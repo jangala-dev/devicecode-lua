@@ -1,3 +1,9 @@
+local channel = require "fibers.channel"
+local fiber   = require "fibers.fiber"
+local json = require 'dkjson'
+local op   = require 'fibers.op'
+local sleep = require 'fibers.sleep'
+
 local function read_file(path)
     local file = io.open(path, "r")
     if not file then return nil end
@@ -90,22 +96,62 @@ local function get_ram_info()
     return total, used, free + buffers + cached
 end
 
-local function main()
+local system_service = {}
+
+function system_service:publish_telemetry()
     -- local cpu_model = get_cpu_info()
     local ram_total, ram_used, ram_free = get_ram_info()
-
-    local overall_utilisation, core_utilisations, average_frequency, core_frequencies = get_cpu_utilisation_and_freq()
-
-    -- print("CPU Info: " .. cpu_model)
-    print("Overall CPU Utilisation:", overall_utilisation .. "%")
-    print("Average Frequency:", average_frequency .. "kHz")
-    for core, util in pairs(core_utilisations) do
-        print(core .. " Utilisation:", util .. "%")
-        print(core .. " Frequency:", (core_frequencies[core] or "Unknown"))
-    end
-    print("Total RAM: " .. ram_total .. " kB")
-    print("Used RAM: " .. ram_used .. " kB")
-    print("Free RAM: " .. ram_free .. " kB")
+    self.bus_connection:publish({type="publish", topic="t.system", payload={n="ram_free",v=ram_free}, retained=false})
+    print("RAM free: ", ram_free)
 end
 
-main()
+function system_service:handle_config(msg)
+    print("new config received!")
+    local conf_received, _, err = json.decode(msg)
+    if err then 
+        print(err)
+    return end -- add proper config error handling
+
+    print("config received for System")
+
+    fiber.spawn(function()
+        local quit
+        while not quit do
+            self:publish_telemetry()
+            sleep.sleep(10)
+        end
+        -- cleanup code unsubscribe
+    end)
+end
+
+function system_service:start_config_handler()
+    fiber.spawn(function()
+        local sub = self.bus_connection:subscribe("config/hub")
+        local quit
+        while not quit do
+            op.choice(
+                sub:next_msg_op():wrap(function(x) self:handle_config(x.payload) end),
+                self.config_quit_channel:get_op():wrap(function() quit = true end)
+            ):perform()
+        end
+        -- cleanup code unsubscribe
+    end)
+end
+
+function system_service:stop_config_handler()
+    self.config_quit_channel:put(true)
+end
+
+function system_service:start(rootctx, bus_connection)
+    print("Hello from hub service!")
+    self.bus_connection = bus_connection
+
+    self.config_channel = channel.new() -- Channel to receive configuration updates
+    self.config_quit_channel = channel.new() -- Channel to receive configuration updates
+
+    self.system_quit_channel = channel.new() -- Channel to receive configuration updates
+
+    self:start_config_handler()
+end
+
+return system_service

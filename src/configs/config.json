@@ -104,5 +104,27 @@
     "service2": {
         "paramX": "valueX",
         "paramY": "valueY"
+    },
+    "hub": {
+        "ws_host": "172.19.0.2",
+        "ws_port": "9003",
+        "connections": [
+            // {
+            //     "type": "http",
+            //     "url": "http://cloud.dev.janga.la/http/channels/{channel}/messages",
+            //     "mainflux_id":"{ID}",
+            //     "mainflux_key":"{KEY}",
+            //     "mainflux_datachannel":"{DATACHANNEL_ID}"
+            // },
+            {
+                "type": "fd",
+                "path_read": "/dev/ttyAMA0",
+                "path_send": "/dev/ttyAMA0"
+            }
+        ]
+    },
+    "testdevice":{
+        "fd_path": "/dev/ttyAMA0",
+        "interval": 10
     }
 }
