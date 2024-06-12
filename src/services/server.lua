@@ -1,10 +1,10 @@
-local Fiber = require 'fibers.fiber'
+local fiber = require 'fibers.fiber'
 local sleep = require 'fibers.sleep'
 local channel = require 'fibers.channel'
 local op = require 'fibers.op'
 local json = require 'dkjson'
-local cqueues = require "cqueues"
-local mimetypes = require '../local-ui/mimetypes'
+local log = require 'log'
+local mimetypes = require '../ui/mimetypes'
 
 -- http
 local http_headers = require "http.headers"
@@ -36,7 +36,7 @@ local function is_static_asset(path)
 end
 
 local function serve_spa(req_path)
-    local base_path = "./local-ui/client/dist"
+    local base_path = "./ui/client/dist"
 
     -- If it's a known static asset, serve the file directly.
     if is_static_asset(req_path) then
@@ -95,7 +95,7 @@ local function reply(self, stream) -- luacheck: ignore 212
 			print("WebSocket connection established within a fiber.")
 
 			-- Spawn a new fiber to handle the WebSocket communication
-			Fiber.spawn(function()
+			fiber.spawn(function()
 				-- WebSocket communication loop
 				while true do
 					local message, err = ws:receive()
@@ -123,8 +123,6 @@ local function reply(self, stream) -- luacheck: ignore 212
 
 			while true do
 				local msg, _ = sub:next_msg()
-				print("MSG", msg)
-
 				local config, _, err = json.decode(msg.payload)
 				if err then
 					log.error(err)
@@ -186,8 +184,8 @@ function server_service:init_server_config()
 
 	print("overriding server's 'add_stream' method")
 	function myserver:add_stream(stream)
-		Fiber.spawn(function()
-			Fiber.yield()
+		fiber.spawn(function()
+			fiber.yield()
 			local ok, err = http_util.yieldable_pcall(self.onstream, self, stream)
 			stream:shutdown()
 			if not ok then
@@ -209,7 +207,7 @@ end
 function server_service:handle_server()
 	print("init server config")
     print("spawning server")
-	Fiber.spawn(function()
+	fiber.spawn(function()
         local quit = false
         while quit == false do
 			op.choice(

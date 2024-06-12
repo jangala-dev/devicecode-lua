@@ -1,0 +1,71 @@
+{
+  "name": "client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "pull-all": "git pull origin main && git submodule update --recursive --remote",
+    "dev": "vite",
+    "build": "vite build",
+    "serve": "vite preview",
+    "lint": "eslint --ext .js,.vue,.ts src",
+    "test:unit": "vitest",
+    "test:e2e": "cypress open"
+  },
+  "dependencies": {
+    "core-js": "^3.6.5",
+    "pinia": "^2.1.7",
+    "postcss": "^8.4.6",
+    "register-service-worker": "^1.7.1",
+    "tailwindcss": "^3.4.1",
+    "vue": "^3.0.0",
+    "vue-router": "^4.0.0-0"
+  },
+  "devDependencies": {
+    "@types/webpack-env": "^1.18.4",
+    "@typescript-eslint/eslint-plugin": "^4.18.0",
+    "@typescript-eslint/parser": "^4.18.0",
+    "@vitejs/plugin-vue": "^5.0.3",
+    "@vue/compiler-sfc": "^3.0.0",
+    "@vue/eslint-config-typescript": "^7.0.0",
+    "autoprefixer": "^10.4.17",
+    "cssnano": "^6.0.3",
+    "eslint": "^6.7.2",
+    "eslint-plugin-vue": "^7.0.0",
+    "sass": "^1.26.5",
+    "sass-loader": "^8.0.2",
+    "typescript": "~4.4.4",
+    "vite": "^5.0.12",
+    "vitest": "^1.2.2"
+  },
+  "eslintConfig": {
+    "root": true,
+    "env": {
+      "node": true
+    },
+    "extends": [
+      "plugin:vue/vue3-essential",
+      "eslint:recommended",
+      "@vue/typescript/recommended"
+    ],
+    "parserOptions": {
+      "ecmaVersion": 2020
+    },
+    "rules": {},
+    "overrides": [
+      {
+        "files": [
+          "**/__tests__/*.{j,t}s?(x)",
+          "**/tests/unit/**/*.spec.{j,t}s?(x)"
+        ],
+        "env": {
+          "jest": true
+        }
+      }
+    ]
+  },
+  "browserslist": [
+    "> 1%",
+    "last 2 versions",
+    "not dead"
+  ]
+}

@@ -1,3 +1,0 @@
-[submodule "src/local-ui"]
-	path = src/local-ui
-	url = https://github.com/jangala-dev/local-ui.git

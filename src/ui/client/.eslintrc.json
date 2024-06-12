@@ -1,0 +1,73 @@
+{
+  "root": true,
+  "ignorePatterns": [
+    "dist/",
+    "node_modules/"
+  ],
+  "env": {
+    "node": true,
+    "browser": true
+  },
+  "parser": "vue-eslint-parser",
+  "parserOptions": {
+    "parser": "@typescript-eslint/parser",
+    "ecmaVersion": 2020,
+    "sourceType": "module",
+    "project": "./tsconfig.json"
+  },
+  "plugins": [
+    "@typescript-eslint"
+  ],
+  "extends": [
+    "plugin:vue/vue3-recommended",
+    "@vue/typescript/recommended",
+    "eslint:recommended",
+    "plugin:@typescript-eslint/recommended"
+    // "plugin:@typescript-eslint/recommended-requiring-type-checking"
+  ],
+  "globals": {
+    "defineProps": "readonly",
+    "defineEmits": "readonly",
+    "defineExpose": "readonly",
+    "withDefaults": "readonly"
+  },
+  "rules": {
+    "quotes": ["error", "single"], // Enforce single quotes
+    "no-var": "error", // Disallow use of var
+    "indent": ["error", 2], // Enforce 2-space indentation
+    "max-len": ["warn", { "code": 120 }], // Line length warning at 120 characters
+    "no-unused-vars": "warn", // Warn about variables that are declared but not used
+    "consistent-return": "error", // Require return statements to either always or never specify values
+    "no-console": ["warn", { "allow": ["warn", "error"] }],
+    "comma-dangle": ["error", "always-multiline"], // Enforce commas being added on multilines
+    "semi": ["error", "always"], // Enforce semicolons at the end of statements
+    "object-curly-spacing": ["error", "always"], // Enforce consistent spacing inside braces of object literals.
+    "key-spacing": ["error", { "beforeColon": false, "afterColon": true }], // Enforce spacing around the colon in object literal properties
+    "space-before-function-paren": ["error", { "anonymous": "never", "named": "never", "asyncArrow": "always" }], // Enforce no spacing between function name and parenthesis
+    "space-before-blocks": "error", // Encforce space before curly braces
+    "vue/max-attributes-per-line": "off",
+    "vue/first-attribute-linebreak": "off",
+    "vue/singleline-html-element-content-newline": "off",
+    "no-trailing-spaces": "warn",
+    "vue/html-self-closing": ["error", { "html": { "void": "always" }}]
+    // Add more custom rules here
+  },
+  "overrides": [
+    {
+      "files": ["*.ts", "*.tsx", "*.vue"],
+      "rules": {
+        "no-unused-vars": "off", // Turn off the base rule for TypeScript files
+        "@typescript-eslint/no-unused-vars": "warn" // Enable the TypeScript-specific rule
+      }
+    },
+    {
+      "files": [
+        "**/__tests__/*.{j,t}s?(x)",
+        "**/tests/unit/**/*.spec.{j,t}s?(x)"
+      ],
+      "env": {
+        "jest": true
+      }
+    }
+  ]
+}
