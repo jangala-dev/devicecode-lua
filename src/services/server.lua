@@ -73,26 +73,26 @@ local function reply(self, stream) -- luacheck: ignore 212
 	end
 
 	if string.sub(req_path,1,string.len(self.api_prefix)) == self.api_prefix then
-		print("/api call")
+		log.info("/api call")
 	elseif string.sub(req_path,1,string.len(self.ws_prefix)) == self.ws_prefix then
-		print("/ws call")
+		log.info("/ws call")
 		-- Suspected WebSocket upgrade request
 		if req_headers:get("upgrade"):lower() == "websocket" then
 			-- Try to create a new WebSocket server from the stream and headers
 			local ws, err = http_ws.new_from_stream(stream, req_headers)
 			if not ws then
-				print("Failed to upgrade to WebSocket:", err)
+				log.error("Failed to upgrade to WebSocket:", err)
 				return
 			end
 
 			-- Perform WebSocket handshake here
 			local ok, err = ws:accept()
 			if not ok then
-				print("WebSocket handshake failed:", err)
+				log.error("WebSocket handshake failed:", err)
 				return
 			end
 			
-			print("WebSocket connection established within a fiber.")
+			log.info("WebSocket connection established within a fiber.")
 
 			-- Spawn a new fiber to handle the WebSocket communication
 			fiber.spawn(function()
@@ -108,11 +108,11 @@ local function reply(self, stream) -- luacheck: ignore 212
 					ws:send("Pong")
 				end
 
-				print("WebSocket connection closed within a fiber.")
+				log.info("WebSocket connection closed within a fiber.")
 			end)
 		end
 	elseif req_path == "/sse/event-stats" then
-		print("sse call")
+		log.info("/sse/event-stats call")
 		res_headers:append(":status", "200")
 		res_headers:append("content-type", "text/event-stream")
 		-- Send headers to client; end the stream immediately if this was a HEAD request
@@ -136,7 +136,7 @@ local function reply(self, stream) -- luacheck: ignore 212
 			end
 		end
 	elseif req_path then
-		print("html call")
+		log.info("html call", req_path)
 		local path = serve_spa(req_path)
 		local mimetype = mimetypes.guess(path)
 		res_headers:append(":status", "200")
@@ -182,7 +182,7 @@ function server_service:init_server_config()
 	myserver.api_prefix = "/api";
 	myserver.ws_prefix = "/ws";
 
-	print("overriding server's 'add_stream' method")
+	log.info("overriding server's 'add_stream' method")
 	function myserver:add_stream(stream)
 		fiber.spawn(function()
 			fiber.yield()
@@ -195,26 +195,18 @@ function server_service:init_server_config()
 	end
 end
 
-function server_service:init_server_service(bus_connection)
-	-- set bus connection
-	self.bus_connection = bus_connection
-	print("init_server_service bus_connection", bus_connection)
-	-- create necessary channels
-	self.server_stop_ch = channel.new()
-end
-
 -- Server handling end
 function server_service:handle_server()
-	print("init server config")
-    print("spawning server")
+	log.trace("Starting Server Service")
+
 	fiber.spawn(function()
         local quit = false
         while quit == false do
 			op.choice(
                 self.server_stop_ch:get_op():wrap(function() 
-					print("closing server")
+					log.trace("Closing server")
 					myserver:close()
-					print("server closed")
+					log.trace("Server closed")
 					myserver = nil
 					quit = true 
 				end)
@@ -227,38 +219,32 @@ function server_service:handle_server()
 end
 
 function server_service:init_server(bus_connection)
-	print("init_server bus_connection", bus_connection)
-	self:init_server_service(bus_connection)
+	-- set bus connection
+	self.bus_connection = bus_connection
+	-- create necessary channels
+	self.server_stop_ch = channel.new()
+
 	self:init_server_config()
 end
 
 function server_service:start(rootctx, bus_connection)
 	if myserver ~= nil then
-		print("server exists", myserver)
+		log.warn("Can't start server as already exists")
 		return
 	end
-	print("Hello from server, here to serve!")
 
 	-- start services
 	self:init_server(bus_connection)
 	self:handle_server()
-
-	-- -- This service might subscribe to topics and do some work
-    -- local subscription = connection:subscribe("some/topic")
-
-    -- while true do
-    --     local msg = subscription:next_msg()
-    --     -- Do something with the message
-    -- end
 end
 
 function server_service:stop()
 	if myserver == nil then
-		print("server deosn't exist")
+		log.warn("server deosn't exist")
 		return
 	end
 
-	print("stopping server")
+	log.warn("stopping server")
     self.server_stop_ch:put(true)
 end
 
