@@ -1,7 +1,3 @@
-package.path = package.path .. ';/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua'
-
-local op = require "fibers.op"
-local fiber = require 'fibers.fiber'
 local file = require 'fibers.stream.file'
 local sc = require 'fibers.utils.syscall'
 
@@ -67,6 +63,24 @@ function pin:set_out()
 end
 
 -- Write a high value to the GPIO pin
+function pin:pull_up()
+    assert(os.execute("pinctrl set "..self.gpio_num.." pu"))
+    return true
+end
+
+-- Write a low value to the GPIO pin
+function pin:pull_down()
+    assert(os.execute("pinctrl set "..self.gpio_num.." pd"))
+    return true
+end
+
+-- Set edge detection to none
+function pin:pull_none()
+    assert(os.execute("pinctrl set "..self.gpio_num.." pn"))
+    return true
+end
+
+-- Write a high value to the GPIO pin
 function pin:write_high()
     return write_gpio_file(self.gpio_path .. "/value", "1")
 end
@@ -112,9 +126,10 @@ function pin:watch_op()
         local err
         f, err = file.open(self.gpio_path .. "/value", "r")
         if not f then return nil, err end
-        f:read() -- consume existing `pri` event, if any
         self.watch_file = f
     end
+    f:seek(sc.SEEK_SET, 0)
+    f:read() -- consume existing `pri` event, if any
     local retval = pollio.fd_priority_op(f.io.fd):wrap(function ()
         f:seek(sc.SEEK_SET, 0)
         local state, err = f:read()
