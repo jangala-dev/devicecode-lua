@@ -27,10 +27,8 @@
       </div>
 
       <!-- TODO how do we guarantee display in correct order -->
-      <ModemCard
-        v-for="(modem, modemId) in device.modems" :key="modemId" :modem="modem" :name="modemId"
-        :is_online="device.net?.[modem.wann_type]?.is_online ?? false"
-      />
+      <ModemCard v-for="(modem, index) in orderedModems" :key="index" :modem="modem" :name="'modem' + (index + 1)"
+        :is_online="device.net?.[modem.wwan_type]?.is_online ?? false" />
 
       <div class="card">
         <div class="card-header">
@@ -46,6 +44,9 @@
             <p>serial: {{ device.system.serial }}</p>
             <p>cpu load: {{ device.system.cpu_util }}%</p>
             <p>memory load: {{ device.system.mem_util }}%</p>
+            <p>power: {{ device.system.power }}</p>
+            <p>battery: {{ device.system.battery }}</p>
+            <p>mcu temp: {{ device.mcu.temp }}%</p>
             <!-- <p>bootloader: {{ system.stats.blid }}</p> -->
           </div>
         </div>
@@ -58,7 +59,7 @@
 import { ComputedRef, computed, onMounted } from 'vue';
 import { useDeviceStore } from '@/stores/device';
 import ModemCard from '@/components/ModemCard.vue';
-import { Device } from '@/types/types';
+import { Device, Modem } from '@/types/types';
 
 // Store
 const deviceStore = useDeviceStore();
@@ -67,6 +68,12 @@ const deviceStore = useDeviceStore();
 const device: ComputedRef<Device> = computed(() => deviceStore.device);
 const eventStreamLoaded: ComputedRef<boolean> = computed(() => deviceStore.eventStreamLoaded);
 const internetOnline: ComputedRef<boolean> = computed(() => Object.values(device.value.net).some(net => net.is_online));
+const orderedModems: ComputedRef<Modem[]> = computed(() => {
+  const sorted = Object.keys(device.value.modems)
+    .sort()  // Sort the keys in alphabetical order
+    .map(key => device.value.modems[key]);
+  return sorted;
+});
 
 // Vue Lifecycle Functions
 onMounted(() => {

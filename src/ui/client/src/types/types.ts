@@ -1,11 +1,12 @@
 export class Device {
   public modems: Record<string, Modem> = {};
   public net: Record<string, Net> = {};
-  public system: System
+  public system: System = new System();
+  public mcu: Mcu = new Mcu();
+}
 
-  constructor() {
-    this.system = new System();
-  }
+export class Mcu {
+  public temp = 0;
 }
 
 export class System {
@@ -16,6 +17,8 @@ export class System {
   public hw_id = '';
   public serial = '';
   public uptime = 0;
+  public power = '';
+  public battery = '';
 }
 
 export class Net {
@@ -34,7 +37,7 @@ export class Modem {
   public signal_type = '';
   public band = '';
   public bars = '';
-  public wann_type = '';
+  public wwan_type = '';
   public imei = '';
 }
 
@@ -77,7 +80,7 @@ export class Apn {
   public modem_cognitive?: string = undefined;
   public max_conns?: string = undefined;
   public max_conns_time?: string = undefined;
-  public skip_464xlat? = undefined;
+  public skip_464xlat?: string = undefined;
   public carrier_enabled?: string = undefined;
   public mtusize?: string = undefined;
   public auth?: string = undefined;

@@ -22,7 +22,7 @@
         </p>
         <p>access tech: {{ props.modem.access_fam }} ({{ props.modem.access_tech }})</p>
         <p>band: {{ props.modem.band }}</p>
-        <p>wann type: {{ props.modem.wann_type }}</p>
+        <p>wwan type: {{ props.modem.wwan_type }}</p>
         <p>status: {{ props.is_online ? "online" : "offline" }}</p>
         <p>imei: {{ props.modem.imei }}</p>
       </div>
