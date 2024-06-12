@@ -1,0 +1,49 @@
+package.path = "../?.lua;" .. package.path .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
+
+local fiber = require 'fibers.fiber'
+local sleep = require 'fibers.sleep'
+local context = require 'fibers.context'
+local bus = require 'bus'
+require 'fibers.pollio'.install_poll_io_handler()
+
+-- Get the device type/version from command line arguments or environment
+local device_version = arg[1] or os.getenv("DEVICE")
+
+if not device_version then error("device version must be specified on command line or env variable") end
+
+-- Load the device configuration
+local device_config = require("devices/" .. device_version)
+
+-- create the root context for the whole application
+local rootctx = context.background()
+
+-- Initialise bus (current bus implemeentation doesn't take a context)
+local bus = bus.new({q_len=10, m_wild='#', s_wild='+'})
+
+local services = {}
+
+local function launch_services()
+    for _, service_name in ipairs(device_config.services) do
+        services.service_name = require("services/" .. service_name)
+        services.service_name:start(rootctx, bus:connect())
+    end
+end
+
+-- The main control fiber
+fiber.spawn(function()
+    -- Launch all the services for the specific device
+    launch_services()
+
+    -- Here we can add more code for the CLI or other controls
+    while true do
+        print("main fiber sleeping")
+        sleep.sleep(100)
+        -- CLI or other control logic goes here
+    end
+end)
+
+fiber.main()
+
+
+
+
