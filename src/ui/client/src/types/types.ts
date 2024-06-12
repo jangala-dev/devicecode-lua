@@ -3,6 +3,11 @@ export class Device {
   public net: Record<string, Net> = {};
   public system: System = new System();
   public mcu: Mcu = new Mcu();
+  public wifi: Wifi = new Wifi();
+}
+
+export class Wifi {
+  public users = 0;
 }
 
 export class Mcu {

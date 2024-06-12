@@ -62,6 +62,7 @@ local function get_dummy_dynamic()
         {type = "publish", topic = "t.mcu.temp", payload = {n = "temp", v = rn(25, 50) }},
         {type = "publish", topic = "t.power", payload = {n = "power", vs = rp() }},
         {type = "publish", topic = "t.battery", payload = {n = "battery", vs = rb() }},
+        {type = "publish", topic = "t.wifi.users", payload = {n = "users", v =  rn(20, 30) }},
         {type = "publish", topic = "t.system.cpu_util", payload = {n = "cpu_util", v = rn(10, 200) }},
         {type = "publish", topic = "t.system.mem_util", payload = {n = "mem_util", v = rn(5, 100) }},
         {type = "publish", topic = "t.system.temp", payload = {n = "temp", v = rn(25, 50) }},

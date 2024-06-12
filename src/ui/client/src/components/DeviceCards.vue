@@ -51,6 +51,19 @@
           </div>
         </div>
       </div>
+
+      <div class="card">
+        <div class="card-header" :class="{ 'card-header-inactive': !internetOnline }">
+          <img :src="wifiImage" />
+        </div>
+
+        <div class="card-content">
+          <h5 class="card-title">wifi</h5>
+          <div class="card-context">
+            <p>users: {{ device.wifi.users }}</p>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -60,6 +73,7 @@ import { ComputedRef, computed, onMounted } from 'vue';
 import { useDeviceStore } from '@/stores/device';
 import ModemCard from '@/components/ModemCard.vue';
 import { Device, Modem } from '@/types/types';
+import wifiImage from '../assets/wifi.svg';
 
 // Store
 const deviceStore = useDeviceStore();

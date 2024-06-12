@@ -128,6 +128,15 @@ export const useDeviceStore = defineStore('device', {
           console.error(`Unknown payload name ${message.payload.n}`);
       }
     },
+    setWifiState(message: MessageI) {
+      switch (message.payload.n) {
+        case "users":
+          this.device.wifi.users = message.payload.v;
+          break
+        default:
+          console.error(`Unknown payload name ${message.payload.n}`);
+      }
+    },
     setEventStreamLoaded() {
       this.eventStreamLoaded = true;
     },
@@ -148,6 +157,8 @@ export const useDeviceStore = defineStore('device', {
             this.setMcuState(message);
           } else if (message.topic.includes('system') || message.topic.includes('power') || message.topic.includes('battery')) {
             this.setSystemState(message);
+          } else if (message.topic.includes('wifi')) {
+            this.setWifiState(message);
           } else {
             console.error(`Message topic unknown ${message.topic}`)
           }
