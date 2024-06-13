@@ -38,44 +38,10 @@
             }
         ]
     },
-    "wifi": {
-        "radios": [
-            {
-                "id": "radio1",
-                "type": "mac80211",
-                "path": "platform/ahb/18100000.wmac",
-                "band": "2g",
-                "channel": "auto",
-                "channels": ["1", "6", "11"],
-                "country": "GB",
-                "htmode": "HT20",
-                "txpower": "20"
-            }
-        ],
-        "ssids": [
-            {
-                "name": "GetBox-PmWBH",
-                "encryption": "psk2",
-                "mode": "access_point",
-                "password": "shiny-huge-valet",
-                "network": "jng",
-                "radios": ["radio1"]
-            },
-            {
-                "name": "GetBox-PmWBH-admin",
-                "encryption": "psk2",
-                "mode": "access_point",
-                "password": "shiny-huge-valet",
-                "network": "adm",
-                "radios": ["radio1"]
-            }
-        ]
-    },
     "modem": {
         "modems": {
             "default": {
-                "enabled": true,
-                "autoconnect": true
+                "enabled": true
             },
             "known": {
                 "primary": {
@@ -99,32 +65,13 @@
             }
         },
         "sims": {
+            "default": {
+                "autoconnect": true
+            }
         }
     },
     "service2": {
         "paramX": "valueX",
         "paramY": "valueY"
-    },
-    "hub": {
-        "ws_host": "172.19.0.2",
-        "ws_port": "9003",
-        "connections": [
-            // {
-            //     "type": "http",
-            //     "url": "http://cloud.dev.janga.la/http/channels/{channel}/messages",
-            //     "mainflux_id":"{ID}",
-            //     "mainflux_key":"{KEY}",
-            //     "mainflux_datachannel":"{DATACHANNEL_ID}"
-            // },
-            {
-                "type": "fd",
-                "path_read": "/dev/ttyAMA0",
-                "path_send": "/dev/ttyAMA0"
-            }
-        ]
-    },
-    "testdevice":{
-        "fd_path": "/dev/ttyAMA0",
-        "interval": 10
     }
 }

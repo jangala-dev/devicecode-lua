@@ -11,11 +11,12 @@ local device_version = arg[1] or os.getenv("DEVICE")
 
 if not device_version then error("device version must be specified on command line or env variable") end
 
--- Load the device configuration
-local device_config = require("devices/" .. device_version)
-
 -- create the root context for the whole application
-local rootctx = context.background()
+local bg_ctx = context.background()
+local rootctx = context.with_value(bg_ctx, "device", device_version)
+
+-- Load the device configuration
+local device_config = require("devices/" .. rootctx:value("device"))
 
 -- Initialise bus (current bus implemeentation doesn't take a context)
 local bus = bus.new({q_len=10, m_wild='#', s_wild='+', sep='.'})

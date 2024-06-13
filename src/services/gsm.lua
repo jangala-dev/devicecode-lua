@@ -37,30 +37,30 @@ local connectors = {}
 
 -- Defines the Modem type, long-term identities for Modems
 
-local modem_instance = {}
-modem_instance.__index = modem_instance
+local modem = {}
+modem.__index = modem
 
-local function new_modem_instance(name, config, driver)
+local function new_modem(name, config, driver)
     assert((name and config) or driver)
     local instance = setmetatable({
         name = name,
         config = config,
         driver = driver
-    }, modem_instance)
+    }, modem)
     return instance
 end
 
-function modem_instance:update_config(config)
+function modem:update_config(config)
     self.config = config
     if self.driver then self:apply_config() end
 end
 
-function modem_instance:update_driver(driver)
+function modem:update_driver(driver)
     self.driver = driver
     if self.config then self:apply_config() end
 end
 
-function modem_instance:apply_config()
+function modem:apply_config()
     log.info("Applying configuration for:", self.name)
 end
 
@@ -68,10 +68,10 @@ end
 local sim_instance = {}
 sim_instance.__index = sim_instance
 
--- Defines the Connector type, encompassing Sim Slots and Switchers
+-- Defines the Connector type, which links modems to sim cards. A modem with a single
+-- slot is just a 1x1 instance of a connector
 local connector = {}
 connector.__index = connector
-
 
 
 -- Core module functionality
@@ -141,7 +141,7 @@ local function modem_manager(ctx)
 
     local function handle_detection(address)
         local driver = driver.new(context.with_cancel(ctx), address)
-        modems.address[address] = new_modem_instance(nil, nil, driver)
+        modems.address[address] = new_modem(nil, nil, driver)
         fiber.spawn(function ()
             local err = driver:init()
             if err then
@@ -192,7 +192,7 @@ local function modem_manager(ctx)
                     instance:update_config(mod_config)
                 else
                     -- Create a new instance and update the modems table
-                    instance = new_modem_instance(name, mod_config, nil) -- Driver to be associated later
+                    instance = new_modem(name, mod_config, nil) -- Driver to be associated later
                     modems.name[name] = instance
                     modems[id_field][id_value] = instance
                 end
