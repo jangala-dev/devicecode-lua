@@ -164,6 +164,21 @@
             }
         }
     },
+    "hub": {
+        "ws_host": "172.19.0.2",
+        "ws_port": "9003",
+        "connections": [
+            {
+                "type": "fd",
+                "path_read": "/dev/ttyAMA0",
+                "path_send": "/dev/ttyAMA0"
+            }
+        ]
+    },
+    "testdevice":{
+        "fd_path": "/dev/ttyAMA0",
+        "interval": 10
+    },
     "service2": {
         "paramX": "valueX",
         "paramY": "valueY"
