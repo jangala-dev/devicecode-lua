@@ -62,7 +62,7 @@ local function reply(self, stream) -- luacheck: ignore 212
 		req_headers:get("referer") or "-",
 		req_headers:get("user-agent") or "-"
 	)))
-	
+
 	-- Build response headers
 	local res_headers = http_headers.new()
 
@@ -91,7 +91,7 @@ local function reply(self, stream) -- luacheck: ignore 212
 				log.error("WebSocket handshake failed:", err)
 				return
 			end
-			
+
 			log.info("WebSocket connection established within a fiber.")
 
 			-- Spawn a new fiber to handle the WebSocket communication
@@ -123,6 +123,7 @@ local function reply(self, stream) -- luacheck: ignore 212
 
 			while true do
 				local msg, _ = sub:next_msg()
+				-- print("MESSAGE RECEIVED!")
 				local config, _, err = json.decode(msg.payload)
 				if err then
 					log.error(err)
@@ -173,8 +174,8 @@ function server_service:init_server_config()
 	end
 
 	myserver = assert(http_server.listen {
-		host = "127.0.0.1";
-		port = 8000;
+		host = "0.0.0.0";
+		port = 80;
 		onstream = reply;
 		onerror = error_reply;
 	})
@@ -203,12 +204,12 @@ function server_service:handle_server()
         local quit = false
         while quit == false do
 			op.choice(
-                self.server_stop_ch:get_op():wrap(function() 
+                self.server_stop_ch:get_op():wrap(function()
 					log.trace("Closing server")
 					myserver:close()
 					log.trace("Server closed")
 					myserver = nil
-					quit = true 
+					quit = true
 				end)
             ):perform_alt(function()
 				assert(myserver:step(0.1))
@@ -252,7 +253,7 @@ end
 -- 	start = function(rootctx, bus_connection)
 -- 		server_service:start(rootctx, bus_connection)
 -- 	end,
--- 	stop = function() 
+-- 	stop = function()
 -- 		server_service:stop()
 -- 	end
 -- }
