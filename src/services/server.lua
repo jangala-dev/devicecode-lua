@@ -124,9 +124,11 @@ local function reply(self, stream) -- luacheck: ignore 212
 			while true do
 				local msg, _ = sub:next_msg()
 				local payload, _, _ = json.decode(msg.payload)
-				msg.payload = payload
+				local respmsg = {}
+				respmsg.payload = payload
+				respmsg.topic = msg.topic
 
-				local resp = "data: " .. json.encode(msg) .. "\n\n"
+				local resp = "data: " .. json.encode(respmsg) .. "\n\n"
 				local write_succesful = stream:write_chunk(resp, false)
 				if not write_succesful then
 					break
