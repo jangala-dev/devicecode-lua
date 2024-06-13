@@ -67,7 +67,7 @@ end
 
 function FDConnection:sendMsg(msg)
     local msg_string = string.char(2)..json.encode(msg)..string.char(3)
-    print("Sending message: ", msg_string)
+    -- print("Sending message: ", msg_string)
     self.send_file:write(msg_string)
     self.send_file:flush()
 end
