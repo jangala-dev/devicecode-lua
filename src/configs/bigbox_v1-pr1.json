@@ -84,7 +84,7 @@
                 },
                 "secondary": {
                     "id_field": "device",
-                    "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3/3-2",
+                    "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1",
                     "enabled": true
                 },
                 "modem1": {
@@ -100,7 +100,7 @@
             }
         },
         "connectors": {
-            "connector_complex": {
+            "builtin": {
                 "inputs": [
                     {
                         "slot": 1,

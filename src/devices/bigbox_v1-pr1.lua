@@ -6,6 +6,7 @@ return {
         "gsm",
         "geo",
         "time",
+        "wifi"
         -- ... other services specific to this device version
     }
 }
