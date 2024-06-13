@@ -1,5 +1,7 @@
 package.path = "../?.lua;" .. package.path .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
 
+require 'compat53'
+
 local fiber = require 'fibers.fiber'
 local sleep = require 'fibers.sleep'
 local context = require 'fibers.context'
