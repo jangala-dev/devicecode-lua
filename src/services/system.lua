@@ -82,7 +82,7 @@ local function get_cpu_utilisation_and_freq()
     local average_frequency = overall_freq_sum / (core_id > 0 and core_id or 1)
 
     return overall_utilisation, core_utilisations, average_frequency, core_frequencies
-end    
+end
 
 -- Get total, used, and free RAM
 local function get_ram_info()
@@ -108,7 +108,7 @@ end
 function system_service:handle_config(msg)
     print("new config received!")
     local conf_received, _, err = json.decode(msg)
-    if err then 
+    if err then
         print(err)
     return end -- add proper config error handling
 
@@ -126,7 +126,7 @@ end
 
 function system_service:start_config_handler()
     fiber.spawn(function()
-        local sub = self.bus_connection:subscribe("config/hub")
+        local sub = self.bus_connection:subscribe("config.hub")
         local quit
         while not quit do
             op.choice(

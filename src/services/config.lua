@@ -12,7 +12,7 @@ function config_service:start(rootctx, bus_connection)
     local raw_config = config_file:read_all_chars()
     local config = json.decode(raw_config)
     for k, v in pairs(config) do
-        self.bus_connection:publish({type="publish", topic="config/"..k, payload=json.encode(v), retained=true})
+        self.bus_connection:publish({type="publish", topic="config".."."..k, payload=json.encode(v), retained=true})
     end
 end
 

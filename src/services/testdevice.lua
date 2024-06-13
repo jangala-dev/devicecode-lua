@@ -10,7 +10,7 @@ local testdevice_service = {}
 function testdevice_service:handle_config(msg)
     print("new config received!")
     local conf_received, _, err = json.decode(msg)
-    if err then 
+    if err then
         print(err)
     return end -- add proper config error handling
 
@@ -33,7 +33,7 @@ end
 
 function testdevice_service:start_config_handler()
     fiber.spawn(function()
-        local sub = self.bus_connection:subscribe("config/testdevice")
+        local sub = self.bus_connection:subscribe("config.testdevice")
         local quit
         while not quit do
             op.choice(

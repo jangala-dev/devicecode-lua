@@ -123,7 +123,7 @@ local hub_service = {}
 function hub_service:handle_config(msg)
     print("new config received!")
     local conf_received, _, err = json.decode(msg)
-    if err then 
+    if err then
         print(err)
     return end -- add proper config error handling
 
@@ -134,7 +134,7 @@ end
 
 function hub_service:start_config_handler()
     fiber.spawn(function()
-        local sub = self.bus_connection:subscribe("config/hub")
+        local sub = self.bus_connection:subscribe("config.hub")
         local quit
         while not quit do
             op.choice(
