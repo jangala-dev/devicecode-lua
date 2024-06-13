@@ -77,7 +77,7 @@ function dummy_service:start(rootctx, bus_connection)
     local function send_message(message)
         self.bus_connection:publish({
             topic = message.topic,
-            payload = json.encode(message),
+            payload = json.encode(message.payload),
             retained = true
         })
     end
