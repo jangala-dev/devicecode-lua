@@ -52,6 +52,7 @@ local function publish_clients_count(interfaces, bus_connection)
     log.info("new connected Wi-Fi users is:", count)
 
     bus_connection:publish({
+        type = "publish",
         topic = "t.wifi.users",
         payload = json.encode({n="users", v=count}),
         retained = true
