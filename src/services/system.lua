@@ -1,3 +1,6 @@
+local system_service = {}
+system_service.__index = system_service
+
 local function read_file(path)
     local file = io.open(path, "r")
     if not file then return nil end
@@ -90,7 +93,7 @@ local function get_ram_info()
     return total, used, free + buffers + cached
 end
 
-local function main()
+function system_service:start(bus_connection)
     -- local cpu_model = get_cpu_info()
     local ram_total, ram_used, ram_free = get_ram_info()
 
@@ -108,4 +111,4 @@ local function main()
     print("Free RAM: " .. ram_free .. " kB")
 end
 
-main()
+return system_service
