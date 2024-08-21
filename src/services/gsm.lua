@@ -161,8 +161,6 @@ local function modem_manager(ctx)
         local address = driver.address
 
         -- Check if an existing instance for that modem exists
-        for key, val in pairs(modems.imei) do print(key, val) end
-        for key, val in pairs(modems.device) do print(key, val) end
         local instance = modems.imei[imei] or modems.device[device]
         if instance then
             log.trace("GSM: Modem: Handle Driver: driver detected for modem:", instance.name)
