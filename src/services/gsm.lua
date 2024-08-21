@@ -3,6 +3,7 @@ local sleep = require "fibers.sleep"
 local exec = require "fibers.exec"
 local context = require "fibers.context"
 local driver = require "services.gsm.modem_driver"
+local connector = require "services.gsm.connector"
 local utils = require "services.gsm.utils"
 local channel = require "fibers.channel"
 local op = require "fibers.op"
@@ -17,7 +18,7 @@ local modem_config_channel = channel.new()
 local modem_detect_channel = channel.new()
 local modem_remove_channel = channel.new()
 
---
+-- Containers for holding GSM elements: modems, sims and connectors
 local modems = {
     imei = {},
     device = {},
@@ -65,19 +66,17 @@ function modem:apply_config()
 end
 
 -- Defines the Sim type, long-term identities for Sims
-local sim_instance = {}
-sim_instance.__index = sim_instance
+local sim = {}
+sim.__index = sim
 
--- Defines the Connector type, which links modems to sim cards. A modem with a single
--- slot is just a 1x1 instance of a connector
-local connector = {}
-connector.__index = connector
-
+-- Defines the Connector type, which links modems to sim cards. A modem with a
+-- single slot is just a 1x1 instance of a connector.
+-- MOVED TO OWN FILE
 
 -- Core module functionality
 
 local function modem_detector(ctx)
-    log.trace("Modem Detector: starting...")
+    log.trace("GSM: Modem Detector: starting...")
 
     while true do
         -- First, we start the modem detector
@@ -106,7 +105,7 @@ local function modem_detector(ctx)
 end
 
 local function config_receiver(rootctx, bus_connection)
-    log.trace("Modem: Config Receiver: starting...")
+    log.trace("GSM: Config Receiver: starting...")
     while true do
         local sub = bus_connection:subscribe("config/gsm")
         while true do
@@ -117,7 +116,7 @@ local function config_receiver(rootctx, bus_connection)
             if err then
                 log.error(err)
             else
-                log.trace("Modem Config Receiver: new config received")
+                log.trace("GSM: Config Receiver: new config received")
                 modem_config_channel:put(config.modems)
                 -- sim_config_channel:put(config.sims)
             end
@@ -127,7 +126,7 @@ local function config_receiver(rootctx, bus_connection)
 end
 
 local function modem_manager(ctx)
-    log.trace("Modem: Manager starting")
+    log.trace("GSM: Modem Manager starting")
 
     local modem_config = {}
 
@@ -145,7 +144,7 @@ local function modem_manager(ctx)
         fiber.spawn(function ()
             local err = driver:init()
             if err then
-                log.error("modem initialisation failed, removing modem")
+                log.error("GSM: Modem: Handle Detection: modem initialisation failed, removing modem")
                 handle_removal(address)
             else
                 driver_channel:put(driver)
@@ -162,12 +161,14 @@ local function modem_manager(ctx)
         local address = driver.address
 
         -- Check if an existing instance for that modem exists
+        for key, val in pairs(modems.imei) do print(key, val) end
+        for key, val in pairs(modems.device) do print(key, val) end
         local instance = modems.imei[imei] or modems.device[device]
         if instance then
-            log.trace("Modem: Handle Driver: driver detected for modem:", instance.name)
+            log.trace("GSM: Modem: Handle Driver: driver detected for modem:", instance.name)
             instance:update_driver(driver)
         else
-            log.trace("Modem: Handle Driver: driver detected for unknown modem:", driver.address)
+            log.trace("GSM: Modem: Handle Driver: driver detected for unknown modem:", driver.address)
             instance = modems.address[address]
             -- Modem is unknown, insert it into the tables with the relevant keys
             modems.imei[imei] = instance
@@ -220,12 +221,26 @@ local function modem_manager(ctx)
     end
 end
 
+local function connector_manager(ctx)
+    log.trace("GSM: Connector manager starting")
+
+    local modem_config = {}
+
+    local driver_channel = channel.new()
+end
+
+local function connector_detector(ctx)
+    log.trace("GSM: Connector detector currently unimplemented")
+end
+
 function gsm_service:start(ctx, bus_connection)
-    log.trace("Starting Modem Service")
+    log.trace("Starting GSM Service")
 
     fiber.spawn(function() config_receiver(ctx, bus_connection) end)
     fiber.spawn(function() modem_manager(ctx) end)
     fiber.spawn(function() modem_detector(ctx) end)
+    fiber.spawn(function() connector_manager(ctx) end)
+    fiber.spawn(function() connector_detector(ctx) end)
 end
 
 return gsm_service

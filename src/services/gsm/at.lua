@@ -1,56 +1,71 @@
-package.path = "../src/?.lua;../?.lua;" .. package.path
+package.path = '/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;' .. package.path
 
--- Importing the necessary modules
-local fiber = require 'fibers.fiber'
-local context = require 'fibers.context'
-local sleep = require 'fibers.sleep'
-local op = require 'fibers.op'
-local pollio = require 'fibers.pollio'
 local file = require 'fibers.stream.file'
+local op = require 'fibers.op'
 
-pollio.install_poll_io_handler()
+local function trim(input)
+    -- Pattern matches non-printable characters and spaces at the start and end of the string
+    -- %c matches control characters, %s matches all whitespace characters
+    -- %z matches the character with representation 0x00 (NUL byte)
+    return (input:gsub("^[%c%s%z]+", ""):gsub("[%c%s%z]+$", ""))
+end
 
-local function at_context(ctx, port, command)
-    local read_stream = assert(file.open(port, 'r'))
-    local write_stream = assert(file.open(port, 'w')):setvbuf('no')
+local function send_with_context(ctx, port, command)
+    local reader, err = file.open(port, "r")
+    if not reader then return nil, "error opening AT read port: "..err end
 
-    local function close_streams() write_stream:close(); read_stream:close() end
+    local writer = assert(file.open(port, "w"))
+    if not writer then return nil, "error opening AT write port: "..err end
 
-    -- first, send command to AT port
+    -- file write
     op.choice(
-        pollio.stream_writable_op(write_stream):wrap(function ()
-            -- print("sending command!")
-            write_stream:write(command .. '\r\n')
-        end),
+        writer:write_chars_op(command..'\r'),
         ctx:done_op()
     ):perform()
 
-    if ctx:err() then close_streams() return nil, "couldn't send at command" end
+    writer:close()
 
-    -- next, read the response
+    if ctx:err() then reader:close() return nil, ctx:err() end
+
     local res = {}
-    local complete = false
-    while not complete do
-        -- print("looping around at output")
-        op.choice(
-            pollio.stream_readable_op(read_stream):wrap(function ()
-                local chars = read_stream:read_some_chars()
-                -- print("output:", chars)
-                table.insert(res, chars)
-                -- if not chars or chars:find("ERROR") or chars:match("OK\r\n$") then
-                if not chars or chars:match("ERROR.*\r\n$") or chars:match("OK\r\n$") then
-                    complete = true
-                end
-            end),
-            ctx:done_op():wrap(function () complete = true end)
-        ):perform()
-    end
 
-    close_streams()
-    
-    return ctx:err() and nil or table.concat(res), ctx:err()
+    while true do
+        local line = op.choice(
+            reader:read_line_op(),
+            ctx:done_op()
+        ):perform()
+
+        if ctx:err() then reader:close() return nil, ctx:err() end
+        if not line then reader:close() return nil, 'unknown error' end
+
+        line = trim(line)
+
+        -- check for non-descriptive success/fail
+        if line:find("^OK$") then
+            reader:close()
+            return res, nil
+        elseif line:find("^ERROR$") then
+            reader:close()
+            return res, 'error'
+        else
+            -- check for descriptive fail
+            local error_code
+            error_code = line:match("^%+CME ERROR: (%d+)$")
+            if error_code then
+                reader:close()
+                return res, error_code
+            end
+            error_code = line:match("^%+CMS ERROR: (%d+)$")
+            if error_code then
+                reader:close()
+                return res, error_code
+            end
+        end
+
+        if #line > 0 then table.insert(res, line) end
+    end
 end
 
 return {
-    at_context = at_context
+    send_with_context = send_with_context
 }

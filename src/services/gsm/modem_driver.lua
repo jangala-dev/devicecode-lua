@@ -1,8 +1,11 @@
 -- driver.lua
+local fiber = require "fibers.fiber"
+local channel = require "fibers.channel"
 local exec = require "fibers.exec"
 local context = require "fibers.context"
 local sc = require "fibers.utils.syscall"
 local at = require "services.gsm.at"
+local utils = require "services.gsm.utils"
 local mode_overrides = require "services.gsm.modem_driver.mode"
 local model_overrides = require "services.gsm.modem_driver.model"
 local json = require "dkjson"
@@ -55,6 +58,8 @@ function Driver:get(enquiry)
         plugin = {loc = {"modem", "generic", "plugin"}, func = self.get_info},
         model = {loc = {"modem", "generic", "model"}, func = self.get_info},
         revision = {loc = {"modem", "generic", "revision"}, func = self.get_info},
+        state = {loc = {"modem", "generic", "state"}, func = self.get_info},
+        state_failed_reason = {loc = {"modem", "generic", "state-failed-reason"}, func = self.get_info},
     }
 
     local info = command_list[enquiry]
@@ -89,7 +94,7 @@ function Driver:init()
         if self.mode then break end
     end
 
-    -- now let's enrich the driver with mode specific functions/overrides
+    -- -- now let's enrich the driver with mode specific functions/overrides
     assert(mode_overrides.add_mode_funcs(self))
 
     -- let's now determine the manufacturer, model and variant
@@ -116,20 +121,51 @@ function Driver:init()
         end
     end
 
-    -- Finally we add any make/model specific functions/overrides
+    -- -- Finally we add any make/model specific functions/overrides
     model_overrides.add_model_funcs(self)
+
+    -- Let's also start the state monitor :)
+    self.status_chan = channel.new()
+    fiber.spawn(function ()
+        self:state_monitor()
+    end)
 end
 
 -- Base methods can be defined here
 
-function Driver:enable()
-    print("Generic modem enable")
+function Driver:set_func_min()
+    local cmd_ctx = context.with_timeout(self.ctx, 0.3)
+    return at.send_with_context(cmd_ctx, "AT+CFUN=0")
+end
+
+function Driver:set_func_max()
+    local cmd_ctx = context.with_timeout(self.ctx, 0.3)
+    return at.send_with_context(cmd_ctx, "AT+CFUN=1")
+end
+
+function Driver:set_func_flight()
+    local cmd_ctx = context.with_timeout(self.ctx, 0.3)
+    return at.send_with_context(cmd_ctx, "AT+CFUN=4")
 end
 
 function Driver:disable()
+    local cmd = exec.command('mmcli', '-m', self.address, '-d')
+    return cmd:run()
+end
+
+function Driver:enable()
+    local cmd = exec.command('mmcli', '-m', self.address, '-e')
+    return cmd:run()
+end
+
+function Driver:restart()
+    local cmd = exec.command('mmcli', '-m', self.address, '-r')
+    return cmd:run()
 end
 
 function Driver:connect()
+    local cmd = exec.command('mmcli', '-m', self.address, '--simple-connect="apn=mobile.o2.co.uk,user=o2web,password=password,allowed-auth=pap"')
+    return cmd:run()
 end
 
 function Driver:disconnect()
@@ -164,11 +200,38 @@ end
 function Driver:change_pin(cur_pin, new_pin)
 end
 
+
+function Driver:state_monitor()
+    local state_machine = {
+        failed = function () print("restarting") log.info("warm swap here!") end,
+        disabled = function () print("enabling") self:enable() end,
+        registered = function () print("connecting") self:connect() end,
+    }
+    log.trace("Modem State Monitor: starting for address:", self.address)
+    local cmd = exec.command('mmcli', '-m', self.address, '-w')
+    local stdout = assert(cmd:stdout_pipe())
+    local err = cmd:start()
+    if err then
+        log.error("Failed to start modem state detection:", err)
+    else
+        -- Now we loop over every line of output
+        for line in stdout:lines() do
+            local report, err = utils.parse_modem_monitor(line)
+            if not report or err then break end
+            self.status = report.current_state
+            if state_machine[self.status] then fiber.spawn(state_machine[self.status]) end
+            if self.status == 'failed' then break end
+        end
+        cmd:wait()
+    end
+    stdout:close()
+end
+
 local function new(ctx, address)
     local self = setmetatable({}, Driver)
     self.ctx = ctx
     self.address = address
-    self.cache = cache.new(1, sc.monotime)
+    self.cache = cache.new(0.1, sc.monotime)
     -- Other initial properties
     return self
 end
