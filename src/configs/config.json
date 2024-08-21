@@ -71,7 +71,7 @@
             }
         ]
     },
-    "modem": {
+    "gsm": {
         "modems": {
             "default": {
                 "enabled": true,

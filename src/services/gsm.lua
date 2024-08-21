@@ -108,7 +108,7 @@ end
 local function config_receiver(rootctx, bus_connection)
     log.trace("Modem: Config Receiver: starting...")
     while true do
-        local sub = bus_connection:subscribe("config/modem")
+        local sub = bus_connection:subscribe("config/gsm")
         while true do
             local msg, err = sub:next_msg()
             if err then log.error(err) break end
