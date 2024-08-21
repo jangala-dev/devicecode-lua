@@ -12,13 +12,14 @@ local gpio_path = "/sys/class/gpio"
 
 -- Set the GPIO base
 local function set_gpio_base()
-    local f = file.popen("cat /sys/class/gpio/gpiochip*/base | head -n1", "r")
+    local f = io.popen("cat /sys/class/gpio/gpiochip*/base | head -n1", "r")
+    if not f then error("could not read GPIO base!") end
     local base = f:read()
     f:close()
     base = tonumber(base)
     if not base then return nil, 'could not determine gpio_base' end
     gpio_base = base
-    return true, nil
+    return base, nil
 end
 
 -- Helper function to write to a GPIO file
@@ -148,11 +149,11 @@ end
 
 -- Initialize the GPIO base
 local function initialize_gpio()
-    local success, err = set_gpio_base()
-    if not success then
+    local base, err = set_gpio_base()
+    if not base then
         return nil, err
     end
-    return true, nil
+    return base, nil
 end
 
 return {
