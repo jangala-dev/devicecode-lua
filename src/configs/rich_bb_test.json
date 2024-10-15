@@ -41,9 +41,9 @@
     "wifi": {
         "radios": [
             {
-                "id": "radio1",
+                "id": "radio0",
                 "type": "mac80211",
-                "path": "platform/ahb/18100000.wmac",
+                "path": "platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1",
                 "band": "2g",
                 "channel": "auto",
                 "channels": ["1", "6", "11"],
@@ -54,20 +54,11 @@
         ],
         "ssids": [
             {
-                "name": "GetBox-PmWBH",
-                "encryption": "psk2",
-                "mode": "access_point",
-                "password": "shiny-huge-valet",
-                "network": "jng",
-                "radios": ["radio1"]
-            },
-            {
-                "name": "GetBox-PmWBH-admin",
-                "encryption": "psk2",
-                "mode": "access_point",
-                "password": "shiny-huge-valet",
-                "network": "adm",
-                "radios": ["radio1"]
+                "name": "OpenWart",
+                "encryption": "none",
+                "mode": "ap",
+                "network": "lan",
+                "radios": ["radio0"]
             }
         ]
     },
@@ -82,60 +73,32 @@
                     "id_field": "device",
                     "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb4/4-1",
                     "enabled": true,
-                    "autoconnect": true
+                    "autoconnect": true,
+                    "sim_detect": "state_cycle"
                 },
                 "secondary": {
                     "id_field": "device",
                     "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3/3-2",
                     "enabled": true,
-                    "autoconnect": true
+                    "autoconnect": true,
+                    "sim_detect": "state_cycle"
                 },
                 "modem1": {
                     "id_field": "imei",
                     "imei": "123456789054321",
                     "enabled": true,
-                    "autoconnect": true
+                    "autoconnect": true,
+                    "sim_detect": "state_cycle"
                 }
             }
         },
         "sims": {
         },
         "connectors": {
-            "known": {
-                "builtin": {
-                    "id_field": "specific USB identifier here if more than one switcher connected?",
-                    "device": "if attached on usb something like /sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
-                    "enabled": true,
-                    "always_connected": true,
-                    "type": "bbv1_internal"
-                }
-            }
         }
     },
     "service2": {
         "paramX": "valueX",
         "paramY": "valueY"
-    },
-    "hub": {
-        "ws_host": "172.19.0.2",
-        "ws_port": "9003",
-        "connections": [
-            // {
-            //     "type": "http",
-            //     "url": "http://cloud.dev.janga.la/http/channels/{channel}/messages",
-            //     "mainflux_id":"{ID}",
-            //     "mainflux_key":"{KEY}",
-            //     "mainflux_datachannel":"{DATACHANNEL_ID}"
-            // },
-            {
-                "type": "fd",
-                "path_read": "/dev/ttyAMA0",
-                "path_send": "/dev/ttyAMA0"
-            }
-        ]
-    },
-    "testdevice":{
-        "fd_path": "/dev/ttyAMA0",
-        "interval": 10
     }
 }

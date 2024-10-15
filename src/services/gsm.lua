@@ -14,9 +14,15 @@ local gsm_service = {}
 gsm_service.__index = gsm_service
 
 -- Define global channels for inter-component communication
+
+-- Channels for modem events
 local modem_config_channel = channel.new()
 local modem_detect_channel = channel.new()
 local modem_remove_channel = channel.new()
+
+-- Channels for connector events
+local connector_config_channel = channel.new()
+local connector_modem_association_channel = channel.new()
 
 -- Containers for holding GSM elements: modems, sims and connectors
 local modems = {
@@ -118,6 +124,7 @@ local function config_receiver(rootctx, bus_connection)
             else
                 log.trace("GSM: Config Receiver: new config received")
                 modem_config_channel:put(config.modems)
+                connector_config_channel:put(config.connectors)
                 -- sim_config_channel:put(config.sims)
             end
         end
@@ -178,7 +185,7 @@ local function modem_manager(ctx)
         modem_config = config
 
         -- Handling known configs
-        for name, mod_config in pairs(config.known) do
+        for name, mod_config in pairs(config.devices) do
             local instance = modems.name[name]
             if instance then
                 instance:update_config(mod_config)
@@ -199,11 +206,11 @@ local function modem_manager(ctx)
         end
 
         -- Apply default configuration to all modems without specific configs
-        if modem_config.default then
+        if modem_config.defaults then
             for _, modem in pairs(modems.address) do
                 if not modem.name then
                     log.trace("applying default config to:", modem.address)
-                    modem:update_config(modem_config.default)
+                    modem:update_config(modem_config.defaults)
                 end
             end
         end
@@ -222,7 +229,8 @@ end
 local function connector_manager(ctx)
     log.trace("GSM: Connector manager starting")
 
-    local modem_config = {}
+    local connector_config = {}
+
 
     local driver_channel = channel.new()
 end

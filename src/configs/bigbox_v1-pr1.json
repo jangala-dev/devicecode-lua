@@ -73,24 +73,31 @@
     },
     "gsm": {
         "modems": {
-            "default": {
-                "enabled": true
+            "defaults": {
+                "target_state": "autoconnect"
             },
-            "known": {
-                "primary": {
+            "devices": {
+                "internal_primary": {
+                    "builtin": true,
                     "id_field": "device",
                     "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3/3-2",
-                    "enabled": true
+                    "permanent_connector": "builtin",
+                    "permanent_connector_slot": "1",
+                    "target_state": "autoconnect"
                 },
-                "secondary": {
+                "internal_secondary": {
+                    "builtin": true,
                     "id_field": "device",
                     "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1",
-                    "enabled": true
+                    "permanent_connector": "builtin",
+                    "permanent_connector_slot": "2",
+                    "target_state": "disabled"
                 },
                 "modem1": {
                     "id_field": "imei",
                     "imei": "123456789054321",
-                    "enabled": true
+                    "sim_detect": "state_cycle",
+                    "target_state": "autoconnect"
                 }
             }
         },
@@ -100,67 +107,16 @@
             }
         },
         "connectors": {
-            "builtin": {
-                "inputs": [
-                    {
-                        "slot": 1,
-                        "type": "removable",
-                        "gpio": 5,
-                        "detect_method": "gpio_low"
-                    },
-                    {
-                        "slot": 2,
-                        "type": "removable",
-                        "gpio": 6,
-                        "detect_method": "gpio_low"
-                    },
-                    {
-                        "slot": 3,
-                        "type": "removable",
-                        "gpio": 13,
-                        "detect_method": "gpio_low"
-                    },
-                    {
-                        "slot": 4,
-                        "type": "removable",
-                        "gpio": 19,
-                        "detect_method": "gpio_low"
-                    },
-                    {
-                        "slot": 5,
-                        "type": "esim"
-                    },
-                    {
-                        "slot": 6,
-                        "type": "esim"
-                    }
-                ],
-                "outputs": [
-                    {
-                        "slot": 1,
-                        "connected_to": "primary",
-                        "mapping": [
-                            {"input": 1, "gpio": {"18": "high", "23": "low", "24": "low"}},
-                            {"input": 2, "gpio": {"18": "high", "23": "high", "24": "low"}},
-                            {"input": 3, "gpio": {"18": "low", "23": "low", "24": "low"}},
-                            {"input": 4, "gpio": {"18": "low", "23": "high", "24": "low"}},
-                            {"input": 5, "gpio": {"18": "high", "23": "high", "24": "high"}},
-                            {"input": 6, "gpio": {"18": "high", "23": "low", "24": "high"}}
-                        ]
-                    },
-                    {
-                        "slot": 2,
-                        "connected_to": "secondary",
-                        "mapping": [
-                            {"input": 1, "gpio": {"8": "high", "7": "low", "1": "low"}},
-                            {"input": 2, "gpio": {"8": "high", "7": "high", "1": "low"}},
-                            {"input": 3, "gpio": {"8": "low", "7": "low", "1": "low"}},
-                            {"input": 4, "gpio": {"8": "low", "7": "high", "1": "low"}},
-                            {"input": 5, "gpio": {"8": "high", "7": "high", "1": "high"}},
-                            {"input": 6, "gpio": {"8": "high", "7": "low", "1": "high"}}
-                        ]
-                    }
-                ]
+            "devices": {
+                "internal": {
+                    "builtin": true,
+                    "output_slots": ["internal_primary", "internal_secondary"],
+                    "id_field": "specific USB identifier here if more than one switcher connected?",
+                    "device": "if attached on usb something like /sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
+                    "enabled": true,
+                    "always_connected": true,
+                    "type": "bbv1_internal"
+                }
             }
         }
     },
