@@ -5,7 +5,11 @@
             "type": "lua",
             "request": "launch",
             "name": "Launch",
-            "program": "${workspaceFolder}/src/main.lua"
+            "program": "${workspaceFolder}/src/main.lua",
+            "path": "${workspaceFolder}/src/?.lua;/usr/local/share/lua/5.1/?.lua;/usr/local/share/lua/5.1/?/?.lua;/usr/share/lua/5.1/?.lua",
+            "cpath":"/usr/local/lib/lua/5.1/?.so",
+            "env":{"DEVICE":"dev-device"},
+            "cwd":"${workspaceFolder}/src"
         }
     ]
 }
