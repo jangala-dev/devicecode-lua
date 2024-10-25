@@ -101,7 +101,7 @@ local system_service = {}
 function system_service:publish_telemetry()
     -- local cpu_model = get_cpu_info()
     local ram_total, ram_used, ram_free = get_ram_info()
-    self.bus_connection:publish({type="publish", topic="t.system", payload={n="ram_free",v=ram_free}, retained=false})
+    self.bus_connection:publish({type="publish", topic="t/system", payload={{n="ram_free",v=ram_free}}, retained=false})
     print("RAM free: ", ram_free)
 end
 
@@ -143,12 +143,11 @@ function system_service:stop_config_handler()
 end
 
 function system_service:start(rootctx, bus_connection)
-    print("Hello from hub service!")
+    print("Hello from system service!")
     self.bus_connection = bus_connection
 
     self.config_channel = channel.new() -- Channel to receive configuration updates
     self.config_quit_channel = channel.new() -- Channel to receive configuration updates
-
     self.system_quit_channel = channel.new() -- Channel to receive configuration updates
 
     self:start_config_handler()

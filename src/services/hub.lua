@@ -5,6 +5,7 @@ local channel = require 'fibers.channel'
 -- local WSTransport = require 'services.networking.ws_transport'
 -- local HTTPConnection = require 'services.networking.http_connection'
 local FDConnection = require 'services.networking.fd_connection'
+local MQTTConnection = require 'services.networking.mqtt_connection'
 --local WSConnection = require 'services.networking.ws_connection'
 
 local Hub = {}
@@ -27,26 +28,37 @@ function Hub:start()
     -- ws_transport:run()
 
     local cid = 1
-    for _, cfg in ipairs(self.config.connections) do
-        if cfg.type == "http" then
-            local http_connection = HTTPConnection.new_HTTPConnection(cfg)
-            http_connection.CID = cid
-            self:handle_outgoing_connection(http_connection, "t.#")
-        elseif cfg.type == "fd" then
-            local fd_connection = FDConnection.new_FDConnection(cfg.path_read, cfg.path_send)
-            fd_connection.CID = cid
-            self:handle_incoming_connection(fd_connection, "t.#")
-            self:handle_outgoing_connection(fd_connection, "t.#")
-        end
+    if self.config.connections ~= nil then
+        for _, cfg in ipairs(self.config.connections) do
+            if cfg.type == "http" then
+                local http_connection = HTTPConnection.new_HTTPConnection(cfg)
+                http_connection.CID = cid
+                self:handle_outgoing_connection(http_connection, "t/#")
+            elseif cfg.type == "fd" then
+                local fd_connection = FDConnection.new_FDConnection(cfg.path_read, cfg.path_send)
+                fd_connection.CID = cid
+                self:handle_incoming_connection(fd_connection, "t/#")
+                self:handle_outgoing_connection(fd_connection, "t/#")
+            elseif cfg.type == "mqtt" then
+                local broker_ip = cfg.broker_ip ~= nil and cfg.broker_ip or os.getenv("MQTT_BROKER_IP")
+                local user_id = cfg.user_id ~= nil and cfg.user_id or os.getenv("MQTT_USER_ID")
+                local password = cfg.password ~= nil and cfg.password or os.getenv("MQTT_PASSWORD")
+                local topic_data_prefix = cfg.topic_data_prefix ~= nil and cfg.topic_data_prefix or os.getenv("MQTT_TOPIC_DATA_PREFIX")
+                local topic_control_prefix = cfg.topic_control_prefix ~= nil and cfg.topic_control_prefix or os.getenv("MQTT_TOPIC_CONTROL_PREFIX")
 
-        cid = cid + 1
+                local mqtt_connection = MQTTConnection.new_MQTTConnection(broker_ip, user_id, password, topic_data_prefix, topic_control_prefix)
+                mqtt_connection.CID = cid
+                self:handle_outgoing_connection(mqtt_connection, "t/#")
+                self:handle_incoming_connection(mqtt_connection, "#")
+            end
+
+            cid = cid + 1
+        end
     end
 end
 
 function Hub:handle_outgoing_connection(conn, topic)
     local conn_quit_channel = channel.new() -- Channel to quit connection
-    print("New connection")
-
     local sub = self.bus_connection:subscribe(topic)
     fiber.spawn(function()
         while true do
@@ -84,11 +96,10 @@ function Hub:handle_incoming_connection(conn, topic)
 
     fiber.spawn(function()
         while true do
-            local hasMsg, msg_string = conn:readMsg()
+            local hasMsg, msg = conn:readMsg()
 
             if hasMsg then
                 --print("Got message: ", msg_string)
-                local msg, _, err = json.decode(msg_string)
                 if err then
                     print(err)
                 elseif msg.type == "subscribe" then
@@ -106,6 +117,7 @@ function Hub:handle_incoming_connection(conn, topic)
                 elseif msg.type == "publish" then
                     msg.CID = conn.CID
                     self.bus_connection:publish(msg)
+                    print("Published message "..msg.payload)
                 elseif msg.type == nil then
                     print("No type in message")
                 else

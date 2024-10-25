@@ -8,12 +8,16 @@ sudo apt install -y apt-utils unzip curl wget git build-essential libreadline-de
 
 sudo apt install -y lua5.1 liblua5.1-dev luajit luarocks lua-dkjson
 
+sudo apt-get update
+sudo apt-get install libmosquitto-dev
+
 # install luarocks packages
 
 sudo luarocks install bit32
 sudo luarocks install cqueues
 sudo luarocks install http
 sudo luarocks install luaposix
+sudo luarocks install lua-mosquitto
 
 # install cffi-lua
 

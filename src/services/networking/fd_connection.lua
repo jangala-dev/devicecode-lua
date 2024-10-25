@@ -58,8 +58,13 @@ function FDConnection:readMsg()
     local txt = self.read_file:read_some_chars()
     local result = nil
     if txt ~= nil then
-        result = txt
         print("Received Message", txt)
+        local msg, _, err = json.decode(txt)
+        if err then
+            print("Error decoding message: ", err)
+        else
+            result = msg
+        end
     end
 
     return result ~= nil, result

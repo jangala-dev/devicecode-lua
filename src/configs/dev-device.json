@@ -1,1 +1,135 @@
-{}
+{
+    "network": {
+        "networks": [
+            {
+                "name": "Wired Internet",
+                "id": "wan",
+                "interface": "eth1",
+                "protocol": "dhcp",
+                "ipv6": true
+            },
+            {
+                "name": "Primary Modem",
+                "id": "mwan0",
+                "protocol": "dhcp",
+                "ipv6": true
+            },
+            {
+                "name": "Secondary Modem",
+                "id": "mwan1",
+                "protocol": "dhcp",
+                "ipv6": true
+            },
+            {
+                "name": "Admin Network",
+                "id": "adm",
+                "interface": "eth0",
+                "vlan": "1",
+                "protocol": "static",
+                "ipaddr": "172.28.1.1/24"
+            },
+            {
+                "name": "Guest Network",
+                "id": "jng",
+                "interface": "eth0",
+                "vlan": "2",
+                "protocol": "static",
+                "ipaddr": "172.28.2.1/24"
+            }
+        ]
+    },
+    "wifi": {
+        "radios": [
+            {
+                "id": "radio1",
+                "type": "mac80211",
+                "path": "platform/ahb/18100000.wmac",
+                "band": "2g",
+                "channel": "auto",
+                "channels": ["1", "6", "11"],
+                "country": "GB",
+                "htmode": "HT20",
+                "txpower": "20"
+            }
+        ],
+        "ssids": [
+            {
+                "name": "GetBox-PmWBH",
+                "encryption": "psk2",
+                "mode": "access_point",
+                "password": "shiny-huge-valet",
+                "network": "jng",
+                "radios": ["radio1"]
+            },
+            {
+                "name": "GetBox-PmWBH-admin",
+                "encryption": "psk2",
+                "mode": "access_point",
+                "password": "shiny-huge-valet",
+                "network": "adm",
+                "radios": ["radio1"]
+            }
+        ]
+    },
+    "gsm": {
+        "modems": {
+            "default": {
+                "enabled": true,
+                "autoconnect": true
+            },
+            "known": {
+                "primary": {
+                    "id_field": "device",
+                    "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb4/4-1",
+                    "enabled": true,
+                    "autoconnect": true
+                },
+                "secondary": {
+                    "id_field": "device",
+                    "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3/3-2",
+                    "enabled": true,
+                    "autoconnect": true
+                },
+                "modem1": {
+                    "id_field": "imei",
+                    "imei": "123456789054321",
+                    "enabled": true,
+                    "autoconnect": true
+                }
+            }
+        },
+        "sims": {
+        },
+        "connectors": {
+            "known": {
+                "builtin": {
+                    "id_field": "specific USB identifier here if more than one switcher connected?",
+                    "device": "if attached on usb something like /sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
+                    "enabled": true,
+                    "always_connected": true,
+                    "type": "bbv1_internal"
+                }
+            }
+        }
+    },
+    "service2": {
+        "paramX": "valueX",
+        "paramY": "valueY"
+    },
+    "hub": {
+        "ws_host": "172.19.0.2",
+        "ws_port": "9003",
+        "connections": [
+            {
+                "type": "mqtt",
+                "user_id": "2094de6e-1344-4e1e-aab8-303863706ad1",
+                "password": "edd75abe-a84f-42e2-bd7b-b7a5dd06bbb1",
+                "topic_data_prefix": "channels/f38e2bdd-d480-4b9a-b5e7-99a87ccd31a5/messages",
+                "topic_control_prefix": "channels/665f52ca-0d42-42db-aaa5-07db9950b512/messages"
+            }
+        ]
+    },
+    "testservice":{
+        "interval": 10
+    }
+}

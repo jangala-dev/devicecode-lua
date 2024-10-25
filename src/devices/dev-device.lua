@@ -5,7 +5,7 @@ return {
         "config",
         "hub",
         "system",
-        -- "testdevice"
+        "testservice"
         -- ... other services specific to this device version
     }
 }
