@@ -19,7 +19,7 @@ local rootctx = context.with_value(bg_ctx, "device", device_version)
 local device_config = require("devices/" .. rootctx:value("device"))
 
 -- Initialise bus (current bus implemeentation doesn't take a context)
-local bus = bus.new({q_len=10, m_wild='#', s_wild='+', sep='.'})
+local bus = bus.new({q_len=10, m_wild='#', s_wild='+', sep='/'})
 
 local services = {}
 
