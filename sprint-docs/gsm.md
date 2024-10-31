@@ -1,23 +1,24 @@
 So, we've decided that `hal` will detect and identify the physical elements of the system and ferry this information to `gsm`:
 
-### Elements received from HAL
+## Relationship with `hal`
 
+Elements received from `hal`
 Modems - `hal` will detect all the modems in the system
 SimSets - `hal` will detect the Sim Sets available in the system
 
-#### What are Sim Sets?
+### What are Sim Sets?
 
 SimSets are sets of sim connectors that provide the possibility of sim connections. The elements of a SimSet can be the following:
   - a regular slot for a sim card (with or without sim detect capability)
   - an embedded esim, which can store multiple profiles
 
-#### Relationships between modems and sim sets
+### Relationships between modems and sim sets
 
 Modems and SimSets have a many to many possible relationship. One Modem can be attached to multiple SimSets and one SimSet can be associated with multiple Modems.
 
-#### Designs for our devices
+### Designs for our devices
 
-##### Big Box v0.9
+#### Big Box v0.9
 
 Has two Modems and two SimSets, arranged like this:
 
@@ -27,7 +28,7 @@ Has two Modems and two SimSets, arranged like this:
   - SimSet 1 - single slot with no detect - associated with Modem 1
   - SimSet 2 - single slot with no detect - associated with Modem 2
 
-##### Big Box v1
+#### Big Box v1
 Has two modems and two SimSets, arranged like this:
 
   - Modem 1 - Primary - associated with SimSet 1 and SimSet 2
@@ -36,7 +37,7 @@ Has two modems and two SimSets, arranged like this:
   - SimSet 1 - single eSim - associated with Modem 1
   - SimSet 2 - switcher with slots 1-4 (all for external sims with sim detect), and slot 5 (an eSim)  - associated with Modems 1 and 2
 
-##### Get Box v1
+#### Get Box v1
 
 Has one modem and one SimSet, arranged like this:
 
@@ -44,7 +45,7 @@ Has one modem and one SimSet, arranged like this:
 
   - SimSet 1 - single slot with no detect - associated with Modem 1
 
-##### Get Box v1 + external Sim Switcher
+#### Get Box v1 + external Sim Switcher
 
 Has one modem and one SimSet, arranged like this:
 
@@ -64,3 +65,21 @@ So far, `hal` will provide information and control points for hardware. It will 
 - etc.
 
 This means that if Modem X is already connected to SimSet1-slot1, to connect Modem Y to this same SimSet slot, Modem X will first need to be disconnected from that SimSet slot. This will ensure that our intention, through our code will remain explicit.
+
+## The functioning of `gsm`
+
+The goal of `gsm` is to establish and manage our connections to mobile networks through modems and sims.
+
+### Architecture notes
+
+The architecture of `gsm` will follow those used in all of our services: a set of readable focused synchronous loops (made possible by fibers (Lua) and goroutines (TinyGo)), ready to react to asynchronous events. These loops will communicate with each other through channels. It's important that these loops never perform potentially blocking operations directly, instead they should start worker goroutines when needed. For example:
+- if the user enters a PIN to unlock a SIM card, then a goroutine should manage sending the PIN to `hal` and waiting for its response
+- if a config change means a modem will go from being disconnected to autoconnecting, then a worker goroutine should begin to manage the autoconnection process (for example asking `hal` to enable the modem, waiting for the modem's state to move through *enabled* and then to *registered*, and then asking `hal` to connect the modem, waiting for the response and then returning that response back via a channel to its parent loop)
+
+### Startup
+
+Like all services, `gsm` will be initialised by `main` with a connection to the `bus` and a cancellable `context` which will be used for exiting blocking processes and cleaning up before planned system shutdown.
+
+### Operation
+
+In operation, `gsm` will be waiting for config updates from `config`, and modem and simset updates from `hal`.
