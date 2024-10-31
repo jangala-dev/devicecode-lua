@@ -1,11 +1,13 @@
-So, we've decided that hal.lua will detect and identify the physical elements of the system:
+So, we've decided that `hal` will detect and identify the physical elements of the system and ferry this information to `gsm`:
 
-Modems - HAL will detect all the modems in the system
-Sim Sets - HAL will detect the Sim Sets available in the system
+### Elements received from HAL
+
+Modems - `hal` will detect all the modems in the system
+SimSets - `hal` will detect the Sim Sets available in the system
 
 #### What are Sim Sets?
 
-Sim Sets are sets of sim connectors that provide the possibility of sim connections. The elements of a Sim Set can be the following:
+SimSets are sets of sim connectors that provide the possibility of sim connections. The elements of a SimSet can be the following:
   - a regular slot for a sim card (with or without sim detect capability)
   - an embedded esim, which can store multiple profiles
 
@@ -51,3 +53,14 @@ Has one modem and one SimSet, arranged like this:
   - SimSet 1 - switcher with slots 1-4 (all for external sims with sim detect) - associated with Modem 1
 
 
+### Split of responsibility between `gsm` and `hal`
+
+We want to ensure a clear boundary between `gsm` (and other services) and `hal`. Our initial implementation of these two services can help guide what this looks like!
+
+So far, `hal` will provide information and control points for hardware. It will inform services should they try to do anything unsupported or illegal with hardware. For example, in the `gsm` world, `hal` will not permit (by *reply*ing to  a *request*) if `gsm` asks `hal` to:
+- set a 4G modem to connect only to 5G networks
+- connect a modem to a non-existent SimSet or non-existent slot in a SimSet
+- connect a modem to a slot in a SimSet to which another modem is already connected
+- etc.
+
+This means that if Modem X is already connected to SimSet1-slot1, to connect Modem Y to this same SimSet slot, Modem X will first need to be disconnected from that SimSet slot. This will ensure that our intention, through our code will remain explicit.
