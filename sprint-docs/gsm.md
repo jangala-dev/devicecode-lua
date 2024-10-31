@@ -26,7 +26,7 @@ Has two Modems and two SimSets, arranged like this:
   - SimSet 2 - single slot with no detect - associated with Modem 2
 
 ##### Big Box v1
-Has two <odems and two SimSets, arranged like this:
+Has two modems and two SimSets, arranged like this:
 
   - Modem 1 - Primary - associated with SimSet 1 and SimSet 2
   - Modem 2 - Secondary - associated with SimSet 2
