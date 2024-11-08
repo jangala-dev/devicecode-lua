@@ -130,6 +130,32 @@
         ]
     },
     "testservice":{
-        "interval": 10
+        "telemetry": {
+            "events": [
+                {
+                    "message": {
+                        "verb": "get",
+                        "path": "health",
+                        "response_topic": "t/testservice/health",
+                        "payload": {
+                            "param1": "value1",
+                            "param2": "value2"
+                        }
+                    },
+                    "interval": 10
+                },
+                {
+                    "message": {
+                        "verb": "get",
+                        "path": "mental_state",
+                        "response_topic": "t/testservice/mental_state",
+                        "payload": {
+                            "param1": "value1"
+                        }
+                    },
+                    "interval": 7
+                }
+            ]
+        }
     }
 }

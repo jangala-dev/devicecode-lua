@@ -8,71 +8,83 @@ local fiber = require 'fibers.fiber'
 
 local MQTTConnection = {
     is_connected = false,
+    queue = {first = 0, last = -1, size = 0, max_size = 1000},
+    client = nil, 
 }
-
-local message_queue = {}
 
 MQTTConnection.__index = MQTTConnection
 
 function MQTTConnection.new_MQTTConnection(broker_ip, user_id, password, topic_data_prefix, topic_control_prefix)
+    return setmetatable({
+        broker_ip = broker_ip,
+        user_id = user_id,
+        password = password,
+        topic_data_prefix = topic_data_prefix, 
+        topic_control_prefix = topic_control_prefix, 
+        status = status,
+    }, MQTTConnection)
+end
+
+function MQTTConnection:initialise()
     mqtt.init()
     local client = mqtt.new()
-    status = { connected = false }
+    self.client = client
 
-    client.ON_CONNECT = function()
-        log.info("MQTT connected")
-        log.info("topic_control_prefix: ", topic_control_prefix)
-        status.connected = true
-        client:subscribe(topic_control_prefix.."/#", 2)
-        --  local mid = client:subscribe("channels/"..chanid.."/messages", 2)
-    end
+    mqttConnection = self
 
-    client.ON_MESSAGE = function(mid, topic, payload, qos, retain)
-        print(mid, topic, payload, qos, retain)
-        local msg = { topic = topic, payload = payload, type = "publish" }
-        table.insert(message_queue, msg) -- Replace with a thread safe queue
-    end
-
-    client:login_set(user_id, password)
-    log.info("user:", user_id, "password:", password, "broker:", broker_ip)
+    client:login_set(self.user_id, self.password)
+    log.info("user:", self.user_id, "password:", self.password, "broker:", self.broker_ip)
     log.info("Attempting to connect to Mainflux broker")
 
-    if client:connect("localhost", "1883") ~= true then
+    if client:connect("0.0.0.0", "1883") ~= true then
         log.error("Failed to connect to Mainflux broker")
     end
+
+    client:callback_set("ON_CONNECT", function()
+        log.info("MQTT connected")
+        mqttConnection.is_connected = true
+        client:subscribe(self.topic_control_prefix.."/#", 2)
+    end)
+
+    client:callback_set("ON_MESSAGE", function(mid, topic, payload)
+        --print("message", mid, topic, payload)
+        local p = json.decode(payload, 1, nil)
+        local msg = { topic = string.sub(topic, #self.topic_control_prefix + 2), payload = payload, response_topic = p.response_topic, type = p.type }
+        --print("MESSAGE: ", msg.topic, msg.payload, msg.response_topic, msg.type)
+        queue = mqttConnection.queue
+        queue.last = queue.last + 1
+        queue[queue.last] = msg
+    end)
 
     fiber.spawn(function()
         while true do
             client:loop() 
-            fiber.yield()     
+            sleep.sleep(0.1)    
         end
     end)
-
-    return setmetatable({client = client, topic_data_prefix = topic_data_prefix, topic_control_prefix = topic_control_prefix, status = status}, MQTTConnection)
 end
 
 function MQTTConnection:readMsg()
     local result = nil
-    if #message_queue > 0 then
-        result = message_queue[1]
-        log.info('Read message: '..result.payload)
-        table.remove(message_queue, 1)
+    if self.queue.first <= self.queue.last then
+        result = self.queue[self.queue.first]
+        self.queue[self.queue.first] = nil -- to allow garbage collection
+        self.queue.first = self.queue.first + 1
+        --log.info('Read message: '..result.topic..' '..result.payload)
     end
 
     return result ~= nil, result    
 end
 
 function MQTTConnection:sendMsg(msg)
-    if not self.status.connected then
+    if not self.is_connected then
         log.error("Not connected to MQTT broker")
         return
     end
     
     local json_payload = json.encode(msg.payload)
     log.info('Sending message: '..json_payload)
-    -- local extendedtopic = self.topic_prefix..'/'..componentid
-    self.client:publish(self.topic_data_prefix..'/'..msg.topic, json_payload)
-    -- log.info('Publishing ')--..#metrics..' metrics to topic '..extendedtopic)
+    -- self.client:publish(self.topic_data_prefix..'/'..msg.topic, json_payload)
 end
 
 return MQTTConnection

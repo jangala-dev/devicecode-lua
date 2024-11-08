@@ -1,27 +1,65 @@
 local channel = require "fibers.channel"
 local fiber   = require "fibers.fiber"
 local json = require 'dkjson'
+local log = require 'log'
 local op   = require 'fibers.op'
 local sleep = require 'fibers.sleep'
 local file = require 'fibers.stream.file'
+local MessageHandler = require 'services.networking.message_handler'
+local TelemetryAgent = require 'services.networking.telemetry_agent'
 
 local testservice_service = {}
 
+function testservice_service:health(params)
+    return "Health OK from test device with params: " .. json.encode(params)
+end
+
+function testservice_service:mental_state(params)
+    return "Mental state is great from test device with params: " .. json.encode(params)
+end
+
+function testservice_service:hifive()
+    return "hifive"
+end
+
+function testservice_service:create_message_handler(bus_connection)
+    local mh = MessageHandler.new(bus_connection, "testservice/#")
+
+    mh:create_endpoint(
+        "post", 
+        "hifive",
+        self.hifive
+    )
+
+    mh:create_endpoint(
+        "get", 
+        "health",
+        self.health
+    )
+
+    mh:create_endpoint(
+        "get", 
+        "mental_state",
+        self.mental_state
+    )
+
+    return mh
+end
+
 function testservice_service:handle_config(msg)
     print("new config received!")
-    local conf_received, _, err = json.decode(msg)
+    local config, _, err = json.decode(msg)
     if err then 
         print(err)
     return end -- add proper config error handling
 
     print("config received for test device")
 
-    fiber.spawn(function()
-        while true do
-            self:publish_telemetry()
-            sleep.sleep(conf_received.interval)
-        end
-    end)
+    if config.telemetry then
+        self.telemetry:stop()
+        self.telemetry:configure(config.telemetry)
+        self.telemetry:run()
+    end
 end
 
 function testservice_service:start_config_handler()
@@ -34,17 +72,13 @@ function testservice_service:start_config_handler()
                 self.config_quit_channel:get_op():wrap(function() quit = true end)
             ):perform()
         end
-        -- cleanup code unsubscribe
+
+        self.bus_connection:unsubscribe("config/testservice")
     end)
 end
 
 function testservice_service:stop_config_handler()
     self.config_quit_channel:put(true)
-end
-
-function testservice_service:publish_telemetry()
-    self.bus_connection:publish({type="publish", topic="t/testservice", payload={{n="test_metric",v=123}}, retained=false})
-    print("Published test metric")
 end
 
 function testservice_service:start(rootctx, bus_connection)
@@ -53,7 +87,12 @@ function testservice_service:start(rootctx, bus_connection)
 
     self.config_channel = channel.new() -- Channel to receive configuration updates
     self.config_quit_channel = channel.new() -- Channel to receive configuration updates
-    self.testservice_quit_channel = channel.new() -- Channel to receive configuration updates
+    self.messaging_quit_channel = channel.new() -- Channel to receive configuration updates
+
+    self.message_handler = self:create_message_handler(bus_connection)
+    self.message_handler:start(rootctx)
+
+    self.telemetry = TelemetryAgent.new(self.bus_connection, "t/testservice", self.message_handler)
 
     self:start_config_handler()
 end

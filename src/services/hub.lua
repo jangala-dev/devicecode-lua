@@ -47,6 +47,7 @@ function Hub:start()
                 local topic_control_prefix = cfg.topic_control_prefix ~= nil and cfg.topic_control_prefix or os.getenv("MQTT_TOPIC_CONTROL_PREFIX")
 
                 local mqtt_connection = MQTTConnection.new_MQTTConnection(broker_ip, user_id, password, topic_data_prefix, topic_control_prefix)
+                mqtt_connection:initialise()
                 mqtt_connection.CID = cid
                 self:handle_outgoing_connection(mqtt_connection, "t/#")
                 self:handle_incoming_connection(mqtt_connection, "#")
@@ -99,7 +100,6 @@ function Hub:handle_incoming_connection(conn, topic)
             local hasMsg, msg = conn:readMsg()
 
             if hasMsg then
-                --print("Got message: ", msg_string)
                 if err then
                     print(err)
                 elseif msg.type == "subscribe" then
@@ -115,9 +115,24 @@ function Hub:handle_incoming_connection(conn, topic)
                         end
                     end)
                 elseif msg.type == "publish" then
+                    --print("Publishing message: ", msg.topic, msg.payload, msg.response_topic, msg.type)
+                
                     msg.CID = conn.CID
+                    if msg.response_topic ~= nil then
+                        local sub = self.bus_connection:subscribe(msg.response_topic)
+                        local topic = msg.response_topic
+                        fiber.spawn(function()
+                            local msg, err = sub:next_msg()
+                            if err == nil then 
+                                conn:sendMsg(msg)
+                            end
+
+                            self.bus_connection:unsubscribe(topic)
+                        end)
+                    end
+
                     self.bus_connection:publish(msg)
-                    print("Published message "..msg.payload)
+                    --print("Published message "..msg.topic..':'..msg.payload)
                 elseif msg.type == nil then
                     print("No type in message")
                 else

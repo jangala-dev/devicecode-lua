@@ -4,7 +4,7 @@ return {
     services = {
         "config",
         "hub",
-        "system",
+        -- "system",
         "testservice"
         -- ... other services specific to this device version
     }
