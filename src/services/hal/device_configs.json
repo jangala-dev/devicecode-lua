@@ -1,0 +1,26 @@
+{
+    "modem" : {
+        "/org/freedesktop/ModemManager1/Modem/1" : {
+            "name" : "primary",
+            "capability" : {
+                "geo" : true,
+                "modem" : true,
+                "time" : true
+            }
+        },
+        "/org/freedesktop/ModemManager1/Modem/0" : {
+            "name" : "primary",
+            "capability" : {
+                "geo" : true,
+                "modem" : true,
+                "time" : true
+            }
+        },
+        "default" : {
+            "name" : "external",
+            "capability" : {
+                "modem" : true
+            }
+        }
+    }
+}
