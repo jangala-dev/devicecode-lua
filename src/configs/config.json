@@ -116,6 +116,81 @@
         "paramX": "valueX",
         "paramY": "valueY"
     },
+    "switch": {
+        "network": [
+            {
+                "config": "config interface 'loopback'",
+                "options": [
+                    "option device 'lo'",
+                    "option proto 'static'",
+                    "option ipaddr '127.0.0.1'",
+                    "option netmask '255.0.0.0'"
+                ]
+            },
+            {
+                "config": "config globals 'globals'",
+                "options": [
+                    "option ula_prefix 'fd91:8cf8:a2dd::/48'"
+                ]
+            },
+            {
+                "config": "config device 'switch'",
+                "options": [
+                    "option name 'switch'",
+                    "option type 'bridge'"
+                ]
+            },
+            {
+                "config": "config bridge-vlan 'wan_vlan'",
+                "options": [
+                    "option device 'switch'",
+                    "option vlan '1'",
+                    "option ports 'lan1 lan2 lan3 lan4 lan5 lan6 lan7 lan8 lan9 lan10'"
+                ]
+            },
+            {
+                "config": "config bridge-vlan 'lan_vlan'",
+                "options": [
+                    "option device 'switch'",
+                    "option vlan '200'",
+                    "option ports 'lan1 lan2 lan3 lan4 lan5 lan6 lan7 lan8 lan9 lan10'"
+                ]
+            },
+            {
+                "config": "config interface 'lan'",
+                "options": [
+                    "option device 'switch.200'",
+                    "option proto 'static'",
+                    "option ipaddr '192.168.200.1'",
+                    "option netmask '255.255.255.0'",
+                    "option ip6assign '60'"
+                ]
+            },
+            {
+                "config": "config interface 'wan'",
+                "options": [
+                    "option device 'switch.1'",
+                    "option proto 'dhcp'"
+                ]
+            }
+        ],
+        "poe": [
+            {
+                "config": "config poe poe",
+                "options": [
+                    "option budget 77",
+                    "option port1 1",
+                    "option port2 1",
+                    "option port3 0",
+                    "option port4 0",
+                    "option port5 0",
+                    "option port6 0",
+                    "option port7 0",
+                    "option port8 0"
+                ]
+            }
+        ]
+    },
     "hub": {
         "ws_host": "172.19.0.2",
         "ws_port": "9003",
