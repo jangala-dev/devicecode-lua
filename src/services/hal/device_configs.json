@@ -1,7 +1,7 @@
 {
     "modem" : {
         "/org/freedesktop/ModemManager1/Modem/1" : {
-            "name" : "primary",
+            "name" : "secondary",
             "capability" : {
                 "geo" : true,
                 "modem" : true,
@@ -10,6 +10,14 @@
         },
         "/org/freedesktop/ModemManager1/Modem/0" : {
             "name" : "primary",
+            "capability" : {
+                "geo" : true,
+                "modem" : true,
+                "time" : true
+            }
+        },
+        "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3/3-1" : {
+            "name" : "hello_world",
             "capability" : {
                 "geo" : true,
                 "modem" : true,

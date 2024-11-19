@@ -4,10 +4,10 @@ local channel = require "fibers.channel"
 local exec = require "fibers.exec"
 local context = require "fibers.context"
 local sc = require "fibers.utils.syscall"
-local at = require "services.gsm.at"
-local utils = require "services.gsm.utils"
-local mode_overrides = require "services.gsm.modem_driver.mode"
-local model_overrides = require "services.gsm.modem_driver.model"
+local at = require "services.hal.at"
+local utils = require "services.hal.utils"
+local mode_overrides = require "services.hal.modem_driver.mode"
+local model_overrides = require "services.hal.modem_driver.model"
 local json = require "dkjson"
 local cache = require "cache"
 local log = require "log"
@@ -50,6 +50,21 @@ function Driver:get_info()
     self.cache:set("modem", info.modem)
 end
 
+function Driver:get_at_ports()
+    ports = self:get("ports")
+
+    local at_ports = {}
+
+    for _, port in ipairs(ports) do
+        local pname, ptype = port:match("^(.-) %((.-)%)$")
+        if ptype == 'at' then
+            table.insert(at_ports, pname)
+        end
+    end
+
+    self.cache.set("modem", {generic = {at_ports = at_ports}})
+end
+
 function Driver:get(enquiry)
     local command_list = {
         imei = {loc = {"modem", "generic", "equipment-identifier"}, func = self.get_info},
@@ -60,6 +75,9 @@ function Driver:get(enquiry)
         revision = {loc = {"modem", "generic", "revision"}, func = self.get_info},
         state = {loc = {"modem", "generic", "state"}, func = self.get_info},
         state_failed_reason = {loc = {"modem", "generic", "state-failed-reason"}, func = self.get_info},
+        primary_port = {loc = {"modem", "generic", "primary-port"}, func = self.get_info},
+        ports = {loc = {"modem", "generic", "ports"}, func = self.get_info},
+        at_ports = {loc = {"modem", "generic", "at_ports"}, func = self.get_at_ports}
     }
 
     local info = command_list[enquiry]
@@ -81,6 +99,12 @@ function Driver:drivers() return self:get("drivers") end
 function Driver:plugin() return self:get("plugin") end
 function Driver:get_model() return self:get("model") end
 function Driver:revision() return self:get("revision") end
+function Driver:primary_port() 
+    local port, err = self:get("primary_port")
+    if err then return nil, err end 
+    return "/dev/"..port, nil
+end
+function Driver:state() return self:get("state") end
 
 function Driver:init()
     self:get_info()
@@ -93,6 +117,8 @@ function Driver:init()
         self.mode = v=="qmi_wwan" and "qmi" or v=="cdc_mbim" and "mbim"
         if self.mode then break end
     end
+
+    log.trace("HAL: init before add_mode_funcs")
 
     -- -- now let's enrich the driver with mode specific functions/overrides
     assert(mode_overrides.add_mode_funcs(self))
@@ -132,7 +158,6 @@ function Driver:init()
 end
 
 -- Base methods can be defined here
-
 function Driver:set_func_min()
     local cmd_ctx = context.with_timeout(self.ctx, 0.3)
     return at.send_with_context(cmd_ctx, "AT+CFUN=0")
@@ -231,6 +256,9 @@ local function new(ctx, address)
     local self = setmetatable({}, Driver)
     self.ctx = ctx
     self.address = address
+    local index, err = utils.parse_address_index(address)
+    if err then log.error(err) end
+    self.address_idx = index
     self.cache = cache.new(0.1, sc.monotime)
     -- Other initial properties
     return self

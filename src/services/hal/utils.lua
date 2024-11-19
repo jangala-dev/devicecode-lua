@@ -9,6 +9,13 @@ function utils.parse_monitor(line)
     end
 end
 
+function utils.parse_address_index(address)
+    local index = address:match(".*/(%d+)$")
+
+    if index then return index, nil end
+    return nil, 'index could not be found'
+end
+
 function utils.parse_modem_monitor(line)
     local result = {}
 
@@ -29,7 +36,9 @@ function utils.parse_modem_monitor(line)
         for state in line:gmatch("'(%w+)'") do
             table.insert(states, state)
         end
-        result.current_state = states[#states] -- get the last state
+        -- result.current_state = states[#states] -- get the last state
+        result.prev_state = states[1]
+        result.curr_state = states[2]
     end
 
     -- Extract reason if present
@@ -48,7 +57,9 @@ function utils.parse_control_topic(topic)
         table.insert(components, token)
     end
 
-    return components[3], components[4], components[6]
+    if #components < 6 then return nil, nil, nil, 'control topic does not contain enough components' end
+
+    return components[3], components[4], components[6], nil
 end
 
 
