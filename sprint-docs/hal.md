@@ -103,6 +103,7 @@ stateDiagram-v2
     NATR: No ATR
     PgU: Powering Up
     FL: Failed
+    SPFL: Failed with Sim Present
 
     SP --> PR: status monitor conn to *
     PR --> PgD: --uim-sim-power-off
@@ -111,7 +112,9 @@ stateDiagram-v2
     PD --> PgU: --uim-sim-power-on
     PgU --> SP: --uim-get-card-status
     PgU --> NATR: --uim-get-card-status 
+    PgU --> SPFL: --uim-get-card-status 
     PgU --> FL
+    SPFL --> SP: --inhibit
     FL --> PgD:  --uim-sim-power-off
 ```
 This is the base state machine for warm swap, it does not take into account locked sims yet.
@@ -119,3 +122,83 @@ Warm swap in devicecode v0.9 uses polling to continuously check for a sim with s
 The new version of warm swap will use mmcli status monitor and qmi monitor to detect "immediate" disconnection of sims
 and changes of power states (as asking for power on/off is not immediate) in lieu of timings, hopefully speeding up the process and 
 reducing unneeded polls.
+
+## Device Event Structure
+```
+{
+    connected = <bool>,
+    type = <type> (usb),
+    driver = <driver> (modem_driver),
+    capabilities = {
+        <cap_name> = {
+            <cap_func_name> = <cap_function>,
+            ...
+        }
+        ...
+    },
+    device_control = {
+        <control_option> = <control_function>,
+        ...
+    },
+    identifier = <identifier>,
+    identity = {
+        device = <device> (modem_card),
+        name = <name>
+    }
+}
+```
+
+## Capability Structure
+```
+{
+    endpoints = {
+        <cap_func_name> = <cap_function>,
+        ...
+    },
+    driver = <driver>
+}
+```
+
+## Device Structure
+```
+{
+    endpoints = {
+        <control_name> = <control_function>,
+        ...
+    },
+    driver = <driver>, 
+    cap_indexes = {
+        cap_name = <cap_index>,
+        ...
+    }
+}
+```
+
+## Devices Structure
+```
+{
+    <type> (usb) = {
+        <device_index> = <device>,
+        ...
+    },
+    ...
+}
+```
+
+## Capabilities Structure
+```
+{
+    <cap_name> (modem) = {
+        <cap_index> = <capability>,
+        ...
+    },
+    ...
+}
+```
+
+### General Notes
+Job of HAL - handle device endpoints and configs, and capability endpoints.
+Job of ModemManager - detect modems and build their drivers
+Job of Driver - supply endpoints and contain functionality to handle asychronous endpoint access
+
+for ModemManager to build a driver and send it to HAL should it need to have access to configs? If it does not then it will not know which modem is primary/secondary, therefore cannot pick imei or device as the identifier to be used by HAL. If it does then configs must be supplied to ModemManager somehow, perhaps as a class call.
