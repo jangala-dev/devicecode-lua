@@ -38,9 +38,10 @@ function Cache:set(key, value, timeout)
 end
 
 -- Getting a value from the cache
-function Cache:get(key)
+function Cache:get(key, allow_stale)
     key = type(key) == 'string' and key or table.concat(key, self.separator)
     local item = self.store[key]
+    if allow_stale then return item end
     if item and self.time_func() < item.timestamp then
         return item.value
     end
