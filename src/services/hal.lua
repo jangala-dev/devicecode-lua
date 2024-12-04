@@ -1,15 +1,12 @@
-local fiber = require "fibers.fiber"
 local sleep = require "fibers.sleep"
-local exec = require "fibers.exec"
-local context = require "fibers.context"
 local modem_manager = require "services.hal.modem_manager"
-local connector = require "services.hal.connector"
+-- local connector = require "services.hal.connector"
 local tracker = require "services.hal.device_tracker"
 local utils = require "services.hal.utils"
 local channel = require "fibers.channel"
 local queue = require "fibers.queue"
 local op = require "fibers.op"
-local service = require "services.service"
+local service = require "service"
 local log = require "log"
 
 -- time placeholder
@@ -17,6 +14,7 @@ local log = require "log"
 
 local hal_service = {}
 hal_service.__index = hal_service
+hal_service.name = "hal"
 
 -- This will hold current available capabilities
 local capabilities = {
@@ -105,7 +103,7 @@ local function control_main(ctx, bus_conn, device_event_q)
         local device_type, device_idx, info_query, dev_info_err = utils.parse_device_info_topic(request.topic)
         if dev_info_err ~= nil then reply(reply_to, nil, dev_info_err); return end
 
-        local type_devices = devices.id[device_type]
+        local type_devices = devices.index[device_type]
         if type_devices == nil then reply(reply_to, nil, 'device type does not exist'); return end
 
         local device = type_devices:get(device_idx)
@@ -116,22 +114,26 @@ local function control_main(ctx, bus_conn, device_event_q)
     end
 
     local function handle_device_event(event)
-        local type_device = devices.id[event.type]
+        local type_device = devices.index[event.type]
         if type_device == nil then log.error('Device Event: device type does not exist'); return end
 
         local device_instance
         local device_idx
         if event.connected then
-            device_instance = {identity = event.identity, driver = event.driver, cap_indexes = {}, endpoints = event.device_control}
+            device_instance = {
+                identity = event.identity,
+                driver = event.driver,
+                cap_indexes = {},
+                endpoints = event.device_control
+            }
 
-            device_instance.cap_indexes = {}
             for cap_name, cap in pairs(event.capabilities) do
                 local capability = capabilities[cap_name]
                 if capability == nil then
                     log.error('Device Event: capability does not exist')
                 else
                     local cap_instance = {driver = device_instance.driver, endpoints=cap}
-                    local cap_idx = capabilities:add(cap_instance)
+                    local cap_idx = capability:add(cap_instance)
                     device_instance.cap_indexes[cap_name] = cap_idx
 
                     bus_conn:publish(utils.make_cap_message(cap_name, cap_idx, true))
@@ -139,9 +141,9 @@ local function control_main(ctx, bus_conn, device_event_q)
             end
 
             device_idx = type_device:add(device_instance)
-            devices.name[event.type][event.identifier] = device_idx
+            devices.id[event.type][event.identifier] = device_idx
         else
-            device_idx = devices.name[event.type][event.identifier]
+            device_idx = devices.id[event.type][event.identifier]
             if device_idx == nil then log.error('Device Event: removed device does not exist'); return end
             device_instance = type_device:get(device_idx)
 
@@ -153,7 +155,7 @@ local function control_main(ctx, bus_conn, device_event_q)
             end
 
             type_device:remove(device_idx)
-            devices.name[event.type][event.identifier] = nil
+            devices.id[event.type][event.identifier] = nil
         end
 
         bus_conn:publish(utils.make_device_message(event.type, device_idx, device_instance.identity, event.connected))
@@ -169,12 +171,13 @@ local function control_main(ctx, bus_conn, device_event_q)
     end
 end
 
-function hal_service:start(ctx, bus_connection)
+function hal_service:start(bus_connection, ctx)
+    print(ctx.values.service_name)
     log.trace("Starting HAL Service")
 
     local modem_config_channel = channel.new()
     service.spawn_fiber('Config Receiver', bus_connection, ctx, function (child_ctx)
-        config_receiver(ctx, bus_connection, modem_config_channel)
+        config_receiver(child_ctx, bus_connection, modem_config_channel)
     end)
 
     local modem_manager_instance = modem_manager.new()

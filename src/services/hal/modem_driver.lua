@@ -4,7 +4,6 @@ local channel = require "fibers.channel"
 local context = require "fibers.context"
 local sc = require "fibers.utils.syscall"
 local sleep = require "fibers.sleep"
-local service = require "services.service"
 local at = require "services.hal.at"
 local mmcli = require "services.hal.mmcli"
 local utils = require "services.hal.utils"
@@ -253,7 +252,7 @@ function Driver:state_monitor(bus_conn)
 
     log.trace("Modem State Monitor: starting for imei - ", self:imei())
 
-    local cmd = mmcli.monitor_state()
+    local cmd = mmcli.monitor_state(self.address)
     local stdout = assert(cmd:stdout_pipe())
     local cmd_err = cmd:start()
 
