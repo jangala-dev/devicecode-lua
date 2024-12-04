@@ -2,16 +2,15 @@ local fiber = require "fibers.fiber"
 local sleep = require "fibers.sleep"
 local exec = require "fibers.exec"
 local context = require "fibers.context"
-local driver = require "services.hal.modem_driver"
+local modem_manager = require "services.hal.modem_manager"
 local connector = require "services.hal.connector"
+local tracker = require "services.hal.device_tracker"
 local utils = require "services.hal.utils"
 local channel = require "fibers.channel"
+local queue = require "fibers.queue"
 local op = require "fibers.op"
-local json = require "dkjson"
+local service = require "services.service"
 local log = require "log"
-
-local file = require "fibers.stream.file"
-local stream = require "fibers.stream"
 
 -- time placeholder
 -- local time = require "time"
@@ -19,427 +18,179 @@ local stream = require "fibers.stream"
 local hal_service = {}
 hal_service.__index = hal_service
 
--- Define global channels for inter-component communication
-
--- Channels for modem events
-local modem_config_channel = channel.new()
-local modem_detect_channel = channel.new()
-local modem_remove_channel = channel.new()
-
--- Channels for connector events
-local connector_config_channel = channel.new()
-local connector_modem_association_channel = channel.new()
-
--- device details
-local device_settings, err = file.open("./services/hal/device_configs.json", "r")
-if err then
-    log.error(err)
-else
-    device_settings = json.decode(device_settings:read_all_chars())
-end
-
--- Containers for holding GSM elements: modems, sims and connectors
-local modems = {
-    imei = {},
-    device = {},
-    address = {},
-    name = {}
-}
-
-local sims = {
-    imsi = {},
-    iccid = {},
-    -- ...
-    name = {}
-}
-
-local functions = {
-    modem = 0,
-    geo = 0,
-    time = 0
-}
-
-local connectors = {}
-
 -- This will hold current available capabilities
 local capabilities = {
-    modem = {},
-    geo = {},
-    time = {}
+    modem = tracker.new(),
+    geo = tracker.new(),
+    time = tracker.new()
 }
 
-
--- Defines the Modem type, long-term identities for Modems
-
-local modem = {}
-modem.__index = modem
-
-local function new_modem(name, config, driver)
-    assert((name and config) or driver)
-    local instance = setmetatable({
-        name = name,
-        config = config,
-        driver = driver
-    }, modem)
-    return instance
-end
-
-local function new_modem_capability(driver)
-    local ends = {
-        enable = driver.enable,
-        disable = driver.disable,
-        restart = driver.restart,
-        connect = driver.connect,
-        disconnect = driver.disconnect
+-- Holds devices by index (for bus side access) and id (for hardware manager side access)
+local devices = {
+    index = {
+        usb = tracker.new()
+    },
+    id = {
+        usb = {}
     }
-
-    return {
-        driver = driver,
-        endpoints = ends
-    }
-end
-
-local function new_geo_capability(driver)
-    return {
-        driver = driver,
-        endpoints = {}
-    }
-end
-
-local function new_time_capability(driver)
-    return {
-        driver = driver,
-        endpoints = {}
-    }
-end
-
-function modem:update_config(config)
-    self.config = config
-    if self.driver then self:apply_config() end
-end
-
-function modem:update_driver(driver)
-    self.driver = driver
-    if self.config then self:apply_config() end
-end
-
-function modem:apply_config()
-    log.info("Applying configuration for:", self.name)
-end
-
--- Defines the Sim type, long-term identities for Sims
-local sim = {}
-sim.__index = sim
-
--- Defines the Connector type, which links modems to sim cards. A modem with a
--- single slot is just a 1x1 instance of a connector.
--- MOVED TO OWN FILE
+}
 
 -- Core module functionality
 
-local function modem_detector(ctx, bus_conn)
-    log.trace("HAL: Modem Detector: starting...")
-
-    while true do
-        -- First, we start the modem detector
-        local cmd = exec.command('mmcli', '-M')
-        local stdout = assert(cmd:stdout_pipe())
-        local err = cmd:start()
-        if err then
-            log.error("Failed to start modem detection:", err)
-            sleep.sleep(5)
-        else
-            -- Now we loop over every line of output
-            for line in stdout:lines() do
-                local is_added, address = utils.parse_monitor(line)
-
-                if is_added==true then
-                    log.trace("Modem Detector: detected at:", address)
-                    modem_detect_channel:put(address)
-                elseif is_added==false then
-                    log.trace("Modem Detector: removed at:", address)
-                    modem_remove_channel:put(address)
-                end
-            end
-            cmd:wait()
-        end
-        stdout:close()
-    end
-end
-
-local function modem_state_monitor(ctx, bus_conn, address, imei)
-    log.trace("HAL: starting state monitor for: ", address, "-", imei)
-    
-    local cmd = exec.command('mmcli', '-m', address, '-w')
-    local stdout = assert(cmd:stdout_pipe())
-    local err = cmd:start()
-    if err then
-        log.error(string.format("Modem %s, imei: %s failed to start state monitoring", address, imei))
-        sleep.sleep(5)
-    else
-        while true do
-            for line in stdout:lines() do
-                log.trace("HAL: detected state change for imei = ", imei)
-                local state, _ = utils.parse_modem_monitor(line)
-                bus_conn:publish({
-                    topic = 'hal/capability/modem/'..imei..'/info/state',
-                    payload = state
-                })
-            end
-            cmd:wait()
-        end
-    end
-    stdout:close()
-end
-
-local function config_receiver(rootctx, bus_connection)
-    log.trace("GSM: Config Receiver: starting...")
-    while true do
+local function config_receiver(rootctx, bus_connection, modem_config_channel)
+    log.trace("HAL: Config Receiver: starting...")
+    while not rootctx:err() do
         local sub = bus_connection:subscribe("config/gsm")
-        while true do
-            local msg, err = sub:next_msg()
+        while not rootctx:err() do
+            local msg, err = op.choice(
+                sub:next_msg_op(),
+                rootctx:done_op()
+            ):perform()
             if err then log.error(err) break end
+            if msg == nil then break end
 
-            local config, _, err = json.decode(msg.payload)
-            if err then
-                log.error(err)
+            local config = msg.payload
+            if config == nil then
+                log.error("config is nil")
             else
-                log.trace("GSM: Config Receiver: new config received")
-                modem_config_channel:put(config.modems)
-                connector_config_channel:put(config.connectors)
+                log.trace("HAL: Config Receiver: new config received")
+                op.choice(
+                    modem_config_channel:put(config.modems),
+                    rootctx:done_op()
+                ):perform()
+                -- connector_config_channel:put(config.connectors)
                 -- sim_config_channel:put(config.sims)
             end
         end
+        sub:unsubscribe()
         sleep.sleep(1) -- placeholder to prevent multiple rapid restarts
     end
 end
 
-local function modem_manager(ctx, bus_conn)
-    log.trace("GSM: Modem Manager starting")
-
-    local modem_config = {}
-
-    local driver_channel = channel.new()
-
-    local function handle_removal(address)
-        local device = modems.address[address]
-        if not device then return end
-        device.driver.ctx:cancel('removed')
-        modems.address[address] = nil
-        local imei = device.driver:imei()
-        capabilities.modem[imei] = nil
-
-        -- Remove previously retained message
-        bus_conn:publish({
-            topic = "hal/device/usb/"..imei,
-            payload = "",
-            retained = true
-        })
-
-        local modem_info = device_settings["modem"][address]
-        if modem_info == nil then
-            modem_info = device_settings["modem"]["default"]
-        end
-
-        -- 
-        bus_conn:publish({
-            topic = "hal/device/usb/"..imei,
-            payload = {
-                status = {
-                    connected = false,
-                    -- "time" = time.now()
-                },
-                identity = {
-                    name = modem_info["name"],
-                    model = driver:get_model(),
-                    imei = driver:imei()
-                },
-                capabilities = modem_info["capability"]
-            }
-        })
-
-        capabilities.modem[imei] = nil
-        capabilities.geo[imei] = nil
-        capabilities.time[imei] = nil
+local function control_main(ctx, bus_conn, device_event_q)
+    local cap_crtl_sub, err = bus_conn:subscribe("hal/capability/+/+/control/#")
+    if err ~= nil then
+        log.error(err)
     end
 
-    local function handle_detection(address)
-        local driver = driver.new(context.with_cancel(ctx), address)
-        modems.address[address] = new_modem(nil, nil, driver)
-        fiber.spawn(function ()
-            local err = driver:init()
-            if err then
-                log.error("GSM: Modem: Handle Detection: modem initialisation failed, removing modem")
-                handle_removal(driver)
-            else
-                driver_channel:put(driver)
-            end
-        end)
+    local dev_info_sub, err = bus_conn:subscribe("hal/device/+/+/info/#")
+    if err ~= nil then
+        log.error(err)
     end
 
-    local function handle_driver(driver)
-        if driver.ctx:err() then return end
-
-        -- Extract fingerprinting info
-        local imei = driver:imei()
-        local device = driver:device()
-        local model = driver:get_model()
-        local address = driver.address
-
-        -- Check if an existing instance for that modem exists
-        local instance = modems.imei[imei] or modems.device[device]
-        if instance then
-            log.trace("GSM: Modem: Handle Driver: driver detected for modem:", instance.name)
-            instance:update_driver(driver)
-        else
-            log.trace("GSM: Modem: Handle Driver: driver detected for unknown modem:", driver.address)
-            instance = modems.address[address]
-            -- Modem is unknown, insert it into the tables with the relevant keys
-            modems.imei[imei] = instance
-            modems.device[device] = instance
-        end
-
-        local modem_info = device_settings["modem"][address]
-        if modem_info == nil then
-            modem_info = device_settings["modem"]["default"]
-        end
-
-        capabilities.modem[driver:imei()] = new_modem_capability(driver)
-
-        if modem_info["capability"].geo then
-            capabilities.geo[driver:imei()] = new_geo_capability(driver)
-        end
-
-        if modem_info["capability"].time then
-            capabilities.time[driver:imei()] = new_time_capability(driver)
-        end
-
-        bus_conn:publish({
-            topic = "hal/device/usb/"..imei,
-            payload = {
-                status = {
-                    connected = true,
-                    -- "time" = time.now()
-                },
-                identity = {
-                    name = modem_info["name"],
-                    model = model,
-                    imei = imei
-                },
-                capabilities = modem_info["capability"]
-            },
-            retained = true
-        })
-
-        fiber.spawn(function () 
-            modem_state_monitor(ctx, bus_conn, address, imei)
-        end)
+    local function reply(reply_to, result, error)
+        bus_conn:publish(utils.make_request_reply(reply_to, result, error))
     end
 
-    local function handle_config(config)
-        modem_config = config
+    local function handle_cap_ctrl(request)
+        local reply_to = request.reply_to
+        local capability, instance_id, method, cap_ctrl_err = utils.parse_control_topic(request.topic)
+        if cap_ctrl_err ~= nil then reply(reply_to, nil, cap_ctrl_err); return end
 
-        -- Handling known configs
-        for name, mod_config in pairs(config.devices) do
-            local instance = modems.name[name]
-            if instance then
-                instance:update_config(mod_config)
-            else
-                local id_field = mod_config.id_field
-                local id_value = mod_config[id_field]
-                instance = modems[id_field] and modems[id_field][id_value]
-                if instance then
-                    instance.name = name
-                    instance:update_config(mod_config)
+        local cap = capabilities[capability]
+        if cap == nil then reply(reply_to, nil, 'capability does not exist'); return end
+
+        local instance = cap[instance_id]
+        if instance == nil then reply(reply_to, nil, 'capability instance does not exist'); return end
+
+        local func = instance.endpoints[method]
+        if func == nil then reply(reply_to, nil, 'endpoint does not exist'); return end
+
+        local result = func(instance.driver, unpack(request.payload))
+        reply(reply_to, result, nil)
+    end
+
+    local function handle_device_info(request)
+        local reply_to = request.reply_to
+        local device_type, device_idx, info_query, dev_info_err = utils.parse_device_info_topic(request.topic)
+        if dev_info_err ~= nil then reply(reply_to, nil, dev_info_err); return end
+
+        local type_devices = devices.id[device_type]
+        if type_devices == nil then reply(reply_to, nil, 'device type does not exist'); return end
+
+        local device = type_devices:get(device_idx)
+        if device == nil then reply(reply_to, nil, 'device does not exist'); return end
+
+        local info, info_err = device:get_info(info_query)
+        reply(reply_to, info, info_err)
+    end
+
+    local function handle_device_event(event)
+        local type_device = devices.id[event.type]
+        if type_device == nil then log.error('Device Event: device type does not exist'); return end
+
+        local device_instance
+        local device_idx
+        if event.connected then
+            device_instance = {identity = event.identity, driver = event.driver, cap_indexes = {}, endpoints = event.device_control}
+
+            device_instance.cap_indexes = {}
+            for cap_name, cap in pairs(event.capabilities) do
+                local capability = capabilities[cap_name]
+                if capability == nil then
+                    log.error('Device Event: capability does not exist')
                 else
-                    -- Create a new instance and update the modems table
-                    instance = new_modem(name, mod_config, nil) -- Driver to be associated later
-                    modems.name[name] = instance
-                    modems[id_field][id_value] = instance
+                    local cap_instance = {driver = device_instance.driver, endpoints=cap}
+                    local cap_idx = capabilities:add(cap_instance)
+                    device_instance.cap_indexes[cap_name] = cap_idx
+
+                    bus_conn:publish(utils.make_cap_message(cap_name, cap_idx, true))
                 end
             end
+
+            device_idx = type_device:add(device_instance)
+            devices.name[event.type][event.identifier] = device_idx
+        else
+            device_idx = devices.name[event.type][event.identifier]
+            if device_idx == nil then log.error('Device Event: removed device does not exist'); return end
+            device_instance = type_device:get(device_idx)
+
+            for cap_name, cap_index in pairs(device_instance.cap_indexes) do
+                local capability = capabilities[cap_name]
+                if capability == nil then log.error("capability does not exist"); return end
+                capability:remove(cap_index)
+                bus_conn:publish(utils.make_cap_message(cap_name, cap_index, false))
+            end
+
+            type_device:remove(device_idx)
+            devices.name[event.type][event.identifier] = nil
         end
 
-        -- Apply default configuration to all modems without specific configs
-        if modem_config.defaults then
-            for _, modem in pairs(modems.address) do
-                if not modem.name then
-                    log.trace("applying default config to:", modem.address)
-                    modem:update_config(modem_config.defaults)
-                end
-            end
-        end
+        bus_conn:publish(utils.make_device_message(event.type, device_idx, device_instance.identity, event.connected))
     end
 
-    while true do
+    while not ctx:err() do
         op.choice(
-            modem_config_channel:get_op():wrap(handle_config),
-            modem_detect_channel:get_op():wrap(handle_detection),
-            modem_remove_channel:get_op():wrap(handle_removal),
-            driver_channel:get_op():wrap(handle_driver)
+            cap_crtl_sub:next_msg_op():wrap(handle_cap_ctrl),
+            dev_info_sub:next_msg_op():wrap(handle_device_info),
+            device_event_q:get_op():wrap(handle_device_event),
+            ctx:done_op()
         ):perform()
     end
-end
-
-local function control(ctx, bus_conn)
-    -- subscribes to all control signals of all capabilities, is this valid?
-    local control_sub, err = bus_conn:subscribe("hal/capability/+/+/control/#")
-    if err then
-        log.error(err)
-        return
-    end
-
-    while true do
-        local err = nil
-        local result = nil
-
-        local control_msg = control_sub:next_msg()
-        local capability, instance_id, method = utils.parse_control_topic(control_msg.topic)
-
-        local device_driver = capabilities[capability][instance_id]
-        if device_driver == nil then
-            err = string.format("capability instance %s not found", instance_id)
-        else
-            local func = device_driver.endpoints[method]
-            if func == nil then
-                err = string.format("endpoint %s for capability %s does not exist", method, capability)
-            else
-                result = func(device_driver.driver, unpack(control_msg.payload))
-            end
-        end
-
-        bus_conn:publish({
-            topic = control_msg.reply_to,
-            payload = {
-                result = result,
-                error = err
-            }
-        })
-    end
-end
-
-local function connector_manager(ctx)
-    log.trace("GSM: Connector manager starting")
-
-    local connector_config = {}
-
-
-    local driver_channel = channel.new()
-end
-
-local function connector_detector(ctx)
-    log.trace("GSM: Connector detector currently unimplemented")
 end
 
 function hal_service:start(ctx, bus_connection)
     log.trace("Starting HAL Service")
 
-    fiber.spawn(function() control(ctx, bus_connection) end)
-    fiber.spawn(function() config_receiver(ctx, bus_connection) end)
-    fiber.spawn(function() modem_manager(ctx, bus_connection) end)
-    fiber.spawn(function() modem_detector(ctx) end)
-    -- fiber.spawn(function() connector_manager(ctx) end)
-    -- fiber.spawn(function() connector_detector(ctx) end)
+    local modem_config_channel = channel.new()
+    service.spawn_fiber('Config Receiver', bus_connection, ctx, function (child_ctx)
+        config_receiver(ctx, bus_connection, modem_config_channel)
+    end)
+
+    local modem_manager_instance = modem_manager.new()
+    local device_q = queue.new()
+
+    service.spawn_fiber('Control', bus_connection, ctx, function (child_ctx)
+        control_main(child_ctx, bus_connection, device_q)
+    end)
+
+    service.spawn_fiber('Modem Card Detector', bus_connection, ctx, function (child_ctx)
+        modem_manager_instance:detector(child_ctx)
+    end)
+
+    service.spawn_fiber('Modem Card Manger', bus_connection, ctx, function (child_ctx)
+        modem_manager_instance:manager(child_ctx, bus_connection, device_q, modem_config_channel)
+    end)
 end
 
 return hal_service

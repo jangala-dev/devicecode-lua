@@ -51,7 +51,7 @@ function utils.parse_modem_monitor(line)
 end
 
 function utils.parse_control_topic(topic)
-    components = {}
+    local components = {}
 
     for token in string.gmatch(topic, "[^/]+") do
         table.insert(components, token)
@@ -60,6 +60,44 @@ function utils.parse_control_topic(topic)
     if #components < 6 then return nil, nil, nil, 'control topic does not contain enough components' end
 
     return components[3], components[4], components[6], nil
+end
+
+function utils.make_cap_message(name, index, connected)
+    return {
+        topic = string.format('hal/capability/%s/%s', name, index),
+        payload = {
+            connected = connected,
+            name = name,
+            index = index
+        },
+        retained = true
+    }
+end
+
+function utils.make_device_message(type, index, identity, connected)
+    return {
+        topic = string.format('hal/device/%s/%s', type, index),
+        payload = {
+            status = {
+                connected = connected,
+                time = nil
+            },
+            identity = identity,
+            type = type,
+            index = index
+        },
+        retained = true
+    }
+end
+
+function utils.make_request_reply(reply_to, result, error)
+    return {
+        topic = reply_to,
+        payload = {
+            result = result,
+            error = error
+        }
+    }
 end
 
 

@@ -1,10 +1,12 @@
 -- driver.lua
 local fiber = require "fibers.fiber"
 local channel = require "fibers.channel"
-local exec = require "fibers.exec"
 local context = require "fibers.context"
 local sc = require "fibers.utils.syscall"
+local sleep = require "fibers.sleep"
+local service = require "services.service"
 local at = require "services.hal.at"
+local mmcli = require "services.hal.mmcli"
 local utils = require "services.hal.utils"
 local mode_overrides = require "services.hal.modem_driver.mode"
 local model_overrides = require "services.hal.modem_driver.model"
@@ -40,7 +42,7 @@ end
 
 function Driver:get_info()
     local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
-    local cmd = exec.command_context(new_ctx, 'mmcli', '-J', '-m', self.address)
+    local cmd = mmcli.information(new_ctx, self.address)
     local out, err = cmd:combined_output()
     if err then return wraperr.new(err) end
 
@@ -51,7 +53,8 @@ function Driver:get_info()
 end
 
 function Driver:get_at_ports()
-    ports = self:get("ports")
+    local ports = self:get("ports")
+    ports = ports or {}
 
     local at_ports = {}
 
@@ -65,7 +68,7 @@ function Driver:get_at_ports()
     self.cache.set("modem", {generic = {at_ports = at_ports}})
 end
 
-function Driver:get(enquiry)
+function Driver:get(enquiry, allow_stale)
     local command_list = {
         imei = {loc = {"modem", "generic", "equipment-identifier"}, func = self.get_info},
         device = {loc = {"modem", "generic", "device"}, func = self.get_info},
@@ -83,7 +86,7 @@ function Driver:get(enquiry)
     local info = command_list[enquiry]
     if not info then return nil, wraperr.new("placeholder error") end
 
-    local value = self.cache:get(info.loc)
+    local value = self.cache:get(info.loc, allow_stale)
     if not value then
         info.func(self)
         value = self.cache:get(info.loc)
@@ -149,12 +152,6 @@ function Driver:init()
 
     -- -- Finally we add any make/model specific functions/overrides
     model_overrides.add_model_funcs(self)
-
-    -- Let's also start the state monitor :)
-    self.status_chan = channel.new()
-    -- fiber.spawn(function ()
-    --     self:state_monitor()
-    -- end)
 end
 
 -- Base methods can be defined here
@@ -174,26 +171,36 @@ function Driver:set_func_flight()
 end
 
 function Driver:disable()
-    local cmd = exec.command('mmcli', '-m', self.address, '-d')
+    local cmd = mmcli.disable(self.address)
     return cmd:run()
 end
 
 function Driver:enable()
-    local cmd = exec.command('mmcli', '-m', self.address, '-e')
+    local cmd = mmcli.enable(self.address)
     return cmd:run()
 end
 
 function Driver:restart()
-    local cmd = exec.command('mmcli', '-m', self.address, '-r')
+    local cmd = mmcli.restart(self.address)
     return cmd:run()
 end
 
 function Driver:connect()
-    local cmd = exec.command('mmcli', '-m', self.address, '--simple-connect="apn=mobile.o2.co.uk,user=o2web,password=password,allowed-auth=pap"')
+    local cmd = mmcli.connect(self.address)
     return cmd:run()
 end
 
 function Driver:disconnect()
+    local cmd = mmcli.disconnect(self.address)
+    return cmd:run()
+end
+
+function Driver:inhibit()
+    local cmd = mmcli.inhibit(self.address)
+    local err = cmd:start()
+    if err then log.trace("inhibit failed"); return false end
+    cmd:kill()
+    return true
 end
 
 -- Sim ID Methods
@@ -226,39 +233,69 @@ function Driver:change_pin(cur_pin, new_pin)
 end
 
 
-function Driver:state_monitor()
-    local state_machine = {
-        failed = function () print("restarting") log.info("warm swap here!") end,
-        disabled = function () print("enabling") self:enable() end,
-        registered = function () print("connecting") self:connect() end,
-    }
-    log.trace("Modem State Monitor: starting for address:", self.address)
-    local cmd = exec.command('mmcli', '-m', self.address, '-w')
-    local stdout = assert(cmd:stdout_pipe())
-    local err = cmd:start()
-    if err then
-        log.error("Failed to start modem state detection:", err)
-    else
-        -- Now we loop over every line of output
-        for line in stdout:lines() do
-            local report, err = utils.parse_modem_monitor(line)
-            if not report or err then break end
-            self.status = report.current_state
-            if state_machine[self.status] then fiber.spawn(state_machine[self.status]) end
-            if self.status == 'failed' then break end
+function Driver:monitor_manager(bus_conn)
+    while not self.ctx:err() do
+        self.wait_for_sim()
+        if not self.ctx:err() and self:get("state") == 'failed' then
+            local success = self:inhibit()
+            if not success then sleep.sleep(5) end
         end
-        cmd:wait()
+        self.ctx:done_op():perform_alt(function () self:state_monitor(bus_conn) end)
+    end
+end
+
+local function is_state_transition(state_change, before, after)
+    return state_change.prev_state == before and state_change.curr_state == after
+end
+
+function Driver:state_monitor(bus_conn)
+    local state_bus_path = 'hal/capability/modem/'..self:imei()..'/info/state'
+
+    log.trace("Modem State Monitor: starting for imei - ", self:imei())
+
+    local cmd = mmcli.monitor_state()
+    local stdout = assert(cmd:stdout_pipe())
+    local cmd_err = cmd:start()
+
+    local exit_state = false
+
+    if cmd_err then
+        log.error("Modem State Monitor: failed to start for imei - ", self:imei())
+    else
+        while not (self.ctx:err() or exit_state) do
+            for line in stdout:lines() do
+                local state, err = utils.parse_modem_monitor(line)
+                if err ~= nil then
+                    log.error("Modem State Monitor: failed to parse line - ", line)
+                else
+                    bus_conn:publish({
+                        topic = state_bus_path,
+                        payload = state
+                    })
+
+                    if (is_state_transition(state, 'connected', 'registered') 
+                    or is_state_transition(state, 'registered', 'enabled')
+                    or is_state_transition(state, 'failed', nil)
+                    or state.type == 'removed') then
+                        exit_state = true
+                        break
+                    end
+                end
+            end
+
+            if not (self.ctx:err() or exit_state) then
+                cmd:wait()
+            end
+        end
     end
     stdout:close()
+    log.trace("Modem State Monitor: closing for imei - ", self:imei())
 end
 
 local function new(ctx, address)
     local self = setmetatable({}, Driver)
     self.ctx = ctx
     self.address = address
-    local index, err = utils.parse_address_index(address)
-    if err then log.error(err) end
-    self.address_idx = index
     self.cache = cache.new(0.1, sc.monotime)
     -- Other initial properties
     return self
