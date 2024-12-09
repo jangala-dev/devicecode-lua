@@ -1,0 +1,36 @@
+{
+    "events" : [
+        {
+            "message" : "No modems were found",
+            "wait_after" : 0.1
+        },
+        {
+            "connected" : true,
+            "address" : "/org/freedesktop/ModemManager1/Modem/0",
+            "manufacturer" : "QUALCOMM INCORPORATED",
+            "model" : "QUECTEL Mobile Broadband Module",
+            "wait_after" : 0.3
+        },
+        {
+            "connected" : true,
+            "address" : "/org/freedesktop/ModemManager1/Modem/1",
+            "manufacturer" : "QUALCOMM INCORPORATED",
+            "model" : "QUECTEL Mobile Broadband Module",
+            "wait_after" : 0.1
+        },
+        {
+            "connected" : false,
+            "address" : "/org/freedesktop/ModemManager1/Modem/0",
+            "manufacturer" : "QUALCOMM INCORPORATED",
+            "model" : "QUECTEL Mobile Broadband Module",
+            "wait_after" : 0.3
+        },
+        {
+            "connected" : false,
+            "address" : "/org/freedesktop/ModemManager1/Modem/1",
+            "manufacturer" : "QUALCOMM INCORPORATED",
+            "model" : "QUECTEL Mobile Broadband Module",
+            "wait_after" : 0.1
+        }
+    ]
+}
