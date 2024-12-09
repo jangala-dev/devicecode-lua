@@ -9,6 +9,8 @@ local op = require "fibers.op"
 local service = require "service"
 local log = require "log"
 
+local json = require "dkjson"
+
 -- time placeholder
 -- local time = require "time"
 
@@ -143,6 +145,7 @@ local function control_main(ctx, bus_conn, device_event_q)
             device_idx = type_device:add(device_instance)
             devices.id[event.type][event.identifier] = device_idx
         else
+            print(json.encode(devices.id))
             device_idx = devices.id[event.type][event.identifier]
             if device_idx == nil then log.error('Device Event: removed device does not exist'); return end
             device_instance = type_device:get(device_idx)

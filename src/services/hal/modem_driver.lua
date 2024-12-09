@@ -103,7 +103,7 @@ function Driver:get_model() return self:get("model") end
 function Driver:revision() return self:get("revision") end
 function Driver:primary_port() 
     local port, err = self:get("primary_port")
-    if err then return nil, err end 
+    if err then return nil, err end
     return "/dev/"..port, nil
 end
 function Driver:state() return self:get("state") end
@@ -239,7 +239,9 @@ function Driver:monitor_manager(bus_conn)
             local success = self:inhibit()
             if not success then sleep.sleep(5) end
         end
-        self.ctx:done_op():perform_alt(function () self:state_monitor(bus_conn) end)
+        log.trace("before monitor", self.ctx:err())
+        self:state_monitor(bus_conn)
+        log.trace("after monitor", self.ctx:err())
     end
 end
 
@@ -248,9 +250,11 @@ local function is_state_transition(state_change, before, after)
 end
 
 function Driver:state_monitor(bus_conn)
-    local state_bus_path = 'hal/capability/modem/'..self:imei()..'/info/state'
+    if self.ctx:err() then return end
+    local imei = self:imei()
+    local state_bus_path = 'hal/capability/modem/'..imei..'/info/state'
 
-    log.trace("Modem State Monitor: starting for imei - ", self:imei())
+    log.trace("Modem State Monitor: starting for imei - ", imei)
 
     local cmd = mmcli.monitor_state(self.address)
     local stdout = assert(cmd:stdout_pipe())
@@ -259,7 +263,7 @@ function Driver:state_monitor(bus_conn)
     local exit_state = false
 
     if cmd_err then
-        log.error("Modem State Monitor: failed to start for imei - ", self:imei())
+        log.error("Modem State Monitor: failed to start for imei - ", imei)
     else
         while not (self.ctx:err() or exit_state) do
             for line in stdout:lines() do
@@ -288,7 +292,7 @@ function Driver:state_monitor(bus_conn)
         end
     end
     stdout:close()
-    log.trace("Modem State Monitor: closing for imei - ", self:imei())
+    log.trace("Modem State Monitor: closing for imei - ", imei)
 end
 
 local function new(ctx, address)
