@@ -1,9 +1,21 @@
 {
+	"name": "devicecode-lua",
 	"build": {
 		"dockerfile": "Dockerfile"
-		// [Optional] You can use build args to set options. e.g. 'VARIANT' below affects the image in the Dockerfile
-		// "args": { "VARIANT": "buster" }
 	},
-    "remoteUser": "vscode",
-    "postCreateCommand": "bash .devcontainer/postCreateCommand.sh"
+	"remoteUser": "vscode",
+	"postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-azuretools.vscode-docker",
+				"ms-vscode-remote.remote-containers",
+				"waderyan.gitblame",
+				"sumneko.lua",
+				"rog2.luacheck",
+				"tomblind.local-lua-debugger-vscode",
+				"bierner.markdown-mermaid"
+			]
+		}
+	}
 }
