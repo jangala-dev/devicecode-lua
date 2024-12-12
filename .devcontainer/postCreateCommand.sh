@@ -29,19 +29,4 @@ sudo ninja all
 sudo ninja test
 sudo cp cffi.so /usr/local/lib/lua/5.1/cffi.so
 
-# install go
-cd /tmp
-
-arch=$(uname -m)
-
-if [ "$arch" = "aarch64" ]
-then
-   wget https://go.dev/dl/go1.21.0.linux-arm64.tar.gz
-else
-   wget https://go.dev/dl/go1.21.0.linux-amd64.tar.gz
-fi
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.21.0.linux*.tar.gz
-echo "export PATH=$PATH:/usr/local/go/bin" >> $HOME/.profile
-echo "export PATH=$PATH:/usr/local/go/bin" >> $HOME/.bashrc
-
 exit 0
