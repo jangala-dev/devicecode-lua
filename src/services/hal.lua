@@ -3,6 +3,7 @@ local modem_manager = require "services.hal.modem_manager"
 -- local connector = require "services.hal.connector"
 local tracker = require "services.hal.device_tracker"
 local utils = require "services.hal.utils"
+local fiber = require "fibers.fiber"
 local channel = require "fibers.channel"
 local queue = require "fibers.queue"
 local op = require "fibers.op"
@@ -68,7 +69,7 @@ local function config_receiver(rootctx, bus_connection, modem_config_channel)
 end
 
 local function control_main(ctx, bus_conn, device_event_q)
-    local cap_crtl_sub, err = bus_conn:subscribe("hal/capability/+/+/control/#")
+    local cap_ctrl_sub, err = bus_conn:subscribe("hal/capability/+/+/control/#")
     if err ~= nil then
         log.error(err)
     end
@@ -93,11 +94,13 @@ local function control_main(ctx, bus_conn, device_event_q)
         local instance = cap[instance_id]
         if instance == nil then reply(reply_to, nil, 'capability instance does not exist'); return end
 
-        local func = instance.endpoints[method]
+        local func = instance[method]
         if func == nil then reply(reply_to, nil, 'endpoint does not exist'); return end
 
-        local result = func(instance.driver, unpack(request.payload))
-        reply(reply_to, result, nil)
+        fiber.spawn(function ()
+            local result = func(instance, request.payload)
+            reply(reply_to, result, nil)
+        end)
     end
 
     local function handle_device_info(request)
@@ -124,9 +127,8 @@ local function control_main(ctx, bus_conn, device_event_q)
         if event.connected then
             device_instance = {
                 identity = event.identity,
-                driver = event.driver,
                 cap_indexes = {},
-                endpoints = event.device_control
+                control = event.device_control
             }
 
             for cap_name, cap in pairs(event.capabilities) do
@@ -134,8 +136,7 @@ local function control_main(ctx, bus_conn, device_event_q)
                 if capability == nil then
                     log.error('Device Event: capability does not exist')
                 else
-                    local cap_instance = {driver = device_instance.driver, endpoints=cap}
-                    local cap_idx = capability:add(cap_instance)
+                    local cap_idx = capability:add(cap)
                     device_instance.cap_indexes[cap_name] = cap_idx
 
                     bus_conn:publish(utils.make_cap_message(cap_name, cap_idx, true))
@@ -145,7 +146,6 @@ local function control_main(ctx, bus_conn, device_event_q)
             device_idx = type_device:add(device_instance)
             devices.id[event.type][event.identifier] = device_idx
         else
-            print(json.encode(devices.id))
             device_idx = devices.id[event.type][event.identifier]
             if device_idx == nil then log.error('Device Event: removed device does not exist'); return end
             device_instance = type_device:get(device_idx)
@@ -166,7 +166,7 @@ local function control_main(ctx, bus_conn, device_event_q)
 
     while not ctx:err() do
         op.choice(
-            cap_crtl_sub:next_msg_op():wrap(handle_cap_ctrl),
+            cap_ctrl_sub:next_msg_op():wrap(handle_cap_ctrl),
             dev_info_sub:next_msg_op():wrap(handle_device_info),
             device_event_q:get_op():wrap(handle_device_event),
             ctx:done_op()
