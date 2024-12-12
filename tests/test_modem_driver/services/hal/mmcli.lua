@@ -1,0 +1,89 @@
+local sleep = require "fibers.sleep"
+local file = require "fibers.stream.file"
+local json = require "dkjson"
+local simu_commands = require "SimuCommands"
+
+local function monitor_modems()
+end
+
+local function inhibit(device)
+    return {
+        run = function ()
+            sleep.sleep(0.05)
+            return "inhibit"
+        end
+    }
+end
+
+local function connect(device)
+    return {
+        run = function ()
+            sleep.sleep(0.05)
+            return "connect"
+        end
+    }
+end
+
+local function disconnect(device)
+    return {
+        run = function ()
+            sleep.sleep(0.05)
+            return "disconnect"
+        end
+    }
+end
+
+local function restart(device)
+    return {
+        run = function ()
+            sleep.sleep(0.05)
+            return "restart"
+        end
+    }
+end
+
+local function enable(device)
+    return {
+        run = function ()
+            sleep.sleep(0.05)
+            return "enable"
+        end
+    }
+end
+
+local function disable(device)
+    return {
+        run = function ()
+            sleep.sleep(0.05)
+            return "disable"
+        end
+    }
+end
+
+local function monitor_state(device)
+    return simu_commands.new('./test_modem_driver/services/hal/modem_states.json')
+end
+
+local function information(ctx, device)
+    return {
+        combined_output = function ()
+            sleep.sleep(0.05)
+            local cardfile, err = file.open("./test_modem_driver/services/hal/modemcard_info.json", "r")
+            if err then return nil end
+            local carddata = cardfile:read_all_chars()
+            return carddata
+        end
+    }
+end
+
+return {
+    monitor_modems = monitor_modems,
+    inhibit = inhibit,
+    connect = connect,
+    disconnect = disconnect,
+    restart = restart,
+    enable = enable,
+    disable = disable,
+    monitor_state = monitor_state,
+    information = information
+}
