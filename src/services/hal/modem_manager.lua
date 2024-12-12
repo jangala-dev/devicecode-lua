@@ -31,18 +31,58 @@ local function new_modem_capability(driver)
     }
 end
 
-local function new_geo_capability(driver)
-    return {
-        driver = driver,
-        endpoints = {}
-    }
+-- Testing new way to make Capabilities
+
+local ModemCapability = {}
+ModemCapability.__index = ModemCapability
+
+function ModemCapability.new(driver_q)
+    return setmetatable({driver_q = driver_q}, ModemCapability)
 end
 
-local function new_time_capability(driver)
-    return {
-        driver = driver,
-        endpoints = {}
-    }
+function ModemCapability:do_command(cmd)
+    cmd.return_channel = channel.new()
+    self.driver_q:put(cmd)
+    return cmd.return_channel:get()
+end
+
+function ModemCapability:enable()
+    local cmd = {command = "enable"}
+    return self:do_command(cmd)
+end
+
+function ModemCapability:disable()
+    local cmd = {command = "disable"}
+    return self:do_command(cmd)
+end
+
+function ModemCapability:restart()
+    local cmd = {command = "restart"}
+    return self:do_command(cmd)
+end
+
+function ModemCapability:connect()
+    local cmd = {command = "connect"}
+    return self:do_command(cmd)
+end
+
+function ModemCapability:disconnect()
+    local cmd = {command = "disconnect"}
+    return self:do_command(cmd)
+end
+
+local GeoCapability = {}
+GeoCapability.__index = GeoCapability
+
+function GeoCapability.new(driver_q)
+    return setmetatable({driver_q = driver_q}, GeoCapability)
+end
+
+local TimeCapability = {}
+TimeCapability.__index = TimeCapability
+
+function TimeCapability.new(driver_q)
+    return setmetatable({driver_q = driver_q}, GeoCapability)
 end
 
 local ModemCard = {}
@@ -179,7 +219,6 @@ function ModemManagement:manager(ctx, bus_conn,
         local device_event = {
             connected = true,
             type = 'usb',
-            driver = driver,
             capabilities = {},
             device_control = {},
             identifier = device,
@@ -191,18 +230,22 @@ function ModemManagement:manager(ctx, bus_conn,
             }
         }
 
-        device_event.capabilities.modem = new_modem_capability(driver)
+        device_event.capabilities.modem = ModemCapability.new(driver.command_q)
         if instance.config and instance.config.capabilities.geo then
-            device_event.capabilities.geo = new_geo_capability(driver)
+            device_event.capabilities.geo = GeoCapability.new(driver.command_q)
         end
         if instance.config and instance.config.capabilities.time then
-            device_event.capabilities.time = new_time_capability(driver)
+            device_event.capabilities.time = TimeCapability.new(driver.command_q)
         end
 
         device_event_q:put(device_event)
 
         service.spawn_fiber('State Monitor - '..imei, bus_conn, ctx, function ()
             driver:monitor_manager(bus_conn)
+        end)
+
+        service.spawn_fiber('Command Manger - '..imei, bus_conn, ctx, function ()
+            driver:command_manager()
         end)
     end
 
