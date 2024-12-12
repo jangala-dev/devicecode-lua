@@ -1,0 +1,17 @@
+{
+    "editor.tabSize": 2,
+    "editor.indentSize": "tabSize",
+    "editor.insertSpaces": true,
+    "editor.formatOnSave": true,
+    "editor.formatOnSaveMode": "modifications",
+    "editor.codeActionsOnSave": {
+      "source.fixAll.eslint": "never"
+    },
+    "files.insertFinalNewline": true,
+    "files.trimTrailingWhitespace": true,
+    "json.schemas": [],
+    "terminal.integrated.defaultProfile.linux": "bash",
+    "[lua]": {
+      "editor.tabSize": 4
+    },
+  }
