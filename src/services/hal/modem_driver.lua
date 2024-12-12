@@ -1,6 +1,8 @@
 -- driver.lua
 local fiber = require "fibers.fiber"
 local channel = require "fibers.channel"
+local op = require "fibers.op"
+local queue = require "fibers.queue"
 local context = require "fibers.context"
 local sc = require "fibers.utils.syscall"
 local sleep = require "fibers.sleep"
@@ -232,7 +234,7 @@ function Driver:change_pin(cur_pin, new_pin)
 end
 
 
-function Driver:monitor_manager(bus_conn)
+function Driver:monitor_manager(bus_conn, index)
     while not self.ctx:err() do
         self.wait_for_sim()
         if not self.ctx:err() and self:get("state") == 'failed' then
@@ -240,7 +242,7 @@ function Driver:monitor_manager(bus_conn)
             if not success then sleep.sleep(5) end
         end
         log.trace("before monitor", self.ctx:err())
-        self:state_monitor(bus_conn)
+        self:state_monitor(bus_conn, index)
         log.trace("after monitor", self.ctx:err())
     end
 end
@@ -249,10 +251,10 @@ local function is_state_transition(state_change, before, after)
     return state_change.prev_state == before and state_change.curr_state == after
 end
 
-function Driver:state_monitor(bus_conn)
+function Driver:state_monitor(bus_conn, index)
     if self.ctx:err() then return end
     local imei = self:imei()
-    local state_bus_path = 'hal/capability/modem/'..imei..'/info/state'
+    local state_bus_path = 'hal/capability/modem/'..index..'/info/state'
 
     log.trace("Modem State Monitor: starting for imei - ", imei)
 
@@ -276,7 +278,7 @@ function Driver:state_monitor(bus_conn)
                         payload = state
                     })
 
-                    if (is_state_transition(state, 'connected', 'registered') 
+                    if (is_state_transition(state, 'connected', 'registered')
                     or is_state_transition(state, 'registered', 'enabled')
                     or is_state_transition(state, 'failed', nil)
                     or state.type == 'removed') then
@@ -295,11 +297,43 @@ function Driver:state_monitor(bus_conn)
     log.trace("Modem State Monitor: closing for imei - ", imei)
 end
 
+function Driver:command_manager()
+    local command_table = {
+        enable = self.enable,
+        disable = self.disable,
+        restart = self.restart,
+        connect = self.connect,
+        disconnect = self.disconnect
+    }
+    while not self.ctx:err() do
+        local cmd_msg = op.choice(
+            self.command_q:get_op(),
+            self.ctx:done_op()
+        ):perform()
+
+        if cmd_msg == nil then return end
+
+        local cmd = command_table[cmd_msg.command]
+        local result = 'command does not exist'
+        if cmd ~= nil then
+            result = cmd(self, cmd_msg.args)
+        end
+
+        fiber.spawn(function ()
+            op.choice(
+                cmd_msg.return_channel:put_op(result),
+                self.ctx:done_op()
+            ):perform()
+        end)
+    end
+end
+
 local function new(ctx, address)
     local self = setmetatable({}, Driver)
     self.ctx = ctx
     self.address = address
     self.cache = cache.new(0.1, sc.monotime)
+    self.command_q = queue.new()
     -- Other initial properties
     return self
 end
