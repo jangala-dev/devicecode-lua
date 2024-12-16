@@ -19,9 +19,15 @@ sudo luarocks install http
 sudo luarocks install luaposix
 sudo luarocks install lua-mosquitto
 
+cd /tmp
+sudo git clone https://github.com/facebook/luaffifb
+cd luaffifb
+sudo luarocks make
+
 # install cffi-lua
 
 sudo apt install -y meson pkg-config cmake libffi-dev
+
 
 cd /tmp
 sudo rm -rf cffi-lua

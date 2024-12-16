@@ -117,15 +117,15 @@
         "paramY": "valueY"
     },
     "hub": {
-        "ws_host": "172.19.0.2",
+        "ws_host": "localhost",
         "ws_port": "9003",
         "connections": [
             {
                 "type": "mqtt",
-                "user_id": "2094de6e-1344-4e1e-aab8-303863706ad1",
-                "password": "edd75abe-a84f-42e2-bd7b-b7a5dd06bbb1",
-                "topic_data_prefix": "channels/f38e2bdd-d480-4b9a-b5e7-99a87ccd31a5/messages",
-                "topic_control_prefix": "channels/665f52ca-0d42-42db-aaa5-07db9950b512/messages"
+                "user_id": "3f8eb882-01ed-4afd-93ab-4832d841747a",
+                "password": "b3565ea1-7019-49d2-acb1-5d6d193d7dcf",
+                "topic_data_prefix": "channels/27f8fc1a-a979-4d13-8d39-fbb9031c6c07/messages",
+                "topic_control_prefix": "channels/943cb756-e0f8-4c17-9a17-756c342ef09a/messages"
             }
         ]
     },

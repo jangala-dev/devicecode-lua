@@ -2,11 +2,11 @@ local fiber = require "fibers.fiber"
 local json = require 'dkjson'
 local op   = require 'fibers.op'
 local channel = require 'fibers.channel'
--- local WSTransport = require 'services.networking.ws_transport'
+local WSTransport = require 'services.networking.ws_transport'
 -- local HTTPConnection = require 'services.networking.http_connection'
 local FDConnection = require 'services.networking.fd_connection'
 local MQTTConnection = require 'services.networking.mqtt_connection'
---local WSConnection = require 'services.networking.ws_connection'
+local WSConnection = require 'services.networking.ws_connection'
 
 local Hub = {}
 Hub.__index = Hub
@@ -14,18 +14,20 @@ Hub.__index = Hub
 local function new_Hub(config, bus_connection)
     return setmetatable({
         bus_connection = bus_connection,
-        --ws_transport = WSTransport.new_WSTransport(),
+        ws_transport = WSTransport.new_WSTransport(),
         config = config,
     }, Hub)
 end
 
 function Hub:start()
     print("Hub started")
-    -- local ws_transport = WSTransport.new_WSTransport(
-    --     self.config.ws_host,
-    --     self.config.ws_port,
-    --     function(conn) self:handle_incoming_connection(WSConnection.new_WSConnection(conn)) end)
-    -- ws_transport:run()
+    local ws_transport = WSTransport.new_WSTransport(
+        self.config.ws_host,
+        self.config.ws_port,
+        function(conn) 
+            self:handle_incoming_connection(WSConnection.new_WSConnection(conn)) 
+        end)
+    ws_transport:run()
 
     local cid = 1
     if self.config.connections ~= nil then

@@ -84,7 +84,7 @@ function MQTTConnection:sendMsg(msg)
     
     local json_payload = json.encode(msg.payload)
     log.info('Sending message: '..json_payload)
-    -- self.client:publish(self.topic_data_prefix..'/'..msg.topic, json_payload)
+    self.client:publish(self.topic_data_prefix..'/'..msg.topic, json_payload)
 end
 
 return MQTTConnection

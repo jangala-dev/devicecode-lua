@@ -7,4 +7,5 @@
     "remoteUser": "vscode",
     "postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
 	"runArgs": [ "--network=host"],
+	"forwardPorts": [9003]
 }

@@ -36,3 +36,5 @@ end
 function WSConnection:close()
     self.ws:close()
 end
+
+return WSConnection

@@ -36,7 +36,7 @@ end
 
 function WSTransport:run()
     fiber.spawn(function()
-        local myserver = http_server.listen({
+        local myserver = http_server.listen {
             host = self.host,
             port = self.port,
             onstream = function (sv,st)
@@ -45,9 +45,13 @@ function WSTransport:run()
                 ws:accept()
                 self.onConnectFunc(ws)
             end
-        })
+        }
 
         myserver:listen()
+
+        local bound_port = select(3, myserver:localname())
+	    print(string.format("Now listening on port %d\n", bound_port))
+
         while true do
             myserver:step()
             fiber.yield()
