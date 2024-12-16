@@ -1,3 +1,5 @@
+local json = require 'dkjson'
+
 local WSConnection = {
     buffer={},
 }
@@ -16,7 +18,7 @@ function WSConnection:readMsg()
         if string.byte(txt,1,1) == 2 then
             self.buffer = {}
         elseif string.byte(txt,1,1) == 3 then
-            result_string = table.concat(self.buffer)
+            local result_string = table.concat(self.buffer)
             local result_decoded, _, err = json.decode(result_string)
             if err then
                 print("Error decoding message: ", err)
