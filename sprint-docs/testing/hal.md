@@ -76,3 +76,31 @@ graph TD
 
 The mmcli.lua module has been chosen as it is a base module for directly talking to modems, and utilised by modem manager to listen for addition and removals of modems which can be done by simply using a fake command. The modem_driver.lua module was also chosen as it provides the lowest level of hardware abstraction where creating a shim will not produce fragmented emulation; If qmicli and mmcli where shimmed separately then synchronising modem state between the two modules would become very difficult, requiring file interactions to sync the two. Modem driver forms a single point for storage of modem state, the only case of state synchronisation which may cause issue is when the driver calls `--inhibit` which should cause a modem disconnection event. How would modem driver communicate to mmcli that a disconnection event has occurred? We need to think of the mmcli that Modem Manager loads and the mmcli that Modem Driver loads as different instances, therefore not able to communicate to each other, right??
 
+### Passing state through address
+As everything in lua is a table, the address value associated with an instance of a driver can be swapped out with a table that holds all values needed to maintain state. HAL its self does not interact with the address and both modem manager and modem driver only store address in order to pass it to qmi and mmcli commands for hardware interaction. If we shim hal utils to return address as a state rather than a string, then shim mmcli and qmicli to use that address to communicate state the Entire HAL system can be run with relatively little intrusion. This solves the `--inhibit` issue mentioned above as fragmented shims are not longer an issue.
+
+```mermaid
+graph TD
+    HAL["HAL"]
+    ModemManager["Modem Manager"]
+    ModemDriver["Modem Driver"]
+    mmcli["mmcli"]
+    qmicli["qmicli"]
+    utils["utils"]
+    Manager["Manager"]
+    Detector["Detector"]
+
+    %% Subgraph for ModemManager components
+    subgraph ModemManagerComponents["Modem Manager"]
+        Detector
+        Manager
+    end
+
+    %% Address flows
+    utils -->|Address| Detector
+    Detector -->|Address| Manager
+    Manager -->|Address| ModemDriver
+    mmcli -->|Address| Detector
+    ModemDriver -->|Address| mmcli
+    ModemDriver -->|Address| qmicli
+```
