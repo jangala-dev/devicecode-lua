@@ -13,6 +13,7 @@ local core_packages_dir = "../src/?.lua;"
 local shim_dir = "./test_hal/shims/"
 
 local function update_shim_path(shim_name)
+    package.loaded["services.hal.mmcli"] = nil
     package.path = shim_dir..shim_name.."/?.lua;"..path
 end
 
@@ -72,4 +73,7 @@ fiber.spawn(function ()
     fiber.stop()
 end)
 
+print("running hal tests")
 fiber.main()
+print("pass")
+package.path = path
