@@ -8,9 +8,12 @@ end
 
 local function inhibit(device)
     return {
-        run = function ()
+        start = function ()
             sleep.sleep(0.05)
-            return "inhibit"
+            return nil
+        end,
+        kill = function ()
+            sleep.sleep(0.05)
         end
     }
 end
