@@ -66,7 +66,7 @@ function Driver:get_at_ports()
         end
     end
 
-    self.cache.set("modem", {generic = {at_ports = at_ports}})
+    self.cache:set("modem", {generic = {at_ports = at_ports}})
 end
 
 function Driver:get(enquiry, allow_stale)
@@ -121,8 +121,6 @@ function Driver:init()
         self.mode = v=="qmi_wwan" and "qmi" or v=="cdc_mbim" and "mbim"
         if self.mode then break end
     end
-
-    log.trace("HAL: init before add_mode_funcs")
 
     -- -- now let's enrich the driver with mode specific functions/overrides
     assert(mode_overrides.add_mode_funcs(self))
@@ -236,15 +234,22 @@ end
 
 function Driver:monitor_manager(bus_conn, index)
     while not self.ctx:err() do
-        self.wait_for_sim()
-        if not self.ctx:err() and self:get("state") == 'failed' then
-            local success = self:inhibit()
-            if not success then sleep.sleep(5) end
+        if self.autoconnect then
+            self.wait_for_sim()
+            if not self.ctx:err() and self:get("state") == 'failed' then
+                local success = self:inhibit()
+                while not success do
+                    sleep.sleep(5)
+                    success = self:inhibit()
+                end
+            end
         end
-        log.trace("before monitor", self.ctx:err())
         self:state_monitor(bus_conn, index)
-        log.trace("after monitor", self.ctx:err())
     end
+end
+
+function Driver:enable_autoconnect()
+    self.autoconnect = true
 end
 
 local function is_state_transition(state_change, before, after)
@@ -330,6 +335,7 @@ end
 
 local function new(ctx, address)
     local self = setmetatable({}, Driver)
+    self.autoconnect = false
     self.ctx = ctx
     self.address = address
     self.cache = cache.new(0.1, sc.monotime)

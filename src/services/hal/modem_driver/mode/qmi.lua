@@ -18,7 +18,7 @@ return function(modem)
 
     modem.is_sim_inserted = function()
         local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
-        local cmd = qmicli.uim_get_card_status(new_ctx, modem:primary_port())
+        local cmd = qmicli.uim_get_card_status(new_ctx, modem)
         local out, err = cmd:combined_output()
         if err then return wraperr.new(err) end
 
@@ -29,7 +29,7 @@ return function(modem)
 
     modem.set_func_min = function()
         local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
-        local cmd = qmicli.uim_sim_power_off(new_ctx, modem:primary_port())
+        local cmd = qmicli.uim_sim_power_off(new_ctx, modem)
         local out, err = cmd:combined_output()
         if err then return wraperr.new(err) end
 
@@ -38,7 +38,7 @@ return function(modem)
 
     modem.set_func_max = function()
         local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
-        local cmd = qmicli.uim_sim_power_on(new_ctx, modem:primary_port())
+        local cmd = qmicli.uim_sim_power_on(new_ctx, modem)
         local out, err = cmd:combined_output()
         if err then return wraperr.new(err) end
 
