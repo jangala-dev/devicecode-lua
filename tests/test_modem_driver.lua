@@ -1,5 +1,7 @@
 local json = require "dkjson"
 package.path = "./test_modem_driver/?.lua;./test_utils/?.lua;../src/?.lua;" .. package.path .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
+package.loaded["services.hal.mmcli"] = nil
+package.loaded["services.hal.modem_driver"] = nil
 
 local fiber = require "fibers.fiber"
 local op = require "fibers.op"
@@ -120,10 +122,55 @@ local function test_state_monitor()
     end
 end
 
+local function test_modem_driver_init()
+    local bg = context.background()
+    local ctx = context.with_cancel(bg)
+
+    local driver = modem_driver.new(context.with_cancel(ctx), 0)
+
+    local err = driver:init()
+
+    assert(err == nil, err)
+end
+
+local function test_modem_driver_at_port()
+    local bg = context.background()
+    local ctx = context.with_cancel(bg)
+
+    local driver = modem_driver.new(context.with_cancel(ctx), 0)
+
+    local at_ports, err = driver:get("at_ports")
+    assert(err == nil, err)
+    assert(at_ports)
+
+    local expected_ports = {"ttyUSB2", "ttyUSB3"}
+
+    for i, port in ipairs(at_ports) do
+        assert(port == expected_ports[i],
+        string.format("port mismatch, expected %s got %s", expected_ports[i], port))
+    end
+end
+
+local function test_modem_driver_invalid_get()
+    local bg = context.background()
+    local ctx = context.with_cancel(bg)
+
+    local driver = modem_driver.new(context.with_cancel(ctx), 0)
+
+    local info, err =  driver:get("foo")
+    assert(err)
+    assert(info == nil)
+end
+
+-- How to test starts_with function when is local? Make a hook into the module?
+
 fiber.spawn(function ()
     test_command_manager_commands()
     test_command_manager_command_not_exist()
     test_state_monitor()
+    test_modem_driver_init()
+    test_modem_driver_at_port()
+    test_modem_driver_invalid_get()
     fiber.stop()
 end)
 
