@@ -1,5 +1,3 @@
-package.path = "../src/?.lua;" .. package.path .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
-
 local service = require "service"
 local sleep = require "fibers.sleep"
 local fiber = require "fibers.fiber"

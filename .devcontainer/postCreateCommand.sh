@@ -14,6 +14,7 @@ sudo luarocks install bit32
 sudo luarocks install cqueues
 sudo luarocks install http
 sudo luarocks install luaposix
+sudo luarocks install luacheck
 
 # install cffi-lua
 
