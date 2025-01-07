@@ -1,0 +1,9 @@
+[submodule "src/lua-fibers"]
+	path = src/lua-fibers
+	url = https://github.com/jangala-dev/lua-fibers.git
+[submodule "src/lua-trie"]
+	path = src/lua-trie
+	url = https://github.com/jangala-dev/lua-trie.git
+[submodule "src/lua-bus"]
+	path = src/lua-bus
+	url = https://github.com/jangala-dev/lua-bus.git
