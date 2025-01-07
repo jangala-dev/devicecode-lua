@@ -1,4 +1,9 @@
-package.path = "../?.lua;" .. package.path .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
+package.path = "./lua-fibers/?.lua;"
+    .. "./lua-trie/src/?.lua;"
+    .. "./lua-bus/src/?.lua;"
+    .. "../?.lua;"
+    .. package.path
+    .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
 
 local fiber = require 'fibers.fiber'
 local sleep = require 'fibers.sleep'
