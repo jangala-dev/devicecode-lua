@@ -1,0 +1,51 @@
+name: devicecode-ci
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4.2.2
+        with:
+          submodules: recursive
+          token: ${{ secrets.DEVICECODE_TOKEN }}
+
+      - name: install-luajit
+        uses: leafo/gh-actions-lua@v10.0.0
+        with:
+          luaVersion: "luajit-openresty"
+
+      - name: install-luarocks
+        uses: leafo/gh-actions-luarocks@v4.3.0
+
+      - name: install-luacheck
+        run: luarocks install luacheck
+
+      - name: install-bit32
+        run: luarocks install bit32
+
+      - name: install-cqueues
+        run: luarocks install cqueues
+
+      - name: install-http
+        run: luarocks install http
+
+      - name: install-luaposix
+        run: luarocks install luaposix
+
+      - name: setup-env
+        run: make env
+
+      - name: run-lint
+        run: make lint
+
+      - name: run-tests
+        if: always()
+        run: make test-all

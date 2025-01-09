@@ -1,0 +1,7 @@
+repos:
+  - repo: local
+    hooks:
+      - id: dc-pre-commit
+        name: dc-pre-commit
+        entry: ./pre-commit.sh
+        language: system

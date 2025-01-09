@@ -30,4 +30,9 @@ sudo ninja all
 sudo ninja test
 sudo cp cffi.so /usr/local/lib/lua/5.1/cffi.so
 
+# pre-commit for CI
+
+sudo apt-get install -y pre-commit
+pre-commit install
+
 exit 0
