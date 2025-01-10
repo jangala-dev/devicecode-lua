@@ -5,11 +5,16 @@ package.path = "../src/lua-fibers/?.lua;" -- fibers submodule src
     .. package.path
     .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
 
+local base_pkg_path = package.path
+
 local tests = {
+    "submodules",
     "service",
-    "submodules"
+    "hal_utils",
+    "modem_driver",
 }
 
 for _, test in ipairs(tests) do
     dofile("test_" .. test .. ".lua")
+    package.path = base_pkg_path
 end

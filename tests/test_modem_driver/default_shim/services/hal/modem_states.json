@@ -1,0 +1,32 @@
+{
+    "events": [
+        {
+            "out": "/org/freedesktop/ModemManager1/Modem/0: Initial state, 'disabled'",
+            "wait": 0.1
+        },
+        {
+            "out": "/org/freedesktop/ModemManager1/Modem/0: State changed, 'disabled' --> 'enabling' (Reason: User request)",
+            "wait": 0.1
+        },
+        {
+            "out": "/org/freedesktop/ModemManager1/Modem/0: State changed, 'enabling' --> 'searching' (Reason: User request)",
+            "wait": 0.1
+        },
+        {
+            "out": "/org/freedesktop/ModemManager1/Modem/0: State changed, 'searching' --> 'disabling' (Reason: User request)",
+            "wait": 0.1
+        },
+        {
+            "out": "/org/freedesktop/ModemManager1/Modem/0: State changed, 'disabling' --> 'disabled' (Reason: User request)",
+            "wait": 0.1
+        },
+        {
+            "out": "/org/freedesktop/ModemManager1/Modem/0: Removed",
+            "wait": 0
+        },
+        {
+            "out": "This will not parse",
+            "wait": 0
+        }
+    ]
+}
