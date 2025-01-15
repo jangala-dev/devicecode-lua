@@ -7,6 +7,8 @@ local sleep = require "fibers.sleep"
 local StreamCommand = {}
 StreamCommand.__index = StreamCommand
 
+-- Given a json file, acts as a fake command that outputs
+-- defined messages and blocks for a set time
 function StreamCommand.new(events_directory)
     local events_file, err = file.open(events_directory, "r")
     if err then return nil end
