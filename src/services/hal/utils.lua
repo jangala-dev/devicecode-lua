@@ -1,5 +1,13 @@
 local utils = {}
 
+function utils.parse_monitor(line)
+    local status, address = line:match("^(.-)(/org%S+)")
+    if address then
+        return not status:match("-"), address, nil
+    else
+        return nil, nil, 'line could not be parsed'
+    end
+end
 function utils.parse_modem_monitor(line)
     if line == nil then return nil, "Modem monitor message is nil" end
     local result = {}
