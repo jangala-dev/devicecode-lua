@@ -1,5 +1,6 @@
 local fiber = require "fibers.fiber"
 local utils = require "services.hal.utils"
+local assertions = require "test_utils.assertions"
 
 local function check_parse_output(expected, result, err)
     assert(err == nil, "expected err to be nil but got", err)
@@ -110,16 +111,108 @@ local function test_starts_with_nil_2()
     local expected_result = false
     assert(result == expected_result, string.format("starts_with expected %s but got %s", expected_result, result))
 end
+-- test_parse_monitor_added
+local function test_parse_monitor_added()
+    local line = '(+) /org/freedesktop/ModemManager1/Modem/1 [QUALCOMM INCORPORATED] QUECTEL Mobile Broadband Module'
+    local added, address, err = utils.parse_monitor(line)
+
+    local expected_address = "/org/freedesktop/ModemManager1/Modem/1"
+    assert(added == true, 'added should equal true')
+    assert(address == expected_address,
+        string.format('address expected %s but got %s', expected_address, assertions.to_str(address)))
+    assert(err == nil, string.format('expected err to be nil but got %s', assertions.to_str(err)))
+end
+
+-- test_parse_monitor_removed
+
+local function test_parse_monitor_removed()
+    local line = '(-) /org/freedesktop/ModemManager1/Modem/0 [QUALCOMM INCORPORATED] QUECTEL Mobile Broadband Module'
+    local added, address, err = utils.parse_monitor(line)
+
+    local expected_address = "/org/freedesktop/ModemManager1/Modem/0"
+    assert(added == false, 'added should equal true')
+    assert(address == expected_address,
+        string.format('address expected %s but got %s', expected_address, assertions.to_str(address)))
+    assert(err == nil, string.format('expected err to be nil but got %s', assertions.to_str(err)))
+end
+
+-- test_parse_monitor_nil
+
+local function test_parse_monitor_nil()
+    local added, address, err = utils.parse_monitor(nil)
+
+    local expected_err = 'monitor message is nil'
+
+    assert(added == nil, string.format('added should be nil but got %s', assertions.to_str(added)))
+    assert(address == nil, string.format('address should be nil but got %s', assertions.to_str(address)))
+    assert(err == expected_err, string.format('expected err to be nil but got %s', expected_err, assertions.to_str(err)))
+end
+
+-- test_parse_control_topic_valid
+
+local function test_parse_control_topic_valid()
+    local topic = 'hal/capability/modem/1/control/enable'
+
+    local cap_name, index, endpoint, err = utils.parse_control_topic(topic)
+
+    local exp_cap_name = 'modem'
+    local exp_index = 1
+    local exp_endpoint = 'enable'
+
+    assertions.expect_assert(exp_cap_name, cap_name, 'capability name')
+    assertions.expect_assert(exp_index, index, 'capability index')
+    assertions.expect_assert(exp_endpoint, endpoint, 'capability endpoint')
+    assertions.expect_assert(nil, err, 'capability error')
+end
+
+-- test_parse_control_topic_fewer_components
+
+local function test_parse_control_topic_fewer_components()
+    local topic = 'hal/capability/modem/1/control'
+
+    local cap_name, index, endpoint, err = utils.parse_control_topic(topic)
+
+    local exp_err = 'control topic does not contain enough components'
+
+    assertions.expect_assert(nil, cap_name, 'capability name')
+    assertions.expect_assert(nil, index, 'capability index')
+    assertions.expect_assert(nil, endpoint, 'capability endpoint')
+    assertions.expect_assert(exp_err, err, 'capability error')
+end
+
+-- test_parse_control_topic_invalid_number
+
+local function test_parse_control_topic_invalid_number()
+    local topic = 'hal/capability/modem/foo/control/enable'
+
+    local cap_name, index, endpoint, err = utils.parse_control_topic(topic)
+
+    local exp_err = 'failed to convert instance to a number'
+
+    assertions.expect_assert(nil, cap_name, 'capability name')
+    assertions.expect_assert(nil, index, 'capability index')
+    assertions.expect_assert(nil, endpoint, 'capability endpoint')
+    assertions.expect_assert(exp_err, err, 'capability error')
+end
+
+--
 fiber.spawn(function ()
     test_parse_modem_monitor_init()
     test_parse_modem_monitor_changed_with_reason()
     test_parse_modem_monitor_removed()
     test_invalid_parse_modem_monitor()
     test_nil_parse_modem_monitor()
+
     test_starts_with_true()
     test_starts_with_false()
     test_starts_with_nil_1()
     test_starts_with_nil_2()
+    test_parse_monitor_added()
+    test_parse_monitor_removed()
+    test_parse_monitor_nil()
+    test_parse_control_topic_valid()
+    test_parse_control_topic_fewer_components()
+    test_parse_control_topic_invalid_number()
     fiber.stop()
 end)
 
