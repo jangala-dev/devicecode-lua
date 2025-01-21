@@ -25,7 +25,11 @@ local function assert_table(expected, recieved, root_key)
     end
 end
 
+local function expect_assert(expected, result, name)
+    assert(expected == result, string.format('%s expected %s but got %s', name, to_str(expected), to_str(result)))
+end
 return {
     assert_table = assert_table,
-    to_str = to_str
+    to_str = to_str,
+    expect_assert = expect_assert
 }

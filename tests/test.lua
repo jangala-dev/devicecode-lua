@@ -14,6 +14,8 @@ local tests = {
     "hal_utils",
     "modem_driver",
     "modemcard_manager",
+    "hal_capabilities",
+    "hal",
 }
 
 for _, test in ipairs(tests) do

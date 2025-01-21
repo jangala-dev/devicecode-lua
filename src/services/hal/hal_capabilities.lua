@@ -15,27 +15,27 @@ end
 
 function ModemCapability:enable()
     local cmd = {command = "enable"}
-    return do_command(cmd, self.driver_q)
+    return do_command(self.driver_q, cmd)
 end
 
 function ModemCapability:disable()
     local cmd = {command = "disable"}
-    return do_command(cmd, self.driver_q)
+    return do_command(self.driver_q, cmd)
 end
 
 function ModemCapability:restart()
     local cmd = {command = "restart"}
-    return do_command(cmd, self.driver_q)
+    return do_command(self.driver_q, cmd)
 end
 
 function ModemCapability:connect()
     local cmd = {command = "connect"}
-    return do_command(cmd, self.driver_q)
+    return do_command(self.driver_q, cmd)
 end
 
 function ModemCapability:disconnect()
     local cmd = {command = "disconnect"}
-    return do_command(cmd, self.driver_q)
+    return do_command(self.driver_q, cmd)
 end
 
 local GeoCapability = {}
@@ -49,7 +49,7 @@ local TimeCapability = {}
 TimeCapability.__index = TimeCapability
 
 local function new_time_capability(driver_q)
-    return setmetatable({driver_q = driver_q}, GeoCapability)
+    return setmetatable({ driver_q = driver_q }, TimeCapability)
 end
 
 return {
