@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MQTT WebSocket Clients</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+            display: flex;
+            gap: 20px;
+        }
+
+        .client-container {
+            flex: 1;
+            border: 1px solid #ccc;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.1);
+            box-sizing: border-box;
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .controls label {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .controls input[type="text"],
+        .controls textarea {
+            padding: 10px;
+            width: 100%;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+
+        .controls input[readonly] {
+            background-color: #f5f5f5;
+            cursor: not-allowed;
+        }
+
+        .controls button {
+            padding: 12px;
+            background-color: #007BFF;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.3s;
+            width: 100%;
+            box-sizing: border-box;
+        }
+
+        .controls button:hover {
+            background-color: #0056b3;
+        }
+
+        .log {
+            white-space: pre-wrap;
+            border: 1px solid #ddd;
+            padding: 15px;
+            height: 250px;
+            overflow-y: auto;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="client-container">
+        <h1>MQTT Client 1</h1>
+        <div class="controls">
+            <label for="client1-topic">Subscribe to Topic:</label>
+            <input type="text" id="client1-topic" value="channels/27f8fc1a-a979-4d13-8d39-fbb9031c6c07/messages">
+            <div style="display: flex; gap: 10px;">
+                <button onclick="subscribeClient1()">Subscribe</button>
+                <button onclick="unsubscribeClient1()">Unsubscribe</button>
+            </div>
+        </div>
+
+        <div class="controls">
+            <label for="client1-publishTopic">Publish Topic:</label>
+            <input type="text" id="client1-publishTopic"
+                value="channels/943cb756-e0f8-4c17-9a17-756c342ef09a/messages/testservice" readonly>
+
+            <label for="client1-type">Type:</label>
+            <input type="text" id="client1-type" value="publish" readonly>
+
+            <label for="client1-verb">Verb:</label>
+            <input type="text" id="client1-verb" value="post" readonly>
+
+            <label for="client1-path">Path:</label>
+            <input type="text" id="client1-path" value="hifive" readonly>
+
+            <label for="client1-payload">Payload (JSON):</label>
+            <textarea id="client1-payload" rows="4" placeholder="{}"></textarea>
+
+            <button onclick="publishClient1()">Publish</button>
+        </div>
+
+        <div id="client1-log" class="log">Log:</div>
+    </div>
+
+    <div class="client-container">
+        <h1>MQTT Client 2</h1>
+        <div class="controls">
+            <label for="client2-topic">Subscribe to Topic:</label>
+            <input type="text" id="client2-topic" value="channels/f38e2bdd-d480-4b9a-b5e7-99a87ccd31a5/messages">
+            <div style="display: flex; gap: 10px;">
+                <button onclick="subscribeClient2()">Subscribe</button>
+                <button onclick="unsubscribeClient2()">Unsubscribe</button>
+            </div>
+        </div>
+
+        <div class="controls">
+            <label for="client2-publishTopic">Publish Topic:</label>
+            <input type="text" id="client2-publishTopic"
+                value="channels/665f52ca-0d42-42db-aaa5-07db9950b512/messages/testservice" readonly>
+
+            <label for="client2-type">Type:</label>
+            <input type="text" id="client2-type" value="publish" readonly>
+
+            <label for="client2-verb">Verb:</label>
+            <input type="text" id="client2-verb" value="post" readonly>
+
+            <label for="client2-path">Path:</label>
+            <input type="text" id="client2-path" value="hifive" readonly>
+
+            <label for="client2-payload">Payload (JSON):</label>
+            <textarea id="client2-payload" rows="4" placeholder="{}"></textarea>
+
+            <button onclick="publishClient2()">Publish</button>
+        </div>
+
+        <div id="client2-log" class="log">Log:</div>
+    </div>
+
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script>
+        // Options and configurations for each client
+        const optionsClient1 = {
+            clean: true,
+            connectTimeout: 4000,
+            clientId: 'client1-' + Math.random().toString(16).substring(2, 8),
+            username: '3f8eb882-01ed-4afd-93ab-4832d841747a',
+            password: 'b3565ea1-7019-49d2-acb1-5d6d193d7dcf',
+        }
+
+        const optionsClient2 = {
+            clean: true,
+            connectTimeout: 4000,
+            clientId: 'client2-' + Math.random().toString(16).substring(2, 8),
+            username: 'user2',
+            password: 'pass2',
+        }
+
+        // Connect to different MQTT servers
+        const client1 = mqtt.connect('ws://localhost/mqtt', optionsClient1);
+        // const client2 = mqtt.connect('ws://mqtt-server2-url:port', optionsClient2);
+
+        const responseTopicPrefix = "channels/27f8fc1a-a979-4d13-8d39-fbb9031c6c07/messages/";
+        // Track response topics to unsubscribe after receiving a message
+        const subscribedResponseTopics = new Set();
+
+
+        function logClient(clientLogElement, message) {
+            clientLogElement.textContent += message + "\n";
+            clientLogElement.scrollTop = clientLogElement.scrollHeight;
+        }
+
+        // Client 1 Event Handlers and Functions
+        client1.on('connect', function () {
+            logClient(document.getElementById("client1-log"), 'Client 1 connected');
+        });
+
+        client1.on('message', function (topic, message) {
+            logClient(document.getElementById("client1-log"), 'Received message on ' + topic + ': ' + message.toString());
+
+            // Unsubscribe if the topic is a response topic
+            if (subscribedResponseTopics.has(topic)) {
+                client.unsubscribe(topic, (err) => {
+                    if (err) {
+                        log('Unsubscription error from response topic: ' + topic);
+                    } else {
+                        log('Unsubscribed from response topic: ' + topic);
+                        subscribedResponseTopics.delete(topic);  // Remove from tracking
+                    }
+                });
+            }
+        });
+
+        client1.on('close', function () {
+            logClient(document.getElementById("client1-log"), 'Client 1 disconnected');
+        });
+
+        function generateGUID() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+                const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        function subscribeClient1() {
+            const topic = document.getElementById("client1-topic").value;
+            client1.subscribe(topic, (err) => {
+                if (err) logClient(document.getElementById("client1-log"), 'Subscription error: ' + err.message);
+                else logClient(document.getElementById("client1-log"), 'Subscribed to ' + topic);
+            });
+        }
+
+        function unsubscribeClient1() {
+            const topic = document.getElementById("client1-topic").value;
+            client1.unsubscribe(topic, (err) => {
+                if (err) logClient(document.getElementById("client1-log"), 'Unsubscription error: ' + err.message);
+                else logClient(document.getElementById("client1-log"), 'Unsubscribed from ' + topic);
+            });
+        }
+
+        const responseGUID = generateGUID();
+        const fullResponseTopic = responseTopicPrefix + responseGUID; // Full topic for subscription
+
+        function publishClient1() {
+            const topic = document.getElementById("client1-publishTopic").value;
+            const message = JSON.stringify({
+                type: document.getElementById("client1-type").value,
+                verb: document.getElementById("client1-verb").value,
+                path: document.getElementById("client1-path").value,
+                response_topic: responseGUID, // Only the GUID, no prefix
+                payload: document.getElementById("client1-payload").value
+            });
+            // Subscribe to the full response topic (prefix + GUID)
+            client1.subscribe(fullResponseTopic, { qos: 0 }, (err) => {
+                if (err) logClient(document.getElementById("client1-log"), 'Failed to subscribe to response topic: ' + fullResponseTopic);
+                else {
+                    logClient(document.getElementById("client1-log"), 'Subscribed to response topic: ' + fullResponseTopic);
+                    subscribedResponseTopics.add(fullResponseTopic);
+                }
+            });
+            client1.publish(topic, message, (err) => {
+                if (err) logClient(document.getElementById("client1-log"), 'Publish error: ' + err.message);
+                else logClient(document.getElementById("client1-log"), 'Message published to ' + topic + ': ' + message);
+            });
+        }
+
+        // Client 2 Event Handlers and Functions
+        client2.on('connect', function () {
+            logClient(document.getElementById("client2-log"), 'Client 2 connected');
+        });
+
+        client2.on('message', function (topic, message) {
+            logClient(document.getElementById("client2-log"), 'Received message on ' + topic + ': ' + message.toString());
+        });
+
+        client2.on('close', function () {
+            logClient(document.getElementById("client2-log"), 'Client 2 disconnected');
+        });
+
+        function subscribeClient2() {
+            const topic = document.getElementById("client2-topic").value;
+            client2.subscribe(topic, (err) => {
+                if (err) logClient(document.getElementById("client2-log"), 'Subscription error: ' + err.message);
+                else logClient(document.getElementById("client2-log"), 'Subscribed to ' + topic);
+            });
+        }
+
+        function unsubscribeClient2() {
+            const topic = document.getElementById("client2-topic").value;
+            client2.unsubscribe(topic, (err) => {
+                if (err) logClient(document.getElementById("client2-log"), 'Unsubscription error: ' + err.message);
+                else logClient(document.getElementById("client2-log"), 'Unsubscribed from ' + topic);
+            });
+        }
+
+        function publishClient2() {
+            const topic = document.getElementById("client2-publishTopic").value;
+            const message = JSON.stringify({
+                type: document.getElementById("client2-type").value,
+                verb: document.getElementById("client2-verb").value,
+                path: document.getElementById("client2-path").value,
+                payload: document.getElementById("client2-payload").value
+            });
+            client2.publish(topic, message, (err) => {
+                if (err) logClient(document.getElementById("client2-log"), 'Publish error: ' + err.message);
+                else logClient(document.getElementById("client2-log"), 'Message published to ' + topic + ': ' + message);
+            });
+        }
+    </script>
+
+</body>
+
+</html>
