@@ -14,7 +14,10 @@ local ModemManagement = {}
 ModemManagement.__index = ModemManagement
 
 local function new()
-    local modem_management = {}
+    local modem_management = {
+        config_channel = channel.new(),
+        device_event_q = channel.new()
+    }
     return setmetatable(modem_management, ModemManagement)
 end
 
@@ -112,20 +115,27 @@ local function get_device_index(ctx, bus_conn, imei, device)
     return device_event.payload.index
 end
 
-function ModemManagement:manager(
-    ctx,
-    bus_conn,
-    device_event_q,
-    modem_config_channel,
-    modem_detect_channel,
-    modem_remove_channel)
+function ModemManagement:spawn(ctx)
+    log.trace("Modem Management: starting")
+
+    local modem_detect_channel = channel.new()
+    local modem_remove_channel = channel.new()
+
+    service.spawn_fiber('Modem Card Manager', ctx, function(child_ctx)
+        self:manage(child_ctx, modem_detect_channel, modem_remove_channel)
+    end)
+
+    service.spawn_fiber('Modem Card Detector', ctx, function(child_ctx)
+        self:detector(child_ctx, modem_detect_channel, modem_remove_channel)
+    end)
+end
+
+function ModemManagement:manage(ctx, modem_detect_channel, modem_remove_channel)
     log.trace("Modem Manager: starting")
 
     local modem_config = {}
 
-    local driver_channel = channel.new()
-
-    local function handle_removal(address)
+    local function handle_modem_removal(address)
         local instance = modems.address[address]
         if not instance then return end
         instance.driver.ctx:cancel('removed')
@@ -149,25 +159,12 @@ function ModemManagement:manager(
         }
 
         op.choice(
-            device_event_q:put_op(device_event),
+            self.device_event_q:put_op(device_event),
             ctx:done_op()
         ):perform()
     end
 
-    local function handle_detection(address)
-        local driver = modem_driver.new(context.with_cancel(ctx), address)
-        fiber.spawn(function ()
-            local err = driver:init()
-            if err then
-                log.error("HAL: Modem: Handle Detection: modem initialisation failed, removing modem")
-                handle_removal(address)
-            else
-                driver_channel:put(driver)
-            end
-        end)
-    end
-
-    local function handle_driver(driver)
+    local function handle_device_added(driver)
         if driver.ctx:err() then return end
 
         -- Extract fingerprinting info
@@ -213,26 +210,45 @@ function ModemManagement:manager(
             end
         end
 
-        device_event_q:put(device_event)
+        self.device_event_q:put(device_event)
 
         fiber.spawn(function()
-            local index, err = get_device_index(context.with_timeout(ctx, 5), bus_conn, imei, device)
-            if err then
-                log.error(string.format("%s - %s: %s", ctx:value("service_name"),
-                    ctx:value("fiber_name"), err))
-                return
+            while true do
+                local cmd_msg = op.choice(
+                    driver.state_change_channel:get_op(),
+                    self.ctx:done_op()
+                ):perform()
             end
+            -- local index, err = get_device_index(context.with_timeout(ctx, 5), bus_conn, imei, device)
+            -- if err then
+            --     log.error(string.format("%s - %s: %s", ctx:value("service_name"),
+            --         ctx:value("fiber_name"), err))
+            --     return
+            -- end
 
-            service.spawn_fiber('State Monitor - ' .. imei, bus_conn, ctx, function()
-                driver:monitor_manager(bus_conn, index)
-            end)
+            -- service.spawn_fiber('State Monitor - ' .. imei, bus_conn, ctx, function()
+            --     driver:monitor_manager(bus_conn, index)
+            -- end)
         end)
 
-        service.spawn_fiber('Command Manger - '..imei, bus_conn, ctx, function ()
-            driver:command_manager()
-        end)
+        -- service.spawn_fiber('Command Manger - '..imei, bus_conn, ctx, function ()
+        --     driver:command_manager()
+        -- end)
     end
 
+    local function handle_modem_detection(address)
+        local driver = modem_driver.new(context.with_cancel(ctx), address)
+        fiber.spawn(function()
+            local err = driver:init()
+            if err then
+                log.error("HAL: Modem: Handle Detection: modem initialisation failed, removing modem")
+                handle_modem_removal(address)
+            else
+                handle_device_added(driver)
+                -- driver_channel:put(driver)
+            end
+        end)
+    end
     local function handle_config(config)
         if config == nil then return end
         if config.known == nil or config.defaults == nil then return end
@@ -265,12 +281,15 @@ function ModemManagement:manager(
         end
     end
 
+    local function handle_device_event(event)
+
+    end
     while true do
         op.choice(
-            modem_config_channel:get_op():wrap(handle_config),
-            modem_detect_channel:get_op():wrap(handle_detection),
-            modem_remove_channel:get_op():wrap(handle_removal),
-            driver_channel:get_op():wrap(handle_driver)
+            self.config_channel:get_op():wrap(handle_config),
+            modem_detect_channel:get_op():wrap(handle_modem_detection),
+            modem_remove_channel:get_op():wrap(handle_modem_removal),
+            device_event_channel:get_op():wrap(handle_device_event)
         ):perform()
     end
 end

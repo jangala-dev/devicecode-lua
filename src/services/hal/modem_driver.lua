@@ -3,6 +3,7 @@ local fiber = require "fibers.fiber"
 local op = require "fibers.op"
 local queue = require "fibers.queue"
 local context = require "fibers.context"
+local channel = require "fibers.channel"
 local sc = require "fibers.utils.syscall"
 local sleep = require "fibers.sleep"
 local at = require "services.hal.at"
@@ -17,7 +18,9 @@ local wraperr = require "wraperr"
 
 local CMD_TIMEOUT = 2
 
-local Driver = {}
+local Driver = {
+    state_change_channel = channel.new(),
+}
 Driver.__index = Driver
 
 local model_info = {
