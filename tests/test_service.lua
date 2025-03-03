@@ -2,6 +2,7 @@ local service = require "service"
 local sleep = require "fibers.sleep"
 local fiber = require "fibers.fiber"
 local bus_pkg = require "bus"
+local new_msg = bus_pkg.new_msg
 local context = require "fibers.context"
 
 local function test_service_states()
@@ -26,7 +27,7 @@ local function test_service_states()
 
     -- fiber to listen for service health updates
     fiber.spawn(function ()
-        local service_health_sub = bus_connection:subscribe('dummy-service/health')
+        local service_health_sub = bus_connection:subscribe({ 'dummy-service', 'health' })
         while not ctx:err() do
             local msg = service_health_sub:next_msg()
             if msg.payload ~= '' then
@@ -38,13 +39,11 @@ local function test_service_states()
     service.spawn(dummy_service, bus, ctx)
 
     -- send shutdown signal to service
-    bus_connection:publish({
-        topic = 'dummy-service/control/shutdown',
-        payload = {
-            cause = "shutdown-service"
-        },
-        retained = true
-    })
+    bus_connection:publish(new_msg(
+        { 'dummy-service', 'control', 'shutdown' },
+        { cause = "shutdown-service" },
+        { retained = true }
+    ))
 
     -- a little time for messages to propagate
     sleep.sleep(0.1)
@@ -83,7 +82,7 @@ local function test_fiber_states()
 
     -- fiber to listen for fiber health updates
     fiber.spawn(function ()
-        local fiber_health_sub = bus_connection:subscribe('dummy-service/health/fibers/sleep-fiber')
+        local fiber_health_sub = bus_connection:subscribe({ 'dummy-service', 'health', 'fibers', 'sleep-fiber' })
         while not ctx:err() do
             local msg = fiber_health_sub:next_msg()
             if msg.payload ~= '' then
@@ -98,13 +97,11 @@ local function test_fiber_states()
     service.spawn(dummy_service, bus, ctx)
 
     -- send shutdown signal to service
-    bus_connection:publish({
-        topic = 'dummy-service/control/shutdown',
-        payload = {
-            cause = "shutdown-service"
-        },
-        retained = true
-    })
+    bus_connection:publish(new_msg(
+        { 'dummy-service', 'control', 'shutdown' },
+        { cause = "shutdown-service" },
+        { retained = true }
+    ))
 
     -- let shutdown signal propagate
     sleep.sleep(0.2)
@@ -120,14 +117,14 @@ local function test_fiber_states()
 end
 
 local function check_fiber_state(bus_conn, service_name, fiber_name)
-    local sub = bus_conn:subscribe(service_name..'/health/fibers/'..fiber_name)
+    local sub = bus_conn:subscribe({ service_name, 'health', 'fibers', fiber_name })
     local state_msg = sub:next_msg()
     sub:unsubscribe()
     return state_msg.payload.state
 end
 
 local function check_service_state(bus_conn, service_name)
-    local sub = bus_conn:subscribe(service_name..'/health')
+    local sub = bus_conn:subscribe({ service_name, 'health' })
     local state_msg = sub:next_msg()
     sub:unsubscribe()
     return state_msg.payload.state
@@ -160,13 +157,11 @@ local function test_blocked_shutdown()
     service.spawn(dummy_service, bus, ctx)
 
     -- send shutdown signal to service
-    bus_connection:publish({
-        topic = 'dummy-service/control/shutdown',
-        payload = {
-            cause = "shutdown-service"
-        },
-        retained = true
-    })
+    bus_connection:publish(new_msg(
+        { 'dummy-service', 'control', 'shutdown' },
+        { cause = "shutdown-service" },
+        { retained = true }
+    ))
 
     -- wait for messages to propegate
     sleep.sleep(0.1)
@@ -200,13 +195,11 @@ local function test_timed_shutdown()
     service.spawn(dummy_service, bus, ctx)
 
     -- send shutdown signal to service
-    bus_connection:publish({
-        topic = 'dummy-service/control/shutdown',
-        payload = {
-            cause = "shutdown-service"
-        },
-        retained = true
-    })
+    bus_connection:publish(new_msg(
+        { 'dummy-service', 'control', 'shutdown' },
+        { cause = "shutdown-service" },
+        { retained = true }
+    ))
 
     -- wait for service and fiber to spin up
     sleep.sleep(0.1)
@@ -265,13 +258,11 @@ local function test_context_shutdown()
     assert(service_state == 'active', 'dummy-service should be active but is '..service_state)
 
     -- send shutdown signal to service
-    bus_connection:publish({
-        topic = 'dummy-service/control/shutdown',
-        payload = {
-            cause = "shutdown-service"
-        },
-        retained = true
-    })
+    bus_connection:publish(new_msg(
+        { 'dummy-service', 'control', 'shutdown' },
+        { cause = "shutdown-service" },
+        { retained = true }
+    ))
 
     -- wait for messages to propegate
     sleep.sleep(0.1)
