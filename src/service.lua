@@ -1,5 +1,7 @@
 local context = require "fibers.context"
 local fiber = require 'fibers.fiber'
+local bus = require "bus"
+local new_msg = bus.new_msg
 
 local FiberRegister = {}
 FiberRegister.__index = FiberRegister
@@ -34,27 +36,26 @@ local function spawn(service, bus, ctx)
     local child_ctx = context.with_cancel(ctx)
     child_ctx.values.service_name = service.name
 
-    local health_topic = child_ctx.values.service_name..'/health'
+    local health_topic = { child_ctx.values.service_name, 'health' }
 
     -- Non-blocking start function
     service:start(bus_connection, child_ctx)
-    bus_connection:publish({
-        topic = health_topic,
-        payload = {
-            name = child_ctx.values.service_name,
-            state = 'active'
-        },
-        retained = true
-    })
+    bus_connection:publish(new_msg(
+        health_topic,
+        { name = child_ctx.values.service_name, state = 'active' },
+        { retained = true }
+    ))
 
     -- Creates a shutdown fiber to handle any shutdown messages from the system service
     -- Tracks all long running fibers under the current service before reporting an end to the service
     fiber.spawn(function ()
-        local system_events_sub = bus_connection:subscribe(child_ctx.values.service_name..'/control/shutdown')
+        local system_events_sub = bus_connection:subscribe({ child_ctx.values.service_name, 'control', 'shutdown' })
         local shutdown_event = system_events_sub:next_msg()
         system_events_sub:unsubscribe()
 
-        local service_fibers_status_sub = bus_connection:subscribe(child_ctx.values.service_name..'/health/fibers/+')
+        local service_fibers_status_sub = bus_connection:subscribe(
+            { child_ctx.values.service_name, 'health', 'fibers', '+' }
+        )
         local active_fibers = FiberRegister.new()
 
         local fibers_checked = false
@@ -94,14 +95,11 @@ local function spawn(service, bus, ctx)
             end
         end
 
-        bus_connection:publish({
-            topic = health_topic,
-            payload = {
-                name = child_ctx.values.service_name,
-                state = 'disabled'
-            },
-            retained = true
-        })
+        bus_connection:publish(new_msg(
+            health_topic,
+            { name = child_ctx.values.service_name, state = 'disabled' },
+            { retained = true }
+        ))
     end)
 end
 
@@ -109,35 +107,26 @@ local function spawn_fiber(name, bus_connection, ctx, fn)
     local child_ctx = context.with_cancel(ctx)
     child_ctx.values.fiber_name = name
 
-    local fiber_topic = child_ctx.values.service_name..'/health/fibers/'..child_ctx.values.fiber_name
+    local fiber_topic = { child_ctx.values.service_name, 'health', 'fibers', child_ctx.values.fiber_name }
 
-    bus_connection:publish({
-        topic = fiber_topic,
-        payload = {
-            name = child_ctx.values.fiber_name,
-            state = 'initialising'
-        },
-        retained = true
-    })
+    bus_connection:publish(new_msg(
+        fiber_topic,
+        { name = child_ctx.values.fiber_name, state = 'initialising' },
+        { retained = true }
+    ))
 
     fiber.spawn(function ()
-        bus_connection:publish({
-            topic = fiber_topic,
-            payload = {
-                name = child_ctx.values.fiber_name,
-                state = 'active'
-            },
-            retained = true
-        })
+        bus_connection:publish(new_msg(
+            fiber_topic,
+            { name = child_ctx.values.fiber_name, state = 'active' },
+            { retained = true }
+        ))
         fn(child_ctx)
-        bus_connection:publish({
-            topic = fiber_topic,
-            payload = {
-                name = child_ctx.values.fiber_name,
-                state = 'disabled'
-            },
-            retained = true
-        })
+        bus_connection:publish(new_msg(
+            fiber_topic,
+            { name = child_ctx.values.fiber_name, state = 'disabled' },
+            { retained = true }
+        ))
     end)
 end
 
