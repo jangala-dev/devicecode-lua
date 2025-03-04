@@ -1,0 +1,18 @@
+#!/bin/sh
+
+# Define the UBUS event name
+EVENT_NAME="hotplug.usbmisc"
+
+# Create JSON payload for UBUS event
+JSON_PAYLOAD="{
+    \"action\": \"$ACTION\",
+    \"devicename\": \"$DEVICENAME\",
+    \"devname\": \"$DEVNAME\",
+    \"devpath\": \"$DEVPATH\",
+    \"seqnum\": \"$SEQNUM\",
+    \"major\": \"$MAJOR\",
+    \"minor\": \"$MINOR\"
+}"
+
+# Send event to UBUS
+ubus send "$EVENT_NAME" "$JSON_PAYLOAD"
