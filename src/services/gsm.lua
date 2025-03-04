@@ -9,6 +9,7 @@ local channel = require "fibers.channel"
 local op = require "fibers.op"
 local json = require "dkjson"
 local log = require "log"
+local new_msg = require "bus".new_msg
 
 local gsm_service = {}
 gsm_service.__index = gsm_service
@@ -110,10 +111,10 @@ local function modem_detector(ctx)
     end
 end
 
-local function config_receiver(rootctx, bus_connection)
+local function config_receiver(rootctx, conn)
     log.trace("GSM: Config Receiver: starting...")
     while true do
-        local sub = bus_connection:subscribe("config/gsm")
+        local sub = conn:subscribe({ "config", "gsm" })
         while true do
             local msg, err = sub:next_msg()
             if err then log.error(err) break end
@@ -239,10 +240,10 @@ local function connector_detector(ctx)
     log.trace("GSM: Connector detector currently unimplemented")
 end
 
-function gsm_service:start(ctx, bus_connection)
+function gsm_service:start(ctx, conn)
     log.trace("Starting GSM Service")
 
-    fiber.spawn(function() config_receiver(ctx, bus_connection) end)
+    fiber.spawn(function() config_receiver(ctx, conn) end)
     fiber.spawn(function() modem_manager(ctx) end)
     fiber.spawn(function() modem_detector(ctx) end)
     fiber.spawn(function() connector_manager(ctx) end)
