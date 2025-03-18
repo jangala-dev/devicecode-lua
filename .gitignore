@@ -2,3 +2,4 @@ scratchpad
 *.DS_Store
 src/services/modem-*
 docs/
+build/

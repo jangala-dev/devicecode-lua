@@ -4,6 +4,7 @@ local fiber = require 'fibers.fiber'
 local sleep = require 'fibers.sleep'
 local context = require 'fibers.context'
 local bus = require 'bus'
+local service = require 'service'
 require 'fibers.pollio'.install_poll_io_handler()
 
 -- Get the device type/version from command line arguments or environment
@@ -18,15 +19,15 @@ local rootctx = context.with_value(bg_ctx, "device", device_version)
 -- Load the device configuration
 local device_config = require("devices/" .. rootctx:value("device"))
 
--- Initialise bus (current bus implemeentation doesn't take a context)
+-- Initialise bus (current bus implementation doesn't take a context)
 local bus = bus.new({q_len=10, m_wild='#', s_wild='+'})
 
 local services = {}
 
 local function launch_services()
     for _, service_name in ipairs(device_config.services) do
-        services.service_name = require("services/" .. service_name)
-        services.service_name:start(rootctx, bus:connect())
+        local svce = require("services/" .. service_name)
+        service.spawn(svce, bus, rootctx)
     end
 end
 

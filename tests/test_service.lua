@@ -12,7 +12,7 @@ local function test_service_states()
 
     dummy_service.name = 'dummy-service'
 
-    function dummy_service:start(bus_conn, ctx)
+    function dummy_service:start(ctx, bus_conn)
         --nothing
     end
 
@@ -65,7 +65,7 @@ local function test_fiber_states()
     dummy_service.name = 'dummy-service'
 
     -- service spins up a fiber that waits for 0.1 seconds before exiting
-    function dummy_service:start(bus_conn, ctx)
+    function dummy_service:start(ctx, bus_conn)
         service.spawn_fiber('sleep-fiber', bus_conn, ctx, function (fctx)
             sleep.sleep(0.1)
         end)
@@ -138,7 +138,7 @@ local function test_blocked_shutdown()
 
     -- service will create a fiber that will run endlessly, therefore
     -- blocking the shutdown of the service
-    function dummy_service:start(bus_conn, ctx)
+    function dummy_service:start(ctx, bus_conn)
         service.spawn_fiber('stuck-loop', bus_conn, ctx, function (fctx)
             local i = 0
             while true do
@@ -180,7 +180,7 @@ local function test_timed_shutdown()
     dummy_service.name = 'dummy-service'
 
     -- service will spin up
-    function dummy_service:start(bus_conn, ctx)
+    function dummy_service:start(ctx, bus_conn)
         service.spawn_fiber('time-dependant', bus_conn, ctx, function (fctx)
             sleep.sleep(0.2)
         end)
@@ -227,7 +227,7 @@ local function test_context_shutdown()
     dummy_service.name = 'dummy-service'
 
     -- service creates a fiber that requires a context cancellation in order to exit
-    function dummy_service:start(bus_conn, sctx)
+    function dummy_service:start(sctx, bus_conn)
         service.spawn_fiber('ctx-dependant', bus_conn, sctx, function (fctx)
             local i = 0
             while not fctx:err() do
