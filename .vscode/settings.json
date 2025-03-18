@@ -14,4 +14,10 @@
     "[lua]": {
       "editor.tabSize": 4
     },
+    "cSpell.words": [
+      "autopin",
+      "autounlock",
+      "iccid",
+      "imsi"
+    ],
   }

@@ -39,7 +39,7 @@ local function spawn(service, bus, ctx)
     local health_topic = { child_ctx.values.service_name, 'health' }
 
     -- Non-blocking start function
-    service:start(bus_connection, child_ctx)
+    service:start(child_ctx, bus_connection)
     bus_connection:publish(new_msg(
         health_topic,
         { name = child_ctx.values.service_name, state = 'active' },
