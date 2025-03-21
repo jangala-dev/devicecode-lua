@@ -82,8 +82,35 @@
             }
         }
     },
-    "service2": {
-        "paramX": "valueX",
-        "paramY": "valueY"
+    "metrics": {
+        "hal/capability/modem/+": {
+            "field": "index",
+            "protocol": "log",
+            "delta_trigger": {
+                "type": "none"
+            },
+            "aggregation": {
+                "type": "none"
+            }
+        },
+        "hal/capability/modem/+/info/nas/lte/rssi": {
+            "protocol": "log",
+            "delta_trigger": {
+                "type": "time",
+                "timeout": 10
+            },
+            "aggregation": {
+                "type": "none"
+            }
+        },
+        "hal/capability/modem/+/info/nas/lte/rsrp": {
+            "protocol": "log",
+            "delta_trigger": {
+                "type": "none"
+            },
+            "aggregation": {
+                "type": "none"
+            }
+        }
     }
 }

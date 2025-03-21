@@ -3,7 +3,9 @@ local log = require 'log'
 local json = require 'dkjson'
 local new_msg = require('bus').new_msg
 
-local config_service = {}
+local config_service = {
+    name = 'config'
+}
 config_service.__index = config_service
 
 function config_service:start(rootctx, conn)

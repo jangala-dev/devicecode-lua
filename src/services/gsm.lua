@@ -92,7 +92,7 @@ function Modem:autoconnect(ctx, cutoff)
     local spn = nil
 
     local gid1_sub = self.bus_conn:subscribe(
-        { 'hal', 'capability', 'modem', self.idx, 'info', 'gid', 'gid1' }
+        { 'hal', 'capability', 'modem', self.idx, 'info', 'gids', 'gid1' }
     )
     local gid1_msg, gid1_err = gid1_sub:next_msg_with_context_op(ctx):perform()
     if gid1_err then return nil, gid1_err end

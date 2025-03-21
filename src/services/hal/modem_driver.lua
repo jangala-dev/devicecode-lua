@@ -43,8 +43,8 @@ function Driver:get_capabilities()
             { name = 'state', channel = self.state_monitor_channel, endpoints = 'single' },
             { name = 'modem', channel = self.modem_info_channel,    endpoints = 'multiple' },
             { name = 'sim',   channel = self.sim_info_channel,      endpoints = 'multiple' },
-            { name = 'nas',   channel = self.home_network_channel,  endpoints = 'multiple' },
-            { name = 'gid',   channel = self.gid_channel,           endpoints = 'multiple' }
+            { name = 'nas',   channel = self.nas_channel,           endpoints = 'multiple' },
+            { name = 'gids',  channel = self.gid_channel,           endpoints = 'multiple' }
         }
     }
 
@@ -92,29 +92,25 @@ function Driver:poll_info()
                 end
 
                 if modem_info["3gpp"]["registration-state"] ~= "--" then
-                    local mcc, mnc, m_err = self.get_mcc_mnc()
-                    local nas_table = {}
-                    nas_table["home-network"] = {
-                        mcc = mcc,
-                        mnc = mnc
-                    }
-                    if m_err then
-                        log.debug("MCC MNC failed retrieval", m_err)
+                    local nas_info, nas_err = self.get_nas_info()
+
+                    if nas_err then
+                        log.debug("MCC MNC failed retrieval", nas_err)
                     end
                     op.choice(
-                        self.home_network_channel:put_op(nas_table),
+                        self.nas_channel:put_op(nas_info),
                         self.ctx:done_op()
                     ):perform()
                 end
             end
 
             if modem_info.generic.state ~= 'failed' then
-                local gid1, gid1_err = self.gid1()
+                local gids, gid_err = self.uim_get_gids()
                 local gid_table = {
-                    gid1 = gid1,
-                    gid2 = nil
+                    gid1 = gids.gid1,
+                    gid2 = gids.gid2
                 }
-                if gid1_err then log.debug(gid1_err) end
+                if gid_err then log.debug(gid_err) end
                 op.choice(
                     self.gid_channel:put_op(gid_table),
                     self.ctx:done_op()
@@ -126,10 +122,12 @@ function Driver:poll_info()
                 self.ctx:done_op()
             ):perform()
         end
-        op.choice(
+        local poll_freq_update = op.choice(
             self.ctx:done_op(),
-            sleep.sleep_op(poll_freq)
+            sleep.sleep_op(poll_freq),
+            self.refresh_rate_channel:get_op()
         ):perform()
+        if poll_freq_update then poll_freq = poll_freq_update end
     end
 
     log.trace(string.format("Modem - %s: Polling info stopped", self.imei))
@@ -277,9 +275,10 @@ function Driver:fix_failure()
     return true, nil
 end
 
-function Driver:set_signal_update_freq(freq)
-    local cmd = mmcli.signal_setup(self.ctx, self.address, freq)
+function Driver:set_signal_update_freq(seconds)
+    local cmd = mmcli.signal_setup(self.ctx, self.address, seconds)
     local cmd_err = cmd:run()
+    self.refresh_rate_channel:put(seconds)
     return (cmd_err == nil), cmd_err
 end
 -- Sim ID Methods
@@ -474,9 +473,10 @@ local function new(ctx, address)
     self.state_monitor_channel = channel.new()
     self.modem_info_channel = channel.new()
     self.sim_info_channel = channel.new()
-    self.home_network_channel = channel.new()
+    self.nas_channel = channel.new()
     self.gid_channel = channel.new()
     self.gps_info_channel = channel.new()
+    self.refresh_rate_channel = channel.new()
     -- Other initial properties
     return self
 end

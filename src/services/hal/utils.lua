@@ -92,4 +92,72 @@ function utils.parse_device_info_topic(topic)
 
     return components[3], instance, components[6]
 end
+--- qmicli output is nasty so convert it to a lua table and remap ugly keys
+--- it does not handle qmicli lists as of yet
+---@param output string the output of a qmicli command
+---@param key_map { string: string }? a mapping of qmicli key names against custom key names
+---@return table? qmicli output as a lua table
+---@return string? error
+function utils.parse_qmicli_output(output, key_map)
+    if output == nil then return nil, "Output is nil" end
+    key_map = key_map or {}
+
+    local function clean_key(key)
+        return key_map[key] or key
+    end
+
+    local result = {}
+    local current_table = result
+    local table_stack = {}
+    local indent_stack = { 0 }
+    local line_num = 0
+
+    for line in output:gmatch("[^\r\n]+") do
+        local indent = line:match("^%s*"):len()
+        local cleaned_line = line:match("^%s*(.-)%s*$")
+        if line_num == 0 then goto continue end
+        if line:match("^%s*$") then goto continue end
+
+        -- Find the appropriate parent table based on indentation
+        while #indent_stack > 1 and indent <= indent_stack[#indent_stack] do
+            table.remove(indent_stack)
+            table.remove(table_stack)
+            current_table = #table_stack > 0 and table_stack[#table_stack] or result
+        end
+
+        if cleaned_line:match(":$") then
+            local section = cleaned_line:match("^(.+):$")
+            section = clean_key(section)
+            current_table[section] = {}
+            table.insert(table_stack, current_table[section])
+            table.insert(indent_stack, indent)
+            current_table = current_table[section]
+        else
+            local key, value = cleaned_line:match("^([^:]+):%s*(.+)$")
+            if key and value then
+                key = clean_key(key:match("^%s*(.-)%s*$"))
+                value = value:match("^%s*(.-)%s*$")
+
+                local num_value = tonumber(value)
+                if num_value then
+                    value = num_value
+                elseif value == "yes" then
+                    value = true
+                elseif value == "no" then
+                    value = false
+                else
+                    -- remove any quotation marks
+                    value = value:match("^'?(.-)'?$")
+                end
+
+                current_table[key] = value
+            end
+        end
+
+        ::continue::
+        line_num = line_num + 1
+    end
+
+    return result, nil
+end
 return utils

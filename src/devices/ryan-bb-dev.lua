@@ -4,7 +4,8 @@ return {
     services = {
         "config",
         "gsm",
-        "hal"
+        "hal",
+        "metrics",
         -- ... other services specific to this device version
     }
 }
