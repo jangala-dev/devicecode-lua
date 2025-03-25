@@ -1,0 +1,160 @@
+-- Base class setup
+local Process = {}
+Process.__index = Process  -- Setup instance->class lookup
+
+function Process.new()
+    return setmetatable({}, Process)
+end
+
+function Process:run()
+    error("run must be implemented by derived class")
+end
+
+function Process:clone()
+    error("clone must be implemented by derived class")
+end
+
+function Process:reset()
+    error("reset must be implemented by derived class")
+end
+
+-- DiffTrigger class setup
+local DiffTrigger = {}
+DiffTrigger.__index = DiffTrigger
+setmetatable(DiffTrigger, { __index = Process })
+
+function DiffTrigger.new(config)
+    local initial_val = config.initial_val
+    local diff_method = config.diff_method
+    local threshold = config.threshold
+    if initial_val and type(initial_val) ~= 'number' then return nil, "Initial value must be a number" end
+    if threshold and type(threshold) ~= 'number' or threshold == nil then return "Threshold value must be a number" end
+    local self = setmetatable({}, DiffTrigger)
+    if diff_method == 'absolute' then
+        self.diff_method = function(curr, last, threshold) return math.abs(curr - last) >= threshold end
+    elseif diff_method == 'percent' then
+        self.diff_method = function(curr, last, threshold) return (math.abs((curr - last) / last) * 100) >= threshold end
+    elseif diff_method == 'any-change' then
+        self.diff_method = function (curr, last) return curr ~= last end
+    else
+        return nil, "Diff method must be 'absolute' or 'percent'"
+    end
+    self.empty = (initial_val == nil)
+    self.threshold = threshold
+    self.last_val = initial_val or 0
+    self.curr_val = initial_val
+    return self
+end
+
+function DiffTrigger:run(value)
+    self.curr_val = value
+    if self.empty or self.diff_method(self.curr_val, self.last_val, self.threshold) then
+        self.last_val = value
+        self.empty = false
+        return value, false, nil
+    end
+    return nil, true, nil
+end
+
+function DiffTrigger:clone()
+    return setmetatable(
+        { last_val = self.last_val, curr_val = self.curr_val, diff_method = self.diff_method, threshold = self.threshold },
+        DiffTrigger)
+end
+
+function DiffTrigger:reset()
+end
+
+-- TimeTrigger class setup
+local TimeTrigger = {}
+TimeTrigger.__index = TimeTrigger
+setmetatable(TimeTrigger, { __index = Process })
+
+function TimeTrigger.new(config)
+    local duration = config.duration
+    if duration == nil or type(duration) ~= "number" then return nil, "Duration must be a number" end
+    local self = setmetatable({}, TimeTrigger)
+    self.duration = duration
+    self.timeout = os.time() + duration
+    return self
+end
+
+function TimeTrigger:run(value)
+    if os.time() >= self.timeout then
+        self.timeout = os.time() + self.duration
+        return value, false, nil
+    end
+    return nil, true, nil
+end
+
+function TimeTrigger:clone()
+    return setmetatable({ duration = self.duration, timeout = self.timeout }, TimeTrigger)
+end
+
+function TimeTrigger:reset()
+end
+
+local Difference = {}
+Difference.__index = Difference
+setmetatable(Difference, { __index = Process })
+
+function Difference.new(config)
+    local self = setmetatable({}, Difference)
+    self.last_val = config.initial_val or 0
+    self.config = config
+    return self
+end
+
+function Difference:run(value)
+    if type(value) ~= 'number' then return nil, nil, 'Value must be a number' end
+    local difference = value - self.last_val
+    self.curr_val = value
+    return difference, false, nil
+end
+
+function Difference:reset()
+    self.last_val = self.curr_val or 0
+end
+
+function Difference:clone()
+    return Difference.new(self.config)
+end
+
+local ProcessPipeline = {}
+ProcessPipeline.__index = ProcessPipeline
+
+function ProcessPipeline:add(processing_block)
+    if processing_block == nil then return 'processing block cannot be nil' end
+    table.insert(self.process_blocks, processing_block)
+end
+
+function ProcessPipeline:run(value)
+    local val = value
+    local short = false
+    local err = nil
+    for _, process in ipairs(self.process_blocks) do
+        val, short, err = process:run(val)
+        if err or short then break end
+    end
+    -- if not err and not short then self:reset() end
+    return val, short, err
+end
+
+function ProcessPipeline:reset()
+    for _, process in ipairs(self.process_blocks) do
+        process:reset()
+    end
+end
+
+local function new_process_pipeline()
+    local self = setmetatable({}, ProcessPipeline)
+    self.process_blocks = {}
+    return self
+end
+
+return {
+    DiffTrigger = DiffTrigger,
+    TimeTrigger = TimeTrigger,
+    Difference = Difference,
+    new_process_pipeline = new_process_pipeline
+}
