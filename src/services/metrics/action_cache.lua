@@ -1,3 +1,5 @@
+---@param t table
+---@return boolean
 local function is_array(t)
     if type(t) ~= 'table' then return false end
     local i = 0
@@ -8,9 +10,15 @@ local function is_array(t)
     return true
 end
 
+---@class ActionCache
+---@field separator string
+---@field store table
 local ActionCache = {}
 ActionCache.__index = ActionCache
 
+---Creates a new ActionCache instance
+---@param separator string? Separator character for compound keys
+---@return ActionCache
 function ActionCache.new(separator)
     local self = setmetatable({}, ActionCache)
     self.separator = separator or string.char(31)
@@ -18,6 +26,13 @@ function ActionCache.new(separator)
     return self
 end
 
+---Sets a value in the cache with a new process
+---@param key string|table Key to store value under
+---@param value any Value to store
+---@param process Process Process to handle the value
+---@return any value
+---@return boolean short_circuit
+---@return string? Error
 function ActionCache:set(key, value, process)
     key = type(key) == 'string' and key or table.concat(key, self.separator)
     if type(value) == 'table' and not is_array(value) then
@@ -25,8 +40,8 @@ function ActionCache:set(key, value, process)
         local short = true
         for k, v in pairs(value) do
             local new_key = key .. self.separator .. k
-            local val, sc, err = self:set(new_key, v, process:clone())
-            if err then return nil, nil, err end
+            local val, sc, err = self:set(new_key, v, process)
+            if err then return nil, false, err end
             if not sc then
                 ret[k] = val
                 short = false
@@ -34,11 +49,17 @@ function ActionCache:set(key, value, process)
         end
         return ret, short, nil
     else
-        self.store[key] = process
-        return process:run(value)
+        self.store[key] = process:clone()
+        return self.store[key]:run(value)
     end
 end
 
+---Updates a value in the cache using existing process
+---@param key string|table Key to update
+---@param value any New value
+---@return any value
+---@return boolean short_circuit
+---@return string? Error
 function ActionCache:update(key, value)
     key = type(key) == 'string' and key or table.concat(key, self.separator)
     if type(value) == 'table' and not is_array(value) then
@@ -47,7 +68,7 @@ function ActionCache:update(key, value)
         for k, v in pairs(value) do
             local new_key = key .. self.separator .. k
             local val, sc, err = self:update(new_key, v)
-            if err then return nil, nil, err end
+            if err then return nil, true, err end
             if not sc then
                 ret[k] = val
                 short = false
@@ -60,33 +81,19 @@ function ActionCache:update(key, value)
             return process:run(value)
         end
     end
+    return nil, true, 'could not find process accociated with key-value'
 end
 
-function ActionCache:reset(key, value)
-    key = type(key) == 'string' and key or table.concat(key, self.separator)
-    if type(value) == 'table' and not is_array(value) then
-        for k, v in pairs(value) do
-            local new_key = key .. self.separator .. k
-            self:reset(new_key, v)
-        end
-    else
-        local process = self.store[key]
-        if process then
-            process:reset()
-        end
+---Resets all processes in the cache
+function ActionCache:reset()
+    for _, process in pairs(self.store) do
+        process:reset()
     end
 end
 
--- function ActionCache:get(key)
---     key = type(key) == 'string' and key or table.concat(key, self.separator)
---     local stored = self.store[key]
-
---     if stored and stored.trigger:is_active() then
---         stored.trigger:reset()
---         return stored.value
---     end
---     return nil
--- end
+---Checks if a key exists in the cache
+---@param key string|table Key to check
+---@return boolean exists
 function ActionCache:has_key(key)
     key = type(key) == 'string' and key or table.concat(key, self.separator)
     return self.store[key] ~= nil
