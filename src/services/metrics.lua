@@ -35,6 +35,7 @@ end
 ---iterates over a table of data to be published
 ---@param data table
 function metrics_service:_publish_all(data)
+    self.cache:reset()
     -- all first keys are the names of the publish protocols
     for protocol, values in pairs(data) do
         local protocol_fn = self["_" .. protocol .. "_publish"]
@@ -168,6 +169,8 @@ function metrics_service:_handle_config(config)
                     return
                 end
                 overrides[override_endpoint] = pipeline
+            else
+                log.error(string.format("Invalid override for %s onto %s", override_endpoint, endpoint))
             end
         end
 

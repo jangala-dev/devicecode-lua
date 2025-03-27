@@ -49,7 +49,11 @@ function ActionCache:set(key, value, process)
         end
         return ret, short, nil
     else
-        self.store[key] = process:clone()
+        local new_process, p_err = process:clone()
+        if p_err then
+            return nil, true, p_err
+        end
+        self.store[key] = new_process
         return self.store[key]:run(value)
     end
 end

@@ -17,6 +17,7 @@ function Process:run(value)
     return nil, true, "run must be implemented by derived class"
 end
 
+---@return Process?
 function Process:clone()
     error("clone must be implemented by derived class")
 end
@@ -28,6 +29,7 @@ end
 --- @class DiffTrigger: Process
 --- @field threshold number
 --- @field diff_method function
+--- @field config table
 local DiffTrigger = {}
 DiffTrigger.__index = DiffTrigger
 setmetatable(DiffTrigger, { __index = Process })
@@ -55,6 +57,7 @@ function DiffTrigger.new(config)
     self.threshold = threshold
     self.last_val = initial_val or 0
     self.curr_val = initial_val
+    self.config = config
     return self, nil
 end
 
@@ -72,11 +75,10 @@ function DiffTrigger:run(value)
     return nil, true, nil
 end
 
----@return DiffTrigger
+---@return DiffTrigger?
+---@return string?
 function DiffTrigger:clone()
-    return setmetatable(
-        { last_val = self.last_val, curr_val = self.curr_val, diff_method = self.diff_method, threshold = self.threshold },
-        DiffTrigger)
+    return self.new(self.config)
 end
 
 function DiffTrigger:reset()
@@ -84,6 +86,7 @@ end
 
 --- @class TimeTrigger: Process
 --- @field duration number
+--- @field config table
 local TimeTrigger = {}
 TimeTrigger.__index = TimeTrigger
 setmetatable(TimeTrigger, { __index = Process })
@@ -97,6 +100,7 @@ function TimeTrigger.new(config)
     local self = setmetatable({}, TimeTrigger)
     self.duration = duration
     self.timeout = sc.monotime() + duration
+    self.config = config
     return self, nil
 end
 
@@ -112,8 +116,10 @@ function TimeTrigger:run(value)
     return nil, true, nil
 end
 
+---@return TimeTrigger?
+---@return string? Error
 function TimeTrigger:clone()
-    return setmetatable({ duration = self.duration, timeout = self.timeout }, TimeTrigger)
+    return self.new(self.config)
 end
 
 function TimeTrigger:reset()
@@ -154,7 +160,7 @@ function DeltaValue:clone()
     return DeltaValue.new(self.config)
 end
 
----@class ProcessPipeline
+---@class ProcessPipeline: Process
 ---@field process_blocks Process[]
 local ProcessPipeline = {}
 ProcessPipeline.__index = ProcessPipeline
@@ -201,6 +207,20 @@ function ProcessPipeline:force_reset()
     self:reset()
 end
 
+---@return ProcessPipeline?
+---@return string? Error
+function ProcessPipeline:clone()
+    local pipeline = setmetatable({ full_run = false, process_blocks = {} }, ProcessPipeline)
+    for _, process_block in ipairs(self.process_blocks) do
+        local process, err = process_block:clone()
+        if not process or err then
+            return nil, err
+        end
+        pipeline:add(process)
+    end
+
+    return pipeline, nil
+end
 --- @param process_config table
 --- @return ProcessPipeline?
 --- @return string? Error
