@@ -33,28 +33,28 @@ end
 -- (which should be adapted for update, reboot etc when system service is more built out)
 local function spawn(service, bus, ctx)
     local bus_connection = bus:connect()
-    local child_ctx = context.with_cancel(ctx)
-    child_ctx.values.service_name = service.name
+    local cancel_ctx, cancel_fn = context.with_cancel(ctx)
+    local child_ctx = context.with_value(cancel_ctx, "service_name", service.name)
 
-    local health_topic = { child_ctx.values.service_name, 'health' }
+    local health_topic = { child_ctx:value("service_name"), 'health' }
 
     -- Non-blocking start function
     service:start(child_ctx, bus_connection)
     bus_connection:publish(new_msg(
         health_topic,
-        { name = child_ctx.values.service_name, state = 'active' },
+        { name = child_ctx:value("service_name"), state = 'active' },
         { retained = true }
     ))
 
     -- Creates a shutdown fiber to handle any shutdown messages from the system service
     -- Tracks all long running fibers under the current service before reporting an end to the service
     fiber.spawn(function ()
-        local system_events_sub = bus_connection:subscribe({ child_ctx.values.service_name, 'control', 'shutdown' })
+        local system_events_sub = bus_connection:subscribe({ child_ctx:value("service_name"), 'control', 'shutdown' })
         local shutdown_event = system_events_sub:next_msg()
         system_events_sub:unsubscribe()
 
         local service_fibers_status_sub = bus_connection:subscribe(
-            { child_ctx.values.service_name, 'health', 'fibers', '+' }
+            { child_ctx:value("service_name"), 'health', 'fibers', '+' }
         )
         local active_fibers = FiberRegister.new()
 
@@ -81,7 +81,7 @@ local function spawn(service, bus, ctx)
         end
 
         -- let every fiber know to end
-        child_ctx:cancel(shutdown_event.payload.cause)
+        cancel_fn(shutdown_event.payload.cause)
 
         -- wait for fibers to close
         while not active_fibers:is_empty() do
@@ -97,7 +97,7 @@ local function spawn(service, bus, ctx)
 
         bus_connection:publish(new_msg(
             health_topic,
-            { name = child_ctx.values.service_name, state = 'disabled' },
+            { name = child_ctx:value("service_name"), state = 'disabled' },
             { retained = true }
         ))
     end)
@@ -105,26 +105,26 @@ end
 
 local function spawn_fiber(name, bus_connection, ctx, fn)
     local child_ctx = context.with_cancel(ctx)
-    child_ctx.values.fiber_name = name
+    child_ctx = context.with_value(child_ctx, "fiber_name", name)
 
-    local fiber_topic = { child_ctx.values.service_name, 'health', 'fibers', child_ctx.values.fiber_name }
+    local fiber_topic = { child_ctx:value("service_name"), 'health', 'fibers', child_ctx:value("fiber_name") }
 
     bus_connection:publish(new_msg(
         fiber_topic,
-        { name = child_ctx.values.fiber_name, state = 'initialising' },
+        { name = child_ctx:value("fiber_name"), state = 'initialising' },
         { retained = true }
     ))
 
     fiber.spawn(function ()
         bus_connection:publish(new_msg(
             fiber_topic,
-            { name = child_ctx.values.fiber_name, state = 'active' },
+            { name = child_ctx:value("fiber_name"), state = 'active' },
             { retained = true }
         ))
         fn(child_ctx)
         bus_connection:publish(new_msg(
             fiber_topic,
-            { name = child_ctx.values.fiber_name, state = 'disabled' },
+            { name = child_ctx:value("fiber_name"), state = 'disabled' },
             { retained = true }
         ))
     end)
