@@ -82,8 +82,69 @@
             }
         }
     },
-    "service2": {
-        "paramX": "valueX",
-        "paramY": "valueY"
+    "metrics": {
+        "publish_cache": {
+            "period": 10
+        },
+        "collections": {
+            "hal/capability/modem/+": {
+                "field": "index",
+                "protocol": "log",
+                "process": []
+            },
+            "hal/capability/modem/+/info/nas/lte/rssi": {
+                "protocol": "log",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    }
+                ]
+            },
+            "hal/capability/modem/+/info/nas/lte/rsrp": {
+                "protocol": "log",
+                "process": []
+            },
+            "gsm/modem/+/tx_bytes": {
+                "protocol": "log",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ],
+                "sub_collections": {
+                    "gsm/modem/primary/tx_bytes": {
+                        "process": [
+                            {
+                                "type": "DiffTrigger",
+                                "diff_method": "percent",
+                                "threshold": 2
+                            },
+                            {
+                                "type": "DeltaValue"
+                            }
+                        ]
+                    },
+                    "gsm/modem/secondary/tx_bytes": {
+                        "process": [
+                            {
+                                "type": "DiffTrigger",
+                                "diff_method": "percent",
+                                "threshold": 3
+                            },
+                            {
+                                "type": "DeltaValue"
+                            }
+                        ]
+                    }
+                }
+            }
+        }
     }
 }
