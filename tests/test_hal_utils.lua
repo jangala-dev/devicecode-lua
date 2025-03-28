@@ -195,7 +195,36 @@ local function test_parse_control_topic_invalid_number()
     assertions.expect_assert(exp_err, err, 'capability error')
 end
 
---
+local function test_parse_qmicli_output()
+    local qmi_output = [[
+[/dev/cdc-wdm0] Successfully got serving system:
+        Registration state: 'registered'
+        CS: 'attached'
+        PS: 'attached'
+        Selected network: '3gpp'
+        Radio interfaces: '1'
+                [0]: 'lte'
+        Roaming status: 'off'
+        Current PLMN:
+                MCC: '234'
+                MNC: '10'
+                Description: 'O2 - UK']]
+
+    local result, err = utils.parse_qmicli_output(qmi_output)
+
+    assert(err == nil, "expected err to be nil but got " .. (err or "nil"))
+    assert(result ~= nil, "expected result to be a table but got nil")
+
+    assert(result["Registration state"] == "registered", "wrong registration state")
+    assert(result["CS"] == "attached", "wrong CS state")
+    assert(result["PS"] == "attached", "wrong PS state")
+    assert(result["Selected network"] == "3gpp", "wrong network")
+
+    local plmn = result["Current PLMN"]
+    assert(plmn.MCC == "234", "wrong MCC")
+    assert(plmn.MNC == "10", "wrong MNC")
+    assert(plmn.Description == "O2 - UK", "wrong description")
+end
 fiber.spawn(function ()
     test_parse_modem_monitor_init()
     test_parse_modem_monitor_changed_with_reason()
@@ -212,6 +241,7 @@ fiber.spawn(function ()
     test_parse_control_topic_valid()
     test_parse_control_topic_fewer_components()
     test_parse_control_topic_invalid_number()
+    test_parse_qmicli_output()
     fiber.stop()
 end)
 

@@ -80,6 +80,54 @@ function TestProcessing:test_delta_value()
     luaunit.assertEquals(val, 5)
 end
 
+function TestProcessing:test_clone_process()
+    local config = {
+        threshold = 5,
+        diff_method = "absolute",
+        initial_val = 10
+    }
+
+    local trigger, trig_err = processing.DiffTrigger.new(config)
+    luaunit.assertNil(trig_err)
+
+    local clone, clone_err = trigger:clone()
+    luaunit.assertNil(clone_err)
+    luaunit.assertNotNil(clone)
+
+    -- Test that clone behaves the same as original
+    local val1, short1, err1 = trigger:run(16)
+    local val2, short2, err2 = clone:run(16)
+
+    luaunit.assertEquals(val1, val2)
+    luaunit.assertEquals(short1, short2)
+    luaunit.assertEquals(err1, err2)
+end
+
+function TestProcessing:test_process_pipeline()
+    local pipeline = processing.new_process_pipeline({})
+
+    -- Create a pipeline with DiffTrigger and DeltaValue
+    local diff_trigger = processing.DiffTrigger.new({
+        threshold = 5,
+        diff_method = "absolute",
+        initial_val = 10
+    })
+    local delta_value = processing.DeltaValue.new({ initial_val = 10 })
+
+    pipeline:add(diff_trigger)
+    pipeline:add(delta_value)
+
+    -- First run should pass through both processes
+    local val, short, err = pipeline:run(20)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(short, false)
+    luaunit.assertEquals(val, 10) -- DeltaValue should return difference from initial
+
+    -- Second run should short circuit at DiffTrigger
+    val, short, err = pipeline:run(22)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(short, true)
+end
 TestActionCache = {}
 
 function TestActionCache:test_set_and_update()
@@ -101,6 +149,52 @@ function TestActionCache:test_set_and_update()
     luaunit.assertEquals(val, 16)
 end
 
+function TestActionCache:test_nested_values()
+    local cache = action_cache.new()
+    local process = processing.DiffTrigger.new({
+        threshold = 5,
+        diff_method = "absolute"
+    })
+
+    -- Test nested structure
+    local val, short = cache:set({ "system", "resources" }, {
+        cpu = 80,
+        memory = 50
+    }, process)
+
+    luaunit.assertEquals(val.cpu, 80)
+    luaunit.assertEquals(val.memory, 50)
+    luaunit.assertEquals(short, false)
+
+    -- Update with small changes (should short circuit)
+    val, short = cache:update({ "system", "resources" }, {
+        cpu = 82,
+        memory = 52
+    })
+    luaunit.assertEquals(short, true)
+
+    -- Update with large changes (should pass through)
+    val, short = cache:update({ "system", "resources" }, {
+        cpu = 90,
+        memory = 60
+    })
+    luaunit.assertEquals(short, false)
+    luaunit.assertEquals(val.cpu, 90)
+    luaunit.assertEquals(val.memory, 60)
+end
+
+function TestActionCache:test_invalid_updates()
+    local cache = action_cache.new()
+
+    -- Try to update non-existent key
+    local val, short, err = cache:update("nonexistent", 123)
+    luaunit.assertEquals(short, true)
+    luaunit.assertNotNil(err)
+
+    -- Try to set invalid process
+    local val2, short2, err2 = cache:set("test", 123, nil)
+    luaunit.assertNotNil(err2)
+end
 TestMetricsService = {}
 
 function TestMetricsService:test_build_metric_pipeline()

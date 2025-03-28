@@ -34,6 +34,7 @@ end
 ---@return boolean short_circuit
 ---@return string? Error
 function ActionCache:set(key, value, process)
+    if process == nil then return nil, true, 'process must be a valid process, not nil' end
     key = type(key) == 'string' and key or table.concat(key, self.separator)
     if type(value) == 'table' and not is_array(value) then
         local ret = {}
