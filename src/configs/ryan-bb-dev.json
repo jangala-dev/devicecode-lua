@@ -90,27 +90,21 @@
             "hal/capability/modem/+": {
                 "field": "index",
                 "protocol": "log",
-                "delta_trigger": {
-                    "type": "none"
-                },
-                "aggregation": {
-                    "type": "this is a possible feature but for now I am not implementing it",
-                    "how would it work?": "after a metric is recieved but before publish it will be passed through a processing block which could do rolling average or buffering or whatever",
-                    "is this needed?": "for parity? nah"
-                }
+                "process": []
             },
             "hal/capability/modem/+/info/nas/lte/rssi": {
                 "protocol": "log",
-                "delta_trigger": {
-                    "type": "time",
-                    "timeout": 10
-                }
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    }
+                ]
             },
             "hal/capability/modem/+/info/nas/lte/rsrp": {
                 "protocol": "log",
-                "delta_trigger": {
-                    "type": "none"
-                }
+                "process": []
             },
             "gsm/modem/+/tx_bytes": {
                 "protocol": "log",
