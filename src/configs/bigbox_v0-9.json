@@ -70,6 +70,262 @@
             }
         }
     },
+    "metrics": {
+        "pubilish_cache": {
+            "enabled": true,
+            "period": 10
+        },
+        "default_process": [
+            {
+                "type": "DiffTrigger",
+                "diff_method": "percent",
+                "threshold": 10
+            }
+        ],
+        "collections": {
+            "wifi/foo/bar/tx_bytes": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "wifi/foo/bar/tx_packets": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "wifi/foo/bar/tx_dropped": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "wifi/foo/bar/tx_errors": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "wifi/foo/bar/tx_retries": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "net/foo/bar/rx_bytes": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "wifi/foo/bar/rx_packets": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "wifi/foo/bar/rx_dropped": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "wifi/foo/bar/rx_errors": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "wifi/foo/bar/rx_frags": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "wifi/foo/bar/rx_crypts": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    },
+                    {
+                        "type": "DeltaValue"
+                    }
+                ]
+            },
+            "hal/capability/modem/+/info/nas/signal/rssi": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 10
+                    }
+                ]
+            },
+            "wifi/foo/bar/noise": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 10
+                    }
+                ]
+            },
+            "wifi/foo/bar/power": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 10
+                    }
+                ]
+            },
+            "wifi/foo/bar/channel": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "any-change"
+                    }
+                ]
+            },
+            "wifi/foo/bar/num_sta": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    }
+                ]
+            },
+            "system/foo/bar/cpu_util": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    }
+                ]
+            },
+            "system/foo/bar/mem_util": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    }
+                ]
+            },
+            "gsm/foo/bar/sim_data_balance": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "percent",
+                        "threshold": 5
+                    }
+                ]
+            },
+            "gsm/foo/bar/sim_data_expiry": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "any-change"
+                    }
+                ]
+            },
+            "system/foo/bar/temp": {
+                "protocol": "http",
+                "process": [
+                    {
+                        "type": "DiffTrigger",
+                        "diff_method": "absolute",
+                        "threshold": 2
+                    }
+                ]
+            }
+        }
+    },
     "service2": {
         "paramX": "valueX",
         "paramY": "valueY"

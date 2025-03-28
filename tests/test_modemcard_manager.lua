@@ -20,8 +20,7 @@ module_loader:add_uncacheable("services.hal.mmcli")
 local function setup_test_contexts()
     local bg_context = context.background()
     local test_context = context.with_cancel(bg_context)
-    local fiber_context = context.with_cancel(test_context)
-    fiber_context.values.service_name = 'dummy-service'
+    local fiber_context = context.with_cancel(context.with_value(test_context, "service_name", "dummy-service"))
 
     return test_context, fiber_context
 end
