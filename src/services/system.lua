@@ -1,111 +1,57 @@
-local function read_file(path)
-    local file = io.open(path, "r")
-    if not file then return nil end
-    local content = file:read("*a")
-    file:close()
-    return content
+local service = require "service"
+local log = require "log"
+local op = require "fibers.op"
+local new_msg = require("bus").new_msg
+
+local system_service = {
+    name = 'system'
+}
+system_service.__index = system_service
+
+-- Main system service loop
+local function system_main(ctx, bus_conn)
+    -- Subscribe to system-related topics
+    local config_sub = bus_conn:subscribe({ 'config', 'system' })
+
+    -- Get initial configuration
+    local config, config_err = config_sub:next_msg_with_context_op(ctx):perform()
+    if config_err then
+        log.error(config_err)
+        return
+    end
+
+    -- Publish device identity information
+    local device_info = {
+        id = ctx:value("device"),
+        type = "device",
+        -- Add more system information as needed
+    }
+
+    bus_conn:publish(new_msg(
+        { 'system', 'device', 'identity' },
+        device_info,
+        { retained = true }
+    ))
+
+    -- Main event loop
+    while not ctx:err() do
+        op.choice(
+            ctx:done_op(),
+            config_sub:next_msg_op():wrap(function(config_msg)
+                -- Handle system configuration updates
+                log.info("System configuration updated")
+                -- Process new config here
+            end)
+        ):perform()
+    end
 end
 
-local function get_cpu_info()
-    local cpuinfo = assert(read_file("/proc/cpuinfo"))
-    local model
-
-    if cpuinfo:match("Qualcomm Atheros") then
-        model = cpuinfo:match("cpu model%s+:%s+(.+)\n")
-    elseif cpuinfo:match("Raspberry Pi") then
-        model = "Raspberry Pi 4 Model B"
-    else
-        model = "Unknown"
-    end
-
-    return model
+-- Start the system service
+function system_service:start(ctx, bus_connection)
+    log.trace("Starting System Service")
+    service.spawn_fiber('System', bus_connection, ctx, function(fiber_ctx)
+        system_main(fiber_ctx, bus_connection)
+    end)
 end
 
-local function get_cpu_utilisation_and_freq()
-    local function extract_cpu_times(stat, core)
-        local pattern = core .. "%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)"
-        local user, nice, system, idle = stat:match(pattern)
-        return tonumber(user), tonumber(nice), tonumber(system), tonumber(idle)
-    end
-
-    local function compute_utilisation(user_prev, nice_prev, system_prev, idle_prev, user_curr, nice_curr, system_curr, idle_curr)
-        local total_prev = user_prev + nice_prev + system_prev + idle_prev
-        local total_curr = user_curr + nice_curr + system_curr + idle_curr
-        local active_diff = (user_curr - user_prev) + (nice_curr - nice_prev) + (system_curr - system_prev)
-        local total_diff = total_curr - total_prev
-        return total_diff == 0 and 0 or (active_diff / total_diff) * 100
-    end
-
-    local function get_scaling_cur_freq(core)
-        local path = "/sys/devices/system/cpu/" .. core .. "/cpufreq/scaling_cur_freq"
-        local freq = read_file(path)
-        return freq and tonumber(freq) or nil
-    end
-
-    local stat_prev = read_file("/proc/stat")
-    os.execute("sleep 1")
-    local stat_curr = read_file("/proc/stat")
-
-    local core_utilisations = {}
-    local core_frequencies = {}
-    local core_id = 0
-    local overall_utilisation_sum = 0
-    local overall_freq_sum = 0
-
-    while true do
-        local core = "cpu" .. core_id
-        local user_prev, nice_prev, system_prev, idle_prev = extract_cpu_times(stat_prev, core)
-        if not user_prev then
-            break
-        end
-        local user_curr, nice_curr, system_curr, idle_curr = extract_cpu_times(stat_curr, core)
-        local utilisation = compute_utilisation(user_prev, nice_prev, system_prev, idle_prev, user_curr, nice_curr, system_curr, idle_curr)
-        core_utilisations[core] = utilisation
-        overall_utilisation_sum = overall_utilisation_sum + utilisation
-
-        local freq = get_scaling_cur_freq(core)
-        if freq then
-            core_frequencies[core] = freq
-            overall_freq_sum = overall_freq_sum + freq
-        end
-
-        core_id = core_id + 1
-    end
-
-    local overall_utilisation = overall_utilisation_sum / (core_id > 0 and core_id or 1)
-    local average_frequency = overall_freq_sum / (core_id > 0 and core_id or 1)
-
-    return overall_utilisation, core_utilisations, average_frequency, core_frequencies
-end    
-
--- Get total, used, and free RAM
-local function get_ram_info()
-    local meminfo = assert(read_file("/proc/meminfo"))
-    local total = meminfo:match("MemTotal:%s*(%d+)") or 0
-    local free = meminfo:match("MemFree:%s*(%d+)") or 0
-    local buffers = meminfo:match("Buffers:%s*(%d+)") or 0
-    local cached = meminfo:match("Cached:%s*(%d+)") or 0
-
-    local used = total - (free + buffers + cached)
-    return total, used, free + buffers + cached
-end
-
-local function main()
-    -- local cpu_model = get_cpu_info()
-    local ram_total, ram_used, ram_free = get_ram_info()
-
-    local overall_utilisation, core_utilisations, average_frequency, core_frequencies = get_cpu_utilisation_and_freq()
-
-    -- print("CPU Info: " .. cpu_model)
-    print("Overall CPU Utilisation:", overall_utilisation .. "%")
-    print("Average Frequency:", average_frequency .. "kHz")
-    for core, util in pairs(core_utilisations) do
-        print(core .. " Utilisation:", util .. "%")
-        print(core .. " Frequency:", (core_frequencies[core] or "Unknown"))
-    end
-    print("Total RAM: " .. ram_total .. " kB")
-    print("Used RAM: " .. ram_used .. " kB")
-    print("Free RAM: " .. ram_free .. " kB")
-end
-
-main()
+return system_service
