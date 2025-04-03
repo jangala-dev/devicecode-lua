@@ -10,6 +10,7 @@ local function read_file(path)
     if err then return nil, err end
     local content = file:read_all_chars()
 
+    file:close()
     return content, nil
 end
 
@@ -66,7 +67,7 @@ local function get_cpu_utilisation_and_freq(ctx)
         ctx:done_op():wrap(function ()
             return ctx:err()
         end)
-    )
+    ):perform()
     if ctx_err then return nil, nil, nil, nil, ctx_err end
     local stat_curr, curr_err = read_file("/proc/stat")
     if curr_err then return nil, nil, nil, nil, curr_err end
@@ -120,8 +121,54 @@ local function get_ram_info()
     return total, used, free + buffers + cached, nil
 end
 
+---Gets the modem and version of hardware
+---@return string? model
+---@return string? version
+---@return string? error
+local function get_hw_revision()
+    local revision, err = read_file("/etc/hwrevision")
+    if err or not revision then return nil, nil, err end
+    local model, version = revision:match('(%S+)%s+(%S+)')
+    if not (model or version) then
+        return nil, nil, "Failed to parse hwrevision"
+    end
+    return model, version, nil
+end
+
+---@return string? version
+---@return string? error
+local function get_fw_version()
+    local version, err = read_file("/etc/fwversion")
+    if err or not version then return nil, err end
+    return version, nil
+end
+
+local function get_serial()
+    local serial, err = read_file("/data/serial")
+    if err or not serial then return nil, err end
+    return serial, nil
+end
+
+local function get_temperature()
+    local temperature, err = read_file("/sys/class/thermal/thermal_zone0/temp")
+    if err or not temperature then return nil, err end
+    return tonumber(temperature) / 1000, nil
+end
+
+local function get_uptime()
+    local uptime, err = read_file("/proc/uptime")
+    if err or not uptime then return nil, err end
+    local up = string.match(uptime, "(%S+)%s")
+    if not up then return nil, "Failed to parse uptime" end
+    return tonumber(up), nil
+end
 return {
+    get_hw_revision = get_hw_revision,
+    get_fw_version = get_fw_version,
     get_cpu_model = get_cpu_info,
     get_cpu_utilisation_and_freq = get_cpu_utilisation_and_freq,
-    get_ram_info = get_ram_info
+    get_ram_info = get_ram_info,
+    get_serial = get_serial,
+    get_temperature = get_temperature,
+    get_uptime = get_uptime,
 }

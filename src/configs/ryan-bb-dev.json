@@ -64,7 +64,7 @@
                 },
                 "ryan-tera-secondary": {
                     "id_field": "imei",
-                    "imei": "867929069468694",
+                    "imei": "867929068986514",
                     "enabled": true,
                     "autoconnect": true
                 },
@@ -84,7 +84,7 @@
     },
     "metrics": {
         "publish_cache": {
-            "period": 10
+            "period": 60
         },
         "collections": {
             "hal/capability/modem/+": {
@@ -94,57 +94,49 @@
             },
             "hal/capability/modem/+/info/nas/lte/rssi": {
                 "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    }
-                ]
+                "process": []
             },
             "hal/capability/modem/+/info/nas/lte/rsrp": {
                 "protocol": "log",
                 "process": []
             },
-            "gsm/modem/+/tx_bytes": {
+            "system/info/cpu/overall_utilisation": {
                 "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ],
-                "sub_collections": {
-                    "gsm/modem/primary/tx_bytes": {
-                        "process": [
-                            {
-                                "type": "DiffTrigger",
-                                "diff_method": "percent",
-                                "threshold": 2
-                            },
-                            {
-                                "type": "DeltaValue"
-                            }
-                        ]
-                    },
-                    "gsm/modem/secondary/tx_bytes": {
-                        "process": [
-                            {
-                                "type": "DiffTrigger",
-                                "diff_method": "percent",
-                                "threshold": 3
-                            },
-                            {
-                                "type": "DeltaValue"
-                            }
-                        ]
-                    }
-                }
+                "process": []
+            },
+            "system/info/memory/+": {
+                "protocol": "log",
+                "process": []
+            },
+            "system/info/temperature": {
+                "protocol": "log",
+                "process": []
+            },
+            "system/info/uptime": {
+                "protocol": "log",
+                "process": []
+            },
+            "system/info/device/+": {
+                "protocol": "log",
+                "process": []
+            },
+            "system/info/firmware/version": {
+                "protocol": "log",
+                "process": []
             }
         }
+    },
+    "system": {
+        "report_period": 1,
+        "usb3_enabled": false,
+        "alarms": [
+            {
+                "name": "daily reboot",
+                "action": "reboot",
+                "datetime": "8:48",
+                "repeats": "daily"
+            }
+        ]
     }
 }
+

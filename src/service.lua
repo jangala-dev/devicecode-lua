@@ -53,6 +53,8 @@ local function spawn(service, bus, ctx)
         local shutdown_event = system_events_sub:next_msg()
         system_events_sub:unsubscribe()
 
+        -- let every fiber know to end
+        cancel_fn(shutdown_event.payload.cause)
         local service_fibers_status_sub = bus_connection:subscribe(
             { child_ctx:value("service_name"), 'health', 'fibers', '+' }
         )
@@ -68,38 +70,26 @@ local function spawn(service, bus, ctx)
         -- 5. (opt) Could a fiber spin up during the shutdown and not be detected as ongoing?
 
         -- collect what fibers are active or initialising
+
+        local fiber_check_ctx = context.with_deadline(ctx, shutdown_event.payload.deadline)
+
         while true do
-            local message = service_fibers_status_sub:next_msg_op():perform_alt(function () fibers_checked = true end)
-            if fibers_checked then break end
-            if message.payload ~= '' then
-                if message.payload.state == 'disabled' then
-                    active_fibers:pop(message.payload.name)
-                else
-                    active_fibers:push(message.payload.name, message.payload.state)
-                end
+            local message, ctx_err = service_fibers_status_sub:next_msg_with_context_op(fiber_check_ctx):perform()
+            if ctx_err then break end
+            if message.payload.state == 'disabled' then
+                active_fibers:pop(message.payload.name)
+            else
+                active_fibers:push(message.payload.name, message.payload.state)
             end
         end
 
-        -- let every fiber know to end
-        cancel_fn(shutdown_event.payload.cause)
-
-        -- wait for fibers to close
-        while not active_fibers:is_empty() do
-            local message = service_fibers_status_sub:next_msg()
-            if message.payload ~= '' then
-                if message.payload.state == 'disabled' then
-                    active_fibers:pop(message.payload.name)
-                else
-                    active_fibers:push(message.payload.name, message.payload.state)
-                end
-            end
+        if active_fibers:is_empty() then
+            bus_connection:publish(new_msg(
+                health_topic,
+                { name = child_ctx:value("service_name"), state = 'disabled' },
+                { retained = true }
+            ))
         end
-
-        bus_connection:publish(new_msg(
-            health_topic,
-            { name = child_ctx:value("service_name"), state = 'disabled' },
-            { retained = true }
-        ))
     end)
 end
 
