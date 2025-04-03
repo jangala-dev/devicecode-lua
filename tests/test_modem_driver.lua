@@ -18,7 +18,7 @@ local shim_dir = "./test_modem_driver/"
 --
 local function test_get_info()
     test_utils.update_shim_path(shim_dir, "default_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local bg = context.background()
     local ctx = context.with_cancel(bg)
 
@@ -40,7 +40,7 @@ end
 
 local function test_get_at_ports()
     test_utils.update_shim_path(shim_dir, "default_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local bg = context.background()
     local ctx = context.with_cancel(bg)
 
@@ -63,7 +63,7 @@ end
 
 local function test_get()
     test_utils.update_shim_path(shim_dir, "default_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local bg = context.background()
     local ctx = context.with_cancel(bg)
 
@@ -77,7 +77,7 @@ end
 
 local function test_get_primary_port()
     test_utils.update_shim_path(shim_dir, "default_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local bg = context.background()
     local ctx = context.with_cancel(bg)
 
@@ -92,7 +92,7 @@ end
 
 local function test_modem_driver_invalid_get()
     test_utils.update_shim_path(shim_dir, "default_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local bg = context.background()
     local ctx = context.with_cancel(bg)
 
@@ -105,7 +105,7 @@ end
 
 local function test_modem_driver_init()
     test_utils.update_shim_path(shim_dir, "default_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local bg = context.background()
     local ctx = context.with_cancel(bg)
 
@@ -118,7 +118,7 @@ end
 
 local function test_modem_driver_invalid_init()
     test_utils.update_shim_path(shim_dir, "no_modem_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local bg = context.background()
     local ctx = context.with_cancel(bg)
 
@@ -133,7 +133,7 @@ local function test_modem_driver_invalid_init()
 end
 local function test_state_monitor()
     test_utils.update_shim_path(shim_dir, "default_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local bg = context.background()
     local ctx = context.with_cancel(bg)
     local ctx2 = context.with_cancel(ctx)
@@ -190,7 +190,7 @@ end
 
 local function test_command_manager_commands()
     test_utils.update_shim_path(shim_dir, "default_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local commands = {"disconnect", "reset", "enable", "disable", "inhibit"}
 
     local bg = context.background()
@@ -229,7 +229,7 @@ end
 
 local function test_command_manager_command_not_exist()
     test_utils.update_shim_path(shim_dir, "default_shim")
-    local modem_driver = test_utils.uncached_require("services.hal.modem_driver")
+    local modem_driver = test_utils.uncached_require("services.hal.drivers.modem")
     local expected_result = "command does not exist"
     local bg = context.background()
     local ctx = context.with_cancel(bg)

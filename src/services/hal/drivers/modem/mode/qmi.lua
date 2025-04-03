@@ -2,7 +2,7 @@ local exec = require 'fibers.exec'
 local sleep = require "fibers.sleep"
 local context = require 'fibers.context'
 local wraperr = require "wraperr"
-local qmicli = require "services.hal.qmicli"
+local qmicli = require "services.hal.drivers.modem.qmicli"
 local utils = require "services.hal.utils"
 local log = require "log"
 

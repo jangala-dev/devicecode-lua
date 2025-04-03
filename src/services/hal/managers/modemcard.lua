@@ -4,8 +4,8 @@ local sleep = require "fibers.sleep"
 local context = require "fibers.context"
 local op = require "fibers.op"
 local utils = require "services.hal.utils"
-local modem_driver = require "services.hal.modem_driver"
-local mmcli = require "services.hal.mmcli"
+local modem_driver = require "services.hal.drivers.modem"
+local mmcli = require "services.hal.drivers.modem.mmcli"
 local service = require "service"
 local log = require "log"
 
@@ -36,7 +36,18 @@ function ModemManagement:detector(ctx)
             sleep.sleep(5)
         else
             -- Now we loop over every line of output
-            for line in stdout:lines() do
+            -- for line in stdout:lines() do
+            while not ctx:err() do
+                local line, ctx_err = op.choice(
+                    stdout:read_line_op(),
+                    ctx:done_op():wrap(function()
+                        return nil, ctx:err()
+                    end)
+                ):perform()
+                if ctx_err or line == nil then
+                    cmd:kill()
+                    break
+                end
                 local is_added, address, parse_err = utils.parse_monitor(line)
 
                 if is_added==true then
@@ -57,6 +68,7 @@ function ModemManagement:detector(ctx)
         end
         stdout:close()
     end
+    log.trace(string.format("HAL: Modemcard Manager - Detector Closing, reason '%s'", ctx:err()))
 end
 
 function ModemManagement:manager(
@@ -132,13 +144,15 @@ function ModemManagement:manager(
         device_event_q:put(device_event)
     end
 
-    while true do
+    while not ctx:err() do
         op.choice(
             self.modem_detect_channel:get_op():wrap(handle_detection),
             self.modem_remove_channel:get_op():wrap(handle_removal),
-            driver_channel:get_op():wrap(handle_driver)
+            driver_channel:get_op():wrap(handle_driver),
+            ctx:done_op()
         ):perform()
     end
+    log.trace(string.format("HAL: Modemcard Manager - Manager Closing, reason '%s'", ctx:err()))
 end
 
 function ModemManagement:spawn(ctx, bus_conn, device_event_q)

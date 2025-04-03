@@ -14,8 +14,8 @@ local shim_dir = "./test_modemcard_manager/shims/"
 
 -- set module loading to mot cache driver or mmcli for shims
 local module_loader = test_utils.new_module_loader()
-module_loader:add_uncacheable("services.hal.modem_driver")
-module_loader:add_uncacheable("services.hal.mmcli")
+module_loader:add_uncacheable("services.hal.drivers.modem")
+module_loader:add_uncacheable("services.hal.drivers.modem.mmcli")
 
 local function setup_test_contexts()
     local bg_context = context.background()
@@ -42,7 +42,7 @@ end
 local function test_monitor_modems()
     test_utils.update_shim_path(shim_dir, "monitor_modems")
 
-    local modem_manager = module_loader:require("services.hal.modemcard_manager")
+    local modem_manager = module_loader:require("services.hal.managers.modemcard")
     local modem_manager_instance = modem_manager.new()
 
     local detect_channel, remove_channel, config_channel, _ = make_communication()
@@ -91,7 +91,7 @@ end
 local function test_handle_detection()
     test_utils.update_shim_path(shim_dir, "monitor_modems")
 
-    local modem_manager = module_loader:require("services.hal.modemcard_manager")
+    local modem_manager = module_loader:require("services.hal.managers.modemcard")
     local modem_manager_instance = modem_manager.new()
 
     local test_context, fiber_context = setup_test_contexts()
@@ -133,7 +133,7 @@ end
 local function test_handle_detection_no_exist()
     test_utils.update_shim_path(shim_dir, "no_device")
 
-    local modem_manager = module_loader:require("services.hal.modemcard_manager")
+    local modem_manager = module_loader:require("services.hal.managers.modemcard")
     local modem_manager_instance = modem_manager.new()
 
     local test_context, fiber_context = setup_test_contexts()
@@ -168,7 +168,7 @@ end
 local function test_handle_removal()
     test_utils.update_shim_path(shim_dir, "monitor_modems")
 
-    local modem_manager = module_loader:require("services.hal.modemcard_manager")
+    local modem_manager = module_loader:require("services.hal.managers.modemcard")
     local modem_manager_instance = modem_manager.new()
 
     local test_context, fiber_context = setup_test_contexts()
@@ -218,7 +218,7 @@ end
 local function test_handle_removal_no_exist()
     test_utils.update_shim_path(shim_dir, "monitor_modems")
 
-    local modem_manager = module_loader:require("services.hal.modemcard_manager")
+    local modem_manager = module_loader:require("services.hal.managers.modemcard")
     local modem_manager_instance = modem_manager.new()
 
     local test_context, fiber_context = setup_test_contexts()

@@ -6,12 +6,12 @@ local context = require "fibers.context"
 local channel = require "fibers.channel"
 local sleep = require "fibers.sleep"
 local service = require "service"
-local at = require "services.hal.at"
-local mmcli = require "services.hal.mmcli"
+local at = require "services.hal.drivers.modem.at"
+local mmcli = require "services.hal.drivers.modem.mmcli"
 local utils = require "services.hal.utils"
 local hal_capabilities = require "services.hal.hal_capabilities"
-local mode_overrides = require "services.hal.modem_driver.mode"
-local model_overrides = require "services.hal.modem_driver.model"
+local mode_overrides = require "services.hal.drivers.modem.mode"
+local model_overrides = require "services.hal.drivers.modem.model"
 local json = require "dkjson"
 local log = require "log"
 local wraperr = require "wraperr"
@@ -320,7 +320,18 @@ function Driver:modem_state_monitor()
         log.error("Modem State Monitor: failed to start for imei - ", self.imei)
     else
         while not self.ctx:err() do
-            for line in stdout:lines() do
+            -- for line in stdout:lines() do
+            while not self.ctx:err() do
+                local line, ctx_err = op.choice(
+                    stdout:read_line_op(),
+                    self.ctx:done_op():wrap(function()
+                        return nil, self.ctx:err()
+                    end)
+                ):perform()
+                if ctx_err then
+                    cmd:kill()
+                    break
+                end
                 local state, err = utils.parse_modem_monitor(line)
                 if err ~= nil then
                     log.error(err)
@@ -329,12 +340,11 @@ function Driver:modem_state_monitor()
                 end
             end
 
-            if not self.ctx:err() then
-                cmd:wait()
-            end
+            cmd:wait()
         end
     end
     stdout:close()
+    log.trace(string.format("HAL: Modem: State Monitor closing, reason '%s'", self.ctx:err()))
 end
 
 function Driver:sim_slot_monitor()
@@ -400,7 +410,17 @@ function Driver:state_monitor()
         log.error("Modem State Monitor: failed to start for imei - ", self.imei)
     else
         while not self.ctx:err() do
-            for line in stdout:lines() do
+            while not self.ctx:err() do
+                local line, ctx_err = op.choice(
+                    stdout:read_line_op(),
+                    self.ctx:done_op():wrap(function()
+                        return nil, self.ctx:err()
+                    end)
+                ):perform()
+                if ctx_err or line == nil then
+                    cmd:kill()
+                    break
+                end
                 local state, err = utils.parse_modem_monitor(line)
                 if err ~= nil then
                     log.error(err)
