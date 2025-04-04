@@ -150,14 +150,6 @@ function system_service:_report_sysinfo()
             log.debug("Failed to get temperature: ", temp_err)
         end
 
-        local uptime, uptime_err = sysinfo.get_uptime()
-        local boot_time
-        if uptime_err then
-            log.debug("Failed to get uptime: ", uptime_err)
-        else
-            boot_time = math.floor(os.time() - uptime)
-        end
-
         local sysinfo_data = {
             cpu = {
                 cpu_model = cpu_model,
@@ -172,7 +164,6 @@ function system_service:_report_sysinfo()
                 free = free
             },
             temperature = temperature,
-            uptime = boot_time,
             heartbeat = 0
         }
 
@@ -249,34 +240,43 @@ function system_service:_system_main()
     local config_sub = self.bus_conn:subscribe({ 'config', 'system' })
     local services_health_sub = self.bus_conn:subscribe({ '+', 'health' })
 
-    local system_data = {}
     local model, version, hw_err = sysinfo.get_hw_revision()
     if hw_err then
         log.error(string.format("System: Failed to get model and version: %s", hw_err))
-        self.model = "bigbox-ss"
     else
         self.model = model
         self.version = version
-        system_data.device = {
-            model = model,
-            version = version
-        }
     end
 
     local firmware_version, fw_err = sysinfo.get_fw_version()
     if fw_err then
         log.error(string.format("System: Failed to get firmware version: %s", fw_err))
-    else
-        system_data.firmware = { version = firmware_version }
     end
 
+    local uptime, uptime_err = sysinfo.get_uptime()
+    local boot_time
+    if uptime_err then
+        log.error("Failed to get uptime: ", uptime_err)
+    else
+        boot_time = math.floor(os.time() - uptime)
+    end
     -- only need to publish if some info was retrieved
-    if not (hw_err and fw_err) then
-        self.bus_conn:publish_multiple(new_msg(
+    if not (hw_err and fw_err and uptime_err) then
+        local system_data = {
+            device = {
+                model = model,
+                version = version
+            },
+            firmware = {
+                version = firmware_version
+            },
+            boot_time = boot_time
+        }
+        self.bus_conn:publish_multiple(
             { 'system', 'info' },
             system_data,
             { retained = true }
-        ))
+        )
     end
 
     -- Main event loop
