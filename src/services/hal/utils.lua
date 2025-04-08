@@ -48,12 +48,12 @@ end
 
 function utils.parse_slot_monitor(line)
     for card_status, slot_status in line:gmatch("Card status:%s*(%S+).-Slot status:%s*(%S+)") do
-        if card_status == "active" then
-            return slot_status, nil
+        if slot_status == "active" then
+            return card_status, nil
         end
     end
 
-    return nil, 'could not parse (no active slot or invalid string format)'
+    return line, 'could not parse (no active slot or invalid string format)'
 end
 function utils.starts_with(main_string, start_string)
     if main_string == nil or start_string == nil then return false end

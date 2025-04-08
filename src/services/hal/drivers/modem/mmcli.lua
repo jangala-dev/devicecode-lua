@@ -22,7 +22,7 @@ local function reset(device)
     return exec.command('mmcli', '-m', device, '-r')
 end
 
-local function factory_reset(code)
+local function factory_reset(device, code)
     return exec.command('mmcli', '-m', device, '--factory_reset=', code)
 end
 
@@ -50,7 +50,7 @@ local function location_status(ctx, device)
 end
 
 local function signal_setup(ctx, device, rate)
-    return exec.command_context(ctx, 'mmcli', '-m', device, '--signal-setup=', rate)
+    return exec.command_context(ctx, 'mmcli', '-m', device, '--signal-setup=' .. tostring(rate))
 end
 
 local function create_bearer(ctx, device, ...)
