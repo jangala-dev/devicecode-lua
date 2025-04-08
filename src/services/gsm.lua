@@ -236,35 +236,35 @@ function Modem:enable_autoconnect(ctx)
                             log.warn("GSM_MODEM_SIGNAL_UPDATE_FAILED", self.name, signal_update_err)
                         end
                         self.cfg.apn = active_apn
-
-                        local net_iface_sub = self.bus_conn:subscribe(
-                            { 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'generic', 'ports', '+' }
-                        )
-                        -- the bus handles multiple publish for lists as having numbered endpoints
-                        -- iterate over all numbered endpoints of ports and check which one holds the net iface; if any
-                        -- only breaks if iface is found, otherwise errors out
-                        local net_interface
-                        while true do
-                            local net_interface_msg, interface_err = net_iface_sub:next_msg_with_context_op(context.with_timeout(self.ctx, 1)):perform()
-                            if interface_err then
-                                log.error("GSM_MODEM_NET_IFACE_ERROR", self.name, interface_err)
-                                return
-                            end
-                            net_interface = net_interface_msg.payload:match("%s*(%S+)%s%(net%)")
-                            if net_interface then
-                                break
-                            end
-                        end
-
-                        self.bus_conn:publish(new_msg(
-                        -- what is our bus structure here?
-                            { 'gsm', 'modem', self.name, 'net-interface' },
-                            { net_interface },
-                            { retained = true }
-                        ))
-                        -- after this i expect the net service to handle bringup?
                     end
+                elseif state_info.curr_state == 'connected' then
+                    local net_iface_sub = self.bus_conn:subscribe(
+                        { 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'generic', 'ports', '+' }
+                    )
+                    -- the bus handles multiple publish for lists as having numbered endpoints
+                    -- iterate over all numbered endpoints of ports and check which one holds the net iface; if any
+                    -- only breaks if iface is found, otherwise errors out
+                    local net_interface
+                    while true do
+                        local net_interface_msg, interface_err = net_iface_sub:next_msg_with_context_op(context
+                            .with_timeout(self.ctx, 1)):perform()
+                        if interface_err then
+                            log.error("GSM_MODEM_NET_IFACE_ERROR", self.name, interface_err)
+                            return
+                        end
+                        net_interface = net_interface_msg.payload:match("%s*(%S+)%s%(net%)")
+                        if net_interface then
+                            break
+                        end
+                    end
+
+                    self.bus_conn:publish(new_msg(
+                        { 'gsm', 'modem', self.name, 'interface' },
+                        { net_interface },
+                        { retained = true }
+                    ))
                 end
+
                 local next_connected = state_info.curr_state == 'connected'
                 if next_connected ~= connected then
                     self.bus_conn:publish(new_msg(

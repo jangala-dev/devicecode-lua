@@ -1,333 +1,668 @@
 {
-    "network": {
-        "networks": [
-            {
-                "name": "Wired Internet",
-                "id": "wan",
-                "interface": "eth1",
-                "protocol": "dhcp",
-                "ipv6": true
+  "net": {
+    "default": {
+      "backhauls": {
+        "network": {
+          "ipv4": {
+            "proto": "dhcp"
+          },
+          "firewall": {
+            "zone": "wan"
+          },
+          "shaping": {
+            "egress": {
+              "qdisc": "fq_codel"
             },
-            {
-                "name": "Primary Modem",
-                "id": "mwan0",
-                "protocol": "dhcp",
-                "ipv6": true
-            },
-            {
-                "name": "Secondary Modem",
-                "id": "mwan1",
-                "protocol": "dhcp",
-                "ipv6": true
-            },
-            {
-                "name": "Admin Network",
-                "id": "adm",
-                "interface": "eth0",
-                "vlan": "1",
-                "protocol": "static",
-                "ipaddr": "172.28.1.1/24"
-            },
-            {
-                "name": "Guest Network",
-                "id": "jng",
-                "interface": "eth0",
-                "vlan": "2",
-                "protocol": "static",
-                "ipaddr": "172.28.2.1/24"
+            "ingress": {
+              "qdisc": "fq_codel"
             }
-        ]
-    },
-    "gsm": {
-        "modems": {
-            "default": {
-                "enabled": true
-            },
-            "known": {
-                "primary": {
-                    "id_field": "device",
-                    "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
-                    "enabled": true,
-                    "autoconnect": true
-                },
-                "secondary": {
-                    "id_field": "device",
-                    "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4",
-                    "enabled": true,
-                    "autoconnect": true
-                },
-                "modem1": {
-                    "id_field": "imei",
-                    "imei": "123456789054321",
-                    "enabled": true,
-                    "autoconnect": true
-                }
-            }
+          }
         },
-        "sims": {
-            "default": {
-                "autoconnect": true
-            }
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
         }
+      }
     },
-    "metrics": {
-        "pubilish_cache": {
-            "enabled": true,
-            "period": 10
-        },
-        "default_process": [
-            {
-                "type": "DiffTrigger",
-                "diff_method": "percent",
-                "threshold": 10
-            }
+    "dns": {
+      "upstream_servers": [
+        "8.8.8.8",
+        "1.1.1.1"
+      ],
+      "default_cache_size": 1000
+    },
+    "network": [
+      {
+        "name": "Admin Network",
+        "id": "adm",
+        "type": "local",
+        "interfaces": [
+          "eth0.8"
         ],
-        "collections": {
-            "wifi/foo/bar/tx_bytes": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "wifi/foo/bar/tx_packets": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "wifi/foo/bar/tx_dropped": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "wifi/foo/bar/tx_errors": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "wifi/foo/bar/tx_retries": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "net/foo/bar/rx_bytes": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "wifi/foo/bar/rx_packets": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "wifi/foo/bar/rx_dropped": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "wifi/foo/bar/rx_errors": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "wifi/foo/bar/rx_frags": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "wifi/foo/bar/rx_crypts": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    },
-                    {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "hal/capability/modem/+/info/nas/signal/rssi": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 10
-                    }
-                ]
-            },
-            "wifi/foo/bar/noise": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 10
-                    }
-                ]
-            },
-            "wifi/foo/bar/power": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 10
-                    }
-                ]
-            },
-            "wifi/foo/bar/channel": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "any-change"
-                    }
-                ]
-            },
-            "wifi/foo/bar/num_sta": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    }
-                ]
-            },
-            "system/foo/bar/cpu_util": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    }
-                ]
-            },
-            "system/foo/bar/mem_util": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    }
-                ]
-            },
-            "gsm/foo/bar/sim_data_balance": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    }
-                ]
-            },
-            "gsm/foo/bar/sim_data_expiry": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "any-change"
-                    }
-                ]
-            },
-            "system/foo/bar/temp": {
-                "protocol": "http",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "absolute",
-                        "threshold": 2
-                    }
-                ]
-            }
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "172.28.8.1",
+          "netmask": "255.255.255.0"
+        },
+        "dhcp_server": {
+          "range_skip": "10",
+          "range_extent": "240",
+          "lease_time": "12h"
+        },
+        "dns_server": {
+          "local_server": true,
+          "default_hosts": [
+            "ads"
+          ]
+        },
+        "firewall": {
+          "zone": "lan"
         }
+      },
+      {
+        "name": "Jangala Network",
+        "id": "jan",
+        "type": "local",
+        "interfaces": [
+          "eth0.32"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "172.28.32.1",
+          "netmask": "255.255.255.0"
+        },
+        "dhcp_server": {
+          "range_skip": "10",
+          "range_extent": "240",
+          "lease_time": "12h"
+        },
+        "dns_server": {
+          "local_server": true,
+          "default_hosts": [
+            "ads",
+            "adult"
+          ]
+        },
+        "firewall": {
+          "zone": "lan_rst"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "htb",
+            "filters": [
+              {
+                "id": "per_ip_filter",
+                "kind": "u32",
+                "hash_key": "dest_ip",
+                "target_class_template": "per_ip_shapers"
+              }
+            ],
+            "class_template": {
+              "id": "per_ip_shapers",
+              "kind": "per_dest_ip",
+              "classes": [
+                {
+                  "qdisc": "htb",
+                  "config": {
+                    "rate": "450kbit",
+                    "ceil": "2mbit",
+                    "burst": "500k"
+                  },
+                  "classes": [
+                    {
+                      "qdisc": "fq_codel"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "ingress": {
+            "qdisc": "htb",
+            "filters": [
+              {
+                "id": "per_ip_filter",
+                "kind": "u32",
+                "hash_key": "src_ip",
+                "target_class_template": "per_ip_shapers"
+              }
+            ],
+            "class_template": {
+              "id": "per_ip_shapers",
+              "kind": "per_src_ip",
+              "classes": [
+                {
+                  "qdisc": "htb",
+                  "config": {
+                    "rate": "450kbit",
+                    "ceil": "2mbit",
+                    "burst": "500k"
+                  },
+                  "classes": [
+                    {
+                      "qdisc": "fq_codel"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "name": "Internal Network",
+        "id": "int",
+        "type": "local",
+        "interfaces": [
+          "eth0.100"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "172.28.100.1",
+          "netmask": "255.255.255.0"
+        },
+        "dhcp_server": {
+          "range_skip": "10",
+          "range_extent": "240",
+          "lease_time": "12h"
+        },
+        "dns_server": {
+          "servers": [
+            "8.8.8.8",
+            "1.1.1.1"
+          ]
+        },
+        "firewall": {
+          "zone": "lan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        }
+      },
+      {
+        "name": "Primary Modem",
+        "id": "mdm0",
+        "type": "backhaul",
+        "modem_id": "primary",
+        "ipv4": {
+          "enabled": true,
+          "proto": "dhcp"
+        },
+        "firewall": {
+          "zone": "wan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
+        }
+      },
+      {
+        "name": "Secondary Modem",
+        "id": "mdm1",
+        "type": "backhaul",
+        "modem_id": "secondary",
+        "ipv4": {
+          "enabled": true,
+          "proto": "dhcp"
+        },
+        "firewall": {
+          "zone": "wan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
+        }
+      },
+      {
+        "name": "Wired Internet",
+        "id": "wan",
+        "type": "backhaul",
+        "interfaces": [
+          "eth0.4"
+        ],
+        "ipv4": {
+          "enabled": true,
+          "proto": "dhcp"
+        },
+        "firewall": {
+          "zone": "wan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
+        }
+      }
+    ],
+    "multiwan": {
+      "default_strategy": "dynamic_weight",
+      "health_checks": {
+        "down": 3,
+        "up": 2,
+        "initial_state": "offline",
+        "track_method": "ping",
+        "track_ip": [
+          "1.1.1.1",
+          "8.8.8.8"
+        ],
+        "timeout": 2,
+        "interval": 1
+      }
     },
-    "service2": {
-        "paramX": "valueX",
-        "paramY": "valueY"
+    "firewall": {
+      "zones": [
+        {
+          "name": "Local Networks",
+          "id": "lan",
+          "input": "ACCEPT",
+          "output": "ACCEPT",
+          "forward": "ACCEPT"
+        },
+        {
+          "name": "Local Networks - restricted",
+          "id": "lan_rst",
+          "input": "REJECT",
+          "output": "ACCEPT",
+          "forward": "REJECT"
+        },
+        {
+          "name": "Internet",
+          "id": "wan",
+          "input": "REJECT",
+          "output": "ACCEPT",
+          "forward": "REJECT",
+          "masquerade": true,
+          "mtu_fix": true
+        }
+      ],
+      "forwarding": [
+        {
+          "src": "lan",
+          "dest": "wan"
+        },
+        {
+          "src": "lan_rst",
+          "dest": "wan"
+        }
+      ],
+      "rules": [
+        {
+          "name": "Allow-DHCP-Renew",
+          "src": "wan",
+          "proto": "udp",
+          "dest_port": "68",
+          "target": "ACCEPT"
+        },
+        {
+          "name": "Allow-Ping",
+          "src": "wan",
+          "proto": "icmp",
+          "icmp_type": "echo-request",
+          "target": "ACCEPT"
+        },
+        {
+          "name": "Allow-IGMP",
+          "src": "wan",
+          "proto": "igmp",
+          "target": "ACCEPT"
+        },
+        {
+          "name": "Allow-IPSec-ESP",
+          "src": "wan",
+          "dest": "lan",
+          "proto": "esp",
+          "target": "ACCEPT"
+        },
+        {
+          "name": "Allow-ISAKMP",
+          "src": "wan",
+          "dest": "lan",
+          "proto": "udp",
+          "dest_port": "500",
+          "target": "ACCEPT"
+        },
+        {
+          "name": "Allow-IPSec-ESP (RST)",
+          "src": "wan",
+          "dest": "lan_rst",
+          "proto": "esp",
+          "target": "ACCEPT"
+        },
+        {
+          "name": "Allow-ISAKMP (RST)",
+          "src": "wan",
+          "dest": "lan_rst",
+          "proto": "udp",
+          "dest_port": "500",
+          "target": "ACCEPT"
+        },
+        {
+          "name": "Allow DHCP request (RST)",
+          "src": "lan_rst",
+          "proto": "udp",
+          "src_port": "67-68",
+          "dest_port": "67-68",
+          "target": "ACCEPT"
+        },
+        {
+          "name": "Allow DNS queries (RST)",
+          "src": "lan_rst",
+          "proto": "tcp udp",
+          "dest_port": "53",
+          "target": "ACCEPT"
+        }
+      ]
+    },
+    "static_route": [
+      {
+        "target": "192.168.100.1",
+        "interface": "wan"
+      }
+    ]
+  },
+  "gsm": {
+    "modems": {
+      "known": [
+        {
+          "name": "Primary",
+          "id_by": "device",
+          "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2"
+        },
+        {
+          "name": "Secondary",
+          "id_by": "device",
+          "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4"
+        },
+        {
+          "name": "Modem 1",
+          "id_by": "imei",
+          "imei": "123456789054321"
+        }
+      ]
     }
+  },
+  "metrics": {
+    "pubilish_cache": {
+        "enabled": true,
+        "period": 10
+    },
+    "default_process": [
+        {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 10
+        }
+    ],
+    "collections": {
+        "wifi/foo/bar/tx_bytes": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "wifi/foo/bar/tx_packets": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "wifi/foo/bar/tx_dropped": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "wifi/foo/bar/tx_errors": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "wifi/foo/bar/tx_retries": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "net/foo/bar/rx_bytes": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "wifi/foo/bar/rx_packets": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "wifi/foo/bar/rx_dropped": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "wifi/foo/bar/rx_errors": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "wifi/foo/bar/rx_frags": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "wifi/foo/bar/rx_crypts": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                },
+                {
+                    "type": "DeltaValue"
+                }
+            ]
+        },
+        "hal/capability/modem/+/info/nas/signal/rssi": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 10
+                }
+            ]
+        },
+        "wifi/foo/bar/noise": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 10
+                }
+            ]
+        },
+        "wifi/foo/bar/power": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 10
+                }
+            ]
+        },
+        "wifi/foo/bar/channel": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "any-change"
+                }
+            ]
+        },
+        "wifi/foo/bar/num_sta": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                }
+            ]
+        },
+        "system/foo/bar/cpu_util": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                }
+            ]
+        },
+        "system/foo/bar/mem_util": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                }
+            ]
+        },
+        "gsm/foo/bar/sim_data_balance": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "percent",
+                    "threshold": 5
+                }
+            ]
+        },
+        "gsm/foo/bar/sim_data_expiry": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "any-change"
+                }
+            ]
+        },
+        "system/foo/bar/temp": {
+            "protocol": "http",
+            "process": [
+                {
+                    "type": "DiffTrigger",
+                    "diff_method": "absolute",
+                    "threshold": 2
+                }
+            ]
+        }
+    }
+  }
 }
