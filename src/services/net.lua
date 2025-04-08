@@ -9,28 +9,10 @@ local uci = require "uci"
 local speedtest = require "services.net.speedtest"
 local new_msg = require "bus".new_msg
 
+local cursor = uci.cursor("/tmp/test", "/tmp/.uci") -- runtime-safe!
 
 -------------------------------------------------------
 -- Helper functions
-
--- Print contents of `tbl`, with indentation.
--- `indent` sets the initial level of indentation.
-local function tprint (tbl, indent)
-    if not indent then indent = 0 end
-    for k, v in pairs(tbl) do
-        local formatting = string.rep("  ", indent) .. k .. ": "
-        if type(v) == "table" then
-            print(formatting)
-            tprint(v, indent+1)
-        elseif type(v) == 'boolean' then
-            print(formatting .. tostring(v))
-        else
-            print(formatting .. v)
-        end
-    end
-end
-
-local cursor = uci.cursor("/tmp/test", "/tmp/.uci") -- runtime-safe!
 
 local function add_to_uci_list(main, section_name, list_name, list_value)
     -- Read current networks assigned to the zone
@@ -274,11 +256,7 @@ local function get_dnsmasq_id(default_hosts)
         return id
     end
 
-    -- Create a new ID
     dnsmasq_counter = dnsmasq_counter + 1
-    -- print("DO WE GET HERE")
-    -- id = id or table.concat(default_hosts, "_")
-    -- print("NOW HERE")
     dnsmasq_instances[id] = true
 
     -- Create dnsmasq config block
