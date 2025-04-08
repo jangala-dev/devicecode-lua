@@ -70,6 +70,7 @@ function Modem:autoconnect(ctx, cutoff)
         { 'hal', 'capability', 'modem', self.idx, 'info', 'nas', 'home-network', 'mcc' }
     )
     local mcc_msg, mcc_err = mcc_sub:next_msg_with_context_op(ctx):perform()
+    mcc_sub:unsubscribe()
 
     if mcc_err then return nil, mcc_err end
     local mcc = mcc_msg.payload
@@ -78,6 +79,7 @@ function Modem:autoconnect(ctx, cutoff)
         { 'hal', 'capability', 'modem', self.idx, 'info', 'nas', 'home-network', 'mnc' }
     )
     local mnc_msg, mnc_err = mnc_sub:next_msg_with_context_op(ctx):perform()
+    mnc_sub:unsubscribe()
     if mnc_err then return nil, mnc_err end
     local mnc = mnc_msg.payload
 
@@ -85,6 +87,7 @@ function Modem:autoconnect(ctx, cutoff)
         { 'hal', 'capability', 'modem', self.idx, 'info', 'sim', 'properties', 'imsi' }
     )
     local imsi_msg, imsi_err = imsi_sub:next_msg_with_context_op(ctx):perform()
+    imsi_sub:unsubscribe()
     if imsi_err then return nil, imsi_err end
     local imsi = imsi_msg.payload
 
@@ -95,6 +98,7 @@ function Modem:autoconnect(ctx, cutoff)
         { 'hal', 'capability', 'modem', self.idx, 'info', 'gids', 'gid1' }
     )
     local gid1_msg, gid1_err = gid1_sub:next_msg_with_context_op(ctx):perform()
+    gid1_sub:unsubscribe()
     if gid1_err then return nil, gid1_err end
     local gid1 = gid1_msg.payload
 
@@ -140,6 +144,7 @@ function Modem:autoconnect(ctx, cutoff)
             end
         end
     end
+    status_sub:unsubscribe()
     return nil, "no apn connected"
 end
 
@@ -151,6 +156,7 @@ function Modem:enable_autoconnect(ctx)
         ctx,
         function(autoconnect_ctx)
             log.info(string.format("GSM: Autoconnect started for %s", self.name))
+            local connected = false
             local state_monitor_sub = self.bus_conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'state' })
 
             while not autoconnect_ctx:err() do
@@ -252,18 +258,24 @@ function Modem:enable_autoconnect(ctx)
 
                         self.bus_conn:publish(new_msg(
                         -- what is our bus structure here?
-                            {'gsm', 'modem', self.idx, 'net-interface' },
+                            { 'gsm', 'modem', self.name, 'net-interface' },
                             { net_interface },
                             { retained = true }
                         ))
                         -- after this i expect the net service to handle bringup?
                     end
-                elseif state_info.curr_state == 'connected' then
-                    log.info('UNIMPLEMENTED CONNECTED STATE')
-                    -- is this state even part of GSM's responsibility?
-                    -- move to net?
+                end
+                local next_connected = state_info.curr_state == 'connected'
+                if next_connected ~= connected then
+                    self.bus_conn:publish(new_msg(
+                        { 'gsm', 'modem', self.idx, 'connected' },
+                        { connected = connected },
+                        { retained = true }
+                    ))
                 end
             end
+            state_monitor_sub:unsubscribe()
+            log.trace(string.format("GSM: Autoconnect - %s Closing, reason: '%s'", self.name, autoconnect_ctx:err()))
         end
     )
     return true
@@ -307,6 +319,7 @@ local function modem_capability_handler(ctx, bus_conn, modem_capability_msg)
     local modem_imei_sub = bus_conn:subscribe({ 'hal', 'capability', 'modem', modem_capability_msg.index, 'info',
         'modem', 'generic', 'equipment-identifier' })
     local imei_msg, imei_err = modem_imei_sub:next_msg_with_context_op(ctx):perform()
+    modem_imei_sub:unsubscribe()
     if imei_err then
         log.error(imei_err); return
     end
@@ -317,6 +330,7 @@ local function modem_capability_handler(ctx, bus_conn, modem_capability_msg)
     local device_msg, device_err = modem_device_sub:next_msg_op():perform_alt(function()
         return nil, 'device not found'
     end)
+    modem_device_sub:unsubscribe()
     if device_err then
         log.error(device_err); return
     end
@@ -406,6 +420,9 @@ local function gsm_manager(ctx, bus_conn)
             ctx:done_op()
         ):perform()
     end
+    capability_sub:unsubscribe()
+    config_sub:unsubscribe()
+    log.trace(string.format("GSM: Manager Closing, reason: '%s'", ctx:err()))
 end
 
 function gsm_service:start(service_ctx, bus_connection)

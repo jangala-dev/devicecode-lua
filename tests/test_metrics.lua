@@ -29,6 +29,25 @@ function TestTimedCache:test_set_and_get()
     luaunit.assertAlmostEquals(cache.next_deadline, current_time + 2, 0.1)
 end
 
+function TestTimedCache:test_nested_key_insertion_order1()
+    local cache = timed_cache.new(1, sc.monotime)
+    cache:set({ "metrics", "system", "memory" }, "8GB")
+    cache:set({ "metrics", "system" }, "active")
+
+    -- Verify the exact structure of the store
+    luaunit.assertEquals(cache.store.metrics.system.__value, "active")
+    luaunit.assertEquals(cache.store.metrics.system.memory, "8GB")
+end
+
+function TestTimedCache:test_nested_key_insertion_order2()
+    local cache = timed_cache.new(1, sc.monotime)
+    cache:set({ "metrics", "system" }, "active")
+    cache:set({ "metrics", "system", "memory" }, "8GB")
+
+    -- Verify the exact structure of the store
+    luaunit.assertEquals(cache.store.metrics.system.__value, "active")
+    luaunit.assertEquals(cache.store.metrics.system.memory, "8GB")
+end
 TestProcessing = {}
 
 function TestProcessing:test_diff_trigger()

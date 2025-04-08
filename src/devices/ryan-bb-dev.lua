@@ -6,6 +6,7 @@ return {
         "gsm",
         "hal",
         "metrics",
+        "system"
         -- ... other services specific to this device version
     }
 }
