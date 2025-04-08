@@ -14,7 +14,7 @@ function config_service:start(rootctx, conn)
     local config = json.decode(raw_config)
     for k, v in pairs(config) do
         log.trace("Config: publishing config for: ", k)
-        self.conn:publish(new_msg({ topic = { "config", k }, payload = json.encode(v), { retained = true } }))
+        self.conn:publish(new_msg({ "config", k }, json.encode(v), { retained = true }))
     end
 end
 
