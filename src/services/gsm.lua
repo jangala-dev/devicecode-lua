@@ -155,8 +155,6 @@ function Modem:enable_autoconnect(ctx)
         self.bus_conn,
         ctx,
         function(autoconnect_ctx)
-            local prev_connected = false
-            local connected = false
             log.info(string.format("GSM: Autoconnect started for %s", self.name))
             local connected = false
             local state_monitor_sub = self.bus_conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'state' })
@@ -169,15 +167,6 @@ function Modem:enable_autoconnect(ctx)
                     return
                 end
                 local state_info = state_info_msg.payload
-                connected = (state_info.curr_state == 'connected')
-                if connected ~= prev_connected then
-                    self.bus_conn:publish(new_msg(
-                        { 'gsm', 'modem', self.name, 'state' },
-                        { connected = connected },
-                        { retained = true }
-                    ))
-                    prev_connected = connected
-                end
                 log.info(string.format("GSM: Autoconnect state for %s: %s", self.name, state_info.curr_state))
                 -- locked state is currently unimplemented due to uncertainty of parity against dcv0.9
                 if state_info.curr_state == 'locked' then
