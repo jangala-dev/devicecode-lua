@@ -2,11 +2,11 @@ local exec = require 'fibers.exec'
 local sleep = require "fibers.sleep"
 local context = require 'fibers.context'
 local wraperr = require "wraperr"
-local qmicli = require "services.hal.qmicli"
+local qmicli = require "services.hal.drivers.modem.qmicli"
 local utils = require "services.hal.utils"
 local log = require "log"
 
-local CMD_TIMEOUT = 2
+local CMD_TIMEOUT = 3
 
 -- driver/mode/qmi.lua
 return function(modem)
@@ -50,7 +50,7 @@ return function(modem)
         while not modem.ctx:err() and not modem.is_sim_inserted() do
             modem.set_func_min()
             modem.set_func_max()
-            sleep.sleep(0.1)
+            sleep.sleep(0.2)
         end
     end
     modem.monitor_slot_state = function()

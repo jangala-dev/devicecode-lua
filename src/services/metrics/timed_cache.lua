@@ -9,6 +9,10 @@ local function merge_values(orig, new)
         for k, v in pairs(new) do
             orig[k] = merge_values(orig[k], v)
         end
+        return orig -- Add explicit return to fix bug
+    elseif type(orig) == "table" then
+        orig["__value"] = new
+        return orig
     else
         return new
     end
@@ -45,10 +49,16 @@ function TimedCache:set(key, value)
     if type(key) ~= "table" then key = { key } end
     local sub_table = self.store
     for i, part in ipairs(key) do
-        if not sub_table[part] then
-            sub_table[part] = {}
+        if i < #key then -- Not the last part
+            -- If the part exists but is not a table, convert it
+            if sub_table[part] ~= nil and type(sub_table[part]) ~= "table" then
+                local old_value = sub_table[part]
+                sub_table[part] = { ["__value"] = old_value }
+            elseif not sub_table[part] then
+                sub_table[part] = {}
+            end
+            sub_table = sub_table[part]
         end
-        if i < #key then sub_table = sub_table[part] end
     end
     local end_part = key[#key]
     sub_table[end_part] = merge_values(sub_table[end_part], value)
