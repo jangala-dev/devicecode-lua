@@ -39,7 +39,7 @@ fiber.spawn(function()
     -- Here we can add more code for the CLI or other controls
     while true do
         print("main fiber sleeping")
-        sleep.sleep(100)
+        sleep.sleep(5)
         -- CLI or other control logic goes here
     end
 end)
