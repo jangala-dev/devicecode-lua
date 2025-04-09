@@ -260,7 +260,7 @@ function Modem:enable_autoconnect(ctx)
 
                     self.bus_conn:publish(new_msg(
                         { 'gsm', 'modem', self.name, 'interface' },
-                        { net_interface },
+                        net_interface,
                         { retained = true }
                     ))
                 end
@@ -364,6 +364,7 @@ end
 
 -- merge custom config with default to avoid any missing fields
 local function apply_defaults(config, defaults)
+    if not defaults then return end
     for k, v in pairs(defaults) do
         if config[k] == nil then
             config[k] = v
@@ -381,12 +382,16 @@ local function config_handler(config_msg)
 
         for name, known_config in pairs(modem_configs.known) do
             local id_field = known_config.id_field
-            apply_defaults(known_config, default_config)
-            known_config.name = name
-            configs.modem[id_field][known_config[id_field]] = known_config
+            if id_field then
+                apply_defaults(known_config, default_config)
+                known_config.name = name
+                configs.modem[id_field][known_config[id_field]] = known_config
 
-            if modems[id_field][known_config[id_field]] then
-                modems[id_field][known_config[id_field]]:update_config(known_config)
+                if modems[id_field][known_config[id_field]] then
+                    modems[id_field][known_config[id_field]]:update_config(known_config)
+                end
+            else
+                log.error('GSM - Config: id_field is not set')
             end
         end
 

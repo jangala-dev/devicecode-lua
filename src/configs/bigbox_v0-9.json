@@ -390,27 +390,31 @@
   },
   "gsm": {
     "modems": {
+      "default": {
+        "enabled": true,
+        "autoconnect": true
+      },
       "known": [
         {
           "name": "Primary",
-          "id_by": "device",
+          "id_field": "device",
           "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2"
         },
         {
           "name": "Secondary",
-          "id_by": "device",
+          "id_field": "device",
           "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4"
         },
         {
           "name": "Modem 1",
-          "id_by": "imei",
+          "id_field": "imei",
           "imei": "123456789054321"
         }
       ]
     }
   },
   "metrics": {
-    "pubilish_cache": {
+    "publish_cache": {
         "enabled": true,
         "period": 10
     },

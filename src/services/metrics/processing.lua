@@ -34,6 +34,14 @@ local DiffTrigger = {}
 DiffTrigger.__index = DiffTrigger
 setmetatable(DiffTrigger, { __index = Process })
 
+local function check_diff_args_valid(config)
+    if config.initial_val and type(config.initial_val) ~= 'number' then
+        return 'Initial value must be a number'
+    end
+    if config.diff_method ~= 'any-change' and type(config.threshold) ~= 'number' then
+        return 'Threshold must be a number'
+    end
+end
 ---@param config table
 ---@return DiffTrigger?
 ---@return string? Error
@@ -41,8 +49,8 @@ function DiffTrigger.new(config)
     local initial_val = config.initial_val
     local diff_method = config.diff_method
     local threshold = config.threshold
-    if initial_val and type(initial_val) ~= 'number' then return nil, "Initial value must be a number" end
-    if threshold and type(threshold) ~= 'number' or threshold == nil then return nil, "Threshold value must be a number" end
+    local valid_err = check_diff_args_valid(config)
+    if valid_err then return nil, valid_err end
     local self = setmetatable({}, DiffTrigger)
     if diff_method == 'absolute' then
         self.diff_method = function(curr, last, threshold) return math.abs(curr - last) >= threshold end
@@ -51,7 +59,7 @@ function DiffTrigger.new(config)
     elseif diff_method == 'any-change' then
         self.diff_method = function (curr, last) return curr ~= last end
     else
-        return nil, "Diff method must be 'absolute' or 'percent'"
+        return nil, "Diff method must be 'absolute', 'percent' or 'any-change'"
     end
     self.empty = (initial_val == nil)
     self.threshold = threshold
