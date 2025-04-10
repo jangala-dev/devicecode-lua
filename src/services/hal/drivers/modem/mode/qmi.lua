@@ -47,11 +47,13 @@ return function(modem)
         local cmd_err = cmd:start()
         if cmd_err then return nil, nil, cmd_err end
         local reads = 0
-        local read_op = stdout:read_line_op():wrap(function(line)
-            local slot_status, err = utils.parse_slot_monitor(line)
-            if err then return line, err end
-            return slot_status == 'present'
-        end)
+        local read_op = function()
+            return stdout:read_line_op():wrap(function(line)
+                local slot_status, err = utils.parse_slot_monitor(line)
+                if err then return line, err end
+                return slot_status == 'present'
+            end)
+        end
         local cancel_fn = function()
             cmd:kill()
             stdout:close()

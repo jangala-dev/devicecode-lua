@@ -280,7 +280,7 @@ function Driver:wait_for_sim()
         local connected = false
         while not connected do
             local state, parse_err, ctx_err = op.choice(
-                slot_monitor_op,
+                slot_monitor_op(),
                 warm_swap_ctx:done_op():wrap(function()
                     return nil, nil, self.ctx:err()
                 end)
@@ -422,7 +422,7 @@ function Driver:state_monitor(ctx)
                 if err then return err end
                 modem_state = modem_line
             end),
-            sim_monitor_op:wrap(function(connected, err)
+            sim_monitor_op():wrap(function(connected, err)
                 if err then return err .. " " .. tostring(connected) end
                 sim_connected = connected
             end),
