@@ -114,7 +114,7 @@ function system_service:_handle_config(config_msg)
     end
 
     local alarms = config_msg.payload.alarms
-    if alarms then
+    if alarms and type(alarms) == "table" then
         self.alarm_manager:delete_all()
         for _, alarm in ipairs(alarms) do
             local add_err = self.alarm_manager:add(alarm)
@@ -187,7 +187,7 @@ end
 function system_service:_handle_alarm(alarm)
     local name = alarm.payload and alarm.payload.name
     local type = alarm.payload and alarm.payload.type
-    log.info("SHUTTING DOWN", name, type)
+    if type ~= 'reboot' and type ~= 'alarm' then return end
     local deadline = sc.monotime() + 10
     self.conn:publish(new_msg(
         { '+', 'control', 'shutdown' },
@@ -288,8 +288,8 @@ function system_service:_system_main()
     local config_sub = self.conn:subscribe({ 'config', 'system' })
 
     local static_info = get_static_infos()
-    self.model = static_info.device.model
     if static_info then
+        self.model = static_info.device.model
         self.conn:publish_multiple(
             { 'system', 'info' },
             static_info,
