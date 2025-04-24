@@ -19,6 +19,17 @@ local wraperr = require "wraperr"
 local unpack = table.unpack or unpack
 local CMD_TIMEOUT = 2
 
+---@class Driver
+---@field ctx Context
+---@field address string
+---@field command_q Queue
+---@field state_monitor_channel Channel
+---@field modem_info_channel Channel
+---@field sim_info_channel Channel
+---@field nas_info_channel Channel
+---@field gid_info_channel Channel
+---@field gps_info_channel Channel
+---@field refresh_rate_channel Channel
 local Driver = {}
 Driver.__index = Driver
 
@@ -35,6 +46,8 @@ local model_info = {
     fibocom = {}
 }
 
+---returns a list of control and info capabilities for the modem
+---@return table
 function Driver:get_capabilities()
     local capabilities = {}
     capabilities.modem = {
@@ -43,84 +56,59 @@ function Driver:get_capabilities()
             { name = 'state', channel = self.state_monitor_channel, endpoints = 'single' },
             { name = 'modem', channel = self.modem_info_channel,    endpoints = 'multiple' },
             { name = 'sim',   channel = self.sim_info_channel,      endpoints = 'multiple' },
-            { name = 'nas',   channel = self.nas_channel,           endpoints = 'multiple' },
-            { name = 'gids',  channel = self.gid_channel,           endpoints = 'multiple' }
+            { name = 'nas',   channel = self.nas_info_channel,      endpoints = 'multiple' },
+            { name = 'gids',  channel = self.gid_info_channel,      endpoints = 'multiple' }
         }
     }
-
-    -- local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
-    -- local cmd = mmcli.location_status(new_ctx, self.address)
-    -- local out, out_err = cmd:combined_output()
-    -- if out_err then return nil, wraperr.new(out_err) end
-
-    -- local location_info, _, decode_err = json.decode(out)
-    -- if decode_err then return nil, wraperr.new(decode_err) end
-
-    -- local location_capabilities = location_info.modem.location.capabilities
-    -- if #location_capabilities > 0 then
-    --     capabilities.gps = {
-    --         control = hal_capabilities.new_gps_capability(self.command_q),
-    --         info_streams = { { name = 'gps', channel = self.gps_info_channel, endpoints = 'single' } }
-    --     }
-    -- end
-
-    capabilities.time = {
-        control = hal_capabilities.new_time_capability(self.command_q),
-        info_streams = {}
-    }
-    -- add time events
-
     return capabilities
 end
+---continuously polls the modem for modem and sim information
 function Driver:poll_info()
-    local poll_freq = 1
-
+    local poll_freq = 10
     while not self.ctx:err() do
+        local infos = {}
         local modem_info, modem_err = self:get_modem_info()
         if modem_err then
             log.error(string.format("Modem - %s: Failed to get modem info: %s", self.imei, modem_err))
         else
-            if modem_info.generic.sim ~= '--' then
-                local sim_info, sim_err = self:get_sim_info(modem_info.generic.sim)
-                if sim_err then
-                    log.debug("Sim - %s: Failed to get sim info: %s", self.imei, sim_err)
-                else
-                    op.choice(
-                        self.sim_info_channel:put_op(sim_info),
-                        self.ctx:done_op()
-                    ):perform()
-                end
+            infos.modem = modem_info
+        end
 
-                if modem_info["3gpp"]["registration-state"] ~= "--" then
-                    local nas_info, nas_err = self.get_nas_info()
-
-                    if nas_err then
-                        log.debug("MCC MNC failed retrieval", nas_err)
-                    end
-                    op.choice(
-                        self.nas_channel:put_op(nas_info),
-                        self.ctx:done_op()
-                    ):perform()
-                end
+        if infos.modem and infos.modem.generic.sim ~= '--' then
+            local sim_info, sim_err = self:get_sim_info(infos.modem.generic.sim)
+            if sim_err then
+                log.debug("Sim - %s: Failed to get sim info: %s", self.imei, sim_err)
+            else
+                infos.sim = sim_info
             end
+        end
 
-            if modem_info.generic.state ~= 'failed' then
-                local gids, gid_err = self.uim_get_gids()
-                local gid_table = {
-                    gid1 = gids.gid1,
-                    gid2 = gids.gid2
-                }
-                if gid_err then log.debug(gid_err) end
+        if infos.modem and infos.modem["3gpp"]["registration-state"] ~= '--' then
+            local nas_info, nas_err = self.get_nas_info()
+            if nas_err then
+                log.debug("MCC MNC failed retrieval", nas_err)
+            else
+                infos.nas = nas_info
+            end
+        end
+
+        if infos.modem and infos.modem.generic.state ~= 'failed' then
+            local gids, gid_err = self.uim_get_gids()
+            if gid_err then
+                log.debug(gid_err)
+            else
+                infos.gid = gids
+            end
+        end
+
+        for k, v in pairs(infos) do
+            local info_channel = self[k .. "_info_channel"]
+            if v and info_channel then
                 op.choice(
-                    self.gid_channel:put_op(gid_table),
+                    info_channel:put_op(v),
                     self.ctx:done_op()
                 ):perform()
             end
-
-            op.choice(
-                self.modem_info_channel:put_op(modem_info),
-                self.ctx:done_op()
-            ):perform()
         end
         local poll_freq_update = op.choice(
             self.ctx:done_op(),
@@ -132,6 +120,9 @@ function Driver:poll_info()
 
     log.trace(string.format("Modem - %s: Polling info stopped", self.imei))
 end
+---Reads mmcli modem output into a table structure
+---@return table?
+---@return table? error
 function Driver:get_modem_info()
     local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.information(new_ctx, self.address)
@@ -144,6 +135,10 @@ function Driver:get_modem_info()
     return info.modem, nil
 end
 
+---Reads mmcli sim output into a table structure
+---@param sim_address string
+---@return table?
+---@return table? error
 function Driver:get_sim_info(sim_address)
     local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.sim_information(new_ctx, sim_address)
@@ -155,6 +150,7 @@ function Driver:get_sim_info(sim_address)
 
     return info.sim, nil
 end
+---Gets initial modem information and binds protocol specific functions to the driver
 function Driver:init()
     local info, err = self:get_modem_info()
     if info == nil or err then return err end
@@ -198,6 +194,8 @@ function Driver:init()
     model_overrides.add_model_funcs(self)
 end
 
+---Starts modem information, monitor and command manager fibers
+---@param bus_conn Connection
 function Driver:spawn(bus_conn)
     service.spawn_fiber('Modem Info Poll - ' .. self.imei, bus_conn, self.ctx, function()
         self:poll_info()
@@ -209,7 +207,9 @@ function Driver:spawn(bus_conn)
         self:command_manager()
     end)
 end
+
 -- Base methods can be defined here
+
 function Driver:set_func_min()
     local cmd_ctx = context.with_timeout(self.ctx, 0.3)
     return at.send_with_context(cmd_ctx, "AT+CFUN=0")
@@ -309,94 +309,7 @@ local function is_state_transition(state_change, before, after)
     return state_change.prev_state == before and state_change.curr_state == after
 end
 
-function Driver:modem_state_monitor()
-    if self.ctx:err() then return end
-
-    local cmd = mmcli.monitor_state(self.address)
-    local stdout = assert(cmd:stdout_pipe())
-    local cmd_err = cmd:start()
-
-    if cmd_err then
-        log.error("Modem State Monitor: failed to start for imei - ", self.imei)
-    else
-        while not self.ctx:err() do
-            -- for line in stdout:lines() do
-            while not self.ctx:err() do
-                local line, ctx_err = op.choice(
-                    stdout:read_line_op(),
-                    self.ctx:done_op():wrap(function()
-                        return nil, self.ctx:err()
-                    end)
-                ):perform()
-                if ctx_err then
-                    cmd:kill()
-                    break
-                end
-                local state, err = utils.parse_modem_monitor(line)
-                if err ~= nil then
-                    log.error(err)
-                else
-                    self.modem_state_monitor_channel:put(state)
-                end
-            end
-
-            cmd:wait()
-        end
-    end
-    stdout:close()
-    log.trace(string.format("HAL: Modem: State Monitor closing, reason '%s'", self.ctx:err()))
-end
-
-function Driver:sim_slot_monitor()
-    if self.ctx:err() then return end
-
-    local cmd = self.monitor_slot_state()
-    local stdout = assert(cmd:stdout_pipe())
-    local cmd_err = cmd:start()
-
-    if cmd_err then
-        log.error("Slot State Monitor: failed to start for imei - ", self.imei)
-    else
-        while not self.ctx:err() do
-            for line in stdout:lines() do
-                local slot_state, err = utils.parse_slot_monitor(line)
-                if err ~= nil then
-                    log.error(err)
-                else
-                    self.slot_state_monitor_channel:put(slot_state)
-                end
-            end
-
-            if not self.ctx:err() then
-                cmd:wait()
-            end
-        end
-    end
-    stdout:close()
-end
-
---[[
-function Driver:state_monitor()
-    while not self.ctx:err() do
-        local modem_status, slot_status, ctx_err op.choice(
-            self.modem_state_monitor_channel:get_op():wrap(function (modem_status)
-                return modem_status, nil, nil
-            end),
-            self.slot_state_monitor_channel:get_op():wrap(function (slot_status)
-                return nil, slot_status, nil
-            end),
-            self.ctx:done_op():wrap(function () return nil, nil, self.ctx:err() end)
-        ):perform()
-
-        if ctx_err then return end
-        if modem_status then
-            self.state_monitor_channel:put(modem_status)
-        else if slot_status then
-            self.state_monitor_channel:put({some state showing no sim})
-        end
-    end
-end
-]] --
+-- Listens for modem state changes and sends them to HAL
 function Driver:state_monitor()
     if self.ctx:err() then return end
 
@@ -456,6 +369,7 @@ function Driver:state_monitor()
     log.trace("Modem State Monitor: closing for imei - ", self.imei)
 end
 
+---Listens for commands from HAL and executes them
 function Driver:command_manager()
     log.trace(string.format("Modem - %s: Command Manager started", self.imei))
     while not self.ctx:err() do
@@ -490,12 +404,14 @@ local function new(ctx, address)
     self.ctx = ctx
     self.address = address
     self.command_q = queue.new()
+    --create info channels
     self.state_monitor_channel = channel.new()
     self.modem_info_channel = channel.new()
     self.sim_info_channel = channel.new()
-    self.nas_channel = channel.new()
-    self.gid_channel = channel.new()
+    self.nas_info_channel = channel.new()
+    self.gid_info_channel = channel.new()
     self.gps_info_channel = channel.new()
+
     self.refresh_rate_channel = channel.new()
     -- Other initial properties
     return self

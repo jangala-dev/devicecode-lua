@@ -9,12 +9,15 @@ local mmcli = require "services.hal.drivers.modem.mmcli"
 local service = require "service"
 local log = require "log"
 
+---@class ModemManagement
 local ModemManagement = {
     modem_remove_channel = channel.new(),
     modem_detect_channel = channel.new()
 }
 ModemManagement.__index = ModemManagement
 
+---Create a new Modem Manager
+---@return ModemManagement
 local function new()
     local modem_management = {}
     return setmetatable(modem_management, ModemManagement)
@@ -22,7 +25,9 @@ end
 
 local modems = {}
 
-function ModemManagement:detector(ctx)
+--- Detect modems via mmcli modem monitor
+---@param ctx Context
+function ModemManagement:_detector(ctx)
     log.trace("Modem Detector: starting...")
 
     while not ctx:err() do
@@ -71,7 +76,11 @@ function ModemManagement:detector(ctx)
     log.trace(string.format("HAL: Modemcard Manager - Detector Closing, reason '%s'", ctx:err()))
 end
 
-function ModemManagement:manager(
+--- Creates and deletes modem drivers
+---@param ctx Context
+---@param bus_conn Connection
+---@param device_event_q Queue
+function ModemManagement:_manager(
     ctx,
     bus_conn,
     device_event_q)
@@ -157,11 +166,11 @@ end
 
 function ModemManagement:spawn(ctx, bus_conn, device_event_q)
     service.spawn_fiber('Modem Detector', bus_conn, ctx, function(detector_ctx)
-        self:detector(detector_ctx)
+        self:_detector(detector_ctx)
     end)
 
     service.spawn_fiber('Modem Manager', bus_conn, ctx, function(manager_ctx)
-        self:manager(manager_ctx, bus_conn, device_event_q)
+        self:_manager(manager_ctx, bus_conn, device_event_q)
     end)
 end
 return {new = new}

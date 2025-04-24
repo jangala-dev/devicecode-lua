@@ -131,10 +131,12 @@
         "usb3_enabled": false,
         "alarms": [
             {
-                "name": "daily reboot",
-                "action": "reboot",
-                "datetime": "8:48",
-                "repeats": "daily"
+                "time": "5:00",
+                "repeats": "daily",
+                "payload": {
+                    "name": "daily reboot",
+                    "type": "reboot"
+                }
             }
         ]
     }

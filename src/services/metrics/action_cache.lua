@@ -86,7 +86,7 @@ function ActionCache:update(key, value)
             return process:run(value)
         end
     end
-    return nil, true, 'could not find process accociated with key-value'
+    return nil, true, 'could not find process associated with key-value'
 end
 
 ---Resets all processes in the cache
