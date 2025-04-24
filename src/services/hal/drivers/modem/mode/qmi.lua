@@ -10,13 +10,6 @@ local CMD_TIMEOUT = 3
 
 -- driver/mode/qmi.lua
 return function(modem)
-    modem.example_1 = function()
-        print("Running QMI example 1...")
-    end
-    modem.example_2 = function()
-        print("Running QMI example 2...")
-    end
-
     modem.is_sim_inserted = function()
         local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
         local cmd = qmicli.uim_get_card_status(new_ctx, modem)
@@ -131,7 +124,7 @@ return function(modem)
         local nas_infos = {}
 
         local home_network_info, hn_err = nas_get_home_network_parsed()
-        if nh_err == nil and home_network_info then
+        if hn_err == nil and home_network_info then
             for k, v in pairs(home_network_info) do
                 nas_infos[k] = v
             end

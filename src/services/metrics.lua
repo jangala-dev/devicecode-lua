@@ -8,6 +8,9 @@ local trie = require 'trie'
 local sc = require 'fibers.utils.syscall'
 local unpack = table.unpack or unpack
 
+---@class metrics_service
+---@field str_trie Trie
+---@field default_process ProcessPipeline
 local metrics_service = {
     name = 'metrics',
     metric_ops = {},

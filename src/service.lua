@@ -2,7 +2,13 @@ local context = require "fibers.context"
 local fiber = require 'fibers.fiber'
 local bus = require "bus"
 local new_msg = bus.new_msg
+local log = require "log"
 
+local STATE = {
+    INITIALISING = 'initialising',
+    ACTIVE = 'active',
+    DISABLED = 'disabled'
+}
 local FiberRegister = {}
 FiberRegister.__index = FiberRegister
 
@@ -10,14 +16,14 @@ function FiberRegister.new()
     return setmetatable({size = 0, fibers = {}}, FiberRegister)
 end
 
-function FiberRegister:push(name, status)
+function FiberRegister:add(name, status)
     if self.fibers[name] == nil then
         self.size = self.size + 1
     end
     self.fibers[name] = status
 end
 
-function FiberRegister:pop(name)
+function FiberRegister:remove(name)
     if self.fibers[name] ~= nil then
         self.size = self.size - 1
         self.fibers[name] = nil
@@ -34,15 +40,23 @@ end
 local function spawn(service, bus, ctx)
     local bus_connection = bus:connect()
     local cancel_ctx, cancel_fn = context.with_cancel(ctx)
+    if service.name == nil then
+        log.error("Service name is nil")
+        return
+    end
     local child_ctx = context.with_value(cancel_ctx, "service_name", service.name)
 
     local health_topic = { child_ctx:value("service_name"), 'health' }
 
     -- Non-blocking start function
+    if service.start == nil then
+        log.error("Service start function is nil")
+        return
+    end
     service:start(child_ctx, bus_connection)
     bus_connection:publish(new_msg(
         health_topic,
-        { name = child_ctx:value("service_name"), state = 'active' },
+        { name = child_ctx:value("service_name"), state = STATE.ACTIVE },
         { retained = true }
     ))
 
@@ -60,33 +74,23 @@ local function spawn(service, bus, ctx)
         )
         local active_fibers = FiberRegister.new()
 
-        local fibers_checked = false
-
-        -- is there a better way to do this? should be one loop or two for better readability?:
-        -- 1. No fibers
-        -- 2. All fibers already completed
-        -- 3. Some fibers finished
-        -- 4. All fibers finished
-        -- 5. (opt) Could a fiber spin up during the shutdown and not be detected as ongoing?
-
         -- collect what fibers are active or initialising
-
         local fiber_check_ctx = context.with_deadline(ctx, shutdown_event.payload.deadline)
-
         while true do
             local message, ctx_err = service_fibers_status_sub:next_msg_with_context_op(fiber_check_ctx):perform()
             if ctx_err then break end
-            if message.payload.state == 'disabled' then
-                active_fibers:pop(message.payload.name)
+            if message.payload.state == STATE.DISABLED then
+                active_fibers:remove(message.payload.name)
             else
-                active_fibers:push(message.payload.name, message.payload.state)
+                active_fibers:add(message.payload.name, message.payload.state)
             end
         end
 
+        -- if no active or initialising fibers, we can safely end the service
         if active_fibers:is_empty() then
             bus_connection:publish(new_msg(
                 health_topic,
-                { name = child_ctx:value("service_name"), state = 'disabled' },
+                { name = child_ctx:value("service_name"), state = STATE.DISABLED },
                 { retained = true }
             ))
         end
@@ -101,20 +105,20 @@ local function spawn_fiber(name, bus_connection, ctx, fn)
 
     bus_connection:publish(new_msg(
         fiber_topic,
-        { name = child_ctx:value("fiber_name"), state = 'initialising' },
+        { name = child_ctx:value("fiber_name"), state = STATE.INITIALISING },
         { retained = true }
     ))
 
     fiber.spawn(function ()
         bus_connection:publish(new_msg(
             fiber_topic,
-            { name = child_ctx:value("fiber_name"), state = 'active' },
+            { name = child_ctx:value("fiber_name"), state = STATE.ACTIVE },
             { retained = true }
         ))
         fn(child_ctx)
         bus_connection:publish(new_msg(
             fiber_topic,
-            { name = child_ctx:value("fiber_name"), state = 'disabled' },
+            { name = child_ctx:value("fiber_name"), state = STATE.DISABLED },
             { retained = true }
         ))
     end)
