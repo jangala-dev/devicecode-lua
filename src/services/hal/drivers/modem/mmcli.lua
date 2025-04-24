@@ -22,10 +22,6 @@ local function reset(device)
     return exec.command('mmcli', '-m', device, '-r')
 end
 
-local function factory_reset(code)
-    return exec.command('mmcli', '-m', device, '--factory_reset=', code)
-end
-
 local function enable(device)
     return exec.command('mmcli', '-m', device, '-e')
 end
@@ -51,21 +47,6 @@ end
 
 local function signal_setup(ctx, device, rate)
     return exec.command_context(ctx, 'mmcli', '-m', device, '--signal-setup=', rate)
-end
-
-local function create_bearer(ctx, device, ...)
-    local cmd_args = {}
-    local num_args = select("#", ...)
-    for i = 1, num_args do
-        local kv_pair = select(i, ...)
-        assert(type(kv_pair) == "table")
-        assert(kv_pair.key)
-        assert(kv_pair.value)
-        table.insert(cmd_args, kv_pair.key .. "=" .. kv_pair.value)
-    end
-    local arg_string = table.concat(cmd_args, ',')
-    arg_string = '"'.. arg_string .. '"'
-    return exec.command_context(ctx, 'mmcli', '-m', device, '--create-bearer=', arg_string)
 end
 
 return {

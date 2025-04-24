@@ -16,13 +16,15 @@ local system_service = {
 }
 system_service.__index = system_service
 
--- Note: shove all this into hal module, system should just have to call usb3.disable() and .enable()
-function system_service:disable_usb3()
-    if self.model ~= "bigbox-ss" then return end
+---Turn off the USB3 hub and move peripherals to USB2
+---@param ctx Context
+---@param model string?
+local function disable_usb3(ctx, model)
+    if model ~= "bigbox-ss" then return end
     -- VL805 (usb hub controller) firmware needs to be past a certain version
     -- version was added 2019-09-10 so let's check our version is 2019-09-10 or later
     local vl805_supported_from = os.time({ year = 2019, month = 09, day = 10, hour = 0, min = 0, sec = 0 })
-    local vl805_timestamp, err = usb3.get_vl805_version_timestamp(self.ctx)
+    local vl805_timestamp, err = usb3.get_vl805_version_timestamp(ctx)
     if err ~= nil or vl805_timestamp < vl805_supported_from then
         err = err or ""
         log.warn(string.format(
@@ -34,15 +36,15 @@ function system_service:disable_usb3()
         return
     end
     -- deactivating any current usb 3.0 connections via deauthorisation
-    local usb_3_0_used, err = usb3.clear_usb_3_0_hub(self.ctx)
+    local usb_3_0_used, err = usb3.clear_usb_3_0_hub(ctx)
     if err ~= nil then
         -- need to reauth devices just in case
         log.error(string.format("System: Error clearing usb 3.0 hub, attempting repopulation, %s", err))
-        _, err = usb3.repopulate_usb_3_0_hub(self.ctx)
+        _, err = usb3.repopulate_usb_3_0_hub(ctx)
         if err ~= nil then
             log.error(string.format("System: Error reactivating usb 3.0 connections, %s", err))
         end
-        err = usb3.set_usb_hub_auth_default(self.ctx, true, 2)
+        err = usb3.set_usb_hub_auth_default(ctx, true, 2)
         if err ~= nil then
             log.error(string.format("System: Error default-reauthorising usb 3.0 connections, %s", err))
         end
@@ -53,24 +55,24 @@ function system_service:disable_usb3()
         return
     end
     -- default deauthorising usb 3.0 hub, prevents future connections
-    err = usb3.set_usb_hub_auth_default(self.ctx, false, 2)
+    err = usb3.set_usb_hub_auth_default(ctx, false, 2)
     if err ~= nil then
         log.warn(string.format("System: Error default-deauthorising usb 3.0 connections, %s", err))
     end
     -- powering down usb 3.0 hub to initiate usb 2.0 connections
-    err = usb3.set_usb_hub_power(self.ctx, false, 2)
+    err = usb3.set_usb_hub_power(ctx, false, 2)
     if err ~= nil then
         -- need to try power up the hub just in case, and reauth devices
         log.error(string.format("System: Error powering down usb 3.0 hub, attempting power up, %s", err))
-        err = usb3.set_usb_hub_power(self.ctx, true, 2)
+        err = usb3.set_usb_hub_power(ctx, true, 2)
         if err ~= nil then
             log.error("System: Error powering up usb 3.0 hub, attempting repopulation, %s", err)
         end
-        _, err = usb3.repopulate_usb_3_0_hub(self.ctx)
+        _, err = usb3.repopulate_usb_3_0_hub(ctx)
         if err ~= nil then
             log.error(string.format("System: Error reactivating usb 3.0 connections, %s", err))
         end
-        err = usb3.set_usb_hub_auth_default(self.ctx, true, 2)
+        err = usb3.set_usb_hub_auth_default(ctx, true, 2)
         if err ~= nil then log.warn(string.format("System: Error default-reauthorising usb 3.0 connections, %s", err)) end
         return
     end
@@ -88,6 +90,8 @@ function system_service:disable_usb3()
     log.warn(string.format("System: Deactivated usb 3.0 devices not detected on usb 2.0 hub ports, may be unstable"))
 end
 
+---Configure USB hub and alarms
+---@param config_msg table
 function system_service:_handle_config(config_msg)
     if config_msg.payload == nil then
         log.error("System: Invalid configuration message")
@@ -106,11 +110,11 @@ function system_service:_handle_config(config_msg)
     if not usb3_enabled then
         -- this is just a copy-paste job, look at this again during mvp
         -- and think about abstraction and renablement(?) etc
-        self:disable_usb3()
+        disable_usb3(self.ctx, self.model)
     end
 
     local alarms = config_msg.payload.alarms
-    if alarms then
+    if alarms and type(alarms) == "table" then
         self.alarm_manager:delete_all()
         for _, alarm in ipairs(alarms) do
             local add_err = self.alarm_manager:add(alarm)
@@ -121,6 +125,7 @@ function system_service:_handle_config(config_msg)
     end
 end
 
+---Periodic gathering a publish of system information
 function system_service:_report_sysinfo()
     local report_period = self.report_period_channel:get()
     while not self.ctx:err() do
@@ -129,15 +134,9 @@ function system_service:_report_sysinfo()
             log.debug("Failed to get CPU model: ", cpu_model_err)
         end
 
-        local overall_utilisation, core_utilisations, average_frequency, core_frequencies, err = sysinfo
-            .get_cpu_utilisation_and_freq(self.ctx)
+        local all_util, core_util, avg_freq, core_freq, err = sysinfo.get_cpu_utilisation_and_freq(self.ctx)
         if err then
             log.debug("Failed to get CPU utilisation and frequency: ", err)
-            if type(err) == 'table' then
-                for k, v in pairs(err) do
-                    log.debug(string.format("Error %s: %s", k, v))
-                end
-            end
         end
 
         local total, used, free, ram_err = sysinfo.get_ram_info()
@@ -153,10 +152,10 @@ function system_service:_report_sysinfo()
         local sysinfo_data = {
             cpu = {
                 cpu_model = cpu_model,
-                overall_utilisation = overall_utilisation,
-                core_utilisations = core_utilisations,
-                average_frequency = average_frequency,
-                core_frequencies = core_frequencies
+                overall_utilisation = all_util,
+                core_utilisations = core_util,
+                average_frequency = avg_freq,
+                core_frequencies = core_freq
             },
             mem = {
                 total = total,
@@ -167,7 +166,7 @@ function system_service:_report_sysinfo()
             heartbeat = 0
         }
 
-        self.bus_conn:publish_multiple(
+        self.conn:publish_multiple(
             { 'system', 'info' },
             sysinfo_data,
             { retained = true }
@@ -183,33 +182,44 @@ function system_service:_report_sysinfo()
     end
 end
 
+---Performs shutdown or reboot of the system
+---@param alarm Alarm
 function system_service:_handle_alarm(alarm)
+    local name = alarm.payload and alarm.payload.name
+    local type = alarm.payload and alarm.payload.type
+    if type ~= 'reboot' and type ~= 'alarm' then return end
     local deadline = sc.monotime() + 10
-    self.bus_conn:publish(new_msg(
+    self.conn:publish(new_msg(
         { '+', 'control', 'shutdown' },
-        { reason = alarm.name, deadline = deadline },
+        { reason = name, deadline = deadline },
         { retained = true }
     ))
 
-    -- need to create context that is independant from the service context
+    -- need to create context that is independent from the service context
     -- as the broadcast shutdown message will also shutdown the system service
     local shutdown_timeout = context.with_deadline(context.background(), deadline + 1)
-    local shutdown_sub = self.bus_conn:subscribe({ '+', 'health' })
+    local shutdown_sub = self.conn:subscribe({ '+', 'health' })
 
-    while not shutdown_timeout:err() and self.num_services > 0 do
+    local active_services = {}
+
+    while not shutdown_timeout:err() do
         local msg, timeout_err = shutdown_sub:next_msg_with_context_op(shutdown_timeout):perform()
         if timeout_err then break end
         local service_name = msg.topic[1]
-        if msg.payload.state == 'disabled' and self.services[service_name] then
-            self.num_services = self.num_services - 1
-            self.services[service_name] = nil
+        if service_name ~= self.name then
+            if msg.payload.state == 'disabled' and active_services[service_name] then
+                active_services[service_name] = nil
+            end
+            if msg.payload.state ~= 'disabled' and not active_services[service_name] then
+                active_services[service_name] = true
+            end
         end
     end
     shutdown_sub:unsubscribe()
 
-    for service_name, _ in pairs(self.services) do
+    for service_name, _ in pairs(active_services) do
         local err_msg = string.format("Service %s did not shut down safely due to hanging fibers:\n", service_name)
-        local service_fibers_status_sub = self.bus_conn:subscribe(
+        local service_fibers_status_sub = self.conn:subscribe(
             { service_name, 'health', 'fibers', '+' }
         )
         while true do
@@ -225,27 +235,22 @@ function system_service:_handle_alarm(alarm)
         log.debug(err_msg)
     end
 
-    if alarm.type == alarms.ALARM_TYPES.SHUTDOWN then
+    if type == 'shutdown' then
         local cmd = exec.command('shutdown', '-h', 'now')
         cmd:run()
-    elseif alarm.type == alarms.ALARM_TYPES.REBOOT then
+    elseif type == 'reboot' then
         local cmd = exec.command('reboot')
         cmd:run()
     end
     os.exit()
 end
--- Main system service loop
-function system_service:_system_main()
-    -- Subscribe to system-related topics
-    local config_sub = self.bus_conn:subscribe({ 'config', 'system' })
-    local services_health_sub = self.bus_conn:subscribe({ '+', 'health' })
 
+---Gets static information (hw model, hw/fw version, boot time)
+---@return table?
+local function get_static_infos()
     local model, version, hw_err = sysinfo.get_hw_revision()
     if hw_err then
         log.error(string.format("System: Failed to get model and version: %s", hw_err))
-    else
-        self.model = model
-        self.version = version
     end
 
     local firmware_version, fw_err = sysinfo.get_fw_version()
@@ -272,14 +277,26 @@ function system_service:_system_main()
             },
             boot_time = boot_time
         }
-        self.bus_conn:publish_multiple(
+        return system_data
+    end
+    return nil
+end
+
+--- Main system service loop
+function system_service:_system_main()
+    -- Subscribe to system-related topics
+    local config_sub = self.conn:subscribe({ 'config', 'system' })
+
+    local static_info = get_static_infos()
+    if static_info then
+        self.model = static_info.device.model
+        self.conn:publish_multiple(
             { 'system', 'info' },
-            system_data,
+            static_info,
             { retained = true }
         )
     end
 
-    -- Main event loop
     while not self.ctx:err() do
         op.choice(
             self.ctx:done_op(),
@@ -288,35 +305,25 @@ function system_service:_system_main()
             end),
             self.alarm_manager:next_alarm_op():wrap(function(alarm)
                 self:_handle_alarm(alarm)
-            end),
-            services_health_sub:next_msg_op():wrap(function(msg)
-                local service_name = msg.topic[1]
-                if service_name == self.name then return end
-                local service_state = msg.payload.state
-                if service_state ~= 'disabled' then
-                    if not self.services[service_name] then
-                        self.services[service_name] = service_name
-                        self.num_services = self.num_services + 1
-                    end
-                end
             end)
         ):perform()
     end
+    config_sub:unsubscribe()
 end
 
--- Start the system service
-function system_service:start(ctx, bus_connection)
+---Start the system service
+---@param ctx Context
+---@param conn Connection
+function system_service:start(ctx, conn)
     self.ctx = ctx
-    self.bus_conn = bus_connection
+    self.conn = conn
     self.report_period_channel = channel.new()
     self.alarm_manager = alarms.AlarmManager.new()
-    self.services = {}
-    self.num_services = 0
     log.trace("Starting System Service")
-    service.spawn_fiber('System Main', bus_connection, ctx, function()
+    service.spawn_fiber('System Main', conn, ctx, function()
         self:_system_main()
     end)
-    service.spawn_fiber('System Sysinfo', bus_connection, ctx, function()
+    service.spawn_fiber('System Sysinfo', conn, ctx, function()
         self:_report_sysinfo()
     end)
 end
