@@ -46,7 +46,7 @@ local function location_status(ctx, device)
 end
 
 local function signal_setup(ctx, device, rate)
-    return exec.command_context(ctx, 'mmcli', '-m', device, '--signal-setup=', rate)
+    return exec.command_context(ctx, 'mmcli', '-m', device, '--signal-setup=' .. tostring(rate))
 end
 
 return {

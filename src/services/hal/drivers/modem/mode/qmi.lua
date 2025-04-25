@@ -12,42 +12,48 @@ local CMD_TIMEOUT = 3
 return function(modem)
     modem.is_sim_inserted = function()
         local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
-        local cmd = qmicli.uim_get_card_status(new_ctx, modem)
-        local out, err = cmd:combined_output()
-        if err then return nil, wraperr.new(err) end
+        local cmd = qmicli.uim_get_card_status(new_ctx, modem.primary_port)
+        local out, cmd_err = cmd:combined_output()
+        if cmd_err then return nil, cmd_err end
 
-        local status = out:match("Card state:%s'(.-)\n"):gsub("'", "")
-        if status:find("present") then return true, nil end
-        return false, nil
+        local status, parse_err = utils.parse_slot_monitor(out)
+        if parse_err then return nil, parse_err end
+        return status == 'present', nil
     end
 
-    modem.set_func_min = function()
-        local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
+    modem.set_power_low = function(ctx)
+        local new_ctx = context.with_timeout(ctx, CMD_TIMEOUT)
         local cmd = qmicli.uim_sim_power_off(new_ctx, modem.primary_port)
-        local out, err = cmd:combined_output()
-        if err then return wraperr.new(err) end
-
-        return nil
+        return cmd:combined_output()
     end
 
-    modem.set_func_max = function()
-        local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
+    modem.set_power_high = function(ctx)
+        local new_ctx = context.with_timeout(ctx, CMD_TIMEOUT)
         local cmd = qmicli.uim_sim_power_on(new_ctx, modem.primary_port)
-        local out, err = cmd:combined_output()
-        if err then return wraperr.new(err) end
-
-        return nil
+        return cmd:combined_output()
     end
 
-    modem.wait_for_sim = function()
-        while not modem.ctx:err() and not modem.is_sim_inserted() do
-            modem.set_func_min()
-            modem.set_func_max()
-            sleep.sleep(0.2)
+    modem.monitor_slot_status = function()
+        local cmd = qmicli.uim_monitor_slot_status(modem.primary_port)
+        local stdout = assert(cmd:stdout_pipe())
+        local cmd_err = cmd:start()
+        if cmd_err then return nil, nil, cmd_err end
+        local data = ""
+        local read_func = function()
+            return stdout:read_line_op("keep"):wrap(function(line)
+                data = data .. line
+                local slot_status, err = utils.parse_slot_monitor(data)
+                if err then return nil end
+                data = ""
+                return slot_status == 'present'
+            end)
         end
-    end
-    modem.monitor_slot_state = function()
-        return qmicli.uim_monitor_slot_status(modem.primary_port)
+        local cancel_fn = function()
+            cmd:kill()
+            stdout:close()
+        end
+
+        return read_func, cancel_fn, nil
     end
 
     modem.get_mcc_mnc = function()
@@ -75,7 +81,7 @@ return function(modem)
         if gid1_cmd_err then return gids, wraperr.new(gid1_cmd_err) end
 
         local gid1_out_parsed, gid1_parse_err = utils.parse_qmicli_output(gid1_out, key_map)
-        if gid1_parse_err == nil then
+        if gid1_parse_err == nil and gid1_out_parsed["read-result"] then
             local gid1
             -- unfortnuately the parser incorrectly identifies the hex as a key value pair
             -- so f:o:o:b:a:r becomes {f = o:o:b:a:r}
