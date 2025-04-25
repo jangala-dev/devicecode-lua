@@ -22,7 +22,7 @@ local function uim_read_transparent(ctx, port, address_string)
 end
 
 local function nas_get_rf_band_info(ctx, port)
-    return exec.command_context(ctx, 'qmicli', '-p', '-d', port)
+    return exec.command_context(ctx, 'qmicli', '-p', '-d', port, '--nas-get-rf-band-info')
 end
 local function nas_get_home_network(ctx, port)
     return exec.command_context(ctx, 'qmicli', '-p', '-d', port, '--nas-get-home-network')
