@@ -4,7 +4,9 @@ local socket = require 'fibers.stream.socket'
 local sc = require 'fibers.utils.syscall'
 local sleep = require 'fibers.sleep'
 
-local time_service = {}
+local time_service = {
+    name = "time"
+}
 time_service.__index = time_service
 
 -- Define the path for the Unix domain socket
