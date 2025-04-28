@@ -16,7 +16,9 @@ local log = require "log"
 -- will result in something like this in the logs
 -- hostapd event received wlan1 AP-STA-CONNECTED xx:xx:xx:xx:xx:xx
 
-local wifi_service = {}
+local wifi_service = {
+    name = "wifi"
+}
 wifi_service.__index = wifi_service
 
 local function get_interfaces()
