@@ -42,7 +42,9 @@ local function add_to_uci_list(main, section_name, list_name, list_value)
     end
 end
 
-local net_service = {}
+local net_service = {
+    name = "net"
+}
 net_service.__index = net_service
 
 -- Channel definitions
