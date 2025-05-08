@@ -12,6 +12,7 @@ local NO_IMPROVEMENT_SAMPLES = 2  -- Number of consecutive samples with no impro
 
 local function run(ctx, owrt_interface, linux_interface)
     local cmd = exec.command('mwan3', 'use', owrt_interface, 'wget', '-O', '/dev/null', DOWNLOAD_URL)
+    cmd:setpgid(true)
     local stderr_pipe = assert(cmd:stderr_pipe())
 
     assert(cmd:start() == nil, "Failed to start wget")
