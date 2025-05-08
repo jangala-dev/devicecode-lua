@@ -17,7 +17,7 @@ build:
 	@cp -r $(SRC_DIR)/* $(BUILD_DIR)/
 	@cp $(BUILD_DIR)/lua-bus/src/* $(BUILD_DIR)
 	@rm -r $(BUILD_DIR)/lua-bus
-	@cp -r $(BUILD_DIR)/lua-fibers/fibers $(BUILD_DIR)/fibers
+	@cp -r $(BUILD_DIR)/lua-fibers/fibers $(BUILD_DIR)
 	@rm -r $(BUILD_DIR)/lua-fibers
 	@cp $(BUILD_DIR)/lua-trie/src/* $(BUILD_DIR)
 	@rm -r $(BUILD_DIR)/lua-trie
