@@ -229,11 +229,11 @@ function ProcessPipeline:clone()
 
     return pipeline, nil
 end
---- @param process_config table
+
 --- @return ProcessPipeline?
 --- @return string? Error
-local function new_process_pipeline(process_config)
-    if process_config == nil then return nil, 'Cannot create a process pipeline with no config' end
+local function new_process_pipeline()
+    -- if process_config == nil then return nil, 'Cannot create a process pipeline with no config' end
     local self = setmetatable({}, ProcessPipeline)
     self.process_blocks = {}
     self.full_run = false

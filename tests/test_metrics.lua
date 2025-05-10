@@ -6,6 +6,7 @@ local metrics = require 'services.metrics'
 local sc = require "fibers.utils.syscall"
 local sleep = require "fibers.sleep"
 local fiber = require "fibers.fiber"
+local senml = require "services.metrics.senml"
 
 TestTimedCache = {}
 
@@ -234,6 +235,147 @@ function TestMetricsService:test_build_metric_pipeline()
     luaunit.assertNotNil(pipeline)
 end
 
+TestSenML = {}
+
+function TestSenML:test_encode_basic()
+    -- Test encoding a string
+    local result, err = senml.encode("test/topic", "string_value")
+    luaunit.assertNil(err)
+    luaunit.assertEquals(result.n, "test/topic")
+    luaunit.assertEquals(result.vs, "string_value")
+
+    -- Test encoding a number
+    result, err = senml.encode("test/topic", 42.5)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(result.n, "test/topic")
+    luaunit.assertEquals(result.v, 42.5)
+
+    -- Test encoding a boolean
+    result, err = senml.encode("test/topic", true)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(result.n, "test/topic")
+    luaunit.assertEquals(result.vb, true)
+
+    -- Test encoding with timestamp
+    result, err = senml.encode("test/topic", 42, 1234567890)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(result.t, 1234567890)
+end
+
+function TestSenML:test_encode_invalid_types()
+    -- Test encoding with invalid type
+    local result, err = senml.encode("test/topic", {})
+    luaunit.assertNotNil(err)
+    luaunit.assertNil(result)
+
+    -- Test encoding with nil
+    result, err = senml.encode("test/topic", nil)
+    luaunit.assertNotNil(err)
+    luaunit.assertNil(result)
+end
+
+function TestSenML:test_encode_r_flat()
+    -- Test encoding a flat table
+    local values = {
+        temperature = 23.5,
+        humidity = 60,
+        status = "online"
+    }
+
+    local result, err = senml.encode_r("device/sensors", values)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(#result, 3)
+
+    -- Check each entry
+    local found = { temp = false, humid = false, status = false }
+    for _, entry in ipairs(result) do
+        if entry.n == "device/sensors.temperature" and entry.v == 23.5 then
+            found.temp = true
+        elseif entry.n == "device/sensors.humidity" and entry.v == 60 then
+            found.humid = true
+        elseif entry.n == "device/sensors.status" and entry.vs == "online" then
+            found.status = true
+        end
+    end
+
+    luaunit.assertTrue(found.temp)
+    luaunit.assertTrue(found.humid)
+    luaunit.assertTrue(found.status)
+end
+
+function TestSenML:test_encode_r_nested()
+    -- Test encoding a nested table
+    local values = {
+        system = {
+            memory = 8192,
+            cpu = 45.6
+        },
+        network = {
+            status = "connected",
+            speed = 100
+        }
+    }
+
+    local result, err = senml.encode_r("device", values)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(#result, 4)
+
+    -- Check specific entries
+    local found = { memory = false, cpu = false, net_status = false, speed = false }
+    for _, entry in ipairs(result) do
+        if entry.n == "device.system.memory" and entry.v == 8192 then
+            found.memory = true
+        elseif entry.n == "device.system.cpu" and entry.v == 45.6 then
+            found.cpu = true
+        elseif entry.n == "device.network.status" and entry.vs == "connected" then
+            found.net_status = true
+        elseif entry.n == "device.network.speed" and entry.v == 100 then
+            found.speed = true
+        end
+    end
+
+    luaunit.assertTrue(found.memory)
+    luaunit.assertTrue(found.cpu)
+    luaunit.assertTrue(found.net_status)
+    luaunit.assertTrue(found.speed)
+end
+
+function TestSenML:test_encode_r_with_value_field()
+    -- Test encoding a table with __value field and a subtable
+    local values = {
+        system = {
+            __value = "active", -- This should be at the base topic
+            memory = {
+                __value = "healthy",
+                used = 4096,
+                free = 4096
+            }
+        }
+    }
+
+    local result, err = senml.encode_r("device", values)
+    luaunit.assertNil(err)
+
+    -- Check for all expected entries
+    local found = { system = false, memory = false, used = false, free = false }
+    for _, entry in ipairs(result) do
+        if entry.n == "device.system" and entry.vs == "active" then
+            found.system = true
+        elseif entry.n == "device.system.memory" and entry.vs == "healthy" then
+            found.memory = true
+        elseif entry.n == "device.system.memory.used" and entry.v == 4096 then
+            found.used = true
+        elseif entry.n == "device.system.memory.free" and entry.v == 4096 then
+            found.free = true
+        end
+    end
+
+    luaunit.assertTrue(found.system)
+    luaunit.assertTrue(found.memory)
+    luaunit.assertTrue(found.used)
+    luaunit.assertTrue(found.free)
+    luaunit.assertEquals(#result, 4)
+end
 fiber.spawn(function ()
     luaunit.LuaUnit.run()
     fiber.stop()

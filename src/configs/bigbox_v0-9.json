@@ -414,17 +414,11 @@
     }
   },
   "metrics": {
+    "cloud_url": "$CLOUD_URL",
     "publish_cache": {
         "enabled": true,
         "period": 10
     },
-    "default_process": [
-        {
-            "type": "DiffTrigger",
-            "diff_method": "percent",
-            "threshold": 10
-        }
-    ],
     "collections": {
         "wifi/foo/bar/tx_bytes": {
             "protocol": "http",
