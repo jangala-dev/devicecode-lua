@@ -86,7 +86,7 @@ end
 ---@return DiffTrigger?
 ---@return string?
 function DiffTrigger:clone()
-    return self.new(self.config)
+    return DiffTrigger.new(self.config)
 end
 
 function DiffTrigger:reset()
@@ -127,7 +127,7 @@ end
 ---@return TimeTrigger?
 ---@return string? Error
 function TimeTrigger:clone()
-    return self.new(self.config)
+    return TimeTrigger.new(self.config)
 end
 
 function TimeTrigger:reset()

@@ -81,13 +81,13 @@ function metrics_service:_http_publish(data)
         self.cloud_config.url,
         channel_id
     )
-    -- local req = request.new_from_uri(uri)
-    -- req.headers:upsert(":method", "POST")
-    -- req.headers:upsert("authorization", "Thing " .. self.cloud_config.mainflux_key)
-    -- req.headers:upsert("content-type", "senml+json")
-    -- req:set_body(body)
-    -- req.headers:delete("expect")
-    -- local response_headers, _ = req:go()
+    local req = request.new_from_uri(uri)
+    req.headers:upsert(":method", "POST")
+    req.headers:upsert("authorization", "Thing " .. self.cloud_config.mainflux_key)
+    req.headers:upsert("content-type", "senml+json")
+    req:set_body(body)
+    req.headers:delete("expect")
+    local response_headers, _ = req:go()
 
     if not response_headers then
         log.error(string.format(
@@ -246,6 +246,12 @@ function metrics_service:_handle_config(config)
             return
         end
 
+        local endpoint_rename = metric_config.rename
+        if type(endpoint_rename) ~= 'table' and type(endpoint_rename) ~= 'nil' then
+            log.warn(string.format('Metric config [%s] rename is not of expected type: table', endpoint))
+        elseif type(endpoint_rename) == 'table' then
+            table.insert(endpoint_rename, 1, protocol)
+        end
         -- Now we wrap our bus endpoint in a function to
         -- run our processing pipline in a cache
         -- the cache is needed to give each endpoint of a wildcard
@@ -277,7 +283,8 @@ function metrics_service:_handle_config(config)
             -- if the pipeline completed with no early exit we can update our publish cache
             if not short_circuit then
                 table.insert(metric_msg.topic, 1, protocol)
-                self.publish_cache:set(metric_msg.topic, val)
+                local cache_topic = endpoint_rename or metric_msg.topic
+                self.publish_cache:set(cache_topic, val)
             end
         end)
 
@@ -307,7 +314,7 @@ function metrics_service:_main(ctx)
         op.choice(
             self.ctx:done_op(),
             config_sub:next_msg_op():wrap(function (config_msg)
-                self:_handle_config(self.ctx, config_msg.payload)
+                self:_handle_config(config_msg.payload)
             end),
             cloud_config_sub:next_msg_op():wrap(function(config_msg)
                 self.cloud_config = merge_config(self.cloud_config, config_msg.payload)
