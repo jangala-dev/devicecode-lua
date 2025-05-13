@@ -5,6 +5,9 @@
 	},
 	"remoteUser": "vscode",
 	"postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
+	"forwardPorts": [
+		8080
+	],
 	"customizations": {
 		"vscode": {
 			"extensions": [
