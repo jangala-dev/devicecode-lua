@@ -15,6 +15,10 @@ local ui_service = {
 }
 ui_service.__index = ui_service
 
+-- TODO move into server config
+local api_prefix = "api"
+local ws_prefix = "ws"
+local sse_prefix = "sse"
 -- Runtime state
 local ws_clients = {} -- list of active WebSocket clients
 
@@ -68,25 +72,40 @@ local function handle_websocket(ctx, ws)
     end
 end
 
-
 local function onstream(self, stream)
     local req_headers = assert(stream:get_headers())
-    local method = req_headers:get(":method") or "GET"
-    local path = req_headers:get(":path") or "/"
+    local req_method = req_headers:get(":method") or "GET"
+    local req_path = req_headers:get(":path") or "/"
+    local req_type = req_path:match("^/([^/]+)")
 
-    -- Attempt WebSocket upgrade directly
-    local ws, err = websocket.new_from_stream(stream, req_headers)
-    if ws then
-        print("websocket upgrade request")
-        -- Successful WebSocket upgrade
-        ws:accept()
-        local ctx = { err = function() return false end }
-        handle_websocket(ctx, ws)
+    -- Invalid method
+    if req_method ~= "GET" and req_method ~= "HEAD" and req_method ~= "PUT" then
+        local res_headers = http_headers.new()
+        res_headers:upsert(":status", "405")
+        assert(stream:write_headers(res_headers, true))
         return
     end
 
+    -- Dynamic request handling
+    if req_type == api_prefix then
+        print("api call")
+    elseif req_type == ws_prefix then
+        -- Attempt WebSocket upgrade directly
+        local ws, err = websocket.new_from_stream(stream, req_headers)
+        if ws then
+            print("websocket upgrade request")
+            -- Successful WebSocket upgrade
+            ws:accept()
+            local ctx = { err = function() return false end }
+            handle_websocket(ctx, ws)
+            return
+        end
+    elseif req_type == sse_prefix then
+        print("sse call")
+    end
+
     -- Normal HTTP static file serving
-    if method ~= "GET" then
+    if req_method ~= "GET" then
         local res_headers = http_headers.new()
         res_headers:append(":status", "405")
         res_headers:append("content-type", "text/plain")
@@ -95,10 +114,9 @@ local function onstream(self, stream)
         return
     end
 
-    local file_path = "www/ui" .. (path == "/" and "/index.html" or path)
+    local file_path = "www/ui" .. (req_path == "/" and "/index.html" or req_path)
     serve_static(stream, file_path)
 end
-
 
 local function publish_to_ws_clients(payload)
     local msg = cjson.encode(payload)
@@ -135,7 +153,7 @@ function ui_service:start(ctx, connection)
 
     local server = assert(http_server.listen {
         host = "0.0.0.0",
-        port = 8080,
+        port = 8081,
         onstream = onstream,
         onerror = function(_, context, operation, err)
             print(operation, "on", context, "failed:", err)
