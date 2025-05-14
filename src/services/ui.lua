@@ -22,6 +22,8 @@ local ws_prefix = "ws"
 local sse_prefix = "sse"
 local sse_stats = "/" .. sse_prefix .. "/stats"
 local sse_logs = "/" .. sse_prefix .. "/logs"
+local logs_subscription = "logs"
+local metrics_subscription = "metrics"
 -- Runtime state
 local ws_clients = {} -- list of active WebSocket clients
 local sse_clients = {} -- list of active WebSocket clients
@@ -76,15 +78,15 @@ local function handle_websocket(ctx, ws)
     end
 end
 
-local function handle_sse(ctx, stream)
+local function handle_sse(ctx, stream, subscription)
     local stats_channel = channel.new()
     table.insert(sse_clients, stats_channel)
 
     while not ctx:err() do
         local msg = stats_channel:get()
 
-        if msg then
-            local sse_msg = "data: " .. msg .. "\n\n"
+        if msg and msg.subscription == subscription then
+            local sse_msg = "data: " .. cjson.encode(msg) .. "\n\n"
             local ok, err = pcall(function()
                 stream:write_chunk(sse_msg, false)
             end)
@@ -140,9 +142,16 @@ local function onstream(self, stream)
             assert(stream:write_headers(res_headers, req_method == "HEAD"))
 
             local ctx = { err = function() return false end }
-            handle_sse(ctx, stream)
+            -- Ideally there would be a handeful of retained messages to populate the initial state
+            handle_sse(ctx, stream, metrics_subscription)
         elseif req_path == sse_logs then
-            print("sse logs")
+            local res_headers = http_headers.new()
+            res_headers:append(":status", "200")
+            res_headers:append("content-type", "text/event-stream")
+            assert(stream:write_headers(res_headers, req_method == "HEAD"))
+
+            local ctx = { err = function() return false end }
+            handle_sse(ctx, stream, logs_subscription)
         end
     end
 
@@ -173,11 +182,9 @@ local function publish_to_ws_clients(payload)
 end
 
 local function publish_to_sse_clients(payload)
-    local msg = cjson.encode(payload)
-
     for _, sse_channel in ipairs(sse_clients) do
         local ok, err = pcall(function()
-            sse_channel:put(msg)
+            sse_channel:put(payload)
         end)
 
         if not ok then
@@ -186,8 +193,8 @@ local function publish_to_sse_clients(payload)
     end
 end
 
-local function bus_listener(ctx, connection)
-    local sub = connection:subscribe({ "metrics", "#" })
+local function bus_listener_metrics(ctx, connection)
+    local sub = connection:subscribe({ metrics_subscription, "#" })
     while not ctx:err() do
         local msg, err = sub:next_msg()
         if msg then
@@ -197,7 +204,25 @@ local function bus_listener(ctx, connection)
             })
             publish_to_sse_clients({
                 topic = msg.topic,
-                payload = msg.payload
+                payload = msg.payload,
+                subscription = metrics_subscription
+            })
+        elseif err then
+            print("Bus subscription error:", err)
+        end
+    end
+    sub:unsubscribe()
+end
+
+local function bus_listener_logs(ctx, connection)
+    local sub = connection:subscribe({ logs_subscription, "#" })
+    while not ctx:err() do
+        local msg, err = sub:next_msg()
+        if msg then
+            publish_to_sse_clients({
+                topic = msg.topic,
+                payload = msg.payload,
+                subscription = logs_subscription
             })
         elseif err then
             print("Bus subscription error:", err)
@@ -236,7 +261,11 @@ function ui_service:start(ctx, connection)
     end)
 
     fiber.spawn(function()
-        bus_listener(ctx, connection)
+        bus_listener_metrics(ctx, connection)
+    end)
+
+    fiber.spawn(function()
+        bus_listener_logs(ctx, connection)
     end)
 end
 
