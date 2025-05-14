@@ -1,4 +1,5 @@
 local fiber = require "fibers.fiber"
+local channel = require 'fibers.channel'
 local sleep = require "fibers.sleep"
 local pollio = require "fibers.pollio"
 local file = require "fibers.stream.file"
@@ -19,8 +20,11 @@ ui_service.__index = ui_service
 local api_prefix = "api"
 local ws_prefix = "ws"
 local sse_prefix = "sse"
+local sse_stats = "/" .. sse_prefix .. "/stats"
+local sse_logs = "/" .. sse_prefix .. "/logs"
 -- Runtime state
 local ws_clients = {} -- list of active WebSocket clients
+local sse_clients = {} -- list of active WebSocket clients
 
 local function serve_static(stream, path)
     -- Very simple static file server
@@ -72,6 +76,34 @@ local function handle_websocket(ctx, ws)
     end
 end
 
+local function handle_sse(ctx, stream)
+    local stats_channel = channel.new()
+    table.insert(sse_clients, stats_channel)
+
+    while not ctx:err() do
+        local msg = stats_channel:get()
+
+        if msg then
+            local sse_msg = "data: " .. msg .. "\n\n"
+            local ok, err = pcall(function()
+                stream:write_chunk(sse_msg, false)
+            end)
+            if not ok then
+                print("Client disconnected or write error:", err)
+                break
+            end
+        end
+    end
+
+    -- Cleanup: remove the channel from sse_clients
+    for i, ch in ipairs(sse_clients) do
+        if ch == stats_channel then
+            table.remove(sse_clients, i)
+            break
+        end
+    end
+end
+
 local function onstream(self, stream)
     local req_headers = assert(stream:get_headers())
     local req_method = req_headers:get(":method") or "GET"
@@ -101,7 +133,17 @@ local function onstream(self, stream)
             return
         end
     elseif req_type == sse_prefix then
-        print("sse call")
+        if req_path == sse_stats then
+            local res_headers = http_headers.new()
+            res_headers:append(":status", "200")
+            res_headers:append("content-type", "text/event-stream")
+            assert(stream:write_headers(res_headers, req_method == "HEAD"))
+
+            local ctx = { err = function() return false end }
+            handle_sse(ctx, stream)
+        elseif req_path == sse_logs then
+            print("sse logs")
+        end
     end
 
     -- Normal HTTP static file serving
@@ -130,12 +172,30 @@ local function publish_to_ws_clients(payload)
     end
 end
 
+local function publish_to_sse_clients(payload)
+    local msg = cjson.encode(payload)
+
+    for _, sse_channel in ipairs(sse_clients) do
+        local ok, err = pcall(function()
+            sse_channel:put(msg)
+        end)
+
+        if not ok then
+            print("Failed to send to SSE client:", err)
+        end
+    end
+end
+
 local function bus_listener(ctx, connection)
-    local sub = connection:subscribe({ "+", "metrics", "*" })
+    local sub = connection:subscribe({ "metrics", "#" })
     while not ctx:err() do
         local msg, err = sub:next_msg()
         if msg then
             publish_to_ws_clients({
+                topic = msg.topic,
+                payload = msg.payload
+            })
+            publish_to_sse_clients({
                 topic = msg.topic,
                 payload = msg.payload
             })
