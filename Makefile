@@ -56,6 +56,7 @@ env:
 	@cd $(SRC_DIR)/lua-fibers && git checkout $(FIBERS_VER)
 	@cd $(SRC_DIR)/lua-trie && git checkout $(TRIE_VER)
 	@cd $(SRC_DIR)/lua-bus && git checkout $(BUS_VER)
+	@cd $(SRC_DIR)/services/ui/local-ui && git checkout $(UI_VER)
 	@echo "Git submodules updated."
 
 # Lint: Run the linter to check code quality
