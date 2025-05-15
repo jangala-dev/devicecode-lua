@@ -1,6 +1,5 @@
 local fiber = require "fibers.fiber"
 local channel = require 'fibers.channel'
-local sleep = require "fibers.sleep"
 local pollio = require "fibers.pollio"
 local file = require "fibers.stream.file"
 local http_server = require "http.server"
@@ -8,7 +7,6 @@ local http_headers = require "http.headers"
 local http_util = require "http.util"
 local websocket = require "http.websocket"
 local cjson = require "cjson.safe"
-
 require "services.ui.fibers_cqueues"
 
 local ui_service = {
@@ -28,32 +26,44 @@ local metrics_subscription = "metrics"
 local ws_clients = {} -- list of active WebSocket clients
 local sse_clients = {} -- list of active WebSocket clients
 
-local function serve_static(stream, path)
-    -- Very simple static file server
-    print("path:", path)
-    local handle, err = file.open(path, "rb")
-    if not handle or err then
-        -- 404
-        local res_headers = http_headers.new()
-        res_headers:append(":status", "404")
-        res_headers:append("content-type", "text/plain")
-        assert(stream:write_headers(res_headers, true))
-        return
+local function get_static_mimetype(path)
+    local ext_to_type = {
+        [".js"]   = "application/javascript",
+        [".css"]  = "text/css",
+        [".png"]  = "image/png",
+        [".jpg"]  = "image/jpeg",
+        [".jpeg"] = "image/jpeg",
+        [".svg"]  = "image/svg+xml",
+        [".ico"]  = "image/x-icon",
+        [".json"] = "application/json",
+        [".tff"]  = "font/ttf",
+        [".eot"]  = "application/vnd.ms-fontobject",
+        [".woff"] = "font/woff",
+    }
+
+    for ext, mime in pairs(ext_to_type) do
+        if path:sub(- #ext) == ext then
+            return mime
+        end
     end
 
-    local res_headers = http_headers.new()
-    res_headers:append(":status", "200")
-    res_headers:append("content-type", "text/html") -- assume HTML for now; later infer from extension
-    assert(stream:write_headers(res_headers, false))
+    return nil
+end
 
-    while true do
-        local chunk = handle:read(4096)
-        if not chunk then break end
-        assert(stream:write_chunk(chunk, false))
+local function is_static_asset(path)
+    return get_static_mimetype(path) ~= nil
+end
+
+local function get_spa_path(req_path)
+    local base_path = "./www/ui/dist"
+
+    -- If it's a known static asset, serve the file directly.
+    if is_static_asset(req_path) then
+        return base_path .. req_path
+    else
+        -- Otherwise, it's probably an HTML page and we should serve the index.html of SPA.
+        return base_path .. "/index.html"
     end
-
-    handle:close()
-    assert(stream:write_chunk("", true))
 end
 
 local function handle_websocket(ctx, ws)
@@ -165,8 +175,33 @@ local function onstream(self, stream)
         return
     end
 
-    local file_path = "www/ui" .. (req_path == "/" and "/index.html" or req_path)
-    serve_static(stream, file_path)
+    print("html call", req_path)
+    local path = get_spa_path(req_path)
+    local handle, err = file.open(path, "rb")
+    local res_headers = http_headers.new()
+
+    if not handle then
+        print("Failed to open file:", err)
+        res_headers:append(":status", "404")
+        assert(stream:write_headers(res_headers, true))
+        return
+    end
+
+    res_headers:append(":status", "200")
+    local mimetype = get_static_mimetype(path) or "text/html"
+    res_headers:append("content-type", mimetype)
+    assert(stream:write_headers(res_headers, req_method == "HEAD"))
+
+    if req_method ~= "HEAD" then
+        while true do
+            local chunk = handle:read(4096)
+            if not chunk then break end
+            assert(stream:write_chunk(chunk, false))
+        end
+        assert(stream:write_chunk("", true)) -- EOF
+    end
+
+    handle:close()
 end
 
 local function publish_to_ws_clients(payload)

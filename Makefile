@@ -23,6 +23,22 @@ build:
 	@rm -r $(BUILD_DIR)/lua-trie
 	@echo "Build complete."
 
+# Build-All: Builds the project and all submodules including ui
+.PHONY: build-all
+build-all:
+	@echo "Building the project..."
+	@mkdir -p $(BUILD_DIR)
+	@cp -r $(SRC_DIR)/* $(BUILD_DIR)/
+	@cp $(BUILD_DIR)/lua-bus/src/* $(BUILD_DIR)
+	@rm -r $(BUILD_DIR)/lua-bus
+	@cp -r $(BUILD_DIR)/lua-fibers/fibers $(BUILD_DIR)/fibers
+	@rm -r $(BUILD_DIR)/lua-fibers
+	@cp $(BUILD_DIR)/lua-trie/src/* $(BUILD_DIR)
+	@rm -r $(BUILD_DIR)/lua-trie
+	@cd $(SRC_DIR)/services/ui/local-ui && make build
+	@cp -r $(SRC_DIR)/services/ui/local-ui/build/dist $(BUILD_DIR)/www/ui
+	@echo "Build complete."
+
 # Test: Run the project's test suite
 .PHONY: test
 test:
@@ -46,6 +62,8 @@ test-all:
 	@cd $(SRC_DIR)/lua-bus/tests && luajit test.lua
 	@rm -rf $(SRC_DIR)/lua-bus/src/fibers
 	@rm -rf $(SRC_DIR)/lua-bus/src/trie.lua
+# UI tests
+	@cd $(SRC_DIR)/services/ui/local-ui && make unit-test
 	@echo "Tests completed."
 
 # Env: Initialize environment and update git submodules
@@ -53,10 +71,20 @@ test-all:
 env:
 	@echo "Updating git submodules..."
 	@git submodule update --init --recursive
-	@cd $(SRC_DIR)/lua-fibers && git checkout $(FIBERS_VER)
-	@cd $(SRC_DIR)/lua-trie && git checkout $(TRIE_VER)
-	@cd $(SRC_DIR)/lua-bus && git checkout $(BUS_VER)
-	@cd $(SRC_DIR)/services/ui/local-ui && git checkout $(UI_VER)
+	@cd $(SRC_DIR)/lua-fibers && git checkout main && git pull && git checkout $(FIBERS_VER)
+	@cd $(SRC_DIR)/lua-trie && git checkout main && git pull && git checkout $(TRIE_VER)
+	@cd $(SRC_DIR)/lua-bus && git checkout main && git pull && git checkout $(BUS_VER)
+	@echo "Git submodules updated."
+
+# Includes ui
+.PHONY: env-all
+env-all:
+	@echo "Updating git submodules..."
+	@git submodule update --init --recursive
+	@cd $(SRC_DIR)/lua-fibers && git checkout main && git pull && git checkout $(FIBERS_VER)
+	@cd $(SRC_DIR)/lua-trie && git checkout main && git pull && git checkout $(TRIE_VER)
+	@cd $(SRC_DIR)/lua-bus && git checkout main && git pull && git checkout $(BUS_VER)
+	@cd $(SRC_DIR)/services/ui/local-ui && git checkout main && git pull && git checkout $(UI_VER) && cd client && npm run install-all
 	@echo "Git submodules updated."
 
 # Lint: Run the linter to check code quality
