@@ -7,6 +7,7 @@ local http_headers = require "http.headers"
 local http_util = require "http.util"
 local websocket = require "http.websocket"
 local cjson = require "cjson.safe"
+local op = require "fibers.op"
 require "services.ui.fibers_cqueues"
 
 local ui_service = {
@@ -228,42 +229,37 @@ local function publish_to_sse_clients(payload)
     end
 end
 
-local function bus_listener_metrics(ctx, connection)
-    local sub = connection:subscribe({ metrics_subscription, "#" })
-    while not ctx:err() do
-        local msg, err = sub:next_msg()
-        if msg then
-            publish_to_ws_clients({
-                topic = msg.topic,
-                payload = msg.payload
-            })
-            publish_to_sse_clients({
-                topic = msg.topic,
-                payload = msg.payload,
-                subscription = metrics_subscription
-            })
-        elseif err then
-            print("Bus subscription error:", err)
-        end
-    end
-    sub:unsubscribe()
-end
+local function bus_listener(ctx, connection)
+    local sub_metrics = connection:subscribe({ metrics_subscription, "#" })
+    local sub_logs = connection:subscribe({ logs_subscription, "#" })
 
-local function bus_listener_logs(ctx, connection)
-    local sub = connection:subscribe({ logs_subscription, "#" })
-    while not ctx:err() do
-        local msg, err = sub:next_msg()
-        if msg then
-            publish_to_sse_clients({
-                topic = msg.topic,
-                payload = msg.payload,
-                subscription = logs_subscription
-            })
-        elseif err then
-            print("Bus subscription error:", err)
-        end
+    local publish_message = function(msg, subscription)
+        if not msg then return end
+        publish_to_ws_clients({
+            topic = msg.topic,
+            payload = msg.payload
+        })
+        publish_to_sse_clients({
+            topic = msg.topic,
+            payload = msg.payload,
+            subscription = subscription
+        })
     end
-    sub:unsubscribe()
+
+    while not ctx:err() do
+        -- TODO unsure how to handle errors here
+        op.choice(
+            sub_metrics:next_msg_op():wrap(function(msg)
+                publish_message(msg, metrics_subscription)
+            end),
+            sub_logs:next_msg_op():wrap(function(msg)
+                publish_message(msg, logs_subscription)
+            end)
+        ):perform()
+    end
+
+    sub_metrics:unsubscribe()
+    sub_logs:unsubscribe()
 end
 
 function ui_service:start(ctx, connection)
@@ -296,11 +292,7 @@ function ui_service:start(ctx, connection)
     end)
 
     fiber.spawn(function()
-        bus_listener_metrics(ctx, connection)
-    end)
-
-    fiber.spawn(function()
-        bus_listener_logs(ctx, connection)
+        bus_listener(ctx, connection)
     end)
 end
 
