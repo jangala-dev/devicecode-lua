@@ -1,3 +1,4 @@
+local fiber = require "fibers.fiber"
 local op = require "fibers.op"
 local context = require "fibers.context"
 local sleep = require "fibers.sleep"
@@ -129,37 +130,6 @@ function Modem:_apn_connect(ctx, cutoff)
     return nil, "no apn connected"
 end
 
----Retrieve and publish the network interface to the bus
----@param ctx Context
----@return string?
-function Modem:_publish_iface(ctx)
-    local net_iface_sub = self.conn:subscribe(
-        { 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'generic', 'ports', '+' }
-    )
-    -- the bus handles multiple publish for lists as having numbered endpoints
-    -- iterate over all numbered endpoints of ports and check which one holds the net iface; if any
-    -- only breaks if iface is found, otherwise errors out
-    local net_interface
-    while true do
-        local net_interface_msg, interface_err = net_iface_sub:next_msg_with_context_op(
-            context.with_timeout(ctx, 1)
-        ):perform()
-        if interface_err then
-            net_iface_sub:unsubscribe()
-            return interface_err
-        end
-        net_interface = net_interface_msg.payload:match("%s*(%S+)%s%(net%)")
-        if net_interface then break end
-    end
-    net_iface_sub:unsubscribe()
-
-    self.conn:publish(new_msg(
-        { 'gsm', 'modem', self.name, 'interface' },
-        net_interface,
-        { retained = true }
-    ))
-end
-
 ---Connect modem and set signal report frequency
 ---@param ctx Context
 ---@return string?
@@ -209,6 +179,13 @@ function Modem:_enable(ctx)
     if enable_err then return enable_err end
 end
 
+function Modem:_enable_failed(ctx)
+    log.warn(string.format(
+        "%s - %s: Modem failed to register",
+        ctx:value("service_name"),
+        ctx:value("fiber_name")
+    ))
+end
 ---Start warm swap to detect sim insertion
 ---@param ctx any
 ---@return string?
@@ -262,8 +239,8 @@ function Modem:_autoconnect(ctx)
         failed = self._fix_failure,
         no_sim = self._detect_sim,
         disabled = self._enable,
-        registered = self._connect,
-        connected = self._publish_iface
+        enabled = self._enable_failed,
+        registered = self._connect
     }
 
     local state_monitor_sub = self.conn:subscribe(
@@ -308,6 +285,150 @@ function Modem:_autoconnect(ctx)
     ))
 end
 
+local function get_band_class(ctx, conn, idx)
+    local band_class_sub = conn:subscribe({ 'hal',
+        'capability',
+        'modem',
+        idx,
+        'info',
+        'band',
+        'band-information',
+        'active-band-class'
+    })
+    local band_class_msg, band_err = band_class_sub:next_msg_with_context_op(ctx):perform()
+    band_class_sub:unsubscribe()
+    if band_err then return nil, band_err end
+    return band_class_msg.payload
+end
+
+local function get_access_tech(ctx, conn, idx)
+    local access_tech_sub = conn:subscribe({ 'hal',
+        'capability',
+        'modem',
+        idx,
+        'info',
+        'band',
+        'band-information',
+        'radio-interface'
+    })
+    local access_tech_msg, access_err = access_tech_sub:next_msg_with_context_op(ctx):perform()
+    access_tech_sub:unsubscribe()
+    if access_err then return nil, access_err end
+    return access_tech_msg.payload
+end
+
+local function get_access_family(access_tech)
+    local accessfamdict = {
+        cdma1x = '3G',
+        evdo = '3G',
+        gsm = '2G',
+        umts = '3G',
+        lte = '4G',
+        ['5g'] = '5G',
+    }
+    if not accessfamdict[access_tech] then
+        local err = "error invalid access tech"
+        return nil, err
+    end
+    return accessfamdict[access_tech], nil
+end
+
+local function get_imei(ctx, con, idx)
+    local imei_sub = conn:subscribe({ 'hal', 'capability', 'modem', idx, 'info', 'modem', 'generic',
+        'equipment-identifier' })
+    local imei_msg, imei_err = imei_sub:next_msg_with_context_op(ctx):perform()
+    if imei_err then return nil, imei_err end
+    return imei_msg.payload
+end
+
+function Modem:_publish_static_data(ctx)
+    local band, band_err = get_band_class(ctx, self.conn, self.idx)
+    if band_err then log.warn(band_err) end
+    self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'band' }, band, { retained = true }))
+
+    local access_tech, access_err = get_access_tech(ctx, self.conn, self.idx)
+    if access_err then log.warn(access_err) end
+    self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-tech' }, access_tech, { retained = true }))
+
+    local access_family, family_err = get_access_family(access_tech)
+    if family_err then log.warn(family_err) end
+    self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-family' }, access_family, { retained = true }))
+
+    local imei, imei_err = get_imei(ctx, self.conn, self.idx)
+    if imei_err then log.warn(imei_err) end
+    self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'imei' }, imei, { retained = true }))
+end
+
+function Modem:_publish_dynamic_data(ctx)
+    local function publish_sim_present(msg)
+        local state = msg.payload == '--' and '--' or 'present'
+        self.conn:publish(new_msg(
+            { 'gsm', 'modem', self.name, 'sim' },
+            state,
+            { retained = true }
+        ))
+    end
+    local sim_present_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'generic',
+        'sim' })
+
+    local function publish_signal(msg)
+        self.conn:publish(new_msg(
+            { 'gsm', 'modem', self.name, 'signal', msg.topic[8] },
+            msg.payload
+        ))
+    end
+    local signal_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'signal', '+' })
+
+    local function publish_operator(msg)
+        self.conn:publish(new_msg(
+            { 'gsm', 'modem', self.name, 'operator' },
+            msg.payload,
+            { retained = true }
+        ))
+    end
+    local operator_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'modem', '3gpp',
+        'operator-name' })
+
+    while not ctx:err() do
+        op.choice(
+            sim_present_sub:next_msg_op():wrap(publish_sim_present),
+            signal_sub:next_msg_op():wrap(publish_signal),
+            operator_sub:next_msg_op():wrap(publish_operator),
+            ctx:done_op()
+        ):perform()
+    end
+end
+
+---Retrieve and publish the network interface to the bus
+---@param ctx Context
+---@return string?
+function Modem:_publish_iface(ctx)
+    local net_iface_sub = self.conn:subscribe(
+        { 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'generic', 'ports', '+' }
+    )
+    -- the bus handles multiple publish for lists as having numbered endpoints
+    -- iterate over all numbered endpoints of ports and check which one holds the net iface; if any
+    -- only breaks if iface is found, otherwise errors out
+    local net_interface
+    while true do
+        local net_interface_msg, interface_err = net_iface_sub:next_msg_with_context_op(
+            context.with_timeout(ctx, 1)
+        ):perform()
+        if interface_err then
+            net_iface_sub:unsubscribe()
+            return interface_err
+        end
+        net_interface = net_interface_msg.payload:match("%s*(%S+)%s%(net%)")
+        if net_interface then break end
+    end
+    net_iface_sub:unsubscribe()
+
+    self.conn:publish(new_msg(
+        { 'gsm', 'modem', self.name, 'interface' },
+        net_interface,
+        { retained = true }
+    ))
+end
 --- Either starts or ends autoconnection and updates modem name
 --- @param config table
 function Modem:update_config(config)
@@ -330,6 +451,18 @@ function Modem:update_config(config)
             end
         )
     end
+    fiber.spawn(function()
+        self:_publish_iface(self.ctx)
+        self:_publish_static_data(self.ctx)
+    end)
+    service.spawn_fiber(
+        string.format("Reporting (%s)", self.name),
+        self.conn,
+        self.ctx,
+        function(fiber_ctx)
+            self:_publish_dynamic_data(fiber_ctx)
+        end
+    )
 end
 
 --- Creates a New Modem Capability Class
@@ -427,11 +560,10 @@ local function config_handler(config_msg)
         end
         configs.modem.default = default_config
 
-        for name, known_config in pairs(modem_configs.known) do
+        for _, known_config in ipairs(modem_configs.known) do
             local id_field = known_config.id_field
             if id_field then
                 apply_defaults(known_config, default_config)
-                known_config.name = name
                 configs.modem[id_field][known_config[id_field]] = known_config
 
                 if modems[id_field][known_config[id_field]] then

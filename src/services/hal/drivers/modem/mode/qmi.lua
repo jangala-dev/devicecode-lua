@@ -41,6 +41,7 @@ return function(modem)
         local data = ""
         local read_func = function()
             return stdout:read_line_op("keep"):wrap(function(line)
+                if line == nil then return nil end
                 data = data .. line
                 local slot_status, err = utils.parse_slot_monitor(data)
                 if err then return nil end
@@ -94,6 +95,26 @@ return function(modem)
         return gids
     end
 
+    modem.nas_get_rf_band_info = function()
+        local key_map = {
+            ["Band Information"] = "band-information",
+            ["Radio Interface"] = "radio-interface",
+            ["Active Band Class"] = "active-band-class",
+            ["Active Channel"] = "active-channel",
+            ["Band Information (Extended)"] = "band-information-extended"
+        }
+        local band_info_cmd = qmicli.nas_get_rf_band_info(
+            context.with_timeout(modem.ctx, CMD_TIMEOUT),
+            modem.primary_port
+        )
+
+        local band_info_out, band_info_err = band_info_cmd:combined_output()
+        if band_info_err then return nil, band_info_err end
+
+        local band_info, parse_err = utils.parse_qmicli_output(band_info_out, key_map)
+        if parse_err then return nil, parse_err end
+        return band_info
+    end
     local function nas_get_home_network_parsed()
         local key_map = {
             ["Home network"] = "home-network",
