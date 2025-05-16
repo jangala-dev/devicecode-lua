@@ -12,7 +12,7 @@ local alarms = require "services.system.alarms"
 local sc = require "fibers.utils.syscall"
 
 local system_service = {
-    name = 'system'
+    name = 'System'
 }
 system_service.__index = system_service
 
@@ -36,6 +36,10 @@ function system_service:_handle_config(config_msg)
     if not usb3_enabled then
         -- this is just a copy-paste job, look at this again during mvp
         -- and think about abstraction and renablement(?) etc
+        log.info(string.format("%s - %s: Disabling USB3",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name")
+        ))
         usb3.disable_usb3(self.ctx, self.model)
     end
 
