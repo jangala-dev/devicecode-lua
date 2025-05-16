@@ -42,13 +42,16 @@ local function sim_information(ctx, device)
     return exec.command_context(ctx, 'mmcli', '-J', '-i', device)
 end
 local function location_status(ctx, device)
-    return exec.command_context(ctx, 'mmcli', '-m', device, '--location-status')
+    return exec.command_context(ctx, 'mmcli', '-J', '-m', device, '--location-status')
 end
 
 local function signal_setup(ctx, device, rate)
     return exec.command_context(ctx, 'mmcli', '-m', device, '--signal-setup=' .. tostring(rate))
 end
 
+local function signal_get(ctx, device)
+    return exec.command_context(ctx, 'mmcli', '-J', '-m', device, '--signal-get')
+end
 return {
     monitor_modems = monitor_modems,
     inhibit = inhibit,
@@ -61,5 +64,6 @@ return {
     information = information,
     sim_information = sim_information,
     location_status = location_status,
-    signal_setup = signal_setup
+    signal_setup = signal_setup,
+    signal_get = signal_get
 }
