@@ -29,6 +29,7 @@ local CMD_TIMEOUT = 3
 ---@field nas_info_channel Channel
 ---@field gid_info_channel Channel
 ---@field gps_info_channel Channel
+---@field band_info_channel Channel
 ---@field refresh_rate_channel Channel
 local Driver = {}
 Driver.__index = Driver
@@ -57,12 +58,14 @@ function Driver:get_capabilities()
             { name = 'modem', channel = self.modem_info_channel,    endpoints = 'multiple' },
             { name = 'sim',   channel = self.sim_info_channel,      endpoints = 'multiple' },
             { name = 'nas',   channel = self.nas_info_channel,      endpoints = 'multiple' },
-            { name = 'gids',  channel = self.gid_info_channel,      endpoints = 'multiple' }
+            { name = 'gids',  channel = self.gid_info_channel,      endpoints = 'multiple' },
+            { name = 'band',  channel = self.band_info_channel,     endpoints = 'multiple' }
         }
     }
     return capabilities
 end
 ---continuously polls the modem for modem and sim information
+---omg I hate this, when mvp is done and theres no major deadline this is the first thing to go
 function Driver:poll_info()
     local poll_freq = 10
     while not self.ctx:err() do
@@ -74,12 +77,26 @@ function Driver:poll_info()
             infos.modem = modem_info
         end
 
+        local band_info, band_err = self.nas_get_rf_band_info()
+        if band_err then
+            log.warn(string.format("Modem - %s: Failed to get band info: %s", self.imei, band_err))
+        else
+            infos.band = band_info
+        end
         if infos.modem and infos.modem.generic.sim ~= '--' then
             local sim_info, sim_err = self:get_sim_info(infos.modem.generic.sim)
             if sim_err then
-                log.debug("Sim - %s: Failed to get sim info: %s", self.imei, sim_err)
+                log.debug(string.format("Sim - %s: Failed to get sim info: %s",
+                    self.imei,
+                    sim_err))
             else
                 infos.sim = sim_info
+            end
+            local signal, signal_err = self:get_signal()
+            if signal_err then
+                log.debug(string.format("Modem - %s: Failed to get signal info: %s", self.imei, signal_err))
+            else
+                infos.modem.signal = signal
             end
         end
 
@@ -149,6 +166,31 @@ function Driver:get_sim_info(sim_address)
     if err then return nil, wraperr.new(err) end
 
     return info.sim, nil
+end
+function Driver:get_signal()
+    local cmd = mmcli.signal_get(context.with_timeout(self.ctx, CMD_TIMEOUT), self.address)
+
+    local out, err = cmd:combined_output()
+    if err then return nil, wraperr.new(err) end
+
+    local info, _, err = json.decode(out)
+    if err then return nil, wraperr.new(err) end
+
+    for signal_tech, signals in pairs(info.modem.signal) do
+        if signal_tech ~= 'refresh' then
+            local valid_signal = true
+            for _, signal in pairs(signals) do
+                if signal == '--' then
+                    valid_signal = false
+                    break
+                end
+            end
+            if valid_signal then
+                return signals, nil
+            end
+        end
+    end
+    return nil, wraperr.new("No valid signals")
 end
 ---Gets initial modem information and binds protocol specific functions to the driver
 function Driver:init()
@@ -347,7 +389,7 @@ function Driver:set_signal_update_freq(seconds)
     return (cmd_err == nil), cmd_err
 end
 
-function modem_states_equal(state1, state2)
+local function modem_states_equal(state1, state2)
     return state1.curr_state == state2.curr_state and
         state1.prev_state == state2.prev_state and
         state1.reason == state2.reason
@@ -479,6 +521,7 @@ local function new(ctx, address)
     self.nas_info_channel = channel.new()
     self.gid_info_channel = channel.new()
     self.gps_info_channel = channel.new()
+    self.band_info_channel = channel.new()
 
     self.refresh_rate_channel = channel.new()
     -- Other initial properties
