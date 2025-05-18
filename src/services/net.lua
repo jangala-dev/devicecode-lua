@@ -3,27 +3,36 @@ local queue = require "fibers.queue"
 local exec = require "fibers.exec"
 local channel = require "fibers.channel"
 local op = require "fibers.op"
+local sc = require "fibers.utils.syscall"
 local cjson = require "cjson.safe"
 local log = require "log"
 local uci = require "uci"
 local speedtest = require "services.net.speedtest"
 local new_msg = require "bus".new_msg
+local cursor = uci.cursor() -- runtime-safe!
+-- local cursor = uci.cursor("/tmp/test", "/tmp/.uci") -- runtime-safe!
 
-local cursor = uci.cursor("/tmp/test", "/tmp/.uci") -- runtime-safe!
-
+-- top-level service
+local net_service = {
+    name = 'net'
+}
+net_service.__index = net_service
+-------------------------------------------------------
+-- Constants
+local tracking_ips = { "8.8.8.8", "1.1.1.1" }
 -------------------------------------------------------
 -- Helper functions
 
 local function add_to_uci_list(main, section_name, list_name, list_value)
     -- Read current networks assigned to the zone
-    local retvalue = cursor:get(main, section_name, list_name)
+    local list_elements = cursor:get(main, section_name, list_name)
 
     -- Convert to table if necessary
     local network_list = {}
-    if type(retvalue) == "string" then
-        network_list = { retvalue }
-    elseif type(retvalue) == "table" then
-        network_list = retvalue
+    if type(list_elements) == "string" then
+        network_list = { list_elements }
+    elseif type(list_elements) == "table" then
+        network_list = list_elements
     end
 
     -- Add this value if not already included
@@ -42,29 +51,45 @@ local function add_to_uci_list(main, section_name, list_name, list_value)
     end
 end
 
-local net_service = {
-    name = "net"
-}
-net_service.__index = net_service
+local function round(num, numDecimalPlaces)
+    local mult = 10 ^ (numDecimalPlaces or 0)
+    return math.floor(num * mult + 0.5) / mult
+end
+local function make_counter()
+    local count = 10
+    return {
+        next = function()
+            count = count + 1
+            return count
+        end,
+        reset = function()
+            count = 10
+        end
+    }
+end
+
+local metric_counter = make_counter()
 
 -- Channel definitions
 local config_channel = channel.new()      -- For config updates
 local interface_channel = channel.new()   -- For gsm/interface mappings
--- local speedtest_result_channel = channel.new()   -- For speedtest requests
+local speedtest_result_channel = channel.new() -- For speedtest requests
+local wan_status_channel = channel.new()       -- For wan status supdates
 
 -- Queue definitions
 local speedtest_queue = queue.new()       -- Unbounded queue for holding speedtest requests
+local config_applier_queue = queue.new() -- Unbounded queue for holding config changes
 
 local function config_receiver(ctx, conn)
     log.trace("NET: Config receiver starting")
-    local sub = conn:subscribe({"config", "net"})
+    local sub = conn:subscribe({ "config", "net" })
     while not ctx:err() do
         op.choice(
             sub:next_msg_op():wrap(function (msg, err)
                 if err then
                     log.error("NET: Config receive error:", err)
                 end
-
+                log.info("NET: Config Received")
                 config_channel:put(msg.payload)
             end),
             ctx:done_op()
@@ -79,12 +104,13 @@ local function interface_listener(ctx, conn)
     while not ctx:err() do
         op.choice(
             sub:next_msg_op():wrap(function (msg, err)
+                print("INTERFACE LISTENER GOT A MESSAGE")
                 if err then
                     log.error("NET: Interface listen error:", err)
                 end
                 -- Extract modem_id from topic gsm/<modem_id>/interface
                 local modem_id = msg.topic[3]
-                interface_channel:put{
+                interface_channel:put {
                     modem_id = modem_id,
                     interface = msg.payload
                 }
@@ -95,55 +121,42 @@ local function interface_listener(ctx, conn)
     sub:unsubscribe()
 end
 
-local function apply_firewall_base_config(fw_cfg)
+local function set_firewall_base_config(fw_cfg)
     log.info("NET: Applying base firewall config")
 
     -- Set default policies
     cursor:set("firewall", "defaults", "defaults")
-    cursor:set("firewall", "defaults", "syn_flood", "1")
-    cursor:set("firewall", "defaults", "input", "ACCEPT")
-    cursor:set("firewall", "defaults", "forward", "REJECT")
-    cursor:set("firewall", "defaults", "output", "ACCEPT")
-    cursor:set("firewall", "defaults", "disable_ipv6", "1")
-
+    for k, v in pairs(fw_cfg.defaults or {}) do
+        cursor:set("firewall", "defaults", k, v)
+    end
     -- Zones
     for _, zone in ipairs(fw_cfg.zones or {}) do
-        local name = zone.id
-        cursor:set("firewall", name, "zone")
-        cursor:set("firewall", name, "name", name)
-        cursor:set("firewall", name, "input", zone.input)
-        cursor:set("firewall", name, "output", zone.output)
-        cursor:set("firewall", name, "forward", zone.forward)
-        if zone.masquerade then
-            cursor:set("firewall", name, "masq", "1")
+        local id = zone.config.name
+        cursor:set("firewall", id, "zone")
+        for k, v in pairs(zone.config) do
+            cursor:set("firewall", id, k, v)
         end
-        if zone.mtu_fix then
-            cursor:set("firewall", name, "mtu_fix", "1")
+        for _, fwrule in ipairs(zone.forwarding or {}) do
+            local id = cursor:add("firewall", "forwarding")
+            cursor:set("firewall", id, "src", zone.config.name)
+            for k, v in pairs(fwrule) do
+                cursor:set("firewall", id, k, v)
+            end
         end
-    end
-
-    -- Forwarding rules
-    for i, rule in ipairs(fw_cfg.forwarding or {}) do
-        local id = string.format("fwd_%d", i)
-        cursor:set("firewall", id, "forwarding")
-        cursor:set("firewall", id, "src", rule.src)
-        cursor:set("firewall", id, "dest", rule.dest)
     end
 
     -- Firewall rules
-    for i, rule in ipairs(fw_cfg.rules or {}) do
-        local id = "rule_" .. i
-        cursor:set("firewall", id, "rule")
-        for k, v in pairs(rule) do
+    for _, rule in ipairs(fw_cfg.rules or {}) do
+        local id = cursor:add("firewall", "rule")
+        for k, v in pairs(rule.config) do
             cursor:set("firewall", id, k, v)
         end
     end
 
-    cursor:commit("firewall")
-    log.info("NET: Base firewall config committed")
+    log.info("NET: Base firewall configured")
 end
 
-local function apply_network_base_config(net_cfg)
+local function set_network_base_config(net_cfg)
     log.info("NET: Applying base network config")
 
     -- Loopback
@@ -171,32 +184,65 @@ local function apply_network_base_config(net_cfg)
         end
     end
 
-    -- Commit base state
-    cursor:commit("network")
-    log.info("NET: Base network config committed")
+    log.info("NET: Base network configured")
 end
 
-local function apply_network_config(net_cfg, dns_id)
+local function set_mwan3_base_config(multiwan_cfg)
+    log.info("NET: Applying base mwan3 config")
+
+    -- Globals
+    cursor:set("mwan3", "globals", "globals")
+    cursor:set("mwan3", "globals", "mmx_mask", "0x3F00")
+
+    -- HTTPS Rule
+    cursor:set("mwan3", "https", "rule")
+    cursor:set("mwan3", "https", "sticky", "1")
+    cursor:set("mwan3", "https", "dest_port", "443")
+    cursor:set("mwan3", "https", "proto", "tcp")
+    cursor:set("mwan3", "https", "use_policy", "def_pol")
+
+    -- Default Rule
+    cursor:set("mwan3", "default_ipv4", "rule")
+    cursor:set("mwan3", "default_ipv4", "dest_ip", "0.0.0.0/0")
+    cursor:set("mwan3", "default_ipv4", "use_policy", "def_pol")
+
+    -- Policy
+    cursor:set("mwan3", "def_pol", "policy")
+    cursor:set("mwan3", "def_pol", "last_resort", "unreachable")
+
+    log.info("NET: Base mwan3 configured")
+end
+local function set_network_config(instance)
+    local net_cfg = instance.cfg
     assert(net_cfg.id, "network config must have an 'id'")
     local net_id = net_cfg.id
 
     log.info("NET: Applying network config for:", net_id)
 
-    local iface_name = net_cfg.interfaces and net_cfg.interfaces[1]
-    if not iface_name then
-        log.warn("NET: No interface specified for network:", net_id)
-        return
+    -- 1. Network interface config
+    if net_cfg.type == "local" then
+        local devicename = cursor:add("network", "device")
+        cursor:set("network", devicename, "name", "br-" .. net_id)
+        cursor:set("network", devicename, "type", "bridge")
+        cursor:set("network", devicename, "ports", net_cfg.interfaces or {})
     end
 
-    -- 1. Network interface config
     cursor:set("network", net_id, "interface")
-    cursor:set("network", net_id, "ifname", iface_name)
-    cursor:set("network", net_id, "proto", net_cfg.ipv4.proto or "dhcp")
+    if net_cfg.type == "local" then
+        cursor:set("network", net_id, "device", "br-" .. net_id)
+    elseif net_cfg.type == "backhaul" then
+        cursor:set("network", net_id, "peerdns", "0")
+        cursor:set("network", net_id, "device", net_cfg.interfaces[1])
+        cursor:set("network", net_id, "metric", metric_counter.next())
+    end
 
-    if net_cfg.ipv4.proto == "static" then
+    if net_cfg.ipv4.proto == "dhcp" then
+        cursor:set("network", net_id, "proto", "dhcp")
+    elseif net_cfg.ipv4.proto == "static" then
+        cursor:set("network", net_id, "proto", "static")
         cursor:set("network", net_id, "ipaddr", net_cfg.ipv4.ip_address)
         cursor:set("network", net_id, "netmask", net_cfg.ipv4.netmask)
-        if net_cfg.ipv4.gateway then cursor:set("network", net_id, "netmask", net_cfg.ipv4.gateway) end
+        if net_cfg.ipv4.gateway then cursor:set("network", net_id, "gateway", net_cfg.ipv4.gateway) end
     end
 
     -- 2. DHCP
@@ -213,9 +259,9 @@ local function apply_network_config(net_cfg, dns_id)
     end
 
     -- connects DHCP to instance and DNS to interface
-    if dns_id then
-        cursor:set("dhcp", net_id, "instance", dns_id)
-        add_to_uci_list("dhcp", dns_id, "interface", net_id)
+    if instance.dns_id then
+        cursor:set("dhcp", net_id, "instance", instance.dns_id)
+        add_to_uci_list("dhcp", instance.dns_id, "interface", net_id)
     end
 
     -- 3. Associate this network with an existing firewall zone
@@ -225,14 +271,44 @@ local function apply_network_config(net_cfg, dns_id)
         add_to_uci_list("firewall", zone_id, "network", net_id)
     end
 
-    -- 4. Commit
-    cursor:commit("network")
-    cursor:commit("dhcp")
-    cursor:commit("firewall")
-
+    -- 4. Add MWAN3 configuration
+    if net_cfg.type == 'backhaul' then
+        -- first, add the interface
+        cursor:set("mwan3", net_id, "interface")
+        cursor:set("mwan3", net_id, "enabled", 1)
+        cursor:set("mwan3", net_id, "up", 1)
+        cursor:set("mwan3", net_id, "down", 2)
+        cursor:set("mwan3", net_id, "family", "ipv4")
+        cursor:set("mwan3", net_id, "track_ip", tracking_ips)
+        cursor:set("mwan3", net_id, "initial_state", instance.online and "online" or "offline")
+        -- now add the member
+        local member_id = net_id .. "_member"
+        cursor:set("mwan3", member_id, "member")
+        cursor:set("mwan3", member_id, "interface", net_id)
+        cursor:set("mwan3", member_id, "metric", net_cfg.multiwan.metric)
+        cursor:set("mwan3", member_id, "weight", instance.speed and instance.speed * 10 or 1)
+        -- now add member to policy
+        add_to_uci_list("mwan3", "def_pol", "use_member", member_id)
+    end
     log.info("NET: Network config applied successfully for:", net_id)
 end
 
+local function set_network_speed(instance)
+    local net_cfg = instance.cfg
+    local net_id = net_cfg.id
+
+    log.info("NET: Applying network speed for:", net_id)
+
+    -- first, add the interface
+    cursor:set("mwan3", net_id, "initial_state", instance.status == "online" and "online" or "offline")
+    -- now add the member
+    local member_id = net_id .. "_member"
+    cursor:set("mwan3", member_id, "weight", instance.speed and round(instance.speed * 10) or 1)
+    -- now add member to policy
+    add_to_uci_list("mwan3", "def_pol", "use_member", member_id)
+    cursor:commit("mwan3")
+    log.info("NET: Network config applied successfully for:", net_id)
+end
 local dnsmasq_instances = {}  -- maps host filter keys to instance names
 local dnsmasq_counter = 0
 
@@ -273,6 +349,7 @@ local function get_dnsmasq_id(default_hosts)
     cursor:set("dhcp", id, "filterwin2k", "0")
     cursor:set("dhcp", id, "readethers", "1")
     cursor:set("dhcp", id, "server", { "8.8.8.8", "1.1.1.1" })
+    cursor:set("dhcp", id, "cachesize", "1000")
 
     -- Add any blocklist host files
     if #default_hosts > 0 then
@@ -286,36 +363,109 @@ local function get_dnsmasq_id(default_hosts)
     return id
 end
 
+-- Define action types
+local ACTION_TYPES = {
+    FULL_RESTART = 1,
+    MWAN_RELOAD_INTERFACE = 2
+}
+
+local function config_applier(ctx)
+    log.trace("NET: Config applier starting")
+
+    while not ctx:err() do
+        local request = config_applier_queue:get()
+
+        if request.type == ACTION_TYPES.FULL_RESTART then
+            log.info("NET: Performing full config restart")
+            -- Execute in specific order with error handling
+            local services = {
+                { "/etc/init.d/network",  "reload" },
+                { "/etc/init.d/firewall", "restart" },
+                { "/etc/init.d/dnsmasq",  "restart" },
+                { "/etc/init.d/odhcpd",   "restart" },
+                { "mwan3",                "restart" }
+            }
+
+            for _, cmd in ipairs(services) do
+                local err = exec.command(cmd[1], cmd[2]):run()
+                if err then
+                    log.error("NET: Failed to execute", cmd[1], cmd[2], ":", err)
+                end
+            end
+        elseif request.type == ACTION_TYPES.MWAN_RELOAD_INTERFACE then
+            log.info("NET: Reloading mwan3 interface:", request.interface)
+            exec.command("mwan3", "ifup", request.interface):run()
+        end
+    end
+end
+
 local function uci_manager(ctx)
     log.trace("NET: UCI manager starting")
 
-    local pending_networks = {}    -- key = net_id, value = network cfg
+    local networks = {}
+    local wan_iface_status = {}
+    local wan_iface_speed = {}
     local resolved_interfaces = {} -- key = modem_id or ifname, value = resolved interface string
 
     local function on_config(cfg)
-        apply_firewall_base_config(cfg.firewall)
-        apply_network_base_config(cfg.network)
+        local start = sc.monotime()
+        -- cleanup
+        local areas = { "network", "firewall", "dhcp", "mwan3" }
+        for _, area in ipairs(areas) do
+            cursor:foreach(area, nil, function(s)
+                cursor:delete(area, s[".name"])
+            end)
+        end
+        metric_counter.reset()
+        -- config application
+        set_firewall_base_config(cfg.firewall)
+        set_network_base_config(cfg.network)
+        set_mwan3_base_config(cfg.multiwan) -- NEED TO CREATE MULTIWAN GLOBALS SECTION
+        local new_networks = {}
         for _, net_cfg in ipairs(cfg.network or {}) do
             local net_id = net_cfg.id
-            local dns_id
-            if net_cfg.type == "local" then -- only assign DNS servers to local networks
-                dns_id = get_dnsmasq_id(net_cfg.dns_server and net_cfg.dns_server.default_hosts or {})
-            end
+            networks[net_id] = {
+                cfg = net_cfg,
+                dns_id = net_cfg.type == "local" and
+                    get_dnsmasq_id(net_cfg.dns_server and net_cfg.dns_server.default_hosts or {}),
+                status = networks[net_id] and networks[net_id].status or "offline",
+                speed = networks[net_id] and networks[net_id].speed,
+                resolved = net_cfg.interfaces and net_cfg.interfaces[1] and true or false
+            }
             local modem_id = net_cfg.modem_id
             local iface = net_cfg.interfaces and net_cfg.interfaces[1]
 
             if modem_id and not resolved_interfaces[modem_id] then
                 -- Modem-dependent and unresolved
-                pending_networks[net_id] = net_cfg
                 log.debug("NET: Deferring config for", net_id, "— waiting for modem", modem_id)
             elseif iface or (modem_id and resolved_interfaces[modem_id]) then
                 -- Ready to apply
-                if modem_id then
-                    net_cfg.interfaces = { resolved_interfaces[modem_id] }
-                end
-                apply_network_config(net_cfg, dns_id)
+                if modem_id then net_cfg.interfaces = { resolved_interfaces[modem_id] } end
+                set_network_config(networks[net_id])
             else
                 log.warn("NET: Network", net_id, "has no usable interface or modem_id")
+            end
+        end
+        for _, area in ipairs(areas) do
+            cursor:commit(area)
+        end
+        print("That took:", sc.monotime() - start)
+        config_applier_queue:put({ type = ACTION_TYPES.FULL_RESTART })
+    end
+
+    local function on_wan_status(msg)
+        local network, status = msg.network, msg.status
+        networks[network] = networks[network] or {}
+        local old_status = networks[network].status
+        networks[network].status = status
+        if old_status ~= status then
+            log.debug("NET: WAN state change", network, status)
+
+            -- Trigger speedtest only on new connections
+            if status == "online" then
+                local interface = networks[network].cfg.interfaces[1]
+                log.info("NET: network", network, ": newly online, scheduling speedtest")
+                speedtest_queue:put({ network = network, interface = interface })
             end
         end
     end
@@ -329,20 +479,26 @@ local function uci_manager(ctx)
         log.info("NET: Interface", iface, "resolved for modem", modem_id)
 
         -- Check pending networks that depend on this modem
-        for net_id, net in pairs(pending_networks) do
-            if net.modem_id == modem_id then
-                net.interfaces = { iface }
-                apply_network_config(net)
-                pending_networks[net_id] = nil
+        for net_id, net in pairs(networks) do
+            if net.cfg.modem_id == modem_id then
+                net.cfg.interfaces = { iface }
+                set_network_config(net)
                 log.info("NET: Applied deferred network config for", net_id)
             end
         end
+    end
+
+    local function on_speedtest_result(result)
+        networks[result.network].speed = result.speed
+        set_network_speed(networks[result.network])
     end
 
     while ctx:err() == nil do
         op.choice(
             config_channel:get_op():wrap(on_config),
             interface_channel:get_op():wrap(on_interface),
+            speedtest_result_channel:get_op():wrap(on_speedtest_result),
+            wan_status_channel:get_op():wrap(on_wan_status),
             ctx:done_op()
         ):perform()
     end
@@ -351,23 +507,6 @@ end
 local function wan_monitor(ctx)
     log.trace("NET: WAN monitor starting")
 
-    -- State tracking table
-    local interface_states = {}
-
-    local function handle_event(iface, status)
-        local prev_status = interface_states[iface]
-        if prev_status ~= status then
-            log.debug("NET: WAN state change", iface, status)
-            interface_states[iface] = status
-
-            -- Trigger speedtest only on new connections
-            if status == "online" then
-                log.info("NET: network", iface, ": newly online, scheduling speedtest")
-                speedtest_queue:put(iface)
-            end
-        end
-    end
-
     -- first, we get the initial state of the interfaces, we use command line ubus for consistency with `ubus listen`
     local output, err = exec.command("ubus", "call", "mwan3", "status"):output()
     if err then log.error("NET: WAN monitor: could not start ubus call") return end
@@ -375,9 +514,9 @@ local function wan_monitor(ctx)
     local res, err = cjson.decode(output)
     if err then log.error("NET: WAN monitor: could not get initial state: "..err) return end
 
-    for iface, data in pairs(res.interfaces or {}) do
+    for network, data in pairs(res.interfaces or {}) do
         local status = data.status == "online" and "online" or "offline"
-        handle_event(iface, status)
+        wan_status_channel:put({ network = network, status = status })
     end
 
     -- now we start a continuous loop to monitor for changes in interface state
@@ -400,13 +539,12 @@ local function wan_monitor(ctx)
                     local event, err = cjson.decode(line)
                     if err then log.error("NET: ubus listen line decode failed:", err) return end
                     local data = event["hotplug.mwan3"]
-                    for k,v in pairs(data) do print(k,v) end
+                    log.debug("MWAN3 hotplug event received!")
 
-                    if data.action == "connected" then
-                        handle_event(data.interface, "online")
-                    elseif data.action == "disconnected" then
-                        handle_event(data.interface, "offline")
-                    end
+                    wan_status_channel:put({
+                        network = data.interface,
+                        status = data.action == "connected" and "online" or "offline"
+                    })
                 end
             end),
             ctx:done_op():wrap(function ()
@@ -422,16 +560,22 @@ local function speedtest_worker(ctx)
     log.trace("NET: Speedtest worker starting")
     while not ctx:err() do
         log.trace("NET: Speedtest worker waiting for jobs")
-        local owrt_iface, linux_iface = speedtest_queue:get()
-        local results, err = speedtest.run(ctx, owrt_iface, "eth0")
-        if err then log.error("NET:","Speedtest error:", err) end
-        log.info(string.format(
-            "Speedtest complete for network: wan. %.2f Mbps, data used: %.2f MB in %.2f Secs",
-             results.peak, results.data, results.time
-        ))
+        local msg = speedtest_queue:get()
+        local results, err = speedtest.run(ctx, msg.network, msg.interface)
+        if err then
+            log.error("NET:", "Speedtest error:", err)
+        else
+            log.info(string.format(
+                "Speedtest complete for network: wan. %.2f Mbps, data used: %.2f MB in %.2f Secs",
+                results.peak, results.data, results.time
+            ))
+            speedtest_result_channel:put({
+                network = msg.network,
+                speed = results.peak
+            })
+        end
     end
 end
-
 
 function net_service:start(ctx, conn)
     log.trace("Starting NET Service")
@@ -442,6 +586,7 @@ function net_service:start(ctx, conn)
     fiber.spawn(function() uci_manager(ctx, conn) end)
     fiber.spawn(function() wan_monitor(ctx, conn) end)
     fiber.spawn(function() speedtest_worker(ctx, conn) end)
+    fiber.spawn(function() config_applier(ctx) end)
 end
 
 return net_service
