@@ -3,13 +3,13 @@
 return {
     services = {
         "config",
-        -- "hal",
-        -- "gsm",
-        -- "geo",
-        -- "time",
+        "hal",
+        "gsm",
+        "geo",
+        "time",
         "net",
-        -- "metrics",
-        -- "system"
+        "metrics",
+        "system"
         -- ... other services specific to this device version
     }
 }
