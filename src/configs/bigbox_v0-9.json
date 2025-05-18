@@ -191,7 +191,8 @@
         "modem_id": "primary",
         "ipv4": {
           "enabled": true,
-          "proto": "dhcp"
+          "proto": "dhcp",
+          "peerdns": 0
         },
         "firewall": {
           "zone": "wan"
@@ -243,7 +244,8 @@
         ],
         "ipv4": {
           "enabled": true,
-          "proto": "dhcp"
+          "proto": "dhcp",
+          "peerdns": 0
         },
         "firewall": {
           "zone": "wan"
@@ -269,8 +271,8 @@
       "rules": {},
       "default_strategy": "dynamic_weight",
       "health_checks": {
-        "down": 3,
-        "up": 2,
+        "down": 2,
+        "up": 1,
         "initial_state": "offline",
         "track_method": "ping",
         "track_ip": [
@@ -328,7 +330,7 @@
             "input": "REJECT",
             "output": "ACCEPT",
             "forward": "REJECT",
-            "masquerade": 1,
+            "masq": 1,
             "mtu_fix": 1
           }
         }

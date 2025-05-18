@@ -12,3 +12,7 @@ JSON_PAYLOAD="{
 
 # Send event to UBUS
 ubus send "$EVENT_NAME" "$JSON_PAYLOAD"
+
+# Default mwan3 action
+if [ "${ACTION}" = "connected" ] ; then
+   /etc/init.d/sysntpd restart

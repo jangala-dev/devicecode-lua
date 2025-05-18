@@ -9,15 +9,14 @@ local log = require "log"
 local uci = require "uci"
 local speedtest = require "services.net.speedtest"
 local new_msg = require "bus".new_msg
-
-local cursor = uci.cursor("/tmp/test", "/tmp/.uci") -- runtime-safe!
+local cursor = uci.cursor() -- runtime-safe!
+-- local cursor = uci.cursor("/tmp/test", "/tmp/.uci") -- runtime-safe!
 
 -- top-level service
 local net_service = {
     name = 'net'
 }
 net_service.__index = net_service
-
 -------------------------------------------------------
 -- Constants
 local tracking_ips = { "8.8.8.8", "1.1.1.1" }
@@ -83,7 +82,7 @@ local config_applier_queue = queue.new() -- Unbounded queue for holding config c
 
 local function config_receiver(ctx, conn)
     log.trace("NET: Config receiver starting")
-    local sub = conn:subscribe({"config", "net"})
+    local sub = conn:subscribe({ "config", "net" })
     while not ctx:err() do
         op.choice(
             sub:next_msg_op():wrap(function (msg, err)
@@ -105,12 +104,13 @@ local function interface_listener(ctx, conn)
     while not ctx:err() do
         op.choice(
             sub:next_msg_op():wrap(function (msg, err)
+                print("INTERFACE LISTENER GOT A MESSAGE")
                 if err then
                     log.error("NET: Interface listen error:", err)
                 end
                 -- Extract modem_id from topic gsm/<modem_id>/interface
                 local modem_id = msg.topic[3]
-                interface_channel:put{
+                interface_channel:put {
                     modem_id = modem_id,
                     interface = msg.payload
                 }
@@ -129,7 +129,6 @@ local function set_firewall_base_config(fw_cfg)
     for k, v in pairs(fw_cfg.defaults or {}) do
         cursor:set("firewall", "defaults", k, v)
     end
-
     -- Zones
     for _, zone in ipairs(fw_cfg.zones or {}) do
         local id = zone.config.name
@@ -232,6 +231,7 @@ local function set_network_config(instance)
     if net_cfg.type == "local" then
         cursor:set("network", net_id, "device", "br-" .. net_id)
     elseif net_cfg.type == "backhaul" then
+        cursor:set("network", net_id, "peerdns", "0")
         cursor:set("network", net_id, "device", net_cfg.interfaces[1])
         cursor:set("network", net_id, "metric", metric_counter.next())
     end
@@ -276,6 +276,8 @@ local function set_network_config(instance)
         -- first, add the interface
         cursor:set("mwan3", net_id, "interface")
         cursor:set("mwan3", net_id, "enabled", 1)
+        cursor:set("mwan3", net_id, "up", 1)
+        cursor:set("mwan3", net_id, "down", 2)
         cursor:set("mwan3", net_id, "family", "ipv4")
         cursor:set("mwan3", net_id, "track_ip", tracking_ips)
         cursor:set("mwan3", net_id, "initial_state", instance.online and "online" or "offline")

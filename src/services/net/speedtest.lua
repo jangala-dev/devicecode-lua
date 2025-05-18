@@ -4,21 +4,24 @@ local file = require 'fibers.stream.file'
 local exec = require 'fibers.exec'
 local sc = require 'fibers.utils.syscall'
 local log = require "log"
+local context = require "fibers.context"
 
 
 local DOWNLOAD_URL = "https://proof.ovh.net/files/100Mb.dat"
-local SAMPLE_INTERVAL = 0.07       -- 10ms between measurements
-local NO_IMPROVEMENT_SAMPLES = 2  -- Number of consecutive samples with no improvement before stopping
+local SAMPLE_INTERVAL = 0.06     -- 60ms between measurements
+local NO_IMPROVEMENT_SAMPLES = 2 -- Number of consecutive samples with no improvement before stopping
+local STARTUP_TIMEOUT = 2        -- Seconds to wait for connection to speedtest server
 
 local function run(ctx, owrt_interface, linux_interface)
     local cmd = exec.command('mwan3', 'use', owrt_interface, 'wget', '-O', '/dev/null', DOWNLOAD_URL)
     cmd:setpgid(true)
     local stderr_pipe = assert(cmd:stderr_pipe())
 
-    assert(cmd:start() == nil, "Failed to start wget")
+    local err = cmd:start()
+    if err then return nil, "Failed to start wget" end
 
     local rx_file = file.open("/sys/class/net/" .. linux_interface .. "/statistics/rx_bytes", "r")
-    if not rx_file then return nil end
+    if not rx_file then return nil, "Failed to open RX bytes" end
 
     local function get_rx_bytes()
         rx_file:seek(0)  -- Rewind to beginning
@@ -26,12 +29,15 @@ local function run(ctx, owrt_interface, linux_interface)
     end
 
     local started = false
+    local ctx_timeout
 
     -- Detect the moment the download begins
     while true do
+        ctx_timeout = context.with_timeout(ctx, STARTUP_TIMEOUT)
         local line = op.choice(
-            stderr_pipe:read_some_chars_op(),
-            ctx:done_op()
+            stderr_pipe:read_line_op(),
+            -- stderr_pipe:read_some_chars_op(),
+            ctx_timeout:done_op()
         ):perform()
         if not line then break end
 
@@ -47,7 +53,7 @@ local function run(ctx, owrt_interface, linux_interface)
         rx_file:close()
         cmd:kill()
         cmd:wait()
-        return nil, ctx:err() or "Could not start file download"
+        return nil, ctx:err() or ctx_timeout:err() or "Could not start file download"
     end
 
     -- Capture initial bytes/time
@@ -66,7 +72,6 @@ local function run(ctx, owrt_interface, linux_interface)
 
     local peak_speed = 0
     local consecutive_no_improvement = 0
-    local speed_samples = {}  -- Store the last NO_IMPROVEMENT_SAMPLES speeds
 
     while not ctx:err() do
         sleep.sleep(SAMPLE_INTERVAL)
@@ -79,7 +84,7 @@ local function run(ctx, owrt_interface, linux_interface)
 
         local elapsed = now - prev_time
         local diff = current_bytes - prev_bytes
-        local speed_mbps = (diff * 8) / (elapsed * 1e6)
+        local speed_mbps = (diff * 8) / (elapsed * 2 ^ 20)
 
         -- Update peak speed or increment the no-improvement counter
         if speed_mbps > peak_speed then
@@ -87,12 +92,6 @@ local function run(ctx, owrt_interface, linux_interface)
             consecutive_no_improvement = 0
         else
             consecutive_no_improvement = consecutive_no_improvement + 1
-        end
-
-        -- Maintain a sliding window of the last NO_IMPROVEMENT_SAMPLES speeds
-        table.insert(speed_samples, speed_mbps)
-        if #speed_samples > NO_IMPROVEMENT_SAMPLES then
-            table.remove(speed_samples, 1) -- Keep only the latest N samples
         end
 
         prev_time = now
@@ -111,28 +110,9 @@ local function run(ctx, owrt_interface, linux_interface)
 
     if ctx:err() then return nil, ctx:err() end
 
-    -- Compute the mean of the last NO_IMPROVEMENT_SAMPLES
-    local sum = 0
-    for _, speed in ipairs(speed_samples) do
-        sum = sum + speed
-    end
-    local avg_recent_speed = sum / #speed_samples
-
-    -- Compute the median of the last NO_IMPROVEMENT_SAMPLES
-    table.sort(speed_samples)
-    local n = #speed_samples
-    local median_recent_speed
-    if n % 2 == 1 then
-        median_recent_speed = speed_samples[(n + 1) / 2]
-    else
-        median_recent_speed = (speed_samples[n / 2] + speed_samples[(n / 2) + 1]) / 2
-    end
-
     return {
-        mean = avg_recent_speed,
-        median = median_recent_speed,
         peak = peak_speed,
-        data = (prev_bytes - start_bytes) / 1e6,
+        data = (prev_bytes - start_bytes) / 2 ^ 20,
         time = prev_time - start_time
     }, nil
 end
