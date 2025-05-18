@@ -191,7 +191,8 @@
         "modem_id": "primary",
         "ipv4": {
           "enabled": true,
-          "proto": "dhcp"
+          "proto": "dhcp",
+          "peerdns": 0
         },
         "firewall": {
           "zone": "wan"
@@ -243,7 +244,8 @@
         ],
         "ipv4": {
           "enabled": true,
-          "proto": "dhcp"
+          "proto": "dhcp",
+          "peerdns": 0
         },
         "firewall": {
           "zone": "wan"
@@ -263,10 +265,14 @@
       }
     ],
     "multiwan": {
+      "globals": {
+        "mmx_mask": "0x3F00"
+      },
+      "rules": {},
       "default_strategy": "dynamic_weight",
       "health_checks": {
-        "down": 3,
-        "up": 2,
+        "down": 2,
+        "up": 1,
         "initial_state": "offline",
         "track_method": "ping",
         "track_ip": [
@@ -278,106 +284,149 @@
       }
     },
     "firewall": {
+      "defaults": {
+        "syn_flood": "1",
+        "input": "ACCEPT",
+        "forward": "REJECT",
+        "output": "ACCEPT",
+        "disable_ipv6": "1"
+      },
       "zones": [
         {
-          "name": "Local Networks",
-          "id": "lan",
-          "input": "ACCEPT",
-          "output": "ACCEPT",
-          "forward": "ACCEPT"
+          "description": "Local Networks",
+          "name": "lan",
+          "config": {
+            "name": "lan",
+            "input": "ACCEPT",
+            "output": "ACCEPT",
+            "forward": "ACCEPT"
+          },
+          "forwarding": [
+            {
+              "dest": "wan"
+            }
+          ]
         },
         {
-          "name": "Local Networks - restricted",
-          "id": "lan_rst",
-          "input": "REJECT",
-          "output": "ACCEPT",
-          "forward": "REJECT"
+          "description": "Local Networks - restricted",
+          "name": "lan_rst",
+          "config": {
+            "name": "lan_rst",
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT"
+          },
+          "forwarding": [
+            {
+              "dest": "wan"
+            }
+          ]
         },
         {
-          "name": "Internet",
-          "id": "wan",
-          "input": "REJECT",
-          "output": "ACCEPT",
-          "forward": "REJECT",
-          "masquerade": true,
-          "mtu_fix": true
-        }
-      ],
-      "forwarding": [
-        {
-          "src": "lan",
-          "dest": "wan"
-        },
-        {
-          "src": "lan_rst",
-          "dest": "wan"
+          "description": "Internet",
+          "name": "wan",
+          "config": {
+            "name": "wan",
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT",
+            "masq": 1,
+            "mtu_fix": 1
+          }
         }
       ],
       "rules": [
         {
-          "name": "Allow-DHCP-Renew",
-          "src": "wan",
-          "proto": "udp",
-          "dest_port": "68",
-          "target": "ACCEPT"
+          "description": "Allows for DHCP renewal from upstream routers",
+          "config": {
+            "name": "Allow-DHCP-Renew",
+            "src": "wan",
+            "proto": "udp",
+            "dest_port": "68",
+            "target": "ACCEPT"
+          }
         },
         {
-          "name": "Allow-Ping",
-          "src": "wan",
-          "proto": "icmp",
-          "icmp_type": "echo-request",
-          "target": "ACCEPT"
+          "description": "Responds to pings from the Internet",
+          "config": {
+            "name": "Allow-Ping",
+            "src": "wan",
+            "proto": "icmp",
+            "icmp_type": "echo-request",
+            "target": "ACCEPT"
+          }
         },
         {
-          "name": "Allow-IGMP",
-          "src": "wan",
-          "proto": "igmp",
-          "target": "ACCEPT"
+          "description": "",
+          "config": {
+            "name": "Allow-IGMP",
+            "src": "wan",
+            "proto": "igmp",
+            "target": "ACCEPT"
+          }
         },
         {
-          "name": "Allow-IPSec-ESP",
-          "src": "wan",
-          "dest": "lan",
-          "proto": "esp",
-          "target": "ACCEPT"
+          "description": "",
+          "config": {
+            "name": "Allow-IPSec-ESP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "esp",
+            "target": "ACCEPT"
+          }
         },
         {
-          "name": "Allow-ISAKMP",
-          "src": "wan",
-          "dest": "lan",
-          "proto": "udp",
-          "dest_port": "500",
-          "target": "ACCEPT"
+          "description": "",
+          "config": {
+            "name": "Allow-ISAKMP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          }
         },
         {
-          "name": "Allow-IPSec-ESP (RST)",
-          "src": "wan",
-          "dest": "lan_rst",
-          "proto": "esp",
-          "target": "ACCEPT"
+          "description": "",
+          "config": {
+            "name": "Allow-IPSec-ESP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "esp",
+            "target": "ACCEPT"
+          }
         },
         {
-          "name": "Allow-ISAKMP (RST)",
-          "src": "wan",
-          "dest": "lan_rst",
-          "proto": "udp",
-          "dest_port": "500",
-          "target": "ACCEPT"
+          "name": "",
+          "config": {
+            "name": "Allow-ISAKMP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          }
         },
         {
-          "name": "Allow DHCP request (RST)",
-          "src": "lan_rst",
-          "proto": "udp",
-          "src_port": "67-68",
-          "dest_port": "67-68",
-          "target": "ACCEPT"
+          "name": "",
+          "config": {
+            "name": "Allow DHCP request (RST)",
+            "src": "lan_rst",
+            "proto": "udp",
+            "src_port": "67-68",
+            "dest_port": "67-68",
+            "target": "ACCEPT"
+          }
         },
         {
-          "name": "Allow DNS queries (RST)",
-          "src": "lan_rst",
-          "proto": "tcp udp",
-          "dest_port": "53",
-          "target": "ACCEPT"
+          "name": "",
+          "config": {
+            "name": "Allow DNS queries (RST)",
+            "src": "lan_rst",
+            "proto": "tcp udp",
+            "dest_port": "53",
+            "target": "ACCEPT"
+          }
         }
       ]
     },
