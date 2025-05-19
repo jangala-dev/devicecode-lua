@@ -188,7 +188,7 @@
         "name": "Primary Modem",
         "id": "mdm0",
         "type": "backhaul",
-        "modem_id": "Primary",
+        "modem_id": "primary",
         "ipv4": {
           "enabled": true,
           "proto": "dhcp",
@@ -214,7 +214,7 @@
         "name": "Secondary Modem",
         "id": "mdm1",
         "type": "backhaul",
-        "modem_id": "Secondary",
+        "modem_id": "secondary",
         "ipv4": {
           "enabled": true,
           "proto": "dhcp"
