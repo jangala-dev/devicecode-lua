@@ -25,7 +25,7 @@ local function is_device_on_hub_port(hub, port)
         return false, "invalid port specified for hub"
     end
 
-    local isdir, err = sc.access(usb_hub_address_prefix .. hub .. "/" .. usb_hub_port_subpaths[hub][port], "r")
+    local isdir, err = sc.access(usb_hub_address_prefix .. hub .. "/" .. usb_hub_port_subpaths[hub][port], "rw")
     if err ~= nil and not string.match(err, "No such file or directory") then
         log.warn("DEFAULT_ERROR", "unexpected error checking for device on hub port: " .. err)
     end
