@@ -1,5 +1,6 @@
 local fiber = require "fibers.fiber"
 local op = require "fibers.op"
+local channel = require "fibers.channel"
 local context = require "fibers.context"
 local sleep = require "fibers.sleep"
 local service = require "service"
@@ -389,11 +390,33 @@ function Modem:_publish_dynamic_data(ctx)
     local operator_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'modem', '3gpp',
         'operator-name' })
 
+    local function publish_iccid(msg)
+        self.conn:publish(new_msg(
+            { 'gsm', 'modem', self.name, 'iccid' },
+            msg.payload,
+            { retained = true }
+        ))
+    end
+    local iccid_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'sim', 'properties',
+        'iccid' })
+
+    local function publish_state(msg)
+        self.conn:publish(new_msg(
+            { 'gsm', 'modem', self.name, 'state' },
+            msg.payload,
+            { retained = true }
+        ))
+    end
+    local state_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'state' })
+
+    -- qmi:sim_freq_stats <- implement this asap
     while not ctx:err() do
         op.choice(
             sim_present_sub:next_msg_op():wrap(publish_sim_present),
             signal_sub:next_msg_op():wrap(publish_signal),
             operator_sub:next_msg_op():wrap(publish_operator),
+            iccid_sub:next_msg_op():wrap(publish_iccid),
+            state_sub:next_msg_op():wrap(publish_state),
             ctx:done_op()
         ):perform()
     end
@@ -471,43 +494,19 @@ end
 ---@param imei string
 ---@param index number
 ---@return Modem
-local function new_modem(ctx, conn, imei, index)
+local function new_modem(ctx, conn, imei, device, index)
     local self = setmetatable({}, Modem)
     self.ctx = context.with_cancel(ctx)
     self.conn = conn
 
     self.idx = index
     self.imei = imei
+    self.device = device
 
     return self
 end
 
---- Create or Destroy a Modem Capability
---- @param ctx Context
---- @param conn Connection Bus Connection
---- @param modem_capability_msg table modem capability infos
-local function modem_capability_handler(ctx, conn, modem_capability_msg)
-    if modem_capability_msg == nil then return end
-
-    -- get imei and device (port) info from bus
-    local modem_imei_sub = conn:subscribe({ 'hal', 'capability', 'modem', modem_capability_msg.index, 'info',
-        'modem', 'generic', 'equipment-identifier' })
-    local imei_msg, imei_err = modem_imei_sub:next_msg_with_context_op(ctx):perform()
-    modem_imei_sub:unsubscribe()
-    if imei_err then
-        log.error(imei_err); return
-    end
-    local imei = imei_msg.payload
-
-    local modem_device_sub = conn:subscribe({ 'hal', 'capability', 'modem', modem_capability_msg.index, 'info',
-        'modem', 'generic', 'device' })
-    local device_msg, device_err = modem_device_sub:next_msg_with_context_op(ctx):perform()
-    modem_device_sub:unsubscribe()
-    if device_err then
-        log.error(device_err); return
-    end
-    local device = device_msg.payload
-
+local function get_modem_config(imei, device)
     -- get the modem config from the configs table, if not found use default
     local modem_config = configs.modem.imei[imei] or configs.modem.device[device]
     local id_field, key
@@ -521,17 +520,78 @@ local function modem_capability_handler(ctx, conn, modem_capability_msg)
         modem_config = configs.modem.default
     end
 
+    return modem_config, id_field, key
+end
+
+local function modem_capability_remove(modem)
+    local imei = modem.imei
+    local device = modem.device
+    
+    modem_config, id_field, key = get_modem_config(imei, device)
+
+    if modems[id_field][key] then
+        modems[id_field][key].ctx:cancel('modem disconnected')
+        modems[id_field][key] = nil
+        log.info(string.format('Modem Capability %s removed', modem.idx))
+    end
+end
+
+local function modem_capability_add(modem)
+    local imei = modem.imei
+    local device = modem.device
+    
+    modem_config, id_field, key = get_modem_config(imei, device)
+
+    modem:update_config(modem_config)
+    modems[id_field][key] = modem
+    log.info(string.format('Modem Capability %s detected', modem.idx))
+end
+
+
+local function init_modem_capability(ctx, conn, modem_add_channel, modem_remove_channel, modem_capability_msg)
+    if modem_capability_msg.payload == nil then
+        log.error("GSM - Modem capability message is nil")
+        return
+    end
+    local modem_capability_msg = modem_capability_msg.payload
+
+    -- get imei and device (port) info from bus
+    local modem_imei_sub = conn:subscribe({ 'hal', 'capability', 'modem', modem_capability_msg.index, 'info',
+        'modem', 'generic', 'equipment-identifier' })
+    local imei_msg, imei_err = modem_imei_sub:next_msg_with_context_op(context.with_timeout(ctx, 10)):perform()
+    modem_imei_sub:unsubscribe()
+    if imei_err then
+        log.error(string.format(
+            "%s - %s: Error getting modem imei: %s",
+            ctx:value("service_name"),
+            ctx:value("fiber_name"),
+            imei_err
+        ))
+        return
+    end
+    local imei = imei_msg.payload
+
+    local modem_device_sub = conn:subscribe({ 'hal', 'capability', 'modem', modem_capability_msg.index, 'info',
+        'modem', 'generic', 'device' })
+    local device_msg, device_err = modem_device_sub:next_msg_with_context_op(context.with_timeout(ctx, 10)):perform()
+    modem_device_sub:unsubscribe()
+    if device_err then
+        log.error(string.format(
+            "%s - %s: Error getting modem device: %s",
+            ctx:value("service_name"),
+            ctx:value("fiber_name"),
+            device_err
+        ))
+        return
+    end
+    local device = device_msg.payload
+
+    local modem = new_modem(ctx, conn, imei, device, modem_capability_msg.index)
+
     if modem_capability_msg.connected then
-        local modem = new_modem(ctx, conn, imei, modem_capability_msg.index)
-        modem:update_config(modem_config)
-        modems[id_field][key] = modem
-        log.info(string.format('Modem Capability %s detected', modem_capability_msg.index))
+        modem_add_channel:put(modem)
     else
-        if modems[id_field][key] then
-            modems[id_field][key].ctx:cancel('modem disconnected')
-            modems[id_field][key] = nil
-            log.info(string.format('Modem Capability %s removed', modem_capability_msg.index))
-        end
+        modem_remove_channel:put(modem)
     end
 end
 
@@ -589,6 +649,9 @@ local function gsm_manager(ctx, conn)
     local capability_sub = conn:subscribe({ 'hal', 'capability', 'modem', '+' })
     local config_sub = conn:subscribe({ 'config', 'gsm' })
 
+    local modem_add_channel = channel.new()
+    local modem_remove_channel = channel.new()
+
     -- load config before anything else
     local config, config_err = config_sub:next_msg_with_context_op(ctx):perform()
     if config_err then
@@ -602,9 +665,12 @@ local function gsm_manager(ctx, conn)
     while not ctx:err() do
         op.choice(
             capability_sub:next_msg_op():wrap(function(capability_msg)
-                modem_capability_handler(ctx, conn, capability_msg.payload)
-            end
-            ),
+                fiber.spawn(function()
+                    init_modem_capability(ctx, conn, modem_add_channel, modem_remove_channel, capability_msg)
+                end)
+            end),
+            modem_add_channel:get_op():wrap(modem_capability_add),
+            modem_remove_channel:get_op():wrap(modem_capability_remove),
             config_sub:next_msg_op():wrap(config_handler),
             ctx:done_op()
         ):perform()
@@ -619,7 +685,7 @@ end
 ---@param conn Connection Bus Connection
 function gsm_service:start(ctx, conn)
     log.trace("Starting GSM Service")
-    service.spawn_fiber('GSM fiber', conn, ctx, function(fiber_ctx)
+    service.spawn_fiber('Manager', conn, ctx, function(fiber_ctx)
         gsm_manager(fiber_ctx, conn)
     end)
 end
