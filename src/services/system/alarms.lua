@@ -2,9 +2,6 @@ local op = require 'fibers.op'
 local falarm = require "fibers.alarm"
 local sc = require 'fibers.utils.syscall'
 
-falarm.install_alarm_handler()
-falarm.clock_synced()
-
 local REPEAT_TYPES = {
     NONE = "none",
     DAILY = "daily",
