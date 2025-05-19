@@ -51,6 +51,7 @@ return function(modem)
         end
         local cancel_fn = function()
             cmd:kill()
+            cmd:wait()
             stdout:close()
         end
 
