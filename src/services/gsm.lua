@@ -526,8 +526,8 @@ end
 local function modem_capability_remove(modem)
     local imei = modem.imei
     local device = modem.device
-    
-    modem_config, id_field, key = get_modem_config(imei, device)
+
+    local modem_config, id_field, key = get_modem_config(imei, device)
 
     if modems[id_field][key] then
         modems[id_field][key].ctx:cancel('modem disconnected')
@@ -539,8 +539,8 @@ end
 local function modem_capability_add(modem)
     local imei = modem.imei
     local device = modem.device
-    
-    modem_config, id_field, key = get_modem_config(imei, device)
+
+    local modem_config, id_field, key = get_modem_config(imei, device)
 
     modem:update_config(modem_config)
     modems[id_field][key] = modem
