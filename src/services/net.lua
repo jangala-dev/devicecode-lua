@@ -307,6 +307,7 @@ local function set_network_speed(instance)
     cursor:set("mwan3", member_id, "weight", instance.speed and round(instance.speed * 10) or 1)
     -- now add member to policy
     add_to_uci_list("mwan3", "def_pol", "use_member", member_id)
+    log.debug("NET: Committing changes for: mwan3")
     cursor:commit("mwan3")
     config_applier_queue:put({ "mwan3" })
     log.info("NET: Speed config applied successfully for:", net_id)
@@ -450,6 +451,7 @@ local function uci_manager(ctx)
             end
         end
         for _, area in ipairs(areas) do
+            log.debug("NET: Committing changes for:", area)
             cursor:commit(area)
         end
         print("That took:", sc.monotime() - start)
@@ -493,6 +495,7 @@ local function uci_manager(ctx)
                 set_network_config(net)
                 log.info("NET: Applied deferred network config for", net_id)
                 for _, area in ipairs(areas) do
+                    log.debug("NET: Committing changes for:", area)
                     cursor:commit(area)
                 end
                 config_applier_queue:put(areas)
