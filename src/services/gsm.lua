@@ -333,7 +333,7 @@ local function get_access_family(access_tech)
     return accessfamdict[access_tech], nil
 end
 
-local function get_imei(ctx, con, idx)
+local function get_imei(ctx, conn, idx)
     local imei_sub = conn:subscribe({ 'hal', 'capability', 'modem', idx, 'info', 'modem', 'generic',
         'equipment-identifier' })
     local imei_msg, imei_err = imei_sub:next_msg_with_context_op(ctx):perform()
