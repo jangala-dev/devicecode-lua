@@ -107,13 +107,14 @@ local function interface_listener(ctx, conn)
             sub:next_msg_op():wrap(function(msg, err)
                 if err then
                     log.error("NET: Interface listen error:", err)
+                else
+                    -- Extract modem_id from topic gsm/<modem_id>/interface
+                    local modem_id = msg.topic[3]
+                    interface_channel:put {
+                        modem_id = modem_id,
+                        interface = msg.payload
+                    }
                 end
-                -- Extract modem_id from topic gsm/<modem_id>/interface
-                local modem_id = msg.topic[3]
-                interface_channel:put {
-                    modem_id = modem_id,
-                    interface = msg.payload
-                }
             end),
             ctx:done_op()
         ):perform()
