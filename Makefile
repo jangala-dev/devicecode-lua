@@ -13,29 +13,24 @@ all: env test-all build lint
 .PHONY: build
 build:
 	@echo "Building the project..."
+	@rm -rf $(BUILD_DIR)
 	@mkdir -p $(BUILD_DIR)
 	@cp -r $(SRC_DIR)/* $(BUILD_DIR)/
 	@cp $(BUILD_DIR)/lua-bus/src/* $(BUILD_DIR)
-	@rm -r $(BUILD_DIR)/lua-bus
+	@rm -rf $(BUILD_DIR)/lua-bus
 	@cp -r $(BUILD_DIR)/lua-fibers/fibers $(BUILD_DIR)
-	@rm -r $(BUILD_DIR)/lua-fibers
+	@rm -rf $(BUILD_DIR)/lua-fibers
 	@cp $(BUILD_DIR)/lua-trie/src/* $(BUILD_DIR)
-	@rm -r $(BUILD_DIR)/lua-trie
+	@rm -rf $(BUILD_DIR)/lua-trie
+	@rm -rf $(BUILD_DIR)/services/ui/local-ui
 	@echo "Build complete."
 
 # Build-All: Builds the project and all submodules including ui
 .PHONY: build-all
 build-all:
-	@echo "Building the project..."
-	@mkdir -p $(BUILD_DIR)
-	@cp -r $(SRC_DIR)/* $(BUILD_DIR)/
-	@cp $(BUILD_DIR)/lua-bus/src/* $(BUILD_DIR)
-	@rm -r $(BUILD_DIR)/lua-bus
-	@cp -r $(BUILD_DIR)/lua-fibers/fibers $(BUILD_DIR)/fibers
-	@rm -r $(BUILD_DIR)/lua-fibers
-	@cp $(BUILD_DIR)/lua-trie/src/* $(BUILD_DIR)
-	@rm -r $(BUILD_DIR)/lua-trie
+	@make build
 	@cd $(SRC_DIR)/services/ui/local-ui && make build
+	@mkdir -p $(BUILD_DIR)/www/ui
 	@cp -r $(SRC_DIR)/services/ui/local-ui/build/dist $(BUILD_DIR)/www/ui
 	@echo "Build complete."
 
