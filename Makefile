@@ -84,7 +84,8 @@ env-all:
 	@cd $(SRC_DIR)/lua-fibers && git checkout main && git pull && git checkout $(FIBERS_VER)
 	@cd $(SRC_DIR)/lua-trie && git checkout main && git pull && git checkout $(TRIE_VER)
 	@cd $(SRC_DIR)/lua-bus && git checkout main && git pull && git checkout $(BUS_VER)
-	@cd $(SRC_DIR)/services/ui/local-ui && git checkout main && git pull && git checkout $(UI_VER) && cd client && npm run install-all
+	@cd $(SRC_DIR)/services/ui/local-ui && git checkout main && git fetch && git checkout $(UI_VER) \
+		&& cd client && npm run pull-submodule && npm run install-all
 	@echo "Git submodules updated."
 
 # Lint: Run the linter to check code quality
