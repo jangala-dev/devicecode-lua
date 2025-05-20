@@ -2,6 +2,7 @@ local fiber = require "fibers.fiber"
 local channel = require 'fibers.channel'
 local pollio = require "fibers.pollio"
 local file = require "fibers.stream.file"
+local log = require "log"
 local http_server = require "http.server"
 local http_headers = require "http.headers"
 local http_util = require "http.util"
@@ -72,9 +73,7 @@ local function handle_websocket(ctx, ws)
 
     while not ctx:err() do
         local message, errmsg, errcode = ws:receive()
-        print(message, errmsg, errcode)
         if message == nil then
-            print("breaking!")
             break
         end
         -- handle incoming messages if necessary
@@ -102,7 +101,7 @@ local function handle_sse(ctx, stream, subscription)
                 stream:write_chunk(sse_msg, false)
             end)
             if not ok then
-                print("Client disconnected or write error:", err)
+                log.warning("SSE: Client disconnected or write error:", err)
                 break
             end
         end
@@ -133,12 +132,12 @@ local function onstream(self, stream)
 
     -- Dynamic request handling
     if req_type == api_prefix then
-        print("api call")
+        log.info("API call")
     elseif req_type == ws_prefix then
         -- Attempt WebSocket upgrade directly
         local ws, err = websocket.new_from_stream(stream, req_headers)
         if ws then
-            print("websocket upgrade request")
+            log.info("Websocket upgrade request")
             -- Successful WebSocket upgrade
             ws:accept()
             local ctx = { err = function() return false end }
@@ -176,13 +175,12 @@ local function onstream(self, stream)
         return
     end
 
-    print("html call", req_path)
     local path = get_spa_path(req_path)
     local handle, err = file.open(path, "rb")
     local res_headers = http_headers.new()
 
     if not handle then
-        print("Failed to open file:", err)
+        log.warning("Failed to open file:", err)
         res_headers:append(":status", "404")
         assert(stream:write_headers(res_headers, true))
         return
@@ -212,7 +210,7 @@ local function publish_to_ws_clients(payload)
             ws:send(msg)
         end)
         if not ok then
-            print("Failed to send to websocket client:", err)
+            log.warning("Failed to send to websocket client:", err)
         end
     end
 end
@@ -224,7 +222,7 @@ local function publish_to_sse_clients(payload)
         end)
 
         if not ok then
-            print("Failed to send to SSE client:", err)
+            log.warning("Failed to send to SSE client:", err)
         end
     end
 end
@@ -263,7 +261,7 @@ local function bus_listener(ctx, connection)
 end
 
 function ui_service:start(ctx, connection)
-    print("Starting UI service")
+    log.trace("Starting UI service")
 
     pollio.install_poll_io_handler()
 
@@ -272,7 +270,7 @@ function ui_service:start(ctx, connection)
         port = 80,
         onstream = onstream,
         onerror = function(_, context, operation, err)
-            print(operation, "on", context, "failed:", err)
+            log.warning(operation, "on", context, "failed:", err)
         end
     })
 
