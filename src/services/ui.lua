@@ -269,7 +269,7 @@ function ui_service:start(ctx, connection)
 
     local server = assert(http_server.listen {
         host = "0.0.0.0",
-        port = 8081,
+        port = 80,
         onstream = onstream,
         onerror = function(_, context, operation, err)
             print(operation, "on", context, "failed:", err)

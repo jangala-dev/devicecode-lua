@@ -57,7 +57,13 @@
         },
         "firewall": {
           "zone": "lan"
-        }
+        },
+        "domains": [
+          {
+            "name": "config.bigbox.home",
+            "ip": "172.28.8.1"
+          }
+        ]
       },
       {
         "name": "Jangala Network",

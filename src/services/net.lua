@@ -427,7 +427,15 @@ local function uci_manager(ctx)
         set_firewall_base_config(cfg.firewall)
         set_network_base_config(cfg.network)
         set_mwan3_base_config(cfg.multiwan) -- NEED TO CREATE MULTIWAN GLOBALS SECTION
+
         for _, net_cfg in ipairs(cfg.network or {}) do
+            for _, domain in ipairs(net_cfg.domains or {}) do
+                local id = cursor:add("dhcp", "domain")
+                cursor:set("dhcp", id, "name", domain.name)
+                cursor:set("dhcp", id, "ip", domain.ip)
+                log.info("NET: Added static DNS", domain.name, "->", domain.ip)
+            end
+
             local net_id = net_cfg.id
             networks[net_id] = {
                 cfg = net_cfg,
