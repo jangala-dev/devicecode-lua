@@ -211,6 +211,12 @@ function metrics_service:_handle_config(config)
 
     self.cloud_config = merge_config(self.cloud_config, { url = config.cloud_url })
     -- clean up any old metric pipelines
+    if self.metric_subs then
+        for _, metric_sub in pairs(self.metric_subs) do
+            metric_sub:unsubscribe()
+        end
+    end
+    self.metric_subs = {}
     self.metric_ops = {}
     if config.publish_cache then
         local period = config.publish_cache.period
@@ -288,6 +294,7 @@ function metrics_service:_handle_config(config)
             end
         end)
 
+        table.insert(self.metric_subs, metric_sub)
         table.insert(self.metric_ops, metric_op)
     end
 end
