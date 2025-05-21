@@ -267,17 +267,20 @@ function Driver:set_func_flight()
 end
 
 function Driver:disable()
-    local cmd = mmcli.disable(self.address)
+    local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
+    local cmd = mmcli.disable(cmd_ctx, self.address)
     return cmd:run()
 end
 
 function Driver:enable()
-    local cmd = mmcli.enable(self.address)
+    local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
+    local cmd = mmcli.enable(cmd_ctx, self.address)
     return cmd:run()
 end
 
 function Driver:reset()
-    local cmd = mmcli.reset(self.address)
+    local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
+    local cmd = mmcli.reset(cmd_ctx, self.address)
     return cmd:run()
 end
 
@@ -289,15 +292,27 @@ function Driver:connect(connection_string)
 end
 
 function Driver:disconnect()
-    local cmd = mmcli.disconnect(self.address)
+    local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
+    local cmd = mmcli.disconnect(cmd_ctx, self.address)
     return cmd:run()
 end
 
 function Driver:inhibit()
-    local cmd = mmcli.inhibit(self.address)
-    local err = cmd:start()
-    if err then log.trace("inhibit failed"); return false end
-    cmd:kill()
+    if self.inhibit_cmd then return true end
+    self.inhibit_cmd = mmcli.inhibit(self.address)
+    local err = self.inhibit_cmd:start()
+    if err then
+        log.trace(string.format("Modem inhibit failed, reason: %s", err))
+        return false
+    end
+    return true
+end
+
+function Driver:uninhibit()
+    if not self.inhibit_cmd then return true end
+    self.inhibit_cmd:kill()
+    self.inhibit_cmd:wait()
+    self.inhibit_cmd = nil
     return true
 end
 
@@ -319,6 +334,12 @@ function Driver:wait_for_sim()
     end
     fiber.spawn(function()
         local connected = false
+        log.trace(string.format(
+            "%s - %s: Waiting for SIM for %s",
+            warm_swap_ctx:value("service_name"),
+            warm_swap_ctx:value("fiber_name"),
+            self.imei
+        ))
         while not connected do
             local state, ctx_err = op.choice(
                 make_slot_monitor_op(),
@@ -345,6 +366,12 @@ function Driver:wait_for_sim()
 
     sleep.sleep(0.1)
 
+    log.trace(string.format(
+        "%s - %s: Power cycling for modem %s",
+        warm_swap_ctx:value("service_name"),
+        warm_swap_ctx:value("fiber_name"),
+        self.imei
+    ))
     while not warm_swap_ctx:err() do
         -- this is going to really hammer the modem
         -- without a courtesy sleep
@@ -355,7 +382,7 @@ function Driver:wait_for_sim()
     -- we must attempt to put modem into high power state even if disconnected
     -- as we could otherwise get stuck in a failed state boot-loop
 
-    local out, err = self.set_power_high(context.background())
+    local out, err = self.set_power_high(context.with_timeout(context.background(), CMD_TIMEOUT))
     if err then
         log.error(string.format(
             '%s: Failed to set modem power high "%s" (%s) for %s',
@@ -378,6 +405,7 @@ function Driver:fix_failure()
     fiber.spawn(function()
         self:wait_for_sim()
         self:inhibit()
+        self:uninhibit()
     end)
     return true, nil
 end
@@ -405,10 +433,13 @@ function Driver:state_monitor(ctx)
     ))
 
     -- setup the modem monitor
-    local modem_monitor_cmd = mmcli.monitor_state(self.address)
-    local stdout = assert(modem_monitor_cmd:stdout_pipe())
-    local cmd_err = modem_monitor_cmd:start()
+    local state_monitor_cmd = mmcli.monitor_state(self.address)
+    local stdout = assert(state_monitor_cmd:stdout_pipe())
+    local cmd_err = state_monitor_cmd:start()
     if cmd_err then
+        state_monitor_cmd:kill()
+        state_monitor_cmd:wait()
+        stdout:close()
         log.error(string.format(
             "%s - %s: Failed to start for %s, reason: %s",
             ctx:value("service_name"),
@@ -420,7 +451,7 @@ function Driver:state_monitor(ctx)
     end
 
     -- setup the sim monitor
-    local sim_monitor_op, sim_close_op, sim_monitor_err = self.monitor_slot_status()
+    local sim_monitor_op, sim_close, sim_monitor_err = self.monitor_slot_status()
     if sim_monitor_err then
         log.error(string.format(
             "%s - %s: Failed to start for %s, reason: %s",
@@ -456,7 +487,7 @@ function Driver:state_monitor(ctx)
         if line_err then
             log.debug(line_err)
         else
-            if sim_connected == false and modem_state.curr_state ~= 'failed' then
+            if sim_connected == false and modem_state and modem_state.curr_state ~= 'failed' then
                 modem_state.curr_state = 'no_sim'
             end
             -- only publish if state has changed
@@ -467,9 +498,10 @@ function Driver:state_monitor(ctx)
         end
     end
     -- clean up
-    modem_monitor_cmd:kill()
+    state_monitor_cmd:kill()
+    state_monitor_cmd:wait()
     stdout:close()
-    sim_close_op()
+    sim_close()
     log.trace(string.format(
         "%s - %s: Closed for %s, reason: %s",
         ctx:value("service_name"),
@@ -494,6 +526,12 @@ function Driver:command_manager()
             local ret, err = nil, 'command does not exist'
             if cmd ~= nil then
                 local args = cmd_msg.args or {}
+                log.trace(string.format(
+                    "%s - %s: Executing command: '%s'",
+                    self.ctx:value("service_name"),
+                    self.ctx:value("fiber_name"),
+                    cmd_msg.command
+                ))
                 ret, err = cmd(self, unpack(args))
             end
 
