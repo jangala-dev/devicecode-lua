@@ -5,7 +5,6 @@ return {
         "config",
         "hal",
         "gsm",
-        "geo",
         "time",
         "net",
         "metrics",
