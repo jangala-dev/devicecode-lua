@@ -465,246 +465,236 @@
         "period": 10
     },
     "collections": {
-        "wifi/foo/bar/tx_bytes": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/band": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "band"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
-        "wifi/foo/bar/tx_packets": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/access-tech": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "access_tech"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
-        "wifi/foo/bar/tx_dropped": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/access-family": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "access_fam"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
-        "wifi/foo/bar/tx_errors": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/imei": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "imei"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
-        "wifi/foo/bar/tx_retries": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/sim": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "sim"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
-        "net/foo/bar/rx_bytes": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/signal/rssi": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "rssi"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
         },
-        "wifi/foo/bar/rx_packets": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/signal/rsrp": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "rsrp"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
         },
-        "wifi/foo/bar/rx_dropped": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/signal/rsrq": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "rsrq"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
         },
-        "wifi/foo/bar/rx_errors": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/operator": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "operator"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
-        "wifi/foo/bar/rx_frags": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/iccid": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "iccid"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
-        "wifi/foo/bar/rx_crypts": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                },
-                {
-                    "type": "DeltaValue"
-                }
-            ]
+        "gsm/modem/primary/state": {
+          "protocol": "log",
+          "field": "curr_state",
+          "rename": [
+            "modem",
+            "1",
+            "state"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
-        "hal/capability/modem/+/info/nas/signal/rssi": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 10
-                }
-            ]
+        "gsm/modem/primary/interface": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "wann_type"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
-        "wifi/foo/bar/noise": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 10
-                }
-            ]
+        "system/info/boot_time": {
+          "protocol": "log",
+          "rename": [
+            "system",
+            "boot_time"
+          ],
+          "process": []
         },
-        "wifi/foo/bar/power": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 10
-                }
-            ]
+        "system/firmware/version": {
+          "protocol": "log",
+          "rename": [
+            "system",
+            "fw_id"
+          ],
+          "process": []
         },
-        "wifi/foo/bar/channel": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "any-change"
-                }
-            ]
+        "system/cpu/overall_utilisation": {
+          "protocol": "log",
+          "rename": [
+            "system",
+            "cpu_util"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
         },
-        "wifi/foo/bar/num_sta": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                }
-            ]
-        },
-        "system/foo/bar/cpu_util": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                }
-            ]
-        },
-        "system/foo/bar/mem_util": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                }
-            ]
-        },
-        "gsm/foo/bar/sim_data_balance": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "percent",
-                    "threshold": 5
-                }
-            ]
-        },
-        "gsm/foo/bar/sim_data_expiry": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "any-change"
-                }
-            ]
-        },
-        "system/foo/bar/temp": {
-            "protocol": "http",
-            "process": [
-                {
-                    "type": "DiffTrigger",
-                    "diff_method": "absolute",
-                    "threshold": 2
-                }
-            ]
+        "system/mem/used": {
+          "protocol": "log",
+          "rename": [
+            "system",
+            "mem_util"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
         }
     }
   },
