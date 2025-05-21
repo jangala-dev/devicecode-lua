@@ -257,6 +257,7 @@ function hal_service:_control_main()
             unpack(self.events:get_events())
         ):perform()
     end
+    cap_ctrl_sub:unsubscribe()
 end
 
 ---Spin off all HAL service fibers

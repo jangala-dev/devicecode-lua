@@ -121,6 +121,7 @@ function Modem:_apn_connect(ctx, cutoff)
             while modem_status == 'connecting' do
                 local status_msg, status_err = status_sub:next_msg_with_context_op(ctx):perform()
                 if status_err then
+                    status_sub:unsubscribe()
                     log.debug(status_err); return
                 end
                 modem_status = status_msg.payload.curr_state
@@ -338,6 +339,7 @@ local function get_imei(ctx, conn, idx)
     local imei_sub = conn:subscribe({ 'hal', 'capability', 'modem', idx, 'info', 'modem', 'generic',
         'equipment-identifier' })
     local imei_msg, imei_err = imei_sub:next_msg_with_context_op(ctx):perform()
+    imei_sub:unsubscribe()
     if imei_err then return nil, imei_err end
     return imei_msg.payload
 end
@@ -373,9 +375,19 @@ function Modem:_publish_dynamic_data(ctx)
         'sim' })
 
     local function publish_signal(msg)
+        local signal = tonumber(msg.payload)
+        if not signal then
+            log.warn(string.format(
+                "%s - %s: Signal strength (%s) is not a number",
+                ctx:value("service_name"),
+                ctx:value("fiber_name"),
+                msg.payload
+            ))
+            return
+        end
         self.conn:publish(new_msg(
             { 'gsm', 'modem', self.name, 'signal', msg.topic[8] },
-            msg.payload
+            signal
         ))
     end
     local signal_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'signal', '+' })
@@ -420,6 +432,17 @@ function Modem:_publish_dynamic_data(ctx)
             ctx:done_op()
         ):perform()
     end
+    sim_present_sub:unsubscribe()
+    signal_sub:unsubscribe()
+    operator_sub:unsubscribe()
+    iccid_sub:unsubscribe()
+    state_sub:unsubscribe()
+    log.trace(string.format(
+        "%s - %s: Closing, reason: '%s'",
+        ctx:value("service_name"),
+        ctx:value("fiber_name"),
+        ctx:err()
+    ))
 end
 
 ---Retrieve and publish the network interface to the bus
@@ -539,6 +562,7 @@ end
 local function modem_capability_add(modem)
     local imei = modem.imei
     local device = modem.device
+    print(device)
 
     local modem_config, id_field, key = get_modem_config(imei, device)
 
@@ -553,13 +577,10 @@ local function init_modem_capability(ctx, conn, modem_add_channel, modem_remove_
         log.error("GSM - Modem capability message is nil")
         return
     end
-    local modem_capability_msg = modem_capability_msg.payload
+    local modem_capability = modem_capability_msg.payload
 
     -- get imei and device (port) info from bus
-    local modem_imei_sub = conn:subscribe({ 'hal', 'capability', 'modem', modem_capability_msg.index, 'info',
-        'modem', 'generic', 'equipment-identifier' })
-    local imei_msg, imei_err = modem_imei_sub:next_msg_with_context_op(context.with_timeout(ctx, 10)):perform()
-    modem_imei_sub:unsubscribe()
+    local imei, imei_err = get_imei(ctx, conn, modem_capability.index)
     if imei_err then
         log.error(string.format(
             "%s - %s: Error getting modem imei: %s",
@@ -569,9 +590,8 @@ local function init_modem_capability(ctx, conn, modem_add_channel, modem_remove_
         ))
         return
     end
-    local imei = imei_msg.payload
 
-    local modem_device_sub = conn:subscribe({ 'hal', 'capability', 'modem', modem_capability_msg.index, 'info',
+    local modem_device_sub = conn:subscribe({ 'hal', 'capability', 'modem', modem_capability.index, 'info',
         'modem', 'generic', 'device' })
     local device_msg, device_err = modem_device_sub:next_msg_with_context_op(context.with_timeout(ctx, 10)):perform()
     modem_device_sub:unsubscribe()
@@ -586,9 +606,9 @@ local function init_modem_capability(ctx, conn, modem_add_channel, modem_remove_
     end
     local device = device_msg.payload
 
-    local modem = new_modem(ctx, conn, imei, device, modem_capability_msg.index)
+    local modem = new_modem(ctx, conn, imei, device, modem_capability.index)
 
-    if modem_capability_msg.connected then
+    if modem_capability.connected then
         modem_add_channel:put(modem)
     else
         modem_remove_channel:put(modem)
