@@ -49,10 +49,7 @@ function ModemManagement:_detector(ctx)
                         return nil, ctx:err()
                     end)
                 ):perform()
-                if ctx_err or line == nil then
-                    cmd:kill()
-                    break
-                end
+                if ctx_err or line == nil then break end
                 local is_added, address, parse_err = utils.parse_monitor(line)
 
                 if is_added==true then
@@ -69,6 +66,7 @@ function ModemManagement:_detector(ctx)
                         parse_err))
                 end
             end
+            cmd:kill()
             cmd:wait()
         end
         stdout:close()
@@ -89,6 +87,7 @@ function ModemManagement:_manager(
     local driver_channel = channel.new()
 
     local function handle_removal(address)
+        log.trace(string.format("HAL - Modem Manager: removing modem at %s", address))
         local instance = modems[address]
         if not instance then return end
         instance.driver.ctx:cancel('removed')
@@ -114,11 +113,12 @@ function ModemManagement:_manager(
     end
 
     local function handle_detection(address)
+        log.trace(string.format("HAL - Modem Manager: detected modem at %s", address))
         local driver = modem_driver.new(context.with_cancel(ctx), address)
         fiber.spawn(function ()
             local err = driver:init()
             if err then
-                log.error("HAL: Modem: Handle Detection: modem initialisation failed, removing modem")
+                log.error("HAL - Modem Manager Handle Detection: modem initialisation failed, removing modem")
                 handle_removal(address)
             else
                 driver_channel:put(driver)
