@@ -14,20 +14,20 @@ local function connect(ctx, device, connection_string)
         connection_string)
 end
 
-local function disconnect(device)
-    return exec.command('mmcli', '-m', device, '--simple-disconnect')
+local function disconnect(ctx, device)
+    return exec.command_context(ctx, 'mmcli', '-m', device, '--simple-disconnect')
 end
 
-local function reset(device)
-    return exec.command('mmcli', '-m', device, '-r')
+local function reset(ctx, device)
+    return exec.command_context(ctx, 'mmcli', '-m', device, '-r')
 end
 
-local function enable(device)
-    return exec.command('mmcli', '-m', device, '-e')
+local function enable(ctx, device)
+    return exec.command_context(ctx, 'mmcli', '-m', device, '-e')
 end
 
-local function disable(device)
-    return exec.command('mmcli', '-m', device, '-d')
+local function disable(ctx, device)
+    return exec.command_context(ctx, 'mmcli', '-m', device, '-d')
 end
 
 local function monitor_state(device)
