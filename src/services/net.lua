@@ -529,7 +529,7 @@ local function uci_manager(ctx)
     end
 end
 
-local function wan_monitor(ctx)
+local function wan_monitor(ctx, conn)
     log.trace("NET: WAN monitor starting")
 
     -- first, we get the initial state of the interfaces, we use command line ubus for consistency with `ubus listen`
@@ -542,6 +542,7 @@ local function wan_monitor(ctx)
     for network, data in pairs(res.interfaces or {}) do
         local status = data.status == "online" and "online" or "offline"
         wan_status_channel:put({ network = network, status = status })
+        conn:publish(new_msg({ "net", network, "status" }, status))
     end
 
     -- now we start a continuous loop to monitor for changes in interface state
@@ -566,10 +567,12 @@ local function wan_monitor(ctx)
                     local data = event["hotplug.mwan3"]
                     log.debug("MWAN3 hotplug event received!")
 
+                    local status = data.action == "connected" and "online" or "offline"
                     wan_status_channel:put({
                         network = data.interface,
-                        status = data.action == "connected" and "online" or "offline"
+                        status = status
                     })
+                    conn:publish(new_msg({ "net", data.interface, "status" }, status))
                 end
             end),
             ctx:done_op():wrap(function ()
@@ -581,7 +584,7 @@ local function wan_monitor(ctx)
     stdout:close()
 end
 
-local function speedtest_worker(ctx)
+local function speedtest_worker(ctx, conn)
     log.trace("NET: Speedtest worker starting")
     while not ctx:err() do
         log.trace("NET: Speedtest worker waiting for jobs")
@@ -598,6 +601,7 @@ local function speedtest_worker(ctx)
                 network = msg.network,
                 speed = results.peak
             })
+            conn:publish(new_msg({ "net", msg.network, "download_speed" }, results.peak))
         end
     end
 end
