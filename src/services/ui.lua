@@ -22,11 +22,15 @@ local ws_prefix = "ws"
 local sse_prefix = "sse"
 local sse_stats = "/" .. sse_prefix .. "/stats"
 local sse_logs = "/" .. sse_prefix .. "/logs"
+local stats_stream = "stats"
 local logs_subscription = "logs"
-local metrics_subscription = "metrics"
+local gsm_subscription = "gsm"
+local system_subscription = "system"
+local net_subscription = "net"
 -- Runtime state
 local ws_clients = {} -- list of active WebSocket clients
 local sse_clients = {} -- list of active WebSocket clients
+local latest_messages = {} -- key: topic string, value: message table
 
 local function get_static_mimetype(path)
     local ext_to_type = {
@@ -41,6 +45,8 @@ local function get_static_mimetype(path)
         [".tff"]  = "font/ttf",
         [".eot"]  = "application/vnd.ms-fontobject",
         [".woff"] = "font/woff",
+        [".webmanifest"] = "application/manifest+json",
+        [".webp"] = "image/webp",
     }
 
     for ext, mime in pairs(ext_to_type) do
@@ -92,6 +98,20 @@ local function handle_sse(ctx, stream, subscription)
     local stats_channel = channel.new()
     table.insert(sse_clients, stats_channel)
 
+    -- Send latest cached messages to new SSE client
+    for _, cached_msg in pairs(latest_messages) do
+        if cached_msg.subscription == subscription then
+            local sse_msg = "data: " .. cjson.encode(cached_msg) .. "\n\n"
+            local ok, err = pcall(function()
+                stream:write_chunk(sse_msg, false)
+            end)
+            if not ok then
+                log.warn("SSE: Failed to send cached message:", err)
+                break
+            end
+        end
+    end
+
     while not ctx:err() do
         local msg = stats_channel:get()
 
@@ -101,7 +121,7 @@ local function handle_sse(ctx, stream, subscription)
                 stream:write_chunk(sse_msg, false)
             end)
             if not ok then
-                log.warning("SSE: Client disconnected or write error:", err)
+                log.warn("SSE: Client disconnected or write error:", err)
                 break
             end
         end
@@ -153,7 +173,7 @@ local function onstream(self, stream)
 
             local ctx = { err = function() return false end }
             -- Ideally there would be a handeful of retained messages to populate the initial state
-            handle_sse(ctx, stream, metrics_subscription)
+            handle_sse(ctx, stream, stats_stream)
         elseif req_path == sse_logs then
             local res_headers = http_headers.new()
             res_headers:append(":status", "200")
@@ -180,7 +200,7 @@ local function onstream(self, stream)
     local res_headers = http_headers.new()
 
     if not handle then
-        log.warning("Failed to open file:", err)
+        log.warn("Failed to open file:", err)
         res_headers:append(":status", "404")
         assert(stream:write_headers(res_headers, true))
         return
@@ -210,7 +230,7 @@ local function publish_to_ws_clients(payload)
             ws:send(msg)
         end)
         if not ok then
-            log.warning("Failed to send to websocket client:", err)
+            log.warn("Failed to send to websocket client:", err)
         end
     end
 end
@@ -222,17 +242,24 @@ local function publish_to_sse_clients(payload)
         end)
 
         if not ok then
-            log.warning("Failed to send to SSE client:", err)
+            log.warn("Failed to send to SSE client:", err)
         end
     end
 end
 
 local function bus_listener(ctx, connection)
-    local sub_metrics = connection:subscribe({ metrics_subscription, "#" })
-    local sub_logs = connection:subscribe({ logs_subscription, "#" })
+    local sub_gsm = connection:subscribe({ gsm_subscription, "#" })
+    local sub_system = connection:subscribe({ system_subscription, "#" })
+    local sub_net = connection:subscribe({ net_subscription, "#" })
 
     local publish_message = function(msg, subscription)
-        if not msg then return end
+        local topic_key = table.concat(msg.topic, ".")
+        latest_messages[topic_key] = {
+            topic = msg.topic,
+            payload = msg.payload,
+            subscription = subscription
+        }
+
         publish_to_ws_clients({
             topic = msg.topic,
             payload = msg.payload
@@ -247,17 +274,24 @@ local function bus_listener(ctx, connection)
     while not ctx:err() do
         -- TODO unsure how to handle errors here
         op.choice(
-            sub_metrics:next_msg_op():wrap(function(msg)
-                publish_message(msg, metrics_subscription)
+            sub_gsm:next_msg_op():wrap(function(msg)
+                publish_message(msg, stats_stream)
             end),
-            sub_logs:next_msg_op():wrap(function(msg)
-                publish_message(msg, logs_subscription)
+            sub_system:next_msg_op():wrap(function(msg)
+                publish_message(msg, stats_stream)
+            end),
+            sub_net:next_msg_op():wrap(function(msg)
+                publish_message(msg, stats_stream)
             end)
+        -- sub_logs:next_msg_op():wrap(function(msg)
+        --     publish_message(msg, logs_subscription)
+        -- end)
         ):perform()
     end
 
-    sub_metrics:unsubscribe()
-    sub_logs:unsubscribe()
+    sub_gsm:unsubscribe()
+    sub_system:unsubscribe()
+    sub_net:unsubscribe()
 end
 
 function ui_service:start(ctx, connection)
@@ -270,7 +304,7 @@ function ui_service:start(ctx, connection)
         port = 80,
         onstream = onstream,
         onerror = function(_, context, operation, err)
-            log.warning(operation, "on", context, "failed:", err)
+            log.warn(operation, "on", context, "failed:", err)
         end
     })
 
