@@ -461,16 +461,24 @@ local function uci_manager(ctx)
 
     local function on_wan_status(msg)
         local network, status = msg.network, msg.status
-        if networks[network] == nil then
-            log.warn("NET: WAN state change ignored due to nil network:", network, status)
-            return
+
+        local start = sc.monotime()
+        local deadline = start + 2
+        while not networks[network] or not networks[network].resolved and sc.monotime() < deadline do
+            log.debug(string.format("NET: WAN state change (%s -> %s) on unresolved network, sleeping...", network, status))
+            sleep.sleep(1)
         end
+
         local old_status = networks[network].status
         networks[network].status = status
-        if not networks[network].resolved then
-            log.warn("NET: cannot process WAN state change as network interface is not resolved:", network, status)
+        if networks[network] == nil then
+	    log.warn(string.format("NET: cannot process WAN state change (%s -> %s): network is nil", network, status))
+        elseif not networks[network].resolved then
+            log.warn(string.format("NET: cannot process WAN state change (%s -> %s): network unresolved", network, status))
         elseif old_status ~= status then
-            log.debug("NET: WAN state change", network, status)
+            log.debug(string.format("NET: WAN state unchanged (%s -> %s)", network, old_status))
+        else
+            log.debug(string.format("NET: WAN state change (%s -> %s)", network, status))
 
             -- Trigger speedtest only on new connections
             if status == "online" then
