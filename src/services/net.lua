@@ -81,9 +81,9 @@ local wan_status_channel = channel.new()       -- For wan status supdates
 local speedtest_queue = queue.new()       -- Unbounded queue for holding speedtest requests
 local config_applier_queue = queue.new() -- Unbounded queue for holding config changes
 
-local function config_receiver(ctx, conn)
+local function config_receiver(ctx)
     log.trace("NET: Config receiver starting")
-    local sub = conn:subscribe({ "config", "net" })
+    local sub = net_service.conn:subscribe({ "config", "net" })
     while not ctx:err() do
         op.choice(
             sub:next_msg_op():wrap(function (msg, err)
@@ -99,9 +99,9 @@ local function config_receiver(ctx, conn)
     sub:unsubscribe()
 end
 
-local function interface_listener(ctx, conn)
+local function interface_listener(ctx)
     log.trace("NET: Interface listener starting")
-    local sub = conn:subscribe({"gsm", "modem", "+", "interface"})
+    local sub = net_service.conn:subscribe({"gsm", "modem", "+", "interface"})
     while not ctx:err() do
         op.choice(
             sub:next_msg_op():wrap(function(msg, err)
@@ -213,6 +213,21 @@ local function set_mwan3_base_config(multiwan_cfg)
 
     log.info("NET: Base mwan3 configured")
 end
+
+local function set_dhcp_base_config(dhcp_cfg)
+    log.info("NET: Applying base dhcp config")
+
+    -- DHCP domains
+    for _, domain in ipairs(dhcp_cfg.domains or {}) do
+        local id = cursor:add("dhcp", "domain")
+        cursor:set("dhcp", id, "name", domain.name)
+        cursor:set("dhcp", id, "ip", domain.ip)
+        log.info("NET: Added static DNS", domain.name, "->", domain.ip)
+    end
+
+    log.info("NET: Base dhcp configured")
+end
+
 local function set_network_config(instance)
     local net_cfg = instance.cfg
     assert(net_cfg.id, "network config must have an 'id'")
@@ -427,15 +442,9 @@ local function uci_manager(ctx)
         set_firewall_base_config(cfg.firewall)
         set_network_base_config(cfg.network)
         set_mwan3_base_config(cfg.multiwan) -- NEED TO CREATE MULTIWAN GLOBALS SECTION
+        set_dhcp_base_config(cfg.dhcp)
 
         for _, net_cfg in ipairs(cfg.network or {}) do
-            for _, domain in ipairs(net_cfg.domains or {}) do
-                local id = cursor:add("dhcp", "domain")
-                cursor:set("dhcp", id, "name", domain.name)
-                cursor:set("dhcp", id, "ip", domain.ip)
-                log.info("NET: Added static DNS", domain.name, "->", domain.ip)
-            end
-
             local net_id = net_cfg.id
             networks[net_id] = {
                 cfg = net_cfg,
@@ -516,6 +525,7 @@ local function uci_manager(ctx)
         networks[result.network].speed = result.speed
         networks[result.network].speed_time = sc.monotime()
         set_network_speed(networks[result.network])
+        net_service.conn:publish(new_msg({ "net", result.network, "download_speed" }, result.speed))
     end
 
     while ctx:err() == nil do
@@ -529,7 +539,7 @@ local function uci_manager(ctx)
     end
 end
 
-local function wan_monitor(ctx, conn)
+local function wan_monitor(ctx)
     log.trace("NET: WAN monitor starting")
 
     -- first, we get the initial state of the interfaces, we use command line ubus for consistency with `ubus listen`
@@ -542,7 +552,7 @@ local function wan_monitor(ctx, conn)
     for network, data in pairs(res.interfaces or {}) do
         local status = data.status == "online" and "online" or "offline"
         wan_status_channel:put({ network = network, status = status })
-        conn:publish(new_msg({ "net", network, "status" }, status))
+        net_service.conn:publish(new_msg({ "net", network, "status" }, status))
     end
 
     -- now we start a continuous loop to monitor for changes in interface state
@@ -572,7 +582,7 @@ local function wan_monitor(ctx, conn)
                         network = data.interface,
                         status = status
                     })
-                    conn:publish(new_msg({ "net", data.interface, "status" }, status))
+                    net_service.conn:publish(new_msg({ "net", data.interface, "status" }, status))
                 end
             end),
             ctx:done_op():wrap(function ()
@@ -584,7 +594,7 @@ local function wan_monitor(ctx, conn)
     stdout:close()
 end
 
-local function speedtest_worker(ctx, conn)
+local function speedtest_worker(ctx)
     log.trace("NET: Speedtest worker starting")
     while not ctx:err() do
         log.trace("NET: Speedtest worker waiting for jobs")
@@ -601,20 +611,20 @@ local function speedtest_worker(ctx, conn)
                 network = msg.network,
                 speed = results.peak
             })
-            conn:publish(new_msg({ "net", msg.network, "download_speed" }, results.peak))
         end
     end
 end
 
 function net_service:start(ctx, conn)
     log.trace("Starting NET Service")
+    self.conn = conn
 
     -- Spawn core components
-    fiber.spawn(function() config_receiver(ctx, conn) end)
-    fiber.spawn(function() interface_listener(ctx, conn) end)
-    fiber.spawn(function() uci_manager(ctx, conn) end)
-    fiber.spawn(function() wan_monitor(ctx, conn) end)
-    fiber.spawn(function() speedtest_worker(ctx, conn) end)
+    fiber.spawn(function() config_receiver(ctx) end)
+    fiber.spawn(function() interface_listener(ctx) end)
+    fiber.spawn(function() uci_manager(ctx) end)
+    fiber.spawn(function() wan_monitor(ctx) end)
+    fiber.spawn(function() speedtest_worker(ctx) end)
     fiber.spawn(function() config_applier(ctx) end)
 end
 
