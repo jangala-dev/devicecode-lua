@@ -179,9 +179,8 @@ function metrics_service:_build_metric_pipeline(endpoint, process_config)
 end
 
 local function merge_config(base_config, override_vals)
-    if not base_config then
-        return override_vals
-    end
+    if not base_config then return override_vals end
+    if not override_vals then return base_config end
 
     for k, v in pairs(override_vals) do
         if type(v) == 'table' and type(base_config[k]) == 'table' then
@@ -196,6 +195,10 @@ end
 ---use config to build cache and processing pipelines
 ---@param config table
 function metrics_service:_handle_config(config)
+    if config == nil then
+        log.error("Metrics: Invalid configuration message")
+        return
+    end
     log.info("Metrics Config Received")
 
     -- config validation
@@ -267,12 +270,12 @@ function metrics_service:_handle_config(config)
             -- combine endpoint into string for override lookup
             local metric_endpoint = table.concat(metric_msg.topic, '/')
             local metric = metric_msg.payload
-            -- we may want a specific field from the bus message
-            if metric_config.field then metric = metric[metric_config.field] end
             if metric == nil then
                 log.debug('Metric is nil for endpoint: ' .. metric_endpoint)
                 return
             end
+            -- we may want a specific field from the bus message
+            if metric_config.field then metric = metric[metric_config.field] end
 
             local val, short_circuit, err
             -- either set or update the value into our pipeline
