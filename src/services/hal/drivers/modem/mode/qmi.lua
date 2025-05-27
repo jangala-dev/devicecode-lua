@@ -1,5 +1,3 @@
-local exec = require 'fibers.exec'
-local sleep = require "fibers.sleep"
 local context = require 'fibers.context'
 local wraperr = require "wraperr"
 local qmicli = require "services.hal.drivers.modem.qmicli"
@@ -13,6 +11,7 @@ return function(modem)
     modem.is_sim_inserted = function()
         local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
         local cmd = qmicli.uim_get_card_status(new_ctx, modem.primary_port)
+        cmd:setpgid(true)
         local out, cmd_err = cmd:combined_output()
         if cmd_err then return nil, cmd_err end
 
@@ -24,35 +23,46 @@ return function(modem)
     modem.set_power_low = function(ctx)
         local new_ctx = context.with_timeout(ctx, CMD_TIMEOUT)
         local cmd = qmicli.uim_sim_power_off(new_ctx, modem.primary_port)
+        cmd:setpgid(true)
         return cmd:combined_output()
     end
 
     modem.set_power_high = function(ctx)
         local new_ctx = context.with_timeout(ctx, CMD_TIMEOUT)
         local cmd = qmicli.uim_sim_power_on(new_ctx, modem.primary_port)
+        cmd:setpgid(true)
         return cmd:combined_output()
     end
 
     modem.monitor_slot_status = function()
         local cmd = qmicli.uim_monitor_slot_status(modem.primary_port)
+        cmd:setpgid(true)
         local stdout = assert(cmd:stdout_pipe())
         local cmd_err = cmd:start()
-        if cmd_err then return nil, nil, cmd_err end
+        if cmd_err then
+            cmd:kill()
+            cmd:wait()
+            stdout:close()
+            return nil, nil, cmd_err
+        end
+        local cancel_fn = function()
+            cmd:kill()
+            cmd:wait()
+            stdout:close()
+        end
         local data = ""
         local read_func = function()
             return stdout:read_line_op("keep"):wrap(function(line)
-                if line == nil then return nil end
+                if line == nil then
+                    log.trace("error here?")
+                    return nil
+                end
                 data = data .. line
                 local slot_status, err = utils.parse_slot_monitor(data)
                 if err then return nil end
                 data = ""
                 return slot_status == 'present'
             end)
-        end
-        local cancel_fn = function()
-            cmd:kill()
-            cmd:wait()
-            stdout:close()
         end
 
         return read_func, cancel_fn, nil
@@ -61,6 +71,7 @@ return function(modem)
     modem.get_mcc_mnc = function()
         local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
         local cmd = qmicli.nas_get_home_network(new_ctx, modem.primary_port)
+        cmd:setpgid(true)
         local out, err = cmd:combined_output()
         if err then return nil, nil, wraperr.new(err) end
 
@@ -79,6 +90,7 @@ return function(modem)
         }
         local gid1_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
         local gid1_cmd = qmicli.uim_read_transparent(gid1_ctx, modem.primary_port, '0x3F00,0x7FFF,0x6F3E')
+        gid1_cmd:setpgid(true)
         local gid1_out, gid1_cmd_err = gid1_cmd:combined_output()
         if gid1_cmd_err then return gids, wraperr.new(gid1_cmd_err) end
 
@@ -108,6 +120,7 @@ return function(modem)
             context.with_timeout(modem.ctx, CMD_TIMEOUT),
             modem.primary_port
         )
+        band_info_cmd:setpgid(true)
 
         local band_info_out, band_info_err = band_info_cmd:combined_output()
         if band_info_err then return nil, band_info_err end
@@ -126,6 +139,7 @@ return function(modem)
         }
         local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
         local cmd = qmicli.nas_get_home_network(new_ctx, modem.primary_port)
+        cmd:setpgid(true)
         local out, err = cmd:combined_output()
         if err then return nil, wraperr.new(err) end
 
@@ -142,6 +156,7 @@ return function(modem)
         }
         local new_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
         local cmd = qmicli.nas_get_signal_info(new_ctx, modem.primary_port)
+        cmd:setpgid(true)
         local out, err = cmd:combined_output()
         if err then return nil, wraperr.new(err) end
 
