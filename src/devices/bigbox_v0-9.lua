@@ -2,6 +2,7 @@
 
 return {
     services = {
+        "log",
         "config",
         "hal",
         "gsm",

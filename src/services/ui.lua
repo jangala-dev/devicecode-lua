@@ -2,7 +2,7 @@ local fiber = require "fibers.fiber"
 local channel = require 'fibers.channel'
 local pollio = require "fibers.pollio"
 local file = require "fibers.stream.file"
-local log = require "log"
+local log = require "services.log"
 local http_server = require "http.server"
 local http_headers = require "http.headers"
 local http_util = require "http.util"
@@ -23,6 +23,7 @@ local sse_prefix = "sse"
 local sse_stats = "/" .. sse_prefix .. "/stats"
 local sse_logs = "/" .. sse_prefix .. "/logs"
 local stats_stream = "stats"
+local log_stream = "logs"
 local logs_subscription = "logs"
 local gsm_subscription = "gsm"
 local system_subscription = "system"
@@ -181,7 +182,7 @@ local function onstream(self, stream)
             assert(stream:write_headers(res_headers, req_method == "HEAD"))
 
             local ctx = { err = function() return false end }
-            handle_sse(ctx, stream, logs_subscription)
+            handle_sse(ctx, stream, log_stream)
         end
     end
 
@@ -251,6 +252,7 @@ local function bus_listener(ctx, connection)
     local sub_gsm = connection:subscribe({ gsm_subscription, "#" })
     local sub_system = connection:subscribe({ system_subscription, "#" })
     local sub_net = connection:subscribe({ net_subscription, "#" })
+    local sub_logs = connection:subscribe({ logs_subscription, "#" })
 
     local publish_message = function(msg, subscription)
         local topic_key = table.concat(msg.topic, ".")
@@ -282,13 +284,14 @@ local function bus_listener(ctx, connection)
             end),
             sub_net:next_msg_op():wrap(function(msg)
                 publish_message(msg, stats_stream)
+            end),
+            sub_logs:next_msg_op():wrap(function(msg)
+                publish_message(msg, log_stream)
             end)
-        -- sub_logs:next_msg_op():wrap(function(msg)
-        --     publish_message(msg, logs_subscription)
-        -- end)
         ):perform()
     end
 
+    sub_logs:unsubscribe()
     sub_gsm:unsubscribe()
     sub_system:unsubscribe()
     sub_net:unsubscribe()

@@ -1,7 +1,7 @@
 local exec = require 'fibers.exec'
 local sc = require 'fibers.utils.syscall'
 local sleep = require 'fibers.sleep'
-local log = require 'log'
+local log = require 'services.log'
 
 
 local usb_hub_address_prefix = "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb"
