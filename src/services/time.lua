@@ -51,12 +51,12 @@ local function ntpd_monitor(ctx)
                     if event["hotplug.ntp"] and event["hotplug.ntp"].stratum then
                         if event["hotplug.ntp"].stratum ~= 16 then
                             log.debug("TIME: ntp time synced!")
-                            time_service.bus_connection:publish(new_msg({ "config", "ntp_synced" }, true,
+                            time_service.bus_connection:publish(new_msg({ "time", "ntp_synced" }, true,
                                 { retained = true }))
                             alarm.clock_synced()
                         else
                             log.debug("TIME: ntp time desynced")
-                            time_service.bus_connection:publish(new_msg({ "config", "ntp_synced" }, false,
+                            time_service.bus_connection:publish(new_msg({ "time", "ntp_synced" }, false,
                                 { retained = true }))
                             alarm.clock_desynced()
                         end
