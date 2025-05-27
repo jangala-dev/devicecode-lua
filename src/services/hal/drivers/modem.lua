@@ -12,7 +12,7 @@ local utils = require "services.hal.utils"
 local hal_capabilities = require "services.hal.hal_capabilities"
 local mode_overrides = require "services.hal.drivers.modem.mode"
 local model_overrides = require "services.hal.drivers.modem.model"
-local json = require "dkjson"
+local json = require "cjson.safe"
 local log = require "log"
 local wraperr = require "wraperr"
 
@@ -143,6 +143,7 @@ end
 function Driver:get_modem_info()
     local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.information(new_ctx, self.address)
+    cmd:setpgid(true)
     local out, err = cmd:combined_output()
     if err then return nil, wraperr.new(err) end
 
@@ -159,6 +160,7 @@ end
 function Driver:get_sim_info(sim_address)
     local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.sim_information(new_ctx, sim_address)
+    cmd:setpgid(true)
     local out, err = cmd:combined_output()
     if err then return nil, wraperr.new(err) end
 
@@ -169,6 +171,7 @@ function Driver:get_sim_info(sim_address)
 end
 function Driver:get_signal()
     local cmd = mmcli.signal_get(context.with_timeout(self.ctx, CMD_TIMEOUT), self.address)
+    cmd:setpgid(true)
 
     local out, err = cmd:combined_output()
     if err then return nil, wraperr.new(err) end
@@ -269,24 +272,28 @@ end
 function Driver:disable()
     local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.disable(cmd_ctx, self.address)
+    cmd:setpgid(true)
     return cmd:run()
 end
 
 function Driver:enable()
     local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.enable(cmd_ctx, self.address)
+    cmd:setpgid(true)
     return cmd:run()
 end
 
 function Driver:reset()
     local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.reset(cmd_ctx, self.address)
+    cmd:setpgid(true)
     return cmd:run()
 end
 
 function Driver:connect(connection_string)
     local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.connect(new_ctx, self.address, connection_string)
+    cmd:setpgid(true)
     local out, err = cmd:combined_output()
     return out, err
 end
@@ -294,12 +301,14 @@ end
 function Driver:disconnect()
     local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.disconnect(cmd_ctx, self.address)
+    cmd:setpgid(true)
     return cmd:run()
 end
 
 function Driver:inhibit()
     if self.inhibit_cmd then return true end
     self.inhibit_cmd = mmcli.inhibit(self.address)
+    self.inhibit_cmd:setpgid(true)
     local err = self.inhibit_cmd:start()
     if err then
         log.trace(string.format("Modem inhibit failed, reason: %s", err))
@@ -320,20 +329,19 @@ function Driver:wait_for_sim()
     if self.waiting_for_sim then return end
     self.waiting_for_sim = true
     local warm_swap_ctx = context.with_cancel(self.ctx)
-    local make_slot_monitor_op, slot_monitor_close, slot_monitor_err = self.monitor_slot_status()
-
-    if slot_monitor_err then
-        log.error(string.format(
-            "%s - %s: Failed to start for %s, reason: %s",
-            warm_swap_ctx:value("service_name"),
-            warm_swap_ctx:value("fiber_name"),
-            self.imei,
-            slot_monitor_err
-        ))
-        return
-    end
     fiber.spawn(function()
         local connected = false
+        local make_slot_monitor_op, slot_monitor_close, slot_monitor_err = self.monitor_slot_status()
+        if slot_monitor_err then
+            log.error(string.format(
+                "%s - %s: Failed to start for %s, reason: %s",
+                warm_swap_ctx:value("service_name"),
+                warm_swap_ctx:value("fiber_name"),
+                self.imei,
+                slot_monitor_err
+            ))
+            return
+        end
         log.trace(string.format(
             "%s - %s: Waiting for SIM for %s",
             warm_swap_ctx:value("service_name"),
@@ -372,25 +380,36 @@ function Driver:wait_for_sim()
         warm_swap_ctx:value("fiber_name"),
         self.imei
     ))
+    local high_power = true
+    local out, err
     while not warm_swap_ctx:err() do
         -- this is going to really hammer the modem
         -- without a courtesy sleep
-        self.set_power_low(warm_swap_ctx)
-        self.set_power_high(warm_swap_ctx)
+        if high_power then
+            out, err = self.set_power_low(warm_swap_ctx)
+            if not err then high_power = false end
+        end
+        sleep.sleep(0.1)
+        if not high_power then
+            out, err = self.set_power_high(warm_swap_ctx)
+            if not err then high_power = true end
+        end
         sleep.sleep(0.1)
     end
     -- we must attempt to put modem into high power state even if disconnected
     -- as we could otherwise get stuck in a failed state boot-loop
 
-    local out, err = self.set_power_high(context.with_timeout(context.background(), CMD_TIMEOUT))
-    if err then
-        log.error(string.format(
-            '%s: Failed to set modem power high "%s" (%s) for %s',
-            self.ctx:value("service_name"),
-            out,
-            err,
-            self.imei
-        ))
+    if not high_power then
+        out, err = self.set_power_high(context.with_timeout(context.background(), CMD_TIMEOUT))
+        if err then
+            log.error(string.format(
+                '%s: Failed to set modem power high "%s" (%s) for %s',
+                self.ctx:value("service_name"),
+                out,
+                err,
+                self.imei
+            ))
+        end
     end
     self.waiting_for_sim = false
 end
@@ -412,6 +431,7 @@ end
 
 function Driver:set_signal_update_freq(seconds)
     local cmd = mmcli.signal_setup(self.ctx, self.address, seconds)
+    cmd:setpgid(true)
     local cmd_err = cmd:run()
     self.refresh_rate_channel:put(seconds)
     return (cmd_err == nil), cmd_err
@@ -434,6 +454,7 @@ function Driver:state_monitor(ctx)
 
     -- setup the modem monitor
     local state_monitor_cmd = mmcli.monitor_state(self.address)
+    state_monitor_cmd:setpgid(true)
     local stdout = assert(state_monitor_cmd:stdout_pipe())
     local cmd_err = state_monitor_cmd:start()
     if cmd_err then
@@ -491,7 +512,9 @@ function Driver:state_monitor(ctx)
                 modem_state.curr_state = 'no_sim'
             end
             -- only publish if state has changed
-            if not modem_states_equal(modem_state, prev_modem_state) then
+            if (modem_state and not prev_modem_state)
+                or modem_state
+                and not modem_states_equal(modem_state, prev_modem_state) then
                 self.state_monitor_channel:put(modem_state)
                 prev_modem_state = modem_state
             end
