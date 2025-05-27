@@ -1,7 +1,7 @@
 local file = require 'fibers.stream.file'
 local fiber = require 'fibers.fiber'
 local log = require 'log'
-local json = require 'dkjson'
+local json = require 'cjson.safe'
 local new_msg = require('bus').new_msg
 
 local config_service = {
