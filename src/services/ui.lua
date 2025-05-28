@@ -31,7 +31,8 @@ local net_subscription = "net"
 -- Runtime state
 local ws_clients = {} -- list of active WebSocket clients
 local sse_clients = {} -- list of active WebSocket clients
-local latest_messages = {} -- key: topic string, value: message table
+local stats_messages_cache = {}
+local log_messages_cache = {}
 
 local function get_static_mimetype(path)
     local ext_to_type = {
@@ -100,14 +101,29 @@ local function handle_sse(ctx, stream, subscription)
     table.insert(sse_clients, stats_channel)
 
     -- Send latest cached messages to new SSE client
-    for _, cached_msg in pairs(latest_messages) do
-        if cached_msg.subscription == subscription then
-            local sse_msg = "data: " .. cjson.encode(cached_msg) .. "\n\n"
-            local ok, err = pcall(function()
-                stream:write_chunk(sse_msg, false)
-            end)
+    local send_cached_message = function(cached_msg)
+        local sse_msg = "data: " .. cjson.encode(cached_msg) .. "\n\n"
+        local ok, err = pcall(function()
+            stream:write_chunk(sse_msg, false)
+        end)
+        if not ok then
+            log.warn("SSE: Failed to send cached message:", err)
+            return false
+        end
+        return true
+    end
+
+    if subscription == stats_stream then
+        for _, cached_msg in pairs(stats_messages_cache) do
+            local ok = send_cached_message(cached_msg)
             if not ok then
-                log.warn("SSE: Failed to send cached message:", err)
+                break
+            end
+        end
+    elseif subscription == log_stream then
+        for _, cached_msg in ipairs(log_messages_cache) do
+            local ok = send_cached_message(cached_msg)
+            if not ok then
                 break
             end
         end
@@ -255,12 +271,22 @@ local function bus_listener(ctx, connection)
     local sub_logs = connection:subscribe({ logs_subscription, "#" })
 
     local publish_message = function(msg, subscription)
-        local topic_key = table.concat(msg.topic, ".")
-        latest_messages[topic_key] = {
-            topic = msg.topic,
-            payload = msg.payload,
-            subscription = subscription
-        }
+
+        if subscription == stats_stream then
+            local topic_key = table.concat(msg.topic, ".")
+
+            stats_messages_cache[topic_key] = {
+                topic = msg.topic,
+                payload = msg.payload,
+                subscription = subscription
+            }
+        elseif subscription == log_stream then
+            table.insert(log_messages_cache, {
+                topic = msg.topic,
+                payload = msg.payload,
+                subscription = subscription
+            })
+        end
 
         publish_to_ws_clients({
             topic = msg.topic,
