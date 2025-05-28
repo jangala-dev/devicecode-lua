@@ -77,10 +77,11 @@ local function get_spa_path(req_path)
 end
 
 local function handle_websocket(ctx, ws)
+    log.info("Websocket: New client connected")
     table.insert(ws_clients, ws)
 
     while not ctx:err() do
-        local message, errmsg, errcode = ws:receive()
+        local message, _, _ = ws:receive()
         if message == nil then
             break
         end
@@ -90,13 +91,16 @@ local function handle_websocket(ctx, ws)
     -- Cleanup
     for i, client in ipairs(ws_clients) do
         if client == ws then
+            ws:close()
             table.remove(ws_clients, i)
+            log.info("Websocket: Client disconnected")
             break
         end
     end
 end
 
 local function handle_sse(ctx, stream, subscription)
+    log.info("SSE: New client connected", subscription)
     local stats_channel = channel.new()
     table.insert(sse_clients, stats_channel)
 
@@ -148,6 +152,7 @@ local function handle_sse(ctx, stream, subscription)
     for i, ch in ipairs(sse_clients) do
         if ch == stats_channel then
             table.remove(sse_clients, i)
+            log.info("SSE: Client disconnected", subscription)
             break
         end
     end
@@ -182,23 +187,14 @@ local function onstream(self, stream)
             return
         end
     elseif req_type == sse_prefix then
-        if req_path == sse_stats then
+        if req_path == sse_stats or req_path == sse_logs then
             local res_headers = http_headers.new()
             res_headers:append(":status", "200")
             res_headers:append("content-type", "text/event-stream")
             assert(stream:write_headers(res_headers, req_method == "HEAD"))
-
             local ctx = { err = function() return false end }
-            -- Ideally there would be a handeful of retained messages to populate the initial state
-            handle_sse(ctx, stream, stats_stream)
-        elseif req_path == sse_logs then
-            local res_headers = http_headers.new()
-            res_headers:append(":status", "200")
-            res_headers:append("content-type", "text/event-stream")
-            assert(stream:write_headers(res_headers, req_method == "HEAD"))
-
-            local ctx = { err = function() return false end }
-            handle_sse(ctx, stream, log_stream)
+            local selected_stream = req_path == sse_stats and stats_stream or log_stream
+            handle_sse(ctx, stream, selected_stream)
         end
     end
 
