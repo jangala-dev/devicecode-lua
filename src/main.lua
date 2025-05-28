@@ -6,7 +6,7 @@ local context = require 'fibers.context'
 local sc = require 'fibers.utils.syscall'
 local bus = require 'bus'
 local service = require 'service'
-local log = require 'log'
+local log = require 'services.log'
 log.outfile = '/tmp/logs.log'
 require 'fibers.pollio'.install_poll_io_handler()
 require 'fibers.alarm'.install_alarm_handler()
