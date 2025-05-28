@@ -286,6 +286,11 @@ local function bus_listener(ctx, connection)
                 payload = msg.payload,
                 subscription = subscription
             })
+
+            -- Keep only the last 200 log messages
+            if #log_messages_cache > 200 then
+                table.remove(log_messages_cache, 1)
+            end
         end
 
         publish_to_ws_clients({
