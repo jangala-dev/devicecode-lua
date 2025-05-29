@@ -15,6 +15,7 @@ sudo luarocks install cqueues
 sudo luarocks install http
 sudo luarocks install luaposix
 sudo luarocks install luacheck
+sudo luarocks install lua-cjson
 
 # install cffi-lua
 

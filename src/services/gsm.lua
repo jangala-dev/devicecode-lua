@@ -4,7 +4,7 @@ local channel = require "fibers.channel"
 local context = require "fibers.context"
 local sleep = require "fibers.sleep"
 local service = require "service"
-local log = require "log"
+local log = require "services.log"
 local new_msg = require "bus".new_msg
 local apn = require "services.gsm.apn"
 
