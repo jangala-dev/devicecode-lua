@@ -4,7 +4,7 @@ local op = require "fibers.op"
 local exec = require 'fibers.exec'
 local alarm = require 'fibers.alarm'
 local cjson = require "cjson.safe"
-local log = require 'log'
+local log = require 'services.log'
 local new_msg = require('bus').new_msg
 
 local time_service = {

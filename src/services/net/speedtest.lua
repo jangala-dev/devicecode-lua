@@ -3,7 +3,7 @@ local sleep = require 'fibers.sleep'
 local file = require 'fibers.stream.file'
 local exec = require 'fibers.exec'
 local sc = require 'fibers.utils.syscall'
-local log = require "log"
+local log = require "services.log"
 local context = require "fibers.context"
 
 

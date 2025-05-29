@@ -2,7 +2,7 @@ local context = require 'fibers.context'
 local wraperr = require "wraperr"
 local qmicli = require "services.hal.drivers.modem.qmicli"
 local utils = require "services.hal.utils"
-local log = require "log"
+local log = require "services.log"
 
 local CMD_TIMEOUT = 3
 
