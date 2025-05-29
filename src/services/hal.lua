@@ -6,7 +6,7 @@ local op = require "fibers.op"
 local service = require "service"
 local bus = require "bus"
 local new_msg = bus.new_msg
-local log = require "log"
+local log = require "services.log"
 local unpack = table.unpack or unpack
 
 ---@class hal_service

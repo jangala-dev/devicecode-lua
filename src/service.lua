@@ -2,7 +2,7 @@ local context = require "fibers.context"
 local fiber = require 'fibers.fiber'
 local bus = require "bus"
 local new_msg = bus.new_msg
-local log = require "log"
+local log = require 'services.log'
 
 local STATE = {
     INITIALISING = 'initialising',
