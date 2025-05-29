@@ -7,7 +7,7 @@ local utils = require "services.hal.utils"
 local modem_driver = require "services.hal.drivers.modem"
 local mmcli = require "services.hal.drivers.modem.mmcli"
 local service = require "service"
-local log = require "log"
+local log = require "services.log"
 
 ---@class ModemManagement
 local ModemManagement = {

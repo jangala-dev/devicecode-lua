@@ -13,7 +13,7 @@ local hal_capabilities = require "services.hal.hal_capabilities"
 local mode_overrides = require "services.hal.drivers.modem.mode"
 local model_overrides = require "services.hal.drivers.modem.model"
 local json = require "cjson.safe"
-local log = require "log"
+local log = require "services.log"
 local wraperr = require "wraperr"
 
 local unpack = table.unpack or unpack

@@ -9,6 +9,7 @@
 
 local log = { _version = "0.1.0" }
 
+
 log.usecolor = true
 log.outfile = nil
 log.level = "trace"
@@ -51,18 +52,26 @@ local tostring = function(...)
   return table.concat(t, " ")
 end
 
+local format_log_message = function(level, lineinfo, msg)
+  return string.format("[%-6s%s] %s: %s",
+    level:upper(),
+    os.date(),
+    lineinfo,
+    msg)
+end
 
 for i, x in ipairs(modes) do
   local nameupper = x.name:upper()
   log[x.name] = function(...)
-    
+
     -- Return early if we're below the log level
     if i < levels[log.level] then
       return
     end
 
     local msg = tostring(...)
-    local info = debug.getinfo(2, "Sl")
+    -- Set to three levels up the call stack i.e avoid this file and the log service
+    local info = debug.getinfo(3, "Sl")
     local lineinfo = info.short_src .. ":" .. info.currentline
 
     -- Output to console
@@ -77,14 +86,15 @@ for i, x in ipairs(modes) do
     -- Output to log file
     if log.outfile then
       local fp = io.open(log.outfile, "a")
-      local str = string.format("[%-6s%s] %s: %s\n",
-                                nameupper, os.date(), lineinfo, msg)
+      local str = format_log_message(nameupper, lineinfo, msg)
       fp:write(str)
       fp:close()
     end
-
   end
 end
 
+log.modes = modes
+log.tostring = tostring
+log.format_log_message = format_log_message
 
 return log

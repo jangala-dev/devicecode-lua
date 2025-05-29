@@ -1,5 +1,5 @@
 local service = require "service"
-local log = require "log"
+local log = require "services.log"
 local op = require "fibers.op"
 local sleep = require "fibers.sleep"
 local channel = require "fibers.channel"

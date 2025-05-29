@@ -1,7 +1,7 @@
 local fiber = require "fibers.fiber"
 local exec = require "fibers.exec"
 local json = require "dkjson"
-local log = require "log"
+local log = require "services.log"
 
 -- there's a connect/disconnect event available directly from hostapd.
 -- opkg install hostapd-utils will give you hostapd_cli
