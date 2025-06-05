@@ -711,7 +711,7 @@
     "usb3_enabled": false,
     "alarms": [
       {
-        "time": "12:45",
+        "time": "5:00",
         "repeats": "daily",
         "payload": {
           "name": "daily reboot",
