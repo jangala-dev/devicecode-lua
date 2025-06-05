@@ -82,7 +82,8 @@ end
 function ModemManagement:_manager(
     ctx,
     bus_conn,
-    device_event_q)
+    device_event_q,
+    capability_info_q)
     log.trace("Modem Manager: starting")
 
     local driver_channel = channel.new()
@@ -132,7 +133,7 @@ function ModemManagement:_manager(
 
         modems[driver.address] = { driver = driver, device = driver.device }
 
-        local capabilities, cap_err = driver:get_capabilities()
+        local capabilities, cap_err = driver:apply_capabilities(capability_info_q)
         if cap_err then
             log.error(cap_err)
             return
@@ -165,13 +166,13 @@ function ModemManagement:_manager(
     log.trace(string.format("HAL: Modemcard Manager - Manager Closing, reason '%s'", ctx:err()))
 end
 
-function ModemManagement:spawn(ctx, bus_conn, device_event_q)
+function ModemManagement:spawn(ctx, bus_conn, device_event_q, capability_info_q)
     service.spawn_fiber('Modem Detector', bus_conn, ctx, function(detector_ctx)
         self:_detector(detector_ctx)
     end)
 
     service.spawn_fiber('Modem Manager', bus_conn, ctx, function(manager_ctx)
-        self:_manager(manager_ctx, bus_conn, device_event_q)
+        self:_manager(manager_ctx, bus_conn, device_event_q, capability_info_q)
     end)
 end
 return {new = new}

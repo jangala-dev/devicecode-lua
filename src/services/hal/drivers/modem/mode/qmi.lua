@@ -35,37 +35,7 @@ return function(modem)
     end
 
     modem.monitor_slot_status = function()
-        local cmd = qmicli.uim_monitor_slot_status(modem.primary_port)
-        cmd:setpgid(true)
-        local stdout = assert(cmd:stdout_pipe())
-        local cmd_err = cmd:start()
-        if cmd_err then
-            cmd:kill()
-            cmd:wait()
-            stdout:close()
-            return nil, nil, cmd_err
-        end
-        local cancel_fn = function()
-            cmd:kill()
-            cmd:wait()
-            stdout:close()
-        end
-        local data = ""
-        local read_func = function()
-            return stdout:read_line_op("keep"):wrap(function(line)
-                if line == nil then
-                    log.trace("error here?")
-                    return nil
-                end
-                data = data .. line
-                local slot_status, err = utils.parse_slot_monitor(data)
-                if err then return nil end
-                data = ""
-                return slot_status == 'present'
-            end)
-        end
-
-        return read_func, cancel_fn, nil
+        return qmicli.uim_monitor_slot_status(modem.primary_port)
     end
 
     modem.get_mcc_mnc = function()
@@ -123,7 +93,7 @@ return function(modem)
         band_info_cmd:setpgid(true)
 
         local band_info_out, band_info_err = band_info_cmd:combined_output()
-        if band_info_err then return nil, band_info_err end
+        if band_info_err then return nil, string.format("%s (%s)", band_info_out, band_info_err) end
 
         local band_info, parse_err = utils.parse_qmicli_output(band_info_out, key_map)
         if parse_err then return nil, parse_err end
