@@ -12,6 +12,7 @@ local gsm_service = {
     name = 'GSM'
 }
 gsm_service.__index = {}
+local REQUEST_TIMEOUT = 10
 
 -- for now we only hold configs about modems but later may need to hold
 -- sim and sim switching configs as well
@@ -51,25 +52,25 @@ function Modem:_apn_connect(ctx, cutoff)
     local mcc_sub = self.conn:subscribe(
         { 'hal', 'capability', 'modem', self.idx, 'info', 'nas', 'home-network', 'mcc' }
     )
-    local mcc_msg, mcc_err = mcc_sub:next_msg_with_context_op(ctx):perform()
+    local mcc_msg, mcc_err = mcc_sub:next_msg_with_context_op(context.with_timeout(ctx, REQUEST_TIMEOUT)):perform()
     mcc_sub:unsubscribe()
-    if mcc_err then return nil, mcc_err end
+    if mcc_err then return nil, "mcc: " .. mcc_err end
     local mcc = mcc_msg.payload
 
     local mnc_sub = self.conn:subscribe(
         { 'hal', 'capability', 'modem', self.idx, 'info', 'nas', 'home-network', 'mnc' }
     )
-    local mnc_msg, mnc_err = mnc_sub:next_msg_with_context_op(ctx):perform()
+    local mnc_msg, mnc_err = mnc_sub:next_msg_with_context_op(context.with_timeout(ctx, REQUEST_TIMEOUT)):perform()
     mnc_sub:unsubscribe()
-    if mnc_err then return nil, mnc_err end
+    if mnc_err then return nil, "mnc: " .. mnc_err end
     local mnc = mnc_msg.payload
 
     local imsi_sub = self.conn:subscribe(
         { 'hal', 'capability', 'modem', self.idx, 'info', 'sim', 'properties', 'imsi' }
     )
-    local imsi_msg, imsi_err = imsi_sub:next_msg_with_context_op(ctx):perform()
+    local imsi_msg, imsi_err = imsi_sub:next_msg_with_context_op(context.with_timeout(ctx, REQUEST_TIMEOUT)):perform()
     imsi_sub:unsubscribe()
-    if imsi_err then return nil, imsi_err end
+    if imsi_err then return nil, "imsi: " .. imsi_err end
     local imsi = imsi_msg.payload
 
     -- local spn, spn_err = self.modem_capability:get_spn() -- this is needed for giffgaff but for now im not doing it because I don't want to
@@ -78,9 +79,9 @@ function Modem:_apn_connect(ctx, cutoff)
     local gid1_sub = self.conn:subscribe(
         { 'hal', 'capability', 'modem', self.idx, 'info', 'gids', 'gid1' }
     )
-    local gid1_msg, gid1_err = gid1_sub:next_msg_with_context_op(ctx):perform()
+    local gid1_msg, gid1_err = gid1_sub:next_msg_with_context_op(context.with_timeout(ctx, REQUEST_TIMEOUT)):perform()
     gid1_sub:unsubscribe()
-    if gid1_err then return nil, gid1_err end
+    if gid1_err then return nil, "gid: " .. gid1_err end
     local gid1 = gid1_msg.payload
 
     -- todo: how to feed apns from configs into this fiber?
@@ -101,18 +102,27 @@ function Modem:_apn_connect(ctx, cutoff)
                 { 'hal', 'capability', 'modem', self.idx, 'control', 'connect' },
                 { apn_connect_string }
             ))
-            local connect_msg, ctx_err = connect_sub:next_msg_with_context_op(ctx):perform()
+            local connect_msg, ctx_err = connect_sub:next_msg_with_context_op(context.with_timeout(ctx, REQUEST_TIMEOUT)):perform()
             if ctx_err then
-                log.debug(ctx_err); return
+                return nil, "connect: " .. ctx_err
             end
             local connect_err = connect_msg.payload.err
             if connect_err == nil then
                 status_sub:unsubscribe()
                 return apns[n.name], nil
             else
-                if string.find(connect_msg.payload.result, "pdn-ipv4-call-throttled") then
+                if connect_msg.payload.result and string.find(connect_msg.payload.result, "pdn-ipv4-call-throttled") then
                     status_sub:unsubscribe()
                     return nil, "pdn-ipv4-call-throttled"
+                else
+                    log.debug(string.format(
+                        "%s - %s: Failed to connect to APN '%s', reason: %s (%s)",
+                        ctx:value("service_name"),
+                        ctx:value("fiber_name"),
+                        n.name,
+                        connect_msg.payload.result,
+                        connect_err
+                    ))
                 end
             end
 
@@ -183,7 +193,7 @@ end
 
 function Modem:_enable_failed(ctx)
     log.warn(string.format(
-        "%s - %s: Modem failed to register",
+        "%s - %s: Modem may have failed to register",
         ctx:value("service_name"),
         ctx:value("fiber_name")
     ))
@@ -228,6 +238,18 @@ function Modem:_autounlock(ctx)
     return "not implemented"
 end
 
+local function purge_sub(ctx, sub)
+    local msg
+    while not ctx:err() do
+        local next_msg, err = sub:next_msg_with_context_op(ctx):perform_alt(function ()
+            return nil, "all messages purged"
+        end)
+        if err then break end
+        msg = next_msg
+    end
+    return msg
+end
+
 ---State machine to automatically connect the modem to an apn and network interface
 ---@param ctx Context
 function Modem:_autoconnect(ctx)
@@ -249,12 +271,17 @@ function Modem:_autoconnect(ctx)
         { 'hal', 'capability', 'modem', self.idx, 'info', 'state' }
     )
     while not ctx:err() do
-        local state_info_msg, monitor_err = state_monitor_sub:next_msg_with_context_op(ctx):perform()
+        -- Purge messages that may have been sent during state action
+        local state_info_msg, monitor_err = purge_sub(ctx, state_monitor_sub)
+        if not state_info_msg then
+            state_info_msg, monitor_err = state_monitor_sub:next_msg_with_context_op(ctx):perform()
+        end
         if monitor_err then
             log.debug(monitor_err)
             break
         end
         local state_info = state_info_msg.payload
+        if state_info == nil then ctx:cancel('state monitor closed') return end
         log.trace(string.format(
             "%s - %s: State recieved: %s",
             ctx:value("service_name"),
@@ -562,7 +589,6 @@ end
 local function modem_capability_add(modem)
     local imei = modem.imei
     local device = modem.device
-    print(device)
 
     local modem_config, id_field, key = get_modem_config(imei, device)
 
