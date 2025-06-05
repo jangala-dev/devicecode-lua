@@ -324,7 +324,7 @@ function Driver:wait_for_sim()
         local connected = false
 
         local sim_monitor_cmd = self.monitor_slot_status()
-        sim_monitor_cmd:setpgid(true)
+        sim_monitor_cmd:setpgid(false)
         local sim_stdout = assert(sim_monitor_cmd:stdout_pipe())
         local sim_cmd_err = sim_monitor_cmd:start()
         if sim_cmd_err then
@@ -502,7 +502,7 @@ function Driver:state_monitor(ctx)
 
     -- setup the modem monitor
     local state_monitor_cmd = mmcli.monitor_state(self.address)
-    state_monitor_cmd:setpgid(true)
+    state_monitor_cmd:setpgid(false)
     local state_stdout = assert(state_monitor_cmd:stdout_pipe())
     local cmd_err = state_monitor_cmd:start()
     if cmd_err then
@@ -520,7 +520,7 @@ function Driver:state_monitor(ctx)
     end
 
     local sim_monitor_cmd = self.monitor_slot_status()
-    sim_monitor_cmd:setpgid(true)
+    sim_monitor_cmd:setpgid(false)
     local sim_stdout = assert(sim_monitor_cmd:stdout_pipe())
     local sim_cmd_err = sim_monitor_cmd:start()
     if sim_cmd_err then

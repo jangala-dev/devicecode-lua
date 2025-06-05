@@ -33,7 +33,7 @@ function ModemManagement:_detector(ctx)
     while not ctx:err() do
         -- First, we start the modem detector
         local cmd = mmcli.monitor_modems()
-        cmd:setpgid(true)
+        cmd:setpgid(false)
         local stdout = assert(cmd:stdout_pipe())
         local err = cmd:start()
 
