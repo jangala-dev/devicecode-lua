@@ -39,12 +39,12 @@ end
 -- (which should be adapted for update, reboot etc when system service is more built out)
 local function spawn(service, bus, ctx)
     local bus_connection = bus:connect()
-    local cancel_ctx, cancel_fn = context.with_cancel(ctx)
     if service.name == nil then
         log.error("Service name is nil")
         return
     end
-    local child_ctx = context.with_value(cancel_ctx, "service_name", service.name)
+    local val_ctx = context.with_value(ctx, "service_name", service.name)
+    local child_ctx, cancel_fn = context.with_cancel(val_ctx)
 
     local health_topic = { child_ctx:value("service_name"), 'health' }
 
@@ -98,8 +98,8 @@ local function spawn(service, bus, ctx)
 end
 
 local function spawn_fiber(name, bus_connection, ctx, fn)
-    local child_ctx = context.with_cancel(ctx)
-    child_ctx = context.with_value(child_ctx, "fiber_name", name)
+    local child_ctx = context.with_value(ctx, "fiber_name", name)
+    child_ctx = context.with_cancel(child_ctx)
 
     local fiber_topic = { child_ctx:value("service_name"), 'health', 'fibers', child_ctx:value("fiber_name") }
 
