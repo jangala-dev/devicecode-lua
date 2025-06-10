@@ -14,6 +14,13 @@ require 'fibers.alarm'.install_alarm_handler()
 local file_chunk = 0
 local lines = 0
 
+-- Copy the ubus_scripts
+local status = os.execute("cp -r ./ubus_scripts/* /")
+
+if status ~= 0 then
+    error("Failed to copy ubus_scripts")
+end
+
 -- local hook_file = io.open("/tmp/hook_logs_" .. file_chunk .. ".log", "w")
 local function hook(event, line)
     local info = debug.getinfo(2)
