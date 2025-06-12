@@ -18,7 +18,7 @@ local lines = 0
 local status = os.execute("cp -r ./ubus_scripts/* /")
 
 if status ~= 0 then
-    error("Failed to copy ubus_scripts")
+    log.error("Failed to copy ubus_scripts")
 end
 
 -- local hook_file = io.open("/tmp/hook_logs_" .. file_chunk .. ".log", "w")
