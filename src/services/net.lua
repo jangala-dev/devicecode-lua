@@ -3,6 +3,7 @@ local sleep = require "fibers.sleep"
 local queue = require "fibers.queue"
 local exec = require "fibers.exec"
 local channel = require "fibers.channel"
+local cond = require "fibers.cond"
 local op = require "fibers.op"
 local sc = require "fibers.utils.syscall"
 local cjson = require "cjson.safe"
@@ -81,6 +82,9 @@ local wan_status_channel = channel.new()       -- For wan status supdates
 local speedtest_queue = queue.new()       -- Unbounded queue for holding speedtest requests
 local config_applier_queue = queue.new() -- Unbounded queue for holding config changes
 
+--- Conditional variable definitions
+local config_signal = cond.new() -- Conditional varibale to signal inital config
+
 local function config_receiver(ctx)
     log.trace("NET: Config receiver starting")
     local sub = net_service.conn:subscribe({ "config", "net" })
@@ -100,6 +104,7 @@ local function config_receiver(ctx)
 end
 
 local function interface_listener(ctx)
+    config_signal:wait() -- Block interface listener until initial configs
     log.trace("NET: Interface listener starting")
     local sub = net_service.conn:subscribe({"gsm", "modem", "+", "interface"})
     while not ctx:err() do
@@ -108,7 +113,7 @@ local function interface_listener(ctx)
                 if err then
                     log.error("NET: Interface listen error:", err)
                 else
-                    -- Extract modem_id from topic gsm/<modem_id>/interface
+                    -- Extract modem_id from topic gsm/modem/<modem_id>/interface
                     local modem_id = msg.topic[3]
                     interface_channel:put {
                         modem_id = modem_id,
@@ -474,6 +479,8 @@ local function uci_manager(ctx)
         end
         print("That took:", sc.monotime() - start)
         config_applier_queue:put({ "network", "firewall", "dhcp", "mwan3" })
+        -- If this is the initial config, signal config applied
+        config_signal:signal()
     end
 
     local function on_wan_status(msg)
@@ -540,6 +547,7 @@ local function uci_manager(ctx)
 end
 
 local function wan_monitor(ctx)
+    config_signal:wait() -- Block wan monitor until initial configs
     log.trace("NET: WAN monitor starting")
 
     -- first, we get the initial state of the interfaces, we use command line ubus for consistency with `ubus listen`
