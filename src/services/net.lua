@@ -73,13 +73,13 @@ end
 local metric_counter = make_counter()
 
 -- Channel definitions
-local config_channel = channel.new()      -- For config updates
-local interface_channel = channel.new()   -- For gsm/interface mappings
+local config_channel = channel.new()           -- For config updates
+local interface_channel = channel.new()        -- For gsm/interface mappings
 local speedtest_result_channel = channel.new() -- For speedtest requests
 local wan_status_channel = channel.new()       -- For wan status supdates
 
 -- Queue definitions
-local speedtest_queue = queue.new()       -- Unbounded queue for holding speedtest requests
+local speedtest_queue = queue.new()      -- Unbounded queue for holding speedtest requests
 local config_applier_queue = queue.new() -- Unbounded queue for holding config changes
 
 --- Conditional variable definitions
@@ -90,7 +90,7 @@ local function config_receiver(ctx)
     local sub = net_service.conn:subscribe({ "config", "net" })
     while not ctx:err() do
         op.choice(
-            sub:next_msg_op():wrap(function (msg, err)
+            sub:next_msg_op():wrap(function(msg, err)
                 if err then
                     log.error("NET: Config receive error:", err)
                 end
@@ -106,7 +106,7 @@ end
 local function interface_listener(ctx)
     config_signal:wait() -- Block interface listener until initial configs
     log.trace("NET: Interface listener starting")
-    local sub = net_service.conn:subscribe({"gsm", "modem", "+", "interface"})
+    local sub = net_service.conn:subscribe({ "gsm", "modem", "+", "interface" })
     while not ctx:err() do
         op.choice(
             sub:next_msg_op():wrap(function(msg, err)
@@ -333,7 +333,7 @@ local function set_network_speed(instance)
     config_applier_queue:put({ "mwan3" })
     log.info("NET: Speed config applied successfully for:", net_id)
 end
-local dnsmasq_instances = {}  -- maps host filter keys to instance names
+local dnsmasq_instances = {} -- maps host filter keys to instance names
 local dnsmasq_counter = 0
 
 local function get_dnsmasq_id(default_hosts)
@@ -485,7 +485,11 @@ local function uci_manager(ctx)
 
     local function on_wan_status(msg)
         local network, status = msg.network, msg.status
-        networks[network] = networks[network] or {}
+        if not networks[network] then
+            networks[network] = { status = status }
+            log.info("NET: Status for unknown network", network, "set to", status, ", skipping speedtest")
+            return
+        end
         local old_status = networks[network].status
         networks[network].status = status
         if old_status ~= status then
@@ -552,10 +556,16 @@ local function wan_monitor(ctx)
 
     -- first, we get the initial state of the interfaces, we use command line ubus for consistency with `ubus listen`
     local output, err = exec.command("ubus", "call", "mwan3", "status"):output()
-    if err then log.error("NET: WAN monitor: could not start ubus call") return end
+    if err then
+        log.error("NET: WAN monitor: could not start ubus call")
+        return
+    end
 
     local res, err = cjson.decode(output)
-    if err then log.error("NET: WAN monitor: could not get initial state: "..err) return end
+    if err then
+        log.error("NET: WAN monitor: could not get initial state: " .. err)
+        return
+    end
 
     for network, data in pairs(res.interfaces or {}) do
         local status = data.status == "online" and "online" or "offline"
@@ -566,22 +576,31 @@ local function wan_monitor(ctx)
     -- now we start a continuous loop to monitor for changes in interface state
     local cmd = exec.command("ubus", "listen", "hotplug.mwan3")
     local stdout = cmd:stdout_pipe()
-    if not stdout then log.error("NET: could not create stdout pipe for ubus listen") return end
+    if not stdout then
+        log.error("NET: could not create stdout pipe for ubus listen")
+        return
+    end
 
     local err = cmd:start()
-    if err then log.error("NET: ubus listen failed:", err) return end
+    if err then
+        log.error("NET: ubus listen failed:", err)
+        return
+    end
 
     local process_ended = false
 
     while not ctx:err() and not process_ended do
         op.choice(
-            stdout:read_line_op():wrap(function (line)
+            stdout:read_line_op():wrap(function(line)
                 if not line then
                     log.error("NET: ubus listen unexpectedly exited")
                     process_ended = true
                 else
                     local event, err = cjson.decode(line)
-                    if err then log.error("NET: ubus listen line decode failed:", err) return end
+                    if err then
+                        log.error("NET: ubus listen line decode failed:", err)
+                        return
+                    end
                     local data = event["hotplug.mwan3"]
                     log.debug("MWAN3 hotplug event received!")
 
@@ -593,7 +612,7 @@ local function wan_monitor(ctx)
                     net_service.conn:publish(new_msg({ "net", data.interface, "status" }, status))
                 end
             end),
-            ctx:done_op():wrap(function ()
+            ctx:done_op():wrap(function()
                 cmd:kill()
             end)
         ):perform()
