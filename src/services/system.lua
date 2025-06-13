@@ -188,6 +188,11 @@ local function get_static_infos()
         log.error(string.format("System: Failed to get firmware version: %s", fw_err))
     end
 
+    local serial, serial_err = sysinfo.get_serial()
+    if serial_err then
+        log.error(string.format("System: Failed to get serial number: %s", serial_err))
+    end
+
     local uptime, uptime_err = sysinfo.get_uptime()
     local boot_time
     if uptime_err then
@@ -196,7 +201,7 @@ local function get_static_infos()
         boot_time = math.floor(os.time() - uptime)
     end
     -- only need to publish if some info was retrieved
-    if not (hw_err and fw_err and uptime_err) then
+    if not (hw_err and fw_err and uptime_err and serial_err) then
         local system_data = {
             device = {
                 model = model,
@@ -205,7 +210,8 @@ local function get_static_infos()
             firmware = {
                 version = firmware_version
             },
-            boot_time = boot_time
+            boot_time = boot_time,
+            serial = serial
         }
         return system_data
     end
