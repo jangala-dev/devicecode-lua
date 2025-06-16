@@ -76,6 +76,7 @@ local config_channel = channel.new()      -- For config updates
 local interface_channel = channel.new()   -- For gsm/interface mappings
 local speedtest_result_channel = channel.new() -- For speedtest requests
 local wan_status_channel = channel.new()       -- For wan status supdates
+local modem_on_connected_channel = channel.new()       -- For wan status supdates
 
 -- Queue definitions
 local speedtest_queue = queue.new()       -- Unbounded queue for holding speedtest requests
@@ -397,8 +398,17 @@ local function config_applier(ctx)
     while not ctx:err() do
         op.choice(
             config_applier_queue:get_op():wrap(function(msg)
-                for _, v in ipairs(msg) do
-                    to_be_restarted[v] = true
+                if msg.ifup then -- this is a temporary ad-hoc special case. config application needs to move to HAL and be made more logical
+                    -- Directly handle ifup here
+                    local err = exec.command("ifup", msg.ifup):run()
+                    if err then
+                        log.warn("NET: Could not ifup", msg.ifup)
+                    end
+                else
+                    -- Existing logic
+                    for _, v in ipairs(msg) do
+                        to_be_restarted[v] = true
+                    end
                 end
             end),
             sleep.sleep_until_op(next_deadline):wrap(function()
@@ -528,12 +538,20 @@ local function uci_manager(ctx)
         net_service.conn:publish(new_msg({ "net", result.network, "download_speed" }, result.speed))
     end
 
+    local function on_modem_connected(result)
+        local iface = resolved_interfaces[result]
+        if iface then
+            config_applier_queue:put({ ifup = iface })
+        end
+    end
+
     while ctx:err() == nil do
         op.choice(
             config_channel:get_op():wrap(on_config),
             interface_channel:get_op():wrap(on_interface),
             speedtest_result_channel:get_op():wrap(on_speedtest_result),
             wan_status_channel:get_op():wrap(on_wan_status),
+            modem_on_connected_channel:get_op():wrap(on_modem_connected),
             ctx:done_op()
         ):perform()
     end
@@ -615,6 +633,28 @@ local function speedtest_worker(ctx)
     end
 end
 
+local function modem_state_listener(ctx)
+    log.trace("NET: Interface listener starting")
+    local sub = net_service.conn:subscribe({ "gsm", "modem", "+", "state" })
+    while not ctx:err() do
+        op.choice(
+            sub:next_msg_op():wrap(function(msg, err)
+                if err then
+                    log.error("NET: Interface listen error:", err)
+                else
+                    if msg.prev_state ~= "connected" and msg.curr_state == "connected" then
+                        -- Extract modem_id from topic gsm/modem/<modem_id>/state
+                        local modem_id = msg.topic[3]
+                        modem_on_connected_channel:put(modem_id)
+                    end
+                end
+            end),
+            ctx:done_op()
+        ):perform()
+    end
+    sub:unsubscribe()
+end
+
 function net_service:start(ctx, conn)
     log.trace("Starting NET Service")
     self.conn = conn
@@ -626,6 +666,7 @@ function net_service:start(ctx, conn)
     fiber.spawn(function() wan_monitor(ctx) end)
     fiber.spawn(function() speedtest_worker(ctx) end)
     fiber.spawn(function() config_applier(ctx) end)
+    fiber.spawn(function() modem_state_listener(ctx) end)
 end
 
 return net_service
