@@ -86,7 +86,7 @@ AlarmManager.__index = AlarmManager
 function AlarmManager.new()
     return setmetatable({
         next_alarm = nil,
-        synced = false
+        is_synced = false
     }, AlarmManager)
 end
 
@@ -133,21 +133,22 @@ function AlarmManager:delete_all()
 end
 
 function AlarmManager:sync()
-    self.synced = true
+    self.is_synced = true
     local head = self.next_alarm
     while head do
         head.alarm:calc_next_trigger()
+        head = head.next_alarm
     end
 end
 
 function AlarmManager:desync()
-    self.synced = false
+    self.is_synced = false
 end
 
 --- Create an operation that waits until the next alarm triggers.
 ---@return table operation Operation that resolves when the next alarm triggers
 function AlarmManager:next_alarm_op()
-    if not self.next_alarm or not self.synced then
+    if not self.next_alarm or not self.is_synced then
         -- No alarms, create an operation that will never complete
         return op.new_base_op(
             nil,
