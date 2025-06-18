@@ -166,13 +166,20 @@ function system_service:_handle_alarm(alarm)
     end
 
     if type == 'shutdown' then
+        log.info(string.format("%s - %s: Shutting down system",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name")
+        ))
         local cmd = exec.command('shutdown', '-h', 'now')
         cmd:run()
     elseif type == 'reboot' then
+        log.info(string.format("%s - %s: Rebooting system",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name")
+        ))
         local cmd = exec.command('reboot')
         cmd:run()
     end
-    os.exit()
 end
 
 ---Gets static information (hw model, hw/fw version, boot time)
