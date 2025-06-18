@@ -9,14 +9,14 @@ log_service.__index = log_service
 for _, mode in ipairs(rxilog.modes) do
     local level = mode.name
     log_service[level] = function(...)
-        -- TODO move into rxilog
-        local info = debug.getinfo(2, "Sl")
-        local lineinfo = info.short_src .. ":" .. info.currentline
         local msg = rxilog.tostring(...)
-        local formatted_msg = rxilog.format_log_message(level:upper(), lineinfo, msg)
-        rxilog[level](formatted_msg)
+        rxilog[level](msg)
 
         if log_service.conn then
+            local info = debug.getinfo(2, "Sl")
+            local lineinfo = info.short_src .. ":" .. info.currentline
+            local formatted_msg = rxilog.format_log_message(level:upper(), lineinfo, msg)
+
             log_service.conn:publish(new_msg({ "logs", level }, formatted_msg))
         end
     end
