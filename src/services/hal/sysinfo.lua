@@ -1,0 +1,174 @@
+local file = require "fibers.stream.file"
+local sleep = require "fibers.sleep"
+local op = require "fibers.op"
+
+---@param path string
+---@return string?
+---@return string? Error
+local function read_file(path)
+    local file, err = file.open(path, "r")
+    if err then return nil, err end
+    local content = file:read_all_chars()
+
+    file:close()
+    return content, nil
+end
+
+---@return string?
+---@return string? Error
+local function get_cpu_info()
+    local cpuinfo, cpuinfo_err = read_file("/proc/cpuinfo")
+    if cpuinfo_err or not cpuinfo then return nil, cpuinfo_err end
+    local model
+
+    if cpuinfo:match("Qualcomm Atheros") then
+        model = cpuinfo:match("cpu model%s+:%s+(.+)\n")
+    elseif cpuinfo:match("Raspberry Pi") then
+        model = "Raspberry Pi 4 Model B"
+    else
+        model = "Unknown"
+    end
+
+    return model, nil
+end
+
+---@param ctx Context
+---@return number? overall_utilisation
+---@return number[]? core_utilisations
+---@return number? average_frequency
+---@return number[]? core_frequencies
+---@return string? Error
+local function get_cpu_utilisation_and_freq(ctx)
+    local function extract_cpu_times(stat, core)
+        local pattern = core .. "%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)"
+        local user, nice, system, idle = stat:match(pattern)
+        return tonumber(user), tonumber(nice), tonumber(system), tonumber(idle)
+    end
+
+    local function compute_utilisation(user_prev, nice_prev, system_prev, idle_prev, user_curr, nice_curr, system_curr, idle_curr)
+        local total_prev = user_prev + nice_prev + system_prev + idle_prev
+        local total_curr = user_curr + nice_curr + system_curr + idle_curr
+        local active_diff = (user_curr - user_prev) + (nice_curr - nice_prev) + (system_curr - system_prev)
+        local total_diff = total_curr - total_prev
+        return total_diff == 0 and 0 or (active_diff / total_diff) * 100
+    end
+
+    local function get_scaling_cur_freq(core)
+        local path = "/sys/devices/system/cpu/" .. core .. "/cpufreq/scaling_cur_freq"
+        local freq, read_err = read_file(path)
+        if not freq or read_err then return nil, read_err end
+        return tonumber(freq), nil
+    end
+
+    local stat_prev, prev_err = read_file("/proc/stat")
+    if prev_err then return nil, nil, nil, nil, prev_err end
+    local ctx_err = op.choice(
+        sleep.sleep_op(1),
+        ctx:done_op():wrap(function ()
+            return ctx:err()
+        end)
+    ):perform()
+    if ctx_err then return nil, nil, nil, nil, ctx_err end
+    local stat_curr, curr_err = read_file("/proc/stat")
+    if curr_err then return nil, nil, nil, nil, curr_err end
+
+    local core_utilisations = {}
+    local core_frequencies = {}
+    local core_id = 0
+    local overall_utilisation_sum = 0
+    local overall_freq_sum = 0
+
+    while true do
+        local core = "cpu" .. core_id
+        local user_prev, nice_prev, system_prev, idle_prev = extract_cpu_times(stat_prev, core)
+        if not user_prev then
+            break
+        end
+        local user_curr, nice_curr, system_curr, idle_curr = extract_cpu_times(stat_curr, core)
+        local utilisation = compute_utilisation(user_prev, nice_prev, system_prev, idle_prev, user_curr, nice_curr, system_curr, idle_curr)
+        core_utilisations[core] = utilisation
+        overall_utilisation_sum = overall_utilisation_sum + utilisation
+
+        local freq = get_scaling_cur_freq(core)
+        if freq then
+            core_frequencies[core] = freq
+            overall_freq_sum = overall_freq_sum + freq
+        end
+
+        core_id = core_id + 1
+    end
+
+    local overall_utilisation = overall_utilisation_sum / (core_id > 0 and core_id or 1)
+    local average_frequency = overall_freq_sum / (core_id > 0 and core_id or 1)
+
+    return overall_utilisation, core_utilisations, average_frequency, core_frequencies
+end
+
+--- Get total, used, and free RAM
+---@return number? total
+---@return number? used
+---@return number? free
+---@return string? Error
+local function get_ram_info()
+    local meminfo, err = read_file("/proc/meminfo")
+    if not meminfo or err then return nil, nil, nil, err end
+    local total = meminfo:match("MemTotal:%s*(%d+)") or 0
+    local free = meminfo:match("MemFree:%s*(%d+)") or 0
+    local buffers = meminfo:match("Buffers:%s*(%d+)") or 0
+    local cached = meminfo:match("Cached:%s*(%d+)") or 0
+
+    local used = total - (free + buffers + cached)
+    return total, used, free + buffers + cached, nil
+end
+
+---Gets the modem and version of hardware
+---@return string? model
+---@return string? version
+---@return string? error
+local function get_hw_revision()
+    local revision, err = read_file("/etc/hwrevision")
+    if err or not revision then return nil, nil, err end
+    local model, version = revision:match('(%S+)%s+(%S+)')
+    if not (model or version) then
+        return nil, nil, "Failed to parse hwrevision"
+    end
+    return model, version, nil
+end
+
+---@return string? version
+---@return string? error
+local function get_fw_version()
+    local version, err = read_file("/etc/fwversion")
+    if err or not version then return nil, err end
+    return version, nil
+end
+
+local function get_serial()
+    local serial, err = read_file("/data/serial")
+    if err or not serial then return nil, err end
+    return serial, nil
+end
+
+local function get_temperature()
+    local temperature, err = read_file("/sys/class/thermal/thermal_zone0/temp")
+    if err or not temperature then return nil, err end
+    return tonumber(temperature) / 1000, nil
+end
+
+local function get_uptime()
+    local uptime, err = read_file("/proc/uptime")
+    if err or not uptime then return nil, err end
+    local up = string.match(uptime, "(%S+)%s")
+    if not up then return nil, "Failed to parse uptime" end
+    return tonumber(up), nil
+end
+return {
+    get_hw_revision = get_hw_revision,
+    get_fw_version = get_fw_version,
+    get_cpu_model = get_cpu_info,
+    get_cpu_utilisation_and_freq = get_cpu_utilisation_and_freq,
+    get_ram_info = get_ram_info,
+    get_serial = get_serial,
+    get_temperature = get_temperature,
+    get_uptime = get_uptime,
+}

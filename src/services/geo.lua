@@ -1,7 +1,9 @@
 local fiber = require 'fibers.fiber'
 local sleep = require 'fibers.sleep'
 
-local geo_service = {}
+local geo_service = {
+    name = "geo"
+}
 geo_service.__index = geo_service
 
 function geo_service:start(bus_connection)

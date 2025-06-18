@@ -1,111 +1,261 @@
-local function read_file(path)
-    local file = io.open(path, "r")
-    if not file then return nil end
-    local content = file:read("*a")
-    file:close()
-    return content
+local service = require "service"
+local log = require "services.log"
+local op = require "fibers.op"
+local sleep = require "fibers.sleep"
+local channel = require "fibers.channel"
+local context = require "fibers.context"
+local exec = require "fibers.exec"
+local new_msg = require("bus").new_msg
+local sysinfo = require "services.hal.sysinfo"
+local usb3 = require "services.hal.usb3"
+local alarms = require "services.system.alarms"
+local sc = require "fibers.utils.syscall"
+
+local system_service = {
+    name = 'System'
+}
+system_service.__index = system_service
+
+---Configure USB hub and alarms
+---@param config_msg table
+function system_service:_handle_config(config_msg)
+    if config_msg.payload == nil then
+        log.error("System: Invalid configuration message")
+        return
+    end
+    local usb3_enabled = config_msg.payload.usb3_enabled
+    local report_period = config_msg.payload.report_period
+
+    if usb3_enabled == nil or report_period == nil then
+        log.error("System: Missing required configuration fields")
+        return
+    end
+
+    self.report_period_channel:put(report_period)
+
+    if not usb3_enabled then
+        -- this is just a copy-paste job, look at this again during mvp
+        -- and think about abstraction and renablement(?) etc
+        log.info(string.format("%s - %s: Disabling USB3",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name")
+        ))
+        usb3.disable_usb3(self.ctx, self.model)
+    end
+
+    local alarms = config_msg.payload.alarms
+    if alarms and type(alarms) == "table" then
+        self.alarm_manager:delete_all()
+        for _, alarm in ipairs(alarms) do
+            local add_err = self.alarm_manager:add(alarm)
+            if add_err then
+                log.error("Failed to add alarm: ", add_err)
+            end
+        end
+    end
 end
 
-local function get_cpu_info()
-    local cpuinfo = assert(read_file("/proc/cpuinfo"))
-    local model
+---Periodic gathering a publish of system information
+function system_service:_report_sysinfo()
+    local report_period = self.report_period_channel:get()
+    while not self.ctx:err() do
+        local cpu_model, cpu_model_err = sysinfo.get_cpu_model()
+        if cpu_model_err then
+            log.debug("Failed to get CPU model: ", cpu_model_err)
+        end
 
-    if cpuinfo:match("Qualcomm Atheros") then
-        model = cpuinfo:match("cpu model%s+:%s+(.+)\n")
-    elseif cpuinfo:match("Raspberry Pi") then
-        model = "Raspberry Pi 4 Model B"
+        local all_util, core_util, avg_freq, core_freq, err = sysinfo.get_cpu_utilisation_and_freq(self.ctx)
+        if err then
+            log.debug("Failed to get CPU utilisation and frequency: ", err)
+        end
+
+        local total, used, free, ram_err = sysinfo.get_ram_info()
+        if ram_err then
+            log.debug("Failed to get RAM info: ", ram_err)
+        end
+
+        local temperature, temp_err = sysinfo.get_temperature()
+        if temp_err then
+            log.debug("Failed to get temperature: ", temp_err)
+        end
+
+        local sysinfo_data = {
+            cpu = {
+                cpu_model = cpu_model,
+                overall_utilisation = all_util,
+                core_utilisations = core_util,
+                average_frequency = avg_freq,
+                core_frequencies = core_freq
+            },
+            mem = {
+                total = total,
+                used = used,
+                free = free
+            },
+            temperature = temperature,
+            heartbeat = 0
+        }
+
+        self.conn:publish_multiple(
+            { 'system', 'info' },
+            sysinfo_data,
+            { retained = true }
+        )
+
+        op.choice(
+            sleep.sleep_op(report_period),
+            self.report_period_channel:get_op():wrap(function(new_period)
+                report_period = new_period
+            end),
+            self.ctx:done_op()
+        ):perform()
+    end
+end
+
+---Performs shutdown or reboot of the system
+---@param alarm Alarm
+function system_service:_handle_alarm(alarm)
+    local name = alarm.payload and alarm.payload.name
+    local type = alarm.payload and alarm.payload.type
+    if type ~= 'reboot' and type ~= 'alarm' then return end
+    local deadline = sc.monotime() + 10
+    self.conn:publish(new_msg(
+        { '+', 'control', 'shutdown' },
+        { reason = name, deadline = deadline },
+        { retained = true }
+    ))
+
+    -- need to create context that is independent from the service context
+    -- as the broadcast shutdown message will also shutdown the system service
+    local shutdown_timeout = context.with_deadline(context.background(), deadline + 1)
+    local shutdown_sub = self.conn:subscribe({ '+', 'health' })
+
+    local active_services = {}
+
+    while not shutdown_timeout:err() do
+        local msg, timeout_err = shutdown_sub:next_msg_with_context_op(shutdown_timeout):perform()
+        if timeout_err then break end
+        local service_name = msg.topic[1]
+        if service_name ~= self.name then
+            if msg.payload.state == 'disabled' and active_services[service_name] then
+                active_services[service_name] = nil
+            end
+            if msg.payload.state ~= 'disabled' and not active_services[service_name] then
+                active_services[service_name] = true
+            end
+        end
+    end
+    shutdown_sub:unsubscribe()
+
+    for service_name, _ in pairs(active_services) do
+        local err_msg = string.format("Service %s did not shut down safely due to hanging fibers:\n", service_name)
+        local service_fibers_status_sub = self.conn:subscribe(
+            { service_name, 'health', 'fibers', '+' }
+        )
+        while true do
+            local msg, is_break = service_fibers_status_sub:next_msg_op():perform_alt(function()
+                return nil, true
+            end)
+            if is_break then break end
+            if msg.payload.state ~= 'disabled' then
+                err_msg = err_msg .. string.format("\tFiber %s is stuck in state %s\n", msg.topic[4], msg.payload.state)
+            end
+        end
+        service_fibers_status_sub:unsubscribe()
+        log.debug(err_msg)
+    end
+
+    if type == 'shutdown' then
+        local cmd = exec.command('shutdown', '-h', 'now')
+        cmd:run()
+    elseif type == 'reboot' then
+        local cmd = exec.command('reboot')
+        cmd:run()
+    end
+    os.exit()
+end
+
+---Gets static information (hw model, hw/fw version, boot time)
+---@return table?
+local function get_static_infos()
+    local model, version, hw_err = sysinfo.get_hw_revision()
+    if hw_err then
+        log.error(string.format("System: Failed to get model and version: %s", hw_err))
+    end
+
+    local firmware_version, fw_err = sysinfo.get_fw_version()
+    if fw_err then
+        log.error(string.format("System: Failed to get firmware version: %s", fw_err))
+    end
+
+    local uptime, uptime_err = sysinfo.get_uptime()
+    local boot_time
+    if uptime_err then
+        log.error("Failed to get uptime: ", uptime_err)
     else
-        model = "Unknown"
+        boot_time = math.floor(os.time() - uptime)
     end
-
-    return model
+    -- only need to publish if some info was retrieved
+    if not (hw_err and fw_err and uptime_err) then
+        local system_data = {
+            device = {
+                model = model,
+                version = version
+            },
+            firmware = {
+                version = firmware_version
+            },
+            boot_time = boot_time
+        }
+        return system_data
+    end
+    return nil
 end
 
-local function get_cpu_utilisation_and_freq()
-    local function extract_cpu_times(stat, core)
-        local pattern = core .. "%s+(%d+)%s+(%d+)%s+(%d+)%s+(%d+)"
-        local user, nice, system, idle = stat:match(pattern)
-        return tonumber(user), tonumber(nice), tonumber(system), tonumber(idle)
+--- Main system service loop
+function system_service:_system_main()
+    -- Subscribe to system-related topics
+    local config_sub = self.conn:subscribe({ 'config', 'system' })
+
+    local static_info = get_static_infos()
+    if static_info then
+        self.model = static_info.device.model
+        self.conn:publish_multiple(
+            { 'system', 'info' },
+            static_info,
+            { retained = true }
+        )
     end
 
-    local function compute_utilisation(user_prev, nice_prev, system_prev, idle_prev, user_curr, nice_curr, system_curr, idle_curr)
-        local total_prev = user_prev + nice_prev + system_prev + idle_prev
-        local total_curr = user_curr + nice_curr + system_curr + idle_curr
-        local active_diff = (user_curr - user_prev) + (nice_curr - nice_prev) + (system_curr - system_prev)
-        local total_diff = total_curr - total_prev
-        return total_diff == 0 and 0 or (active_diff / total_diff) * 100
+    while not self.ctx:err() do
+        op.choice(
+            self.ctx:done_op(),
+            config_sub:next_msg_op():wrap(function(config_msg)
+                self:_handle_config(config_msg)
+            end),
+            self.alarm_manager:next_alarm_op():wrap(function(alarm)
+                self:_handle_alarm(alarm)
+            end)
+        ):perform()
     end
-
-    local function get_scaling_cur_freq(core)
-        local path = "/sys/devices/system/cpu/" .. core .. "/cpufreq/scaling_cur_freq"
-        local freq = read_file(path)
-        return freq and tonumber(freq) or nil
-    end
-
-    local stat_prev = read_file("/proc/stat")
-    os.execute("sleep 1")
-    local stat_curr = read_file("/proc/stat")
-
-    local core_utilisations = {}
-    local core_frequencies = {}
-    local core_id = 0
-    local overall_utilisation_sum = 0
-    local overall_freq_sum = 0
-
-    while true do
-        local core = "cpu" .. core_id
-        local user_prev, nice_prev, system_prev, idle_prev = extract_cpu_times(stat_prev, core)
-        if not user_prev then
-            break
-        end
-        local user_curr, nice_curr, system_curr, idle_curr = extract_cpu_times(stat_curr, core)
-        local utilisation = compute_utilisation(user_prev, nice_prev, system_prev, idle_prev, user_curr, nice_curr, system_curr, idle_curr)
-        core_utilisations[core] = utilisation
-        overall_utilisation_sum = overall_utilisation_sum + utilisation
-
-        local freq = get_scaling_cur_freq(core)
-        if freq then
-            core_frequencies[core] = freq
-            overall_freq_sum = overall_freq_sum + freq
-        end
-
-        core_id = core_id + 1
-    end
-
-    local overall_utilisation = overall_utilisation_sum / (core_id > 0 and core_id or 1)
-    local average_frequency = overall_freq_sum / (core_id > 0 and core_id or 1)
-
-    return overall_utilisation, core_utilisations, average_frequency, core_frequencies
-end    
-
--- Get total, used, and free RAM
-local function get_ram_info()
-    local meminfo = assert(read_file("/proc/meminfo"))
-    local total = meminfo:match("MemTotal:%s*(%d+)") or 0
-    local free = meminfo:match("MemFree:%s*(%d+)") or 0
-    local buffers = meminfo:match("Buffers:%s*(%d+)") or 0
-    local cached = meminfo:match("Cached:%s*(%d+)") or 0
-
-    local used = total - (free + buffers + cached)
-    return total, used, free + buffers + cached
+    config_sub:unsubscribe()
 end
 
-local function main()
-    -- local cpu_model = get_cpu_info()
-    local ram_total, ram_used, ram_free = get_ram_info()
-
-    local overall_utilisation, core_utilisations, average_frequency, core_frequencies = get_cpu_utilisation_and_freq()
-
-    -- print("CPU Info: " .. cpu_model)
-    print("Overall CPU Utilisation:", overall_utilisation .. "%")
-    print("Average Frequency:", average_frequency .. "kHz")
-    for core, util in pairs(core_utilisations) do
-        print(core .. " Utilisation:", util .. "%")
-        print(core .. " Frequency:", (core_frequencies[core] or "Unknown"))
-    end
-    print("Total RAM: " .. ram_total .. " kB")
-    print("Used RAM: " .. ram_used .. " kB")
-    print("Free RAM: " .. ram_free .. " kB")
+---Start the system service
+---@param ctx Context
+---@param conn Connection
+function system_service:start(ctx, conn)
+    self.ctx = ctx
+    self.conn = conn
+    self.report_period_channel = channel.new()
+    self.alarm_manager = alarms.AlarmManager.new()
+    log.trace("Starting System Service")
+    service.spawn_fiber('System Main', conn, ctx, function()
+        self:_system_main()
+    end)
+    service.spawn_fiber('System Sysinfo', conn, ctx, function()
+        self:_report_sysinfo()
+    end)
 end
 
-main()
+return system_service

@@ -1,77 +1,723 @@
 {
-    "network": {
-        "networks": [
-            {
-                "name": "Wired Internet",
-                "id": "wan",
-                "interface": "eth1",
-                "protocol": "dhcp",
-                "ipv6": true
+  "net": {
+    "default": {
+      "backhauls": {
+        "network": {
+          "ipv4": {
+            "proto": "dhcp"
+          },
+          "firewall": {
+            "zone": "wan"
+          },
+          "shaping": {
+            "egress": {
+              "qdisc": "fq_codel"
             },
-            {
-                "name": "Primary Modem",
-                "id": "mwan0",
-                "protocol": "dhcp",
-                "ipv6": true
-            },
-            {
-                "name": "Secondary Modem",
-                "id": "mwan1",
-                "protocol": "dhcp",
-                "ipv6": true
-            },
-            {
-                "name": "Admin Network",
-                "id": "adm",
-                "interface": "eth0",
-                "vlan": "1",
-                "protocol": "static",
-                "ipaddr": "172.28.1.1/24"
-            },
-            {
-                "name": "Guest Network",
-                "id": "jng",
-                "interface": "eth0",
-                "vlan": "2",
-                "protocol": "static",
-                "ipaddr": "172.28.2.1/24"
+            "ingress": {
+              "qdisc": "fq_codel"
             }
-        ]
-    },
-    "gsm": {
-        "modems": {
-            "default": {
-                "enabled": true
-            },
-            "known": {
-                "primary": {
-                    "id_field": "device",
-                    "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
-                    "enabled": true,
-                    "autoconnect": true
-                },
-                "secondary": {
-                    "id_field": "device",
-                    "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4",
-                    "enabled": true,
-                    "autoconnect": true
-                },
-                "modem1": {
-                    "id_field": "imei",
-                    "imei": "123456789054321",
-                    "enabled": true,
-                    "autoconnect": true
-                }
-            }
+          }
         },
-        "sims": {
-            "default": {
-                "autoconnect": true
-            }
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
         }
+      }
     },
-    "service2": {
-        "paramX": "valueX",
-        "paramY": "valueY"
+    "dns": {
+      "upstream_servers": [
+        "8.8.8.8",
+        "1.1.1.1"
+      ],
+      "default_cache_size": 1000
+    },
+    "dhcp": {
+      "domains": [
+        {
+          "name": "config.bigbox.home",
+          "ip": "172.28.8.1"
+        }
+      ]
+    },
+    "network": [
+      {
+        "name": "Admin Network",
+        "id": "adm",
+        "type": "local",
+        "interfaces": [
+          "eth0.8"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "172.28.8.1",
+          "netmask": "255.255.255.0"
+        },
+        "dhcp_server": {
+          "range_skip": "10",
+          "range_extent": "240",
+          "lease_time": "12h"
+        },
+        "dns_server": {
+          "local_server": true,
+          "default_hosts": [
+            "ads"
+          ]
+        },
+        "firewall": {
+          "zone": "lan"
+        }
+      },
+      {
+        "name": "Jangala Network",
+        "id": "jan",
+        "type": "local",
+        "interfaces": [
+          "eth0.32"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "172.28.32.1",
+          "netmask": "255.255.255.0"
+        },
+        "dhcp_server": {
+          "range_skip": "10",
+          "range_extent": "240",
+          "lease_time": "12h"
+        },
+        "dns_server": {
+          "local_server": true,
+          "default_hosts": [
+            "ads",
+            "adult"
+          ]
+        },
+        "firewall": {
+          "zone": "lan_rst"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "htb",
+            "filters": [
+              {
+                "id": "per_ip_filter",
+                "kind": "u32",
+                "hash_key": "dest_ip",
+                "target_class_template": "per_ip_shapers"
+              }
+            ],
+            "class_template": {
+              "id": "per_ip_shapers",
+              "kind": "per_dest_ip",
+              "classes": [
+                {
+                  "qdisc": "htb",
+                  "config": {
+                    "rate": "450kbit",
+                    "ceil": "2mbit",
+                    "burst": "500k"
+                  },
+                  "classes": [
+                    {
+                      "qdisc": "fq_codel"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "ingress": {
+            "qdisc": "htb",
+            "filters": [
+              {
+                "id": "per_ip_filter",
+                "kind": "u32",
+                "hash_key": "src_ip",
+                "target_class_template": "per_ip_shapers"
+              }
+            ],
+            "class_template": {
+              "id": "per_ip_shapers",
+              "kind": "per_src_ip",
+              "classes": [
+                {
+                  "qdisc": "htb",
+                  "config": {
+                    "rate": "450kbit",
+                    "ceil": "2mbit",
+                    "burst": "500k"
+                  },
+                  "classes": [
+                    {
+                      "qdisc": "fq_codel"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "name": "Internal Network",
+        "id": "int",
+        "type": "local",
+        "interfaces": [
+          "eth0.100"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "172.28.100.1",
+          "netmask": "255.255.255.0"
+        },
+        "dhcp_server": {
+          "range_skip": "10",
+          "range_extent": "240",
+          "lease_time": "12h"
+        },
+        "dns_server": {
+          "servers": [
+            "8.8.8.8",
+            "1.1.1.1"
+          ]
+        },
+        "firewall": {
+          "zone": "lan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        }
+      },
+      {
+        "name": "Primary Modem",
+        "id": "mdm0",
+        "type": "backhaul",
+        "modem_id": "primary",
+        "ipv4": {
+          "enabled": true,
+          "proto": "dhcp",
+          "peerdns": 0
+        },
+        "firewall": {
+          "zone": "wan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
+        }
+      },
+      {
+        "name": "Secondary Modem",
+        "id": "mdm1",
+        "type": "backhaul",
+        "modem_id": "secondary",
+        "ipv4": {
+          "enabled": true,
+          "proto": "dhcp"
+        },
+        "firewall": {
+          "zone": "wan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
+        }
+      },
+      {
+        "name": "Wired Internet",
+        "id": "wan",
+        "type": "backhaul",
+        "interfaces": [
+          "eth0.4"
+        ],
+        "ipv4": {
+          "enabled": true,
+          "proto": "dhcp",
+          "peerdns": 0
+        },
+        "firewall": {
+          "zone": "wan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
+        }
+      }
+    ],
+    "multiwan": {
+      "globals": {
+        "mmx_mask": "0x3F00"
+      },
+      "rules": {},
+      "default_strategy": "dynamic_weight",
+      "health_checks": {
+        "down": 2,
+        "up": 1,
+        "initial_state": "offline",
+        "track_method": "ping",
+        "track_ip": [
+          "1.1.1.1",
+          "8.8.8.8"
+        ],
+        "timeout": 2,
+        "interval": 1
+      }
+    },
+    "firewall": {
+      "defaults": {
+        "syn_flood": "1",
+        "input": "ACCEPT",
+        "forward": "REJECT",
+        "output": "ACCEPT",
+        "disable_ipv6": "1"
+      },
+      "zones": [
+        {
+          "description": "Local Networks",
+          "name": "lan",
+          "config": {
+            "name": "lan",
+            "input": "ACCEPT",
+            "output": "ACCEPT",
+            "forward": "ACCEPT"
+          },
+          "forwarding": [
+            {
+              "dest": "wan"
+            }
+          ]
+        },
+        {
+          "description": "Local Networks - restricted",
+          "name": "lan_rst",
+          "config": {
+            "name": "lan_rst",
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT"
+          },
+          "forwarding": [
+            {
+              "dest": "wan"
+            }
+          ]
+        },
+        {
+          "description": "Internet",
+          "name": "wan",
+          "config": {
+            "name": "wan",
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT",
+            "masq": 1,
+            "mtu_fix": 1
+          }
+        }
+      ],
+      "rules": [
+        {
+          "description": "Allows for DHCP renewal from upstream routers",
+          "config": {
+            "name": "Allow-DHCP-Renew",
+            "src": "wan",
+            "proto": "udp",
+            "dest_port": "68",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "Responds to pings from the Internet",
+          "config": {
+            "name": "Allow-Ping",
+            "src": "wan",
+            "proto": "icmp",
+            "icmp_type": "echo-request",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "",
+          "config": {
+            "name": "Allow-IGMP",
+            "src": "wan",
+            "proto": "igmp",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "",
+          "config": {
+            "name": "Allow-IPSec-ESP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "esp",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "",
+          "config": {
+            "name": "Allow-ISAKMP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "",
+          "config": {
+            "name": "Allow-IPSec-ESP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "esp",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "name": "",
+          "config": {
+            "name": "Allow-ISAKMP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "name": "",
+          "config": {
+            "name": "Allow DHCP request (RST)",
+            "src": "lan_rst",
+            "proto": "udp",
+            "src_port": "67-68",
+            "dest_port": "67-68",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "name": "",
+          "config": {
+            "name": "Allow DNS queries (RST)",
+            "src": "lan_rst",
+            "proto": "tcp udp",
+            "dest_port": "53",
+            "target": "ACCEPT"
+          }
+        }
+      ]
+    },
+    "static_route": [
+      {
+        "target": "192.168.100.1",
+        "interface": "wan"
+      }
+    ]
+  },
+  "gsm": {
+    "modems": {
+      "default": {
+        "enabled": true
+      },
+      "known": [
+        {
+          "name": "primary",
+          "id_field": "device",
+          "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
+          "autoconnect": true
+        },
+        {
+          "name": "secondary",
+          "id_field": "device",
+          "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4",
+          "autoconnect": true
+        }
+      ]
     }
+  },
+  "metrics": {
+    "cloud_url": "$CLOUD_URL",
+    "publish_cache": {
+        "enabled": true,
+        "period": 10
+    },
+    "collections": {
+        "gsm/modem/primary/band": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "band"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/primary/access-tech": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "access_tech"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/primary/access-family": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "access_fam"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/primary/imei": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "imei"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/primary/sim": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "sim"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/primary/signal/rssi": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "rssi"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "gsm/modem/primary/signal/rsrp": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "rsrp"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "gsm/modem/primary/signal/rsrq": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "rsrq"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "gsm/modem/primary/operator": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "operator"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/primary/iccid": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "iccid"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/primary/state": {
+          "protocol": "log",
+          "field": "curr_state",
+          "rename": [
+            "modem",
+            "1",
+            "state"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/primary/interface": {
+          "protocol": "log",
+          "rename": [
+            "modem",
+            "1",
+            "wann_type"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "system/info/boot_time": {
+          "protocol": "log",
+          "rename": [
+            "system",
+            "boot_time"
+          ],
+          "process": []
+        },
+        "system/firmware/version": {
+          "protocol": "log",
+          "rename": [
+            "system",
+            "fw_id"
+          ],
+          "process": []
+        },
+        "system/cpu/overall_utilisation": {
+          "protocol": "log",
+          "rename": [
+            "system",
+            "cpu_util"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "system/mem/used": {
+          "protocol": "log",
+          "rename": [
+            "system",
+            "mem_util"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        }
+    }
+  },
+  "system": {
+    "report_period": 10,
+    "usb3_enabled": false,
+    "alarms": [
+      {
+        "time": "5:00",
+        "repeats": "daily",
+        "payload": {
+          "name": "daily reboot",
+          "type": "reboot"
+        }
+      }
+    ]
+  }
 }

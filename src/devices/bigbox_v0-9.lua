@@ -2,10 +2,15 @@
 
 return {
     services = {
+        "log",
         "config",
+        "hal",
         "gsm",
-        "geo",
         "time",
+        "net",
+        "metrics",
+        "system",
+        "ui"
         -- ... other services specific to this device version
     }
 }

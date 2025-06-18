@@ -1,0 +1,24 @@
+{
+    "events": [
+        {
+            "out": "No modems were found",
+            "wait": 0.1
+        },
+        {
+            "out": "(+) /org/freedesktop/ModemManager1/Modem/0 [QUALCOMM INCORPORATED] QUECTEL Mobile Broadband Module",
+            "wait": 0.1
+        },
+        {
+            "out": "(+) /org/freedesktop/ModemManager1/Modem/1 [QUALCOMM INCORPORATED] QUECTEL Mobile Broadband Module",
+            "wait": 0.1
+        },
+        {
+            "out": "(-) /org/freedesktop/ModemManager1/Modem/0 [QUALCOMM INCORPORATED] QUECTEL Mobile Broadband Module",
+            "wait": 0.1
+        },
+        {
+            "out": "(-) /org/freedesktop/ModemManager1/Modem/1 [QUALCOMM INCORPORATED] QUECTEL Mobile Broadband Module",
+            "wait": 0.1
+        }
+    ]
+}

@@ -1,7 +1,7 @@
 local fiber = require "fibers.fiber"
 local exec = require "fibers.exec"
 local json = require "dkjson"
-local log = require "log"
+local log = require "services.log"
 
 -- there's a connect/disconnect event available directly from hostapd.
 -- opkg install hostapd-utils will give you hostapd_cli
@@ -16,7 +16,9 @@ local log = require "log"
 -- will result in something like this in the logs
 -- hostapd event received wlan1 AP-STA-CONNECTED xx:xx:xx:xx:xx:xx
 
-local wifi_service = {}
+local wifi_service = {
+    name = "wifi"
+}
 wifi_service.__index = wifi_service
 
 local function get_interfaces()
