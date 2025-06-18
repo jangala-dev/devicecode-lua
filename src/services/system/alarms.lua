@@ -133,10 +133,12 @@ function AlarmManager:delete_all()
 end
 
 function AlarmManager:sync()
+    if self.is_synced then return end
     self.is_synced = true
     local head = self.next_alarm
+    self:delete_all()
     while head do
-        head.alarm:calc_next_trigger()
+        self:add(head.alarm)
         head = head.next_alarm
     end
 end
@@ -163,7 +165,6 @@ function AlarmManager:next_alarm_op()
         self.next_alarm = self.next_alarm.next_alarm
         -- Recalculate the next trigger time for repeating alarms
         if alarm.repeat_type ~= REPEAT_TYPES.NONE then
-            alarm:calc_next_trigger()
             self:add(alarm)
         end
 
