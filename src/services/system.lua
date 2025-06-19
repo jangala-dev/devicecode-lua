@@ -117,7 +117,7 @@ end
 function system_service:_handle_alarm(alarm)
     local name = alarm.payload and alarm.payload.name
     local type = alarm.payload and alarm.payload.type
-    if type ~= 'reboot' and type ~= 'alarm' then return end
+    if type ~= 'reboot' and type ~= 'shutdown' then return end
     local deadline = sc.monotime() + 10
     self.conn:publish(new_msg(
         { '+', 'control', 'shutdown' },
