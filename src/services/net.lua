@@ -549,10 +549,11 @@ local function uci_manager(ctx)
         net_service.conn:publish(new_msg({ "net", result.network, "download_speed" }, result.speed))
     end
 
-    local function on_modem_connected(result)
-        local iface = resolved_interfaces[result]
-        if iface then
-            config_applier_queue:put({ ifup = iface })
+    local function on_modem_connected(modem_id)
+        for _, net in pairs(networks) do
+            if net.cfg.modem_id == modem_id then
+                config_applier_queue:put({ ifup = net.cfg.id })
+            end
         end
     end
 
@@ -669,10 +670,12 @@ local function modem_state_listener(ctx)
                 if err then
                     log.error("NET: Interface listen error:", err)
                 else
-                    if msg.prev_state ~= "connected" and msg.curr_state == "connected" then
-                        -- Extract modem_id from topic gsm/modem/<modem_id>/state
-                        local modem_id = msg.topic[3]
-                        modem_on_connected_channel:put(modem_id)
+                    if msg.payload then
+                        if msg.payload.prev_state ~= "connected" and msg.payload.curr_state == "connected" then
+                            -- Extract modem_id from topic gsm/modem/<modem_id>/state
+                            local modem_id = msg.topic[3]
+                            modem_on_connected_channel:put(modem_id)
+                        end
                     end
                 end
             end),
