@@ -123,7 +123,7 @@ local hal_service = require "services.hal"
 local bus = require "bus"
 local context = require "fibers.context"
 
-local bus_inst = bus.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+local bus_inst = bus.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
 local bus_connection = bus_inst:connect()
 local ctx = context.background()
 

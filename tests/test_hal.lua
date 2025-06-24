@@ -50,7 +50,7 @@ end
 local function test_capability_valid_cap()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -95,7 +95,7 @@ end
 local function test_capability_no_cap()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -123,7 +123,7 @@ end
 local function test_capability_no_inst()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -163,7 +163,7 @@ end
 local function test_capability_no_method()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -203,7 +203,7 @@ end
 local function test_capability_args()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -249,7 +249,7 @@ end
 local function test_device_event_add()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -284,7 +284,7 @@ end
 local function test_device_event_remove()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -323,7 +323,7 @@ end
 local function test_device_event_remove_no_exist()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -353,7 +353,7 @@ end
 local function test_device_event_nil_type()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -381,7 +381,7 @@ end
 local function test_device_event_nil_connected()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -409,7 +409,7 @@ end
 local function test_device_event_nil_id_field()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -437,7 +437,7 @@ end
 local function test_device_event_nil_data()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -465,7 +465,7 @@ end
 local function test_device_event_nil_capabilities()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -494,7 +494,7 @@ local function test_capability_event()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
     local event_channel = channel.new()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -534,7 +534,7 @@ end
 local function test_device_event_nil_identifier()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -561,7 +561,7 @@ end
 local function test_device_info_valid()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -594,7 +594,7 @@ end
 local function test_device_info_no_device_type()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -619,7 +619,7 @@ end
 local function test_device_info_no_device()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
@@ -644,7 +644,7 @@ end
 local function test_device_info_no_method()
     local hal = hal_loader:require("services.hal")
     local service_ctx, fiber_ctx = make_contexts()
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local device_event_q = queue.new()
 
     fiber.spawn(function()
