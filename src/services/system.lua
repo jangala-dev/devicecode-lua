@@ -79,6 +79,11 @@ function system_service:_report_sysinfo()
             log.debug("Failed to get temperature: ", temp_err)
         end
 
+        local serial, serial_err = sysinfo.get_serial()
+        if serial_err then
+            log.debug("Failed to get serial number: ", serial_err)
+        end
+
         local sysinfo_data = {
             cpu = {
                 cpu_model = cpu_model,
@@ -93,6 +98,7 @@ function system_service:_report_sysinfo()
                 free = free
             },
             temperature = temperature,
+            serial = serial,
             heartbeat = 0
         }
 
