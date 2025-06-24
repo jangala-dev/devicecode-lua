@@ -117,7 +117,7 @@ end
 function system_service:_handle_alarm(alarm)
     local name = alarm.payload and alarm.payload.name
     local type = alarm.payload and alarm.payload.type
-    if type ~= 'reboot' and type ~= 'alarm' then return end
+    if type ~= 'reboot' and type ~= 'shutdown' then return end
     local deadline = sc.monotime() + 10
     self.conn:publish(new_msg(
         { '+', 'control', 'shutdown' },
@@ -166,13 +166,20 @@ function system_service:_handle_alarm(alarm)
     end
 
     if type == 'shutdown' then
+        log.info(string.format("%s - %s: Shutting down system",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name")
+        ))
         local cmd = exec.command('shutdown', '-h', 'now')
         cmd:run()
     elseif type == 'reboot' then
+        log.info(string.format("%s - %s: Rebooting system",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name")
+        ))
         local cmd = exec.command('reboot')
         cmd:run()
     end
-    os.exit()
 end
 
 ---Gets static information (hw model, hw/fw version, boot time)
@@ -216,6 +223,7 @@ end
 function system_service:_system_main()
     -- Subscribe to system-related topics
     local config_sub = self.conn:subscribe({ 'config', 'system' })
+    local time_sync_sub = self.conn:subscribe({ 'time', 'ntp_synced'})
 
     local static_info = get_static_infos()
     if static_info then
@@ -233,12 +241,20 @@ function system_service:_system_main()
             config_sub:next_msg_op():wrap(function(config_msg)
                 self:_handle_config(config_msg)
             end),
+            time_sync_sub:next_msg_op():wrap(function(msg)
+                if msg.payload then
+                    self.alarm_manager:sync()
+                else
+                    self.alarm_manager:desync()
+                end
+            end),
             self.alarm_manager:next_alarm_op():wrap(function(alarm)
                 self:_handle_alarm(alarm)
             end)
         ):perform()
     end
     config_sub:unsubscribe()
+    time_sync_sub:unsubscribe()
 end
 
 ---Start the system service
