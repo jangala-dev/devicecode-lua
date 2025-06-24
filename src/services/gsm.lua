@@ -391,7 +391,10 @@ end
 
 function Modem:_publish_dynamic_data(ctx)
     local function publish_sim_present(msg)
-        local state = msg.payload == '--' and '--' or 'present'
+        local state = "--"
+        if msg.payload and msg.payload ~= '--' then
+            state = "present"
+        end
         self.conn:publish(new_msg(
             { 'gsm', 'modem', self.name, 'sim' },
             state,
@@ -422,7 +425,7 @@ function Modem:_publish_dynamic_data(ctx)
     local function publish_operator(msg)
         self.conn:publish(new_msg(
             { 'gsm', 'modem', self.name, 'operator' },
-            msg.payload,
+            msg.payload or '--',
             { retained = true }
         ))
     end
