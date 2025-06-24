@@ -61,16 +61,20 @@ function Alarm.new(config)
     local _, err = falarm.validate_next_table(trigger_time)
     if err then return nil, err end
 
-    local time_trigger, _ = falarm.calculate_next(trigger_time, sc.realtime())
+    -- local time_trigger, _ = falarm.calculate_next(trigger_time, sc.realtime())
 
     -- Create the alarm with parsed values
     local alarm = setmetatable({
         payload = config.payload,
         trigger_time = trigger_time,
         repeat_type = repeat_type,
-        next_trigger = time_trigger
+        -- next_trigger = time_trigger
     }, Alarm)
     return alarm
+end
+
+function Alarm:calc_next_trigger()
+    self.next_trigger = falarm.calculate_next(self.trigger_time, sc.realtime())
 end
 
 ---@class AlarmManager
@@ -81,7 +85,8 @@ AlarmManager.__index = AlarmManager
 ---@return AlarmManager manager A new AlarmManager instance
 function AlarmManager.new()
     return setmetatable({
-        next_alarm = nil
+        next_alarm = nil,
+        is_synced = false
     }, AlarmManager)
 end
 
@@ -102,6 +107,8 @@ function AlarmManager:add(alarm)
     if not alarm or getmetatable(alarm) ~= Alarm then
         return "Invalid alarm object"
     end
+
+    alarm:calc_next_trigger()
 
     if self.next_alarm then
         local prev = self.next_alarm
@@ -125,10 +132,25 @@ function AlarmManager:delete_all()
     self.next_alarm = nil
 end
 
+function AlarmManager:sync()
+    if self.is_synced then return end
+    self.is_synced = true
+    local head = self.next_alarm
+    self:delete_all()
+    while head do
+        self:add(head.alarm)
+        head = head.next_alarm
+    end
+end
+
+function AlarmManager:desync()
+    self.is_synced = false
+end
+
 --- Create an operation that waits until the next alarm triggers.
 ---@return table operation Operation that resolves when the next alarm triggers
 function AlarmManager:next_alarm_op()
-    if not self.next_alarm then
+    if not self.next_alarm or not self.is_synced then
         -- No alarms, create an operation that will never complete
         return op.new_base_op(
             nil,
@@ -143,7 +165,6 @@ function AlarmManager:next_alarm_op()
         self.next_alarm = self.next_alarm.next_alarm
         -- Recalculate the next trigger time for repeating alarms
         if alarm.repeat_type ~= REPEAT_TYPES.NONE then
-            alarm.next_trigger = falarm.calculate_next(alarm.trigger_time, sc.realtime())
             self:add(alarm)
         end
 
