@@ -30,7 +30,7 @@ local system_subscription = "system"
 local net_subscription = "net"
 -- Runtime state
 local ws_clients = {} -- list of active WebSocket clients
-local sse_clients = {} -- list of active WebSocket clients
+local sse_clients = {} -- list of active SSE clients
 local stats_messages_cache = {}
 local log_messages_cache = {}
 
@@ -100,9 +100,11 @@ local function handle_websocket(ctx, ws)
 end
 
 local function handle_sse(ctx, stream, subscription)
+    stream.sse_type = subscription
     log.info("SSE: New client connected", subscription)
-    local stats_channel = channel.new()
-    table.insert(sse_clients, stats_channel)
+    local sse_channel = channel.new()
+    sse_channel.subscription = subscription
+    table.insert(sse_clients, sse_channel)
 
     -- Send latest cached messages to new SSE client
     local send_cached_message = function(cached_msg)
@@ -111,7 +113,7 @@ local function handle_sse(ctx, stream, subscription)
             stream:write_chunk(sse_msg, false)
         end)
         if not ok then
-            log.warn("SSE: Failed to send cached message:", err)
+            log.warn("SSE: Failed to send cached message:", err, " when writing to channel", subscription)
             return false
         end
         return true
@@ -134,26 +136,23 @@ local function handle_sse(ctx, stream, subscription)
     end
 
     while not ctx:err() do
-        local msg = stats_channel:get()
-
+        local msg = sse_channel:get()
         if msg and msg.subscription == subscription then
             local sse_msg = "data: " .. cjson.encode(msg) .. "\n\n"
             local ok, err = pcall(function()
                 stream:write_chunk(sse_msg, false)
             end)
             if not ok then
-                log.warn("SSE: Client disconnected or write error:", err)
+                log.warn("Subscribed ", subscription," SSE: Client disconnected or write error: ", err)
+                for i, client in ipairs(sse_clients) do
+                    if sse_channel == client then
+                        stream:shutdown()
+                        table.remove(sse_clients,i)
+                        break
+                    end
+                end
                 break
             end
-        end
-    end
-
-    -- Cleanup: remove the channel from sse_clients
-    for i, ch in ipairs(sse_clients) do
-        if ch == stats_channel then
-            table.remove(sse_clients, i)
-            log.info("SSE: Client disconnected", subscription)
-            break
         end
     end
 end
@@ -250,12 +249,9 @@ end
 
 local function publish_to_sse_clients(payload)
     for _, sse_channel in ipairs(sse_clients) do
-        local ok, err = pcall(function()
+        if sse_channel.subscription == payload.subscription then
+            -- Only send to clients subscribed to the same stream
             sse_channel:put(payload)
-        end)
-
-        if not ok then
-            log.warn("Failed to send to SSE client:", err)
         end
     end
 end
@@ -342,7 +338,6 @@ function ui_service:start(ctx, connection)
         fiber.spawn(function()
             fiber.yield()
             local ok, err = http_util.yieldable_pcall(self.onstream, self, stream)
-            stream:shutdown()
             if not ok then
                 self:onerror()(self, stream, "onstream", err)
             end
