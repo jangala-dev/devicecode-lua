@@ -17,7 +17,7 @@ local function test_service_states()
         --nothing
     end
 
-    local bus = bus_pkg.new({q_len=10, m_wild='#', s_wild='+', sep="/"})
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local bus_connection = bus:connect()
 
     local bg_ctx = context.background()
@@ -72,7 +72,7 @@ local function test_fiber_states()
         end)
     end
 
-    local bus = bus_pkg.new({q_len=10, m_wild='#', s_wild='+', sep="/"})
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local bus_connection = bus:connect()
 
     local bg_ctx = context.background()
@@ -149,7 +149,7 @@ local function test_blocked_shutdown()
         end)
     end
 
-    local bus = bus_pkg.new({q_len=10, m_wild='#', s_wild='+', sep="/"})
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local bus_connection = bus:connect()
 
     local bg_ctx = context.background()
@@ -187,7 +187,7 @@ local function test_timed_shutdown()
         end)
     end
 
-    local bus = bus_pkg.new({q_len=10, m_wild='#', s_wild='+', sep="/"})
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local bus_connection = bus:connect()
 
     local bg_ctx = context.background()
@@ -238,7 +238,7 @@ local function test_context_shutdown()
         end)
     end
 
-    local bus = bus_pkg.new({q_len=10, m_wild='#', s_wild='+', sep="/"})
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local bus_connection = bus:connect()
 
     local bg_ctx = context.background()

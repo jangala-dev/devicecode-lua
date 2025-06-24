@@ -100,7 +100,7 @@ local function test_handle_detection()
     modem_manager_instance.modem_detect_channel = detect_channel
     modem_manager_instance.modem_remove_channel = remove_channel
 
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
 
     -- emulate the connection of a modem
     fiber.spawn(function()
@@ -142,7 +142,7 @@ local function test_handle_detection_no_exist()
     modem_manager_instance.modem_detect_channel = detect_channel
     modem_manager_instance.modem_remove_channel = remove_channel
 
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
 
     -- emulate the connection of a modem
     fiber.spawn(function()
@@ -177,7 +177,7 @@ local function test_handle_removal()
     modem_manager_instance.modem_detect_channel = detect_channel
     modem_manager_instance.modem_remove_channel = remove_channel
 
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
 
     -- emulate the connection and disconnection of a modem
     fiber.spawn(function()
@@ -227,7 +227,7 @@ local function test_handle_removal_no_exist()
     modem_manager_instance.modem_detect_channel = detect_channel
     modem_manager_instance.modem_remove_channel = remove_channel
 
-    local bus = bus_pkg.new({ q_len = 10, m_wild = '#', s_wild = '+', sep = "/" })
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
 
     -- emulate the connection and disconnection of a modem
     fiber.spawn(function()
