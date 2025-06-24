@@ -670,12 +670,11 @@ local function modem_state_listener(ctx)
                 if err then
                     log.error("NET: Interface listen error:", err)
                 else
-                    if msg.payload then
-                        if msg.payload.prev_state ~= "connected" and msg.payload.curr_state == "connected" then
-                            -- Extract modem_id from topic gsm/modem/<modem_id>/state
-                            local modem_id = msg.topic[3]
-                            modem_on_connected_channel:put(modem_id)
-                        end
+                    local payload = msg.payload
+                    if payload and payload.prev_state ~= "connected" and payload.curr_state == "connected" then
+                        -- Extract modem_id from topic gsm/modem/<modem_id>/state
+                        local modem_id = msg.topic[3]
+                        modem_on_connected_channel:put(modem_id)
                     end
                 end
             end),
