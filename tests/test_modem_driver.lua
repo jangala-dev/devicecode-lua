@@ -140,7 +140,7 @@ local function test_state_monitor()
 
     local driver = modem_driver.new(context.with_cancel(ctx), 0)
 
-    local bus = bus_pkg.new({q_len=10, m_wild='#', s_wild='+', sep="/"})
+    local bus = bus_pkg.new({ q_length = 10, m_wild = '#', s_wild = '+', sep = "/" })
     local bus_connection = bus:connect()
     local bus_connection_2 = bus:connect()
 
