@@ -100,9 +100,11 @@ local function handle_websocket(ctx, ws)
 end
 
 local function handle_sse(ctx, stream, subscription)
+    stream.last_stats_sent = 0
     stream.sse_type = subscription
     log.info("SSE: New client connected", subscription)
     local sse_channel = channel.new()
+    sse_channel.closed = false
     sse_channel.subscription = subscription
     table.insert(sse_clients, sse_channel)
 
@@ -142,18 +144,18 @@ local function handle_sse(ctx, stream, subscription)
             local ok, err = pcall(function()
                 stream:write_chunk(sse_msg, false)
             end)
-            if not ok then
-                log.warn("Subscribed ", subscription," SSE: Client disconnected or write error: ", err)
-                for i, client in ipairs(sse_clients) do
-                    if sse_channel == client then
-                        stream:shutdown()
-                        table.remove(sse_clients,i)
-                        break
-                    end
+            -- Pre-emptively check if the stream is not stale
+            if stream.stats_sent == stream.last_stats_sent or not ok then
+                sse_channel.closed = true
+                if not ok then
+                    log.warn("Subscribed ", subscription," SSE: Client disconnected or write error: ", err)
+                else
+                    log.info("SSE: Stream is stale, closing connection for subscription: ", subscription)
                 end
-                break
+                stream:shutdown()
             end
         end
+        stream.last_stats_sent = stream.stats_sent
     end
 end
 
@@ -194,6 +196,7 @@ local function onstream(self, stream)
             local ctx = { err = function() return false end }
             local selected_stream = req_path == sse_stats and stats_stream or log_stream
             handle_sse(ctx, stream, selected_stream)
+            return
         end
     end
 
@@ -248,10 +251,12 @@ local function publish_to_ws_clients(payload)
 end
 
 local function publish_to_sse_clients(payload)
-    for _, sse_channel in ipairs(sse_clients) do
-        if sse_channel.subscription == payload.subscription then
-            -- Only send to clients subscribed to the same stream
-            sse_channel:put(payload)
+    for i = #sse_clients, 1, -1 do -- Iterate in reverse
+        if sse_clients[i].closed then
+            -- sse_clients[i]:get() -- Clear the channel
+            table.remove(sse_clients, i) -- Safely remove the sse_channel
+        elseif  sse_clients[i].subscription == payload.subscription then
+            sse_clients[i]:put(payload)
         end
     end
 end
