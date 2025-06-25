@@ -103,7 +103,7 @@ local function handle_sse(ctx, stream, subscription)
     stream.last_stats_sent = 0
     stream.sse_type = subscription
     log.info("SSE: New client connected", subscription)
-    local sse_channel = channel.new()
+    local sse_channel = channel.new(10)
     sse_channel.closed = false
     sse_channel.subscription = subscription
     table.insert(sse_clients, sse_channel)
@@ -153,9 +153,10 @@ local function handle_sse(ctx, stream, subscription)
                     log.info("SSE: Stream is stale, closing connection for subscription: ", subscription)
                 end
                 stream:shutdown()
+                break
             end
+            stream.last_stats_sent = stream.stats_sent
         end
-        stream.last_stats_sent = stream.stats_sent
     end
 end
 
@@ -253,10 +254,9 @@ end
 local function publish_to_sse_clients(payload)
     for i = #sse_clients, 1, -1 do -- Iterate in reverse
         if sse_clients[i].closed then
-            -- sse_clients[i]:get() -- Clear the channel
             table.remove(sse_clients, i) -- Safely remove the sse_channel
         elseif  sse_clients[i].subscription == payload.subscription then
-            sse_clients[i]:put(payload)
+            sse_clients[i]:put_op(payload):perform_alt(function () end)
         end
     end
 end
@@ -345,6 +345,11 @@ function ui_service:start(ctx, connection)
             local ok, err = http_util.yieldable_pcall(self.onstream, self, stream)
             if not ok then
                 self:onerror()(self, stream, "onstream", err)
+            end
+            -- Ensure the other streams are closed properly
+            if stream.state ~= "closed" then
+                print("Shutting down stream")
+                stream:shutdown()
             end
         end)
     end
