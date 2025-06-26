@@ -30,7 +30,7 @@ local system_subscription = "system"
 local net_subscription = "net"
 -- Runtime state
 local ws_clients = {} -- list of active WebSocket clients
-local sse_clients = {} -- list of active WebSocket clients
+local sse_clients = {} -- list of active SSE clients
 local stats_messages_cache = {}
 local log_messages_cache = {}
 
@@ -100,9 +100,13 @@ local function handle_websocket(ctx, ws)
 end
 
 local function handle_sse(ctx, stream, subscription)
+    stream.last_stats_sent = 0
+    stream.sse_type = subscription
     log.info("SSE: New client connected", subscription)
-    local stats_channel = channel.new()
-    table.insert(sse_clients, stats_channel)
+    local sse_channel = channel.new(10)
+    sse_channel.closed = false
+    sse_channel.subscription = subscription
+    table.insert(sse_clients, sse_channel)
 
     -- Send latest cached messages to new SSE client
     local send_cached_message = function(cached_msg)
@@ -111,7 +115,7 @@ local function handle_sse(ctx, stream, subscription)
             stream:write_chunk(sse_msg, false)
         end)
         if not ok then
-            log.warn("SSE: Failed to send cached message:", err)
+            log.warn("SSE: Failed to send cached message:", err, " when writing to channel", subscription)
             return false
         end
         return true
@@ -134,26 +138,24 @@ local function handle_sse(ctx, stream, subscription)
     end
 
     while not ctx:err() do
-        local msg = stats_channel:get()
-
+        local msg = sse_channel:get()
         if msg and msg.subscription == subscription then
             local sse_msg = "data: " .. cjson.encode(msg) .. "\n\n"
             local ok, err = pcall(function()
                 stream:write_chunk(sse_msg, false)
             end)
-            if not ok then
-                log.warn("SSE: Client disconnected or write error:", err)
+            -- Pre-emptively check if the stream is not stale
+            if stream.stats_sent == stream.last_stats_sent or not ok then
+                sse_channel.closed = true
+                if not ok then
+                    log.warn("Subscribed ", subscription," SSE: Client disconnected or write error: ", err)
+                else
+                    log.info("SSE: Stream is stale, closing connection for subscription: ", subscription)
+                end
+                stream:shutdown()
                 break
             end
-        end
-    end
-
-    -- Cleanup: remove the channel from sse_clients
-    for i, ch in ipairs(sse_clients) do
-        if ch == stats_channel then
-            table.remove(sse_clients, i)
-            log.info("SSE: Client disconnected", subscription)
-            break
+            stream.last_stats_sent = stream.stats_sent
         end
     end
 end
@@ -195,6 +197,7 @@ local function onstream(self, stream)
             local ctx = { err = function() return false end }
             local selected_stream = req_path == sse_stats and stats_stream or log_stream
             handle_sse(ctx, stream, selected_stream)
+            return
         end
     end
 
@@ -249,13 +252,11 @@ local function publish_to_ws_clients(payload)
 end
 
 local function publish_to_sse_clients(payload)
-    for _, sse_channel in ipairs(sse_clients) do
-        local ok, err = pcall(function()
-            sse_channel:put(payload)
-        end)
-
-        if not ok then
-            log.warn("Failed to send to SSE client:", err)
+    for i = #sse_clients, 1, -1 do -- Iterate in reverse
+        if sse_clients[i].closed then
+            table.remove(sse_clients, i) -- Safely remove the sse_channel
+        elseif  sse_clients[i].subscription == payload.subscription then
+            sse_clients[i]:put_op(payload):perform_alt(function () end)
         end
     end
 end
@@ -342,9 +343,13 @@ function ui_service:start(ctx, connection)
         fiber.spawn(function()
             fiber.yield()
             local ok, err = http_util.yieldable_pcall(self.onstream, self, stream)
-            stream:shutdown()
             if not ok then
                 self:onerror()(self, stream, "onstream", err)
+            end
+            -- Ensure the other streams are closed properly
+            if stream.state ~= "closed" then
+                print("Shutting down stream")
+                stream:shutdown()
             end
         end)
     end
