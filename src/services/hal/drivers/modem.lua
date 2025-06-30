@@ -409,11 +409,12 @@ function Driver:wait_for_sim()
         -- without a courtesy sleep
         if high_power then
             out, err = self.set_power_low(warm_swap_ctx)
-            if err then
+            if err and not (out and string.find(out, "NoEffect")) then
                 log.debug(string.format(
-                    "Setting low power failed: %s (%s)",
+                    "Setting low power failed: %s (%s) for %s",
                     out,
-                    err
+                    err,
+                    self.imei
                 ))
                 high_power = false
             else
@@ -423,11 +424,12 @@ function Driver:wait_for_sim()
         sleep.sleep(0.1)
         if not high_power then
             out, err = self.set_power_high(warm_swap_ctx)
-            if err then
+            if err and not (out and string.find(out, "NoEffect"))then
                 log.debug(string.format(
                     "Setting high power failed: %s (%s) for %s",
                     out,
-                    err, self.imei
+                    err,
+                    self.imei
                 ))
             else
                 high_power = true
@@ -441,7 +443,7 @@ function Driver:wait_for_sim()
     if not high_power then
         for _ = 1, 3 do
             out, err = self.set_power_high(context.with_timeout(context.background(), CMD_TIMEOUT))
-            if err then
+            if err and not (out and string.find(out, "NoEffect")) then
                 sleep.sleep(0.1)
             else
                 high_power = true
