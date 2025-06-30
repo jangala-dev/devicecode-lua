@@ -413,7 +413,7 @@ function Driver:wait_for_sim()
                 high_power = false
             end
         end
-        sleep.sleep(0.1)
+        sleep.sleep(1)
         if not high_power then
             out, err = self.set_power_high(warm_swap_ctx)
             if err then
@@ -426,7 +426,7 @@ function Driver:wait_for_sim()
                 high_power = true
             end
         end
-        sleep.sleep(0.1)
+        sleep.sleep(1)
     end
     -- we must attempt to put modem into high power state even if disconnected
     -- as we could otherwise get stuck in a failed state boot-loop
@@ -435,7 +435,7 @@ function Driver:wait_for_sim()
         for _ = 1, 3 do
             out, err = self.set_power_high(context.with_timeout(context.background(), CMD_TIMEOUT))
             if err then
-                sleep.sleep(0.1)
+                sleep.sleep(1)
             else
                 high_power = true
                 break
