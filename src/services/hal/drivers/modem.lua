@@ -5,6 +5,7 @@ local queue = require "fibers.queue"
 local context = require "fibers.context"
 local channel = require "fibers.channel"
 local sleep = require "fibers.sleep"
+local sc = require "fibers.utils.syscall"
 local service = require "service"
 local at = require "services.hal.drivers.modem.at"
 local mmcli = require "services.hal.drivers.modem.mmcli"
@@ -132,7 +133,6 @@ end
 function Driver:get_modem_info()
     local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.information(new_ctx, self.address)
-    cmd:setpgid(true)
     local out, err = cmd:combined_output()
     if err then return nil, wraperr.new(err) end
 
@@ -149,7 +149,6 @@ end
 function Driver:get_sim_info(sim_address)
     local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.sim_information(new_ctx, sim_address)
-    cmd:setpgid(true)
     local out, err = cmd:combined_output()
     if err then return nil, wraperr.new(err) end
 
@@ -161,7 +160,6 @@ end
 
 function Driver:get_signal()
     local cmd = mmcli.signal_get(context.with_timeout(self.ctx, CMD_TIMEOUT), self.address)
-    cmd:setpgid(true)
 
     local out, err = cmd:combined_output()
     if err then return nil, wraperr.new(err) end
@@ -263,28 +261,24 @@ end
 function Driver:disable()
     local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.disable(cmd_ctx, self.address)
-    cmd:setpgid(true)
     return cmd:run()
 end
 
 function Driver:enable()
     local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.enable(cmd_ctx, self.address)
-    cmd:setpgid(true)
     return cmd:run()
 end
 
 function Driver:reset()
     local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.reset(cmd_ctx, self.address)
-    cmd:setpgid(true)
     return cmd:run()
 end
 
 function Driver:connect(connection_string)
     local new_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.connect(new_ctx, self.address, connection_string)
-    cmd:setpgid(true)
     local out, err = cmd:combined_output()
     return out, err
 end
@@ -292,14 +286,13 @@ end
 function Driver:disconnect()
     local cmd_ctx = context.with_timeout(self.ctx, CMD_TIMEOUT)
     local cmd = mmcli.disconnect(cmd_ctx, self.address)
-    cmd:setpgid(true)
     return cmd:run()
 end
 
 function Driver:inhibit()
     if self.inhibit_cmd then return true end
     self.inhibit_cmd = mmcli.inhibit(self.address)
-    self.inhibit_cmd:setpgid(true)
+    self.inhibit_cmd:setprdeathsig(sc.SIGKILL)
     local err = self.inhibit_cmd:start()
     if err then
         log.trace(string.format("Modem inhibit failed, reason: %s", err))
@@ -324,7 +317,7 @@ function Driver:wait_for_sim()
         local connected = false
 
         local sim_monitor_cmd = self.monitor_slot_status()
-        sim_monitor_cmd:setpgid(false)
+        sim_monitor_cmd:setprdeathsig(sc.SIGKILL)
         local sim_stdout = assert(sim_monitor_cmd:stdout_pipe())
         local sim_cmd_err = sim_monitor_cmd:start()
         if sim_cmd_err then
@@ -479,7 +472,6 @@ end
 
 function Driver:set_signal_update_freq(seconds)
     local cmd = mmcli.signal_setup(self.ctx, self.address, seconds)
-    cmd:setpgid(true)
     local cmd_err = cmd:run()
     self.refresh_rate_channel:put(seconds)
     return (cmd_err == nil), cmd_err
@@ -502,7 +494,7 @@ function Driver:state_monitor(ctx)
 
     -- setup the modem monitor
     local state_monitor_cmd = mmcli.monitor_state(self.address)
-    state_monitor_cmd:setpgid(false)
+    state_monitor_cmd:setprdeathsig(sc.SIGKILL)
     local state_stdout = assert(state_monitor_cmd:stdout_pipe())
     local cmd_err = state_monitor_cmd:start()
     if cmd_err then
@@ -520,7 +512,7 @@ function Driver:state_monitor(ctx)
     end
 
     local sim_monitor_cmd = self.monitor_slot_status()
-    sim_monitor_cmd:setpgid(false)
+    sim_monitor_cmd:setprdeathsig(sc.SIGKILL)
     local sim_stdout = assert(sim_monitor_cmd:stdout_pipe())
     local sim_cmd_err = sim_monitor_cmd:start()
     if sim_cmd_err then
