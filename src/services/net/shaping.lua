@@ -1,4 +1,6 @@
 local log = require "services.log"
+local exec = require 'fibers.exec'
+local unpack = table.unpack or unpack -- luacheck: ignore -- Compatibility fallback
 local bit = rawget(_G, "bit") or require "bit32"
 local fqcmemorylimit = "1Mb"
 local fqcflows = 256
@@ -28,11 +30,13 @@ local function get_ipv4(iface)
     handle:close()
 
     local raw = string.match(out, "inet%s(%S+)")
+
     if not raw then
         return nil, "interface has no ipv4 address"
     end
 
     local ip, err = parse_ip(raw)
+
     if err then return nil, err end
 
     return ip
@@ -40,17 +44,21 @@ end
 
 local function ip_to_number(ip)
     local n = 0
+
     for i, v in ipairs(ip) do
         n = n + bit.lshift(v, 8 * (4 - i))
     end
+
     return n
 end
 
 local function number_to_ip(number)
     local ip = {}
+
     for i = 1, 4 do
         ip[i] = bit.band(bit.rshift(number, 8 * (4 - i)), bit.lshift(1, 8) - 1)
     end
+
     return ip
 end
 
@@ -60,6 +68,7 @@ local function usable_ips(ip)
     local mask = bit.lshift(1, 32 - ip.subnetmask) - 1 -- 0b10...0 - 1 --> 0b01...1
     local baseip = bit.band(number, bit.bnot(mask))
     local i = 0
+
     return function()
         i = i + 1
         if i < mask then return i, number_to_ip(baseip + i) end
@@ -67,62 +76,62 @@ local function usable_ips(ip)
 end
 
 local function setup_ifb(ifbname)
-    -- Check if already exists
-    local exists = os.execute(string.format("ip link show %s >/dev/null 2>&1", ifbname)) == 0
+    -- Check if IFB already exists
+    local err = exec.command("ip", "link", "show", ifbname):run()
+    local exists = not err
 
     if exists then
         log.info("IFB already exists:", ifbname)
     else
-        -- Try to create IFB
-        local cmd_add = string.format("ip link add name %s type ifb", ifbname)
-        local cmd_status = os.execute(cmd_add)
-        if cmd_status ~= 0 then
-            return "Failed to create IFB" .. cmd_add
+        err = exec.command("ip", "link", "add", "name", ifbname, "type", "ifb"):run()
+
+        if err then
+            return "Failed to create IFB: " .. tostring(err)
         end
     end
 
-    -- Ensure IFB is up
-    local cmd_up = string.format("ip link set dev %s up", ifbname)
-    local cmd_status = os.execute(cmd_up)
-    if cmd_status ~= 0 then
-        local err_msg = "Failed to bring IFB up: " .. cmd_up
-        return err_msg
+    err = exec.command("ip", "link", "set", "dev", ifbname, "up"):run()
+
+    if err then
+        return "Failed to bring IFB up: " .. tostring(err)
     end
 
     return nil
 end
 
 local function clear(iface)
-    local cmd_root = string.format("tc qdisc del dev %s root", iface)
-    local cmd_status = os.execute(cmd_root)
-    if cmd_status ~= 0 then
-        log.warn("Failed to delete root qdisc:", cmd_root)
+    local err = exec.command("tc", "qdisc", "del", "dev", iface, "root"):run()
+
+    if err then
+        log.warn("Failed to delete root qdisc:", "tc qdisc del dev " .. iface .. " root")
     end
 
-    local cmd_ingress = string.format("tc qdisc del dev %s ingress", iface)
-    cmd_status = os.execute(cmd_ingress)
-    if cmd_status ~= 0 then
-        log.warn("Failed to delete ingress qdisc:", cmd_ingress)
+    err = exec.command("tc", "qdisc", "del", "dev", iface, "ingress"):run()
+
+    if err then
+        log.warn("Failed to delete ingress qdisc:", "tc qdisc del dev " .. iface .. " ingress")
     end
 
     return nil
 end
 
 local function ingress_mirror(iface, ifbiface)
-    local cmd_qdisc = string.format("tc qdisc add dev %s handle ffff: ingress", iface)
-    local cmd_status = os.execute(cmd_qdisc)
-    if cmd_status ~= 0 then
-        log.error("Failed to add ingress qdisc:", cmd_qdisc)
+    local err = exec.command("tc", "qdisc", "add", "dev", iface, "handle", "ffff:", "ingress"):run()
+
+    if err then
+        log.error("Failed to add ingress qdisc:", "tc qdisc add dev " .. iface .. " handle ffff: ingress")
         return "Failed to add ingress qdisc"
     end
 
-    local cmd_filter = string.format(
-        "tc filter add dev %s parent ffff: protocol ip u32 match u32 0 0 action mirred egress redirect dev %s",
-        iface, ifbiface
-    )
-    cmd_status = os.execute(cmd_filter)
-    if cmd_status ~= 0 then
-        log.error("Failed to add mirred redirect filter:", cmd_filter)
+    err = exec.command(
+        "tc", "filter", "add", "dev", iface, "parent", "ffff:", "protocol", "ip", "u32",
+        "match", "u32", "0", "0",
+        "action", "mirred", "egress", "redirect", "dev", ifbiface
+    ):run()
+
+    if err then
+        log.error("Failed to add mirred redirect filter:",
+        "tc filter add dev " .. iface .. " ... redirect dev " .. ifbiface)
         return "Failed to add mirred redirect filter"
     end
 
@@ -135,6 +144,7 @@ local function host_shape(iface, ipnet, hostsdir, rate)
     end
 
     local octet
+
     if hostsdir == "dst" then
         octet = "16"
     elseif hostsdir == "src" then
@@ -143,25 +153,21 @@ local function host_shape(iface, ipnet, hostsdir, rate)
         return "error: invalid dir"
     end
 
-    local function run(cmd)
-        local status = os.execute(cmd)
-        if status ~= 0 then error("tc command failed: " .. cmd) end
+    local function run(...)
+        local err = exec.command(...):run()
+        if err then error("tc command failed: " .. table.concat({ ... }, " ")) end
     end
 
     -- 1. Root qdisc
-    run(string.format("tc qdisc add dev %s root handle 1: htb", iface))
+    run("tc", "qdisc", "add", "dev", iface, "root", "handle", "1:", "htb")
 
     -- 2. 4th octet hasher
-    run(string.format("tc filter add dev %s parent 1:0 prio 1 protocol ip u32", iface))
-    run(string.format("tc filter add dev %s parent 1:0 prio 1 handle 100: protocol ip u32 divisor 256", iface))
-    run(string.format(
-        "tc filter add dev %s protocol ip parent 1:0 prio 1 u32 ht 800:: " ..
-        "match ip %s %s/24 hashkey mask 0x000000ff at %s link 100:",
-        iface,
-        hostsdir,
-        table.concat(ipnet, "."),
-        octet
-    ))
+    run("tc", "filter", "add", "dev", iface, "parent", "1:0", "prio", "1", "protocol", "ip", "u32")
+    run("tc", "filter", "add", "dev", iface, "parent", "1:0", "prio", "1", "handle", "100:", "protocol", "ip", "u32",
+        "divisor", "256")
+    run("tc", "filter", "add", "dev", iface, "protocol", "ip", "parent", "1:0", "prio", "1", "u32", "ht", "800::",
+        "match", "ip", hostsdir, table.concat(ipnet, ".") .. "/24",
+        "hashkey", "mask", "0x000000ff", "at", octet, "link", "100:")
 
     -- 3. Per-host shaping
     for i, ip in usable_ips(ipnet) do
@@ -170,20 +176,14 @@ local function host_shape(iface, ipnet, hostsdir, rate)
         local ipstr = table.concat(ip, ".")
         local ip4 = ip[4]
 
-        run(string.format(
-            "tc class add dev %s parent 1: classid %s htb rate %s ceil %s burst %s",
-            iface, classid, rate.rate, rate.ceil, rate.burst
-        ))
+        run("tc", "class", "add", "dev", iface, "parent", "1:", "classid", classid,
+            "htb", "rate", rate.rate, "ceil", rate.ceil, "burst", rate.burst)
 
-        run(string.format(
-            "tc qdisc add dev %s parent %s handle %s fq_codel memory_limit %s flows %d",
-            iface, classid, fq_handle, fqcmemorylimit, fqcflows
-        ))
+        run("tc", "qdisc", "add", "dev", iface, "parent", classid, "handle", fq_handle,
+            "fq_codel", "memory_limit", fqcmemorylimit, "flows", tostring(fqcflows))
 
-        run(string.format(
-            "tc filter add dev %s parent 1:0 protocol ip prio 1 u32 ht 100:%x: match ip %s %s/32 flowid %s",
-            iface, ip4, hostsdir, ipstr, classid
-        ))
+        run("tc", "filter", "add", "dev", iface, "parent", "1:0", "protocol", "ip", "prio", "1", "u32",
+            "ht", "100:" .. string.format("%x", ip4) .. ":", "match", "ip", hostsdir, ipstr .. "/32", "flowid", classid)
     end
 
     return nil
@@ -194,10 +194,10 @@ local function shape_wan(net_cfg, iface)
     log.info("Shaping wan started", wan)
     local wanifb = wan .. ifbsuffix
 
-    local err = setup_ifb(wanifb)
+    local err_wanifb = setup_ifb(wanifb)
 
-    if err then
-        log.error(err)
+    if err_wanifb then
+        log.error(err_wanifb)
     end
 
     clear(iface)
@@ -208,27 +208,37 @@ local function shape_wan(net_cfg, iface)
 
     -- Downlink (ingress from WAN, redirected to IFB)
     local ingress = shaping.ingress
+
     if ingress and ingress.qdisc == "cake" then
-        local cmd_down = string.format("tc qdisc replace dev %s root cake dual-dsthost nat", wanifb)
+        local args = { "tc", "qdisc", "replace", "dev", wanifb, "root", "cake", "dual-dsthost", "nat" }
+
         if ingress.bandwidth then
-            cmd_down = cmd_down .. " bandwidth " .. ingress.bandwidth
+            table.insert(args, "bandwidth")
+            table.insert(args, ingress.bandwidth)
         end
-        local status = os.execute(cmd_down)
-        if status ~= 0 then
-            log.warn("Failed to set downlink shaping:", cmd_down)
+
+        local err = exec.command(unpack(args)):run()
+
+        if err then
+            log.warn("Failed to set downlink shaping:", table.concat(args, " "))
         end
     end
 
     -- Uplink (egress directly from WAN)
     local egress = shaping.egress
+
     if egress and egress.qdisc == "cake" then
-        local cmd_up = string.format("tc qdisc replace dev %s root cake dual-srchost nat", wan)
+        local args = { "tc", "qdisc", "replace", "dev", wan, "root", "cake", "dual-srchost", "nat" }
+
         if egress.bandwidth then
-            cmd_up = cmd_up .. " bandwidth " .. egress.bandwidth
+            table.insert(args, "bandwidth")
+            table.insert(args, egress.bandwidth)
         end
-        local status = os.execute(cmd_up)
-        if status ~= 0 then
-            log.warn("Failed to set uplink shaping:", cmd_up)
+
+        local err = exec.command(unpack(args)):run()
+
+        if err then
+            log.warn("Failed to set uplink shaping:", table.concat(args, " "))
         end
     end
 
@@ -261,10 +271,12 @@ local function shape_lan(net_cfg)
 
     local function apply_direction(dir, dev, expected_hash)
         local dir_cfg = shaping[dir]
+
         if not dir_cfg then return end
 
         local filter = dir_cfg.filters and dir_cfg.filters[1]
         local class = dir_cfg.class_template and dir_cfg.class_template.classes[1]
+
         if not filter or not class then return end
 
         if filter.kind ~= "u32" or filter.hash_key ~= expected_hash then return end
