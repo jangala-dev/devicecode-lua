@@ -8,6 +8,7 @@ local op = require "fibers.op"
 local sc = require "fibers.utils.syscall"
 local cjson = require "cjson.safe"
 local log = require "services.log"
+local shaping = require "services.net.shaping"
 local uci = require "uci"
 local speedtest = require "services.net.speedtest"
 local new_msg = require "bus".new_msg
@@ -78,6 +79,7 @@ local interface_channel = channel.new()        -- For gsm/interface mappings
 local speedtest_result_channel = channel.new() -- For speedtest requests
 local wan_status_channel = channel.new()       -- For wan status supdates
 local modem_on_connected_channel = channel.new()       -- For wan status supdates
+local shaping_channel = channel.new() -- For shaping requests
 
 -- Queue definitions
 local speedtest_queue = queue.new()      -- Unbounded queue for holding speedtest requests
@@ -489,6 +491,11 @@ local function uci_manager(ctx)
         end
         print("That took:", sc.monotime() - start)
         config_applier_queue:put({ "network", "firewall", "dhcp", "mwan3" })
+
+        for _, net_cfg in ipairs(cfg.network or {}) do
+            shaping_channel:put(net_cfg)
+        end
+
         -- If this is the initial config, signal config applied
         config_signal:signal()
     end
@@ -685,6 +692,16 @@ local function modem_state_listener(ctx)
     sub:unsubscribe()
 end
 
+local function shaping_worker(ctx)
+    while not ctx:err() do
+        local net_cfg = shaping_channel:get()
+        if net_cfg.shaping and net_cfg.interfaces then
+            log.info("NET: Applying shaping (delayed) for:", net_cfg.id)
+            shaping.apply(net_cfg)
+        end
+    end
+end
+
 function net_service:start(ctx, conn)
     log.trace("Starting NET Service")
     self.conn = conn
@@ -697,6 +714,7 @@ function net_service:start(ctx, conn)
     fiber.spawn(function() speedtest_worker(ctx) end)
     fiber.spawn(function() config_applier(ctx) end)
     fiber.spawn(function() modem_state_listener(ctx) end)
+    fiber.spawn(function() shaping_worker(ctx) end)
 end
 
 return net_service

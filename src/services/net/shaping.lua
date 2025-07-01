@@ -25,11 +25,7 @@ local function get_ipv4(iface)
     end
 
     local out = handle:read("*a")
-    local ok, _, code = handle:close()
-
-    if not ok or code ~= 0 then
-        return nil, "failed to get IP: " .. cmd
-    end
+    handle:close()
 
     local raw = string.match(out, "inet%s(%S+)")
     if not raw then
@@ -71,25 +67,25 @@ local function usable_ips(ip)
 end
 
 local function setup_ifb(ifbname)
-    local cmd_add = string.format("ip link add name %s type ifb", ifbname)
-    local cmd_status = os.execute(cmd_add)
+    -- Check if already exists
+    local exists = os.execute(string.format("ip link show %s >/dev/null 2>&1", ifbname)) == 0
 
-    if cmd_status ~= 0 then
-        -- Special case: ignore if already exists
-        local check = io.popen(string.format("ip link show %s 2>&1", ifbname)):read("*a")
-        if not check:match("^[0-9]+: " .. ifbname) then
-            local err_msg = "Failed to create IFB: " .. cmd_add .. " " .. check
-            log.error(err_msg)
-            return err_msg
+    if exists then
+        log.info("IFB already exists:", ifbname)
+    else
+        -- Try to create IFB
+        local cmd_add = string.format("ip link add name %s type ifb", ifbname)
+        local cmd_status = os.execute(cmd_add)
+        if cmd_status ~= 0 then
+            return "Failed to create IFB" .. cmd_add
         end
     end
 
+    -- Ensure IFB is up
     local cmd_up = string.format("ip link set dev %s up", ifbname)
-    cmd_status = os.execute(cmd_up)
-
+    local cmd_status = os.execute(cmd_up)
     if cmd_status ~= 0 then
         local err_msg = "Failed to bring IFB up: " .. cmd_up
-        log.error(err_msg)
         return err_msg
     end
 
@@ -193,78 +189,114 @@ local function host_shape(iface, ipnet, hostsdir, rate)
     return nil
 end
 
-local function shape_wan(shaping)
-    local wan = shaping.iface
+local function shape_wan(net_cfg, iface)
+    local wan = iface
     log.info("Shaping wan started", wan)
-
     local wanifb = wan .. ifbsuffix
-    setup_ifb(wanifb)
-    clear(wan)
+
+    local err = setup_ifb(wanifb)
+
+    if err then
+        log.error(err)
+    end
+
+    clear(iface)
     clear(wanifb)
-    ingress_mirror(wan, wanifb)
+    ingress_mirror(iface, wanifb)
 
-    -- Downlink (rx via IFB)
-    local cmd_down = string.format("tc qdisc replace dev %s root cake dual-dsthost nat", wanifb)
-    if shaping.rx and shaping.rx.rate then
-        cmd_down = cmd_down .. " bandwidth " .. shaping.rx.rate
-    end
-    local status = os.execute(cmd_down)
-    if status ~= 0 then
-        log.warn("Failed to set downlink shaping:", cmd_down)
+    local shaping = net_cfg.shaping or {}
+
+    -- Downlink (ingress from WAN, redirected to IFB)
+    local ingress = shaping.ingress
+    if ingress and ingress.qdisc == "cake" then
+        local cmd_down = string.format("tc qdisc replace dev %s root cake dual-dsthost nat", wanifb)
+        if ingress.bandwidth then
+            cmd_down = cmd_down .. " bandwidth " .. ingress.bandwidth
+        end
+        local status = os.execute(cmd_down)
+        if status ~= 0 then
+            log.warn("Failed to set downlink shaping:", cmd_down)
+        end
     end
 
-    -- Uplink (tx direct)
-    local cmd_up = string.format("tc qdisc replace dev %s root cake dual-srchost nat", wan)
-    if shaping.tx and shaping.tx.rate then
-        cmd_up = cmd_up .. " bandwidth " .. shaping.tx.rate
-    end
-    status = os.execute(cmd_up)
-    if status ~= 0 then
-        log.warn("Failed to set uplink shaping:", cmd_up)
+    -- Uplink (egress directly from WAN)
+    local egress = shaping.egress
+    if egress and egress.qdisc == "cake" then
+        local cmd_up = string.format("tc qdisc replace dev %s root cake dual-srchost nat", wan)
+        if egress.bandwidth then
+            cmd_up = cmd_up .. " bandwidth " .. egress.bandwidth
+        end
+        local status = os.execute(cmd_up)
+        if status ~= 0 then
+            log.warn("Failed to set uplink shaping:", cmd_up)
+        end
     end
 
     log.info("Shaping wan completed", wan)
 end
 
-local function shape_lan(shaping)
-    local lan = "br-" .. shaping.network_name
+local function shape_lan(net_cfg)
+    local lan = "br-" .. net_cfg.id
     log.info("Shaping lan started", lan)
+    local lanifb = lan .. ifbsuffix
 
-    if not shaping.perhost then
-        log.warn("Shaping lan: no per-host shaping specified")
+    local err_lanifb = setup_ifb(lanifb)
+
+    if err_lanifb then
+        log.error(err_lanifb)
     end
 
-    local lanifb = lan .. ifbsuffix
-    setup_ifb(lanifb)
     clear(lan)
     clear(lanifb)
     ingress_mirror(lan, lanifb)
 
-    local ip, err = get_ipv4(lan)
-    if not ip then
-        log.error("Failed to get LAN IP for shaping:", err)
+    local ip, err_ip = get_ipv4(lan)
+
+    if err_ip then
+        log.error("Failed to get LAN IP for shaping:", err_ip)
         return
     end
 
-    if shaping.perhost and shaping.perhost.tx then
-        host_shape(lan, ip, "dst", shaping.perhost.tx)
+    local shaping = net_cfg.shaping or {}
+
+    local function apply_direction(dir, dev, expected_hash)
+        local dir_cfg = shaping[dir]
+        if not dir_cfg then return end
+
+        local filter = dir_cfg.filters and dir_cfg.filters[1]
+        local class = dir_cfg.class_template and dir_cfg.class_template.classes[1]
+        if not filter or not class then return end
+
+        if filter.kind ~= "u32" or filter.hash_key ~= expected_hash then return end
+
+        local hostsdir = expected_hash == "src_ip" and "src" or "dst"
+        host_shape(dev, ip, hostsdir, class.config)
     end
 
-    if shaping.perhost and shaping.perhost.rx then
-        host_shape(lanifb, ip, "src", shaping.perhost.rx)
-    end
+    apply_direction("egress", lan, "dest_ip")
+    apply_direction("ingress", lanifb, "src_ip")
 
     log.info("Shaping lan completed", lan)
 end
 
-local function apply(shapings)
-    for _, j in ipairs(shapings) do
-        if j.network_type == "lan" then
-            log.info("Shaping lan", j.network_name)
-            shape_lan(j)
-        elseif j.network_type == "wan" then
-            log.info("Shaping wan", j.network_name)
-            shape_wan(j)
+local function apply(net_cfg)
+    local net_type = net_cfg.type
+    local interfaces = net_cfg.interfaces
+
+    if not interfaces or #interfaces == 0 then
+        log.warn("No interfaces to shape for network:", net_cfg.id)
+        return
+    end
+
+    for _, iface in ipairs(interfaces) do
+        if net_type == "local" then
+            log.info("Shaping LAN:", net_cfg.id, iface)
+            shape_lan(net_cfg)
+        elseif net_type == "backhaul" then
+            log.info("Shaping WAN:", net_cfg.id, iface)
+            shape_wan(net_cfg, iface)
+        else
+            log.warn("Unknown network type:", net_type)
         end
     end
 end
