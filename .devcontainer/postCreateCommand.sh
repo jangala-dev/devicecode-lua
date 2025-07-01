@@ -10,7 +10,7 @@ sudo apt install -y lua5.1 liblua5.1-dev luarocks lua-dkjson
 
 cd /tmp
 sudo rm -rf LuaJIT
-git clone -b v2.1.ROLLING https://github.com/LuaJIT/LuaJIT.git
+git clone -b v2.1 https://github.com/LuaJIT/LuaJIT.git
 cd LuaJIT
 make -j$(nproc)
 sudo make install
