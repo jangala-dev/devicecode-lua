@@ -594,6 +594,7 @@ local function wan_monitor(ctx)
 
     -- now we start a continuous loop to monitor for changes in interface state
     local cmd = exec.command("ubus", "listen", "hotplug.mwan3")
+    cmd:setprdeathsig(sc.SIGKILL) -- Ensure the process is killed on parent death
     local stdout = cmd:stdout_pipe()
     if not stdout then
         log.error("NET: could not create stdout pipe for ubus listen")
