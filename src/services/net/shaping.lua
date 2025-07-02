@@ -19,25 +19,21 @@ local function parse_ip(s)
 end
 
 local function get_ipv4(iface)
-    local cmd = string.format("ip addr show dev %s", iface)
-    local handle = io.popen(cmd .. " 2>&1")
+    local output, err = exec.command("ip", "addr", "show", "dev", iface):output()
 
-    if not handle then
-        return nil, "failed to run command: " .. cmd
+    if err then
+        return nil, "failed to run command: ip addr show dev " .. iface
     end
 
-    local out = handle:read("*a")
-    handle:close()
-
-    local raw = string.match(out, "inet%s(%S+)")
-
+    local raw = string.match(output, "inet%s+(%S+)")
     if not raw then
         return nil, "interface has no ipv4 address"
     end
 
-    local ip, err = parse_ip(raw)
-
-    if err then return nil, err end
+    local ip, parse_err = parse_ip(raw)
+    if parse_err then
+        return nil, parse_err
+    end
 
     return ip
 end
