@@ -222,6 +222,7 @@ local function merge_config(base_config, override_vals)
 
     return base_config
 end
+
 ---use config to build cache and processing pipelines
 ---@param config table
 function metrics_service:_handle_config(config)
@@ -323,7 +324,8 @@ function metrics_service:_handle_config(config)
             if not short_circuit then
                 table.insert(metric_msg.topic, 1, protocol)
                 local cache_topic = endpoint_rename or metric_msg.topic
-                self.publish_cache:set(cache_topic, val)
+                local item = {value = val, time = sc.realtime()*1000}
+                self.publish_cache:set(cache_topic, item)
             end
         end)
 
