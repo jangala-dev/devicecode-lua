@@ -6,7 +6,15 @@ sudo apt install -y apt-utils unzip curl wget git build-essential libreadline-de
 
 # install core lua packages
 
-sudo apt install -y lua5.1 liblua5.1-dev luajit luarocks lua-dkjson
+sudo apt install -y lua5.1 liblua5.1-dev luarocks lua-dkjson
+
+cd /tmp
+sudo rm -rf LuaJIT
+git clone -b v2.1 https://github.com/LuaJIT/LuaJIT.git
+cd LuaJIT
+make -j$(nproc)
+sudo make install
+sudo ldconfig
 
 # install luarocks packages
 
