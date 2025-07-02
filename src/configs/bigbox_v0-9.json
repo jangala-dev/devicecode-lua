@@ -470,11 +470,11 @@
     "cloud_url": "$CLOUD_URL",
     "publish_cache": {
         "enabled": true,
-        "period": 10
+        "period": 60
     },
     "collections": {
         "gsm/modem/primary/band": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -488,7 +488,7 @@
           ]
         },
         "gsm/modem/primary/access-tech": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -502,7 +502,7 @@
           ]
         },
         "gsm/modem/primary/access-family": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -516,7 +516,7 @@
           ]
         },
         "gsm/modem/primary/imei": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -530,7 +530,7 @@
           ]
         },
         "gsm/modem/primary/sim": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -544,7 +544,7 @@
           ]
         },
         "gsm/modem/primary/signal/rssi": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -554,15 +554,12 @@
             {
               "type": "DiffTrigger",
               "diff_method": "percent",
-              "threshold": 10
-            },
-            {
-              "type": "DeltaValue"
+              "threshold": 5
             }
           ]
         },
         "gsm/modem/primary/signal/rsrp": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -572,15 +569,12 @@
             {
               "type": "DiffTrigger",
               "diff_method": "percent",
-              "threshold": 10
-            },
-            {
-              "type": "DeltaValue"
+              "threshold": 5
             }
           ]
         },
         "gsm/modem/primary/signal/rsrq": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -590,15 +584,12 @@
             {
               "type": "DiffTrigger",
               "diff_method": "percent",
-              "threshold": 10
-            },
-            {
-              "type": "DeltaValue"
+              "threshold": 5
             }
           ]
         },
         "gsm/modem/primary/operator": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -612,7 +603,7 @@
           ]
         },
         "gsm/modem/primary/iccid": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -626,7 +617,7 @@
           ]
         },
         "gsm/modem/primary/state": {
-          "protocol": "log",
+          "protocol": "http",
           "field": "curr_state",
           "rename": [
             "modem",
@@ -641,7 +632,7 @@
           ]
         },
         "gsm/modem/primary/interface": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "modem",
             "1",
@@ -654,24 +645,196 @@
             }
           ]
         },
+        "gsm/modem/secondary/band": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "band"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/secondary/access-tech": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "access_tech"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/secondary/access-family": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "access_fam"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/secondary/imei": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "imei"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/secondary/sim": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "sim"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/secondary/signal/rssi": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "rssi"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5
+            }
+          ]
+        },
+        "gsm/modem/secondary/signal/rsrp": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "rsrp"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5
+            }
+          ]
+        },
+        "gsm/modem/secondary/signal/rsrq": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "rsrq"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5
+            }
+          ]
+        },
+        "gsm/modem/secondary/operator": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "operator"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/secondary/iccid": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "iccid"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/secondary/state": {
+          "protocol": "http",
+          "field": "curr_state",
+          "rename": [
+            "modem",
+            "2",
+            "state"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/secondary/interface": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "wann_type"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
         "system/info/boot_time": {
-          "protocol": "log",
+          "protocol": "http",
           "rename": [
             "system",
             "boot_time"
           ],
           "process": []
         },
-        "system/firmware/version": {
-          "protocol": "log",
+        "system/info/firmware/version": {
+          "protocol": "http",
           "rename": [
             "system",
             "fw_id"
           ],
           "process": []
         },
-        "system/cpu/overall_utilisation": {
-          "protocol": "log",
+        "system/info/cpu/overall_utilisation": {
+          "protocol": "http",
           "rename": [
             "system",
             "cpu_util"
@@ -680,15 +843,12 @@
             {
               "type": "DiffTrigger",
               "diff_method": "percent",
-              "threshold": 10
-            },
-            {
-              "type": "DeltaValue"
+              "threshold": 5
             }
           ]
         },
-        "system/mem/used": {
-          "protocol": "log",
+        "system/info/mem/used": {
+          "protocol": "http",
           "rename": [
             "system",
             "mem_util"
@@ -697,17 +857,28 @@
             {
               "type": "DiffTrigger",
               "diff_method": "percent",
-              "threshold": 10
-            },
+              "threshold": 5
+            }
+          ]
+        },
+        "system/info/temperature": {
+          "protocol": "http",
+          "rename":[
+            "system",
+            "temp"
+          ],
+          "process": [
             {
-              "type": "DeltaValue"
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 2
             }
           ]
         }
     }
   },
   "system": {
-    "report_period": 10,
+    "report_period": 60,
     "usb3_enabled": false,
     "alarms": [
       {
