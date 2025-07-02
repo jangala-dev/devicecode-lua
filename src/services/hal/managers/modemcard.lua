@@ -3,6 +3,7 @@ local channel = require "fibers.channel"
 local sleep = require "fibers.sleep"
 local context = require "fibers.context"
 local op = require "fibers.op"
+local sc = require "fibers.utils.syscall"
 local utils = require "services.hal.utils"
 local modem_driver = require "services.hal.drivers.modem"
 local mmcli = require "services.hal.drivers.modem.mmcli"
@@ -33,7 +34,7 @@ function ModemManagement:_detector(ctx)
     while not ctx:err() do
         -- First, we start the modem detector
         local cmd = mmcli.monitor_modems()
-        cmd:setpgid(false)
+        cmd:setprdeathsig(sc.SIGKILL)
         local stdout = assert(cmd:stdout_pipe())
         local err = cmd:start()
 
