@@ -43,14 +43,24 @@ local function validate_http_config(config)
         return false, "No cloud config set"
     elseif not config.url then
         return false, "No cloud url set"
-    elseif not config.mainflux_key or not config.mainflux_channels then
-        return false, "No mainflux config set"
+    elseif not config.thing_key or not config.channels then
+        return false, "No cloud config set"
     end
     return true, nil
 end
 
 function metrics_service:_http_publish(data)
-    local senml_list = senml.encode_r("", data)
+    local senml_list, err = senml.encode_r("", data)
+    if err then
+        log.error(string.format(
+            "%s - %s: %s",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name"),
+            err
+        ))
+        return
+    end
+    if #senml_list == 0 then return end
     local body = json.encode(senml_list)
     local valid_config, config_err = validate_http_config(self.cloud_config)
     if not valid_config then
@@ -63,8 +73,8 @@ function metrics_service:_http_publish(data)
         return
     end
     local channel_id
-    for _, channel in ipairs(self.cloud_config.mainflux_channels) do
-        if string.find(channel.name, "data") then
+    for _, channel in ipairs(self.cloud_config.channels) do
+        if channel.metadata and channel.metadata.channel_type == "data" then
             channel_id = channel.id
             break
         end
@@ -83,11 +93,11 @@ function metrics_service:_http_publish(data)
     )
     local req = request.new_from_uri(uri)
     req.headers:upsert(":method", "POST")
-    req.headers:upsert("authorization", "Thing " .. self.cloud_config.mainflux_key)
-    req.headers:upsert("content-type", "senml+json")
+    req.headers:upsert("authorization", "Thing " .. self.cloud_config.thing_key)
+    req.headers:upsert("content-type", "application/senml+json")
     req:set_body(body)
     req.headers:delete("expect")
-    local response_headers, _ = req:go()
+    local response_headers, _ = req:go(10)
 
     if not response_headers then
         log.error(string.format(
@@ -99,7 +109,7 @@ function metrics_service:_http_publish(data)
         return
     elseif response_headers:get(":status") ~= "202" then
         local header_msgs = ""
-        for k, v in pairs(response_headers:each()) do
+        for k, v in response_headers:each() do
             header_msgs = string.format("%s\n\t%s: %s", header_msgs, k, v)
         end
 
@@ -176,6 +186,26 @@ function metrics_service:_build_metric_pipeline(endpoint, process_config)
     end
 
     return process, nil
+end
+
+local function standardise_config(config)
+    local standard_config = {}
+
+    standard_config.thing_id = config.mainflux_id or config.thing_id
+    standard_config.thing_key = config.mainflux_key or config.thing_key
+    standard_config.channels = config.mainflux_channels or config.channels
+    for _, channel in ipairs(standard_config.channels) do
+        channel.metadata = channel.metadata or {}
+        if type(channel.metadata) == "userdata" then channel.metadata = {} end
+        if string.find(channel.name, "data") then
+            channel.metadata.channel_type = "data"
+        elseif string.find(channel.name, "control") then
+            channel.metadata.channel_type = "events"
+        end
+    end
+
+    standard_config.content = config.content
+    return standard_config
 end
 
 local function merge_config(base_config, override_vals)
@@ -327,7 +357,8 @@ function metrics_service:_main(ctx)
                 self:_handle_config(config_msg.payload)
             end),
             cloud_config_sub:next_msg_op():wrap(function(config_msg)
-                self.cloud_config = merge_config(self.cloud_config, config_msg.payload)
+                local config = standardise_config(config_msg.payload)
+                self.cloud_config = merge_config(self.cloud_config, config)
             end),
             self.publish_cache:get_op():wrap(function(data)
                 self:_publish_all(data)
