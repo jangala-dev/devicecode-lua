@@ -109,7 +109,7 @@ function metrics_service:_http_publish(data)
         return
     elseif response_headers:get(":status") ~= "202" then
         local header_msgs = ""
-        for k, v in pairs(response_headers:each()) do
+        for k, v in response_headers:each() do
             header_msgs = string.format("%s\n\t%s: %s", header_msgs, k, v)
         end
 
