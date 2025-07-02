@@ -50,7 +50,17 @@ local function validate_http_config(config)
 end
 
 function metrics_service:_http_publish(data)
-    local senml_list = senml.encode_r("", data)
+    local senml_list, err = senml.encode_r("", data)
+    if err then
+        log.error(string.format(
+            "%s - %s: %s",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name"),
+            err
+        ))
+        return
+    end
+    if #senml_list == 0 then return end
     local body = json.encode(senml_list)
     local valid_config, config_err = validate_http_config(self.cloud_config)
     if not valid_config then
@@ -84,10 +94,10 @@ function metrics_service:_http_publish(data)
     local req = request.new_from_uri(uri)
     req.headers:upsert(":method", "POST")
     req.headers:upsert("authorization", "Thing " .. self.cloud_config.thing_key)
-    req.headers:upsert("content-type", "senml+json")
+    req.headers:upsert("content-type", "application/senml+json")
     req:set_body(body)
     req.headers:delete("expect")
-    local response_headers, _ = req:go()
+    local response_headers, _ = req:go(10)
 
     if not response_headers then
         log.error(string.format(
@@ -186,6 +196,7 @@ local function standardise_config(config)
     standard_config.channels = config.mainflux_channels or config.channels
     for _, channel in ipairs(standard_config.channels) do
         channel.metadata = channel.metadata or {}
+        if type(channel.metadata) == "userdata" then channel.metadata = {} end
         if string.find(channel.name, "data") then
             channel.metadata.channel_type = "data"
         elseif string.find(channel.name, "control") then
