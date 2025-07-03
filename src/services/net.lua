@@ -8,6 +8,7 @@ local op = require "fibers.op"
 local sc = require "fibers.utils.syscall"
 local cjson = require "cjson.safe"
 local log = require "services.log"
+local shaping = require "services.net.shaping"
 local uci = require "uci"
 local speedtest = require "services.net.speedtest"
 local new_msg = require "bus".new_msg
@@ -409,6 +410,12 @@ local function config_applier(ctx)
                     if err then
                         log.warn("NET: Could not ifup", msg.ifup)
                     end
+                elseif msg.shaping then
+                    local net_cfg = msg.shaping
+                    if net_cfg.shaping and net_cfg.interfaces then
+                        log.info("NET: Applying shaping for:", net_cfg.id)
+                        shaping.apply(net_cfg)
+                    end
                 else
                     -- Existing logic
                     for _, v in ipairs(msg) do
@@ -489,6 +496,10 @@ local function uci_manager(ctx)
         end
         print("That took:", sc.monotime() - start)
         config_applier_queue:put({ "network", "firewall", "dhcp", "mwan3" })
+
+        for _, net_cfg in ipairs(cfg.network or {}) do
+            config_applier_queue:put({ shaping = net_cfg })
+        end
         -- If this is the initial config, signal config applied
         config_signal:signal()
     end
