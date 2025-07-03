@@ -537,6 +537,7 @@ function Driver:state_monitor(ctx)
     local curr_sim_state = self.is_sim_inserted()
     local continue = true
     local sim_monitor_output = ""
+    local enabled_sleep_op = nil -- This op is only created in the case of a modem stuck in enabled
     while not ctx:err() and continue do
         local modem_state, sim_state, err = op.choice(
             state_stdout:read_line_op():wrap(function(line)
@@ -567,8 +568,10 @@ function Driver:state_monitor(ctx)
                 state_monitor_cmd:kill()
                 sim_monitor_cmd:kill()
                 return nil, nil, ctx:err()
-            end)
+            end),
+            enabled_sleep_op -- if this is nil to op the list will simply look like state, sim, ctx with no sleep
         ):perform()
+        enabled_sleep_op = nil
         if err then break end
 
         if modem_state then
@@ -599,6 +602,11 @@ function Driver:state_monitor(ctx)
                     info = merged_state
                 })
                 prev_modem_state = merged_state
+            end
+            if merged_state.curr_state == 'enabled' then
+                enabled_sleep_op = sleep.sleep_op(20):wrap(function ()
+                    self:reset()
+                end)
             end
         end
     end
