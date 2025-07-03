@@ -134,7 +134,7 @@ function Modem:_apn_connect(ctx, cutoff)
                     status_sub:unsubscribe()
                     log.debug(status_err); return
                 end
-                modem_status = status_msg.payload.curr_state
+                modem_status = status_msg and status_msg.payload and status_msg.payload.curr_state or modem_status
             end
         end
     end
