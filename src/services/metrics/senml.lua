@@ -28,11 +28,16 @@ local function encode_r(base_topic, values, output)
             end
         end
 
-        if type(v) == 'table' then
+        -- check if v is a table with value and time
+        if type(v) == 'table' and not (v.value and v.time)  then
+            -- if v is a table with no value and time, recurse
             local _, err = encode_r(topic, v, output)
             if err then return nil, err end
         else
-            local senml_obj, err = encode(topic, v)
+            if type(v) ~= 'table' then
+                v = {value = v}
+            end
+            local senml_obj, err = encode(topic, v.value, v.time)
             if err then return nil, err end
             table.insert(output, senml_obj)
         end
