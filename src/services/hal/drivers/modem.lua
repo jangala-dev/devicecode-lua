@@ -604,7 +604,7 @@ function Driver:state_monitor(ctx)
                 prev_modem_state = merged_state
             end
             if merged_state.curr_state == 'enabled' then
-                enabled_sleep_op = sleep.sleep_op(20):wrap(function ()
+                enabled_sleep_op = sleep.sleep_op(60):wrap(function ()
                     if not self.is_sim_inserted() then
                         self:reset()
                     end
