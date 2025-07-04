@@ -3,7 +3,6 @@ local processing = require "services.metrics.processing"
 local timed_cache = require "services.metrics.timed_cache"
 local service = require 'service'
 local op = require "fibers.op"
-local fiber = require "fibers.fiber"
 local log = require 'services.log'
 local trie = require 'trie'
 local sc = require 'fibers.utils.syscall'
@@ -93,12 +92,17 @@ function metrics_service:_http_publish(data)
         channel_id
     )
     local auth = "Thing " .. self.cloud_config.mainflux_key
-    fiber.spawn(function ()
-        self.http_send_q:put({
-            uri = uri,
-            auth = auth,
-            body = body
-        })
+    local http_payload = {
+        uri = uri,
+        auth = auth,
+        body = body
+    }
+    self.http_send_q:put_op(http_payload):perform_alt(function ()
+        log.error(string.format(
+            "%s - %s: HTTP publish failed, reason: HTTP send queue is full",
+            self.ctx:value('service_name'),
+            self.ctx:value('fiber_name')
+        ))
     end)
 end
 

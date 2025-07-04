@@ -4,7 +4,7 @@ local op = require "fibers.op"
 local sleep = require "fibers.sleep"
 local service = require "service"
 local request = require 'http.request'
-local log = require "log"
+local log = require "services.log"
 
 local function send_http(ctx, data)
     local uri = data.uri
@@ -23,20 +23,16 @@ local function send_http(ctx, data)
         local headers,  _ = req:go(10)
         response_headers = headers
         if not response_headers then
+            log.debug(string.format(
+                "%s - %s: HTTP publish failed, retrying in %s seconds",
+                sleep_duration
+            ))
             sleep.sleep(sleep_duration)
             sleep_duration = math.min(sleep_duration * 2, 60) -- Exponential backoff, max 60 seconds
         end
     end
 
-    if not response_headers then
-        log.error(string.format(
-            "%s - %s: HTTP publish failed, reason: %s",
-            ctx:value('service_name'),
-            ctx:value('fiber_name'),
-            "No response headers"
-        ))
-        return
-    elseif response_headers:get(":status") ~= "202" then
+    if response_headers:get(":status") ~= "202" then
         local header_msgs = ""
         for k, v in pairs(response_headers:each()) do
             header_msgs = string.format("%s\n\t%s: %s", header_msgs, k, v)
