@@ -91,7 +91,7 @@ function metrics_service:_http_publish(data)
         self.cloud_config.url,
         channel_id
     )
-    local auth = "Thing " .. self.cloud_config.mainflux_key
+    local auth = "Thing " .. self.cloud_config.thing_key
     local http_payload = {
         uri = uri,
         auth = auth,

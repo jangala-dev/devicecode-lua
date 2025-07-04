@@ -25,6 +25,8 @@ local function send_http(ctx, data)
         if not response_headers then
             log.debug(string.format(
                 "%s - %s: HTTP publish failed, retrying in %s seconds",
+                ctx:value("service_name"),
+                ctx:value("fiber_name"),
                 sleep_duration
             ))
             sleep.sleep(sleep_duration)
