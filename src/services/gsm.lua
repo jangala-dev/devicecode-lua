@@ -381,14 +381,6 @@ function Modem:_publish_static_data(ctx)
     if band_err then log.warn(band_err) end
     self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'band' }, band, { retained = true }))
 
-    local access_tech, access_err = get_access_tech(ctx, self.conn, self.idx)
-    if access_err then log.warn(access_err) end
-    self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-tech' }, access_tech, { retained = true }))
-
-    local access_family, family_err = get_access_family(access_tech)
-    if family_err then log.warn(family_err) end
-    self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-family' }, access_family, { retained = true }))
-
     local imei, imei_err = get_imei(ctx, self.conn, self.idx)
     if imei_err then log.warn(imei_err) end
     self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'imei' }, imei, { retained = true }))
@@ -427,6 +419,12 @@ function Modem:_publish_dynamic_data(ctx)
     local function publish_access_tech(msg)
         self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-tech' }, msg.payload, { retained = true }))
         access_tech = msg.payload
+        local access_family, family_err = get_access_family(access_tech)
+        if family_err then
+            log.warn(family_err)
+            return
+        end
+        self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-family' }, access_family, { retained = true }))
     end
     local access_tech_sub = self.conn:subscribe({ 'hal',
         'capability',
@@ -467,12 +465,12 @@ function Modem:_publish_dynamic_data(ctx)
             { 'gsm', 'modem', self.name, 'signal', msg.topic[8] },
             signal
         ))
-        if msg.topic[-1] == 'rssi' then
+        if msg.topic[#msg.topic] == 'rssi' then
             local bars = calc_bars(access_tech, signal)
             self.conn:publish(new_msg(
                 { 'gsm', 'modem', self.name, 'bars' },
                 bars,
-                {retained = true}
+                { retained = true }
             ))
         end
     end
