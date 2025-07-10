@@ -1,6 +1,7 @@
 local file = require "fibers.stream.file"
 local sleep = require "fibers.sleep"
 local op = require "fibers.op"
+local exec = require "fibers.exec"
 
 ---@param path string
 ---@return string?
@@ -128,11 +129,7 @@ end
 local function get_hw_revision()
     local revision, err = read_file("/etc/hwrevision")
     if err or not revision then return nil, nil, err end
-    local model, version = revision:match('(%S+)%s+(%S+)')
-    if not (model or version) then
-        return nil, nil, "Failed to parse hwrevision"
-    end
-    return model, version, nil
+    return revision, nil
 end
 
 ---@return string? version
@@ -162,6 +159,16 @@ local function get_uptime()
     if not up then return nil, "Failed to parse uptime" end
     return tonumber(up), nil
 end
+
+local function get_board_revision()
+    local board_revision_data, err = exec.command("fw_printenv"):output()
+    if err then
+        return nil, err
+    end
+    local board_revision = string.match(board_revision_data, "board_revision=([^\n]+)")
+    return board_revision, nil
+end
+
 return {
     get_hw_revision = get_hw_revision,
     get_fw_version = get_fw_version,
@@ -171,4 +178,5 @@ return {
     get_serial = get_serial,
     get_temperature = get_temperature,
     get_uptime = get_uptime,
+    get_board_revision = get_board_revision
 }

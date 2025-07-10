@@ -833,6 +833,30 @@
           ],
           "process": []
         },
+        "system/info/hardware/revision": {
+          "protocol": "http",
+          "rename": [
+            "system",
+            "hw_id"
+          ],
+          "process": []
+        },
+        "system/info/hardware/serial": {
+          "protocol": "http",
+          "rename": [
+            "system",
+            "serial"
+          ],
+          "process": []
+        },
+        "system/info/hardware/board/revision": {
+          "protocol": "http",
+          "rename": [
+            "system",
+            "board_revision"
+          ],
+          "process": []
+        },
         "system/info/cpu/overall_utilisation": {
           "protocol": "http",
           "rename": [
