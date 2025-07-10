@@ -588,6 +588,20 @@
             }
           ]
         },
+        "gsm/modem/primary/bars": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "1",
+            "bars"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
         "gsm/modem/primary/operator": {
           "protocol": "http",
           "rename": [
@@ -757,6 +771,20 @@
               "type": "DiffTrigger",
               "diff_method": "percent",
               "threshold": 5
+            }
+          ]
+        },
+        "gsm/modem/secondary/bars": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "bars"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
             }
           ]
         },
