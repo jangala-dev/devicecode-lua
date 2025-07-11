@@ -473,6 +473,20 @@
         "period": 60
     },
     "collections": {
+        "gsm/modem/primary/firmware":{
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "1",
+            "fw_version"
+          ],
+          "process":[
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
         "gsm/modem/primary/band": {
           "protocol": "http",
           "rename": [
@@ -653,6 +667,58 @@
             "wann_type"
           ],
           "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/primary/rx_bytes": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "1",
+            "rx_bytes"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5,
+              "initial_val": 0
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "gsm/modem/primary/tx_bytes": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "1",
+            "tx_bytes"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5,
+              "initial_val": 0
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "gsm/modem/secondary/firmware":{
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "fw_version"
+          ],
+          "process":[
             {
               "type": "DiffTrigger",
               "diff_method": "any-change"
@@ -842,6 +908,44 @@
             {
               "type": "DiffTrigger",
               "diff_method": "any-change"
+            }
+          ]
+        },
+        "gsm/modem/secondary/rx_bytes": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "rx_bytes"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5,
+              "initial_val": 0
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "gsm/modem/secondary/tx_bytes": {
+          "protocol": "http",
+          "rename": [
+            "modem",
+            "2",
+            "tx_bytes"
+          ],
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5,
+              "initial_val": 0
+            },
+            {
+              "type": "DeltaValue"
             }
           ]
         },
