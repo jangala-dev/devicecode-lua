@@ -6,6 +6,8 @@ local service = require "service"
 local request = require 'http.request'
 local log = require "services.log"
 
+local QUEUE_SIZE = 10
+
 local function send_http(ctx, data)
     local uri = data.uri
     local body = data.body
@@ -13,7 +15,7 @@ local function send_http(ctx, data)
 
     local response_headers
     local sleep_duration = 1
-    while not response_headers do
+    while not response_headers and not ctx:err() do
         local req = request.new_from_uri(uri)
         req.headers:upsert(":method", "POST")
         req.headers:upsert("authorization", auth)
@@ -35,16 +37,16 @@ local function send_http(ctx, data)
     end
 
     if response_headers:get(":status") ~= "202" then
-        local header_msgs = ""
+        local header_msgs = {}
         for k, v in pairs(response_headers:each()) do
-            header_msgs = string.format("%s\n\t%s: %s", header_msgs, k, v)
+            table.insert(header_msgs, string.format("\t%s: %s", k, v))
         end
 
         log.debug(string.format(
-            "%s - %s: HTTP publish failed, header responses: %s",
+            "%s - %s: HTTP publish failed, header responses:\n%s",
             ctx:value('service_name'),
             ctx:value('fiber_name'),
-            header_msgs
+            table.concat(header_msgs, "\n")
         ))
     else
         log.info(string.format(
@@ -58,7 +60,7 @@ end
 
 local function start_http_publisher(ctx, conn)
     local http_ctx = context.with_cancel(ctx)
-    local to_send_queue = queue.new(10)
+    local to_send_queue = queue.new(QUEUE_SIZE)
 
     service.spawn_fiber("HTTP Publish", conn, ctx, function ()
         while not http_ctx:err() do
