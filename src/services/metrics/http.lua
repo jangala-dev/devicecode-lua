@@ -38,7 +38,7 @@ local function send_http(ctx, data)
 
     if response_headers:get(":status") ~= "202" then
         local header_msgs = {}
-        for k, v in pairs(response_headers:each()) do
+        for k, v in response_headers:each() do
             table.insert(header_msgs, string.format("\t%s: %s", k, v))
         end
 
