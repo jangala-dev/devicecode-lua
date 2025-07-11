@@ -41,6 +41,19 @@ local model_info = {
     fibocom = {}
 }
 
+local function get_ports(ports)
+    local port_list = {}
+    for _, port in ipairs(ports) do
+        local port_name, port_type = string.match(port, "^([%w%-]+)%s*%(([%w%-]+)%)")
+        if port_list[port_type] == nil then
+            port_list[port_type] = { port_name}
+        else
+            table.insert(port_list[port_type], port_name)
+        end
+    end
+    return port_list
+end
+
 ---returns a list of control and info capabilities for the modem
 ---@return table
 function Driver:apply_capabilities(capability_info_q)
@@ -101,6 +114,38 @@ function Driver:poll_info()
                 log.debug(gid_err)
             else
                 infos.gids = gids
+            end
+        end
+
+        if self.at_port then
+            local response, fw_err = at.send_with_context(
+                context.with_timeout(self.ctx, 10),
+                self.at_port,
+                "AT+QGMR"
+            )
+            if not fw_err then
+                for _, line in ipairs(response or {}) do
+                    local firmware_version = string.match(line, "([%w]+_[%w]+%.[%w]+%.[%w]+%.[%w]+)")
+                    if firmware_version then
+                        infos.modem = infos.modem or {}
+                        infos.modem.firmware = firmware_version
+                        break
+                    end
+                end
+            end
+        end
+
+        if infos.modem and infos.modem.generic then
+            local ports = get_ports(infos.modem.generic.ports or {})
+            local net_port = ports.net and ports.net[1] or nil
+            if net_port then
+                local path = string.format('/sys/class/net/%s/statistics/', net_port)
+                local rx_bytes = utils.read_file(path .. 'rx_bytes')
+                local tx_bytes = utils.read_file(path .. 'tx_bytes')
+                infos.modem.net = {
+                    rx_bytes = tonumber(rx_bytes) or 0,
+                    tx_bytes = tonumber(tx_bytes) or 0
+                }
             end
         end
 
@@ -221,9 +266,20 @@ function Driver:init()
         end
     end
 
-    self.primary_port = string.format('/dev/%s', info.generic["primary-port"])
     self.imei = info.generic['equipment-identifier']
     self.device = info.generic.device
+
+    self.primary_port = string.format('/dev/%s', info.generic["primary-port"])
+    local ports = get_ports(info.generic.ports or {})
+    self.at_port = ports.at and ports.at[1] or nil
+    if self.at_port == nil then
+        log.warn(
+            string.format("%s - %s: Could not find at port",
+                self.ctx:value("service_name"),
+                self.ctx:value("fiber_name")
+            )
+        )
+    end
     -- -- we add any make/model specific functions/overrides
     model_overrides.add_model_funcs(self)
 end
@@ -604,7 +660,7 @@ function Driver:state_monitor(ctx)
                 prev_modem_state = merged_state
             end
             if merged_state.curr_state == 'enabled' then
-                enabled_sleep_op = sleep.sleep_op(60):wrap(function ()
+                enabled_sleep_op = sleep.sleep_op(60):wrap(function()
                     if not self.is_sim_inserted() then
                         self:reset()
                     end

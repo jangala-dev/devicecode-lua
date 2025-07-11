@@ -505,7 +505,23 @@ function Modem:_publish_dynamic_data(ctx)
     end
     local state_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'state' })
 
-    -- qmi:sim_freq_stats <- implement this asap
+    local function publish_firmware_version(msg)
+        self.conn:publish(new_msg(
+            { 'gsm', 'modem', self.name, 'firmware' },
+            msg.payload,
+            { retained = true }
+        ))
+    end
+    local firmware_sub = self.conn:subscribe({'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'firmware'})
+
+    local function publish_bytes(msg)
+        self.conn:publish(new_msg(
+            { 'gsm', 'modem', self.name, msg.topic[#msg.topic] },
+            msg.payload
+        ))
+    end
+    local bytes_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'net', '+' })
+
     while not ctx:err() do
         op.choice(
             access_tech_sub:next_msg_op():wrap(publish_access_tech),
@@ -514,14 +530,19 @@ function Modem:_publish_dynamic_data(ctx)
             operator_sub:next_msg_op():wrap(publish_operator),
             iccid_sub:next_msg_op():wrap(publish_iccid),
             state_sub:next_msg_op():wrap(publish_state),
+            firmware_sub:next_msg_op():wrap(publish_firmware_version),
+            bytes_sub:next_msg_op():wrap(publish_bytes),
             ctx:done_op()
         ):perform()
     end
+    access_tech_sub:unsubscribe()
     sim_present_sub:unsubscribe()
     signal_sub:unsubscribe()
     operator_sub:unsubscribe()
     iccid_sub:unsubscribe()
     state_sub:unsubscribe()
+    firmware_sub:unsubscribe()
+    bytes_sub:unsubscribe()
     log.trace(string.format(
         "%s - %s: Closing, reason: '%s'",
         ctx:value("service_name"),
