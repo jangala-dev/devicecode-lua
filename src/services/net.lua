@@ -1,3 +1,4 @@
+local file = require 'fibers.stream.file'
 local fiber = require "fibers.fiber"
 local sleep = require "fibers.sleep"
 local queue = require "fibers.queue"
@@ -79,6 +80,7 @@ local interface_channel = channel.new()        -- For gsm/interface mappings
 local speedtest_result_channel = channel.new() -- For speedtest requests
 local wan_status_channel = channel.new()       -- For wan status supdates
 local modem_on_connected_channel = channel.new()       -- For wan status supdates
+local report_period_channel = channel.new()           -- For config updates
 
 -- Queue definitions
 local speedtest_queue = queue.new()      -- Unbounded queue for holding speedtest requests
@@ -502,6 +504,11 @@ local function uci_manager(ctx)
         end
         -- If this is the initial config, signal config applied
         config_signal:signal()
+
+        local report_period = cfg.report_period
+        if report_period ~= nil then
+            report_period_channel:put(report_period)
+        end
     end
 
     local function on_wan_status(msg)
@@ -567,6 +574,70 @@ local function uci_manager(ctx)
             end
         end
     end
+
+    ---Periodic gathering a publish of net information
+    local function report_metrics(ctx)
+        local function read_interface_file_numeric(id, stat_name)
+            local path = "/sys/class/net/" .. id .. "/statistics/" .. stat_name
+            local f = file.open(path, "r")
+            if not f then return nil, "Failed to open interface file: "..path end
+
+            f:seek(0)  -- Rewind to beginning
+            return tonumber(f:read_all_chars())
+        end
+
+        local report_period = report_period_channel:get()
+        while not ctx:err() do
+            local net_metrics = {}
+            for net_id, net in pairs(networks) do
+                if net.cfg.interfaces ~= nil and #net.cfg.interfaces > 0 then
+                    local iface_metrics = {}
+
+                    local rx_bytes, e = read_interface_file_numeric(net.cfg.interfaces[1], "rx_bytes")
+                    if e == nil then iface_metrics.rx_bytes = rx_bytes end
+
+                    local rx_packets, e = read_interface_file_numeric(net.cfg.interfaces[1], "rx_packets")
+                    if e == nil then iface_metrics.rx_packets = rx_packets end
+
+                    local rx_dropped, e = read_interface_file_numeric(net.cfg.interfaces[1], "rx_dropped")
+                    if e == nil then iface_metrics.rx_dropped = rx_dropped end
+
+                    local rx_errors, e = read_interface_file_numeric(net.cfg.interfaces[1], "rx_errors")
+                    if e == nil then iface_metrics.rx_errors = rx_errors end
+
+                    local tx_bytes, e = read_interface_file_numeric(net.cfg.interfaces[1], "tx_bytes")
+                    if e == nil then iface_metrics.tx_bytes = tx_bytes end
+
+                    local tx_packets, e = read_interface_file_numeric(net.cfg.interfaces[1], "tx_packets")
+                    if e == nil then iface_metrics.tx_packets = tx_packets end
+
+                    local tx_dropped, e = read_interface_file_numeric(net.cfg.interfaces[1], "tx_dropped")
+                    if e == nil then iface_metrics.tx_dropped = tx_dropped end
+
+                    local tx_errors, e = read_interface_file_numeric(net.cfg.interfaces[1], "tx_errors")
+                    if e == nil then iface_metrics.tx_errors = tx_errors end
+
+                    if next(iface_metrics) ~= nil then
+                        net_metrics[net_id] = iface_metrics
+                    end
+                end
+            end
+
+            if next(net_metrics) ~= nil then
+                net_service.conn:publish_multiple({'net'}, net_metrics, { retained = true })
+            end
+
+            op.choice(
+                sleep.sleep_op(report_period),
+                report_period_channel:get_op():wrap(function(new_period)
+                    report_period = new_period
+                end),
+                ctx:done_op()
+            ):perform()
+        end
+    end
+
+    fiber.spawn(function() report_metrics(ctx) end)
 
     while ctx:err() == nil do
         op.choice(
