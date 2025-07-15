@@ -1003,7 +1003,7 @@
             }
           ]
         },
-        "system/info/mem/used": {
+        "system/info/mem/util": {
           "protocol": "http",
           "rename": [
             "system",

@@ -90,7 +90,8 @@ function system_service:_report_sysinfo()
             mem = {
                 total = total,
                 used = used,
-                free = free
+                free = free,
+                util = (used / total) * 100
             },
             temperature = temperature,
             heartbeat = 0
