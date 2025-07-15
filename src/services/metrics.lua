@@ -7,8 +7,8 @@ local log = require 'services.log'
 local trie = require 'trie'
 local sc = require 'fibers.utils.syscall'
 local json = require 'cjson.safe'
-local request = require 'http.request'
 local senml = require 'services.metrics.senml'
+local http = require 'services.metrics.http'
 local unpack = table.unpack or unpack
 
 ---@class metrics_service
@@ -91,42 +91,19 @@ function metrics_service:_http_publish(data)
         self.cloud_config.url,
         channel_id
     )
-    local req = request.new_from_uri(uri)
-    req.headers:upsert(":method", "POST")
-    req.headers:upsert("authorization", "Thing " .. self.cloud_config.thing_key)
-    req.headers:upsert("content-type", "application/senml+json")
-    req:set_body(body)
-    req.headers:delete("expect")
-    local response_headers, _ = req:go(10)
-
-    if not response_headers then
+    local auth = "Thing " .. self.cloud_config.thing_key
+    local http_payload = {
+        uri = uri,
+        auth = auth,
+        body = body
+    }
+    self.http_send_q:put_op(http_payload):perform_alt(function ()
         log.error(string.format(
-            "%s - %s: HTTP publish failed, reason: %s",
+            "%s - %s: HTTP publish failed, reason: HTTP send queue is full",
             self.ctx:value('service_name'),
-            self.ctx:value('fiber_name'),
-            "No response headers"
+            self.ctx:value('fiber_name')
         ))
-        return
-    elseif response_headers:get(":status") ~= "202" then
-        local header_msgs = ""
-        for k, v in response_headers:each() do
-            header_msgs = string.format("%s\n\t%s: %s", header_msgs, k, v)
-        end
-
-        log.debug(string.format(
-            "%s - %s: HTTP publish failed, header responses: %s",
-            self.ctx:value('service_name'),
-            self.ctx:value('fiber_name'),
-            header_msgs
-        ))
-    else
-        log.info(string.format(
-            "%s - %s: HTTP publish success, response: %s",
-            self.ctx:value('service_name'),
-            self.ctx:value('fiber_name'),
-            response_headers:get(":status")
-        ))
-    end
+    end)
 end
 
 ---iterates over a table of data to be published
@@ -277,6 +254,9 @@ function metrics_service:_handle_config(config)
         if protocol == nil then
             log.error(string.format('Metric config [%s] has no defined protocol', endpoint))
             return
+        end
+        if protocol == "http" and not self.http_send_q then
+            self.http_send_q = http.start_http_publisher(self.ctx, self.conn)
         end
 
         -- create our processing pipeline for this endpoint
