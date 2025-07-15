@@ -102,7 +102,8 @@ function Modem:_apn_connect(ctx, cutoff)
                 { 'hal', 'capability', 'modem', self.idx, 'control', 'connect' },
                 { apn_connect_string }
             ))
-            local connect_msg, ctx_err = connect_sub:next_msg_with_context_op(context.with_timeout(ctx, REQUEST_TIMEOUT)):perform()
+            local connect_msg, ctx_err = connect_sub:next_msg_with_context_op(context.with_timeout(ctx, REQUEST_TIMEOUT))
+                :perform()
             if ctx_err then
                 return nil, "connect: " .. ctx_err
             end
@@ -198,6 +199,7 @@ function Modem:_enable_failed(ctx)
         ctx:value("fiber_name")
     ))
 end
+
 ---Start warm swap to detect sim insertion
 ---@param ctx any
 ---@return string?
@@ -241,7 +243,7 @@ end
 local function purge_sub(ctx, sub)
     local msg
     while not ctx:err() do
-        local next_msg, err = sub:next_msg_with_context_op(ctx):perform_alt(function ()
+        local next_msg, err = sub:next_msg_with_context_op(ctx):perform_alt(function()
             return nil, "all messages purged"
         end)
         if err then break end
@@ -281,7 +283,10 @@ function Modem:_autoconnect(ctx)
             break
         end
         local state_info = state_info_msg.payload
-        if state_info == nil then ctx:cancel('state monitor closed') return end
+        if state_info == nil then
+            ctx:cancel('state monitor closed')
+            return
+        end
         log.trace(string.format(
             "%s - %s: State recieved: %s",
             ctx:value("service_name"),
@@ -376,20 +381,61 @@ function Modem:_publish_static_data(ctx)
     if band_err then log.warn(band_err) end
     self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'band' }, band, { retained = true }))
 
-    local access_tech, access_err = get_access_tech(ctx, self.conn, self.idx)
-    if access_err then log.warn(access_err) end
-    self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-tech' }, access_tech, { retained = true }))
-
-    local access_family, family_err = get_access_family(access_tech)
-    if family_err then log.warn(family_err) end
-    self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-family' }, access_family, { retained = true }))
-
     local imei, imei_err = get_imei(ctx, self.conn, self.idx)
     if imei_err then log.warn(imei_err) end
     self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'imei' }, imei, { retained = true }))
 end
 
+local function calc_bars(access_tech, signal)
+    if access_tech == 'lte' then
+        if signal >= -50 then
+            return 6
+        elseif signal >= -60 then
+            return 5
+        elseif signal >= -70 then
+            return 4
+        elseif signal >= -80 then
+            return 3
+        elseif signal >= -90 then
+            return 2
+        elseif signal >= -100 then
+            return 1
+        else
+            return 0
+        end
+    else
+        if signal >= -70 then
+            return 2
+        elseif signal >= -85 then
+            return 1
+        else
+            return 0
+        end
+    end
+end
+
 function Modem:_publish_dynamic_data(ctx)
+    local access_tech = nil
+    local function publish_access_tech(msg)
+        self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-tech' }, msg.payload, { retained = true }))
+        access_tech = msg.payload
+        local access_family, family_err = get_access_family(access_tech)
+        if family_err then
+            log.warn(family_err)
+            return
+        end
+        self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-family' }, access_family, { retained = true }))
+    end
+    local access_tech_sub = self.conn:subscribe({ 'hal',
+        'capability',
+        'modem',
+        self.idx,
+        'info',
+        'band',
+        'band-information',
+        'radio-interface'
+    })
+
     local function publish_sim_present(msg)
         local state = "--"
         if msg.payload and msg.payload ~= '--' then
@@ -419,6 +465,14 @@ function Modem:_publish_dynamic_data(ctx)
             { 'gsm', 'modem', self.name, 'signal', msg.topic[8] },
             signal
         ))
+        if msg.topic[#msg.topic] == 'rssi' then
+            local bars = calc_bars(access_tech, signal)
+            self.conn:publish(new_msg(
+                { 'gsm', 'modem', self.name, 'bars' },
+                bars,
+                { retained = true }
+            ))
+        end
     end
     local signal_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'signal', '+' })
 
@@ -451,22 +505,44 @@ function Modem:_publish_dynamic_data(ctx)
     end
     local state_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'state' })
 
-    -- qmi:sim_freq_stats <- implement this asap
+    local function publish_firmware_version(msg)
+        self.conn:publish(new_msg(
+            { 'gsm', 'modem', self.name, 'firmware' },
+            msg.payload,
+            { retained = true }
+        ))
+    end
+    local firmware_sub = self.conn:subscribe({'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'firmware'})
+
+    local function publish_bytes(msg)
+        self.conn:publish(new_msg(
+            { 'gsm', 'modem', self.name, msg.topic[#msg.topic] },
+            msg.payload
+        ))
+    end
+    local bytes_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'net', '+' })
+
     while not ctx:err() do
         op.choice(
+            access_tech_sub:next_msg_op():wrap(publish_access_tech),
             sim_present_sub:next_msg_op():wrap(publish_sim_present),
             signal_sub:next_msg_op():wrap(publish_signal),
             operator_sub:next_msg_op():wrap(publish_operator),
             iccid_sub:next_msg_op():wrap(publish_iccid),
             state_sub:next_msg_op():wrap(publish_state),
+            firmware_sub:next_msg_op():wrap(publish_firmware_version),
+            bytes_sub:next_msg_op():wrap(publish_bytes),
             ctx:done_op()
         ):perform()
     end
+    access_tech_sub:unsubscribe()
     sim_present_sub:unsubscribe()
     signal_sub:unsubscribe()
     operator_sub:unsubscribe()
     iccid_sub:unsubscribe()
     state_sub:unsubscribe()
+    firmware_sub:unsubscribe()
+    bytes_sub:unsubscribe()
     log.trace(string.format(
         "%s - %s: Closing, reason: '%s'",
         ctx:value("service_name"),
@@ -505,6 +581,7 @@ function Modem:_publish_iface(ctx)
         { retained = true }
     ))
 end
+
 --- Either starts or ends autoconnection and updates modem name
 --- @param config table
 function Modem:update_config(config)

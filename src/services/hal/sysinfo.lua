@@ -1,23 +1,13 @@
 local file = require "fibers.stream.file"
 local sleep = require "fibers.sleep"
 local op = require "fibers.op"
-
----@param path string
----@return string?
----@return string? Error
-local function read_file(path)
-    local file, err = file.open(path, "r")
-    if err then return nil, err end
-    local content = file:read_all_chars()
-
-    file:close()
-    return content, nil
-end
+local exec = require "fibers.exec"
+local utils = require "services.hal.utils"
 
 ---@return string?
 ---@return string? Error
 local function get_cpu_info()
-    local cpuinfo, cpuinfo_err = read_file("/proc/cpuinfo")
+    local cpuinfo, cpuinfo_err = utils.read_file("/proc/cpuinfo")
     if cpuinfo_err or not cpuinfo then return nil, cpuinfo_err end
     local model
 
@@ -55,12 +45,12 @@ local function get_cpu_utilisation_and_freq(ctx)
 
     local function get_scaling_cur_freq(core)
         local path = "/sys/devices/system/cpu/" .. core .. "/cpufreq/scaling_cur_freq"
-        local freq, read_err = read_file(path)
+        local freq, read_err = utils.read_file(path)
         if not freq or read_err then return nil, read_err end
         return tonumber(freq), nil
     end
 
-    local stat_prev, prev_err = read_file("/proc/stat")
+    local stat_prev, prev_err = utils.read_file("/proc/stat")
     if prev_err then return nil, nil, nil, nil, prev_err end
     local ctx_err = op.choice(
         sleep.sleep_op(1),
@@ -69,7 +59,7 @@ local function get_cpu_utilisation_and_freq(ctx)
         end)
     ):perform()
     if ctx_err then return nil, nil, nil, nil, ctx_err end
-    local stat_curr, curr_err = read_file("/proc/stat")
+    local stat_curr, curr_err = utils.read_file("/proc/stat")
     if curr_err then return nil, nil, nil, nil, curr_err end
 
     local core_utilisations = {}
@@ -110,7 +100,7 @@ end
 ---@return number? free
 ---@return string? Error
 local function get_ram_info()
-    local meminfo, err = read_file("/proc/meminfo")
+    local meminfo, err = utils.read_file("/proc/meminfo")
     if not meminfo or err then return nil, nil, nil, err end
     local total = meminfo:match("MemTotal:%s*(%d+)") or 0
     local free = meminfo:match("MemFree:%s*(%d+)") or 0
@@ -126,42 +116,48 @@ end
 ---@return string? version
 ---@return string? error
 local function get_hw_revision()
-    local revision, err = read_file("/etc/hwrevision")
+    local revision, err = utils.read_file("/etc/hwrevision")
     if err or not revision then return nil, nil, err end
-    local model, version = revision:match('(%S+)%s+(%S+)')
-    if not (model or version) then
-        return nil, nil, "Failed to parse hwrevision"
-    end
-    return model, version, nil
+    return revision, nil
 end
 
 ---@return string? version
 ---@return string? error
 local function get_fw_version()
-    local version, err = read_file("/etc/fwversion")
+    local version, err = utils.read_file("/etc/fwversion")
     if err or not version then return nil, err end
     return version, nil
 end
 
 local function get_serial()
-    local serial, err = read_file("/data/serial")
+    local serial, err = utils.read_file("/data/serial")
     if err or not serial then return nil, err end
     return serial, nil
 end
 
 local function get_temperature()
-    local temperature, err = read_file("/sys/class/thermal/thermal_zone0/temp")
+    local temperature, err = utils.read_file("/sys/class/thermal/thermal_zone0/temp")
     if err or not temperature then return nil, err end
     return tonumber(temperature) / 1000, nil
 end
 
 local function get_uptime()
-    local uptime, err = read_file("/proc/uptime")
+    local uptime, err = utils.read_file("/proc/uptime")
     if err or not uptime then return nil, err end
     local up = string.match(uptime, "(%S+)%s")
     if not up then return nil, "Failed to parse uptime" end
     return tonumber(up), nil
 end
+
+local function get_board_revision()
+    local board_revision_data, err = exec.command("fw_printenv"):output()
+    if err then
+        return nil, err
+    end
+    local board_revision = string.match(board_revision_data, "board_revision=([^\n]+)")
+    return board_revision, nil
+end
+
 return {
     get_hw_revision = get_hw_revision,
     get_fw_version = get_fw_version,
@@ -171,4 +167,5 @@ return {
     get_serial = get_serial,
     get_temperature = get_temperature,
     get_uptime = get_uptime,
+    get_board_revision = get_board_revision
 }

@@ -1,4 +1,18 @@
+local file = require "fibers.stream.file"
+
 local utils = {}
+
+---@param path string
+---@return string?
+---@return string? Error
+function utils.read_file(path)
+    local file, err = file.open(path, "r")
+    if err then return nil, err end
+    local content = file:read_all_chars()
+
+    file:close()
+    return content, nil
+end
 
 function utils.parse_monitor(line)
     if line == nil then return nil, nil, 'monitor message is nil' end
