@@ -583,7 +583,9 @@ local function uci_manager(ctx)
             if not f then return nil, "Failed to open interface file: "..path end
 
             f:seek(0)  -- Rewind to beginning
-            return tonumber(f:read_all_chars())
+            local metric = tonumber(f:read_all_chars())
+            f:close()
+            return metric
         end
 
         local report_period = report_period_channel:get()
