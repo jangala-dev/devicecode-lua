@@ -3,7 +3,10 @@ program that powers our Big Box and Get Box devices.
 
 # Using make script
 SRC_DIR, TEST_DIR and BUILD_DIR are all optional values
+
 ## Initialise dev environment
+To ensure you have all the required dependencies, use the devcontainer (see [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json)).
+
 Before testing or building the code all submodules need to be loaded in. You can select
 the version of each submodule in `.env`.
 ```
