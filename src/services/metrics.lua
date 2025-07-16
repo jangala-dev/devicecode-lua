@@ -200,6 +200,21 @@ local function merge_config(base_config, override_vals)
     return base_config
 end
 
+local function is_array(t)
+    if type(t) ~= "table" then
+        return false
+    end
+    local i = 1
+    for k, _ in pairs(t) do
+        if k ~= i then
+            return false
+        end
+        i = i + 1
+    end
+
+    return true
+end
+
 ---use config to build cache and processing pipelines
 ---@param config table
 function metrics_service:_handle_config(config)
@@ -266,11 +281,10 @@ function metrics_service:_handle_config(config)
             return
         end
 
-        local endpoint_rename = metric_config.rename
-        if type(endpoint_rename) ~= 'table' and type(endpoint_rename) ~= 'nil' then
+        local metric_endpoint_name = metric_config.rename
+        if not is_array(metric_endpoint_name) and type(metric_endpoint_name) ~= 'nil' then
             log.warn(string.format('Metric config [%s] rename is not of expected type: table', endpoint))
-        elseif type(endpoint_rename) == 'table' then
-            table.insert(endpoint_rename, 1, protocol)
+            metric_endpoint_name = nil
         end
         -- Now we wrap our bus endpoint in a function to
         -- run our processing pipline in a cache
@@ -302,8 +316,7 @@ function metrics_service:_handle_config(config)
             end
             -- if the pipeline completed with no early exit we can update our publish cache
             if not short_circuit then
-                table.insert(metric_msg.topic, 1, protocol)
-                local cache_topic = endpoint_rename or metric_msg.topic
+                local cache_topic = { protocol, unpack(metric_endpoint_name or metric_msg.topic) }
                 local metric_time = math.floor(sc.realtime()*1000)
                 local item = {value = val, time = metric_time}
                 self.publish_cache:set(cache_topic, item)
