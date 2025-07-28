@@ -113,8 +113,8 @@
                 {
                   "qdisc": "htb",
                   "config": {
-                    "rate": "450kbit",
-                    "ceil": "2mbit",
+                    "rate": "2mbit",
+                    "ceil": "8mbit",
                     "burst": "500k"
                   },
                   "classes": [
@@ -143,9 +143,9 @@
                 {
                   "qdisc": "htb",
                   "config": {
-                    "rate": "450kbit",
-                    "ceil": "2mbit",
-                    "burst": "500k"
+                    "rate": "1.5mbit",
+                    "ceil": "6mbit",
+                    "burst": "225k"
                   },
                   "classes": [
                     {
