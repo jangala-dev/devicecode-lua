@@ -416,7 +416,17 @@ local function config_applier(ctx)
                     local net_cfg = msg.shaping
                     if net_cfg.shaping and net_cfg.interfaces then
                         log.info("NET: Applying shaping for:", net_cfg.id)
-                        shaping.apply(net_cfg)
+
+                        local err = exec.command("ifup", net_cfg.id):run()
+                        if err then
+                            log.warn("NET: ifup failed, retrying shaping later for:", net_cfg.id)
+                            fiber.spawn(function()
+                                sleep.sleep(2)
+                                config_applier_queue:put(msg)
+                            end)
+                        else
+                            shaping.apply(net_cfg)
+                        end
                     end
                 else
                     -- Existing logic
