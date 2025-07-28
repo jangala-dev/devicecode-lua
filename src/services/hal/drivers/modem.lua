@@ -271,7 +271,7 @@ function Driver:init()
 
     self.primary_port = string.format('/dev/%s', info.generic["primary-port"])
     local ports = get_ports(info.generic.ports or {})
-    self.at_port = ports.at and ports.at[1] or nil
+    self.at_port = ports.at and ports.at[1] and string.format("/dev/%s", ports.at[1]) or nil
     if self.at_port == nil then
         log.warn(
             string.format("%s - %s: Could not find at port",
