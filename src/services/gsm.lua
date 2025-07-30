@@ -30,6 +30,15 @@ local modems = {
     device = {},
 }
 
+local SCOREMAP = {
+    cdma1x = { rssi = { -110, -100, -86, -70, 1000000 } },
+    evdo = { rssi = { -110, -100, -86, -70, 1000000 } },
+    gsm = { rssi = { -110, -100, -86, -70, 1000000 } },
+    umts = { rscp = { -124, -95, -85, -75, 1000000 } },
+    lte = { rsrp = { -115, -105, -95, -85, 1000000 } },
+    ["5g"] = { rsrp = { -115, -105, -95, -85, 1000000 } }
+}
+
 ---@class Modem
 ---@field conn Connection
 ---@field ctx Context
@@ -335,22 +344,6 @@ local function get_band_class(ctx, conn, idx)
     return band_class_msg.payload
 end
 
-local function get_access_tech(ctx, conn, idx)
-    local access_tech_sub = conn:subscribe({ 'hal',
-        'capability',
-        'modem',
-        idx,
-        'info',
-        'band',
-        'band-information',
-        'radio-interface'
-    })
-    local access_tech_msg, access_err = access_tech_sub:next_msg_with_context_op(ctx):perform()
-    access_tech_sub:unsubscribe()
-    if access_err then return nil, access_err end
-    return access_tech_msg.payload
-end
-
 local function get_access_family(access_tech)
     local accessfamdict = {
         cdma1x = '3G',
@@ -386,32 +379,20 @@ function Modem:_publish_static_data(ctx)
     self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'imei' }, imei, { retained = true }))
 end
 
-local function calc_bars(access_tech, signal)
-    if access_tech == 'lte' then
-        if signal >= -50 then
-            return 6
-        elseif signal >= -60 then
-            return 5
-        elseif signal >= -70 then
-            return 4
-        elseif signal >= -80 then
-            return 3
-        elseif signal >= -90 then
-            return 2
-        elseif signal >= -100 then
-            return 1
-        else
-            return 0
-        end
-    else
-        if signal >= -70 then
-            return 2
-        elseif signal >= -85 then
-            return 1
-        else
-            return 0
+local function get_signal_bars(access_tech, signal_type, signal)
+    local tech_map = SCOREMAP[access_tech]
+    if not tech_map then return 0, "error invalid access tech" end
+
+    local map = tech_map[signal_type]
+    if not map then return 0, "error invalid signal type" end
+
+    for i, threshold in ipairs(map) do
+        if signal < threshold then
+            return i, nil
         end
     end
+
+    return 0, nil
 end
 
 function Modem:_publish_dynamic_data(ctx)
@@ -465,8 +446,15 @@ function Modem:_publish_dynamic_data(ctx)
             { 'gsm', 'modem', self.name, 'signal', msg.topic[8] },
             signal
         ))
-        if msg.topic[#msg.topic] == 'rssi' then
-            local bars = calc_bars(access_tech, signal)
+
+        local signal_type = msg.topic[#msg.topic]
+        if signal_type == 'rssi' or signal_type == 'rsrp' or signal_type == 'rscp' then
+            local bars, bars_err = get_signal_bars(access_tech, signal_type, signal)
+
+            if bars_err then
+                return
+            end
+
             self.conn:publish(new_msg(
                 { 'gsm', 'modem', self.name, 'bars' },
                 bars,
