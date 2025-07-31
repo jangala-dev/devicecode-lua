@@ -1,4 +1,5 @@
 local modem_manager = require "services.hal.managers.modemcard"
+local ubus_manager = require "services.hal.managers.ubus"
 local fiber = require "fibers.fiber"
 local queue = require "fibers.queue"
 local op = require "fibers.op"
@@ -12,9 +13,10 @@ local hal_service = {
     name = "hal",
     capabilities = {},
     devices = {},
-    capability_info_q = queue.new(20),
+    capability_info_q = queue.new(50),
     device_event_q = queue.new(10),
-    modem_manager_instance = modem_manager.new()
+    modem_manager_instance = modem_manager.new(),
+    ubus_manager_instance = ubus_manager.new()
 }
 hal_service.__index = hal_service
 
@@ -298,6 +300,7 @@ function hal_service:start(ctx, conn)
 
     -- start modem manager and detection
     self.modem_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
+    self.ubus_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
 end
 
 return hal_service
