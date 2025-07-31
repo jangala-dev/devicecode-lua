@@ -7,6 +7,7 @@ local channel = require "fibers.channel"
 local cond = require "fibers.cond"
 local op = require "fibers.op"
 local sc = require "fibers.utils.syscall"
+local context = require "fibers.context"
 local cjson = require "cjson.safe"
 local log = require "services.log"
 local shaping = require "services.net.shaping"
@@ -24,6 +25,7 @@ net_service.__index = net_service
 -------------------------------------------------------
 -- Constants
 local tracking_ips = { "8.8.8.8", "1.1.1.1" }
+local BUS_TIMEOUT = 5
 -------------------------------------------------------
 -- Helper functions
 
@@ -75,12 +77,12 @@ end
 local metric_counter = make_counter()
 
 -- Channel definitions
-local config_channel = channel.new()           -- For config updates
-local interface_channel = channel.new()        -- For gsm/interface mappings
-local speedtest_result_channel = channel.new() -- For speedtest requests
-local wan_status_channel = channel.new()       -- For wan status supdates
-local modem_on_connected_channel = channel.new()       -- For wan status supdates
-local report_period_channel = channel.new()           -- For config updates
+local config_channel = channel.new()             -- For config updates
+local interface_channel = channel.new()          -- For gsm/interface mappings
+local speedtest_result_channel = channel.new()   -- For speedtest requests
+local wan_status_channel = channel.new()         -- For wan status supdates
+local modem_on_connected_channel = channel.new() -- For wan status supdates
+local report_period_channel = channel.new()      -- For config updates
 
 -- Queue definitions
 local speedtest_queue = queue.new()      -- Unbounded queue for holding speedtest requests
@@ -590,9 +592,9 @@ local function uci_manager(ctx)
         local function read_interface_file_numeric(id, stat_name)
             local path = "/sys/class/net/" .. id .. "/statistics/" .. stat_name
             local f = file.open(path, "r")
-            if not f then return nil, "Failed to open interface file: "..path end
+            if not f then return nil, "Failed to open interface file: " .. path end
 
-            f:seek(0)  -- Rewind to beginning
+            f:seek(0) -- Rewind to beginning
             local metric = tonumber(f:read_all_chars())
             f:close()
             return metric
@@ -636,7 +638,7 @@ local function uci_manager(ctx)
             end
 
             if next(net_metrics) ~= nil then
-                net_service.conn:publish_multiple({'net'}, net_metrics, { retained = true })
+                net_service.conn:publish_multiple({ 'net' }, net_metrics, { retained = true })
             end
 
             op.choice(
@@ -665,20 +667,25 @@ end
 
 local function wan_monitor(ctx)
     config_signal:wait() -- Block wan monitor until initial configs
+    local ubus_active_sub = net_service.conn:subscribe({'hal', 'capability', 'ubus', '1'})
+    ubus_active_sub:next_msg() -- Block wan monitor until ubus capability is active
+
     log.trace("NET: WAN monitor starting")
 
     -- first, we get the initial state of the interfaces, we use command line ubus for consistency with `ubus listen`
-    local output, err = exec.command("ubus", "call", "mwan3", "status"):output()
-    if err then
-        log.error("NET: WAN monitor: could not start ubus call")
-        return
-    end
+    local status_sub = net_service.conn:request(new_msg(
+        { 'hal', 'capability', 'ubus', '1', 'control', 'call' },
+        { "mwan3", "status" }
+    ))
+    local status_response, ctx_err = status_sub:next_msg_with_context(context.with_timeout(ctx, BUS_TIMEOUT))
 
-    local res, err = cjson.decode(output)
-    if err then
+    if ctx_err or status_response.payload.err then
+        local err = ctx_err or status_response.payload.err
         log.error("NET: WAN monitor: could not get initial state: " .. err)
         return
     end
+
+    local res = status_response.payload.result
 
     for network, data in pairs(res.interfaces or {}) do
         local status = data.status == "online" and "online" or "offline"
@@ -692,56 +699,58 @@ local function wan_monitor(ctx)
     end
 
     -- now we start a continuous loop to monitor for changes in interface state
-    local cmd = exec.command("ubus", "listen", "hotplug.mwan3")
-    cmd:setprdeathsig(sc.SIGKILL) -- Ensure the process is killed on parent death
-    local stdout = cmd:stdout_pipe()
-    if not stdout then
-        log.error("NET: could not create stdout pipe for ubus listen")
-        return
-    end
-
-    local err = cmd:start()
-    if err then
+    local listen_sub = net_service.conn:request(new_msg(
+        { 'hal', 'capability', 'ubus', '1', 'control', 'listen' },
+        { 'hotplug.mwan3' }
+    ))
+    local listen_response, ctx_err = listen_sub:next_msg_with_context(context.with_timeout(ctx, BUS_TIMEOUT))
+    if ctx_err or listen_response.payload.err then
+        local err = ctx_err or listen_response.payload.err
         log.error("NET: ubus listen failed:", err)
         return
     end
+    local stream_id = listen_response.payload.result.stream_id
+    local hotplug_sub = net_service.conn:subscribe(
+        { 'hal', 'capability', 'ubus', '1', 'info', 'stream', stream_id }
+    )
+    local stream_end_sub = net_service.conn:subscribe(
+        { 'hal', 'capability', 'ubus', '1', 'info', 'stream', stream_id, 'closed' }
+    )
 
     local process_ended = false
 
     while not ctx:err() and not process_ended do
         op.choice(
-            stdout:read_line_op():wrap(function(line)
-                if not line then
-                    log.error("NET: ubus listen unexpectedly exited")
-                    process_ended = true
-                else
-                    local event, err = cjson.decode(line)
-                    if err then
-                        log.error("NET: ubus listen line decode failed:", err)
-                        return
-                    end
-                    local data = event["hotplug.mwan3"]
-                    log.debug("MWAN3 hotplug event received!")
+            hotplug_sub:next_msg_op():wrap(function(msg)
+                local event = msg.payload
+                if not event then return end
+                local data = event["hotplug.mwan3"]
+                log.debug("MWAN3 hotplug event received!")
 
-                    local status = data.action == "connected" and "online" or "offline"
-                    wan_status_channel:put({
-                        network = data.interface,
-                        status = status
-                    })
-                    net_service.conn:publish(new_msg({ "net", data.interface, "status" }, status))
-                    net_service.conn:publish(new_msg(
-                        { "net", data.interface, "curr_uptime" },
-                        status == "online" and os.time() or 0
-                    ))
+                local status = data.action == "connected" and "online" or "offline"
+                wan_status_channel:put({
+                    network = data.interface,
+                    status = status
+                })
+                net_service.conn:publish(new_msg({ "net", data.interface, "status" }, status))
+                net_service.conn:publish(new_msg(
+                    { "net", data.interface, "curr_uptime" },
+                    status == "online" and os.time() or 0
+                ))
+            end),
+            stream_end_sub:next_msg_op():wrap(function (stream_ended)
+                if stream_ended.payload then
+                    process_ended = true
                 end
             end),
             ctx:done_op():wrap(function()
-                cmd:kill()
+                net_service:publish(new_msg(
+                    { 'hal', 'capability', 'ubus', '1', 'control', 'stop_stream' },
+                    { stream_id }
+                ))
             end)
         ):perform()
     end
-    cmd:wait()
-    stdout:close()
 end
 
 local function speedtest_worker(ctx)
