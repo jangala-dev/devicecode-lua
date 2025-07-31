@@ -68,8 +68,42 @@ local function new_time_capability(driver_q)
     return setmetatable({ driver_q = driver_q }, TimeCapability)
 end
 
+-- ubus cap
+local UBusCapability = {}
+UBusCapability.__index = UBusCapability
+
+local function new_ubus_capability(driver_q)
+    return setmetatable({driver_q = driver_q}, UBusCapability)
+end
+
+function UBusCapability:list()
+    local cmd = {command = "list"}
+    return do_command(self.driver_q, cmd)
+end
+
+function UBusCapability:call(args)
+    local cmd = {command = "call", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function UBusCapability:listen(args)
+    local cmd = {command = "listen", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function UBusCapability:stop_stream(args)
+    local cmd = {command = "stop_stream", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function UBusCapability:send(args)
+    local cmd = {command = "send", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
 return {
     new_modem_capability = new_modem_capability,
+    new_ubus_capability = new_ubus_capability,
     new_geo_capability = new_geo_capability,
     new_time_capability = new_time_capability
 }
