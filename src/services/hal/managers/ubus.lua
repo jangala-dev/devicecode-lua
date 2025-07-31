@@ -20,13 +20,9 @@ function UBusManagement:_manager(ctx, conn, device_event_q, capability_info_q)
     ))
 
     -- Check that ubus command responds
-    local res, err = exec.command_context(ctx, 'command', '-v', 'ubus'):output()
+    local _, err = exec.command_context(ctx, 'ubus', '-v'):output()
 
-    if not res or res:match("^%s*$") then
-        err = err or "ubus command not found"
-    end
-
-    if err then
+    if err and err ~= 1 then
         log.error(string.format(
             "%s - %s: ubus driver cannot be started, reason: %s",
             ctx:value("service_name"),
