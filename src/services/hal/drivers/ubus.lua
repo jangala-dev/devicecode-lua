@@ -5,6 +5,7 @@ local exec = require "fibers.exec"
 local context = require "fibers.context"
 local sc = require "fibers.utils.syscall"
 local log = require "services.log"
+local hal_capabilities = require "services.hal.hal_capabilities"
 local service = require "service"
 local uuid = require "uuid"
 local unpack = table.unpack or unpack
@@ -14,6 +15,11 @@ local STRING_SEPARATOR = string.char(31)
 
 local UBus = {}
 UBus.__index = UBus
+
+function UBus.new(ctx)
+    local ubus = { ctx = ctx, cap_control_q = queue.new(10) }
+    return setmetatable(ubus, UBus)
+end
 
 local streams = {
     by_key = {},
@@ -98,7 +104,7 @@ function UBus:stop_stream(ctx, stream_id)
                 id = "1",
                 sub_topic = { "stream", stream_id, "closed" },
                 endpoints = "single",
-                info = { true }
+                info = true
             }),
             ctx:done_op()
         ):perform()
@@ -142,8 +148,8 @@ function UBus:listen(ctx, ...)
     fiber.spawn(function()
         log.trace(string.format(
             "%s - %s: Starting ubus listen command for stream %s with paths: %s",
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name"),
+            stream_ctx:value("service_name"),
+            stream_ctx:value("fiber_name"),
             stream_id,
             table.concat(paths, ", ")
         ))
@@ -154,8 +160,8 @@ function UBus:listen(ctx, ...)
         if not stdout then
             log.error(string.format(
                 "%s - %s: Failed to create stdout pipe for ubus listen command",
-                self.ctx:value("service_name"),
-                self.ctx:value("fiber_name")
+                stream_ctx:value("service_name"),
+                stream_ctx:value("fiber_name")
             ))
             op.choice(
                 self.cap_control_q:put_op({
@@ -172,8 +178,8 @@ function UBus:listen(ctx, ...)
         if cmd_err then
             log.error(string.format(
                 "%s - %s: Failed to start ubus listen command: %s",
-                self.ctx:value("service_name"),
-                self.ctx:value("fiber_name"),
+                stream_ctx:value("service_name"),
+                stream_ctx:value("fiber_name"),
                 cmd_err
             ))
             cmd:wait()
@@ -200,8 +206,8 @@ function UBus:listen(ctx, ...)
                     if decode_err then
                         log.error(string.format(
                             "%s - %s: Failed to decode ubus listen data: %s, reason: %s",
-                            self.ctx:value("service_name"),
-                            self.ctx:value("fiber_name"),
+                            stream_ctx:value("service_name"),
+                            stream_ctx:vselfalue("fiber_name"),
                             tostring(line),
                             decode_err
                         ))
@@ -239,8 +245,8 @@ function UBus:listen(ctx, ...)
 
         log.trace(string.format(
             "%s - %s: Ubus listen command finished for stream %s",
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name"),
+            stream_ctx:value("service_name"),
+            stream_ctx:value("fiber_name"),
             stream_id
         ))
     end)
@@ -279,7 +285,8 @@ function UBus:handle_capability(ctx, request)
         return
     end
 
-    if type(self[command]) ~= "function" then
+    local func = self[command]
+    if type(func) ~= "function" then
         ret_ch:put({
             result = nil,
             err = "Command does not exist"
@@ -288,7 +295,7 @@ function UBus:handle_capability(ctx, request)
     end
 
     fiber.spawn(function()
-        local result, err = self[command](self, ctx, unpack(args))
+        local result, err = func(self, ctx, unpack(args))
 
         ret_ch:put({
             result = result,
@@ -297,16 +304,11 @@ function UBus:handle_capability(ctx, request)
     end)
 end
 
-function UBus:new(ctx)
-    local ubus = { ctx = ctx, cap_control_q = queue.new(10) }
-    return setmetatable(ubus, UBus)
-end
-
 function UBus:apply_capabilities(capability_info_q)
     self.info_q = capability_info_q
     local capabilities = {
         ubus = {
-            control = self.cap_control_q,
+            control = hal_capabilities.new_ubus_capability(self.cap_control_q),
             id = "1"
         }
     }
@@ -317,7 +319,7 @@ function UBus:_main(ctx)
     while not ctx:err() do
         op.choice(
             self.cap_control_q:get_op():wrap(function(req)
-                UBus:handle_capability(ctx, req)
+                self:handle_capability(ctx, req)
             end),
             ctx:done_op()
         ):perform()
@@ -329,3 +331,5 @@ function UBus:spawn(conn)
         self:_main(fctx)
     end)
 end
+
+return { new = UBus.new }
