@@ -683,7 +683,12 @@ local function wan_monitor(ctx)
     for network, data in pairs(res.interfaces or {}) do
         local status = data.status == "online" and "online" or "offline"
         wan_status_channel:put({ network = network, status = status })
+
         net_service.conn:publish(new_msg({ "net", network, "status" }, status))
+        net_service.conn:publish(new_msg(
+            { "net", data.interface, "curr_uptime" },
+            status == "online" and os.time() or 0
+        ))
     end
 
     -- now we start a continuous loop to monitor for changes in interface state
@@ -724,6 +729,10 @@ local function wan_monitor(ctx)
                         status = status
                     })
                     net_service.conn:publish(new_msg({ "net", data.interface, "status" }, status))
+                    net_service.conn:publish(new_msg(
+                        { "net", data.interface, "curr_uptime" },
+                        status == "online" and os.time() or 0
+                    ))
                 end
             end),
             ctx:done_op():wrap(function()
