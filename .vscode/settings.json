@@ -14,6 +14,11 @@
     "[lua]": {
       "editor.tabSize": 4
     },
+    "Lua.workspace.checkThirdParty": false,
+    "Lua.workspace.maxPreload": 0,
+    "Lua.diagnostics.workspaceDelay": -1,
+    "Lua.workspace.library": [],
+    "Lua.diagnostics.enable": true,
     "cSpell.words": [
       "autopin",
       "autounlock",
