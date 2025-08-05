@@ -9,6 +9,8 @@ local http_util = require "http.util"
 local websocket = require "http.websocket"
 local cjson = require "cjson.safe"
 local op = require "fibers.op"
+-- -@type { get_box_reports: fun(): table, get_box_logs: fun(): table }
+local diagnostics = require "services.ui.diagnostics"
 require "services.ui.fibers_cqueues"
 
 local ui_service = {
@@ -176,10 +178,27 @@ local function onstream(self, stream)
 
     -- Dynamic request handling
     if req_type == api_prefix then
-        log.info("API call")
+        if req_path == "/api/diagnostics" then
+            local res_headers = http_headers.new()
+
+            if req_method == "GET" then
+                ---@diagnostic disable-next-line: need-check-nil
+                local diagnostics_reports = diagnostics.get_box_reports()
+                ---@diagnostic disable-next-line: need-check-nil
+                local diagnostics_logs = diagnostics.get_box_logs()
+                local resp = { diagnostics_logs = diagnostics_logs, diagnostics = diagnostics_reports }
+                local msg = cjson.encode(resp) .. "\n\n"
+                res_headers:append(":status", "200")
+                assert(stream:write_headers(res_headers, false))
+                assert(stream:write_chunk(msg, true))
+            else
+                res_headers:append(":status", "404")
+                assert(stream:write_headers(res_headers, true))
+            end
+        end
     elseif req_type == ws_prefix then
         -- Attempt WebSocket upgrade directly
-        local ws, err = websocket.new_from_stream(stream, req_headers)
+        local ws, _ = websocket.new_from_stream(stream, req_headers)
         if ws then
             log.info("Websocket upgrade request")
             -- Successful WebSocket upgrade
