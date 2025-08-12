@@ -272,7 +272,7 @@ end
 
 function UBus:handle_capability(ctx, request)
     local command = request.command
-    local args = request.args
+    local args = request.args or {}
     local ret_ch = request.return_channel
 
     if type(ret_ch) == 'nil' then return end
