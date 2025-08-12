@@ -2,7 +2,6 @@ local file = require 'fibers.stream.file'
 local fiber = require "fibers.fiber"
 local sleep = require "fibers.sleep"
 local queue = require "fibers.queue"
-local exec = require "fibers.exec"
 local channel = require "fibers.channel"
 local cond = require "fibers.cond"
 local op = require "fibers.op"
@@ -11,10 +10,8 @@ local context = require "fibers.context"
 local cjson = require "cjson.safe"
 local log = require "services.log"
 local shaping = require "services.net.shaping"
-local uci = require "uci"
 local speedtest = require "services.net.speedtest"
 local new_msg = require "bus".new_msg
-local cursor = uci.cursor() -- runtime-safe!
 -- local cursor = uci.cursor("/tmp/test", "/tmp/.uci") -- runtime-safe!
 
 -- top-level service
@@ -31,7 +28,17 @@ local BUS_TIMEOUT = 5
 
 local function add_to_uci_list(main, section_name, list_name, list_value)
     -- Read current networks assigned to the zone
-    local list_elements = cursor:get(main, section_name, list_name)
+    local uci_get_sub = net_service.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'get' },
+        { main, section_name, list_name }
+    ))
+    local ret = uci_get_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+    uci_get_sub:unsubscribe()
+    local list_elements, err = ret.payload.result, ret.payload.err
+    if err then
+        log.error("NET: Could not get UCI list", main, section_name, list_name, ":", err)
+        return
+    end
 
     -- Convert to table if necessary
     local network_list = {}
@@ -52,7 +59,10 @@ local function add_to_uci_list(main, section_name, list_name, list_value)
 
     if not already_present then
         table.insert(network_list, list_value)
-        cursor:set(main, section_name, list_name, network_list)
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { main, section_name, list_name, network_list }
+        ))
         log.debug("NET: Added", list_value, "to", main, section_name, list_name)
     end
 end
@@ -85,8 +95,9 @@ local modem_on_connected_channel = channel.new() -- For wan status supdates
 local report_period_channel = channel.new()      -- For config updates
 
 -- Queue definitions
-local speedtest_queue = queue.new()      -- Unbounded queue for holding speedtest requests
-local config_applier_queue = queue.new() -- Unbounded queue for holding config changes
+local speedtest_queue = queue.new() -- Unbounded queue for holding speedtest requests
+local shaping_queue = queue.new()
+-- local config_applier_queue = queue.new() -- Unbounded queue for holding config changes
 
 --- Conditional variable definitions
 local config_signal = cond.new() -- Conditional varibale to signal inital config
@@ -137,31 +148,72 @@ local function set_firewall_base_config(fw_cfg)
     log.info("NET: Applying base firewall config")
 
     -- Set default policies
-    cursor:set("firewall", "defaults", "defaults")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "firewall", "defaults", "defaults" }
+    ))
     for k, v in pairs(fw_cfg.defaults or {}) do
-        cursor:set("firewall", "defaults", k, v)
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "firewall", "defaults", k, v }
+        ))
     end
     -- Zones
     for _, zone in ipairs(fw_cfg.zones or {}) do
         local id = zone.config.name
-        cursor:set("firewall", id, "zone")
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "firewall", id, "zone" }
+        ))
         for k, v in pairs(zone.config) do
-            cursor:set("firewall", id, k, v)
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "firewall", id, k, v }
+            ))
         end
         for _, fwrule in ipairs(zone.forwarding or {}) do
-            local id = cursor:add("firewall", "forwarding")
-            cursor:set("firewall", id, "src", zone.config.name)
+            local forwarding_sub = net_service.conn:request(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'get' },
+                { "firewall", "forwarding" }
+            ))
+            local ret = forwarding_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+            forwarding_sub:unsubscribe()
+            local fw_id, err = ret.payload.result, ret.payload.err
+            if err then
+                log.error("NET: Failed to get forwarding ID:", err)
+                return
+            end
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "firewall", fw_id, "src", zone.config.name }
+            ))
             for k, v in pairs(fwrule) do
-                cursor:set("firewall", id, k, v)
+                net_service.conn:publish(new_msg(
+                    { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                    { "firewall", fw_id, k, v }
+                ))
             end
         end
     end
 
     -- Firewall rules
     for _, rule in ipairs(fw_cfg.rules or {}) do
-        local id = cursor:add("firewall", "rule")
+        local rule_sub = net_service.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "firewall", "rule" }
+        ))
+        local ret = rule_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+        rule_sub:unsubscribe()
+        local rule_id, err = ret.payload.result, ret.payload.err
+        if err then
+            log.error("NET: Failed to get rule ID:", err)
+            return
+        end
         for k, v in pairs(rule.config) do
-            cursor:set("firewall", id, k, v)
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "firewall", rule_id, k, v }
+            ))
         end
     end
 
@@ -172,27 +224,63 @@ local function set_network_base_config(net_cfg)
     log.info("NET: Applying base network config")
 
     -- Loopback
-    cursor:set("network", "loopback", "interface")
-    cursor:set("network", "loopback", "device", "lo")
-    cursor:set("network", "loopback", "proto", "static")
-    cursor:set("network", "loopback", "ipaddr", "127.0.0.1")
-    cursor:set("network", "loopback", "netmask", "255.0.0.0")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "network", "loopback", "interface" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "network", "loopback", "device", "lo" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "network", "loopback", "proto", "static" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "network", "loopback", "ipaddr", "127.0.0.1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "network", "loopback", "netmask", "255.0.0.0" }
+    ))
 
     -- Globals
-    cursor:set("network", "globals", "globals")
-    cursor:set("network", "globals", "ula_prefix", "auto")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "network", "globals", "globals" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "network", "globals", "ula_prefix", "auto" }
+    ))
 
     -- Static Routes
     for i, route in ipairs(net_cfg.static_routes or {}) do
         local id = "route_" .. i
-        cursor:set("network", id, "route")
-        cursor:set("network", id, "target", route.target)
-        cursor:set("network", id, "interface", route.interface)
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", id, "route" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", id, "target", route.target }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", id, "interface", route.interface }
+        ))
         if route.netmask then
-            cursor:set("network", id, "netmask", route.netmask)
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "network", id, "netmask", route.netmask }
+            ))
         end
         if route.gateway then
-            cursor:set("network", id, "gateway", route.gateway)
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "network", id, "gateway", route.gateway }
+            ))
         end
     end
 
@@ -203,24 +291,60 @@ local function set_mwan3_base_config(multiwan_cfg)
     log.info("NET: Applying base mwan3 config")
 
     -- Globals
-    cursor:set("mwan3", "globals", "globals")
-    cursor:set("mwan3", "globals", "mmx_mask", "0x3F00")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "globals", "globals" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "globals", "mmx_mask", "0x3F00" }
+    ))
 
     -- HTTPS Rule
-    cursor:set("mwan3", "https", "rule")
-    cursor:set("mwan3", "https", "sticky", "1")
-    cursor:set("mwan3", "https", "dest_port", "443")
-    cursor:set("mwan3", "https", "proto", "tcp")
-    cursor:set("mwan3", "https", "use_policy", "def_pol")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "https", "rule" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "https", "sticky", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "https", "dest_port", "443" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "https", "proto", "tcp" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "https", "use_policy", "def_pol" }
+    ))
 
     -- Default Rule
-    cursor:set("mwan3", "default_ipv4", "rule")
-    cursor:set("mwan3", "default_ipv4", "dest_ip", "0.0.0.0/0")
-    cursor:set("mwan3", "default_ipv4", "use_policy", "def_pol")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "default_ipv4", "rule" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "default_ipv4", "dest_ip", "0.0.0.0/0" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "default_ipv4", "use_policy", "def_pol" }
+    ))
 
     -- Policy
-    cursor:set("mwan3", "def_pol", "policy")
-    cursor:set("mwan3", "def_pol", "last_resort", "unreachable")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "def_pol", "policy" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", "def_pol", "last_resort", "unreachable" }
+    ))
 
     log.info("NET: Base mwan3 configured")
 end
@@ -230,10 +354,26 @@ local function set_dhcp_base_config(dhcp_cfg)
 
     -- DHCP domains
     for _, domain in ipairs(dhcp_cfg.domains or {}) do
-        local id = cursor:add("dhcp", "domain")
-        cursor:set("dhcp", id, "name", domain.name)
-        cursor:set("dhcp", id, "ip", domain.ip)
-        log.info("NET: Added static DNS", domain.name, "->", domain.ip)
+        local id_sub = net_service.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'add' },
+            { "dhcp", "domain" }
+        ))
+        local ret = id_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+        id_sub:unsubscribe()
+        local id, err = ret.payload.result, ret.payload.err
+        if err then
+            log.error("NET: Failed to add domain:", err)
+        else
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "dhcp", id, "name", domain.name }
+            ))
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "dhcp", id, "ip", domain.ip }
+            ))
+            log.info("NET: Added static DNS", domain.name, "->", domain.ip)
+        end
     end
 
     log.info("NET: Base dhcp configured")
@@ -248,46 +388,124 @@ local function set_network_config(instance)
 
     -- 1. Network interface config
     if net_cfg.type == "local" then
-        local devicename = cursor:add("network", "device")
-        cursor:set("network", devicename, "name", "br-" .. net_id)
-        cursor:set("network", devicename, "type", "bridge")
-        cursor:set("network", devicename, "ports", net_cfg.interfaces or {})
+        local devicename_sub = net_service.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'add' },
+            { "network", "device" }
+        ))
+        local ret = devicename_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+        devicename_sub:unsubscribe()
+        local devicename, err = ret.payload.result, ret.payload.err
+        if err then
+            log.error("NET: Failed to add network device:", err)
+            return
+        end
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", devicename, "name", "br-" .. net_id }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", devicename, "type", "bridge" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", devicename, "ports", net_cfg.interfaces or {} }
+        ))
     end
 
-    cursor:set("network", net_id, "interface")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "network", net_id, "interface" }
+    ))
     if net_cfg.type == "local" then
-        cursor:set("network", net_id, "device", "br-" .. net_id)
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", net_id, "device", "br-" .. net_id }
+        ))
     elseif net_cfg.type == "backhaul" then
-        cursor:set("network", net_id, "peerdns", "0")
-        cursor:set("network", net_id, "device", net_cfg.interfaces[1])
-        cursor:set("network", net_id, "metric", metric_counter.next())
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", net_id, "peerdns", "0" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", net_id, "device", net_cfg.interfaces[1] }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", net_id, "metric", metric_counter.next() }
+        ))
     end
 
     if net_cfg.ipv4.proto == "dhcp" then
-        cursor:set("network", net_id, "proto", "dhcp")
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", net_id, "proto", "dhcp" }
+        ))
     elseif net_cfg.ipv4.proto == "static" then
-        cursor:set("network", net_id, "proto", "static")
-        cursor:set("network", net_id, "ipaddr", net_cfg.ipv4.ip_address)
-        cursor:set("network", net_id, "netmask", net_cfg.ipv4.netmask)
-        if net_cfg.ipv4.gateway then cursor:set("network", net_id, "gateway", net_cfg.ipv4.gateway) end
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", net_id, "proto", "static" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", net_id, "ipaddr", net_cfg.ipv4.ip_address }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "network", net_id, "netmask", net_cfg.ipv4.netmask }
+        ))
+        if net_cfg.ipv4.gateway then
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "network", net_id, "gateway", net_cfg.ipv4.gateway }
+            ))
+        end
     end
 
     -- 2. DHCP
     if net_cfg.dhcp_server then
-        cursor:set("dhcp", net_id, "dhcp")
-        cursor:set("dhcp", net_id, "interface", net_id)
-        cursor:set("dhcp", net_id, "start", net_cfg.dhcp_server.range_skip or "10")
-        cursor:set("dhcp", net_id, "limit", net_cfg.dhcp_server.range_extent or "240")
-        cursor:set("dhcp", net_id, "leasetime", net_cfg.dhcp_server.lease_time or "12h")
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", net_id, "dhcp" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", net_id, "interface", net_id }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", net_id, "start", net_cfg.dhcp_server.range_skip or "10" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", net_id, "limit", net_cfg.dhcp_server.range_extent or "240" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", net_id, "leasetime", net_cfg.dhcp_server.lease_time or "12h" }
+        ))
     else
-        cursor:set("dhcp", net_id, "dhcp")
-        cursor:set("dhcp", net_id, "interface", net_id)
-        cursor:set("dhcp", net_id, "ignore", "1")
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", net_id, "dhcp" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", net_id, "interface", net_id }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", net_id, "ignore", "1" }
+        ))
     end
 
     -- connects DHCP to instance and DNS to interface
     if instance.dns_id then
-        cursor:set("dhcp", net_id, "instance", instance.dns_id)
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", net_id, "instance", instance.dns_id }
+        ))
         add_to_uci_list("dhcp", instance.dns_id, "interface", net_id)
     end
 
@@ -301,20 +519,56 @@ local function set_network_config(instance)
     -- 4. Add MWAN3 configuration
     if net_cfg.type == 'backhaul' then
         -- first, add the interface
-        cursor:set("mwan3", net_id, "interface")
-        cursor:set("mwan3", net_id, "enabled", 1)
-        cursor:set("mwan3", net_id, "interval", 1)
-        cursor:set("mwan3", net_id, "up", 1)
-        cursor:set("mwan3", net_id, "down", 2)
-        cursor:set("mwan3", net_id, "family", "ipv4")
-        cursor:set("mwan3", net_id, "track_ip", tracking_ips)
-        cursor:set("mwan3", net_id, "initial_state", instance.online and "online" or "offline")
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", net_id, "interface" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", net_id, "enabled", 1 }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", net_id, "interval", 1 }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", net_id, "up", 1 }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", net_id, "down", 2 }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", net_id, "family", "ipv4" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", net_id, "track_ip", tracking_ips }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", net_id, "initial_state", instance.online and "online" or "offline" }
+        ))
         -- now add the member
         local member_id = net_id .. "_member"
-        cursor:set("mwan3", member_id, "member")
-        cursor:set("mwan3", member_id, "interface", net_id)
-        cursor:set("mwan3", member_id, "metric", instance.speed and net_cfg.multiwan.metric or 99)
-        cursor:set("mwan3", member_id, "weight", instance.speed and instance.speed * 10 or 1)
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", member_id, "member" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", member_id, "interface", net_id }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", member_id, "metric", instance.speed and net_cfg.multiwan.metric or 99 }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "mwan3", member_id, "weight", instance.speed and instance.speed * 10 or 1 }
+        ))
         -- now add member to policy
         add_to_uci_list("mwan3", "def_pol", "use_member", member_id)
     end
@@ -328,15 +582,24 @@ local function set_network_speed(instance)
     log.info("NET: Applying network speed for:", net_id)
 
     -- first, add the interface
-    cursor:set("mwan3", net_id, "initial_state", instance.status == "online" and "online" or "offline")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", net_id, "initial_state", instance.status == "online" and "online" or "offline" }
+    ))
     -- now add the member
     local member_id = net_id .. "_member"
-    cursor:set("mwan3", member_id, "weight", instance.speed and round(instance.speed * 10) or 1)
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "mwan3", member_id, "weight", instance.speed and round(instance.speed * 10) or 1 }
+    ))
     -- now add member to policy
     add_to_uci_list("mwan3", "def_pol", "use_member", member_id)
     log.debug("NET: Committing changes for: mwan3")
-    cursor:commit("mwan3")
-    config_applier_queue:put({ "mwan3" })
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
+        { "mwan3" }
+    ))
+    -- config_applier_queue:put({ "mwan3" })
     log.info("NET: Speed config applied successfully for:", net_id)
 end
 local dnsmasq_instances = {} -- maps host filter keys to instance names
@@ -362,24 +625,78 @@ local function get_dnsmasq_id(default_hosts)
     dnsmasq_instances[id] = true
 
     -- Create dnsmasq config block
-    cursor:set("dhcp", id, "dnsmasq")
-    cursor:set("dhcp", id, "domain", "lan")
-    cursor:set("dhcp", id, "authoritative", "1")
-    cursor:set("dhcp", id, "localservice", "1")
-    cursor:set("dhcp", id, "nonwildcard", "1")
-    cursor:set("dhcp", id, "localise_queries", "1")
-    cursor:set("dhcp", id, "rebind_protection", "1")
-    cursor:set("dhcp", id, "rebind_localhost", "1")
-    cursor:set("dhcp", id, "expandhosts", "1")
-    cursor:set("dhcp", id, "boguspriv", "1")
-    cursor:set("dhcp", id, "leasefile", "/tmp/dhcp.leases." .. id)
-    cursor:set("dhcp", id, "local", "/lan/")
-    cursor:set("dhcp", id, "domainneeded", "1")
-    cursor:set("dhcp", id, "nonegcache", "0")
-    cursor:set("dhcp", id, "filterwin2k", "0")
-    cursor:set("dhcp", id, "readethers", "1")
-    cursor:set("dhcp", id, "server", { "8.8.8.8", "1.1.1.1" })
-    cursor:set("dhcp", id, "cachesize", "1000")
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "dnsmasq" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "domain", "lan" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "authoritative", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "localservice", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "nonwildcard", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "localise_queries", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "rebind_protection", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "rebind_localhost", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "expandhosts", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "boguspriv", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "leasefile", "/tmp/dhcp.leases." .. id }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "local", "/lan/" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "domainneeded", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "nonegcache", "0" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "filterwin2k", "0" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "readethers", "1" }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "server", { "8.8.8.8", "1.1.1.1" } }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "cachesize", "1000" }
+    ))
 
     -- Add any blocklist host files
     if #default_hosts > 0 then
@@ -387,7 +704,10 @@ local function get_dnsmasq_id(default_hosts)
         for _, list in ipairs(default_hosts) do
             table.insert(path_list, "/etc/jng/hosts/" .. list)
         end
-        cursor:set("dhcp", id, "addnhosts", path_list)
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", id, "addnhosts", path_list }
+        ))
     end
 
     return id
@@ -396,70 +716,44 @@ end
 local function config_applier(ctx)
     log.trace("NET: Config applier starting")
 
+    -- Need to change how this works as most has moved under HAL
+    -- Need to setup config restart policies
+    -- just listen for shaping and ifups now
     local services = {
         { service = "network",  actions = { { "/etc/init.d/network", "reload" } } },
         { service = "firewall", actions = { { "/etc/init.d/firewall", "restart" } } },
         { service = "dhcp",     actions = { { "/etc/init.d/dnsmasq", "restart" }, { "/etc/init.d/odhcpd", "restart" } } },
         { service = "mwan3",    actions = { { "/etc/init.d/mwan3", "restart" } } },
     }
-
-    local next_deadline = sc.monotime() + 1
-    local to_be_restarted = {}
-    while not ctx:err() do
-        op.choice(
-            config_applier_queue:get_op():wrap(function(msg)
-                if msg.ifup then -- this is a temporary ad-hoc special case. config application needs to move to HAL and be made more logical
-                    -- Directly handle ifup here
-                    local err = exec.command("ifup", msg.ifup):run()
-                    if err then
-                        log.warn("NET: Could not ifup", msg.ifup)
-                    end
-                elseif msg.shaping then
-                    local net_cfg = msg.shaping
-                    if net_cfg.shaping and net_cfg.interfaces then
-                        log.info("NET: Applying shaping for:", net_cfg.id)
-
-                        local err = exec.command("ifup", net_cfg.id):run()
-                        if err then
-                            log.warn("NET: ifup failed, retrying shaping later for:", net_cfg.id)
-                            fiber.spawn(function()
-                                sleep.sleep(2)
-                                config_applier_queue:put(msg)
-                            end)
-                        else
-                            shaping.apply(net_cfg)
-                        end
-                    end
-                else
-                    -- Existing logic
-                    for _, v in ipairs(msg) do
-                        to_be_restarted[v] = true
-                    end
-                end
-            end),
-            sleep.sleep_until_op(next_deadline):wrap(function()
-                for _, v in ipairs(services) do
-                    if to_be_restarted[v.service] then
-                        log.info("NET:", "Restarting", v.service)
-                        for i, action in ipairs(v.actions) do
-                            local err = exec.command(table.unpack(action)):run()
-                            if err then
-                                log.warn("NET: Could not run", table.concat(action, " "))
-                            else
-                                log.info("NET:", v.service, "restart action", i, "completed successfully")
-                            end
-                        end
-                    end
-                end
-                next_deadline = sc.monotime() + 1
-                to_be_restarted = {}
-            end)
-        ):perform()
-    end
 end
 
 local function uci_manager(ctx)
     log.trace("NET: UCI manager starting")
+
+    local uci_sub = net_service:subscribe({ 'hal', 'capability', 'uci', '1' })
+    uci_sub:next_msg_with_context(context.with_timeout(ctx, BUS_TIMEOUT)) -- wait for uci capability to appear
+    uci_sub:unsubscribe()
+
+    -- setup restart policies for each config
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
+        { "network", { method = "debounce", delay = 1 }, { { "/etc/init.d/network", "reload" } } }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
+        { "firewall", { method = "debounce", delay = 1 }, { { "/etc/init.d/firewall", "restart" } } }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
+        { "dhcp", { method = "debounce", delay = 1 }, {
+            { "/etc/init.d/dnsmasq", "restart" },
+            { "/etc/init.d/odhcpd",  "restart" }
+        } }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
+        { "mwan3", { method = "debounce", delay = 1 }, { { "/etc/init.d/mwan3", "restart" } } }
+    ))
 
     local networks = {}
     local resolved_interfaces = {} -- key = modem_id or ifname, value = resolved interface string
@@ -469,9 +763,20 @@ local function uci_manager(ctx)
         -- cleanup
         local areas = { "network", "firewall", "dhcp", "mwan3" }
         for _, area in ipairs(areas) do
-            cursor:foreach(area, nil, function(s)
-                cursor:delete(area, s[".name"])
-            end)
+            -- Delete all sections in each UCI config area
+            local foreach_sub = net_service.conn:request(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'foreach' },
+                { area, nil,
+                    function(cursor, s)
+                        cursor:delete(area, s[".name"])
+                    end
+                }
+            ))
+            local ret = foreach_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+            foreach_sub:unsubscribe()
+            if ret.payload.err then
+                log.error("NET: Failed to clear UCI area", area, ":", ret.payload.err)
+            end
         end
         metric_counter.reset()
         -- config application
@@ -506,13 +811,16 @@ local function uci_manager(ctx)
         end
         for _, area in ipairs(areas) do
             log.debug("NET: Committing changes for:", area)
-            cursor:commit(area)
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
+                { area }
+            ))
         end
         print("That took:", sc.monotime() - start)
-        config_applier_queue:put({ "network", "firewall", "dhcp", "mwan3" })
+        -- config_applier_queue:put({ "network", "firewall", "dhcp", "mwan3" })
 
         for _, net_cfg in ipairs(cfg.network or {}) do
-            config_applier_queue:put({ shaping = net_cfg })
+            shaping_queue:put(net_cfg)
         end
         -- If this is the initial config, signal config applied
         config_signal:signal()
@@ -565,9 +873,12 @@ local function uci_manager(ctx)
                 log.info("NET: Applied deferred network config for", net_id)
                 for _, area in ipairs(areas) do
                     log.debug("NET: Committing changes for:", area)
-                    cursor:commit(area)
+                    net_service.conn:publish(new_msg(
+                        { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
+                        { area }
+                    ))
                 end
-                config_applier_queue:put(areas)
+                -- config_applier_queue:put(areas)
             end
         end
     end
@@ -582,7 +893,10 @@ local function uci_manager(ctx)
     local function on_modem_connected(modem_id)
         for _, net in pairs(networks) do
             if net.cfg.modem_id == modem_id then
-                config_applier_queue:put({ ifup = net.cfg.id })
+                net_service.conn:publish(new_msg(
+                    { 'hal', 'capability', 'uci', '1', 'control', 'ifup' },
+                    { net.cfg.id }
+                ))
             end
         end
     end
@@ -666,8 +980,8 @@ local function uci_manager(ctx)
 end
 
 local function wan_monitor(ctx)
-    config_signal:wait() -- Block wan monitor until initial configs
-    local ubus_active_sub = net_service.conn:subscribe({'hal', 'capability', 'ubus', '1'})
+    config_signal:wait()       -- Block wan monitor until initial configs
+    local ubus_active_sub = net_service.conn:subscribe({ 'hal', 'capability', 'ubus', '1' })
     ubus_active_sub:next_msg() -- Block wan monitor until ubus capability is active
 
     log.trace("NET: WAN monitor starting")
@@ -678,6 +992,7 @@ local function wan_monitor(ctx)
         { "mwan3", "status" }
     ))
     local status_response, ctx_err = status_sub:next_msg_with_context(context.with_timeout(ctx, BUS_TIMEOUT))
+    status_sub:unsubscribe()
 
     if ctx_err or status_response.payload.err then
         local err = ctx_err or status_response.payload.err
@@ -704,6 +1019,7 @@ local function wan_monitor(ctx)
         { 'hotplug.mwan3' }
     ))
     local listen_response, ctx_err = listen_sub:next_msg_with_context(context.with_timeout(ctx, BUS_TIMEOUT))
+    listen_sub:unsubscribe()
     if ctx_err or listen_response.payload.err then
         local err = ctx_err or listen_response.payload.err
         log.error("NET: ubus listen failed:", err)
@@ -738,7 +1054,7 @@ local function wan_monitor(ctx)
                     status == "online" and os.time() or 0
                 ))
             end),
-            stream_end_sub:next_msg_op():wrap(function (stream_ended)
+            stream_end_sub:next_msg_op():wrap(function(stream_ended)
                 if stream_ended.payload then
                     process_ended = true
                 end
@@ -774,6 +1090,15 @@ local function speedtest_worker(ctx)
     end
 end
 
+local function shaping_worker(ctx)
+    log.trace("NET: Shaping worker starting")
+    while not ctx:err() do
+        local net_cfg = shaping_queue:get()
+        log.trace("NET: Shaping worker got config for:", net_cfg.id)
+        shaping.apply(net_cfg)
+    end
+end
+
 local function modem_state_listener(ctx)
     log.trace("NET: Interface listener starting")
     local sub = net_service.conn:subscribe({ "gsm", "modem", "+", "state" })
@@ -799,6 +1124,7 @@ end
 
 function net_service:start(ctx, conn)
     log.trace("Starting NET Service")
+    self.ctx = ctx
     self.conn = conn
 
     -- Spawn core components
@@ -807,7 +1133,8 @@ function net_service:start(ctx, conn)
     fiber.spawn(function() uci_manager(ctx) end)
     fiber.spawn(function() wan_monitor(ctx) end)
     fiber.spawn(function() speedtest_worker(ctx) end)
-    fiber.spawn(function() config_applier(ctx) end)
+    fiber.spawn(function() shaping_worker(ctx) end)
+    -- fiber.spawn(function() config_applier(ctx) end)
     fiber.spawn(function() modem_state_listener(ctx) end)
 end
 
