@@ -1,5 +1,6 @@
 local modem_manager = require "services.hal.managers.modemcard"
 local ubus_manager = require "services.hal.managers.ubus"
+local uci_manager = require "services.hal.managers.uci"
 local fiber = require "fibers.fiber"
 local queue = require "fibers.queue"
 local op = require "fibers.op"
@@ -16,7 +17,8 @@ local hal_service = {
     capability_info_q = queue.new(50),
     device_event_q = queue.new(10),
     modem_manager_instance = modem_manager.new(),
-    ubus_manager_instance = ubus_manager.new()
+    ubus_manager_instance = ubus_manager.new(),
+    uci_manager_instance = uci_manager.new()
 }
 hal_service.__index = hal_service
 
@@ -180,21 +182,21 @@ function hal_service:_handle_capability_control(request)
     local capability, instance_id, method = request.topic[3], request.topic[4], request.topic[6]
 
     local cap = self.capabilities[capability]
-    if cap == nil then
+    if cap == nil and request.reply_to then
         local msg = new_msg({ request.reply_to }, { result = nil, err = 'capability does not exist' })
         self.conn:publish(msg)
         return
     end
 
     local instance = cap[instance_id]
-    if instance == nil then
+    if instance == nil and request.reply_to then
         local msg = new_msg({ request.reply_to }, { result = nil, err = 'capability instance does not exist' })
         self.conn:publish(msg)
         return
     end
 
     local func = instance[method]
-    if func == nil then
+    if func == nil and request.reply_to then
         local msg = new_msg({ request.reply_to }, { result = nil, err = 'endpoint does not exist' })
         self.conn:publish(msg)
         return
@@ -204,11 +206,13 @@ function hal_service:_handle_capability_control(request)
     fiber.spawn(function()
         -- unpack arguments to function
         local ret = func(instance, request.payload)
-        local msg = new_msg({ request.reply_to }, {
-            result = ret.result,
-            err = ret.err
-        })
-        self.conn:publish(msg)
+        if request.reply_to then
+            local msg = new_msg({ request.reply_to }, {
+                result = ret.result,
+                err = ret.err
+            })
+            self.conn:publish(msg)
+        end
     end)
 end
 
@@ -301,6 +305,7 @@ function hal_service:start(ctx, conn)
     -- start modem manager and detection
     self.modem_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
     self.ubus_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
+    self.uci_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
 end
 
 return hal_service
