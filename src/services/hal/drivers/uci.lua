@@ -43,6 +43,7 @@ end
 --- @return string?
 function UCI:get(_, config, section, option)
     local val, err = cursor:get(config, section, option)
+    print("get", config, section, option, "result", val, err)
     if err then
         return nil, err
     end
@@ -78,13 +79,9 @@ end
 --- @param option string
 --- @return boolean
 --- @return string?
-function UCI:delete(ctx, config, section, option)
-    local success, err
-    if option then
-        success, err = cursor:delete(config, section, option)
-    else
-        success, err = cursor:delete(config, section)
-    end
+function UCI:delete(_, config, section, option)
+    local success, err = cursor:delete(config, section, option)
+    -- print("delete", config, section, option, "result", success, err)
     if not success then
         return false, string.format("Failed to delete %s.%s.%s: %s", config, section, option, err)
     end
@@ -98,7 +95,11 @@ end
 --- @return boolean
 --- @return string?
 function UCI:commit(ctx, config)
-    local config_restart_ch = channel.new()
+    local success, err = cursor:commit(config)
+    -- print("commit", config, success, err)
+    if not success then
+        return false, string.format("Failed to commit changes for %s: %s", config, err)
+    end
     op.choice(
         self.config_update_q:put_op({ config = config, notify_ch = config_restart_ch }),
         ctx:done_op()
@@ -169,6 +170,7 @@ function UCI:foreach(ctx, config, type, callback)
     local success = cursor:foreach(config, type, function(section)
         callback(cursor, section)
     end)
+    -- print("foreach", config, type, callback, "result", success)
     if not success then
         return false, string.format("Failed to iterate over %s.%s", config, type)
     end
@@ -182,9 +184,32 @@ end
 --- @param actions table
 --- @return boolean
 --- @return string?
-function UCI:set_restart_actions(ctx, config, actions)
-    if not actions then
-        return false, "Actions must be specified"
+function UCI:set_restart_policy(ctx, config, policy, actions)
+    -- print("set_restart_policy", config, policy, actions)
+    if not policy or not policy.method then
+        return false, "Policy must be specified with a method"
+    end
+    local new_policy = {}
+    if policy.method == 'immediate' then
+        new_policy.next_restart = function()
+            return sc.monotime()
+        end
+    elseif policy.method == 'defer' then
+        if not policy.delay then return false, "Delay must be specified for delay_from_first method" end
+        new_policy.next_restart = function(prev_delay)
+            return prev_delay or sc.monotime() + policy.delay
+        end
+    elseif policy.method == 'debounce' then
+        if not policy.delay then return false, "Delay must be specified for debounce method" end
+        new_policy.next_restart = function()
+            return sc.monotime() + policy.delay
+        end
+    elseif policy.method == 'manual' then
+        new_policy.next_restart = function()
+            return nil -- Manual restart means no automatic next restart
+        end
+    else
+        return false, "Invalid restart policy method"
     end
 
     op.choice(
@@ -237,6 +262,7 @@ end
 --- @param request table
 function UCI:handle_capability(ctx, request)
     local command = request.command
+    print("uci", command)
     local args = request.args or {}
     local ret_ch = request.return_channel
 
