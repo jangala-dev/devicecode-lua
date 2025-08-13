@@ -182,23 +182,29 @@ function hal_service:_handle_capability_control(request)
     local capability, instance_id, method = request.topic[3], request.topic[4], request.topic[6]
 
     local cap = self.capabilities[capability]
-    if cap == nil and request.reply_to then
-        local msg = new_msg({ request.reply_to }, { result = nil, err = 'capability does not exist' })
-        self.conn:publish(msg)
+    if cap == nil then
+        if request.reply_to then
+            local msg = new_msg({ request.reply_to }, { result = nil, err = 'capability does not exist' })
+            self.conn:publish(msg)
+        end
         return
     end
 
     local instance = cap[instance_id]
-    if instance == nil and request.reply_to then
-        local msg = new_msg({ request.reply_to }, { result = nil, err = 'capability instance does not exist' })
-        self.conn:publish(msg)
+    if instance == nil then
+        if request.reply_to then
+            local msg = new_msg({ request.reply_to }, { result = nil, err = 'capability instance does not exist' })
+            self.conn:publish(msg)
+        end
         return
     end
 
     local func = instance[method]
-    if func == nil and request.reply_to then
-        local msg = new_msg({ request.reply_to }, { result = nil, err = 'endpoint does not exist' })
-        self.conn:publish(msg)
+    if func == nil then
+        if request.reply_to then
+            local msg = new_msg({ request.reply_to }, { result = nil, err = 'endpoint does not exist' })
+            self.conn:publish(msg)
+        end
         return
     end
 
