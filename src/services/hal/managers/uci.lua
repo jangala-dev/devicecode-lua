@@ -3,15 +3,15 @@ local log = require "services.log"
 local uci_driver = require "services.hal.drivers.uci"
 local service = require "service"
 
-local UBusManagement = {}
-UBusManagement.__index = UBusManagement
+local UCIManagement = {}
+UCIManagement.__index = UCIManagement
 
 local function new()
     local ubus_management = {}
-    return setmetatable(ubus_management, UBusManagement)
+    return setmetatable(ubus_management, UCIManagement)
 end
 
-function UBusManagement:_manager(ctx, conn, device_event_q, capability_info_q)
+function UCIManagement:_manager(ctx, conn, device_event_q, capability_info_q)
     log.trace(string.format(
         "%s - %s: Starting",
         ctx:value("service_name"),
@@ -54,7 +54,7 @@ function UBusManagement:_manager(ctx, conn, device_event_q, capability_info_q)
     device_event_q:put(device_event)
 end
 
-function UBusManagement:spawn(ctx, conn, device_event_q, capability_info_q)
+function UCIManagement:spawn(ctx, conn, device_event_q, capability_info_q)
     service.spawn_fiber("UBus Manager", conn, ctx, function (fctx)
         self:_manager(fctx, conn, device_event_q, capability_info_q)
     end)
