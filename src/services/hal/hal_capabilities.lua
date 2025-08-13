@@ -141,6 +141,11 @@ function UCICapability:continue_restarts()
     return do_command(self.driver_q, cmd)
 end
 
+function UCICapability:ifup(args)
+    local cmd = {command = 'ifup', args = args}
+    return do_command(self.driver_q, cmd)
+end
+
 -- ubus cap
 local UBusCapability = {}
 UBusCapability.__index = UBusCapability
