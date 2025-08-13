@@ -1,12 +1,26 @@
 local expected = require 'services.ui.diagnostics_expected'
 local helpers = require 'services.ui.diagnostics_helpers'
 local exec = require 'fibers.exec'
+local log = require 'services.log'
 
 local LOG_LEVELS = {
     NOTICE = "notice",
     WARN = "warn",
     ERROR = "error"
 }
+
+local dmesg_level_set = false
+
+-- Configuring Dmesg log level to include Notice
+local function ensure_dmesg_console_level()
+    if dmesg_level_set then return end
+    local _, err = exec.command("sh", "-c", "dmesg -n 5"):output()
+    if err then
+        log.error("UI - Error setting dmesg log level " .. tostring(err))
+    else
+        dmesg_level_set = true
+    end
+end
 
 ---Creates a new report table
 ---@param exp number Number of expected packages/services
@@ -88,6 +102,8 @@ end
 ---@return string[]|nil logs
 ---@return string|nil error
 local function get_dmesg_logs(log_level)
+    ensure_dmesg_console_level()
+
     local output, err = exec.command("sh", "-c", 'dmesg | grep -E -i "' .. log_level .. '"'):output()
     if err then
         return nil, err
@@ -217,19 +233,27 @@ local function get_box_reports()
         local packages_installed, pkg_inst_err = get_packages_installed(hardware_info.model)
         if pkg_inst_err == nil then
             diagnostics.packages_installed = packages_installed
+        else
+            log.error("UI - error getting packages installed", pkg_inst_err)
         end
 
         -- Check modems
         local modems_installed, mod_inst_err = get_modems_installed(hardware_info.model)
         if mod_inst_err == nil then
             diagnostics.modems_installed = modems_installed
+        else
+            log.error("UI - error getting modems installed", mod_inst_err)
         end
 
         -- Check services running
         local services_running, exp_svc_err = check_expected_services_running(hardware_info.model)
         if exp_svc_err == nil then
             diagnostics.services_running = services_running
+        else
+            log.error("UI - error getting services running", exp_svc_err)
         end
+    else
+        log.error("UI - error getting hardware info", hardware_info_err)
     end
 
     -- Check if packages are running
@@ -239,7 +263,6 @@ local function get_box_reports()
     -- Check bootstrapped
     local bootstrap_installed = check_expected_bootstrap_installed(expected.bootstrap_installed)
     diagnostics.bootstrap_installed = bootstrap_installed
-
 
     return diagnostics
 end
@@ -265,12 +288,6 @@ local function get_box_logs()
         end
     end
     return logs
-end
-
--- Configuring Dmesg log level to include Notice
-local _, err = exec.command("sh", "-c", "dmesg -n 5"):output()
-if err then
-    exec.command("logger", "-p", "err", "-t", "device_code", "Error setting dmesg log level: " .. tostring(err)):run()
 end
 
 return {
