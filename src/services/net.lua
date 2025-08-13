@@ -32,13 +32,22 @@ local function add_to_uci_list(main, section_name, list_name, list_value)
         { 'hal', 'capability', 'uci', '1', 'control', 'get' },
         { main, section_name, list_name }
     ))
-    local ret = uci_get_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+    print("getting", sc.monotime())
+    local ret, ctx_err = uci_get_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+    print("got", sc.monotime())
     uci_get_sub:unsubscribe()
-    local list_elements, err = ret.payload.result, ret.payload.err
-    if err then
-        log.error("NET: Could not get UCI list", main, section_name, list_name, ":", err)
-        return
+    if ctx_err then
+        log.error(string.format(
+            "%s - %s: Get (%s, %s, %s) failed, reason: %s",
+            net_service.ctx:value("service_name"),
+            net_service.ctx:value("fiber_name"),
+            main,
+            section_name,
+            list_name,
+            ctx_err
+        ))
     end
+    local list_elements = ret.payload.result
 
     -- Convert to table if necessary
     local network_list = {}
@@ -173,7 +182,7 @@ local function set_firewall_base_config(fw_cfg)
         end
         for _, fwrule in ipairs(zone.forwarding or {}) do
             local forwarding_sub = net_service.conn:request(new_msg(
-                { 'hal', 'capability', 'uci', '1', 'control', 'get' },
+                { 'hal', 'capability', 'uci', '1', 'control', 'add' },
                 { "firewall", "forwarding" }
             ))
             local ret = forwarding_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
@@ -199,7 +208,7 @@ local function set_firewall_base_config(fw_cfg)
     -- Firewall rules
     for _, rule in ipairs(fw_cfg.rules or {}) do
         local rule_sub = net_service.conn:request(new_msg(
-            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { 'hal', 'capability', 'uci', '1', 'control', 'add' },
             { "firewall", "rule" }
         ))
         local ret = rule_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
@@ -730,8 +739,8 @@ end
 local function uci_manager(ctx)
     log.trace("NET: UCI manager starting")
 
-    local uci_sub = net_service:subscribe({ 'hal', 'capability', 'uci', '1' })
-    uci_sub:next_msg_with_context(context.with_timeout(ctx, BUS_TIMEOUT)) -- wait for uci capability to appear
+    local uci_sub = net_service.conn:subscribe({ 'hal', 'capability', 'uci', '1' })
+    uci_sub:next_msg_with_context(ctx) -- wait for uci capability to appear
     uci_sub:unsubscribe()
 
     -- setup restart policies for each config
@@ -893,10 +902,29 @@ local function uci_manager(ctx)
     local function on_modem_connected(modem_id)
         for _, net in pairs(networks) do
             if net.cfg.modem_id == modem_id then
-                net_service.conn:publish(new_msg(
+                local ifup_sub = net_service.conn:request(new_msg(
                     { 'hal', 'capability', 'uci', '1', 'control', 'ifup' },
                     { net.cfg.id }
                 ))
+                local ret, ctx_err = ifup_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+                if ctx_err or ret.payload.err then
+                    log.error(string.format(
+                        "%s - %s: Failed to bring up network %s: %s",
+                        net_service.ctx:value("service_name"),
+                        net_service.ctx:value("fiber_name"),
+                        net.cfg.id,
+                        ctx_err or ret.payload.err
+                    ))
+                    return
+                else
+                    log.trace(string.format(
+                        "%s - %s: Successfully brought up network %s",
+                        net_service.ctx:value("service_name"),
+                        net_service.ctx:value("fiber_name"),
+                        net.cfg.id
+                    ))
+                end
+                ifup_sub:unsubscribe()
             end
         end
     end
@@ -1094,8 +1122,37 @@ local function shaping_worker(ctx)
     log.trace("NET: Shaping worker starting")
     while not ctx:err() do
         local net_cfg = shaping_queue:get()
-        log.trace("NET: Shaping worker got config for:", net_cfg.id)
-        shaping.apply(net_cfg)
+        if net_cfg.shaping and net_cfg.interfaces then
+            log.trace("NET: Shaping worker got config for:", net_cfg.id)
+
+            local ifup_sub = net_service.conn:request(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'ifup' },
+                { net_cfg.id }
+            ))
+            local ret, ctx_err = ifup_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+            ifup_sub:unsubscribe()
+            if ctx_err or ret.payload.err then
+                log.error(string.format(
+                    "%s - %s: Failed to bring up network %s: %s",
+                    net_service.ctx:value("service_name"),
+                    net_service.ctx:value("fiber_name"),
+                    net_cfg.id,
+                    ctx_err or ret.payload.err
+                ))
+                fiber.spawn(function()
+                    sleep.sleep(2)
+                    shaping_queue:put(net_cfg)
+                end)
+            else
+                log.trace(string.format(
+                    "%s - %s: Successfully brought up network %s",
+                    net_service.ctx:value("service_name"),
+                    net_service.ctx:value("fiber_name"),
+                    net_cfg.id
+                ))
+                shaping.apply(net_cfg)
+            end
+        end
     end
 end
 
