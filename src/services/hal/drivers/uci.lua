@@ -43,6 +43,7 @@ end
 --- @return string?
 function UCI:get(_, config, section, option)
     local val, err = cursor:get(config, section, option)
+    print("get", config, section, option, "result", val, err)
     if err then
         return nil, err
     end
@@ -169,6 +170,7 @@ function UCI:foreach(ctx, config, type, callback)
     local success = cursor:foreach(config, type, function(section)
         callback(cursor, section)
     end)
+    -- print("foreach", config, type, callback, "result", success)
     if not success then
         return false, string.format("Failed to iterate over %s.%s", config, type)
     end
@@ -237,6 +239,7 @@ end
 --- @param request table
 function UCI:handle_capability(ctx, request)
     local command = request.command
+    print("uci", command)
     local args = request.args or {}
     local ret_ch = request.return_channel
 
