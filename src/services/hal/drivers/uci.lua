@@ -366,6 +366,8 @@ function UCI:_main(ctx)
         ctx:value("fiber_name")
     ))
     local restart_op = nil
+    local restarts = {}
+    local next_group_restart = sc.monotime() + 1
     while not ctx:err() do
         local ops = {
             self.cap_control_q:get_op():wrap(function(req)
@@ -389,6 +391,17 @@ function UCI:_main(ctx)
                         notify_ch = commit_request.notify_ch
                     })
                 end)
+            end),
+            sleep.sleep_until_op(next_group_restart):wrap(function ()
+                print("restarting")
+                for config, restarter in pairs(restarts) do
+                    print("\t", config)
+                    for _, action in ipairs(restarter.actions) do
+                        exec.command_context(ctx, unpack(action)):run()
+                    end
+                    restarts[config] = nil
+                end
+                next_group_restart = sc.monotime() + 1
             end),
             ctx:done_op()
         }
