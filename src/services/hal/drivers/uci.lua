@@ -343,6 +343,8 @@ function UCI:_main(ctx)
         ctx:value("fiber_name")
     ))
     local restart_op = nil
+    local restarts = {}
+    local next_group_restart = sc.monotime() + 1
     while not ctx:err() do
         local ops = {
             self.cap_control_q:get_op():wrap(function(req)
