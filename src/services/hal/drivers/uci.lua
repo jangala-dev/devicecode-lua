@@ -249,6 +249,8 @@ function UCI:_main(ctx)
         ctx:value("fiber_name")
     ))
     local restart_op = nil
+    local restarts = {}
+    local next_group_restart = sc.monotime() + 1
     while not ctx:err() do
         local ops = {
             self.cap_control_q:get_op():wrap(function(req)
@@ -269,17 +271,24 @@ function UCI:_main(ctx)
                     restart_op = nil
                 end
             end),
+            sleep.sleep_until_op(next_group_restart):wrap(function ()
+                print("restarting")
+                for config, restarter in pairs(restarts) do
+                    print("\t", config)
+                    for _, action in ipairs(restarter.actions) do
+                        exec.command_context(ctx, unpack(action)):run()
+                    end
+                    restarts[config] = nil
+                end
+                next_group_restart = sc.monotime() + 1
+            end),
             ctx:done_op()
         }
         if restart_op then
             table.insert(ops, restart_op:wrap(function (restarter)
-                print("restarting", restarter.config)
+                print("here")
+                restarts[restarter.config] = restarter
                 restart_policies[restarter.config].current_restart = nil
-                for _, action in ipairs(restarter.actions) do
-                    fiber.spawn(function ()
-                        exec.command_context(ctx, unpack(action)):run()
-                    end)
-                end
                 local next_restart = self:get_next_restart()
                 if next_restart.config and next_restart.time then
                     restart_op = sleep.sleep_until_op(next_restart.time):wrap(function()
