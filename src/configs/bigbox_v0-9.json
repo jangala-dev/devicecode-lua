@@ -1516,7 +1516,12 @@
             "system",
             "boot_time"
           ],
-          "process": []
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
         "system/info/firmware/version": {
           "protocol": "http",
@@ -1524,7 +1529,12 @@
             "system",
             "fw_id"
           ],
-          "process": []
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
         "system/info/hardware/revision": {
           "protocol": "http",
@@ -1532,7 +1542,12 @@
             "system",
             "hw_id"
           ],
-          "process": []
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
         "system/info/hardware/serial": {
           "protocol": "http",
@@ -1540,7 +1555,12 @@
             "system",
             "serial"
           ],
-          "process": []
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
         "system/info/hardware/board/revision": {
           "protocol": "http",
@@ -1548,7 +1568,12 @@
             "system",
             "board_revision"
           ],
-          "process": []
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
         },
         "system/info/cpu/overall_utilisation": {
           "protocol": "http",
