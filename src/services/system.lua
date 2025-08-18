@@ -55,8 +55,73 @@ function system_service:_handle_config(config_msg)
     end
 end
 
+---Gets static information (hw model, hw/fw version, boot time)
+---@return table?
+local function get_static_infos()
+    local info = {}
+    local hw_revision, hw_err = sysinfo.get_hw_revision()
+    if hw_err then
+        log.error(string.format("System: Failed to get model and version: %s", hw_err))
+    else
+        info.hardware = {
+            revision = hw_revision
+        }
+    end
+
+    local firmware_version, fw_err = sysinfo.get_fw_version()
+    if fw_err then
+        log.error(string.format("System: Failed to get firmware version: %s", fw_err))
+    else
+        info.firmware = {
+            version = firmware_version
+        }
+    end
+
+    local uptime, uptime_err = sysinfo.get_uptime()
+    local boot_time
+    if uptime_err then
+        log.error("Failed to get uptime: ", uptime_err)
+    else
+        boot_time = math.floor(os.time() - uptime)
+        info.boot_time = boot_time
+    end
+
+    local board_revision, revision_err = sysinfo.get_board_revision()
+    if revision_err then
+        log.error("Failed to get board revision: ", revision_err)
+    else
+        info.hardware = info.hardware or {}
+        info.hardware.board = { revision = board_revision }
+    end
+
+    local serial, serial_err = sysinfo.get_serial()
+    if serial_err then
+        log.debug("Failed to get serial number: ", serial_err)
+    else
+        info.hardware = info.hardware or {}
+        info.hardware.serial = serial
+    end
+
+    if next(info) then
+        return info
+    else
+        log.error("System: No static information available")
+        return nil
+    end
+end
+
 ---Periodic gathering a publish of system information
 function system_service:_report_sysinfo()
+    local sysinfo_data = get_static_infos() or {}
+    if sysinfo_data then
+        if sysinfo_data.hardware and sysinfo_data.hardware.revision then
+            -- Extract model and version from hw revision
+            local hw_revision = sysinfo_data.hardware.revision
+            local model, _ = hw_revision:match('(%S+)%s+(%S+)')
+            if model then self.model = model end
+        end
+    end
+
     local report_period = self.report_period_channel:get()
     while not self.ctx:err() do
         local cpu_model, cpu_model_err = sysinfo.get_cpu_model()
@@ -79,23 +144,23 @@ function system_service:_report_sysinfo()
             log.debug("Failed to get temperature: ", temp_err)
         end
 
-        local sysinfo_data = {
-            cpu = {
-                cpu_model = cpu_model,
-                overall_utilisation = all_util,
-                core_utilisations = core_util,
-                average_frequency = avg_freq,
-                core_frequencies = core_freq
-            },
-            mem = {
-                total = total,
-                used = used,
-                free = free,
-                util = (used / total) * 100
-            },
-            temperature = temperature,
-            heartbeat = 0
+        sysinfo_data.cpu = {
+            cpu_model = cpu_model,
+            overall_utilisation = all_util,
+            core_utilisations = core_util,
+            average_frequency = avg_freq,
+            core_frequencies = core_freq
         }
+
+        sysinfo_data.mem = {
+            total = total,
+            used = used,
+            free = free,
+            util = (used / total) * 100
+        }
+
+        sysinfo_data.temperature = temperature
+        sysinfo_data.heartbeat = 0
 
         self.conn:publish_multiple(
             { 'system', 'info' },
@@ -183,81 +248,11 @@ function system_service:_handle_alarm(alarm)
     end
 end
 
----Gets static information (hw model, hw/fw version, boot time)
----@return table?
-local function get_static_infos()
-    local info = {}
-    local hw_revision, hw_err = sysinfo.get_hw_revision()
-    if hw_err then
-        log.error(string.format("System: Failed to get model and version: %s", hw_err))
-    else
-        info.hardware = {
-            revision = hw_revision
-        }
-    end
-
-    local firmware_version, fw_err = sysinfo.get_fw_version()
-    if fw_err then
-        log.error(string.format("System: Failed to get firmware version: %s", fw_err))
-    else
-        info.firmware = {
-            version = firmware_version
-        }
-    end
-
-    local uptime, uptime_err = sysinfo.get_uptime()
-    local boot_time
-    if uptime_err then
-        log.error("Failed to get uptime: ", uptime_err)
-    else
-        boot_time = math.floor(os.time() - uptime)
-        info.boot_time = boot_time
-    end
-
-    local board_revision, revision_err = sysinfo.get_board_revision()
-    if revision_err then
-        log.error("Failed to get board revision: ", revision_err)
-    else
-        info.hardware = info.hardware or {}
-        info.hardware.board = {revision = board_revision}
-    end
-
-    local serial, serial_err = sysinfo.get_serial()
-    if serial_err then
-        log.debug("Failed to get serial number: ", serial_err)
-    else
-        info.hardware = info.hardware or {}
-        info.hardware.serial = serial
-    end
-
-    if next(info) then
-        return info
-    else
-        log.error("System: No static information available")
-        return nil
-    end
-end
-
 --- Main system service loop
 function system_service:_system_main()
     -- Subscribe to system-related topics
     local config_sub = self.conn:subscribe({ 'config', 'system' })
     local time_sync_sub = self.conn:subscribe({ 'time', 'ntp_synced' })
-
-    local static_info = get_static_infos()
-    if static_info then
-        if static_info.hardware and static_info.hardware.revision then
-            -- Extract model and version from hw revision
-            local hw_revision = static_info.hardware.revision
-            local model, version = hw_revision:match('(%S+)%s+(%S+)')
-            self.model = model
-        end
-        self.conn:publish_multiple(
-            { 'system', 'info' },
-            static_info,
-            { retained = true }
-        )
-    end
 
     while not self.ctx:err() do
         op.choice(
