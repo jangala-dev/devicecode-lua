@@ -35,6 +35,10 @@
     "dhcp": {
       "domains": [
         {
+          "name": "unifi",
+          "ip": "$UNIFI_IP"
+        },
+        {
           "name": "config.bigbox.home",
           "ip": "172.28.8.1"
         }
