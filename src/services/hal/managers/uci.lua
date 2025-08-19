@@ -55,7 +55,7 @@ function UCIManagement:_manager(ctx, conn, device_event_q, capability_info_q)
 end
 
 function UCIManagement:spawn(ctx, conn, device_event_q, capability_info_q)
-    service.spawn_fiber("UBus Manager", conn, ctx, function (fctx)
+    service.spawn_fiber("UCI Manager", conn, ctx, function (fctx)
         self:_manager(fctx, conn, device_event_q, capability_info_q)
     end)
 end
