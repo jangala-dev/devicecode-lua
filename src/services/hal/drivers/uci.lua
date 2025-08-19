@@ -43,7 +43,6 @@ end
 --- @return string?
 function UCI:get(_, config, section, option)
     local val, err = cursor:get(config, section, option)
-    print("get", config, section, option, "result", val, err)
     if err then
         return nil, err
     end
@@ -80,7 +79,6 @@ end
 --- @return string?
 function UCI:delete(_, config, section, option)
     local success, err = cursor:delete(config, section, option)
-    -- print("delete", config, section, option, "result", success, err)
     if not success then
         return false, string.format("Failed to delete %s.%s.%s: %s", config, section, option, err)
     end
@@ -94,7 +92,6 @@ end
 --- @return string?
 function UCI:commit(ctx, config)
     local success, err = cursor:commit(config)
-    -- print("commit", config, success, err)
     if not success then
         return false, string.format("Failed to commit changes for %s: %s", config, err)
     end
@@ -164,7 +161,6 @@ function UCI:foreach(_, config, type, callback)
     local success = cursor:foreach(config, type, function(section)
         callback(cursor, section)
     end)
-    -- print("foreach", config, type, callback, "result", success)
     if not success then
         return false, string.format("Failed to iterate over %s.%s", config, type)
     end
@@ -179,7 +175,6 @@ end
 --- @return boolean
 --- @return string?
 function UCI:set_restart_policy(ctx, config, policy, actions)
-    -- print("set_restart_policy", config, policy, actions)
     if not policy or not policy.method then
         return false, "Policy must be specified with a method"
     end
@@ -257,7 +252,6 @@ end
 --- @param request table
 function UCI:handle_capability(ctx, request)
     local command = request.command
-    print("uci", command)
     local args = request.args or {}
     local ret_ch = request.return_channel
 
@@ -359,8 +353,6 @@ function UCI:_main(ctx)
         ctx:value("fiber_name")
     ))
     local restart_op = nil
-    local restarts = {}
-    local next_group_restart = sc.monotime() + 1
     while not ctx:err() do
         local ops = {
             self.cap_control_q:get_op():wrap(function(req)
@@ -379,17 +371,6 @@ function UCI:_main(ctx)
                 else
                     restart_op = nil
                 end
-            end),
-            sleep.sleep_until_op(next_group_restart):wrap(function ()
-                print("restarting")
-                for config, restarter in pairs(restarts) do
-                    print("\t", config)
-                    for _, action in ipairs(restarter.actions) do
-                        exec.command_context(ctx, unpack(action)):run()
-                    end
-                    restarts[config] = nil
-                end
-                next_group_restart = sc.monotime() + 1
             end),
             ctx:done_op()
         }
