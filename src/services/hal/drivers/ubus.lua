@@ -26,6 +26,10 @@ local streams = {
     by_id = {}
 }
 
+--- Check all paths are of string type
+--- @param paths string[]
+--- @return boolean
+--- @return string?
 local function validate_paths(paths)
     for _, path in ipairs(paths) do
         if type(path) ~= 'string' or path == '' then
@@ -35,6 +39,10 @@ local function validate_paths(paths)
     return true, nil
 end
 
+--- Compare two strings alphabetically
+--- @param str1 string
+--- @param str2 string
+--- @return boolean
 local function sort_alphabetically(str1, str2)
     return str1:lower() < str2:lower()
 end
@@ -43,6 +51,10 @@ end
 --- ubus capabilities
 --- --------------------------------------------------------------------------------
 
+--- list available ubus endpoints
+--- @param ctx Context
+--- @return table?
+--- @return string?
 function UBus:list(ctx)
     local result, err = exec.command_context(ctx, 'ubus', 'list'):output()
     if err then
@@ -56,6 +68,13 @@ function UBus:list(ctx)
     return list, nil
 end
 
+--- Call a ubus method
+--- @param ctx Context
+--- @param path string
+--- @param method string
+--- @param ... string[]
+--- @return table?
+--- @return string?
 function UBus:call(ctx, path, method, ...)
     local args = { ... }
     local result, err = exec.command_context(ctx, 'ubus', 'call', path, method, unpack(args)):output()
@@ -99,7 +118,7 @@ function UBus:stop_stream(ctx, stream_id)
 
     fiber.spawn(function()
         op.choice(
-            self.info_q:put_op({
+            self.info_q:put_op({ -- report stream as closed
                 type = "ubus",
                 id = "1",
                 sub_topic = { "stream", stream_id, "closed" },
@@ -135,7 +154,7 @@ function UBus:listen(ctx, ...)
         return { stream_id = streams.by_key[path_key] }, nil
     end
 
-    local stream_id = uuid.new()
+    local stream_id = uuid.new() -- create a unique identifier for the listen command
     local stream_ctx, cancel = context.with_cancel(ctx)
 
     streams.by_key[path_key] = stream_id
@@ -155,7 +174,7 @@ function UBus:listen(ctx, ...)
         ))
 
         local cmd = exec.command('ubus', 'listen', unpack(paths))
-        cmd:setprdeathsig(sc.SIGKILL)
+        cmd:setprdeathsig(sc.SIGKILL) -- make sure that the command is killed if the parent dies
         local stdout = cmd:stdout_pipe()
         if not stdout then
             log.error(string.format(
@@ -164,7 +183,7 @@ function UBus:listen(ctx, ...)
                 stream_ctx:value("fiber_name")
             ))
             op.choice(
-                self.cap_control_q:put_op({
+                self.cap_control_q:put_op({ -- stop the stream if stdout pipe creation failed
                     command = "stop_stream",
                     args = { stream_id },
                     return_channel = { put = function() end }
@@ -185,7 +204,7 @@ function UBus:listen(ctx, ...)
             cmd:wait()
             stdout:close()
             op.choice(
-                self.cap_control_q:put_op({
+                self.cap_control_q:put_op({ -- stop the stream if the command fails to start
                     command = "stop_stream",
                     args = { stream_id },
                     return_channel = { put = function() end }
@@ -215,7 +234,7 @@ function UBus:listen(ctx, ...)
                     end
 
                     op.choice(
-                        self.info_q:put_op({
+                        self.info_q:put_op({ -- send listen data to stream endpoint
                             type = "ubus",
                             id = "1",
                             sub_topic = { "stream", stream_id },
@@ -254,6 +273,12 @@ function UBus:listen(ctx, ...)
     return { stream_id = stream_id }, nil
 end
 
+--- Send a ubus message
+--- @param ctx Context
+--- @param type string
+--- @param message table
+--- @return table?
+--- @return string?
 function UBus:send(ctx, type, message)
     local result, err = exec.command_context(ctx, 'ubus', 'send', type, cjson.encode(message)):output()
     if err then
@@ -270,6 +295,9 @@ end
 --- --------------------------------------------------------------------------------
 --- --------------------------------------------------------------------------------
 
+--- Handle a ubus capability request
+--- @param ctx Context
+--- @param request table
 function UBus:handle_capability(ctx, request)
     local command = request.command
     local args = request.args or {}
@@ -304,6 +332,10 @@ function UBus:handle_capability(ctx, request)
     end)
 end
 
+--- Apply ubus capabilities
+--- @param capability_info_q Queue
+--- @return table?
+--- @return string?
 function UBus:apply_capabilities(capability_info_q)
     self.info_q = capability_info_q
     local capabilities = {
@@ -315,6 +347,8 @@ function UBus:apply_capabilities(capability_info_q)
     return capabilities, nil
 end
 
+--- Main ubus fiber
+--- @param ctx Context
 function UBus:_main(ctx)
     while not ctx:err() do
         op.choice(
@@ -326,6 +360,8 @@ function UBus:_main(ctx)
     end
 end
 
+--- Spawn all ubus driver fibers
+--- @param conn Connection
 function UBus:spawn(conn)
     service.spawn_fiber("UBus Driver", conn, self.ctx, function(fctx)
         self:_main(fctx)
