@@ -8,7 +8,8 @@ UCIManagement.__index = UCIManagement
 
 local function new()
     local ubus_management = {}
-    return setmetatable(ubus_management, UCIManagement)
+    local uci_management = {}
+    return setmetatable(uci_management, UCIManagement)
 end
 
 function UCIManagement:_manager(ctx, conn, device_event_q, capability_info_q)
