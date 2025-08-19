@@ -22,7 +22,7 @@ net_service.__index = net_service
 -------------------------------------------------------
 -- Constants
 local tracking_ips = { "8.8.8.8", "1.1.1.1" }
-local BUS_TIMEOUT = 5
+local BUS_TIMEOUT = 10
 -------------------------------------------------------
 -- Helper functions
 
@@ -32,9 +32,7 @@ local function add_to_uci_list(main, section_name, list_name, list_value)
         { 'hal', 'capability', 'uci', '1', 'control', 'get' },
         { main, section_name, list_name }
     ))
-    print("getting", sc.monotime())
     local ret, ctx_err = uci_get_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
-    print("got", sc.monotime())
     uci_get_sub:unsubscribe()
     if ctx_err then
         log.error(string.format(
@@ -106,7 +104,6 @@ local report_period_channel = channel.new()      -- For config updates
 -- Queue definitions
 local speedtest_queue = queue.new() -- Unbounded queue for holding speedtest requests
 local shaping_queue = queue.new()
--- local config_applier_queue = queue.new() -- Unbounded queue for holding config changes
 
 --- Conditional variable definitions
 local config_signal = cond.new() -- Conditional varibale to signal inital config
@@ -608,7 +605,6 @@ local function set_network_speed(instance)
         { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
         { "mwan3" }
     ))
-    -- config_applier_queue:put({ "mwan3" })
     log.info("NET: Speed config applied successfully for:", net_id)
 end
 local dnsmasq_instances = {} -- maps host filter keys to instance names
@@ -722,20 +718,6 @@ local function get_dnsmasq_id(default_hosts)
     return id
 end
 
-local function config_applier(ctx)
-    log.trace("NET: Config applier starting")
-
-    -- Need to change how this works as most has moved under HAL
-    -- Need to setup config restart policies
-    -- just listen for shaping and ifups now
-    local services = {
-        { service = "network",  actions = { { "/etc/init.d/network", "reload" } } },
-        { service = "firewall", actions = { { "/etc/init.d/firewall", "restart" } } },
-        { service = "dhcp",     actions = { { "/etc/init.d/dnsmasq", "restart" }, { "/etc/init.d/odhcpd", "restart" } } },
-        { service = "mwan3",    actions = { { "/etc/init.d/mwan3", "restart" } } },
-    }
-end
-
 local function uci_manager(ctx)
     log.trace("NET: UCI manager starting")
 
@@ -746,22 +728,22 @@ local function uci_manager(ctx)
     -- setup restart policies for each config
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "network", { method = "debounce", delay = 1 }, { { "/etc/init.d/network", "reload" } } }
+        { "network", { method = "immediate"}, { { "/etc/init.d/network", "reload" } } }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "firewall", { method = "debounce", delay = 1 }, { { "/etc/init.d/firewall", "restart" } } }
+        { "firewall", { method = "immediate"}, { { "/etc/init.d/firewall", "restart" } } }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "dhcp", { method = "debounce", delay = 1 }, {
+        { "dhcp", { method = "immediate"}, {
             { "/etc/init.d/dnsmasq", "restart" },
             { "/etc/init.d/odhcpd",  "restart" }
         } }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "mwan3", { method = "debounce", delay = 1 }, { { "/etc/init.d/mwan3", "restart" } } }
+        { "mwan3", { method = "immediate"}, { { "/etc/init.d/mwan3", "restart" } } }
     ))
 
     local networks = {}
@@ -826,7 +808,6 @@ local function uci_manager(ctx)
             ))
         end
         print("That took:", sc.monotime() - start)
-        -- config_applier_queue:put({ "network", "firewall", "dhcp", "mwan3" })
 
         for _, net_cfg in ipairs(cfg.network or {}) do
             shaping_queue:put(net_cfg)
@@ -887,7 +868,6 @@ local function uci_manager(ctx)
                         { area }
                     ))
                 end
-                -- config_applier_queue:put(areas)
             end
         end
     end
@@ -1102,7 +1082,19 @@ local function speedtest_worker(ctx)
     while not ctx:err() do
         log.trace("NET: Speedtest worker waiting for jobs")
         local msg = speedtest_queue:get()
+        -- halt any config restarts from happening during speedtest
+        local halt_sub = net_service.conn:request(new_msg(
+            {'hal', 'capability', 'uci', '1', 'control', 'halt_restarts'},
+            {}
+        ))
+        halt_sub:next_msg_with_context(ctx)
+        halt_sub:unsubscribe()
         local results, err = speedtest.run(ctx, msg.network, msg.interface)
+        -- allow config restarts to take place
+        net_service.conn:publish(new_msg(
+            {'hal', 'capability', 'uci', '1', 'control', 'continue_restarts'},
+            {}
+        ))
         if err then
             log.error("NET:", "Speedtest error:", err)
         else
@@ -1129,7 +1121,7 @@ local function shaping_worker(ctx)
                 { 'hal', 'capability', 'uci', '1', 'control', 'ifup' },
                 { net_cfg.id }
             ))
-            local ret, ctx_err = ifup_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+            local ret, ctx_err = ifup_sub:next_msg_with_context(net_service.ctx)
             ifup_sub:unsubscribe()
             if ctx_err or ret.payload.err then
                 log.error(string.format(
@@ -1150,7 +1142,19 @@ local function shaping_worker(ctx)
                     net_service.ctx:value("fiber_name"),
                     net_cfg.id
                 ))
+                -- halt any config restarts from happening during shaping
+                local halt_sub = net_service.conn:request(new_msg(
+                    {'hal', 'capability', 'uci', '1', 'control', 'halt_restarts'},
+                    {}
+                ))
+                halt_sub:next_msg_with_context(ctx)
+                halt_sub:unsubscribe()
                 shaping.apply(net_cfg)
+                -- allow config restarts to take place
+                net_service.conn:publish(new_msg(
+                    {'hal', 'capability', 'uci', '1', 'control', 'continue_restarts'},
+                    {}
+                ))
             end
         end
     end
@@ -1191,7 +1195,6 @@ function net_service:start(ctx, conn)
     fiber.spawn(function() wan_monitor(ctx) end)
     fiber.spawn(function() speedtest_worker(ctx) end)
     fiber.spawn(function() shaping_worker(ctx) end)
-    -- fiber.spawn(function() config_applier(ctx) end)
     fiber.spawn(function() modem_state_listener(ctx) end)
 end
 
