@@ -226,7 +226,7 @@ function UBus:listen(ctx, ...)
                         log.error(string.format(
                             "%s - %s: Failed to decode ubus listen data: %s, reason: %s",
                             stream_ctx:value("service_name"),
-                            stream_ctx:vselfalue("fiber_name"),
+                            stream_ctx:value("fiber_name"),
                             tostring(line),
                             decode_err
                         ))
