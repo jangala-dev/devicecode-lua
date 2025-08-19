@@ -1068,7 +1068,7 @@ local function wan_monitor(ctx)
                 end
             end),
             ctx:done_op():wrap(function()
-                net_service:publish(new_msg(
+                net_service.conn:publish(new_msg(
                     { 'hal', 'capability', 'ubus', '1', 'control', 'stop_stream' },
                     { stream_id }
                 ))
