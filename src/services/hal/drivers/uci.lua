@@ -1,4 +1,5 @@
 local queue = require "fibers.queue"
+local channel = require "fibers.channel"
 local op = require "fibers.op"
 local fiber = require "fibers.fiber"
 local sc = require "fibers.utils.syscall"
@@ -20,24 +21,42 @@ UCI.__index = UCI
 function UCI.new(ctx)
     local uci = {
         ctx = ctx,
-        cap_control_q = queue.new(10),
-        info_q = nil,
-        policy_q = queue.new(10),
-        config_update_q = queue.new(10),
+        cap_control_q = queue.new(10), -- source of capability commands
+        info_q = nil, -- to be assigned at initalisation
+        policy_q = queue.new(10), -- source of restart policies
+        config_update_q = queue.new(10), -- signals when a config has been updated for restart policies
+        restart_q = queue.new(10), -- scheduled config restarts
+        restart_state_ch = channel.new(), -- outputs state of restart worker
+        restart_halt_ch = channel.new() -- signals restart worker to halt any restarts
     }
     return setmetatable(uci, UCI)
 end
 
 --- UCI command functions
+
+--- Get the value of a UCI entry
+--- @param _ Context
+--- @param config string
+--- @param section string
+--- @param option string
+--- @return any
+--- @return string?
 function UCI:get(_, config, section, option)
     local val, err = cursor:get(config, section, option)
-    print("get", config, section, option, "result", val, err)
     if err then
         return nil, err
     end
     return val, nil
 end
 
+--- Set the value of a UCI entry
+--- @param _ Context
+--- @param config string
+--- @param section string
+--- @param option string
+--- @param value any
+--- @return boolean
+--- @return string?
 function UCI:set(_, config, section, option, value)
     local success, err
     if value == nil then
@@ -45,27 +64,36 @@ function UCI:set(_, config, section, option, value)
     else
         success, err = cursor:set(config, section, option, value)
     end
-    -- print("set", config, section, option, value, "result", success, err)
     if not success then
-        return nil, string.format("Failed to set %s.%s.%s to %s: %s", config, section, option, value, err)
+        return false, string.format("Failed to set %s.%s.%s to %s: %s", config, section, option, value, err)
     end
     return true, nil
 end
 
+--- Delete a UCI entry
+--- @param _ Context
+--- @param config string
+--- @param section string
+--- @param option string
+--- @return boolean
+--- @return string?
 function UCI:delete(_, config, section, option)
     local success, err = cursor:delete(config, section, option)
-    -- print("delete", config, section, option, "result", success, err)
     if not success then
-        return nil, string.format("Failed to delete %s.%s.%s: %s", config, section, option, err)
+        return false, string.format("Failed to delete %s.%s.%s: %s", config, section, option, err)
     end
     return true, nil
 end
 
+--- Commit changes to a UCI configuration
+--- @param ctx Context
+--- @param config string
+--- @return boolean
+--- @return string?
 function UCI:commit(ctx, config)
     local success, err = cursor:commit(config)
-    -- print("commit", config, success, err)
     if not success then
-        return nil, string.format("Failed to commit changes for %s: %s", config, err)
+        return false, string.format("Failed to commit changes for %s: %s", config, err)
     end
     op.choice(
         self.config_update_q:put_op(config),
@@ -74,28 +102,35 @@ function UCI:commit(ctx, config)
     return true, nil
 end
 
-function UCI:show(_, config, section)
-    local values, err = cursor:show(config, section)
-    if err then
-        return nil, string.format("Failed to show %s.%s: %s", config, section, err)
-    end
-    return values, nil
-end
-
+--- Add a new section to a UCI configuration
+--- @param _ Context
+--- @param config string
+--- @param section_type string
+--- @return string
+--- @return string?
 function UCI:add(_, config, section_type)
     local name = cursor:add(config, section_type)
-    -- print("add", config, section_type, "result", name)
     return name, nil
 end
 
-function UCI:revert(_, config, section, option)
-    local success, err = cursor:revert(config, section, option)
+--- Revert saved but uncommitted changes
+--- @param _ Context
+--- @param config string
+--- @return boolean
+--- @return string?
+function UCI:revert(_, config)
+    local success, err = cursor:revert(config)
     if not success then
-        return nil, string.format("Failed to revert %s.%s.%s: %s", config, section, option, err)
+        return false, string.format("Failed to revert %s: %s", config, err)
     end
     return true, nil
 end
 
+--- Get a table of saved but uncommitted changes
+--- @param _ Context
+--- @param config string
+--- @return table
+--- @return string?
 function UCI:changes(_, config)
     local changes, err = cursor:changes(config)
     if err then
@@ -104,27 +139,44 @@ function UCI:changes(_, config)
     return changes, nil
 end
 
+--- Bring up a network interface
+--- @param ctx Context
+--- @param interface string
+--- @return boolean
+--- @return string?
 function UCI:ifup(ctx, interface)
-    local err = exec.command_context(ctx, 'ifup', interface):run()
-    -- print("ifup", interface, "result", err)
-    return nil, err
+    local ret, err = self:halt_restarts(ctx)
+    if err then return ret, err end
+    err = exec.command_context(ctx, 'ifup', interface):run()
+    local ret2, err2 = self:continue_restarts(ctx) -- signal restart fiber to continue whether command succeeds or not
+    return ret2, err or err2
 end
 
+--- Call a function for every section of a certain type
+--- @param _ Context
+--- @param config string
+--- @param type string
+--- @param callback fun(cursor: Cursor, section: string)
 function UCI:foreach(_, config, type, callback)
     local success = cursor:foreach(config, type, function(section)
         callback(cursor, section)
     end)
-    -- print("foreach", config, type, callback, "result", success)
     if not success then
-        return nil, string.format("Failed to iterate over %s.%s", config, type)
+        return false, string.format("Failed to iterate over %s.%s", config, type)
     end
     return true, nil
 end
 
+--- Assign a restart policy to a UCI config
+--- @param ctx Context
+--- @param config string
+--- @param policy table
+--- @param actions table
+--- @return boolean
+--- @return string?
 function UCI:set_restart_policy(ctx, config, policy, actions)
-    -- print("set_restart_policy", config, policy, actions)
     if not policy or not policy.method then
-        return nil, "Policy must be specified with a method"
+        return false, "Policy must be specified with a method"
     end
     local new_policy = {}
     if policy.method == 'immediate' then
@@ -132,12 +184,12 @@ function UCI:set_restart_policy(ctx, config, policy, actions)
             return sc.monotime()
         end
     elseif policy.method == 'defer' then
-        if not policy.delay then return nil, "Delay must be specified for delay_from_first method" end
+        if not policy.delay then return false, "Delay must be specified for delay_from_first method" end
         new_policy.next_restart = function(prev_delay)
             return prev_delay or sc.monotime() + policy.delay
         end
     elseif policy.method == 'debounce' then
-        if not policy.delay then return nil, "Delay must be specified for debounce method" end
+        if not policy.delay then return false, "Delay must be specified for debounce method" end
         new_policy.next_restart = function()
             return sc.monotime() + policy.delay
         end
@@ -146,7 +198,7 @@ function UCI:set_restart_policy(ctx, config, policy, actions)
             return nil -- Manual restart means no automatic next restart
         end
     else
-        return nil, "Invalid restart policy method"
+        return false, "Invalid restart policy method"
     end
 
     op.choice(
@@ -157,11 +209,49 @@ function UCI:set_restart_policy(ctx, config, policy, actions)
         }),
         ctx:done_op()
     ):perform()
+
+    return true, nil
 end
 
+--- Signal restart fiber to halt
+--- @param ctx Context
+--- @return boolean
+--- @return string?
+function UCI:halt_restarts(ctx)
+    op.choice(
+        self.restart_halt_ch:put_op(true),
+        ctx:done_op()
+    ):perform()
+    local state = "active"
+    -- wait for restart fiber to halt
+    while state ~= "halt" and not ctx:err() do
+        op.choice(
+            self.restart_state_ch:get_op():wrap(function(msg)
+                state = msg
+            end),
+            ctx:done_op()
+        ):perform()
+    end
+    return ctx:err() == nil, ctx:err()
+end
+
+--- Signal restart fiber to continue
+--- @param ctx Context
+--- @return boolean
+--- @return string?
+function UCI:continue_restarts(ctx)
+    op.choice(
+        self.restart_halt_ch:put_op(false),
+        ctx:done_op()
+    ):perform()
+    return ctx:err() == nil, ctx:err()
+end
+
+--- Run requested method if exists
+--- @param ctx Context
+--- @param request table
 function UCI:handle_capability(ctx, request)
     local command = request.command
-    print("uci", command)
     local args = request.args or {}
     local ret_ch = request.return_channel
 
@@ -194,6 +284,10 @@ function UCI:handle_capability(ctx, request)
     end)
 end
 
+--- Assign a restart policy to a specific config
+--- @param config string
+--- @param policy table
+--- @param actions table
 function UCI:handle_restart_policy(config, policy, actions)
     if not restart_policies[config] then
         restart_policies[config] = {}
@@ -204,6 +298,8 @@ function UCI:handle_restart_policy(config, policy, actions)
     restart_policies[config].actions = actions
 end
 
+--- Get the nearest config restart time
+--- @return table
 function UCI:get_next_restart()
     local next_restart = {}
     for config, restart_policy in pairs(restart_policies) do
@@ -216,6 +312,8 @@ function UCI:get_next_restart()
     return next_restart
 end
 
+--- Update a config restart policy to new deadline
+--- @param config string
 function UCI:handle_config_update(config)
     if not restart_policies[config] then
         log.debug(string.format(
@@ -231,6 +329,10 @@ function UCI:handle_config_update(config)
     restart_policy.current_restart = restart_policy.get_next_restart(restart_policy.current_restart)
 end
 
+--- Apply UCI capabilities
+--- @param capability_info_q Queue
+--- @return table
+--- @return string?
 function UCI:apply_capabilities(capability_info_q)
     self.info_q = capability_info_q
     local capabilities = {
@@ -242,6 +344,8 @@ function UCI:apply_capabilities(capability_info_q)
     return capabilities, nil
 end
 
+--- Main loop for UCI driver
+--- @param ctx Context
 function UCI:_main(ctx)
     log.info(string.format(
         "%s - %s: UCI Main Starting",
@@ -249,8 +353,6 @@ function UCI:_main(ctx)
         ctx:value("fiber_name")
     ))
     local restart_op = nil
-    local restarts = {}
-    local next_group_restart = sc.monotime() + 1
     while not ctx:err() do
         local ops = {
             self.cap_control_q:get_op():wrap(function(req)
@@ -260,9 +362,8 @@ function UCI:_main(ctx)
                 self:handle_restart_policy(msg.config, msg.policy, msg.actions)
             end),
             self.config_update_q:get_op():wrap(function(config)
-                self:handle_config_update(config)
-                local next_restart = self:get_next_restart()
-                -- print("next_restart", next_restart.config, next_restart.time)
+                self:handle_config_update(config) -- update config restart deadline
+                local next_restart = self:get_next_restart() -- get next occurring config restart
                 if next_restart.config and next_restart.time then
                     restart_op = sleep.sleep_until_op(next_restart.time):wrap(function()
                         return next_restart
@@ -271,25 +372,16 @@ function UCI:_main(ctx)
                     restart_op = nil
                 end
             end),
-            sleep.sleep_until_op(next_group_restart):wrap(function ()
-                print("restarting")
-                for config, restarter in pairs(restarts) do
-                    print("\t", config)
-                    for _, action in ipairs(restarter.actions) do
-                        exec.command_context(ctx, unpack(action)):run()
-                    end
-                    restarts[config] = nil
-                end
-                next_group_restart = sc.monotime() + 1
-            end),
             ctx:done_op()
         }
+        -- Insert restart operation is there is a restart for a config scheduled
         if restart_op then
-            table.insert(ops, restart_op:wrap(function (restarter)
-                print("here")
-                restarts[restarter.config] = restarter
-                restart_policies[restarter.config].current_restart = nil
-                local next_restart = self:get_next_restart()
+            table.insert(ops, restart_op:wrap(function(restarter)
+                fiber.spawn(function()
+                    self.restart_q:put(restarter) -- send restart to restart worker
+                end)
+                restart_policies[restarter.config].current_restart = nil -- reset config policy deadline
+                local next_restart = self:get_next_restart() -- check if there are any other scheduled restarts
                 if next_restart.config and next_restart.time then
                     restart_op = sleep.sleep_until_op(next_restart.time):wrap(function()
                         return next_restart
@@ -308,9 +400,85 @@ function UCI:_main(ctx)
     ))
 end
 
+--- Restart Worker
+--- @param ctx Context
+function UCI:_restart_worker(ctx)
+    local to_restart = {}
+    local next_deadline = sc.monotime() + 1
+    local state = "active"
+    local halt_num = 0
+    while not ctx:err() do
+        op.choice(
+            self.restart_state_ch:put_op(state),
+            self.restart_halt_ch:get_op():wrap(function(msg)
+                local halt = msg
+                halt_num = halt and (halt_num + 1) or (halt_num - 1) -- count the number of halts
+                if halt_num <= 0 then
+                    halt_num = 0 -- halts should never go below 0 but just in case
+                    return
+                end
+                state = "halt"
+                log.trace(string.format(
+                    "%s - %s: Halted",
+                    ctx:value("service_name"),
+                    ctx:value("fiber_name")
+                ))
+                while halt_num > 0 and not ctx:err() do -- listen for halt messages until all halts are resolved
+                    op.choice(
+                        self.restart_halt_ch:get_op():wrap(function(msg)
+                            halt = msg
+                            halt_num = halt and (halt_num + 1) or (halt_num - 1)
+                        end),
+                        self.restart_state_ch:put_op(state), -- update restart state
+                        ctx:done_op()
+                    ):perform()
+                end
+                state = "active"
+                log.trace(string.format(
+                    "%s - %s: Active",
+                    ctx:value("service_name"),
+                    ctx:value("fiber_name")
+                ))
+            end),
+            self.restart_q:get_op():wrap(function(msg)
+                to_restart[msg.config] = msg -- schedule restart of config to take place
+            end),
+            sleep.sleep_until_op(next_deadline):wrap(function() -- iterate over all scheduled restarts every 1 second
+                next_deadline = sc.monotime() + 1
+                if next(to_restart) == nil then return end
+                for config, restarter in pairs(to_restart) do
+                    for i, action in ipairs(restarter.actions) do
+                        log.trace(string.format(
+                            "%s - %s: Restarting %s action %d",
+                            ctx:value("service_name"),
+                            ctx:value("fiber_name"),
+                            config,
+                            i
+                        ))
+                        exec.command_context(ctx, unpack(action)):run()
+                        log.trace(string.format(
+                            "%s - %s: Restarting %s action %d completed",
+                            ctx:value("service_name"),
+                            ctx:value("fiber_name"),
+                            config,
+                            i
+                        ))
+                    end
+                end
+                to_restart = {}
+            end)
+        ):perform()
+    end
+end
+
+--- Spin up all fibers for UCI driver
+--- @param conn Connection
 function UCI:spawn(conn)
     service.spawn_fiber("UCI Driver", conn, self.ctx, function(fctx)
         self:_main(fctx)
+    end)
+    service.spawn_fiber("UCI Restarter", conn, self.ctx, function(fctx)
+        self:_restart_worker(fctx)
     end)
 end
 
