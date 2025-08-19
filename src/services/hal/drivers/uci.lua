@@ -156,7 +156,7 @@ end
 --- @param _ Context
 --- @param config string
 --- @param type string
---- @param callback fun(cursor: Cursor, section: string)
+--- @param callback fun(cursor: Cursor, section: table)
 function UCI:foreach(_, config, type, callback)
     local success = cursor:foreach(config, type, function(section)
         callback(cursor, section)
