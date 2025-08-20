@@ -1,7 +1,11 @@
 local expected = require 'services.ui.diagnostics_expected'
 local helpers = require 'services.ui.diagnostics_helpers'
+local request = require 'http.request'
 local exec = require 'fibers.exec'
 local log = require 'services.log'
+local cjson = require "cjson.safe"
+
+local tests = {}
 
 local LOG_LEVELS = {
     NOTICE = "notice",
@@ -216,15 +220,155 @@ local function get_modems_installed(box_type)
     return modems_installed, nil
 end
 
+---Simple ICMP reachability check for google (BusyBox ping)
+---@param config table<string, string | table> The google configuration
+---@return boolean
+---@return string|nil error
+function tests.test_google_connectivity(config)
+    local out, err = exec.command("sh", "-c", "ping -c 1 -W 2 " .. config.ip):output()
+    if err then return false, "ping error: " .. tostring(err) end
+    -- BusyBox output usually includes "1 packets transmitted, 1 packets received" or "bytes from"
+    if out:lower():match("1 packets received") or out:lower():match("bytes from") then
+        return true, nil
+    end
+    return false, "no reply from " .. config.ip
+end
+
+---Test the connectivity to hawkbit
+---@param config table<string, table | string> The hawkbit configuration
+---@return boolean
+---@return string|nil error
+function tests.test_hawkbit_connectivity(config)
+    if not config.url or not config.key then
+        local err = "Hawkbit configuration is missing"
+        log.error(err)
+        return false, err
+    end
+
+    -- Make a request to hawkbit to check connectivity
+    -- TODO shouldn't read from here
+    local MAC_PATH = "/sys/class/net/eth0/address"
+    local mac_address, err = helpers.get_parsed_mac(MAC_PATH)
+
+    if err ~= nil then
+        log.error('Error getting mac address: ' .. err)
+        return false, err
+    end
+
+    local full_path = config.url .. "/default/controller/v1/" .. mac_address
+    local req = request.new_from_uri(full_path)
+
+    req.headers:upsert(":method", "GET")
+    req.headers:upsert("authorization", "TargetToken " .. config.key)
+    req.headers:upsert("content-type", "application/json")
+    local headers, _ = req:go(10)
+
+    if not headers then
+        log.error("Request Timeout: No response from the Hawkbit server. Url: " .. full_path)
+        return false, err
+    elseif headers:get(":status") ~= "200" then
+        log.error('Error connecting to hawkbit: ' .. headers:get(":status"))
+        return false, err
+    end
+
+    return true, nil
+end
+
+---Test the connectivity to Unifi
+---@param config table<string, table | string> The unifi configuration
+---@return boolean
+---@return string|nil error
+function tests.test_unifi_connectivity(config)
+    -- Check if the Unifi IP is set
+    if not config.ip then
+        local err = "Unifi IP is not set in the default config"
+        log.error(err)
+        return false, err
+    end
+
+    return true, nil
+end
+
+---Test the connectivity to Mainflux
+---@param config table<string, table | string> The mainflux configuration
+---@return boolean
+---@return string|nil error
+function tests.test_mainflux_connectivity(config)
+    if not config.url or not config.key or not config.channels.data or not config.channels.control then
+        local err = "Mainflux configuration is missing"
+        log.error(err)
+        return false, err
+    end
+
+    local full_path = config.url .. "/http/channels/" .. config.channels.data .. "/messages"
+    -- Creating a SENML formatted message
+    local req = request.new_from_uri(full_path)
+    req.headers:upsert(":method", "POST")
+    req.headers:upsert("authorization", "Thing " .. config.key)
+    req.headers:upsert("content-type", "application/senml+json")
+    req.headers:delete("expect")
+    req:set_body(cjson.encode({ {
+        vs = "Testing Mainflux Connectivity", ts = os.time(), n = "Diagnostics"
+    }}))
+
+    local res_headers, _ = req:go(10)
+
+    if not res_headers then
+        local err = "Request Timeout: No response from the Mainflux server. Url: " .. full_path
+        log.error(err)
+        return false, err
+    elseif res_headers:get(":status") ~= "202" then
+        local err = string.format("URL: %s | Response: %s", full_path, res_headers:get(":status"))
+        log.error(err)
+        return false, err
+    end
+
+    return true, nil
+end
+
+---@param box_type string getbox|bigbox
+---@param config table<string, any> The configuration
+---@return table<string, number|string[]>|nil report
+---@return string|nil error
+local function check_expected_cloud_services_reachable(box_type, config)
+    local expected_tests, exp_tests_err = expected.get_expected_connectivity_tests(box_type)
+    if exp_tests_err ~= nil then
+        return nil, exp_tests_err
+    end
+
+    local expected = 0
+    local installed = 0
+    local missing = {}
+
+    for name, test_fn_name in pairs(expected_tests) do
+        expected = expected + 1
+        local test_fn = tests[test_fn_name]
+        if type(test_fn) ~= "function" then
+            table.insert(missing, name .. " (missing test function)")
+        else
+            local ok, _ = test_fn(config[name])
+            if ok then installed = installed + 1 else table.insert(missing, name) end
+        end
+    end
+
+    return {
+        expected  = expected,
+        installed = installed,
+        missing   = missing
+    }
+end
+
 ---Fetches diagnostics stats from the box
 ---@return table<string, table> diagnostics
-local function get_box_reports()
+---@param config table<string, string> The configuration
+local function get_box_reports(config)
     local diagnostics = {
         packages_installed = {},
         modems_installed = {},
         services_running = {},
         packages_running = {},
         bootstrap_installed = {},
+        cloud_services_reachable = {},
     }
     local hardware_info, hardware_info_err = helpers.get_hardware_info("/etc/hwrevision")
 
@@ -252,11 +396,20 @@ local function get_box_reports()
         else
             log.error("UI - error getting services running", exp_svc_err)
         end
+
+        -- Check cloud services reachable
+        local cloud_services, cloud_services_err = check_expected_cloud_services_reachable(hardware_info.model, config)
+        if cloud_services_err ~= nil then
+            log.error("UI - error checking cloud services reachable", cloud_services_err)
+        else
+            diagnostics.cloud_services_reachable = cloud_services
+        end
     else
         log.error("UI - error getting hardware info", hardware_info_err)
     end
 
     -- Check if packages are running
+    -- TODO will need to separate per device
     local packages_running = check_expected_packages_running(expected.packages_running)
     diagnostics.packages_running = packages_running
 

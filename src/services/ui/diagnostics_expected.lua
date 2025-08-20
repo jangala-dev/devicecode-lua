@@ -319,6 +319,29 @@ local bigbox_services_running = {
     "wpad"
 }
 
+local bigbox_connectivity_tests = {
+    google   = "test_google_connectivity",
+    hawkbit  = "test_hawkbit_connectivity",
+    mainflux = "test_mainflux_connectivity",
+    unifi    = "test_unifi_connectivity",
+}
+
+local getbox_connectivity_tests = {
+    google   = "test_google_connectivity",
+    hawkbit  = "test_hawkbit_connectivity",
+    mainflux = "test_mainflux_connectivity",
+}
+
+local function get_expected_connectivity_tests(box_type)
+    if box_type == GETBOX then
+        return getbox_connectivity_tests, nil
+    elseif box_type == BIGBOX then
+        return bigbox_connectivity_tests, nil
+    end
+
+    return {}, "Unknown box type: " .. box_type
+end
+
 ---Get the expected packages installed for the box type
 ---@param box_type string getbox|bigbox
 ---@return string[] expected_packages_installed
@@ -366,5 +389,6 @@ return {
     bootstrap_installed = bootstrap_installed,
     get_expected_packages_installed = get_expected_packages_installed,
     get_expected_services_running = get_expected_services_running,
-    get_expected_modem_count = get_expected_modem_count
+    get_expected_modem_count = get_expected_modem_count,
+    get_expected_connectivity_tests = get_expected_connectivity_tests,
 }

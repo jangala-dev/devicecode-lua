@@ -93,10 +93,23 @@ local function get_hardware_info(hardware_info_path)
     return hardware_info, error
 end
 
+---Get the MAC address of the device
+---@param mac_address_path string Path to the mac address file
+---@return string|nil mac_address
+---@return string|nil err
+local function get_parsed_mac(mac_address_path)
+    local mac_address, err = read_file(mac_address_path, true)
+    if mac_address then
+        return mac_address:gsub(":", ""):match("^%s*(.-)%s*$"), nil
+    end
+    return nil, err
+end
+
 return {
     is_process_running = is_process_running,
     is_service_running = is_service_running,
     file_exists = file_exists,
     get_installed_packages = get_installed_packages,
-    get_hardware_info = get_hardware_info
+    get_hardware_info = get_hardware_info,
+    get_parsed_mac = get_parsed_mac
 }
