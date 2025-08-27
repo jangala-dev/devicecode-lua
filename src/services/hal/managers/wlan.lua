@@ -147,7 +147,7 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
                     { stream_id }
                 ))
             end)
-        )
+        ):perform()
     end
 
     log.trace(string.format(
