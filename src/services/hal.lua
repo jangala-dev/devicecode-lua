@@ -1,6 +1,7 @@
 local modem_manager = require "services.hal.managers.modemcard"
 local ubus_manager = require "services.hal.managers.ubus"
 local uci_manager = require "services.hal.managers.uci"
+local wlan_managaer = require "services.hal.managers.wlan"
 local fiber = require "fibers.fiber"
 local queue = require "fibers.queue"
 local op = require "fibers.op"
@@ -18,7 +19,8 @@ local hal_service = {
     device_event_q = queue.new(10),
     modem_manager_instance = modem_manager.new(),
     ubus_manager_instance = ubus_manager.new(),
-    uci_manager_instance = uci_manager.new()
+    uci_manager_instance = uci_manager.new(),
+    wlan_manager_instance = wlan_managaer.new()
 }
 hal_service.__index = hal_service
 
@@ -299,7 +301,10 @@ end
 ---@param ctx Context
 ---@param conn Connection
 function hal_service:start(ctx, conn)
-    log.trace("Starting HAL Service")
+    log.trace(string.format(
+        "%s: Starting",
+        ctx:value("service_name")
+    ))
     self.ctx = ctx
     self.conn = conn
 
@@ -308,10 +313,11 @@ function hal_service:start(ctx, conn)
         self:_control_main()
     end)
 
-    -- start modem manager and detection
+    -- start managers
     self.modem_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
     self.ubus_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
     self.uci_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
+    self.wlan_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
 end
 
 return hal_service
