@@ -16,12 +16,18 @@ local function new()
 end
 
 function WLANManagement:_add_wlan(ctx, conn, event, capability_info_q)
+    log.trace(string.format(
+        "%s - %s: Detected WLAN of name %s",
+        ctx:value("service_name"),
+        ctx:value("fiber_name"),
+        event.devicename
+    ))
     if self._wlan_devices[event.devicename] then
         self._wlan_devices[event.devicename].ctx:cancel()
         self._wlan_devices[event.devicename] = nil
     end
     local wireless_instance = wireless_driver.new(context.with_cancel(ctx), event.interface)
-    local capabilities, cap_err = wireless_driver:apply_capabilities(capability_info_q)
+    local capabilities, cap_err = wireless_instance:apply_capabilities(capability_info_q)
     if cap_err then
         log.error(cap_err)
         return
@@ -49,6 +55,12 @@ function WLANManagement:_add_wlan(ctx, conn, event, capability_info_q)
 end
 
 function WLANManagement:_remove_wlan(event)
+    log.trace(string.format(
+        "%s - %s: Removed WLAN of name %s",
+        ctx:value("service_name"),
+        ctx:value("fiber_name"),
+        event.devicename
+    ))
     local wireless_instance = self._wlan_devices[event.devicename]
     if wireless_instance then
         wireless_instance.ctx:cancel()
