@@ -5,12 +5,12 @@ return {
         "log",
         "config",
         "hal",
-        -- "gsm",
+        "gsm",
         "time",
-        -- "net",
+        "net",
         "metrics",
-        -- "system",
-        -- "ui",
+        "system",
+        "ui",
         "wifi"
         -- ... other services specific to this device version
     }
