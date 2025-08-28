@@ -166,6 +166,12 @@ function WirelessDriver:_monitor_clients(ctx)
                 end
                 if iface and event and mac then
                     if iface == self.interface then
+                        log.trace(string.format(
+                            "%s - %s: client %s - %s",
+                            ctx:value("service_name"),
+                            ctx:value("fiber_name"),
+                            event == "new" and "connected" or "disconnected"
+                        ))
                         op.choice(
                             self.client_event_ch:put_op({
                                 connected = event == "new" and true or false,
@@ -301,13 +307,13 @@ end
 --- Spawn driver fiber
 --- @param conn Connection The bus connection
 function WirelessDriver:spawn(conn)
-    service.spawn_fiber("Wireless Main", conn, self.ctx, function(fctx)
+    service.spawn_fiber(string.format("Wireless Main (%s)", self.interface), conn, self.ctx, function(fctx)
         self:_main(fctx)
     end)
-    service.spawn_fiber("Wireless Client Monitor", conn, self.ctx, function(fctx)
+    service.spawn_fiber(string.format("Wireless Client Monitor (%s)", self.interface), conn, self.ctx, function(fctx)
         self:_monitor_clients(fctx)
     end)
-    service.spawn_fiber("Wireless Metrics Reporter", conn, self.ctx, function(fctx)
+    service.spawn_fiber(string.format("Wireless Metrics Reporter (%s)", self.interface), conn, self.ctx, function(fctx)
         self:_report_metrics(fctx)
     end)
 end
