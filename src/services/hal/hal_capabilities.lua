@@ -174,10 +174,24 @@ function UBusCapability:send(args)
     return do_command(self.driver_q, cmd)
 end
 
+-- wireless cap
+local WirelessCapability = {}
+WirelessCapability.__index = WirelessCapability
+
+local function new_wireless_capability(driver_q)
+    return setmetatable({driver_q = driver_q}, WirelessCapability)
+end
+
+function WirelessCapability:set_report_period(period)
+    local cmd = {command = "set_report_period", args = {period}}
+    return do_command(self.driver_q, cmd)
+end
+
 return {
     new_modem_capability = new_modem_capability,
     new_ubus_capability = new_ubus_capability,
     new_geo_capability = new_geo_capability,
     new_time_capability = new_time_capability,
-    new_uci_capability = new_uci_capability
+    new_uci_capability = new_uci_capability,
+    new_wireless_capability = new_wireless_capability
 }
