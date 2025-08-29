@@ -41,20 +41,16 @@ function WLANManagement:_add_wlan(ctx, conn, event, capability_info_q)
         id_field = "devicename",
         data = {
             devicename = event.devicename,
-            path = event.path,
             devpath = event.devpath,
             devtype = event.devtype,
-            interface = event.interface,
-            seqnum = event.seqnum,
-            subsystem = event.subsystem,
-            ifindex = event.ifindex
+            interface = event.interface
         }
     }
     self._wlan_devices[event.devicename] = wireless_instance
     return device_event
 end
 
-function WLANManagement:_remove_wlan(event)
+function WLANManagement:_remove_wlan(ctx, event)
     log.trace(string.format(
         "%s - %s: Removed WLAN of name %s",
         ctx:value("service_name"),
@@ -72,13 +68,9 @@ function WLANManagement:_remove_wlan(event)
         id_field = "devicename",
         data = {
             devicename = event.devicename,
-            path = event.path,
             devpath = event.devpath,
             devtype = event.devtype,
-            interface = event.interface,
-            seqnum = event.seqnum,
-            subsystem = event.subsystem,
-            ifindex = event.ifindex
+            interface = event.interface
         }
     }
     return device_event
@@ -87,6 +79,7 @@ end
 function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
     local ubus_sub = conn:subscribe({ 'hal', 'capability', 'ubus', '1' })
     local _, ctx_err = ubus_sub:next_msg_with_context(ctx) -- wait for ubus capability to be available
+    ubus_sub:unsubscribe()
     if ctx_err then return end
     log.trace(string.format(
         "%s - %s: Starting",
@@ -94,12 +87,53 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
         ctx:value("fiber_name")
     ))
 
+    -- Query initial list of wireless radios using ubus
+    local status_req = conn:request(new_msg(
+        { 'hal', 'capability', 'ubus', '1', 'control', 'call' },
+        { 'network.wireless', 'status' }
+    ))
+    local status_msg, ctx_err = status_req:next_msg_with_context(ctx) -- THIS IS NOT RETURNING, INVESTIGATE UBUS CALL
+    status_req:unsubscribe()
+    if status_msg and status_msg.payload and status_msg.payload.err or ctx_err then
+        log.error(string.format(
+            "%s - %s: failed to get initial wireless status: %s",
+            ctx:value("service_name"),
+            ctx:value("fiber_name"),
+            status_msg.payload.err or ctx_err
+        ))
+        return
+    end
+    if status_msg and status_msg.payload and status_msg.payload.result then
+        for _, radio in pairs(status_msg.payload.result) do
+            if not radio.disabled then
+                local event = {
+                    devicename = radio.interfaces[1].ifname,
+                    devpath = "/devices/platform/" .. radio.config.path,
+                    devtype = "wlan",
+                    interface = radio.interfaces[1].ifname
+                }
+                local device_event = self:_add_wlan(ctx, conn, event, capability_info_q)
+                if device_event then
+                    device_event_q:put(device_event)
+                end
+            end
+        end
+    else
+        log.error(string.format(
+            "%s - %s: failed to get initial wireless status: %s",
+            ctx:value("service_name"),
+            ctx:value("fiber_name"),
+            status_err
+        ))
+    end
+
     local hotplug_req = conn:request(new_msg(
         { 'hal', 'capability', 'ubus', '1', 'control', 'listen' },
         { 'hotplug.net' }
     ))
 
     local msg, ctx_err = hotplug_req:next_msg_with_context(ctx)
+    hotplug_req:unsubscribe()
     if ctx_err or msg and msg.payload and msg.payload.err then
         log.error(string.format(
             "%s - %s: ubus driver cannot be started, reason: %s",
@@ -132,7 +166,7 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
                 if data.action == "add" then
                     device_event = self:_add_wlan(ctx, conn, data, capability_info_q)
                 elseif data.action == "remove" then
-                    device_event = self:_remove_wlan(data)
+                    device_event = self:_remove_wlan(ctx, data)
                 end
                 if device_event then
                     device_event_q:put(device_event)
@@ -149,6 +183,8 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
             end)
         ):perform()
     end
+    hotplug_sub:unsubscribe()
+    stream_end_sub:unsubscribe()
 
     log.trace(string.format(
         "%s - %s: Stopping",
