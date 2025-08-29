@@ -167,7 +167,7 @@ function WirelessDriver:_monitor_clients(ctx)
                 if iface and event and mac then
                     if iface == self.interface then
                         log.trace(string.format(
-                            "%s - %s: client %s - %s",
+                            "%s - %s: client %s",
                             ctx:value("service_name"),
                             ctx:value("fiber_name"),
                             event == "new" and "connected" or "disconnected"
