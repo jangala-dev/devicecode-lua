@@ -2,5 +2,14 @@
 
 return {
     services = {
+        "log",
+        "config",
+        "hal",
+        "gsm",
+        "time",
+        "net",
+        "metrics",
+        "system",
+        "ui"
     }
 }
