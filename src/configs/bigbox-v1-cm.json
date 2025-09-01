@@ -61,7 +61,7 @@
         "id": "int",
         "type": "local",
         "interfaces": [
-          "eth0.100"
+          "eth0"
         ],
         "ipv4": {
           "proto": "static",
