@@ -79,7 +79,12 @@ end
 --- @return boolean
 --- @return string?
 function UCI:delete(_, config, section, option)
-    local success, err = cursor:delete(config, section, option)
+    local success, err
+    if option then
+        success, err = cursor:delete(config, section, option)
+    else
+        success, err = cursor:delete(config, section)
+    end
     if not success then
         return false, string.format("Failed to delete %s.%s.%s: %s", config, section, option, err)
     end
