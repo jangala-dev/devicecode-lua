@@ -172,7 +172,8 @@ function hal_service:_handle_device_connection_event(connection_event)
             type = device.type,
             index = device.id,
             -- in this case device refers to the specific type of hardware
-            identity = device.data.device
+            identity = device.data.device,
+            metadata = device.data
         },
         { retained = true }
     ))
