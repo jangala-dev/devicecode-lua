@@ -182,8 +182,43 @@ local function new_wireless_capability(driver_q)
     return setmetatable({driver_q = driver_q}, WirelessCapability)
 end
 
-function WirelessCapability:set_report_period(period)
-    local cmd = {command = "set_report_period", args = {period}}
+function WirelessCapability:set_report_period(args)
+    local cmd = {command = "set_report_period", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function WirelessCapability:set_channels(args)
+    local cmd = {command = "set_channels", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function WirelessCapability:set_country(args)
+    local cmd = {command = "set_country", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function WirelessCapability:set_txpower(args)
+    local cmd = {command = "set_txpower", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function WirelessCapability:set_enabled(args)
+    local cmd = {command = "set_enabled", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function WirelessCapability:add_interface(args)
+    local cmd = {command = "add_interface", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function WirelessCapability:delete_interface(args)
+    local cmd = {command = "delete_interface", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function WirelessCapability:apply()
+    local cmd = {command = "apply"}
     return do_command(self.driver_q, cmd)
 end
 
