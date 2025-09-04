@@ -497,7 +497,7 @@
                 "mode": "access_point",
                 "password": "shiny-huge-valet",
                 "network": "jng",
-                "radios": ["radio1"]
+                "radios": ["radio0"]
             },
             {
                 "name": "GetBox-PmWBH-admin",
@@ -506,6 +506,10 @@
                 "password": "shiny-huge-valet",
                 "network": "adm",
                 "radios": ["radio1"]
+            },
+            {
+              "config_path": "/data/configs/networks.cfg",
+              "radios": ["radio2"]
             }
         ]
     },
@@ -537,6 +541,10 @@
         "period": 60
     },
     "collections": {
+        "hal/capability/wireless/#": {
+          "protocol": "log",
+          "process": []
+        },
         "net/adm/rx_bytes": {
           "protocol": "http",
           "process": [
