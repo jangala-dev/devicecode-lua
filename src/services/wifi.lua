@@ -1,7 +1,10 @@
 local fiber = require "fibers.fiber"
 local exec = require "fibers.exec"
+local sleep = require "fibers.sleep"
 local json = require "dkjson"
 local log = require "services.log"
+local new_msg = require "bus".new_msg
+local dump = require "fibers.utils.helper".dump
 
 -- there's a connect/disconnect event available directly from hostapd.
 -- opkg install hostapd-utils will give you hostapd_cli
@@ -15,6 +18,8 @@ local log = require "services.log"
 
 -- will result in something like this in the logs
 -- hostapd event received wlan1 AP-STA-CONNECTED xx:xx:xx:xx:xx:xx
+
+-- I've used `iw event` for connection and disconnection events instead of the method above
 
 local wifi_service = {
     name = "wifi"
@@ -77,10 +82,74 @@ local function client_counter(bus_connection)
     end
 end
 
-function wifi_service:start(ctx, bus_connection)
-    log.trace("Starting Wi-Fi Service")
+local function radio_listener(ctx, conn)
+    local wireless_sub = conn:subscribe({'hal', 'capability', 'wireless', '+'})
 
-    fiber.spawn(function() client_counter(bus_connection) end)
+    while not ctx:err() do
+        local radio_msg = wireless_sub:next_msg()
+        if radio_msg and radio_msg.payload then
+            log.info("Received radio message:", json.encode(radio_msg.payload))
+            local radio = conn:subscribe({'hal', 'device', 'wlan', radio_msg.payload.device.index}):next_msg()
+            log.info("Radio details:", json.encode(radio.payload))
+            if radio.payload.metadata.radioname == 'radio0' then
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_report_period'},
+                    { 10 }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_channels'},
+                    { '2g', 'auto', 'HE20', {1, 6, 11} }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_txpower'},
+                    { 20 }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_country'},
+                    { 'GB' }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_enabled'},
+                    { true }
+                ))
+                local interface_sub = conn:request(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'add_interface'},
+                    {'test-ssid', 'psk2', 'adminjangala', 'lan'}
+                ))
+                local interface_response = interface_sub:next_msg()
+                print("SECTION interface_response.payload.result:", interface_response.payload.result)
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'apply'}
+                ))
+                sleep.sleep(30)
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'delete_interface'},
+                    { interface_response.payload.result }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'apply'}
+                ))
+                sleep.sleep(30)
+            end
+        end
+    end
+end
+
+local function build_basic_wireless(ctx, conn)
+    conn:publish(new_msg(
+        {'hal', 'capability', 'uci', '1', 'control', 'set'},
+        {''}
+    ))
+end
+
+function wifi_service:start(ctx, conn)
+    log.trace(string.format(
+        "%s - %s: Starting",
+        ctx:value("service_name"),
+        ctx:value("fiber_name")
+    ))
+
+    fiber.spawn(function() radio_listener(ctx, conn) end)
 end
 
 return wifi_service
