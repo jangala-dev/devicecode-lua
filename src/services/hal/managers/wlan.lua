@@ -1,5 +1,6 @@
 local context = require "fibers.context"
 local op = require "fibers.op"
+local queue = require "fibers.queue"
 local log = require "services.log"
 local wireless_driver = require "services.hal.drivers.wireless"
 local service = require "service"
@@ -10,23 +11,35 @@ WLANManagement.__index = WLANManagement
 
 local function new()
     local wlan_management = {
-        _wlan_devices = {}
+        _wlan_devices = {},
+        _wlan_add_queue = queue.new(10)
     }
     return setmetatable(wlan_management, WLANManagement)
 end
 
-function WLANManagement:_add_wlan(ctx, conn, event, capability_info_q)
+function WLANManagement:_add_wlan(ctx, conn, radio_name, radio_metadata, capability_info_q)
     log.trace(string.format(
         "%s - %s: Detected WLAN of name %s",
         ctx:value("service_name"),
         ctx:value("fiber_name"),
-        event.devicename
+        radio_name
     ))
-    if self._wlan_devices[event.devicename] then
-        self._wlan_devices[event.devicename].ctx:cancel()
-        self._wlan_devices[event.devicename] = nil
+    if self._wlan_devices[radio_name] then
+        return
     end
-    local wireless_instance = wireless_driver.new(context.with_cancel(ctx), event.interface)
+    local wireless_instance = wireless_driver.new(context.with_cancel(ctx), radio_name, radio_metadata)
+    local phy, err = wireless_instance:init(conn)
+    if err then
+        log.error(
+            string.format("%s - %s: Failed to initialize wireless driver for %s: %s",
+                ctx:value("service_name"),
+                ctx:value("fiber_name"),
+                radio_name,
+                err
+            )
+        )
+        return
+    end
     local capabilities, cap_err = wireless_instance:apply_capabilities(capability_info_q)
     if cap_err then
         log.error(cap_err)
@@ -38,42 +51,56 @@ function WLANManagement:_add_wlan(ctx, conn, event, capability_info_q)
         type = 'wlan',
         capabilities = capabilities,
         device_control = {},
-        id_field = "devicename",
+        id_field = "radioname",
         data = {
-            devicename = event.devicename,
-            devpath = event.devpath,
-            devtype = event.devtype,
-            interface = event.interface
+            interface = wireless_instance.interface,
+            radioname = radio_name,
+            devpath = radio_metadata.config.path,
         }
     }
-    self._wlan_devices[event.devicename] = wireless_instance
+    self._wlan_devices[radio_name] = { driver = wireless_instance, phy = phy }
     return device_event
 end
 
-function WLANManagement:_remove_wlan(ctx, event)
+function WLANManagement:_remove_wlan(ctx, radio_name, radio_metadata)
     log.trace(string.format(
         "%s - %s: Removed WLAN of name %s",
         ctx:value("service_name"),
         ctx:value("fiber_name"),
-        event.devicename
+        radio_name
     ))
-    local wireless_instance = self._wlan_devices[event.devicename]
+    local wireless_instance = self._wlan_devices[radio_name].driver
     if wireless_instance then
         wireless_instance.ctx:cancel()
-        self._wlan_devices[event.devicename] = nil
+        self._wlan_devices[radio_name] = nil
     end
     local device_event = {
         connected = false,
         type = 'wlan',
         id_field = "devicename",
         data = {
-            devicename = event.devicename,
-            devpath = event.devpath,
-            devtype = event.devtype,
-            interface = event.interface
+            interface = wireless_instance.interface,
+            radioname = radio_name,
+            devpath = radio_metadata.config.path
         }
     }
     return device_event
+end
+
+function WLANManagement:_get_radios(ctx, conn)
+    local status_req = conn:request(new_msg(
+        { 'hal', 'capability', 'ubus', '1', 'control', 'call' },
+        { 'network.wireless', 'status' }
+    ))
+    local status_msg, ctx_err = status_req:next_msg_with_context(ctx)
+    status_req:unsubscribe()
+    if status_msg and status_msg.payload and status_msg.payload.err or ctx_err then
+        return nil, status_msg.payload.err or ctx_err
+    end
+    if status_msg and status_msg.payload and status_msg.payload.result then
+        return status_msg.payload.result
+    end
+    return nil, "Failed to get response from ubus for radios"
 end
 
 function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
@@ -81,50 +108,41 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
     local _, ctx_err = ubus_sub:next_msg_with_context(ctx) -- wait for ubus capability to be available
     ubus_sub:unsubscribe()
     if ctx_err then return end
+    local uci_sub = conn:subscribe({ 'hal', 'capability', 'uci', '1' })
+    local _, ctx_err = uci_sub:next_msg_with_context(ctx)
+    uci_sub:unsubscribe()
+    if ctx_err then return end
     log.trace(string.format(
         "%s - %s: Starting",
         ctx:value("service_name"),
         ctx:value("fiber_name")
     ))
 
-    -- Query initial list of wireless radios using ubus
-    local status_req = conn:request(new_msg(
-        { 'hal', 'capability', 'ubus', '1', 'control', 'call' },
-        { 'network.wireless', 'status' }
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
+        { 'wireless', { method = "immediate" }, { { 'wifi', 'reload' } } }
     ))
-    local status_msg, ctx_err = status_req:next_msg_with_context(ctx) -- THIS IS NOT RETURNING, INVESTIGATE UBUS CALL
-    status_req:unsubscribe()
-    if status_msg and status_msg.payload and status_msg.payload.err or ctx_err then
+
+    -- Query initial list of wireless radios using ubus
+    local radios, radio_get_err = self:_get_radios(ctx, conn)
+    if radio_get_err then
         log.error(string.format(
-            "%s - %s: failed to get initial wireless status: %s",
+            "%s - %s: ubus driver cannot be started, reason: %s",
             ctx:value("service_name"),
             ctx:value("fiber_name"),
-            status_msg.payload.err or ctx_err
+            radio_get_err
         ))
         return
     end
-    if status_msg and status_msg.payload and status_msg.payload.result then
-        for _, radio in pairs(status_msg.payload.result) do
-            if not radio.disabled then
-                local event = {
-                    devicename = radio.interfaces[1].ifname,
-                    devpath = "/devices/platform/" .. radio.config.path,
-                    devtype = "wlan",
-                    interface = radio.interfaces[1].ifname
-                }
-                local device_event = self:_add_wlan(ctx, conn, event, capability_info_q)
-                if device_event then
-                    device_event_q:put(device_event)
-                end
-            end
-        end
-    else
-        log.error(string.format(
-            "%s - %s: failed to get initial wireless status: %s",
-            ctx:value("service_name"),
-            ctx:value("fiber_name"),
-            status_err
-        ))
+    for radio_name, radio_metadata in pairs(radios or {}) do
+        local device_event = self:_add_wlan(
+            ctx,
+            conn,
+            radio_name,
+            radio_metadata,
+            capability_info_q
+        )
+        device_event_q:put(device_event)
     end
 
     local hotplug_req = conn:request(new_msg(
@@ -162,14 +180,41 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
                 if not event then return end
                 local data = event['hotplug.net']
                 if data.devtype ~= 'wlan' then return end
-                local device_event = nil
-                if data.action == "add" then
-                    device_event = self:_add_wlan(ctx, conn, data, capability_info_q)
-                elseif data.action == "remove" then
-                    device_event = self:_remove_wlan(ctx, data)
+                local phy = data.interface:match("^(phy%d+)")
+                local phy_found = false
+                -- First check if we already have a driver with this phy assigned
+                -- route interface event to that driver
+                for _, radio in pairs(self._wlan_devices) do
+                    if radio.phy == phy then
+                        phy_found = true
+                        if data.action == "add" then
+                            radio.driver:attach_interface(data.interface)
+                        else
+                            radio.driver:detach_interface(data.interface)
+                        end
+                    end
                 end
-                if device_event then
-                    device_event_q:put(device_event)
+                -- If we don't have a driver with this phy assigned, it means it's a new phy
+                -- We must scan all radios to find the one without a phy assigned but with an interface
+                -- matching the phy of the event and assign it
+                -- this is not very efficient but we don't have a better way to do it for now
+                if not phy_found then
+                    radios = self:_get_radios(ctx, conn)
+                    for radio_name, radio_metadata in pairs(radios or {}) do
+                        if radio_metadata.interfaces[1] and
+                            radio_metadata.interfaces[1].ifname and
+                            self._wlan_devices[radio_name] and
+                            not self._wlan_devices[radio_name].phy and
+                            radio_metadata.interfaces[1].ifname:match("^(phy%d+)") == phy
+                        then
+                            self._wlan_devices[radio_name].phy = phy
+                            if data.action == "add" then
+                                self._wlan_devices[radio_name].driver:attach_interface(data.interface)
+                            else
+                                self._wlan_devices[radio_name].driver:detach_interface(data.interface)
+                            end
+                        end
+                    end
                 end
             end),
             stream_end_sub:next_msg_op():wrap(function(msg)
