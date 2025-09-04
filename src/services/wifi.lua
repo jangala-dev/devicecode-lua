@@ -1,11 +1,10 @@
 local fiber = require "fibers.fiber"
-local op = require "fibers.op"
-local queue = require "fibers.queue"
+local exec = require "fibers.exec"
+local sleep = require "fibers.sleep"
+local json = require "dkjson"
 local log = require "services.log"
-local gen = require "services.wifi.gen"
-local service = require "service"
 local new_msg = require "bus".new_msg
-local utils = require "services.wifi.utils"
+local dump = require "fibers.utils.helper".dump
 
 -- there's a connect/disconnect event available directly from hostapd.
 -- opkg install hostapd-utils will give you hostapd_cli
@@ -21,296 +20,6 @@ local utils = require "services.wifi.utils"
 -- hostapd event received wlan1 AP-STA-CONNECTED xx:xx:xx:xx:xx:xx
 
 -- I've used `iw event` for connection and disconnection events instead of the method above
-
-local INTERFACE_MODES = {
-    access_point = "ap",
-    client = "sta",
-    adhoc = "adhoc",
-    mesh = "mesh",
-    monitor = "monitor"
-}
-
-
-local Radio = {}
-Radio.__index = Radio
-
-function Radio:apply_config(config, report_period)
-    local reqs = {}
-
-    local clear_req = self.conn:request(new_msg(
-        { 'hal', 'capability', 'wireless', self.index, 'control', 'clear_radio_config' }
-    ))
-    local resp, err = clear_req:next_msg_with_context(self.ctx)
-    clear_req:unsubscribe()
-    if err or resp and resp.payload and resp.payload.err then
-        log.error(string.format(
-            "%s - %s: Radio %s clear config error: %s",
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name"),
-            self.index or "(unknown)",
-            err or resp.payload.err
-        ))
-        return
-    end
-
-    reqs[#reqs + 1] = self.conn:request(new_msg(
-        { 'hal', 'capability', 'wireless', self.index, 'control', 'set_report_period' },
-        { report_period }
-    ))
-
-    reqs[#reqs + 1] = self.conn:request(new_msg(
-        { 'hal', 'capability', 'wireless', self.index, 'control', 'set_channels' },
-        {
-            config.band,
-            config.channel,
-            config.htmode,
-            config.channels
-        }
-    ))
-
-    if config.txpower then
-        reqs[#reqs + 1] = self.conn:request(new_msg(
-            { 'hal', 'capability', 'wireless', self.index, 'control', 'set_txpower' },
-            { config.txpower }
-        ))
-    end
-
-    if config.country then
-        reqs[#reqs + 1] = self.conn:request(new_msg(
-            { 'hal', 'capability', 'wireless', self.index, 'control', 'set_country' },
-            { config.country }
-        ))
-    end
-
-    if config.disabled ~= nil then
-        reqs[#reqs + 1] = self.conn:request(new_msg(
-            { 'hal', 'capability', 'wireless', self.index, 'control', 'set_enabled' },
-            { not config.disabled }
-        ))
-    end
-
-    fiber.spawn(function()
-        local results = {}
-        for i, req in pairs(reqs) do
-            local resp, err = req:next_msg_with_context(self.ctx)
-            req:unsubscribe()
-            if err then return end
-            results[i] = resp and resp.payload or {}
-        end
-        if err then
-            log.error(string.format(
-                "%s - %s: Radio %s config error: %s",
-                self.ctx:value("service_name"),
-                self.ctx:value("fiber_name"),
-                self.index or "(unknown)",
-                err
-            ))
-            return
-        end
-        for _, result in pairs(results) do
-            if result.err then
-                log.error(string.format(
-                    "%s - %s: Radio %s config error: %s",
-                    self.ctx:value("service_name"),
-                    self.ctx:value("fiber_name"),
-                    self.index or "(unknown)",
-                    result.err
-                ))
-            end
-        end
-
-        self.conn:publish(new_msg(
-            { 'hal', 'capability', 'wireless', self.index, 'control', 'apply' }
-        ))
-    end)
-end
-
-function Radio:make_mainflux_ssids(mainflux_cfg, encryption, mode)
-    local mf_ssids = {}
-    for _, ssid_cfg in ipairs(mainflux_cfg or {}) do
-        -- edge case for incorrect mainflux naming that uses jng instead of adm
-        local name = ssid_cfg.name == "jng" and "adm" or ssid_cfg.name
-        mf_ssids[#mf_ssids + 1] = {
-            name = ssid_cfg.ssid,
-            encryption = encryption,
-            password = ssid_cfg.password,
-            network = name,
-            mode = mode
-        }
-    end
-    return mf_ssids
-end
-
-function Radio:apply_ssids(ssid_configs)
-    fiber.spawn(function()
-        for _, ssid in ipairs(ssid_configs) do
-            local req = self.conn:request(new_msg(
-                { 'hal', 'capability', 'wireless', self.index, 'control', 'add_interface' },
-                {
-                    ssid.name,
-                    ssid.encryption or "none",
-                    ssid.password or "",
-                    ssid.network,
-                    INTERFACE_MODES[ssid.mode]
-                }
-            ))
-            local resp, err = req:next_msg_with_context(self.ctx)
-            req:unsubscribe()
-            if err or resp and resp.payload and resp.payload.err then
-                log.error(string.format(
-                    "%s - %s: Radio %s add SSID error: %s",
-                    self.ctx:value("service_name"),
-                    self.ctx:value("fiber_name"),
-                    self.index or "(unknown)",
-                    err or resp.payload.err
-                ))
-            else
-                self.ssids[#self.ssids + 1] = resp.payload.result
-            end
-        end
-
-        self.conn:publish(new_msg(
-            { 'hal', 'capability', 'wireless', self.index, 'control', 'apply' }
-        ))
-    end)
-end
-
-function Radio:remove_ssids()
-    local reqs = {}
-    for _, id in ipairs(self.ssids) do
-        reqs[#reqs + 1] = self.conn:request(new_msg(
-            { 'hal', 'capability', 'wireless', self.index, 'control', 'delete_interface' },
-            { id }
-        ))
-    end
-    for _, req in ipairs(reqs) do
-        local resp, err = req:next_msg_with_context(self.ctx)
-        req:unsubscribe()
-        if err or resp and resp.payload and resp.payload.err then
-            log.error(string.format(
-                "%s - %s: Radio %s remove SSID error: %s",
-                self.ctx:value("service_name"),
-                self.ctx:value("fiber_name"),
-                self.index or "(unknown)",
-                err or resp.payload.err
-            ))
-        end
-    end
-    local req = self.conn:request(new_msg(
-        { 'hal', 'capability', 'wireless', self.index, 'control', 'apply' }
-    ))
-    local resp, ctx_err = req:next_msg_with_context(self.ctx)
-    req:unsubscribe()
-    if ctx_err or resp and resp.payload and resp.payload.err then
-        log.error(string.format(
-            "%s - %s: Radio %s apply after remove SSIDs error: %s",
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name"),
-            self.index or "(unknown)",
-            ctx_err or resp.payload.err
-        ))
-        return
-    end
-    self.ssids = {}
-end
-
-function Radio:_report_metrics(ctx, conn)
-    -- local num_clients = 0
-    -- local interface_names = {}
-
-    -- local interface_stat_targets = {
-    --     txpower = { 'txpower' },
-    --     channel = { 'channel', 'chan' },
-    --     -- noise = { '' } not currently supplied by wireless driver
-
-    --     rx_bytes = { 'rx_bytes' },
-    --     rx_packets = { 'rx_packets' },
-    --     rx_dropped = { 'rx_dropped' },
-    --     rx_errors = { 'rx_errors' },
-
-    --     tx_bytes = { 'tx_bytes' },
-    --     tx_packets = { 'tx_packets' },
-    --     tx_dropped = { 'tx_dropped' },
-    --     tx_errors = { 'tx_errors' },
-    --     ssid = { 'ssid'}
-    -- }
-    -- local interface_stat_subs = {}
-    -- for name, path in pairs(interface_stat_targets) do
-    --     interface_stat_subs[name] = conn:subscribe(
-    --         { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+', unpack(path) }
-    --     )
-    -- end
-
-    -- -- local interface_ssid_sub = conn:subscribe(
-    -- --     { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+',  }
-    -- -- )
-    -- local client_sub = conn:subscribe(
-    --     { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+', 'client', '+' }
-    -- )
-
-    -- while not ctx:err() do
-    --     local ops = {}
-    --     for name, sub in pairs(interface_stat_subs) do
-    --         ops[#ops + 1] = sub:next_msg_op():wrap(function (msg)
-    --             local interface = msg.topic[7]
-    --             if msg.payload and interface and interface_names[interface] then
-    --                 local value = msg.payload
-    --                 conn:publish(new_msg(
-    --                     { 'wifi', self.index, interface_names[interface], name },
-    --                     value
-    --                 ))
-    --             end
-    --             return msg
-    --         end)
-    --         if name == "ssid" then
-    --             ops[#ops]:wrap(function (msg)
-    --                 local interface = msg.topic[7]
-    --                 if msg.payload and interface then
-    --                     interface_names[interface] = string.find(msg.payload, "-admin") and "admin" or "jangala"
-    --                 end
-    --                 return msg
-    --             end)
-    --         end
-    --     end
-    --     op.choice(
-    --         client_sub:next_msg_op():wrap(function (msg)
-    --             if msg.payload then
-    --                 if msg.payload.connected then
-    --                     num_clients = num_clients + 1
-    --                 else
-    --                     if num_clients <= 0  then
-    --                         log.warn(string.format(
-    --                             "%s - %s: num_clients entering negative, adjusting back to 0",
-    --                             ctx:value("service_name"),
-    --                             ctx:value("fiber_name")
-    --                         ))
-    --                         num_clients = 0
-    --                     else
-    --                         num_clients = num_clients - 1
-    --                     end
-    --                 end
-    --             end
-    --         end)
-    --     )
-    -- end
-end
-
-function Radio:get_index()
-    return self.index
-end
-
-function Radio:remove()
-    self.ctx:cancel("Radio removed")
-end
-
-function Radio.new(ctx, conn, index)
-    local self = setmetatable({}, Radio)
-    self.ctx = ctx
-    self.conn = conn
-    self.index = index
-    self.ssids = {}
-    return self
-end
 
 local wifi_service = {
     name = "wifi",
@@ -724,6 +433,66 @@ local function radio_manager(ctx, conn)
     ))
 end
 
+local function radio_listener(ctx, conn)
+    local wireless_sub = conn:subscribe({'hal', 'capability', 'wireless', '+'})
+
+    while not ctx:err() do
+        local radio_msg = wireless_sub:next_msg()
+        if radio_msg and radio_msg.payload then
+            log.info("Received radio message:", json.encode(radio_msg.payload))
+            local radio = conn:subscribe({'hal', 'device', 'wlan', radio_msg.payload.device.index}):next_msg()
+            log.info("Radio details:", json.encode(radio.payload))
+            if radio.payload.metadata.radioname == 'radio0' then
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_report_period'},
+                    { 10 }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_channels'},
+                    { '2g', 'auto', 'HE20', {1, 6, 11} }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_txpower'},
+                    { 20 }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_country'},
+                    { 'GB' }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_enabled'},
+                    { true }
+                ))
+                local interface_sub = conn:request(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'add_interface'},
+                    {'test-ssid', 'psk2', 'adminjangala', 'lan'}
+                ))
+                local interface_response = interface_sub:next_msg()
+                print("SECTION interface_response.payload.result:", interface_response.payload.result)
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'apply'}
+                ))
+                sleep.sleep(30)
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'delete_interface'},
+                    { interface_response.payload.result }
+                ))
+                conn:publish(new_msg(
+                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'apply'}
+                ))
+                sleep.sleep(30)
+            end
+        end
+    end
+end
+
+local function build_basic_wireless(ctx, conn)
+    conn:publish(new_msg(
+        {'hal', 'capability', 'uci', '1', 'control', 'set'},
+        {''}
+    ))
+end
+
 function wifi_service:start(ctx, conn)
     log.trace(string.format(
         "%s - %s: Starting",
@@ -731,12 +500,7 @@ function wifi_service:start(ctx, conn)
         ctx:value("fiber_name")
     ))
 
-    service.spawn_fiber('Radio Listener', conn, ctx, function(fctx)
-        radio_listener(fctx, conn)
-    end)
-    service.spawn_fiber('Radio Manager', conn, ctx, function(fctx)
-        radio_manager(fctx, conn)
-    end)
+    fiber.spawn(function() radio_listener(ctx, conn) end)
 end
 
 return wifi_service
