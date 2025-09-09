@@ -23,8 +23,8 @@ function UCI.new(ctx)
         ctx = ctx,
         cap_control_q = queue.new(10),    -- source of capability commands
         info_q = nil,                     -- to be assigned at initalisation
-        actions_q = queue.new(10),        -- source of restart actions
-        config_update_q = queue.new(10),  -- signals when a config has been updated for restart actions
+        policy_q = queue.new(10),         -- source of restart policies
+        config_update_q = queue.new(10),  -- signals when a config has been updated for restart policies
         restart_q = queue.new(10),        -- scheduled config restarts
         restart_state_ch = channel.new(), -- outputs state of restart worker
         restart_halt_ch = channel.new()   -- signals restart worker to halt any restarts
@@ -373,13 +373,15 @@ function UCI:_main(ctx)
             self.actions_q:get_op():wrap(function(msg)
                 self:handle_restart_actions(msg.config, msg.actions)
             end),
-            self.config_update_q:get_op():wrap(function(commit_request)
-                local restarter = restart_policies[commit_request.config]
-                if not restarter then
-                    commit_request.notify_ch:put({
-                        err = "No restart actions set for config " .. commit_request.config
-                    })
-                    return
+            self.config_update_q:get_op():wrap(function(config)
+                self:handle_config_update(config)            -- update config restart deadline
+                local next_restart = self:get_next_restart() -- get next occurring config restart
+                if next_restart.config and next_restart.time then
+                    restart_op = sleep.sleep_until_op(next_restart.time):wrap(function()
+                        return next_restart
+                    end)
+                else
+                    restart_op = nil
                 end
                 fiber.spawn(function()
                     self.restart_q:put({
@@ -391,6 +393,23 @@ function UCI:_main(ctx)
             end),
             ctx:done_op()
         }
+        -- Insert restart operation is there is a restart for a config scheduled
+        if restart_op then
+            table.insert(ops, restart_op:wrap(function(restarter)
+                fiber.spawn(function()
+                    self.restart_q:put(restarter)                        -- send restart to restart worker
+                end)
+                restart_policies[restarter.config].current_restart = nil -- reset config policy deadline
+                local next_restart = self:get_next_restart()             -- check if there are any other scheduled restarts
+                if next_restart.config and next_restart.time then
+                    restart_op = sleep.sleep_until_op(next_restart.time):wrap(function()
+                        return next_restart
+                    end)
+                else
+                    restart_op = nil
+                end
+            end))
+        end
         op.choice(unpack(ops)):perform()
     end
     log.info(string.format(
@@ -441,24 +460,19 @@ function UCI:_restart_worker(ctx)
                 ))
             end),
             self.restart_q:get_op():wrap(function(msg)
-                local restarter = to_restart[msg.config]
-                if not restarter then
-                    restarter = { config = msg.config, actions = msg.actions, notify_channels = {} }
-                    to_restart[msg.config] = restarter
-                end
-                table.insert(restarter.notify_channels, msg.notify_ch)
+                to_restart[msg.config] = msg                    -- schedule restart of config to take place
             end),
             sleep.sleep_until_op(next_deadline):wrap(function() -- iterate over all scheduled restarts every 1 second
                 next_deadline = sc.monotime() + 1
                 if next(to_restart) == nil then return end
                 for config, restarter in pairs(to_restart) do
-                    local _, err = cursor:commit(config)
-                    if err then
-                        for _, ch in ipairs(restarter.notify_channels) do
-                            ch:put({ ret = false, err = err })
-                        end
-                        return
-                    end
+                    self.info_q:put({
+                        type = "uci",
+                        id = "1",
+                        sub_topic = { "restart", config },
+                        endpoints = "single",
+                        info = "restarting"
+                    })
                     for i, action in ipairs(restarter.actions) do
                         log.trace(string.format(
                             "%s - %s: Restarting %s action %d",
@@ -490,9 +504,13 @@ function UCI:_restart_worker(ctx)
                             i
                         ))
                     end
-                    for _, ch in ipairs(restarter.notify_channels) do
-                        ch:put({ ret = err == nil, err = err })
-                    end
+                    self.info_q:put({
+                        type = "uci",
+                        id = "1",
+                        sub_topic = { "restart", config },
+                        endpoints = "single",
+                        info = "complete"
+                    })
                 end
                 to_restart = {}
             end)
