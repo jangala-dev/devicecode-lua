@@ -21,13 +21,13 @@ UCI.__index = UCI
 function UCI.new(ctx)
     local uci = {
         ctx = ctx,
-        cap_control_q = queue.new(10), -- source of capability commands
-        info_q = nil, -- to be assigned at initalisation
-        policy_q = queue.new(10), -- source of restart policies
-        config_update_q = queue.new(10), -- signals when a config has been updated for restart policies
-        restart_q = queue.new(10), -- scheduled config restarts
+        cap_control_q = queue.new(10),    -- source of capability commands
+        info_q = nil,                     -- to be assigned at initalisation
+        policy_q = queue.new(10),         -- source of restart policies
+        config_update_q = queue.new(10),  -- signals when a config has been updated for restart policies
+        restart_q = queue.new(10),        -- scheduled config restarts
         restart_state_ch = channel.new(), -- outputs state of restart worker
-        restart_halt_ch = channel.new() -- signals restart worker to halt any restarts
+        restart_halt_ch = channel.new()   -- signals restart worker to halt any restarts
     }
     return setmetatable(uci, UCI)
 end
@@ -367,7 +367,7 @@ function UCI:_main(ctx)
                 self:handle_restart_policy(msg.config, msg.policy, msg.actions)
             end),
             self.config_update_q:get_op():wrap(function(config)
-                self:handle_config_update(config) -- update config restart deadline
+                self:handle_config_update(config)            -- update config restart deadline
                 local next_restart = self:get_next_restart() -- get next occurring config restart
                 if next_restart.config and next_restart.time then
                     restart_op = sleep.sleep_until_op(next_restart.time):wrap(function()
@@ -383,10 +383,10 @@ function UCI:_main(ctx)
         if restart_op then
             table.insert(ops, restart_op:wrap(function(restarter)
                 fiber.spawn(function()
-                    self.restart_q:put(restarter) -- send restart to restart worker
+                    self.restart_q:put(restarter)                        -- send restart to restart worker
                 end)
                 restart_policies[restarter.config].current_restart = nil -- reset config policy deadline
-                local next_restart = self:get_next_restart() -- check if there are any other scheduled restarts
+                local next_restart = self:get_next_restart()             -- check if there are any other scheduled restarts
                 if next_restart.config and next_restart.time then
                     restart_op = sleep.sleep_until_op(next_restart.time):wrap(function()
                         return next_restart
@@ -419,7 +419,7 @@ function UCI:_restart_worker(ctx)
                 local halt = msg
                 halt_num = halt and (halt_num + 1) or (halt_num - 1) -- count the number of halts
                 if halt_num <= 0 then
-                    halt_num = 0 -- halts should never go below 0 but just in case
+                    halt_num = 0                                     -- halts should never go below 0 but just in case
                     return
                 end
                 state = "halt"
@@ -446,12 +446,19 @@ function UCI:_restart_worker(ctx)
                 ))
             end),
             self.restart_q:get_op():wrap(function(msg)
-                to_restart[msg.config] = msg -- schedule restart of config to take place
+                to_restart[msg.config] = msg                    -- schedule restart of config to take place
             end),
             sleep.sleep_until_op(next_deadline):wrap(function() -- iterate over all scheduled restarts every 1 second
                 next_deadline = sc.monotime() + 1
                 if next(to_restart) == nil then return end
                 for config, restarter in pairs(to_restart) do
+                    self.info_q:put({
+                        type = "uci",
+                        id = "1",
+                        sub_topic = { "restart", config },
+                        endpoints = "single",
+                        info = "restarting"
+                    })
                     for i, action in ipairs(restarter.actions) do
                         log.trace(string.format(
                             "%s - %s: Restarting %s action %d",
@@ -469,6 +476,13 @@ function UCI:_restart_worker(ctx)
                             i
                         ))
                     end
+                    self.info_q:put({
+                        type = "uci",
+                        id = "1",
+                        sub_topic = { "restart", config },
+                        endpoints = "single",
+                        info = "complete"
+                    })
                 end
                 to_restart = {}
             end)
