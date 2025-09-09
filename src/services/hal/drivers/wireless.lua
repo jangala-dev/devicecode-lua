@@ -7,6 +7,7 @@ local service = require "service"
 local log = require "services.log"
 local hal_capabilities = require "services.hal.hal_capabilities"
 local iw = require "services.hal.drivers.wireless.iw"
+local hal_utils = require "services.hal.utils"
 local utils = require "services.hal.drivers.wireless.utils"
 local sc = require "fibers.utils.syscall"
 local new_msg = require "bus".new_msg
@@ -38,16 +39,6 @@ local DELETE_MARKER = true
 ---@field info_q Queue Queue for sending information updates
 local WirelessDriver = {}
 WirelessDriver.__index = WirelessDriver
-
-local function is_in(item, list, key)
-    if key == nil then key = function(x) return x end end
-    for _, v in ipairs(list) do
-        if key(v) == item then
-            return true
-        end
-    end
-    return false
-end
 
 local function list_is_type(value, expected_type)
     for _, t in ipairs(value) do
@@ -109,10 +100,10 @@ function WirelessDriver:set_report_period(ctx, period)
 end
 
 function WirelessDriver:set_channels(ctx, band, channel, htmode, channels)
-    if type(band) ~= "string" or not is_in(band, VALID_BANDS) then
+    if type(band) ~= "string" or not hal_utils.is_in(band, VALID_BANDS) then
         return nil, "Invalid band, must be one of: " .. table.concat(VALID_BANDS, ", ")
     end
-    if type(htmode) ~= "string" or not is_in(htmode, VALID_HTMODES) then
+    if type(htmode) ~= "string" or not hal_utils.is_in(htmode, VALID_HTMODES) then
         return nil, "Invalid htmode, must be one of: " .. table.concat(VALID_HTMODES, ", ")
     end
     if channel == 'auto' then
@@ -201,7 +192,7 @@ function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_inter
     if type(ssid) ~= "string" or #ssid == 0 then
         return nil, "Invalid SSID, must be a non-empty string"
     end
-    if type(encryption) ~= "string" or not is_in(encryption, VALID_ENCRYPTIONS) then
+    if type(encryption) ~= "string" or not hal_utils.is_in(encryption, VALID_ENCRYPTIONS) then
         return nil, "Invalid encryption, must be one of: " .. table.concat(VALID_ENCRYPTIONS, ", ")
     end
     if type(password) ~= 'string' then
@@ -260,11 +251,11 @@ function WirelessDriver:delete_interface(ctx, interface)
         { 'hal', 'capability', 'uci', '1', 'control', 'delete' },
         { 'wireless', interface }
     ))
-    if is_in(interface, self.config.interfaces, function(x) return x["section"] end) then
+    if hal_utils.is_in(interface, self.config.interfaces, function(x) return x["section"] end) then
         set_attr(self.config_diff_removals,
             { 'interfaces', interface }, DELETE_MARKER
         )
-    elseif is_in(interface, self.config_diff_additions, function(x) return x["section"] end) then
+    elseif hal_utils.is_in(interface, self.config_diff_additions, function(x) return x["section"] end) then
         set_attr(self.config_diff_additions,
             { 'interfaces', interface }, nil
         )
@@ -467,7 +458,7 @@ local function get_iface_stats(ctx, interface)
     local stats = {}
 
     local info, info_err = iw.get_iw_dev_info(ctx, interface)
-    print(interface, info_err)
+    print("get_iface", interface, info_err)
     if not info_err then
         for k, v in pairs(info) do
             stats[k] = v
@@ -632,20 +623,60 @@ function WirelessDriver:spawn(conn)
 end
 
 function WirelessDriver:init(conn)
+    local restart_sub = conn:subscribe({ 'hal', 'capability', 'uci', '1', 'info', 'restart', 'wireless' })
     conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'delete' },
-        { 'wireless', 'default_' .. self.name }
+        { 'hal', 'capability', 'uci', '1', 'control', 'foreach' },
+        { 'wireless',  'wifi-iface', function (cursor, section)
+            print(section["device"], self.name)
+            if section["device"] == self.name then
+                print(section[".name"])
+                local res = cursor:delete('wireless', section[".name"])
+                print(res)
+            end
+        end}
     ))
-    set_attr(self.config_diff_removals, { 'wireless', 'default_' .. self.name })
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
+        { 'wireless' }
+    ))
+
+    -- wait for wireless to restart
+    local restart_states = {"complete", "restarting"}
+    local i = 1
+    local restart_state = "complete"
+    while restart_state == restart_states[i] and not self.ctx:err() do
+        op.choice(
+            restart_sub:next_msg_with_context_op(self.ctx):wrap(function(msg)
+                if msg and msg.payload then
+                    if msg.payload ~= restart_state then
+                        i = i + 1
+                        restart_state = msg.payload
+                    end
+                end
+            end),
+            self.ctx:done_op()
+        ):perform()
+    end
+    restart_sub:unsubscribe()
+
+    if restart_state ~= "complete" then
+        return nil, "Failed to initialize wireless driver, wireless restart did not complete"
+    end
 
     local phy = nil
     for _, interface_config in ipairs(self.config.interfaces) do
+        print(dump(interface_config))
         local ifname = interface_config.ifname
         if ifname then
-            self:attach_interface(ifname)
-            phy = ifname:match("^(phy%d+)")
+            local iphy = ifname:match("^(phy%d+)")
+            if iphy then
+                phy = iphy
+                print(phy)
+                break
+            end
         end
     end
+    self.config.interfaces = {}
 
     return phy, nil
 end
