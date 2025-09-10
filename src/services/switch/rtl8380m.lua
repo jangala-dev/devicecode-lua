@@ -1,7 +1,7 @@
 local cjson = require "cjson.safe"
 local socket = require "cqueues.socket"
 local basexx= require "basexx"
-local exec = require 'fibers.exec'
+local exec = require "fibers.exec"
 
 local PORT = 80
 local EXPONENT_HEX = "10001"
@@ -251,8 +251,6 @@ local function login(host, username, password)
 
      while true do
         local status, err = get_login_status(host)
-
-        print("Status:", status)
 
         if err then
             return false, err
