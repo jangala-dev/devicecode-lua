@@ -1,10 +1,11 @@
 local cjson = require "cjson.safe"
 local socket = require "cqueues.socket"
-local basexx= require "basexx"
+local basexx = require "basexx"
 local exec = require "fibers.exec"
 
 local PORT = 80
 local EXPONENT_HEX = "10001"
+local DEFAULT_TIMEOUT = 10
 
 -- HTTP helpers
 local function build_request(method, path, host, headers, body)
@@ -66,6 +67,13 @@ local function get_cgi_json(host, cmd, use_dummy)
 
     local s, err = socket.connect(host, PORT)
     if not s then return nil, "connect failed: " .. tostring(err) end
+
+    local ok, cerr = s:connect(DEFAULT_TIMEOUT)
+    if not ok then
+        s:close()
+        return nil, "connection timeout: " .. tostring(cerr)
+    end
+
     s:setmode("b", "b")
 
     local req = build_request("GET", path, host, {})
@@ -92,6 +100,13 @@ end
 local function post_cgi_json(host, path, payload, headers)
     local s, err = socket.connect(host, PORT)
     if not s then return nil, "connect failed: " .. tostring(err) end
+
+    local ok, cerr = s:connect(DEFAULT_TIMEOUT)
+    if not ok then
+        s:close()
+        return nil, "connection timeout: " .. tostring(cerr)
+    end
+
     s:setmode("b", "b")
 
     local req = build_request("POST", path, host, headers, payload)
@@ -142,7 +157,7 @@ local function encrypt_password(modulus_hex, password)
     f:close()
 
     -- 2. Generate DER
-   local err = exec.command("openssl", "asn1parse", "-genconf", asn1_file, "-out", der_file, "-noout"):run()
+    local err = exec.command("openssl", "asn1parse", "-genconf", asn1_file, "-out", der_file, "-noout"):run()
 
     if err then
         exec.command("rm", asn1_file):run()
@@ -160,7 +175,7 @@ local function encrypt_password(modulus_hex, password)
 
     -- 4. Encrypt password with pkeyutl
     local cmd3 = string.format(
-    "echo -n %q | openssl pkeyutl -encrypt -inkey %s -pubin -pkeyopt rsa_padding_mode:pkcs1 2>/dev/null", password,
+        "echo -n %q | openssl pkeyutl -encrypt -inkey %s -pubin -pkeyopt rsa_padding_mode:pkcs1 2>/dev/null", password,
         pem_file)
     local pipe = io.popen(cmd3, "r")
     if not pipe then
@@ -188,37 +203,37 @@ end
 -- http calls
 local function get_ports_info(host)
     local js, err = get_cgi_json(host, "panel_info", true)
-    if not js then return nil, err end
+    if not js or err then return nil, err end
     return js.data.ports or nil
 end
 
 local function get_sys_cpumem(host)
     local js, err = get_cgi_json(host, "sys_cpumem", true)
-    if not js then return nil, nil, err end
+    if not js or err then return nil, nil, err end
     return js.data.cpu, js.data.mem, nil
 end
 
 local function get_sys_time(host)
     local js, err = get_cgi_json(host, "sys_sysTime", true)
-    if not js then return nil, err end
+    if not js or err then return nil, err end
     return js.data.sysCurrTime or nil, nil
 end
 
 local function get_ports_poe_info(host)
     local js, err = get_cgi_json(host, "poe_poe", true)
-    if not js then return nil, nil, nil, err end
+    if not js or err then return nil, nil, nil, err end
     return js.data.ports, js.data.devPower, js.data.devTemp, nil
 end
 
 local function get_modules(host)
     local js, err = get_cgi_json(host, "home_login", false)
-    if not js then return nil, err end
+    if not js or err then return nil, err end
     return js.data and js.data.modulus or nil
 end
 
 local function get_login_status(host)
     local js, err = get_cgi_json(host, "home_loginStatus", false)
-    if not js then return nil, err end
+    if not js or err then return nil, err end
     return js.data and js.data.status or nil
 end
 
@@ -249,7 +264,7 @@ local function login(host, username, password)
     authenticate_user(host, username, password)
     local success
 
-     while true do
+    while true do
         local status, err = get_login_status(host)
 
         if err then
@@ -270,14 +285,14 @@ end
 
 local function get_stats(host)
     local stats = {
-       ["system"] = {
+        ["system"] = {
             ["curr_time"] = 0,
             ["mem"] = 0,
             ["cpu"] = 0,
             ["power"] = 0,
             ["temp"] = 0
         },
-        ["ports"] = {}, -- link/speed/etc
+        ["ports"] = {},    -- link/speed/etc
         ["ports_poe"] = {} -- PoE status/limits
     }
 

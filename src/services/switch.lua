@@ -42,12 +42,16 @@ local function handler(ctx, bus_connection)
                 stats_ctx, cancel_stats = context.with_cancel(ctx)
 
                 fiber.spawn(function()
+                    log.trace("Switch: Starting login")
                     local ok, err = driver.login(cfg.host, cfg.username, cfg.password)
 
                     if not ok then
+                        -- TODO no retry here
                         log.error("Switch: Initial login failed:", err)
                         return
                     end
+
+                    log.trace("Switch: Login successful")
 
                     local fail_count = 0
                     local max_fails = 5
@@ -72,6 +76,7 @@ local function handler(ctx, bus_connection)
 
                             sleep.sleep(5)
                         else
+                            log.trace("Switch: Publishing stats")
                             fail_count = 0 -- reset on success
                             bus_connection:publish(new_msg({ "switch" }, stats, { retained = true }))
                             sleep.sleep(cfg.report_period or 10)
