@@ -14,7 +14,8 @@ WLANManagement.__index = WLANManagement
 local function new()
     local wlan_management = {
         _wlan_devices = {},
-        _wlan_add_queue = queue.new(10)
+        _wlan_add_queue = queue.new(10),
+        _band_add_queue = queue.new(10)
     }
     return setmetatable(wlan_management, WLANManagement)
 end
@@ -140,40 +141,42 @@ function WLANManagement:_get_radios(ctx, conn)
     return nil, "Failed to get response from ubus for radios"
 end
 
-function WLANManagement:_create_band_driver(ctx, conn, capability_info_q)
-    local band_instance = band_driver.new()
-    local band_init_ok, band_init_err = band_instance:init(ctx, conn)
-    if band_init_err then
-        log.error(string.format(
-            "%s - %s: band driver cannot be started, reason: %s",
-            ctx:value("service_name"),
-            ctx:value("fiber_name"),
-            band_init_err
-        ))
-        return nil, band_init_err
-    end
-    band_instance:spawn(conn)
-    local capabilities, cap_err = band_instance:apply_capabilities(capability_info_q)
-    if cap_err then
-        log.error(string.format(
-            "%s - %s: band driver cannot apply capabilities, reason: %s",
-            ctx:value("service_name"),
-            ctx:value("fiber_name"),
-            cap_err
-        ))
-        return nil, cap_err
-    end
-    local device_event = {
-        connected = true,
-        type = 'band',
-        capabilities = capabilities,
-        device_control = {},
-        id_field = "id",
-        data = {
-            id = "1",
+function WLANManagement:_create_band_driver(ctx, conn, capability_info_q, device_event_q)
+    fiber.spawn(function()
+        local band_instance = band_driver.new(context.with_cancel(ctx))
+        local band_init_ok, band_init_err = band_instance:init(ctx, conn)
+        if band_init_err then
+            log.error(string.format(
+                "%s - %s: band driver cannot be started, reason: %s",
+                ctx:value("service_name"),
+                ctx:value("fiber_name"),
+                band_init_err
+            ))
+            return nil, band_init_err
+        end
+        band_instance:spawn(conn)
+        local capabilities, cap_err = band_instance:apply_capabilities(capability_info_q)
+        if cap_err then
+            log.error(string.format(
+                "%s - %s: band driver cannot apply capabilities, reason: %s",
+                ctx:value("service_name"),
+                ctx:value("fiber_name"),
+                cap_err
+            ))
+            return nil, cap_err
+        end
+        local device_event = {
+            connected = true,
+            type = 'band',
+            capabilities = capabilities,
+            device_control = {},
+            id_field = "id",
+            data = {
+                id = "1",
+            }
         }
-    }
-    return device_event, nil
+        device_event_q:put(device_event)
+    end)
 end
 
 function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
@@ -194,26 +197,16 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
     -- Set dawn restart policy to immediate so that changes are applied immediately
     conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { 'dawn', { method = "immediate" }, { { '/etc/init.d/dawn', 'restart' } } }
+        { 'dawn', { method = "debounce", delay = 3 }, { { '/etc/init.d/dawn', 'restart' } } }
     ))
 
-    local band_event, band_err = self:_create_band_driver(ctx, conn, capability_info_q)
-    if band_err then
-        log.error(string.format(
-            "%s - %s: band driver cannot be started, reason: %s",
-            ctx:value("service_name"),
-            ctx:value("fiber_name"),
-            band_err
-        ))
-    else
-        device_event_q:put(band_event)
-    end
+    self:_create_band_driver(ctx, conn, capability_info_q, device_event_q)
 
 
     -- Set wireless restart policy to immediate so that changes are applied immediately
     conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { 'wireless', { method = "debounce", delay = 1 }, { { 'wifi', 'reload' } } }
+        { 'wireless', { method = "debounce", delay = 3 }, { { 'wifi', 'reload' } } }
     ))
 
     -- Query initial list of wireless radios using ubus
