@@ -61,11 +61,14 @@ local function radio_listener(ctx, conn)
     ))
 end
 
-local function radio_manager(ctx, conn)
-    local radios = {}
-    local radio_configs = {}
-    local report_period = nil
-    local ssid_configs = {}
+local function publish_clients_count(interfaces, bus_connection)
+    local count = 0
+    for _, interface in ipairs(interfaces) do
+        local cmd = exec.command("ubus", "call", "hostapd." .. interface, "get_clients")
+        local raw, err = cmd:output()
+        if err then return nil, err end
+        local status, _, err = json.decode(raw)
+        if err then return nil, err end
 
     local function add_radio(radio_index)
         if radios[radio_index] then
@@ -113,25 +116,12 @@ local function radio_manager(ctx, conn)
         radios[radio_index] = nil
     end
 
-    local function validate_config(config)
-        if not config then
-            return "Missing configuration"
-        end
-        --- Check Radios config section
-        if not config.radios then
-            return "Missing radios configuration"
-        end
-        if not (type(config.radios) == "table") then
-            return string.format("Invalid radios type, should be a table but found %s", type(config.radios))
-        end
-        for _, radio_cfg in ipairs(config.radios) do
-            if not radio_cfg.name then
-                return "Radio config missing name"
-            end
-            if not radio_cfg.band then
-                return string.format("Radio %s missing band", radio_cfg.name)
-            end
-        end
+    bus_connection:publish({
+        topic = "t.wifi.users",
+        payload = json.encode({ n = "users", v = count }),
+        retained = true
+    })
+end
 
         --- Check SSIDs config section
         if not config.ssids then
@@ -182,205 +172,10 @@ local function radio_manager(ctx, conn)
             )
         end
 
-        local globals = config.band_steering.globals
-        if not globals then
-            return "Missing band_steering globals configuration"
-        end
-        if not (type(globals) == "table") then
-            return string.format("Invalid band_steering globals type, should be a table but found %s", type(globals))
-        end
-        local required_globals_fields = {
-            "kick_mode",
-            "bandwidth_threshold",
-            "kicking_threshold",
-            "evals_before_kick"
-        }
-        for _, field in ipairs(required_globals_fields) do
-            if globals[field] == nil then
-                return string.format("Missing band_steering globals field: %s", field)
-            end
-        end
-
-        local timing = config.band_steering.timings
-        if not timing then
-            return "Missing band_steering timing configuration"
-        end
-        if type(timing) ~= 'table' then
-            return string.format("Invalid timing type, should be a table but found %s", type(timing))
-        end
-        local required_timing_fields = {
-            "update_client",
-            "update_chan_util",
-            "update_hostapd",
-            "client_cleanup",
-            "inactive_client_kickoff"
-        }
-        for _, field in ipairs(required_timing_fields) do
-            if timing[field] == nil then
-                return string.format("Missing band_steering timing field: %s", field)
-            end
-        end
-
-        local bands = config.band_steering.bands
-        if not bands then
-            return "Missing band_steering bands configuration"
-        end
-        if not (type(bands) == "table") then
-            return string.format("Invalid band_steering bands type, should be a table but found %s", type(bands))
-        end
-        local required_band_fields = {
-            "initial_score",
-            "good_rssi_threshold",
-            "good_rssi_reward",
-            "bad_rssi_threshold",
-            "bad_rssi_penalty",
-        }
-        for _, band_cfg in pairs(bands) do
-            if not (type(band_cfg) == "table") then
-                return string.format("Invalid band_steering band type, should be a table but found %s", type(band_cfg))
-            end
-            for _, field in ipairs(required_band_fields) do
-                if band_cfg[field] == nil then
-                    return string.format("Missing band_steering band field: %s", field)
-                end
-            end
-        end
-
-        return nil
-    end
-
-    local function apply_config(config)
-        report_period = config.report_period
-        for _, radio_cfg in ipairs(config.radios) do
-            local radio = radios[radio_cfg.name]
-            if radio then
-                radio:apply_config(radio_cfg, report_period)
-            end
-            radio_configs[radio_cfg.name] = radio_cfg
-        end
-
-        local radio_ssids = {}
-        for _, ssid_cfg in ipairs(config.ssids) do
-            local ssids, err
-            if ssid_cfg.mainflux_path then
-                local base_cfg = {}
-                for k, v in pairs(ssid_cfg) do
-                    if k ~= 'mainflux_path' then
-                        base_cfg[k] = v
-                    end
-                end
-                ssids, err = utils.parse_mainflux_ssids(ctx, conn, ssid_cfg.mainflux_path, base_cfg)
-                if err then
-                    log.error(string.format(
-                        "%s - %s: SSID %s mainflux config error: %s",
-                        ctx:value("service_name"),
-                        ctx:value("fiber_name"),
-                        ssid_cfg.name or "(unknown)",
-                        err
-                    ))
-                    ssids = {}
-                end
-            end
-            -- a mainflux path may spawn multiple ssids from one ssid_cfg
-            for _, ssid in ipairs(ssids or { ssid_cfg }) do
-                for _, radio_id in ipairs(ssid.radios) do
-                    if radio_ssids[radio_id] then
-                        table.insert(radio_ssids[radio_id], ssid)
-                    else
-                        radio_ssids[radio_id] = { ssid }
-                    end
-                end
-            end
-        end
-        ssid_configs = radio_ssids
-        for radio_id, ssids in pairs(ssid_configs) do
-            local radio = radios[radio_id]
-            if radio then
-                radio:remove_ssids()
-                radio:apply_ssids(ssids)
-            end
-        end
-
-
-        local band_configs = config.band_steering or {}
-        local globals = band_configs.globals or {}
-        local reqs = {}
-        reqs[#reqs + 1] = conn:request(new_msg(
-            { 'hal', 'capability', 'band', '1', 'control', 'set_kicking' },
-            {
-                globals.kick_mode,
-                globals.bandwidth_threshold,
-                globals.kicking_threshold,
-                globals.evals_before_kick
-            }
-        ))
-
-        local timing = band_configs.timings or {}
-        reqs[#reqs + 1] = conn:request(new_msg(
-            { 'hal', 'capability', 'band', '1', 'control', 'set_update_freq' },
-            { {
-                client = timing.update_client,
-                chan_util = timing.update_chan_util,
-                hostapd = timing.update_hostapd
-            } }
-        ))
-        reqs[#reqs + 1] = conn:request(new_msg(
-            { 'hal', 'capability', 'band', '1', 'control', 'set_client_inactive_kickoff' },
-            { timing.inactive_client_kickoff }
-        ))
-        reqs[#reqs + 1] = conn:request(new_msg(
-            { 'hal', 'capability', 'band', '1', 'control', 'set_client_cleanup' },
-            { timing.client_cleanup }
-        ))
-
-        local bands = band_configs.bands or {}
-        for band_name, band_cfg in pairs(bands) do
-            reqs[#reqs + 1] = conn:request(new_msg(
-                { 'hal', 'capability', 'band', '1', 'control', 'set_band_kicking' },
-                { band_name, {
-                    rssi_center = band_cfg.rssi_center,
-                    reward_threshold = band_cfg.good_rssi_threshold,
-                    reward = band_cfg.good_rssi_reward,
-                    penalty_threshold = band_cfg.bad_rssi_threshold,
-                    penalty = band_cfg.bad_rssi_penalty,
-                    weight = band_cfg.weight
-                } }
-            ))
-            reqs[#reqs + 1] = conn:request(new_msg(
-                { 'hal', 'capability', 'band', '1', 'control', 'set_band_priority' },
-                { band_name, band_cfg.initial_score }
-            ))
-        end
-
+    while true do
+        assert(stdout:read_line())
         fiber.spawn(function()
-            for _, req in ipairs(reqs) do
-                local resp, err = req:next_msg_with_context(ctx)
-                req:unsubscribe()
-                if err or resp and resp.payload and resp.payload.err then
-                    log.error(string.format(
-                        "%s - %s: Band steering config error: %s",
-                        ctx:value("service_name"),
-                        ctx:value("fiber_name"),
-                        err or resp.payload.err
-                    ))
-                    return
-                end
-            end
-
-            local req = conn:request(new_msg(
-                { 'hal', 'capability', 'band', '1', 'control', 'apply' }
-            ))
-            local resp, ctx_err = req:next_msg_with_context(ctx)
-            req:unsubscribe()
-            if ctx_err or resp and resp.payload and resp.payload.err then
-                log.error(string.format(
-                    "%s - %s: Band steering apply error: %s",
-                    ctx:value("service_name"),
-                    ctx:value("fiber_name"),
-                    ctx_err or resp.payload.err
-                ))
-                return
-            end
+            publish_clients_count(interfaces, bus_connection)
         end)
     end
 
@@ -433,63 +228,167 @@ local function radio_manager(ctx, conn)
     ))
 end
 
+local function setup_radio(
+    ctx,
+    conn,
+    index,
+    report_period,
+    band,
+    channel,
+    width,
+    channels,
+    txpower,
+    country,
+    interface)
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'wireless', index, 'control', 'set_report_period' },
+        { report_period }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'wireless', index, 'control', 'set_channels' },
+        { band, channel, width, channels }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'wireless', index, 'control', 'set_txpower' },
+        { txpower }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'wireless', index, 'control', 'set_country' },
+        { country }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'wireless', index, 'control', 'set_enabled' },
+        { true }
+    ))
+    local interface_sub = conn:request(new_msg(
+        { 'hal', 'capability', 'wireless', index, 'control', 'add_interface' },
+        interface
+    ))
+    local interface_response = interface_sub:next_msg()
+    print("SECTION interface_response.payload.result:", interface_response.payload.result)
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'wireless', index, 'control', 'apply' }
+    ))
+    return interface_response.payload.result
+end
+
 local function radio_listener(ctx, conn)
-    local wireless_sub = conn:subscribe({'hal', 'capability', 'wireless', '+'})
+    local wireless_sub = conn:subscribe({ 'hal', 'capability', 'wireless', '+' })
 
     while not ctx:err() do
         local radio_msg = wireless_sub:next_msg()
         if radio_msg and radio_msg.payload then
             log.info("Received radio message:", json.encode(radio_msg.payload))
-            local radio = conn:subscribe({'hal', 'device', 'wlan', radio_msg.payload.device.index}):next_msg()
+            local radio = conn:subscribe({ 'hal', 'device', 'wlan', radio_msg.payload.device.index }):next_msg()
             log.info("Radio details:", json.encode(radio.payload))
             if radio.payload.metadata.radioname == 'radio0' then
-                conn:publish(new_msg(
-                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_report_period'},
-                    { 10 }
-                ))
-                conn:publish(new_msg(
-                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_channels'},
-                    { '2g', 'auto', 'HE20', {1, 6, 11} }
-                ))
-                conn:publish(new_msg(
-                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_txpower'},
-                    { 20 }
-                ))
-                conn:publish(new_msg(
-                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_country'},
-                    { 'GB' }
-                ))
-                conn:publish(new_msg(
-                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'set_enabled'},
-                    { true }
-                ))
-                local interface_sub = conn:request(new_msg(
-                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'add_interface'},
-                    {'test-ssid', 'psk2', 'adminjangala', 'lan'}
-                ))
-                local interface_response = interface_sub:next_msg()
-                print("SECTION interface_response.payload.result:", interface_response.payload.result)
-                conn:publish(new_msg(
-                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'apply'}
-                ))
-                sleep.sleep(30)
-                conn:publish(new_msg(
-                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'delete_interface'},
-                    { interface_response.payload.result }
-                ))
-                conn:publish(new_msg(
-                    {'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'apply'}
-                ))
-                sleep.sleep(30)
+                local interface_id = setup_radio(
+                    ctx,
+                    conn,
+                    radio_msg.payload.index,
+                    10,
+                    '2g',
+                    'auto',
+                    'HE20',
+                    { 1, 6, 11 },
+                    20,
+                    'GB',
+                    { 'test-ssid', 'psk2', 'adminjangala', 'lan' }
+                )
+                fiber.spawn(function()
+                    sleep.sleep(60 * 5)
+                    conn:publish(new_msg(
+                        { 'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'delete_interface' },
+                        { interface_id }
+                    ))
+                    conn:publish(new_msg(
+                        { 'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'apply' }
+                    ))
+                end)
+            elseif radio.payload.metadata.radioname == 'radio1' then
+                local interface_id = setup_radio(
+                    ctx,
+                    conn,
+                    radio_msg.payload.index,
+                    10,
+                    '5g',
+                    'auto',
+                    'HE80',
+                    { 36, 40, 44, 48 },
+                    20,
+                    'GB',
+                    { 'test-ssid-5g', 'psk2', 'adminjangala', 'lan' }
+                )
+                fiber.spawn(function()
+                    sleep.sleep(60 * 5)
+                    conn:publish(new_msg(
+                        { 'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'delete_interface' },
+                        { interface_id }
+                    ))
+                    conn:publish(new_msg(
+                        { 'hal', 'capability', 'wireless', radio_msg.payload.index, 'control', 'apply' }
+                    ))
+                end)
             end
         end
     end
 end
 
-local function build_basic_wireless(ctx, conn)
+local function build_basic_dawn(ctx, conn)
+    local band_sub = conn:subscribe({'hal', 'capability', 'band', '+'})
+    local band_msg, ctx_err = band_sub:next_msg_with_context(ctx)
+    if ctx_err then return end
+    local band_idx = band_msg.payload.index
     conn:publish(new_msg(
-        {'hal', 'capability', 'uci', '1', 'control', 'set'},
-        {''}
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_kick_mode' },
+        { 'both' }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_band_priority' },
+        { '2g', 80 }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_band_priority' },
+        { '5g', 100 }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_client_kicking' },
+        { '2g', -50, 5, 10, 5, -20, 1 }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_client_kicking' },
+        { '5g', -50, 5, 10, 5, -20, 1 }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_support_bonus' },
+        { '2g', 'ht', 20 }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_support_bonus' },
+        { '5g', 'ht', 30 }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_support_bonus' },
+        { '5g', 'vht', 40 }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_update_freq' },
+        { { client = 15, chan_util = 5, hostapd = 10 } }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_client_inactive_kickoff' },
+        { 60 }
+    ))
+    conn:request(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'set_client_cleanup' },
+        { 30 }
+    ))
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'apply' }
+    ))
+    sleep.sleep(20)
+    conn:publish(new_msg(
+        { 'hal', 'capability', 'band', band_idx, 'control', 'apply' }
     ))
 end
 
@@ -501,6 +400,7 @@ function wifi_service:start(ctx, conn)
     ))
 
     fiber.spawn(function() radio_listener(ctx, conn) end)
+    fiber.spawn(function() build_basic_dawn(ctx, conn) end)
 end
 
 return wifi_service
