@@ -67,7 +67,10 @@ function UCI:set(ctx, config, section, option, value)
     if not success then
         return false, string.format("Failed to set %s.%s.%s to %s: %s", config, section, option, value, err)
     end
-
+    op.choice(
+        self.config_update_q:put_op(config),
+        ctx:done_op()
+    ):perform()
     return true, nil
 end
 
@@ -78,7 +81,7 @@ end
 --- @param option string
 --- @return boolean
 --- @return string?
-function UCI:delete(_, config, section, option)
+function UCI:delete(ctx, config, section, option)
     local success, err
     if option then
         success, err = cursor:delete(config, section, option)
@@ -88,7 +91,10 @@ function UCI:delete(_, config, section, option)
     if not success then
         return false, string.format("Failed to delete %s.%s.%s: %s", config, section, option, err)
     end
-
+    op.choice(
+        self.config_update_q:put_op(config),
+        ctx:done_op()
+    ):perform()
     return true, nil
 end
 
@@ -98,19 +104,10 @@ end
 --- @return boolean
 --- @return string?
 function UCI:commit(ctx, config)
-    local success, err = cursor:commit(config)
     if not success then
         return false, string.format("Failed to commit changes for %s: %s", config, err)
     end
-    op.choice(
-        self.config_update_q:put_op({ config = config, notify_ch = config_restart_ch }),
-        ctx:done_op()
-    ):perform()
-    local restart_result = op.choice(
-        config_restart_ch:get_op(),
-        ctx:done_op()
-    ):perform()
-    return restart_result and restart_result.ret or false, restart_result and restart_result.err or ctx:err()
+    return true, nil
 end
 
 --- Add a new section to a UCI configuration
@@ -121,6 +118,10 @@ end
 --- @return string?
 function UCI:add(ctx, config, section_type)
     local name = cursor:add(config, section_type)
+    op.choice(
+        self.config_update_q:put_op(config),
+        ctx:done_op()
+    ):perform()
     return name, nil
 end
 
@@ -134,6 +135,10 @@ function UCI:revert(ctx, config)
     if not success then
         return false, string.format("Failed to revert %s: %s", config, err)
     end
+    op.choice(
+        self.config_update_q:put_op(config),
+        ctx:done_op()
+    ):perform()
     return true, nil
 end
 
@@ -175,6 +180,10 @@ function UCI:foreach(ctx, config, type, callback)
     if not success then
         return false, string.format("Failed to iterate over %s.%s", config, type)
     end
+    op.choice(
+        self.config_update_q:put_op(config),
+        ctx:done_op()
+    ):perform()
     return true, nil
 end
 
@@ -290,6 +299,7 @@ function UCI:handle_capability(ctx, request)
     end
 
     fiber.spawn(function()
+        print("UCI:", command, table.concat(str_args, ", "))
         local result, err = func(self, ctx, unpack(args))
 
         ret_ch:put({
@@ -334,12 +344,12 @@ end
 --         return {}
 --     end
 
---     local restart_policy = restart_policies[config]
---     local old_time = restart_policy.current_restart
---     restart_policy.current_restart = restart_policy.get_next_restart(restart_policy.current_restart)
---     local new_time = restart_policy.current_restart
---     print("config update", config, old_time, new_time)
--- end
+    local restart_policy = restart_policies[config]
+    local old_time = restart_policy.current_restart
+    restart_policy.current_restart = restart_policy.get_next_restart(restart_policy.current_restart)
+    local new_time = restart_policy.current_restart
+    print("config update", config, old_time, new_time)
+end
 
 --- Apply UCI capabilities
 --- @param capability_info_q Queue
@@ -473,6 +483,14 @@ function UCI:_restart_worker(ctx)
                         endpoints = "single",
                         info = "restarting"
                     })
+                    local _, err = cursor:commit(config)
+                    if err then
+                        log.error(string.format(
+                            "%s - %s: Failed to commit changes",
+                            ctx:value("service_name"),
+                            ctx:value("fiber_name")
+                        ))
+                    end
                     for i, action in ipairs(restarter.actions) do
                         log.trace(string.format(
                             "%s - %s: Restarting %s action %d",
