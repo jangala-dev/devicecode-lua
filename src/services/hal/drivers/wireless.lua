@@ -25,6 +25,7 @@ local VALID_ENCRYPTIONS = {
     "none", "wep", "psk", "psk2", "psk-mixed",
     "sae", "sae-mixed", "owe", "wpa", "wpa2", "wpa3"
 }
+local VALID_MODES = { "ap", "sta", "adhoc", "mesh", "monitor" }
 local DELETE_MARKER = true
 
 ---@class WirelessDriver
@@ -121,31 +122,42 @@ function WirelessDriver:set_channels(ctx, band, channel, htmode, channels)
         return nil, "Invalid channel, must be a number, string or 'auto'"
     end
 
-    self.conn:publish(new_msg(
+    local reqs = {}
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'band', band }
     ))
     set_attr(self.config_diff_additions, { 'config', 'band' }, band)
 
-    self.conn:publish(new_msg(
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'htmode', htmode }
     ))
     set_attr(self.config_diff_additions, { 'config', 'htmode' }, htmode)
 
-    self.conn:publish(new_msg(
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'channel', channel }
     ))
     set_attr(self.config_diff_additions, { 'config', 'channel' }, channel)
 
     if channel == 'auto' then
-        self.conn:publish(new_msg(
+        local cat_channels = table.concat(channels, " ")
+        reqs[#reqs + 1] = self.conn:request(new_msg(
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            { 'wireless', self.name, 'channels', channels }
+            { 'wireless', self.name, 'channels', cat_channels }
         ))
     end
     set_attr(self.config_diff_additions, { 'config', 'channels' }, channels)
+
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
+        end
+    end
 
     return true, nil
 end
@@ -154,23 +166,54 @@ function WirelessDriver:set_country(ctx, country_code)
     if type(country_code) ~= "string" or #country_code ~= 2 then
         return nil, "Invalid country code, must be a 2-letter ISO code"
     end
-    self.conn:publish(new_msg(
+
+    local req = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'country', country_code:upper() }
     ))
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
+    end
+
     set_attr(self.config_diff_additions, { 'config', 'country' }, country_code:upper())
     return true, nil
 end
 
 function WirelessDriver:set_txpower(ctx, txpower)
-    if type(txpower) ~= "number" then
-        return nil, "Invalid txpower, must be a number"
+    if type(txpower) ~= "number" and type(txpower) ~= "string" then
+        return nil, "Invalid txpower, must be a number or a string"
     end
-    self.conn:publish(new_msg(
+
+    local req = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'txpower', txpower }
     ))
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
+    end
+
     set_attr(self.config_diff_additions, { 'config', 'txpower' }, txpower)
+    return true, nil
+end
+
+function WirelessDriver:set_type(ctx, radio_type)
+    if type(radio_type) ~= "string" then
+        return nil, "Invalid radio type, must be a string"
+    end
+    local req = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'wireless', self.name, 'type', radio_type }
+    ))
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
+    end
+    set_attr(self.config_diff_additions, { 'config', 'type' }, radio_type)
     return true, nil
 end
 
@@ -179,16 +222,23 @@ function WirelessDriver:set_enabled(ctx, enabled)
         return nil, "Invalid enabled state, must be a boolean"
     end
     local disabled = enabled and '0' or '1'
-    self.conn:publish(new_msg(
+
+    local req = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'disabled', disabled }
     ))
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
+    end
+
     set_attr(self.config_diff_additions, { 'disabled' }, not enabled)
     set_attr(self.config_diff_additions, { 'config', 'disabled' }, not enabled)
     return true, nil
 end
 
-function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_interface)
+function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_interface, mode)
     if type(ssid) ~= "string" or #ssid == 0 then
         return nil, "Invalid SSID, must be a non-empty string"
     end
@@ -201,6 +251,10 @@ function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_inter
     if type(net_interface) ~= "string" or #net_interface == 0 then
         return nil, "Invalid network interface, must be a non-empty string"
     end
+    if not hal_utils.is_in(mode, VALID_MODES) then
+        return nil, "Invalid mode, must be one of: " .. table.concat(VALID_MODES, ", ")
+    end
+
     local add_sub = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'add' },
         { 'wireless', 'wifi-iface' }
@@ -210,47 +264,76 @@ function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_inter
     if add_response.payload and add_response.payload.err or ctx_err then
         return nil, add_response.payload.err or ctx_err
     end
+
     local wifi_interface = add_response.payload and add_response.payload.result
-    self.conn:publish(new_msg(
+    local reqs = {}
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'device', self.name }
     ))
-    self.conn:publish(new_msg(
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'mode', 'ap' }
     ))
-    self.conn:publish(new_msg(
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'ssid', ssid }
     ))
     set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'ssid' }, ssid)
-    self.conn:publish(new_msg(
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'encryption', encryption }
     ))
     set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'encryption' }, encryption)
-    self.conn:publish(new_msg(
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'key', password }
     ))
     set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'password' }, password)
-    self.conn:publish(new_msg(
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'network', net_interface }
     ))
     set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'network' }, net_interface)
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'wireless', wifi_interface, 'mode', mode }
+    ))
+    set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'mode' }, mode)
+
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
+        end
+    end
+
     return wifi_interface, nil
 end
 
 function WirelessDriver:delete_interface(ctx, interface)
-    print("DELETE INTERFACE", interface)
     if type(interface) ~= "string" or #interface == 0 then
         return nil, "Invalid interface, must be a non-empty string"
     end
-    self.conn:publish(new_msg(
+
+    local req = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'delete' },
         { 'wireless', interface }
     ))
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
+    end
+
     if hal_utils.is_in(interface, self.config.interfaces, function(x) return x["section"] end) then
         set_attr(self.config_diff_removals,
             { 'interfaces', interface }, DELETE_MARKER
@@ -260,6 +343,38 @@ function WirelessDriver:delete_interface(ctx, interface)
             { 'interfaces', interface }, nil
         )
     end
+
+    return true, nil
+end
+
+function WirelessDriver:clear_radio_config(ctx)
+    local delete_req = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'delete' },
+        { 'wireless', self.name }
+    ))
+    local delete_resp, ctx_err = delete_req:next_msg_with_context(ctx)
+    delete_req:unsubscribe()
+    if ctx_err or (delete_resp.payload and delete_resp.payload.err) then
+        return nil, ctx_err or delete_resp.payload.err
+    end
+
+    local reqs = {}
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'wireless', self.name, 'wifi-device' }
+    ))
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'wireless', self.name, 'path', self.path }
+    ))
+
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
+        end
+    end
     return true, nil
 end
 
@@ -267,10 +382,14 @@ function WirelessDriver:apply(ctx)
     apply_diffs(self.config, self.config_diff_additions, self.config_diff_removals)
     self.config_diff_additions = {}
     self.config_diff_removals = {}
-    self.conn:publish(new_msg(
+    local commit_sub = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
         { 'wireless' }
     ))
+    local commit_response, ctx_err = commit_sub:next_msg_with_context(ctx)
+    if ctx_err or (commit_response.payload and commit_response.payload.err) then
+        return nil, ctx_err or commit_response.payload.err
+    end
     return true, nil
 end
 
@@ -458,7 +577,6 @@ local function get_iface_stats(ctx, interface)
     local stats = {}
 
     local info, info_err = iw.get_iw_dev_info(ctx, interface)
-    print("get_iface", interface, info_err)
     if not info_err then
         for k, v in pairs(info) do
             stats[k] = v
@@ -467,7 +585,6 @@ local function get_iface_stats(ctx, interface)
 
     for _, stat in ipairs(net_statistics) do
         local value, value_err = utils.get_net_statistic(interface, stat)
-        print(interface, value_err)
         if not value_err then
             stats[stat] = value
         end
@@ -495,11 +612,11 @@ function WirelessDriver:_report_metrics(ctx)
                 next_report = next_report - report_period + period -- Adjust next_report for new period
                 report_period = period
             end),
-            self.interface_event_queue:get_op():wrap(function (event)
+            self.interface_event_queue:get_op():wrap(function(event)
                 if not phy then
-                        phy = event.interface:match("^(phy%d+)")
-                        if phy then self.phy_channel:put(phy) end
-                    end
+                    phy = event.interface:match("^(phy%d+)")
+                    if phy then self.phy_channel:put(phy) end
+                end
                 if event.connected then
                     if not interfaces[event.interface] then
                         interfaces[event.interface] = {}
@@ -509,7 +626,6 @@ function WirelessDriver:_report_metrics(ctx)
                 end
             end),
             self.client_event_queue:get_op():wrap(function(event)
-                print("client event:", dump(event))
                 if not event then return end
                 if not interfaces[event.interface] then return end
                 if type(event.connected) ~= "nil" then
@@ -527,9 +643,7 @@ function WirelessDriver:_report_metrics(ctx)
                 if event.connected then
                     interfaces[event.interface][event.mac] = true
                     local client_info, client_err = iw.get_client_info(ctx, event.interface, event.mac)
-                    print(client_err)
                     if not client_err then
-                        print("cleint event info:", dump(client_info))
                         self.info_q:put({
                             type = "wireless",
                             id = self.name,
@@ -543,7 +657,6 @@ function WirelessDriver:_report_metrics(ctx)
                 end
             end),
             sleep.sleep_until_op(next_report):wrap(function()
-                print("reporting")
                 local client_stats = {}
                 for interface, iclients in pairs(interfaces) do
                     local stats = get_iface_stats(ctx, interface)
@@ -554,12 +667,11 @@ function WirelessDriver:_report_metrics(ctx)
                         local client_info, client_err = iw.get_client_info(ctx, interface, mac)
                         if not client_err then
                             client_stats[interface] = client_stats[interface] or {}
-                            client_stats[interface].client =  client_stats[interface].client or {}
+                            client_stats[interface].client = client_stats[interface].client or {}
                             client_stats[interface].client[mac] = client_info
                         end
                     end
                 end
-                print("metrics:", dump(client_stats))
                 if next(client_stats) then
                     self.info_q:put({
                         type = "wireless",
@@ -590,7 +702,6 @@ end
 -- to centralize it in the manager and just set the phy here when we get the event.
 -- more research is needed to find a better way to assign a phy to a driver
 function WirelessDriver:attach_interface(interface)
-    print("add", interface)
     local interface_event = {
         connected = true,
         interface = interface
@@ -599,7 +710,6 @@ function WirelessDriver:attach_interface(interface)
 end
 
 function WirelessDriver:detach_interface(interface)
-    print("remove", interface)
     local interface_event = {
         connected = false,
         interface = interface
@@ -623,55 +733,35 @@ function WirelessDriver:spawn(conn)
 end
 
 function WirelessDriver:init(conn)
-    local restart_sub = conn:subscribe({ 'hal', 'capability', 'uci', '1', 'info', 'restart', 'wireless' })
-    conn:publish(new_msg(
+    local req = conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'foreach' },
-        { 'wireless',  'wifi-iface', function (cursor, section)
-            print(section["device"], self.name)
+        { 'wireless', 'wifi-iface', function(cursor, section)
             if section["device"] == self.name then
-                print(section[".name"])
-                local res = cursor:delete('wireless', section[".name"])
-                print(res)
+                cursor:delete('wireless', section[".name"])
             end
-        end}
+        end }
     ))
-    conn:publish(new_msg(
+    local resp, ctx_err = req:next_msg_with_context(self.ctx)
+    req:unsubscribe()
+    -- We don't care if there was an error here, the wifi-iface sections might not exist
+
+    local commit_sub = conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
         { 'wireless' }
     ))
 
-    -- wait for wireless to restart
-    local restart_states = {"complete", "restarting"}
-    local i = 1
-    local restart_state = "complete"
-    while restart_state == restart_states[i] and not self.ctx:err() do
-        op.choice(
-            restart_sub:next_msg_with_context_op(self.ctx):wrap(function(msg)
-                if msg and msg.payload then
-                    if msg.payload ~= restart_state then
-                        i = i + 1
-                        restart_state = msg.payload
-                    end
-                end
-            end),
-            self.ctx:done_op()
-        ):perform()
-    end
-    restart_sub:unsubscribe()
-
-    if restart_state ~= "complete" then
-        return nil, "Failed to initialize wireless driver, wireless restart did not complete"
+    local commit_response, ctx_err = commit_sub:next_msg_with_context(self.ctx)
+    if ctx_err or (commit_response.payload and commit_response.payload.err) then
+        return nil, ctx_err or commit_response.payload.err
     end
 
     local phy = nil
     for _, interface_config in ipairs(self.config.interfaces) do
-        print(dump(interface_config))
         local ifname = interface_config.ifname
         if ifname then
             local iphy = ifname:match("^(phy%d+)")
             if iphy then
                 phy = iphy
-                print(phy)
                 break
             end
         end
@@ -684,11 +774,12 @@ end
 --- Create a new driver instance
 --- @param ctx Context The context for this driver
 --- @return WirelessDriver The new driver instance
-local function new(ctx, name, metadata)
+local function new(ctx, name, path, metadata)
     local self = setmetatable({}, WirelessDriver)
     self.ctx = ctx
     self.command_q = queue.new(10)
     self.name = name
+    self.path = path
     self.config = metadata
     self.config_diff_additions = {}
     self.config_diff_removals = {}
