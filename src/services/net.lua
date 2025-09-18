@@ -727,23 +727,23 @@ local function uci_manager(ctx)
 
     -- setup restart policies for each config
     net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "network", { method = "immediate"}, { { "/etc/init.d/network", "reload" } } }
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { "network", { { "/etc/init.d/network", "reload" } } }
     ))
     net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "firewall", { method = "immediate"}, { { "/etc/init.d/firewall", "restart" } } }
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { "firewall", { { "/etc/init.d/firewall", "restart" } } }
     ))
     net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "dhcp", { method = "immediate"}, {
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { "dhcp", {
             { "/etc/init.d/dnsmasq", "restart" },
             { "/etc/init.d/odhcpd",  "restart" }
         } }
     ))
     net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "mwan3", { method = "immediate"}, { { "/etc/init.d/mwan3", "restart" } } }
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { "mwan3", { { "/etc/init.d/mwan3", "restart" } } }
     ))
 
     local networks = {}
