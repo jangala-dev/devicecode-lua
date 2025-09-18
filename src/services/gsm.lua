@@ -39,6 +39,18 @@ local SCOREMAP = {
     ["5g"] = { rsrp = { -115, -105, -95, -85, 1000000 } }
 }
 
+local function purge_sub(ctx, sub)
+    local msg
+    while not ctx:err() do
+        local next_msg, err = sub:next_msg_with_context_op(ctx):perform_alt(function()
+            return nil, "all messages purged"
+        end)
+        if err then break end
+        msg = next_msg
+    end
+    return msg
+end
+
 ---@class Modem
 ---@field conn Connection
 ---@field ctx Context
@@ -137,7 +149,8 @@ function Modem:_apn_connect(ctx, cutoff)
             end
 
             -- need to wait for current connection attempt to finish before trying another
-            local modem_status = 'connecting'
+            local modem_status_msg = purge_sub(ctx, status_sub)
+            local modem_status = modem_status_msg and modem_status_msg.payload and modem_status_msg.payload.curr_state or nil
             while modem_status == 'connecting' do
                 local status_msg, status_err = status_sub:next_msg_with_context_op(ctx):perform()
                 if status_err then
@@ -145,6 +158,9 @@ function Modem:_apn_connect(ctx, cutoff)
                     log.debug(status_err); return
                 end
                 modem_status = status_msg and status_msg.payload and status_msg.payload.curr_state or modem_status
+            end
+            if modem_status == 'connected' then
+                return apns[n.name], nil
             end
         end
     end
@@ -247,18 +263,6 @@ end
 
 function Modem:_autounlock(ctx)
     return "not implemented"
-end
-
-local function purge_sub(ctx, sub)
-    local msg
-    while not ctx:err() do
-        local next_msg, err = sub:next_msg_with_context_op(ctx):perform_alt(function()
-            return nil, "all messages purged"
-        end)
-        if err then break end
-        msg = next_msg
-    end
-    return msg
 end
 
 ---State machine to automatically connect the modem to an apn and network interface
