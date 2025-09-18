@@ -30,9 +30,13 @@ function WLANManagement:_add_wlan(ctx, conn, radio_name, radio_metadata, capabil
     if self._wlan_devices[radio_name] then
         return
     end
-    local wireless_instance = wireless_driver.new(context.with_cancel(ctx), radio_name, radio_metadata)
+    local wireless_instance = wireless_driver.new(
+        context.with_cancel(ctx),
+        radio_name,
+        radio_metadata.config.path,
+        radio_metadata
+    )
     local phy, err = wireless_instance:init(conn)
-    print("init", phy)
     if err then
         log.error(
             string.format("%s - %s: Failed to initialize wireless driver for %s: %s",
@@ -71,7 +75,12 @@ function WLANManagement:_create_wlan(ctx, conn, radio_name, radio_metadata, capa
         return
     end
     fiber.spawn(function()
-        local wireless_instance = wireless_driver.new(context.with_cancel(ctx), radio_name, radio_metadata)
+        local wireless_instance = wireless_driver.new(
+            context.with_cancel(ctx),
+            radio_name,
+            radio_metadata.config.path,
+            radio_metadata
+        )
         local phy, err = wireless_instance:init(conn)
         if err then
             log.error(
@@ -196,8 +205,8 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
 
     -- Set dawn restart policy to immediate so that changes are applied immediately
     conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { 'dawn', { method = "debounce", delay = 3 }, { { '/etc/init.d/dawn', 'restart' } } }
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { 'dawn', { { '/etc/init.d/dawn', 'restart' } } }
     ))
 
     self:_create_band_driver(ctx, conn, capability_info_q, device_event_q)
@@ -205,8 +214,8 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
 
     -- Set wireless restart policy to immediate so that changes are applied immediately
     conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { 'wireless', { method = "debounce", delay = 3 }, { { 'wifi', 'reload' } } }
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { 'wireless', { { 'wifi', 'reload' } } }
     ))
 
     -- Query initial list of wireless radios using ubus
@@ -281,7 +290,6 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
                 local data = event['hotplug.net']
                 if data.devtype ~= 'wlan' then return end
                 local phy = data.interface:match("^(phy%d+)")
-                print("new event", event, data.interface, phy, data.action)
                 local phy_found = false
                 -- First check if we already have a driver with this phy assigned
                 -- route interface event to that driver
@@ -289,16 +297,12 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
                     if radio.phy == phy then
                         phy_found = true
                         if data.action == "add" then
-                            print("attach", radio.phy)
                             radio.driver:attach_interface(data.interface)
                         else
-                            print("detach", radio.phy)
                             radio.driver:detach_interface(data.interface)
                         end
                     end
                 end
-
-                print("phy found", phy_found)
                 -- If we don't have a driver with this phy assigned, it means it's a new phy
                 -- We must scan all radios to find the one without a phy assigned but with an interface
                 -- matching the phy of the event and assign it
@@ -306,8 +310,6 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
                 if not phy_found then
                     radios = self:_get_radios(ctx, conn)
                     for radio_name, radio_metadata in pairs(radios or {}) do
-                        print("ifname, phy", radio_metadata.interfaces[1] and radio_metadata.interfaces[1].ifname,
-                            self._wlan_devices[radio_name].phy)
                         if radio_metadata.interfaces[1] and
                             radio_metadata.interfaces[1].ifname and
                             self._wlan_devices[radio_name] and
@@ -316,10 +318,8 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
                         then
                             self._wlan_devices[radio_name].phy = phy
                             if data.action == "add" then
-                                print("radio attach", phy)
                                 self._wlan_devices[radio_name].driver:attach_interface(data.interface)
                             else
-                                print("radio detach", phy)
                                 self._wlan_devices[radio_name].driver:detach_interface(data.interface)
                             end
                         end
