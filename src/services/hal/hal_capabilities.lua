@@ -121,8 +121,8 @@ function UCICapability:foreach(args)
     return do_command(self.driver_q, cmd)
 end
 
-function UCICapability:set_restart_policy(args)
-    local cmd = {command = "set_restart_policy", args = args}
+function UCICapability:set_restart_actions(args)
+    local cmd = {command = "set_restart_actions", args = args}
     return do_command(self.driver_q, cmd)
 end
 
@@ -202,6 +202,11 @@ function WirelessCapability:set_txpower(args)
     return do_command(self.driver_q, cmd)
 end
 
+function WirelessCapability:set_type(args)
+    local cmd = {command = "set_type", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
 function WirelessCapability:set_enabled(args)
     local cmd = {command = "set_enabled", args = args}
     return do_command(self.driver_q, cmd)
@@ -217,6 +222,12 @@ function WirelessCapability:delete_interface(args)
     return do_command(self.driver_q, cmd)
 end
 
+function WirelessCapability:clear_radio_config()
+    local cmd = {command = "clear_radio_config"}
+    return do_command(self.driver_q, cmd)
+
+end
+
 function WirelessCapability:apply()
     local cmd = {command = "apply"}
     return do_command(self.driver_q, cmd)
@@ -230,8 +241,8 @@ local function new_band_capability(driver_q)
     return setmetatable({driver_q = driver_q}, BandCapability)
 end
 
-function BandCapability:set_kick_mode(args)
-    local cmd = {command = "set_kick_mode", args = args}
+function BandCapability:set_kicking(args)
+    local cmd = {command = "set_kicking", args = args}
     return do_command(self.driver_q, cmd)
 end
 
@@ -240,8 +251,8 @@ function BandCapability:set_band_priority(args)
     return do_command(self.driver_q, cmd)
 end
 
-function BandCapability:set_client_kicking(args)
-    local cmd = {command = "set_client_kicking", args = args}
+function BandCapability:set_band_kicking(args)
+    local cmd = {command = "set_band_kicking", args = args}
     return do_command(self.driver_q, cmd)
 end
 
