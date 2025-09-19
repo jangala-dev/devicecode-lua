@@ -447,7 +447,7 @@ local function radio_manager(ctx, conn)
             end
         end
 
-        local timing = config.band_steering.timing
+        local timing = config.band_steering.timings
         if not timing then
             return "Missing band_steering timing configuration"
         end
