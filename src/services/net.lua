@@ -827,6 +827,10 @@ local function uci_manager(ctx)
             networks[network] = { status = status }
             log.info("NET: Status for unknown network", network, "set to", status, ", skipping speedtest")
             return
+        elseif not networks[network].interfaces then
+            networks[network].status = status
+            log.info("NET: Status for network", network, "with unknown interface set to", status, ", skipping speedtest")
+            return
         end
         local old_status = networks[network].status
         networks[network].status = status
