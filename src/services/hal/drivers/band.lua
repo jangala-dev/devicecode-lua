@@ -35,24 +35,59 @@ local sections = {
     { name = 'gbltime', type = 'times' }
 }
 
-
 -------------------------------------------------------------------------
 --- BandCapabilities ----------------------------------------------------
 
-function BandDriver:set_kick_mode(ctx, mode)
+function BandDriver:set_kicking(ctx,
+                                mode,
+                                bandwidth_threshold,
+                                kicking_threshold,
+                                evals_before_kick
+)
     if not KICK_MODES[mode] then
         return nil, "Invalid kick mode"
     end
+    if type(bandwidth_threshold) ~= "number" or bandwidth_threshold < 0 then
+        return nil, "Invalid bandwidth threshold"
+    end
+    if type(kicking_threshold) ~= "number" or kicking_threshold < 0 then
+        return nil, "Invalid kicking threshold"
+    end
+    if type(evals_before_kick) ~= "number" or evals_before_kick < 0 then
+        return nil, "Invalid evaluations before kick"
+    end
 
-    local req = self.conn:request(new_msg(
+    local reqs = {}
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'dawn', 'global', 'kicking', KICK_MODES[mode] }
     ))
-    local resp = req:next_msg_with_context(ctx)
-    if resp.payload then
-        return resp.payload.result, resp.payload.err
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'global', 'bandwidth_threshold', bandwidth_threshold }
+    ))
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'global', 'kicking_threshold', kicking_threshold }
+    ))
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'global', 'min_number_to_kick', evals_before_kick }
+    ))
+
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
+        end
     end
-    return nil, ctx:err() or "No response from UCI"
+
+    return true, nil
 end
 
 function BandDriver:set_band_priority(ctx, band, priority)
@@ -69,69 +104,59 @@ function BandDriver:set_band_priority(ctx, band, priority)
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'dawn', full_band, 'initial_score', priority }
     ))
-    local resp = req:next_msg_with_context(ctx)
-    if resp.payload then
-        return resp.payload.result, resp.payload.err
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
     end
-    return nil, ctx:err() or "No response from UCI"
+
+    return true, nil
 end
 
-function BandDriver:set_client_kicking(ctx,
-                                       band,
-                                       rssi_center,
-                                       reward_threshold,
-                                       reward,
-                                       penalty_threshold,
-                                       penalty,
-                                       weight)
+function BandDriver:set_band_kicking(ctx,
+                                     band,
+                                     options)
     band = band:upper()
-    if type(rssi_center) ~= "number" then
-        return nil, "Invalid RSSI center"
-    end
-    if type(reward_threshold) ~= "number" then
-        return nil, "Invalid reward threshold"
-    end
-    if type(reward) ~= "number" then
-        return nil, "Invalid reward"
-    end
-    if type(penalty_threshold) ~= "number" then
-        return nil, "Invalid penalty threshold"
-    end
-    if type(penalty) ~= "number" then
-        return nil, "Invalid penalty"
-    end
-    if type(weight) ~= "number" then
-        return nil, "Invalid weight"
-    end
-    if not BAND_MAPPING[band] then
+    local full_band = BAND_MAPPING[band]
+    if not full_band then
         return nil, "Invalid band"
     end
 
     local configs = {
-        { 'dawn', BAND_MAPPING[band], 'rssi_center',  rssi_center },
-        { 'dawn', BAND_MAPPING[band], 'rssi_val',     reward_threshold },
-        { 'dawn', BAND_MAPPING[band], 'rssi',         reward },
-        { 'dawn', BAND_MAPPING[band], 'low_rssi_val', penalty_threshold },
-        { 'dawn', BAND_MAPPING[band], 'low_rssi',     penalty },
-        { 'dawn', BAND_MAPPING[band], 'rssi_weight',  weight }
+        rssi_center = {type = "number", entry = { 'dawn', full_band, 'rssi_center' }},
+        reward_threshold = {type = "number", entry = { 'dawn', full_band, 'rssi_val' }},
+        reward = {type = "number", entry = { 'dawn', full_band, 'rssi' }},
+        penalty_threshold = {type = "number", entry = { 'dawn', full_band, 'low_rssi_val' }},
+        penalty = {type = "number", entry = { 'dawn', full_band, 'low_rssi' }},
+        weight = {type = "number", entry = { 'dawn', full_band, 'rssi_weight' }}
     }
 
-    for _, config in ipairs(configs) do
-        print("set_client_kicking", table.concat(config, '.'))
-        local req = self.conn:request(new_msg(
+    local reqs = {}
+    for key, value in pairs(options) do
+        local config = configs[key]
+        if not config then
+            return false, "No entry associated with " .. key
+        end
+        if type(value) ~= config.type then
+            return false, "Invalid type for " .. key
+        end
+
+        local config_entry = {unpack(config.entry)}
+        table.insert(config_entry, value)
+        reqs[#reqs + 1] = self.conn:request(new_msg(
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            config
+            config_entry
         ))
-        local resp = req:next_msg_with_context(ctx)
-        print("set_client_kicking", resp.payload.result, resp.payload.err)
-        if resp.payload then
-            if resp.payload.err then
-                return nil, resp.payload.err
-            end
-        else
-            return nil, ctx:err() or "No response from UCI"
+    end
+
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
         end
     end
+
     return true, nil
 end
 
@@ -151,11 +176,13 @@ function BandDriver:set_support_bonus(ctx, band, support, reward)
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'dawn', BAND_MAPPING[band], support .. '_support', reward }
     ))
-    local resp = req:next_msg_with_context(ctx)
-    if resp.payload then
-        return resp.payload.result, resp.payload.err
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
     end
-    return nil, ctx:err() or "No response from UCI"
+
+    return true, nil
 end
 
 function BandDriver:set_update_freq(ctx, updates)
@@ -163,6 +190,7 @@ function BandDriver:set_update_freq(ctx, updates)
         return nil, "Updates must be a table"
     end
 
+    local reqs = {}
     for key, freq in pairs(updates) do
         if not utils.is_in(key, VALID_UPDATE_KEYS) then
             return nil, "Invalid update key: " .. key
@@ -171,17 +199,17 @@ function BandDriver:set_update_freq(ctx, updates)
             return nil, "Invalid frequency for " .. key
         end
 
-        local req = self.conn:request(new_msg(
+        reqs[#reqs + 1] = self.conn:request(new_msg(
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            { 'dawn', '', 'update_' .. key, freq }
+            { 'dawn', 'gbltime', 'update_' .. key, freq }
         ))
-        local resp = req:next_msg_with_context(ctx)
-        if resp.payload then
-            if resp.payload.err then
-                return nil, resp.payload.err
-            end
-        else
-            return nil, ctx:err() or "No response from UCI"
+    end
+
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
         end
     end
 
@@ -189,6 +217,8 @@ function BandDriver:set_update_freq(ctx, updates)
 end
 
 function BandDriver:set_client_inactive_kickoff(ctx, timeout)
+    print(timeout)
+    timeout = tonumber(timeout)
     if type(timeout) ~= "number" or timeout < 0 then
         return nil, "Invalid timeout"
     end
@@ -197,14 +227,18 @@ function BandDriver:set_client_inactive_kickoff(ctx, timeout)
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'dawn', 'gbltime', 'con_timeout', timeout }
     ))
-    local resp = req:next_msg_with_context(ctx)
-    if resp.payload then
-        return resp.payload.result, resp.payload.err
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
     end
-    return nil, ctx:err() or "No response from UCI"
+
+    return true, nil
 end
 
 function BandDriver:set_client_cleanup(ctx, timeout)
+    print(timeout)
+    timeout = tonumber(timeout)
     if type(timeout) ~= "number" or timeout < 0 then
         return nil, "Invalid timeout"
     end
@@ -213,11 +247,13 @@ function BandDriver:set_client_cleanup(ctx, timeout)
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'dawn', 'gbltime', 'remove_client', timeout }
     ))
-    local resp = req:next_msg_with_context(ctx)
-    if resp.payload then
-        return resp.payload.result, resp.payload.err
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
     end
-    return nil, ctx:err() or "No response from UCI"
+
+    return true, nil
 end
 
 function BandDriver:apply(ctx)
@@ -225,11 +261,13 @@ function BandDriver:apply(ctx)
         { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
         { 'dawn' }
     ))
-    local resp = req:next_msg_with_context(ctx)
-    if resp.payload then
-        return resp.payload.result, resp.payload.err
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
     end
-    return nil, ctx:err() or "No response from UCI"
+
+    return true, nil
 end
 
 -------------------------------------------------------------------------
@@ -278,7 +316,6 @@ function BandDriver:handle_capability(ctx, request)
 
     fiber.spawn(function()
         local result, err = func(self, ctx, unpack(args))
-        print("BAND DRIVER:", command, result, err)
 
         ret_ch:put({
             result = result,
@@ -326,12 +363,15 @@ function BandDriver:init(ctx, conn)
     local req = conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'foreach' },
         { 'dawn', nil, function(cursor, section)
-            cursor:delete('dawn', section[".name"])
+            if section[".type"] ~= "hostapd" and section[".type"] ~= "local" then
+                cursor:delete('dawn', section[".name"])
+            end
         end }
     ))
-    local resp = req:next_msg_with_context(ctx)
-    if resp.payload and resp.payload.err then
-        return resp.payload.result, resp.payload.err
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return resp.payload.result, resp.payload.err or ctx_err
     end
 
     for _, section in ipairs(sections) do
@@ -339,12 +379,24 @@ function BandDriver:init(ctx, conn)
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
             { 'dawn', section.name, section.type }
         ))
-        local resp = req:next_msg_with_context(ctx)
-        if resp.payload and resp.payload.err then
-            return resp.payload.result, resp.payload.err
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return resp.payload.result, resp.payload.err or ctx_err
         end
     end
-    return ctx:err() == nil, ctx:err()
+
+    local commit_req = conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
+        { 'dawn' }
+    ))
+
+    local resp, ctx_err = commit_req:next_msg_with_context(ctx)
+    commit_req:unsubscribe()
+    if resp.payload then
+        return resp.payload.result, resp.payload.err or ctx_err
+    end
+    return nil, ctx_err or "No response from UCI"
 end
 
 function BandDriver.new(ctx)
