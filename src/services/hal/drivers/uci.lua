@@ -357,11 +357,13 @@ function UCI:_main(ctx)
                     })
                     return
                 end
-                self.restart_q:put({
-                    config = commit_request.config,
-                    actions = restarter.actions,
-                    notify_ch = commit_request.notify_ch
-                })
+                fiber.spawn(function()
+                    self.restart_q:put({
+                        config = commit_request.config,
+                        actions = restarter.actions,
+                        notify_ch = commit_request.notify_ch
+                    })
+                end)
             end),
             ctx:done_op()
         }
