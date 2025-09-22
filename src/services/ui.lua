@@ -9,6 +9,8 @@ local http_util = require "http.util"
 local websocket = require "http.websocket"
 local cjson = require "cjson.safe"
 local op = require "fibers.op"
+-- -@type { get_box_reports: fun(): table, get_box_logs: fun(): table }
+local diagnostics = require "services.ui.diagnostics"
 require "services.ui.fibers_cqueues"
 
 local ui_service = {
@@ -25,6 +27,7 @@ local sse_logs = "/" .. sse_prefix .. "/logs"
 local stats_stream = "stats"
 local log_stream = "logs"
 local logs_subscription = "logs"
+local config_subscription = "config"
 local gsm_subscription = "gsm"
 local system_subscription = "system"
 local net_subscription = "net"
@@ -33,6 +36,26 @@ local ws_clients = {} -- list of active WebSocket clients
 local sse_clients = {} -- list of active SSE clients
 local stats_messages_cache = {}
 local log_messages_cache = {}
+local config = {
+    mainflux = {
+        url = '',
+        key = '',
+        channels = {
+            data = '',
+            control = '',
+        }
+    },
+    hawkbit = {
+        url = '',
+        key = '',
+    },
+    unifi = {
+        ip = '',
+    },
+    google = {
+        ip = '8.8.8.8',
+    }
+}
 
 local function get_static_mimetype(path)
     local ext_to_type = {
@@ -176,10 +199,27 @@ local function onstream(self, stream)
 
     -- Dynamic request handling
     if req_type == api_prefix then
-        log.info("API call")
+        if req_path == "/api/diagnostics" then
+            local res_headers = http_headers.new()
+
+            if req_method == "GET" then
+                ---@diagnostic disable-next-line: need-check-nil
+                local diagnostics_reports = diagnostics.get_box_reports(config)
+                ---@diagnostic disable-next-line: need-check-nil
+                local diagnostics_logs = diagnostics.get_box_logs()
+                local resp = { diagnostics_logs = diagnostics_logs, diagnostics = diagnostics_reports }
+                local msg = cjson.encode(resp) .. "\n\n"
+                res_headers:append(":status", "200")
+                assert(stream:write_headers(res_headers, false))
+                assert(stream:write_chunk(msg, true))
+            else
+                res_headers:append(":status", "404")
+                assert(stream:write_headers(res_headers, true))
+            end
+        end
     elseif req_type == ws_prefix then
         -- Attempt WebSocket upgrade directly
-        local ws, err = websocket.new_from_stream(stream, req_headers)
+        local ws, _ = websocket.new_from_stream(stream, req_headers)
         if ws then
             log.info("Websocket upgrade request")
             -- Successful WebSocket upgrade
@@ -266,9 +306,11 @@ local function bus_listener(ctx, connection)
     local sub_system = connection:subscribe({ system_subscription, "#" })
     local sub_net = connection:subscribe({ net_subscription, "#" })
     local sub_logs = connection:subscribe({ logs_subscription, "#" })
+    local sub_mainflux_config = connection:subscribe({ config_subscription, "mainflux" })
+    local sub_metrics_config = connection:subscribe({ config_subscription, "metrics" })
+    local sub_net_config = connection:subscribe({ config_subscription, "net" })
 
     local publish_message = function(msg, subscription)
-
         if subscription == stats_stream then
             local topic_key = table.concat(msg.topic, ".")
 
@@ -315,11 +357,82 @@ local function bus_listener(ctx, connection)
             end),
             sub_logs:next_msg_op():wrap(function(msg)
                 publish_message(msg, log_stream)
+            end),
+            sub_mainflux_config:next_msg_op():wrap(function(msg)
+                local function parse_mainflux_config(msg)
+                    local result = {
+                        key = '',
+                        channels = { data = '', control = '' },
+                    }
+
+                    local payload = msg.payload
+                    if payload then
+                        local key = payload.mainflux_key or payload.thing_key
+                        if key then result.key = key end
+
+                        local channels = payload.mainflux_channels
+                        for _, ch in ipairs(channels) do
+                            if ch.metadata and ch.metadata.channel_type == "data" then
+                                result.channels.data = ch.id
+                            elseif ch.metadata and ch.metadata.channel_type == "events" then
+                                result.channels.control = ch.id
+                            end
+                        end
+                    end
+
+                    return result
+                end
+
+                local function parse_hawkbit_config(msg)
+                    local result = {
+                        key = '',
+                        url = ''
+                    }
+
+                    if msg.payload and msg.payload.content then
+                        local content = msg.payload.content
+                        local content_json, err = cjson.decode(content)
+                        if not content_json then return result end
+                        content = content_json
+
+                        if content.hawkbit.hawkbit_key and content.hawkbit.hawkbit_url then
+                            result.key = content.hawkbit.hawkbit_key
+                            result.url = content.hawkbit.hawkbit_url
+                        end
+                    end
+
+                    return result
+                end
+
+                local mainflux = parse_mainflux_config(msg)
+                config.mainflux.channels = mainflux.channels
+                config.mainflux.key = mainflux.key
+                config.hawkbit = parse_hawkbit_config(msg)
+            end),
+            sub_metrics_config:next_msg_op():wrap(function(msg)
+                local cloud_url = msg.payload and msg.payload.cloud_url
+                config.mainflux.url = cloud_url
+            end),
+            sub_net_config:next_msg_op():wrap(function(msg)
+                local function parse_unifi_ip(msg)
+                    local domains = msg.payload and msg.payload.dhcp and msg.payload.dhcp.domains
+                    if not domains then return '' end
+
+                    for _, domain in ipairs(domains) do
+                        if domain.name == "unifi" then return domain.ip end
+                    end
+
+                    return ''
+                end
+                config.unifi.ip = parse_unifi_ip(msg)
             end)
         ):perform()
     end
 
     sub_logs:unsubscribe()
+    sub_mainflux_config:unsubscribe()
+    sub_metrics_config:unsubscribe()
+    sub_net_config:unsubscribe()
     sub_gsm:unsubscribe()
     sub_system:unsubscribe()
     sub_net:unsubscribe()
@@ -348,7 +461,7 @@ function ui_service:start(ctx, connection)
             end
             -- Ensure the other streams are closed properly
             if stream.state ~= "closed" then
-                print("Shutting down stream")
+                log.info("Shutting down stream")
                 stream:shutdown()
             end
         end)
