@@ -123,5 +123,12 @@
     "service2": {
         "paramX": "valueX",
         "paramY": "valueY"
+    },
+    "switch": {
+        "report_period": 10,
+        "host": "192.168.1.1",
+        "username": "admin",
+        "password": "admin",
+        "type": "rtl8380m"
     }
 }

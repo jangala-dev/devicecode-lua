@@ -2,11 +2,9 @@
 
 return {
     services = {
+        "log",
         "config",
-        "gsm",
-        "geo",
-        "time",
-        "wifi"
+        "switch",
         -- ... other services specific to this device version
     }
 }
