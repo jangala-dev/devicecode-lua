@@ -27,7 +27,6 @@ sudo luarocks install http
 sudo luarocks install luaposix
 sudo luarocks install luacheck
 sudo luarocks install lua-cjson
-sudo luarocks install luaossl
 
 # install cffi-lua
 sudo apt install -y meson pkg-config cmake libffi-dev
