@@ -1,0 +1,1457 @@
+{
+  "net": {
+    "report_period": 60,
+    "default": {
+      "backhauls": {
+        "network": {
+          "ipv4": {
+            "proto": "dhcp"
+          },
+          "firewall": {
+            "zone": "wan"
+          }
+        }
+      }
+    },
+    "dns": {
+      "upstream_servers": [
+        "8.8.8.8",
+        "1.1.1.1"
+      ],
+      "default_cache_size": 1000
+    },
+    "dhcp": {
+      "domains": [
+        {
+          "name": "config.bigbox.home",
+          "ip": "172.28.8.1"
+        }
+      ]
+    },
+    "network": [
+      {
+        "name": "Admin Network",
+        "id": "lan",
+        "type": "local",
+        "interfaces": [
+          "eth0.8"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "172.28.8.1",
+          "netmask": "255.255.255.0"
+        },
+        "dhcp_server": {
+          "range_skip": "10",
+          "range_extent": "240",
+          "lease_time": "12h"
+        },
+        "dns_server": {
+          "local_server": true,
+          "default_hosts": [
+            "ads"
+          ]
+        },
+        "firewall": {
+          "zone": "lan"
+        }
+      },
+      {
+        "name": "Internal Network",
+        "id": "int",
+        "type": "local",
+        "interfaces": [
+          "eth0"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "172.28.100.1",
+          "netmask": "255.255.255.0"
+        },
+        "dhcp_server": {
+          "range_skip": "10",
+          "range_extent": "240",
+          "lease_time": "12h"
+        },
+        "dns_server": {
+          "servers": [
+            "8.8.8.8",
+            "1.1.1.1"
+          ]
+        },
+        "firewall": {
+          "zone": "lan"
+        }
+      },
+      {
+        "name": "Primary Modem",
+        "id": "mdm0",
+        "type": "backhaul",
+        "modem_id": "primary",
+        "ipv4": {
+          "enabled": true,
+          "proto": "dhcp",
+          "peerdns": 0
+        },
+        "firewall": {
+          "zone": "wan"
+        }
+      },
+      {
+        "name": "Secondary Modem",
+        "id": "mdm1",
+        "type": "backhaul",
+        "modem_id": "secondary",
+        "ipv4": {
+          "enabled": true,
+          "proto": "dhcp"
+        },
+        "firewall": {
+          "zone": "wan"
+        }
+      },
+      {
+        "name": "Wired Internet",
+        "id": "wan",
+        "type": "backhaul",
+        "interfaces": [
+          "eth0.4"
+        ],
+        "ipv4": {
+          "enabled": true,
+          "proto": "dhcp",
+          "peerdns": 0
+        },
+        "firewall": {
+          "zone": "wan"
+        }
+      }
+    ],
+    "firewall": {
+      "defaults": {
+        "syn_flood": "1",
+        "input": "ACCEPT",
+        "forward": "REJECT",
+        "output": "ACCEPT",
+        "disable_ipv6": "1"
+      },
+      "zones": [
+        {
+          "description": "Local Networks",
+          "name": "lan",
+          "config": {
+            "name": "lan",
+            "input": "ACCEPT",
+            "output": "ACCEPT",
+            "forward": "ACCEPT"
+          },
+          "forwarding": [
+            {
+              "dest": "wan"
+            }
+          ]
+        },
+        {
+          "description": "Local Networks - restricted",
+          "name": "lan_rst",
+          "config": {
+            "name": "lan_rst",
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT"
+          },
+          "forwarding": [
+            {
+              "dest": "wan"
+            }
+          ]
+        },
+        {
+          "description": "Internet",
+          "name": "wan",
+          "config": {
+            "name": "wan",
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT",
+            "masq": 1,
+            "mtu_fix": 1
+          }
+        }
+      ],
+      "rules": [
+        {
+          "description": "Allows for DHCP renewal from upstream routers",
+          "config": {
+            "name": "Allow-DHCP-Renew",
+            "src": "wan",
+            "proto": "udp",
+            "dest_port": "68",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "Responds to pings from the Internet",
+          "config": {
+            "name": "Allow-Ping",
+            "src": "wan",
+            "proto": "icmp",
+            "icmp_type": "echo-request",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "",
+          "config": {
+            "name": "Allow-IGMP",
+            "src": "wan",
+            "proto": "igmp",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "",
+          "config": {
+            "name": "Allow-IPSec-ESP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "esp",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "",
+          "config": {
+            "name": "Allow-ISAKMP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "description": "",
+          "config": {
+            "name": "Allow-IPSec-ESP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "esp",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "name": "",
+          "config": {
+            "name": "Allow-ISAKMP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "name": "",
+          "config": {
+            "name": "Allow DHCP request (RST)",
+            "src": "lan_rst",
+            "proto": "udp",
+            "src_port": "67-68",
+            "dest_port": "67-68",
+            "target": "ACCEPT"
+          }
+        },
+        {
+          "name": "",
+          "config": {
+            "name": "Allow DNS queries (RST)",
+            "src": "lan_rst",
+            "proto": "tcp udp",
+            "dest_port": "53",
+            "target": "ACCEPT"
+          }
+        }
+      ]
+    },
+    "static_route": [
+      {
+        "target": "192.168.100.1",
+        "interface": "wan"
+      }
+    ]
+  },
+  "gsm": {
+    "modems": {
+      "default": {
+        "enabled": true
+      },
+      "known": [
+        {
+          "name": "primary",
+          "id_field": "device",
+          "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
+          "autoconnect": true
+        },
+        {
+          "name": "secondary",
+          "id_field": "device",
+          "device": "/ /sys/devices/platform/axi/1000480000.usb/usb1/1-1",
+          "autoconnect": true
+        }
+      ]
+    }
+  },
+  "metrics": {
+    "cloud_url": "$CLOUD_URL",
+    "publish_cache": {
+      "enabled": true,
+      "period": 60
+    },
+    "collections": {
+      "net/adm/rx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/adm/rx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/adm/rx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/adm/rx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/adm/tx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/adm/tx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/adm/tx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/adm/tx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/jan/rx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/jan/rx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/jan/rx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/jan/rx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/jan/tx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/jan/tx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/jan/tx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/jan/tx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm0/rx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm0/rx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm0/rx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm0/rx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm0/tx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm0/tx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm0/tx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm0/tx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm1/rx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm1/rx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm1/rx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm1/rx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm1/tx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm1/tx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm1/tx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/mdm1/tx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/wan/rx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/wan/rx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/wan/rx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/wan/rx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/wan/tx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/wan/tx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/wan/tx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "net/wan/tx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "gsm/modem/primary/firmware": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "fw_version"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/band": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "band"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/access-tech": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "access_tech"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/access-family": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "access_fam"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/imei": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "imei"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/sim": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "sim"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/signal/rssi": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "rssi"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "gsm/modem/primary/signal/rsrp": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "rsrp"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "gsm/modem/primary/signal/rsrq": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "rsrq"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "gsm/modem/primary/bars": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "bars"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/operator": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "operator"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/iccid": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "iccid"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/state": {
+        "protocol": "http",
+        "field": "curr_state",
+        "rename": [
+          "modem",
+          "1",
+          "state"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/interface": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "wann_type"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/primary/rx_bytes": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "rx_bytes"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "gsm/modem/primary/tx_bytes": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "1",
+          "tx_bytes"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "gsm/modem/secondary/firmware": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "fw_version"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/band": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "band"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/access-tech": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "access_tech"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/access-family": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "access_fam"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/imei": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "imei"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/sim": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "sim"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/signal/rssi": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "rssi"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "gsm/modem/secondary/signal/rsrp": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "rsrp"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "gsm/modem/secondary/signal/rsrq": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "rsrq"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "gsm/modem/secondary/bars": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "bars"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/operator": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "operator"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/iccid": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "iccid"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/state": {
+        "protocol": "http",
+        "field": "curr_state",
+        "rename": [
+          "modem",
+          "2",
+          "state"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/interface": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "wann_type"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "gsm/modem/secondary/rx_bytes": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "rx_bytes"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "gsm/modem/secondary/tx_bytes": {
+        "protocol": "http",
+        "rename": [
+          "modem",
+          "2",
+          "tx_bytes"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "system/info/boot_time": {
+        "protocol": "http",
+        "rename": [
+          "system",
+          "boot_time"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "system/info/firmware/version": {
+        "protocol": "http",
+        "rename": [
+          "system",
+          "fw_id"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "system/info/hardware/revision": {
+        "protocol": "http",
+        "rename": [
+          "system",
+          "hw_id"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "system/info/hardware/serial": {
+        "protocol": "http",
+        "rename": [
+          "system",
+          "serial"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "system/info/hardware/board/revision": {
+        "protocol": "http",
+        "rename": [
+          "system",
+          "board_revision"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "system/info/cpu/overall_utilisation": {
+        "protocol": "http",
+        "rename": [
+          "system",
+          "cpu_util"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "system/info/mem/util": {
+        "protocol": "http",
+        "rename": [
+          "system",
+          "mem_util"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "system/info/temperature": {
+        "protocol": "http",
+        "rename": [
+          "system",
+          "temp"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "absolute",
+            "threshold": 2
+          }
+        ]
+      }
+    }
+  }
+}
