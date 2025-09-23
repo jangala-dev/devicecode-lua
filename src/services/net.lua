@@ -827,7 +827,7 @@ local function uci_manager(ctx)
             networks[network] = { status = status }
             log.info("NET: Status for unknown network", network, "set to", status, ", skipping speedtest")
             return
-        elseif not networks[network].cfg.interfaces then
+        elseif not networks[network].cfg or networks[network].cfg.interfaces then
             networks[network].status = status
             log.info("NET: Status for network", network, "with unknown interface set to", status, ", skipping speedtest")
             return
