@@ -32,9 +32,12 @@ local DELETE_MARKER = true
 ---@field ctx Context The driver's context
 ---@field interface string
 ---@field name string
----@field config table
----@field config_diff_additions table
+---@field path string
+---@field type string
+---@field phy string
 ---@field report_period_ch Channel Channel for setting the report period of metrics
+---@field phy_channel Channel Channel for sending the phy name once known
+---@field interface_event_queue Queue Queue for receiving interface events
 ---@field client_event_queue Queue Queue for receiving client events
 ---@field command_q Queue Queue for receiving commands
 ---@field info_q Queue Queue for sending information updates
@@ -59,34 +62,6 @@ local function is_list(list)
         i = i + 1
     end
     return true
-end
-
-local function set_attr(obj, keys, value)
-    if #keys == 1 then
-        obj[keys[1]] = value
-    else
-        if type(obj[keys[1]]) ~= "table" then
-            obj[keys[1]] = {}
-        end
-        set_attr(obj[keys[1]], { unpack(keys, 2) }, value)
-    end
-end
-
-local function apply_diffs(main, additions, removals)
-    for k, v in pairs(additions) do
-        if type(v) == "table" and type(main[k]) == "table" then
-            apply_diffs(main[k], v, removals[k] or {})
-        else
-            main[k] = v
-        end
-    end
-    for k, v in pairs(removals) do
-        if type(v) == "table" and type(main[k]) == "table" then
-            apply_diffs(main[k], {}, v)
-        else
-            main[k] = nil
-        end
-    end
 end
 
 -------------------------------------------------------------------------
@@ -128,19 +103,16 @@ function WirelessDriver:set_channels(ctx, band, channel, htmode, channels)
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'band', band }
     ))
-    set_attr(self.config_diff_additions, { 'config', 'band' }, band)
 
     reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'htmode', htmode }
     ))
-    set_attr(self.config_diff_additions, { 'config', 'htmode' }, htmode)
 
     reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'channel', channel }
     ))
-    set_attr(self.config_diff_additions, { 'config', 'channel' }, channel)
 
     if channel == 'auto' then
         local cat_channels = table.concat(channels, " ")
@@ -149,7 +121,6 @@ function WirelessDriver:set_channels(ctx, band, channel, htmode, channels)
             { 'wireless', self.name, 'channels', cat_channels }
         ))
     end
-    set_attr(self.config_diff_additions, { 'config', 'channels' }, channels)
 
     for _, req in ipairs(reqs) do
         local resp, ctx_err = req:next_msg_with_context(ctx)
@@ -176,8 +147,6 @@ function WirelessDriver:set_country(ctx, country_code)
     if ctx_err or (resp.payload and resp.payload.err) then
         return nil, ctx_err or resp.payload.err
     end
-
-    set_attr(self.config_diff_additions, { 'config', 'country' }, country_code:upper())
     return true, nil
 end
 
@@ -195,8 +164,6 @@ function WirelessDriver:set_txpower(ctx, txpower)
     if ctx_err or (resp.payload and resp.payload.err) then
         return nil, ctx_err or resp.payload.err
     end
-
-    set_attr(self.config_diff_additions, { 'config', 'txpower' }, txpower)
     return true, nil
 end
 
@@ -213,7 +180,6 @@ function WirelessDriver:set_type(ctx, radio_type)
     if ctx_err or (resp.payload and resp.payload.err) then
         return nil, ctx_err or resp.payload.err
     end
-    set_attr(self.config_diff_additions, { 'config', 'type' }, radio_type)
     return true, nil
 end
 
@@ -232,9 +198,6 @@ function WirelessDriver:set_enabled(ctx, enabled)
     if ctx_err or (resp.payload and resp.payload.err) then
         return nil, ctx_err or resp.payload.err
     end
-
-    set_attr(self.config_diff_additions, { 'disabled' }, not enabled)
-    set_attr(self.config_diff_additions, { 'config', 'disabled' }, not enabled)
     return true, nil
 end
 
@@ -282,31 +245,26 @@ function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_inter
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'ssid', ssid }
     ))
-    set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'ssid' }, ssid)
 
     reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'encryption', encryption }
     ))
-    set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'encryption' }, encryption)
 
     reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'key', password }
     ))
-    set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'password' }, password)
 
     reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'network', net_interface }
     ))
-    set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'network' }, net_interface)
 
     reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'mode', mode }
     ))
-    set_attr(self.config_diff_additions, { 'interfaces', wifi_interface, 'config', 'mode' }, mode)
 
     for _, req in ipairs(reqs) do
         local resp, ctx_err = req:next_msg_with_context(ctx)
@@ -334,16 +292,6 @@ function WirelessDriver:delete_interface(ctx, interface)
         return nil, ctx_err or resp.payload.err
     end
 
-    if hal_utils.is_in(interface, self.config.interfaces, function(x) return x["section"] end) then
-        set_attr(self.config_diff_removals,
-            { 'interfaces', interface }, DELETE_MARKER
-        )
-    elseif hal_utils.is_in(interface, self.config_diff_additions, function(x) return x["section"] end) then
-        set_attr(self.config_diff_additions,
-            { 'interfaces', interface }, nil
-        )
-    end
-
     return true, nil
 end
 
@@ -367,6 +315,10 @@ function WirelessDriver:clear_radio_config(ctx)
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', self.name, 'path', self.path }
     ))
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'wireless', self.name, 'type', self.type }
+    ))
 
     for _, req in ipairs(reqs) do
         local resp, ctx_err = req:next_msg_with_context(ctx)
@@ -379,9 +331,6 @@ function WirelessDriver:clear_radio_config(ctx)
 end
 
 function WirelessDriver:apply(ctx)
-    apply_diffs(self.config, self.config_diff_additions, self.config_diff_removals)
-    self.config_diff_additions = {}
-    self.config_diff_removals = {}
     local commit_sub = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
         { 'wireless' }
@@ -395,24 +344,6 @@ end
 
 -------------------------------------------------------------------------
 -------------------------------------------------------------------------
-
---- Register and apply driver capabilities
---- @param capability_info_q Queue Queue for sending capability information updates
---- @return table capabilities The capabilities exposed by this driver
---- @return string? error Error message if capabilities couldn't be applied
-function WirelessDriver:apply_capabilities(capability_info_q)
-    self.info_q = capability_info_q
-
-    -- Example of registering capabilities - customize based on driver needs
-    local capabilities = {
-        wireless = {
-            control = hal_capabilities.new_wireless_capability(self.command_q),
-            id = self.name -- unique identifier for this capability instance
-        }
-    }
-
-    return capabilities, nil
-end
 
 --- Handle a capability request
 --- @param ctx Context
@@ -693,6 +624,36 @@ function WirelessDriver:_report_metrics(ctx)
     ))
 end
 
+function WirelessDriver:get_name()
+    return self.name
+end
+
+function WirelessDriver:get_phy()
+    return self.phy
+end
+
+function WirelessDriver:get_path()
+    return self.path
+end
+
+--- Register and apply driver capabilities
+--- @param capability_info_q Queue Queue for sending capability information updates
+--- @return table capabilities The capabilities exposed by this driver
+--- @return string? error Error message if capabilities couldn't be applied
+function WirelessDriver:apply_capabilities(capability_info_q)
+    self.info_q = capability_info_q
+
+    -- Example of registering capabilities - customize based on driver needs
+    local capabilities = {
+        wireless = {
+            control = hal_capabilities.new_wireless_capability(self.command_q),
+            id = self.name -- unique identifier for this capability instance
+        }
+    }
+
+    return capabilities, nil
+end
+
 -- This is not ideal
 -- Figuring out phy from ifname should be done in init
 -- but getting the associated interface from uci data is not reliable
@@ -702,6 +663,9 @@ end
 -- to centralize it in the manager and just set the phy here when we get the event.
 -- more research is needed to find a better way to assign a phy to a driver
 function WirelessDriver:attach_interface(interface)
+    if not self.phy then
+        self.phy = interface:match("^(phy%d+)")
+    end
     local interface_event = {
         connected = true,
         interface = interface
@@ -710,6 +674,9 @@ function WirelessDriver:attach_interface(interface)
 end
 
 function WirelessDriver:detach_interface(interface)
+    if not self.phy then
+        self.phy = interface:match("^(phy%d+)")
+    end
     local interface_event = {
         connected = false,
         interface = interface
@@ -720,7 +687,6 @@ end
 --- Spawn driver fiber
 --- @param conn Connection The bus connection
 function WirelessDriver:spawn(conn)
-    self.conn = conn
     service.spawn_fiber(string.format("Wireless Main (%s)", self.name), conn, self.ctx, function(fctx)
         self:_main(fctx)
     end)
@@ -733,6 +699,14 @@ function WirelessDriver:spawn(conn)
 end
 
 function WirelessDriver:init(conn)
+    self.conn = conn
+    -- Delete the radio device section and rebuild it with only the name, path and type
+    local ok, err = self:clear_radio_config(self.ctx)
+    if not ok then
+        return err
+    end
+
+    -- Delete all wifi-iface sections associated with this device
     local req = conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'foreach' },
         { 'wireless', 'wifi-iface', function(cursor, section)
@@ -745,6 +719,7 @@ function WirelessDriver:init(conn)
     req:unsubscribe()
     -- We don't care if there was an error here, the wifi-iface sections might not exist
 
+    -- Apply changes
     local commit_sub = conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'commit' },
         { 'wireless' }
@@ -752,37 +727,23 @@ function WirelessDriver:init(conn)
 
     local commit_response, ctx_err = commit_sub:next_msg_with_context(self.ctx)
     if ctx_err or (commit_response.payload and commit_response.payload.err) then
-        return nil, ctx_err or commit_response.payload.err
+        return ctx_err or commit_response.payload.err
     end
 
-    local phy = nil
-    for _, interface_config in ipairs(self.config.interfaces) do
-        local ifname = interface_config.ifname
-        if ifname then
-            local iphy = ifname:match("^(phy%d+)")
-            if iphy then
-                phy = iphy
-                break
-            end
-        end
-    end
-    self.config.interfaces = {}
-
-    return phy, nil
+    return nil
 end
 
 --- Create a new driver instance
 --- @param ctx Context The context for this driver
 --- @return WirelessDriver The new driver instance
-local function new(ctx, name, path, metadata)
+local function new(ctx, name, path, type)
     local self = setmetatable({}, WirelessDriver)
     self.ctx = ctx
     self.command_q = queue.new(10)
     self.name = name
     self.path = path
-    self.config = metadata
-    self.config_diff_additions = {}
-    self.config_diff_removals = {}
+    self.type = type
+    self.phy = nil
     self.report_period_ch = channel.new()
     self.client_event_queue = queue.new(10)
     self.interface_event_queue = queue.new(10)
