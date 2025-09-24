@@ -13,6 +13,7 @@ WLANManagement.__index = WLANManagement
 
 local function new()
     local wlan_management = {
+        _config_apply_q = queue.new(10),
         _wlan_devices = {},
         _wlan_add_queue = queue.new(10),
         _band_add_queue = queue.new(10)
@@ -20,57 +21,95 @@ local function new()
     return setmetatable(wlan_management, WLANManagement)
 end
 
-function WLANManagement:_add_wlan(ctx, conn, radio_name, radio_metadata, capability_info_q)
-    log.trace(string.format(
-        "%s - %s: Detected WLAN of name %s",
-        ctx:value("service_name"),
-        ctx:value("fiber_name"),
-        radio_name
-    ))
-    if self._wlan_devices[radio_name] then
-        return
-    end
-    local wireless_instance = wireless_driver.new(
-        context.with_cancel(ctx),
-        radio_name,
-        radio_metadata.config.path,
-        radio_metadata
-    )
-    local phy, err = wireless_instance:init(conn)
-    if err then
-        log.error(
-            string.format("%s - %s: Failed to initialize wireless driver for %s: %s",
-                ctx:value("service_name"),
-                ctx:value("fiber_name"),
-                radio_name,
-                err
-            )
-        )
-        return
-    end
-    local capabilities, cap_err = wireless_instance:apply_capabilities(capability_info_q)
-    if cap_err then
-        log.error(cap_err)
-        return
-    end
-    wireless_instance:spawn(conn)
-    local device_event = {
-        connected = true,
-        type = 'wlan',
-        capabilities = capabilities,
-        device_control = {},
-        id_field = "radioname",
-        data = {
-            interface = wireless_instance.interface,
-            radioname = radio_name,
-            devpath = radio_metadata.config.path,
-        }
-    }
-    self._wlan_devices[radio_name] = { driver = wireless_instance, phy = phy }
-    return device_event
+function WLANManagement:apply_config(config)
+    self._config_apply_q:put(config)
 end
 
-function WLANManagement:_create_wlan(ctx, conn, radio_name, radio_metadata, capability_info_q)
+function WLANManagement:_apply_config(ctx, conn, device_event_q, capability_info_q, config)
+    log.trace(string.format(
+        "%s - %s: Applying WLAN config",
+        ctx:value("service_name"),
+        ctx:value("fiber_name")
+    ))
+    if not config.radios or type(config.radios) ~= "table" then
+        log.error(string.format(
+            "%s - %s: Invalid WLAN config, 'radios' field missing or not a table",
+            ctx:value("service_name"),
+            ctx:value("fiber_name")
+        ))
+        return
+    end
+    local radio_configs = config.radios
+    for radio_name, _ in pairs(self._wlan_devices) do
+        local device_event = self:_remove_wlan(ctx, radio_name)
+        if device_event then
+            device_event_q:put(device_event)
+        end
+    end
+
+    for radio_name, radio_config in pairs(radio_configs) do
+        print("RADIO CONFIG:", radio_name)
+        self:_create_wlan(ctx, conn, radio_name, radio_config, capability_info_q)
+    end
+end
+
+-- function WLANManagement:_add_wlan(ctx, conn, radio_name, radio_config, capability_info_q)
+--     log.trace(string.format(
+--         "%s - %s: Detected WLAN of name %s",
+--         ctx:value("service_name"),
+--         ctx:value("fiber_name"),
+--         radio_name
+--     ))
+--     if self._wlan_devices[radio_name] then
+--         log.warn(string.format(
+--             "%s - %s: WLAN of name %s already exists, skipping",
+--             ctx:value("service_name"),
+--             ctx:value("fiber_name"),
+--             radio_name
+--         ))
+--         return
+--     end
+--     local wireless_instance = wireless_driver.new(
+--         context.with_cancel(ctx),
+--         radio_name,
+--         radio_config.path,
+--         radio_config.type
+--     )
+--     local phy, err = wireless_instance:init(conn)
+--     if err then
+--         log.error(
+--             string.format("%s - %s: Failed to initialize wireless driver for %s: %s",
+--                 ctx:value("service_name"),
+--                 ctx:value("fiber_name"),
+--                 radio_name,
+--                 err
+--             )
+--         )
+--         return
+--     end
+--     local capabilities, cap_err = wireless_instance:apply_capabilities(capability_info_q)
+--     if cap_err then
+--         log.error(cap_err)
+--         return
+--     end
+--     wireless_instance:spawn(conn)
+--     local device_event = {
+--         connected = true,
+--         type = 'wlan',
+--         capabilities = capabilities,
+--         device_control = {},
+--         id_field = "radioname",
+--         data = {
+--             interface = wireless_instance.interface,
+--             radioname = radio_name,
+--             devpath = radio_config.path,
+--         }
+--     }
+--     self._wlan_devices[radio_name] = { driver = wireless_instance, phy = phy }
+--     return device_event
+-- end
+
+function WLANManagement:_create_wlan(ctx, conn, radio_name, radio_config, capability_info_q)
     if self._wlan_devices[radio_name] then
         return
     end
@@ -78,10 +117,10 @@ function WLANManagement:_create_wlan(ctx, conn, radio_name, radio_metadata, capa
         local wireless_instance = wireless_driver.new(
             context.with_cancel(ctx),
             radio_name,
-            radio_metadata.config.path,
-            radio_metadata
+            radio_config.path,
+            radio_config.type
         )
-        local phy, err = wireless_instance:init(conn)
+        local err = wireless_instance:init(conn)
         if err then
             log.error(
                 string.format("%s - %s: Failed to initialize wireless driver for %s: %s",
@@ -101,34 +140,32 @@ function WLANManagement:_create_wlan(ctx, conn, radio_name, radio_metadata, capa
         wireless_instance:spawn(conn)
         self._wlan_add_queue:put({
             capabilities = capabilities,
-            radioname = radio_name,
-            devpath = radio_metadata.config.path,
-            phy = phy,
             driver = wireless_instance
         })
     end)
 end
 
-function WLANManagement:_remove_wlan(ctx, radio_name, radio_metadata)
+function WLANManagement:_remove_wlan(ctx, radio_name)
     log.trace(string.format(
         "%s - %s: Removed WLAN of name %s",
         ctx:value("service_name"),
         ctx:value("fiber_name"),
         radio_name
     ))
-    local wireless_instance = self._wlan_devices[radio_name].driver
-    if wireless_instance then
-        wireless_instance.ctx:cancel()
-        self._wlan_devices[radio_name] = nil
+    local wireless_instance = self._wlan_devices[radio_name]
+    if not wireless_instance then
+        return nil
     end
+    wireless_instance.ctx:cancel()
+    self._wlan_devices[radio_name] = nil
     local device_event = {
         connected = false,
         type = 'wlan',
-        id_field = "devicename",
+        id_field = "radioname",
         data = {
-            interface = wireless_instance.interface,
+            interface = wireless_instance:get_phy(),
             radioname = radio_name,
-            devpath = radio_metadata.config.path
+            devpath = wireless_instance:get_path()
         }
     }
     return device_event
@@ -218,27 +255,6 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
         { 'wireless', { { 'wifi', 'reload' } } }
     ))
 
-    -- Query initial list of wireless radios using ubus
-    local radios, radio_get_err = self:_get_radios(ctx, conn)
-    if radio_get_err then
-        log.error(string.format(
-            "%s - %s: ubus driver cannot be started, reason: %s",
-            ctx:value("service_name"),
-            ctx:value("fiber_name"),
-            radio_get_err
-        ))
-        return
-    end
-    for radio_name, radio_metadata in pairs(radios or {}) do
-        self:_create_wlan(
-            ctx,
-            conn,
-            radio_name,
-            radio_metadata,
-            capability_info_q
-        )
-    end
-
     local hotplug_req = conn:request(new_msg(
         { 'hal', 'capability', 'ubus', '1', 'control', 'listen' },
         { 'hotplug.net' }
@@ -269,18 +285,23 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
 
     while not process_ended and not ctx:err() do
         op.choice(
+            self._config_apply_q:get_op():wrap(function(config)
+                self:_apply_config(ctx, conn, device_event_q, capability_info_q, config)
+            end),
             self._wlan_add_queue:get_op():wrap(function(wlan_device)
-                self._wlan_devices[wlan_device.radioname] = { driver = wlan_device.driver, phy = wlan_device.phy }
+                local driver = wlan_device.driver
+                local capabilities = wlan_device.capabilities
+                self._wlan_devices[driver:get_name()] = driver
                 device_event_q:put({
                     connected = true,
                     type = 'wlan',
-                    capabilities = wlan_device.capabilities,
+                    capabilities = capabilities,
                     device_control = {},
                     id_field = "radioname",
                     data = {
-                        phy = wlan_device.phy,
-                        radioname = wlan_device.radioname,
-                        devpath = wlan_device.devpath,
+                        phy = driver:get_phy(),
+                        radioname = driver:get_name(),
+                        devpath = driver:get_path(),
                     }
                 })
             end),
@@ -294,12 +315,12 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
                 -- First check if we already have a driver with this phy assigned
                 -- route interface event to that driver
                 for _, radio in pairs(self._wlan_devices) do
-                    if radio.phy == phy then
+                    if radio:get_phy() == phy then
                         phy_found = true
                         if data.action == "add" then
-                            radio.driver:attach_interface(data.interface)
+                            radio:attach_interface(data.interface)
                         else
-                            radio.driver:detach_interface(data.interface)
+                            radio:detach_interface(data.interface)
                         end
                     end
                 end
@@ -310,17 +331,17 @@ function WLANManagement:_manager(ctx, conn, device_event_q, capability_info_q)
                 if not phy_found then
                     radios = self:_get_radios(ctx, conn)
                     for radio_name, radio_metadata in pairs(radios or {}) do
-                        if radio_metadata.interfaces[1] and
+                        if radio_metadata.interfaces and
+                            radio_metadata.interfaces[1] and
                             radio_metadata.interfaces[1].ifname and
                             self._wlan_devices[radio_name] and
-                            not self._wlan_devices[radio_name].phy and
+                            not self._wlan_devices[radio_name]:get_phy() and
                             radio_metadata.interfaces[1].ifname:match("^(phy%d+)") == phy
                         then
-                            self._wlan_devices[radio_name].phy = phy
                             if data.action == "add" then
-                                self._wlan_devices[radio_name].driver:attach_interface(data.interface)
+                                self._wlan_devices[radio_name]:attach_interface(data.interface)
                             else
-                                self._wlan_devices[radio_name].driver:detach_interface(data.interface)
+                                self._wlan_devices[radio_name]:detach_interface(data.interface)
                             end
                         end
                     end
