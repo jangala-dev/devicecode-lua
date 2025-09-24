@@ -34,11 +34,6 @@ local Radio = {}
 Radio.__index = Radio
 
 function Radio:apply_config(config, report_period)
-    self.id = config.id
-    fiber.spawn(function()
-        self.id_ch:put(config.id)
-    end)
-
     local reqs = {}
 
     local clear_req = self.conn:request(new_msg(
@@ -51,7 +46,7 @@ function Radio:apply_config(config, report_period)
         "%s - %s: Radio %s clear config error: %s",
             self.ctx:value("service_name"),
             self.ctx:value("fiber_name"),
-            self.id or "(unknown)",
+            self.index or "(unknown)",
             err or resp.payload.err
         ))
         return
@@ -60,11 +55,6 @@ function Radio:apply_config(config, report_period)
     reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'wireless', self.index, 'control', 'set_report_period' },
         { report_period }
-    ))
-
-    reqs[#reqs+1] = self.conn:request(new_msg(
-        { 'hal', 'capability', 'wireless', self.index, 'control', 'set_type' },
-        { config.type }
     ))
 
     reqs[#reqs + 1] = self.conn:request(new_msg(
@@ -111,7 +101,7 @@ function Radio:apply_config(config, report_period)
                 "%s - %s: Radio %s config error: %s",
                 self.ctx:value("service_name"),
                 self.ctx:value("fiber_name"),
-                self.id or "(unknown)",
+                self.index or "(unknown)",
                 err
             ))
             return
@@ -122,7 +112,7 @@ function Radio:apply_config(config, report_period)
                     "%s - %s: Radio %s config error: %s",
                     self.ctx:value("service_name"),
                     self.ctx:value("fiber_name"),
-                    self.id or "(unknown)",
+                    self.index or "(unknown)",
                     result.err
                 ))
             end
@@ -157,7 +147,7 @@ function Radio:apply_ssids(ssid_configs)
                     "%s - %s: Radio %s add SSID error: %s",
                     self.ctx:value("service_name"),
                     self.ctx:value("fiber_name"),
-                    self.id or "(unknown)",
+                    self.index or "(unknown)",
                     err or resp.payload.err
                 ))
             else
@@ -187,7 +177,7 @@ function Radio:remove_ssids()
                 "%s - %s: Radio %s remove SSID error: %s",
                 self.ctx:value("service_name"),
                 self.ctx:value("fiber_name"),
-                self.id or "(unknown)",
+                self.index or "(unknown)",
                 err or resp.payload.err
             ))
         end
@@ -202,7 +192,7 @@ function Radio:remove_ssids()
             "%s - %s: Radio %s apply after remove SSIDs error: %s",
             self.ctx:value("service_name"),
             self.ctx:value("fiber_name"),
-            self.id or "(unknown)",
+            self.index or "(unknown)",
             ctx_err or resp.payload.err
         ))
         return
@@ -214,14 +204,6 @@ function Radio:_report_metrics(ctx, conn)
     -- unimplemented for now, prioritising getting router functionality working first
 end
 
-function Radio:get_path()
-    return self.path
-end
-
-function Radio:get_id()
-    return self.id
-end
-
 function Radio:get_index()
     return self.index
 end
@@ -230,13 +212,11 @@ function Radio:remove()
     self.ctx:cancel("Radio removed")
 end
 
-function Radio.new(ctx, conn, index, path)
+function Radio.new(ctx, conn, index)
     local self = setmetatable({}, Radio)
     self.ctx = ctx
     self.conn = conn
     self.index = index
-    self.path = path
-    self.id_ch = channel.new()
     self.ssids = {}
     return self
 end
@@ -265,23 +245,11 @@ local function radio_listener(ctx, conn)
         local wireless_msg = wireless_sub:next_msg_with_context(ctx)
         if wireless_msg and wireless_msg.payload then
             local wireless_cap = wireless_msg.payload
-            fiber.spawn(function()
-                local radio = conn:subscribe(
-                    { 'hal', 'device', 'wlan', wireless_cap.device.index }
-                ):next_msg_with_context(ctx)
-                if radio and radio.payload and radio.payload.metadata then
-                    local radio_data = {
-                        name = radio.payload.metadata.radioname,
-                        index = wireless_cap.device.index,
-                        path = radio.payload.metadata.devpath
-                    }
-                    if wireless_cap.connected then
-                        wifi_service.radio_add_queue:put(radio_data)
-                    else
-                        wifi_service.radio_remove_queue:put(radio_data)
-                    end
-                end
-            end)
+            if wireless_cap.connected then
+                wifi_service.radio_add_queue:put(wireless_cap.device.index)
+            else
+                wifi_service.radio_remove_queue:put(wireless_cap.device.index)
+            end
         end
     end
     wireless_sub:unsubscribe()
@@ -294,44 +262,44 @@ local function radio_listener(ctx, conn)
 end
 
 local function radio_manager(ctx, conn)
-    local radios = { by_id = {}, by_path = {} }
+    local radios = {}
     local radio_configs = {}
     local report_period = nil
     local ssid_configs = {}
 
-    local function add_radio(radio_data)
-        if radios.by_path[radio_data.path] then
-            log.warn("Radio already exists:", radio_data.name)
+    local function add_radio(radio_index)
+        if radios[radio_index] then
+            log.warn("Radio already exists:", radio_index)
             return
         end
         log.info(string.format(
             "%s - %s: New radio detected (%s)",
             ctx:value("service_name"),
             ctx:value("fiber_name"),
-            radio_data.name
+            radio_index
         ))
-        local radio = Radio.new(ctx, conn, radio_data.index, radio_data.path)
-        local config = radio_configs[radio_data.path]
+        local radio = Radio.new(ctx, conn, radio_index)
+        local config = radio_configs[radio_index]
         if config then
             radio:apply_config(config, report_period)
-            radios.by_id[radio:get_id()] = radio
-            local ssid_config = ssid_configs[radio:get_id()]
+            radios[radio:get_index()] = radio
+            local ssid_config = ssid_configs[radio:get_index()]
             if ssid_config then
                 radio:remove_ssids()
                 radio:apply_ssids(ssid_config)
             end
         end
-        radios.by_path[radio_data.path] = radio
+        radios[radio_index] = radio
     end
 
-    local function remove_radio(radio_data)
-        local radio = radios.by_path[radio_data.path]
+    local function remove_radio(radio_index)
+        local radio = radios[radio_index]
         if not radio then
             log.warn(string.format(
                 "%s - %s: Radio not found for removal (%s)",
                 ctx:value("service_name"),
                 ctx:value("fiber_name"),
-                radio_data.name
+                radio_index
             ))
             return
         end
@@ -339,13 +307,10 @@ local function radio_manager(ctx, conn)
             "%s - %s: Removing radio (%s)",
             ctx:value("service_name"),
             ctx:value("fiber_name"),
-            radio_data.name
+            radio_index
         ))
         radio:remove()
-        radios[radio_data.path] = nil
-        if radio:get_id() then
-            radios.by_id[radio:get_id()] = nil
-        end
+        radios[radio_index] = nil
     end
 
     local function validate_config(config)
@@ -360,24 +325,11 @@ local function radio_manager(ctx, conn)
             return string.format("Invalid radios type, should be a table but found %s", type(config.radios))
         end
         for _, radio_cfg in ipairs(config.radios) do
-            if not radio_cfg.id then
-                return "Radio config missing id"
-            end
-            if not radio_cfg.path then
-                return string.format("Radio %s missing path", radio_cfg.id)
-            end
-            if not radio_cfg.type then
-                return string.format("Radio %s missing type", radio_cfg.id)
+            if not radio_cfg.name then
+                return "Radio config missing name"
             end
             if not radio_cfg.band then
-                return string.format("Radio %s missing band", radio_cfg.id)
-            end
-            if not (type(radio_cfg.path) == "string") then
-                return string.format(
-                    "Radio %s path should be a string but found %s",
-                    radio_cfg.id,
-                    type(radio_cfg.path)
-                )
+                return string.format("Radio %s missing band", radio_cfg.name)
             end
         end
 
@@ -498,12 +450,11 @@ local function radio_manager(ctx, conn)
     local function apply_config(config)
         report_period = config.report_period
         for _, radio_cfg in ipairs(config.radios) do
-            local radio = radios.by_path[radio_cfg.path]
+            local radio = radios[radio_cfg.name]
             if radio then
                 radio:apply_config(radio_cfg, report_period)
-                radios.by_id[radio:get_id()] = radio
             end
-            radio_configs[radio_cfg.path] = radio_cfg
+            radio_configs[radio_cfg.name] = radio_cfg
         end
 
         local radio_ssids = {}
@@ -518,7 +469,7 @@ local function radio_manager(ctx, conn)
         end
         ssid_configs = radio_ssids
         for radio_id, ssids in pairs(ssid_configs) do
-            local radio = radios.by_id[radio_id]
+            local radio = radios[radio_id]
             if radio then
                 radio:remove_ssids()
                 radio:apply_ssids(ssids)
