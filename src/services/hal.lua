@@ -17,10 +17,7 @@ local hal_service = {
     devices = {},
     capability_info_q = queue.new(50),
     device_event_q = queue.new(10),
-    modem_manager_instance = modem_manager.new(),
-    ubus_manager_instance = ubus_manager.new(),
-    uci_manager_instance = uci_manager.new(),
-    wlan_manager_instance = wlan_managaer.new()
+    managers = {}
 }
 hal_service.__index = hal_service
 
@@ -372,12 +369,6 @@ function hal_service:start(ctx, conn)
     service.spawn_fiber('Control', conn, ctx, function(control_ctx)
         self:_control_main(control_ctx)
     end)
-
-    -- start managers
-    self.modem_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
-    self.ubus_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
-    self.uci_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
-    self.wlan_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
 end
 
 return hal_service
