@@ -281,6 +281,25 @@ function BandCapability:apply()
     return do_command(self.driver_q, cmd)
 end
 
+local SerialCapability = {}
+SerialCapability.__index = SerialCapability
+
+local function new_serial_capability(driver_q)
+    return setmetatable({driver_q = driver_q}, SerialCapability)
+end
+function SerialCapability:open(args)
+    local cmd = { command = "open", args = args }
+    return do_command(self.driver_q, cmd)
+end
+function SerialCapability:close()
+    local cmd = { command = "close" }
+    return do_command(self.driver_q, cmd)
+end
+function SerialCapability:write(args)
+    local cmd = { command = "write", args = args }
+    return do_command(self.driver_q, cmd)
+end
+
 return {
     new_modem_capability = new_modem_capability,
     new_ubus_capability = new_ubus_capability,
@@ -288,5 +307,6 @@ return {
     new_time_capability = new_time_capability,
     new_uci_capability = new_uci_capability,
     new_wireless_capability = new_wireless_capability,
-    new_band_capability = new_band_capability
+    new_band_capability = new_band_capability,
+    new_serial_capability = new_serial_capability
 }
