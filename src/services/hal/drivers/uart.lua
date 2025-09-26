@@ -7,7 +7,7 @@ local service = require "service"
 local hal_capabilities = require "services.hal.hal_capabilities"
 local sc = require "fibers.utils.syscall"
 local log = require "services.log"
-local unpack = table.unpack or unpack  -- Lua 5.2 compatibility
+local unpack = table.unpack or unpack -- Lua 5.2 compatibility
 
 ---@class Driver
 ---@field ctx Context
@@ -109,29 +109,37 @@ end
 ------------------------------------------------------------------ Capability functions
 ---------------------------------------------------------------------------------------
 function Driver:open(ctx, opts)
+    print("BAUDRATE:", opts.baudrate)
     if self.is_open then
         return nil, "Port already open"
     end
     local baudrate = opts.baudrate or 115200
     local open_mode = ""
-    if opts.read then open_mode = open_mode .. "r" end
-    if opts.write then open_mode = open_mode .. "w" end
+    if opts.read and opts.write then
+        open_mode = "r+"
+    elseif opts.read then
+        open_mode = "r"
+    elseif opts.write then
+        open_mode = "w"
+    else
+        return nil, "Either read or write must be true"
+    end
 
     local filestream, err = file.open(self.port, open_mode)
     local fd = filestream and filestream.io and filestream.io.fd or nil
     if not fd then
-        log.error(string.format("Failed to open serial port %s: %s", self.port, err))
+        log.error(string.format("Failed to open serial port %s: %s", self.name, err))
         return nil, err
     end
     if err then
-        log.error(string.format("Failed to open serial port %s: %s", self.port, err))
+        log.error(string.format("Failed to open serial port %s: %s", self.name, err))
         return nil, err
     end
 
     local termios = sc.new_termios()
     local ok, err = sc.tcgetattr(fd, termios)
     if not ok then
-        log.error(string.format("Failed to get terminal attributes for %s: %s", self.port, err))
+        log.error(string.format("Failed to get terminal attributes for %s: %s", self.name, err))
         file.close(fd)
         return nil, err
     end
@@ -145,27 +153,28 @@ function Driver:open(ctx, opts)
 
     ok, err = sc.cfsetispeed(termios, baud_const)
     if not ok then
-        log.error(string.format("Failed to set input speed for %s: %s", self.port, err))
+        log.error(string.format("Failed to set input speed for %s: %s", self.name, err))
         file.close(fd)
         return nil, err
     end
 
     ok, err = sc.cfsetospeed(termios, baud_const)
     if not ok then
-        log.error(string.format("Failed to set output speed for %s: %s", self.port, err))
+        log.error(string.format("Failed to set output speed for %s: %s", self.name, err))
         file.close(fd)
         return nil, err
     end
 
     ok, err = sc.tcsetattr(fd, sc.TCSANOW, termios)
     if not ok then
-        log.error(string.format("Failed to apply terminal settings for %s: %s", self.port, err))
+        log.error(string.format("Failed to apply terminal settings for %s: %s", self.name, err))
         file.close(fd)
         return nil, err
     end
 
     self.filestream = filestream
     self.is_open = true
+    print("Opened serial port", self.name, "at", baudrate)
     return true, nil
 end
 
@@ -176,6 +185,13 @@ function Driver:close(ctx)
     self.filestream:close()
     self.filestream = nil
     self.is_open = false
+    self.info_q:put({
+        type = "uart",
+        id = self.name,
+        sub_topic = { "status" },
+        endpoints = "single",
+        info = "closed"
+    })
     return true, nil
 end
 
@@ -249,30 +265,19 @@ function Driver:_main(ctx)
             ctx:done_op()
         }
         if self.is_open then
-            table.insert(ops, self.filestream:read_line_op():wrap(function (line, _, err)
-                if not line or err then
+            table.insert(ops, self.filestream:read_line_op():wrap(function(line, _, err)
+                print(string.format("READ: '%s', %s", line, err))
+                if (not line) or err then
                     self:close(ctx)
-                    fiber.spawn(function()
-                        self.info_q:put({
-                            type = "uart",
-                            id = self.port,
-                            sub_topic = { "status" },
-                            endpoints = "single",
-                            info = "closed"
-                        })
-                    end)
                     return
                 end
-
-                fiber.spawn(function()
-                    self.info_q:put({
-                        type = "uart",
-                        id = self.port,
-                        sub_topic = { "out" },
-                        endpoints = "single",
-                        info = line
-                    })
-                end)
+                self.info_q:put({
+                    type = "uart",
+                    id = self.name,
+                    sub_topic = { "out" },
+                    endpoints = "single",
+                    info = line
+                })
             end))
         end
         op.choice(unpack(ops)):perform()
@@ -285,32 +290,34 @@ function Driver:_main(ctx)
     ))
 end
 
+function Driver:get_port()
+    return self.port
+end
+
 ---returns a list of control and info capabilities for the modem
 ---@return table
 function Driver:apply_capabilities(capability_info_q)
     self.info_q = capability_info_q
     local capabilities = {}
-    capabilities.modem = {
-        control = hal_capabilities.new_serial_capability(self.command_q),
-        id = self.imei
+    capabilities.uart = {
+        control = hal_capabilities.new_serial_capability(self.capability_q),
+        id = self.name
     }
     return capabilities
 end
 
-function Driver:init()
-
-end
-
 ---@param conn Connection
 function Driver:spawn(conn)
-    service.spawn_fiber('Serial Main (' .. self.port .. ')', conn, self.ctx, function(fctx)
+    service.spawn_fiber('Serial Main (' .. self.name .. ')', conn, self.ctx, function(fctx)
         self:_main(fctx)
     end)
 end
 
-local function new(ctx)
+local function new(ctx, name, port)
     local self = setmetatable({}, Driver)
     self.ctx = ctx
+    self.name = name
+    self.port = port
     self.capability_q = queue.new(10)
     self.filestream = nil
     -- Other initial properties
