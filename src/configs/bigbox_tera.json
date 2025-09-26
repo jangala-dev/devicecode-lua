@@ -1,4 +1,35 @@
 {
+  "hal": {
+    "managers": {
+      "modemcard": {},
+      "uci": {},
+      "ubus": {},
+      "wlan": {
+        "radios": {
+          "radio0": {
+            "type": "mac80211",
+            "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0"
+          },
+          "radio1": {
+            "type": "mac80211",
+            "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1"
+          },
+          "radio2": {
+            "type": "mac80211",
+            "path": "platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1"
+          }
+        }
+      },
+      "uart": {
+        "serial_ports": [
+          {
+            "name": "uart0",
+            "path": "/dev/ttyACM0"
+          }
+        ]
+      }
+    }
+  },
   "net": {
     "report_period": 60,
     "default": {
@@ -454,9 +485,7 @@
     "report_period": 60,
     "radios": [
       {
-        "id": "mt-2g",
-        "type": "mac80211",
-        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0",
+        "id": "radio0",
         "band": "2g",
         "channel": "auto",
         "channels": [
@@ -470,9 +499,7 @@
         "disabled": false
       },
       {
-        "id": "mt-5g",
-        "type": "mac80211",
-        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1",
+        "id": "radio1",
         "band": "5g",
         "channel": "auto",
         "channels": [
@@ -483,24 +510,8 @@
         ],
         "country": "GB",
         "htmode": "HT20",
-        "txpower": "10",
+        "txpower": "20",
         "disabled": false
-      },
-      {
-        "id": "internal",
-        "type": "mac80211",
-        "path": "platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1",
-        "band": "5g",
-        "channel": "auto",
-        "channels": [
-          "36",
-          "40",
-          "44",
-          "48"
-        ],
-        "country": "GB",
-        "htmode": "HT20",
-        "disabled": true
       }
     ],
     "ssids": [
@@ -511,7 +522,7 @@
         "password": "shiny-huge-valet",
         "network": "jng",
         "radios": [
-          "mt-2g"
+          "radio0"
         ]
       },
       {
@@ -521,7 +532,7 @@
         "password": "shiny-huge-valet",
         "network": "adm",
         "radios": [
-          "mt-5g"
+          "radio1"
         ]
       }
     ],
