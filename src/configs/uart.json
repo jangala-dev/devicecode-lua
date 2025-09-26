@@ -1,0 +1,14 @@
+{
+  "hal": {
+    "managers": {
+      "uart": {
+        "serial_ports": [
+          {
+            "name": "uart0",
+            "path": "/dev/ttyAMA10"
+          }
+        ]
+      }
+    }
+  }
+}
