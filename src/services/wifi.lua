@@ -3,6 +3,7 @@ local op = require "fibers.op"
 local queue = require "fibers.queue"
 local channel = require "fibers.channel"
 local log = require "services.log"
+local gen = require "services.wifi.gen"
 local service = require "service"
 local new_msg = require "bus".new_msg
 
@@ -201,7 +202,15 @@ function Radio:remove_ssids()
 end
 
 function Radio:_report_metrics(ctx, conn)
-    -- unimplemented for now, prioritising getting router functionality working first
+    local num_clients = 0
+
+    local interface_sub = conn:subscribe(
+        { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+' }
+    )
+    local client_sub = conn:subscribe(
+        { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+', 'client', '+' }
+    )
+
 end
 
 function Radio:get_index()
