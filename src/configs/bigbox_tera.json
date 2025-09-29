@@ -485,7 +485,7 @@
     "report_period": 60,
     "radios": [
       {
-        "id": "radio0",
+        "name": "radio0",
         "band": "2g",
         "channel": "auto",
         "channels": [
@@ -499,7 +499,7 @@
         "disabled": false
       },
       {
-        "id": "radio1",
+        "name": "radio1",
         "band": "5g",
         "channel": "auto",
         "channels": [
@@ -543,7 +543,7 @@
         "kicking_threshold": 10,
         "evals_before_kick": 3
       },
-      "timing": {
+      "timings": {
         "update_client": 10,
         "update_chan_util": 5,
         "update_hostapd": 10,
