@@ -203,84 +203,84 @@ function Radio:remove_ssids()
 end
 
 function Radio:_report_metrics(ctx, conn)
-    local num_clients = 0
-    local interface_names = {}
+    -- local num_clients = 0
+    -- local interface_names = {}
 
-    local interface_stat_targets = {
-        txpower = { 'txpower' },
-        channel = { 'channel', 'chan' },
-        -- noise = { '' } not currently supplied by wireless driver
+    -- local interface_stat_targets = {
+    --     txpower = { 'txpower' },
+    --     channel = { 'channel', 'chan' },
+    --     -- noise = { '' } not currently supplied by wireless driver
 
-        rx_bytes = { 'rx_bytes' },
-        rx_packets = { 'rx_packets' },
-        rx_dropped = { 'rx_dropped' },
-        rx_errors = { 'rx_errors' },
+    --     rx_bytes = { 'rx_bytes' },
+    --     rx_packets = { 'rx_packets' },
+    --     rx_dropped = { 'rx_dropped' },
+    --     rx_errors = { 'rx_errors' },
 
-        tx_bytes = { 'tx_bytes' },
-        tx_packets = { 'tx_packets' },
-        tx_dropped = { 'tx_dropped' },
-        tx_errors = { 'tx_errors' },
-        ssid = { 'ssid'}
-    }
-    local interface_stat_subs = {}
-    for name, path in pairs(interface_stat_targets) do
-        interface_stat_subs[name] = conn:subscribe(
-            { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+', unpack(path) }
-        )
-    end
+    --     tx_bytes = { 'tx_bytes' },
+    --     tx_packets = { 'tx_packets' },
+    --     tx_dropped = { 'tx_dropped' },
+    --     tx_errors = { 'tx_errors' },
+    --     ssid = { 'ssid'}
+    -- }
+    -- local interface_stat_subs = {}
+    -- for name, path in pairs(interface_stat_targets) do
+    --     interface_stat_subs[name] = conn:subscribe(
+    --         { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+', unpack(path) }
+    --     )
+    -- end
 
-    -- local interface_ssid_sub = conn:subscribe(
-    --     { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+',  }
+    -- -- local interface_ssid_sub = conn:subscribe(
+    -- --     { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+',  }
+    -- -- )
+    -- local client_sub = conn:subscribe(
+    --     { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+', 'client', '+' }
     -- )
-    local client_sub = conn:subscribe(
-        { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+', 'client', '+' }
-    )
 
-    while not ctx:err() do
-        local ops = {}
-        for name, sub in pairs(interface_stat_subs) do
-            ops[#ops + 1] = sub:next_msg_op():wrap(function (msg)
-                local interface = msg.topic[7]
-                if msg.payload and interface and interface_names[interface] then
-                    local value = msg.payload
-                    conn:publish(new_msg(
-                        { 'wifi', self.index, interface_names[interface], name },
-                        value
-                    ))
-                end
-                return msg
-            end)
-            if name == "ssid" then
-                ops[#ops]:wrap(function (msg)
-                    local interface = msg.topic[7]
-                    if msg.payload and interface then
-                        interface_names[interface] = string.find(msg.payload, "-admin") and "admin" or "jangala"
-                    end
-                    return msg
-                end)
-            end
-        end
-        op.choice(
-            client_sub:next_msg_op():wrap(function (msg)
-                if msg.payload then
-                    if msg.payload.connected then
-                        num_clients = num_clients + 1
-                    else
-                        if num_clients <= 0  then
-                            log.warn(string.format(
-                                "%s - %s: num_clients entering negative, adjusting back to 0",
-                                ctx:value("service_name"),
-                                ctx:value("fiber_name")
-                            ))
-                            num_clients = 0
-                        else
-                            num_clients = num_clients - 1
-                        end
-                    end
-                end
-            end)
-        )
-    end
+    -- while not ctx:err() do
+    --     local ops = {}
+    --     for name, sub in pairs(interface_stat_subs) do
+    --         ops[#ops + 1] = sub:next_msg_op():wrap(function (msg)
+    --             local interface = msg.topic[7]
+    --             if msg.payload and interface and interface_names[interface] then
+    --                 local value = msg.payload
+    --                 conn:publish(new_msg(
+    --                     { 'wifi', self.index, interface_names[interface], name },
+    --                     value
+    --                 ))
+    --             end
+    --             return msg
+    --         end)
+    --         if name == "ssid" then
+    --             ops[#ops]:wrap(function (msg)
+    --                 local interface = msg.topic[7]
+    --                 if msg.payload and interface then
+    --                     interface_names[interface] = string.find(msg.payload, "-admin") and "admin" or "jangala"
+    --                 end
+    --                 return msg
+    --             end)
+    --         end
+    --     end
+    --     op.choice(
+    --         client_sub:next_msg_op():wrap(function (msg)
+    --             if msg.payload then
+    --                 if msg.payload.connected then
+    --                     num_clients = num_clients + 1
+    --                 else
+    --                     if num_clients <= 0  then
+    --                         log.warn(string.format(
+    --                             "%s - %s: num_clients entering negative, adjusting back to 0",
+    --                             ctx:value("service_name"),
+    --                             ctx:value("fiber_name")
+    --                         ))
+    --                         num_clients = 0
+    --                     else
+    --                         num_clients = num_clients - 1
+    --                     end
+    --                 end
+    --             end
+    --         end)
+    --     )
+    -- end
 
 end
 
