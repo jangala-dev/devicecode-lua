@@ -10,8 +10,7 @@ end
 
 local function connect(ctx, device, connection_string)
     connection_string = string.format("--simple-connect=%s", connection_string)
-    return exec.command_context(ctx, 'mmcli', '-m', device,
-        connection_string)
+    return exec.command_context(ctx, 'mmcli', '-m', device, connection_string)
 end
 
 local function disconnect(ctx, device)
@@ -52,6 +51,12 @@ end
 local function signal_get(ctx, device)
     return exec.command_context(ctx, 'mmcli', '-J', '-m', device, '--signal-get')
 end
+
+local function three_gpp_set_initial_eps_bearer_settings(ctx, device, settings)
+    local settings_string = string.format("--3gpp-set-initial-eps-bearer-settings=%s", settings)
+    return exec.command_context(ctx, 'mmcli', '-m', device, settings_string)
+end
+
 return {
     monitor_modems = monitor_modems,
     inhibit = inhibit,
@@ -65,5 +70,6 @@ return {
     sim_information = sim_information,
     location_status = location_status,
     signal_setup = signal_setup,
-    signal_get = signal_get
+    signal_get = signal_get,
+    three_gpp_set_initial_eps_bearer_settings = three_gpp_set_initial_eps_bearer_settings,
 }
