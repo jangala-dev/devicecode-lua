@@ -508,21 +508,22 @@
     ],
     "ssids": [
       {
-        "name": "Jangala",
+        "name": "GetBox-PmWBH",
+        "encryption": "psk2",
         "mode": "access_point",
-        "encryption": "none",
-        "network": "jan",
+        "password": "shiny-huge-valet",
+        "network": "jng",
         "radios": [
-          "radio0",
-          "radio1"
+          "radio0"
         ]
       },
       {
-        "mainflux_path": "config/mainflux",
+        "name": "GetBox-PmWBH-admin",
         "encryption": "psk2",
         "mode": "access_point",
+        "password": "shiny-huge-valet",
+        "network": "adm",
         "radios": [
-          "radio0",
           "radio1"
         ]
       }
