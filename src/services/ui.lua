@@ -370,7 +370,7 @@ local function bus_listener(ctx, connection)
                         local key = payload.mainflux_key or payload.thing_key
                         if key then result.key = key end
 
-                        local channels = payload.mainflux_channels
+                        local channels = payload.mainflux_channels or payload.channels
                         for _, ch in ipairs(channels) do
                             if ch.metadata and ch.metadata.channel_type == "data" then
                                 result.channels.data = ch.id
