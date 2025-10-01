@@ -32,7 +32,19 @@
           },
           "firewall": {
             "zone": "wan"
+          },
+          "shaping": {
+            "egress": {
+              "qdisc": "fq_codel"
+            },
+            "ingress": {
+              "qdisc": "fq_codel"
+            }
           }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
         }
       }
     },
@@ -46,6 +58,10 @@
     "dhcp": {
       "domains": [
         {
+          "name": "unifi",
+          "ip": "$UNIFI_IP"
+        },
+        {
           "name": "config.bigbox.home",
           "ip": "172.28.8.1"
         }
@@ -54,7 +70,7 @@
     "network": [
       {
         "name": "Admin Network",
-        "id": "lan",
+        "id": "adm",
         "type": "local",
         "interfaces": [
           "eth0.8"
@@ -80,11 +96,101 @@
         }
       },
       {
+        "name": "Jangala Network",
+        "id": "jan",
+        "type": "local",
+        "interfaces": [
+          "eth0.32"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "172.28.32.1",
+          "netmask": "255.255.255.0"
+        },
+        "dhcp_server": {
+          "range_skip": "10",
+          "range_extent": "240",
+          "lease_time": "12h"
+        },
+        "dns_server": {
+          "local_server": true,
+          "default_hosts": [
+            "ads",
+            "adult"
+          ]
+        },
+        "firewall": {
+          "zone": "lan_rst"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "htb",
+            "filters": [
+              {
+                "id": "per_ip_filter",
+                "kind": "u32",
+                "hash_key": "dest_ip",
+                "target_class_template": "per_ip_shapers"
+              }
+            ],
+            "class_template": {
+              "id": "per_ip_shapers",
+              "kind": "per_dest_ip",
+              "classes": [
+                {
+                  "qdisc": "htb",
+                  "config": {
+                    "rate": "2mbit",
+                    "ceil": "8mbit",
+                    "burst": "500k"
+                  },
+                  "classes": [
+                    {
+                      "qdisc": "fq_codel"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "ingress": {
+            "qdisc": "htb",
+            "filters": [
+              {
+                "id": "per_ip_filter",
+                "kind": "u32",
+                "hash_key": "src_ip",
+                "target_class_template": "per_ip_shapers"
+              }
+            ],
+            "class_template": {
+              "id": "per_ip_shapers",
+              "kind": "per_src_ip",
+              "classes": [
+                {
+                  "qdisc": "htb",
+                  "config": {
+                    "rate": "1.5mbit",
+                    "ceil": "6mbit",
+                    "burst": "225k"
+                  },
+                  "classes": [
+                    {
+                      "qdisc": "fq_codel"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
         "name": "Internal Network",
         "id": "int",
         "type": "local",
         "interfaces": [
-          "eth0"
+          "eth0.100"
         ],
         "ipv4": {
           "proto": "static",
@@ -104,6 +210,14 @@
         },
         "firewall": {
           "zone": "lan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
         }
       },
       {
@@ -118,6 +232,18 @@
         },
         "firewall": {
           "zone": "wan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
         }
       },
       {
@@ -131,6 +257,18 @@
         },
         "firewall": {
           "zone": "wan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
         }
       },
       {
@@ -147,9 +285,40 @@
         },
         "firewall": {
           "zone": "wan"
+        },
+        "shaping": {
+          "egress": {
+            "qdisc": "fq_codel"
+          },
+          "ingress": {
+            "qdisc": "fq_codel"
+          }
+        },
+        "multiwan": {
+          "dynamic_weight": true,
+          "metric": 1
         }
       }
     ],
+    "multiwan": {
+      "globals": {
+        "mmx_mask": "0x3F00"
+      },
+      "rules": {},
+      "default_strategy": "dynamic_weight",
+      "health_checks": {
+        "down": 2,
+        "up": 1,
+        "initial_state": "offline",
+        "track_method": "ping",
+        "track_ip": [
+          "1.1.1.1",
+          "8.8.8.8"
+        ],
+        "timeout": 2,
+        "interval": 1
+      }
+    },
     "firewall": {
       "defaults": {
         "syn_flood": "1",
@@ -304,25 +473,91 @@
       }
     ]
   },
-  "gsm": {
-    "modems": {
-      "default": {
-        "enabled": true
+  "wifi": {
+    "report_period": 10,
+    "radios": [
+      {
+        "name": "radio0",
+        "band": "2g",
+        "channel": "auto",
+        "channels": [
+          "1",
+          "6",
+          "11"
+        ],
+        "country": "GB",
+        "htmode": "HT20",
+        "txpower": "20",
+        "disabled": false
       },
-      "known": [
-        {
-          "name": "primary",
-          "id_field": "device",
-          "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
-          "autoconnect": true
+      {
+        "name": "radio1",
+        "band": "5g",
+        "channel": "auto",
+        "channels": [
+          "36",
+          "40",
+          "44",
+          "48"
+        ],
+        "country": "GB",
+        "htmode": "HT20",
+        "txpower": "10",
+        "disabled": false
+      }
+    ],
+    "ssids": [
+      {
+        "name": "GetBox-PmWBH",
+        "encryption": "psk2",
+        "mode": "access_point",
+        "password": "shiny-huge-valet",
+        "network": "jng",
+        "radios": [
+          "radio0"
+        ]
+      },
+      {
+        "name": "GetBox-PmWBH-admin",
+        "encryption": "psk2",
+        "mode": "access_point",
+        "password": "shiny-huge-valet",
+        "network": "adm",
+        "radios": [
+          "radio1"
+        ]
+      }
+    ],
+    "band_steering": {
+      "globals": {
+        "kick_mode": "both",
+        "bandwidth_threshold": 6,
+        "kicking_threshold": 10,
+        "evals_before_kick": 3
+      },
+      "timings": {
+        "update_client": 10,
+        "update_chan_util": 5,
+        "update_hostapd": 10,
+        "client_cleanup": 15,
+        "inactive_client_kickoff": 60
+      },
+      "bands": {
+        "2g": {
+          "initial_score": 80,
+          "good_rssi_threshold": -50,
+          "good_rssi_reward": 15,
+          "bad_rssi_threshold": -75,
+          "bad_rssi_penalty": -15
         },
-        {
-          "name": "secondary",
-          "id_field": "device",
-          "device": "/ /sys/devices/platform/axi/1000480000.usb/usb1/1-1",
-          "autoconnect": true
+        "5g": {
+          "initial_score": 100,
+          "good_rssi_threshold": -50,
+          "good_rssi_reward": 15,
+          "bad_rssi_threshold": -75,
+          "bad_rssi_penalty": -15
         }
-      ]
+      }
     }
   },
   "metrics": {

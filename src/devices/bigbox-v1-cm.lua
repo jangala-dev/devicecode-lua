@@ -10,6 +10,7 @@ return {
         "net",
         "metrics",
         "system",
-        "ui"
+        "ui",
+        "wifi"
     }
 }
