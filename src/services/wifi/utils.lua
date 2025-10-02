@@ -1,3 +1,4 @@
+local fcontext = require "fibers.context"
 local json = require "cjson.safe"
 
 local BUS_TIMEOUT = 2
