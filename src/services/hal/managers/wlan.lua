@@ -48,66 +48,9 @@ function WLANManagement:_apply_config(ctx, conn, device_event_q, capability_info
     end
 
     for radio_name, radio_config in pairs(radio_configs) do
-        print("RADIO CONFIG:", radio_name)
         self:_create_wlan(ctx, conn, radio_name, radio_config, capability_info_q)
     end
 end
-
--- function WLANManagement:_add_wlan(ctx, conn, radio_name, radio_config, capability_info_q)
---     log.trace(string.format(
---         "%s - %s: Detected WLAN of name %s",
---         ctx:value("service_name"),
---         ctx:value("fiber_name"),
---         radio_name
---     ))
---     if self._wlan_devices[radio_name] then
---         log.warn(string.format(
---             "%s - %s: WLAN of name %s already exists, skipping",
---             ctx:value("service_name"),
---             ctx:value("fiber_name"),
---             radio_name
---         ))
---         return
---     end
---     local wireless_instance = wireless_driver.new(
---         context.with_cancel(ctx),
---         radio_name,
---         radio_config.path,
---         radio_config.type
---     )
---     local phy, err = wireless_instance:init(conn)
---     if err then
---         log.error(
---             string.format("%s - %s: Failed to initialize wireless driver for %s: %s",
---                 ctx:value("service_name"),
---                 ctx:value("fiber_name"),
---                 radio_name,
---                 err
---             )
---         )
---         return
---     end
---     local capabilities, cap_err = wireless_instance:apply_capabilities(capability_info_q)
---     if cap_err then
---         log.error(cap_err)
---         return
---     end
---     wireless_instance:spawn(conn)
---     local device_event = {
---         connected = true,
---         type = 'wlan',
---         capabilities = capabilities,
---         device_control = {},
---         id_field = "radioname",
---         data = {
---             interface = wireless_instance.interface,
---             radioname = radio_name,
---             devpath = radio_config.path,
---         }
---     }
---     self._wlan_devices[radio_name] = { driver = wireless_instance, phy = phy }
---     return device_event
--- end
 
 function WLANManagement:_create_wlan(ctx, conn, radio_name, radio_config, capability_info_q)
     if self._wlan_devices[radio_name] then
