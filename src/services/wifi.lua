@@ -1,12 +1,11 @@
 local fiber = require "fibers.fiber"
 local op = require "fibers.op"
 local queue = require "fibers.queue"
-local channel = require "fibers.channel"
 local log = require "services.log"
 local gen = require "services.wifi.gen"
 local service = require "service"
 local new_msg = require "bus".new_msg
-local unpack = table.unpack or unpack
+local utils = require "services.wifi.utils"
 
 -- there's a connect/disconnect event available directly from hostapd.
 -- opkg install hostapd-utils will give you hostapd_cli
@@ -124,6 +123,22 @@ function Radio:apply_config(config, report_period)
             { 'hal', 'capability', 'wireless', self.index, 'control', 'apply' }
         ))
     end)
+end
+
+function Radio:make_mainflux_ssids(mainflux_cfg, encryption, mode)
+    local mf_ssids = {}
+    for _, ssid_cfg in ipairs(mainflux_cfg or {}) do
+        -- edge case for incorrect mainflux naming that uses jng instead of adm
+        local name = ssid_cfg.name == "jng" and "adm" or ssid_cfg.name
+        mf_ssids[#mf_ssids + 1] = {
+            name = ssid_cfg.ssid,
+            encryption = encryption,
+            password = ssid_cfg.password,
+            network = name,
+            mode = mode
+        }
+    end
+    return mf_ssids
 end
 
 function Radio:apply_ssids(ssid_configs)
@@ -441,11 +456,13 @@ local function radio_manager(ctx, conn)
             if not INTERFACE_MODES[ssid_cfg.mode] then
                 return string.format("SSID config has invalid mode: %s", ssid_cfg.mode)
             end
-            if not ssid_cfg.network then
-                return "SSID config missing network"
-            end
-            if not (type(ssid_cfg.network) == "string") then
-                return string.format("SSID network should be a string but found %s", type(ssid_cfg.network))
+            if not ssid_cfg.mainflux_path then
+                if not ssid_cfg.network then
+                    return "SSID config missing network or mainflux_path"
+                end
+                if not (type(ssid_cfg.network) == "string") then
+                    return string.format("SSID network should be a string but found %s", type(ssid_cfg.network))
+                end
             end
         end
 
@@ -539,11 +556,34 @@ local function radio_manager(ctx, conn)
 
         local radio_ssids = {}
         for _, ssid_cfg in ipairs(config.ssids) do
-            for _, radio_id in ipairs(ssid_cfg.radios) do
-                if radio_ssids[radio_id] then
-                    table.insert(radio_ssids[radio_id], ssid_cfg)
-                else
-                    radio_ssids[radio_id] = { ssid_cfg }
+            local ssids, err
+            if ssid_cfg.mainflux_path then
+                local base_cfg = {}
+                for k, v in pairs(ssid_cfg) do
+                    if k ~= 'mainflux_path' then
+                        base_cfg[k] = v
+                    end
+                end
+                ssids, err = utils.parse_mainflux_ssids(ctx, conn, ssid_cfg.mainflux_path, base_cfg)
+                if err then
+                    log.error(string.format(
+                        "%s - %s: SSID %s mainflux config error: %s",
+                        ctx:value("service_name"),
+                        ctx:value("fiber_name"),
+                        ssid_cfg.name or "(unknown)",
+                        err
+                    ))
+                    ssids = {}
+                end
+            end
+            -- a mainflux path may spawn multiple ssids from one ssid_cfg
+            for _, ssid in ipairs(ssids or { ssid_cfg }) do
+                for _, radio_id in ipairs(ssid.radios) do
+                    if radio_ssids[radio_id] then
+                        table.insert(radio_ssids[radio_id], ssid)
+                    else
+                        radio_ssids[radio_id] = { ssid }
+                    end
                 end
             end
         end
