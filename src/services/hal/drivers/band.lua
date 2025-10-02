@@ -217,7 +217,6 @@ function BandDriver:set_update_freq(ctx, updates)
 end
 
 function BandDriver:set_client_inactive_kickoff(ctx, timeout)
-    print(timeout)
     timeout = tonumber(timeout)
     if type(timeout) ~= "number" or timeout < 0 then
         return nil, "Invalid timeout"
@@ -237,7 +236,6 @@ function BandDriver:set_client_inactive_kickoff(ctx, timeout)
 end
 
 function BandDriver:set_client_cleanup(ctx, timeout)
-    print(timeout)
     timeout = tonumber(timeout)
     if type(timeout) ~= "number" or timeout < 0 then
         return nil, "Invalid timeout"

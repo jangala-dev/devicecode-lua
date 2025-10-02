@@ -265,7 +265,6 @@ function UCI:handle_capability(ctx, request)
     end
 
     fiber.spawn(function()
-        print("UCI:", command, table.concat(str_args, ", "))
         local result, err = func(self, ctx, unpack(args))
 
         ret_ch:put({
