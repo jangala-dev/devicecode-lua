@@ -44,7 +44,7 @@ function Radio:apply_config(config, report_period)
     clear_req:unsubscribe()
     if err or resp and resp.payload and resp.payload.err then
         log.error(string.format(
-        "%s - %s: Radio %s clear config error: %s",
+            "%s - %s: Radio %s clear config error: %s",
             self.ctx:value("service_name"),
             self.ctx:value("fiber_name"),
             self.index or "(unknown)",
@@ -142,21 +142,18 @@ function Radio:make_mainflux_ssids(mainflux_cfg, encryption, mode)
 end
 
 function Radio:apply_ssids(ssid_configs)
-    local reqs = {}
-    for _, ssid in ipairs(ssid_configs) do
-        reqs[#reqs + 1] = self.conn:request(new_msg(
-            { 'hal', 'capability', 'wireless', self.index, 'control', 'add_interface' },
-            {
-                ssid.name,
-                ssid.encryption or "none",
-                ssid.password or "",
-                ssid.network,
-                INTERFACE_MODES[ssid.mode]
-            }
-        ))
-    end
     fiber.spawn(function()
-        for _, req in ipairs(reqs) do
+        for _, ssid in ipairs(ssid_configs) do
+            local req = self.conn:request(new_msg(
+                { 'hal', 'capability', 'wireless', self.index, 'control', 'add_interface' },
+                {
+                    ssid.name,
+                    ssid.encryption or "none",
+                    ssid.password or "",
+                    ssid.network,
+                    INTERFACE_MODES[ssid.mode]
+                }
+            ))
             local resp, err = req:next_msg_with_context(self.ctx)
             req:unsubscribe()
             if err or resp and resp.payload and resp.payload.err then
@@ -296,7 +293,6 @@ function Radio:_report_metrics(ctx, conn)
     --         end)
     --     )
     -- end
-
 end
 
 function Radio:get_index()
