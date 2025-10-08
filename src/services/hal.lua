@@ -1,6 +1,7 @@
 local modem_manager = require "services.hal.managers.modemcard"
 local ubus_manager = require "services.hal.managers.ubus"
 local uci_manager = require "services.hal.managers.uci"
+local wlan_managaer = require "services.hal.managers.wlan"
 local fiber = require "fibers.fiber"
 local queue = require "fibers.queue"
 local op = require "fibers.op"
@@ -16,9 +17,7 @@ local hal_service = {
     devices = {},
     capability_info_q = queue.new(50),
     device_event_q = queue.new(10),
-    modem_manager_instance = modem_manager.new(),
-    ubus_manager_instance = ubus_manager.new(),
-    uci_manager_instance = uci_manager.new()
+    managers = {}
 }
 hal_service.__index = hal_service
 
@@ -170,7 +169,8 @@ function hal_service:_handle_device_connection_event(connection_event)
             type = device.type,
             index = device.id,
             -- in this case device refers to the specific type of hardware
-            identity = device.data.device
+            identity = device.data.device,
+            metadata = device.data
         },
         { retained = true }
     ))
@@ -270,26 +270,85 @@ function hal_service:_handle_capbility_info(data)
     end
 end
 
+function hal_service:_apply_config(msg)
+    log.trace(string.format(
+        '%s - %s: Recieved new HAL config',
+        self.ctx:value("service_name"),
+        self.ctx:value("fiber_name")
+    ))
+    if not msg.payload or type(msg.payload) ~= 'table' then
+        log.error(string.format(
+            '%s - %s: Config message does not have a valid payload',
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name")
+        ))
+        return
+    end
+
+    local config = msg.payload
+    if not config.managers or type(config.managers) ~= 'table' then
+        log.error(string.format(
+            '%s - %s: Config message does not have a valid managers field',
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name")
+        ))
+        return
+    end
+
+    local manager_configs = config.managers
+    -- Remove managers that are not in the new config
+    for manager_name, manager in pairs(self.managers) do
+        if not manager_configs[manager_name] then
+            manager.ctx:cancel('manager removed')
+            self.managers[manager_name] = nil
+        end
+    end
+
+    for manager_name, manager_config in pairs(manager_configs) do
+        local manager = self.managers[manager_name]
+        if manager then
+            manager:apply_config(manager_config)
+        else
+            local manager_pkg = require('services.hal.managers.' .. manager_name)
+            self.managers[manager_name] = manager_pkg.new()
+            self.managers[manager_name]:spawn(self.ctx, self.conn, self.device_event_q, self.capability_info_q)
+            self.managers[manager_name]:apply_config(manager_config)
+        end
+    end
+end
+
 ---Handles capability and device control, and connection events
-function hal_service:_control_main()
+function hal_service:_control_main(ctx)
     local cap_ctrl_sub, cap_sub_err = self.conn:subscribe({ 'hal', 'capability', '+', '+', 'control', '+' })
     if cap_sub_err ~= nil then
         log.error(string.format(
             '%s - %s: Failed to subscribe to capability control topic, reason: %s',
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name"),
+            ctx:value("service_name"),
+            ctx:value("fiber_name"),
             cap_sub_err
         ))
         return
     end
 
+    local config_sub, config_sub_err = self.conn:subscribe({ 'config', 'hal' })
+    if config_sub_err ~= nil then
+        log.error(string.format(
+            '%s - %s: Failed to subscribe to config topic, reason: %s',
+            ctx:value("service_name"),
+            ctx:value("fiber_name"),
+            config_sub_err
+        ))
+        return
+    end
+
     -- All interactions with devices and capabilities run on the same fiber
-    while not self.ctx:err() do
+    while not ctx:err() do
         op.choice(
+            config_sub:next_msg_op():wrap(function(msg) self:_apply_config(msg) end),
             cap_ctrl_sub:next_msg_op():wrap(function(msg) self:_handle_capability_control(msg) end),
             self.device_event_q:get_op():wrap(function(msg) self:_handle_device_connection_event(msg) end),
-            self.ctx:done_op(),
-            self.capability_info_q:get_op():wrap(function(msg) self:_handle_capbility_info(msg) end)
+            self.capability_info_q:get_op():wrap(function(msg) self:_handle_capbility_info(msg) end),
+            ctx:done_op()
         ):perform()
     end
     cap_ctrl_sub:unsubscribe()
@@ -299,19 +358,17 @@ end
 ---@param ctx Context
 ---@param conn Connection
 function hal_service:start(ctx, conn)
-    log.trace("Starting HAL Service")
+    log.trace(string.format(
+        "%s: Starting",
+        ctx:value("service_name")
+    ))
     self.ctx = ctx
     self.conn = conn
 
     -- start main control loop
     service.spawn_fiber('Control', conn, ctx, function(control_ctx)
-        self:_control_main()
+        self:_control_main(control_ctx)
     end)
-
-    -- start modem manager and detection
-    self.modem_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
-    self.ubus_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
-    self.uci_manager_instance:spawn(ctx, conn, self.device_event_q, self.capability_info_q)
 end
 
 return hal_service

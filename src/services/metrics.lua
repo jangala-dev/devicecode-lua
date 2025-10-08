@@ -97,7 +97,7 @@ function metrics_service:_http_publish(data)
         auth = auth,
         body = body
     }
-    self.http_send_q:put_op(http_payload):perform_alt(function ()
+    self.http_send_q:put_op(http_payload):perform_alt(function()
         log.error(string.format(
             "%s - %s: HTTP publish failed, reason: HTTP send queue is full",
             self.ctx:value('service_name'),
@@ -291,14 +291,11 @@ function metrics_service:_handle_config(config)
         -- the cache is needed to give each endpoint of a wildcard
         -- its own processing
         -- e.g. gsm/modem/+ could be gsm/modem/primary or gsm/modem/secondary
-        local metric_op = metric_sub:next_msg_op():wrap(function (metric_msg)
+        local metric_op = metric_sub:next_msg_op():wrap(function(metric_msg)
             -- combine endpoint into string for override lookup
             local metric_endpoint = table.concat(metric_msg.topic, '/')
             local metric = metric_msg.payload
-            if metric == nil then
-                log.debug('Metric is nil for endpoint: ' .. metric_endpoint)
-                return
-            end
+            if metric == nil then return end
             -- we may want a specific field from the bus message
             if metric_config.field then metric = metric[metric_config.field] end
 
@@ -317,8 +314,8 @@ function metrics_service:_handle_config(config)
             -- if the pipeline completed with no early exit we can update our publish cache
             if not short_circuit then
                 local cache_topic = { protocol, unpack(metric_endpoint_name or metric_msg.topic) }
-                local metric_time = math.floor(sc.realtime()*1000)
-                local item = {value = val, time = metric_time}
+                local metric_time = math.floor(sc.realtime() * 1000)
+                local item = { value = val, time = metric_time }
                 self.publish_cache:set(cache_topic, item)
             end
         end)
@@ -349,7 +346,7 @@ function metrics_service:_main(ctx)
     while not self.ctx:err() do
         op.choice(
             self.ctx:done_op(),
-            config_sub:next_msg_op():wrap(function (config_msg)
+            config_sub:next_msg_op():wrap(function(config_msg)
                 self:_handle_config(config_msg.payload)
             end),
             cloud_config_sub:next_msg_op():wrap(function(config_msg)

@@ -12,6 +12,10 @@ local function new()
     return setmetatable(uci_management, UCIManagement)
 end
 
+function UCIManagement:apply_config(config)
+    -- Currently no config options
+end
+
 function UCIManagement:_manager(ctx, conn, device_event_q, capability_info_q)
     log.trace(string.format(
         "%s - %s: Starting",
