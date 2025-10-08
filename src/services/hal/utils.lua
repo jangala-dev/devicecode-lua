@@ -174,4 +174,15 @@ function utils.parse_qmicli_output(output, key_map)
 
     return result, nil
 end
+
+function utils.is_in(item, list, key)
+    if key == nil then key = function(x) return x end end
+    for _, v in ipairs(list) do
+        if key(v) == item then
+            return true
+        end
+    end
+    return false
+end
+
 return utils

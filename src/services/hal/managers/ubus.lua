@@ -12,6 +12,10 @@ local function new()
     return setmetatable(ubus_management, UBusManagement)
 end
 
+function UBusManagement:apply_config(config)
+    -- Currently no config options
+end
+
 function UBusManagement:_manager(ctx, conn, device_event_q, capability_info_q)
     log.trace(string.format(
         "%s - %s: Starting",

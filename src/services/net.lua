@@ -727,23 +727,23 @@ local function uci_manager(ctx)
 
     -- setup restart policies for each config
     net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "network", { method = "immediate"}, { { "/etc/init.d/network", "reload" } } }
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { "network", { { "/etc/init.d/network", "reload" } } }
     ))
     net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "firewall", { method = "immediate"}, { { "/etc/init.d/firewall", "restart" } } }
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { "firewall", { { "/etc/init.d/firewall", "restart" } } }
     ))
     net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "dhcp", { method = "immediate"}, {
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { "dhcp", {
             { "/etc/init.d/dnsmasq", "restart" },
             { "/etc/init.d/odhcpd",  "restart" }
         } }
     ))
     net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_policy' },
-        { "mwan3", { method = "immediate"}, { { "/etc/init.d/mwan3", "restart" } } }
+        { 'hal', 'capability', 'uci', '1', 'control', 'set_restart_actions' },
+        { "mwan3", { { "/etc/init.d/mwan3", "restart" } } }
     ))
 
     local networks = {}
@@ -827,6 +827,10 @@ local function uci_manager(ctx)
             networks[network] = { status = status }
             log.info("NET: Status for unknown network", network, "set to", status, ", skipping speedtest")
             return
+        elseif (not networks[network].cfg) or (not networks[network].cfg.interfaces) then
+            networks[network].status = status
+            log.info("NET: Status for network", network, "with unknown interface set to", status, ", skipping speedtest")
+            return
         end
         local old_status = networks[network].status
         networks[network].status = status
@@ -857,7 +861,7 @@ local function uci_manager(ctx)
 
         -- Check pending networks that depend on this modem
         for net_id, net in pairs(networks) do
-            if net.cfg.modem_id == modem_id then
+            if net.cfg and net.cfg.modem_id == modem_id then
                 net.cfg.interfaces = { iface }
                 set_network_config(net)
                 log.info("NET: Applied deferred network config for", net_id)
@@ -881,7 +885,7 @@ local function uci_manager(ctx)
 
     local function on_modem_connected(modem_id)
         for _, net in pairs(networks) do
-            if net.cfg.modem_id == modem_id then
+            if net.cfg and net.cfg.modem_id == modem_id then
                 local ifup_sub = net_service.conn:request(new_msg(
                     { 'hal', 'capability', 'uci', '1', 'control', 'ifup' },
                     { net.cfg.id }
@@ -926,7 +930,7 @@ local function uci_manager(ctx)
         while not ctx:err() do
             local net_metrics = {}
             for net_id, net in pairs(networks) do
-                if net.cfg.interfaces ~= nil and #net.cfg.interfaces > 0 then
+                if net.cfg and net.cfg.interfaces ~= nil and #net.cfg.interfaces > 0 then
                     local iface_metrics = {}
 
                     local rx_bytes, e = read_interface_file_numeric(net.cfg.interfaces[1], "rx_bytes")

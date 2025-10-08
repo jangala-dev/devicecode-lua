@@ -1,27 +1,4 @@
 {
-  "hal": {
-    "managers": {
-      "modemcard": {},
-      "uci": {},
-      "ubus": {},
-      "wlan": {
-        "radios": {
-          "radio0": {
-            "type": "mac80211",
-            "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0"
-          },
-          "radio1": {
-            "type": "mac80211",
-            "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1"
-          },
-          "radio2": {
-            "type": "mac80211",
-            "path": "platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1"
-          }
-        }
-      }
-    }
-  },
   "net": {
     "report_period": 60,
     "default": {
@@ -474,10 +451,12 @@
     ]
   },
   "wifi": {
-    "report_period": 10,
+    "report_period": 60,
     "radios": [
       {
-        "name": "radio0",
+        "id": "mt-2g",
+        "type": "mac80211",
+        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0",
         "band": "2g",
         "channel": "auto",
         "channels": [
@@ -491,7 +470,9 @@
         "disabled": false
       },
       {
-        "name": "radio1",
+        "id": "mt-5g",
+        "type": "mac80211",
+        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1",
         "band": "5g",
         "channel": "auto",
         "channels": [
@@ -504,26 +485,43 @@
         "htmode": "HT20",
         "txpower": "10",
         "disabled": false
+      },
+      {
+        "id": "internal",
+        "type": "mac80211",
+        "path": "platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1",
+        "band": "5g",
+        "channel": "auto",
+        "channels": [
+          "36",
+          "40",
+          "44",
+          "48"
+        ],
+        "country": "GB",
+        "htmode": "HT20",
+        "disabled": true
       }
     ],
     "ssids": [
       {
-        "name": "Jangala",
+        "name": "GetBox-PmWBH",
+        "encryption": "psk2",
         "mode": "access_point",
-        "encryption": "none",
-        "network": "jan",
+        "password": "shiny-huge-valet",
+        "network": "jng",
         "radios": [
-          "radio0",
-          "radio1"
+          "mt-2g"
         ]
       },
       {
-        "mainflux_path": "config/mainflux",
+        "name": "GetBox-PmWBH-admin",
         "encryption": "psk2",
         "mode": "access_point",
+        "password": "shiny-huge-valet",
+        "network": "adm",
         "radios": [
-          "radio0",
-          "radio1"
+          "mt-5g"
         ]
       }
     ],
@@ -534,7 +532,7 @@
         "kicking_threshold": 10,
         "evals_before_kick": 3
       },
-      "timings": {
+      "timing": {
         "update_client": 10,
         "update_chan_util": 5,
         "update_hostapd": 10,
@@ -559,6 +557,27 @@
       }
     }
   },
+  "gsm": {
+    "modems": {
+      "default": {
+        "enabled": true
+      },
+      "known": [
+        {
+          "name": "primary",
+          "id_field": "device",
+          "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb5/5-1/5-1.1",
+          "autoconnect": true
+        },
+        {
+          "name": "secondary",
+          "id_field": "device",
+          "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb4/4-1/4-1.2",
+          "autoconnect": true
+        }
+      ]
+    }
+  },
   "metrics": {
     "cloud_url": "$CLOUD_URL",
     "publish_cache": {
@@ -566,6 +585,10 @@
       "period": 60
     },
     "collections": {
+      "hal/capability/wireless/#": {
+        "protocol": "log",
+        "process": []
+      },
       "net/adm/rx_bytes": {
         "protocol": "http",
         "process": [
@@ -1710,5 +1733,19 @@
         ]
       }
     }
+  },
+  "system": {
+    "report_period": 60,
+    "usb3_enabled": false,
+    "alarms": [
+      {
+        "time": "5:00",
+        "repeats": "daily",
+        "payload": {
+          "name": "daily reboot",
+          "type": "reboot"
+        }
+      }
+    ]
   }
 }

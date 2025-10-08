@@ -26,6 +26,10 @@ end
 
 local modems = {}
 
+function ModemManagement:apply_config(config)
+    -- Currently no config options
+end
+
 --- Detect modems via mmcli modem monitor
 ---@param ctx Context
 function ModemManagement:_detector(ctx)
