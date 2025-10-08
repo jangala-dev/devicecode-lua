@@ -24,7 +24,7 @@
         "serial_ports": [
           {
             "name": "uart0",
-            "path": "/dev/ttyACM0"
+            "path": "/dev/ttyAMA0"
           }
         ]
       }
