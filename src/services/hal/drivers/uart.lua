@@ -266,7 +266,6 @@ function Driver:_main(ctx)
         }
         if self.is_open then
             table.insert(ops, self.filestream:read_line_op():wrap(function(line, _, err)
-                print(string.format("READ: '%s', %s", line, err))
                 if (not line) or err then
                     self:close(ctx)
                     return
