@@ -52,28 +52,26 @@ local function read_uart_data(ctx)
             break
         end
         if msg and msg.payload then
-            log.info(string.format(
-                "%s - %s: UART Data Received: %s",
-                ctx:value("service_name"),
-                ctx:value("fiber_name"),
-                msg.payload
-            ))
-            -- local decoded, decode_err = cjson.decode(msg.payload)
-            -- if decode_err then
-            --     log.error(string.format(
-            --         "%s - %s: Error decoding UART JSON data: %s",
-            --         ctx:value("service_name"),
-            --         ctx:value("fiber_name"),
-            --         decode_err
-            --     ))
-            -- else
-            --     for k, v in pairs(decoded) do
-            --         mcu_bridge.conn:publish(new_msg(
-            --             { 'mcu', k },
-            --             v
-            --         ))
-            --     end
-            -- end
+            local decoded, decode_err = cjson.decode(msg.payload)
+            if decode_err then
+                log.error(string.format(
+                    "%s - %s: Error decoding UART JSON data: %s",
+                    ctx:value("service_name"),
+                    ctx:value("fiber_name"),
+                    decode_err
+                ))
+            else
+                for k, v in pairs(decoded) do
+                    local key_table = { 'mcu'}
+                    for segment in string.gmatch(k, "[^/]+") do
+                        table.insert(key_table, segment)
+                    end
+                    mcu_bridge.conn:publish(new_msg(
+                        key_table,
+                        v
+                    ))
+                end
+            end
         end
     end
     uart_data_sub:unsubscribe()
