@@ -512,7 +512,19 @@ local function set_network_config(instance)
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
             { "dhcp", net_id, "instance", instance.dns_id }
         ))
-        add_to_uci_list("dhcp", instance.dns_id, "interface", net_id)
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", instance.dns_id, "local", "/" .. net_id .. "/" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", instance.dns_id, "domain", net_id }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", instance.dns_id, "listen_address", { net_cfg.ipv4.ip_address } }
+        ))
+        -- add_to_uci_list("dhcp", instance.dns_id, "interface", net_id)
     end
 
     -- 3. Associate this network with an existing firewall zone
@@ -636,39 +648,43 @@ local function get_dnsmasq_id(default_hosts)
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "domain", "lan" }
+        { "dhcp", id, "domainneeded", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "authoritative", "1" }
+        { "dhcp", id, "boguspriv", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "localservice", "1" }
+        { "dhcp", id, "localise_queries", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "nonwildcard", "1" }
+        { "dhcp", id, "rebind_protection", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "localise_queries", "1" }
+        { "dhcp", id, "rebind_localhost", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "rebind_protection", "1" }
+        { "dhcp", id, "expandhosts", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "rebind_localhost", "1" }
+        { "dhcp", id, "nonegcache", '0' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "expandhosts", "1" }
+        { "dhcp", id, "cachesize", '1000' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "boguspriv", "1" }
+        { "dhcp", id, "authoritative", '1' }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "readethers", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
@@ -676,23 +692,19 @@ local function get_dnsmasq_id(default_hosts)
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "local", "/lan/" }
+        { "dhcp", id, "resolvfile", '/tmp/resolv.conf.d/resolv.conf.auto' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "domainneeded", "1" }
+        { "dhcp", id, "nonwildcard", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "nonegcache", "0" }
+        { "dhcp", id, "localservice", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "filterwin2k", "0" }
-    ))
-    net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "readethers", "1" }
+        { "dhcp", id, "port", '53' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
@@ -700,7 +712,7 @@ local function get_dnsmasq_id(default_hosts)
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "cachesize", "1000" }
+        { "dhcp", id, "noresolv", "1" }
     ))
 
     -- Add any blocklist host files
@@ -1088,7 +1100,7 @@ local function speedtest_worker(ctx)
         local msg = speedtest_queue:get()
         -- halt any config restarts from happening during speedtest
         local halt_sub = net_service.conn:request(new_msg(
-            {'hal', 'capability', 'uci', '1', 'control', 'halt_restarts'},
+            { 'hal', 'capability', 'uci', '1', 'control', 'halt_restarts' },
             {}
         ))
         halt_sub:next_msg_with_context(ctx)
@@ -1096,7 +1108,7 @@ local function speedtest_worker(ctx)
         local results, err = speedtest.run(ctx, msg.network, msg.interface)
         -- allow config restarts to take place
         net_service.conn:publish(new_msg(
-            {'hal', 'capability', 'uci', '1', 'control', 'continue_restarts'},
+            { 'hal', 'capability', 'uci', '1', 'control', 'continue_restarts' },
             {}
         ))
         if err then
@@ -1148,7 +1160,7 @@ local function shaping_worker(ctx)
                 ))
                 -- halt any config restarts from happening during shaping
                 local halt_sub = net_service.conn:request(new_msg(
-                    {'hal', 'capability', 'uci', '1', 'control', 'halt_restarts'},
+                    { 'hal', 'capability', 'uci', '1', 'control', 'halt_restarts' },
                     {}
                 ))
                 halt_sub:next_msg_with_context(ctx)
@@ -1156,7 +1168,7 @@ local function shaping_worker(ctx)
                 shaping.apply(net_cfg)
                 -- allow config restarts to take place
                 net_service.conn:publish(new_msg(
-                    {'hal', 'capability', 'uci', '1', 'control', 'continue_restarts'},
+                    { 'hal', 'capability', 'uci', '1', 'control', 'continue_restarts' },
                     {}
                 ))
             end
