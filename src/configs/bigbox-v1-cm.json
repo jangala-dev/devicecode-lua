@@ -69,6 +69,26 @@
     },
     "network": [
       {
+        "name": "Loopback",
+        "id": "loopback",
+        "type": "local",
+        "interfaces": [
+          "lo"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "127.0.0.1",
+          "netmask": "255.0.0.0"
+        },
+        "dns_server": {
+          "local_server": true,
+          "default_hosts": []
+        },
+        "firewall": {
+          "zone": "lan"
+        }
+      },
+      {
         "name": "Admin Network",
         "id": "adm",
         "type": "local",
