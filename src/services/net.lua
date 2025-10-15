@@ -229,28 +229,6 @@ end
 local function set_network_base_config(net_cfg)
     log.info("NET: Applying base network config")
 
-    -- Loopback
-    net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "network", "loopback", "interface" }
-    ))
-    net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "network", "loopback", "device", "lo" }
-    ))
-    net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "network", "loopback", "proto", "static" }
-    ))
-    net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "network", "loopback", "ipaddr", "127.0.0.1" }
-    ))
-    net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "network", "loopback", "netmask", "255.0.0.0" }
-    ))
-
     -- Globals
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
@@ -393,42 +371,49 @@ local function set_network_config(instance)
     log.info("NET: Applying network config for:", net_id)
 
     -- 1. Network interface config
-    if net_cfg.type == "local" then
-        local devicename_sub = net_service.conn:request(new_msg(
-            { 'hal', 'capability', 'uci', '1', 'control', 'add' },
-            { "network", "device" }
-        ))
-        local ret = devicename_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
-        devicename_sub:unsubscribe()
-        local devicename, err = ret.payload.result, ret.payload.err
-        if err then
-            log.error("NET: Failed to add network device:", err)
-            return
-        end
-        net_service.conn:publish(new_msg(
-            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            { "network", devicename, "name", "br-" .. net_id }
-        ))
-        net_service.conn:publish(new_msg(
-            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            { "network", devicename, "type", "bridge" }
-        ))
-        net_service.conn:publish(new_msg(
-            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            { "network", devicename, "ports", net_cfg.interfaces or {} }
-        ))
-    end
-
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { "network", net_id, "interface" }
     ))
+
     if net_cfg.type == "local" then
-        net_service.conn:publish(new_msg(
-            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            { "network", net_id, "device", "br-" .. net_id }
-        ))
-    elseif net_cfg.type == "backhaul" then
+        if net_cfg.is_bridge then
+            local devicename_sub = net_service.conn:request(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'add' },
+                { "network", "device" }
+            ))
+            local ret = devicename_sub:next_msg_with_context(context.with_timeout(net_service.ctx, BUS_TIMEOUT))
+            devicename_sub:unsubscribe()
+            local devicename, err = ret.payload.result, ret.payload.err
+            if err then
+                log.error("NET: Failed to add network device:", err)
+                return
+            end
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "network", devicename, "name", "br-" .. net_id }
+            ))
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "network", devicename, "type", "bridge" }
+            ))
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "network", devicename, "ports", net_cfg.interfaces or {} }
+            ))
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "network", net_id, "device", "br-" .. net_id }
+            ))
+        else
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+                { "network", net_id, "device", net_cfg.interfaces[1] }
+            ))
+        end
+    end
+
+    if net_cfg.type == "backhaul" then
         net_service.conn:publish(new_msg(
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
             { "network", net_id, "peerdns", "0" }
@@ -470,7 +455,7 @@ local function set_network_config(instance)
     end
 
     -- 2. DHCP
-    if net_cfg.dhcp_server then
+    if net_cfg.type=='local' and net_cfg.dhcp_server then
         net_service.conn:publish(new_msg(
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
             { "dhcp", net_id, "dhcp" }
@@ -491,7 +476,7 @@ local function set_network_config(instance)
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
             { "dhcp", net_id, "leasetime", net_cfg.dhcp_server.lease_time or "12h" }
         ))
-    else
+    elseif net_cfg.type=='backhaul' then
         net_service.conn:publish(new_msg(
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
             { "dhcp", net_id, "dhcp" }
@@ -512,7 +497,16 @@ local function set_network_config(instance)
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
             { "dhcp", net_id, "instance", instance.dns_id }
         ))
-        add_to_uci_list("dhcp", instance.dns_id, "interface", net_id)
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", instance.dns_id, "local", "/" .. net_id .. "/" }
+        ))
+        net_service.conn:publish(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { "dhcp", instance.dns_id, "domain", net_id }
+        ))
+        add_to_uci_list("dhcp", instance.dns_id, "listen_address", net_cfg.ipv4.ip_address)
+        -- add_to_uci_list("dhcp", instance.dns_id, "interface", net_id)
     end
 
     -- 3. Associate this network with an existing firewall zone
@@ -636,39 +630,43 @@ local function get_dnsmasq_id(default_hosts)
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "domain", "lan" }
+        { "dhcp", id, "domainneeded", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "authoritative", "1" }
+        { "dhcp", id, "boguspriv", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "localservice", "1" }
+        { "dhcp", id, "localise_queries", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "nonwildcard", "1" }
+        { "dhcp", id, "rebind_protection", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "localise_queries", "1" }
+        { "dhcp", id, "rebind_localhost", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "rebind_protection", "1" }
+        { "dhcp", id, "expandhosts", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "rebind_localhost", "1" }
+        { "dhcp", id, "nonegcache", '0' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "expandhosts", "1" }
+        { "dhcp", id, "cachesize", '1000' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "boguspriv", "1" }
+        { "dhcp", id, "authoritative", '1' }
+    ))
+    net_service.conn:publish(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { "dhcp", id, "readethers", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
@@ -676,23 +674,19 @@ local function get_dnsmasq_id(default_hosts)
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "local", "/lan/" }
+        { "dhcp", id, "resolvfile", '/tmp/resolv.conf.d/resolv.conf.auto' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "domainneeded", "1" }
+        { "dhcp", id, "nonwildcard", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "nonegcache", "0" }
+        { "dhcp", id, "localservice", '1' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "filterwin2k", "0" }
-    ))
-    net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "readethers", "1" }
+        { "dhcp", id, "port", '53' }
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
@@ -700,7 +694,7 @@ local function get_dnsmasq_id(default_hosts)
     ))
     net_service.conn:publish(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "dhcp", id, "cachesize", "1000" }
+        { "dhcp", id, "noresolv", "1" }
     ))
 
     -- Add any blocklist host files
@@ -1088,7 +1082,7 @@ local function speedtest_worker(ctx)
         local msg = speedtest_queue:get()
         -- halt any config restarts from happening during speedtest
         local halt_sub = net_service.conn:request(new_msg(
-            {'hal', 'capability', 'uci', '1', 'control', 'halt_restarts'},
+            { 'hal', 'capability', 'uci', '1', 'control', 'halt_restarts' },
             {}
         ))
         halt_sub:next_msg_with_context(ctx)
@@ -1096,7 +1090,7 @@ local function speedtest_worker(ctx)
         local results, err = speedtest.run(ctx, msg.network, msg.interface)
         -- allow config restarts to take place
         net_service.conn:publish(new_msg(
-            {'hal', 'capability', 'uci', '1', 'control', 'continue_restarts'},
+            { 'hal', 'capability', 'uci', '1', 'control', 'continue_restarts' },
             {}
         ))
         if err then
@@ -1148,7 +1142,7 @@ local function shaping_worker(ctx)
                 ))
                 -- halt any config restarts from happening during shaping
                 local halt_sub = net_service.conn:request(new_msg(
-                    {'hal', 'capability', 'uci', '1', 'control', 'halt_restarts'},
+                    { 'hal', 'capability', 'uci', '1', 'control', 'halt_restarts' },
                     {}
                 ))
                 halt_sub:next_msg_with_context(ctx)
@@ -1156,7 +1150,7 @@ local function shaping_worker(ctx)
                 shaping.apply(net_cfg)
                 -- allow config restarts to take place
                 net_service.conn:publish(new_msg(
-                    {'hal', 'capability', 'uci', '1', 'control', 'continue_restarts'},
+                    { 'hal', 'capability', 'uci', '1', 'control', 'continue_restarts' },
                     {}
                 ))
             end
