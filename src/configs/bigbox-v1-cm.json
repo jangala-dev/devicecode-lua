@@ -1766,5 +1766,19 @@
         ]
       }
     }
+  },
+  "system": {
+    "report_period": 60,
+    "usb3_enabled": true,
+    "alarms": [
+      {
+        "time": "5:00",
+        "repeats": "daily",
+        "payload": {
+          "name": "daily reboot",
+          "type": "reboot"
+        }
+      }
+    ]
   }
 }
