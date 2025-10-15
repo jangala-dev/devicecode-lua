@@ -11,6 +11,7 @@ return {
         "metrics",
         "system",
         "ui",
-        "wifi"
+        "wifi",
+        "mcu_bridge"
     }
 }
