@@ -15,6 +15,14 @@
             "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1"
           }
         }
+      },
+      "uart": {
+        "serial_ports": [
+          {
+            "name": "uart0",
+            "path": "/dev/ttyAMA0"
+          }
+        ]
       }
     }
   },
@@ -570,6 +578,48 @@
         }
       }
     }
+  },
+  "gsm": {
+    "modems": {
+      "default": {
+        "enabled": true
+      },
+      "known": [
+        {
+          "name": "primary",
+          "id_field": "device",
+          "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
+          "autoconnect": true
+        },
+        {
+          "name": "secondary",
+          "id_field": "device",
+          "device": "/sys/devices/platform/axi/1000480000.usb/usb1/1-1",
+          "autoconnect": true
+        }
+      ]
+    }
+  },
+  "bridge": {
+    "sources": [
+      {
+        "name": "pico_mcu",
+        "type": "uart",
+        "capability_id": "uart0",
+        "options": {
+          "baudrate": 115200
+        }
+      }
+    ],
+    "connections": [
+      {
+        "source": "pico_mcu",
+        "topic": "power/#",
+        "direction": "in",
+        "local_prefix": "cm",
+        "remote_prefix": "mcu"
+      }
+    ]
   },
   "metrics": {
     "cloud_url": "$CLOUD_URL",

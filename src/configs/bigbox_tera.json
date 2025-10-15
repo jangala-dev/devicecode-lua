@@ -1,4 +1,35 @@
 {
+  "hal": {
+    "managers": {
+      "modemcard": {},
+      "uci": {},
+      "ubus": {},
+      "wlan": {
+        "radios": {
+          "radio0": {
+            "type": "mac80211",
+            "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0"
+          },
+          "radio1": {
+            "type": "mac80211",
+            "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1"
+          },
+          "radio2": {
+            "type": "mac80211",
+            "path": "platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1"
+          }
+        }
+      },
+      "uart": {
+        "serial_ports": [
+          {
+            "name": "uart0",
+            "path": "/dev/ttyACM0"
+          }
+        ]
+      }
+    }
+  },
   "net": {
     "report_period": 60,
     "default": {
@@ -454,9 +485,7 @@
     "report_period": 60,
     "radios": [
       {
-        "id": "mt-2g",
-        "type": "mac80211",
-        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0",
+        "name": "radio0",
         "band": "2g",
         "channel": "auto",
         "channels": [
@@ -470,9 +499,7 @@
         "disabled": false
       },
       {
-        "id": "mt-5g",
-        "type": "mac80211",
-        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1",
+        "name": "radio1",
         "band": "5g",
         "channel": "auto",
         "channels": [
@@ -483,45 +510,28 @@
         ],
         "country": "GB",
         "htmode": "HT20",
-        "txpower": "10",
+        "txpower": "20",
         "disabled": false
-      },
-      {
-        "id": "internal",
-        "type": "mac80211",
-        "path": "platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1",
-        "band": "5g",
-        "channel": "auto",
-        "channels": [
-          "36",
-          "40",
-          "44",
-          "48"
-        ],
-        "country": "GB",
-        "htmode": "HT20",
-        "disabled": true
       }
     ],
     "ssids": [
       {
-        "name": "GetBox-PmWBH",
-        "encryption": "psk2",
+        "name": "Jangala",
         "mode": "access_point",
-        "password": "shiny-huge-valet",
-        "network": "jng",
+        "encryption": "none",
+        "network": "jan",
         "radios": [
-          "mt-2g"
+          "radio0",
+          "radio1"
         ]
       },
       {
-        "name": "GetBox-PmWBH-admin",
+        "mainflux_path": "config/mainflux",
         "encryption": "psk2",
         "mode": "access_point",
-        "password": "shiny-huge-valet",
-        "network": "adm",
         "radios": [
-          "mt-5g"
+          "radio0",
+          "radio1"
         ]
       }
     ],
@@ -532,7 +542,7 @@
         "kicking_threshold": 10,
         "evals_before_kick": 3
       },
-      "timing": {
+      "timings": {
         "update_client": 10,
         "update_chan_util": 5,
         "update_hostapd": 10,
