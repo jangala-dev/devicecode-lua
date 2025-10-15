@@ -486,23 +486,17 @@
           "11"
         ],
         "country": "GB",
-        "htmode": "HT20",
+        "htmode": "HE20",
         "txpower": "20",
         "disabled": false
       },
       {
         "name": "radio1",
         "band": "5g",
-        "channel": "auto",
-        "channels": [
-          "36",
-          "40",
-          "44",
-          "48"
-        ],
+        "channel": "36",
         "country": "GB",
-        "htmode": "HT20",
-        "txpower": "10",
+        "htmode": "HE80",
+        "txpower": "23",
         "disabled": false
       }
     ],
