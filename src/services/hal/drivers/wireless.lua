@@ -201,7 +201,7 @@ function WirelessDriver:set_enabled(ctx, enabled)
     return true, nil
 end
 
-function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_interface, mode)
+function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_interface, mode, optionals)
     if type(ssid) ~= "string" or #ssid == 0 then
         return nil, "Invalid SSID, must be a non-empty string"
     end
@@ -265,6 +265,25 @@ function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_inter
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'mode', mode }
     ))
+
+    if optionals.enable_steering then
+        reqs[#reqs + 1] = self.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { 'wireless', wifi_interface, 'bss_transition', '1' }
+        ))
+        reqs[#reqs + 1] = self.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { 'wireless', wifi_interface, 'ieee80211k', '1' }
+        ))
+        reqs[#reqs + 1] = self.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { 'wireless', wifi_interface, 'rrm_neighbor_report', '1' }
+        ))
+        reqs[#reqs + 1] = self.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { 'wireless', wifi_interface, 'rrm_beacon_report', '1' }
+        ))
+    end
 
     for _, req in ipairs(reqs) do
         local resp, ctx_err = req:next_msg_with_context(ctx)
