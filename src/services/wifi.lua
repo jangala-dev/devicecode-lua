@@ -151,7 +151,10 @@ function Radio:apply_ssids(ssid_configs)
                     ssid.encryption or "none",
                     ssid.password or "",
                     ssid.network,
-                    INTERFACE_MODES[ssid.mode]
+                    INTERFACE_MODES[ssid.mode],
+                    {
+                        enable_steering = ssid.has_band_steering or false
+                    }
                 }
             ))
             local resp, err = req:next_msg_with_context(self.ctx)
@@ -553,6 +556,7 @@ local function radio_manager(ctx, conn)
         local radio_ssids = {}
         for _, ssid_cfg in ipairs(config.ssids) do
             local ssids, err
+            ssid_cfg.has_band_steering = config.band_steering and true or false
             if ssid_cfg.mainflux_path then
                 local base_cfg = {}
                 for k, v in pairs(ssid_cfg) do
