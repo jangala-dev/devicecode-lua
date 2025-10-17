@@ -541,6 +541,7 @@
       }
     ],
     "band_steering": {
+      "log_level": 2,
       "globals": {
         "rrm_mode": "PAT",
         "kicking": {
