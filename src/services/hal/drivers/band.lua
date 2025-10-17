@@ -223,7 +223,7 @@ function BandDriver:set_legacy_options(ctx, opts)
 
         local req = self.conn:request(new_msg(
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            { 'dawn', 'hostapd', key, value }
+            { 'dawn', 'global', key, value }
         ))
         local resp, ctx_err = req:next_msg_with_context(ctx)
         req:unsubscribe()
