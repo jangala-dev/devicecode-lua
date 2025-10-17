@@ -619,6 +619,13 @@ local function radio_manager(ctx, conn)
     local function apply_band_steering_config(ctx, conn, band_configs)
         local reqs = {}
 
+        if band_configs.log_level then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_log_level' },
+                { band_configs.log_level }
+            ))
+        end
+
         -- Configure global settings
         local globals = band_configs.globals or {}
         if globals.kicking then

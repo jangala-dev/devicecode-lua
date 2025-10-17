@@ -50,11 +50,30 @@ local sections = {
     { name = '802_11g', type = 'metric' },
     { name = '802_11a', type = 'metric' },
     { name = 'gbltime', type = 'times' },
-    { name = 'gblnet', type = 'network'}
+    { name = 'gblnet', type = 'network'},
+    { name = 'localcfg', type = 'local' }
 }
 
 -------------------------------------------------------------------------
 --- BandCapabilities ----------------------------------------------------
+
+function BandDriver:set_log_level(ctx, level)
+    if type(level) ~= "number" or level < 0 then
+        return nil, "Invalid log level"
+    end
+
+    local req = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'localcfg', 'log_level', level }
+    ))
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
+    end
+
+    return true, nil
+end
 
 function BandDriver:set_kicking(ctx,
                                 mode,
@@ -548,7 +567,7 @@ function BandDriver:init(ctx, conn)
     local req = conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'foreach' },
         { 'dawn', nil, function(cursor, section)
-            if section[".type"] ~= "hostapd" and section[".type"] ~= "local" then
+            if section[".type"] ~= "hostapd" then
                 cursor:delete('dawn', section[".name"])
             end
         end }

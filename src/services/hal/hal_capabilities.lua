@@ -256,6 +256,11 @@ local function new_band_capability(driver_q)
     return setmetatable({driver_q = driver_q}, BandCapability)
 end
 
+function BandCapability:set_log_level(args)
+    local cmd = {command = "set_log_level", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
 function BandCapability:set_kicking(args)
     local cmd = {command = "set_kicking", args = args}
     return do_command(self.driver_q, cmd)
