@@ -226,8 +226,7 @@
           "range_extent": "240",
           "lease_time": "12h"
         },
-        "dns_server": {
-        },
+        "dns_server": {},
         "firewall": {
           "zone": "lan"
         },
@@ -543,32 +542,94 @@
     ],
     "band_steering": {
       "globals": {
-        "kick_mode": "both",
-        "bandwidth_threshold": 6,
-        "kicking_threshold": 10,
-        "evals_before_kick": 3
+        "rrm_mode": "PAT",
+        "kicking": {
+          "kick_mode": "both",
+          "bandwidth_threshold": 0,
+          "kicking_threshold": 15,
+          "evals_before_kick": 3
+        },
+        "stations": {
+          "use_station_count": false,
+          "max_station_diff": 1
+        },
+        "neighbor_reports": {
+          "dyn_report_num": 2,
+          "disassoc_report_len": 6
+        },
+        "legacy": {
+          "eval_probe_req": true,
+          "eval_assoc_req": false,
+          "eval_auth_req": false,
+          "min_probe_count": 2,
+          "deny_auth_reason": 1,
+          "deny_assoc_reason": 17
+        }
       },
       "timings": {
-        "update_client": 10,
-        "update_chan_util": 5,
-        "update_hostapd": 10,
-        "client_cleanup": 15,
+        "updates": {
+          "client": 10,
+          "chan_util": 5,
+          "beacon_reports": 5,
+          "hostapd": 10,
+          "tcp_con": 10
+        },
+        "cleanup": {
+          "client": 15,
+          "probe": 40,
+          "ap": 460
+        },
         "inactive_client_kickoff": 60
+      },
+      "networking": {
+        "method": "tcp+umdns",
+        "ip": "0.0.0.0",
+        "port": 1026,
+        "broadcast_port": 1025,
+        "enable_encryption": false
       },
       "bands": {
         "2g": {
-          "initial_score": 80,
-          "good_rssi_threshold": -50,
-          "good_rssi_reward": 15,
-          "bad_rssi_threshold": -75,
-          "bad_rssi_penalty": -15
+          "initial_score": 90,
+          "rssi_scoring": {
+            "center": -69,
+            "weight": 2,
+            "good_threshold": -66,
+            "good_reward": 12,
+            "bad_threshold": -75,
+            "bad_penalty": -15
+          },
+          "chan_util_scoring": {
+            "good_threshold": 140,
+            "good_reward": 5,
+            "bad_threshold": 170,
+            "bad_penalty": -20
+          },
+          "support_bonuses": {
+            "vht": 5,
+            "ht": 5
+          }
         },
         "5g": {
-          "initial_score": 100,
-          "good_rssi_threshold": -50,
-          "good_rssi_reward": 15,
-          "bad_rssi_threshold": -75,
-          "bad_rssi_penalty": -15
+          "initial_score": 95,
+          "rssi_scoring": {
+            "center": -64,
+            "weight": 4,
+            "good_threshold": -62,
+            "good_reward": 10,
+            "bad_threshold": -70,
+            "bad_penalty": -28
+          },
+          "chan_util_scoring": {
+            "good_threshold": 140,
+            "good_reward": 5,
+            "bad_threshold": 170,
+            "bad_penalty": -20
+          },
+          "support_bonuses": {
+            "vht": 2,
+            "ht": 2
+          }
         }
       }
     }
