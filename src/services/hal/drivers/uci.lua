@@ -62,6 +62,9 @@ function UCI:set(ctx, config, section, option, value)
     if value == nil then
         success, err = cursor:set(config, section, option)
     else
+        if type(value) == 'boolean' then
+            value = value and 1 or 0
+        end
         success, err = cursor:set(config, section, option, value)
     end
     if not success then
@@ -265,6 +268,7 @@ function UCI:handle_capability(ctx, request)
     end
 
     fiber.spawn(function()
+        print(string.format("UCI COMMAND: %s(%s)", command, table.concat(str_args, ",")))
         local result, err = func(self, ctx, unpack(args))
 
         ret_ch:put({
