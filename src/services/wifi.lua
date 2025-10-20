@@ -119,8 +119,26 @@ function Radio:apply_config(config, report_period)
             end
         end
 
-        self.conn:publish(new_msg(
+        local req = self.conn:request(new_msg(
             { 'hal', 'capability', 'wireless', self.index, 'control', 'apply' }
+        ))
+        local resp, ctx_err = req:next_msg_with_context(self.ctx)
+        req:unsubscribe()
+        if ctx_err or resp and resp.payload and resp.payload.err then
+            log.error(string.format(
+                "%s - %s: Radio %s apply config error: %s",
+                self.ctx:value("service_name"),
+                self.ctx:value("fiber_name"),
+                self.index or "(unknown)",
+                ctx_err or resp.payload.err
+            ))
+            return
+        end
+        log.info(string.format(
+            "%s - %s: Radio %s applied configuration",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name"),
+            self.index or "(unknown)"
         ))
     end)
 end
@@ -172,8 +190,27 @@ function Radio:apply_ssids(ssid_configs)
             end
         end
 
-        self.conn:publish(new_msg(
+        local req = self.conn:request(new_msg(
             { 'hal', 'capability', 'wireless', self.index, 'control', 'apply' }
+        ))
+        local resp, ctx_err = req:next_msg_with_context(self.ctx)
+        req:unsubscribe()
+        if ctx_err or resp and resp.payload and resp.payload.err then
+            log.error(string.format(
+                "%s - %s: Radio %s failed to apply SSIDs, reason: %s",
+                self.ctx:value("service_name"),
+                self.ctx:value("fiber_name"),
+                self.index or "(unknown)",
+                ctx_err or resp.payload.err
+            ))
+            return
+        end
+        log.info(string.format(
+            "%s - %s: Radio %s applied %d SSIDs",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name"),
+            self.index or "(unknown)",
+            #ssid_configs
         ))
     end)
 end
