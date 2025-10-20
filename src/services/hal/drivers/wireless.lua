@@ -238,11 +238,6 @@ function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_inter
 
     reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { 'wireless', wifi_interface, 'mode', 'ap' }
-    ))
-
-    reqs[#reqs + 1] = self.conn:request(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
         { 'wireless', wifi_interface, 'ssid', ssid }
     ))
 
