@@ -46,7 +46,7 @@ local function get_ports(ports)
     for _, port in ipairs(ports) do
         local port_name, port_type = string.match(port, "^([%w%-]+)%s*%(([%w%-]+)%)")
         if port_list[port_type] == nil then
-            port_list[port_type] = { port_name}
+            port_list[port_type] = { port_name }
         else
             table.insert(port_list[port_type], port_name)
         end
@@ -70,6 +70,8 @@ end
 ---omg I hate this, when mvp is done and theres no major deadline this is the first thing to go
 function Driver:poll_info()
     local poll_freq = 10
+    local poll_ctx = context.with_timeout(self.ctx, poll_freq)
+    local send_ctx = context.with_cancel(self.ctx)
     while not self.ctx:err() do
         local infos = {}
         local modem_info, modem_err = self:get_modem_info()
@@ -149,24 +151,31 @@ function Driver:poll_info()
             end
         end
 
-        for k, v in pairs(infos) do
-            op.choice(
-                self.info_q:put_op({
-                    type = "modem",
-                    id = self.imei,
-                    sub_topic = { k },
-                    endpoints = "multiple",
-                    info = v
-                }),
-                self.ctx:done_op()
-            ):perform()
+        send_ctx:cancel('new infos available')
+        send_ctx = context.with_cancel(self.ctx)
+        if next(infos) ~= nil then
+            fiber.spawn(function()
+                op.choice(
+                    self.info_q:put_op({
+                        type = "modem",
+                        id = self.imei,
+                        sub_topic = {},
+                        endpoints = "multiple",
+                        info = infos
+                    }),
+                    send_ctx:done_op()
+                ):perform()
+            end)
         end
         local poll_freq_update = op.choice(
-            self.ctx:done_op(),
-            sleep.sleep_op(poll_freq),
+            poll_ctx:done_op(),
             self.refresh_rate_channel:get_op()
         ):perform()
         if poll_freq_update then poll_freq = poll_freq_update end
+
+        -- Make sure to not loop until we have hit our deadline
+        poll_ctx:done_op():perform()
+        poll_ctx = context.with_timeout(self.ctx, poll_freq)
     end
 
     log.trace(string.format("Modem - %s: Polling info stopped", self.imei))
