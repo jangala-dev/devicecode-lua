@@ -13,6 +13,7 @@ local gsm_service = {
 }
 gsm_service.__index = {}
 local REQUEST_TIMEOUT = 10
+local DEFAULT_RETRY_TIMEOUT = 5
 
 -- for now we only hold configs about modems but later may need to hold
 -- sim and sim switching configs as well
@@ -73,6 +74,8 @@ function Modem:_apn_connect(ctx, cutoff)
     local mcc_sub = self.conn:subscribe(
         { 'hal', 'capability', 'modem', self.idx, 'info', 'nas', 'home-network', 'mcc' }
     )
+    -- Through testing the timings of when the mcc is first available after registering the modem, a timeout of 30 seconds is used
+    -- this should give ample time for the modem poll to retrieve the mcc and deliver
     local mcc_msg, mcc_err = mcc_sub:next_msg_with_context_op(context.with_timeout(ctx, REQUEST_TIMEOUT)):perform()
     mcc_sub:unsubscribe()
     if mcc_err then return nil, "mcc: " .. mcc_err end
@@ -150,7 +153,8 @@ function Modem:_apn_connect(ctx, cutoff)
 
             -- need to wait for current connection attempt to finish before trying another
             local modem_status_msg = purge_sub(ctx, status_sub)
-            local modem_status = modem_status_msg and modem_status_msg.payload and modem_status_msg.payload.curr_state or nil
+            local modem_status = modem_status_msg and modem_status_msg.payload and modem_status_msg.payload.curr_state or
+            nil
             while modem_status == 'connecting' do
                 local status_msg, status_err = status_sub:next_msg_with_context_op(ctx):perform()
                 if status_err then
@@ -171,15 +175,15 @@ end
 ---Connect modem and set signal report frequency
 ---@param ctx Context
 ---@return string?
+---@return number? timeout
 function Modem:_connect(ctx)
     local active_apn, apn_err = self:_apn_connect(ctx)
     if apn_err then
+        local timeout = 20
         if apn_err == "pdn-ipv4-call-throttled" then
-            sleep.sleep(360) -- cooldown for 6 minutes before trying again
-        else
-            sleep.sleep(20)  -- cooldown for 20 seconds before trying again
+            timeout = 360
         end
-        return apn_err
+        return apn_err, timeout
     end
 
     log.info(string.format(
@@ -285,17 +289,24 @@ function Modem:_autoconnect(ctx)
     local state_monitor_sub = self.conn:subscribe(
         { 'hal', 'capability', 'modem', self.idx, 'info', 'state' }
     )
+    local state_carry_forward = nil
     while not ctx:err() do
         -- Purge messages that may have been sent during state action
         local state_info_msg, monitor_err = purge_sub(ctx, state_monitor_sub)
-        if not state_info_msg then
-            state_info_msg, monitor_err = state_monitor_sub:next_msg_with_context_op(ctx):perform()
+        local state_info = nil
+        if not state_carry_forward then
+            if not state_info_msg then
+                state_info_msg, monitor_err = state_monitor_sub:next_msg_with_context_op(ctx):perform()
+            end
+            if monitor_err then
+                log.debug(monitor_err)
+                break
+            end
+            state_info = state_info_msg.payload
+        else
+            state_info = state_carry_forward
+            state_carry_forward = nil
         end
-        if monitor_err then
-            log.debug(monitor_err)
-            break
-        end
-        local state_info = state_info_msg.payload
         if state_info == nil then
             ctx:cancel('state monitor closed')
             return
@@ -311,15 +322,18 @@ function Modem:_autoconnect(ctx)
         local state_func = states[state_info.curr_state]
         if state_func then
             -- Call the state function and check for errors
-            local state_err = state_func(self, ctx)
+            local state_err, retry_timeout = state_func(self, ctx)
             if state_err then
                 log.error(string.format(
-                    "%s - %s: State function for state %s failed, reason: %s",
+                    "%s - %s: State function for state %s failed, reason: %s, retrying after %s seconds",
                     ctx:value("service_name"),
                     ctx:value("fiber_name"),
                     state_info.curr_state,
-                    state_err
+                    state_err,
+                    retry_timeout or DEFAULT_RETRY_TIMEOUT
                 ))
+                sleep.sleep(retry_timeout or DEFAULT_RETRY_TIMEOUT)
+                state_carry_forward = state_info
             end
         end
     end
@@ -504,7 +518,7 @@ function Modem:_publish_dynamic_data(ctx)
             { retained = true }
         ))
     end
-    local firmware_sub = self.conn:subscribe({'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'firmware'})
+    local firmware_sub = self.conn:subscribe({ 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'firmware' })
 
     local function publish_bytes(msg)
         self.conn:publish(new_msg(
