@@ -1,4 +1,11 @@
 {
+  "hal": {
+    "managers": {
+      "modemcard": {},
+      "uci": {},
+      "ubus": {}
+    }
+  },
   "net": {
     "report_period": 60,
     "default": {
@@ -46,9 +53,27 @@
     },
     "network": [
       {
+        "name": "Loopback",
+        "id": "loopback",
+        "type": "local",
+        "interfaces": [
+          "lo"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "127.0.0.1",
+          "netmask": "255.0.0.0"
+        },
+        "dns_server": {
+          "local_server": true,
+          "default_hosts": []
+        }
+      },
+      {
         "name": "Admin Network",
         "id": "adm",
         "type": "local",
+        "is_bridge": true,
         "interfaces": [
           "eth0.8"
         ],
@@ -76,6 +101,7 @@
         "name": "Jangala Network",
         "id": "jan",
         "type": "local",
+        "is_bridge": true,
         "interfaces": [
           "eth0.32"
         ],
@@ -166,6 +192,7 @@
         "name": "Internal Network",
         "id": "int",
         "type": "local",
+        "is_bridge": true,
         "interfaces": [
           "eth0.100"
         ],
@@ -179,12 +206,7 @@
           "range_extent": "240",
           "lease_time": "12h"
         },
-        "dns_server": {
-          "servers": [
-            "8.8.8.8",
-            "1.1.1.1"
-          ]
-        },
+        "dns_server": {},
         "firewall": {
           "zone": "lan"
         },
