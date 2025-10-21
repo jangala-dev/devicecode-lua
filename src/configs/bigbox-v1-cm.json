@@ -1780,5 +1780,12 @@
         }
       }
     ]
+  },
+  "switch": {
+    "report_period": 10,
+    "host": "172.28.100.9",
+    "username": "admin",
+    "password": "admin",
+    "type": "rtl8380m"
   }
 }
