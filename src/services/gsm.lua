@@ -74,8 +74,7 @@ function Modem:_apn_connect(ctx, cutoff)
     local mcc_sub = self.conn:subscribe(
         { 'hal', 'capability', 'modem', self.idx, 'info', 'nas', 'home-network', 'mcc' }
     )
-    -- Through testing the timings of when the mcc is first available after registering the modem, a timeout of 30 seconds is used
-    -- this should give ample time for the modem poll to retrieve the mcc and deliver
+    -- This line commonly fails on first try
     local mcc_msg, mcc_err = mcc_sub:next_msg_with_context_op(context.with_timeout(ctx, REQUEST_TIMEOUT)):perform()
     mcc_sub:unsubscribe()
     if mcc_err then return nil, "mcc: " .. mcc_err end
