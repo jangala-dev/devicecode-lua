@@ -262,13 +262,7 @@ function UCI:handle_capability(ctx, request)
         return
     end
 
-    local str_args = {}
-    for _, v in ipairs(args) do
-        table.insert(str_args, tostring(v))
-    end
-
     fiber.spawn(function()
-        print(string.format("UCI COMMAND: %s(%s)", command, table.concat(str_args, ",")))
         local result, err = func(self, ctx, unpack(args))
 
         ret_ch:put({
@@ -286,39 +280,6 @@ function UCI:handle_restart_actions(config, actions)
         restart_policies[config] = { actions = actions }
     end
 end
-
---- Get the nearest config restart time
---- @return table
--- function UCI:get_next_restart()
---     local next_restart = {}
---     for config, restart_policy in pairs(restart_policies) do
---         if restart_policy.current_restart and
---             (not next_restart.time or restart_policy.current_restart < next_restart.time) then
---             next_restart = { config = config, time = restart_policy.current_restart, actions = restart_policy.actions }
---         end
---     end
---     return next_restart
--- end
-
---- Update a config restart policy to new deadline
---- @param config string
--- function UCI:handle_config_update(config)
---     if not restart_policies[config] then
---         log.debug(string.format(
---             "%s - %s: config %s has no set restart policy",
---             self.ctx:value("service_name"),
---             self.ctx:value("fiber_name"),
---             config
---         ))
---         return {}
---     end
-
---     local restart_policy = restart_policies[config]
---     local old_time = restart_policy.current_restart
---     restart_policy.current_restart = restart_policy.get_next_restart(restart_policy.current_restart)
---     local new_time = restart_policy.current_restart
---     print("config update", config, old_time, new_time)
--- end
 
 --- Apply UCI capabilities
 --- @param capability_info_q Queue
