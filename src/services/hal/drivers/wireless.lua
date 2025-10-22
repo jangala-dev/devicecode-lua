@@ -218,17 +218,18 @@ function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_inter
         return nil, "Invalid mode, must be one of: " .. table.concat(VALID_MODES, ", ")
     end
 
-    local add_sub = self.conn:request(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'add' },
-        { 'wireless', 'wifi-iface' }
+    local wifi_interface = string.format("%s-i%s", self.name, self.iface_num)
+    self.iface_num = self.iface_num + 1
+    local set_sub = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'wireless', wifi_interface, 'wifi-iface' }
     ))
-    local add_response, ctx_err = add_sub:next_msg_with_context(ctx)
-    add_sub:unsubscribe()
-    if add_response.payload and add_response.payload.err or ctx_err then
-        return nil, add_response.payload.err or ctx_err
+    local set_response, ctx_err = set_sub:next_msg_with_context(ctx)
+    set_sub:unsubscribe()
+    if set_response.payload and set_response.payload.err or ctx_err then
+        return nil, set_response.payload.err or ctx_err
     end
 
-    local wifi_interface = add_response.payload and add_response.payload.result
     local reqs = {}
 
     reqs[#reqs + 1] = self.conn:request(new_msg(
@@ -758,6 +759,7 @@ local function new(ctx, name, path, type)
     self.path = path
     self.type = type
     self.phy = nil
+    self.iface_num = 0
     self.report_period_ch = channel.new()
     self.client_event_queue = queue.new(10)
     self.interface_event_queue = queue.new(10)
