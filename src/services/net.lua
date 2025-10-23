@@ -1097,8 +1097,8 @@ local function speedtest_worker(ctx)
             log.error("NET:", "Speedtest error:", err)
         else
             log.info(string.format(
-                "Speedtest complete for network: wan. %.2f Mbps, data used: %.2f MB in %.2f Secs",
-                results.peak, results.data, results.time
+                "Speedtest complete for network: %s. %.2f Mbps, data used: %.2f MB in %.2f Secs",
+                msg.network, results.peak, results.data, results.time
             ))
             speedtest_result_channel:put({
                 network = msg.network,
