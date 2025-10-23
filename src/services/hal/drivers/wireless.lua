@@ -218,7 +218,7 @@ function WirelessDriver:add_interface(ctx, ssid, encryption, password, net_inter
         return nil, "Invalid mode, must be one of: " .. table.concat(VALID_MODES, ", ")
     end
 
-    local wifi_interface = string.format("%s-i%s", self.name, self.iface_num)
+    local wifi_interface = string.format("%s_i%s", self.name, self.iface_num)
     self.iface_num = self.iface_num + 1
     local set_sub = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
