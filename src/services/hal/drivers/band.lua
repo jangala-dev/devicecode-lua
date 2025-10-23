@@ -25,7 +25,7 @@ local SUPPORT_OPTIONS = {
     'ht', 'vht'
 }
 local VALID_UPDATE_KEYS = {
-    'client', 'chan_util', 'hostapd', 'beacon_reports', 'tcp_con', ''
+    'client', 'chan_util', 'hostapd', 'beacon_reports', 'tcp_con'
 }
 local VALID_TIMEOUTS = {
     'probe', 'client', 'ap'
