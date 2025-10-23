@@ -593,18 +593,18 @@
         "2g": {
           "initial_score": 90,
           "rssi_scoring": {
-            "center": -69,
+            "center": "-69",
             "weight": 2,
-            "good_threshold": -66,
+            "good_threshold": "-66",
             "good_reward": 12,
-            "bad_threshold": -75,
-            "bad_penalty": -15
+            "bad_threshold": "-75",
+            "bad_penalty": "-15"
           },
           "chan_util_scoring": {
             "good_threshold": 140,
             "good_reward": 5,
             "bad_threshold": 170,
-            "bad_penalty": -20
+            "bad_penalty": "-20"
           },
           "support_bonuses": {
             "vht": 5,
@@ -614,18 +614,18 @@
         "5g": {
           "initial_score": 95,
           "rssi_scoring": {
-            "center": -64,
+            "center": "-64",
             "weight": 4,
-            "good_threshold": -62,
+            "good_threshold": "-62",
             "good_reward": 10,
-            "bad_threshold": -70,
-            "bad_penalty": -28
+            "bad_threshold": "-70",
+            "bad_penalty": "-28"
           },
           "chan_util_scoring": {
             "good_threshold": 140,
             "good_reward": 5,
             "bad_threshold": 170,
-            "bad_penalty": -20
+            "bad_penalty": "-20"
           },
           "support_bonuses": {
             "vht": 2,
