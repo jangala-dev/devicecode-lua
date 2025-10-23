@@ -55,10 +55,11 @@ local function read_uart_data(ctx)
             local decoded, decode_err = cjson.decode(msg.payload)
             if decode_err then
                 log.error(string.format(
-                    "%s - %s: Error decoding UART JSON data: %s",
+                    "%s - %s: Error decoding UART JSON data: %s \"%s\"",
                     ctx:value("service_name"),
                     ctx:value("fiber_name"),
-                    decode_err
+                    decode_err,
+                    msg.payload
                 ))
             else
                 for k, v in pairs(decoded) do
