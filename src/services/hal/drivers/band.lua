@@ -286,6 +286,9 @@ function BandDriver:set_band_kicking(ctx,
         if not config then
             return false, "No entry associated with " .. key
         end
+        if config.type == "number" then
+            value = tonumber(value)
+        end
         if type(value) ~= config.type then
             return false, "Invalid type for " .. key
         end
