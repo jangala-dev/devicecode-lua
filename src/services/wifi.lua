@@ -597,7 +597,8 @@ local function radio_manager(ctx, conn)
         -- Validate each band configuration
         for band_name, band_cfg in pairs(bands) do
             if not (type(band_cfg) == "table") then
-                return string.format("Invalid band_steering band type for %s, should be a table but found %s", band_name, type(band_cfg))
+                return string.format("Invalid band_steering band type for %s, should be a table but found %s", band_name,
+                    type(band_cfg))
             end
 
             -- Check initial score
@@ -845,7 +846,7 @@ local function radio_manager(ctx, conn)
         local radio_ssids = {}
         for _, ssid_cfg in ipairs(config.ssids) do
             local ssids, err
-            ssid_cfg.has_band_steering = config.band_steering and true or false
+            ssid_cfg.has_band_steering = config.band_steering.globals.kicking.kick_mode ~= "none"
             if ssid_cfg.mainflux_path then
                 local base_cfg = {}
                 for k, v in pairs(ssid_cfg) do
