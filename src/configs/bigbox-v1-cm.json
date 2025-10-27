@@ -1826,6 +1826,329 @@
             "threshold": 2
           }
         ]
+      },
+      "mcu/power/temperature/internal": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "mcu/env/temperature/core": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "mcu/env/humidity/core": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "mcu/power/battery/internal/vbat": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "mcu/power/battery/internal/ibat": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "mcu/power/charger/internal/vin": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "mcu/power/charger/internal/vsys": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "mcu/power/charger/internal/iin": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/charger_enabled": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/mppt_en_pin": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/equalize_req": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/drvcc_good": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/cell_count_error": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/ok_to_charge": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/no_rt": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/thermal_shutdown": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/vin_ovlo": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/vin_gt_vbat": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/intvcc_gt_4p3v": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/system/intvcc_gt_2p8v": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/status/iin_limited": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/status/uvcl_active": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/status/cc_phase": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/status/cv_phase": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/bat_short": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/bat_missing": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/max_charge_time_fault": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/c_over_x_term": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/timer_term": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/ntc_pause": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/precharge": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/cccv": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/absorb": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/equalize": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "mcu/power/charger/internal/state/suspended": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
       }
     }
   },
