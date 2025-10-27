@@ -1832,8 +1832,8 @@
         "process": [
           {
             "type": "DiffTrigger",
-            "diff_method": "percent",
-            "threshold": 5
+            "diff_method": "absolute",
+            "threshold": 1
           }
         ]
       },
@@ -1862,8 +1862,8 @@
         "process": [
           {
             "type": "DiffTrigger",
-            "diff_method": "percent",
-            "threshold": 5
+            "diff_method": "absolute",
+            "threshold": 10
           }
         ]
       },
@@ -1872,8 +1872,8 @@
         "process": [
           {
             "type": "DiffTrigger",
-            "diff_method": "percent",
-            "threshold": 5
+            "diff_method": "absolute",
+            "threshold": 10
           }
         ]
       },
@@ -1882,8 +1882,8 @@
         "process": [
           {
             "type": "DiffTrigger",
-            "diff_method": "percent",
-            "threshold": 5
+            "diff_method": "absolute",
+            "threshold": 10
           }
         ]
       },
@@ -1892,8 +1892,8 @@
         "process": [
           {
             "type": "DiffTrigger",
-            "diff_method": "percent",
-            "threshold": 5
+            "diff_method": "absolute",
+            "threshold": 10
           }
         ]
       },
@@ -1902,8 +1902,8 @@
         "process": [
           {
             "type": "DiffTrigger",
-            "diff_method": "percent",
-            "threshold": 5
+            "diff_method": "absolute",
+            "threshold": 10
           }
         ]
       },
