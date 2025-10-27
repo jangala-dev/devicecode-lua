@@ -89,14 +89,11 @@ local BIGBOX_SS_PACKAGES_INSTALLED = {
 
 local BIGBOX_V1_CM_PACKAGES_INSTALLED = {
     -- Core
-    "libopenssl",
     "mwan3",
     "rpcd",
     "sqm-scripts",
-    "lua-lumen",
 
     -- Fan / hardware monitoring
-    "kmod-hwmon-rpi-poe-fan",
     "kmod-i2c-core",
 
     -- Persistent storage
