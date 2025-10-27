@@ -256,8 +256,33 @@ local function new_band_capability(driver_q)
     return setmetatable({driver_q = driver_q}, BandCapability)
 end
 
+function BandCapability:set_log_level(args)
+    local cmd = {command = "set_log_level", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
 function BandCapability:set_kicking(args)
     local cmd = {command = "set_kicking", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function BandCapability:set_station_counting(args)
+    local cmd = {command = "set_station_counting", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function BandCapability:set_rrm_mode(args)
+    local cmd = {command = "set_rrm_mode", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function BandCapability:set_neighbour_reports(args)
+    local cmd = {command = "set_neighbour_reports", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function BandCapability:set_legacy_options(args)
+    local cmd = {command = "set_legacy_options", args = args}
     return do_command(self.driver_q, cmd)
 end
 
@@ -286,8 +311,13 @@ function BandCapability:set_client_inactive_kickoff(args)
     return do_command(self.driver_q, cmd)
 end
 
-function BandCapability:set_client_cleanup(args)
-    local cmd = {command = "set_client_cleanup", args = args}
+function BandCapability:set_cleanup(args)
+    local cmd = {command = "set_cleanup", args = args}
+    return do_command(self.driver_q, cmd)
+end
+
+function BandCapability:set_networking(args)
+    local cmd = {command = "set_networking", args = args}
     return do_command(self.driver_q, cmd)
 end
 

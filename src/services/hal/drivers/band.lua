@@ -25,18 +25,55 @@ local SUPPORT_OPTIONS = {
     'ht', 'vht'
 }
 local VALID_UPDATE_KEYS = {
-    'client', 'chan_util', 'hostapd'
+    'client', 'chan_util', 'hostapd', 'beacon_reports', 'tcp_con'
+}
+local VALID_TIMEOUTS = {
+    'probe', 'client', 'ap'
+}
+local VALID_RRM_MODES = {
+    'PAT'
+}
+local VALID_LEGACY_OPTIONS = {
+    'eval_probe_req', 'eval_assoc_req', 'eval_auth_req',
+    'min_probe_count', 'deny_assoc_reason', 'deny_auth_reason'
+}
+local VALID_NETWORKING_METHODS = {
+    'broadcast', 'tcp+umdns', 'tcp',
+    broadcast = 0,
+    ['tcp+umdns'] = 2,
+    ['multicast'] = 2,
+    tcp = 3
 }
 
 local sections = {
     { name = 'global',  type = 'metric' },
     { name = '802_11g', type = 'metric' },
     { name = '802_11a', type = 'metric' },
-    { name = 'gbltime', type = 'times' }
+    { name = 'gbltime', type = 'times' },
+    { name = 'gblnet', type = 'network'},
+    { name = 'localcfg', type = 'local' }
 }
 
 -------------------------------------------------------------------------
 --- BandCapabilities ----------------------------------------------------
+
+function BandDriver:set_log_level(ctx, level)
+    if type(level) ~= "number" or level < 0 then
+        return nil, "Invalid log level"
+    end
+
+    local req = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'localcfg', 'log_level', level }
+    ))
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
+    end
+
+    return true, nil
+end
 
 function BandDriver:set_kicking(ctx,
                                 mode,
@@ -90,6 +127,114 @@ function BandDriver:set_kicking(ctx,
     return true, nil
 end
 
+function BandDriver:set_station_counting(ctx, use_station_count, max_station_diff)
+    if type(use_station_count) ~= "boolean" then
+        return nil, "Invalid use_station_count"
+    end
+    if type(max_station_diff) ~= "number" or max_station_diff < 0 then
+        return nil, "Invalid max_station_diff"
+    end
+
+    local reqs = {}
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'global', 'use_station_count', use_station_count}
+    ))
+
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'global', 'max_station_diff', max_station_diff }
+    ))
+
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
+        end
+    end
+
+    return true, nil
+end
+
+function BandDriver:set_rrm_mode(ctx, mode)
+    if not utils.is_in(mode, VALID_RRM_MODES) then
+        return nil, "Invalid RRM mode"
+    end
+
+    local req = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'global', 'rrm_mode', mode }
+    ))
+    local resp, ctx_err = req:next_msg_with_context(ctx)
+    req:unsubscribe()
+    if ctx_err or (resp.payload and resp.payload.err) then
+        return nil, ctx_err or resp.payload.err
+    end
+
+    return true, nil
+end
+
+function BandDriver:set_neighbour_reports(ctx, dyn_report_num, disassoc_report_len)
+    dyn_report_num = tonumber(dyn_report_num)
+    disassoc_report_len = tonumber(disassoc_report_len)
+
+    if type(dyn_report_num) ~= "number" or dyn_report_num < 0 then
+        return nil, "Invalid dyn_report_num"
+    end
+    if type(disassoc_report_len) ~= "number" or disassoc_report_len < 0 then
+        return nil, "Invalid disassoc_report_len"
+    end
+
+    local reqs = {}
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'global', 'set_hostapd_nr', dyn_report_num }
+    ))
+    reqs[#reqs + 1] = self.conn:request(new_msg(
+        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+        { 'dawn', 'global', 'disassoc_nr_length', disassoc_report_len }
+    ))
+
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
+        end
+    end
+
+    return true, nil
+end
+
+function BandDriver:set_legacy_options(ctx, opts)
+    if type(opts) ~= "table" then
+        return nil, "Options must be a table"
+    end
+
+    for key, value in pairs(opts) do
+        if not utils.is_in(key, VALID_LEGACY_OPTIONS) then
+            return false, "No entry associated with " .. key
+        end
+        if type(value) == "nil" then
+            return false, "Invalid value for " .. key
+        end
+
+        local req = self.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { 'dawn', 'global', key, value }
+        ))
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
+        end
+    end
+
+    return true, nil
+end
+
 function BandDriver:set_band_priority(ctx, band, priority)
     band = band:upper()
     if type(priority) ~= "number" or priority < 0 then
@@ -124,11 +269,15 @@ function BandDriver:set_band_kicking(ctx,
 
     local configs = {
         rssi_center = {type = "number", entry = { 'dawn', full_band, 'rssi_center' }},
-        reward_threshold = {type = "number", entry = { 'dawn', full_band, 'rssi_val' }},
-        reward = {type = "number", entry = { 'dawn', full_band, 'rssi' }},
-        penalty_threshold = {type = "number", entry = { 'dawn', full_band, 'low_rssi_val' }},
-        penalty = {type = "number", entry = { 'dawn', full_band, 'low_rssi' }},
-        weight = {type = "number", entry = { 'dawn', full_band, 'rssi_weight' }}
+        rssi_reward_threshold = {type = "number", entry = { 'dawn', full_band, 'rssi_val' }},
+        rssi_reward = {type = "number", entry = { 'dawn', full_band, 'rssi' }},
+        rssi_penalty_threshold = {type = "number", entry = { 'dawn', full_band, 'low_rssi_val' }},
+        rssi_penalty = {type = "number", entry = { 'dawn', full_band, 'low_rssi' }},
+        rssi_weight = {type = "number", entry = { 'dawn', full_band, 'rssi_weight' }},
+        channel_util_reward_threshold = {type = "number", entry = { 'dawn', full_band, 'chan_util_val' }},
+        channel_util_reward = {type = "number", entry = { 'dawn', full_band, 'chan_util' }},
+        channel_util_penalty_threshold = {type = "number", entry = { 'dawn', full_band, 'max_chan_util_val' }},
+        channel_util_penalty = {type = "number", entry = { 'dawn', full_band, 'max_chan_util' }}
     }
 
     local reqs = {}
@@ -136,6 +285,9 @@ function BandDriver:set_band_kicking(ctx,
         local config = configs[key]
         if not config then
             return false, "No entry associated with " .. key
+        end
+        if config.type == "number" then
+            value = tonumber(value)
         end
         if type(value) ~= config.type then
             return false, "Invalid type for " .. key
@@ -235,22 +387,79 @@ function BandDriver:set_client_inactive_kickoff(ctx, timeout)
     return true, nil
 end
 
-function BandDriver:set_client_cleanup(ctx, timeout)
-    timeout = tonumber(timeout)
-    if type(timeout) ~= "number" or timeout < 0 then
-        return nil, "Invalid timeout"
+function BandDriver:set_cleanup(ctx, timeouts)
+    if type(timeouts) ~= "table" then
+        return nil, "Timeouts must be a table"
     end
 
-    local req = self.conn:request(new_msg(
+    local reqs = {}
+    for key, timeout in pairs(timeouts) do
+        if not utils.is_in(key, VALID_TIMEOUTS) then
+            return nil, "Invalid timeout key: " .. key
+        end
+        if type(timeout) ~= "number" or timeout < 0 then
+            return nil, "Invalid timeout for " .. key
+        end
+
+        reqs[#reqs + 1] = self.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            { 'dawn', 'gbltime', 'remove_' .. key, timeout }
+        ))
+    end
+
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
+        end
+    end
+
+    return true, nil
+end
+
+function BandDriver:set_networking(ctx, method, options)
+    local configs = {
+        ip = {type = "string", entry = { 'dawn', 'gblnet', 'tcp_ip' }},
+        port = {type = "number", entry = { 'dawn', 'gblnet', 'tcp_port' }},
+        broadcast_port = {type = "number", entry = { 'dawn', 'gblnet', 'broadcast_port' }},
+        enable_encryption = {type = "boolean", entry = { 'dawn', 'gblnet', 'use_symm_enc' }},
+    }
+
+    local method_id = VALID_NETWORKING_METHODS[method]
+    if not method_id then
+        return nil, "Invalid networking method: " .. tostring(method)
+    end
+
+    local reqs = {}
+    reqs[#reqs + 1] = self.conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { 'dawn', 'gbltime', 'remove_client', timeout }
+        { 'dawn', 'gblnet', 'method', method_id }
     ))
-    local resp, ctx_err = req:next_msg_with_context(ctx)
-    req:unsubscribe()
-    if ctx_err or (resp.payload and resp.payload.err) then
-        return nil, ctx_err or resp.payload.err
+    for key, value in pairs(options) do
+        local config = configs[key]
+        if not config then
+            return false, "No entry associated with " .. key
+        end
+        if type(value) ~= config.type then
+            return false, "Invalid type for " .. key
+        end
+
+        local config_entry = {unpack(config.entry)}
+        table.insert(config_entry, value)
+        reqs[#reqs + 1] = self.conn:request(new_msg(
+            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
+            config_entry
+        ))
     end
 
+    for _, req in ipairs(reqs) do
+        local resp, ctx_err = req:next_msg_with_context(ctx)
+        req:unsubscribe()
+        if ctx_err or (resp.payload and resp.payload.err) then
+            return nil, ctx_err or resp.payload.err
+        end
+    end
     return true, nil
 end
 
@@ -361,7 +570,7 @@ function BandDriver:init(ctx, conn)
     local req = conn:request(new_msg(
         { 'hal', 'capability', 'uci', '1', 'control', 'foreach' },
         { 'dawn', nil, function(cursor, section)
-            if section[".type"] ~= "hostapd" and section[".type"] ~= "local" then
+            if section[".type"] ~= "hostapd" then
                 cursor:delete('dawn', section[".name"])
             end
         end }
