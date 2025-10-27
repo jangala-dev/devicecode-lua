@@ -119,8 +119,26 @@ function Radio:apply_config(config, report_period)
             end
         end
 
-        self.conn:publish(new_msg(
+        local req = self.conn:request(new_msg(
             { 'hal', 'capability', 'wireless', self.index, 'control', 'apply' }
+        ))
+        local resp, ctx_err = req:next_msg_with_context(self.ctx)
+        req:unsubscribe()
+        if ctx_err or resp and resp.payload and resp.payload.err then
+            log.error(string.format(
+                "%s - %s: Radio %s apply config error: %s",
+                self.ctx:value("service_name"),
+                self.ctx:value("fiber_name"),
+                self.index or "(unknown)",
+                ctx_err or resp.payload.err
+            ))
+            return
+        end
+        log.info(string.format(
+            "%s - %s: Radio %s applied configuration",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name"),
+            self.index or "(unknown)"
         ))
     end)
 end
@@ -151,7 +169,10 @@ function Radio:apply_ssids(ssid_configs)
                     ssid.encryption or "none",
                     ssid.password or "",
                     ssid.network,
-                    INTERFACE_MODES[ssid.mode]
+                    INTERFACE_MODES[ssid.mode],
+                    {
+                        enable_steering = ssid.has_band_steering or false
+                    }
                 }
             ))
             local resp, err = req:next_msg_with_context(self.ctx)
@@ -169,8 +190,27 @@ function Radio:apply_ssids(ssid_configs)
             end
         end
 
-        self.conn:publish(new_msg(
+        local req = self.conn:request(new_msg(
             { 'hal', 'capability', 'wireless', self.index, 'control', 'apply' }
+        ))
+        local resp, ctx_err = req:next_msg_with_context(self.ctx)
+        req:unsubscribe()
+        if ctx_err or resp and resp.payload and resp.payload.err then
+            log.error(string.format(
+                "%s - %s: Radio %s failed to apply SSIDs, reason: %s",
+                self.ctx:value("service_name"),
+                self.ctx:value("fiber_name"),
+                self.index or "(unknown)",
+                ctx_err or resp.payload.err
+            ))
+            return
+        end
+        log.info(string.format(
+            "%s - %s: Radio %s applied %d SSIDs",
+            self.ctx:value("service_name"),
+            self.ctx:value("fiber_name"),
+            self.index or "(unknown)",
+            #ssid_configs
         ))
     end)
 end
@@ -480,15 +520,20 @@ local function radio_manager(ctx, conn)
         if not (type(globals) == "table") then
             return string.format("Invalid band_steering globals type, should be a table but found %s", type(globals))
         end
-        local required_globals_fields = {
+
+        -- Validate the kicking settings
+        if not globals.kicking then
+            return "Missing band_steering kicking configuration"
+        end
+        local required_kicking_fields = {
             "kick_mode",
             "bandwidth_threshold",
             "kicking_threshold",
             "evals_before_kick"
         }
-        for _, field in ipairs(required_globals_fields) do
-            if globals[field] == nil then
-                return string.format("Missing band_steering globals field: %s", field)
+        for _, field in ipairs(required_kicking_fields) do
+            if globals.kicking[field] == nil then
+                return string.format("Missing band_steering kicking field: %s", field)
             end
         end
 
@@ -499,17 +544,46 @@ local function radio_manager(ctx, conn)
         if type(timing) ~= 'table' then
             return string.format("Invalid timing type, should be a table but found %s", type(timing))
         end
-        local required_timing_fields = {
-            "update_client",
-            "update_chan_util",
-            "update_hostapd",
-            "client_cleanup",
-            "inactive_client_kickoff"
+
+        -- Check updates structure
+        if not timing.updates then
+            return "Missing band_steering updates timing configuration"
+        end
+        if type(timing.updates) ~= 'table' then
+            return string.format("Invalid updates timing type, should be a table but found %s", type(timing.updates))
+        end
+        local required_update_fields = {
+            "client",
+            "chan_util",
+            "hostapd"
         }
-        for _, field in ipairs(required_timing_fields) do
-            if timing[field] == nil then
-                return string.format("Missing band_steering timing field: %s", field)
+        for _, field in ipairs(required_update_fields) do
+            if timing.updates[field] == nil then
+                return string.format("Missing band_steering updates timing field: %s", field)
             end
+        end
+
+        -- Check cleanup structure
+        if not timing.cleanup then
+            return "Missing band_steering cleanup timing configuration"
+        end
+        if type(timing.cleanup) ~= 'table' then
+            return string.format("Invalid cleanup timing type, should be a table but found %s", type(timing.cleanup))
+        end
+        local required_cleanup_fields = {
+            "client",
+            "probe",
+            "ap"
+        }
+        for _, field in ipairs(required_cleanup_fields) do
+            if timing.cleanup[field] == nil then
+                return string.format("Missing band_steering cleanup timing field: %s", field)
+            end
+        end
+
+        -- Check inactive_client_kickoff
+        if timing.inactive_client_kickoff == nil then
+            return "Missing band_steering inactive_client_kickoff timing configuration"
         end
 
         local bands = config.band_steering.bands
@@ -519,25 +593,244 @@ local function radio_manager(ctx, conn)
         if not (type(bands) == "table") then
             return string.format("Invalid band_steering bands type, should be a table but found %s", type(bands))
         end
-        local required_band_fields = {
-            "initial_score",
-            "good_rssi_threshold",
-            "good_rssi_reward",
-            "bad_rssi_threshold",
-            "bad_rssi_penalty",
-        }
-        for _, band_cfg in pairs(bands) do
+
+        -- Validate each band configuration
+        for band_name, band_cfg in pairs(bands) do
             if not (type(band_cfg) == "table") then
-                return string.format("Invalid band_steering band type, should be a table but found %s", type(band_cfg))
+                return string.format("Invalid band_steering band type for %s, should be a table but found %s", band_name,
+                    type(band_cfg))
             end
-            for _, field in ipairs(required_band_fields) do
-                if band_cfg[field] == nil then
-                    return string.format("Missing band_steering band field: %s", field)
+
+            -- Check initial score
+            if band_cfg.initial_score == nil then
+                return string.format("Missing initial_score for band %s", band_name)
+            end
+
+            -- Check RSSI scoring configuration if present
+            if band_cfg.rssi_scoring then
+                if not (type(band_cfg.rssi_scoring) == "table") then
+                    return string.format("Invalid rssi_scoring type for band %s, should be a table", band_name)
                 end
+
+                local required_rssi_fields = {
+                    "good_threshold",
+                    "good_reward",
+                    "bad_threshold",
+                    "bad_penalty"
+                }
+                for _, field in ipairs(required_rssi_fields) do
+                    if band_cfg.rssi_scoring[field] == nil then
+                        return string.format("Missing rssi_scoring.%s for band %s", field, band_name)
+                    end
+                end
+            end
+
+            -- Check channel utilization configuration if present
+            if band_cfg.chan_util_scoring then
+                if not (type(band_cfg.chan_util_scoring) == "table") then
+                    return string.format("Invalid chan_util_scoring type for band %s, should be a table", band_name)
+                end
+
+                local required_chan_fields = {
+                    "good_threshold",
+                    "good_reward",
+                    "bad_threshold",
+                    "bad_penalty"
+                }
+                for _, field in ipairs(required_chan_fields) do
+                    if band_cfg.chan_util_scoring[field] == nil then
+                        return string.format("Missing chan_util_scoring.%s for band %s", field, band_name)
+                    end
+                end
+            end
+
+            -- Check support bonuses if present
+            if band_cfg.support_bonuses and not (type(band_cfg.support_bonuses) == "table") then
+                return string.format("Invalid support_bonuses type for band %s, should be a table", band_name)
             end
         end
 
         return nil
+    end
+
+    -- New function to apply band steering configuration
+    local function apply_band_steering_config(ctx, conn, band_configs)
+        local reqs = {}
+
+        if band_configs.log_level then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_log_level' },
+                { band_configs.log_level }
+            ))
+        end
+
+        -- Configure global settings
+        local globals = band_configs.globals or {}
+        if globals.kicking then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_kicking' },
+                {
+                    globals.kicking.kick_mode,
+                    globals.kicking.bandwidth_threshold,
+                    globals.kicking.kicking_threshold,
+                    globals.kicking.evals_before_kick
+                }
+            ))
+        end
+
+        if globals.stations then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_station_counting' },
+                {
+                    globals.stations.use_station_count,
+                    globals.stations.max_station_diff
+                }
+            ))
+        end
+
+        if globals.rrm_mode then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_rrm_mode' },
+                { globals.rrm_mode }
+            ))
+        end
+
+        if globals.neighbor_reports then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_neighbour_reports' },
+                {
+                    globals.neighbor_reports.dyn_report_num,
+                    globals.neighbor_reports.disassoc_report_len
+                }
+            ))
+        end
+
+        if globals.legacy then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_legacy_options' },
+                { globals.legacy }
+            ))
+        end
+
+        -- Configure timing settings
+        local timing = band_configs.timings or {}
+        if timing.updates then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_update_freq' },
+                { timing.updates }
+            ))
+        end
+
+        if timing.inactive_client_kickoff then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_client_inactive_kickoff' },
+                { timing.inactive_client_kickoff }
+            ))
+        end
+
+        if timing.cleanup then
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_cleanup' },
+                { timing.cleanup }
+            ))
+        end
+
+        -- Configure networking settings
+        local networking = band_configs.networking or {}
+        if networking.method then
+            local network_options = {
+                ip = networking.ip,
+                port = networking.port,
+                broadcast_port = networking.broadcast_port,
+                enable_encryption = networking.enable_encryption
+            }
+            reqs[#reqs + 1] = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'set_networking' },
+                { networking.method, network_options }
+            ))
+        end
+
+        -- Configure band-specific settings
+        local bands = band_configs.bands or {}
+        for band_name, band_cfg in pairs(bands) do
+            -- Set band priority
+            if band_cfg.initial_score then
+                reqs[#reqs + 1] = conn:request(new_msg(
+                    { 'hal', 'capability', 'band', '1', 'control', 'set_band_priority' },
+                    { band_name, band_cfg.initial_score }
+                ))
+            end
+
+            -- Set RSSI scoring
+            if band_cfg.rssi_scoring then
+                local rssi_options = {
+                    rssi_center = band_cfg.rssi_scoring.center,
+                    rssi_weight = band_cfg.rssi_scoring.weight,
+                    rssi_reward_threshold = band_cfg.rssi_scoring.good_threshold,
+                    rssi_reward = band_cfg.rssi_scoring.good_reward,
+                    rssi_penalty_threshold = band_cfg.rssi_scoring.bad_threshold,
+                    rssi_penalty = band_cfg.rssi_scoring.bad_penalty
+                }
+                reqs[#reqs + 1] = conn:request(new_msg(
+                    { 'hal', 'capability', 'band', '1', 'control', 'set_band_kicking' },
+                    { band_name, rssi_options }
+                ))
+            end
+
+            -- Set channel utilization scoring
+            if band_cfg.chan_util_scoring then
+                local channel_options = {
+                    channel_util_reward_threshold = band_cfg.chan_util_scoring.good_threshold,
+                    channel_util_reward = band_cfg.chan_util_scoring.good_reward,
+                    channel_util_penalty_threshold = band_cfg.chan_util_scoring.bad_threshold,
+                    channel_util_penalty = band_cfg.chan_util_scoring.bad_penalty
+                }
+                reqs[#reqs + 1] = conn:request(new_msg(
+                    { 'hal', 'capability', 'band', '1', 'control', 'set_band_kicking' },
+                    { band_name, channel_options }
+                ))
+            end
+
+            -- Set support bonuses
+            if band_cfg.support_bonuses then
+                for support_type, bonus in pairs(band_cfg.support_bonuses) do
+                    reqs[#reqs + 1] = conn:request(new_msg(
+                        { 'hal', 'capability', 'band', '1', 'control', 'set_support_bonus' },
+                        { band_name, support_type, bonus }
+                    ))
+                end
+            end
+        end
+
+        fiber.spawn(function()
+            for _, req in ipairs(reqs) do
+                local resp, err = req:next_msg_with_context(ctx)
+                req:unsubscribe()
+                if err or (resp and resp.payload and resp.payload.err) then
+                    log.error(string.format(
+                        "%s - %s: Band steering config error: %s",
+                        ctx:value("service_name"),
+                        ctx:value("fiber_name"),
+                        err or resp.payload.err
+                    ))
+                end
+            end
+
+            -- Apply band steering configuration
+            local req = conn:request(new_msg(
+                { 'hal', 'capability', 'band', '1', 'control', 'apply' }
+            ))
+            local resp, ctx_err = req:next_msg_with_context(ctx)
+            req:unsubscribe()
+            if ctx_err or resp and resp.payload and resp.payload.err then
+                log.error(string.format(
+                    "%s - %s: Band steering apply error: %s",
+                    ctx:value("service_name"),
+                    ctx:value("fiber_name"),
+                    ctx_err or resp.payload.err
+                ))
+            end
+        end)
     end
 
     local function apply_config(config)
@@ -553,6 +846,7 @@ local function radio_manager(ctx, conn)
         local radio_ssids = {}
         for _, ssid_cfg in ipairs(config.ssids) do
             local ssids, err
+            ssid_cfg.has_band_steering = config.band_steering.globals.kicking.kick_mode ~= "none"
             if ssid_cfg.mainflux_path then
                 local base_cfg = {}
                 for k, v in pairs(ssid_cfg) do
@@ -592,87 +886,10 @@ local function radio_manager(ctx, conn)
             end
         end
 
-
-        local band_configs = config.band_steering or {}
-        local globals = band_configs.globals or {}
-        local reqs = {}
-        reqs[#reqs + 1] = conn:request(new_msg(
-            { 'hal', 'capability', 'band', '1', 'control', 'set_kicking' },
-            {
-                globals.kick_mode,
-                globals.bandwidth_threshold,
-                globals.kicking_threshold,
-                globals.evals_before_kick
-            }
-        ))
-
-        local timing = band_configs.timings or {}
-        reqs[#reqs + 1] = conn:request(new_msg(
-            { 'hal', 'capability', 'band', '1', 'control', 'set_update_freq' },
-            { {
-                client = timing.update_client,
-                chan_util = timing.update_chan_util,
-                hostapd = timing.update_hostapd
-            } }
-        ))
-        reqs[#reqs + 1] = conn:request(new_msg(
-            { 'hal', 'capability', 'band', '1', 'control', 'set_client_inactive_kickoff' },
-            { timing.inactive_client_kickoff }
-        ))
-        reqs[#reqs + 1] = conn:request(new_msg(
-            { 'hal', 'capability', 'band', '1', 'control', 'set_client_cleanup' },
-            { timing.client_cleanup }
-        ))
-
-        local bands = band_configs.bands or {}
-        for band_name, band_cfg in pairs(bands) do
-            reqs[#reqs + 1] = conn:request(new_msg(
-                { 'hal', 'capability', 'band', '1', 'control', 'set_band_kicking' },
-                { band_name, {
-                    rssi_center = band_cfg.rssi_center,
-                    reward_threshold = band_cfg.good_rssi_threshold,
-                    reward = band_cfg.good_rssi_reward,
-                    penalty_threshold = band_cfg.bad_rssi_threshold,
-                    penalty = band_cfg.bad_rssi_penalty,
-                    weight = band_cfg.weight
-                } }
-            ))
-            reqs[#reqs + 1] = conn:request(new_msg(
-                { 'hal', 'capability', 'band', '1', 'control', 'set_band_priority' },
-                { band_name, band_cfg.initial_score }
-            ))
+        -- Configure band steering if it exists
+        if config.band_steering then
+            apply_band_steering_config(ctx, conn, config.band_steering)
         end
-
-        fiber.spawn(function()
-            for _, req in ipairs(reqs) do
-                local resp, err = req:next_msg_with_context(ctx)
-                req:unsubscribe()
-                if err or resp and resp.payload and resp.payload.err then
-                    log.error(string.format(
-                        "%s - %s: Band steering config error: %s",
-                        ctx:value("service_name"),
-                        ctx:value("fiber_name"),
-                        err or resp.payload.err
-                    ))
-                    return
-                end
-            end
-
-            local req = conn:request(new_msg(
-                { 'hal', 'capability', 'band', '1', 'control', 'apply' }
-            ))
-            local resp, ctx_err = req:next_msg_with_context(ctx)
-            req:unsubscribe()
-            if ctx_err or resp and resp.payload and resp.payload.err then
-                log.error(string.format(
-                    "%s - %s: Band steering apply error: %s",
-                    ctx:value("service_name"),
-                    ctx:value("fiber_name"),
-                    ctx_err or resp.payload.err
-                ))
-                return
-            end
-        end)
     end
 
     local function handle_config(msg)
