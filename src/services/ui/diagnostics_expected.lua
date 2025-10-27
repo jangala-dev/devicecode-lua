@@ -38,7 +38,6 @@ local GETBOX_PACKAGES_INSTALLED = {
 }
 
 local BIGBOX_SS_PACKAGES_INSTALLED = {
-    "libopenssl",
     "mwan3",
     "rpcd",
     "sqm-scripts",
