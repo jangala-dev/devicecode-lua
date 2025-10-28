@@ -1,7 +1,8 @@
 local GETBOX="getbox"
-local BIGBOX="bigbox-ss"
+local BIGBOX_SS="bigbox-ss"
+local BIGBOX_V1_CM="bigbox-v1-cm"
 
-local getbox_packages_installed = {
+local GETBOX_PACKAGES_INSTALLED = {
     "mwan3",
     "rpcd",
     "sqm-scripts",
@@ -36,263 +37,149 @@ local getbox_packages_installed = {
     "block-mount"
 }
 
--- Put quotes around the package names and remove anything after (hyphen and version)
-local bigbox_packages_installed = {
-    "atinout",
-    "base-files",
-    "bcm27xx-gpu-fw",
-    "bcm27xx-userland",
-    "block-mount",
-    "brcmfmac-firmware-usb",
-    "btrfs-progs",
-    "busybox",
-    "ca-bundle",
-    "curl",
-    "cypress-firmware-sdio",
-    "cypress-nvram",
-    "dbus",
-    "dkjson",
-    "dnsmasq",
-    "dropbear",
-    "e2fsprogs",
-    "fdisk",
-    "firewall4",
-    "fstools",
-    "fwtool",
-    "getrandom",
-    "glib2",
-    "hostapd",
-    "ip",
-    "ip6tables",
-    "ipset",
-    "iptables",
-    "iptables-mod-ipopt",
-    "iptables-nft",
-    "iw",
-    "iwinfo",
-    "jansson4",
-    "jq",
-    "jshn",
-    "jsonfilter",
-    "kernel",
-    "kmod-brcmfmac",
-    "kmod-brcmutil",
-    "kmod-cfg80211",
-    "kmod-crypto-acompress",
-    "kmod-crypto-crc32c",
-    "kmod-crypto-hash",
-    "kmod-fixed-phy",
-    "kmod-fs-btrfs",
-    "kmod-fs-ext4",
-    "kmod-fs-vfat",
-    "kmod-hid",
-    "kmod-hid-generic",
-    "kmod-hwmon-core",
-    "kmod-hwmon-pwmfan",
-    "kmod-hwmon-rpi-poe-fan",
-    "kmod-i2c-core",
-    "kmod-ifb",
-    "kmod-input-core",
-    "kmod-input-evdev",
-    "kmod-ip6tables",
-    "kmod-ipt-conntrack",
-    "kmod-ipt-conntrack-extra",
-    "kmod-ipt-core",
-    "kmod-ipt-ipopt",
-    "kmod-ipt-ipset",
-    "kmod-ipt-raw",
-    "kmod-lib-crc-ccitt",
-    "kmod-lib-crc16",
-    "kmod-lib-crc32c",
-    "kmod-lib-lzo",
-    "kmod-lib-raid6",
-    "kmod-lib-xor",
-    "kmod-lib-zlib-deflate",
-    "kmod-lib-zlib-inflate",
-    "kmod-lib-zstd",
-    "kmod-libphy",
-    "kmod-mii",
-    "kmod-mmc",
-    "kmod-nf-conntrack",
-    "kmod-nf-conntrack6",
-    "kmod-nf-flow",
-    "kmod-nf-ipt",
-    "kmod-nf-ipt6",
-    "kmod-nf-log",
-    "kmod-nf-log6",
-    "kmod-nf-nat",
-    "kmod-nf-reject",
-    "kmod-nf-reject6",
-    "kmod-nfnetlink",
-    "kmod-nft-compat",
-    "kmod-nft-core",
-    "kmod-nft-fib",
-    "kmod-nft-nat",
-    "kmod-nft-offload",
-    "kmod-nls-base",
-    "kmod-nls-cp437",
-    "kmod-nls-iso8859-1",
-    "kmod-nls-utf8",
-    "kmod-phy-microchip",
-    "kmod-ppp",
-    "kmod-pppoe",
-    "kmod-pppox",
-    "kmod-sched-cake",
-    "kmod-sched-core",
-    "kmod-slhc",
-    "kmod-sound-arm-bcm2835",
-    "kmod-sound-core",
-    "kmod-usb-core",
-    "kmod-usb-hid",
-    "kmod-usb-net",
-    "kmod-usb-net-cdc-ether",
-    "kmod-usb-net-cdc-mbim",
-    "kmod-usb-net-cdc-ncm",
-    "kmod-usb-net-lan78xx",
-    "kmod-usb-net-qmi-wwan",
-    "kmod-usb-serial",
-    "kmod-usb-serial-option",
-    "kmod-usb-serial-wwan",
-    "kmod-usb-wdm",
-    "libattr",
-    "libblkid1",
-    "libblobmsg-json",
-    "libc",
-    "libcomerr0",
-    "libconfig11",
-    "libcurl4",
-    "libdbus",
-    "libevdev",
-    "libexpat",
-    "libext2fs2",
-    "libf2fs6",
-    "libfdisk1",
-    "libffi",
-    "libgcc1",
-    "libipset13",
-    "libiptext",
-    "libiptext0",
-    "libiptext6",
-    "libiwinfo-data",
-    "libiwinfo-lua",
-    "libiwinfo20210430",
-    "libjson-c5",
-    "libjson-script",
-    "liblua5.1.5",
-    "liblzo2",
-    "libmbim",
-    "libmnl0",
-    "libmount1",
-    "libncurses6",
-    "libnftnl11",
-    "libnghttp2",
-    "libnl",
-    "libopenssl1.1",
-    "libpcre2",
-    "libpthread",
-    "libqmi",
-    "libqrtr-glib",
-    "librt",
-    "libsmartcols1",
-    "libss2",
-    "libubootenv",
-    "libubox20220515",
-    "libubus-lua",
-    "libubus20220601",
-    "libuci-lua",
-    "libuci20130104",
-    "libuclient20201210",
-    "libucode20220812",
-    "libudev-zero",
-    "libusb",
-    "libustream-wolfssl20201210",
-    "libuuid1",
-    "libwolfssl5.7.2.ee39414e",
-    "libxtables12",
-    "lmdb",
-    "lmdb-test",
-    "logd",
-    "lpeg",
-    "lpeg_patterns",
-    "lua",
-    "lua-basexx",
-    "lua-binaryheap",
-    "lua-bit32",
-    "lua-cjson",
-    "lua-compat53",
-    "lua-cqueues",
-    "lua-fifo",
-    "lua-http",
-    "lua-lumen",
-    "lua-popen3",
-    "luajit",
-    "luaossl",
-    "luaposix",
-    "luasocket",
-    "luci-lib-nixio",
-    "mbim-utils",
-    "mkf2fs",
-    "modemmanager",
-    "mtd",
+local BIGBOX_SS_PACKAGES_INSTALLED = {
     "mwan3",
-    "netifd",
-    "nftables-json",
-    "odhcp6c",
-    "odhcpd",
-    "openwrt-keyring",
-    "opkg",
-    "partx-utils",
-    "ppp",
-    "ppp-mod-pppoe",
-    "procd",
-    "procd-seccomp",
-    "procd-ujail",
-    "qmi-utils",
     "rpcd",
     "sqm-scripts",
-    "swupdate",
-    "tc-tiny",
-    "terminfo",
-    "tree",
-    "ubi-utils",
-    "ubox",
-    "ubus",
-    "ubusd",
-    "uci",
-    "uclient",
-    "ucode",
-    "ucode-mod-fs",
-    "ucode-mod-ubus",
-    "ucode-mod-uci",
-    "uhubctl",
-    "urandom-seed",
+    "lua-lumen",
+    "block-mount",
+    "btrfs-progs",
+    "kmod-fs-ext4",
+    "kmod-fs-btrfs",
+    "fdisk",
+    "modemmanager",
+    "qmi-utils",
+    "mbim-utils",
+    "libqmi",
     "usb-modeswitch",
+    "kmod-mii",
+    "kmod-usb-wdm",
+    "kmod-usb-serial",
+    "kmod-usb-net",
+    "kmod-usb-serial-wwan",
+    "kmod-usb-serial-option",
+    "kmod-usb-net-qmi-wwan",
+    "kmod-usb-net-cdc-mbim",
+    "atinout",
+    "swupdate",
+    "lua",
+    "luasocket",
+    "luaposix",
+    "dkjson",
+    "curl",
+    "lua-bit32",
+    "lua-popen3",
+    "luci-lib-nixio",
+    "luajit",
+    "lua-cjson",
+    "libuci-lua",
+    "libubus-lua",
+    "libiwinfo-lua",
+    "lua-http",
+    "lua-cqueues",
+    "lmdb",
+    "lmdb-test",
+    "lua-compat53",
     "usbutils",
-    "usign",
-    "wireless-regdb",
-    "wpad-basic-wolfssl",
-    "xtables-nft",
-    "zlib",
+    "tree",
+    "uhubctl",
+    "jq",
 }
 
-local getbox_modems = 1
+local BIGBOX_V1_CM_PACKAGES_INSTALLED = {
+    -- Core
+    "mwan3",
+    "rpcd",
+    "sqm-scripts",
 
-local bigbox_modems = 2
+    -- Fan / hardware monitoring
+    "kmod-i2c-core",
 
-local bootstrap_installed = {
+    -- Persistent storage
+    "block-mount",
+    "kmod-fs-ext4",
+    "btrfs-progs",
+    "kmod-fs-btrfs",
+    "fdisk",
+
+    -- Modem / connectivity
+    "modemmanager",
+    "qmi-utils",
+    "mbim-utils",
+    "libqmi",
+    "usb-modeswitch",
+    "kmod-mii",
+    "kmod-usb-wdm",
+    "kmod-usb-serial",
+    "kmod-usb-net",
+    "kmod-usb-serial-wwan",
+    "kmod-usb-serial-option",
+    "kmod-usb-net-qmi-wwan",
+    "kmod-usb-net-cdc-mbim",
+    "atinout",
+
+    -- Wi-Fi support
+    "kmod-mt7915-firmware",
+    "kmod-mt7915e",
+    "pciutils",
+    "dawn",
+    "wpad-mbedtls",
+
+    -- Updater
+    "swupdate",
+
+    -- Lua runtime
+    "lua",
+    "luasocket",
+    "luaposix",
+    "dkjson",
+    "curl",
+    "lua-bit32",
+    "lua-popen3",
+    "luci-lib-nixio",
+    "luajit",
+    "lua-cjson",
+
+    -- Lua bindings
+    "libuci-lua",
+    "libubus-lua",
+    "libiwinfo-lua",
+
+    -- Experimental Lua / internal libs
+    "lua-http",
+    "lua-cqueues",
+    "lmdb",
+    "lmdb-test",
+    "lua-compat53",
+
+    -- Utilities
+    "usbutils",
+    "tree",
+    "uhubctl",
+    "jq",
+
+    -- Bootloader
+    "uboot-envtools",
+}
+
+local GETBOX_MODEMS = 1
+local BIGBOX_SS_MODEMS = 2
+local BIGBOX_V1_CM_MODEMS = 2
+
+local BOOTSTRAP_INSTALLED = {
     "/data/configs/hawkbit.cfg",
     "/data/configs/mainflux.cfg",
     "/data/serial",
 }
 
-local packages_running = {
+local PACKAGES_RUNNING = {
     "ModemManager",
     "main.lua",
     "swupdate",
     "mwan3"
 }
 
-local getbox_services_running = {
+local GETBOX_SERVICES_RUNNING = {
     "dnsmasq",
     "dropbear",
     "log",
@@ -306,7 +193,7 @@ local getbox_services_running = {
     "wpad"
 }
 
-local bigbox_services_running = {
+local BIGBOX_SS_SERVICES_RUNNING = {
     "dnsmasq",
     "dropbear",
     "log",
@@ -319,14 +206,36 @@ local bigbox_services_running = {
     "wpad"
 }
 
-local bigbox_connectivity_tests = {
+local BIGBOX_V1_CM_SERVICES_RUNNING = {
+    "dawn",
+    "dbus",
+    "dnsmasq",
+    "dropbear",
+    "log",
+    "modemmanager",
+    "mwan3",
+    "network",
+    "odhcpd",
+    "rpcd",
+    "sysntpd",
+    "umdns",
+    "wpad"
+}
+
+local BIGBOX_SS_CONNECTIVITY_TESTS = {
     google   = "test_google_connectivity",
     hawkbit  = "test_hawkbit_connectivity",
     mainflux = "test_mainflux_connectivity",
     unifi    = "test_unifi_connectivity",
 }
 
-local getbox_connectivity_tests = {
+local BIGBOX_V1_CM_CONNECTIVITY_TESTS = {
+    google   = "test_google_connectivity",
+    hawkbit  = "test_hawkbit_connectivity",
+    mainflux = "test_mainflux_connectivity",
+}
+
+local GETBOX_CONNECTIVITY_TESTS = {
     google   = "test_google_connectivity",
     hawkbit  = "test_hawkbit_connectivity",
     mainflux = "test_mainflux_connectivity",
@@ -334,9 +243,11 @@ local getbox_connectivity_tests = {
 
 local function get_expected_connectivity_tests(box_type)
     if box_type == GETBOX then
-        return getbox_connectivity_tests, nil
-    elseif box_type == BIGBOX then
-        return bigbox_connectivity_tests, nil
+        return GETBOX_CONNECTIVITY_TESTS, nil
+    elseif box_type == BIGBOX_SS then
+        return BIGBOX_SS_CONNECTIVITY_TESTS, nil
+    elseif box_type == BIGBOX_V1_CM then
+        return BIGBOX_V1_CM_CONNECTIVITY_TESTS, nil
     end
 
     return {}, "Unknown box type: " .. box_type
@@ -348,9 +259,11 @@ end
 ---@return string|nil error
 local function get_expected_packages_installed(box_type)
     if box_type == GETBOX then
-        return getbox_packages_installed, nil
-    elseif box_type == BIGBOX then
-        return bigbox_packages_installed, nil
+        return GETBOX_PACKAGES_INSTALLED, nil
+    elseif box_type == BIGBOX_SS then
+        return BIGBOX_SS_PACKAGES_INSTALLED, nil
+    elseif box_type == BIGBOX_V1_CM then
+        return BIGBOX_V1_CM_PACKAGES_INSTALLED, nil
     else
         return {}, "Unknown box type: " .. box_type
     end
@@ -362,9 +275,11 @@ end
 ---@return string|nil error
 local function get_expected_services_running(box_type)
     if box_type == GETBOX then
-        return getbox_services_running, nil
-    elseif box_type == BIGBOX then
-        return bigbox_services_running, nil
+        return GETBOX_SERVICES_RUNNING, nil
+    elseif box_type == BIGBOX_SS then
+        return BIGBOX_SS_SERVICES_RUNNING, nil
+    elseif box_type == BIGBOX_V1_CM then
+        return BIGBOX_V1_CM_SERVICES_RUNNING, nil
     else
         return {}, "Unknown box type: " .. box_type
     end
@@ -376,17 +291,19 @@ end
 ---@return string|nil error
 local function get_expected_modem_count(box_type)
     if box_type == GETBOX then
-        return getbox_modems, nil
-    elseif box_type == BIGBOX then
-        return bigbox_modems, nil
+        return GETBOX_MODEMS, nil
+    elseif box_type == BIGBOX_SS then
+        return BIGBOX_SS_MODEMS, nil
+    elseif box_type == BIGBOX_V1_CM then
+        return BIGBOX_V1_CM_MODEMS, nil
     else
         return 0, "Unknown box_type: " .. box_type
     end
 end
 
 return {
-    packages_running = packages_running,
-    bootstrap_installed = bootstrap_installed,
+    packages_running = PACKAGES_RUNNING,
+    bootstrap_installed = BOOTSTRAP_INSTALLED,
     get_expected_packages_installed = get_expected_packages_installed,
     get_expected_services_running = get_expected_services_running,
     get_expected_modem_count = get_expected_modem_count,

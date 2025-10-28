@@ -13,8 +13,8 @@ RUN groupadd --gid $USER_GID $USERNAME \
   && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
   && chmod 0440 /etc/sudoers.d/$USERNAME
 
-# Install Node.js 18.x from NodeSource
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - \
+# Install Node.js 22.x from NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - \
   && apt-get install -y nodejs
 
 # [Optional] Clean up
