@@ -2,11 +2,29 @@ local log = require 'services.log'
 local service = require 'service'
 local cjson = require 'cjson.safe'
 local new_msg = require 'bus'.new_msg
+local pow = math.pow or function(base, power)
+    return base ^ power
+end
 
 local mcu_bridge = {
     name = 'mcu_bridge'
 }
 mcu_bridge.__index = mcu_bridge
+
+local UNDERFLOW_THRESHOLD = 1000000 -- threshiold for detection of underflow due to cjson limitations
+
+local function fix_underflows(tbl)
+    for k, value in pairs(tbl) do
+        if type(value) == "number" and value > UNDERFLOW_THRESHOLD then
+            tbl[k] = value - pow(2, 32)
+        end
+    end
+    return tbl
+end
+
+local function trim(str)
+    return str:gsub("^%s*(.-)%s*$", "%1")
+end
 
 local function read_uart_data(ctx)
     local time_to_next_err_log = os.time()
@@ -55,7 +73,8 @@ local function read_uart_data(ctx)
             break
         end
         if msg and msg.payload then
-            local decoded, decode_err = cjson.decode(msg.payload)
+            local json_string = trim(msg.payload)
+            local decoded, decode_err = cjson.decode(json_string)
             -- If pico starts putting out wrong json or the line becomes noisy the logs could be spammed with
             -- decoding errors, therefore I have put a cooldown on
             if decode_err and os.time() >= time_to_next_err_log then
@@ -70,7 +89,8 @@ local function read_uart_data(ctx)
                 err_log_cooldown = 2 * err_log_cooldown
                 err_log_cooldown = (err_log_cooldown > 60) and 60 or err_log_cooldown
             elseif not decode_err then
-                for k, v in pairs(decoded) do
+                local casted = fix_underflows(decoded)
+                for k, v in pairs(casted) do
                     local key_table = { 'mcu' }
                     for segment in string.gmatch(k, "[^/]+") do
                         table.insert(key_table, segment)
