@@ -1113,6 +1113,13 @@ local function shaping_worker(ctx)
     while not ctx:err() do
         local net_cfg = shaping_queue:get()
         if net_cfg.shaping and net_cfg.interfaces then
+            local halt_sub = net_service.conn:request(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'halt_restarts' },
+                {}
+            ))
+            halt_sub:next_msg_with_context(ctx)
+            halt_sub:unsubscribe()
+
             log.trace("NET: Shaping worker got config for:", net_cfg.id)
 
             local ifup_sub = net_service.conn:request(new_msg(
@@ -1121,6 +1128,7 @@ local function shaping_worker(ctx)
             ))
             local ret, ctx_err = ifup_sub:next_msg_with_context(net_service.ctx)
             ifup_sub:unsubscribe()
+
             if ctx_err or ret.payload.err then
                 log.error(string.format(
                     "%s - %s: Failed to bring up network %s: %s",
@@ -1140,20 +1148,14 @@ local function shaping_worker(ctx)
                     net_service.ctx:value("fiber_name"),
                     net_cfg.id
                 ))
-                -- halt any config restarts from happening during shaping
-                local halt_sub = net_service.conn:request(new_msg(
-                    { 'hal', 'capability', 'uci', '1', 'control', 'halt_restarts' },
-                    {}
-                ))
-                halt_sub:next_msg_with_context(ctx)
-                halt_sub:unsubscribe()
+
                 shaping.apply(net_cfg)
-                -- allow config restarts to take place
-                net_service.conn:publish(new_msg(
-                    { 'hal', 'capability', 'uci', '1', 'control', 'continue_restarts' },
-                    {}
-                ))
             end
+
+            net_service.conn:publish(new_msg(
+                { 'hal', 'capability', 'uci', '1', 'control', 'continue_restarts' },
+                {}
+            ))
         end
     end
 end
