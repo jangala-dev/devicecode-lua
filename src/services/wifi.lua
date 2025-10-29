@@ -246,9 +246,10 @@ function Radio:remove_ssids()
 end
 
 function Radio:_report_metrics(ctx, conn)
-    local radio_band = self.band_ch:get()[1] -- wait for radio configs to give radio band
-    local hw_platform = 1            -- hardcoded for now, do we really need this?
-    local radio_band_idx = 1         -- hardcoded for now
+    local radio_band = string.sub(self.band_ch:get(), 1, 1) -- wait for radio configs to give radio band,
+    -- get integer part only e.g. 2g -> 2
+    local hw_platform = 1                                   -- hardcoded for now, do we really need this?
+    local radio_band_idx = 1                                -- hardcoded for now
     local interface_info_endpoints = {
         power = { 'txpower' },
         channel = { 'channel', 'chan' },
@@ -283,7 +284,7 @@ function Radio:_report_metrics(ctx, conn)
     }
     local client_info_subs = {}
     for key, topic in pairs(client_info_endpoints) do
-        client_info_subs[key] = conn:subscribe({
+        local tokens = {
             'hal',
             'capability',
             'wireless',
@@ -294,7 +295,8 @@ function Radio:_report_metrics(ctx, conn)
             'client',
             '+',
             unpack(topic)
-        })
+        }
+        client_info_subs[key] = conn:subscribe(tokens)
     end
     local client_session_ids = {}
     local client_sub = conn:subscribe({
@@ -312,7 +314,7 @@ function Radio:_report_metrics(ctx, conn)
     local function handle_client_event(msg)
         if msg and msg.payload then
             local client = msg.payload
-            local mac = msg.topic[#msg.topic - 1]
+            local mac = msg.topic[#msg.topic]
             local client_hash = gen.userid(mac)
             local session_id = client_session_ids[client_hash]
             local key = client.connected and "session_start" or "session_end"
@@ -345,6 +347,23 @@ function Radio:_report_metrics(ctx, conn)
         end
     end
 
+    local function handle_interface_info(key, msg)
+        if msg and msg.payload then
+            local topic = {
+                'wifi',
+                'hp',
+                tostring(hw_platform),
+                'rd' .. tostring(radio_band),
+                tostring(radio_band_idx),
+                key
+            }
+            conn:publish(new_msg(
+                topic,
+                msg.payload
+            ))
+        end
+    end
+
     log.info(string.format(
         "%s - %s: Radio %s metrics reporting started",
         ctx:value("service_name"),
@@ -354,28 +373,13 @@ function Radio:_report_metrics(ctx, conn)
 
     while not ctx:err() do
         local ops = { ctx:done_op() }
-        ops[#ops + 1] = self.band_ch:get_op():wrap(function(band) radio_band = band[1] end)
+        ops[#ops + 1] = self.band_ch:get_op():wrap(function(band) radio_band = string.sub(band, 1, 1) end)
         ops[#ops + 1] = client_sub:next_msg_op():wrap(handle_client_event)
         for key, sub in pairs(client_info_subs) do
             ops[#ops + 1] = sub:next_msg_op():wrap(function(msg) handle_client_info(key, msg) end)
         end
         for key, sub in pairs(interface_info_subs) do
-            ops[#ops + 1] = sub:next_msg_op():wrap(function(msg)
-                if msg and msg.payload then
-                    local topic = {
-                        'wifi',
-                        'hp',
-                        tostring(hw_platform),
-                        'rd' .. tostring(radio_band),
-                        tostring(radio_band_idx),
-                        key
-                    }
-                    conn:publish(new_msg(
-                        topic,
-                        msg.payload
-                    ))
-                end
-            end)
+            ops[#ops + 1] = sub:next_msg_op():wrap(function(msg) handle_interface_info(key, msg) end)
         end
         op.choice(unpack(ops)):perform()
     end
@@ -401,7 +405,7 @@ function Radio.new(ctx, conn, index)
         string.format('Radio %s Metrics', self.index),
         conn,
         ctx,
-        function (fctx)
+        function(fctx)
             self:_report_metrics(fctx, conn)
         end
     )
