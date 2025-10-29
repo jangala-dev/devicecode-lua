@@ -582,7 +582,7 @@ function WirelessDriver:_report_metrics(ctx)
                         endpoints = "single",
                         info = {
                             connected = event.connected,
-                            timestamp = sc.monotime()
+                            timestamp = sc.realtime()
                         }
                     })
                 end
