@@ -521,19 +521,19 @@
     ],
     "ssids": [
       {
-        "name": "Jangala",
+        "mainflux_path": "config/mainflux",
+        "encryption": "psk2",
         "mode": "access_point",
-        "encryption": "none",
-        "network": "jan",
         "radios": [
           "radio0",
           "radio1"
         ]
       },
       {
-        "mainflux_path": "config/mainflux",
-        "encryption": "psk2",
+        "name": "Jangala",
         "mode": "access_point",
+        "encryption": "none",
+        "network": "jan",
         "radios": [
           "radio0",
           "radio1"
@@ -2147,6 +2147,206 @@
           {
             "type": "DiffTrigger",
             "diff_method": "any-change"
+          }
+        ]
+      },
+      "wifi/clients/+/sessions/+/session_start": {
+        "protocol": "http",
+        "process": []
+      },
+      "wifi/clients/+/sessions/+/session_end": {
+        "protocol": "http",
+        "process": []
+      },
+      "wifi/clients/+/sessions/+/rx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/clients/+/sessions/+/tx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/clients/+/sessions/+/signal": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "wifi/clients/+/sessions/+/noise": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 10,
+            "initial_val": 0
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/power": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 10,
+            "initial_val": 0
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/channel": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/noise": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 10,
+            "initial_val": 0
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/rx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/rx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/rx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/rx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/tx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/tx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/tx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/tx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
           }
         ]
       }
