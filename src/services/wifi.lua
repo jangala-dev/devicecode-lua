@@ -152,7 +152,7 @@ end
 
 function Radio:apply_ssids(ssid_configs)
     fiber.spawn(function()
-        for _, ssid in ipairs(ssid_configs) do
+        for i, ssid in ipairs(ssid_configs) do
             local req = self.conn:request(new_msg(
                 { 'hal', 'capability', 'wireless', self.index, 'control', 'add_interface' },
                 {
@@ -166,6 +166,7 @@ function Radio:apply_ssids(ssid_configs)
                     }
                 }
             ))
+            self.interface_ch:put({ name = ssid.name, index = i })
             local resp, err = req:next_msg_with_context(self.ctx)
             req:unsubscribe()
             if err or resp and resp.payload and resp.payload.err then
@@ -249,7 +250,10 @@ function Radio:_report_metrics(ctx, conn)
     local radio_band = string.sub(self.band_ch:get(), 1, 1) -- wait for radio configs to give radio band,
     -- get integer part only e.g. 2g -> 2
     local hw_platform = 1                                   -- hardcoded for now, do we really need this?
-    local radio_band_idx = 1                                -- hardcoded for now
+    local radio_interface_indexes = {
+        by_ssid = {},
+        by_phy = {}
+    }
     local interface_info_endpoints = {
         power = { 'txpower' },
         channel = { 'channel', 'chan' },
@@ -311,6 +315,17 @@ function Radio:_report_metrics(ctx, conn)
         '+'
     })
 
+    local interface_ssid_sub = conn:subscribe({
+        'hal',
+        'capability',
+        'wireless',
+        self.index,
+        'info',
+        'interface',
+        '+',
+        'ssid'
+    })
+
     local function handle_client_event(msg)
         if msg and msg.payload then
             local client = msg.payload
@@ -349,18 +364,28 @@ function Radio:_report_metrics(ctx, conn)
 
     local function handle_interface_info(key, msg)
         if msg and msg.payload then
+            local interface = msg.topic[7]
+            if not radio_interface_indexes.by_phy[interface] then return end
+            local interface_index = radio_interface_indexes.by_phy[interface]
             local topic = {
                 'wifi',
                 'hp',
                 tostring(hw_platform),
                 'rd' .. tostring(radio_band),
-                tostring(radio_band_idx),
+                tostring(interface_index),
                 key
             }
             conn:publish(new_msg(
                 topic,
                 msg.payload
             ))
+        end
+    end
+
+    local function handle_interface_ssid(msg)
+        if not msg.payload then return end
+        if radio_interface_indexes.by_ssid[msg.payload] and (not radio_interface_indexes.by_phy[msg.topic[7]]) then
+            radio_interface_indexes.by_phy[msg.topic[7]] = radio_interface_indexes.by_ssid[msg.payload]
         end
     end
 
@@ -374,6 +399,10 @@ function Radio:_report_metrics(ctx, conn)
     while not ctx:err() do
         local ops = { ctx:done_op() }
         ops[#ops + 1] = self.band_ch:get_op():wrap(function(band) radio_band = string.sub(band, 1, 1) end)
+        ops[#ops + 1] = self.interface_ch:get_op():wrap(function (interface)
+            radio_interface_indexes.by_ssid[interface.name] = interface.index
+        end)
+        ops[#ops + 1] = interface_ssid_sub:next_msg_op():wrap(handle_interface_ssid)
         ops[#ops + 1] = client_sub:next_msg_op():wrap(handle_client_event)
         for key, sub in pairs(client_info_subs) do
             ops[#ops + 1] = sub:next_msg_op():wrap(function(msg) handle_client_info(key, msg) end)
@@ -399,6 +428,7 @@ function Radio.new(ctx, conn, index)
     self.conn = conn
     self.index = index
     self.band_ch = channel.new()
+    self.interface_ch = channel.new()
     self.ssids = {}
 
     service.spawn_fiber(
