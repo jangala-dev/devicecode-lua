@@ -484,7 +484,7 @@ function WirelessDriver:_monitor_clients(ctx)
                         ))
                         op.choice(
                             self.client_event_queue:put_op({
-                                connected = event == "new" and true or false,
+                                connected = (event == "new"),
                                 interface = iface,
                                 mac = mac
                             }),
