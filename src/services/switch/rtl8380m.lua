@@ -1,5 +1,6 @@
 local cjson = require "cjson.safe"
 local socket = require "cqueues.socket"
+local sleep = require "fibers.sleep"
 local basexx = require "basexx"
 local exec = require "fibers.exec"
 
@@ -66,14 +67,11 @@ local function get_cgi_json(host, cmd, use_dummy)
     end
 
     local s, err = socket.connect(host, PORT)
-    if not s then return nil, "connect failed: " .. tostring(err) end
-
-    local ok, cerr = s:connect(DEFAULT_TIMEOUT)
-    if not ok then
-        s:close()
-        return nil, "connection timeout: " .. tostring(cerr)
+    if not s then
+        return nil, "connect failed: " .. tostring(err)
     end
 
+    s:settimeout(DEFAULT_TIMEOUT)
     s:setmode("b", "b")
 
     local req = build_request("GET", path, host, {})
@@ -101,12 +99,7 @@ local function post_cgi_json(host, path, payload, headers)
     local s, err = socket.connect(host, PORT)
     if not s then return nil, "connect failed: " .. tostring(err) end
 
-    local ok, cerr = s:connect(DEFAULT_TIMEOUT)
-    if not ok then
-        s:close()
-        return nil, "connection timeout: " .. tostring(cerr)
-    end
-
+    s:settimeout(DEFAULT_TIMEOUT)
     s:setmode("b", "b")
 
     local req = build_request("POST", path, host, headers, payload)
@@ -261,26 +254,25 @@ end
 
 -- TODO: handle unable to auth
 local function login(host, username, password)
-    authenticate_user(host, username, password)
-    local success
+    local _, err = authenticate_user(host, username, password)
 
-    while true do
+    if err then return false, err end
+
+    local tries = 0
+    local max_tries = 10
+
+    while tries < max_tries do
         local status, err = get_login_status(host)
 
-        if err then
-            return false, err
-        end
+        if err then return false, err end
+        if status == "ok" then return true end
+        if status == "fail" then return false, "login failed incorrect credentials" end
 
-        if status == "ok" then
-            success = true
-            break
-        elseif status == "fail" then
-            success = false
-            break
-        end
+        tries = tries + 1
+        sleep.sleep(1)
     end
 
-    return success, nil
+    return false, "login timeout"
 end
 
 local function get_stats(host)
