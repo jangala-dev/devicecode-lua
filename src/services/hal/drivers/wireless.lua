@@ -536,6 +536,11 @@ local function get_iface_stats(ctx, interface)
         end
     end
 
+    local noise, noise_err = iw.get_dev_noise(ctx, interface)
+    if not noise_err then
+        stats["noise"] = noise
+    end
+
     return stats
 end
 
