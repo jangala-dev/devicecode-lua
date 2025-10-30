@@ -2169,8 +2169,8 @@
   "switch": {
     "report_period": 10,
     "host": "172.28.100.9",
-    "username": "admin",
-    "password": "admin",
+    "username": "$SWITCH_USERNAME",
+    "password": "$SWITCH_PASSWORD",
     "type": "rtl8380m"
   }
 }
