@@ -50,7 +50,7 @@ local function format_iw_dev_info(raw_output)
             -- Next line should contain headers
             if i + 1 <= #lines then
                 local headers = {}
-                for header in lines[i+1]:gsub("^%s+", ""):gmatch("%S+") do
+                for header in lines[i + 1]:gsub("^%s+", ""):gmatch("%S+") do
                     table.insert(headers, header)
                 end
 
@@ -58,7 +58,7 @@ local function format_iw_dev_info(raw_output)
                 if i + 2 <= #lines then
                     -- Parse the line once and extract all values
                     local values = {}
-                    for value in lines[i+2]:gsub("^%s+", ""):gmatch("%S+") do
+                    for value in lines[i + 2]:gsub("^%s+", ""):gmatch("%S+") do
                         table.insert(values, value)
                     end
 
@@ -71,7 +71,7 @@ local function format_iw_dev_info(raw_output)
                 end
                 i = i + 2 -- Skip the headers and values lines
             end
-        -- Handle regular key-value pairs
+            -- Handle regular key-value pairs
         else
             if line:match("%s*ifindex%s+(%d+)") then
                 result.ifindex = tonumber(line:match("%s*ifindex%s+(%d+)"))
@@ -119,30 +119,30 @@ local function format_iw_client_info(raw_output)
                 if key == "associated_at_[boottime]" then
                     local boottime = value:match("(%d+%.%d+)s")
                     result["associated_at_boottime"] = tonumber(boottime)
-                -- Handle bitrates (e.g. "6.0 MBit/s")
+                    -- Handle bitrates (e.g. "6.0 MBit/s")
                 elseif value:match("^%-?%d+%.%d+%s+%w+/s$") then
                     local num, unit = value:match("^(%-?%d+%.%d+)%s+(.+)")
                     result[key] = tonumber(num)
-                    result[key.."_unit"] = unit
-                -- Handle signal with range (e.g. "-33 [-36, -35] dBm")
+                    result[key .. "_unit"] = unit
+                    -- Handle signal with range (e.g. "-33 [-36, -35] dBm")
                 elseif value:match("^%-?%d+%s+%[") then
                     local main = value:match("^(%-?%d+)")
                     result[key] = tonumber(main)
-                -- Handle values with units (e.g. "1390 ms")
+                    -- Handle values with units (e.g. "1390 ms")
                 elseif value:match("^%-?%d+%s+%w+$") then
                     local num, unit = value:match("^(%-?%d+)%s+(.+)")
                     result[key] = tonumber(num)
-                    result[key.."_unit"] = unit
-                -- Handle integer values
+                    result[key .. "_unit"] = unit
+                    -- Handle integer values
                 elseif value:match("^%-?%d+$") then
                     result[key] = tonumber(value)
-                -- Handle boolean-like values
+                    -- Handle boolean-like values
                 elseif value == "yes" or value == "no" then
                     result[key] = value
-                -- Handle associated timestamp
+                    -- Handle associated timestamp
                 elseif key == "associated_at" or key == "current_time" then
                     result[key] = tonumber(value:match("(%d+)"))
-                -- Default case: keep as string
+                    -- Default case: keep as string
                 else
                     result[key] = value
                 end
@@ -171,8 +171,35 @@ local function get_net_statistic(interface, statistic)
     return num, nil
 end
 
+local function parse_dev_noise(raw_output)
+    if not raw_output or raw_output == "" then
+        return nil, "No input provided"
+    end
+
+    local in_use_section = false
+
+    for line in raw_output:gmatch("[^\r\n]+") do
+        if not in_use_section then
+            if line:find("%[in use%]") then
+                in_use_section = true
+            end
+        else
+            if line:find("noise:") then
+                local value = line:match("noise:%s*([%-]?%d+%.?%d*)")
+                if value then
+                    return tonumber(value), nil
+                end
+                return nil, "Noise value missing"
+            end
+        end
+    end
+
+    return nil, "Noise value not found"
+end
+
 return {
     format_iw_dev_info = format_iw_dev_info,
     format_iw_client_info = format_iw_client_info,
     get_net_statistic = get_net_statistic,
+    parse_dev_noise = parse_dev_noise
 }
