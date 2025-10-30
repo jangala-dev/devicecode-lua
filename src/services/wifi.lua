@@ -286,7 +286,6 @@ function Radio:_report_metrics(ctx, conn)
         tx_bytes = { 'tx_bytes' },
         rx_bytes = { 'rx_bytes' },
         signal = { 'signal' },
-        noise = { 'noise' },
         hostname = { 'hostname' }
     }
     local client_info_subs = {}
