@@ -247,6 +247,8 @@ function Radio:remove_ssids()
 end
 
 function Radio:_report_metrics(ctx, conn)
+    local total_num_sta = 0
+    local interfaces_num_sta = {}
     local radio_band = string.sub(self.band_ch:get(), 1, 1) -- wait for radio configs to give radio band,
     -- get integer part only e.g. 2g -> 2
     local hw_platform = 1                                   -- hardcoded for now, do we really need this?
@@ -341,6 +343,28 @@ function Radio:_report_metrics(ctx, conn)
             else
                 client_session_ids[client_hash] = nil
             end
+
+            local interface = msg.topic[7]
+            local interface_idx = radio_interface_indexes.by_phy[interface]
+            if interface_idx then
+                if not interfaces_num_sta[interface_idx] then
+                    interfaces_num_sta[interface_idx] = 0
+                end
+                local interface_num_sta = interfaces_num_sta[interface_idx]
+                local num_change = client.connected and 1 or -1
+                total_num_sta = total_num_sta + num_change
+
+                interface_num_sta = interface_num_sta + num_change
+                conn:publish(new_msg(
+                    { 'wifi', 'hp', tostring(hw_platform), 'num_sta' },
+                    total_num_sta
+                ))
+                conn:publish(new_msg(
+                    { 'wifi', 'hp', tostring(hw_platform), 'rd' .. tostring(radio_band), interface_idx, 'num_sta' },
+                    interface_num_sta
+                ))
+                interfaces_num_sta[interface_idx] = interface_num_sta
+            end
             conn:publish(new_msg(
                 { 'wifi', 'clients', client_hash, 'sessions', session_id, key },
                 client.timestamp
@@ -399,7 +423,7 @@ function Radio:_report_metrics(ctx, conn)
     while not ctx:err() do
         local ops = { ctx:done_op() }
         ops[#ops + 1] = self.band_ch:get_op():wrap(function(band) radio_band = string.sub(band, 1, 1) end)
-        ops[#ops + 1] = self.interface_ch:get_op():wrap(function (interface)
+        ops[#ops + 1] = self.interface_ch:get_op():wrap(function(interface)
             radio_interface_indexes.by_ssid[interface.name] = interface.index
         end)
         ops[#ops + 1] = interface_ssid_sub:next_msg_op():wrap(handle_interface_ssid)
@@ -1002,6 +1026,21 @@ local function radio_manager(ctx, conn)
         apply_config(config)
     end
 
+    local num_sta = 0
+    local function handle_client(msg)
+        if not msg or not msg.payload then return end
+        local connected = msg.payload.connected
+        local sta_change = connected and 1 or -1
+        print("sta_change:", sta_change)
+        num_sta = num_sta + sta_change
+        print("num_sta:", num_sta)
+        conn:publish(new_msg(
+            { 'wifi', 'num_sta' },
+            num_sta
+        ))
+    end
+
+
     local band_sub = conn:subscribe({ 'hal', 'capability', 'band', '+' })
     band_sub:next_msg_with_context(ctx) -- wait for band driver to be initialised
     band_sub:unsubscribe()
@@ -1013,12 +1052,14 @@ local function radio_manager(ctx, conn)
     ))
 
     local config_sub = conn:subscribe({ 'config', 'wifi' })
+    local client_sub = conn:subscribe({ 'hal', 'capability', 'wireless', '+', 'info', 'interface', '+', 'client', '+' })
     while not ctx:err() do
         op.choice(
             wifi_service.radio_add_queue:get_op():wrap(add_radio),
             wifi_service.radio_remove_queue:get_op():wrap(remove_radio),
             wifi_service.config_queue:get_op():wrap(handle_config),
             config_sub:next_msg_op():wrap(handle_config),
+            client_sub:next_msg_op():wrap(handle_client),
             ctx:done_op()
         ):perform()
     end
