@@ -1031,9 +1031,7 @@ local function radio_manager(ctx, conn)
         if not msg or not msg.payload then return end
         local connected = msg.payload.connected
         local sta_change = connected and 1 or -1
-        print("sta_change:", sta_change)
         num_sta = num_sta + sta_change
-        print("num_sta:", num_sta)
         conn:publish(new_msg(
             { 'wifi', 'num_sta' },
             num_sta
