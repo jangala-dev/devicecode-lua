@@ -595,6 +595,12 @@ function WirelessDriver:_report_metrics(ctx)
                     interfaces[event.interface][event.mac] = true
                     local client_info, client_err = iw.get_client_info(ctx, event.interface, event.mac)
                     if not client_err then
+                        -- Try to get hostname for the client
+                        local hostname, hostname_err = utils.get_hostname(ctx, event.mac)
+                        if hostname and not hostname_err then
+                            client_info.hostname = hostname
+                        end
+
                         self.info_q:put({
                             type = "wireless",
                             id = self.name,

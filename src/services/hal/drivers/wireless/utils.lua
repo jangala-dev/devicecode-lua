@@ -1,4 +1,5 @@
 local file = require "fibers.stream.file"
+local exec = require "fibers.exec"
 
 local function extract_channel(line)
     local chan, freq, width, center1 = line:match(
@@ -197,9 +198,45 @@ local function parse_dev_noise(raw_output)
     return nil, "Noise value not found"
 end
 
+--- Get the hostname for a MAC address by searching DHCP lease files
+--- @param ctx Context The context for this operation (for cancellation)
+--- @param mac_address string The MAC address to look up
+--- @return string? hostname The hostname if found
+--- @return string? error Error message if any
+local function get_hostname(ctx, mac_address)
+    -- Find all DHCP lease files using command_context
+    local cmd = exec.command_context(ctx, "sh", "-c", "ls /tmp/dhcp.* 2>/dev/null")
+    local output, err = cmd:output()
+
+    if err or not output or output == "" then
+        return nil, nil  -- No DHCP lease files found, not an error
+    end
+
+    -- Search each DHCP lease file
+    for dhcp_lease_file in string.gmatch(output, "%S+") do
+        local filedata, file_err = file.open(dhcp_lease_file, "r")
+        if not file_err then
+            local content, content_err = filedata:read_all_chars()
+            filedata:close()
+
+            if not content_err and content then
+                for line in string.gmatch(content, "[^\n]+") do
+                    local _, mac, _, hostname = string.match(line, "(%S+)%s+(%S+)%s+(%S+)%s+(%S+)")
+                    if mac and hostname and mac == mac_address then
+                        return hostname, nil
+                    end
+                end
+            end
+        end
+    end
+
+    return nil, nil  -- Not found, but not an error
+end
+
 return {
     format_iw_dev_info = format_iw_dev_info,
     format_iw_client_info = format_iw_client_info,
     get_net_statistic = get_net_statistic,
-    parse_dev_noise = parse_dev_noise
+    parse_dev_noise = parse_dev_noise,
+    get_hostname = get_hostname
 }

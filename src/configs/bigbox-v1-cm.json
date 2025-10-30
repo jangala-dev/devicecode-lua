@@ -2158,6 +2158,15 @@
         "protocol": "http",
         "process": []
       },
+      "wifi/clients/+/sessions/+/hostname": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
       "wifi/clients/+/sessions/+/rx_bytes": {
         "protocol": "http",
         "process": [
