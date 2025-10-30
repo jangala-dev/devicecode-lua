@@ -2349,6 +2349,36 @@
             "type": "DeltaValue"
           }
         ]
+      },
+      "wifi/hp/+/+/+/num_sta": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "wifi/num_sta": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "wifi/hp/+/num_sta": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
       }
     }
   },
