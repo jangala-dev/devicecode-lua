@@ -1149,7 +1149,21 @@ local function shaping_worker(ctx)
                     net_cfg.id
                 ))
 
-                shaping.apply(net_cfg)
+                local iface = (net_cfg.type == "local" and net_cfg.is_bridge)
+                    and ("br-" .. net_cfg.id)
+                    or net_cfg.interfaces[1]
+                local f = io.open("/sys/class/net/" .. iface, "r")
+
+                if f then
+                    f:close()
+                    shaping.apply(net_cfg)
+                else
+                    log.warn("NET: Interface " .. iface .. " not yet ready; retrying shaping later")
+                    fiber.spawn(function()
+                        sleep.sleep(2)
+                        shaping_queue:put(net_cfg)
+                    end)
+                end
             end
 
             net_service.conn:publish(new_msg(
