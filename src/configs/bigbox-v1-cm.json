@@ -2205,17 +2205,6 @@
           }
         ]
       },
-      "wifi/clients/+/sessions/+/noise": {
-        "protocol": "http",
-        "process": [
-          {
-            "type": "DiffTrigger",
-            "diff_method": "percent",
-            "threshold": 10,
-            "initial_val": 0
-          }
-        ]
-      },
       "wifi/hp/+/+/+/power": {
         "protocol": "http",
         "process": [

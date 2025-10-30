@@ -82,7 +82,8 @@ Available client metrics:
 - `rx_bytes` - Bytes received from client
 - `tx_bytes` - Bytes transmitted to client
 - `signal` - Client signal strength (dBm)
-- `noise` - Client noise level (dBm)
+
+**Note**: Client noise is not reported separately as it duplicates the interface-level noise metric.
 
 Client sessions are identified by a hash of the client's MAC address and a unique session ID generated when the client connects.
 

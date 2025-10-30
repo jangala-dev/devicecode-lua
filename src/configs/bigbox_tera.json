@@ -13,10 +13,6 @@
           "radio1": {
             "type": "mac80211",
             "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1"
-          },
-          "radio2": {
-            "type": "mac80211",
-            "path": "platform/axi/1001100000.mmc/mmc_host/mmc1/mmc1:0001/mmc1:0001:1"
           }
         }
       },
@@ -24,7 +20,7 @@
         "serial_ports": [
           {
             "name": "uart0",
-            "path": "/dev/ttyACM0"
+            "path": "/dev/ttyAMA0"
           }
         ]
       }
@@ -77,9 +73,27 @@
     },
     "network": [
       {
+        "name": "Loopback",
+        "id": "loopback",
+        "type": "local",
+        "interfaces": [
+          "lo"
+        ],
+        "ipv4": {
+          "proto": "static",
+          "ip_address": "127.0.0.1",
+          "netmask": "255.0.0.0"
+        },
+        "dns_server": {
+          "local_server": true,
+          "default_hosts": []
+        }
+      },
+      {
         "name": "Admin Network",
         "id": "adm",
         "type": "local",
+        "is_bridge": true,
         "interfaces": [
           "eth0.8"
         ],
@@ -107,6 +121,7 @@
         "name": "Jangala Network",
         "id": "jan",
         "type": "local",
+        "is_bridge": true,
         "interfaces": [
           "eth0.32"
         ],
@@ -197,6 +212,7 @@
         "name": "Internal Network",
         "id": "int",
         "type": "local",
+        "is_bridge": true,
         "interfaces": [
           "eth0.100"
         ],
@@ -210,12 +226,7 @@
           "range_extent": "240",
           "lease_time": "12h"
         },
-        "dns_server": {
-          "servers": [
-            "8.8.8.8",
-            "1.1.1.1"
-          ]
-        },
+        "dns_server": {},
         "firewall": {
           "zone": "lan"
         },
@@ -482,7 +493,7 @@
     ]
   },
   "wifi": {
-    "report_period": 60,
+    "report_period": 10,
     "radios": [
       {
         "name": "radio0",
@@ -494,23 +505,17 @@
           "11"
         ],
         "country": "GB",
-        "htmode": "HT20",
+        "htmode": "HE20",
         "txpower": "20",
         "disabled": false
       },
       {
         "name": "radio1",
         "band": "5g",
-        "channel": "auto",
-        "channels": [
-          "36",
-          "40",
-          "44",
-          "48"
-        ],
+        "channel": "36",
         "country": "GB",
-        "htmode": "HT20",
-        "txpower": "20",
+        "htmode": "HE80",
+        "txpower": "23",
         "disabled": false
       }
     ],
@@ -536,33 +541,96 @@
       }
     ],
     "band_steering": {
+      "log_level": 2,
       "globals": {
-        "kick_mode": "both",
-        "bandwidth_threshold": 6,
-        "kicking_threshold": 10,
-        "evals_before_kick": 3
+        "rrm_mode": "PAT",
+        "kicking": {
+          "kick_mode": "both",
+          "bandwidth_threshold": 0,
+          "kicking_threshold": 15,
+          "evals_before_kick": 3
+        },
+        "stations": {
+          "use_station_count": false,
+          "max_station_diff": 1
+        },
+        "neighbor_reports": {
+          "dyn_report_num": 2,
+          "disassoc_report_len": 6
+        },
+        "legacy": {
+          "eval_probe_req": true,
+          "eval_assoc_req": false,
+          "eval_auth_req": false,
+          "min_probe_count": 2,
+          "deny_auth_reason": 1,
+          "deny_assoc_reason": 17
+        }
       },
       "timings": {
-        "update_client": 10,
-        "update_chan_util": 5,
-        "update_hostapd": 10,
-        "client_cleanup": 15,
+        "updates": {
+          "client": 10,
+          "chan_util": 5,
+          "beacon_reports": 5,
+          "hostapd": 10,
+          "tcp_con": 10
+        },
+        "cleanup": {
+          "client": 15,
+          "probe": 40,
+          "ap": 460
+        },
         "inactive_client_kickoff": 60
+      },
+      "networking": {
+        "method": "tcp+umdns",
+        "ip": "0.0.0.0",
+        "port": 1026,
+        "broadcast_port": 1025,
+        "enable_encryption": false
       },
       "bands": {
         "2g": {
-          "initial_score": 80,
-          "good_rssi_threshold": -50,
-          "good_rssi_reward": 15,
-          "bad_rssi_threshold": -75,
-          "bad_rssi_penalty": -15
+          "initial_score": 90,
+          "rssi_scoring": {
+            "center": "-69",
+            "weight": 2,
+            "good_threshold": "-66",
+            "good_reward": 12,
+            "bad_threshold": "-75",
+            "bad_penalty": "-15"
+          },
+          "chan_util_scoring": {
+            "good_threshold": 140,
+            "good_reward": 5,
+            "bad_threshold": 170,
+            "bad_penalty": "-20"
+          },
+          "support_bonuses": {
+            "vht": 5,
+            "ht": 5
+          }
         },
         "5g": {
-          "initial_score": 100,
-          "good_rssi_threshold": -50,
-          "good_rssi_reward": 15,
-          "bad_rssi_threshold": -75,
-          "bad_rssi_penalty": -15
+          "initial_score": 95,
+          "rssi_scoring": {
+            "center": "-64",
+            "weight": 4,
+            "good_threshold": "-62",
+            "good_reward": 10,
+            "bad_threshold": "-70",
+            "bad_penalty": "-28"
+          },
+          "chan_util_scoring": {
+            "good_threshold": 140,
+            "good_reward": 5,
+            "bad_threshold": 170,
+            "bad_penalty": "-20"
+          },
+          "support_bonuses": {
+            "vht": 2,
+            "ht": 2
+          }
         }
       }
     }
@@ -588,6 +656,27 @@
       ]
     }
   },
+  "bridge": {
+    "sources": [
+      {
+        "name": "pico_mcu",
+        "type": "uart",
+        "capability_id": "uart0",
+        "options": {
+          "baudrate": 115200
+        }
+      }
+    ],
+    "connections": [
+      {
+        "source": "pico_mcu",
+        "topic": "power/#",
+        "direction": "in",
+        "local_prefix": "cm",
+        "remote_prefix": "mcu"
+      }
+    ]
+  },
   "metrics": {
     "cloud_url": "$CLOUD_URL",
     "publish_cache": {
@@ -595,10 +684,6 @@
       "period": 60
     },
     "collections": {
-      "hal/capability/wireless/#": {
-        "protocol": "log",
-        "process": []
-      },
       "net/adm/rx_bytes": {
         "protocol": "http",
         "process": [
@@ -1741,12 +1826,234 @@
             "threshold": 2
           }
         ]
+      },
+      "wifi/clients/+/sessions/+/session_start": {
+        "protocol": "http",
+        "process": []
+      },
+      "wifi/clients/+/sessions/+/session_end": {
+        "protocol": "http",
+        "process": []
+      },
+      "wifi/clients/+/sessions/+/rx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/clients/+/sessions/+/tx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/clients/+/sessions/+/signal": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/power": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 10,
+            "initial_val": 0
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/channel": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/noise": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 10,
+            "initial_val": 0
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/rx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/rx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/rx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/rx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/tx_bytes": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/tx_packets": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/tx_dropped": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/tx_errors": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": 5,
+            "initial_val": 0
+          },
+          {
+            "type": "DeltaValue"
+          }
+        ]
+      },
+      "wifi/hp/+/+/+/num_sta": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": "5",
+            "initial_val": 0
+          }
+        ]
+      },
+      "wifi/num_sta": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": "5",
+            "initial_val": 0
+          }
+        ]
+      },
+      "wifi/hp/+/num_sta": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "percent",
+            "threshold": "5",
+            "initial_val": 0
+          }
+        ]
       }
     }
   },
   "system": {
     "report_period": 60,
-    "usb3_enabled": false,
+    "usb3_enabled": true,
     "alarms": [
       {
         "time": "5:00",
@@ -1757,5 +2064,12 @@
         }
       }
     ]
+  },
+  "switch": {
+    "report_period": 10,
+    "host": "172.28.100.9",
+    "username": "admin",
+    "password": "admin",
+    "type": "rtl8380m"
   }
 }
