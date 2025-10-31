@@ -41,6 +41,52 @@ The WiFi service interacts extensively with the hardware abstraction layer:
   - `hal.capability.wireless.<index>.control.add_interface`
   - `hal.capability.band.1.control.set_kicking`
 
+## Metrics
+
+The WiFi service publishes metrics about wireless interfaces and connected clients to the bus. These metrics are collected from the HAL wireless driver and published for consumption by the metrics service.
+
+### HAL Wireless Driver Output
+
+The HAL wireless driver publishes information on the following topics:
+
+- **`hal.capability.wireless.<radio>.info.interface.<interface>.client.<mac>`** - Client connection/disconnection events with timestamp
+- **`hal.capability.wireless.<radio>.info.interface.<interface>.client.<mac>.<metric>`** - Individual client metrics (tx_bytes, rx_bytes, signal, noise, hostname, etc.)
+- **`hal.capability.wireless.<radio>.info.interface.<interface>.<metric>`** - Interface-level metrics (channel, power, noise, traffic counters)
+
+### Published Metrics
+
+#### Interface Metrics
+Published on topic: `wifi/hp/<hardware_platform>/rd<radio_band>/<interface_index>/<metric>`
+
+Available interface metrics:
+- `num_sta` - Number of connected stations
+- `channel` - Current operating channel
+- `power` - Transmit power (dBm)
+- `noise` - Noise level (dBm)
+- `rx_bytes` - Received bytes
+- `rx_packets` - Received packets
+- `rx_dropped` - Dropped received packets
+- `rx_errors` - Receive errors
+- `tx_bytes` - Transmitted bytes
+- `tx_packets` - Transmitted packets
+- `tx_dropped` - Dropped transmitted packets
+- `tx_errors` - Transmit errors
+
+#### Client Session Metrics
+Published on topic: `wifi/clients/<client_hash>/sessions/<session_id>/<metric>`
+
+Available client metrics:
+- `session_start` - Timestamp when client connected
+- `session_end` - Timestamp when client disconnected
+- `hostname` - Client hostname (from DHCP lease)
+- `rx_bytes` - Bytes received from client
+- `tx_bytes` - Bytes transmitted to client
+- `signal` - Client signal strength (dBm)
+
+**Note**: Client noise is not reported separately as it duplicates the interface-level noise metric.
+
+Client sessions are identified by a hash of the client's MAC address and a unique session ID generated when the client connects.
+
 ## Configuration
 
 The WiFi service accepts a configuration message on the `config.wifi` topic with the following structure:

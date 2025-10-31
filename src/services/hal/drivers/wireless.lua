@@ -484,7 +484,7 @@ function WirelessDriver:_monitor_clients(ctx)
                         ))
                         op.choice(
                             self.client_event_queue:put_op({
-                                connected = event == "new" and true or false,
+                                connected = (event == "new"),
                                 interface = iface,
                                 mac = mac
                             }),
@@ -536,6 +536,11 @@ local function get_iface_stats(ctx, interface)
         end
     end
 
+    local noise, noise_err = iw.get_dev_noise(ctx, interface)
+    if not noise_err then
+        stats["noise"] = noise
+    end
+
     return stats
 end
 
@@ -582,7 +587,7 @@ function WirelessDriver:_report_metrics(ctx)
                         endpoints = "single",
                         info = {
                             connected = event.connected,
-                            timestamp = sc.monotime()
+                            timestamp = sc.realtime()
                         }
                     })
                 end
@@ -590,6 +595,12 @@ function WirelessDriver:_report_metrics(ctx)
                     interfaces[event.interface][event.mac] = true
                     local client_info, client_err = iw.get_client_info(ctx, event.interface, event.mac)
                     if not client_err then
+                        -- Try to get hostname for the client
+                        local hostname, hostname_err = utils.get_hostname(ctx, event.mac)
+                        if hostname and not hostname_err then
+                            client_info.hostname = hostname
+                        end
+
                         self.info_q:put({
                             type = "wireless",
                             id = self.name,

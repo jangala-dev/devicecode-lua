@@ -1,4 +1,17 @@
 local digest = require "openssl.digest"
+local string = require "string"
+
+function string.tohex(str)
+    return (str:gsub('.', function (c)
+        return string.format('%02X', string.byte(c))
+    end))
+end
+
+if digest.digest == nil then
+    function digest.digest(algo, str)
+        return digest.new(algo):final(str):tohex():lower()
+    end
+end
 
 local USER_SALT = "$USER_SALT"
 local USER_ID_LEN = 6

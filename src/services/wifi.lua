@@ -1,11 +1,13 @@
 local fiber = require "fibers.fiber"
 local op = require "fibers.op"
 local queue = require "fibers.queue"
+local channel = require "fibers.channel"
 local log = require "services.log"
 local gen = require "services.wifi.gen"
 local service = require "service"
 local new_msg = require "bus".new_msg
 local utils = require "services.wifi.utils"
+local unpack = unpack or table.unpack
 
 -- there's a connect/disconnect event available directly from hostapd.
 -- opkg install hostapd-utils will give you hostapd_cli
@@ -89,6 +91,11 @@ function Radio:apply_config(config, report_period)
         ))
     end
 
+    local band = config.band
+    fiber.spawn(function()
+        self.band_ch:put(band)
+    end)
+
     fiber.spawn(function()
         local results = {}
         for i, req in pairs(reqs) do
@@ -143,25 +150,9 @@ function Radio:apply_config(config, report_period)
     end)
 end
 
-function Radio:make_mainflux_ssids(mainflux_cfg, encryption, mode)
-    local mf_ssids = {}
-    for _, ssid_cfg in ipairs(mainflux_cfg or {}) do
-        -- edge case for incorrect mainflux naming that uses jng instead of adm
-        local name = ssid_cfg.name == "jng" and "adm" or ssid_cfg.name
-        mf_ssids[#mf_ssids + 1] = {
-            name = ssid_cfg.ssid,
-            encryption = encryption,
-            password = ssid_cfg.password,
-            network = name,
-            mode = mode
-        }
-    end
-    return mf_ssids
-end
-
 function Radio:apply_ssids(ssid_configs)
     fiber.spawn(function()
-        for _, ssid in ipairs(ssid_configs) do
+        for i, ssid in ipairs(ssid_configs) do
             local req = self.conn:request(new_msg(
                 { 'hal', 'capability', 'wireless', self.index, 'control', 'add_interface' },
                 {
@@ -175,6 +166,7 @@ function Radio:apply_ssids(ssid_configs)
                     }
                 }
             ))
+            self.interface_ch:put({ name = ssid.name, index = i })
             local resp, err = req:next_msg_with_context(self.ctx)
             req:unsubscribe()
             if err or resp and resp.payload and resp.payload.err then
@@ -255,84 +247,195 @@ function Radio:remove_ssids()
 end
 
 function Radio:_report_metrics(ctx, conn)
-    -- local num_clients = 0
-    -- local interface_names = {}
+    local total_num_sta = 0
+    local interfaces_num_sta = {}
+    local radio_band = string.sub(self.band_ch:get(), 1, 1) -- wait for radio configs to give radio band,
+    -- get integer part only e.g. 2g -> 2
+    local hw_platform = 1                                   -- hardcoded for now, do we really need this?
+    local radio_interface_indexes = {
+        by_ssid = {},
+        by_phy = {}
+    }
+    local interface_info_endpoints = {
+        power = { 'txpower' },
+        channel = { 'channel', 'chan' },
+        noise = { 'noise' },
+        rx_bytes = { 'rx_bytes' },
+        rx_packets = { 'rx_packets' },
+        rx_dropped = { 'rx_dropped' },
+        rx_errors = { 'rx_errors' },
+        tx_bytes = { 'tx_bytes' },
+        tx_packets = { 'tx_packets' },
+        tx_dropped = { 'tx_dropped' },
+        tx_errors = { 'tx_errors' }
+    }
+    local interface_info_subs = {}
+    for key, topic in pairs(interface_info_endpoints) do
+        interface_info_subs[key] = conn:subscribe({
+            'hal',
+            'capability',
+            'wireless',
+            self.index,
+            'info',
+            'interface',
+            '+',
+            unpack(topic)
+        })
+    end
+    local client_info_endpoints = {
+        tx_bytes = { 'tx_bytes' },
+        rx_bytes = { 'rx_bytes' },
+        signal = { 'signal' },
+        hostname = { 'hostname' }
+    }
+    local client_info_subs = {}
+    for key, topic in pairs(client_info_endpoints) do
+        local tokens = {
+            'hal',
+            'capability',
+            'wireless',
+            self.index,
+            'info',
+            'interface',
+            '+',
+            'client',
+            '+',
+            unpack(topic)
+        }
+        client_info_subs[key] = conn:subscribe(tokens)
+    end
+    local client_session_ids = {}
+    local client_sub = conn:subscribe({
+        'hal',
+        'capability',
+        'wireless',
+        self.index,
+        'info',
+        'interface',
+        '+',
+        'client',
+        '+'
+    })
 
-    -- local interface_stat_targets = {
-    --     txpower = { 'txpower' },
-    --     channel = { 'channel', 'chan' },
-    --     -- noise = { '' } not currently supplied by wireless driver
+    local interface_ssid_sub = conn:subscribe({
+        'hal',
+        'capability',
+        'wireless',
+        self.index,
+        'info',
+        'interface',
+        '+',
+        'ssid'
+    })
 
-    --     rx_bytes = { 'rx_bytes' },
-    --     rx_packets = { 'rx_packets' },
-    --     rx_dropped = { 'rx_dropped' },
-    --     rx_errors = { 'rx_errors' },
+    local function handle_client_event(msg)
+        if msg and msg.payload then
+            local client = msg.payload
+            local mac = msg.topic[#msg.topic]
+            local client_hash = gen.userid(mac)
+            local session_id = client_session_ids[client_hash]
+            local key = client.connected and "session_start" or "session_end"
+            if client.connected then
+                if not session_id then
+                    client_session_ids[client_hash] = gen.gen_session_id()
+                    session_id = client_session_ids[client_hash]
+                end
+            else
+                client_session_ids[client_hash] = nil
+            end
 
-    --     tx_bytes = { 'tx_bytes' },
-    --     tx_packets = { 'tx_packets' },
-    --     tx_dropped = { 'tx_dropped' },
-    --     tx_errors = { 'tx_errors' },
-    --     ssid = { 'ssid'}
-    -- }
-    -- local interface_stat_subs = {}
-    -- for name, path in pairs(interface_stat_targets) do
-    --     interface_stat_subs[name] = conn:subscribe(
-    --         { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+', unpack(path) }
-    --     )
-    -- end
+            local interface = msg.topic[7]
+            local interface_idx = radio_interface_indexes.by_phy[interface]
+            if interface_idx then
+                if not interfaces_num_sta[interface_idx] then
+                    interfaces_num_sta[interface_idx] = 0
+                end
+                local interface_num_sta = interfaces_num_sta[interface_idx]
+                local num_change = client.connected and 1 or -1
+                total_num_sta = total_num_sta + num_change
 
-    -- -- local interface_ssid_sub = conn:subscribe(
-    -- --     { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+',  }
-    -- -- )
-    -- local client_sub = conn:subscribe(
-    --     { 'hal', 'capability', 'wireless', self.index, 'info', 'interface', '+', 'client', '+' }
-    -- )
+                interface_num_sta = interface_num_sta + num_change
+                conn:publish(new_msg(
+                    { 'wifi', 'hp', tostring(hw_platform), 'num_sta' },
+                    total_num_sta
+                ))
+                conn:publish(new_msg(
+                    { 'wifi', 'hp', tostring(hw_platform), 'rd' .. tostring(radio_band), interface_idx, 'num_sta' },
+                    interface_num_sta
+                ))
+                interfaces_num_sta[interface_idx] = interface_num_sta
+            end
+            conn:publish(new_msg(
+                { 'wifi', 'clients', client_hash, 'sessions', session_id, key },
+                client.timestamp
+            ))
+        end
+    end
 
-    -- while not ctx:err() do
-    --     local ops = {}
-    --     for name, sub in pairs(interface_stat_subs) do
-    --         ops[#ops + 1] = sub:next_msg_op():wrap(function (msg)
-    --             local interface = msg.topic[7]
-    --             if msg.payload and interface and interface_names[interface] then
-    --                 local value = msg.payload
-    --                 conn:publish(new_msg(
-    --                     { 'wifi', self.index, interface_names[interface], name },
-    --                     value
-    --                 ))
-    --             end
-    --             return msg
-    --         end)
-    --         if name == "ssid" then
-    --             ops[#ops]:wrap(function (msg)
-    --                 local interface = msg.topic[7]
-    --                 if msg.payload and interface then
-    --                     interface_names[interface] = string.find(msg.payload, "-admin") and "admin" or "jangala"
-    --                 end
-    --                 return msg
-    --             end)
-    --         end
-    --     end
-    --     op.choice(
-    --         client_sub:next_msg_op():wrap(function (msg)
-    --             if msg.payload then
-    --                 if msg.payload.connected then
-    --                     num_clients = num_clients + 1
-    --                 else
-    --                     if num_clients <= 0  then
-    --                         log.warn(string.format(
-    --                             "%s - %s: num_clients entering negative, adjusting back to 0",
-    --                             ctx:value("service_name"),
-    --                             ctx:value("fiber_name")
-    --                         ))
-    --                         num_clients = 0
-    --                     else
-    --                         num_clients = num_clients - 1
-    --                     end
-    --                 end
-    --             end
-    --         end)
-    --     )
-    -- end
+    local function handle_client_info(key, msg)
+        if msg and msg.payload then
+            local mac = msg.topic[9]
+            local client_hash = gen.userid(mac)
+            local session_id = client_session_ids[client_hash]
+            if session_id then
+                conn:publish(new_msg(
+                    { 'wifi', 'clients', client_hash, 'sessions', session_id, key },
+                    msg.payload
+                ))
+            end
+        end
+    end
+
+    local function handle_interface_info(key, msg)
+        if msg and msg.payload then
+            local interface = msg.topic[7]
+            if not radio_interface_indexes.by_phy[interface] then return end
+            local interface_index = radio_interface_indexes.by_phy[interface]
+            local topic = {
+                'wifi',
+                'hp',
+                tostring(hw_platform),
+                'rd' .. tostring(radio_band),
+                tostring(interface_index),
+                key
+            }
+            conn:publish(new_msg(
+                topic,
+                msg.payload
+            ))
+        end
+    end
+
+    local function handle_interface_ssid(msg)
+        if not msg.payload then return end
+        if radio_interface_indexes.by_ssid[msg.payload] and (not radio_interface_indexes.by_phy[msg.topic[7]]) then
+            radio_interface_indexes.by_phy[msg.topic[7]] = radio_interface_indexes.by_ssid[msg.payload]
+        end
+    end
+
+    log.info(string.format(
+        "%s - %s: Radio %s metrics reporting started",
+        ctx:value("service_name"),
+        ctx:value("fiber_name"),
+        self.index
+    ))
+
+    while not ctx:err() do
+        local ops = { ctx:done_op() }
+        ops[#ops + 1] = self.band_ch:get_op():wrap(function(band) radio_band = string.sub(band, 1, 1) end)
+        ops[#ops + 1] = self.interface_ch:get_op():wrap(function(interface)
+            radio_interface_indexes.by_ssid[interface.name] = interface.index
+        end)
+        ops[#ops + 1] = interface_ssid_sub:next_msg_op():wrap(handle_interface_ssid)
+        ops[#ops + 1] = client_sub:next_msg_op():wrap(handle_client_event)
+        for key, sub in pairs(client_info_subs) do
+            ops[#ops + 1] = sub:next_msg_op():wrap(function(msg) handle_client_info(key, msg) end)
+        end
+        for key, sub in pairs(interface_info_subs) do
+            ops[#ops + 1] = sub:next_msg_op():wrap(function(msg) handle_interface_info(key, msg) end)
+        end
+        op.choice(unpack(ops)):perform()
+    end
 end
 
 function Radio:get_index()
@@ -348,7 +451,18 @@ function Radio.new(ctx, conn, index)
     self.ctx = ctx
     self.conn = conn
     self.index = index
+    self.band_ch = channel.new()
+    self.interface_ch = channel.new()
     self.ssids = {}
+
+    service.spawn_fiber(
+        string.format('Radio %s Metrics', self.index),
+        conn,
+        ctx,
+        function(fctx)
+            self:_report_metrics(fctx, conn)
+        end
+    )
     return self
 end
 
@@ -912,6 +1026,19 @@ local function radio_manager(ctx, conn)
         apply_config(config)
     end
 
+    local num_sta = 0
+    local function handle_client(msg)
+        if not msg or not msg.payload then return end
+        local connected = msg.payload.connected
+        local sta_change = connected and 1 or -1
+        num_sta = num_sta + sta_change
+        conn:publish(new_msg(
+            { 'wifi', 'num_sta' },
+            num_sta
+        ))
+    end
+
+
     local band_sub = conn:subscribe({ 'hal', 'capability', 'band', '+' })
     band_sub:next_msg_with_context(ctx) -- wait for band driver to be initialised
     band_sub:unsubscribe()
@@ -923,12 +1050,14 @@ local function radio_manager(ctx, conn)
     ))
 
     local config_sub = conn:subscribe({ 'config', 'wifi' })
+    local client_sub = conn:subscribe({ 'hal', 'capability', 'wireless', '+', 'info', 'interface', '+', 'client', '+' })
     while not ctx:err() do
         op.choice(
             wifi_service.radio_add_queue:get_op():wrap(add_radio),
             wifi_service.radio_remove_queue:get_op():wrap(remove_radio),
             wifi_service.config_queue:get_op():wrap(handle_config),
             config_sub:next_msg_op():wrap(handle_config),
+            client_sub:next_msg_op():wrap(handle_client),
             ctx:done_op()
         ):perform()
     end
