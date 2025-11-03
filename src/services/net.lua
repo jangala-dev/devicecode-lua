@@ -1149,13 +1149,17 @@ local function shaping_worker(ctx)
                     net_cfg.id
                 ))
 
-                local iface = (net_cfg.type == "local" and net_cfg.is_bridge)
-                    and ("br-" .. net_cfg.id)
-                    or net_cfg.interfaces[1]
-                local f = io.open("/sys/class/net/" .. iface, "r")
+                local iface = (net_cfg.type == "local" and net_cfg.is_bridge) and ("br-" .. net_cfg.id) or net_cfg.interfaces[1]
+                local device_status_sub = net_service.conn:request(new_msg(
+                    { 'hal', 'capability', 'ubus', '1', 'control', 'call' },
+                    { "network.device", "status", string.format('{"name":"%s"}', iface) }
+                ))
+                local device_ret, device_ctx_err = device_status_sub:next_msg_with_context(ctx)
+                device_status_sub:unsubscribe()
+                local info = device_ret and device_ret.payload and device_ret.payload.result
+                local present = info and info.present
 
-                if f then
-                    f:close()
+                if (not device_ctx_err) and (not device_ret.err) and present then
                     shaping.apply(net_cfg)
                 else
                     log.warn("NET: Interface " .. iface .. " not yet ready; retrying shaping later")
