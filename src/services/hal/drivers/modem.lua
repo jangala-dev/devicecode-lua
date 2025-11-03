@@ -41,6 +41,14 @@ local model_info = {
     fibocom = {}
 }
 
+local function array_to_table(arr)
+    local t = {}
+    for _, v in ipairs(arr) do
+        t[v] = true
+    end
+    return t
+end
+
 local function get_ports(ports)
     local port_list = {}
     for _, port in ipairs(ports) do
@@ -212,6 +220,18 @@ function Driver:get_sim_info(sim_address)
     return info.sim, nil
 end
 
+local SIGNAL_TECHNOLOGIES = array_to_table({
+    '5g',
+    'cdma1x',
+    'evdo',
+    'gsm',
+    'lte',
+    'umts'
+})
+local IGNORE_FIELDS = array_to_table({
+    'error-rate'
+})
+
 function Driver:get_signal()
     local cmd = mmcli.signal_get(context.with_timeout(self.ctx, CMD_TIMEOUT), self.address)
 
@@ -222,16 +242,17 @@ function Driver:get_signal()
     if err then return nil, wraperr.new(err) end
 
     for signal_tech, signals in pairs(info.modem.signal) do
-        if signal_tech ~= 'refresh' then
-            local valid_signal = true
-            for _, signal in pairs(signals) do
-                if signal == '--' then
-                    valid_signal = false
-                    break
+        if SIGNAL_TECHNOLOGIES[signal_tech] then
+            local valid_signal = false
+            local filtered_signals = {}
+            for signal_name, signal_value in pairs(signals) do
+                if not IGNORE_FIELDS[signal_name] and signal_value ~= '--' then
+                    filtered_signals[signal_name] = signal_value
+                    valid_signal = true
                 end
             end
             if valid_signal then
-                return signals, nil
+                return filtered_signals, nil
             end
         end
     end
