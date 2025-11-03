@@ -105,8 +105,6 @@ function Driver:poll_info()
             end
             local signal, signal_err = self:get_signal()
             if not signal_err then
-                local dump = require "fibers.utils.helper".dump
-                log.trace(string.format("Modem - %s: Signal info retrieved %s", self.imei, dump(signal)))
                 infos.modem.signal = signal
             end
         end
