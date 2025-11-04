@@ -9,6 +9,7 @@ local http_util = require "http.util"
 local websocket = require "http.websocket"
 local cjson = require "cjson.safe"
 local op = require "fibers.op"
+local sleep = require "fibers.sleep"
 -- -@type { get_box_reports: fun(): table, get_box_logs: fun(): table }
 local diagnostics = require "services.ui.diagnostics"
 require "services.ui.fibers_cqueues"
@@ -31,6 +32,8 @@ local config_subscription = "config"
 local gsm_subscription = "gsm"
 local system_subscription = "system"
 local net_subscription = "net"
+local mcu_subscription = "mcu"
+local wifi_subscription = "wifi"
 -- Runtime state
 local ws_clients = {} -- list of active WebSocket clients
 local sse_clients = {} -- list of active SSE clients
@@ -306,6 +309,8 @@ local function bus_listener(ctx, connection)
     local sub_system = connection:subscribe({ system_subscription, "#" })
     local sub_net = connection:subscribe({ net_subscription, "#" })
     local sub_logs = connection:subscribe({ logs_subscription, "#" })
+    local sub_mcu = connection:subscribe({ mcu_subscription, "#" })
+    local sub_wifi = connection:subscribe({ wifi_subscription, "num_sta" })
     local sub_mainflux_config = connection:subscribe({ config_subscription, "mainflux" })
     local sub_metrics_config = connection:subscribe({ config_subscription, "metrics" })
     local sub_net_config = connection:subscribe({ config_subscription, "net" })
@@ -353,6 +358,12 @@ local function bus_listener(ctx, connection)
                 publish_message(msg, stats_stream)
             end),
             sub_net:next_msg_op():wrap(function(msg)
+                publish_message(msg, stats_stream)
+            end),
+            sub_mcu:next_msg_op():wrap(function(msg)
+                publish_message(msg, stats_stream)
+            end),
+            sub_wifi:next_msg_op():wrap(function(msg)
                 publish_message(msg, stats_stream)
             end),
             sub_logs:next_msg_op():wrap(function(msg)
@@ -436,6 +447,8 @@ local function bus_listener(ctx, connection)
     sub_gsm:unsubscribe()
     sub_system:unsubscribe()
     sub_net:unsubscribe()
+    sub_mcu:unsubscribe()
+    sub_wifi:unsubscribe()
 end
 
 function ui_service:start(ctx, connection)
