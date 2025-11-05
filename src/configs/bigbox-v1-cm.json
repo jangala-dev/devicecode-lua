@@ -2377,6 +2377,51 @@
             "threshold": 5
           }
         ]
+      },
+      "switch/system/mem": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "switch/system/cpu": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "switch/system/temp": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "switch/system/power": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
+      },
+      "switch/system/curr_time": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "any-change"
+          }
+        ]
       }
     }
   },
@@ -2397,8 +2442,8 @@
   "switch": {
     "report_period": 10,
     "host": "172.28.100.9",
-    "username": "admin",
-    "password": "admin",
+    "username": "$SWITCH_USERNAME",
+    "password": "$SWITCH_PASSWORD",
     "type": "rtl8380m"
   }
 }

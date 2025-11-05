@@ -12,6 +12,7 @@ return {
         "system",
         "ui",
         "wifi",
-        "mcu_bridge"
+        "mcu_bridge",
+        "switch"
     }
 }

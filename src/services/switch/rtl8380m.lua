@@ -1,5 +1,6 @@
 local cjson = require "cjson.safe"
 local socket = require "cqueues.socket"
+local sleep = require "fibers.sleep"
 local basexx = require "basexx"
 local exec = require "fibers.exec"
 
@@ -27,10 +28,35 @@ local function build_request(method, path, host, headers, body)
     return req
 end
 
-local function read_chunks(s)
+local function parse_body(raw)
+    local i = raw:find("\r\n\r\n", 1, true)
+    if i then return raw:sub(i + 4) end
+
+    i = raw:find("\n\n", 1, true)
+    if i then return raw:sub(i + 2) end
+
+    local j = raw:find("{", 1, true)
+    if j then return raw:sub(j) end
+
+    return raw
+end
+
+local function safe_write_and_flush(s, data)
+    -- write may throw; catch it
+    local ok, wres, werr = pcall(function() return s:write(data) end)
+    if not ok then return nil, wres end   -- wres is the thrown error
+    if not wres then return nil, werr end -- write returned nil, err
+
+    local fok, ferr = pcall(function() return s:flush() end)
+    if not fok then return nil, ferr end
+    return true
+end
+
+local function safe_read_all(s)
     local chunks = {}
     while true do
-        local buf, err, part = s:read(4096)
+        local ok, buf, err, part = pcall(function() return s:read(4096) end)
+        if not ok then return nil, buf end -- buf is thrown error
         if buf and #buf > 0 then
             chunks[#chunks + 1] = buf
         elseif part and #part > 0 then
@@ -46,54 +72,28 @@ local function read_chunks(s)
     return table.concat(chunks)
 end
 
-local function parse_body(raw)
-    local i = raw:find("\r\n\r\n", 1, true)
-    if i then return raw:sub(i + 4) end
-
-    i = raw:find("\n\n", 1, true)
-    if i then return raw:sub(i + 2) end
-
-    local j = raw:find("{", 1, true)
-    if j then return raw:sub(j) end
-
-    return raw
-end
-
 local function get_cgi_json(host, cmd, use_dummy)
-    local path = "/cgi/get.cgi?cmd=" .. cmd
-    if use_dummy then
-        path = path .. "&dummy=" .. tostring(math.floor(os.time() * 1000))
-    end
-
+    local path = "/cgi/get.cgi?cmd=" ..
+    cmd .. (use_dummy and ("&dummy=" .. tostring(math.floor(os.time() * 1000))) or "")
     local s, err = socket.connect(host, PORT)
     if not s then return nil, "connect failed: " .. tostring(err) end
 
-    local ok, cerr = s:connect(DEFAULT_TIMEOUT)
-    if not ok then
-        s:close()
-        return nil, "connection timeout: " .. tostring(cerr)
-    end
-
+    s:settimeout(DEFAULT_TIMEOUT)
     s:setmode("b", "b")
 
     local req = build_request("GET", path, host, {})
-    local ok, werr = s:write(req)
+    local ok, werr = safe_write_and_flush(s, req)
     if not ok then
-        s:close()
-        return nil, "write failed: " .. tostring(werr)
+        s:close(); return nil, "write/flush failed: " .. tostring(werr)
     end
-    s:flush()
 
-    local raw, rerr = read_chunks(s)
+    local raw, rerr = safe_read_all(s)
     s:close()
     if not raw then return nil, rerr end
 
     local body = parse_body(raw)
     local js, derr = cjson.decode(body)
-    if not js then
-        return nil, "decode error: " .. tostring(derr)
-    end
-
+    if not js then return nil, "decode error: " .. tostring(derr) end
     return js
 end
 
@@ -101,30 +101,22 @@ local function post_cgi_json(host, path, payload, headers)
     local s, err = socket.connect(host, PORT)
     if not s then return nil, "connect failed: " .. tostring(err) end
 
-    local ok, cerr = s:connect(DEFAULT_TIMEOUT)
-    if not ok then
-        s:close()
-        return nil, "connection timeout: " .. tostring(cerr)
-    end
-
+    s:settimeout(DEFAULT_TIMEOUT)
     s:setmode("b", "b")
 
     local req = build_request("POST", path, host, headers, payload)
-    local ok, werr = s:write(req)
+    local ok, werr = safe_write_and_flush(s, req)
     if not ok then
-        s:close()
-        return nil, "write failed: " .. tostring(werr)
+        s:close(); return nil, "write/flush failed: " .. tostring(werr)
     end
-    s:flush()
 
-    local raw, rerr = read_chunks(s)
+    local raw, rerr = safe_read_all(s)
     s:close()
     if not raw then return nil, rerr end
 
     local body = parse_body(raw)
     local js, derr = cjson.decode(body)
     if not js then return nil, "decode error: " .. tostring(derr) end
-
     return js
 end
 
@@ -261,26 +253,25 @@ end
 
 -- TODO: handle unable to auth
 local function login(host, username, password)
-    authenticate_user(host, username, password)
-    local success
+    local _, err = authenticate_user(host, username, password)
 
-    while true do
+    if err then return false, err end
+
+    local tries = 0
+    local max_tries = 10
+
+    while tries < max_tries do
         local status, err = get_login_status(host)
 
-        if err then
-            return false, err
-        end
+        if err then return false, err end
+        if status == "ok" then return true end
+        if status == "fail" then return false, "login failed incorrect credentials" end
 
-        if status == "ok" then
-            success = true
-            break
-        elseif status == "fail" then
-            success = false
-            break
-        end
+        tries = tries + 1
+        sleep.sleep(1)
     end
 
-    return success, nil
+    return false, "login timeout"
 end
 
 local function get_stats(host)
