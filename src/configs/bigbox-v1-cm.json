@@ -648,6 +648,18 @@
           "autoconnect": true
         },
         {
+          "name": "primary",
+          "id_field": "device",
+          "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb5/5-1/5-1.1",
+          "autoconnect": true
+        },
+        {
+          "name": "secondary",
+          "id_field": "device",
+          "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb4/4-1/4-1.2",
+          "autoconnect": true
+        },
+        {
           "name": "secondary",
           "id_field": "device",
           "device": "/sys/devices/platform/axi/1000480000.usb/usb1/1-1",
