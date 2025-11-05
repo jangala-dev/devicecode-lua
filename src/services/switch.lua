@@ -78,7 +78,7 @@ local function handler(ctx, bus_connection)
                         else
                             log.trace("Switch: Publishing stats")
                             fail_count = 0 -- reset on success
-                            bus_connection:publish(new_msg({ "switch" }, stats, { retained = true }))
+                            bus_connection:publish_multiple({ "switch" }, stats, { retained = true })
                             sleep.sleep(cfg.report_period or 10)
                         end
                     end
