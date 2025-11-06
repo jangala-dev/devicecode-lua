@@ -2,6 +2,7 @@ local log = require 'services.log'
 local service = require 'service'
 local cjson = require 'cjson.safe'
 local new_msg = require 'bus'.new_msg
+local cache = require 'cache'
 local pow = math.pow or function(base, power)
     return base ^ power
 end
@@ -10,6 +11,9 @@ local mcu_bridge = {
     name = 'mcu_bridge'
 }
 mcu_bridge.__index = mcu_bridge
+
+-- Cache to store previous MCU values (no timeout since we want to keep them indefinitely)
+local mcu_value_cache = cache.new(math.huge)
 
 local UNDERFLOW_THRESHOLD = 1000000 -- threshiold for detection of underflow due to cjson limitations
 
@@ -91,14 +95,21 @@ local function read_uart_data(ctx)
             elseif not decode_err then
                 local casted = fix_underflows(decoded)
                 for k, v in pairs(casted) do
-                    local key_table = { 'mcu' }
-                    for segment in string.gmatch(k, "[^/]+") do
-                        table.insert(key_table, segment)
+                    -- Check if value has changed before publishing
+                    local cached_value = mcu_value_cache:get(k)
+
+                    -- Only publish if value changed or doesn't exist in cache
+                    if cached_value ~= v then
+                        local key_table = { 'mcu' }
+                        for segment in string.gmatch(k, "[^/]+") do
+                            table.insert(key_table, segment)
+                        end
+                        mcu_value_cache:set(k, v)
+                        mcu_bridge.conn:publish(new_msg(
+                            key_table,
+                            v
+                        ))
                     end
-                    mcu_bridge.conn:publish(new_msg(
-                        key_table,
-                        v
-                    ))
                 end
             end
         end
