@@ -309,7 +309,24 @@ local function get_stats(host)
     return stats, nil
 end
 
+local function wait_for_host(host, port, timeout, retries)
+    port = port or 80
+    timeout = timeout or 1
+    retries = retries or 120
+
+    for i = 1, retries do
+        local s, _ = socket.connect(host, port)
+        if s then
+            s:close()
+            return true
+        end
+        sleep.sleep(timeout)
+    end
+    return false, "host unreachable after " .. retries .. " tries"
+end
+
 return {
     login = login,
     get_stats = get_stats,
+    wait_for_host = wait_for_host,
 }

@@ -3,7 +3,6 @@ local sleep = require "fibers.sleep"
 local context = require "fibers.context"
 local op = require "fibers.op"
 local log = require "services.log"
-local new_msg = require("bus").new_msg
 
 local switch_service = {
     name = "switch"
@@ -42,6 +41,13 @@ local function handler(ctx, bus_connection)
                 stats_ctx, cancel_stats = context.with_cancel(ctx)
 
                 fiber.spawn(function()
+                    log.trace("Switch: Waiting for host")
+                    local ok, err = driver.wait_for_host(cfg.host)
+                    if not ok then
+                        log.error("Switch: Host unreachable:", err)
+                        return
+                    end
+
                     log.trace("Switch: Starting login")
                     local ok, err = driver.login(cfg.host, cfg.username, cfg.password)
 
@@ -87,6 +93,8 @@ local function handler(ctx, bus_connection)
             ctx:done_op()
         ):perform()
     end
+
+    sub_switch:unsubscribe()
 end
 
 function switch_service:start(ctx, bus_connection)
