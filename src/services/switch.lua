@@ -41,23 +41,18 @@ local function handler(ctx, bus_connection)
                 stats_ctx, cancel_stats = context.with_cancel(ctx)
 
                 fiber.spawn(function()
-                    log.trace("Switch: Waiting for host")
-                    local ok, err = driver.wait_for_host(cfg.host)
-                    if not ok then
-                        log.error("Switch: Host unreachable:", err)
-                        return
+                    while stats_ctx:err() == nil do
+                        log.trace("Switch: Starting login")
+                        local ok, err = driver.login(cfg.host, cfg.username, cfg.password)
+
+                        if not ok then
+                            log.error("Switch: Login failed, retrying in 60s:", err)
+                            sleep.sleep(60)
+                        else
+                            log.trace("Switch: Login successful")
+                            break
+                        end
                     end
-
-                    log.trace("Switch: Starting login")
-                    local ok, err = driver.login(cfg.host, cfg.username, cfg.password)
-
-                    if not ok then
-                        -- TODO no retry here
-                        log.error("Switch: Initial login failed:", err)
-                        return
-                    end
-
-                    log.trace("Switch: Login successful")
 
                     local fail_count = 0
                     local max_fails = 5
