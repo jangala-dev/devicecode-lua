@@ -3,7 +3,6 @@ local sleep = require "fibers.sleep"
 local context = require "fibers.context"
 local op = require "fibers.op"
 local log = require "services.log"
-local new_msg = require("bus").new_msg
 
 local switch_service = {
     name = "switch"
@@ -42,16 +41,18 @@ local function handler(ctx, bus_connection)
                 stats_ctx, cancel_stats = context.with_cancel(ctx)
 
                 fiber.spawn(function()
-                    log.trace("Switch: Starting login")
-                    local ok, err = driver.login(cfg.host, cfg.username, cfg.password)
+                    while stats_ctx:err() == nil do
+                        log.trace("Switch: Starting login")
+                        local ok, err = driver.login(cfg.host, cfg.username, cfg.password)
 
-                    if not ok then
-                        -- TODO no retry here
-                        log.error("Switch: Initial login failed:", err)
-                        return
+                        if not ok then
+                            log.error("Switch: Login failed, retrying in 60s:", err)
+                            sleep.sleep(60)
+                        else
+                            log.trace("Switch: Login successful")
+                            break
+                        end
                     end
-
-                    log.trace("Switch: Login successful")
 
                     local fail_count = 0
                     local max_fails = 5
@@ -87,6 +88,8 @@ local function handler(ctx, bus_connection)
             ctx:done_op()
         ):perform()
     end
+
+    sub_switch:unsubscribe()
 end
 
 function switch_service:start(ctx, bus_connection)
