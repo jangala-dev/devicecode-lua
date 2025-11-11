@@ -1,23 +1,21 @@
-local reactive_cache = require 'services.metrics.action_cache'
-local processing = require "services.metrics.processing"
-local timed_cache = require "services.metrics.timed_cache"
 local service = require 'service'
 local op = require "fibers.op"
 local log = require 'services.log'
-local trie = require 'trie'
 local sc = require 'fibers.utils.syscall'
+local sleep = require 'fibers.sleep'
 local json = require 'cjson.safe'
 local senml = require 'services.metrics.senml'
 local http = require 'services.metrics.http'
+local conf = require 'services.metrics.config'
 local unpack = table.unpack or unpack
 
 ---@class metrics_service
----@field str_trie Trie
 ---@field default_process ProcessPipeline
 local metrics_service = {
     name = 'metrics',
-    metric_ops = {},
-    str_trie = trie.new_string(nil, nil, '/')
+    metrics = {},
+    metric_values = {},
+    pipelines = {},
 }
 metrics_service.__index = metrics_service
 
@@ -38,17 +36,6 @@ function metrics_service:_log_publish(data)
     print_recursive(data, 0)
 end
 
-local function validate_http_config(config)
-    if not config then
-        return false, "No cloud config set"
-    elseif not config.url then
-        return false, "No cloud url set"
-    elseif not config.thing_key or not config.channels then
-        return false, "No cloud config set"
-    end
-    return true, nil
-end
-
 function metrics_service:_http_publish(data)
     local senml_list, err = senml.encode_r("", data)
     if err then
@@ -62,7 +49,7 @@ function metrics_service:_http_publish(data)
     end
     if #senml_list == 0 then return end
     local body = json.encode(senml_list)
-    local valid_config, config_err = validate_http_config(self.cloud_config)
+    local valid_config, config_err = conf.validate_http_config(self.cloud_config)
     if not valid_config then
         log.error(string.format(
             "%s - %s: HTTP publish failed, reason: %s",
@@ -109,9 +96,14 @@ end
 ---iterates over a table of data to be published
 ---@param data table
 function metrics_service:_publish_all(data)
-    self.cache:reset()
     -- all first keys are the names of the publish protocols
     for protocol, values in pairs(data) do
+        -- reset all pipelines after publish
+        for endpoint, _ in pairs(values) do
+            if self.pipelines[endpoint] then
+                self.pipelines[endpoint]:reset()
+            end
+        end
         local protocol_fn = self["_" .. protocol .. "_publish"]
         if protocol_fn == nil then
             log.error(string.format('Failed to publish for %s, no function associated with protocol', protocol))
@@ -124,239 +116,132 @@ function metrics_service:_publish_all(data)
     end
 end
 
---- Uses process configs to build a processing pipline made of
---- process blocks
---- @param endpoint string
---- @param process_config table
---- @return ProcessPipeline?
---- @return string? Error
-function metrics_service:_build_metric_pipeline(endpoint, process_config)
-    -- processing blocks take a value and output another value
-    -- build up a processing pipeline between the cache and publish steps
-    local process, process_err = processing.new_process_pipeline()
-    if process_err or not process then
-        return nil, process_err
+function metrics_service:_handle_metric(metric, msg)
+    local protocol = metric.protocol
+    local field = metric.field
+    local rename = metric.rename
+    local base_pipeline = metric.base_pipeline
+
+    local value = msg.payload
+    if field then
+        value = value[field]
     end
-    if process_config == nil then
-        return nil, "process config is nil"
-    end
-    for _, process_block_config in ipairs(process_config) do
-        local process_type = process_block_config.type
-        if process_type == nil then
-            return nil, string.format('Metric config [%s] has process with no type', endpoint)
-        end
-        local proc_class = processing[process_type]
+    if value == nil then return end
 
-        if proc_class == nil then
-            return nil, string.format('Metric config [%s] has invalid process [%s]', endpoint, process_type)
-        end
+    local str_endpoint = table.concat(rename or msg.topic, '/')
 
-        local proc, proc_err = proc_class.new(process_block_config)
-
-        if proc_err or not proc then
-            return nil, string.format('Metric config [%s] failed to create process block [%s]', endpoint, process_type)
-        end
-        local add_err = process:add(proc)
-        if add_err then
-            return nil, add_err
-        end
+    if self.pipelines[str_endpoint] == nil then
+        self.pipelines[str_endpoint] = base_pipeline:clone()
     end
 
-    return process, nil
-end
+    local pipeline = self.pipelines[str_endpoint]
 
-local function standardise_config(config)
-    local standard_config = {}
-
-    standard_config.thing_id = config.mainflux_id or config.thing_id
-    standard_config.thing_key = config.mainflux_key or config.thing_key
-    standard_config.channels = config.mainflux_channels or config.channels
-    for _, channel in ipairs(standard_config.channels) do
-        channel.metadata = channel.metadata or {}
-        if type(channel.metadata) == "userdata" then channel.metadata = {} end
-        if string.find(channel.name, "data") then
-            channel.metadata.channel_type = "data"
-        elseif string.find(channel.name, "control") then
-            channel.metadata.channel_type = "events"
-        end
+    local ret, short, err = pipeline:run(value)
+    if err then
+        log.error(string.format(
+            "%s - %s: Metric processing error for endpoint %s: %s",
+            self.ctx:value('service_name'),
+            self.ctx:value('fiber_name'),
+            str_endpoint,
+            err
+        ))
+        return
     end
-
-    standard_config.content = config.content
-    return standard_config
-end
-
-local function merge_config(base_config, override_vals)
-    if not base_config then return override_vals end
-    if not override_vals then return base_config end
-
-    for k, v in pairs(override_vals) do
-        if type(v) == 'table' and type(base_config[k]) == 'table' then
-            base_config[k] = merge_config(base_config[k], v)
-        else
-            base_config[k] = v
-        end
+    if not short then
+        self.metric_values[protocol] = self.metric_values[protocol] or {}
+        self.metric_values[protocol][str_endpoint] = {
+            value = ret,
+            time = math.floor(sc.realtime() * 1000)
+        }
     end
-
-    return base_config
-end
-
-local function is_array(t)
-    if type(t) ~= "table" then
-        return false
-    end
-    local i = 1
-    for k, _ in pairs(t) do
-        if k ~= i then
-            return false
-        end
-        i = i + 1
-    end
-
-    return true
 end
 
 ---use config to build cache and processing pipelines
 ---@param config table
 function metrics_service:_handle_config(config)
-    if config == nil then
-        log.error("Metrics: Invalid configuration message")
+    local valid, warns, err = conf.validate_config(config)
+    if not valid then
+        log.error(string.format(
+            "%s - %s: Metrics config invalid: %s",
+            self.ctx:value('service_name'),
+            self.ctx:value('fiber_name'),
+            err
+        ))
         return
     end
-    log.info("Metrics Config Received")
-
-    -- config validation
-    if not config.publish_cache or type(config.publish_cache.period) ~= "number" then
-        log.error("Invalid publish cache configuration")
-        return
+    -- log any warnings and remove invalid metric configs
+    if #warns > 0 then
+        local warn_msgs = {}
+        for _, warn in ipairs(warns) do
+            table.insert(warn_msgs, warn.msg)
+            if warn.endpoint then
+                config.collections[warn.endpoint] = nil
+            end
+        end
+        log.warn(string.format(
+            "%s - %s: Metrics config warnings:\n\t%s",
+            self.ctx:value('service_name'),
+            self.ctx:value('fiber_name'),
+            table.concat(warn_msgs, "\n\t")
+        ))
     end
 
-    if not config.collections then
-        log.error("No metric collections defined in config")
-        return
+    local metrics, publish_period, merged_cloud_config = conf.apply_config(self.conn, config, self.cloud_config)
+    if #metrics == 0 then
+        log.warn(string.format(
+            "%s - %s: No valid metrics created, metrics service will be idle",
+            self.ctx:value('service_name'),
+            self.ctx:value('fiber_name')
+        ))
     end
 
-    self.cloud_config = merge_config(self.cloud_config, { url = config.cloud_url })
     -- clean up any old metric pipelines
-    if self.metric_subs then
-        for _, metric_sub in pairs(self.metric_subs) do
-            metric_sub:unsubscribe()
-        end
+    for _, metric in ipairs(self.metrics) do
+        metric.sub:unsubscribe()
     end
-    self.metric_subs = {}
-    self.metric_ops = {}
-    if config.publish_cache then
-        local period = config.publish_cache.period
-        local publish_cache, cache_err = timed_cache.new(period, sc.monotime)
-        if cache_err then
-            log.error(cache_err)
-            return
-        end
-        self.publish_cache = publish_cache
-    else
-        log.error('No cache config')
-        return
-    end
-
-    -- iterate over each bus topic in our config
-    -- and build up a pipeline for each one
-    for endpoint, metric_config in pairs(config.collections) do
-        -- could our bus just take tables or strings so I don't have to do this?
-        local sub_topic = self.str_trie:_key_to_tokens(endpoint)
-        local metric_sub = self.conn:subscribe(sub_topic)
-
-        -- protocol defines the publish method to be used
-        local protocol = metric_config.protocol
-        if protocol == nil then
-            log.error(string.format('Metric config [%s] has no defined protocol', endpoint))
-            return
-        end
-        if protocol == "http" and not self.http_send_q then
-            self.http_send_q = http.start_http_publisher(self.ctx, self.conn)
-        end
-
-        -- create our processing pipeline for this endpoint
-        local default_pipeline, pipline_err = self:_build_metric_pipeline(endpoint, metric_config.process)
-        if pipline_err then
-            log.error(pipline_err)
-            return
-        end
-
-        local metric_endpoint_name = metric_config.rename
-        if not is_array(metric_endpoint_name) and type(metric_endpoint_name) ~= 'nil' then
-            log.warn(string.format('Metric config [%s] rename is not of expected type: table', endpoint))
-            metric_endpoint_name = nil
-        end
-        -- Now we wrap our bus endpoint in a function to
-        -- run our processing pipline in a cache
-        -- the cache is needed to give each endpoint of a wildcard
-        -- its own processing
-        -- e.g. gsm/modem/+ could be gsm/modem/primary or gsm/modem/secondary
-        local metric_op = metric_sub:next_msg_op():wrap(function(metric_msg)
-            -- combine endpoint into string for override lookup
-            local metric_endpoint = table.concat(metric_msg.topic, '/')
-            local metric = metric_msg.payload
-            if metric == nil then return end
-            -- we may want a specific field from the bus message
-            if metric_config.field then metric = metric[metric_config.field] end
-
-            local val, short_circuit, err
-            -- either set or update the value into our pipeline
-            if self.cache:has_key(metric_msg.topic) then
-                val, short_circuit, err = self.cache:update(metric_msg.topic, metric)
-            else
-                val, short_circuit, err = self.cache:set(metric_msg.topic, metric, default_pipeline)
-            end
-
-            if err then
-                log.error(err)
-                return
-            end
-            -- if the pipeline completed with no early exit we can update our publish cache
-            if not short_circuit then
-                local cache_topic = { protocol, unpack(metric_endpoint_name or metric_msg.topic) }
-                local metric_time = math.floor(sc.realtime() * 1000)
-                local item = { value = val, time = metric_time }
-                self.publish_cache:set(cache_topic, item)
-            end
-        end)
-
-        table.insert(self.metric_subs, metric_sub)
-        table.insert(self.metric_ops, metric_op)
-    end
+    self.pipelines = {}
+    self.metrics = metrics
+    self.publish_period = publish_period
+    self.cloud_config = merged_cloud_config
 end
 
 ---setup initial cache and config then loop over config, metrics and timed cache operations
 function metrics_service:_main(ctx)
     self.ctx = ctx
-    self.cache = reactive_cache.new()
+    self.http_send_q = http.start_http_publisher(self.ctx, self.conn)
 
     local config_sub = self.conn:subscribe({ 'config', 'metrics' })
     local cloud_config_sub = self.conn:subscribe({ 'config', 'mainflux' })
 
-    local initial_config, iconfig_err = config_sub:next_msg_with_context_op(self.ctx):perform()
-    if iconfig_err then
-        log.error(iconfig_err)
-        return
-    end
-    self:_handle_config(initial_config.payload)
+    local next_publish_time = os.time() + math.huge
 
     -- local device_info_sub = self.conn:subscribe({'system', 'device', 'idenitity'}) idk what this will be but
     -- it is a reminder to get system info that canopy will need for reporting
 
     while not self.ctx:err() do
+        local metric_ops = {}
+        for _, metric in ipairs(self.metrics) do
+            table.insert(metric_ops, metric.sub:next_msg_op():wrap(function (msg)
+                self:_handle_metric(metric, msg)
+            end))
+        end
         op.choice(
             self.ctx:done_op(),
             config_sub:next_msg_op():wrap(function(config_msg)
                 self:_handle_config(config_msg.payload)
+                next_publish_time = os.time() + self.publish_period
             end),
             cloud_config_sub:next_msg_op():wrap(function(config_msg)
-                local config = standardise_config(config_msg.payload)
-                self.cloud_config = merge_config(self.cloud_config, config)
+                local config = conf.standardise_config(config_msg.payload)
+                self.cloud_config = conf.merge_config(self.cloud_config, config)
             end),
-            self.publish_cache:get_op():wrap(function(data)
-                self:_publish_all(data)
+            sleep.sleep_until_op(next_publish_time):wrap(function()
+                local values = self.metric_values
+                self.metric_values = {}
+                next_publish_time = os.time() + self.publish_period
+                self:_publish_all(values)
             end),
-            unpack(self.metric_ops)
+            unpack(metric_ops)
         ):perform()
     end
     config_sub:unsubscribe()
