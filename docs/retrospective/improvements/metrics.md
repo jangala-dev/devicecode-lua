@@ -765,4 +765,203 @@ end
 - Dynamic pipeline updates (no service restart)
 - Multi-protocol publishing (MQTT, CoAP)
 - Metric sampling (reduce processing load)
-- Pipeline composition (blocked - team doesn't want config inheritance)
+
+---
+
+## Appendix: Memory-Efficient Pipeline Sharing (Advanced)
+
+### Problem Statement
+
+Currently, each endpoint gets its own cloned pipeline instance to maintain independent state. With 100 endpoints using identical pipelines, you have 100 copies in memory. While templates reduce config size, they don't reduce runtime memory footprint.
+
+**Example:**
+```lua
+-- Current approach: Each endpoint has its own pipeline
+self.pipelines["net/adm/rx_bytes"] = base_pipeline:clone()  -- DiffTrigger state: last_val, threshold
+self.pipelines["net/adm/tx_bytes"] = base_pipeline:clone()  -- Independent copy
+self.pipelines["net/jan/rx_bytes"] = base_pipeline:clone()  -- Independent copy
+-- ... 97 more clones
+```
+
+**Memory Cost:**
+- 100 endpoints × (DiffTrigger + TimeTrigger + DeltaValue) = ~100 state objects
+- Each state object: ~100 bytes
+- Total: ~10KB (not huge, but adds up with more process blocks)
+
+### Proposed Solution: Stateless Pipelines with External State
+
+**Core Idea:** Separate pipeline logic (stateless, shareable) from pipeline state (per-endpoint).
+
+#### Architecture
+
+```lua
+---@class StatelessPipeline
+---@field process_blocks Process[] Shared logic, no state
+local StatelessPipeline = {}
+
+function StatelessPipeline:run(value, state)
+    local val = value
+    local short = false
+    local err = nil
+
+    for i, process in ipairs(self.process_blocks) do
+        -- Pass per-endpoint state to each process block
+        val, short, err = process:run(val, state[i])
+        if err or short then break
+    end
+
+    return val, short, err
+end
+
+---@class PipelineState
+---@field states table[] Array of per-block state objects
+local PipelineState = {}
+
+function PipelineState.new(pipeline_template)
+    local states = {}
+    for i, process_block in ipairs(pipeline_template.process_blocks) do
+        -- Each block initializes its own state
+        states[i] = process_block:create_state()
+    end
+    return setmetatable({states = states}, PipelineState)
+end
+```
+
+#### Process Block Refactor
+
+**Before (Stateful):**
+```lua
+---@class DiffTrigger: Process
+---@field threshold number
+---@field last_val number
+---@field curr_val number
+local DiffTrigger = {}
+
+function DiffTrigger:run(value)
+    self.curr_val = value
+    if self.diff_method(self.curr_val, self.last_val, self.threshold) then
+        self.last_val = value
+        return value, false, nil
+    end
+    return nil, true, nil
+end
+
+function DiffTrigger:clone()
+    -- Full object copy
+    return DiffTrigger.new(self.config)
+end
+```
+
+**After (Stateless with External State):**
+```lua
+---@class DiffTrigger: Process
+---@field threshold number (immutable config)
+---@field diff_method function (immutable logic)
+local DiffTrigger = {}
+
+---@class DiffTriggerState
+---@field last_val number
+---@field curr_val number
+---@field empty boolean
+
+function DiffTrigger:create_state()
+    return {
+        last_val = self.initial_val or 0,
+        curr_val = self.initial_val,
+        empty = (self.initial_val == nil)
+    }
+end
+
+function DiffTrigger:run(value, state)
+    state.curr_val = value
+    if state.empty or self.diff_method(state.curr_val, state.last_val, self.threshold) then
+        state.last_val = value
+        state.empty = false
+        return value, false, nil
+    end
+    return nil, true, nil
+end
+
+function DiffTrigger:reset(state)
+    -- Reset only state, not the process block itself
+end
+```
+
+#### Cache Implementation
+
+```lua
+local metrics_cache = {
+    shared_pipelines = {},  -- Template name -> StatelessPipeline (SHARED)
+    endpoint_states = {}    -- Endpoint -> PipelineState (PER-ENDPOINT)
+}
+
+function metrics_cache:process_metric(endpoint, template_name, value)
+    -- Get shared pipeline (created once per template)
+    local pipeline = self.shared_pipelines[template_name]
+    if not pipeline then
+        pipeline = self:build_shared_pipeline(template_name)
+        self.shared_pipelines[template_name] = pipeline
+    end
+
+    -- Get per-endpoint state (lazy init)
+    local state = self.endpoint_states[endpoint]
+    if not state then
+        state = PipelineState.new(pipeline)
+        self.endpoint_states[endpoint] = state
+    end
+
+    -- Run shared pipeline with endpoint-specific state
+    return pipeline:run(value, state.states)
+end
+```
+
+### Memory Savings
+
+**Before:**
+```
+100 endpoints × (DiffTrigger + TimeTrigger + DeltaValue) instances
+= 100 × 3 objects = 300 objects
+= ~30KB
+```
+
+**After:**
+```
+Shared: 1 template × 3 process blocks = 3 objects (~1KB)
+State: 100 endpoints × 3 state objects = 300 state objects (~15KB)
+Total: ~16KB (47% reduction)
+```
+
+**Scaling Benefits:**
+- 1000 endpoints with 5 templates: 1000 clones → 5 shared + 1000 states
+- Memory reduction increases with more endpoints sharing templates
+- Better CPU cache locality (shared logic is hot in cache)
+
+### Trade-offs
+
+**Pros:**
+- ✅ Significant memory reduction (30-50% for typical configs)
+- ✅ Better cache locality (hot pipeline code shared)
+- ✅ Clearer separation: logic vs state
+- ✅ Easier to reason about immutable pipeline logic
+
+**Cons:**
+- ❌ More complex implementation (state management)
+- ❌ All process blocks must be refactored
+- ❌ Slight performance overhead (extra indirection for state access)
+- ❌ Harder to debug (state is external to process block)
+- ❌ Breaking change (can't be done incrementally)
+
+### Implementation Path
+
+This is a **major refactor** and should only be considered if:
+1. Memory usage becomes a production issue (>1000 endpoints)
+2. Phase 1-4 are complete and stable
+3. Comprehensive tests are in place
+4. Team capacity for large refactor
+
+**Estimated Effort:** 2-3 weeks
+
+**Alternative:** If memory is a concern but not critical, consider:
+- Lazy pipeline creation (only create when endpoint first publishes)
+- Pipeline pooling (reuse pipelines for inactive endpoints)
+- Lightweight state (use primitive types, avoid tables where possible)
