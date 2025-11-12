@@ -1827,6 +1827,15 @@
           }
         ]
       },
+      "mcu/sys/mem/alloc": {
+        "protocol": "http",
+        "process": [
+          {
+            "type": "TimeTrigger",
+            "period": 60
+          }
+        ]
+      },
       "mcu/power/temperature/internal": {
         "protocol": "http",
         "process": [
