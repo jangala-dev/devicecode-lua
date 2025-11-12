@@ -833,7 +833,8 @@ local function uci_manager(ctx)
 
             -- Trigger speedtest only on new connections
             if status == "online" then
-                if not networks[network].speed or sc.monotime() - networks[network].speed_time > 180 then
+                local SPEEDTEST_CACHE_DURATION = 600
+                if not networks[network].speed or sc.monotime() - networks[network].speed_time > SPEEDTEST_CACHE_DURATION then
                     local interface = networks[network].cfg.interfaces[1]
                     log.info("NET: network", network, ": newly online, scheduling speedtest")
                     speedtest_queue:put({ network = network, interface = interface })
