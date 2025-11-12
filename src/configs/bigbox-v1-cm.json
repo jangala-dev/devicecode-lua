@@ -1832,7 +1832,7 @@
         "process": [
           {
             "type": "TimeTrigger",
-            "period": 60
+            "duration": 60
           }
         ]
       },
