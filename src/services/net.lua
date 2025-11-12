@@ -850,6 +850,12 @@ local function uci_manager(ctx)
         local iface = msg.interface
         if not modem_id or not iface then return end
 
+        -- Check if this interface was already resolved and configured
+        if resolved_interfaces[modem_id] == iface then
+            log.debug("NET: Interface", iface, "already resolved for modem", modem_id)
+            return
+        end
+
         resolved_interfaces[modem_id] = iface
         log.info("NET: Interface", iface, "resolved for modem", modem_id)
 
