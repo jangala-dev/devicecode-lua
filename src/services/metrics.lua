@@ -123,12 +123,13 @@ function metrics_service:_handle_metric(metric, msg)
     local base_pipeline = metric.base_pipeline
 
     local value = msg.payload
+    if value == nil then return end
     if field then
         value = value[field]
     end
     if value == nil then return end
 
-    local str_endpoint = table.concat(rename or msg.topic, '/')
+    local str_endpoint = table.concat(rename or msg.topic, '.')
 
     if self.pipelines[str_endpoint] == nil then
         self.pipelines[str_endpoint] = base_pipeline:clone()
@@ -213,7 +214,7 @@ function metrics_service:_main(ctx)
     local config_sub = self.conn:subscribe({ 'config', 'metrics' })
     local cloud_config_sub = self.conn:subscribe({ 'config', 'mainflux' })
 
-    local next_publish_time = os.time() + math.huge
+    local next_publish_time = math.huge
 
     -- local device_info_sub = self.conn:subscribe({'system', 'device', 'idenitity'}) idk what this will be but
     -- it is a reminder to get system info that canopy will need for reporting
@@ -229,7 +230,7 @@ function metrics_service:_main(ctx)
             self.ctx:done_op(),
             config_sub:next_msg_op():wrap(function(config_msg)
                 self:_handle_config(config_msg.payload)
-                next_publish_time = os.time() + self.publish_period
+                next_publish_time = sc.monotime() + self.publish_period
             end),
             cloud_config_sub:next_msg_op():wrap(function(config_msg)
                 local config = conf.standardise_config(config_msg.payload)
@@ -238,7 +239,7 @@ function metrics_service:_main(ctx)
             sleep.sleep_until_op(next_publish_time):wrap(function()
                 local values = self.metric_values
                 self.metric_values = {}
-                next_publish_time = os.time() + self.publish_period
+                next_publish_time = sc.monotime() + self.publish_period
                 self:_publish_all(values)
             end),
             unpack(metric_ops)
