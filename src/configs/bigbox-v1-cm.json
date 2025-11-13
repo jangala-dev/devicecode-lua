@@ -679,10 +679,7 @@
   },
   "metrics": {
     "cloud_url": "$CLOUD_URL",
-    "publish_cache": {
-      "enabled": true,
-      "period": 60
-    },
+    "publish_period": 60,
     "collections": {
       "net/adm/rx_bytes": {
         "protocol": "http",
