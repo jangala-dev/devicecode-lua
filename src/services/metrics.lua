@@ -157,6 +157,57 @@ function metrics_service:_handle_metric(metric, msg)
     end
 end
 
+---Process validation warnings and remove invalid configs
+---@param warns table
+---@param config table
+function metrics_service:_process_config_warnings(warns, config)
+    if #warns == 0 then return end
+
+    local warn_msgs = {}
+    local dropped_metrics = {}
+    local dropped_templates = {}
+
+    for _, warn in ipairs(warns) do
+        table.insert(warn_msgs, warn.msg)
+        if warn.endpoint then
+            if warn.type == "metric" then
+                config.collections[warn.endpoint] = nil
+                dropped_metrics[warn.endpoint] = true
+            elseif warn.type == "template" then
+                config.templates[warn.endpoint] = nil
+                dropped_templates[warn.endpoint] = true
+            end
+        end
+    end
+
+    local summary_parts = {}
+    local dropped_metric_list = {}
+    for endpoint, _ in pairs(dropped_metrics) do
+        table.insert(dropped_metric_list, endpoint)
+    end
+    if #dropped_metric_list > 0 then
+        table.insert(summary_parts, string.format("Dropped %d metric(s): %s",
+            #dropped_metric_list, table.concat(dropped_metric_list, ", ")))
+    end
+
+    local dropped_template_list = {}
+    for endpoint, _ in pairs(dropped_templates) do
+        table.insert(dropped_template_list, endpoint)
+    end
+    if #dropped_template_list > 0 then
+        table.insert(summary_parts, string.format("Dropped %d template(s): %s",
+            #dropped_template_list, table.concat(dropped_template_list, ", ")))
+    end
+
+    log.warn(string.format(
+        "%s - %s: Metrics config warnings (invalid configs will be dropped):\n\t%s\n\nSummary: %s",
+        self.ctx:value('service_name'),
+        self.ctx:value('fiber_name'),
+        table.concat(warn_msgs, "\n\t"),
+        table.concat(summary_parts, "; ")
+    ))
+end
+
 ---use config to build cache and processing pipelines
 ---@param config table
 function metrics_service:_handle_config(config)
@@ -170,22 +221,8 @@ function metrics_service:_handle_config(config)
         ))
         return
     end
-    -- log any warnings and remove invalid metric configs
-    if #warns > 0 then
-        local warn_msgs = {}
-        for _, warn in ipairs(warns) do
-            table.insert(warn_msgs, warn.msg)
-            if warn.endpoint then
-                config.collections[warn.endpoint] = nil
-            end
-        end
-        log.warn(string.format(
-            "%s - %s: Metrics config warnings:\n\t%s",
-            self.ctx:value('service_name'),
-            self.ctx:value('fiber_name'),
-            table.concat(warn_msgs, "\n\t")
-        ))
-    end
+
+    self:_process_config_warnings(warns, config)
 
     local metrics, publish_period, merged_cloud_config = conf.apply_config(self.conn, config, self.cloud_config)
     if #metrics == 0 then
