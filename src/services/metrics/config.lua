@@ -118,7 +118,7 @@ local function validate_config(config)
     end
 
     if type(config.publish_period) ~= "number" or tonumber(config.publish_period) == nil then
-        return false, warnings, "Invalid publish cache configuration"
+        return false, warnings, "Publish period must be of number type, found " .. type(config.publish_period)
     end
 
     if config.publish_period <= 0 then
