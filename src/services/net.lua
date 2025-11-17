@@ -547,10 +547,6 @@ local function set_network_config(instance)
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
             { "mwan3", net_id, "track_ip", tracking_ips }
         ))
-        net_service.conn:publish(new_msg(
-            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            { "mwan3", net_id, "initial_state", instance.online and "online" or "offline" }
-        ))
         -- now add the member
         local member_id = net_id .. "_member"
         net_service.conn:publish(new_msg(
@@ -581,11 +577,6 @@ local function set_network_speed(instance)
 
     log.info("NET: Applying network speed for:", net_id)
 
-    -- first, add the interface
-    net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "mwan3", net_id, "initial_state", instance.status == "online" and "online" or "offline" }
-    ))
     -- now add the member
     local member_id = net_id .. "_member"
     net_service.conn:publish(new_msg(
