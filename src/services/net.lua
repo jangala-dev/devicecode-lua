@@ -547,10 +547,6 @@ local function set_network_config(instance)
             { 'hal', 'capability', 'uci', '1', 'control', 'set' },
             { "mwan3", net_id, "track_ip", tracking_ips }
         ))
-        net_service.conn:publish(new_msg(
-            { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-            { "mwan3", net_id, "initial_state", instance.online and "online" or "offline" }
-        ))
         -- now add the member
         local member_id = net_id .. "_member"
         net_service.conn:publish(new_msg(
@@ -581,11 +577,6 @@ local function set_network_speed(instance)
 
     log.info("NET: Applying network speed for:", net_id)
 
-    -- first, add the interface
-    net_service.conn:publish(new_msg(
-        { 'hal', 'capability', 'uci', '1', 'control', 'set' },
-        { "mwan3", net_id, "initial_state", instance.status == "online" and "online" or "offline" }
-    ))
     -- now add the member
     local member_id = net_id .. "_member"
     net_service.conn:publish(new_msg(
@@ -833,7 +824,8 @@ local function uci_manager(ctx)
 
             -- Trigger speedtest only on new connections
             if status == "online" then
-                if not networks[network].speed or sc.monotime() - networks[network].speed_time > 180 then
+                local SPEEDTEST_CACHE_DURATION = 600
+                if not networks[network].speed or sc.monotime() - networks[network].speed_time > SPEEDTEST_CACHE_DURATION then
                     local interface = networks[network].cfg.interfaces[1]
                     log.info("NET: network", network, ": newly online, scheduling speedtest")
                     speedtest_queue:put({ network = network, interface = interface })
@@ -849,6 +841,12 @@ local function uci_manager(ctx)
         local modem_id = msg.modem_id
         local iface = msg.interface
         if not modem_id or not iface then return end
+
+        -- Check if this interface was already resolved and configured
+        if resolved_interfaces[modem_id] == iface then
+            log.debug("NET: Interface", iface, "already resolved for modem", modem_id)
+            return
+        end
 
         resolved_interfaces[modem_id] = iface
         log.info("NET: Interface", iface, "resolved for modem", modem_id)
