@@ -93,17 +93,29 @@ function metrics_service:_http_publish(data)
     end)
 end
 
+local function reset_pipelines(pipelines, metrics)
+    for endpoint, _ in pairs(metrics) do
+        if pipelines[endpoint] then
+            pipelines[endpoint]:reset()
+        end
+    end
+end
+
+local function set_timestamps_realtime_millis(base_time, metrics)
+    for _, metric in pairs(metrics) do
+        metric.time = math.floor((base_time.real + (metric.time - base_time.mono))*1000)
+    end
+    return metrics
+end
+
 ---iterates over a table of data to be published
 ---@param data table
 function metrics_service:_publish_all(data)
     -- all first keys are the names of the publish protocols
     for protocol, values in pairs(data) do
         -- reset all pipelines after publish
-        for endpoint, _ in pairs(values) do
-            if self.pipelines[endpoint] then
-                self.pipelines[endpoint]:reset()
-            end
-        end
+        reset_pipelines(self.pipelines, values)
+        values = set_timestamps_realtime_millis(self.base_time, values)
         local protocol_fn = self["_" .. protocol .. "_publish"]
         if protocol_fn == nil then
             log.error(string.format('Failed to publish for %s, no function associated with protocol', protocol))
@@ -152,7 +164,7 @@ function metrics_service:_handle_metric(metric, msg)
         self.metric_values[protocol] = self.metric_values[protocol] or {}
         self.metric_values[protocol][str_endpoint] = {
             value = ret,
-            time = math.floor(sc.realtime() * 1000)
+            time = sc.monotime()
         }
     end
 end
@@ -247,9 +259,15 @@ end
 function metrics_service:_main(ctx)
     self.ctx = ctx
     self.http_send_q = http.start_http_publisher(self.ctx, self.conn)
+    self.base_time = {
+        synced = false,
+        real = sc.realtime(),
+        mono = sc.monotime()
+    }
 
     local config_sub = self.conn:subscribe({ 'config', 'metrics' })
     local cloud_config_sub = self.conn:subscribe({ 'config', 'mainflux' })
+    local time_sync_sub = self.conn:subscribe({ 'time', 'ntp_synced' })
 
     local next_publish_time = math.huge
 
@@ -267,16 +285,34 @@ function metrics_service:_main(ctx)
             self.ctx:done_op(),
             config_sub:next_msg_op():wrap(function(config_msg)
                 self:_handle_config(config_msg.payload)
-                next_publish_time = sc.monotime() + self.publish_period
+                next_publish_time = self.base_time.synced and (sc.monotime() + self.publish_period) or math.huge
             end),
             cloud_config_sub:next_msg_op():wrap(function(config_msg)
                 local config = conf.standardise_config(config_msg.payload)
                 self.cloud_config = conf.merge_config(self.cloud_config, config)
             end),
+            time_sync_sub:next_msg_op():wrap(function(msg)
+                if msg.payload == true then
+                    if not self.base_time.synced then
+                        -- First time sync - calculate real time at base and schedule first publish
+                        self.base_time.synced = true
+                        local real = sc.realtime()
+                        local mono = sc.monotime()
+                        local real_at_base = real - (mono - self.base_time.mono)
+                        self.base_time.real = real_at_base
+                        if self.publish_period then
+                            next_publish_time = mono + self.publish_period
+                        end
+                    end
+                else
+                    self.base_time.synced = false
+                    next_publish_time = math.huge
+                end
+            end),
             sleep.sleep_until_op(next_publish_time):wrap(function()
                 local values = self.metric_values
                 self.metric_values = {}
-                next_publish_time = sc.monotime() + self.publish_period
+                next_publish_time = self.base_time.synced and (sc.monotime() + self.publish_period) or math.huge
                 self:_publish_all(values)
             end),
             unpack(metric_ops)
