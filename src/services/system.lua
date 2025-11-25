@@ -16,9 +16,44 @@ local system_service = {
 }
 system_service.__index = system_service
 
+local function get_boot_time(_)
+    local uptime, err = sysinfo.get_uptime()
+    if err then
+        return nil, err
+    end
+    return math.floor(os.time() - uptime)
+end
+
+local function get_mem_stats(_)
+    local stats, err = sysinfo.get_ram_info()
+    if err then
+        return nil, err
+    end
+    return {
+        total = stats.total,
+        used = stats.used,
+        free = stats.free,
+        util = (stats.used / stats.total) * 100
+    }
+end
+
+local METRICS = {
+    -- static metrics
+    { method = sysinfo.get_hw_revision, key = { 'hardware', 'revision' } },
+    { method = sysinfo.get_fw_version, key = { 'firmware', 'version' } },
+    { method = get_boot_time, key = { 'boot_time' }, needs_time_sync = true },
+    { method = sysinfo.get_board_revision, key = { 'hardware', 'board', 'revision' } },
+    { method = sysinfo.get_serial, key = { 'hardware', 'serial' } },
+    -- dynamic metrics
+    { method = sysinfo.get_cpu_model, key = { 'cpu', 'cpu_model' } },
+    { method = sysinfo.get_cpu_utilisation_and_freq, key = { 'cpu' } },
+    { method = get_mem_stats, key = { 'mem' } },
+    { method = sysinfo.get_temperature, key = { 'temperature' } },
+}
+
 ---Configure USB hub and alarms
 ---@param config_msg table
-function system_service:_handle_config(config_msg)
+function system_service:_handle_config(ctx, config_msg)
     if config_msg.payload == nil then
         log.error("System: Invalid configuration message")
         return
@@ -37,16 +72,16 @@ function system_service:_handle_config(config_msg)
         -- this is just a copy-paste job, look at this again during mvp
         -- and think about abstraction and renablement(?) etc
         log.info(string.format("%s - %s: Disabling USB3",
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name")
+            ctx:value("service_name"),
+            ctx:value("fiber_name")
         ))
-        usb3.disable_usb3(self.ctx, self.model)
+        usb3.disable_usb3(ctx, self.model)
     end
 
-    local alarms = config_msg.payload.alarms
-    if alarms and type(alarms) == "table" then
+    local cfg_alarms = config_msg.payload.alarms
+    if cfg_alarms and type(cfg_alarms) == "table" then
         self.alarm_manager:delete_all()
-        for _, alarm in ipairs(alarms) do
+        for _, alarm in ipairs(cfg_alarms) do
             local add_err = self.alarm_manager:add(alarm)
             if add_err then
                 log.error("Failed to add alarm: ", add_err)
@@ -55,116 +90,55 @@ function system_service:_handle_config(config_msg)
     end
 end
 
----Gets static information (hw model, hw/fw version, boot time)
----@return table?
-local function get_static_infos()
-    local info = {}
-    local hw_revision, hw_err = sysinfo.get_hw_revision()
-    if hw_err then
-        log.error(string.format("System: Failed to get model and version: %s", hw_err))
-    else
-        info.hardware = {
-            revision = hw_revision
-        }
+local function build_keyed_table(tbl, keys)
+    local current = tbl
+    for i = 1, #keys - 1 do
+        local k = keys[i]
+        current[k] = current[k] or {}
+        current = current[k]
     end
-
-    local firmware_version, fw_err = sysinfo.get_fw_version()
-    if fw_err then
-        log.error(string.format("System: Failed to get firmware version: %s", fw_err))
-    else
-        info.firmware = {
-            version = firmware_version
-        }
-    end
-
-    local uptime, uptime_err = sysinfo.get_uptime()
-    local boot_time
-    if uptime_err then
-        log.error("Failed to get uptime: ", uptime_err)
-    else
-        boot_time = math.floor(os.time() - uptime)
-        info.boot_time = boot_time
-    end
-
-    local board_revision, revision_err = sysinfo.get_board_revision()
-    if revision_err then
-        log.error("Failed to get board revision: ", revision_err)
-    else
-        info.hardware = info.hardware or {}
-        info.hardware.board = { revision = board_revision }
-    end
-
-    local serial, serial_err = sysinfo.get_serial()
-    if serial_err then
-        log.debug("Failed to get serial number: ", serial_err)
-    else
-        info.hardware = info.hardware or {}
-        info.hardware.serial = serial
-    end
-
-    if next(info) then
-        return info
-    else
-        log.error("System: No static information available")
-        return nil
-    end
+    return current
 end
 
 ---Periodic gathering a publish of system information
-function system_service:_report_sysinfo()
-    local sysinfo_data = get_static_infos() or {}
-    if sysinfo_data then
-        if sysinfo_data.hardware and sysinfo_data.hardware.revision then
-            -- Extract model and version from hw revision
-            local hw_revision = sysinfo_data.hardware.revision
-            local model, _ = hw_revision:match('(%S+)%s+(%S+)')
-            if model then self.model = model end
-        end
+function system_service:_report_sysinfo(ctx)
+    local time_synced_sub = self.conn:subscribe({ 'time', 'ntp_synced' })
+    local time_synced = false
+    local hw_revision = sysinfo.get_hw_revision()
+    if hw_revision then
+        self.model = hw_revision:match('(%S+)') -- this should be put on a channel
     end
 
     local report_period = self.report_period_channel:get()
-    while not self.ctx:err() do
-        local cpu_model, cpu_model_err = sysinfo.get_cpu_model()
-        if cpu_model_err then
-            log.debug("Failed to get CPU model: ", cpu_model_err)
+    while not ctx:err() do
+        local stats = {}
+        for _, metric in ipairs(METRICS) do
+            if (metric.needs_time_sync and time_synced) or (not metric.needs_time_sync) then
+                local result, err
+                if metric.method then
+                    result, err = metric.method(ctx)
+                else
+                    err = "No method defined for metric"
+                end
+                if err then
+                    log.error(string.format("System: Failed to get metric for %s: %s",
+                        table.concat(metric.key, '.'), err))
+                else
+                    local current = build_keyed_table(stats, metric.key)
+                    local last_key = metric.key[#metric.key]
+                    if type(result) ~= "table" then -- wrap non-tables
+                        result = { [last_key] = result }
+                    end
+                    for rk, rv in pairs(result) do
+                        current[rk] = rv
+                    end
+                end
+            end
         end
-
-        local all_util, core_util, avg_freq, core_freq, err = sysinfo.get_cpu_utilisation_and_freq(self.ctx)
-        if err then
-            log.debug("Failed to get CPU utilisation and frequency: ", err)
-        end
-
-        local total, used, free, ram_err = sysinfo.get_ram_info()
-        if ram_err then
-            log.debug("Failed to get RAM info: ", ram_err)
-        end
-
-        local temperature, temp_err = sysinfo.get_temperature()
-        if temp_err then
-            log.debug("Failed to get temperature: ", temp_err)
-        end
-
-        sysinfo_data.cpu = {
-            cpu_model = cpu_model,
-            overall_utilisation = all_util,
-            core_utilisations = core_util,
-            average_frequency = avg_freq,
-            core_frequencies = core_freq
-        }
-
-        sysinfo_data.mem = {
-            total = total,
-            used = used,
-            free = free,
-            util = (used / total) * 100
-        }
-
-        sysinfo_data.temperature = temperature
-        sysinfo_data.heartbeat = 0
 
         self.conn:publish_multiple(
             { 'system', 'info' },
-            sysinfo_data,
+            stats,
             { retained = true }
         )
 
@@ -173,14 +147,17 @@ function system_service:_report_sysinfo()
             self.report_period_channel:get_op():wrap(function(new_period)
                 report_period = new_period
             end),
-            self.ctx:done_op()
+            time_synced_sub:next_msg_op():wrap(function(msg)
+                time_synced = (msg.payload == true)
+            end),
+            ctx:done_op()
         ):perform()
     end
 end
 
 ---Performs shutdown or reboot of the system
 ---@param alarm Alarm
-function system_service:_handle_alarm(alarm)
+function system_service:_handle_alarm(ctx, alarm)
     local name = alarm.payload and alarm.payload.name
     local type = alarm.payload and alarm.payload.type
     if type ~= 'reboot' and type ~= 'shutdown' then return end
@@ -233,15 +210,15 @@ function system_service:_handle_alarm(alarm)
 
     if type == 'shutdown' then
         log.info(string.format("%s - %s: Shutting down system",
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name")
+            ctx:value("service_name"),
+            ctx:value("fiber_name")
         ))
         local cmd = exec.command('shutdown', '-h', 'now')
         cmd:run()
     elseif type == 'reboot' then
         log.info(string.format("%s - %s: Rebooting system",
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name")
+            ctx:value("service_name"),
+            ctx:value("fiber_name")
         ))
         local cmd = exec.command('reboot')
         cmd:run()
@@ -249,16 +226,16 @@ function system_service:_handle_alarm(alarm)
 end
 
 --- Main system service loop
-function system_service:_system_main()
+function system_service:_system_main(ctx)
     -- Subscribe to system-related topics
     local config_sub = self.conn:subscribe({ 'config', 'system' })
     local time_sync_sub = self.conn:subscribe({ 'time', 'ntp_synced' })
 
-    while not self.ctx:err() do
+    while not ctx:err() do
         op.choice(
-            self.ctx:done_op(),
+            ctx:done_op(),
             config_sub:next_msg_op():wrap(function(config_msg)
-                self:_handle_config(config_msg)
+                self:_handle_config(ctx, config_msg)
             end),
             time_sync_sub:next_msg_op():wrap(function(msg)
                 if msg.payload then
@@ -268,7 +245,7 @@ function system_service:_system_main()
                 end
             end),
             self.alarm_manager:next_alarm_op():wrap(function(alarm)
-                self:_handle_alarm(alarm)
+                self:_handle_alarm(ctx, alarm)
             end)
         ):perform()
     end
@@ -280,16 +257,15 @@ end
 ---@param ctx Context
 ---@param conn Connection
 function system_service:start(ctx, conn)
-    self.ctx = ctx
     self.conn = conn
     self.report_period_channel = channel.new()
     self.alarm_manager = alarms.AlarmManager.new()
     log.trace("Starting System Service")
-    service.spawn_fiber('System Main', conn, ctx, function()
-        self:_system_main()
+    service.spawn_fiber('System Main', conn, ctx, function(fctx)
+        self:_system_main(fctx)
     end)
-    service.spawn_fiber('System Sysinfo', conn, ctx, function()
-        self:_report_sysinfo()
+    service.spawn_fiber('System Sysinfo', conn, ctx, function(fctx)
+        self:_report_sysinfo(fctx)
     end)
 end
 
