@@ -41,6 +41,7 @@ local METRICS = {
     -- static metrics
     { method = sysinfo.get_hw_revision, key = { 'hardware', 'revision' } },
     { method = sysinfo.get_fw_version, key = { 'firmware', 'version' } },
+    -- Boot time should not be retrieved until time is synced
     { method = get_boot_time, key = { 'boot_time' }, needs_time_sync = true },
     { method = sysinfo.get_board_revision, key = { 'hardware', 'board', 'revision' } },
     { method = sysinfo.get_serial, key = { 'hardware', 'serial' } },
