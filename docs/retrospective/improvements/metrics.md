@@ -60,7 +60,7 @@ end
 
 ---
 
-### 2. Pipeline Templates
+### 2. Pipeline Templates ✅
 
 **Why:** Config has massive duplication (2400 lines, mostly repeated pipeline definitions).
 
