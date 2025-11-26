@@ -408,6 +408,150 @@ end
 
 ---
 
+### 7. Cache-Level Concatenation (Buffering)
+
+**Why:** Need to batch rare events (e.g., state changes) to reduce HTTP request overhead while preserving all values with correct timestamps.
+
+**What:** Per-collection buffer mode that accumulates values between publish periods.
+
+**Config:**
+```json
+{
+  "metrics": {
+    "publish": {
+      "period": 300  // Publish every 5 minutes
+    },
+    "collections": {
+      "wifi/clients/+/state": {
+        "protocol": "http",
+        "process": [{"type": "AnyChange"}],
+        "buffer": "concat"  // Accumulate all changes
+      },
+      "net/adm/rx_bytes": {
+        "protocol": "http",
+        "process": [{"type": "DiffTrigger"}],
+        "buffer": {
+          "mode": "concat",
+          "max_items": 50  // Optional: flush early if too many
+        }
+      },
+      "modem/signal/rssi": {
+        "protocol": "http",
+        "buffer": "single"  // Default: latest value only
+      }
+    }
+  }
+}
+```
+
+**Implementation:**
+
+```lua
+function metrics_service:_handle_metric(metric, msg)
+    -- ... pipeline processing ...
+
+    if not short then
+        self.metric_values[protocol] = self.metric_values[protocol] or {}
+        local now = sc.monotime()
+
+        local buffer_config = metric.buffer or {mode = "single"}
+        if type(buffer_config) == "string" then
+            buffer_config = {mode = buffer_config}
+        end
+
+        if buffer_config.mode == "concat" then
+            -- Initialize concat buffer if needed
+            if not self.metric_values[protocol][str_endpoint] then
+                self.metric_values[protocol][str_endpoint] = {
+                    mode = "concat",
+                    items = {},
+                    first_time = now
+                }
+            end
+
+            -- Add to buffer
+            local buffer = self.metric_values[protocol][str_endpoint]
+            table.insert(buffer.items, {
+                value = ret,
+                time = now
+            })
+        else
+            -- Default single-value mode (replace previous)
+            self.metric_values[protocol][str_endpoint] = {
+                mode = "single",
+                value = ret,
+                time = now
+            }
+        end
+    end
+end
+```
+
+**SenML Encoder Update:**
+```lua
+local function encode_r(base_topic, values, output)
+    for k, v in pairs(values) do
+        local topic = construct_topic(base_topic, k)
+
+        -- Check if it's a concat buffer
+        if v.mode == "concat" then
+            -- Flatten buffer items into multiple SenML records
+            for _, item in ipairs(v.items) do
+                local senml_obj, err = encode(topic, item.value, item.time)
+                if err then return nil, err end
+                table.insert(output, senml_obj)
+            end
+        else
+            -- Single value {value, time}
+            local senml_obj, err = encode(topic, v.value, v.time)
+            if err then return nil, err end
+            table.insert(output, senml_obj)
+        end
+    end
+    return output, nil
+end
+```
+
+**HTTP Output (Flattened):**
+```json
+[
+  {"n": "wifi.clients.state", "vs": "connected", "t": 1234567890.000},
+  {"n": "wifi.clients.state", "vs": "disconnected", "t": 1234567895.123},
+  {"n": "wifi.clients.state", "vs": "connected", "t": 1234567900.456},
+  {"n": "net.adm.rx_bytes", "v": 1024, "t": 1234567905.000}
+]
+```
+
+**Benefits:**
+- **Reduces HTTP overhead** - 1 request instead of N for rare events
+- **Preserves temporal accuracy** - Each value keeps original timestamp
+- **Standard SenML** - No custom array handling
+- **Composable** - Works with any processing blocks
+- **Per-metric control** - Mix single and concat modes
+
+**Use Cases:**
+- ✅ State changes: `AnyChange` + concat to batch events
+- ✅ Threshold monitoring: `DiffTrigger` + concat for history
+- ✅ Raw value collection: No processing + concat
+- ⚠️ Not recommended with `DeltaValue` (state reset issues)
+
+**Naming:**
+- **`publish.period`**: Global publish timer (service-level)
+- **`buffer`**: Per-metric accumulation mode (collection-level)
+
+**Files:**
+- Update: `metrics.lua` (_handle_metric, value storage)
+- Update: `senml.lua` (handle concat buffers)
+- Update: `config.lua` (rename publish_cache → publish, add buffer validation)
+
+**Success Criteria:**
+- Single and concat modes work correctly
+- SenML flattens concat buffers with correct timestamps
+- Config validation ensures buffer compatibility
+- No impact on single-mode performance
+
+---
+
 ## Phase 3: Observability
 
 **Dependencies:** Phase 1 complete (need unified cache and pipelines to instrument).
