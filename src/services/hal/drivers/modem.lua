@@ -51,14 +51,22 @@ end
 
 local function get_ports(ports)
     local port_list = {}
-    for _, port in ipairs(ports) do
-        local port_name, port_type = string.match(port, "^([%w%-]+)%s*%(([%w%-]+)%)")
-        if port_list[port_type] == nil then
-            port_list[port_type] = { port_name }
-        else
-            table.insert(port_list[port_type], port_name)
+
+    -- ports is now a comma-separated string
+    if type(ports) == "string" then
+        for port in ports:gmatch("[^,]+") do
+            port = port:match("^%s*(.-)%s*$") -- trim whitespace
+            local port_name, port_type = string.match(port, "^([%w%-]+)%s*%(([%w%-]+)%)")
+            if port_name and port_type then
+                if port_list[port_type] == nil then
+                    port_list[port_type] = { port_name }
+                else
+                    table.insert(port_list[port_type], port_name)
+                end
+            end
         end
     end
+
     return port_list
 end
 
@@ -189,6 +197,43 @@ function Driver:poll_info()
     log.trace(string.format("Modem - %s: Polling info stopped", self.imei))
 end
 
+local function is_array(tbl)
+    if type(tbl) ~= "table" then
+        return false
+    end
+    local count = 0
+    for k, _ in pairs(tbl) do
+        count = count + 1
+        if type(k) ~= "number" or k < 1 or k > count then
+            return false
+        end
+    end
+    return count > 0
+end
+
+local function format_arrays(tbl)
+    if type(tbl) ~= "table" then
+        return tbl
+    end
+
+    -- Check if this table is an array
+    if is_array(tbl) then
+        -- Convert array to comma-separated string
+        local str_parts = {}
+        for i = 1, #tbl do
+            table.insert(str_parts, tostring(tbl[i]))
+        end
+        return table.concat(str_parts, ",")
+    end
+
+    -- Not an array, so recursively process nested tables
+    local result = {}
+    for k, v in pairs(tbl) do
+        result[k] = format_arrays(v)
+    end
+    return result
+end
+
 ---Reads mmcli modem output into a table structure
 ---@return table?
 ---@return table? error
@@ -201,7 +246,8 @@ function Driver:get_modem_info()
     local info, _, err = json.decode(out)
     if err then return nil, wraperr.new(err) end
 
-    return info.modem, nil
+    -- format any array fields to be a string of format [val1,val2,...]
+    return format_arrays(info.modem), nil
 end
 
 ---Reads mmcli sim output into a table structure
@@ -267,9 +313,11 @@ function Driver:init()
     -- let's get the driver mode
     local drivers = info.generic.drivers
 
-    for _, v in pairs(drivers) do
-        self.mode = v == "qmi_wwan" and "qmi" or v == "cdc_mbim" and "mbim"
-        if self.mode then break end
+    -- drivers is a comma-separated string
+    if drivers:match("qmi_wwan") then
+        self.mode = "qmi"
+    elseif drivers:match("cdc_mbim") then
+        self.mode = "mbim"
     end
 
     -- -- now let's enrich the driver with mode specific functions/overrides

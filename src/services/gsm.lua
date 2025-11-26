@@ -40,6 +40,19 @@ local SCOREMAP = {
     ["5g"] = { rsrp = { -115, -105, -95, -85, 1000000 } }
 }
 
+-- Access technology detection rules: list of required tokens -> access tech name
+-- Rules are checked in order, first match wins
+local ACCESS_TECH_MAP = {
+    { tokens = { 'lte', '5gnr' }, tech = '5g' },  -- Non-standalone 5G
+    { tokens = { '5gnr' }, tech = '5g' },         -- Standalone 5G NR
+    { tokens = { '5g' }, tech = '5g' },
+    { tokens = { 'lte' }, tech = 'lte' },
+    { tokens = { 'umts' }, tech = 'umts' },
+    { tokens = { 'gsm' }, tech = 'gsm' },
+    { tokens = { 'evdo' }, tech = 'evdo' },
+    { tokens = { 'cdma1x' }, tech = 'cdma1x' },
+}
+
 local function purge_sub(ctx, sub)
     local msg
     while not ctx:err() do
@@ -415,8 +428,45 @@ end
 function Modem:_publish_dynamic_data(ctx)
     local access_tech = nil
     local function publish_access_tech(msg)
-        self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-tech' }, msg.payload, { retained = true }))
-        access_tech = msg.payload
+        -- Parse comma-separated access technologies string
+        local tech_string = msg.payload
+        if not tech_string or tech_string == '--' then
+            return
+        end
+
+        -- Split the comma-separated string into a set
+        local technologies = {}
+        for tech in string.gmatch(tech_string, "([^,]+)") do
+            technologies[tech] = true
+        end
+
+        -- Match against ACCESS_TECH_MAP rules
+        for _, rule in ipairs(ACCESS_TECH_MAP) do
+            local all_match = true
+            for _, required_token in ipairs(rule.tokens) do
+                if not technologies[required_token] then
+                    all_match = false
+                    break
+                end
+            end
+            if all_match then
+                access_tech = rule.tech
+                break
+            end
+        end
+
+        -- If no rule matched, log and don't publish
+        if not access_tech then
+            log.debug(string.format(
+                "%s - %s: No access tech rule matched for technologies: %s",
+                ctx:value("service_name"),
+                ctx:value("fiber_name"),
+                tech_string
+            ))
+            return
+        end
+
+        self.conn:publish(new_msg({ 'gsm', 'modem', self.name, 'access-tech' }, access_tech, { retained = true }))
         local access_family, family_err = get_access_family(access_tech)
         if family_err then
             log.warn(family_err)
@@ -429,9 +479,9 @@ function Modem:_publish_dynamic_data(ctx)
         'modem',
         self.idx,
         'info',
-        'band',
-        'band-information',
-        'radio-interface'
+        'modem',
+        'generic',
+        'access-technologies'
     })
 
     local function publish_sim_present(msg)
@@ -561,24 +611,25 @@ end
 ---@return string?
 function Modem:_publish_iface(ctx)
     local net_iface_sub = self.conn:subscribe(
-        { 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'generic', 'ports', '+' }
+        { 'hal', 'capability', 'modem', self.idx, 'info', 'modem', 'generic', 'ports'}
     )
-    -- the bus handles multiple publish for lists as having numbered endpoints
-    -- iterate over all numbered endpoints of ports and check which one holds the net iface; if any
-    -- only breaks if iface is found, otherwise errors out
-    local net_interface
-    while true do
-        local net_interface_msg, interface_err = net_iface_sub:next_msg_with_context_op(
-            context.with_timeout(ctx, 1)
-        ):perform()
-        if interface_err then
-            net_iface_sub:unsubscribe()
-            return interface_err
-        end
-        net_interface = net_interface_msg.payload:match("%s*(%S+)%s%(net%)")
-        if net_interface then break end
-    end
+
+    local net_interface_msg, interface_err = net_iface_sub:next_msg_with_context_op(
+        context.with_timeout(ctx, 1)
+    ):perform()
     net_iface_sub:unsubscribe()
+
+    if interface_err then
+        return interface_err
+    end
+
+    -- ports is now a comma-separated string like "cdc-wdm0 (qmi),ttyUSB0 (ignored),...,wwan0 (net)"
+    local ports_string = net_interface_msg.payload
+    local net_interface = ports_string:match("([^,%(%)%s]+)%s*%(net%)")
+
+    if not net_interface then
+        return "no net interface found in ports"
+    end
 
     self.conn:publish(new_msg(
         { 'gsm', 'modem', self.name, 'interface' },
