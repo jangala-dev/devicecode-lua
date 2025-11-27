@@ -6,7 +6,7 @@ local utils = require "services.hal.utils"
 
 ---@return string?
 ---@return string? Error
-local function get_cpu_info()
+local function get_cpu_info(_)
     local cpuinfo, cpuinfo_err = utils.read_file("/proc/cpuinfo")
     if cpuinfo_err or not cpuinfo then return nil, cpuinfo_err end
     local model
@@ -23,10 +23,7 @@ local function get_cpu_info()
 end
 
 ---@param ctx Context
----@return number? overall_utilisation
----@return number[]? core_utilisations
----@return number? average_frequency
----@return number[]? core_frequencies
+---@return table? cpu_utilisation_and_freq
 ---@return string? Error
 local function get_cpu_utilisation_and_freq(ctx)
     local function extract_cpu_times(stat, core)
@@ -51,16 +48,16 @@ local function get_cpu_utilisation_and_freq(ctx)
     end
 
     local stat_prev, prev_err = utils.read_file("/proc/stat")
-    if prev_err then return nil, nil, nil, nil, prev_err end
+    if prev_err then return nil, prev_err end
     local ctx_err = op.choice(
         sleep.sleep_op(1),
         ctx:done_op():wrap(function ()
             return ctx:err()
         end)
     ):perform()
-    if ctx_err then return nil, nil, nil, nil, ctx_err end
+    if ctx_err then return nil, ctx_err end
     local stat_curr, curr_err = utils.read_file("/proc/stat")
-    if curr_err then return nil, nil, nil, nil, curr_err end
+    if curr_err then return nil, curr_err end
 
     local core_utilisations = {}
     local core_frequencies = {}
@@ -91,31 +88,38 @@ local function get_cpu_utilisation_and_freq(ctx)
     local overall_utilisation = overall_utilisation_sum / (core_id > 0 and core_id or 1)
     local average_frequency = overall_freq_sum / (core_id > 0 and core_id or 1)
 
-    return overall_utilisation, core_utilisations, average_frequency, core_frequencies
+    return {
+        overall_utilisation = overall_utilisation,
+        core_utilisations = core_utilisations,
+        average_frequency = average_frequency,
+        core_frequencies = core_frequencies
+    }
 end
 
 --- Get total, used, and free RAM
----@return number? total
----@return number? used
----@return number? free
+---@return table? ram_info
 ---@return string? Error
-local function get_ram_info()
+local function get_ram_info(_)
     local meminfo, err = utils.read_file("/proc/meminfo")
-    if not meminfo or err then return nil, nil, nil, err end
+    if not meminfo or err then return nil, err end
     local total = meminfo:match("MemTotal:%s*(%d+)") or 0
     local free = meminfo:match("MemFree:%s*(%d+)") or 0
     local buffers = meminfo:match("Buffers:%s*(%d+)") or 0
     local cached = meminfo:match("Cached:%s*(%d+)") or 0
 
     local used = total - (free + buffers + cached)
-    return total, used, free + buffers + cached, nil
+    return {
+        total = tonumber(total),
+        used = tonumber(used),
+        free = tonumber(free) + tonumber(buffers) + tonumber(cached)
+    }, nil
 end
 
 ---Gets the modem and version of hardware
 ---@return string? model
 ---@return string? version
 ---@return string? error
-local function get_hw_revision()
+local function get_hw_revision(_)
     local revision, err = utils.read_file("/etc/hwrevision")
     if err or not revision then return nil, nil, err end
     return revision, nil
@@ -123,25 +127,25 @@ end
 
 ---@return string? version
 ---@return string? error
-local function get_fw_version()
+local function get_fw_version(_)
     local version, err = utils.read_file("/etc/fwversion")
     if err or not version then return nil, err end
     return version, nil
 end
 
-local function get_serial()
+local function get_serial(_)
     local serial, err = utils.read_file("/data/serial")
     if err or not serial then return nil, err end
     return serial, nil
 end
 
-local function get_temperature()
+local function get_temperature(_)
     local temperature, err = utils.read_file("/sys/class/thermal/thermal_zone0/temp")
     if err or not temperature then return nil, err end
     return tonumber(temperature) / 1000, nil
 end
 
-local function get_uptime()
+local function get_uptime(_)
     local uptime, err = utils.read_file("/proc/uptime")
     if err or not uptime then return nil, err end
     local up = string.match(uptime, "(%S+)%s")
@@ -149,7 +153,7 @@ local function get_uptime()
     return tonumber(up), nil
 end
 
-local function get_board_revision()
+local function get_board_revision(_)
     local board_revision_data, err = exec.command("fw_printenv"):output()
     if err then
         return nil, err
