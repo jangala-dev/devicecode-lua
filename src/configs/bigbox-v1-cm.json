@@ -798,6 +798,9 @@
       "net/mdm0/tx_errors": {
         "template": "network_stat"
       },
+      "net/mdm0/download_speed": {
+        "template": "any-change"
+      },
       "net/mdm1/rx_bytes": {
         "template": "network_stat"
       },
@@ -822,6 +825,9 @@
       "net/mdm1/tx_errors": {
         "template": "network_stat"
       },
+      "net/mdm1/download_speed": {
+        "template": "any-change"
+      },
       "net/wan/rx_bytes": {
         "template": "network_stat"
       },
@@ -845,6 +851,9 @@
       },
       "net/wan/tx_errors": {
         "template": "network_stat"
+      },
+      "net/wan/download_speed": {
+        "template": "any-change"
       },
       "gsm/modem/primary/firmware": {
         "template": "any_change",
