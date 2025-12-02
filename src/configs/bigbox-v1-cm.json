@@ -1114,7 +1114,7 @@
           {
             "type": "DiffTrigger",
             "diff_method": "absolute",
-            "threshold": 1
+            "threshold": 1000
           }
         ]
       },
