@@ -1105,10 +1105,17 @@
         ]
       },
       "system/info/boot_time": {
-        "template": "any_change",
+        "protocol": "http",
         "rename": [
           "system",
           "boot_time"
+        ],
+        "process": [
+          {
+            "type": "DiffTrigger",
+            "diff_method": "absolute",
+            "threshold": 1000
+          }
         ]
       },
       "system/info/firmware/version": {

@@ -1545,7 +1545,8 @@
           "process": [
             {
               "type": "DiffTrigger",
-              "diff_method": "any-change"
+              "diff_method": "absolute",
+              "threshold": 1000
             }
           ]
         },
