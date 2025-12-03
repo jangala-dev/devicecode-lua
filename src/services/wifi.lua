@@ -342,8 +342,7 @@ function Radio:_report_metrics(ctx, conn)
                         "%s - %s: Duplicate connection event for client %s (session: %s)",
                         ctx:value("service_name"),
                         ctx:value("fiber_name"),
-                        client_hash,
-                        session_id
+                        client_hash
                     ))
                     return
                 end
@@ -367,7 +366,6 @@ function Radio:_report_metrics(ctx, conn)
                 ctx:value("fiber_name"),
                 client_hash,
                 client.connected and "connected" or "disconnected",
-                session_id,
                 interface
             ))
             local interface_idx = radio_interface_indexes.by_phy[interface]
