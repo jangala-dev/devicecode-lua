@@ -108,6 +108,17 @@ local function set_timestamps_realtime_millis(base_time, metrics)
     return metrics
 end
 
+local function validate_topic(topic)
+    local i = 1
+    for idx, val in pairs(topic) do
+        if idx ~= i or val == nil then
+            return false
+        end
+        i = i + 1
+    end
+    return true
+end
+
 ---iterates over a table of data to be published
 ---@param data table
 function metrics_service:_publish_all(data)
@@ -141,7 +152,17 @@ function metrics_service:_handle_metric(metric, msg)
     end
     if value == nil then return end
 
-    local str_endpoint = table.concat(rename or msg.topic, '.')
+    local topic = rename or msg.topic
+    if not validate_topic(topic) then
+        log.warn(string.format(
+            "%s - %s: Invalid topic array (nil value or gap detected), skipping metric",
+            self.ctx:value('service_name'),
+            self.ctx:value('fiber_name')
+        ))
+        return
+    end
+
+    local str_endpoint = table.concat(topic, '.')
 
     if self.pipelines[str_endpoint] == nil then
         self.pipelines[str_endpoint] = base_pipeline:clone()
