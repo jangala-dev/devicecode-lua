@@ -339,7 +339,7 @@ function Radio:_report_metrics(ctx, conn)
             if client.connected then
                 if session_id then -- defend against duplicate connection events
                     log.warn(string.format(
-                        "%s - %s: Duplicate connection event for client %s (session: %s)",
+                        "%s - %s: Duplicate connection event for client %s",
                         ctx:value("service_name"),
                         ctx:value("fiber_name"),
                         client_hash
@@ -351,7 +351,7 @@ function Radio:_report_metrics(ctx, conn)
             else
                 if session_id == nil then -- defend against duplicate disconnection events
                     log.warn(string.format(
-                        "%s - %s: Duplicate disconnection event for client %s (no active session)",
+                        "%s - %s: Duplicate disconnection event for client %s",
                         ctx:value("service_name"),
                         ctx:value("fiber_name"),
                         client_hash
@@ -361,7 +361,7 @@ function Radio:_report_metrics(ctx, conn)
                 client_session_ids[client_hash] = nil
             end
             log.info(string.format(
-                "%s - %s: Client %s %s (session: %s, interface: %s)",
+                "%s - %s: Client %s %s (interface: %s)",
                 ctx:value("service_name"),
                 ctx:value("fiber_name"),
                 client_hash,
