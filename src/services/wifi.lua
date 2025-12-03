@@ -332,19 +332,44 @@ function Radio:_report_metrics(ctx, conn)
         if msg and msg.payload then
             local client = msg.payload
             local mac = msg.topic[#msg.topic]
+            local interface = msg.topic[7]
             local client_hash = gen.userid(mac)
             local session_id = client_session_ids[client_hash]
             local key = client.connected and "session_start" or "session_end"
             if client.connected then
-                if not session_id then
-                    client_session_ids[client_hash] = gen.gen_session_id()
-                    session_id = client_session_ids[client_hash]
+                if session_id then -- defend against duplicate connection events
+                    log.warn(string.format(
+                        "%s - %s: Duplicate connection event for client %s (session: %s)",
+                        ctx:value("service_name"),
+                        ctx:value("fiber_name"),
+                        client_hash,
+                        session_id
+                    ))
+                    return
                 end
+                client_session_ids[client_hash] = gen.gen_session_id()
+                session_id = client_session_ids[client_hash]
             else
+                if session_id == nil then -- defend against duplicate disconnection events
+                    log.warn(string.format(
+                        "%s - %s: Duplicate disconnection event for client %s (no active session)",
+                        ctx:value("service_name"),
+                        ctx:value("fiber_name"),
+                        client_hash
+                    ))
+                    return
+                end
                 client_session_ids[client_hash] = nil
             end
-
-            local interface = msg.topic[7]
+            log.info(string.format(
+                "%s - %s: Client %s %s (session: %s, interface: %s)",
+                ctx:value("service_name"),
+                ctx:value("fiber_name"),
+                client_hash,
+                client.connected and "connected" or "disconnected",
+                session_id,
+                interface
+            ))
             local interface_idx = radio_interface_indexes.by_phy[interface]
             if interface_idx then
                 if not interfaces_num_sta[interface_idx] then
@@ -365,6 +390,7 @@ function Radio:_report_metrics(ctx, conn)
                 ))
                 interfaces_num_sta[interface_idx] = interface_num_sta
             end
+            print(client_hash, session_id, key, client.timestamp)
             conn:publish(new_msg(
                 { 'wifi', 'clients', client_hash, 'sessions', session_id, key },
                 client.timestamp
@@ -378,6 +404,7 @@ function Radio:_report_metrics(ctx, conn)
             local client_hash = gen.userid(mac)
             local session_id = client_session_ids[client_hash]
             if session_id then
+                print(client_hash, session_id, key, msg.payload)
                 conn:publish(new_msg(
                     { 'wifi', 'clients', client_hash, 'sessions', session_id, key },
                     msg.payload
