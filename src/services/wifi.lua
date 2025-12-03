@@ -388,7 +388,6 @@ function Radio:_report_metrics(ctx, conn)
                 ))
                 interfaces_num_sta[interface_idx] = interface_num_sta
             end
-            print(client_hash, session_id, key, client.timestamp)
             conn:publish(new_msg(
                 { 'wifi', 'clients', client_hash, 'sessions', session_id, key },
                 client.timestamp
@@ -402,7 +401,6 @@ function Radio:_report_metrics(ctx, conn)
             local client_hash = gen.userid(mac)
             local session_id = client_session_ids[client_hash]
             if session_id then
-                print(client_hash, session_id, key, msg.payload)
                 conn:publish(new_msg(
                     { 'wifi', 'clients', client_hash, 'sessions', session_id, key },
                     msg.payload
