@@ -1108,4 +1108,11 @@ function wifi_service:start(ctx, conn)
     end)
 end
 
-return wifi_service
+if _G._TEST then
+    return {
+        wifi_service = wifi_service,
+        new_radio = Radio.new,
+    }
+else
+    return wifi_service
+end
