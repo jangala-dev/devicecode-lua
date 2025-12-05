@@ -344,6 +344,13 @@ function TestConfig:test_validate_topic_with_nil()
     luaunit.assertNotNil(metrics_service.metric_values.log)
     luaunit.assertNotNil(metrics_service.metric_values.log["another.valid.topic"])
 
+    -- Test 5: Empty topic (should this be valid?) - assuming it is valid and maps to empty string
+    metrics_service.metric_values = {}
+    local empty_msg = bus_pkg.new_msg({}, 400)
+    metrics_service:_handle_metric(metric, empty_msg)
+    luaunit.assertNotNil(metrics_service.metric_values.log)
+    luaunit.assertNotNil(metrics_service.metric_values.log[""])
+
     -- Clean up
     conn:disconnect()
 end
