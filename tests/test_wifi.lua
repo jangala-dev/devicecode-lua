@@ -175,7 +175,7 @@ function TestWifiClientEvents:test_duplicate_disconnection_event()
     local wifi, bus, new_msg = setup_wifi_test_environment()
     local conn = bus:connect()
     local bg_ctx = context.background()
-    local ctx, cancel = context.with_cancel(bg_ctx)
+    local ctx = context.with_cancel(bg_ctx)
 
     -- Setup: Create radio and interface
     local radio_index = "radio0"
