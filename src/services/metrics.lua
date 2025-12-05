@@ -108,6 +108,9 @@ local function set_timestamps_realtime_millis(base_time, metrics)
     return metrics
 end
 
+--- Validates that a topic array is properly formed with no gaps or nil values
+--- @param topic table The topic array to validate
+--- @return boolean true if the topic is valid (contiguous array with no nils), false otherwise
 local function validate_topic(topic)
     local i = 1
     for idx, val in pairs(topic) do
