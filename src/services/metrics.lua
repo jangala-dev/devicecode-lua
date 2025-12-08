@@ -112,14 +112,21 @@ end
 --- @param topic table The topic array to validate
 --- @return boolean true if the topic is valid (contiguous array with no nils), false otherwise
 local function validate_topic(topic)
-    local i = 1
-    for idx, val in pairs(topic) do
-        if idx ~= i or val == nil then
+    if #topic == 0 then return false end -- empty topic is invalid
+    local ipairs_count = 0
+    local pairs_count = 0
+
+    for i, v in ipairs(topic) do
+        ipairs_count = ipairs_count + 1
+        if i ~= ipairs_count or v == nil then -- check for non-arraylike keys and nil values
             return false
         end
-        i = i + 1
     end
-    return true
+
+    for _ in pairs(topic) do
+        pairs_count = pairs_count + 1
+    end
+    return ipairs_count == pairs_count -- if counts differ then a nil value or non-arraylike key exists
 end
 
 ---iterates over a table of data to be published

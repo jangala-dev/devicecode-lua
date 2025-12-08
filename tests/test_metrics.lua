@@ -326,7 +326,7 @@ function TestConfig:test_validate_topic_with_nil()
     local invalid_msg_nil = bus_pkg.new_msg({"test", nil, "metric"}, 200)
     metrics_service:_handle_metric(metric, invalid_msg_nil)
     -- Should not create any metric values because topic is invalid
-    luaunit.assertTrue(not metrics_service.metric_values.log or not metrics_service.metric_values.log["test..metric"])
+    luaunit.assertTrue((not metrics_service.metric_values.log) or (not metrics_service.metric_values.log["test..metric"]))
 
     -- Test 3: Invalid topic with gap (sparse array) should be rejected
     local sparse_topic = {}
@@ -335,7 +335,7 @@ function TestConfig:test_validate_topic_with_nil()
     local sparse_msg = bus_pkg.new_msg(sparse_topic, 300)
     metrics_service:_handle_metric(metric, sparse_msg)
     -- Should not create any metric values because topic is invalid
-    luaunit.assertTrue(not metrics_service.metric_values.log or not metrics_service.metric_values.log["test.metric"])
+    luaunit.assertTrue((not metrics_service.metric_values.log) or (not metrics_service.metric_values.log["test.metric"]))
 
     -- Test 4: Another valid topic should work
     metrics_service.metric_values = {}
@@ -344,12 +344,11 @@ function TestConfig:test_validate_topic_with_nil()
     luaunit.assertNotNil(metrics_service.metric_values.log)
     luaunit.assertNotNil(metrics_service.metric_values.log["another.valid.topic"])
 
-    -- Test 5: Empty topic (should this be valid?) - assuming it is valid and maps to empty string
+    -- Test 5: Empty topic should be rejected
     metrics_service.metric_values = {}
     local empty_msg = bus_pkg.new_msg({}, 400)
     metrics_service:_handle_metric(metric, empty_msg)
-    luaunit.assertNotNil(metrics_service.metric_values.log)
-    luaunit.assertNotNil(metrics_service.metric_values.log[""])
+    luaunit.assertNil(metrics_service.metric_values.log)
 
     -- Clean up
     conn:disconnect()
