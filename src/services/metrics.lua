@@ -112,21 +112,22 @@ end
 --- @param topic table The topic array to validate
 --- @return boolean true if the topic is valid (contiguous array with no nils), false otherwise
 local function validate_topic(topic)
-    if #topic == 0 then return false end -- empty topic is invalid
-    local ipairs_count = 0
-    local pairs_count = 0
+    if #topic == 0 then return false end
 
-    for i, v in ipairs(topic) do
-        ipairs_count = ipairs_count + 1
-        if i ~= ipairs_count or v == nil then -- check for non-arraylike keys and nil values
-            return false
+    -- Count all keys using pairs
+    local pairs_count = 0
+    for k, v in pairs(topic) do
+        pairs_count = pairs_count + 1
+        if type(k) ~= "number" or k < 1 or k ~= math.floor(k) then
+            return false -- non-integer or non-positive key
+        end
+        if v == nil then
+            return false -- explicit nil value
         end
     end
 
-    for _ in pairs(topic) do
-        pairs_count = pairs_count + 1
-    end
-    return ipairs_count == pairs_count -- if counts differ then a nil value or non-arraylike key exists
+    -- If pairs_count equals #topic, array is contiguous with no gaps
+    return pairs_count == #topic
 end
 
 ---iterates over a table of data to be published
