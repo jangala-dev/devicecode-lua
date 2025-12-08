@@ -108,6 +108,28 @@ local function set_timestamps_realtime_millis(base_time, metrics)
     return metrics
 end
 
+--- Validates that a topic array is properly formed with no gaps or nil values
+--- @param topic table The topic array to validate
+--- @return boolean true if the topic is valid (contiguous array with no nils), false otherwise
+local function validate_topic(topic)
+    if #topic == 0 then return false end
+
+    -- Count all keys using pairs
+    local pairs_count = 0
+    for k, v in pairs(topic) do
+        pairs_count = pairs_count + 1
+        if type(k) ~= "number" or k < 1 or k ~= math.floor(k) then
+            return false -- non-integer or non-positive key
+        end
+        if v == nil then
+            return false -- explicit nil value
+        end
+    end
+
+    -- If pairs_count equals #topic, array is contiguous with no gaps
+    return pairs_count == #topic
+end
+
 ---iterates over a table of data to be published
 ---@param data table
 function metrics_service:_publish_all(data)
@@ -141,7 +163,17 @@ function metrics_service:_handle_metric(metric, msg)
     end
     if value == nil then return end
 
-    local str_endpoint = table.concat(rename or msg.topic, '.')
+    local topic = rename or msg.topic
+    if not validate_topic(topic) then
+        log.warn(string.format(
+            "%s - %s: Invalid topic array (nil value or gap detected), skipping metric",
+            self.ctx:value('service_name'),
+            self.ctx:value('fiber_name')
+        ))
+        return
+    end
+
+    local str_endpoint = table.concat(topic, '.')
 
     if self.pipelines[str_endpoint] == nil then
         self.pipelines[str_endpoint] = base_pipeline:clone()

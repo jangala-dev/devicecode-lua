@@ -332,19 +332,42 @@ function Radio:_report_metrics(ctx, conn)
         if msg and msg.payload then
             local client = msg.payload
             local mac = msg.topic[#msg.topic]
+            local interface = msg.topic[7]
             local client_hash = gen.userid(mac)
             local session_id = client_session_ids[client_hash]
             local key = client.connected and "session_start" or "session_end"
             if client.connected then
-                if not session_id then
-                    client_session_ids[client_hash] = gen.gen_session_id()
-                    session_id = client_session_ids[client_hash]
+                if session_id then -- defend against duplicate connection events
+                    log.warn(string.format(
+                        "%s - %s: Duplicate connection event for client %s",
+                        ctx:value("service_name"),
+                        ctx:value("fiber_name"),
+                        client_hash
+                    ))
+                    return
                 end
+                client_session_ids[client_hash] = gen.gen_session_id()
+                session_id = client_session_ids[client_hash]
             else
+                if session_id == nil then -- defend against duplicate disconnection events
+                    log.warn(string.format(
+                        "%s - %s: Duplicate disconnection event for client %s",
+                        ctx:value("service_name"),
+                        ctx:value("fiber_name"),
+                        client_hash
+                    ))
+                    return
+                end
                 client_session_ids[client_hash] = nil
             end
-
-            local interface = msg.topic[7]
+            log.info(string.format(
+                "%s - %s: Client %s %s (interface: %s)",
+                ctx:value("service_name"),
+                ctx:value("fiber_name"),
+                client_hash,
+                client.connected and "connected" or "disconnected",
+                interface
+            ))
             local interface_idx = radio_interface_indexes.by_phy[interface]
             if interface_idx then
                 if not interfaces_num_sta[interface_idx] then
@@ -1085,4 +1108,11 @@ function wifi_service:start(ctx, conn)
     end)
 end
 
-return wifi_service
+if _G._TEST then
+    return {
+        wifi_service = wifi_service,
+        new_radio = Radio.new,
+    }
+else
+    return wifi_service
+end

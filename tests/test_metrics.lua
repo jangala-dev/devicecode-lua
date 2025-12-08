@@ -1,57 +1,30 @@
+-- Detect if this file is being run as the entry point
+local this_file = debug.getinfo(1, "S").source:match("@?([^/]+)$")
+local is_entry_point = arg and arg[0] and arg[0]:match("[^/]+$") == this_file
+
+if is_entry_point then
+    package.path = "../src/lua-fibers/?.lua;" -- fibers submodule src
+        .. "../src/lua-trie/src/?.lua;"       -- trie submodule src
+        .. "../src/lua-bus/src/?.lua;"        -- bus submodule src
+        .. "../src/?.lua;"
+        .. "./test_utils/?.lua;"
+        .. package.path
+        .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
+
+    _G._TEST = true -- Enable test exports in source code
+end
+
 local luaunit = require 'luaunit'
-local timed_cache = require 'services.metrics.timed_cache'
 local processing = require 'services.metrics.processing'
-local action_cache = require 'services.metrics.action_cache'
-local metrics = require 'services.metrics'
+local conf = require 'services.metrics.config'
 local sc = require "fibers.utils.syscall"
 local sleep = require "fibers.sleep"
 local fiber = require "fibers.fiber"
 local senml = require "services.metrics.senml"
 
-TestTimedCache = {}
-
-function TestTimedCache:test_new_cache()
-    local cache = timed_cache.new(1, sc.monotime)
-    luaunit.assertNotNil(cache)
-    local current_time = sc.monotime()
-    luaunit.assertEquals(cache.period, 1)
-    luaunit.assertAlmostEquals(cache.next_deadline, current_time + 1, 0.1)
-end
-
-function TestTimedCache:test_set_and_get()
-    local cache = timed_cache.new(1, sc.monotime)
-    local current_time = sc.monotime()
-    cache:set("test", 123)
-    cache:set({"nested", "key"}, 456)
-
-    local result = cache:get_op():perform()
-    luaunit.assertEquals(result.test, 123)
-    luaunit.assertEquals(result.nested.key, 456)
-    luaunit.assertAlmostEquals(cache.next_deadline, current_time + 2, 0.1)
-end
-
-function TestTimedCache:test_nested_key_insertion_order1()
-    local cache = timed_cache.new(1, sc.monotime)
-    cache:set({ "metrics", "system", "memory" }, "8GB")
-    cache:set({ "metrics", "system" }, "active")
-
-    -- Verify the exact structure of the store
-    luaunit.assertEquals(cache.store.metrics.system.__value, "active")
-    luaunit.assertEquals(cache.store.metrics.system.memory, "8GB")
-end
-
-function TestTimedCache:test_nested_key_insertion_order2()
-    local cache = timed_cache.new(1, sc.monotime)
-    cache:set({ "metrics", "system" }, "active")
-    cache:set({ "metrics", "system", "memory" }, "8GB")
-
-    -- Verify the exact structure of the store
-    luaunit.assertEquals(cache.store.metrics.system.__value, "active")
-    luaunit.assertEquals(cache.store.metrics.system.memory, "8GB")
-end
 TestProcessing = {}
 
-function TestProcessing:test_diff_trigger()
+function TestProcessing:test_diff_trigger_absolute()
     local config = {
         threshold = 5,
         diff_method = "absolute",
@@ -70,15 +43,58 @@ function TestProcessing:test_diff_trigger()
     luaunit.assertEquals(val, 16)
 end
 
+function TestProcessing:test_diff_trigger_percent()
+    local config = {
+        threshold = 10, -- 10% threshold
+        diff_method = "percent",
+        initial_val = 100
+    }
+
+    local trigger, trig_err = processing.DiffTrigger.new(config)
+    luaunit.assertNil(trig_err)
+
+    -- 5% change - should short circuit
+    local val, short, err = trigger:run(105)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(short, true)
+
+    -- 15% change - should pass
+    val, short, err = trigger:run(115)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(short, false)
+    luaunit.assertEquals(val, 115)
+end
+
+function TestProcessing:test_diff_trigger_any_change()
+    local config = {
+        diff_method = "any-change",
+        initial_val = 10
+    }
+
+    local trigger, trig_err = processing.DiffTrigger.new(config)
+    luaunit.assertNil(trig_err)
+
+    -- Same value - should short circuit
+    local val, short, err = trigger:run(10)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(short, true)
+
+    -- Any change - should pass
+    val, short, err = trigger:run(10.1)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(short, false)
+    luaunit.assertEquals(val, 10.1)
+end
+
 function TestProcessing:test_time_trigger()
-    local config = { duration = 1 }
+    local config = { duration = 0.1 }
     local trigger = processing.TimeTrigger.new(config)
 
     local val, short, err = trigger:run(123)
     luaunit.assertNil(err)
     luaunit.assertEquals(short, true) -- Should short circuit initially
 
-    sleep.sleep(2)
+    sleep.sleep(0.2)
     val, short, err = trigger:run(123)
     luaunit.assertNil(err)
     luaunit.assertEquals(short, false) -- Should pass after duration
@@ -124,7 +140,7 @@ function TestProcessing:test_clone_process()
 end
 
 function TestProcessing:test_process_pipeline()
-    local pipeline = processing.new_process_pipeline({})
+    local pipeline = processing.new_process_pipeline()
 
     -- Create a pipeline with DiffTrigger and DeltaValue
     local diff_trigger = processing.DiffTrigger.new({
@@ -148,91 +164,194 @@ function TestProcessing:test_process_pipeline()
     luaunit.assertNil(err)
     luaunit.assertEquals(short, true)
 end
-TestActionCache = {}
 
-function TestActionCache:test_set_and_update()
-    local cache = action_cache.new()
-    local process = processing.DiffTrigger.new({
-        threshold = 5,
-        diff_method = "absolute"
-    })
+function TestProcessing:test_pipeline_reset()
+    local pipeline = processing.new_process_pipeline()
+    local delta_value = processing.DeltaValue.new({ initial_val = 10 })
+    pipeline:add(delta_value)
 
-    local val, short = cache:set("test", 10, process)
+    -- Run once to get delta
+    local val, short, err = pipeline:run(20)
+    luaunit.assertNil(err)
     luaunit.assertEquals(val, 10)
-    luaunit.assertEquals(short, false)
 
-    val, short = cache:update("test", 12)
-    luaunit.assertEquals(short, true) -- Should short circuit as diff < threshold
+    -- Reset pipeline
+    pipeline:reset()
 
-    val, short = cache:update("test", 16)
-    luaunit.assertEquals(short, false) -- Should pass as diff >= threshold
-    luaunit.assertEquals(val, 16)
+    -- Next run should use the last value as new base
+    val, short, err = pipeline:run(25)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(val, 5) -- 25 - 20
 end
 
-function TestActionCache:test_nested_values()
-    local cache = action_cache.new()
-    local process = processing.DiffTrigger.new({
-        threshold = 5,
-        diff_method = "absolute"
-    })
+TestConfig = {}
 
-    -- Test nested structure
-    local val, short = cache:set({ "system", "resources" }, {
-        cpu = 80,
-        memory = 50
-    }, process)
+function TestConfig:test_build_metric_pipeline_via_apply_config()
+    -- Test pipeline building indirectly through apply_config
+    -- which is the main way pipelines are created
+    local mock_conn = {
+        subscribe = function(self, topic)
+            return {
+                next_msg_op = function() end,
+                unsubscribe = function() end
+            }
+        end
+    }
 
-    luaunit.assertEquals(val.cpu, 80)
-    luaunit.assertEquals(val.memory, 50)
-    luaunit.assertEquals(short, false)
+    local config = {
+        templates = {},
+        collections = {
+            ["test/endpoint"] = {
+                protocol = "log",
+                process = {
+                    {
+                        type = "DiffTrigger",
+                        threshold = 5,
+                        diff_method = "absolute"
+                    }
+                }
+            }
+        },
+        publish_period = 60
+    }
 
-    -- Update with small changes (should short circuit)
-    val, short = cache:update({ "system", "resources" }, {
-        cpu = 82,
-        memory = 52
-    })
-    luaunit.assertEquals(short, true)
-
-    -- Update with large changes (should pass through)
-    val, short = cache:update({ "system", "resources" }, {
-        cpu = 90,
-        memory = 60
-    })
-    luaunit.assertEquals(short, false)
-    luaunit.assertEquals(val.cpu, 90)
-    luaunit.assertEquals(val.memory, 60)
+    local metrics, period, cloud_config = conf.apply_config(mock_conn, config, {})
+    luaunit.assertEquals(#metrics, 1)
+    luaunit.assertEquals(period, 60)
+    luaunit.assertNotNil(metrics[1].base_pipeline)
 end
 
-function TestActionCache:test_invalid_updates()
-    local cache = action_cache.new()
+function TestConfig:test_validate_http_config()
+    -- Valid config
+    local valid_config = {
+        url = "http://example.com",
+        thing_key = "test_key",
+        channels = {
+            { id = "ch1", name = "data", metadata = { channel_type = "data" } }
+        }
+    }
+    local valid, err = conf.validate_http_config(valid_config)
+    luaunit.assertTrue(valid)
+    luaunit.assertNil(err)
 
-    -- Try to update non-existent key
-    local val, short, err = cache:update("nonexistent", 123)
-    luaunit.assertEquals(short, true)
+    -- Missing url
+    local invalid_config = {
+        thing_key = "test_key",
+        channels = {}
+    }
+    valid, err = conf.validate_http_config(invalid_config)
+    luaunit.assertFalse(valid)
     luaunit.assertNotNil(err)
 
-    -- Try to set invalid process
-    local val2, short2, err2 = cache:set("test", 123, nil)
-    luaunit.assertNotNil(err2)
+    -- Nil config
+    valid, err = conf.validate_http_config(nil)
+    luaunit.assertFalse(valid)
+    luaunit.assertNotNil(err)
 end
-TestMetricsService = {}
 
-function TestMetricsService:test_build_metric_pipeline()
-    local process_config = {
-        {
-            type = "DiffTrigger",
-            threshold = 5,
-            diff_method = "absolute"
-        },
-        {
-            type = "TimeTrigger",
-            duration = 10
+function TestConfig:test_merge_config()
+    local base = {
+        url = "http://base.com",
+        thing_key = "base_key",
+        nested = {
+            field1 = "value1",
+            field2 = "value2"
         }
     }
 
-    local pipeline, err = metrics:_build_metric_pipeline("test/endpoint", process_config)
-    luaunit.assertNil(err)
-    luaunit.assertNotNil(pipeline)
+    local override = {
+        thing_key = "override_key",
+        nested = {
+            field2 = "override_value2",
+            field3 = "value3"
+        }
+    }
+
+    local merged = conf.merge_config(base, override)
+    luaunit.assertEquals(merged.url, "http://base.com")
+    luaunit.assertEquals(merged.thing_key, "override_key")
+    luaunit.assertEquals(merged.nested.field1, "value1")
+    luaunit.assertEquals(merged.nested.field2, "override_value2")
+    luaunit.assertEquals(merged.nested.field3, "value3")
+end
+
+function TestConfig:test_validate_topic_with_nil()
+    -- Test the actual metrics service validate_topic logic by directly calling _handle_metric
+    local metrics_service = require 'services.metrics'
+    local bus_pkg = require 'bus'
+    local context = require "fibers.context"
+
+    -- Create a bus and connection (but don't start the service)
+    local test_bus = bus_pkg.new()
+    local conn = test_bus:connect()
+
+    -- Create a context for the metrics service (needed for logging)
+    local bg_ctx = context.background()
+    local service_ctx = context.with_value(bg_ctx, "service_name", "metrics_test")
+    service_ctx = context.with_value(service_ctx, "fiber_name", "test_fiber")
+
+    -- Set up metrics service state manually without starting it
+    metrics_service.ctx = service_ctx
+    metrics_service.metric_values = {}
+    metrics_service.pipelines = {}
+
+    -- Create a pipeline for a test metric
+    local base_pipeline = processing.new_process_pipeline()
+    local diff_trigger = processing.DiffTrigger.new({
+        threshold = 5,
+        diff_method = "absolute",
+        initial_val = 10
+    })
+    base_pipeline:add(diff_trigger)
+
+    -- Create a metric definition
+    local metric = {
+        protocol = "log",
+        field = nil,
+        rename = nil,
+        base_pipeline = base_pipeline
+    }
+
+    -- Test 1: Valid topic should work and add value to metric_values
+    local valid_msg = bus_pkg.new_msg({"test", "metric"}, 100)
+    metrics_service:_handle_metric(metric, valid_msg)
+    luaunit.assertNotNil(metrics_service.metric_values.log)
+    luaunit.assertNotNil(metrics_service.metric_values.log["test.metric"])
+    luaunit.assertEquals(metrics_service.metric_values.log["test.metric"].value, 100)
+
+    -- Reset for next test
+    metrics_service.metric_values = {}
+
+    -- Test 2: Invalid topic with nil in the middle should be rejected (not added)
+    local invalid_msg_nil = bus_pkg.new_msg({"test", nil, "metric"}, 200)
+    metrics_service:_handle_metric(metric, invalid_msg_nil)
+    -- Should not create any metric values because topic is invalid
+    luaunit.assertTrue((not metrics_service.metric_values.log) or (not metrics_service.metric_values.log["test..metric"]))
+
+    -- Test 3: Invalid topic with gap (sparse array) should be rejected
+    local sparse_topic = {}
+    sparse_topic[1] = "test"
+    sparse_topic[3] = "metric"  -- index 2 is missing
+    local sparse_msg = bus_pkg.new_msg(sparse_topic, 300)
+    metrics_service:_handle_metric(metric, sparse_msg)
+    -- Should not create any metric values because topic is invalid
+    luaunit.assertTrue((not metrics_service.metric_values.log) or (not metrics_service.metric_values.log["test.metric"]))
+
+    -- Test 4: Another valid topic should work
+    metrics_service.metric_values = {}
+    local valid_msg2 = bus_pkg.new_msg({"another", "valid", "topic"}, 50)
+    metrics_service:_handle_metric(metric, valid_msg2)
+    luaunit.assertNotNil(metrics_service.metric_values.log)
+    luaunit.assertNotNil(metrics_service.metric_values.log["another.valid.topic"])
+
+    -- Test 5: Empty topic should be rejected
+    metrics_service.metric_values = {}
+    local empty_msg = bus_pkg.new_msg({}, 400)
+    metrics_service:_handle_metric(metric, empty_msg)
+    luaunit.assertNil(metrics_service.metric_values.log)
+
+    -- Clean up
+    conn:disconnect()
 end
 
 TestSenML = {}
@@ -376,9 +495,41 @@ function TestSenML:test_encode_r_with_value_field()
     luaunit.assertTrue(found.free)
     luaunit.assertEquals(#result, 4)
 end
-fiber.spawn(function ()
-    luaunit.LuaUnit.run()
-    fiber.stop()
-end)
 
-fiber.main()
+function TestSenML:test_encode_r_with_value_and_time()
+    -- Test encoding values with explicit value and time fields
+    local values = {
+        temperature = {
+            value = 23.5,
+            time = 1234567890
+        },
+        status = "online"
+    }
+
+    local result, err = senml.encode_r("sensor", values)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(#result, 2)
+
+    -- Check entries
+    local found = { temp = false, status = false }
+    for _, entry in ipairs(result) do
+        if entry.n == "sensor.temperature" and entry.v == 23.5 and entry.t == 1234567890 then
+            found.temp = true
+        elseif entry.n == "sensor.status" and entry.vs == "online" then
+            found.status = true
+        end
+    end
+
+    luaunit.assertTrue(found.temp)
+    luaunit.assertTrue(found.status)
+end
+
+-- Only run tests if this file is executed directly (not via dofile)
+if is_entry_point then
+    fiber.spawn(function ()
+        luaunit.LuaUnit.run()
+        fiber.stop()
+    end)
+
+    fiber.main()
+end

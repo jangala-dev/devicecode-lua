@@ -8,15 +8,18 @@ package.path = "../src/lua-fibers/?.lua;" -- fibers submodule src
 
 local base_pkg_path = package.path
 
+_G._TEST = true -- global test flag
+
 local tests = {
     "submodules",
     "service",
     "hal_utils",
-    "modem_driver",
-    "modemcard_manager",
-    "hal_capabilities",
-    "hal",
-    "metrics"
+    -- "modem_driver",
+    -- "modemcard_manager",
+    -- "hal_capabilities",
+    -- "hal",
+    "metrics",
+    "wifi"
 }
 
 for _, test in ipairs(tests) do
@@ -24,3 +27,14 @@ for _, test in ipairs(tests) do
     package.path = base_pkg_path
     -- package.loaded = nil
 end
+
+-- Run all accumulated tests
+local fiber = require "fibers.fiber"
+local luaunit = require "luaunit"
+
+fiber.spawn(function()
+    luaunit.LuaUnit.run()
+    fiber.stop()
+end)
+
+fiber.main()

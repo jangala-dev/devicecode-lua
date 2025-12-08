@@ -475,13 +475,6 @@ function WirelessDriver:_monitor_clients(ctx)
                 if iface and event and mac then
                     local client_phy = iface:match("^(phy%d+)")
                     if client_phy == phy then
-                        log.trace(string.format(
-                            "%s - %s: (%s) client %s",
-                            ctx:value("service_name"),
-                            ctx:value("fiber_name"),
-                            iface,
-                            event == "new" and "connected" or "disconnected"
-                        ))
                         op.choice(
                             self.client_event_queue:put_op({
                                 connected = (event == "new"),
