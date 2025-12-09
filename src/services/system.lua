@@ -91,14 +91,25 @@ function system_service:_handle_config(ctx, config_msg)
     end
 end
 
-local function build_keyed_table(tbl, keys)
-    local current = tbl
-    for i = 1, #keys - 1 do
-        local k = keys[i]
-        current[k] = current[k] or {}
-        current = current[k]
+local function build_table(keys, values)
+    local tbl = {}
+    local head = tbl
+    for i = 1, #keys-1 do
+        head[keys[i]] = {}
+        head = head[keys[i]]
     end
-    return current
+    head[keys[#keys]] = values
+    return tbl
+end
+
+local function merge_tables(primary, secondary)
+    for k, v in pairs(secondary) do
+        if type(v) == "table" and type(primary[k]) == "table" then
+            merge_tables(primary[k], v)
+        else
+            primary[k] = v
+        end
+    end
 end
 
 ---Periodic gathering a publish of system information
@@ -125,14 +136,8 @@ function system_service:_report_sysinfo(ctx)
                     log.error(string.format("System: Failed to get metric for %s: %s",
                         table.concat(metric.key, '.'), err))
                 else
-                    local current = build_keyed_table(stats, metric.key)
-                    local last_key = metric.key[#metric.key]
-                    if type(result) ~= "table" then -- wrap non-tables
-                        result = { [last_key] = result }
-                    end
-                    for rk, rv in pairs(result) do
-                        current[rk] = rv
-                    end
+                    local keyed_table = build_table(metric.key, result)
+                    merge_tables(stats, keyed_table)
                 end
             end
         end
@@ -270,4 +275,12 @@ function system_service:start(ctx, conn)
     end)
 end
 
-return system_service
+if _G._TEST then
+    return {
+        system_service = system_service,
+        build_table = build_table,
+        merge_tables = merge_tables
+    }
+else
+    return system_service
+end

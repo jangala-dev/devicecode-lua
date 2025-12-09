@@ -19,6 +19,7 @@ local tests = {
     -- "hal_capabilities",
     -- "hal",
     "metrics",
+    "system",
     "wifi"
 }
 
