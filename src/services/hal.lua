@@ -1,6 +1,7 @@
 local fiber = require "fibers.fiber"
 local queue = require "fibers.queue"
 local op = require "fibers.op"
+local context = require "fibers.context"
 local service = require "service"
 local new_msg = require("bus").new_msg
 local log = require "services.log"
@@ -313,7 +314,7 @@ function hal_service:_apply_config(msg)
             local ok, manager_pkg = pcall(require, 'services.hal.managers.' .. manager_name)
             if ok and type(manager_pkg) == "table" then
                 self.managers[manager_name] = manager_pkg.new()
-                self.managers[manager_name]:spawn(self.ctx, self.conn, self.device_event_q, self.capability_info_q)
+                self.managers[manager_name]:spawn(context.with_cancel(self.ctx), self.conn, self.device_event_q, self.capability_info_q)
                 self.managers[manager_name]:apply_config(manager_config)
             else
                 log.error(string.format(
