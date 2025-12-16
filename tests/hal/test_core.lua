@@ -38,7 +38,6 @@ TestHalConfig = {}
 local new_hal_env = harness.new_hal_env
 local config_path = harness.config_path
 local publish_config = harness.publish_config
-local channel = require 'fibers.channel'
 
 local function assert_no_managers(hal, msg)
 	luaunit.assertNil(next(hal.managers), msg or "Expected HAL to have zero managers")
@@ -85,8 +84,7 @@ function TestHalConfig:test_nil_config()
 	local ok, reason = harness.wait_until(ctx, function()
 		return next(hal.managers) ~= nil
 	end)
-	luaunit.assertFalse(ok, "Expected HAL to not create managers for nil config, but wait_until succeeded: " ..
-		tostring(reason))
+	luaunit.assertFalse(ok, "Expected HAL to not create managers for nil config")
 	assert_no_managers(hal)
 	ctx:cancel("test complete")
 end
@@ -107,8 +105,7 @@ function TestHalConfig:test_empty_managers_config()
 	local ok, reason = harness.wait_until(ctx, function()
 		return next(hal.managers) ~= nil
 	end)
-	luaunit.assertFalse(ok, "Expected HAL to not create managers for empty managers config, but wait_until succeeded: " ..
-		tostring(reason))
+	luaunit.assertFalse(ok, "Expected HAL to not create managers for empty managers config")
 	assert_no_managers(hal)
 	ctx:cancel("test complete")
 end
@@ -125,8 +122,7 @@ function TestHalConfig:test_invalid_type_config()
 	local ok, reason = harness.wait_until(ctx, function()
 		return next(hal.managers) ~= nil
 	end)
-	luaunit.assertFalse(ok, "Expected HAL to not create managers for invalid type config, but wait_until succeeded: " ..
-		tostring(reason))
+	luaunit.assertFalse(ok, "Expected HAL to not create managers for invalid type config")
 	assert_no_managers(hal)
 	ctx:cancel("test complete")
 end
@@ -146,8 +142,7 @@ function TestHalConfig:test_no_managers_config()
 	local ok, reason = harness.wait_until(ctx, function()
 		return next(hal.managers) ~= nil
 	end)
-	luaunit.assertFalse(ok, "Expected HAL to not create managers when managers key is missing, but wait_until succeeded: " ..
-		tostring(reason))
+	luaunit.assertFalse(ok, "Expected HAL to not create managers when managers key is missing")
 	assert_no_managers(hal)
 	ctx:cancel("test complete")
 end
@@ -170,8 +165,7 @@ function TestHalConfig:test_invalid_manager()
 	local ok, reason = harness.wait_until(ctx, function()
 		return hal.managers.invalid_manager_name ~= nil
 	end)
-	luaunit.assertFalse(ok,
-		"Expected HAL to ignore invalid manager name, but wait_until succeeded: " .. tostring(reason))
+	luaunit.assertFalse(ok, "Expected HAL to ignore invalid manager name")
 	luaunit.assertNil(hal.managers.invalid_manager_name, "Expected HAL to ignore invalid manager name")
 	ctx:cancel("test complete")
 end
@@ -325,9 +319,7 @@ function TestHalConfig:test_invalid_config_does_not_affect_managers()
 	local ok, reason = harness.wait_until(ctx, function()
 		return next(hal.managers) == nil
 	end)
-	luaunit.assertFalse(ok,
-		"Expected HAL to keep dummy manager after invalid config, but wait_until reported success: " ..
-			tostring(reason))
+	luaunit.assertFalse(ok, "Expected HAL to keep dummy manager after invalid config")
 	luaunit.assertNotNil(hal.managers.dummy, "Expected HAL to still have dummy manager after invalid config")
 	luaunit.assertEquals(hal.managers.dummy.test_arg, test_arg,
 		"Expected dummy manager to retain initial config after invalid config")
@@ -341,9 +333,7 @@ function TestHalConfig:test_invalid_config_does_not_affect_managers()
 	ok, reason = harness.wait_until(ctx, function()
 		return next(hal.managers) == nil
 	end)
-	luaunit.assertFalse(ok,
-		"Expected HAL to keep dummy manager after missing managers config, but wait_until reported success: " ..
-			tostring(reason))
+	luaunit.assertFalse(ok, "Expected HAL to keep dummy manager after missing managers config")
 	luaunit.assertNotNil(hal.managers.dummy, "Expected HAL to still have dummy manager after missing managers config")
 	luaunit.assertEquals(hal.managers.dummy.test_arg, test_arg,
 		"Expected dummy manager to retain initial config after missing managers config")
@@ -984,6 +974,7 @@ end
 
 function TestHalCapabilityControl:test_publish_control()
 	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	local channel = require 'fibers.channel'
 	local ch = channel.new()
 	hal:start(ctx, bus:connect())
 	local capabilities = make_dummy_capability_list(1)

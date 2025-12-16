@@ -1,6 +1,5 @@
 local fiber = require 'fibers.fiber'
 local context = require 'fibers.context'
-local op = require 'fibers.op'
 
 local harness = {}
 
@@ -78,24 +77,6 @@ function harness.wait_for_msg(sub, ctx, max_ticks)
 		local msg, err = sub:next_msg_op():perform_alt(alt)
 		if err ~= '__ALT__' then
 			return msg, err
-		end
-	end
-end
-
--- Ensure that no message is received on a subscriber within the
--- given tick budget. Returns true on success (no message), or
--- false, msg, err if a message or real error was observed.
-function harness.ensure_no_msg(sub, ctx, max_ticks)
-	local alt = make_alt_wait(ctx, max_ticks)
-	while true do
-		local msg, err = sub:next_msg_op():perform_alt(alt)
-		if err == '__ALT__' then
-			-- Alt path taken; keep waiting.
-		else
-			-- Either a real message (err == nil) or a real error
-			-- (timeout/context cancelled). In both cases the caller
-			-- treats this as a failure of "no message expected".
-			return false, msg, err
 		end
 	end
 end
