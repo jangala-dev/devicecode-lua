@@ -9,19 +9,25 @@ if is_entry_point then
 		.. "../../src/lua-trie/src/?.lua;"    -- trie submodule src
 		.. "../../src/lua-bus/src/?.lua;"     -- bus submodule src
 		.. "../../src/?.lua;"                 -- main src tree
+		.. "../../?.lua;"                     -- repo root (for tests.hal.harness)
 		.. "./test_utils/?.lua;"              -- shared test utilities
 		.. package.path
 		.. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;"
 		.. "./harness/?.lua;"
 
 	_G._TEST = true -- Enable test exports in source code
+	local log = require 'services.log'
+	local rxilog = require 'rxilog'
+	for _, mode in ipairs(rxilog.modes) do
+		log[mode.name] = function() end -- no-op logging during tests
+	end
 end
 
 local luaunit = require 'luaunit'
 local fiber = require 'fibers.fiber'
-local context = require 'fibers.context'
-local sleep = require 'fibers.sleep'
-local queue = require 'fibers.queue'
+local unpack = unpack or table.unpack
+
+local harness = require 'tests.hal.harness'
 
 -- Test harness for HAL configuration, device events, and capability events.
 
@@ -29,34 +35,10 @@ local queue = require 'fibers.queue'
 
 TestHalConfig = {}
 
-local function get_env_variables()
-	local bg_ctx = context.background()
-
-	local ctx = context.with_cancel(
-		context.with_value(bg_ctx, "service_name", "hal")
-	)
-
-	local bus = require 'bus'
-
-	package.loaded['services.hal'] = nil             -- force reload to reset state between tests
-	package.loaded['services.hal.managers.dummy'] = nil -- force reload to reset state between tests
-	local hal = require 'services.hal'
-	return hal, ctx, bus.new(), bus.new_msg
-end
-
-local function config_path()
-	return { 'config', 'hal' }
-end
-
-local function new_hal_env()
-	local hal, ctx, bus, new_msg = get_env_variables()
-	local conn = bus:connect()
-	return hal, ctx, bus, conn, new_msg
-end
-
-local function publish_config(conn, new_msg, payload)
-	conn:publish(new_msg(config_path(), payload, { retained = true }))
-end
+local new_hal_env = harness.new_hal_env
+local config_path = harness.config_path
+local publish_config = harness.publish_config
+local channel = require 'fibers.channel'
 
 local function assert_no_managers(hal, msg)
 	luaunit.assertNil(next(hal.managers), msg or "Expected HAL to have zero managers")
@@ -82,7 +64,7 @@ function TestHalConfig:test_simple_config()
 
 	publish_config(conn, new_msg, config)
 	luaunit.assertNotNil(dummy_manager_sub, "Expected to subscribe to dummy manager status messages")
-	local msg, err = dummy_manager_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(dummy_manager_sub, ctx)
 	luaunit.assertNil(err, "Expected to receive dummy manager status message")
 	luaunit.assertNotNil(msg, "Expected to receive dummy manager status message")
 	luaunit.assertEquals(msg.payload, "running")
@@ -100,8 +82,11 @@ function TestHalConfig:test_nil_config()
 
 	publish_config(conn, new_msg, config)
 
-	sleep.sleep(0.1) -- Give HAL some time to process the config
-
+	local ok, reason = harness.wait_until(ctx, function()
+		return next(hal.managers) ~= nil
+	end)
+	luaunit.assertFalse(ok, "Expected HAL to not create managers for nil config, but wait_until succeeded: " ..
+		tostring(reason))
 	assert_no_managers(hal)
 	ctx:cancel("test complete")
 end
@@ -119,8 +104,11 @@ function TestHalConfig:test_empty_managers_config()
 
 	publish_config(conn, new_msg, config)
 
-	sleep.sleep(0.1) -- Give HAL some time to process the config
-
+	local ok, reason = harness.wait_until(ctx, function()
+		return next(hal.managers) ~= nil
+	end)
+	luaunit.assertFalse(ok, "Expected HAL to not create managers for empty managers config, but wait_until succeeded: " ..
+		tostring(reason))
 	assert_no_managers(hal)
 	ctx:cancel("test complete")
 end
@@ -134,8 +122,11 @@ function TestHalConfig:test_invalid_type_config()
 
 	publish_config(conn, new_msg, config)
 
-	sleep.sleep(0.1) -- Give HAL some time to process the config
-
+	local ok, reason = harness.wait_until(ctx, function()
+		return next(hal.managers) ~= nil
+	end)
+	luaunit.assertFalse(ok, "Expected HAL to not create managers for invalid type config, but wait_until succeeded: " ..
+		tostring(reason))
 	assert_no_managers(hal)
 	ctx:cancel("test complete")
 end
@@ -152,8 +143,11 @@ function TestHalConfig:test_no_managers_config()
 
 	publish_config(conn, new_msg, config)
 
-	sleep.sleep(0.1) -- Give HAL some time to process the config
-
+	local ok, reason = harness.wait_until(ctx, function()
+		return next(hal.managers) ~= nil
+	end)
+	luaunit.assertFalse(ok, "Expected HAL to not create managers when managers key is missing, but wait_until succeeded: " ..
+		tostring(reason))
 	assert_no_managers(hal)
 	ctx:cancel("test complete")
 end
@@ -173,8 +167,11 @@ function TestHalConfig:test_invalid_manager()
 
 	publish_config(conn, new_msg, config)
 
-	sleep.sleep(0.1) -- Give HAL some time to process the config
-
+	local ok, reason = harness.wait_until(ctx, function()
+		return hal.managers.invalid_manager_name ~= nil
+	end)
+	luaunit.assertFalse(ok,
+		"Expected HAL to ignore invalid manager name, but wait_until succeeded: " .. tostring(reason))
 	luaunit.assertNil(hal.managers.invalid_manager_name, "Expected HAL to ignore invalid manager name")
 	ctx:cancel("test complete")
 end
@@ -197,7 +194,7 @@ function TestHalConfig:test_remove_manager()
 
 	publish_config(conn, new_msg, config)
 	luaunit.assertNotNil(dummy_manager_sub, "Expected to subscribe to dummy manager status messages")
-	local msg, err = dummy_manager_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(dummy_manager_sub, ctx)
 	luaunit.assertNil(err, "Expected to receive dummy manager status message" .. (err and (": " .. tostring(err)) or ""))
 	luaunit.assertNotNil(msg, "Expected to receive dummy manager status message")
 	luaunit.assertEquals(msg.payload, "running")
@@ -226,7 +223,10 @@ function TestHalConfig:test_remove_manager()
 		)
 	)
 
-	sleep.sleep(0.1) -- Give HAL some time to process the config
+	local ok, reason = harness.wait_until(ctx, function()
+		return (next(hal.managers) == nil or hal.managers.dummy == nil) and done
+	end)
+	luaunit.assertTrue(ok, "Expected HAL to remove dummy manager, but wait_until failed: " .. tostring(reason))
 	luaunit.assertNil(hal.managers.dummy, "Expected HAL to have removed dummy manager")
 	luaunit.assertNil(next(hal.managers), "Expected HAL to have zero managers")
 	luaunit.assertTrue(done, "Expected dummy manager context to be done") -- manager should revieve a cancel signal
@@ -254,7 +254,7 @@ function TestHalConfig:test_reconfigure_manager()
 
 	publish_config(conn, new_msg, config)
 
-	local msg, err = dummy_manager_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(dummy_manager_sub, ctx)
 	luaunit.assertNil(err, "Expected to receive dummy manager status message")
 	luaunit.assertNotNil(msg, "Expected to receive dummy manager status message")
 	luaunit.assertEquals(msg.payload, "running")
@@ -280,7 +280,11 @@ function TestHalConfig:test_reconfigure_manager()
 		)
 	)
 
-	sleep.sleep(0.1) -- Give HAL some time to process the config
+	local ok, reason = harness.wait_until(ctx, function()
+		return hal.managers.dummy ~= nil and hal.managers.dummy.test_arg == new_test_arg
+	end)
+	luaunit.assertTrue(ok,
+		"Expected HAL to reconfigure dummy manager, but wait_until failed: " .. tostring(reason))
 	luaunit.assertNotNil(hal.managers.dummy, "Expected HAL to still have dummy manager after reconfiguration")
 	luaunit.assertEquals(hal.managers.dummy.test_arg, new_test_arg,
 		"Expected dummy manager to have applied updated config")
@@ -305,7 +309,7 @@ function TestHalConfig:test_invalid_config_does_not_affect_managers()
 
 	publish_config(conn, new_msg, config)
 	luaunit.assertNotNil(dummy_manager_sub, "Expected to subscribe to dummy manager status messages")
-	local msg, err = dummy_manager_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(dummy_manager_sub, ctx)
 	luaunit.assertNil(err, "Expected to receive dummy manager status message")
 	luaunit.assertNotNil(msg, "Expected to receive dummy manager status message")
 	luaunit.assertEquals(msg.payload, "running")
@@ -318,7 +322,12 @@ function TestHalConfig:test_invalid_config_does_not_affect_managers()
 
 	publish_config(conn, new_msg, invalid_config)
 
-	sleep.sleep(0.1) -- Give HAL some time to process the config
+	local ok, reason = harness.wait_until(ctx, function()
+		return next(hal.managers) == nil
+	end)
+	luaunit.assertFalse(ok,
+		"Expected HAL to keep dummy manager after invalid config, but wait_until reported success: " ..
+			tostring(reason))
 	luaunit.assertNotNil(hal.managers.dummy, "Expected HAL to still have dummy manager after invalid config")
 	luaunit.assertEquals(hal.managers.dummy.test_arg, test_arg,
 		"Expected dummy manager to retain initial config after invalid config")
@@ -328,7 +337,13 @@ function TestHalConfig:test_invalid_config_does_not_affect_managers()
 		some_other_config = true
 	}
 	publish_config(conn, new_msg, missing_managers_config)
-	sleep.sleep(0.1) -- Give HAL some time to process the config
+
+	ok, reason = harness.wait_until(ctx, function()
+		return next(hal.managers) == nil
+	end)
+	luaunit.assertFalse(ok,
+		"Expected HAL to keep dummy manager after missing managers config, but wait_until reported success: " ..
+			tostring(reason))
 	luaunit.assertNotNil(hal.managers.dummy, "Expected HAL to still have dummy manager after missing managers config")
 	luaunit.assertEquals(hal.managers.dummy.test_arg, test_arg,
 		"Expected dummy manager to retain initial config after missing managers config")
@@ -359,7 +374,7 @@ function TestHalConfig:test_partial_manager_removal()
 
 	-- Wait for dummy manager 1
 	luaunit.assertNotNil(dummy_manager_sub, "Expected to subscribe to dummy manager status messages")
-	local msg, err = dummy_manager_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(dummy_manager_sub, ctx)
 	luaunit.assertNil(err, "Expected to receive dummy manager status message")
 	luaunit.assertNotNil(msg, "Expected to receive dummy manager status message")
 	luaunit.assertEquals(msg.payload, "running")
@@ -367,7 +382,7 @@ function TestHalConfig:test_partial_manager_removal()
 
 	-- Wait for dummy manager 2
 	luaunit.assertNotNil(dummy2_manager_sub, "Expected to subscribe to dummy2 manager status messages")
-	local msg2, err2 = dummy2_manager_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg2, err2 = harness.wait_for_msg(dummy2_manager_sub, ctx)
 	luaunit.assertNil(err2, "Expected to receive dummy2 manager status message")
 	luaunit.assertNotNil(msg2, "Expected to receive dummy2 manager status message")
 	luaunit.assertEquals(msg2.payload, "running")
@@ -389,7 +404,13 @@ function TestHalConfig:test_partial_manager_removal()
 			{ retained = true }
 		)
 	)
-	sleep.sleep(0.1) -- Give HAL some time to process the config
+
+	local ok, reason = harness.wait_until(ctx, function()
+		return hal.managers.dummy ~= nil and hal.managers.dummy.test_arg == "value2" and
+			hal.managers.dummy2 == nil
+	end)
+	luaunit.assertTrue(ok,
+		"Expected HAL to apply partial manager removal, but wait_until failed: " .. tostring(reason))
 	-- HAL removes managers that are not present in the new
 	-- config, so dummy2 should be removed and dummy kept.
 	luaunit.assertNotNil(hal.managers.dummy, "Expected HAL to still have dummy manager")
@@ -421,11 +442,12 @@ end
 
 local function assert_no_device_event(device_event_q, hal_device_event_sub, ctx, event, description)
 	device_event_q:put(event)
-	local msg, err = hal_device_event_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(hal_device_event_sub, ctx)
 	luaunit.assertNil(msg,
 		"Expected to not receive HAL device event message for " .. description)
-	luaunit.assertNotNil(err,
-		"Expected to receive timeout error for " .. description)
+	luaunit.assertEquals(err, 'timeout',
+		"Expected timeout when no HAL device event should be received for " .. description ..
+			", got: " .. tostring(err))
 end
 
 function TestHalDeviceEvent:test_device_add_event()
@@ -440,7 +462,7 @@ function TestHalDeviceEvent:test_device_add_event()
 	device_event_q:put(device_add_event)
 
 	-- Next wait for a device event and check the value in the payload
-	local msg, err = hal_device_event_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(hal_device_event_sub, ctx)
 	luaunit.assertNil(err, "Expected to receive HAL device event message")
 	luaunit.assertNotNil(msg, "Expected to receive HAL device event message")
 	luaunit.assertNotNil(msg.payload, "Expected HAL device event message to have data payload")
@@ -464,14 +486,14 @@ function TestHalDeviceEvent:test_device_remove_event()
 	device_event_q:put(device_remove_event)
 
 	-- First wait for the add event to be received
-	local msg, err = hal_device_event_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(hal_device_event_sub, ctx)
 	luaunit.assertNil(err, "Expected to receive HAL device event message")
 	luaunit.assertNotNil(msg, "Expected to receive HAL device event message")
 	luaunit.assertNotNil(msg.payload, "Expected HAL device event message to have data payload")
 	luaunit.assertEquals(msg.payload.connected, true, "Expected device connected state to be true")
 
 	-- Now wait for the remove event and check the value in the payload
-	local msg, err = hal_device_event_sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(hal_device_event_sub, ctx)
 	luaunit.assertNil(err, "Expected to receive HAL device event message")
 	luaunit.assertNotNil(msg, "Expected to receive HAL device event message")
 	luaunit.assertNotNil(msg.payload, "Expected HAL device event message to have data payload")
@@ -540,9 +562,6 @@ end
 
 TestHalDeviceCapabilityEvent = {}
 
--- These helpers are kept for future capability control tests,
--- where capability endpoints will be invoked directly.
-
 local function wrap_result(...)
 	return { result = { ... }, err = nil }
 end
@@ -560,10 +579,10 @@ local function make_dummy_capability_list(length)
 				no_args = function()
 					return wrap_result(i, "no_args_endpoint")
 				end,
-				single_arg = function(args)
+				single_arg = function(_, args)
 					return wrap_result(i, "single_arg_endpoint", args, #args)
 				end,
-				multi_arg = function(args)
+				multi_arg = function(_, args)
 					return wrap_result(i, "multi_arg_endpoint", args, #args)
 				end,
 				error_fn = function()
@@ -604,9 +623,14 @@ local function capability_event_path(capability_index)
 	return { 'hal', 'capability', 'capability' .. capability_index, tostring(capability_index) }
 end
 
+local function all_capability_event_path()
+	-- Topic used by HAL for all capability connection events
+	return { 'hal', 'capability', '+', '+' }
+end
+
 local function expect_capability_event(sub, ctx, expected_event, label)
 	local suffix = label and (" " .. label) or ""
-	local msg, err = sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(sub, ctx)
 	luaunit.assertNil(err, "Expected to receive HAL capability event message" .. suffix)
 	luaunit.assertNotNil(msg, "Expected to receive HAL capability event message" .. suffix)
 	assert_capability_event(msg.payload, expected_event)
@@ -614,13 +638,14 @@ end
 
 local function assert_no_capability_event(ctx, sub, label)
 	local suffix = label and (" " .. label) or ""
-	local msg, err = sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(sub, ctx)
 	luaunit.assertNil(msg, "Expected to not receive HAL capability event message" .. suffix)
-	luaunit.assertNotNil(err, "Expected to receive timeout error" .. suffix)
+	luaunit.assertEquals(err, 'timeout', "Expected timeout when no capability event should be received" .. suffix ..
+		", got: " .. tostring(err))
 end
 
 local function expect_retained_drop_event(ctx, sub)
-	local msg, err = sub:next_msg_with_context(context.with_timeout(ctx, 0.1))
+	local msg, err = harness.wait_for_msg(sub, ctx)
 	luaunit.assertNil(err, "Expected to receive a message")
 	luaunit.assertNotNil(msg, "Expected to receive a message")
 	luaunit.assertNil(msg.payload, "Expected retained drop message to have nil payload")
@@ -638,8 +663,25 @@ function TestHalDeviceCapabilityEvent:test_device_capability_add_event()
 
 	local expected_event = make_expected_capability_event(device_name, 1, true)
 
-	-- Next wait for a capability info event and check the value in the payload
+	-- Next wait for a capability event and check the value in the payload
 	expect_capability_event(hal_capability_info_sub, ctx, expected_event, "for capability1")
+	ctx:cancel("test complete")
+end
+
+function TestHalDeviceCapabilityEvent:test_device_no_capability()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local device_name = 'dummy_no_capability_device'
+	local capabilities = {} -- empty capabilities
+	local device_event = make_dummy_device_event(true, device_name, capabilities)
+	local hal_capability_info_sub = conn:subscribe(all_capability_event_path())
+
+	hal.device_event_q:put(device_event)
+
+	-- No capability event should be published
+	assert_no_capability_event(ctx, hal_capability_info_sub,
+		"Expect no capability events for device with no capabilities")
+
 	ctx:cancel("test complete")
 end
 
@@ -748,6 +790,39 @@ function TestHalDeviceCapabilityEvent:test_device_capability_duplicate_id_event(
 	ctx:cancel("test complete")
 end
 
+function TestHalDeviceCapabilityEvent:test_add_remove_add_capability_event()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local device_name = 'dummy_add_remove_add_device'
+	local capabilities = make_dummy_capability_list(1)
+	local device_add_event = make_dummy_device_event(true, device_name, capabilities)
+	local device_remove_event = make_dummy_device_event(false, device_name, nil)
+
+	local cap_sub = conn:subscribe(capability_event_path(1))
+
+	-- 1. Add event
+	hal.device_event_q:put(device_add_event)
+
+	local expected_add_event = make_expected_capability_event(device_name, 1, true)
+	expect_capability_event(cap_sub, ctx, expected_add_event, "for capability1 add")
+
+	-- 2. Remove event
+	hal.device_event_q:put(device_remove_event)
+
+	-- A nil payload is sent first to remove retained values under the topic
+	expect_retained_drop_event(ctx, cap_sub)
+
+	local expected_remove_event = make_expected_capability_event(device_name, 1, false)
+	expect_capability_event(cap_sub, ctx, expected_remove_event, "for capability1 remove")
+
+	-- 3. Add event again
+	hal.device_event_q:put(device_add_event)
+
+	expect_capability_event(cap_sub, ctx, expected_add_event, "for capability1 add again")
+
+	ctx:cancel("test complete")
+end
+
 function TestHalDeviceCapabilityEvent:test_device_capability_nil_control_event()
 	local hal, ctx, bus, conn, new_msg = new_hal_env()
 	hal:start(ctx, bus:connect())
@@ -762,6 +837,357 @@ function TestHalDeviceCapabilityEvent:test_device_capability_nil_control_event()
 
 	-- No capability event should be published when control is nil.
 	assert_no_capability_event(ctx, cap_sub, " for capability1 with nil control")
+
+	ctx:cancel("test complete")
+end
+
+TestHalCapabilityControl = {}
+
+local function capability_control_path(capability_type, capability_index, endpoint)
+	return { 'hal', 'capability', capability_type, tostring(capability_index), 'control', endpoint }
+end
+
+function TestHalCapabilityControl:test_capability_control_endpoints()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local capabilities = make_dummy_capability_list(1)
+	local device_event = make_dummy_device_event(true, "test_device", capabilities)
+	local cap_sub = conn:subscribe(capability_event_path(1))
+
+	hal.device_event_q:put(device_event)
+
+	local expected_event = make_expected_capability_event("test_device", 1, true)
+	expect_capability_event(cap_sub, ctx, expected_event, "for capability1 add") -- wait for capability to appear
+
+	-- 1. Test no_args endpoint
+	local cap_control_sub = conn:request(new_msg(
+		capability_control_path("capability1", 1, "no_args")
+	))
+
+	local response, err = harness.wait_for_msg(cap_control_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability control response")
+	local expected_result = wrap_result(1, "no_args_endpoint")
+	luaunit.assertEquals(response.payload, expected_result, "Expected capability control response to match")
+
+	-- 2. Test single_arg endpoint
+	cap_control_sub = conn:request(new_msg(
+		capability_control_path("capability1", 1, "single_arg"),
+		{ "arg1_value" }
+	))
+	response, err = harness.wait_for_msg(cap_control_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability control response")
+	expected_result = wrap_result(1, "single_arg_endpoint", { "arg1_value" }, 1)
+	luaunit.assertEquals(response.payload, expected_result, "Expected capability control response to match")
+
+	-- 3. Test multi_arg endpoint
+	cap_control_sub = conn:request(new_msg(
+		capability_control_path("capability1", 1, "multi_arg"),
+		{ "arg1", "arg2", "arg3" }
+	))
+	response, err = harness.wait_for_msg(cap_control_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability control response")
+	expected_result = wrap_result(1, "multi_arg_endpoint", { "arg1", "arg2", "arg3" }, 3)
+	luaunit.assertEquals(response.payload, expected_result, "Expected capability control response to match")
+
+	-- 4. Test error_fn endpoint
+	cap_control_sub = conn:request(new_msg(
+		capability_control_path("capability1", 1, "error_fn")
+	))
+	response, err = harness.wait_for_msg(cap_control_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability control response")
+	expected_result = wrap_error("Capability function error")
+	luaunit.assertEquals(response.payload, expected_result, "Expected capability control response to match")
+
+	ctx:cancel("test complete")
+end
+
+function TestHalCapabilityControl:test_invalid_capability_control_endpoints()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local capabilities = make_dummy_capability_list(1)
+	local device_event = make_dummy_device_event(true, "test_device_invalid_control", capabilities)
+	local cap_sub = conn:subscribe(capability_event_path(1))
+
+	hal.device_event_q:put(device_event)
+
+	local expected_event = make_expected_capability_event("test_device_invalid_control", 1, true)
+	expect_capability_event(cap_sub, ctx, expected_event, "for capability1 add") -- wait for capability to appear
+
+	-- 1. Non-existent function
+	local cap_control_sub = conn:request(new_msg(
+		capability_control_path("capability1", 1, "invalid_endpoint")
+	))
+
+	local response, err = harness.wait_for_msg(cap_control_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability control response")
+	local expected_result = wrap_error('endpoint does not exist')
+	luaunit.assertEquals(response.payload, expected_result, "Expected capability control response to match")
+
+	-- 2. Non-existent capability index
+	cap_control_sub = conn:request(new_msg(
+		capability_control_path("capability1", 999, "no_args")
+	))
+
+	response, err = harness.wait_for_msg(cap_control_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability control response")
+	expected_result = wrap_error('capability instance does not exist')
+	luaunit.assertEquals(response.payload, expected_result, "Expected capability control response to match")
+
+	-- 3. Non-existent capability type
+	cap_control_sub = conn:request(new_msg(
+		capability_control_path("invalid_capability", 1, "no_args")
+	))
+	response, err = harness.wait_for_msg(cap_control_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability control response")
+	expected_result = wrap_error('capability does not exist')
+	luaunit.assertEquals(response.payload, expected_result, "Expected capability control response to match")
+	ctx:cancel("test complete")
+end
+
+function TestHalCapabilityControl:test_no_endpoint_on_removal()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local device_name = 'dummy_control_remove_device'
+	local capabilities = make_dummy_capability_list(1)
+	local device_add_event = make_dummy_device_event(true, device_name, capabilities)
+	local device_remove_event = make_dummy_device_event(false, device_name, nil)
+
+	local cap_sub = conn:subscribe(capability_event_path(1))
+
+	-- 1. Add event
+	hal.device_event_q:put(device_add_event)
+
+	local expected_add_event = make_expected_capability_event(device_name, 1, true)
+	expect_capability_event(cap_sub, ctx, expected_add_event, "for capability1 add")
+
+	-- 2. Remove event
+	hal.device_event_q:put(device_remove_event)
+
+	-- A nil payload is sent first to remove retained values under the topic
+	expect_retained_drop_event(ctx, cap_sub)
+
+	local expected_remove_event = make_expected_capability_event(device_name, 1, false)
+	expect_capability_event(cap_sub, ctx, expected_remove_event, "for capability1 remove")
+
+	-- Now try to call an endpoint on the removed capability
+	local cap_control_sub = conn:request(new_msg(
+		capability_control_path("capability1", 1, "no_args")
+	))
+
+	local response, err = harness.wait_for_msg(cap_control_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability control response")
+	local expected_result = wrap_error('capability instance does not exist')
+	luaunit.assertEquals(response.payload, expected_result, "Expected capability control response to match")
+
+	ctx:cancel("test complete")
+end
+
+function TestHalCapabilityControl:test_publish_control()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	local ch = channel.new()
+	hal:start(ctx, bus:connect())
+	local capabilities = make_dummy_capability_list(1)
+	-- New endpoint to detect run of endpoint
+	capabilities["capability1"].control["trigger_channel"] = function(_, args)
+		ch:put(args[1])
+		return wrap_result("") -- we won't receive this
+	end
+	local device_event = make_dummy_device_event(true, "test_device_publish_control", capabilities)
+	local cap_sub = conn:subscribe(capability_event_path(1))
+
+	hal.device_event_q:put(device_event)
+
+	local expected_event = make_expected_capability_event("test_device_publish_control", 1, true)
+	expect_capability_event(cap_sub, ctx, expected_event, "for capability1 add") -- wait for capability to appear
+
+	-- Now publish a control message directly to the capability control topic
+	conn:publish(new_msg(
+		capability_control_path("capability1", 1, "trigger_channel"),
+		{ 42 }
+	))
+	-- Wait for the channel to be triggered using cooperative waiting
+	local received
+	fiber.spawn(function()
+		received = ch:get()
+	end)
+	local ok, reason = harness.wait_until(ctx, function()
+		return received ~= nil
+	end)
+	luaunit.assertTrue(ok,
+		"Expected capability control endpoint to trigger channel, but wait_until failed: " .. tostring(reason))
+	luaunit.assertEquals(received, 42, "Expected capability control endpoint to trigger channel with argument")
+end
+
+TestHalCapabilityInfo = {}
+
+local function capability_info_path(type, id, endpoints)
+	if endpoints == nil then endpoints = {} end
+    return { 'hal', 'capability', type, id, 'info', unpack(endpoints) }
+end
+
+function TestHalCapabilityInfo:test_simple_info()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local info_q = hal.capability_info_q
+	local info_sub = conn:subscribe(capability_info_path("dummy", "1"))
+
+	local info = "test"
+	info_q:put({
+		type = "dummy",
+		id = "1",
+		sub_topic = {},
+		endpoints = "single",
+		info = info,
+	})
+
+	local msg, err = harness.wait_for_msg(info_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability info message")
+	luaunit.assertNotNil(msg, "Expected to receive capability info message")
+	luaunit.assertEquals(msg.payload, info, "Expected capability info payload to match")
+	ctx:cancel("test complete")
+end
+
+function TestHalCapabilityInfo:test_tabled_info()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local info_q = hal.capability_info_q
+	local info_sub = conn:subscribe(capability_info_path("dummy", "2"))
+	local no_info_sub_1 = conn:subscribe(capability_info_path("dummy", "2", { "field1" }))
+	local no_info_sub_2 = conn:subscribe(capability_info_path("dummy", "2", { "field2" }))
+
+	local info = {
+		field1 = "value1",
+		field2 = 42,
+	}
+	info_q:put({
+		type = "dummy",
+		id = "2",
+		sub_topic = {},
+		endpoints = "single",
+		info = info,
+	})
+
+	local msg, err = harness.wait_for_msg(info_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability info message")
+	luaunit.assertNotNil(msg, "Expected to receive capability info message")
+	luaunit.assertEquals(msg.payload, info, "Expected capability info payload to match")
+
+	local msg2, err2 = harness.wait_for_msg(no_info_sub_1, ctx)
+	luaunit.assertNil(msg2, "Expected to not receive capability info message with subtopic")
+	luaunit.assertEquals(err2, 'timeout',
+		"Expected timeout with subtopic for missing capability info, got: " .. tostring(err2))
+
+	local msg3, err3 = harness.wait_for_msg(no_info_sub_2, ctx)
+	luaunit.assertNil(msg3, "Expected to not receive capability info message with subtopic")
+	luaunit.assertEquals(err3, 'timeout',
+		"Expected timeout with subtopic for missing capability info, got: " .. tostring(err3))
+
+	ctx:cancel("test complete")
+end
+
+function TestHalCapabilityInfo:test_info_with_subtopic()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local info_q = hal.capability_info_q
+	local info_sub = conn:subscribe(capability_info_path("dummy", "3", { "subtopic1", "subtopic2" }))
+
+	local info = "subtopic_info"
+	info_q:put({
+		type = "dummy",
+		id = "3",
+		sub_topic = { "subtopic1", "subtopic2" },
+		endpoints = "single",
+		info = info,
+	})
+
+	local msg, err = harness.wait_for_msg(info_sub, ctx)
+	luaunit.assertNil(err, "Expected to receive capability info message")
+	luaunit.assertNotNil(msg, "Expected to receive capability info message")
+	luaunit.assertEquals(msg.payload, info, "Expected capability info payload to match")
+	ctx:cancel("test complete")
+end
+
+function TestHalCapabilityInfo:test_tabled_info_publish_multiple()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local info_q = hal.capability_info_q
+	local info_sub_1 = conn:subscribe(capability_info_path("dummy", "3", { "field1" }))
+	local info_sub_2 = conn:subscribe(capability_info_path("dummy", "3", { "field2" }))
+	local no_info_sub = conn:subscribe(capability_info_path("dummy", "3"))
+
+	local info = {
+		field1 = "value1",
+		field2 = 42,
+	}
+	info_q:put({
+		type = "dummy",
+		id = "3",
+		endpoints = "multiple",
+		info = info,
+	})
+
+	local msg, err = harness.wait_for_msg(info_sub_1, ctx)
+	luaunit.assertNil(err, "Expected to receive capability info message")
+	luaunit.assertNotNil(msg, "Expected to receive capability info message")
+	luaunit.assertEquals(msg.payload, info.field1, "Expected capability info payload to match")
+
+	local msg2, err2 = harness.wait_for_msg(info_sub_2, ctx)
+	luaunit.assertNil(err2, "Expected to receive capability info message")
+	luaunit.assertNotNil(msg2, "Expected to receive capability info message")
+	luaunit.assertEquals(msg2.payload, info.field2, "Expected capability info payload to match")
+
+	local msg3, err3 = harness.wait_for_msg(no_info_sub, ctx)
+	luaunit.assertNil(msg3, "Expected to not receive capability info message without subtopic")
+	luaunit.assertEquals(err3, 'timeout',
+		"Expected timeout without subtopic for missing capability info, got: " .. tostring(err3))
+
+	ctx:cancel("test complete")
+end
+
+function TestHalCapabilityInfo:test_info_invalid()
+	local hal, ctx, bus, conn, new_msg = new_hal_env()
+	hal:start(ctx, bus:connect())
+	local info_q = hal.capability_info_q
+	local info_sub = conn:subscribe(capability_info_path("dummy", "4"))
+
+	-- Missing type
+	info_q:put({
+		id = "4",
+		sub_topic = {},
+		endpoints = "single",
+		info = "invalid_info",
+	})
+
+	local msg, err = harness.wait_for_msg(info_sub, ctx)
+	luaunit.assertNil(msg, "Expected to not receive capability info message with missing type")
+	luaunit.assertEquals(err, 'timeout',
+		"Expected timeout with missing type for capability info, got: " .. tostring(err))
+
+	-- Missing id
+	info_q:put({
+		type = "dummy",
+		sub_topic = {},
+		endpoints = "single",
+		info = "invalid_info",
+	})
+
+	msg, err = harness.wait_for_msg(info_sub, ctx)
+	luaunit.assertNil(msg, "Expected to not receive capability info message with missing id")
+	luaunit.assertEquals(err, 'timeout',
+		"Expected timeout with missing id for capability info, got: " .. tostring(err))
+
+	-- Missing endpoints
+	info_q:put({
+		type = "dummy",
+		id = "4",
+		sub_topic = {},
+		info = "invalid_info",
+	})
+
+	msg, err = harness.wait_for_msg(info_sub, ctx)
+	luaunit.assertNil(msg, "Expected to not receive capability info message with missing endpoints")
+	luaunit.assertEquals(err, 'timeout',
+		"Expected timeout with missing endpoints for capability info, got: " .. tostring(err))
 
 	ctx:cancel("test complete")
 end
