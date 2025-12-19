@@ -1,0 +1,6 @@
+[/dev/cdc-wdm0] Successfully got signal info
+LTE:
+	RSSI: '-71 dBm'
+	RSRQ: '-14 dB'
+	RSRP: '-102 dBm'
+	SNR: '8.2 dB'

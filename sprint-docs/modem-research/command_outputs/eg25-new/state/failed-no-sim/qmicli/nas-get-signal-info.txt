@@ -1,0 +1,4 @@
+[/dev/cdc-wdm0] Successfully got signal info
+WCDMA:
+	RSSI: '-80 dBm'
+	ECIO: '-8.5 dBm'

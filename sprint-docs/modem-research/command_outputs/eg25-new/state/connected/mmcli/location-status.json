@@ -1,0 +1,24 @@
+{
+  "modem": {
+    "location": {
+      "capabilities": [
+        "3gpp-lac-ci",
+        "gps-raw",
+        "gps-nmea",
+        "gps-unmanaged",
+        "agps-msa",
+        "agps-msb"
+      ],
+      "enabled": [
+        "3gpp-lac-ci"
+      ],
+      "gps": {
+        "assistance": [],
+        "assistance-servers": [],
+        "refresh-rate": "30",
+        "supl-server": "--"
+      },
+      "signals": "no"
+    }
+  }
+}

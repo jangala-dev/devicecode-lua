@@ -1,0 +1,1 @@
+error: could not power on SIM: QMI protocol error (26): 'NoEffect'

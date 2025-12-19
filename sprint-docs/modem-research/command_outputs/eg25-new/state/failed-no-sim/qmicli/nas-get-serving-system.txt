@@ -1,0 +1,26 @@
+[/dev/cdc-wdm0] Successfully got serving system:
+	Registration state: 'not-registered-searching'
+	CS: 'detached'
+	PS: 'detached'
+	Selected network: '3gpp'
+	Radio interfaces: '1'
+		[0]: 'umts'
+	Roaming status: 'on'
+	Data service capabilities: '0'
+	Current PLMN:
+		MCC: '234'
+		MNC: '10'
+		Description: ''
+	Roaming indicators: '1'
+		[0]: 'on' (umts)
+	Detailed status:
+		Status: 'limited'
+		Capability: 'cs-ps'
+		HDR Status: 'none'
+		HDR Hybrid: 'no'
+		Forbidden: 'no'
+	UMTS primary scrambling code: '460'
+	Full operator code info:
+		MCC: '234'
+		MNC: '10'
+		MNC with PCS digit: 'no'

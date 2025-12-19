@@ -1,0 +1,1 @@
+[/dev/cdc-wdm0] Successfully performed SIM power on
