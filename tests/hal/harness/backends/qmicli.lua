@@ -1,4 +1,5 @@
 local commands = require "tests.utils.ShimCommands"
+local modem_registry = require 'tests.hal.harness.devices.modem_registry'
 
 -- For each function we create and track shim commands per *port*.
 
@@ -10,20 +11,47 @@ end
 
 local uim_sim_power_off_cmds = {}
 local function uim_sim_power_off(ctx, port)
-    uim_sim_power_off_cmds[port] = commands.new_command()
-    return uim_sim_power_off_cmds[port]
+    local cmd = commands.new_command()
+    uim_sim_power_off_cmds[port] = cmd
+
+    local modem = modem_registry.get_by_qmi_port(port)
+    if modem and modem.on_qmi_uim_sim_power_off then
+        cmd.on_start = function()
+            return modem:on_qmi_uim_sim_power_off(cmd, port)
+        end
+    end
+
+    return cmd
 end
 
 local uim_sim_power_on_cmds = {}
 local function uim_sim_power_on(ctx, port)
-    uim_sim_power_on_cmds[port] = commands.new_command()
-    return uim_sim_power_on_cmds[port]
+    local cmd = commands.new_command()
+    uim_sim_power_on_cmds[port] = cmd
+
+    local modem = modem_registry.get_by_qmi_port(port)
+    if modem and modem.on_qmi_uim_sim_power_on then
+        cmd.on_start = function()
+            return modem:on_qmi_uim_sim_power_on(cmd, port)
+        end
+    end
+
+    return cmd
 end
 
 local uim_monitor_slot_status_cmds = {}
 local function uim_monitor_slot_status(port)
-    uim_monitor_slot_status_cmds[port] = commands.new_command()
-    return uim_monitor_slot_status_cmds[port]
+    local cmd = commands.new_command()
+    uim_monitor_slot_status_cmds[port] = cmd
+
+    local modem = modem_registry.get_by_qmi_port(port)
+    if modem and modem.on_qmi_uim_monitor_start then
+        cmd.on_start = function()
+            return modem:on_qmi_uim_monitor_start(cmd, port)
+        end
+    end
+
+    return cmd
 end
 
 local uim_read_transparent_cmds = {}

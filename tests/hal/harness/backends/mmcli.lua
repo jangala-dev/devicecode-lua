@@ -1,5 +1,6 @@
 local channel = require 'fibers.channel'
 local commands = require 'tests.utils.ShimCommands'
+local modem_registry = require 'tests.hal.harness.devices.modem_registry'
 
 local monitor_modems_cmd = commands.new_command() -- We only ever need one instance
 local function monitor_modems()
@@ -8,8 +9,22 @@ end
 
 local inhibit_cmds = {}
 local function inhibit(device)
-    inhibit_cmds[device] = commands.new_command()
-    return inhibit_cmds[device]
+    local cmd = commands.new_command()
+    inhibit_cmds[device] = cmd
+
+    local modem = modem_registry.get_by_address(device)
+    if modem and modem.on_mmcli_inhibit_start then
+        cmd.on_start = function()
+            return modem:on_mmcli_inhibit_start(cmd)
+        end
+    end
+    if modem and modem.on_mmcli_inhibit_end then
+        cmd.on_kill = function()
+            modem:on_mmcli_inhibit_end(cmd)
+        end
+    end
+
+    return cmd
 end
 
 local connect_cmds = {}
@@ -17,43 +32,96 @@ local function connect(ctx, device, connection_string)
     if not connect_cmds[device] then
         connect_cmds[device] = {}
     end
-    table.insert(connect_cmds[device], commands.new_command())
-    return connect_cmds[device][#connect_cmds[device]]
+    local cmd = commands.new_command()
+    table.insert(connect_cmds[device], cmd)
+
+    local modem = modem_registry.get_by_address(device)
+    if modem and modem.on_mmcli_connect then
+        cmd.on_start = function()
+            return modem:on_mmcli_connect(cmd, connection_string)
+        end
+    end
+
+    return cmd
 end
 
 local disconnect_cmds = {}
 local function disconnect(ctx, device)
-    disconnect_cmds[device] = commands.new_command()
-    return disconnect_cmds[device]
+    local cmd = commands.new_command()
+    disconnect_cmds[device] = cmd
+
+    local modem = modem_registry.get_by_address(device)
+    if modem and modem.on_mmcli_disconnect then
+        cmd.on_start = function()
+            return modem:on_mmcli_disconnect(cmd)
+        end
+    end
+
+    return cmd
 end
 
 local reset_cmds = {}
 local function reset(ctx, device)
-    reset_cmds[device] = commands.new_command()
-    return reset_cmds[device]
+    local cmd = commands.new_command()
+    reset_cmds[device] = cmd
+
+    local modem = modem_registry.get_by_address(device)
+    if modem and modem.on_mmcli_reset then
+        cmd.on_start = function()
+            return modem:on_mmcli_reset(cmd)
+        end
+    end
+
+    return cmd
 end
 
 local enable_cmds = {}
 local function enable(ctx, device)
-    enable_cmds[device] = commands.new_command()
-    return enable_cmds[device]
+    local cmd = commands.new_command()
+    enable_cmds[device] = cmd
+
+    local modem = modem_registry.get_by_address(device)
+    if modem and modem.on_mmcli_enable then
+        cmd.on_start = function()
+            return modem:on_mmcli_enable(cmd)
+        end
+    end
+
+    return cmd
 end
 
 local disable_cmds = {}
 local function disable(ctx, device)
-    disable_cmds[device] = commands.new_command()
-    return disable_cmds[device]
+    local cmd = commands.new_command()
+    disable_cmds[device] = cmd
+
+    local modem = modem_registry.get_by_address(device)
+    if modem and modem.on_mmcli_disable then
+        cmd.on_start = function()
+            return modem:on_mmcli_disable(cmd)
+        end
+    end
+
+    return cmd
 end
 
 local monitor_state_cmds = {}
 local function monitor_state(device)
-    monitor_state_cmds[device] = commands.new_command()
-    return monitor_state_cmds[device]
+    local cmd = commands.new_command()
+    monitor_state_cmds[device] = cmd
+
+    local modem = modem_registry.get_by_address(device)
+    if modem and modem.on_mmcli_monitor_state_start then
+        cmd.on_start = function()
+            return modem:on_mmcli_monitor_state_start(cmd)
+        end
+    end
+
+    return cmd
 end
 
 local information_cmds = {}
 local function information(ctx, device)
-    print(device)
     if not information_cmds[device] then
         information_cmds[device] = commands.new_static_command()
     end
@@ -74,8 +142,17 @@ end
 
 local signal_setup_cmds = {}
 local function signal_setup(ctx, device, rate)
-    signal_setup_cmds[device] = commands.new_command()
-    return signal_setup_cmds[device]
+    local cmd = commands.new_command()
+    signal_setup_cmds[device] = cmd
+
+    local modem = modem_registry.get_by_address(device)
+    if modem and modem.on_mmcli_signal_setup then
+        cmd.on_start = function()
+            return modem:on_mmcli_signal_setup(cmd, rate)
+        end
+    end
+
+    return cmd
 end
 
 local signal_get_cmds = {}
