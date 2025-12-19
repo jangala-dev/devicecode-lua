@@ -1,0 +1,48 @@
+{
+  "modem": {
+    "signal": {
+      "5g": {
+        "error-rate": "--",
+        "rsrp": "--",
+        "rsrq": "--",
+        "snr": "--"
+      },
+      "cdma1x": {
+        "ecio": "--",
+        "error-rate": "--",
+        "rssi": "--"
+      },
+      "evdo": {
+        "ecio": "--",
+        "error-rate": "--",
+        "io": "--",
+        "rssi": "--",
+        "sinr": "--"
+      },
+      "gsm": {
+        "error-rate": "--",
+        "rssi": "--"
+      },
+      "lte": {
+        "error-rate": "--",
+        "rsrp": "--",
+        "rsrq": "--",
+        "rssi": "--",
+        "snr": "--"
+      },
+      "refresh": {
+        "rate": "0"
+      },
+      "threshold": {
+        "error-rate": "no",
+        "rssi": "0"
+      },
+      "umts": {
+        "ecio": "--",
+        "error-rate": "--",
+        "rscp": "--",
+        "rssi": "--"
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+[/dev/cdc-wdm0] Successfully got serving system:
+	Registration state: 'registered'
+	CS: 'attached'
+	PS: 'attached'
+	Selected network: '3gpp'
+	Radio interfaces: '1'
+		[0]: 'lte'
+	Roaming status: 'off'
+	Data service capabilities: '1'
+		[0]: 'lte'
+	Current PLMN:
+		MCC: '234'
+		MNC: '10'
+		Description: 'O2 - UK'
+	Roaming indicators: '1'
+		[0]: 'off' (lte)
+	3GPP location area code: '65534'
+	3GPP cell ID: '153667976'
+	Detailed status:
+		Status: 'available'
+		Capability: 'cs-ps'
+		HDR Status: 'none'
+		HDR Hybrid: 'no'
+		Forbidden: 'no'
+	LTE tracking area code: '14768'
+	Full operator code info:
+		MCC: '234'
+		MNC: '10'
+		MNC with PCS digit: 'no'
