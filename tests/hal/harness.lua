@@ -1,5 +1,6 @@
 local fiber = require 'fibers.fiber'
 local context = require 'fibers.context'
+local sleep = require 'fibers.sleep'
 
 local harness = {}
 
@@ -60,7 +61,7 @@ local function make_alt_wait(ctx, max_ticks)
 			return nil, 'timeout'
 		end
 
-		fiber.yield()
+		sleep.sleep(0) -- yields
 		-- Special error sentinel used by wait helpers to
 		-- distinguish an alt-path from a real error.
 		return nil, '__ALT__'
@@ -79,6 +80,16 @@ function harness.wait_for_msg(sub, ctx, max_ticks)
 			return msg, err
 		end
 	end
+end
+
+function harness.wait_for_channel(ch, ctx, max_ticks)
+    local alt = make_alt_wait(ctx, max_ticks)
+    while true do
+        local val, err = ch:get_op():perform_alt(alt)
+        if err ~= '__ALT__' then
+            return val, err
+        end
+    end
 end
 
 -- Wait until a predicate becomes true, yielding cooperatively
