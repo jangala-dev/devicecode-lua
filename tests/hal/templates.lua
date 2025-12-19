@@ -16,191 +16,147 @@ local function merge_tables(main, overrides)
 end
 
 local function make_modem_information(overrides)
+    -- Minimal mmcli -J -m output containing only the fields the
+    -- modem driver (and mode/model overrides) actually read.
     local base_information = {
         modem = {
             ["3gpp"] = {
-                ["5gnr"] = {
-                    ["registration-settings"] = {
-                        ["drx-cycle"] = "--",
-                        ["mico-mode"] = "--",
-                    },
-                },
-                ["enabled-locks"] = {
-                    "fixed-dialing",
-                },
-                eps = {
-                    ["initial-bearer"] = {
-                        ["dbus-path"] = "--",
-                        settings = {
-                            apn = "",
-                            ["ip-type"] = "ipv4v6",
-                            password = "--",
-                            user = "--",
-                        },
-                    },
-                    ["ue-mode-operation"] = "csps-2",
-                },
-                imei = "867929068986654",
-                ["operator-code"] = "--",
-                ["operator-name"] = "--",
-                ["packet-service-state"] = "--",
-                pco = "--",
                 ["registration-state"] = "--",
             },
-            cdma = {
-                ["activation-state"] = "--",
-                ["cdma1x-registration-state"] = "--",
-                esn = "--",
-                ["evdo-registration-state"] = "--",
-                meid = "--",
-                nid = "--",
-                sid = "--",
-            },
-            ["dbus-path"] = "/org/freedesktop/ModemManager1/Modem/14",
             generic = {
-                ["access-technologies"] = {},
-                bearers = {},
-                ["carrier-configuration"] = "ROW_Generic_3GPP",
-                ["carrier-configuration-revision"] = "0501081F",
-                ["current-bands"] = {
-                    "egsm",
-                    "dcs",
-                    "pcs",
-                    "g850",
-                    "utran-1",
-                    "utran-4",
-                    "utran-6",
-                    "utran-5",
-                    "utran-8",
-                    "utran-2",
-                    "eutran-1",
-                    "eutran-2",
-                    "eutran-3",
-                    "eutran-4",
-                    "eutran-5",
-                    "eutran-7",
-                    "eutran-8",
-                    "eutran-12",
-                    "eutran-13",
-                    "eutran-18",
-                    "eutran-19",
-                    "eutran-20",
-                    "eutran-25",
-                    "eutran-26",
-                    "eutran-28",
-                    "eutran-38",
-                    "eutran-39",
-                    "eutran-40",
-                    "eutran-41",
-                    "utran-19",
-                },
-                ["current-capabilities"] = {
-                    "gsm-umts, lte",
-                },
-                ["current-modes"] = "allowed: 2g, 3g, 4g; preferred: 4g",
-                device = "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3/3-1",
-                ["device-identifier"] = "a7591502473ae9ffc14e992ff1621f18cc4dd408",
+                -- Drivers determine QMI/MBIM mode
                 drivers = {
-                    "option1",
                     "qmi_wwan",
                 },
-                ["equipment-identifier"] = "867929068986654",
-                ["hardware-revision"] = "10000",
-                manufacturer = "QUALCOMM INCORPORATED",
-                model = "QUECTEL Mobile Broadband Module",
-                ["own-numbers"] = {},
-                physdev = "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3/3-1",
+                -- Used to select manufacturer/model mapping
                 plugin = "quectel",
+                model = "QUECTEL Mobile Broadband Module",
+                revision = "EG25GGBR07A08M2G",
+
+                -- Identity
+                ["equipment-identifier"] = "867929068986654",
+                device = "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb3/3-1",
+
+                -- Ports used for QMI, AT and net stats
                 ports = {
                     "cdc-wdm0 (qmi)",
-                    "ttyUSB0 (ignored)",
-                    "ttyUSB1 (gps)",
                     "ttyUSB2 (at)",
-                    "ttyUSB3 (at)",
                     "wwan0 (net)",
                 },
-                ["power-state"] = "on",
                 ["primary-port"] = "cdc-wdm0",
-                ["primary-sim-slot"] = "1",
-                revision = "EG25GGBR07A08M2G",
-                ["signal-quality"] = {
-                    recent = "yes",
-                    value = "0",
-                },
+
+                -- SIM / state used by the driver polling logic
                 sim = "--",
-                ["sim-slots"] = {
-                    "/org/freedesktop/ModemManager1/SIM/14",
-                    "/",
-                },
                 state = "disabled",
-                ["state-failed-reason"] = "--",
-                ["supported-bands"] = {
-                    "egsm",
-                    "dcs",
-                    "pcs",
-                    "g850",
-                    "utran-1",
-                    "utran-4",
-                    "utran-6",
-                    "utran-5",
-                    "utran-8",
-                    "utran-2",
-                    "eutran-1",
-                    "eutran-2",
-                    "eutran-3",
-                    "eutran-4",
-                    "eutran-5",
-                    "eutran-7",
-                    "eutran-8",
-                    "eutran-12",
-                    "eutran-13",
-                    "eutran-18",
-                    "eutran-19",
-                    "eutran-20",
-                    "eutran-25",
-                    "eutran-26",
-                    "eutran-28",
-                    "eutran-38",
-                    "eutran-39",
-                    "eutran-40",
-                    "eutran-41",
-                    "utran-19",
-                },
-                ["supported-capabilities"] = {
-                    "gsm-umts, lte",
-                },
-                ["supported-ip-families"] = {
-                    "ipv4",
-                    "ipv6",
-                    "ipv4v6",
-                },
-                ["supported-modes"] = {
-                    "allowed: 2g; preferred: none",
-                    "allowed: 3g; preferred: none",
-                    "allowed: 4g; preferred: none",
-                    "allowed: 2g, 3g; preferred: 3g",
-                    "allowed: 2g, 3g; preferred: 2g",
-                    "allowed: 2g, 4g; preferred: 4g",
-                    "allowed: 2g, 4g; preferred: 2g",
-                    "allowed: 3g, 4g; preferred: 4g",
-                    "allowed: 3g, 4g; preferred: 3g",
-                    "allowed: 2g, 3g, 4g; preferred: 4g",
-                    "allowed: 2g, 3g, 4g; preferred: 3g",
-                    "allowed: 2g, 3g, 4g; preferred: 2g",
-                },
-                ["unlock-required"] = "sim-pin2",
-                ["unlock-retries"] = {
-                    "sim-pin (3)",
-                    "sim-puk (10)",
-                    "sim-pin2 (3)",
-                    "sim-puk2 (10)",
-                },
             },
         },
     }
     local merged = merge_tables(base_information, overrides or {})
 
     return json.encode(merged), merged
+end
+
+-- Minimal mmcli -J -i <sim> output structure. The driver only
+-- requires the top-level `sim` table, so we keep this very small
+-- while allowing overrides for tests that care about details.
+local function make_sim_information(overrides)
+    local base_information = {
+        sim = {
+            ["active"] = true,
+            ["imsi"] = "001010123456789",
+            ["operator-id"] = "00101",
+            ["operator-name"] = "Test Operator",
+        },
+    }
+    local merged = merge_tables(base_information, overrides or {})
+    return json.encode(merged), merged
+end
+
+-- Minimal mmcli --signal-get JSON. You can select one or more
+-- access technologies that should carry real values via
+-- `active_techs`; all other technologies have their metrics set
+-- to "--" by default.
+--
+-- active_techs: either a single string ("lte") or an array of
+--                tech strings (e.g. {"lte", "5g"}). Allowed
+--                values are "5g", "cdma1x", "evdo", "gsm",
+--                "lte", "umts".
+-- overrides: optional table keyed by tech name, each value a
+--            table merged into that tech's metrics.
+local function make_signal_information(active_techs, overrides)
+    local base_signal = {
+        modem = {
+            signal = {
+                ["5g"] = {
+                    ["error-rate"] = "--",
+                    rsrp = "--",
+                    rsrq = "--",
+                    snr = "--",
+                },
+                cdma1x = {
+                    ecio = "--",
+                    ["error-rate"] = "--",
+                    rssi = "--",
+                },
+                evdo = {
+                    ecio = "--",
+                    ["error-rate"] = "--",
+                    io = "--",
+                    rssi = "--",
+                    sinr = "--",
+                },
+                gsm = {
+                    ["error-rate"] = "--",
+                    rssi = "--",
+                },
+                lte = {
+                    ["error-rate"] = "--",
+                    rsrp = "--",
+                    rsrq = "--",
+                    rssi = "--",
+                    snr = "--",
+                },
+                umts = {
+                    ecio = "--",
+                    ["error-rate"] = "--",
+                    rscp = "--",
+                    rssi = "--",
+                },
+                refresh = {
+                    rate = "0",
+                },
+                threshold = {
+                    ["error-rate"] = "no",
+                    rssi = "0",
+                },
+            },
+        },
+    }
+
+    -- Normalise active_techs to an array of tech names
+    local tech_list
+    if type(active_techs) == "string" or active_techs == nil then
+        tech_list = { active_techs or "lte" }
+    elseif type(active_techs) == "table" then
+        tech_list = active_techs
+    else
+        tech_list = { "lte" }
+    end
+
+    overrides = overrides or {}
+
+    for _, tech in ipairs(tech_list) do
+        local tech_table = base_signal.modem.signal[tech]
+        if tech_table then
+            local tech_overrides = overrides[tech] or overrides
+            if tech_overrides and next(tech_overrides) ~= nil then
+                base_signal.modem.signal[tech] = merge_tables(tech_table, tech_overrides)
+            end
+        end
+    end
+
+    local encoded = json.encode(base_signal)
+    return encoded, base_signal
 end
 
 local function make_modem_device_event(overrides)
@@ -234,5 +190,8 @@ end
 
 return {
     make_modem_information = make_modem_information,
+    make_sim_information = make_sim_information,
+    make_signal_information = make_signal_information,
     make_modem_device_event = make_modem_device_event,
+    merge_tables = merge_tables,
 }
