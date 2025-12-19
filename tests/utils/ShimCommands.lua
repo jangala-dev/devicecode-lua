@@ -20,9 +20,10 @@ function Pipe:read_line_op()
 end
 
 function Pipe:close()
-    if self.parent_cmd.state ~= COMMAND_STATE.FLUSHED then
-        error("cannot close pipe before parent command is flushed")
-    end
+    -- In the real exec implementation, pipes can be closed
+    -- independently of the process lifecycle. For the shim we
+    -- therefore allow close() regardless of the parent command
+    -- state and simply drop the underlying channel reference.
     self.ch = nil
 end
 
@@ -43,12 +44,19 @@ local function new_command()
         ctx = context.with_cancel(context.background()),
         stdout = nil,
         stderr = nil,
+        -- Optional lifecycle hooks used by test backends to
+        -- trigger side-effects when commands are used.
+        on_start = nil,
+        on_kill = nil,
     }
     return setmetatable(self, Command)
 end
 
 function Command:start()
     self.state = COMMAND_STATE.STARTED
+    if self.on_start then
+        return self.on_start(self)
+    end
     return nil
 end
 
@@ -75,8 +83,18 @@ function Command:stderr_pipe()
 end
 
 function Command:combined_output()
-    local out = self:stdout_pipe()
-    local err = self:stderr_pipe()
+    local out_pipe = self:stdout_pipe()
+    local err_pipe = self:stderr_pipe()
+
+    -- In the real exec implementation, the process is started
+    -- before output is read. Mirror that behaviour here so that
+    -- any on_start side-effects are applied exactly once.
+    if self.state == COMMAND_STATE.CREATED then
+        local err = self:start()
+        if err then
+            return "", err
+        end
+    end
 
     local buf = ""
     local continue = true
@@ -90,8 +108,8 @@ function Command:combined_output()
 
     while continue and not self.ctx:err() do
         local read_op = op.choice(
-            out:read_line_op(),
-            err:read_line_op()
+            out_pipe:read_line_op(),
+            err_pipe:read_line_op()
         ):wrap(push_data)
         op.choice(
             read_op,
@@ -100,6 +118,21 @@ function Command:combined_output()
     end
 
     return buf, nil
+end
+
+function Command:run()
+    -- Simplified exec-style run: ensure the command has started and
+    -- propagate any start error. We do not currently accumulate
+    -- stdout/stderr here as existing callers only check the error.
+    if self.state == COMMAND_STATE.CREATED then
+        local err = self:start()
+        if err then
+            self.state = COMMAND_STATE.FLUSHED
+            return err
+        end
+    end
+    self.state = COMMAND_STATE.FLUSHED
+    return nil
 end
 
 function Command:wait()
@@ -111,6 +144,9 @@ end
 function Command:kill()
     self.ctx:cancel('killed')
     self.state = COMMAND_STATE.KILLED
+    if self.on_kill then
+        self.on_kill(self)
+    end
 end
 
 function Command:close()
