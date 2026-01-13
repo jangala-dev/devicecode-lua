@@ -18,93 +18,164 @@ if is_entry_point then
     _G._TEST = true -- Enable test exports in source code
     local log = require 'services.log'
     local rxilog = require 'rxilog'
-    -- for _, mode in ipairs(rxilog.modes) do
-    --     log[mode.name] = function() end -- no-op logging during tests
-    -- end
+    for _, mode in ipairs(rxilog.modes) do
+        log[mode.name] = function() end -- no-op logging during tests, comment out to see logs
+    end
 end
 
 local luaunit = require 'luaunit'
 local fiber = require 'fibers.fiber'
-local channel = require 'fibers.channel'
 local context = require 'fibers.context'
 local sleep = require 'fibers.sleep'
+local channel = require 'fibers.channel'
 
 local harness = require 'tests.hal.harness'
-local templates = require 'tests.hal.templates'
-local dummy_modem = require 'tests.hal.harness.devices.modem'
+local mock = require 'tests.utils.mock'
+local commands = require 'tests.utils.ShimCommands'
+
+local function make_monitor_event(is_added, address)
+    local sign = is_added and '(+)' or '(-)'
+    return string.format("%s %s [DUMMY MANAFACUTER] Dummy Modem Module", sign,
+        address)
+end
+
+local function release(module_path)
+    package.loaded[module_path] = nil
+end
 
 TestHalModemcardManager = {}
 
-function TestHalModemcardManager:test_modem_monitor_events()
-    local _, ctx, bus, conn, new_msg = harness.new_hal_env()
-    local manager = require 'services.hal.managers.modemcard'.new()
-    local device_event_q = channel.new()
-    local capability_info_q = channel.new()
-    manager:spawn(context.with_cancel(ctx), bus:connect(), device_event_q, capability_info_q)
+function TestHalModemcardManager:test_detector()
+    local ctx = context.with_cancel(context.background())
 
-    -- 1. No modems present
-    local nomodem = dummy_modem.no_modem()
-    local wr_err = nomodem:appear()
-    luaunit.assertNil(wr_err, "Failed to write to monitor command stdout")
+    -- Setup mmcli backend command mocks
+    local mmcli = require 'tests.hal.harness.backends.mmcli'
+    local mmcli_mock = mock.new_module(
+        "services.hal.drivers.modem.mmcli",
+        mmcli
+    )
+    mmcli_mock:apply()
 
-    local result, err = harness.wait_for_channel(device_event_q, ctx, 20) -- wait for no add event
-    luaunit.assertNil(result, "Did not expect a device event")
+    local monitor_modems_cmd = commands.new_command(ctx)
+    mmcli.set_command("monitor_modems", monitor_modems_cmd)
+
+    local modem_manager_module = require 'services.hal.managers.modemcard'
+    local modem_manager = modem_manager_module.new()
+    local modem_detect_ch = modem_manager.modem_detect_channel
+    local modem_remove_ch = modem_manager.modem_remove_channel
+    fiber.spawn(function()
+        modem_manager:_detector(ctx)
+    end)
+
+    local address = "/org/freedesktop/ModemManager1/Modem/0"
+
+    -- Simulate modem addition
+    monitor_modems_cmd.stdout_ch:put(make_monitor_event(true, address))
+    local detected_address, err = harness.wait_for_channel(modem_detect_ch, ctx)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(detected_address, address)
+
+
+    -- Simulate modem removal
+    monitor_modems_cmd.stdout_ch:put(make_monitor_event(false, address))
+    local removed_address, err = harness.wait_for_channel(modem_remove_ch, ctx)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(removed_address, address)
+
+    -- Simulate no modems
+    monitor_modems_cmd.stdout_ch:put("No modems found")
+    local no_event, err = harness.wait_for_channel(modem_detect_ch, ctx)
+    luaunit.assertNil(no_event)
     luaunit.assertEquals(err, 'timeout')
 
-    -- pre 2&3. Create dummy modem
-    local modem = dummy_modem.new(context.with_cancel(ctx))
-    modem:set_address_index("0")
-    modem:set_mmcli_information{
-        modem = {
-            generic = {
-                device = "/fake/port0",
-                ["equipment-identifier"] = "123456789",
-            }
-        }
-    }
-
-    -- 2. Modem 0 added
-    wr_err = modem:appear()
-    luaunit.assertNil(wr_err, "Failed to write to monitor command stdout")
-
-
-    result, err = harness.wait_for_channel(device_event_q, ctx, 20) -- wait for add event
-    -- ignore control object
-    if result.capabilities.modem then result.capabilities.modem.control = "" end
-    -- build expected event
-    local expected_event = templates.make_modem_device_event{
-        connected = true,
-        data = {
-            port = "/fake/port0"
-        },
-        capabilities = {
-            modem = {
-                id = "123456789",
-                control = "" -- we don't care about the control object here
-            }
-        }
-    }
-    luaunit.assertNotNil(result, "Expected a device event")
-    luaunit.assertEquals(err, nil)
-    luaunit.assertEquals(result, expected_event)
-
-    -- 3. Modem 0 removed
-    wr_err = modem:disappear()
-    luaunit.assertNil(wr_err, "Failed to write to monitor command stdout")
-    result, err = harness.wait_for_channel(device_event_q, ctx, 20) -- wait for remove event
-    -- expected_event = make_expected_device_event(false, make_full_address("0"))
-    expected_event = templates.make_modem_device_event{
-        connected = false,
-        data = {
-            port = "/fake/port0"
-        }
-    }
-    luaunit.assertNotNil(result, "Expected a device event")
-    luaunit.assertEquals(err, nil)
-    luaunit.assertEquals(result, expected_event)
+    -- Verify command call counts
+    luaunit.assertEquals(monitor_modems_cmd.calls.start, 1)
 
     ctx:cancel('test complete')
-    sleep.sleep(0) -- allow manager to exit
+    -- Cleanup modules from cache
+    mmcli_mock:clear()
+    release "services.hal.managers.modemcard"
+    sleep.sleep(0) -- allow fiber to exit
+
+    luaunit.assertEquals(monitor_modems_cmd.calls.wait, 1)
+    luaunit.assertEquals(monitor_modems_cmd.calls.kill, 1)
+    luaunit.assertEquals(monitor_modems_cmd.calls.close, 1)
+end
+
+function TestHalModemcardManager:test_manager()
+    local ctx = context.with_cancel(context.background())
+
+    -- Setup modem driver mock (this will be a driver instance)
+    local modem_mock = mock.new_object {
+        init = { nil },
+        apply_capabilities = { {}, nil },
+        spawn = {}
+    }
+
+    local modem_inst = modem_mock:create_instance()
+
+    -- Setup modem driver module mock (to return the driver instance)
+    local modem_driver_module_mock = mock.new_module(
+        "services.hal.drivers.modem",
+        {
+            -- a mock can take a function for dynamic behavior or table of return values for static behavior
+            new = function(mctx, address)
+                modem_inst.address = address
+                modem_inst.device = "dummy"
+                modem_inst.ctx = mctx
+                return modem_inst
+            end
+        }
+    )
+    modem_driver_module_mock:apply()
+
+    -- Setup mmcli backend command mocks
+    local mmcli = require 'tests.hal.harness.backends.mmcli'
+    local mmcli_mock = mock.new_module(
+        "services.hal.drivers.modem.mmcli",
+        mmcli
+    )
+    mmcli_mock:apply()
+
+    local modem_manager_module = require 'services.hal.managers.modemcard'
+    local modem_manager = modem_manager_module.new()
+    local modem_detect_ch = modem_manager.modem_detect_channel
+    local modem_remove_ch = modem_manager.modem_remove_channel
+    local device_event_q = channel.new()
+    local capability_info_q = channel.new()
+    fiber.spawn(function()
+        modem_manager:_manager(
+            ctx,
+            nil,
+            device_event_q,
+            capability_info_q
+        )
+    end)
+    local address = "/org/freedesktop/ModemManager1/Modem/0"
+
+    -- Simulate modem detection
+    modem_detect_ch:put(address)
+    local device_event, err = harness.wait_for_channel(device_event_q, ctx)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(device_event.connected, true)
+    luaunit.assertEquals(device_event.data.port, "dummy")
+    luaunit.assertEquals(modem_inst._calls.init, 1)
+    luaunit.assertEquals(modem_inst._calls.apply_capabilities, 1)
+    luaunit.assertEquals(modem_inst._calls.spawn, 1)
+
+    -- Simulate modem removal
+    modem_remove_ch:put(address)
+    local device_event, err = harness.wait_for_channel(device_event_q, ctx)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(device_event.connected, false)
+    luaunit.assertEquals(device_event.data.port, "dummy")
+
+    ctx:cancel('test complete')
+    -- Cleanup modules from cache
+    modem_driver_module_mock:clear()
+    mmcli_mock:clear()
+    release "services.hal.managers.modemcard"
+    sleep.sleep(0) -- allow fiber to exit
 end
 
 local function main()
