@@ -1,10 +1,7 @@
-local modem_manager = require "services.hal.managers.modemcard"
-local ubus_manager = require "services.hal.managers.ubus"
-local uci_manager = require "services.hal.managers.uci"
-local wlan_managaer = require "services.hal.managers.wlan"
 local fiber = require "fibers.fiber"
 local queue = require "fibers.queue"
 local op = require "fibers.op"
+local context = require "fibers.context"
 local service = require "service"
 local new_msg = require("bus").new_msg
 local log = require "services.log"
@@ -35,6 +32,11 @@ function hal_service:_register_device(device, capabilities)
         if not cap.id then
             log.error(string.format(
                 "Device Event: capability '%s' for device '%s' with id '%s' does not have an id",
+                cap_name, device.type, device.id
+            ))
+        elseif not cap.control then
+            log.error(string.format(
+                "Device Event: capability '%s' for device '%s' with id '%s' does not have a control field",
                 cap_name, device.type, device.id
             ))
         else
@@ -222,7 +224,7 @@ function hal_service:_handle_capability_control(request)
     end)
 end
 
-function hal_service:_handle_capbility_info(data)
+function hal_service:_handle_capability_info(data)
     if not data then return end
 
     if not data.type then
@@ -272,7 +274,7 @@ end
 
 function hal_service:_apply_config(msg)
     log.trace(string.format(
-        '%s - %s: Recieved new HAL config',
+        "%s - %s: Received new HAL config",
         self.ctx:value("service_name"),
         self.ctx:value("fiber_name")
     ))
@@ -309,10 +311,19 @@ function hal_service:_apply_config(msg)
         if manager then
             manager:apply_config(manager_config)
         else
-            local manager_pkg = require('services.hal.managers.' .. manager_name)
-            self.managers[manager_name] = manager_pkg.new()
-            self.managers[manager_name]:spawn(self.ctx, self.conn, self.device_event_q, self.capability_info_q)
-            self.managers[manager_name]:apply_config(manager_config)
+            local ok, manager_pkg = pcall(require, 'services.hal.managers.' .. manager_name)
+            if ok and type(manager_pkg) == "table" then
+                self.managers[manager_name] = manager_pkg.new()
+                self.managers[manager_name]:spawn(context.with_cancel(self.ctx), self.conn, self.device_event_q, self.capability_info_q)
+                self.managers[manager_name]:apply_config(manager_config)
+            else
+                log.error(string.format(
+                    '%s - %s: Failed to load manager "%s"',
+                    self.ctx:value("service_name"),
+                    self.ctx:value("fiber_name"),
+                    manager_name
+                ))
+            end
         end
     end
 end
@@ -347,7 +358,7 @@ function hal_service:_control_main(ctx)
             config_sub:next_msg_op():wrap(function(msg) self:_apply_config(msg) end),
             cap_ctrl_sub:next_msg_op():wrap(function(msg) self:_handle_capability_control(msg) end),
             self.device_event_q:get_op():wrap(function(msg) self:_handle_device_connection_event(msg) end),
-            self.capability_info_q:get_op():wrap(function(msg) self:_handle_capbility_info(msg) end),
+            self.capability_info_q:get_op():wrap(function(msg) self:_handle_capability_info(msg) end),
             ctx:done_op()
         ):perform()
     end

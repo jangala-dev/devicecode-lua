@@ -1,0 +1,11 @@
+[/dev/cdc-wdm0] Successfully got card status
+Provisioning applications:
+	Primary GW:   session doesn't exist
+	Primary 1X:   session doesn't exist
+	Secondary GW: session doesn't exist
+	Secondary 1X: session doesn't exist
+Slot [1]:
+	Card state: 'error: no-atr-received (3)'
+	UPIN state: 'not-initialized'
+		UPIN retries: '0'
+		UPUK retries: '0'

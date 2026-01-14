@@ -1,0 +1,37 @@
+[/dev/cdc-wdm0] Successfully got card status
+Provisioning applications:
+	Primary GW:   slot '1', application '1'
+	Primary 1X:   session doesn't exist
+	Secondary GW: session doesn't exist
+	Secondary 1X: session doesn't exist
+Slot [1]:
+	Card state: 'present'
+	UPIN state: 'not-initialized'
+		UPIN retries: '0'
+		UPUK retries: '0'
+	Application [1]:
+		Application type:  'usim (2)'
+		Application state: 'ready'
+		Application ID:
+			A0:00:00:00:87:10:02:FF:44:FF:FF:89:01:01:01:00
+		Personalization state: 'ready'
+		UPIN replaces PIN1: 'no'
+		PIN1 state: 'disabled'
+			PIN1 retries: '3'
+			PUK1 retries: '10'
+		PIN2 state: 'enabled-not-verified'
+			PIN2 retries: '3'
+			PUK2 retries: '10'
+	Application [2]:
+		Application type:  'unknown (0)'
+		Application state: 'detected'
+		Application ID:
+			A0:00:00:00:63:50:4B:FF:34:FF:07:89:54:46:52:38
+		Personalization state: 'unknown'
+		UPIN replaces PIN1: 'no'
+		PIN1 state: 'not-initialized'
+			PIN1 retries: '0'
+			PUK1 retries: '0'
+		PIN2 state: 'not-initialized'
+			PIN2 retries: '0'
+			PUK2 retries: '0'
