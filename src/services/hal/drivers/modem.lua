@@ -10,6 +10,7 @@ local service = require "service"
 local at = require "services.hal.drivers.modem.at"
 local mmcli = require "services.hal.drivers.modem.mmcli"
 local utils = require "services.hal.utils"
+local ubus = require "services.hal.ubus"
 local hal_capabilities = require "services.hal.hal_capabilities"
 local mode_overrides = require "services.hal.drivers.modem.mode"
 local model_overrides = require "services.hal.drivers.modem.model"
@@ -609,6 +610,173 @@ function Driver:set_signal_update_freq(seconds)
     local cmd_err = cmd:run()
     self.refresh_rate_channel:put(seconds)
     return (cmd_err == nil), cmd_err
+end
+
+local function listen_for_port(ctx, port)
+    local ubus_listen_cmd = ubus.listen_with_context(ctx, 'hotplug.tty')
+    ubus_listen_cmd:setprdeathsig(sc.SIGKILL)
+    local ubus_stdout = assert(ubus_listen_cmd:stdout_pipe())
+    local cmd_err = ubus_listen_cmd:start()
+    if cmd_err then
+        ubus_listen_cmd:kill()
+        ubus_listen_cmd:wait()
+        ubus_stdout:close()
+        return false, cmd_err
+    end
+
+    local found = false
+    while not ctx:err() do
+        local _, err = op.choice(
+            ubus_stdout:read_line_op():wrap(function(line)
+                if not line then
+                    ctx:cancel('ubus listen ended')
+                    return
+                end
+                local decoded, decode_err = json.decode(line)
+                if not decoded or decode_err then return end
+                local info = decoded['hotplug.tty'] or {}
+                if info.action == 'add' and info.devicename == port then
+                    found = true
+                    ctx:cancel('port found')
+                end
+            end),
+            ctx:done_op()
+        ):perform()
+        if err then break end
+    end
+    ubus_listen_cmd:kill()
+    ubus_listen_cmd:wait()
+    ubus_stdout:close()
+
+    return found, ctx:err()
+end
+
+local function parse_httpsend_code(line)
+    if not line then return nil end
+    line = at.trim(line)
+    local code = line:match('^%+QIND:%s*"FOTA","HTTPSEND",(%d+)$')
+    if not code then return nil end
+    local num_code = tonumber(code)
+    if not num_code then
+        return nil, 'invalid OTA code received'
+    end
+    return num_code
+end
+
+local function get_update_progress(line)
+    if not line then return { ended = true, exit_code = -1 } end
+    line = at.trim(line)
+    local progress_type, code = line:match('^%+QIND:%s*"FOTA","(%w+)",(%d+)$')
+
+    if progress_type == 'UPDATING' then
+        return { progress = tonumber(code) }
+    elseif progress_type == 'END' then
+        return { ended = true, exit_code = tonumber(code) }
+    end
+    return {} -- unknown line
+end
+
+function Driver:ota_update(ctx, url, opts)
+    opts = opts or {}
+    local http_timeout = opts.http_timeout or 180   -- seconds
+    local port_timeout = opts.port_timeout or 60    -- seconds
+    local fota_timeout = opts.fota_timeout or 180   -- seconds
+
+    local inhibit_cmd = mmcli.inhibit(self.address)
+    inhibit_cmd:setprdeathsig(sc.SIGKILL)
+    local inhibit_err = inhibit_cmd:start()
+    if inhibit_err then
+        return false, inhibit_err
+    end
+
+    local function release_inhibit()
+        if not inhibit_cmd then return end
+        inhibit_cmd:kill()
+        inhibit_cmd:wait()
+        inhibit_cmd = nil
+    end
+    -- The port will close early once the https fetch completes
+    local http_ota_lines, https_ota_err = at.send_with_context(
+        context.with_timeout(ctx, http_timeout), -- wait for https download to complete
+        self.at_port,
+        string.format("AT+QFOTADL=\"%s\"", url),
+        {
+            ".*HTTPSEND.*" -- indicates https download has ended
+        }
+    )
+    if https_ota_err then
+        release_inhibit()
+        return false, https_ota_err
+    end
+
+    -- check the http phase result for success (code 0)
+    for _, line in ipairs(http_ota_lines or {}) do
+        local num_code, parse_err = parse_httpsend_code(line)
+        if parse_err then
+            release_inhibit()
+            return false, parse_err
+        end
+        if num_code ~= nil then
+            if num_code ~= 0 then
+                release_inhibit()
+                return false, string.format('OTA failed with code %d', num_code)
+            end
+            break
+        end
+    end
+
+    local port_found, port_err = listen_for_port(
+        context.with_timeout(ctx, port_timeout), -- wait for port to re-appear
+        self.at_port:match("/dev/(%w+)")
+    )
+
+    if not port_found then
+        release_inhibit()
+        return false, string.format("OTA failed, port did not re-appear: %s", port_err or "unknown error")
+    end
+
+    local at_listener = at.listen(self.at_port)
+    local exit_code = nil
+    local sleep_op = sleep.sleep_op(fota_timeout) -- max time for update to complete
+    while not ctx:err() and exit_code == nil do
+        local update_progress = op.choice(
+            at_listener:read_line_op():wrap(get_update_progress),
+            sleep_op:wrap(function()
+                ctx:cancel('timeout')
+            end),
+            ctx:done_op()
+        ):perform()
+
+        if ctx:err() then break end
+
+        if update_progress.progress then -- report update progress
+            self.info_q:put({
+                type = "modem",
+                id = self.imei,
+                sub_topic = { "ota", "progress" },
+                endpoints = "single",
+                info = update_progress.progress
+            })
+        end
+        if update_progress.ended then -- report final result
+            exit_code = update_progress.exit_code
+            self.info_q:put({
+                type = "modem",
+                id = self.imei,
+                sub_topic = { "ota", "exit_code"},
+                endpoints = "single",
+                info = exit_code
+            })
+        end
+    end
+
+    if at_listener and at_listener.close then
+        at_listener:close()
+    end
+
+    release_inhibit()
+
+    return exit_code == 0, exit_code or ctx:err()
 end
 
 local function modem_states_equal(state1, state2)
