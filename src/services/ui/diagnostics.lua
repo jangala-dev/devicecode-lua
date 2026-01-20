@@ -351,20 +351,60 @@ local function check_expected_cloud_services_reachable(box_type, config)
         end
     end
 
-    return {
-        expected  = expected,
-        installed = installed,
-        missing   = missing
-    }
+    return new_report(expected, installed, missing)
+end
+
+---Check which modems are active (SIM present and state machine running)
+---@param box_type string Box model type
+---@param stats_cache table|nil Flat stats messages cache
+---@return table<string, number|string[]>|nil report
+---@return string|nil error
+local function get_modems_sim_active(box_type, stats_cache)
+    local expected_modems, err = expected.get_expected_modem_names(box_type)
+    if err ~= nil then
+        return nil, err
+    end
+
+    local installed = 0
+    local missing = {}
+
+    if not stats_cache then
+        return new_report(#expected_modems, 0, expected_modems), nil
+    end
+
+    for _, modem_name in ipairs(expected_modems) do
+        local sim_key = "gsm.modem." .. modem_name .. ".sim"
+        local sim_entry = stats_cache[sim_key]
+        local sim_present = sim_entry and sim_entry.payload == "present"
+
+        local state_key = "gsm.modem." .. modem_name .. ".state"
+        local state_entry = stats_cache[state_key]
+        local has_active_state = state_entry
+            and state_entry.payload
+            and state_entry.payload.curr_state
+            and state_entry.payload.curr_state ~= ""
+
+        local is_active = sim_present and has_active_state
+
+        if is_active then
+            installed = installed + 1
+        else
+            table.insert(missing, modem_name)
+        end
+    end
+
+    return new_report(#expected_modems, installed, missing), nil
 end
 
 ---Fetches diagnostics stats from the box
----@return table<string, table> diagnostics
 ---@param config table<string, string> The configuration
-local function get_box_reports(config)
+---@param stats_cache table|nil Flat stats messages cache
+---@return table<string, table> diagnostics
+local function get_box_reports(config, stats_cache)
     local diagnostics = {
         packages_installed = {},
         modems_installed = {},
+        modems_sim_active = {},
         services_running = {},
         packages_running = {},
         bootstrap_installed = {},
@@ -403,6 +443,14 @@ local function get_box_reports(config)
             log.error("UI - error checking cloud services reachable", cloud_services_err)
         else
             diagnostics.cloud_services_reachable = cloud_services
+        end
+
+        -- Check modem SIM active (present + state machine running)
+        local modems_sim_active, sim_check_err = get_modems_sim_active(hardware_info.model, stats_cache)
+        if sim_check_err ~= nil then
+            log.error("UI - error checking modem SIM active", sim_check_err)
+        else
+            diagnostics.modems_sim_active = modems_sim_active
         end
     else
         log.error("UI - error getting hardware info", hardware_info_err)
