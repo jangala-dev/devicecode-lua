@@ -1,8 +1,6 @@
 {
 	"name": "devicecode-lua",
-	"build": {
-		"dockerfile": "Dockerfile"
-	},
+	"image": "ghcr.io/jangala-dev/mini-lua-image:bookworm",
 	"remoteUser": "vscode",
 	"postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
 	"forwardPorts": [
@@ -11,12 +9,8 @@
 	"customizations": {
 		"vscode": {
 			"extensions": [
-				"ms-azuretools.vscode-docker",
-				"ms-vscode-remote.remote-containers",
-				"waderyan.gitblame",
 				"sumneko.lua",
 				"rog2.luacheck",
-				"tomblind.local-lua-debugger-vscode",
 				"bierner.markdown-mermaid"
 			]
 		}
