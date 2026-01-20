@@ -143,9 +143,9 @@
                 {
                   "qdisc": "htb",
                   "config": {
-                    "rate": "3mbit",
-                    "ceil": "12mbit",
-                    "burst": "750k"
+                    "rate": "6mbit",
+                    "ceil": "24mbit",
+                    "burst": "1500k"
                   },
                   "classes": [
                     {
@@ -173,9 +173,9 @@
                 {
                   "qdisc": "htb",
                   "config": {
-                    "rate": "6mbit",
-                    "ceil": "24mbit",
-                    "burst": "1500k"
+                    "rate": "3mbit",
+                    "ceil": "12mbit",
+                    "burst": "750k"
                   },
                   "classes": [
                     {
