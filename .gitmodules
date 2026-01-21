@@ -1,12 +1,15 @@
-[submodule "src/lua-fibers"]
-	path = src/lua-fibers
+[submodule "vendor/lua-fibers"]
+	path = vendor/lua-fibers
 	url = https://github.com/jangala-dev/lua-fibers.git
-[submodule "src/lua-trie"]
-	path = src/lua-trie
+[submodule "vendor/lua-trie"]
+	path = vendor/lua-trie
 	url = https://github.com/jangala-dev/lua-trie.git
-[submodule "src/lua-bus"]
-	path = src/lua-bus
+[submodule "vendor/lua-bus"]
+	path = vendor/lua-bus
 	url = https://github.com/jangala-dev/lua-bus.git
-[submodule "src/services/ui/local-ui"]
-	path = src/services/ui/local-ui
+[submodule "vendor/local-ui"]
+	path = vendor/local-ui
 	url = https://github.com/jangala-dev/local-ui.git
+[submodule "vendor/lua-fibers"]
+	path = vendor/fibers
+	url = https://github.com/jangala-dev/lua-fibers.git
