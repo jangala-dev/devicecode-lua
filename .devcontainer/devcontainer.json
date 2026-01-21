@@ -1,6 +1,6 @@
 {
 	"name": "devicecode-lua",
-	"image": "ghcr.io/jangala-dev/mini-lua-image:bookworm",
+	"image": "ghcr.io/jangala-dev/mini-lua-image:latest",
 	"remoteUser": "vscode",
 	"postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
 	"forwardPorts": [
