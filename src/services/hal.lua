@@ -1,7 +1,3 @@
-local modem_manager = require "services.hal.managers.modemcard"
-local ubus_manager = require "services.hal.managers.ubus"
-local uci_manager = require "services.hal.managers.uci"
-local wlan_managaer = require "services.hal.managers.wlan"
 local fiber = require "fibers.fiber"
 local queue = require "fibers.queue"
 local op = require "fibers.op"
