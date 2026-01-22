@@ -48,6 +48,7 @@ local function send_with_context(ctx, port, command, terminator_patterns)
 
         for _, terminator_pattern in ipairs(terminator_patterns) do
             if line:find(terminator_pattern) then
+                table.insert(res, line)
                 reader:close()
                 return res, nil
             end

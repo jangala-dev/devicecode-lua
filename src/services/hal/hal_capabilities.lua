@@ -53,6 +53,11 @@ function ModemCapability:set_signal_update_freq(args)
     return do_command(self.driver_q, cmd)
 end
 
+function ModemCapability:ota_update(args)
+    local cmd = { command = "ota_update", args = args }
+    return do_command(self.driver_q, cmd)
+end
+
 -- geo cap
 local GeoCapability = {}
 GeoCapability.__index = GeoCapability

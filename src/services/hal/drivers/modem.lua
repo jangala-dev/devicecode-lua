@@ -431,9 +431,9 @@ function Driver:inhibit()
     local err = self.inhibit_cmd:start()
     if err then
         log.trace(string.format("Modem inhibit failed, reason: %s", err))
-        return false
+        return false, err
     end
-    return true
+    return true, nil
 end
 
 function Driver:uninhibit()
@@ -678,22 +678,13 @@ end
 
 function Driver:ota_update(ctx, url, opts)
     opts = opts or {}
-    local http_timeout = opts.http_timeout or 180   -- seconds
-    local port_timeout = opts.port_timeout or 60    -- seconds
-    local fota_timeout = opts.fota_timeout or 180   -- seconds
+    local http_timeout = opts.http_timeout or 180 -- seconds
+    local port_timeout = opts.port_timeout or 60  -- seconds
+    local fota_timeout = opts.fota_timeout or 180 -- seconds
 
-    local inhibit_cmd = mmcli.inhibit(self.address)
-    inhibit_cmd:setprdeathsig(sc.SIGKILL)
-    local inhibit_err = inhibit_cmd:start()
-    if inhibit_err then
-        return false, inhibit_err
-    end
-
-    local function release_inhibit()
-        if not inhibit_cmd then return end
-        inhibit_cmd:kill()
-        inhibit_cmd:wait()
-        inhibit_cmd = nil
+    local ok, err = self:inhibit()
+    if not ok or err then
+        return false, string.format("Failed to inhibit modem for OTA: %s", err or "unknown error")
     end
     -- The port will close early once the https fetch completes
     local http_ota_lines, https_ota_err = at.send_with_context(
@@ -705,7 +696,7 @@ function Driver:ota_update(ctx, url, opts)
         }
     )
     if https_ota_err then
-        release_inhibit()
+        self:uninhibit()
         return false, https_ota_err
     end
 
@@ -713,12 +704,19 @@ function Driver:ota_update(ctx, url, opts)
     for _, line in ipairs(http_ota_lines or {}) do
         local num_code, parse_err = parse_httpsend_code(line)
         if parse_err then
-            release_inhibit()
+            self:uninhibit()
             return false, parse_err
         end
         if num_code ~= nil then
             if num_code ~= 0 then
-                release_inhibit()
+                self:uninhibit()
+                self.info_q:put({
+                    type = "modem",
+                    id = self.imei,
+                    sub_topic = { "ota", "exit_code" },
+                    endpoints = "single",
+                    info = num_code
+                })
                 return false, string.format('OTA failed with code %d', num_code)
             end
             break
@@ -731,7 +729,7 @@ function Driver:ota_update(ctx, url, opts)
     )
 
     if not port_found then
-        release_inhibit()
+        self:uninhibit()
         return false, string.format("OTA failed, port did not re-appear: %s", port_err or "unknown error")
     end
 
@@ -746,6 +744,7 @@ function Driver:ota_update(ctx, url, opts)
             end),
             ctx:done_op()
         ):perform()
+        update_progress = update_progress or {}
 
         if ctx:err() then break end
 
@@ -753,7 +752,7 @@ function Driver:ota_update(ctx, url, opts)
             self.info_q:put({
                 type = "modem",
                 id = self.imei,
-                sub_topic = { "ota", "progress" },
+                sub_topic = { "update", "progress" },
                 endpoints = "single",
                 info = update_progress.progress
             })
@@ -763,7 +762,7 @@ function Driver:ota_update(ctx, url, opts)
             self.info_q:put({
                 type = "modem",
                 id = self.imei,
-                sub_topic = { "ota", "exit_code"},
+                sub_topic = { "update", "exit_code" },
                 endpoints = "single",
                 info = exit_code
             })
@@ -774,9 +773,9 @@ function Driver:ota_update(ctx, url, opts)
         at_listener:close()
     end
 
-    release_inhibit()
+    self:uninhibit()
 
-    return exit_code == 0, exit_code or ctx:err()
+    return exit_code == 0, exit_code ~= 0 and exit_code or ctx:err()
 end
 
 local function modem_states_equal(state1, state2)
