@@ -1,0 +1,7 @@
+[/dev/cdc-wdm0] Successfully read information from the UIM:
+Card result:
+	SW1: '0x90'
+	SW2: '0x00'
+Read result:
+	85:FF:FF:FF:FF:FF:47:45:4E:49:45:49:4E:20:20:20:20:20:20:20
+

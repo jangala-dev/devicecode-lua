@@ -1,0 +1,1 @@
+error: couldn't get home network: QMI protocol error (37): 'UimUninitialized'

@@ -1,0 +1,9 @@
+[/dev/cdc-wdm0] Successfully got RF band info
+Band Information:
+	Radio Interface:   'umts'
+	Active Band Class: 'wcdma-900'
+	Active Channel:    '3025'
+Band Information (Extended):
+	Radio Interface:   'umts'
+	Active Band Class: 'wcdma-900'
+	Active Channel:    '3025'

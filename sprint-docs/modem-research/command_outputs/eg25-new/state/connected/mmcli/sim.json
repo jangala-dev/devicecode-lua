@@ -1,0 +1,22 @@
+{
+  "sim": {
+    "dbus-path": "/org/freedesktop/ModemManager1/SIM/2",
+    "properties": {
+      "active": "yes",
+      "eid": "--",
+      "emergency-numbers": [
+        "999",
+        "00112"
+      ],
+      "esim-status": "--",
+      "gid1": "85FFFFFFFFFF47454E4945494E20202020202020",
+      "gid2": "FFFFFFFFFFFF2020202020202020202020202020",
+      "iccid": "8944110069073915392",
+      "imsi": "234103403359194",
+      "operator-code": "23410",
+      "operator-name": "--",
+      "removability": "--",
+      "sim-type": "--"
+    }
+  }
+}

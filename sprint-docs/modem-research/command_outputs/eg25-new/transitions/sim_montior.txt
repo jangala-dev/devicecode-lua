@@ -1,0 +1,20 @@
+[/dev/cdc-wdm0] Received slot status indication:
+  Physical slot 1:
+     Card status: present
+     Slot status: active
+    Logical slot: 1
+           ICCID: 8944110069073915392
+        Protocol: uicc
+        Num apps: 0
+        Is eUICC: no
+  Physical slot 2:
+     Card status: absent
+     Slot status: inactive
+[/dev/cdc-wdm0] Received slot status indication:
+  Physical slot 1:
+     Card status: absent
+     Slot status: active
+    Logical slot: 1
+  Physical slot 2:
+     Card status: absent
+     Slot status: inactive

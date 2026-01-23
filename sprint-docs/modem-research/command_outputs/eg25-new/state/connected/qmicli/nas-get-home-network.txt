@@ -1,0 +1,6 @@
+[/dev/cdc-wdm0] Successfully got home network:
+	Home network:
+		MCC: '234'
+		MNC: '10'
+		Description: 'O2 - UK'
+	Network name source: se13
