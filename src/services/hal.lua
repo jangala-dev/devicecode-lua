@@ -1,374 +1,243 @@
-local modem_manager = require "services.hal.managers.modemcard"
-local ubus_manager = require "services.hal.managers.ubus"
-local uci_manager = require "services.hal.managers.uci"
-local wlan_managaer = require "services.hal.managers.wlan"
-local fiber = require "fibers.fiber"
-local queue = require "fibers.queue"
-local op = require "fibers.op"
-local service = require "service"
-local new_msg = require("bus").new_msg
-local log = require "services.log"
-local unpack = table.unpack or unpack
+-- services/hal.lua
+--
+-- HAL service: owns all OS/filesystem interactions for persisted state.
+--
+-- Env:
+--   DEVICECODE_STATE_DIR           required
+--   DEVICECODE_STATE_NS_ROOT       optional (default: "state")
+--
+-- Announce (retained):
+--   {'svc', <name>, 'announce'} payload { role="hal", rpc_root={...}, ts=... }
+--
+-- RPC endpoints (lane B, under rpc_root):
+--   <rpc_root + {'read_state'}>  payload { ns=string, key=string } -> { ok=true, found=bool, data=string? } | { ok=false, err=string }
+--   <rpc_root + {'write_state'}> payload { ns=string, key=string, data=string } -> { ok=true } | { ok=false, err=string }
+--   <rpc_root + {'ping'}>        payload {} -> { ok=true, now=number }
 
----@class hal_service
-local hal_service = {
-    name = "hal",
-    capabilities = {},
-    devices = {},
-    capability_info_q = queue.new(50),
-    device_event_q = queue.new(10),
-    managers = {}
-}
-hal_service.__index = hal_service
+local op      = require 'fibers.op'
+local runtime = require 'fibers.runtime'
+local perform = require 'fibers.performer'.perform
 
----Adds a device, its capabilities and events to the service
----@param device table
----@param capabilities table
----@return table device
----@return string? error
-function hal_service:_register_device(device, capabilities)
-    if not self.devices[device.type] then
-        self.devices[device.type] = {}
-    end
-    device.capabilities = {}
-    for cap_name, cap in pairs(capabilities) do
-        if not cap.id then
-            log.error(string.format(
-                "Device Event: capability '%s' for device '%s' with id '%s' does not have an id",
-                cap_name, device.type, device.id
-            ))
-        else
-            if not self.capabilities[cap_name] then
-                self.capabilities[cap_name] = {}
-            end
+local mailbox = require 'fibers.mailbox' -- used only for type availability (optional)
+local M = {}
 
-            if self.capabilities[cap_name][cap.id] then
-                log.debug(string.format(
-                    "Device Event: capability '%s' with id '%s' already exists, overwriting",
-                    cap_name, cap.id
-                ))
-            end
-            self.capabilities[cap_name][cap.id] = cap.control
-            device.capabilities[cap_name] = cap.id
-        end
-    end
-    if self.devices[device.type][device.id] then
-        log.debug(string.format(
-            "Device Event: device '%s' with id '%s' already exists, overwriting",
-            device.type, device.id
-        ))
-    end
-    self.devices[device.type][device.id] = device
-
-    return device
+local function t(...)
+	return { ... }
 end
 
----Removes a device, its capabilities and events from the service
----@param device table
----@return table? device
----@return string? error
-function hal_service:_unregister_device(device)
-    -- retrieve full device
-    device = self.devices[device.type] and self.devices[device.type][device.id]
-    if not device then return nil, "removed device does not exist" end
-    self.devices[device.type][device.id] = nil
-
-    -- remove capabilities and event channels
-    for cap_name, cap_id in pairs(device.capabilities) do
-        self.capabilities[cap_name][cap_id] = nil
-        self.conn:publish(new_msg(
-            { 'hal', 'capability', cap_name, cap_id, '#' },
-            nil,
-            { retained = true }
-        ))
-    end
-
-    return device
+local function now()
+	return runtime.now()
 end
 
----Checks that all required fields are present in the connection event
----@param connection_event table
----@return boolean
----@return string? error
-local function connection_event_valid(connection_event)
-    if not connection_event.type then
-        return false, "missing device type"
-    end
-    if connection_event.connected == nil then
-        return false, "missing device connected status"
-    end
-    if not connection_event.id_field then
-        return false, "missing device id field"
-    end
-    if not connection_event.data then
-        return false, "missing device data"
-    end
-    if connection_event.connected and not connection_event.capabilities then
-        return false, "missing device capabilities"
-    end
-    return true
+local function require_env(name)
+	local v = os.getenv(name)
+	if not v or v == '' then
+		error(('missing required environment variable %s'):format(name), 2)
+	end
+	return v
 end
 
----Handles device connection and disconnection events
----@param connection_event table
-function hal_service:_handle_device_connection_event(connection_event)
-    local valid, err = connection_event_valid(connection_event)
-    if not valid then
-        log.error("Device Event: " .. err)
-        return
-    end
-
-    local device_capabilities = connection_event.capabilities
-
-    -- create a basic device instance, this will be built
-    -- up further in the register and unregister functions
-    local device = {
-        type = connection_event.type,
-        connected = connection_event.connected,
-        id = connection_event.data[connection_event.id_field],
-        data = connection_event.data
-    }
-
-    if device.connected then
-        local full_device, register_err = self:_register_device(device, device_capabilities)
-        if register_err then
-            log.error("Device Event: " .. register_err)
-            return
-        end
-        device = full_device
-    else
-        local full_device, unregister_err = self:_unregister_device(device)
-        if unregister_err then
-            log.error("Device Event: " .. unregister_err)
-            return
-        end
-        device = full_device
-        -- since we now have the original device instance, change to disconnected
-        device.connected = false
-    end
-
-    -- broadcast the capabilities and device connections/removals on the bus
-
-    for cap_name, cap_id in pairs(device.capabilities) do
-        self.conn:publish(new_msg(
-            { 'hal', 'capability', cap_name, cap_id },
-            {
-                connected = device.connected,
-                type = cap_name,
-                index = cap_id,
-                device = { type = device.type, index = device.id }
-            },
-            { retained = true }
-        ))
-    end
-
-    self.conn:publish(new_msg(
-        { 'hal', 'device', device.type, device.id },
-        {
-            connected = device.connected,
-            type = device.type,
-            index = device.id,
-            -- in this case device refers to the specific type of hardware
-            identity = device.data.device,
-            metadata = device.data
-        },
-        { retained = true }
-    ))
+local function shell_quote(s)
+	-- Minimal single-quote shell escaping.
+	s = tostring(s)
+	return "'" .. s:gsub("'", [['"'"']]) .. "'"
 end
 
----Uses device driver to execute control commands
----@param request table
-function hal_service:_handle_capability_control(request)
-    local capability, instance_id, method = request.topic[3], request.topic[4], request.topic[6]
-
-    local cap = self.capabilities[capability]
-    if cap == nil then
-        if request.reply_to then
-            local msg = new_msg({ request.reply_to }, { result = nil, err = 'capability does not exist' })
-            self.conn:publish(msg)
-        end
-        return
-    end
-
-    local instance = cap[instance_id]
-    if instance == nil then
-        if request.reply_to then
-            local msg = new_msg({ request.reply_to }, { result = nil, err = 'capability instance does not exist' })
-            self.conn:publish(msg)
-        end
-        return
-    end
-
-    local func = instance[method]
-    if func == nil then
-        if request.reply_to then
-            local msg = new_msg({ request.reply_to }, { result = nil, err = 'endpoint does not exist' })
-            self.conn:publish(msg)
-        end
-        return
-    end
-
-    -- execute capability asynchronously
-    fiber.spawn(function()
-        -- unpack arguments to function
-        local ret = func(instance, request.payload)
-        if request.reply_to then
-            local msg = new_msg({ request.reply_to }, {
-                result = ret.result,
-                err = ret.err
-            })
-            self.conn:publish(msg)
-        end
-    end)
+local function valid_name(s)
+	return type(s) == 'string' and s:match('^[A-Za-z0-9][A-Za-z0-9._-]*$') ~= nil
 end
 
-function hal_service:_handle_capbility_info(data)
-    if not data then return end
-
-    if not data.type then
-        log.error(string.format(
-            '%s - %s: Capability info message does not have a type field',
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name")
-        ))
-        return
-    end
-
-    if not data.id then
-        log.error(string.format(
-            '%s - %s: Capability info message does not have an id field',
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name")
-        ))
-        return
-    end
-
-    if not data.endpoints then
-        log.error(string.format(
-            '%s - %s: Capability info message must define an endpoints field ("single" or "multiple")',
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name")
-        ))
-        return
-    end
-
-    local sub_topic = data.sub_topic or {}
-    local topic = { 'hal', 'capability', data.type, data.id, 'info', unpack(sub_topic) }
-
-    if data.endpoints == 'single' then
-        self.conn:publish(new_msg(
-            topic,
-            data.info,
-            { retained = true }
-        ))
-    elseif data.endpoints == 'multiple' then
-        self.conn:publish_multiple(
-            topic,
-            data.info,
-            { retained = true }
-        )
-    end
+local function publish_status(conn, name, state, extra)
+	local payload = { state = state, ts = now() }
+	if type(extra) == 'table' then
+		for k, v in pairs(extra) do payload[k] = v end
+	end
+	conn:retain(t('svc', name, 'status'), payload)
 end
 
-function hal_service:_apply_config(msg)
-    log.trace(string.format(
-        '%s - %s: Recieved new HAL config',
-        self.ctx:value("service_name"),
-        self.ctx:value("fiber_name")
-    ))
-    if not msg.payload or type(msg.payload) ~= 'table' then
-        log.error(string.format(
-            '%s - %s: Config message does not have a valid payload',
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name")
-        ))
-        return
-    end
+-------------------------------------------------------------------------------
+-- FS backend
+-------------------------------------------------------------------------------
 
-    local config = msg.payload
-    if not config.managers or type(config.managers) ~= 'table' then
-        log.error(string.format(
-            '%s - %s: Config message does not have a valid managers field',
-            self.ctx:value("service_name"),
-            self.ctx:value("fiber_name")
-        ))
-        return
-    end
-
-    local manager_configs = config.managers
-    -- Remove managers that are not in the new config
-    for manager_name, manager in pairs(self.managers) do
-        if not manager_configs[manager_name] then
-            manager.ctx:cancel('manager removed')
-            self.managers[manager_name] = nil
-        end
-    end
-
-    for manager_name, manager_config in pairs(manager_configs) do
-        local manager = self.managers[manager_name]
-        if manager then
-            manager:apply_config(manager_config)
-        else
-            local manager_pkg = require('services.hal.managers.' .. manager_name)
-            self.managers[manager_name] = manager_pkg.new()
-            self.managers[manager_name]:spawn(self.ctx, self.conn, self.device_event_q, self.capability_info_q)
-            self.managers[manager_name]:apply_config(manager_config)
-        end
-    end
+local function join_path(a, b, c, d)
+	if d ~= nil then
+		return a .. '/' .. b .. '/' .. c .. '/' .. d
+	end
+	return a .. '/' .. b .. '/' .. c
 end
 
----Handles capability and device control, and connection events
-function hal_service:_control_main(ctx)
-    local cap_ctrl_sub, cap_sub_err = self.conn:subscribe({ 'hal', 'capability', '+', '+', 'control', '+' })
-    if cap_sub_err ~= nil then
-        log.error(string.format(
-            '%s - %s: Failed to subscribe to capability control topic, reason: %s',
-            ctx:value("service_name"),
-            ctx:value("fiber_name"),
-            cap_sub_err
-        ))
-        return
-    end
-
-    local config_sub, config_sub_err = self.conn:subscribe({ 'config', 'hal' })
-    if config_sub_err ~= nil then
-        log.error(string.format(
-            '%s - %s: Failed to subscribe to config topic, reason: %s',
-            ctx:value("service_name"),
-            ctx:value("fiber_name"),
-            config_sub_err
-        ))
-        return
-    end
-
-    -- All interactions with devices and capabilities run on the same fiber
-    while not ctx:err() do
-        op.choice(
-            config_sub:next_msg_op():wrap(function(msg) self:_apply_config(msg) end),
-            cap_ctrl_sub:next_msg_op():wrap(function(msg) self:_handle_capability_control(msg) end),
-            self.device_event_q:get_op():wrap(function(msg) self:_handle_device_connection_event(msg) end),
-            self.capability_info_q:get_op():wrap(function(msg) self:_handle_capbility_info(msg) end),
-            ctx:done_op()
-        ):perform()
-    end
-    cap_ctrl_sub:unsubscribe()
+local function mkdir_p(path)
+	-- Busybox-compatible and acceptable within HAL.
+	local cmd = 'mkdir -p ' .. shell_quote(path)
+	local ok = os.execute(cmd)
+	return ok == true or ok == 0
 end
 
----Spin off all HAL service fibers
----@param ctx Context
----@param conn Connection
-function hal_service:start(ctx, conn)
-    log.trace(string.format(
-        "%s: Starting",
-        ctx:value("service_name")
-    ))
-    self.ctx = ctx
-    self.conn = conn
-
-    -- start main control loop
-    service.spawn_fiber('Control', conn, ctx, function(control_ctx)
-        self:_control_main(control_ctx)
-    end)
+local function read_file(p)
+	local f, err = io.open(p, 'rb')
+	if not f then return nil, err end
+	local data = f:read('*a')
+	f:close()
+	return data or '', nil
 end
 
-return hal_service
+local function write_atomic(p, data)
+	local tmp = p .. '.tmp.' .. tostring(math.random(1, 1e9))
+	local f, err = io.open(tmp, 'wb')
+	if not f then return nil, err end
+
+	local ok_w, werr = pcall(function () f:write(data) end)
+	f:close()
+
+	if not ok_w then
+		pcall(function () os.remove(tmp) end)
+		return nil, tostring(werr)
+	end
+
+	local ok, rerr = os.rename(tmp, p)
+	if not ok then
+		pcall(function () os.remove(tmp) end)
+		return nil, tostring(rerr)
+	end
+	return true, nil
+end
+
+function M.new_fs_backend(state_dir, opts)
+	opts = opts or {}
+	local ns_root = opts.ns_root or 'state'
+	local ext     = opts.ext or '.json'
+
+	local function path_for(ns, key)
+		if not valid_name(ns) then return nil, 'invalid ns' end
+		if not valid_name(key) then return nil, 'invalid key' end
+		local dir = join_path(state_dir, ns_root, ns)
+		local p   = join_path(state_dir, ns_root, ns, key .. ext)
+		return dir, p
+	end
+
+	return {
+		read_state = function (_, ns, key)
+			local _, p = path_for(ns, key)
+			local data, err = read_file(p)
+			if not data then
+				return nil, 'not_found:' .. tostring(err)
+			end
+			return data, nil
+		end,
+
+		write_state = function (_, ns, key, data)
+			local dir, p = path_for(ns, key)
+			if not mkdir_p(dir) then
+				return nil, 'failed to create state directory'
+			end
+			local ok, err = write_atomic(p, data)
+			if not ok then return nil, err end
+			return true, nil
+		end,
+	}
+end
+
+-- In-memory backend for unit tests.
+function M.new_mem_backend(initial)
+	local store = {}
+	if type(initial) == 'table' then
+		for k, v in pairs(initial) do store[k] = v end
+	end
+	local function k(ns, key) return tostring(ns) .. '/' .. tostring(key) end
+
+	return {
+		read_state = function (_, ns, key)
+			local v = store[k(ns, key)]
+			if v == nil then return nil, 'not_found' end
+			return v, nil
+		end,
+		write_state = function (_, ns, key, data)
+			store[k(ns, key)] = data
+			return true, nil
+		end,
+		_store = store,
+	}
+end
+
+-------------------------------------------------------------------------------
+-- Service
+-------------------------------------------------------------------------------
+
+function M.start(conn, opts)
+	opts = opts or {}
+	local name = opts.name or 'hal'
+
+	local state_dir = require_env('DEVICECODE_STATE_DIR')
+	local ns_root   = os.getenv('DEVICECODE_STATE_NS_ROOT') or 'state'
+
+	local backend = opts.backend or M.new_fs_backend(state_dir, { ns_root = ns_root })
+
+	local rpc_root = t('svc', name, 'rpc')
+
+	conn:retain(t('svc', name, 'announce'), {
+		role     = 'hal',
+		rpc_root = rpc_root,
+		ts       = now(),
+	})
+
+	publish_status(conn, name, 'starting')
+
+	local ep_read  = conn:bind({ rpc_root[1], rpc_root[2], rpc_root[3], 'read_state' })
+	local ep_write = conn:bind({ rpc_root[1], rpc_root[2], rpc_root[3], 'write_state' })
+	local ep_ping  = conn:bind({ rpc_root[1], rpc_root[2], rpc_root[3], 'ping' })
+
+	publish_status(conn, name, 'running')
+
+	while true do
+		local which, msg, err = perform(op.named_choice({
+			read  = ep_read:recv_op(),
+			write = ep_write:recv_op(),
+			ping  = ep_ping:recv_op(),
+		}))
+
+		if not msg then
+			publish_status(conn, name, 'stopped', { reason = err })
+			return
+		end
+
+		local function reply(payload)
+			if msg.reply_to ~= nil then
+				conn:publish_one(msg.reply_to, payload, { id = msg.id })
+			end
+		end
+
+		if which == 'ping' then
+			reply({ ok = true, now = now() })
+
+		elseif which == 'read' then
+			local p = msg.payload or {}
+			local ns, key = p.ns, p.key
+			if not valid_name(ns) or not valid_name(key) then
+				reply({ ok = false, err = 'invalid ns/key' })
+			else
+				local data, rerr = backend:read_state(ns, key)
+				if data ~= nil then
+					reply({ ok = true, found = true, data = data })
+				else
+					reply({ ok = true, found = false, err = rerr })
+				end
+			end
+
+		elseif which == 'write' then
+			local p = msg.payload or {}
+			local ns, key, data = p.ns, p.key, p.data
+			if not valid_name(ns) or not valid_name(key) or type(data) ~= 'string' then
+				reply({ ok = false, err = 'invalid ns/key/data' })
+			else
+				local ok_w, werr = backend:write_state(ns, key, data)
+				if ok_w then
+					reply({ ok = true })
+				else
+					reply({ ok = false, err = tostring(werr) })
+				end
+			end
+		end
+	end
+end
+
+return M

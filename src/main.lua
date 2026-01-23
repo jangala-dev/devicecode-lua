@@ -1,124 +1,78 @@
-package.path = "../?.lua;" .. package.path .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
+-- main.lua
+--
+-- Entrypoint.
+--
+-- Required env:
+--   DEVICECODE_SERVICES   comma-separated service module names (e.g. "hal,config,monitor")
+--   DEVICECODE_STATE_DIR  persisted state root directory
+--
+-- Optional env:
+--   DEVICECODE_ENV        "dev" | "prod" (default: dev)
 
-local fiber = require 'fibers.fiber'
-local sleep = require 'fibers.sleep'
-local context = require 'fibers.context'
-local sc = require 'fibers.utils.syscall'
-local bus = require 'bus'
-local service = require 'service'
-local log = require 'services.log'
-log.outfile = '/tmp/logs.log'
-require 'fibers.pollio'.install_poll_io_handler()
-require 'fibers.alarm'.install_alarm_handler()
-
-local file_chunk = 0
-local lines = 0
-
--- Copy the ubus_scripts
-local status = os.execute("cp -r ./ubus_scripts/* /")
-
-if status ~= 0 then
-    log.error("Failed to copy ubus_scripts")
+local function add_path(prefix)
+	package.path = prefix .. '?.lua;' .. prefix .. '?/init.lua;' .. package.path
 end
 
--- local hook_file = io.open("/tmp/hook_logs_" .. file_chunk .. ".log", "w")
-local function hook(event, line)
-    local info = debug.getinfo(2)
-    local msg = string.format("%s:%d:%s\n", info.short_src, line, info.name or "<anon>")
-    if hook_file then
-        hook_file:write(msg)
-        hook_file:flush()
-    end
-
-    lines = lines + 1
-    if lines > 2000 then
-        if file_chunk - 1 >= 0 then
-            os.remove("/tmp/hook_logs_" .. (file_chunk - 1) .. ".log")
-        end
-        file_chunk = file_chunk + 1
-        hook_file:close()
-        hook_file = io.open("/tmp/hook_logs_" .. file_chunk .. ".log", "w")
-        lines = 0
-    end
-end
--- debug.sethook(hook, "l")
-
-local function count_dir_items(path)
-    local count
-    local p = io.popen('ls -1 "' .. path .. '" | wc -l')
-    if p then
-        local output = p:read("*all")
-        count = tonumber(output)
-        p:close()
-    end
-    return count
+local env = os.getenv('DEVICECODE_ENV') or 'dev'
+if env == 'prod' then
+	add_path('./lib/')
+else
+	add_path('../vendor/lua-fibers/src/')
+	add_path('../vendor/lua-bus/src/')
+	add_path('../vendor/lua-trie/src/')
+	add_path('./')
 end
 
-local function count_zombies()
-    local count
-    local p = io.popen('ps | grep -c " Z "')
-    if p then
-        local output = p:read("*all")
-        count = tonumber(output)
-        p:close()
-    end
-    return count
+local fibers = require 'fibers'
+local sleep  = require 'fibers.sleep'
+local busmod = require 'bus'
+
+local function require_env(name)
+	local v = os.getenv(name)
+	if not v or v == '' then
+		error(('missing required environment variable %s'):format(name), 2)
+	end
+	return v
 end
 
-local function count_processes()
-    local p = io.popen('ps | wc -l')
-    if p then
-        local output = p:read("*all")
-        local count = tonumber(output)
-        p:close()
-        return count - 1 -- Subtract 1 for the header line
-    end
+local function parse_csv(s)
+	local out = {}
+	for part in tostring(s):gmatch('[^,%s]+') do
+		out[#out + 1] = part
+	end
+	return out
 end
 
--- Get the device type/version from command line arguments or environment
-local device_version = arg[1] or os.getenv("DEVICE")
+fibers.run(function ()
+	print("main: starting")
+	local root = fibers.current_scope()
 
-if not device_version then error("device version must be specified on command line or env variable") end
+	-- Validate required env early.
+	require_env('DEVICECODE_STATE_DIR')
+	local service_names = parse_csv(require_env('DEVICECODE_SERVICES'))
+	if #service_names == 0 then
+		error('DEVICECODE_SERVICES must contain at least one service name', 2)
+	end
 
--- create the root context for the whole application
-local bg_ctx = context.background()
-local rootctx = context.with_value(bg_ctx, "device", device_version)
+	local bus = busmod.new({
+		q_length = 10,
+		full     = 'drop_oldest',
+		s_wild   = '+',
+		m_wild   = '#',
+	})
 
--- Load the device configuration
-local device_config = require("devices/" .. rootctx:value("device"))
+	for i = 1, #service_names do
+		local name = service_names[i]
+		local mod  = require('services.' .. name)
 
--- Initialise bus (current bus implementation doesn't take a context)
-local bus = bus.new({ q_length = 100, m_wild = '#', s_wild = '+' })
+		local s = root:child(name)
+		s:spawn(function ()
+			print("main: spawning: "..tostring(name))
+			local conn = bus:connect() -- created inside the service scope
+			mod.start(conn, { name = name })
+		end)
+	end
 
-local services = {}
-
-local function launch_services()
-    for _, service_name in ipairs(device_config.services) do
-        local svce = require("services/" .. service_name)
-        service.spawn(svce, bus, rootctx)
-    end
-end
-
--- The main control fiber
-fiber.spawn(function()
-    local pid = sc.getpid()
-    -- Launch all the services for the specific device
-    launch_services()
-
-    -- Here we can add more code for the CLI or other controls
-    while true do
-        local base_open_fds = count_dir_items("/proc/" .. pid .. "/fd")
-        local base_zombies = count_zombies()
-        local processes = count_processes()
-        print("main fiber sleeping, zombies:", base_zombies, "open fds:", base_open_fds, "processes:", processes)
-        sleep.sleep(5)
-        -- CLI or other control logic goes here
-    end
+	-- Keep alive until scope cancellation.
+	sleep.sleep(math.huge)
 end)
-
-
-fiber.main()
-
-
-
-
