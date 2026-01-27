@@ -118,13 +118,13 @@ local function disable_usb3(ctx, model)
     -- version was added 2019-09-10 so let's check our version is 2019-09-10 or later
     local vl805_supported_from = os.time({ year = 2019, month = 09, day = 10, hour = 0, min = 0, sec = 0 })
     local vl805_timestamp, err = get_vl805_version_timestamp()
-    if err ~= nil or vl805_timestamp < vl805_supported_from then
-        err = err or ""
+    if err ~= nil then
+        log.warn("System: Could not verify VL805 firmware version, proceeding anyway")
+    elseif vl805_timestamp < vl805_supported_from then
         log.warn(string.format(
-            "System: VL805 firmware version is %s, expected version >= %s %s",
+            "System: VL805 firmware version is %s, expected version >= %s",
             vl805_timestamp,
-            vl805_supported_from,
-            err
+            vl805_supported_from
         ))
         return
     end
