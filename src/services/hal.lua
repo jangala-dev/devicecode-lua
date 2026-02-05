@@ -1,243 +1,348 @@
--- services/hal.lua
---
--- HAL service: owns all OS/filesystem interactions for persisted state.
---
--- Env:
---   DEVICECODE_STATE_DIR           required
---   DEVICECODE_STATE_NS_ROOT       optional (default: "state")
---
--- Announce (retained):
---   {'svc', <name>, 'announce'} payload { role="hal", rpc_root={...}, ts=... }
---
--- RPC endpoints (lane B, under rpc_root):
---   <rpc_root + {'read_state'}>  payload { ns=string, key=string } -> { ok=true, found=bool, data=string? } | { ok=false, err=string }
---   <rpc_root + {'write_state'}> payload { ns=string, key=string, data=string } -> { ok=true } | { ok=false, err=string }
---   <rpc_root + {'ping'}>        payload {} -> { ok=true, now=number }
+-- HAL modules
+local types = require "services.hal.types.core"
 
-local op      = require 'fibers.op'
-local runtime = require 'fibers.runtime'
-local perform = require 'fibers.performer'.perform
+-- Fibers modules
+local fibers = require "fibers"
+local op = require "fibers.op"
+local channel = require "fibers.channel"
 
-local mailbox = require 'fibers.mailbox' -- used only for type availability (optional)
-local M = {}
+local perform = fibers.perform
+local spawn = fibers.spawn
+local now = fibers.now
 
-local function t(...)
-	return { ... }
+-- General modules
+local log = require "services.log"
+
+local DEFAULT_Q_LEN = 10
+
+-- Topic helpers
+
+---@param class DeviceClass
+---@param id DeviceId
+---@return string[] topic
+local function t_dev_event(class, id)
+    return { 'dev', class, id, 'event' }
 end
 
-local function now()
-	return runtime.now()
+---@param class DeviceClass
+---@param id DeviceId
+---@return string[] topic
+local function t_dev_meta(class, id)
+    return { 'dev', class, id, 'meta' }
 end
 
-local function require_env(name)
-	local v = os.getenv(name)
-	if not v or v == '' then
-		error(('missing required environment variable %s'):format(name), 2)
-	end
-	return v
+---@param class DeviceClass
+---@param id DeviceId
+---@return string[] topic
+local function t_dev_state(class, id)
+    return { 'dev', class, id, 'state' }
 end
 
-local function shell_quote(s)
-	-- Minimal single-quote shell escaping.
-	s = tostring(s)
-	return "'" .. s:gsub("'", [['"'"']]) .. "'"
+---@param class CapabilityClass
+---@param id CapabilityId
+---@return string[] topic
+local function t_cap_meta(class, id)
+    return { 'cap', class, id, 'meta' }
 end
 
-local function valid_name(s)
-	return type(s) == 'string' and s:match('^[A-Za-z0-9][A-Za-z0-9._-]*$') ~= nil
+---@param class CapabilityClass
+---@param id CapabilityId
+---@return string[] topic
+local function t_cap_state(class, id)
+    return { 'cap', class, id, 'state' }
 end
 
+---@class HalService
+---@field name string
+---@field cap_emit_ch Channel
+---@field dev_ev_ch Channel
+---@field managers table<string, Manager>
+---@field devices table<string, Device>
+---@field capabilities table<string, Capability>
+local HalService = {
+    cap_emit_ch = channel.new(DEFAULT_Q_LEN), -- capability emits of state, meta or events
+    dev_ev_ch = channel.new(DEFAULT_Q_LEN), -- manager emits of device events (added/removed)
+    managers = {},
+    devices = {},
+    capabilities = {},
+}
+
+---Publishes the HAL service status
+---@param conn Connection
+---@param name string
+---@param state string
+---@param extra table?
 local function publish_status(conn, name, state, extra)
-	local payload = { state = state, ts = now() }
-	if type(extra) == 'table' then
-		for k, v in pairs(extra) do payload[k] = v end
-	end
-	conn:retain(t('svc', name, 'status'), payload)
+    local payload = { state = state, ts = now() }
+    if type(extra) == 'table' then
+        for k, v in pairs(extra) do payload[k] = v end
+    end
+    conn:retain({ 'svc', name, 'status' }, payload)
 end
 
--------------------------------------------------------------------------------
--- FS backend
--------------------------------------------------------------------------------
-
-local function join_path(a, b, c, d)
-	if d ~= nil then
-		return a .. '/' .. b .. '/' .. c .. '/' .. d
-	end
-	return a .. '/' .. b .. '/' .. c
+---Validates class string
+---@param class CapabilityClass|DeviceClass
+---@return boolean
+local function class_valid(class)
+    return type(class) == 'string' and class ~= ''
 end
 
-local function mkdir_p(path)
-	-- Busybox-compatible and acceptable within HAL.
-	local cmd = 'mkdir -p ' .. shell_quote(path)
-	local ok = os.execute(cmd)
-	return ok == true or ok == 0
+---Validates id string or number
+---@param id CapabilityId|DeviceId
+---@return boolean
+local function id_valid(id)
+    return (type(id) == 'string' and id ~= '') or (type(id) == 'number' and id >= 0)
 end
 
-local function read_file(p)
-	local f, err = io.open(p, 'rb')
-	if not f then return nil, err end
-	local data = f:read('*a')
-	f:close()
-	return data or '', nil
+---Gets the device instance or returns nil
+---@param class DeviceClass
+---@param id DeviceId
+---@return Device?
+local function get_device(class, id)
+    local devices = HalService.devices[class]
+    if not devices then return nil end
+    return devices[id]
 end
 
-local function write_atomic(p, data)
-	local tmp = p .. '.tmp.' .. tostring(math.random(1, 1e9))
-	local f, err = io.open(tmp, 'wb')
-	if not f then return nil, err end
-
-	local ok_w, werr = pcall(function () f:write(data) end)
-	f:close()
-
-	if not ok_w then
-		pcall(function () os.remove(tmp) end)
-		return nil, tostring(werr)
-	end
-
-	local ok, rerr = os.rename(tmp, p)
-	if not ok then
-		pcall(function () os.remove(tmp) end)
-		return nil, tostring(rerr)
-	end
-	return true, nil
+---Sets the device instance
+---@param class DeviceClass
+---@param id DeviceId
+---@param device_inst Device
+---@return string? error
+local function set_device(class, id, device_inst)
+    HalService.devices[class] = HalService.devices[class] or {}
+    if HalService.devices[class][id] then
+        return "device already exists"
+    end
+    HalService.devices[class][id] = device_inst
 end
 
-function M.new_fs_backend(state_dir, opts)
-	opts = opts or {}
-	local ns_root = opts.ns_root or 'state'
-	local ext     = opts.ext or '.json'
-
-	local function path_for(ns, key)
-		if not valid_name(ns) then return nil, 'invalid ns' end
-		if not valid_name(key) then return nil, 'invalid key' end
-		local dir = join_path(state_dir, ns_root, ns)
-		local p   = join_path(state_dir, ns_root, ns, key .. ext)
-		return dir, p
-	end
-
-	return {
-		read_state = function (_, ns, key)
-			local _, p = path_for(ns, key)
-			local data, err = read_file(p)
-			if not data then
-				return nil, 'not_found:' .. tostring(err)
-			end
-			return data, nil
-		end,
-
-		write_state = function (_, ns, key, data)
-			local dir, p = path_for(ns, key)
-			if not mkdir_p(dir) then
-				return nil, 'failed to create state directory'
-			end
-			local ok, err = write_atomic(p, data)
-			if not ok then return nil, err end
-			return true, nil
-		end,
-	}
+---Removes the device instance
+---@param class DeviceClass
+---@param id DeviceId
+---@return string? error
+local function remove_device(class, id)
+    local devices = HalService.devices[class]
+    if not devices or not devices[id] then
+        return "device does not exist"
+    end
+    HalService.devices[class][id] = nil
 end
 
--- In-memory backend for unit tests.
-function M.new_mem_backend(initial)
-	local store = {}
-	if type(initial) == 'table' then
-		for k, v in pairs(initial) do store[k] = v end
-	end
-	local function k(ns, key) return tostring(ns) .. '/' .. tostring(key) end
-
-	return {
-		read_state = function (_, ns, key)
-			local v = store[k(ns, key)]
-			if v == nil then return nil, 'not_found' end
-			return v, nil
-		end,
-		write_state = function (_, ns, key, data)
-			store[k(ns, key)] = data
-			return true, nil
-		end,
-		_store = store,
-	}
+---Gets the capability instance or returns nil
+---@param class CapabilityClass
+---@param id CapabilityId
+---@return Capability?
+local function get_cap(class, id)
+    local caps = HalService.capabilities[class]
+    if not caps then return nil end
+    return caps[id]
 end
 
--------------------------------------------------------------------------------
--- Service
--------------------------------------------------------------------------------
-
-function M.start(conn, opts)
-	opts = opts or {}
-	local name = opts.name or 'hal'
-
-	local state_dir = require_env('DEVICECODE_STATE_DIR')
-	local ns_root   = os.getenv('DEVICECODE_STATE_NS_ROOT') or 'state'
-
-	local backend = opts.backend or M.new_fs_backend(state_dir, { ns_root = ns_root })
-
-	local rpc_root = t('svc', name, 'rpc')
-
-	conn:retain(t('svc', name, 'announce'), {
-		role     = 'hal',
-		rpc_root = rpc_root,
-		ts       = now(),
-	})
-
-	publish_status(conn, name, 'starting')
-
-	local ep_read  = conn:bind({ rpc_root[1], rpc_root[2], rpc_root[3], 'read_state' })
-	local ep_write = conn:bind({ rpc_root[1], rpc_root[2], rpc_root[3], 'write_state' })
-	local ep_ping  = conn:bind({ rpc_root[1], rpc_root[2], rpc_root[3], 'ping' })
-
-	publish_status(conn, name, 'running')
-
-	while true do
-		local which, msg, err = perform(op.named_choice({
-			read  = ep_read:recv_op(),
-			write = ep_write:recv_op(),
-			ping  = ep_ping:recv_op(),
-		}))
-
-		if not msg then
-			publish_status(conn, name, 'stopped', { reason = err })
-			return
-		end
-
-		local function reply(payload)
-			if msg.reply_to ~= nil then
-				conn:publish_one(msg.reply_to, payload, { id = msg.id })
-			end
-		end
-
-		if which == 'ping' then
-			reply({ ok = true, now = now() })
-
-		elseif which == 'read' then
-			local p = msg.payload or {}
-			local ns, key = p.ns, p.key
-			if not valid_name(ns) or not valid_name(key) then
-				reply({ ok = false, err = 'invalid ns/key' })
-			else
-				local data, rerr = backend:read_state(ns, key)
-				if data ~= nil then
-					reply({ ok = true, found = true, data = data })
-				else
-					reply({ ok = true, found = false, err = rerr })
-				end
-			end
-
-		elseif which == 'write' then
-			local p = msg.payload or {}
-			local ns, key, data = p.ns, p.key, p.data
-			if not valid_name(ns) or not valid_name(key) or type(data) ~= 'string' then
-				reply({ ok = false, err = 'invalid ns/key/data' })
-			else
-				local ok_w, werr = backend:write_state(ns, key, data)
-				if ok_w then
-					reply({ ok = true })
-				else
-					reply({ ok = false, err = tostring(werr) })
-				end
-			end
-		end
-	end
+---Sets the capability instance
+---@param class CapabilityClass
+---@param id CapabilityId
+---@param cap_inst Capability
+---@return string? error
+local function set_cap(class, id, cap_inst)
+    HalService.capabilities[class] = HalService.capabilities[class] or {}
+    if HalService.capabilities[class][id] then
+        return "capability already exists"
+    end
+    HalService.capabilities[class][id] = cap_inst
 end
 
-return M
+---Removes the capability instance
+---@param class CapabilityClass
+---@param id CapabilityId
+---@return string? error
+local function remove_cap(class, id)
+    local caps = HalService.capabilities[class]
+    if not caps or not caps[id] then
+        return "capability does not exist"
+    end
+    HalService.capabilities[class][id] = nil
+end
+
+---Handles running driver functions for control requests
+---@param conn Connection
+---@param msg Message
+local function on_cap_ctrl(conn, msg)
+    local class, id, verb = msg.topic[2], msg.topic[3], msg.topic[5]
+
+    if not class_valid(class) then
+        log.debug(HalService.name, "- invalid class")
+        return
+    end
+
+    if not id_valid(id) then
+        log.debug(HalService.name, "- invalid id")
+        return
+    end
+
+    local control_req, ctrl_req_err = types.new.ControlRequest(
+        verb,
+        msg.payload,
+        channel.new()
+    )
+    if not control_req then
+        log.debug(HalService.name, "-", ctrl_req_err)
+        return
+    end
+
+    local cap_inst = get_cap(class, id)
+    if not cap_inst then return end -- could be a capability owned by another service
+
+    if not cap_inst.offerings[verb] then
+        log.debug(HalService.name, "- capability", class, "does not offer verb:", verb)
+        return
+    end
+
+    spawn(function()
+        cap_inst.control_ch:put(control_req)
+        local reply, reply_err = control_req.reply_ch:get()
+        if not reply then
+            reply = types.new.Reply(false, reply_err)
+        end
+        if msg.reply_to then
+            local ok, pub_err = conn:publish_one(msg.reply_to, reply)
+            if not ok then
+                log.debug(HalService.name, "-", pub_err)
+            end
+        end
+    end)
+end
+
+---@param conn Connection
+---@param emit Emit
+local function on_cap_emit(conn, emit)
+    if getmetatable(emit) ~= types.Emit then
+        log.debug(HalService.name, "- invalid emit message")
+        return
+    end
+    conn:publish({ 'cap', emit.class, emit.id, emit.mode, emit.key }, emit.data)
+end
+
+---Adds a device and its capabilities to HAL and broadcasts event to bus
+---@param conn Connection
+---@param event_type EventType
+---@param device Device
+local function register_device(conn, event_type, device)
+    local set_err = set_device(device.class, device.id, device)
+    if set_err then
+        log.debug(HalService.name, "-", set_err)
+        return
+    end
+
+    for _, cap in ipairs(device.capabilities) do
+        local cap_set_err = set_cap(cap.class, cap.id, cap)
+        if cap_set_err then
+            log.debug(HalService.name, "-", cap_set_err)
+        else
+            conn:retain(t_cap_state(cap.class, cap.id), event_type)
+            conn:retain(t_cap_meta(cap.class, cap.id), { offerings = cap.offerings })
+        end
+    end
+
+    conn:retain(t_dev_meta(device.class, device.id), device.meta)
+    conn:retain(t_dev_state(device.class, device.id), event_type)
+end
+
+---Removes a device and its capabilities from HAL and broadcasts event to bus
+---@param conn Connection
+---@param event_type EventType
+---@param device Device
+local function unregister_device(conn, event_type, device)
+    for _, cap in ipairs(device.capabilities) do
+        local cap_remove_err = remove_cap(cap.class, cap.id)
+        if cap_remove_err then
+            log.debug(HalService.name, "-", cap_remove_err)
+        else
+            conn:retain(t_cap_state(cap.class, cap.id), event_type)
+            conn:unretain(t_cap_meta(cap.class, cap.id))
+        end
+    end
+
+    local remove_err = remove_device(device.class, device.id)
+    if remove_err then
+        log.debug(HalService.name, "-", remove_err)
+        return
+    end
+    conn:unretain(t_dev_meta(device.class, device.id))
+    conn:retain(t_dev_state(device.class, device.id), event_type)
+end
+
+---@param conn Connection
+---@param device_event DeviceEvent
+local function on_device_event(conn, device_event)
+    if getmetatable(device_event) ~= types.DeviceEvent then
+        log.debug(HalService.name, "- invalid device event message")
+        return
+    end
+
+    if device_event.event_type == 'added' then
+        local dev_inst, dev_err = types.new.Device(
+            device_event.class,
+            device_event.id,
+            device_event.meta,
+            device_event.capabilities
+        )
+        if not dev_inst then
+            log.debug(HalService.name, "-", dev_err)
+            return
+        end
+        register_device(conn, device_event.event_type, dev_inst)
+    elseif device_event.event_type == 'removed' then
+        local dev_inst = get_device(device_event.class, device_event.id)
+        if not dev_inst then
+            log.debug(HalService.name, "- device does not exist")
+            return
+        end
+        unregister_device(conn, device_event.event_type, dev_inst)
+    else
+        log.debug(HalService.name,
+            "- unhandled device event type for ",
+            device_event.class,
+            device_event.id,
+            device_event.event_type
+        )
+        return
+    end
+end
+
+
+---Spawns all HAL service long running fibers
+---@param conn Connection
+---@param opts any
+function HalService.start(conn, opts)
+    HalService.name = opts.name or "hal"
+    publish_status(conn, HalService.name, "starting")
+
+    local cap_ctrl_sub = conn:bind({ 'cap', '+', '+', 'rpc', '+' })
+
+    -- Setup managers based on hard-coded config here
+
+    publish_status(conn, HalService.name, "running")
+
+    fibers.current_scope():finally(function ()
+        publish_status(conn, HalService.name, "stopped")
+    end)
+
+    while true do
+        local source, msg = perform(op.named_choice({
+            cap_ctrl = cap_ctrl_sub:recv_op(),
+            cap_emit = HalService.cap_emit_ch:get_op(),
+            device_event = HalService.dev_ev_ch:get_op()
+        }))
+
+        if source == 'cap_ctrl' then
+            on_cap_ctrl(conn, msg)
+        elseif source == 'cap_emit' then
+            on_cap_emit(conn, msg)
+        elseif source == 'device_event' then
+            on_device_event(conn, msg)
+        end
+    end
+end
+
+return HalService
