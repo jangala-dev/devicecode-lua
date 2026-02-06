@@ -13,6 +13,12 @@
     - modem
       - provider.lua <-- selects modem provider (OpenWrt ModemManager, testing, etc)
       - iface.lua <-- the modem-backend interface contract (documented + validated)
+      - mode
+        - qmi.lua
+        - mbim.lua
+      - model
+        - quectel.lua
+        - fibcocom.lua
       - providers
         - openwrt_mm
           - init.lua <-- constructs a backend that implements modem/iface.lua
@@ -22,16 +28,9 @@
           - init.lua
 
   - drivers <-- domain logic + stable capability surface
+    - modem.lua <-- specific modem functionality and HAL interaction
     - modem
-      - driver.lua <-- assembles base + mode + model strategies
-      - mode.lua
-      - model.lua
-      - mode
-        - qmi.lua
-        - mbim.lua
-      - model
-        - quectel.lua
-        - fibcocom.lua
+      - any helper stuff here
 
   - managers <-- owns lifecycles, supervision, (re)announce capabilities
     - modemcard.lua
