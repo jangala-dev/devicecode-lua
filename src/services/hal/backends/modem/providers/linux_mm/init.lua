@@ -39,6 +39,8 @@ local function is_supported()
     return is_linux() and has_mmcli()
 end
 
+local backend = require "services.hal.backends.modem.providers.linux_mm.impl"
+
 return {
     is_supported = is_supported,
     backend = backend
