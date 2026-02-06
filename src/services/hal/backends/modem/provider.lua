@@ -1,53 +1,112 @@
 local iface = require "services.hal.backends.modem.iface"
 
-local backends = {
+local MODEL_INFO = {
+    quectel = {
+        -- these are ordered, as eg25gl should match before eg25g
+        { mod_string = "UNKNOWN",   rev_string = "eg25gl",   model = "eg25",   model_variant = "gl" },
+        { mod_string = "UNKNOWN",   rev_string = "eg25g",    model = "eg25",   model_variant = "g" },
+        { mod_string = "UNKNOWN",   rev_string = "ec25e",    model = "ec25",   model_variant = "e" },
+        { mod_string = "em06-e",    rev_string = "em06e",    model = "em06",   model_variant = "e" },
+        { mod_string = "rm520n-gl", rev_string = "rm520ngl", model = "rm520n", model_variant = "gl" }
+        -- more quectel models here
+    },
+    fibocom = {}
+}
+
+local BACKENDS = {
     "linux_mm"
 }
 
-local backend = nil
-for _, backend_name in ipairs(backends) do
+--- Utility function to check if a string starts with a given prefix (case-insensitive)
+---@param str string
+---@param start string
+---@return boolean
+local function starts_with(str, start)
+    if str == nil or start == nil then return false end
+    str, start = str:lower(), start:lower()
+    -- Use string.sub to get the prefix of mainString that is equal in length to startString
+    return string.sub(str, 1, string.len(start)) == start
+end
+
+local backend_impl = nil
+for _, backend_name in ipairs(BACKENDS) do
     local ok, mod = pcall(require, "services.hal.backends.modem.providers." .. backend_name .. ".init")
     if ok and type(mod.is_supported) == "function" and mod.is_supported() then
-        backend = mod
+        backend_impl = mod.backend
         break
     end
 end
 
-if backend == nil then
+if backend_impl == nil then
     error("No supported modem backend found")
 end
 
---- Apply mode specific functions
----@param mode string
----@return boolean ok
-function backend:override_mode(mode)
-    local ok, mod = pcall(require, "services.hal.backends.modem.modes." .. mode)
-    if ok and type(mod) == "function" then
-        mod(self)
-        return true
+local function new(address)
+    local backend = backend_impl.new(address)
+    ---@cast backend ModemBackend
+    local drivers, dr_err = backend:drivers()
+    if dr_err ~= "" then
+        error("Failed to get modem drivers: " .. tostring(dr_err))
     end
-    return false
-end
 
---- Apply model specific functions
----@param manufacturer string
----@param model string
----@param variant string
----@return boolean ok
-function backend:override_model(manufacturer, model, variant)
-    local ok, mod = pcall(require, "services.hal.backends.modem.models." .. manufacturer)
-    if ok and type(mod) == "function" then
-        mod(self, model, variant)
-        return true
+    local drivers_str = table.concat(drivers, ",")
+    local mode
+    if drivers_str:match("qmi_wwan") then
+        mode = "qmi"
+    elseif drivers_str:match("cdc_mbim") then
+        mode = "mbim"
     end
-    return false
+
+    if mode then
+        local ok, mod = pcall(require, "services.hal.backends.modem.modes." .. mode)
+        if ok and mod and mod.add_mode_funcs and type(mod.add_mode_funcs) == "function" then
+            mod.add_mode_funcs(backend)
+        end
+    end
+
+    local plugin, pl_err = backend:plugin()
+    if pl_err ~= "" then
+        error("Failed to get modem plugin status: " .. tostring(pl_err))
+    end
+
+    local model, model_err = backend:model()
+    if model_err ~= "" then
+        error("Failed to get modem model: " .. tostring(model_err))
+    end
+
+    local revision, rev_err = backend:revision()
+    if rev_err ~= "" then
+        error("Failed to get modem revision: " .. tostring(rev_err))
+    end
+
+    local model_funcs_loaded = false
+    for manufacturer, models in pairs(MODEL_INFO) do
+        if string.match(plugin:lower(), manufacturer) then
+            for _, details in ipairs(models) do
+                if details.mod_string == model:lower()
+                    or starts_with(revision, details.rev_string) then
+                    model = details.model
+                    local model_variant = details.model_variant
+                    local ok, mod = pcall(require, "services.hal.backends.modem.models." .. manufacturer)
+                    if ok and mod and mod.add_model_funcs and type(mod.add_model_funcs) == "function" then
+                        mod.add_model_funcs(backend, model, model_variant)
+                        model_funcs_loaded = true
+                    end
+                    break
+                end
+            end
+        end
+        if model_funcs_loaded then break end
+    end
+
+    local iface_err = iface.validate(backend)
+    if iface_err ~= "" then
+        error("Modem backend does not implement required interface: " .. tostring(iface_err))
+    end
+
+    return backend
 end
 
---- Check that all required backend functions are implemented
----@return boolean ok
----@return string? error
-function backend:validate()
-    return iface.validate_backend(self)
-end
-
-return backend
+return {
+    new = new
+}
