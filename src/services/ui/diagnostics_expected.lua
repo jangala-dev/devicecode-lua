@@ -41,7 +41,6 @@ local BIGBOX_SS_PACKAGES_INSTALLED = {
     "mwan3",
     "rpcd",
     "sqm-scripts",
-    "lua-lumen",
     "block-mount",
     "btrfs-progs",
     "kmod-fs-ext4",
