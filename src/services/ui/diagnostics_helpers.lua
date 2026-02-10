@@ -105,11 +105,62 @@ local function get_parsed_mac(mac_address_path)
     return nil, err
 end
 
+---Find the hwmon directory for a given device name
+---@param device_name string The name to match in /sys/class/hwmon/*/name
+---@return string|nil hwmon_path The hwmon directory path
+---@return string|nil error
+local function find_hwmon_device(device_name)
+    local output, err = exec.command("sh", "-c",
+        "grep -rl '^" .. device_name .. "$' /sys/class/hwmon/*/name 2>/dev/null"):output()
+    if err or #output == 0 then
+        return nil, "hwmon device '" .. device_name .. "' not found"
+    end
+
+    -- output is e.g. /sys/class/hwmon/hwmon2/name — extract directory
+    local name_path = output:match("^(%S+)")
+    if not name_path then
+        return nil, "hwmon device '" .. device_name .. "' not found"
+    end
+    local hwmon_path = name_path:match("(.+)/name$")
+    if not hwmon_path then
+        return nil, "could not parse hwmon path from: " .. name_path
+    end
+    return hwmon_path, nil
+end
+
+---Check if the fan controller is present and readable
+---Tries both "pwmfan" and "rpipoefan" as the device name varies by OpenWrt version
+---@return table|nil fan_status {hwmon_path, pwm}
+---@return string|nil error
+local function get_fan_status()
+    local hwmon_path, find_err = find_hwmon_device("pwmfan")
+    if find_err then
+        hwmon_path, find_err = find_hwmon_device("rpipoefan")
+    end
+    if find_err then
+        return nil, find_err
+    end
+
+    local pwm_path = hwmon_path .. "/pwm1"
+    local pwm_str = read_file(pwm_path, true)
+    local pwm = 0
+    if pwm_str then
+        pwm = tonumber(pwm_str:match("^%s*(.-)%s*$")) or 0
+    end
+
+    return {
+        hwmon_path = hwmon_path,
+        pwm = pwm,
+    }, nil
+end
+
 return {
     is_process_running = is_process_running,
     is_service_running = is_service_running,
     file_exists = file_exists,
     get_installed_packages = get_installed_packages,
     get_hardware_info = get_hardware_info,
-    get_parsed_mac = get_parsed_mac
+    get_parsed_mac = get_parsed_mac,
+    find_hwmon_device = find_hwmon_device,
+    get_fan_status = get_fan_status,
 }

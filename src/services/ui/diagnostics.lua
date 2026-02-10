@@ -354,6 +354,23 @@ local function check_expected_cloud_services_reachable(box_type, config)
     return new_report(expected, installed, missing)
 end
 
+---Check if the expected fans are present and working
+---@param box_type string Box model type
+---@return table<string, number|string[]>|nil report (nil if no fans expected)
+local function check_expected_fans(box_type)
+    local expected_fans, err = expected.get_expected_fan_count(box_type)
+    if err ~= nil or expected_fans == 0 then
+        return nil
+    end
+
+    local _, fan_err = helpers.get_fan_status()
+    if fan_err then
+        return new_report(expected_fans, 0, {"fan"})
+    end
+
+    return new_report(expected_fans, 1, {})
+end
+
 ---Check which modems are active (SIM present and state machine running)
 ---@param box_type string Box model type
 ---@param stats_cache table|nil Flat stats messages cache
@@ -451,6 +468,12 @@ local function get_box_reports(config, stats_cache)
             log.error("UI - error checking modem SIM active", sim_check_err)
         else
             diagnostics.modems_sim_active = modems_sim_active
+        end
+
+        -- Check fan status (only included for devices that have a fan)
+        local fan_report = check_expected_fans(hardware_info.model)
+        if fan_report then
+            diagnostics.fan_status = fan_report
         end
     else
         log.error("UI - error getting hardware info", hardware_info_err)
