@@ -9,8 +9,6 @@ local http_util = require "http.util"
 local websocket = require "http.websocket"
 local cjson = require "cjson.safe"
 local op = require "fibers.op"
-local sleep = require "fibers.sleep"
----@type { get_box_reports: fun(config: table, gsm_stats: table|nil): table, get_box_logs: fun(): table }
 local diagnostics = require "services.ui.diagnostics"
 require "services.ui.fibers_cqueues"
 
@@ -402,7 +400,7 @@ local function bus_listener(ctx, connection)
 
                     if msg.payload and msg.payload.content then
                         local content = msg.payload.content
-                        local content_json, err = cjson.decode(content)
+                        local content_json, _ = cjson.decode(content)
                         if not content_json then return result end
                         content = content_json
 
