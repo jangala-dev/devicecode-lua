@@ -336,12 +336,12 @@ local function check_expected_cloud_services_reachable(box_type, config)
         return nil, exp_tests_err
     end
 
-    local expected = 0
+    local expected_cloud_services = 0
     local installed = 0
     local missing = {}
 
     for name, test_fn_name in pairs(expected_tests) do
-        expected = expected + 1
+        expected_cloud_services = expected_cloud_services + 1
         local test_fn = tests[test_fn_name]
         if type(test_fn) ~= "function" then
             table.insert(missing, name .. " (missing test function)")
@@ -351,7 +351,7 @@ local function check_expected_cloud_services_reachable(box_type, config)
         end
     end
 
-    return new_report(expected, installed, missing)
+    return new_report(expected_cloud_services, installed, missing)
 end
 
 ---Check if the expected fans are present and working
@@ -497,8 +497,8 @@ local function get_box_logs()
     local logs = {}
 
     local function log_appender(new_logs)
-        for _, log in ipairs(new_logs) do
-            table.insert(logs, log)
+        for _, new_log in ipairs(new_logs) do
+            table.insert(logs, new_log)
         end
     end
     for _, log_level in pairs(LOG_LEVELS) do
