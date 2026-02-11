@@ -162,6 +162,14 @@ local function get_board_revision(_)
     return board_revision, nil
 end
 
+local function get_power_state(_)
+    local throttled, err = utils.read_file("/sys/devices/platform/soc/soc:firmware/get_throttled")
+    if err or not throttled then return nil, err end
+    local value = tonumber(throttled:match("0x(%x+)"), 16)
+    if not value then return nil, "Failed to parse throttled state" end
+    return bit.band(value, 0x1) ~= 0
+end
+
 return {
     get_hw_revision = get_hw_revision,
     get_fw_version = get_fw_version,
@@ -171,5 +179,6 @@ return {
     get_serial = get_serial,
     get_temperature = get_temperature,
     get_uptime = get_uptime,
-    get_board_revision = get_board_revision
+    get_board_revision = get_board_revision,
+    get_power_state = get_power_state
 }

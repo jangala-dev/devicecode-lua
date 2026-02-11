@@ -1174,6 +1174,13 @@
           }
         ]
       },
+      "system/info/power/undervoltage": {
+        "template": "any_change",
+        "rename": [
+          "system",
+          "power_undervoltage"
+        ]
+      },
       "mcu/sys/mem/alloc": {
         "protocol": "http",
         "process": [
