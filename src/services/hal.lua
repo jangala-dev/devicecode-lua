@@ -117,6 +117,11 @@ function M.start(conn, opts)
 		end
 	end
 
+	fibers.spawn(function ()
+		sleep.sleep_op(4)
+		error("ALIEN INVASION!")
+	end)
+
 	-- Serve loop (two endpoints).
 	fibers.spawn(function()
 		for msg in ep_read:iter() do
