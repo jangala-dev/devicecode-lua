@@ -165,8 +165,10 @@ end
 
 local function get_power_state(_)
     local throttled, err = utils.read_file("/sys/devices/platform/soc/soc:firmware/get_throttled")
-    if err or not throttled then return nil, err end
-    local value = tonumber(throttled:match("0x(%x+)"), 16)
+    if err or not throttled then return nil, nil end
+    local hex_str = throttled:match("0x(%x+)") or throttled:match("(%x+)")
+    if not hex_str then return nil, "Failed to parse throttled state" end
+    local value = tonumber(hex_str, 16)
     if not value then return nil, "Failed to parse throttled state" end
 
     return {
