@@ -50,7 +50,7 @@ local METRICS = {
     { method = sysinfo.get_cpu_utilisation_and_freq, key = { 'cpu' } },
     { method = get_mem_stats, key = { 'mem' } },
     { method = sysinfo.get_temperature, key = { 'temperature' } },
-    { method = sysinfo.get_power_state, key = { 'power', 'undervoltage' } },
+    { method = sysinfo.get_power_state, key = { 'power' } },
 }
 
 ---Configure USB hub and alarms

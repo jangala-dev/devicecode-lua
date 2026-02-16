@@ -3,6 +3,7 @@ local sleep = require "fibers.sleep"
 local op = require "fibers.op"
 local exec = require "fibers.exec"
 local utils = require "services.hal.utils"
+local bit = rawget(_G, "bit") or require "bit32"
 
 ---@return string?
 ---@return string? Error
@@ -167,7 +168,14 @@ local function get_power_state(_)
     if err or not throttled then return nil, err end
     local value = tonumber(throttled:match("0x(%x+)"), 16)
     if not value then return nil, "Failed to parse throttled state" end
-    return bit.band(value, 0x1) ~= 0
+
+    return {
+        under_voltage_detected = bit.band(value, 0x1) ~= 0,
+        arm_frequency_capped = bit.band(value, 0x2) ~= 0,
+        currently_throttled = bit.band(value, 0x4) ~= 0,
+        under_voltage_occurred = bit.band(value, 0x10000) ~= 0,
+        raw = value
+    }, nil
 end
 
 return {
