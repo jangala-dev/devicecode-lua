@@ -41,7 +41,6 @@ local BIGBOX_SS_PACKAGES_INSTALLED = {
     "mwan3",
     "rpcd",
     "sqm-scripts",
-    "lua-lumen",
     "block-mount",
     "btrfs-progs",
     "kmod-fs-ext4",
@@ -165,6 +164,14 @@ local BIGBOX_V1_CM_PACKAGES_INSTALLED = {
 local GETBOX_MODEMS = 1
 local BIGBOX_SS_MODEMS = 2
 local BIGBOX_V1_CM_MODEMS = 2
+
+local GETBOX_EXPECTED_FANS = 0
+local BIGBOX_SS_EXPECTED_FANS = 1
+local BIGBOX_V1_CM_EXPECTED_FANS = 0
+
+local GETBOX_MODEM_NAMES = {"primary"}
+local BIGBOX_SS_MODEM_NAMES = {"primary", "secondary"}
+local BIGBOX_V1_CM_MODEM_NAMES = {"primary", "secondary"}
 
 local BOOTSTRAP_INSTALLED = {
     "/data/configs/hawkbit.cfg",
@@ -301,11 +308,45 @@ local function get_expected_modem_count(box_type)
     end
 end
 
+---Get the expected modem names for the box model
+---@param box_type string getbox|bigbox-ss|bigbox-v1-cm
+---@return string[] expected_modem_names
+---@return string|nil error
+local function get_expected_modem_names(box_type)
+    if box_type == GETBOX then
+        return GETBOX_MODEM_NAMES, nil
+    elseif box_type == BIGBOX_SS then
+        return BIGBOX_SS_MODEM_NAMES, nil
+    elseif box_type == BIGBOX_V1_CM then
+        return BIGBOX_V1_CM_MODEM_NAMES, nil
+    else
+        return {}, "Unknown box_type: " .. box_type
+    end
+end
+
+---Get the number of expected fans for the box model
+---@param box_type string getbox|bigbox-ss|bigbox-v1-cm
+---@return number expected_fans
+---@return string|nil error
+local function get_expected_fan_count(box_type)
+    if box_type == GETBOX then
+        return GETBOX_EXPECTED_FANS, nil
+    elseif box_type == BIGBOX_SS then
+        return BIGBOX_SS_EXPECTED_FANS, nil
+    elseif box_type == BIGBOX_V1_CM then
+        return BIGBOX_V1_CM_EXPECTED_FANS, nil
+    else
+        return 0, "Unknown box_type: " .. box_type
+    end
+end
+
 return {
     packages_running = PACKAGES_RUNNING,
     bootstrap_installed = BOOTSTRAP_INSTALLED,
     get_expected_packages_installed = get_expected_packages_installed,
     get_expected_services_running = get_expected_services_running,
     get_expected_modem_count = get_expected_modem_count,
+    get_expected_modem_names = get_expected_modem_names,
     get_expected_connectivity_tests = get_expected_connectivity_tests,
+    get_expected_fan_count = get_expected_fan_count,
 }
