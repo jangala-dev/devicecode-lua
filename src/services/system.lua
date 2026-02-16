@@ -50,6 +50,7 @@ local METRICS = {
     { method = sysinfo.get_cpu_utilisation_and_freq, key = { 'cpu' } },
     { method = get_mem_stats, key = { 'mem' } },
     { method = sysinfo.get_temperature, key = { 'temperature' } },
+    { method = sysinfo.get_power_state, key = { 'power' } },
 }
 
 ---Configure USB hub and alarms
@@ -135,7 +136,7 @@ function system_service:_report_sysinfo(ctx)
                 if err then
                     log.error(string.format("System: Failed to get metric for %s: %s",
                         table.concat(metric.key, '.'), err))
-                else
+                elseif result then
                     local keyed_table = build_table(metric.key, result)
                     merge_tables(stats, keyed_table)
                 end

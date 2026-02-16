@@ -36,7 +36,7 @@ local wifi_subscription = "wifi"
 local ws_clients = {} -- list of active WebSocket clients
 local sse_clients = {} -- list of active SSE clients
 local stats_messages_cache = {}
-local log_messages_cache = {}
+local log_messages_cache = {} -- keyed by level, each value is an array of messages
 local config = {
     mainflux = {
         url = '',
@@ -153,7 +153,14 @@ local function handle_sse(ctx, stream, subscription)
             end
         end
     elseif subscription == log_stream then
-        for _, cached_msg in ipairs(log_messages_cache) do
+        local all_logs = {}
+        for _, level_msgs in pairs(log_messages_cache) do
+            for _, cached_msg in ipairs(level_msgs) do
+                table.insert(all_logs, cached_msg)
+            end
+        end
+        table.sort(all_logs, function(a, b) return a.payload.timestamp < b.payload.timestamp end)
+        for _, cached_msg in ipairs(all_logs) do
             local ok = send_cached_message(cached_msg)
             if not ok then
                 break
@@ -323,15 +330,19 @@ local function bus_listener(ctx, connection)
                 subscription = subscription
             }
         elseif subscription == log_stream then
-            table.insert(log_messages_cache, {
+            local level = msg.topic[2] or "unknown"
+            if not log_messages_cache[level] then
+                log_messages_cache[level] = {}
+            end
+            table.insert(log_messages_cache[level], {
                 topic = msg.topic,
                 payload = msg.payload,
                 subscription = subscription
             })
 
-            -- Keep only the last 200 log messages
-            if #log_messages_cache > 200 then
-                table.remove(log_messages_cache, 1)
+            -- Keep only the last 200 log messages per level
+            if #log_messages_cache[level] > 200 then
+                table.remove(log_messages_cache[level], 1)
             end
         end
 

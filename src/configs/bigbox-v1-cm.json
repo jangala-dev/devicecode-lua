@@ -1174,6 +1174,34 @@
           }
         ]
       },
+      "system/info/power/under_voltage_detected": {
+        "template": "any_change",
+        "rename": [
+          "system",
+          "power_undervoltage"
+        ]
+      },
+      "system/info/power/arm_frequency_capped": {
+        "template": "any_change",
+        "rename": [
+          "system",
+          "power_arm_frequency_capped"
+        ]
+      },
+      "system/info/power/currently_throttled": {
+        "template": "any_change",
+        "rename": [
+          "system",
+          "power_currently_throttled"
+        ]
+      },
+      "system/info/power/under_voltage_occurred": {
+        "template": "any_change",
+        "rename": [
+          "system",
+          "power_under_voltage_occurred"
+        ]
+      },
       "mcu/sys/mem/alloc": {
         "protocol": "http",
         "process": [

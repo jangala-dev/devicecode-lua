@@ -1,5 +1,6 @@
 local rxilog = require 'rxilog'
 local new_msg = require 'bus'.new_msg
+local syscall = require 'fibers.utils.syscall'
 
 local log_service = {
     name = "log",
@@ -17,7 +18,10 @@ for _, mode in ipairs(rxilog.modes) do
             local lineinfo = info.short_src .. ":" .. info.currentline
             local formatted_msg = rxilog.format_log_message(level:upper(), lineinfo, msg)
 
-            log_service.conn:publish(new_msg({ "logs", level }, formatted_msg))
+            log_service.conn:publish(new_msg({ "logs", level }, {
+                message = formatted_msg,
+                timestamp = syscall.realtime()
+            }))
         end
     end
 end

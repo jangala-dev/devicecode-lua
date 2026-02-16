@@ -3,6 +3,7 @@ local sleep = require "fibers.sleep"
 local op = require "fibers.op"
 local exec = require "fibers.exec"
 local utils = require "services.hal.utils"
+local bit = rawget(_G, "bit") or require "bit32"
 
 ---@return string?
 ---@return string? Error
@@ -162,6 +163,23 @@ local function get_board_revision(_)
     return board_revision, nil
 end
 
+local function get_power_state(_)
+    local throttled, err = utils.read_file("/sys/devices/platform/soc/soc:firmware/get_throttled")
+    if err or not throttled then return nil, nil end
+    local hex_str = throttled:match("0x(%x+)") or throttled:match("(%x+)")
+    if not hex_str then return nil, "Failed to parse throttled state" end
+    local value = tonumber(hex_str, 16)
+    if not value then return nil, "Failed to parse throttled state" end
+
+    return {
+        under_voltage_detected = bit.band(value, 0x1) ~= 0,
+        arm_frequency_capped = bit.band(value, 0x2) ~= 0,
+        currently_throttled = bit.band(value, 0x4) ~= 0,
+        under_voltage_occurred = bit.band(value, 0x10000) ~= 0,
+        raw = value
+    }, nil
+end
+
 return {
     get_hw_revision = get_hw_revision,
     get_fw_version = get_fw_version,
@@ -171,5 +189,6 @@ return {
     get_serial = get_serial,
     get_temperature = get_temperature,
     get_uptime = get_uptime,
-    get_board_revision = get_board_revision
+    get_board_revision = get_board_revision,
+    get_power_state = get_power_state
 }
