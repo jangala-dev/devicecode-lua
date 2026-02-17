@@ -25,7 +25,12 @@ end
 
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
+local scope = require 'fibers.scope'
 local busmod = require 'bus'
+
+if env == 'dev' then
+	scope.set_debug(true) -- enable debug mode for better error traces
+end
 
 local function require_env(name)
 	local v = os.getenv(name)
@@ -61,6 +66,8 @@ fibers.run(function ()
 		m_wild   = '#',
 	})
 
+	local scopes = {}
+
 	for i = 1, #service_names do
 		local name = service_names[i]
 		local mod  = require('services.' .. name)
@@ -71,8 +78,19 @@ fibers.run(function ()
 			local conn = bus:connect() -- created inside the service scope
 			mod.start(conn, { name = name })
 		end)
+		scopes[name] = s
 	end
 
 	-- Keep alive until scope cancellation.
-	sleep.sleep(math.huge)
+	while true do
+		sleep.sleep(10)
+		for name, sc in pairs(scopes) do
+			local st, _ = sc:status()
+			if st ~= 'ok' then
+				fibers.perform(sc:join_op()) -- propagate any errors
+				print(("main: scope %s exited with status %s"):format(name, st))
+				scopes[name] = nil
+			end
+		end
+	end
 end)
