@@ -61,10 +61,11 @@ end
 ---@field capabilities table<string, Capability>
 local HalService = {
     cap_emit_ch = channel.new(DEFAULT_Q_LEN), -- capability emits of state, meta or events
-    dev_ev_ch = channel.new(DEFAULT_Q_LEN), -- manager emits of device events (added/removed)
+    dev_ev_ch = channel.new(DEFAULT_Q_LEN),   -- manager emits of device events (added/removed)
     managers = {},
     devices = {},
     capabilities = {},
+    rpc_subs = {}
 }
 
 ---Publishes the HAL service status
@@ -140,16 +141,21 @@ local function get_cap(class, id)
 end
 
 ---Sets the capability instance
+---@param conn Connection
 ---@param class CapabilityClass
 ---@param id CapabilityId
 ---@param cap_inst Capability
 ---@return string? error
-local function set_cap(class, id, cap_inst)
+local function set_cap(conn, class, id, cap_inst)
     HalService.capabilities[class] = HalService.capabilities[class] or {}
     if HalService.capabilities[class][id] then
         return "capability already exists"
     end
-    HalService.capabilities[class][id] = cap_inst
+    HalService.capabilities[class][id] = { inst = cap_inst, rpc = {} }
+    for offering, _ in pairs(cap_inst.offerings) do
+        print(class, id, offering)
+        HalService.capabilities[class][id].rpc[offering] = conn:bind({ 'cap', class, id, 'rpc', offering })
+    end
 end
 
 ---Removes the capability instance
@@ -160,6 +166,10 @@ local function remove_cap(class, id)
     local caps = HalService.capabilities[class]
     if not caps or not caps[id] then
         return "capability does not exist"
+    end
+    for _, rpc_sub in pairs(HalService.capabilities[class][id].rpc) do
+        ---@cast rpc_sub Endpoint
+        rpc_sub:unbind()
     end
     HalService.capabilities[class][id] = nil
 end
@@ -235,7 +245,7 @@ local function register_device(conn, event_type, device)
     end
 
     for _, cap in ipairs(device.capabilities) do
-        local cap_set_err = set_cap(cap.class, cap.id, cap)
+        local cap_set_err = set_cap(conn, cap.class, cap.id, cap)
         if cap_set_err then
             log.debug(HalService.name, "-", cap_set_err)
         else
@@ -310,37 +320,85 @@ local function on_device_event(conn, device_event)
     end
 end
 
-
 ---Spawns all HAL service long running fibers
 ---@param conn Connection
 ---@param opts any
 function HalService.start(conn, opts)
+    log.trace("HAL: starting")
     HalService.name = opts.name or "hal"
     publish_status(conn, HalService.name, "starting")
 
-    local cap_ctrl_sub = conn:bind({ 'cap', '+', '+', 'rpc', '+' })
+    fibers.current_scope():finally(function()
+        local scope = fibers.current_scope()
+        local st, primary = scope:status()
+        if st == 'failed' then
+            log.error(("HAL: error - %s"):format(tostring(primary)))
+            log.trace("HAL: scope exiting with status", st)
+        end
+        publish_status(conn, HalService.name, "stopped")
+        log.trace("HAL: stopped")
+    end)
 
-    -- Setup managers based on hard-coded config here
+    local modemcard_manager = require "services.hal.managers.modemcard"
+    HalService.managers.modemcard = modemcard_manager
+
+    for name, manager in pairs(HalService.managers) do
+        local err = manager.start(HalService.dev_ev_ch, HalService.cap_emit_ch)
+        if err ~= "" then
+            log.error("HAL failed to start " .. name .. " manager", err)
+        end
+    end
 
     publish_status(conn, HalService.name, "running")
 
-    fibers.current_scope():finally(function ()
-        publish_status(conn, HalService.name, "stopped")
-    end)
-
     while true do
-        local source, msg = perform(op.named_choice({
-            cap_ctrl = cap_ctrl_sub:recv_op(),
+        local rpc_ops = {} -- choice needs at least 1 op to aviod fatal error
+
+        for _, class in pairs(HalService.capabilities) do
+            for _, cap in pairs(class) do
+                for _, rpc_sub in pairs(cap.rpc) do
+                    table.insert(rpc_ops, rpc_sub:recv_op())
+                end
+            end
+        end
+
+        local manager_fault_ops = {}
+
+        for name, manager in pairs(HalService.managers) do
+            table.insert(manager_fault_ops, manager.scope:fault_op():wrap(function () return name end))
+        end
+
+        local ops = {
             cap_emit = HalService.cap_emit_ch:get_op(),
             device_event = HalService.dev_ev_ch:get_op()
-        }))
+        }
 
-        if source == 'cap_ctrl' then
+        if #rpc_ops > 0 then
+            ops.rpc = op.choice(unpack(rpc_ops))
+        end
+
+        if #manager_fault_ops > 0 then
+            ops.modem_manager_fault = op.choice(unpack(manager_fault_ops))
+        end
+
+        local source, msg = perform(op.named_choice(ops))
+
+        if source == 'rpc' then
             on_cap_ctrl(conn, msg)
         elseif source == 'cap_emit' then
             on_cap_emit(conn, msg)
         elseif source == 'device_event' then
             on_device_event(conn, msg)
+        elseif source == 'modem_manager_fault' then
+            local name = msg
+            local manager = HalService.managers[name]
+            if manager then
+                log.error("HAL: modem manager fault detected")
+                manager.stop()
+                HalService.managers[name] = nil
+            end
+        else
+            log.error("HAL: unknown operation source:", source)
         end
     end
 end
