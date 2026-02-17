@@ -1,4 +1,4 @@
-local iface = require "services.hal.backends.modem.iface"
+local contract = require "services.hal.backends.modem.contract"
 
 local MODEL_INFO = {
     quectel = {
@@ -7,7 +7,8 @@ local MODEL_INFO = {
         { mod_string = "UNKNOWN",   rev_string = "eg25g",    model = "eg25",   model_variant = "g" },
         { mod_string = "UNKNOWN",   rev_string = "ec25e",    model = "ec25",   model_variant = "e" },
         { mod_string = "em06-e",    rev_string = "em06e",    model = "em06",   model_variant = "e" },
-        { mod_string = "rm520n-gl", rev_string = "rm520ngl", model = "rm520n", model_variant = "gl" }
+        { mod_string = "rm520n-gl", rev_string = "rm520ngl", model = "rm520n", model_variant = "gl" },
+        { mod_string = "em12-g", rev_string = "em12g", model = "em12", model_variant = "g" },
         -- more quectel models here
     },
     fibocom = {}
@@ -28,21 +29,32 @@ local function starts_with(str, start)
     return string.sub(str, 1, string.len(start)) == start
 end
 
-local backend_impl = nil
-for _, backend_name in ipairs(BACKENDS) do
-    local ok, mod = pcall(require, "services.hal.backends.modem.providers." .. backend_name .. ".init")
-    if ok and type(mod.is_supported) == "function" and mod.is_supported() then
-        backend_impl = mod.backend
-        break
-    end
-end
+-- local backend_impl = nil
 
-if backend_impl == nil then
-    error("No supported modem backend found")
+--- select and initialize the backend implementation
+---@return table backend_impl
+local function get_backend_impl()
+    local backend_impl = nil
+    for _, backend_name in ipairs(BACKENDS) do
+        print("Checking backend: services.hal.backends.modem.providers." .. backend_name .. ".init")
+        local ok, backend_mod = pcall(require, "services.hal.backends.modem.providers." .. backend_name .. ".init")
+        if ok and type(backend_mod) == "table" and backend_mod.is_supported and backend_mod.is_supported() then
+            backend_impl = backend_mod.backend
+            print("Selected backend:", backend_name)
+            break
+        end
+    end
+
+    if backend_impl == nil then
+        error("No supported modem backend found")
+    end
+
+    return backend_impl
 end
 
 local function new(address)
-    local backend = backend_impl.new(address)
+    local impl = get_backend_impl()
+    local backend = impl.new(address)
     ---@cast backend ModemBackend
     local drivers, dr_err = backend:drivers()
     if dr_err ~= "" then
@@ -50,17 +62,19 @@ local function new(address)
     end
 
     local drivers_str = table.concat(drivers, ",")
+    print(drivers_str)
     local mode
     if drivers_str:match("qmi_wwan") then
         mode = "qmi"
     elseif drivers_str:match("cdc_mbim") then
         mode = "mbim"
     end
+    print(mode)
 
     if mode then
-        local ok, mod = pcall(require, "services.hal.backends.modem.modes." .. mode)
-        if ok and mod and mod.add_mode_funcs and type(mod.add_mode_funcs) == "function" then
-            mod.add_mode_funcs(backend)
+        local ok, driver_mod = pcall(require, "services.hal.backends.modem.modes." .. mode)
+        if ok and type(driver_mod) == "table" and driver_mod.add_mode_funcs then
+            driver_mod.add_mode_funcs(backend)
         end
     end
 
@@ -79,6 +93,8 @@ local function new(address)
         error("Failed to get modem revision: " .. tostring(rev_err))
     end
 
+    print("Plugin:", plugin, "Model:", model, "Revision:", revision)
+
     local model_funcs_loaded = false
     for manufacturer, models in pairs(MODEL_INFO) do
         if string.match(plugin:lower(), manufacturer) then
@@ -87,9 +103,9 @@ local function new(address)
                     or starts_with(revision, details.rev_string) then
                     model = details.model
                     local model_variant = details.model_variant
-                    local ok, mod = pcall(require, "services.hal.backends.modem.models." .. manufacturer)
-                    if ok and mod and mod.add_model_funcs and type(mod.add_model_funcs) == "function" then
-                        mod.add_model_funcs(backend, model, model_variant)
+                    local ok, model_mod = pcall(require, "services.hal.backends.modem.models." .. manufacturer)
+                    if ok and type(model_mod) == "table" and model_mod.add_model_funcs then
+                        model_mod.add_model_funcs(backend, model, model_variant)
                         model_funcs_loaded = true
                     end
                     break
@@ -99,7 +115,7 @@ local function new(address)
         if model_funcs_loaded then break end
     end
 
-    local iface_err = iface.validate(backend)
+    local iface_err = contract.validate(backend)
     if iface_err ~= "" then
         error("Modem backend does not implement required interface: " .. tostring(iface_err))
     end

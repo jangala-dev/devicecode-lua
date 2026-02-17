@@ -3,33 +3,12 @@
 
 local fetch = require "services.hal.backends.fetch"
 
---- Read a net stat
----@param net_port string
----@return integer rx_bytes
----@return string error
-local function read_net_stat(net_port, stat)
-    local path = '/sys/class/net/' .. net_port .. '/statistics/' .. stat
-    local file = io.open(path, "r")
-    if not file then
-        return -1, "Failed to open file: " .. tostring(path)
-    end
-    local content = file:read("*a")
-    file:close()
-    if not content then
-        return -1, "Failed to read file: " .. tostring(path)
-    end
-    local rx_bytes = tonumber(content)
-    if not rx_bytes then
-        return -1, "Failed to parse rx_bytes: " .. tostring(content)
-    end
-    return rx_bytes, ""
-end
-
 --- Adds all getter methods to the ModemBackend class
 ---@param ModemBackend table The ModemBackend class table
 ---@param fetch_modem_info function The fetch function for modem info
 ---@param fetch_signal_info function The fetch function for signal info
-local function add_getters(ModemBackend, fetch_modem_info, fetch_signal_info)
+---@param read_net_stat function The function to read network statistics
+local function add_getters(ModemBackend, fetch_modem_info, fetch_signal_info, read_net_stat)
     --- Gets the modem's IMEI number
     ---@param timeout number? Cache timeout in seconds (optional)
     ---@return string imei

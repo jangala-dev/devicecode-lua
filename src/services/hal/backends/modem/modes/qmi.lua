@@ -28,26 +28,28 @@ end
 ---@param cache Cache
 ---@return string error
 local function fetch_home_network_info(identity, cache)
-    local cmd = exec.command {
-        "qmicli", "-p", "-d", identity.mode_port, "--nas-get-home-network",
-        stdin = "null",
-        stdout = "pipe",
-        stderr = "stdout"
-    }
-    local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
-    if status ~= "exited" or code ~= 0 then
-        return "Failed to execute qmicli command: " .. tostring(err)
-    end
+    local st, _, err = fibers.run_scope(function()
+        local cmd = exec.command {
+            "qmicli", "-p", "-d", identity.mode_port, "--nas-get-home-network",
+            stdin = "null",
+            stdout = "pipe",
+            stderr = "stdout"
+        }
+        local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
+        if status ~= "exited" or code ~= 0 then
+            error("Failed to execute qmicli command: " .. tostring(err))
+        end
 
-    local mcc = out:match("MCC:%s+'(%d+)'")
-    local mnc = out:match("MNC:%s+'(%d+)'")
-    if not mcc or not mnc then
-        return "Failed to parse qmicli output: " .. tostring(out)
-    end
+        local mcc = out:match("MCC:%s+'(%d+)'")
+        local mnc = out:match("MNC:%s+'(%d+)'")
+        if not mcc or not mnc then
+            error("Failed to parse qmicli output: " .. tostring(out))
+        end
 
-    cache:set("mcc", mcc)
-    cache:set("mnc", mnc)
-    return ""
+        cache:set("mcc", mcc)
+        cache:set("mnc", mnc)
+    end)
+    return st ~= "ok" and err or ""
 end
 
 --- Gets gid1 for a sim card and caches it
@@ -55,25 +57,27 @@ end
 ---@param cache Cache
 ---@return string error
 local function fetch_gid1(identity, cache)
-    local cmd = exec.command {
-        "qmicli", "-p", "-d", identity.mode_port, "--uim-read-transparent=0x3F00,0x7FFF,0x6F3E",
-        stdin = "null",
-        stdout = "pipe",
-        stderr = "stdout"
-    }
-    local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
-    if status ~= "exited" or code ~= 0 then
-        return "Failed to execute qmicli command: " .. tostring(err)
-    end
+    local st, _, err = fibers.run_scope(function()
+        local cmd = exec.command {
+            "qmicli", "-p", "-d", identity.mode_port, "--uim-read-transparent=0x3F00,0x7FFF,0x6F3E",
+            stdin = "null",
+            stdout = "pipe",
+            stderr = "stdout"
+        }
+        local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
+        if status ~= "exited" or code ~= 0 then
+            error("Failed to execute qmicli command: " .. tostring(err))
+        end
 
-    -- Parse the hex string after "Read result:"
-    local gid1 = out:match("Read result:%s*([%x:]+)")
-    if not gid1 then
-        return "Failed to parse qmicli output: " .. tostring(out)
-    end
+        -- Parse the hex string after "Read result:"
+        local gid1 = out:match("Read result:%s*([%x:]+)$")
+        if not gid1 then
+            error("Failed to parse qmicli output: " .. tostring(out))
+        end
 
-    cache:set("gid1", gid1)
-    return ""
+        cache:set("gid1", gid1)
+    end)
+    return st ~= "ok" and err or ""
 end
 
 --- Gets the RF band info for a modem and caches active_band_class
@@ -81,83 +85,97 @@ end
 ---@param cache Cache
 ---@return string error
 local function fetch_rf_band_info(identity, cache)
-    local cmd = exec.command {
-        "qmicli", "-p", "-d", identity.mode_port, "--nas-get-rf-band-info",
-        stdin = "null",
-        stdout = "pipe",
-        stderr = "stdout"
-    }
-    local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
-    if status ~= "exited" or code ~= 0 then
-        return "Failed to execute qmicli command: " .. tostring(err)
-    end
+    local st, _, err = fibers.run_scope(function()
+        local cmd = exec.command {
+            "qmicli", "-p", "-d", identity.mode_port, "--nas-get-rf-band-info",
+            stdin = "null",
+            stdout = "pipe",
+            stderr = "stdout"
+        }
+        local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
+        if status ~= "exited" or code ~= 0 then
+            error("Failed to execute qmicli command: " .. tostring(err))
+        end
 
-    local active_band_class = out:match("Active Band Class:%s*'([^']+)'")
-    if not active_band_class then
-        return "Failed to parse qmicli output: " .. tostring(out)
-    end
+        local active_band_class = out:match("Active Band Class:%s*'([^']+)'")
+        if not active_band_class then
+            error("Failed to parse qmicli output: " .. tostring(out))
+        end
 
-    cache:set("active_band_class", active_band_class)
-    return ""
+        cache:set("active_band_class", active_band_class)
+    end)
+    return st ~= "ok" and err or ""
 end
 
 
 local function add_mode_funcs(ModemBackend)
+    --- Start command to read sim presence
+    ---@return boolean ok
+    ---@return string error
+    function ModemBackend:start_sim_presence_monitor()
+        if self.sim_present then
+            return false, "Already monitoring sim presence"
+        end
+
+        local cmd = exec.command {
+            "qmicli", "-p", "-d", self.identity.mode_port, "--uim-monitor-slot-status",
+            stdin = "null",
+            stdout = "pipe",
+            stderr = "stdout"
+        }
+
+        local stdout, err = cmd:stdout_stream()
+        if not stdout then
+            return false, "Failed to start QMI monitor: " .. tostring(err)
+        end
+        self.sim_present = {
+            cmd = cmd,
+            stdout = stdout
+        }
+        return true, ""
+    end
+
     --- Make an op to listen for sim presence
     ---@return Op
     function ModemBackend:wait_for_sim_present_op()
         return op.guard(function()
             return scope.run_op(function(s)
-                -- Start QMI monitor command
-                local cmd = exec.command {
-                    "qmicli", "-p", "-d", self.identity.mode_port, "--uim-monitor-slot-status",
-                    stdin = "null",
-                    stdout = "pipe",
-                    stderr = "stdout"
-                }
-
-                -- Get stdout stream (starts command automatically)
-                local stdout, err = cmd:stdout_stream()
-                if not stdout then
-                    -- Return error result from scope - won't propagate to caller
-                    return false, "Failed to start QMI monitor: " .. tostring(err)
-                end
-
-                -- Command handles stream cleanup automatically via scope finalizer
-
-                -- Read chunks until we find "Slot status: active"
-                while true do
-                    local chunk = s:perform(stdout:read_line_op({
-                        terminator = "Slot status: active",
-                        keep_terminator = true,
-                    }))
-
-                    if not chunk then
-                        -- EOF - return error result from scope
-                        return false, "QMI monitor stream closed"
+                    if not self.sim_present then
+                        return false, "Sim presence monitor not started"
                     end
+                    -- Read chunks until we find "Slot status: active"
+                    while true do
+                        local chunk = s:perform(self.sim_present.stdout:read_line_op({
+                            terminator = "Slot status: active",
+                            keep_terminator = true,
+                        }))
 
-                    -- Parse the chunk (includes Card status + Slot status lines)
-                    local card_status, parse_err = parse_slot_status(chunk)
+                        if not chunk then
+                            -- EOF - return error result from scope
+                            return false, "Stream closed"
+                        end
 
-                    if parse_err == "" and card_status ~= "" then
-                        -- Valid parse - return true if present, false if absent
-                        return card_status == "present"
+                        -- Parse the chunk (includes Card status + Slot status lines)
+                        local card_status, parse_err = parse_slot_status(chunk)
+
+                        if parse_err == "" and card_status ~= "" then
+                            -- Valid parse - return true if present, false if absent
+                            return card_status == "present", ""
+                        end
+
+                        -- If parse failed, continue reading next chunk
                     end
-
-                    -- If parse failed, continue reading next chunk
-                end
-            end)
-            :wrap(function(st, _, ...)
-                if st == 'ok' then
-                    return ...  -- Returns the boolean (and optional error string)
-                elseif st == 'cancelled' then
-                    return false, "cancelled"
-                else
-                    -- Scope failed - return the error from scope body
-                    return false, (... or "QMI monitor failed")
-                end
-            end)
+                end)
+                :wrap(function(st, _, ...)
+                    if st == 'ok' then
+                        return ... -- Returns the boolean (and optional error string)
+                    elseif st == 'cancelled' then
+                        return false, "cancelled"
+                    else
+                        -- Scope failed - return the error from scope body
+                        return false, (... or "QMI monitor failed")
+                    end
+                end)
         end)
     end
 
@@ -171,22 +189,30 @@ local function add_mode_funcs(ModemBackend)
     ---@return boolean sim_present
     ---@return string error
     function ModemBackend:is_sim_present()
-        local cmd = exec.command {
-            "qmicli", "-p", "-d", self.identity.mode_port, "--uim-get-card-status",
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" or code ~= 0 then
-            return false, "Failed to execute qmicli command: " .. tostring(err)
-        end
+        local st, _, present_or_err = fibers.run_scope(function()
+            local cmd = exec.command {
+                "qmicli", "-p", "-d", self.identity.mode_port, "--uim-get-card-status",
+                stdin = "null",
+                stdout = "pipe",
+                stderr = "stdout"
+            }
+            local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
+            if status ~= "exited" or code ~= 0 then
+                error("Failed to execute qmicli command: " .. tostring(err))
+            end
 
-        local state, parse_err = parse_slot_status(out)
-        if parse_err ~= "" then
-            return false, "Failed to parse qmicli output: " .. tostring(parse_err)
+            local state, parse_err = parse_slot_status(out)
+            if parse_err ~= "" then
+                error("Failed to parse qmicli output: " .. tostring(parse_err))
+            end
+            return state == 'present'
+        end)
+
+        if st == "ok" then
+            return present_or_err, ""
+        else
+            return false, present_or_err or "Unknown error"
         end
-        return state == 'present', ""
     end
 
     --- Check for sim presence, will cause a sim_present_op to emit if present
@@ -194,34 +220,41 @@ local function add_mode_funcs(ModemBackend)
     ---@return boolean ok
     ---@return string error
     function ModemBackend:trigger_sim_presence_check(cooldown)
-        cooldown = cooldown or 1
-        --- Set power low
-        local cmd = exec.command {
-            "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-off=1",
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local _, status, code, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" or code ~= 0 then
-            return false, "Failed to execute qmicli power off command: " .. tostring(err)
-        end
+        local st, _, err = fibers.run_scope(function()
+            local errors = {}
+            cooldown = cooldown or 1
+            --- Set power low
+            local cmd = exec.command {
+                "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-off=1",
+                stdin = "null",
+                stdout = "pipe",
+                stderr = "stdout"
+            }
+            local _, status, code, _, err = fibers.perform(cmd:combined_output_op())
+            if status ~= "exited" or code ~= 0 then
+                table.insert(errors, "Failed to execute qmicli power off command: " .. tostring(err))
+            end
 
-        sleep.sleep(cooldown)
+            sleep.sleep(cooldown)
 
-        --- Set power high
-        local cmd_on = exec.command {
-            "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-on=1",
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local _, status_on, code_on, _, err_on = fibers.perform(cmd_on:combined_output_op())
-        if status_on ~= "exited" or code_on ~= 0 then
-            return false, "Failed to execute qmicli power on command: " .. tostring(err_on)
-        end
+            --- Set power high
+            local cmd_on = exec.command {
+                "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-on=1",
+                stdin = "null",
+                stdout = "pipe",
+                stderr = "stdout"
+            }
+            local _, status_on, code_on, _, err_on = fibers.perform(cmd_on:combined_output_op())
+            if status_on ~= "exited" or code_on ~= 0 then
+                table.insert(errors, "Failed to execute qmicli power on command: " .. tostring(err_on))
+            end
 
-        return true, ""
+            if #errors > 0 then
+                error(table.concat(errors, ";\n"))
+            end
+        end)
+
+        return st == "ok", err or ""
     end
 
     --- Gets a simcards MCC
@@ -253,7 +286,8 @@ local function add_mode_funcs(ModemBackend)
     ---@return string active_band_class
     ---@return string error
     function ModemBackend:active_band_class(timeout)
-        return fetch.get_cached_value(self.identity, "active_band_class", self.cache, "string", timeout, fetch_rf_band_info)
+        return fetch.get_cached_value(self.identity, "active_band_class", self.cache, "string", timeout,
+            fetch_rf_band_info)
     end
 end
 

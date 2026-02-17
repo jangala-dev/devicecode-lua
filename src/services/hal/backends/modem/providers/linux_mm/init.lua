@@ -1,16 +1,19 @@
 local file = require "fibers.io.file"
 local exec = require "fibers.io.exec"
 local op = require "fibers.op"
+local fibers = require "fibers"
+
+local backend = require "services.hal.backends.modem.providers.linux_mm.impl"
 
 local function is_linux()
-    local fh = file.open("/proc/version", "r")
-    if not fh then
+    local fh, open_err = file.open("/proc/version", "r")
+    if not fh or open_err then
         return false
     end
 
-    local content = fh:read("*a")
+    local content, read_err = fh:read_all()
     fh:close()
-    if not content then
+    if not content or read_err then
         return false
     end
 
@@ -26,7 +29,7 @@ local function has_mmcli()
         stdout = "pipe",
         stderr = "stdout"
     }
-    local _, status, code, _, err = op.perform(cmd:combined_output_op())
+    local _, status, code, _, err = fibers.perform(cmd:combined_output_op())
     if status == "exited" and code == 0 then
         return true
     end
@@ -36,10 +39,9 @@ end
 --- Returns if linux with modem manager is supported
 ---@return boolean
 local function is_supported()
-    return is_linux() and has_mmcli()
+    local res = is_linux() and has_mmcli()
+    return res
 end
-
-local backend = require "services.hal.backends.modem.providers.linux_mm.impl"
 
 return {
     is_supported = is_supported,
