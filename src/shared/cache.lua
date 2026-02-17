@@ -42,7 +42,7 @@ function Cache:set(key, value, timeout)
     timeout = timeout or self.default_timeout
     if type(value) == 'table' then
         if is_array(value) then
-            self.store[key] = {value=value, timestamp=self.time_func() + timeout}
+            self.store[key] = {value=value, timestamp=self.time_func() + timeout, timeout = timeout}
         else
             for k, v in pairs(value) do
                 self:set(key .. self.separator .. k, v, timeout)
@@ -58,7 +58,6 @@ end
 ---@param timeout number?
 ---@return any
 function Cache:get(key, timeout)
-    if stale == nil then stale = false end
     if type(key) ~= 'string' then
         key = table.concat(key, self.separator)
     end
