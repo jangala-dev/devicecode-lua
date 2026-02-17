@@ -52,28 +52,15 @@ return function(modem)
 
     modem.uim_get_gids = function()
         local gids = {}
-        local key_map = {
-            ["Card result"] = "card-result",
-            SW1 = 'sw1',
-            SW2 = 'sw2',
-            ["Read result"] = "read-result"
-        }
+
         local gid1_ctx = context.with_timeout(modem.ctx, CMD_TIMEOUT)
         local gid1_cmd = qmicli.uim_read_transparent(gid1_ctx, modem.primary_port, '0x3F00,0x7FFF,0x6F3E')
         gid1_cmd:setpgid(true)
+
         local gid1_out, gid1_cmd_err = gid1_cmd:combined_output()
         if gid1_cmd_err then return gids, wraperr.new(gid1_cmd_err) end
 
-        local gid1_out_parsed, gid1_parse_err = utils.parse_qmicli_output(gid1_out, key_map)
-        if gid1_parse_err == nil and gid1_out_parsed["read-result"] then
-            local gid1
-            -- unfortnuately the parser incorrectly identifies the hex as a key value pair
-            -- so f:o:o:b:a:r becomes {f = o:o:b:a:r}
-            for k, v in pairs(gid1_out_parsed["read-result"]) do
-                gid1 = k .. ":" .. v
-            end
-            gids.gid1 = gid1
-        end
+        gids.gid1 = gid1_out:match("%s+(%S+)%s*$"):gsub(":", "")
 
         return gids
     end
