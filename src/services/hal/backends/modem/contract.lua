@@ -29,8 +29,20 @@ local BACKEND_FUNCTIONS = list_to_map {
     "mnc",
     "gid1",
     "active_band_class",
+    "firmware",
 
-    -- others
+    -- State monitoring
+    "start_state_monitor",
+    "monitor_state_op",
+
+    -- SIM monitoring
+    "start_sim_presence_monitor",
+    "wait_for_sim_present_op",
+    "wait_for_sim_present",
+    "is_sim_present",
+    "trigger_sim_presence_check",
+
+    -- Control operations
     "enable",
     "disable",
     "reset",
@@ -38,11 +50,7 @@ local BACKEND_FUNCTIONS = list_to_map {
     "disconnect",
     "inhibit",
     "uninhibit",
-    "monitor_state_op",
-    "wait_for_sim_present_op",
-    "wait_for_sim_present",
-    "is_sim_present",
-    "trigger_sim_presence_check",
+    "set_signal_update_interval"
 }
 
 --- Check that a modem backend provides all required functions and no more
