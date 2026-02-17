@@ -1,6 +1,5 @@
 -- Modem modules
-local modem_types = require "services.hal.types.modem"
-local attr_paths = require "services.hal.drivers.modem.attr_paths"
+local modem_backend_provider = require "services.hal.backends.modem.provider"
 
 -- HAL modules
 local hal_types = require "services.hal.types.core"
@@ -12,28 +11,35 @@ local log = require "services.log"
 
 -- Fibers modules
 local fibers = require "fibers"
-local scope_mod = require "fibers.scope"
 local op = require "fibers.op"
 local channel = require "fibers.channel"
 local sleep = require "fibers.sleep"
-
--- Other modules
-local cache = require "shared.cache"
+local cond = require "fibers.cond"
+local pulse = require "fibers.pulse"
 
 ---@class Modem
 ---@field address ModemAddress
 ---@field control_ch Channel
 ---@field cap_emit_ch Channel
 ---@field scope Scope
----@field identity ModemIdentity
+---@field imei string
 ---@field model string
 ---@field model_variant string
 ---@field mode string
 ---@field initialised boolean
 ---@field caps_applied boolean
+---@field state_pulse Pulse
 ---@field cache Cache
 local Modem = {}
 Modem.__index = Modem
+
+local function list_to_table(list)
+    local t = {}
+    for _, v in ipairs(list) do
+        t[v] = true
+    end
+    return t
+end
 
 ---- Constant Definitions ----
 
@@ -42,29 +48,22 @@ local DEFAULT_CACHE_TIMEOUT = 10
 
 local CONTROL_Q_LEN = 8
 
-local ATTR_ACCESSOR = attr_paths.build_paths {
-    get_modem_info = get_modem_info,
-    get_modem_firmware = get_modem_firmware,
-    get_sim_info = get_sim_info,
-    get_home_network = get_home_network,
-    get_gid1 = get_gid1,
-    get_rf_band_info = get_rf_band_info,
-    get_operator_info = get_operator_info,
-    get_signal_info = get_signal_info,
-    get_net_stats = get_net_stats,
-}
-
-local MODEL_INFO = {
-    quectel = {
-        -- these are ordered, as eg25gl should match before eg25g
-        { mod_string = "UNKNOWN",   rev_string = "eg25gl",   model = "eg25",   model_variant = "gl" },
-        { mod_string = "UNKNOWN",   rev_string = "eg25g",    model = "eg25",   model_variant = "g" },
-        { mod_string = "UNKNOWN",   rev_string = "ec25e",    model = "ec25",   model_variant = "e" },
-        { mod_string = "em06-e",    rev_string = "em06e",    model = "em06",   model_variant = "e" },
-        { mod_string = "rm520n-gl", rev_string = "rm520ngl", model = "rm520n", model_variant = "gl" }
-        -- more quectel models here
-    },
-    fibocom = {}
+local GET_METHODS = list_to_table {
+    "imei",
+    "device",
+    "primary_port",
+    "ports",
+    "at_ports",
+    "qmi_ports",
+    "gps_ports",
+    "net_ports",
+    "access_techs",
+    "sim",
+    "drivers",
+    "plugin",
+    "model",
+    "revision",
+    "operator"
 }
 
 
@@ -130,7 +129,7 @@ end
 ---@return boolean ok
 ---@return string? error
 function Modem:_emit_event(key, data)
-    return emit(self.cap_emit_ch, self.identity.imei, 'event', key, data)
+    return emit(self.cap_emit_ch, self.imei, 'event', key, data)
 end
 
 --- Emit a state.
@@ -139,7 +138,7 @@ end
 ---@return boolean ok
 ---@return string? error
 function Modem:_emit_state(key, data)
-    return emit(self.cap_emit_ch, self.identity.imei, 'state', key, data)
+    return emit(self.cap_emit_ch, self.imei, 'state', key, data)
 end
 
 --- Emit meta information.
@@ -148,7 +147,7 @@ end
 ---@return boolean ok
 ---@return string? error
 function Modem:_emit_meta(key, data)
-    return emit(self.cap_emit_ch, self.identity.imei, 'meta', key, data)
+    return emit(self.cap_emit_ch, self.imei, 'meta', key, data)
 end
 
 --- Emit a set of key-value events.
@@ -156,7 +155,7 @@ end
 ---@return boolean ok
 ---@return string? error
 function Modem:_emit_kv(kv_data)
-    return emit_kv(self.cap_emit_ch, self.identity.imei, kv_data)
+    return emit_kv(self.cap_emit_ch, self.imei, kv_data)
 end
 
 --- Emit a set of key-value states.
@@ -164,7 +163,7 @@ end
 ---@return boolean ok
 ---@return string? error
 function Modem:_emit_kv_state(kv_data)
-    return emit_kv(self.cap_emit_ch, self.identity.imei, kv_data)
+    return emit_kv(self.cap_emit_ch, self.imei, kv_data)
 end
 
 --- Emit a set of key-value meta information.
@@ -172,7 +171,7 @@ end
 ---@return boolean ok
 ---@return string? error
 function Modem:_emit_kv_meta(kv_data)
-    return emit_kv(self.cap_emit_ch, self.identity.imei, kv_data)
+    return emit_kv(self.cap_emit_ch, self.imei, kv_data)
 end
 
 --- Validate that a function is implemented
@@ -194,55 +193,170 @@ end
 --- Get a modem attribute.
 ---@param opts ModemGetOpts?
 ---@return any value
----@return string? error
 function Modem:get(opts)
     if opts == nil or getmetatable(opts) ~= external_types.ModemGetOpts then
-        return nil, "invalid options"
+        throw_error("invalid options")
+        return
     end
     local field = opts.field
     local timescale = opts.timescale or math.huge
 
-    local accessor = ATTR_ACCESSOR[field]
-    if not accessor then
-        throw_error("unknown field: " .. tostring(field))
+    -- Check that the field is supported
+    if not GET_METHODS[field] then
+        throw_error("unsupported field: " .. tostring(field))
     end
 
-    -- try to find value in cache
-    local method = accessor.method
-    local key = method
-    if accessor.path ~= '' then
-        key = key .. "." .. accessor.path
+    -- Call the corresponding backend function to get the value
+    local get_fn = self.backend[field]
+    if not get_fn then
+        throw_error("field " .. tostring(field) .. " is not implemented by backend")
     end
-    local value, err = self.cache:get(key, timescale)
-    if err then throw_error(err) end
-
-    -- if not found in cache, or stale
-    if value == nil then
-        local valid, validation_err = validate_fn(accessor.gettr)
-        if not valid then
-            return throw_error(validation_err)
-        end
-
-        local info, info_err = accessor.gettr(self.identity)
-        if not info then throw_error(info_err) end
-        local values = attr_paths.flatten_table(info)
-        for k, v in pairs(values) do
-            self.cache:set(k, v)
-        end
-
-        local ok, emit_err = self:_emit_kv_meta(values)
-        if not ok then
-            log.debug("Modem Driver", self.identity.imei, "emit_kv_meta error:", emit_err)
-        end
-
-        value = values[key]
+    local value, err = get_fn(self.backend, timescale)
+    if err ~= "" then
+        throw_error("error getting field " .. tostring(field) .. ": " .. tostring(err))
     end
-
-    if value == nil then
-        throw_error("no value for field: " .. tostring(field))
-    end
-
     return value
+end
+
+--- Enable the modem
+function Modem:enable()
+    local ok, err = self.backend:enable()
+    if not ok then
+        throw_error(err)
+    end
+end
+
+--- Disable the modem
+function Modem:disable()
+    local ok, err = self.backend:disable()
+    if not ok then
+        throw_error(err)
+    end
+end
+
+--- Reset the modem
+function Modem:reset()
+    local ok, err = self.backend:reset()
+    if not ok then
+        throw_error(err)
+    end
+end
+
+--- Connect the modem
+---@param opts ModemConnectOpts?
+function Modem:connect(opts)
+    if opts == nil or getmetatable(opts) ~= external_types.ModemConnectOpts then
+        throw_error("invalid options")
+        return
+    end
+    local ok, err = self.backend:connect(opts.connection_string)
+    if not ok then
+        throw_error(err)
+    end
+end
+
+--- Disconnect the modem
+function Modem:disconnect()
+    local ok, err = self.backend:disconnect()
+    if not ok then
+        throw_error(err)
+    end
+end
+
+--- Inhibit the modem
+function Modem:inhibit()
+    local done_ch = channel.new()
+
+    local ok, err = self.scope:spawn(function()
+        local result_ok, result_err = self.backend:inhibit()
+        done_ch:put({ ok = result_ok, err = result_err })
+    end)
+
+    if not ok then
+        throw_error("failed to spawn inhibit fiber: " .. tostring(err))
+    end
+
+    local source, msg, primary = fibers.perform(op.named_choice {
+        done = done_ch:get_op(),
+        failed = self.scope:fault_op(),
+    })
+
+    if source == "done" then
+        if not msg.ok then
+            throw_error(msg.err)
+        end
+        return
+    elseif source == "failed" then
+        throw_error("modem inhibit failed: " .. tostring(primary))
+    end
+    throw_error("unexpected error during modem inhibit")
+end
+
+--- Uninhibit the modem
+function Modem:uninhibit()
+    local ok, err = self.backend:uninhibit()
+    if not ok then
+        throw_error(err)
+    end
+end
+
+--- Start listening for a sim insertion
+function Modem:listen_for_sim()
+    if self.listening_for_sim then
+        throw_error("already listening for SIM")
+    end
+    self.listening_for_sim = true
+    local ok, err = fibers.current_scope():spawn(function()
+        fibers.run_scope(function()
+            self:_emit_state("sim_listener", "open")
+
+            fibers.current_scope():finally(function()
+                self.listening_for_sim = false
+                self:_emit_state("sim_listener", "closed")
+            end)
+
+            while true do
+                --- out returns true if SIM is present, false if not
+                local source, out, err = fibers.perform(op.named_choice {
+                    sim_present = self.backend:wait_for_sim_present_op(),
+                    timeout = sleep.sleep_op(DEFAULT_CACHE_TIMEOUT)
+                })
+                if source == "sim_present" then
+                    if err ~= "" then
+                        log.error("Modem Driver", self.imei,
+                            "listen_for_sim: error waiting for SIM presence:", err)
+                        self:_emit_event("sim_listen_error", err)
+                    end
+                    if out then
+                        self.state_pulse:signal()
+                        break
+                    end
+                elseif source == "timeout" then
+                    local ok, check_err = self.backend:trigger_sim_presence_check()
+                    if not ok then
+                        log.error("Modem Driver", self.imei,
+                            "listen_for_sim: failed to trigger SIM presence check:", check_err)
+                    end
+                end
+            end
+        end)
+    end)
+    if not ok then
+        throw_error("listen_for_sim spawn failed: " .. tostring(err))
+    end
+end
+
+--- Set the signal update period
+---@param opts ModemSignalUpdateOpts
+function Modem:set_signal_update_freq(opts)
+    if opts == nil or getmetatable(opts) ~= external_types.ModemSignalUpdateOpts then
+        throw_error("invalid options")
+        return
+    end
+    local ok, err = self.backend:set_signal_update_interval(opts.frequency)
+    if not ok then
+        throw_error(err)
+    end
 end
 
 ---- Long Running Fibers ----
@@ -256,29 +370,87 @@ local function get_reason_and_code(control_err, verb)
         return control_err.reason, control_err.code
     end
 
-    local reason = "function " .. tostring(verb) .. " did not return a valid ControlError"
+    local reason = "function " .. tostring(verb) .. " failed with error: " .. tostring(control_err)
     return reason, 1
 end
 
+function Modem:emitter()
+    log.trace("Modem Driver", self.imei, "emitter: started")
+
+    fibers.current_scope():finally(function()
+        log.trace("Modem Driver", self.imei, "emitter: exiting")
+    end)
+
+    while true do
+        self.state_pulse:next() -- wait for a pulse indicating state change
+
+        for method, _ in pairs(GET_METHODS) do
+            local st, _, primary = fibers.run_scope(function() self:get(external_types.new.ModemGetOpts(method, 0)) end)
+
+            if st ~= 'ok' then
+                local err_msg = primary
+                if type(err_msg) == "table" and err_msg.reason then
+                    err_msg = err_msg.reason
+                end
+                log.warn("Modem Driver", self.imei,
+                    "emitter: error getting field " .. tostring(method) .. ": " .. tostring(err_msg))
+            else
+                local ok, emit_err = self:_emit_meta(method, primary)
+                if not ok then
+                    log.warn("Modem Driver", self.imei,
+                        "emitter: failed to emit meta for field " .. tostring(method) .. ": "
+                        .. tostring(emit_err))
+                end
+            end
+        end
+    end
+end
+
 function Modem:state_monitor()
+    log.trace("Modem Driver", self.imei, "state_monitor: started")
+
+    fibers.current_scope():finally(function()
+        log.trace("Modem Driver", self.imei, "state_monitor: exiting")
+    end)
+
+    while true do
+        local state_update, err = fibers.perform(self.backend:monitor_state_op())
+        ---@cast state_update ModemStateEvent
+        if err == 'Command closed' then
+            log.error("Modem Driver", self.imei, "state_monitor: backend command closed, exiting monitor")
+            break
+        elseif err ~= "" then
+            log.error("Modem Driver", self.imei, "state_monitor: error monitoring state:", err)
+        elseif state_update then
+            self.state_pulse:signal() -- signal that modem state has changed
+            local ok, emit_err = self:_emit_state('card', state_update)
+            if not ok then
+                log.error("Modem Driver", self.imei, "state_monitor: failed to emit state update:", emit_err)
+            end
+        end
+    end
 end
 
 function Modem:control_manager()
     if self.cap_emit_ch == nil then
-        log.error("Modem Driver", self.identity.imei, "control_manager: cap_emit_ch is nil")
+        log.error("Modem Driver", self.imei, "control_manager: cap_emit_ch is nil")
         return
     end
     if self.control_ch == nil then
-        log.error("Modem Driver", self.identity.imei, "control_manager: control_ch is nil")
+        log.error("Modem Driver", self.imei, "control_manager: control_ch is nil")
         return
     end
 
-    log.trace("Modem Driver", self.identity.imei, "control_manager: started")
+    log.trace("Modem Driver", self.imei, "control_manager: started")
+
+    fibers.current_scope():finally(function()
+        log.trace("Modem Driver", self.imei, "control_manager: exiting")
+    end)
 
     while true do
         local request, req_err = self.control_ch:get()
         if not request then
-            log.error("Modem Driver", self.identity.imei, "control_manager: control_ch get error:", req_err)
+            log.error("Modem Driver", self.imei, "control_manager: control_ch get error:", req_err)
             break
         end
 
@@ -305,59 +477,14 @@ function Modem:control_manager()
 
         local reply, reply_err = hal_types.new.Reply(ok, reason, code)
         if not reply then
-            log.error("Modem Driver", self.identity.imei, "control_manager: failed to create reply:", reply_err)
+            log.error("Modem Driver", self.imei, "control_manager: failed to create reply:", reply_err)
         else
             request.reply_ch:put(reply)
         end
     end
-
-    log.trace("Modem Driver", self.identity.imei, "control_manager: exiting")
 end
 
 ---- Driver Functions ----
-
-local function format_ports(ports)
-    local port_list = {}
-
-    -- ports is now a comma-separated string
-    if type(ports) == "string" then
-        for port in ports:gmatch("[^,]+") do
-            port = port:match("^%s*(.-)%s*$") -- trim whitespace
-            local port_name, port_type = string.match(port, "^([%w%-]+)%s*%(([%w%-]+)%)")
-            if port_name and port_type then
-                if port_list[port_type] == nil then
-                    port_list[port_type] = { port_name }
-                else
-                    table.insert(port_list[port_type], port_name)
-                end
-            end
-        end
-    end
-
-    return port_list
-end
-
---- Utility function to check if a string starts with a given prefix (case-insensitive)
----@param str string
----@param start string
----@return boolean
-local function starts_with(str, start)
-    if str == nil or start == nil then return false end
-    str, start = str:lower(), start:lower()
-    -- Use string.sub to get the prefix of mainString that is equal in length to startString
-    return string.sub(str, 1, string.len(start)) == start
-end
-
-
---- Get driver identity
----@return ModemIdentity? identity
----@return string error
-function Modem:get_identity()
-    if not self.initialised then
-        return nil, "modem not initialised"
-    end
-    return self.identity, ""
-end
 
 --- Spawn driver services
 ---@return boolean ok
@@ -370,8 +497,9 @@ function Modem:start()
         return false, "capabilities not applied"
     end
 
-    self.scope:spawn(self.state_monitor, self)
-    self.scope:spawn(self.control_manager, self)
+    self.scope:spawn(function() self:state_monitor() end)
+    self.scope:spawn(function() self:control_manager() end)
+    self.scope:spawn(function() self:emitter() end)
 
     return true, ""
 end
@@ -412,7 +540,7 @@ function Modem:capabilities(emit_ch)
 
     local modem_cap, mod_cap_err = cap_types.new.ModemCapability(
         'modem',
-        self.identity.imei,
+        self.imei,
         self.control_ch
     )
     if not modem_cap then
@@ -430,124 +558,82 @@ function Modem:init()
     if self.initialised then
         return "already initialised"
     end
-    -- determine mode (qmi/mbim) from drivers to apply mode-specific overrides
-    local drivers, drivers_err = self:get { field = 'drivers' }
-    if not drivers then
-        return "failed to get drivers: " .. tostring(drivers_err)
-    end
 
-    if drivers:match("qmi_wwan") then
-        self.mode = 'qmi'
-    elseif drivers:match("cdc_mbim") then
-        self.mode = 'mbim'
-    end
+    local backend_built_sig = cond.new()
 
-    assert(mode_overrides.add_mode_funcs(self))
+    local ok, err = self.scope:spawn(function()
+        self.backend = modem_backend_provider.new(self.address)
 
-    -- identify model to apply model-specific overrides
-    local plugin, plugin_err = self:get { field = 'plugin' }
-    if not plugin then
-        return "failed to get plugin: " .. tostring(plugin_err)
-    end
+        self.backend:start_sim_presence_monitor()
+        self.backend:start_state_monitor()
 
-    local model, model_err = self:get { field = 'model' }
-    if not model then
-        return "failed to get model: " .. tostring(model_err)
-    end
-
-    local revision, revision_err = self:get { field = 'revision' }
-    if not revision then
-        return "failed to get revision: " .. tostring(revision_err)
-    end
-
-    for manufacturer, models in pairs(MODEL_INFO) do
-        if string.match(plugin:lower(), manufacturer) then
-            for _, details in ipairs(models) do
-                if details.mod_string == model:lower()
-                    or starts_with(revision, details.rev_string) then
-                    log.info("Modem Driver", self.identity.imei,
-                        "identified model as", details.model,
-                        "variant", details.model_variant)
-                    self.model = details.model
-                    self.model_variant = details.model_variant
-                    break
-                end
-            end
+        -- Get IMEI from backend
+        local imei, imei_err = self.backend:imei()
+        if imei_err == "" then
+            self.imei = imei
+        else
+            error("failed to get IMEI: " .. tostring(imei_err))
         end
+
+        backend_built_sig:signal()
+    end)
+
+    if not ok then
+        return "failed to spawn modem backend fiber: " .. tostring(err)
     end
 
-    model_overrides.add_model_funcs(self)
+    local source, _, primary = fibers.perform(op.named_choice {
+        backend_ready = backend_built_sig:wait_op(),
+        failed = self.scope:fault_op()
+    })
 
-    -- obtain essential identity information
-    local imei, imei_err = self:get { field = 'imei' }
-    if not imei then
-        return "failed to get imei: " .. tostring(imei_err)
+    if source == "backend_ready" then
+        self.initialised = true
+        return ""
+    elseif source == "failed" then
+        return "modem init failed: " .. tostring(primary) -- primary is the error from the faulted fiber
+    else
+        return "unexpected error during modem init"
     end
-
-    local primary_port, primary_port_err = self:get { field = 'primary_port' }
-    if not primary_port then
-        return "failed to get primary_port: " .. tostring(primary_port_err)
-    end
-
-    local ports, ports_err = self:get { field = 'ports' }
-    if not ports then
-        return "failed to get ports: " .. tostring(ports_err)
-    end
-
-    local fmt_ports = format_ports(ports)
-    if (not fmt_ports.at) or (not fmt_ports.at[1]) then
-        return "no AT port found"
-    end
-
-    local device, device_err = self:get { field = 'device' }
-    if not device then
-        return "failed to get device: " .. tostring(device_err)
-    end
-
-    local id, id_err = modem_types.new.ModemIdentity(
-        imei,
-        self.address,
-        primary_port,
-        fmt_ports.at[1],
-        device
-    )
-
-    if not id then
-        return "failed to create modem identity: " .. tostring(id_err)
-    end
-
-    self.identity = id
-
-    self.initialised = true
-
-    return ""
 end
 
 --- Create a new Modem driver.
----@param scope Scope
 ---@param address ModemAddress
 ---@return Modem? modem
 ---@return string error
-local function new(scope, address)
-    if getmetatable(scope) ~= scope_mod.Scope then
-        return nil, "invalid scope"
-    end
+local function new(address)
     if type(address) ~= 'string' or address == '' then
         return nil, "invalid address"
     end
 
     local control_ch = channel.new(CONTROL_Q_LEN)
 
+    local scope, err = fibers.current_scope():child()
+    if not scope then
+        return nil, "failed to create child scope: " .. tostring(err)
+    end
+
+    -- Print out driver stack trace if scope closes on a failure
+    scope:finally(function ()
+        local st, primary = scope:status()
+        if st == 'failed' then
+            log.error(("Modem Driver %s: error - %s"):format(tostring(address), tostring(primary)))
+            log.trace("Modem Driver %s: scope exiting with status %s", tostring(address), st)
+        end
+        log.trace("Modem Driver %s: stopped", tostring(address))
+    end)
+
     return setmetatable({
         scope = scope,
         address = address,
         initialised = false,  -- modem cannot apply capabilities until initialised
         caps_applied = false, -- modem cannot start until capabilities applied
-        control_ch = control_ch,
-        cache = cache.new(DEFAULT_CACHE_TIMEOUT, nil, '.')
+        listening_for_sim = false,
+        state_pulse = pulse.new(),
+        control_ch = control_ch
     }, Modem), ""
 end
 
 return {
-    new
+    new = new
 }
