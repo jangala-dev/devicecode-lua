@@ -8,6 +8,9 @@ local function list_to_map(list)
     return map
 end
 
+local channel = require "fibers.channel"
+local ChannelMT = getmetatable(channel.new())
+
 local function valid_class(class)
     return type(class) == 'string' and class ~= ''
 end
@@ -60,7 +63,7 @@ function new.Capability(class, id, control_ch, offerings)
         return nil, "invalid capability id"
     end
 
-    if getmetatable(control_ch) ~= "Channel" then
+    if getmetatable(control_ch) ~= ChannelMT then
         return nil, "invalid capability control_ch"
     end
 
@@ -69,8 +72,6 @@ function new.Capability(class, id, control_ch, offerings)
     end
 
     local offerings_map = list_to_map(offerings)
-    offerings_map['get'] = true -- all capabilities support 'get'
-    offerings_map['set'] = true -- all capabilities support 'set'
 
     local capability = setmetatable({
         class = class,
@@ -89,6 +90,7 @@ end
 ---@return string error
 function new.ModemCapability(class, id, control_ch)
     local offerings = {
+        'get',
         'enable',
         'disable',
         'restart',

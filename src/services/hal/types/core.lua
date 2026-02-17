@@ -5,7 +5,9 @@
 
 ---@alias CapList Capability[]
 
-local cap_types = require "hal.types.capabilities"
+local cap_types = require "services.hal.types.capabilities"
+local channel = require "fibers.channel"
+local ChannelMT = getmetatable(channel.new())
 
 ---@class TypeConstructors
 local new = {}
@@ -33,7 +35,7 @@ function new.ControlRequest(verb, opts, reply_ch)
         return nil, "opts must be a table"
     end
 
-    if getmetatable(reply_ch) ~= "Channel" then
+    if getmetatable(reply_ch) ~= ChannelMT then
         return nil, "invalid reply_ch"
     end
 
@@ -228,6 +230,9 @@ end
 
 -- Todo types:
 ---@class Manager
+---@field scope Scope
+---@field start fun(dev_ev_ch: Channel, cap_emit_ch: Channel): string error
+---@field stop fun(): string error
 
 return {
     ControlRequest = ControlRequest,
