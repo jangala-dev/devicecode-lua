@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+
+  "runtime.version": "LuaJIT",
+
+  "runtime.path": [
+    "src/?.lua",
+    "src/?/init.lua",
+
+    "vendor/lua-fibers/src/?.lua",
+    "vendor/lua-fibers/src/?/init.lua",
+
+    "vendor/lua-bus/src/?.lua",
+    "vendor/lua-bus/src/?/init.lua",
+
+    "vendor/lua-trie/src/?.lua",
+    "vendor/lua-trie/src/?/init.lua"
+  ],
+
+  "workspace.library": [
+    "src",
+    "vendor/lua-fibers/src",
+    "vendor/lua-bus/src",
+    "vendor/lua-trie/src"
+  ],
+
+  "workspace.checkThirdParty": false,
+  "workspace.maxPreload": 10000,
+
+  "diagnostics.enable": true,
+  "diagnostics.workspaceDelay": -1
+}
