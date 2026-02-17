@@ -32,8 +32,9 @@ end
 ---@class ModemIdentity
 ---@field imei string
 ---@field address ModemAddress
----@field primary_port string
+---@field mode_port string
 ---@field at_port string
+---@field net_port string
 ---@field device string
 local ModemIdentity = {}
 ModemIdentity.__index = ModemIdentity
@@ -41,12 +42,13 @@ ModemIdentity.__index = ModemIdentity
 ---Create a new ModemIdentity.
 ---@param imei string
 ---@param address ModemAddress
----@param primary_port string
+---@param mode_port string
 ---@param at_port string
+---@param net_port string
 ---@param device string
 ---@return ModemIdentity?
 ---@return string error
-function new.ModemIdentity(imei, address, primary_port, at_port, device)
+function new.ModemIdentity(imei, address, mode_port, at_port, net_port, device)
 	if type(imei) ~= 'string' or imei == '' then
 		return nil, "invalid imei"
 	end
@@ -55,12 +57,16 @@ function new.ModemIdentity(imei, address, primary_port, at_port, device)
 		return nil, "invalid address"
 	end
 
-	if type(primary_port) ~= 'string' or primary_port == '' then
-		return nil, "invalid primary_port"
+	if type(mode_port) ~= 'string' or mode_port == '' then
+		return nil, "invalid mode_port"
 	end
 
 	if type(at_port) ~= 'string' or at_port == '' then
 		return nil, "invalid at_port"
+	end
+
+	if type(net_port) ~= 'string' or net_port == '' then
+		return nil, "invalid net_port"
 	end
 
 	if type(device) ~= 'string' or device == '' then
@@ -70,8 +76,9 @@ function new.ModemIdentity(imei, address, primary_port, at_port, device)
 	local identity = setmetatable({
 		imei = imei,
 		address = address,
-		primary_port = primary_port,
+		mode_port = mode_port,
 		at_port = at_port,
+		net_port = net_port,
 		device = device,
 	}, ModemIdentity)
 	return identity, ""
@@ -133,6 +140,50 @@ end
 function new.ModemStateRemovedEvent(reason)
 	return new.ModemStateEvent("removed", "removed", "removed", reason)
 end
+
+---@class ModemBackend
+---@field identity ModemIdentity
+---@field cache Cache
+---@field base string
+---@field inhibit_cmd Command?
+---@field state_monitor table?
+---@field sim_present table?
+---@field imei fun(self: ModemBackend, timeout: number?): string, string
+---@field device fun(self: ModemBackend, timeout: number?): string, string
+---@field primary_port fun(self: ModemBackend, timeout: number?): string, string
+---@field at_ports fun(self: ModemBackend, timeout: number?): table, string
+---@field qmi_ports fun(self: ModemBackend, timeout: number?): table, string
+---@field gps_ports fun(self: ModemBackend, timeout: number?): table, string
+---@field net_ports fun(self: ModemBackend, timeout: number?): table, string
+---@field access_techs fun(self: ModemBackend, timeout: number?): table, string
+---@field sim fun(self: ModemBackend, timeout: number?): string, string
+---@field drivers fun(self: ModemBackend, timeout: number?): table, string
+---@field plugin fun(self: ModemBackend, timeout: number?): string, string
+---@field model fun(self: ModemBackend, timeout: number?): string, string
+---@field revision fun(self: ModemBackend, timeout: number?): string, string
+---@field operator fun(self: ModemBackend, timeout: number?): string, string
+---@field rx_bytes fun(self: ModemBackend): integer, string
+---@field tx_bytes fun(self: ModemBackend): integer, string
+---@field signal fun(self: ModemBackend, timeout: number?): table, string
+---@field mcc fun(self: ModemBackend, timeout: number?): string, string
+---@field mnc fun(self: ModemBackend, timeout: number?): string, string
+---@field gid1 fun(self: ModemBackend, timeout: number?): string, string
+---@field active_band_class fun(self: ModemBackend, timeout: number?): string, string
+---@field start_state_monitor fun(self: ModemBackend): boolean, string
+---@field monitor_state_op fun(self: ModemBackend): Op
+---@field start_sim_presence_monitor fun(self: ModemBackend): boolean, string
+---@field wait_for_sim_present_op fun(self: ModemBackend): Op
+---@field wait_for_sim_present fun(self: ModemBackend): boolean, string
+---@field is_sim_present fun(self: ModemBackend): boolean, string
+---@field trigger_sim_presence_check fun(self: ModemBackend, cooldown: number?): boolean, string
+---@field enable fun(self: ModemBackend): boolean, string
+---@field disable fun(self: ModemBackend): boolean, string
+---@field reset fun(self: ModemBackend): boolean, string
+---@field connect fun(self: ModemBackend, conn_string: string): boolean, string
+---@field disconnect fun(self: ModemBackend): boolean, string
+---@field inhibit fun(self: ModemBackend): boolean, string
+---@field uninhibit fun(self: ModemBackend): boolean, string
+---@field set_signal_update_interval fun(self: ModemBackend, interval: number): boolean, string
 
 return {
 	ModemDevice = ModemDevice,
