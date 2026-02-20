@@ -36,11 +36,9 @@ end
 local function get_backend_impl()
     local backend_impl = nil
     for _, backend_name in ipairs(BACKENDS) do
-        print("Checking backend: services.hal.backends.modem.providers." .. backend_name .. ".init")
         local ok, backend_mod = pcall(require, "services.hal.backends.modem.providers." .. backend_name .. ".init")
         if ok and type(backend_mod) == "table" and backend_mod.is_supported and backend_mod.is_supported() then
             backend_impl = backend_mod.backend
-            print("Selected backend:", backend_name)
             break
         end
     end
@@ -62,14 +60,12 @@ local function new(address)
     end
 
     local drivers_str = table.concat(drivers, ",")
-    print(drivers_str)
     local mode
     if drivers_str:match("qmi_wwan") then
         mode = "qmi"
     elseif drivers_str:match("cdc_mbim") then
         mode = "mbim"
     end
-    print(mode)
 
     if mode then
         local ok, driver_mod = pcall(require, "services.hal.backends.modem.modes." .. mode)
@@ -92,8 +88,6 @@ local function new(address)
     if rev_err ~= "" then
         error("Failed to get modem revision: " .. tostring(rev_err))
     end
-
-    print("Plugin:", plugin, "Model:", model, "Revision:", revision)
 
     local model_funcs_loaded = false
     for manufacturer, models in pairs(MODEL_INFO) do
