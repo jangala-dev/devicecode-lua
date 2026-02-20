@@ -52,13 +52,15 @@ local function t_cap_state(class, id)
     return { 'cap', class, id, 'state' }
 end
 
+---@alias CapabilityEntry { inst: Capability, rpc: table<string, Endpoint> }
+
 ---@class HalService
 ---@field name string
 ---@field cap_emit_ch Channel
 ---@field dev_ev_ch Channel
 ---@field managers table<string, Manager>
 ---@field devices table<string, Device>
----@field capabilities table<string, Capability>
+---@field capabilities table<CapabilityClass, table<CapabilityId, CapabilityEntry>>
 local HalService = {
     cap_emit_ch = channel.new(DEFAULT_Q_LEN), -- capability emits of state, meta or events
     dev_ev_ch = channel.new(DEFAULT_Q_LEN),   -- manager emits of device events (added/removed)
@@ -133,7 +135,7 @@ end
 ---Gets the capability instance or returns nil
 ---@param class CapabilityClass
 ---@param id CapabilityId
----@return Capability?
+---@return CapabilityEntry?
 local function get_cap(class, id)
     local caps = HalService.capabilities[class]
     if not caps then return nil end
@@ -153,7 +155,6 @@ local function set_cap(conn, class, id, cap_inst)
     end
     HalService.capabilities[class][id] = { inst = cap_inst, rpc = {} }
     for offering, _ in pairs(cap_inst.offerings) do
-        print(class, id, offering)
         HalService.capabilities[class][id].rpc[offering] = conn:bind({ 'cap', class, id, 'rpc', offering })
     end
 end
@@ -167,7 +168,8 @@ local function remove_cap(class, id)
     if not caps or not caps[id] then
         return "capability does not exist"
     end
-    for _, rpc_sub in pairs(HalService.capabilities[class][id].rpc) do
+
+    for _, rpc_sub in pairs(caps[id].rpc) do
         ---@cast rpc_sub Endpoint
         rpc_sub:unbind()
     end
@@ -200,16 +202,16 @@ local function on_cap_ctrl(conn, msg)
         return
     end
 
-    local cap_inst = get_cap(class, id)
-    if not cap_inst then return end -- could be a capability owned by another service
+    local cap_entry = get_cap(class, id)
+    if not cap_entry then return end -- could be a capability owned by another service
 
-    if not cap_inst.offerings[verb] then
+    if not cap_entry.inst.offerings[verb] then
         log.debug(HalService.name, "- capability", class, "does not offer verb:", verb)
         return
     end
 
     spawn(function()
-        cap_inst.control_ch:put(control_req)
+        cap_entry.inst.control_ch:put(control_req)
         local reply, reply_err = control_req.reply_ch:get()
         if not reply then
             reply = types.new.Reply(false, reply_err)
@@ -320,6 +322,95 @@ local function on_device_event(conn, device_event)
     end
 end
 
+--- Checks that HAL config is valid
+---@param config table
+---@return boolean
+---@return string error
+local function validate_config(config)
+    if type(config) ~= 'table' then
+        return false, "config must be a table"
+    end
+
+    for key, value in pairs(config) do
+        if type(key) ~= 'string' then
+            return false, "config keys must be strings"
+        end
+        if type(value) ~= 'table' then
+            return false, "config values must be tables"
+        end
+    end
+
+    return true, ""
+end
+
+--- Uses config to setup managers
+---@param config table
+local function on_config(config)
+    log.trace("HAL: received config update")
+    local valid, valid_err = validate_config(config)
+    if not valid then
+        log.debug(HalService.name, "- invalid config:", valid_err)
+        return
+    end
+
+    for name, manager_config in pairs(config) do
+        if HalService.managers[name] then
+            local ok, apply_err = HalService.managers[name].apply_config(manager_config)
+            if not ok then
+                log.debug(HalService.name, "- failed to apply config for manager:", name, apply_err)
+            end
+        else
+            local ok, manager = pcall(require, "services.hal.managers." .. name)
+            if not ok then
+                log.debug("HAL: failed to load manager module for manager:", name)
+            else
+                ---@cast manager Manager
+                local start_err = manager.start(HalService.dev_ev_ch, HalService.cap_emit_ch)
+                if start_err ~= "" then
+                    log.debug(HalService.name, "- failed to start manager:", name, start_err)
+                else
+                    HalService.managers[name] = manager
+                end
+            end
+        end
+    end
+
+    for name, manager in pairs(HalService.managers) do
+        if not config[name] then
+            HalService.managers[name] = nil
+            fibers.current_scope():spawn(function()
+                manager.stop()
+            end)
+        end
+    end
+
+    log.trace("HAL: config update complete")
+end
+
+--- Creates initial utilities required for loading config which will bring up rest of HAL
+local function bootstrap()
+    local fs_manager = require "services.hal.managers.filesystem"
+    ---@cast fs_manager Manager
+
+    local fs_manager_err = fs_manager.start(HalService.dev_ev_ch, HalService.cap_emit_ch)
+    if fs_manager_err ~= "" then
+        error("HAL bootstrap failed: Failed to start filesystem manager: " .. fs_manager_err)
+    end
+
+    local ok, cfg_err = fs_manager.apply_config({
+        {
+            name = "config",
+            root = os.getenv("DEVICECODE_CONFIG_DIR")
+        }
+    })
+
+    if not ok then
+        error("HAL bootstrap failed: " .. tostring(cfg_err))
+    end
+
+    HalService.managers["filesystem"] = fs_manager
+end
+
 ---Spawns all HAL service long running fibers
 ---@param conn Connection
 ---@param opts any
@@ -339,21 +430,21 @@ function HalService.start(conn, opts)
         log.trace("HAL: stopped")
     end)
 
-    local modemcard_manager = require "services.hal.managers.modemcard"
-    HalService.managers.modemcard = modemcard_manager
+    -- bootstrap will start the filesystem manager and apply config which will bring up the rest of HAL
+    -- will also fail fast if not successful
+    bootstrap()
+    log.trace("HAL: Bootstrap successful")
 
-    for name, manager in pairs(HalService.managers) do
-        local err = manager.start(HalService.dev_ev_ch, HalService.cap_emit_ch)
-        if err ~= "" then
-            log.error("HAL failed to start " .. name .. " manager", err)
-        end
-    end
-
-    publish_status(conn, HalService.name, "running")
+    local config_sub = conn:subscribe({ 'cfg', HalService.name })
 
     while true do
-        local rpc_ops = {} -- choice needs at least 1 op to aviod fatal error
+        local ops = {
+            cap_emit = HalService.cap_emit_ch:get_op(),
+            device_event = HalService.dev_ev_ch:get_op(),
+            config = config_sub:recv_op(),
+        }
 
+        local rpc_ops = {}
         for _, class in pairs(HalService.capabilities) do
             for _, cap in pairs(class) do
                 for _, rpc_sub in pairs(cap.rpc) do
@@ -361,24 +452,16 @@ function HalService.start(conn, opts)
                 end
             end
         end
-
-        local manager_fault_ops = {}
-
-        for name, manager in pairs(HalService.managers) do
-            table.insert(manager_fault_ops, manager.scope:fault_op():wrap(function () return name end))
-        end
-
-        local ops = {
-            cap_emit = HalService.cap_emit_ch:get_op(),
-            device_event = HalService.dev_ev_ch:get_op()
-        }
-
         if #rpc_ops > 0 then
             ops.rpc = op.choice(unpack(rpc_ops))
         end
 
+        local manager_fault_ops = {}
+        for name, manager in pairs(HalService.managers) do
+            table.insert(manager_fault_ops, manager.scope:fault_op():wrap(function () return name end))
+        end
         if #manager_fault_ops > 0 then
-            ops.modem_manager_fault = op.choice(unpack(manager_fault_ops))
+            ops.manager_fault = op.choice(unpack(manager_fault_ops))
         end
 
         local source, msg = perform(op.named_choice(ops))
@@ -389,11 +472,13 @@ function HalService.start(conn, opts)
             on_cap_emit(conn, msg)
         elseif source == 'device_event' then
             on_device_event(conn, msg)
-        elseif source == 'modem_manager_fault' then
+        elseif source == 'config' then
+            on_config(msg.payload)
+        elseif source == 'manager_fault' then
             local name = msg
             local manager = HalService.managers[name]
             if manager then
-                log.error("HAL: modem manager fault detected")
+                log.error(("HAL: %s manager fault detected"):format(name))
                 manager.stop()
                 HalService.managers[name] = nil
             end
