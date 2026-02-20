@@ -52,10 +52,9 @@ local GET_METHODS = list_to_table {
     "imei",
     "device",
     "primary_port",
-    "ports",
     "at_ports",
     "qmi_ports",
-    "gps_ports",
+    -- "gps_ports", -- maybe needed for the future
     "net_ports",
     "access_techs",
     "sim",
@@ -63,7 +62,16 @@ local GET_METHODS = list_to_table {
     "plugin",
     "model",
     "revision",
-    "operator"
+    "operator",
+    "rx_bytes",
+    "tx_bytes",
+    "signal",
+    "mcc",
+    "mnc",
+    "gid1",
+    "active_band_class",
+    "firmware",
+    "iccid"
 }
 
 
@@ -113,14 +121,17 @@ local function emit_kv(emit_ch, imei, kv_data)
     return all_ok, first_err
 end
 
---- Utility function to throw a ControlError
+--- Utility function to return a ControlError
 ---@param err string?
 ---@param code integer?
-local function throw_error(err, code)
+---@return boolean ok
+---@return string reason
+---@return integer? code
+local function return_error(err, code)
     if err == nil then
         err = "unknown error"
     end
-    error(cap_types.new.ControlError(err, code), 2)
+    return false, err, code
 end
 
 --- Emit an event.
@@ -150,30 +161,6 @@ function Modem:_emit_meta(key, data)
     return emit(self.cap_emit_ch, self.imei, 'meta', key, data)
 end
 
---- Emit a set of key-value events.
----@param kv_data table<string, any>
----@return boolean ok
----@return string? error
-function Modem:_emit_kv(kv_data)
-    return emit_kv(self.cap_emit_ch, self.imei, kv_data)
-end
-
---- Emit a set of key-value states.
----@param kv_data table<string, any>
----@return boolean ok
----@return string? error
-function Modem:_emit_kv_state(kv_data)
-    return emit_kv(self.cap_emit_ch, self.imei, kv_data)
-end
-
---- Emit a set of key-value meta information.
----@param kv_data table<string, any>
----@return boolean ok
----@return string? error
-function Modem:_emit_kv_meta(kv_data)
-    return emit_kv(self.cap_emit_ch, self.imei, kv_data)
-end
-
 --- Validate that a function is implemented
 ---@param fn any
 ---@return boolean is_valid
@@ -188,82 +175,116 @@ local function validate_fn(fn)
     return true
 end
 
+--- Trim the traceback from an error message
+---@param err string
+---@return string trimmed_error
+local function trim_error(err)
+    local traceback_start = err:find("\nstack traceback:")
+    if traceback_start then
+        return err:sub(1, traceback_start - 1)
+    end
+    return err
+end
+
 ---- Modem Capabilities ----
 
 --- Get a modem attribute.
 ---@param opts ModemGetOpts?
----@return any value
+---@return boolean ok
+---@return any reason_or_value
+---@return integer? code
 function Modem:get(opts)
     if opts == nil or getmetatable(opts) ~= external_types.ModemGetOpts then
-        throw_error("invalid options")
-        return
+        return return_error("invalid options", 1)
     end
     local field = opts.field
     local timescale = opts.timescale or math.huge
 
     -- Check that the field is supported
     if not GET_METHODS[field] then
-        throw_error("unsupported field: " .. tostring(field))
+        return return_error("unsupported field: " .. tostring(field), 1)
     end
 
     -- Call the corresponding backend function to get the value
     local get_fn = self.backend[field]
     if not get_fn then
-        throw_error("field " .. tostring(field) .. " is not implemented by backend")
+        return return_error("field " .. tostring(field) .. " is not implemented by backend", 1)
     end
     local value, err = get_fn(self.backend, timescale)
     if err ~= "" then
-        throw_error("error getting field " .. tostring(field) .. ": " .. tostring(err))
+        return return_error("error getting field " .. tostring(field) .. ": " .. tostring(err), 1)
     end
-    return value
+    return true, value
 end
 
 --- Enable the modem
+---@return boolean ok
+---@return string? reason
+---@return integer? code
 function Modem:enable()
     local ok, err = self.backend:enable()
     if not ok then
-        throw_error(err)
+        return return_error(err, 1)
     end
+    return true
 end
 
 --- Disable the modem
+---@return boolean ok
+---@return string? reason
+---@return integer? code
 function Modem:disable()
     local ok, err = self.backend:disable()
     if not ok then
-        throw_error(err)
+        return return_error(err, 1)
     end
+    return true
 end
 
 --- Reset the modem
+---@return boolean ok
+---@return string? reason
+---@return integer? code
 function Modem:reset()
     local ok, err = self.backend:reset()
     if not ok then
-        throw_error(err)
+        return return_error(err, 1)
     end
+    return true
 end
 
 --- Connect the modem
 ---@param opts ModemConnectOpts?
+---@return boolean ok
+---@return string? reason
+---@return integer? code
 function Modem:connect(opts)
     if opts == nil or getmetatable(opts) ~= external_types.ModemConnectOpts then
-        throw_error("invalid options")
-        return
+        return return_error("invalid options", 1)
     end
     local ok, err = self.backend:connect(opts.connection_string)
     if not ok then
-        throw_error(err)
+        return return_error(err, 1)
     end
+    return true
 end
 
 --- Disconnect the modem
+---@return boolean ok
+---@return string? reason
+---@return integer? code
 function Modem:disconnect()
     local ok, err = self.backend:disconnect()
     if not ok then
-        throw_error(err)
+        return return_error(err, 1)
     end
+    return true
 end
 
 --- Inhibit the modem
+---@return boolean ok
+---@return string? reason
+---@return integer? code
 function Modem:inhibit()
     local done_ch = channel.new()
 
@@ -273,7 +294,7 @@ function Modem:inhibit()
     end)
 
     if not ok then
-        throw_error("failed to spawn inhibit fiber: " .. tostring(err))
+        return return_error("failed to spawn inhibit fiber: " .. tostring(err), 1)
     end
 
     local source, msg, primary = fibers.perform(op.named_choice {
@@ -283,27 +304,34 @@ function Modem:inhibit()
 
     if source == "done" then
         if not msg.ok then
-            throw_error(msg.err)
+            return return_error(msg.err, 1)
         end
-        return
+        return true
     elseif source == "failed" then
-        throw_error("modem inhibit failed: " .. tostring(primary))
+        return return_error("modem inhibit failed: " .. tostring(primary), 1)
     end
-    throw_error("unexpected error during modem inhibit")
+    return return_error("unexpected error during modem inhibit", 1)
 end
 
 --- Uninhibit the modem
+---@return boolean ok
+---@return string? reason
+---@return integer? code
 function Modem:uninhibit()
     local ok, err = self.backend:uninhibit()
     if not ok then
-        throw_error(err)
+        return return_error(err, 1)
     end
+    return true
 end
 
 --- Start listening for a sim insertion
+---@return boolean ok
+---@return string? reason
+---@return integer? code
 function Modem:listen_for_sim()
     if self.listening_for_sim then
-        throw_error("already listening for SIM")
+        return return_error("already listening for SIM", 1)
     end
     self.listening_for_sim = true
     local ok, err = fibers.current_scope():spawn(function()
@@ -342,39 +370,30 @@ function Modem:listen_for_sim()
         end)
     end)
     if not ok then
-        throw_error("listen_for_sim spawn failed: " .. tostring(err))
+        return return_error("listen_for_sim spawn failed: " .. tostring(err), 1)
     end
+    return true
 end
 
 --- Set the signal update period
 ---@param opts ModemSignalUpdateOpts
+---@return boolean ok
+---@return string? reason
+---@return integer? code
 function Modem:set_signal_update_freq(opts)
     if opts == nil or getmetatable(opts) ~= external_types.ModemSignalUpdateOpts then
-        throw_error("invalid options")
-        return
+        return return_error("invalid options", 1)
     end
     local ok, err = self.backend:set_signal_update_interval(opts.frequency)
     if not ok then
-        throw_error(err)
+        return return_error(err, 1)
     end
+    return true
 end
 
----- Long Running Fibers ----
-
---- Get reason and code from a ControlError
----@param control_err any
----@param verb string
-local function get_reason_and_code(control_err, verb)
-    if getmetatable(control_err) == cap_types.ControlError then
-        ---@cast control_err ControlError
-        return control_err.reason, control_err.code
-    end
-
-    local reason = "function " .. tostring(verb) .. " failed with error: " .. tostring(control_err)
-    return reason, 1
-end
 
 function Modem:emitter()
+    local timeout_buffer = 0.1
     log.trace("Modem Driver", self.imei, "emitter: started")
 
     fibers.current_scope():finally(function()
@@ -383,23 +402,28 @@ function Modem:emitter()
 
     while true do
         self.state_pulse:next() -- wait for a pulse indicating state change
+        sleep.sleep(timeout_buffer) -- we want to put some buffer time in to invalidate any cache
 
         for method, _ in pairs(GET_METHODS) do
-            local st, _, primary = fibers.run_scope(function() self:get(external_types.new.ModemGetOpts(method, 0)) end)
-
-            if st ~= 'ok' then
-                local err_msg = primary
-                if type(err_msg) == "table" and err_msg.reason then
-                    err_msg = err_msg.reason
-                end
+            local opts, opts_err = external_types.new.ModemGetOpts(method, timeout_buffer)
+            if not opts then
                 log.warn("Modem Driver", self.imei,
-                    "emitter: error getting field " .. tostring(method) .. ": " .. tostring(err_msg))
+                    "emitter: failed to build get opts for field " .. tostring(method) .. ": "
+                    .. tostring(opts_err))
             else
-                local ok, emit_err = self:_emit_meta(method, primary)
+                local ok, value_or_err = self:get(opts)
                 if not ok then
+                    local trimmed_err = trim_error(value_or_err)
                     log.warn("Modem Driver", self.imei,
-                        "emitter: failed to emit meta for field " .. tostring(method) .. ": "
-                        .. tostring(emit_err))
+                        "emitter: error getting field " .. tostring(method) .. ": "
+                        .. tostring(trimmed_err))
+                else
+                    local emit_ok, emit_err = self:_emit_meta(method, value_or_err)
+                    if not emit_ok then
+                        log.warn("Modem Driver", self.imei,
+                            "emitter: failed to emit meta for field " .. tostring(method) .. ": "
+                            .. tostring(emit_err))
+                    end
                 end
             end
         end
@@ -464,14 +488,15 @@ function Modem:control_manager()
             ok = false
             reason = "no function exists for verb: " .. tostring(validation_err)
         else
-            local status, _, primary_or_val = fibers.run_scope(fn, self, request.opts)
-            -- reason field holds the error in case of failure, or the return value in case of success
-            if status == 'ok' then
-                ok = true
-                reason = primary_or_val
-            else
-                reason, code = get_reason_and_code(primary_or_val, request.verb)
+            local call_ok, fn_ok, fn_reason, fn_code = pcall(fn, self, request.opts)
+            if not call_ok then
                 ok = false
+                reason = "internal error: " .. tostring(fn_ok)
+                code = 1
+            else
+                ok = fn_ok
+                reason = fn_reason
+                code = fn_code
             end
         end
 
@@ -539,7 +564,6 @@ function Modem:capabilities(emit_ch)
     self.cap_emit_ch = emit_ch
 
     local modem_cap, mod_cap_err = cap_types.new.ModemCapability(
-        'modem',
         self.imei,
         self.control_ch
     )
