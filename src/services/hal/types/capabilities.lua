@@ -83,12 +83,11 @@ function new.Capability(class, id, control_ch, offerings)
     return capability, ""
 end
 
----@param class CapabilityClass
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?
 ---@return string error
-function new.ModemCapability(class, id, control_ch)
+function new.ModemCapability(id, control_ch)
     local offerings = {
         'get',
         'enable',
@@ -100,7 +99,7 @@ function new.ModemCapability(class, id, control_ch)
         'fix_failure',
         'set_signal_update_freq',
     }
-    return new.Capability(class, id, control_ch, offerings)
+    return new.Capability('modem', id, control_ch, offerings)
 end
 
 ---@param class CapabilityClass
@@ -188,6 +187,18 @@ function new.SerialCapability(class, id, control_ch)
         'open', 'close', 'write'
     }
     return new.Capability(class, id, control_ch, offerings)
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.FilesystemCapability(id, control_ch)
+    local offerings = {
+        'read',
+        'write'
+    }
+    return new.Capability('fs', id, control_ch, offerings)
 end
 
 ---@class ControlError
