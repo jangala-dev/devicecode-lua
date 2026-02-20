@@ -38,6 +38,10 @@ local MODEM_INFO_PATHS = {
     operator = { "3gpp", "operator-name" },
 }
 
+local SIM_INFO_PATHS = {
+    iccid = { "properties", "iccid" }
+}
+
 local SIGNAL_TECHNOLOGIES = list_to_map {
     "5g",
     "cdma1x",
@@ -82,6 +86,17 @@ local function nested_to_flat(nested, key_paths)
     return flat, errors
 end
 
+--- Shallow copy of a table
+---@param tbl table
+---@return table copy
+local function shallow_copy(tbl)
+    local copy = {}
+    for k, v in pairs(tbl) do
+        copy[k] = v
+    end
+    return copy
+end
+
 --- Formats each port from a string list of "name (type)" to a map of type_ports:name[]
 --- Returns a table of cache keys to be stored separately
 ---@param ports string[]
@@ -109,6 +124,23 @@ end
 local FIELD_POST_PROCESSORS = {
     ports = format_ports, -- Expands to at_ports, qmi_ports, etc.
 }
+
+--- Dumps a nested table in a well-formatted form
+---@param tbl table
+---@param indent number
+local function dump(tbl, indent)
+    indent = indent or 0
+    local prefix = string.rep("  ", indent)
+    for k, v in pairs(tbl) do
+        if type(v) == "table" then
+            print(prefix .. tostring(k) .. " = {")
+            dump(v, indent + 1)
+            print(prefix .. "}")
+        else
+            print(prefix .. tostring(k) .. " = " .. tostring(v))
+        end
+    end
+end
 
 
 --- Fetches modem info using mmcli and caches it
@@ -197,7 +229,7 @@ local function get_active_signal(signal_techs)
             local active_signal = false
             local filtered_fields = {}
             for signal_name, signal_value in pairs(signals) do
-                if not SIGNAL_IGNORE_FIELDS[signal_name] then
+                if not SIGNAL_IGNORE_FIELDS[signal_name] and signal_value ~= "--" then
                     filtered_fields[signal_name] = signal_value
                     active_signal = true
                 end
@@ -241,7 +273,46 @@ local function fetch_signal_info(identity, cache)
         if active_err ~= "" then
             error("Failed to get active signal: " .. tostring(active_err))
         end
-        cache:set("signal", active_signal)
+        cache:set("signal", shallow_copy(active_signal))
+    end)
+    return st ~= "ok" and err or ""
+end
+
+--- Fetches SIM info using mmcli and caches it
+---@param identity ModemIdentity
+---@param cache Cache
+---@return string error
+local function fetch_sim_info(identity, cache)
+    local st, _, err = fibers.run_scope(function()
+        local sim = cache:get("sim")
+        if not sim then
+            fetch_modem_info(identity, cache) -- SIM info is needed to fetch SIM details, so fetch modem info if SIM path is not cached
+            sim = cache:get("sim")
+            if not sim then
+                error("Failed to get SIM path for fetching SIM info")
+            end
+        end
+        local cmd = exec.command {
+            "mmcli", "-J", "-i", sim,
+            stdin = "null",
+            stdout = "pipe",
+            stderr = "stdout"
+        }
+        local output, status, code, _, err = fibers.perform(cmd:combined_output_op())
+        if status ~= "exited" or code ~= 0 then
+            error("mmcli command failed: " .. tostring(err) .. ", output: " .. tostring(output))
+        end
+        local data, json_err = json.decode(output)
+        if not data then
+            error("Failed to decode mmcli output as JSON: " .. tostring(json_err) .. " , output: " .. tostring(output))
+        end
+        local flat, errors = nested_to_flat(data.sim, SIM_INFO_PATHS)
+        if #errors > 0 then
+            log.warn("Errors formatting SIM info: " .. table.concat(errors, ";\n\t"))
+        end
+        for k, v in pairs(flat) do
+            cache:set(k, v)
+        end
     end)
     return st ~= "ok" and err or ""
 end
@@ -281,12 +352,12 @@ local function get_identity(address, cache)
         mbim_port = mbim_ports[1]
     end
 
-    local mode_port = mbim_port or qmi_port -- Prefer mbim port if available, otherwise use qmi port
+    local mode_port = "/dev/" .. (mbim_port or qmi_port) -- Prefer mbim port if available, otherwise use qmi port
 
     local at_ports = cache:get("at_ports")
     local at_port
     if at_ports and type(at_ports) == "table" then
-        at_port = at_ports[1]
+        at_port = "/dev/" .. at_ports[1]
     end
 
     local net_ports = cache:get("net_ports")
@@ -353,6 +424,7 @@ ModemBackend.__index = ModemBackend
 -- Add all getter methods to ModemBackend
 getters.add_getters(ModemBackend,
     fetch_modem_info,
+    fetch_sim_info,
     fetch_signal_info,
     read_net_stat
 )
