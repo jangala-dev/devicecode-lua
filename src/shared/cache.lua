@@ -40,17 +40,18 @@ end
 ---@param timeout number?
 function Cache:set(key, value, timeout)
     timeout = timeout or self.default_timeout
-    if type(value) == 'table' then
-        if is_array(value) then
-            self.store[key] = {value=value, timestamp=self.time_func() + timeout, timeout = timeout}
-        else
-            for k, v in pairs(value) do
-                self:set(key .. self.separator .. k, v, timeout)
-            end
-        end
-    else
-        self.store[key] = {value = value, timestamp=self.time_func(), timeout = timeout}
-    end
+    -- if type(value) == 'table' then
+    --     if is_array(value) then
+    --         self.store[key] = {value=value, timestamp=self.time_func() + timeout, timeout = timeout}
+    --     else
+    --         for k, v in pairs(value) do
+    --             self:set(key .. self.separator .. k, v, timeout)
+    --         end
+    --     end
+    -- else
+    --     self.store[key] = {value = value, timestamp=self.time_func(), timeout = timeout}
+    -- end
+    self.store[key] = {value = value, timestamp=self.time_func(), timeout = timeout}
 end
 
 --- Getting a value from the cache
