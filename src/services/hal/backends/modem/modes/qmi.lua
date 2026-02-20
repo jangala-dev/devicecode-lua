@@ -70,7 +70,7 @@ local function fetch_gid1(identity, cache)
         end
 
         -- Parse the hex string after "Read result:"
-        local gid1 = out:match("Read result:%s*([%x:]+)$")
+        local gid1 = out:match("%s+(%S+)%s*$"):gsub(":", "")
         if not gid1 then
             error("Failed to parse qmicli output: " .. tostring(out))
         end
