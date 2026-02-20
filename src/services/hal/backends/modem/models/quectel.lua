@@ -59,13 +59,11 @@ local funcs = {
             if err ~= "" then
                 return nil, "Failed to get firmware version: " .. err
             end
-            if lines then
-                for _, line in ipairs(lines) do
-                    local fw = line:match("Revision:%s*(%S+)")
-                    if fw then
-                        backend.cache:set("firmware", fw)
-                        return fw, ""
-                    end
+            for _, line in ipairs(lines or {}) do
+                local firmware_version = string.match(line, "([%w]+_[%w]+%.[%w]+%.[%w]+%.[%w]+)")
+                if firmware_version then
+                    backend.cache:set("firmware", firmware_version)
+                    return firmware_version, ""
                 end
             end
             return nil, "Firmware version not found in AT response"
