@@ -14,7 +14,7 @@ local function get_cached_value(identity, key, cache, ret_type, timeout, fetch_f
 
     local err = fetch_fn(identity, cache)
     if err ~= "" then
-        return nil, "Failed to fetch modem info: " .. tostring(err)
+        return nil, "Failed to fetch info: " .. tostring(err)
     end
 
     local value = cache:get(key, timeout)
