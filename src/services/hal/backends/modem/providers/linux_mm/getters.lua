@@ -6,9 +6,10 @@ local fetch = require "services.hal.backends.fetch"
 --- Adds all getter methods to the ModemBackend class
 ---@param ModemBackend table The ModemBackend class table
 ---@param fetch_modem_info function The fetch function for modem info
+---@param fetch_sim_info function The fetch function for SIM info
 ---@param fetch_signal_info function The fetch function for signal info
 ---@param read_net_stat function The function to read network statistics
-local function add_getters(ModemBackend, fetch_modem_info, fetch_signal_info, read_net_stat)
+local function add_getters(ModemBackend, fetch_modem_info, fetch_sim_info, fetch_signal_info, read_net_stat)
     --- Gets the modem's IMEI number
     ---@param timeout number? Cache timeout in seconds (optional)
     ---@return string imei
@@ -141,6 +142,14 @@ local function add_getters(ModemBackend, fetch_modem_info, fetch_signal_info, re
     ---@return string error
     function ModemBackend:signal(timeout)
         return fetch.get_cached_value(self.identity, "signal", self.cache, "table", timeout, fetch_signal_info)
+    end
+
+    --- Gets the modem's ICCID
+    ---@param timeout number? Cache timeout in seconds (optional)
+    ---@return string iccid
+    ---@return string error
+    function ModemBackend:iccid(timeout)
+        return fetch.get_cached_value(self.identity, "iccid", self.cache, "string", timeout, fetch_sim_info)
     end
 
 end
