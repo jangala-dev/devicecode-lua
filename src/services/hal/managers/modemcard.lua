@@ -108,7 +108,12 @@ local function on_remove(dev_ev_ch, address)
 
     -- Get device, no need to have a fresh value so set cache lifetime to infinity
     -- Also asking for a fresh value when the modem may have disconnected could cause errors
-    local device = driver:get(external_types.new.ModemGetOpts("device", math.huge))
+    local get_ok, primary = driver:get(external_types.new.ModemGetOpts("device", math.huge))
+    if not get_ok then
+        log.error(("Modemcard Manager: failed to get device: %s"):format(primary))
+        return
+    end
+    local device = primary
 
     fibers.current_scope():spawn(function()
         local ok, stop_err = driver:stop(STOP_TIMEOUT)
@@ -168,7 +173,12 @@ end
 local function on_driver(dev_ev_ch, cap_emit_ch, driver)
     local address = driver.address
     -- Get device, no need to have a fresh value so set cache lifetime to infinity
-    local device = driver:get(external_types.new.ModemGetOpts("device", math.huge))
+    local get_ok, primary = driver:get(external_types.new.ModemGetOpts("device", math.huge))
+    if not get_ok then
+        log.error(("Modemcard Manager: failed to get device: %s"):format(primary))
+        return
+    end
+    local device = primary
 
     ModemcardManager.modems[driver.address] = driver
 
@@ -308,6 +318,15 @@ function ModemcardManager.stop(timeout)
         return false, "modemcard manager stop timeout"
     end
     ModemcardManager.started = false
+    return true, ""
+end
+
+---Apply configuration for modemcard manager (no-op, kept for interface consistency).
+---@param namespaces table
+---@return boolean ok
+---@return string error
+function ModemcardManager.apply_config(namespaces) -- luacheck: ignore
+    -- No-op: modemcard manager does not support dynamic configuration
     return true, ""
 end
 
