@@ -30,14 +30,14 @@ local at = {}
 ---@return string error
 function at.send(port, command)
     local st, _, err, result = fibers.run_scope(function()
-        local reader, err = file.open(port, "r")
-        if not reader then return "error opening AT read port: " .. err, nil end
+        local reader, rd_err = file.open(port, "r")
+        if not reader then return "error opening AT read port: " .. rd_err, nil end
 
-        local writer = assert(file.open(port, "w"))
-        if not writer then return "error opening AT write port: " .. err, nil end
+        local writer, wr_err = file.open(port, "w")
+        if not writer then return "error opening AT write port: " .. wr_err, nil end
 
         -- file write
-        writer:write_chars(command .. '\r')
+        writer:write(command .. '\r')
 
         writer:close()
 
@@ -46,17 +46,17 @@ function at.send(port, command)
         while true do
             local line = reader:read_line()
 
-            if not line then return 'unknown error', nil end
+            if not line then return "unknown error", nil end
 
             line = trim(line)
 
             -- check for non-descriptive success/fail
             if line:find("^OK$") then
                 reader:close()
-                return res, nil
+                return "", res
             elseif line:find("^ERROR$") then
                 reader:close()
-                return res, 'error'
+                return 'error', res
             else
                 -- check for descriptive fail
                 local error_code
