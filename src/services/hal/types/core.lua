@@ -233,6 +233,7 @@ end
 ---@field scope Scope
 ---@field start fun(dev_ev_ch: Channel, cap_emit_ch: Channel): string error
 ---@field stop fun(): string error
+---@field apply_config fun(config: table): boolean ok, string error
 
 return {
     ControlRequest = ControlRequest,
