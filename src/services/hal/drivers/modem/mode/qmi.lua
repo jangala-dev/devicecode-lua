@@ -60,8 +60,14 @@ return function(modem)
         local gid1_out, gid1_cmd_err = gid1_cmd:combined_output()
         if gid1_cmd_err then return gids, wraperr.new(gid1_cmd_err) end
 
-        gids.gid1 = gid1_out:match("%s+(%S+)%s*$"):gsub(":", "")
+        -- Anchor parsing to the "Read result:" section and make it nil-safe.
+        -- Example expected format (simplified): "Read result: 12:34:56:78"
+        local gid1_hex = gid1_out:match("Read result:%s*([0-9A-Fa-f:]+)")
+        if not gid1_hex then
+            return gids, wraperr.new("failed to parse GID1 from qmicli output")
+        end
 
+        gids.gid1 = gid1_hex:gsub(":", "")
         return gids
     end
 
