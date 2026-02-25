@@ -7,7 +7,7 @@
 --   * ingress shaping via IFB (mirror ingress -> shape IFB egress)
 --   * /20 max subnet size (4096 hosts)
 --   * incremental class updates (tc class replace)
---   * bulk programming acceleration via tc -batch (host filters + HTB host classes)
+--   * bulk programming acceleration via tc -batch (host filters, HTB classes, fq_codel leaves)
 --   * per-host fq_codel parameters
 --   * declarative "all_hosts" expansion for every IP in the subnet
 --     (with optional per-host overrides)
@@ -107,8 +107,10 @@ local function write_file_all(path, text)
 	return true, nil
 end
 
-local function run_tc_batch(cmds)
+local function run_tc_batch(cmds, opts)
 	-- cmds: array of argv tables, each beginning with "tc"
+	opts = opts or {}
+
 	if type(cmds) ~= 'table' or #cmds == 0 then
 		return true, '', nil, 0, 'exited', 0
 	end
@@ -133,7 +135,14 @@ local function run_tc_batch(cmds)
 		return nil, '', 'failed to write tc batch file: ' .. tostring(ferr), 255, 'exited', 0
 	end
 
-	local ok, out, err, code, st, sig = run_cmd({ 'tc', '-batch', path })
+	local tc_argv = { 'tc' }
+	if opts.force then
+		tc_argv[#tc_argv + 1] = '-force'
+	end
+	tc_argv[#tc_argv + 1] = '-batch'
+	tc_argv[#tc_argv + 1] = path
+
+	local ok, out, err, code, st, sig = run_cmd(tc_argv)
 	pcall(os.remove, path)
 	return ok, out, err, code, st, sig
 end
@@ -174,6 +183,60 @@ local function must_tc_batch_chunked(cmds, logger, label, chunk_size)
 			chunk[#chunk + 1] = cmds[k]
 		end
 		local ok, err = must_tc_batch(chunk, logger, (label or 'tc-batch') .. ' (chunk ' .. tostring(chunk_no) .. ')')
+		if not ok then return nil, err end
+		i = j + 1
+	end
+	return true, nil
+end
+
+-- Best-effort tc -force -batch for idempotent delete paths.
+-- Semantics:
+--   * encoding/file errors remain fatal (return nil, err)
+--   * tc execution non-zero is ignored (return true, nil)
+local function try_tc_batch_force(cmds, logger, label)
+	if type(cmds) ~= 'table' or #cmds == 0 then
+		return true, nil
+	end
+
+	local ok, out, err, code = run_tc_batch(cmds, { force = true })
+
+	-- Only hard-fail on local encoding/file issues (run_tc_batch returns nil).
+	if ok == nil then
+		local msg = (label or 'tc -force -batch') .. ': ' .. tostring(err or out or ('exit ' .. tostring(code)))
+		if logger then
+			logger('error', {
+				what = 'tc_batch_force_prepare_failed',
+				label = label,
+				count = #cmds,
+				out = out ~= '' and out or nil,
+				err = err and tostring(err) or nil,
+				code = code,
+			})
+		end
+		return nil, msg
+	end
+
+	-- Non-zero tc exit is tolerated for force-delete batches.
+	return true, nil
+end
+
+local function try_tc_batch_force_chunked(cmds, logger, label, chunk_size)
+	chunk_size = tonumber(chunk_size) or TC_BATCH_CHUNK
+	if chunk_size < 1 then chunk_size = TC_BATCH_CHUNK end
+
+	local n = #cmds
+	if n == 0 then return true, nil end
+
+	local i = 1
+	local chunk_no = 0
+	while i <= n do
+		chunk_no = chunk_no + 1
+		local j = math.min(i + chunk_size - 1, n)
+		local chunk = {}
+		for k = i, j do
+			chunk[#chunk + 1] = cmds[k]
+		end
+		local ok, err = try_tc_batch_force(chunk, logger, (label or 'tc-force-batch') .. ' (chunk ' .. tostring(chunk_no) .. ')')
 		if not ok then return nil, err end
 		i = j + 1
 	end
@@ -511,6 +574,10 @@ local function fq_codel_qdisc_argv(op, dev, parent_classid, fq)
 	return argv
 end
 
+local function fq_codel_qdisc_del_argv(dev, parent_classid)
+	return { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', parent_classid }
+end
+
 local function fq_codel_qdisc_replace(dev, parent_classid, fq, logger)
 	-- Deliberately avoid "tc qdisc replace" for fq_codel on HTB leaves.
 	-- Some OpenWrt/iproute2/kernel combinations reject repeated replace with EINVAL.
@@ -521,12 +588,23 @@ local function fq_codel_qdisc_replace(dev, parent_classid, fq, logger)
 	return must_cmd(argv, logger, 'fq_codel qdisc add on ' .. parent_classid)
 end
 
-local function reconcile_default_fq_codel(dev, ids, fq_cfg, logger)
+local function append_default_fq_codel_reconcile_cmds(dev, ids, fq_cfg, del_cmds, add_cmds)
 	local parent = classid(ids.inner_major, ids.default_minor)
 
 	-- Declarative semantics:
 	--   * table  => ensure fq_codel exists with those settings
 	--   * false/nil => ensure no leaf qdisc is attached
+	del_cmds[#del_cmds + 1] = fq_codel_qdisc_del_argv(dev, parent)
+
+	if fq_cfg ~= nil and fq_cfg ~= false then
+		add_cmds[#add_cmds + 1] = fq_codel_qdisc_argv('add', dev, parent, fq_cfg)
+	end
+end
+
+local function reconcile_default_fq_codel(dev, ids, fq_cfg, logger)
+	-- Retained for compatibility/use in less critical paths.
+	local parent = classid(ids.inner_major, ids.default_minor)
+
 	if fq_cfg == nil or fq_cfg == false then
 		try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'parent', parent }, logger)
 		return true, nil
@@ -672,8 +750,15 @@ local function rebuild_scaffold(kind, spec, cfg, dev, ids, logger)
 		}, logger)
 	if not ok then return nil, err end
 
-	ok, err = reconcile_default_fq_codel(dev, ids, cfg.default_fq_codel, logger)
-	if not ok then return nil, err end
+	-- Batch default fq_codel delete/add path too.
+	do
+		local del_cmds, add_cmds = {}, {}
+		append_default_fq_codel_reconcile_cmds(dev, ids, cfg.default_fq_codel, del_cmds, add_cmds)
+		ok, err = try_tc_batch_force_chunked(del_cmds, logger, 'default fq_codel cleanup (scaffold)')
+		if not ok then return nil, err end
+		ok, err = must_tc_batch_chunked(add_cmds, logger, 'default fq_codel add (scaffold)')
+		if not ok then return nil, err end
+	end
 
 	-- Outer prefix gate: root -> pool
 	ok, err = must_cmd({
@@ -869,7 +954,7 @@ local function rebuild_host_filters(kind, spec, cfg, dev, ids, plan, logger)
 		'protocol', 'ip',
 		'prio', tostring(ids.link_prio),
 		'u32',
-		'link', tostring(ids.host_table_handle) .. ':',
+		'link', u32_table_ref(ids.host_table_handle),
 		'hashkey', 'mask', '0x000000ff', 'at', hash_at,
 		'match', 'ip', match_field, net_s,
 	}
@@ -903,16 +988,18 @@ end
 local function reconcile_host_classes(dev, ids, prev_plan, new_plan, logger)
 	prev_plan = prev_plan or {}
 
-	-- Remove stale classes first (leaf qdisc then class)
+	-- Remove stale classes first (leaf qdisc then class) in force-batched deletes.
+	local stale_del_cmds = {}
 	for ip_s, old in pairs(prev_plan) do
 		if not new_plan[ip_s] then
-			try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'parent', old.classid }, logger)
-			try_cmd({ 'tc', 'class', 'del', 'dev', dev, 'classid', old.classid }, logger)
+			stale_del_cmds[#stale_del_cmds + 1] = { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', old.classid }
+			stale_del_cmds[#stale_del_cmds + 1] = { 'tc', 'class', 'del', 'dev', dev, 'classid', old.classid }
 		end
 	end
+	local ok, err = try_tc_batch_force_chunked(stale_del_cmds, logger, 'reconcile stale host deletes')
+	if not ok then return nil, err end
 
-	-- Upsert current classes in bulk (tc -batch), then handle per-host fq_codel leaves.
-	-- fq_codel leaf qdiscs remain on the per-command path for safety across older iproute2/kernel combos.
+	-- Upsert current HTB classes in bulk.
 	local class_cmds = {}
 	local ips = sorted_keys(new_plan)
 	for i = 1, #ips do
@@ -921,20 +1008,36 @@ local function reconcile_host_classes(dev, ids, prev_plan, new_plan, logger)
 			htb_class_replace_argv(dev, classid(ids.inner_major, ids.inner_root_minor), rec.classid, rec.htb)
 	end
 
-	local ok, err = must_tc_batch_chunked(class_cmds, logger, 'reconcile host htb classes')
+	ok, err = must_tc_batch_chunked(class_cmds, logger, 'reconcile host htb classes')
 	if not ok then return nil, err end
+
+	-- Batch fq_codel leaf qdisc deletes/adds too:
+	--   * deletes go via tc -force -batch (idempotent)
+	--   * adds go via tc -batch
+	local qdisc_del_cmds = {}
+	local qdisc_add_cmds = {}
 
 	for i = 1, #ips do
 		local rec = new_plan[ips[i]]
+		local prev = prev_plan[rec.ip_s]
 
 		if rec.fq == false then
-			-- Explicitly remove leaf qdisc
-			try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'parent', rec.classid }, logger)
+			qdisc_del_cmds[#qdisc_del_cmds + 1] = fq_codel_qdisc_del_argv(dev, rec.classid)
 		elseif is_plain_table(rec.fq) then
-			ok, err = fq_codel_qdisc_replace(dev, rec.classid, rec.fq, logger)
-			if not ok then return nil, err end
+			-- Deterministic replace via delete+add, but batched.
+			qdisc_del_cmds[#qdisc_del_cmds + 1] = fq_codel_qdisc_del_argv(dev, rec.classid)
+			qdisc_add_cmds[#qdisc_add_cmds + 1] = fq_codel_qdisc_argv('add', dev, rec.classid, rec.fq)
+		elseif prev and (prev.fq == false or is_plain_table(prev.fq)) then
+			-- Desired no qdisc; previous state may have had one.
+			qdisc_del_cmds[#qdisc_del_cmds + 1] = fq_codel_qdisc_del_argv(dev, rec.classid)
 		end
 	end
+
+	ok, err = try_tc_batch_force_chunked(qdisc_del_cmds, logger, 'reconcile host fq_codel deletes')
+	if not ok then return nil, err end
+
+	ok, err = must_tc_batch_chunked(qdisc_add_cmds, logger, 'reconcile host fq_codel adds')
+	if not ok then return nil, err end
 
 	return true, nil
 end
@@ -1042,39 +1145,61 @@ local function apply_direction(iface, kind, spec, cfg, logger)
 		st.hosts_limits_sig = nil
 	end
 
-	-- Keep top-level pool/default classes up to date incrementally even without scaffold rebuild
-	local ok, err
-	ok, err = htb_class_replace(dev, classid(ids.root_major, ids.root_class_minor),
-		classid(ids.root_major, ids.pool_minor),
-		cfg.pool_class or {
-			rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
-			ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
-			burst  = cfg.pool_burst,
-			cburst = cfg.pool_cburst,
-		}, logger)
-	if not ok then return nil, err end
+	-- Keep top-level pool/default classes up to date incrementally even without scaffold rebuild.
+	-- Batch the three HTB class replaces and default fq_codel leaf updates.
+	do
+		local class_cmds = {}
+		local qdisc_del_cmds = {}
+		local qdisc_add_cmds = {}
 
-	ok, err = htb_class_replace(dev, qdisc_handle(ids.inner_major), classid(ids.inner_major, ids.inner_root_minor),
-		{
-			rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
-			ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
-			burst  = cfg.pool_burst,
-			cburst = cfg.pool_cburst,
-		}, logger)
-	if not ok then return nil, err end
+		class_cmds[#class_cmds + 1] = htb_class_replace_argv(
+			dev,
+			classid(ids.root_major, ids.root_class_minor),
+			classid(ids.root_major, ids.pool_minor),
+			cfg.pool_class or {
+				rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
+				ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
+				burst  = cfg.pool_burst,
+				cburst = cfg.pool_cburst,
+			}
+		)
 
-	ok, err = htb_class_replace(dev, classid(ids.inner_major, ids.inner_root_minor),
-		classid(ids.inner_major, ids.default_minor),
-		cfg.default_class or {
-			rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
-			ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
-			burst  = (cfg.default_burst or cfg.host_burst),
-			cburst = (cfg.default_cburst or cfg.host_cburst),
-		}, logger)
-	if not ok then return nil, err end
+		class_cmds[#class_cmds + 1] = htb_class_replace_argv(
+			dev,
+			qdisc_handle(ids.inner_major),
+			classid(ids.inner_major, ids.inner_root_minor),
+			{
+				rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
+				ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
+				burst  = cfg.pool_burst,
+				cburst = cfg.pool_cburst,
+			}
+		)
 
-	ok, err = reconcile_default_fq_codel(dev, ids, cfg.default_fq_codel, logger)
-	if not ok then return nil, err end
+		class_cmds[#class_cmds + 1] = htb_class_replace_argv(
+			dev,
+			classid(ids.inner_major, ids.inner_root_minor),
+			classid(ids.inner_major, ids.default_minor),
+			cfg.default_class or {
+				rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
+				ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
+				burst  = (cfg.default_burst or cfg.host_burst),
+				cburst = (cfg.default_cburst or cfg.host_cburst),
+			}
+		)
+
+		append_default_fq_codel_reconcile_cmds(dev, ids, cfg.default_fq_codel, qdisc_del_cmds, qdisc_add_cmds)
+
+		local ok, err
+		ok, err = must_tc_batch_chunked(class_cmds, logger, 'reconcile top-level htb classes')
+		if not ok then return nil, err end
+
+		ok, err = try_tc_batch_force_chunked(qdisc_del_cmds, logger, 'reconcile default fq_codel delete')
+		if not ok then return nil, err end
+
+		ok, err = must_tc_batch_chunked(qdisc_add_cmds, logger, 'reconcile default fq_codel add')
+		if not ok then return nil, err end
+	end
 
 	local plan, perr = build_host_plan(spec, cfg, ids)
 	if not plan then return nil, perr end
@@ -1086,6 +1211,7 @@ local function apply_direction(iface, kind, spec, cfg, logger)
 	local limits_changed     = need_rebuild_scaffold or (st.hosts_limits_sig ~= limits_sig)
 
 	-- Rebuild host filter rules only if membership changed (or scaffold rebuilt)
+	local ok, err
 	if membership_changed then
 		ok, err = rebuild_host_filters(kind, spec, cfg, dev, ids, plan, logger)
 		if not ok then return nil, err end
@@ -1202,9 +1328,14 @@ function M.clear(iface, opts)
 	local st = STATE[iface]
 	local ifb = opts.ifb or (st and st.ingress and st.ingress.ifb) or sanitise_ifb_name(iface)
 
-	try_cmd({ 'tc', 'qdisc', 'del', 'dev', iface, 'root' }, logger)
-	try_cmd({ 'tc', 'qdisc', 'del', 'dev', iface, 'ingress' }, logger)
-	try_cmd({ 'tc', 'qdisc', 'del', 'dev', ifb, 'root' }, logger)
+	-- Batch the tc deletes; IFB link deletion remains on ip(8).
+	local del_cmds = {
+		{ 'tc', 'qdisc', 'del', 'dev', iface, 'root' },
+		{ 'tc', 'qdisc', 'del', 'dev', iface, 'ingress' },
+		{ 'tc', 'qdisc', 'del', 'dev', ifb, 'root' },
+	}
+	local ok, err = try_tc_batch_force_chunked(del_cmds, logger, 'clear tc state')
+	if not ok then return nil, err end
 
 	if opts.delete_ifb then
 		try_cmd({ 'ip', 'link', 'del', ifb }, logger)
