@@ -1,11 +1,12 @@
 -- services/config.lua
 --
--- Config service (chatty version):
---  - discovers HAL via {'svc','+','announce'} where payload.role == "hal"
---  - reads a single JSON blob from HAL (string) keyed at top level by service name
---  - publishes retained to {'config', <service_name>} with the nested settings table
---  - accepts updates:
---      * pub/sub: {'config', <service_name>, 'set'} payload is a table (settings)
+-- Config service (strict protocol):
+--  - discovers HAL via retained svc/hal/announce
+--  - reads a single JSON blob from HAL (string) in strict shape:
+--        { <svc>: { rev: int, data: table }, ... }
+--  - publishes retained config/<svc> with { rev=int, data=table }
+--  - accepts updates only on:
+--        config/<svc>/set with payload { data = table }
 --
 -- Persisted state location (within HAL):
 --   ns  = "config"
@@ -13,327 +14,302 @@
 --
 -- Assumes cjson.safe is available.
 
-local fibers  = require 'fibers'
-local runtime = require 'fibers.runtime'
-local sleep   = require 'fibers.sleep'
+local fibers       = require 'fibers'
+local sleep        = require 'fibers.sleep'
+local pulse        = require 'fibers.pulse'
 
-local cjson = require 'cjson.safe'
+local cjson        = require 'cjson.safe'
 
 local perform      = fibers.perform
 local named_choice = fibers.named_choice
 
-local M = {}
+local base         = require 'devicecode.service_base'
 
-local function t(...)
-	return { ... }
-end
+local M            = {}
 
-local function now()
-	return runtime.now()
-end
+local JSON_NULL    = cjson.null
 
-local function wall_time()
-	return os.date('%Y-%m-%d %H:%M:%S')
-end
+local function strip_nulls(x, seen)
+	if x == JSON_NULL then return nil end
+	if type(x) ~= 'table' then return x end
+	if getmetatable(x) ~= nil then return x end
 
--------------------------------------------------------------------------------
--- Observability helpers
--------------------------------------------------------------------------------
+	seen = seen or {}
+	if seen[x] then return x end
+	seen[x] = true
 
-local function obs_log(conn, svc, level, payload)
-	conn:publish(t('obs', 'log', svc, level), payload)
-end
-
-local function obs_event(conn, svc, name, payload)
-	conn:publish(t('obs', 'event', svc, name), payload)
-end
-
-local function obs_state(conn, svc, name, payload)
-	conn:retain(t('obs', 'state', svc, name), payload)
-end
-
-local function topic_to_string(topic)
-	if type(topic) ~= 'table' then return tostring(topic) end
-	local parts = {}
-	for i = 1, #topic do parts[#parts + 1] = tostring(topic[i]) end
-	return table.concat(parts, '/')
-end
-
--------------------------------------------------------------------------------
--- Status publishing
--------------------------------------------------------------------------------
-
-local function publish_status(conn, name, state, extra)
-	local payload = { state = state, ts = now(), at = wall_time() }
-	if type(extra) == 'table' then
-		for k, v in pairs(extra) do payload[k] = v end
+	for k, v in pairs(x) do
+		local nv = strip_nulls(v, seen)
+		if nv == nil then
+			x[k] = nil
+		else
+			x[k] = nv
+		end
 	end
-
-	conn:retain(t('svc', name, 'status'), payload)
-	obs_state(conn, name, 'status', payload)
+	return x
 end
 
 local function is_plain_table(x)
 	return type(x) == 'table' and getmetatable(x) == nil
 end
 
-local function is_service_map(x)
-	if not is_plain_table(x) then return false end
-	for k, v in pairs(x) do
-		if type(k) ~= 'string' or k == '' then return false end
-		if not is_plain_table(v) then return false end
+local function decode_blob_strict(blob)
+	local decoded, jerr = cjson.decode(blob)
+	if decoded == nil then
+		return nil, 'json_decode_failed: ' .. tostring(jerr)
 	end
-	return true
-end
+	if not is_plain_table(decoded) then
+		return nil, 'invalid_shape: root must be a table'
+	end
 
-local function count_pairs(tbl)
-	local n = 0
-	for _ in pairs(tbl) do n = n + 1 end
-	return n
-end
+	strip_nulls(decoded)
 
--------------------------------------------------------------------------------
--- HAL discovery + client
--------------------------------------------------------------------------------
-
-local function join_topic(root, last)
 	local out = {}
-	for i = 1, #root do out[i] = root[i] end
-	out[#out + 1] = last
-	return out
-end
-
-local function discover_hal_rpc_root(conn, name, opts)
-	opts = opts or {}
-
-	local deadline_s  = (type(opts.timeout) == 'number') and opts.timeout or 60.0
-	local tick_s      = (type(opts.tick) == 'number') and opts.tick or 10.0
-	local deadline_at = now() + deadline_s
-
-	obs_log(conn, name, 'info', 'waiting for HAL announce on svc/+/announce')
-
-	local sub = conn:subscribe(t('svc', '+', 'announce'), { queue_len = 10, full = 'drop_oldest' })
-	publish_status(conn, name, 'waiting_for_hal', { deadline_s = deadline_s })
-
-	while true do
-		if now() >= deadline_at then
-			sub:unsubscribe()
-			return nil, 'hal discovery timeout'
+	for svc, rec in pairs(decoded) do
+		if type(svc) ~= 'string' or svc == '' then
+			return nil, 'invalid_shape: service key must be non-empty string'
+		end
+		if not is_plain_table(rec) then
+			return nil, 'invalid_shape: record must be a table for ' .. svc
+		end
+		if type(rec.rev) ~= 'number' then
+			return nil, 'invalid_shape: rev must be a number for ' .. svc
+		end
+		if not is_plain_table(rec.data) then
+			return nil, 'invalid_shape: data must be a table for ' .. svc
 		end
 
-		local which, a, b = perform(named_choice {
-			recv = sub:recv_op(),
-			tick = sleep.sleep_op(tick_s):wrap(function () return nil, 'waiting' end),
-		})
-
-		if which == 'tick' then
-			obs_event(conn, name, 'hal_waiting', { at = wall_time(), ts = now() })
-		else
-			local msg, err = a, b
-			if not msg then
-				sub:unsubscribe()
-				return nil, err or 'hal discovery subscription closed'
-			end
-
-			local p = msg.payload or {}
-			if p.role == 'hal' and type(p.rpc_root) == 'table' then
-				obs_event(conn, name, 'hal_discovered', {
-					rpc_root = topic_to_string(p.rpc_root),
-					from     = topic_to_string(msg.topic),
-				})
-				sub:unsubscribe()
-				return p.rpc_root, nil
-			end
+		-- Require a schema discriminator in the data block.
+		if type(rec.data.schema) ~= 'string' or rec.data.schema == '' then
+			return nil, 'invalid_shape: data.schema must be a non-empty string for ' .. svc
 		end
+
+		out[svc] = { rev = math.floor(rec.rev), data = rec.data }
 	end
+
+	return out, nil
 end
 
-local function hal_call(conn, rpc_root, method, payload, timeout_s)
-	local topic = join_topic(rpc_root, method)
-	return perform(conn:call_op(topic, payload, { timeout = timeout_s }))
+local function encode_blob(current)
+	return cjson.encode(current) or '{}'
 end
-
-local function hal_read_blob(conn, rpc_root, ns, key)
-	local reply, err = hal_call(conn, rpc_root, 'read_state', { ns = ns, key = key }, 2.0)
-	if not reply then return nil, err end
-	if reply.ok ~= true then return nil, reply.err or 'hal read failed' end
-	if reply.found ~= true then return nil, 'not_found' end
-	return reply.data, nil
-end
-
-local function hal_write_blob(conn, rpc_root, ns, key, data)
-	local reply, err = hal_call(conn, rpc_root, 'write_state', { ns = ns, key = key, data = data }, 4.0)
-	if not reply then return nil, err end
-	if reply.ok ~= true then return nil, reply.err or 'hal write failed' end
-	return true, nil
-end
-
--------------------------------------------------------------------------------
--- Service
--------------------------------------------------------------------------------
 
 function M.start(conn, opts)
 	opts = opts or {}
-	local name = opts.name or 'config'
+	local svc = base.new(conn, { name = opts.name or 'config', env = opts.env })
 
-	obs_state(conn, name, 'boot', { at = wall_time(), ts = now(), state = 'entered' })
-	obs_log(conn, name, 'info', 'service start() entered')
-	publish_status(conn, name, 'starting')
+	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
+	svc:obs_log('info', 'service start() entered')
+	svc:status('starting')
 
-	-- Heartbeat (simple; cancellation interrupts sleep naturally).
-	fibers.spawn(function ()
-		local n = 0
-		while true do
-			n = n + 1
-			obs_event(conn, name, 'tick', { n = n, ts = now() })
-			sleep.sleep(30.0)
-		end
-	end)
+	svc:spawn_heartbeat(30.0, 'tick')
 
-	-- Discover HAL.
-	local hal_rpc_root, herr = discover_hal_rpc_root(conn, name, { timeout = 60, tick = 10 })
-	if not hal_rpc_root then
-		publish_status(conn, name, 'stopped', { reason = herr or 'no hal available' })
-		obs_log(conn, name, 'error', { what = 'start_failed', err = tostring(herr or 'no hal') })
+	local hal_announce, herr = svc:wait_for_hal({ timeout = 60, tick = 10 })
+	if not hal_announce then
+		svc:status('stopped', { reason = herr or 'no hal available' })
+		svc:obs_log('error', { what = 'start_failed', err = tostring(herr or 'no hal') })
 		return
 	end
 
 	local STATE_NS  = 'config'
 	local STATE_KEY = 'services'
 
-	local current = {}
+	-- current[svc] = { rev=int, data=table }
+	local current   = {}
 
 	local function publish_all_retained()
 		local n = 0
-		for svc, settings in pairs(current) do
+		for sname, rec in pairs(current) do
 			n = n + 1
-			conn:retain(t('config', svc), settings)
+			conn:retain({ 'config', sname }, rec)
 		end
-		obs_event(conn, name, 'publish_all', { services = n })
+		svc:obs_event('publish_all', { services = n })
 	end
 
 	local function load_from_hal()
-		obs_event(conn, name, 'load_begin', { ns = STATE_NS, key = STATE_KEY })
+		svc:obs_event('load_begin', { ns = STATE_NS, key = STATE_KEY })
 
-		local blob, err = hal_read_blob(conn, hal_rpc_root, STATE_NS, STATE_KEY)
-		if not blob then
-			if err == 'not_found' then
-				obs_log(conn, name, 'warn', { what = 'load_missing', ns = STATE_NS, key = STATE_KEY })
-			else
-				obs_log(conn, name, 'error', { what = 'load_failed', err = tostring(err), ns = STATE_NS, key = STATE_KEY })
-			end
+		local reply, err = svc:hal_call('read_state', { ns = STATE_NS, key = STATE_KEY }, 2.0)
+		if not reply then
+			svc:obs_log('error', { what = 'load_failed', err = tostring(err) })
 			current = {}
 			publish_all_retained()
-			obs_event(conn, name, 'load_end', { ok = true, services = 0 })
+			svc:obs_event('load_end', { ok = false, reason = 'call_failed' })
+			return true
+		end
+		if reply.ok ~= true then
+			svc:obs_log('error', { what = 'load_failed', err = tostring(reply.err or 'hal read failed') })
+			current = {}
+			publish_all_retained()
+			svc:obs_event('load_end', { ok = false, reason = 'hal_error' })
+			return true
+		end
+		if reply.found ~= true then
+			svc:obs_log('warn', { what = 'load_missing', ns = STATE_NS, key = STATE_KEY })
+			current = {}
+			publish_all_retained()
+			svc:obs_event('load_end', { ok = true, services = 0 })
 			return true
 		end
 
-		local decoded, jerr = cjson.decode(blob)
-		if decoded == nil then
-			publish_status(conn, name, 'degraded', { reason = 'invalid config JSON', err = tostring(jerr) })
-			obs_log(conn, name, 'error', { what = 'json_decode_failed', err = tostring(jerr) })
+		local decoded, derr = decode_blob_strict(reply.data or '')
+		if not decoded then
+			svc:status('degraded', { reason = 'invalid config JSON', err = tostring(derr) })
+			svc:obs_log('error', { what = 'decode_failed', err = tostring(derr) })
 			current = {}
-			obs_event(conn, name, 'load_end', { ok = false, reason = 'decode_failed' })
-			return true
-		end
-
-		if not is_service_map(decoded) then
-			publish_status(conn, name, 'degraded', { reason = 'invalid config JSON shape' })
-			obs_log(conn, name, 'error', { what = 'invalid_shape' })
-			current = {}
-			obs_event(conn, name, 'load_end', { ok = false, reason = 'invalid_shape' })
+			publish_all_retained()
+			svc:obs_event('load_end', { ok = false, reason = tostring(derr) })
 			return true
 		end
 
 		current = decoded
 		publish_all_retained()
-		obs_event(conn, name, 'load_end', { ok = true })
+		svc:obs_event('load_end', { ok = true })
 		return true
 	end
 
-	local function persist_to_hal(reason)
-		local blob = cjson.encode(current) or '{}'
-		obs_event(conn, name, 'persist_begin', { ns = STATE_NS, key = STATE_KEY, reason = reason })
+	load_from_hal()
 
-		local ok, err = hal_write_blob(conn, hal_rpc_root, STATE_NS, STATE_KEY, blob)
-		if not ok then
-			obs_log(conn, name, 'error', { what = 'persist_failed', err = tostring(err) })
-			obs_event(conn, name, 'persist_end', { ok = false, err = tostring(err) })
+	-- Debounced persistence worker (coalesces writes).
+	local p              = pulse.new()
+	local dirty          = false
+	local flush_at       = math.huge
+	local flush_deadline = math.huge
+
+	local debounce_s     = 0.25
+	local max_delay_s    = 5.0
+
+	local retry_s        = 1.0
+	local retry_max_s    = 30.0
+
+	local function mark_dirty(reason)
+		local n = svc:now()
+		dirty = true
+		flush_at = n + debounce_s
+		if flush_deadline == math.huge then
+			flush_deadline = n + max_delay_s
+		end
+		p:signal()
+		svc:obs_event('persist_dirty', { reason = reason, at = svc:wall(), ts = svc:now() })
+	end
+
+	local function persist_snapshot(reason)
+		local blob = encode_blob(current)
+		svc:obs_event('persist_begin', { ns = STATE_NS, key = STATE_KEY, reason = reason, bytes = #blob })
+
+		local reply, err = svc:hal_call('write_state', { ns = STATE_NS, key = STATE_KEY, data = blob }, 4.0)
+		if not reply then
+			svc:obs_log('error', { what = 'persist_failed', err = tostring(err) })
+			svc:obs_event('persist_end', { ok = false, err = tostring(err) })
 			return nil, err
 		end
+		if reply.ok ~= true then
+			local e = tostring(reply.err or 'hal write failed')
+			svc:obs_log('error', { what = 'persist_failed', err = e })
+			svc:obs_event('persist_end', { ok = false, err = e })
+			return nil, e
+		end
 
-		obs_event(conn, name, 'persist_end', { ok = true })
+		svc:obs_event('persist_end', { ok = true })
 		return true, nil
 	end
 
-	local function set_service(service, settings, msg)
+	fibers.spawn(function()
+		local seen = p:version()
+		while true do
+			if dirty then
+				local due = math.min(flush_at, flush_deadline)
+				local dt = due - svc:now()
+				if dt <= 0 then
+					local ok, err = persist_snapshot('debounced_flush')
+					if ok then
+						dirty = false
+						flush_at = math.huge
+						flush_deadline = math.huge
+						retry_s = 1.0
+						svc:status('running')
+					else
+						local n = svc:now()
+						flush_at = n + retry_s
+						flush_deadline = math.min(flush_deadline, n + max_delay_s)
+						retry_s = math.min(retry_s * 2, retry_max_s)
+						svc:status('degraded', { reason = 'persist_failed', err = tostring(err) })
+					end
+				else
+					local which, a, b = perform(named_choice {
+						changed = p:changed_op(seen),
+						timer   = sleep.sleep_op(dt):wrap(function() return true end),
+					})
+					if which == 'changed' then
+						local v, r = a, b
+						if v == nil and r ~= nil then return end
+						seen = v or seen
+					end
+				end
+			else
+				local v, r = perform(p:changed_op(seen))
+				if v == nil and r ~= nil then return end
+				seen = v or seen
+			end
+		end
+	end)
+
+	-- Strict set: payload must be { data = table }.
+	local function set_service(service, payload, msg)
 		if type(service) ~= 'string' or service == '' then
 			return nil, 'invalid service'
 		end
-		if not is_plain_table(settings) then
-			return nil, 'settings must be a table'
+		if not is_plain_table(payload) or not is_plain_table(payload.data) then
+			return nil, 'payload must be { data = table }'
 		end
 
-		obs_event(conn, name, 'set_received', {
-			service  = service,
-			keys     = count_pairs(settings),
-			reply_to = msg and msg.reply_to and topic_to_string(msg.reply_to) or nil,
-			id       = msg and msg.id or nil,
-		})
+		local settings = payload.data
+
+		if type(settings.schema) ~= 'string' or settings.schema == '' then
+			return nil, 'payload.data.schema must be a non-empty string'
+		end
+		local okb, eerr = assert_no_extra_bags(settings, '$.payload.data')
+		if not okb then
+			return nil, eerr
+		end
 
 		local old = current[service]
-		current[service] = settings
+		local next_rev = (old and type(old.rev) == 'number') and (math.floor(old.rev) + 1) or 1
 
-		local ok, err = persist_to_hal('set ' .. service)
-		if not ok then
-			current[service] = old
-			return nil, err
-		end
+		current[service] = { rev = next_rev, data = settings }
+		conn:retain({ 'config', service }, current[service])
 
-		conn:retain(t('config', service), settings)
-		obs_event(conn, name, 'set_applied', { service = service })
+		svc:obs_event('set_applied', { service = service, rev = next_rev, id = msg and msg.id or nil })
+		mark_dirty('set ' .. service)
+
 		return true, nil
 	end
 
-	-- Initial load.
-	load_from_hal()
+	local sub_set = conn:subscribe({ 'config', '+', 'set' }, { queue_len = 50, full = 'drop_oldest' })
+	svc:obs_log('info', 'subscribed to config/+/set')
 
-	-- Updates from other sources.
-	local sub_set = conn:subscribe(t('config', '+', 'set'), { queue_len = 50, full = 'drop_oldest' })
-	obs_log(conn, name, 'info', 'subscribed to config/+/set')
-
-	publish_status(conn, name, 'running')
-	obs_log(conn, name, 'info', 'service running')
+	svc:status('running')
+	svc:obs_log('info', 'service running')
 
 	while true do
 		local msg, err = perform(sub_set:recv_op())
 		if not msg then
-			publish_status(conn, name, 'stopped', { reason = err })
-			obs_log(conn, name, 'warn', { what = 'subscription_ended', err = tostring(err) })
+			svc:status('stopped', { reason = err })
+			svc:obs_log('warn', { what = 'subscription_ended', err = tostring(err) })
 			return
 		end
 
-		local service  = msg.topic and msg.topic[2]
-		local settings = msg.payload
+		local service = msg.topic and msg.topic[2]
+		local ok, uerr = set_service(service, msg.payload, msg)
 
-		obs_event(conn, name, 'set_message', {
-			service  = tostring(service),
-			reply_to = msg.reply_to and topic_to_string(msg.reply_to) or nil,
-			id       = msg.id,
-		})
-
-		local ok, uerr = set_service(service, settings, msg)
-
+		-- Reply immediately: accepted != persisted.
 		if msg.reply_to ~= nil then
-			local payload = ok and { ok = true } or { ok = false, err = tostring(uerr) }
-			local rok, rreason = conn:publish_one(msg.reply_to, payload, { id = msg.id })
-			if not rok then
-				obs_log(conn, name, 'warn', { what = 'reply_failed', reason = tostring(rreason) })
-			end
+			local reply = ok and { ok = true, persisted = false } or { ok = false, err = tostring(uerr) }
+			conn:publish_one(msg.reply_to, reply, { id = msg.id })
 		end
 
 		if not ok then
-			obs_log(conn, name, 'warn', { what = 'set_rejected', service = tostring(service), err = tostring(uerr) })
+			svc:obs_log('warn', { what = 'set_rejected', service = tostring(service), err = tostring(uerr) })
 		end
 	end
 end

@@ -2,7 +2,7 @@
 --
 -- Monitor service:
 --   * subscribes to obs/# and prints messages
---   * bounded, drop-oldest to avoid blocking the system during bursts
+--   * bounded, drop-oldest
 
 local fibers  = require 'fibers'
 local runtime = require 'fibers.runtime'
@@ -12,11 +12,11 @@ local sleep   = require 'fibers.sleep'
 local perform      = fibers.perform
 local named_choice = fibers.named_choice
 
+local base = require 'devicecode.service_base'
+
 local M = {}
 
-----------------------------------------------------------------------
--- Safe pretty printer (handles cycles; keeps output bounded)
-----------------------------------------------------------------------
+-- pretty printer kept as-is (it is purely a dev/operator tool)
 
 local function is_array(t)
 	local n = 0
@@ -50,19 +50,11 @@ local function pretty(v, opts, depth, seen)
 	local max_items = opts.max_items or 30
 
 	local tv = type(v)
-	if tv == 'string' then
-		return string.format('%q', v)
-	end
-	if tv == 'number' or tv == 'boolean' or tv == 'nil' then
-		return tostring(v)
-	end
-	if tv ~= 'table' then
-		return ('<%s:%s>'):format(tv, tostring(v))
-	end
+	if tv == 'string' then return string.format('%q', v) end
+	if tv == 'number' or tv == 'boolean' or tv == 'nil' then return tostring(v) end
+	if tv ~= 'table' then return ('<%s:%s>'):format(tv, tostring(v)) end
 
-	if seen[v] then
-		return '<cycle>'
-	end
+	if seen[v] then return '<cycle>' end
 	seen[v] = true
 
 	if depth >= max_depth then
@@ -77,10 +69,7 @@ local function pretty(v, opts, depth, seen)
 		out[#out + 1] = '['
 		for i = 1, #v do
 			count = count + 1
-			if count > max_items then
-				out[#out + 1] = '...'
-				break
-			end
+			if count > max_items then out[#out + 1] = '...'; break end
 			out[#out + 1] = pretty(v[i], opts, depth + 1, seen)
 		end
 		out[#out + 1] = ']'
@@ -89,10 +78,7 @@ local function pretty(v, opts, depth, seen)
 		local keys = sort_keys(v)
 		for i = 1, #keys do
 			count = count + 1
-			if count > max_items then
-				out[#out + 1] = '...'
-				break
-			end
+			if count > max_items then out[#out + 1] = '...'; break end
 			local k = keys[i]
 			local kk = (type(k) == 'string') and k or ('[' .. tostring(k) .. ']')
 			out[#out + 1] = tostring(kk) .. '=' .. pretty(v[k], opts, depth + 1, seen)
@@ -104,15 +90,9 @@ local function pretty(v, opts, depth, seen)
 	return table.concat(out, ' ')
 end
 
-----------------------------------------------------------------------
--- Formatting
-----------------------------------------------------------------------
-
 local function topic_to_string(topic)
 	local parts = {}
-	for i = 1, #topic do
-		parts[#parts + 1] = tostring(topic[i])
-	end
+	for i = 1, #topic do parts[#parts + 1] = tostring(topic[i]) end
 	return table.concat(parts, '/')
 end
 
@@ -140,17 +120,12 @@ local function format_line(msg)
 	local kind, svc, lvl_or_name = classify(msg)
 
 	local payload = msg.payload
-	local payload_s
-	if type(payload) == 'string' then
-		payload_s = payload
-	else
-		payload_s = pretty(payload, { max_depth = 6, max_items = 40 })
-	end
+	local payload_s = (type(payload) == 'string') and payload
+		or pretty(payload, { max_depth = 6, max_items = 40 })
 
 	if kind == 'log' then
-		local lvl = tostring(lvl_or_name or 'info')
 		return string.format('%s  LOG  %-10s %-5s  %s',
-			fmt_time(), tostring(svc), lvl, payload_s)
+			fmt_time(), tostring(svc), tostring(lvl_or_name or 'info'), payload_s)
 	end
 
 	if kind == 'metric' then
@@ -172,37 +147,26 @@ local function format_line(msg)
 		fmt_time(), tostring(svc), topic_to_string(msg.topic), payload_s)
 end
 
-----------------------------------------------------------------------
--- Service entrypoint
-----------------------------------------------------------------------
-
 function M.start(conn, ctx)
 	ctx = ctx or {}
-	local name = ctx.name or 'monitor'
+	local svc = base.new(conn, { name = ctx.name or 'monitor', env = ctx.env })
+	local name = svc.name
 
 	local out = file.fdopen(1, 'w', 'stdout')
 	out:setvbuf('line')
 
-	-- Best-effort write with a short timeout; drop the line if stdout blocks.
 	local function write_line(line)
 		local which, a, b = perform(named_choice {
 			wrote = out:write_op(line, '\n'),
-			timeout = sleep.sleep_op(0.5):wrap(function ()
-				return nil, 'write timeout'
-			end),
+			timeout = sleep.sleep_op(0.5):wrap(function () return nil, 'write timeout' end),
 		})
 		if which == 'wrote' then
 			local n, err = a, b
-			-- If stdout errors, let the service fail (supervisor decides policy).
 			if n == nil and err ~= nil then error(err) end
 		end
-		-- timeout: drop output
 	end
 
-	conn:retain({ 'obs', 'state', name, 'status' }, {
-		status = 'running',
-		at     = os.date('%Y-%m-%d %H:%M:%S'),
-	})
+	svc:status('running', { subscribed = 'obs/#' })
 
 	local sub = conn:subscribe({ 'obs', '#' }, { queue_len = 500, full = 'drop_oldest' })
 

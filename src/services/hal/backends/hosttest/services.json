@@ -1,0 +1,439 @@
+{
+  "monitor": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.pre_monitor/1.0",
+      "pretty": true
+    }
+  },
+
+  "net": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.pre_net/1.0",
+
+      "report_period_s": 60,
+
+      "profiles": {
+        "backhaul_default": {
+          "network": {
+            "ipv4": { "enabled": true, "proto": "dhcp", "peerdns": false },
+            "ipv6": { "enabled": false },
+            "device": { "kind": "raw" }
+          },
+          "firewall": { "zone": "wan" },
+          "shaping": {
+            "egress": { "qdisc": "fq_codel" },
+            "ingress": { "qdisc": "fq_codel" }
+          },
+          "multiwan": { "dynamic_weight": true, "metric": 1 }
+        },
+
+        "local_default": {
+          "network": {
+            "ipv4": { "enabled": true, "proto": "static" },
+            "ipv6": { "enabled": false },
+            "device": { "kind": "bridge", "bridge_empty": false }
+          },
+          "firewall": { "zone": "lan" },
+          "shaping": {
+            "egress": { "qdisc": "fq_codel" },
+            "ingress": { "qdisc": "fq_codel" }
+          }
+        },
+
+        "local_restricted": {
+          "network": {
+            "ipv4": { "enabled": true, "proto": "static" },
+            "ipv6": { "enabled": false },
+            "device": { "kind": "bridge", "bridge_empty": false }
+          },
+          "firewall": { "zone": "lan_rst" }
+        }
+      },
+
+      "dns": {
+        "upstream_servers": [ "8.8.8.8", "1.1.1.1" ],
+        "default_cache_size": 1000
+      },
+
+      "dhcp": {
+        "domains": [
+          { "name": "unifi", "ip": "$UNIFI_IP" },
+          { "name": "config.bigbox.home", "ip": "172.28.8.1" }
+        ]
+      },
+
+      "network": {
+        "globals": {
+          "packet_steering": 1,
+          "tcp_l3mdev": false,
+          "udp_l3mdev": false,
+          "netifd_loglevel": 2
+        },
+
+        "nets": {
+          "loopback": {
+            "id": "loopback",
+            "name": "Loopback",
+            "role": "local",
+
+            "device": {
+              "kind": "raw",
+              "ifnames": [ "lo" ]
+            },
+
+            "ipv4": { "enabled": true, "proto": "static", "ip_address": "127.0.0.1", "netmask": "255.0.0.0" },
+            "dns_server": { "local_server": true, "default_hosts": [] }
+          },
+
+          "adm": {
+            "id": "adm",
+            "name": "Admin Network",
+            "role": "local",
+            "profile": "local_default",
+
+            "device": {
+              "kind": "bridge",
+              "ifnames": [ "eth0.8" ],
+              "bridge_empty": false
+            },
+
+            "ipv4": { "enabled": true, "proto": "static", "ip_address": "172.28.8.1", "netmask": "255.255.255.0" },
+
+            "dhcp_server": { "enabled": true, "range_skip": 10, "range_extent": 240, "lease_time": "12h" },
+            "dns_server": { "local_server": true, "default_hosts": [ "ads" ] },
+
+            "firewall": { "zone": "lan" }
+          },
+
+          "jan": {
+            "id": "jan",
+            "name": "Jangala Network",
+            "role": "local",
+            "profile": "local_restricted",
+
+            "device": {
+              "kind": "bridge",
+              "ifnames": [ "eth0.32" ],
+              "bridge_empty": false
+            },
+
+            "ipv4": { "enabled": true, "proto": "static", "ip_address": "172.28.32.1", "netmask": "255.255.255.0" },
+
+            "dhcp_server": { "enabled": true, "range_skip": 10, "range_extent": 240, "lease_time": "12h" },
+            "dns_server": { "local_server": true, "default_hosts": [ "ads", "adult" ] },
+
+            "firewall": { "zone": "lan_rst" },
+
+            "shaping": {
+              "egress": {
+                "qdisc": "htb",
+                "filters": [
+                  {
+                    "id": "per_ip_filter",
+                    "kind": "u32",
+                    "hash_key": "dest_ip",
+                    "target_class_template": "per_ip_shapers"
+                  }
+                ],
+                "class_template": {
+                  "id": "per_ip_shapers",
+                  "kind": "per_dest_ip",
+                  "classes": [
+                    {
+                      "qdisc": "htb",
+                      "config": { "rate": "2mbit", "ceil": "8mbit", "burst": "500k" },
+                      "classes": [ { "qdisc": "fq_codel" } ]
+                    }
+                  ]
+                }
+              },
+              "ingress": {
+                "qdisc": "htb",
+                "filters": [
+                  {
+                    "id": "per_ip_filter",
+                    "kind": "u32",
+                    "hash_key": "src_ip",
+                    "target_class_template": "per_ip_shapers"
+                  }
+                ],
+                "class_template": {
+                  "id": "per_ip_shapers",
+                  "kind": "per_src_ip",
+                  "classes": [
+                    {
+                      "qdisc": "htb",
+                      "config": { "rate": "1.5mbit", "ceil": "6mbit", "burst": "225k" },
+                      "classes": [ { "qdisc": "fq_codel" } ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+
+          "int": {
+            "id": "int",
+            "name": "Internal Network",
+            "role": "local",
+            "profile": "local_default",
+
+            "device": {
+              "kind": "bridge",
+              "ifnames": [ "eth0.100" ],
+              "bridge_empty": false
+            },
+
+            "ipv4": { "enabled": true, "proto": "static", "ip_address": "172.28.100.1", "netmask": "255.255.255.0" },
+
+            "dhcp_server": { "enabled": true, "range_skip": 10, "range_extent": 240, "lease_time": "12h" },
+            "dns_server": { "local_server": false, "default_hosts": [] },
+
+            "firewall": { "zone": "lan" },
+            "shaping": {
+              "egress": { "qdisc": "fq_codel" },
+              "ingress": { "qdisc": "fq_codel" }
+            }
+          },
+
+          "mdm0": {
+            "id": "mdm0",
+            "name": "Primary Modem",
+            "role": "backhaul",
+            "profile": "backhaul_default",
+
+            "modem_id": "primary",
+
+            "device": {
+              "kind": "raw",
+              "ifnames": []
+            },
+
+            "ipv4": { "enabled": true, "proto": "dhcp", "peerdns": false },
+            "firewall": { "zone": "wan" },
+            "shaping": {
+              "egress": { "qdisc": "fq_codel" },
+              "ingress": { "qdisc": "fq_codel" }
+            },
+            "multiwan": { "dynamic_weight": true, "metric": 1 }
+          },
+
+          "mdm1": {
+            "id": "mdm1",
+            "name": "Secondary Modem",
+            "role": "backhaul",
+            "profile": "backhaul_default",
+
+            "modem_id": "secondary",
+
+            "device": {
+              "kind": "raw",
+              "ifnames": []
+            },
+
+            "ipv4": { "enabled": true, "proto": "dhcp", "peerdns": true },
+            "firewall": { "zone": "wan" },
+            "shaping": {
+              "egress": { "qdisc": "fq_codel" },
+              "ingress": { "qdisc": "fq_codel" }
+            },
+            "multiwan": { "dynamic_weight": true, "metric": 1 }
+          },
+
+          "wan": {
+            "id": "wan",
+            "name": "Wired Internet",
+            "role": "backhaul",
+            "profile": "backhaul_default",
+
+            "device": {
+              "kind": "raw",
+              "ifnames": [ "eth0.4" ]
+            },
+
+            "ipv4": { "enabled": true, "proto": "dhcp", "peerdns": false },
+            "firewall": { "zone": "wan" },
+            "shaping": {
+              "egress": { "qdisc": "fq_codel" },
+              "ingress": { "qdisc": "fq_codel" }
+            },
+            "multiwan": { "dynamic_weight": true, "metric": 1 }
+          }
+        }
+      },
+
+      "multiwan": {
+        "schema": "devicecode.pre_multiwan/1.0",
+
+        "globals": {
+          "mark_mask": "0x3F00",
+          "logging": true,
+          "loglevel": "notice",
+          "enabled": true
+        },
+
+        "strategy": {
+          "default": "dynamic_weight"
+        },
+
+        "health": {
+          "track_method": "ping",
+          "track_ip": [ "1.1.1.1", "8.8.8.8" ],
+          "timeout_s": 2,
+          "interval_s": 1,
+          "down": 2,
+          "up": 1,
+          "initial_state": "offline"
+        },
+
+        "rules": []
+      },
+
+      "firewall": {
+        "schema": "devicecode.pre_firewall/1.0",
+
+        "defaults": {
+          "syn_flood": true,
+          "input": "ACCEPT",
+          "forward": "REJECT",
+          "output": "ACCEPT",
+          "disable_ipv6": true
+        },
+
+        "zones": {
+          "lan": {
+            "description": "Local Networks",
+            "config": { "name": "lan", "input": "ACCEPT", "output": "ACCEPT", "forward": "ACCEPT" },
+            "forward_to": [ "wan" ]
+          },
+
+          "lan_rst": {
+            "description": "Local Networks - restricted",
+            "config": { "name": "lan_rst", "input": "REJECT", "output": "ACCEPT", "forward": "REJECT" },
+            "forward_to": [ "wan" ]
+          },
+
+          "wan": {
+            "description": "Internet",
+            "config": {
+              "name": "wan",
+              "input": "REJECT",
+              "output": "ACCEPT",
+              "forward": "REJECT",
+              "masq": true,
+              "mtu_fix": true
+            },
+            "forward_to": []
+          }
+        },
+
+        "rules": [
+          {
+            "id": "allow_dhcp_renew",
+            "description": "Allows for DHCP renewal from upstream routers",
+            "config": { "name": "Allow-DHCP-Renew", "src": "wan", "proto": "udp", "dest_port": "68", "target": "ACCEPT" }
+          },
+          {
+            "id": "allow_ping",
+            "description": "Responds to pings from the Internet",
+            "config": { "name": "Allow-Ping", "src": "wan", "proto": "icmp", "icmp_type": "echo-request", "target": "ACCEPT" }
+          },
+          {
+            "id": "allow_igmp",
+            "description": "",
+            "config": { "name": "Allow-IGMP", "src": "wan", "proto": "igmp", "target": "ACCEPT" }
+          },
+          {
+            "id": "allow_ipsec_esp",
+            "description": "",
+            "config": { "name": "Allow-IPSec-ESP", "src": "wan", "dest": "lan", "proto": "esp", "target": "ACCEPT" }
+          },
+          {
+            "id": "allow_isakmp",
+            "description": "",
+            "config": { "name": "Allow-ISAKMP", "src": "wan", "dest": "lan", "proto": "udp", "dest_port": "500", "target": "ACCEPT" }
+          },
+          {
+            "id": "allow_ipsec_esp_rst",
+            "description": "",
+            "config": { "name": "Allow-IPSec-ESP (RST)", "src": "wan", "dest": "lan_rst", "proto": "esp", "target": "ACCEPT" }
+          },
+          {
+            "id": "allow_isakmp_rst",
+            "description": "",
+            "config": { "name": "Allow-ISAKMP (RST)", "src": "wan", "dest": "lan_rst", "proto": "udp", "dest_port": "500", "target": "ACCEPT" }
+          },
+          {
+            "id": "allow_dhcp_rst",
+            "description": "",
+            "config": { "name": "Allow DHCP request (RST)", "src": "lan_rst", "proto": "udp", "src_port": "67-68", "dest_port": "67-68", "target": "ACCEPT" }
+          },
+          {
+            "id": "allow_dns_rst",
+            "description": "",
+            "config": { "name": "Allow DNS queries (RST)", "src": "lan_rst", "proto": "tcp udp", "dest_port": "53", "target": "ACCEPT" }
+          }
+        ]
+      },
+
+      "routes": {
+        "static": [
+          { "target": "192.168.100.1", "interface": "wan" }
+        ]
+      }
+    }
+  },
+
+  "wifi": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.pre_wifi/1.0",
+      "report_period_s": 10,
+
+      "radios": {
+        "radio0": {
+          "name": "radio0",
+          "band": "2g",
+          "channel": "auto",
+          "allowed_channels": [ "1", "6", "11" ],
+          "country": "GB",
+          "htmode": "HE20",
+          "txpower": 20,
+          "disabled": false
+        },
+
+        "radio1": {
+          "name": "radio1",
+          "band": "5g",
+          "channel": "36",
+          "allowed_channels": [],
+          "country": "GB",
+          "htmode": "HE80",
+          "txpower": 23,
+          "disabled": false
+        }
+      },
+
+      "ssids": [
+        {
+          "id": "admin",
+          "mode": "access_point",
+          "encryption": "psk2",
+          "name": "Admin",
+          "radios": [ "radio0", "radio1" ],
+          "network": "adm"
+        },
+        {
+          "id": "jangala_open",
+          "name": "Jangala",
+          "mode": "access_point",
+          "encryption": "none",
+          "network": "jan",
+          "radios": [ "radio0", "radio1" ]
+        }
+      ]
+    }
+  }
+}
