@@ -18,6 +18,8 @@ local fibers       = require 'fibers'
 local sleep        = require 'fibers.sleep'
 local pulse        = require 'fibers.pulse'
 
+local cjson        = require 'cjson.safe'
+
 local perform      = fibers.perform
 local named_choice = fibers.named_choice
 
