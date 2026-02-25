@@ -50,7 +50,7 @@ local PREFIXES  = { 20, 21, 22, 23, 24 }
 local REPEATS   = 1
 
 -- Toggle per-host fq_codel creation (significant extra cost when true)
-local ENABLE_PER_HOST_FQ_CODEL = false
+local ENABLE_PER_HOST_FQ_CODEL = true
 
 -- Toggle default (unmatched) class fq_codel
 local ENABLE_DEFAULT_FQ_CODEL = false
