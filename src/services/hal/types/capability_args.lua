@@ -267,6 +267,7 @@ end
 return {
     ModemGetOpts = ModemGetOpts,
     ModemConnectOpts = ModemConnectOpts,
+    ModemSignalUpdateOpts = ModemSignalUpdateOpts,
     FilesystemReadOpts = FilesystemReadOpts,
     FilesystemWriteOpts = FilesystemWriteOpts,
     UARTOpenOpts = UARTOpenOpts,
