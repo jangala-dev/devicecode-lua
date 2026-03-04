@@ -95,8 +95,7 @@ function new.ModemCapability(id, control_ch)
         'restart',
         'connect',
         'disconnect',
-        'sim_detect',
-        'fix_failure',
+        'listen_for_sim',
         'set_signal_update_freq',
     }
     return new.Capability('modem', id, control_ch, offerings)
@@ -199,6 +198,17 @@ function new.FilesystemCapability(id, control_ch)
         'write'
     }
     return new.Capability('fs', id, control_ch, offerings)
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.UARTCapability(id, control_ch)
+    local offerings = {
+        'open', 'close', 'write'
+    }
+    return new.Capability('uart', id, control_ch, offerings)
 end
 
 ---@class ControlError
