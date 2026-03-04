@@ -37,7 +37,7 @@ local function fetch_home_network_info(identity, cache)
         }
         local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
         if status ~= "exited" or code ~= 0 then
-            error("Failed to execute qmicli command: " .. tostring(err))
+            error("Failed to execute qmicli command: --nas-get-home-network, reason: " .. tostring(err))
         end
 
         local mcc = out:match("MCC:%s+'(%d+)'")
@@ -66,7 +66,7 @@ local function fetch_gid1(identity, cache)
         }
         local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
         if status ~= "exited" or code ~= 0 then
-            error("Failed to execute qmicli command: " .. tostring(err))
+            error("Failed to execute qmicli command: --uim-read-transparent, reason: " .. tostring(err))
         end
 
         -- Parse the hex string after "Read result:"
@@ -94,7 +94,7 @@ local function fetch_rf_band_info(identity, cache)
         }
         local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
         if status ~= "exited" or code ~= 0 then
-            error("Failed to execute qmicli command: " .. tostring(err))
+            error("Failed to execute qmicli command: --nas-get-rf-band-info, reason: " .. tostring(err))
         end
 
         local active_band_class = out:match("Active Band Class:%s*'([^']+)'")
