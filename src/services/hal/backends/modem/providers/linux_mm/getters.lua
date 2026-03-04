@@ -152,6 +152,14 @@ local function add_getters(ModemBackend, fetch_modem_info, fetch_sim_info, fetch
         return fetch.get_cached_value(self.identity, "iccid", self.cache, "string", timeout, fetch_sim_info)
     end
 
+    --- Gets the modem's IMSI
+    ---@param timeout number? Cache timeout in seconds (optional)
+    ---@return string imsi
+    ---@return string error
+    function ModemBackend:imsi(timeout)
+        return fetch.get_cached_value(self.identity, "imsi", self.cache, "string", timeout, fetch_sim_info)
+    end
+
 end
 
 return {

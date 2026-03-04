@@ -1,7 +1,11 @@
 local exec = require "fibers.io.exec"
 local fibers = require "fibers"
+local sleep = require "fibers.sleep"
+local op = require "fibers.op"
 
 local at = require "services.hal.backends.modem.at"
+
+local DEFAULT_TIMEOUT = 5
 
 local funcs = {
     -- This is a special case for the RM520N, it has a initial bearer which will always cause a
@@ -55,18 +59,31 @@ local funcs = {
             ---@cast backend ModemBackend
             local firmware = backend.cache:get("firmware")
             if firmware then return firmware, "" end
-            local lines, err = at.send(backend.identity.at_port, "AT+QGMR")
-            if err ~= "" then
+            local at_send_op = at.send_op(backend.identity.at_port, "AT+QGMR", {
+                terminal_patterns = {
+                    { pattern = "^%w+_%w+%.%w+%.%w+%.%w+$", is_error = false }
+                }
+            })
+            local source, resp, err = fibers.perform(op.named_choice({
+                at = at_send_op,
+                timeout = sleep.sleep_op(DEFAULT_TIMEOUT)
+            }))
+
+            if err then
                 return nil, "Failed to get firmware version: " .. err
             end
-            for _, line in ipairs(lines or {}) do
-                local firmware_version = string.match(line, "([%w]+_[%w]+%.[%w]+%.[%w]+%.[%w]+)")
+
+            if source == "timeout" then
+                return nil, "Timed out while getting firmware version"
+            elseif source == "at" then
+                local firmware_version = string.match(resp[#resp], "([%w]+_[%w]+%.[%w]+%.[%w]+%.[%w]+)")
                 if firmware_version then
                     backend.cache:set("firmware", firmware_version)
                     return firmware_version, ""
+                else
+                    return nil, "Firmware version not found in AT response"
                 end
             end
-            return nil, "Firmware version not found in AT response"
         end
     }
     -- Other functions
