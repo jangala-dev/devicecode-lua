@@ -31,6 +31,7 @@ local BACKEND_FUNCTIONS = list_to_map {
     "active_band_class",
     "firmware",
     "iccid",
+    "imsi",
 
     -- State monitoring
     "start_state_monitor",
