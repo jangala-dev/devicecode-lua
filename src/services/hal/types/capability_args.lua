@@ -126,10 +126,56 @@ function new.FilesystemWriteOpts(filename, data)
     }, FilesystemWriteOpts), ""
 end
 
+---@class UARTOpenOpts
+---@field read boolean
+---@field write boolean
+local UARTOpenOpts = {}
+UARTOpenOpts.__index = UARTOpenOpts
+
+---Create a new UARTOpenOpts.
+---At least one of read or write must be true.
+---@param read boolean
+---@param write boolean
+---@return UARTOpenOpts?
+---@return string error
+function new.UARTOpenOpts(read, write)
+    if type(read) ~= 'boolean' or type(write) ~= 'boolean' then
+        return nil, "read and write must be booleans"
+    end
+    if not read and not write then
+        return nil, "at least one of read or write must be true"
+    end
+    return setmetatable({
+        read  = read,
+        write = write,
+    }, UARTOpenOpts), ""
+end
+
+---@class UARTWriteOpts
+---@field data string
+local UARTWriteOpts = {}
+UARTWriteOpts.__index = UARTWriteOpts
+
+---Create a new UARTWriteOpts.
+---@param data string
+---@return UARTWriteOpts?
+---@return string error
+function new.UARTWriteOpts(data)
+    if type(data) ~= 'string' or data == '' then
+        return nil, "data must be a non-empty string"
+    end
+    return setmetatable({
+        data = data,
+    }, UARTWriteOpts), ""
+end
+
 return {
     ModemGetOpts = ModemGetOpts,
     ModemConnectOpts = ModemConnectOpts,
+    ModemSignalUpdateOpts = ModemSignalUpdateOpts,
     FilesystemReadOpts = FilesystemReadOpts,
     FilesystemWriteOpts = FilesystemWriteOpts,
+    UARTOpenOpts = UARTOpenOpts,
+    UARTWriteOpts = UARTWriteOpts,
     new = new,
 }
