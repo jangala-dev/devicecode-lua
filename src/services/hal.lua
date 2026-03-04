@@ -219,7 +219,7 @@ local function on_cap_ctrl(conn, msg)
         if msg.reply_to then
             local ok, pub_err = conn:publish_one(msg.reply_to, reply)
             if not ok then
-                log.debug(HalService.name, "-", pub_err)
+                log.debug("HAL - failed to send control response for ", class, id, verb, ": ", pub_err)
             end
         end
     end)
@@ -232,7 +232,14 @@ local function on_cap_emit(conn, emit)
         log.debug(HalService.name, "- invalid emit message")
         return
     end
-    conn:publish({ 'cap', emit.class, emit.id, emit.mode, emit.key }, emit.data)
+    local topic = { 'cap', emit.class, emit.id, emit.mode, emit.key }
+
+    -- Events are in the moment but state and meta can be held on the bus
+    if emit.mode == 'event' then
+        conn:publish(topic, emit.data)
+    else
+        conn:retain(topic, emit.data)
+    end
 end
 
 ---Adds a device and its capabilities to HAL and broadcasts event to bus
@@ -458,7 +465,7 @@ function HalService.start(conn, opts)
 
         local manager_fault_ops = {}
         for name, manager in pairs(HalService.managers) do
-            table.insert(manager_fault_ops, manager.scope:fault_op():wrap(function () return name end))
+            table.insert(manager_fault_ops, manager.scope:fault_op():wrap(function() return name end))
         end
         if #manager_fault_ops > 0 then
             ops.manager_fault = op.choice(unpack(manager_fault_ops))
