@@ -29,7 +29,6 @@ local pulse = require "fibers.pulse"
 ---@field initialised boolean
 ---@field caps_applied boolean
 ---@field state_pulse Pulse
----@field cache Cache
 local Modem = {}
 Modem.__index = Modem
 
@@ -42,6 +41,7 @@ local function list_to_table(list)
 end
 
 ---- Constant Definitions ----
+local D_LOG_EMITTER = false
 
 local DEFAULT_STOP_TIMEOUT = 5
 local DEFAULT_CACHE_TIMEOUT = 10
@@ -71,7 +71,8 @@ local GET_METHODS = list_to_table {
     "gid1",
     "active_band_class",
     "firmware",
-    "iccid"
+    "iccid",
+    "imsi"
 }
 
 
@@ -163,14 +164,15 @@ end
 
 --- Validate that a function is implemented
 ---@param fn any
+---@param verb string
 ---@return boolean is_valid
 ---@return string? error
-local function validate_fn(fn)
+local function validate_fn(fn, verb)
     if fn == nil then
-        return false, tostring(fn) .. " is unimplemented"
+        return false, tostring(verb) .. " is unimplemented"
     end
     if type(fn) ~= "function" then
-        return false, tostring(fn) .. " is not a function"
+        return false, tostring(verb) .. " is not a function"
     end
     return true
 end
@@ -198,7 +200,7 @@ function Modem:get(opts)
         return return_error("invalid options", 1)
     end
     local field = opts.field
-    local timescale = opts.timescale or math.huge
+    local timescale = opts.timescale
 
     -- Check that the field is supported
     if not GET_METHODS[field] then
@@ -331,7 +333,7 @@ end
 ---@return integer? code
 function Modem:listen_for_sim()
     if self.listening_for_sim then
-        return return_error("already listening for SIM", 1)
+        return true
     end
     self.listening_for_sim = true
     local ok, err = fibers.current_scope():spawn(function()
@@ -391,7 +393,6 @@ function Modem:set_signal_update_freq(opts)
     return true
 end
 
-
 function Modem:emitter()
     local timeout_buffer = 0.1
     log.trace("Modem Driver", self.imei, "emitter: started")
@@ -400,9 +401,17 @@ function Modem:emitter()
         log.trace("Modem Driver", self.imei, "emitter: exiting")
     end)
 
+    local seen_version = 0
     while true do
-        self.state_pulse:next() -- wait for a pulse indicating state change
+        log.trace("Modem Driver", self.imei, "emitter: waiting for state change (last seen version:", seen_version, ")")
+        local new_version = self.state_pulse:changed(seen_version)
+        if not new_version then
+            -- Pulse was closed
+            break
+        end
+        seen_version = new_version
         sleep.sleep(timeout_buffer) -- we want to put some buffer time in to invalidate any cache
+        log.trace("Modem Driver", self.imei, "emitter: change detected emitting updates")
 
         for method, _ in pairs(GET_METHODS) do
             local opts, opts_err = external_types.new.ModemGetOpts(method, timeout_buffer)
@@ -412,14 +421,14 @@ function Modem:emitter()
                     .. tostring(opts_err))
             else
                 local ok, value_or_err = self:get(opts)
-                if not ok then
+                if not ok and D_LOG_EMITTER then
                     local trimmed_err = trim_error(value_or_err)
                     log.warn("Modem Driver", self.imei,
                         "emitter: error getting field " .. tostring(method) .. ": "
                         .. tostring(trimmed_err))
                 else
                     local emit_ok, emit_err = self:_emit_meta(method, value_or_err)
-                    if not emit_ok then
+                    if not emit_ok and D_LOG_EMITTER then
                         log.warn("Modem Driver", self.imei,
                             "emitter: failed to emit meta for field " .. tostring(method) .. ": "
                             .. tostring(emit_err))
@@ -446,6 +455,8 @@ function Modem:state_monitor()
         elseif err ~= "" then
             log.error("Modem Driver", self.imei, "state_monitor: error monitoring state:", err)
         elseif state_update then
+            log.trace("Modem Driver", self.imei, "state_monitor: detected state change from",
+                state_update.from, "to", state_update.to, "- signaling pulse")
             self.state_pulse:signal() -- signal that modem state has changed
             local ok, emit_err = self:_emit_state('card', state_update)
             if not ok then
@@ -483,10 +494,10 @@ function Modem:control_manager()
         local ok, reason, code
 
         local fn = self[request.verb]
-        local valid, validation_err = validate_fn(fn)
+        local valid, validation_err = validate_fn(fn, request.verb)
         if not valid then
             ok = false
-            reason = "no function exists for verb: " .. tostring(validation_err)
+            reason = validation_err
         else
             local call_ok, fn_ok, fn_reason, fn_code = pcall(fn, self, request.opts)
             if not call_ok then
@@ -525,6 +536,9 @@ function Modem:start()
     self.scope:spawn(function() self:state_monitor() end)
     self.scope:spawn(function() self:control_manager() end)
     self.scope:spawn(function() self:emitter() end)
+
+    -- Signal initial pulse so emitter emits the initial state
+    self.state_pulse:signal()
 
     return true, ""
 end
@@ -638,13 +652,13 @@ local function new(address)
     end
 
     -- Print out driver stack trace if scope closes on a failure
-    scope:finally(function ()
+    scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
             log.error(("Modem Driver %s: error - %s"):format(tostring(address), tostring(primary)))
-            log.trace("Modem Driver %s: scope exiting with status %s", tostring(address), st)
+            log.trace(("Modem Driver %s: scope exiting with status %s"):format(tostring(address), st))
         end
-        log.trace("Modem Driver %s: stopped", tostring(address))
+        log.trace(("Modem Driver %s: stopped"):format(tostring(address)))
     end)
 
     return setmetatable({
