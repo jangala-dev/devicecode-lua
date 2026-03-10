@@ -2,337 +2,55 @@
 --
 -- Strict per-host HTB shaper using u32 hashing + exact /32 rules.
 --
--- Supports:
---   * egress shaping on iface (typically match dst)
---   * ingress shaping via IFB (mirror ingress -> shape IFB egress)
---   * /20 max subnet size (4096 hosts)
---   * incremental class updates (tc class replace)
---   * bulk programming acceleration via tc -batch (host filters, HTB classes, fq_codel leaves)
---   * per-host fq_codel parameters
---   * declarative "all_hosts" expansion for every IP in the subnet
---     (with optional per-host overrides)
+-- Features
+--   * Egress shaping on iface (match dst by default)
+--   * Ingress shaping via IFB (mirror ingress -> shape IFB egress)
+--   * Prefix support: /20 .. /32 (up to 4096 addresses; /20 practical ceiling)
+--   * Declarative host set:
+--       - all_hosts=true expands to every address in the subnet
+--       - hosts={} becomes an override table in all_hosts mode
+--       - by default, network/broadcast are skipped for /0.. /30
+--         (include_network/include_broadcast to include them)
+--   * True deltas:
+--       - host filters updated only when membership changes
+--       - host HTB classes updated only when changed/new
+--       - per-host fq_codel leaves updated only when changed/new (removed when deleted)
+--   * Bulk programming via tc -batch for filters, HTB classes, and fq_codel add/del
 --
--- Notes:
---   * When all_hosts=true, hosts={} is treated as an override table.
---   * By default, network and broadcast addresses are skipped for /0.. /30.
---     Use include_network/include_broadcast to include them explicitly.
+-- Notes
+--   * fq_codel leaves are applied via delete+add (no qdisc replace) for compatibility.
+--   * Bucket-local filter deletes are attempted; if unsupported, the filter table is rebuilt.
 --   * Lua 5.1 / LuaJIT compatible.
 
-local exec_mod  = require 'fibers.io.exec'
-local performer = require 'fibers.performer'
-local perform   = performer.perform
-local unpack_   = (table and table.unpack) or _G.unpack
+local fibers   = require 'fibers'
+local file_mod = require 'fibers.io.file'
+local exec_mod = require 'fibers.io.exec'
 
-local bit       = rawget(_G, 'bit32')
-if not bit then
-	local ok, b = pcall(require, 'bit')
-	if ok then bit = b end
-end
-assert(bit, 'tc_shaper: requires bit32 or bit')
+local bit = require 'bit'
 
-local band           = bit.band
-local bor            = bit.bor
-local lshift         = bit.lshift
-local rshift         = bit.rshift
+local perform  = fibers.perform
+local unpack  = _G.unpack or rawget(table, 'unpack')
 
-local M              = {}
 
--- Chunk size for tc batch application (kept moderate for memory/error locality).
+local band, bor, bxor, lshift, rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
+
+local M = {}
+
 local TC_BATCH_CHUNK = 512
 
--- Lua 5.1/LuaJIT-safe argv appender.
--- Do not use: argv[#argv+1], argv[#argv+1] = k, v
--- (both indices are evaluated before assignment, so they target the same slot)
-local function argv_push(argv, ...)
-	local n = select('#', ...)
-	for i = 1, n do
-		argv[#argv + 1] = select(i, ...)
-	end
-end
-
--- In-memory state for incremental updates (per process)
--- STATE[iface] = {
---   egress = { sig=..., dev=..., hosts_membership_sig=..., hosts_limits_sig=..., hosts=..., ids=... },
---   ingress = { sig=..., dev=..., hosts_membership_sig=..., hosts_limits_sig=..., hosts=..., ids=..., ifb=... },
--- }
+-- STATE[iface] = { egress = st, ingress = st }
+-- st = { sig=..., dev=..., ifb?=..., ids=..., hosts=plan, dirty?=true }
 local STATE = {}
 
-------------------------------------------------------------------------
--- Command runner helpers
-------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Small helpers
+--------------------------------------------------------------------------------
 
-local function run_cmd(argv)
-	local cmd = exec_mod.command(unpack_(argv))
-	local out, st, code, sig, err = perform(cmd:combined_output_op())
-	local ok = (st == 'exited' and code == 0)
-	return ok, out or '', err, code, st, sig
-end
+local function is_plain_table(x) return type(x) == 'table' and getmetatable(x) == nil end
 
-------------------------------------------------------------------------
--- tc -batch helpers (bulk apply)
-------------------------------------------------------------------------
-
-local function tc_batch_line(argv)
-	-- tc -batch input lines are tc subcommands, i.e. omit argv[1] == "tc".
-	-- We only support whitespace-free tokens here (which matches our generated args).
-	if type(argv) ~= 'table' or argv[1] ~= 'tc' then
-		return nil, 'tc batch expects argv beginning with "tc"'
-	end
-
-	local parts = {}
-	for i = 2, #argv do
-		local s = tostring(argv[i])
-		if s:find('[\r\n]') then
-			return nil, 'tc batch token contains newline'
-		end
-		if s:find('%s') then
-			-- tc batch parser is token-based, not shell-quoted; keep this strict.
-			return nil, 'tc batch token contains whitespace: ' .. s
-		end
-		parts[#parts + 1] = s
-	end
-	return table.concat(parts, ' '), nil
-end
-
-local function write_file_all(path, text)
-	local f, err = io.open(path, 'wb')
-	if not f then return nil, err end
-	local okw, werr = f:write(text)
-	if not okw then
-		f:close()
-		return nil, werr
-	end
-	local okc, cerr = f:close()
-	if not okc then return nil, cerr end
-	return true, nil
-end
-
-local function run_tc_batch(cmds, opts)
-	-- cmds: array of argv tables, each beginning with "tc"
-	opts = opts or {}
-
-	if type(cmds) ~= 'table' or #cmds == 0 then
-		return true, '', nil, 0, 'exited', 0
-	end
-
-	local lines = {}
-	for i = 1, #cmds do
-		local line, lerr = tc_batch_line(cmds[i])
-		if not line then
-			return nil, '', 'batch line encode failed: ' .. tostring(lerr), 255, 'exited', 0
-		end
-		lines[#lines + 1] = line
-	end
-
-	local path = os.tmpname()
-	if not path or path == '' then
-		return nil, '', 'os.tmpname failed', 255, 'exited', 0
-	end
-
-	local okf, ferr = write_file_all(path, table.concat(lines, '\n') .. '\n')
-	if not okf then
-		pcall(os.remove, path)
-		return nil, '', 'failed to write tc batch file: ' .. tostring(ferr), 255, 'exited', 0
-	end
-
-	local tc_argv = { 'tc' }
-	if opts.force then
-		tc_argv[#tc_argv + 1] = '-force'
-	end
-	tc_argv[#tc_argv + 1] = '-batch'
-	tc_argv[#tc_argv + 1] = path
-
-	local ok, out, err, code, st, sig = run_cmd(tc_argv)
-	pcall(os.remove, path)
-	return ok, out, err, code, st, sig
-end
-
-local function must_tc_batch(cmds, logger, label)
-	local ok, out, err, code = run_tc_batch(cmds)
-	if not ok then
-		local msg = (label or 'tc -batch') .. ': ' .. tostring(err or out or ('exit ' .. tostring(code)))
-		if logger then
-			logger('error', {
-				what = 'tc_batch_failed_fatal',
-				label = label,
-				count = #cmds,
-				out = out ~= '' and out or nil,
-				err = err and tostring(err) or nil,
-				code = code,
-			})
-		end
-		return nil, msg
-	end
-	return true, nil
-end
-
-local function must_tc_batch_chunked(cmds, logger, label, chunk_size)
-	chunk_size = tonumber(chunk_size) or TC_BATCH_CHUNK
-	if chunk_size < 1 then chunk_size = TC_BATCH_CHUNK end
-
-	local n = #cmds
-	if n == 0 then return true, nil end
-
-	local i = 1
-	local chunk_no = 0
-	while i <= n do
-		chunk_no = chunk_no + 1
-		local j = math.min(i + chunk_size - 1, n)
-		local chunk = {}
-		for k = i, j do
-			chunk[#chunk + 1] = cmds[k]
-		end
-		local ok, err = must_tc_batch(chunk, logger, (label or 'tc-batch') .. ' (chunk ' .. tostring(chunk_no) .. ')')
-		if not ok then return nil, err end
-		i = j + 1
-	end
-	return true, nil
-end
-
--- Best-effort tc -force -batch for idempotent delete paths.
--- Semantics:
---   * encoding/file errors remain fatal (return nil, err)
---   * tc execution non-zero is ignored (return true, nil)
-local function try_tc_batch_force(cmds, logger, label)
-	if type(cmds) ~= 'table' or #cmds == 0 then
-		return true, nil
-	end
-
-	local ok, out, err, code = run_tc_batch(cmds, { force = true })
-
-	-- Only hard-fail on local encoding/file issues (run_tc_batch returns nil).
-	if ok == nil then
-		local msg = (label or 'tc -force -batch') .. ': ' .. tostring(err or out or ('exit ' .. tostring(code)))
-		if logger then
-			logger('error', {
-				what = 'tc_batch_force_prepare_failed',
-				label = label,
-				count = #cmds,
-				out = out ~= '' and out or nil,
-				err = err and tostring(err) or nil,
-				code = code,
-			})
-		end
-		return nil, msg
-	end
-
-	-- Non-zero tc exit is tolerated for force-delete batches.
-	return true, nil
-end
-
-local function try_tc_batch_force_chunked(cmds, logger, label, chunk_size)
-	chunk_size = tonumber(chunk_size) or TC_BATCH_CHUNK
-	if chunk_size < 1 then chunk_size = TC_BATCH_CHUNK end
-
-	local n = #cmds
-	if n == 0 then return true, nil end
-
-	local i = 1
-	local chunk_no = 0
-	while i <= n do
-		chunk_no = chunk_no + 1
-		local j = math.min(i + chunk_size - 1, n)
-		local chunk = {}
-		for k = i, j do
-			chunk[#chunk + 1] = cmds[k]
-		end
-		local ok, err = try_tc_batch_force(chunk, logger, (label or 'tc-force-batch') .. ' (chunk ' .. tostring(chunk_no) .. ')')
-		if not ok then return nil, err end
-		i = j + 1
-	end
-	return true, nil
-end
-
-------------------------------------------------------------------------
--- Benign-error suppression for best-effort cleanup
-------------------------------------------------------------------------
-
-local function str_contains(haystack, needle)
-	return type(haystack) == 'string' and haystack:find(needle, 1, true) ~= nil
-end
-
-local function is_benign_try_error(argv, out, err, code)
-	-- Only used for try_cmd() (best-effort cleanup/idempotent setup), never for must_cmd().
-	-- We suppress known "nothing to delete / already exists" cases.
-	local a1, a2, a3 = argv[1], argv[2], argv[3]
-	local msg = (out or '') .. '\n' .. tostring(err or '')
-
-	-- tc qdisc del ... on interfaces that still have only the default qdisc
-	if a1 == 'tc' and a2 == 'qdisc' and a3 == 'del' then
-		if str_contains(msg, 'Cannot delete qdisc with handle of zero.') then
-			return true
-		end
-		if str_contains(msg, 'Cannot find specified qdisc on specified device.') then
-			return true
-		end
-		-- OpenWrt/iproute2 sometimes reports this for missing/invalid parent handles
-		if str_contains(msg, 'Error: Invalid handle.') then
-			return true
-		end
-	end
-
-	-- tc filter del ... when the chain/prio is not present yet
-	if a1 == 'tc' and a2 == 'filter' and a3 == 'del' then
-		if str_contains(msg, 'Cannot find specified filter chain.') then
-			return true
-		end
-		-- Some builds report a generic rtnetlink "not found" for missing filters
-		if str_contains(msg, 'RTNETLINK answers: No such file or directory') then
-			return true
-		end
-	end
-
-	-- ip link add ifb... when IFB already exists
-	if a1 == 'ip' and a2 == 'link' and a3 == 'add' then
-		if str_contains(msg, 'File exists') then
-			return true
-		end
-	end
-
-	return false
-end
-
-local function try_cmd(argv, logger)
-	local ok, out, err, code = run_cmd(argv)
-	if not ok then
-		if not is_benign_try_error(argv, out, err, code) and logger then
-			logger('warn', {
-				what = 'tc_cmd_failed',
-				cmd  = table.concat(argv, ' '),
-				out  = out ~= '' and out or nil,
-				err  = err and tostring(err) or nil,
-				code = code,
-			})
-		end
-	end
-	return ok, out, err, code
-end
-
-local function must_cmd(argv, logger, label)
-	local ok, out, err, code = run_cmd(argv)
-	if not ok then
-		local msg = (label or table.concat(argv, ' ')) .. ': ' .. tostring(err or out or ('exit ' .. tostring(code)))
-		if logger then
-			logger('error', {
-				what = 'tc_cmd_failed_fatal',
-				label = label,
-				cmd = table.concat(argv, ' '),
-				out = out ~= '' and out or nil,
-				err = err and tostring(err) or nil,
-				code = code,
-			})
-		end
-		return nil, msg
-	end
-	return true, nil
-end
-
-------------------------------------------------------------------------
--- Generic helpers
-------------------------------------------------------------------------
-
-local function is_plain_table(x)
-	return type(x) == 'table' and getmetatable(x) == nil
+local function argv_push(argv, ...)
+	local n = select('#', ...)
+	for i = 1, n do argv[#argv + 1] = select(i, ...) end
 end
 
 local function sorted_keys(t)
@@ -348,12 +66,222 @@ local function shallow_copy(t)
 	return o
 end
 
+-- 32-bit multiply mod 2^32 without relying on 64-bit integer arithmetic.
+local function mul32(a, b)
+	a = tonumber(a) or 0
+	b = tonumber(b) or 0
+	local a_lo = band(a, 0xffff)
+	local a_hi = rshift(a, 16)
+	local b_lo = band(b, 0xffff)
+	local b_hi = rshift(b, 16)
+
+	local lo  = a_lo * b_lo
+	local mid = a_hi * b_lo + a_lo * b_hi
+	return band(lo + lshift(mid, 16), 0xffffffff)
+end
+
+-- 32-bit FNV-1a (stable across runs; used for IFB suffixes).
+local function fnv1a32(s)
+	s = tostring(s or '')
+	local h = 2166136261
+	for i = 1, #s do
+		h = bxor(h, s:byte(i))
+		h = mul32(h, 16777619)
+	end
+	return band(h, 0xffffffff)
+end
+
+local function ifb_suffix_hex4(iface)
+	return string.format('%04x', band(fnv1a32(iface), 0xffff))
+end
+
 local function sanitise_ifb_name(iface)
 	-- Linux ifname max is 15 chars. "ifb_" + iface may overflow.
-	local base = 'ifb_' .. tostring(iface or '')
-	if #base <= 15 then return base end
-	return base:sub(1, 15)
+	local raw = tostring(iface or '')
+
+	-- Keep conservative characters for IFB device names.
+	local clean = raw:gsub('[^%w]', '_')
+	if clean == '' then clean = '_' end
+
+	local base = 'ifb_' .. clean
+	if #base <= 15 then
+		return base
+	end
+
+	-- Collision-avoiding truncation: ifb_<prefix>_<hash>
+	-- Must be <= 15 chars.
+	local suf = ifb_suffix_hex4(raw)          -- 4 chars
+	local prefix_len = 15 - 4 - 1 - #suf      -- "ifb_" + "_" + suf
+	if prefix_len < 1 then prefix_len = 1 end
+	return 'ifb_' .. clean:sub(1, prefix_len) .. '_' .. suf
 end
+
+local function str_contains(hay, needle)
+	return type(hay) == 'string' and hay:find(needle, 1, true) ~= nil
+end
+
+local function log(logger, level, payload)
+	if type(logger) == 'function' then logger(level, payload) end
+end
+
+--------------------------------------------------------------------------------
+-- Command runners (single + tc -batch)
+--------------------------------------------------------------------------------
+
+local function run_cmd(argv)
+	local cmd = exec_mod.command(unpack(argv))
+	local out, st, code, sig, err = perform(cmd:combined_output_op())
+	local ok = (st == 'exited' and code == 0)
+	return ok, out or '', err, code, st, sig
+end
+
+local function is_benign_try_error(argv, out, err, _code)
+	local a1, a2, a3 = argv[1], argv[2], argv[3]
+	local msg = (out or '') .. '\n' .. tostring(err or '')
+
+	if a1 == 'tc' and a2 == 'qdisc' and a3 == 'del' then
+		if str_contains(msg, 'Cannot delete qdisc with handle of zero.') then return true end
+		if str_contains(msg, 'Cannot find specified qdisc on specified device.') then return true end
+		if str_contains(msg, 'Error: Invalid handle.') then return true end
+	end
+
+	if a1 == 'tc' and a2 == 'filter' and a3 == 'del' then
+		if str_contains(msg, 'Cannot find specified filter chain.') then return true end
+		if str_contains(msg, 'RTNETLINK answers: No such file or directory') then return true end
+	end
+
+	if a1 == 'ip' and a2 == 'link' and a3 == 'add' then
+		if str_contains(msg, 'File exists') then return true end
+	end
+
+	return false
+end
+
+local function try_cmd(argv, logger)
+	local ok, out, err, code = run_cmd(argv)
+	if not ok and not is_benign_try_error(argv, out, err, code) then
+		log(logger, 'warn', {
+			what = 'cmd_failed',
+			cmd  = table.concat(argv, ' '),
+			out  = out ~= '' and out or nil,
+			err  = err and tostring(err) or nil,
+			code = code,
+		})
+	end
+	return ok, out, err, code
+end
+
+local function must_cmd(argv, logger, label)
+	local ok, out, err, code = run_cmd(argv)
+	if not ok then
+		log(logger, 'error', {
+			what  = 'cmd_failed_fatal',
+			label = label,
+			cmd   = table.concat(argv, ' '),
+			out   = out ~= '' and out or nil,
+			err   = err and tostring(err) or nil,
+			code  = code,
+		})
+		return nil, (label or table.concat(argv, ' ')) .. ': ' .. tostring(err or out or ('exit ' .. tostring(code)))
+	end
+	return true, nil
+end
+
+local function tc_batch_line(argv)
+	-- tc -batch lines omit the leading "tc".
+	if type(argv) ~= 'table' or argv[1] ~= 'tc' then
+		return nil, 'argv must begin with "tc"'
+	end
+	local parts = {}
+	for i = 2, #argv do
+		local s = tostring(argv[i])
+		if s:find('[\r\n]') then return nil, 'newline in token' end
+		if s:find('%s') then return nil, 'whitespace in token: ' .. s end
+		parts[#parts + 1] = s
+	end
+	return table.concat(parts, ' '), nil
+end
+
+local function run_tc_batch(cmds)
+	if type(cmds) ~= 'table' or #cmds == 0 then
+		return true, '', nil, 0
+	end
+
+	local lines = {}
+	for i = 1, #cmds do
+		local line, lerr = tc_batch_line(cmds[i])
+		if not line then
+			return nil, '', 'batch encode failed: ' .. tostring(lerr), 255
+		end
+		lines[#lines + 1] = line
+	end
+
+	-- Use fibers.io.file tmpfile to avoid blocking Lua I/O. Keep the file open
+	-- (and flushed) while tc reads it; close afterwards to unlink.
+	local tmp, terr = file_mod.tmpfile('rw-r--r--')
+	if not tmp then
+		return nil, '', 'tmpfile failed: ' .. tostring(terr), 255
+	end
+
+	local path = tmp:filename()
+	if not path or path == '' then
+		tmp:close()
+		return nil, '', 'tmpfile has no filename', 255
+	end
+
+	local content = table.concat(lines, '\n') .. '\n'
+	local n, werr = tmp:write(content)
+	if not n then
+		tmp:close()
+		return nil, '', 'write batch file failed: ' .. tostring(werr), 255
+	end
+
+	local fok, ferr = tmp:flush()
+	if not fok then
+		tmp:close()
+		return nil, '', 'flush batch file failed: ' .. tostring(ferr), 255
+	end
+
+	local ok, out, err, code = run_cmd({ 'tc', '-batch', path })
+	tmp:close() -- unlink-on-close
+	return ok, out, err, code
+end
+
+local function must_tc_batch_chunked(cmds, logger, label, chunk_size)
+	chunk_size = tonumber(chunk_size) or TC_BATCH_CHUNK
+	if chunk_size < 1 then chunk_size = TC_BATCH_CHUNK end
+	if #cmds == 0 then return true, nil end
+
+	local i, chunk_no = 1, 0
+	while i <= #cmds do
+		chunk_no = chunk_no + 1
+		local j = math.min(i + chunk_size - 1, #cmds)
+		local chunk = {}
+		for k = i, j do chunk[#chunk + 1] = cmds[k] end
+
+		local ok, out, err, code = run_tc_batch(chunk)
+		if not ok then
+			log(logger, 'error', {
+				what  = 'batch_failed_fatal',
+				label = label,
+				chunk = chunk_no,
+				count = #chunk,
+				out   = out ~= '' and out or nil,
+				err   = err and tostring(err) or nil,
+				code  = code,
+			})
+			return nil, (label or 'tc -batch') .. ': ' .. tostring(err or out or ('exit ' .. tostring(code)))
+		end
+
+		i = j + 1
+	end
+
+	return true, nil
+end
+
+--------------------------------------------------------------------------------
+-- IPv4 helpers
+--------------------------------------------------------------------------------
 
 local function parse_ipv4(s)
 	if type(s) ~= 'string' then return nil end
@@ -366,22 +294,19 @@ end
 
 local function ipv4_to_string(u)
 	u = tonumber(u) or 0
-	local a = band(rshift(u, 24), 0xff)
-	local b = band(rshift(u, 16), 0xff)
-	local c = band(rshift(u, 8), 0xff)
-	local d = band(u, 0xff)
-	return string.format('%d.%d.%d.%d', a, b, c, d)
+	return string.format('%d.%d.%d.%d',
+		band(rshift(u, 24), 0xff),
+		band(rshift(u, 16), 0xff),
+		band(rshift(u, 8), 0xff),
+		band(u, 0xff))
 end
 
 local function mask_from_prefix(pfx)
 	pfx = tonumber(pfx)
 	if not pfx or pfx < 0 or pfx > 32 then return nil end
 	if pfx == 0 then return 0 end
-	-- Build mask without relying on unsigned literals.
 	local m = 0
-	for i = 1, pfx do
-		m = bor(m, lshift(1, 32 - i))
-	end
+	for i = 1, pfx do m = bor(m, lshift(1, 32 - i)) end
 	return m
 end
 
@@ -392,12 +317,9 @@ local function parse_cidr(cidr)
 	local ip = parse_ipv4(ip_s)
 	local pfx = tonumber(pfx_s)
 	if not ip or not pfx then return nil, nil, 'bad cidr value' end
-	if pfx < 20 or pfx > 32 then
-		return nil, nil, 'supported prefixes are /20.. /32'
-	end
+	if pfx < 20 or pfx > 32 then return nil, nil, 'supported prefixes are /20.. /32' end
 	local mask = mask_from_prefix(pfx)
-	local net  = band(ip, mask)
-	return net, pfx, nil
+	return band(ip, mask), pfx, nil
 end
 
 local function host_count_from_prefix(pfx)
@@ -410,35 +332,20 @@ local function ip_in_subnet(ip_u, net_u, pfx)
 end
 
 local function host_offset(ip_u, net_u)
-	-- safe for /20..32 (<= 4095)
 	local off = tonumber(ip_u) - tonumber(net_u)
-	if off < 0 then return nil end
-	return off
-end
-
-local function bool_flag(v, yes_name, no_name)
-	if v == nil then return nil end
-	return v and yes_name or no_name
+	return (off >= 0) and off or nil
 end
 
 local function should_skip_specials(pfx, off, total, cfg)
-	-- By default skip network+broadcast for /0.. /30.
-	-- For /31 and /32, keep both endpoints.
-	if pfx >= 31 then
-		return false
-	end
-
-	local include_net   = (cfg and cfg.include_network == true)
-	local include_bcast = (cfg and cfg.include_broadcast == true)
-
-	if off == 0 and not include_net then
-		return true
-	end
-	if off == (total - 1) and not include_bcast then
-		return true
-	end
+	if pfx >= 31 then return false end
+	if off == 0 and not (cfg and cfg.include_network) then return true end
+	if off == total - 1 and not (cfg and cfg.include_broadcast) then return true end
 	return false
 end
+
+--------------------------------------------------------------------------------
+-- u32 helpers
+--------------------------------------------------------------------------------
 
 local function u32_handle_hex(n)
 	n = tonumber(n) or 0
@@ -454,27 +361,9 @@ local function u32_bucket_ref(handle_num, bucket_num)
 	return u32_handle_hex(handle_num) .. ':' .. u32_handle_hex(bucket_num) .. ':'
 end
 
-------------------------------------------------------------------------
--- fq_codel args
-------------------------------------------------------------------------
-
-local function append_fq_codel_args(argv, fq)
-	fq = fq or {}
-	argv[#argv + 1] = 'fq_codel'
-
-	-- Common, useful knobs
-	if fq.limit ~= nil then argv_push(argv, 'limit', tostring(fq.limit)) end
-	if fq.flows ~= nil then argv_push(argv, 'flows', tostring(fq.flows)) end
-	if fq.quantum ~= nil then argv_push(argv, 'quantum', tostring(fq.quantum)) end
-	if fq.target ~= nil then argv_push(argv, 'target', tostring(fq.target)) end
-	if fq.interval ~= nil then argv_push(argv, 'interval', tostring(fq.interval)) end
-	if fq.memory_limit ~= nil then argv_push(argv, 'memory_limit', tostring(fq.memory_limit)) end
-	if fq.drop_batch ~= nil then argv_push(argv, 'drop_batch', tostring(fq.drop_batch)) end
-	if fq.ce_threshold ~= nil then argv_push(argv, 'ce_threshold', tostring(fq.ce_threshold)) end
-
-	local ecn = bool_flag(fq.ecn, 'ecn', 'noecn')
-	if ecn then argv[#argv + 1] = ecn end
-end
+--------------------------------------------------------------------------------
+-- Signatures (per-host only; built once when planning)
+--------------------------------------------------------------------------------
 
 local function fq_signature(fq)
 	if not is_plain_table(fq) then return '' end
@@ -487,59 +376,61 @@ local function fq_signature(fq)
 	return table.concat(parts, ';')
 end
 
-------------------------------------------------------------------------
+local function htb_signature(htb)
+	if not is_plain_table(htb) then return '' end
+	return table.concat({
+		'r=' .. tostring(htb.rate),
+		'c=' .. tostring(htb.ceil),
+		'b=' .. tostring(htb.burst),
+		'cb=' .. tostring(htb.cburst),
+		'p=' .. tostring(htb.prio),
+		'q=' .. tostring(htb.quantum),
+	}, '|')
+end
+
+--------------------------------------------------------------------------------
 -- tc layout helpers
-------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 local function default_ids()
 	return {
-		root_major        = 1, -- root htb qdisc handle 1:
-		root_class_minor  = 1, -- class 1:1
-		pool_minor        = 20, -- class 1:20 (subnet pool)
-		inner_major       = 20, -- child htb qdisc handle 20:
-		inner_root_minor  = 1, -- class 20:1
-		default_minor     = 100, -- class 20:100 default unmatched-in-subnet
-		base_minor        = 1000, -- per-host classes 20:(base+offset)
-		host_table_handle = 1, -- u32 table handle 1:
-		outer_prio        = 100, -- outer gate priority
-		link_prio         = 1, -- hash-link filter priority
-		host_prio         = 99, -- host rules + table priority
+		root_major        = 1,
+		root_class_minor  = 1,
+		pool_minor        = 20,
+		inner_major       = 20,
+		inner_root_minor  = 1,
+		default_minor     = 100,
+		base_minor        = 1000,
+		host_table_handle = 1,
+		outer_prio        = 100,
+		link_prio         = 1,
+		host_prio         = 99,
 	}
 end
 
-local function classid(major, minor)
-	return tostring(major) .. ':' .. tostring(minor)
+local function classid(major, minor) return tostring(major) .. ':' .. tostring(minor) end
+local function qdisc_handle(major) return tostring(major) .. ':' end
+
+local function bool_flag(v, yes, no)
+	if v == nil then return nil end
+	return v and yes or no
 end
 
-local function qdisc_handle(major)
-	return tostring(major) .. ':'
-end
+local function append_fq_codel_args(argv, fq)
+	fq = fq or {}
+	argv[#argv + 1] = 'fq_codel'
 
-local function htb_class_replace(dev, parent, class_id, cfg, logger)
-	cfg           = cfg or {}
-	local rate    = tostring(cfg.rate or '1gbit')
-	local ceil    = tostring(cfg.ceil or rate)
-	local burst   = (cfg.burst ~= nil) and tostring(cfg.burst) or nil
-	local cburst  = (cfg.cburst ~= nil) and tostring(cfg.cburst) or nil
-	local prio    = (cfg.prio ~= nil) and tostring(cfg.prio) or nil
-	local quantum = (cfg.quantum ~= nil) and tostring(cfg.quantum) or nil
+	if fq.limit ~= nil then argv_push(argv, 'limit', tostring(fq.limit)) end
+	if fq.flows ~= nil then argv_push(argv, 'flows', tostring(fq.flows)) end
+	if fq.quantum ~= nil then argv_push(argv, 'quantum', tostring(fq.quantum)) end
+	if fq.target ~= nil then argv_push(argv, 'target', tostring(fq.target)) end
+	if fq.interval ~= nil then argv_push(argv, 'interval', tostring(fq.interval)) end
+	if fq.memory_limit ~= nil then argv_push(argv, 'memory_limit', tostring(fq.memory_limit)) end
+	if fq.drop_batch ~= nil then argv_push(argv, 'drop_batch', tostring(fq.drop_batch)) end
+	if fq.ce_threshold ~= nil then argv_push(argv, 'ce_threshold', tostring(fq.ce_threshold)) end
 
-	local argv    = {
-		'tc', 'class', 'replace', 'dev', dev,
-		'parent', parent,
-		'classid', class_id,
-		'htb',
-		'rate', rate,
-	}
-
-	-- Safe ordering for HTB class args.
-	if burst then argv_push(argv, 'burst', burst) end
-	argv_push(argv, 'ceil', ceil)
-	if cburst then argv_push(argv, 'cburst', cburst) end
-	if prio then argv_push(argv, 'prio', prio) end
-	if quantum then argv_push(argv, 'quantum', quantum) end
-
-	return must_cmd(argv, logger, 'htb class replace ' .. class_id)
+	local ecn = bool_flag(fq.ecn, 'ecn', 'noecn')
+	if ecn then argv[#argv + 1] = ecn end
 end
 
 local function htb_class_replace_argv(dev, parent, class_id, cfg)
@@ -558,78 +449,35 @@ local function htb_class_replace_argv(dev, parent, class_id, cfg)
 		'htb',
 		'rate', rate,
 	}
-
 	if burst then argv_push(argv, 'burst', burst) end
 	argv_push(argv, 'ceil', ceil)
 	if cburst then argv_push(argv, 'cburst', cburst) end
 	if prio then argv_push(argv, 'prio', prio) end
 	if quantum then argv_push(argv, 'quantum', quantum) end
-
 	return argv
 end
 
-local function fq_codel_qdisc_argv(op, dev, parent_classid, fq)
+local function fq_qdisc_argv(op, dev, parent_classid, fq)
 	local argv = { 'tc', 'qdisc', op, 'dev', dev, 'parent', parent_classid }
 	append_fq_codel_args(argv, fq)
 	return argv
 end
 
-local function fq_codel_qdisc_del_argv(dev, parent_classid)
-	return { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', parent_classid }
-end
-
-local function fq_codel_qdisc_replace(dev, parent_classid, fq, logger)
-	-- Deliberately avoid "tc qdisc replace" for fq_codel on HTB leaves.
-	-- Some OpenWrt/iproute2/kernel combinations reject repeated replace with EINVAL.
-	-- Use a deterministic delete+add path everywhere.
-	try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'parent', parent_classid }, logger)
-
-	local argv = fq_codel_qdisc_argv('add', dev, parent_classid, fq)
-	return must_cmd(argv, logger, 'fq_codel qdisc add on ' .. parent_classid)
-end
-
-local function append_default_fq_codel_reconcile_cmds(dev, ids, fq_cfg, del_cmds, add_cmds)
-	local parent = classid(ids.inner_major, ids.default_minor)
-
-	-- Declarative semantics:
-	--   * table  => ensure fq_codel exists with those settings
-	--   * false/nil => ensure no leaf qdisc is attached
-	del_cmds[#del_cmds + 1] = fq_codel_qdisc_del_argv(dev, parent)
-
-	if fq_cfg ~= nil and fq_cfg ~= false then
-		add_cmds[#add_cmds + 1] = fq_codel_qdisc_argv('add', dev, parent, fq_cfg)
-	end
-end
-
-local function reconcile_default_fq_codel(dev, ids, fq_cfg, logger)
-	-- Retained for compatibility/use in less critical paths.
-	local parent = classid(ids.inner_major, ids.default_minor)
-
-	if fq_cfg == nil or fq_cfg == false then
-		try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'parent', parent }, logger)
-		return true, nil
-	end
-
-	return fq_codel_qdisc_replace(dev, parent, fq_cfg, logger)
-end
-
-------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 -- IFB ingress redirect
-------------------------------------------------------------------------
+--------------------------------------------------------------------------------
 
 local function ensure_ifb(ifb, logger)
-	try_cmd({ 'ip', 'link', 'add', ifb, 'type', 'ifb' }, logger) -- may already exist
+	try_cmd({ 'ip', 'link', 'add', ifb, 'type', 'ifb' }, logger)
 	return must_cmd({ 'ip', 'link', 'set', 'dev', ifb, 'up' }, logger, 'ifb up')
 end
 
 local function ensure_ingress_redirect(iface, ifb, logger)
-	-- Reset ingress qdisc/filter on the real interface to ensure idempotent redirect
 	try_cmd({ 'tc', 'qdisc', 'del', 'dev', iface, 'ingress' }, logger)
 	local ok, err = must_cmd({ 'tc', 'qdisc', 'add', 'dev', iface, 'handle', 'ffff:', 'ingress' }, logger,
 		'add ingress qdisc')
 	if not ok then return nil, err end
 
-	-- Redirect all IPv4 ingress to IFB
 	return must_cmd({
 		'tc', 'filter', 'add', 'dev', iface, 'parent', 'ffff:',
 		'protocol', 'ip', 'u32',
@@ -638,35 +486,23 @@ local function ensure_ingress_redirect(iface, ifb, logger)
 	}, logger, 'add mirred redirect')
 end
 
-------------------------------------------------------------------------
--- Base scaffold (root/pool/inner qdisc + hash link)
-------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+-- Scaffold + top-level maintenance
+--------------------------------------------------------------------------------
 
 local function direction_params(kind, cfg)
-	-- Defaults are opinionated, but overrideable.
 	if kind == 'egress' then
 		local m = cfg.match or 'dst'
-		return {
-			match_field = m, -- 'dst' usually correct for egress shaping per destination host on that subnet
-			hash_at     = (m == 'src') and 12 or 16,
-		}
-	else
-		local m = cfg.match or 'src'
-		return {
-			match_field = m, -- often 'src' for lab tests; use 'dst' if shaping downloads to LAN hosts on WAN IFB
-			hash_at     = (m == 'src') and 12 or 16,
-		}
+		return { match_field = m, hash_at = (m == 'src') and 12 or 16 }
 	end
+	local m = cfg.match or 'src'
+	return { match_field = m, hash_at = (m == 'src') and 12 or 16 }
 end
 
 local function scaffold_signature(kind, spec, cfg, ids, dev)
 	local dp = direction_params(kind, cfg)
 	return table.concat({
-		kind,
-		dev,
-		spec.cidr,
-		dp.match_field,
-		tostring(dp.hash_at),
+		kind, dev, spec.cidr, dp.match_field, tostring(dp.hash_at),
 		tostring(ids.root_major), tostring(ids.pool_minor),
 		tostring(ids.inner_major), tostring(ids.inner_root_minor),
 		tostring(ids.default_minor), tostring(ids.base_minor),
@@ -675,159 +511,155 @@ local function scaffold_signature(kind, spec, cfg, ids, dev)
 	}, '|')
 end
 
-local function rebuild_scaffold(kind, spec, cfg, dev, ids, logger)
-	local net_u, pfx  = spec.net_u, spec.pfx
-	local dp          = direction_params(kind, cfg)
-	local match_field = dp.match_field
-	local hash_at     = tostring(dp.hash_at)
-
-	local net_s       = ipv4_to_string(net_u) .. '/' .. tostring(pfx)
-
-	-- Clear root qdisc on shaped device and recreate
-	try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'root' }, logger)
-
-	-- root htb
-	local ok, err = must_cmd({
-		'tc', 'qdisc', 'add', 'dev', dev, 'root',
-		'handle', qdisc_handle(ids.root_major),
-		'htb',
-		-- Root qdisc default must point to a real class under 1: .
-		-- Use the root class so non-matching traffic falls back safely.
-		'default', tostring(ids.root_class_minor),
-	}, logger, 'root htb qdisc')
-	if not ok then return nil, err end
-
-	-- root + pool classes
-	ok, err = htb_class_replace(
-		dev,
-		qdisc_handle(ids.root_major), -- IMPORTANT: root class hangs off qdisc handle "1:", not "1:0"
-		classid(ids.root_major, ids.root_class_minor),
-		cfg.root_class or {
-			rate = (cfg.root_rate or '1gbit'),
-			ceil = (cfg.root_ceil or cfg.root_rate or '1gbit'),
-		},
-		logger
-	)
-	if not ok then return nil, err end
-
-	ok, err = htb_class_replace(dev, classid(ids.root_major, ids.root_class_minor),
-		classid(ids.root_major, ids.pool_minor),
-		cfg.pool_class or {
-			rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
-			ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
-			burst  = cfg.pool_burst,
-			cburst = cfg.pool_cburst,
-		}, logger)
-	if not ok then return nil, err end
-
-	-- inner htb under pool class
-	ok, err = must_cmd({
-		'tc', 'qdisc', 'add', 'dev', dev,
-		'parent', classid(ids.root_major, ids.pool_minor),
-		'handle', qdisc_handle(ids.inner_major),
-		'htb',
-		'default', tostring(ids.default_minor),
-	}, logger, 'inner htb qdisc')
-	if not ok then return nil, err end
-
-	ok, err = htb_class_replace(dev, qdisc_handle(ids.inner_major), classid(ids.inner_major, ids.inner_root_minor),
-		{
-			rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
-			ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
-			burst  = cfg.pool_burst,
-			cburst = cfg.pool_cburst,
-		}, logger)
-	if not ok then return nil, err end
-
-	-- default inner class for unmatched hosts in subnet
-	ok, err = htb_class_replace(dev, classid(ids.inner_major, ids.inner_root_minor),
-		classid(ids.inner_major, ids.default_minor),
-		cfg.default_class or {
-			rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
-			ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
-			burst  = (cfg.default_burst or cfg.host_burst),
-			cburst = (cfg.default_cburst or cfg.host_cburst),
-		}, logger)
-	if not ok then return nil, err end
-
-	-- Batch default fq_codel delete/add path too.
-	do
-		local del_cmds, add_cmds = {}, {}
-		append_default_fq_codel_reconcile_cmds(dev, ids, cfg.default_fq_codel, del_cmds, add_cmds)
-		ok, err = try_tc_batch_force_chunked(del_cmds, logger, 'default fq_codel cleanup (scaffold)')
-		if not ok then return nil, err end
-		ok, err = must_tc_batch_chunked(add_cmds, logger, 'default fq_codel add (scaffold)')
-		if not ok then return nil, err end
+local function reconcile_default_fq(dev, ids, fq_cfg, logger)
+	local parent = classid(ids.inner_major, ids.default_minor)
+	if fq_cfg == nil or fq_cfg == false then
+		try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'parent', parent }, logger)
+		return true, nil
 	end
-
-	-- Outer prefix gate: root -> pool
-	ok, err = must_cmd({
-		'tc', 'filter', 'add', 'dev', dev,
-		'parent', qdisc_handle(ids.root_major),
-		'protocol', 'ip',
-		'prio', tostring(ids.outer_prio),
-		'u32', 'match', 'ip', match_field, net_s,
-		'flowid', classid(ids.root_major, ids.pool_minor),
-	}, logger, 'outer prefix gate')
-	if not ok then return nil, err end
-
-	return true, nil
+	-- delete+add (no replace)
+	try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'parent', parent }, logger)
+	return must_cmd(fq_qdisc_argv('add', dev, parent, fq_cfg), logger, 'default fq_codel add')
 end
 
-------------------------------------------------------------------------
--- Host plan (validate + class id mapping)
-------------------------------------------------------------------------
+local function rebuild_scaffold(kind, spec, cfg, dev, ids, logger)
+	local dp = direction_params(kind, cfg)
+	local net_s = ipv4_to_string(spec.net_u) .. '/' .. tostring(spec.pfx)
+
+	try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'root' }, logger)
+
+	local cmds = {
+		{ 'tc', 'qdisc', 'add', 'dev', dev, 'root',
+			'handle', qdisc_handle(ids.root_major),
+			'htb', 'default', tostring(ids.root_class_minor) },
+
+		htb_class_replace_argv(dev, qdisc_handle(ids.root_major),
+			classid(ids.root_major, ids.root_class_minor),
+			cfg.root_class or { rate = (cfg.root_rate or '1gbit'), ceil = (cfg.root_ceil or cfg.root_rate or '1gbit') }),
+		htb_class_replace_argv(dev, classid(ids.root_major, ids.root_class_minor),
+			classid(ids.root_major, ids.pool_minor),
+			cfg.pool_class or {
+				rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
+				ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
+				burst  = cfg.pool_burst,
+				cburst = cfg.pool_cburst,
+			}),
+
+		{ 'tc', 'qdisc', 'add', 'dev', dev,
+			'parent', classid(ids.root_major, ids.pool_minor),
+			'handle', qdisc_handle(ids.inner_major),
+			'htb', 'default', tostring(ids.default_minor) },
+
+		htb_class_replace_argv(dev, qdisc_handle(ids.inner_major),
+			classid(ids.inner_major, ids.inner_root_minor),
+			{
+				rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
+				ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
+				burst  = cfg.pool_burst,
+				cburst = cfg.pool_cburst,
+			}),
+
+		htb_class_replace_argv(dev, classid(ids.inner_major, ids.inner_root_minor),
+			classid(ids.inner_major, ids.default_minor),
+			cfg.default_class or {
+				rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
+				ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
+				burst  = (cfg.default_burst or cfg.host_burst),
+				cburst = (cfg.default_cburst or cfg.host_cburst),
+			}),
+
+		{ 'tc', 'filter', 'add', 'dev', dev,
+			'parent', qdisc_handle(ids.root_major),
+			'protocol', 'ip',
+			'prio', tostring(ids.outer_prio),
+			'u32', 'match', 'ip', dp.match_field, net_s,
+			'flowid', classid(ids.root_major, ids.pool_minor) },
+	}
+
+	local ok, err = must_tc_batch_chunked(cmds, logger, 'rebuild scaffold', 128)
+	if not ok then return nil, err end
+	return reconcile_default_fq(dev, ids, cfg.default_fq_codel, logger)
+end
+
+local function apply_top_classes(dev, ids, cfg, logger)
+	local cmds = {
+		-- Refresh root class as well; otherwise root_rate/root_ceil changes only
+		-- take effect on a full scaffold rebuild.
+		htb_class_replace_argv(dev, qdisc_handle(ids.root_major),
+			classid(ids.root_major, ids.root_class_minor),
+			cfg.root_class or {
+				rate = (cfg.root_rate or '1gbit'),
+				ceil = (cfg.root_ceil or cfg.root_rate or '1gbit'),
+			}),
+		htb_class_replace_argv(dev, classid(ids.root_major, ids.root_class_minor),
+			classid(ids.root_major, ids.pool_minor),
+			cfg.pool_class or {
+				rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
+				ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
+				burst  = cfg.pool_burst,
+				cburst = cfg.pool_cburst,
+			}),
+		htb_class_replace_argv(dev, qdisc_handle(ids.inner_major),
+			classid(ids.inner_major, ids.inner_root_minor),
+			{
+				rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
+				ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
+				burst  = cfg.pool_burst,
+				cburst = cfg.pool_cburst,
+			}),
+		htb_class_replace_argv(dev, classid(ids.inner_major, ids.inner_root_minor),
+			classid(ids.inner_major, ids.default_minor),
+			cfg.default_class or {
+				rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
+				ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
+				burst  = (cfg.default_burst or cfg.host_burst),
+				cburst = (cfg.default_cburst or cfg.host_cburst),
+			}),
+	}
+	local ok, err = must_tc_batch_chunked(cmds, logger, 'top class refresh', 128)
+	if not ok then return nil, err end
+	return reconcile_default_fq(dev, ids, cfg.default_fq_codel, logger)
+end
+
+--------------------------------------------------------------------------------
+-- Host plan
+--------------------------------------------------------------------------------
 
 local function build_host_plan(spec, cfg, ids)
 	local hosts_raw = cfg.hosts
-	if hosts_raw == nil then
-		hosts_raw = {}
-	end
+	if hosts_raw == nil then hosts_raw = {} end
 	if not is_plain_table(hosts_raw) then
 		return nil, 'hosts must be a table keyed by IPv4 string'
 	end
 
-	-- Validate override entries first. In all_hosts mode, this catches typos/out-of-subnet
-	-- addresses even if they would not be generated naturally.
 	local overrides = {}
-	local override_keys = sorted_keys(hosts_raw)
-	for i = 1, #override_keys do
-		local ip_s = override_keys[i]
+	local ok_keys = sorted_keys(hosts_raw)
+	for i = 1, #ok_keys do
+		local ip_s = ok_keys[i]
 		local hcfg = hosts_raw[ip_s]
-
 		if not is_plain_table(hcfg) then
 			return nil, 'host entry for ' .. tostring(ip_s) .. ' must be a table'
 		end
-
 		local ip_u = parse_ipv4(ip_s)
-		if not ip_u then
-			return nil, 'invalid host IP ' .. tostring(ip_s)
-		end
+		if not ip_u then return nil, 'invalid host IP ' .. tostring(ip_s) end
 		if not ip_in_subnet(ip_u, spec.net_u, spec.pfx) then
 			return nil, 'host ' .. ip_s .. ' is outside subnet ' .. spec.cidr
 		end
-
 		overrides[ip_s] = hcfg
 	end
 
-	local function make_host_record(ip_s, hcfg)
+	local function make_rec(ip_s, hcfg)
 		local ip_u = parse_ipv4(ip_s)
-		if not ip_u then
-			return nil, 'invalid host IP ' .. tostring(ip_s)
-		end
+		if not ip_u then return nil, 'invalid host IP ' .. tostring(ip_s) end
 		if not ip_in_subnet(ip_u, spec.net_u, spec.pfx) then
 			return nil, 'host ' .. ip_s .. ' is outside subnet ' .. spec.cidr
 		end
 
 		local off = host_offset(ip_u, spec.net_u)
-		if off == nil then
-			return nil, 'failed to compute host offset for ' .. ip_s
-		end
-		if off >= host_count_from_prefix(spec.pfx) then
-			return nil, 'host offset out of range for ' .. ip_s
-		end
+		if off == nil then return nil, 'failed host offset for ' .. ip_s end
+		if off >= host_count_from_prefix(spec.pfx) then return nil, 'host offset out of range for ' .. ip_s end
 
-		local bucket = band(ip_u, 0xff) -- last octet bucket, matches hash mask 0x000000ff at {12|16}
+		local bucket = band(ip_u, 0xff)
 		local minor  = ids.base_minor + off
 		if minor == ids.default_minor then
 			return nil, 'classid collision for host ' .. ip_s .. '; change base_minor/default_minor'
@@ -836,7 +668,7 @@ local function build_host_plan(spec, cfg, ids)
 			return nil, 'class minor too large for host ' .. ip_s
 		end
 
-		local eff = {
+		local htb = {
 			rate    = hcfg.rate or cfg.host_rate or '1mbit',
 			ceil    = hcfg.ceil or cfg.host_ceil or hcfg.rate or cfg.host_rate or '1mbit',
 			burst   = hcfg.burst or cfg.host_burst,
@@ -862,29 +694,28 @@ local function build_host_plan(spec, cfg, ids)
 			bucket  = bucket,
 			minor   = minor,
 			classid = classid(ids.inner_major, minor),
-			htb     = eff,
+			htb     = htb,
 			fq      = fq,
+			htb_sig = htb_signature(htb),
+			fq_sig  = fq_signature(fq),
 		}, nil
 	end
 
 	local out = {}
-	local all_hosts = (cfg.all_hosts == true)
-
-	if all_hosts then
+	if cfg.all_hosts == true then
 		local total = host_count_from_prefix(spec.pfx)
 		for off = 0, total - 1 do
 			if not should_skip_specials(spec.pfx, off, total, cfg) then
 				local ip_s = ipv4_to_string((tonumber(spec.net_u) or 0) + off)
-				local hcfg = overrides[ip_s] or {}
-				local rec, err = make_host_record(ip_s, hcfg)
+				local rec, err = make_rec(ip_s, overrides[ip_s] or {})
 				if not rec then return nil, err end
 				out[ip_s] = rec
 			end
 		end
 	else
-		for i = 1, #override_keys do
-			local ip_s = override_keys[i]
-			local rec, err = make_host_record(ip_s, overrides[ip_s] or {})
+		for i = 1, #ok_keys do
+			local ip_s = ok_keys[i]
+			local rec, err = make_rec(ip_s, overrides[ip_s] or {})
 			if not rec then return nil, err end
 			out[ip_s] = rec
 		end
@@ -893,195 +724,297 @@ local function build_host_plan(spec, cfg, ids)
 	return out, nil
 end
 
-local function host_membership_signature(plan)
-	local ks = sorted_keys(plan)
-	local parts = {}
-	for i = 1, #ks do
-		local p = plan[ks[i]]
-		parts[#parts + 1] = p.ip_s .. '>' .. tostring(p.minor) .. '@' .. tostring(p.bucket)
-	end
-	return table.concat(parts, '|')
+--------------------------------------------------------------------------------
+-- Deltas (membership + per-host)
+--------------------------------------------------------------------------------
+
+local function host_htb_changed(old, new_)
+	if not old then return true end
+	if old.classid ~= new_.classid then return true end
+	return old.htb_sig ~= new_.htb_sig
 end
 
-------------------------------------------------------------------------
--- Host filter table reconcile (rebuild only host rules/table)
-------------------------------------------------------------------------
+local function host_fq_changed(old, new_)
+	if not old then
+		return is_plain_table(new_.fq) or (new_.fq == false)
+	end
+	if old.classid ~= new_.classid then return true end
 
-local function rebuild_host_filters(kind, spec, cfg, dev, ids, plan, logger)
-	local dp          = direction_params(kind, cfg)
-	local match_field = dp.match_field
-	local hash_at     = tostring(dp.hash_at)
-	local net_s       = ipv4_to_string(spec.net_u) .. '/' .. tostring(spec.pfx)
+	local okind = (old.fq == false) and 'false' or (is_plain_table(old.fq) and 'table' or 'nil')
+	local nkind = (new_.fq == false) and 'false' or (is_plain_table(new_.fq) and 'table' or 'nil')
+	if okind ~= nkind then return true end
+
+	return old.fq_sig ~= new_.fq_sig
+end
+
+local function membership_delta(prev_plan, new_plan)
+	prev_plan, new_plan = prev_plan or {}, new_plan or {}
+
+	local affected      = {}
+	local changed       = false
+
+	-- additions + bucket/class changes
+	for ip_s, nrec in pairs(new_plan) do
+		local orec = prev_plan[ip_s]
+		if not orec then
+			affected[nrec.bucket] = true
+			changed = true
+		else
+			if orec.bucket ~= nrec.bucket or orec.classid ~= nrec.classid then
+				affected[orec.bucket] = true
+				affected[nrec.bucket] = true
+				changed = true
+			end
+		end
+	end
+
+	-- removals
+	for ip_s, orec in pairs(prev_plan) do
+		if not new_plan[ip_s] then
+			affected[orec.bucket] = true
+			changed = true
+		end
+	end
+
+	return changed, affected
+end
+
+--------------------------------------------------------------------------------
+-- Host filters (full + delta)
+--------------------------------------------------------------------------------
+
+local function host_rule_argv(dev, ids, match_field, rec)
+	return {
+		'tc', 'filter', 'add', 'dev', dev,
+		'parent', qdisc_handle(ids.inner_major),
+		'protocol', 'ip',
+		'prio', tostring(ids.host_prio),
+		'u32',
+		'ht', u32_bucket_ref(ids.host_table_handle, rec.bucket),
+		'match', 'ip', match_field, rec.ip_s .. '/32',
+		'flowid', rec.classid,
+	}
+end
+
+local function rebuild_host_filters_full(kind, spec, cfg, dev, ids, plan, logger)
+	local dp = direction_params(kind, cfg)
+	local net_s = ipv4_to_string(spec.net_u) .. '/' .. tostring(spec.pfx)
 
 	if ids.link_prio == ids.host_prio then
 		return nil, 'link_prio and host_prio must differ'
 	end
 
-	-- Clear both filter priorities on the inner HTB parent.
-	-- link_prio owns the hash-link rule; host_prio owns the u32 table + exact host rules.
-	try_cmd({
-		'tc', 'filter', 'del', 'dev', dev,
-		'parent', qdisc_handle(ids.inner_major),
-		'protocol', 'ip',
-		'prio', tostring(ids.link_prio),
-	}, logger)
+	-- best-effort clear the filter priorities we own
+	try_cmd(
+		{ 'tc', 'filter', 'del', 'dev', dev, 'parent', qdisc_handle(ids.inner_major), 'protocol', 'ip', 'prio', tostring(
+			ids
+			.link_prio) }, logger)
+	try_cmd(
+		{ 'tc', 'filter', 'del', 'dev', dev, 'parent', qdisc_handle(ids.inner_major), 'protocol', 'ip', 'prio', tostring(
+			ids
+			.host_prio) }, logger)
 
-	try_cmd({
-		'tc', 'filter', 'del', 'dev', dev,
-		'parent', qdisc_handle(ids.inner_major),
-		'protocol', 'ip',
-		'prio', tostring(ids.host_prio),
-	}, logger)
-
-	-- Rebuild the inner host filter structure in one (chunked) tc -batch sequence:
-	--   1) hash table
-	--   2) hash-link filter
-	--   3) exact /32 host rules
-	local batch_cmds = {}
-
-	batch_cmds[#batch_cmds + 1] = {
-		'tc', 'filter', 'add', 'dev', dev,
-		'parent', qdisc_handle(ids.inner_major),
-		'protocol', 'ip',
-		'prio', tostring(ids.host_prio),
-		'handle', tostring(ids.host_table_handle) .. ':', -- e.g. "1:"
-		'u32', 'divisor', '256',
-	}
-
-	batch_cmds[#batch_cmds + 1] = {
-		'tc', 'filter', 'add', 'dev', dev,
-		'parent', qdisc_handle(ids.inner_major),
-		'protocol', 'ip',
-		'prio', tostring(ids.link_prio),
-		'u32',
-		'link', u32_table_ref(ids.host_table_handle),
-		'hashkey', 'mask', '0x000000ff', 'at', hash_at,
-		'match', 'ip', match_field, net_s,
-	}
-
-	-- Add exact /32 rules into the appropriate bucket, one per host
-	local ips = sorted_keys(plan)
-	for i = 1, #ips do
-		local rec = plan[ips[i]]
-		batch_cmds[#batch_cmds + 1] = {
+	local batch = {
+		{
 			'tc', 'filter', 'add', 'dev', dev,
 			'parent', qdisc_handle(ids.inner_major),
 			'protocol', 'ip',
 			'prio', tostring(ids.host_prio),
+			'handle', u32_table_ref(ids.host_table_handle),
+			'u32', 'divisor', '256',
+		},
+		{
+			'tc', 'filter', 'add', 'dev', dev,
+			'parent', qdisc_handle(ids.inner_major),
+			'protocol', 'ip',
+			'prio', tostring(ids.link_prio),
 			'u32',
-			'ht', u32_bucket_ref(ids.host_table_handle, rec.bucket), -- bucket is hex
-			'match', 'ip', match_field, rec.ip_s .. '/32',
-			'flowid', rec.classid,
-		}
+			'link', u32_table_ref(ids.host_table_handle),
+			'hashkey', 'mask', '0x000000ff', 'at', tostring(dp.hash_at),
+			'match', 'ip', dp.match_field, net_s,
+		},
+	}
+
+	local ips = sorted_keys(plan)
+	for i = 1, #ips do
+		batch[#batch + 1] = host_rule_argv(dev, ids, dp.match_field, plan[ips[i]])
 	end
 
-	local ok, err = must_tc_batch_chunked(batch_cmds, logger, 'rebuild host filters')
-	if not ok then return nil, err end
-
-	return true, nil
+	return must_tc_batch_chunked(batch, logger, 'rebuild host filters')
 end
 
-------------------------------------------------------------------------
--- Class/qdisc reconcile (incremental)
-------------------------------------------------------------------------
+local function delete_bucket_rules(dev, ids, bucket, logger)
+	local argv = {
+		'tc', 'filter', 'del', 'dev', dev,
+		'parent', qdisc_handle(ids.inner_major),
+		'protocol', 'ip',
+		'prio', tostring(ids.host_prio),
+		'u32',
+		'ht', u32_bucket_ref(ids.host_table_handle, bucket),
+	}
 
-local function reconcile_host_classes(dev, ids, prev_plan, new_plan, logger)
-	prev_plan = prev_plan or {}
+	local ok, out, err, code = run_cmd(argv)
+	if ok or is_benign_try_error(argv, out, err, code) then
+		return true, nil
+	end
 
-	-- Remove stale classes first (leaf qdisc then class) in force-batched deletes.
-	local stale_del_cmds = {}
-	for ip_s, old in pairs(prev_plan) do
-		if not new_plan[ip_s] then
-			stale_del_cmds[#stale_del_cmds + 1] = { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', old.classid }
-			stale_del_cmds[#stale_del_cmds + 1] = { 'tc', 'class', 'del', 'dev', dev, 'classid', old.classid }
+	local msg = tostring(err or out or ('exit ' .. tostring(code)))
+	if str_contains(msg, 'Illegal "ht"') or str_contains(msg, 'Illegal \"ht\"') then
+		return nil, 'bucket_delete_unsupported'
+	end
+
+	log(logger, 'warn', {
+		what = 'cmd_failed',
+		cmd  = table.concat(argv, ' '),
+		out  = out ~= '' and out or nil,
+		err  = err and tostring(err) or nil,
+		code = code,
+	})
+
+	return nil, 'bucket_delete_failed'
+end
+
+local function reconcile_host_filters_delta(kind, spec, cfg, dev, ids, prev_plan, new_plan, logger)
+	local changed, affected = membership_delta(prev_plan, new_plan)
+	if not changed then return true, nil end
+
+	-- Attempt bucket-local delete; fall back to full rebuild if unsupported.
+	local buckets = sorted_keys(affected)
+	for i = 1, #buckets do
+		local b = tonumber(buckets[i])
+		local ok, _ = delete_bucket_rules(dev, ids, b, logger)
+		if not ok then
+			return rebuild_host_filters_full(kind, spec, cfg, dev, ids, new_plan, logger)
 		end
 	end
-	local ok, err = try_tc_batch_force_chunked(stale_del_cmds, logger, 'reconcile stale host deletes')
-	if not ok then return nil, err end
 
-	-- Upsert current HTB classes in bulk.
-	local class_cmds = {}
+	local match_field = direction_params(kind, cfg).match_field
+	local batch = {}
 	local ips = sorted_keys(new_plan)
 	for i = 1, #ips do
 		local rec = new_plan[ips[i]]
-		class_cmds[#class_cmds + 1] =
-			htb_class_replace_argv(dev, classid(ids.inner_major, ids.inner_root_minor), rec.classid, rec.htb)
-	end
-
-	ok, err = must_tc_batch_chunked(class_cmds, logger, 'reconcile host htb classes')
-	if not ok then return nil, err end
-
-	-- Batch fq_codel leaf qdisc deletes/adds too:
-	--   * deletes go via tc -force -batch (idempotent)
-	--   * adds go via tc -batch
-	local qdisc_del_cmds = {}
-	local qdisc_add_cmds = {}
-
-	for i = 1, #ips do
-		local rec = new_plan[ips[i]]
-		local prev = prev_plan[rec.ip_s]
-
-		if rec.fq == false then
-			qdisc_del_cmds[#qdisc_del_cmds + 1] = fq_codel_qdisc_del_argv(dev, rec.classid)
-		elseif is_plain_table(rec.fq) then
-			-- Deterministic replace via delete+add, but batched.
-			qdisc_del_cmds[#qdisc_del_cmds + 1] = fq_codel_qdisc_del_argv(dev, rec.classid)
-			qdisc_add_cmds[#qdisc_add_cmds + 1] = fq_codel_qdisc_argv('add', dev, rec.classid, rec.fq)
-		elseif prev and (prev.fq == false or is_plain_table(prev.fq)) then
-			-- Desired no qdisc; previous state may have had one.
-			qdisc_del_cmds[#qdisc_del_cmds + 1] = fq_codel_qdisc_del_argv(dev, rec.classid)
+		if affected[rec.bucket] then
+			batch[#batch + 1] = host_rule_argv(dev, ids, match_field, rec)
 		end
 	end
 
-	ok, err = try_tc_batch_force_chunked(qdisc_del_cmds, logger, 'reconcile host fq_codel deletes')
-	if not ok then return nil, err end
+	return must_tc_batch_chunked(batch, logger, 'reconcile host filters delta')
+end
 
-	ok, err = must_tc_batch_chunked(qdisc_add_cmds, logger, 'reconcile host fq_codel adds')
-	if not ok then return nil, err end
+--------------------------------------------------------------------------------
+-- Host classes + fq_codel leaves (true deltas; batched)
+--------------------------------------------------------------------------------
+
+local function reconcile_host_classes_and_fq(dev, ids, prev_plan, new_plan, logger)
+	prev_plan = prev_plan or {}
+
+	local qdisc_del, class_del, class_upd, qdisc_add = {}, {}, {}, {}
+
+	-- stale removals
+	for ip_s, old in pairs(prev_plan) do
+		if not new_plan[ip_s] then
+			if is_plain_table(old.fq) then
+				qdisc_del[#qdisc_del + 1] = { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', old.classid }
+			end
+			class_del[#class_del + 1] = { 'tc', 'class', 'del', 'dev', dev, 'classid', old.classid }
+		end
+	end
+
+	-- changes/additions
+	local ips = sorted_keys(new_plan)
+	for i = 1, #ips do
+		local rec = new_plan[ips[i]]
+		local old = prev_plan[rec.ip_s]
+
+		-- If the host remains present but its classid changes, remove the old class.
+		-- (Any old per-host qdisc is handled in host_fq_changed().)
+		if old and old.classid ~= rec.classid then
+			class_del[#class_del + 1] = { 'tc', 'class', 'del', 'dev', dev, 'classid', old.classid }
+		end
+
+		if host_htb_changed(old, rec) then
+			class_upd[#class_upd + 1] =
+				htb_class_replace_argv(dev, classid(ids.inner_major, ids.inner_root_minor), rec.classid, rec.htb)
+		end
+
+		if host_fq_changed(old, rec) then
+			if old and is_plain_table(old.fq) then
+				-- Delete the qdisc attached to the *old* classid (it may differ from rec.classid).
+				qdisc_del[#qdisc_del + 1] = { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', old.classid }
+			end
+			if is_plain_table(rec.fq) then
+				qdisc_add[#qdisc_add + 1] = fq_qdisc_argv('add', dev, rec.classid, rec.fq)
+			end
+		end
+	end
+
+	-- Phase 1: qdisc deletes (batch, with best-effort fallback)
+	if #qdisc_del > 0 then
+		local ok, _ = must_tc_batch_chunked(qdisc_del, logger, 'fq qdisc deletes', 256)
+		if not ok then
+			for i = 1, #qdisc_del do try_cmd(qdisc_del[i], logger) end
+		end
+	end
+
+	-- Phase 2: class deletes
+	if #class_del > 0 then
+		local ok, err = must_tc_batch_chunked(class_del, logger, 'class deletes', 512)
+		if not ok then return nil, err end
+	end
+
+	-- Phase 3: class updates
+	if #class_upd > 0 then
+		local ok, err = must_tc_batch_chunked(class_upd, logger, 'class updates', 512)
+		if not ok then return nil, err end
+	end
+
+	-- Phase 4: qdisc adds
+	if #qdisc_add > 0 then
+		local ok, err = must_tc_batch_chunked(qdisc_add, logger, 'fq qdisc adds', 256)
+		if not ok then return nil, err end
+	end
 
 	return true, nil
 end
 
-local function host_limits_signature(plan)
-	local ks = sorted_keys(plan)
-	local parts = {}
-	for i = 1, #ks do
-		local p = plan[ks[i]]
-		parts[#parts + 1] =
-			p.ip_s ..
-			'|r=' .. tostring(p.htb.rate) ..
-			'|c=' .. tostring(p.htb.ceil) ..
-			'|b=' .. tostring(p.htb.burst) ..
-			'|cb=' .. tostring(p.htb.cburst) ..
-			'|p=' .. tostring(p.htb.prio) ..
-			'|q=' .. tostring(p.htb.quantum) ..
-			'|fq=' .. fq_signature(p.fq)
-	end
-	return table.concat(parts, '||')
-end
+--------------------------------------------------------------------------------
+-- Per-direction apply/clear
+--------------------------------------------------------------------------------
 
 local function prune_iface_state(iface)
 	local st = STATE[iface]
-	if not st then return end
-	if st.egress == nil and st.ingress == nil then
+	if st and st.egress == nil and st.ingress == nil then
 		STATE[iface] = nil
 	end
 end
 
+local function mark_dirty(st)
+	-- Force a full rebuild next run (scaffold + filters), to avoid state drift
+	-- after partial kernel programming.
+	if not st then return end
+	st.dirty = true
+	st.sig   = nil
+	st.hosts = nil
+	st.redirect_ready = nil
+end
+
+local function fail_dirty(st, err)
+	mark_dirty(st)
+	return nil, err
+end
+
 local function clear_direction(iface, kind, cfg, logger)
 	local per_iface = STATE[iface]
-	local prev      = per_iface and per_iface[kind] or nil
+	local prev = per_iface and per_iface[kind] or nil
 
 	if kind == 'egress' then
-		-- This module owns the tc root hierarchy on the interface.
 		try_cmd({ 'tc', 'qdisc', 'del', 'dev', iface, 'root' }, logger)
 		if per_iface then per_iface.egress = nil end
 		prune_iface_state(iface)
 		return true, nil
 	end
 
-	-- kind == 'ingress'
-	local ifb = nil
+	local ifb
 	if is_plain_table(cfg) and type(cfg.ifb) == 'string' and cfg.ifb ~= '' then
 		ifb = cfg.ifb
 	elseif prev and type(prev.ifb) == 'string' and prev.ifb ~= '' then
@@ -1090,7 +1023,6 @@ local function clear_direction(iface, kind, cfg, logger)
 		ifb = sanitise_ifb_name(iface)
 	end
 
-	-- Remove ingress redirect on the real interface and shaped qdisc on the IFB.
 	try_cmd({ 'tc', 'qdisc', 'del', 'dev', iface, 'ingress' }, logger)
 	try_cmd({ 'tc', 'qdisc', 'del', 'dev', ifb, 'root' }, logger)
 
@@ -1099,14 +1031,7 @@ local function clear_direction(iface, kind, cfg, logger)
 	return true, nil
 end
 
-------------------------------------------------------------------------
--- Per-direction apply
-------------------------------------------------------------------------
-
 local function apply_direction(iface, kind, spec, cfg, logger)
-	-- Declarative semantics:
-	--   * missing cfg        => ensure direction is absent
-	--   * cfg.enabled=false  => ensure direction is absent
 	if cfg == nil or cfg.enabled == false then
 		return clear_direction(iface, kind, cfg, logger)
 	end
@@ -1114,121 +1039,87 @@ local function apply_direction(iface, kind, spec, cfg, logger)
 	local ids = shallow_copy(default_ids())
 	for k, v in pairs(cfg.ids or {}) do ids[k] = v end
 
-	local dev = iface
-	local ifb = nil
-	if kind == 'ingress' then
-		ifb = cfg.ifb or sanitise_ifb_name(iface)
-		local ok, err = ensure_ifb(ifb, logger)
-		if not ok then return nil, err end
-		ok, err = ensure_ingress_redirect(iface, ifb, logger)
-		if not ok then return nil, err end
-		dev = ifb
-	end
-
+	-- Ensure we always have a state record we can mark dirty on error.
 	local per_iface = STATE[iface] or {}
 	STATE[iface] = per_iface
 	local st = per_iface[kind] or {}
 	per_iface[kind] = st
 
-	local sig = scaffold_signature(kind, spec, cfg, ids, dev)
-	local need_rebuild_scaffold = (st.sig ~= sig) or (st.dev ~= dev)
+	local dev, ifb = iface, nil
+	if kind == 'ingress' then
+		-- Prefer explicit config; otherwise reuse previous IFB if known; otherwise derive.
+		ifb = cfg.ifb or st.ifb or sanitise_ifb_name(iface)
 
-	if need_rebuild_scaffold then
-		local ok, err = rebuild_scaffold(kind, spec, cfg, dev, ids, logger)
-		if not ok then return nil, err end
-		st.sig = sig
-		st.dev = dev
-		st.ifb = ifb
-		st.ids = shallow_copy(ids)
-		st.hosts = nil
-		st.hosts_membership_sig = nil
-		st.hosts_limits_sig = nil
+		local ok, err = ensure_ifb(ifb, logger)
+		if not ok then return fail_dirty(st, err) end
+
+		-- The ingress redirect (ingress qdisc + mirred filter) is disruptive to rebuild.
+		-- Under the assumption that nothing else mutates tc state, we only need to
+		-- program it once per iface/ifb pair, and again after an internal failure
+		-- (mark_dirty clears redirect_ready) or if the IFB name changes.
+		if st.redirect_ready ~= true or st.ifb ~= ifb then
+			ok, err = ensure_ingress_redirect(iface, ifb, logger)
+			if not ok then return fail_dirty(st, err) end
+			st.redirect_ready = true
+			st.ifb = ifb
+		end
+
+		dev = ifb
 	end
 
-	-- Keep top-level pool/default classes up to date incrementally even without scaffold rebuild.
-	-- Batch the three HTB class replaces and default fq_codel leaf updates.
-	do
-		local class_cmds = {}
-		local qdisc_del_cmds = {}
-		local qdisc_add_cmds = {}
+	local sig = scaffold_signature(kind, spec, cfg, ids, dev)
+	local need_scaffold = (st.dirty == true) or (st.sig ~= sig) or (st.dev ~= dev)
 
-		class_cmds[#class_cmds + 1] = htb_class_replace_argv(
-			dev,
-			classid(ids.root_major, ids.root_class_minor),
-			classid(ids.root_major, ids.pool_minor),
-			cfg.pool_class or {
-				rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
-				ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
-				burst  = cfg.pool_burst,
-				cburst = cfg.pool_cburst,
-			}
-		)
-
-		class_cmds[#class_cmds + 1] = htb_class_replace_argv(
-			dev,
-			qdisc_handle(ids.inner_major),
-			classid(ids.inner_major, ids.inner_root_minor),
-			{
-				rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
-				ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
-				burst  = cfg.pool_burst,
-				cburst = cfg.pool_cburst,
-			}
-		)
-
-		class_cmds[#class_cmds + 1] = htb_class_replace_argv(
-			dev,
-			classid(ids.inner_major, ids.inner_root_minor),
-			classid(ids.inner_major, ids.default_minor),
-			cfg.default_class or {
-				rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
-				ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
-				burst  = (cfg.default_burst or cfg.host_burst),
-				cburst = (cfg.default_cburst or cfg.host_cburst),
-			}
-		)
-
-		append_default_fq_codel_reconcile_cmds(dev, ids, cfg.default_fq_codel, qdisc_del_cmds, qdisc_add_cmds)
-
-		local ok, err
-		ok, err = must_tc_batch_chunked(class_cmds, logger, 'reconcile top-level htb classes')
-		if not ok then return nil, err end
-
-		ok, err = try_tc_batch_force_chunked(qdisc_del_cmds, logger, 'reconcile default fq_codel delete')
-		if not ok then return nil, err end
-
-		ok, err = must_tc_batch_chunked(qdisc_add_cmds, logger, 'reconcile default fq_codel add')
-		if not ok then return nil, err end
+	if need_scaffold then
+		local ok, err = rebuild_scaffold(kind, spec, cfg, dev, ids, logger)
+		if not ok then return fail_dirty(st, err) end
+		st.sig, st.dev, st.ifb, st.ids, st.hosts = sig, dev, ifb, shallow_copy(ids), nil
+		st.dirty = nil
+	else
+		local ok, err = apply_top_classes(dev, ids, cfg, logger)
+		if not ok then return fail_dirty(st, err) end
 	end
 
 	local plan, perr = build_host_plan(spec, cfg, ids)
-	if not plan then return nil, perr end
+	if not plan then return fail_dirty(st, perr) end
 
-	local membership_sig     = host_membership_signature(plan)
-	local limits_sig         = host_limits_signature(plan)
+	local prev_plan = st.hosts or {}
 
-	local membership_changed = need_rebuild_scaffold or (st.hosts_membership_sig ~= membership_sig)
-	local limits_changed     = need_rebuild_scaffold or (st.hosts_limits_sig ~= limits_sig)
+	-- Membership drives filter work; limits drive class/fq work.
+	local mem_changed, _affected = membership_delta(prev_plan, plan)
+	local lim_changed = false
 
-	-- Rebuild host filter rules only if membership changed (or scaffold rebuilt)
-	local ok, err
-	if membership_changed then
-		ok, err = rebuild_host_filters(kind, spec, cfg, dev, ids, plan, logger)
-		if not ok then return nil, err end
-		st.hosts_membership_sig = membership_sig
+	if mem_changed then
+		local ok, err
+		if need_scaffold or not st.hosts then
+			ok, err = rebuild_host_filters_full(kind, spec, cfg, dev, ids, plan, logger)
+		else
+			ok, err = reconcile_host_filters_delta(kind, spec, cfg, dev, ids, prev_plan, plan, logger)
+		end
+		if not ok then return fail_dirty(st, err) end
+		lim_changed = true -- membership implies class/fq reconciliation work may be needed
+	else
+		-- Check per-host deltas only when membership is stable.
+		for ip_s, rec in pairs(plan) do
+			local old = prev_plan[ip_s]
+			if host_htb_changed(old, rec) or host_fq_changed(old, rec) then
+				lim_changed = true
+				break
+			end
+		end
 	end
 
-	-- Reconcile host classes/qdiscs if membership or limits changed
-	if membership_changed or limits_changed then
-		ok, err = reconcile_host_classes(dev, ids, st.hosts or {}, plan, logger)
-		if not ok then return nil, err end
-		st.hosts_limits_sig = limits_sig
+	-- Always reconcile when membership changed (stale removals), otherwise only if limits changed.
+	if mem_changed or lim_changed then
+		local ok, err = reconcile_host_classes_and_fq(dev, ids, prev_plan, plan, logger)
+		if not ok then return fail_dirty(st, err) end
 	end
 
 	st.hosts = plan
 	st.ids   = shallow_copy(ids)
 	st.dev   = dev
 	st.ifb   = ifb
+	st.dirty = nil
 
 	return true, nil
 end
@@ -1284,6 +1175,11 @@ end
 ---     hosts = { ... same shape (overrides) ... }
 ---   }
 --- }
+---
+--- Reconciliation behaviour:
+---   * Host filters are updated only when membership changes (adds/removes).
+---   * Host HTB classes are updated only for changed/new hosts.
+---   * Per-host fq_codel leaves are updated only for changed/new hosts (and removed for deleted hosts).
 function M.apply(spec)
 	spec = spec or {}
 	local iface = spec.iface
@@ -1293,20 +1189,10 @@ function M.apply(spec)
 
 	local cidr = spec.subnet or spec.cidr
 	local net_u, pfx, cerr = parse_cidr(cidr)
-	if not net_u then
-		return nil, cerr
-	end
+	if not net_u then return nil, cerr end
 
-	local logger
-	if type(spec.log) == 'function' then
-		logger = spec.log
-	end
-
-	local parsed = {
-		cidr  = cidr,
-		net_u = net_u,
-		pfx   = pfx,
-	}
+	local logger = (type(spec.log) == 'function') and spec.log or nil
+	local parsed = { cidr = cidr, net_u = net_u, pfx = pfx }
 
 	local ok, err = apply_direction(iface, 'egress', parsed, spec.egress, logger)
 	if not ok then return nil, 'egress: ' .. tostring(err) end
@@ -1317,25 +1203,19 @@ function M.apply(spec)
 	return true, nil
 end
 
---- Clear shaping on an interface (egress root + ingress redirect; IFB root if known).
 function M.clear(iface, opts)
 	opts = opts or {}
 	if type(iface) ~= 'string' or iface == '' then
 		return nil, 'iface is required'
 	end
-	local logger = type(opts.log) == 'function' and opts.log or nil
 
+	local logger = (type(opts.log) == 'function') and opts.log or nil
 	local st = STATE[iface]
 	local ifb = opts.ifb or (st and st.ingress and st.ingress.ifb) or sanitise_ifb_name(iface)
 
-	-- Batch the tc deletes; IFB link deletion remains on ip(8).
-	local del_cmds = {
-		{ 'tc', 'qdisc', 'del', 'dev', iface, 'root' },
-		{ 'tc', 'qdisc', 'del', 'dev', iface, 'ingress' },
-		{ 'tc', 'qdisc', 'del', 'dev', ifb, 'root' },
-	}
-	local ok, err = try_tc_batch_force_chunked(del_cmds, logger, 'clear tc state')
-	if not ok then return nil, err end
+	try_cmd({ 'tc', 'qdisc', 'del', 'dev', iface, 'root' }, logger)
+	try_cmd({ 'tc', 'qdisc', 'del', 'dev', iface, 'ingress' }, logger)
+	try_cmd({ 'tc', 'qdisc', 'del', 'dev', ifb, 'root' }, logger)
 
 	if opts.delete_ifb then
 		try_cmd({ 'ip', 'link', 'del', ifb }, logger)
