@@ -1,23 +1,24 @@
 -- services/config.lua
 --
 -- Config service:
---  - discovers HAL via {'svc','+','announce'} where payload.role == "hal"
---  - reads a single JSON blob from HAL (string) keyed at top level by service name
---  - publishes retained to {'config', <service_name>} with the nested settings table
---  - accepts updates:
---      * pub/sub: {'config', <service_name>, 'set'} payload is a table (settings)
+--  - discovers filesystem capability {'cap', 'fs', 'config', ...}
+--  - reads config.json from the filesystem capability
+--  - publishes retained to {'cfg', <service_name>} with the nested settings table
+--  - accepts updates (in-memory only, not persisted):
+--      * pub/sub: {'cfg', <service_name>, 'set'} payload is a table (settings)
 --
--- Persisted state location (within HAL):
---   ns  = "config"
---   key = "services"
+-- Config file location: ${DC_CONFIG_DIR}/config.json
+-- Format: { "service_name": { ...settings... }, ... }
 --
--- Assumes cjson.safe is available.
+-- Note: Write/persistence not yet implemented.
 
 local op      = require 'fibers.op'
 local runtime = require 'fibers.runtime'
 local perform = require 'fibers.performer'.perform
+local log     = require 'services.log'
 
 local cjson = require 'cjson.safe'
+local external_types = require 'services.hal.types.external'
 
 local M = {}
 
@@ -58,11 +59,12 @@ local function is_service_map(x)
 end
 
 -------------------------------------------------------------------------------
--- HAL discovery + client
+-- Filesystem capability discovery + client
 -------------------------------------------------------------------------------
 
-local function discover_hal_rpc_root(conn)
-	local sub = conn:subscribe(t('svc', '+', 'announce'), { queue_len = 10, full = 'drop_oldest' })
+local function wait_for_fs_capability(conn)
+	-- Wait for filesystem capability with ID 'config' to become available
+	local sub = conn:subscribe(t('cap', 'fs', 'config', 'state'), { queue_len = 10, full = 'drop_oldest' })
 
 	while true do
 		local msg, err = perform(sub:recv_op())
@@ -70,33 +72,31 @@ local function discover_hal_rpc_root(conn)
 			return nil, err
 		end
 
-		local p = msg.payload or {}
-		if p.role == 'hal' and type(p.rpc_root) == 'table' then
-			-- rpc_root is a topic array
+		if msg.payload == 'added' then
 			sub:unsubscribe()
-			return p.rpc_root, nil
+			return true, nil
 		end
 	end
 end
 
-local function hal_call(conn, rpc_root, method, payload)
-	local topic = { rpc_root[1], rpc_root[2], rpc_root[3], method }
-	return conn:call(topic, payload)
-end
+local function fs_read_config(conn)
+	-- Read config.json from the filesystem capability
+	local opts, opts_err = external_types.new.FilesystemReadOpts('config.json')
+	if not opts then
+		return nil, 'failed to create read options: ' .. tostring(opts_err)
+	end
 
-local function hal_read_blob(conn, rpc_root, ns, key)
-	local reply, err = hal_call(conn, rpc_root, 'read_state', { ns = ns, key = key })
-	if not reply then return nil, err end
-	if reply.ok ~= true then return nil, reply.err or 'hal read failed' end
-	if reply.found ~= true then return nil, 'not_found' end
-	return reply.data, nil
-end
+	local reply, err = conn:call(t('cap', 'fs', 'config', 'rpc', 'read'), opts)
+	if not reply then
+		return nil, err
+	end
 
-local function hal_write_blob(conn, rpc_root, ns, key, data)
-	local reply, err = hal_call(conn, rpc_root, 'write_state', { ns = ns, key = key, data = data })
-	if not reply then return nil, err end
-	if reply.ok ~= true then return nil, reply.err or 'hal write failed' end
-	return true, nil
+	if reply.ok ~= true then
+		return nil, reply.reason or 'filesystem read failed'
+	end
+
+	-- File content is in reply.reason
+	return reply.reason, nil
 end
 
 -------------------------------------------------------------------------------
@@ -109,54 +109,50 @@ function M.start(conn, opts)
 
 	publish_status(conn, name, 'starting')
 
-	-- Discover HAL without naming it.
-	local hal_rpc_root, herr = discover_hal_rpc_root(conn)
-	if not hal_rpc_root then
-		publish_status(conn, name, 'stopped', { reason = herr or 'no hal available' })
+	-- Wait for filesystem capability to become available
+	local ok, cap_err = wait_for_fs_capability(conn)
+	if not ok then
+		publish_status(conn, name, 'stopped', { reason = cap_err or 'filesystem capability not available' })
 		return
 	end
-
-	local STATE_NS  = 'config'
-	local STATE_KEY = 'services'
 
 	-- Current config: service_name -> settings_table
 	local current = {}
 
 	local function publish_all_retained()
 		for svc, settings in pairs(current) do
-			conn:retain(t('config', svc), settings)
+			conn:retain(t('cfg', svc), settings)
 		end
 	end
 
-	local function load_from_hal()
-		local blob, err = hal_read_blob(conn, hal_rpc_root, STATE_NS, STATE_KEY)
+	local function load_from_fs()
+		local blob, err = fs_read_config(conn)
 		if not blob then
-			-- Missing is not fatal: start with empty.
+			log.warn(("Config: %s"):format(err))
+			-- Missing file is not fatal: start with empty config.
+			if err and (err:find('not found') or err:find('No such file')) then
+				current = {}
+				publish_all_retained()
+				return true
+			end
+			-- Other errors are more serious
+			publish_status(conn, name, 'degraded', { reason = 'failed to read config: ' .. tostring(err) })
 			current = {}
-			publish_all_retained()
-			return true
+			return false
 		end
 
 		local decoded = cjson.decode(blob)
+		print(decoded)
 		if not is_service_map(decoded) then
 			-- Do not guess: publish nothing and surface an error status.
 			publish_status(conn, name, 'degraded', { reason = 'invalid config JSON shape' })
 			current = {}
-			return true
+			return false
 		end
 
 		current = decoded
 		publish_all_retained()
 		return true
-	end
-
-	local function persist_to_hal()
-		local blob = cjson.encode(current) or '{}'
-		local ok, err = hal_write_blob(conn, hal_rpc_root, STATE_NS, STATE_KEY, blob)
-		if not ok then
-			return nil, err
-		end
-		return true, nil
 	end
 
 	local function set_service(service, settings)
@@ -167,21 +163,17 @@ function M.start(conn, opts)
 			return nil, 'settings must be a table'
 		end
 
+		-- Update in-memory only (persistence not yet implemented)
 		current[service] = settings
-		local ok, err = persist_to_hal()
-		if not ok then
-			return nil, err
-		end
-
-		conn:retain(t('config', service), settings)
+		conn:retain(t('cfg', service), settings)
 		return true, nil
 	end
 
 	-- Initial load
-	load_from_hal()
+	load_from_fs()
 
 	-- Updates from other sources (UI/cloud/etc)
-	local sub_set = conn:subscribe(t('config', '+', 'set'), { queue_len = 50, full = 'drop_oldest' })
+	local sub_set = conn:subscribe(t('cfg', '+', 'set'), { queue_len = 50, full = 'drop_oldest' })
 
 	publish_status(conn, name, 'running')
 
@@ -195,10 +187,10 @@ function M.start(conn, opts)
 		local service = msg.topic and msg.topic[2]
 		local settings = msg.payload
 
-		local ok, uerr = set_service(service, settings)
+		local success, uerr = set_service(service, settings)
 		-- Best-effort reply if request-style publish provided reply_to.
 		if msg.reply_to ~= nil then
-			if ok then
+			if success then
 				conn:publish_one(msg.reply_to, { ok = true }, { id = msg.id })
 			else
 				conn:publish_one(msg.reply_to, { ok = false, err = tostring(uerr) }, { id = msg.id })
