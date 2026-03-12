@@ -72,11 +72,10 @@ local function t_cap_rpc(id, method)
 	return { 'cap', 'modem', id, 'rpc', method }
 end
 
----@param id string|number
 ---@param key string
 ---@return table
-local function t_obs_metric(id, key)
-	return { 'obs', 'v1', 'gsm', 'metric', id, key }
+local function t_obs_metric(key)
+	return { 'obs', 'v1', 'gsm', 'metric', key }
 end
 
 ---@param id string|number
@@ -418,7 +417,19 @@ function GsmModem:_emit_metric(key, value)
 	if value == nil then
 		return
 	end
-	self.conn:publish(t_obs_metric(self.id, key), value)
+	local ns_name = nil
+	if self.name == "primary" then
+		ns_name = "1"
+	elseif self.name == "secondary" then
+		ns_name = "2"
+	else
+		return
+	end
+	local metric = {
+		value = value,
+		namespace = {'modem', ns_name, key}
+	}
+	self.conn:publish(t_obs_metric(key), metric)
 end
 
 ---@param key string
@@ -482,8 +493,9 @@ function GsmModem:_emit_metrics_once()
 		log.debug("GSM", self.name, "- state: ", msg_err)
 	end
 	local state = state_msg.payload and state_msg.payload.to
+	---@cast state ModemStateEvent
 	if state then
-		self:_emit_metric('state', state)
+		self:_emit_metric('state', state.to)
 	end
 
 	local net_ports, net_ports_err = modem_get_field(self.conn, self.id, 'net_ports', REQUEST_TIMEOUT)
