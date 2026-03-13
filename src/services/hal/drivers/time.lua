@@ -54,15 +54,40 @@ local function emit(emit_ch, id, mode, key, data)
     return true
 end
 
+---Convert NTP stratum to an estimated absolute accuracy in seconds.
+---Returns nil when unsynced (stratum >= 16) or invalid input.
+---@param stratum number
+---@return number? accuracy_seconds
+local function accuracy_for_stratum(stratum)
+    if type(stratum) ~= 'number' then
+        return nil
+    end
+    if stratum >= 16 then
+        return nil
+    end
+
+    -- Coarse operational heuristic:
+    -- lower stratum generally implies lower clock error.
+    if stratum <= 1 then
+        return 0.001
+    elseif stratum <= 4 then
+        return 0.01
+    elseif stratum <= 8 then
+        return 0.1
+    else
+        return 1.0
+    end
+end
+
 ---Build a meta payload table for this time source.
----@param accuracy 'low'|'high'
+---@param accuracy_seconds number?
 ---@return table
-local function build_meta(accuracy)
+local function build_meta(accuracy_seconds)
     return {
         provider = 'hal',
         source   = 'ntp',
         version  = 1,
-        accuracy = accuracy,
+        accuracy_seconds = accuracy_seconds,
     }
 end
 
@@ -111,12 +136,17 @@ function TimeDriver:_ntpd_monitor()
                 local stratum = ntp_data.stratum
                 local now_synced = stratum ~= 16
                 local was_synced = self.synced
+                local accuracy_seconds = accuracy_for_stratum(stratum)
 
                 -- Always update retained state, even if sync status did not change,
                 -- so that the latest stratum value is always visible to subscribers.
                 local ok, emit_err = emit(
                     self.cap_emit_ch, self.id, 'state', 'synced',
-                    { synced = now_synced, stratum = stratum }
+                    {
+                        synced = now_synced,
+                        stratum = stratum,
+                        accuracy_seconds = accuracy_seconds,
+                    }
                 )
                 if not ok then
                     log.warn("Time Driver: failed to emit state:", emit_err)
@@ -124,10 +154,9 @@ function TimeDriver:_ntpd_monitor()
 
                 -- Update accuracy metadata only on a sync/unsync transition.
                 if now_synced ~= was_synced then
-                    local accuracy = now_synced and 'high' or 'low'
                     local meta_ok, meta_err = emit(
                         self.cap_emit_ch, self.id, 'meta', 'source',
-                        build_meta(accuracy)
+                        build_meta(accuracy_seconds)
                     )
                     if not meta_ok then
                         log.warn("Time Driver: failed to emit meta:", meta_err)
@@ -139,7 +168,10 @@ function TimeDriver:_ntpd_monitor()
                     log.debug("Time Driver: NTP synced, stratum =", stratum)
                     local ev_ok, ev_err = emit(
                         self.cap_emit_ch, self.id, 'event', 'synced',
-                        { stratum = stratum }
+                        {
+                            stratum = stratum,
+                            accuracy_seconds = accuracy_seconds,
+                        }
                     )
                     if not ev_ok then
                         log.warn("Time Driver: failed to emit synced event:", ev_err)
@@ -148,7 +180,10 @@ function TimeDriver:_ntpd_monitor()
                     log.debug("Time Driver: NTP unsynced, stratum =", stratum)
                     local ev_ok, ev_err = emit(
                         self.cap_emit_ch, self.id, 'event', 'unsynced',
-                        { stratum = stratum }
+                        {
+                            stratum = stratum,
+                            accuracy_seconds = accuracy_seconds,
+                        }
                     )
                     if not ev_ok then
                         log.warn("Time Driver: failed to emit unsynced event:", ev_err)
@@ -216,10 +251,10 @@ function TimeDriver:start()
         return false, "capabilities not applied"
     end
 
-    -- Publish initial meta (accuracy is low; sysntpd has only just restarted).
+    -- Publish initial meta (accuracy unknown until first NTP update).
     local meta_ok, meta_err = emit(
         self.cap_emit_ch, self.id, 'meta', 'source',
-        build_meta('low')
+        build_meta(nil)
     )
     if not meta_ok then
         log.warn("Time Driver: failed to emit initial meta:", meta_err)
