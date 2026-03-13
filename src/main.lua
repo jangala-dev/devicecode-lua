@@ -16,17 +16,25 @@ end
 local env = os.getenv('DEVICECODE_ENV') or 'dev'
 if env == 'prod' then
 	add_path('./lib/')
+	-- Include system Lua paths for OpenWrt packages (e.g. http.request, ssl, etc.)
+	add_path('/usr/share/lua/')
+	add_path('/usr/lib/lua/')
 else
 	add_path('../vendor/lua-fibers/src/')
 	add_path('../vendor/lua-bus/src/')
 	add_path('../vendor/lua-trie/src/')
 	add_path('./')
+	-- Include system Lua paths for locally-installed packages (e.g. http.request)
+	add_path('/usr/share/lua/')
+	add_path('/usr/lib/lua/')
 end
 
 local fibers = require 'fibers'
+local op = require 'fibers.op'
 local sleep  = require 'fibers.sleep'
 local scope = require 'fibers.scope'
 local busmod = require 'bus'
+local log = require 'services.log'
 
 if env == 'dev' then
 	scope.set_debug(true) -- enable debug mode for better error traces
@@ -53,7 +61,7 @@ fibers.run(function ()
 	local root = fibers.current_scope()
 
 	-- Validate required env early.
-	require_env('DEVICECODE_STATE_DIR')
+	require_env('DEVICECODE_CONFIG_DIR')
 	local service_names = parse_csv(require_env('DEVICECODE_SERVICES'))
 	if #service_names == 0 then
 		error('DEVICECODE_SERVICES must contain at least one service name', 2)
@@ -83,14 +91,20 @@ fibers.run(function ()
 
 	-- Keep alive until scope cancellation.
 	while true do
-		sleep.sleep(10)
-		for name, sc in pairs(scopes) do
-			local st, _ = sc:status()
-			if st ~= 'ok' then
-				fibers.perform(sc:join_op()) -- propagate any errors
-				print(("main: scope %s exited with status %s"):format(name, st))
-				scopes[name] = nil
-			end
+		local ops = {}
+		for name, s in pairs(scopes) do
+			ops[#ops + 1] = s:fault_op():wrap(function (_, pr)
+				return { name = name, scope = s, pr = pr }
+			end)
+		end
+		local source, msg, err = fibers.perform(op.named_choice(ops))
+
+		if source then
+			log.error("main", "service", msg.name, "failed with error:", msg.pr)
+			fibers.perform(msg.scope:join_op())
+			scopes[msg.name] = nil
+		else
+			log.error("main", "error in main loop:", err)
 		end
 	end
 end)
