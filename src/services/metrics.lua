@@ -291,9 +291,10 @@ local function http_publish(data)
 	local auth  = 'Thing ' .. State.cloud_config.thing_key
 
 	-- Non-blocking enqueue: drop and log if the channel is at capacity.
-	local sent = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body })
-		:or_else(function() return false end))
-	if not sent then
+	local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body })
+		:or_else(function() return true end))
+
+	if full then
 		log.error('metrics: HTTP send queue full, dropping publish payload')
 	end
 end
