@@ -33,6 +33,7 @@ local function publish_status(conn, name, state, extra)
 	if type(extra) == 'table' then
 		for k, v in pairs(extra) do payload[k] = v end
 	end
+	log.trace(("TIME: service status -> %s"):format(tostring(state)))
 	conn:retain(t('svc', name, 'status'), payload)
 end
 
@@ -66,6 +67,9 @@ end
 ---@return nil
 local function apply_sync_state(state, conn, is_synced, payload)
 	if state.current_synced ~= is_synced then
+		log.info((
+			"TIME: sync state transition %s -> %s"
+		):format(tostring(state.current_synced), tostring(is_synced)))
 		publish_synced(conn, is_synced)
 		if is_synced then
 			publish_transition_event(conn, 'synced', payload)
@@ -79,9 +83,11 @@ local function apply_sync_state(state, conn, is_synced, payload)
 	-- install_alarm_handler/clock_synced/clock_desynced.
 	if is_synced then
 		if not state.time_source_installed then
+			log.info("TIME: installing alarm time source from realtime clock")
 			local ok, err = pcall(alarm.set_time_source, time_utils.realtime)
 			if ok then
 				state.time_source_installed = true
+				log.info("TIME: alarm time source installed")
 			else
 				log.warn("TIME: failed to set alarm time source:", tostring(err))
 			end
@@ -95,6 +101,7 @@ end
 ---@param cap_id CapabilityId
 ---@return nil
 local function monitor_capability(conn, cap_id)
+	log.info(("TIME: starting monitor for capability id=%s"):format(tostring(cap_id)))
 	local sub_state = conn:subscribe(t('cap', 'time', cap_id, 'state', 'synced'), {
 		queue_len = 10,
 		full = 'drop_oldest',
@@ -119,9 +126,12 @@ local function monitor_capability(conn, cap_id)
 	do
 		local msg, err = perform(sub_state:recv_op())
 		if msg then
+			log.info("TIME: received initial retained sync state")
 			local is_synced = synced_from_state_payload(msg.payload)
 			if is_synced ~= nil then
 				apply_sync_state(state, conn, is_synced, msg.payload)
+			else
+				log.warn("TIME: initial retained state payload missing boolean synced field")
 			end
 		else
 			log.warn("TIME: failed to read initial state:", err)
@@ -144,6 +154,8 @@ local function monitor_capability(conn, cap_id)
 			apply_sync_state(state, conn, true, msg.payload)
 		elseif which == 'unsynced' then
 			apply_sync_state(state, conn, false, msg.payload)
+		else
+			log.warn("TIME: unknown event source in monitor loop:", tostring(which))
 		end
 	end
 end
@@ -154,6 +166,7 @@ end
 function M.start(conn, opts)
 	opts = opts or {}
 	local name = opts.name or 'time'
+	log.trace("TIME: starting")
 
 	publish_status(conn, name, 'starting')
 
@@ -169,6 +182,7 @@ function M.start(conn, opts)
 		queue_len = 10,
 		full = 'drop_oldest',
 	})
+	log.trace("TIME: subscribed to time capability meta announcements")
 
 	publish_status(conn, name, 'running')
 
@@ -185,6 +199,8 @@ function M.start(conn, opts)
 			log.trace("TIME: selected first time capability:", tostring(cap_id))
 			monitor_capability(conn, cap_id)
 			return
+		else
+			log.warn("TIME: capability meta message missing capability id token")
 		end
 	end
 end
