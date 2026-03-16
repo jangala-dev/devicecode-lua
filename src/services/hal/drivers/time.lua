@@ -54,6 +54,28 @@ local function emit(emit_ch, id, mode, key, data)
     return true
 end
 
+---Recursively convert numeric-looking strings into numbers.
+---@param value any
+---@return any
+local function coerce_numeric_strings(value)
+    if type(value) == 'string' then
+        local n = tonumber(value)
+        if n ~= nil then
+            return n
+        end
+        return value
+    end
+
+    if type(value) == 'table' then
+        for k, v in pairs(value) do
+            value[k] = coerce_numeric_strings(v)
+        end
+        return value
+    end
+
+    return value
+end
+
 ---Convert NTP stratum to an estimated absolute accuracy in seconds.
 ---Returns nil when unsynced (stratum >= 16) or invalid input.
 ---@param stratum number
@@ -131,6 +153,7 @@ function TimeDriver:_ntpd_monitor()
         if not decoded then
             log.warn("Time Driver: failed to decode hotplug.ntp event:", line)
         else
+            decoded = coerce_numeric_strings(decoded)
             local ntp_data = decoded["hotplug.ntp"]
             if type(ntp_data) == 'table' and type(ntp_data.stratum) == 'number' then
                 local stratum = ntp_data.stratum
