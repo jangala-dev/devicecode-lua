@@ -72,7 +72,7 @@
             "publish_period": 10,
             "templates": {
                 "network_stat": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "DiffTrigger",
@@ -86,7 +86,7 @@
                     ]
                 },
                 "any_change": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "DiffTrigger",
@@ -95,7 +95,7 @@
                     ]
                 },
                 "percent_5": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "DiffTrigger",
@@ -105,7 +105,7 @@
                     ]
                 },
                 "absolute_10": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "DiffTrigger",
@@ -183,7 +183,7 @@
                     "template": "any_change"
                 },
                 "boot_time": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "DiffTrigger",
@@ -208,7 +208,7 @@
                     "template": "percent_5"
                 },
                 "temperature": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "DiffTrigger",
@@ -218,7 +218,7 @@
                     ]
                 },
                 "alloc": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "TimeTrigger",
@@ -227,7 +227,7 @@
                     ]
                 },
                 "internal": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "DiffTrigger",
@@ -336,11 +336,11 @@
                     "template": "any_change"
                 },
                 "session_start": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": []
                 },
                 "session_end": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": []
                 },
                 "hostname": {
@@ -350,7 +350,7 @@
                     "template": "percent_5"
                 },
                 "power": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "DiffTrigger",
@@ -364,7 +364,7 @@
                     "template": "any_change"
                 },
                 "noise": {
-                    "protocol": "log",
+                    "protocol": "http",
                     "process": [
                         {
                             "type": "DiffTrigger",
