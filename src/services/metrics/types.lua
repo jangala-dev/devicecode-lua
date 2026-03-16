@@ -147,7 +147,7 @@ end
 -- ServiceState  (the live mutable state table held in metrics.lua)
 -------------------------------------------------------------------------------
 
----@alias PipelineEntry { pipeline: ProcessPipeline, protocol: string, field: string|number|nil, rename: table? }
+---@alias PipelineEntry { pipeline: ProcessPipeline, protocol: string }
 ---@alias PipelineMap   table<string, PipelineEntry>
 ---@alias MetricStates  table<string, table>
 ---@alias MetricValues  table<string, table<string, MetricSample>>
