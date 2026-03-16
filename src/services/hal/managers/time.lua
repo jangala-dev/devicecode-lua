@@ -6,6 +6,7 @@ local hal_types = require "services.hal.types.core"
 local fibers = require "fibers"
 local op = require "fibers.op"
 local sleep = require "fibers.sleep"
+local exec = require "fibers.io.exec"
 
 -- Other modules
 local log = require "services.log"
@@ -13,6 +14,8 @@ local log = require "services.log"
 -- Constants
 
 local STOP_TIMEOUT = 5.0 -- seconds
+local HOTPLUG_DIR = "/etc/hotplug.d/ntp"
+local HOTPLUG_SCRIPT_NAME = "ntp"
 
 ---@alias TimeDriverHandle table
 
@@ -20,8 +23,8 @@ local STOP_TIMEOUT = 5.0 -- seconds
 ---@field scope Scope
 ---@field started boolean
 ---@field driver TimeDriverHandle?
----@field dev_ev_ch Channel
----@field cap_emit_ch Channel
+---@field dev_ev_ch Channel?
+---@field cap_emit_ch Channel?
 local TimeManager = {
     started     = false,
     driver      = nil,
@@ -82,12 +85,63 @@ local function stop_existing_driver()
     TimeManager.driver = nil
 end
 
+---Run a command and require a zero exit status.
+---@param ... string argv
+---@return boolean ok
+---@return string? error
+local function run_checked(...)
+    local status, code, _, err = fibers.perform(exec.command(...):run_op())
+    if status ~= 'exited' or code ~= 0 then
+        return false, tostring(err or ("exit code " .. tostring(code)))
+    end
+    return true, nil
+end
+
+---Resolve the directory that contains this manager file.
+---@return string dir
+local function manager_dir()
+    local source = debug.getinfo(1, 'S').source or ''
+    source = source:gsub('^@', '')
+    return source:match('^(.*)/[^/]+$') or '.'
+end
+
+---Install the NTP hotplug script into /etc/hotplug.d/ntp.
+---@return boolean ok
+---@return string? error
+local function install_ntp_hotplug_script()
+    local src = manager_dir() .. "/time/" .. HOTPLUG_SCRIPT_NAME
+    local dst = HOTPLUG_DIR .. "/" .. HOTPLUG_SCRIPT_NAME
+
+    local ok, err = run_checked("mkdir", "-p", HOTPLUG_DIR)
+    if not ok then
+        return false, "failed to create hotplug directory: " .. tostring(err)
+    end
+
+    ok, err = run_checked("cp", src, dst)
+    if not ok then
+        return false, "failed to copy hotplug script from " .. src .. ": " .. tostring(err)
+    end
+
+    ok, err = run_checked("chmod", "+x", dst)
+    if not ok then
+        return false, "failed to chmod hotplug script: " .. tostring(err)
+    end
+
+    return true, nil
+end
+
 ---Initialise, apply capabilities, and start a new TimeDriver. Stops any previously
 ---running driver first. Called from within a manager-scope fiber so exec and channel
 ---operations are safe.
 ---@return nil
 local function bring_up_driver()
     stop_existing_driver()
+
+    local installed, install_err = install_ntp_hotplug_script()
+    if not installed then
+        log.error("Time Manager: failed to install NTP hotplug script:", install_err)
+        return
+    end
 
     local driver, new_err = time_driver.new()
     if not driver then
