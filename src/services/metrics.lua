@@ -34,7 +34,7 @@ local conf           = require 'services.metrics.config'
 local types          = require 'services.metrics.types'
 
 
-local unpack = unpack or table.unpack
+local unpack = unpack or rawget(table, 'unpack')
 
 local NAME = 'metrics'
 
