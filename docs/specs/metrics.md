@@ -23,7 +23,7 @@ A pipeline is defined as:
 - `protocol`: The procotol to be used for publication, either log or http
 - `process`: A list of processing blocks to be used on the metric
 - - `type`: The process block name
-- - `args`: A collection of args required by that block
+- - additional fields are the arguments for that block (flat, not nested under an `args` key)
 
 An example config
 
@@ -37,11 +37,9 @@ An example config
       "process": [
         {
           "type": "DiffTrigger",
-          "args": {
-            "diff_method": "percent",
-            "threshold": 5,
-            "initial_val": 0
-          }
+          "diff_method": "percent",
+          "threshold": 5,
+          "initial_val": 0
         },
         {
           "type": "DeltaValue"
@@ -58,9 +56,7 @@ An example config
       "process": [
         {
           "type": "DiffTrigger",
-          "args": {
-            "diff_method": "any-change"
-          }
+          "diff_method": "any-change"
         }
       ]
     }
@@ -110,7 +106,7 @@ The metrics service validates all configuration on receipt and handles invalid c
 - `templates`: Each template must have valid `protocol` and optional `process` array. Invalid templates are dropped.
 - `pipelines`: Each pipeline must specify a valid `protocol`. Pipelines referencing dropped templates are also dropped.
 - `protocol`: Must be one of: `http`, `log`, or `bus`. Invalid protocols cause that pipeline to be dropped.
-- `process`: Must be an array of process block tables, each with `type` and optional `args`.
+- `process`: Must be an array of process block tables, each with a `type` field; additional fields are the block's arguments.
 
 ### Warning Handling
 
@@ -248,7 +244,7 @@ The difference trigger is a block which only outputs a value if the difference b
 - `absolute`: Only triggers if the current value is an absolute difference of the last output value
 - `any-change`: Triggers if the current value does not match the last output value
 
-**Arguments**
+**Arguments** (fields on the process block table, alongside `type`)
 
 - `diff_method`: This can either be `percent`, `absolute` or `any-change`
 - `initial_val`: This is an optional argument to set the previous value before any value has been set. If this value is not set then the block will always output the first value received
@@ -264,7 +260,7 @@ The difference trigger is a block which only outputs a value if the difference b
 
 The time trigger outputs a value only once a certain time period has elapsed since the last value output. Uses monotonic time to ensure immunity to system clock changes.
 
-**Arguments**
+**Arguments** (fields on the process block table, alongside `type`)
 - `duration`: the time between value outputs (seconds)
 
 **Behavior Details**
