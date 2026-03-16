@@ -361,12 +361,7 @@ local function on_config(config)
     end
 
     for name, manager_config in pairs(config) do
-        if HalService.managers[name] then
-            local ok, apply_err = HalService.managers[name].apply_config(manager_config)
-            if not ok then
-                log.debug(HalService.name, "- failed to apply config for manager:", name, apply_err)
-            end
-        else
+        if not HalService.managers[name] then
             local ok, manager = pcall(require, "services.hal.managers." .. name)
             if not ok then
                 log.debug("HAL: failed to load manager module for manager:", name)
@@ -378,6 +373,14 @@ local function on_config(config)
                 else
                     HalService.managers[name] = manager
                 end
+            end
+        end
+
+        local manager = HalService.managers[name]
+        if manager then
+            local ok, apply_err = manager.apply_config(manager_config)
+            if not ok then
+                log.debug(HalService.name, "- failed to apply config for manager:", name, apply_err)
             end
         end
     end
