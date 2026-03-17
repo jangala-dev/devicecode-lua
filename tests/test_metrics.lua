@@ -565,10 +565,22 @@ end
 
 TestMetricsService = {}
 
+function TestMetricsService:setUp()
+    self.clock = nil
+end
+
+function TestMetricsService:tearDown()
+    if self.clock then
+        self.clock:restore()
+        self.clock = nil
+    end
+end
+
 -- Publish a metric config as a retained message and a raw metric, then verify
 -- the processed value is re-published on the bus topic.
 function TestMetricsService:test_metric_published_via_bus()
     local clock = new_test_clock()
+    self.clock = clock
     local root      = fibers.current_scope()
     local bus       = make_bus()
     local test_conn = bus:connect()
@@ -576,6 +588,7 @@ function TestMetricsService:test_metric_published_via_bus()
     -- Signal HAL filesystem capability ready (retained).
     test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
     start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
 
     -- Subscribe to bus-protocol metric output before starting the service.
     local result_sub = test_conn:subscribe(
@@ -606,12 +619,14 @@ end
 -- the SenML key and the output topic.
 function TestMetricsService:test_namespace_overrides_topic_key()
     local clock = new_test_clock()
+    self.clock = clock
     local root      = fibers.current_scope()
     local bus       = make_bus()
     local test_conn = bus:connect()
 
     test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
     start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
 
     local result_sub = test_conn:subscribe(
         { 'svc', 'metrics', '#' },
@@ -641,12 +656,14 @@ end
 -- A metric whose name has no matching pipeline must be silently dropped.
 function TestMetricsService:test_unknown_metric_dropped()
     local clock = new_test_clock()
+    self.clock = clock
     local root      = fibers.current_scope()
     local bus       = make_bus()
     local test_conn = bus:connect()
 
     test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
     start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
 
     local result_sub = test_conn:subscribe(
         { 'svc', 'metrics', '#' },
@@ -675,12 +692,14 @@ end
 -- does not change between publish cycles.
 function TestMetricsService:test_difftrigger_suppresses_unchanged_value()
     local clock = new_test_clock()
+    self.clock = clock
     local root      = fibers.current_scope()
     local bus       = make_bus()
     local test_conn = bus:connect()
 
     test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
     start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
 
     local result_sub = test_conn:subscribe(
         { 'svc', 'metrics', '#' },
@@ -723,12 +742,14 @@ end
 -- DeltaValue transforms a cumulative counter into a per-period delta.
 function TestMetricsService:test_delta_value_pipeline()
     local clock = new_test_clock()
+    self.clock = clock
     local root      = fibers.current_scope()
     local bus       = make_bus()
     local test_conn = bus:connect()
 
     test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
     start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
 
     local result_sub = test_conn:subscribe(
         { 'svc', 'metrics', '#' },
@@ -765,12 +786,14 @@ end
 -- HTTP protocol pipelines should enqueue a well-formed Mainflux request.
 function TestMetricsService:test_http_pipeline_enqueues_request_payload()
     local clock = new_test_clock()
+    self.clock = clock
     local root      = fibers.current_scope()
     local bus       = make_bus()
     local test_conn = bus:connect()
 
     test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
     start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
 
     local captured = nil
     local original_http_mod = package.loaded['services.metrics.http']
@@ -836,12 +859,14 @@ end
 -- Receiving a new config replaces pipelines; old metric names are dropped.
 function TestMetricsService:test_config_update_replaces_pipelines()
     local clock = new_test_clock()
+    self.clock = clock
     local root      = fibers.current_scope()
     local bus       = make_bus()
     local test_conn = bus:connect()
 
     test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
     start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
 
     local result_sub = test_conn:subscribe(
         { 'svc', 'metrics', '#' },
@@ -882,12 +907,14 @@ end
 -- state (DeltaValue counters don't bleed across endpoints).
 function TestMetricsService:test_per_endpoint_state_isolation()
     local clock = new_test_clock()
+    self.clock = clock
     local root      = fibers.current_scope()
     local bus       = make_bus()
     local test_conn = bus:connect()
 
     test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
     start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
 
     local result_sub = test_conn:subscribe(
         { 'svc', 'metrics', '#' },
