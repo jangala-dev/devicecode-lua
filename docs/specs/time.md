@@ -46,24 +46,21 @@ flowchart TD
   St[Start] --> B(Publish status: starting)
   B --> C(Subscribe to cap/time/+/meta/source)
   C --> D(Publish status: running)
-  D --> E{Wait for first time capability meta message or context done}
-  E -->|context done| Z[Publish status: stopped]
+  D --> E{Wait for first time capability meta message or scope done}
+  E -->|scope done| Z[Publish status: stopped]
   E -->|first capability meta received| F(Extract uuid from meta topic)
-  F --> G(Subscribe to cap/time/uuid/state/synced)
-  G --> H(Consume retained state and apply sync state)
-  H --> I(Subscribe to cap/time/uuid/event/synced)
-  I --> J(Subscribe to cap/time/uuid/event/unsynced)
-  J --> K{Wait for state, synced event, unsynced event, or context done}
+  F --> G(Subscribe to cap/time/uuid/state/synced\ncap/time/uuid/event/synced\ncap/time/uuid/event/unsynced)
+  G --> H(Read single retained state message and apply sync state)
+  H --> H2(Unsubscribe from state/synced)
+  H2 --> K{Wait for synced event, unsynced event, or scope done}
   K -->|synced event| L(Apply synced: retain svc/time/synced=true, emit transition event)
   L --> K
   K -->|unsynced event| M(Apply unsynced: retain svc/time/synced=false, emit transition event)
   M --> K
-  K -->|state update| N(Apply state payload synced bool)
-  N --> K
-  K -->|context done| Z
+  K -->|scope done| Z
 ```
 
-The retained `{'cap', 'time', <uuid>, 'state', 'synced'}` payload is consumed immediately after subscription to initialise sync state before any events arrive.
+All three subscriptions are created before any message is read, so no events are lost during initialisation. The retained `{'cap', 'time', <uuid>, 'state', 'synced'}` payload is consumed as a one-shot read to bootstrap sync state, then the state subscription is dropped. Ongoing sync state changes are tracked exclusively through the `event/synced` and `event/unsynced` transition topics.
 
 With the new fibers alarm API, the service calls:
 - `alarm.set_time_source(fibers.utils.time.realtime)` on first synced state
