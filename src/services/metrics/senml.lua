@@ -11,6 +11,9 @@
 ---@return SenMLRecord? senml_obj
 ---@return string? error
 local function encode(topic, value, time)
+    if type(topic) ~= 'string' or topic == '' then
+        return nil, 'topic must be a non-empty string'
+    end
     local vtype = type(value)
     if vtype ~= 'number' and vtype ~= 'string' and vtype ~= 'boolean' then
         return nil, 'value must be number, string or boolean, found ' .. vtype
