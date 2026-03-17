@@ -39,10 +39,15 @@ local VALID_METRIC_FIELDS   = {
 ---@return boolean
 local function is_array(t)
     if type(t) ~= 'table' then return false end
-    local i = 1
+    local count = 0
     for k in pairs(t) do
-        if k ~= i then return false end
-        i = i + 1
+        if type(k) ~= 'number' or math.floor(k) ~= k or k < 1 then
+            return false
+        end
+        count = count + 1
+    end
+    for i = 1, count do
+        if t[i] == nil then return false end
     end
     return true
 end
@@ -76,10 +81,12 @@ local function standardise_config(config)
     for _, channel in ipairs(out.channels or {}) do
         channel.metadata = channel.metadata or {}
         if type(channel.metadata) == 'userdata' then channel.metadata = {} end
-        if string.find(channel.name, 'data') then
-            channel.metadata.channel_type = 'data'
-        elseif string.find(channel.name, 'control') then
-            channel.metadata.channel_type = 'events'
+        if type(channel.name) == 'string' then
+            if string.find(channel.name, 'data') then
+                channel.metadata.channel_type = 'data'
+            elseif string.find(channel.name, 'control') then
+                channel.metadata.channel_type = 'events'
+            end
         end
     end
     out.content = config.content
