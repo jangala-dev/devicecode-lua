@@ -245,7 +245,7 @@ function TimeManager.apply_config(config) -- luacheck: ignore config
         return false, "channels not initialized (start must be called first)"
     end
 
-    log.trace("Time manager: recieved config")
+    log.trace("Time manager: received config")
 
     local ok, spawn_err = TimeManager.scope:spawn(function()
         bring_up_driver()
