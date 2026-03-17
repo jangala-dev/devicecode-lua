@@ -19,14 +19,14 @@ local function is_linux()
     return content:lower():find("linux") ~= nil
 end
 
---- Returns true if `ubus` is available on the system
+--- Returns true if `ubus` is available and the daemon is reachable
 ---@return boolean ok
 local function has_ubus()
     local cmd = exec.command{
-        "ubus",
+        "ubus", "list",
         stdin = "null",
         stdout = "pipe",
-        stderr = "stdout"
+        stderr = "null"
     }
     local _, status, code = fibers.perform(cmd:combined_output_op())
     if status == "exited" and code == 0 then
