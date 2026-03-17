@@ -42,6 +42,7 @@ function M.install(opts)
         realtime       = time.realtime,
         block          = time._block,
         scheduler_time = scheduler.get_time,
+        wheel_now      = scheduler.wheel.now,
     }
 
     local state = {
@@ -110,7 +111,7 @@ function M.install(opts)
         end
 
         scheduler.get_time = original.scheduler_time
-        scheduler.wheel.now = scheduler.get_time()
+        scheduler.wheel.now = original.wheel_now
         time.monotonic = original.monotonic
         time.realtime = original.realtime
         time._block = original.block
