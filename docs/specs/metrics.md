@@ -6,13 +6,13 @@ The metrics service listens to the bus for metrics, applies processing to these 
 
 ## Config
 
-The metric service takes a selection of configs, validates them and then applies all parts of the condig that are valid. If globaly required parts of the config are not valid then the whole service fails (publish_period, all pipelines fail). Any pipeline that uses a failed template also fails. A missing cloud url means any http protol metrics also fail and the http publisher cannot be started.
+The metrics service takes a selection of configs, validates them and then applies all parts of the config that are valid. If globally required parts of the config are not valid then the whole service fails (publish_period, all pipelines fail). Any pipeline that uses a failed template also fails. A missing cloud URL means any HTTP protocol metrics also fail and the HTTP publisher cannot be started.
 
 `publish_period`: The period for which metrics are cached before publishing to the cloud, recorded in seconds
 
 `cloud_url`: The url used to publish http metrics to
 
-`templates`: a k-v set of metric pipelines that can be reused in the pipelines section, good for different metrics that use the same pipeline without repitition
+`templates`: a k-v set of metric pipelines that can be reused in the pipelines section, good for different metrics that use the same pipeline without repetition
 
 `pipelines`: a k-v set of metric pipelines (`name` to pipeline)
 - `name`: The name of the metric e.g. `rx_bytes`
@@ -20,7 +20,7 @@ The metric service takes a selection of configs, validates them and then applies
 A pipeline is defined as:
 
 - `template`: An optional argument for using a template (can be modified with further arguments)
-- `protocol`: The procotol to be used for publication, either log or http
+- `protocol`: The protocol to be used for publication, either log or http
 - `process`: A list of processing blocks to be used on the metric
 - - `type`: The process block name
 - - additional fields are the arguments for that block (flat, not nested under an `args` key)
@@ -66,7 +66,7 @@ An example config
 
 ## Metrics over the Bus
 
-Metrics recieved over the bus will need to be in a specific format to be processed. The metric payload must include a `value` field and may also contain a `namespace` field. The namespace is a list of string or integer tokens which denotes the full senml key of that metric. Without a namespace, the metric key will be derived from the bus topic path.
+Metrics received over the bus will need to be in a specific format to be processed. The metric payload must include a `value` field and may also contain a `namespace` field. The namespace is a list of string or integer tokens which denotes the full senml key of that metric. Without a namespace, the metric key will be derived from the bus topic path.
 
 The bus topic path determines which pipeline config is applied to the metric. The topic is an array of strings/integers that form the metric's endpoint identifier. The exact topic structure depends on the bus namespace conventions used (see runtime model documentation for topic organization).
 
@@ -147,7 +147,7 @@ This method will iterate over the list of senml items and log them using the log
 
 ### HTTP
 
-This method will send the senml list to the cloud by building up a cloud config by merging the cloud_url with the mainflux config. The mainflux config is retreieved by loading it from hal via the `filesystem` capability called `config` with the mainflux.cfg file name, this is then decoded from json to a lua table and then normalised (`mainflux_id` -> `thing_id`, `mainflux_key` -> `thing_key`). The mainflux config is of the structure:
+This method will send the senml list to the cloud by building up a cloud config by merging the cloud_url with the mainflux config. The mainflux config is retrieved by loading it from HAL via the `filesystem` capability with the mainflux.cfg file name, this is then decoded from JSON to a Lua table and then normalised (`mainflux_id` -> `thing_id`, `mainflux_key` -> `thing_key`). The mainflux config is of the structure:
 
 ```json
 {
@@ -184,11 +184,11 @@ The resulting merger should be formatted into the structure:
 
 The cloud URI is composed as `cloud.url` + `/http/channels/` + `cloud.data_id` + `/messages`
 
-The authentications is composed as `Thing ` + `cloud.thing_key`
+The authentication header is composed as `Thing ` + `cloud.thing_key`
 
 The body is a json encoding of the senml list
 
-As http publications can fail due to lack of backhaul, boot time metrics are very important, and publiscations can cause a long blokcing time to the fiber they are running on, we run the http sending in a seperate fiber with a queue between the main metrics service fiber and the http fiber.
+As HTTP publications can fail due to lack of backhaul, boot-time metrics are very important, and publications can cause long blocking time on the fiber they are running on, so we run the HTTP sending in a separate fiber with a queue between the main metrics service fiber and the HTTP fiber.
 
 **Queue Behavior**:
 - Fixed capacity: **10 items**
@@ -203,7 +203,7 @@ As http publications can fail due to lack of backhaul, boot time metrics are ver
 
 ### Bus
 
-For testablility a bus protocol should be provided which will publish the metrics under the topic
+For testability a bus protocol should be provided which will publish the metrics under the topic
 `svc/metrics/<key>` for example `svc/metrics/modem/1/sim`. The payload will just be the value and timestamp of the metric.
 
 ## Processing
@@ -292,11 +292,11 @@ Each metric must have an accurate time stamp. As the time at boot will be incorr
 
 The metrics service **blocks all publishing** until NTP time synchronization is confirmed:
 
-- Service subscribes to `{time, ntp_synced}` bus topic
-- When `ntp_synced = true` is received:
+- Service subscribes to `{'svc', 'time', 'synced'}` bus topic
+- When `synced = true` is received:
   - **First sync**: Calculates base time offset and schedules first publish
   - **Subsequent syncs**: Continues using existing offset
-- When `ntp_synced = false` is received:
+- When `synced = false` is received:
   - Publishing is suspended indefinitely
   - Publish timer is disabled (`next_publish_time = infinity`)
   - Metrics continue to be collected but not published
