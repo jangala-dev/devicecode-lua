@@ -48,7 +48,7 @@ local DiffTrigger = {}
 DiffTrigger.__index = DiffTrigger
 
 local function check_diff_args_valid(config)
-    if config.initial_val and type(config.initial_val) ~= 'number' then
+    if config.initial_val ~= nil and type(config.initial_val) ~= 'number' then
         return 'Initial value must be a number'
     end
     if config.diff_method ~= 'any-change' and type(config.threshold) ~= 'number' then
@@ -174,11 +174,15 @@ local DeltaValue = {}
 DeltaValue.__index = DeltaValue
 
 ---@param config table
----@return DeltaValue
+---@return DeltaValue?
+---@return string? error
 function DeltaValue.new(config)
+    if config.initial_val ~= nil and type(config.initial_val) ~= 'number' then
+        return nil, 'Initial value must be a number'
+    end
     local self = setmetatable({}, DeltaValue)
     self.config = config
-    return self
+    return self, nil
 end
 
 ---@return table
