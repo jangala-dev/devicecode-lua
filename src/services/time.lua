@@ -189,6 +189,7 @@ function M.start(conn, opts)
 	while true do
 		local msg, err = perform(sub_meta:recv_op())
 		if not msg then
+			sub_meta:unsubscribe()
 			log.warn("TIME: capability discovery subscription closed:", err)
 			return
 		end
@@ -196,6 +197,7 @@ function M.start(conn, opts)
 		local topic = msg.topic
 		local cap_id = topic and topic[3]
 		if cap_id ~= nil then
+			sub_meta:unsubscribe()
 			log.trace("TIME: selected first time capability:", tostring(cap_id))
 			monitor_capability(conn, cap_id)
 			return
