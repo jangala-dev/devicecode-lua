@@ -10,8 +10,8 @@
 -- Topics consumed:
 --   {'obs', 'v1', '+', 'metric', '+'}  - incoming metric values
 --   {'cfg', 'metrics'}                  - metrics config (retained)
---   {'time', 'ntp_synced'}              - NTP sync status (retained)
---   {'cap', 'fs', 'config', 'state'}    - HAL filesystem capability readiness
+--   {'svc', 'time', 'synced'}           - NTP sync status (retained)
+--   {'cap', 'fs', 'configs', 'state'}   - HAL filesystem capability readiness
 --
 -- Topics produced:
 --   {'svc', 'metrics', 'status'}        - service lifecycle status (retained)
@@ -95,14 +95,17 @@ end
 ---@param topic any
 ---@return boolean
 local function validate_topic(topic)
-	if type(topic) ~= 'table' or #topic == 0 then return false end
+	if type(topic) ~= 'table' then return false end
 	local count = 0
-	for k, v in pairs(topic) do
-		count = count + 1
+	for k in pairs(topic) do
 		if type(k) ~= 'number' or k < 1 or k ~= math.floor(k) then return false end
-		if v == nil then return false end
+		count = count + 1
 	end
-	return count == #topic
+	if count == 0 then return false end
+	for i = 1, count do
+		if topic[i] == nil then return false end
+	end
+	return true
 end
 
 --- Shift per-endpoint metric timestamps from monotonic to real-time milliseconds.
