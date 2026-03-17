@@ -56,7 +56,7 @@ local function t_obs_metric(service, name) return { 'obs', 'v1', service, 'metri
 local function t_cfg(name) return { 'cfg', name } end
 
 ---@return table
-local function t_time_ntp_synced() return { 'time', 'ntp_synced' } end
+local function t_time_ntp_synced() return { 'svc', 'time', 'synced' } end
 
 ---@return table
 local function t_cap_fs_state() return { 'cap', 'fs', 'configs', 'state' } end
@@ -478,8 +478,8 @@ local function main()
 		local which, a, b = perform(op.named_choice({
 			config   = cfg_sub:recv_op(),
 			metric   = obs_sub:recv_op(),
-			-- timesync = time_sub:recv_op(),
-			timesync = State.base_time.synced and op.never() or op.always({ payload = true }),
+			timesync = time_sub:recv_op(),
+			-- timesync = State.base_time.synced and op.never() or op.always({ payload = true }),
 			tick     = sleep.sleep_until_op(next_publish_time),
 		}))
 
