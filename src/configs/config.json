@@ -69,7 +69,7 @@
         "data": {
             "schema": "devicecode.config/metrics/1",
             "cloud_url": "$CLOUD_URL",
-            "publish_period": 10,
+            "publish_period": 60,
             "templates": {
                 "network_stat": {
                     "protocol": "http",
