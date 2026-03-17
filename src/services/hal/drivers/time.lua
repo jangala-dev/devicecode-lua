@@ -3,7 +3,7 @@ local hal_types = require "services.hal.types.core"
 local cap_types = require "services.hal.types.capabilities"
 
 -- Backend modules
-local ubus_backend = require "services.hal.backends.ubus"
+local time_backend_provider = require "services.hal.backends.time.provider"
 
 -- Service modules
 local log = require "services.log"
@@ -16,13 +16,13 @@ local sleep = require "fibers.sleep"
 local exec = require "fibers.io.exec"
 
 -- Other modules
-local cjson = require "cjson.safe"
 local uuid = require "uuid"
 
 ---@class TimeDriver
 ---@field id CapabilityId UUID for this time source capability
 ---@field cap_emit_ch Channel Capability emit channel (Emit messages)
 ---@field scope Scope Child scope owning the monitor fiber
+---@field backend TimeBackend Time backend for platform-specific NTP monitoring
 ---@field control_ch Channel RPC control channel (no offerings currently, reserved)
 ---@field initialised boolean
 ---@field caps_applied boolean
@@ -52,28 +52,6 @@ local function emit(emit_ch, id, mode, key, data)
     end
     emit_ch:put(payload)
     return true
-end
-
----Recursively convert numeric-looking strings into numbers.
----@param value any
----@return any
-local function coerce_numeric_strings(value)
-    if type(value) == 'string' then
-        local n = tonumber(value)
-        if n ~= nil then
-            return n
-        end
-        return value
-    end
-
-    if type(value) == 'table' then
-        for k, v in pairs(value) do
-            value[k] = coerce_numeric_strings(v)
-        end
-        return value
-    end
-
-    return value
 end
 
 ---Convert NTP stratum to an estimated absolute accuracy in seconds.
@@ -115,8 +93,8 @@ end
 
 ---- Monitor Fiber ----
 
----Listen to `ubus listen hotplug.ntp` output and emit state/events via the cap
----emit channel. Runs in self.scope. Exits on stream close, read error, or scope
+---Listen to NTP synchronization events via the time backend and emit state/events via
+---the cap emit channel. Runs in self.scope. Exits on stream close, read error, or scope
 ---cancellation. Transition events (synced/unsynced) are non-retained; the current
 ---sync state is always published as a retained state emit on every hotplug event.
 ---@return nil
@@ -125,45 +103,37 @@ function TimeDriver:_ntpd_monitor()
         log.trace("Time Driver: ntpd monitor exiting")
     end)
 
-    log.trace("Time Driver: ntpd monitor started")
-
-    -- exec.command is bound to the current scope (self.scope) automatically.
-    -- When self.scope is cancelled the process is terminated, causing read_line to
-    -- return nil/error and the loop below exits cleanly.
-    local listen_cmd = ubus_backend.listen('hotplug.ntp')
-    local stdout, stream_err = listen_cmd:stdout_stream()
-    if not stdout then
-        error("Time Driver: failed to start ubus listen: " .. tostring(stream_err))
+    -- Start the backend monitor here so the ubus command is bound to this fiber's
+    -- scope (the driver child scope). Cancelling the driver scope will then kill
+    -- the underlying process automatically.
+    local ok, start_err = self.backend:start_ntp_monitor()
+    if not ok then
+        log.error("Time Driver: failed to start NTP backend:", start_err)
+        return
     end
 
-    while true do
-        local line, read_err = stdout:read_line()
-        if read_err then
-            log.error("Time Driver: ubus listen read error:", read_err)
-            break
-        end
-        if line == nil then
-            log.warn("Time Driver: ubus listen stream closed unexpectedly")
-            break
-        end
+    log.trace("Time Driver: ntpd monitor started")
 
-        -- ubus listen output is one JSON object per line:
-        -- { "hotplug.ntp": { "stratum": <n> } }
-        local decoded = cjson.decode(line)
-        if not decoded then
-            log.warn("Time Driver: failed to decode hotplug.ntp event:", line)
-        else
-            decoded = coerce_numeric_strings(decoded)
-            local ntp_data = decoded["hotplug.ntp"]
-            if type(ntp_data) == 'table' and type(ntp_data.stratum) == 'number' then
-                local stratum = ntp_data.stratum
+    while true do
+        local ntp_event, err = fibers.perform(self.backend:ntp_event_op())
+        if err ~= nil then
+            -- Fatal: stream closed or read error
+            log.warn("Time Driver: NTP event stream closed:", err)
+            break
+        end
+        if ntp_event then
+            local stratum = ntp_event.stratum
+            -- NTPEvent constructor guarantees stratum is a number, but guard anyway
+            if type(stratum) ~= 'number' then
+                log.warn("Time Driver: received NTP event with invalid stratum:", stratum)
+            else
                 local now_synced = stratum ~= 16
                 local was_synced = self.synced
                 local accuracy_seconds = accuracy_for_stratum(stratum)
 
                 -- Always update retained state, even if sync status did not change,
                 -- so that the latest stratum value is always visible to subscribers.
-                local ok, emit_err = emit(
+                local emit_ok, emit_err = emit(
                     self.cap_emit_ch, self.id, 'state', 'synced',
                     {
                         synced = now_synced,
@@ -171,7 +141,7 @@ function TimeDriver:_ntpd_monitor()
                         accuracy_seconds = accuracy_seconds,
                     }
                 )
-                if not ok then
+                if not emit_ok then
                     log.warn("Time Driver: failed to emit state:", emit_err)
                 end
 
@@ -214,10 +184,9 @@ function TimeDriver:_ntpd_monitor()
                 end
 
                 self.synced = now_synced
-            else
-                log.warn("Time Driver: received unexpected hotplug.ntp payload:", line)
             end
         end
+        -- ntp_event == nil and err == nil: parse error, already logged by backend, retry
     end
 end
 
@@ -320,8 +289,9 @@ end
 
 ---- Constructor ----
 
----Create a new TimeDriver instance. Generates a UUID for the capability id and
----creates a child scope. Must be called from inside a fiber.
+---Create a new TimeDriver instance. Generates a UUID for the capability id,
+---creates a child scope, and instantiates the platform-specific time backend.
+---Must be called from inside a fiber.
 ---@return TimeDriver? driver
 ---@return string error Empty string on success.
 local function new()
@@ -330,10 +300,13 @@ local function new()
         return nil, "failed to create child scope: " .. tostring(sc_err)
     end
 
+    local backend = time_backend_provider.new()
+
     return setmetatable({
         id           = uuid.new(),
         cap_emit_ch  = nil,
         scope        = scope,
+        backend      = backend,
         control_ch   = channel.new(CONTROL_Q_LEN),
         initialised  = false,
         caps_applied = false,
