@@ -34,10 +34,12 @@ Published for every log call made while the service is running.
 
 ```lua
 {
-    message   = "[LEVEL  HH:MM:SS] file.lua:line  message text",
+    message   = "[INFO  Thu Mar 18 14:23:45 2026] src/main.lua:42: Something happened",
     timestamp = <number>,  -- realtime clock (seconds since epoch)
 }
 ```
+
+The format is `[%-6s%s] %s: %s` — level left-padded to 6 chars, then the full `os.date()` string (locale-dependent, e.g. `Thu Mar 18 14:23:45 2026`), then `file.lua:line`, then the message. Note: the file-output timestamp uses `os.date()` with no format argument (full date/time), unlike the console output which uses `os.date("%H:%M:%S")`.
 
 - `message` is the pre-formatted string produced by `rxilog.format_log_message`, including level, timestamp, source location, and message text.
 - `timestamp` is the wall-clock time from `fibers.utils.time.realtime()`.
