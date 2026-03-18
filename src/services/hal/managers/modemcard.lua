@@ -1,5 +1,5 @@
 -- HAL modules
-local mmcli = require "services.hal.backends.mmcli"
+local modem_provider = require "services.hal.backends.modem.provider"
 local hal_types = require "services.hal.types.core"
 local external_types = require "services.hal.types.external"
 local modem_driver = require "services.hal.drivers.modem"
@@ -35,20 +35,6 @@ local ModemcardManager = {
     modems = {},
 }
 
----Get a modem status and address from a monitor line
----@param line string
----@return boolean? is_added
----@return string? address
----@return string? err
-local function parse_monitor(line)
-    local status, address = line:match("^(.-)(/org%S+)")
-    if address then
-        return not status:match("-"), address, nil
-    else
-        return nil, nil, 'line could not be parsed'
-    end
-end
-
 ---Continuously monitors modem add/remove events and publishes them onto
 ---`ModemcardManager.modem_detect_ch` and `ModemcardManager.modem_remove_ch`.
 ---@param scope Scope
@@ -59,32 +45,26 @@ local function detector(scope)
         log.trace("Modem Detector: closed")
     end)
 
-    local monitor_cmd = mmcli.monitor_modems()
-    local stdout, err = monitor_cmd:stdout_stream()
-    if not stdout then
-        error("Modem Detector: failed to get stdout stream: " .. err)
+    local monitor, err = modem_provider.new_monitor()
+    if not monitor then
+        error("Modem Detector: failed to create monitor: " .. tostring(err))
     end
 
     while true do
-        local line, rerr = stdout:read_line()
-        if rerr then
-            log.error("Modem Detector: stdout read error:", rerr)
+        local event, mon_err = fibers.perform(monitor:next_event_op())
+        if mon_err == "Command closed" then
             break
-        end
-        if line == nil then
-            break
-        end
-
-        local is_added, address, parse_err = parse_monitor(line)
-
-        if is_added == nil or address == nil then
-            log.error("Modem Detector: failed to parse line:", parse_err)
-        elseif is_added == true then
-            log.info("Modem Detector: detected at", address)
-            ModemcardManager.modem_detect_ch:put(address)
-        elseif is_added == false then
-            log.info("Modem Detector: removed at", address)
-            ModemcardManager.modem_remove_ch:put(address)
+        elseif mon_err and mon_err ~= "" then
+            log.warn("Modem Detector: skipping unparseable line:", mon_err)
+        elseif event then
+            ---@cast event ModemMonitorEvent
+            if event.is_added then
+                log.info("Modem Detector: detected at", event.address)
+                ModemcardManager.modem_detect_ch:put(event.address)
+            else
+                log.info("Modem Detector: removed at", event.address)
+                ModemcardManager.modem_remove_ch:put(event.address)
+            end
         end
     end
 end

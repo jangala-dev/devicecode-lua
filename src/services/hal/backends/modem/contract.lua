@@ -55,6 +55,27 @@ local BACKEND_FUNCTIONS = list_to_map {
     "set_signal_update_interval"
 }
 
+local MONITOR_FUNCTIONS = list_to_map {
+    "next_event_op",
+}
+
+--- Check that a modem monitor provides all required functions and no extras.
+---@param monitor ModemMonitor
+---@return string error
+local function validate_monitor(monitor)
+    for func in pairs(MONITOR_FUNCTIONS) do
+        if type(monitor[func]) ~= "function" then
+            return "Missing required function: " .. func
+        end
+    end
+    for key, value in pairs(monitor) do
+        if type(value) == "function" and not MONITOR_FUNCTIONS[key] then
+            return "Monitor provides unsupported function: " .. key
+        end
+    end
+    return ""
+end
+
 --- Check that a modem backend provides all required functions and no more
 ---@param backend ModemBackend
 ---@return string error
@@ -75,5 +96,6 @@ local function validate(backend)
 end
 
 return {
-    validate = validate
+    validate = validate,
+    validate_monitor = validate_monitor,
 }

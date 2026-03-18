@@ -4,6 +4,7 @@ local op = require "fibers.op"
 local fibers = require "fibers"
 
 local backend = require "services.hal.backends.modem.providers.linux_mm.impl"
+local monitor = require "services.hal.backends.modem.providers.linux_mm.monitor"
 
 local function is_linux()
     local fh, open_err = file.open("/proc/version", "r")
@@ -43,8 +44,15 @@ local function is_supported()
     return res
 end
 
+---@return ModemMonitor? monitor
+---@return string error
+local function new_monitor()
+    return monitor.new()
+end
+
 return {
     is_supported = is_supported,
-    backend = backend
+    backend = backend,
+    new_monitor = new_monitor,
 }
 

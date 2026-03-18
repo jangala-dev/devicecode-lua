@@ -29,29 +29,21 @@ local function starts_with(str, start)
     return string.sub(str, 1, string.len(start)) == start
 end
 
--- local backend_impl = nil
-
---- select and initialize the backend implementation
----@return table backend_impl
-local function get_backend_impl()
-    local backend_impl = nil
+--- Select the first supported provider for the current environment.
+---@return table provider
+local function get_provider()
     for _, backend_name in ipairs(BACKENDS) do
-        local ok, backend_mod = pcall(require, "services.hal.backends.modem.providers." .. backend_name .. ".init")
-        if ok and type(backend_mod) == "table" and backend_mod.is_supported and backend_mod.is_supported() then
-            backend_impl = backend_mod.backend
-            break
+        local ok, mod = pcall(require, "services.hal.backends.modem.providers." .. backend_name .. ".init")
+        if ok and type(mod) == "table" and mod.is_supported and mod.is_supported() then
+            return mod
         end
     end
-
-    if backend_impl == nil then
-        error("No supported modem backend found")
-    end
-
-    return backend_impl
+    error("No supported modem provider found")
 end
 
 local function new(address)
-    local impl = get_backend_impl()
+    local provider = get_provider()
+    local impl = provider.backend
     local backend = impl.new(address)
     ---@cast backend ModemBackend
     local drivers, dr_err = backend:drivers()
@@ -117,6 +109,25 @@ local function new(address)
     return backend
 end
 
+--- Create a new ModemMonitor using the selected provider.
+---@return ModemMonitor monitor
+local function new_monitor()
+    local provider = get_provider()
+    if not provider.new_monitor then
+        error("Selected modem provider does not support modem monitoring")
+    end
+    local monitor, err = provider.new_monitor()
+    if not monitor then
+        error("Failed to create modem monitor: " .. tostring(err))
+    end
+    local validate_err = contract.validate_monitor(monitor)
+    if validate_err ~= "" then
+        error("Modem monitor does not satisfy required interface: " .. validate_err)
+    end
+    return monitor
+end
+
 return {
-    new = new
+    new = new,
+    new_monitor = new_monitor,
 }

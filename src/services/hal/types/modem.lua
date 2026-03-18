@@ -141,6 +141,33 @@ function new.ModemStateRemovedEvent(reason)
 	return new.ModemStateEvent("removed", "removed", "removed", reason)
 end
 
+---@class ModemMonitorEvent
+---@field is_added boolean
+---@field address ModemAddress
+local ModemMonitorEvent = {}
+ModemMonitorEvent.__index = ModemMonitorEvent
+
+---Create a new ModemMonitorEvent.
+---@param is_added boolean
+---@param address ModemAddress
+---@return ModemMonitorEvent?
+---@return string error
+function new.ModemMonitorEvent(is_added, address)
+	if type(is_added) ~= 'boolean' then
+		return nil, "invalid is_added: expected boolean"
+	end
+	if type(address) ~= 'string' or address == '' then
+		return nil, "invalid address"
+	end
+	return setmetatable({
+		is_added = is_added,
+		address = address,
+	}, ModemMonitorEvent), ""
+end
+
+---@class ModemMonitor
+---@field next_event_op fun(self: ModemMonitor): Op
+
 ---@class ModemBackend
 ---@field identity ModemIdentity
 ---@field cache Cache
@@ -189,5 +216,6 @@ return {
 	ModemDevice = ModemDevice,
 	ModemIdentity = ModemIdentity,
 	ModemStateEvent = ModemStateEvent,
+	ModemMonitorEvent = ModemMonitorEvent,
 	new = new,
 }
