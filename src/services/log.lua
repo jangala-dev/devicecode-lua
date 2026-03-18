@@ -5,22 +5,29 @@
 --  - when conn is set (after start), publishes log entries to {'logs', <level>}
 --  - publishes service lifecycle status to {'svc', <name>, 'status'}
 
-local rxilog  = require 'rxilog'
-local runtime = require 'fibers.runtime'
-local fibers  = require 'fibers'
-local sleep   = require 'fibers.sleep'
-local perform = require 'fibers.performer'.perform
+local rxilog      = require 'rxilog'
+local runtime     = require 'fibers.runtime'
+local fibers      = require 'fibers'
+local sleep       = require 'fibers.sleep'
+local perform     = require 'fibers.performer'.perform
+local time_utils  = require 'fibers.utils.time'
 
 local log_service = {}
 
+---@return (string|number)[]
 local function t(...)
     return { ... }
 end
 
+---@return number
 local function now()
     return runtime.now()
 end
 
+---@param conn Connection
+---@param name string
+---@param state string
+---@param extra table?
 local function publish_status(conn, name, state, extra)
     local payload = { state = state, ts = now() }
     if type(extra) == 'table' then
@@ -39,7 +46,6 @@ for _, mode in ipairs(rxilog.modes) do
         if log_service._conn then
             local info     = debug.getinfo(2, "Sl")
             local lineinfo = info.short_src .. ":" .. info.currentline
-            local time_utils = require 'fibers.utils.time'
             log_service._conn:publish(t('logs', level), {
                 message   = rxilog.format_log_message(level:upper(), lineinfo, msg),
                 timestamp = time_utils.realtime(),
@@ -48,6 +54,8 @@ for _, mode in ipairs(rxilog.modes) do
     end
 end
 
+---@param conn Connection
+---@param opts {name: string?}?
 function log_service.start(conn, opts)
     opts = opts or {}
     local name = opts.name or 'log'
@@ -60,8 +68,8 @@ function log_service.start(conn, opts)
         rxilog.trace("Log: stopped")
     end)
 
-    log_service._conn  = conn
-    log_service._name  = name
+    log_service._conn = conn
+    log_service._name = name
 
     publish_status(conn, name, 'running')
     log_service.trace("Log service started")
