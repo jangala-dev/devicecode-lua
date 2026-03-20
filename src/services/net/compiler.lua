@@ -1,16 +1,17 @@
 -- services/net/compiler.lua
 --
--- Compile pre-net config into a strict desired state bundle for HAL.
+-- Compile pre-net config into:
+--
+--   * desired  -> strict desired structural state for HAL apply_net
+--   * runtime  -> NET-local policy/runtime model for monitoring, autorate,
+--                and live multiwan control
+--
 -- Pure, non-yielding, side-effect free.
 --
--- Returns:
---   desired_table, nil
--- or
---   nil, diag_table  { code=string, path=Topic, message=string }
---
--- Conventions:
---   * Missing fields imply defaults (compiler generally omits nil fields).
---   * Output is intended for "replace/reconcile" application by HAL.
+-- Existing compile() behaviour is preserved for the structural path.
+-- New:
+--   * compile_runtime_policy()
+--   * compile_bundle()
 
 local M = {}
 
@@ -92,19 +93,16 @@ local function normalise_route_target(target)
 	if target:find('/', 1, true) then
 		return target
 	end
-	-- Canonicalise host route when no prefix is given.
 	if is_ipv4(target) then
 		return target .. '/32'
 	end
-	-- Leave other forms as-is (backend may reject if unsupported).
 	return target
 end
 
 local function join_host_sets(list)
-	-- list is an array of strings; return stable id like "ads_adult" or "plain".
-	if not list or #list == 0 then return 'plain' end
 	local parts = {}
-	for i = 1, #list do parts[i] = tostring(list[i]) end
+	for i = 1, #(list or {}) do parts[i] = tostring(list[i]) end
+	if #parts == 0 then return 'plain' end
 	table.sort(parts)
 	return table.concat(parts, '_')
 end
@@ -122,7 +120,6 @@ local function uniq_sorted(list)
 	return out
 end
 
--- Resolve per-net "firewall.zone" by looking at net record first, then profile.
 local function resolve_zone(net_rec, prof_rec)
 	local z = get_tbl(net_rec, 'firewall')
 	if z and type(z.zone) == 'string' and z.zone ~= '' then return z.zone end
@@ -144,6 +141,10 @@ local function resolve_shaping(net_rec, prof_rec)
 	if prof_rec and prof_rec.shaping ~= nil then return prof_rec.shaping end
 	return nil
 end
+
+--------------------------------------------------------------------------------
+-- Existing structural compiler pieces
+--------------------------------------------------------------------------------
 
 local function compile_links_and_nets(pre, rev, gen)
 	local network = get_tbl(pre, 'network') or {}
@@ -167,7 +168,6 @@ local function compile_links_and_nets(pre, rev, gen)
 					'unknown profile: ' .. tostring(profile_name))
 		end
 
-		-- Device
 		local dev = get_tbl(nrec, 'device') or {}
 		local dev_kind = get_str(dev, 'kind') or 'raw'
 		local ifnames = dev.ifnames
@@ -188,7 +188,6 @@ local function compile_links_and_nets(pre, rev, gen)
 				end
 			end
 			if #ports == 0 then
-				-- You may choose to allow empty bridges when bridge_empty=true. Here we honour input.
 				local be = get_bool(dev, 'bridge_empty')
 				if not be then
 					return nil,
@@ -200,13 +199,11 @@ local function compile_links_and_nets(pre, rev, gen)
 			links[link_name] = {
 				kind              = 'bridge',
 				ports             = ports,
-
 				bridge_empty      = get_bool(dev, 'bridge_empty') or false,
 				vlan_filtering    = false,
 				igmp_snooping     = false,
 				multicast_querier = false,
 				stp               = false,
-
 				rxpause           = nil,
 				txpause           = nil,
 				autoneg           = nil,
@@ -217,21 +214,18 @@ local function compile_links_and_nets(pre, rev, gen)
 
 			device_out = { ref = link_name }
 		else
-			-- raw device
 			local modem_id = (type(nrec.modem_id) == 'string') and nrec.modem_id or nil
 			if modem_id then
 				device_out = { ifname = '@modem.' .. modem_id }
 			else
 				local ifname = (ifnames and ifnames[1]) or nil
 				if type(ifname) ~= 'string' or ifname == '' then
-					-- allow empty ifnames in pre-config (e.g. placeholder), but then output will be explicit nil
 					ifname = nil
 				end
 				device_out = { ifname = ifname }
 			end
 		end
 
-		-- IPv4
 		local ipv4 = get_tbl(nrec, 'ipv4') or (prof and get_tbl(get_tbl(prof, 'network') or {}, 'ipv4')) or nil
 		local proto = (ipv4 and get_str(ipv4, 'proto')) or 'static'
 		local v4 = nil
@@ -249,10 +243,8 @@ local function compile_links_and_nets(pre, rev, gen)
 				end
 				v4 = { addr = ip, prefix = pfx, gw = nil }
 			elseif net_id == 'loopback' then
-				-- Allow loopback to be pre-specified exactly as in example.
 				v4 = { addr = '127.0.0.1', prefix = 8, gw = nil }
 			else
-				-- Permit missing static fields; HAL/backend may reject later if required.
 				v4 = nil
 			end
 		elseif proto == 'dhcp' then
@@ -266,24 +258,18 @@ local function compile_links_and_nets(pre, rev, gen)
 					'unsupported proto: ' .. tostring(proto))
 		end
 
-		-- Net output
 		nets_out[net_id] = {
 			proto      = proto,
 			device     = device_out,
-
 			auto       = true,
 			disabled   = false,
 			force_link = (net_id == 'loopback') or (proto == 'static') or nil,
-
 			v4         = v4,
-
 			dns        = nil,
 			peerdns    = peerdns,
 			metric     = nil,
-
 			ipv6       = nil,
 			ip6assign  = nil,
-
 			mtu        = nil,
 			ip4table   = nil,
 			ip6table   = nil,
@@ -295,7 +281,7 @@ local function compile_links_and_nets(pre, rev, gen)
 		globals = shallow_copy(get_tbl(network, 'globals') or {}),
 		links   = links,
 		nets    = nets_out,
-		routes  = {}, -- filled elsewhere
+		routes  = {},
 	}, nil
 end
 
@@ -352,7 +338,6 @@ local function compile_addressing(pre, nets_in, profiles)
 		return nil, diag('bad_dns', { 'net', 'dns', 'default_cache_size' }, 'default_cache_size must be a number')
 	end
 
-	-- Gather host_sets used by DHCP pools from nets' dns_server.default_hosts.
 	local hostset_to_profile = {}
 	local profiles_out = {}
 
@@ -367,16 +352,13 @@ local function compile_addressing(pre, nets_in, profiles)
 			authoritative     = nil,
 			localservice      = nil,
 			rebind_protection = nil,
-
 			upstream_servers  = upstream_servers,
 			cache_size        = cache_size,
-
 			host_sets         = hs,
 		}
 		return name
 	end
 
-	-- Pools derive from networks with dhcp_server.enabled=true.
 	local pools = {}
 	for _, net_id in ipairs(sorted_keys(nets_in)) do
 		local nrec = nets_in[net_id]
@@ -412,7 +394,6 @@ local function compile_addressing(pre, nets_in, profiles)
 		end
 	end
 
-	-- Domains: passthrough array of {name, ip} (validation left to backend/compiler v2).
 	local domains = {}
 	local doms = dhcp_in.domains
 	if doms ~= nil and type(doms) ~= 'table' then
@@ -443,7 +424,6 @@ local function compile_firewall(pre, nets_in, profiles)
 		return nil, diag('bad_firewall', { 'net', 'firewall', 'rules' }, 'firewall.rules must be an array')
 	end
 
-	-- Assign nets to zones (from net record or profile).
 	local zone_to_nets = {}
 	for _, net_id in ipairs(sorted_keys(nets_in)) do
 		local nrec = nets_in[net_id]
@@ -459,7 +439,6 @@ local function compile_firewall(pre, nets_in, profiles)
 		table.sort(list)
 	end
 
-	-- Zones
 	local zones_out = {}
 	local forwardings = {}
 
@@ -490,7 +469,6 @@ local function compile_firewall(pre, nets_in, profiles)
 		end
 	end
 
-	-- Rules
 	local rules_out = {}
 	for i = 1, #(rules_in or {}) do
 		local r = rules_in[i]
@@ -521,7 +499,7 @@ end
 local function compile_multiwan(pre, nets_in, profiles)
 	local mw = get_tbl(pre, 'multiwan')
 	if not mw then
-		return nil, nil -- optional
+		return nil, nil
 	end
 
 	local globals    = get_tbl(mw, 'globals') or {}
@@ -559,7 +537,6 @@ local function compile_multiwan(pre, nets_in, profiles)
 	end
 
 	table.sort(member_ids)
-	for i = 1, #member_ids do member_ids[i] = member_ids[i] end
 
 	local policies = {
 		default = {
@@ -586,6 +563,241 @@ local function compile_multiwan(pre, nets_in, profiles)
 	}, nil
 end
 
+--------------------------------------------------------------------------------
+-- New NET-local runtime compiler pieces
+--------------------------------------------------------------------------------
+
+local function compile_runtime_timings(pre)
+	-- These timings control NET's own internal loops.
+	--
+	-- They are intentionally separate from structural desired state because
+	-- they do not belong to HAL. They are business/policy parameters for NET.
+	local rt = get_tbl(pre, 'runtime') or {}
+	local netrt = get_tbl(rt, 'net') or {}
+
+	return {
+		-- Structural config changes should be coalesced briefly.
+		structural_debounce_s = get_num(netrt, 'structural_debounce_s') or 0.25,
+
+		-- How often to ask HAL for current link inventory/facts.
+		inventory_refresh_s   = get_num(netrt, 'inventory_refresh_s') or 30.0,
+
+		-- Probe scheduling defaults if the per-link policy does not override them.
+		probe_interval_s      = get_num(netrt, 'probe_interval_s') or 2.0,
+
+		-- Counter sampling period for throughput estimation.
+		counter_interval_s    = get_num(netrt, 'counter_interval_s') or 1.0,
+
+		-- Control pass cadence. In a more mature version this might be event-led
+		-- with a maximum interval rather than a strict fixed interval.
+		control_interval_s    = get_num(netrt, 'control_interval_s') or 1.0,
+
+		-- How long to wait after a successful live multiwan change before
+		-- persisting that state back into OS config.
+		persist_quiet_s       = get_num(netrt, 'persist_quiet_s') or 30.0,
+	}
+end
+
+local function compile_runtime_health(link_id, nmw, mw, shaping)
+	-- Compile NET-local health policy for one logical uplink.
+	--
+	-- The fields below are *not* HAL instructions. They are how NET should
+	-- interpret raw observations returned by HAL.
+	local health = get_tbl(mw, 'health') or {}
+	local hlink  = get_tbl(nmw, 'health') or {}
+
+	return {
+		enabled = true,
+
+		-- Probe execution parameters. HAL uses these to perform the probe;
+		-- NET uses the results to classify health.
+		method      = get_str(hlink, 'track_method') or get_str(health, 'track_method') or 'ping',
+		reflectors  = (type(hlink.track_ip) == 'table' and hlink.track_ip)
+			or (type(health.track_ip) == 'table' and health.track_ip)
+			or {},
+		count       = math.floor(get_num(hlink, 'count') or get_num(health, 'count') or 1),
+		timeout_s   = get_num(hlink, 'timeout_s') or get_num(health, 'timeout_s') or 2.0,
+		interval_s  = get_num(hlink, 'interval_s') or get_num(health, 'interval_s') or 2.0,
+
+		-- Reliability and state transition thresholds.
+		up          = math.floor(get_num(hlink, 'up')   or get_num(health, 'up')   or 2),
+		down        = math.floor(get_num(hlink, 'down') or get_num(health, 'down') or 2),
+
+		-- Delay/loss thresholds used by NET to classify online/degraded/offline.
+		-- Names are explicit so that the runtime logic can evolve without HAL caring.
+		failure_delay_ms   = get_num(hlink, 'failure_delay_ms')
+			or get_num(health, 'failure_delay_ms')
+			or get_num(health, 'failure_latency')
+			or 150,
+
+		recovery_delay_ms  = get_num(hlink, 'recovery_delay_ms')
+			or get_num(health, 'recovery_delay_ms')
+			or get_num(health, 'recovery_latency')
+			or 50,
+
+		failure_loss_pct   = get_num(hlink, 'failure_loss_pct')
+			or get_num(health, 'failure_loss_pct')
+			or get_num(health, 'failure_loss')
+			or 40,
+
+		recovery_loss_pct  = get_num(hlink, 'recovery_loss_pct')
+			or get_num(health, 'recovery_loss_pct')
+			or get_num(health, 'recovery_loss')
+			or 10,
+
+		-- Smoothing constants for RTT tracking.
+		baseline_alpha = get_num(hlink, 'baseline_alpha') or get_num(health, 'baseline_alpha') or 0.05,
+		recent_alpha   = get_num(hlink, 'recent_alpha')   or get_num(health, 'recent_alpha')   or 0.50,
+
+		-- When probes go missing for too long, NET treats the link as stale/offline.
+		stale_after_s  = get_num(hlink, 'stale_after_s') or get_num(health, 'stale_after_s')
+			or ((get_num(hlink, 'interval_s') or get_num(health, 'interval_s') or 2.0) * 3),
+	}
+end
+
+local function compile_runtime_shaping(link_id, shaping_rec)
+	-- Compile NET-local shaping/autorate policy for one logical uplink.
+	--
+	-- This tells NET:
+	--   * whether this link should be shaped dynamically at all
+	--   * what algorithm family to use
+	--   * what the current bounds are
+	--   * when rate changes are allowed
+	--
+	-- HAL later receives only the live, already-decided target rates.
+	shaping_rec = shaping_rec or {}
+
+	local autorate = get_tbl(shaping_rec, 'autorate') or {}
+
+	local enabled = get_bool(shaping_rec, 'enabled')
+	if enabled == nil then enabled = get_bool(autorate, 'enabled') end
+	if enabled == nil then enabled = false end
+
+	return {
+		enabled = enabled == true,
+
+		-- "scope" is an intentionally generic NET-side label.
+		-- HAL decides what "scope=wan" means on the target platform.
+		scope   = get_str(shaping_rec, 'scope') or 'wan',
+
+		-- Queueing mode intended for the live dataplane.
+		mode    = get_str(shaping_rec, 'mode') or 'cake',
+
+		-- Transport-specific parameters that HAL needs when applying.
+		overhead = get_num(shaping_rec, 'overhead'),
+		mpu      = get_num(shaping_rec, 'mpu'),
+		ingress_ifb = get_str(shaping_rec, 'ingress_ifb'),
+
+		-- Static starting points / maxima. The initial stub controller will start
+		-- from these and then nudge them.
+		static_up_kbit   = get_num(shaping_rec, 'up_kbit'),
+		static_down_kbit = get_num(shaping_rec, 'down_kbit'),
+
+		autorate = {
+			enabled               = get_bool(autorate, 'enabled') ~= false,
+			min_up_kbit           = get_num(autorate, 'min_up_kbit')   or get_num(shaping_rec, 'min_up_kbit'),
+			max_up_kbit           = get_num(autorate, 'max_up_kbit')   or get_num(shaping_rec, 'max_up_kbit')   or get_num(shaping_rec, 'up_kbit'),
+			min_down_kbit         = get_num(autorate, 'min_down_kbit') or get_num(shaping_rec, 'min_down_kbit'),
+			max_down_kbit         = get_num(autorate, 'max_down_kbit') or get_num(shaping_rec, 'max_down_kbit') or get_num(shaping_rec, 'down_kbit'),
+			max_delay_ms          = get_num(autorate, 'max_delay_ms') or 15,
+			high_load_level       = get_num(autorate, 'high_load_level') or 0.80,
+			min_change_interval_s = get_num(autorate, 'min_change_interval_s') or 2.0,
+		},
+	}
+end
+
+local function compile_runtime_multipath(link_id, nmw, mw)
+	-- Compile NET-local live multiwan policy for one logical uplink.
+	--
+	-- HAL should not decide whether a link participates or at what weight.
+	-- HAL should only apply the membership/weight result NET chooses.
+	local globals = get_tbl(mw, 'globals') or {}
+
+	return {
+		participate = get_bool(nmw, 'enabled')
+			or get_bool(globals, 'enabled')
+			or true,
+
+		metric      = math.floor(get_num(nmw, 'metric') or 1),
+		base_weight = math.floor(get_num(nmw, 'weight') or 1),
+
+		-- This flag tells NET whether it is allowed to alter the live weight of
+		-- this member dynamically as the link quality/capacity changes.
+		dynamic_weight = get_bool(nmw, 'dynamic_weight') or false,
+	}
+end
+
+local function compile_runtime_links(pre, nets_in, profiles)
+	-- Build NET's per-link policy model.
+	--
+	-- We derive this from the same pre-net config that drives structural
+	-- compilation, but the result is *not* sent to HAL as desired OS state.
+	-- It is consumed by NET itself.
+	local mw = get_tbl(pre, 'multiwan') or {}
+	local out = {}
+
+	for _, net_id in ipairs(sorted_keys(nets_in)) do
+		local nrec = nets_in[net_id]
+		local prof = nil
+		if type(nrec.profile) == 'string' then prof = profiles[nrec.profile] end
+
+		local nmw = resolve_multiwan(nrec, prof)
+		local shaping = resolve_shaping(nrec, prof)
+
+		-- Only create a runtime link entry if this net participates in either:
+		--   * multiwan runtime control, or
+		--   * dynamic shaping / autorate
+		if is_plain_table(nmw) or is_plain_table(shaping) then
+			nmw = is_plain_table(nmw) and nmw or {}
+			shaping = is_plain_table(shaping) and shaping or {}
+
+			out[net_id] = {
+				link_id = net_id,
+				family  = get_str(nmw, 'family') or 'ipv4',
+				health  = compile_runtime_health(net_id, nmw, mw, shaping),
+				shaping = compile_runtime_shaping(net_id, shaping),
+				multipath = compile_runtime_multipath(net_id, nmw, mw),
+			}
+		end
+	end
+
+	return out, nil
+end
+
+local function compile_runtime_policy(pre_net_data, opts)
+	opts = opts or {}
+
+	if not is_plain_table(pre_net_data) then
+		return nil, diag('bad_config', { 'net', 'data' }, 'net data must be a table')
+	end
+
+	local profiles = get_tbl(pre_net_data, 'profiles') or {}
+	local network  = get_tbl(pre_net_data, 'network') or {}
+	local nets_in  = get_tbl(network, 'nets') or {}
+	local mw       = get_tbl(pre_net_data, 'multiwan') or {}
+
+	local links, lerr = compile_runtime_links(pre_net_data, nets_in, profiles)
+	if not links then return nil, lerr end
+
+	return {
+		-- Timings control NET's own loops.
+		timings = compile_runtime_timings(pre_net_data),
+
+		-- Top-level multiwan runtime policy.
+		multipath = {
+			enabled     = get_bool(get_tbl(mw, 'globals') or {}, 'enabled') ~= false,
+			policy_name = 'default',
+			last_resort = get_str(get_tbl(mw, 'globals') or {}, 'last_resort') or 'unreachable',
+		},
+
+		links = links,
+	}, nil
+end
+
+--------------------------------------------------------------------------------
+-- Public compile entry points
+--------------------------------------------------------------------------------
+
 function M.compile(pre_net_data, opts)
 	opts = opts or {}
 	local rev = opts.rev
@@ -600,12 +812,6 @@ function M.compile(pre_net_data, opts)
 		return nil, diag('bad_config', { 'net', 'data' }, 'net data must be a table')
 	end
 
-	local schema = pre_net_data.schema
-	if schema ~= nil and type(schema) == 'string' then
-		-- Optional strictness: enforce pre-net schema.
-		-- if schema ~= 'devicecode.pre_net/1.0' then ...
-	end
-
 	local profiles          = get_tbl(pre_net_data, 'profiles') or {}
 	local network           = get_tbl(pre_net_data, 'network') or {}
 	local nets_in           = get_tbl(network, 'nets') or {}
@@ -615,7 +821,6 @@ function M.compile(pre_net_data, opts)
 		snapshot = { rev = rev, gen = gen },
 	}
 
-	-- NETWORK
 	local network_out, derr = compile_links_and_nets(pre_net_data, rev, gen)
 	if not network_out then return nil, derr end
 
@@ -623,7 +828,6 @@ function M.compile(pre_net_data, opts)
 	if not routes_out then return nil, rerr end
 	network_out.routes = routes_out
 
-	-- Normalise globals: only keep known keys, omit if absent.
 	local g_in = get_tbl(get_tbl(pre_net_data, 'network') or {}, 'globals') or {}
 	network_out.globals = {
 		ula_prefix      = g_in.ula_prefix,
@@ -635,19 +839,16 @@ function M.compile(pre_net_data, opts)
 
 	desired.network = network_out
 
-	-- ADDRESSING
 	local addressing_out, aerr = compile_addressing(pre_net_data, nets_in, profiles)
 	if not addressing_out then return nil, aerr end
 	addressing_out.rev = rev
 	desired.addressing = addressing_out
 
-	-- FIREWALL
 	local fw_out, fwerr = compile_firewall(pre_net_data, nets_in, profiles)
 	if not fw_out then return nil, fwerr end
 	fw_out.rev = rev
 	desired.firewall = fw_out
 
-	-- MULTIWAN (optional)
 	local mw_out, mwerr = compile_multiwan(pre_net_data, nets_in, profiles)
 	if mw_out == nil and mwerr ~= nil then
 		return nil, mwerr
@@ -658,6 +859,27 @@ function M.compile(pre_net_data, opts)
 	end
 
 	return desired, nil
+end
+
+function M.compile_runtime_policy(pre_net_data, opts)
+	return compile_runtime_policy(pre_net_data, opts)
+end
+
+function M.compile_bundle(pre_net_data, opts)
+	opts = opts or {}
+
+	local desired, derr = M.compile(pre_net_data, opts)
+	if not desired then return nil, derr end
+
+	local runtime, rerr = compile_runtime_policy(pre_net_data, opts)
+	if not runtime then return nil, rerr end
+
+	return {
+		gen     = math.floor(opts.gen or 0),
+		rev     = math.floor(opts.rev or 0),
+		desired = desired,
+		runtime = runtime,
+	}, nil
 end
 
 return M
