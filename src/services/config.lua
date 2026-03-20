@@ -268,10 +268,6 @@ function M.start(conn, opts)
 		if type(settings.schema) ~= 'string' or settings.schema == '' then
 			return nil, 'payload.data.schema must be a non-empty string'
 		end
-		local okb, eerr = assert_no_extra_bags(settings, '$.payload.data')
-		if not okb then
-			return nil, eerr
-		end
 
 		local old = current[service]
 		local next_rev = (old and type(old.rev) == 'number') and (math.floor(old.rev) + 1) or 1

@@ -91,6 +91,23 @@ local function main(scope)
 
 	local services = {}
 
+	local function cleanup_child_scope(child, reason)
+		if not child then return end
+		child:cancel(reason or 'cleanup')
+		-- Intentional: this scope is being retired immediately.
+		op.perform_raw(child:join_op())
+	end
+
+	local function spawn_service(child, name, mod)
+		return child:spawn(function()
+			local conn = bus:connect()
+			mod.start(conn, { name = name, env = env })
+
+			-- Long-lived services are not expected to return normally.
+			error(('service returned unexpectedly: %s'):format(tostring(name)), 0)
+		end)
+	end
+
 	for i = 1, #service_names do
 		local name = service_names[i]
 		local mod  = require('services.' .. name)
@@ -102,16 +119,14 @@ local function main(scope)
 			main_conn:publish({ 'obs', 'log', 'main', 'error' },
 				{ what = 'child_scope_failed', service = name, err = tostring(cerr) })
 		else
-			services[#services + 1] = { name = name, scope = child }
-
-			local ok_spawn, serr = child:spawn(function()
-				local conn = bus:connect()
-				mod.start(conn, { name = name, env = env })
-			end)
+			local ok_spawn, serr = spawn_service(child, name, mod)
 
 			if not ok_spawn then
 				main_conn:publish({ 'obs', 'log', 'main', 'error' },
 					{ what = 'spawn_failed', service = name, err = tostring(serr) })
+				cleanup_child_scope(child, 'spawn_failed')
+			else
+				services[#services + 1] = { name = name, scope = child }
 			end
 		end
 	end
@@ -124,7 +139,7 @@ local function main(scope)
 				local rec = services[i]
 				if rec and rec.scope then
 					local one = rec.scope:not_ok_op():wrap(function(st, primary)
-						return rec.name, st, primary
+						return rec, st, primary
 					end)
 					ev = ev and op.choice(ev, one) or one
 				end
@@ -141,26 +156,33 @@ local function main(scope)
 			local ev = build_choice()
 			if not ev then return end
 
-			local svc, st, primary = op.perform_raw(ev)
+			local rec, st, primary = op.perform_raw(ev)
+			local svc = rec.name
+
+			-- Now that the scope is not-ok, retire it fully. Calling join_op()
+			-- here is safe: the service has already failed/cancelled, so we are
+			-- no longer trying to preserve normal admission.
+			local jst, report, jprimary = op.perform_raw(rec.scope:join_op())
 
 			-- Log to monitor.
 			main_conn:publish({ 'obs', 'event', 'main', 'service_exit' }, {
 				service = svc,
-				status  = st,
-				primary = tostring(primary),
+				status  = jst,
+				primary = tostring(jprimary),
+				report  = report,
 				at      = os.date('%Y-%m-%d %H:%M:%S'),
 			})
 
-			main_conn:publish({ 'obs', 'log', 'main', (st == 'failed') and 'error' or 'warn' }, {
+			main_conn:publish({ 'obs', 'log', 'main', (jst == 'failed') and 'error' or 'warn' }, {
 				what    = 'service_not_ok',
 				service = svc,
-				status  = st,
-				primary = tostring(primary),
+				status  = jst,
+				primary = tostring(jprimary),
 			})
 
-			-- Remove it so we do not immediately re-fire on the same terminal scope.
+			-- Remove it so we do not immediately re-fire on the same retired scope.
 			for i = #services, 1, -1 do
-				if services[i] and services[i].name == svc then
+				if services[i] == rec then
 					table.remove(services, i)
 					break
 				end

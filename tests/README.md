@@ -1,1 +1,0 @@
-This folder will contain tests for `devicecode`

@@ -1,11 +1,34 @@
 -- services/hal.lua
 --
--- HAL façade (reactor + worker lanes), rev-based idempotency:
+-- HAL façade (reactor + worker lanes).
+--
+-- Responsibilities
 --   * Stable RPC surface: rpc/hal/*
---   * Idempotency (apply_*): if req.rev is present and <= last_rev[domain], skip backend.
+--   * Structural apply lane:
+--       - apply_net
+--       - apply_wifi
+--     These remain revision-driven and idempotent by req.rev.
+--
+--   * Sense lane:
+--       - list_links
+--       - probe_links
+--       - read_link_counters
+--     These are read-only runtime methods used by NET to build health/load state.
+--
+--   * Live lane:
+--       - apply_link_shaping_live
+--       - apply_multipath_live
+--       - persist_multipath_state
+--     These are runtime dataplane or persistence mutations. They are serialised
+--     so tc / routing / targeted UCI writes do not interleave unpredictably.
+--
+-- Important boundary
+--   HAL does not decide policy.
+--   HAL only performs bounded OS-facing work and returns facts/results.
 
 local fibers       = require 'fibers'
 local mailbox      = require 'fibers.mailbox'
+local safe         = require 'coxpcall'
 
 local perform      = fibers.perform
 local named_choice = fibers.named_choice
@@ -83,10 +106,15 @@ function M.start(conn, opts)
 	local host     = {
 		state_dir = os.getenv('DEVICECODE_STATE_DIR'),
 		env       = os.getenv('DEVICECODE_ENV') or 'dev',
+
+		-- Observability hooks exposed to the backend. These keep the backend free
+		-- from direct knowledge of the bus topic layout.
 		log       = function(level, payload) svc:obs_log(level, payload) end,
 		event     = function(ev, payload) svc:obs_event(ev, payload) end,
 		retain    = function(topic, payload) conn:retain(topic, payload) end,
 		publish   = function(topic, payload) conn:publish(topic, payload) end,
+
+		-- Time helpers for any backend code that needs timestamps.
 		now       = function() return svc:now() end,
 		wall      = function() return svc:wall() end,
 	}
@@ -94,7 +122,7 @@ function M.start(conn, opts)
 	local backend  = assert(mod.new(host), 'backend new() returned nil')
 	local caps     = (backend.capabilities and backend:capabilities()) or {}
 
-	-- Announce (retained) for discovery.
+	-- Retained announce for discovery.
 	conn:retain(t('svc', name, 'announce'), {
 		role     = 'hal',
 		rpc_root = rpc_root,
@@ -106,16 +134,35 @@ function M.start(conn, opts)
 	svc:obs_event('ready', { rpc_root = 'rpc/hal', backend = bname })
 	svc:obs_log('info', { what = 'hal_started', backend = bname })
 
-	-- Heartbeat.
+	-- Basic heartbeat.
 	svc:spawn_heartbeat(30.0, 'tick')
 
+	-- Method registry.
+	--
+	-- Kinds:
+	--   rpc   : generic request/response, usually small or infrequent
+	--   sense : runtime read/probe methods used by NET
+	--   live  : runtime dataplane / persistence mutations
+	--   apply : structural reconcile methods, serialised and rev-idempotent
 	local methods = {
-		read_state  = { kind = 'rpc' },
-		write_state = { kind = 'rpc' },
-		dump        = { kind = 'rpc' },
+		-- Generic/state methods.
+		read_state              = { kind = 'rpc' },
+		write_state             = { kind = 'rpc' },
+		dump                    = { kind = 'rpc' },
 
-		apply_net   = { kind = 'apply', domain = 'net' },
-		apply_wifi  = { kind = 'apply', domain = 'wifi' },
+		-- Runtime sensing.
+		list_links              = { kind = 'sense' },
+		probe_links             = { kind = 'sense' },
+		read_link_counters      = { kind = 'sense' },
+
+		-- Structural apply.
+		apply_net               = { kind = 'apply', domain = 'net' },
+		apply_wifi              = { kind = 'apply', domain = 'wifi' },
+
+		-- Runtime live apply.
+		apply_link_shaping_live = { kind = 'live', domain = 'link_shaping_live' },
+		apply_multipath_live    = { kind = 'live', domain = 'multipath_live' },
+		persist_multipath_state = { kind = 'live', domain = 'multipath_persist' },
 	}
 
 	-- One endpoint per method.
@@ -125,10 +172,15 @@ function M.start(conn, opts)
 	end
 
 	-- Internal work queues.
-	local rpc_tx, rpc_rx     = mailbox.new(64, { full = 'reject_newest' })
-	local apply_tx, apply_rx = mailbox.new(32, { full = 'reject_newest' })
+	--
+	-- These are deliberately bounded. The system should reject and retry rather
+	-- than accumulate unbounded work under load.
+	local rpc_tx,   rpc_rx   = mailbox.new(64, { full = 'reject_newest' })
+	local sense_tx, sense_rx = mailbox.new(64, { full = 'reject_newest' })
+	local live_tx,  live_rx  = mailbox.new(32, { full = 'reject_newest' })
+	local apply_tx, apply_rx = mailbox.new(16, { full = 'reject_newest' })
 
-	-- RPC worker: read_state/write_state/dump.
+	-- Generic RPC worker.
 	fibers.spawn(function()
 		while true do
 			local job = perform(rpc_rx:recv_op())
@@ -136,18 +188,93 @@ function M.start(conn, opts)
 
 			local method = job.method
 			local msg    = job.msg
+			local req    = msg.payload or {}
 
 			svc:obs_event('rpc_in', { id = msg.id, method = method })
 
-			local req        = msg.payload or {}
-			local reply      = safe_invoke(backend, method, req, msg)
-
+			local reply  = safe_invoke(backend, method, req, msg)
 			local ok, reason = reply_best_effort(conn, msg, reply)
-			svc:obs_event('rpc_out', { id = msg.id, method = method, ok = (ok == true), reason = reason })
+
+			svc:obs_event('rpc_out', {
+				id     = msg.id,
+				method = method,
+				ok     = (ok == true),
+				reason = reason,
+			})
 		end
 	end)
 
-	-- Apply worker: serialises apply_*.
+	-- Sense worker.
+	--
+	-- This lane should only do reads/probes. It is kept separate so that probe
+	-- traffic does not interfere with structural apply work.
+	fibers.spawn(function()
+		while true do
+			local job = perform(sense_rx:recv_op())
+			if job == nil then return end
+
+			local method = job.method
+			local msg    = job.msg
+			local req    = msg.payload or {}
+
+			svc:obs_event(method, { id = msg.id, phase = 'begin' })
+
+			local reply = safe_invoke(backend, method, req, msg)
+			if reply.applied == nil then reply.applied = true end
+			if reply.changed == nil then reply.changed = false end
+
+			local ok, reason = reply_best_effort(conn, msg, reply)
+
+			svc:obs_event(method, {
+				id      = msg.id,
+				phase   = 'end',
+				ok      = (reply.ok == true),
+				applied = (reply.applied == true),
+				changed = (reply.changed == true),
+				reason  = reason,
+				err     = (reply.ok ~= true) and tostring(reply.err or 'sense failed') or nil,
+			})
+		end
+	end)
+
+	-- Live worker.
+	--
+	-- This serialises runtime dataplane mutations. It is intentionally separate
+	-- from the structural apply lane so NET can do frequent live adjustments
+	-- without mixing them with full reconcile/reload flows.
+	fibers.spawn(function()
+		while true do
+			local job = perform(live_rx:recv_op())
+			if job == nil then return end
+
+			local method = job.method
+			local msg    = job.msg
+			local req    = msg.payload or {}
+
+			svc:obs_event(method, { id = msg.id, phase = 'begin' })
+
+			local reply = safe_invoke(backend, method, req, msg)
+			if reply.applied == nil then reply.applied = (reply.ok == true) end
+			if reply.changed == nil then reply.changed = (reply.ok == true) end
+
+			local ok, reason = reply_best_effort(conn, msg, reply)
+
+			svc:obs_event(method, {
+				id      = msg.id,
+				phase   = 'end',
+				ok      = (reply.ok == true),
+				applied = (reply.applied == true),
+				changed = (reply.changed == true),
+				reason  = reason,
+				err     = (reply.ok ~= true) and tostring(reply.err or 'live apply failed') or nil,
+			})
+		end
+	end)
+
+	-- Structural apply worker.
+	--
+	-- Revision-driven idempotency remains here. This worker serialises the
+	-- disruptive, whole-domain operations.
 	fibers.spawn(function()
 		local last_rev = {} -- last_rev[domain] = integer
 
@@ -165,8 +292,12 @@ function M.start(conn, opts)
 			if desired == nil then desired = req end
 
 			if type(desired) ~= 'table' then
-				reply_best_effort(conn, msg,
-					{ ok = false, err = 'desired must be a table', applied = false, changed = false })
+				reply_best_effort(conn, msg, {
+					ok      = false,
+					err     = 'desired must be a table',
+					applied = false,
+					changed = false,
+				})
 			else
 				local rev = req.rev
 				if type(rev) == 'number' then rev = math.floor(rev) else rev = nil end
@@ -176,8 +307,15 @@ function M.start(conn, opts)
 				if rev ~= nil and last_rev[domain] ~= nil and rev <= last_rev[domain] then
 					local reply = { ok = true, applied = true, changed = false }
 					reply_best_effort(conn, msg, reply)
-					svc:obs_event(method,
-						{ id = msg.id, gen = req.gen, rev = rev, phase = 'end', ok = true, applied = true, changed = false })
+					svc:obs_event(method, {
+						id      = msg.id,
+						gen     = req.gen,
+						rev     = rev,
+						phase   = 'end',
+						ok      = true,
+						applied = true,
+						changed = false,
+					})
 				else
 					local reply = safe_invoke(backend, method, desired, msg)
 
@@ -190,26 +328,25 @@ function M.start(conn, opts)
 
 					reply_best_effort(conn, msg, reply)
 
-					local okb      = (reply.ok == true)
-					local appliedb = (reply.applied == true)
-					local changedb = (reply.changed == true)
-
 					svc:obs_event(method, {
 						id      = msg.id,
 						gen     = req.gen,
 						rev     = rev,
 						phase   = 'end',
-						ok      = okb,
-						applied = appliedb,
-						changed = changedb,
-						err     = (not okb) and tostring(reply.err or 'apply failed') or nil,
+						ok      = (reply.ok == true),
+						applied = (reply.applied == true),
+						changed = (reply.changed == true),
+						err     = (reply.ok ~= true) and tostring(reply.err or 'apply failed') or nil,
 					})
 				end
 			end
 		end
 	end)
 
-	-- Reactor: wait on all endpoints; enqueue without yielding.
+	-- Reactor.
+	--
+	-- This waits on all endpoints and routes each request into the appropriate
+	-- internal lane without doing backend work inline.
 	while true do
 		local arms = {}
 		for method, ep in pairs(endpoints) do
@@ -230,15 +367,24 @@ function M.start(conn, opts)
 		else
 			local job = { method = which, msg = msg }
 			local okq, qerr
+
 			if meta.kind == 'apply' then
 				okq, qerr = try_enqueue(apply_tx, job)
+			elseif meta.kind == 'live' then
+				okq, qerr = try_enqueue(live_tx, job)
+			elseif meta.kind == 'sense' then
+				okq, qerr = try_enqueue(sense_tx, job)
 			else
 				okq, qerr = try_enqueue(rpc_tx, job)
 			end
 
 			if not okq then
 				fibers.spawn(function()
-					reply_best_effort(conn, msg, { ok = false, err = 'busy', detail = tostring(qerr) })
+					reply_best_effort(conn, msg, {
+						ok     = false,
+						err    = 'busy',
+						detail = tostring(qerr),
+					})
 				end)
 			end
 		end
