@@ -29,6 +29,8 @@ local pulse = require "fibers.pulse"
 ---@field initialised boolean
 ---@field caps_applied boolean
 ---@field state_pulse Pulse
+---@field sim_inserted_pulse Pulse
+---@field sim_state_ch Channel
 local Modem = {}
 Modem.__index = Modem
 
@@ -45,6 +47,7 @@ local D_LOG_EMITTER = false
 
 local DEFAULT_STOP_TIMEOUT = 5
 local DEFAULT_CACHE_TIMEOUT = 10
+local LISTEN_TRIGGER_INTERVAL = 1
 
 local CONTROL_Q_LEN = 8
 
@@ -337,39 +340,37 @@ function Modem:listen_for_sim()
     end
     self.listening_for_sim = true
     local ok, err = fibers.current_scope():spawn(function()
-        fibers.run_scope(function()
-            self:_emit_state("sim_listener", "open")
+        self:_emit_state("sim_listener", "open")
 
-            fibers.current_scope():finally(function()
-                self.listening_for_sim = false
-                self:_emit_state("sim_listener", "closed")
-            end)
-
-            while true do
-                --- out returns true if SIM is present, false if not
-                local source, out, err = fibers.perform(op.named_choice {
-                    sim_present = self.backend:wait_for_sim_present_op(),
-                    timeout = sleep.sleep_op(DEFAULT_CACHE_TIMEOUT)
-                })
-                if source == "sim_present" then
-                    if err ~= "" then
-                        log.error("Modem Driver", self.imei,
-                            "listen_for_sim: error waiting for SIM presence:", err)
-                        self:_emit_event("sim_listen_error", err)
-                    end
-                    if out then
-                        self.state_pulse:signal()
-                        break
-                    end
-                elseif source == "timeout" then
-                    local ok, check_err = self.backend:trigger_sim_presence_check()
-                    if not ok then
-                        log.error("Modem Driver", self.imei,
-                            "listen_for_sim: failed to trigger SIM presence check:", check_err)
-                    end
-                end
-            end
+        fibers.current_scope():finally(function()
+            self.listening_for_sim = false
+            self:_emit_state("sim_listener", "closed")
         end)
+
+        -- Capture pulse version before reading state to close the insertion race window.
+        local last_seen = self.sim_inserted_pulse:version()
+        local sim_present = self.sim_state_ch:get()
+
+        while sim_present ~= true do
+            local source, _, primary = fibers.perform(op.named_choice {
+                inserted = self.sim_inserted_pulse:changed_op(last_seen),
+                trigger  = sleep.sleep_op(LISTEN_TRIGGER_INTERVAL),
+                failed   = self.scope:fault_op(),
+            })
+            if source == "inserted" then
+                break
+            elseif source == "trigger" then
+                local trigger_ok, check_err = self.backend:trigger_sim_presence_check()
+                if not trigger_ok then
+                    log.error("Modem Driver", self.imei,
+                        "listen_for_sim: failed to trigger SIM presence check:", check_err)
+                end
+            elseif source == "failed" then
+                log.error("Modem Driver", self.imei,
+                    "listen_for_sim: modem scope faulted:", tostring(primary))
+                break
+            end
+        end
     end)
     if not ok then
         return return_error("listen_for_sim spawn failed: " .. tostring(err), 1)
@@ -520,6 +521,43 @@ function Modem:control_manager()
     end
 end
 
+function Modem:sim_lifecycle_monitor()
+    log.trace("Modem Driver", self.imei, "sim_lifecycle_monitor: started")
+
+    fibers.current_scope():finally(function()
+        log.trace("Modem Driver", self.imei, "sim_lifecycle_monitor: exiting")
+    end)
+
+    local sim_present = nil
+    while true do
+        local source, v1, v2 = fibers.perform(op.named_choice {
+            sim_change = self.backend:wait_for_sim_present_op(),
+            send       = self.sim_state_ch:put_op(sim_present),
+        })
+        if source == "sim_change" then
+            local present, err = v1, v2
+            if err == "cancelled" or err == "Stream closed" or err == "Command closed" then
+                log.trace("Modem Driver", self.imei, "sim_lifecycle_monitor:", err)
+                break
+            elseif err ~= "" then
+                log.error("Modem Driver", self.imei, "sim_lifecycle_monitor: error polling SIM presence:", err)
+                sleep.sleep(DEFAULT_CACHE_TIMEOUT)
+            elseif present then
+                log.trace("Modem Driver", self.imei, "sim_lifecycle_monitor: SIM inserted")
+                sim_present = true
+                self.sim_inserted_pulse:signal()
+                self.state_pulse:signal()
+                self:_emit_state("sim_status", "present")
+            else
+                log.trace("Modem Driver", self.imei, "sim_lifecycle_monitor: SIM removed")
+                sim_present = false
+                self:_emit_state("sim_status", "absent")
+            end
+        end
+        -- source == "send": listener consumed the state, loop to offer it again
+    end
+end
+
 ---- Driver Functions ----
 
 --- Spawn driver services
@@ -536,6 +574,7 @@ function Modem:start()
     self.scope:spawn(function() self:state_monitor() end)
     self.scope:spawn(function() self:control_manager() end)
     self.scope:spawn(function() self:emitter() end)
+    self.scope:spawn(function() self:sim_lifecycle_monitor() end)
 
     -- Signal initial pulse so emitter emits the initial state
     self.state_pulse:signal()
@@ -668,6 +707,8 @@ local function new(address)
         caps_applied = false, -- modem cannot start until capabilities applied
         listening_for_sim = false,
         state_pulse = pulse.new(),
+        sim_inserted_pulse = pulse.new(),
+        sim_state_ch = channel.new(),
         control_ch = control_ch
     }, Modem), ""
 end

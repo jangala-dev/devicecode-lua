@@ -135,7 +135,9 @@ local function add_mode_funcs(ModemBackend)
         return true, ""
     end
 
-    --- Make an op to listen for sim presence
+    --- Make an op that completes when the UIM slot status changes to reflect a new SIM state.
+    --- Behaviour varies by modem and firmware — on some models the slot monitor cannot be relied
+    --- upon to fire on removal or insertion. See models/quectel.lua for the polling override.
     ---@return Op
     function ModemBackend:wait_for_sim_present_op()
         return op.guard(function()
