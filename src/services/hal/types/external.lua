@@ -169,6 +169,101 @@ function new.UARTWriteOpts(data)
     }, UARTWriteOpts), ""
 end
 
+---@class MemoryGetOpts
+---@field field string
+---@field max_age number
+local MemoryGetOpts = {}
+MemoryGetOpts.__index = MemoryGetOpts
+
+---Create a new MemoryGetOpts.
+---@param field string
+---@param max_age number
+---@return MemoryGetOpts?
+---@return string error
+function new.MemoryGetOpts(field, max_age)
+    if type(field) ~= 'string' or field == '' then
+        return nil, "invalid field"
+    end
+    if type(max_age) ~= 'number' or max_age < 0 then
+        return nil, "invalid max_age"
+    end
+    return setmetatable({ field = field, max_age = max_age }, MemoryGetOpts), ""
+end
+
+---@class CpuGetOpts
+---@field field string
+---@field max_age number
+local CpuGetOpts = {}
+CpuGetOpts.__index = CpuGetOpts
+
+---Create a new CpuGetOpts.
+---@param field string
+---@param max_age number
+---@return CpuGetOpts?
+---@return string error
+function new.CpuGetOpts(field, max_age)
+    if type(field) ~= 'string' or field == '' then
+        return nil, "invalid field"
+    end
+    if type(max_age) ~= 'number' or max_age < 0 then
+        return nil, "invalid max_age"
+    end
+    return setmetatable({ field = field, max_age = max_age }, CpuGetOpts), ""
+end
+
+---@class ThermalGetOpts
+---@field max_age number
+local ThermalGetOpts = {}
+ThermalGetOpts.__index = ThermalGetOpts
+
+---Create a new ThermalGetOpts.
+---@param max_age number
+---@return ThermalGetOpts?
+---@return string error
+function new.ThermalGetOpts(max_age)
+    if type(max_age) ~= 'number' or max_age < 0 then
+        return nil, "invalid max_age"
+    end
+    return setmetatable({ max_age = max_age }, ThermalGetOpts), ""
+end
+
+---@class PlatformGetOpts
+---@field field string
+---@field max_age number
+local PlatformGetOpts = {}
+PlatformGetOpts.__index = PlatformGetOpts
+
+---Create a new PlatformGetOpts.
+---@param field string
+---@param max_age number
+---@return PlatformGetOpts?
+---@return string error
+function new.PlatformGetOpts(field, max_age)
+    if type(field) ~= 'string' or field == '' then
+        return nil, "invalid field"
+    end
+    if type(max_age) ~= 'number' or max_age < 0 then
+        return nil, "invalid max_age"
+    end
+    return setmetatable({ field = field, max_age = max_age }, PlatformGetOpts), ""
+end
+
+---@class PowerActionOpts
+---@field delay? number
+local PowerActionOpts = {}
+PowerActionOpts.__index = PowerActionOpts
+
+---Create a new PowerActionOpts.
+---@param delay? number
+---@return PowerActionOpts?
+---@return string error
+function new.PowerActionOpts(delay)
+    if delay ~= nil and (type(delay) ~= 'number' or delay < 0) then
+        return nil, "invalid delay"
+    end
+    return setmetatable({ delay = delay }, PowerActionOpts), ""
+end
+
 return {
     ModemGetOpts = ModemGetOpts,
     ModemConnectOpts = ModemConnectOpts,
@@ -177,5 +272,10 @@ return {
     FilesystemWriteOpts = FilesystemWriteOpts,
     UARTOpenOpts = UARTOpenOpts,
     UARTWriteOpts = UARTWriteOpts,
+    MemoryGetOpts = MemoryGetOpts,
+    CpuGetOpts = CpuGetOpts,
+    ThermalGetOpts = ThermalGetOpts,
+    PlatformGetOpts = PlatformGetOpts,
+    PowerActionOpts = PowerActionOpts,
     new = new,
 }
