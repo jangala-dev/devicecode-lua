@@ -201,6 +201,65 @@ function new.FilesystemCapability(id, control_ch)
     return new.Capability('fs', id, control_ch, offerings)
 end
 
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.UARTCapability(id, control_ch)
+    local offerings = {
+        'open', 'close', 'write'
+    }
+    return new.Capability('uart', id, control_ch, offerings)
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.CpuCapability(id, control_ch)
+    return new.Capability('cpu', id, control_ch, { 'get' })
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.MemoryCapability(id, control_ch)
+    return new.Capability('memory', id, control_ch, { 'get' })
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.ThermalCapability(id, control_ch)
+    return new.Capability('thermal', id, control_ch, { 'get' })
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.PlatformCapability(id, control_ch)
+    return new.Capability('platform', id, control_ch, { 'get' })
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.PowerCapability(id, control_ch)
+    return new.Capability('power', id, control_ch, { 'shutdown', 'reboot' })
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.UsbCapability(id, control_ch)
+    return new.Capability('usb', id, control_ch, { 'enable', 'disable' })
+end
+
 ---@class ControlError
 ---@field reason string
 ---@field code integer
