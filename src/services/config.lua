@@ -11,104 +11,58 @@
 -- Persisted state location (within HAL):
 --   ns  = "config"
 --   key = "services"
---
--- Assumes cjson.safe is available.
+
+-- services/config.lua
 
 local fibers       = require 'fibers'
 local sleep        = require 'fibers.sleep'
 local pulse        = require 'fibers.pulse'
 
-local cjson        = require 'cjson.safe'
-
 local perform      = fibers.perform
 local named_choice = fibers.named_choice
 
 local base         = require 'devicecode.service_base'
+local codec        = require 'services.config.codec'
+local state        = require 'services.config.state'
 
 local M            = {}
-
-local JSON_NULL    = cjson.null
-
-local function strip_nulls(x, seen)
-	if x == JSON_NULL then return nil end
-	if type(x) ~= 'table' then return x end
-	if getmetatable(x) ~= nil then return x end
-
-	seen = seen or {}
-	if seen[x] then return x end
-	seen[x] = true
-
-	for k, v in pairs(x) do
-		local nv = strip_nulls(v, seen)
-		if nv == nil then
-			x[k] = nil
-		else
-			x[k] = nv
-		end
-	end
-	return x
-end
-
-local function is_plain_table(x)
-	return type(x) == 'table' and getmetatable(x) == nil
-end
-
-local function decode_blob_strict(blob)
-	local decoded, jerr = cjson.decode(blob)
-	if decoded == nil then
-		return nil, 'json_decode_failed: ' .. tostring(jerr)
-	end
-	if not is_plain_table(decoded) then
-		return nil, 'invalid_shape: root must be a table'
-	end
-
-	strip_nulls(decoded)
-
-	local out = {}
-	for svc, rec in pairs(decoded) do
-		if type(svc) ~= 'string' or svc == '' then
-			return nil, 'invalid_shape: service key must be non-empty string'
-		end
-		if not is_plain_table(rec) then
-			return nil, 'invalid_shape: record must be a table for ' .. svc
-		end
-		if type(rec.rev) ~= 'number' then
-			return nil, 'invalid_shape: rev must be a number for ' .. svc
-		end
-		if not is_plain_table(rec.data) then
-			return nil, 'invalid_shape: data must be a table for ' .. svc
-		end
-
-		-- Require a schema discriminator in the data block.
-		if type(rec.data.schema) ~= 'string' or rec.data.schema == '' then
-			return nil, 'invalid_shape: data.schema must be a non-empty string for ' .. svc
-		end
-
-		out[svc] = { rev = math.floor(rec.rev), data = rec.data }
-	end
-
-	return out, nil
-end
-
-local function encode_blob(current)
-	return cjson.encode(current) or '{}'
-end
 
 function M.start(conn, opts)
 	opts = opts or {}
 	local svc = base.new(conn, { name = opts.name or 'config', env = opts.env })
 
+	local timings = opts.timings or {}
+
+	local function numopt(name, default)
+		local v = timings[name]
+		return (type(v) == 'number') and v or default
+	end
+
+	local hal_wait_timeout_s     = numopt('hal_wait_timeout_s', 60)
+	local hal_wait_tick_s        = numopt('hal_wait_tick_s', 10)
+	local heartbeat_s            = numopt('heartbeat_s', 30.0)
+
+	local persist_debounce_s     = numopt('persist_debounce_s', 0.25)
+	local persist_max_delay_s    = numopt('persist_max_delay_s', 5.0)
+	local persist_retry_initial_s = numopt('persist_retry_initial_s', 1.0)
+	local persist_retry_max_s    = numopt('persist_retry_max_s', 30.0)
+
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
 	svc:obs_log('info', 'service start() entered')
 	svc:status('starting')
 
-	svc:spawn_heartbeat(30.0, 'tick')
+	svc:spawn_heartbeat(heartbeat_s, 'tick')
 
-	local hal_announce, herr = svc:wait_for_hal({ timeout = 60, tick = 10 })
+	local hal_announce, herr = svc:wait_for_hal({
+		timeout = hal_wait_timeout_s,
+		tick    = hal_wait_tick_s,
+	})
+
 	if not hal_announce then
-		svc:status('stopped', { reason = herr or 'no hal available' })
-		svc:obs_log('error', { what = 'start_failed', err = tostring(herr or 'no hal') })
-		return
+		local err = herr or 'no hal available'
+		svc:status('failed', { reason = err })
+		svc:obs_log('error', { what = 'start_failed', err = tostring(err) })
+		error(('config: failed to discover HAL: %s'):format(tostring(err)), 0)
 	end
 
 	local STATE_NS  = 'config'
@@ -118,12 +72,7 @@ function M.start(conn, opts)
 	local current   = {}
 
 	local function publish_all_retained()
-		local n = 0
-		for sname, rec in pairs(current) do
-			n = n + 1
-			conn:retain({ 'config', sname }, rec)
-		end
-		svc:obs_event('publish_all', { services = n })
+		return state.publish_all_retained(conn, svc, current)
 	end
 
 	local function load_from_hal()
@@ -152,7 +101,7 @@ function M.start(conn, opts)
 			return true
 		end
 
-		local decoded, derr = decode_blob_strict(reply.data or '')
+		local decoded, derr = codec.decode_blob_strict(reply.data or '')
 		if not decoded then
 			svc:status('degraded', { reason = 'invalid config JSON', err = tostring(derr) })
 			svc:obs_log('error', { what = 'decode_failed', err = tostring(derr) })
@@ -176,11 +125,11 @@ function M.start(conn, opts)
 	local flush_at       = math.huge
 	local flush_deadline = math.huge
 
-	local debounce_s     = 0.25
-	local max_delay_s    = 5.0
+	local debounce_s     = persist_debounce_s
+	local max_delay_s    = persist_max_delay_s
 
-	local retry_s        = 1.0
-	local retry_max_s    = 30.0
+	local retry_s        = persist_retry_initial_s
+	local retry_max_s    = persist_retry_max_s
 
 	local function mark_dirty(reason)
 		local n = svc:now()
@@ -194,7 +143,13 @@ function M.start(conn, opts)
 	end
 
 	local function persist_snapshot(reason)
-		local blob = encode_blob(current)
+		local blob, berr = codec.encode_blob(current)
+		if not blob then
+			svc:obs_log('error', { what = 'persist_encode_failed', err = tostring(berr) })
+			svc:obs_event('persist_end', { ok = false, err = tostring(berr), phase = 'encode' })
+			return nil, berr
+		end
+
 		svc:obs_event('persist_begin', { ns = STATE_NS, key = STATE_KEY, reason = reason, bytes = #blob })
 
 		local reply, err = svc:hal_call('write_state', { ns = STATE_NS, key = STATE_KEY, data = blob }, 4.0)
@@ -254,33 +209,6 @@ function M.start(conn, opts)
 		end
 	end)
 
-	-- Strict set: payload must be { data = table }.
-	local function set_service(service, payload, msg)
-		if type(service) ~= 'string' or service == '' then
-			return nil, 'invalid service'
-		end
-		if not is_plain_table(payload) or not is_plain_table(payload.data) then
-			return nil, 'payload must be { data = table }'
-		end
-
-		local settings = payload.data
-
-		if type(settings.schema) ~= 'string' or settings.schema == '' then
-			return nil, 'payload.data.schema must be a non-empty string'
-		end
-
-		local old = current[service]
-		local next_rev = (old and type(old.rev) == 'number') and (math.floor(old.rev) + 1) or 1
-
-		current[service] = { rev = next_rev, data = settings }
-		conn:retain({ 'config', service }, current[service])
-
-		svc:obs_event('set_applied', { service = service, rev = next_rev, id = msg and msg.id or nil })
-		mark_dirty('set ' .. service)
-
-		return true, nil
-	end
-
 	local sub_set = conn:subscribe({ 'config', '+', 'set' }, { queue_len = 50, full = 'drop_oldest' })
 	svc:obs_log('info', 'subscribed to config/+/set')
 
@@ -296,12 +224,12 @@ function M.start(conn, opts)
 		end
 
 		local service = msg.topic and msg.topic[2]
-		local ok, uerr = set_service(service, msg.payload, msg)
+		local ok, uerr = state.set_service(current, conn, svc, mark_dirty, service, msg.payload, msg)
 
 		-- Reply immediately: accepted != persisted.
 		if msg.reply_to ~= nil then
 			local reply = ok and { ok = true, persisted = false } or { ok = false, err = tostring(uerr) }
-			conn:publish_one(msg.reply_to, reply, { id = msg.id })
+			conn:publish(msg.reply_to, reply, { id = msg.id })
 		end
 
 		if not ok then
