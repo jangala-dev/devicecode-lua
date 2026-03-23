@@ -10,7 +10,11 @@
                 "name": "state",
                 "root": "/tmp/dc-states/"
             }
-        ]
+        ],
+        "sysmon": {},
+        "platform": {},
+        "power": {},
+        "usb": {}
     },
     "gsm": {
         "modems": {
