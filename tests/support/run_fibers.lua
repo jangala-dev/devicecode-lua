@@ -5,13 +5,15 @@ local sleep  = require 'fibers.sleep'
 local pulse  = require 'fibers.pulse'
 local op     = require 'fibers.op'
 
+local safe = require 'coxpcall'
+
 local M = {}
 
 function M.run(fn, opts)
 	opts = opts or {}
 	local timeout = opts.timeout or 2.0
 
-	local ok, err = pcall(function()
+	local ok, err = safe.pcall(function()
 		fibers.run(function(root_scope)
 			local test_scope, cerr = root_scope:child()
 			if not test_scope then
@@ -22,7 +24,7 @@ function M.run(fn, opts)
 			local body_err = nil
 
 			local ok_spawn, spawn_err = test_scope:spawn(function(s)
-				local ok_body, err_body = pcall(function()
+				local ok_body, err_body = safe.pcall(function()
 					fn(s)
 				end)
 

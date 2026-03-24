@@ -4,6 +4,8 @@ local fibers         = require 'fibers'
 local sleep          = require 'fibers.sleep'
 local busmod         = require 'bus'
 
+local safe = require 'coxpcall'
+
 local runfibers      = require 'tests.support.run_fibers'
 local probe          = require 'tests.support.bus_probe'
 local fake_hal_mod   = require 'tests.support.fake_hal'
@@ -113,7 +115,7 @@ function T.config_accepts_set_and_persists_debounced()
 			})
 
 			seen = probe.wait_until(function()
-				local ok, payload = pcall(function()
+				local ok, payload = safe.pcall(function()
 					return probe.wait_payload(conn, { 'config', 'net' }, { timeout = 0.02 })
 				end)
 				return ok

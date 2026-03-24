@@ -18,6 +18,7 @@ else
 	add_path('./')
 end
 
+local safe = require 'coxpcall'
 
 local files = {
 	'unit.config.codec_spec',
@@ -46,7 +47,7 @@ for i = 1, #files do
 	for name, fn in pairs(mod) do
 		total = total + 1
 		io.write(('[TEST] %s :: %s ... '):format(modname, name))
-		local ok, err = pcall(fn)
+		local ok, err = safe.pcall(fn)
 		if ok then
 			io.write('ok\n')
 		else

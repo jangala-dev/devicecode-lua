@@ -1,5 +1,7 @@
 -- tests/ui_cqueues_bridge_spec.lua
 
+local safe = require 'coxpcall'
+
 local T = {}
 
 local function with_stubbed_modules(stubs, fn)
@@ -17,7 +19,7 @@ local function with_stubbed_modules(stubs, fn)
 
 	package.loaded['services.ui.cqueues_bridge'] = nil
 
-	local ok, a, b, c = pcall(fn)
+	local ok, a, b, c = safe.pcall(fn)
 
 	package.loaded['services.ui.cqueues_bridge'] = nil
 

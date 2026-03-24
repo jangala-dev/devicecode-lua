@@ -5,10 +5,12 @@
 local cjson  = require 'cjson.safe'
 local fibers = require 'fibers'
 
+local safe = require 'coxpcall'
+
 local M = {}
 
 local function encode_one(v)
-	local ok, s = pcall(cjson.encode, v)
+	local ok, s = safe.pcall(cjson.encode, v)
 	if ok and s then
 		return s
 	end
