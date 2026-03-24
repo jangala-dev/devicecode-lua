@@ -208,6 +208,7 @@ local function rebuild_cloud_config()
 		return
 	end
 	State.cloud_config = cfg
+	log.info('metrics: cloud config ready')
 end
 
 local function fetch_mainflux_config()
@@ -234,6 +235,7 @@ local function fetch_mainflux_config()
 	end
 
 	State.mainflux_config = conf.standardise_config(raw)
+	log.info('metrics: mainflux config loaded successfully')
 	rebuild_cloud_config()
 end
 
@@ -493,9 +495,12 @@ local function main()
 				log.warn('metrics: config subscription closed:', tostring(err))
 				break
 			end
+			log.info('metrics: config received, applying')
 			next_publish_time = handle_config(msg.payload)
 			-- Re-read mainflux.cfg in case cloud_url or credentials changed.
 			fetch_mainflux_config()
+			local next_publish_str = next_publish_time == math.huge and "never" or string.format('%.1fs', (next_publish_time - now()))
+			log.info('metrics: config applied, next publish in ' .. next_publish_str)
 		elseif which == 'metric' then
 			local msg = a
 			if msg then
@@ -507,8 +512,13 @@ local function main()
 				local first_sync = handle_time_sync(msg.payload)
 				if first_sync and State.publish_period then
 					next_publish_time = now() + State.publish_period
+					log.info(string.format(
+						'metrics: NTP synced, first publish scheduled in %.1fs', State.publish_period))
+				elseif first_sync then
+					log.info('metrics: NTP synced, waiting for config before scheduling publish')
 				elseif not State.base_time.synced then
 					next_publish_time = math.huge
+					log.warn('metrics: NTP sync lost, publishing suspended')
 				end
 			end
 		elseif which == 'tick' then
@@ -521,6 +531,13 @@ local function main()
 				next_publish_time = math.huge
 			end
 
+			local total = 0
+			for _, pv in pairs(values) do
+				for _ in pairs(pv) do total = total + 1 end
+			end
+			if total > 0 then
+				log.info(string.format('metrics: publishing %d metric(s)', total))
+			end
 			publish_all(values)
 		end
 	end
@@ -564,15 +581,19 @@ function M.start(conn, opts)
 		publish_status(conn, name, 'stopped', reason and { reason = tostring(reason) } or nil)
 	end)
 
+	log.info('metrics: waiting for filesystem capability')
 	local fs_ok = wait_for_fs_capability()
 	if not fs_ok then
 		publish_status(conn, name, 'error', { reason = 'filesystem capability unavailable' })
+		log.error('metrics: filesystem capability unavailable, service cannot start')
 		return
 	end
 
+	log.info('metrics: fetching mainflux config')
 	fetch_mainflux_config()
 
 	publish_status(conn, name, 'running')
+	log.info('metrics: service is live')
 
 	main()
 end
