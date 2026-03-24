@@ -10,6 +10,3 @@
 [submodule "vendor/local-ui"]
 	path = vendor/local-ui
 	url = https://github.com/jangala-dev/local-ui.git
-[submodule "vendor/lua-fibers"]
-	path = vendor/fibers
-	url = https://github.com/jangala-dev/lua-fibers.git
