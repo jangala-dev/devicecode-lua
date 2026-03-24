@@ -15,6 +15,8 @@
 local fibers = require 'fibers'
 local uuid   = require 'uuid'
 
+local safe = require 'coxpcall'
+
 local base   = require 'devicecode.service_base'
 local authz  = require 'devicecode.authz'
 
@@ -158,7 +160,7 @@ function M.start(conn, opts)
 
 	local function with_user_conn(principal, fn)
 		local user_conn = opts.connect(principal)
-		local ok, a, b, c = pcall(fn, user_conn)
+		local ok, a, b, c = safe.pcall(fn, user_conn)
 		pcall(function() user_conn:disconnect() end)
 		if not ok then
 			return nil, tostring(a)

@@ -8,6 +8,8 @@ local sleep  = require 'fibers.sleep'
 local authz  = require 'devicecode.authz'
 local busmod = require 'bus'
 
+local safe = require 'coxpcall'
+
 local M = {}
 
 local function require_env(name)
@@ -124,7 +126,7 @@ local function retain_service_state(conn, name, status, fields)
 end
 
 local function load_service(service_loader, name)
-	local ok, mod = pcall(service_loader, name)
+	local ok, mod = safe.pcall(service_loader, name)
 	if not ok then
 		return nil, mod
 	end
@@ -285,11 +287,7 @@ function M.run(scope, params)
 		})
 
 		scope:cancel(('service_not_ok:%s'):format(tostring(svc)))
-<<<<<<< HEAD
     end)
-=======
-	end)
->>>>>>> 219aadc (first testable cut with net)
 
 	main_conn:publish({ 'obs', 'log', 'main', 'info' }, {
 		what = 'services_spawned',

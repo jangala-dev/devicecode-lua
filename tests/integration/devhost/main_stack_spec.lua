@@ -6,6 +6,8 @@ local fibers         = require 'fibers'
 local sleep          = require 'fibers.sleep'
 local busmod         = require 'bus'
 
+local safe = require 'coxpcall'
+
 local runfibers      = require 'tests.support.run_fibers'
 local probe          = require 'tests.support.bus_probe'
 local fake_hal_mod   = require 'tests.support.fake_hal'
@@ -90,7 +92,7 @@ local function wait_retained_payload_matching(conn, topic, pred, opts)
 
 	local found = nil
 	local ok = probe.wait_until(function()
-		local ok2, payload = pcall(function()
+		local ok2, payload = safe.pcall(function()
 			return probe.wait_payload(conn, topic, { timeout = 0.02 })
 		end)
 
