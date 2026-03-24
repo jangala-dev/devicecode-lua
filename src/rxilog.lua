@@ -7,14 +7,14 @@
 -- under the terms of the MIT license. See LICENSE for details.
 --
 
-local log = { _version = "0.1.0" }
-
-
+local log = {}
+log._version = "0.1.0"
 log.usecolor = true
 log.outfile = nil
 log.level = "trace"
 
 
+---@type {name: string, color: string}[]
 local modes = {
   { name = "trace", color = "\27[34m", },
   { name = "debug", color = "\27[36m", },
@@ -25,12 +25,16 @@ local modes = {
 }
 
 
+---@type table<string, integer>
 local levels = {}
 for i, v in ipairs(modes) do
   levels[v.name] = i
 end
 
 
+---@param x number
+---@param increment number?
+---@return number
 local round = function(x, increment)
   increment = increment or 1
   x = x / increment
@@ -40,6 +44,8 @@ end
 
 local _tostring = tostring
 
+---@param ... any
+---@return string
 local tostring = function(...)
   local t = {}
   for i = 1, select('#', ...) do
@@ -52,6 +58,10 @@ local tostring = function(...)
   return table.concat(t, " ")
 end
 
+---@param level string
+---@param lineinfo string
+---@param msg string
+---@return string
 local format_log_message = function(level, lineinfo, msg)
   return string.format("[%-6s%s] %s: %s",
     level:upper(),
@@ -63,7 +73,6 @@ end
 for i, x in ipairs(modes) do
   local nameupper = x.name:upper()
   log[x.name] = function(...)
-
     -- Return early if we're below the log level
     if i < levels[log.level] then
       return
@@ -76,19 +85,21 @@ for i, x in ipairs(modes) do
 
     -- Output to console
     print(string.format("%s[%-6s%s]%s %s: %s",
-                        log.usecolor and x.color or "",
-                        nameupper,
-                        os.date("%H:%M:%S"),
-                        log.usecolor and "\27[0m" or "",
-                        lineinfo,
-                        msg))
+      log.usecolor and x.color or "",
+      nameupper,
+      os.date("%H:%M:%S"),
+      log.usecolor and "\27[0m" or "",
+      lineinfo,
+      msg))
 
     -- Output to log file
     if log.outfile then
       local fp = io.open(log.outfile, "a")
-      local str = format_log_message(nameupper, lineinfo, msg)
-      fp:write(str)
-      fp:close()
+      if fp then
+        local str = format_log_message(nameupper, lineinfo, msg)
+        fp:write(str)
+        fp:close()
+      end
     end
   end
 end
