@@ -7,3 +7,6 @@
 [submodule "vendor/lua-bus"]
 	path = vendor/lua-bus
 	url = https://github.com/jangala-dev/lua-bus.git
+[submodule "vendor/local-ui"]
+	path = vendor/local-ui
+	url = https://github.com/jangala-dev/local-ui.git
