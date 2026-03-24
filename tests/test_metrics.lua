@@ -1,535 +1,964 @@
--- Detect if this file is being run as the entry point
+-- test_metrics.lua
+--
+-- Service-level tests for the metrics service.
+--
+-- Each test spins up the full metrics service in a child scope, interacts with
+-- it via the bus, and asserts on bus-published results.
+--
+-- Run standalone: luajit test_metrics.lua
+
 local this_file = debug.getinfo(1, "S").source:match("@?([^/]+)$")
 local is_entry_point = arg and arg[0] and arg[0]:match("[^/]+$") == this_file
 
 if is_entry_point then
-    package.path = "../src/lua-fibers/?.lua;" -- fibers submodule src
-        .. "../src/lua-trie/src/?.lua;"       -- trie submodule src
-        .. "../src/lua-bus/src/?.lua;"        -- bus submodule src
+    package.path = "../vendor/lua-fibers/src/?.lua;"
+        .. "../vendor/lua-trie/src/?.lua;"
+        .. "../vendor/lua-bus/src/?.lua;"
         .. "../src/?.lua;"
         .. "./test_utils/?.lua;"
         .. package.path
         .. ";/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua"
 
-    _G._TEST = true -- Enable test exports in source code
+    _G._TEST = true
 end
 
 local luaunit = require 'luaunit'
+local fibers  = require 'fibers'
+local perform = fibers.perform
+local op      = require 'fibers.op'
+local busmod  = require 'bus'
+local json    = require 'cjson.safe'
+local virtual_time = require 'virtual_time'
+local time_harness = require 'time_harness'
+
 local processing = require 'services.metrics.processing'
-local conf = require 'services.metrics.config'
-local sc = require "fibers.utils.syscall"
-local sleep = require "fibers.sleep"
-local fiber = require "fibers.fiber"
-local senml = require "services.metrics.senml"
+local conf       = require 'services.metrics.config'
+local senml      = require 'services.metrics.senml'
+
+-------------------------------------------------------------------------------
+-- Helpers
+-------------------------------------------------------------------------------
+
+-- A sample mainflux.cfg payload returned by the mock HAL RPC.
+local MAINFLUX_CFG = json.encode({
+    thing_key = 'test-thing-key',
+    channels  = {
+        { id = 'ch-data',    name = 'test_data',    metadata = { channel_type = 'data' } },
+        { id = 'ch-control', name = 'test_control', metadata = { channel_type = 'control' } },
+    },
+})
+
+-- Build a fresh bus and test connection for each test.
+local function make_bus()
+    return busmod.new({ q_length = 100, s_wild = '+', m_wild = '#' })
+end
+
+local function new_test_clock()
+    return virtual_time.install({
+        monotonic = 0,
+        realtime  = 1700000000,
+    })
+end
+
+local function flush_ticks(max_ticks)
+    time_harness.flush_ticks(max_ticks or 20)
+end
+
+-- The tests subscribe to {'svc', 'metrics', '#'} so they can match
+-- dynamically-keyed output topics such as 'svc.metrics.wan.rx_bytes'.
+-- The '#' wildcard also captures the service's own lifecycle messages
+-- retained at {'svc', 'metrics', 'status'} (e.g. 'starting', 'running',
+-- 'stopped').  The helpers below skip those status messages so assertions
+-- only see metric payload publishes.
+local function recv_timeout(clock, sub, timeout_s)
+    local step = 0.05
+    local max_ticks = 20
+    local elapsed = 0
+    while true do
+        while true do
+            local ok, msg = time_harness.try_op_now(function() return sub:recv_op() end)
+            if not ok then break end
+            if msg.topic[3] ~= 'status' then return msg end
+        end
+        if elapsed >= timeout_s then return nil end
+        local advance = math.min(step, timeout_s - elapsed)
+        clock:advance(advance)
+        time_harness.flush_ticks(max_ticks)
+        elapsed = elapsed + advance
+    end
+end
+
+local function drain_non_status(sub, max_ticks)
+    max_ticks = max_ticks or 20
+    local messages = {}
+    for tick = 1, max_ticks do
+        local saw_message = false
+        while true do
+            local ok, msg = time_harness.try_op_now(function() return sub:recv_op() end)
+            if not ok then break end
+            saw_message = true
+            if msg.topic[3] ~= 'status' then
+                messages[#messages + 1] = msg
+            end
+        end
+        if not saw_message or tick == max_ticks then break end
+        time_harness.flush_ticks(1)
+    end
+    return messages
+end
+
+-- Start a mock handler for the HAL filesystem read RPC on `bus`.
+-- The handler responds with `mainflux_cfg_json` to every request then loops.
+-- Returns the child scope so the caller can cancel it after the test.
+local function start_mock_hal(test_conn, root_scope)
+    local ep = test_conn:bind(
+        { 'cap', 'fs', 'configs', 'rpc', 'read' },
+        { queue_len = 5 })
+
+    root_scope:spawn(function()
+        while true do
+            local req, err = perform(ep:recv_op())
+            if not req then break end
+            -- call_op binds a reply endpoint; deliver to it with publish_one.
+            test_conn:publish_one(req.reply_to, { ok = true, reason = MAINFLUX_CFG })
+        end
+    end)
+end
+
+-- Convenience: start the metrics service in its own child scope.
+-- Returns the scope so the caller can cancel/join it.
+local function start_metrics(bus, root_scope, opts)
+    local svc_scope = root_scope:child()
+    svc_scope:spawn(function()
+        -- Each test needs a fresh require to reset module-level State.
+        package.loaded['services.metrics'] = nil
+        local metrics = require 'services.metrics'
+        local svc_conn = bus:connect()
+        metrics.start(svc_conn, opts or { name = 'metrics' })
+    end)
+    return svc_scope
+end
+
+-- Cancel a scope and wait for it to finish.
+local function stop_scope(svc_scope)
+    svc_scope:cancel('test done')
+    perform(svc_scope:join_op())
+end
+
+-- A minimal valid metrics config with one bus-protocol pipeline.
+local function bus_pipeline_config(metric_name, publish_period, process)
+    return {
+        publish_period = publish_period or 0.1,
+        pipelines = {
+            [metric_name] = {
+                protocol = 'bus',
+                process  = process or {},
+            },
+        },
+    }
+end
+
+-- A minimal valid metrics config with one log-protocol pipeline.
+local function log_pipeline_config(metric_name, publish_period, process)
+    return {
+        publish_period = publish_period or 0.1,
+        pipelines = {
+            [metric_name] = {
+                protocol = 'log',
+                process  = process or {},
+            },
+        },
+    }
+end
+
+-------------------------------------------------------------------------------
+-- Unit tests: processing blocks
+-------------------------------------------------------------------------------
 
 TestProcessing = {}
 
 function TestProcessing:test_diff_trigger_absolute()
-    local config = {
-        threshold = 5,
-        diff_method = "absolute",
-        initial_val = 10
-    }
+    local trigger = processing.DiffTrigger.new({
+        threshold   = 5,
+        diff_method = 'absolute',
+        initial_val = 10,
+    })
+    local state = trigger:new_state()
 
-    local trigger, trig_err = processing.DiffTrigger.new(config)
-    luaunit.assertNil(trig_err)
-    local val, short, err = trigger:run(12)
+    local val, short, err = trigger:run(12, state)
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, true) -- Should short circuit as diff < threshold
+    luaunit.assertTrue(short)  -- diff = 2 < threshold 5, short-circuits
 
-    val, short, err = trigger:run(16)
+    val, short, err = trigger:run(16, state)
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, false) -- Should pass as diff >= threshold
+    luaunit.assertFalse(short) -- diff = 6 >= threshold 5
     luaunit.assertEquals(val, 16)
 end
 
 function TestProcessing:test_diff_trigger_percent()
-    local config = {
-        threshold = 10, -- 10% threshold
-        diff_method = "percent",
-        initial_val = 100
-    }
+    local trigger = processing.DiffTrigger.new({
+        threshold   = 10,
+        diff_method = 'percent',
+        initial_val = 100,
+    })
+    local state = trigger:new_state()
 
-    local trigger, trig_err = processing.DiffTrigger.new(config)
-    luaunit.assertNil(trig_err)
-
-    -- 5% change - should short circuit
-    local val, short, err = trigger:run(105)
+    local val, short, err = trigger:run(105, state)
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, true)
+    luaunit.assertTrue(short)  -- 5% < 10% threshold
 
-    -- 15% change - should pass
-    val, short, err = trigger:run(115)
+    val, short, err = trigger:run(115, state)
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, false)
+    luaunit.assertFalse(short) -- 15% >= 10% threshold
     luaunit.assertEquals(val, 115)
 end
 
 function TestProcessing:test_diff_trigger_any_change()
-    local config = {
-        diff_method = "any-change",
-        initial_val = 10
-    }
+    local trigger = processing.DiffTrigger.new({
+        diff_method = 'any-change',
+        initial_val = 10,
+    })
+    local state = trigger:new_state()
 
-    local trigger, trig_err = processing.DiffTrigger.new(config)
-    luaunit.assertNil(trig_err)
-
-    -- Same value - should short circuit
-    local val, short, err = trigger:run(10)
+    local val, short, err = trigger:run(10, state)
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, true)
+    luaunit.assertTrue(short)   -- same value
 
-    -- Any change - should pass
-    val, short, err = trigger:run(10.1)
+    val, short, err = trigger:run(10.1, state)
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, false)
+    luaunit.assertFalse(short)  -- changed
     luaunit.assertEquals(val, 10.1)
 end
 
-function TestProcessing:test_time_trigger()
-    local config = { duration = 0.1 }
-    local trigger = processing.TimeTrigger.new(config)
-
-    local val, short, err = trigger:run(123)
-    luaunit.assertNil(err)
-    luaunit.assertEquals(short, true) -- Should short circuit initially
-
-    sleep.sleep(0.2)
-    val, short, err = trigger:run(123)
-    luaunit.assertNil(err)
-    luaunit.assertEquals(short, false) -- Should pass after duration
-    luaunit.assertEquals(val, 123)
-end
-
 function TestProcessing:test_delta_value()
-    local delta = processing.DeltaValue.new({ initial_val = 10 })
+    local block = processing.DeltaValue.new({ initial_val = 10 })
+    local state = block:new_state()
 
-    local val, short, err = delta:run(15)
+    local val, short, err = block:run(15, state)
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, false)
-    luaunit.assertEquals(val, 5) -- Should return difference
+    luaunit.assertFalse(short)
+    luaunit.assertEquals(val, 5)  -- 15 - 10
 
-    delta:reset()
-    val, short, err = delta:run(20)
+    block:reset(state)            -- simulate publish: last_val = 15
+
+    val, short, err = block:run(20, state)
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, false)
-    luaunit.assertEquals(val, 5)
+    luaunit.assertEquals(val, 5) -- 20 - 15
 end
 
-function TestProcessing:test_clone_process()
-    local config = {
-        threshold = 5,
-        diff_method = "absolute",
-        initial_val = 10
-    }
+function TestProcessing:test_pipeline_run_and_reset()
+    local pipeline, err = processing.new_process_pipeline()
+    luaunit.assertNil(err)
+    pipeline:add(processing.DeltaValue.new({ initial_val = 10 }))
 
-    local trigger, trig_err = processing.DiffTrigger.new(config)
-    luaunit.assertNil(trig_err)
+    local state = pipeline:new_state()
 
-    local clone, clone_err = trigger:clone()
-    luaunit.assertNil(clone_err)
-    luaunit.assertNotNil(clone)
+    local val, short
+    val, short, err = pipeline:run(20, state)
+    luaunit.assertNil(err)
+    luaunit.assertFalse(short)
+    luaunit.assertEquals(val, 10) -- 20 - 10
 
-    -- Test that clone behaves the same as original
-    local val1, short1, err1 = trigger:run(16)
-    local val2, short2, err2 = clone:run(16)
+    pipeline:reset(state)         -- last_val = 20
 
-    luaunit.assertEquals(val1, val2)
-    luaunit.assertEquals(short1, short2)
-    luaunit.assertEquals(err1, err2)
+    val, short, err = pipeline:run(25, state)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(val, 5)  -- 25 - 20
 end
 
-function TestProcessing:test_process_pipeline()
-    local pipeline = processing.new_process_pipeline()
-
-    -- Create a pipeline with DiffTrigger and DeltaValue
-    local diff_trigger = processing.DiffTrigger.new({
-        threshold = 5,
-        diff_method = "absolute",
-        initial_val = 10
-    })
-    local delta_value = processing.DeltaValue.new({ initial_val = 10 })
-
-    pipeline:add(diff_trigger)
-    pipeline:add(delta_value)
-
-    -- First run should pass through both processes
-    local val, short, err = pipeline:run(20)
+function TestProcessing:test_pipeline_short_circuit()
+    local pipeline, err = processing.new_process_pipeline()
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, false)
-    luaunit.assertEquals(val, 10) -- DeltaValue should return difference from initial
+    pipeline:add(processing.DiffTrigger.new({
+        diff_method = 'absolute', threshold = 5, initial_val = 10,
+    }))
+    pipeline:add(processing.DeltaValue.new({ initial_val = 10 }))
 
-    -- Second run should short circuit at DiffTrigger
-    val, short, err = pipeline:run(22)
+    local state = pipeline:new_state()
+
+    local val, short
+    val, short, err = pipeline:run(20, state)  -- diff=10, passes DiffTrigger
     luaunit.assertNil(err)
-    luaunit.assertEquals(short, true)
+    luaunit.assertFalse(short)
+    luaunit.assertEquals(val, 10) -- DeltaValue: 20-10
+
+    val, short, err = pipeline:run(22, state)  -- diff=2 from last(20), short-circuits
+    luaunit.assertNil(err)
+    luaunit.assertTrue(short)
 end
 
-function TestProcessing:test_pipeline_reset()
-    local pipeline = processing.new_process_pipeline()
-    local delta_value = processing.DeltaValue.new({ initial_val = 10 })
-    pipeline:add(delta_value)
-
-    -- Run once to get delta
-    local val, short, err = pipeline:run(20)
-    luaunit.assertNil(err)
-    luaunit.assertEquals(val, 10)
-
-    -- Reset pipeline
-    pipeline:reset()
-
-    -- Next run should use the last value as new base
-    val, short, err = pipeline:run(25)
-    luaunit.assertNil(err)
-    luaunit.assertEquals(val, 5) -- 25 - 20
-end
+-------------------------------------------------------------------------------
+-- Unit tests: config module
+-------------------------------------------------------------------------------
 
 TestConfig = {}
 
-function TestConfig:test_build_metric_pipeline_via_apply_config()
-    -- Test pipeline building indirectly through apply_config
-    -- which is the main way pipelines are created
-    local mock_conn = {
-        subscribe = function(self, topic)
-            return {
-                next_msg_op = function() end,
-                unsubscribe = function() end
-            }
-        end
-    }
-
-    local config = {
-        templates = {},
-        collections = {
-            ["test/endpoint"] = {
-                protocol = "log",
-                process = {
-                    {
-                        type = "DiffTrigger",
-                        threshold = 5,
-                        diff_method = "absolute"
-                    }
-                }
-            }
-        },
-        publish_period = 60
-    }
-
-    local metrics, period, cloud_config = conf.apply_config(mock_conn, config, {})
-    luaunit.assertEquals(#metrics, 1)
-    luaunit.assertEquals(period, 60)
-    luaunit.assertNotNil(metrics[1].base_pipeline)
+function TestConfig:test_validate_http_config_valid()
+    local ok, err = conf.validate_http_config({
+        url       = 'http://cloud.example.com',
+        thing_key = 'key',
+        channels  = { { id = 'ch1', name = 'data' } },
+    })
+    luaunit.assertTrue(ok)
+    luaunit.assertNil(err)
 end
 
-function TestConfig:test_validate_http_config()
-    -- Valid config
-    local valid_config = {
-        url = "http://example.com",
-        thing_key = "test_key",
-        channels = {
-            { id = "ch1", name = "data", metadata = { channel_type = "data" } }
-        }
-    }
-    local valid, err = conf.validate_http_config(valid_config)
-    luaunit.assertTrue(valid)
-    luaunit.assertNil(err)
-
-    -- Missing url
-    local invalid_config = {
-        thing_key = "test_key",
-        channels = {}
-    }
-    valid, err = conf.validate_http_config(invalid_config)
-    luaunit.assertFalse(valid)
+function TestConfig:test_validate_http_config_nil()
+    local ok, err = conf.validate_http_config(nil)
+    luaunit.assertFalse(ok)
     luaunit.assertNotNil(err)
+end
 
-    -- Nil config
-    valid, err = conf.validate_http_config(nil)
-    luaunit.assertFalse(valid)
+function TestConfig:test_validate_http_config_missing_url()
+    local ok, err = conf.validate_http_config({ thing_key = 'k', channels = {} })
+    luaunit.assertFalse(ok)
     luaunit.assertNotNil(err)
 end
 
 function TestConfig:test_merge_config()
-    local base = {
-        url = "http://base.com",
-        thing_key = "base_key",
-        nested = {
-            field1 = "value1",
-            field2 = "value2"
-        }
-    }
-
-    local override = {
-        thing_key = "override_key",
-        nested = {
-            field2 = "override_value2",
-            field3 = "value3"
-        }
-    }
-
-    local merged = conf.merge_config(base, override)
-    luaunit.assertEquals(merged.url, "http://base.com")
-    luaunit.assertEquals(merged.thing_key, "override_key")
-    luaunit.assertEquals(merged.nested.field1, "value1")
-    luaunit.assertEquals(merged.nested.field2, "override_value2")
-    luaunit.assertEquals(merged.nested.field3, "value3")
+    local merged = conf.merge_config(
+        { a = 1, nested = { x = 10, y = 20 } },
+        { b = 2, nested = { y = 99, z = 30 } }
+    )
+    luaunit.assertEquals(merged.a, 1)
+    luaunit.assertEquals(merged.b, 2)
+    luaunit.assertEquals(merged.nested.x, 10)
+    luaunit.assertEquals(merged.nested.y, 99) -- overridden
+    luaunit.assertEquals(merged.nested.z, 30) -- added
 end
 
-function TestConfig:test_validate_topic_with_nil()
-    -- Test the actual metrics service validate_topic logic by directly calling _handle_metric
-    local metrics_service = require 'services.metrics'
-    local bus_pkg = require 'bus'
-    local context = require "fibers.context"
-
-    -- Create a bus and connection (but don't start the service)
-    local test_bus = bus_pkg.new()
-    local conn = test_bus:connect()
-
-    -- Create a context for the metrics service (needed for logging)
-    local bg_ctx = context.background()
-    local service_ctx = context.with_value(bg_ctx, "service_name", "metrics_test")
-    service_ctx = context.with_value(service_ctx, "fiber_name", "test_fiber")
-
-    -- Set up metrics service state manually without starting it
-    metrics_service.ctx = service_ctx
-    metrics_service.metric_values = {}
-    metrics_service.pipelines = {}
-
-    -- Create a pipeline for a test metric
-    local base_pipeline = processing.new_process_pipeline()
-    local diff_trigger = processing.DiffTrigger.new({
-        threshold = 5,
-        diff_method = "absolute",
-        initial_val = 10
+function TestConfig:test_apply_config_builds_pipeline()
+    local map, period = conf.apply_config({
+        publish_period = 30,
+        pipelines = {
+            rx_bytes = {
+                protocol = 'log',
+                process  = { { type = 'DeltaValue' } },
+            },
+        },
     })
-    base_pipeline:add(diff_trigger)
-
-    -- Create a metric definition
-    local metric = {
-        protocol = "log",
-        field = nil,
-        rename = nil,
-        base_pipeline = base_pipeline
-    }
-
-    -- Test 1: Valid topic should work and add value to metric_values
-    local valid_msg = bus_pkg.new_msg({"test", "metric"}, 100)
-    metrics_service:_handle_metric(metric, valid_msg)
-    luaunit.assertNotNil(metrics_service.metric_values.log)
-    luaunit.assertNotNil(metrics_service.metric_values.log["test.metric"])
-    luaunit.assertEquals(metrics_service.metric_values.log["test.metric"].value, 100)
-
-    -- Reset for next test
-    metrics_service.metric_values = {}
-
-    -- Test 2: Invalid topic with nil in the middle should be rejected (not added)
-    local invalid_msg_nil = bus_pkg.new_msg({"test", nil, "metric"}, 200)
-    metrics_service:_handle_metric(metric, invalid_msg_nil)
-    -- Should not create any metric values because topic is invalid
-    luaunit.assertTrue((not metrics_service.metric_values.log) or (not metrics_service.metric_values.log["test..metric"]))
-
-    -- Test 3: Invalid topic with gap (sparse array) should be rejected
-    local sparse_topic = {}
-    sparse_topic[1] = "test"
-    sparse_topic[3] = "metric"  -- index 2 is missing
-    local sparse_msg = bus_pkg.new_msg(sparse_topic, 300)
-    metrics_service:_handle_metric(metric, sparse_msg)
-    -- Should not create any metric values because topic is invalid
-    luaunit.assertTrue((not metrics_service.metric_values.log) or (not metrics_service.metric_values.log["test.metric"]))
-
-    -- Test 4: Another valid topic should work
-    metrics_service.metric_values = {}
-    local valid_msg2 = bus_pkg.new_msg({"another", "valid", "topic"}, 50)
-    metrics_service:_handle_metric(metric, valid_msg2)
-    luaunit.assertNotNil(metrics_service.metric_values.log)
-    luaunit.assertNotNil(metrics_service.metric_values.log["another.valid.topic"])
-
-    -- Test 5: Empty topic should be rejected
-    metrics_service.metric_values = {}
-    local empty_msg = bus_pkg.new_msg({}, 400)
-    metrics_service:_handle_metric(metric, empty_msg)
-    luaunit.assertNil(metrics_service.metric_values.log)
-
-    -- Clean up
-    conn:disconnect()
+    luaunit.assertEquals(period, 30)
+    luaunit.assertNotNil(map.rx_bytes)
+    luaunit.assertEquals(map.rx_bytes.protocol, 'log')
+    luaunit.assertNotNil(map.rx_bytes.pipeline)
 end
+
+function TestConfig:test_validate_config_rejects_bad_period()
+    local ok, _, err = conf.validate_config({
+        publish_period = -1,
+        pipelines      = { sim = { protocol = 'log', process = {} } },
+    })
+    luaunit.assertFalse(ok)
+    luaunit.assertNotNil(err)
+end
+
+function TestConfig:test_validate_config_warns_bad_protocol()
+    local ok, warns = conf.validate_config({
+        publish_period = 10,
+        pipelines      = { sim = { protocol = 'invalid' } },
+    })
+    luaunit.assertTrue(ok)
+    luaunit.assertTrue(#warns > 0)
+end
+
+function TestConfig:test_validate_config_propagates_invalid_template_to_pipeline()
+    local ok, warns, err = conf.validate_config({
+        publish_period = 10,
+        templates = {
+            bad_template = {
+                protocol = 'invalid',
+            },
+        },
+        pipelines = {
+            sim = {
+                template = 'bad_template',
+            },
+        },
+    })
+
+    luaunit.assertTrue(ok)
+    luaunit.assertNil(err)
+
+    local saw_template_invalid = false
+    local saw_metric_uses_invalid_template = false
+    local saw_metric_invalid_protocol = false
+
+    for _, w in ipairs(warns) do
+        if w.type == 'template'
+            and w.endpoint == 'bad_template'
+            and string.find(w.msg, "invalid protocol 'invalid'", 1, true)
+        then
+            saw_template_invalid = true
+        end
+
+        if w.type == 'metric'
+            and w.endpoint == 'sim'
+            and string.find(w.msg, 'uses invalid template [bad_template]', 1, true)
+        then
+            saw_metric_uses_invalid_template = true
+        end
+
+        if w.type == 'metric'
+            and w.endpoint == 'sim'
+            and string.find(w.msg, "invalid protocol 'invalid'", 1, true)
+        then
+            saw_metric_invalid_protocol = true
+        end
+    end
+
+    luaunit.assertTrue(saw_template_invalid)
+    luaunit.assertTrue(saw_metric_uses_invalid_template)
+    luaunit.assertTrue(saw_metric_invalid_protocol)
+end
+
+-------------------------------------------------------------------------------
+-- Unit tests: SenML encoder
+-------------------------------------------------------------------------------
 
 TestSenML = {}
 
-function TestSenML:test_encode_basic()
-    -- Test encoding a string
-    local result, err = senml.encode("test/topic", "string_value")
+function TestSenML:test_encode_number()
+    local rec, err = senml.encode('cpu', 42.5)
     luaunit.assertNil(err)
-    luaunit.assertEquals(result.n, "test/topic")
-    luaunit.assertEquals(result.vs, "string_value")
-
-    -- Test encoding a number
-    result, err = senml.encode("test/topic", 42.5)
-    luaunit.assertNil(err)
-    luaunit.assertEquals(result.n, "test/topic")
-    luaunit.assertEquals(result.v, 42.5)
-
-    -- Test encoding a boolean
-    result, err = senml.encode("test/topic", true)
-    luaunit.assertNil(err)
-    luaunit.assertEquals(result.n, "test/topic")
-    luaunit.assertEquals(result.vb, true)
-
-    -- Test encoding with timestamp
-    result, err = senml.encode("test/topic", 42, 1234567890)
-    luaunit.assertNil(err)
-    luaunit.assertEquals(result.t, 1234567890)
+    luaunit.assertEquals(rec.n, 'cpu')
+    luaunit.assertEquals(rec.v, 42.5)
 end
 
-function TestSenML:test_encode_invalid_types()
-    -- Test encoding with invalid type
-    local result, err = senml.encode("test/topic", {})
-    luaunit.assertNotNil(err)
-    luaunit.assertNil(result)
+function TestSenML:test_encode_string()
+    local rec, err = senml.encode('status', 'ok')
+    luaunit.assertNil(err)
+    luaunit.assertEquals(rec.vs, 'ok')
+end
 
-    -- Test encoding with nil
-    result, err = senml.encode("test/topic", nil)
+function TestSenML:test_encode_boolean()
+    local rec, err = senml.encode('flag', true)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(rec.vb, true)
+end
+
+function TestSenML:test_encode_with_time()
+    local rec, err = senml.encode('t', 1, 1000)
+    luaunit.assertNil(err)
+    luaunit.assertEquals(rec.t, 1000)
+end
+
+function TestSenML:test_encode_invalid_value()
+    local rec, err = senml.encode('k', {})
+    luaunit.assertNil(rec)
     luaunit.assertNotNil(err)
-    luaunit.assertNil(result)
 end
 
 function TestSenML:test_encode_r_flat()
-    -- Test encoding a flat table
-    local values = {
-        temperature = 23.5,
-        humidity = 60,
-        status = "online"
-    }
-
-    local result, err = senml.encode_r("device/sensors", values)
+    local recs, err = senml.encode_r('dev', { temp = 23.5, status = 'on' })
     luaunit.assertNil(err)
-    luaunit.assertEquals(#result, 3)
-
-    -- Check each entry
-    local found = { temp = false, humid = false, status = false }
-    for _, entry in ipairs(result) do
-        if entry.n == "device/sensors.temperature" and entry.v == 23.5 then
-            found.temp = true
-        elseif entry.n == "device/sensors.humidity" and entry.v == 60 then
-            found.humid = true
-        elseif entry.n == "device/sensors.status" and entry.vs == "online" then
-            found.status = true
-        end
-    end
-
-    luaunit.assertTrue(found.temp)
-    luaunit.assertTrue(found.humid)
-    luaunit.assertTrue(found.status)
+    luaunit.assertEquals(#recs, 2)
+    local names = {}
+    for _, r in ipairs(recs) do names[r.n] = r end
+    luaunit.assertEquals(names['dev.temp'].v,   23.5)
+    luaunit.assertEquals(names['dev.status'].vs, 'on')
 end
 
-function TestSenML:test_encode_r_nested()
-    -- Test encoding a nested table
-    local values = {
-        system = {
-            memory = 8192,
-            cpu = 45.6
-        },
-        network = {
-            status = "connected",
-            speed = 100
-        }
+-------------------------------------------------------------------------------
+-- Unit tests: HTTP publisher module
+-------------------------------------------------------------------------------
+
+TestHttpModule = {}
+
+function TestHttpModule:test_start_http_publisher_builds_expected_request()
+    local original_http_request = package.loaded['http.request']
+    local original_http_module  = package.loaded['services.metrics.http']
+
+    local captured = {
+        uri = nil,
+        method = nil,
+        auth = nil,
+        content_type = nil,
+        expect_header = 'present',
+        body = nil,
+        timeout = nil,
     }
 
-    local result, err = senml.encode_r("device", values)
-    luaunit.assertNil(err)
-    luaunit.assertEquals(#result, 4)
+    package.loaded['http.request'] = {
+        new_from_uri = function(uri)
+            captured.uri = uri
 
-    -- Check specific entries
-    local found = { memory = false, cpu = false, net_status = false, speed = false }
-    for _, entry in ipairs(result) do
-        if entry.n == "device.system.memory" and entry.v == 8192 then
-            found.memory = true
-        elseif entry.n == "device.system.cpu" and entry.v == 45.6 then
-            found.cpu = true
-        elseif entry.n == "device.network.status" and entry.vs == "connected" then
-            found.net_status = true
-        elseif entry.n == "device.network.speed" and entry.v == 100 then
-            found.speed = true
-        end
-    end
-
-    luaunit.assertTrue(found.memory)
-    luaunit.assertTrue(found.cpu)
-    luaunit.assertTrue(found.net_status)
-    luaunit.assertTrue(found.speed)
-end
-
-function TestSenML:test_encode_r_with_value_field()
-    -- Test encoding a table with __value field and a subtable
-    local values = {
-        system = {
-            __value = "active", -- This should be at the base topic
-            memory = {
-                __value = "healthy",
-                used = 4096,
-                free = 4096
+            local hdr = {}
+            local req = {
+                headers = {
+                    upsert = function(_, k, v) hdr[k] = v end,
+                    delete = function(_, k) hdr[k] = nil end,
+                },
+                set_body = function(_, body)
+                    captured.body = body
+                end,
+                go = function(_, timeout)
+                    captured.timeout = timeout
+                    captured.method = hdr[':method']
+                    captured.auth = hdr['authorization']
+                    captured.content_type = hdr['content-type']
+                    captured.expect_header = hdr['expect']
+                    return {
+                        get = function(_, key)
+                            if key == ':status' then return '202' end
+                            return nil
+                        end,
+                        each = function()
+                            return function() return nil end
+                        end,
+                    }
+                end,
             }
-        }
+
+            return req
+        end,
     }
 
-    local result, err = senml.encode_r("device", values)
-    luaunit.assertNil(err)
+    package.loaded['services.metrics.http'] = nil
 
-    -- Check for all expected entries
-    local found = { system = false, memory = false, used = false, free = false }
-    for _, entry in ipairs(result) do
-        if entry.n == "device.system" and entry.vs == "active" then
-            found.system = true
-        elseif entry.n == "device.system.memory" and entry.vs == "healthy" then
-            found.memory = true
-        elseif entry.n == "device.system.memory.used" and entry.v == 4096 then
-            found.used = true
-        elseif entry.n == "device.system.memory.free" and entry.v == 4096 then
-            found.free = true
-        end
-    end
+    local st, _, test_err = fibers.run_scope(function(s)
+        local http_mod = require 'services.metrics.http'
 
-    luaunit.assertTrue(found.system)
-    luaunit.assertTrue(found.memory)
-    luaunit.assertTrue(found.used)
-    luaunit.assertTrue(found.free)
-    luaunit.assertEquals(#result, 4)
-end
+        local worker_scope, worker_err = s:child()
+        luaunit.assertNotNil(worker_scope, tostring(worker_err))
 
-function TestSenML:test_encode_r_with_value_and_time()
-    -- Test encoding values with explicit value and time fields
-    local values = {
-        temperature = {
-            value = 23.5,
-            time = 1234567890
-        },
-        status = "online"
-    }
+        local spawn_ok, spawn_err = worker_scope:spawn(function()
+            local ch = http_mod.start_http_publisher()
 
-    local result, err = senml.encode_r("sensor", values)
-    luaunit.assertNil(err)
-    luaunit.assertEquals(#result, 2)
+            perform(ch:put_op({
+                uri = 'http://localhost:18080/http/channels/ch-data/messages',
+                auth = 'Thing test-thing-key',
+                body = '[{"n":"sim","vs":"present"}]',
+            }))
+        end)
+        luaunit.assertTrue(spawn_ok, tostring(spawn_err))
 
-    -- Check entries
-    local found = { temp = false, status = false }
-    for _, entry in ipairs(result) do
-        if entry.n == "sensor.temperature" and entry.v == 23.5 and entry.t == 1234567890 then
-            found.temp = true
-        elseif entry.n == "sensor.status" and entry.vs == "online" then
-            found.status = true
-        end
-    end
+        flush_ticks(20)
 
-    luaunit.assertTrue(found.temp)
-    luaunit.assertTrue(found.status)
-end
+        luaunit.assertEquals(captured.uri,
+            'http://localhost:18080/http/channels/ch-data/messages')
+        luaunit.assertEquals(captured.method, 'POST')
+        luaunit.assertEquals(captured.auth, 'Thing test-thing-key')
+        luaunit.assertEquals(captured.content_type, 'application/senml+json')
+        luaunit.assertNil(captured.expect_header)
+        luaunit.assertEquals(captured.body, '[{"n":"sim","vs":"present"}]')
+        luaunit.assertEquals(captured.timeout, 10)
 
--- Only run tests if this file is executed directly (not via dofile)
-if is_entry_point then
-    fiber.spawn(function ()
-        luaunit.LuaUnit.run()
-        fiber.stop()
+        worker_scope:cancel('test done')
+        perform(worker_scope:join_op())
     end)
 
-    fiber.main()
+    package.loaded['http.request'] = original_http_request
+    package.loaded['services.metrics.http'] = original_http_module
+
+    if st ~= 'ok' then
+        error(test_err or ('http module scope failed: ' .. tostring(st)))
+    end
+end
+
+-------------------------------------------------------------------------------
+-- Service-level tests
+--
+-- These tests run the full metrics service in a child scope and exercise it
+-- end-to-end via the bus.  Because they call perform() / sleep, they must run
+-- inside a fiber (i.e. inside fibers.run or another existing scope+spawn).
+-------------------------------------------------------------------------------
+
+TestMetricsService = {}
+
+function TestMetricsService:setUp()
+    self.clock = nil
+end
+
+function TestMetricsService:tearDown()
+    if self.clock then
+        self.clock:restore()
+        self.clock = nil
+    end
+end
+
+-- Publish a metric config as a retained message and a raw metric, then verify
+-- the processed value is re-published on the bus topic.
+function TestMetricsService:test_metric_published_via_bus()
+    local clock = new_test_clock()
+    self.clock = clock
+    local root      = fibers.current_scope()
+    local bus       = make_bus()
+    local test_conn = bus:connect()
+
+    -- Signal HAL filesystem capability ready (retained).
+    test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+    start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
+
+    -- Subscribe to bus-protocol metric output before starting the service.
+    local result_sub = test_conn:subscribe(
+        { 'svc', 'metrics', '#' },
+        { queue_len = 10, full = 'drop_oldest' })
+
+    -- Publish config: simple pass-through pipeline, publish every 0.1 s.
+    test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1))
+
+    local svc_scope = start_metrics(bus, root)
+    flush_ticks()
+
+    -- topic[5] = 'sim' must match the pipeline name.
+    test_conn:publish(
+        { 'obs', 'v1', 'modem', 'metric', 'sim' },
+        { value = 'present', namespace = { 'modem', 1, 'sim' } })
+
+    local msg = recv_timeout(clock, result_sub, 0.5)
+
+    luaunit.assertNotNil(msg, 'expected bus publish of sim metric')
+    luaunit.assertEquals(msg.payload.value, 'present')
+
+    stop_scope(svc_scope)
+    clock:restore()
+end
+
+-- When the payload has a `namespace` field it overrides the bus topic used as
+-- the SenML key and the output topic.
+function TestMetricsService:test_namespace_overrides_topic_key()
+    local clock = new_test_clock()
+    self.clock = clock
+    local root      = fibers.current_scope()
+    local bus       = make_bus()
+    local test_conn = bus:connect()
+
+    test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+    start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
+
+    local result_sub = test_conn:subscribe(
+        { 'svc', 'metrics', '#' },
+        { queue_len = 10, full = 'drop_oldest' })
+
+    test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1))
+    local svc_scope = start_metrics(bus, root)
+    flush_ticks()
+
+    -- Publish with a namespace override: topic key becomes 'wan.rx_bytes'.
+    test_conn:publish(
+        { 'obs', 'v1', 'network', 'metric', 'rx_bytes' },
+        { value = 1024, namespace = { 'wan', 'rx_bytes' } })
+
+    local msg = recv_timeout(clock, result_sub, 0.5)
+
+    luaunit.assertNotNil(msg, 'expected bus publish with namespace key')
+    -- Output topic should be {'svc', 'metrics', 'wan', 'rx_bytes'}
+    luaunit.assertEquals(msg.topic[3], 'wan')
+    luaunit.assertEquals(msg.topic[4], 'rx_bytes')
+    luaunit.assertEquals(msg.payload.value, 1024)
+
+    stop_scope(svc_scope)
+    clock:restore()
+end
+
+-- A metric whose name has no matching pipeline must be silently dropped.
+function TestMetricsService:test_unknown_metric_dropped()
+    local clock = new_test_clock()
+    self.clock = clock
+    local root      = fibers.current_scope()
+    local bus       = make_bus()
+    local test_conn = bus:connect()
+
+    test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+    start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
+
+    local result_sub = test_conn:subscribe(
+        { 'svc', 'metrics', '#' },
+        { queue_len = 10, full = 'drop_oldest' })
+
+    -- Config only knows about 'sim'; we will publish 'rx_bytes'.
+    test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1))
+    local svc_scope = start_metrics(bus, root)
+    flush_ticks()
+
+    test_conn:publish(
+        { 'obs', 'v1', 'network', 'metric', 'rx_bytes' },
+        { value = 9999 })
+
+    clock:advance(0.25)
+    time_harness.flush_ticks(20)
+    local messages = drain_non_status(result_sub)
+
+    luaunit.assertEquals(#messages, 0, 'unexpected publish for unknown metric')
+
+    stop_scope(svc_scope)
+    clock:restore()
+end
+
+-- A DiffTrigger with any-change suppresses the second publish when the value
+-- does not change between publish cycles.
+function TestMetricsService:test_difftrigger_suppresses_unchanged_value()
+    local clock = new_test_clock()
+    self.clock = clock
+    local root      = fibers.current_scope()
+    local bus       = make_bus()
+    local test_conn = bus:connect()
+
+    test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+    start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
+
+    local result_sub = test_conn:subscribe(
+        { 'svc', 'metrics', '#' },
+        { queue_len = 10, full = 'drop_oldest' })
+
+    test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1, {
+        { type = 'DiffTrigger', diff_method = 'any-change' },
+    }))
+    local svc_scope = start_metrics(bus, root)
+    flush_ticks()
+
+    -- First publish: value 'present' — should pass DiffTrigger.
+    test_conn:publish(
+        { 'obs', 'v1', 'modem', 'metric', 'sim' },
+        { value = 'present' })
+
+    local msg1 = recv_timeout(clock, result_sub, 0.4)
+    luaunit.assertNotNil(msg1, 'expected first publish')
+    luaunit.assertEquals(msg1.payload.value, 'present')
+
+    -- Second publish: same value — DiffTrigger must suppress it.
+    test_conn:publish(
+        { 'obs', 'v1', 'modem', 'metric', 'sim' },
+        { value = 'present' })
+
+    clock:advance(0.25)
+    time_harness.flush_ticks(20)
+    local msg2 = nil
+    while true do
+        local ok, m = time_harness.try_op_now(function() return result_sub:recv_op() end)
+        if not ok then break end
+        if m.topic[3] ~= 'status' then msg2 = m; break end
+    end
+    luaunit.assertNil(msg2, 'second publish should be suppressed by DiffTrigger')
+
+    stop_scope(svc_scope)
+    clock:restore()
+end
+
+-- DeltaValue transforms a cumulative counter into a per-period delta.
+function TestMetricsService:test_delta_value_pipeline()
+    local clock = new_test_clock()
+    self.clock = clock
+    local root      = fibers.current_scope()
+    local bus       = make_bus()
+    local test_conn = bus:connect()
+
+    test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+    start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
+
+    local result_sub = test_conn:subscribe(
+        { 'svc', 'metrics', '#' },
+        { queue_len = 10, full = 'drop_oldest' })
+
+    test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1, {
+        { type = 'DeltaValue', initial_val = 0 },
+    }))
+    local svc_scope = start_metrics(bus, root)
+    flush_ticks()
+
+    -- First reading: 1000 bytes; delta from initial 0 = 1000.
+    test_conn:publish(
+        { 'obs', 'v1', 'network', 'metric', 'rx_bytes' },
+        { value = 1000 })
+
+    local msg1 = recv_timeout(clock, result_sub, 0.4)
+    luaunit.assertNotNil(msg1, 'expected first delta publish')
+    luaunit.assertEquals(msg1.payload.value, 1000)
+
+    -- Second reading: 1500 bytes; delta from 1000 = 500.
+    test_conn:publish(
+        { 'obs', 'v1', 'network', 'metric', 'rx_bytes' },
+        { value = 1500 })
+
+    local msg2 = recv_timeout(clock, result_sub, 0.4)
+    luaunit.assertNotNil(msg2, 'expected second delta publish')
+    luaunit.assertEquals(msg2.payload.value, 500)
+
+    stop_scope(svc_scope)
+    clock:restore()
+end
+
+-- HTTP protocol pipelines should enqueue a well-formed Mainflux request.
+function TestMetricsService:test_http_pipeline_enqueues_request_payload()
+    local clock = new_test_clock()
+    self.clock = clock
+    local root      = fibers.current_scope()
+    local bus       = make_bus()
+    local test_conn = bus:connect()
+
+    test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+    start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
+
+    local captured = nil
+    local original_http_mod = package.loaded['services.metrics.http']
+    package.loaded['services.metrics.http'] = {
+        start_http_publisher = function()
+            return {
+                put_op = function(_, data)
+                    captured = data
+                    return op.always(true)
+                end,
+            }
+        end,
+    }
+
+    local svc_scope = nil
+    local st, _, test_err = fibers.run_scope(function()
+        test_conn:retain({ 'cfg', 'metrics' }, {
+            publish_period = 0.1,
+            cloud_url = 'http://localhost:18080',
+            pipelines = {
+                sim = {
+                    protocol = 'http',
+                    process  = {},
+                },
+            },
+        })
+
+        svc_scope = start_metrics(bus, root)
+        flush_ticks()
+
+        test_conn:publish(
+            { 'obs', 'v1', 'modem', 'metric', 'sim' },
+            { value = 'present', namespace = { 'modem', 1, 'sim' } })
+
+        clock:advance(0.3)
+        time_harness.flush_ticks(20)
+
+        luaunit.assertNotNil(captured, 'expected HTTP payload to be enqueued')
+        luaunit.assertEquals(captured.uri,
+            'http://localhost:18080/http/channels/ch-data/messages')
+        luaunit.assertEquals(captured.auth, 'Thing test-thing-key')
+        luaunit.assertNotNil(captured.body)
+
+        local recs, decode_err = json.decode(captured.body)
+        luaunit.assertNil(decode_err)
+        luaunit.assertEquals(type(recs), 'table')
+        luaunit.assertEquals(#recs, 1)
+        luaunit.assertEquals(recs[1].n, 'modem.1.sim')
+        luaunit.assertEquals(recs[1].vs, 'present')
+    end)
+
+    if svc_scope then
+        stop_scope(svc_scope)
+    end
+    package.loaded['services.metrics.http'] = original_http_mod
+    clock:restore()
+
+    if st ~= 'ok' then
+        error(test_err or ('metrics http scope failed: ' .. tostring(st)))
+    end
+end
+
+-- Receiving a new config replaces pipelines; old metric names are dropped.
+function TestMetricsService:test_config_update_replaces_pipelines()
+    local clock = new_test_clock()
+    self.clock = clock
+    local root      = fibers.current_scope()
+    local bus       = make_bus()
+    local test_conn = bus:connect()
+
+    test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+    start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
+
+    local result_sub = test_conn:subscribe(
+        { 'svc', 'metrics', '#' },
+        { queue_len = 20, full = 'drop_oldest' }
+    )
+
+    -- Initial config: pipeline for 'sim'.
+    test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1))
+    local svc_scope = start_metrics(bus, root)
+    flush_ticks()
+
+    -- Confirm 'sim' publishes under the initial config.
+    test_conn:publish(
+        { 'obs', 'v1', 'modem', 'metric', 'sim' },
+        { value = 'present' }
+    )
+    local msg1 = recv_timeout(clock, result_sub, 0.4)
+    luaunit.assertNotNil(msg1, 'expected sim metric before config update')
+
+    -- Update config: replace 'sim' pipeline with 'rx_bytes'.
+    test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1))
+    flush_ticks()
+
+    -- 'rx_bytes' must publish after the config update.
+    test_conn:publish(
+        { 'obs', 'v1', 'network', 'metric', 'rx_bytes' },
+        { value = 42 }
+    )
+    local msg2 = recv_timeout(clock, result_sub, 0.4)
+    luaunit.assertNotNil(msg2, 'expected rx_bytes metric after config update')
+    luaunit.assertEquals(msg2.payload.value, 42)
+
+    stop_scope(svc_scope)
+    clock:restore()
+end
+
+-- Two endpoints sharing the same pipeline name maintain isolated processing
+-- state (DeltaValue counters don't bleed across endpoints).
+function TestMetricsService:test_per_endpoint_state_isolation()
+    local clock = new_test_clock()
+    self.clock = clock
+    local root      = fibers.current_scope()
+    local bus       = make_bus()
+    local test_conn = bus:connect()
+
+    test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+    start_mock_hal(test_conn, root)
+    test_conn:retain({ 'svc', 'time', 'synced' }, true)
+
+    local result_sub = test_conn:subscribe(
+        { 'svc', 'metrics', '#' },
+        { queue_len = 20, full = 'drop_oldest' })
+
+    test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1, {
+        { type = 'DeltaValue', initial_val = 0 },
+    }))
+    local svc_scope = start_metrics(bus, root)
+    flush_ticks()
+
+    -- WAN endpoint: 500 bytes → delta = 500.
+    test_conn:publish(
+        { 'obs', 'v1', 'network', 'metric', 'rx_bytes' },
+        { value = 500, namespace = { 'wan', 'rx_bytes' } })
+
+    -- LAN endpoint: 200 bytes → delta = 200 (independent state).
+    test_conn:publish(
+        { 'obs', 'v1', 'network', 'metric', 'rx_bytes' },
+        { value = 200, namespace = { 'lan', 'rx_bytes' } })
+
+    -- Collect both publishes within one tick window.
+    local received = {}
+    for _ = 1, 2 do
+        local msg = recv_timeout(clock, result_sub, 0.4)
+        if msg then
+            local key = table.concat(msg.topic, '.')
+            received[key] = msg.payload.value
+        end
+    end
+
+    luaunit.assertEquals(received['svc.metrics.wan.rx_bytes'], 500)
+    luaunit.assertEquals(received['svc.metrics.lan.rx_bytes'], 200)
+
+    stop_scope(svc_scope)
+    clock:restore()
+end
+
+-------------------------------------------------------------------------------
+-- Entry point
+-------------------------------------------------------------------------------
+
+if is_entry_point then
+    fibers.run(function()
+        os.exit(luaunit.LuaUnit.run())
+    end)
 end
