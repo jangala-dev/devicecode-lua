@@ -11,6 +11,7 @@ local named_choice = fibers.named_choice
 local base         = require 'devicecode.service_base'
 local methods_mod  = require 'services.hal.methods'
 local util         = require 'services.hal.util'
+local hal_config   = require 'services.hal.config'
 
 local M            = {}
 
@@ -34,6 +35,10 @@ function M.start(conn, opts)
 
 	local rpc_root = t('rpc', 'hal')
 
+	local current_hal_config = {
+		serial = {},
+	}
+
 	-- Select backend.
 	local bname    = backend_name_from_env(opts)
 	local mod      = require('services.hal.backends.' .. bname)
@@ -49,6 +54,9 @@ function M.start(conn, opts)
 
 		now       = function() return svc:now() end,
 		wall      = function() return svc:wall() end,
+		get_hal_config = function()
+			return current_hal_config
+		end,
 	}
 
 	local backend  = assert(mod.new(host), 'backend new() returned nil')
@@ -68,6 +76,36 @@ function M.start(conn, opts)
 	svc:obs_log('info', { what = 'hal_started', backend = bname })
 
 	svc:spawn_heartbeat(30.0, 'tick')
+
+	-- Subscribe to HAL-owned configuration.
+	local sub_cfg = conn:subscribe({ 'config', 'hal' }, { queue_len = 4, full = 'drop_oldest' })
+
+	fibers.spawn(function()
+		while true do
+			local msg, err = perform(sub_cfg:recv_op())
+			if not msg then
+				svc:obs_log('warn', { what = 'config_subscription_ended', err = tostring(err) })
+				return
+			end
+
+			local cfg, cerr = hal_config.normalise(msg.payload)
+			if not cfg then
+				svc:obs_log('warn', {
+					what = 'bad_hal_config',
+					err  = tostring(cerr),
+				})
+			else
+				current_hal_config = cfg
+				svc:obs_event('config_update', {
+					serial_refs = (function()
+						local n = 0
+						for _ in pairs(cfg.serial or {}) do n = n + 1 end
+						return n
+					end)(),
+				})
+			end
+		end
+	end)
 
 	local endpoints = methods_mod.bind_endpoints(conn, methods, function(method)
 		return t('rpc', 'hal', method)

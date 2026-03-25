@@ -7,6 +7,7 @@ local common      = require 'services.hal.backends.openwrt.common'
 local state_store = require 'services.hal.backends.openwrt.state_store'
 local uci_apply   = require 'services.hal.backends.openwrt.uci_apply'
 local links       = require 'services.hal.backends.openwrt.links'
+local serial      = require 'services.hal.backends.openwrt.serial'
 
 local M           = {}
 
@@ -50,6 +51,7 @@ function M.new(host)
 		_host      = host,
 		_state_dir = state_dir,
 		_cur       = cur,
+		_serial_streams = {}, -- ref -> { stream = Stream, opened_at = number }
 	}
 
 	function self:name() return 'openwrt' end
@@ -57,6 +59,7 @@ function M.new(host)
 	function self:capabilities()
 		return {
 			state_store             = true,
+			open_serial_stream      = true,
 			apply_net               = true,
 			apply_wifi              = false,
 			list_links              = true,
@@ -71,6 +74,7 @@ function M.new(host)
 	mixin(self, state_store)
 	mixin(self, uci_apply)
 	mixin(self, links)
+	mixin(self, serial)
 
 	return self
 end

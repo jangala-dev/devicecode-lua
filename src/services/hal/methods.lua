@@ -12,6 +12,7 @@ function M.registry()
 		read_state              = { kind = 'rpc' },
 		write_state             = { kind = 'rpc' },
 		dump                    = { kind = 'rpc' },
+		open_serial_stream      = { kind = 'rpc' },
 
 		-- Runtime sensing.
 		list_links              = { kind = 'sense' },

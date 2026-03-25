@@ -1,4 +1,4 @@
--- tests/devhost_stack_spec.lua
+-- tests/integration/devhost/stack_spec.lua
 
 local cjson         = require 'cjson.safe'
 

@@ -1,5 +1,3 @@
--- tests/support/fake_hal.lua
-
 local fibers = require 'fibers'
 
 local M = {}
@@ -18,12 +16,38 @@ FakeHal.__index = FakeHal
 
 function FakeHal:new(opts)
 	opts = opts or {}
+
+	local caps = {}
+	if type(opts.caps) == 'table' then
+		for k, v in pairs(opts.caps) do
+			caps[k] = v
+		end
+	end
+	if type(opts.scripted) == 'table' then
+		for method in pairs(opts.scripted) do
+			if caps[method] == nil then
+				caps[method] = true
+			end
+		end
+	end
+
 	return setmetatable({
 		calls    = {},
 		scripted = opts.scripted or {},
 		backend  = opts.backend or 'fakehal',
-		caps     = opts.caps or {},
+		caps     = caps,
 	}, FakeHal)
+end
+
+function FakeHal:calls_for(method)
+	local out = {}
+	for i = 1, #self.calls do
+		local c = self.calls[i]
+		if c.method == method then
+			out[#out + 1] = c
+		end
+	end
+	return out
 end
 
 function FakeHal:_next_reply(method, req, msg)
