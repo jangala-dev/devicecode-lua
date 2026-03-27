@@ -1,200 +1,256 @@
 -- services/config.lua
 --
--- Config service:
---  - discovers filesystem capability {'cap', 'fs', 'config', ...}
---  - reads config.json from the filesystem capability
---  - publishes retained to {'cfg', <service_name>} with the nested settings table
---  - accepts updates (in-memory only, not persisted):
---      * pub/sub: {'cfg', <service_name>, 'set'} payload is a table (settings)
+-- Config service (strict protocol):
+--  - discovers HAL via retained svc/hal/announce
+--  - reads a single JSON blob from HAL (string) in strict shape:
+--        { <svc>: { rev: int, data: table }, ... }
+--  - publishes retained config/<svc> with { rev=int, data=table }
+--  - accepts updates only on:
+--        config/<svc>/set with payload { data = table }
 --
--- Config file location: ${DC_CONFIG_DIR}/config.json
--- Format: { "service_name": { ...settings... }, ... }
---
--- Note: Write/persistence not yet implemented.
+-- Persisted state location (within HAL):
+--   ns  = "config"
+--   key = "services"
 
-local op      = require 'fibers.op'
-local runtime = require 'fibers.runtime'
-local perform = require 'fibers.performer'.perform
-local log     = require 'services.log'
+-- services/config.lua
 
-local cjson = require 'cjson.safe'
-local external_types = require 'services.hal.types.external'
+local fibers       = require 'fibers'
+local sleep        = require 'fibers.sleep'
+local pulse        = require 'fibers.pulse'
 
-local M = {}
+local perform      = fibers.perform
+local named_choice = fibers.named_choice
 
-local function t(...)
-	return { ... }
-end
+local base         = require 'devicecode.service_base'
+local codec        = require 'services.config.codec'
+local state        = require 'services.config.state'
 
-local function now()
-	return runtime.now()
-end
+local cap_sdk      = require 'services.hal.sdk.cap'
 
-local function publish_status(conn, name, state, extra)
-	local payload = { state = state, ts = now() }
-	if type(extra) == 'table' then
-		for k, v in pairs(extra) do payload[k] = v end
-	end
-	conn:retain(t('svc', name, 'status'), payload)
-end
-
-local function shallow_copy(x)
-	local out = {}
-	for k, v in pairs(x) do out[k] = v end
-	return out
-end
-
-local function is_plain_table(x)
-	return type(x) == 'table' and getmetatable(x) == nil
-end
-
-local function is_service_map(x)
-	-- top-level: service_name -> settings_table
-	if not is_plain_table(x) then return false end
-	for k, v in pairs(x) do
-		if type(k) ~= 'string' or k == '' then return false end
-		if not is_plain_table(v) then return false end
-	end
-	return true
-end
-
--------------------------------------------------------------------------------
--- Filesystem capability discovery + client
--------------------------------------------------------------------------------
-
-local function wait_for_fs_capability(conn)
-	-- Wait for filesystem capability with ID 'config' to become available
-	local sub = conn:subscribe(t('cap', 'fs', 'config', 'state'), { queue_len = 10, full = 'drop_oldest' })
-
-	while true do
-		local msg, err = perform(sub:recv_op())
-		if not msg then
-			return nil, err
-		end
-
-		if msg.payload == 'added' then
-			sub:unsubscribe()
-			return true, nil
-		end
-	end
-end
-
-local function fs_read_config(conn)
-	-- Read config.json from the filesystem capability
-	local opts, opts_err = external_types.new.FilesystemReadOpts('config.json')
-	if not opts then
-		return nil, 'failed to create read options: ' .. tostring(opts_err)
-	end
-
-	local reply, err = conn:call(t('cap', 'fs', 'config', 'rpc', 'read'), opts)
-	if not reply then
-		return nil, err
-	end
-
-	if reply.ok ~= true then
-		return nil, reply.reason or 'filesystem read failed'
-	end
-
-	-- File content is in reply.reason
-	return reply.reason, nil
-end
-
--------------------------------------------------------------------------------
--- Service
--------------------------------------------------------------------------------
+local M            = {}
 
 function M.start(conn, opts)
 	opts = opts or {}
-	local name = opts.name or 'config'
+	local svc = base.new(conn, { name = opts.name or 'config', env = opts.env })
 
-	publish_status(conn, name, 'starting')
+	local timings = opts.timings or {}
 
-	-- Wait for filesystem capability to become available
-	local ok, cap_err = wait_for_fs_capability(conn)
-	if not ok then
-		publish_status(conn, name, 'stopped', { reason = cap_err or 'filesystem capability not available' })
-		return
+	local function numopt(name, default)
+		local v = timings[name]
+		return (type(v) == 'number') and v or default
 	end
 
-	-- Current config: service_name -> settings_table
-	local current = {}
+	local hal_wait_timeout_s      = numopt('hal_wait_timeout_s', 60)
+	local hal_wait_tick_s         = numopt('hal_wait_tick_s', 10)
+	local heartbeat_s             = numopt('heartbeat_s', 30.0)
+
+	local persist_debounce_s      = numopt('persist_debounce_s', 0.25)
+	local persist_max_delay_s     = numopt('persist_max_delay_s', 5.0)
+	local persist_retry_initial_s = numopt('persist_retry_initial_s', 1.0)
+	local persist_retry_max_s     = numopt('persist_retry_max_s', 30.0)
+
+	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
+	svc:obs_log('info', 'service start() entered')
+	svc:status('starting')
+
+	svc:spawn_heartbeat(heartbeat_s, 'tick')
+
+	local config_cap_monitor = cap_sdk.new_cap_listener(svc.conn, 'fs', 'config')
+	local config_cap, ferr = config_cap_monitor:wait_for_cap({
+		timeout = hal_wait_timeout_s
+	})
+
+	if ferr ~= "" then
+		svc:status('failed', { reason = 'fs cap monitor: ' .. ferr })
+		svc:obs_log('error', { what = 'start_failed', err = 'fs cap monitor: ' .. tostring(ferr) })
+		error('config: failed to discover fs capability: ' .. tostring(ferr), 0)
+	end
+
+	if not config_cap then
+		svc:status('failed', { reason = 'fs cap not found' })
+		svc:obs_log('error', { what = 'start_failed', err = 'fs cap not found' })
+		error('config: failed to discover fs capability', 0)
+	end
+
+	local STATE_KEY = os.getenv('CONFIG_TARGET') or error('CONFIG_TARGET env var must be set to load inital config')
+
+	-- current[svc] = { rev=int, data=table }
+	local current   = {}
 
 	local function publish_all_retained()
-		for svc, settings in pairs(current) do
-			conn:retain(t('cfg', svc), settings)
-		end
+		return state.publish_all_retained(conn, svc, current)
 	end
 
-	local function load_from_fs()
-		local blob, err = fs_read_config(conn)
-		if not blob then
-			log.warn(("Config: %s"):format(err))
-			-- Missing file is not fatal: start with empty config.
-			if err and (err:find('not found') or err:find('No such file')) then
-				current = {}
-				publish_all_retained()
-				return true
-			end
-			-- Other errors are more serious
-			publish_status(conn, name, 'degraded', { reason = 'failed to read config: ' .. tostring(err) })
+	local function load_from_hal()
+		svc:obs_event('load_begin', { key = STATE_KEY })
+
+		local reply, read_err = config_cap:call_control('read', cap_sdk.args.new.FilesystemReadOpts(STATE_KEY .. '.json'))
+		if not reply then
+			svc:obs_log('error', { what = 'load_failed', err = tostring(read_err) })
 			current = {}
-			return false
+			publish_all_retained()
+			svc:obs_event('load_end', { ok = false, reason = 'call_failed' })
+			return true
+		end
+		if reply.ok ~= true then
+			svc:obs_log('error', { what = 'load_failed', err = tostring(reply.reason or 'hal read failed') })
+			current = {}
+			publish_all_retained()
+			svc:obs_event('load_end', { ok = false, reason = 'hal_error' })
+			return true
 		end
 
-		local decoded = cjson.decode(blob)
-		print(decoded)
-		if not is_service_map(decoded) then
-			-- Do not guess: publish nothing and surface an error status.
-			publish_status(conn, name, 'degraded', { reason = 'invalid config JSON shape' })
+		local blob = reply.reason
+		local decoded, derr = codec.decode_blob_strict(blob or '')
+		if not decoded then
+			svc:status('degraded', { reason = 'invalid config JSON', err = tostring(derr) })
+			svc:obs_log('error', { what = 'decode_failed', err = tostring(derr) })
 			current = {}
-			return false
+			publish_all_retained()
+			svc:obs_event('load_end', { ok = false, reason = tostring(derr) })
+			return true
 		end
 
 		current = decoded
 		publish_all_retained()
+		svc:obs_event('load_end', { ok = true })
 		return true
 	end
 
-	local function set_service(service, settings)
-		if type(service) ~= 'string' or service == '' then
-			return nil, 'invalid service'
+	load_from_hal()
+
+	local state_cap_monitor = cap_sdk.new_cap_listener(svc.conn, 'fs', 'state')
+	local state_cap, serr = state_cap_monitor:wait_for_cap({
+		timeout = hal_wait_timeout_s
+	})
+
+	if serr ~= "" then
+		svc:status('failed', { reason = 'state cap monitor: ' .. serr })
+		svc:obs_log('error', { what = 'start_failed', err = 'state cap monitor: ' .. tostring(serr) })
+		error('config: failed to discover state fs capability: ' .. tostring(serr), 0)
+	end
+
+	if not state_cap then
+		svc:status('failed', { reason = 'state cap not found' })
+		svc:obs_log('error', { what = 'start_failed', err = 'state cap not found' })
+		error('config: failed to discover state fs capability', 0)
+	end
+
+	-- Debounced persistence worker (coalesces writes).
+	local p              = pulse.new()
+	local dirty          = false
+	local flush_at       = math.huge
+	local flush_deadline = math.huge
+
+	local debounce_s     = persist_debounce_s
+	local max_delay_s    = persist_max_delay_s
+
+	local retry_s        = persist_retry_initial_s
+	local retry_max_s    = persist_retry_max_s
+
+	local function mark_dirty(reason)
+		local n = svc:now()
+		dirty = true
+		flush_at = n + debounce_s
+		if flush_deadline == math.huge then
+			flush_deadline = n + max_delay_s
 		end
-		if not is_plain_table(settings) then
-			return nil, 'settings must be a table'
+		p:signal()
+		svc:obs_event('persist_dirty', { reason = reason, at = svc:wall(), ts = svc:now() })
+	end
+
+	local function persist_snapshot(reason)
+		local blob, berr = codec.encode_blob(current)
+		if not blob then
+			svc:obs_log('error', { what = 'persist_encode_failed', err = tostring(berr) })
+			svc:obs_event('persist_end', { ok = false, err = tostring(berr), phase = 'encode' })
+			return nil, berr
 		end
 
-		-- Update in-memory only (persistence not yet implemented)
-		current[service] = settings
-		conn:retain(t('cfg', service), settings)
+		svc:obs_event('persist_begin', { key = STATE_KEY, reason = reason, bytes = #blob })
+
+		local reply, wr_err = state_cap:call_control('write', cap_sdk.args.new.FilesystemWriteOpts(STATE_KEY .. '.json', blob))
+		if not reply then
+			svc:obs_log('error', { what = 'persist_failed', err = tostring(wr_err) })
+			svc:obs_event('persist_end', { ok = false, err = tostring(wr_err) })
+			return nil, wr_err
+		end
+		if reply.ok ~= true then
+			local e = tostring(reply.reason or 'hal write failed')
+			svc:obs_log('error', { what = 'persist_failed', err = e })
+			svc:obs_event('persist_end', { ok = false, err = e })
+			return nil, e
+		end
+
+		svc:obs_event('persist_end', { ok = true })
 		return true, nil
 	end
 
-	-- Initial load
-	load_from_fs()
+	fibers.spawn(function()
+		local seen = p:version()
+		while true do
+			if dirty then
+				local due = math.min(flush_at, flush_deadline)
+				local dt = due - svc:now()
+				if dt <= 0 then
+					local ok, err = persist_snapshot('debounced_flush')
+					if ok then
+						dirty = false
+						flush_at = math.huge
+						flush_deadline = math.huge
+						retry_s = 1.0
+						svc:status('running')
+					else
+						local n = svc:now()
+						flush_at = n + retry_s
+						flush_deadline = math.min(flush_deadline, n + max_delay_s)
+						retry_s = math.min(retry_s * 2, retry_max_s)
+						svc:status('degraded', { reason = 'persist_failed', err = tostring(err) })
+					end
+				else
+					local which, a, b = perform(named_choice {
+						changed = p:changed_op(seen),
+						timer   = sleep.sleep_op(dt):wrap(function() return true end),
+					})
+					if which == 'changed' then
+						local v, r = a, b
+						if v == nil and r ~= nil then return end
+						seen = v or seen
+					end
+				end
+			else
+				local v, r = perform(p:changed_op(seen))
+				if v == nil and r ~= nil then return end
+				seen = v or seen
+			end
+		end
+	end)
 
-	-- Updates from other sources (UI/cloud/etc)
-	local sub_set = conn:subscribe(t('cfg', '+', 'set'), { queue_len = 50, full = 'drop_oldest' })
+	local sub_set = conn:subscribe({ 'config', '+', 'set' }, { queue_len = 50, full = 'drop_oldest' })
+	svc:obs_log('info', 'subscribed to config/+/set')
 
-	publish_status(conn, name, 'running')
+	svc:status('running')
+	svc:obs_log('info', 'service running')
 
 	while true do
 		local msg, err = perform(sub_set:recv_op())
 		if not msg then
-			publish_status(conn, name, 'stopped', { reason = err })
+			svc:status('stopped', { reason = err })
+			svc:obs_log('warn', { what = 'subscription_ended', err = tostring(err) })
 			return
 		end
 
 		local service = msg.topic and msg.topic[2]
-		local settings = msg.payload
+		local ok, uerr = state.set_service(current, conn, svc, mark_dirty, service, msg.payload, msg)
 
-		local success, uerr = set_service(service, settings)
-		-- Best-effort reply if request-style publish provided reply_to.
+		-- Reply immediately: accepted != persisted.
 		if msg.reply_to ~= nil then
-			if success then
-				conn:publish_one(msg.reply_to, { ok = true }, { id = msg.id })
-			else
-				conn:publish_one(msg.reply_to, { ok = false, err = tostring(uerr) }, { id = msg.id })
-			end
+			local reply = ok and { ok = true, persisted = false } or { ok = false, err = tostring(uerr) }
+			conn:publish(msg.reply_to, reply, { id = msg.id })
+		end
+
+		if not ok then
+			svc:obs_log('warn', { what = 'set_rejected', service = tostring(service), err = tostring(uerr) })
 		end
 	end
 end
