@@ -71,7 +71,7 @@ function new.Reply(ok, reason, code)
     }, Reply), ""
 end
 
----@alias EmitMode 'event'|'state'|'meta'
+---@alias EmitMode 'event'|'state'|'meta'|'log'
 
 ---@class Emit
 ---@field class CapabilityClass
@@ -99,7 +99,7 @@ function new.Emit(class, id, mode, key, data)
         return nil, "invalid id"
     end
 
-    if mode ~= 'event' and mode ~= 'state' and mode ~= 'meta' then
+    if mode ~= 'event' and mode ~= 'state' and mode ~= 'meta' and mode ~= 'log' then
         return nil, "invalid mode"
     end
 
@@ -231,7 +231,7 @@ end
 -- Todo types:
 ---@class Manager
 ---@field scope Scope
----@field start fun(dev_ev_ch: Channel, cap_emit_ch: Channel): string error
+---@field start fun(logger: table|nil, dev_ev_ch: Channel, cap_emit_ch: Channel): string error
 ---@field stop fun(): string error
 ---@field apply_config fun(config: table): boolean ok, string error
 
