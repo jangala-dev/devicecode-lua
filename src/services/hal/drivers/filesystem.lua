@@ -1,10 +1,7 @@
 -- HAL modules
 local hal_types = require "services.hal.types.core"
 local cap_types = require "services.hal.types.capabilities"
-local external_types = require "services.hal.types.external"
-
--- Service modules
-local log = require "services.log"
+local cap_args = require "services.hal.types.capability_args"
 
 -- Fibers modules
 local fibers = require "fibers"
@@ -18,6 +15,7 @@ local file = require "fibers.io.file"
 ---@field roots table<string, string>
 ---@field control_chs table<string, Channel>
 ---@field cap_emit_ch Channel
+---@field logger table?
 ---@field initialised boolean
 ---@field caps_applied boolean
 local FSDriver = {}
@@ -27,6 +25,12 @@ FSDriver.__index = FSDriver
 
 local DEFAULT_STOP_TIMEOUT = 5
 local CONTROL_Q_LEN = 8
+
+local function dlog(self, level, payload)
+    if self.logger and self.logger[level] then
+        self.logger[level](self.logger, payload)
+    end
+end
 
 ---- Utility Functions ----
 
@@ -75,7 +79,7 @@ end
 ---@return string reason_or_content
 ---@return integer? code
 function FSDriver:read(root_name, opts)
-    if opts == nil or getmetatable(opts) ~= external_types.FilesystemReadOpts then
+    if opts == nil or getmetatable(opts) ~= cap_args.FilesystemReadOpts then
         return return_error("invalid options", 1)
     end
 
@@ -105,7 +109,12 @@ function FSDriver:read(root_name, opts)
     end
 
     if close_err then
-        log.warn("FS Driver", "read: warning closing file:", close_err)
+        dlog(self, 'warn', {
+            what = 'read_close_warning',
+            root = root_name,
+            filename = filename,
+            err = tostring(close_err),
+        })
     end
 
     -- Emit success event
@@ -113,7 +122,12 @@ function FSDriver:read(root_name, opts)
         filename = filename
     })
     if not ok then
-        log.warn("FS Driver", "read: failed to emit success event:", emit_err)
+        dlog(self, 'warn', {
+            what = 'read_success_emit_failed',
+            root = root_name,
+            filename = filename,
+            err = tostring(emit_err),
+        })
     end
 
     return true, content
@@ -126,7 +140,7 @@ end
 ---@return string? reason
 ---@return integer? code
 function FSDriver:write(root_name, opts)
-    if opts == nil or getmetatable(opts) ~= external_types.FilesystemWriteOpts then
+    if opts == nil or getmetatable(opts) ~= cap_args.FilesystemWriteOpts then
         return return_error("invalid options", 1)
     end
 
@@ -156,7 +170,12 @@ function FSDriver:write(root_name, opts)
     end
 
     if close_err then
-        log.warn("FS Driver", "write: warning closing file:", close_err)
+        dlog(self, 'warn', {
+            what = 'write_close_warning',
+            root = root_name,
+            filename = filename,
+            err = tostring(close_err),
+        })
     end
 
     -- Emit success event
@@ -164,7 +183,12 @@ function FSDriver:write(root_name, opts)
         filename = filename
     })
     if not ok_emit then
-        log.warn("FS Driver", "write: failed to emit success event:", emit_err)
+        dlog(self, 'warn', {
+            what = 'write_success_emit_failed',
+            root = root_name,
+            filename = filename,
+            err = tostring(emit_err),
+        })
     end
 
     return true
@@ -188,14 +212,14 @@ end
 
 function FSDriver:control_manager()
     if self.cap_emit_ch == nil then
-        log.error("FS Driver", "control_manager: cap_emit_ch is nil")
+        dlog(self, 'error', { what = 'control_manager_missing_cap_emit_channel' })
         return
     end
 
-    log.trace("FS Driver", "control_manager: started")
+    dlog(self, 'debug', { what = 'control_manager_started' })
 
     fibers.current_scope():finally(function()
-        log.trace("FS Driver", "control_manager: exiting")
+        dlog(self, 'debug', { what = 'control_manager_exiting' })
     end)
 
     while true do
@@ -209,7 +233,7 @@ function FSDriver:control_manager()
         local root_name, request, req_err = fibers.perform(op.named_choice(choice_arms))
 
         if not request then
-            log.error("FS Driver", "control_manager: control channel get error:", req_err)
+            dlog(self, 'error', { what = 'control_channel_get_failed', err = tostring(req_err) })
             break
         end
 
@@ -237,7 +261,7 @@ function FSDriver:control_manager()
 
         local reply, reply_err = hal_types.new.Reply(ok, reason, code)
         if not reply then
-            log.error("FS Driver", "control_manager: failed to create reply:", reply_err)
+            dlog(self, 'error', { what = 'reply_create_failed', err = tostring(reply_err) })
         else
             request.reply_ch:put(reply)
         end
@@ -343,7 +367,7 @@ function FSDriver:init()
             return err_msg
         end
 
-        log.trace("FS Driver", "created/verified root", root_name, "at", root_path)
+        dlog(self, 'debug', { what = 'root_ready', root = root_name, path = root_path })
     end
 
     self.initialised = true
@@ -352,9 +376,10 @@ end
 
 --- Create a new filesystem driver
 ---@param roots table<string, string> A mapping of root names to their paths
+---@param logger table?
 ---@return FSDriver?
 ---@return string error
-local function new(roots)
+local function new(roots, logger)
     local self = setmetatable({}, FSDriver)
     local scope, sc_err = fibers.current_scope():child()
     if not scope then return nil, sc_err end
@@ -362,6 +387,7 @@ local function new(roots)
     self.scope = scope
     self.roots = roots or {}
     self.control_chs = {}
+    self.logger = logger
     self.initialised = false
     self.caps_applied = false
 

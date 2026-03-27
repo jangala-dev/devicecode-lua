@@ -1,5 +1,7 @@
 -- HAL modules
 local types = require "services.hal.types.core"
+local base = require "devicecode.service_base"
+local Logger = require "services.hal.logger"
 
 -- Fibers modules
 local fibers = require "fibers"
@@ -8,21 +10,12 @@ local channel = require "fibers.channel"
 
 local perform = fibers.perform
 local spawn = fibers.spawn
-local now = fibers.now
 
--- General modules
-local log = require "services.log"
+local SCHEMA_STANDARD = "devicecode.config/hal/1"
 
 local DEFAULT_Q_LEN = 10
 
 -- Topic helpers
-
----@param class DeviceClass
----@param id DeviceId
----@return string[] topic
-local function t_dev_event(class, id)
-    return { 'dev', class, id, 'event' }
-end
 
 ---@param class DeviceClass
 ---@param id DeviceId
@@ -56,32 +49,7 @@ end
 
 ---@class HalService
 ---@field name string
----@field cap_emit_ch Channel
----@field dev_ev_ch Channel
----@field managers table<string, Manager>
----@field devices table<string, Device>
----@field capabilities table<CapabilityClass, table<CapabilityId, CapabilityEntry>>
-local HalService = {
-    cap_emit_ch = channel.new(DEFAULT_Q_LEN), -- capability emits of state, meta or events
-    dev_ev_ch = channel.new(DEFAULT_Q_LEN),   -- manager emits of device events (added/removed)
-    managers = {},
-    devices = {},
-    capabilities = {},
-    rpc_subs = {}
-}
-
----Publishes the HAL service status
----@param conn Connection
----@param name string
----@param state string
----@param extra table?
-local function publish_status(conn, name, state, extra)
-    local payload = { state = state, ts = now() }
-    if type(extra) == 'table' then
-        for k, v in pairs(extra) do payload[k] = v end
-    end
-    conn:retain({ 'svc', name, 'status' }, payload)
-end
+local HalService = {}
 
 ---Validates class string
 ---@param class CapabilityClass|DeviceClass
@@ -97,238 +65,6 @@ local function id_valid(id)
     return (type(id) == 'string' and id ~= '') or (type(id) == 'number' and id >= 0)
 end
 
----Gets the device instance or returns nil
----@param class DeviceClass
----@param id DeviceId
----@return Device?
-local function get_device(class, id)
-    local devices = HalService.devices[class]
-    if not devices then return nil end
-    return devices[id]
-end
-
----Sets the device instance
----@param class DeviceClass
----@param id DeviceId
----@param device_inst Device
----@return string? error
-local function set_device(class, id, device_inst)
-    HalService.devices[class] = HalService.devices[class] or {}
-    if HalService.devices[class][id] then
-        return "device already exists"
-    end
-    HalService.devices[class][id] = device_inst
-end
-
----Removes the device instance
----@param class DeviceClass
----@param id DeviceId
----@return string? error
-local function remove_device(class, id)
-    local devices = HalService.devices[class]
-    if not devices or not devices[id] then
-        return "device does not exist"
-    end
-    HalService.devices[class][id] = nil
-end
-
----Gets the capability instance or returns nil
----@param class CapabilityClass
----@param id CapabilityId
----@return CapabilityEntry?
-local function get_cap(class, id)
-    local caps = HalService.capabilities[class]
-    if not caps then return nil end
-    return caps[id]
-end
-
----Sets the capability instance
----@param conn Connection
----@param class CapabilityClass
----@param id CapabilityId
----@param cap_inst Capability
----@return string? error
-local function set_cap(conn, class, id, cap_inst)
-    HalService.capabilities[class] = HalService.capabilities[class] or {}
-    if HalService.capabilities[class][id] then
-        return "capability already exists"
-    end
-    HalService.capabilities[class][id] = { inst = cap_inst, rpc = {} }
-    for offering, _ in pairs(cap_inst.offerings) do
-        HalService.capabilities[class][id].rpc[offering] = conn:bind({ 'cap', class, id, 'rpc', offering })
-    end
-end
-
----Removes the capability instance
----@param class CapabilityClass
----@param id CapabilityId
----@return string? error
-local function remove_cap(class, id)
-    local caps = HalService.capabilities[class]
-    if not caps or not caps[id] then
-        return "capability does not exist"
-    end
-
-    for _, rpc_sub in pairs(caps[id].rpc) do
-        ---@cast rpc_sub Endpoint
-        rpc_sub:unbind()
-    end
-    HalService.capabilities[class][id] = nil
-end
-
----Handles running driver functions for control requests
----@param conn Connection
----@param msg Message
-local function on_cap_ctrl(conn, msg)
-    local class, id, verb = msg.topic[2], msg.topic[3], msg.topic[5]
-
-    if not class_valid(class) then
-        log.debug(HalService.name, "- invalid class")
-        return
-    end
-
-    if not id_valid(id) then
-        log.debug(HalService.name, "- invalid id")
-        return
-    end
-
-    local control_req, ctrl_req_err = types.new.ControlRequest(
-        verb,
-        msg.payload,
-        channel.new()
-    )
-    if not control_req then
-        log.debug(HalService.name, "-", ctrl_req_err)
-        return
-    end
-
-    local cap_entry = get_cap(class, id)
-    if not cap_entry then return end -- could be a capability owned by another service
-
-    if not cap_entry.inst.offerings[verb] then
-        log.debug(HalService.name, "- capability", class, "does not offer verb:", verb)
-        return
-    end
-
-    spawn(function()
-        cap_entry.inst.control_ch:put(control_req)
-        local reply, reply_err = control_req.reply_ch:get()
-        if not reply then
-            reply = types.new.Reply(false, reply_err)
-        end
-        if msg.reply_to then
-            local ok, pub_err = conn:publish_one(msg.reply_to, reply)
-            if not ok then
-                log.debug("HAL - failed to send control response for ", class, id, verb, ": ", pub_err)
-            end
-        end
-    end)
-end
-
----@param conn Connection
----@param emit Emit
-local function on_cap_emit(conn, emit)
-    if getmetatable(emit) ~= types.Emit then
-        log.debug(HalService.name, "- invalid emit message")
-        return
-    end
-    local topic = { 'cap', emit.class, emit.id, emit.mode, emit.key }
-
-    -- Events are in the moment but state and meta can be held on the bus
-    if emit.mode == 'event' then
-        conn:publish(topic, emit.data)
-    else
-        conn:retain(topic, emit.data)
-    end
-end
-
----Adds a device and its capabilities to HAL and broadcasts event to bus
----@param conn Connection
----@param event_type EventType
----@param device Device
-local function register_device(conn, event_type, device)
-    local set_err = set_device(device.class, device.id, device)
-    if set_err then
-        log.debug(HalService.name, "-", set_err)
-        return
-    end
-
-    for _, cap in ipairs(device.capabilities) do
-        local cap_set_err = set_cap(conn, cap.class, cap.id, cap)
-        if cap_set_err then
-            log.debug(HalService.name, "-", cap_set_err)
-        else
-            conn:retain(t_cap_state(cap.class, cap.id), event_type)
-            conn:retain(t_cap_meta(cap.class, cap.id), { offerings = cap.offerings })
-        end
-    end
-
-    conn:retain(t_dev_meta(device.class, device.id), device.meta)
-    conn:retain(t_dev_state(device.class, device.id), event_type)
-end
-
----Removes a device and its capabilities from HAL and broadcasts event to bus
----@param conn Connection
----@param event_type EventType
----@param device Device
-local function unregister_device(conn, event_type, device)
-    for _, cap in ipairs(device.capabilities) do
-        local cap_remove_err = remove_cap(cap.class, cap.id)
-        if cap_remove_err then
-            log.debug(HalService.name, "-", cap_remove_err)
-        else
-            conn:retain(t_cap_state(cap.class, cap.id), event_type)
-            conn:unretain(t_cap_meta(cap.class, cap.id))
-        end
-    end
-
-    local remove_err = remove_device(device.class, device.id)
-    if remove_err then
-        log.debug(HalService.name, "-", remove_err)
-        return
-    end
-    conn:unretain(t_dev_meta(device.class, device.id))
-    conn:retain(t_dev_state(device.class, device.id), event_type)
-end
-
----@param conn Connection
----@param device_event DeviceEvent
-local function on_device_event(conn, device_event)
-    if getmetatable(device_event) ~= types.DeviceEvent then
-        log.debug(HalService.name, "- invalid device event message")
-        return
-    end
-
-    if device_event.event_type == 'added' then
-        local dev_inst, dev_err = types.new.Device(
-            device_event.class,
-            device_event.id,
-            device_event.meta,
-            device_event.capabilities
-        )
-        if not dev_inst then
-            log.debug(HalService.name, "-", dev_err)
-            return
-        end
-        register_device(conn, device_event.event_type, dev_inst)
-    elseif device_event.event_type == 'removed' then
-        local dev_inst = get_device(device_event.class, device_event.id)
-        if not dev_inst then
-            log.debug(HalService.name, "- device does not exist")
-            return
-        end
-        unregister_device(conn, device_event.event_type, dev_inst)
-    else
-        log.debug(HalService.name,
-            "- unhandled device event type for ",
-            device_event.class,
-            device_event.id,
-            device_event.event_type
-        )
-        return
-    end
-end
-
 --- Checks that HAL config is valid
 ---@param config table
 ---@return boolean
@@ -337,6 +73,11 @@ local function validate_config(config)
     if type(config) ~= 'table' then
         return false, "config must be a table"
     end
+
+    if config.schema ~= SCHEMA_STANDARD then
+        return false, "config schema must be " .. SCHEMA_STANDARD
+    end
+    config.schema = nil
 
     for key, value in pairs(config) do
         if type(key) ~= 'string' then
@@ -350,112 +91,438 @@ local function validate_config(config)
     return true, ""
 end
 
---- Uses config to setup managers
----@param config table
-local function on_config(config)
-    log.trace("HAL: received config update")
-    local valid, valid_err = validate_config(config)
-    if not valid then
-        log.debug(HalService.name, "- invalid config:", valid_err)
-        return
-    end
-
-    for name, manager_config in pairs(config) do
-        if not HalService.managers[name] then
-            local ok, manager = pcall(require, "services.hal.managers." .. name)
-            if not ok then
-                log.debug("HAL: failed to load manager module for manager:", name)
-            else
-                ---@cast manager Manager
-                local start_err = manager.start(HalService.dev_ev_ch, HalService.cap_emit_ch)
-                if start_err ~= "" then
-                    log.debug(HalService.name, "- failed to start manager:", name, start_err)
-                else
-                    HalService.managers[name] = manager
-                end
-            end
-        end
-
-        local manager = HalService.managers[name]
-        if manager then
-            local ok, apply_err = manager.apply_config(manager_config)
-            if not ok then
-                log.debug(HalService.name, "- failed to apply config for manager:", name, apply_err)
-            end
-        end
-    end
-
-    for name, manager in pairs(HalService.managers) do
-        if not config[name] then
-            HalService.managers[name] = nil
-            fibers.current_scope():spawn(function()
-                manager.stop()
-            end)
-        end
-    end
-
-    log.trace("HAL: config update complete")
-end
-
---- Creates initial utilities required for loading config which will bring up rest of HAL
-local function bootstrap()
-    local fs_manager = require "services.hal.managers.filesystem"
-    ---@cast fs_manager Manager
-
-    local fs_manager_err = fs_manager.start(HalService.dev_ev_ch, HalService.cap_emit_ch)
-    if fs_manager_err ~= "" then
-        error("HAL bootstrap failed: Failed to start filesystem manager: " .. fs_manager_err)
-    end
-
-    local ok, cfg_err = fs_manager.apply_config({
-        {
-            name = "config",
-            root = os.getenv("DEVICECODE_CONFIG_DIR")
-        }
-    })
-
-    if not ok then
-        error("HAL bootstrap failed: " .. tostring(cfg_err))
-    end
-
-    HalService.managers["filesystem"] = fs_manager
-end
-
 ---Spawns all HAL service long running fibers
 ---@param conn Connection
 ---@param opts any
 function HalService.start(conn, opts)
-    log.trace("HAL: starting")
-    HalService.name = opts.name or "hal"
-    publish_status(conn, HalService.name, "starting")
+    opts = opts or {}
+
+    local svc = base.new(conn, { name = opts.name or "hal", env = opts.env })
+    HalService.name = svc.name
+
+    local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
+
+    local cap_emit_ch = channel.new(DEFAULT_Q_LEN)
+    local dev_ev_ch = channel.new(DEFAULT_Q_LEN)
+    local managers = {}
+    local devices = {}
+    local capabilities = {}
+
+    local function merge_fields(a, b)
+        local out = {}
+        if type(a) == 'table' then
+            for k, v in pairs(a) do out[k] = v end
+        end
+        if type(b) == 'table' then
+            for k, v in pairs(b) do out[k] = v end
+        end
+        return out
+    end
+
+        local function obs_emitter(level, payload)
+            svc:obs_log(level, payload)
+        end
+
+    ---Gets the device instance or returns nil
+    ---@param class DeviceClass
+    ---@param id DeviceId
+    ---@return Device?
+    local function get_device(class, id)
+        local class_devices = devices[class]
+        if not class_devices then return nil end
+        return class_devices[id]
+    end
+
+    ---Sets the device instance
+    ---@param class DeviceClass
+    ---@param id DeviceId
+    ---@param device_inst Device
+    ---@return string? error
+    local function set_device(class, id, device_inst)
+        devices[class] = devices[class] or {}
+        if devices[class][id] then
+            return "device already exists"
+        end
+        devices[class][id] = device_inst
+    end
+
+    ---Removes the device instance
+    ---@param class DeviceClass
+    ---@param id DeviceId
+    ---@return string? error
+    local function remove_device(class, id)
+        local class_devices = devices[class]
+        if not class_devices or not class_devices[id] then
+            return "device does not exist"
+        end
+        class_devices[id] = nil
+    end
+
+    ---Gets the capability instance or returns nil
+    ---@param class CapabilityClass
+    ---@param id CapabilityId
+    ---@return CapabilityEntry?
+    local function get_cap(class, id)
+        local caps = capabilities[class]
+        if not caps then return nil end
+        return caps[id]
+    end
+
+    ---Sets the capability instance
+    ---@param class CapabilityClass
+    ---@param id CapabilityId
+    ---@param cap_inst Capability
+    ---@return string? error
+    local function set_cap(class, id, cap_inst)
+        capabilities[class] = capabilities[class] or {}
+        if capabilities[class][id] then
+            return "capability already exists"
+        end
+        capabilities[class][id] = { inst = cap_inst, rpc = {} }
+        for offering, _ in pairs(cap_inst.offerings) do
+            capabilities[class][id].rpc[offering] = conn:bind({ 'cap', class, id, 'rpc', offering })
+        end
+    end
+
+    ---Removes the capability instance
+    ---@param class CapabilityClass
+    ---@param id CapabilityId
+    ---@return string? error
+    local function remove_cap(class, id)
+        local caps = capabilities[class]
+        if not caps or not caps[id] then
+            return "capability does not exist"
+        end
+
+        for _, rpc_sub in pairs(caps[id].rpc) do
+            ---@cast rpc_sub Endpoint
+            rpc_sub:unbind()
+        end
+        caps[id] = nil
+    end
+
+    ---Adds a device and its capabilities to HAL and broadcasts event to bus
+    ---@param event_type EventType
+    ---@param device Device
+    local function register_device(event_type, device)
+        local set_err = set_device(device.class, device.id, device)
+        if set_err then
+            svc:obs_log('warn', {
+                what = 'register_device_skipped',
+                err = set_err,
+                class = device.class,
+                id = device.id,
+            })
+            return
+        end
+
+        for _, cap in ipairs(device.capabilities) do
+            local cap_set_err = set_cap(cap.class, cap.id, cap)
+            if cap_set_err then
+                svc:obs_log('warn', {
+                    what = 'register_capability_skipped',
+                    err = cap_set_err,
+                    class = cap.class,
+                    id = cap.id,
+                })
+            else
+                conn:retain(t_cap_state(cap.class, cap.id), event_type)
+                conn:retain(t_cap_meta(cap.class, cap.id), { offerings = cap.offerings })
+            end
+        end
+
+        conn:retain(t_dev_meta(device.class, device.id), device.meta)
+        conn:retain(t_dev_state(device.class, device.id), event_type)
+        svc:obs_event('device_registered', { class = device.class, id = device.id, event_type = event_type })
+    end
+
+    ---Removes a device and its capabilities from HAL and broadcasts event to bus
+    ---@param event_type EventType
+    ---@param device Device
+    local function unregister_device(event_type, device)
+        for _, cap in ipairs(device.capabilities) do
+            local cap_remove_err = remove_cap(cap.class, cap.id)
+            if cap_remove_err then
+                svc:obs_log('warn', {
+                    what = 'remove_capability_skipped',
+                    err = cap_remove_err,
+                    class = cap.class,
+                    id = cap.id,
+                })
+            else
+                conn:retain(t_cap_state(cap.class, cap.id), event_type)
+                conn:unretain(t_cap_meta(cap.class, cap.id))
+            end
+        end
+
+        local remove_err = remove_device(device.class, device.id)
+        if remove_err then
+            svc:obs_log('warn', {
+                what = 'remove_device_skipped',
+                err = remove_err,
+                class = device.class,
+                id = device.id,
+            })
+            return
+        end
+
+        conn:unretain(t_dev_meta(device.class, device.id))
+        conn:retain(t_dev_state(device.class, device.id), event_type)
+        svc:obs_event('device_unregistered', { class = device.class, id = device.id, event_type = event_type })
+    end
+
+    ---Handles running driver functions for control requests
+    ---@param msg Message
+    local function on_cap_ctrl(msg)
+        local class, id, verb = msg.topic[2], msg.topic[3], msg.topic[5]
+
+        if not class_valid(class) then
+            svc:obs_log('warn', { what = 'invalid_cap_class', class = tostring(class) })
+            return
+        end
+
+        if not id_valid(id) then
+            svc:obs_log('warn', { what = 'invalid_cap_id', class = class, id = tostring(id) })
+            return
+        end
+
+        local control_req, ctrl_req_err = types.new.ControlRequest(
+            verb,
+            msg.payload,
+            channel.new()
+        )
+        if not control_req then
+            svc:obs_log('warn', {
+                what = 'control_request_invalid',
+                err = tostring(ctrl_req_err),
+                class = class,
+                id = id,
+                verb = verb,
+            })
+            return
+        end
+
+        local cap_entry = get_cap(class, id)
+        if not cap_entry then return end
+
+        if not cap_entry.inst.offerings[verb] then
+            svc:obs_log('warn', { what = 'control_verb_unavailable', class = class, id = id, verb = verb })
+            return
+        end
+
+        spawn(function()
+            cap_entry.inst.control_ch:put(control_req)
+            local reply, reply_err = control_req.reply_ch:get()
+            if not reply then
+                reply = types.new.Reply(false, reply_err)
+            end
+            if msg.reply_to and reply then
+                local ok, pub_err = conn:publish_one(msg.reply_to, reply)
+                if not ok then
+                    svc:obs_log('error', {
+                        what = 'control_reply_publish_failed',
+                        class = class,
+                        id = id,
+                        verb = verb,
+                        err = tostring(pub_err),
+                    })
+                end
+            end
+        end)
+    end
+
+    ---@param emit Emit
+    local function on_cap_emit(emit)
+        if getmetatable(emit) ~= types.Emit then
+            svc:obs_log('warn', { what = 'invalid_emit_message' })
+            return
+        end
+
+        local topic = { 'cap', emit.class, emit.id, emit.mode, emit.key }
+
+        if emit.mode == 'event' then
+            conn:publish(topic, emit.data)
+        else
+            conn:retain(topic, emit.data)
+        end
+    end
+
+    ---@param device_event DeviceEvent
+    local function on_device_event(device_event)
+        if getmetatable(device_event) ~= types.DeviceEvent then
+            svc:obs_log('warn', { what = 'invalid_device_event_message' })
+            return
+        end
+
+        if device_event.event_type == 'added' then
+            local dev_inst, dev_err = types.new.Device(
+                device_event.class,
+                device_event.id,
+                device_event.meta,
+                device_event.capabilities
+            )
+            if not dev_inst then
+                svc:obs_log('warn', {
+                    what = 'device_instance_invalid',
+                    err = tostring(dev_err),
+                    class = device_event.class,
+                    id = device_event.id,
+                })
+                return
+            end
+            register_device(device_event.event_type, dev_inst)
+        elseif device_event.event_type == 'removed' then
+            local dev_inst = get_device(device_event.class, device_event.id)
+            if not dev_inst then
+                svc:obs_log('warn', { what = 'device_missing', class = device_event.class, id = device_event.id })
+                return
+            end
+            unregister_device(device_event.event_type, dev_inst)
+        else
+            svc:obs_log('warn', {
+                what = 'device_event_unhandled',
+                class = device_event.class,
+                id = device_event.id,
+                event_type = device_event.event_type,
+            })
+        end
+    end
+
+    --- Uses config to setup managers
+    ---@param config table
+    local function on_config(config)
+        svc:obs_event('config_begin', {})
+
+        local valid, valid_err = validate_config(config)
+        if not valid then
+            svc:obs_log('warn', { what = 'config_invalid', err = valid_err })
+            svc:obs_event('config_end', { ok = false, err = valid_err })
+            return
+        end
+
+        for name, manager_config in pairs(config) do
+            if not managers[name] then
+                local ok, manager = pcall(require, "services.hal.managers." .. name)
+                if not ok then
+                    svc:obs_log('error', { what = 'manager_require_failed', manager = name })
+                else
+                    ---@cast manager any
+                    local manager_logger = Logger.new(obs_emitter, { service = svc.name, component = 'manager', manager = name })
+                    local start_err = manager.start(manager_logger, dev_ev_ch, cap_emit_ch)
+                    if start_err ~= "" then
+                        svc:obs_log('error', { what = 'manager_start_failed', manager = name, err = start_err })
+                    else
+                        managers[name] = manager
+                        svc:obs_event('manager_started', { manager = name })
+                    end
+                end
+            end
+
+            local manager = managers[name]
+            if manager then
+                local ok, apply_err = manager.apply_config(manager_config)
+                if not ok then
+                    svc:obs_log('error', { what = 'manager_apply_failed', manager = name, err = tostring(apply_err) })
+                end
+            end
+        end
+
+        for name, manager in pairs(managers) do
+            if not config[name] then
+                managers[name] = nil
+                svc:obs_event('manager_stopping', { manager = name, reason = 'removed_from_config' })
+                fibers.current_scope():spawn(function()
+                    manager.stop()
+                end)
+            end
+        end
+
+        svc:obs_event('config_end', { ok = true })
+    end
+
+    --- Creates initial utilities required for loading config which will bring up rest of HAL
+    local function bootstrap()
+        svc:obs_event('bootstrap_begin', {})
+
+        local fs_manager = require "services.hal.managers.filesystem"
+    ---@cast fs_manager any
+
+        local fs_manager_err = fs_manager.start(
+            Logger.new(obs_emitter, { service = svc.name, component = 'manager', manager = 'filesystem' }),
+            dev_ev_ch,
+            cap_emit_ch
+        )
+        if fs_manager_err ~= "" then
+            svc:status('failed', { reason = 'filesystem manager start failed', err = fs_manager_err })
+            svc:obs_log('error', {
+                what = 'bootstrap_failed',
+                err = fs_manager_err,
+                phase = 'start_filesystem_manager',
+            })
+            error("HAL bootstrap failed: Failed to start filesystem manager: " .. fs_manager_err)
+        end
+
+        local ok, cfg_err = fs_manager.apply_config({
+            {
+                name = "config",
+                root = os.getenv("DEVICECODE_CONFIG_DIR")
+            }
+        })
+
+        if not ok then
+            svc:status('failed', { reason = 'filesystem manager config failed', err = tostring(cfg_err) })
+            svc:obs_log('error', {
+                what = 'bootstrap_failed',
+                err = tostring(cfg_err),
+                phase = 'apply_filesystem_config',
+            })
+            error("HAL bootstrap failed: " .. tostring(cfg_err))
+        end
+
+        managers["filesystem"] = fs_manager
+        svc:obs_event('bootstrap_end', { ok = true })
+    end
+
+    svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
+    svc:obs_log('info', 'service start() entered')
+    svc:status('starting')
+    svc:spawn_heartbeat(heartbeat_s, 'tick')
 
     fibers.current_scope():finally(function()
         local scope = fibers.current_scope()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("HAL: error - %s"):format(tostring(primary)))
-            log.trace("HAL: scope exiting with status", st)
+            svc:obs_log('error', { what = 'scope_failed', err = tostring(primary), status = st })
         end
-        publish_status(conn, HalService.name, "stopped")
-        log.trace("HAL: stopped")
+
+        for _, class_caps in pairs(capabilities) do
+            for _, cap_entry in pairs(class_caps) do
+                for _, rpc_sub in pairs(cap_entry.rpc) do
+                    rpc_sub:unbind()
+                end
+            end
+        end
+
+        svc:status('stopped', { reason = tostring(primary or 'scope_exit') })
+        svc:obs_log('info', 'service stopped')
     end)
 
-    -- bootstrap will start the filesystem manager and apply config which will bring up the rest of HAL
-    -- will also fail fast if not successful
     bootstrap()
-    log.trace("HAL: Bootstrap successful")
+    svc:status('running')
+    svc:obs_log('info', 'bootstrap successful')
 
-    local config_sub = conn:subscribe({ 'cfg', HalService.name })
+    local config_sub = conn:subscribe({ 'cfg', svc.name })
+    svc:obs_log('info', { what = 'subscribed', topic = 'cfg/' .. svc.name })
 
     while true do
         local ops = {
-            cap_emit = HalService.cap_emit_ch:get_op(),
-            device_event = HalService.dev_ev_ch:get_op(),
+            cap_emit = cap_emit_ch:get_op(),
+            device_event = dev_ev_ch:get_op(),
             config = config_sub:recv_op(),
         }
 
         local rpc_ops = {}
-        for _, class in pairs(HalService.capabilities) do
+        for _, class in pairs(capabilities) do
             for _, cap in pairs(class) do
                 for _, rpc_sub in pairs(cap.rpc) do
                     table.insert(rpc_ops, rpc_sub:recv_op())
@@ -467,7 +534,7 @@ function HalService.start(conn, opts)
         end
 
         local manager_fault_ops = {}
-        for name, manager in pairs(HalService.managers) do
+        for name, manager in pairs(managers) do
             table.insert(manager_fault_ops, manager.scope:fault_op():wrap(function() return name end))
         end
         if #manager_fault_ops > 0 then
@@ -477,23 +544,29 @@ function HalService.start(conn, opts)
         local source, msg = perform(op.named_choice(ops))
 
         if source == 'rpc' then
-            on_cap_ctrl(conn, msg)
+            on_cap_ctrl(msg)
         elseif source == 'cap_emit' then
-            on_cap_emit(conn, msg)
+            on_cap_emit(msg)
         elseif source == 'device_event' then
-            on_device_event(conn, msg)
+            on_device_event(msg)
         elseif source == 'config' then
-            on_config(msg.payload)
+            local cfg_data = msg and msg.payload and msg.payload.data
+            if type(cfg_data) == 'table' then
+                on_config(cfg_data)
+            else
+                svc:obs_log('warn', { what = 'config_bad_shape', payload = msg and msg.payload })
+            end
         elseif source == 'manager_fault' then
             local name = msg
-            local manager = HalService.managers[name]
+            local manager = managers[name]
             if manager then
-                log.error(("HAL: %s manager fault detected"):format(name))
+                svc:status('degraded', { reason = 'manager_fault', manager = name })
+                svc:obs_log('error', { what = 'manager_fault', manager = name })
                 manager.stop()
-                HalService.managers[name] = nil
+                managers[name] = nil
             end
         else
-            log.error("HAL: unknown operation source:", source)
+            svc:obs_log('error', { what = 'unknown_operation_source', source = tostring(source) })
         end
     end
 end
