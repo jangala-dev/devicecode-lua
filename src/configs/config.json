@@ -1,360 +1,372 @@
 {
     "hal": {
-        "modemcard": {},
-        "filesystem": [
-            {
-                "name": "configs",
-                "root": "/data/configs/"
-            },
-            {
-                "name": "state",
-                "root": "/tmp/dc-states/"
-            }
-        ]
-    },
-    "gsm": {
-        "modems": {
-            "default": {
-                "enabled": true,
-                "signal_freq": 10
-            },
-            "known": [
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/hal/1",
+            "modemcard": {},
+            "filesystem": [
                 {
-                    "name": "primary",
-                    "id_field": "device",
-                    "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
-                    "autoconnect": true
+                    "name": "configs",
+                    "root": "/data/configs/"
                 },
                 {
-                    "name": "secondary",
-                    "id_field": "device",
-                    "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4",
-                    "autoconnect": true
+                    "name": "state",
+                    "root": "/tmp/dc-states/"
                 }
             ]
         }
     },
-    "metrics": {
-        "cloud_url": "$CLOUD_URL",
-        "publish_period": 10,
-        "templates": {
-            "network_stat": {
-                "protocol": "log",
-                "process": [
+    "gsm": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/gsm/1",
+            "modems": {
+                "default": {
+                    "enabled": true,
+                    "signal_freq": 10
+                },
+                "known": [
                     {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5,
-                        "initial_val": 0
+                        "name": "primary",
+                        "id_field": "device",
+                        "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
+                        "autoconnect": true
                     },
                     {
-                        "type": "DeltaValue"
-                    }
-                ]
-            },
-            "any_change": {
-                "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "any-change"
-                    }
-                ]
-            },
-            "percent_5": {
-                "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 5
-                    }
-                ]
-            },
-            "absolute_10": {
-                "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "absolute",
-                        "threshold": 10
+                        "name": "secondary",
+                        "id_field": "device",
+                        "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4",
+                        "autoconnect": true
                     }
                 ]
             }
-        },
-        "pipelines": {
-            "rx_bytes": {
-                "template": "network_stat"
-            },
-            "rx_packets": {
-                "template": "network_stat"
-            },
-            "rx_dropped": {
-                "template": "network_stat"
-            },
-            "rx_errors": {
-                "template": "network_stat"
-            },
-            "tx_bytes": {
-                "template": "network_stat"
-            },
-            "tx_packets": {
-                "template": "network_stat"
-            },
-            "tx_dropped": {
-                "template": "network_stat"
-            },
-            "tx_errors": {
-                "template": "network_stat"
-            },
-            "firmware": {
-                "template": "any_change"
-            },
-            "band": {
-                "template": "any_change"
-            },
-            "access-tech": {
-                "template": "any_change"
-            },
-            "access-family": {
-                "template": "any_change"
-            },
-            "imei": {
-                "template": "any_change"
-            },
-            "sim": {
-                "template": "any_change"
-            },
-            "rssi": {
-                "template": "percent_5"
-            },
-            "rsrp": {
-                "template": "percent_5"
-            },
-            "rsrq": {
-                "template": "percent_5"
-            },
-            "bars": {
-                "template": "any_change"
-            },
-            "operator": {
-                "template": "any_change"
-            },
-            "iccid": {
-                "template": "any_change"
-            },
-            "state": {
-                "template": "any_change"
-            },
-            "interface": {
-                "template": "any_change"
-            },
-            "boot_time": {
-                "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "absolute",
-                        "threshold": 1000
-                    }
-                ]
-            },
-            "version": {
-                "template": "any_change"
-            },
-            "revision": {
-                "template": "any_change"
-            },
-            "serial": {
-                "template": "any_change"
-            },
-            "overall_utilisation": {
-                "template": "percent_5"
-            },
-            "util": {
-                "template": "percent_5"
-            },
-            "temperature": {
-                "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "absolute",
-                        "threshold": 2
-                    }
-                ]
-            },
-            "alloc": {
-                "protocol": "log",
-                "process": [
-                    {
-                        "type": "TimeTrigger",
-                        "duration": 60
-                    }
-                ]
-            },
-            "internal": {
-                "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "absolute",
-                        "threshold": 1
-                    }
-                ]
-            },
-            "core": {
-                "template": "percent_5"
-            },
-            "vbat": {
-                "template": "absolute_10"
-            },
-            "ibat": {
-                "template": "absolute_10"
-            },
-            "vin": {
-                "template": "absolute_10"
-            },
-            "vsys": {
-                "template": "absolute_10"
-            },
-            "iin": {
-                "template": "absolute_10"
-            },
-            "charger_enabled": {
-                "template": "any_change"
-            },
-            "mppt_en_pin": {
-                "template": "any_change"
-            },
-            "equalize_req": {
-                "template": "any_change"
-            },
-            "drvcc_good": {
-                "template": "any_change"
-            },
-            "cell_count_error": {
-                "template": "any_change"
-            },
-            "ok_to_charge": {
-                "template": "any_change"
-            },
-            "no_rt": {
-                "template": "any_change"
-            },
-            "thermal_shutdown": {
-                "template": "any_change"
-            },
-            "vin_ovlo": {
-                "template": "any_change"
-            },
-            "vin_gt_vbat": {
-                "template": "any_change"
-            },
-            "intvcc_gt_4p3v": {
-                "template": "any_change"
-            },
-            "intvcc_gt_2p8v": {
-                "template": "any_change"
-            },
-            "iin_limited": {
-                "template": "any_change"
-            },
-            "uvcl_active": {
-                "template": "any_change"
-            },
-            "cc_phase": {
-                "template": "any_change"
-            },
-            "cv_phase": {
-                "template": "any_change"
-            },
-            "bat_short": {
-                "template": "any_change"
-            },
-            "bat_missing": {
-                "template": "any_change"
-            },
-            "max_charge_time_fault": {
-                "template": "any_change"
-            },
-            "c_over_x_term": {
-                "template": "any_change"
-            },
-            "timer_term": {
-                "template": "any_change"
-            },
-            "ntc_pause": {
-                "template": "any_change"
-            },
-            "precharge": {
-                "template": "any_change"
-            },
-            "cccv": {
-                "template": "any_change"
-            },
-            "absorb": {
-                "template": "any_change"
-            },
-            "equalize": {
-                "template": "any_change"
-            },
-            "suspended": {
-                "template": "any_change"
-            },
-            "session_start": {
-                "protocol": "log",
-                "process": []
-            },
-            "session_end": {
-                "protocol": "log",
-                "process": []
-            },
-            "hostname": {
-                "template": "any_change"
-            },
-            "signal": {
-                "template": "percent_5"
-            },
-            "power": {
-                "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 10,
-                        "initial_val": 0
-                    }
-                ]
-            },
-            "channel": {
-                "template": "any_change"
-            },
-            "noise": {
-                "protocol": "log",
-                "process": [
-                    {
-                        "type": "DiffTrigger",
-                        "diff_method": "percent",
-                        "threshold": 10,
-                        "initial_val": 0
-                    }
-                ]
-            },
-            "num_sta": {
-                "template": "percent_5"
-            },
-            "mem": {
-                "template": "any_change"
-            },
-            "cpu": {
-                "template": "any_change"
-            },
-            "temp": {
-                "template": "any_change"
-            },
-            "curr_time": {
-                "template": "any_change"
+        }
+    },
+    "metrics": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/metrics/1",
+            "cloud_url": "$CLOUD_URL",
+            "publish_period": 10,
+            "templates": {
+                "network_stat": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "percent",
+                            "threshold": 5,
+                            "initial_val": 0
+                        },
+                        {
+                            "type": "DeltaValue"
+                        }
+                    ]
+                },
+                "any_change": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "any-change"
+                        }
+                    ]
+                },
+                "percent_5": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "percent",
+                            "threshold": 5
+                        }
+                    ]
+                },
+                "absolute_10": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "absolute",
+                            "threshold": 10
+                        }
+                    ]
+                }
+            },
+            "pipelines": {
+                "rx_bytes": {
+                    "template": "network_stat"
+                },
+                "rx_packets": {
+                    "template": "network_stat"
+                },
+                "rx_dropped": {
+                    "template": "network_stat"
+                },
+                "rx_errors": {
+                    "template": "network_stat"
+                },
+                "tx_bytes": {
+                    "template": "network_stat"
+                },
+                "tx_packets": {
+                    "template": "network_stat"
+                },
+                "tx_dropped": {
+                    "template": "network_stat"
+                },
+                "tx_errors": {
+                    "template": "network_stat"
+                },
+                "firmware": {
+                    "template": "any_change"
+                },
+                "band": {
+                    "template": "any_change"
+                },
+                "access-tech": {
+                    "template": "any_change"
+                },
+                "access-family": {
+                    "template": "any_change"
+                },
+                "imei": {
+                    "template": "any_change"
+                },
+                "sim": {
+                    "template": "any_change"
+                },
+                "rssi": {
+                    "template": "percent_5"
+                },
+                "rsrp": {
+                    "template": "percent_5"
+                },
+                "rsrq": {
+                    "template": "percent_5"
+                },
+                "bars": {
+                    "template": "any_change"
+                },
+                "operator": {
+                    "template": "any_change"
+                },
+                "iccid": {
+                    "template": "any_change"
+                },
+                "state": {
+                    "template": "any_change"
+                },
+                "interface": {
+                    "template": "any_change"
+                },
+                "boot_time": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "absolute",
+                            "threshold": 1000
+                        }
+                    ]
+                },
+                "version": {
+                    "template": "any_change"
+                },
+                "revision": {
+                    "template": "any_change"
+                },
+                "serial": {
+                    "template": "any_change"
+                },
+                "overall_utilisation": {
+                    "template": "percent_5"
+                },
+                "util": {
+                    "template": "percent_5"
+                },
+                "temperature": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "absolute",
+                            "threshold": 2
+                        }
+                    ]
+                },
+                "alloc": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "TimeTrigger",
+                            "duration": 60
+                        }
+                    ]
+                },
+                "internal": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "absolute",
+                            "threshold": 1
+                        }
+                    ]
+                },
+                "core": {
+                    "template": "percent_5"
+                },
+                "vbat": {
+                    "template": "absolute_10"
+                },
+                "ibat": {
+                    "template": "absolute_10"
+                },
+                "vin": {
+                    "template": "absolute_10"
+                },
+                "vsys": {
+                    "template": "absolute_10"
+                },
+                "iin": {
+                    "template": "absolute_10"
+                },
+                "charger_enabled": {
+                    "template": "any_change"
+                },
+                "mppt_en_pin": {
+                    "template": "any_change"
+                },
+                "equalize_req": {
+                    "template": "any_change"
+                },
+                "drvcc_good": {
+                    "template": "any_change"
+                },
+                "cell_count_error": {
+                    "template": "any_change"
+                },
+                "ok_to_charge": {
+                    "template": "any_change"
+                },
+                "no_rt": {
+                    "template": "any_change"
+                },
+                "thermal_shutdown": {
+                    "template": "any_change"
+                },
+                "vin_ovlo": {
+                    "template": "any_change"
+                },
+                "vin_gt_vbat": {
+                    "template": "any_change"
+                },
+                "intvcc_gt_4p3v": {
+                    "template": "any_change"
+                },
+                "intvcc_gt_2p8v": {
+                    "template": "any_change"
+                },
+                "iin_limited": {
+                    "template": "any_change"
+                },
+                "uvcl_active": {
+                    "template": "any_change"
+                },
+                "cc_phase": {
+                    "template": "any_change"
+                },
+                "cv_phase": {
+                    "template": "any_change"
+                },
+                "bat_short": {
+                    "template": "any_change"
+                },
+                "bat_missing": {
+                    "template": "any_change"
+                },
+                "max_charge_time_fault": {
+                    "template": "any_change"
+                },
+                "c_over_x_term": {
+                    "template": "any_change"
+                },
+                "timer_term": {
+                    "template": "any_change"
+                },
+                "ntc_pause": {
+                    "template": "any_change"
+                },
+                "precharge": {
+                    "template": "any_change"
+                },
+                "cccv": {
+                    "template": "any_change"
+                },
+                "absorb": {
+                    "template": "any_change"
+                },
+                "equalize": {
+                    "template": "any_change"
+                },
+                "suspended": {
+                    "template": "any_change"
+                },
+                "session_start": {
+                    "protocol": "log",
+                    "process": []
+                },
+                "session_end": {
+                    "protocol": "log",
+                    "process": []
+                },
+                "hostname": {
+                    "template": "any_change"
+                },
+                "signal": {
+                    "template": "percent_5"
+                },
+                "power": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "percent",
+                            "threshold": 10,
+                            "initial_val": 0
+                        }
+                    ]
+                },
+                "channel": {
+                    "template": "any_change"
+                },
+                "noise": {
+                    "protocol": "log",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "percent",
+                            "threshold": 10,
+                            "initial_val": 0
+                        }
+                    ]
+                },
+                "num_sta": {
+                    "template": "percent_5"
+                },
+                "mem": {
+                    "template": "any_change"
+                },
+                "cpu": {
+                    "template": "any_change"
+                },
+                "temp": {
+                    "template": "any_change"
+                },
+                "curr_time": {
+                    "template": "any_change"
+                }
             }
         }
     }
