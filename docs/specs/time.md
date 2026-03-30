@@ -18,24 +18,18 @@ Topic: `{'svc', 'time', 'status'}`
 
 ```lua
 {
-  state = 'starting' | 'running' | 'stopped',
+  state = 'starting' | 'running' | 'synced' | 'unsynced' | 'stopped',
   ts    = <number>,
 }
 ```
 
-### Time synced state (retained)
-
-Topic: `{'svc', 'time', 'synced'}`
-
-Payload: `true` or `false`
-
-Published whenever the overall sync state changes. This is the authoritative "is system time trustworthy" signal for other services. It is retained so services that start later immediately receive the current state.
+The `state` field doubles as the authoritative sync signal: it transitions to `'synced'` or `'unsynced'` on every sync state change. It is retained so services that start later immediately receive the current state.
 
 ### Time transition events (non-retained)
 
 Topics:
-- `{'svc', 'time', 'event', 'synced'}`
-- `{'svc', 'time', 'event', 'unsynced'}`
+- `{'obs', 'event', 'time', 'synced'}`
+- `{'obs', 'event', 'time', 'unsynced'}`
 
 Published on state transitions for consumers that need edge-triggered behaviour.
 
@@ -53,9 +47,9 @@ flowchart TD
   G --> H(Read single retained state message and apply sync state)
   H --> H2(Unsubscribe from state/synced)
   H2 --> K{Wait for synced event, unsynced event, or scope done}
-  K -->|synced event| L(Apply synced: retain svc/time/synced=true, emit transition event)
+  K -->|synced event| L(Apply synced: set status=synced, emit obs/event/time/synced)
   L --> K
-  K -->|unsynced event| M(Apply unsynced: retain svc/time/synced=false, emit transition event)
+  K -->|unsynced event| M(Apply unsynced: set status=unsynced, emit obs/event/time/unsynced)
   M --> K
   K -->|scope done| Z
 ```

@@ -11,45 +11,15 @@ local op = require "fibers.op"
 local alarm = require "fibers.alarm"
 local time_utils = require "fibers.utils.time"
 
-local log = require "services.log"
+local base = require "devicecode.service_base"
 
 local perform = fibers.perform
-local now = fibers.now
 
 local M = {}
 
 ---@return table
 local function t(...)
 	return { ... }
-end
-
----@param conn Connection
----@param name string
----@param state string
----@param extra table?
----@return nil
-local function publish_status(conn, name, state, extra)
-	local payload = { state = state, ts = now() }
-	if type(extra) == 'table' then
-		for k, v in pairs(extra) do payload[k] = v end
-	end
-	log.trace(("TIME: service status -> %s"):format(tostring(state)))
-	conn:retain(t('svc', name, 'status'), payload)
-end
-
----@param conn Connection
----@param synced boolean
----@return nil
-local function publish_synced(conn, synced)
-	conn:retain(t('svc', 'time', 'synced'), synced)
-end
-
----@param conn Connection
----@param event_name 'synced'|'unsynced'
----@param payload table?
----@return nil
-local function publish_transition_event(conn, event_name, payload)
-	conn:publish(t('svc', 'time', 'event', event_name), payload or {})
 end
 
 ---@param payload any
@@ -61,21 +31,19 @@ local function synced_from_state_payload(payload)
 end
 
 ---@param state table
----@param conn Connection
+---@param svc ServiceBase
 ---@param is_synced boolean
 ---@param payload table?
 ---@return nil
-local function apply_sync_state(state, conn, is_synced, payload)
+local function apply_sync_state(state, svc, is_synced, payload)
 	if state.current_synced ~= is_synced then
-		log.info((
-			"TIME: sync state transition %s -> %s"
-		):format(tostring(state.current_synced), tostring(is_synced)))
-		publish_synced(conn, is_synced)
-		if is_synced then
-			publish_transition_event(conn, 'synced', payload)
-		else
-			publish_transition_event(conn, 'unsynced', payload)
-		end
+		svc:obs_log('info', {
+			what = 'sync_state_transition',
+			from = tostring(state.current_synced),
+			to   = tostring(is_synced),
+		})
+		svc:status(is_synced and 'synced' or 'unsynced')
+		svc:obs_event(is_synced and 'synced' or 'unsynced', payload or {})
 		state.current_synced = is_synced
 	end
 
@@ -83,13 +51,13 @@ local function apply_sync_state(state, conn, is_synced, payload)
 	-- install_alarm_handler/clock_synced/clock_desynced.
 	if is_synced then
 		if not state.time_source_installed then
-			log.info("TIME: installing alarm time source from realtime clock")
+			svc:obs_log('info', 'installing alarm time source from realtime clock')
 			local ok, err = pcall(alarm.set_time_source, time_utils.realtime)
 			if ok then
 				state.time_source_installed = true
-				log.info("TIME: alarm time source installed")
+				svc:obs_log('info', 'alarm time source installed')
 			else
-				log.warn("TIME: failed to set alarm time source:", tostring(err))
+				svc:obs_log('warn', { what = 'alarm_time_source_failed', err = tostring(err) })
 			end
 		else
 			alarm.time_changed()
@@ -98,10 +66,11 @@ local function apply_sync_state(state, conn, is_synced, payload)
 end
 
 ---@param conn Connection
+---@param svc ServiceBase
 ---@param cap_id CapabilityId
 ---@return nil
-local function monitor_capability(conn, cap_id)
-	log.info(("TIME: starting monitor for capability id=%s"):format(tostring(cap_id)))
+local function monitor_capability(conn, svc, cap_id)
+	svc:obs_log('info', { what = 'capability_monitor_start', cap_id = tostring(cap_id) })
 	local sub_state = conn:subscribe(t('cap', 'time', cap_id, 'state', 'synced'), {
 		queue_len = 10,
 		full = 'drop_oldest',
@@ -126,15 +95,15 @@ local function monitor_capability(conn, cap_id)
 	do
 		local msg, err = perform(sub_state:recv_op())
 		if msg then
-			log.info("TIME: received initial retained sync state")
+			svc:obs_log('info', 'received initial retained sync state')
 			local is_synced = synced_from_state_payload(msg.payload)
 			if is_synced ~= nil then
-				apply_sync_state(state, conn, is_synced, msg.payload)
+				apply_sync_state(state, svc, is_synced, msg.payload)
 			else
-				log.warn("TIME: initial retained state payload missing boolean synced field")
+				svc:obs_log('warn', { what = 'initial_state_invalid', reason = 'missing boolean synced field' })
 			end
 		else
-			log.warn("TIME: failed to read initial state:", err)
+			svc:obs_log('warn', { what = 'initial_state_read_failed', err = tostring(err) })
 		end
 		sub_state:unsubscribe()
 	end
@@ -146,16 +115,16 @@ local function monitor_capability(conn, cap_id)
 		}))
 
 		if not msg then
-			log.warn("TIME: capability monitor subscription closed:", err)
+			svc:obs_log('warn', { what = 'capability_monitor_closed', err = tostring(err) })
 			return
 		end
 
 		if which == 'synced' then
-			apply_sync_state(state, conn, true, msg.payload)
+			apply_sync_state(state, svc, true, msg.payload)
 		elseif which == 'unsynced' then
-			apply_sync_state(state, conn, false, msg.payload)
+			apply_sync_state(state, svc, false, msg.payload)
 		else
-			log.warn("TIME: unknown event source in monitor loop:", tostring(which))
+			svc:obs_log('warn', { what = 'unknown_event_source', source = tostring(which) })
 		end
 	end
 end
@@ -165,32 +134,36 @@ end
 ---@return nil
 function M.start(conn, opts)
 	opts = opts or {}
-	local name = opts.name or 'time'
-	log.trace("TIME: starting")
+	local svc = base.new(conn, { name = opts.name or 'time', env = opts.env })
+	local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
 
-	publish_status(conn, name, 'starting')
+	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
+	svc:obs_log('info', 'service start() entered')
+	svc:status('starting')
+	svc:spawn_heartbeat(heartbeat_s, 'tick')
 
 	fibers.current_scope():finally(function()
 		local st, primary = fibers.current_scope():status()
 		if st == 'failed' then
-			log.error(("TIME: scope failed - %s"):format(tostring(primary)))
+			svc:obs_log('error', { what = 'scope_failed', err = tostring(primary), status = st })
 		end
-		publish_status(conn, name, 'stopped', { reason = primary or st })
+		svc:status('stopped', { reason = tostring(primary or 'scope_exit') })
+		svc:obs_log('info', 'service stopped')
 	end)
 
 	local sub_meta = conn:subscribe(t('cap', 'time', '+', 'meta', 'source'), {
 		queue_len = 10,
 		full = 'drop_oldest',
 	})
-	log.trace("TIME: subscribed to time capability meta announcements")
+	svc:obs_log('info', { what = 'subscribed', topic = 'cap/time/+/meta/source' })
 
-	publish_status(conn, name, 'running')
+	svc:status('running')
 
 	while true do
 		local msg, err = perform(sub_meta:recv_op())
 		if not msg then
 			sub_meta:unsubscribe()
-			log.warn("TIME: capability discovery subscription closed:", err)
+			svc:obs_log('warn', { what = 'capability_discovery_closed', err = tostring(err) })
 			return
 		end
 
@@ -198,11 +171,11 @@ function M.start(conn, opts)
 		local cap_id = topic and topic[3]
 		if cap_id ~= nil then
 			sub_meta:unsubscribe()
-			log.trace("TIME: selected first time capability:", tostring(cap_id))
-			monitor_capability(conn, cap_id)
+			svc:obs_log('info', { what = 'capability_selected', cap_id = tostring(cap_id) })
+			monitor_capability(conn, svc, cap_id)
 			return
 		else
-			log.warn("TIME: capability meta message missing capability id token")
+			svc:obs_log('warn', { what = 'capability_meta_missing_id' })
 		end
 	end
 end

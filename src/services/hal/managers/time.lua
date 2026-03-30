@@ -9,7 +9,6 @@ local sleep = require "fibers.sleep"
 local exec = require "fibers.io.exec"
 
 -- Other modules
-local log = require "services.log"
 
 -- Constants
 
@@ -21,6 +20,7 @@ local HOTPLUG_SCRIPT_NAME = "ntp"
 
 ---@class TimeManager
 ---@field scope Scope
+---@field logger Logger?
 ---@field started boolean
 ---@field driver TimeDriverHandle?
 ---@field dev_ev_ch Channel?
@@ -30,6 +30,7 @@ local TimeManager = {
     driver      = nil,
     dev_ev_ch   = nil,
     cap_emit_ch = nil,
+    logger      = nil,
 }
 
 ---- Internal Utilities ----
@@ -46,7 +47,7 @@ local function emit_device_added(driver, capabilities)
         capabilities
     )
     if not device_event then
-        log.error("Time Manager: failed to create device-added event:", ev_err)
+        TimeManager.logger:error({ what = 'device_added_event_failed', err = tostring(ev_err) })
         return
     end
     TimeManager.dev_ev_ch:put(device_event)
@@ -62,7 +63,7 @@ local function emit_device_removed(driver)
         {}
     )
     if not device_event then
-        log.error("Time Manager: failed to create device-removed event:", ev_err)
+        TimeManager.logger:error({ what = 'device_removed_event_failed', err = tostring(ev_err) })
         return
     end
     TimeManager.dev_ev_ch:put(device_event)
@@ -75,10 +76,10 @@ local function stop_existing_driver()
     local prev = TimeManager.driver
     if not prev then return end
 
-    log.trace("Time Manager: stopping existing driver")
+    TimeManager.logger:debug({ what = 'stopping_existing_driver' })
     local ok, stop_err = prev:stop(STOP_TIMEOUT)
     if not ok then
-        log.warn("Time Manager: failed to stop previous driver:", stop_err)
+        TimeManager.logger:warn({ what = 'driver_stop_failed', err = tostring(stop_err) })
     end
 
     emit_device_removed(prev)
@@ -139,37 +140,37 @@ local function bring_up_driver()
 
     local installed, install_err = install_ntp_hotplug_script()
     if not installed then
-        log.error("Time Manager: failed to install NTP hotplug script:", install_err)
+        TimeManager.logger:error({ what = 'hotplug_script_install_failed', err = tostring(install_err) })
         return
     end
 
-    local driver, new_err = time_driver.new()
+    local driver, new_err = time_driver.new(TimeManager.logger:child({ component = 'driver' }))
     if not driver then
-        log.error("Time Manager: failed to create driver:", new_err)
+        TimeManager.logger:error({ what = 'driver_create_failed', err = tostring(new_err) })
         return
     end
 
     local init_err = driver:init()
     if init_err ~= "" then
-        log.error("Time Manager: failed to init driver:", init_err)
+        TimeManager.logger:error({ what = 'driver_init_failed', err = tostring(init_err) })
         return
     end
 
     local capabilities, cap_err = driver:capabilities(TimeManager.cap_emit_ch)
     if not capabilities then
-        log.error("Time Manager: failed to apply capabilities:", cap_err)
+        TimeManager.logger:error({ what = 'driver_capabilities_failed', err = tostring(cap_err) })
         return
     end
 
     local ok, start_err = driver:start()
     if not ok then
-        log.error("Time Manager: failed to start driver:", start_err)
+        TimeManager.logger:error({ what = 'driver_start_failed', err = tostring(start_err) })
         return
     end
 
     TimeManager.driver = driver
     emit_device_added(driver, capabilities)
-    log.trace("Time Manager: driver started successfully, capability id =", driver.id)
+    TimeManager.logger:debug({ what = 'driver_started', cap_id = tostring(driver.id) })
 end
 
 ---- Manager Lifecycle ----
@@ -178,7 +179,7 @@ end
 ---@param dev_ev_ch Channel Device event channel (DeviceEvent messages to HAL)
 ---@param cap_emit_ch Channel Capability emit channel (Emit messages to HAL)
 ---@return string error Empty string on success.
-function TimeManager.start(dev_ev_ch, cap_emit_ch)
+function TimeManager.start(logger, dev_ev_ch, cap_emit_ch)
     if TimeManager.started then
         return "already started"
     end
@@ -189,19 +190,20 @@ function TimeManager.start(dev_ev_ch, cap_emit_ch)
     end
 
     TimeManager.scope = scope
+    TimeManager.logger = logger
     TimeManager.dev_ev_ch = dev_ev_ch
     TimeManager.cap_emit_ch = cap_emit_ch
 
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("Time Manager: error - %s"):format(tostring(primary)))
+            logger:error({ what = 'scope_failed', err = tostring(primary), status = st })
         end
-        log.trace("Time Manager: stopped")
+        logger:debug({ what = 'stopped' })
     end)
 
     TimeManager.started = true
-    log.trace("Time Manager: started")
+    logger:debug({ what = 'started' })
     return ""
 end
 
@@ -245,7 +247,7 @@ function TimeManager.apply_config(config) -- luacheck: ignore config
         return false, "channels not initialized (start must be called first)"
     end
 
-    log.trace("Time manager: received config")
+    TimeManager.logger:debug({ what = 'config_received' })
 
     local ok, spawn_err = TimeManager.scope:spawn(function()
         bring_up_driver()
