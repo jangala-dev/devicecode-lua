@@ -1,7 +1,6 @@
 ---OpenWrt-specific TimeBackend implementation using ubus hotplug.ntp events.
 
 -- Service modules
-local log = require "services.log"
 local time_types = require "services.hal.types.time"
 
 -- Fibers modules
@@ -46,45 +45,38 @@ end
 ---Called as a wrap function on read_line_op(), receiving (line, read_err).
 ---Returns:
 ---  (NTPEvent, nil)    -- success
----  (nil, nil)         -- parse error; caller should retry with next line
----  (nil, err_string)  -- fatal error (stream closed or read error)
+---  (nil, err_string)  -- fatal error; caller should break the monitor loop
 ---
----@param line string? Line from ubus listen (nil on EOF)
----@param read_err any? Read error from the stream (nil on success)
----@return NTPEvent?
+---@param line string?
+---@param read_err any?
+---@return any?
 ---@return string?
 local function parse_ntp_event_line(line, read_err)
-    -- Fatal: stream read error
     if read_err ~= nil then
         return nil, "read error: " .. tostring(read_err)
     end
 
-    -- Fatal: EOF / stream closed
     if line == nil or line == "" then
         return nil, "stream closed"
     end
 
     local decoded = cjson.decode(line)
     if not decoded then
-        log.warn("OpenWrt Time Backend: failed to decode hotplug.ntp event:", line)
-        return nil, nil  -- non-fatal, retry
+        return nil, "decode failed: " .. line
     end
 
     decoded = coerce_numeric_strings(decoded)
     local ntp_data = decoded["hotplug.ntp"]
     if type(ntp_data) ~= 'table' then
-        log.warn("OpenWrt Time Backend: no hotplug.ntp data in event:", line)
-        return nil, nil  -- non-fatal, retry
+        return nil, "missing hotplug.ntp key: " .. line
     end
 
     if type(ntp_data.stratum) ~= 'number' then
-        log.warn("OpenWrt Time Backend: stratum field missing or not a number:", line)
-        return nil, nil  -- non-fatal, retry
+        return nil, "invalid stratum: " .. line
     end
 
-    -- Extract fields with sensible defaults for optional fields
-    local action = ntp_data.action or "unknown"
-    local offset = ntp_data.offset or 0
+    local action        = ntp_data.action or "unknown"
+    local offset        = ntp_data.offset or 0
     local freq_drift_ppm = ntp_data.freq_drift_ppm or 0
 
     local ntp_event, event_err = time_types.new.NTPEvent(
@@ -94,11 +86,9 @@ local function parse_ntp_event_line(line, read_err)
         freq_drift_ppm
     )
     if not ntp_event then
-        log.warn("OpenWrt Time Backend: failed to construct NTPEvent:", event_err)
-        return nil, nil  -- non-fatal, retry
+        return nil, "NTPEvent construction failed: " .. tostring(event_err)
     end
 
-    -- Preserve additional backend fields on the event for observability
     for k, v in pairs(ntp_data) do
         if ntp_event[k] == nil then
             ntp_event[k] = v
@@ -132,7 +122,6 @@ function OpenWrtTimeBackend:start_ntp_monitor()
     end
 
     self.ntp_monitor_stream = stream
-    log.trace("OpenWrt Time Backend: NTP monitor started")
     return true, ""
 end
 
@@ -161,7 +150,6 @@ function OpenWrtTimeBackend:stop()
     end
     self.ntp_monitor_stream = nil
     self.ntp_monitor_cmd = nil
-    log.trace("OpenWrt Time Backend: NTP monitor stopped")
     return true, ""
 end
 
@@ -173,7 +161,7 @@ end
 local function new()
     return setmetatable({
         ntp_monitor_stream = nil,
-        ntp_monitor_cmd = nil,
+        ntp_monitor_cmd    = nil,
     }, OpenWrtTimeBackend)
 end
 
