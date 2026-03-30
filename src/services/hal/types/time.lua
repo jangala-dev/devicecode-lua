@@ -50,8 +50,11 @@ end
 ---@field start_ntp_monitor fun(self: TimeBackend): boolean, string
 ---@field ntp_event_op fun(self: TimeBackend): Op
 ---@field stop fun(self: TimeBackend): boolean, string
+local TimeBackend = {}
+TimeBackend.__index = TimeBackend
 
 return {
 	NTPEvent = NTPEvent,
+	TimeBackend = TimeBackend,
 	new = new,
 }
