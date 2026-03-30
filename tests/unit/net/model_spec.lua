@@ -1,4 +1,4 @@
--- tests/net_model_spec.lua
+-- tests/unit/net/model_spec.lua
 
 local model = require 'services.net.model'
 

@@ -1,4 +1,4 @@
--- tests/net_control_spec.lua
+-- tests/unit/net/control_spec.lua
 
 local control = require 'services.net.control'
 

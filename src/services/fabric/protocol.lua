@@ -4,14 +4,14 @@
 --   * one JSON object per line
 --   * suitable for stream transports
 --
--- This is intentionally simple for v1.
--- Later we can replace line framing with binary packets without changing
--- the session-level message meanings.
+-- This version carries explicit session identity in hello/ack/ping/pong.
 
 local cjson = require 'cjson.safe'
 local uuid  = require 'uuid'
 
 local M = {}
+
+M.PROTO_VERSION = 1
 
 function M.next_id()
 	return tostring(uuid.new())
@@ -39,35 +39,44 @@ function M.decode_line(line)
 	return obj, nil
 end
 
-function M.hello(node_id, peer_id, caps)
+function M.hello(node_id, peer_id, caps, opts)
+	opts = opts or {}
 	return {
-		t      = 'hello',
-		node   = node_id,
-		peer   = peer_id,
-		sid    = M.next_id(),
-		caps   = caps or {},
+		t     = 'hello',
+		node  = node_id,
+		peer  = peer_id,
+		sid   = opts.sid or M.next_id(),
+		proto = opts.proto or M.PROTO_VERSION,
+		caps  = caps or {},
 	}
 end
 
-function M.hello_ack(node_id)
+function M.hello_ack(node_id, opts)
+	opts = opts or {}
 	return {
-		t    = 'hello_ack',
-		node = node_id,
-		ok   = true,
+		t     = 'hello_ack',
+		node  = node_id,
+		sid   = opts.sid,
+		proto = opts.proto or M.PROTO_VERSION,
+		ok    = (opts.ok ~= false),
 	}
 end
 
-function M.ping()
+function M.ping(opts)
+	opts = opts or {}
 	return {
-		t  = 'ping',
-		ts = os.time(),
+		t   = 'ping',
+		ts  = os.time(),
+		sid = opts.sid,
 	}
 end
 
-function M.pong()
+function M.pong(opts)
+	opts = opts or {}
 	return {
-		t  = 'pong',
-		ts = os.time(),
+		t   = 'pong',
+		ts  = os.time(),
+		sid = opts.sid,
 	}
 end
 

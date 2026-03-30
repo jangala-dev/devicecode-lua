@@ -1,4 +1,4 @@
--- tests/net_service_spec.lua
+-- tests/unit/net/service_spec.lua
 
 local busmod       = require 'bus'
 

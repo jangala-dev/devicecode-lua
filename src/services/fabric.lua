@@ -83,6 +83,7 @@ function M.start(conn, opts)
 						link_id  = link_id,
 						link     = link_cfg,
 						connect  = opts.connect,
+						node_id  = opts.node_id,
 					})
 				end)
 
