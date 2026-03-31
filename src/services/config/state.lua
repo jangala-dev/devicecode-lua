@@ -17,7 +17,7 @@ function M.publish_all_retained(conn, svc, current)
 	local n = 0
 	for sname, rec in pairs(current) do
 		n = n + 1
-		conn:retain({ 'config', sname }, copy_record(rec))
+		conn:retain({ 'cfg', sname }, copy_record(rec))
 	end
 	if svc and svc.obs_event then
 		svc:obs_event('publish_all', { services = n })
@@ -47,7 +47,7 @@ function M.set_service(current, conn, svc, mark_dirty, service, payload, msg)
 		data = stored_data,
 	}
 
-	conn:retain({ 'config', service }, {
+	conn:retain({ 'cfg', service }, {
 		rev  = next_rev,
 		data = codec.deepcopy_plain(stored_data),
 	})

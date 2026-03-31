@@ -40,22 +40,6 @@ function M.start(conn, opts)
 		return (type(v) == 'number') and v or default
 	end
 
-	local hal_wait_timeout_s     = numopt('hal_wait_timeout_s', 60)
-	local hal_wait_tick_s        = numopt('hal_wait_tick_s', 10)
-	local heartbeat_s            = numopt('heartbeat_s', 30.0)
-
-	local persist_debounce_s     = numopt('persist_debounce_s', 0.25)
-	local persist_max_delay_s    = numopt('persist_max_delay_s', 5.0)
-	local persist_retry_initial_s = numopt('persist_retry_initial_s', 1.0)
-	local persist_retry_max_s    = numopt('persist_retry_max_s', 30.0)
-
-	local timings = opts.timings or {}
-
-	local function numopt(name, default)
-		local v = timings[name]
-		return (type(v) == 'number') and v or default
-	end
-
 	local hal_wait_timeout_s      = numopt('hal_wait_timeout_s', 60)
 	local heartbeat_s             = numopt('heartbeat_s', 30.0)
 
