@@ -14,7 +14,6 @@
 --   The pipeline object contains only logic; per-endpoint state is created
 --   externally with pipeline:new_state().
 
-local log                   = require 'services.log'
 local processing            = require 'services.metrics.processing'
 local _types                = require 'services.metrics.types' -- luacheck: ignore (imported for annotations)
 
@@ -404,9 +403,12 @@ end
 --- Does not create any bus subscriptions.
 ---
 ---@param config table
+---@param log_fn? fun(level: string, payload: any)  optional logger; defaults to log.warn/error
 ---@return PipelineMap pipelines_map  keyed by metric_name
 ---@return number      publish_period
-local function apply_config(config)
+local function apply_config(config, log_fn)
+    log_fn = log_fn or function() end
+
     local publish_period = config.publish_period
     local pipelines_map  = {}
 
@@ -418,16 +420,20 @@ local function apply_config(config)
 
         local protocol = resolved.protocol
         if not protocol or not VALID_PROTOCOLS[protocol] then
-            log.warn(string.format(
-                'metrics/config: skipping pipeline [%s] — invalid or missing protocol',
-                tostring(metric_name)))
+            log_fn('warn', {
+                what     = 'pipeline_skipped',
+                pipeline = tostring(metric_name),
+                reason   = 'invalid or missing protocol',
+            })
         else
             local pipeline, pipeline_err = build_metric_pipeline(
                 metric_name, resolved.process or {})
             if pipeline_err then
-                log.error(string.format(
-                    'metrics/config: skipping pipeline [%s] — %s',
-                    tostring(metric_name), pipeline_err))
+                log_fn('error', {
+                    what     = 'pipeline_skipped',
+                    pipeline = tostring(metric_name),
+                    err      = pipeline_err,
+                })
             else
                 pipelines_map[metric_name] = {
                     pipeline = pipeline,

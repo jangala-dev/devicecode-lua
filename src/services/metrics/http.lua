@@ -7,18 +7,18 @@
 -- network failure.
 --
 -- Public API:
---   start_http_publisher() -> channel
+--   start_http_publisher(log_fn?) -> channel
 --     Must be called from inside a running fiber scope.  Returns the send
 --     channel (capacity QUEUE_SIZE).  The caller enqueues payloads with a
 --     non-blocking put; if the channel is full the payload is dropped and an
 --     error is logged.
+--     log_fn(level, payload) is an optional logger; defaults to log.debug/info.
 
 local fibers     = require 'fibers'
 local op         = require 'fibers.op'
 local sleep      = require 'fibers.sleep'
 local channel    = require 'fibers.channel'
 local request    = require 'http.request'
-local log        = require 'services.log'
 
 local QUEUE_SIZE = 10
 
@@ -27,7 +27,8 @@ local QUEUE_SIZE = 10
 --- scope is cancelled.
 ---
 ---@param data table  { uri: string, auth: string, body: string }
-local function send_http(data)
+---@param log_fn fun(level: string, payload: any)
+local function send_http(data, log_fn)
     local uri            = data.uri
     local body           = data.body
     local auth           = data.auth
@@ -47,9 +48,7 @@ local function send_http(data)
         response_headers = headers
 
         if not response_headers then
-            log.debug(string.format(
-                'metrics/http: HTTP publish failed, retrying in %s seconds',
-                sleep_duration))
+            log_fn('debug', { what = 'http_retry', retry_in_s = sleep_duration })
             sleep.sleep(sleep_duration)
             sleep_duration = math.min(sleep_duration * 2, 60)
         end
@@ -61,11 +60,10 @@ local function send_http(data)
         for k, v in response_headers:each() do
             table.insert(parts, string.format('\t%s: %s', k, v))
         end
-        log.debug(string.format(
-            'metrics/http: HTTP publish failed, response headers:\n%s',
-            table.concat(parts, '\n')))
+        log_fn('warn', { what = 'http_publish_failed', status = status,
+            headers = table.concat(parts, '\n') })
     else
-        log.info('metrics/http: HTTP publish success, status: ' .. status)
+        log_fn('info', { what = 'http_publish_ok', status = status })
     end
 end
 
@@ -74,8 +72,11 @@ end
 --- select (see _http_publish in metrics.lua); if the channel is full the
 --- payload should be dropped by the caller.
 ---
+---@param log_fn? fun(level: string, payload: any)  optional logger
 ---@return table channel
-local function start_http_publisher()
+local function start_http_publisher(log_fn)
+    log_fn = log_fn or function() end
+
     local send_ch = channel.new(QUEUE_SIZE)
 
     local scope = fibers.current_scope()
@@ -85,7 +86,7 @@ local function start_http_publisher()
                 msg = send_ch:get_op(),
             }))
             if which == 'msg' and payload ~= nil then
-                send_http(payload)
+                send_http(payload, log_fn)
             end
         end
     end)

@@ -25,8 +25,8 @@ local time           = require 'fibers.utils.time'
 local perform        = fibers.perform
 
 local json           = require 'cjson.safe'
-local log            = require 'services.log'
-local external_types = require 'services.hal.types.external'
+local base           = require 'devicecode.service_base'
+local capability_args = require 'services.hal.types.capability_args'
 
 local senml          = require 'services.metrics.senml'
 local http_m         = require 'services.metrics.http'
@@ -74,18 +74,6 @@ local function now() return runtime.now() end
 
 ---@return number
 local function now_real() return time.realtime() end
-
----@param conn Connection
----@param name string
----@param state string
----@param extra table?
-local function publish_status(conn, name, state, extra)
-	local payload = { state = state, ts = now() }
-	if type(extra) == 'table' then
-		for k, v in pairs(extra) do payload[k] = v end
-	end
-	conn:retain(t_svc_status(name), payload)
-end
 
 -------------------------------------------------------------------------------
 -- Metric helpers
@@ -149,26 +137,18 @@ local function process_config_warnings(warns, config)
 		end
 	end
 
-	local summary_parts = {}
-
 	local dm_list = {}
 	for ep in pairs(dropped_metrics) do dm_list[#dm_list + 1] = ep end
-	if #dm_list > 0 then
-		table.insert(summary_parts, string.format(
-			'Dropped %d metric(s): %s', #dm_list, table.concat(dm_list, ', ')))
-	end
 
 	local dt_list = {}
 	for ep in pairs(dropped_templates) do dt_list[#dt_list + 1] = ep end
-	if #dt_list > 0 then
-		table.insert(summary_parts, string.format(
-			'Dropped %d template(s): %s', #dt_list, table.concat(dt_list, ', ')))
-	end
 
-	log.warn(string.format(
-		'metrics: config warnings (invalid entries will be dropped):\n\t%s\n\nSummary: %s',
-		table.concat(warn_msgs, '\n\t'),
-		table.concat(summary_parts, '; ')))
+	State.svc:obs_log('warn', {
+		what             = 'config_warnings',
+		warnings         = warn_msgs,
+		dropped_metrics  = dm_list,
+		dropped_templates = dt_list,
+	})
 end
 
 -------------------------------------------------------------------------------
@@ -178,6 +158,7 @@ end
 ---@type ServiceState
 local State = {
 	conn             = nil,
+	svc              = nil,
 	name             = nil,
 	http_send_ch     = nil,
 	pipelines_map    = {},
@@ -203,39 +184,39 @@ local function rebuild_cloud_config()
 	end
 	local cfg, cfg_err = types.new.CloudConfig(State.cloud_url, mf.thing_key, mf.channels)
 	if not cfg then
-		log.warn('metrics: failed to build cloud config: ' .. tostring(cfg_err))
+		State.svc:obs_log('warn', { what = 'cloud_config_build_failed', err = tostring(cfg_err) })
 		State.cloud_config = nil
 		return
 	end
 	State.cloud_config = cfg
-	log.info('metrics: cloud config ready')
+	State.svc:obs_log('info', 'cloud config ready')
 end
 
 local function fetch_mainflux_config()
-	local read_opts, opts_err = external_types.new.FilesystemReadOpts('mainflux.cfg')
+	local read_opts, opts_err = capability_args.new.FilesystemReadOpts('mainflux.cfg')
 	if not read_opts then
-		log.warn('metrics: failed to build mainflux.cfg read opts:', tostring(opts_err))
+		State.svc:obs_log('warn', { what = 'mainflux_read_opts_failed', err = tostring(opts_err) })
 		return
 	end
 
 	local reply, err = State.conn:call(t_cap_fs_rpc('read'), read_opts)
 	if not reply then
-		log.warn('metrics: failed to read mainflux.cfg:', tostring(err))
+		State.svc:obs_log('warn', { what = 'mainflux_read_failed', err = tostring(err) })
 		return
 	end
 	if reply.ok ~= true then
-		log.warn('metrics: mainflux.cfg read failed:', tostring(reply.reason))
+		State.svc:obs_log('warn', { what = 'mainflux_read_error', err = tostring(reply.reason) })
 		return
 	end
 
 	local raw, decode_err = json.decode(reply.reason)
 	if not raw then
-		log.warn('metrics: failed to decode mainflux.cfg:', tostring(decode_err))
+		State.svc:obs_log('warn', { what = 'mainflux_decode_failed', err = tostring(decode_err) })
 		return
 	end
 
 	State.mainflux_config = conf.standardise_config(raw)
-	log.info('metrics: mainflux config loaded successfully')
+	State.svc:obs_log('info', 'mainflux config loaded')
 	rebuild_cloud_config()
 end
 
@@ -257,8 +238,8 @@ end
 ---@param data table<string, MetricSample>
 local function log_publish(data)
 	for endpoint_str, metric in pairs(data) do
-		log.info(string.format('metrics: %s = %s (t=%s)',
-			endpoint_str, tostring(metric.value), tostring(metric.time)))
+		State.svc:obs_log('info', { what = 'metric_value',
+			endpoint = endpoint_str, value = metric.value, time = metric.time })
 	end
 end
 
@@ -266,7 +247,7 @@ end
 local function http_publish(data)
 	local senml_list, encode_err = senml.encode_r('', data)
 	if encode_err then
-		log.error('metrics: SenML encode failed: ' .. tostring(encode_err))
+		State.svc:obs_log('error', { what = 'senml_encode_failed', err = tostring(encode_err) })
 		return
 	end
 	if #senml_list == 0 then return end
@@ -275,7 +256,7 @@ local function http_publish(data)
 
 	local valid, config_err = conf.validate_http_config(State.cloud_config)
 	if not valid then
-		log.error('metrics: HTTP publish skipped, invalid cloud config: ' .. tostring(config_err))
+		State.svc:obs_log('error', { what = 'http_publish_skipped', err = tostring(config_err) })
 		return
 	end
 
@@ -287,7 +268,7 @@ local function http_publish(data)
 		end
 	end
 	if channel_id == nil then
-		log.error('metrics: HTTP publish failed, no data channel id found')
+		State.svc:obs_log('error', { what = 'http_publish_failed', err = 'no data channel id found' })
 		return
 	end
 
@@ -300,7 +281,7 @@ local function http_publish(data)
 		:or_else(function() return true end))
 
 	if full then
-		log.error('metrics: HTTP send queue full, dropping publish payload')
+		State.svc:obs_log('error', { what = 'http_queue_full', err = 'dropping publish payload' })
 	end
 end
 
@@ -324,7 +305,7 @@ local function publish_all(values)
 
 		local fn = publish_fns[protocol]
 		if fn == nil then
-			log.error('metrics: no publish function for protocol: ' .. tostring(protocol))
+			State.svc:obs_log('error', { what = 'unknown_protocol', protocol = tostring(protocol) })
 		else
 			fn(pv)
 		end
@@ -355,7 +336,7 @@ local function handle_metric(msg)
 	-- Optional namespace overrides the topic used as the SenML name and state key.
 	local topic = payload.namespace or msg.topic
 	if not validate_topic(topic) then
-		log.warn('metrics: received metric with invalid topic array, skipping')
+		State.svc:obs_log('warn', { what = 'metric_invalid_topic', metric = metric_name })
 		return
 	end
 
@@ -369,8 +350,7 @@ local function handle_metric(msg)
 
 	local ret, short, err = pipe_cfg.pipeline:run(value, State.metric_states[endpoint_str])
 	if err then
-		log.error(string.format(
-			'metrics: pipeline error for [%s]: %s', endpoint_str, tostring(err)))
+		State.svc:obs_log('error', { what = 'pipeline_error', endpoint = endpoint_str, err = tostring(err) })
 		return
 	end
 
@@ -391,16 +371,18 @@ local function handle_config(payload)
 
 	local valid, warns, err = conf.validate_config(payload)
 	if not valid then
-		log.error('metrics: invalid config received: ' .. tostring(err))
+		State.svc:obs_log('error', { what = 'config_invalid', err = tostring(err) })
+		State.svc:obs_event('config_rejected', { err = tostring(err) })
 		return math.huge
 	end
 
 	process_config_warnings(warns, payload)
 
-	local new_pipelines_map, new_publish_period = conf.apply_config(payload)
+	local log_fn = function(level, msg) State.svc:obs_log(level, msg) end
+	local new_pipelines_map, new_publish_period = conf.apply_config(payload, log_fn)
 
 	if next(new_pipelines_map) == nil then
-		log.warn('metrics: no valid pipelines after config apply; service will be idle')
+		State.svc:obs_log('warn', { what = 'config_no_pipelines' })
 	end
 
 	-- Cache cloud_url from the metrics config and rebuild cloud_config.
@@ -450,7 +432,7 @@ local function wait_for_fs_capability()
 	while true do
 		local msg, err = perform(sub:recv_op())
 		if not msg then
-			log.warn('metrics: filesystem capability subscription closed:', tostring(err))
+			State.svc:obs_log('warn', { what = 'fs_cap_sub_closed', err = tostring(err) })
 			sub:unsubscribe()
 			return false
 		end
@@ -492,15 +474,18 @@ local function main()
 		if which == 'config' then
 			local msg, err = a, b
 			if not msg then
-				log.warn('metrics: config subscription closed:', tostring(err))
+				State.svc:obs_log('warn', { what = 'config_sub_closed', err = tostring(err) })
 				break
 			end
-			log.info('metrics: config received, applying')
+			State.svc:obs_log('info', 'config received, applying')
 			next_publish_time = handle_config(msg.payload)
 			-- Re-read mainflux.cfg in case cloud_url or credentials changed.
 			fetch_mainflux_config()
-			local next_publish_str = next_publish_time == math.huge and "never" or string.format('%.1fs', (next_publish_time - now()))
-			log.info('metrics: config applied, next publish in ' .. next_publish_str)
+			local next_s = next_publish_time == math.huge and nil or (next_publish_time - now())
+			State.svc:obs_event('config_applied', { next_publish_s = next_s })
+			State.svc:obs_log('info', next_s
+				and string.format('config applied, next publish in %.1fs', next_s)
+				or 'config applied, publishing suspended (waiting for NTP sync)')
 		elseif which == 'metric' then
 			local msg = a
 			if msg then
@@ -512,13 +497,16 @@ local function main()
 				local first_sync = handle_time_sync(msg.payload)
 				if first_sync and State.publish_period then
 					next_publish_time = now() + State.publish_period
-					log.info(string.format(
-						'metrics: NTP synced, first publish scheduled in %.1fs', State.publish_period))
+					State.svc:obs_event('ntp_synced', { first = true, next_publish_s = State.publish_period })
+					State.svc:obs_log('info', string.format(
+						'NTP synced, first publish scheduled in %.1fs', State.publish_period))
 				elseif first_sync then
-					log.info('metrics: NTP synced, waiting for config before scheduling publish')
+					State.svc:obs_event('ntp_synced', { first = true })
+					State.svc:obs_log('info', 'NTP synced, waiting for config before scheduling publish')
 				elseif not State.base_time.synced then
 					next_publish_time = math.huge
-					log.warn('metrics: NTP sync lost, publishing suspended')
+					State.svc:obs_event('ntp_lost', {})
+					State.svc:obs_log('warn', { what = 'ntp_lost' })
 				end
 			end
 		elseif which == 'tick' then
@@ -535,8 +523,9 @@ local function main()
 			for _, pv in pairs(values) do
 				for _ in pairs(pv) do total = total + 1 end
 			end
+			State.svc:obs_event('publish', { count = total })
 			if total > 0 then
-				log.info(string.format('metrics: publishing %d metric(s)', total))
+				State.svc:obs_log('info', string.format('publishing %d metric(s)', total))
 			end
 			publish_all(values)
 		end
@@ -545,7 +534,7 @@ local function main()
 	obs_sub:unsubscribe()
 	cfg_sub:unsubscribe()
 	time_sub:unsubscribe()
-	log.info('metrics: service stopping')
+	State.svc:obs_log('info', 'service stopping')
 end
 
 -------------------------------------------------------------------------------
@@ -558,13 +547,22 @@ local M = {}
 ---@param opts table?
 function M.start(conn, opts)
 	opts = opts or {}
-	local name = opts.name or NAME
+	local name        = opts.name or NAME
+	local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
 
-	publish_status(conn, name, 'starting')
+	local svc = base.new(conn, { name = name, env = opts.env })
+
+	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
+	svc:obs_log('info', 'service start() entered')
+	svc:status('starting')
+	svc:spawn_heartbeat(heartbeat_s, 'tick')
 
 	State.conn             = conn
+	State.svc              = svc
 	State.name             = name
-	State.http_send_ch     = http_m.start_http_publisher()
+	State.http_send_ch     = http_m.start_http_publisher(function(level, payload)
+		svc:obs_log(level, payload)
+	end)
 	State.pipelines_map    = {}
 	State.metric_states    = {}
 	State.endpoint_to_pipe = {}
@@ -575,25 +573,30 @@ function M.start(conn, opts)
 	State.cloud_config     = nil
 	State.base_time        = types.new.BaseTime(now_real(), now())
 
-	fibers.current_scope():finally(function(_, st, primary)
-		local reason = primary or st
-		log.info(('metrics: scope closed (status: %s, reason: %s)'):format(tostring(st), tostring(primary)))
-		publish_status(conn, name, 'stopped', reason and { reason = tostring(reason) } or nil)
+	fibers.current_scope():finally(function()
+		local scope = fibers.current_scope()
+		local st, primary = scope:status()
+		if st == 'failed' then
+			svc:obs_log('error', { what = 'scope_failed', err = tostring(primary), status = st })
+		end
+		svc:status('stopped', primary and { reason = tostring(primary) } or nil)
+		svc:obs_log('info', 'service stopped')
 	end)
 
-	log.info('metrics: waiting for filesystem capability')
+	svc:obs_log('info', 'waiting for filesystem capability')
 	local fs_ok = wait_for_fs_capability()
 	if not fs_ok then
-		publish_status(conn, name, 'error', { reason = 'filesystem capability unavailable' })
-		log.error('metrics: filesystem capability unavailable, service cannot start')
+		svc:status('failed', { reason = 'filesystem capability unavailable' })
+		svc:obs_log('error', { what = 'start_failed', err = 'filesystem capability unavailable' })
 		return
 	end
 
-	log.info('metrics: fetching mainflux config')
+	svc:obs_event('fs_ready', {})
+	svc:obs_log('info', 'fetching mainflux config')
 	fetch_mainflux_config()
 
-	publish_status(conn, name, 'running')
-	log.info('metrics: service is live')
+	svc:status('running')
+	svc:obs_log('info', 'service is live')
 
 	main()
 end
