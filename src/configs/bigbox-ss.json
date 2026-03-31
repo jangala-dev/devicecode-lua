@@ -662,6 +662,24 @@
       "net/wan/tx_errors": {
         "template": "network_stat"
       },
+      "net/mdm0/download_speed": {
+        "template": "any_change"
+      },
+      "net/mdm1/download_speed": {
+        "template": "any_change"
+      },
+      "net/wan/download_speed": {
+        "template": "any_change"
+      },
+      "net/mdm0/status": {
+        "template": "any_change"
+      },
+      "net/mdm1/status": {
+        "template": "any_change"
+      },
+      "net/wan/status": {
+        "template": "any_change"
+      },
       "gsm/modem/primary/firmware": {
         "template": "any_change",
         "rename": [
