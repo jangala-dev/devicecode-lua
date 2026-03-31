@@ -19,6 +19,9 @@ else
 end
 
 local safe = require 'coxpcall'
+local stdlib = require 'posix.stdlib'
+
+assert(stdlib.setenv('CONFIG_TARGET', 'services'))
 
 local files = {
 	'unit.config.codec_spec',
