@@ -21,6 +21,8 @@ local DEFAULT_RETRY_TIMEOUT = 20
 local DEFAULT_METRICS_INTERVAL = 10
 local DEFAULT_SIGNAL_FREQ = 5
 
+local SCHEMA_STANDARD = "devicecode.config/gsm/1"
+
 local SCOREMAP = {
 	cdma1x = { rssi = { -110, -100, -86, -70, 1000000 } },
 	evdo = { rssi = { -110, -100, -86, -70, 1000000 } },
@@ -294,6 +296,9 @@ local function normalize_config(cfg)
 		return {}, "config must be a table"
 	end
 	---@cast cfg table
+	if cfg.schema ~= SCHEMA_STANDARD then
+		return {}, "config schema must be " .. SCHEMA_STANDARD
+	end
 	local modems_cfg = rawget(cfg, 'modems')
 	if not is_plain_table(modems_cfg) then
 		return {}, "config.modems must be a table"
@@ -306,7 +311,9 @@ local function normalize_config(cfg)
 	if modems_known ~= nil and type(modems_known) ~= 'table' then
 		return {}, "config.modems.known must be a list"
 	end
-	return shallow_copy(cfg), ""
+	local out = shallow_copy(cfg)
+	out.schema = nil
+	return out, ""
 end
 
 ---@param cfg table
@@ -316,7 +323,7 @@ end
 ---@return string
 ---@return string
 local function get_modem_config(cfg, imei, device)
-	local base = shallow_copy(cfg.modems and cfg.modems.default or {})
+	local modem_base = shallow_copy(cfg.modems and cfg.modems.default or {})
 	local known = cfg.modems and cfg.modems.known
 	if type(known) == 'table' then
 		for _, entry in ipairs(known) do
@@ -326,14 +333,14 @@ local function get_modem_config(cfg, imei, device)
 					or (id_field ~= 'device' and (entry.imei == imei))
 				then
 					local merged = shallow_copy(entry)
-					apply_defaults(merged, base)
+					apply_defaults(merged, modem_base)
 					return merged, (merged.name or ""), ""
 				end
 			end
 		end
 	end
 
-	return base, "", ""
+	return modem_base, "", ""
 end
 
 --- Waits for a modem state to move out of connecting
@@ -405,11 +412,10 @@ end
 ---@param value any
 ---@return nil
 function GsmModem:_emit_metric(key, value)
-	self.svc:obs_log('info', { what = 'emit_metric', modem = self.name, key = key, value = tostring(value) })
 	if value == nil then
 		return
 	end
-	local ns_name = nil
+	local ns_name
 	if self.name == "primary" then
 		ns_name = "1"
 	elseif self.name == "secondary" then
@@ -419,7 +425,7 @@ function GsmModem:_emit_metric(key, value)
 	end
 	local metric = {
 		value = value,
-		namespace = {'modem', ns_name, key}
+		namespace = { 'modem', ns_name, key }
 	}
 	self.conn:publish(t_obs_metric(key), metric)
 end
@@ -605,11 +611,13 @@ function GsmModem:_apn_connect()
 			-- Build and send connect RPC
 			local opts, opts_err = capability_args.new.ModemConnectOpts(conn_str)
 			if opts then
-				self.svc:obs_log('debug', { what = 'apn_connect_attempt', modem = self.name, apn = ranking.name, conn_str = conn_str })
+				self.svc:obs_log('debug',
+					{ what = 'apn_connect_attempt', modem = self.name, apn = ranking.name, conn_str = conn_str })
 
 				local _, conn_err = call_modem_rpc(self.conn, self.id, 'connect', opts, REQUEST_TIMEOUT)
 
-				self.svc:obs_log('debug', { what = 'apn_connect_rpc', modem = self.name, apn = ranking.name, err = conn_err })
+				self.svc:obs_log('debug',
+					{ what = 'apn_connect_rpc', modem = self.name, apn = ranking.name, err = conn_err })
 				if conn_err == "" then
 					-- Connect succeeded
 					self.svc:obs_log('debug', { what = 'apn_connected', modem = self.name, apn = ranking.name })
@@ -623,14 +631,18 @@ function GsmModem:_apn_connect()
 				end
 
 				-- Connection attempt failed, wait for modem state to stabilize before trying next APN
-				self.svc:obs_log('debug', { what = 'apn_connect_failed', modem = self.name, apn = ranking.name, err = conn_err })
+				self.svc:obs_log('debug',
+					{ what = 'apn_connect_failed', modem = self.name, apn = ranking.name, err = conn_err })
 
 				-- Subscribe to state changes to monitor connection progress
 				local state_sub = self.conn:subscribe(t_cap_card_state(self.id), {
 					queue_len = 1,
 					full = 'drop_oldest',
 				})
-				local ok, wait_err = wait_for_connection(self.name, state_sub, function(level, payload) self.svc:obs_log(level, payload) end)
+				local ok, wait_err = wait_for_connection(
+					self.name, state_sub,
+					function(level, payload) self.svc:obs_log(level, payload) end
+				)
 				state_sub:unsubscribe()
 				if not ok then
 					self.svc:obs_log('debug', { what = 'wait_for_connection_failed', modem = self.name, err = wait_err })
@@ -638,15 +650,16 @@ function GsmModem:_apn_connect()
 				end
 
 				self.svc:obs_log('debug', { what = 'apn_attempt_failed', modem = self.name, apn = ranking.name })
-				else
-					self.svc:obs_log('debug', { what = 'apn_invalid_opts', modem = self.name, apn = ranking.name, err = opts_err })
+			else
+				self.svc:obs_log('debug',
+					{ what = 'apn_invalid_opts', modem = self.name, apn = ranking.name, err = opts_err })
 			end
 		else
-			self.svc:obs_log('debug', { what = 'apn_build_failed', modem = self.name, apn = ranking.name, err = build_err or 'nil' })
+			self.svc:obs_log('debug',
+				{ what = 'apn_build_failed', modem = self.name, apn = ranking.name, err = build_err or 'nil' })
 		end
 	end
 
-	state_sub:unsubscribe()
 	return nil, "no apn connected", DEFAULT_RETRY_TIMEOUT
 end
 
@@ -708,7 +721,9 @@ function GsmModem:_autoconnect_loop()
 
 			if err and err ~= "" then
 				backoff = retry_timeout or DEFAULT_RETRY_TIMEOUT
-				self.svc:obs_log('error', { what = 'autoconnect_failed', modem = self.name, state = current_state, err = err, retry_after = backoff })
+				self.svc:obs_log('error',
+					{ what = 'autoconnect_failed', modem = self.name, state = current_state, err = err, retry_after =
+					backoff })
 			else
 				backoff = math.huge
 			end
@@ -745,7 +760,7 @@ function GsmModem:start(parent_scope)
 		local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
 		local _, sig_err = modem_set_signal_freq(self.conn, self.id, signal_freq)
 		if sig_err ~= "" then
-				self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = sig_err })
+			self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = sig_err })
 		end
 	end)
 	if not ok then
@@ -877,10 +892,11 @@ function GsmService.start(conn, opts)
 				svc:obs_log('warn', { what = 'config_sub_closed', err = tostring(err) })
 				return
 			end
-			if not is_plain_table(msg.payload) then
+			local cfg_data = msg.payload and msg.payload.data
+			if not is_plain_table(cfg_data) then
 				svc:obs_log('warn', { what = 'invalid_config_payload' })
 			else
-				local cfg, cfg_err = normalize_config(msg.payload)
+				local cfg, cfg_err = normalize_config(cfg_data)
 				if cfg_err ~= "" then
 					svc:obs_log('warn', { what = 'invalid_config', err = cfg_err })
 				else
@@ -928,19 +944,22 @@ function GsmService.start(conn, opts)
 			elseif msg.payload == 'removed' then
 				remove_modem(id)
 			else
-				svc:obs_log('debug', { what = 'unknown_modem_state', modem = tostring(id), state = tostring(msg.payload) })
+				svc:obs_log('debug',
+					{ what = 'unknown_modem_state', modem = tostring(id), state = tostring(msg.payload) })
 			end
 		elseif which == 'modem_fault' then
 			local modem = modems[msg.id]
 			if modem then
-				svc:obs_log('debug', { what = 'modem_scope_faulted', modem = tostring(msg.id), err = tostring(msg.primary) })
+				svc:obs_log('debug',
+					{ what = 'modem_scope_faulted', modem = tostring(msg.id), err = tostring(msg.primary) })
 				modem:stop()
 			end
 		elseif which == 'cfg' then
-			if not is_plain_table(msg.payload) then
+			local cfg_data = msg.payload and msg.payload.data
+			if not is_plain_table(cfg_data) then
 				svc:obs_log('debug', { what = 'invalid_config_payload' })
 			else
-				local updated_cfg, cfg_err = normalize_config(msg.payload)
+				local updated_cfg, cfg_err = normalize_config(cfg_data)
 				if cfg_err ~= "" then
 					svc:obs_log('debug', { what = 'invalid_config', err = cfg_err })
 				else
