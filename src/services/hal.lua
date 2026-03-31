@@ -405,8 +405,10 @@ function HalService.start(conn, opts)
                     svc:obs_log('error', { what = 'manager_require_failed', manager = name, err = manager })
                 else
                     ---@cast manager any
-                    local manager_logger = Logger.new(obs_emitter,
-                        { service = svc.name, component = 'manager', manager = name })
+                    local manager_logger = Logger.new(
+                        obs_emitter,
+                        { service = svc.name, component = 'manager', manager = name }
+                    )
                     local start_err = manager.start(manager_logger, dev_ev_ch, cap_emit_ch)
                     if start_err ~= "" then
                         svc:obs_log('error', { what = 'manager_start_failed', manager = name, err = start_err })
