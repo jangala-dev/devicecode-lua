@@ -1,7 +1,7 @@
 -- HAL modules
 local modem_provider = require "services.hal.backends.modem.provider"
 local hal_types = require "services.hal.types.core"
-local external_types = require "services.hal.types.external"
+local capability_args = require "services.hal.types.capability_args"
 local modem_driver = require "services.hal.drivers.modem"
 
 -- Fiber modules
@@ -11,7 +11,7 @@ local channel = require "fibers.channel"
 local sleep = require "fibers.sleep"
 
 -- Other modules
-local log = require "services.log"
+local log -- set in start()
 
 
 -- Constants
@@ -39,10 +39,10 @@ local ModemcardManager = {
 ---`ModemcardManager.modem_detect_ch` and `ModemcardManager.modem_remove_ch`.
 ---@param scope Scope
 local function detector(scope)
-    log.trace("Modem Detector: started")
+    log:debug("Modem Detector: started")
 
     scope:finally(function ()
-        log.trace("Modem Detector: closed")
+        log:debug("Modem Detector: closed")
     end)
 
     local monitor, err = modem_provider.new_monitor()
@@ -55,14 +55,14 @@ local function detector(scope)
         if mon_err == "Command closed" then
             break
         elseif mon_err and mon_err ~= "" then
-            log.warn("Modem Detector: skipping unparseable line:", mon_err)
+            log:warn({ what = 'unparse_monitor_line', err = tostring(mon_err) })
         elseif event then
             ---@cast event ModemMonitorEvent
             if event.is_added then
-                log.info("Modem Detector: detected at", event.address)
+                log:info({ what = 'modem_detected', address = event.address })
                 ModemcardManager.modem_detect_ch:put(event.address)
             else
-                log.info("Modem Detector: removed at", event.address)
+                log:info({ what = 'modem_removed', address = event.address })
                 ModemcardManager.modem_remove_ch:put(event.address)
             end
         end
@@ -74,23 +74,23 @@ end
 ---@param address ModemAddress
 local function on_remove(dev_ev_ch, address)
     if type(address) ~= 'string' or address == '' then
-        log.error("Modemcard Manager: invalid address on removal")
+        log:error({ what = 'invalid_address_removal' })
         return
     end
 
-    log.info("Modemcard Manager: removing modem at", address)
+    log:info({ what = 'removing_modem', address = address })
 
     local driver = ModemcardManager.modems[address]
     if driver == nil then
-        log.error("Modemcard Manager: modem not found for removal at", address)
+        log:error({ what = 'modem_not_found', address = address })
         return
     end
 
     -- Get device, no need to have a fresh value so set cache lifetime to infinity
     -- Also asking for a fresh value when the modem may have disconnected could cause errors
-    local get_ok, primary = driver:get(external_types.new.ModemGetOpts("device", math.huge))
+    local get_ok, primary = driver:get(capability_args.new.ModemGetOpts("device", math.huge))
     if not get_ok then
-        log.error(("Modemcard Manager: failed to get device: %s"):format(primary))
+        log:error({ what = 'get_device_failed', address = address, err = tostring(primary) })
         return
     end
     local device = primary
@@ -98,7 +98,7 @@ local function on_remove(dev_ev_ch, address)
     fibers.current_scope():spawn(function()
         local ok, stop_err = driver:stop(STOP_TIMEOUT)
         if not ok then
-            log.error("Modemcard Manager: failed to stop driver:", stop_err)
+            log:error({ what = 'stop_driver_failed', address = address, err = tostring(stop_err) })
         end
     end)
 
@@ -110,7 +110,7 @@ local function on_remove(dev_ev_ch, address)
         device
     )
     if not device_event then
-        log.error("Modemcard Manager: failed to create device event:", ev_err)
+        log:error({ what = 'create_device_event_failed', address = address, err = tostring(ev_err) })
         return
     end
 
@@ -122,22 +122,22 @@ end
 ---@return nil
 local function on_detection(address)
     if type(address) ~= 'string' or address == '' then
-        log.error("Modemcard Manager: invalid address on detection")
+        log:error({ what = 'invalid_address_detection' })
         return
     end
 
-    log.info("Modemcard Manager: creating modem at", address)
+    log:info({ what = 'creating_modem', address = address })
 
-    local driver, drv_err = modem_driver.new(address)
+    local driver, drv_err = modem_driver.new(address, log:child({ modem = address }))
     if not driver then
-        log.error("Modemcard Manager: failed to create modem driver:", drv_err)
+        log:error({ what = 'create_driver_failed', address = address, err = tostring(drv_err) })
         return
     end
 
     fibers.current_scope():spawn(function()
         local init_err = driver:init()
         if init_err ~= "" then
-            log.error(("Modemcard Manager: failed to init modem driver %s: %s"):format(address, init_err))
+            log:error({ what = 'init_driver_failed', address = address, err = init_err })
             return
         end
         ModemcardManager.driver_ch:put(driver)
@@ -153,9 +153,9 @@ end
 local function on_driver(dev_ev_ch, cap_emit_ch, driver)
     local address = driver.address
     -- Get device, no need to have a fresh value so set cache lifetime to infinity
-    local get_ok, primary = driver:get(external_types.new.ModemGetOpts("device", math.huge))
+    local get_ok, primary = driver:get(capability_args.new.ModemGetOpts("device", math.huge))
     if not get_ok then
-        log.error(("Modemcard Manager: failed to get device: %s"):format(primary))
+        log:error({ what = 'get_device_failed', address = address, err = tostring(primary) })
         return
     end
     local device = primary
@@ -165,14 +165,14 @@ local function on_driver(dev_ev_ch, cap_emit_ch, driver)
     -- Build capabilities
     local capabilities, cap_err = driver:capabilities(cap_emit_ch)
     if cap_err then
-        log.error("Modemcard Manager: failed to apply capabilities:", cap_err)
+        log:error({ what = 'apply_capabilities_failed', address = address, err = tostring(cap_err) })
         return
     end
 
     -- Start the driver
     local ok, start_err = driver:start()
     if not ok then
-        log.error("Modemcard Manager: failed to start driver:", start_err)
+        log:error({ what = 'start_driver_failed', address = address, err = tostring(start_err) })
         return
     end
 
@@ -187,7 +187,7 @@ local function on_driver(dev_ev_ch, cap_emit_ch, driver)
         capabilities
     )
     if not device_event then
-        log.error("Modemcard Manager: failed to create device event:", ev_err)
+        log:error({ what = 'create_device_event_failed', address = address, err = tostring(ev_err) })
         return
     end
 
@@ -201,10 +201,10 @@ end
 ---@param cap_emit_ch Channel Capability emit channel (Emit messages)
 ---@return nil
 local function manager(scope, dev_ev_ch, cap_emit_ch)
-    log.trace("Modemcard Manager: started")
+    log:debug("Modemcard Manager: started")
 
     scope:finally(function ()
-        log.trace("Modemcard Manager: closed")
+        log:debug("Modemcard Manager: closed")
     end)
 
     while true do
@@ -226,7 +226,7 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
         })
 
         if not msg then
-            log.error("Modemcard Manager: operation failed:", err)
+            log:error({ what = 'operation_failed', err = tostring(err) })
             break
         end
 
@@ -237,19 +237,21 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
         elseif source == "driver" then
             on_driver(dev_ev_ch, cap_emit_ch, msg)
         elseif source == "driver_fault" then
-            log.error("Modemcard Manager: driver fault detected for modem at", msg)
+            log:error({ what = 'driver_fault', address = tostring(msg) })
             on_remove(dev_ev_ch, msg)
         else
-            log.error("Modemcard Manager: unknown operation source:", source)
+            log:error({ what = 'unknown_source', source = tostring(source) })
         end
     end
 end
 
 ---Starts the Modemcard Manager's detector and manager fibers.
+---@param logger Logger
 ---@param dev_ev_ch Channel
 ---@param cap_emit_ch Channel
 ---@return string error
-function ModemcardManager.start(dev_ev_ch, cap_emit_ch)
+function ModemcardManager.start(logger, dev_ev_ch, cap_emit_ch)
+    log = logger
     if ModemcardManager.started then
         return "Already started"
     end
@@ -264,17 +266,17 @@ function ModemcardManager.start(dev_ev_ch, cap_emit_ch)
     scope:finally(function ()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("Modem Manager: error - %s"):format(tostring(primary)))
-            log.trace("Modem Manager: scope exiting with status", st)
+            log:error({ what = 'scope_error', err = tostring(primary) })
+            log:debug({ what = 'scope_exit', status = st })
         end
-        log.trace("Modem Manager: stopped")
+        log:debug("Modem Manager: stopped")
     end)
 
     ModemcardManager.scope:spawn(detector)
     ModemcardManager.scope:spawn(manager, dev_ev_ch, cap_emit_ch)
 
     ModemcardManager.started = true
-    log.trace("Modemcard Manager: started")
+    log:debug("Modemcard Manager: started")
     return ""
 end
 
