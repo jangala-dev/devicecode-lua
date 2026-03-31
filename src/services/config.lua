@@ -41,7 +41,6 @@ function M.start(conn, opts)
 	end
 
 	local hal_wait_timeout_s      = numopt('hal_wait_timeout_s', 60)
-	local hal_wait_tick_s         = numopt('hal_wait_tick_s', 10)
 	local heartbeat_s             = numopt('heartbeat_s', 30.0)
 
 	local persist_debounce_s      = numopt('persist_debounce_s', 0.25)
@@ -84,7 +83,10 @@ function M.start(conn, opts)
 	local function load_from_hal()
 		svc:obs_event('load_begin', { key = STATE_KEY })
 
-		local reply, read_err = config_cap:call_control('read', cap_sdk.args.new.FilesystemReadOpts(STATE_KEY .. '.json'))
+		local reply, read_err = config_cap:call_control(
+			'read',
+			cap_sdk.args.new.FilesystemReadOpts(STATE_KEY .. '.json')
+		)
 		if not reply then
 			svc:obs_log('error', { what = 'load_failed', err = tostring(read_err) })
 			current = {}
@@ -169,7 +171,10 @@ function M.start(conn, opts)
 
 		svc:obs_event('persist_begin', { key = STATE_KEY, reason = reason, bytes = #blob })
 
-		local reply, wr_err = state_cap:call_control('write', cap_sdk.args.new.FilesystemWriteOpts(STATE_KEY .. '.json', blob))
+		local reply, wr_err = state_cap:call_control(
+			'write',
+			cap_sdk.args.new.FilesystemWriteOpts(STATE_KEY .. '.json', blob)
+		)
 		if not reply then
 			svc:obs_log('error', { what = 'persist_failed', err = tostring(wr_err) })
 			svc:obs_event('persist_end', { ok = false, err = tostring(wr_err) })
