@@ -1,6 +1,5 @@
 -- service modules
 local modem_types = require "services.hal.types.modem"
-local log = require "services.log"
 
 -- Fiber modules
 local fibers = require "fibers"
@@ -63,20 +62,17 @@ local SIGNAL_IGNORE_FIELDS = list_to_map {
 ---@param nested table
 ---@param key_paths table<string, string[]>
 ---@return table<string, any>
----@return string[] errors
 local function nested_to_flat(nested, key_paths)
     local flat = {}
-    local errors = {}
     for key, path in pairs(key_paths) do
         local value = nested
         for _, p in ipairs(path) do
             if type(value) ~= 'table' then
-                table.insert(errors, "Expected table at path " .. table.concat(path, ".") .. ", got " .. type(value))
+                value = nil
                 break
             end
             value = value[p]
             if value == nil then
-                table.insert(errors, "Missing value at path " .. table.concat(path, "."))
                 break
             end
         end
@@ -84,7 +80,7 @@ local function nested_to_flat(nested, key_paths)
             flat[key] = value
         end
     end
-    return flat, errors
+    return flat
 end
 
 --- Shallow copy of a table
@@ -112,8 +108,6 @@ local function format_ports(ports)
                 cache_entries[key] = {}
             end
             table.insert(cache_entries[key], name)
-        else
-            log.warn("Failed to parse port string: " .. tostring(port))
         end
     end
     return cache_entries
@@ -151,10 +145,7 @@ local function fetch_modem_info(identity, cache)
 
         local modem = data.modem
 
-        local flat, errors = nested_to_flat(modem, MODEM_INFO_PATHS)
-        if #errors > 0 then
-            log.warn("Errors formatting modem info: " .. table.concat(errors, ";\n\t"))
-        end
+        local flat = nested_to_flat(modem, MODEM_INFO_PATHS)
 
         -- Apply post-processors to transform fields before caching
         for field_name, processor in pairs(FIELD_POST_PROCESSORS) do
@@ -277,7 +268,7 @@ local function fetch_sim_info(identity, cache)
             end
         end
         if sim == "--" then
-            return "" -- no sim means we cannot get sim info
+            return -- no sim means we cannot get sim info
         end
         local cmd = exec.command {
             "mmcli", "-J", "-i", sim,
@@ -294,10 +285,7 @@ local function fetch_sim_info(identity, cache)
         if not data then
             error("Failed to decode mmcli output as JSON: " .. tostring(json_err) .. " , output: " .. tostring(output))
         end
-        local flat, errors = nested_to_flat(data.sim, SIM_INFO_PATHS)
-        if #errors > 0 then
-            log.warn("Errors formatting SIM info: " .. table.concat(errors, ";\n\t"))
-        end
+        local flat = nested_to_flat(data.sim, SIM_INFO_PATHS)
         for k, v in pairs(flat) do
             cache:set(k, v)
         end
@@ -320,10 +308,7 @@ local function get_identity(address, cache)
         "unknown",
         "unknown"
     ))
-    local err = fetch_modem_info(fake_id, cache)                            -- We need modem info to build the identity
-    if err ~= "" then
-        error("Failed to fetch modem info for identity: " .. tostring(err)) -- Fatal error if we cannot get modem info
-    end
+    fetch_modem_info(fake_id, cache)                            -- We need modem info to build the identity
 
     local imei = cache:get("imei")
     local device = cache:get("device")
