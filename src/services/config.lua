@@ -4,7 +4,7 @@
 --  - discovers HAL via retained svc/hal/announce
 --  - reads a single JSON blob from HAL (string) in strict shape:
 --        { <svc>: { rev: int, data: table }, ... }
---  - publishes retained config/<svc> with { rev=int, data=table }
+--  - publishes retained cfg/<svc> with { rev=int, data=table }
 --  - accepts updates only on:
 --        config/<svc>/set with payload { data = table }
 --

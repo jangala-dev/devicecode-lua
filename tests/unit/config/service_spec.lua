@@ -59,7 +59,7 @@ function T.config_loads_from_hal_and_publishes_retained()
 		end)
 		assert(ok_spawn, tostring(err))
 
-		local payload = probe.wait_payload(conn, { 'config', 'net' }, { timeout = 0.5 })
+		local payload = probe.wait_payload(conn, { 'cfg', 'net' }, { timeout = 0.5 })
 		assert(type(payload) == 'table')
 		assert(payload.rev == 2)
 		assert(type(payload.data) == 'table')
@@ -116,7 +116,7 @@ function T.config_accepts_set_and_persists_debounced()
 
 			seen = probe.wait_until(function()
 				local ok, payload = safe.pcall(function()
-					return probe.wait_payload(conn, { 'config', 'net' }, { timeout = 0.02 })
+					return probe.wait_payload(conn, { 'cfg', 'net' }, { timeout = 0.02 })
 				end)
 				return ok
 					and type(payload) == 'table'
@@ -132,7 +132,7 @@ function T.config_accepts_set_and_persists_debounced()
 			sleep.sleep(0.01)
 		end
 
-		assert(seen == true, 'expected retained config/net update')
+		assert(seen == true, 'expected retained cfg/net update')
 
 		local persisted = probe.wait_until(function()
 			for i = 1, #fake_hal.calls do

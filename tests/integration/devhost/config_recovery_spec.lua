@@ -2,8 +2,6 @@
 
 local cjson          = require 'cjson.safe'
 
-local fibers         = require 'fibers'
-local sleep          = require 'fibers.sleep'
 local busmod         = require 'bus'
 
 local runfibers      = require 'tests.support.run_fibers'
@@ -58,7 +56,7 @@ function T.devhost_config_degrades_on_persist_failure_then_recovers()
 		local rec = diag.start(scope, bus, {
 			{ label = 'obs',    topic = { 'obs', '#' } },
 			{ label = 'svc',    topic = { 'svc', '#' } },
-			{ label = 'config', topic = { 'config', '#' } },
+			{ label = 'cfg',    topic = { 'cfg', '#' } },
 		}, {
 			max_records = 300,
 		})
@@ -74,7 +72,7 @@ function T.devhost_config_degrades_on_persist_failure_then_recovers()
 			})
 
 			while true do
-				local msg, err = sub:recv()
+				local msg = sub:recv()
 				if not msg then
 					return
 				end

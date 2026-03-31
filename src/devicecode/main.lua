@@ -287,7 +287,7 @@ function M.run(scope, params)
             primary = tostring(jprimary),
         })
 
-        -- scope:cancel(('service_not_ok:%s'):format(tostring(svc)))
+		scope:cancel(('service_not_ok:%s'):format(tostring(svc)))
     end)
 
     main_conn:publish({ 'obs', 'log', 'main', 'info' }, {
