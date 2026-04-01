@@ -18,7 +18,7 @@ local apns = require "services.gsm.apn"
 
 local REQUEST_TIMEOUT = 10
 local DEFAULT_RETRY_TIMEOUT = 20
-local DEFAULT_METRICS_INTERVAL = 10
+local DEFAULT_METRICS_INTERVAL = 120
 local DEFAULT_SIGNAL_FREQ = 5
 
 local SCHEMA_STANDARD = "devicecode.config/gsm/1"
