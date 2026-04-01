@@ -31,6 +31,7 @@ local pulse = require "fibers.pulse"
 ---@field state_pulse Pulse
 ---@field sim_inserted_pulse Pulse
 ---@field sim_state_ch Channel
+---@field log Logger
 local Modem = {}
 Modem.__index = Modem
 
@@ -541,6 +542,7 @@ function Modem:sim_lifecycle_monitor()
                 self:_emit_state("sim_status", "present")
             else
                 self.log:debug({ what = 'sim_removed', imei = self.imei })
+                self:reset() -- restart to enter failed state (cleaner than implementing a new removed state)
                 sim_present = false
                 self:_emit_state("sim_status", "absent")
             end
