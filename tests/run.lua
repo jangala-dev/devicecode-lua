@@ -34,7 +34,7 @@ local files = {
 	'unit.metrics.config_spec',
 	'unit.metrics.senml_spec',
 	'unit.metrics.http_spec',
-	'integration.metrics.service_spec',
+	'integration.devhost.metrics_spec',
 }
 
 local total, failed = 0, 0
