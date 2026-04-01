@@ -11,13 +11,13 @@
 -- Current features:
 --   * UART transport
 --   * local export publish forwarding
+--   * local retained export forwarding (retain replay + retain/unretain lifecycle)
 --   * remote import publish forwarding
 --   * local proxy calls -> remote calls
 --   * remote calls -> local calls
 --
 -- Deliberate omissions remain:
 --   * transfer streams
---   * retained local->remote unretain propagation
 --   * wire auth
 
 local fibers   = require 'fibers'
@@ -108,6 +108,7 @@ end
 local function start_export_publishers(conn, svc, transport, link_id, export_cfg, send_frame, mark_ready)
 	for i = 1, #(export_cfg.publish or {}) do
 		local rule = export_cfg.publish[i]
+
 		fibers.spawn(function()
 			local sub = conn:subscribe(rule.local_topic, {
 				queue_len = rule.queue_len or 50,
@@ -147,6 +148,63 @@ local function start_export_publishers(conn, svc, transport, link_id, export_cfg
 				end
 			end
 		end)
+	end
+end
+
+local function start_export_retained_watchers(conn, svc, transport, link_id, export_cfg, send_frame, mark_ready)
+	for i = 1, #(export_cfg.publish or {}) do
+		local rule = export_cfg.publish[i]
+
+		-- Only rules explicitly marked retain=true get retained lifecycle forwarding.
+		if rule.retain == true then
+			fibers.spawn(function()
+				local rw = conn:watch_retained(rule.local_topic, {
+					queue_len = rule.queue_len or 50,
+					full      = 'drop_oldest',
+					replay    = true,
+				})
+
+				mark_ready('retained')
+
+				svc:obs_log('info', {
+					what     = 'export_retained_started',
+					link_id  = link_id,
+					local_t  = topic_s(rule.local_topic),
+					remote_t = topic_s(rule.remote_topic),
+				})
+
+				while true do
+					local ev, err = perform(rw:recv_op())
+					if not ev then
+						svc:obs_log('warn', {
+							what    = 'export_retained_stopped',
+							link_id = link_id,
+							err     = tostring(err),
+						})
+						return
+					end
+
+					local remote_topic = topicmap.apply_first({ rule }, ev.topic, 'local_topic', 'remote_topic')
+					if remote_topic then
+						local ok, serr
+
+						if ev.op == 'retain' then
+							ok, serr = send_frame(protocol.pub(remote_topic, ev.payload, true))
+						elseif ev.op == 'unretain' then
+							ok, serr = send_frame(protocol.unretain(remote_topic))
+						end
+
+						if ok ~= true then
+							svc:obs_log('warn', {
+								what    = 'export_retained_send_failed',
+								link_id = link_id,
+								err     = tostring(serr),
+							})
+						end
+					end
+				end
+			end)
+		end
 	end
 end
 
@@ -296,11 +354,19 @@ function M.run(conn, svc, opts)
 		last_pong_at       = nil,
 	}
 
+	local retained_rules = 0
+	for i = 1, #(link_cfg.export.publish or {}) do
+		if link_cfg.export.publish[i].retain == true then
+			retained_rules = retained_rules + 1
+		end
+	end
+
 	local readiness = {
-		expected     = #(link_cfg.export.publish or {}) + #(link_cfg.proxy_calls or {}),
-		started      = 0,
-		export_ready = 0,
-		proxy_ready  = 0,
+		expected       = #(link_cfg.export.publish or {}) + retained_rules + #(link_cfg.proxy_calls or {}),
+		started        = 0,
+		export_ready   = 0,
+		retained_ready = 0,
+		proxy_ready    = 0,
 	}
 
 	local function is_ready()
@@ -321,20 +387,21 @@ function M.run(conn, svc, opts)
 		extra = extra or {}
 
 		local payload = {
-			status       = extra.status or current_status(),
-			ready        = state.established and is_ready() or false,
-			established  = state.established,
-			peer_id      = peer_id,
-			local_sid    = state.local_sid,
-			peer_sid     = state.peer_sid,
-			remote_id    = state.peer_node,
-			kind         = ((link_cfg.transport or {}).kind) or 'uart',
-			last_rx_at   = state.last_rx_at,
-			last_tx_at   = state.last_tx_at,
-			last_pong_at = state.last_pong_at,
-			export_ready = readiness.export_ready,
-			proxy_ready  = readiness.proxy_ready,
-			expected     = readiness.expected,
+			status         = extra.status or current_status(),
+			ready          = state.established and is_ready() or false,
+			established    = state.established,
+			peer_id        = peer_id,
+			local_sid      = state.local_sid,
+			peer_sid       = state.peer_sid,
+			remote_id      = state.peer_node,
+			kind           = ((link_cfg.transport or {}).kind) or 'uart',
+			last_rx_at     = state.last_rx_at,
+			last_tx_at     = state.last_tx_at,
+			last_pong_at   = state.last_pong_at,
+			export_ready   = readiness.export_ready,
+			retained_ready = readiness.retained_ready,
+			proxy_ready    = readiness.proxy_ready,
+			expected       = readiness.expected,
 		}
 
 		if extra.err ~= nil then payload.err = extra.err end
@@ -347,20 +414,97 @@ function M.run(conn, svc, opts)
 		readiness.started = readiness.started + 1
 		if kind == 'export' then
 			readiness.export_ready = readiness.export_ready + 1
+		elseif kind == 'retained' then
+			readiness.retained_ready = readiness.retained_ready + 1
 		elseif kind == 'proxy' then
 			readiness.proxy_ready = readiness.proxy_ready + 1
 		end
 		publish_session()
 	end
 
-	local function mark_tx(msg)
+	local bad_frames = {
+		count        = 0,
+		window_start = nil,
+		threshold    = 5,
+		window_s     = 30.0,
+	}
+
+	local function reset_bad_frames()
+		bad_frames.count = 0
+		bad_frames.window_start = nil
+	end
+
+	local function note_bad_frame(what, detail, raw_t)
 		local tnow = svc:now()
-		state.last_tx_at = tnow
-		if msg.t == 'hello' then
-			state.last_hello_at = tnow
-		elseif msg.t == 'ping' then
-			state.last_ping_at = tnow
+
+		if bad_frames.window_start == nil or (tnow - bad_frames.window_start) > bad_frames.window_s then
+			bad_frames.window_start = tnow
+			bad_frames.count = 0
 		end
+
+		bad_frames.count = bad_frames.count + 1
+
+		svc:obs_log('warn', {
+			what    = what,
+			link_id = link_id,
+			err     = tostring(detail),
+			t       = raw_t,
+			n       = bad_frames.count,
+		})
+
+		if bad_frames.count >= bad_frames.threshold then
+			pending:close_all('too_many_bad_frames')
+			publish_link_state(conn, svc, link_id, {
+				status      = 'down',
+				ready       = false,
+				established = state.established,
+				peer_id     = peer_id,
+				local_sid   = state.local_sid,
+				peer_sid    = state.peer_sid,
+				remote_id   = state.peer_node,
+				kind        = ((link_cfg.transport or {}).kind) or 'uart',
+				err         = 'too_many_bad_frames',
+			})
+			error(('fabric/%s: too many bad frames'):format(link_id), 0)
+		end
+	end
+
+	local function validate_peer_hello(msg)
+		if msg.peer ~= state.node_id then
+			return nil, ('unexpected hello.peer: %s'):format(tostring(msg.peer))
+		end
+		if msg.node ~= peer_id then
+			return nil, ('unexpected hello.node: %s'):format(tostring(msg.node))
+		end
+		if msg.proto ~= protocol.PROTO_VERSION then
+			return nil, ('unsupported proto: %s'):format(tostring(msg.proto))
+		end
+		return true
+	end
+
+	local function validate_peer_ack(msg)
+		if msg.node ~= peer_id then
+			return nil, ('unexpected hello_ack.node: %s'):format(tostring(msg.node))
+		end
+		if msg.proto ~= protocol.PROTO_VERSION then
+			return nil, ('unsupported proto: %s'):format(tostring(msg.proto))
+		end
+		return true
+	end
+
+	local function send_frame(msg)
+		local ok, err = perform(transport:send_msg_op(msg))
+		if ok == true then
+			local tnow = svc:now()
+			state.last_tx_at = tnow
+			if msg.t == 'hello' then
+				state.last_hello_at = tnow
+			elseif msg.t == 'ping' then
+				state.last_ping_at = tnow
+			end
+			return true, nil
+		end
+		return nil, err
 	end
 
 	local function mark_rx(msg)
@@ -369,15 +513,6 @@ function M.run(conn, svc, opts)
 		if msg.t == 'pong' then
 			state.last_pong_at = tnow
 		end
-	end
-
-	local function send_frame(msg)
-		local ok, err = perform(transport:send_msg_op(msg))
-		if ok == true then
-			mark_tx(msg)
-			return true, nil
-		end
-		return nil, err
 	end
 
 	local function note_peer_identity(msg, is_hello)
@@ -390,6 +525,28 @@ function M.run(conn, svc, opts)
 		if is_hello then
 			state.last_peer_hello_at = svc:now()
 		end
+
+		if sid_changed then
+			pending:close_all('peer_session_changed')
+			svc:obs_event('peer_session_changed', {
+				link_id  = link_id,
+				peer_id  = peer_id,
+				peer_sid = state.peer_sid,
+				node     = state.peer_node,
+			})
+		end
+
+		reset_bad_frames()
+		publish_session()
+	end
+
+	local function note_peer_sid_only(msg)
+		if type(msg.sid) ~= 'string' or msg.sid == '' then
+			return
+		end
+
+		local sid_changed = (state.peer_sid ~= nil and state.peer_sid ~= msg.sid)
+		state.peer_sid = msg.sid
 
 		if sid_changed then
 			pending:close_all('peer_session_changed')
@@ -470,6 +627,7 @@ function M.run(conn, svc, opts)
 	end
 
 	start_export_publishers(conn, svc, transport, link_id, link_cfg.export, send_frame, mark_worker_ready)
+	start_export_retained_watchers(conn, svc, transport, link_id, link_cfg.export, send_frame, mark_worker_ready)
 	start_proxy_call_endpoints(conn, svc, transport, link_id, link_cfg.proxy_calls, pending, send_frame, mark_worker_ready)
 
 	while true do
@@ -477,7 +635,7 @@ function M.run(conn, svc, opts)
 		local deadline = next_deadline(tnow)
 
 		local arms = {
-			recv = transport:recv_msg_op(),
+			recv = transport:recv_line_op(),
 		}
 
 		if deadline < math.huge then
@@ -536,8 +694,8 @@ function M.run(conn, svc, opts)
 			end
 
 		else
-			local msg, rerr = a, b
-			if not msg then
+			local line, rerr = a, b
+			if not line then
 				pending:close_all('transport_down')
 				publish_link_state(conn, svc, link_id, {
 					status      = 'down',
@@ -553,77 +711,108 @@ function M.run(conn, svc, opts)
 				error(('fabric/%s: receive failed: %s'):format(link_id, tostring(rerr)), 0)
 			end
 
-			mark_rx(msg)
-
-			if msg.t == 'hello' then
-				note_peer_identity(msg, true)
-
-				local ok2, err2 = send_frame(protocol.hello_ack(state.node_id, {
-					sid = state.local_sid,
-				}))
-				if ok2 ~= true then
-					svc:obs_log('warn', {
-						what    = 'hello_ack_failed',
-						link_id = link_id,
-						err     = tostring(err2),
-					})
-				end
-
-			elseif msg.t == 'hello_ack' then
-				note_peer_identity(msg, false)
-
-			elseif msg.t == 'ping' then
-				local ok2, err2 = send_frame(protocol.pong({ sid = state.local_sid }))
-				if ok2 ~= true then
-					svc:obs_log('warn', {
-						what    = 'pong_send_failed',
-						link_id = link_id,
-						err     = tostring(err2),
-					})
-				end
-
-			elseif msg.t == 'pong' then
-				-- mark_rx() already updated last_pong_at
-
-			elseif msg.t == 'pub' then
-				local _, derr = handle_incoming_pub(peer_conn, link_cfg, msg)
-				if derr then
-					svc:obs_log('warn', {
-						what    = 'incoming_pub_dropped',
-						link_id = link_id,
-						err     = tostring(derr),
-					})
-				end
-
-			elseif msg.t == 'unretain' then
-				local _, derr = handle_incoming_unretain(peer_conn, link_cfg, msg)
-				if derr then
-					svc:obs_log('warn', {
-						what    = 'incoming_unretain_dropped',
-						link_id = link_id,
-						err     = tostring(derr),
-					})
-				end
-
-			elseif msg.t == 'call' then
-				local ok_call, call_err = handle_incoming_call(peer_conn, send_frame, link_cfg, msg)
-				if ok_call ~= true then
-					svc:obs_log('warn', {
-						what    = 'incoming_call_failed',
-						link_id = link_id,
-						err     = tostring(call_err),
-					})
-				end
-
-			elseif msg.t == 'reply' then
-				pending:deliver(msg.corr, msg)
-
+			local raw, derr = protocol.decode_line(line)
+			if not raw then
+				note_bad_frame('decode_failed', derr, nil)
 			else
-				svc:obs_log('warn', {
-					what    = 'unknown_message_type',
-					link_id = link_id,
-					t       = tostring(msg.t),
-				})
+				local msg, verr = protocol.validate_message(raw)
+				if not msg then
+					-- If this was recognisably a call with an id, try to reply with error.
+					if raw.t == 'call' and type(raw.id) == 'string' and raw.id ~= '' then
+						pcall(function()
+							send_frame(protocol.reply_err(raw.id, 'bad_message: ' .. tostring(verr)))
+						end)
+					end
+					note_bad_frame('invalid_message', verr, raw.t)
+				else
+					mark_rx(msg)
+
+					if msg.t == 'hello' then
+						local okh, herr = validate_peer_hello(msg)
+						if not okh then
+							note_bad_frame('bad_hello', herr, msg.t)
+						else
+							note_peer_identity(msg, true)
+
+							local ok2, err2 = send_frame(protocol.hello_ack(state.node_id, {
+								sid = state.local_sid,
+							}))
+							if ok2 ~= true then
+								svc:obs_log('warn', {
+									what    = 'hello_ack_failed',
+									link_id = link_id,
+									err     = tostring(err2),
+								})
+							end
+						end
+
+					elseif msg.t == 'hello_ack' then
+						local oka, aerr = validate_peer_ack(msg)
+						if not oka then
+							note_bad_frame('bad_hello_ack', aerr, msg.t)
+						elseif msg.ok == false then
+							note_bad_frame('hello_ack_rejected', 'peer rejected session', msg.t)
+						else
+							note_peer_identity(msg, false)
+						end
+
+					elseif msg.t == 'ping' then
+						note_peer_sid_only(msg)
+						local ok2, err2 = send_frame(protocol.pong({ sid = state.local_sid }))
+						if ok2 ~= true then
+							svc:obs_log('warn', {
+								what    = 'pong_send_failed',
+								link_id = link_id,
+								err     = tostring(err2),
+							})
+						end
+
+					elseif msg.t == 'pong' then
+						note_peer_sid_only(msg)
+						-- mark_rx() already updated last_pong_at
+
+					elseif msg.t == 'pub' then
+						local _, perr = handle_incoming_pub(peer_conn, link_cfg, msg)
+						if perr then
+							svc:obs_log('warn', {
+								what    = 'incoming_pub_dropped',
+								link_id = link_id,
+								err     = tostring(perr),
+							})
+						end
+
+					elseif msg.t == 'unretain' then
+						local _, uerr = handle_incoming_unretain(peer_conn, link_cfg, msg)
+						if uerr then
+							svc:obs_log('warn', {
+								what    = 'incoming_unretain_dropped',
+								link_id = link_id,
+								err     = tostring(uerr),
+							})
+						end
+
+					elseif msg.t == 'call' then
+						local ok_call, call_err = handle_incoming_call(peer_conn, send_frame, link_cfg, msg)
+						if ok_call ~= true then
+							svc:obs_log('warn', {
+								what    = 'incoming_call_failed',
+								link_id = link_id,
+								err     = tostring(call_err),
+							})
+						end
+
+					elseif msg.t == 'reply' then
+						pending:deliver(msg.corr, msg)
+
+					else
+						-- Unknown message types are not session-fatal.
+						svc:obs_log('warn', {
+							what    = 'unknown_message_type',
+							link_id = link_id,
+							t       = tostring(msg.t),
+						})
+					end
+				end
 			end
 		end
 	end

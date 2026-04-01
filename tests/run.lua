@@ -33,6 +33,7 @@ local files = {
 	'unit.ui.cqueues_bridge_spec',
 	'unit.fabric.config_spec',
 	'unit.fabric.topicmap_spec',
+	'unit.fabric.protocol_spec',
 	'unit.fabric.service_spec',
 	'integration.devhost.stack_spec',
 	'integration.devhost.main_stack_spec',

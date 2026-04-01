@@ -17,11 +17,15 @@ local UartTransport = {}
 UartTransport.__index = UartTransport
 
 function M.new(svc, cfg)
+	cfg = cfg or {}
 	return setmetatable({
-		_svc    = svc,
-		_cfg    = cfg,
-		_stream = nil,
-		_info   = nil,
+		_svc            = svc,
+		_cfg            = cfg,
+		_stream         = nil,
+		_info           = nil,
+		_max_line_bytes = (type(cfg.max_line_bytes) == 'number' and cfg.max_line_bytes > 0)
+			and math.floor(cfg.max_line_bytes)
+			or 4096,
 	}, UartTransport)
 end
 
@@ -69,6 +73,9 @@ function UartTransport:send_msg_op(msg)
 		if not line then
 			return op.always(nil, err)
 		end
+		if #line > self._max_line_bytes then
+			return op.always(nil, 'frame_too_large')
+		end
 		return s:write_op(line, '\n'):wrap(function(n, werr)
 			if n == nil then
 				return nil, tostring(werr)
@@ -78,7 +85,8 @@ function UartTransport:send_msg_op(msg)
 	end)
 end
 
-function UartTransport:recv_msg_op()
+-- Framing only: returns raw line text.
+function UartTransport:recv_line_op()
 	local s = assert(self._stream, 'uart transport is not open')
 	return s:read_line_op():wrap(function(line, err)
 		if err ~= nil then
@@ -86,6 +94,19 @@ function UartTransport:recv_msg_op()
 		end
 		if line == nil then
 			return nil, 'eof'
+		end
+		if #line > self._max_line_bytes then
+			return nil, 'frame_too_large'
+		end
+		return line, nil
+	end)
+end
+
+-- Kept for compatibility with any existing callers.
+function UartTransport:recv_msg_op()
+	return self:recv_line_op():wrap(function(line, err)
+		if not line then
+			return nil, err
 		end
 		local msg, derr = protocol.decode_line(line)
 		if not msg then
