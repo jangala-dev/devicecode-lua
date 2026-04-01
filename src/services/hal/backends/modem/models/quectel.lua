@@ -71,7 +71,11 @@ local funcs = {
         name = 'firmware',
         conditionals = {
             function(_, model, _)
-                return model == 'rm520n' or model == 'eg25' or model == 'ec25' or model == 'em12'
+                return model == 'rm520n'
+                    or model == 'eg25'
+                    or model == 'ec25'
+                    or model == 'em12'
+                    or model == 'em06'
             end
         },
         func = function(backend)
@@ -135,8 +139,11 @@ local funcs = {
                             error("Failed to poll SIM presence: " .. err)
                         end
                         if present ~= backend.last_sim_state then
+                            local last_state = backend.last_sim_state
                             backend.last_sim_state = present
-                            return present, ""
+                            if last_state ~= nil then
+                                return present, ""
+                            end
                         end
                         s:perform(sleep.sleep_op(SIM_POLL_INTERVAL))
                     end
