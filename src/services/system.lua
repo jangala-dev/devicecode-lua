@@ -16,13 +16,13 @@ local channel = require "fibers.channel"
 
 local perform = fibers.perform
 
-local log            = require "services.log"
+local base           = require 'devicecode.service_base'
 local alarms         = require "services.system.alarms"
 local external_types = require "services.hal.types.external"
 
 -- ── topic helpers ────────────────────────────────
 
-local function t(...) return { ... } end
+-- local function t(...) return { ... } end
 local function t_cfg(name) return { 'cfg', name } end
 
 local function t_cap_rpc(class, id, method)
@@ -95,14 +95,6 @@ local function publish_metric(conn, key, value, namespace)
     conn:retain(t_obs_metric(key), payload)
 end
 
-local function publish_status(conn, name, state, extra)
-    local payload = { state = state, ts = fibers.now() }
-    if type(extra) == 'table' then
-        for k, v in pairs(extra) do payload[k] = v end
-    end
-    conn:retain(t('svc', name, 'status'), payload)
-end
-
 -- ── sysinfo fiber ────────────────────────────────
 
 local SYSINFO_METRICS = {
@@ -123,25 +115,26 @@ local SYSINFO_METRICS = {
 -- Temperature from zone0 (preserved metric name for historical continuity).
 local THERMAL_ZONE0_ID = 'zone0'
 
-local function sysinfo_fiber(_scope, conn, report_period_ch, name)
-    log.trace("System Sysinfo: started")
+local function sysinfo_fiber(_, svc, report_period_ch)
+    local conn = svc.conn
+    svc:obs_log('debug', 'sysinfo started')
 
     fibers.current_scope():finally(function()
         local _, primary = fibers.current_scope():status()
-        log.trace(("System Sysinfo: stopped - %s"):format(tostring(primary or "ok")))
+        svc:obs_log('debug', { what = 'sysinfo_stopped', reason = tostring(primary or 'ok') })
     end)
 
     -- Subscribe to time sync and thermal meta before blocking on config.
-    local time_sub      = conn:subscribe(t_svc_time_synced())
-    local thermal_sub   = conn:subscribe(t_thermal_meta())
+    local time_sub    = conn:subscribe(t_svc_time_synced())
+    local thermal_sub = conn:subscribe(t_thermal_meta())
 
     -- Block until System Main sends us the initial report_period.
     local report_period = report_period_ch:get()
     if not report_period then
-        log.warn("System Sysinfo: report_period channel closed before config received")
+        svc:obs_log('warn', 'sysinfo: report_period channel closed before config received')
         return
     end
-    log.trace("System Sysinfo: initial report_period =", report_period)
+    svc:obs_log('debug', { what = 'report_period_set', value = report_period })
 
     -- Read platform retained state once at startup.
     local identity_sub = conn:subscribe(t_platform_state_identity())
@@ -157,9 +150,9 @@ local function sysinfo_fiber(_scope, conn, report_period_ch, name)
                 publish_metric(conn, field, id[field])
             end
         end
-        log.trace("System Sysinfo: published platform identity metrics")
+        svc:obs_log('debug', 'sysinfo: published platform identity metrics')
     else
-        log.warn("System Sysinfo: platform identity not available within timeout")
+        svc:obs_log('warn', 'sysinfo: platform identity not available within timeout')
     end
 
     local time_synced = false
@@ -176,24 +169,24 @@ local function sysinfo_fiber(_scope, conn, report_period_ch, name)
         if which == 'period' then
             if msg then
                 report_period = msg
-                log.trace("System Sysinfo: report_period updated to", report_period)
+                svc:obs_log('debug', { what = 'report_period_updated', value = report_period })
             else
-                log.debug("System Sysinfo: report_period channel closed")
+                svc:obs_log('debug', 'sysinfo: report_period channel closed')
                 return
             end
         elseif which == 'time' then
             if not msg then
-                log.debug("System Sysinfo: time subscription closed")
+                svc:obs_log('debug', 'sysinfo: time subscription closed')
                 return
             end
             time_synced = (msg.payload == true)
-            log.trace("System Sysinfo: time_synced =", time_synced)
+            svc:obs_log('debug', { what = 'time_synced_updated', value = time_synced })
         elseif which == 'thermal' then
             if msg then
                 local zone_id = msg.topic and msg.topic[3]
                 if zone_id == THERMAL_ZONE0_ID then
                     zone0_present = true
-                    log.trace("System Sysinfo: thermal zone0 discovered")
+                    svc:obs_log('debug', 'sysinfo: thermal zone0 discovered')
                 end
             end
         elseif which == 'sleep' then
@@ -202,13 +195,13 @@ local function sysinfo_fiber(_scope, conn, report_period_ch, name)
             for _, m in ipairs(SYSINFO_METRICS) do
                 local opts, opts_err = m.mk_opts(m.field, report_period)
                 if opts_err ~= "" then
-                    log.warn(("System Sysinfo: bad opts for %s/%s.%s: %s"):format(
-                        m.class, m.id, m.field, opts_err))
+                    svc:obs_log('warn', { what = 'metric_opts_invalid', class = m.class,
+                        id = m.id, field = m.field, err = opts_err })
                 else
                     local value, err = cap_call(conn, m.class, m.id, m.method, opts)
                     if err ~= "" then
-                        log.warn(("System Sysinfo: get %s/%s.%s failed: %s"):format(
-                            m.class, m.id, m.field, err))
+                        svc:obs_log('warn', { what = 'metric_get_failed', class = m.class,
+                            id = m.id, field = m.field, err = err })
                     else
                         publish_metric(conn, m.metric_key, value)
                     end
@@ -219,11 +212,11 @@ local function sysinfo_fiber(_scope, conn, report_period_ch, name)
             if time_synced then
                 local uptime_opts, uptime_opts_err = external_types.new.PlatformGetOpts('uptime', report_period)
                 if uptime_opts_err ~= "" then
-                    log.warn("System Sysinfo: bad opts for platform uptime:", uptime_opts_err)
+                    svc:obs_log('warn', { what = 'uptime_opts_invalid', err = uptime_opts_err })
                 else
                     local uptime, uptime_err = cap_call(conn, 'platform', '1', 'get', uptime_opts)
                     if uptime == nil or uptime_err ~= "" then
-                        log.warn("System Sysinfo: get platform/1.uptime failed:", uptime_err)
+                        svc:obs_log('warn', { what = 'uptime_get_failed', err = uptime_err })
                     else
                         publish_metric(conn, 'boot_time', os.time() - math.floor(uptime))
                     end
@@ -234,11 +227,11 @@ local function sysinfo_fiber(_scope, conn, report_period_ch, name)
             if zone0_present then
                 local thermal_opts, thermal_opts_err = external_types.new.ThermalGetOpts(report_period)
                 if thermal_opts_err ~= "" then
-                    log.warn("System Sysinfo: bad opts for thermal zone0:", thermal_opts_err)
+                    svc:obs_log('warn', { what = 'thermal_opts_invalid', err = thermal_opts_err })
                 else
                     local temp, terr = cap_call(conn, 'thermal', THERMAL_ZONE0_ID, 'get', thermal_opts)
                     if terr ~= "" then
-                        log.warn("System Sysinfo: get thermal/zone0 failed:", terr)
+                        svc:obs_log('warn', { what = 'thermal_get_failed', err = terr })
                     else
                         publish_metric(conn, 'temperature', temp)
                     end
@@ -253,12 +246,14 @@ end
 local SHUTDOWN_GRACE = 10 -- seconds services have to shut down
 local USB3_MODEL     = "bigbox-ss" -- only model with controllable USB3 hardware
 
-local function handle_alarm(conn, alarm)
+local function handle_alarm(svc, alarm)
+    local conn       = svc.conn
     local payload    = alarm.payload or {}
     local alarm_name = payload.name or "scheduled alarm"
     local alarm_type = payload.type or "reboot"
 
-    log.info(("System Main: alarm fired: %s (%s)"):format(alarm_name, alarm_type))
+    svc:obs_log('info', { what = 'alarm_fired', name = alarm_name, type = alarm_type })
+    svc:obs_event('alarm_fired', { name = alarm_name, type = alarm_type, ts = svc:now() })
 
     -- Broadcast shutdown signal so all services can clean up within the deadline.
     conn:retain(t_shutdown_control(), {
@@ -269,28 +264,29 @@ local function handle_alarm(conn, alarm)
     -- After the grace period, issue the power command via the bus.
     local ok, spawn_err = fibers.current_scope():spawn(function()
         perform(sleep.sleep_op(SHUTDOWN_GRACE))
-        log.info(("System Main: issuing %s command"):format(alarm_type))
+        svc:obs_log('info', { what = 'power_command', type = alarm_type })
         local power_opts = external_types.new.PowerActionOpts()
         local _, err = cap_call(conn, 'power', '1', alarm_type, power_opts)
         if err ~= "" then
-            log.error("System Main: power command failed:", err)
+            svc:obs_log('error', { what = 'power_command_failed', type = alarm_type, err = err })
         end
     end)
     if not ok then
-        log.error("System Main: failed to spawn power fiber:", spawn_err)
+        svc:obs_log('error', { what = 'power_fiber_spawn_failed', err = tostring(spawn_err) })
     end
 end
 
 -- ── system main fiber ──────────────────────────────
 
-local function system_main(conn, report_period_ch, name)
-    log.trace("System Main: started")
+local function system_main(svc, report_period_ch)
+    local conn = svc.conn
+    svc:obs_log('debug', 'main started')
 
     local parent_scope = fibers.current_scope()
     parent_scope:finally(function()
         local _, primary = parent_scope:status()
-        log.trace(("System Main: stopped - %s"):format(tostring(primary or "ok")))
-        publish_status(conn, name, 'stopped', { reason = tostring(primary or "ok") })
+        svc:obs_log('debug', { what = 'main_stopped', reason = tostring(primary or 'ok') })
+        svc:status('stopped', { reason = tostring(primary or 'ok') })
     end)
 
     local alarm_mgr = alarms.AlarmManager.new()
@@ -306,14 +302,14 @@ local function system_main(conn, report_period_ch, name)
         ))
         if id_msg and type(id_msg.payload) == 'table' and id_msg.payload.hw_revision then
             hw_revision = id_msg.payload.hw_revision:match('(%S+)')
-            log.trace("System Main: hw_revision =", hw_revision)
+            svc:obs_log('debug', { what = 'hw_revision_detected', value = hw_revision })
         else
-            log.warn("System Main: platform identity not available at startup; USB3 control disabled")
+            svc:obs_log('warn', 'platform identity not available at startup; USB3 control disabled')
         end
     end
 
-    local cfg_sub   = conn:subscribe(t_cfg(name))
-    local time_sub  = conn:subscribe(t_svc_time_synced())
+    local cfg_sub  = conn:subscribe(t_cfg(svc.name))
+    local time_sub = conn:subscribe(t_svc_time_synced())
 
     while true do
         local choices = {
@@ -325,15 +321,17 @@ local function system_main(conn, report_period_ch, name)
         local which, msg = perform(op.named_choice(choices))
 
         if not msg and (which == 'cfg' or which == 'time') then
-            log.debug(("System Main: subscription '%s' closed"):format(which))
+            svc:obs_log('debug', { what = 'subscription_closed', source = which })
             return
         end
 
         if which == 'cfg' then
             local cfg, err = validate_config(msg.payload)
             if cfg == nil or err ~= "" then
-                log.warn("System Main: invalid config:", err)
+                svc:obs_log('warn', { what = 'config_invalid', err = err })
             else
+                svc:obs_event('config_applied', { ts = svc:now() })
+
                 -- Forward report_period to sysinfo fiber.
                 -- Drain any stale unconsumed value first (non-blocking via or_else so
                 -- the channel is tried first), then put the latest value.
@@ -345,10 +343,8 @@ local function system_main(conn, report_period_ch, name)
                     local usb_verb = cfg.usb3_enabled and 'enable' or 'disable'
                     local _, usb_err = cap_call(conn, 'usb', 'usb3', usb_verb)
                     if usb_err ~= "" then
-                        log.warn(("System Main: USB3 %s failed: %s"):format(usb_verb, usb_err))
+                        svc:obs_log('warn', { what = 'usb3_control_failed', verb = usb_verb, err = usb_err })
                     end
-                else
-                    log.trace("System Main: USB3 control skipped (not bigbox-ss)")
                 end
 
                 -- Reload alarms.
@@ -357,7 +353,7 @@ local function system_main(conn, report_period_ch, name)
                     for _, alarm_cfg in ipairs(cfg.alarms) do
                         local add_err = alarm_mgr:add(alarm_cfg)
                         if add_err ~= "" then
-                            log.warn("System Main: invalid alarm config:", add_err)
+                            svc:obs_log('warn', { what = 'alarm_add_failed', err = add_err })
                         end
                     end
                 end
@@ -366,14 +362,13 @@ local function system_main(conn, report_period_ch, name)
             local is_synced = (msg.payload == true)
             if is_synced then
                 alarm_mgr:sync()
-                log.trace("System Main: alarm manager synced")
+                svc:obs_log('debug', 'alarm manager synced')
             else
                 alarm_mgr:desync()
-                log.trace("System Main: alarm manager desynced")
+                svc:obs_log('debug', 'alarm manager desynced')
             end
         elseif which == 'alarm' then
-            -- msg is the fired Alarm.
-            handle_alarm(conn, msg)
+            handle_alarm(svc, msg)
         end
     end
 end
@@ -386,28 +381,33 @@ local SystemService = {}
 ---@param opts table?
 function SystemService.start(conn, opts)
     opts = opts or {}
-    local name = opts.name or 'system'
 
-    publish_status(conn, name, 'starting')
+    local svc = base.new(conn, { name = opts.name or 'system', env = opts.env })
+    local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
+
+    svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
+    svc:obs_log('info', 'service start() entered')
+    svc:status('starting')
+    svc:spawn_heartbeat(heartbeat_s, 'tick')
 
     -- Channel carries report_period from System Main → System Sysinfo.
     -- Buffer of 1 so a rapid double-update does not block Main.
     local report_period_ch = channel.new(1)
 
-    local parent_scope = fibers.current_scope()
-
-    parent_scope:finally(function()
-        local _, primary = parent_scope:status()
-        publish_status(conn, name, 'stopped', { reason = tostring(primary or 'ok') })
+    fibers.current_scope():finally(function()
+        local _, primary = fibers.current_scope():status()
+        svc:status('stopped', { reason = tostring(primary or 'ok') })
+        svc:obs_log('info', 'service stopped')
     end)
 
     -- Spawn Sysinfo first so it is ready to receive from report_period_ch.
-    parent_scope:spawn(sysinfo_fiber, conn, report_period_ch, name)
+    fibers.current_scope():spawn(sysinfo_fiber, svc, report_period_ch)
 
-    publish_status(conn, name, 'running')
+    svc:status('running')
+    svc:obs_log('info', 'service running')
 
     -- Run System Main in the calling fiber.
-    system_main(conn, report_period_ch, name)
+    system_main(svc, report_period_ch)
 end
 
 return SystemService
