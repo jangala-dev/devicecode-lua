@@ -14,13 +14,17 @@ local function parse_slot_status(status)
     if not status or status == "" then
         return "", "Command closed"
     end
-    for card_status, slot_status in status:gmatch("Card status:%s*(%S+).-Slot status:%s*(%S+)") do
-        if slot_status == "active" then
-            return card_status, ""
-        end
+
+    local card_state = status:match("Card state:%s*'([^']+)'")
+    if not card_state then
+        return "", "could not parse card state"
     end
 
-    return "", 'could not parse (no active slot or invalid string format)'
+    if card_state == "present" then
+        return "present", ""
+    end
+
+    return "absent", ""
 end
 
 --- Gets the home network info (MCC/MNC) for a modem, with caching
