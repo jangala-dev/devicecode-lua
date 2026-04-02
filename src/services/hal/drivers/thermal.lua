@@ -14,13 +14,18 @@ local channel = require "fibers.channel"
 
 local hal_types = require "services.hal.types.core"
 local cap_types      = require "services.hal.types.capabilities"
-local external_types = require "services.hal.types.external"
+local cap_args = require "services.hal.types.capability_args"
 local cache_mod      = require "shared.cache"
-local log            = require "services.log"
 
 local perform = fibers.perform
 
 local CONTROL_Q_LEN = 8
+
+local function dlog(logger, level, payload)
+    if logger and logger[level] then
+        logger[level](logger, payload)
+    end
+end
 
 ---@class ThermalDriver
 ---@field zone_id string       e.g. "zone0"
@@ -30,6 +35,7 @@ local CONTROL_Q_LEN = 8
 ---@field control_ch Channel
 ---@field cap_emit_ch Channel?
 ---@field cache Cache
+---@field logger Logger?
 local ThermalDriver = {}
 ThermalDriver.__index = ThermalDriver
 
@@ -53,11 +59,12 @@ end
 
 --- Read the zone's type string (e.g. "cpu-thermal").
 ---@param sysfs_dir string
+---@param logger Logger?
 ---@return string? zone_type
-local function read_zone_type(sysfs_dir)
+local function read_zone_type(sysfs_dir, logger)
     local raw, err = read_file(sysfs_dir .. '/type')
     if not raw then
-        log.debug("Thermal Driver: failed to read zone type:", err)
+        dlog(logger, 'debug', { what = 'zone_type_read_failed', err = tostring(err), path = sysfs_dir .. '/type' })
         return nil
     end
     return raw:match("^%s*(.-)%s*$")
@@ -69,7 +76,7 @@ end
 ---@return boolean ok
 ---@return any value_or_err
 function ThermalDriver:get(opts)
-    if opts == nil or getmetatable(opts) ~= external_types.ThermalGetOpts then
+    if opts == nil or getmetatable(opts) ~= cap_args.ThermalGetOpts then
         return false, "invalid opts"
     end
     local max_age = opts.max_age
@@ -98,14 +105,13 @@ end
 
 function ThermalDriver:control_manager()
     fibers.current_scope():finally(function()
-        log.trace(("Thermal Driver [%s]: control_manager exiting"):format(self.zone_id))
+        dlog(self.logger, 'debug', { what = 'control_manager_exiting' })
     end)
 
     while true do
         local request, req_err = self.control_ch:get()
         if not request then
-            log.debug(("Thermal Driver [%s]: control_ch closed: %s"):format(
-                self.zone_id, tostring(req_err)))
+            dlog(self.logger, 'debug', { what = 'control_ch_closed', err = tostring(req_err) })
             break
         end
 
@@ -173,8 +179,7 @@ function ThermalDriver:start()
     if meta_payload and self.cap_emit_ch then
         self.cap_emit_ch:put(meta_payload)
     elseif not meta_payload then
-        log.debug(("Thermal Driver [%s]: meta emit failed: %s"):format(
-            self.zone_id, tostring(emit_err)))
+        dlog(self.logger, 'debug', { what = 'meta_emit_failed', err = tostring(emit_err) })
     end
 
     local ok, spawn_err = self.scope:spawn(function()
@@ -204,9 +209,10 @@ end
 
 ---@param zone_id string    canonical zone id, e.g. "zone0"
 ---@param sysfs_dir string  full path to zone sysfs dir, e.g. "/sys/class/thermal/thermal_zone0"
+---@param logger Logger?
 ---@return ThermalDriver?
 ---@return string error
-local function new(zone_id, sysfs_dir)
+local function new(zone_id, sysfs_dir, logger)
     assert(type(zone_id) == 'string' and zone_id ~= '', "zone_id must be a non-empty string")
     assert(type(sysfs_dir) == 'string' and sysfs_dir ~= '', "sysfs_dir must be a non-empty string")
 
@@ -218,12 +224,12 @@ local function new(zone_id, sysfs_dir)
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("Thermal Driver [%s]: error - %s"):format(zone_id, tostring(primary)))
+            dlog(logger, 'error', { what = 'scope_failed', err = tostring(primary), status = st })
         end
-        log.trace(("Thermal Driver [%s]: stopped"):format(zone_id))
+        dlog(logger, 'debug', { what = 'stopped' })
     end)
 
-    local zone_type = read_zone_type(sysfs_dir)
+    local zone_type = read_zone_type(sysfs_dir, logger)
 
     return setmetatable({
         zone_id     = zone_id,
@@ -233,6 +239,7 @@ local function new(zone_id, sysfs_dir)
         control_ch  = channel.new(CONTROL_Q_LEN),
         cap_emit_ch = nil,
         cache       = cache_mod.new(),
+        logger      = logger,
         initialised = false,
     }, ThermalDriver), ""
 end

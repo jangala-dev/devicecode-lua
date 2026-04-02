@@ -15,12 +15,17 @@ local channel = require "fibers.channel"
 
 local hal_types = require "services.hal.types.core"
 local cap_types      = require "services.hal.types.capabilities"
-local external_types = require "services.hal.types.external"
-local log            = require "services.log"
+local cap_args = require "services.hal.types.capability_args"
 
 local perform = fibers.perform
 
 local CONTROL_Q_LEN = 8
+
+local function dlog(logger, level, payload)
+    if logger and logger[level] then
+        logger[level](logger, payload)
+    end
+end
 
 -- Delay (seconds) before executing a power command.  This gives the reply
 -- time to be transmitted to the caller before the system goes down.
@@ -30,6 +35,7 @@ local EXEC_DELAY = 1
 ---@field scope Scope
 ---@field control_ch Channel
 ---@field cap_emit_ch Channel?
+---@field logger Logger?
 local PowerDriver = {}
 PowerDriver.__index = PowerDriver
 
@@ -39,14 +45,14 @@ PowerDriver.__index = PowerDriver
 ---@return boolean ok
 ---@return nil reason
 function PowerDriver:shutdown(opts)
-    if opts ~= nil and getmetatable(opts) ~= external_types.PowerActionOpts then
+    if opts ~= nil and getmetatable(opts) ~= cap_args.PowerActionOpts then
         return false, "invalid opts"
     end
     local delay = (opts and opts.delay) or EXEC_DELAY
     self.scope:spawn(function()
         -- Give caller time to receive the reply before the system shuts down.
         perform(sleep.sleep_op(delay))
-        log.info("Power Driver: executing shutdown")
+        dlog(self.logger, 'info', { what = 'executing_shutdown' })
         local cmd = exec.command('shutdown', '-h', 'now')
         perform(cmd:run_op())
     end)
@@ -57,13 +63,13 @@ end
 ---@return boolean ok
 ---@return nil reason
 function PowerDriver:reboot(opts)
-    if opts ~= nil and getmetatable(opts) ~= external_types.PowerActionOpts then
+    if opts ~= nil and getmetatable(opts) ~= cap_args.PowerActionOpts then
         return false, "invalid opts"
     end
     local delay = (opts and opts.delay) or EXEC_DELAY
     self.scope:spawn(function()
         perform(sleep.sleep_op(delay))
-        log.info("Power Driver: executing reboot")
+        dlog(self.logger, 'info', { what = 'executing_reboot' })
         local cmd = exec.command('reboot')
         perform(cmd:run_op())
     end)
@@ -74,13 +80,13 @@ end
 
 function PowerDriver:control_manager()
     fibers.current_scope():finally(function()
-        log.trace("Power Driver: control_manager exiting")
+        dlog(self.logger, 'debug', { what = 'control_manager_exiting' })
     end)
 
     while true do
         local request, req_err = self.control_ch:get()
         if not request then
-            log.debug("Power Driver: control_ch closed:", req_err)
+            dlog(self.logger, 'debug', { what = 'control_ch_closed', err = tostring(req_err) })
             break
         end
 
@@ -147,7 +153,7 @@ function PowerDriver:start()
         if meta_payload then
             self.cap_emit_ch:put(meta_payload)
         else
-            log.debug("Power Driver: meta emit failed:", meta_err)
+            dlog(self.logger, 'debug', { what = 'meta_emit_failed', err = tostring(meta_err) })
         end
     end
 
@@ -176,9 +182,10 @@ function PowerDriver:stop(timeout)
     return true, ""
 end
 
+---@param logger Logger?
 ---@return PowerDriver?
 ---@return string error
-local function new()
+local function new(logger)
     local scope, err = fibers.current_scope():child()
     if not scope then
         return nil, "failed to create child scope: " .. tostring(err)
@@ -187,15 +194,16 @@ local function new()
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("Power Driver: error - %s"):format(tostring(primary)))
+            dlog(logger, 'error', { what = 'scope_failed', err = tostring(primary), status = st })
         end
-        log.trace("Power Driver: stopped")
+        dlog(logger, 'debug', { what = 'stopped' })
     end)
 
     return setmetatable({
         scope       = scope,
         control_ch  = channel.new(CONTROL_Q_LEN),
         cap_emit_ch = nil,
+        logger      = logger,
         initialised = false,
     }, PowerDriver), ""
 end

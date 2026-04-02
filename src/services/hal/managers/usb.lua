@@ -7,20 +7,29 @@
 local usb_driver = require "services.hal.drivers.usb"
 local hal_types  = require "services.hal.types.core"
 
+---@type any
+local usb_driver_any = usb_driver
+
 local fibers = require "fibers"
 local op     = require "fibers.op"
 local sleep  = require "fibers.sleep"
 
-local log = require "services.log"
-
 local STOP_TIMEOUT = 5.0
+
+local function dlog(logger, level, payload)
+    if logger and logger[level] then
+        logger[level](logger, payload)
+    end
+end
 
 ---@class UsbManager
 ---@field scope Scope?
 ---@field started boolean
+---@field logger Logger?
 local UsbManager = {
     started = false,
     scope   = nil,
+    logger  = nil,
 }
 
 ---- manager fiber ----
@@ -29,13 +38,18 @@ local UsbManager = {
 ---@param dev_ev_ch Channel
 ---@param cap_emit_ch Channel
 local function manager(scope, dev_ev_ch, cap_emit_ch)
-    log.trace("USB Manager: started")
+    dlog(UsbManager.logger, 'debug', { what = 'started' })
 
     scope:finally(function()
-        log.trace("USB Manager: closed")
+        dlog(UsbManager.logger, 'debug', { what = 'closed' })
     end)
 
-    local driver, drv_err = usb_driver.new('usb3')
+    local driver_logger = nil
+    if UsbManager.logger and UsbManager.logger.child then
+        driver_logger = UsbManager.logger:child({ component = 'driver', driver = 'usb', id = 'usb3' })
+    end
+
+    local driver, drv_err = usb_driver_any.new('usb3', driver_logger)
     if not driver then
         error("USB Manager: failed to create USB driver: " .. tostring(drv_err))
     end
@@ -62,15 +76,16 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
     end
     dev_ev_ch:put(device_event)
 
-    log.trace("USB Manager: device registered")
+    dlog(UsbManager.logger, 'info', { what = 'device_registered' })
 end
 
 ---- public interface ----
 
+---@param logger Logger?
 ---@param dev_ev_ch Channel
 ---@param cap_emit_ch Channel
 ---@return string error
-function UsbManager.start(dev_ev_ch, cap_emit_ch)
+function UsbManager.start(logger, dev_ev_ch, cap_emit_ch)
     if UsbManager.started then
         return "Already started"
     end
@@ -80,19 +95,20 @@ function UsbManager.start(dev_ev_ch, cap_emit_ch)
         return "Failed to create child scope: " .. tostring(err)
     end
     UsbManager.scope = scope
+    UsbManager.logger = logger
 
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("USB Manager: error - %s"):format(tostring(primary)))
+            dlog(UsbManager.logger, 'error', { what = 'scope_failed', err = tostring(primary), status = st })
         end
-        log.trace("USB Manager: stopped")
+        dlog(UsbManager.logger, 'debug', { what = 'stopped' })
     end)
 
     scope:spawn(manager, dev_ev_ch, cap_emit_ch)
 
     UsbManager.started = true
-    log.trace("USB Manager: started")
+    dlog(UsbManager.logger, 'debug', { what = 'start_called' })
     return ""
 end
 

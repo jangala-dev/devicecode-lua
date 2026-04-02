@@ -14,22 +14,45 @@ local memory_driver  = require "services.hal.drivers.memory"
 local thermal_driver = require "services.hal.drivers.thermal"
 local hal_types      = require "services.hal.types.core"
 
+---@type any
+local cpu_driver_any = cpu_driver
+---@type any
+local memory_driver_any = memory_driver
+---@type any
+local thermal_driver_any = thermal_driver
+
 local fibers  = require "fibers"
 local op      = require "fibers.op"
 local sleep   = require "fibers.sleep"
 local exec    = require "fibers.io.exec"
 
-local log = require "services.log"
-
 local STOP_TIMEOUT = 5.0
+
+local function dlog(logger, level, payload)
+    if logger and logger[level] then
+        logger[level](logger, payload)
+    end
+end
 
 ---@class SysmonManager
 ---@field scope Scope?
 ---@field started boolean
+---@field logger Logger?
 local SysmonManager = {
     started = false,
     scope   = nil,
+    logger  = nil,
 }
+
+---@param driver string
+---@param id string
+---@return Logger?
+local function child_logger(driver, id)
+    if SysmonManager.logger and SysmonManager.logger.child then
+        return SysmonManager.logger:child({ component = 'driver', driver = driver, id = id })
+    end
+    return nil
+end
 
 ---- helpers ----
 
@@ -39,7 +62,7 @@ local function discover_thermal_zones()
     local cmd = exec.command('ls', '/sys/class/thermal/')
     local out, status, code = fibers.perform(cmd:output_op())
     if status ~= 'exited' or code ~= 0 then
-        log.warn("Sysmon Manager: failed to list /sys/class/thermal/:", tostring(code))
+        dlog(SysmonManager.logger, 'warn', { what = 'thermal_discovery_failed', code = tostring(code) })
         return {}
     end
 
@@ -67,29 +90,29 @@ end
 local function register_driver(driver, class, id, meta, dev_ev_ch, cap_emit_ch)
     local init_err = driver:init()
     if init_err ~= "" then
-        log.error(("Sysmon Manager: failed to init driver %s/%s: %s"):format(
-            class, id, init_err))
+        dlog(SysmonManager.logger, 'error', { what = 'driver_init_failed', class = class, id = id, err = init_err })
         return false
     end
 
     local capabilities, cap_err = driver:capabilities(cap_emit_ch)
     if cap_err ~= "" then
-        log.error(("Sysmon Manager: failed to bind capabilities for %s/%s: %s"):format(
-            class, id, cap_err))
+        dlog(SysmonManager.logger, 'error', {
+            what = 'bind_capabilities_failed', class = class, id = id, err = cap_err,
+        })
         return false
     end
 
     local ok, start_err = driver:start()
     if not ok then
-        log.error(("Sysmon Manager: failed to start driver %s/%s: %s"):format(
-            class, id, start_err))
+        dlog(SysmonManager.logger, 'error', { what = 'driver_start_failed', class = class, id = id, err = start_err })
         return false
     end
 
     local device_event, ev_err = hal_types.new.DeviceEvent("added", class, id, meta, capabilities)
     if not device_event then
-        log.error(("Sysmon Manager: failed to create DeviceEvent for %s/%s: %s"):format(
-            class, id, ev_err))
+        dlog(SysmonManager.logger, 'error', {
+            what = 'device_event_create_failed', class = class, id = id, err = ev_err,
+        })
         return false
     end
     dev_ev_ch:put(device_event)
@@ -102,24 +125,28 @@ end
 ---@param dev_ev_ch Channel
 ---@param cap_emit_ch Channel
 local function manager(scope, dev_ev_ch, cap_emit_ch)
-    log.trace("Sysmon Manager: started")
+    dlog(SysmonManager.logger, 'debug', { what = 'started' })
 
     scope:finally(function()
-        log.trace("Sysmon Manager: closed")
+        dlog(SysmonManager.logger, 'debug', { what = 'closed' })
     end)
 
     -- ── CPU ──
-    local cpu_drv, cpu_err = cpu_driver.new()
+    local cpu_drv, cpu_err = cpu_driver_any.new(child_logger('cpu', '1'))
     if not cpu_drv then
-        log.error("Sysmon Manager: failed to create CPU driver:", cpu_err)
+        dlog(SysmonManager.logger, 'error', {
+            what = 'driver_create_failed', class = 'cpu', id = '1', err = cpu_err,
+        })
     else
         register_driver(cpu_drv, 'cpu', '1', {}, dev_ev_ch, cap_emit_ch)
     end
 
     -- ── Memory ──
-    local mem_drv, mem_err = memory_driver.new()
+    local mem_drv, mem_err = memory_driver_any.new(child_logger('memory', '1'))
     if not mem_drv then
-        log.error("Sysmon Manager: failed to create Memory driver:", mem_err)
+        dlog(SysmonManager.logger, 'error', {
+            what = 'driver_create_failed', class = 'memory', id = '1', err = mem_err,
+        })
     else
         register_driver(mem_drv, 'memory', '1', {}, dev_ev_ch, cap_emit_ch)
     end
@@ -127,28 +154,34 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
     -- ── Thermal zones ──
     local zones = discover_thermal_zones()
     if #zones == 0 then
-        log.info("Sysmon Manager: no thermal zones discovered")
+        dlog(SysmonManager.logger, 'info', { what = 'no_thermal_zones_discovered' })
     end
     for _, zone in ipairs(zones) do
-        local therm_drv, therm_err = thermal_driver.new(zone.zone_id, zone.sysfs_dir)
+        local therm_drv, therm_err = thermal_driver_any.new(
+            zone.zone_id,
+            zone.sysfs_dir,
+            child_logger('thermal', zone.zone_id)
+        )
         if not therm_drv then
-            log.error(("Sysmon Manager: failed to create thermal driver for %s: %s"):format(
-                zone.zone_id, therm_err))
+            dlog(SysmonManager.logger, 'error', {
+                what = 'driver_create_failed', class = 'thermal', id = zone.zone_id, err = therm_err,
+            })
         else
             register_driver(therm_drv, 'thermal', zone.zone_id,
                 { zone = zone.zone_id, path = zone.sysfs_dir }, dev_ev_ch, cap_emit_ch)
         end
     end
 
-    log.trace("Sysmon Manager: all devices registered")
+    dlog(SysmonManager.logger, 'info', { what = 'all_devices_registered' })
 end
 
 ---- public interface ----
 
+---@param logger Logger?
 ---@param dev_ev_ch Channel
 ---@param cap_emit_ch Channel
 ---@return string error
-function SysmonManager.start(dev_ev_ch, cap_emit_ch)
+function SysmonManager.start(logger, dev_ev_ch, cap_emit_ch)
     if SysmonManager.started then
         return "Already started"
     end
@@ -158,19 +191,20 @@ function SysmonManager.start(dev_ev_ch, cap_emit_ch)
         return "Failed to create child scope: " .. tostring(err)
     end
     SysmonManager.scope = scope
+    SysmonManager.logger = logger
 
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("Sysmon Manager: error - %s"):format(tostring(primary)))
+            dlog(SysmonManager.logger, 'error', { what = 'scope_failed', err = tostring(primary), status = st })
         end
-        log.trace("Sysmon Manager: stopped")
+        dlog(SysmonManager.logger, 'debug', { what = 'stopped' })
     end)
 
     scope:spawn(manager, dev_ev_ch, cap_emit_ch)
 
     SysmonManager.started = true
-    log.trace("Sysmon Manager: started")
+    dlog(SysmonManager.logger, 'debug', { what = 'start_called' })
     return ""
 end
 

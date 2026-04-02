@@ -7,20 +7,29 @@
 local power_driver = require "services.hal.drivers.power"
 local hal_types    = require "services.hal.types.core"
 
+---@type any
+local power_driver_any = power_driver
+
 local fibers = require "fibers"
 local op     = require "fibers.op"
 local sleep  = require "fibers.sleep"
 
-local log = require "services.log"
-
 local STOP_TIMEOUT = 5.0
+
+local function dlog(logger, level, payload)
+    if logger and logger[level] then
+        logger[level](logger, payload)
+    end
+end
 
 ---@class PowerManager
 ---@field scope Scope?
 ---@field started boolean
+---@field logger Logger?
 local PowerManager = {
     started = false,
     scope   = nil,
+    logger  = nil,
 }
 
 ---- manager fiber ----
@@ -29,13 +38,18 @@ local PowerManager = {
 ---@param dev_ev_ch Channel
 ---@param cap_emit_ch Channel
 local function manager(scope, dev_ev_ch, cap_emit_ch)
-    log.trace("Power Manager: started")
+    dlog(PowerManager.logger, 'debug', { what = 'started' })
 
     scope:finally(function()
-        log.trace("Power Manager: closed")
+        dlog(PowerManager.logger, 'debug', { what = 'closed' })
     end)
 
-    local driver, drv_err = power_driver.new()
+    local driver_logger = nil
+    if PowerManager.logger and PowerManager.logger.child then
+        driver_logger = PowerManager.logger:child({ component = 'driver', driver = 'power', id = '1' })
+    end
+
+    local driver, drv_err = power_driver_any.new(driver_logger)
     if not driver then
         error("Power Manager: failed to create power driver: " .. tostring(drv_err))
     end
@@ -62,15 +76,16 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
     end
     dev_ev_ch:put(device_event)
 
-    log.trace("Power Manager: device registered")
+    dlog(PowerManager.logger, 'info', { what = 'device_registered' })
 end
 
 ---- public interface ----
 
+---@param logger Logger?
 ---@param dev_ev_ch Channel
 ---@param cap_emit_ch Channel
 ---@return string error
-function PowerManager.start(dev_ev_ch, cap_emit_ch)
+function PowerManager.start(logger, dev_ev_ch, cap_emit_ch)
     if PowerManager.started then
         return "Already started"
     end
@@ -80,19 +95,20 @@ function PowerManager.start(dev_ev_ch, cap_emit_ch)
         return "Failed to create child scope: " .. tostring(err)
     end
     PowerManager.scope = scope
+    PowerManager.logger = logger
 
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("Power Manager: error - %s"):format(tostring(primary)))
+            dlog(PowerManager.logger, 'error', { what = 'scope_failed', err = tostring(primary), status = st })
         end
-        log.trace("Power Manager: stopped")
+        dlog(PowerManager.logger, 'debug', { what = 'stopped' })
     end)
 
     scope:spawn(manager, dev_ev_ch, cap_emit_ch)
 
     PowerManager.started = true
-    log.trace("Power Manager: started")
+    dlog(PowerManager.logger, 'debug', { what = 'start_called' })
     return ""
 end
 

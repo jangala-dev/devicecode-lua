@@ -13,19 +13,25 @@ local channel = require "fibers.channel"
 
 local hal_types = require "services.hal.types.core"
 local cap_types      = require "services.hal.types.capabilities"
-local external_types = require "services.hal.types.external"
+local cap_args = require "services.hal.types.capability_args"
 local cache_mod      = require "shared.cache"
-local log       = require "services.log"
 
 local perform = fibers.perform
 
 local CONTROL_Q_LEN = 8
+
+local function dlog(logger, level, payload)
+    if logger and logger[level] then
+        logger[level](logger, payload)
+    end
+end
 
 ---@class MemoryDriver
 ---@field scope Scope
 ---@field control_ch Channel
 ---@field cap_emit_ch Channel?
 ---@field cache Cache
+---@field logger Logger?
 local MemoryDriver = {}
 MemoryDriver.__index = MemoryDriver
 
@@ -81,7 +87,7 @@ local VALID_FIELDS = { total = true, used = true, free = true, util = true }
 ---@return boolean ok
 ---@return any value_or_err
 function MemoryDriver:get(opts)
-    if opts == nil or getmetatable(opts) ~= external_types.MemoryGetOpts then
+    if opts == nil or getmetatable(opts) ~= cap_args.MemoryGetOpts then
         return false, "invalid opts"
     end
     local field   = opts.field
@@ -114,13 +120,13 @@ end
 
 function MemoryDriver:control_manager()
     fibers.current_scope():finally(function()
-        log.trace("Memory Driver: control_manager exiting")
+        dlog(self.logger, 'debug', { what = 'control_manager_exiting' })
     end)
 
     while true do
         local request, req_err = self.control_ch:get()
         if not request then
-            log.debug("Memory Driver: control_ch closed:", req_err)
+            dlog(self.logger, 'debug', { what = 'control_ch_closed', err = tostring(req_err) })
             break
         end
 
@@ -185,7 +191,7 @@ function MemoryDriver:start()
     if payload and self.cap_emit_ch then
         self.cap_emit_ch:put(payload)
     elseif not payload then
-        log.debug("Memory Driver: meta emit construction failed:", err)
+        dlog(self.logger, 'debug', { what = 'meta_emit_failed', err = tostring(err) })
     end
 
     local ok, spawn_err = self.scope:spawn(function()
@@ -213,9 +219,10 @@ function MemoryDriver:stop(timeout)
     return true, ""
 end
 
+---@param logger Logger?
 ---@return MemoryDriver?
 ---@return string error
-local function new()
+local function new(logger)
     local scope, err = fibers.current_scope():child()
     if not scope then
         return nil, "failed to create child scope: " .. tostring(err)
@@ -224,9 +231,9 @@ local function new()
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("Memory Driver: error - %s"):format(tostring(primary)))
+            dlog(logger, 'error', { what = 'scope_failed', err = tostring(primary), status = st })
         end
-        log.trace("Memory Driver: stopped")
+        dlog(logger, 'debug', { what = 'stopped' })
     end)
 
     return setmetatable({
@@ -234,6 +241,7 @@ local function new()
         control_ch  = channel.new(CONTROL_Q_LEN),
         cap_emit_ch = nil,
         cache       = cache_mod.new(),
+        logger      = logger,
         initialised = false,
     }, MemoryDriver), ""
 end
