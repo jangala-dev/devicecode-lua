@@ -119,9 +119,9 @@ function HalService.start(conn, opts)
         return out
     end
 
-        local function obs_emitter(level, payload)
-            svc:obs_log(level, payload)
-        end
+    local function obs_emitter(level, payload)
+        svc:obs_log(level, payload)
+    end
 
     ---Gets the device instance or returns nil
     ---@param class DeviceClass
@@ -226,6 +226,7 @@ function HalService.start(conn, opts)
                     id = cap.id,
                 })
             else
+                svc:obs_event('capability_registered', { class = cap.class, id = cap.id })
                 conn:retain(t_cap_state(cap.class, cap.id), event_type)
                 conn:retain(t_cap_meta(cap.class, cap.id), { offerings = cap.offerings })
             end
@@ -250,6 +251,7 @@ function HalService.start(conn, opts)
                     id = cap.id,
                 })
             else
+                svc:obs_event('capability_unregistered', { class = cap.class, id = cap.id })
                 conn:retain(t_cap_state(cap.class, cap.id), event_type)
                 conn:unretain(t_cap_meta(cap.class, cap.id))
             end
@@ -404,10 +406,11 @@ function HalService.start(conn, opts)
             if not managers[name] then
                 local ok, manager = pcall(require, "services.hal.managers." .. name)
                 if not ok then
-                    svc:obs_log('error', { what = 'manager_require_failed', manager = name })
+                    svc:obs_log('error', { what = 'manager_require_failed', manager = name, err = manager })
                 else
                     ---@cast manager any
-                    local manager_logger = Logger.new(obs_emitter, { service = svc.name, component = 'manager', manager = name })
+                    local manager_logger = Logger.new(obs_emitter,
+                        { service = svc.name, component = 'manager', manager = name })
                     local start_err = manager.start(manager_logger, dev_ev_ch, cap_emit_ch)
                     if start_err ~= "" then
                         svc:obs_log('error', { what = 'manager_start_failed', manager = name, err = start_err })
@@ -445,7 +448,7 @@ function HalService.start(conn, opts)
         svc:obs_event('bootstrap_begin', {})
 
         local fs_manager = require "services.hal.managers.filesystem"
-    ---@cast fs_manager any
+        ---@cast fs_manager any
 
         local fs_manager_err = fs_manager.start(
             Logger.new(obs_emitter, { service = svc.name, component = 'manager', manager = 'filesystem' }),
