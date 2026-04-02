@@ -15,14 +15,19 @@ local channel = require "fibers.channel"
 
 local hal_types = require "services.hal.types.core"
 local cap_types      = require "services.hal.types.capabilities"
-local external_types = require "services.hal.types.external"
+local cap_args = require "services.hal.types.capability_args"
 local cache_mod      = require "shared.cache"
-local log       = require "services.log"
 
 local perform = fibers.perform
 
 local CONTROL_Q_LEN  = 8
 local FREQ_SYSFS_FMT = '/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq'
+
+local function dlog(logger, level, payload)
+    if logger and logger[level] then
+        logger[level](logger, payload)
+    end
+end
 
 ---@class CpuDriver
 ---@field scope Scope
@@ -31,6 +36,7 @@ local FREQ_SYSFS_FMT = '/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq'
 ---@field cache Cache
 ---@field model string
 ---@field core_count number
+---@field logger Logger?
 local CpuDriver = {}
 CpuDriver.__index = CpuDriver
 
@@ -53,12 +59,13 @@ local function read_file(path)
 end
 
 --- Parse /proc/cpuinfo for the first model name and core count.
+---@param logger Logger?
 ---@return string model
 ---@return number core_count
-local function read_cpuinfo()
+local function read_cpuinfo(logger)
     local content, err = read_file('/proc/cpuinfo')
     if not content then
-        log.warn("CPU Driver: failed to read /proc/cpuinfo:", err)
+        dlog(logger, 'warn', { what = 'cpuinfo_read_failed', err = tostring(err) })
         return "", 1
     end
     local model = content:match("model name%s*:%s*([^\n]+)") or ""
@@ -93,8 +100,8 @@ end
 ---@return number util percentage 0-100
 local function compute_util(s1, s2)
     local total1, total2, idle1, idle2 = 0, 0, (s1[4] or 0), (s2[4] or 0)
-    for i, v in ipairs(s1) do total1 = total1 + v; _ = i end
-    for i, v in ipairs(s2) do total2 = total2 + v; _ = i end
+    for _, v in ipairs(s1) do total1 = total1 + v end
+    for _, v in ipairs(s2) do total2 = total2 + v end
     local delta_total = total2 - total1
     local delta_idle  = idle2 - idle1
     if delta_total == 0 then return 0 end
@@ -109,7 +116,7 @@ local VALID_FIELDS = { utilisation = true, core_utilisations = true, frequency =
 ---@return boolean ok
 ---@return any value_or_err
 function CpuDriver:get(opts)
-    if opts == nil or getmetatable(opts) ~= external_types.CpuGetOpts then
+    if opts == nil or getmetatable(opts) ~= cap_args.CpuGetOpts then
         return false, "invalid opts"
     end
     local field   = opts.field
@@ -170,7 +177,7 @@ function CpuDriver:get(opts)
                     count = count + 1
                 end
             else
-                log.debug("CPU Driver: skip", path, ferr)
+                dlog(self.logger, 'debug', { what = 'frequency_read_skipped', path = path, err = tostring(ferr) })
             end
         end
         local avg = (count > 0) and (total / count) or 0
@@ -190,13 +197,13 @@ end
 
 function CpuDriver:control_manager()
     fibers.current_scope():finally(function()
-        log.trace("CPU Driver: control_manager exiting")
+        dlog(self.logger, 'debug', { what = 'control_manager_exiting' })
     end)
 
     while true do
         local request, req_err = self.control_ch:get()
         if not request then
-            log.debug("CPU Driver: control_ch closed:", req_err)
+            dlog(self.logger, 'debug', { what = 'control_ch_closed', err = tostring(req_err) })
             break
         end
         ---@cast request ControlRequest
@@ -232,7 +239,7 @@ function CpuDriver:_emit(mode, key, data)
     if not self.cap_emit_ch then return end
     local payload, err = hal_types.new.Emit('cpu', '1', mode, key, data)
     if not payload then
-        log.debug("CPU Driver: emit error:", err)
+        dlog(self.logger, 'debug', { what = 'emit_failed', key = key, err = tostring(err) })
         return
     end
     self.cap_emit_ch:put(payload)
@@ -302,9 +309,10 @@ function CpuDriver:stop(timeout)
     return true, ""
 end
 
+---@param logger Logger?
 ---@return CpuDriver?
 ---@return string error
-local function new()
+local function new(logger)
     local scope, err = fibers.current_scope():child()
     if not scope then
         return nil, "failed to create child scope: " .. tostring(err)
@@ -313,12 +321,12 @@ local function new()
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("CPU Driver: error - %s"):format(tostring(primary)))
+            dlog(logger, 'error', { what = 'scope_failed', err = tostring(primary), status = st })
         end
-        log.trace("CPU Driver: stopped")
+        dlog(logger, 'debug', { what = 'stopped' })
     end)
 
-    local model, core_count = read_cpuinfo()
+    local model, core_count = read_cpuinfo(logger)
 
     return setmetatable({
         scope       = scope,
@@ -327,6 +335,7 @@ local function new()
         cache       = cache_mod.new(),
         model       = model,
         core_count  = core_count,
+        logger      = logger,
         initialised = false,
     }, CpuDriver), ""
 end

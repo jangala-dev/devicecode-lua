@@ -15,11 +15,16 @@ local channel = require "fibers.channel"
 
 local hal_types = require "services.hal.types.core"
 local cap_types = require "services.hal.types.capabilities"
-local log       = require "services.log"
 
 local perform = fibers.perform
 
 local CONTROL_Q_LEN = 8
+
+local function dlog(logger, level, payload)
+    if logger and logger[level] then
+        logger[level](logger, payload)
+    end
+end
 
 -- Sysfs base path for USB hubs on bigbox-ss hardware (BCM2711 / VL805).
 local USB_HUB_PREFIX = "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb"
@@ -40,6 +45,7 @@ local VL805_SUPPORTED_FROM = os.time({ year = 2019, month = 9, day = 10, hour = 
 ---@field control_ch Channel
 ---@field cap_emit_ch Channel?
 ---@field enabled boolean     current logical state
+---@field logger Logger?
 local UsbDriver = {}
 UsbDriver.__index = UsbDriver
 
@@ -171,11 +177,12 @@ local function get_vl805_timestamp()
 end
 
 ---@param enabled boolean
-local function emit_state(emit_ch, bus_id, enabled)
+---@param logger Logger?
+local function emit_state(emit_ch, bus_id, enabled, logger)
     if not emit_ch then return end
     local payload, err = hal_types.new.Emit('usb', bus_id, 'state', 'bus', { enabled = enabled })
     if not payload then
-        log.debug(("USB Driver [%s]: state emit failed: %s"):format(bus_id, tostring(err)))
+        dlog(logger, 'debug', { what = 'state_emit_failed', err = tostring(err) })
         return
     end
     emit_ch:put(payload)
@@ -183,17 +190,17 @@ end
 
 ---- capability verbs ----
 
----@param opts table?
+---@param _opts table?
 ---@return boolean ok
 ---@return any value_or_err
-function UsbDriver:enable(opts)
+function UsbDriver:enable(_opts)
     if self.enabled then
         return true, nil
     end
 
     local auth_err = set_usb_hub_auth_default(true, 2)
     if auth_err then
-        log.warn("USB Driver: failed to restore authorized_default:", auth_err)
+        dlog(self.logger, 'warn', { what = 'restore_authorized_default_failed', err = tostring(auth_err) })
     end
 
     local power_err = set_usb_hub_power(true, 2)
@@ -206,10 +213,10 @@ function UsbDriver:enable(opts)
     return true, nil
 end
 
----@param opts table?
+---@param _opts table?
 ---@return boolean ok
 ---@return any value_or_err
-function UsbDriver:disable(opts)
+function UsbDriver:disable(_opts)
     if not self.enabled then
         return true, nil
     end
@@ -227,30 +234,30 @@ function UsbDriver:disable(opts)
     -- Deauthorize each connected USB3 port so devices fall back to USB2.
     local hub_used, clear_err = clear_usb3_hub()
     if clear_err then
-        log.error("USB Driver: error clearing USB3 hub, rolling back:", clear_err)
+        dlog(self.logger, 'error', { what = 'clear_usb3_hub_failed', err = tostring(clear_err) })
         repopulate_usb3_hub()
         set_usb_hub_auth_default(true, 2)
         return false, clear_err
     end
     if not hub_used then
         -- No active USB3 connections; still prevent future connections.
-        log.info("USB Driver: no USB3 devices connected")
+        dlog(self.logger, 'info', { what = 'no_usb3_devices_connected' })
         set_usb_hub_auth_default(false, 2)
         self.enabled = false
-        emit_state(self.cap_emit_ch, self.bus_id, false)
+        emit_state(self.cap_emit_ch, self.bus_id, false, self.logger)
         return true, nil
     end
 
     -- Prevent future USB3 connections.
     local auth_err = set_usb_hub_auth_default(false, 2)
     if auth_err then
-        log.warn("USB Driver: failed to set authorized_default=0:", auth_err)
+        dlog(self.logger, 'warn', { what = 'set_authorized_default_failed', err = tostring(auth_err) })
     end
 
     -- Power down USB3 hub to force devices onto USB2.
     local power_err = set_usb_hub_power(false, 2)
     if power_err then
-        log.error("USB Driver: error powering down USB3 hub, rolling back:", power_err)
+        dlog(self.logger, 'error', { what = 'power_down_usb3_hub_failed', err = tostring(power_err) })
         set_usb_hub_power(true, 2)
         repopulate_usb3_hub()
         set_usb_hub_auth_default(true, 2)
@@ -268,11 +275,11 @@ function UsbDriver:disable(opts)
         perform(sleep.sleep_op(1))
     end
     if not migrated then
-        log.warn("USB Driver: USB3 devices not detected on USB2 after power down, may be unstable")
+        dlog(self.logger, 'warn', { what = 'usb3_migration_incomplete' })
     end
 
     self.enabled = false
-    emit_state(self.cap_emit_ch, self.bus_id, false)
+    emit_state(self.cap_emit_ch, self.bus_id, false, self.logger)
     return true, nil
 end
 
@@ -280,14 +287,13 @@ end
 
 function UsbDriver:control_manager()
     fibers.current_scope():finally(function()
-        log.trace(("USB Driver [%s]: control_manager exiting"):format(self.bus_id))
+        dlog(self.logger, 'debug', { what = 'control_manager_exiting' })
     end)
 
     while true do
         local request, req_err = self.control_ch:get()
         if not request then
-            log.debug(("USB Driver [%s]: control_ch closed: %s"):format(
-                self.bus_id, tostring(req_err)))
+            dlog(self.logger, 'debug', { what = 'control_ch_closed', err = tostring(req_err) })
             break
         end
 
@@ -347,7 +353,7 @@ function UsbDriver:start()
     end
     if self.cap_emit_ch then
         -- Publish initial bus state.
-        emit_state(self.cap_emit_ch, self.bus_id, self.enabled)
+        emit_state(self.cap_emit_ch, self.bus_id, self.enabled, self.logger)
 
         -- Publish meta.
         local meta_payload, meta_err = hal_types.new.Emit('usb', self.bus_id, 'meta', 'info', {
@@ -358,8 +364,7 @@ function UsbDriver:start()
         if meta_payload then
             self.cap_emit_ch:put(meta_payload)
         else
-            log.debug(("USB Driver [%s]: meta emit failed: %s"):format(
-                self.bus_id, tostring(meta_err)))
+            dlog(self.logger, 'debug', { what = 'meta_emit_failed', err = tostring(meta_err) })
         end
     end
 
@@ -389,9 +394,10 @@ function UsbDriver:stop(timeout)
 end
 
 ---@param bus_id string  capability id, e.g. "usb3"
+---@param logger Logger?
 ---@return UsbDriver?
 ---@return string error
-local function new(bus_id)
+local function new(bus_id, logger)
     bus_id = bus_id or 'usb3'
 
     local scope, err = fibers.current_scope():child()
@@ -402,9 +408,9 @@ local function new(bus_id)
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
-            log.error(("USB Driver [%s]: error - %s"):format(bus_id, tostring(primary)))
+            dlog(logger, 'error', { what = 'scope_failed', err = tostring(primary), status = st })
         end
-        log.trace(("USB Driver [%s]: stopped"):format(bus_id))
+        dlog(logger, 'debug', { what = 'stopped' })
     end)
 
     local enabled = probe_usb3_state()
@@ -415,6 +421,7 @@ local function new(bus_id)
         control_ch  = channel.new(CONTROL_Q_LEN),
         cap_emit_ch = nil,
         enabled     = enabled,
+        logger      = logger,
         initialised = false,
     }, UsbDriver), ""
 end
