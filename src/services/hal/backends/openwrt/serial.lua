@@ -199,23 +199,27 @@ function M.open_serial_stream(self, req, _msg)
 		return { ok = false, err = tostring(aerr) }
 	end
 
-	-- Best-effort device configuration.
+	-- Configure the serial device. All stty variants failing is fatal —
+	-- an unconfigured TTY will not match the expected baud/mode and the
+	-- link will produce decode errors or timeouts.
 	do
 		local ok_cfg, cfg_errs, cfg_cmd = try_serial_config(self, args)
 		if not ok_cfg then
+			local parts = {}
+			for i = 1, #(cfg_errs or {}) do
+				local rec_err = cfg_errs[i]
+				parts[#parts + 1] = tostring(rec_err.cmd) .. ': ' .. tostring(rec_err.err)
+			end
+			local msg = table.concat(parts, ' | ')
 			if self._host and type(self._host.log) == 'function' then
-				local parts = {}
-				for i = 1, #(cfg_errs or {}) do
-					local rec_err = cfg_errs[i]
-					parts[#parts + 1] = tostring(rec_err.cmd) .. ': ' .. tostring(rec_err.err)
-				end
 				self._host.log('warn', {
 					what   = 'serial_stty_failed',
 					ref    = ref,
 					device = rec.device,
-					err    = table.concat(parts, ' | '),
+					err    = msg,
 				})
 			end
+			return { ok = false, err = 'serial config failed: ' .. msg }
 		elseif self._host and type(self._host.log) == 'function' and cfg_cmd ~= 'stty' then
 			self._host.log('info', {
 				what   = 'serial_stty_fallback_used',
