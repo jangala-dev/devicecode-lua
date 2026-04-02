@@ -256,8 +256,8 @@ local function sysinfo_fiber(_, svc, report_period_ch)
         local choices = {
             sleep  = sleep.sleep_op(report_period),
             period = report_period_ch:get_op(),
-            -- time   = time_sub:recv_op(),
-            time = time_synced and op.never() or op.always( { payload = true } )
+            time   = time_sub:recv_op(),
+            -- time = time_synced and op.never() or op.always( { payload = true } )
         }
 
         local which, msg = perform(op.named_choice(choices))
