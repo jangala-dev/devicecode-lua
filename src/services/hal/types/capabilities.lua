@@ -102,42 +102,38 @@ function new.ModemCapability(id, control_ch)
     return new.Capability('modem', id, control_ch, offerings)
 end
 
----@param class CapabilityClass
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?
 ---@return string error
-function new.GeoCapability(class, id, control_ch)
+function new.GeoCapability(id, control_ch)
     local offerings = {}
-    return new.Capability(class, id, control_ch, offerings)
+    return new.Capability('geo', id, control_ch, offerings)
 end
 
----@param class CapabilityClass
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?
 ---@return string error
-function new.TimeCapability(class, id, control_ch)
+function new.TimeCapability(id, control_ch)
     local offerings = {}
-    return new.Capability(class, id, control_ch, offerings)
+    return new.Capability('time', id, control_ch, offerings)
 end
 
----@param class CapabilityClass
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?
 ---@return string error
-function new.NetworkCapability(class, id, control_ch)
+function new.NetworkCapability(id, control_ch)
     local offerings = {}
-    return new.Capability(class, id, control_ch, offerings)
+    return new.Capability('network', id, control_ch, offerings)
 end
 
----@param class CapabilityClass
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?
 ---@return string error
-function new.WirelessCapability(class, id, control_ch)
+function new.WirelessCapability(id, control_ch)
     local offerings = {
         'set_channels',
         'set_country',
@@ -149,15 +145,14 @@ function new.WirelessCapability(class, id, control_ch)
         'clear_radio_config',
         'apply'
     }
-    return new.Capability(class, id, control_ch, offerings)
+    return new.Capability('wireless', id, control_ch, offerings)
 end
 
----@param class CapabilityClass
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?
 ---@return string error
-function new.BandCapability(class, id, control_ch)
+function new.BandCapability(id, control_ch)
     local offerings = {
         'set_log_level',
         'set_kicking',
@@ -174,19 +169,18 @@ function new.BandCapability(class, id, control_ch)
         'set_networking',
         'apply'
     }
-    return new.Capability(class, id, control_ch, offerings)
+    return new.Capability('band', id, control_ch, offerings)
 end
 
----@param class CapabilityClass
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?
 ---@return string error
-function new.SerialCapability(class, id, control_ch)
+function new.SerialCapability(id, control_ch)
     local offerings = {
         'open', 'close', 'write'
     }
-    return new.Capability(class, id, control_ch, offerings)
+    return new.Capability('serial', id, control_ch, offerings)
 end
 
 ---@param id CapabilityId
