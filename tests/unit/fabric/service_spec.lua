@@ -627,8 +627,15 @@ function T.fabric_accepts_symmetric_peer_hello_and_imports_remote_publish()
 		cfg_conn:retain({ 'config', 'fabric' }, base_fabric_cfg())
 
 		local which, msg, err = recv_with_timeout(sub:recv_op(), 0.75)
-		assert(which == 'value', explain('timed out waiting for imported remote publish after symmetric hello', diag, fake_hal, wire))
-		assert(msg ~= nil, explain('subscription ended waiting for imported remote publish after symmetric hello: ' .. tostring(err), diag, fake_hal, wire))
+		assert(which == 'value', explain(
+			'timed out waiting for imported remote publish after symmetric hello',
+			diag, fake_hal, wire
+		))
+		assert(msg ~= nil, explain(
+			'subscription ended waiting for imported remote publish after symmetric hello: '
+				.. tostring(err),
+			diag, fake_hal, wire
+		))
 
 		assert(msg.topic[1] == 'peer')
 		assert(msg.topic[2] == 'mcu-1')
@@ -637,6 +644,238 @@ function T.fabric_accepts_symmetric_peer_hello_and_imports_remote_publish()
 		assert(type(msg.payload) == 'table')
 		assert(msg.payload.ok == true)
 		assert(msg.payload.source == 'mcu')
+	end, { timeout = 1.5 })
+end
+
+function T.fabric_drops_invalid_frame_before_handshake_and_accepts_following_hello_ack()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local cfg_conn = bus:connect()
+		local probe_conn = bus:connect()
+
+		local diag = stack_diag.start(scope, bus, {
+			{ label = 'svc',   topic = { 'svc', '#' } },
+			{ label = 'cfg',   topic = { 'config', '#' } },
+			{ label = 'state', topic = { 'state', '#' } },
+			{ label = 'obs',   topic = { 'obs', '#' } },
+		}, { max_records = 300 })
+
+		local sub = probe_conn:subscribe({ 'peer', 'mcu-1', 'state', '#' }, {
+			queue_len = 8,
+			full      = 'drop_oldest',
+		})
+
+		local hal_side, peer_side = fake_stream_mod.new_pair()
+		local wire = new_wire_trace()
+
+		local fake_hal = fake_hal_mod.new({
+			scripted = {
+				open_serial_stream = function(req, _msg)
+					return {
+						ok     = true,
+						stream = hal_side,
+						info   = {
+							ref  = req.ref,
+							baud = 115200,
+							mode = '8N1',
+						},
+					}
+				end,
+			},
+		})
+		fake_hal:start(bus:connect(), { name = 'hal' })
+
+		local ok_peer, perr = scope:spawn(function()
+			local which1, line1, err1 = recv_with_timeout(peer_side:read_line_op(), 0.5)
+			assert(which1 == 'value', explain('timed out waiting for hello', diag, fake_hal, wire))
+			assert(line1 ~= nil, explain('peer read error waiting for hello: ' .. tostring(err1), diag, fake_hal, wire))
+
+			local hello, derr1 = protocol.decode_line(line1)
+			wire_add(wire, 'rx', line1, hello)
+			assert(hello ~= nil, explain('failed to decode hello: ' .. tostring(derr1), diag, fake_hal, wire))
+			assert_hello_frame(hello, diag, fake_hal, wire)
+
+			wire_add(wire, 'tx', ':true}', { raw = ':true}' })
+			assert(fibers.perform(peer_side:write_op(':true}', '\n')))
+
+			local ack_msg = protocol.hello_ack('mcu-1', {
+				sid = 'peer-sid-1',
+			})
+			local ack_line = assert(protocol.encode_line(ack_msg))
+			wire_add(wire, 'tx', ack_line, ack_msg)
+			assert(fibers.perform(peer_side:write_op(ack_line, '\n')))
+
+			local pub_msg = protocol.pub({ 'state', 'health' }, { ok = true, source = 'mcu' }, true)
+			local pub_line = assert(protocol.encode_line(pub_msg))
+			wire_add(wire, 'tx', pub_line, pub_msg)
+			assert(fibers.perform(peer_side:write_op(pub_line, '\n')))
+		end)
+		assert(ok_peer, tostring(perr))
+
+		spawn_fabric(scope, bus)
+		cfg_conn:retain({ 'config', 'fabric' }, base_fabric_cfg())
+
+		local which, msg, err = recv_with_timeout(sub:recv_op(), 0.75)
+		assert(which == 'value', explain(
+			'timed out waiting for imported remote publish after invalid frame',
+			diag, fake_hal, wire
+		))
+		assert(msg ~= nil, explain(
+			'subscription ended waiting for imported remote publish after invalid frame: '
+				.. tostring(err),
+			diag, fake_hal, wire
+		))
+
+		assert(msg.topic[1] == 'peer')
+		assert(msg.topic[2] == 'mcu-1')
+		assert(msg.topic[3] == 'state')
+		assert(msg.topic[4] == 'health')
+		assert(type(msg.payload) == 'table')
+		assert(msg.payload.ok == true)
+		assert(msg.payload.source == 'mcu')
+
+		local saw_invalid_drop = wait_until_trace_has(diag, function(rec)
+			return rec.label == 'obs'
+				and type(rec.payload) == 'table'
+				and rec.payload.what == 'invalid_frame_dropped'
+				and rec.payload.link_id == 'mcu0'
+				and tostring(rec.payload.raw) == ':true}'
+		end, 0.5, 0.01)
+		assert(saw_invalid_drop == true, explain(
+			'expected invalid_frame_dropped log before handshake recovery',
+			diag, fake_hal, wire
+		))
+
+		local saw_ack = wait_until_trace_has(diag, function(rec)
+			return rec.label == 'obs'
+				and type(rec.payload) == 'table'
+				and rec.payload.what == 'hello_ack_received'
+				and rec.payload.link_id == 'mcu0'
+		end, 0.5, 0.01)
+		assert(saw_ack == true, explain(
+			'expected hello_ack_received after invalid frame',
+			diag, fake_hal, wire
+		))
+	end, { timeout = 1.5 })
+end
+
+function T.fabric_drops_invalid_frame_after_handshake_and_processes_following_ping()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local cfg_conn = bus:connect()
+
+		local diag = stack_diag.start(scope, bus, {
+			{ label = 'svc',   topic = { 'svc', '#' } },
+			{ label = 'cfg',   topic = { 'config', '#' } },
+			{ label = 'state', topic = { 'state', '#' } },
+			{ label = 'obs',   topic = { 'obs', '#' } },
+		}, { max_records = 300 })
+
+		local hal_side, peer_side = fake_stream_mod.new_pair()
+		local wire = new_wire_trace()
+
+		local fake_hal = fake_hal_mod.new({
+			scripted = {
+				open_serial_stream = function(req, _msg)
+					return {
+						ok     = true,
+						stream = hal_side,
+						info   = {
+							ref  = req.ref,
+							baud = 115200,
+							mode = '8N1',
+						},
+					}
+				end,
+			},
+		})
+		fake_hal:start(bus:connect(), { name = 'hal' })
+
+		local ok_peer, perr = scope:spawn(function()
+			local which1, line1, err1 = recv_with_timeout(peer_side:read_line_op(), 0.5)
+			assert(which1 == 'value', explain('timed out waiting for hello', diag, fake_hal, wire))
+			assert(line1 ~= nil, explain('peer read error waiting for hello: ' .. tostring(err1), diag, fake_hal, wire))
+
+			local hello, derr1 = protocol.decode_line(line1)
+			wire_add(wire, 'rx', line1, hello)
+			assert(hello ~= nil, explain('failed to decode hello: ' .. tostring(derr1), diag, fake_hal, wire))
+			assert_hello_frame(hello, diag, fake_hal, wire)
+
+			local ack_msg = protocol.hello_ack('mcu-1', {
+				sid = 'peer-sid-1',
+			})
+			local ack_line = assert(protocol.encode_line(ack_msg))
+			wire_add(wire, 'tx', ack_line, ack_msg)
+			assert(fibers.perform(peer_side:write_op(ack_line, '\n')))
+
+			wire_add(wire, 'tx', ':true}', { raw = ':true}' })
+			assert(fibers.perform(peer_side:write_op(':true}', '\n')))
+
+			local ping_msg = protocol.ping({ sid = 'peer-sid-1' })
+			local ping_line = assert(protocol.encode_line(ping_msg))
+			wire_add(wire, 'tx', ping_line, ping_msg)
+			assert(fibers.perform(peer_side:write_op(ping_line, '\n')))
+
+			local which2, line2, err2 = recv_with_timeout(peer_side:read_line_op(), 0.75)
+			assert(which2 == 'value', explain(
+				'timed out waiting for pong after invalid frame',
+				diag, fake_hal, wire
+			))
+			assert(line2 ~= nil, explain(
+				'peer read error waiting for pong after invalid frame: ' .. tostring(err2),
+				diag, fake_hal, wire
+			))
+
+			local pong, derr2 = protocol.decode_line(line2)
+			wire_add(wire, 'rx', line2, pong)
+			assert(pong ~= nil, explain(
+				'failed to decode pong after invalid frame: ' .. tostring(derr2),
+				diag, fake_hal, wire
+			))
+			assert(pong.t == 'pong', explain('expected pong after invalid frame', diag, fake_hal, wire))
+		end)
+		assert(ok_peer, tostring(perr))
+
+		spawn_fabric(scope, bus)
+		cfg_conn:retain({ 'config', 'fabric' }, base_fabric_cfg())
+
+		local saw_invalid_drop = wait_until_trace_has(diag, function(rec)
+			return rec.label == 'obs'
+				and type(rec.payload) == 'table'
+				and rec.payload.what == 'invalid_frame_dropped'
+				and rec.payload.link_id == 'mcu0'
+				and tostring(rec.payload.raw) == ':true}'
+		end, 0.5, 0.01)
+		assert(saw_invalid_drop == true, explain(
+			'expected invalid_frame_dropped log after handshake',
+			diag, fake_hal, wire
+		))
+
+		local saw_pong = wait_until_trace_has(diag, function(rec)
+			return rec.label == 'obs'
+				and type(rec.payload) == 'table'
+				and rec.payload.what == 'pong_sent'
+				and rec.payload.link_id == 'mcu0'
+		end, 0.5, 0.01)
+		assert(saw_pong == true, explain(
+			'expected pong_sent after invalid frame',
+			diag, fake_hal, wire
+		))
+
+		local went_down = wait_until_trace_has(diag, function(rec)
+			return rec.label == 'state'
+				and type(rec.payload) == 'table'
+				and rec.topic
+				and rec.topic[1] == 'state'
+				and rec.topic[2] == 'fabric'
+				and rec.topic[3] == 'link'
+				and rec.topic[4] == 'mcu0'
+				and rec.payload.status == 'down'
+		end, 0.2, 0.01)
+		assert(went_down ~= true, explain(
+			'link should not transition to down after malformed frame',
+			diag, fake_hal, wire
+		))
 	end, { timeout = 1.5 })
 end
 

@@ -19,8 +19,19 @@ local function read_file(path)
 	return s, nil
 end
 
+local function module_dir()
+	local source = debug.getinfo(1, 'S').source or ''
+	if source:sub(1, 1) == '@' then
+		local dir = source:sub(2):match('^(.*[/\\])')
+		if dir then
+			return dir
+		end
+	end
+	return './'
+end
+
 local function default_seed_path()
-	return './services/hal/backends/hosttest/services.json'
+	return module_dir() .. 'hosttest/services.json'
 end
 
 local function shallow_copy(t)
