@@ -30,8 +30,8 @@ end
 local CapabilityReference = {}
 CapabilityReference.__index = CapabilityReference
 
-function CapabilityReference:call_control_op(method, args)
-    return self.conn:call_op(t_cap_control(self.class, self.id, method), args)
+function CapabilityReference:call_control_op(method, args, opts)
+    return self.conn:call_op(t_cap_control(self.class, self.id, method), args, opts)
 end
 
 ---@param method string
