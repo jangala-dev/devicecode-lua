@@ -230,6 +230,39 @@ function T.http_logout_clears_cookie()
 	assert(calls[1].session_id == 'sess-logout')
 end
 
+function T.http_logout_rejects_malformed_json()
+	local calls = {}
+
+	local api = {
+		logout = function(session_id)
+			calls[#calls + 1] = {
+				op = 'logout',
+				session_id = session_id,
+			}
+			return true, nil
+		end,
+	}
+
+	local handler = transport.build_handler(fake_svc(), api, {})
+	local stream = new_stream(
+		make_req_headers('POST', '/api/logout', {
+			cookie = 'devicecode_session=sess-logout',
+		}),
+		'{'
+	)
+
+	handler({}, stream)
+
+	assert(stream:response_status() == '400')
+
+	local body = decode_json_body(stream)
+	assert(body.ok == false)
+	assert(type(body.err) == 'string')
+	assert(body.err:match('json_decode_failed') ~= nil)
+
+	assert(#calls == 0)
+end
+
 function T.http_config_route_uses_cookie_session()
 	local calls = {}
 
@@ -276,6 +309,41 @@ function T.http_config_route_uses_cookie_session()
 	assert(calls[1].service_name == 'net')
 	assert(type(calls[1].data) == 'table')
 	assert(calls[1].data.answer == 42)
+end
+
+function T.http_config_route_surfaces_rejected_writes()
+	local api = {
+		config_set = function(_session_id, service_name, _data)
+			return {
+				ok = false,
+				err = 'validation failed',
+				service = service_name,
+			}, nil
+		end,
+	}
+
+	local handler = transport.build_handler(fake_svc(), api, {})
+	local stream = new_stream(
+		make_req_headers('POST', '/api/config/net', {
+			cookie = 'devicecode_session=sess-net',
+		}),
+		cjson.encode({
+			data = {
+				schema = 'devicecode.net/1',
+			},
+		})
+	)
+
+	handler({}, stream)
+
+	assert(stream:response_status() == '400')
+
+	local body = decode_json_body(stream)
+	assert(body.ok == false)
+	assert(body.err == 'validation failed')
+	assert(type(body.data) == 'table')
+	assert(body.data.ok == false)
+	assert(body.data.err == 'validation failed')
 end
 
 function T.http_rpc_route_prefers_cookie_then_body()

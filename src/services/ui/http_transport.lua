@@ -413,7 +413,11 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 		end
 
 		local sid = session_id_from_headers(req_headers)
-		local body = read_json_body(stream)
+		local body, jerr = read_json_body(stream)
+		if not body then
+			write_json(stream, 400, { ok = false, err = jerr })
+			return true
+		end
 		if type(body) == 'table' and body.session_id then
 			sid = body.session_id
 		end
@@ -473,10 +477,12 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 
 		local sid = session_id_from_headers(req_headers) or body.session_id
 		local out, cerr = api.config_set(sid, parts[3], body.data)
-		write_json(stream, out and 200 or 400, {
-			ok   = (out ~= nil),
+		local ok = (out ~= nil) and (type(out) ~= 'table' or out.ok ~= false)
+		write_json(stream, ok and 200 or 400, {
+			ok   = ok,
 			data = out,
-			err  = (out == nil) and tostring(cerr) or nil,
+			err  = (out == nil) and tostring(cerr)
+				or ((type(out) == 'table' and out.ok == false) and tostring(out.err) or nil),
 		})
 		return true
 	end

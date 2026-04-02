@@ -78,13 +78,21 @@ function M.start(conn, opts)
 				})
 			else
 				local ok_spawn, serr = child:spawn(function()
-					return session.run(conn, svc, {
+					local ok_run, run_err = pcall(session.run, conn, svc, {
 						gen      = gen,
 						link_id  = link_id,
 						link     = link_cfg,
 						connect  = opts.connect,
 						node_id  = opts.node_id,
 					})
+					if not ok_run then
+						svc:obs_log('error', {
+							what    = 'link_session_failed',
+							link_id = link_id,
+							err     = tostring(run_err),
+						})
+						error(run_err, 0)
+					end
 				end)
 
 				if not ok_spawn then
@@ -95,6 +103,13 @@ function M.start(conn, opts)
 						err     = tostring(serr),
 					})
 				else
+					svc:obs_log('info', {
+						what    = 'link_session_spawned',
+						link_id = link_id,
+						gen     = gen,
+						peer_id = link_cfg.peer_id,
+						kind    = ((link_cfg.transport or {}).kind) or 'uart',
+					})
 					children[link_id] = {
 						scope = child,
 						cfg   = link_cfg,

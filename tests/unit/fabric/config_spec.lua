@@ -97,4 +97,30 @@ function T.normalise_rejects_wild_proxy_call_topic()
 	assert(err:find('concrete', 1, true) ~= nil)
 end
 
+function T.normalise_preserves_keepalive()
+	local out, err = cfg.normalise({
+		schema = 'devicecode.fabric/1',
+		links = {
+			mcu0 = {
+				peer_id = 'mcu-1',
+				transport = {
+					kind       = 'uart',
+					serial_ref = 'uart-0',
+				},
+				keepalive = {
+					hello_retry_s = 1.0,
+					idle_ping_s = 12.5,
+					stale_after_s = 30.0,
+				},
+			},
+		},
+	})
+
+	assert(out ~= nil, tostring(err))
+	assert(type(out.links.mcu0.keepalive) == 'table')
+	assert(out.links.mcu0.keepalive.hello_retry_s == 1.0)
+	assert(out.links.mcu0.keepalive.idle_ping_s == 12.5)
+	assert(out.links.mcu0.keepalive.stale_after_s == 30.0)
+end
+
 return T
