@@ -32,11 +32,8 @@ end
 
 ---@param conn any
 ---@param opts? { name?: string, env?: string }
----@return ServiceBase
 function M.new(conn, opts)
 	opts = opts or {}
-
-	---@class ServiceBase
 	local svc = {}
 
 	svc.conn = conn
@@ -80,6 +77,59 @@ function M.new(conn, opts)
 				sleep.sleep(period_s)
 			end
 		end)
+	end
+
+	-- Wait for HAL announce (retained), return payload table.
+	-- opts: { timeout?: number, tick?: number }
+	function svc:wait_for_hal(opts2)
+		opts2 = opts2 or {}
+		local deadline_s  = (type(opts2.timeout) == 'number') and opts2.timeout or 60.0
+		local tick_s      = (type(opts2.tick) == 'number') and opts2.tick or 10.0
+		local deadline_at = self:now() + deadline_s
+
+		self:obs_log('info', 'waiting for HAL announce on svc/hal/announce')
+		self:status('waiting_for_hal', { deadline_s = deadline_s })
+
+		local sub = self.conn:subscribe(t('svc', 'hal', 'announce'), { queue_len = 4, full = 'drop_oldest' })
+
+		while true do
+			if self:now() >= deadline_at then
+				sub:unsubscribe()
+				return nil, 'hal discovery timeout'
+			end
+
+			local which, a, b = perform(named_choice {
+				recv = sub:recv_op(),
+				tick = sleep.sleep_op(tick_s):wrap(function () return nil, 'waiting' end),
+			})
+
+			if which == 'tick' then
+				self:obs_event('hal_waiting', { at = self:wall(), ts = self:now() })
+			else
+				local msg, err = a, b
+				if not msg then
+					sub:unsubscribe()
+					return nil, err or 'hal discovery subscription closed'
+				end
+
+				local p = msg.payload or {}
+				if p.role == 'hal' then
+					self:obs_event('hal_discovered', {
+						from  = topic_to_string(msg.topic),
+						rpc   = topic_to_string(p.rpc_root or t('rpc', 'hal')),
+						backend = p.backend,
+					})
+					sub:unsubscribe()
+					return p, nil
+				end
+			end
+		end
+	end
+
+	-- Fixed HAL RPC surface: rpc/hal/<method>
+	function svc:hal_call(method, payload, timeout_s)
+		local topic = t('rpc', 'hal', method)
+		return perform(self.conn:call_op(topic, payload, { timeout = timeout_s }))
 	end
 
 	return svc

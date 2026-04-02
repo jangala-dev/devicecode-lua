@@ -26,9 +26,18 @@ assert(stdlib.setenv('CONFIG_TARGET', 'services'))
 local files = {
 	'unit.config.codec_spec',
 	'unit.config.state_spec',
+	'unit.net.model_spec',
+	'unit.net.control_spec',
 	'unit.main.service_spec',
 	'unit.config.service_spec',
+	'unit.net.service_spec',
+	'unit.ui.service_spec',
+	'unit.ui.http_transport_spec',
+	'unit.ui.cqueues_bridge_spec',
+	'integration.devhost.stack_spec',
+	'integration.devhost.main_stack_spec',
 	'integration.devhost.main_failure_spec',
+	'integration.devhost.ui_stack_spec',
 	'integration.devhost.config_recovery_spec'
 }
 
