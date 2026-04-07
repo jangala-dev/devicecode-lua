@@ -12,15 +12,11 @@ local alarm = require "fibers.alarm"
 local time_utils = require "fibers.utils.time"
 
 local base = require "devicecode.service_base"
+local cap_sdk = require "services.hal.sdk.cap"
 
 local perform = fibers.perform
 
 local M = {}
-
----@return table
-local function t(...)
-	return { ... }
-end
 
 ---@param payload any
 ---@return boolean? synced
@@ -65,24 +61,14 @@ local function apply_sync_state(state, svc, is_synced, payload)
 	end
 end
 
----@param conn Connection
 ---@param svc ServiceBase
----@param cap_id CapabilityId
+---@param cap_ref CapabilityReference
 ---@return nil
-local function monitor_capability(conn, svc, cap_id)
-	svc:obs_log('info', { what = 'capability_monitor_start', cap_id = tostring(cap_id) })
-	local sub_state = conn:subscribe(t('cap', 'time', cap_id, 'state', 'synced'), {
-		queue_len = 10,
-		full = 'drop_oldest',
-	})
-	local sub_synced = conn:subscribe(t('cap', 'time', cap_id, 'event', 'synced'), {
-		queue_len = 20,
-		full = 'drop_oldest',
-	})
-	local sub_unsynced = conn:subscribe(t('cap', 'time', cap_id, 'event', 'unsynced'), {
-		queue_len = 20,
-		full = 'drop_oldest',
-	})
+local function monitor_capability(svc, cap_ref)
+	svc:obs_log('info', { what = 'capability_monitor_start', cap_id = tostring(cap_ref.id) })
+	local sub_state    = cap_ref:get_state_sub('synced')
+	local sub_synced   = cap_ref:get_event_sub('synced')
+	local sub_unsynced = cap_ref:get_event_sub('unsynced')
 
 	local state = {
 		---@type boolean?
@@ -135,7 +121,8 @@ end
 function M.start(conn, opts)
 	opts = opts or {}
 	local svc = base.new(conn, { name = opts.name or 'time', env = opts.env })
-	local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
+	local heartbeat_s    = (type(opts.heartbeat_s)    == 'number') and opts.heartbeat_s    or 30.0
+	local wait_timeout_s = (type(opts.wait_timeout_s) == 'number') and opts.wait_timeout_s or nil
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
 	svc:obs_log('info', 'service start() entered')
@@ -151,33 +138,21 @@ function M.start(conn, opts)
 		svc:obs_log('info', 'service stopped')
 	end)
 
-	local sub_meta = conn:subscribe(t('cap', 'time', '+', 'meta', 'source'), {
-		queue_len = 10,
-		full = 'drop_oldest',
-	})
-	svc:obs_log('info', { what = 'subscribed', topic = 'cap/time/+/meta/source' })
-
 	svc:status('running')
 
-	while true do
-		local msg, err = perform(sub_meta:recv_op())
-		if not msg then
-			sub_meta:unsubscribe()
-			svc:obs_log('warn', { what = 'capability_discovery_closed', err = tostring(err) })
-			return
-		end
+	local cap_listener = cap_sdk.new_cap_listener(conn, 'time', '+')
+	svc:obs_log('info', { what = 'waiting_for_time_capability', timeout = wait_timeout_s })
 
-		local topic = msg.topic
-		local cap_id = topic and topic[3]
-		if cap_id ~= nil then
-			sub_meta:unsubscribe()
-			svc:obs_log('info', { what = 'capability_selected', cap_id = tostring(cap_id) })
-			monitor_capability(conn, svc, cap_id)
-			return
-		else
-			svc:obs_log('warn', { what = 'capability_meta_missing_id' })
-		end
+	local cap_ref, cap_err = cap_listener:wait_for_cap({ timeout = wait_timeout_s })
+	cap_listener:close()
+
+	if not cap_ref then
+		svc:obs_log('warn', { what = 'capability_discovery_failed', err = tostring(cap_err) })
+		return
 	end
+
+	svc:obs_log('info', { what = 'capability_selected', cap_id = tostring(cap_ref.id) })
+	monitor_capability(svc, cap_ref)
 end
 
 return M
