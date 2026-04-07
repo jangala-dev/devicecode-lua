@@ -1,12 +1,13 @@
--- tests/ui_service_spec.lua
+-- tests/unit/ui/service_spec.lua
 
-local sleep      = require 'fibers.sleep'
-local busmod     = require 'bus'
+local sleep       = require 'fibers.sleep'
+local busmod      = require 'bus'
 
-local runfibers  = require 'tests.support.run_fibers'
-local probe      = require 'tests.support.bus_probe'
+local blob_source = require 'services.fabric.blob_source'
+local runfibers   = require 'tests.support.run_fibers'
+local probe       = require 'tests.support.bus_probe'
 
-local ui_service = require 'services.ui'
+local ui_service  = require 'services.ui'
 
 local T = {}
 
@@ -280,6 +281,161 @@ function T.ui_rpc_call_round_trips_via_endpoint()
 		assert(type(call.payload) == 'table')
 		assert(type(call.payload.packages) == 'table')
 		assert(call.payload.packages[1] == 'network')
+	end, { timeout = 1.0 })
+end
+
+function T.ui_firmware_send_round_trips_blob_source_via_endpoint_and_emits_audit()
+	runfibers.run(function(scope)
+		local bus  = busmod.new()
+		local conn = bus:connect()
+		local calls = {}
+
+		spawn_fake_rpc_endpoint(scope, bus, 'fabric', 'send_firmware', function(payload, _msg)
+			assert(type(payload) == 'table')
+			assert(payload.link_id == 'mcu0')
+			assert(type(payload.source) == 'table')
+			assert(type(payload.meta) == 'table')
+
+			local r = payload.source:open()
+			local bytes, err = r:read(1024)
+			assert(bytes ~= nil, tostring(err))
+			assert(bytes == 'firmware-bytes')
+			r:close()
+
+			return {
+				ok = true,
+				transfer_id = 'xfer-123',
+			}
+		end, calls)
+
+		local api = assert(start_ui(scope, bus))
+		local sub = conn:subscribe({ 'obs', 'audit', 'ui', 'firmware_send' }, {
+			queue_len = 1,
+			full      = 'reject_newest',
+		})
+
+		local login, lerr = api.login('admin', 'secret')
+		assert(login ~= nil, tostring(lerr))
+
+		local src = blob_source.from_string('rp2350.uf2', 'firmware-bytes', {
+			format = 'uf2',
+		})
+
+		local out, err = api.firmware_send(login.session_id, 'mcu0', src, {
+			kind = 'firmware.rp2350',
+		})
+		assert(out ~= nil, tostring(err))
+		assert(out.ok == true)
+		assert(out.transfer_id == 'xfer-123')
+
+		local seen = probe.wait_until(function()
+			return #calls >= 1
+		end, { timeout = 0.5, interval = 0.01 })
+		assert(seen == true, 'expected fabric send_firmware call')
+
+		local call = calls[1]
+		assert(call.topic[1] == 'rpc')
+		assert(call.topic[2] == 'fabric')
+		assert(call.topic[3] == 'send_firmware')
+		assert(call.payload.link_id == 'mcu0')
+		assert(type(call.payload.meta) == 'table')
+		assert(call.payload.meta.kind == 'firmware.rp2350')
+		assert(call.payload.meta.name == 'rp2350.uf2')
+		assert(call.payload.meta.format == 'uf2')
+
+		local msg, merr = sub:recv()
+		assert(msg ~= nil, tostring(merr))
+		assert(type(msg.payload) == 'table')
+		assert(msg.payload.user == 'admin')
+		assert(msg.payload.transfer == 'xfer-123')
+		assert(msg.payload.ok == true)
+	end, { timeout = 1.0 })
+end
+
+function T.ui_transfer_status_round_trips_via_endpoint()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local calls = {}
+
+		spawn_fake_rpc_endpoint(scope, bus, 'fabric', 'transfer_status', function(payload, _msg)
+			return {
+				ok          = true,
+				transfer_id = payload.transfer_id,
+				status      = 'sending',
+				bytes_done  = 32,
+			}
+		end, calls)
+
+		local api = assert(start_ui(scope, bus))
+
+		local login, lerr = api.login('admin', 'secret')
+		assert(login ~= nil, tostring(lerr))
+
+		local out, err = api.transfer_status(login.session_id, 'xfer-123')
+		assert(out ~= nil, tostring(err))
+		assert(out.ok == true)
+		assert(out.transfer_id == 'xfer-123')
+		assert(out.status == 'sending')
+		assert(out.bytes_done == 32)
+
+		local seen = probe.wait_until(function()
+			return #calls >= 1
+		end, { timeout = 0.5, interval = 0.01 })
+		assert(seen == true, 'expected fabric transfer_status call')
+
+		local call = calls[1]
+		assert(call.topic[1] == 'rpc')
+		assert(call.topic[2] == 'fabric')
+		assert(call.topic[3] == 'transfer_status')
+		assert(call.payload.transfer_id == 'xfer-123')
+	end, { timeout = 1.0 })
+end
+
+function T.ui_transfer_abort_round_trips_via_endpoint_and_emits_audit()
+	runfibers.run(function(scope)
+		local bus  = busmod.new()
+		local conn = bus:connect()
+		local calls = {}
+
+		spawn_fake_rpc_endpoint(scope, bus, 'fabric', 'transfer_abort', function(payload, _msg)
+			return {
+				ok          = true,
+				transfer_id = payload.transfer_id,
+				aborted     = true,
+			}
+		end, calls)
+
+		local api = assert(start_ui(scope, bus))
+		local sub = conn:subscribe({ 'obs', 'audit', 'ui', 'transfer_abort' }, {
+			queue_len = 1,
+			full      = 'reject_newest',
+		})
+
+		local login, lerr = api.login('admin', 'secret')
+		assert(login ~= nil, tostring(lerr))
+
+		local out, err = api.transfer_abort(login.session_id, 'xfer-123')
+		assert(out ~= nil, tostring(err))
+		assert(out.ok == true)
+		assert(out.aborted == true)
+
+		local seen = probe.wait_until(function()
+			return #calls >= 1
+		end, { timeout = 0.5, interval = 0.01 })
+		assert(seen == true, 'expected fabric transfer_abort call')
+
+		local call = calls[1]
+		assert(call.topic[1] == 'rpc')
+		assert(call.topic[2] == 'fabric')
+		assert(call.topic[3] == 'transfer_abort')
+		assert(call.payload.transfer_id == 'xfer-123')
+
+		local msg, merr = sub:recv()
+		assert(msg ~= nil, tostring(merr))
+		assert(type(msg.payload) == 'table')
+		assert(msg.payload.user == 'admin')
+		assert(msg.payload.transfer == 'xfer-123')
+		assert(msg.payload.ok == true)
 	end, { timeout = 1.0 })
 end
 

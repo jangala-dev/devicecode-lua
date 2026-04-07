@@ -1,22 +1,10 @@
--- services/ui/http_transport.lua
 --
 -- lua-http transport for services/ui.lua.
 --
--- Assumptions:
---   * the cqueues <-> fibers bridge has already been installed
---   * this module is called as opts.run_http(svc, api, opts)
---
--- This first cut provides:
---   * POST /api/login
---   * POST /api/logout
---   * GET  /api/session
---   * GET  /api/health
---   * POST /api/config/<service>
---   * POST /api/rpc/<service>/<method>
---   * GET  /ws         (request/response websocket)
---   * optional static file / SPA serving from opts.www_root
---
--- It does not yet provide live push subscriptions.
+-- This version also provides firmware upload and transfer status APIs:
+--   * POST /api/fabric/firmware/<link_id>        raw binary body
+--   * GET  /api/fabric/transfer/<id>
+--   * POST /api/fabric/transfer/<id>/abort
 
 local fibers       = require 'fibers'
 local file         = require 'fibers.io.file'
@@ -26,6 +14,7 @@ local http_util    = require 'http.util'
 local websocket    = require 'http.websocket'
 local cjson        = require 'cjson.safe'
 local cq_bridge    = require 'services.ui.cqueues_bridge'
+local blob_source  = require 'services.fabric.blob_source'
 
 local perform = fibers.perform
 
@@ -132,7 +121,7 @@ local function read_body_string(stream)
 		end
 		return nil, body
 	end
-	return '', nil
+	return nil, 'http stream does not support get_body_as_string()'
 end
 
 local function read_json_body(stream)
@@ -156,8 +145,7 @@ end
 local function set_session_cookie_headers(session_id, expires_at)
 	local cookie = ('devicecode_session=%s; Path=/; HttpOnly; SameSite=Strict'):format(tostring(session_id))
 	if expires_at then
-		-- Browser expiry handling can be made stricter later. For now the
-		-- server-side session store remains authoritative.
+		-- Server-side session expiry remains authoritative.
 	end
 	return {
 		{ 'set-cookie', cookie },
@@ -197,7 +185,6 @@ local function static_path(www_root, req_path)
 
 	local candidate = www_root .. '/' .. table.concat(parts, '/')
 
-	-- Serve direct assets when there is an extension; otherwise fall back to SPA.
 	if path_ext(candidate) then
 		return candidate
 	end
@@ -241,6 +228,22 @@ end
 local function ws_send(ws, obj)
 	local txt = cjson.encode(obj or {}) or '{"ok":false,"err":"json_encode_failed"}'
 	return ws:send(txt)
+end
+
+local function infer_filename(req_headers, fallback)
+	local v = req_headers:get('x-filename')
+	if type(v) == 'string' and v ~= '' then return v end
+	return fallback or 'firmware.bin'
+end
+
+local function infer_format(filename, req_headers)
+	local v = req_headers:get('x-format')
+	if type(v) == 'string' and v ~= '' then return v end
+
+	filename = tostring(filename or '')
+	if filename:match('%.uf2$') then return 'uf2' end
+	if filename:match('%.bin$') then return 'bin' end
+	return 'bin'
 end
 
 local function handle_ws(svc, api, stream, req_headers)
@@ -352,6 +355,34 @@ local function handle_ws(svc, api, stream, req_headers)
 						err  = (out == nil) and tostring(e) or nil,
 					})
 
+				elseif op == 'firmware_send' then
+					reply({
+						ok  = false,
+						err = 'websocket firmware upload is not implemented in this first pass',
+					})
+
+				elseif op == 'transfer_status' then
+					local out, e = api.transfer_status(
+						obj.session_id or current_session,
+						obj.transfer_id
+					)
+					reply({
+						ok   = (out ~= nil),
+						data = out,
+						err  = (out == nil) and tostring(e) or nil,
+					})
+
+				elseif op == 'transfer_abort' then
+					local out, e = api.transfer_abort(
+						obj.session_id or current_session,
+						obj.transfer_id
+					)
+					reply({
+						ok   = (out ~= nil),
+						data = out,
+						err  = (out == nil) and tostring(e) or nil,
+					})
+
 				else
 					reply({
 						ok  = false,
@@ -367,13 +398,6 @@ end
 
 local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 	local parts = split_path(req_path)
-	-- expected forms:
-	--   /api/login
-	--   /api/logout
-	--   /api/session
-	--   /api/health
-	--   /api/config/<service>
-	--   /api/rpc/<service>/<method>
 
 	if parts[1] ~= 'api' then
 		return false
@@ -503,6 +527,69 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 		return true
 	end
 
+	if #parts == 4 and parts[1] == 'api' and parts[2] == 'fabric' and parts[3] == 'firmware' then
+		if req_method ~= 'POST' then
+			write_text(stream, 405, 'method not allowed\n')
+			return true
+		end
+
+		local sid = session_id_from_headers(req_headers)
+		local body, err = read_body_string(stream)
+		if body == nil then
+			write_json(stream, 400, { ok = false, err = 'body_read_failed: ' .. tostring(err) })
+			return true
+		end
+
+		local filename = infer_filename(req_headers)
+		local format   = infer_format(filename, req_headers)
+		local source   = blob_source.from_string(filename, body, { format = format })
+
+		local out, ferr = api.firmware_send(sid, parts[4], source, {
+			kind   = 'firmware.rp2350',
+			name   = filename,
+			format = format,
+		})
+
+		write_json(stream, out and 200 or 400, {
+			ok   = (out ~= nil),
+			data = out,
+			err  = (out == nil) and tostring(ferr) or nil,
+		})
+		return true
+	end
+
+	if #parts == 4 and parts[1] == 'api' and parts[2] == 'fabric' and parts[3] == 'transfer' then
+		if req_method ~= 'GET' then
+			write_text(stream, 405, 'method not allowed\n')
+			return true
+		end
+
+		local sid = session_id_from_headers(req_headers)
+		local out, terr = api.transfer_status(sid, parts[4])
+		write_json(stream, out and 200 or 400, {
+			ok   = (out ~= nil),
+			data = out,
+			err  = (out == nil) and tostring(terr) or nil,
+		})
+		return true
+	end
+
+	if #parts == 5 and parts[1] == 'api' and parts[2] == 'fabric' and parts[3] == 'transfer' and parts[5] == 'abort' then
+		if req_method ~= 'POST' then
+			write_text(stream, 405, 'method not allowed\n')
+			return true
+		end
+
+		local sid = session_id_from_headers(req_headers)
+		local out, terr = api.transfer_abort(sid, parts[4])
+		write_json(stream, out and 200 or 400, {
+			ok   = (out ~= nil),
+			data = out,
+			err  = (out == nil) and tostring(terr) or nil,
+		})
+		return true
+	end
+
 	write_text(stream, 404, 'not found\n')
 	return true
 end
@@ -548,21 +635,14 @@ local function onstream_factory(svc, api, opts)
 	end
 end
 
----@param svc any
----@param api table
----@param opts? table
----@return function
 function M.build_handler(svc, api, opts)
 	return onstream_factory(svc, api, opts or {})
 end
 
----@param svc any
----@param api table
----@param opts? { host?: string, port?: integer, www_root?: string }
 function M.run(svc, api, opts)
 	opts = opts or {}
 
-    cq_bridge.install()
+	cq_bridge.install()
 
 	local host = opts.host or '0.0.0.0'
 	local port = opts.port or 80
@@ -581,7 +661,6 @@ function M.run(svc, api, opts)
 		end,
 	})
 
-	-- Run each stream handler in a fiber so the rest of the runtime stays coherent.
 	function server:add_stream(stream)
 		fibers.spawn(function()
 			local ok, err
@@ -611,7 +690,6 @@ function M.run(svc, api, opts)
 		port = port,
 	})
 
-	-- Keep the service alive.
 	while true do
 		perform(require('fibers.sleep').sleep_op(3600.0))
 	end

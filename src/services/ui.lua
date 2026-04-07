@@ -8,9 +8,7 @@
 --   * use opts.connect(principal) to act on behalf of logged-in users
 --   * start with admin-only access
 --
--- Expected next layer:
---   * a lua-http transport module calls the API functions returned here
---   * later, a dedicated auth service should replace the temporary password check
+-- This version also exposes firmware transfer helpers built on fabric RPC.
 
 local fibers = require 'fibers'
 local uuid   = require 'uuid'
@@ -320,6 +318,109 @@ function M.start(conn, opts)
 			method  = method_name,
 			ok      = (out ~= nil),
 			t       = now(),
+		})
+
+		return out, nil
+	end
+
+	function api.firmware_send(session_id, link_id, source, meta)
+		local rec, err = require_session(session_id)
+		if not rec then
+			return nil, err
+		end
+
+		if type(link_id) ~= 'string' or link_id == '' then
+			return nil, 'link_id must be a non-empty string'
+		end
+		if type(source) ~= 'table' or type(source.open) ~= 'function' or type(source.size) ~= 'function' or type(source.sha256hex) ~= 'function' then
+			return nil, 'source is not a valid blob source'
+		end
+
+		meta = type(meta) == 'table' and copy_plain(meta) or {}
+		if meta.kind == nil then meta.kind = 'firmware.rp2350' end
+		if meta.name == nil and type(source.name) == 'function' then meta.name = source:name() end
+		if meta.format == nil and type(source.format) == 'function' then meta.format = source:format() or 'bin' end
+		if meta.format == nil then meta.format = 'bin' end
+
+		local out, ferr = with_user_conn(rec.principal, function(user_conn)
+			return user_conn:call(
+				{ 'rpc', 'fabric', 'send_firmware' },
+				{
+					link_id = link_id,
+					source  = source,
+					meta    = meta,
+				},
+				{ timeout = 10.0 }
+			)
+		end)
+
+		if out == nil then
+			return nil, ferr or 'firmware_send failed'
+		end
+
+		conn:publish({ 'obs', 'audit', 'ui', 'firmware_send' }, {
+			user      = rec.principal.id,
+			link_id   = link_id,
+			transfer  = out.transfer_id,
+			ok        = (out.ok == true),
+			t         = now(),
+		})
+
+		return out, nil
+	end
+
+	function api.transfer_status(session_id, transfer_id)
+		local rec, err = require_session(session_id)
+		if not rec then
+			return nil, err
+		end
+
+		if type(transfer_id) ~= 'string' or transfer_id == '' then
+			return nil, 'transfer_id must be a non-empty string'
+		end
+
+		local out, serr = with_user_conn(rec.principal, function(user_conn)
+			return user_conn:call(
+				{ 'rpc', 'fabric', 'transfer_status' },
+				{ transfer_id = transfer_id },
+				{ timeout = 5.0 }
+			)
+		end)
+
+		if out == nil then
+			return nil, serr or 'transfer_status failed'
+		end
+
+		return out, nil
+	end
+
+	function api.transfer_abort(session_id, transfer_id)
+		local rec, err = require_session(session_id)
+		if not rec then
+			return nil, err
+		end
+
+		if type(transfer_id) ~= 'string' or transfer_id == '' then
+			return nil, 'transfer_id must be a non-empty string'
+		end
+
+		local out, aerr = with_user_conn(rec.principal, function(user_conn)
+			return user_conn:call(
+				{ 'rpc', 'fabric', 'transfer_abort' },
+				{ transfer_id = transfer_id },
+				{ timeout = 5.0 }
+			)
+		end)
+
+		if out == nil then
+			return nil, aerr or 'transfer_abort failed'
+		end
+
+		conn:publish({ 'obs', 'audit', 'ui', 'transfer_abort' }, {
+			user      = rec.principal.id,
+			transfer  = transfer_id,
+			ok        = (out.ok == true),
+			t         = now(),
 		})
 
 		return out, nil

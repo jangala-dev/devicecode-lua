@@ -1,4 +1,4 @@
--- tests/main_spec.lua
+-- tests/unit/main/service_spec.lua
 
 local mainmod = require 'devicecode.main'
 local runfibers = require 'tests.support.run_fibers'

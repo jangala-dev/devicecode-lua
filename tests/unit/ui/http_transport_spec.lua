@@ -1,8 +1,9 @@
--- tests/ui_http_transport_spec.lua
+-- tests/unit/ui/http_transport_spec.lua
 
 local cjson        = require 'cjson.safe'
 local http_headers = require 'http.headers'
 
+local blob_source  = require 'services.fabric.blob_source'
 local transport    = require 'services.ui.http_transport'
 
 local T = {}
@@ -68,6 +69,12 @@ local function new_stream(req_headers, body)
 		return table.concat(self._res_chunks)
 	end
 
+	return stream
+end
+
+local function new_stream_without_body_reader(req_headers)
+	local stream = new_stream(req_headers, nil)
+	stream.get_body_as_string = nil
 	return stream
 end
 
@@ -329,6 +336,168 @@ function T.http_rpc_route_prefers_cookie_then_body()
 	assert(type(calls[1].payload.packages) == 'table')
 	assert(calls[1].payload.packages[1] == 'network')
 	assert(calls[1].timeout == 0.5)
+end
+
+function T.http_firmware_upload_route_builds_blob_source_and_meta()
+	local calls = {}
+
+	local api = {
+		firmware_send = function(session_id, link_id, source, meta)
+			local reader = source:open()
+			local data, derr = reader:read(1024)
+			assert(data ~= nil, tostring(derr))
+			local eof = select(1, reader:read(1024))
+			assert(eof == nil)
+			reader:close()
+
+			calls[#calls + 1] = {
+				op         = 'firmware_send',
+				session_id = session_id,
+				link_id    = link_id,
+				source     = source,
+				meta       = meta,
+				data       = data,
+			}
+
+			return {
+				ok = true,
+				transfer_id = 'xfer-123',
+			}, nil
+		end,
+	}
+
+	local handler = transport.build_handler(fake_svc(), api, {})
+	local stream = new_stream(
+		make_req_headers('POST', '/api/fabric/firmware/mcu0', {
+			['x-session-id'] = 'sess-fw',
+			['x-filename']   = 'rp2350.uf2',
+			['x-format']     = 'uf2',
+		}),
+		'firmware-bytes'
+	)
+
+	handler({}, stream)
+
+	assert(stream:response_status() == '200')
+
+	local body = decode_json_body(stream)
+	assert(body.ok == true)
+	assert(type(body.data) == 'table')
+	assert(body.data.transfer_id == 'xfer-123')
+
+	assert(#calls == 1)
+	assert(calls[1].session_id == 'sess-fw')
+	assert(calls[1].link_id == 'mcu0')
+	assert(type(calls[1].source) == 'table')
+	assert(calls[1].source:size() == #'firmware-bytes')
+	assert(calls[1].source:name() == 'rp2350.uf2')
+	assert(type(calls[1].source:sha256hex()) == 'string' and #calls[1].source:sha256hex() == 64)
+	assert(calls[1].data == 'firmware-bytes')
+	assert(type(calls[1].meta) == 'table')
+	assert(calls[1].meta.kind == 'firmware.rp2350')
+	assert(calls[1].meta.name == 'rp2350.uf2')
+	assert(calls[1].meta.format == 'uf2')
+end
+
+function T.http_firmware_upload_without_body_reader_returns_400()
+	local api = {
+		firmware_send = function()
+			error('firmware_send should not be called')
+		end,
+	}
+
+	local handler = transport.build_handler(fake_svc(), api, {})
+	local stream = new_stream_without_body_reader(
+		make_req_headers('POST', '/api/fabric/firmware/mcu0', {
+			['x-session-id'] = 'sess-fw',
+		})
+	)
+
+	handler({}, stream)
+
+	assert(stream:response_status() == '400')
+
+	local body = decode_json_body(stream)
+	assert(body.ok == false)
+	assert(type(body.err) == 'string')
+	assert(body.err:find('body_read_failed', 1, true) ~= nil)
+end
+
+function T.http_transfer_status_route_uses_cookie_session()
+	local calls = {}
+
+	local api = {
+		transfer_status = function(session_id, transfer_id)
+			calls[#calls + 1] = {
+				op          = 'transfer_status',
+				session_id  = session_id,
+				transfer_id = transfer_id,
+			}
+			return {
+				ok     = true,
+				status = 'sending',
+			}, nil
+		end,
+	}
+
+	local handler = transport.build_handler(fake_svc(), api, {})
+	local stream = new_stream(
+		make_req_headers('GET', '/api/fabric/transfer/xfer-9', {
+			cookie = 'devicecode_session=sess-xfer',
+		})
+	)
+
+	handler({}, stream)
+
+	assert(stream:response_status() == '200')
+
+	local body = decode_json_body(stream)
+	assert(body.ok == true)
+	assert(type(body.data) == 'table')
+	assert(body.data.status == 'sending')
+
+	assert(#calls == 1)
+	assert(calls[1].session_id == 'sess-xfer')
+	assert(calls[1].transfer_id == 'xfer-9')
+end
+
+function T.http_transfer_abort_route_uses_cookie_session()
+	local calls = {}
+
+	local api = {
+		transfer_abort = function(session_id, transfer_id)
+			calls[#calls + 1] = {
+				op          = 'transfer_abort',
+				session_id  = session_id,
+				transfer_id = transfer_id,
+			}
+			return {
+				ok = true,
+				aborted = true,
+			}, nil
+		end,
+	}
+
+	local handler = transport.build_handler(fake_svc(), api, {})
+	local stream = new_stream(
+		make_req_headers('POST', '/api/fabric/transfer/xfer-9/abort', {
+			cookie = 'devicecode_session=sess-xfer',
+		}),
+		'{}'
+	)
+
+	handler({}, stream)
+
+	assert(stream:response_status() == '200')
+
+	local body = decode_json_body(stream)
+	assert(body.ok == true)
+	assert(type(body.data) == 'table')
+	assert(body.data.aborted == true)
+
+	assert(#calls == 1)
+	assert(calls[1].session_id == 'sess-xfer')
+	assert(calls[1].transfer_id == 'xfer-9')
 end
 
 function T.http_health_route_returns_200()

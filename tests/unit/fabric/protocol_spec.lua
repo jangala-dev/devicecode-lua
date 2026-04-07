@@ -1,3 +1,5 @@
+-- tests/unit/fabric/protocol_spec.lua
+
 local protocol = require 'services.fabric.protocol'
 
 local T = {}
@@ -137,6 +139,98 @@ function T.validate_rejects_hello_without_sid()
 	assert(msg == nil)
 	assert(type(err) == 'string')
 	assert(err:find('hello.sid', 1, true) ~= nil)
+end
+
+function T.xfer_begin_constructor_and_validation_round_trip()
+	local raw = protocol.xfer_begin(
+		'xfer-1',
+		'firmware.rp2350',
+		'rp2350.uf2',
+		'uf2',
+		'b64url',
+		1234,
+		768,
+		2,
+		'abc123',
+		{ slot = 'ota0' }
+	)
+
+	assert(raw.t == 'xfer_begin')
+	assert(raw.id == 'xfer-1')
+	assert(raw.kind == 'firmware.rp2350')
+	assert(raw.name == 'rp2350.uf2')
+	assert(raw.format == 'uf2')
+	assert(raw.enc == 'b64url')
+	assert(raw.size == 1234)
+	assert(raw.chunk_raw == 768)
+	assert(raw.chunks == 2)
+	assert(raw.sha256 == 'abc123')
+	assert(type(raw.meta) == 'table')
+	assert(raw.meta.slot == 'ota0')
+
+	local msg, err = protocol.validate_message(raw)
+	assert(msg ~= nil, tostring(err))
+	assert(msg.t == 'xfer_begin')
+	assert(msg.meta.slot == 'ota0')
+end
+
+function T.validate_accepts_xfer_chunk()
+	local msg, err = protocol.validate_message({
+		t     = 'xfer_chunk',
+		id    = 'xfer-1',
+		seq   = 0,
+		off   = 0,
+		n     = 3,
+		crc32 = '352441c2',
+		data  = 'YWJj',
+	})
+
+	assert(msg ~= nil, tostring(err))
+	assert(msg.t == 'xfer_chunk')
+	assert(msg.id == 'xfer-1')
+	assert(msg.seq == 0)
+	assert(msg.off == 0)
+	assert(msg.n == 3)
+	assert(msg.crc32 == '352441c2')
+	assert(msg.data == 'YWJj')
+end
+
+function T.validate_rejects_xfer_chunk_without_data()
+	local msg, err = protocol.validate_message({
+		t     = 'xfer_chunk',
+		id    = 'xfer-1',
+		seq   = 0,
+		off   = 0,
+		n     = 3,
+		crc32 = '352441c2',
+	})
+
+	assert(msg == nil)
+	assert(type(err) == 'string')
+	assert(err:find('xfer_chunk.data', 1, true) ~= nil)
+end
+
+function T.validate_accepts_xfer_done_and_xfer_abort()
+	local done, derr = protocol.validate_message({
+		t    = 'xfer_done',
+		id   = 'xfer-1',
+		ok   = true,
+		info = { accepted = true },
+	})
+	assert(done ~= nil, tostring(derr))
+	assert(done.t == 'xfer_done')
+	assert(done.ok == true)
+	assert(type(done.info) == 'table')
+	assert(done.info.accepted == true)
+
+	local abort, aerr = protocol.validate_message({
+		t      = 'xfer_abort',
+		id     = 'xfer-1',
+		reason = 'bad_crc',
+	})
+	assert(abort ~= nil, tostring(aerr))
+	assert(abort.t == 'xfer_abort')
+	assert(abort.reason == 'bad_crc')
 end
 
 return T

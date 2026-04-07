@@ -2,23 +2,19 @@
 --
 -- One fabric session per configured link.
 --
--- This version makes readiness explicit:
---   * opening     : transport open / local setup incomplete
---   * session_up  : peer session established, local setup not yet complete
---   * ready       : peer session established and local forwarding surfaces installed
---   * down        : terminal state published on failure
---
 -- Current features:
 --   * UART transport
 --   * local export publish forwarding
---   * local retained export forwarding (retain replay + retain/unretain lifecycle)
+--   * local retained export forwarding
 --   * remote import publish forwarding
 --   * local proxy calls -> remote calls
 --   * remote calls -> local calls
+--   * generic blob transfer manager (transport-native)
 --
 -- Deliberate omissions remain:
---   * transfer streams
 --   * wire auth
+--   * websocket fabric transport
+--   * true resume for transfers
 
 local fibers   = require 'fibers'
 local sleep    = require 'fibers.sleep'
@@ -28,6 +24,7 @@ local authz    = require 'devicecode.authz'
 local protocol = require 'services.fabric.protocol'
 local topicmap = require 'services.fabric.topicmap'
 local uart_tx  = require 'services.fabric.transport_uart'
+local transfer = require 'services.fabric.transfer'
 
 local perform      = fibers.perform
 local named_choice = fibers.named_choice
@@ -155,7 +152,6 @@ local function start_export_retained_watchers(conn, svc, transport, link_id, exp
 	for i = 1, #(export_cfg.publish or {}) do
 		local rule = export_cfg.publish[i]
 
-		-- Only rules explicitly marked retain=true get retained lifecycle forwarding.
 		if rule.retain == true then
 			fibers.spawn(function()
 				local rw = conn:watch_retained(rule.local_topic, {
@@ -328,11 +324,22 @@ local function handle_incoming_call(peer_conn, send_frame, link_cfg, msg)
 	end
 end
 
+local function reply_control(job, payload)
+	local tx = job and job.reply_tx
+	if tx then
+		pcall(function()
+			tx:send(payload)
+			tx:close('done')
+		end)
+	end
+end
+
 function M.run(conn, svc, opts)
-	local link_id  = assert(opts.link_id, 'fabric session requires link_id')
-	local link_cfg = assert(opts.link, 'fabric session requires link cfg')
-	local peer_id  = assert(link_cfg.peer_id, 'fabric session requires peer_id')
-	local connect  = assert(opts.connect, 'fabric session requires connect(principal)')
+	local link_id   = assert(opts.link_id, 'fabric session requires link_id')
+	local link_cfg  = assert(opts.link, 'fabric session requires link cfg')
+	local peer_id   = assert(link_cfg.peer_id, 'fabric session requires peer_id')
+	local connect   = assert(opts.connect, 'fabric session requires connect(principal)')
+	local control_rx = opts.control_rx
 
 	local peer_conn = connect(authz.peer_principal(peer_id, { roles = { 'admin' } }))
 	local pending   = new_pending_store()
@@ -434,6 +441,8 @@ function M.run(conn, svc, opts)
 		bad_frames.window_start = nil
 	end
 
+	local xfer -- forward declaration
+
 	local function note_bad_frame(what, detail, raw_t)
 		local tnow = svc:now()
 
@@ -454,6 +463,7 @@ function M.run(conn, svc, opts)
 
 		if bad_frames.count >= bad_frames.threshold then
 			pending:close_all('too_many_bad_frames')
+			if xfer then pcall(function() xfer:abort_all('too_many_bad_frames') end) end
 			publish_link_state(conn, svc, link_id, {
 				status      = 'down',
 				ready       = false,
@@ -528,6 +538,7 @@ function M.run(conn, svc, opts)
 
 		if sid_changed then
 			pending:close_all('peer_session_changed')
+			if xfer then pcall(function() xfer:abort_all('peer_session_changed') end) end
 			svc:obs_event('peer_session_changed', {
 				link_id  = link_id,
 				peer_id  = peer_id,
@@ -550,6 +561,7 @@ function M.run(conn, svc, opts)
 
 		if sid_changed then
 			pending:close_all('peer_session_changed')
+			if xfer then pcall(function() xfer:abort_all('peer_session_changed') end) end
 			svc:obs_event('peer_session_changed', {
 				link_id  = link_id,
 				peer_id  = peer_id,
@@ -590,6 +602,7 @@ function M.run(conn, svc, opts)
 	local scope = fibers.current_scope()
 	scope:finally(function()
 		pcall(function() pending:close_all('session_end') end)
+		if xfer then pcall(function() xfer:abort_all('session_end') end) end
 		pcall(function() transport:close() end)
 	end)
 
@@ -604,6 +617,18 @@ function M.run(conn, svc, opts)
 		error(('fabric/%s: transport open failed: %s'):format(link_id, tostring(err)), 0)
 	end
 
+	xfer = transfer.new({
+		svc           = svc,
+		conn          = conn,
+		link_id       = link_id,
+		peer_id       = peer_id,
+		send_frame    = send_frame,
+		sink_factory  = opts.sink_factory,
+		chunk_raw     = (((link_cfg.transfer or {}).chunk_raw) or 768),
+		ack_timeout_s = (((link_cfg.transfer or {}).ack_timeout_s) or 2.0),
+		max_retries   = (((link_cfg.transfer or {}).max_retries) or 5),
+	})
+
 	publish_session({ status = 'opening' })
 
 	svc:obs_log('info', {
@@ -613,8 +638,9 @@ function M.run(conn, svc, opts)
 	})
 
 	local hello_ok, hello_err = send_frame(protocol.hello(state.node_id, peer_id, {
-		pub  = true,
-		call = true,
+		pub          = true,
+		call         = true,
+		blob_transfer = true,
 	}, {
 		sid = state.local_sid,
 	}))
@@ -630,6 +656,69 @@ function M.run(conn, svc, opts)
 	start_export_retained_watchers(conn, svc, transport, link_id, link_cfg.export, send_frame, mark_worker_ready)
 	start_proxy_call_endpoints(conn, svc, transport, link_id, link_cfg.proxy_calls, pending, send_frame, mark_worker_ready)
 
+	local function handle_control(job)
+		if type(job) ~= 'table' then
+			return
+		end
+
+		if job.op == 'send_blob' then
+			if not state.established then
+				reply_control(job, {
+					ok  = false,
+					err = 'session_not_established',
+				})
+				return
+			end
+			if not is_ready() then
+				reply_control(job, {
+					ok  = false,
+					err = 'session_not_ready',
+				})
+				return
+			end
+
+			local transfer_id, terr = xfer:start_send(job.source, job.meta or {})
+			if transfer_id then
+				reply_control(job, {
+					ok          = true,
+					transfer_id = transfer_id,
+				})
+			else
+				reply_control(job, {
+					ok  = false,
+					err = tostring(terr),
+				})
+			end
+
+		elseif job.op == 'transfer_status' then
+			local st, serr = xfer:status(job.transfer_id)
+			if st then
+				reply_control(job, {
+					ok       = true,
+					transfer = st,
+				})
+			else
+				reply_control(job, {
+					ok  = false,
+					err = tostring(serr),
+				})
+			end
+
+		elseif job.op == 'transfer_abort' then
+			local ok2, aerr = xfer:abort(job.transfer_id, job.reason or 'aborted')
+			reply_control(job, {
+				ok  = (ok2 == true),
+				err = (ok2 ~= true) and tostring(aerr) or nil,
+			})
+
+		else
+			reply_control(job, {
+				ok  = false,
+				err = 'unknown control op: ' .. tostring(job.op),
+			})
+		end
+	end
+
 	while true do
 		local tnow = svc:now()
 		local deadline = next_deadline(tnow)
@@ -637,6 +726,10 @@ function M.run(conn, svc, opts)
 		local arms = {
 			recv = transport:recv_line_op(),
 		}
+
+		if control_rx then
+			arms.ctrl = control_rx:recv_op()
+		end
 
 		if deadline < math.huge then
 			local dt = deadline - tnow
@@ -646,11 +739,20 @@ function M.run(conn, svc, opts)
 
 		local which, a, b = perform(named_choice(arms))
 
-		if which == 'timer' then
+		if which == 'ctrl' then
+			local job = a
+			if job == nil then
+				control_rx = nil
+			else
+				handle_control(job)
+			end
+
+		elseif which == 'timer' then
 			local now2 = svc:now()
 
 			if state.last_rx_at ~= nil and (now2 - state.last_rx_at) >= ka.stale_after_s then
 				pending:close_all('peer_stale')
+				if xfer then pcall(function() xfer:abort_all('peer_stale') end) end
 				publish_link_state(conn, svc, link_id, {
 					status      = 'down',
 					ready       = false,
@@ -667,8 +769,9 @@ function M.run(conn, svc, opts)
 
 			if not state.established then
 				local ok2, err2 = send_frame(protocol.hello(state.node_id, peer_id, {
-					pub  = true,
-					call = true,
+					pub          = true,
+					call         = true,
+					blob_transfer = true,
 				}, {
 					sid = state.local_sid,
 				}))
@@ -697,6 +800,7 @@ function M.run(conn, svc, opts)
 			local line, rerr = a, b
 			if not line then
 				pending:close_all('transport_down')
+				if xfer then pcall(function() xfer:abort_all('transport_down') end) end
 				publish_link_state(conn, svc, link_id, {
 					status      = 'down',
 					ready       = false,
@@ -717,10 +821,13 @@ function M.run(conn, svc, opts)
 			else
 				local msg, verr = protocol.validate_message(raw)
 				if not msg then
-					-- If this was recognisably a call with an id, try to reply with error.
 					if raw.t == 'call' and type(raw.id) == 'string' and raw.id ~= '' then
 						pcall(function()
 							send_frame(protocol.reply_err(raw.id, 'bad_message: ' .. tostring(verr)))
+						end)
+					elseif raw.t == 'xfer_begin' and type(raw.id) == 'string' and raw.id ~= '' then
+						pcall(function()
+							send_frame(protocol.xfer_ready(raw.id, false, nil, 'bad_message: ' .. tostring(verr)))
 						end)
 					end
 					note_bad_frame('invalid_message', verr, raw.t)
@@ -769,7 +876,17 @@ function M.run(conn, svc, opts)
 
 					elseif msg.t == 'pong' then
 						note_peer_sid_only(msg)
-						-- mark_rx() already updated last_pong_at
+
+					elseif xfer and xfer:is_transfer_message(msg) then
+						local okx, xerr = xfer:handle_incoming(msg)
+						if okx ~= true then
+							svc:obs_log('warn', {
+								what    = 'transfer_message_failed',
+								link_id = link_id,
+								err     = tostring(xerr),
+								t       = tostring(msg.t),
+							})
+						end
 
 					elseif msg.t == 'pub' then
 						local _, perr = handle_incoming_pub(peer_conn, link_cfg, msg)
@@ -805,7 +922,6 @@ function M.run(conn, svc, opts)
 						pending:deliver(msg.corr, msg)
 
 					else
-						-- Unknown message types are not session-fatal.
 						svc:obs_log('warn', {
 							what    = 'unknown_message_type',
 							link_id = link_id,

@@ -1,3 +1,4 @@
+local fibers  = require 'fibers'
 local mailbox = require 'fibers.mailbox'
 local op      = require 'fibers.op'
 
@@ -83,6 +84,19 @@ end
 
 function Endpoint:setvbuf(_mode, _size)
 	return self
+end
+
+-- Synchronous wrappers to mimic fibers.io.stream.Stream.
+function Endpoint:write(...)
+	return fibers.perform(self:write_op(...))
+end
+
+function Endpoint:read_line()
+	return fibers.perform(self:read_line_op())
+end
+
+function Endpoint:close()
+	return fibers.perform(self:close_op())
 end
 
 local function new_endpoint()

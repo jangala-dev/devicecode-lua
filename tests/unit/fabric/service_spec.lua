@@ -1,3 +1,5 @@
+-- tests/unit/fabric/service_spec.lua
+
 local cjson           = require 'cjson.safe'
 
 local busmod          = require 'bus'
@@ -22,6 +24,16 @@ local function connect_factory(bus)
 		end
 		return bus:connect()
 	end
+end
+
+local function trace_specs()
+	return {
+		{ label = 'svc',   topic = { 'svc', '#' } },
+		{ label = 'cfg',   topic = { 'config', '#' } },
+		{ label = 'state', topic = { 'state', '#' } },
+		{ label = 'obs',   topic = { 'obs', '#' } },
+		{ label = 'rpc',   topic = { 'rpc', '#' } },
+	}
 end
 
 local function base_fabric_cfg()
@@ -142,6 +154,7 @@ local function assert_hello_frame(msg, diag, fake_hal, wire)
 	assert(type(msg.sid) == 'string' and msg.sid ~= '', explain('hello.sid missing', diag, fake_hal, wire))
 	assert(type(msg.proto) == 'number', explain('hello.proto missing', diag, fake_hal, wire))
 	assert(type(msg.caps) == 'table', explain('hello.caps missing', diag, fake_hal, wire))
+	assert(msg.caps.blob_transfer == true, explain('hello.blob_transfer missing', diag, fake_hal, wire))
 end
 
 local function wait_until_trace_has(diag, predicate, timeout, interval)
@@ -160,18 +173,29 @@ local function wait_until_trace_has(diag, predicate, timeout, interval)
 	})
 end
 
+local function wait_for_link_ready(diag, fake_hal, wire, timeout)
+	local ok = wait_until_trace_has(diag, function(rec)
+		return rec.label == 'state'
+			and type(rec.topic) == 'table'
+			and rec.topic[1] == 'state'
+			and rec.topic[2] == 'fabric'
+			and rec.topic[3] == 'link'
+			and rec.topic[4] == 'mcu0'
+			and type(rec.payload) == 'table'
+			and rec.payload.status == 'ready'
+			and rec.payload.ready == true
+	end, timeout or 0.75, 0.01)
+
+	assert(ok == true, explain('expected fabric link ready state', diag, fake_hal, wire))
+end
+
 function T.fabric_opens_hal_serial_ref_and_imports_remote_publish()
 	runfibers.run(function(scope)
 		local bus = busmod.new()
 		local cfg_conn = bus:connect()
 		local probe_conn = bus:connect()
 
-		local diag = stack_diag.start(scope, bus, {
-			{ label = 'svc',   topic = { 'svc', '#' } },
-			{ label = 'cfg',   topic = { 'config', '#' } },
-			{ label = 'state', topic = { 'state', '#' } },
-			{ label = 'obs',   topic = { 'obs', '#' } },
-		}, { max_records = 300 })
+		local diag = stack_diag.start(scope, bus, trace_specs(), { max_records = 300 })
 
 		local sub = probe_conn:subscribe({ 'peer', 'mcu-1', 'state', '#' }, {
 			queue_len = 8,
@@ -256,12 +280,7 @@ function T.fabric_exports_local_publish_to_remote_peer()
 		local cfg_conn = bus:connect()
 		local pub_conn = bus:connect()
 
-		local diag = stack_diag.start(scope, bus, {
-			{ label = 'svc',   topic = { 'svc', '#' } },
-			{ label = 'cfg',   topic = { 'config', '#' } },
-			{ label = 'state', topic = { 'state', '#' } },
-			{ label = 'obs',   topic = { 'obs', '#' } },
-		}, { max_records = 300 })
+		local diag = stack_diag.start(scope, bus, trace_specs(), { max_records = 300 })
 
 		local hal_side, peer_side = fake_stream_mod.new_pair()
 		local wire = new_wire_trace()
@@ -326,6 +345,7 @@ function T.fabric_exports_local_publish_to_remote_peer()
 		end, { timeout = 0.5, interval = 0.005 })
 
 		assert(ready == true, explain('expected fabric link to be ready before export test', diag, fake_hal, wire))
+		wait_for_link_ready(diag, fake_hal, wire, 0.75)
 
 		local exporter_started = wait_until_trace_has(diag, function(rec)
 			return rec.label == 'obs'
@@ -353,12 +373,7 @@ function T.fabric_proxies_local_call_to_remote_peer()
 		local cfg_conn = bus:connect()
 		local req_conn = bus:connect()
 
-		local diag = stack_diag.start(scope, bus, {
-			{ label = 'svc',   topic = { 'svc', '#' } },
-			{ label = 'cfg',   topic = { 'config', '#' } },
-			{ label = 'state', topic = { 'state', '#' } },
-			{ label = 'obs',   topic = { 'obs', '#' } },
-		}, { max_records = 300 })
+		local diag = stack_diag.start(scope, bus, trace_specs(), { max_records = 300 })
 
 		local hal_side, peer_side = fake_stream_mod.new_pair()
 		local wire = new_wire_trace()
@@ -428,6 +443,7 @@ function T.fabric_proxies_local_call_to_remote_peer()
 		end, { timeout = 0.5, interval = 0.005 })
 
 		assert(ready == true, explain('expected fabric link to be ready before proxied call test', diag, fake_hal, wire))
+		wait_for_link_ready(diag, fake_hal, wire, 0.75)
 
 		local proxy_started = wait_until_trace_has(diag, function(rec)
 			return rec.label == 'obs'
@@ -461,12 +477,7 @@ function T.fabric_proxies_incoming_remote_call_to_local_hal()
 		local bus = busmod.new()
 		local cfg_conn = bus:connect()
 
-		local diag = stack_diag.start(scope, bus, {
-			{ label = 'svc',   topic = { 'svc', '#' } },
-			{ label = 'cfg',   topic = { 'config', '#' } },
-			{ label = 'state', topic = { 'state', '#' } },
-			{ label = 'obs',   topic = { 'obs', '#' } },
-		}, { max_records = 300 })
+		local diag = stack_diag.start(scope, bus, trace_specs(), { max_records = 300 })
 
 		local hal_side, peer_side = fake_stream_mod.new_pair()
 		local wire = new_wire_trace()
@@ -562,12 +573,7 @@ function T.fabric_accepts_symmetric_peer_hello_and_imports_remote_publish()
 		local cfg_conn = bus:connect()
 		local probe_conn = bus:connect()
 
-		local diag = stack_diag.start(scope, bus, {
-			{ label = 'svc',   topic = { 'svc', '#' } },
-			{ label = 'cfg',   topic = { 'config', '#' } },
-			{ label = 'state', topic = { 'state', '#' } },
-			{ label = 'obs',   topic = { 'obs', '#' } },
-		}, { max_records = 300 })
+		local diag = stack_diag.start(scope, bus, trace_specs(), { max_records = 300 })
 
 		local sub = probe_conn:subscribe({ 'peer', 'mcu-1', 'state', '#' }, {
 			queue_len = 8,
@@ -605,8 +611,9 @@ function T.fabric_accepts_symmetric_peer_hello_and_imports_remote_publish()
 			assert_hello_frame(msg, diag, fake_hal, wire)
 
 			local peer_hello = protocol.hello('mcu-1', 'cm5-local', {
-				pub  = true,
-				call = true,
+				pub           = true,
+				call          = true,
+				blob_transfer = true,
 			}, {
 				sid = 'peer-sid-1',
 			})

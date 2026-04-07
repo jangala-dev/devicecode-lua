@@ -1,11 +1,16 @@
 -- services/fabric/protocol.lua
 --
--- First-pass control protocol:
+-- Fabric control protocol.
+--
 --   * one JSON object per line
 --   * suitable for stream transports
 --
--- This version carries explicit session identity in hello/ack/ping/pong,
--- and provides strict validation helpers for session code.
+-- Session messages:
+--   hello / hello_ack / ping / pong / pub / unretain / call / reply
+--
+-- Transfer messages:
+--   xfer_begin / xfer_ready / xfer_chunk / xfer_need / xfer_commit
+--   xfer_done / xfer_abort
 
 local cjson = require 'cjson.safe'
 local uuid  = require 'uuid'
@@ -81,12 +86,39 @@ local function require_nonempty_string(v, field)
 	return v, nil
 end
 
+local function require_bool(v, field)
+	if type(v) ~= 'boolean' then
+		return nil, field .. ' must be boolean'
+	end
+	return v, nil
+end
+
+local function require_nonneg_int(v, field)
+	if type(v) ~= 'number' or v < 0 or v % 1 ~= 0 then
+		return nil, field .. ' must be a non-negative integer'
+	end
+	return math.floor(v), nil
+end
+
+local function require_pos_int(v, field)
+	if type(v) ~= 'number' or v <= 0 or v % 1 ~= 0 then
+		return nil, field .. ' must be a positive integer'
+	end
+	return math.floor(v), nil
+end
+
 local function norm_proto(v)
 	if v == nil then return M.PROTO_VERSION, nil end
 	if type(v) ~= 'number' or v < 1 or v % 1 ~= 0 then
 		return nil, 'proto must be a positive integer'
 	end
 	return math.floor(v), nil
+end
+
+local function optional_table(v)
+	if v == nil then return nil end
+	if type(v) ~= 'table' then return nil end
+	return v
 end
 
 function M.validate_message(msg)
@@ -203,9 +235,8 @@ function M.validate_message(msg)
 		local corr, err = require_nonempty_string(msg.corr, 'reply.corr')
 		if not corr then return nil, err end
 
-		if type(msg.ok) ~= 'boolean' then
-			return nil, 'reply.ok must be boolean'
-		end
+		local _, err2 = require_bool(msg.ok, 'reply.ok')
+		if err2 then return nil, err2 end
 
 		if msg.ok == true then
 			return {
@@ -221,6 +252,138 @@ function M.validate_message(msg)
 			corr = corr,
 			ok   = false,
 			err  = tostring(msg.err or 'remote error'),
+		}, nil
+
+	elseif t == 'xfer_begin' then
+		local id, err = require_nonempty_string(msg.id, 'xfer_begin.id')
+		if not id then return nil, err end
+		local kind, err2 = require_nonempty_string(msg.kind, 'xfer_begin.kind')
+		if not kind then return nil, err2 end
+		local name, err3 = require_nonempty_string(msg.name, 'xfer_begin.name')
+		if not name then return nil, err3 end
+		local format, err4 = require_nonempty_string(msg.format, 'xfer_begin.format')
+		if not format then return nil, err4 end
+		local enc, err5 = require_nonempty_string(msg.enc, 'xfer_begin.enc')
+		if not enc then return nil, err5 end
+		local size, err6 = require_nonneg_int(msg.size, 'xfer_begin.size')
+		if not size then return nil, err6 end
+		local chunk_raw, err7 = require_pos_int(msg.chunk_raw, 'xfer_begin.chunk_raw')
+		if not chunk_raw then return nil, err7 end
+		local chunks, err8 = require_nonneg_int(msg.chunks, 'xfer_begin.chunks')
+		if not chunks then return nil, err8 end
+		local sha256, err9 = require_nonempty_string(msg.sha256, 'xfer_begin.sha256')
+		if not sha256 then return nil, err9 end
+
+		return {
+			t         = 'xfer_begin',
+			id        = id,
+			kind      = kind,
+			name      = name,
+			format    = format,
+			enc       = enc,
+			size      = size,
+			chunk_raw = chunk_raw,
+			chunks    = chunks,
+			sha256    = sha256,
+			meta      = optional_table(msg.meta),
+		}, nil
+
+	elseif t == 'xfer_ready' then
+		local id, err = require_nonempty_string(msg.id, 'xfer_ready.id')
+		if not id then return nil, err end
+		local _, err2 = require_bool(msg.ok, 'xfer_ready.ok')
+		if err2 then return nil, err2 end
+
+		local nextv = nil
+		if msg.next ~= nil then
+			nextv, err = require_nonneg_int(msg.next, 'xfer_ready.next')
+			if not nextv then return nil, err end
+		end
+
+		return {
+			t    = 'xfer_ready',
+			id   = id,
+			ok   = msg.ok,
+			next = nextv,
+			err  = (msg.ok == false) and tostring(msg.err or 'rejected') or nil,
+		}, nil
+
+	elseif t == 'xfer_chunk' then
+		local id, err = require_nonempty_string(msg.id, 'xfer_chunk.id')
+		if not id then return nil, err end
+		local seq, err2 = require_nonneg_int(msg.seq, 'xfer_chunk.seq')
+		if not seq then return nil, err2 end
+		local off, err3 = require_nonneg_int(msg.off, 'xfer_chunk.off')
+		if not off then return nil, err3 end
+		local n, err4 = require_nonneg_int(msg.n, 'xfer_chunk.n')
+		if not n then return nil, err4 end
+		local crc32, err5 = require_nonempty_string(msg.crc32, 'xfer_chunk.crc32')
+		if not crc32 then return nil, err5 end
+		local data, err6 = require_nonempty_string(msg.data, 'xfer_chunk.data')
+		if not data then return nil, err6 end
+
+		return {
+			t     = 'xfer_chunk',
+			id    = id,
+			seq   = seq,
+			off   = off,
+			n     = n,
+			crc32 = crc32,
+			data  = data,
+		}, nil
+
+	elseif t == 'xfer_need' then
+		local id, err = require_nonempty_string(msg.id, 'xfer_need.id')
+		if not id then return nil, err end
+		local nextv, err2 = require_nonneg_int(msg.next, 'xfer_need.next')
+		if not nextv then return nil, err2 end
+
+		return {
+			t    = 'xfer_need',
+			id   = id,
+			next = nextv,
+			err  = (msg.err ~= nil) and tostring(msg.err) or nil,
+		}, nil
+
+	elseif t == 'xfer_commit' then
+		local id, err = require_nonempty_string(msg.id, 'xfer_commit.id')
+		if not id then return nil, err end
+		local size, err2 = require_nonneg_int(msg.size, 'xfer_commit.size')
+		if not size then return nil, err2 end
+		local sha256, err3 = require_nonempty_string(msg.sha256, 'xfer_commit.sha256')
+		if not sha256 then return nil, err3 end
+
+		return {
+			t      = 'xfer_commit',
+			id     = id,
+			size   = size,
+			sha256 = sha256,
+		}, nil
+
+	elseif t == 'xfer_done' then
+		local id, err = require_nonempty_string(msg.id, 'xfer_done.id')
+		if not id then return nil, err end
+		local _, err2 = require_bool(msg.ok, 'xfer_done.ok')
+		if err2 then return nil, err2 end
+
+		return {
+			t    = 'xfer_done',
+			id   = id,
+			ok   = msg.ok,
+			info = optional_table(msg.info),
+			err  = (msg.ok == false) and tostring(msg.err or 'transfer failed') or nil,
+		}, nil
+
+	elseif t == 'xfer_abort' then
+		local id, err = require_nonempty_string(msg.id, 'xfer_abort.id')
+		if not id then return nil, err end
+		local reason, err2 = require_nonempty_string(msg.reason, 'xfer_abort.reason')
+		if not reason then return nil, err2 end
+
+		return {
+			t      = 'xfer_abort',
+			id     = id,
+			reason = reason,
 		}, nil
 	end
 
@@ -309,6 +472,80 @@ function M.reply_err(corr, err)
 		corr = corr,
 		ok   = false,
 		err  = tostring(err),
+	}
+end
+
+function M.xfer_begin(id, kind, name, format, enc, size, chunk_raw, chunks, sha256, meta)
+	return {
+		t         = 'xfer_begin',
+		id        = id,
+		kind      = kind,
+		name      = name,
+		format    = format,
+		enc       = enc,
+		size      = size,
+		chunk_raw = chunk_raw,
+		chunks    = chunks,
+		sha256    = sha256,
+		meta      = meta,
+	}
+end
+
+function M.xfer_ready(id, ok, nextv, err)
+	return {
+		t    = 'xfer_ready',
+		id   = id,
+		ok   = not not ok,
+		next = nextv,
+		err  = (ok == false) and tostring(err or 'rejected') or nil,
+	}
+end
+
+function M.xfer_chunk(id, seq, off, n, crc32, data)
+	return {
+		t     = 'xfer_chunk',
+		id    = id,
+		seq   = seq,
+		off   = off,
+		n     = n,
+		crc32 = crc32,
+		data  = data,
+	}
+end
+
+function M.xfer_need(id, nextv, err)
+	return {
+		t    = 'xfer_need',
+		id   = id,
+		next = nextv,
+		err  = err,
+	}
+end
+
+function M.xfer_commit(id, size, sha256)
+	return {
+		t      = 'xfer_commit',
+		id     = id,
+		size   = size,
+		sha256 = sha256,
+	}
+end
+
+function M.xfer_done(id, ok, info, err)
+	return {
+		t    = 'xfer_done',
+		id   = id,
+		ok   = not not ok,
+		info = info,
+		err  = (ok == false) and tostring(err or 'transfer failed') or nil,
+	}
+end
+
+function M.xfer_abort(id, reason)
+	return {
+		t      = 'xfer_abort',
+		id     = id,
+		reason = tostring(reason or 'aborted'),
 	}
 end
 
