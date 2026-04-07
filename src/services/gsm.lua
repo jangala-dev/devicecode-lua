@@ -13,7 +13,7 @@ local pulse = require "fibers.pulse"
 local perform = fibers.perform
 
 local base = require 'devicecode.service_base'
-local capability_args = require 'services.hal.types.capability_args'
+local cap_sdk = require 'services.hal.sdk.cap'
 local apns = require "services.gsm.apn"
 
 local REQUEST_TIMEOUT = 10
@@ -55,25 +55,6 @@ local function t_cfg(name)
 	return { 'cfg', name }
 end
 
----@param id string|number
----@return table
-local function t_cap_state(id)
-	return { 'cap', 'modem', id, 'state' }
-end
-
----@param id string|number
----@return table
-local function t_cap_card_state(id)
-	return { 'cap', 'modem', id, 'state', 'card' }
-end
-
----@param id string|number
----@param method string
----@return table
-local function t_cap_rpc(id, method)
-	return { 'cap', 'modem', id, 'rpc', method }
-end
-
 ---@param key string
 ---@return table
 local function t_obs_metric(key)
@@ -87,17 +68,16 @@ local function t_obs_event(id, key)
 	return { 'obs', 'v1', 'gsm', 'event', id, key }
 end
 
----@param conn Connection
----@param id string|number
+---@param cap CapabilityReference
 ---@param method string
 ---@param payload table?
 ---@param timeout number?
 ---@return any
 ---@return string
-local function call_modem_rpc(conn, id, method, payload, timeout)
-	local reply, err = conn:call(t_cap_rpc(id, method), payload or {}, {
+local function call_modem_rpc(cap, method, payload, timeout)
+	local reply, err = perform(cap:call_control_op(method, payload or {}, {
 		timeout = timeout or REQUEST_TIMEOUT,
-	})
+	}))
 	if not reply then
 		return nil, err or "rpc failed"
 	end
@@ -107,32 +87,30 @@ local function call_modem_rpc(conn, id, method, payload, timeout)
 	return reply.reason, ""
 end
 
----@param conn Connection
----@param id string|number
+---@param cap CapabilityReference
 ---@param field string
 ---@param timeout number?
 ---@param timescale number?
 ---@return any
 ---@return string
-local function modem_get_field(conn, id, field, timeout, timescale)
-	local opts, opts_err = capability_args.new.ModemGetOpts(field, timescale)
+local function modem_get_field(cap, field, timeout, timescale)
+	local opts, opts_err = cap_sdk.args.new.ModemGetOpts(field, timescale)
 	if not opts then
 		return nil, opts_err or "invalid modem get opts"
 	end
-	return call_modem_rpc(conn, id, 'get', opts, timeout)
+	return call_modem_rpc(cap, 'get', opts, timeout)
 end
 
----@param conn Connection
----@param id string|number
+---@param cap CapabilityReference
 ---@param freq number
 ---@return any
 ---@return string
-local function modem_set_signal_freq(conn, id, freq)
-	local opts, opts_err = capability_args.new.ModemSignalUpdateOpts(freq)
+local function modem_set_signal_freq(cap, freq)
+	local opts, opts_err = cap_sdk.args.new.ModemSignalUpdateOpts(freq)
 	if not opts then
 		return false, opts_err or "invalid signal update opts"
 	end
-	return call_modem_rpc(conn, id, 'set_signal_update_freq', opts, REQUEST_TIMEOUT)
+	return call_modem_rpc(cap, 'set_signal_update_freq', opts, REQUEST_TIMEOUT)
 end
 
 ---@param tbl table?
@@ -365,6 +343,7 @@ end
 
 ---@class GsmModem
 ---@field conn Connection
+---@field cap CapabilityReference
 ---@field id string|number
 ---@field name string
 ---@field cfg table
@@ -375,15 +354,15 @@ end
 local GsmModem = {}
 GsmModem.__index = GsmModem
 
----@param conn Connection
----@param id string|number
+---@param cap CapabilityReference
 ---@param svc ServiceBase
 ---@return GsmModem
-function GsmModem.new(conn, id, svc)
+function GsmModem.new(cap, svc)
 	local self = setmetatable({}, GsmModem)
-	self.conn = conn
-	self.id = id
-	self.name = tostring(id)
+	self.cap = cap
+	self.conn = cap.conn
+	self.id = cap.id
+	self.name = tostring(cap.id)
 	self.cfg = {}
 	self.device = ""
 	self.scope = nil
@@ -443,7 +422,7 @@ end
 ---@return nil
 function GsmModem:_emit_metrics_once()
 	-- Derived metrics only; HAL remains the source of truth.
-	local access_techs, access_err = modem_get_field(self.conn, self.id, 'access_techs', REQUEST_TIMEOUT)
+	local access_techs, access_err = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT)
 	if access_err == "" then
 		local access_tech = derive_access_tech(access_techs)
 		if access_tech ~= "" then
@@ -455,37 +434,37 @@ function GsmModem:_emit_metrics_once()
 		end
 	end
 
-	local band, band_err = modem_get_field(self.conn, self.id, 'active_band_class', REQUEST_TIMEOUT)
+	local band, band_err = modem_get_field(self.cap, 'active_band_class', REQUEST_TIMEOUT)
 	if band_err == "" then
 		self:_emit_metric('band', band)
 	end
 
-	local imei, imei_err = modem_get_field(self.conn, self.id, 'imei', REQUEST_TIMEOUT)
+	local imei, imei_err = modem_get_field(self.cap, 'imei', REQUEST_TIMEOUT)
 	if imei_err == "" then
 		self:_emit_metric('imei', imei)
 	end
 
-	local operator, operator_err = modem_get_field(self.conn, self.id, 'operator', REQUEST_TIMEOUT)
+	local operator, operator_err = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT)
 	if operator_err == "" then
 		self:_emit_metric('operator', operator)
 	end
 
-	local sim, sim_err = modem_get_field(self.conn, self.id, 'sim', REQUEST_TIMEOUT)
+	local sim, sim_err = modem_get_field(self.cap, 'sim', REQUEST_TIMEOUT)
 	if sim_err == "" then
 		self:_emit_metric('sim', normalize_sim_presence(sim))
 	end
 
-	local iccid, iccid_err = modem_get_field(self.conn, self.id, 'iccid', REQUEST_TIMEOUT)
+	local iccid, iccid_err = modem_get_field(self.cap, 'iccid', REQUEST_TIMEOUT)
 	if iccid_err == "" then
 		self:_emit_metric('iccid', iccid)
 	end
 
-	local firmware, firmware_err = modem_get_field(self.conn, self.id, 'firmware', REQUEST_TIMEOUT)
+	local firmware, firmware_err = modem_get_field(self.cap, 'firmware', REQUEST_TIMEOUT)
 	if firmware_err == "" then
 		self:_emit_metric('firmware', firmware)
 	end
 
-	local state_sub = self.conn:subscribe(t_cap_card_state(self.id))
+	local state_sub = self.cap:get_state_sub('card')
 	local state_msg, msg_err = state_sub:recv()
 	if msg_err then
 		self.svc:obs_log('debug', { what = 'state_recv_error', modem = self.name, err = tostring(msg_err) })
@@ -496,7 +475,7 @@ function GsmModem:_emit_metrics_once()
 		self:_emit_metric('state', state.to)
 	end
 
-	local net_ports, net_ports_err = modem_get_field(self.conn, self.id, 'net_ports', REQUEST_TIMEOUT)
+	local net_ports, net_ports_err = modem_get_field(self.cap, 'net_ports', REQUEST_TIMEOUT)
 	if net_ports_err == "" then
 		local interface = net_ports and net_ports[1]
 		if interface then
@@ -506,17 +485,17 @@ function GsmModem:_emit_metrics_once()
 		end
 	end
 
-	local rx_bytes, rx_err = modem_get_field(self.conn, self.id, 'rx_bytes', REQUEST_TIMEOUT)
+	local rx_bytes, rx_err = modem_get_field(self.cap, 'rx_bytes', REQUEST_TIMEOUT)
 	if rx_err == "" then
 		self:_emit_metric('rx_bytes', rx_bytes)
 	end
 
-	local tx_bytes, tx_err = modem_get_field(self.conn, self.id, 'tx_bytes', REQUEST_TIMEOUT)
+	local tx_bytes, tx_err = modem_get_field(self.cap, 'tx_bytes', REQUEST_TIMEOUT)
 	if tx_err == "" then
 		self:_emit_metric('tx_bytes', tx_bytes)
 	end
 
-	local signal, signal_err = modem_get_field(self.conn, self.id, 'signal', REQUEST_TIMEOUT)
+	local signal, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT)
 	local rssi, rsrp, rsrq, rscp = nil, nil, nil, nil
 	if signal_err == "" then
 		rssi = signal.rssi
@@ -576,22 +555,22 @@ end
 ---@return number? retry_timeout
 function GsmModem:_apn_connect()
 	-- Fetch network/SIM identifiers from HAL
-	local mcc, mcc_err = modem_get_field(self.conn, self.id, 'mcc', REQUEST_TIMEOUT)
+	local mcc, mcc_err = modem_get_field(self.cap, 'mcc', REQUEST_TIMEOUT)
 	if mcc_err ~= "" then
 		return nil, "mcc: " .. mcc_err, DEFAULT_RETRY_TIMEOUT
 	end
 
-	local mnc, mnc_err = modem_get_field(self.conn, self.id, 'mnc', REQUEST_TIMEOUT)
+	local mnc, mnc_err = modem_get_field(self.cap, 'mnc', REQUEST_TIMEOUT)
 	if mnc_err ~= "" then
 		return nil, "mnc: " .. mnc_err, DEFAULT_RETRY_TIMEOUT
 	end
 
-	local imsi, imsi_err = modem_get_field(self.conn, self.id, 'imsi', REQUEST_TIMEOUT)
+	local imsi, imsi_err = modem_get_field(self.cap, 'imsi', REQUEST_TIMEOUT)
 	if imsi_err ~= "" then
 		return nil, "imsi: " .. imsi_err, DEFAULT_RETRY_TIMEOUT
 	end
 
-	local gid1, gid1_err = modem_get_field(self.conn, self.id, 'gid1', REQUEST_TIMEOUT)
+	local gid1, gid1_err = modem_get_field(self.cap, 'gid1', REQUEST_TIMEOUT)
 	if gid1_err ~= "" then
 		return nil, "gid1: " .. gid1_err, DEFAULT_RETRY_TIMEOUT
 	end
@@ -609,12 +588,12 @@ function GsmModem:_apn_connect()
 
 		if not build_err and conn_str then
 			-- Build and send connect RPC
-			local opts, opts_err = capability_args.new.ModemConnectOpts(conn_str)
+			local opts, opts_err = cap_sdk.args.new.ModemConnectOpts(conn_str)
 			if opts then
 				self.svc:obs_log('debug',
 					{ what = 'apn_connect_attempt', modem = self.name, apn = ranking.name, conn_str = conn_str })
 
-				local _, conn_err = call_modem_rpc(self.conn, self.id, 'connect', opts, REQUEST_TIMEOUT)
+				local _, conn_err = call_modem_rpc(self.cap, 'connect', opts, REQUEST_TIMEOUT)
 
 				self.svc:obs_log('debug',
 					{ what = 'apn_connect_rpc', modem = self.name, apn = ranking.name, err = conn_err })
@@ -635,7 +614,7 @@ function GsmModem:_apn_connect()
 					{ what = 'apn_connect_failed', modem = self.name, apn = ranking.name, err = conn_err })
 
 				-- Subscribe to state changes to monitor connection progress
-				local state_sub = self.conn:subscribe(t_cap_card_state(self.id), {
+				local state_sub = self.cap:get_state_sub('card', {
 					queue_len = 1,
 					full = 'drop_oldest',
 				})
@@ -668,7 +647,7 @@ end
 ---@return nil
 function GsmModem:_autoconnect_loop()
 	local seen = self.config_pulse:version()
-	local state_sub = self.conn:subscribe(t_cap_card_state(self.id), {
+	local state_sub = self.cap:get_state_sub('card', {
 		queue_len = 1,
 		full = 'drop_oldest',
 	})
@@ -705,10 +684,10 @@ function GsmModem:_autoconnect_loop()
 			local err, retry_timeout
 
 			if current_state == 'disabled' then
-				local _, err_inner = call_modem_rpc(self.conn, self.id, 'enable', {}, REQUEST_TIMEOUT)
+				local _, err_inner = call_modem_rpc(self.cap, 'enable', {}, REQUEST_TIMEOUT)
 				err = err_inner
 			elseif current_state == 'failed' then
-				local _, err_inner = call_modem_rpc(self.conn, self.id, 'listen_for_sim', {}, REQUEST_TIMEOUT)
+				local _, err_inner = call_modem_rpc(self.cap, 'listen_for_sim', {}, REQUEST_TIMEOUT)
 				err = err_inner
 			elseif current_state == 'registered' then
 				local _, err_inner, retry_inner = self:_apn_connect()
@@ -758,7 +737,7 @@ function GsmModem:start(parent_scope)
 
 	local ok, spawn_err = child:spawn(function()
 		local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
-		local _, sig_err = modem_set_signal_freq(self.conn, self.id, signal_freq)
+		local _, sig_err = modem_set_signal_freq(self.cap, signal_freq)
 		if sig_err ~= "" then
 			self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = sig_err })
 		end
@@ -841,16 +820,17 @@ function GsmService.start(conn, opts)
 		svc:obs_log('info', 'service stopped')
 	end)
 
-	local function ensure_modem(id)
+	local function ensure_modem(cap)
+		local id = cap.id
 		local modem = modems[id]
 		if modem then
 			return modem
 		end
 
-		modem = GsmModem.new(conn, id, svc)
+		modem = GsmModem.new(cap, svc)
 		modems[id] = modem
 
-		local device, device_err = modem_get_field(conn, id, 'device', REQUEST_TIMEOUT)
+		local device, device_err = modem_get_field(cap, 'device', REQUEST_TIMEOUT)
 		if device_err ~= "" then
 			svc:obs_log('debug', { what = 'device_lookup_failed', modem = tostring(id), err = device_err })
 		else
@@ -907,7 +887,7 @@ function GsmService.start(conn, opts)
 		end
 	end
 
-	local cap_sub = conn:subscribe(t_cap_state('+'))
+	local cap_listener = cap_sdk.new_cap_listener(conn, 'modem', '+')
 
 	svc:obs_event('config_applied', {})
 	svc:status('running')
@@ -915,7 +895,7 @@ function GsmService.start(conn, opts)
 
 	while true do
 		local choices = {
-			cap = cap_sub:recv_op(),
+			cap = cap_listener.sub:recv_op(),
 			cfg = cfg_sub:recv_op(),
 		}
 
@@ -940,7 +920,7 @@ function GsmService.start(conn, opts)
 		if which == 'cap' then
 			local id = msg.topic and msg.topic[3]
 			if msg.payload == 'added' then
-				ensure_modem(id)
+				ensure_modem(cap_sdk.new_cap_ref(conn, 'modem', id))
 			elseif msg.payload == 'removed' then
 				remove_modem(id)
 			else
