@@ -43,15 +43,17 @@ function CapabilityReference:call_control(method, args)
 end
 
 ---@param field string
+---@param opts table?
 ---@return Subscription
-function CapabilityReference:get_state_sub(field)
-    return self.conn:subscribe(t_cap_state(self.class, self.id, field))
+function CapabilityReference:get_state_sub(field, opts)
+    return self.conn:subscribe(t_cap_state(self.class, self.id, field), opts)
 end
 
 ---@param field string
+---@param opts table?
 ---@return Subscription
-function CapabilityReference:get_event_sub(field)
-    return self.conn:subscribe(t_cap_event(self.class, self.id, field))
+function CapabilityReference:get_event_sub(field, opts)
+    return self.conn:subscribe(t_cap_event(self.class, self.id, field), opts)
 end
 
 ---@class CapListener
@@ -121,6 +123,14 @@ function CapSDK.new_cap_listener(conn, class, id)
     local topic = t_cap_listen(class, id)
     local sub = conn:subscribe(topic)
     return setmetatable({ conn = conn, sub = sub, topic = topic }, CapListener)
+end
+
+---@param conn Connection
+---@param class CapabilityClass
+---@param id CapabilityId
+---@return CapabilityReference
+function CapSDK.new_cap_ref(conn, class, id)
+    return setmetatable({ conn = conn, class = class, id = id }, CapabilityReference)
 end
 
 return CapSDK
