@@ -26,7 +26,7 @@ local perform        = fibers.perform
 
 local json           = require 'cjson.safe'
 local base           = require 'devicecode.service_base'
-local capability_args = require 'services.hal.types.capability_args'
+local cap_sdk = require 'services.hal.sdk.cap'
 
 local senml          = require 'services.metrics.senml'
 local http_m         = require 'services.metrics.http'
@@ -193,7 +193,7 @@ local function rebuild_cloud_config()
 end
 
 local function fetch_mainflux_config()
-	local read_opts, opts_err = capability_args.new.FilesystemReadOpts('mainflux.cfg')
+	local read_opts, opts_err = cap_sdk.args.new.FilesystemReadOpts('mainflux.cfg')
 	if not read_opts then
 		State.svc:obs_log('warn', { what = 'mainflux_read_opts_failed', err = tostring(opts_err) })
 		return
