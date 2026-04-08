@@ -545,6 +545,7 @@ function Modem:sim_lifecycle_monitor()
                 self:reset() -- restart to enter failed state (cleaner than implementing a new removed state)
                 sim_present = false
                 self:_emit_state("sim_status", "absent")
+                self.scope:cancel("modem restarting")
             end
         end
         -- source == "send": listener consumed the state, loop to offer it again
