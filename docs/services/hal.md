@@ -110,5 +110,15 @@ Both of these examples are fiberless
 
 Monitors may also spawn fibers in the background, although the majority won't need to, to mediate command output between drivers
 
+## HAL Authoring Docs
+
+For manager, driver, capability, and backend implementation guidance, use this document set:
+
+- [HAL Authoring Guide Index](./hal/authoring-index.md)
+- [HAL Architecture Standards](./hal/architecture-standards.md)
+- [HAL Implementation Cookbook](./hal/implementation-cookbook.md)
+- [HAL Interfaces Reference](./hal/interfaces-reference.md)
+- [HAL Backend Authoring Guide](./hal/backend-authoring.md)
+
 
 
