@@ -4,9 +4,8 @@ local sleep = require "fibers.sleep"
 local scope = require "fibers.scope"
 local op = require "fibers.op"
 
-local fetch = require "services.hal.backends.fetch"
+local modem_types = require "services.hal.types.modem"
 
---- Parses the output of a sim slot status line
 ---@param status string?
 ---@return string card_status
 ---@return string error
@@ -27,12 +26,12 @@ local function parse_slot_status(status)
     return "absent", ""
 end
 
---- Gets the home network info (MCC/MNC) for a modem, with caching
 ---@param identity ModemIdentity
----@param cache Cache
+---@return string?
+---@return string?
 ---@return string error
-local function fetch_home_network_info(identity, cache)
-    local st, _, err = fibers.run_scope(function()
+local function read_home_network_info(identity)
+    local st, _, result_or_err = fibers.run_scope(function()
         local cmd = exec.command {
             "qmicli", "-p", "-d", identity.mode_port, "--nas-get-home-network",
             stdin = "null",
@@ -50,18 +49,20 @@ local function fetch_home_network_info(identity, cache)
             error("Failed to parse qmicli output: " .. tostring(out))
         end
 
-        cache:set("mcc", mcc)
-        cache:set("mnc", mnc)
+        return { mcc = mcc, mnc = mnc }
     end)
-    return st ~= "ok" and err or ""
+
+    if st == "ok" then
+        return result_or_err.mcc, result_or_err.mnc, ""
+    end
+    return nil, nil, result_or_err or "Unknown error"
 end
 
---- Gets gid1 for a sim card and caches it
 ---@param identity ModemIdentity
----@param cache Cache
+---@return string?
 ---@return string error
-local function fetch_gid1(identity, cache)
-    local st, _, err = fibers.run_scope(function()
+local function read_gid1(identity)
+    local st, _, gid1_or_err = fibers.run_scope(function()
         local cmd = exec.command {
             "qmicli", "-p", "-d", identity.mode_port, "--uim-read-transparent=0x3F00,0x7FFF,0x6F3E",
             stdin = "null",
@@ -73,23 +74,25 @@ local function fetch_gid1(identity, cache)
             error("Failed to execute qmicli command: --uim-read-transparent, reason: " .. tostring(err))
         end
 
-        -- Parse the hex string after "Read result:"
-        local gid1 = out:match("%s+(%S+)%s*$"):gsub(":", "")
+        local gid1 = out:match("%s+(%S+)%s*$")
         if not gid1 then
             error("Failed to parse qmicli output: " .. tostring(out))
         end
 
-        cache:set("gid1", gid1)
+        return gid1:gsub(":", "")
     end)
-    return st ~= "ok" and err or ""
+
+    if st == "ok" then
+        return gid1_or_err, ""
+    end
+    return nil, gid1_or_err or "Unknown error"
 end
 
---- Gets the RF band info for a modem and caches active_band_class
 ---@param identity ModemIdentity
----@param cache Cache
+---@return string?
 ---@return string error
-local function fetch_rf_band_info(identity, cache)
-    local st, _, err = fibers.run_scope(function()
+local function read_rf_band_info(identity)
+    local st, _, band_or_err = fibers.run_scope(function()
         local cmd = exec.command {
             "qmicli", "-p", "-d", identity.mode_port, "--nas-get-rf-band-info",
             stdin = "null",
@@ -106,14 +109,19 @@ local function fetch_rf_band_info(identity, cache)
             error("Failed to parse qmicli output: " .. tostring(out))
         end
 
-        cache:set("active_band_class", active_band_class)
+        return active_band_class
     end)
-    return st ~= "ok" and err or ""
+
+    if st == "ok" then
+        return band_or_err, ""
+    end
+    return nil, band_or_err or "Unknown error"
 end
 
-
 local function add_mode_funcs(ModemBackend)
-    --- Start command to read sim presence
+    local base_read_network_info = ModemBackend.read_network_info
+    local base_read_sim_info = ModemBackend.read_sim_info
+
     ---@return boolean ok
     ---@return string error
     function ModemBackend:start_sim_presence_monitor()
@@ -139,9 +147,6 @@ local function add_mode_funcs(ModemBackend)
         return true, ""
     end
 
-    --- Make an op that completes when the UIM slot status changes to reflect a new SIM state.
-    --- Behaviour varies by modem and firmware — on some models the slot monitor cannot be relied
-    --- upon to fire on removal or insertion. See models/quectel.lua for the polling override.
     ---@return Op
     function ModemBackend:wait_for_sim_present_op()
         return op.guard(function()
@@ -149,7 +154,6 @@ local function add_mode_funcs(ModemBackend)
                     if not self.sim_present then
                         return false, "Sim presence monitor not started"
                     end
-                    -- Read chunks until we find "Slot status: active"
                     while true do
                         local chunk = s:perform(self.sim_present.stdout:read_line_op({
                             terminator = "Slot status: active",
@@ -157,41 +161,32 @@ local function add_mode_funcs(ModemBackend)
                         }))
 
                         if not chunk then
-                            -- EOF - return error result from scope
                             return false, "Stream closed"
                         end
 
-                        -- Parse the chunk (includes Card status + Slot status lines)
                         local card_status, parse_err = parse_slot_status(chunk)
-
                         if parse_err == "" and card_status ~= "" then
-                            -- Valid parse - return true if present, false if absent
                             return card_status == "present", ""
                         end
-
-                        -- If parse failed, continue reading next chunk
                     end
                 end)
                 :wrap(function(st, _, ...)
                     if st == 'ok' then
-                        return ... -- Returns the boolean (and optional error string)
+                        return ...
                     elseif st == 'cancelled' then
                         return false, "cancelled"
                     else
-                        -- Scope failed - return the error from scope body
                         return false, (... or "QMI monitor failed")
                     end
                 end)
         end)
     end
 
-    --- Wait for sim to become present
     ---@return boolean sim_present
     function ModemBackend:wait_for_sim_present()
         return fibers.perform(self:wait_for_sim_present_op())
     end
 
-    --- Poll for sim presence, returns true if sim is present, false if not, or error if an error occurs
     ---@return boolean sim_present
     ---@return string error
     function ModemBackend:is_sim_present()
@@ -216,34 +211,30 @@ local function add_mode_funcs(ModemBackend)
 
         if st == "ok" then
             return present_or_err, ""
-        else
-            return false, present_or_err or "Unknown error"
         end
+        return false, present_or_err or "Unknown error"
     end
 
-    --- Check for sim presence, will cause a sim_present_op to emit if present
-    ---@param cooldown number? time to wait between power off and on commands, default 1 second
+    ---@param cooldown number?
     ---@return boolean ok
     ---@return string error
     function ModemBackend:trigger_sim_presence_check(cooldown)
         local st, _, err = fibers.run_scope(function()
             local errors = {}
             cooldown = cooldown or 1
-            --- Set power low
             local cmd = exec.command {
                 "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-off=1",
                 stdin = "null",
                 stdout = "pipe",
                 stderr = "stdout"
             }
-            local _, status, code, _, err = fibers.perform(cmd:combined_output_op())
+            local _, status, code, _, power_err = fibers.perform(cmd:combined_output_op())
             if status ~= "exited" or code ~= 0 then
-                table.insert(errors, "Failed to execute qmicli power off command: " .. tostring(err))
+                table.insert(errors, "Failed to execute qmicli power off command: " .. tostring(power_err))
             end
 
             sleep.sleep(cooldown)
 
-            --- Set power high
             local cmd_on = exec.command {
                 "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-on=1",
                 stdin = "null",
@@ -263,37 +254,52 @@ local function add_mode_funcs(ModemBackend)
         return st == "ok", err or ""
     end
 
-    --- Gets a simcards MCC
-    ---@param timeout number? Cache timeout in seconds (optional)
-    ---@return string mcc
+    ---@return ModemNetworkInfo?
     ---@return string error
-    function ModemBackend:mcc(timeout)
-        return fetch.get_cached_value(self.identity, "mcc", self.cache, "string", timeout, fetch_home_network_info)
+    function ModemBackend:read_network_info()
+        local info, err = base_read_network_info(self)
+        if not info then
+            return nil, err
+        end
+
+        local mcc, mnc, network_err = read_home_network_info(self.identity)
+        if network_err ~= "" then
+            return nil, network_err
+        end
+
+        local active_band_class, band_err = read_rf_band_info(self.identity)
+        if band_err ~= "" then
+            return nil, band_err
+        end
+
+        return modem_types.new.ModemNetworkInfo(
+            info.operator,
+            info.access_techs,
+            mcc,
+            mnc,
+            active_band_class
+        )
     end
 
-    --- Gets a simcards MNC
-    ---@param timeout number? Cache timeout in seconds (optional)
-    ---@return string mnc
+    ---@return ModemSimInfo?
     ---@return string error
-    function ModemBackend:mnc(timeout)
-        return fetch.get_cached_value(self.identity, "mnc", self.cache, "string", timeout, fetch_home_network_info)
-    end
+    function ModemBackend:read_sim_info()
+        local info, err = base_read_sim_info(self)
+        if not info then
+            return nil, err
+        end
 
-    --- Gets a simcards GID1 value
-    ---@param timeout number? Cache timeout in seconds (optional)
-    ---@return string gid1
-    ---@return string error
-    function ModemBackend:gid1(timeout)
-        return fetch.get_cached_value(self.identity, "gid1", self.cache, "string", timeout, fetch_gid1)
-    end
+        local gid1, gid_err = read_gid1(self.identity)
+        if gid_err ~= "" then
+            return nil, gid_err
+        end
 
-    --- Gets the active band class for the modem
-    ---@param timeout number? Cache timeout in seconds (optional)
-    ---@return string active_band_class
-    ---@return string error
-    function ModemBackend:active_band_class(timeout)
-        return fetch.get_cached_value(self.identity, "active_band_class", self.cache, "string", timeout,
-            fetch_rf_band_info)
+        return modem_types.new.ModemSimInfo(
+            info.sim,
+            info.iccid,
+            info.imsi,
+            gid1
+        )
     end
 end
 

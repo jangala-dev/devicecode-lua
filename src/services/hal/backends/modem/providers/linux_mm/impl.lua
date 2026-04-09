@@ -7,10 +7,7 @@ local exec = require "fibers.io.exec"
 local op = require "fibers.op"
 
 -- Other modules
-local cache_mod = require "shared.cache"
 local json = require "cjson.safe"
-local getters = require "services.hal.backends.modem.providers.linux_mm.getters"
-
 
 local function list_to_map(list)
     local map = {}
@@ -19,9 +16,6 @@ local function list_to_map(list)
     end
     return map
 end
-
----- Constants ----
-local CACHE_TIMEOUT = math.huge -- The default for cache is to hold a value indefinitely
 
 local MODEM_INFO_PATHS = {
     imei = { "generic", "equipment-identifier" },
@@ -55,16 +49,13 @@ local SIGNAL_IGNORE_FIELDS = list_to_map {
     "error-rate"
 }
 
-
----- Private functions ----
-
---- Format nested table into k-v pairs
 ---@param nested table
 ---@param key_paths table<string, string[]>
 ---@return table<string, any>
 local function nested_to_flat(nested, key_paths)
     local flat = {}
     for key, path in pairs(key_paths) do
+        ---@type any
         local value = nested
         for _, p in ipairs(path) do
             if type(value) ~= 'table' then
@@ -83,95 +74,222 @@ local function nested_to_flat(nested, key_paths)
     return flat
 end
 
---- Shallow copy of a table
----@param tbl table
----@return table copy
+---@param tbl table<string, any>
+---@return table<string, any>
 local function shallow_copy(tbl)
     local copy = {}
-    for k, v in pairs(tbl) do
-        copy[k] = v
+    for key, value in pairs(tbl) do
+        copy[key] = value
     end
     return copy
 end
 
---- Formats each port from a string list of "name (type)" to a map of type_ports:name[]
---- Returns a table of cache keys to be stored separately
 ---@param ports string[]
----@return table<string, string[]> cache_entries Map of cache keys to values
+---@return table<string, string[]>
 local function format_ports(ports)
-    local cache_entries = {}
+    local formatted = {
+        at_ports = {},
+        qmi_ports = {},
+        gps_ports = {},
+        net_ports = {},
+        mbim_ports = {},
+    }
     for _, port in ipairs(ports) do
-        local name, type = port:match("^(.*) %((.*)%)$")
-        if name and type then
-            local key = type .. "_ports"
-            if not cache_entries[key] then
-                cache_entries[key] = {}
+        local name, port_type = port:match("^(.*) %((.*)%)$")
+        if name and port_type then
+            local key = port_type .. "_ports"
+            if formatted[key] then
+                table.insert(formatted[key], name)
             end
-            table.insert(cache_entries[key], name)
         end
     end
-    return cache_entries
+    return formatted
 end
 
--- Post-processors transform field values before caching
--- Each processor must return a table of {key = value} pairs to cache
--- Example: ports -> {at_ports = [...], qmi_ports = [...]}
-local FIELD_POST_PROCESSORS = {
-    ports = format_ports, -- Expands to at_ports, qmi_ports, etc.
-}
+---@param value any
+---@return string[]
+local function normalize_string_list(value)
+    if type(value) == 'table' then
+        local result = {}
+        for _, entry in ipairs(value) do
+            if type(entry) == 'string' and entry ~= '' then
+                table.insert(result, entry)
+            end
+        end
+        return result
+    end
+    if type(value) == 'string' and value ~= '' and value ~= "--" then
+        return { value }
+    end
+    return {}
+end
 
+---@param output string
+---@return string
+local function parse_firmware_version(output)
+    for line in output:gmatch("[^\r\n]+") do
+        local version = line:match("version:%s*(%S+)")
+        if version and version ~= '' then
+            return version
+        end
+    end
+    return ""
+end
 
---- Fetches modem info using mmcli and caches it
----@param identity ModemIdentity
----@param cache Cache
+---@param drivers string[]
+---@param ports table<string, string[]>
+---@return string?
+local function derive_mode(drivers, ports)
+    local drivers_str = table.concat(drivers or {}, ",")
+    if drivers_str:match("cdc_mbim") or #(ports.mbim_ports or {}) > 0 then
+        return "mbim"
+    end
+    if drivers_str:match("qmi_wwan") or #(ports.qmi_ports or {}) > 0 then
+        return "qmi"
+    end
+    return nil
+end
+
+---@param address string
+---@param args string[]
+---@return string? output
 ---@return string error
-local function fetch_modem_info(identity, cache)
-    local st, _, err = fibers.run_scope(function()
+local function run_command(address, args)
+    local st, _, output_or_err = fibers.run_scope(function()
         local cmd = exec.command {
-            "mmcli", "-J", "-m", identity.address,
+            unpack(args),
             stdin = "null",
             stdout = "pipe",
             stderr = "stdout"
         }
         local output, status, code, _, err = fibers.perform(cmd:combined_output_op())
         if status ~= "exited" or code ~= 0 then
-            error("mmcli command failed: " .. tostring(err) .. ", output: " .. tostring(output))
+            error(table.concat(args, " ") .. " failed for modem " .. tostring(address) .. ": " .. tostring(err)
+                .. ", output: " .. tostring(output))
         end
-
-        local data, json_err = json.decode(output)
-        if not data then
-            error("Failed to decode mmcli output as JSON: " .. tostring(json_err) .. ", output: " .. tostring(output))
-        end
-
-        local modem = data.modem
-
-        local flat = nested_to_flat(modem, MODEM_INFO_PATHS)
-
-        -- Apply post-processors to transform fields before caching
-        for field_name, processor in pairs(FIELD_POST_PROCESSORS) do
-            if flat[field_name] then
-                local cache_entries = processor(flat[field_name])
-                for k, v in pairs(cache_entries) do
-                    cache:set(k, v)
-                end
-                flat[field_name] = nil -- Remove original field since we cached the processed entries
-            end
-        end
-
-        for k, v in pairs(flat) do
-            cache:set(k, v)
-        end
+        return output
     end)
-    return st ~= "ok" and err or ""
+
+    if st == "ok" then
+        return output_or_err, ""
+    end
+    return nil, output_or_err or "unknown command error"
 end
 
---- Read a net stat
----@param net_port string
----@return integer rx_bytes
+---@param address string
+---@return table<string, any>?
 ---@return string error
+local function read_modem_info(address)
+    local output, err = run_command(address, { "mmcli", "-J", "-m", address })
+    if not output then
+        return nil, err
+    end
+
+    local data, json_err = json.decode(output)
+    if not data then
+        return nil, "Failed to decode mmcli output as JSON: " .. tostring(json_err) .. ", output: " .. tostring(output)
+    end
+    if type(data.modem) ~= 'table' then
+        return nil, "No modem info found in mmcli output"
+    end
+
+    local flat = nested_to_flat(data.modem, MODEM_INFO_PATHS)
+    local ports = format_ports(flat.ports or {})
+    flat.ports = nil
+    for key, value in pairs(ports) do
+        flat[key] = value
+    end
+    flat.drivers = normalize_string_list(flat.drivers)
+    flat.access_techs = normalize_string_list(flat.access_techs)
+    return flat, ""
+end
+
+---@param address string
+---@return string?
+---@return string error
+local function read_firmware_version(address)
+    local output, err = run_command(address, { "mmcli", "-m", address, "--firmware-status" })
+    if not output then
+        return nil, err
+    end
+
+    local version = parse_firmware_version(output)
+    if version == "" then
+        return nil, "Failed to parse firmware version from mmcli --firmware-status"
+    end
+    return version, ""
+end
+
+---@param identity ModemIdentity
+---@return ModemSignalInfo?
+---@return string error
+local function read_signal_info(identity)
+    local output, err = run_command(identity.address, { "mmcli", "-J", "-m", identity.address, "--signal-get" })
+    if not output then
+        return nil, err
+    end
+
+    local data, json_err = json.decode(output)
+    if not data then
+        return nil, "Failed to decode mmcli output as JSON: " .. tostring(json_err) .. ", output: " .. tostring(output)
+    end
+
+    local signal_techs = data.modem and data.modem.signal or nil
+    if type(signal_techs) ~= 'table' then
+        return nil, "No signal info found in mmcli output"
+    end
+
+    local active_signal = nil
+    for tech, signals in pairs(signal_techs) do
+        if SIGNAL_TECHNOLOGIES[tech] and type(signals) == 'table' then
+            local filtered_fields = {}
+            for signal_name, signal_value in pairs(signals) do
+                if not SIGNAL_IGNORE_FIELDS[signal_name] and signal_value ~= "--" then
+                    filtered_fields[signal_name] = signal_value
+                end
+            end
+            if next(filtered_fields) ~= nil then
+                active_signal = filtered_fields
+                break
+            end
+        end
+    end
+
+    if not active_signal then
+        return nil, "No active signal found"
+    end
+
+    return modem_types.new.ModemSignalInfo(shallow_copy(active_signal))
+end
+
+---@param sim_path string
+---@return table<string, any>?
+---@return string error
+local function read_sim_payload(sim_path)
+    local output, err = run_command(sim_path, { "mmcli", "-J", "-i", sim_path })
+    if not output then
+        return nil, err
+    end
+
+    local data, json_err = json.decode(output)
+    if not data then
+        return nil,
+            "Failed to decode mmcli SIM output as JSON: " .. tostring(json_err) .. ", output: " .. tostring(output)
+    end
+    if type(data.sim) ~= 'table' then
+        return nil, "No SIM info found in mmcli output"
+    end
+
+    return nested_to_flat(data.sim, SIM_INFO_PATHS), ""
+end
+
+---@param net_port string
+---@param stat string
+---@return integer
+---@return string
 local function read_net_stat(net_port, stat)
-    local st, _, rx_bytes_or_err = fibers.run_scope(function()
-        local path = '/sys/class/net/' .. net_port .. '/statistics/' .. stat
+    local st, _, value_or_err = fibers.run_scope(function()
+        local path = "/sys/class/net/" .. net_port .. "/statistics/" .. stat
         local file = io.open(path, "r")
         if not file then
             error("Failed to open file: " .. tostring(path))
@@ -181,180 +299,58 @@ local function read_net_stat(net_port, stat)
         if not content then
             error("Failed to read file: " .. tostring(path))
         end
-        local rx_bytes = tonumber(content)
-        if not rx_bytes then
-            error("Failed to parse rx_bytes: " .. tostring(content))
+        local value = tonumber(content)
+        if not value then
+            error("Failed to parse net stat: " .. tostring(content))
         end
-        return rx_bytes
+        return value
     end)
 
     if st == "ok" then
-        return rx_bytes_or_err, ""
+        return value_or_err, ""
     end
-    return -1, rx_bytes_or_err or "Unknown error"
+    return -1, value_or_err or "Unknown error"
 end
 
---- Get the table values from the active signal tech
----@param signal_techs table
----@return table signals
----@return string error
-local function get_active_signal(signal_techs)
-    for tech, signals in pairs(signal_techs) do
-        if SIGNAL_TECHNOLOGIES[tech] then
-            local active_signal = false
-            local filtered_fields = {}
-            for signal_name, signal_value in pairs(signals) do
-                if not SIGNAL_IGNORE_FIELDS[signal_name] and signal_value ~= "--" then
-                    filtered_fields[signal_name] = signal_value
-                    active_signal = true
-                end
-            end
-            if active_signal then
-                return filtered_fields, ""
-            end
-        end
-    end
-    return {}, "No active signal found"
-end
-
---- Fetches signal info using mmcli and caches it
----@param identity ModemIdentity
----@param cache Cache
----@return string error
-local function fetch_signal_info(identity, cache)
-    local st, _, err = fibers.run_scope(function()
-        local cmd = exec.command {
-            "mmcli", "-J", "-m", identity.address, "--signal-get",
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local output, status, code, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" or code ~= 0 then
-            error("mmcli command failed: --signal-get, reason: " .. tostring(err) .. ", output: " .. tostring(output))
-        end
-
-        local data, json_err = json.decode(output)
-        if not data then
-            error("Failed to decode mmcli output as JSON: " .. tostring(json_err) .. ", output: " .. tostring(output))
-        end
-
-        local signal_techs = data.modem and data.modem.signal or nil
-        if not signal_techs then
-            error("No signal info found in mmcli output: " .. tostring(output))
-        end
-
-        local active_signal, active_err = get_active_signal(signal_techs)
-        if active_err ~= "" then
-            error("Failed to get active signal: " .. tostring(active_err))
-        end
-        cache:set("signal", shallow_copy(active_signal)) -- Cache a copy of the active signal fields
-    end)
-    return st ~= "ok" and err or ""
-end
-
---- Fetches SIM info using mmcli and caches it
----@param identity ModemIdentity
----@param cache Cache
----@return string error
-local function fetch_sim_info(identity, cache)
-    local st, _, err = fibers.run_scope(function()
-        local sim = cache:get("sim")
-        if not sim then
-            fetch_modem_info(identity, cache) -- SIM info is needed to fetch SIM details, so fetch modem info if SIM path is not cached
-            sim = cache:get("sim")
-            if not sim then
-                error("Failed to get SIM path for fetching SIM info")
-            end
-        end
-        if sim == "--" then
-            return -- no sim means we cannot get sim info
-        end
-        local cmd = exec.command {
-            "mmcli", "-J", "-i", sim,
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local output, status, code, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" or code ~= 0 then
-            error("mmcli command failed: mmcli -J -i " ..
-            sim .. ", reason:" .. tostring(err) .. ", output: " .. tostring(output))
-        end
-        local data, json_err = json.decode(output)
-        if not data then
-            error("Failed to decode mmcli output as JSON: " .. tostring(json_err) .. " , output: " .. tostring(output))
-        end
-        local flat = nested_to_flat(data.sim, SIM_INFO_PATHS)
-        for k, v in pairs(flat) do
-            cache:set(k, v)
-        end
-    end)
-    return st ~= "ok" and err or ""
-end
-
-
---- Returns all attributes needed for modem identity
 ---@param address string
----@param cache Cache
----@return ModemIdentity identity
-local function get_identity(address, cache)
-    -- Build a temp id
-    local fake_id = assert(modem_types.new.ModemIdentity(
-        "unknown",
+---@return ModemIdentity
+local function get_identity(address)
+    local modem_info, err = read_modem_info(address)
+    if not modem_info then
+        error("Failed to fetch modem info: " .. tostring(err))
+    end
+
+    local qmi_port = modem_info.qmi_ports and modem_info.qmi_ports[1] or nil
+    local mbim_port = modem_info.mbim_ports and modem_info.mbim_ports[1] or nil
+    local selected_mode_port = mbim_port or qmi_port
+    if not selected_mode_port then
+        error("Failed to determine modem control port")
+    end
+
+    local at_port = modem_info.at_ports and modem_info.at_ports[1] or nil
+    if not at_port then
+        error("Failed to determine modem AT port")
+    end
+
+    local net_port = modem_info.net_ports and modem_info.net_ports[1] or nil
+    if not net_port then
+        error("Failed to determine modem network port")
+    end
+
+    local identity, id_err = modem_types.new.ModemIdentity(
+        modem_info.imei,
         address,
-        "unknown",
-        "unknown",
-        "unknown",
-        "unknown"
-    ))
-    fetch_modem_info(fake_id, cache)                            -- We need modem info to build the identity
-
-    local imei = cache:get("imei")
-    local device = cache:get("device")
-
-    local qmi_ports = cache:get("qmi_ports")
-    local qmi_port
-    if qmi_ports and type(qmi_ports) == "table" then
-        qmi_port = qmi_ports[1]
-    end
-
-    local mbim_ports = cache:get("mbim_ports")
-    local mbim_port
-    if mbim_ports and type(mbim_ports) == "table" then
-        mbim_port = mbim_ports[1]
-    end
-
-    local mode_port = "/dev/" .. (mbim_port or qmi_port) -- Prefer mbim port if available, otherwise use qmi port
-
-    local at_ports = cache:get("at_ports")
-    local at_port
-    if at_ports and type(at_ports) == "table" then
-        at_port = "/dev/" .. at_ports[1]
-    end
-
-    local net_ports = cache:get("net_ports")
-    local net_port
-    if net_ports and type(net_ports) == "table" then
-        net_port = net_ports[1]
-    end
-
-    local id, id_err = modem_types.new.ModemIdentity(
-        imei,
-        address,
-        mode_port,
-        at_port,
+        "/dev/" .. selected_mode_port,
+        "/dev/" .. at_port,
         net_port,
-        device
+        modem_info.device
     )
-    if not id then
-        error("Failed to get modem identity: " .. tostring(id_err)) -- Fatal error if we cannot build the identity
+    if not identity then
+        error("Failed to get modem identity: " .. tostring(id_err))
     end
-
-    return id
+    return identity
 end
 
---- Parses the output of a modem state line
 ---@param line string?
 ---@return ModemStateEvent?
 ---@return string error
@@ -363,143 +359,174 @@ local function parse_modem_state_line(line)
         return nil, "Command closed"
     end
 
-    -- Remove leading/trailing whitespace
     line = line:match("^%s*(.-)%s*$")
 
-    -- Pattern 1: Initial state, 'state'
     local initial_state = line:match(": Initial state, '([^']+)'")
     if initial_state then
         return modem_types.new.ModemStateInitialEvent(initial_state, "initial")
     end
 
-    -- Pattern 2: State changed, 'old' --> 'new' (Reason: reason)
     local old_state, new_state, reason = line:match(": State changed, '([^']+)' %-%-> '([^']+)' %(Reason: ([^)]+)%)")
     if old_state and new_state then
         return modem_types.new.ModemStateChangeEvent(old_state, new_state, reason)
     end
 
-    -- Pattern 3: Removed
     if line:match(": Removed") then
         return modem_types.new.ModemStateRemovedEvent("removed")
     end
 
-    -- Unknown format
     return nil, "Unknown modem state line format: " .. line
 end
-
-
----- Public backend interface ----
---- See ModemBackend class definition in services.hal.types.modem
 
 local ModemBackend = {}
 ModemBackend.__index = ModemBackend
 
--- Add all getter methods to ModemBackend
-getters.add_getters(ModemBackend,
-    fetch_modem_info,
-    fetch_sim_info,
-    fetch_signal_info,
-    read_net_stat
-)
+---@return ModemIdentityInfo?
+---@return string error
+function ModemBackend:read_identity()
+    local modem_info, err = read_modem_info(self.identity.address)
+    if not modem_info then
+        return nil, err
+    end
 
---- Enable the modem
+    local firmware, firmware_err = read_firmware_version(self.identity.address)
+    if firmware_err ~= "" then
+        return nil, firmware_err
+    end
+
+    return modem_types.new.ModemIdentityInfo(
+        modem_info.imei,
+        modem_info.drivers or {},
+        modem_info.model,
+        modem_info.revision,
+        firmware,
+        modem_info.plugin,
+        derive_mode(modem_info.drivers or {}, {
+            qmi_ports = modem_info.qmi_ports or {},
+            mbim_ports = modem_info.mbim_ports or {},
+        })
+    )
+end
+
+---@return ModemPortsInfo?
+---@return string error
+function ModemBackend:read_ports()
+    local modem_info, err = read_modem_info(self.identity.address)
+    if not modem_info then
+        return nil, err
+    end
+
+    return modem_types.new.ModemPortsInfo(
+        modem_info.device,
+        modem_info.primary_port,
+        modem_info.at_ports,
+        modem_info.qmi_ports,
+        modem_info.gps_ports,
+        modem_info.net_ports
+    )
+end
+
+---@return ModemSimInfo?
+---@return string error
+function ModemBackend:read_sim_info()
+    local modem_info, err = read_modem_info(self.identity.address)
+    if not modem_info then
+        return nil, err
+    end
+
+    local sim_info = nil
+    if modem_info.sim and modem_info.sim ~= "--" then
+        sim_info, err = read_sim_payload(modem_info.sim)
+        if err ~= "" then
+            return nil, err
+        end
+    end
+
+    return modem_types.new.ModemSimInfo(
+        modem_info.sim,
+        sim_info and sim_info.iccid or nil,
+        sim_info and sim_info.imsi or nil,
+        nil
+    )
+end
+
+---@return ModemNetworkInfo?
+---@return string error
+function ModemBackend:read_network_info()
+    local modem_info, err = read_modem_info(self.identity.address)
+    if not modem_info then
+        return nil, err
+    end
+
+    return modem_types.new.ModemNetworkInfo(
+        modem_info.operator,
+        modem_info.access_techs,
+        nil,
+        nil,
+        nil
+    )
+end
+
+---@return ModemSignalInfo?
+---@return string error
+function ModemBackend:read_signal()
+    return read_signal_info(self.identity)
+end
+
+---@return ModemTrafficInfo?
+---@return string error
+function ModemBackend:read_traffic()
+    local rx_bytes, rx_err = read_net_stat(self.identity.net_port, "rx_bytes")
+    if rx_err ~= "" then
+        return nil, rx_err
+    end
+
+    local tx_bytes, tx_err = read_net_stat(self.identity.net_port, "tx_bytes")
+    if tx_err ~= "" then
+        return nil, tx_err
+    end
+
+    return modem_types.new.ModemTrafficInfo(rx_bytes, tx_bytes)
+end
+
 ---@return boolean ok
 ---@return string error
 function ModemBackend:enable()
-    local st, _, err = fibers.run_scope(function()
-        local cmd = exec.command {
-            "mmcli", "-m", self.identity.address, "-e",
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local _, status, _, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" then
-            error("mmcli command failed to execute: enable, reason: " .. tostring(err))
-        end
-    end)
-    return st == "ok", err or ""
+    local _, err = run_command(self.identity.address, { "mmcli", "-m", self.identity.address, "-e" })
+    return err == "", err
 end
 
---- Disable the modem
 ---@return boolean ok
 ---@return string error
 function ModemBackend:disable()
-    local st, _, err = fibers.run_scope(function()
-        local cmd = exec.command {
-            "mmcli", "-m", self.identity.address, "-d",
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local _, status, _, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" then
-            error("mmcli command failed to execute: disable, reason: " .. tostring(err))
-        end
-    end)
-    return st == "ok", err or ""
+    local _, err = run_command(self.identity.address, { "mmcli", "-m", self.identity.address, "-d" })
+    return err == "", err
 end
 
---- Reset the modem
 ---@return boolean ok
 ---@return string error
 function ModemBackend:reset()
-    local st, _, err = fibers.run_scope(function()
-        local cmd = exec.command {
-            "mmcli", "-m", self.identity.address, "--reset",
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local _, status, _, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" then
-            error("mmcli command failed to execute: --reset, reason: " .. tostring(err))
-        end
-    end)
-    return st == "ok", err or ""
+    local _, err = run_command(self.identity.address, { "mmcli", "-m", self.identity.address, "--reset" })
+    return err == "", err
 end
 
---- Connect the modem
 ---@param conn_string string
 ---@return boolean ok
 ---@return string error
 function ModemBackend:connect(conn_string)
-    local full_conn_string = "--simple-connect=" .. conn_string
-    local st, _, err = fibers.run_scope(function()
-        local cmd = exec.command {
-            "mmcli", "-m", self.identity.address, full_conn_string,
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local _, status, _, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" then
-            error("mmcli command failed to execute: --simple-connect, reason: " .. tostring(err))
-        end
-    end)
-    return st == "ok", err or ""
+    local _, err = run_command(self.identity.address, {
+        "mmcli", "-m", self.identity.address, "--simple-connect=" .. conn_string
+    })
+    return err == "", err
 end
 
---- Disconnect the modem
 ---@return boolean ok
 ---@return string error
 function ModemBackend:disconnect()
-    local st, _, err = fibers.run_scope(function()
-        local cmd = exec.command {
-            "mmcli", "-m", self.identity.address, "--simple-disconnect",
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local _, status, _, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" then
-            error("mmcli command failed to execute: --simple-disconnect, reason: " .. tostring(err))
-        end
-    end)
-    return st == "ok", err or ""
+    local _, err = run_command(self.identity.address, { "mmcli", "-m", self.identity.address, "--simple-disconnect" })
+    return err == "", err
 end
 
---- Inhibit the modem
 ---@return boolean ok
 ---@return string error
 function ModemBackend:inhibit()
@@ -514,8 +541,6 @@ function ModemBackend:inhibit()
         stderr = "stdout"
     }
 
-    -- Accessing stdout_stream() triggers the command to start
-    -- The command will run in the background, managed by the scope
     local stream, err = cmd:stdout_stream()
     if not stream then
         return false, "Failed to start inhibit command: --inhibit, reason: " .. tostring(err)
@@ -525,7 +550,6 @@ function ModemBackend:inhibit()
     return true, "Modem inhibit started"
 end
 
---- Uninhibit the modem
 ---@return boolean ok
 ---@return string error
 function ModemBackend:uninhibit()
@@ -535,11 +559,9 @@ function ModemBackend:uninhibit()
 
     self.inhibit_cmd:kill()
     self.inhibit_cmd = nil
-
     return true, "Modem uninhibited"
 end
 
---- Start monitoring modem state changes
 ---@return boolean ok
 ---@return string error
 function ModemBackend:start_state_monitor()
@@ -560,45 +582,38 @@ function ModemBackend:start_state_monitor()
     return true, ""
 end
 
---- Listen for modem state changes
 ---@return Op
 function ModemBackend:monitor_state_op()
     return op.guard(function()
         if not self.state_monitor then
             return op.always(nil)
         end
-        return self.state_monitor.stream:read_line_op():wrap(parse_modem_state_line)
+        return self.state_monitor.stream:read_line_op():wrap(function(line)
+            local state_ev, err = parse_modem_state_line(line)
+            if state_ev then
+                self.last_state_event = state_ev
+            end
+            return state_ev, err
+        end)
     end)
 end
 
---- Set the modem signal update interval
 ---@param period number
 ---@return boolean ok
 ---@return string error
 function ModemBackend:set_signal_update_interval(period)
-    local st, _, err = fibers.run_scope(function()
-        local cmd = exec.command {
-            "mmcli", "-m", self.identity.address, "--signal-setup=" .. tostring(period),
-            stdin = "null",
-            stdout = "pipe",
-            stderr = "stdout"
-        }
-        local _, status, _, _, err = fibers.perform(cmd:combined_output_op())
-        if status ~= "exited" then
-            error("mmcli command failed to execute: " .. tostring(err))
-        end
-    end)
-    return st == "ok", err or ""
+    local _, err = run_command(self.identity.address, {
+        "mmcli", "-m", self.identity.address, "--signal-setup=" .. tostring(period)
+    })
+    return err == "", err
 end
 
---- Builds the backend instance
---- @return ModemBackend
+---@return ModemBackend
 local function new(address)
-    local cache = cache_mod.new(CACHE_TIMEOUT, nil, '.')
     local self = {
-        cache = cache,
-        identity = get_identity(address, cache),
-        base = "linux_mm"
+        identity = get_identity(address),
+        base = "linux_mm",
+        last_state_event = nil,
     }
     return setmetatable(self, ModemBackend)
 end
