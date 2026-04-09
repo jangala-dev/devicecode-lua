@@ -15,7 +15,37 @@ local op     = require 'fibers.op'
 local common = require 'services.hal.backends.openwrt.common'
 local hcfg   = require 'services.hal.config'
 
+local unpack_ = table.unpack or unpack
+
 local M = {}
+
+local function try_serial_config(self, args)
+	local commands = {
+		{ 'stty' },
+		{ '/bin/busybox', 'stty' },
+		{ '/usr/bin/stty' },
+		{ '/bin/stty' },
+	}
+
+	local errs = {}
+	for i = 1, #commands do
+		local cmd = commands[i]
+		local argv = {}
+		for j = 1, #cmd do argv[#argv + 1] = cmd[j] end
+		for j = 1, #args do argv[#argv + 1] = args[j] end
+
+		local ok_cfg, cfg_err = common.cmd_ok(unpack_(argv))
+		if ok_cfg then
+			return true, nil, argv[1]
+		end
+		errs[#errs + 1] = {
+			cmd = table.concat(cmd, ' '),
+			err = tostring(cfg_err),
+		}
+	end
+
+	return nil, errs, nil
+end
 
 local function parse_mode(mode)
 	mode = mode or '8N1'
@@ -169,13 +199,34 @@ function M.open_serial_stream(self, req, _msg)
 		return { ok = false, err = tostring(aerr) }
 	end
 
-	-- Best-effort device configuration.
+	-- Configure the serial device. All stty variants failing is fatal —
+	-- an unconfigured TTY will not match the expected baud/mode and the
+	-- link will produce decode errors or timeouts.
 	do
-		local cmd = { 'stty' }
-		for i = 1, #args do cmd[#cmd + 1] = args[i] end
-		local ok_cfg, cfg_err = common.cmd_ok(table.unpack(cmd))
+		local ok_cfg, cfg_errs, cfg_cmd = try_serial_config(self, args)
 		if not ok_cfg then
-			return { ok = false, err = 'stty failed: ' .. tostring(cfg_err) }
+			local parts = {}
+			for i = 1, #(cfg_errs or {}) do
+				local rec_err = cfg_errs[i]
+				parts[#parts + 1] = tostring(rec_err.cmd) .. ': ' .. tostring(rec_err.err)
+			end
+			local msg = table.concat(parts, ' | ')
+			if self._host and type(self._host.log) == 'function' then
+				self._host.log('warn', {
+					what   = 'serial_stty_failed',
+					ref    = ref,
+					device = rec.device,
+					err    = msg,
+				})
+			end
+			return { ok = false, err = 'serial config failed: ' .. msg }
+		elseif self._host and type(self._host.log) == 'function' and cfg_cmd ~= 'stty' then
+			self._host.log('info', {
+				what   = 'serial_stty_fallback_used',
+				ref    = ref,
+				device = rec.device,
+				cmd    = cfg_cmd,
+			})
 		end
 	end
 

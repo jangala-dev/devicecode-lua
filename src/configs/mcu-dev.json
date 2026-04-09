@@ -1,0 +1,64 @@
+{
+  "hal": {
+    "managers": {
+      "uart": {
+        "serial_ports": [
+          {
+            "name": "uart-0",
+            "path": "/dev/ttyAMA0",
+            "baud": 115200
+          }
+        ]
+      }
+    }
+  },
+  "fabric": {
+    "schema": "devicecode.fabric/1",
+    "links": {
+      "mcu0": {
+        "peer_id": "mcu-1",
+        "keepalive": {
+          "hello_retry_s": 1.0,
+          "idle_ping_s": 15.0,
+          "stale_after_s": 45.0
+        },
+        "transport": {
+          "kind": "uart",
+          "serial_ref": "uart-0"
+        },
+        "export": {
+          "publish": [
+            {
+              "src": ["config", "mcu"],
+              "dst": ["config", "device"],
+              "retain": true
+            }
+          ]
+        },
+        "import": {
+          "publish": [
+            {
+              "src": ["state", "#"],
+              "dst": ["peer", "mcu-1", "state", "#"],
+              "retain": true
+            }
+          ],
+          "call": [
+            {
+              "src": ["rpc", "hal", "read_state"],
+              "dst": ["rpc", "hal", "read_state"],
+              "timeout_s": 0.5
+            }
+          ]
+        },
+        "proxy_calls": [
+          {
+            "src": ["rpc", "peer", "mcu-1", "hal", "dump"],
+            "dst": ["rpc", "hal", "dump"],
+            "timeout_s": 0.5
+          }
+        ]
+      }
+    }
+  }
+}

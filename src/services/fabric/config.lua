@@ -100,6 +100,37 @@ local function norm_transfer(t, path)
 	}, nil
 end
 
+local function norm_keepalive(t, path)
+	if t == nil then
+		return nil, nil
+	end
+	if not is_plain_table(t) then
+		return nil, path .. ' must be a table'
+	end
+
+	local out = {}
+	local keys = {
+		'hello_retry_s',
+		'idle_ping_s',
+		'stale_after_s',
+	}
+	for i = 1, #keys do
+		local key = keys[i]
+		local v = t[key]
+		if v ~= nil then
+			if type(v) ~= 'number' or v <= 0 then
+				return nil, path .. '.' .. key .. ' must be a positive number'
+			end
+			out[key] = v
+		end
+	end
+
+	if next(out) == nil then
+		return nil, nil
+	end
+	return out, nil
+end
+
 local function is_concrete_topic(t)
 	for i = 1, #t do
 		if t[i] == '+' or t[i] == '#' then
@@ -227,6 +258,10 @@ function M.normalise(payload)
 		if not transport then
 			return nil, terr
 		end
+		local keepalive, kerr = norm_keepalive(rec.keepalive, ('links.%s.keepalive'):format(link_id))
+		if kerr then
+			return nil, kerr
+		end
 		local transfer, trerr = norm_transfer(rec.transfer, ('links.%s.transfer'):format(link_id))
 		if not transfer then
 			return nil, trerr
@@ -252,6 +287,9 @@ function M.normalise(payload)
 			},
 			proxy_calls = {},
 		}
+		if keepalive ~= nil then
+			link.keepalive = keepalive
+		end
 
 		local exp_pub    = type(export_cfg.publish) == 'table' and export_cfg.publish or {}
 		for i = 1, #exp_pub do

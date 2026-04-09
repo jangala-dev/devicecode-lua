@@ -7,6 +7,7 @@ local op     = require 'fibers.op'
 local sleep  = require 'fibers.sleep'
 local authz  = require 'devicecode.authz'
 local busmod = require 'bus'
+local config_bootstrap = require 'devicecode.config_bootstrap'
 
 local safe = require 'coxpcall'
 
@@ -171,6 +172,7 @@ function M.run(scope, params)
 	params = params or {}
 
 	local env = params.env or (os.getenv('DEVICECODE_ENV') or 'dev')
+	local config_name = params.config_name or os.getenv('DEVICECODE_CONFIG')
 
 	local service_names = parse_csv(params.services_csv or require_env('DEVICECODE_SERVICES'))
 	if #service_names == 0 then
@@ -196,6 +198,28 @@ function M.run(scope, params)
 		env      = env,
 		services = service_names,
 	})
+
+	if config_name then
+		local seeded, serr = config_bootstrap.seed(main_conn, {
+			name             = config_name,
+			service_names    = service_names,
+			fabric_link_id   = params.fabric_link_id or os.getenv('DEVICECODE_FABRIC_LINK_ID'),
+			fabric_peer_id   = params.fabric_peer_id or os.getenv('DEVICECODE_FABRIC_PEER_ID'),
+			fabric_serial_ref = params.fabric_serial_ref or os.getenv('DEVICECODE_FABRIC_SERIAL_REF'),
+		})
+		if not seeded then
+			fail_boot(main_conn, nil, 'config_bootstrap_failed', serr, {
+				config_name = config_name,
+			})
+		end
+
+		main_conn:publish({ 'obs', 'log', 'main', 'info' }, {
+			what        = 'config_bootstrap_loaded',
+			config_name = seeded.name,
+			path        = seeded.path,
+			topics      = seeded.topics,
+		})
+	end
 
 	main_conn:publish({ 'obs', 'log', 'main', 'info' }, {
 		what = 'starting',

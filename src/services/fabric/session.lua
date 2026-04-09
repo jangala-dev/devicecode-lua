@@ -49,12 +49,13 @@ local function choose_transport(svc, link_cfg)
 	error('fabric: unsupported transport kind ' .. tostring(k), 0)
 end
 
-local function max2(a, b)
-	if a == nil then return b end
-	if b == nil then return a end
-	return (a > b) and a or b
-end
-
+-- Keepalive timing relationships:
+--   stale_after_s (45) > idle_ping_s (15) > hello_retry_s (10)
+--
+-- idle_ping_s drives TX-idle pings so the remote peer's stale timer
+-- stays alive. stale_after_s is RX-only — if nothing is received for
+-- this long, the peer is declared stale. The margin between them
+-- (45 - 15 = 30s) is the grace window for lost pings.
 local function keepalive_cfg(link_cfg)
 	local ka = (type(link_cfg.keepalive) == 'table') and link_cfg.keepalive or {}
 	return {
@@ -573,10 +574,6 @@ function M.run(conn, svc, opts)
 		publish_session()
 	end
 
-	local function last_activity()
-		return max2(state.last_rx_at, state.last_tx_at)
-	end
-
 	local function next_deadline(tnow)
 		local best = math.huge
 
@@ -585,12 +582,18 @@ function M.run(conn, svc, opts)
 			if hello_due < best then best = hello_due end
 		end
 
-		local act = last_activity()
-		if act ~= nil then
-			local ping_due = act + ka.idle_ping_s
+		-- Ping deadline uses TX time only — we ping when WE haven't sent
+		-- anything, regardless of incoming traffic. This keeps the remote
+		-- peer's stale timer alive. Using max(rx, tx) here would suppress
+		-- pings during one-way receive, causing the peer to go stale.
+		local tx_at = state.last_tx_at
+		if tx_at ~= nil then
+			local ping_due = tx_at + ka.idle_ping_s
 			if ping_due < best then best = ping_due end
 		end
 
+		-- Stale deadline uses RX time only — if WE haven't received
+		-- anything, the peer may be dead.
 		if state.last_rx_at ~= nil then
 			local stale_due = state.last_rx_at + ka.stale_after_s
 			if stale_due < best then best = stale_due end
@@ -783,8 +786,8 @@ function M.run(conn, svc, opts)
 					})
 				end
 			else
-				local act = last_activity()
-				if act ~= nil and (now2 - act) >= ka.idle_ping_s then
+				local tx_at = state.last_tx_at
+				if tx_at ~= nil and (now2 - tx_at) >= ka.idle_ping_s then
 					local ok2, err2 = send_frame(protocol.ping({ sid = state.local_sid }))
 					if ok2 ~= true then
 						svc:obs_log('warn', {
