@@ -9,18 +9,18 @@
 -- All hardware interaction is through HAL capability RPCs on the bus.
 -- No direct file reads or exec calls are performed here.
 
-local fibers         = require "fibers"
-local op             = require "fibers.op"
-local sleep          = require "fibers.sleep"
-local channel        = require "fibers.channel"
+local fibers        = require "fibers"
+local op            = require "fibers.op"
+local sleep         = require "fibers.sleep"
+local channel       = require "fibers.channel"
 
-local perform        = fibers.perform
+local perform       = fibers.perform
 
-local base           = require 'devicecode.service_base'
-local cap_sdk        = require 'services.hal.sdk.cap'
-local alarms         = require "services.system.alarms"
+local base          = require 'devicecode.service_base'
+local cap_sdk       = require 'services.hal.sdk.cap'
+local alarms        = require "services.system.alarms"
 
-local SCHEMA_TARGET  = "devicecode.config/system/1"
+local SCHEMA_TARGET = "devicecode.config/system/1"
 
 -- ── topic helpers ────────────────────────────────
 
@@ -163,6 +163,12 @@ end
 -- Temperature from zone0 (preserved metric name for historical continuity).
 local THERMAL_ZONE0_ID = 'zone0'
 
+local PLATFORM_IDENTITY_METRICS = {
+    { field = 'hw_revision',    metric_key = 'hw_id' },
+    { field = 'fw_version',     metric_key = 'fw_id' },
+    { field = 'serial',         metric_key = 'serial' },
+    { field = 'board_revision', metric_key = 'board_revision' },
+}
 
 local SYSINFO_METRICS = {
     {
@@ -195,7 +201,7 @@ local SYSINFO_METRICS = {
         method = 'get',
         field = '',
         metric_key = 'temp',
-        mk_opts = function (_, max_age) return cap_sdk.args.new.ThermalGetOpts(max_age) end
+        mk_opts = function(_, max_age) return cap_sdk.args.new.ThermalGetOpts(max_age) end
     }
 }
 
@@ -238,8 +244,10 @@ local function sysinfo_fiber(_, svc, report_period_ch)
         ))
         if identity_msg and type(identity_msg.payload) == 'table' then
             local id = identity_msg.payload
-            for _, field in ipairs({ 'hw_revision', 'fw_version', 'serial', 'board_revision' }) do
-                if id[field] ~= nil then publish_metric(conn, field, id[field]) end
+            for _, metric in ipairs(PLATFORM_IDENTITY_METRICS) do
+                if id[metric.field] ~= nil then
+                    publish_metric(conn, metric.metric_key, id[metric.field])
+                end
             end
             svc:obs_log('debug', 'sysinfo: published platform identity metrics')
         else
@@ -323,7 +331,6 @@ local function sysinfo_fiber(_, svc, report_period_ch)
                     end
                 end
             end
-
         end
     end
 end
