@@ -31,4 +31,8 @@ DEVICECODE_CONFIG_DIR=/path/to/config/dir \
 CONFIG_TARGET=config \
 luajit main.lua
 ```
+## Vendor Versions
 
+`lua-fibers`: v0.8.1
+`lua-trie`: v0.3
+`lua-bus`: v0.4
