@@ -46,18 +46,12 @@ local function new(address)
     local impl = provider.backend
     local backend = impl.new(address)
     ---@cast backend ModemBackend
-    local drivers, dr_err = backend:drivers()
-    if dr_err ~= "" then
-        error("Failed to get modem drivers: " .. tostring(dr_err))
+    local identity_info, identity_err = backend:read_identity()
+    if not identity_info then
+        error("Failed to read modem identity: " .. tostring(identity_err))
     end
 
-    local drivers_str = table.concat(drivers, ",")
-    local mode
-    if drivers_str:match("qmi_wwan") then
-        mode = "qmi"
-    elseif drivers_str:match("cdc_mbim") then
-        mode = "mbim"
-    end
+    local mode = identity_info.mode
 
     if mode then
         local ok, driver_mod = pcall(require, "services.hal.backends.modem.modes." .. mode)
@@ -66,20 +60,9 @@ local function new(address)
         end
     end
 
-    local plugin, pl_err = backend:plugin()
-    if pl_err ~= "" then
-        error("Failed to get modem plugin status: " .. tostring(pl_err))
-    end
-
-    local model, model_err = backend:model()
-    if model_err ~= "" then
-        error("Failed to get modem model: " .. tostring(model_err))
-    end
-
-    local revision, rev_err = backend:revision()
-    if rev_err ~= "" then
-        error("Failed to get modem revision: " .. tostring(rev_err))
-    end
+    local plugin = identity_info.plugin or ""
+    local model = identity_info.model or ""
+    local revision = identity_info.revision or ""
 
     local model_funcs_loaded = false
     for manufacturer, models in pairs(MODEL_INFO) do
@@ -89,9 +72,11 @@ local function new(address)
                     or starts_with(revision, details.rev_string) then
                     model = details.model
                     local model_variant = details.model_variant
+                    identity_info.model = model
+                    identity_info.model_variant = model_variant
                     local ok, model_mod = pcall(require, "services.hal.backends.modem.models." .. manufacturer)
                     if ok and type(model_mod) == "table" and model_mod.add_model_funcs then
-                        model_mod.add_model_funcs(backend, model, model_variant)
+                        model_mod.add_model_funcs(backend, identity_info)
                         model_funcs_loaded = true
                     end
                     break

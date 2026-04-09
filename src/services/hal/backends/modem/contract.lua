@@ -7,31 +7,13 @@ local function list_to_map(list)
 end
 
 local BACKEND_FUNCTIONS = list_to_map {
-    -- Getters
-    "imei",
-    "device",
-    "primary_port",
-    "at_ports",
-    "qmi_ports",
-    "gps_ports",
-    "net_ports",
-    "access_techs",
-    "sim",
-    "drivers",
-    "plugin",
-    "model",
-    "revision",
-    "operator",
-    "rx_bytes",
-    "tx_bytes",
-    "signal",
-    "mcc",
-    "mnc",
-    "gid1",
-    "active_band_class",
-    "firmware",
-    "iccid",
-    "imsi",
+    -- Grouped reads
+    "read_identity",
+    "read_ports",
+    "read_sim_info",
+    "read_network_info",
+    "read_signal",
+    "read_traffic",
 
     -- State monitoring
     "start_state_monitor",

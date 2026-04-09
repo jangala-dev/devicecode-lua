@@ -1,4 +1,4 @@
-local function add_model_funcs(_, _, _)
+local function add_model_funcs(_, _)
 end
 
 return {

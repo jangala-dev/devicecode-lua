@@ -5,6 +5,7 @@ local modem_backend_provider = require "services.hal.backends.modem.provider"
 local hal_types = require "services.hal.types.core"
 local cap_types = require "services.hal.types.capabilities"
 local capability_args = require "services.hal.types.capability_args"
+local cache_mod = require "shared.cache"
 
 -- Service modules
 -- (logger injected via new())
@@ -19,10 +20,10 @@ local pulse = require "fibers.pulse"
 
 ---@class Modem
 ---@field address ModemAddress
+---@field cache Cache
 ---@field control_ch Channel
 ---@field cap_emit_ch Channel
 ---@field scope Scope
----@field imei string
 ---@field model string
 ---@field model_variant string
 ---@field mode string
@@ -35,12 +36,12 @@ local pulse = require "fibers.pulse"
 local Modem = {}
 Modem.__index = Modem
 
-local function list_to_table(list)
-    local t = {}
-    for _, v in ipairs(list) do
-        t[v] = true
+local function list_to_map(list)
+    local map = {}
+    for _, value in ipairs(list) do
+        map[value] = true
     end
-    return t
+    return map
 end
 
 ---- Constant Definitions ----
@@ -52,31 +53,67 @@ local LISTEN_TRIGGER_INTERVAL = 1
 
 local CONTROL_Q_LEN = 8
 
-local GET_METHODS = list_to_table {
-    "imei",
-    "device",
-    "primary_port",
-    "at_ports",
-    "qmi_ports",
-    -- "gps_ports", -- maybe needed for the future
-    "net_ports",
-    "access_techs",
+local GROUP_FIELDS = {
+    identity = {
+        "imei",
+        "drivers",
+        "plugin",
+        "model",
+        "revision",
+        "firmware",
+    },
+    ports = {
+        "device",
+        "primary_port",
+        "at_ports",
+        "qmi_ports",
+        "net_ports",
+    },
+    sim = {
+        "sim",
+        "iccid",
+        "imsi",
+        "gid1",
+    },
+    network = {
+        "access_techs",
+        "operator",
+        "mcc",
+        "mnc",
+        "active_band_class",
+    },
+    signal = {
+        "signal",
+    },
+    traffic = {
+        "rx_bytes",
+        "tx_bytes",
+    },
+}
+
+local FIELD_TO_GROUP = {}
+for group_name, fields in pairs(GROUP_FIELDS) do
+    for _, field in ipairs(fields) do
+        FIELD_TO_GROUP[field] = group_name
+    end
+end
+
+local GROUP_FETCHERS = {
+    identity = "read_identity",
+    ports = "read_ports",
+    sim = "read_sim_info",
+    network = "read_network_info",
+    signal = "read_signal",
+    traffic = "read_traffic",
+}
+
+local VALID_GROUPS = list_to_map {
+    "identity",
+    "ports",
     "sim",
-    "drivers",
-    "plugin",
-    "model",
-    "revision",
-    "operator",
-    "rx_bytes",
-    "tx_bytes",
+    "network",
     "signal",
-    "mcc",
-    "mnc",
-    "gid1",
-    "active_band_class",
-    "firmware",
-    "iccid",
-    "imsi"
+    "traffic",
 }
 
 
@@ -103,27 +140,6 @@ local function emit(emit_ch, imei, mode, key, data)
     end
     emit_ch:put(payload)
     return true
-end
-
---- Emit a set of key-value pairs from the modem capability
----@param emit_ch Channel
----@param imei string
----@param kv_data table<string, any>
----@return boolean ok
----@return string? error
-local function emit_kv(emit_ch, imei, kv_data)
-    local all_ok = true
-    local first_err = nil
-    for key, value in pairs(kv_data) do
-        local ok, err = emit(emit_ch, imei, 'state', key, value)
-        if not ok then
-            all_ok = false
-            if not first_err then
-                first_err = err
-            end
-        end
-    end
-    return all_ok, first_err
 end
 
 --- Utility function to return a ControlError
@@ -192,6 +208,57 @@ local function trim_error(err)
     return err
 end
 
+---@param snapshot any
+---@param field string
+---@return any
+local function extract_group_field(snapshot, field)
+    if field == "signal" then
+        return snapshot.values
+    end
+    return snapshot[field]
+end
+
+---@param group string
+---@return boolean
+local function group_valid(group)
+    return VALID_GROUPS[group] == true
+end
+
+---@param group string
+---@param value any
+function Modem:_cache_group(group, value)
+    self.cache:set(group, value)
+end
+
+---@param group string
+---@param timescale number?
+---@return any snapshot
+---@return string error
+function Modem:_get_group(group, timescale)
+    if not group_valid(group) then
+        return nil, "unsupported group: " .. tostring(group)
+    end
+
+    local cached = self.cache:get(group, timescale)
+    if cached ~= nil then
+        return cached, ""
+    end
+
+    local fetcher_name = GROUP_FETCHERS[group]
+    local fetcher = self.backend and self.backend[fetcher_name] or nil
+    if type(fetcher) ~= "function" then
+        return nil, "group " .. tostring(group) .. " is not implemented by backend"
+    end
+
+    local snapshot, err = fetcher(self.backend)
+    if err ~= "" then
+        return nil, err
+    end
+
+    self:_cache_group(group, snapshot)
+    return snapshot, ""
+end
+
 ---- Modem Capabilities ----
 
 --- Get a modem attribute.
@@ -207,19 +274,21 @@ function Modem:get(opts)
     local timescale = opts.timescale
 
     -- Check that the field is supported
-    if not GET_METHODS[field] then
+    local group = FIELD_TO_GROUP[field]
+    if not group then
         return return_error("unsupported field: " .. tostring(field), 1)
     end
 
-    -- Call the corresponding backend function to get the value
-    local get_fn = self.backend[field]
-    if not get_fn then
-        return return_error("field " .. tostring(field) .. " is not implemented by backend", 1)
-    end
-    local value, err = get_fn(self.backend, timescale)
+    local snapshot, err = self:_get_group(group, timescale)
     if err ~= "" then
         return return_error("error getting field " .. tostring(field) .. ": " .. tostring(err), 1)
     end
+
+    local value = extract_group_field(snapshot, field)
+    if value == nil then
+        return return_error("field unavailable: " .. tostring(field), 1)
+    end
+
     return true, value
 end
 
@@ -413,19 +482,30 @@ function Modem:emitter()
         sleep.sleep(timeout_buffer) -- we want to put some buffer time in to invalidate any cache
         self.log:debug({ what = 'emitter_dispatching', imei = self.imei })
 
-        for method, _ in pairs(GET_METHODS) do
-            local opts, opts_err = capability_args.new.ModemGetOpts(method, timeout_buffer)
-            if not opts then
-                self.log:warn({ what = 'emitter_opts_failed', imei = self.imei, field = tostring(method), err = tostring(opts_err) })
+        for group_name, fields in pairs(GROUP_FIELDS) do
+            local snapshot, group_err = self:_get_group(group_name, timeout_buffer)
+            if group_err ~= "" then
+                if D_LOG_EMITTER then
+                    self.log:warn({
+                        what = 'emitter_group_failed',
+                        imei = self.imei,
+                        group = group_name,
+                        err = tostring(trim_error(group_err))
+                    })
+                end
             else
-                local ok, value_or_err = self:get(opts)
-                if not ok and D_LOG_EMITTER then
-                    local trimmed_err = trim_error(value_or_err)
-                    self.log:warn({ what = 'emitter_get_failed', imei = self.imei, field = tostring(method), err = tostring(trimmed_err) })
-                else
-                    local emit_ok, emit_err = self:_emit_meta(method, value_or_err)
-                    if not emit_ok and D_LOG_EMITTER then
-                        self.log:warn({ what = 'emitter_emit_failed', imei = self.imei, field = tostring(method), err = tostring(emit_err) })
+                for _, field in ipairs(fields) do
+                    local value = extract_group_field(snapshot, field)
+                    if value ~= nil then
+                        local emit_ok, emit_err = self:_emit_meta(field, value)
+                        if not emit_ok and D_LOG_EMITTER then
+                            self.log:warn({
+                                what = 'emitter_emit_failed',
+                                imei = self.imei,
+                                field = tostring(field),
+                                err = tostring(emit_err)
+                            })
+                        end
                     end
                 end
             end
@@ -638,13 +718,15 @@ function Modem:init()
         self.backend:start_sim_presence_monitor()
         self.backend:start_state_monitor()
 
-        -- Get IMEI from backend
-        local imei, imei_err = self.backend:imei()
-        if imei_err == "" then
-            self.imei = imei
-        else
-            error("failed to get IMEI: " .. tostring(imei_err))
+        local identity_info, identity_err = self.backend:read_identity()
+        if not identity_info then
+            error("failed to get modem identity info: " .. tostring(identity_err))
         end
+
+        self:_cache_group("identity", identity_info)
+        self.imei = identity_info.imei
+        self.model = identity_info.model
+        self.mode = identity_info.mode
 
         backend_built_sig:signal()
     end)
@@ -699,6 +781,7 @@ local function new(address, logger)
         scope = scope,
         log = logger,
         address = address,
+        cache = cache_mod.new(math.huge, fibers.now, '.'),
         initialised = false,  -- modem cannot apply capabilities until initialised
         caps_applied = false, -- modem cannot start until capabilities applied
         listening_for_sim = false,
