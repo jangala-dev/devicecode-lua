@@ -1,37 +1,34 @@
 This repository contains the Lua version of [Jangala's](https://www.janga.la) `devicecode`, the
 program that powers our Big Box and Get Box devices.
 
-# Using make script
-SRC_DIR, TEST_DIR and BUILD_DIR are all optional values
+## Run devicecode (current runtime)
 
-## Initialise dev environment
-To ensure you have all the required dependencies, use the devcontainer (see [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json)).
+Use the devcontainer for dependencies (see [.devcontainer/devcontainer.json](.devcontainer/devcontainer.json)).
 
-Before testing or building the code all submodules need to be loaded in. You can select
-the version of each submodule in `.env`.
-```
-make env SRC_DIR=<src>
+Runtime entrypoint is `src/main.lua`.
+
+For on-box runs, copy both `src/` and `vendor/` to the target, then run devicecode from inside `src/`.
+
+### Required environment variables
+
+- `DEVICECODE_SERVICES`: Comma-separated services to start (example: `hal,config,monitor`).
+- `DEVICECODE_CONFIG_DIR`: Directory that contains `<CONFIG_TARGET>.json` used at startup by HAL.
+- `CONFIG_TARGET`: Base filename (without `.json`) for the config blob consumed by the config service.
+
+### Optional environment variables
+
+- `DEVICECODE_ENV`: `dev` or `prod` (defaults to `dev`).
+
+### Run command
+
+Run from `src/` so Lua module paths resolve correctly:
+
+```bash
+cd src
+DEVICECODE_ENV=dev \
+DEVICECODE_SERVICES='hal,config,monitor' \
+DEVICECODE_CONFIG_DIR=/path/to/config/dir \
+CONFIG_TARGET=config \
+luajit main.lua
 ```
 
-## Build devicecode
-Building devicecode creates a folder with only required source files and restructures the submodules
-to make a simpler file structure.
-```
-make build SRC_DIR=<src> BUILD_DIR=<build>
-```
-
-## Test devicecode
-Devicecode and it's submodules can be tested, to test devicecode only
-```
-make test TEST_DIR=<tests>
-```
-to test devicecode and the submodules
-```
-make test-all TEST_DIR=<tests> SRC_DIR=<src>
-```
-
-## Linter
-To run the linter
-```
-make lint SRC_DIR=<src> TEST_DIR=<tests>
-```
