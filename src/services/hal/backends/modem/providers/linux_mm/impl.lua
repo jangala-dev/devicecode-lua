@@ -156,12 +156,15 @@ end
 ---@return string error
 local function run_command(address, args)
     local st, _, output_or_err = fibers.run_scope(function()
-        local cmd = exec.command {
-            unpack(args),
+        local cmd_args = {
             stdin = "null",
             stdout = "pipe",
             stderr = "stdout"
         }
+        for _, arg in ipairs(args) do
+            table.insert(cmd_args, arg)
+        end
+        local cmd = exec.command(cmd_args)
         local output, status, code, _, err = fibers.perform(cmd:combined_output_op())
         if status ~= "exited" or code ~= 0 then
             error(table.concat(args, " ") .. " failed for modem " .. tostring(address) .. ": " .. tostring(err)
