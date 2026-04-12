@@ -77,14 +77,18 @@ local function validate_config(config)
     if config.schema ~= SCHEMA_STANDARD then
         return false, "config schema must be " .. SCHEMA_STANDARD
     end
-    config.schema = nil
 
-    for key, value in pairs(config) do
+    local managers = config.managers
+    if type(managers) ~= 'table' then
+        return false, "config.managers must be a table"
+    end
+
+    for key, value in pairs(managers) do
         if type(key) ~= 'string' then
-            return false, "config keys must be strings"
+            return false, "manager names must be strings"
         end
         if type(value) ~= 'table' then
-            return false, "config values must be tables"
+            return false, "manager configs must be tables"
         end
     end
 
@@ -402,7 +406,9 @@ function HalService.start(conn, opts)
             return
         end
 
-        for name, manager_config in pairs(config) do
+        local managers_cfg = config.managers or {}
+
+        for name, manager_config in pairs(managers_cfg) do
             if not managers[name] then
                 local ok, manager = pcall(require, "services.hal.managers." .. name)
                 if not ok then
@@ -431,7 +437,7 @@ function HalService.start(conn, opts)
         end
 
         for name, manager in pairs(managers) do
-            if not config[name] then
+            if not managers_cfg[name] then
                 managers[name] = nil
                 svc:obs_event('manager_stopping', { manager = name, reason = 'removed_from_config' })
                 fibers.current_scope():spawn(function()
