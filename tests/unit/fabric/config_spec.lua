@@ -59,6 +59,8 @@ function T.normalise_accepts_uart_serial_ref_and_transfer_defaults()
 	assert(out.links.mcu0.transfer.chunk_raw == 768)
 	assert(out.links.mcu0.transfer.ack_timeout_s == 2.0)
 	assert(out.links.mcu0.transfer.max_retries == 5)
+	assert(out.links.mcu0.transfer.chunk_gap_s == 0.0)
+	assert(out.links.mcu0.transfer.retry_gap_s == 0.0)
 end
 
 function T.normalise_accepts_uart_max_line_bytes_and_transfer_overrides()
@@ -76,6 +78,8 @@ function T.normalise_accepts_uart_max_line_bytes_and_transfer_overrides()
 					chunk_raw     = 1024,
 					ack_timeout_s = 1.5,
 					max_retries   = 7,
+					chunk_gap_s   = 0.25,
+					retry_gap_s   = 0.5,
 				},
 			},
 		},
@@ -88,6 +92,8 @@ function T.normalise_accepts_uart_max_line_bytes_and_transfer_overrides()
 	assert(out.links.mcu0.transfer.chunk_raw == 1024)
 	assert(out.links.mcu0.transfer.ack_timeout_s == 1.5)
 	assert(out.links.mcu0.transfer.max_retries == 7)
+	assert(out.links.mcu0.transfer.chunk_gap_s == 0.25)
+	assert(out.links.mcu0.transfer.retry_gap_s == 0.5)
 end
 
 function T.normalise_rejects_missing_uart_serial_ref()
@@ -172,6 +178,50 @@ function T.normalise_rejects_bad_transfer_max_retries()
 	assert(out == nil)
 	assert(type(err) == 'string')
 	assert(err:find('max_retries', 1, true) ~= nil)
+end
+
+function T.normalise_rejects_bad_transfer_chunk_gap()
+	local out, err = cfg.normalise({
+		schema = 'devicecode.fabric/1',
+		links = {
+			mcu0 = {
+				peer_id = 'mcu-1',
+				transport = {
+					kind       = 'uart',
+					serial_ref = 'uart-0',
+				},
+				transfer = {
+					chunk_gap_s = -0.1,
+				},
+			},
+		},
+	})
+
+	assert(out == nil)
+	assert(type(err) == 'string')
+	assert(err:find('chunk_gap_s', 1, true) ~= nil)
+end
+
+function T.normalise_rejects_bad_transfer_retry_gap()
+	local out, err = cfg.normalise({
+		schema = 'devicecode.fabric/1',
+		links = {
+			mcu0 = {
+				peer_id = 'mcu-1',
+				transport = {
+					kind       = 'uart',
+					serial_ref = 'uart-0',
+				},
+				transfer = {
+					retry_gap_s = -0.1,
+				},
+			},
+		},
+	})
+
+	assert(out == nil)
+	assert(type(err) == 'string')
+	assert(err:find('retry_gap_s', 1, true) ~= nil)
 end
 
 function T.normalise_rejects_wild_proxy_call_topic()

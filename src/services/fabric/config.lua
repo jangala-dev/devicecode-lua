@@ -63,6 +63,8 @@ local function norm_transfer(t, path)
 			chunk_raw     = 768,
 			ack_timeout_s = 2.0,
 			max_retries   = 5,
+			chunk_gap_s   = 0.0,
+			retry_gap_s   = 0.0,
 		}, nil
 	end
 
@@ -93,10 +95,26 @@ local function norm_transfer(t, path)
 		max_retries = math.floor(max_retries)
 	end
 
+	local chunk_gap_s = t.chunk_gap_s
+	if chunk_gap_s ~= nil then
+		if type(chunk_gap_s) ~= 'number' or chunk_gap_s < 0 then
+			return nil, path .. '.chunk_gap_s must be a non-negative number'
+		end
+	end
+
+	local retry_gap_s = t.retry_gap_s
+	if retry_gap_s ~= nil then
+		if type(retry_gap_s) ~= 'number' or retry_gap_s < 0 then
+			return nil, path .. '.retry_gap_s must be a non-negative number'
+		end
+	end
+
 	return {
 		chunk_raw     = chunk_raw or 768,
 		ack_timeout_s = ack_timeout_s or 2.0,
 		max_retries   = max_retries or 5,
+		chunk_gap_s   = chunk_gap_s or 0.0,
+		retry_gap_s   = retry_gap_s or 0.0,
 	}, nil
 end
 
