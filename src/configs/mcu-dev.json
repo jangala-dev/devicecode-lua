@@ -26,6 +26,13 @@
           "kind": "uart",
           "serial_ref": "uart-0"
         },
+        "transfer": {
+          "chunk_raw": 64,
+          "ack_timeout_s": 5.0,
+          "max_retries": 10,
+          "chunk_gap_s": 0.002,
+          "retry_gap_s": 0.005
+        },
         "export": {
           "publish": [
             {
