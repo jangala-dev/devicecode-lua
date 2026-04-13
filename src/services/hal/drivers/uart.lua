@@ -15,6 +15,7 @@ local sleep   = require 'fibers.sleep'
 local file    = require 'fibers.io.file'
 local exec    = require 'fibers.io.exec'
 local channel = require 'fibers.channel'
+local safe    = require 'coxpcall'
 
 local hal_types = require 'services.hal.types.core'
 local cap_types = require 'services.hal.types.capabilities'
@@ -189,6 +190,20 @@ local function open_mode_from_opts(opts)
 	if opts.read and opts.write then return 'r+' end
 	if opts.read then return 'r' end
 	return 'w'
+end
+
+local function close_stream_best_effort(stream)
+	if not (stream and stream.close_op) then
+		return true, nil
+	end
+
+	local ok, a, b = safe.pcall(function()
+		return op.perform_raw(stream:close_op())
+	end)
+	if not ok then
+		return nil, tostring(a)
+	end
+	return a, b
 end
 
 local function unregister_stream(self, stream)
@@ -378,9 +393,7 @@ function UARTDriver:open(opts)
 		return false, 'open failed: ' .. tostring(open_err)
 	end
 
-	pcall(function()
-		if stream.setvbuf then stream:setvbuf('no') end
-	end)
+	if stream.setvbuf then stream:setvbuf('no') end
 
 	stream = wrap_stream_close(self, stream)
 	self.active_stream = stream
@@ -537,9 +550,7 @@ function UARTDriver:start()
 		})
 
 		if self.active_stream then
-			pcall(function()
-				perform(self.active_stream:close_op())
-			end)
+			close_stream_best_effort(self.active_stream)
 			self.active_stream = nil
 		end
 
@@ -571,17 +582,13 @@ function UARTDriver:stop(timeout)
 	})
 
 	if self.active_stream then
-		pcall(function()
-			perform(self.active_stream:close_op())
-		end)
+		close_stream_best_effort(self.active_stream)
 		self.active_stream = nil
 	end
 
 	if self.control_ch and type(self.control_ch.close) == 'function' then
 		trace_push(self, 'driver.stop.control_close.begin')
-		pcall(function()
-			self.control_ch:close('uart driver stopped')
-		end)
+		self.control_ch:close('uart driver stopped')
 		trace_push(self, 'driver.stop.control_close.end')
 	else
 		trace_push(self, 'driver.stop.control_close.unsupported')

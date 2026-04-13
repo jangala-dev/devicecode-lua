@@ -22,6 +22,7 @@ local exec   = require 'fibers.io.exec'
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
 local op     = require 'fibers.op'
+local safe   = require 'coxpcall'
 
 local perform = fibers.perform
 
@@ -40,6 +41,21 @@ local function close_fd(fd)
 	if type(fn) == 'function' and fd ~= nil then
 		pcall(function() fn(fd) end)
 	end
+end
+
+
+local function close_stream_best_effort(stream)
+	if not (stream and stream.close_op) then
+		return true, nil
+	end
+
+	local ok, a, b = safe.pcall(function()
+		return perform(stream:close_op())
+	end)
+	if not ok then
+		return nil, tostring(a)
+	end
+	return a, b
 end
 
 local function wait_read_some(stream, max_n, timeout_s)
@@ -150,7 +166,7 @@ end
 
 function PTY:close()
 	if self.master then
-		pcall(function() perform(self.master:close_op()) end)
+		close_stream_best_effort(self.master)
 		self.master = nil
 	end
 
@@ -255,14 +271,14 @@ function M.preflight_bridge_pair(scope, left, right, opts)
 
 	local right_slave, rerr = M.open_slave_stream(right.slave_name, { raw = true })
 	if not right_slave then
-		pcall(function() perform(left_slave:close_op()) end)
+		close_stream_best_effort(left_slave)
 		error('failed to open right PTY slave: ' .. tostring(rerr), 0)
 	end
 
 	if scope and scope.finally then
 		scope:finally(function()
-			pcall(function() perform(left_slave:close_op()) end)
-			pcall(function() perform(right_slave:close_op()) end)
+			close_stream_best_effort(left_slave)
+			close_stream_best_effort(right_slave)
 		end)
 	end
 
@@ -294,8 +310,8 @@ function M.preflight_bridge_pair(scope, left, right, opts)
 		)
 	end
 
-	pcall(function() perform(left_slave:close_op()) end)
-	pcall(function() perform(right_slave:close_op()) end)
+	close_stream_best_effort(left_slave)
+	close_stream_best_effort(right_slave)
 
 	return true
 end

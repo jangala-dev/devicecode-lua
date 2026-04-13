@@ -1,5 +1,6 @@
 local file = require 'fibers.io.file'
 local op   = require 'fibers.op'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -27,8 +28,8 @@ local function endpoint(rd, wr)
 	function ep:close_op()
 		if not self._closed then
 			self._closed = true
-			pcall(function() self._wr:close() end)
-			pcall(function() self._rd:close() end)
+			safe.pcall(function() self._wr:close() end)
+			safe.pcall(function() self._rd:close() end)
 		end
 		return op.always(true, nil)
 	end

@@ -5,6 +5,7 @@
 local fibers   = require 'fibers'
 local sleep    = require 'fibers.sleep'
 local mailbox  = require 'fibers.mailbox'
+local safe     = require 'coxpcall'
 local authz    = require 'devicecode.authz'
 
 local protocol = require 'services.fabric.protocol'
@@ -318,10 +319,8 @@ end
 local function reply_control(job, payload)
     local tx = job and job.reply_tx
     if tx then
-        pcall(function()
-            tx:send(payload)
-            tx:close('done')
-        end)
+        tx:send(payload)
+        tx:close('done')
     end
 end
 
@@ -457,7 +456,7 @@ function M.run(conn, svc, opts)
 
         if bad_frames.count >= bad_frames.threshold then
             pending:close_all('too_many_bad_frames')
-            if xfer then pcall(function() xfer:abort_all('too_many_bad_frames') end) end
+            if xfer then safe.pcall(function() xfer:abort_all('too_many_bad_frames') end) end
             publish_link_state(conn, svc, link_id, {
                 status      = 'down',
                 ready       = false,
@@ -530,7 +529,7 @@ function M.run(conn, svc, opts)
 
         if sid_changed then
             pending:close_all('peer_session_changed')
-            if xfer then pcall(function() xfer:abort_all('peer_session_changed') end) end
+            if xfer then safe.pcall(function() xfer:abort_all('peer_session_changed') end) end
             svc:obs_event('peer_session_changed', {
                 link_id  = link_id,
                 peer_id  = peer_id,
@@ -553,7 +552,7 @@ function M.run(conn, svc, opts)
 
         if sid_changed then
             pending:close_all('peer_session_changed')
-            if xfer then pcall(function() xfer:abort_all('peer_session_changed') end) end
+            if xfer then safe.pcall(function() xfer:abort_all('peer_session_changed') end) end
             svc:obs_event('peer_session_changed', {
                 link_id  = link_id,
                 peer_id  = peer_id,
@@ -589,9 +588,9 @@ function M.run(conn, svc, opts)
 
     local scope = fibers.current_scope()
     scope:finally(function()
-        pcall(function() pending:close_all('session_end') end)
-        if xfer then pcall(function() xfer:abort_all('session_end') end) end
-        pcall(function() transport:close() end)
+        pending:close_all('session_end')
+        if xfer then safe.pcall(function() xfer:abort_all('session_end') end) end
+        safe.pcall(function() transport:close() end)
     end)
 
     local ok, err = transport:open()
@@ -701,7 +700,7 @@ function M.run(conn, svc, opts)
 
             if state.last_rx_at ~= nil and (now2 - state.last_rx_at) >= ka.stale_after_s then
                 pending:close_all('peer_stale')
-                if xfer then pcall(function() xfer:abort_all('peer_stale') end) end
+                if xfer then safe.pcall(function() xfer:abort_all('peer_stale') end) end
                 publish_link_state(conn, svc, link_id, {
                     status      = 'down',
                     ready       = false,
@@ -739,7 +738,7 @@ function M.run(conn, svc, opts)
             local line, rerr = a, b
             if not line then
                 pending:close_all('transport_down')
-                if xfer then pcall(function() xfer:abort_all('transport_down') end) end
+                if xfer then safe.pcall(function() xfer:abort_all('transport_down') end) end
                 publish_link_state(conn, svc, link_id, {
                     status      = 'down',
                     ready       = false,
@@ -761,9 +760,9 @@ function M.run(conn, svc, opts)
                 local msg, verr = protocol.validate_message(raw)
                 if not msg then
                     if raw.t == 'call' and type(raw.id) == 'string' and raw.id ~= '' then
-                        pcall(function() send_frame(protocol.reply_err(raw.id, 'bad_message: ' .. tostring(verr))) end)
+                        safe.pcall(function() send_frame(protocol.reply_err(raw.id, 'bad_message: ' .. tostring(verr))) end)
                     elseif raw.t == 'xfer_begin' and type(raw.id) == 'string' and raw.id ~= '' then
-                        pcall(function() send_frame(protocol.xfer_ready(raw.id, false, nil, 'bad_message: ' .. tostring(verr))) end)
+                        safe.pcall(function() send_frame(protocol.xfer_ready(raw.id, false, nil, 'bad_message: ' .. tostring(verr))) end)
                     end
                     note_bad_frame('invalid_message', verr, raw.t)
                 else

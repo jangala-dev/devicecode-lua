@@ -11,6 +11,7 @@ local uart_mgr  = require 'services.hal.managers.uart'
 
 local runfibers = require 'tests.support.run_fibers'
 local pty       = require 'tests.support.pty'
+local safe      = require 'coxpcall'
 
 local perform = fibers.perform
 
@@ -120,7 +121,7 @@ local function start_manager(scope)
 	assert(start_err == '', tostring(start_err))
 
 	scope:finally(function()
-		pcall(function()
+		safe.pcall(function()
 			uart_mgr.stop()
 		end)
 	end)
@@ -158,7 +159,7 @@ end
 local function assert_stream_write_fails(stream, label)
 	label = label or 'stream'
 
-	local ok, a, b = pcall(function()
+	local ok, a, b = safe.pcall(function()
 		return perform(stream:write_op('x'))
 	end)
 

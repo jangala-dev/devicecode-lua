@@ -5,6 +5,7 @@ local busmod       = require 'bus'
 local mailbox      = require 'fibers.mailbox'
 local posix        = require 'posix'
 local cjson        = require 'cjson.safe'
+local safe         = require 'coxpcall'
 
 local authz        = require 'devicecode.authz'
 local hal_service  = require 'services.hal'
@@ -89,7 +90,7 @@ end
 
 local function wait_ready(conn, link_id)
 	return probe.wait_until(function()
-		local ok, payload = pcall(function()
+		local ok, payload = safe.pcall(function()
 			return probe.wait_payload(conn, { 'state', 'fabric', 'link', link_id }, { timeout = 0.02 })
 		end)
 		return ok and type(payload) == 'table' and payload.ready == true
@@ -98,7 +99,7 @@ end
 
 local function wait_opening(conn, link_id)
 	return probe.wait_until(function()
-		local ok, payload = pcall(function()
+		local ok, payload = safe.pcall(function()
 			return probe.wait_payload(conn, { 'state', 'fabric', 'link', link_id }, { timeout = 0.02 })
 		end)
 		return ok and type(payload) == 'table' and payload.status == 'opening'
@@ -106,7 +107,7 @@ local function wait_opening(conn, link_id)
 end
 
 local function try_payload(conn, topic)
-	local ok, payload = pcall(function()
+	local ok, payload = safe.pcall(function()
 		return probe.wait_payload(conn, topic, { timeout = 0.05 })
 	end)
 	if ok then

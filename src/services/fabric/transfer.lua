@@ -14,6 +14,7 @@
 local fibers   = require 'fibers'
 local mailbox  = require 'fibers.mailbox'
 local sleep    = require 'fibers.sleep'
+local safe     = require 'coxpcall'
 
 local b64url   = require 'services.fabric.b64url'
 local checksum = require 'services.fabric.checksum'
@@ -126,7 +127,7 @@ local function ctrl_put(tx, msg)
 end
 
 local function send_abort_best_effort(self, id, reason)
-	pcall(function()
+	safe.pcall(function()
 		self._send_frame(protocol.xfer_abort(id, reason or 'aborted'))
 	end)
 end
@@ -188,7 +189,7 @@ local function finalise_out(self, st, status, err, info)
 		self._out = nil
 	end
 
-	if st.ctrl_tx then pcall(function() st.ctrl_tx:close(status) end) end
+	if st.ctrl_tx then st.ctrl_tx:close(status) end
 	clear_link_pointer(self, st)
 end
 
@@ -494,7 +495,7 @@ local function incoming_chunk(self, msg)
 	local ok, err = st.sink:write(msg.seq, msg.off, raw)
 	if ok ~= true then
 		if type(st.sink.abort) == 'function' then
-			pcall(function() st.sink:abort(err or 'write_failed') end)
+			safe.pcall(function() st.sink:abort(err or 'write_failed') end)
 		end
 		self._send_frame(protocol.xfer_done(st.id, false, nil, tostring(err or 'write_failed')))
 		finalise_in(self, st, 'aborted', err or 'write_failed')
@@ -533,7 +534,7 @@ local function incoming_commit(self, msg)
 
 	if st.bytes_done ~= msg.size then
 		if type(st.sink.abort) == 'function' then
-			pcall(function() st.sink:abort('size_mismatch') end)
+			safe.pcall(function() st.sink:abort('size_mismatch') end)
 		end
 		return finish_in_with_done(self, st, false, nil, 'size_mismatch', 'aborted')
 	end
@@ -542,7 +543,7 @@ local function incoming_commit(self, msg)
 		local got = st.sink:sha256hex()
 		if type(got) ~= 'string' or got:lower() ~= tostring(msg.sha256):lower() then
 			if type(st.sink.abort) == 'function' then
-				pcall(function() st.sink:abort('sha256_mismatch') end)
+				safe.pcall(function() st.sink:abort('sha256_mismatch') end)
 			end
 			return finish_in_with_done(self, st, false, nil, 'sha256_mismatch', 'aborted')
 		end
@@ -572,7 +573,7 @@ local function incoming_abort(self, msg)
 	end
 
 	if type(st.sink.abort) == 'function' then
-		pcall(function() st.sink:abort(msg.reason or 'remote_abort') end)
+		safe.pcall(function() st.sink:abort(msg.reason or 'remote_abort') end)
 	end
 
 	finalise_in(self, st, 'aborted', msg.reason or 'remote_abort')
@@ -704,7 +705,7 @@ function Transfer:abort(id, reason)
 
 	if self._in and self._in.id == id then
 		if type(self._in.sink.abort) == 'function' then
-			pcall(function() self._in.sink:abort(reason) end)
+			safe.pcall(function() self._in.sink:abort(reason) end)
 		end
 		send_abort_best_effort(self, id, reason)
 		finalise_in(self, self._in, 'aborted', reason)
