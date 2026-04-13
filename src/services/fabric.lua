@@ -5,7 +5,6 @@
 -- Design notes:
 --   * follows the capability-led HAL shape used in this branch
 --   * does not proxy UART bytes over the bus
---   * obtains a duplex Stream directly from HAL via a UART capability control reply
 --   * consumes retained cfg/fabric
 --   * spawns one child scope per configured link
 --   * exposes firmware transfer RPCs over the bus
@@ -15,9 +14,9 @@ local mailbox = require 'fibers.mailbox'
 local sleep   = require 'fibers.sleep'
 local safe    = require 'coxpcall'
 
-local base    = require 'devicecode.service_base'
+local base       = require 'devicecode.service_base'
 local config_mod = require 'services.fabric.config'
-local session = require 'services.fabric.session'
+local session    = require 'services.fabric.session'
 
 local perform      = fibers.perform
 local named_choice = fibers.named_choice
@@ -52,10 +51,13 @@ local function ask_child(rec, job, timeout_s)
     end
 
     local tx, rx = mailbox.new(1, { full = 'reject_newest' })
-    job.reply_tx = tx
+    local req = {}
+    for k, v in pairs(job or {}) do req[k] = v end
+    req.reply_tx = tx
 
-    local ok, err = rec.ctrl_tx:send(job)
+    local ok, err = rec.ctrl_tx:send(req)
     if ok ~= true then
+        tx:close('enqueue_failed')
         if ok == nil then return nil, 'control closed' end
         return nil, tostring(err or 'control full')
     end
@@ -66,7 +68,7 @@ local function ask_child(rec, job, timeout_s)
     })
 
     if which == 'timer' then
-        safe.pcall(function() tx:close('timeout') end)
+        tx:close('timeout')
         return nil, 'timeout'
     end
 
@@ -82,6 +84,14 @@ local function valid_source(x)
         and type(x.open) == 'function'
         and type(x.size) == 'function'
         and type(x.sha256hex) == 'function'
+end
+
+local function drop_transfers_for_link(transfers, link_id)
+    for transfer_id, rec in pairs(transfers) do
+        if rec and rec.link_id == link_id then
+            transfers[transfer_id] = nil
+        end
+    end
 end
 
 function M.start(conn, opts)
@@ -111,12 +121,40 @@ function M.start(conn, opts)
     local current_gen = 0
     local transfers = {} -- transfer_id -> { link_id = ..., transfer = last_seen_snapshot }
 
+    local function watch_child(link_id, rec)
+        fibers.spawn(function()
+            local st, report, primary = perform(rec.scope:join_op())
+
+            if children[link_id] == rec then
+                children[link_id] = nil
+                drop_transfers_for_link(transfers, link_id)
+            end
+
+            svc:obs_log((st == 'failed') and 'error' or 'warn', {
+                what    = 'link_session_exit',
+                link_id = link_id,
+                status  = st,
+                primary = tostring(primary),
+                report  = report,
+            })
+
+            conn:retain(t('state', 'fabric', 'link', link_id), {
+                link_id = link_id,
+                status  = 'down',
+                ready   = false,
+                err     = tostring(primary or st),
+                t       = svc:now(),
+            })
+        end)
+    end
+
     local function apply_config(cfg)
         current_gen = current_gen + 1
         local gen = current_gen
 
         stop_children(children)
         children = {}
+        transfers = {}
 
         for link_id, link_cfg in pairs(cfg.links) do
             local child, cerr = root:child()
@@ -150,11 +188,13 @@ function M.start(conn, opts)
                         err     = tostring(serr),
                     })
                 else
-                    children[link_id] = {
+                    local rec = {
                         scope   = child,
                         cfg     = link_cfg,
                         ctrl_tx = ctrl_tx,
                     }
+                    children[link_id] = rec
+                    watch_child(link_id, rec)
                 end
             end
         end
@@ -243,13 +283,8 @@ function M.start(conn, opts)
 
         local child = children[rec.link_id]
         if not child then
-            if rec.transfer then
-                return {
-                    ok       = true,
-                    transfer = rec.transfer,
-                }
-            end
-            return { ok = false, err = 'link is unavailable' }
+            transfers[transfer_id] = nil
+            return { ok = false, err = 'transfer is no longer active' }
         end
 
         local reply, err = ask_child(child, {
@@ -285,7 +320,8 @@ function M.start(conn, opts)
 
         local child = children[rec.link_id]
         if not child then
-            return { ok = false, err = 'link is unavailable' }
+            transfers[transfer_id] = nil
+            return { ok = false, err = 'transfer is no longer active' }
         end
 
         local reply, err = ask_child(child, {
@@ -322,7 +358,14 @@ function M.start(conn, opts)
                     reply = { ok = false, err = tostring(reply) }
                 end
 
-                reply_rpc(conn, msg, reply)
+                local pub_ok, pub_err = reply_rpc(conn, msg, reply)
+                if pub_ok ~= true then
+                    svc:obs_log('warn', {
+                        what = 'rpc_reply_failed',
+                        name = name,
+                        err  = tostring(pub_err),
+                    })
+                end
             end
         end)
     end

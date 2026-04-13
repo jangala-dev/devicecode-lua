@@ -2,10 +2,11 @@
 --
 -- UART fabric transport using a HAL UART capability.
 --
--- The capability control call is expected to return:
+-- The transport owns both capability discovery and the capability open call.
+-- A successful open control reply is expected to be:
 --   Reply { ok = true, reason = <Stream>, code = nil }
 --
--- The stream is used directly in-process.
+-- The returned stream is then used directly in-process.
 
 local protocol = require 'services.fabric.protocol'
 local cap_sdk  = require 'services.hal.sdk.cap'
@@ -15,12 +16,28 @@ local M = {}
 local UartTransport = {}
 UartTransport.__index = UartTransport
 
-function M.new(svc, cap_ref, cfg)
+local function resolve_uart_cap(conn, cfg)
+    local cap_id = cfg.cap_id
+    local timeout_s = cfg.open_timeout_s or 30.0
+
+    local listener = cap_sdk.new_cap_listener(conn, 'uart', cap_id)
+    local cap_ref, err = listener:wait_for_cap({ timeout = timeout_s })
+    listener:close()
+
+    if not cap_ref then
+        return nil, err or ('uart capability not found: ' .. tostring(cap_id))
+    end
+
+    return cap_ref, nil
+end
+
+function M.new(conn, svc, cfg)
     cfg = cfg or {}
     return setmetatable({
+        _conn           = assert(conn, 'uart transport requires a bus connection'),
         _svc            = svc,
-        _cap            = assert(cap_ref, 'uart transport requires a capability reference'),
         _cfg            = cfg,
+        _cap            = nil,
         _stream         = nil,
         _max_line_bytes = (type(cfg.max_line_bytes) == 'number' and cfg.max_line_bytes > 0)
             and math.floor(cfg.max_line_bytes)
@@ -29,6 +46,13 @@ function M.new(svc, cap_ref, cfg)
 end
 
 function UartTransport:open()
+    if self._cap == nil then
+        local cap_ref, err = resolve_uart_cap(self._conn, self._cfg)
+        if not cap_ref then
+            return nil, tostring(err)
+        end
+        self._cap = cap_ref
+    end
     local opts, oerr = cap_sdk.args.new.UARTOpenOpts(true, true)
     if not opts then
         return nil, tostring(oerr)
@@ -39,7 +63,10 @@ function UartTransport:open()
         return nil, ('uart open control failed for %s: %s'):format(tostring(self._cap.id), tostring(err))
     end
     if rep.ok ~= true then
-        return nil, ('uart open rejected for %s: %s'):format(tostring(self._cap.id), tostring(rep.reason or 'uart open failed'))
+        return nil, ('uart open rejected for %s: %s'):format(
+            tostring(self._cap.id),
+            tostring(rep.reason or 'uart open failed')
+        )
     end
     if type(rep.reason) ~= 'table' then
         return nil, ('uart open returned no stream in reply.reason for %s (reason type %s)'):format(
@@ -114,7 +141,7 @@ end
 function UartTransport:stats()
     return {
         kind   = 'uart',
-        cap_id = self._cap.id,
+        cap_id = (self._cap and self._cap.id) or self._cfg.cap_id,
     }
 end
 

@@ -12,7 +12,6 @@ local protocol = require 'services.fabric.protocol'
 local topicmap = require 'services.fabric.topicmap'
 local uart_tx  = require 'services.fabric.transport_uart'
 local transfer = require 'services.fabric.transfer'
-local cap_sdk  = require 'services.hal.sdk.cap'
 
 local perform      = fibers.perform
 local named_choice = fibers.named_choice
@@ -29,29 +28,10 @@ local function publish_link_state(conn, svc, link_id, fields)
     conn:retain({ 'state', 'fabric', 'link', link_id }, payload)
 end
 
-local function resolve_uart_cap(conn, cfg)
-    local cap_id = cfg.cap_id
-    local timeout_s = cfg.open_timeout_s or 30.0
-
-    local listener = cap_sdk.new_cap_listener(conn, 'uart', cap_id)
-    local cap_ref, err = listener:wait_for_cap({ timeout = timeout_s })
-    listener:close()
-
-    if not cap_ref then
-        return nil, err or ('uart capability not found: ' .. tostring(cap_id))
-    end
-
-    return cap_ref, nil
-end
-
 local function choose_transport(conn, svc, link_cfg)
     local k = (((link_cfg.transport or {}).kind) or 'uart')
     if k == 'uart' then
-        local cap_ref, err = resolve_uart_cap(conn, link_cfg.transport or {})
-        if not cap_ref then
-            return nil, err
-        end
-        return uart_tx.new(svc, cap_ref, link_cfg.transport or {}), nil
+        return uart_tx.new(conn, svc, link_cfg.transport or {}), nil
     end
     return nil, 'unsupported transport kind ' .. tostring(k)
 end
@@ -108,7 +88,7 @@ local function new_pending_store()
     return store
 end
 
-local function start_export_publishers(conn, svc, transport, link_id, export_cfg, send_frame, mark_ready)
+local function start_export_publishers(conn, svc, link_id, export_cfg, send_frame, mark_ready)
     for i = 1, #(export_cfg.publish or {}) do
         local rule = export_cfg.publish[i]
 
@@ -154,7 +134,7 @@ local function start_export_publishers(conn, svc, transport, link_id, export_cfg
     end
 end
 
-local function start_export_retained_watchers(conn, svc, transport, link_id, export_cfg, send_frame, mark_ready)
+local function start_export_retained_watchers(conn, svc, link_id, export_cfg, send_frame, mark_ready)
     for i = 1, #(export_cfg.publish or {}) do
         local rule = export_cfg.publish[i]
 
@@ -208,7 +188,7 @@ local function start_export_retained_watchers(conn, svc, transport, link_id, exp
     end
 end
 
-local function remote_call(transport, pending, send_frame, remote_topic, payload, timeout_s)
+local function remote_call(pending, send_frame, remote_topic, payload, timeout_s)
     local id = protocol.next_id()
     local rx = pending:open(id)
 
@@ -238,7 +218,7 @@ local function remote_call(transport, pending, send_frame, remote_topic, payload
     return nil, tostring(msg.err or 'remote error')
 end
 
-local function start_proxy_call_endpoints(conn, svc, transport, link_id, proxy_rules, pending, send_frame, mark_ready)
+local function start_proxy_call_endpoints(conn, svc, link_id, proxy_rules, pending, send_frame, mark_ready)
     for i = 1, #(proxy_rules or {}) do
         local rule = proxy_rules[i]
         fibers.spawn(function()
@@ -264,7 +244,7 @@ local function start_proxy_call_endpoints(conn, svc, transport, link_id, proxy_r
                     return
                 end
 
-                local payload, cerr = remote_call(transport, pending, send_frame, rule.remote_topic, msg.payload, rule.timeout_s or 5.0)
+                local payload, cerr = remote_call(pending, send_frame, rule.remote_topic, msg.payload, rule.timeout_s or 5.0)
                 if msg.reply_to ~= nil then
                     if payload ~= nil then
                         conn:publish_one(msg.reply_to, payload, { id = msg.id })
@@ -346,18 +326,16 @@ function M.run(conn, svc, opts)
     local ka        = keepalive_cfg(link_cfg)
 
     local state = {
-        node_id            = opts.node_id or os.getenv('DEVICECODE_NODE_ID') or 'devicecode',
-        local_sid          = protocol.next_id(),
-        peer_id            = peer_id,
-        peer_node          = nil,
-        peer_sid           = nil,
-        established        = false,
-        last_rx_at         = nil,
-        last_tx_at         = nil,
-        last_hello_at      = nil,
-        last_peer_hello_at = nil,
-        last_ping_at       = nil,
-        last_pong_at       = nil,
+        node_id       = opts.node_id or os.getenv('DEVICECODE_NODE_ID') or 'devicecode',
+        local_sid     = protocol.next_id(),
+        peer_id       = peer_id,
+        peer_node     = nil,
+        peer_sid      = nil,
+        established   = false,
+        last_rx_at    = nil,
+        last_tx_at    = nil,
+        last_hello_at = nil,
+        last_pong_at  = nil,
     }
 
     local retained_rules = 0
@@ -502,8 +480,6 @@ function M.run(conn, svc, opts)
             state.last_tx_at = tnow
             if msg.t == 'hello' then
                 state.last_hello_at = tnow
-            elseif msg.t == 'ping' then
-                state.last_ping_at = tnow
             end
             return true, nil
         end
@@ -518,14 +494,13 @@ function M.run(conn, svc, opts)
         end
     end
 
-    local function note_peer_identity(msg, is_hello)
+    local function note_peer_identity(msg)
         local sid_changed = (state.peer_sid ~= nil and msg.sid ~= nil and state.peer_sid ~= msg.sid)
 
         if msg.node ~= nil then state.peer_node = msg.node end
         if msg.sid  ~= nil then state.peer_sid  = msg.sid  end
 
         state.established = true
-        if is_hello then state.last_peer_hello_at = svc:now() end
 
         if sid_changed then
             pending:close_all('peer_session_changed')
@@ -633,9 +608,9 @@ function M.run(conn, svc, opts)
         svc:obs_log('warn', { what = 'hello_send_failed', link_id = link_id, err = tostring(hello_err) })
     end
 
-    start_export_publishers(conn, svc, transport, link_id, link_cfg.export, send_frame, mark_worker_ready)
-    start_export_retained_watchers(conn, svc, transport, link_id, link_cfg.export, send_frame, mark_worker_ready)
-    start_proxy_call_endpoints(conn, svc, transport, link_id, link_cfg.proxy_calls, pending, send_frame, mark_worker_ready)
+    start_export_publishers(conn, svc, link_id, link_cfg.export, send_frame, mark_worker_ready)
+    start_export_retained_watchers(conn, svc, link_id, link_cfg.export, send_frame, mark_worker_ready)
+    start_proxy_call_endpoints(conn, svc, link_id, link_cfg.proxy_calls, pending, send_frame, mark_worker_ready)
 
     local function handle_control(job)
         if type(job) ~= 'table' then return end
@@ -773,7 +748,7 @@ function M.run(conn, svc, opts)
                         if not okh then
                             note_bad_frame('bad_hello', herr, msg.t)
                         else
-                            note_peer_identity(msg, true)
+                            note_peer_identity(msg)
                             local ok2, err2 = send_frame(protocol.hello_ack(state.node_id, { sid = state.local_sid }))
                             if ok2 ~= true then
                                 svc:obs_log('warn', { what = 'hello_ack_failed', link_id = link_id, err = tostring(err2) })
@@ -787,7 +762,7 @@ function M.run(conn, svc, opts)
                         elseif msg.ok == false then
                             note_bad_frame('hello_ack_rejected', 'peer rejected session', msg.t)
                         else
-                            note_peer_identity(msg, false)
+                            note_peer_identity(msg)
                         end
 
                     elseif msg.t == 'ping' then

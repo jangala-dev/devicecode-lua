@@ -27,7 +27,6 @@ local M = {}
 local Transfer = {}
 Transfer.__index = Transfer
 
-local function inf() return 1 / 0 end
 local RECENT_DONE_TTL_S = 5.0
 
 local function t(...) return { ... } end
