@@ -171,6 +171,16 @@ local function wait_for_peer_dump(req_conn, peer_id, timeout_s)
 	return nil, 'timed out waiting for peer hal/dump after transfer'
 end
 
+-- fatal prints msg to stderr and force-exits with status 1. Use this in place
+-- of the cancel-then-error pattern: the runtime's fabric RX fiber stays
+-- suspended on its UART fd after any teardown and prevents fibers.run from
+-- draining the scope, so a normal raise hangs the harness instead of exiting.
+-- A test-harness short-circuit is fine; the kernel cleans up file descriptors.
+local function fatal(msg)
+	io.stderr:write('error: ' .. tostring(msg) .. '\n')
+	os.exit(1)
+end
+
 local function start_runtime(scope, bus, env, config_name)
 	local child, cerr = scope:child()
 	if not child then
@@ -194,6 +204,13 @@ local function start_runtime(scope, bus, env, config_name)
 end
 
 local function main(scope)
+	-- Force unbuffered stdout. By default Lua's io.stdout is block-buffered when
+	-- it isn't a terminal, which is how this script always runs (under SSH from
+	-- the fw-update-e2e harness). With buffering on, the harness sees [transfer]
+	-- progress lines in chunks and any output written immediately before a hang
+	-- is stranded in the libc buffer until process exit.
+	io.stdout:setvbuf('no')
+
 	local image_path = arg[1]
 	if image_path == nil or image_path == '' then
 		usage()
@@ -229,14 +246,14 @@ local function main(scope)
 
 	local child, startup_err = start_runtime(scope, bus, env, config_name)
 	if not child then
-		error(tostring(startup_err), 0)
+		fatal(startup_err)
 	end
 
 	io.stdout:write('[runtime] waiting for fabric link ' .. link_id .. ' -> ' .. peer_id .. '\n')
 	local ready, rerr = wait_for_link_ready(req_conn, link_id, peer_id, 20.0)
 	if not ready then
 		child:cancel('ready_failed')
-		error(tostring(rerr), 0)
+		fatal(rerr)
 	end
 
 	io.stdout:write('[runtime] link ready: ' .. encode_json(ready) .. '\n')
@@ -258,14 +275,14 @@ local function main(scope)
 
 	if not reply then
 		child:cancel('send_failed')
-		error('send_firmware rpc failed: ' .. tostring(call_err), 0)
+		fatal('send_firmware rpc failed: ' .. tostring(call_err))
 	end
 
 	io.stdout:write('[send] ' .. encode_json(reply) .. '\n')
 
 	if reply.ok ~= true or type(reply.transfer_id) ~= 'string' or reply.transfer_id == '' then
 		child:cancel('send_rejected')
-		error('send_firmware rejected', 0)
+		fatal('send_firmware rejected')
 	end
 
 	local transfer_id = reply.transfer_id
@@ -278,7 +295,7 @@ local function main(scope)
 	local final_status, ferr = poll_transfer(req_conn, transfer_id, transfer_timeout_s)
 	if not final_status then
 		child:cancel('transfer_timeout')
-		error(tostring(ferr), 0)
+		fatal(ferr)
 	end
 
 	io.stdout:write('[final] ' .. encode_json(final_status) .. '\n')
@@ -286,13 +303,19 @@ local function main(scope)
 
 	if final_status.status ~= 'done' then
 		child:cancel('transfer_failed')
-		error('transfer ended in state: ' .. tostring(final_status.status), 0)
+		fatal('transfer ended in state: ' .. tostring(final_status.status))
 	end
 
 	if not verify_after_reboot then
 		io.stdout:write('[post] skipping reboot verification (set DEVICECODE_VERIFY_AFTER_REBOOT=1 to enable)\n')
 		child:cancel('done')
-		return
+		-- The runtime has a fabric RX reader fiber that's now suspended on a UART
+		-- fd whose peer (the MCU) just rebooted. The fd doesn't EOF, the suspension
+		-- doesn't unblock cleanly, and fibers.run cannot drain the scope. For a
+		-- one-shot test harness this is fine to short-circuit: every interesting
+		-- result is already on stdout, so force-exit and let the kernel clean up
+		-- the file descriptors.
+		os.exit(0)
 	end
 
 	io.stdout:write('[post] transfer reached done; MCU should reboot immediately after this\n')
@@ -302,14 +325,14 @@ local function main(scope)
 
 	child, startup_err = start_runtime(scope, bus, env, config_name)
 	if not child then
-		error(tostring(startup_err), 0)
+		fatal(startup_err)
 	end
 
 	io.stdout:write('[post] waiting for fabric link ' .. link_id .. ' -> ' .. peer_id .. ' after reboot\n')
 	local post_ready, prerr = wait_for_link_ready(req_conn, link_id, peer_id, 20.0)
 	if not post_ready then
 		child:cancel('post_ready_failed')
-		error(tostring(prerr), 0)
+		fatal(prerr)
 	end
 	io.stdout:write('[post] link ready: ' .. encode_json(post_ready) .. '\n')
 	io.stdout:write('[post] waiting for peer hal/dump to succeed again\n')
@@ -322,6 +345,7 @@ local function main(scope)
 	end
 
 	child:cancel('done')
+	os.exit(0)
 end
 
 fibers.run(function(scope)
