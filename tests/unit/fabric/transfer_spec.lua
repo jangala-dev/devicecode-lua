@@ -1,3 +1,4 @@
+local b64url      = require 'services.fabric.b64url'
 local blob_source = require 'services.fabric.blob_source'
 local checksum    = require 'services.fabric.checksum'
 local protocol    = require 'services.fabric.protocol'
@@ -13,7 +14,7 @@ local T = {}
 local function make_svc()
 	return {
 		now = function()
-			return os.clock()
+			return fibers.now()
 		end,
 		wall = function()
 			return 'now'
@@ -117,14 +118,15 @@ local function make_pair(opts)
 	local left, right
 
 	left = transfer.new({
-		svc           = opts.left_svc or make_svc(),
-		conn          = conn,
-		link_id       = 'left',
-		peer_id       = 'right',
-		chunk_raw     = opts.left_chunk_raw,
-		ack_timeout_s = opts.left_ack_timeout_s,
-		max_retries   = opts.left_max_retries,
-		send_frame    = function(msg)
+		svc               = opts.left_svc or make_svc(),
+		conn              = conn,
+		link_id           = 'left',
+		peer_id           = 'right',
+		chunk_raw         = opts.left_chunk_raw,
+		ack_timeout_s     = opts.left_ack_timeout_s,
+		max_retries       = opts.left_max_retries,
+		recent_done_ttl_s = opts.recent_done_ttl_s,
+		send_frame        = function(msg)
 			if type(opts.left_send) == 'function' then
 				return opts.left_send(msg, left, right, state)
 			end
@@ -136,14 +138,15 @@ local function make_pair(opts)
 	})
 
 	right = transfer.new({
-		svc           = opts.right_svc or make_svc(),
-		conn          = conn,
-		link_id       = 'right',
-		peer_id       = 'left',
-		chunk_raw     = opts.right_chunk_raw,
-		ack_timeout_s = opts.right_ack_timeout_s,
-		max_retries   = opts.right_max_retries,
-		send_frame    = function(msg)
+		svc               = opts.right_svc or make_svc(),
+		conn              = conn,
+		link_id           = 'right',
+		peer_id           = 'left',
+		chunk_raw         = opts.right_chunk_raw,
+		ack_timeout_s     = opts.right_ack_timeout_s,
+		max_retries       = opts.right_max_retries,
+		recent_done_ttl_s = opts.recent_done_ttl_s,
+		send_frame        = function(msg)
 			if type(opts.right_send) == 'function' then
 				return opts.right_send(msg, left, right, state)
 			end
@@ -294,7 +297,6 @@ function T.transfer_rejects_second_outgoing_transfer_while_first_is_active()
 		assert(err2 == 'outgoing transfer already active',
 			'expected outgoing-transfer-active error, got: ' .. tostring(err2))
 
-		-- Let the first worker finish so the assertion runner does not time out.
 		local ok = wait_until(function()
 			local st = left:status(id1)
 			return st ~= nil and st.status == 'aborted'
@@ -407,14 +409,8 @@ function T.transfer_aborts_when_sink_write_fails()
 
 		assert(lst.status == 'aborted')
 		assert(rst.status == 'aborted')
-
-		-- Current behaviour:
-		--   * receiver abort reason is the local sink failure
-		--   * sender sees the protocol consequence on resend
-		assert(tostring(lst.err):match('no such incoming transfer'),
-			'expected sender-side protocol failure, got: ' .. tostring(lst.err))
-		assert(tostring(rst.err):match('disk_full'),
-			'expected receiver-side sink failure, got: ' .. tostring(rst.err))
+		assert(lst.err == 'disk_full', 'expected sender to surface disk_full, got: ' .. tostring(lst.err))
+		assert(rst.err == 'disk_full', 'expected receiver to surface disk_full, got: ' .. tostring(rst.err))
 		assert(received.abort_reason == 'disk_full')
 	end, { timeout = 1.5 })
 end
@@ -426,10 +422,10 @@ function T.transfer_retries_after_receiver_requests_same_chunk_again()
 		local seq0_sends = 0
 
 		local left, right = make_pair({
-			state        = received,
+			state          = received,
 			left_chunk_raw = 4,
-			sink_factory = make_collecting_sink(received),
-			left_send = function(msg, _left, right_mgr)
+			sink_factory   = make_collecting_sink(received),
+			left_send      = function(msg, _left, right_mgr)
 				if msg.t == 'xfer_chunk' and msg.seq == 0 then
 					seq0_sends = seq0_sends + 1
 
@@ -574,10 +570,10 @@ function T.transfer_aborts_when_chunk_ack_times_out()
 		local received = {}
 
 		local left, right = make_pair({
-			state             = received,
+			state              = received,
 			left_ack_timeout_s = 0.1,
 			left_max_retries   = 2,
-			sink_factory      = make_collecting_sink(received),
+			sink_factory       = make_collecting_sink(received),
 			right_send = function(msg, left_mgr, _right_mgr)
 				if msg.t == 'xfer_need' then
 					return true, nil
@@ -610,36 +606,14 @@ end
 function T.transfer_aborts_when_commit_reply_times_out()
 	runfibers.run(function()
 		local received = {}
-		local commit_seen = 0
 
 		local left, right = make_pair({
-			state             = received,
+			state              = received,
 			left_ack_timeout_s = 0.1,
 			left_max_retries   = 2,
-			sink_factory      = make_collecting_sink(received),
+			sink_factory       = make_collecting_sink(received),
 
-			-- Deliver the first commit so the receiver finalises successfully,
-			-- then swallow later commit retries so we test sender commit timeout
-			-- rather than receiver non-idempotence.
-			left_send = function(msg, _left_mgr, right_mgr)
-				if msg.t == 'xfer_commit' then
-					commit_seen = commit_seen + 1
-
-					if commit_seen == 1 then
-						local ok, err = right_mgr:handle_incoming(msg)
-						if ok ~= true then return nil, err end
-						return true, nil
-					end
-
-					return true, nil
-				end
-
-				local ok, err = right_mgr:handle_incoming(msg)
-				if ok ~= true then return nil, err end
-				return true, nil
-			end,
-
-			-- Swallow xfer_done replies back to the sender.
+			-- Let the receiver see every commit, but swallow every xfer_done.
 			right_send = function(msg, left_mgr, _right_mgr)
 				if msg.t == 'xfer_done' then
 					return true, nil
@@ -669,6 +643,57 @@ function T.transfer_aborts_when_commit_reply_times_out()
 	end, { timeout = 1.5 })
 end
 
+function T.transfer_replays_done_reply_for_duplicate_commit()
+	local sent = {}
+	local state = {}
+
+	local mgr = transfer.new({
+		svc               = make_svc(),
+		conn              = make_stub_conn(),
+		link_id           = 'right',
+		peer_id           = 'left',
+		recent_done_ttl_s = 1.0,
+		send_frame = function(msg)
+			sent[#sent + 1] = shallow_copy(msg)
+			return true, nil
+		end,
+		sink_factory = make_collecting_sink(state),
+	})
+
+	local id = 'dup-commit'
+	local bytes = 'data'
+	local sha = checksum.sha256_hex(bytes)
+
+	local ok, err = mgr:handle_incoming(protocol.xfer_begin(
+		id, 'firmware', 'fw.bin', 'bin', 'b64url', #bytes, #bytes, 1, sha, nil
+	))
+	assert(ok == true, tostring(err))
+
+	ok, err = mgr:handle_incoming(protocol.xfer_chunk(
+		id, 0, 0, #bytes, checksum.crc32_hex(bytes), b64url.encode(bytes)
+	))
+	assert(ok == true, tostring(err))
+
+	ok, err = mgr:handle_incoming(protocol.xfer_commit(id, #bytes, sha))
+	assert(ok == true, tostring(err))
+
+	local first_done = sent[#sent]
+	assert(first_done.t == 'xfer_done')
+	assert(first_done.ok == true)
+	assert(first_done.id == id)
+
+	local n = #sent
+
+	ok, err = mgr:handle_incoming(protocol.xfer_commit(id, #bytes, sha))
+	assert(ok == true, tostring(err))
+	assert(#sent == n + 1, 'expected duplicate commit to replay xfer_done')
+
+	local second_done = sent[#sent]
+	assert(second_done.t == 'xfer_done')
+	assert(second_done.ok == true)
+	assert(second_done.id == id)
+end
+
 function T.transfer_abort_api_stops_active_outgoing_transfer()
 	runfibers.run(function()
 		local left = transfer.new({
@@ -693,8 +718,6 @@ function T.transfer_abort_api_stops_active_outgoing_transfer()
 		assert(st.status == 'aborted')
 		assert(st.err == 'cancelled_by_test')
 
-		-- Give the sender worker a moment to observe the closed control mailbox
-		-- and exit, so the simple runner does not time out.
 		fibers.perform(sleep.sleep_op(0.05))
 	end, { timeout = 1.5 })
 end
