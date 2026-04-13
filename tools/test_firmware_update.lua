@@ -54,6 +54,38 @@ local function encode_json(v)
 	return '<json encode failed: ' .. tostring(err) .. '>'
 end
 
+local function parse_positive_integer_env(name)
+	local raw = os.getenv(name)
+	if raw == nil or raw == '' then
+		return nil
+	end
+
+	local n = tonumber(raw)
+	if type(n) ~= 'number' or n <= 0 or n % 1 ~= 0 then
+		error(name .. ' must be a positive integer', 0)
+	end
+
+	return math.floor(n)
+end
+
+local function print_transfer_summary(final_status, duration_s)
+	local bytes_done  = tonumber(final_status and final_status.bytes_done) or 0
+	local chunks_done = tonumber(final_status and final_status.chunks_done) or 0
+	local goodput_bps = (duration_s > 0) and (bytes_done / duration_s) or 0
+	local avg_chunk_rtt_ms = (chunks_done > 0) and ((duration_s * 1000.0) / chunks_done) or 0
+
+	io.stdout:write(
+		('[summary] transfer_secs=%.3f bytes_per_sec=%.1f avg_chunk_rtt_ms=%.2f bytes=%d chunks=%d status=%s\n'):format(
+			duration_s,
+			goodput_bps,
+			avg_chunk_rtt_ms,
+			bytes_done,
+			chunks_done,
+			tostring(final_status and final_status.status or '?')
+		)
+	)
+end
+
 local function wait_for_link_ready(conn, link_id, peer_id, timeout_s)
 	local sub = conn:subscribe({ 'state', 'fabric', 'link', link_id }, {
 		queue_len = 32,
@@ -139,6 +171,28 @@ local function wait_for_peer_dump(req_conn, peer_id, timeout_s)
 	return nil, 'timed out waiting for peer hal/dump after transfer'
 end
 
+local function start_runtime(scope, bus, env, config_name)
+	local child, cerr = scope:child()
+	if not child then
+		return nil, 'failed to create runtime child scope: ' .. tostring(cerr)
+	end
+
+	local ok_spawn, spawn_err = scope:spawn(function()
+		return mainmod.run(child, {
+			env          = env,
+			config_name  = config_name,
+			services_csv = 'hal,fabric',
+			bus          = bus,
+		})
+	end)
+	if not ok_spawn then
+		child:cancel('spawn_failed')
+		return nil, 'failed to start runtime: ' .. tostring(spawn_err)
+	end
+
+	return child, nil
+end
+
 local function main(scope)
 	local image_path = arg[1]
 	if image_path == nil or image_path == '' then
@@ -150,6 +204,8 @@ local function main(scope)
 	local peer_id     = arg[4] or os.getenv('DEVICECODE_FABRIC_PEER_ID') or 'mcu-1'
 	local env         = os.getenv('DEVICECODE_ENV') or 'dev'
 	local transfer_timeout_s = tonumber(os.getenv('DEVICECODE_TRANSFER_TIMEOUT_S')) or 900.0
+	local transfer_chunk_raw = parse_positive_integer_env('DEVICECODE_TRANSFER_CHUNK_RAW')
+	local verify_after_reboot = os.getenv('DEVICECODE_VERIFY_AFTER_REBOOT') == '1'
 
 	local source, serr = blob_source.from_file(image_path, { format = 'bin' })
 	if not source then
@@ -171,21 +227,9 @@ local function main(scope)
 		principal = authz.service_principal('firmware-update-test'),
 	})
 
-	local child, cerr = scope:child()
+	local child, startup_err = start_runtime(scope, bus, env, config_name)
 	if not child then
-		error('failed to create runtime child scope: ' .. tostring(cerr), 0)
-	end
-
-	local ok_spawn, spawn_err = scope:spawn(function()
-		return mainmod.run(child, {
-			env          = env,
-			config_name  = config_name,
-			services_csv = 'hal,fabric',
-			bus          = bus,
-		})
-	end)
-	if not ok_spawn then
-		error('failed to start runtime: ' .. tostring(spawn_err), 0)
+		error(tostring(startup_err), 0)
 	end
 
 	io.stdout:write('[runtime] waiting for fabric link ' .. link_id .. ' -> ' .. peer_id .. '\n')
@@ -203,9 +247,10 @@ local function main(scope)
 			link_id = link_id,
 			source  = source,
 			meta    = {
-				kind   = 'firmware.rp2350',
-				name   = source:name(),
-				format = 'bin',
+				kind      = 'firmware.rp2350',
+				name      = source:name(),
+				format    = 'bin',
+				chunk_raw = transfer_chunk_raw,
 			},
 		},
 		{ timeout = 10.0 }
@@ -224,7 +269,11 @@ local function main(scope)
 	end
 
 	local transfer_id = reply.transfer_id
+	local transfer_started_at = fibers.now()
 	io.stdout:write('[transfer] timeout_budget=' .. tostring(transfer_timeout_s) .. 's\n')
+	if transfer_chunk_raw ~= nil then
+		io.stdout:write('[transfer] chunk_raw_override=' .. tostring(transfer_chunk_raw) .. '\n')
+	end
 
 	local final_status, ferr = poll_transfer(req_conn, transfer_id, transfer_timeout_s)
 	if not final_status then
@@ -233,13 +282,36 @@ local function main(scope)
 	end
 
 	io.stdout:write('[final] ' .. encode_json(final_status) .. '\n')
+	print_transfer_summary(final_status, fibers.now() - transfer_started_at)
 
 	if final_status.status ~= 'done' then
 		child:cancel('transfer_failed')
 		error('transfer ended in state: ' .. tostring(final_status.status), 0)
 	end
 
+	if not verify_after_reboot then
+		io.stdout:write('[post] skipping reboot verification (set DEVICECODE_VERIFY_AFTER_REBOOT=1 to enable)\n')
+		child:cancel('done')
+		return
+	end
+
 	io.stdout:write('[post] transfer reached done; MCU should reboot immediately after this\n')
+	io.stdout:write('[post] restarting local runtime to force a fresh fabric handshake\n')
+	child:cancel('post_transfer_reconnect')
+	sleep.sleep(0.5)
+
+	child, startup_err = start_runtime(scope, bus, env, config_name)
+	if not child then
+		error(tostring(startup_err), 0)
+	end
+
+	io.stdout:write('[post] waiting for fabric link ' .. link_id .. ' -> ' .. peer_id .. ' after reboot\n')
+	local post_ready, prerr = wait_for_link_ready(req_conn, link_id, peer_id, 20.0)
+	if not post_ready then
+		child:cancel('post_ready_failed')
+		error(tostring(prerr), 0)
+	end
+	io.stdout:write('[post] link ready: ' .. encode_json(post_ready) .. '\n')
 	io.stdout:write('[post] waiting for peer hal/dump to succeed again\n')
 
 	local dump, derr = wait_for_peer_dump(req_conn, peer_id, 30.0)
