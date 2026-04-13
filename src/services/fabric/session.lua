@@ -30,6 +30,7 @@ local perform      = fibers.perform
 local named_choice = fibers.named_choice
 
 local M = {}
+local RX_QUEUE_CAP = 64
 
 local function topic_s(t)
 	return table.concat(t or {}, '/')
@@ -518,9 +519,11 @@ function M.run(conn, svc, opts)
 		return nil, err
 	end
 
-	local function mark_rx(msg)
-		local tnow = svc:now()
-		state.last_rx_at = tnow
+	local function mark_rx(msg, rx_at)
+		local tnow = rx_at or svc:now()
+		if state.last_rx_at == nil or tnow > state.last_rx_at then
+			state.last_rx_at = tnow
+		end
 		if msg.t == 'pong' then
 			state.last_pong_at = tnow
 		end
@@ -619,6 +622,32 @@ function M.run(conn, svc, opts)
 		})
 		error(('fabric/%s: transport open failed: %s'):format(link_id, tostring(err)), 0)
 	end
+
+	local rx_tx, rx_rx = mailbox.new(RX_QUEUE_CAP, { full = 'reject_newest' })
+
+	fibers.spawn(function()
+		while true do
+			local line, rerr = perform(transport:recv_line_op())
+			if not line then
+				rx_tx:close(tostring(rerr or 'transport_down'))
+				return
+			end
+
+			local okq, qerr = rx_tx:send({
+				line  = line,
+				rx_at = svc:now(),
+			})
+			if okq ~= true then
+				svc:obs_log('warn', {
+					what    = 'rx_queue_full',
+					link_id = link_id,
+					err     = tostring(qerr or 'full'),
+				})
+				rx_tx:close('rx_queue_full')
+				return
+			end
+		end
+	end)
 
 	xfer = transfer.new({
 		svc           = svc,
@@ -727,7 +756,7 @@ function M.run(conn, svc, opts)
 		local deadline = next_deadline(tnow)
 
 		local arms = {
-			recv = transport:recv_line_op(),
+			recv = rx_rx:recv_op(),
 		}
 
 		if control_rx then
@@ -800,8 +829,9 @@ function M.run(conn, svc, opts)
 			end
 
 		else
-			local line, rerr = a, b
-			if not line then
+			local env = a
+			if not env then
+				local rerr = rx_rx:why() or tostring(b or 'transport_down')
 				pending:close_all('transport_down')
 				if xfer then pcall(function() xfer:abort_all('transport_down') end) end
 				publish_link_state(conn, svc, link_id, {
@@ -818,6 +848,7 @@ function M.run(conn, svc, opts)
 				error(('fabric/%s: receive failed: %s'):format(link_id, tostring(rerr)), 0)
 			end
 
+			local line = env.line
 			local raw, derr = protocol.decode_line(line)
 			if not raw then
 				note_bad_frame('decode_failed', derr, nil)
@@ -835,7 +866,7 @@ function M.run(conn, svc, opts)
 					end
 					note_bad_frame('invalid_message', verr, raw.t)
 				else
-					mark_rx(msg)
+					mark_rx(msg, env.rx_at)
 
 					if msg.t == 'hello' then
 						local okh, herr = validate_peer_hello(msg)
