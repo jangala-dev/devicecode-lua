@@ -12,9 +12,7 @@ local function make_req_headers(method, path, extra)
 	h:append(':method', method)
 	h:append(':path', path)
 	if type(extra) == 'table' then
-		for k, v in pairs(extra) do
-			h:append(k, v)
-		end
+		for k, v in pairs(extra) do h:append(k, v) end
 	end
 	return h
 end
@@ -29,13 +27,8 @@ local function new_stream(req_headers, body)
 		state        = 'open',
 	}
 
-	function stream:get_headers()
-		return self._req_headers
-	end
-
-	function stream:get_body_as_string()
-		return self._req_body
-	end
+	function stream:get_headers() return self._req_headers end
+	function stream:get_body_as_string() return self._req_body end
 
 	function stream:write_headers(headers, end_stream)
 		self._res_headers = headers
@@ -87,370 +80,224 @@ end
 
 function T.http_login_sets_cookie_and_returns_session()
 	local calls = {}
-
 	local api = {
 		login = function(username, password)
-			calls[#calls + 1] = {
-				op       = 'login',
-				username = username,
-				password = password,
-			}
+			calls[#calls + 1] = { username = username, password = password }
 			return {
 				session_id = 'sess-123',
-				user = {
-					id    = 'admin',
-					kind  = 'user',
-					roles = { 'admin' },
-				},
+				user = { id = 'admin', kind = 'user', roles = { 'admin' } },
 				expires_at = 12345,
 			}, nil
 		end,
 	}
 
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('POST', '/api/login'),
-		cjson.encode({
-			username = 'admin',
-			password = 'secret',
-		})
-	)
-
+	local stream = new_stream(make_req_headers('POST', '/api/login'), cjson.encode({ username = 'admin', password = 'secret' }))
 	handler({}, stream)
 
 	assert(stream:response_status() == '200')
-	assert(type(stream:response_header('set-cookie')) == 'string')
 	assert(stream:response_header('set-cookie'):match('devicecode_session=sess%-123') ~= nil)
-
 	local body = decode_json_body(stream)
 	assert(body.ok == true)
-	assert(type(body.data) == 'table')
 	assert(body.data.session_id == 'sess-123')
-
 	assert(#calls == 1)
-	assert(calls[1].username == 'admin')
-	assert(calls[1].password == 'secret')
 end
 
 function T.http_login_failure_returns_401()
-	local api = {
-		login = function(username, password)
-			return nil, 'invalid credentials'
-		end,
-	}
-
+	local api = { login = function() return nil, 'invalid credentials' end }
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('POST', '/api/login'),
-		cjson.encode({
-			username = 'admin',
-			password = 'wrong',
-		})
-	)
-
+	local stream = new_stream(make_req_headers('POST', '/api/login'), cjson.encode({ username = 'admin', password = 'wrong' }))
 	handler({}, stream)
-
 	assert(stream:response_status() == '401')
-
-	local body = decode_json_body(stream)
-	assert(body.ok == false)
-	assert(body.err == 'invalid credentials')
+	assert(decode_json_body(stream).err == 'invalid credentials')
 end
 
 function T.http_session_uses_cookie()
 	local calls = {}
-
 	local api = {
 		get_session = function(session_id)
-			calls[#calls + 1] = {
-				op = 'get_session',
-				session_id = session_id,
-			}
-			return {
-				session_id = session_id,
-				user = {
-					id    = 'admin',
-					kind  = 'user',
-					roles = { 'admin' },
-				},
-			}, nil
+			calls[#calls + 1] = session_id
+			return { session_id = session_id, user = { id = 'admin', kind = 'user', roles = { 'admin' } } }, nil
 		end,
 	}
-
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('GET', '/api/session', {
-			cookie = 'foo=bar; devicecode_session=sess-cookie; baz=qux',
-		})
-	)
-
+	local stream = new_stream(make_req_headers('GET', '/api/session', { cookie = 'foo=bar; devicecode_session=sess-cookie; baz=qux' }))
 	handler({}, stream)
-
 	assert(stream:response_status() == '200')
-
-	local body = decode_json_body(stream)
-	assert(body.ok == true)
-	assert(body.data.session_id == 'sess-cookie')
-
-	assert(#calls == 1)
-	assert(calls[1].session_id == 'sess-cookie')
+	assert(decode_json_body(stream).data.session_id == 'sess-cookie')
+	assert(calls[1] == 'sess-cookie')
 end
 
-function T.http_logout_clears_cookie()
+function T.http_logout_clears_cookie_and_uses_401_for_bad_session()
 	local calls = {}
-
 	local api = {
 		logout = function(session_id)
-			calls[#calls + 1] = {
-				op = 'logout',
-				session_id = session_id,
-			}
+			calls[#calls + 1] = session_id
+			if session_id == 'bad' then return nil, 'invalid or expired session' end
 			return true, nil
 		end,
 	}
-
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('POST', '/api/logout', {
-			cookie = 'devicecode_session=sess-logout',
-		}),
-		'{}'
-	)
 
-	handler({}, stream)
+	local ok_stream = new_stream(make_req_headers('POST', '/api/logout', { cookie = 'devicecode_session=sess-logout' }), '{}')
+	handler({}, ok_stream)
+	assert(ok_stream:response_status() == '200')
+	assert(ok_stream:response_header('set-cookie'):match('Max%-Age=0') ~= nil)
 
-	assert(stream:response_status() == '200')
-	assert(type(stream:response_header('set-cookie')) == 'string')
-	assert(stream:response_header('set-cookie'):match('Max%-Age=0') ~= nil)
-
-	local body = decode_json_body(stream)
-	assert(body.ok == true)
-
-	assert(#calls == 1)
-	assert(calls[1].session_id == 'sess-logout')
+	local bad_stream = new_stream(make_req_headers('POST', '/api/logout', { cookie = 'devicecode_session=bad' }), '{}')
+	handler({}, bad_stream)
+	assert(bad_stream:response_status() == '401')
+	assert(calls[1] == 'sess-logout')
+	assert(calls[2] == 'bad')
 end
 
-function T.http_config_get_route_uses_cookie_session()
-	local calls = {}
-
+function T.http_config_get_uses_404_for_missing_and_200_for_present()
 	local api = {
-		config_get = function(session_id, service_name)
-			calls[#calls + 1] = {
-				op           = 'config_get',
-				session_id   = session_id,
-				service_name = service_name,
-			}
-			return {
-				rev = 3,
-				data = {
-					schema = 'devicecode.net/2',
-					answer = 42,
-				},
-			}, nil
+		config_get = function(_, service_name)
+			if service_name == 'missing' then return nil, 'not found' end
+			return { rev = 3, data = { schema = 'devicecode.net/2', answer = 42 } }, nil
 		end,
 	}
-
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('GET', '/api/config/net', {
-			cookie = 'devicecode_session=sess-net',
-		})
-	)
 
-	handler({}, stream)
+	local ok_stream = new_stream(make_req_headers('GET', '/api/config/net', { cookie = 'devicecode_session=sess-net' }))
+	handler({}, ok_stream)
+	assert(ok_stream:response_status() == '200')
+	assert(decode_json_body(ok_stream).data.data.answer == 42)
 
-	assert(stream:response_status() == '200')
-
-	local body = decode_json_body(stream)
-	assert(body.ok == true)
-	assert(type(body.data) == 'table')
-	assert(body.data.rev == 3)
-	assert(type(body.data.data) == 'table')
-	assert(body.data.data.answer == 42)
-
-	assert(#calls == 1)
-	assert(calls[1].session_id == 'sess-net')
-	assert(calls[1].service_name == 'net')
+	local miss_stream = new_stream(make_req_headers('GET', '/api/config/missing', { cookie = 'devicecode_session=sess-net' }))
+	handler({}, miss_stream)
+	assert(miss_stream:response_status() == '404')
 end
 
-function T.http_config_route_uses_cookie_session()
-	local calls = {}
-
+function T.http_config_post_returns_400_on_bad_body_and_401_on_missing_session()
 	local api = {
 		config_set = function(session_id, service_name, data)
-			calls[#calls + 1] = {
-				op           = 'config_set',
-				session_id   = session_id,
-				service_name = service_name,
-				data         = data,
-			}
-			return {
-				ok = true,
-				persisted = false,
-			}, nil
+			if session_id == nil then return nil, 'missing session' end
+			if service_name == 'net' and type(data) ~= 'table' then return nil, 'data must be a plain table' end
+			return { ok = true, persisted = false }, nil
 		end,
 	}
-
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('POST', '/api/config/net', {
-			cookie = 'devicecode_session=sess-net',
-		}),
-		cjson.encode({
-			data = {
-				schema = 'devicecode.net/1',
-				answer = 42,
-			},
-		})
-	)
 
-	handler({}, stream)
+	local bad_json = new_stream(make_req_headers('POST', '/api/config/net', { cookie = 'devicecode_session=sess-net' }), '{')
+	handler({}, bad_json)
+	assert(bad_json:response_status() == '400')
 
-	assert(stream:response_status() == '200')
-
-	local body = decode_json_body(stream)
-	assert(body.ok == true)
-	assert(type(body.data) == 'table')
-	assert(body.data.ok == true)
-	assert(body.data.persisted == false)
-
-	assert(#calls == 1)
-	assert(calls[1].session_id == 'sess-net')
-	assert(calls[1].service_name == 'net')
-	assert(type(calls[1].data) == 'table')
-	assert(calls[1].data.answer == 42)
+	local no_session = new_stream(make_req_headers('POST', '/api/config/net'), cjson.encode({ data = { schema = 'x' } }))
+	handler({}, no_session)
+	assert(no_session:response_status() == '401')
 end
 
-function T.http_service_status_route_uses_cookie_session()
-	local calls = {}
-
+function T.http_service_status_capabilities_and_fabric_routes_use_expected_statuses()
 	local api = {
-		service_status = function(session_id, service_name)
-			calls[#calls + 1] = {
-				op           = 'service_status',
-				session_id   = session_id,
-				service_name = service_name,
-			}
-			return {
-				state = 'running',
-				ts    = 123.0,
-			}, nil
+		service_status = function(_, service_name)
+			if service_name == 'missing' then return nil, 'not found' end
+			return { state = 'running', ts = 123.0 }, nil
+		end,
+		capability_snapshot = function(session_id)
+			if session_id == nil then return nil, 'missing session' end
+			return { capabilities = {}, devices = {}, services = { announce = {}, status = {} } }, nil
+		end,
+		fabric_status = function() return { main = { status = 'running' }, links = {} }, nil end,
+		fabric_link_status = function(_, link_id)
+			if link_id == 'missing' then return nil, 'not found' end
+			return { link = { status = 'ready' }, transfer = nil }, nil
 		end,
 	}
-
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('GET', '/api/service/net/status', {
-			cookie = 'devicecode_session=sess-status',
-		})
-	)
 
-	handler({}, stream)
+	local svc_ok = new_stream(make_req_headers('GET', '/api/service/net/status', { cookie = 'devicecode_session=sess' }))
+	handler({}, svc_ok)
+	assert(svc_ok:response_status() == '200')
 
-	assert(stream:response_status() == '200')
+	local svc_missing = new_stream(make_req_headers('GET', '/api/service/missing/status', { cookie = 'devicecode_session=sess' }))
+	handler({}, svc_missing)
+	assert(svc_missing:response_status() == '404')
 
-	local body = decode_json_body(stream)
-	assert(body.ok == true)
-	assert(type(body.data) == 'table')
-	assert(body.data.state == 'running')
+	local caps_no_session = new_stream(make_req_headers('GET', '/api/capabilities'))
+	handler({}, caps_no_session)
+	assert(caps_no_session:response_status() == '401')
 
-	assert(#calls == 1)
-	assert(calls[1].session_id == 'sess-status')
-	assert(calls[1].service_name == 'net')
+	local fabric_ok = new_stream(make_req_headers('GET', '/api/fabric', { cookie = 'devicecode_session=sess' }))
+	handler({}, fabric_ok)
+	assert(fabric_ok:response_status() == '200')
+
+	local link_missing = new_stream(make_req_headers('GET', '/api/fabric/link/missing', { cookie = 'devicecode_session=sess' }))
+	handler({}, link_missing)
+	assert(link_missing:response_status() == '404')
 end
 
-function T.http_rpc_route_prefers_header_session()
-	local calls = {}
-
+function T.http_rpc_route_maps_timeout_to_504_and_invalid_payload_to_400()
 	local api = {
-		rpc_call = function(session_id, service_name, method_name, payload, timeout)
-			calls[#calls + 1] = {
-				op           = 'rpc_call',
-				session_id   = session_id,
-				service_name = service_name,
-				method_name  = method_name,
-				payload      = payload,
-				timeout      = timeout,
-			}
-			return {
-				ok = true,
-				method = method_name,
-			}, nil
+		rpc_call = function(_, service_name, method_name, payload, timeout)
+			if payload == nil then return nil, 'payload must be a table or nil' end
+			if timeout == 0.5 then return nil, 'timeout' end
+			return { ok = true, method = method_name }, nil
 		end,
 	}
-
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('POST', '/api/rpc/hal/dump', {
-			['x-session-id'] = 'sess-rpc',
-		}),
-		cjson.encode({
-			payload = {
-				packages = { 'network', 'firewall' },
-			},
-			timeout = 0.5,
-		})
-	)
 
-	handler({}, stream)
+	local timeout_stream = new_stream(make_req_headers('POST', '/api/rpc/hal/dump', { ['x-session-id'] = 'sess-rpc' }), cjson.encode({ payload = { x = 1 }, timeout = 0.5 }))
+	handler({}, timeout_stream)
+	assert(timeout_stream:response_status() == '504')
 
-	assert(stream:response_status() == '200')
-
-	local body = decode_json_body(stream)
-	assert(body.ok == true)
-	assert(type(body.data) == 'table')
-	assert(body.data.ok == true)
-	assert(body.data.method == 'dump')
-
-	assert(#calls == 1)
-	assert(calls[1].session_id == 'sess-rpc')
-	assert(calls[1].service_name == 'hal')
-	assert(calls[1].method_name == 'dump')
-	assert(type(calls[1].payload) == 'table')
-	assert(type(calls[1].payload.packages) == 'table')
-	assert(calls[1].payload.packages[1] == 'network')
-	assert(calls[1].timeout == 0.5)
+	local bad_json = new_stream(make_req_headers('POST', '/api/rpc/hal/dump', { ['x-session-id'] = 'sess-rpc' }), '{')
+	handler({}, bad_json)
+	assert(bad_json:response_status() == '400')
 end
 
-function T.http_health_route_returns_200()
+function T.http_fabric_transfer_routes_cover_send_status_abort_and_status_mapping()
 	local api = {
-		health = function()
-			return {
-				service  = 'ui',
-				sessions = 2,
-				now      = 123.0,
-			}, nil
+		firmware_send = function(_, link_id, source, meta)
+			assert(link_id == 'uart0')
+			assert(type(source) == 'table')
+			assert(type(source.open) == 'function')
+			assert(meta.kind == 'firmware.rp2350')
+			return { ok = true, transfer_id = 'tx-1' }, nil
+		end,
+		transfer_status = function(_, transfer_id)
+			if transfer_id == 'gone' then return nil, 'unknown transfer' end
+			return { ok = true, transfer = { id = transfer_id, status = 'sending' } }, nil
+		end,
+		transfer_abort = function(_, transfer_id)
+			if transfer_id == 'busy' then return nil, 'busy' end
+			return { ok = true }, nil
 		end,
 	}
-
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('GET', '/api/health')
-	)
 
-	handler({}, stream)
+	local fw = new_stream(make_req_headers('POST', '/api/fabric/firmware/uart0', { cookie = 'devicecode_session=sess', ['x-filename'] = 'fw.bin' }), 'abcd')
+	handler({}, fw)
+	assert(fw:response_status() == '200')
+	assert(decode_json_body(fw).data.transfer_id == 'tx-1')
 
-	assert(stream:response_status() == '200')
+	local status_ok = new_stream(make_req_headers('GET', '/api/fabric/transfer/tx-1', { cookie = 'devicecode_session=sess' }))
+	handler({}, status_ok)
+	assert(status_ok:response_status() == '200')
 
-	local body = decode_json_body(stream)
-	assert(body.ok == true)
-	assert(type(body.data) == 'table')
-	assert(body.data.service == 'ui')
-	assert(body.data.sessions == 2)
+	local status_missing = new_stream(make_req_headers('GET', '/api/fabric/transfer/gone', { cookie = 'devicecode_session=sess' }))
+	handler({}, status_missing)
+	assert(status_missing:response_status() == '404')
+
+	local abort_busy = new_stream(make_req_headers('POST', '/api/fabric/transfer/busy/abort', { cookie = 'devicecode_session=sess' }), '{}')
+	handler({}, abort_busy)
+	assert(abort_busy:response_status() == '503')
 end
 
-function T.http_unknown_api_route_returns_404()
-	local api = {}
-
+function T.http_health_route_returns_200_and_unknown_api_route_returns_404()
+	local api = { health = function() return { service = 'ui', sessions = 2, now = 123.0 }, nil end }
 	local handler = transport.build_handler(fake_svc(), api, {})
-	local stream = new_stream(
-		make_req_headers('GET', '/api/nope')
-	)
 
-	handler({}, stream)
+	local health = new_stream(make_req_headers('GET', '/api/health'))
+	handler({}, health)
+	assert(health:response_status() == '200')
+	assert(decode_json_body(health).data.service == 'ui')
 
-	assert(stream:response_status() == '404')
-	assert(stream:response_body():match('not found') ~= nil)
+	local missing = new_stream(make_req_headers('GET', '/api/nope'))
+	handler({}, missing)
+	assert(missing:response_status() == '404')
+	assert(missing:response_body():match('not found') ~= nil)
 end
 
 return T

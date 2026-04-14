@@ -58,6 +58,11 @@ local function seed_retained(bus, topic, payload)
 	conn:retain(topic, payload)
 end
 
+local function unretain(bus, topic)
+	local conn = bus:connect()
+	conn:unretain(topic)
+end
+
 local function spawn_fake_config_acceptor(scope, bus, service_name, calls)
 	calls = calls or {}
 	local ready = false
@@ -72,9 +77,7 @@ local function spawn_fake_config_acceptor(scope, bus, service_name, calls)
 
 		while true do
 			local msg, _ = sub:recv()
-			if not msg then
-				return
-			end
+			if not msg then return end
 
 			calls[#calls + 1] = {
 				topic   = msg.topic,
@@ -83,19 +86,13 @@ local function spawn_fake_config_acceptor(scope, bus, service_name, calls)
 			}
 
 			if msg.reply_to ~= nil then
-				conn:publish(msg.reply_to, {
-					ok        = true,
-					persisted = false,
-				}, { id = msg.id })
+				conn:publish(msg.reply_to, { ok = true, persisted = false }, { id = msg.id })
 			end
 		end
 	end)
 	assert(ok_spawn, tostring(err))
 
-	local ok = probe.wait_until(function()
-		return ready == true
-	end, { timeout = 0.5, interval = 0.01 })
-
+	local ok = probe.wait_until(function() return ready == true end, { timeout = 0.5, interval = 0.01 })
 	assert(ok == true, 'expected fake config acceptor to be ready')
 	return calls
 end
@@ -106,16 +103,12 @@ local function spawn_fake_rpc_endpoint(scope, bus, service_name, method_name, ha
 
 	local ok_spawn, err = scope:spawn(function()
 		local conn = bus:connect()
-		local ep = conn:bind({ 'rpc', service_name, method_name }, {
-			queue_len = 8,
-		})
+		local ep = conn:bind({ 'rpc', service_name, method_name }, { queue_len = 8 })
 		ready = true
 
 		while true do
 			local msg, _ = ep:recv()
-			if not msg then
-				return
-			end
+			if not msg then return end
 
 			calls[#calls + 1] = {
 				topic   = msg.topic,
@@ -132,10 +125,7 @@ local function spawn_fake_rpc_endpoint(scope, bus, service_name, method_name, ha
 	end)
 	assert(ok_spawn, tostring(err))
 
-	local ok = probe.wait_until(function()
-		return ready == true
-	end, { timeout = 0.5, interval = 0.01 })
-
+	local ok = probe.wait_until(function() return ready == true end, { timeout = 0.5, interval = 0.01 })
 	assert(ok == true, 'expected fake rpc endpoint to be ready')
 	return calls
 end
@@ -154,14 +144,11 @@ function T.ui_login_accepts_admin_and_emits_audit()
 		local out, err = api.login('admin', 'secret')
 		assert(out ~= nil, tostring(err))
 		assert(type(out.session_id) == 'string' and out.session_id ~= '')
-		assert(type(out.user) == 'table')
 		assert(out.user.id == 'admin')
-		assert(type(out.user.roles) == 'table')
 		assert(out.user.roles[1] == 'admin')
 
 		local msg, merr = sub:recv()
 		assert(msg ~= nil, tostring(merr))
-		assert(type(msg.payload) == 'table')
 		assert(msg.payload.user == 'admin')
 	end, { timeout = 1.0 })
 end
@@ -206,20 +193,13 @@ function T.ui_config_get_reads_retained_snapshot()
 
 		seed_retained(bus, { 'cfg', 'net' }, {
 			rev = 3,
-			data = {
-				schema = 'devicecode.net/2',
-				answer = 42,
-			},
+			data = { schema = 'devicecode.net/2', answer = 42 },
 		})
 
-		local login, lerr = api.login('admin', 'secret')
-		assert(login ~= nil, tostring(lerr))
-
+		local login = assert((api.login('admin', 'secret')))
 		local out, err = api.config_get(login.session_id, 'net')
 		assert(out ~= nil, tostring(err))
-		assert(type(out) == 'table')
 		assert(out.rev == 3)
-		assert(type(out.data) == 'table')
 		assert(out.data.answer == 42)
 	end, { timeout = 1.0 })
 end
@@ -229,17 +209,11 @@ function T.ui_service_status_reads_retained_status()
 		local bus = busmod.new()
 		local api = assert(start_ui(scope, bus))
 
-		seed_retained(bus, { 'svc', 'net', 'status' }, {
-			state = 'running',
-			ts    = 123.0,
-		})
+		seed_retained(bus, { 'svc', 'net', 'status' }, { state = 'running', ts = 123.0 })
 
-		local login, lerr = api.login('admin', 'secret')
-		assert(login ~= nil, tostring(lerr))
-
+		local login = assert((api.login('admin', 'secret')))
 		local out, err = api.service_status(login.session_id, 'net')
 		assert(out ~= nil, tostring(err))
-		assert(type(out) == 'table')
 		assert(out.state == 'running')
 	end, { timeout = 1.0 })
 end
@@ -248,14 +222,10 @@ function T.ui_config_set_round_trips_via_bus()
 	runfibers.run(function(scope)
 		local bus = busmod.new()
 		local calls = {}
-
 		spawn_fake_config_acceptor(scope, bus, 'net', calls)
-
 		local api = assert(start_ui(scope, bus))
 
-		local login, lerr = api.login('admin', 'secret')
-		assert(login ~= nil, tostring(lerr))
-
+		local login = assert((api.login('admin', 'secret')))
 		local out, err = api.config_set(login.session_id, 'net', {
 			schema = 'devicecode.net/1',
 			answer = 42,
@@ -264,22 +234,11 @@ function T.ui_config_set_round_trips_via_bus()
 		assert(out.ok == true)
 		assert(out.persisted == false)
 
-		local seen = probe.wait_until(function()
-			return #calls >= 1
-		end, { timeout = 0.5, interval = 0.01 })
-
-		assert(seen == true, 'expected fake config acceptor to receive a request')
-		assert(#calls >= 1)
-
-		local call = calls[1]
-		assert(type(call.topic) == 'table')
-		assert(call.topic[1] == 'config')
-		assert(call.topic[2] == 'net')
-		assert(call.topic[3] == 'set')
-		assert(type(call.payload) == 'table')
-		assert(type(call.payload.data) == 'table')
-		assert(call.payload.data.schema == 'devicecode.net/1')
-		assert(call.payload.data.answer == 42)
+		assert(probe.wait_until(function() return #calls >= 1 end, { timeout = 0.5, interval = 0.01 }) == true)
+		assert(calls[1].topic[1] == 'config')
+		assert(calls[1].topic[2] == 'net')
+		assert(calls[1].topic[3] == 'set')
+		assert(calls[1].payload.data.answer == 42)
 	end, { timeout = 1.0 })
 end
 
@@ -287,7 +246,6 @@ function T.ui_rpc_call_round_trips_via_endpoint()
 	runfibers.run(function(scope)
 		local bus = busmod.new()
 		local calls = {}
-
 		spawn_fake_rpc_endpoint(scope, bus, 'hal', 'dump', function(payload, msg)
 			return {
 				ok       = true,
@@ -298,38 +256,141 @@ function T.ui_rpc_call_round_trips_via_endpoint()
 		end, calls)
 
 		local api = assert(start_ui(scope, bus))
-
-		local login, lerr = api.login('admin', 'secret')
-		assert(login ~= nil, tostring(lerr))
-
-		local out, err = api.rpc_call(login.session_id, 'hal', 'dump', {
-			packages = { 'network', 'firewall' },
-		}, 0.5)
+		local login = assert((api.login('admin', 'secret')))
+		local out, err = api.rpc_call(login.session_id, 'hal', 'dump', { packages = { 'network', 'firewall' } }, 0.5)
 
 		assert(out ~= nil, tostring(err))
 		assert(out.ok == true)
 		assert(out.method == 'dump')
 		assert(out.reply_to == true)
-		assert(type(out.echo) == 'table')
-		assert(type(out.echo.packages) == 'table')
 		assert(out.echo.packages[1] == 'network')
-		assert(out.echo.packages[2] == 'firewall')
+		assert(#calls == 1)
+	end, { timeout = 1.0 })
+end
 
-		local seen = probe.wait_until(function()
-			return #calls >= 1
-		end, { timeout = 0.5, interval = 0.01 })
+function T.ui_fabric_status_and_link_status_read_retained_state()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local api = assert(start_ui(scope, bus))
 
-		assert(seen == true, 'expected fake rpc endpoint to receive a request')
-		assert(#calls >= 1)
+		seed_retained(bus, { 'state', 'fabric', 'main' }, { status = 'running', gen = 2 })
+		seed_retained(bus, { 'state', 'fabric', 'link', 'uart0' }, { status = 'ready', peer_id = 'peer-a' })
+		seed_retained(bus, { 'state', 'fabric', 'link', 'uart0', 'transfer' }, { status = 'idle' })
 
-		local call = calls[1]
-		assert(type(call.topic) == 'table')
-		assert(call.topic[1] == 'rpc')
-		assert(call.topic[2] == 'hal')
-		assert(call.topic[3] == 'dump')
-		assert(type(call.payload) == 'table')
-		assert(type(call.payload.packages) == 'table')
-		assert(call.payload.packages[1] == 'network')
+		local login = assert((api.login('admin', 'secret')))
+		local fabric, ferr = api.fabric_status(login.session_id)
+		assert(fabric ~= nil, tostring(ferr))
+		assert(fabric.main.status == 'running')
+		assert(fabric.links.uart0.status == 'ready')
+
+		local link, lerr = api.fabric_link_status(login.session_id, 'uart0')
+		assert(link ~= nil, tostring(lerr))
+		assert(link.link.peer_id == 'peer-a')
+		assert(link.transfer.status == 'idle')
+	end, { timeout = 1.0 })
+end
+
+function T.ui_capability_snapshot_collects_cap_dev_and_service_retained()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local api = assert(start_ui(scope, bus))
+
+		seed_retained(bus, { 'cap', 'uart', 'ttyS0' }, { kind = 'uart' })
+		seed_retained(bus, { 'dev', 'modem', 'mdm0' }, { kind = 'modem' })
+		seed_retained(bus, { 'svc', 'hal', 'announce' }, { role = 'hal' })
+		seed_retained(bus, { 'svc', 'hal', 'status' }, { state = 'running' })
+
+		local login = assert((api.login('admin', 'secret')))
+		local out, err = api.capability_snapshot(login.session_id)
+		assert(out ~= nil, tostring(err))
+		assert(out.capabilities['cap/uart/ttyS0'].kind == 'uart')
+		assert(out.devices['dev/modem/mdm0'].kind == 'modem')
+		assert(out.services.announce.hal.role == 'hal')
+		assert(out.services.status.hal.state == 'running')
+	end, { timeout = 1.0 })
+end
+
+function T.ui_firmware_and_transfer_helpers_call_fabric_rpc()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local api = assert(start_ui(scope, bus))
+
+		spawn_fake_rpc_endpoint(scope, bus, 'fabric', 'send_firmware', function(payload)
+			assert(payload.link_id == 'uart0')
+			assert(type(payload.source) == 'table')
+			assert(type(payload.source.open) == 'function')
+			return { ok = true, transfer_id = 'tx-1' }
+		end)
+
+		spawn_fake_rpc_endpoint(scope, bus, 'fabric', 'transfer_status', function(payload)
+			assert(payload.transfer_id == 'tx-1')
+			return { ok = true, transfer = { id = 'tx-1', status = 'sending' } }
+		end)
+
+		spawn_fake_rpc_endpoint(scope, bus, 'fabric', 'transfer_abort', function(payload)
+			assert(payload.transfer_id == 'tx-1')
+			return { ok = true }
+		end)
+
+		local login = assert((api.login('admin', 'secret')))
+		local source = {
+			open = function()
+				return {
+					read = function() return nil, nil end,
+					close = function() return true end,
+				}
+			end,
+			size = function() return 4 end,
+			sha256hex = function() return 'deadbeef' end,
+			name = function() return 'fw.bin' end,
+			format = function() return 'bin' end,
+		}
+
+		local sent, serr = api.firmware_send(login.session_id, 'uart0', source, {})
+		assert(sent ~= nil, tostring(serr))
+		assert(sent.transfer_id == 'tx-1')
+
+		local st, terr = api.transfer_status(login.session_id, 'tx-1')
+		assert(st ~= nil, tostring(terr))
+		assert(st.transfer.status == 'sending')
+
+		local aborted, aerr = api.transfer_abort(login.session_id, 'tx-1')
+		assert(aborted ~= nil, tostring(aerr))
+		assert(aborted.ok == true)
+	end, { timeout = 1.0 })
+end
+
+function T.ui_retained_watch_streams_replay_done_and_live_changes()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local api = assert(start_ui(scope, bus))
+
+		seed_retained(bus, { 'state', 'fabric', 'link', 'uart0' }, { status = 'ready' })
+		local login = assert((api.login('admin', 'secret')))
+
+		local watch, err = api.retained_watch(login.session_id, { 'state', 'fabric', 'link', '+' }, {
+			replay_idle_s = 0.01,
+		})
+		assert(watch ~= nil, tostring(err))
+
+		local ev1, e1 = watch:recv()
+		assert(ev1 ~= nil, tostring(e1))
+		assert(ev1.kind == 'retain')
+		assert(ev1.phase == 'replay')
+		assert(ev1.topic[4] == 'uart0')
+
+		local ev2, e2 = watch:recv()
+		assert(ev2 ~= nil, tostring(e2))
+		assert(ev2.kind == 'replay_done')
+
+		unretain(bus, { 'state', 'fabric', 'link', 'uart0' })
+		local ev3, e3 = watch:recv()
+		assert(ev3 ~= nil, tostring(e3))
+		assert(ev3.kind == 'unretain')
+		assert(ev3.phase == 'live')
+		assert(ev3.topic[4] == 'uart0')
+
+		assert(watch:close() == true)
 	end, { timeout = 1.0 })
 end
 

@@ -6,26 +6,23 @@
 --   * local login/session handling
 --   * act on behalf of logged-in users via opts.connect(principal)
 --   * expose retained snapshots for cfg/svc/state/cap/dev topics
+--   * expose retained watch streams with replay + replay_done semantics
 --   * expose config mutation and generic RPC helpers
 --   * expose fabric firmware transfer helpers
 --
 -- Expected opts:
 --   * connect(principal) -> bus connection
 --   * run_http(svc, api, opts) -> transport runner
---
--- First pass policy:
---   * admin-only access
---   * session-backed, in-process auth
---   * retained reads are pulled by transient subscriptions
 
-local fibers = require 'fibers'
-local sleep  = require 'fibers.sleep'
-local uuid   = require 'uuid'
+local fibers  = require 'fibers'
+local mailbox = require 'fibers.mailbox'
+local sleep   = require 'fibers.sleep'
+local uuid    = require 'uuid'
 
-local safe   = require 'coxpcall'
+local safe    = require 'coxpcall'
 
-local base   = require 'devicecode.service_base'
-local authz  = require 'devicecode.authz'
+local base    = require 'devicecode.service_base'
+local authz   = require 'devicecode.authz'
 
 local M = {}
 
@@ -102,20 +99,7 @@ local function msgs_to_service_map(msgs, service_idx)
 	return out
 end
 
-local function last_payload(msgs)
-	if type(msgs) ~= 'table' or #msgs == 0 then
-		return nil
-	end
-	local msg = msgs[#msgs]
-	return msg and msg.payload or nil
-end
-
 local function temporary_verify_login(username, password)
-	-- Temporary bootstrap mechanism:
-	--   * only "admin" is recognised
-	--   * password comes from DEVICECODE_UI_ADMIN_PASSWORD
-	--
-	-- Replace this with a proper auth service and slow password hashes.
 	local expected = getenv_nonempty('DEVICECODE_UI_ADMIN_PASSWORD')
 	if not expected then
 		return nil, 'ui admin password is not configured'
@@ -192,56 +176,203 @@ local function make_session_store()
 	return store
 end
 
----@param user_conn any
----@param topic table
----@param opts? { timeout_s?: number, idle_s?: number, queue_len?: integer }
----@return table
-local function collect_retained(user_conn, topic, opts)
+local function normalise_topic(topic)
+	if type(topic) ~= 'table' then
+		return nil, 'topic must be an array'
+	end
+
+	local out = {}
+	for i = 1, #topic do
+		local v = topic[i]
+		if type(v) ~= 'string' or v == '' then
+			return nil, ('topic[%d] must be a non-empty string'):format(i)
+		end
+		out[i] = v
+	end
+
+	return out, nil
+end
+
+local function make_retained_watch(connect, principal, topic, opts)
+	opts = opts or {}
+
+	local queue_len      = (type(opts.queue_len) == 'number' and opts.queue_len >= 0) and opts.queue_len or 128
+	local replay_idle_s  = (type(opts.replay_idle_s) == 'number' and opts.replay_idle_s > 0) and opts.replay_idle_s or 0.05
+	local event_queue    = (type(opts.event_queue) == 'number' and opts.event_queue >= 0) and opts.event_queue or 128
+
+	local user_conn = connect(principal)
+	local tx, rx = mailbox.new(event_queue, { full = 'drop_oldest' })
+
+	local state = {
+		closed = false,
+		rw     = nil,
+	}
+
+	local function close(reason)
+		if state.closed then return true end
+		state.closed = true
+		if state.rw then pcall(function() state.rw:unwatch() end) end
+		pcall(function() user_conn:disconnect() end)
+		pcall(function() tx:close(reason or 'closed') end)
+		return true
+	end
+
+	local function emit(ev)
+		if state.closed then return false end
+		local ok = tx:send(ev)
+		return ok == true
+	end
+
+	fibers.spawn(function()
+		local rw = user_conn:watch_retained(topic, {
+			queue_len = queue_len,
+			full      = 'drop_oldest',
+			replay    = true,
+		})
+		state.rw = rw
+
+		local replay_done = false
+
+		while not state.closed and not replay_done do
+			local which, a, b = perform(named_choice {
+				recv = rw:recv_op(),
+				idle = sleep.sleep_op(replay_idle_s):wrap(function() return true end),
+			})
+
+			if which == 'idle' then
+				emit({
+					kind  = 'replay_done',
+					topic = copy_plain(topic),
+				})
+				replay_done = true
+			else
+				local ev, err = a, b
+				if not ev then
+					emit({
+						kind = 'closed',
+						err  = tostring(err or 'closed'),
+					})
+					close(err or 'closed')
+					return
+				end
+
+				emit({
+					kind     = ev.op,
+					phase    = 'replay',
+					topic    = copy_plain(ev.topic),
+					payload  = copy_plain(ev.payload),
+					reply_to = copy_plain(ev.reply_to),
+					id       = ev.id,
+				})
+			end
+		end
+
+		while not state.closed do
+			local ev, err = perform(rw:recv_op())
+			if not ev then
+				emit({
+					kind = 'closed',
+					err  = tostring(err or 'closed'),
+				})
+				close(err or 'closed')
+				return
+			end
+
+			emit({
+				kind     = ev.op,
+				phase    = 'live',
+				topic    = copy_plain(ev.topic),
+				payload  = copy_plain(ev.payload),
+				reply_to = copy_plain(ev.reply_to),
+				id       = ev.id,
+			})
+		end
+	end)
+
+	return {
+		topic = copy_plain(topic),
+
+		recv_op = function()
+			return rx:recv_op():wrap(function(ev)
+				if ev == nil then
+					return nil, tostring(rx:why() or 'closed')
+				end
+				return ev, nil
+			end)
+		end,
+
+		recv = function(self)
+			return perform(self:recv_op())
+		end,
+
+		close = close,
+	}
+end
+
+local function collect_retained_snapshot(connect, principal, topic, opts)
 	opts = opts or {}
 
 	local timeout_s = (type(opts.timeout_s) == 'number' and opts.timeout_s > 0) and opts.timeout_s or 1.0
-	local idle_s    = (type(opts.idle_s) == 'number' and opts.idle_s > 0) and opts.idle_s or 0.05
-	local queue_len = (type(opts.queue_len) == 'number' and opts.queue_len >= 0) and opts.queue_len or 64
-
-	local sub = user_conn:subscribe(topic, {
-		queue_len = queue_len,
-		full      = 'drop_oldest',
+	local watch, err = make_retained_watch(connect, principal, topic, {
+		queue_len     = opts.queue_len,
+		event_queue   = opts.event_queue,
+		replay_idle_s = opts.replay_idle_s,
 	})
+	if not watch then
+		return nil, err or 'watch_open_failed'
+	end
 
-	local msgs = {}
+	local by_topic = {}
 	local deadline = now() + timeout_s
 
 	while true do
-		local tnow = now()
-		local remain = deadline - tnow
+		local remain = deadline - now()
 		if remain <= 0 then
-			break
+			watch:close('timeout')
+			return nil, 'timeout'
 		end
 
-		local arms = {
-			recv = sub:recv_op(),
+		local which, a, b = perform(named_choice {
+			recv     = watch:recv_op(),
 			deadline = sleep.sleep_op(remain):wrap(function() return true end),
-		}
+		})
 
-		if #msgs > 0 then
-			arms.idle = sleep.sleep_op(idle_s):wrap(function() return true end)
+		if which == 'deadline' then
+			watch:close('timeout')
+			return nil, 'timeout'
 		end
 
-		local which, a = perform(named_choice(arms))
+		local ev, rerr = a, b
+		if not ev then
+			watch:close(rerr or 'closed')
+			return nil, tostring(rerr or 'closed')
+		end
 
-		if which == 'recv' then
-			local msg = a
-			if msg == nil then
-				break
-			end
-			msgs[#msgs + 1] = msg
-		else
+		if ev.kind == 'replay_done' then
 			break
+		elseif ev.kind == 'retain' then
+			by_topic[topic_to_string(ev.topic)] = {
+				topic   = copy_plain(ev.topic),
+				payload = copy_plain(ev.payload),
+			}
+		elseif ev.kind == 'unretain' then
+			by_topic[topic_to_string(ev.topic)] = nil
+		elseif ev.kind == 'closed' then
+			watch:close(ev.err or 'closed')
+			return nil, tostring(ev.err or 'closed')
 		end
 	end
 
-	pcall(function() sub:unsubscribe() end)
-	return msgs
+	watch:close('snapshot_complete')
+
+	local out = {}
+	for _, rec in pairs(by_topic) do
+		out[#out + 1] = rec
+	end
+	table.sort(out, function(a, b)
+		return topic_to_string(a.topic) < topic_to_string(b.topic)
+	end)
+	return out, nil
 end
 
 function M.start(conn, opts)
@@ -275,6 +406,7 @@ function M.start(conn, opts)
 			config_set          = true,
 			service_status      = true,
 			capability_snapshot = true,
+			retained_watch      = true,
 			rpc_call            = true,
 			fabric_status       = true,
 			firmware_push       = true,
@@ -318,32 +450,28 @@ function M.start(conn, opts)
 	end
 
 	local function get_exact_payload(principal, topic, timeout_s)
-		local msgs, err = with_user_conn(principal, function(user_conn)
-			return collect_retained(user_conn, topic, { timeout_s = timeout_s or 1.0, idle_s = 0.05, queue_len = 8 })
-		end)
+		local msgs, err = collect_retained_snapshot(opts.connect, principal, topic, {
+			timeout_s     = timeout_s or 1.0,
+			replay_idle_s = 0.05,
+			queue_len     = 16,
+			event_queue   = 16,
+		})
 		if msgs == nil then
 			return nil, err or 'read failed'
 		end
-
-		local payload = last_payload(msgs)
-		if payload == nil then
+		if #msgs == 0 then
 			return nil, 'not found'
 		end
-		return payload, nil
+		return msgs[#msgs].payload, nil
 	end
 
-	local function get_snapshot_map(principal, topic, timeout_s, idle_s)
-		local msgs, err = with_user_conn(principal, function(user_conn)
-			return collect_retained(user_conn, topic, {
-				timeout_s = timeout_s or 1.0,
-				idle_s    = idle_s or 0.05,
-				queue_len = 128,
-			})
-		end)
-		if msgs == nil then
-			return nil, err or 'read failed'
-		end
-		return msgs, nil
+	local function get_snapshot_entries(principal, topic, timeout_s, replay_idle_s)
+		return collect_retained_snapshot(opts.connect, principal, topic, {
+			timeout_s     = timeout_s or 1.0,
+			replay_idle_s = replay_idle_s or 0.05,
+			queue_len     = 128,
+			event_queue   = 128,
+		})
 	end
 
 	local api = {}
@@ -386,12 +514,14 @@ function M.start(conn, opts)
 
 	function api.logout(session_id)
 		local rec = sessions:get(session_id)
-		if rec then
-			conn:publish({ 'obs', 'audit', 'ui', 'logout' }, {
-				user = rec.principal.id,
-				t    = now(),
-			})
+		if not rec then
+			return nil, 'invalid or expired session'
 		end
+
+		conn:publish({ 'obs', 'audit', 'ui', 'logout' }, {
+			user = rec.principal.id,
+			t    = now(),
+		})
 
 		sessions:delete(session_id)
 		retain_ui_state()
@@ -509,16 +639,14 @@ function M.start(conn, opts)
 			return nil, merr
 		end
 
-		local link_msgs, lerr = get_snapshot_map(rec.principal, { 'state', 'fabric', 'link', '+' }, 1.0, 0.05)
+		local link_msgs, lerr = get_snapshot_entries(rec.principal, { 'state', 'fabric', 'link', '+' }, 1.0, 0.05)
 		if link_msgs == nil then
 			return nil, lerr
 		end
 
-		local links = msgs_to_service_map(link_msgs, 4)
-
 		return {
 			main  = main,
-			links = links,
+			links = msgs_to_service_map(link_msgs, 4),
 		}, nil
 	end
 
@@ -542,6 +670,10 @@ function M.start(conn, opts)
 			return nil, terr
 		end
 
+		if link == nil and transfer == nil then
+			return nil, 'not found'
+		end
+
 		return {
 			link     = link,
 			transfer = transfer,
@@ -554,22 +686,22 @@ function M.start(conn, opts)
 			return nil, err
 		end
 
-		local cap_msgs, cerr = get_snapshot_map(rec.principal, { 'cap', '#' }, 1.0, 0.05)
+		local cap_msgs, cerr = get_snapshot_entries(rec.principal, { 'cap', '#' }, 1.0, 0.05)
 		if cap_msgs == nil then
 			return nil, cerr
 		end
 
-		local dev_msgs, derr = get_snapshot_map(rec.principal, { 'dev', '#' }, 1.0, 0.05)
+		local dev_msgs, derr = get_snapshot_entries(rec.principal, { 'dev', '#' }, 1.0, 0.05)
 		if dev_msgs == nil then
 			return nil, derr
 		end
 
-		local ann_msgs, aerr = get_snapshot_map(rec.principal, { 'svc', '+', 'announce' }, 1.0, 0.05)
+		local ann_msgs, aerr = get_snapshot_entries(rec.principal, { 'svc', '+', 'announce' }, 1.0, 0.05)
 		if ann_msgs == nil then
 			return nil, aerr
 		end
 
-		local st_msgs, serr = get_snapshot_map(rec.principal, { 'svc', '+', 'status' }, 1.0, 0.05)
+		local st_msgs, serr = get_snapshot_entries(rec.principal, { 'svc', '+', 'status' }, 1.0, 0.05)
 		if st_msgs == nil then
 			return nil, serr
 		end
@@ -582,6 +714,20 @@ function M.start(conn, opts)
 				status   = msgs_to_service_map(st_msgs, 2),
 			},
 		}, nil
+	end
+
+	function api.retained_watch(session_id, topic, watch_opts)
+		local rec, err = require_session(session_id)
+		if not rec then
+			return nil, err
+		end
+
+		local norm_topic, terr = normalise_topic(topic)
+		if not norm_topic then
+			return nil, terr
+		end
+
+		return make_retained_watch(opts.connect, rec.principal, norm_topic, watch_opts or {}), nil
 	end
 
 	function api.rpc_call(session_id, service_name, method_name, payload, timeout_s)
@@ -747,7 +893,6 @@ function M.start(conn, opts)
 	retain_ui_state()
 	svc:obs_log('info', { what = 'ui_ready' })
 
-	-- Expected not to return under normal operation.
 	return opts.run_http(svc, api, opts)
 end
 

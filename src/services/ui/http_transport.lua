@@ -2,8 +2,6 @@
 --
 -- lua-http transport for services/ui.lua.
 --
--- Routes in this branch-aligned version:
---
 -- Session/auth:
 --   POST /api/login
 --   POST /api/logout
@@ -22,18 +20,33 @@
 --   POST /api/rpc/<service>/<method>
 --
 -- Fabric transfer helpers:
---   POST /api/fabric/firmware/<link_id>        raw binary body
+--   POST /api/fabric/firmware/<link_id>
 --   GET  /api/fabric/transfer/<id>
 --   POST /api/fabric/transfer/<id>/abort
 --
 -- WebSocket:
 --   GET  /ws
 --
--- Notes:
---   * firmware upload is still eager in-memory in this first pass
---   * websocket is request/response, not a live topic subscription feed yet
+-- WebSocket operations:
+--   hello
+--   session
+--   health
+--   login
+--   logout
+--   config_get
+--   config_set
+--   service_status
+--   fabric_status
+--   fabric_link_status
+--   capability_snapshot
+--   rpc_call
+--   transfer_status
+--   transfer_abort
+--   retained_watch_start   { stream_id, topic, replay_idle_s? }
+--   retained_watch_stop    { stream_id }
 
 local fibers       = require 'fibers'
+local mailbox      = require 'fibers.mailbox'
 local file         = require 'fibers.io.file'
 local http_server  = require 'http.server'
 local http_headers = require 'http.headers'
@@ -173,7 +186,7 @@ local function read_json_body(stream)
 	return obj, nil
 end
 
-local function set_session_cookie_headers(session_id, _expires_at)
+local function set_session_cookie_headers(session_id)
 	local cookie = ('devicecode_session=%s; Path=/; HttpOnly; SameSite=Strict'):format(tostring(session_id))
 	return {
 		{ 'set-cookie', cookie },
@@ -274,6 +287,76 @@ local function infer_format(filename, req_headers)
 	return 'bin'
 end
 
+local function status_for_error(err, fallback)
+	err = tostring(err or '')
+	if err == '' then
+		return fallback or 500
+	end
+
+	if err == 'missing session'
+		or err == 'invalid or expired session'
+		or err == 'invalid credentials'
+		or err == 'login failed'
+	then
+		return 401
+	end
+
+	if err == 'not found'
+		or err:match('^unknown transfer')
+		or err:match('^unknown link')
+	then
+		return 404
+	end
+
+	if err:find('timeout', 1, true) then
+		return 504
+	end
+
+	if err:find('busy', 1, true) or err:find('full', 1, true) then
+		return 503
+	end
+
+	if err:find('not configured', 1, true) then
+		return 503
+	end
+
+	if err:find('transport', 1, true)
+		or err:find('send_', 1, true)
+		or err:find('call failed', 1, true)
+		or err:find('upstream', 1, true)
+	then
+		return 502
+	end
+
+	if err:find('must be', 1, true)
+		or err:find('invalid', 1, true)
+		or err:find('missing', 1, true)
+		or err:find('json_', 1, true)
+		or err:find('payload', 1, true)
+		or err:find('unsupported', 1, true)
+	then
+		return 400
+	end
+
+	return fallback or 500
+end
+
+local function write_api_result(stream, out, err, ok_status, err_fallback)
+	if out ~= nil then
+		write_json(stream, ok_status or 200, {
+			ok   = true,
+			data = out,
+		})
+		return true
+	end
+
+	write_json(stream, status_for_error(err, err_fallback), {
+		ok  = false,
+		err = tostring(err),
+	})
+	return true
+end
+
 local function handle_ws(svc, api, stream, req_headers)
 	local ws, werr = websocket.new_from_stream(stream, req_headers)
 	if not ws then
@@ -283,8 +366,38 @@ local function handle_ws(svc, api, stream, req_headers)
 
 	assert(ws:accept())
 
+	local out_tx, out_rx = mailbox.new(128, { full = 'drop_oldest' })
+	fibers.spawn(function()
+		while true do
+			local item = perform(out_rx:recv_op())
+			if item == nil then return end
+			local ok = pcall(function() ws_send(ws, item) end)
+			if not ok then return end
+		end
+	end)
+
+	local function send_ws(item)
+		local ok = out_tx:send(item)
+		return ok == true
+	end
+
 	local sid0 = session_id_from_headers(req_headers)
 	local current_session = sid0
+	local watches = {}
+
+	local function close_watch(stream_id)
+		local rec = watches[stream_id]
+		if not rec then return false end
+		watches[stream_id] = nil
+		pcall(function() rec.watch:close('client_stop') end)
+		return true
+	end
+
+	local function close_all_watches()
+		for stream_id in pairs(watches) do
+			close_watch(stream_id)
+		end
+	end
 
 	svc:obs_log('info', { what = 'ws_connected' })
 
@@ -296,11 +409,11 @@ local function handle_ws(svc, api, stream, req_headers)
 		end
 
 		if opcode ~= 'text' then
-			ws_send(ws, { ok = false, err = 'only text frames are supported' })
+			send_ws({ ok = false, err = 'only text frames are supported' })
 		else
 			local obj, jerr = cjson.decode(msg)
 			if obj == nil or type(obj) ~= 'table' then
-				ws_send(ws, {
+				send_ws({
 					ok  = false,
 					err = 'invalid_json: ' .. tostring(jerr),
 				})
@@ -311,173 +424,134 @@ local function handle_ws(svc, api, stream, req_headers)
 				local function reply(payload)
 					payload = payload or {}
 					payload.id = id
-					return ws_send(ws, payload)
+					return send_ws(payload)
 				end
 
 				if op_name == 'hello' then
-					reply({
-						ok      = true,
-						service = svc.name,
-					})
+					reply({ ok = true, service = svc.name })
 
 				elseif op_name == 'session' then
 					local out, e = api.get_session(obj.session_id or current_session)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'health' then
 					local out, e = api.health()
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'login' then
 					local out, e = api.login(obj.username, obj.password)
-					if out and out.session_id then
-						current_session = out.session_id
-					end
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					if out and out.session_id then current_session = out.session_id end
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'logout' then
 					local ok, e = api.logout(obj.session_id or current_session)
-					if ok then
-						current_session = nil
-					end
-					reply({
-						ok  = (ok == true),
-						err = (ok ~= true) and tostring(e) or nil,
-					})
+					if ok then current_session = nil end
+					reply({ ok = (ok == true), err = (ok ~= true) and tostring(e) or nil })
 
 				elseif op_name == 'config_get' then
-					local out, e = api.config_get(
-						obj.session_id or current_session,
-						obj.service
-					)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					local out, e = api.config_get(obj.session_id or current_session, obj.service)
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'config_set' then
-					local out, e = api.config_set(
-						obj.session_id or current_session,
-						obj.service,
-						obj.data
-					)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					local out, e = api.config_set(obj.session_id or current_session, obj.service, obj.data)
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'service_status' then
-					local out, e = api.service_status(
-						obj.session_id or current_session,
-						obj.service
-					)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					local out, e = api.service_status(obj.session_id or current_session, obj.service)
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'fabric_status' then
-					local out, e = api.fabric_status(
-						obj.session_id or current_session
-					)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					local out, e = api.fabric_status(obj.session_id or current_session)
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'fabric_link_status' then
-					local out, e = api.fabric_link_status(
-						obj.session_id or current_session,
-						obj.link_id
-					)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					local out, e = api.fabric_link_status(obj.session_id or current_session, obj.link_id)
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'capability_snapshot' then
-					local out, e = api.capability_snapshot(
-						obj.session_id or current_session
-					)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					local out, e = api.capability_snapshot(obj.session_id or current_session)
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'rpc_call' then
-					local out, e = api.rpc_call(
-						obj.session_id or current_session,
-						obj.service,
-						obj.method,
-						obj.payload,
-						obj.timeout
-					)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					local out, e = api.rpc_call(obj.session_id or current_session, obj.service, obj.method, obj.payload, obj.timeout)
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'firmware_send' then
-					reply({
-						ok  = false,
-						err = 'websocket firmware upload is not implemented in this first pass',
-					})
+					reply({ ok = false, err = 'websocket firmware upload is not implemented in this first pass' })
 
 				elseif op_name == 'transfer_status' then
-					local out, e = api.transfer_status(
-						obj.session_id or current_session,
-						obj.transfer_id
-					)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					local out, e = api.transfer_status(obj.session_id or current_session, obj.transfer_id)
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
 
 				elseif op_name == 'transfer_abort' then
-					local out, e = api.transfer_abort(
-						obj.session_id or current_session,
-						obj.transfer_id
-					)
-					reply({
-						ok   = (out ~= nil),
-						data = out,
-						err  = (out == nil) and tostring(e) or nil,
-					})
+					local out, e = api.transfer_abort(obj.session_id or current_session, obj.transfer_id)
+					reply({ ok = (out ~= nil), data = out, err = (out == nil) and tostring(e) or nil })
+
+				elseif op_name == 'retained_watch_start' then
+					local stream_id = obj.stream_id
+					if type(stream_id) ~= 'string' or stream_id == '' then
+						reply({ ok = false, err = 'stream_id must be a non-empty string' })
+					else
+						close_watch(stream_id)
+						local watch, e = api.retained_watch(obj.session_id or current_session, obj.topic, {
+							replay_idle_s = obj.replay_idle_s,
+							queue_len     = obj.queue_len,
+							event_queue   = obj.event_queue,
+						})
+						if not watch then
+							reply({ ok = false, err = tostring(e) })
+						else
+							watches[stream_id] = { watch = watch }
+							fibers.spawn(function()
+								while watches[stream_id] do
+									local ev, werr = perform(watch:recv_op())
+									if not ev then
+										send_ws({
+											op   = 'retained_watch_end',
+											id   = stream_id,
+											ok   = false,
+											err  = tostring(werr or 'closed'),
+										})
+										close_watch(stream_id)
+										return
+									end
+									send_ws({
+										op    = 'retained_watch_event',
+										id    = stream_id,
+										event = ev,
+									})
+									if ev.kind == 'closed' then
+										close_watch(stream_id)
+										return
+									end
+								end
+							end)
+							reply({ ok = true, data = { stream_id = stream_id } })
+						end
+					end
+
+				elseif op_name == 'retained_watch_stop' then
+					local stream_id = obj.stream_id
+					if type(stream_id) ~= 'string' or stream_id == '' then
+						reply({ ok = false, err = 'stream_id must be a non-empty string' })
+					else
+						local ok = close_watch(stream_id)
+						reply({ ok = ok == true, err = (ok ~= true) and 'unknown stream' or nil })
+					end
 
 				else
-					reply({
-						ok  = false,
-						err = 'unknown op: ' .. tostring(op_name),
-					})
+					reply({ ok = false, err = 'unknown op: ' .. tostring(op_name) })
 				end
 			end
 		end
 	end
 
+	close_all_watches()
+	pcall(function() out_tx:close('ws_closed') end)
 	pcall(function() ws:close() end)
 end
 
-local function handle_api(svc, api, stream, req_method, req_path, req_headers)
+local function handle_api(_svc, api, stream, req_method, req_path, req_headers)
 	local parts = split_path(req_path)
 
 	if parts[1] ~= 'api' then
@@ -498,16 +572,11 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 
 		local out, lerr = api.login(body.username, body.password)
 		if not out then
-			write_json(stream, 401, { ok = false, err = tostring(lerr) })
+			write_json(stream, status_for_error(lerr, 401), { ok = false, err = tostring(lerr) })
 			return true
 		end
 
-		write_json(
-			stream,
-			200,
-			{ ok = true, data = out },
-			set_session_cookie_headers(out.session_id, out.expires_at)
-		)
+		write_json(stream, 200, { ok = true, data = out }, set_session_cookie_headers(out.session_id))
 		return true
 	end
 
@@ -518,18 +587,19 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 		end
 
 		local sid = session_id_from_headers(req_headers)
-		local body = read_json_body(stream)
-		if type(body) == 'table' and body.session_id then
-			sid = body.session_id
+		local body, err = read_json_body(stream)
+		if not body then
+			write_json(stream, 400, { ok = false, err = err })
+			return true
 		end
+		if body.session_id then sid = body.session_id end
 
-		local ok, err = api.logout(sid)
-		write_json(
-			stream,
-			(ok == true) and 200 or 400,
-			{ ok = (ok == true), err = (ok ~= true) and tostring(err) or nil },
-			clear_session_cookie_headers()
-		)
+		local ok, lerr = api.logout(sid)
+		if ok == true then
+			write_json(stream, 200, { ok = true }, clear_session_cookie_headers())
+		else
+			write_json(stream, status_for_error(lerr, 401), { ok = false, err = tostring(lerr) }, clear_session_cookie_headers())
+		end
 		return true
 	end
 
@@ -538,15 +608,9 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local sid = session_id_from_headers(req_headers)
 		local out, err = api.get_session(sid)
-		write_json(stream, out and 200 or 401, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(err) or nil,
-		})
-		return true
+		return write_api_result(stream, out, err, 200, 401)
 	end
 
 	if req_path == '/api/health' then
@@ -554,14 +618,8 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local out, err = api.health()
-		write_json(stream, out and 200 or 500, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(err) or nil,
-		})
-		return true
+		return write_api_result(stream, out, err, 200, 500)
 	end
 
 	if req_path == '/api/capabilities' then
@@ -569,27 +627,16 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local sid = session_id_from_headers(req_headers)
 		local out, err = api.capability_snapshot(sid)
-		write_json(stream, out and 200 or 401, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(err) or nil,
-		})
-		return true
+		return write_api_result(stream, out, err, 200, 401)
 	end
 
 	if #parts == 3 and parts[1] == 'api' and parts[2] == 'config' then
 		if req_method == 'GET' then
 			local sid = session_id_from_headers(req_headers)
 			local out, err = api.config_get(sid, parts[3])
-			write_json(stream, out and 200 or 401, {
-				ok   = (out ~= nil),
-				data = out,
-				err  = (out == nil) and tostring(err) or nil,
-			})
-			return true
+			return write_api_result(stream, out, err, 200, 401)
 		end
 
 		if req_method == 'POST' then
@@ -598,15 +645,9 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 				write_json(stream, 400, { ok = false, err = err })
 				return true
 			end
-
 			local sid = session_id_from_headers(req_headers) or body.session_id
 			local out, cerr = api.config_set(sid, parts[3], body.data)
-			write_json(stream, out and 200 or 400, {
-				ok   = (out ~= nil),
-				data = out,
-				err  = (out == nil) and tostring(cerr) or nil,
-			})
-			return true
+			return write_api_result(stream, out, cerr, 200, 400)
 		end
 
 		write_text(stream, 405, 'method not allowed\n')
@@ -618,20 +659,9 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local sid = session_id_from_headers(req_headers)
 		local out, err = api.service_status(sid, parts[3])
-		write_json(stream, out and 200 or 401, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(err) or nil,
-		})
-		return true
-	end
-
-	if #parts == 3 and parts[1] == 'api' and parts[2] == 'rpc' then
-		write_text(stream, 404, 'not found\n')
-		return true
+		return write_api_result(stream, out, err, 200, 401)
 	end
 
 	if #parts == 4 and parts[1] == 'api' and parts[2] == 'rpc' then
@@ -639,21 +669,14 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local body, err = read_json_body(stream)
 		if not body then
 			write_json(stream, 400, { ok = false, err = err })
 			return true
 		end
-
 		local sid = session_id_from_headers(req_headers) or body.session_id
 		local out, rerr = api.rpc_call(sid, parts[3], parts[4], body.payload, body.timeout)
-		write_json(stream, out and 200 or 400, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(rerr) or nil,
-		})
-		return true
+		return write_api_result(stream, out, rerr, 200, 502)
 	end
 
 	if req_path == '/api/fabric' then
@@ -661,15 +684,9 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local sid = session_id_from_headers(req_headers)
 		local out, err = api.fabric_status(sid)
-		write_json(stream, out and 200 or 401, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(err) or nil,
-		})
-		return true
+		return write_api_result(stream, out, err, 200, 401)
 	end
 
 	if #parts == 4 and parts[1] == 'api' and parts[2] == 'fabric' and parts[3] == 'link' then
@@ -677,15 +694,9 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local sid = session_id_from_headers(req_headers)
 		local out, err = api.fabric_link_status(sid, parts[4])
-		write_json(stream, out and 200 or 401, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(err) or nil,
-		})
-		return true
+		return write_api_result(stream, out, err, 200, 401)
 	end
 
 	if #parts == 4 and parts[1] == 'api' and parts[2] == 'fabric' and parts[3] == 'firmware' then
@@ -693,7 +704,6 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local sid = session_id_from_headers(req_headers)
 		local body, err = read_body_string(stream)
 		if body == nil then
@@ -710,13 +720,7 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			name   = filename,
 			format = format,
 		})
-
-		write_json(stream, out and 200 or 400, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(ferr) or nil,
-		})
-		return true
+		return write_api_result(stream, out, ferr, 200, 400)
 	end
 
 	if #parts == 4 and parts[1] == 'api' and parts[2] == 'fabric' and parts[3] == 'transfer' then
@@ -724,15 +728,9 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local sid = session_id_from_headers(req_headers)
 		local out, terr = api.transfer_status(sid, parts[4])
-		write_json(stream, out and 200 or 400, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(terr) or nil,
-		})
-		return true
+		return write_api_result(stream, out, terr, 200, 400)
 	end
 
 	if #parts == 5 and parts[1] == 'api' and parts[2] == 'fabric' and parts[3] == 'transfer' and parts[5] == 'abort' then
@@ -740,15 +738,9 @@ local function handle_api(svc, api, stream, req_method, req_path, req_headers)
 			write_text(stream, 405, 'method not allowed\n')
 			return true
 		end
-
 		local sid = session_id_from_headers(req_headers)
 		local out, terr = api.transfer_abort(sid, parts[4])
-		write_json(stream, out and 200 or 400, {
-			ok   = (out ~= nil),
-			data = out,
-			err  = (out == nil) and tostring(terr) or nil,
-		})
-		return true
+		return write_api_result(stream, out, terr, 200, 400)
 	end
 
 	write_text(stream, 404, 'not found\n')
