@@ -606,7 +606,9 @@ function M.run(conn, svc, opts)
 
     local rx_tx, rx_rx = mailbox.new(RX_QUEUE_CAP, { full = 'reject_newest' })
 
-    fibers.spawn(function()
+    io.stderr:write('[session] about to fibers.spawn rx_reader link=' .. tostring(link_id) .. '\n')
+    local ok_spawn, spawn_err = fibers.spawn(function()
+        io.stderr:write('[session] rx_reader body entered link=' .. tostring(link_id) .. '\n')
         svc:obs_log('info', { what = 'rx_reader_spawned', link_id = link_id })
         while true do
             svc:obs_log('info', { what = 'rx_reader_waiting', link_id = link_id })
@@ -643,6 +645,14 @@ function M.run(conn, svc, opts)
             end
         end
     end)
+    io.stderr:write(('[session] fibers.spawn rx_reader returned ok=%s err=%s\n'):format(
+        tostring(ok_spawn), tostring(spawn_err or 'nil')))
+    svc:obs_log('info', {
+        what    = 'rx_reader_spawn_result',
+        link_id = link_id,
+        ok      = ok_spawn,
+        err     = tostring(spawn_err or 'nil'),
+    })
 
     xfer = transfer.new({
         svc           = svc,
