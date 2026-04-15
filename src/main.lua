@@ -58,7 +58,7 @@ local function default_service_opts()
 		local port = tonumber(os.getenv('DEVICECODE_UI_HTTP_PORT'))
 		local host = os.getenv('DEVICECODE_UI_HTTP_HOST')
 		out.ui = {
-			run_http = http_transport.run_http,
+			run_http = http_transport.run,
 			port     = port,
 			host     = (host ~= nil and host ~= '') and host or nil,
 		}
