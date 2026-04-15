@@ -6,12 +6,11 @@ local Scope     = require "fibers.scope"
 local exec      = require "fibers.io.exec"
 
 ---@class UciChange
----@field op 'set'|'add'|'delete'
+---@field op 'set'|'delete'
 ---@field config string
 ---@field section? string
----@field stype? string
----@field option? string
----@field value? any
+---@field option? string   section type when value is nil (named-section creation)
+---@field value? any       absent/nil means create a named section of type `option`
 
 ---@class UciCommitRecord
 ---@field changes UciChange[]
@@ -32,17 +31,21 @@ local started   = false
 local function apply_changes(cursor, record)
     for _, change in ipairs(record.changes) do
         if change.op == 'set' then
-            local ok = cursor:set(change.config, change.section, change.option, change.value)
-            if not ok then
-                error(("uci set failed: %s.%s.%s = %s"):format(
-                    change.config, change.section or '?',
-                    change.option or '?', tostring(change.value)))
-            end
-        elseif change.op == 'add' then
-            local name = cursor:add(change.config, change.stype)
-            if not name then
-                error(("uci add failed: %s type=%s"):format(
-                    change.config, change.stype or '?'))
+            local ok
+            if change.value == nil then
+                -- 3-arg form: create a named section of type change.option
+                ok = cursor:set(change.config, change.section, change.option)
+                if not ok then
+                    error(("uci set (named section) failed: %s.%s type=%s"):format(
+                        change.config, change.section or '?', change.option or '?'))
+                end
+            else
+                ok = cursor:set(change.config, change.section, change.option, change.value)
+                if not ok then
+                    error(("uci set failed: %s.%s.%s = %s"):format(
+                        change.config, change.section or '?',
+                        change.option or '?', tostring(change.value)))
+                end
             end
         elseif change.op == 'delete' then
             local ok
@@ -193,10 +196,13 @@ local function new_session()
     return setmetatable({ _changes = {} }, Session)
 end
 
+---Set an option value, or create a named section when called with 3 arguments.
+---3-arg form: `set(config, section, stype)` creates a named section of the given type.
+---4-arg form: `set(config, section, option, value)` sets an option value.
 ---@param config string
 ---@param section string
----@param option string
----@param value any
+---@param option string  option name, or section type when value is absent
+---@param value? any
 function Session:set(config, section, option, value)
     table.insert(self._changes, {
         op = 'set',
@@ -204,14 +210,6 @@ function Session:set(config, section, option, value)
         section = section,
         option = option,
         value = value,
-    })
-end
-
----@param config string
----@param stype string  UCI section type
-function Session:add(config, stype)
-    table.insert(self._changes, {
-        op = 'add', config = config, stype = stype,
     })
 end
 
@@ -240,29 +238,6 @@ function Session:commit(config, restart_cmds)
     })
     self._changes = {}
     return reply_ch
-end
-
----Apply staged changes immediately using a temporary cursor (synchronous).
----Use only during driver initialisation where blocking is acceptable.
----Returns ok (boolean) and err (string).
----@param config string
----@param restart_cmds string[][]|nil  List of argv lists to exec immediately (not debounced)
----@return boolean ok
----@return string  err
-function Session:commit_sync(config, restart_cmds)
-    local ok, err = pcall(function()
-        local c = uci_mod.cursor()
-        apply_changes(c, { changes = self._changes, config = config })
-        if restart_cmds then
-            local rok, rerr = run_restart_cmds(restart_cmds)
-            if not rok then error(rerr) end
-        end
-    end)
-    self._changes = {}
-    if not ok then
-        return false, tostring(err)
-    end
-    return true, ""
 end
 
 ---Read a single UCI value without going through the reactor queue.
