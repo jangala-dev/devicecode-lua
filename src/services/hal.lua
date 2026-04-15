@@ -108,17 +108,6 @@ function HalService.start(conn, opts)
     local devices = {}
     local capabilities = {}
 
-    local function merge_fields(a, b)
-        local out = {}
-        if type(a) == 'table' then
-            for k, v in pairs(a) do out[k] = v end
-        end
-        if type(b) == 'table' then
-            for k, v in pairs(b) do out[k] = v end
-        end
-        return out
-    end
-
     local function obs_emitter(level, payload)
         svc:obs_log(level, payload)
     end
