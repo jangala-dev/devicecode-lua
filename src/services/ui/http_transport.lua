@@ -20,7 +20,7 @@
 --   POST /api/rpc/<service>/<method>
 --
 -- Fabric transfer helpers:
---   POST /api/fabric/firmware/<link_id>
+--   POST /api/fabric/firmware/<link_id>   (raw body; x-filename, x-format, x-transfer-chunk-raw)
 --   GET  /api/fabric/transfer/<id>
 --   POST /api/fabric/transfer/<id>/abort
 --
@@ -285,6 +285,18 @@ local function infer_format(filename, req_headers)
 	if filename:match('%.uf2$') then return 'uf2' end
 	if filename:match('%.bin$') then return 'bin' end
 	return 'bin'
+end
+
+local function infer_transfer_chunk_raw(req_headers)
+	local v = req_headers:get('x-transfer-chunk-raw')
+	if v == nil or v == '' then return nil, nil end
+
+	local n = tonumber(v)
+	if type(n) ~= 'number' or n <= 0 or n % 1 ~= 0 then
+		return nil, 'x-transfer-chunk-raw must be a positive integer'
+	end
+
+	return math.floor(n), nil
 end
 
 local function status_for_error(err, fallback)
@@ -713,13 +725,21 @@ local function handle_api(_svc, api, stream, req_method, req_path, req_headers)
 
 		local filename = infer_filename(req_headers)
 		local format   = infer_format(filename, req_headers)
+		local chunk_raw, cerr = infer_transfer_chunk_raw(req_headers)
+		if cerr then
+			write_json(stream, 400, { ok = false, err = cerr })
+			return true
+		end
 		local source   = blob_source.from_string(filename, body, { format = format })
 
-		local out, ferr = api.firmware_send(sid, parts[4], source, {
+		local meta = {
 			kind   = 'firmware.rp2350',
 			name   = filename,
 			format = format,
-		})
+		}
+		if chunk_raw ~= nil then meta.chunk_raw = chunk_raw end
+
+		local out, ferr = api.firmware_send(sid, parts[4], source, meta)
 		return write_api_result(stream, out, ferr, 200, 400)
 	end
 
@@ -747,6 +767,13 @@ local function handle_api(_svc, api, stream, req_method, req_path, req_headers)
 	return true
 end
 
+local function request_log_level(req_method)
+	if req_method == 'GET' or req_method == 'HEAD' then
+		return 'debug'
+	end
+	return 'info'
+end
+
 local function onstream_factory(svc, api, opts)
 	local www_root = opts.www_root
 
@@ -755,7 +782,7 @@ local function onstream_factory(svc, api, opts)
 		local req_method  = req_headers:get(':method') or 'GET'
 		local req_path    = req_headers:get(':path') or '/'
 
-		svc:obs_log('info', {
+		svc:obs_log(request_log_level(req_method), {
 			what   = 'http_request',
 			method = req_method,
 			path   = req_path,

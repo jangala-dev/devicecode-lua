@@ -3,6 +3,7 @@ local busmod       = require 'bus'
 local mailbox      = require 'fibers.mailbox'
 local blob_source  = require 'services.fabric.blob_source'
 local authz        = require 'devicecode.authz'
+local protocol     = require 'services.fabric.protocol'
 local session      = require 'services.fabric.session'
 local safe         = require 'coxpcall'
 
@@ -63,6 +64,15 @@ local function get_link_state(conn, link_id)
 	return nil
 end
 
+local function wait_transfer_status(conn, transfer_id, want_status)
+	return probe.wait_until(function()
+		local ok, payload = safe.pcall(function()
+			return probe.wait_payload(conn, { 'state', 'fabric', 'transfer', transfer_id }, { timeout = 0.02 })
+		end)
+		return ok and type(payload) == 'table' and payload.status == want_status
+	end, { timeout = 1.0, interval = 0.01 })
+end
+
 local function recv_mailbox(rx, timeout_s)
 	local which, a = perform(named_choice {
 		msg = rx:recv_op(),
@@ -76,6 +86,38 @@ local function recv_mailbox(rx, timeout_s)
 		return nil, 'closed'
 	end
 	return a, nil
+end
+
+local function write_frame(stream, msg)
+	local line, lerr = protocol.encode_line(msg)
+	assert(line ~= nil, tostring(lerr))
+
+	local n, werr = perform(stream:write_op(line, '\n'))
+	assert(n ~= nil, tostring(werr))
+	return true
+end
+
+local function recv_frame(stream, timeout_s, label)
+	local which, a, b = perform(named_choice {
+		msg = stream:read_line_op(),
+		timer = sleep.sleep_op(timeout_s or 1.0):wrap(function() return true end),
+	})
+
+	if which == 'timer' then
+		error(('%s timed out'):format(label or 'frame read'), 0)
+	end
+
+	local line, err = a, b
+	if line == nil then
+		error(('%s failed: %s'):format(label or 'frame read', tostring(err)), 0)
+	end
+
+	local raw, derr = protocol.decode_line(line)
+	assert(raw ~= nil, tostring(derr))
+
+	local msg, verr = protocol.validate_message(raw)
+	assert(msg ~= nil, tostring(verr))
+	return msg
 end
 
 local function start_uart_cap(scope, bus, cap_id, stream)
@@ -405,6 +447,202 @@ function T.devhost_proxy_call_returns_no_route_when_remote_has_no_import_rule()
 		assert(reply.ok == false)
 		assert(tostring(reply.err):match('no_route'))
 	end, { timeout = 3.0 })
+end
+
+
+function T.devhost_session_reconnects_after_successful_firmware_transfer()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local conn = bus:connect({ principal = authz.service_principal('test') })
+		local connect = make_connect(bus)
+
+		local a_stream, peer_stream = duplex.new_pair()
+		local a_ctrl_tx, a_ctrl_rx = mailbox.new(8, { full = 'reject_newest' })
+		start_uart_cap(scope, bus, 'uart-a', a_stream)
+
+		local link_a = {
+			peer_id = 'node-b',
+			transport = {
+				kind = 'uart',
+				cap_id = 'uart-a',
+				open_timeout_s = 1.0,
+			},
+			keepalive = {
+				hello_retry_s = 0.05,
+				idle_ping_s = 1.0,
+				stale_after_s = 1.0,
+			},
+			export = { publish = {} },
+			import = { publish = {}, call = {} },
+			proxy_calls = {},
+		}
+
+		local ok_spawn, err = scope:spawn(function()
+			session.run(bus:connect({ principal = authz.service_principal('sess-a') }), make_svc(), {
+				link_id = 'link-a',
+				link = link_a,
+				connect = connect,
+				node_id = 'node-a',
+				control_rx = a_ctrl_rx,
+			})
+		end)
+		assert(ok_spawn, tostring(err))
+
+		local hello1 = recv_frame(peer_stream, 1.0, 'initial peer hello')
+		assert(hello1.t == 'hello')
+		write_frame(peer_stream, protocol.hello_ack('node-b', { sid = 'peer-sid-1' }))
+
+		assert(wait_ready(conn, 'link-a') == true, 'expected link-a to become ready')
+
+		local reply_tx, reply_rx = mailbox.new(1, { full = 'reject_newest' })
+		local source = blob_source.from_string('fw.bin', 'firmware-bytes', { format = 'bin' })
+		local ok_job, jerr = a_ctrl_tx:send({
+			op = 'send_blob',
+			source = source,
+			meta = {
+				kind = 'firmware.rp2350',
+				name = 'fw.bin',
+				format = 'bin',
+			},
+			reply_tx = reply_tx,
+		})
+		assert(ok_job == true, tostring(jerr))
+
+		local send_reply, rerr = recv_mailbox(reply_rx, 1.0)
+		assert(send_reply ~= nil, tostring(rerr))
+		assert(send_reply.ok == true)
+		assert(type(send_reply.transfer_id) == 'string' and send_reply.transfer_id ~= '')
+
+		local begin = recv_frame(peer_stream, 1.0, 'transfer begin')
+		assert(begin.t == 'xfer_begin')
+		assert(begin.id == send_reply.transfer_id)
+		write_frame(peer_stream, protocol.xfer_ready(begin.id, true, 0, nil))
+
+		local chunk = recv_frame(peer_stream, 1.0, 'transfer chunk')
+		assert(chunk.t == 'xfer_chunk')
+		assert(chunk.id == begin.id)
+		write_frame(peer_stream, protocol.xfer_need(begin.id, 1, nil))
+
+		local commit = recv_frame(peer_stream, 1.0, 'transfer commit')
+		assert(commit.t == 'xfer_commit')
+		assert(commit.id == begin.id)
+		write_frame(peer_stream, protocol.xfer_done(begin.id, true, {
+			bytes_written = #'firmware-bytes',
+		}, nil))
+
+		assert(wait_transfer_status(conn, begin.id, 'done') == true, 'expected transfer to reach done')
+
+		local opening = probe.wait_until(function()
+			local st = get_link_state(conn, 'link-a')
+			return type(st) == 'table'
+				and st.status == 'opening'
+				and st.ready == false
+				and st.established == false
+				and st.reason == 'peer_reboot_expected'
+		end, { timeout = 0.5, interval = 0.01 })
+		assert(opening == true, 'expected link-a to drop back to opening after firmware transfer done')
+
+		local hello2 = recv_frame(peer_stream, 0.30, 'reconnect hello')
+		assert(hello2.t == 'hello')
+		write_frame(peer_stream, protocol.hello_ack('node-b', { sid = 'peer-sid-2' }))
+
+		local reconnected = probe.wait_until(function()
+			local st = get_link_state(conn, 'link-a')
+			return type(st) == 'table'
+				and st.ready == true
+				and st.peer_sid == 'peer-sid-2'
+		end, { timeout = 0.5, interval = 0.01 })
+		assert(reconnected == true, 'expected link-a to re-handshake after firmware transfer done')
+	end, { timeout = 3.0 })
+end
+
+function T.devhost_session_sends_ping_while_peer_is_chatty_inbound()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local conn = bus:connect({ principal = authz.service_principal('test') })
+		local connect = make_connect(bus)
+
+		local a_stream, peer_stream = duplex.new_pair()
+		start_uart_cap(scope, bus, 'uart-a', a_stream)
+
+		local link_a = {
+			peer_id = 'node-b',
+			transport = {
+				kind = 'uart',
+				cap_id = 'uart-a',
+				open_timeout_s = 1.0,
+			},
+			keepalive = {
+				hello_retry_s = 0.2,
+				idle_ping_s = 0.08,
+				stale_after_s = 0.5,
+			},
+			export = { publish = {} },
+			import = {
+				publish = {
+					{
+						remote_topic = { 'remote', '+' },
+						local_topic = { 'seen', '+' },
+						retain = false,
+					},
+				},
+				call = {},
+			},
+			proxy_calls = {},
+		}
+
+		local ok_spawn, err = scope:spawn(function()
+			session.run(bus:connect({ principal = authz.service_principal('sess-a') }), make_svc(), {
+				link_id = 'link-a',
+				link = link_a,
+				connect = connect,
+				node_id = 'node-a',
+			})
+		end)
+		assert(ok_spawn, tostring(err))
+
+		local hello = recv_frame(peer_stream, 1.0, 'peer hello')
+		assert(hello.t == 'hello')
+		assert(hello.node == 'node-a')
+		assert(hello.peer == 'node-b')
+
+		write_frame(peer_stream, protocol.hello_ack('node-b', { sid = 'peer-sid-1' }))
+
+		assert(wait_ready(conn, 'link-a') == true, 'expected link-a to become ready')
+
+		local writer_done = false
+		local ok_writer, writer_err = scope:spawn(function()
+			for i = 1, 12 do
+				write_frame(peer_stream, protocol.pub({ 'remote', 'demo' }, { seq = i }, false))
+				sleep.sleep(0.02)
+			end
+			writer_done = true
+		end)
+		assert(ok_writer, tostring(writer_err))
+
+		local ping = recv_frame(peer_stream, 0.20, 'outbound keepalive ping')
+		assert(
+			ping.t == 'ping',
+			('expected ping while peer remained chatty, got %s'):format(tostring(ping.t))
+		)
+		assert(type(ping.sid) == 'string' and ping.sid ~= '')
+
+		write_frame(peer_stream, protocol.pong({ sid = 'peer-sid-1' }))
+
+		local pong_seen = probe.wait_until(function()
+			local st = get_link_state(conn, 'link-a')
+			return type(st) == 'table'
+				and st.status ~= 'down'
+				and st.ready == true
+				and st.last_pong_at ~= nil
+		end, { timeout = 0.5, interval = 0.01 })
+		assert(pong_seen == true, 'expected link-a to record pong and remain ready')
+
+		local writer_finished = probe.wait_until(function()
+			return writer_done == true
+		end, { timeout = 0.5, interval = 0.01 })
+		assert(writer_finished == true, 'expected peer writer to finish')
+	end, { timeout = 2.0 })
 end
 
 function T.devhost_session_transitions_down_after_repeated_bad_frames()

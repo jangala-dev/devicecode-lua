@@ -556,6 +556,55 @@ function M.run(conn, svc, opts)
         publish_session()
     end
 
+    local function expect_peer_reconnect(reason, extra)
+        if state.established ~= true then
+            return
+        end
+
+        reason = tostring(reason or 'peer_reboot_expected')
+        extra = type(extra) == 'table' and extra or {}
+
+        pending:close_all(reason)
+
+        state.established = false
+        state.peer_node = nil
+        state.peer_sid = nil
+        state.last_rx_at = nil
+        state.last_tx_at = nil
+        state.last_hello_at = nil
+        state.last_pong_at = nil
+
+        svc:obs_log('info', {
+            what        = 'peer_reconnect_expected',
+            link_id     = link_id,
+            peer_id     = peer_id,
+            reason      = reason,
+            transfer_id = extra.transfer_id,
+            kind        = extra.kind,
+        })
+        publish_session({ status = 'opening', reason = reason })
+
+        fibers.spawn(function()
+            perform(sleep.sleep_op(ka.hello_retry_s))
+            if state.established then
+                return
+            end
+
+            local ok2, err2 = send_frame(protocol.hello(state.node_id, peer_id, {
+                pub           = true,
+                call          = true,
+                blob_transfer = true,
+            }, { sid = state.local_sid }))
+            if ok2 ~= true then
+                svc:obs_log('warn', {
+                    what    = 'hello_reconnect_failed',
+                    link_id = link_id,
+                    err     = tostring(err2),
+                })
+            end
+        end)
+    end
+
     local function next_deadline(tnow)
         local best = math.huge
         if not state.established then
@@ -636,6 +685,22 @@ function M.run(conn, svc, opts)
         max_retries   = (((link_cfg.transfer or {}).max_retries) or 5),
         chunk_gap_s   = (((link_cfg.transfer or {}).chunk_gap_s) or 0.0),
         retry_gap_s   = (((link_cfg.transfer or {}).retry_gap_s) or 0.0),
+        on_state_update = function(payload)
+            if type(payload) ~= 'table' then
+                return
+            end
+            if payload.dir ~= 'out' or payload.status ~= 'done' then
+                return
+            end
+            if type(payload.kind) ~= 'string' or payload.kind:match('^firmware%.') == nil then
+                return
+            end
+
+            expect_peer_reconnect('peer_reboot_expected', {
+                transfer_id = payload.id,
+                kind        = payload.kind,
+            })
+        end,
     })
 
     publish_session({ status = 'opening' })

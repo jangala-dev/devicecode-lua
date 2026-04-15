@@ -254,6 +254,7 @@ function T.http_fabric_transfer_routes_cover_send_status_abort_and_status_mappin
 			assert(type(source) == 'table')
 			assert(type(source.open) == 'function')
 			assert(meta.kind == 'firmware.rp2350')
+			assert(meta.chunk_raw == 2048)
 			return { ok = true, transfer_id = 'tx-1' }, nil
 		end,
 		transfer_status = function(_, transfer_id)
@@ -267,10 +268,22 @@ function T.http_fabric_transfer_routes_cover_send_status_abort_and_status_mappin
 	}
 	local handler = transport.build_handler(fake_svc(), api, {})
 
-	local fw = new_stream(make_req_headers('POST', '/api/fabric/firmware/uart0', { cookie = 'devicecode_session=sess', ['x-filename'] = 'fw.bin' }), 'abcd')
+	local fw = new_stream(make_req_headers('POST', '/api/fabric/firmware/uart0', {
+		cookie = 'devicecode_session=sess',
+		['x-filename'] = 'fw.bin',
+		['x-transfer-chunk-raw'] = '2048',
+	}), 'abcd')
 	handler({}, fw)
 	assert(fw:response_status() == '200')
 	assert(decode_json_body(fw).data.transfer_id == 'tx-1')
+
+	local fw_bad_chunk = new_stream(make_req_headers('POST', '/api/fabric/firmware/uart0', {
+		cookie = 'devicecode_session=sess',
+		['x-filename'] = 'fw.bin',
+		['x-transfer-chunk-raw'] = 'bad',
+	}), 'abcd')
+	handler({}, fw_bad_chunk)
+	assert(fw_bad_chunk:response_status() == '400')
 
 	local status_ok = new_stream(make_req_headers('GET', '/api/fabric/transfer/tx-1', { cookie = 'devicecode_session=sess' }))
 	handler({}, status_ok)

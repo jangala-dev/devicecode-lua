@@ -94,6 +94,12 @@ local function update_state(self, st, status, fields)
 			size        = payload.size,
 		})
 	end
+
+	if type(self._on_state_update) == 'function' then
+		safe.pcall(function()
+			self._on_state_update(payload, st)
+		end)
+	end
 end
 
 local function clear_link_pointer(self, st)
@@ -656,6 +662,7 @@ function M.new(opts)
 		_recent_done_ttl_s = (type(opts.recent_done_ttl_s) == 'number' and opts.recent_done_ttl_s > 0)
 			and opts.recent_done_ttl_s
 			or RECENT_DONE_TTL_S,
+		_on_state_update   = opts.on_state_update,
 		_out              = nil,
 		_in               = nil,
 		_history          = {},

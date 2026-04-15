@@ -30,6 +30,14 @@ local function line_crc32(line)
     return checksum.crc32_hex(line)
 end
 
+local function transfer_log_level(msg)
+    local tt = type(msg) == 'table' and msg.t or nil
+    if tt == 'xfer_chunk' or tt == 'xfer_need' then
+        return 'debug'
+    end
+    return 'info'
+end
+
 local function resolve_uart_cap(conn, cfg)
     local cap_id = cfg.cap_id
     local timeout_s = cfg.open_timeout_s or 30.0
@@ -162,7 +170,7 @@ function UartTransport:send_msg_op(msg)
                 return nil, tostring(werr)
             end
             if is_transfer_message(msg) then
-                self:obs_log('info', {
+                self:obs_log(transfer_log_level(msg), {
                     what          = 'uart_tx_line',
                     t             = msg.t,
                     id            = msg.id,
@@ -210,7 +218,7 @@ function UartTransport:recv_line_op()
 
         local msg, derr = protocol.decode_line(line)
         if msg and is_transfer_message(msg) then
-            self:obs_log('info', {
+            self:obs_log(transfer_log_level(msg), {
                 what       = 'uart_rx_line',
                 t          = msg.t,
                 id         = msg.id,
