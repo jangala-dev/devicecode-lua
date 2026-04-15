@@ -123,6 +123,21 @@ function M.start(conn, opts)
 
     local function watch_child(link_id, rec)
         fibers.spawn(function()
+            -- IMPORTANT: observe the child scope via not_ok_op (passive),
+            -- never call join_op directly here. join_op transitions the
+            -- scope to _join_started as soon as its block_fn runs, which
+            -- races session.run's own fibers.spawn calls — session.run
+            -- yields early during transport:open(), this watcher then
+            -- runs, join_op kicks _start_join_worker, and any subsequent
+            -- fibers.spawn in session.run is rejected with 'scope is
+            -- joining'. The result is a session where the rx reader
+            -- fiber, export publishers, retained watchers and proxy
+            -- endpoints all silently fail to start and the link hangs
+            -- after link_up without ever processing incoming frames.
+            --
+            -- devicecode/main.lua:244 uses the same not_ok_op -> join_op
+            -- pattern for its own supervisor; follow it here.
+            perform(rec.scope:not_ok_op())
             local st, report, primary = perform(rec.scope:join_op())
 
             if children[link_id] == rec then
