@@ -43,7 +43,7 @@
             "cap_id": "uart-0"
           },
           "transfer": {
-            "chunk_raw": 1024,
+            "chunk_raw": 1280,
             "ack_timeout_s": 5.0,
             "max_retries": 10,
             "chunk_gap_s": 0.002,
