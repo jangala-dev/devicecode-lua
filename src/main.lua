@@ -27,6 +27,14 @@ else
 	add_path('./')
 end
 
+-- OpenWrt ships system Lua modules (lua-http, lua-cqueues, luaossl, ...)
+-- under /usr/lib/lua/ for both .lua and .so. luajit's default
+-- package.path / package.cpath do not include that directory, so
+-- prepend it here to unblock requires for opkg-installed packages
+-- when the runtime is started on-box.
+package.path  = '/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;' .. package.path
+package.cpath = '/usr/lib/lua/?.so;' .. package.cpath
+
 local fibers = require 'fibers'
 local mainmod = require 'devicecode.main'
 
