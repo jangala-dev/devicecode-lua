@@ -301,13 +301,17 @@ function HalService.start(conn, opts)
                 id = id,
                 verb = verb,
             })
-            req:fail(tostring(ctrl_req_err))
+            -- Command-plane callers should supply a Request, but avoid crashing
+            -- if this path is reached incorrectly.
+            if req and req.fail then
+                req:fail(tostring(ctrl_req_err))
+            end
             return
         end
 
         local cap_entry = get_cap(class, id)
+        -- A missing cap is not inherently a HAL error here; it may be owned elsewhere.
         if not cap_entry then
-            req:fail('capability unavailable')
             return
         end
 
