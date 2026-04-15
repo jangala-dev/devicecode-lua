@@ -23,17 +23,6 @@ local function new(default_timeout, custom_time_func, separator)
     return self
 end
 
---- Utility function to check if a table is an array
----@param table table
-local function is_array(table)
-    local i = 0
-    for _ in pairs(table) do
-        i = i + 1
-        if table[i] == nil then return false end
-    end
-    return true
-end
-
 --- Setting a value in the cache
 ---@param key string
 ---@param value any

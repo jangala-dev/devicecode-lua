@@ -79,11 +79,11 @@ function CapListener:wait_for_cap_op()
                 return setmetatable({ conn = self.conn, class = class, id = id }, CapabilityReference), ''
             end
         end
-    end):wrap(function(st, _report, cap, err)
+    end):wrap(function(st, report, cap, err)
         if st == 'ok' then
             return cap, err or ''
         else
-            return nil, tostring(_report)
+            return nil, tostring(report)
         end
     end)
 end

@@ -5,7 +5,6 @@
 local fibers = require 'fibers'
 local op     = require 'fibers.op'
 local sleep  = require 'fibers.sleep'
-local scope_mod = require 'fibers.scope'
 local authz  = require 'devicecode.authz'
 local busmod = require 'bus'
 
