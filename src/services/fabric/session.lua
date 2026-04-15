@@ -591,7 +591,6 @@ function M.run(conn, svc, opts)
         safe.pcall(function() transport:close() end)
     end)
 
-    svc:obs_log('info', { what = 'transport_open_begin', link_id = link_id })
     local ok, err = transport:open()
     if ok ~= true then
         publish_link_state(conn, svc, link_id, {
@@ -602,33 +601,16 @@ function M.run(conn, svc, opts)
         })
         error(('fabric/%s: transport open failed: %s'):format(link_id, tostring(err)), 0)
     end
-    svc:obs_log('info', { what = 'transport_open_ok', link_id = link_id })
 
     local rx_tx, rx_rx = mailbox.new(RX_QUEUE_CAP, { full = 'reject_newest' })
 
-    io.stderr:write('[session] about to fibers.spawn rx_reader link=' .. tostring(link_id) .. '\n')
-    local ok_spawn, spawn_err = fibers.spawn(function()
-        io.stderr:write('[session] rx_reader body entered link=' .. tostring(link_id) .. '\n')
-        svc:obs_log('info', { what = 'rx_reader_spawned', link_id = link_id })
+    fibers.spawn(function()
         while true do
-            svc:obs_log('info', { what = 'rx_reader_waiting', link_id = link_id })
             local line, rerr = perform(transport:recv_line_op())
             if not line then
-                svc:obs_log('warn', {
-                    what    = 'rx_reader_exit',
-                    link_id = link_id,
-                    err     = tostring(rerr or 'transport_down'),
-                })
                 rx_tx:close(tostring(rerr or 'transport_down'))
                 return
             end
-
-            svc:obs_log('info', {
-                what     = 'rx_reader_got_line',
-                link_id  = link_id,
-                line_len = #line,
-                head     = line:sub(1, 80),
-            })
 
             local okq, qerr = rx_tx:send({
                 line  = line,
@@ -645,14 +627,6 @@ function M.run(conn, svc, opts)
             end
         end
     end)
-    io.stderr:write(('[session] fibers.spawn rx_reader returned ok=%s err=%s\n'):format(
-        tostring(ok_spawn), tostring(spawn_err or 'nil')))
-    svc:obs_log('info', {
-        what    = 'rx_reader_spawn_result',
-        link_id = link_id,
-        ok      = ok_spawn,
-        err     = tostring(spawn_err or 'nil'),
-    })
 
     xfer = transfer.new({
         svc           = svc,
@@ -683,14 +657,6 @@ function M.run(conn, svc, opts)
     }, { sid = state.local_sid }))
     if hello_ok ~= true then
         svc:obs_log('warn', { what = 'hello_send_failed', link_id = link_id, err = tostring(hello_err) })
-    else
-        svc:obs_log('info', {
-            what    = 'hello_sent',
-            link_id = link_id,
-            local_sid = state.local_sid,
-            node_id = state.node_id,
-            peer_id = peer_id,
-        })
     end
 
     start_export_publishers(conn, svc, link_id, link_cfg.export, send_frame, mark_worker_ready)
@@ -783,11 +749,6 @@ function M.run(conn, svc, opts)
                 }, { sid = state.local_sid }))
                 if ok2 ~= true then
                     svc:obs_log('warn', { what = 'hello_retry_failed', link_id = link_id, err = tostring(err2) })
-                else
-                    svc:obs_log('info', {
-                        what    = 'hello_retry_sent',
-                        link_id = link_id,
-                    })
                 end
             else
                 local act = last_activity()
@@ -820,12 +781,6 @@ function M.run(conn, svc, opts)
             end
 
             local line = env.line
-            svc:obs_log('info', {
-                what     = 'session_rx_line',
-                link_id  = link_id,
-                line_len = #line,
-                head     = line:sub(1, 80),
-            })
             local raw, derr = protocol.decode_line(line)
             if not raw then
                 note_bad_frame('decode_failed', derr, nil, line)
@@ -839,11 +794,6 @@ function M.run(conn, svc, opts)
                     end
                     note_bad_frame('invalid_message', verr, raw.t, line)
                 else
-                    svc:obs_log('info', {
-                        what    = 'session_rx_msg',
-                        link_id = link_id,
-                        t       = msg.t,
-                    })
                     mark_rx(msg, env.rx_at)
 
                     if msg.t == 'hello' then
