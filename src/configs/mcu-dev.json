@@ -4,6 +4,16 @@
     "data": {
       "schema": "devicecode.config/hal/1",
       "managers": {
+        "filesystem": [
+          {
+            "name": "config",
+            "root": "/data/configs/"
+          },
+          {
+            "name": "state",
+            "root": "/tmp/dc-states/"
+          }
+        ],
         "uart": {
           "serial_ports": [
             {
