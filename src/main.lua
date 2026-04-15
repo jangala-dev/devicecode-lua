@@ -57,10 +57,16 @@ local function default_service_opts()
 		local http_transport = require 'services.ui.http_transport'
 		local port = tonumber(os.getenv('DEVICECODE_UI_HTTP_PORT'))
 		local host = os.getenv('DEVICECODE_UI_HTTP_HOST')
+		-- spawn_service whitelists service_opts fields, so port/host can't
+		-- flow through as plain table entries. Apply them inside a closure
+		-- that fixes up opts before delegating to http_transport.run.
 		out.ui = {
-			run_http = http_transport.run,
-			port     = port,
-			host     = (host ~= nil and host ~= '') and host or nil,
+			run_http = function(svc, api, opts)
+				opts = opts or {}
+				if port then opts.port = port end
+				if host and host ~= '' then opts.host = host end
+				return http_transport.run(svc, api, opts)
+			end,
 		}
 	end
 
