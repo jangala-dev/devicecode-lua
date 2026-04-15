@@ -77,35 +77,35 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
             return
         end
 
-        local caps, cap_err = driver:capabilities(cap_emit_ch)
-        if cap_err ~= "" then
-            TemplateManager.log:error({ what = "template_caps_failed", err = cap_err })
-            goto continue
-        end
+        repeat
+            local caps, cap_err = driver:capabilities(cap_emit_ch)
+            if cap_err ~= "" then
+                TemplateManager.log:error({ what = "template_caps_failed", err = cap_err })
+                break
+            end
 
-        local ok, start_err = driver:start()
-        if not ok then
-            TemplateManager.log:error({ what = "template_start_failed", err = tostring(start_err) })
-            goto continue
-        end
+            local ok, start_err = driver:start()
+            if not ok then
+                TemplateManager.log:error({ what = "template_start_failed", err = tostring(start_err) })
+                break
+            end
 
-        TemplateManager.drivers[driver.id] = driver
+            TemplateManager.drivers[driver.id] = driver
 
-        local ev, ev_err = hal_types.new.DeviceEvent(
-            "added",
-            "template_device",
-            driver.id,
-            { source = "template" },
-            caps
-        )
-        if not ev then
-            TemplateManager.log:error({ what = "template_device_event_failed", err = tostring(ev_err) })
-            goto continue
-        end
+            local ev, ev_err = hal_types.new.DeviceEvent(
+                "added",
+                "template_device",
+                driver.id,
+                { source = "template" },
+                caps
+            )
+            if not ev then
+                TemplateManager.log:error({ what = "template_device_event_failed", err = tostring(ev_err) })
+                break
+            end
 
-        dev_ev_ch:put(ev)
-
-        ::continue::
+            dev_ev_ch:put(ev)
+        until true
     end
 end
 
