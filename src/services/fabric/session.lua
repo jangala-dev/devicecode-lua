@@ -619,6 +619,8 @@ function M.run(conn, svc, opts)
         chunk_raw     = (((link_cfg.transfer or {}).chunk_raw) or 768),
         ack_timeout_s = (((link_cfg.transfer or {}).ack_timeout_s) or 2.0),
         max_retries   = (((link_cfg.transfer or {}).max_retries) or 5),
+        chunk_gap_s   = (((link_cfg.transfer or {}).chunk_gap_s) or 0.0),
+        retry_gap_s   = (((link_cfg.transfer or {}).retry_gap_s) or 0.0),
     })
 
     publish_session({ status = 'opening' })

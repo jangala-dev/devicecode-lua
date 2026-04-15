@@ -216,6 +216,8 @@ end
 local function sender_worker(self, st, source)
 	local ack_timeout_s = self._ack_timeout_s
 	local max_retries   = self._max_retries
+	local chunk_gap_s   = self._chunk_gap_s
+	local retry_gap_s   = self._retry_gap_s
 
 	local function fail(reason)
 		if st._finalised then
@@ -307,7 +309,11 @@ local function sender_worker(self, st, source)
 		)
 
 		local acked = false
-		for _ = 1, max_retries do
+		for attempt = 1, max_retries do
+			if attempt > 1 and retry_gap_s > 0 then
+				sleep.sleep(retry_gap_s)
+			end
+
 			local ok, err = self._send_frame(frame)
 			if ok ~= true then
 				close_reader()
@@ -352,6 +358,10 @@ local function sender_worker(self, st, source)
 			bytes_done  = off,
 			chunks_done = seq + 1,
 		})
+
+		if chunk_gap_s > 0 then
+			sleep.sleep(chunk_gap_s)
+		end
 	end
 
 	close_reader()
@@ -592,6 +602,8 @@ function M.new(opts)
 		_chunk_raw         = (type(opts.chunk_raw) == 'number' and opts.chunk_raw > 0) and math.floor(opts.chunk_raw) or 768,
 		_ack_timeout_s     = (type(opts.ack_timeout_s) == 'number' and opts.ack_timeout_s > 0) and opts.ack_timeout_s or 2.0,
 		_max_retries       = (type(opts.max_retries) == 'number' and opts.max_retries > 0) and math.floor(opts.max_retries) or 5,
+		_chunk_gap_s       = (type(opts.chunk_gap_s) == 'number' and opts.chunk_gap_s >= 0) and opts.chunk_gap_s or 0.0,
+		_retry_gap_s       = (type(opts.retry_gap_s) == 'number' and opts.retry_gap_s >= 0) and opts.retry_gap_s or 0.0,
 		_recent_done_ttl_s = (type(opts.recent_done_ttl_s) == 'number' and opts.recent_done_ttl_s > 0)
 			and opts.recent_done_ttl_s
 			or RECENT_DONE_TTL_S,
