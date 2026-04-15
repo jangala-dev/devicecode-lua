@@ -24,16 +24,32 @@ local function topic_s(t)
     return table.concat(t or {}, '/')
 end
 
+local function line_preview(line, tail)
+    if type(line) ~= 'string' then
+        return nil
+    end
+    local max = 120
+    if #line > max then
+        line = tail and line:sub(-max) or line:sub(1, max)
+    end
+    return string.format('%q', line)
+end
+
 local function publish_link_state(conn, svc, link_id, fields)
     local payload = { link_id = link_id, t = svc:now() }
     for k, v in pairs(fields or {}) do payload[k] = v end
     conn:retain({ 'state', 'fabric', 'link', link_id }, payload)
 end
 
-local function choose_transport(conn, svc, link_cfg)
+local function choose_transport(conn, svc, link_id, link_cfg)
     local k = (((link_cfg.transport or {}).kind) or 'uart')
     if k == 'uart' then
-        return uart_tx.new(conn, svc, link_cfg.transport or {}), nil
+        local cfg = {}
+        for key, value in pairs(link_cfg.transport or {}) do
+            cfg[key] = value
+        end
+        cfg.link_id = link_id
+        return uart_tx.new(conn, svc, cfg), nil
     end
     return nil, 'unsupported transport kind ' .. tostring(k)
 end
@@ -315,7 +331,7 @@ function M.run(conn, svc, opts)
 
     local peer_conn = connect(authz.peer_principal(peer_id, { roles = { 'admin' } }))
     local pending   = new_pending_store()
-    local transport, terr = choose_transport(conn, svc, link_cfg)
+    local transport, terr = choose_transport(conn, svc, link_id, link_cfg)
     if not transport then
         publish_link_state(conn, svc, link_id, {
             status  = 'down',
@@ -418,7 +434,7 @@ function M.run(conn, svc, opts)
 
     local xfer
 
-    local function note_bad_frame(what, detail, raw_t)
+    local function note_bad_frame(what, detail, raw_t, line)
         local tnow = svc:now()
         if bad_frames.window_start == nil or (tnow - bad_frames.window_start) > bad_frames.window_s then
             bad_frames.window_start = tnow
@@ -427,11 +443,14 @@ function M.run(conn, svc, opts)
         bad_frames.count = bad_frames.count + 1
 
         svc:obs_log('warn', {
-            what    = what,
-            link_id = link_id,
-            err     = tostring(detail),
-            t       = raw_t,
-            n       = bad_frames.count,
+            what      = what,
+            link_id   = link_id,
+            err       = tostring(detail),
+            t         = raw_t,
+            n         = bad_frames.count,
+            line_len  = type(line) == 'string' and #line or nil,
+            line_head = line_preview(line, false),
+            line_tail = line_preview(line, true),
         })
 
         if bad_frames.count >= bad_frames.threshold then
@@ -764,7 +783,7 @@ function M.run(conn, svc, opts)
             local line = env.line
             local raw, derr = protocol.decode_line(line)
             if not raw then
-                note_bad_frame('decode_failed', derr, nil)
+                note_bad_frame('decode_failed', derr, nil, line)
             else
                 local msg, verr = protocol.validate_message(raw)
                 if not msg then
@@ -773,7 +792,7 @@ function M.run(conn, svc, opts)
                     elseif raw.t == 'xfer_begin' and type(raw.id) == 'string' and raw.id ~= '' then
                         safe.pcall(function() send_frame(protocol.xfer_ready(raw.id, false, nil, 'bad_message: ' .. tostring(verr))) end)
                     end
-                    note_bad_frame('invalid_message', verr, raw.t)
+                    note_bad_frame('invalid_message', verr, raw.t, line)
                 else
                     mark_rx(msg, env.rx_at)
 
@@ -810,6 +829,18 @@ function M.run(conn, svc, opts)
                         note_peer_sid_only(msg)
 
                     elseif xfer and xfer:is_transfer_message(msg) then
+                        if msg.t == 'xfer_chunk' and (msg.seq == 0 or (msg.seq % 32) == 31) then
+                            svc:obs_log('info', {
+                                what     = 'xfer_chunk_rx',
+                                link_id  = link_id,
+                                id       = msg.id,
+                                seq      = msg.seq,
+                                off      = msg.off,
+                                n        = msg.n,
+                                data_len = type(msg.data) == 'string' and #msg.data or nil,
+                                line_len = #line,
+                            })
+                        end
                         local okx, xerr = xfer:handle_incoming(msg)
                         if okx ~= true then
                             svc:obs_log('warn', {

@@ -35,6 +35,12 @@ local function now(self)
 	return self._svc and self._svc.now and self._svc:now() or fibers.now()
 end
 
+local function obs_log(self, level, payload)
+	if self._svc and type(self._svc.obs_log) == 'function' then
+		self._svc:obs_log(level, payload)
+	end
+end
+
 local function wall(self)
 	return self._svc and self._svc.wall and self._svc:wall() or nil
 end
@@ -243,6 +249,14 @@ local function sender_worker(self, st, source)
 	)
 
 	local ready = nil
+	obs_log(self, 'info', {
+		what      = 'xfer_begin_tx',
+		link_id   = self._link_id,
+		id        = st.id,
+		size      = st.size,
+		chunks    = st.chunks,
+		chunk_raw = st.chunk_raw,
+	})
 	for _ = 1, max_retries do
 		local ok, err = self._send_frame(begin)
 		if ok ~= true then
@@ -308,6 +322,21 @@ local function sender_worker(self, st, source)
 			b64url.encode(raw)
 		)
 
+		if seq == 0 or (seq % 32) == 31 then
+			local line, lerr = protocol.encode_line(frame)
+			obs_log(self, 'info', {
+				what     = 'xfer_chunk_tx',
+				link_id  = self._link_id,
+				id       = st.id,
+				seq      = seq,
+				off      = off,
+				n        = #raw,
+				data_len = #frame.data,
+				line_len = line and #line or nil,
+				line_err = (line == nil) and tostring(lerr) or nil,
+			})
+		end
+
 		local acked = false
 		for attempt = 1, max_retries do
 			if attempt > 1 and retry_gap_s > 0 then
@@ -326,7 +355,27 @@ local function sender_worker(self, st, source)
 					close_reader()
 					return fail(werr)
 				end
+				obs_log(self, 'warn', {
+					what    = 'xfer_chunk_ack_timeout',
+					link_id = self._link_id,
+					id      = st.id,
+					seq     = seq,
+					off     = off,
+					attempt = attempt,
+				})
 			elseif msg.t == 'xfer_need' then
+				if msg.err ~= nil or msg.next == seq then
+					obs_log(self, 'warn', {
+						what    = 'xfer_chunk_need',
+						link_id = self._link_id,
+						id      = st.id,
+						seq     = seq,
+						off     = off,
+						next    = msg.next,
+						err     = msg.err,
+						attempt = attempt,
+					})
+				end
 				if msg.next == seq + 1 then
 					acked = true
 					break
@@ -748,6 +797,14 @@ function Transfer:handle_incoming(msg)
 	-- Sender control messages.
 	if (tt == 'xfer_ready' or tt == 'xfer_need' or tt == 'xfer_done' or tt == 'xfer_abort')
 		and self._out and self._out.id == msg.id then
+		obs_log(self, 'info', {
+			what    = 'xfer_ctrl_rx',
+			link_id = self._link_id,
+			id      = msg.id,
+			t       = tt,
+			next    = msg.next,
+			err     = msg.err or msg.reason,
+		})
 		return ctrl_put(self._out.ctrl_tx, msg)
 	end
 
