@@ -6,7 +6,7 @@
 --        { <svc>: { rev: int, data: table }, ... }
 --  - publishes retained cfg/<svc> with { rev=int, data=table }
 --  - accepts updates only on:
---        config/<svc>/set with payload { data = table }
+--        cmd/config/set with payload { service = <svc>, data = table }
 --
 -- Persisted state location (within HAL):
 --   ns  = "config"
@@ -231,30 +231,28 @@ function M.start(conn, opts)
 		end
 	end)
 
-	local sub_set = conn:subscribe({ 'config', '+', 'set' }, { queue_len = 50, full = 'drop_oldest' })
-	svc:obs_log('info', 'subscribed to config/+/set')
+	local set_ep = conn:bind({ 'cmd', 'config', 'set' }, { queue_len = 50 })
+	svc:obs_log('info', 'bound cmd/config/set')
 
 	svc:status('running')
 	svc:obs_log('info', 'service running')
 
 	while true do
-		local msg, err = perform(sub_set:recv_op())
-		if not msg then
+		local req, err = perform(set_ep:recv_op())
+		if not req then
 			svc:status('stopped', { reason = err })
-			svc:obs_log('warn', { what = 'subscription_ended', err = tostring(err) })
+			svc:obs_log('warn', { what = 'endpoint_ended', err = tostring(err) })
 			return
 		end
 
-		local service = msg.topic and msg.topic[2]
-		local ok, uerr = state.set_service(current, conn, svc, mark_dirty, service, msg.payload, msg)
+		local payload = req.payload
+		local service = type(payload) == 'table' and payload.service or nil
+		local ok, uerr = state.set_service(current, conn, svc, mark_dirty, service, payload, req)
 
-		-- Reply immediately: accepted != persisted.
-		if msg.reply_to ~= nil then
-			local reply = ok and { ok = true, persisted = false } or { ok = false, err = tostring(uerr) }
-			conn:publish(msg.reply_to, reply, { id = msg.id })
-		end
-
-		if not ok then
+		if ok then
+			req:reply({ ok = true, persisted = false })
+		else
+			req:fail(tostring(uerr))
 			svc:obs_log('warn', { what = 'set_rejected', service = tostring(service), err = tostring(uerr) })
 		end
 	end
