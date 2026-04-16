@@ -68,7 +68,6 @@ function T.handshake_and_status_readiness_drive_ready_state()
 		assert(ack_item.frame.type == 'hello_ack')
 
 		ctx.status_tx:send({ kind = 'rpc_ready', ready = true })
-		ctx.status_tx:send({ kind = 'transfer_ready', ready = true })
 
 		assert(probe.wait_until(function ()
 			local snap = ctx.session:get()
@@ -112,7 +111,6 @@ function T.peer_session_change_bumps_generation_and_updates_snapshot()
 		ctx.control_tx:send({ msg = { type = 'hello', sid = 'peer-1', node = 'peer-a' }, at = require('fibers').now() })
 		assert(select(1, ctx.tx_control_rx:recv()).frame.type == 'hello_ack')
 		ctx.status_tx:send({ kind = 'rpc_ready', ready = true })
-		ctx.status_tx:send({ kind = 'transfer_ready', ready = true })
 		assert(probe.wait_until(function () return ctx.session:get().ready == true end, { timeout = 0.5, interval = 0.01 }))
 
 		local first = ctx.session:get()
@@ -153,7 +151,6 @@ function T.liveness_timeout_faults_the_link_controller()
 		ctx.control_tx:send({ msg = { type = 'hello', sid = 'peer-live', node = 'peer-live' }, at = require('fibers').now() })
 		assert(select(1, ctx.tx_control_rx:recv()).frame.type == 'hello_ack')
 		ctx.status_tx:send({ kind = 'rpc_ready', ready = true })
-		ctx.status_tx:send({ kind = 'transfer_ready', ready = true })
 		assert(probe.wait_until(function () return ctx.session:get().ready == true end, { timeout = 0.25, interval = 0.005 }))
 
 		local st, rep, primary = require('fibers').perform(child:join_op())

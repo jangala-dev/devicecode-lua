@@ -1,13 +1,14 @@
 -- services/fabric/session_ctl.lua
 
-local fibers  = require 'fibers'
-local runtime = require 'fibers.runtime'
-local sleep   = require 'fibers.sleep'
-local uuid    = require 'uuid'
+local fibers   = require 'fibers'
+local pulse_mod = require 'fibers.pulse'
+local runtime  = require 'fibers.runtime'
+local sleep    = require 'fibers.sleep'
+local uuid     = require 'uuid'
 
 local M = {}
 
-local function copy_snapshot(s)
+local function clone_snapshot(s)
 	return {
 		state = s.state,
 		local_sid = s.local_sid,
@@ -22,51 +23,40 @@ local function copy_snapshot(s)
 	}
 end
 
-local function external_state_view(snapshot)
-	local state = snapshot.state
-	if state == 'up' then state = 'establishing' end
-	if snapshot.ready then state = 'ready' end
-	return {
-		state = state,
-		local_sid = snapshot.local_sid,
-		peer_sid = snapshot.peer_sid,
-		peer_node = snapshot.peer_node,
-		generation = snapshot.generation,
-		established = snapshot.established,
-		ready = snapshot.ready,
-	}
-end
-
-local function same_external_state(a, b)
+local function same_snapshot(a, b)
 	if a == nil or b == nil then return a == b end
 	return a.state == b.state
 		and a.local_sid == b.local_sid
 		and a.peer_sid == b.peer_sid
 		and a.peer_node == b.peer_node
 		and a.generation == b.generation
+		and a.last_rx_at == b.last_rx_at
+		and a.last_tx_at == b.last_tx_at
+		and a.last_pong_at == b.last_pong_at
 		and a.established == b.established
 		and a.ready == b.ready
 end
 
-local function publish_state(conn, link_id, view)
+local function publish_state(conn, link_id, snapshot)
 	if not conn then return end
-	local ok = pcall(function() conn:retain({ 'state', 'fabric', 'link', link_id }, {
-		link_id = link_id,
-		state = view.state,
-		local_sid = view.local_sid,
-		peer_sid = view.peer_sid,
-		peer_node = view.peer_node,
-		generation = view.generation,
-		established = view.established,
-		ready = view.ready,
-		ts = runtime.now(),
-	}) end)
-	return ok
+	pcall(function ()
+		conn:retain({ 'state', 'fabric', 'link', link_id }, {
+			link_id = link_id,
+			state = snapshot.state,
+			local_sid = snapshot.local_sid,
+			peer_sid = snapshot.peer_sid,
+			peer_node = snapshot.peer_node,
+			generation = snapshot.generation,
+			established = snapshot.established,
+			ready = snapshot.ready,
+			ts = runtime.now(),
+		})
+	end)
 end
 
 function M.new_state(link_id, state_conn)
-	local pulse = require('fibers.pulse').new()
-	local snapshot = {
+	local pulse = pulse_mod.new()
+	local current = {
 		state = 'opening',
 		local_sid = tostring(uuid.new()),
 		peer_sid = nil,
@@ -78,35 +68,37 @@ function M.new_state(link_id, state_conn)
 		established = false,
 		ready = false,
 	}
-
-	local holder = {}
 	local last_published = nil
 
+	local holder = {}
+
 	local function maybe_publish(force)
-		local view = external_state_view(snapshot)
-		if force or not same_external_state(view, last_published) then
-			last_published = view
-			publish_state(state_conn, link_id, view)
+		if force or not same_snapshot(current, last_published) then
+			last_published = current
+			publish_state(state_conn, link_id, current)
 		end
 	end
 
 	function holder:get()
-		return copy_snapshot(snapshot)
+		return current
 	end
 
 	function holder:update(mutator, opts)
 		opts = opts or {}
-		local before = external_state_view(snapshot)
-		mutator(snapshot)
-		local after = external_state_view(snapshot)
-		local changed = not same_external_state(before, after)
+		local next = clone_snapshot(current)
+		mutator(next)
+
+		local changed = not same_snapshot(current, next)
+		if changed then
+			current = next
+		end
 		if opts.bump_pulse and changed then
 			pulse:signal()
 		end
-		if opts.publish and changed then
-			maybe_publish(false)
-		elseif opts.publish_force then
+		if opts.publish_force then
 			maybe_publish(true)
+		elseif opts.publish and changed then
+			maybe_publish(false)
 		end
 		return changed
 	end
@@ -135,10 +127,8 @@ function M.run(ctx)
 	local ping_interval = tonumber(ctx.ping_interval_s) or 10.0
 	local liveness_timeout = tonumber(ctx.liveness_timeout_s) or 30.0
 	local link_id = ctx.link_id
-	local svc = ctx.svc
 
 	local rpc_ready = false
-	local transfer_ready = false
 	local next_hello_at = runtime.now()
 	local next_ping_at = runtime.now() + ping_interval
 
@@ -163,13 +153,15 @@ function M.run(ctx)
 
 	local function refresh_ready()
 		local snap = snapshot()
-		local ready = snap.established and rpc_ready and transfer_ready
+		local ready = snap.established and rpc_ready
 		state_mut(function(s)
 			s.ready = ready
 			if s.state ~= 'down' then
-				if ready then s.state = 'ready'
-				elseif s.established then s.state = 'up'
-				else s.state = 'establishing' end
+				if ready then
+					s.state = 'ready'
+				else
+					s.state = 'establishing'
+				end
 			end
 		end)
 	end
@@ -212,18 +204,18 @@ function M.run(ctx)
 			end
 		end
 
-		local timer_dt = 0.5
 		local which, item = fibers.perform(fibers.named_choice({
 			control = control_rx:recv_op(),
 			status = status_rx:recv_op(),
-			timer = sleep.sleep_op(timer_dt):wrap(function() return { kind = 'tick' } end),
+			timer = sleep.sleep_op(0.5):wrap(function() return { kind = 'tick' } end),
 		}))
 
 		if which == 'control' and item then
 			local msg = item.msg or item
 			if msg.type == 'hello' or msg.type == 'hello_ack' then
-				local prev = snapshot().peer_sid
+				local prev = snap.peer_sid
 				if prev ~= nil and prev ~= msg.sid then
+					rpc_ready = false
 					bump_generation(function(s)
 						s.peer_sid = msg.sid
 						s.peer_node = msg.node
@@ -253,8 +245,6 @@ function M.run(ctx)
 					s.last_rx_at = item.at or runtime.now()
 					s.last_pong_at = item.at or runtime.now()
 				end)
-			elseif msg.type and msg.type:match('^xfer_') then
-				-- transfer control frames are consumed by transfer_mgr; ignore here.
 			end
 		elseif which == 'status' and item then
 			if item.kind == 'rx_activity' then
@@ -263,14 +253,6 @@ function M.run(ctx)
 				activity_mut(function(s) s.last_tx_at = item.at end)
 			elseif item.kind == 'rpc_ready' then
 				rpc_ready = not not item.ready
-				refresh_ready()
-			elseif item.kind == 'transfer_ready' then
-				transfer_ready = not not item.ready
-				refresh_ready()
-			elseif item.kind == 'peer_reset' then
-				bump_generation(function(s)
-					s.ready = false
-				end)
 				refresh_ready()
 			end
 		elseif which == 'timer' then

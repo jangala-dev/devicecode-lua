@@ -17,7 +17,6 @@ local function new_env(bus, link_id)
 	local tx_control_tx, tx_control_rx = mailbox.new(64, { full = 'reject_newest' })
 	local tx_bulk_tx, tx_bulk_rx = mailbox.new(64, { full = 'reject_newest' })
 	local transfer_ctl_tx, transfer_ctl_rx = mailbox.new(16, { full = 'reject_newest' })
-	local status_tx, status_rx = mailbox.new(64, { full = 'reject_newest' })
 	return {
 		conn = state_conn,
 		session = session,
@@ -29,8 +28,6 @@ local function new_env(bus, link_id)
 		tx_bulk_rx = tx_bulk_rx,
 		transfer_ctl_tx = transfer_ctl_tx,
 		transfer_ctl_rx = transfer_ctl_rx,
-		status_tx = status_tx,
-		status_rx = status_rx,
 	}
 end
 
@@ -59,7 +56,6 @@ function T.outgoing_transfer_happy_path_emits_begin_chunk_commit_and_reply()
 				tx_control = env.tx_control_tx,
 				tx_bulk = env.tx_bulk_tx,
 				transfer_ctl_rx = env.transfer_ctl_rx,
-				status_tx = env.status_tx,
 				chunk_size = 32,
 				transfer_phase_timeout_s = 0.5,
 			})
@@ -116,7 +112,6 @@ function T.incoming_transfer_happy_path_accepts_chunks_and_commits()
 				tx_control = env.tx_control_tx,
 				tx_bulk = env.tx_bulk_tx,
 				transfer_ctl_rx = env.transfer_ctl_rx,
-				status_tx = env.status_tx,
 				chunk_size = 32,
 				transfer_phase_timeout_s = 0.5,
 			})
@@ -159,7 +154,6 @@ function T.session_generation_change_aborts_outgoing_transfer()
 				tx_control = env.tx_control_tx,
 				tx_bulk = env.tx_bulk_tx,
 				transfer_ctl_rx = env.transfer_ctl_rx,
-				status_tx = env.status_tx,
 				chunk_size = 4,
 				transfer_phase_timeout_s = 1.0,
 			})
@@ -201,7 +195,6 @@ function T.only_one_outgoing_transfer_is_admitted_at_a_time()
 				tx_control = env.tx_control_tx,
 				tx_bulk = env.tx_bulk_tx,
 				transfer_ctl_rx = env.transfer_ctl_rx,
-				status_tx = env.status_tx,
 				chunk_size = 32,
 				transfer_phase_timeout_s = 1.0,
 			})

@@ -10,7 +10,6 @@
 local fibers   = require 'fibers'
 local mailbox  = require 'fibers.mailbox'
 local sleep    = require 'fibers.sleep'
-local op       = require 'fibers.op'
 
 local base     = require 'devicecode.service_base'
 local session  = require 'services.fabric.session'
@@ -40,6 +39,24 @@ local function normalise_links(cfg)
 		end
 	end
 	return out
+end
+
+local function same_plain(a, b, seen)
+	if a == b then return true end
+	if type(a) ~= type(b) then return false end
+	if type(a) ~= 'table' then return false end
+
+	seen = seen or {}
+	if seen[a] == b then return true end
+	seen[a] = b
+
+	for k, va in pairs(a) do
+		if not same_plain(va, b[k], seen) then return false end
+	end
+	for k in pairs(b) do
+		if a[k] == nil then return false end
+	end
+	return true
 end
 
 local function count_keys(t)
@@ -114,15 +131,17 @@ function M.start(conn, opts)
 		full = 'drop_oldest',
 	})
 
-	local send_ep = conn:bind({ 'cmd', 'fabric', 'send_blob' }, { queue_len = 16 })
-	local status_ep = conn:bind({ 'cmd', 'fabric', 'transfer_status' }, { queue_len = 16 })
-	local abort_ep = conn:bind({ 'cmd', 'fabric', 'transfer_abort' }, { queue_len = 16 })
+	local transfer_ep = conn:bind({ 'cmd', 'fabric', 'transfer' }, { queue_len = 16 })
 
-	local function route_transfer_job(payload, op_name)
+	local function route_transfer_job(payload)
 		local timeout_s = (type(payload) == 'table' and type(payload.timeout) == 'number') and payload.timeout or 5.0
 		local link_id = payload and payload.link_id
+		local op_name = payload and payload.op
 		if type(link_id) ~= 'string' or link_id == '' then
 			return nil, 'missing_link_id'
+		end
+		if op_name ~= 'send_blob' and op_name ~= 'status' and op_name ~= 'abort' then
+			return nil, 'unsupported_op'
 		end
 		local rec = links[link_id]
 		if not rec or not rec.transfer_ctl_tx then
@@ -142,30 +161,24 @@ function M.start(conn, opts)
 		if ok ~= true then return nil, reason or 'link_queue_closed' end
 		local which, reply = fibers.perform(fibers.named_choice({
 			reply = reply_rx:recv_op(),
-			timeout = require('fibers.sleep').sleep_op(timeout_s):wrap(function() return nil end),
+			timeout = sleep.sleep_op(timeout_s):wrap(function() return nil end),
 		}))
 		if which == 'reply' and reply ~= nil then return reply, nil end
 		return nil, 'timeout'
 	end
 
-	local function spawn_endpoint_handler(ep, op_name)
-		fibers.spawn(function()
-			while true do
-				local req, err = ep:recv()
-				if not req then return end
-				local reply, rerr = route_transfer_job(req.payload or {}, op_name)
-				if reply ~= nil then
-					req:reply(reply)
-				else
-					req:fail(rerr or 'failed')
-				end
+	fibers.spawn(function()
+		while true do
+			local req = transfer_ep:recv()
+			if not req then return end
+			local reply, rerr = route_transfer_job(req.payload or {})
+			if reply ~= nil then
+				req:reply(reply)
+			else
+				req:fail(rerr or 'failed')
 			end
-		end)
-	end
-
-	spawn_endpoint_handler(send_ep, 'send_blob')
-	spawn_endpoint_handler(status_ep, 'status')
-	spawn_endpoint_handler(abort_ep, 'abort')
+		end
+	end)
 
 	local function apply_config(cfg_payload)
 		local cfg = extract_cfg(cfg_payload)
@@ -182,7 +195,7 @@ function M.start(conn, opts)
 				end
 			else
 				desired[link_id] = rec
-				if links[link_id] and links[link_id].cfg ~= rec and links[link_id].child then
+				if links[link_id] and not same_plain(links[link_id].cfg, rec) and links[link_id].child then
 					links[link_id].cfg = rec
 					links[link_id].child:cancel('config_changed')
 				end

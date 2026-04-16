@@ -144,7 +144,6 @@ function M.run(params)
 			tx_control               = tx_control_tx,
 			tx_bulk                  = tx_bulk_tx,
 			transfer_ctl_rx          = transfer_ctl_rx,
-			status_tx                = status_tx,
 			chunk_size               = cfg.chunk_size,
 			transfer_phase_timeout_s = cfg.transfer_phase_timeout_s,
 		})

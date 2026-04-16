@@ -1,7 +1,6 @@
 -- services/fabric/writer.lua
 
 local fibers   = require 'fibers'
-local protocol = require 'services.fabric.protocol'
 local runtime  = require 'fibers.runtime'
 local wait     = require 'fibers.wait'
 
@@ -36,10 +35,7 @@ function M.run(ctx)
 	local quota_left = rpc_quota
 
 	local function write_item(item)
-		local line = item.line
-		if not line then
-			line = assert(protocol.encode_line(item.frame))
-		end
+		local line = assert(item and item.line, 'writer requires pre-encoded writer items')
 		local ok, err = fibers.perform(transport:write_line_op(line))
 		if not ok then
 			error('transport_write_failed: ' .. tostring(err), 0)

@@ -39,7 +39,6 @@ function M.run(ctx)
 	local tx_control = assert(ctx.tx_control, 'transfer_mgr requires tx_control')
 	local tx_bulk = assert(ctx.tx_bulk, 'transfer_mgr requires tx_bulk')
 	local transfer_ctl_rx = assert(ctx.transfer_ctl_rx, 'transfer_mgr requires transfer_ctl_rx')
-	local status_tx = assert(ctx.status_tx, 'transfer_mgr requires status_tx')
 	local link_id = assert(ctx.link_id, 'transfer_mgr requires link_id')
 	local chunk_size = tonumber(ctx.chunk_size) or 2048
 	local phase_timeout = tonumber(ctx.transfer_phase_timeout_s) or 15.0
@@ -49,7 +48,6 @@ function M.run(ctx)
 	local session_seen = session:pulse():version()
 	local last_generation = session:get().generation
 
-	send_required(status_tx, { kind = 'transfer_ready', ready = true }, 'transfer_ready_status')
 	publish_state(conn, link_id, { state = 'idle', ts = runtime.now() })
 
 	local function clear_outgoing(reason)
