@@ -348,10 +348,11 @@ local function sender_worker(self, st, source)
 		end
 
 		off = off + #raw
-		update_state(self, st, 'sending', {
-			bytes_done  = off,
-			chunks_done = seq + 1,
-		})
+		st.bytes_done  = off
+		st.chunks_done = seq + 1
+		if (seq + 1) % 32 == 0 or seq == st.chunks - 1 then
+			update_state(self, st, 'sending')
+		end
 	end
 
 	close_reader()

@@ -123,6 +123,12 @@ function M.start(conn, opts)
 
     local function watch_child(link_id, rec)
         fibers.spawn(function()
+            -- Observe via not_ok_op before join_op. Calling join_op directly
+            -- transitions the scope to _join_started, which races session.run's
+            -- fibers.spawn calls during transport:open and silently prevents
+            -- workers from starting. See devicecode/main.lua:244 for the same
+            -- pattern.
+            perform(rec.scope:not_ok_op())
             local st, report, primary = perform(rec.scope:join_op())
 
             if children[link_id] == rec then
