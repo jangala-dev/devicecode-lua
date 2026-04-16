@@ -23,11 +23,19 @@ else
 	add_path('./')
 end
 
-local fibers = require 'fibers'
-local mainmod = require 'devicecode.main'
+package.path  = '/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;' .. package.path
+package.cpath = '/usr/lib/lua/?.so;' .. package.cpath
 
+local fibers         = require 'fibers'
+local mainmod        = require 'devicecode.main'
+local http_transport = require 'services.ui.http_transport'
+
+-- ui service requires opts.run_http but origin/ui-migration never wired it up.
 fibers.run(function(scope)
 	return mainmod.run(scope, {
 		env = env,
+		service_opts = {
+			ui = { run_http = http_transport.run },
+		},
 	})
 end)

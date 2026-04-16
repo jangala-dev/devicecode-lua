@@ -755,7 +755,7 @@ local function onstream_factory(svc, api, opts)
 		local req_method  = req_headers:get(':method') or 'GET'
 		local req_path    = req_headers:get(':path') or '/'
 
-		svc:obs_log('info', {
+		svc:obs_log('debug', {
 			what   = 'http_request',
 			method = req_method,
 			path   = req_path,
