@@ -3,6 +3,7 @@
 local fibers   = require 'fibers'
 local protocol = require 'services.fabric.protocol'
 local runtime  = require 'fibers.runtime'
+local wait     = require 'fibers.wait'
 
 local M = {}
 
@@ -88,25 +89,42 @@ function M.run(ctx)
 		end
 	end
 
-	while true do
-		if has_item(tx_control) then
-			write_item(recv_now(tx_control))
-		else
-			local chosen = choose_non_control_rx()
-			if chosen then
-				write_item(recv_now(chosen))
-			else
-				local which, item = fibers.perform(fibers.named_choice({
-					control = tx_control:recv_op(),
-					rpc = tx_rpc:recv_op(),
-					bulk = tx_bulk:recv_op(),
-				}))
-				if not item then
-					error('writer outbound queue closed', 0)
-				end
-				write_item(item)
-			end
+	local function choose_ready_rx()
+		if has_item(tx_control) then return tx_control end
+		return choose_non_control_rx()
+	end
+
+	local function wait_any_queue_op()
+		local function register(task, waker)
+			local t1 = tx_control:on_message(task, waker)
+			local t2 = tx_rpc:on_message(task, waker)
+			local t3 = tx_bulk:on_message(task, waker)
+			return {
+				unlink = function()
+					if t1 and t1.unlink then t1:unlink() end
+					if t2 and t2.unlink then t2:unlink() end
+					if t3 and t3.unlink then t3:unlink() end
+					return false
+				end,
+			}
 		end
+
+		local function probe_step()
+			local chosen = choose_ready_rx()
+			if chosen then return true, chosen end
+			return false
+		end
+
+		return wait.waitable2(register, probe_step, probe_step)
+	end
+
+	while true do
+		local chosen = choose_ready_rx()
+		if not chosen then
+			chosen = fibers.perform(wait_any_queue_op())
+			chosen = choose_ready_rx() or chosen
+		end
+		write_item(recv_now(chosen))
 	end
 end
 

@@ -34,7 +34,12 @@ local function build_open_opts(transport)
 	if transport and transport.read ~= nil then read = not not transport.read end
 	if transport and transport.write ~= nil then write = not not transport.write end
 
-	local opts, err = cap_args.UARTOpenOpts(read, write)
+	local ctor = cap_args and cap_args.new and cap_args.new.UARTOpenOpts
+	if type(ctor) ~= 'function' then
+		return nil, 'UARTOpenOpts constructor unavailable'
+	end
+
+	local opts, err = ctor(read, write)
 	if not opts then return nil, err end
 	return opts, nil
 end

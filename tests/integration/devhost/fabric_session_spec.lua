@@ -39,7 +39,7 @@ function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 		local b_ctl_tx, b_ctl_rx = require('fibers.mailbox').new(8, { full = 'reject_newest' })
 
 		local ok1, err1 = scope:spawn(function()
-			session.run(scope, {
+			session.run({
 				svc = make_svc(bus:connect()),
 				conn = bus:connect(),
 				link_id = 'link-a',
@@ -65,7 +65,7 @@ function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 		assert(ok1, tostring(err1))
 
 		local ok2, err2 = scope:spawn(function()
-			session.run(scope, {
+			session.run({
 				svc = make_svc(bus:connect()),
 				conn = bus:connect(),
 				link_id = 'link-b',

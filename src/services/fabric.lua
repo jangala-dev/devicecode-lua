@@ -67,8 +67,8 @@ local function spawn_link_supervisor(scope, svc, conn, desired_ref, links_ref, l
 
 			svc:obs_event('link_spawn', { link_id = link_id, t = svc:now() })
 
-			local ok_spawn, serr = child:spawn(function(s)
-				session.run(s, {
+			local ok_spawn, serr = child:spawn(function()
+				session.run({
 					svc = svc,
 					conn = conn,
 					link_id = link_id,

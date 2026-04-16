@@ -22,13 +22,11 @@ local function copy_snapshot(s)
 	}
 end
 
-local function publish_state(conn, link_id, snapshot)
-	if not conn then return end
+local function external_state_view(snapshot)
 	local state = snapshot.state
 	if state == 'up' then state = 'establishing' end
 	if snapshot.ready then state = 'ready' end
-	local ok = pcall(function() conn:retain({ 'state', 'fabric', 'link', link_id }, {
-		link_id = link_id,
+	return {
 		state = state,
 		local_sid = snapshot.local_sid,
 		peer_sid = snapshot.peer_sid,
@@ -36,9 +34,31 @@ local function publish_state(conn, link_id, snapshot)
 		generation = snapshot.generation,
 		established = snapshot.established,
 		ready = snapshot.ready,
-		last_rx_at = snapshot.last_rx_at,
-		last_tx_at = snapshot.last_tx_at,
-		last_pong_at = snapshot.last_pong_at,
+	}
+end
+
+local function same_external_state(a, b)
+	if a == nil or b == nil then return a == b end
+	return a.state == b.state
+		and a.local_sid == b.local_sid
+		and a.peer_sid == b.peer_sid
+		and a.peer_node == b.peer_node
+		and a.generation == b.generation
+		and a.established == b.established
+		and a.ready == b.ready
+end
+
+local function publish_state(conn, link_id, view)
+	if not conn then return end
+	local ok = pcall(function() conn:retain({ 'state', 'fabric', 'link', link_id }, {
+		link_id = link_id,
+		state = view.state,
+		local_sid = view.local_sid,
+		peer_sid = view.peer_sid,
+		peer_node = view.peer_node,
+		generation = view.generation,
+		established = view.established,
+		ready = view.ready,
 		ts = runtime.now(),
 	}) end)
 	return ok
@@ -60,22 +80,42 @@ function M.new_state(link_id, state_conn)
 	}
 
 	local holder = {}
+	local last_published = nil
+
+	local function maybe_publish(force)
+		local view = external_state_view(snapshot)
+		if force or not same_external_state(view, last_published) then
+			last_published = view
+			publish_state(state_conn, link_id, view)
+		end
+	end
 
 	function holder:get()
 		return copy_snapshot(snapshot)
 	end
 
-	function holder:set(mutator)
+	function holder:update(mutator, opts)
+		opts = opts or {}
+		local before = external_state_view(snapshot)
 		mutator(snapshot)
-		pulse:signal()
-		publish_state(state_conn, link_id, snapshot)
+		local after = external_state_view(snapshot)
+		local changed = not same_external_state(before, after)
+		if opts.bump_pulse and changed then
+			pulse:signal()
+		end
+		if opts.publish and changed then
+			maybe_publish(false)
+		elseif opts.publish_force then
+			maybe_publish(true)
+		end
+		return changed
 	end
 
 	function holder:pulse()
 		return pulse
 	end
 
-	publish_state(state_conn, link_id, snapshot)
+	maybe_publish(true)
 	return holder
 end
 
@@ -107,7 +147,11 @@ function M.run(ctx)
 	end
 
 	local function state_mut(f)
-		session:set(f)
+		session:update(f, { bump_pulse = true, publish = true })
+	end
+
+	local function activity_mut(f)
+		session:update(f)
 	end
 
 	local function bump_generation(mut)
@@ -200,12 +244,12 @@ function M.run(ctx)
 				end
 				refresh_ready()
 			elseif msg.type == 'ping' then
-				state_mut(function(s)
+				activity_mut(function(s)
 					s.last_rx_at = item.at or runtime.now()
 				end)
 				send_control({ type = 'pong', sid = snapshot().local_sid })
 			elseif msg.type == 'pong' then
-				state_mut(function(s)
+				activity_mut(function(s)
 					s.last_rx_at = item.at or runtime.now()
 					s.last_pong_at = item.at or runtime.now()
 				end)
@@ -214,9 +258,9 @@ function M.run(ctx)
 			end
 		elseif which == 'status' and item then
 			if item.kind == 'rx_activity' then
-				state_mut(function(s) s.last_rx_at = item.at end)
+				activity_mut(function(s) s.last_rx_at = item.at end)
 			elseif item.kind == 'tx_activity' then
-				state_mut(function(s) s.last_tx_at = item.at end)
+				activity_mut(function(s) s.last_tx_at = item.at end)
 			elseif item.kind == 'rpc_ready' then
 				rpc_ready = not not item.ready
 				refresh_ready()
