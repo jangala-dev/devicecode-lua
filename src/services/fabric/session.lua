@@ -12,9 +12,9 @@
 --   * transfer_mgr -> state/fabric/link/<id>/transfer
 
 local fibers         = require 'fibers'
-local sleep          = require 'fibers.sleep'
 local mailbox        = require 'fibers.mailbox'
 local safe           = require 'coxpcall'
+local op             = require 'fibers.op'
 
 local session_ctl    = require 'services.fabric.session_ctl'
 local reader         = require 'services.fabric.reader'
@@ -27,13 +27,6 @@ local M = {}
 
 local function q(cap)
 	return mailbox.new(cap, { full = 'reject_newest' })
-end
-
-local function send_required(tx, value, what)
-	local ok, reason = tx:send(value)
-	if ok ~= true then
-		error((what or 'mailbox_send_failed') .. ': ' .. tostring(reason or 'closed'), 0)
-	end
 end
 
 function M.run(params)
@@ -82,42 +75,6 @@ function M.run(params)
 		end,
 	})
 
-	-- Upward coarse summary reporter for the shell.
-	fibers.spawn(function()
-		local pulse = session:pulse()
-		local last = nil
-
-		while true do
-			local snap = session:get()
-			local summary = {
-				state = snap.state,
-				ready = snap.ready,
-				established = snap.established,
-				generation = snap.generation,
-			}
-
-			local changed = last == nil
-				or last.state ~= summary.state
-				or last.ready ~= summary.ready
-				or last.established ~= summary.established
-				or last.generation ~= summary.generation
-
-			if changed then
-				send_required(report_tx, {
-					tag = 'link_summary',
-					link_id = link_id,
-					summary = summary,
-				}, 'fabric_report_overflow')
-				last = summary
-			end
-
-			local _, why = pulse:next()
-			if why ~= nil then
-				return
-			end
-		end
-	end)
-
 	fibers.spawn(function()
 		reader.run({
 			transport          = transport,
@@ -152,6 +109,7 @@ function M.run(params)
 			svc                = svc,
 			session            = session,
 			state_conn         = state_conn,
+			report_tx          = report_tx,
 			control_rx         = control_in_rx,
 			status_rx          = status_rx,
 			tx_control         = tx_control_tx,
@@ -199,11 +157,11 @@ function M.run(params)
 		})
 	end)
 
-	-- Keep the child scope alive until one worker faults or the scope is cancelled.
-	-- The shell joins the child scope and handles restart policy.
-	while true do
-		sleep.sleep(3600)
-	end
+	-- Keep the child scope alive until one worker faults or the scope is
+	-- cancelled. This blocks without polling and lets the shell own restart
+	-- policy via the child scope join outcome.
+	local scope = fibers.current_scope()
+	op.perform_raw(scope:not_ok_op())
 end
 
 return M
