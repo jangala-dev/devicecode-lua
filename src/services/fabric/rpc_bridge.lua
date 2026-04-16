@@ -91,16 +91,28 @@ function M.run(ctx)
 	local max_inbound_helpers = tonumber(ctx.max_inbound_helpers) or max_pending
 	local call_timeout = tonumber(ctx.call_timeout_s) or 5.0
 
+	local bus = conn._bus
+	local m_wild = (bus and bus._m_wild) or '#'
+
+	local function topic_for_prefix(prefix)
+		local t = {}
+		for i = 1, #prefix do t[i] = prefix[i] end
+		if #t == 0 or t[#t] ~= m_wild then
+			t[#t + 1] = m_wild
+		end
+		return t
+	end
+
 	local export_subs = {}
 	for i = 1, #export_pub_rules do
-		export_subs[i] = conn:subscribe(export_pub_rules[i].local_prefix)
+		export_subs[i] = conn:subscribe(topic_for_prefix(export_pub_rules[i].local_prefix))
 	end
 
 	local retained_watches = {}
 	local retained_cache = {}
 	local replay_pending = 0
 	for i = 1, #export_retained_rules do
-		retained_watches[i] = conn:watch_retained(export_retained_rules[i].local_prefix, {
+		retained_watches[i] = conn:watch_retained(topic_for_prefix(export_retained_rules[i].local_prefix), {
 			replay = true,
 			queue_len = 64,
 			full = 'drop_oldest',

@@ -148,9 +148,34 @@ local function open_transport(conn, link_id, cfg)
 	}, Transport), nil
 end
 
+local function wrap_custom_transport(link_id, cfg, obj)
+	if type(obj) ~= 'table' then
+		return obj
+	end
+	if type(obj.read_line_op) == 'function' and type(obj.write_line_op) == 'function' then
+		return obj
+	end
+	if is_stream(obj) then
+		local transport = (cfg and cfg.transport) or cfg and cfg.uart or {}
+		local term = transport and transport.terminator
+		if term == nil then term = '\n' end
+		return setmetatable({
+			_cap = nil,
+			_stream = obj,
+			_link_id = link_id,
+			_opts = transport,
+			_terminator = term,
+			_closed = false,
+		}, Transport)
+	end
+	return obj
+end
+
 function M.open(conn, link_id, cfg)
 	if cfg and cfg.transport and type(cfg.transport.open) == 'function' then
-		return cfg.transport.open(conn, link_id, cfg)
+		local obj, err = cfg.transport.open(conn, link_id, cfg)
+		if not obj then return nil, err end
+		return wrap_custom_transport(link_id, cfg, obj), nil
 	end
 	return open_transport(conn, link_id, cfg)
 end

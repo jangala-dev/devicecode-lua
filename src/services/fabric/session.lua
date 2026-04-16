@@ -3,6 +3,8 @@
 local fibers         = require 'fibers'
 local mailbox        = require 'fibers.mailbox'
 
+local safe           = require 'coxpcall'
+
 local session_ctl    = require 'services.fabric.session_ctl'
 local reader         = require 'services.fabric.reader'
 local writer         = require 'services.fabric.writer'
@@ -22,7 +24,7 @@ function M.run(scope, params)
 
 	local transport, err = transport_uart.open(root_conn, link_id, cfg)
 	if not transport then error('fabric session transport open failed: ' .. tostring(err), 0) end
-	fibers.current_scope():finally(function() pcall(function() transport:close() end) end)
+	fibers.current_scope():finally(function() safe.pcall(function() transport:close() end) end)
 
 	local control_in_tx, control_in_rx = mailbox.new(32, { full = 'reject_newest' })
 	local rpc_in_tx, rpc_in_rx = mailbox.new(64, { full = 'reject_newest' })
