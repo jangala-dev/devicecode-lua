@@ -2,7 +2,6 @@ local busmod    = require 'bus'
 local mailbox   = require 'fibers.mailbox'
 local runfibers = require 'tests.support.run_fibers'
 local probe     = require 'tests.support.bus_probe'
-local sleep     = require 'fibers.sleep'
 
 local session_ctl = require 'services.fabric.session_ctl'
 
@@ -46,6 +45,7 @@ function T.handshake_and_status_readiness_drive_ready_state()
 				control_rx = ctx.control_rx,
 				status_rx = ctx.status_rx,
 				tx_control = ctx.tx_control_tx,
+				state_conn = ctx.state_conn,
 				node_id = 'node-a',
 				hello_interval_s = 0.05,
 				ping_interval_s = 0.5,
@@ -79,10 +79,14 @@ function T.handshake_and_status_readiness_drive_ready_state()
 		assert(snap.peer_node == 'peer-node')
 		assert(snap.generation == before.generation)
 
-		local retained = probe.wait_payload(observer, { 'state', 'fabric', 'link', 'link-1' }, { timeout = 0.25 })
-		assert(retained.state == 'ready')
-		assert(retained.ready == true)
-		assert(retained.peer_sid == 'peer-sid')
+		local retained = probe.wait_payload(observer, { 'state', 'fabric', 'link', 'link-1', 'session' }, { timeout = 0.25 })
+		assert(retained.kind == 'fabric.link.session')
+		assert(retained.component == 'session')
+		assert(retained.link_id == 'link-1')
+		assert(type(retained.status) == 'table')
+		assert(retained.status.state == 'ready')
+		assert(retained.status.ready == true)
+		assert(retained.status.peer_sid == 'peer-sid')
 	end)
 end
 
@@ -99,6 +103,7 @@ function T.peer_session_change_bumps_generation_and_updates_snapshot()
 				control_rx = ctx.control_rx,
 				status_rx = ctx.status_rx,
 				tx_control = ctx.tx_control_tx,
+				state_conn = ctx.state_conn,
 				node_id = 'node-a',
 				hello_interval_s = 0.05,
 				ping_interval_s = 1.0,
@@ -139,6 +144,7 @@ function T.liveness_timeout_faults_the_link_controller()
 				control_rx = ctx.control_rx,
 				status_rx = ctx.status_rx,
 				tx_control = ctx.tx_control_tx,
+				state_conn = ctx.state_conn,
 				node_id = 'node-a',
 				hello_interval_s = 0.01,
 				ping_interval_s = 0.01,

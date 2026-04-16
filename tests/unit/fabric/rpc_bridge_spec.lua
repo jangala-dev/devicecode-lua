@@ -58,12 +58,15 @@ local function new_stub_svc()
 	}
 end
 
-
 local function wait_rpc_ready(env)
-	local st, err = env.status_rx:recv()
-	assert(st ~= nil, tostring(err))
-	assert(st.kind == 'rpc_ready')
-	return st
+	while true do
+		local st, err = env.status_rx:recv()
+		assert(st ~= nil, tostring(err))
+		assert(st.kind == 'rpc_ready')
+		if st.ready == true then
+			return st
+		end
+	end
 end
 
 function T.export_publish_maps_local_topics_and_suppresses_same_link_imports()
@@ -77,6 +80,7 @@ function T.export_publish_maps_local_topics_and_suppresses_same_link_imports()
 				link_id = 'link-a',
 				svc = new_stub_svc(),
 				conn = env.peer_conn,
+				state_conn = env.state_conn,
 				session = env.session,
 				rpc_rx = env.rpc_rx,
 				tx_rpc = env.tx_rpc_tx,
@@ -91,8 +95,9 @@ function T.export_publish_maps_local_topics_and_suppresses_same_link_imports()
 		assert(ok, tostring(err))
 		wait_rpc_ready(env)
 
+		local local_seen = local_pub:derive({ origin_factory = function() return { kind = 'fabric_import', link_id = 'link-a' } end })
 		local_pub:publish({ 'local', 'wifi' }, { up = true })
-		env.peer_conn:publish({ 'local', 'loop' }, { reflected = true })
+		local_seen:publish({ 'local', 'loop' }, { reflected = true })
 
 		local frame = recv_frame(env.tx_rpc_rx)
 		assert(frame.type == 'pub')
@@ -126,6 +131,7 @@ function T.imported_pub_retain_and_unretain_are_applied_with_fabric_origin()
 				link_id = 'link-b',
 				svc = new_stub_svc(),
 				conn = env.peer_conn,
+				state_conn = env.state_conn,
 				session = env.session,
 				rpc_rx = env.rpc_rx,
 				tx_rpc = env.tx_rpc_tx,
@@ -177,6 +183,7 @@ function T.outbound_local_call_times_out_when_remote_reply_does_not_arrive()
 				link_id = 'link-c',
 				svc = new_stub_svc(),
 				conn = env.peer_conn,
+				state_conn = env.state_conn,
 				session = env.session,
 				rpc_rx = env.rpc_rx,
 				tx_rpc = env.tx_rpc_tx,
@@ -220,6 +227,7 @@ function T.session_generation_change_fails_pending_outbound_calls()
 				link_id = 'link-d',
 				svc = new_stub_svc(),
 				conn = env.peer_conn,
+				state_conn = env.state_conn,
 				session = env.session,
 				rpc_rx = env.rpc_rx,
 				tx_rpc = env.tx_rpc_tx,
@@ -271,6 +279,7 @@ function T.inbound_remote_call_uses_helper_and_replies_successfully()
 				link_id = 'link-e',
 				svc = new_stub_svc(),
 				conn = env.peer_conn,
+				state_conn = env.state_conn,
 				session = env.session,
 				rpc_rx = env.rpc_rx,
 				tx_rpc = env.tx_rpc_tx,
@@ -304,6 +313,7 @@ function T.inbound_remote_call_respects_helper_limit()
 				link_id = 'link-f',
 				svc = new_stub_svc(),
 				conn = env.peer_conn,
+				state_conn = env.state_conn,
 				session = env.session,
 				rpc_rx = env.rpc_rx,
 				tx_rpc = env.tx_rpc_tx,

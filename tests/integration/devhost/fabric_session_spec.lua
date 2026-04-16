@@ -3,6 +3,7 @@ local duplex     = require 'tests.support.duplex_stream'
 local probe      = require 'tests.support.bus_probe'
 local runfibers  = require 'tests.support.run_fibers'
 local safe       = require 'coxpcall'
+local mailbox    = require 'fibers.mailbox'
 
 local session    = require 'services.fabric.session'
 
@@ -23,9 +24,11 @@ end
 local function wait_ready(conn, link_id, timeout)
 	return probe.wait_until(function()
 		local ok, payload = safe.pcall(function()
-			return probe.wait_payload(conn, { 'state', 'fabric', 'link', link_id }, { timeout = 0.02 })
+			return probe.wait_payload(conn, { 'state', 'fabric', 'link', link_id, 'session' }, { timeout = 0.02 })
 		end)
-		return ok and type(payload) == 'table' and payload.ready == true
+		return ok and type(payload) == 'table'
+			and type(payload.status) == 'table'
+			and payload.status.ready == true
 	end, { timeout = timeout or 1.5, interval = 0.01 })
 end
 
@@ -35,8 +38,10 @@ function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 		local conn = bus:connect()
 
 		local a_stream, b_stream = duplex.new_pair()
-		local a_ctl_tx, a_ctl_rx = require('fibers.mailbox').new(8, { full = 'reject_newest' })
-		local b_ctl_tx, b_ctl_rx = require('fibers.mailbox').new(8, { full = 'reject_newest' })
+		local a_ctl_tx, a_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
+		local b_ctl_tx, b_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
+		local a_report_tx, a_report_rx = mailbox.new(8, { full = 'reject_newest' })
+		local b_report_tx, b_report_rx = mailbox.new(8, { full = 'reject_newest' })
 
 		local ok1, err1 = scope:spawn(function()
 			session.run({
@@ -44,6 +49,7 @@ function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 				conn = bus:connect(),
 				link_id = 'link-a',
 				transfer_ctl_rx = a_ctl_rx,
+				report_tx = a_report_tx,
 				cfg = {
 					node_id = 'node-a',
 					transport = { open = function() return a_stream end },
@@ -70,6 +76,7 @@ function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 				conn = bus:connect(),
 				link_id = 'link-b',
 				transfer_ctl_rx = b_ctl_rx,
+				report_tx = b_report_tx,
 				cfg = {
 					node_id = 'node-b',
 					transport = { open = function() return b_stream end },

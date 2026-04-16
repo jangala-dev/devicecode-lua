@@ -1,13 +1,16 @@
 -- services/fabric/rpc_bridge.lua
+--
+-- Owns the retained bridge subtree for one link:
+--   state/fabric/link/<id>/bridge
 
 local fibers   = require 'fibers'
-local op       = require 'fibers.op'
 local runtime  = require 'fibers.runtime'
 local sleep    = require 'fibers.sleep'
 local uuid     = require 'uuid'
 
 local protocol = require 'services.fabric.protocol'
 local topicmap = require 'services.fabric.topicmap'
+local statefmt = require 'services.fabric.statefmt'
 
 local M = {}
 
@@ -22,6 +25,16 @@ local function send_rpc(tx_rpc, frame)
 	local item, err = protocol.writer_item('rpc', frame)
 	if not item then error(err, 0) end
 	send_required(tx_rpc, item, 'tx_rpc_overflow')
+end
+
+local function retain_best_effort(conn, topic, payload)
+	if not conn then return end
+	pcall(function() conn:retain(topic, payload) end)
+end
+
+local function unretain_best_effort(conn, topic)
+	if not conn then return end
+	pcall(function() conn:unretain(topic) end)
 end
 
 local function is_import_origin(origin, link_id)
@@ -72,6 +85,7 @@ end
 
 function M.run(ctx)
 	local conn = assert(ctx.conn, 'rpc_bridge requires conn')
+	local state_conn = assert(ctx.state_conn, 'rpc_bridge requires state_conn')
 	local session = assert(ctx.session, 'rpc_bridge requires session')
 	local rpc_rx = assert(ctx.rpc_rx, 'rpc_bridge requires rpc_rx')
 	local tx_rpc = assert(ctx.tx_rpc, 'rpc_bridge requires tx_rpc')
@@ -90,6 +104,7 @@ function M.run(ctx)
 	local max_pending = tonumber(ctx.max_pending_calls) or 64
 	local max_inbound_helpers = tonumber(ctx.max_inbound_helpers) or max_pending
 	local call_timeout = tonumber(ctx.call_timeout_s) or 5.0
+	local bridge_topic = statefmt.component_topic(link_id, 'bridge')
 
 	local bus = conn._bus
 	local m_wild = (bus and bus._m_wild) or '#'
@@ -135,15 +150,53 @@ function M.run(ctx)
 	local last_generation = snap0.generation
 	local last_peer_sid = snap0.peer_sid
 	local last_established = snap0.established
+	local last_bridge = nil
+
+	local function publish_bridge_state(force)
+		local snap = session:get()
+		local status = {
+			ready = (replay_pending == 0) and snap.ready or false,
+			replay_pending = replay_pending,
+			pending_calls = count_pending(pending),
+			inbound_helpers = inbound_helpers,
+			session_generation = snap.generation,
+			peer_sid = snap.peer_sid,
+			established = snap.established,
+		}
+
+		local changed = force
+			or last_bridge == nil
+			or last_bridge.ready ~= status.ready
+			or last_bridge.replay_pending ~= status.replay_pending
+			or last_bridge.pending_calls ~= status.pending_calls
+			or last_bridge.inbound_helpers ~= status.inbound_helpers
+			or last_bridge.session_generation ~= status.session_generation
+			or last_bridge.peer_sid ~= status.peer_sid
+			or last_bridge.established ~= status.established
+
+		if changed then
+			retain_best_effort(state_conn, bridge_topic, statefmt.link_component('bridge', link_id, status))
+			last_bridge = status
+		end
+	end
+
+	fibers.current_scope():finally(function()
+		unretain_best_effort(state_conn, bridge_topic)
+	end)
+
+	publish_bridge_state(true)
 
 	local function maybe_fail_expired()
 		local now = runtime.now()
+		local changed = false
 		for id, ent in pairs(pending) do
 			if ent.deadline <= now then
 				ent.req:fail('timeout')
 				pending[id] = nil
+				changed = true
 			end
 		end
+		if changed then publish_bridge_state(false) end
 	end
 
 	local function on_session_change()
@@ -161,6 +214,7 @@ function M.run(ctx)
 		end
 		last_peer_sid = snap.peer_sid
 		last_established = snap.established
+		publish_bridge_state(false)
 	end
 
 	local function export_message(rule, msg)
@@ -187,6 +241,7 @@ function M.run(ctx)
 		if ev.op == 'replay_done' then
 			if replay_pending > 0 then replay_pending = replay_pending - 1 end
 			send_required(status_tx, { kind = 'rpc_ready', ready = (replay_pending == 0) }, 'rpc_ready_status')
+			publish_bridge_state(false)
 			return
 		end
 		if ev.origin and is_import_origin(ev.origin, link_id) then return end
@@ -235,6 +290,7 @@ function M.run(ctx)
 		if not ent then return end
 		pending[msg.id] = nil
 		if msg.ok then ent.req:reply(msg.value) else ent.req:fail(msg.err or 'remote_error') end
+		publish_bridge_state(false)
 	end
 
 	local function spawn_inbound_helper(frame)
@@ -248,6 +304,7 @@ function M.run(ctx)
 			return
 		end
 		inbound_helpers = inbound_helpers + 1
+		publish_bridge_state(false)
 		fibers.spawn(function()
 			local ok, err
 			local timeout = tonumber(rule and rule.timeout) or call_timeout
@@ -298,6 +355,7 @@ function M.run(ctx)
 			topic = remote_topic,
 			payload = req.payload,
 		})
+		publish_bridge_state(false)
 	end
 
 	while true do
@@ -340,6 +398,7 @@ function M.run(ctx)
 					value = item.value,
 					err = item.err,
 				})
+				publish_bridge_state(false)
 			end
 		elseif which == 'session' then
 			session_seen = a or session_seen

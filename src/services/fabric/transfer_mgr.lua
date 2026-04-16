@@ -1,4 +1,8 @@
 -- services/fabric/transfer_mgr.lua
+--
+-- Per-link transfer manager.
+--
+-- Owns the detailed retained transfer subtree for one link.
 
 local fibers      = require 'fibers'
 local runtime     = require 'fibers.runtime'
@@ -7,6 +11,7 @@ local uuid        = require 'uuid'
 
 local blob_source = require 'services.fabric.blob_source'
 local protocol    = require 'services.fabric.protocol'
+local statefmt    = require 'services.fabric.statefmt'
 
 local M = {}
 
@@ -23,13 +28,22 @@ local function send_frame(tx, class, frame)
 	send_required(tx, item, 'writer_queue_overflow')
 end
 
-local function reply_job(job, payload)
-	if not job or not job.reply_tx then return end
-	job.reply_tx:send(payload)
+local function reply_req(req, payload)
+	if not req or req:done() then return end
+	req:reply(payload)
 end
 
-local function publish_state(conn, link_id, payload)
-	pcall(function() conn:retain({ 'state', 'fabric', 'link', link_id, 'transfer' }, payload) end)
+local function fail_req(req, err)
+	if not req or req:done() then return end
+	req:fail(err)
+end
+
+local function retain_best_effort(conn, topic, payload)
+	pcall(function() conn:retain(topic, payload) end)
+end
+
+local function unretain_best_effort(conn, topic)
+	pcall(function() conn:unretain(topic) end)
 end
 
 function M.run(ctx)
@@ -43,19 +57,29 @@ function M.run(ctx)
 	local chunk_size = tonumber(ctx.chunk_size) or 2048
 	local phase_timeout = tonumber(ctx.transfer_phase_timeout_s) or 15.0
 
+	local transfer_topic = statefmt.component_topic(link_id, 'transfer')
+
+	fibers.current_scope():finally(function()
+		unretain_best_effort(conn, transfer_topic)
+	end)
+
 	local outgoing = nil
 	local incoming = nil
 	local session_seen = session:pulse():version()
 	local last_generation = session:get().generation
 
-	publish_state(conn, link_id, { state = 'idle', ts = runtime.now() })
+	local function publish_state(status)
+		retain_best_effort(conn, transfer_topic, statefmt.link_component('transfer', link_id, status))
+	end
+
+	publish_state({ state = 'idle' })
 
 	local function clear_outgoing(reason)
-		if outgoing and outgoing.job then
-			reply_job(outgoing.job, { ok = false, err = reason or 'aborted', xfer_id = outgoing.xfer_id })
+		if outgoing and outgoing.req then
+			fail_req(outgoing.req, reason or 'aborted')
 		end
 		outgoing = nil
-		publish_state(conn, link_id, { state = 'idle', ts = runtime.now() })
+		publish_state({ state = 'idle', err = reason })
 	end
 
 	local function clear_incoming(reason)
@@ -63,7 +87,7 @@ function M.run(ctx)
 			pcall(function() incoming.sink:abort() end)
 		end
 		incoming = nil
-		publish_state(conn, link_id, { state = 'idle', ts = runtime.now(), err = reason })
+		publish_state({ state = 'idle', err = reason })
 	end
 
 	local function abort_all(reason)
@@ -78,25 +102,29 @@ function M.run(ctx)
 	end
 
 	local function publish_transfer(payload)
-		payload.link_id = link_id
-		payload.ts = runtime.now()
-		publish_state(conn, link_id, payload)
+		publish_state(payload)
 	end
 
-	local function begin_outgoing(job)
+	local function begin_outgoing(req)
+		if req:done() then
+			return
+		end
 		if outgoing then
-			reply_job(job, { ok = false, err = 'busy' })
+			fail_req(req, 'busy')
 			return
 		end
-		local source, err = blob_source.normalise_source(job.source)
+
+		local payload = req.payload or {}
+		local source, err = blob_source.normalise_source(payload.source or payload.data)
 		if not source then
-			reply_job(job, { ok = false, err = err })
+			fail_req(req, err)
 			return
 		end
-		local xfer_id = job.xfer_id or tostring(uuid.new())
+
+		local xfer_id = payload.xfer_id or tostring(uuid.new())
 		outgoing = {
 			xfer_id = xfer_id,
-			job = job,
+			req = req,
 			source = source,
 			size = source:size(),
 			checksum = source:checksum(),
@@ -109,7 +137,7 @@ function M.run(ctx)
 			xfer_id = xfer_id,
 			size = outgoing.size,
 			checksum = outgoing.checksum,
-			meta = job.meta,
+			meta = payload.meta,
 		})
 		publish_transfer({ state = outgoing.state, xfer_id = xfer_id, direction = 'out', size = outgoing.size, offset = 0 })
 	end
@@ -118,23 +146,48 @@ function M.run(ctx)
 		if not outgoing then return end
 		if outgoing.state ~= 'waiting_ready' and outgoing.state ~= 'sending' then return end
 		if trigger_offset ~= nil and trigger_offset ~= outgoing.offset then return end
+
 		if outgoing.offset >= outgoing.size then
 			outgoing.state = 'committing'
 			outgoing.deadline = runtime.now() + phase_timeout
-			send_frame(tx_control, 'control', { type = 'xfer_commit', xfer_id = outgoing.xfer_id, size = outgoing.size, checksum = outgoing.checksum })
-			publish_transfer({ state = outgoing.state, xfer_id = outgoing.xfer_id, direction = 'out', size = outgoing.size, offset = outgoing.offset })
+			send_frame(tx_control, 'control', {
+				type = 'xfer_commit',
+				xfer_id = outgoing.xfer_id,
+				size = outgoing.size,
+				checksum = outgoing.checksum,
+			})
+			publish_transfer({
+				state = outgoing.state,
+				xfer_id = outgoing.xfer_id,
+				direction = 'out',
+				size = outgoing.size,
+				offset = outgoing.offset,
+			})
 			return
 		end
+
 		local data, err = outgoing.source:read_chunk(outgoing.offset, chunk_size)
 		if data == nil then
 			clear_outgoing(err or 'source_error')
 			return
 		end
+
 		outgoing.state = 'sending'
-		send_frame(tx_bulk, 'bulk', { type = 'xfer_chunk', xfer_id = outgoing.xfer_id, offset = outgoing.offset, data = data })
+		send_frame(tx_bulk, 'bulk', {
+			type = 'xfer_chunk',
+			xfer_id = outgoing.xfer_id,
+			offset = outgoing.offset,
+			data = data,
+		})
 		outgoing.offset = outgoing.offset + #data
 		outgoing.deadline = runtime.now() + phase_timeout
-		publish_transfer({ state = outgoing.state, xfer_id = outgoing.xfer_id, direction = 'out', size = outgoing.size, offset = outgoing.offset })
+		publish_transfer({
+			state = outgoing.state,
+			xfer_id = outgoing.xfer_id,
+			direction = 'out',
+			size = outgoing.size,
+			offset = outgoing.offset,
+		})
 	end
 
 	local function handle_incoming_begin(frame)
@@ -171,7 +224,7 @@ function M.run(ctx)
 		incoming.offset = incoming.offset + #frame.data
 		incoming.deadline = runtime.now() + phase_timeout
 		send_frame(tx_control, 'control', { type = 'xfer_need', xfer_id = frame.xfer_id, next = incoming.offset })
-		publish_transfer({ state = incoming.state, xfer_id = frame.xfer_id, direction = 'in', size = incoming.size, offset = incoming.offset })
+		publish_transfer({ state = incoming.state, xfer_id = incoming.xfer_id, direction = 'in', size = incoming.size, offset = incoming.offset })
 	end
 
 	local function handle_incoming_commit(frame)
@@ -192,35 +245,47 @@ function M.run(ctx)
 		incoming = nil
 	end
 
-	local function handle_job(job)
-		if job.op == 'send_blob' then
-			begin_outgoing(job)
-		elseif job.op == 'status' then
-			reply_job(job, {
-				ok = true,
-				outgoing = outgoing and {
-					xfer_id = outgoing.xfer_id,
-					state = outgoing.state,
-					size = outgoing.size,
-					offset = outgoing.offset,
-				},
-				incoming = incoming and {
-					xfer_id = incoming.xfer_id,
-					state = incoming.state,
-					size = incoming.size,
-					offset = incoming.offset,
-				},
-			})
-		elseif job.op == 'abort' then
-			abort_all(job.reason or 'aborted')
-			reply_job(job, { ok = true })
+	local function current_status_snapshot()
+		return {
+			ok = true,
+			outgoing = outgoing and {
+				xfer_id = outgoing.xfer_id,
+				state = outgoing.state,
+				size = outgoing.size,
+				offset = outgoing.offset,
+			},
+			incoming = incoming and {
+				xfer_id = incoming.xfer_id,
+				state = incoming.state,
+				size = incoming.size,
+				offset = incoming.offset,
+			},
+		}
+	end
+
+	local function handle_req(req)
+		if req:done() then
+			return
+		end
+
+		local payload = req.payload or {}
+		local op_name = payload.op
+
+		if op_name == 'send_blob' then
+			begin_outgoing(req)
+		elseif op_name == 'status' then
+			reply_req(req, current_status_snapshot())
+		elseif op_name == 'abort' then
+			abort_all(payload.reason or 'aborted')
+			reply_req(req, { ok = true })
 		else
-			reply_job(job, { ok = false, err = 'unsupported_op' })
+			fail_req(req, 'unsupported_op')
 		end
 	end
 
 	local function handle_xfer_msg(frame)
-		if frame.type == 'xfer_begin' then handle_incoming_begin(frame)
+		if frame.type == 'xfer_begin' then
+			handle_incoming_begin(frame)
 		elseif frame.type == 'xfer_ready' then
 			if outgoing and frame.xfer_id == outgoing.xfer_id then
 				outgoing.state = 'sending'
@@ -231,17 +296,24 @@ function M.run(ctx)
 			if outgoing and frame.xfer_id == outgoing.xfer_id then
 				maybe_send_outgoing_chunk(frame.next)
 			end
-		elseif frame.type == 'xfer_commit' then handle_incoming_commit(frame)
+		elseif frame.type == 'xfer_commit' then
+			handle_incoming_commit(frame)
 		elseif frame.type == 'xfer_done' then
 			if outgoing and frame.xfer_id == outgoing.xfer_id then
-				reply_job(outgoing.job, { ok = true, xfer_id = outgoing.xfer_id, size = outgoing.size, checksum = outgoing.checksum })
+				reply_req(outgoing.req, {
+					ok = true,
+					xfer_id = outgoing.xfer_id,
+					size = outgoing.size,
+					checksum = outgoing.checksum,
+				})
 				publish_transfer({ state = 'done', xfer_id = outgoing.xfer_id, direction = 'out', size = outgoing.size, offset = outgoing.offset, checksum = outgoing.checksum })
 				outgoing = nil
 			end
 		elseif frame.type == 'xfer_abort' then
 			if outgoing and frame.xfer_id == outgoing.xfer_id then clear_outgoing(frame.err or 'remote_abort') end
 			if incoming and frame.xfer_id == incoming.xfer_id then clear_incoming(frame.err or 'remote_abort') end
-		elseif frame.type == 'xfer_chunk' then handle_incoming_chunk(frame)
+		elseif frame.type == 'xfer_chunk' then
+			handle_incoming_chunk(frame)
 		end
 	end
 
@@ -269,7 +341,7 @@ function M.run(ctx)
 
 		local which, item = fibers.perform(fibers.named_choice(ops))
 		if which == 'ctl' and item then
-			handle_job(item)
+			handle_req(item)
 		elseif which == 'xfer' and item then
 			handle_xfer_msg(item.msg or item)
 		elseif which == 'session' then

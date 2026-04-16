@@ -1,10 +1,15 @@
 -- services/fabric/session_ctl.lua
+--
+-- Owns the retained session subtree for one link:
+--   state/fabric/link/<id>/session
 
-local fibers   = require 'fibers'
+local fibers    = require 'fibers'
 local pulse_mod = require 'fibers.pulse'
-local runtime  = require 'fibers.runtime'
-local sleep    = require 'fibers.sleep'
-local uuid     = require 'uuid'
+local runtime   = require 'fibers.runtime'
+local sleep     = require 'fibers.sleep'
+local uuid      = require 'uuid'
+
+local statefmt  = require 'services.fabric.statefmt'
 
 local M = {}
 
@@ -37,21 +42,33 @@ local function same_snapshot(a, b)
 		and a.ready == b.ready
 end
 
-local function publish_state(conn, link_id, snapshot)
+local function retain_best_effort(conn, topic, payload)
 	if not conn then return end
 	pcall(function ()
-		conn:retain({ 'state', 'fabric', 'link', link_id }, {
-			link_id = link_id,
-			state = snapshot.state,
-			local_sid = snapshot.local_sid,
-			peer_sid = snapshot.peer_sid,
-			peer_node = snapshot.peer_node,
-			generation = snapshot.generation,
-			established = snapshot.established,
-			ready = snapshot.ready,
-			ts = runtime.now(),
-		})
+		conn:retain(topic, payload)
 	end)
+end
+
+local function unretain_best_effort(conn, topic)
+	if not conn then return end
+	pcall(function ()
+		conn:unretain(topic)
+	end)
+end
+
+local function publish_state(conn, topic, link_id, snapshot)
+	retain_best_effort(conn, topic, statefmt.link_component('session', link_id, {
+		state = snapshot.state,
+		local_sid = snapshot.local_sid,
+		peer_sid = snapshot.peer_sid,
+		peer_node = snapshot.peer_node,
+		generation = snapshot.generation,
+		last_rx_at = snapshot.last_rx_at,
+		last_tx_at = snapshot.last_tx_at,
+		last_pong_at = snapshot.last_pong_at,
+		established = snapshot.established,
+		ready = snapshot.ready,
+	}))
 end
 
 function M.new_state(link_id, state_conn)
@@ -69,13 +86,14 @@ function M.new_state(link_id, state_conn)
 		ready = false,
 	}
 	local last_published = nil
+	local topic = statefmt.component_topic(link_id, 'session')
 
 	local holder = {}
 
 	local function maybe_publish(force)
 		if force or not same_snapshot(current, last_published) then
 			last_published = current
-			publish_state(state_conn, link_id, current)
+			publish_state(state_conn, topic, link_id, current)
 		end
 	end
 
@@ -107,6 +125,10 @@ function M.new_state(link_id, state_conn)
 		return pulse
 	end
 
+	function holder:unretain()
+		unretain_best_effort(state_conn, topic)
+	end
+
 	maybe_publish(true)
 	return holder
 end
@@ -123,10 +145,12 @@ function M.run(ctx)
 	local tx_control = assert(ctx.tx_control, 'session_ctl requires tx_control')
 	local status_rx = assert(ctx.status_rx, 'session_ctl requires status_rx')
 	local session = assert(ctx.session, 'session_ctl requires session state')
+	local state_conn = assert(ctx.state_conn, 'session_ctl requires state_conn')
 	local hello_interval = tonumber(ctx.hello_interval_s) or 2.0
 	local ping_interval = tonumber(ctx.ping_interval_s) or 10.0
 	local liveness_timeout = tonumber(ctx.liveness_timeout_s) or 30.0
 	local link_id = ctx.link_id
+	local topic = statefmt.component_topic(link_id, 'session')
 
 	local rpc_ready = false
 	local next_hello_at = runtime.now()
@@ -141,7 +165,7 @@ function M.run(ctx)
 	end
 
 	local function activity_mut(f)
-		session:update(f)
+		session:update(f, { publish = true })
 	end
 
 	local function bump_generation(mut)
@@ -181,6 +205,7 @@ function M.run(ctx)
 			s.ready = false
 			s.established = false
 		end)
+		unretain_best_effort(state_conn, topic)
 	end)
 
 	while true do
