@@ -90,7 +90,7 @@ function M.start(scope, bus, specs, opts)
 					kind    = 'msg',
 					topic   = msg.topic,
 					payload = msg.payload,
-					id      = msg.id,
+					origin  = msg.origin,
 				})
 			end
 		end)

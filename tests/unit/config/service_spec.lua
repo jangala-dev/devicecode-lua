@@ -102,17 +102,18 @@ function T.config_accepts_set_and_persists_debounced()
 
 		local req_conn = bus:connect()
 
-		-- Retry publish until the service has definitely started consuming.
+		-- Retry call until the service has definitely bound and accepted it.
 		local deadline = fibers.now() + 0.5
 		local seen = false
 
 		while fibers.now() < deadline do
-			req_conn:publish({ 'config', 'net', 'set' }, {
+			req_conn:call({ 'cmd', 'config', 'set' }, {
+				service = 'net',
 				data = {
 					schema = 'devicecode.net/1',
 					answer = 42,
 				},
-			})
+			}, { timeout = 0.02 })
 
 			seen = probe.wait_until(function()
 				local ok, payload = safe.pcall(function()

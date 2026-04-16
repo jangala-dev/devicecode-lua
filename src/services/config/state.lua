@@ -53,7 +53,13 @@ function M.set_service(current, conn, svc, mark_dirty, service, payload, msg)
 	})
 
 	if svc and svc.obs_event then
-		svc:obs_event('set_applied', { service = service, rev = next_rev, id = msg and msg.id or nil })
+		local origin = msg and msg.origin or nil
+		svc:obs_event('set_applied', {
+			service = service,
+			rev = next_rev,
+			origin_kind = origin and origin.kind or nil,
+			conn_id = origin and origin.conn_id or nil,
+		})
 	end
 	if mark_dirty then
 		mark_dirty('set ' .. service)

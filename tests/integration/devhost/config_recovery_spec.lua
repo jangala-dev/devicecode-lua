@@ -109,12 +109,15 @@ function T.devhost_config_degrades_on_persist_failure_then_recovers()
 		end
 
 		local req_conn = bus:connect()
-		req_conn:publish({ 'config', 'net', 'set' }, {
+		local reply, call_err = req_conn:call({ 'cmd', 'config', 'set' }, {
+			service = 'net',
 			data = {
 				schema = 'devicecode.net/1',
 				answer = 42,
 			},
-		})
+		}, { timeout = 0.25 })
+		assert(call_err == nil, tostring(call_err))
+		assert(type(reply) == 'table' and reply.ok == true and reply.persisted == false)
 
 		local degraded_index = nil
 		local saw_degraded = probe.wait_until(function()

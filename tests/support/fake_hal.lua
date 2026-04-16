@@ -149,18 +149,16 @@ function FakeHal:_start_legacy_rpc(conn)
 
 		fibers.spawn(function()
 			while true do
-				local msg = ep:recv()
-				if not msg then
+				local req, err = ep:recv()
+				if not req then
 					return
 				end
 
-				local req = msg.payload or {}
-				self:_record_call(method, req, msg)
+				local payload = req.payload or {}
+				self:_record_call(method, payload, req)
 
-				local reply = self:_next_reply(method, req, msg)
-				if msg.reply_to ~= nil then
-					conn:publish_one(msg.reply_to, reply, { id = msg.id })
-				end
+				local reply = self:_next_reply(method, payload, req)
+				req:reply(reply)
 			end
 		end)
 	end
@@ -174,7 +172,7 @@ function FakeHal:_start_capability_rpc(conn, class, id, offering, legacy_method)
 
 	fibers.spawn(function()
 		while true do
-			local msg = ep:recv()
+			local msg, err = ep:recv()
 			if not msg then
 				return
 			end
@@ -188,9 +186,7 @@ function FakeHal:_start_capability_rpc(conn, class, id, offering, legacy_method)
 			local reply = self:_next_reply(method, req, msg)
 			reply = map_cap_reply(method, reply)
 
-			if msg.reply_to ~= nil then
-				conn:publish_one(msg.reply_to, reply, { id = msg.id })
-			end
+			msg:reply(reply)
 		end
 	end)
 end
