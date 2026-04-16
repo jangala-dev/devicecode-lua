@@ -1,3 +1,4 @@
+local safe         = require 'coxpcall'
 local fibers       = require 'fibers'
 local file         = require 'fibers.io.file'
 local http_server  = require 'http.server'
@@ -92,7 +93,7 @@ end
 
 local function read_body_string(stream)
 	if type(stream.get_body_as_string) == 'function' then
-		local ok, body = pcall(function() return stream:get_body_as_string() end)
+		local ok, body = safe.pcall(function() return stream:get_body_as_string() end)
 		if ok then return body or '' end
 		return nil, body
 	end
@@ -141,7 +142,7 @@ local function serve_static(stream, req_method, req_path, www_root)
 	if req_method ~= 'HEAD' then
 		while true do
 			local chunk, rerr = s:read_some(16384)
-			if rerr ~= nil then pcall(function() s:close() end); write_text(stream, 500, 'read error\n'); return true end
+			if rerr ~= nil then safe.pcall(function() s:close() end); write_text(stream, 500, 'read error\n'); return true end
 			if chunk == nil then break end
 			assert(stream:write_chunk(chunk, false))
 		end
@@ -314,10 +315,10 @@ function M.run(svc, app, opts)
 			if http_util and type(http_util.yieldable_pcall) == 'function' then
 				ok, err = http_util.yieldable_pcall(self.onstream, self, stream)
 			else
-				ok, err = pcall(self.onstream, self, stream)
+				ok, err = safe.pcall(self.onstream, self, stream)
 			end
 			if not ok then self:onerror()(self, stream, 'onstream', err) end
-			if stream.state ~= 'closed' then pcall(function() stream:shutdown() end) end
+			if stream.state ~= 'closed' then safe.pcall(function() stream:shutdown() end) end
 		end)
 	end
 

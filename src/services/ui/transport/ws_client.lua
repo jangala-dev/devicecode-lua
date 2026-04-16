@@ -3,6 +3,7 @@ local mailbox   = require 'fibers.mailbox'
 local websocket = require 'http.websocket'
 local cjson     = require 'cjson.safe'
 local errors    = require 'services.ui.errors'
+local safe    = require 'coxpcall'
 
 local perform = fibers.perform
 local choice  = fibers.choice
@@ -110,7 +111,7 @@ function M.run(svc, app, stream, req_headers, opts)
 	local user_conn = nil
 
 	local function send_out(msg)
-		local ok, ret = pcall(ws_send, ws, msg)
+		local ok, ret = safe.pcall(ws_send, ws, msg)
 		if (not ok) or ret == nil or ret == false then
 			alive = false
 			return false
@@ -262,7 +263,8 @@ function M.run(svc, app, stream, req_headers, opts)
 
 	clear_user_conn('socket_closed')
 	pcall(function() inbound_tx:close('done') end)
-	pcall(function() ws:close() end)
+	-- close on a stream-backed websocket may yield
+	safe.pcall(function() ws:close() end)
 	on_closed()
 end
 
