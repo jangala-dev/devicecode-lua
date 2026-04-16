@@ -58,35 +58,30 @@ function M.run(ctx)
 	local function choose_non_control_rx()
 		local rpc_ready = has_item(tx_rpc)
 		local bulk_ready = has_item(tx_bulk)
-		if rpc_ready and not bulk_ready then return tx_rpc end
-		if bulk_ready and not rpc_ready then return tx_bulk end
-		if not rpc_ready and not bulk_ready then return nil end
 
-		if turn == 'rpc' then
-			if quota_left <= 0 then
+		if not rpc_ready and not bulk_ready then
+			return nil
+		end
+		if rpc_ready and not bulk_ready then
+			return tx_rpc
+		end
+		if bulk_ready and not rpc_ready then
+			return tx_bulk
+		end
+
+		-- both ready: apply weighted RR only here
+		if quota_left <= 0 then
+			if turn == 'rpc' then
 				turn = 'bulk'
 				quota_left = bulk_quota
-			end
-			if rpc_ready then
-				quota_left = quota_left - 1
-				return tx_rpc
-			end
-			turn = 'bulk'
-			quota_left = bulk_quota - 1
-			return tx_bulk
-		else
-			if quota_left <= 0 then
+			else
 				turn = 'rpc'
 				quota_left = rpc_quota
 			end
-			if bulk_ready then
-				quota_left = quota_left - 1
-				return tx_bulk
-			end
-			turn = 'rpc'
-			quota_left = rpc_quota - 1
-			return tx_rpc
 		end
+
+		quota_left = quota_left - 1
+		return (turn == 'rpc') and tx_rpc or tx_bulk
 	end
 
 	local function choose_ready_rx()

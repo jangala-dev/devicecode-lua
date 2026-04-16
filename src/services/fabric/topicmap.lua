@@ -49,7 +49,7 @@ local function match_rule(rules, topic, from_field, to_field)
 	for i = 1, #rules do
 		local rule = rules[i]
 		if rule.topic then
-			local wanted = rule[from_field]
+			local wanted = rule.topic
 			if #wanted == #topic then
 				local ok = true
 				for j = 1, #topic do
