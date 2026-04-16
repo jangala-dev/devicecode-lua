@@ -301,11 +301,8 @@ function HalService.start(conn, opts)
                 id = id,
                 verb = verb,
             })
-            -- Command-plane callers should supply a Request, but avoid crashing
-            -- if this path is reached incorrectly.
-            if req and req.fail then
-                req:fail(tostring(ctrl_req_err))
-            end
+            -- ordinary publish traffic does not reach bound endpoints
+            req:fail(tostring(ctrl_req_err))
             return
         end
 
