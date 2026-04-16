@@ -2,6 +2,8 @@ local fibers  = require 'fibers'
 local mailbox = require 'fibers.mailbox'
 local safe    = require 'coxpcall'
 local scope   = require 'fibers.scope'
+local op      = require 'fibers.op'
+local sleep   = require 'fibers.sleep'
 
 local base      = require 'devicecode.service_base'
 local auth_mod  = require 'services.ui.auth'
@@ -55,6 +57,20 @@ local function default_announce(svc)
 			watch = true,
 		},
 	}
+end
+
+local function next_shell_event_op(ctl_rx, prune_s)
+	return op.choice(
+		ctl_rx:recv_op():wrap(function(ev)
+			if ev == nil then
+				return { tag = 'ctl_closed', reason = tostring(ctl_rx:why() or 'closed') }
+			end
+			return ev
+		end),
+		sleep.sleep_op(prune_s):wrap(function()
+			return { tag = 'prune_tick' }
+		end)
+	)
 end
 
 function M.start(conn, opts)
@@ -169,14 +185,6 @@ function M.start(conn, opts)
 	retain_state()
 
 	fibers.spawn(function()
-		while true do
-			fibers.perform(require('fibers.sleep').sleep_op(session_prune_s))
-			local removed = session_store:prune()
-			if removed > 0 then note_session_count() end
-		end
-	end)
-
-	fibers.spawn(function()
 		run_http(svc, app, {
 			host = opts.host,
 			port = opts.port,
@@ -195,11 +203,16 @@ function M.start(conn, opts)
 	end)
 
 	while true do
-		local ev, why = ctl_rx:recv()
-		if ev == nil then
-			error('ui ctl closed: ' .. tostring(why or 'closed'), 0)
-		end
-		if ev.tag == 'model_ready' then
+		local ev = fibers.perform(next_shell_event_op(ctl_rx, session_prune_s))
+		if ev.tag == 'ctl_closed' then
+			error('ui ctl closed: ' .. tostring(ev.reason or 'closed'), 0)
+		elseif ev.tag == 'prune_tick' then
+			local removed = session_store:prune()
+			if removed > 0 then
+				aggregate.sessions = session_store:count()
+				retain_state()
+			end
+		elseif ev.tag == 'model_ready' then
 			aggregate.model_ready = true
 			aggregate.model_seq = ev.seq or aggregate.model_seq
 			retain_state()

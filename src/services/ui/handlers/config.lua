@@ -1,3 +1,4 @@
+local safe    = require 'coxpcall'
 local errors  = require 'services.ui.errors'
 local queries = require 'services.ui.queries'
 
@@ -20,7 +21,7 @@ function M.set(ctx, session_id, service_name, data, user_conn)
 	end
 
 	local function do_call(conn)
-		local ok, out, call_err = pcall(function()
+		local ok, out, call_err = safe.pcall(function()
 			return conn:call({ 'config', service_name, 'set' }, { data = data })
 		end)
 		if not ok then return nil, errors.from(out, 502) end

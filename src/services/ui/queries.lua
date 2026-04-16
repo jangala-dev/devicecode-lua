@@ -64,12 +64,27 @@ end
 function M.fabric_status(model)
 	local main, merr = model:get_exact({ 'state', 'fabric' })
 	if not main and errors.code(merr) ~= 'not_found' then return nil, merr end
-	local links, lerr = model:snapshot({ 'state', 'fabric', 'link', '+' })
+	local links, lerr = model:snapshot({ 'state', 'fabric', 'link', '+', '#' })
 	if not links then return nil, lerr end
+	local out = {}
+	for i = 1, #(links.entries or {}) do
+		local rec = links.entries[i]
+		local topic = rec and rec.topic or nil
+		local link_id = type(topic) == 'table' and topic[4] or nil
+		local view = type(topic) == 'table' and topic[5] or nil
+		if type(link_id) == 'string' and link_id ~= '' and type(view) == 'string' and view ~= '' then
+			local slot = out[link_id]
+			if not slot then
+				slot = {}
+				out[link_id] = slot
+			end
+			slot[view] = rec.payload
+		end
+	end
 	return {
 		seq = links.seq,
 		main = main and main.payload or nil,
-		links = by_name(links.entries, 4),
+		links = out,
 	}, nil
 end
 

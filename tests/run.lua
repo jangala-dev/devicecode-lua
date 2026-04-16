@@ -39,10 +39,18 @@ local files = {
 	'unit.fabric.writer_spec',
 	'unit.fabric.rpc_bridge_spec',
 	'unit.fabric.transfer_mgr_spec',
+	'unit.ui.topics_spec',
+	'unit.ui.sessions_spec',
+	'unit.ui.queries_spec',
+	'unit.ui.model_spec',
+	'unit.ui.http_transport_spec',
+	'unit.ui.service_spec',
 	'integration.devhost.main_failure_spec',
 	'integration.devhost.config_recovery_spec',
 	'integration.devhost.fabric_session_spec',
 	'integration.devhost.hal_uart_spec',
+	'integration.devhost.ui_service_spec',
+	'integration.devhost.ui_ws_spec',
 }
 
 local total, failed = 0, 0

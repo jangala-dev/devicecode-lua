@@ -1,3 +1,4 @@
+local safe   = require 'coxpcall'
 local errors = require 'services.ui.errors'
 local topics = require 'services.ui.topics'
 
@@ -10,7 +11,7 @@ function M.call(ctx, session_id, topic, payload, timeout, user_conn)
 	if not norm then return nil, errors.bad_request(nerr) end
 
 	local function do_call(conn)
-		local ok, out, call_err = pcall(function()
+		local ok, out, call_err = safe.pcall(function()
 			return conn:call(norm, payload, {
 				timeout = timeout,
 				extra = { via = 'ui' },

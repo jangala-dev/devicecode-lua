@@ -1,10 +1,9 @@
-local fibers  = require 'fibers'
-local mailbox = require 'fibers.mailbox'
-local op      = require 'fibers.op'
-local pulse   = require 'fibers.pulse'
-local cond    = require 'fibers.cond'
-local sleep   = require 'fibers.sleep'
-local trie    = require 'trie'
+local fibers = require 'fibers'
+local op     = require 'fibers.op'
+local pulse  = require 'fibers.pulse'
+local cond   = require 'fibers.cond'
+local sleep  = require 'fibers.sleep'
+local trie   = require 'trie'
 
 local errors = require 'services.ui.errors'
 local topics = require 'services.ui.topics'
@@ -20,12 +19,6 @@ local DEFAULT_SOURCES = {
 	{ name = 'cap',   pattern = { 'cap', '#' } },
 	{ name = 'dev',   pattern = { 'dev', '#' } },
 }
-
-local function send_required(tx, item, what)
-	local ok, reason = tx:send(item)
-	if ok == true then return true end
-	error((what or 'ui model queue') .. ': ' .. tostring(reason or 'closed'), 0)
-end
 
 local function watcher_close(self, key, reason)
 	local rec = self._watchers[key]
@@ -64,7 +57,6 @@ function Model:close(reason)
 	end
 	self._pulse:close(self._close_reason)
 	self._ready_cond:signal()
-	pcall(function() self._ctl_tx:close(self._close_reason) end)
 	if self._report_tx then
 		pcall(function()
 			self._report_tx:send({ tag = 'model_closed', reason = self._close_reason })
@@ -164,6 +156,7 @@ function Model:open_watch(pattern, opts)
 	if not self._ready then return nil, errors.not_ready('ui model is not ready') end
 
 	local qlen = (type(opts.queue_len) == 'number' and opts.queue_len >= 0) and opts.queue_len or 128
+	local mailbox = require 'fibers.mailbox'
 	local tx, rx = mailbox.new(qlen, { full = 'reject_newest' })
 	local key = {}
 	self._watchers[key] = { pattern = norm, tx = tx }
@@ -260,33 +253,6 @@ local function apply_unretain(self, ev)
 	})
 end
 
-local function start_source(self, source)
-	fibers.spawn(function()
-		local rw = self._conn:watch_retained(source.pattern, {
-			queue_len = self._queue_len,
-			full = 'drop_oldest',
-			replay = true,
-		})
-		self._source_watches[source.name] = rw
-		while not self._closed do
-			local ev, err = rw:recv()
-			if not ev then
-				send_required(self._ctl_tx, {
-					tag = 'source_closed',
-					source = source.name,
-					err = tostring(err or 'closed'),
-				}, 'ui model ctl')
-				return
-			end
-			send_required(self._ctl_tx, {
-				tag = 'source_event',
-				source = source.name,
-				ev = ev,
-			}, 'ui model ctl')
-		end
-	end)
-end
-
 local function report(self, item)
 	if not self._report_tx then return end
 	local ok = self._report_tx:send(item)
@@ -295,35 +261,44 @@ local function report(self, item)
 	end
 end
 
+local function next_source_event_op(self)
+	local arms = {}
+	for i = 1, #self._sources do
+		local source = self._sources[i]
+		local rw = self._source_watches[source.name]
+		if rw then
+			arms[source.name] = rw:recv_op():wrap(function(ev, err)
+				return ev, err
+			end)
+		end
+	end
+	return op.named_choice(arms)
+end
+
 local function run(self)
 	while true do
-		local item, why = self._ctl_rx:recv()
-		if item == nil then
+		local source, ev, err = fibers.perform(next_source_event_op(self))
+		if ev == nil then
 			if self._closed then return end
-			error('ui model ctl closed: ' .. tostring(why or 'closed'), 0)
+			error(('ui model source %s closed: %s'):format(tostring(source), tostring(err or 'closed')), 0)
 		end
 
-		if item.tag == 'source_closed' then
-			if not self._closed then
-				error(('ui model source %s closed: %s'):format(tostring(item.source), tostring(item.err)), 0)
+		if ev.op == 'replay_done' then
+			self._pending[source] = nil
+			if not self._ready and next(self._pending) == nil then
+				self._ready = true
+				self._ready_cond:signal()
+				report(self, { tag = 'model_ready', seq = self._seq })
 			end
-		elseif item.tag == 'source_event' then
-			local ev = item.ev
-			if ev.op == 'replay_done' then
-				self._pending[item.source] = nil
-				if not self._ready and next(self._pending) == nil then
-					self._ready = true
-					self._ready_cond:signal()
-					report(self, { tag = 'model_ready', seq = self._seq })
-				end
-			elseif ev.op == 'retain' or ev.op == 'unretain' then
-				self._seq = self._seq + 1
-				if ev.op == 'retain' then
-					apply_retain(self, ev)
-				else
-					apply_unretain(self, ev)
-				end
-				self._pulse:signal()
+		elseif ev.op == 'retain' or ev.op == 'unretain' then
+			self._seq = self._seq + 1
+			if ev.op == 'retain' then
+				apply_retain(self, ev)
+			else
+				apply_unretain(self, ev)
+			end
+			self._pulse:signal()
+			if self._ready then
 				report(self, { tag = 'model_seq', seq = self._seq })
 			end
 		end
@@ -336,8 +311,6 @@ function M.start(conn, opts)
 		_conn = assert(conn, 'ui model requires a connection'),
 		_sources = opts.sources or DEFAULT_SOURCES,
 		_queue_len = (type(opts.queue_len) == 'number' and opts.queue_len > 0) and opts.queue_len or 256,
-		_ctl_tx = nil,
-		_ctl_rx = nil,
 		_report_tx = opts.report_tx,
 		_store = trie.new_retained('+', '#'),
 		_by_key = {},
@@ -352,13 +325,14 @@ function M.start(conn, opts)
 		_ready_cond = cond.new(),
 	}, Model)
 
-	local tx, rx = mailbox.new(self._queue_len, { full = 'reject_newest' })
-	self._ctl_tx = tx
-	self._ctl_rx = rx
-
 	for i = 1, #self._sources do
-		self._pending[self._sources[i].name] = true
-		start_source(self, self._sources[i])
+		local source = self._sources[i]
+		self._pending[source.name] = true
+		self._source_watches[source.name] = self._conn:watch_retained(source.pattern, {
+			queue_len = self._queue_len,
+			full = 'drop_oldest',
+			replay = true,
+		})
 	end
 
 	fibers.spawn(function()
