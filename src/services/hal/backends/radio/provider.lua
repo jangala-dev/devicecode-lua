@@ -13,6 +13,7 @@ local BACKENDS = {
 local function get_backend()
     for _, path in ipairs(BACKENDS) do
         local ok, provider = pcall(require, path)
+        print("radio", path, ok, (ok == false) and provider or nil)
         if ok and provider.is_supported and provider.is_supported() then
             local backend = provider.backend
             local valid, verr = contract.validate(backend)

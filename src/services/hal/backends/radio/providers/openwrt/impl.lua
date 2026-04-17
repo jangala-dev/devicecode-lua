@@ -4,8 +4,8 @@
 
 local uci    = require "services.hal.backends.common.uci"
 local fibers = require "fibers"
-local exec   = require "fibers.exec"
-local file   = require "fibers.stream.file"
+local exec   = require "fibers.io.exec"
+local file   = require "fibers.io.file"
 
 local SYSFS_STATS = {
     'rx_bytes', 'tx_bytes',
@@ -22,10 +22,10 @@ local SYSFS_STATS = {
 local function read_sysfs_stat(iface, stat)
     local path = '/sys/class/net/' .. iface .. '/statistics/' .. stat
     local f, ferr = file.open(path, 'r')
-    if ferr then return nil, tostring(ferr) end
-    local content, rerr = f:read_all_chars()
+    if not f then return nil, tostring(ferr) end
+    local content, rerr = f:read_all()
     f:close()
-    if rerr then return nil, tostring(rerr) end
+    if not content then return nil, tostring(rerr) end
     local num = tonumber((content or ''):match('(%d+)'))
     if num == nil then return nil, stat .. ' invalid number' end
     return num, nil
@@ -108,7 +108,24 @@ local function apply(staged)
     local session = uci.new_session()
     local name = staged.name
 
-    -- Radio section (wifi-device)
+    -- Delete any existing wifi-iface sections that belong to this radio but
+    -- are not in the staged interfaces set, so stale sections don't linger.
+    local staged_iface_names = {}
+    for _, iface in ipairs(staged.interfaces or {}) do
+        staged_iface_names[iface.name] = true
+    end
+    for _, sec in ipairs(uci.get_sections('wireless', 'wifi-iface')) do
+        if uci.get_value('wireless', sec, 'device') == name
+                and not staged_iface_names[sec] then
+            session:delete('wireless', sec)
+        end
+    end
+
+    -- Radio section (wifi-device) — ensure it exists before setting options
+    session:set('wireless', name, 'wifi-device')
+    if staged.path and staged.path ~= '' then
+        session:set('wireless', name, 'path', staged.path)
+    end
     if staged.type and staged.type ~= '' then
         session:set('wireless', name, 'type', staged.type)
     end
@@ -141,6 +158,8 @@ local function apply(staged)
 
     -- Write interface sections (wifi-iface)
     for _, iface in ipairs(staged.interfaces or {}) do
+        -- Ensure the named section exists with the correct type before setting options
+        session:set('wireless', iface.name, 'wifi-iface')
         session:set('wireless', iface.name, 'ifname',  iface.name)
         session:set('wireless', iface.name, 'device',  name)
         session:set('wireless', iface.name, 'mode',    iface.mode or 'ap')
@@ -161,18 +180,52 @@ local function apply(staged)
         end
     end
 
-    session:commit('wireless', { { 'wifi', 'reload' } })
+    local ok, err = session:commit('wireless', { { 'wifi', 'reload' } })
+    if not ok then
+        error('apply commit failed: ' .. tostring(err))
+    end
+end
+
+---Delete all UCI config owned by this radio and reload wireless.
+---Removes all wifi-iface sections whose device == name, then
+---deletes the configurable options from the wifi-device section.
+---@param name string  UCI radio section name
+local function clear(name)
+    uci.ensure_started()
+    local session = uci.new_session()
+
+    -- Delete all wifi-iface sections that belong to this radio
+    for _, sec in ipairs(uci.get_sections('wireless', 'wifi-iface')) do
+        if uci.get_value('wireless', sec, 'device') == name then
+            session:delete('wireless', sec)
+        end
+    end
+
+    -- Delete the configurable options on the wifi-device section
+    -- (leave 'path' and 'type' intact since they are hardware facts)
+    local OPT_KEYS = { 'band', 'channel', 'channels', 'htmode', 'txpower',
+                       'country', 'disabled' }
+    for _, opt in ipairs(OPT_KEYS) do
+        if uci.get_value('wireless', name, opt) ~= nil then
+            session:delete('wireless', name, opt)
+        end
+    end
+
+    local ok, err = session:commit('wireless', { { 'wifi', 'reload' } })
+    if not ok then
+        error('clear failed: ' .. tostring(err))
+    end
 end
 
 ---Start monitoring client connect/disconnect events for the given interfaces.
 ---Calls cb(event) for each event where event = { mac, connected, interface }.
 ---Runs until the calling fiber's scope is cancelled.
----@param interfaces table  List of interface names to monitor
----@param cb function        Called with each event table
-local function watch_events(interfaces, cb)
+---@param interfaces_set table  Live set of interface names to monitor (name → true)
+---@param cb function            Called with each event table
+local function watch_events(interfaces_set, cb)
     -- `iw event` reports events across all interfaces on stdout
-    local proc = exec.command('iw', 'event')
-    local stdout, serr = proc:stdout_pipe()
+    local proc = exec.command{ 'iw', 'event', stdout = 'pipe' }
+    local stdout, serr = proc:stdout_stream()
     if serr then return end
 
     fibers.current_scope():finally(function()
@@ -195,18 +248,9 @@ local function watch_events(interfaces, cb)
             match_iface, is_connected, match_mac = iface3, false, mac3
         end
 
-        if match_iface and match_mac then
-            -- Only emit events for interfaces we're tracking
-            local tracked = false
-            for _, tracked_iface in ipairs(interfaces) do
-                if tracked_iface == match_iface then
-                    tracked = true
-                    break
-                end
-            end
-            if tracked then
-                cb({ mac = match_mac, connected = is_connected, interface = match_iface })
-            end
+        -- Only forward events for interfaces currently in the live set
+        if match_iface and match_mac and interfaces_set[match_iface] then
+            cb({ mac = match_mac, connected = is_connected, interface = match_iface })
         end
     end
 end
@@ -216,9 +260,9 @@ end
 ---@return table|nil  { txpower, channel, freq, width }
 ---@return string     err
 local function get_iface_info(iface)
-    local proc = exec.command('iw', 'dev', iface, 'info')
-    local out, err = proc:output()
-    if err then return nil, tostring(err) end
+    local proc = exec.command{ 'iw', 'dev', iface, 'info', stdout = 'pipe' }
+    local out, status, _, _, err = fibers.perform(proc:output_op())
+    if status ~= 'exited' or err then return nil, tostring(err or 'iw dev info failed') end
     local result = parse_iw_dev_info(out)
     if not result then return nil, "could not parse iw dev info output" end
     return result, ""
@@ -229,9 +273,9 @@ end
 ---@return number|nil  noise value
 ---@return string      err
 local function get_iface_survey(iface)
-    local proc = exec.command('iw', iface, 'survey', 'dump')
-    local out, err = proc:output()
-    if err then return nil, tostring(err) end
+    local proc = exec.command{ 'iw', iface, 'survey', 'dump', stdout = 'pipe' }
+    local out, status, _, _, err = fibers.perform(proc:output_op())
+    if status ~= 'exited' or err then return nil, tostring(err or 'iw survey failed') end
     local noise = parse_survey_noise(out)
     if noise == nil then return nil, "noise value not found" end
     return noise, ""
@@ -243,9 +287,9 @@ end
 ---@return table|nil  { signal, tx_bytes, rx_bytes }
 ---@return string     err
 local function get_station_info(iface, mac)
-    local proc = exec.command('iw', 'dev', iface, 'station', 'get', mac)
-    local out, err = proc:output()
-    if err then return nil, tostring(err) end
+    local proc = exec.command{ 'iw', 'dev', iface, 'station', 'get', mac, stdout = 'pipe' }
+    local out, status, _, _, err = fibers.perform(proc:output_op())
+    if status ~= 'exited' or err then return nil, tostring(err or 'iw station get failed') end
     local result = parse_station_info(out)
     if not result then return nil, "could not parse station info" end
     return result, ""
@@ -253,6 +297,7 @@ end
 
 return {
     get_meta        = get_meta,
+    clear           = clear,
     apply           = apply,
     watch_events    = watch_events,
     get_iface_info  = get_iface_info,
