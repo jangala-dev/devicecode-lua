@@ -27,9 +27,21 @@ local function parse_mainflux_ssids(fs_cap, mainflux_path, base_ssid_cfg)
         return nil, tostring(reply.reason or "filesystem read failed")
     end
 
-    local content_parsed, derr = json.decode(reply.reason or '')
-    if not content_parsed then
+    local outer, derr = json.decode(reply.reason or '')
+    if not outer then
         return nil, tostring(derr)
+    end
+
+    -- The mainflux file wraps the actual config as a JSON-encoded string in `content`
+    local content_parsed
+    if type(outer.content) == 'string' then
+        local inner_err
+        content_parsed, inner_err = json.decode(outer.content)
+        if not content_parsed then
+            return nil, "failed to decode mainflux content field: " .. tostring(inner_err)
+        end
+    else
+        content_parsed = outer
     end
 
     local ssid_cfgs = content_parsed.networks
