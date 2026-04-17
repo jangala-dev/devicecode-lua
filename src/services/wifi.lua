@@ -107,6 +107,14 @@ local function iface_idx(name)
     return (name and name:match('_i(%d+)$')) or '0'
 end
 
+---@param key string
+---@return Topic
+local function t_obs_metric(key) return { 'obs', 'v1', 'wifi', 'metric', key } end
+
+---@param key string
+---@return Topic
+local function t_obs_event(key) return { 'obs', 'v1', 'wifi', 'event', key } end
+
 ------------------------------------------------------------------------
 -- Band steering RPC helper
 ------------------------------------------------------------------------
@@ -476,70 +484,6 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
 end
 
 ------------------------------------------------------------------------
--- Per-radio stats loop: message handlers
-------------------------------------------------------------------------
-
----@param ctx table  stats loop context (conn, band, hw_platform, sessions)
----@param msg table
-local function on_radio_state(ctx, msg)
-    local key = msg.topic and msg.topic[5]
-    local p   = msg.payload
-    if not (key and is_table(p)) then return end
-
-    local prefix, stat = key:match('^(iface)_(.+)$')
-    if prefix then
-        local idx = iface_idx(p.interface)
-        ctx.conn:publish({ 'wifi', 'hp', ctx.hw_platform, 'rd' .. ctx.band, idx, stat }, p.value)
-        return
-    end
-
-    prefix, stat = key:match('^(client)_(.+)$')
-    if prefix then
-        local uid = gen.userid(p.mac)
-        local sid = ctx.sessions[p.mac]
-        if sid then
-            ctx.conn:publish({ 'wifi', 'clients', uid, 'sessions', sid, stat }, p.value)
-        end
-    end
-end
-
----@param ctx table  stats loop context (conn, band, hw_platform, sessions, iface_sta, radio_sta)
----@param msg table
-local function on_radio_event(ctx, msg)
-    local event_name = msg.topic and msg.topic[5]
-    if event_name ~= 'client_event' then return end
-
-    local p = msg.payload
-    if not (is_table(p) and p.mac) then return end
-
-    local mac       = p.mac
-    local iface     = p.interface
-    local connected = p.connected
-    local timestamp = p.timestamp or os.time()
-    local uid       = gen.userid(mac)
-    local change    = connected and 1 or -1
-
-    ctx.iface_sta[iface] = math.max(0, (ctx.iface_sta[iface] or 0) + change)
-    ctx.radio_sta        = math.max(0, ctx.radio_sta + change)
-
-    local idx = iface_idx(iface)
-    ctx.conn:publish({ 'wifi', 'hp', ctx.hw_platform, 'rd' .. ctx.band, idx, 'num_sta' }, ctx.iface_sta[iface])
-    ctx.conn:publish({ 'wifi', 'hp', ctx.hw_platform, 'num_sta' }, ctx.radio_sta)
-
-    if connected then
-        local sid = gen.gen_session_id()
-        ctx.sessions[mac] = sid
-        ctx.conn:publish({ 'wifi', 'clients', uid, 'sessions', sid, 'session_start' }, timestamp)
-    else
-        local sid = ctx.sessions[mac]
-        if sid then
-            ctx.conn:publish({ 'wifi', 'clients', uid, 'sessions', sid, 'session_end' }, timestamp)
-            ctx.sessions[mac] = nil
-        end
-    end
-end
-
-------------------------------------------------------------------------
 -- Per-radio stats and session forwarding loop
 ------------------------------------------------------------------------
 
@@ -548,14 +492,85 @@ end
 ---@param radio_cfg WifiRadioConfig?
 ---@param svc ServiceBase
 local function radio_stats_loop(conn, id, radio_cfg, svc)
-    local ctx = {
-        conn        = conn,
-        band        = ((radio_cfg and radio_cfg.band) or ''):sub(1, 1),
-        hw_platform = '1',
-        sessions    = {},
-        iface_sta   = {},
-        radio_sta   = 0,
-    }
+    local band        = ((radio_cfg and radio_cfg.band) or ''):sub(1, 1)
+    local hw_platform = '1'
+    local sessions    = {}
+    local iface_sta   = {}
+    local radio_sta   = 0
+
+    local function on_radio_state(msg)
+        local key = msg.topic and msg.topic[5]
+        local p   = msg.payload
+        if not (key and is_table(p)) then return end
+
+        local prefix, stat = key:match('^(iface)_(.+)$')
+        if prefix then
+            local idx = iface_idx(p.interface)
+            conn:retain(t_obs_metric(stat), {
+                value     = p.value,
+                namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, idx },
+            })
+            return
+        end
+
+        prefix, stat = key:match('^(client)_(.+)$')
+        if prefix then
+            local uid = gen.userid(p.mac)
+            local sid = sessions[p.mac]
+            if sid then
+                conn:retain(t_obs_metric(stat), {
+                    value     = p.value,
+                    namespace = { 'wifi', 'clients', uid, 'sessions', sid },
+                })
+            end
+        end
+    end
+
+    local function on_radio_event(msg)
+        local event_name = msg.topic and msg.topic[5]
+        if event_name ~= 'client_event' then return end
+
+        local p = msg.payload
+        if not (is_table(p) and p.mac) then return end
+
+        local mac       = p.mac
+        local iface     = p.interface
+        local connected = p.connected
+        local timestamp = p.timestamp or os.time()
+        local uid       = gen.userid(mac)
+        local change    = connected and 1 or -1
+
+        iface_sta[iface] = math.max(0, (iface_sta[iface] or 0) + change)
+        radio_sta        = math.max(0, radio_sta + change)
+
+        local idx = iface_idx(iface)
+        conn:retain(t_obs_metric('num_sta'), {
+            value     = iface_sta[iface],
+            namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, idx },
+        })
+        conn:retain(t_obs_metric('num_sta'), {
+            value     = radio_sta,
+            namespace = { 'wifi', 'hp', hw_platform },
+        })
+
+        if connected then
+            local sid = gen.gen_session_id()
+            sessions[mac] = sid
+            conn:publish(t_obs_event('session_start'), {
+                value     = timestamp,
+                namespace = { 'wifi', 'clients', uid, 'sessions', sid },
+            })
+        else
+            local sid = sessions[mac]
+            if sid then
+                conn:publish(t_obs_event('session_end'), {
+                    value     = timestamp,
+                    namespace = { 'wifi', 'clients', uid, 'sessions', sid },
+                })
+                sessions[mac] = nil
+            end
+        end
+    end
 
     local state_sub = conn:subscribe({ 'cap', 'radio', id, 'state', '+' })
     local event_sub = conn:subscribe({ 'cap', 'radio', id, 'event', '+' })
@@ -580,9 +595,9 @@ local function radio_stats_loop(conn, id, radio_cfg, svc)
         end
 
         if which == 'state' then
-            on_radio_state(ctx, msg)
+            on_radio_state(msg)
         elseif which == 'event' then
-            on_radio_event(ctx, msg)
+            on_radio_event(msg)
         end
     end
 end
@@ -614,7 +629,7 @@ local function run_global_num_sta(conn, parent_scope)
         if msg and is_table(msg.payload) and msg.payload.mac then
             local change = msg.payload.connected and 1 or -1
             global_sta = math.max(0, global_sta + change)
-            conn:publish({ 'wifi', 'num_sta' }, global_sta)
+            conn:retain(t_obs_metric('num_sta'), { value = global_sta, namespace = { 'wifi', 'num_sta' } })
         end
     end
 end
