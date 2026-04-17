@@ -24,6 +24,15 @@ local commit_ch = channel.new(10)
 -- Reactor start guard
 local started   = false
 
+---Convert a value to a UCI-safe string.
+---Booleans become "1"/"0"; everything else uses tostring().
+---@param v any
+---@return string
+local function to_uci_string(v)
+    if type(v) == 'boolean' then return v and '1' or '0' end
+    return tostring(v)
+end
+
 ---Apply a single commit record to an open UCI cursor.
 ---Errors on any cursor failure so the caller can revert and propagate.
 ---@param cursor table  uci cursor object
@@ -31,39 +40,39 @@ local started   = false
 local function apply_changes(cursor, record)
     for _, change in ipairs(record.changes) do
         if change.op == 'set' then
-            local ok
+            local ok, err
             if change.value == nil then
                 -- 3-arg form: create a named section of type change.option
-                ok = cursor:set(change.config, change.section, change.option)
+                ok, err = cursor:set(change.config, change.section, change.option)
                 if not ok then
-                    error(("uci set (named section) failed: %s.%s type=%s"):format(
-                        change.config, change.section or '?', change.option or '?'))
+                    error(("uci set (named section) failed: %s.%s type=%s: %s"):format(
+                        change.config, change.section or '?', change.option or '?', tostring(err)))
                 end
             else
-                ok = cursor:set(change.config, change.section, change.option, change.value)
+                ok, err = cursor:set(change.config, change.section, change.option, to_uci_string(change.value))
                 if not ok then
-                    error(("uci set failed: %s.%s.%s = %s"):format(
+                    error(("uci set failed: %s.%s.%s = %s: %s"):format(
                         change.config, change.section or '?',
-                        change.option or '?', tostring(change.value)))
+                        change.option or '?', tostring(change.value), tostring(err)))
                 end
             end
         elseif change.op == 'delete' then
-            local ok
+            local ok, err
             if change.option then
-                ok = cursor:delete(change.config, change.section, change.option)
+                ok, err = cursor:delete(change.config, change.section, change.option)
             else
-                ok = cursor:delete(change.config, change.section)
+                ok, err = cursor:delete(change.config, change.section)
             end
             if not ok then
-                error(("uci delete failed: %s.%s%s"):format(
+                error(("uci delete failed: %s.%s%s: %s"):format(
                     change.config, change.section or '?',
-                    change.option and ('.' .. change.option) or ''))
+                    change.option and ('.' .. change.option) or '', tostring(err)))
             end
         end
     end
-    local ok = cursor:commit(record.config)
+    local ok, err = cursor:commit(record.config)
     if not ok then
-        error(("uci commit failed: %s"):format(record.config))
+        error(("uci commit failed: %s: %s"):format(record.config, tostring(err)))
     end
 end
 
@@ -133,7 +142,7 @@ local function reactor()
         while true do
             local name, result = fibers.perform(fibers.named_choice({
                 more    = commit_ch:get_op(),
-                timeout = sleep.sleep_op(1.0),
+                timeout = sleep.sleep_op(0.1),
             }))
             if name == 'timeout' then break end
             batch[#batch + 1] = result
@@ -222,12 +231,12 @@ function Session:delete(config, section, option)
     })
 end
 
----Queue staged changes to be applied by the reactor.
----Returns a reply channel that will receive {ok=boolean, err=string} once
----the commit (and any restart commands) have completed.
+---Queue staged changes to be applied by the reactor and wait for the result.
+---Blocks until the commit (and any restart commands) have completed.
 ---@param config string        UCI config file name
 ---@param restart_cmds string[][]|nil  List of argv lists to exec after apply (debounced, 1s)
----@return table reply_ch      channel — receive to wait for completion
+---@return boolean ok
+---@return string? err
 function Session:commit(config, restart_cmds)
     local reply_ch = channel.new(1)
     commit_ch:put({
@@ -237,7 +246,8 @@ function Session:commit(config, restart_cmds)
         reply_ch     = reply_ch,
     })
     self._changes = {}
-    return reply_ch
+    local result = reply_ch:get()
+    return result.ok, result.err
 end
 
 ---Read a single UCI value without going through the reactor queue.
@@ -251,8 +261,35 @@ local function get_value(config, section, option)
     return c:get(config, section, option)
 end
 
+---Return true if a UCI section exists in the given config file.
+---@param config string
+---@param section string
+---@return boolean
+local function section_exists(config, section)
+    local c = uci_mod.cursor()
+    return c:get(config, section) ~= nil
+end
+
+---Return all section names in a config file matching an optional type filter.
+---Calls cursor:foreach which iterates committed+staged values.
+---@param config string
+---@param stype? string  UCI section type to filter by (e.g. 'wifi-iface'); nil = all sections
+---@return string[]  section names
+local function get_sections(config, stype)
+    local c = uci_mod.cursor()
+    local names = {}
+    c:foreach(config, stype, function(s)
+        if s['.name'] then
+            names[#names + 1] = s['.name']
+        end
+    end)
+    return names
+end
+
 return {
-    ensure_started = ensure_started,
-    new_session    = new_session,
-    get_value      = get_value,
+    ensure_started  = ensure_started,
+    new_session     = new_session,
+    get_value       = get_value,
+    section_exists  = section_exists,
+    get_sections    = get_sections,
 }
