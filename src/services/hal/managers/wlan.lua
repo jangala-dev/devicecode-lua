@@ -32,16 +32,17 @@ local WLANManager = {
 ---Start a single radio driver and emit device-added event.
 ---Must be called from within the manager scope's context.
 ---@param name string
+---@param radio_cfg table  { name, path, type } from device config
 ---@param dev_ev_ch Channel
 ---@param cap_emit_ch Channel
-local function start_radio(name, dev_ev_ch, cap_emit_ch)
+local function start_radio(name, radio_cfg, dev_ev_ch, cap_emit_ch)
     local driver, drv_err = radio_driver.new(name, log:child({ radio = name }))
     if not driver then
         log:error({ what = 'create_radio_driver_failed', name = name, err = drv_err })
         return
     end
 
-    local init_err = driver:init()
+    local init_err = driver:init(radio_cfg.path or '', radio_cfg.type or '')
     if init_err ~= '' then
         log:error({ what = 'init_radio_driver_failed', name = name, err = init_err })
         return
@@ -193,9 +194,9 @@ local function reconcile_radios(config, dev_ev_ch, cap_emit_ch)
     end
 
     -- Start new or replacement radios
-    for name in pairs(new_radios) do
+    for name, radio_cfg in pairs(new_radios) do
         if not WLANManager.radios[name] then
-            start_radio(name, dev_ev_ch, cap_emit_ch)
+            start_radio(name, radio_cfg, dev_ev_ch, cap_emit_ch)
         end
     end
 end
@@ -204,9 +205,7 @@ end
 -- Manager fiber
 ------------------------------------------------------------------------
 
-local function manager_fiber(dev_ev_ch, cap_emit_ch)
-    local scope = fibers.current_scope()
-
+local function manager_fiber(scope, dev_ev_ch, cap_emit_ch)
     scope:finally(function()
         local st, primary = scope:status()
         if st == 'failed' then
@@ -224,7 +223,7 @@ local function manager_fiber(dev_ev_ch, cap_emit_ch)
         -- Build fault ops for each running radio driver
         local fault_ops = {}
         for name, entry in pairs(WLANManager.radios) do
-            table.insert(fault_ops, entry.driver.scope:fault_op():wrap(function() return name end))
+            table.insert(fault_ops, entry.driver.scope:fault_op():wrap(function(_, err) return name, err end))
         end
 
         local fault_op = op.never()
@@ -232,7 +231,7 @@ local function manager_fiber(dev_ev_ch, cap_emit_ch)
             fault_op = op.choice(unpack(fault_ops))
         end
 
-        local source, val = fibers.perform(fibers.named_choice({
+        local source, val, fault_err = fibers.perform(fibers.named_choice({
             config       = WLANManager.config_ch:get_op(),
             driver_fault = fault_op,
             cancel       = scope:cancel_op(),
@@ -246,7 +245,7 @@ local function manager_fiber(dev_ev_ch, cap_emit_ch)
             reconcile_radios(val, dev_ev_ch, cap_emit_ch)
         elseif source == 'driver_fault' then
             local name = val
-            log:error({ what = 'radio_driver_fault', name = tostring(name) })
+            log:error({ what = 'radio_driver_fault', name = tostring(name), err = tostring(fault_err) })
             -- Remove from registry (scope already failed); emit device-removed
             if WLANManager.radios[name] then
                 WLANManager.radios[name] = nil
