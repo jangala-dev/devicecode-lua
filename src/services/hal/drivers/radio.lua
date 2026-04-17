@@ -53,6 +53,7 @@ end
 ---@field control_ch Channel
 ---@field cap_emit_ch Channel?
 ---@field staged table          In-memory staged config
+---@field interfaces_set table  Live set of active interface names (name → true)
 ---@field iface_counter number  Counter for auto-named interfaces
 ---@field report_period_ch Channel
 ---@field initialised boolean
@@ -201,6 +202,7 @@ function RadioDriver:add_interface(opts)
         mode            = opts.mode,
         enable_steering = opts.enable_steering,
     })
+    self.interfaces_set[iface_name] = true
     -- Reply carries the generated interface name in reason
     return true, iface_name
 end
@@ -223,6 +225,7 @@ function RadioDriver:delete_interface(opts)
         if iface.name == opts.interface then
             table.remove(self.staged.interfaces, i)
             table.insert(self.staged.deleted_interfaces, opts.interface)
+            self.interfaces_set[opts.interface] = nil
             return true
         end
     end
@@ -238,6 +241,7 @@ function RadioDriver:clear_radio_config()
         interfaces         = {},
         deleted_interfaces = {},
     }
+    self.interfaces_set = {}
     return true
 end
 
@@ -256,6 +260,27 @@ function RadioDriver:set_report_period(opts)
         return false, 'period must be a positive number'
     end
     self.report_period_ch:put(period)
+    return true
+end
+
+---Clear all UCI config owned by this radio, resetting it to a blank state.
+---Resets staged driver state and commits + reloads wireless via the backend.
+---@return boolean ok
+---@return string? reason
+function RadioDriver:clear()
+    local ok, err = pcall(self.backend.clear, self.id)
+    if not ok then
+        return false, tostring(err)
+    end
+    self.staged = {
+        name               = self.id,
+        path               = self.staged.path,
+        type               = self.staged.type,
+        interfaces         = {},
+        deleted_interfaces = {},
+    }
+    self.interfaces_set = {}
+    self.iface_counter = 0
     return true
 end
 
@@ -280,6 +305,7 @@ function RadioDriver:rollback()
         interfaces         = {},
         deleted_interfaces = {},
     }
+    self.interfaces_set = {}
     self.iface_counter = 0
     return true
 end
@@ -294,12 +320,12 @@ function RadioDriver:control_manager()
     end)
 
     while true do
-        local request = fibers.perform(fibers.named_choice({
+        local source, request = fibers.perform(fibers.named_choice({
             rpc    = self.control_ch:get_op(),
             cancel = fibers.current_scope():cancel_op(),
         }))
 
-        if not request then break end  -- scope cancelled, request is nil
+        if source == 'cancel' then break end
 
         local fn = self[request.verb]
         local ok, reason
@@ -334,23 +360,15 @@ function RadioDriver:stats_loop()
     -- Track connected stations: { [iface] = { [mac] = true } }
     local connected = {}
 
-    -- Collect all interface names from staged config at start
-    -- (interfaces are populated by the time start() is called)
-    local function get_interfaces()
-        local result = {}
-        for _, iface in ipairs(self.staged.interfaces) do
-            table.insert(result, iface.name)
-        end
-        return result
-    end
-
     -- Client event callback channel (watch_events calls cb in its fiber)
     local event_ch = channel.new(32)
 
-    -- Spawn the event watcher as a child fiber
-    local interfaces = get_interfaces()
+    -- interfaces_set is a live table reference shared with add/delete_interface;
+    -- watch_events checks it on each kernel event so new interfaces are picked up
+    -- immediately without restarting the subprocess.
+    local interfaces_set = self.interfaces_set
     fibers.current_scope():spawn(function()
-        backend.watch_events(interfaces, function(ev)
+        backend.watch_events(interfaces_set, function(ev)
             event_ch:put(ev)
         end)
     end)
@@ -402,29 +420,8 @@ function RadioDriver:stats_loop()
                 timestamp = timestamp,
             })
 
-            -- Emit updated station counts
-            local total = 0
-            for _, macs in pairs(connected) do
-                for _ in pairs(macs) do total = total + 1 end
-            end
-            emit_state(emit_ch, id, 'num_sta', total)
-
-            local iface_list = get_interfaces()
-            for idx, iface_name in ipairs(iface_list) do
-                local count = 0
-                if connected[iface_name] then
-                    for _ in pairs(connected[iface_name]) do count = count + 1 end
-                end
-                emit_state(emit_ch, id, 'iface_num_sta', {
-                    interface = iface_name,
-                    index     = idx - 1,
-                    count     = count,
-                })
-            end
-
         elseif name == 'tick' then
-            local iface_list = get_interfaces()
-            for _, iface_name in ipairs(iface_list) do
+            for iface_name in pairs(interfaces_set) do
 
                 -- Interface info (txpower, channel, freq, width)
                 local info, _ = backend.get_iface_info(iface_name)
@@ -503,14 +500,15 @@ end
 -- Public driver interface
 ------------------------------------------------------------------------
 
+---@param path string   hardware sysfs path for this radio
+---@param rtype string  driver type (e.g. "mac80211")
 ---@return string err  empty string on success
-function RadioDriver:init()
-    local meta, err = self.backend.get_meta(self.id)
-    if not meta then
-        return "get_meta failed: " .. tostring(err)
+function RadioDriver:init(path, rtype)
+    if not path or path == '' then
+        return "init failed: path is required"
     end
-    self.staged.path = meta.path
-    self.staged.type = meta.type
+    self.staged.path = path
+    self.staged.type = rtype or ''
     self.initialised = true
     return ""
 end
@@ -540,6 +538,7 @@ function RadioDriver:capabilities(emit_ch)
             'delete_interface',
             'clear_radio_config',
             'set_report_period',
+            'clear',
             'apply',
             'rollback',
         }
@@ -600,6 +599,7 @@ local function new(name, logger)
             interfaces         = {},
             deleted_interfaces = {},
         },
+        interfaces_set   = {},
         iface_counter    = 0,
         initialised      = false,
         caps_applied     = false,
