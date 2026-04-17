@@ -311,8 +311,27 @@ function RadioDriver:rollback()
 end
 
 ------------------------------------------------------------------------
--- Control manager fiber
+-- Control manager: RPC dispatch
 ------------------------------------------------------------------------
+
+local function dispatch_rpc(driver, request)
+    local fn = driver[request.verb]
+    local ok, reason
+    if type(fn) ~= 'function' then
+        ok, reason = false, 'unknown verb: ' .. tostring(request.verb)
+    else
+        local call_ok, r1, r2 = pcall(fn, driver, request.opts)
+        if not call_ok then
+            ok, reason = false, tostring(r1)
+        else
+            ok, reason = r1, r2
+        end
+    end
+    local reply = hal_types.new.Reply(ok, reason)
+    if reply then
+        request.reply_ch:put(reply)
+    end
+end
 
 function RadioDriver:control_manager()
     fibers.current_scope():finally(function()
@@ -326,25 +345,106 @@ function RadioDriver:control_manager()
         }))
 
         if source == 'cancel' then break end
+        dispatch_rpc(self, request)
+    end
+end
 
-        local fn = self[request.verb]
-        local ok, reason
-        if type(fn) ~= 'function' then
-            ok, reason = false, 'unknown verb: ' .. tostring(request.verb)
-        else
-            local call_ok, r1, r2 = pcall(fn, self, request.opts)
-            if not call_ok then
-                ok, reason = false, tostring(r1)
-            else
-                ok, reason = r1, r2
-            end
+------------------------------------------------------------------------
+-- Stats loop: tick and event handlers
+------------------------------------------------------------------------
+
+---Emit all interface-level stats for one interface name.
+local function tick_iface(emit_ch, id, backend, iface_name, connected)
+    local info, _ = backend.get_iface_info(iface_name)
+    if info then
+        if info.txpower ~= nil then
+            emit_state(emit_ch, id, 'iface_power', {
+                interface = iface_name,
+                value     = fix_underflow(info.txpower),
+            })
         end
-
-        local reply = hal_types.new.Reply(ok, reason)
-        if reply then
-            request.reply_ch:put(reply)
+        if info.channel ~= nil then
+            emit_state(emit_ch, id, 'iface_channel', {
+                interface = iface_name,
+                value     = fix_underflow(info.channel),
+            })
         end
     end
+
+    local noise, _ = backend.get_iface_survey(iface_name)
+    if noise ~= nil then
+        emit_state(emit_ch, id, 'iface_noise', {
+            interface = iface_name,
+            value     = fix_underflow(noise),
+        })
+    end
+
+    for _, stat in ipairs(backend.SYSFS_STATS or {}) do
+        local sval, _ = backend.read_sysfs_stat(iface_name, stat)
+        if sval ~= nil then
+            emit_state(emit_ch, id, 'iface_' .. stat, {
+                interface = iface_name,
+                value     = fix_underflow(sval),
+            })
+        end
+    end
+
+    if connected[iface_name] then
+        for mac in pairs(connected[iface_name]) do
+            local sta, _ = backend.get_station_info(iface_name, mac)
+            if sta then
+                if sta.signal ~= nil then
+                    emit_state(emit_ch, id, 'client_signal', {
+                        mac       = mac,
+                        interface = iface_name,
+                        value     = fix_underflow(sta.signal),
+                    })
+                end
+                if sta.tx_bytes ~= nil then
+                    emit_state(emit_ch, id, 'client_tx_bytes', {
+                        mac       = mac,
+                        interface = iface_name,
+                        value     = fix_underflow(sta.tx_bytes),
+                    })
+                end
+                if sta.rx_bytes ~= nil then
+                    emit_state(emit_ch, id, 'client_rx_bytes', {
+                        mac       = mac,
+                        interface = iface_name,
+                        value     = fix_underflow(sta.rx_bytes),
+                    })
+                end
+            end
+        end
+    end
+end
+
+---Emit stats for every currently-tracked interface.
+local function on_tick(emit_ch, id, backend, interfaces_set, connected)
+    for iface_name in pairs(interfaces_set) do
+        tick_iface(emit_ch, id, backend, iface_name, connected)
+    end
+end
+
+---Update connected-station bookkeeping and emit a client_event.
+local function on_client_event(emit_ch, id, connected, ev)
+    local mac   = ev.mac
+    local iface = ev.interface
+
+    if not connected[iface] then connected[iface] = {} end
+
+    if ev.connected then
+        connected[iface][mac] = true
+    else
+        connected[iface][mac] = nil
+    end
+
+    emit_event(emit_ch, id, 'client_event', {
+        mac       = mac,
+        connected = ev.connected,
+        interface = iface,
+        timestamp = os.time(),
+    })
 end
 
 ------------------------------------------------------------------------
@@ -352,33 +452,18 @@ end
 ------------------------------------------------------------------------
 
 function RadioDriver:stats_loop()
-    local emit_ch      = self.cap_emit_ch
-    local id           = self.id
+    local emit_ch       = self.cap_emit_ch
+    local id            = self.id
     local report_period = DEFAULT_REPORT_PERIOD
     local backend       = self.backend
+    local connected     = {}
 
-    -- Track connected stations: { [iface] = { [mac] = true } }
-    local connected = {}
-
-    -- Client event callback channel (watch_events calls cb in its fiber)
-    local event_ch = channel.new(32)
-
-    -- interfaces_set is a live table reference shared with add/delete_interface;
-    -- watch_events checks it on each kernel event so new interfaces are picked up
-    -- immediately without restarting the subprocess.
+    -- Client event callback channel (watch_events runs in a sibling fiber)
+    local event_ch       = channel.new(32)
     local interfaces_set = self.interfaces_set
-    fibers.current_scope():spawn(function()
-        backend.watch_events(interfaces_set, function(ev)
-            event_ch:put(ev)
-        end)
-    end)
 
-    local tick_ch = channel.new(1)
     fibers.current_scope():spawn(function()
-        while true do
-            fibers.perform(sleep.sleep_op(report_period))
-            tick_ch:put(true)
-        end
+        backend.watch_events(interfaces_set, function(ev) event_ch:put(ev) end)
     end)
 
     fibers.current_scope():finally(function()
@@ -387,111 +472,16 @@ function RadioDriver:stats_loop()
 
     while true do
         local name, val = fibers.perform(fibers.named_choice({
-            client_event  = event_ch:get_op(),
-            tick          = tick_ch:get_op(),
-            new_period    = self.report_period_ch:get_op(),
-            cancel        = fibers.current_scope():cancel_op(),
+            client_event = event_ch:get_op(),
+            tick         = sleep.sleep_op(report_period),
+            new_period   = self.report_period_ch:get_op(),
+            cancel       = fibers.current_scope():cancel_op(),
         }))
 
-        if name == 'cancel' then
-            break
-
-        elseif name == 'new_period' then
-            report_period = val
-
-        elseif name == 'client_event' then
-            local ev = val
-            local mac       = ev.mac
-            local iface     = ev.interface
-            local timestamp = os.time()
-
-            if not connected[iface] then connected[iface] = {} end
-
-            if ev.connected then
-                connected[iface][mac] = true
-            else
-                connected[iface][mac] = nil
-            end
-
-            emit_event(emit_ch, id, 'client_event', {
-                mac       = mac,
-                connected = ev.connected,
-                interface = iface,
-                timestamp = timestamp,
-            })
-
-        elseif name == 'tick' then
-            for iface_name in pairs(interfaces_set) do
-
-                -- Interface info (txpower, channel, freq, width)
-                local info, _ = backend.get_iface_info(iface_name)
-                if info then
-                    if info.txpower ~= nil then
-                        emit_state(emit_ch, id, 'iface_txpower', {
-                            interface = iface_name,
-                            value     = fix_underflow(info.txpower),
-                        })
-                    end
-                    if info.channel ~= nil then
-                        emit_state(emit_ch, id, 'iface_channel', {
-                            interface = iface_name,
-                            channel   = info.channel,
-                            freq      = info.freq,
-                            width     = info.width,
-                        })
-                    end
-                end
-
-                -- Survey noise
-                local noise, _ = backend.get_iface_survey(iface_name)
-                if noise ~= nil then
-                    emit_state(emit_ch, id, 'iface_noise', {
-                        interface = iface_name,
-                        value     = fix_underflow(noise),
-                    })
-                end
-
-                -- sysfs network counters
-                for _, stat in ipairs(backend.SYSFS_STATS or {}) do
-                    local sval, _ = backend.read_sysfs_stat(iface_name, stat)
-                    if sval ~= nil then
-                        emit_state(emit_ch, id, 'iface_' .. stat, {
-                            interface = iface_name,
-                            value     = fix_underflow(sval),
-                        })
-                    end
-                end
-
-                -- Per-client stats
-                if connected[iface_name] then
-                    for mac in pairs(connected[iface_name]) do
-                        local sta, _ = backend.get_station_info(iface_name, mac)
-                        if sta then
-                            if sta.signal ~= nil then
-                                emit_state(emit_ch, id, 'client_signal', {
-                                    mac       = mac,
-                                    interface = iface_name,
-                                    signal    = fix_underflow(sta.signal),
-                                })
-                            end
-                            if sta.tx_bytes ~= nil then
-                                emit_state(emit_ch, id, 'client_tx_bytes', {
-                                    mac       = mac,
-                                    interface = iface_name,
-                                    value     = fix_underflow(sta.tx_bytes),
-                                })
-                            end
-                            if sta.rx_bytes ~= nil then
-                                emit_state(emit_ch, id, 'client_rx_bytes', {
-                                    mac       = mac,
-                                    interface = iface_name,
-                                    value     = fix_underflow(sta.rx_bytes),
-                                })
-                            end
-                        end
-                    end
-                end
-            end
+        if name == 'cancel'       then break
+        elseif name == 'new_period'   then report_period = val
+        elseif name == 'client_event' then on_client_event(emit_ch, id, connected, val)
+        elseif name == 'tick'         then on_tick(emit_ch, id, backend, interfaces_set, connected)
         end
     end
 end
