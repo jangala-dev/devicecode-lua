@@ -1,27 +1,27 @@
-local hal_types  = require "services.hal.types.core"
-local cap_types  = require "services.hal.types.capabilities"
-local provider   = require "services.hal.backends.radio.provider"
-local cap_args   = require "services.hal.types.capability_args"
+local hal_types             = require "services.hal.types.core"
+local cap_types             = require "services.hal.types.capabilities"
+local provider              = require "services.hal.backends.radio.provider"
+local cap_args              = require "services.hal.types.capability_args"
 
-local fibers  = require "fibers"
-local channel = require "fibers.channel"
-local sleep   = require "fibers.sleep"
+local fibers                = require "fibers"
+local channel               = require "fibers.channel"
+local sleep                 = require "fibers.sleep"
 
-local CONTROL_Q_LEN        = 16
-local DEFAULT_REPORT_PERIOD = 60  -- seconds
+local CONTROL_Q_LEN         = 16
+local DEFAULT_REPORT_PERIOD = 60 -- seconds
 local INT32_MAX             = 2147483647
 
-local VALID_BANDS = { '2g', '5g' }
-local VALID_HTMODES = {
+local VALID_BANDS           = { '2g', '5g' }
+local VALID_HTMODES         = {
     'HE20', 'HE40+', 'HE40-', 'HE80', 'HE160',
     'HT20', 'HT40+', 'HT40-',
     'VHT20', 'VHT40+', 'VHT40-', 'VHT80', 'VHT160',
 }
-local VALID_ENCRYPTIONS = {
+local VALID_ENCRYPTIONS     = {
     'none', 'wep', 'psk', 'psk2', 'psk-mixed',
     'sae', 'sae-mixed', 'owe', 'wpa', 'wpa2', 'wpa3',
 }
-local VALID_MODES = { 'ap', 'sta', 'adhoc', 'mesh', 'monitor' }
+local VALID_MODES           = { 'ap', 'sta', 'adhoc', 'mesh', 'monitor' }
 
 local function is_in(value, list)
     for _, v in ipairs(list) do
@@ -53,7 +53,7 @@ end
 ---@field control_ch Channel
 ---@field cap_emit_ch Channel?
 ---@field staged table          In-memory staged config
----@field interfaces_set table  Live set of active interface names (name → true)
+---@field iface_update_ch Channel  Interface add/remove/reset messages for stats_loop
 ---@field iface_counter number  Counter for auto-named interfaces
 ---@field report_period_ch Channel
 ---@field initialised boolean
@@ -101,9 +101,9 @@ function RadioDriver:set_channels(opts)
         return false, 'channel must be a number, string, or "auto"'
     end
 
-    self.staged.band    = opts.band
-    self.staged.channel = opts.channel
-    self.staged.htmode  = opts.htmode
+    self.staged.band     = opts.band
+    self.staged.channel  = opts.channel
+    self.staged.htmode   = opts.htmode
     self.staged.channels = (opts.channel == 'auto') and opts.channels or nil
     return true
 end
@@ -202,7 +202,7 @@ function RadioDriver:add_interface(opts)
         mode            = opts.mode,
         enable_steering = opts.enable_steering,
     })
-    self.interfaces_set[iface_name] = true
+    self.iface_update_ch:put({ op = 'add', name = iface_name })
     -- Reply carries the generated interface name in reason
     return true, iface_name
 end
@@ -225,7 +225,7 @@ function RadioDriver:delete_interface(opts)
         if iface.name == opts.interface then
             table.remove(self.staged.interfaces, i)
             table.insert(self.staged.deleted_interfaces, opts.interface)
-            self.interfaces_set[opts.interface] = nil
+            self.iface_update_ch:put({ op = 'remove', name = opts.interface })
             return true
         end
     end
@@ -241,7 +241,7 @@ function RadioDriver:clear_radio_config()
         interfaces         = {},
         deleted_interfaces = {},
     }
-    self.interfaces_set = {}
+    self.iface_update_ch:put({ op = 'reset' })
     return true
 end
 
@@ -268,7 +268,7 @@ end
 ---@return boolean ok
 ---@return string? reason
 function RadioDriver:clear()
-    local ok, err = pcall(self.backend.clear, self.id)
+    local ok, err = pcall(function() self.backend:clear() end)
     if not ok then
         return false, tostring(err)
     end
@@ -279,7 +279,7 @@ function RadioDriver:clear()
         interfaces         = {},
         deleted_interfaces = {},
     }
-    self.interfaces_set = {}
+    self.iface_update_ch:put({ op = 'reset' })
     self.iface_counter = 0
     return true
 end
@@ -287,7 +287,7 @@ end
 ---@return boolean ok
 ---@return string? reason
 function RadioDriver:apply()
-    local ok, err = pcall(self.backend.apply, self.staged)
+    local ok, err = pcall(function() self.backend:apply(self.staged) end)
     if not ok then
         return false, tostring(err)
     end
@@ -305,7 +305,7 @@ function RadioDriver:rollback()
         interfaces         = {},
         deleted_interfaces = {},
     }
-    self.interfaces_set = {}
+    self.iface_update_ch:put({ op = 'reset' })
     self.iface_counter = 0
     return true
 end
@@ -355,7 +355,7 @@ end
 
 ---Emit all interface-level stats for one interface name.
 local function tick_iface(emit_ch, id, backend, iface_name, connected)
-    local info, _ = backend.get_iface_info(iface_name)
+    local info, _ = backend:get_iface_info(iface_name)
     if info then
         if info.txpower ~= nil then
             emit_state(emit_ch, id, 'iface_power', {
@@ -371,7 +371,7 @@ local function tick_iface(emit_ch, id, backend, iface_name, connected)
         end
     end
 
-    local noise, _ = backend.get_iface_survey(iface_name)
+    local noise, _ = backend:get_iface_survey(iface_name)
     if noise ~= nil then
         emit_state(emit_ch, id, 'iface_noise', {
             interface = iface_name,
@@ -380,7 +380,7 @@ local function tick_iface(emit_ch, id, backend, iface_name, connected)
     end
 
     for _, stat in ipairs(backend.SYSFS_STATS or {}) do
-        local sval, _ = backend.read_sysfs_stat(iface_name, stat)
+        local sval, _ = backend:read_sysfs_stat(iface_name, stat)
         if sval ~= nil then
             emit_state(emit_ch, id, 'iface_' .. stat, {
                 interface = iface_name,
@@ -391,7 +391,7 @@ local function tick_iface(emit_ch, id, backend, iface_name, connected)
 
     if connected[iface_name] then
         for mac in pairs(connected[iface_name]) do
-            local sta, _ = backend.get_station_info(iface_name, mac)
+            local sta, _ = backend:get_station_info(iface_name, mac)
             if sta then
                 if sta.signal ~= nil then
                     emit_state(emit_ch, id, 'client_signal', {
@@ -428,20 +428,23 @@ end
 
 ---Update connected-station bookkeeping and emit a client_event.
 local function on_client_event(emit_ch, id, connected, ev)
+    if not ev then return end
     local mac   = ev.mac
     local iface = ev.interface
 
     if not connected[iface] then connected[iface] = {} end
 
-    if ev.connected then
+    if ev.added then
         connected[iface][mac] = true
     else
         connected[iface][mac] = nil
     end
 
+    print("emitted event")
+
     emit_event(emit_ch, id, 'client_event', {
         mac       = mac,
-        connected = ev.connected,
+        connected = ev.added,
         interface = iface,
         timestamp = os.time(),
     })
@@ -452,36 +455,55 @@ end
 ------------------------------------------------------------------------
 
 function RadioDriver:stats_loop()
-    local emit_ch       = self.cap_emit_ch
-    local id            = self.id
-    local report_period = DEFAULT_REPORT_PERIOD
-    local backend       = self.backend
-    local connected     = {}
+    local emit_ch        = self.cap_emit_ch
+    local id             = self.id
+    local report_period  = DEFAULT_REPORT_PERIOD
+    local backend        = self.backend
+    local connected      = {}
+    local interfaces_set = {}
 
-    -- Client event callback channel (watch_events runs in a sibling fiber)
-    local event_ch       = channel.new(32)
-    local interfaces_set = self.interfaces_set
-
-    fibers.current_scope():spawn(function()
-        backend.watch_events(interfaces_set, function(ev) event_ch:put(ev) end)
-    end)
+    backend:start_client_monitor()
 
     fibers.current_scope():finally(function()
         self.log:debug({ what = 'radio_stats_loop_stopped', id = id })
     end)
 
+    local function update_interfaces(op, name)
+        if op == 'add' then
+            interfaces_set[name] = true
+            -- Seed connected set with any clients already associated before startup
+            local macs, _ = backend:get_connected_macs(name)
+            for _, mac in ipairs(macs) do
+                on_client_event(emit_ch, id, connected, { mac = mac, interface = name, added = true })
+            end
+        elseif op == 'remove' then
+            interfaces_set[name] = nil
+        elseif op == 'reset' then
+            interfaces_set = {}
+        end
+    end
+
     while true do
         local name, val = fibers.perform(fibers.named_choice({
-            client_event = event_ch:get_op(),
+            client_event = backend:watch_clients_op(),
+            iface_update = self.iface_update_ch:get_op(),
             tick         = sleep.sleep_op(report_period),
             new_period   = self.report_period_ch:get_op(),
             cancel       = fibers.current_scope():cancel_op(),
         }))
 
-        if name == 'cancel'       then break
-        elseif name == 'new_period'   then report_period = val
-        elseif name == 'client_event' then on_client_event(emit_ch, id, connected, val)
-        elseif name == 'tick'         then on_tick(emit_ch, id, backend, interfaces_set, connected)
+        if name == 'cancel' then
+            break
+        elseif name == 'new_period' then
+            report_period = val
+        elseif name == 'iface_update' then
+            update_interfaces(val.op, val.name)
+        elseif name == 'client_event' then
+            if val and interfaces_set[val.interface] then
+                on_client_event(emit_ch, id, connected, val)
+            end
+        elseif name == 'tick' then
+            on_tick(emit_ch, id, backend, interfaces_set, connected)
         end
     end
 end
@@ -566,7 +588,7 @@ local function new(name, logger)
         return nil, "invalid radio name"
     end
 
-    local bknd, berr = provider.get_backend()
+    local bknd, berr = provider.new(name)
     if not bknd then
         return nil, "no radio backend: " .. tostring(berr)
     end
@@ -581,6 +603,7 @@ local function new(name, logger)
         scope            = scope,
         control_ch       = channel.new(CONTROL_Q_LEN),
         cap_emit_ch      = nil,
+        iface_update_ch  = channel.new(16),
         report_period_ch = channel.new(1),
         staged           = {
             name               = name,
@@ -589,7 +612,6 @@ local function new(name, logger)
             interfaces         = {},
             deleted_interfaces = {},
         },
-        interfaces_set   = {},
         iface_counter    = 0,
         initialised      = false,
         caps_applied     = false,
