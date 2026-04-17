@@ -4,7 +4,10 @@
 local RADIO_BACKEND_FUNCTIONS = {
     'get_meta',
     'apply',
-    'watch_events',
+    'clear',
+    'start_client_monitor',
+    'watch_clients_op',
+    'get_connected_macs',
     'get_iface_info',
     'get_iface_survey',
     'get_station_info',
