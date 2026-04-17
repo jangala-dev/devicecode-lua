@@ -55,35 +55,24 @@ local REQUIRED_SECTIONS = {
 ---@return boolean ok
 ---@return string  err
 local function clear()
+    uci.ensure_started()
     local session = uci.new_session()
 
-    -- Delete each known managed section (if it exists)
+    -- Delete each known managed section only if it already exists
     for _, sec in ipairs(REQUIRED_SECTIONS) do
-        session:delete('dawn', sec.name)
+        if uci.section_exists('dawn', sec.name) then
+            session:delete('dawn', sec.name)
+        end
     end
 
-    -- Re-create required sections with their type
+    -- Re-create required sections with their type using named-section creation
     for _, sec in ipairs(REQUIRED_SECTIONS) do
-        session:add('dawn', sec.type)
-        -- UCI anonymous sections need to be renamed; the router adds them
-        -- sequentially, so we rely on the backend knowing the section names.
-        -- Named sections in OpenWrt UCI are addressed by name directly.
+        session:set('dawn', sec.name, sec.type)
     end
 
-    local ok, err = session:commit_sync('dawn')
+    local ok, err = session:commit('dawn')
     if not ok then
         return false, "failed to clear DAWN config: " .. tostring(err)
-    end
-
-    -- Rename the anonymous sections back to their canonical names by
-    -- doing explicit set operations on each section name.
-    local rename_session = uci.new_session()
-    for _, sec in ipairs(REQUIRED_SECTIONS) do
-        rename_session:set('dawn', sec.name, sec.type)
-    end
-    local rok, rerr = rename_session:commit_sync('dawn')
-    if not rok then
-        return false, "failed to re-create DAWN sections: " .. tostring(rerr)
     end
 
     return true, ""
@@ -224,7 +213,10 @@ local function apply(staged)
         end
     end
 
-    session:commit('dawn', { { 'service', 'dawn', 'restart' } })
+    local ok, err = session:commit('dawn', { { 'service', 'dawn', 'restart' } })
+    if not ok then
+        error('apply commit failed: ' .. tostring(err))
+    end
 end
 
 return {
