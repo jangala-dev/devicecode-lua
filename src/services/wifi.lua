@@ -68,6 +68,30 @@ local function is_table(v) return type(v) == 'table' end
 -- Band steering application
 ------------------------------------------------------------------------
 
+-- Remap tables for config-level scoring keys → band driver option keys
+local RSSI_SCORING_REMAP = {
+    center         = 'rssi_center',
+    weight         = 'rssi_weight',
+    good_threshold = 'rssi_reward_threshold',
+    good_reward    = 'rssi_reward',
+    bad_threshold  = 'rssi_penalty_threshold',
+    bad_penalty    = 'rssi_penalty',
+}
+local CHAN_UTIL_SCORING_REMAP = {
+    good_threshold = 'channel_util_reward_threshold',
+    good_reward    = 'channel_util_reward',
+    bad_threshold  = 'channel_util_penalty_threshold',
+    bad_penalty    = 'channel_util_penalty',
+}
+
+local function remap_keys(src, mapping)
+    local out = {}
+    for src_key, dst_key in pairs(mapping) do
+        if src[src_key] ~= nil then out[dst_key] = src[src_key] end
+    end
+    return out
+end
+
 ---@param band_cap CapabilityReference
 ---@param band_cfg WifiBandSteeringConfig
 ---@param svc ServiceBase
@@ -77,8 +101,8 @@ local function apply_band_steering(band_cap, band_cfg, svc)
     local timings  = band_cfg.timings  or {}
     local bands    = band_cfg.bands    or {}
 
-    local function rpc(method, args)
-        local reply, err = band_cap:call_control(method, args)
+    local function rpc(method, args, opts)
+        local reply, err = perform(band_cap:call_control_op(method, args, opts))
         if err and err ~= "" then
             svc:obs_log('warn', { what = 'band_rpc_failed', method = method, err = tostring(err) })
             return false
@@ -91,7 +115,10 @@ local function apply_band_steering(band_cap, band_cfg, svc)
         return true
     end
 
-    rpc('clear', {})
+    local slow = { timeout = 10.0 }
+
+    svc:obs_log('debug', { what = 'band_config_start' })
+    rpc('clear', {}, slow)
 
     -- kicking
     local kicking = globals.kicking
@@ -196,7 +223,8 @@ local function apply_band_steering(band_cap, band_cfg, svc)
                 end
             end
             if is_table(band_data.rssi_scoring) then
-                local args, err = cap_sdk.args.new.BandSetBandKickingOpts(band_key, band_data.rssi_scoring)
+                local args, err = cap_sdk.args.new.BandSetBandKickingOpts(
+                    band_key, remap_keys(band_data.rssi_scoring, RSSI_SCORING_REMAP))
                 if not args then
                     svc:obs_log('warn', { what = 'band_args_invalid', method = 'set_band_kicking', err = err })
                 else
@@ -204,7 +232,8 @@ local function apply_band_steering(band_cap, band_cfg, svc)
                 end
             end
             if is_table(band_data.chan_util_scoring) then
-                local args, err = cap_sdk.args.new.BandSetBandKickingOpts(band_key, band_data.chan_util_scoring)
+                local args, err = cap_sdk.args.new.BandSetBandKickingOpts(
+                    band_key, remap_keys(band_data.chan_util_scoring, CHAN_UTIL_SCORING_REMAP))
                 if not args then
                     svc:obs_log('warn', { what = 'band_args_invalid', method = 'set_band_kicking', err = err })
                 else
@@ -224,7 +253,8 @@ local function apply_band_steering(band_cap, band_cfg, svc)
         end
     end
 
-    rpc('apply', {})
+    rpc('apply', {}, slow)
+    svc:obs_log('info', { what = 'band_config_applied' })
 end
 
 ------------------------------------------------------------------------
@@ -238,20 +268,24 @@ end
 ---@param band_steering_cfg WifiBandSteeringConfig?
 ---@param svc ServiceBase
 local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_cap, band_steering_cfg, svc)
+    local radio_id = radio_cap.id
+
     local function rpc(method, args)
         local reply, err = radio_cap:call_control(method, args)
         if err and err ~= "" then
-            svc:obs_log('warn', { what = 'radio_rpc_failed', radio = radio_cap.id,
+            svc:obs_log('warn', { what = 'radio_rpc_failed', radio = radio_id,
                                    method = method, err = tostring(err) })
             return false
         end
         if not reply or reply.ok ~= true then
-            svc:obs_log('warn', { what = 'radio_rpc_error', radio = radio_cap.id,
+            svc:obs_log('warn', { what = 'radio_rpc_error', radio = radio_id,
                                    method = method, reason = reply and reply.reason or 'nil' })
             return false
         end
         return true, reply
     end
+
+    svc:obs_log('debug', { what = 'radio_config_start', radio = radio_id })
 
     -- 1. Clear staged config
     if not rpc('clear_radio_config', {}) then return end
@@ -275,6 +309,8 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
             return
         end
         if not rpc('set_channels', args) then return end
+        svc:obs_log('debug', { what = 'radio_channels_set', radio = radio_id,
+            band = radio_cfg.band, channel = radio_cfg.channel, htmode = radio_cfg.htmode })
     end
 
     -- 4. txpower (optional)
@@ -354,7 +390,12 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
                     if not args then
                         svc:obs_log('warn', { what = 'radio_args_invalid', method = 'add_interface', err = err })
                     else
-                        rpc('add_interface', args)
+                        local ok, reply = rpc('add_interface', args)
+                        if ok then
+                            svc:obs_log('debug', { what = 'radio_iface_added', radio = radio_id,
+                                ssid = mssd.name or mssd.ssid, network = mssd.network,
+                                iface = reply and reply.reason or nil })
+                        end
                     end
                 end
             else
@@ -369,14 +410,20 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
                 if not args then
                     svc:obs_log('warn', { what = 'radio_args_invalid', method = 'add_interface', err = err })
                 else
-                    rpc('add_interface', args)
+                    local ok, reply = rpc('add_interface', args)
+                    if ok then
+                        svc:obs_log('debug', { what = 'radio_iface_added', radio = radio_id,
+                            ssid = ssid_cfg.name, network = ssid_cfg.network,
+                            iface = reply and reply.reason or nil })
+                    end
                 end
             end
         until true
     end
 
     -- 8. Apply
-    rpc('apply', {})
+    if not rpc('apply', {}) then return end
+    svc:obs_log('info', { what = 'radio_config_applied', radio = radio_id })
 end
 
 ------------------------------------------------------------------------
@@ -385,10 +432,25 @@ end
 
 ---@param conn Connection
 ---@param id string
+---@param radio_cfg WifiRadioConfig?
 ---@param svc ServiceBase
-local function radio_stats_loop(conn, id, svc)
-    -- Sessions: mac → session_id
+local function radio_stats_loop(conn, id, radio_cfg, svc)
+    -- Sessions: mac → session_id (raw MAC as key)
     local sessions = {}
+
+    -- Per-interface and per-radio station counts
+    local iface_sta = {}  -- iface_name → count
+    local radio_sta = 0
+
+    -- Band digit for metric topics: "2g" → "2", "5g" → "5"
+    local band        = ((radio_cfg and radio_cfg.band) or ''):sub(1, 1)
+    local hw_platform = '1'
+
+    -- Parse interface index from generated name suffix (e.g. "radio0_i2" → "2")
+    local function iface_idx(name)
+        local n = name and name:match('_i(%d+)$')
+        return n or '0'
+    end
 
     local state_sub = conn:subscribe({ 'cap', 'radio', id, 'state', '+' })
     local event_sub = conn:subscribe({ 'cap', 'radio', id, 'event', '+' })
@@ -413,50 +475,73 @@ local function radio_stats_loop(conn, id, svc)
         end
 
         if which == 'state' then
-            -- Forward stat to obs bus
-            local stat_name = msg.topic and msg.topic[5]
-            if stat_name then
-                conn:publish({ 'obs', 'v1', 'wifi', 'metric', stat_name }, msg.payload)
+            local key = msg.topic and msg.topic[5]
+            local p   = msg.payload
+            if key and is_table(p) then
+                local rd  = 'rd' .. band
+                local idx = iface_idx(p.interface)
+                if key == 'iface_txpower' then
+                    conn:publish({'wifi','hp',hw_platform,rd,idx,'power'}, p.value)
+                elseif key == 'iface_channel' then
+                    conn:publish({'wifi','hp',hw_platform,rd,idx,'channel'}, p.channel)
+                elseif key == 'iface_noise' then
+                    conn:publish({'wifi','hp',hw_platform,rd,idx,'noise'}, p.value)
+                elseif key == 'iface_rx_bytes'    or key == 'iface_tx_bytes'
+                    or key == 'iface_rx_packets'  or key == 'iface_tx_packets'
+                    or key == 'iface_rx_dropped'  or key == 'iface_tx_dropped'
+                    or key == 'iface_rx_errors'   or key == 'iface_tx_errors' then
+                    -- Strip "iface_" prefix (6 chars) to get the metric name
+                    conn:publish({'wifi','hp',hw_platform,rd,idx, key:sub(7)}, p.value)
+                elseif key == 'client_signal' then
+                    local uid = gen.userid(p.mac)
+                    local sid = sessions[p.mac]
+                    if sid then
+                        conn:publish({'wifi','clients',uid,'sessions',sid,'signal'}, p.signal)
+                    end
+                elseif key == 'client_tx_bytes' or key == 'client_rx_bytes' then
+                    -- Strip "client_" prefix (7 chars) to get tx_bytes / rx_bytes
+                    local uid = gen.userid(p.mac)
+                    local sid = sessions[p.mac]
+                    if sid then
+                        conn:publish({'wifi','clients',uid,'sessions',sid, key:sub(8)}, p.value)
+                    end
+                end
             end
 
         elseif which == 'event' then
             local event_name = msg.topic and msg.topic[5]
 
             if event_name == 'client_event' then
-                local payload = msg.payload
-                if is_table(payload) then
-                    local mac       = payload.mac
-                    local connected = payload.connected
-                    local timestamp = payload.timestamp or os.time()
+                local p = msg.payload
+                if is_table(p) and p.mac then
+                    local mac       = p.mac
+                    local iface     = p.interface
+                    local connected = p.connected
+                    local timestamp = p.timestamp or os.time()
+                    local uid       = gen.userid(mac)
+                    local change    = connected and 1 or -1
 
-                    if connected and mac then
-                        local user_id    = gen.userid(mac)
-                        local session_id = gen.gen_session_id()
-                        sessions[mac]    = session_id
-                        conn:publish({ 'obs', 'v1', 'wifi', 'metric', 'session_start' }, {
-                            user_id    = user_id,
-                            session_id = session_id,
-                            radio      = id,
-                            timestamp  = timestamp,
-                        })
-                    elseif not connected and mac then
-                        local session_id = sessions[mac]
-                        if session_id then
-                            local user_id = gen.userid(mac)
-                            conn:publish({ 'obs', 'v1', 'wifi', 'metric', 'session_end' }, {
-                                user_id    = user_id,
-                                session_id = session_id,
-                                radio      = id,
-                                timestamp  = timestamp,
-                            })
+                    -- Update per-interface and per-radio station counts
+                    iface_sta[iface] = math.max(0, (iface_sta[iface] or 0) + change)
+                    radio_sta        = math.max(0, radio_sta + change)
+
+                    local rd  = 'rd' .. band
+                    local idx = iface_idx(iface)
+                    conn:publish({'wifi','hp',hw_platform,rd,idx,'num_sta'}, iface_sta[iface])
+                    conn:publish({'wifi','hp',hw_platform,'num_sta'}, radio_sta)
+
+                    -- Session tracking + session event publish
+                    if connected then
+                        local sid = gen.gen_session_id()
+                        sessions[mac] = sid
+                        conn:publish({'wifi','clients',uid,'sessions',sid,'session_start'}, timestamp)
+                    else
+                        local sid = sessions[mac]
+                        if sid then
+                            conn:publish({'wifi','clients',uid,'sessions',sid,'session_end'}, timestamp)
                             sessions[mac] = nil
                         end
                     end
-                end
-            else
-                -- Forward other events
-                if event_name then
-                    conn:publish({ 'obs', 'v1', 'wifi', 'metric', event_name }, msg.payload)
                 end
             end
         end
@@ -546,8 +631,10 @@ function WifiService.start(conn, opts)
         scope:spawn(function()
             -- Apply configuration for this radio
             configure_radio(id)
+            -- Capture radio_cfg after configure so band is available for metric topics
+            local radio_cfg = get_radio_cfg(id)
             -- Run stats forwarding loop
-            radio_stats_loop(conn, id, svc)
+            radio_stats_loop(conn, id, radio_cfg, svc)
         end)
     end
 
@@ -572,6 +659,28 @@ function WifiService.start(conn, opts)
 
     svc:status('running')
     svc:obs_log('info', 'service running')
+
+    -- Aggregate global wifi/num_sta across all radios.
+    -- Each radio also publishes wifi/hp/<platform>/num_sta for its own total.
+    parent_scope:spawn(function()
+        local global_sta = 0
+        local global_event_sub = conn:subscribe({ 'cap', 'radio', '+', 'event', 'client_event' })
+        fibers.current_scope():finally(function()
+            global_event_sub:unsubscribe()
+        end)
+        while true do
+            local which, msg = perform(fibers.named_choice({
+                event  = global_event_sub:recv_op(),
+                cancel = parent_scope:cancel_op(),
+            }))
+            if which == 'cancel' then break end
+            if msg and is_table(msg.payload) and msg.payload.mac then
+                local change = msg.payload.connected and 1 or -1
+                global_sta = math.max(0, global_sta + change)
+                conn:publish({ 'wifi', 'num_sta' }, global_sta)
+            end
+        end
+    end)
 
     while true do
         local choices = {
