@@ -88,7 +88,7 @@
             ],
             "ssids": [
                 {
-                    "mainflux_path": "mainflux.json",
+                    "mainflux_path": "mainflux.cfg",
                     "encryption": "psk2",
                     "mode": "access_point",
                     "radios": ["radio0", "radio1"]
