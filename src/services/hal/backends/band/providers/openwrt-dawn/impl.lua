@@ -46,15 +46,23 @@ local REQUIRED_SECTIONS = {
 }
 
 ------------------------------------------------------------------------
--- Backend functions
+-- BandBackend class
 ------------------------------------------------------------------------
+
+---@class BandBackend
+local BandBackend = {}
+BandBackend.__index = BandBackend
+
+---@return BandBackend
+function BandBackend.new()
+    return setmetatable({}, BandBackend)
+end
 
 ---Reset DAWN's UCI config to a clean base state.
 ---Deletes all non-hostapd sections, re-creates required sections with empty defaults.
----Uses a synchronous commit so callers get immediate success/failure.
 ---@return boolean ok
 ---@return string  err
-local function clear()
+function BandBackend:clear()
     uci.ensure_started()
     local session = uci.new_session()
 
@@ -80,7 +88,7 @@ end
 
 ---Apply the staged band config table to DAWN UCI and restart the daemon.
 ---@param staged table  Band staged config as accumulated by the driver
-local function apply(staged)
+function BandBackend:apply(staged)
     uci.ensure_started()
     local session = uci.new_session()
 
@@ -220,6 +228,5 @@ local function apply(staged)
 end
 
 return {
-    clear        = clear,
-    apply        = apply,
+    new = BandBackend.new,
 }
