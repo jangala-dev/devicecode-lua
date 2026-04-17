@@ -383,7 +383,7 @@ end
 ---@return boolean ok
 ---@return string? reason
 function BandDriver:apply()
-    local ok, err = pcall(self.backend.apply, self.staged)
+    local ok, err = pcall(function() self.backend:apply(self.staged) end)
     if not ok then
         return false, tostring(err)
     end
@@ -393,7 +393,7 @@ end
 ---@return boolean ok
 ---@return string? reason
 function BandDriver:clear()
-    local ok, err = self.backend.clear()
+    local ok, err = self.backend:clear()
     if not ok then
         return false, err
     end
@@ -450,7 +450,7 @@ end
 
 ---@return string err  empty string on success
 function BandDriver:init()
-    local ok, err = self.backend.clear()
+    local ok, err = self.backend:clear()
     if not ok then
         return "band backend clear failed: " .. tostring(err)
     end
@@ -519,7 +519,7 @@ end
 ---@return BandDriver? driver
 ---@return string      err
 local function new(logger)
-    local bknd, berr = provider.get_backend()
+    local bknd, berr = provider.new()
     if not bknd then
         return nil, "no band backend: " .. tostring(berr)
     end

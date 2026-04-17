@@ -7,14 +7,14 @@ local BACKENDS = {
     "services.hal.backends.band.providers.openwrt-dawn",
 }
 
----Get the first supported band backend.
----@return table|nil  backend
+---Instantiate a new backend from the first supported provider.
+---@return table|nil  backend instance
 ---@return string     err  "" on success
-local function get_backend()
+local function new()
     for _, path in ipairs(BACKENDS) do
         local ok, provider = pcall(require, path)
         if ok and provider.is_supported and provider.is_supported() then
-            local backend = provider.backend
+            local backend = provider.backend.new()
             local valid, verr = contract.validate(backend)
             if valid then
                 return backend, ""
@@ -27,5 +27,5 @@ local function get_backend()
 end
 
 return {
-    get_backend = get_backend,
+    new = new,
 }
