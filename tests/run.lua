@@ -1,6 +1,5 @@
 -- tests/run.lua
 
--- look one level up
 package.path = "../src/?.lua;" .. package.path
 package.path = '../?.lua;../?/init.lua;./?.lua;./?/init.lua;' .. package.path
 
@@ -28,8 +27,30 @@ local files = {
 	'unit.config.state_spec',
 	'unit.main.service_spec',
 	'unit.config.service_spec',
+	'unit.fabric.b64url_spec',
+	'unit.fabric.checksum_spec',
+	'unit.fabric.topicmap_spec',
+	'unit.fabric.topicmap_exact_spec',
+	'unit.fabric.protocol_spec',
+	'unit.fabric.blob_source_spec',
+	'unit.fabric.service_spec',
+	'unit.fabric.session_ctl_spec',
+	'unit.fabric.reader_spec',
+	'unit.fabric.writer_spec',
+	'unit.fabric.rpc_bridge_spec',
+	'unit.fabric.transfer_mgr_spec',
+	'unit.ui.topics_spec',
+	'unit.ui.sessions_spec',
+	'unit.ui.queries_spec',
+	'unit.ui.model_spec',
+	'unit.ui.http_transport_spec',
+	'unit.ui.service_spec',
 	'integration.devhost.main_failure_spec',
-	'integration.devhost.config_recovery_spec'
+	'integration.devhost.config_recovery_spec',
+	'integration.devhost.fabric_session_spec',
+	'integration.devhost.hal_uart_spec',
+	'integration.devhost.ui_service_spec',
+	'integration.devhost.ui_ws_spec',
 }
 
 local total, failed = 0, 0
