@@ -1,9 +1,8 @@
 local fibers  = require 'fibers'
-local mailbox = require 'fibers.mailbox'
+local pulse   = require 'fibers.pulse'
 local safe    = require 'coxpcall'
 local scope   = require 'fibers.scope'
 local op      = require 'fibers.op'
-local sleep   = require 'fibers.sleep'
 
 local base      = require 'devicecode.service_base'
 local auth_mod  = require 'services.ui.auth'
@@ -17,12 +16,6 @@ local M = {}
 
 local function now()
 	return fibers.now()
-end
-
-local function send_required(tx, item, what)
-	local ok, reason = tx:send(item)
-	if ok == true then return true end
-	error((what or 'ui ctl queue') .. ': ' .. tostring(reason or 'closed'), 0)
 end
 
 local function start_child(fn)
@@ -59,20 +52,6 @@ local function default_announce(svc)
 	}
 end
 
-local function next_shell_event_op(ctl_rx, prune_s)
-	return op.choice(
-		ctl_rx:recv_op():wrap(function(ev)
-			if ev == nil then
-				return { tag = 'ctl_closed', reason = tostring(ctl_rx:why() or 'closed') }
-			end
-			return ev
-		end),
-		sleep.sleep_op(prune_s):wrap(function()
-			return { tag = 'prune_tick' }
-		end)
-	)
-end
-
 function M.start(conn, opts)
 	opts = opts or {}
 	if type(opts.connect) ~= 'function' then error('ui: opts.connect(principal, origin_extra) is required', 2) end
@@ -82,7 +61,7 @@ function M.start(conn, opts)
 	local session_prune_s = (type(opts.session_prune_s) == 'number' and opts.session_prune_s > 0) and opts.session_prune_s or 60
 	local model_ready_timeout_s = (type(opts.model_ready_timeout_s) == 'number' and opts.model_ready_timeout_s > 0) and opts.model_ready_timeout_s or 2.0
 
-	local ctl_tx, ctl_rx = mailbox.new(128, { full = 'reject_newest' })
+	local shell_pulse = pulse.scoped({ close_reason = 'ui shell closed' })
 	local session_store = sessions.new_store({ now = now })
 	local aggregate = {
 		sessions = 0,
@@ -91,6 +70,8 @@ function M.start(conn, opts)
 		model_seq = 0,
 		status = 'starting',
 	}
+	local client_count = 0
+	local model
 
 	local function retain_state(extra)
 		local payload = {
@@ -105,12 +86,64 @@ function M.start(conn, opts)
 		conn:retain({ 'state', 'ui', 'main' }, payload)
 	end
 
+	local function recompute_aggregate()
+		local changed = false
+		local sessions_n = session_store:count()
+		local model_ready = model and model:is_ready() or false
+		local model_seq = model and model:seq() or 0
+		local clients_n = client_count
+
+		if aggregate.sessions ~= sessions_n then
+			aggregate.sessions = sessions_n
+			changed = true
+		end
+		if aggregate.clients ~= clients_n then
+			aggregate.clients = clients_n
+			changed = true
+		end
+		if aggregate.model_ready ~= model_ready then
+			aggregate.model_ready = model_ready
+			changed = true
+		end
+		if aggregate.model_seq ~= model_seq then
+			aggregate.model_seq = model_seq
+			changed = true
+		end
+
+		return changed
+	end
+
+	local function next_shell_event_op(last_local_ver, last_model_seq, prune_s)
+		return op.choice(
+			shell_pulse:changed_op(last_local_ver):wrap(function(ver, reason)
+				if ver == nil then
+					return { tag = 'shell_closed', reason = tostring(reason or 'closed') }
+				end
+				return { tag = 'local_changed', ver = ver }
+			end),
+			model:next_change_op(last_model_seq, prune_s):wrap(function(seq, err)
+				if seq == nil then
+					if err == 'timeout' then
+						return { tag = 'prune_tick' }
+					end
+					return { tag = 'model_closed', reason = tostring(err or 'closed') }
+				end
+				return { tag = 'model_changed', seq = seq }
+			end)
+		)
+	end
+
+	local function signal_shell_change()
+		shell_pulse:signal()
+	end
+
 	local function note_session_count()
-		send_required(ctl_tx, { tag = 'session_count', value = session_store:count() }, 'ui ctl')
+		signal_shell_change()
 	end
 
 	local function note_client_delta(delta)
-		send_required(ctl_tx, { tag = 'client_delta', value = delta or 0 }, 'ui ctl')
+		client_count = math.max(0, client_count + (delta or 0))
+		signal_shell_change()
 	end
 
 	local function audit(kind, payload)
@@ -145,8 +178,7 @@ function M.start(conn, opts)
 		return a, b, c
 	end
 
-	local model = model_mod.start(conn, {
-		report_tx = ctl_tx,
+	model = model_mod.start(conn, {
 		queue_len = opts.model_queue_len or 512,
 		sources = opts.model_sources,
 	})
@@ -179,8 +211,7 @@ function M.start(conn, opts)
 	end
 
 	aggregate.status = 'running'
-	aggregate.model_ready = true
-	aggregate.model_seq = model:seq()
+	recompute_aggregate()
 	svc:status('running')
 	retain_state()
 
@@ -202,33 +233,33 @@ function M.start(conn, opts)
 		})
 	end)
 
+	local last_local_ver = shell_pulse:version()
+	local last_model_seq = model:seq()
+
 	while true do
-		local ev = fibers.perform(next_shell_event_op(ctl_rx, session_prune_s))
-		if ev.tag == 'ctl_closed' then
-			error('ui ctl closed: ' .. tostring(ev.reason or 'closed'), 0)
+		local ev = fibers.perform(next_shell_event_op(last_local_ver, last_model_seq, session_prune_s))
+		if ev.tag == 'shell_closed' then
+			error('ui shell pulse closed: ' .. tostring(ev.reason or 'closed'), 0)
 		elseif ev.tag == 'prune_tick' then
 			local removed = session_store:prune()
 			if removed > 0 then
-				aggregate.sessions = session_store:count()
+				recompute_aggregate()
 				retain_state()
 			end
-		elseif ev.tag == 'model_ready' then
-			aggregate.model_ready = true
-			aggregate.model_seq = ev.seq or aggregate.model_seq
-			retain_state()
-		elseif ev.tag == 'model_seq' then
-			aggregate.model_seq = ev.seq or aggregate.model_seq
-			retain_state()
+		elseif ev.tag == 'local_changed' then
+			last_local_ver = ev.ver or shell_pulse:version()
+			if recompute_aggregate() then
+				retain_state()
+			end
+		elseif ev.tag == 'model_changed' then
+			last_model_seq = ev.seq or model:seq()
+			if recompute_aggregate() then
+				retain_state()
+			end
 		elseif ev.tag == 'model_closed' then
 			aggregate.status = 'failed'
 			retain_state({ reason = tostring(ev.reason or 'closed') })
 			error('ui model closed: ' .. tostring(ev.reason or 'closed'), 0)
-		elseif ev.tag == 'session_count' then
-			aggregate.sessions = ev.value or session_store:count()
-			retain_state()
-		elseif ev.tag == 'client_delta' then
-			aggregate.clients = math.max(0, aggregate.clients + (ev.value or 0))
-			retain_state()
 		end
 	end
 end

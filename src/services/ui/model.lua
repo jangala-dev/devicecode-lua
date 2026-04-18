@@ -57,11 +57,6 @@ function Model:close(reason)
 	end
 	self._pulse:close(self._close_reason)
 	self._ready_cond:signal()
-	if self._report_tx then
-		pcall(function()
-			self._report_tx:send({ tag = 'model_closed', reason = self._close_reason })
-		end)
-	end
 	return true
 end
 
@@ -94,7 +89,7 @@ function Model:await_ready(timeout_s)
 	return fibers.perform(self:await_ready_op(timeout_s))
 end
 
-function Model:await_seq_change_op(last_seq, timeout_s)
+function Model:next_change_op(last_seq, timeout_s)
 	if self._closed then
 		return op.always(nil, self._close_reason or 'closed')
 	end
@@ -253,14 +248,6 @@ local function apply_unretain(self, ev)
 	})
 end
 
-local function report(self, item)
-	if not self._report_tx then return end
-	local ok = self._report_tx:send(item)
-	if ok ~= true then
-		error('ui model report queue closed', 0)
-	end
-end
-
 local function next_source_event_op(self)
 	local arms = {}
 	for i = 1, #self._sources do
@@ -288,7 +275,6 @@ local function run(self)
 			if not self._ready and next(self._pending) == nil then
 				self._ready = true
 				self._ready_cond:signal()
-				report(self, { tag = 'model_ready', seq = self._seq })
 			end
 		elseif ev.op == 'retain' or ev.op == 'unretain' then
 			self._seq = self._seq + 1
@@ -298,9 +284,6 @@ local function run(self)
 				apply_unretain(self, ev)
 			end
 			self._pulse:signal()
-			if self._ready then
-				report(self, { tag = 'model_seq', seq = self._seq })
-			end
 		end
 	end
 end
@@ -311,7 +294,6 @@ function M.start(conn, opts)
 		_conn = assert(conn, 'ui model requires a connection'),
 		_sources = opts.sources or DEFAULT_SOURCES,
 		_queue_len = (type(opts.queue_len) == 'number' and opts.queue_len > 0) and opts.queue_len or 256,
-		_report_tx = opts.report_tx,
 		_store = trie.new_retained('+', '#'),
 		_by_key = {},
 		_seq = 0,

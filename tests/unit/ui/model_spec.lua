@@ -1,20 +1,25 @@
 local busmod = require 'bus'
-local mailbox = require 'fibers.mailbox'
 local runfibers = require 'tests.support.run_fibers'
 local model_mod = require 'services.ui.model'
-local ui_fakes = require 'tests.support.ui_fakes'
 
 local T = {}
 
-local function recv_mailbox(rx, timeout)
-	local fibers = require 'fibers'
-	local sleep = require 'fibers.sleep'
-	local which, item, err = fibers.perform(fibers.named_choice({
-		item = rx:recv_op(),
-		timeout = sleep.sleep_op(timeout or 1.0):wrap(function() return nil, 'timeout' end),
-	}))
-	if which == 'timeout' then return nil, 'timeout' end
-	return item, err
+local function model_next_change(model, last_seq, timeout)
+	if type(model.next_change) == 'function' then
+		return model:next_change(last_seq, timeout)
+	end
+	if type(model.await_seq_change) == 'function' then
+		return model:await_seq_change(last_seq, timeout)
+	end
+	if type(model.next_change_op) == 'function' then
+		local fibers = require 'fibers'
+		return fibers.perform(model:next_change_op(last_seq, timeout))
+	end
+	if type(model.await_seq_change_op) == 'function' then
+		local fibers = require 'fibers'
+		return fibers.perform(model:await_seq_change_op(last_seq, timeout))
+	end
+	error('ui model does not expose a change-wait API')
 end
 
 function T.model_bootstraps_from_retained_state_and_replays_watchers()
@@ -24,9 +29,7 @@ function T.model_bootstraps_from_retained_state_and_replays_watchers()
 		seed:retain({ 'cfg', 'net' }, { rev = 1, data = { foo = 'bar' } })
 		seed:retain({ 'svc', 'alpha', 'status' }, { state = 'running' })
 
-		local report_tx, report_rx = mailbox.new(16, { full = 'reject_newest' })
 		local model = model_mod.start(bus:connect(), {
-			report_tx = report_tx,
 			queue_len = 32,
 			sources = {
 				{ name = 'cfg', pattern = { 'cfg', '#' } },
@@ -36,8 +39,7 @@ function T.model_bootstraps_from_retained_state_and_replays_watchers()
 
 		local ok, err = model:await_ready(0.5)
 		assert(ok == true, tostring(err))
-		local rep = recv_mailbox(report_rx, 0.5)
-		assert(rep.tag == 'model_ready')
+		assert(model:is_ready() == true)
 
 		local exact, xerr = model:get_exact({ 'cfg', 'net' })
 		assert(xerr == nil)
@@ -67,20 +69,19 @@ function T.model_emits_live_retain_and_unretain_with_seq_reports()
 		local seed = bus:connect()
 		seed:retain({ 'cfg', 'net' }, { rev = 1 })
 
-		local report_tx, report_rx = mailbox.new(16, { full = 'reject_newest' })
 		local model = model_mod.start(bus:connect(), {
-			report_tx = report_tx,
 			queue_len = 32,
 			sources = {
 				{ name = 'cfg', pattern = { 'cfg', '#' } },
 			},
 		})
 		assert(model:await_ready(0.5) == true)
-		recv_mailbox(report_rx, 0.5) -- model_ready
 
 		local watch = assert(model:open_watch({ 'cfg', '#' }, { queue_len = 16 }))
 		watch:recv() -- replay retain
 		watch:recv() -- replay_done
+
+		local last_seq = model:seq()
 
 		seed:retain({ 'cfg', 'wifi' }, { enabled = true })
 		local ev1, err1 = watch:recv()
@@ -89,9 +90,11 @@ function T.model_emits_live_retain_and_unretain_with_seq_reports()
 		assert(ev1.phase == 'live')
 		assert(ev1.topic[2] == 'wifi')
 		assert(ev1.payload.enabled == true)
-		local rep1 = recv_mailbox(report_rx, 0.5)
-		assert(rep1.tag == 'model_seq')
-		assert(type(rep1.seq) == 'number' and rep1.seq >= 1)
+
+		local seq1, seqerr1 = model_next_change(model, last_seq, 0.5)
+		assert(seqerr1 == nil)
+		assert(type(seq1) == 'number' and seq1 > last_seq)
+		last_seq = seq1
 
 		seed:unretain({ 'cfg', 'wifi' })
 		local ev2, err2 = watch:recv()
@@ -99,9 +102,10 @@ function T.model_emits_live_retain_and_unretain_with_seq_reports()
 		assert(ev2.op == 'unretain')
 		assert(ev2.phase == 'live')
 		assert(ev2.topic[2] == 'wifi')
-		local rep2 = recv_mailbox(report_rx, 0.5)
-		assert(rep2.tag == 'model_seq')
-		assert(type(rep2.seq) == 'number' and rep2.seq >= rep1.seq)
+
+		local seq2, seqerr2 = model_next_change(model, last_seq, 0.5)
+		assert(seqerr2 == nil)
+		assert(type(seq2) == 'number' and seq2 > last_seq)
 	end, { timeout = 1.5 })
 end
 
