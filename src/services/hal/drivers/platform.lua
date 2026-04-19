@@ -63,6 +63,65 @@ local function trim(s)
     return (s or ""):match("^%s*(.-)%s*$") or ""
 end
 
+
+local function dirname(path)
+    local d = tostring(path or ''):match('^(.*)/[^/]+$')
+    if d == nil or d == '' then return '.' end
+    return d
+end
+
+local function ensure_parent_dir(path)
+    local dir = dirname(path)
+    local cmd = exec.command('mkdir', '-p', dir)
+    local st = perform(cmd:run_op())
+    if st ~= 'exited' then
+        return false, 'mkdir failed'
+    end
+    return true, ''
+end
+
+local function read_json(path)
+    local raw, err = read_file(path)
+    if not raw then return nil, err end
+    local obj, derr = cjson.decode(raw)
+    if obj == nil then return nil, tostring(derr or 'decode_failed') end
+    return obj, ''
+end
+
+local function write_json(path, obj)
+    local ok, derr = ensure_parent_dir(path)
+    if not ok then return false, derr end
+    local encoded, eerr = cjson.encode(obj)
+    if not encoded then return false, tostring(eerr or 'encode_failed') end
+    local f, ferr = file.open(path, 'w')
+    if not f then return false, tostring(ferr) end
+    local wn, werr = f:write(encoded)
+    f:close()
+    if wn == nil then return false, tostring(werr) end
+    return true, ''
+end
+
+local function updater_state_path()
+    return os.getenv('DEVICECODE_UPDATE_STATE_PATH') or '/data/update/cm5-updater.json'
+end
+
+local function updater_artifact_root()
+    return os.getenv('DEVICECODE_ARTIFACT_DIR') or '/data/artifacts'
+end
+
+local function updater_script_path()
+    return os.getenv('DEVICECODE_UPDATE_SCRIPT') or '/root/scripts/update.sh'
+end
+
+local function read_updater_state()
+    local path = updater_state_path()
+    local obj, err = read_json(path)
+    if not obj then return { state = 'idle', path = path }, err end
+    if type(obj) ~= 'table' then return { state = 'idle', path = path }, 'invalid_state' end
+    obj.path = path
+    return obj, ''
+end
+
 --- Run fw_printenv and extract a named variable.
 ---@param varname string
 ---@return string value
@@ -92,29 +151,6 @@ local function read_identity()
         serial         = safe_read('/data/serial'),
         board_revision = board_revision,
     }
-end
-
-
-
-local function updater_state_path()
-    return os.getenv('DEVICECODE_UPDATE_STATE_PATH') or '/data/update/cm5-updater.json'
-end
-
-local function updater_artifact_root()
-    return os.getenv('DEVICECODE_ARTIFACT_DIR') or '/data/artifacts'
-end
-
-local function updater_script_path()
-    return os.getenv('DEVICECODE_UPDATE_SCRIPT') or '/root/scripts/update.sh'
-end
-
-local function read_updater_state()
-    local path = updater_state_path()
-    local obj, err = read_json(path)
-    if not obj then return { state = 'idle', path = path }, err end
-    if type(obj) ~= 'table' then return { state = 'idle', path = path }, 'invalid_state' end
-    obj.path = path
-    return obj, ''
 end
 
 ---- capability verbs ----
@@ -159,11 +195,10 @@ end
 ---@return any value_or_err
 function PlatformDriver:status(opts)
     if opts ~= nil and getmetatable(opts) ~= cap_args.UpdaterStatusOpts then
-        return false, 'invalid opts'
+        return false, "invalid opts"
     end
-
     local raw_state = read_updater_state()
-    local status = {
+    return true, {
         state = raw_state.state or 'idle',
         staged = raw_state.staged == true,
         artifact = raw_state.artifact,
@@ -173,20 +208,13 @@ function PlatformDriver:status(opts)
         fw_version = self.identity.fw_version,
         hw_revision = self.identity.hw_revision,
         serial = self.identity.serial,
-        uboot_version = read_fw_printenv('ubootversion'),
+        board_revision = self.identity.board_revision,
         bootedfw = read_fw_printenv('bootedfw'),
         targetfw = read_fw_printenv('targetfw'),
         upgrade_available = read_fw_printenv('upgrade_available'),
         artifact_root = updater_artifact_root(),
         state_path = updater_state_path(),
     }
-    return true, status
-end
-
----@param payload table
-local function maybe_now(payload)
-    payload.updated_at = os.time()
-    return payload
 end
 
 function PlatformDriver:emit_updater_status()
@@ -206,7 +234,7 @@ end
 ---@return any value_or_err
 function PlatformDriver:prepare(opts)
     if opts ~= nil and getmetatable(opts) ~= cap_args.UpdaterPrepareOpts then
-        return false, 'invalid opts'
+        return false, "invalid opts"
     end
     local _, status = self:status(cap_args.new.UpdaterStatusOpts(false))
     return true, status
@@ -217,18 +245,16 @@ end
 ---@return any value_or_err
 function PlatformDriver:stage(opts)
     if opts == nil or getmetatable(opts) ~= cap_args.UpdaterStageOpts then
-        return false, 'invalid opts'
+        return false, "invalid opts"
     end
-
     local artifact = opts.artifact
     local path = artifact
     if not artifact:match('^/') then
-        if artifact:find('%.%.', 1, true) or artifact:find('/', 1, true) or artifact:find('\\', 1, true) then
-            return false, 'invalid artifact path'
+        if artifact:find('..', 1, true) or artifact:find('/', 1, true) or artifact:find('\\', 1, true) then
+            return false, "invalid artifact path"
         end
         path = updater_artifact_root() .. '/' .. artifact
     end
-
     local f, ferr = file.open(path, 'r')
     if not f then
         return false, 'artifact not found: ' .. tostring(ferr)
@@ -238,8 +264,7 @@ function PlatformDriver:stage(opts)
     if content == nil then
         return false, 'artifact unreadable: ' .. tostring(rerr)
     end
-
-    local state = maybe_now({
+    local state = {
         state = 'staged',
         staged = true,
         artifact = path,
@@ -247,7 +272,8 @@ function PlatformDriver:stage(opts)
         expected_version = opts.expected_version,
         metadata = opts.metadata,
         last_error = nil,
-    })
+        updated_at = os.time(),
+    }
     local ok, err = write_json(updater_state_path(), state)
     if not ok then
         return false, err
@@ -266,14 +292,12 @@ end
 ---@return any value_or_err
 function PlatformDriver:commit(opts)
     if opts ~= nil and getmetatable(opts) ~= cap_args.UpdaterCommitOpts then
-        return false, 'invalid opts'
+        return false, "invalid opts"
     end
-
     local state = read_updater_state()
     if state.state ~= 'staged' or type(state.artifact) ~= 'string' or state.artifact == '' then
         return false, 'no_staged_artifact'
     end
-
     local script = updater_script_path()
     local sf, ferr = file.open(script, 'r')
     if not sf then
@@ -281,8 +305,8 @@ function PlatformDriver:commit(opts)
     end
     sf:close()
 
-    state = maybe_now(state)
     state.state = 'committing'
+    state.updated_at = os.time()
     local ok, err = write_json(updater_state_path(), state)
     if not ok then
         return false, err
@@ -306,7 +330,6 @@ function PlatformDriver:commit(opts)
     if not spawn_ok then
         return false, tostring(spawn_err)
     end
-
     return true, { started = true, artifact = state.artifact }
 end
 
@@ -394,10 +417,18 @@ function PlatformDriver:start()
 
         -- Publish meta.
         local meta_payload, meta_err = hal_types.new.Emit('platform', '1', 'meta', 'info', { provider = 'hal', version = 1 })
-        if meta_payload then self.cap_emit_ch:put(meta_payload) else dlog(self.logger, 'debug', { what = 'meta_emit_failed', err = tostring(meta_err) }) end
+        if meta_payload then
+            self.cap_emit_ch:put(meta_payload)
+        else
+            dlog(self.logger, 'debug', { what = 'meta_emit_failed', err = tostring(meta_err) })
+        end
 
         local updater_meta, updater_meta_err = hal_types.new.Emit('updater', 'cm5', 'meta', 'info', { provider = 'hal', version = 1 })
-        if updater_meta then self.cap_emit_ch:put(updater_meta) else dlog(self.logger, 'debug', { what = 'updater_meta_emit_failed', err = tostring(updater_meta_err) }) end
+        if updater_meta then
+            self.cap_emit_ch:put(updater_meta)
+        else
+            dlog(self.logger, 'debug', { what = 'updater_meta_emit_failed', err = tostring(updater_meta_err) })
+        end
 
         self:emit_updater_status()
     end

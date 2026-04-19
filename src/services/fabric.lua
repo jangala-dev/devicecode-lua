@@ -94,6 +94,9 @@ local function link_summary(rec)
 		ready = not not s.ready,
 		established = not not s.established,
 		generation = s.generation,
+		member_class = rec.cfg and rec.cfg.member_class or nil,
+		link_class = rec.cfg and rec.cfg.link_class or nil,
+		node_id = rec.cfg and rec.cfg.node_id or nil,
 	}
 end
 

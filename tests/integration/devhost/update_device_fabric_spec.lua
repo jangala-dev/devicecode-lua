@@ -216,6 +216,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 			artifact = 'mcu.uf2',
 			expected_version = 'mcu-v1',
 			metadata = { channel = 'test', next_version = 'mcu-v1' },
+			approval = 'manual',
 		}, { timeout = 0.5 })
 		assert(cerr == nil)
 		assert(created.ok == true)
@@ -224,6 +225,12 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 })
 		assert(aerr == nil)
 		assert(applied.ok == true)
+		assert(type(applied.job) == 'table')
+		assert(applied.job.state == 'awaiting_approval')
+
+		local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
+		assert(perr == nil)
+		assert(approved.ok == true)
 
 		assert(probe.wait_until(function()
 			local ok, payload = safe.pcall(function()

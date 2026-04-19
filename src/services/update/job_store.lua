@@ -24,7 +24,7 @@ function M.load(fs_cap, filename)
     local raw, err = read_file(fs_cap, filename)
     if raw == nil then
         local msg = tostring(err or '')
-        if msg:find('No such file', 1, true) or msg:find('ENOENT', 1, true) then
+        if msg:find('No such file', 1, true) or msg:find('ENOENT', 1, true) or msg:find('no such file', 1, true) then
             return { jobs = {}, order = {} }, nil
         end
         return nil, err

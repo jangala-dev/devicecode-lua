@@ -112,12 +112,25 @@ function M.start(conn, opts)
         status_subs = {}
     end
 
+    local function seed_component_status(name, rec)
+        if type(rec.commands) == 'table' and type(rec.commands.status) == 'table' then
+            local value = nil
+            local ok = safe.pcall(function()
+                value = conn:call(rec.commands.status, {}, { timeout = 0.5 })
+            end)
+            if ok and value ~= nil then
+                rec.status = value
+            end
+        end
+    end
+
     local function rebuild_status_subs()
         close_status_subs()
         for name, rec in pairs(components) do
             if type(rec.status_topic) == 'table' then
                 status_subs[name] = conn:subscribe(rec.status_topic, { queue_len = 16, full = 'drop_oldest' })
             end
+            seed_component_status(name, rec)
             publish_component_state(conn, svc, name, rec)
         end
         publish_summary(conn, svc, components)
@@ -156,9 +169,7 @@ function M.start(conn, opts)
             status_req = status_ep:recv_op(),
             update_req = update_ep:recv_op(),
         }
-        local sub_names = {}
         for name, sub in pairs(status_subs) do
-            sub_names[#sub_names + 1] = name
             ops['sub:' .. name] = sub:recv_op()
         end
 
@@ -213,7 +224,7 @@ function M.start(conn, opts)
             local msg, err = a, b
             if name and components[name] then
                 if msg then
-                    components[name].status = msg.payload
+                    components[name].status = msg.payload or msg
                     publish_component_state(conn, svc, name, components[name])
                     publish_summary(conn, svc, components)
                 else

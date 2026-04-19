@@ -391,5 +391,107 @@
                 }
             }
         }
+    },
+    "device": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/device/1",
+            "components": {
+                "cm5": {
+                    "status_topic": [
+                        "cap",
+                        "updater",
+                        "cm5",
+                        "state",
+                        "status"
+                    ],
+                    "commands": {
+                        "status": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "status"
+                        ],
+                        "prepare": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "prepare"
+                        ],
+                        "stage": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "stage"
+                        ],
+                        "commit": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "commit"
+                        ]
+                    }
+                },
+                "mcu": {
+                    "status_topic": [
+                        "state",
+                        "member",
+                        "mcu",
+                        "updater"
+                    ],
+                    "commands": {
+                        "status": [
+                            "cmd",
+                            "member",
+                            "mcu",
+                            "updater",
+                            "status"
+                        ],
+                        "prepare": [
+                            "cmd",
+                            "member",
+                            "mcu",
+                            "updater",
+                            "prepare"
+                        ],
+                        "stage": [
+                            "cmd",
+                            "member",
+                            "mcu",
+                            "updater",
+                            "stage"
+                        ],
+                        "commit": [
+                            "cmd",
+                            "member",
+                            "mcu",
+                            "updater",
+                            "commit"
+                        ]
+                    }
+                }
+            }
+        }
+    },
+    "update": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/update/1",
+            "store_key": "update-jobs.json",
+            "targets": {
+                "cm5": {
+                    "backend": "cm5_swupdate",
+                    "component": "cm5"
+                },
+                "mcu": {
+                    "backend": "mcu_component",
+                    "component": "mcu"
+                }
+            }
+        }
     }
 }

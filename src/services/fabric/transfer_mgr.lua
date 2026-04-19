@@ -122,6 +122,10 @@ function M.run(ctx)
 		end
 
 		local xfer_id = payload.xfer_id or tostring(uuid.new())
+		local meta = payload.meta or {}
+		if type(payload.receiver) == 'table' and meta.receiver == nil then
+			meta.receiver = payload.receiver
+		end
 		outgoing = {
 			xfer_id = xfer_id,
 			req = req,
@@ -137,7 +141,7 @@ function M.run(ctx)
 			xfer_id = xfer_id,
 			size = outgoing.size,
 			checksum = outgoing.checksum,
-			meta = payload.meta,
+			meta = meta,
 		})
 		publish_transfer({ state = outgoing.state, xfer_id = xfer_id, direction = 'out', size = outgoing.size, offset = 0 })
 	end
@@ -199,6 +203,7 @@ function M.run(ctx)
 			xfer_id = frame.xfer_id,
 			size = frame.size,
 			checksum = frame.checksum,
+			meta = frame.meta,
 			sink = blob_source.memory_sink(),
 			offset = 0,
 			state = 'receiving',
@@ -240,6 +245,24 @@ function M.run(ctx)
 			return
 		end
 		incoming.sink:commit()
+		local receiver = incoming.meta and incoming.meta.receiver or nil
+		if type(receiver) == 'table' then
+			incoming.state = 'delivering'
+			publish_transfer({ state = incoming.state, xfer_id = incoming.xfer_id, direction = 'in', size = incoming.size, offset = incoming.offset })
+			local reply, err = conn:call(receiver, {
+				link_id = link_id,
+				xfer_id = incoming.xfer_id,
+				size = incoming.size,
+				checksum = incoming.checksum,
+				meta = incoming.meta,
+				data = incoming.sink:tostring(),
+			}, { timeout = phase_timeout })
+			if reply == nil then
+				send_frame(tx_control, 'control', { type = 'xfer_abort', xfer_id = frame.xfer_id, err = tostring(err or 'receiver_failed') })
+				clear_incoming(tostring(err or 'receiver_failed'))
+				return
+			end
+		end
 		send_frame(tx_control, 'control', { type = 'xfer_done', xfer_id = frame.xfer_id })
 		publish_transfer({ state = 'done', xfer_id = frame.xfer_id, direction = 'in', size = incoming.size, offset = incoming.offset, checksum = incoming.checksum })
 		incoming = nil
