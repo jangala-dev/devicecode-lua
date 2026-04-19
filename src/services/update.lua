@@ -4,6 +4,7 @@ local pulse     = require 'fibers.pulse'
 local base      = require 'devicecode.service_base'
 local cap_sdk   = require 'services.hal.sdk.cap'
 local job_store = require 'services.update.job_store'
+local component_backend_mod = require 'services.update.backends.component_proxy'
 local cm5_backend_mod = require 'services.update.backends.cm5_swupdate'
 local mcu_backend_mod = require 'services.update.backends.mcu_component'
 local uuid      = require 'uuid'
@@ -166,6 +167,8 @@ local function public_job(job)
         lifecycle = {
             state = job.state,
             next_step = job.next_step,
+            created_seq = job.created_seq,
+            updated_seq = job.updated_seq,
             created_at = job.created_at,
             updated_at = job.updated_at,
             error = job.error,
@@ -192,19 +195,20 @@ end
 local function sort_store(store)
     table.sort(store.order, function(a, b)
         local ja, jb = store.jobs[a], store.jobs[b]
-        local ta = (ja and ja.created_at) or 0
-        local tb = (jb and jb.created_at) or 0
+        local ta = (ja and (ja.created_seq or ja.created_at)) or 0
+        local tb = (jb and (jb.created_seq or jb.created_at)) or 0
         if ta == tb then return tostring(a) < tostring(b) end
         return ta < tb
     end)
 end
 
 local function build_backend(component, component_cfg)
+    local opts = { component = component, proxy_mod = component_backend_mod }
     if component_cfg.backend == 'cm5_swupdate' then
-        return cm5_backend_mod.new({ component = component })
+        return cm5_backend_mod.new(opts)
     end
     if component_cfg.backend == 'mcu_component' then
-        return mcu_backend_mod.new({ component = component })
+        return mcu_backend_mod.new(opts)
     end
     return nil, 'unknown_backend:' .. tostring(component_cfg.backend)
 end
@@ -214,10 +218,6 @@ local function discover_cap(conn, class, id, timeout)
     local cap, err = listener:wait_for_cap({ timeout = timeout or 30.0 })
     listener:close()
     return cap, err
-end
-
-local function now_ts()
-    return os.time()
 end
 
 function M.start(conn, opts)
@@ -250,9 +250,84 @@ function M.start(conn, opts)
     end
 
     local changed = pulse.scoped({ close_reason = 'update service stopping' })
-    local active_jobs = {}
+    local boot_id = tostring(uuid.new())
+    local active_job = nil
     local locks = { global = nil, component = {} }
     local backends = {}
+    local dirty_jobs = {}
+    local summary_dirty = false
+    local seq = 0
+
+    local function next_seq()
+        seq = seq + 1
+        return seq
+    end
+
+    local function seed_seq_from_store()
+        local maxv = 0
+        for _, id in ipairs(store.order) do
+            local job = store.jobs[id]
+            if job then
+                if type(job.created_seq) == 'number' and job.created_seq > maxv then maxv = job.created_seq end
+                if type(job.updated_seq) == 'number' and job.updated_seq > maxv then maxv = job.updated_seq end
+            end
+        end
+        seq = maxv
+    end
+
+    local function mark_job_dirty(job_id)
+        if type(job_id) == 'string' and job_id ~= '' then dirty_jobs[job_id] = true end
+        summary_dirty = true
+    end
+
+    local function mark_all_jobs_dirty()
+        for _, id in ipairs(store.order) do dirty_jobs[id] = true end
+        summary_dirty = true
+    end
+
+    local function flush_publications()
+        local flushed = false
+        for _, id in ipairs(store.order) do
+            if dirty_jobs[id] then
+                local job = store.jobs[id]
+                if job then
+                    retain_best_effort(conn, job_topic(job.job_id), {
+                        kind = 'update.job',
+                        ts = svc:now(),
+                        job = public_job(job),
+                    })
+                end
+                dirty_jobs[id] = nil
+                flushed = true
+            end
+        end
+        if summary_dirty then
+            local counts = {}
+            for _, id in ipairs(store.order) do
+                local job = store.jobs[id]
+                if job then counts[job.state] = (counts[job.state] or 0) + 1 end
+            end
+            local active = {}
+            if active_job then
+                active[1] = {
+                    job_id = active_job.job_id,
+                    component = active_job.component,
+                    started_at = active_job.started_at,
+                }
+            end
+            retain_best_effort(conn, summary_topic(), {
+                kind = 'update.summary',
+                ts = svc:now(),
+                count = #store.order,
+                states = counts,
+                active = active,
+                locks = copy_value(locks),
+            })
+            summary_dirty = false
+            flushed = true
+        end
+        return flushed
+    end
 
     local function is_terminal(state)
         return TERMINAL_STATES[state] == true
@@ -319,46 +394,28 @@ function M.start(conn, opts)
         return true, nil
     end
 
-    local function publish_job(job)
-        retain_best_effort(conn, job_topic(job.job_id), {
-            kind = 'update.job',
-            ts = svc:now(),
-            job = public_job(job),
-        })
-    end
-
-    local function publish_summary()
-        local counts = {}
-        for _, id in ipairs(store.order) do
-            local job = store.jobs[id]
-            if job then counts[job.state] = (counts[job.state] or 0) + 1 end
-        end
-        local active = {}
-        for id, rec in pairs(active_jobs) do
-            active[#active + 1] = { job_id = id, component = rec.component, started_at = rec.started_at }
-        end
-        retain_best_effort(conn, summary_topic(), {
-            kind = 'update.summary',
-            ts = svc:now(),
-            count = #store.order,
-            states = counts,
-            active = active,
-            locks = copy_value(locks),
-        })
-    end
-
-    local function update_job(job, patch, opts_) 
+    local function update_job(job, patch, opts_)
         opts_ = opts_ or {}
-        for k, v in pairs(patch) do job[k] = v end
-        job.updated_at = now_ts()
-        if opts_.runtime_merge and type(job.runtime) == 'table' then
+        local state_changed = false
+        for k, v in pairs(patch) do
+            if job[k] ~= v then
+                if k == 'state' then state_changed = true end
+                job[k] = v
+            end
+        end
+        if opts_.runtime_merge then
+            job.runtime = type(job.runtime) == 'table' and job.runtime or {}
             for k, v in pairs(opts_.runtime_merge) do job.runtime[k] = v end
         end
-        local ok, err = save_job(job)
-        if ok then
-            publish_job(job)
-            publish_summary()
+        if state_changed then
+            job.runtime = type(job.runtime) == 'table' and job.runtime or {}
+            job.runtime.phase_boot_id = boot_id
+            job.runtime.phase_mono = svc:now()
         end
+        job.updated_seq = next_seq()
+        job.updated_at = svc:now()
+        local ok, err = save_job(job)
+        if ok then mark_job_dirty(job.job_id) end
         if not opts_.no_signal then changed:signal() end
         return ok, err
     end
@@ -372,10 +429,11 @@ function M.start(conn, opts)
             return
         end
         job.artifact_ref = nil
-        job.artifact_released_at = now_ts()
+        job.artifact_released_at = svc:now()
+        job.updated_seq = next_seq()
+        job.updated_at = svc:now()
         save_job(job)
-        publish_job(job)
-        publish_summary()
+        mark_job_dirty(job.job_id)
         changed:signal()
     end
 
@@ -406,11 +464,8 @@ function M.start(conn, opts)
                 job.runtime = type(job.runtime) == 'table' and job.runtime or {}
             end
         end
-        for _, id in ipairs(store.order) do
-            local job = store.jobs[id]
-            if job then publish_job(job) end
-        end
-        publish_summary()
+        seed_seq_from_store()
+        mark_all_jobs_dirty()
         return true, nil
     end
 
@@ -477,6 +532,7 @@ function M.start(conn, opts)
         local artifact_ref, artifact_meta, aerr = build_job_artifact(payload)
         if not artifact_ref then return nil, aerr end
 
+        local created_seq = next_seq()
         local job_id = tostring(uuid.new())
         local job = {
             job_id = job_id,
@@ -488,8 +544,10 @@ function M.start(conn, opts)
             metadata = type(payload.metadata) == 'table' and payload.metadata or nil,
             state = 'created',
             next_step = nil,
-            created_at = now_ts(),
-            updated_at = now_ts(),
+            created_seq = created_seq,
+            updated_seq = created_seq,
+            created_at = svc:now(),
+            updated_at = svc:now(),
             result = nil,
             error = nil,
             runtime = {
@@ -497,14 +555,15 @@ function M.start(conn, opts)
                 adopted = false,
                 active_lock = nil,
                 last_progress = nil,
+                phase_boot_id = boot_id,
+                phase_mono = svc:now(),
             },
         }
         store.jobs[job_id] = job
         store.order[#store.order + 1] = job_id
         sort_store(store)
         save_job(job)
-        publish_job(job)
-        publish_summary()
+        mark_job_dirty(job_id)
         changed:signal()
         return job, nil
     end
@@ -527,7 +586,7 @@ function M.start(conn, opts)
     end
 
     local function can_queue(job)
-        if active_jobs[job.job_id] then return nil, 'job_already_active' end
+        if active_job and active_job.job_id == job.job_id then return nil, 'job_already_active' end
         if has_active_global() then return nil, 'busy_global' end
         return true, nil
     end
@@ -547,13 +606,16 @@ function M.start(conn, opts)
         local job = store.jobs[job_id]
         if job and type(job.runtime) == 'table' then
             job.runtime.active_lock = nil
+            job.updated_seq = next_seq()
+            job.updated_at = svc:now()
             save_job(job)
-            publish_job(job)
+            mark_job_dirty(job.job_id)
         end
         if locks.global == job_id then locks.global = nil end
         for component, holder in pairs(locks.component) do
             if holder == job_id then locks.component[component] = nil end
         end
+        summary_dirty = true
     end
 
     local function acquire_lock(job)
@@ -561,12 +623,13 @@ function M.start(conn, opts)
         locks.component[job.component] = job.job_id
         job.runtime = type(job.runtime) == 'table' and job.runtime or {}
         job.runtime.active_lock = 'global:' .. tostring(job.job_id)
+        job.updated_seq = next_seq()
+        job.updated_at = svc:now()
         save_job(job)
-        publish_job(job)
+        mark_job_dirty(job.job_id)
     end
 
     local function demote_to_passive(job, state, next_step, extra_patch)
-        active_jobs[job.job_id] = nil
         release_lock(job.job_id)
         local patch = {
             state = state,
@@ -579,7 +642,7 @@ function M.start(conn, opts)
     end
 
     local function start_worker(job)
-        if active_jobs[job.job_id] then return true, nil end
+        if active_job and active_job.job_id == job.job_id then return true, nil end
         local child, err = service_scope:child()
         if not child then return nil, err end
         acquire_lock(job)
@@ -597,7 +660,7 @@ function M.start(conn, opts)
             end
 
             local function run_reconcile_loop()
-                local deadline = now_ts() + cfg.reconcile.timeout_s
+                local deadline = svc:now() + cfg.reconcile.timeout_s
                 while true do
                     local result, rerr = backend:reconcile(conn, job)
                     if result ~= nil then
@@ -625,10 +688,13 @@ function M.start(conn, opts)
                                 result = result,
                                 error = nil,
                                 next_step = 'reconcile',
-                            })
+                            }, { runtime_merge = {
+                                awaiting_return_boot_id = boot_id,
+                                awaiting_return_mono = svc:now(),
+                            } })
                         end
                     end
-                    if now_ts() >= deadline then
+                    if svc:now() >= deadline then
                         update_job(job, {
                             state = 'timed_out',
                             result = nil,
@@ -645,7 +711,11 @@ function M.start(conn, opts)
             job.runtime.attempt = (job.runtime.attempt or 0) + 1
 
             if job.next_step == 'reconcile' then
-                update_job(job, { state = 'awaiting_return', next_step = 'reconcile' }, { runtime_merge = { adopted = false } })
+                update_job(job, { state = 'awaiting_return', next_step = 'reconcile' }, { runtime_merge = {
+                    adopted = false,
+                    awaiting_return_boot_id = boot_id,
+                    awaiting_return_mono = svc:now(),
+                } })
                 return run_reconcile_loop()
             end
 
@@ -654,8 +724,10 @@ function M.start(conn, opts)
                 local status_before = backend:status(conn)
                 if status_before and status_before.state and type(status_before.state) == 'table' then
                     job.pre_commit_incarnation = status_before.state.incarnation or status_before.state.generation
+                    job.updated_seq = next_seq()
+                    job.updated_at = svc:now()
                     save_job(job)
-                    publish_job(job)
+                    mark_job_dirty(job.job_id)
                 end
                 local prep, perr = backend:prepare(conn, job)
                 if prep == nil then return fail_job(perr) end
@@ -678,30 +750,18 @@ function M.start(conn, opts)
             update_job(job, { state = 'committing', next_step = 'reconcile' })
             local committed, cerr = backend:commit(conn, job)
             if committed == nil then return fail_job(cerr) end
-            update_job(job, { state = 'awaiting_return', result = committed, error = nil, next_step = 'reconcile' })
+            update_job(job, { state = 'awaiting_return', result = committed, error = nil, next_step = 'reconcile' }, { runtime_merge = {
+                awaiting_return_boot_id = boot_id,
+                awaiting_return_mono = svc:now(),
+            } })
             return run_reconcile_loop()
         end)
         if not ok then
             release_lock(job.job_id)
             return nil, spawn_err
         end
-        active_jobs[job.job_id] = { scope = child, component = job.component, started_at = svc:now() }
-        fibers.spawn(function()
-            local _, st, _, primary = fibers.current_scope():try(child:join_op())
-            active_jobs[job.job_id] = nil
-            release_lock(job.job_id)
-            local current = store.jobs[job.job_id]
-            if current and not is_terminal(current.state) and not PASSIVE_STATES[current.state] then
-                if st == 'failed' then
-                    update_job(current, { state = 'failed', error = tostring(primary or 'worker_failed'), next_step = nil })
-                elseif st == 'cancelled' then
-                    update_job(current, { state = 'cancelled', error = tostring(primary or 'worker_cancelled'), next_step = nil })
-                end
-            end
-            publish_summary()
-            changed:signal()
-        end)
-        publish_summary()
+        active_job = { job_id = job.job_id, scope = child, component = job.component, started_at = svc:now() }
+        summary_dirty = true
         changed:signal()
         return true, nil
     end
@@ -736,17 +796,13 @@ function M.start(conn, opts)
     rebuild_backends()
     adopt_repo(repo)
     normalise_adopted_jobs()
-    for _, id in ipairs(store.order) do
-        local job = store.jobs[id]
-        if job then publish_job(job) end
-    end
-    publish_summary()
+    flush_publications()
     changed:signal()
     svc:status('running')
 
     local seen = changed:version()
     while true do
-        local which, req, err = fibers.perform(fibers.named_choice({
+        local ops = {
             cfg = cfg_watch:recv_op():wrap(function(ev) return ev end),
             create = create_ep:recv_op(),
             start = start_ep:recv_op(),
@@ -757,11 +813,33 @@ function M.start(conn, opts)
             get = get_ep:recv_op(),
             list = list_ep:recv_op(),
             changed = changed:changed_op(seen):wrap(function(ver) seen = ver; return ver end),
-        }))
+        }
+        local joining = active_job
+        if joining then
+            ops.active_join = joining.scope:join_op():wrap(function(st, _report, primary)
+                return { job_id = joining.job_id, st = st, primary = primary }
+            end)
+        end
+        local which, req, err = fibers.perform(fibers.named_choice(ops))
 
         if which == 'changed' then
+            flush_publications()
             maybe_start_runnable_jobs()
-            publish_summary()
+            flush_publications()
+        elseif which == 'active_join' then
+            local ev = req
+            local current = ev and store.jobs[ev.job_id] or nil
+            active_job = nil
+            if ev then release_lock(ev.job_id) end
+            if current and not is_terminal(current.state) and not PASSIVE_STATES[current.state] then
+                if ev.st == 'failed' then
+                    update_job(current, { state = 'failed', error = tostring(ev.primary or 'worker_failed'), next_step = nil })
+                elseif ev.st == 'cancelled' then
+                    update_job(current, { state = 'cancelled', error = tostring(ev.primary or 'worker_cancelled'), next_step = nil })
+                end
+            end
+            maybe_start_runnable_jobs()
+            flush_publications()
         elseif which == 'cfg' then
             local ev = req
             if not ev then
@@ -778,12 +856,14 @@ function M.start(conn, opts)
             local ok, aerr = adopt_repo(new_repo)
             if ok then normalise_adopted_jobs() else svc:obs_log('warn', { what = 'repo_adopt_failed', err = tostring(aerr) }) end
             changed:signal()
+            flush_publications()
         elseif which == 'create' then
             if not req then error('update create endpoint closed: ' .. tostring(err), 0) end
             local job, jerr = create_job(req.payload or {})
             if not job then
                 req:fail(jerr)
             else
+                flush_publications()
                 req:reply({ ok = true, job = public_job(job) })
             end
         elseif which == 'start' then
@@ -796,7 +876,7 @@ function M.start(conn, opts)
                 req:fail('job_not_startable')
             else
                 local ok, aerr = set_queued(job, 'stage')
-                if not ok then req:fail(aerr) else req:reply({ ok = true, job = public_job(job) }) end
+                if not ok then req:fail(aerr) else flush_publications(); req:reply({ ok = true, job = public_job(job) }) end
             end
         elseif which == 'commit' then
             if not req then error('update commit endpoint closed: ' .. tostring(err), 0) end
@@ -808,7 +888,7 @@ function M.start(conn, opts)
                 req:fail('job_not_committable')
             else
                 local ok, aerr = set_queued(job, 'commit')
-                if not ok then req:fail(aerr) else req:reply({ ok = true, job = public_job(job) }) end
+                if not ok then req:fail(aerr) else flush_publications(); req:reply({ ok = true, job = public_job(job) }) end
             end
         elseif which == 'cancel' then
             if not req then error('update cancel endpoint closed: ' .. tostring(err), 0) end
@@ -824,6 +904,7 @@ function M.start(conn, opts)
                 req:fail('job_not_cancellable')
             else
                 update_job(job, { state = 'cancelled', next_step = nil, error = nil })
+                flush_publications()
                 req:reply({ ok = true, job = public_job(job) })
             end
         elseif which == 'retry' then
@@ -836,7 +917,7 @@ function M.start(conn, opts)
                 req:fail('job_not_retryable')
             else
                 local new_job, rerr = clone_job_for_retry(job)
-                if not new_job then req:fail(rerr) else req:reply({ ok = true, job = public_job(new_job) }) end
+                if not new_job then req:fail(rerr) else flush_publications(); req:reply({ ok = true, job = public_job(new_job) }) end
             end
         elseif which == 'discard' then
             if not req then error('update discard endpoint closed: ' .. tostring(err), 0) end
@@ -856,8 +937,9 @@ function M.start(conn, opts)
                     if store.order[i] == job.job_id then table.remove(store.order, i) break end
                 end
                 safe.pcall(function() conn:unretain(job_topic(job.job_id)) end)
-                publish_summary()
+                summary_dirty = true
                 changed:signal()
+                flush_publications()
                 req:reply({ ok = true })
             end
         elseif which == 'get' then

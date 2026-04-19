@@ -50,10 +50,45 @@ local function summary_topic()
     return { 'state', 'device', 'components' }
 end
 
+local function normalize_action_routes(actions)
+    local out = {}
+    if type(actions) ~= 'table' then return out end
+    for action_name, topic in pairs(actions) do
+        if type(action_name) == 'string' and type(topic) == 'table' then
+            out[action_name] = {
+                name = action_name,
+                kind = action_name:match('_update$') and 'update' or 'call',
+                call_topic = copy_array(topic),
+            }
+        end
+    end
+    return out
+end
+
+local function normalize_component(name, spec)
+    spec = type(spec) == 'table' and spec or {}
+    local rec = {
+        name = name,
+        class = spec.class or 'member',
+        subtype = spec.subtype or name,
+        role = spec.role or 'member',
+        member = spec.member or name,
+        present = spec.present ~= false,
+        channels = {
+            status = {
+                watch_topic = type(spec.status_topic) == 'table' and copy_array(spec.status_topic) or nil,
+                get_topic = type(spec.get_topic) == 'table' and copy_array(spec.get_topic) or nil,
+            },
+        },
+        operations = normalize_action_routes(spec.actions),
+        status = nil,
+    }
+    return rec
+end
+
 local function default_components()
     return {
-        cm5 = {
-            name = 'cm5',
+        cm5 = normalize_component('cm5', {
             class = 'host',
             subtype = 'cm5',
             role = 'primary',
@@ -65,7 +100,7 @@ local function default_components()
                 stage_update = { 'cap', 'updater', 'cm5', 'rpc', 'stage' },
                 commit_update = { 'cap', 'updater', 'cm5', 'rpc', 'commit' },
             },
-        },
+        }),
     }
 end
 
@@ -77,29 +112,16 @@ local function merge_components(cfg)
     if type(comps) ~= 'table' then return out end
     for name, spec in pairs(comps) do
         if type(name) == 'string' and type(spec) == 'table' then
-            local cur = out[name] or {
-                name = name,
-                class = 'member',
-                subtype = name,
-                role = 'member',
-                member = name,
-                actions = {},
-            }
-            if type(spec.class) == 'string' and spec.class ~= '' then cur.class = spec.class end
-            if type(spec.subtype) == 'string' and spec.subtype ~= '' then cur.subtype = spec.subtype end
-            if type(spec.role) == 'string' and spec.role ~= '' then cur.role = spec.role end
-            if type(spec.member) == 'string' and spec.member ~= '' then cur.member = spec.member end
-            if type(spec.status_topic) == 'table' then cur.status_topic = copy_array(spec.status_topic) end
-            if type(spec.get_topic) == 'table' then cur.get_topic = copy_array(spec.get_topic) end
-            if type(spec.actions) == 'table' then
-                cur.actions = {}
-                for action_name, topic in pairs(spec.actions) do
-                    if type(action_name) == 'string' and type(topic) == 'table' then
-                        cur.actions[action_name] = copy_array(topic)
-                    end
-                end
-            end
-            out[name] = cur
+            local base = out[name] or normalize_component(name, {})
+            if type(spec.class) == 'string' and spec.class ~= '' then base.class = spec.class end
+            if type(spec.subtype) == 'string' and spec.subtype ~= '' then base.subtype = spec.subtype end
+            if type(spec.role) == 'string' and spec.role ~= '' then base.role = spec.role end
+            if type(spec.member) == 'string' and spec.member ~= '' then base.member = spec.member end
+            if spec.present ~= nil then base.present = spec.present ~= false end
+            if type(spec.status_topic) == 'table' then base.channels.status.watch_topic = copy_array(spec.status_topic) end
+            if type(spec.get_topic) == 'table' then base.channels.status.get_topic = copy_array(spec.get_topic) end
+            if type(spec.actions) == 'table' then base.operations = normalize_action_routes(spec.actions) end
+            out[name] = base
         end
     end
     return out
@@ -111,7 +133,7 @@ local function component_view(name, rec, now_ts)
     local version = type(status) == 'table' and (status.version or status.fw_version) or nil
     local incarnation = type(status) == 'table' and (status.incarnation or status.generation) or nil
     local actions = {}
-    for action_name in pairs(rec.actions or {}) do actions[action_name] = true end
+    for action_name in pairs(rec.operations or {}) do actions[action_name] = true end
     local updater_state = type(status) == 'table' and (status.updater_state or state) or state
     local health = (state == nil and 'unknown') or ((state == 'failed' or state == 'unavailable') and 'degraded' or 'ok')
     return {
@@ -140,8 +162,10 @@ local function component_view(name, rec, now_ts)
         },
         status = status,
         source = {
-            status_topic = copy_array(rec.status_topic),
-            get_topic = copy_array(rec.get_topic),
+            status = {
+                watch_topic = copy_array(rec.channels and rec.channels.status and rec.channels.status.watch_topic),
+                get_topic = copy_array(rec.channels and rec.channels.status and rec.channels.status.get_topic),
+            },
         },
     }
 end
@@ -223,10 +247,11 @@ function M.start(conn, opts)
     end
 
     local function seed_component_status(name, rec)
-        if type(rec.get_topic) == 'table' then
+        local get_topic = rec.channels and rec.channels.status and rec.channels.status.get_topic or nil
+        if type(get_topic) == 'table' then
             local value = nil
             local ok = safe.pcall(function()
-                value = conn:call(rec.get_topic, {}, { timeout = 0.5 })
+                value = conn:call(get_topic, {}, { timeout = 0.5 })
             end)
             if ok and value ~= nil then
                 rec.status = value
@@ -237,8 +262,9 @@ function M.start(conn, opts)
     local function rebuild_status_subs()
         close_status_subs()
         for name, rec in pairs(components) do
-            if type(rec.status_topic) == 'table' then
-                status_subs[name] = conn:subscribe(rec.status_topic, { queue_len = 16, full = 'drop_oldest' })
+            local watch_topic = rec.channels and rec.channels.status and rec.channels.status.watch_topic or nil
+            if type(watch_topic) == 'table' then
+                status_subs[name] = conn:subscribe(watch_topic, { queue_len = 16, full = 'drop_oldest' })
             end
             seed_component_status(name, rec)
             publish_component_state(conn, svc, name, rec)
@@ -251,7 +277,7 @@ function M.start(conn, opts)
         for name, rec in pairs(components) do
             rec.name = name
             rec.status = nil
-            rec.actions = rec.actions or {}
+            rec.operations = rec.operations or {}
             rec.present = rec.present ~= false
         end
         rebuild_status_subs()
@@ -340,8 +366,9 @@ function M.start(conn, opts)
             if type(name) ~= 'string' or not rec then
                 req:fail('unknown_component')
             else
-                if rec.status == nil and type(rec.get_topic) == 'table' then
-                    local value, call_err = conn:call(rec.get_topic, payload.args or {}, { timeout = payload.timeout })
+                local get_topic = rec.channels and rec.channels.status and rec.channels.status.get_topic or nil
+                if rec.status == nil and type(get_topic) == 'table' then
+                    local value, call_err = conn:call(get_topic, payload.args or {}, { timeout = payload.timeout })
                     if value == nil then
                         req:fail(call_err)
                     else
@@ -367,10 +394,11 @@ function M.start(conn, opts)
                 req:fail('unknown_component')
             elseif type(action) ~= 'string' or action == '' then
                 req:fail('missing_action')
-            elseif type(rec.actions[action]) ~= 'table' then
+            elseif type(rec.operations[action]) ~= 'table' then
                 req:fail('unsupported_action')
             else
-                local value, call_err = conn:call(rec.actions[action], payload.args or {}, { timeout = payload.timeout })
+                local route = rec.operations[action]
+                local value, call_err = conn:call(route.call_topic, payload.args or {}, { timeout = payload.timeout })
                 if value == nil then req:fail(call_err) else req:reply(value) end
             end
         else

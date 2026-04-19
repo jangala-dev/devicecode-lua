@@ -107,6 +107,8 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     local job = created.job
     assert(type(job.job_id) == 'string')
     assert(job.component == 'mcu')
+    assert(type(job.lifecycle.created_seq) == 'number')
+    assert(type(job.lifecycle.updated_seq) == 'number')
 
     local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
     assert(serr == nil)
