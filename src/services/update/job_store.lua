@@ -1,50 +1,77 @@
-
-local cjson   = require 'cjson.safe'
 local cap_sdk = require 'services.hal.sdk.cap'
 
 local M = {}
 
-local function read_file(fs_cap, filename)
-    local opts = assert(cap_sdk.args.new.FilesystemReadOpts(filename))
-    local reply, err = fs_cap:call_control('read', opts)
-    if not reply then return nil, err end
-    if reply.ok ~= true then return nil, reply.reason end
-    return reply.reason or '', nil
+local function copy_job(job)
+    local out = {}
+    for k, v in pairs(job) do out[k] = v end
+    return out
 end
 
-local function write_file(fs_cap, filename, data)
-    local opts = assert(cap_sdk.args.new.FilesystemWriteOpts(filename, data))
-    local reply, err = fs_cap:call_control('write', opts)
-    if not reply then return nil, err end
-    if reply.ok ~= true then return nil, reply.reason end
-    return true, nil
+local function sorted_order(jobs)
+    local ids = {}
+    for id in pairs(jobs) do ids[#ids + 1] = id end
+    table.sort(ids, function(a, b)
+        local ja, jb = jobs[a], jobs[b]
+        local ta = (ja and ja.created_at) or 0
+        local tb = (jb and jb.created_at) or 0
+        if ta == tb then return tostring(a) < tostring(b) end
+        return ta < tb
+    end)
+    return ids
 end
 
-function M.load(fs_cap, filename)
-    local raw, err = read_file(fs_cap, filename)
-    if raw == nil then
-        local msg = tostring(err or '')
-        if msg:find('No such file', 1, true) or msg:find('ENOENT', 1, true) or msg:find('no such file', 1, true) then
-            return { jobs = {}, order = {} }, nil
+function M.open(store_cap, opts)
+    opts = opts or {}
+    local namespace = opts.namespace or 'update/jobs'
+
+    local repo = {}
+
+    local function call(method, args)
+        return store_cap:call_control(method, args)
+    end
+
+    function repo:load_all()
+        local list_opts = assert(cap_sdk.args.new.ControlStoreListOpts(namespace))
+        local reply, err = call('list', list_opts)
+        if not reply then return nil, err end
+        if reply.ok ~= true then return nil, reply.reason end
+
+        local jobs = {}
+        local keys = type(reply.reason) == 'table' and reply.reason.keys or {}
+        for _, key in ipairs(keys or {}) do
+            local get_opts = assert(cap_sdk.args.new.ControlStoreGetOpts(namespace, key))
+            local r, gerr = call('get', get_opts)
+            if r and r.ok == true and type(r.reason) == 'table' then
+                jobs[key] = r.reason
+            elseif not r then
+                return nil, gerr
+            end
         end
-        return nil, err
+        return { jobs = jobs, order = sorted_order(jobs) }, nil
     end
-    if raw == '' then
-        return { jobs = {}, order = {} }, nil
-    end
-    local obj, derr = cjson.decode(raw)
-    if type(obj) ~= 'table' then
-        return nil, derr or 'decode_failed'
-    end
-    obj.jobs = type(obj.jobs) == 'table' and obj.jobs or {}
-    obj.order = type(obj.order) == 'table' and obj.order or {}
-    return obj, nil
-end
 
-function M.save(fs_cap, filename, store)
-    local encoded, err = cjson.encode(store)
-    if not encoded then return nil, err end
-    return write_file(fs_cap, filename, encoded)
+    function repo:save_job(job)
+        if type(job) ~= 'table' or type(job.job_id) ~= 'string' or job.job_id == '' then
+            return nil, 'invalid_job'
+        end
+        local put_opts = assert(cap_sdk.args.new.ControlStorePutOpts(namespace, job.job_id, copy_job(job)))
+        local reply, err = call('put', put_opts)
+        if not reply then return nil, err end
+        if reply.ok ~= true then return nil, reply.reason end
+        return true, nil
+    end
+
+    function repo:delete_job(job_id)
+        if type(job_id) ~= 'string' or job_id == '' then return nil, 'invalid_job_id' end
+        local del_opts = assert(cap_sdk.args.new.ControlStoreDeleteOpts(namespace, job_id))
+        local reply, err = call('delete', del_opts)
+        if not reply then return nil, err end
+        if reply.ok ~= true then return nil, reply.reason end
+        return true, nil
+    end
+
+    return repo
 end
 
 return M

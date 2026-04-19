@@ -102,7 +102,7 @@ local function start_update_service(parent_scope, bus)
     return s
 end
 
-function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
+function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transient_artifact_loss()
     runfibers.run(function(scope)
         local orig_sleep = sleep_mod.sleep
         sleep_mod.sleep = function(dt)
@@ -115,7 +115,14 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         local bus = busmod.new()
         local caller = bus:connect()
         local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
-        local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+        local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), { durable_enabled = false })
+        local seed = bus:connect()
+        seed:retain({ 'cfg', 'update' }, {
+            schema = 'devicecode.config/update/1',
+            artifact_policy_default = 'transient_only',
+            artifact_policies = { cm5 = 'transient_only' },
+        })
+
         local updater_state = {
             state = 'idle',
             fw_version = 'cm5-v0',
@@ -134,24 +141,32 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
 
         assert(wait_service_running(caller, { 'svc', 'update', 'status' }))
 
-        local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
+        local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
             target = 'cm5',
-            artifact_data = 'cm5-firmware-image-v2',
+            artifact_data = 'getbox-firmware-image-v2',
             expected_version = 'cm5-v2',
             metadata = { next_version = 'cm5-v2' },
             approval = 'manual',
-        }, { timeout = 0.5 }))
+        }, { timeout = 0.5 })
+        assert(cerr == nil)
+        assert(created.ok == true)
         local job = created.job
         local artifact_ref = job.artifact_ref
         assert(type(artifact_ref) == 'string')
+        assert(type(job.artifact_meta) == 'table')
+        assert(job.artifact_meta.durability == 'transient')
+        assert(type(artifacts.artifacts[artifact_ref]) == 'table')
+        assert(artifacts.artifacts[artifact_ref].durability == 'transient')
 
-        local applied = assert(caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 }))
+        local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 })
+        assert(aerr == nil)
+        assert(applied.ok == true)
         assert(applied.job.state == 'awaiting_approval')
 
-        local approved = assert(caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 }))
+        local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
+        assert(perr == nil)
         assert(approved.ok == true)
         assert(type(approved.job.artifact_ref) == 'string')
-        assert(type(artifacts.artifacts[artifact_ref]) == 'table')
 
         local awaiting = wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
             return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.state == 'awaiting_return'
@@ -170,6 +185,11 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         local outer_st, child_st = fibers.current_scope():try(update_scope:join_op())
         assert(outer_st == 'ok')
         assert(child_st == 'cancelled')
+
+        -- Simulate reboot semantics for a Get Box-style transient artifact spool:
+        -- durable control records survive, but transient artifact bytes do not.
+        artifacts.artifacts = {}
+        artifacts.next_id = artifacts.next_id or 0
 
         updater_state.state = 'running'
         updater_state.staged = false
@@ -191,11 +211,23 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
                 and type(payload.job.result) == 'table'
                 and payload.job.result.version == 'cm5-v2'
                 and payload.job.artifact_ref == nil
+                and type(payload.job.artifact_released_at) == 'number'
         end, 1.5))
 
+        local final, ferr = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
+        assert(ferr == nil)
+        assert(final.ok == true)
+        assert(final.job.state == 'succeeded')
+        assert(final.job.artifact_ref == nil)
+        assert(type(final.job.artifact_released_at) == 'number')
         assert(next(artifacts.artifacts) == nil)
-        assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')
-    end, { timeout = 3.0 })
+
+        local persisted = control.namespaces['update/jobs'][job.job_id]
+        assert(type(persisted) == 'table')
+        assert(persisted.state == 'succeeded')
+        assert(persisted.artifact_ref == nil)
+        assert(type(persisted.artifact_released_at) == 'number')
+    end, { timeout = 4.0 })
 end
 
 return T

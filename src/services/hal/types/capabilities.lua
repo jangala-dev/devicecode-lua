@@ -201,6 +201,23 @@ function new.FilesystemCapability(id, control_ch)
     return new.Capability('fs', id, control_ch, offerings)
 end
 
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.ControlStoreCapability(id, control_ch)
+    return new.Capability('control_store', id, control_ch, { 'get', 'put', 'delete', 'list', 'status' })
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.ArtifactStoreCapability(id, control_ch)
+    return new.Capability('artifact_store', id, control_ch, { 'create', 'append', 'finalise', 'import_path', 'describe', 'delete', 'status' })
+end
+
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?

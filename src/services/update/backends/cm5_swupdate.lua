@@ -31,11 +31,14 @@ function M.new(opts)
     end
 
     function backend:stage(conn, job)
-        return device_call(conn, 'stage', {
-            artifact = job.artifact,
+        local value, err = device_call(conn, 'stage', {
+            artifact_ref = job.artifact_ref,
             metadata = job.metadata,
             expected_version = job.expected_version,
         }, timeout_stage)
+        if value == nil then return nil, err end
+        if type(value) == 'table' and value.artifact_retention == nil then value.artifact_retention = 'keep' end
+        return value, nil
     end
 
     function backend:commit(conn, job)

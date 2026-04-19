@@ -1,4 +1,3 @@
-
 local fibers    = require 'fibers'
 local sleep     = require 'fibers.sleep'
 local pulse     = require 'fibers.pulse'
@@ -28,9 +27,14 @@ end
 local function default_cfg()
     return {
         schema = SCHEMA,
-        store_key = 'update-jobs.json',
+        store_namespace = 'update/jobs',
         reconcile_interval_s = 10.0,
         reconcile_timeout_s = 180.0,
+        artifact_policy_default = 'transient_only',
+        artifact_policies = {
+            cm5 = 'transient_only',
+            mcu = 'transient_only',
+        },
         targets = {
             cm5 = { backend = 'cm5_swupdate', component = 'cm5' },
             mcu = { backend = 'mcu_component', component = 'mcu' },
@@ -43,9 +47,18 @@ local function merge_cfg(payload)
     local data = payload and (payload.data or payload) or nil
     if type(data) ~= 'table' then return cfg end
     if data.schema ~= nil and data.schema ~= SCHEMA then return cfg end
-    if type(data.store_key) == 'string' and data.store_key ~= '' then cfg.store_key = data.store_key end
+    if type(data.store_namespace) == 'string' and data.store_namespace ~= '' then cfg.store_namespace = data.store_namespace end
+    -- backwards compat: ignore old store_key
     if type(data.reconcile_interval_s) == 'number' and data.reconcile_interval_s > 0 then cfg.reconcile_interval_s = data.reconcile_interval_s end
     if type(data.reconcile_timeout_s) == 'number' and data.reconcile_timeout_s > 0 then cfg.reconcile_timeout_s = data.reconcile_timeout_s end
+    if type(data.artifact_policy_default) == 'string' and data.artifact_policy_default ~= '' then cfg.artifact_policy_default = data.artifact_policy_default end
+    if type(data.artifact_policies) == 'table' then
+        for target, policy in pairs(data.artifact_policies) do
+            if type(target) == 'string' and type(policy) == 'string' and policy ~= '' then
+                cfg.artifact_policies[target] = policy
+            end
+        end
+    end
     if type(data.targets) == 'table' then
         cfg.targets = {}
         for name, spec in pairs(data.targets) do
@@ -66,6 +79,16 @@ local function copy_job(job)
     return out
 end
 
+local function sort_store(store)
+    table.sort(store.order, function(a, b)
+        local ja, jb = store.jobs[a], store.jobs[b]
+        local ta = (ja and ja.created_at) or 0
+        local tb = (jb and jb.created_at) or 0
+        if ta == tb then return tostring(a) < tostring(b) end
+        return ta < tb
+    end)
+end
+
 local function build_backend(target_cfg)
     if target_cfg.backend == 'cm5_swupdate' then
         return cm5_backend_mod.new({ component = target_cfg.component })
@@ -76,6 +99,13 @@ local function build_backend(target_cfg)
     return nil, 'unknown_backend:' .. tostring(target_cfg.backend)
 end
 
+local function discover_cap(conn, class, id, timeout)
+    local listener = cap_sdk.new_cap_listener(conn, class, id)
+    local cap, err = listener:wait_for_cap({ timeout = timeout or 30.0 })
+    listener:close()
+    return cap, err
+end
+
 function M.start(conn, opts)
     opts = opts or {}
     local svc = base.new(conn, { name = opts.name or 'update', env = opts.env })
@@ -83,29 +113,86 @@ function M.start(conn, opts)
     svc:spawn_heartbeat(heartbeat_s, 'tick')
     svc:status('starting')
 
-    local fs_listener = cap_sdk.new_cap_listener(conn, 'fs', 'state')
-    local fs_cap, ferr = fs_listener:wait_for_cap({ timeout = 30.0 })
-    if ferr ~= '' or not fs_cap then
-        svc:status('failed', { reason = tostring(ferr or 'fs state capability not found') })
-        error('update: failed to discover fs/state capability: ' .. tostring(ferr), 0)
+    local store_cap, serr = discover_cap(conn, 'control_store', 'update', 30.0)
+    if serr ~= '' or not store_cap then
+        svc:status('failed', { reason = tostring(serr or 'control_store capability not found') })
+        error('update: failed to discover control_store/update capability: ' .. tostring(serr), 0)
+    end
+
+    local artifact_cap, aerr = discover_cap(conn, 'artifact_store', 'main', 30.0)
+    if aerr ~= '' or not artifact_cap then
+        svc:status('failed', { reason = tostring(aerr or 'artifact_store capability not found') })
+        error('update: failed to discover artifact_store/main capability: ' .. tostring(aerr), 0)
     end
 
     local cfg_watch = conn:watch_retained({ 'cfg', 'update' }, { replay = true, queue_len = 8, full = 'drop_oldest' })
     local cfg = default_cfg()
     local backends = {}
-
-    local store, serr = job_store.load(fs_cap, cfg.store_key)
+    local repo = job_store.open(store_cap, { namespace = cfg.store_namespace })
+    local store, lerr = repo:load_all()
     if not store then
-        svc:status('failed', { reason = tostring(serr) })
-        error('update: failed to load job store: ' .. tostring(serr), 0)
+        svc:status('failed', { reason = tostring(lerr) })
+        error('update: failed to load job store: ' .. tostring(lerr), 0)
     end
 
     local changed = pulse.scoped({ close_reason = 'update service stopping' })
 
-    local function save_store()
-        local ok, err = job_store.save(fs_cap, cfg.store_key, store)
+    local function artifact_policy_for_target(target)
+        return cfg.artifact_policies[target] or cfg.artifact_policy_default or 'prefer_durable'
+    end
+
+    local function artifact_describe(ref)
+        local opts = assert(cap_sdk.args.new.ArtifactStoreDescribeOpts(ref))
+        local reply, err = artifact_cap:call_control('describe', opts)
+        if not reply then return nil, err end
+        if reply.ok ~= true then return nil, reply.reason end
+        return reply.reason, nil
+    end
+
+    local function artifact_delete(ref)
+        local opts = assert(cap_sdk.args.new.ArtifactStoreDeleteOpts(ref))
+        local reply, err = artifact_cap:call_control('delete', opts)
+        if not reply then return nil, err end
+        if reply.ok ~= true then return nil, reply.reason end
+        return true, nil
+    end
+
+    local function artifact_import_path(path, target, metadata)
+        local meta = {
+            kind = 'update',
+            target = target,
+            metadata = metadata,
+        }
+        local opts = assert(cap_sdk.args.new.ArtifactStoreImportPathOpts(path, meta, artifact_policy_for_target(target)))
+        local reply, err = artifact_cap:call_control('import_path', opts)
+        if not reply then return nil, nil, err end
+        if reply.ok ~= true then return nil, nil, reply.reason end
+        local rec = reply.reason
+        return rec.artifact_ref, rec, nil
+    end
+
+    local function artifact_from_data(data, target, metadata)
+        local c_opts = assert(cap_sdk.args.new.ArtifactStoreCreateOpts({ kind = 'update', target = target, metadata = metadata }, artifact_policy_for_target(target)))
+        local c_reply, c_err = artifact_cap:call_control('create', c_opts)
+        if not c_reply then return nil, nil, c_err end
+        if c_reply.ok ~= true then return nil, nil, c_reply.reason end
+        local rec = c_reply.reason
+        local a_opts = assert(cap_sdk.args.new.ArtifactStoreAppendOpts(rec.artifact_ref, data))
+        local a_reply, a_err = artifact_cap:call_control('append', a_opts)
+        if not a_reply then return nil, nil, a_err end
+        if a_reply.ok ~= true then return nil, nil, a_reply.reason end
+        local f_opts = assert(cap_sdk.args.new.ArtifactStoreFinaliseOpts(rec.artifact_ref))
+        local f_reply, f_err = artifact_cap:call_control('finalise', f_opts)
+        if not f_reply then return nil, nil, f_err end
+        if f_reply.ok ~= true then return nil, nil, f_reply.reason end
+        local out = f_reply.reason
+        return out.artifact_ref, out, nil
+    end
+
+    local function save_job(job)
+        local ok, err = repo:save_job(job)
         if not ok then
-            svc:obs_log('error', { what = 'job_store_save_failed', err = tostring(err) })
+            svc:obs_log('error', { what = 'job_save_failed', err = tostring(err), job_id = job and job.job_id })
             return nil, err
         end
         return true, nil
@@ -136,10 +223,25 @@ function M.start(conn, opts)
     local function update_job(job, patch)
         for k, v in pairs(patch) do job[k] = v end
         job.updated_at = os.time()
+        save_job(job)
         publish_job(job)
         publish_summary()
-        save_store()
         changed:signal()
+    end
+
+    local function release_artifact_if_present(job)
+        if not job or type(job.artifact_ref) ~= 'string' or job.artifact_ref == '' then return end
+        local ref = job.artifact_ref
+        local ok, err = artifact_delete(ref)
+        if not ok and err ~= 'not_found' then
+            svc:obs_log('warn', { what = 'artifact_delete_failed', artifact_ref = ref, err = tostring(err) })
+            return
+        end
+        job.artifact_ref = nil
+        job.artifact_released_at = os.time()
+        save_job(job)
+        publish_job(job)
+        publish_summary()
     end
 
     local function rebuild_backends()
@@ -154,17 +256,52 @@ function M.start(conn, opts)
         end
     end
 
+    local function adopt_repo(new_repo)
+        repo = new_repo
+        local loaded, err = repo:load_all()
+        if not loaded then
+            svc:obs_log('error', { what = 'job_store_reload_failed', err = tostring(err) })
+            return
+        end
+        store = loaded
+        sort_store(store)
+        for _, id in ipairs(store.order) do
+            local job = store.jobs[id]
+            if job then publish_job(job) end
+        end
+        publish_summary()
+    end
+
     local function create_job(payload)
         local target = payload and payload.target
         if type(target) ~= 'string' or cfg.targets[target] == nil then
             return nil, 'invalid_target'
         end
+
+        local artifact_ref = payload.artifact_ref
+        local artifact_meta = payload.artifact_meta
+
+        if type(artifact_ref) == 'string' and artifact_ref ~= '' then
+            local desc, derr = artifact_describe(artifact_ref)
+            if not desc then return nil, derr end
+            artifact_meta = desc
+        elseif type(payload.artifact) == 'string' and payload.artifact ~= '' then
+            local ref, meta, ierr = artifact_import_path(payload.artifact, target, payload.metadata)
+            if not ref then return nil, ierr end
+            artifact_ref, artifact_meta = ref, meta
+        elseif type(payload.artifact_data) == 'string' then
+            local ref, meta, ierr = artifact_from_data(payload.artifact_data, target, payload.metadata)
+            if not ref then return nil, ierr end
+            artifact_ref, artifact_meta = ref, meta
+        end
+
         local job_id = tostring(uuid.new())
         local job = {
             job_id = job_id,
             offer_id = payload.offer_id,
             target = target,
-            artifact = payload.artifact,
+            artifact_ref = artifact_ref,
+            artifact_meta = artifact_meta,
             expected_version = payload.expected_version,
             metadata = type(payload.metadata) == 'table' and payload.metadata or nil,
             approval = payload.approval or 'manual',
@@ -176,9 +313,10 @@ function M.start(conn, opts)
         }
         store.jobs[job_id] = job
         store.order[#store.order + 1] = job_id
+        sort_store(store)
+        save_job(job)
         publish_job(job)
         publish_summary()
-        save_store()
         changed:signal()
         return job, nil
     end
@@ -187,17 +325,25 @@ function M.start(conn, opts)
         local backend = backends[job.target]
         if not backend then
             update_job(job, { state = 'failed', error = 'backend_missing' })
+            release_artifact_if_present(job)
             return nil, 'backend_missing'
+        end
+        if type(job.artifact_ref) ~= 'string' or job.artifact_ref == '' then
+            update_job(job, { state = 'failed', error = 'missing_artifact_ref' })
+            return nil, 'missing_artifact_ref'
         end
 
         update_job(job, { state = 'preparing', error = nil })
         local status_before = backend:status(conn)
         if status_before and status_before.state and type(status_before.state) == 'table' then
             job.pre_commit_incarnation = status_before.state.incarnation or status_before.state.generation
+            save_job(job)
         end
+
         local prep, perr = backend:prepare(conn, job)
         if prep == nil then
             update_job(job, { state = 'failed', error = tostring(perr) })
+            release_artifact_if_present(job)
             return nil, perr
         end
 
@@ -205,15 +351,21 @@ function M.start(conn, opts)
         local staged, serr = backend:stage(conn, job)
         if staged == nil then
             update_job(job, { state = 'failed', error = tostring(serr) })
+            release_artifact_if_present(job)
             return nil, serr
         end
 
-        update_job(job, { state = 'staged', result = staged })
+        update_job(job, { state = 'staged', result = staged, staged_meta = staged })
+        if type(staged) == 'table' and staged.artifact_retention == 'release' then
+            release_artifact_if_present(job)
+        end
+
         if job.approval ~= 'manual' then
             update_job(job, { state = 'committing' })
             local committed, cerr = backend:commit(conn, job)
             if committed == nil then
                 update_job(job, { state = 'failed', error = tostring(cerr) })
+                release_artifact_if_present(job)
                 return nil, cerr
             end
             update_job(job, { state = 'awaiting_return', result = committed, error = nil })
@@ -230,12 +382,14 @@ function M.start(conn, opts)
         local backend = backends[job.target]
         if not backend then
             update_job(job, { state = 'failed', error = 'backend_missing' })
+            release_artifact_if_present(job)
             return nil, 'backend_missing'
         end
         update_job(job, { state = 'committing' })
         local committed, err = backend:commit(conn, job)
         if committed == nil then
             update_job(job, { state = 'failed', error = tostring(err) })
+            release_artifact_if_present(job)
             return nil, err
         end
         update_job(job, { state = 'awaiting_return', result = committed, error = nil })
@@ -253,17 +407,17 @@ function M.start(conn, opts)
         if result == nil then
             if (os.time() - (job.updated_at or job.created_at or os.time())) > cfg.reconcile_timeout_s then
                 update_job(job, { state = 'timed_out', result = nil, error = tostring(err or 'timeout') })
+                release_artifact_if_present(job)
             end
             return
         end
         if result.done and result.success then
             update_job(job, { state = 'succeeded', result = result, error = nil, post_commit_incarnation = result.incarnation })
+            release_artifact_if_present(job)
         elseif result.done then
             update_job(job, { state = 'failed', result = result, error = tostring(result.error or err or 'failed') })
+            release_artifact_if_present(job)
         else
-            -- Keep the job in awaiting_return until there is decisive post-boot
-            -- evidence of success or failure. This avoids a racy transient state
-            -- where fast reconcile ticks can skip over awaiting_return entirely.
             update_job(job, { state = 'awaiting_return', result = result })
         end
     end
@@ -301,9 +455,7 @@ function M.start(conn, opts)
                     return 'changed'
                 end),
             }))
-            if which then
-                reconcile_all()
-            end
+            if which then reconcile_all() end
         end
     end)
 
@@ -329,7 +481,9 @@ function M.start(conn, opts)
             elseif ev.op == 'unretain' then
                 cfg = default_cfg()
             end
+            repo = job_store.open(store_cap, { namespace = cfg.store_namespace })
             rebuild_backends()
+            adopt_repo(repo)
             changed:signal()
         elseif which == 'create' then
             if not req then error('update create endpoint closed: ' .. tostring(err), 0) end

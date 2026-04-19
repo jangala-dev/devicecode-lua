@@ -31,11 +31,14 @@ function M.new(opts)
     end
 
     function backend:stage(conn, job)
-        return device_call(conn, 'stage', {
-            artifact = job.artifact,
+        local value, err = device_call(conn, 'stage', {
+            artifact_ref = job.artifact_ref,
             metadata = job.metadata,
             expected_version = job.expected_version,
         }, timeout_stage)
+        if value == nil then return nil, err end
+        if type(value) == 'table' and value.artifact_retention == nil then value.artifact_retention = 'release' end
+        return value, nil
     end
 
     function backend:commit(conn, job)
@@ -55,7 +58,10 @@ function M.new(opts)
             return { done = true, success = true, version = version, incarnation = incarnation, raw = state }, nil
         end
         if job.pre_commit_incarnation ~= nil and incarnation ~= nil and incarnation ~= job.pre_commit_incarnation then
-            return { done = true, success = true, version = version, incarnation = incarnation, raw = state }, nil
+            if type(state) == 'table' and (state.updater_state == 'running' or state.state == 'running' or state.state == 'ready') then
+                return { done = true, success = true, version = version, incarnation = incarnation, raw = state }, nil
+            end
+            return { done = false, raw = state }, nil
         end
         return { done = false, raw = state }, nil
     end

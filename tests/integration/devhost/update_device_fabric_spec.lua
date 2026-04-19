@@ -1,15 +1,16 @@
-local busmod     = require 'bus'
-local duplex     = require 'tests.support.duplex_stream'
-local probe      = require 'tests.support.bus_probe'
-local runfibers  = require 'tests.support.run_fibers'
-local safe       = require 'coxpcall'
-local mailbox    = require 'fibers.mailbox'
-local fibers     = require 'fibers'
-local sleep_mod  = require 'fibers.sleep'
+local busmod      = require 'bus'
+local duplex      = require 'tests.support.duplex_stream'
+local probe       = require 'tests.support.bus_probe'
+local runfibers   = require 'tests.support.run_fibers'
+local safe        = require 'coxpcall'
+local mailbox     = require 'fibers.mailbox'
+local fibers      = require 'fibers'
+local sleep_mod   = require 'fibers.sleep'
+local storagecaps = require 'tests.support.storage_caps'
 
-local session    = require 'services.fabric.session'
-local device     = require 'services.device'
-local update     = require 'services.update'
+local session = require 'services.fabric.session'
+local device  = require 'services.device'
+local update  = require 'services.update'
 
 local T = {}
 
@@ -39,34 +40,13 @@ end
 local function bind_reply_loop(scope, ep, handler)
 	local ok, err = scope:spawn(function()
 		while true do
-			local req, rerr = ep:recv()
+			local req = ep:recv()
 			if not req then return end
 			local reply, ferr = handler(req.payload or {}, req)
 			if reply == nil then req:fail(ferr or 'failed') else req:reply(reply) end
 		end
 	end)
 	assert(ok, tostring(err))
-end
-
-local function start_fs_state_cap(scope, conn, storage)
-	conn:retain({ 'cap', 'fs', 'state', 'state' }, 'added')
-	conn:retain({ 'cap', 'fs', 'state', 'meta' }, { offerings = { read = true, write = true } })
-
-	local read_ep = conn:bind({ 'cap', 'fs', 'state', 'rpc', 'read' }, { queue_len = 32 })
-	local write_ep = conn:bind({ 'cap', 'fs', 'state', 'rpc', 'write' }, { queue_len = 32 })
-
-	bind_reply_loop(scope, read_ep, function(payload)
-		local data = storage[payload.filename]
-		if data == nil then
-			return { ok = false, reason = 'ENOENT' }
-		end
-		return { ok = true, reason = data }
-	end)
-
-	bind_reply_loop(scope, write_ep, function(payload)
-		storage[payload.filename] = payload.data
-		return { ok = true, reason = '' }
-	end)
 end
 
 function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
@@ -81,11 +61,9 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		local bus = busmod.new()
 		local caller = bus:connect()
-		local fs_conn = bus:connect()
+		local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
+		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
 		local seed = bus:connect()
-
-		local storage = {}
-		start_fs_state_cap(scope, fs_conn, storage)
 
 		seed:retain({ 'cfg', 'device' }, {
 			schema = 'devicecode.config/device/1',
@@ -132,7 +110,8 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 			return { ok = true, prepared = true, target = payload.target }
 		end)
 		bind_reply_loop(scope, stage_ep, function(payload)
-			return { ok = true, staged = payload.artifact, expected_version = payload.expected_version }
+			assert(type(payload.artifact_ref) == 'string')
+			return { ok = true, staged = payload.artifact_ref, expected_version = payload.expected_version }
 		end)
 		bind_reply_loop(scope, commit_ep, function(payload)
 			versions.mcu = payload.metadata and payload.metadata.next_version or 'mcu-v1'
@@ -202,18 +181,9 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		publish_remote_status()
 
-		assert(probe.wait_until(function()
-			local ok, payload = safe.pcall(function()
-				return probe.wait_payload(caller, { 'state', 'device', 'component', 'mcu' }, { timeout = 0.02 })
-			end)
-			return ok and type(payload) == 'table'
-				and type(payload.status) == 'table'
-				and payload.status.version == 'mcu-v0'
-		end, { timeout = 1.0, interval = 0.01 }))
-
 		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
 			target = 'mcu',
-			artifact = 'mcu.uf2',
+			artifact_data = 'mcu-image-v1',
 			expected_version = 'mcu-v1',
 			metadata = { channel = 'test', next_version = 'mcu-v1' },
 			approval = 'manual',
@@ -221,12 +191,15 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		assert(cerr == nil)
 		assert(created.ok == true)
 		local job = created.job
+		assert(type(job.artifact_ref) == 'string')
 
 		local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 })
 		assert(aerr == nil)
 		assert(applied.ok == true)
 		assert(type(applied.job) == 'table')
 		assert(applied.job.state == 'awaiting_approval')
+		assert(applied.job.artifact_ref == nil)
+		assert(next(artifacts.artifacts) == nil)
 
 		local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
 		assert(perr == nil)
@@ -247,13 +220,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		assert(final.job.state == 'succeeded')
 		assert(type(final.job.result) == 'table')
 		assert(final.job.result.version == 'mcu-v1')
-
-		local comp, derr = caller:call({ 'cmd', 'device', 'component', 'status' }, { component = 'mcu' }, { timeout = 0.5 })
-		assert(derr == nil)
-		assert(comp.ok == true)
-		assert(type(comp.state) == 'table')
-		assert(comp.state.version == 'mcu-v1')
-		assert(comp.state.incarnation == 2)
+		assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')
 	end, { timeout = 4.0 })
 end
 

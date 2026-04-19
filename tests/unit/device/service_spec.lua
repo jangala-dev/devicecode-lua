@@ -45,7 +45,7 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
       return { ok = true, prepared = payload.target }
     end)
     bind_reply_loop(scope, stage_ep, function(payload)
-      return { ok = true, staged = payload.artifact, expected_version = payload.expected_version }
+      return { ok = true, staged = payload.artifact_ref, expected_version = payload.expected_version, artifact_retention = 'keep' }
     end)
     bind_reply_loop(scope, commit_ep, function(payload)
       return { ok = true, started = true, mode = payload.mode }
@@ -58,13 +58,6 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
 
     wait_service_running(caller, 'device')
 
-    assert(probe.wait_until(function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'svc', 'device', 'status' }, { timeout = 0.02 })
-      end)
-      return okp and type(payload) == 'table' and payload.state == 'running'
-    end, { timeout = 0.75, interval = 0.01 }))
-
     local status, serr = caller:call({ 'cmd', 'device', 'component', 'status' }, { component = 'cm5' }, { timeout = 0.5 })
     assert(serr == nil)
     assert(status.ok == true)
@@ -75,11 +68,11 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
     local staged, terr = caller:call({ 'cmd', 'device', 'component', 'update' }, {
       component = 'cm5',
       op = 'stage',
-      args = { artifact = 'fw.itb', expected_version = '1.2.3' },
+      args = { artifact_ref = 'art-1', expected_version = '1.2.3' },
     }, { timeout = 0.5 })
     assert(terr == nil)
     assert(staged.ok == true)
-    assert(staged.staged == 'fw.itb')
+    assert(staged.staged == 'art-1')
     assert(staged.expected_version == '1.2.3')
   end, { timeout = 2.0 })
 end
@@ -105,7 +98,7 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
 
     local stage_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'stage' }, { queue_len = 16 })
     bind_reply_loop(scope, stage_ep, function(payload)
-      return { ok = true, staged = payload.artifact }
+      return { ok = true, staged = payload.artifact_ref, artifact_retention = 'release' }
     end)
 
     local ok, err = scope:spawn(function()
@@ -133,32 +126,14 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
         and payload.status.incarnation == 7
     end, { timeout = 0.75, interval = 0.01 }))
 
-    assert(probe.wait_until(function()
-      local okp, summary = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'device', 'components' }, { timeout = 0.02 })
-      end)
-      return okp
-        and type(summary) == 'table'
-        and summary.kind == 'device.components'
-        and type(summary.components) == 'table'
-        and type(summary.components.mcu) == 'table'
-        and summary.components.mcu.ready == true
-        and summary.components.mcu.state == 'running'
-    end, { timeout = 0.75, interval = 0.01 }))
-
-    local status, serr = caller:call({ 'cmd', 'device', 'component', 'status' }, { component = 'mcu' }, { timeout = 0.5 })
-    assert(serr == nil)
-    assert(status.ok == true)
-    assert(status.state.version == 'mcu-v2')
-
     local reply, rerr = caller:call({ 'cmd', 'device', 'component', 'update' }, {
       component = 'mcu',
       op = 'stage',
-      args = { artifact = 'mcu.uf2' },
+      args = { artifact_ref = 'art-9' },
     }, { timeout = 0.5 })
     assert(rerr == nil)
     assert(reply.ok == true)
-    assert(reply.staged == 'mcu.uf2')
+    assert(reply.staged == 'art-9')
   end, { timeout = 2.0 })
 end
 

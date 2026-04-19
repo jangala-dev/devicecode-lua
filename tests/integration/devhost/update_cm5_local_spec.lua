@@ -1,10 +1,10 @@
-
 local busmod     = require 'bus'
 local runfibers  = require 'tests.support.run_fibers'
 local probe      = require 'tests.support.bus_probe'
 local fibers     = require 'fibers'
 local sleep_mod  = require 'fibers.sleep'
 local safe       = require 'coxpcall'
+local storagecaps = require 'tests.support.storage_caps'
 
 local device     = require 'services.device'
 local update     = require 'services.update'
@@ -23,27 +23,6 @@ local function bind_reply_loop(scope, ep, handler)
     assert(ok, tostring(err))
 end
 
-local function start_fs_state_cap(scope, conn, storage)
-    conn:retain({ 'cap', 'fs', 'state', 'state' }, 'added')
-    conn:retain({ 'cap', 'fs', 'state', 'meta' }, { offerings = { read = true, write = true } })
-
-    local read_ep = conn:bind({ 'cap', 'fs', 'state', 'rpc', 'read' }, { queue_len = 32 })
-    local write_ep = conn:bind({ 'cap', 'fs', 'state', 'rpc', 'write' }, { queue_len = 32 })
-
-    bind_reply_loop(scope, read_ep, function(payload)
-        local data = storage[payload.filename]
-        if data == nil then
-            return { ok = false, reason = 'ENOENT' }
-        end
-        return { ok = true, reason = data }
-    end)
-
-    bind_reply_loop(scope, write_ep, function(payload)
-        storage[payload.filename] = payload.data
-        return { ok = true, reason = '' }
-    end)
-end
-
 local function start_cm5_updater_cap(scope, conn, state)
     conn:retain({ 'cap', 'updater', 'cm5', 'state' }, 'added')
     conn:retain({ 'cap', 'updater', 'cm5', 'meta' }, { offerings = { prepare = true, stage = true, commit = true, status = true } })
@@ -54,7 +33,7 @@ local function start_cm5_updater_cap(scope, conn, state)
             fw_version = state.fw_version,
             expected_version = state.expected_version,
             staged = state.staged,
-            artifact = state.artifact,
+            artifact_ref = state.artifact_ref,
         })
     end
 
@@ -69,7 +48,7 @@ local function start_cm5_updater_cap(scope, conn, state)
             fw_version = state.fw_version,
             expected_version = state.expected_version,
             staged = state.staged,
-            artifact = state.artifact,
+            artifact_ref = state.artifact_ref,
         }
     end)
 
@@ -80,10 +59,10 @@ local function start_cm5_updater_cap(scope, conn, state)
     bind_reply_loop(scope, stage_ep, function(payload)
         state.state = 'staged'
         state.staged = true
-        state.artifact = payload.artifact
+        state.artifact_ref = payload.artifact_ref
         state.expected_version = payload.expected_version
         publish_status()
-        return { ok = true, staged = payload.artifact, expected_version = payload.expected_version }
+        return { ok = true, staged = payload.artifact_ref, expected_version = payload.expected_version, artifact_retention = 'keep' }
     end)
 
     bind_reply_loop(scope, commit_ep, function(payload)
@@ -94,6 +73,7 @@ local function start_cm5_updater_cap(scope, conn, state)
             sleep_mod.sleep(0.03)
             state.state = 'running'
             state.staged = false
+            state.artifact_ref = nil
             state.fw_version = next_version
             publish_status()
         end)
@@ -117,14 +97,14 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
 
         local bus = busmod.new()
         local caller = bus:connect()
-        local storage = {}
-        start_fs_state_cap(scope, bus:connect(), storage)
+        local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
+        local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
         local publish_status = start_cm5_updater_cap(scope, bus:connect(), {
             state = 'idle',
             fw_version = 'cm5-v0',
             expected_version = nil,
             staged = false,
-            artifact = nil,
+            artifact_ref = nil,
         })
 
         local ok1, err1 = scope:spawn(function()
@@ -146,16 +126,9 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
 
         publish_status()
 
-        assert(probe.wait_until(function()
-            local ok, payload = safe.pcall(function()
-                return probe.wait_payload(caller, { 'state', 'device', 'component', 'cm5' }, { timeout = 0.02 })
-            end)
-            return ok and type(payload) == 'table' and type(payload.status) == 'table' and payload.status.fw_version == 'cm5-v0'
-        end, { timeout = 0.75, interval = 0.01 }))
-
         local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
             target = 'cm5',
-            artifact = '/data/artifacts/cm5.itb',
+            artifact_data = 'cm5-firmware-image',
             expected_version = 'cm5-v1',
             metadata = { next_version = 'cm5-v1' },
             approval = 'manual',
@@ -163,11 +136,14 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         assert(cerr == nil)
         assert(created.ok == true)
         local job = created.job
+        assert(type(job.artifact_ref) == 'string')
+        assert(type(artifacts.artifacts[job.artifact_ref]) == 'table')
 
         local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(aerr == nil)
         assert(applied.ok == true)
         assert(applied.job.state == 'awaiting_approval')
+        assert(type(applied.job.artifact_ref) == 'string')
 
         local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(perr == nil)
@@ -182,13 +158,11 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
                 and payload.job.state == 'succeeded'
                 and type(payload.job.result) == 'table'
                 and payload.job.result.version == 'cm5-v1'
+                and payload.job.artifact_ref == nil
         end, { timeout = 1.5, interval = 0.01 }))
 
-        local comp, derr = caller:call({ 'cmd', 'device', 'component', 'status' }, { component = 'cm5' }, { timeout = 0.5 })
-        assert(derr == nil)
-        assert(comp.ok == true)
-        assert(type(comp.state) == 'table')
-        assert(comp.state.fw_version == 'cm5-v1')
+        assert(next(artifacts.artifacts) == nil)
+        assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')
     end, { timeout = 3.0 })
 end
 
