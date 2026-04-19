@@ -53,7 +53,7 @@ local function start_cm5_updater_cap(scope, conn, state)
     end)
 
     bind_reply_loop(scope, prepare_ep, function(payload)
-        return { ok = true, target = payload.target, fw_version = state.fw_version }
+        return { ok = true, prepared = true, fw_version = state.fw_version }
     end)
 
     bind_reply_loop(scope, stage_ep, function(payload)
@@ -135,8 +135,8 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
 
         publish_status()
 
-        local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
-            target = 'cm5',
+        local created, cerr = caller:call({ 'cmd', 'update', 'job', 'submit' }, {
+            component = 'cm5',
             artifact_data = 'cm5-firmware-image',
             expected_version = 'cm5-v1',
             metadata = { next_version = 'cm5-v1' },
@@ -145,17 +145,14 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         assert(cerr == nil)
         assert(created.ok == true)
         local job = created.job
-        assert(type(job.artifact_ref) == 'string')
-        assert(type(artifacts.artifacts[job.artifact_ref]) == 'table')
+        assert(type(job.artifact.ref) == 'string')
+        assert(type(artifacts.artifacts[job.artifact.ref]) == 'table')
 
-        local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 })
-        assert(aerr == nil)
-        assert(applied.ok == true)
-        assert(applied.job.state == 'queued')
-        assert(type(applied.job.artifact_ref) == 'string')
+        assert(job.lifecycle.state == 'queued')
+        assert(type(job.artifact.ref) == 'string')
 
         assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
-            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.state == 'awaiting_approval'
+            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_approval'
         end, 0.75))
 
         local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
@@ -168,10 +165,10 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
             end)
             return ok and type(payload) == 'table'
                 and type(payload.job) == 'table'
-                and payload.job.state == 'succeeded'
+                and payload.job.lifecycle.state == 'succeeded'
                 and type(payload.job.result) == 'table'
                 and payload.job.result.version == 'cm5-v1'
-                and payload.job.artifact_ref == nil
+                and payload.job.artifact.ref == nil
         end, { timeout = 1.5, interval = 0.01 }))
 
         assert(next(artifacts.artifacts) == nil)

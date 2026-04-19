@@ -398,6 +398,8 @@
             "schema": "devicecode.config/device/1",
             "components": {
                 "cm5": {
+                    "class": "host",
+                    "subtype": "cm5",
                     "status_topic": [
                         "cap",
                         "updater",
@@ -405,29 +407,29 @@
                         "state",
                         "status"
                     ],
-                    "commands": {
-                        "status": [
-                            "cap",
-                            "updater",
-                            "cm5",
-                            "rpc",
-                            "status"
-                        ],
-                        "prepare": [
+                    "get_topic": [
+                        "cap",
+                        "updater",
+                        "cm5",
+                        "rpc",
+                        "status"
+                    ],
+                    "actions": {
+                        "prepare_update": [
                             "cap",
                             "updater",
                             "cm5",
                             "rpc",
                             "prepare"
                         ],
-                        "stage": [
+                        "stage_update": [
                             "cap",
                             "updater",
                             "cm5",
                             "rpc",
                             "stage"
                         ],
-                        "commit": [
+                        "commit_update": [
                             "cap",
                             "updater",
                             "cm5",
@@ -437,35 +439,37 @@
                     }
                 },
                 "mcu": {
+                    "class": "member",
+                    "subtype": "mcu",
                     "status_topic": [
                         "state",
                         "member",
                         "mcu",
                         "updater"
                     ],
-                    "commands": {
-                        "status": [
-                            "cmd",
-                            "member",
-                            "mcu",
-                            "updater",
-                            "status"
-                        ],
-                        "prepare": [
+                    "get_topic": [
+                        "cmd",
+                        "member",
+                        "mcu",
+                        "updater",
+                        "status"
+                    ],
+                    "actions": {
+                        "prepare_update": [
                             "cmd",
                             "member",
                             "mcu",
                             "updater",
                             "prepare"
                         ],
-                        "stage": [
+                        "stage_update": [
                             "cmd",
                             "member",
                             "mcu",
                             "updater",
                             "stage"
                         ],
-                        "commit": [
+                        "commit_update": [
                             "cmd",
                             "member",
                             "mcu",
@@ -481,16 +485,28 @@
         "rev": 1,
         "data": {
             "schema": "devicecode.config/update/1",
-            "store_key": "update-jobs.json",
-            "targets": {
+            "jobs_namespace": "update/jobs",
+            "components": {
                 "cm5": {
-                    "backend": "cm5_swupdate",
-                    "component": "cm5"
+                    "backend": "cm5_swupdate"
                 },
                 "mcu": {
-                    "backend": "mcu_component",
-                    "component": "mcu"
+                    "backend": "mcu_component"
                 }
+            },
+            "artifacts": {
+                "default_policy": "transient_only",
+                "policies": {
+                    "cm5": "transient_only",
+                    "mcu": "transient_only"
+                }
+            },
+            "reconcile": {
+                "interval_s": 10.0,
+                "timeout_s": 180.0
+            },
+            "admission": {
+                "mode": "global_single"
             }
         }
     }

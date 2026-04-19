@@ -53,7 +53,7 @@ local function start_cm5_updater_cap(scope, conn, state)
     end)
 
     bind_reply_loop(scope, prepare_ep, function(payload)
-        return { ok = true, target = payload.target, fw_version = state.fw_version }
+        return { ok = true, prepared = true, fw_version = state.fw_version }
     end)
 
     bind_reply_loop(scope, stage_ep, function(payload)
@@ -134,22 +134,21 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
 
         assert(wait_service_running(caller, { 'svc', 'update', 'status' }))
 
-        local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
-            target = 'cm5',
+        local created = assert(caller:call({ 'cmd', 'update', 'job', 'submit' }, {
+            component = 'cm5',
             artifact_data = 'cm5-firmware-image-v2',
             expected_version = 'cm5-v2',
             metadata = { next_version = 'cm5-v2' },
             approval = 'manual',
         }, { timeout = 0.5 }))
         local job = created.job
-        local artifact_ref = job.artifact_ref
+        local artifact_ref = job.artifact.ref
         assert(type(artifact_ref) == 'string')
 
-        local applied = assert(caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 }))
-        assert(applied.job.state == 'queued')
+        assert(job.lifecycle.state == 'queued')
 
         assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
-            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.state == 'awaiting_approval'
+            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_approval'
         end, 0.75))
 
         local approved = assert(caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 }))
@@ -157,16 +156,16 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         assert(type(artifacts.artifacts[artifact_ref]) == 'table')
 
         local awaiting = wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
-            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.state == 'awaiting_return'
+            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_return'
         end, 0.75)
         assert(awaiting)
 
         local mid, mid_err = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
         assert(mid_err == nil)
         assert(mid.ok == true)
-        assert(mid.job.state == 'awaiting_return')
-        assert(mid.job.artifact_ref == artifact_ref)
-        assert(mid.job.artifact_released_at == nil)
+        assert(mid.job.lifecycle.state == 'awaiting_return')
+        assert(mid.job.artifact.ref == artifact_ref)
+        assert(mid.job.artifact.released_at == nil)
         assert(type(artifacts.artifacts[artifact_ref]) == 'table')
 
         update_scope:cancel('restart update service')
@@ -190,10 +189,10 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
             return type(payload) == 'table'
                 and type(payload.job) == 'table'
-                and payload.job.state == 'succeeded'
+                and payload.job.lifecycle.state == 'succeeded'
                 and type(payload.job.result) == 'table'
                 and payload.job.result.version == 'cm5-v2'
-                and payload.job.artifact_ref == nil
+                and payload.job.artifact.ref == nil
         end, 1.5))
 
         assert(next(artifacts.artifacts) == nil)

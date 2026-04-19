@@ -1,4 +1,3 @@
-
 local fibers = require 'fibers'
 local base   = require 'devicecode.service_base'
 local safe   = require 'coxpcall'
@@ -10,6 +9,16 @@ local function copy_array(t)
     local out = {}
     if type(t) ~= 'table' then return out end
     for i = 1, #t do out[i] = t[i] end
+    return out
+end
+
+local function copy_value(v, seen)
+    if type(v) ~= 'table' then return v end
+    seen = seen or {}
+    if seen[v] then return seen[v] end
+    local out = {}
+    seen[v] = out
+    for k, vv in pairs(v) do out[copy_value(k, seen)] = copy_value(vv, seen) end
     return out
 end
 
@@ -33,12 +42,14 @@ local function default_components()
     return {
         cm5 = {
             name = 'cm5',
+            class = 'host',
+            subtype = 'cm5',
             status_topic = { 'cap', 'updater', 'cm5', 'state', 'status' },
-            commands = {
-                status = { 'cap', 'updater', 'cm5', 'rpc', 'status' },
-                prepare = { 'cap', 'updater', 'cm5', 'rpc', 'prepare' },
-                stage = { 'cap', 'updater', 'cm5', 'rpc', 'stage' },
-                commit = { 'cap', 'updater', 'cm5', 'rpc', 'commit' },
+            get_topic = { 'cap', 'updater', 'cm5', 'rpc', 'status' },
+            actions = {
+                prepare_update = { 'cap', 'updater', 'cm5', 'rpc', 'prepare' },
+                stage_update = { 'cap', 'updater', 'cm5', 'rpc', 'stage' },
+                commit_update = { 'cap', 'updater', 'cm5', 'rpc', 'commit' },
             },
         },
     }
@@ -48,17 +59,25 @@ local function merge_components(cfg)
     local out = default_components()
     if type(cfg) ~= 'table' then return out end
     if cfg.schema ~= nil and cfg.schema ~= SCHEMA then return out end
-    local comps = cfg.components or cfg
+    local comps = cfg.components or {}
     if type(comps) ~= 'table' then return out end
     for name, spec in pairs(comps) do
         if type(name) == 'string' and type(spec) == 'table' then
-            local cur = out[name] or { name = name, commands = {} }
+            local cur = out[name] or {
+                name = name,
+                class = 'member',
+                subtype = name,
+                actions = {},
+            }
+            if type(spec.class) == 'string' and spec.class ~= '' then cur.class = spec.class end
+            if type(spec.subtype) == 'string' and spec.subtype ~= '' then cur.subtype = spec.subtype end
             if type(spec.status_topic) == 'table' then cur.status_topic = copy_array(spec.status_topic) end
-            if type(spec.commands) == 'table' then
-                cur.commands = cur.commands or {}
-                for op_name, topic in pairs(spec.commands) do
-                    if type(op_name) == 'string' and type(topic) == 'table' then
-                        cur.commands[op_name] = copy_array(topic)
+            if type(spec.get_topic) == 'table' then cur.get_topic = copy_array(spec.get_topic) end
+            if type(spec.actions) == 'table' then
+                cur.actions = {}
+                for action_name, topic in pairs(spec.actions) do
+                    if type(action_name) == 'string' and type(topic) == 'table' then
+                        cur.actions[action_name] = copy_array(topic)
                     end
                 end
             end
@@ -68,24 +87,50 @@ local function merge_components(cfg)
     return out
 end
 
-local function publish_component_state(conn, svc, name, rec)
-    retain_best_effort(conn, component_topic(name), {
+local function component_view(name, rec, now_ts)
+    local status = copy_value(rec.status)
+    local state = type(status) == 'table' and (status.state or status.status or status.kind) or nil
+    local version = type(status) == 'table' and (status.version or status.fw_version) or nil
+    local incarnation = type(status) == 'table' and (status.incarnation or status.generation) or nil
+    local actions = {}
+    for action_name in pairs(rec.actions or {}) do actions[action_name] = true end
+    return {
         kind = 'device.component',
+        ts = now_ts,
         component = name,
-        ts = svc:now(),
-        status = rec.status,
-        source_topic = rec.status_topic,
-        commands = rec.commands,
-    })
+        class = rec.class,
+        subtype = rec.subtype,
+        present = rec.present ~= false,
+        available = status ~= nil,
+        state = state,
+        version = version,
+        incarnation = incarnation,
+        actions = actions,
+        status = status,
+        source = {
+            status_topic = copy_array(rec.status_topic),
+            get_topic = copy_array(rec.get_topic),
+        },
+    }
+end
+
+local function publish_component_state(conn, svc, name, rec)
+    retain_best_effort(conn, component_topic(name), component_view(name, rec, svc:now()))
 end
 
 local function publish_summary(conn, svc, components)
     local items = {}
     for name, rec in pairs(components) do
+        local view = component_view(name, rec, svc:now())
         items[name] = {
-            ready = rec.status ~= nil,
-            state = type(rec.status) == 'table' and (rec.status.state or rec.status.status or rec.status.kind) or nil,
-            source_topic = rec.status_topic,
+            class = view.class,
+            subtype = view.subtype,
+            present = view.present,
+            available = view.available,
+            state = view.state,
+            version = view.version,
+            incarnation = view.incarnation,
+            actions = view.actions,
         }
     end
     retain_best_effort(conn, summary_topic(), {
@@ -113,10 +158,10 @@ function M.start(conn, opts)
     end
 
     local function seed_component_status(name, rec)
-        if type(rec.commands) == 'table' and type(rec.commands.status) == 'table' then
+        if type(rec.get_topic) == 'table' then
             local value = nil
             local ok = safe.pcall(function()
-                value = conn:call(rec.commands.status, {}, { timeout = 0.5 })
+                value = conn:call(rec.get_topic, {}, { timeout = 0.5 })
             end)
             if ok and value ~= nil then
                 rec.status = value
@@ -141,22 +186,23 @@ function M.start(conn, opts)
         for name, rec in pairs(components) do
             rec.name = name
             rec.status = nil
-            rec.commands = rec.commands or {}
+            rec.actions = rec.actions or {}
+            rec.present = rec.present ~= false
         end
         rebuild_status_subs()
     end
 
     apply_cfg(nil)
 
-    local status_ep = conn:bind({ 'cmd', 'device', 'component', 'status' }, { queue_len = 32 })
-    local update_ep = conn:bind({ 'cmd', 'device', 'component', 'update' }, { queue_len = 32 })
+    local get_ep = conn:bind({ 'cmd', 'device', 'component', 'get' }, { queue_len = 32 })
+    local do_ep = conn:bind({ 'cmd', 'device', 'component', 'do' }, { queue_len = 32 })
 
     svc:status('running')
 
     fibers.current_scope():finally(function()
         close_status_subs()
-        pcall(function() status_ep:unbind() end)
-        pcall(function() update_ep:unbind() end)
+        pcall(function() get_ep:unbind() end)
+        pcall(function() do_ep:unbind() end)
         for name, _ in pairs(components) do
             unretain_best_effort(conn, component_topic(name))
         end
@@ -166,8 +212,8 @@ function M.start(conn, opts)
     while true do
         local ops = {
             cfg = cfg_watch:recv_op(),
-            status_req = status_ep:recv_op(),
-            update_req = update_ep:recv_op(),
+            get_req = get_ep:recv_op(),
+            do_req = do_ep:recv_op(),
         }
         for name, sub in pairs(status_subs) do
             ops['sub:' .. name] = sub:recv_op()
@@ -186,37 +232,46 @@ function M.start(conn, opts)
             elseif ev.op == 'unretain' then
                 apply_cfg(nil)
             end
-        elseif which == 'status_req' then
+        elseif which == 'get_req' then
             local req, err = a, b
-            if not req then error('device status endpoint closed: ' .. tostring(err), 0) end
+            if not req then error('device get endpoint closed: ' .. tostring(err), 0) end
             local payload = req.payload or {}
             local name = payload.component
             local rec = components[name]
             if type(name) ~= 'string' or not rec then
                 req:fail('unknown_component')
-            elseif rec.status ~= nil then
-                req:reply({ ok = true, component = name, state = rec.status })
-            elseif type(rec.commands.status) == 'table' then
-                local value, call_err = conn:call(rec.commands.status, payload.args or {}, { timeout = payload.timeout })
-                if value == nil then req:fail(call_err) else req:reply({ ok = true, component = name, state = value }) end
             else
-                req:fail('no_status_available')
+                if rec.status == nil and type(rec.get_topic) == 'table' then
+                    local value, call_err = conn:call(rec.get_topic, payload.args or {}, { timeout = payload.timeout })
+                    if value == nil then
+                        req:fail(call_err)
+                    else
+                        rec.status = value
+                        publish_component_state(conn, svc, name, rec)
+                        publish_summary(conn, svc, components)
+                        req:reply({ ok = true, component = component_view(name, rec, svc:now()) })
+                    end
+                elseif rec.status ~= nil then
+                    req:reply({ ok = true, component = component_view(name, rec, svc:now()) })
+                else
+                    req:fail('no_status_available')
+                end
             end
-        elseif which == 'update_req' then
+        elseif which == 'do_req' then
             local req, err = a, b
-            if not req then error('device update endpoint closed: ' .. tostring(err), 0) end
+            if not req then error('device do endpoint closed: ' .. tostring(err), 0) end
             local payload = req.payload or {}
             local name = payload.component
-            local op_name = payload.op
+            local action = payload.action
             local rec = components[name]
             if type(name) ~= 'string' or not rec then
                 req:fail('unknown_component')
-            elseif type(op_name) ~= 'string' or op_name == '' then
-                req:fail('missing_op')
-            elseif type(rec.commands[op_name]) ~= 'table' then
-                req:fail('unsupported_op')
+            elseif type(action) ~= 'string' or action == '' then
+                req:fail('missing_action')
+            elseif type(rec.actions[action]) ~= 'table' then
+                req:fail('unsupported_action')
             else
-                local value, call_err = conn:call(rec.commands[op_name], payload.args or {}, { timeout = payload.timeout })
+                local value, call_err = conn:call(rec.actions[action], payload.args or {}, { timeout = payload.timeout })
                 if value == nil then req:fail(call_err) else req:reply(value) end
             end
         else
@@ -225,13 +280,11 @@ function M.start(conn, opts)
             if name and components[name] then
                 if msg then
                     components[name].status = msg.payload or msg
-                    publish_component_state(conn, svc, name, components[name])
-                    publish_summary(conn, svc, components)
                 else
                     components[name].status = { state = 'unavailable', err = err }
-                    publish_component_state(conn, svc, name, components[name])
-                    publish_summary(conn, svc, components)
                 end
+                publish_component_state(conn, svc, name, components[name])
+                publish_summary(conn, svc, components)
             end
         end
     end

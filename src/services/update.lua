@@ -29,8 +29,7 @@ local TERMINAL_STATES = {
 }
 
 local PASSIVE_STATES = {
-    available = true,
-    queued = true,
+        queued = true,
     staged = true,
     awaiting_approval = true,
     deferred = true,
@@ -51,17 +50,21 @@ end
 local function default_cfg()
     return {
         schema = SCHEMA,
-        store_namespace = 'update/jobs',
-        reconcile_interval_s = 10.0,
-        reconcile_timeout_s = 180.0,
-        artifact_policy_default = 'transient_only',
-        artifact_policies = {
-            cm5 = 'transient_only',
-            mcu = 'transient_only',
+        jobs_namespace = 'update/jobs',
+        reconcile = {
+            interval_s = 10.0,
+            timeout_s = 180.0,
         },
-        targets = {
-            cm5 = { backend = 'cm5_swupdate', component = 'cm5' },
-            mcu = { backend = 'mcu_component', component = 'mcu' },
+        artifacts = {
+            default_policy = 'transient_only',
+            policies = {
+                cm5 = 'transient_only',
+                mcu = 'transient_only',
+            },
+        },
+        components = {
+            cm5 = { backend = 'cm5_swupdate' },
+            mcu = { backend = 'mcu_component' },
         },
         admission = {
             mode = 'global_single',
@@ -74,31 +77,49 @@ local function merge_cfg(payload)
     local data = payload and (payload.data or payload) or nil
     if type(data) ~= 'table' then return cfg end
     if data.schema ~= nil and data.schema ~= SCHEMA then return cfg end
-    if type(data.store_namespace) == 'string' and data.store_namespace ~= '' then cfg.store_namespace = data.store_namespace end
-    if type(data.reconcile_interval_s) == 'number' and data.reconcile_interval_s > 0 then cfg.reconcile_interval_s = data.reconcile_interval_s end
-    if type(data.reconcile_timeout_s) == 'number' and data.reconcile_timeout_s > 0 then cfg.reconcile_timeout_s = data.reconcile_timeout_s end
-    if type(data.artifact_policy_default) == 'string' and data.artifact_policy_default ~= '' then cfg.artifact_policy_default = data.artifact_policy_default end
-    if type(data.artifact_policies) == 'table' then
-        for target, policy in pairs(data.artifact_policies) do
-            if type(target) == 'string' and type(policy) == 'string' and policy ~= '' then
-                cfg.artifact_policies[target] = policy
+
+    if type(data.jobs_namespace) == 'string' and data.jobs_namespace ~= '' then
+        cfg.jobs_namespace = data.jobs_namespace
+    end
+
+    if type(data.reconcile) == 'table' then
+        if type(data.reconcile.interval_s) == 'number' and data.reconcile.interval_s > 0 then
+            cfg.reconcile.interval_s = data.reconcile.interval_s
+        end
+        if type(data.reconcile.timeout_s) == 'number' and data.reconcile.timeout_s > 0 then
+            cfg.reconcile.timeout_s = data.reconcile.timeout_s
+        end
+    end
+
+    if type(data.artifacts) == 'table' then
+        if type(data.artifacts.default_policy) == 'string' and data.artifacts.default_policy ~= '' then
+            cfg.artifacts.default_policy = data.artifacts.default_policy
+        end
+        if type(data.artifacts.policies) == 'table' then
+            for component, policy in pairs(data.artifacts.policies) do
+                if type(component) == 'string' and type(policy) == 'string' and policy ~= '' then
+                    cfg.artifacts.policies[component] = policy
+                end
             end
         end
     end
-    if type(data.targets) == 'table' then
-        cfg.targets = {}
-        for name, spec in pairs(data.targets) do
-            if type(name) == 'string' and type(spec) == 'table' and type(spec.component) == 'string' and spec.component ~= '' then
-                cfg.targets[name] = {
-                    backend = type(spec.backend) == 'string' and spec.backend or (name == 'cm5' and 'cm5_swupdate' or 'mcu_component'),
-                    component = spec.component,
-                }
+
+    if type(data.components) == 'table' then
+        cfg.components = {}
+        for component, spec in pairs(data.components) do
+            if type(component) == 'string' and type(spec) == 'table' then
+                local backend = type(spec.backend) == 'string' and spec.backend or nil
+                if backend and backend ~= '' then
+                    cfg.components[component] = { backend = backend }
+                end
             end
         end
     end
+
     if type(data.admission) == 'table' and type(data.admission.mode) == 'string' and data.admission.mode ~= '' then
         cfg.admission.mode = data.admission.mode
     end
+
     return cfg
 end
 
@@ -116,6 +137,49 @@ local function copy_job(job)
     return copy_value(job)
 end
 
+local function public_job(job)
+    local staged_meta = type(job.staged_meta) == 'table' and job.staged_meta or nil
+    return {
+        job_id = job.job_id,
+        component = job.component,
+        source = {
+            offer_id = job.offer_id,
+        },
+        artifact = {
+            ref = job.artifact_ref,
+            meta = copy_value(job.artifact_meta),
+            expected_version = job.expected_version,
+            released_at = job.artifact_released_at,
+            retention = staged_meta and staged_meta.artifact_retention or nil,
+        },
+        policy = {
+            approval = job.approval,
+        },
+        lifecycle = {
+            state = job.state,
+            next_step = job.next_step,
+            created_at = job.created_at,
+            updated_at = job.updated_at,
+            error = job.error,
+        },
+        observation = {
+            pre_commit_incarnation = job.pre_commit_incarnation,
+            post_commit_incarnation = job.post_commit_incarnation,
+        },
+        result = copy_value(job.result),
+        metadata = copy_value(job.metadata),
+    }
+end
+
+local function public_jobs(store)
+    local jobs = {}
+    for _, id in ipairs(store.order) do
+        local job = store.jobs[id]
+        if job then jobs[#jobs + 1] = public_job(job) end
+    end
+    return jobs
+end
+
 local function sort_store(store)
     table.sort(store.order, function(a, b)
         local ja, jb = store.jobs[a], store.jobs[b]
@@ -126,14 +190,14 @@ local function sort_store(store)
     end)
 end
 
-local function build_backend(target_cfg)
-    if target_cfg.backend == 'cm5_swupdate' then
-        return cm5_backend_mod.new({ component = target_cfg.component })
+local function build_backend(component, component_cfg)
+    if component_cfg.backend == 'cm5_swupdate' then
+        return cm5_backend_mod.new({ component = component })
     end
-    if target_cfg.backend == 'mcu_component' then
-        return mcu_backend_mod.new({ component = target_cfg.component })
+    if component_cfg.backend == 'mcu_component' then
+        return mcu_backend_mod.new({ component = component })
     end
-    return nil, 'unknown_backend:' .. tostring(target_cfg.backend)
+    return nil, 'unknown_backend:' .. tostring(component_cfg.backend)
 end
 
 local function discover_cap(conn, class, id, timeout)
@@ -169,7 +233,7 @@ function M.start(conn, opts)
 
     local cfg_watch = conn:watch_retained({ 'cfg', 'update' }, { replay = true, queue_len = 8, full = 'drop_oldest' })
     local cfg = default_cfg()
-    local repo = job_store.open(store_cap, { namespace = cfg.store_namespace })
+    local repo = job_store.open(store_cap, { namespace = cfg.jobs_namespace })
     local store, lerr = repo:load_all()
     if not store then
         svc:status('failed', { reason = tostring(lerr) })
@@ -178,7 +242,7 @@ function M.start(conn, opts)
 
     local changed = pulse.scoped({ close_reason = 'update service stopping' })
     local active_jobs = {}
-    local locks = { global = nil, target = {} }
+    local locks = { global = nil, component = {} }
     local backends = {}
 
     local function is_terminal(state)
@@ -189,8 +253,8 @@ function M.start(conn, opts)
         return ACTIVE_STATES[state] == true
     end
 
-    local function artifact_policy_for_target(target)
-        return cfg.artifact_policies[target] or cfg.artifact_policy_default or 'prefer_durable'
+    local function artifact_policy_for_component(component)
+        return cfg.artifacts.policies[component] or cfg.artifacts.default_policy or 'prefer_durable'
     end
 
     local function artifact_describe(ref)
@@ -209,9 +273,9 @@ function M.start(conn, opts)
         return true, nil
     end
 
-    local function artifact_import_path(path, target, metadata)
-        local meta = { kind = 'update', target = target, metadata = metadata }
-        local opts = assert(cap_sdk.args.new.ArtifactStoreImportPathOpts(path, meta, artifact_policy_for_target(target)))
+    local function artifact_import_path(path, component, metadata)
+        local meta = { kind = 'update', component = component, metadata = metadata }
+        local opts = assert(cap_sdk.args.new.ArtifactStoreImportPathOpts(path, meta, artifact_policy_for_component(component)))
         local reply, err = artifact_cap:call_control('import_path', opts)
         if not reply then return nil, nil, err end
         if reply.ok ~= true then return nil, nil, reply.reason end
@@ -219,8 +283,8 @@ function M.start(conn, opts)
         return rec.artifact_ref, rec, nil
     end
 
-    local function artifact_from_data(data, target, metadata)
-        local c_opts = assert(cap_sdk.args.new.ArtifactStoreCreateOpts({ kind = 'update', target = target, metadata = metadata }, artifact_policy_for_target(target)))
+    local function artifact_from_data(data, component, metadata)
+        local c_opts = assert(cap_sdk.args.new.ArtifactStoreCreateOpts({ kind = 'update', component = component, metadata = metadata }, artifact_policy_for_component(component)))
         local c_reply, c_err = artifact_cap:call_control('create', c_opts)
         if not c_reply then return nil, nil, c_err end
         if c_reply.ok ~= true then return nil, nil, c_reply.reason end
@@ -250,7 +314,7 @@ function M.start(conn, opts)
         retain_best_effort(conn, job_topic(job.job_id), {
             kind = 'update.job',
             ts = svc:now(),
-            job = copy_job(job),
+            job = public_job(job),
         })
     end
 
@@ -262,7 +326,7 @@ function M.start(conn, opts)
         end
         local active = {}
         for id, rec in pairs(active_jobs) do
-            active[#active + 1] = { job_id = id, target = rec.target, started_at = rec.started_at }
+            active[#active + 1] = { job_id = id, component = rec.component, started_at = rec.started_at }
         end
         retain_best_effort(conn, summary_topic(), {
             kind = 'update.summary',
@@ -308,12 +372,12 @@ function M.start(conn, opts)
 
     local function rebuild_backends()
         backends = {}
-        for target, tcfg in pairs(cfg.targets) do
-            local backend, berr = build_backend(tcfg)
+        for component, ccfg in pairs(cfg.components) do
+            local backend, berr = build_backend(component, ccfg)
             if backend then
-                backends[target] = backend
+                backends[component] = backend
             else
-                svc:obs_log('warn', { what = 'backend_build_failed', target = target, err = tostring(berr) })
+                svc:obs_log('warn', { what = 'backend_build_failed', component = component, err = tostring(berr) })
             end
         end
     end
@@ -370,9 +434,9 @@ function M.start(conn, opts)
         end
     end
 
-    local function create_job(payload)
-        local target = assert(payload.target, 'target required')
-        if not cfg.targets[target] then return nil, 'unknown_target' end
+    local function submit_job(payload)
+        local component = assert(payload.component, 'component required')
+        if not cfg.components[component] then return nil, 'unknown_component' end
 
         local artifact_ref = payload.artifact_ref
         local artifact_meta = nil
@@ -381,27 +445,31 @@ function M.start(conn, opts)
             if not desc then return nil, derr end
             artifact_meta = desc
         elseif type(payload.artifact) == 'string' and payload.artifact ~= '' then
-            local ref, meta, ierr = artifact_import_path(payload.artifact, target, payload.metadata)
+            local ref, meta, ierr = artifact_import_path(payload.artifact, component, payload.metadata)
             if not ref then return nil, ierr end
             artifact_ref, artifact_meta = ref, meta
         elseif type(payload.artifact_data) == 'string' then
-            local ref, meta, ierr = artifact_from_data(payload.artifact_data, target, payload.metadata)
+            local ref, meta, ierr = artifact_from_data(payload.artifact_data, component, payload.metadata)
             if not ref then return nil, ierr end
             artifact_ref, artifact_meta = ref, meta
         end
+        if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, 'artifact_required' end
+
+        local approval = payload.approval or 'manual'
+        if approval ~= 'manual' and approval ~= 'auto' then return nil, 'invalid_approval' end
 
         local job_id = tostring(uuid.new())
         local job = {
             job_id = job_id,
             offer_id = payload.offer_id,
-            target = target,
+            component = component,
             artifact_ref = artifact_ref,
             artifact_meta = artifact_meta,
             expected_version = payload.expected_version,
             metadata = type(payload.metadata) == 'table' and payload.metadata or nil,
-            approval = payload.approval or 'manual',
-            state = 'available',
-            next_step = nil,
+            approval = approval,
+            state = 'queued',
+            next_step = 'run',
             created_at = now_ts(),
             updated_at = now_ts(),
             result = nil,
@@ -417,6 +485,10 @@ function M.start(conn, opts)
         store.order[#store.order + 1] = job_id
         sort_store(store)
         save_job(job)
+        if job.approval == 'manual' then
+            -- stage immediately; commit only after explicit approval
+            job.next_step = 'run'
+        end
         publish_job(job)
         publish_summary()
         changed:signal()
@@ -452,18 +524,31 @@ function M.start(conn, opts)
             publish_job(job)
         end
         if locks.global == job_id then locks.global = nil end
-        for target, holder in pairs(locks.target) do
-            if holder == job_id then locks.target[target] = nil end
+        for component, holder in pairs(locks.component) do
+            if holder == job_id then locks.component[component] = nil end
         end
     end
 
     local function acquire_lock(job)
         locks.global = job.job_id
-        locks.target[job.target] = job.job_id
+        locks.component[job.component] = job.job_id
         job.runtime = type(job.runtime) == 'table' and job.runtime or {}
         job.runtime.active_lock = 'global:' .. tostring(job.job_id)
         save_job(job)
         publish_job(job)
+    end
+
+    local function demote_to_passive(job, state, next_step, extra_patch)
+        active_jobs[job.job_id] = nil
+        release_lock(job.job_id)
+        local patch = {
+            state = state,
+            next_step = next_step,
+        }
+        if type(extra_patch) == 'table' then
+            for k, v in pairs(extra_patch) do patch[k] = v end
+        end
+        return update_job(job, patch)
     end
 
     local function start_worker(job)
@@ -472,7 +557,7 @@ function M.start(conn, opts)
         if not child then return nil, err end
         acquire_lock(job)
         local ok, spawn_err = child:spawn(function()
-            local backend = backends[job.target]
+            local backend = backends[job.component]
             if not backend then
                 update_job(job, { state = 'failed', error = 'backend_missing', next_step = nil })
                 release_artifact_if_present(job)
@@ -486,7 +571,7 @@ function M.start(conn, opts)
             end
 
             local function run_reconcile_loop()
-                local deadline = now_ts() + cfg.reconcile_timeout_s
+                local deadline = now_ts() + cfg.reconcile.timeout_s
                 while true do
                     local result, rerr = backend:reconcile(conn, job)
                     if result ~= nil then
@@ -528,7 +613,7 @@ function M.start(conn, opts)
                         release_artifact_if_present(job)
                         return nil, 'timeout'
                     end
-                    sleep.sleep(cfg.reconcile_interval_s)
+                    sleep.sleep(cfg.reconcile.interval_s)
                 end
             end
 
@@ -561,7 +646,7 @@ function M.start(conn, opts)
                 end
 
                 if job.approval == 'manual' then
-                    update_job(job, { state = 'awaiting_approval', next_step = 'commit_only' })
+                    demote_to_passive(job, 'awaiting_approval', 'commit_only')
                     return true, nil
                 end
             end
@@ -576,7 +661,7 @@ function M.start(conn, opts)
             release_lock(job.job_id)
             return nil, spawn_err
         end
-        active_jobs[job.job_id] = { scope = child, target = job.target, started_at = svc:now() }
+        active_jobs[job.job_id] = { scope = child, component = job.component, started_at = svc:now() }
         fibers.spawn(function()
             local _, st, _, primary = fibers.current_scope():try(child:join_op())
             active_jobs[job.job_id] = nil
@@ -615,18 +700,13 @@ function M.start(conn, opts)
     end
 
     local function list_jobs_payload()
-        local jobs = {}
-        for _, id in ipairs(store.order) do
-            local job = store.jobs[id]
-            if job then jobs[#jobs + 1] = copy_job(job) end
-        end
-        return jobs
+        return public_jobs(store)
     end
 
-    local create_ep = conn:bind({ 'cmd', 'update', 'job', 'create' }, { queue_len = 32 })
-    local apply_ep = conn:bind({ 'cmd', 'update', 'job', 'apply_now' }, { queue_len = 32 })
+    local submit_ep = conn:bind({ 'cmd', 'update', 'job', 'submit' }, { queue_len = 32 })
     local approve_ep = conn:bind({ 'cmd', 'update', 'job', 'approve' }, { queue_len = 32 })
     local defer_ep = conn:bind({ 'cmd', 'update', 'job', 'defer' }, { queue_len = 32 })
+    local cancel_ep = conn:bind({ 'cmd', 'update', 'job', 'cancel' }, { queue_len = 32 })
     local get_ep = conn:bind({ 'cmd', 'update', 'job', 'get' }, { queue_len = 32 })
     local list_ep = conn:bind({ 'cmd', 'update', 'job', 'list' }, { queue_len = 32 })
 
@@ -645,10 +725,10 @@ function M.start(conn, opts)
     while true do
         local which, req, err = fibers.perform(fibers.named_choice({
             cfg = cfg_watch:recv_op():wrap(function(ev) return ev end),
-            create = create_ep:recv_op(),
-            apply = apply_ep:recv_op(),
+            submit = submit_ep:recv_op(),
             approve = approve_ep:recv_op(),
             defer = defer_ep:recv_op(),
+            cancel = cancel_ep:recv_op(),
             get = get_ep:recv_op(),
             list = list_ep:recv_op(),
             changed = changed:changed_op(seen):wrap(function(ver) seen = ver; return ver end),
@@ -668,26 +748,18 @@ function M.start(conn, opts)
             elseif ev.op == 'unretain' then
                 cfg = default_cfg()
             end
-            local new_repo = job_store.open(store_cap, { namespace = cfg.store_namespace })
+            local new_repo = job_store.open(store_cap, { namespace = cfg.jobs_namespace })
             rebuild_backends()
             local ok, aerr = adopt_repo(new_repo)
             if ok then normalise_adopted_jobs() else svc:obs_log('warn', { what = 'repo_adopt_failed', err = tostring(aerr) }) end
             changed:signal()
-        elseif which == 'create' then
-            if not req then error('update create endpoint closed: ' .. tostring(err), 0) end
-            local job, jerr = create_job(req.payload or {})
-            if not job then req:fail(jerr) else req:reply({ ok = true, job = copy_job(job) }) end
-        elseif which == 'apply' then
-            if not req then error('update apply endpoint closed: ' .. tostring(err), 0) end
-            local payload = req.payload or {}
-            local job = store.jobs[payload.job_id]
+        elseif which == 'submit' then
+            if not req then error('update submit endpoint closed: ' .. tostring(err), 0) end
+            local job, jerr = submit_job(req.payload or {})
             if not job then
-                req:fail('unknown_job')
-            elseif job.state ~= 'available' and job.state ~= 'deferred' then
-                req:fail('job_not_runnable')
+                req:fail(jerr)
             else
-                local ok, aerr = set_queued(job, job.next_step or 'run')
-                if not ok then req:fail(aerr) else req:reply({ ok = true, job = copy_job(job) }) end
+                req:reply({ ok = true, job = public_job(job) })
             end
         elseif which == 'approve' then
             if not req then error('update approve endpoint closed: ' .. tostring(err), 0) end
@@ -695,17 +767,12 @@ function M.start(conn, opts)
             local job = store.jobs[payload.job_id]
             if not job then
                 req:fail('unknown_job')
-            elseif job.state ~= 'awaiting_approval' and job.state ~= 'staged' and job.state ~= 'deferred' then
+            elseif job.state ~= 'awaiting_approval' and job.state ~= 'deferred' then
                 req:fail('job_not_awaiting_approval')
             else
-                local next_step
-                if job.state == 'deferred' then
-                    next_step = job.next_step or 'run'
-                else
-                    next_step = job.next_step or 'commit_only'
-                end
+                local next_step = job.next_step or 'commit_only'
                 local ok, aerr = set_queued(job, next_step)
-                if not ok then req:fail(aerr) else req:reply({ ok = true, job = copy_job(job) }) end
+                if not ok then req:fail(aerr) else req:reply({ ok = true, job = public_job(job) }) end
             end
         elseif which == 'defer' then
             if not req then error('update defer endpoint closed: ' .. tostring(err), 0) end
@@ -713,17 +780,32 @@ function M.start(conn, opts)
             local job = store.jobs[payload.job_id]
             if not job then
                 req:fail('unknown_job')
-            elseif job.state ~= 'awaiting_approval' and job.state ~= 'available' and job.state ~= 'queued' and job.state ~= 'staged' then
+            elseif job.state ~= 'awaiting_approval' and job.state ~= 'queued' and job.state ~= 'staged' then
                 req:fail('job_not_deferrable')
             else
                 update_job(job, { state = 'deferred' })
-                req:reply({ ok = true, job = copy_job(job) })
+                req:reply({ ok = true, job = public_job(job) })
+            end
+        elseif which == 'cancel' then
+            if not req then error('update cancel endpoint closed: ' .. tostring(err), 0) end
+            local payload = req.payload or {}
+            local job = store.jobs[payload.job_id]
+            if not job then
+                req:fail('unknown_job')
+            elseif ACTIVE_STATES[job.state] then
+                req:fail('job_active')
+            elseif TERMINAL_STATES[job.state] then
+                req:fail('job_terminal')
+            else
+                update_job(job, { state = 'cancelled', next_step = nil, error = nil })
+                release_artifact_if_present(job)
+                req:reply({ ok = true, job = public_job(job) })
             end
         elseif which == 'get' then
             if not req then error('update get endpoint closed: ' .. tostring(err), 0) end
             local payload = req.payload or {}
             local job = store.jobs[payload.job_id]
-            if not job then req:fail('unknown_job') else req:reply({ ok = true, job = copy_job(job) }) end
+            if not job then req:fail('unknown_job') else req:reply({ ok = true, job = public_job(job) }) end
         elseif which == 'list' then
             if not req then error('update list endpoint closed: ' .. tostring(err), 0) end
             req:reply({ ok = true, jobs = list_jobs_payload() })

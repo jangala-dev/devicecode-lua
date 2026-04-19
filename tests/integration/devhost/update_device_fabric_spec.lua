@@ -78,12 +78,14 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 			schema = 'devicecode.config/device/1',
 			components = {
 				mcu = {
+					class = 'member',
+					subtype = 'mcu',
 					status_topic = { 'imported', 'member', 'mcu', 'status' },
-					commands = {
-						status = { 'rpc', 'member', 'mcu', 'status' },
-						prepare = { 'rpc', 'member', 'mcu', 'prepare' },
-						stage = { 'rpc', 'member', 'mcu', 'stage' },
-						commit = { 'rpc', 'member', 'mcu', 'commit' },
+					get_topic = { 'rpc', 'member', 'mcu', 'status' },
+					actions = {
+						prepare_update = { 'rpc', 'member', 'mcu', 'prepare' },
+						stage_update = { 'rpc', 'member', 'mcu', 'stage' },
+						commit_update = { 'rpc', 'member', 'mcu', 'commit' },
 					},
 				},
 			},
@@ -116,7 +118,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 			return { version = versions.mcu, state = 'running', incarnation = incarnation.mcu }
 		end)
 		bind_reply_loop(scope, prepare_ep, function(payload)
-			return { ok = true, prepared = true, target = payload.target }
+			return { ok = true, prepared = true }
 		end)
 		bind_reply_loop(scope, stage_ep, function(payload)
 			assert(type(payload.artifact_ref) == 'string')
@@ -190,8 +192,8 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		publish_remote_status()
 
-		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
-			target = 'mcu',
+		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'submit' }, {
+			component = 'mcu',
 			artifact_data = 'mcu-image-v1',
 			expected_version = 'mcu-v1',
 			metadata = { channel = 'test', next_version = 'mcu-v1' },
@@ -200,18 +202,15 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		assert(cerr == nil)
 		assert(created.ok == true)
 		local job = created.job
-		assert(type(job.artifact_ref) == 'string')
+		assert(type(job.artifact.ref) == 'string')
 
-		local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 })
-		assert(aerr == nil)
-		assert(applied.ok == true)
-		assert(type(applied.job) == 'table')
-		assert(applied.job.state == 'queued')
-		assert(type(applied.job.artifact_ref) == 'string')
+		assert(type(job) == 'table')
+		assert(job.lifecycle.state == 'queued')
+		assert(type(job.artifact.ref) == 'string')
 
 		assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
-			return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.state == 'awaiting_approval'
-				and payload.job.artifact_ref == nil and payload.job.artifact_released_at ~= nil
+			return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_approval'
+				and payload.job.artifact.ref == nil and payload.job.artifact.released_at ~= nil
 		end, 0.75))
 		assert(next(artifacts.artifacts) == nil)
 
@@ -225,13 +224,13 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 			end)
 			return ok and type(payload) == 'table'
 				and type(payload.job) == 'table'
-				and payload.job.state == 'succeeded'
+				and payload.job.lifecycle.state == 'succeeded'
 		end, { timeout = 1.5, interval = 0.01 }))
 
 		local final, ferr = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
 		assert(ferr == nil)
 		assert(final.ok == true)
-		assert(final.job.state == 'succeeded')
+		assert(final.job.lifecycle.state == 'succeeded')
 		assert(type(final.job.result) == 'table')
 		assert(final.job.result.version == 'mcu-v1')
 		assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')

@@ -42,13 +42,13 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
       return { version = 'cm5-v1', state = 'running' }
     end)
     bind_reply_loop(scope, prepare_ep, function(payload)
-      return { ok = true, prepared = payload.target }
+      return { ok = true, prepared = payload.component }
     end)
     bind_reply_loop(scope, stage_ep, function(payload)
       return { ok = true, staged = payload.artifact_ref, expected_version = payload.expected_version, artifact_retention = 'keep' }
     end)
     bind_reply_loop(scope, commit_ep, function(payload)
-      return { ok = true, started = true, mode = payload.mode }
+      return { ok = true, started = true, mode = payload.component }
     end)
 
     local ok, err = scope:spawn(function()
@@ -58,16 +58,18 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
 
     wait_service_running(caller, 'device')
 
-    local status, serr = caller:call({ 'cmd', 'device', 'component', 'status' }, { component = 'cm5' }, { timeout = 0.5 })
+    local status, serr = caller:call({ 'cmd', 'device', 'component', 'get' }, { component = 'cm5' }, { timeout = 0.5 })
     assert(serr == nil)
     assert(status.ok == true)
-    assert(status.component == 'cm5')
-    assert(type(status.state) == 'table')
-    assert(status.state.version == 'cm5-v1')
+    assert(type(status.component) == 'table')
+    assert(status.component.component == 'cm5')
+    assert(type(status.component.status) == 'table')
+    assert(status.component.status.version == 'cm5-v1')
+    assert(status.component.actions.stage_update == true)
 
-    local staged, terr = caller:call({ 'cmd', 'device', 'component', 'update' }, {
+    local staged, terr = caller:call({ 'cmd', 'device', 'component', 'do' }, {
       component = 'cm5',
-      op = 'stage',
+      action = 'stage_update',
       args = { artifact_ref = 'art-1', expected_version = '1.2.3' },
     }, { timeout = 0.5 })
     assert(terr == nil)
@@ -88,15 +90,22 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
       schema = 'devicecode.config/device/1',
       components = {
         mcu = {
+          class = 'member',
+          subtype = 'mcu',
           status_topic = { 'cap', 'updater', 'mcu', 'state', 'status' },
-          commands = {
-            stage = { 'cap', 'updater', 'mcu', 'rpc', 'stage' },
+          get_topic = { 'cap', 'updater', 'mcu', 'rpc', 'status' },
+          actions = {
+            stage_update = { 'cap', 'updater', 'mcu', 'rpc', 'stage' },
           },
         },
       },
     })
 
+    local status_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'status' }, { queue_len = 16 })
     local stage_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'stage' }, { queue_len = 16 })
+    bind_reply_loop(scope, status_ep, function()
+      return { version = 'mcu-v2', state = 'running', incarnation = 7 }
+    end)
     bind_reply_loop(scope, stage_ep, function(payload)
       return { ok = true, staged = payload.artifact_ref, artifact_retention = 'release' }
     end)
@@ -123,12 +132,13 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
         and payload.kind == 'device.component'
         and type(payload.status) == 'table'
         and payload.status.version == 'mcu-v2'
-        and payload.status.incarnation == 7
+        and payload.incarnation == 7
+        and payload.actions.stage_update == true
     end, { timeout = 0.75, interval = 0.01 }))
 
-    local reply, rerr = caller:call({ 'cmd', 'device', 'component', 'update' }, {
+    local reply, rerr = caller:call({ 'cmd', 'device', 'component', 'do' }, {
       component = 'mcu',
-      op = 'stage',
+      action = 'stage_update',
       args = { artifact_ref = 'art-9' },
     }, { timeout = 0.5 })
     assert(rerr == nil)
