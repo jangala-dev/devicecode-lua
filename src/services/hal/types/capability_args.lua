@@ -264,6 +264,92 @@ function new.PowerActionOpts(delay)
     return setmetatable({ delay = delay }, PowerActionOpts), ""
 end
 
+
+
+---@class UpdaterPrepareOpts
+---@field target string|nil
+---@field metadata table|nil
+local UpdaterPrepareOpts = {}
+UpdaterPrepareOpts.__index = UpdaterPrepareOpts
+
+---Create a new UpdaterPrepareOpts.
+---@param target string|nil
+---@param metadata table|nil
+---@return UpdaterPrepareOpts?
+---@return string error
+function new.UpdaterPrepareOpts(target, metadata)
+    if target ~= nil and (type(target) ~= 'string' or target == '') then
+        return nil, "invalid target"
+    end
+    if metadata ~= nil and type(metadata) ~= 'table' then
+        return nil, "invalid metadata"
+    end
+    return setmetatable({ target = target, metadata = metadata }, UpdaterPrepareOpts), ""
+end
+
+---@class UpdaterStageOpts
+---@field artifact string
+---@field metadata table|nil
+---@field expected_version string|nil
+local UpdaterStageOpts = {}
+UpdaterStageOpts.__index = UpdaterStageOpts
+
+---Create a new UpdaterStageOpts.
+---@param artifact string
+---@param metadata table|nil
+---@param expected_version string|nil
+---@return UpdaterStageOpts?
+---@return string error
+function new.UpdaterStageOpts(artifact, metadata, expected_version)
+    if type(artifact) ~= 'string' or artifact == '' then
+        return nil, "invalid artifact"
+    end
+    if metadata ~= nil and type(metadata) ~= 'table' then
+        return nil, "invalid metadata"
+    end
+    if expected_version ~= nil and type(expected_version) ~= 'string' then
+        return nil, "invalid expected_version"
+    end
+    return setmetatable({ artifact = artifact, metadata = metadata, expected_version = expected_version }, UpdaterStageOpts), ""
+end
+
+---@class UpdaterCommitOpts
+---@field mode string|nil
+---@field metadata table|nil
+local UpdaterCommitOpts = {}
+UpdaterCommitOpts.__index = UpdaterCommitOpts
+
+---Create a new UpdaterCommitOpts.
+---@param mode string|nil
+---@param metadata table|nil
+---@return UpdaterCommitOpts?
+---@return string error
+function new.UpdaterCommitOpts(mode, metadata)
+    if mode ~= nil and type(mode) ~= 'string' then
+        return nil, "invalid mode"
+    end
+    if metadata ~= nil and type(metadata) ~= 'table' then
+        return nil, "invalid metadata"
+    end
+    return setmetatable({ mode = mode, metadata = metadata }, UpdaterCommitOpts), ""
+end
+
+---@class UpdaterStatusOpts
+---@field verbose boolean|nil
+local UpdaterStatusOpts = {}
+UpdaterStatusOpts.__index = UpdaterStatusOpts
+
+---Create a new UpdaterStatusOpts.
+---@param verbose boolean|nil
+---@return UpdaterStatusOpts?
+---@return string error
+function new.UpdaterStatusOpts(verbose)
+    if verbose ~= nil and type(verbose) ~= 'boolean' then
+        return nil, "invalid verbose"
+    end
+    return setmetatable({ verbose = verbose }, UpdaterStatusOpts), ""
+end
+
 return {
     ModemGetOpts = ModemGetOpts,
     ModemConnectOpts = ModemConnectOpts,
@@ -276,5 +362,9 @@ return {
     ThermalGetOpts = ThermalGetOpts,
     PlatformGetOpts = PlatformGetOpts,
     PowerActionOpts = PowerActionOpts,
+    UpdaterPrepareOpts = UpdaterPrepareOpts,
+    UpdaterStageOpts = UpdaterStageOpts,
+    UpdaterCommitOpts = UpdaterCommitOpts,
+    UpdaterStatusOpts = UpdaterStatusOpts,
     new = new,
 }

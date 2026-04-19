@@ -260,6 +260,16 @@ function new.UsbCapability(id, control_ch)
     return new.Capability('usb', id, control_ch, { 'enable', 'disable' })
 end
 
+
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.UpdaterCapability(id, control_ch)
+    return new.Capability('updater', id, control_ch, { 'prepare', 'stage', 'commit', 'status' })
+end
+
 ---@class ControlError
 ---@field reason string
 ---@field code integer
