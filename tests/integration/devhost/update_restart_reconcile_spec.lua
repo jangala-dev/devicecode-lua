@@ -134,25 +134,28 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
 
         assert(wait_service_running(caller, { 'svc', 'update', 'status' }))
 
-        local created = assert(caller:call({ 'cmd', 'update', 'job', 'submit' }, {
+        local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
             component = 'cm5',
             artifact_data = 'cm5-firmware-image-v2',
             expected_version = 'cm5-v2',
             metadata = { next_version = 'cm5-v2' },
-            approval = 'manual',
         }, { timeout = 0.5 }))
         local job = created.job
         local artifact_ref = job.artifact.ref
         assert(type(artifact_ref) == 'string')
 
-        assert(job.lifecycle.state == 'queued')
+        assert(job.lifecycle.state == 'created')
+
+        local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+        assert(serr == nil)
+        assert(started.ok == true)
 
         assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
-            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_approval'
+            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
         end, 0.75))
 
-        local approved = assert(caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 }))
-        assert(approved.ok == true)
+        local committed = assert(caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = job.job_id }, { timeout = 1.0 }))
+        assert(committed.ok == true)
         assert(type(artifacts.artifacts[artifact_ref]) == 'table')
 
         local awaiting = wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)

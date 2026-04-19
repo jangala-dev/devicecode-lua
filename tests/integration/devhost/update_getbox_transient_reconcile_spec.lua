@@ -143,12 +143,11 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
 
         assert(wait_service_running(caller, { 'svc', 'update', 'status' }))
 
-        local created, cerr = caller:call({ 'cmd', 'update', 'job', 'submit' }, {
+        local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
             component = 'cm5',
             artifact_data = 'getbox-firmware-image-v2',
             expected_version = 'cm5-v2',
             metadata = { next_version = 'cm5-v2' },
-            approval = 'manual',
         }, { timeout = 0.5 })
         assert(cerr == nil)
         assert(created.ok == true)
@@ -160,15 +159,19 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
         assert(type(artifacts.artifacts[artifact_ref]) == 'table')
         assert(artifacts.artifacts[artifact_ref].durability == 'transient')
 
-        assert(job.lifecycle.state == 'queued')
+        assert(job.lifecycle.state == 'created')
+
+        local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+        assert(serr == nil)
+        assert(started.ok == true)
 
         assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
-            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_approval'
+            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
         end, 0.75))
 
-        local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
+        local committed, perr = caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(perr == nil)
-        assert(approved.ok == true)
+        assert(committed.ok == true)
         
         local awaiting = wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
             return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_return'

@@ -26,13 +26,13 @@ local TERMINAL_STATES = {
     cancelled = true,
     timed_out = true,
     superseded = true,
+    discarded = true,
 }
 
 local PASSIVE_STATES = {
-        queued = true,
-    staged = true,
-    awaiting_approval = true,
-    deferred = true,
+    created = true,
+    queued = true,
+    awaiting_commit = true,
 }
 
 local function retain_best_effort(conn, topic, payload)
@@ -137,6 +137,17 @@ local function copy_job(job)
     return copy_value(job)
 end
 
+local function job_actions(job)
+    local st = job and job.state or nil
+    return {
+        start = (st == 'created'),
+        commit = (st == 'awaiting_commit'),
+        cancel = (st == 'created' or st == 'queued' or st == 'awaiting_commit'),
+        retry = (st == 'failed' or st == 'rolled_back' or st == 'timed_out' or st == 'cancelled'),
+        discard = TERMINAL_STATES[st] == true,
+    }
+end
+
 local function public_job(job)
     local staged_meta = type(job.staged_meta) == 'table' and job.staged_meta or nil
     return {
@@ -152,9 +163,6 @@ local function public_job(job)
             released_at = job.artifact_released_at,
             retention = staged_meta and staged_meta.artifact_retention or nil,
         },
-        policy = {
-            approval = job.approval,
-        },
         lifecycle = {
             state = job.state,
             next_step = job.next_step,
@@ -166,6 +174,7 @@ local function public_job(job)
             pre_commit_incarnation = job.pre_commit_incarnation,
             post_commit_incarnation = job.post_commit_incarnation,
         },
+        actions = job_actions(job),
         result = copy_value(job.result),
         metadata = copy_value(job.metadata),
     }
@@ -413,8 +422,8 @@ function M.start(conn, opts)
                 if job.state == 'preparing' or job.state == 'staging' then
                     if type(job.artifact_ref) == 'string' and job.artifact_ref ~= '' then
                         update_job(job, {
-                            state = 'queued',
-                            next_step = 'run',
+                            state = 'created',
+                            next_step = nil,
                             error = job.error,
                         }, { runtime_merge = { adopted = true } })
                     else
@@ -429,34 +438,44 @@ function M.start(conn, opts)
                         state = 'queued',
                         next_step = 'reconcile',
                     }, { runtime_merge = { adopted = true } })
+                elseif job.state == 'awaiting_approval' or job.state == 'deferred' or job.state == 'staged' then
+                    update_job(job, {
+                        state = 'awaiting_commit',
+                        next_step = 'commit',
+                    }, { runtime_merge = { adopted = true } })
                 end
             end
         end
     end
 
-    local function submit_job(payload)
+    local function build_job_artifact(payload)
         local component = assert(payload.component, 'component required')
-        if not cfg.components[component] then return nil, 'unknown_component' end
+        if not cfg.components[component] then return nil, nil, 'unknown_component' end
 
         local artifact_ref = payload.artifact_ref
         local artifact_meta = nil
         if type(artifact_ref) == 'string' and artifact_ref ~= '' then
             local desc, derr = artifact_describe(artifact_ref)
-            if not desc then return nil, derr end
+            if not desc then return nil, nil, derr end
             artifact_meta = desc
         elseif type(payload.artifact) == 'string' and payload.artifact ~= '' then
             local ref, meta, ierr = artifact_import_path(payload.artifact, component, payload.metadata)
-            if not ref then return nil, ierr end
+            if not ref then return nil, nil, ierr end
             artifact_ref, artifact_meta = ref, meta
         elseif type(payload.artifact_data) == 'string' then
             local ref, meta, ierr = artifact_from_data(payload.artifact_data, component, payload.metadata)
-            if not ref then return nil, ierr end
+            if not ref then return nil, nil, ierr end
             artifact_ref, artifact_meta = ref, meta
         end
-        if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, 'artifact_required' end
+        if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, nil, 'artifact_required' end
+        return artifact_ref, artifact_meta, nil
+    end
 
-        local approval = payload.approval or 'manual'
-        if approval ~= 'manual' and approval ~= 'auto' then return nil, 'invalid_approval' end
+    local function create_job(payload)
+        local component = assert(payload.component, 'component required')
+        if not cfg.components[component] then return nil, 'unknown_component' end
+        local artifact_ref, artifact_meta, aerr = build_job_artifact(payload)
+        if not artifact_ref then return nil, aerr end
 
         local job_id = tostring(uuid.new())
         local job = {
@@ -467,9 +486,8 @@ function M.start(conn, opts)
             artifact_meta = artifact_meta,
             expected_version = payload.expected_version,
             metadata = type(payload.metadata) == 'table' and payload.metadata or nil,
-            approval = approval,
-            state = 'queued',
-            next_step = 'run',
+            state = 'created',
+            next_step = nil,
             created_at = now_ts(),
             updated_at = now_ts(),
             result = nil,
@@ -485,13 +503,22 @@ function M.start(conn, opts)
         store.order[#store.order + 1] = job_id
         sort_store(store)
         save_job(job)
-        if job.approval == 'manual' then
-            -- stage immediately; commit only after explicit approval
-            job.next_step = 'run'
-        end
         publish_job(job)
         publish_summary()
         changed:signal()
+        return job, nil
+    end
+
+    local function clone_job_for_retry(src)
+        local job, err = create_job({
+            component = src.component,
+            offer_id = src.offer_id,
+            artifact_ref = src.artifact_ref,
+            expected_version = src.expected_version,
+            metadata = copy_value(src.metadata),
+        })
+        if not job then return nil, err end
+        update_job(src, { state = 'superseded', next_step = nil, error = nil })
         return job, nil
     end
 
@@ -566,7 +593,6 @@ function M.start(conn, opts)
 
             local function fail_job(reason, state)
                 update_job(job, { state = state or 'failed', error = tostring(reason), next_step = nil })
-                release_artifact_if_present(job)
                 return nil, reason
             end
 
@@ -592,7 +618,6 @@ function M.start(conn, opts)
                                 error = tostring(result.error or rerr or 'failed'),
                                 next_step = nil,
                             })
-                            release_artifact_if_present(job)
                             return nil, rerr or result.error
                         else
                             update_job(job, {
@@ -610,7 +635,6 @@ function M.start(conn, opts)
                             error = tostring(rerr or 'timeout'),
                             next_step = nil,
                         })
-                        release_artifact_if_present(job)
                         return nil, 'timeout'
                     end
                     sleep.sleep(cfg.reconcile.interval_s)
@@ -625,8 +649,8 @@ function M.start(conn, opts)
                 return run_reconcile_loop()
             end
 
-            if job.next_step ~= 'commit_only' then
-                update_job(job, { state = 'preparing', next_step = 'run', error = nil })
+            if job.next_step ~= 'commit' then
+                update_job(job, { state = 'preparing', next_step = 'stage', error = nil })
                 local status_before = backend:status(conn)
                 if status_before and status_before.state and type(status_before.state) == 'table' then
                     job.pre_commit_incarnation = status_before.state.incarnation or status_before.state.generation
@@ -636,19 +660,19 @@ function M.start(conn, opts)
                 local prep, perr = backend:prepare(conn, job)
                 if prep == nil then return fail_job(perr) end
 
-                update_job(job, { state = 'staging', next_step = 'run' })
+                update_job(job, { state = 'staging', next_step = 'stage' })
                 local staged, serr = backend:stage(conn, job)
                 if staged == nil then return fail_job(serr) end
 
-                update_job(job, { state = 'staged', result = staged, staged_meta = staged })
                 if type(staged) == 'table' and staged.artifact_retention == 'release' then
                     release_artifact_if_present(job)
                 end
-
-                if job.approval == 'manual' then
-                    demote_to_passive(job, 'awaiting_approval', 'commit_only')
-                    return true, nil
-                end
+                demote_to_passive(job, 'awaiting_commit', 'commit', {
+                    result = staged,
+                    staged_meta = staged,
+                    error = nil,
+                })
+                return true, nil
             end
 
             update_job(job, { state = 'committing', next_step = 'reconcile' })
@@ -670,10 +694,8 @@ function M.start(conn, opts)
             if current and not is_terminal(current.state) and not PASSIVE_STATES[current.state] then
                 if st == 'failed' then
                     update_job(current, { state = 'failed', error = tostring(primary or 'worker_failed'), next_step = nil })
-                    release_artifact_if_present(current)
                 elseif st == 'cancelled' then
                     update_job(current, { state = 'cancelled', error = tostring(primary or 'worker_cancelled'), next_step = nil })
-                    release_artifact_if_present(current)
                 end
             end
             publish_summary()
@@ -692,7 +714,6 @@ function M.start(conn, opts)
                 local ok, err = start_worker(job)
                 if not ok then
                     update_job(job, { state = 'failed', error = tostring(err), next_step = nil })
-                    release_artifact_if_present(job)
                 end
                 return
             end
@@ -703,10 +724,12 @@ function M.start(conn, opts)
         return public_jobs(store)
     end
 
-    local submit_ep = conn:bind({ 'cmd', 'update', 'job', 'submit' }, { queue_len = 32 })
-    local approve_ep = conn:bind({ 'cmd', 'update', 'job', 'approve' }, { queue_len = 32 })
-    local defer_ep = conn:bind({ 'cmd', 'update', 'job', 'defer' }, { queue_len = 32 })
+    local create_ep = conn:bind({ 'cmd', 'update', 'job', 'create' }, { queue_len = 32 })
+    local start_ep = conn:bind({ 'cmd', 'update', 'job', 'start' }, { queue_len = 32 })
+    local commit_ep = conn:bind({ 'cmd', 'update', 'job', 'commit' }, { queue_len = 32 })
     local cancel_ep = conn:bind({ 'cmd', 'update', 'job', 'cancel' }, { queue_len = 32 })
+    local retry_ep = conn:bind({ 'cmd', 'update', 'job', 'retry' }, { queue_len = 32 })
+    local discard_ep = conn:bind({ 'cmd', 'update', 'job', 'discard' }, { queue_len = 32 })
     local get_ep = conn:bind({ 'cmd', 'update', 'job', 'get' }, { queue_len = 32 })
     local list_ep = conn:bind({ 'cmd', 'update', 'job', 'list' }, { queue_len = 32 })
 
@@ -725,10 +748,12 @@ function M.start(conn, opts)
     while true do
         local which, req, err = fibers.perform(fibers.named_choice({
             cfg = cfg_watch:recv_op():wrap(function(ev) return ev end),
-            submit = submit_ep:recv_op(),
-            approve = approve_ep:recv_op(),
-            defer = defer_ep:recv_op(),
+            create = create_ep:recv_op(),
+            start = start_ep:recv_op(),
+            commit = commit_ep:recv_op(),
             cancel = cancel_ep:recv_op(),
+            retry = retry_ep:recv_op(),
+            discard = discard_ep:recv_op(),
             get = get_ep:recv_op(),
             list = list_ep:recv_op(),
             changed = changed:changed_op(seen):wrap(function(ver) seen = ver; return ver end),
@@ -753,38 +778,37 @@ function M.start(conn, opts)
             local ok, aerr = adopt_repo(new_repo)
             if ok then normalise_adopted_jobs() else svc:obs_log('warn', { what = 'repo_adopt_failed', err = tostring(aerr) }) end
             changed:signal()
-        elseif which == 'submit' then
-            if not req then error('update submit endpoint closed: ' .. tostring(err), 0) end
-            local job, jerr = submit_job(req.payload or {})
+        elseif which == 'create' then
+            if not req then error('update create endpoint closed: ' .. tostring(err), 0) end
+            local job, jerr = create_job(req.payload or {})
             if not job then
                 req:fail(jerr)
             else
                 req:reply({ ok = true, job = public_job(job) })
             end
-        elseif which == 'approve' then
-            if not req then error('update approve endpoint closed: ' .. tostring(err), 0) end
+        elseif which == 'start' then
+            if not req then error('update start endpoint closed: ' .. tostring(err), 0) end
             local payload = req.payload or {}
             local job = store.jobs[payload.job_id]
             if not job then
                 req:fail('unknown_job')
-            elseif job.state ~= 'awaiting_approval' and job.state ~= 'deferred' then
-                req:fail('job_not_awaiting_approval')
+            elseif job.state ~= 'created' then
+                req:fail('job_not_startable')
             else
-                local next_step = job.next_step or 'commit_only'
-                local ok, aerr = set_queued(job, next_step)
+                local ok, aerr = set_queued(job, 'stage')
                 if not ok then req:fail(aerr) else req:reply({ ok = true, job = public_job(job) }) end
             end
-        elseif which == 'defer' then
-            if not req then error('update defer endpoint closed: ' .. tostring(err), 0) end
+        elseif which == 'commit' then
+            if not req then error('update commit endpoint closed: ' .. tostring(err), 0) end
             local payload = req.payload or {}
             local job = store.jobs[payload.job_id]
             if not job then
                 req:fail('unknown_job')
-            elseif job.state ~= 'awaiting_approval' and job.state ~= 'queued' and job.state ~= 'staged' then
-                req:fail('job_not_deferrable')
+            elseif job.state ~= 'awaiting_commit' then
+                req:fail('job_not_committable')
             else
-                update_job(job, { state = 'deferred' })
-                req:reply({ ok = true, job = public_job(job) })
+                local ok, aerr = set_queued(job, 'commit')
+                if not ok then req:fail(aerr) else req:reply({ ok = true, job = public_job(job) }) end
             end
         elseif which == 'cancel' then
             if not req then error('update cancel endpoint closed: ' .. tostring(err), 0) end
@@ -796,10 +820,45 @@ function M.start(conn, opts)
                 req:fail('job_active')
             elseif TERMINAL_STATES[job.state] then
                 req:fail('job_terminal')
+            elseif job.state ~= 'created' and job.state ~= 'queued' and job.state ~= 'awaiting_commit' then
+                req:fail('job_not_cancellable')
             else
                 update_job(job, { state = 'cancelled', next_step = nil, error = nil })
-                release_artifact_if_present(job)
                 req:reply({ ok = true, job = public_job(job) })
+            end
+        elseif which == 'retry' then
+            if not req then error('update retry endpoint closed: ' .. tostring(err), 0) end
+            local payload = req.payload or {}
+            local job = store.jobs[payload.job_id]
+            if not job then
+                req:fail('unknown_job')
+            elseif not (job.state == 'failed' or job.state == 'rolled_back' or job.state == 'timed_out' or job.state == 'cancelled') then
+                req:fail('job_not_retryable')
+            else
+                local new_job, rerr = clone_job_for_retry(job)
+                if not new_job then req:fail(rerr) else req:reply({ ok = true, job = public_job(new_job) }) end
+            end
+        elseif which == 'discard' then
+            if not req then error('update discard endpoint closed: ' .. tostring(err), 0) end
+            local payload = req.payload or {}
+            local job = store.jobs[payload.job_id]
+            if not job then
+                req:fail('unknown_job')
+            elseif not is_terminal(job.state) then
+                req:fail('job_not_discardable')
+            else
+                if type(job.artifact_ref) == 'string' and job.artifact_ref ~= '' then
+                    release_artifact_if_present(job)
+                end
+                local _ = repo:delete_job(job.job_id)
+                store.jobs[job.job_id] = nil
+                for i = #store.order, 1, -1 do
+                    if store.order[i] == job.job_id then table.remove(store.order, i) break end
+                end
+                safe.pcall(function() conn:unretain(job_topic(job.job_id)) end)
+                publish_summary()
+                changed:signal()
+                req:reply({ ok = true })
             end
         elseif which == 'get' then
             if not req then error('update get endpoint closed: ' .. tostring(err), 0) end

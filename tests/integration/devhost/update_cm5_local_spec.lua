@@ -135,12 +135,11 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
 
         publish_status()
 
-        local created, cerr = caller:call({ 'cmd', 'update', 'job', 'submit' }, {
+        local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
             component = 'cm5',
             artifact_data = 'cm5-firmware-image',
             expected_version = 'cm5-v1',
             metadata = { next_version = 'cm5-v1' },
-            approval = 'manual',
         }, { timeout = 0.5 })
         assert(cerr == nil)
         assert(created.ok == true)
@@ -148,16 +147,20 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         assert(type(job.artifact.ref) == 'string')
         assert(type(artifacts.artifacts[job.artifact.ref]) == 'table')
 
-        assert(job.lifecycle.state == 'queued')
+        assert(job.lifecycle.state == 'created')
         assert(type(job.artifact.ref) == 'string')
 
+        local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+        assert(serr == nil)
+        assert(started.ok == true)
+
         assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
-            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_approval'
+            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
         end, 0.75))
 
-        local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
+        local committed, perr = caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(perr == nil)
-        assert(approved.ok == true)
+        assert(committed.ok == true)
 
         assert(probe.wait_until(function()
             local ok, payload = safe.pcall(function()

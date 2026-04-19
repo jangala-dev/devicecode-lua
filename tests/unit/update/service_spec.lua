@@ -70,7 +70,7 @@ local function bind_device_double(scope, device_conn, versions, opts)
   end)
 end
 
-function T.update_service_submits_stages_approves_and_reconciles_job_via_device_proxy()
+function T.update_service_creates_starts_commits_and_reconciles_job_via_device_proxy()
   runfibers.run(function(scope)
     local orig_sleep = sleep_mod.sleep
     sleep_mod.sleep = function(dt) return orig_sleep(math.min(dt, 0.01)) end
@@ -96,19 +96,22 @@ function T.update_service_submits_stages_approves_and_reconciles_job_via_device_
 
     wait_service_running(caller, 'update')
 
-    local submitted, cerr = caller:call({ 'cmd', 'update', 'job', 'submit' }, {
+    local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
       component = 'mcu',
       artifact_data = 'mcu-image-v1',
       expected_version = 'mcu-v1',
       metadata = { channel = 'test' },
-      approval = 'manual',
     }, { timeout = 0.5 })
     assert(cerr == nil)
-    assert(submitted.ok == true)
-    local job = submitted.job
+    assert(created.ok == true)
+    local job = created.job
     assert(type(job.job_id) == 'string')
     assert(job.component == 'mcu')
-    assert(job.lifecycle.state == 'queued')
+
+    local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+    assert(serr == nil)
+    assert(started.ok == true)
+    assert(job.lifecycle.state == 'created')
     assert(type(job.artifact.ref) == 'string')
 
     assert(probe.wait_until(function()
@@ -116,15 +119,15 @@ function T.update_service_submits_stages_approves_and_reconciles_job_via_device_
         return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
       end)
       return okp and type(payload) == 'table' and type(payload.job) == 'table'
-        and payload.job.lifecycle.state == 'awaiting_approval'
+        and payload.job.lifecycle.state == 'awaiting_commit'
         and payload.job.artifact.ref == nil and payload.job.artifact.released_at ~= nil
     end, { timeout = 0.75, interval = 0.01 }))
     assert(next(artifacts.artifacts) == nil)
 
-    local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
+    local committed, perr = caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = job.job_id }, { timeout = 1.0 })
     assert(perr == nil)
-    assert(approved.ok == true)
-    assert(approved.job.lifecycle.state == 'queued')
+    assert(committed.ok == true)
+    assert(committed.job.lifecycle.state == 'queued')
 
     assert(probe.wait_until(function()
       local okp, payload = safe.pcall(function()
@@ -145,7 +148,7 @@ function T.update_service_submits_stages_approves_and_reconciles_job_via_device_
   end, { timeout = 3.0 })
 end
 
-function T.update_service_defers_manual_job_after_staging()
+function T.update_service_cancels_staged_job_before_commit()
   runfibers.run(function(scope)
     local bus = busmod.new()
     local caller = bus:connect()
@@ -160,23 +163,27 @@ function T.update_service_defers_manual_job_after_staging()
 
     wait_service_running(caller, 'update')
 
-    local submitted, cerr = caller:call({ 'cmd', 'update', 'job', 'submit' }, {
-      component = 'mcu', artifact_data = 'mcu-image', approval = 'manual'
+    local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+      component = 'mcu', artifact_data = 'mcu-image'
     }, { timeout = 0.5 })
     assert(cerr == nil)
-    local job = submitted.job
+    local job = created.job
+
+    local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+    assert(serr == nil)
+    assert(started.ok == true)
 
     assert(probe.wait_until(function()
       local okp, state = safe.pcall(function()
         return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
       end)
-      return okp and type(state) == 'table' and type(state.job) == 'table' and state.job.lifecycle.state == 'awaiting_approval'
+      return okp and type(state) == 'table' and type(state.job) == 'table' and state.job.lifecycle.state == 'awaiting_commit'
     end, { timeout = 0.75, interval = 0.01 }))
 
-    local deferred, derr = caller:call({ 'cmd', 'update', 'job', 'defer' }, { job_id = job.job_id }, { timeout = 0.5 })
+    local cancelled, derr = caller:call({ 'cmd', 'update', 'job', 'cancel' }, { job_id = job.job_id }, { timeout = 0.5 })
     assert(derr == nil)
-    assert(deferred.ok == true)
-    assert(deferred.job.lifecycle.state == 'deferred')
+    assert(cancelled.ok == true)
+    assert(cancelled.job.lifecycle.state == 'cancelled')
   end, { timeout = 3.0 })
 end
 
@@ -208,15 +215,15 @@ function T.update_service_applies_per_component_artifact_storage_policy()
     wait_service_running(caller, 'update')
     sleep_mod.sleep(0.05)
 
-    local cm5_submitted = assert(caller:call({ 'cmd', 'update', 'job', 'submit' }, {
+    local cm5_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
       component = 'cm5', artifact_data = 'cm5-image'
     }, { timeout = 0.5 }))
-    local mcu_submitted = assert(caller:call({ 'cmd', 'update', 'job', 'submit' }, {
+    local mcu_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
       component = 'mcu', artifact_data = 'mcu-image'
     }, { timeout = 0.5 }))
 
-    local cm5_ref = cm5_submitted.job.artifact.ref
-    local mcu_ref = mcu_submitted.job.artifact.ref
+    local cm5_ref = cm5_created.job.artifact.ref
+    local mcu_ref = mcu_created.job.artifact.ref
     assert(type(cm5_ref) == 'string' and type(mcu_ref) == 'string')
     assert(type(artifacts.artifacts[cm5_ref]) == 'table')
     assert(type(artifacts.artifacts[mcu_ref]) == 'table')
@@ -224,8 +231,8 @@ function T.update_service_applies_per_component_artifact_storage_policy()
     assert(artifacts.artifacts[mcu_ref].durability == 'transient')
 
     assert(type(control.namespaces['update/jobs']) == 'table')
-    assert(type(control.namespaces['update/jobs'][cm5_submitted.job.job_id]) == 'table')
-    assert(type(control.namespaces['update/jobs'][mcu_submitted.job.job_id]) == 'table')
+    assert(type(control.namespaces['update/jobs'][cm5_created.job.job_id]) == 'table')
+    assert(type(control.namespaces['update/jobs'][mcu_created.job.job_id]) == 'table')
   end, { timeout = 3.0 })
 end
 
@@ -250,14 +257,24 @@ function T.update_service_rejects_second_active_job_globally()
     assert(ok, tostring(err))
     wait_service_running(caller, 'update')
 
-    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'submit' }, { component = 'mcu', artifact_data = 'a', approval = 'auto' }, { timeout = 0.5 })).job
-    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'submit' }, { component = 'cm5', artifact_data = 'b', approval = 'auto' }, { timeout = 0.5 })).job
-    assert(j1.lifecycle.state == 'queued')
-    local denied, derr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = j2.job_id }, { timeout = 0.5 })
+    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'mcu', artifact_data = 'a' }, { timeout = 0.5 })).job
+    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'cm5', artifact_data = 'b' }, { timeout = 0.5 })).job
+    assert(j1.lifecycle.state == 'created')
+    assert(j2.lifecycle.state == 'created')
+
+    local s1, s1err = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = j1.job_id }, { timeout = 0.5 })
+    assert(s1err == nil)
+    assert(s1.ok == true)
+
+    local s2, s2err = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = j2.job_id }, { timeout = 0.5 })
+    assert(s2 == nil)
+    assert(s2err == 'busy_global')
+
+    local denied, derr = caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = j2.job_id }, { timeout = 0.5 })
     assert(denied == nil)
-    assert(derr == 'job_not_awaiting_approval')
+    assert(derr == 'job_not_committable')
     local got2 = assert(caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = j2.job_id }, { timeout = 0.5 }))
-    assert(got2.job.lifecycle.state == 'queued' or got2.job.lifecycle.state == 'failed')
+    assert(got2.job.lifecycle.state == 'created' or got2.job.lifecycle.state == 'failed')
   end, { timeout = 3.0 })
 end
 
