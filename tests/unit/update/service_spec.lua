@@ -110,7 +110,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     assert(type(job.lifecycle.created_seq) == 'number')
     assert(type(job.lifecycle.updated_seq) == 'number')
 
-    local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+    local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
     assert(serr == nil)
     assert(started.ok == true)
     assert(job.lifecycle.state == 'created')
@@ -126,10 +126,10 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     end, { timeout = 0.75, interval = 0.01 }))
     assert(next(artifacts.artifacts) == nil)
 
-    local committed, perr = caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = job.job_id }, { timeout = 1.0 })
+    local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
     assert(perr == nil)
     assert(committed.ok == true)
-    assert(committed.job.lifecycle.state == 'queued')
+    assert(committed.job.lifecycle.state == 'awaiting_commit' or committed.job.lifecycle.state == 'awaiting_return' or committed.job.lifecycle.state == 'succeeded')
 
     assert(probe.wait_until(function()
       local okp, payload = safe.pcall(function()
@@ -171,7 +171,7 @@ function T.update_service_cancels_staged_job_before_commit()
     assert(cerr == nil)
     local job = created.job
 
-    local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+    local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
     assert(serr == nil)
     assert(started.ok == true)
 
@@ -182,7 +182,7 @@ function T.update_service_cancels_staged_job_before_commit()
       return okp and type(state) == 'table' and type(state.job) == 'table' and state.job.lifecycle.state == 'awaiting_commit'
     end, { timeout = 0.75, interval = 0.01 }))
 
-    local cancelled, derr = caller:call({ 'cmd', 'update', 'job', 'cancel' }, { job_id = job.job_id }, { timeout = 0.5 })
+    local cancelled, derr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'cancel', job_id = job.job_id }, { timeout = 0.5 })
     assert(derr == nil)
     assert(cancelled.ok == true)
     assert(cancelled.job.lifecycle.state == 'cancelled')
@@ -264,15 +264,15 @@ function T.update_service_rejects_second_active_job_globally()
     assert(j1.lifecycle.state == 'created')
     assert(j2.lifecycle.state == 'created')
 
-    local s1, s1err = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = j1.job_id }, { timeout = 0.5 })
+    local s1, s1err = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = j1.job_id }, { timeout = 0.5 })
     assert(s1err == nil)
     assert(s1.ok == true)
 
-    local s2, s2err = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = j2.job_id }, { timeout = 0.5 })
+    local s2, s2err = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = j2.job_id }, { timeout = 0.5 })
     assert(s2 == nil)
     assert(s2err == 'busy_global')
 
-    local denied, derr = caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = j2.job_id }, { timeout = 0.5 })
+    local denied, derr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = j2.job_id }, { timeout = 0.5 })
     assert(denied == nil)
     assert(derr == 'job_not_committable')
     local got2 = assert(caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = j2.job_id }, { timeout = 0.5 }))

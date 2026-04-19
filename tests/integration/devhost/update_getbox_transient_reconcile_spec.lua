@@ -161,7 +161,7 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
 
         assert(job.lifecycle.state == 'created')
 
-        local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+        local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
         assert(serr == nil)
         assert(started.ok == true)
 
@@ -169,7 +169,7 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
             return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
         end, 0.75))
 
-        local committed, perr = caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = job.job_id }, { timeout = 1.0 })
+        local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
         assert(perr == nil)
         assert(committed.ok == true)
         

@@ -207,7 +207,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		assert(job.lifecycle.state == 'created')
 		assert(type(job.artifact.ref) == 'string')
 
-		local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+		local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
 		assert(serr == nil)
 		assert(started.ok == true)
 
@@ -217,7 +217,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		end, 0.75))
 		assert(next(artifacts.artifacts) == nil)
 
-		local committed, perr = caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = job.job_id }, { timeout = 1.0 })
+		local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
 		assert(perr == nil)
 		assert(committed.ok == true)
 

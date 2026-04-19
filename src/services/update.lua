@@ -14,9 +14,7 @@ local M = {}
 local SCHEMA = 'devicecode.config/update/1'
 
 local ACTIVE_STATES = {
-    preparing = true,
     staging = true,
-    committing = true,
     awaiting_return = true,
 }
 
@@ -32,7 +30,6 @@ local TERMINAL_STATES = {
 
 local PASSIVE_STATES = {
     created = true,
-    queued = true,
     awaiting_commit = true,
 }
 
@@ -143,7 +140,7 @@ local function job_actions(job)
     return {
         start = (st == 'created'),
         commit = (st == 'awaiting_commit'),
-        cancel = (st == 'created' or st == 'queued' or st == 'awaiting_commit'),
+        cancel = (st == 'created' or st == 'awaiting_commit'),
         retry = (st == 'failed' or st == 'rolled_back' or st == 'timed_out' or st == 'cancelled'),
         discard = TERMINAL_STATES[st] == true,
     }
@@ -169,8 +166,8 @@ local function public_job(job)
             next_step = job.next_step,
             created_seq = job.created_seq,
             updated_seq = job.updated_seq,
-            created_at = job.created_at,
-            updated_at = job.updated_at,
+            created_mono = job.created_mono,
+            updated_mono = job.updated_mono,
             error = job.error,
         },
         observation = {
@@ -195,8 +192,8 @@ end
 local function sort_store(store)
     table.sort(store.order, function(a, b)
         local ja, jb = store.jobs[a], store.jobs[b]
-        local ta = (ja and (ja.created_seq or ja.created_at)) or 0
-        local tb = (jb and (jb.created_seq or jb.created_at)) or 0
+        local ta = (ja and (ja.created_seq or ja.created_mono)) or 0
+        local tb = (jb and (jb.created_seq or jb.created_mono)) or 0
         if ta == tb then return tostring(a) < tostring(b) end
         return ta < tb
     end)
@@ -413,7 +410,7 @@ function M.start(conn, opts)
             job.runtime.phase_mono = svc:now()
         end
         job.updated_seq = next_seq()
-        job.updated_at = svc:now()
+        job.updated_mono = svc:now()
         local ok, err = save_job(job)
         if ok then mark_job_dirty(job.job_id) end
         if not opts_.no_signal then changed:signal() end
@@ -431,7 +428,7 @@ function M.start(conn, opts)
         job.artifact_ref = nil
         job.artifact_released_at = svc:now()
         job.updated_seq = next_seq()
-        job.updated_at = svc:now()
+        job.updated_mono = svc:now()
         save_job(job)
         mark_job_dirty(job.job_id)
         changed:signal()
@@ -469,12 +466,12 @@ function M.start(conn, opts)
         return true, nil
     end
 
-    local function normalise_adopted_jobs()
+    local function adopt_persisted_jobs()
         for _, id in ipairs(store.order) do
             local job = store.jobs[id]
             if job then
                 job.runtime = type(job.runtime) == 'table' and job.runtime or {}
-                if job.state == 'preparing' or job.state == 'staging' then
+                if job.state == 'staging' then
                     if type(job.artifact_ref) == 'string' and job.artifact_ref ~= '' then
                         update_job(job, {
                             state = 'created',
@@ -488,9 +485,9 @@ function M.start(conn, opts)
                             error = 'interrupted_before_stage',
                         }, { runtime_merge = { adopted = true } })
                     end
-                elseif job.state == 'committing' or job.state == 'awaiting_return' then
+                elseif job.state == 'awaiting_return' then
                     update_job(job, {
-                        state = 'queued',
+                        state = 'awaiting_return',
                         next_step = 'reconcile',
                     }, { runtime_merge = { adopted = true } })
                 elseif job.state == 'awaiting_approval' or job.state == 'deferred' or job.state == 'staged' then
@@ -533,6 +530,7 @@ function M.start(conn, opts)
         if not artifact_ref then return nil, aerr end
 
         local created_seq = next_seq()
+        local now_mono = svc:now()
         local job_id = tostring(uuid.new())
         local job = {
             job_id = job_id,
@@ -546,8 +544,8 @@ function M.start(conn, opts)
             next_step = nil,
             created_seq = created_seq,
             updated_seq = created_seq,
-            created_at = svc:now(),
-            updated_at = svc:now(),
+            created_mono = now_mono,
+            updated_mono = now_mono,
             result = nil,
             error = nil,
             runtime = {
@@ -556,7 +554,7 @@ function M.start(conn, opts)
                 active_lock = nil,
                 last_progress = nil,
                 phase_boot_id = boot_id,
-                phase_mono = svc:now(),
+                phase_mono = now_mono,
             },
         }
         store.jobs[job_id] = job
@@ -585,20 +583,9 @@ function M.start(conn, opts)
         return locks.global ~= nil
     end
 
-    local function can_queue(job)
+    local function can_activate(job)
         if active_job and active_job.job_id == job.job_id then return nil, 'job_already_active' end
         if has_active_global() then return nil, 'busy_global' end
-        return true, nil
-    end
-
-    local function set_queued(job, next_step)
-        local ok, err = can_queue(job)
-        if not ok then return nil, err end
-        update_job(job, {
-            state = 'queued',
-            next_step = next_step,
-            error = nil,
-        })
         return true, nil
     end
 
@@ -607,7 +594,7 @@ function M.start(conn, opts)
         if job and type(job.runtime) == 'table' then
             job.runtime.active_lock = nil
             job.updated_seq = next_seq()
-            job.updated_at = svc:now()
+            job.updated_mono = svc:now()
             save_job(job)
             mark_job_dirty(job.job_id)
         end
@@ -624,7 +611,7 @@ function M.start(conn, opts)
         job.runtime = type(job.runtime) == 'table' and job.runtime or {}
         job.runtime.active_lock = 'global:' .. tostring(job.job_id)
         job.updated_seq = next_seq()
-        job.updated_at = svc:now()
+        job.updated_mono = svc:now()
         save_job(job)
         mark_job_dirty(job.job_id)
     end
@@ -720,19 +707,18 @@ function M.start(conn, opts)
             end
 
             if job.next_step ~= 'commit' then
-                update_job(job, { state = 'preparing', next_step = 'stage', error = nil })
+                update_job(job, { state = 'staging', next_step = 'stage', error = nil })
                 local status_before = backend:status(conn)
                 if status_before and status_before.state and type(status_before.state) == 'table' then
                     job.pre_commit_incarnation = status_before.state.incarnation or status_before.state.generation
                     job.updated_seq = next_seq()
-                    job.updated_at = svc:now()
+                    job.updated_mono = svc:now()
                     save_job(job)
                     mark_job_dirty(job.job_id)
                 end
                 local prep, perr = backend:prepare(conn, job)
                 if prep == nil then return fail_job(perr) end
 
-                update_job(job, { state = 'staging', next_step = 'stage' })
                 local staged, serr = backend:stage(conn, job)
                 if staged == nil then return fail_job(serr) end
 
@@ -747,7 +733,6 @@ function M.start(conn, opts)
                 return true, nil
             end
 
-            update_job(job, { state = 'committing', next_step = 'reconcile' })
             local committed, cerr = backend:commit(conn, job)
             if committed == nil then return fail_job(cerr) end
             update_job(job, { state = 'awaiting_return', result = committed, error = nil, next_step = 'reconcile' }, { runtime_merge = {
@@ -766,36 +751,29 @@ function M.start(conn, opts)
         return true, nil
     end
 
-    local function maybe_start_runnable_jobs()
-        if has_active_global() then return end
-        for _, id in ipairs(store.order) do
-            local job = store.jobs[id]
-            if job and job.state == 'queued' then
-                local ok, err = start_worker(job)
-                if not ok then
-                    update_job(job, { state = 'failed', error = tostring(err), next_step = nil })
-                end
-                return
-            end
-        end
-    end
-
     local function list_jobs_payload()
         return public_jobs(store)
     end
 
+    local function select_resumable_job()
+        if active_job or has_active_global() then return nil end
+        for _, id in ipairs(store.order) do
+            local job = store.jobs[id]
+            if job and job.state == 'awaiting_return' and job.next_step == 'reconcile' then
+                return job
+            end
+        end
+        return nil
+    end
+
     local create_ep = conn:bind({ 'cmd', 'update', 'job', 'create' }, { queue_len = 32 })
-    local start_ep = conn:bind({ 'cmd', 'update', 'job', 'start' }, { queue_len = 32 })
-    local commit_ep = conn:bind({ 'cmd', 'update', 'job', 'commit' }, { queue_len = 32 })
-    local cancel_ep = conn:bind({ 'cmd', 'update', 'job', 'cancel' }, { queue_len = 32 })
-    local retry_ep = conn:bind({ 'cmd', 'update', 'job', 'retry' }, { queue_len = 32 })
-    local discard_ep = conn:bind({ 'cmd', 'update', 'job', 'discard' }, { queue_len = 32 })
+    local do_ep = conn:bind({ 'cmd', 'update', 'job', 'do' }, { queue_len = 32 })
     local get_ep = conn:bind({ 'cmd', 'update', 'job', 'get' }, { queue_len = 32 })
     local list_ep = conn:bind({ 'cmd', 'update', 'job', 'list' }, { queue_len = 32 })
 
     rebuild_backends()
     adopt_repo(repo)
-    normalise_adopted_jobs()
+    adopt_persisted_jobs()
     flush_publications()
     changed:signal()
     svc:status('running')
@@ -805,11 +783,7 @@ function M.start(conn, opts)
         local ops = {
             cfg = cfg_watch:recv_op():wrap(function(ev) return ev end),
             create = create_ep:recv_op(),
-            start = start_ep:recv_op(),
-            commit = commit_ep:recv_op(),
-            cancel = cancel_ep:recv_op(),
-            retry = retry_ep:recv_op(),
-            discard = discard_ep:recv_op(),
+            job_do = do_ep:recv_op(),
             get = get_ep:recv_op(),
             list = list_ep:recv_op(),
             changed = changed:changed_op(seen):wrap(function(ver) seen = ver; return ver end),
@@ -824,8 +798,13 @@ function M.start(conn, opts)
 
         if which == 'changed' then
             flush_publications()
-            maybe_start_runnable_jobs()
-            flush_publications()
+            local job = select_resumable_job()
+            if job then
+                local ok, serr = start_worker(job)
+                if not ok then
+                    svc:obs_log('warn', { what = 'adopted_job_resume_failed', job_id = job.job_id, err = tostring(serr) })
+                end
+            end
         elseif which == 'active_join' then
             local ev = req
             local current = ev and store.jobs[ev.job_id] or nil
@@ -838,109 +817,130 @@ function M.start(conn, opts)
                     update_job(current, { state = 'cancelled', error = tostring(ev.primary or 'worker_cancelled'), next_step = nil })
                 end
             end
-            maybe_start_runnable_jobs()
             flush_publications()
+            local job = select_resumable_job()
+            if job then
+                local ok, serr = start_worker(job)
+                if not ok then
+                    svc:obs_log('warn', { what = 'adopted_job_resume_failed', job_id = job.job_id, err = tostring(serr) })
+                end
+            end
         elseif which == 'cfg' then
             local ev = req
             if not ev then
                 svc:status('failed', { reason = tostring(err or 'cfg_watch_closed') })
                 error('update cfg watch closed: ' .. tostring(err), 0)
             end
+
+            local old_ns = cfg.jobs_namespace
+
             if ev.op == 'retain' then
                 cfg = merge_cfg(ev.payload)
             elseif ev.op == 'unretain' then
                 cfg = default_cfg()
             end
-            local new_repo = job_store.open(store_cap, { namespace = cfg.jobs_namespace })
+
             rebuild_backends()
-            local ok, aerr = adopt_repo(new_repo)
-            if ok then normalise_adopted_jobs() else svc:obs_log('warn', { what = 'repo_adopt_failed', err = tostring(aerr) }) end
+
+            local new_ns = cfg.jobs_namespace
+            if new_ns ~= old_ns then
+                if active_job or has_active_global() then
+                    svc:obs_log('warn', {
+                        what = 'jobs_namespace_change_ignored_while_active',
+                        old = tostring(old_ns),
+                        new = tostring(new_ns),
+                    })
+                    cfg.jobs_namespace = old_ns
+                else
+                    local new_repo = job_store.open(store_cap, { namespace = new_ns })
+                    local ok, aerr = adopt_repo(new_repo)
+                    if ok then
+                        adopt_persisted_jobs()
+                    else
+                        svc:obs_log('warn', { what = 'repo_adopt_failed', err = tostring(aerr) })
+                    end
+                end
+            end
+
             changed:signal()
-            flush_publications()
         elseif which == 'create' then
             if not req then error('update create endpoint closed: ' .. tostring(err), 0) end
             local job, jerr = create_job(req.payload or {})
             if not job then
                 req:fail(jerr)
             else
-                flush_publications()
                 req:reply({ ok = true, job = public_job(job) })
             end
-        elseif which == 'start' then
-            if not req then error('update start endpoint closed: ' .. tostring(err), 0) end
+        elseif which == 'job_do' then
+            if not req then error('update job do endpoint closed: ' .. tostring(err), 0) end
             local payload = req.payload or {}
+            local op = payload.op
             local job = store.jobs[payload.job_id]
-            if not job then
+            if type(op) ~= 'string' or op == '' then
+                req:fail('invalid_op')
+            elseif not job then
                 req:fail('unknown_job')
-            elseif job.state ~= 'created' then
-                req:fail('job_not_startable')
-            else
-                local ok, aerr = set_queued(job, 'stage')
-                if not ok then req:fail(aerr) else flush_publications(); req:reply({ ok = true, job = public_job(job) }) end
-            end
-        elseif which == 'commit' then
-            if not req then error('update commit endpoint closed: ' .. tostring(err), 0) end
-            local payload = req.payload or {}
-            local job = store.jobs[payload.job_id]
-            if not job then
-                req:fail('unknown_job')
-            elseif job.state ~= 'awaiting_commit' then
-                req:fail('job_not_committable')
-            else
-                local ok, aerr = set_queued(job, 'commit')
-                if not ok then req:fail(aerr) else flush_publications(); req:reply({ ok = true, job = public_job(job) }) end
-            end
-        elseif which == 'cancel' then
-            if not req then error('update cancel endpoint closed: ' .. tostring(err), 0) end
-            local payload = req.payload or {}
-            local job = store.jobs[payload.job_id]
-            if not job then
-                req:fail('unknown_job')
-            elseif ACTIVE_STATES[job.state] then
-                req:fail('job_active')
-            elseif TERMINAL_STATES[job.state] then
-                req:fail('job_terminal')
-            elseif job.state ~= 'created' and job.state ~= 'queued' and job.state ~= 'awaiting_commit' then
-                req:fail('job_not_cancellable')
-            else
-                update_job(job, { state = 'cancelled', next_step = nil, error = nil })
-                flush_publications()
-                req:reply({ ok = true, job = public_job(job) })
-            end
-        elseif which == 'retry' then
-            if not req then error('update retry endpoint closed: ' .. tostring(err), 0) end
-            local payload = req.payload or {}
-            local job = store.jobs[payload.job_id]
-            if not job then
-                req:fail('unknown_job')
-            elseif not (job.state == 'failed' or job.state == 'rolled_back' or job.state == 'timed_out' or job.state == 'cancelled') then
-                req:fail('job_not_retryable')
-            else
-                local new_job, rerr = clone_job_for_retry(job)
-                if not new_job then req:fail(rerr) else flush_publications(); req:reply({ ok = true, job = public_job(new_job) }) end
-            end
-        elseif which == 'discard' then
-            if not req then error('update discard endpoint closed: ' .. tostring(err), 0) end
-            local payload = req.payload or {}
-            local job = store.jobs[payload.job_id]
-            if not job then
-                req:fail('unknown_job')
-            elseif not is_terminal(job.state) then
-                req:fail('job_not_discardable')
-            else
-                if type(job.artifact_ref) == 'string' and job.artifact_ref ~= '' then
-                    release_artifact_if_present(job)
+            elseif op == 'start' then
+                if job.state ~= 'created' then
+                    req:fail('job_not_startable')
+                else
+                    local ok, aerr = can_activate(job)
+                    if not ok then
+                        req:fail(aerr)
+                    else
+                        local wok, werr = start_worker(job)
+                        if not wok then req:fail(tostring(werr)) else req:reply({ ok = true, job = public_job(job) }) end
+                    end
                 end
-                local _ = repo:delete_job(job.job_id)
-                store.jobs[job.job_id] = nil
-                for i = #store.order, 1, -1 do
-                    if store.order[i] == job.job_id then table.remove(store.order, i) break end
+            elseif op == 'commit' then
+                if job.state ~= 'awaiting_commit' then
+                    req:fail('job_not_committable')
+                else
+                    local ok, aerr = can_activate(job)
+                    if not ok then
+                        req:fail(aerr)
+                    else
+                        local wok, werr = start_worker(job)
+                        if not wok then req:fail(tostring(werr)) else req:reply({ ok = true, job = public_job(job) }) end
+                    end
                 end
-                safe.pcall(function() conn:unretain(job_topic(job.job_id)) end)
-                summary_dirty = true
-                changed:signal()
-                flush_publications()
-                req:reply({ ok = true })
+            elseif op == 'cancel' then
+                if ACTIVE_STATES[job.state] then
+                    req:fail('job_active')
+                elseif TERMINAL_STATES[job.state] then
+                    req:fail('job_terminal')
+                elseif job.state ~= 'created' and job.state ~= 'awaiting_commit' then
+                    req:fail('job_not_cancellable')
+                else
+                    update_job(job, { state = 'cancelled', next_step = nil, error = nil })
+                    req:reply({ ok = true, job = public_job(job) })
+                end
+            elseif op == 'retry' then
+                if not (job.state == 'failed' or job.state == 'rolled_back' or job.state == 'timed_out' or job.state == 'cancelled') then
+                    req:fail('job_not_retryable')
+                else
+                    local new_job, rerr = clone_job_for_retry(job)
+                    if not new_job then req:fail(rerr) else req:reply({ ok = true, job = public_job(new_job) }) end
+                end
+            elseif op == 'discard' then
+                if not is_terminal(job.state) then
+                    req:fail('job_not_discardable')
+                else
+                    if type(job.artifact_ref) == 'string' and job.artifact_ref ~= '' then
+                        release_artifact_if_present(job)
+                    end
+                    local _ = repo:delete_job(job.job_id)
+                    store.jobs[job.job_id] = nil
+                    for i = #store.order, 1, -1 do
+                        if store.order[i] == job.job_id then table.remove(store.order, i) break end
+                    end
+                    safe.pcall(function() conn:unretain(job_topic(job.job_id)) end)
+                    summary_dirty = true
+                    changed:signal()
+                    req:reply({ ok = true })
+                end
+            else
+                req:fail('invalid_op')
             end
         elseif which == 'get' then
             if not req then error('update get endpoint closed: ' .. tostring(err), 0) end

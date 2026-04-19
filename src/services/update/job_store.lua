@@ -13,8 +13,8 @@ local function sorted_order(jobs)
     for id in pairs(jobs) do ids[#ids + 1] = id end
     table.sort(ids, function(a, b)
         local ja, jb = jobs[a], jobs[b]
-        local ta = (ja and (ja.created_seq or ja.created_at)) or 0
-        local tb = (jb and (jb.created_seq or jb.created_at)) or 0
+        local ta = (ja and (ja.created_seq or ja.created_mono)) or 0
+        local tb = (jb and (jb.created_seq or jb.created_mono)) or 0
         if ta == tb then return tostring(a) < tostring(b) end
         return ta < tb
     end)

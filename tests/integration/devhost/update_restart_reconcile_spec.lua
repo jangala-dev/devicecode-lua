@@ -146,7 +146,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
 
         assert(job.lifecycle.state == 'created')
 
-        local started, serr = caller:call({ 'cmd', 'update', 'job', 'start' }, { job_id = job.job_id }, { timeout = 0.5 })
+        local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
         assert(serr == nil)
         assert(started.ok == true)
 
@@ -154,7 +154,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
             return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
         end, 0.75))
 
-        local committed = assert(caller:call({ 'cmd', 'update', 'job', 'commit' }, { job_id = job.job_id }, { timeout = 1.0 }))
+        local committed = assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 }))
         assert(committed.ok == true)
         assert(type(artifacts.artifacts[artifact_ref]) == 'table')
 
