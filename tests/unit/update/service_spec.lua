@@ -91,14 +91,22 @@ function T.update_service_creates_applies_and_reconciles_job_via_device_proxy()
     assert(aerr == nil)
     assert(applied.ok == true)
     assert(type(applied.job) == 'table')
-    assert(applied.job.state == 'awaiting_approval')
-    assert(applied.job.artifact_ref == nil)
-    assert(applied.job.artifact_released_at ~= nil)
+    assert(applied.job.state == 'queued')
+    assert(type(applied.job.artifact_ref) == 'string')
+
+    assert(probe.wait_until(function()
+      local okp, state = safe.pcall(function()
+        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
+      end)
+      return okp and type(state) == 'table' and type(state.job) == 'table' and state.job.state == 'awaiting_approval'
+        and state.job.artifact_ref == nil and state.job.artifact_released_at ~= nil
+    end, { timeout = 0.75, interval = 0.01 }))
     assert(next(artifacts.artifacts) == nil)
 
     local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
     assert(perr == nil)
     assert(approved.ok == true)
+    assert(approved.job.state == 'queued')
 
     assert(probe.wait_until(function()
       local okp, state = safe.pcall(function()
@@ -160,7 +168,14 @@ function T.update_service_defers_manual_job_without_applying()
     local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 })
     assert(aerr == nil)
     assert(applied.ok == true)
-    assert(applied.job.state == 'awaiting_approval')
+    assert(applied.job.state == 'queued')
+
+    assert(probe.wait_until(function()
+      local okp, state = safe.pcall(function()
+        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
+      end)
+      return okp and type(state) == 'table' and type(state.job) == 'table' and state.job.state == 'awaiting_approval'
+    end, { timeout = 0.75, interval = 0.01 }))
 
     local deferred, derr = caller:call({ 'cmd', 'update', 'job', 'defer' }, { job_id = job.job_id }, { timeout = 0.5 })
     assert(derr == nil)
@@ -229,6 +244,58 @@ function T.update_service_applies_per_target_artifact_storage_policy()
     assert(type(control.namespaces['update/jobs']) == 'table')
     assert(type(control.namespaces['update/jobs'][cm5_created.job.job_id]) == 'table')
     assert(type(control.namespaces['update/jobs'][mcu_created.job.job_id]) == 'table')
+  end, { timeout = 3.0 })
+end
+
+
+function T.update_service_rejects_second_active_job_globally()
+  runfibers.run(function(scope)
+    local orig_sleep = sleep_mod.sleep
+    sleep_mod.sleep = function(dt)
+      return orig_sleep(math.min(dt, 0.01))
+    end
+    fibers.current_scope():finally(function() sleep_mod.sleep = orig_sleep end)
+
+    local bus = busmod.new()
+    local caller = bus:connect()
+    storagecaps.start_control_store_cap(scope, bus:connect(), {})
+    storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    local device_conn = bus:connect()
+
+    local device_status_ep = device_conn:bind({ 'cmd', 'device', 'component', 'status' }, { queue_len = 32 })
+    local device_update_ep = device_conn:bind({ 'cmd', 'device', 'component', 'update' }, { queue_len = 32 })
+
+    bind_reply_loop(scope, device_status_ep, function(payload)
+      return { ok = true, component = payload.component, state = { version = payload.component .. '-v0' } }
+    end)
+    bind_reply_loop(scope, device_update_ep, function(payload)
+      if payload.op == 'prepare' then
+        sleep_mod.sleep(0.1)
+        return { ok = true, prepared = true }
+      elseif payload.op == 'stage' then
+        return { ok = true, staged = payload.args.artifact_ref }
+      elseif payload.op == 'commit' then
+        return { ok = true, started = true }
+      end
+      return nil, 'unsupported_op'
+    end)
+
+    local ok, err = scope:spawn(function()
+      update.start(bus:connect(), { name = 'update', env = 'dev' })
+    end)
+    assert(ok, tostring(err))
+    wait_service_running(caller, 'update')
+
+    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { target = 'mcu', artifact_data = 'a', approval = 'manual' }, { timeout = 0.5 })).job
+    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { target = 'cm5', artifact_data = 'b', approval = 'manual' }, { timeout = 0.5 })).job
+
+    local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = j1.job_id }, { timeout = 1.0 })
+    assert(aerr == nil)
+    assert(applied.ok == true)
+
+    local denied, derr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = j2.job_id }, { timeout = 0.5 })
+    assert(denied == nil)
+    assert(derr == 'busy_global')
   end, { timeout = 3.0 })
 end
 

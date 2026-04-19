@@ -146,11 +146,14 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         assert(type(artifact_ref) == 'string')
 
         local applied = assert(caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 }))
-        assert(applied.job.state == 'awaiting_approval')
+        assert(applied.job.state == 'queued')
+
+        assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.state == 'awaiting_approval'
+        end, 0.75))
 
         local approved = assert(caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 }))
         assert(approved.ok == true)
-        assert(type(approved.job.artifact_ref) == 'string')
         assert(type(artifacts.artifacts[artifact_ref]) == 'table')
 
         local awaiting = wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)

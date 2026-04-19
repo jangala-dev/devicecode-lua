@@ -161,13 +161,16 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
         local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(aerr == nil)
         assert(applied.ok == true)
-        assert(applied.job.state == 'awaiting_approval')
+        assert(applied.job.state == 'queued')
+
+        assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.state == 'awaiting_approval'
+        end, 0.75))
 
         local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(perr == nil)
         assert(approved.ok == true)
-        assert(type(approved.job.artifact_ref) == 'string')
-
+        
         local awaiting = wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
             return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.state == 'awaiting_return'
         end, 0.75)

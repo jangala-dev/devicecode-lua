@@ -85,6 +85,15 @@ local function start_cm5_updater_cap(scope, conn, state)
     return publish_status
 end
 
+local function wait_retained_state(conn, topic, pred, timeout)
+    return probe.wait_until(function()
+        local ok, payload = safe.pcall(function()
+            return probe.wait_payload(conn, topic, { timeout = 0.02 })
+        end)
+        return ok and pred(payload)
+    end, { timeout = timeout or 1.0, interval = 0.01 })
+end
+
 function T.devhost_cm5_update_flows_via_device_and_update_service()
     runfibers.run(function(scope)
         local orig_sleep = sleep_mod.sleep
@@ -142,8 +151,12 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         local applied, aerr = caller:call({ 'cmd', 'update', 'job', 'apply_now' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(aerr == nil)
         assert(applied.ok == true)
-        assert(applied.job.state == 'awaiting_approval')
+        assert(applied.job.state == 'queued')
         assert(type(applied.job.artifact_ref) == 'string')
+
+        assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.state == 'awaiting_approval'
+        end, 0.75))
 
         local approved, perr = caller:call({ 'cmd', 'update', 'job', 'approve' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(perr == nil)
