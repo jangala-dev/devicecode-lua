@@ -102,6 +102,28 @@ local function default_updater_state()
     }
 end
 
+local function normalized_updater_state(raw_state, identity)
+    raw_state = type(raw_state) == 'table' and raw_state or default_updater_state()
+    local state = raw_state.state or 'idle'
+    local current_version = identity and identity.fw_version or nil
+    if state == 'staged' then
+        return 'staged'
+    end
+    if state == 'committing' or state == 'awaiting_reboot' then
+        if raw_state.expected_version and current_version == raw_state.expected_version then
+            return 'running'
+        end
+        return 'awaiting_reboot'
+    end
+    if state == 'failed' or state == 'rollback_detected' then
+        return state
+    end
+    if current_version and current_version ~= '' then
+        return 'running'
+    end
+    return state
+end
+
 function PlatformDriver:_read_updater_state()
     local obj, err = self.control_store:get('updater/cm5', 'state')
     if not obj then
@@ -171,8 +193,14 @@ function PlatformDriver:updater_status(opts)
         if type(artifact_meta) ~= 'table' then artifact_meta = nil end
     end
 
+    local bootedfw = read_fw_printenv('bootedfw')
+    local targetfw = read_fw_printenv('targetfw')
+    local upgrade_available = read_fw_printenv('upgrade_available')
+    local state = normalized_updater_state(raw_state, self.identity)
+
     return true, {
-        state = raw_state.state or 'idle',
+        state = state,
+        raw_state = raw_state.state or 'idle',
         staged = raw_state.staged == true,
         artifact_ref = raw_state.artifact_ref,
         artifact_meta = artifact_meta or raw_state.artifact_meta,
@@ -183,9 +211,9 @@ function PlatformDriver:updater_status(opts)
         hw_revision = self.identity.hw_revision,
         serial = self.identity.serial,
         board_revision = self.identity.board_revision,
-        bootedfw = read_fw_printenv('bootedfw'),
-        targetfw = read_fw_printenv('targetfw'),
-        upgrade_available = read_fw_printenv('upgrade_available'),
+        bootedfw = bootedfw,
+        targetfw = targetfw,
+        upgrade_available = upgrade_available,
     }
 end
 
@@ -247,7 +275,7 @@ function PlatformDriver:updater_commit(opts)
     if not sf then return false, 'update script unavailable: ' .. tostring(ferr) end
     sf:close()
 
-    state.state = 'committing'
+    state.state = 'awaiting_reboot'
     state.updated_at = os.time()
     local ok, err = self:_write_updater_state(state)
     if not ok then return false, err end

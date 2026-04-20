@@ -73,6 +73,8 @@ local function normalize_component(name, spec)
         subtype = spec.subtype or name,
         role = spec.role or 'member',
         member = spec.member or name,
+        member_class = spec.member_class or spec.subtype or spec.class or name,
+        link_class = spec.link_class or nil,
         present = spec.present ~= false,
         channels = {
             status = {
@@ -117,6 +119,8 @@ local function merge_components(cfg)
             if type(spec.subtype) == 'string' and spec.subtype ~= '' then base.subtype = spec.subtype end
             if type(spec.role) == 'string' and spec.role ~= '' then base.role = spec.role end
             if type(spec.member) == 'string' and spec.member ~= '' then base.member = spec.member end
+            if type(spec.member_class) == 'string' and spec.member_class ~= '' then base.member_class = spec.member_class end
+            if type(spec.link_class) == 'string' and spec.link_class ~= '' then base.link_class = spec.link_class end
             if spec.present ~= nil then base.present = spec.present ~= false end
             if type(spec.status_topic) == 'table' then base.channels.status.watch_topic = copy_array(spec.status_topic) end
             if type(spec.get_topic) == 'table' then base.channels.status.get_topic = copy_array(spec.get_topic) end
@@ -144,6 +148,8 @@ local function component_view(name, rec, now_ts)
         subtype = rec.subtype,
         role = rec.role,
         member = rec.member,
+        member_class = rec.member_class,
+        link_class = rec.link_class,
         present = rec.present ~= false,
         available = status ~= nil,
         health = health,
@@ -162,6 +168,10 @@ local function component_view(name, rec, now_ts)
         },
         status = status,
         source = {
+            member = rec.member,
+            member_class = rec.member_class,
+            link_class = rec.link_class,
+            role = rec.role,
             status = {
                 watch_topic = copy_array(rec.channels and rec.channels.status and rec.channels.status.watch_topic),
                 get_topic = copy_array(rec.channels and rec.channels.status and rec.channels.status.get_topic),
@@ -181,6 +191,8 @@ local function publish_component_state(conn, svc, name, rec)
         incarnation = view.incarnation,
         role = view.role,
         member = view.member,
+        member_class = view.member_class,
+        link_class = view.link_class,
     })
     retain_best_effort(conn, component_update_topic(name), {
         kind = 'device.component.update',
@@ -206,6 +218,8 @@ local function publish_summary(conn, svc, components)
             subtype = view.subtype,
             role = view.role,
             member = view.member,
+            member_class = view.member_class,
+            link_class = view.link_class,
             present = view.present,
             available = view.available,
             health = view.health,

@@ -210,4 +210,13 @@ function M.start_artifact_store_cap(scope, conn, backing)
   return backing
 end
 
+function M.seed_import_path(backing, path, data)
+  assert(type(backing) == 'table', 'backing required')
+  assert(type(path) == 'string' and path ~= '', 'path required')
+  assert(type(data) == 'string', 'data must be a string')
+  backing.import_paths = backing.import_paths or {}
+  backing.import_paths[path] = data
+  return path
+end
+
 return M

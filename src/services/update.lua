@@ -3,7 +3,6 @@ local sleep     = require 'fibers.sleep'
 local pulse     = require 'fibers.pulse'
 local base      = require 'devicecode.service_base'
 local cap_sdk   = require 'services.hal.sdk.cap'
-local blob_source = require 'services.fabric.blob_source'
 local job_store = require 'services.update.job_store'
 local component_backend_mod = require 'services.update.backends.component_proxy'
 local cm5_backend_mod = require 'services.update.backends.cm5_swupdate'
@@ -138,11 +137,12 @@ end
 
 local function job_actions(job)
     local st = job and job.state or nil
+    local has_retry_artifact = type(job) == 'table' and type(job.artifact_ref) == 'string' and job.artifact_ref ~= ''
     return {
         start = (st == 'created'),
         commit = (st == 'awaiting_commit'),
         cancel = (st == 'created' or st == 'awaiting_commit'),
-        retry = (st == 'failed' or st == 'rolled_back' or st == 'timed_out' or st == 'cancelled'),
+        retry = has_retry_artifact and (st == 'failed' or st == 'rolled_back' or st == 'timed_out' or st == 'cancelled'),
         discard = TERMINAL_STATES[st] == true,
     }
 end
@@ -248,7 +248,7 @@ function M.start(conn, opts)
     end
 
     local changed = pulse.scoped({ close_reason = 'update service stopping' })
-    local boot_id = tostring(uuid.new())
+    local service_run_id = tostring(uuid.new())
     local active_job = nil
     local locks = { global = nil, component = {} }
     local backends = {}
@@ -376,18 +376,6 @@ function M.start(conn, opts)
         return artefact:ref(), rec, nil
     end
 
-    local function artifact_from_data(data, component, metadata)
-        local src = blob_source.from_string(data)
-        local meta = { kind = 'update', component = component, metadata = metadata }
-        local opts = assert(cap_sdk.args.new.ArtifactStoreImportSourceOpts(src, meta, artifact_policy_for_component(component)))
-        local reply, err = artifact_cap:call_control('import_source', opts)
-        if not reply then return nil, nil, err end
-        if reply.ok ~= true then return nil, nil, reply.reason end
-        local artefact = reply.reason
-        local rec, rerr = artifact_snapshot(artefact)
-        if not rec then return nil, nil, rerr end
-        return artefact:ref(), rec, nil
-    end
 
     local function save_job(job)
         local ok, err = repo:save_job(job)
@@ -413,7 +401,7 @@ function M.start(conn, opts)
         end
         if state_changed then
             job.runtime = type(job.runtime) == 'table' and job.runtime or {}
-            job.runtime.phase_boot_id = boot_id
+            job.runtime.phase_run_id = service_run_id
             job.runtime.phase_mono = svc:now()
         end
         job.updated_seq = next_seq()
@@ -523,10 +511,6 @@ function M.start(conn, opts)
             local ref, meta, ierr = artifact_import_path(payload.artifact, component, payload.metadata)
             if not ref then return nil, nil, ierr end
             artifact_ref, artifact_meta = ref, meta
-        elseif type(payload.artifact_data) == 'string' then
-            local ref, meta, ierr = artifact_from_data(payload.artifact_data, component, payload.metadata)
-            if not ref then return nil, nil, ierr end
-            artifact_ref, artifact_meta = ref, meta
         end
         if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, nil, 'artifact_required' end
         return artifact_ref, artifact_meta, nil
@@ -562,7 +546,7 @@ function M.start(conn, opts)
                 adopted = false,
                 active_lock = nil,
                 last_progress = nil,
-                phase_boot_id = boot_id,
+                phase_run_id = service_run_id,
                 phase_mono = now_mono,
             },
         }
@@ -685,7 +669,7 @@ function M.start(conn, opts)
                                 error = nil,
                                 next_step = 'reconcile',
                             }, { runtime_merge = {
-                                awaiting_return_boot_id = boot_id,
+                                awaiting_return_run_id = service_run_id,
                                 awaiting_return_mono = svc:now(),
                             } })
                         end
@@ -709,7 +693,7 @@ function M.start(conn, opts)
             if job.next_step == 'reconcile' then
                 update_job(job, { state = 'awaiting_return', next_step = 'reconcile' }, { runtime_merge = {
                     adopted = false,
-                    awaiting_return_boot_id = boot_id,
+                    awaiting_return_run_id = service_run_id,
                     awaiting_return_mono = svc:now(),
                 } })
                 return run_reconcile_loop()
@@ -745,7 +729,7 @@ function M.start(conn, opts)
             local committed, cerr = backend:commit(conn, job)
             if committed == nil then return fail_job(cerr) end
             update_job(job, { state = 'awaiting_return', result = committed, error = nil, next_step = 'reconcile' }, { runtime_merge = {
-                awaiting_return_boot_id = boot_id,
+                awaiting_return_run_id = service_run_id,
                 awaiting_return_mono = svc:now(),
             } })
             return run_reconcile_loop()
@@ -925,7 +909,7 @@ function M.start(conn, opts)
                     req:reply({ ok = true, job = public_job(job) })
                 end
             elseif op == 'retry' then
-                if not (job.state == 'failed' or job.state == 'rolled_back' or job.state == 'timed_out' or job.state == 'cancelled') then
+                if not job_actions(job).retry then
                     req:fail('job_not_retryable')
                 else
                     local new_job, rerr = clone_job_for_retry(job)

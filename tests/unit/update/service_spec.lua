@@ -98,7 +98,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
 
     local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
       component = 'mcu',
-      artifact_data = 'mcu-image-v1',
+      artifact = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1'),
       expected_version = 'mcu-v1',
       metadata = { channel = 'test' },
     }, { timeout = 0.5 })
@@ -155,7 +155,7 @@ function T.update_service_cancels_staged_job_before_commit()
     local bus = busmod.new()
     local caller = bus:connect()
     storagecaps.start_control_store_cap(scope, bus:connect(), {})
-    storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
     bind_device_double(scope, bus:connect(), { mcu = 'mcu-v0' }, { artifact_retention = 'release' })
 
     local ok, err = scope:spawn(function()
@@ -166,7 +166,7 @@ function T.update_service_cancels_staged_job_before_commit()
     wait_service_running(caller, 'update')
 
     local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'mcu', artifact_data = 'mcu-image'
+      component = 'mcu', artifact = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image')
     }, { timeout = 0.5 })
     assert(cerr == nil)
     local job = created.job
@@ -218,10 +218,10 @@ function T.update_service_applies_per_component_artifact_storage_policy()
     sleep_mod.sleep(0.05)
 
     local cm5_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'cm5', artifact_data = 'cm5-image'
+      component = 'cm5', artifact = storagecaps.seed_import_path(artifacts, '/tmp/cm5-image.bin', 'cm5-image')
     }, { timeout = 0.5 }))
     local mcu_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'mcu', artifact_data = 'mcu-image'
+      component = 'mcu', artifact = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image')
     }, { timeout = 0.5 }))
 
     local cm5_ref = cm5_created.job.artifact.ref
@@ -247,7 +247,7 @@ function T.update_service_rejects_second_active_job_globally()
     local bus = busmod.new()
     local caller = bus:connect()
     storagecaps.start_control_store_cap(scope, bus:connect(), {})
-    storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
     bind_device_double(scope, bus:connect(), { cm5 = 'cm5-v0', mcu = 'mcu-v0' }, {
       prepare_sleep = 0.1,
       artifact_retention = 'release',
@@ -259,8 +259,8 @@ function T.update_service_rejects_second_active_job_globally()
     assert(ok, tostring(err))
     wait_service_running(caller, 'update')
 
-    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'mcu', artifact_data = 'a' }, { timeout = 0.5 })).job
-    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'cm5', artifact_data = 'b' }, { timeout = 0.5 })).job
+    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'mcu', artifact = storagecaps.seed_import_path(artifacts, '/tmp/a.bin', 'a') }, { timeout = 0.5 })).job
+    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'cm5', artifact = storagecaps.seed_import_path(artifacts, '/tmp/b.bin', 'b') }, { timeout = 0.5 })).job
     assert(j1.lifecycle.state == 'created')
     assert(j2.lifecycle.state == 'created')
 

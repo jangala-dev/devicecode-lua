@@ -12,11 +12,16 @@ function M.new(opts)
         reconcile = function(state, job)
             local version = type(state) == 'table' and (state.fw_version or state.version) or nil
             local incarnation = type(state) == 'table' and (state.incarnation or state.generation) or nil
+            local phase = type(state) == 'table' and (state.updater_state or state.state) or nil
+            local last_error = type(state) == 'table' and state.last_error or nil
+            if phase == 'failed' or phase == 'rollback_detected' then
+                return { done = true, success = false, version = version, incarnation = incarnation, error = tostring(last_error or phase), raw = state }
+            end
             if job.expected_version and version == job.expected_version then
                 return { done = true, success = true, version = version, incarnation = incarnation, raw = state }
             end
             if job.pre_commit_incarnation ~= nil and incarnation ~= nil and incarnation ~= job.pre_commit_incarnation then
-                if type(state) == 'table' and (state.updater_state == 'running' or state.state == 'running' or state.state == 'ready') then
+                if type(state) == 'table' and (phase == 'running' or phase == 'ready') then
                     return { done = true, success = true, version = version, incarnation = incarnation, raw = state }
                 end
                 return { done = false, raw = state }

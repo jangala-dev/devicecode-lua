@@ -133,6 +133,9 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
         and type(payload.status) == 'table'
         and payload.status.version == 'mcu-v2'
         and payload.incarnation == 7
+        and payload.member_class == 'mcu'
+        and payload.link_class == nil
+        and type(payload.source) == 'table' and payload.source.member_class == 'mcu'
         and payload.actions.stage_update == true
     end, { timeout = 0.75, interval = 0.01 }))
 
