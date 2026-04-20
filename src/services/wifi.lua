@@ -145,7 +145,7 @@ local function apply_band_steering(band_cap, band_cfg, svc)
     local timings = band_cfg.timings or {}
     local bands   = band_cfg.bands or {}
 
-    local slow = { timeout = 10.0 }
+    local slow    = { timeout = 10.0 }
 
     svc:obs_log('debug', { what = 'band_config_start' })
     band_rpc(band_cap, svc, 'clear', {}, slow)
@@ -508,7 +508,7 @@ local function radio_stats_loop(conn, id, radio_cfg, svc)
             local idx = iface_idx(p.interface)
             conn:retain(t_obs_metric(stat), {
                 value     = p.value,
-                namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, idx },
+                namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, idx, stat },
             })
             return
         end
@@ -520,7 +520,7 @@ local function radio_stats_loop(conn, id, radio_cfg, svc)
             if sid then
                 conn:retain(t_obs_metric(stat), {
                     value     = p.value,
-                    namespace = { 'wifi', 'clients', uid, 'sessions', sid },
+                    namespace = { 'wifi', 'clients', uid, 'sessions', sid, stat },
                 })
             end
         end
@@ -533,24 +533,24 @@ local function radio_stats_loop(conn, id, radio_cfg, svc)
         local p = msg.payload
         if not (is_table(p) and p.mac) then return end
 
-        local mac       = p.mac
-        local iface     = p.interface
-        local connected = p.connected
-        local timestamp = p.timestamp or os.time()
-        local uid       = gen.userid(mac)
-        local change    = connected and 1 or -1
+        local mac        = p.mac
+        local iface      = p.interface
+        local connected  = p.connected
+        local timestamp  = p.timestamp or os.time()
+        local uid        = gen.userid(mac)
+        local change     = connected and 1 or -1
 
         iface_sta[iface] = math.max(0, (iface_sta[iface] or 0) + change)
         radio_sta        = math.max(0, radio_sta + change)
 
-        local idx = iface_idx(iface)
+        local idx        = iface_idx(iface)
         conn:retain(t_obs_metric('num_sta'), {
             value     = iface_sta[iface],
-            namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, idx },
+            namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, idx, 'num_sta' },
         })
         conn:retain(t_obs_metric('num_sta'), {
             value     = radio_sta,
-            namespace = { 'wifi', 'hp', hw_platform },
+            namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, 'num_sta' },
         })
 
         if connected then
@@ -558,14 +558,14 @@ local function radio_stats_loop(conn, id, radio_cfg, svc)
             sessions[mac] = sid
             conn:publish(t_obs_event('session_start'), {
                 value     = timestamp,
-                namespace = { 'wifi', 'clients', uid, 'sessions', sid },
+                namespace = { 'wifi', 'clients', uid, 'sessions', sid, 'session_start' },
             })
         else
             local sid = sessions[mac]
             if sid then
                 conn:publish(t_obs_event('session_end'), {
                     value     = timestamp,
-                    namespace = { 'wifi', 'clients', uid, 'sessions', sid },
+                    namespace = { 'wifi', 'clients', uid, 'sessions', sid, 'session_end' },
                 })
                 sessions[mac] = nil
             end
@@ -785,15 +785,15 @@ function WifiService.start(conn, opts)
         svc:obs_log('info', 'service stopped')
     end)
 
-    local ctx = {
+    local ctx                = {
         conn           = conn,
         svc            = svc,
         parent_scope   = parent_scope,
-        data           = nil,   -- data field of last valid config
+        data           = nil, -- data field of last valid config
         last_rev       = -1,
-        fs_configs_cap = nil,   -- configs filesystem cap reference
-        band_cap       = nil,   -- band capability reference
-        radio_scopes   = {},    -- radio_id → child scope
+        fs_configs_cap = nil, -- configs filesystem cap reference
+        band_cap       = nil, -- band capability reference
+        radio_scopes   = {},  -- radio_id → child scope
     }
 
     -- Subscribe to config topic
@@ -822,10 +822,14 @@ function WifiService.start(conn, opts)
 
         if not msg then
             svc:obs_log('debug', { what = 'subscription_closed', source = which })
-        elseif which == 'cfg'   then on_cfg(ctx, msg)
-        elseif which == 'radio' then on_radio_cap(ctx, msg)
-        elseif which == 'band'  then on_band_cap(ctx, msg)
-        elseif which == 'fs'    then on_fs_cap(ctx, msg)
+        elseif which == 'cfg' then
+            on_cfg(ctx, msg)
+        elseif which == 'radio' then
+            on_radio_cap(ctx, msg)
+        elseif which == 'band' then
+            on_band_cap(ctx, msg)
+        elseif which == 'fs' then
+            on_fs_cap(ctx, msg)
         end
     end
 
