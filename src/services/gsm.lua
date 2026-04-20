@@ -646,6 +646,7 @@ end
 -- Retry logic with exponential backoff and state change preemption.
 ---@return nil
 function GsmModem:_autoconnect_loop()
+	self.svc:obs_log('debug', self.name .. ": starting autoconnect loop")
 	local seen = self.config_pulse:version()
 	local state_sub = self.cap:get_state_sub('card', {
 		queue_len = 1,
