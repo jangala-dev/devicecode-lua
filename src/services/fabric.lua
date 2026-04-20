@@ -15,8 +15,8 @@
 local fibers   = require 'fibers'
 local mailbox  = require 'fibers.mailbox'
 local sleep    = require 'fibers.sleep'
-local safe     = require 'coxpcall'
 local op       = require 'fibers.op'
+local safe     = require 'coxpcall'
 
 local base     = require 'devicecode.service_base'
 local session  = require 'services.fabric.session'
@@ -135,7 +135,6 @@ local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
 		error(err or 'failed to create link scope', 0)
 	end
 
-	local link_conn = conn:derive()
 	local transfer_tx, transfer_rx = q(8)
 
 	state.links[link_id] = {
@@ -155,8 +154,9 @@ local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
 	svc:obs_event('link_spawn', { link_id = link_id, ts = svc:now() })
 
 	local ok, serr = child:spawn(function()
-		local ok_run, run_err = safe.xpcall(function()
-			session.run({
+		local link_conn = conn:derive()
+		local ok_run, st, primary = safe.pcall(function()
+			return session.run({
 				svc = svc,
 				conn = link_conn,
 				link_id = link_id,
@@ -164,30 +164,26 @@ local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
 				transfer_ctl_rx = transfer_rx,
 				report_tx = report_tx,
 			})
-		end, debug.traceback)
+		end)
 
-		local ev
 		if ok_run then
-			ev = {
+			send_required(report_tx, {
 				tag = 'link_exit',
 				link_id = link_id,
-				st = 'ok',
-				report = nil,
-				primary = nil,
-			}
+				st = st or 'ok',
+				primary = primary,
+			}, 'fabric_link_exit_report')
+			if st == 'failed' then
+				error(primary or 'link_failed', 0)
+			end
 		else
-			ev = {
+			send_required(report_tx, {
 				tag = 'link_exit',
 				link_id = link_id,
 				st = 'failed',
-				report = nil,
-				primary = tostring(run_err),
-			}
-		end
-
-		local send_ok, send_err = report_tx:send(ev)
-		if send_ok ~= true then
-			svc:obs_log('warn', { what = 'link_exit_report_drop', link_id = link_id, reason = tostring(send_err) })
+				primary = st,
+			}, 'fabric_link_exit_report')
+			error(st, 0)
 		end
 	end)
 	if not ok then
@@ -328,6 +324,7 @@ local function next_shell_event(state, cfg_watch, transfer_ep, report_rx)
 		transfer = transfer_event_op(transfer_ep),
 		report = report_event_op(report_rx),
 	}
+
 
 	for link_id, at in pairs(state.restart_at) do
 		local dt = at - fibers.now()

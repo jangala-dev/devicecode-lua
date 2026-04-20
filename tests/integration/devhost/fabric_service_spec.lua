@@ -1,0 +1,87 @@
+local busmod     = require 'bus'
+local duplex     = require 'tests.support.duplex_stream'
+local probe      = require 'tests.support.bus_probe'
+local runfibers  = require 'tests.support.run_fibers'
+local safe       = require 'coxpcall'
+
+local fabric     = require 'services.fabric'
+
+local T = {}
+
+local function wait_ready(conn, link_id, timeout)
+	return probe.wait_until(function()
+		local ok, payload = safe.pcall(function()
+			return probe.wait_payload(conn, { 'state', 'fabric', 'link', link_id, 'session' }, { timeout = 0.02 })
+		end)
+		return ok and type(payload) == 'table'
+			and type(payload.status) == 'table'
+			and payload.status.ready == true
+	end, { timeout = timeout or 2.0, interval = 0.01 })
+end
+
+function T.fabric_services_reach_ready_on_separate_buses_over_duplex_streams()
+	runfibers.run(function(scope)
+		local bus_a = busmod.new()
+		local bus_b = busmod.new()
+		local obs_a = bus_a:connect()
+		local obs_b = bus_b:connect()
+
+		local a_stream, b_stream = duplex.new_pair()
+
+		obs_a:retain({ 'cfg', 'fabric' }, {
+			links = {
+				wan0 = {
+					id = 'wan0',
+					node_id = 'node-a',
+					transport = { open = function() return a_stream end },
+					export_publish_rules = {
+						{ ['local'] = { 'local' }, ['remote'] = { 'remote' } },
+					},
+					import_rules = {
+						{ ['local'] = { 'seen' }, ['remote'] = { 'remote' } },
+					},
+					outbound_call_rules = {},
+					inbound_call_rules = {},
+				},
+			},
+		})
+
+		obs_b:retain({ 'cfg', 'fabric' }, {
+			links = {
+				wan0 = {
+					id = 'wan0',
+					node_id = 'node-b',
+					transport = { open = function() return b_stream end },
+					export_publish_rules = {
+						{ ['local'] = { 'local' }, ['remote'] = { 'remote' } },
+					},
+					import_rules = {
+						{ ['local'] = { 'seen' }, ['remote'] = { 'remote' } },
+					},
+					outbound_call_rules = {},
+					inbound_call_rules = {},
+				},
+			},
+		})
+
+		local ok1, err1 = scope:spawn(function()
+			fabric.start(bus_a:connect(), { name = 'fabric', env = 'dev' })
+		end)
+		assert(ok1, tostring(err1))
+
+		local ok2, err2 = scope:spawn(function()
+			fabric.start(bus_b:connect(), { name = 'fabric', env = 'dev' })
+		end)
+		assert(ok2, tostring(err2))
+
+		assert(wait_ready(obs_a, 'wan0', 2.0) == true)
+		assert(wait_ready(obs_b, 'wan0', 2.0) == true)
+
+		obs_a:publish({ 'local', 'wifi' }, { up = true })
+		local seen = probe.wait_payload(obs_b, { 'seen', 'wifi' }, { timeout = 1.0 })
+		assert(type(seen) == 'table')
+		assert(seen.up == true)
+	end, { timeout = 3.0 })
+end
+
+return T

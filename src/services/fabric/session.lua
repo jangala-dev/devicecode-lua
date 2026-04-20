@@ -29,10 +29,10 @@ local function q(cap)
 	return mailbox.new(cap, { full = 'reject_newest' })
 end
 
-local function spawn_required(name, fn)
+local function spawn_required(fn, what)
 	local ok, err = fibers.spawn(fn)
-	if not ok then
-		error((name or 'helper') .. ' spawn failed: ' .. tostring(err), 0)
+	if ok ~= true then
+		error((what or 'spawn_failed') .. ': ' .. tostring(err or 'spawn_failed'), 0)
 	end
 end
 
@@ -82,7 +82,7 @@ function M.run(params)
 		end,
 	})
 
-	spawn_required('reader', function()
+	spawn_required(function()
 		reader.run({
 			transport          = transport,
 			link_id            = link_id,
@@ -95,9 +95,9 @@ function M.run(params)
 			bad_frame_window_s = cfg.bad_frame_window_s,
 			read_timeout_s     = cfg.read_timeout_s,
 		})
-	end)
+	end, 'reader_spawn')
 
-	spawn_required('writer', function()
+	spawn_required(function()
 		writer.run({
 			transport    = transport,
 			link_id      = link_id,
@@ -108,9 +108,9 @@ function M.run(params)
 			rpc_quantum  = cfg.rpc_quantum,
 			bulk_quantum = cfg.bulk_quantum,
 		})
-	end)
+	end, 'writer_spawn')
 
-	spawn_required('session_ctl', function()
+	spawn_required(function()
 		session_ctl.run({
 			link_id            = link_id,
 			svc                = svc,
@@ -125,9 +125,9 @@ function M.run(params)
 			liveness_timeout_s = cfg.liveness_timeout_s,
 			node_id            = cfg.node_id,
 		})
-	end)
+	end, 'session_ctl_spawn')
 
-	spawn_required('rpc_bridge', function()
+	spawn_required(function()
 		rpc_bridge.run({
 			link_id               = link_id,
 			svc                   = svc,
@@ -148,9 +148,9 @@ function M.run(params)
 			max_inbound_helpers   = cfg.max_inbound_helpers,
 			call_timeout_s        = cfg.call_timeout_s,
 		})
-	end)
+	end, 'rpc_bridge_spawn')
 
-	spawn_required('transfer_mgr', function()
+	spawn_required(function()
 		transfer_mgr.run({
 			link_id                  = link_id,
 			conn                     = state_conn,
@@ -162,13 +162,13 @@ function M.run(params)
 			chunk_size               = cfg.chunk_size,
 			transfer_phase_timeout_s = cfg.transfer_phase_timeout_s,
 		})
-	end)
+	end, 'transfer_mgr_spawn')
 
 	-- Keep the child scope alive until one worker faults or the scope is
 	-- cancelled. This blocks without polling and lets the shell own restart
 	-- policy via the child scope join outcome.
 	local scope = fibers.current_scope()
-	op.perform_raw(scope:not_ok_op())
+	return op.perform_raw(scope:not_ok_op())
 end
 
 return M
