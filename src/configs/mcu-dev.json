@@ -1,0 +1,80 @@
+{
+  "hal": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/hal/1",
+      "filesystem": [
+        {
+          "name": "config",
+          "root": "/data/configs/"
+        },
+        {
+          "name": "state",
+          "root": "/tmp/dc-states/"
+        }
+      ],
+      "uart": {
+        "serial_ports": [
+          {
+            "name": "uart-0",
+            "path": "/dev/ttyAMA0",
+            "baud": 115200
+          }
+        ]
+      }
+    }
+  },
+  "fabric": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.fabric/1",
+      "links": {
+        "mcu0": {
+          "node_id": "cm5",
+          "member_class": "cm5",
+          "link_class": "member_uart",
+          "hello_interval_s": 1.0,
+          "ping_interval_s": 15.0,
+          "liveness_timeout_s": 45.0,
+          "transport": {
+            "id": "uart-0"
+          },
+          "chunk_size": 1024,
+          "transfer_phase_timeout_s": 5.0,
+          "export_publish_rules": [
+            {
+              "local": ["config", "mcu"],
+              "remote": ["config", "device"]
+            }
+          ],
+          "export_retained_rules": [
+            {
+              "local": ["config", "mcu"],
+              "remote": ["config", "device"]
+            }
+          ],
+          "import_rules": [
+            {
+              "local": ["peer", "mcu-1", "state"],
+              "remote": ["state"]
+            }
+          ],
+          "inbound_call_rules": [
+            {
+              "local": ["rpc", "hal", "read_state"],
+              "remote": ["rpc", "hal", "read_state"],
+              "timeout": 0.5
+            }
+          ],
+          "outbound_call_rules": [
+            {
+              "local": ["rpc", "peer", "mcu-1", "hal", "dump"],
+              "remote": ["rpc", "hal", "dump"],
+              "timeout": 0.5
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -296,7 +296,7 @@ local function onstream_factory(svc, app, opts)
 		local req_method = req_headers:get(':method') or 'GET'
 		local req_path = req_headers:get(':path') or '/'
 
-		svc:obs_log('info', { what = 'http_request', method = req_method, path = req_path })
+		svc:obs_log('debug', { what = 'http_request', method = req_method, path = req_path })
 
 		if req_path == '/ws' then
 			if req_method ~= 'GET' then write_text(stream, 405, 'method not allowed\n'); return end

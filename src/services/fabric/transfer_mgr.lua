@@ -46,10 +46,25 @@ local function unretain_best_effort(conn, topic)
 	pcall(function() conn:unretain(topic) end)
 end
 
+local function send_status(tx, value, what)
+	local ok, reason = tx:send(value)
+	if ok ~= true then
+		error((what or 'status_mailbox_failed') .. ': ' .. tostring(reason or 'closed'), 0)
+	end
+end
+
+local function is_firmware_meta(meta)
+	if type(meta) ~= 'table' then return false end
+	local kind = meta.kind
+	return type(kind) == 'string'
+		and (kind == 'firmware' or kind:sub(1, #'firmware.') == 'firmware.')
+end
+
 function M.run(ctx)
 	local conn = assert(ctx.conn, 'transfer_mgr requires conn')
 	local session = assert(ctx.session, 'transfer_mgr requires session')
 	local xfer_rx = assert(ctx.xfer_rx, 'transfer_mgr requires xfer_rx')
+	local status_tx = assert(ctx.status_tx, 'transfer_mgr requires status_tx')
 	local tx_control = assert(ctx.tx_control, 'transfer_mgr requires tx_control')
 	local tx_bulk = assert(ctx.tx_bulk, 'transfer_mgr requires tx_bulk')
 	local transfer_ctl_rx = assert(ctx.transfer_ctl_rx, 'transfer_mgr requires transfer_ctl_rx')
@@ -130,9 +145,11 @@ function M.run(ctx)
 			xfer_id = xfer_id,
 			req = req,
 			source = source,
+			meta = meta,
 			size = source:size(),
 			checksum = source:checksum(),
 			offset = 0,
+			chunks_sent = 0,
 			state = 'waiting_ready',
 			deadline = runtime.now() + phase_timeout,
 		}
@@ -184,14 +201,17 @@ function M.run(ctx)
 			data = data,
 		})
 		outgoing.offset = outgoing.offset + #data
+		outgoing.chunks_sent = outgoing.chunks_sent + 1
 		outgoing.deadline = runtime.now() + phase_timeout
-		publish_transfer({
-			state = outgoing.state,
-			xfer_id = outgoing.xfer_id,
-			direction = 'out',
-			size = outgoing.size,
-			offset = outgoing.offset,
-		})
+		if outgoing.chunks_sent % 32 == 0 or outgoing.offset >= outgoing.size then
+			publish_transfer({
+				state = outgoing.state,
+				xfer_id = outgoing.xfer_id,
+				direction = 'out',
+				size = outgoing.size,
+				offset = outgoing.offset,
+			})
+		end
 	end
 
 	local function handle_incoming_begin(frame)
@@ -337,14 +357,28 @@ function M.run(ctx)
 			handle_incoming_commit(frame)
 		elseif frame.type == 'xfer_done' then
 			if outgoing and frame.xfer_id == outgoing.xfer_id then
-				reply_req(outgoing.req, {
+				local req = outgoing.req
+				local meta = outgoing.meta
+				local reply = {
 					ok = true,
 					xfer_id = outgoing.xfer_id,
 					size = outgoing.size,
 					checksum = outgoing.checksum,
-				})
-				publish_transfer({ state = 'done', xfer_id = outgoing.xfer_id, direction = 'out', size = outgoing.size, offset = outgoing.offset, checksum = outgoing.checksum })
+				}
+				local status = {
+					state = 'done',
+					xfer_id = outgoing.xfer_id,
+					direction = 'out',
+					size = outgoing.size,
+					offset = outgoing.offset,
+					checksum = outgoing.checksum,
+				}
 				outgoing = nil
+				reply_req(req, reply)
+				publish_transfer(status)
+				if is_firmware_meta(meta) then
+					send_status(status_tx, { kind = 'reconnect_requested' }, 'session_status_overflow')
+				end
 			end
 		elseif frame.type == 'xfer_abort' then
 			if outgoing and frame.xfer_id == outgoing.xfer_id then clear_outgoing(frame.err or 'remote_abort') end
