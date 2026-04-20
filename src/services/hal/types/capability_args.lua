@@ -325,40 +325,6 @@ function new.ControlStoreStatusOpts(verbose)
     return setmetatable({ verbose = verbose }, ControlStoreStatusOpts), ''
 end
 
----@class ArtifactStoreCreateOpts
----@field meta table|nil
----@field policy string|nil
-local ArtifactStoreCreateOpts = {}
-ArtifactStoreCreateOpts.__index = ArtifactStoreCreateOpts
-
-function new.ArtifactStoreCreateOpts(meta, policy)
-    if meta ~= nil and type(meta) ~= 'table' then return nil, 'invalid meta' end
-    if policy ~= nil and type(policy) ~= 'string' then return nil, 'invalid policy' end
-    return setmetatable({ meta = meta, policy = policy }, ArtifactStoreCreateOpts), ''
-end
-
----@class ArtifactStoreAppendOpts
----@field artifact_ref string
----@field data string
-local ArtifactStoreAppendOpts = {}
-ArtifactStoreAppendOpts.__index = ArtifactStoreAppendOpts
-
-function new.ArtifactStoreAppendOpts(artifact_ref, data)
-    if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, 'invalid artifact_ref' end
-    if type(data) ~= 'string' then return nil, 'invalid data' end
-    return setmetatable({ artifact_ref = artifact_ref, data = data }, ArtifactStoreAppendOpts), ''
-end
-
----@class ArtifactStoreFinaliseOpts
----@field artifact_ref string
-local ArtifactStoreFinaliseOpts = {}
-ArtifactStoreFinaliseOpts.__index = ArtifactStoreFinaliseOpts
-
-function new.ArtifactStoreFinaliseOpts(artifact_ref)
-    if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, 'invalid artifact_ref' end
-    return setmetatable({ artifact_ref = artifact_ref }, ArtifactStoreFinaliseOpts), ''
-end
-
 ---@class ArtifactStoreImportPathOpts
 ---@field path string
 ---@field meta table|nil
@@ -373,14 +339,28 @@ function new.ArtifactStoreImportPathOpts(path, meta, policy)
     return setmetatable({ path = path, meta = meta, policy = policy }, ArtifactStoreImportPathOpts), ''
 end
 
----@class ArtifactStoreDescribeOpts
----@field artifact_ref string
-local ArtifactStoreDescribeOpts = {}
-ArtifactStoreDescribeOpts.__index = ArtifactStoreDescribeOpts
+---@class ArtifactStoreImportSourceOpts
+---@field source table
+---@field meta table|nil
+---@field policy string|nil
+local ArtifactStoreImportSourceOpts = {}
+ArtifactStoreImportSourceOpts.__index = ArtifactStoreImportSourceOpts
 
-function new.ArtifactStoreDescribeOpts(artifact_ref)
+function new.ArtifactStoreImportSourceOpts(source, meta, policy)
+    if type(source) ~= 'table' then return nil, 'invalid source' end
+    if meta ~= nil and type(meta) ~= 'table' then return nil, 'invalid meta' end
+    if policy ~= nil and type(policy) ~= 'string' then return nil, 'invalid policy' end
+    return setmetatable({ source = source, meta = meta, policy = policy }, ArtifactStoreImportSourceOpts), ''
+end
+
+---@class ArtifactStoreOpenOpts
+---@field artifact_ref string
+local ArtifactStoreOpenOpts = {}
+ArtifactStoreOpenOpts.__index = ArtifactStoreOpenOpts
+
+function new.ArtifactStoreOpenOpts(artifact_ref)
     if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, 'invalid artifact_ref' end
-    return setmetatable({ artifact_ref = artifact_ref }, ArtifactStoreDescribeOpts), ''
+    return setmetatable({ artifact_ref = artifact_ref }, ArtifactStoreOpenOpts), ''
 end
 
 ---@class ArtifactStoreDeleteOpts
@@ -497,11 +477,9 @@ return {
     ControlStoreDeleteOpts = ControlStoreDeleteOpts,
     ControlStoreListOpts = ControlStoreListOpts,
     ControlStoreStatusOpts = ControlStoreStatusOpts,
-    ArtifactStoreCreateOpts = ArtifactStoreCreateOpts,
-    ArtifactStoreAppendOpts = ArtifactStoreAppendOpts,
-    ArtifactStoreFinaliseOpts = ArtifactStoreFinaliseOpts,
     ArtifactStoreImportPathOpts = ArtifactStoreImportPathOpts,
-    ArtifactStoreDescribeOpts = ArtifactStoreDescribeOpts,
+    ArtifactStoreImportSourceOpts = ArtifactStoreImportSourceOpts,
+    ArtifactStoreOpenOpts = ArtifactStoreOpenOpts,
     ArtifactStoreDeleteOpts = ArtifactStoreDeleteOpts,
     ArtifactStoreStatusOpts = ArtifactStoreStatusOpts,
     UARTOpenOpts = UARTOpenOpts,

@@ -1,5 +1,6 @@
-local checksum = require 'services.fabric.checksum'
-local cjson    = require 'cjson.safe'
+local checksum    = require 'services.fabric.checksum'
+local blob_source = require 'services.fabric.blob_source'
+local cjson       = require 'cjson.safe'
 
 local M = {}
 
@@ -20,6 +21,23 @@ local function bind_reply_loop(scope, ep, handler)
     end
   end)
   assert(ok, tostring(err))
+end
+
+local function mk_mem_artifact(backing, rec)
+  local art = {}
+  function art:ref() return rec.artifact_ref end
+  function art:meta() return clone(rec.meta) end
+  function art:size() return rec.size end
+  function art:checksum() return rec.checksum end
+  function art:open_source() return blob_source.from_string(rec.data) end
+  function art:delete() rec.deleted = true backing.artifacts[rec.artifact_ref] = nil return true end
+  function art:describe()
+    local out = clone(rec)
+    out.data = nil
+    out.deleted = nil
+    return out
+  end
+  return art
 end
 
 function M.start_control_store_cap(scope, conn, backing)
@@ -95,8 +113,8 @@ function M.start_artifact_store_cap(scope, conn, backing)
   conn:retain({ 'cap', 'artifact_store', 'main', 'state' }, 'added')
   conn:retain({ 'cap', 'artifact_store', 'main', 'meta' }, {
     offerings = {
-      create = true, append = true, finalise = true, import_path = true,
-      describe = true, delete = true, status = true,
+      import_path = true, import_source = true, open = true,
+      delete = true, status = true,
     }
   })
 
@@ -118,64 +136,26 @@ function M.start_artifact_store_cap(scope, conn, backing)
     return nil, 'invalid_policy'
   end
 
-  local function out(rec)
-    local c = clone(rec)
-    c.data = nil
-    return c
-  end
-
-  local create_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'create' }, { queue_len = 32 })
-  local append_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'append' }, { queue_len = 32 })
-  local finalise_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'finalise' }, { queue_len = 32 })
-  local import_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'import_path' }, { queue_len = 32 })
-  local describe_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'describe' }, { queue_len = 32 })
+  local import_path_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'import_path' }, { queue_len = 32 })
+  local import_source_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'import_source' }, { queue_len = 32 })
+  local open_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'open' }, { queue_len = 32 })
   local delete_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'delete' }, { queue_len = 32 })
   local status_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'status' }, { queue_len = 32 })
 
-  bind_reply_loop(scope, create_ep, function(payload)
-    local durability, err = choose(payload.policy)
-    if not durability then return { ok = false, reason = err } end
-    local ref = mkref()
-    local rec = {
-      artifact_ref = ref,
-      state = 'writing',
-      durability = durability,
-      size = 0,
-      checksum = nil,
-      meta = clone(payload.meta or {}),
-      data = '',
-      created_at = os.time(),
-      updated_at = os.time(),
-    }
-    backing.artifacts[ref] = rec
-    return { ok = true, reason = out(rec) }
-  end)
-
-  bind_reply_loop(scope, append_ep, function(payload)
-    local rec = backing.artifacts[payload.artifact_ref]
-    if not rec then return { ok = false, reason = 'not_found' } end
-    if rec.state ~= 'writing' then return { ok = false, reason = 'artifact_not_writable' } end
-    rec.data = rec.data .. (payload.data or '')
-    rec.size = #rec.data
-    rec.updated_at = os.time()
-    return { ok = true, reason = out(rec) }
-  end)
-
-  bind_reply_loop(scope, finalise_ep, function(payload)
-    local rec = backing.artifacts[payload.artifact_ref]
-    if not rec then return { ok = false, reason = 'not_found' } end
-    rec.state = 'ready'
-    rec.size = #rec.data
-    rec.checksum = checksum.digest_hex(rec.data)
-    rec.updated_at = os.time()
-    return { ok = true, reason = out(rec) }
-  end)
-
-  bind_reply_loop(scope, import_ep, function(payload)
-    local data = backing.import_paths[payload.path]
-    if type(data) ~= 'string' then return { ok = false, reason = 'not_found' } end
-    local durability, err = choose(payload.policy)
-    if not durability then return { ok = false, reason = err } end
+  local function store_blob(source, meta, policy)
+    local durability, err = choose(policy)
+    if not durability then return nil, err end
+    local src, serr = blob_source.normalise_source(source)
+    if not src then return nil, serr end
+    local data = ''
+    local offset = 0
+    while true do
+      local chunk, cerr = src:read_chunk(offset, 64 * 1024)
+      if chunk == nil then return nil, cerr or 'read_failed' end
+      if chunk == '' then break end
+      data = data .. chunk
+      offset = offset + #chunk
+    end
     local ref = mkref()
     local rec = {
       artifact_ref = ref,
@@ -183,22 +163,38 @@ function M.start_artifact_store_cap(scope, conn, backing)
       durability = durability,
       size = #data,
       checksum = checksum.digest_hex(data),
-      meta = clone(payload.meta or {}),
+      meta = clone(meta or {}),
       data = data,
       created_at = os.time(),
       updated_at = os.time(),
     }
     backing.artifacts[ref] = rec
-    return { ok = true, reason = out(rec) }
+    return mk_mem_artifact(backing, rec), ''
+  end
+
+  bind_reply_loop(scope, import_path_ep, function(payload)
+    local data = backing.import_paths[payload.path]
+    if type(data) ~= 'string' then return { ok = false, reason = 'not_found' } end
+    local art, err = store_blob(blob_source.from_string(data), payload.meta, payload.policy)
+    if not art then return { ok = false, reason = err } end
+    return { ok = true, reason = art }
   end)
 
-  bind_reply_loop(scope, describe_ep, function(payload)
+  bind_reply_loop(scope, import_source_ep, function(payload)
+    local art, err = store_blob(payload.source, payload.meta, payload.policy)
+    if not art then return { ok = false, reason = err } end
+    return { ok = true, reason = art }
+  end)
+
+  bind_reply_loop(scope, open_ep, function(payload)
     local rec = backing.artifacts[payload.artifact_ref]
-    if not rec then return { ok = false, reason = 'not_found' } end
-    return { ok = true, reason = out(rec) }
+    if not rec or rec.deleted then return { ok = false, reason = 'not_found' } end
+    return { ok = true, reason = mk_mem_artifact(backing, rec) }
   end)
 
   bind_reply_loop(scope, delete_ep, function(payload)
+    local rec = backing.artifacts[payload.artifact_ref]
+    if rec then rec.deleted = true end
     backing.artifacts[payload.artifact_ref] = nil
     return { ok = true, reason = { ok = true } }
   end)

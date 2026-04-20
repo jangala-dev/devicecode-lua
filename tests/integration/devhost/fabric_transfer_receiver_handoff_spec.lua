@@ -79,7 +79,19 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
         local receiver_conn = bus:connect()
         local receiver_ep = receiver_conn:bind({ 'cmd', 'blob', 'ingest' }, { queue_len = 16 })
         bind_reply_loop(scope, receiver_ep, function(payload)
-            received[#received + 1] = payload
+            local artefact = payload.artefact
+            assert(type(artefact) == 'table')
+            local src = artefact:open_source()
+            local data = assert(src:read_chunk(0, payload.size + 16))
+            received[#received + 1] = {
+                link_id = payload.link_id,
+                xfer_id = payload.xfer_id,
+                size = payload.size,
+                checksum = payload.checksum,
+                meta = payload.meta,
+                artefact = artefact,
+                data = data,
+            }
             return { ok = true, accepted = true }
         end)
 
@@ -138,7 +150,9 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
 
         assert(#received == 1)
         local payload = received[1]
+        assert(type(payload.artefact) == 'table')
         assert(payload.data == 'firmware-bytes')
+        assert(payload.artefact:checksum() == payload.checksum)
         assert(payload.size == #'firmware-bytes')
         assert(type(payload.meta) == 'table')
         assert(payload.meta.kind == 'firmware')

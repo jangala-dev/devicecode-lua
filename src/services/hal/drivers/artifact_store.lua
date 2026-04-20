@@ -1,9 +1,8 @@
-local fibers   = require "fibers"
-local file     = require "fibers.io.file"
-local exec     = require "fibers.io.exec"
-local cjson    = require "cjson.safe"
-local uuid     = require "uuid"
-local checksum = require 'services.fabric.checksum'
+local fibers      = require 'fibers'
+local exec        = require 'fibers.io.exec'
+local cjson       = require 'cjson.safe'
+local uuid        = require 'uuid'
+local blob_source = require 'services.fabric.blob_source'
 
 local perform = fibers.perform
 
@@ -37,12 +36,18 @@ local function ensure_dir(path)
     return true, ''
 end
 
+local function remove_tree(path)
+    local cmd = exec.command('rm', '-rf', path)
+    local st = perform(cmd:run_op())
+    return st == 'exited'
+end
+
 local function read_file(path)
-    local f, err = file.open(path, 'r')
+    local f, err = io.open(path, 'rb')
     if not f then return nil, tostring(err) end
-    local raw, rerr = f:read_all()
+    local raw = f:read('*a')
     f:close()
-    if raw == nil then return nil, tostring(rerr) end
+    if raw == nil then return nil, 'read_failed' end
     return raw, ''
 end
 
@@ -50,16 +55,16 @@ local function write_file(path, data)
     local ok, derr = ensure_dir(dirname(path))
     if not ok then return false, derr end
     local tmp = path .. '.tmp-' .. tostring(os.time()) .. '-' .. tostring(math.random(1000000))
-    local f, err = file.open(tmp, 'w')
+    local f, err = io.open(tmp, 'wb')
     if not f then return false, tostring(err) end
-    local n, werr = f:write(data)
+    local okw, werr = f:write(data)
     f:close()
-    if n == nil then
+    if not okw then
         os.remove(tmp)
-        return false, tostring(werr)
+        return false, tostring(werr or 'write_failed')
     end
-    local ok_rename, rerr = os.rename(tmp, path)
-    if not ok_rename then
+    local okr, rerr = os.rename(tmp, path)
+    if not okr then
         os.remove(tmp)
         return false, tostring(rerr)
     end
@@ -122,13 +127,121 @@ local function blob_path(self, ref, durability)
     return join_path(artifact_dir(self, ref, durability), 'blob.bin')
 end
 
-local function remove_tree(path)
-    local cmd = exec.command('rm', '-rf', path)
-    local st = perform(cmd:run_op())
-    return st == 'exited'
+local function clone_record(rec)
+    local out = copy_table(rec)
+    out.meta = copy_table(rec.meta)
+    return out
 end
 
-function Store:create(meta, opts)
+local Artifact = {}
+Artifact.__index = Artifact
+
+function Artifact:ref()
+    return self._rec.artifact_ref
+end
+
+function Artifact:meta()
+    return copy_table(self._rec.meta)
+end
+
+function Artifact:size()
+    return self._rec.size
+end
+
+function Artifact:checksum()
+    return self._rec.checksum
+end
+
+function Artifact:open_source()
+    return assert(blob_source.from_file(self._blob_path, {
+        size = self._rec.size,
+        checksum = self._rec.checksum,
+    }))
+end
+
+function Artifact:delete()
+    return self._store:delete(self._rec.artifact_ref)
+end
+
+function Artifact:describe()
+    return clone_record(self._rec)
+end
+
+function Artifact:local_path()
+    return self._blob_path
+end
+
+local ArtifactSink = {}
+ArtifactSink.__index = ArtifactSink
+
+function ArtifactSink:write_chunk(offset, data)
+    if self._closed then return nil, 'closed' end
+    if self._committed then return nil, 'committed' end
+    if type(data) ~= 'string' then return nil, 'invalid_chunk' end
+    if offset ~= self._rec.size then return nil, 'unexpected_offset' end
+    local f, err = io.open(self._blob_path, 'ab')
+    if not f then return nil, tostring(err) end
+    local ok, werr = f:write(data)
+    f:close()
+    if not ok then return nil, tostring(werr or 'write_failed') end
+    self._rec.size = self._rec.size + #data
+    self._rec.updated_at = os.time()
+    local mok, merr = write_json(self._meta_path, self._rec)
+    if not mok then return nil, merr end
+    self._checksum = nil
+    return true
+end
+
+function ArtifactSink:size()
+    return self._rec.size
+end
+
+function ArtifactSink:checksum()
+    if self._checksum then return self._checksum end
+    local src, err = blob_source.from_file(self._blob_path, { size = self._rec.size })
+    if not src then error(err, 0) end
+    self._checksum = src:checksum()
+    return self._checksum
+end
+
+function ArtifactSink:commit()
+    if self._closed then return nil, 'closed' end
+    if self._committed then return nil, 'committed' end
+    self._rec.state = 'ready'
+    self._rec.checksum = self:checksum()
+    self._rec.updated_at = os.time()
+    local ok, err = write_json(self._meta_path, self._rec)
+    if not ok then return nil, err end
+    self._committed = true
+    self._closed = true
+    return setmetatable({
+        _store = self._store,
+        _rec = clone_record(self._rec),
+        _blob_path = self._blob_path,
+    }, Artifact), ''
+end
+
+function ArtifactSink:abort()
+    if self._closed then return true end
+    self._closed = true
+    self._aborted = true
+    remove_tree(self._dir)
+    return true
+end
+
+function ArtifactSink:status()
+    return {
+        artifact_ref = self._rec.artifact_ref,
+        state = self._rec.state,
+        durability = self._rec.durability,
+        size = self._rec.size,
+        checksum = self._rec.checksum,
+        committed = self._committed,
+        aborted = self._aborted,
+    }
+end
+
+function Store:create_sink(meta, opts)
     opts = opts or {}
     local durability, err = choose_durability(self, opts.policy)
     if not durability then return nil, err end
@@ -136,8 +249,12 @@ function Store:create(meta, opts)
     local dir = artifact_dir(self, ref, durability)
     local ok, derr = ensure_dir(dir)
     if not ok then return nil, derr end
-    local f, ferr = file.open(blob_path(self, ref, durability), 'w')
-    if not f then return nil, tostring(ferr) end
+    local blob = blob_path(self, ref, durability)
+    local f, ferr = io.open(blob, 'wb')
+    if not f then
+        remove_tree(dir)
+        return nil, tostring(ferr)
+    end
     f:close()
     local rec = {
         artifact_ref = ref,
@@ -149,51 +266,51 @@ function Store:create(meta, opts)
         updated_at = os.time(),
         meta = type(meta) == 'table' and copy_table(meta) or {},
     }
-    local mok, merr = write_json(meta_path(self, ref, durability), rec)
+    local mp = meta_path(self, ref, durability)
+    local mok, merr = write_json(mp, rec)
     if not mok then
         remove_tree(dir)
         return nil, merr
     end
-    return copy_table(rec), ''
+    return setmetatable({
+        _store = self,
+        _rec = rec,
+        _dir = dir,
+        _blob_path = blob,
+        _meta_path = mp,
+        _committed = false,
+        _aborted = false,
+        _closed = false,
+        _checksum = nil,
+    }, ArtifactSink), ''
 end
 
-function Store:append(ref, data)
+function Store:open(ref)
     if not valid_ref(ref) then return nil, 'invalid_artifact_ref' end
-    if type(data) ~= 'string' then return nil, 'invalid_data' end
-    local rec, err = self:describe(ref)
-    if not rec then return nil, err end
-    if rec.state ~= 'writing' then return nil, 'artifact_not_writable' end
-    local f, ferr = file.open(blob_path(self, ref, rec.durability), 'a')
-    if not f then return nil, tostring(ferr) end
-    local n, werr = f:write(data)
-    f:close()
-    if n == nil then return nil, tostring(werr) end
-    rec.size = (rec.size or 0) + #data
-    rec.updated_at = os.time()
-    local ok, merr = write_json(meta_path(self, ref, rec.durability), rec)
-    if not ok then return nil, merr end
-    return copy_table(rec), ''
+    for _, durability in ipairs({ 'transient', 'durable' }) do
+        local rec, err = read_json(meta_path(self, ref, durability))
+        if rec then
+            if rec.state ~= 'ready' then return nil, 'artifact_not_ready' end
+            return setmetatable({
+                _store = self,
+                _rec = rec,
+                _blob_path = blob_path(self, ref, durability),
+            }, Artifact), ''
+        end
+    end
+    return nil, 'not_found'
 end
 
-function Store:finalise(ref)
-    if not valid_ref(ref) then return nil, 'invalid_artifact_ref' end
-    local rec, err = self:describe(ref)
-    if not rec then return nil, err end
-    local raw, rerr = read_file(blob_path(self, ref, rec.durability))
-    if raw == nil then return nil, rerr end
-    rec.state = 'ready'
-    rec.size = #raw
-    rec.checksum = checksum.digest_hex(raw)
-    rec.updated_at = os.time()
-    local ok, merr = write_json(meta_path(self, ref, rec.durability), rec)
-    if not ok then return nil, merr end
-    return copy_table(rec), ''
+function Store:import_source(source, meta, opts)
+    local sink, err = self:create_sink(meta, opts)
+    if not sink then return nil, err end
+    local artefact, cerr = blob_source.copy(source, sink)
+    if not artefact then return nil, cerr end
+    return artefact, ''
 end
 
 function Store:import_path(path, meta, opts)
-    if type(path) ~= 'string' or path == '' then
-        return nil, 'invalid_path'
-    end
+    if type(path) ~= 'string' or path == '' then return nil, 'invalid_path' end
     if path:sub(1, 1) ~= '/' then
         if path:find('..', 1, true) or path:find('/', 1, true) or path:find('\\', 1, true) then
             return nil, 'invalid_path'
@@ -201,62 +318,34 @@ function Store:import_path(path, meta, opts)
         local import_root = os.getenv('DEVICECODE_IMPORT_ARTIFACT_ROOT') or os.getenv('DEVICECODE_ARTIFACT_DIR') or self.durable_root or self.transient_root
         path = join_path(import_root, path)
     end
-    local raw, err = read_file(path)
-    if raw == nil then return nil, err end
-    local rec, cerr = self:create(meta, opts)
-    if not rec then return nil, cerr end
-    local f, ferr = file.open(blob_path(self, rec.artifact_ref, rec.durability), 'w')
-    if not f then
-        self:delete(rec.artifact_ref)
-        return nil, tostring(ferr)
-    end
-    local n, werr = f:write(raw)
-    f:close()
-    if n == nil then
-        self:delete(rec.artifact_ref)
-        return nil, tostring(werr)
-    end
-    rec.size = #raw
-    rec.checksum = checksum.digest_hex(raw)
-    rec.state = 'ready'
-    rec.updated_at = os.time()
-    local ok, merr = write_json(meta_path(self, rec.artifact_ref, rec.durability), rec)
-    if not ok then
-        self:delete(rec.artifact_ref)
-        return nil, merr
-    end
-    return copy_table(rec), ''
+    local src, err = blob_source.from_file(path)
+    if not src then return nil, err end
+    return self:import_source(src, meta, opts)
 end
 
 function Store:describe(ref)
-    if not valid_ref(ref) then return nil, 'invalid_artifact_ref' end
-    for _, durability in ipairs({ 'transient', 'durable' }) do
-        local rec, err = read_json(meta_path(self, ref, durability))
-        if rec then return rec, '' end
-        local msg = tostring(err or '')
-        if not (msg:find('No such file', 1, true) or msg:find('ENOENT', 1, true) or msg:find('no such file', 1, true)) then
-            return nil, err
-        end
-    end
-    return nil, 'not_found'
+    local art, err = self:open(ref)
+    if not art then return nil, err end
+    return art:describe(), ''
 end
 
 function Store:resolve_local(ref)
-    local rec, err = self:describe(ref)
-    if not rec then return nil, err end
-    if rec.state ~= 'ready' and rec.state ~= 'writing' then
-        return nil, 'artifact_unavailable'
-    end
+    local art, err = self:open(ref)
+    if not art then return nil, err end
+    local rec = art:describe()
     return {
-        artifact_ref = ref,
-        path = blob_path(self, ref, rec.durability),
+        artifact_ref = rec.artifact_ref,
         durability = rec.durability,
-        meta = rec,
+        path = art:local_path(),
+        meta = rec.meta,
+        size = rec.size,
+        checksum = rec.checksum,
+        state = rec.state,
     }, ''
 end
 
 function Store:delete(ref)
-    if not valid_ref(ref) then return false, 'invalid_artifact_ref' end
+    if not valid_ref(ref) then return nil, 'invalid_artifact_ref' end
     local rec, err = self:describe(ref)
     if not rec then
         if err == 'not_found' then return true, '' end

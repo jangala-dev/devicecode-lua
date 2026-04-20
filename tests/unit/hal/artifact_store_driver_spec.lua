@@ -1,5 +1,6 @@
-local runfibers   = require 'tests.support.run_fibers'
+local runfibers    = require 'tests.support.run_fibers'
 local store_mod    = require 'services.hal.drivers.artifact_store'
+local blob_source  = require 'services.fabric.blob_source'
 
 local T = {}
 
@@ -7,7 +8,7 @@ local function rmtree(path)
   os.execute(('rm -rf %q'):format(path))
 end
 
-function T.artifact_store_driver_create_append_finalise_and_delete_transient_artifact()
+function T.artifact_store_driver_imports_source_opens_and_deletes_transient_artefact()
   runfibers.run(function()
     local base = ('/tmp/devicecode-artifact-store-%d'):format(math.random(1000000))
     local transient_root = base .. '/transient'
@@ -15,22 +16,23 @@ function T.artifact_store_driver_create_append_finalise_and_delete_transient_art
     rmtree(base)
     local store = assert(store_mod.new({ transient_root = transient_root, durable_root = durable_root, durable_enabled = false }))
 
-    local rec = assert(store:create({ kind = 'update', target = 'mcu' }, { policy = 'transient_only' }))
+    local artefact = assert(store:import_source(blob_source.from_string('hello'), { kind = 'update', target = 'mcu' }, { policy = 'transient_only' }))
+    local rec = artefact:describe()
     assert(rec.durability == 'transient')
-    assert(rec.state == 'writing')
+    assert(rec.state == 'ready')
+    assert(rec.size == 5)
+    assert(type(rec.checksum) == 'string')
 
-    local rec2 = assert(store:append(rec.artifact_ref, 'hello'))
-    assert(rec2.size == 5)
-    local final = assert(store:finalise(rec.artifact_ref))
-    assert(final.state == 'ready')
-    assert(final.size == 5)
-    assert(type(final.checksum) == 'string')
+    local opened = assert(store:open(artefact:ref()))
+    assert(opened:ref() == artefact:ref())
+    local src = opened:open_source()
+    assert((assert(src:read_chunk(0, 99))) == 'hello')
 
-    local resolved = assert(store:resolve_local(rec.artifact_ref))
+    local resolved = assert(store:resolve_local(artefact:ref()))
     assert(type(resolved.path) == 'string')
 
-    assert(store:delete(rec.artifact_ref) == true)
-    local missing, err = store:describe(rec.artifact_ref)
+    assert(store:delete(artefact:ref()) == true)
+    local missing, err = store:open(artefact:ref())
     assert(missing == nil)
     assert(err == 'not_found')
 
@@ -46,22 +48,21 @@ function T.artifact_store_driver_honours_durability_policy()
     rmtree(base)
 
     local store = assert(store_mod.new({ transient_root = transient_root, durable_root = durable_root, durable_enabled = false }))
-    local rec = assert(store:create({ kind = 'update' }, { policy = 'prefer_durable' }))
-    assert(rec.durability == 'transient')
-    local none, err = store:create({ kind = 'update' }, { policy = 'require_durable' })
+    local art = assert(store:import_source(blob_source.from_string('a'), { kind = 'update' }, { policy = 'prefer_durable' }))
+    assert(art:describe().durability == 'transient')
+    local none, err = store:create_sink({ kind = 'update' }, { policy = 'require_durable' })
     assert(none == nil)
     assert(err == 'durable_disabled')
 
     local store2 = assert(store_mod.new({ transient_root = transient_root, durable_root = durable_root, durable_enabled = true }))
-    local rec2 = assert(store2:create({ kind = 'update' }, { policy = 'require_durable' }))
-    assert(rec2.durability == 'durable')
+    local art2 = assert(store2:import_source(blob_source.from_string('b'), { kind = 'update' }, { policy = 'require_durable' }))
+    assert(art2:describe().durability == 'durable')
 
     rmtree(base)
   end, { timeout = 3.0 })
 end
 
-
-function T.artifact_store_driver_imports_into_transient_store_when_durable_is_disabled()
+function T.artifact_store_driver_imports_path_into_transient_store_when_durable_is_disabled()
   runfibers.run(function()
     local base = ('/tmp/devicecode-artifact-store-%d'):format(math.random(1000000))
     local transient_root = base .. '/transient'
@@ -74,26 +75,23 @@ function T.artifact_store_driver_imports_into_transient_store_when_durable_is_di
     assert(f:write('firmware-bytes'))
     assert(f:close())
 
-    local prev = os.getenv('DEVICECODE_IMPORT_ARTIFACT_ROOT')
-    assert(os.setenv == nil or true)
-    -- Lua has no standard setenv; rely on absolute import path below.
-
     local store = assert(store_mod.new({
       transient_root = transient_root,
       durable_root = durable_root,
       durable_enabled = false,
     }))
 
-    local rec = assert(store:import_path(import_root .. '/fw.bin', {
+    local artefact = assert(store:import_path(import_root .. '/fw.bin', {
       kind = 'firmware',
       target = 'cm5',
     }, {
       policy = 'prefer_durable',
     }))
 
+    local rec = artefact:describe()
     assert(rec.durability == 'transient')
     assert(rec.state == 'ready')
-    local resolved = assert(store:resolve_local(rec.artifact_ref))
+    local resolved = assert(store:resolve_local(artefact:ref()))
     assert(resolved.durability == 'transient')
     assert(resolved.path:match('^' .. transient_root:gsub('([%%%^%$%(%)%%.%[%]%*%+%-%?])','%%%1')))
 
@@ -114,15 +112,14 @@ function T.artifact_store_driver_require_durable_rejection_leaves_no_artifact_di
     rmtree(base)
 
     local store = assert(store_mod.new({ transient_root = transient_root, durable_root = durable_root, durable_enabled = false }))
-    local rec, err = store:create({ kind = 'firmware', target = 'cm5' }, { policy = 'require_durable' })
-    assert(rec == nil)
+    local sink, err = store:create_sink({ kind = 'firmware', target = 'cm5' }, { policy = 'require_durable' })
+    assert(sink == nil)
     assert(err == 'durable_disabled')
 
     local p = io.popen(('find %q -mindepth 1 -maxdepth 3 -type d 2>/dev/null | wc -l'):format(base))
     local out = p and p:read('*a') or '0'
     if p then p:close() end
     local n = tonumber((out or ''):match('%d+')) or 0
-    -- only the transient root may have been created at init time; no per-artifact directories should exist.
     assert(n <= 2)
 
     rmtree(base)

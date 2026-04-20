@@ -3,6 +3,7 @@ local sleep     = require 'fibers.sleep'
 local pulse     = require 'fibers.pulse'
 local base      = require 'devicecode.service_base'
 local cap_sdk   = require 'services.hal.sdk.cap'
+local blob_source = require 'services.fabric.blob_source'
 local job_store = require 'services.update.job_store'
 local component_backend_mod = require 'services.update.backends.component_proxy'
 local cm5_backend_mod = require 'services.update.backends.cm5_swupdate'
@@ -338,9 +339,18 @@ function M.start(conn, opts)
         return cfg.artifacts.policies[component] or cfg.artifacts.default_policy or 'prefer_durable'
     end
 
-    local function artifact_describe(ref)
-        local opts = assert(cap_sdk.args.new.ArtifactStoreDescribeOpts(ref))
-        local reply, err = artifact_cap:call_control('describe', opts)
+    local function artifact_snapshot(artefact)
+        if type(artefact) ~= 'table' or type(artefact.describe) ~= 'function' then
+            return nil, 'invalid_artefact'
+        end
+        local rec = artefact:describe()
+        if type(rec) ~= 'table' then return nil, 'invalid_artefact_record' end
+        return rec, nil
+    end
+
+    local function artifact_open(ref)
+        local opts = assert(cap_sdk.args.new.ArtifactStoreOpenOpts(ref))
+        local reply, err = artifact_cap:call_control('open', opts)
         if not reply then return nil, err end
         if reply.ok ~= true then return nil, reply.reason end
         return reply.reason, nil
@@ -360,26 +370,23 @@ function M.start(conn, opts)
         local reply, err = artifact_cap:call_control('import_path', opts)
         if not reply then return nil, nil, err end
         if reply.ok ~= true then return nil, nil, reply.reason end
-        local rec = reply.reason
-        return rec.artifact_ref, rec, nil
+        local artefact = reply.reason
+        local rec, rerr = artifact_snapshot(artefact)
+        if not rec then return nil, nil, rerr end
+        return artefact:ref(), rec, nil
     end
 
     local function artifact_from_data(data, component, metadata)
-        local c_opts = assert(cap_sdk.args.new.ArtifactStoreCreateOpts({ kind = 'update', component = component, metadata = metadata }, artifact_policy_for_component(component)))
-        local c_reply, c_err = artifact_cap:call_control('create', c_opts)
-        if not c_reply then return nil, nil, c_err end
-        if c_reply.ok ~= true then return nil, nil, c_reply.reason end
-        local rec = c_reply.reason
-        local a_opts = assert(cap_sdk.args.new.ArtifactStoreAppendOpts(rec.artifact_ref, data))
-        local a_reply, a_err = artifact_cap:call_control('append', a_opts)
-        if not a_reply then return nil, nil, a_err end
-        if a_reply.ok ~= true then return nil, nil, a_reply.reason end
-        local f_opts = assert(cap_sdk.args.new.ArtifactStoreFinaliseOpts(rec.artifact_ref))
-        local f_reply, f_err = artifact_cap:call_control('finalise', f_opts)
-        if not f_reply then return nil, nil, f_err end
-        if f_reply.ok ~= true then return nil, nil, f_reply.reason end
-        local out = f_reply.reason
-        return out.artifact_ref, out, nil
+        local src = blob_source.from_string(data)
+        local meta = { kind = 'update', component = component, metadata = metadata }
+        local opts = assert(cap_sdk.args.new.ArtifactStoreImportSourceOpts(src, meta, artifact_policy_for_component(component)))
+        local reply, err = artifact_cap:call_control('import_source', opts)
+        if not reply then return nil, nil, err end
+        if reply.ok ~= true then return nil, nil, reply.reason end
+        local artefact = reply.reason
+        local rec, rerr = artifact_snapshot(artefact)
+        if not rec then return nil, nil, rerr end
+        return artefact:ref(), rec, nil
     end
 
     local function save_job(job)
@@ -507,8 +514,10 @@ function M.start(conn, opts)
         local artifact_ref = payload.artifact_ref
         local artifact_meta = nil
         if type(artifact_ref) == 'string' and artifact_ref ~= '' then
-            local desc, derr = artifact_describe(artifact_ref)
-            if not desc then return nil, nil, derr end
+            local artefact, derr = artifact_open(artifact_ref)
+            if not artefact then return nil, nil, derr end
+            local desc, derr2 = artifact_snapshot(artefact)
+            if not desc then return nil, nil, derr2 end
             artifact_meta = desc
         elseif type(payload.artifact) == 'string' and payload.artifact ~= '' then
             local ref, meta, ierr = artifact_import_path(payload.artifact, component, payload.metadata)

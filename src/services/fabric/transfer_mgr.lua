@@ -199,12 +199,20 @@ function M.run(ctx)
 			send_frame(tx_control, 'control', { type = 'xfer_abort', xfer_id = frame.xfer_id, err = 'busy' })
 			return
 		end
+		local sink_factory = ctx.open_incoming_sink or function(meta, _)
+			return blob_source.memory_sink(meta), nil
+		end
+		local sink, serr = sink_factory(frame.meta, frame)
+		if not sink then
+			send_frame(tx_control, 'control', { type = 'xfer_abort', xfer_id = frame.xfer_id, err = tostring(serr or 'sink_open_failed') })
+			return
+		end
 		incoming = {
 			xfer_id = frame.xfer_id,
 			size = frame.size,
 			checksum = frame.checksum,
 			meta = frame.meta,
-			sink = blob_source.memory_sink(),
+			sink = sink,
 			offset = 0,
 			state = 'receiving',
 			deadline = runtime.now() + phase_timeout,
@@ -244,7 +252,12 @@ function M.run(ctx)
 			clear_incoming('checksum_mismatch')
 			return
 		end
-		incoming.sink:commit()
+		local artefact, cerr = incoming.sink:commit()
+		if not artefact then
+			send_frame(tx_control, 'control', { type = 'xfer_abort', xfer_id = frame.xfer_id, err = tostring(cerr or 'commit_failed') })
+			clear_incoming(tostring(cerr or 'commit_failed'))
+			return
+		end
 		local receiver = incoming.meta and incoming.meta.receiver or nil
 		if type(receiver) == 'table' then
 			incoming.state = 'delivering'
@@ -255,9 +268,10 @@ function M.run(ctx)
 				size = incoming.size,
 				checksum = incoming.checksum,
 				meta = incoming.meta,
-				data = incoming.sink:tostring(),
+				artefact = artefact,
 			}, { timeout = phase_timeout })
 			if reply == nil then
+				pcall(function() artefact:delete() end)
 				send_frame(tx_control, 'control', { type = 'xfer_abort', xfer_id = frame.xfer_id, err = tostring(err or 'receiver_failed') })
 				clear_incoming(tostring(err or 'receiver_failed'))
 				return

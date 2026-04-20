@@ -324,49 +324,31 @@ end
 
 -- artifact_store capability -------------------------------------------------
 
-function PlatformDriver:artifact_store_create(opts)
-    if opts == nil or getmetatable(opts) ~= cap_args.ArtifactStoreCreateOpts then
-        return false, 'invalid opts'
-    end
-    local rec, err = self.artifact_store:create(opts.meta, { policy = opts.policy })
-    if not rec then return false, err end
-    return true, rec
-end
-
-function PlatformDriver:artifact_store_append(opts)
-    if opts == nil or getmetatable(opts) ~= cap_args.ArtifactStoreAppendOpts then
-        return false, 'invalid opts'
-    end
-    local rec, err = self.artifact_store:append(opts.artifact_ref, opts.data)
-    if not rec then return false, err end
-    return true, rec
-end
-
-function PlatformDriver:artifact_store_finalise(opts)
-    if opts == nil or getmetatable(opts) ~= cap_args.ArtifactStoreFinaliseOpts then
-        return false, 'invalid opts'
-    end
-    local rec, err = self.artifact_store:finalise(opts.artifact_ref)
-    if not rec then return false, err end
-    return true, rec
-end
-
 function PlatformDriver:artifact_store_import_path(opts)
     if opts == nil or getmetatable(opts) ~= cap_args.ArtifactStoreImportPathOpts then
         return false, 'invalid opts'
     end
-    local rec, err = self.artifact_store:import_path(opts.path, opts.meta, { policy = opts.policy })
-    if not rec then return false, err end
-    return true, rec
+    local art, err = self.artifact_store:import_path(opts.path, opts.meta, { policy = opts.policy })
+    if not art then return false, err end
+    return true, art
 end
 
-function PlatformDriver:artifact_store_describe(opts)
-    if opts == nil or getmetatable(opts) ~= cap_args.ArtifactStoreDescribeOpts then
+function PlatformDriver:artifact_store_import_source(opts)
+    if opts == nil or getmetatable(opts) ~= cap_args.ArtifactStoreImportSourceOpts then
         return false, 'invalid opts'
     end
-    local rec, err = self.artifact_store:describe(opts.artifact_ref)
-    if not rec then return false, err end
-    return true, rec
+    local art, err = self.artifact_store:import_source(opts.source, opts.meta, { policy = opts.policy })
+    if not art then return false, err end
+    return true, art
+end
+
+function PlatformDriver:artifact_store_open(opts)
+    if opts == nil or getmetatable(opts) ~= cap_args.ArtifactStoreOpenOpts then
+        return false, 'invalid opts'
+    end
+    local art, err = self.artifact_store:open(opts.artifact_ref)
+    if not art then return false, err end
+    return true, art
 end
 
 function PlatformDriver:artifact_store_delete(opts)
@@ -499,11 +481,9 @@ function PlatformDriver:start()
         status = function(opts) return self:control_store_status(opts) end,
     }
     local artifact_methods = {
-        create = function(opts) return self:artifact_store_create(opts) end,
-        append = function(opts) return self:artifact_store_append(opts) end,
-        finalise = function(opts) return self:artifact_store_finalise(opts) end,
         import_path = function(opts) return self:artifact_store_import_path(opts) end,
-        describe = function(opts) return self:artifact_store_describe(opts) end,
+        import_source = function(opts) return self:artifact_store_import_source(opts) end,
+        open = function(opts) return self:artifact_store_open(opts) end,
         delete = function(opts) return self:artifact_store_delete(opts) end,
         status = function(opts) return self:artifact_store_status(opts) end,
     }
