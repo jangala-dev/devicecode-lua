@@ -58,6 +58,18 @@ local function wait_retained_state(conn, topic, pred, timeout)
     end, { timeout = timeout or 1.0, interval = 0.01 })
 end
 
+local function wait_service_running(conn, name, timeout)
+    return wait_retained_state(conn, { 'svc', name, 'status' }, function(payload)
+        return type(payload) == 'table' and payload.state == 'running'
+    end, timeout or 1.5)
+end
+
+local function wait_device_component(conn, name, pred, timeout)
+    return wait_retained_state(conn, { 'state', 'device', 'component', name }, function(payload)
+        return type(payload) == 'table' and pred(payload)
+    end, timeout or 1.5)
+end
+
 function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 	runfibers.run(function(scope)
 		local orig_sleep = sleep_mod.sleep
@@ -102,7 +114,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status()
-			remote_member_conn:publish({ 'member', 'mcu', 'status' }, {
+			remote_member_conn:retain({ 'member', 'mcu', 'status' }, {
 				version = versions.mcu,
 				state = 'running',
 				incarnation = incarnation.mcu,
@@ -189,8 +201,13 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		assert(wait_ready(caller, 'cm5-uart-mcu', 2.0) == true)
 		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
+		assert(wait_service_running(caller, 'device', 1.5) == true)
+		assert(wait_service_running(caller, 'update', 1.5) == true)
 
 		publish_remote_status()
+		assert(wait_device_component(caller, 'mcu', function(payload)
+			return payload.available == true and payload.version == versions.mcu and payload.incarnation == incarnation.mcu
+		end, 1.5))
 
 		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
 			component = 'mcu',
@@ -228,7 +245,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 			return ok and type(payload) == 'table'
 				and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'succeeded'
-		end, { timeout = 1.5, interval = 0.01 }))
+		end, { timeout = 2.5, interval = 0.01 }))
 
 		local final, ferr = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
 		assert(ferr == nil)
@@ -287,7 +304,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status(st)
-			remote_member_conn:publish({ 'member', 'mcu', 'status' }, st or {
+			remote_member_conn:retain({ 'member', 'mcu', 'status' }, st or {
 				version = versions.mcu,
 				state = 'running',
 				incarnation = incarnation.mcu,
@@ -375,7 +392,12 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 
 		assert(wait_ready(caller, 'cm5-uart-mcu', 2.0) == true)
 		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
+		assert(wait_service_running(caller, 'device', 1.5) == true)
+		assert(wait_service_running(caller, 'update', 1.5) == true)
 		publish_remote_status(current_state)
+		assert(wait_device_component(caller, 'mcu', function(payload)
+			return payload.available == true and payload.version == current_state.version and payload.incarnation == current_state.incarnation
+		end, 1.5))
 
 		local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
 			component = 'mcu',
@@ -398,7 +420,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 			return ok and type(payload) == 'table' and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'failed'
 				and tostring(payload.job.lifecycle.error):match('apply_failed') ~= nil
-		end, { timeout = 1.5, interval = 0.01 }))
+		end, { timeout = 2.5, interval = 0.01 }))
 	end, { timeout = 4.0 })
 end
 
