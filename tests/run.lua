@@ -53,6 +53,7 @@ local files = {
 	'integration.devhost.main_failure_spec',
 	'integration.devhost.config_recovery_spec',
 	'integration.devhost.fabric_session_spec',
+	'integration.devhost.fabric_service_session_spec',
 	'integration.devhost.fabric_transfer_receiver_handoff_spec',
 	'integration.devhost.update_cm5_local_spec',
 	'integration.devhost.update_restart_reconcile_spec',

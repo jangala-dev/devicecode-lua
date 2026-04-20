@@ -29,6 +29,13 @@ local function q(cap)
 	return mailbox.new(cap, { full = 'reject_newest' })
 end
 
+local function spawn_required(name, fn)
+	local ok, err = fibers.spawn(fn)
+	if not ok then
+		error((name or 'helper') .. ' spawn failed: ' .. tostring(err), 0)
+	end
+end
+
 function M.run(params)
 	assert(type(params) == 'table', 'session.run expects params table')
 
@@ -75,7 +82,7 @@ function M.run(params)
 		end,
 	})
 
-	fibers.spawn(function()
+	spawn_required('reader', function()
 		reader.run({
 			transport          = transport,
 			link_id            = link_id,
@@ -90,7 +97,7 @@ function M.run(params)
 		})
 	end)
 
-	fibers.spawn(function()
+	spawn_required('writer', function()
 		writer.run({
 			transport    = transport,
 			link_id      = link_id,
@@ -103,7 +110,7 @@ function M.run(params)
 		})
 	end)
 
-	fibers.spawn(function()
+	spawn_required('session_ctl', function()
 		session_ctl.run({
 			link_id            = link_id,
 			svc                = svc,
@@ -120,7 +127,7 @@ function M.run(params)
 		})
 	end)
 
-	fibers.spawn(function()
+	spawn_required('rpc_bridge', function()
 		rpc_bridge.run({
 			link_id               = link_id,
 			svc                   = svc,
@@ -143,7 +150,7 @@ function M.run(params)
 		})
 	end)
 
-	fibers.spawn(function()
+	spawn_required('transfer_mgr', function()
 		transfer_mgr.run({
 			link_id                  = link_id,
 			conn                     = state_conn,

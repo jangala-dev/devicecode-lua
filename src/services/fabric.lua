@@ -16,6 +16,7 @@ local fibers   = require 'fibers'
 local mailbox  = require 'fibers.mailbox'
 local sleep    = require 'fibers.sleep'
 local safe     = require 'coxpcall'
+local op       = require 'fibers.op'
 
 local base     = require 'devicecode.service_base'
 local session  = require 'services.fabric.session'
@@ -134,6 +135,7 @@ local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
 		error(err or 'failed to create link scope', 0)
 	end
 
+	local link_conn = conn:derive()
 	local transfer_tx, transfer_rx = q(8)
 
 	state.links[link_id] = {
@@ -153,14 +155,40 @@ local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
 	svc:obs_event('link_spawn', { link_id = link_id, ts = svc:now() })
 
 	local ok, serr = child:spawn(function()
-		session.run({
-			svc = svc,
-			conn = conn,
-			link_id = link_id,
-			cfg = cfg,
-			transfer_ctl_rx = transfer_rx,
-			report_tx = report_tx,
-		})
+		local ok_run, run_err = safe.xpcall(function()
+			session.run({
+				svc = svc,
+				conn = link_conn,
+				link_id = link_id,
+				cfg = cfg,
+				transfer_ctl_rx = transfer_rx,
+				report_tx = report_tx,
+			})
+		end, debug.traceback)
+
+		local ev
+		if ok_run then
+			ev = {
+				tag = 'link_exit',
+				link_id = link_id,
+				st = 'ok',
+				report = nil,
+				primary = nil,
+			}
+		else
+			ev = {
+				tag = 'link_exit',
+				link_id = link_id,
+				st = 'failed',
+				report = nil,
+				primary = tostring(run_err),
+			}
+		end
+
+		local send_ok, send_err = report_tx:send(ev)
+		if send_ok ~= true then
+			svc:obs_log('warn', { what = 'link_exit_report_drop', link_id = link_id, reason = tostring(send_err) })
+		end
 	end)
 	if not ok then
 		state.links[link_id] = nil
@@ -210,6 +238,11 @@ local function handle_link_exit(state, svc, conn, ev)
 	local rec = state.links[link_id]
 	if rec then
 		state.links[link_id] = nil
+		if rec.scope then
+			safe.pcall(function()
+				op.perform_raw(rec.scope:join_op())
+			end)
+		end
 	end
 
 	local desired = state.desired[link_id]
@@ -296,19 +329,6 @@ local function next_shell_event(state, cfg_watch, transfer_ep, report_rx)
 		report = report_event_op(report_rx),
 	}
 
-	for link_id, rec in pairs(state.links) do
-		if rec.scope then
-			ops['join:' .. link_id] = rec.scope:join_op():wrap(function(st, rep, primary)
-				return {
-					link_id = link_id,
-					st = st,
-					report = rep,
-					primary = primary,
-				}
-			end)
-		end
-	end
-
 	for link_id, at in pairs(state.restart_at) do
 		local dt = at - fibers.now()
 		if dt < 0 then dt = 0 end
@@ -388,12 +408,11 @@ function M.start(conn, opts)
 					}
 					publish_summary(conn, svc, state)
 				end
+			elseif ev.tag == 'link_exit' then
+				handle_link_exit(state, svc, conn, ev)
 			else
 				svc:obs_log('warn', { what = 'unknown_fabric_report', tag = tostring(ev.tag) })
 			end
-
-		elseif string.sub(which, 1, 5) == 'join:' then
-			handle_link_exit(state, svc, conn, item)
 
 		elseif string.sub(which, 1, 8) == 'restart:' then
 			local link_id = item.link_id
