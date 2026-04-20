@@ -1,6 +1,5 @@
 local fibers = require "fibers"
 local file   = require "fibers.io.file"
-local exec   = require "fibers.io.exec"
 local cjson  = require "cjson.safe"
 
 local perform = fibers.perform
@@ -31,11 +30,8 @@ local function dirname(path)
 end
 
 local function ensure_dir(path)
-    local cmd = exec.command('mkdir', '-p', path)
-    local st = perform(cmd:run_op())
-    if st ~= 'exited' then
-        return false, 'mkdir_failed:' .. tostring(path)
-    end
+    local ok, err = file.mkdir_p(path)
+    if not ok then return false, tostring(err or 'mkdir_failed') end
     return true, ''
 end
 
@@ -57,12 +53,12 @@ local function write_file(path, data)
     local n, werr = f:write(data)
     f:close()
     if n == nil then
-        os.remove(tmp)
+        pcall(function() file.unlink(tmp) end)
         return false, tostring(werr)
     end
-    local ok_rename, rerr = os.rename(tmp, path)
+    local ok_rename, rerr = file.rename(tmp, path)
     if not ok_rename then
-        os.remove(tmp)
+        pcall(function() file.unlink(tmp) end)
         return false, tostring(rerr)
     end
     return true, ''
@@ -178,7 +174,7 @@ end
 function Store:delete(ns, key)
     if not valid_ns(ns) then return false, 'invalid_namespace' end
     if not valid_key(key) then return false, 'invalid_key' end
-    pcall(os.remove, record_path(self, ns, key))
+    pcall(function() file.unlink(record_path(self, ns, key)) end)
     local keys, err = load_index(self, ns)
     if not keys then return false, err end
     local out = {}

@@ -1,37 +1,13 @@
 -- services/fabric/blob_source.lua
 --
--- Canonical local artefact abstractions used by fabric transfer and host
--- artefact staging.
+-- Small, OS-agnostic object source/sink helpers shared by fabric transfer
+-- and higher-level services. File-backed artefacts belong behind HAL/host
+-- capabilities; this module only defines abstract sources/sinks plus small
+-- in-memory helpers for tests and simple local flows.
 
 local checksum = require 'services.fabric.checksum'
 
 local M = {}
-
-local function file_size(path)
-    local f, err = io.open(path, 'rb')
-    if not f then return nil, tostring(err) end
-    local sz = f:seek('end')
-    f:close()
-    if type(sz) ~= 'number' then return nil, 'seek_failed' end
-    return sz, ''
-end
-
-local function checksum_of_file(path)
-    local f, err = io.open(path, 'rb')
-    if not f then return nil, tostring(err) end
-    local a, b = 1, 0
-    local mod = 65521
-    while true do
-        local chunk = f:read(64 * 1024)
-        if chunk == nil or chunk == '' then break end
-        for i = 1, #chunk do
-            a = (a + chunk:byte(i)) % mod
-            b = (b + a) % mod
-        end
-    end
-    f:close()
-    return ('%08x'):format(b * 65536 + a), ''
-end
 
 local function copy_table(t)
     local out = {}
@@ -68,52 +44,6 @@ end
 function M.from_string(s)
     assert(type(s) == 'string', 'blob_source.from_string expects string')
     return setmetatable({ _data = s }, StringSource)
-end
-
-local FileSource = {}
-FileSource.__index = FileSource
-
-function FileSource:size()
-    return self._size
-end
-
-function FileSource:checksum()
-    if not self._checksum then
-        local sum, err = checksum_of_file(self._path)
-        if not sum then error(err, 0) end
-        self._checksum = sum
-    end
-    return self._checksum
-end
-
-function FileSource:read_chunk(offset, max_bytes)
-    offset = offset or 0
-    max_bytes = max_bytes or self._size
-    if offset < 0 then return nil, 'invalid_offset' end
-    if offset >= self._size then return '', nil end
-    local f, err = io.open(self._path, 'rb')
-    if not f then return nil, tostring(err) end
-    local ok, serr = f:seek('set', offset)
-    if ok == nil then f:close(); return nil, tostring(serr or 'seek_failed') end
-    local data = f:read(math.min(max_bytes, self._size - offset)) or ''
-    f:close()
-    return data, nil
-end
-
-function FileSource:close()
-    return true
-end
-
-function M.from_file(path, opts)
-    opts = opts or {}
-    assert(type(path) == 'string' and path ~= '', 'blob_source.from_file expects path')
-    local sz, err = file_size(path)
-    if sz == nil then return nil, err end
-    return setmetatable({
-        _path = path,
-        _size = opts.size or sz,
-        _checksum = opts.checksum,
-    }, FileSource), ''
 end
 
 local MemoryArtefact = {}
@@ -168,6 +98,7 @@ function MemorySink:write_chunk(offset, data)
     if type(data) ~= 'string' then return nil, 'invalid_chunk' end
     self._parts[#self._parts + 1] = data
     self._size = self._size + #data
+    self._checksum = nil
     return true
 end
 
@@ -184,6 +115,7 @@ end
 
 function MemorySink:commit()
     if self._closed then return nil, 'closed' end
+    if self._committed then return nil, 'committed' end
     self._committed = true
     self._closed = true
     return setmetatable({
@@ -196,6 +128,12 @@ function MemorySink:abort()
     if self._closed then return true end
     self._closed = true
     self._aborted = true
+    return true
+end
+
+function MemorySink:close()
+    if self._closed then return true end
+    self._closed = true
     return true
 end
 
@@ -221,15 +159,24 @@ function M.memory_sink(meta)
 end
 
 function M.is_source(v)
-    return type(v) == 'table' and type(v.read_chunk) == 'function' and type(v.size) == 'function' and type(v.checksum) == 'function'
+    return type(v) == 'table'
+        and type(v.read_chunk) == 'function'
+        and type(v.size) == 'function'
+        and type(v.checksum) == 'function'
 end
 
 function M.is_sink(v)
-    return type(v) == 'table' and type(v.write_chunk) == 'function' and type(v.commit) == 'function' and type(v.abort) == 'function'
+    return type(v) == 'table'
+        and type(v.write_chunk) == 'function'
+        and type(v.commit) == 'function'
+        and type(v.abort) == 'function'
 end
 
 function M.is_stored_artefact(v)
-    return type(v) == 'table' and type(v.open_source) == 'function' and type(v.ref) == 'function' and type(v.describe) == 'function'
+    return type(v) == 'table'
+        and type(v.open_source) == 'function'
+        and type(v.ref) == 'function'
+        and type(v.describe) == 'function'
 end
 
 function M.normalise_source(source)

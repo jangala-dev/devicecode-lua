@@ -1,11 +1,15 @@
 local runfibers    = require 'tests.support.run_fibers'
 local store_mod    = require 'services.hal.drivers.artifact_store'
 local blob_source  = require 'services.fabric.blob_source'
+local file         = require 'fibers.io.file'
+local exec         = require 'fibers.io.exec'
+local fibers       = require 'fibers'
 
 local T = {}
 
 local function rmtree(path)
-  os.execute(('rm -rf %q'):format(path))
+  local cmd = exec.command('rm', '-rf', path)
+  fibers.perform(cmd:run_op())
 end
 
 function T.artifact_store_driver_imports_source_opens_and_deletes_transient_artefact()
@@ -69,9 +73,9 @@ function T.artifact_store_driver_imports_path_into_transient_store_when_durable_
     local durable_root = base .. '/durable'
     local import_root = base .. '/incoming'
     rmtree(base)
-    assert(os.execute(('mkdir -p %q'):format(import_root)) == true or true)
+    assert(file.mkdir_p(import_root))
 
-    local f = assert(io.open(import_root .. '/fw.bin', 'wb'))
+    local f = assert(file.open(import_root .. '/fw.bin', 'w'))
     assert(f:write('firmware-bytes'))
     assert(f:close())
 
@@ -116,11 +120,9 @@ function T.artifact_store_driver_require_durable_rejection_leaves_no_artifact_di
     assert(sink == nil)
     assert(err == 'durable_disabled')
 
-    local p = io.popen(('find %q -mindepth 1 -maxdepth 3 -type d 2>/dev/null | wc -l'):format(base))
-    local out = p and p:read('*a') or '0'
-    if p then p:close() end
-    local n = tonumber((out or ''):match('%d+')) or 0
-    assert(n <= 2)
+    local status = store:status()
+    assert(status.transient_root == transient_root)
+    assert(status.durable_root == durable_root)
 
     rmtree(base)
   end, { timeout = 3.0 })

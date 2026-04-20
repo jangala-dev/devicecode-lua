@@ -1,7 +1,8 @@
 local fibers      = require 'fibers'
-local exec        = require 'fibers.io.exec'
+local file        = require 'fibers.io.file'
 local cjson       = require 'cjson.safe'
 local uuid        = require 'uuid'
+local checksum    = require 'services.fabric.checksum'
 local blob_source = require 'services.fabric.blob_source'
 
 local perform = fibers.perform
@@ -28,46 +29,65 @@ local function dirname(path)
 end
 
 local function ensure_dir(path)
-    local cmd = exec.command('mkdir', '-p', path)
-    local st = perform(cmd:run_op())
-    if st ~= 'exited' then
-        return false, 'mkdir_failed:' .. tostring(path)
+    local ok, err = file.mkdir_p(path)
+    if not ok then
+        return false, tostring(err or 'mkdir_failed')
     end
     return true, ''
 end
 
 local function remove_tree(path)
-    local cmd = exec.command('rm', '-rf', path)
+    local cmd = require('fibers.io.exec').command('rm', '-rf', path)
     local st = perform(cmd:run_op())
     return st == 'exited'
 end
 
+local function adler32_stream(stream)
+    local a, b = 1, 0
+    local mod = 65521
+    while true do
+        local chunk, err = stream:read_some(64 * 1024)
+        if err ~= nil then return nil, tostring(err) end
+        if chunk == nil then break end
+        for i = 1, #chunk do
+            a = (a + chunk:byte(i)) % mod
+            b = (b + a) % mod
+        end
+    end
+    return ('%08x'):format(b * 65536 + a), ''
+end
+
 local function read_file(path)
-    local f, err = io.open(path, 'rb')
+    local f, err = file.open(path, 'r')
     if not f then return nil, tostring(err) end
-    local raw = f:read('*a')
+    local raw, rerr = f:read_all()
     f:close()
-    if raw == nil then return nil, 'read_failed' end
+    if raw == nil then return nil, tostring(rerr or 'read_failed') end
     return raw, ''
 end
 
 local function write_file(path, data)
     local ok, derr = ensure_dir(dirname(path))
     if not ok then return false, derr end
-    local tmp = path .. '.tmp-' .. tostring(os.time()) .. '-' .. tostring(math.random(1000000))
-    local f, err = io.open(tmp, 'wb')
-    if not f then return false, tostring(err) end
-    local okw, werr = f:write(data)
-    f:close()
-    if not okw then
-        os.remove(tmp)
+    local tmp, terr = file.tmpfile(384, dirname(path))
+    if not tmp then return false, tostring(terr) end
+    local n, werr = tmp:write(data)
+    if n == nil then
+        tmp:close()
         return false, tostring(werr or 'write_failed')
     end
-    local okr, rerr = os.rename(tmp, path)
+    local okf, ferr = tmp:flush()
+    if okf == nil then
+        tmp:close()
+        return false, tostring(ferr or 'flush_failed')
+    end
+    local okr, rerr = tmp:rename(path)
     if not okr then
-        os.remove(tmp)
+        tmp:close()
         return false, tostring(rerr)
     end
+    local okc, cerr = tmp:close()
+    if okc == nil then return false, tostring(cerr) end
     return true, ''
 end
 
@@ -133,6 +153,47 @@ local function clone_record(rec)
     return out
 end
 
+local FileArtefactSource = {}
+FileArtefactSource.__index = FileArtefactSource
+
+function FileArtefactSource:size()
+    return self._size
+end
+
+function FileArtefactSource:checksum()
+    if self._checksum then return self._checksum end
+    local f, err = file.open(self._path, 'r')
+    if not f then error(tostring(err), 0) end
+    local sum, serr = adler32_stream(f)
+    f:close()
+    if not sum then error(tostring(serr), 0) end
+    self._checksum = sum
+    return self._checksum
+end
+
+function FileArtefactSource:read_chunk(offset, max_bytes)
+    offset = offset or 0
+    max_bytes = max_bytes or self._size
+    if offset < 0 then return nil, 'invalid_offset' end
+    if offset >= self._size then return '', nil end
+    local f, err = file.open(self._path, 'r')
+    if not f then return nil, tostring(err) end
+    local pos, serr = f:seek('set', offset)
+    if pos == nil then
+        f:close()
+        return nil, tostring(serr or 'seek_failed')
+    end
+    local n = math.min(max_bytes, self._size - offset)
+    local data, rerr = f:read_exactly(n)
+    f:close()
+    if data == nil then return nil, tostring(rerr or 'read_failed') end
+    return data, nil
+end
+
+function FileArtefactSource:close()
+    return true
+end
+
 local Artifact = {}
 Artifact.__index = Artifact
 
@@ -153,10 +214,11 @@ function Artifact:checksum()
 end
 
 function Artifact:open_source()
-    return assert(blob_source.from_file(self._blob_path, {
-        size = self._rec.size,
-        checksum = self._rec.checksum,
-    }))
+    return setmetatable({
+        _path = self._blob_path,
+        _size = self._rec.size,
+        _checksum = self._rec.checksum,
+    }, FileArtefactSource)
 end
 
 function Artifact:delete()
@@ -179,11 +241,11 @@ function ArtifactSink:write_chunk(offset, data)
     if self._committed then return nil, 'committed' end
     if type(data) ~= 'string' then return nil, 'invalid_chunk' end
     if offset ~= self._rec.size then return nil, 'unexpected_offset' end
-    local f, err = io.open(self._blob_path, 'ab')
+    local f, err = file.open(self._blob_path, 'a+')
     if not f then return nil, tostring(err) end
-    local ok, werr = f:write(data)
+    local n, werr = f:write(data)
     f:close()
-    if not ok then return nil, tostring(werr or 'write_failed') end
+    if n == nil then return nil, tostring(werr or 'write_failed') end
     self._rec.size = self._rec.size + #data
     self._rec.updated_at = os.time()
     local mok, merr = write_json(self._meta_path, self._rec)
@@ -198,8 +260,10 @@ end
 
 function ArtifactSink:checksum()
     if self._checksum then return self._checksum end
-    local src, err = blob_source.from_file(self._blob_path, { size = self._rec.size })
-    if not src then error(err, 0) end
+    local src = setmetatable({
+        _path = self._blob_path,
+        _size = self._rec.size,
+    }, FileArtefactSource)
     self._checksum = src:checksum()
     return self._checksum
 end
@@ -229,6 +293,12 @@ function ArtifactSink:abort()
     return true
 end
 
+function ArtifactSink:close()
+    if self._closed then return true end
+    self._closed = true
+    return true
+end
+
 function ArtifactSink:status()
     return {
         artifact_ref = self._rec.artifact_ref,
@@ -250,7 +320,7 @@ function Store:create_sink(meta, opts)
     local ok, derr = ensure_dir(dir)
     if not ok then return nil, derr end
     local blob = blob_path(self, ref, durability)
-    local f, ferr = io.open(blob, 'wb')
+    local f, ferr = file.open(blob, 'w+')
     if not f then
         remove_tree(dir)
         return nil, tostring(ferr)
@@ -318,8 +388,12 @@ function Store:import_path(path, meta, opts)
         local import_root = os.getenv('DEVICECODE_IMPORT_ARTIFACT_ROOT') or os.getenv('DEVICECODE_ARTIFACT_DIR') or self.durable_root or self.transient_root
         path = join_path(import_root, path)
     end
-    local src, err = blob_source.from_file(path)
-    if not src then return nil, err end
+    local f, err = file.open(path, 'r')
+    if not f then return nil, tostring(err) end
+    local sz, serr = f:seek('end')
+    if sz == nil then f:close(); return nil, tostring(serr or 'seek_failed') end
+    f:close()
+    local src = setmetatable({ _path = path, _size = sz }, FileArtefactSource)
     return self:import_source(src, meta, opts)
 end
 

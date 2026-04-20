@@ -1,10 +1,13 @@
 local runfibers = require 'tests.support.run_fibers'
-local store_mod  = require 'services.hal.drivers.control_store'
+local store_mod = require 'services.hal.drivers.control_store'
+local exec      = require 'fibers.io.exec'
+local fibers    = require 'fibers'
 
 local T = {}
 
 local function rmtree(path)
-  os.execute(('rm -rf %q'):format(path))
+  local cmd = exec.command('rm', '-rf', path)
+  fibers.perform(cmd:run_op())
 end
 
 function T.control_store_driver_put_get_list_and_delete_records()
