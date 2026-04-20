@@ -513,29 +513,75 @@ function Modem:emitter()
     end
 end
 
-function Modem:state_monitor()
-    self.log:debug({ what = 'state_monitor_started', imei = self.imei })
+--- Handles both modem card state changes and SIM presence lifecycle in a single fiber.
+--- card_state is always current when SIM removal decisions are made, eliminating the
+--- need for backend-level guards about whether to reset on SIM absent.
+function Modem:modem_lifecycle_monitor()
+    self.log:debug({ what = 'lifecycle_monitor_started', imei = self.imei })
 
     fibers.current_scope():finally(function()
-        self.log:debug({ what = 'state_monitor_exiting', imei = self.imei })
+        self.log:debug({ what = 'lifecycle_monitor_exiting', imei = self.imei })
     end)
 
+    local init_card_state, err = fibers.perform(self.backend:monitor_state_op())
+    if err ~= "" then
+        self.log:error({ what = 'state_monitor_init_failed', imei = self.imei, err = tostring(err) })
+        return
+    end
+    ---@cast init_card_state ModemStateEvent
+    local card_state = init_card_state and init_card_state.to
+    local sim_present = nil
     while true do
-        local state_update, err = fibers.perform(self.backend:monitor_state_op())
-        ---@cast state_update ModemStateEvent
-        if err == 'Command closed' then
-            self.log:error({ what = 'state_monitor_closed', imei = self.imei })
-            break
-        elseif err ~= "" then
-            self.log:error({ what = 'state_monitor_error', imei = self.imei, err = tostring(err) })
-        elseif state_update then
-            self.log:debug({ what = 'state_change', imei = self.imei, from = state_update.from, to = state_update.to })
-            self.state_pulse:signal() -- signal that modem state has changed
-            local ok, emit_err = self:_emit_state('card', state_update)
-            if not ok then
-                self.log:error({ what = 'state_emit_failed', imei = self.imei, err = tostring(emit_err) })
+        local source, v1, v2 = fibers.perform(op.named_choice {
+            card_change = self.backend:monitor_state_op(),
+            sim_change  = self.backend:wait_for_sim_present_op(),
+            send        = self.sim_state_ch:put_op(sim_present),
+        })
+
+        if source == "card_change" then
+            local state_update, err = v1, v2
+            ---@cast state_update ModemStateEvent
+            if err == 'Command closed' then
+                self.log:error({ what = 'state_monitor_closed', imei = self.imei })
+                break
+            elseif err ~= "" then
+                self.log:error({ what = 'state_monitor_error', imei = self.imei, err = tostring(err) })
+            elseif state_update then
+                card_state = state_update.to
+                self.log:debug({ what = 'state_change', imei = self.imei, from = state_update.from, to = state_update.to })
+                self.state_pulse:signal()
+                local ok, emit_err = self:_emit_state('card', state_update)
+                if not ok then
+                    self.log:error({ what = 'state_emit_failed', imei = self.imei, err = tostring(emit_err) })
+                end
+            end
+        elseif source == "sim_change" then
+            local present, err = v1, v2
+            if err == "cancelled" or err == "Stream closed" or err == "Command closed" then
+                self.log:debug({ what = 'sim_monitor_closed', imei = self.imei, err = tostring(err) })
+                break
+            elseif err ~= "" then
+                self.log:error({ what = 'sim_poll_error', imei = self.imei, err = tostring(err) })
+                sleep.sleep(DEFAULT_CACHE_TIMEOUT)
+            elseif present == true then
+                self.log:debug({ what = 'sim_inserted', imei = self.imei })
+                sim_present = true
+                self.sim_inserted_pulse:signal()
+                self.state_pulse:signal()
+                self:_emit_state("sim_status", "present")
+            elseif present == false then
+                self.log:debug({ what = 'sim_removed', imei = self.imei })
+                sim_present = false
+                self:_emit_state("sim_status", "absent")
+                -- Only reset if the card is not already in a failed state.
+                -- If failed, a SIM-absent report is expected and resetting would cause a boot loop.
+                if card_state ~= "failed" then
+                    self:reset()
+                    self.scope:cancel("modem restarting")
+                end
             end
         end
+        -- source == "send": listener consumed sim_present, loop to re-offer
     end
 end
 
@@ -593,45 +639,6 @@ function Modem:control_manager()
     end
 end
 
-function Modem:sim_lifecycle_monitor()
-    self.log:debug({ what = 'sim_monitor_started', imei = self.imei })
-
-    fibers.current_scope():finally(function()
-        self.log:debug({ what = 'sim_monitor_exiting', imei = self.imei })
-    end)
-
-    local sim_present = nil
-    while true do
-        local source, v1, v2 = fibers.perform(op.named_choice {
-            sim_change = self.backend:wait_for_sim_present_op(),
-            send       = self.sim_state_ch:put_op(sim_present),
-        })
-        if source == "sim_change" then
-            local present, err = v1, v2
-            if err == "cancelled" or err == "Stream closed" or err == "Command closed" then
-                self.log:debug({ what = 'sim_monitor_closed', imei = self.imei, err = tostring(err) })
-                break
-            elseif err ~= "" then
-                self.log:error({ what = 'sim_poll_error', imei = self.imei, err = tostring(err) })
-                sleep.sleep(DEFAULT_CACHE_TIMEOUT)
-            elseif present then
-                self.log:debug({ what = 'sim_inserted', imei = self.imei })
-                sim_present = true
-                self.sim_inserted_pulse:signal()
-                self.state_pulse:signal()
-                self:_emit_state("sim_status", "present")
-            else
-                self.log:debug({ what = 'sim_removed', imei = self.imei })
-                self:reset() -- restart to enter failed state (cleaner than implementing a new removed state)
-                sim_present = false
-                self:_emit_state("sim_status", "absent")
-                self.scope:cancel("modem restarting")
-            end
-        end
-        -- source == "send": listener consumed the state, loop to offer it again
-    end
-end
-
 ---- Driver Functions ----
 
 --- Spawn driver services
@@ -645,10 +652,9 @@ function Modem:start()
         return false, "capabilities not applied"
     end
 
-    self.scope:spawn(function() self:state_monitor() end)
+    self.scope:spawn(function() self:modem_lifecycle_monitor() end)
     self.scope:spawn(function() self:control_manager() end)
     self.scope:spawn(function() self:emitter() end)
-    self.scope:spawn(function() self:sim_lifecycle_monitor() end)
 
     -- Signal initial pulse so emitter emits the initial state
     self.state_pulse:signal()
