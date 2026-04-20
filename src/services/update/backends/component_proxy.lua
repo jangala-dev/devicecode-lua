@@ -36,7 +36,7 @@ function M.new(opts)
         }, timeout_prepare)
     end
 
-    function backend:stage(conn, job)
+    function backend:stage(conn, job, _source)
         local value, err = device_call(conn, 'stage_update', {
             artifact_ref = job.artifact_ref,
             metadata = job.metadata,

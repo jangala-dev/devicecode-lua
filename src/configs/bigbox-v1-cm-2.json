@@ -1501,13 +1501,6 @@
             "updater",
             "prepare"
           ],
-          "stage_update": [
-            "cmd",
-            "member",
-            "mcu",
-            "updater",
-            "stage"
-          ],
           "commit_update": [
             "cmd",
             "member",
@@ -1524,7 +1517,17 @@
     "jobs_namespace": "update/jobs",
     "components": {
       "mcu": {
-        "backend": "mcu_component"
+        "backend": "mcu_component",
+        "transfer": {
+          "link_id": "cm5-uart-mcu",
+          "receiver": [
+            "rpc",
+            "member",
+            "mcu",
+            "receive"
+          ],
+          "timeout_s": 60.0
+        }
       }
     },
     "artifacts": {

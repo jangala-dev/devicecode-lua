@@ -70,6 +70,20 @@ local function bind_device_double(scope, device_conn, versions, opts)
   end)
 end
 
+
+local function bind_fabric_transfer_double(scope, fabric_conn)
+  local transfer_ep = fabric_conn:bind({ 'cmd', 'fabric', 'transfer' }, { queue_len = 32 })
+  bind_reply_loop(scope, transfer_ep, function(payload)
+    assert(payload.op == 'send_blob')
+    assert(type(payload.link_id) == 'string')
+    assert(type(payload.source) == 'table')
+    if type(payload.receiver) == 'table' then
+      return { ok = true, xfer_id = 'xfer-1', artifact_retention = 'release' }
+    end
+    return { ok = true, xfer_id = 'xfer-1', artifact_retention = 'release' }
+  end)
+end
+
 function T.update_service_creates_starts_commits_and_reconciles_job_via_device_proxy()
   runfibers.run(function(scope)
     local orig_sleep = sleep_mod.sleep
@@ -80,6 +94,8 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     local caller = bus:connect()
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    local seed = bus:connect()
+    seed:retain({ 'cfg', 'update' }, { schema = 'devicecode.config/update/1', components = { mcu = { backend = 'mcu_component', transfer = { link_id = 'cm5-uart-mcu', receiver = { 'rpc', 'member', 'mcu', 'receive' }, timeout_s = 1.0 } } } })
     local versions = { mcu = 'mcu-v0' }
     local inc = { mcu = 1 }
     bind_device_double(scope, bus:connect(), versions, {
@@ -88,6 +104,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
       incarnation = inc,
       bump_incarnation = true,
     })
+    bind_fabric_transfer_double(scope, bus:connect())
 
     local ok, err = scope:spawn(function()
       update.start(bus:connect(), { name = 'update', env = 'dev' })
@@ -154,9 +171,12 @@ function T.update_service_cancels_staged_job_before_commit()
   runfibers.run(function(scope)
     local bus = busmod.new()
     local caller = bus:connect()
+    local seed = bus:connect()
+    seed:retain({ 'cfg', 'update' }, { schema = 'devicecode.config/update/1', components = { mcu = { backend = 'mcu_component', transfer = { link_id = 'cm5-uart-mcu', receiver = { 'rpc', 'member', 'mcu', 'receive' }, timeout_s = 1.0 } } } })
     storagecaps.start_control_store_cap(scope, bus:connect(), {})
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
     bind_device_double(scope, bus:connect(), { mcu = 'mcu-v0' }, { artifact_retention = 'release' })
+    bind_fabric_transfer_double(scope, bus:connect())
 
     local ok, err = scope:spawn(function()
       update.start(bus:connect(), { name = 'update', env = 'dev' })
@@ -246,12 +266,15 @@ function T.update_service_rejects_second_active_job_globally()
 
     local bus = busmod.new()
     local caller = bus:connect()
+    local seed = bus:connect()
+    seed:retain({ 'cfg', 'update' }, { schema = 'devicecode.config/update/1', components = { mcu = { backend = 'mcu_component', transfer = { link_id = 'cm5-uart-mcu', receiver = { 'rpc', 'member', 'mcu', 'receive' }, timeout_s = 1.0 } }, cm5 = { backend = 'cm5_swupdate' } } })
     storagecaps.start_control_store_cap(scope, bus:connect(), {})
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
     bind_device_double(scope, bus:connect(), { cm5 = 'cm5-v0', mcu = 'mcu-v0' }, {
       prepare_sleep = 0.1,
       artifact_retention = 'release',
     })
+    bind_fabric_transfer_double(scope, bus:connect())
 
     local ok, err = scope:spawn(function()
       update.start(bus:connect(), { name = 'update', env = 'dev' })

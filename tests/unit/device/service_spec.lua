@@ -66,16 +66,6 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
     assert(type(status.component.status) == 'table')
     assert(status.component.status.version == 'cm5-v1')
     assert(status.component.actions.stage_update == true)
-
-    local staged, terr = caller:call({ 'cmd', 'device', 'component', 'do' }, {
-      component = 'cm5',
-      action = 'stage_update',
-      args = { artifact_ref = 'art-1', expected_version = '1.2.3' },
-    }, { timeout = 0.5 })
-    assert(terr == nil)
-    assert(staged.ok == true)
-    assert(staged.staged == 'art-1')
-    assert(staged.expected_version == '1.2.3')
   end, { timeout = 2.0 })
 end
 
@@ -95,19 +85,14 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
           status_topic = { 'cap', 'updater', 'mcu', 'state', 'status' },
           get_topic = { 'cap', 'updater', 'mcu', 'rpc', 'status' },
           actions = {
-            stage_update = { 'cap', 'updater', 'mcu', 'rpc', 'stage' },
           },
         },
       },
     })
 
     local status_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'status' }, { queue_len = 16 })
-    local stage_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'stage' }, { queue_len = 16 })
     bind_reply_loop(scope, status_ep, function()
       return { version = 'mcu-v2', state = 'running', incarnation = 7 }
-    end)
-    bind_reply_loop(scope, stage_ep, function(payload)
-      return { ok = true, staged = payload.artifact_ref, artifact_retention = 'release' }
     end)
 
     local ok, err = scope:spawn(function()
@@ -136,17 +121,7 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
         and payload.member_class == 'mcu'
         and payload.link_class == nil
         and type(payload.source) == 'table' and payload.source.member_class == 'mcu'
-        and payload.actions.stage_update == true
     end, { timeout = 0.75, interval = 0.01 }))
-
-    local reply, rerr = caller:call({ 'cmd', 'device', 'component', 'do' }, {
-      component = 'mcu',
-      action = 'stage_update',
-      args = { artifact_ref = 'art-9' },
-    }, { timeout = 0.5 })
-    assert(rerr == nil)
-    assert(reply.ok == true)
-    assert(reply.staged == 'art-9')
   end, { timeout = 2.0 })
 end
 

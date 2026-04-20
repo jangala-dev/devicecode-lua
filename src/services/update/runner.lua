@@ -6,7 +6,7 @@ local function emit(tx, ev)
     tx:send(ev)
 end
 
-function M.run_stage(conn, job, backend, tx)
+function M.run_stage(conn, job, backend, tx, source)
     local status_before = backend:status(conn)
     local pre_commit_incarnation = nil
     if type(status_before) == 'table' then
@@ -19,7 +19,7 @@ function M.run_stage(conn, job, backend, tx)
         return
     end
 
-    local staged, serr = backend:stage(conn, job)
+    local staged, serr = backend:stage(conn, job, source)
     if staged == nil then
         emit(tx, { tag = 'failed', job_id = job.job_id, err = tostring(serr or 'stage_failed') })
         return

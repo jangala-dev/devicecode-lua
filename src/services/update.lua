@@ -24,6 +24,11 @@ end
 
 local function build_backend(component, component_cfg)
     local opts = { component = component, proxy_mod = component_backend_mod }
+    if type(component_cfg) == 'table' then
+        for k, v in pairs(component_cfg) do
+            if k ~= 'backend' and opts[k] == nil then opts[k] = v end
+        end
+    end
     if component_cfg.backend == 'cm5_swupdate' then
         return cm5_backend_mod.new(opts)
     end
@@ -251,6 +256,12 @@ function M.start(conn, opts)
         if not backend then return nil, 'backend_missing' end
         local child, err = service_scope:child()
         if not child then return nil, err end
+        local stage_source = nil
+        if mode == 'stage' and type(job.artifact_ref) == 'string' and job.artifact_ref ~= '' then
+            local opened, oerr = artifact_open(job.artifact_ref)
+            if not opened then return nil, oerr or 'artifact_open_failed' end
+            stage_source = opened
+        end
         model.acquire_lock(state, job, now(), service_run_id)
         local ok, save_err = store_sync.save_job(repo, job)
         if not ok then on_store_error(job.job_id, save_err) end
@@ -258,7 +269,7 @@ function M.start(conn, opts)
         local snapshot = copy_job(job)
         local spawned, spawn_err = child:spawn(function()
             if mode == 'stage' then
-                return runner.run_stage(conn, snapshot, backend, runner_tx)
+                return runner.run_stage(conn, snapshot, backend, runner_tx, stage_source)
             elseif mode == 'commit' then
                 return runner.run_commit(conn, snapshot, backend, runner_tx, cfg_reconcile)
             else

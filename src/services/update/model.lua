@@ -98,7 +98,14 @@ function M.merge_cfg(payload, schema)
             if type(component) == 'string' and type(spec) == 'table' then
                 local backend = type(spec.backend) == 'string' and spec.backend or nil
                 if backend and backend ~= '' then
-                    cfg.components[component] = { backend = backend }
+                    local rec = { backend = backend }
+                    if type(spec.transfer) == 'table' then
+                        rec.transfer = copy_value(spec.transfer)
+                    end
+                    if type(spec.timeout_prepare) == 'number' and spec.timeout_prepare > 0 then rec.timeout_prepare = spec.timeout_prepare end
+                    if type(spec.timeout_stage) == 'number' and spec.timeout_stage > 0 then rec.timeout_stage = spec.timeout_stage end
+                    if type(spec.timeout_commit) == 'number' and spec.timeout_commit > 0 then rec.timeout_commit = spec.timeout_commit end
+                    cfg.components[component] = rec
                 end
             end
         end

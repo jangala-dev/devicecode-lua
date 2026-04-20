@@ -43,10 +43,28 @@ local function bind_reply_loop(scope, ep, handler)
 			local req = ep:recv()
 			if not req then return end
 			local reply, ferr = handler(req.payload or {}, req)
-			if reply == nil then req:fail(ferr or 'failed') else req:reply(reply) end
+			if reply == nil then
+				if ferr == '__forwarded__' then
+					-- transfer endpoint will answer later
+				else
+					req:fail(ferr or 'failed')
+				end
+			else req:reply(reply) end
 		end
 	end)
 	assert(ok, tostring(err))
+end
+
+
+local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
+    local ep = conn:bind(topic, { queue_len = 16 })
+    bind_reply_loop(scope, ep, function(_payload, req)
+        local ok, reason = transfer_ctl_tx:send(req)
+        if ok ~= true then
+            return nil, reason or 'queue_closed'
+        end
+        return nil, '__forwarded__'
+    end)
 end
 
 local function wait_retained_state(conn, topic, pred, timeout)
@@ -86,6 +104,20 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
 		local seed = bus:connect()
 
+		seed:retain({ 'cfg', 'update' }, {
+			schema = 'devicecode.config/update/1',
+			components = {
+				mcu = {
+					backend = 'mcu_component',
+					transfer = {
+						link_id = 'cm5-uart-mcu',
+						receiver = { 'rpc', 'member', 'mcu', 'receive' },
+						timeout_s = 1.0,
+					},
+				},
+			},
+		})
+
 		seed:retain({ 'cfg', 'device' }, {
 			schema = 'devicecode.config/device/1',
 			components = {
@@ -96,7 +128,6 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 					get_topic = { 'rpc', 'member', 'mcu', 'status' },
 					actions = {
 						prepare_update = { 'rpc', 'member', 'mcu', 'prepare' },
-						stage_update = { 'rpc', 'member', 'mcu', 'stage' },
 						commit_update = { 'rpc', 'member', 'mcu', 'commit' },
 					},
 				},
@@ -123,7 +154,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		local status_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'status' }, { queue_len = 16 })
 		local prepare_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'prepare' }, { queue_len = 16 })
-		local stage_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'stage' }, { queue_len = 16 })
+		local receive_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'receive' }, { queue_len = 16 })
 		local commit_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'commit' }, { queue_len = 16 })
 
 		bind_reply_loop(scope, status_ep, function()
@@ -132,9 +163,10 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		bind_reply_loop(scope, prepare_ep, function(payload)
 			return { ok = true, prepared = true }
 		end)
-		bind_reply_loop(scope, stage_ep, function(payload)
-			assert(type(payload.artifact_ref) == 'string')
-			return { ok = true, staged = payload.artifact_ref, expected_version = payload.expected_version }
+		bind_reply_loop(scope, receive_ep, function(payload)
+			assert(type(payload.artefact) == 'table')
+			assert(type(payload.artefact.open_source) == 'function')
+			return { ok = true, accepted = true }
 		end)
 		bind_reply_loop(scope, commit_ep, function(payload)
 			versions.mcu = payload.metadata and payload.metadata.next_version or 'mcu-v1'
@@ -188,6 +220,8 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 			})
 		end)
 		assert(ok2, tostring(err2))
+
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'fabric', 'transfer' }, a_ctl_tx)
 
 		local ok3, err3 = scope:spawn(function()
 			device.start(bus:connect(), { name = 'device', env = 'dev' })
@@ -274,6 +308,20 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
 		local seed = bus:connect()
 
+		seed:retain({ 'cfg', 'update' }, {
+			schema = 'devicecode.config/update/1',
+			components = {
+				mcu = {
+					backend = 'mcu_component',
+					transfer = {
+						link_id = 'cm5-uart-mcu',
+						receiver = { 'rpc', 'member', 'mcu', 'receive' },
+						timeout_s = 1.0,
+					},
+				},
+			},
+		})
+
 		seed:retain({ 'cfg', 'device' }, {
 			schema = 'devicecode.config/device/1',
 			components = {
@@ -286,8 +334,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 					get_topic = { 'rpc', 'member', 'mcu', 'status' },
 					actions = {
 						prepare_update = { 'rpc', 'member', 'mcu', 'prepare' },
-						stage_update = { 'rpc', 'member', 'mcu', 'stage' },
-						commit_update = { 'rpc', 'member', 'mcu', 'commit' },
+							commit_update = { 'rpc', 'member', 'mcu', 'commit' },
 					},
 				},
 			},
@@ -313,7 +360,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 
 		local status_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'status' }, { queue_len = 16 })
 		local prepare_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'prepare' }, { queue_len = 16 })
-		local stage_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'stage' }, { queue_len = 16 })
+		local receive_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'receive' }, { queue_len = 16 })
 		local commit_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'commit' }, { queue_len = 16 })
 
 		local current_state = { version = 'mcu-v0', state = 'running', incarnation = 1 }
@@ -323,9 +370,10 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		bind_reply_loop(scope, prepare_ep, function(payload)
 			return { ok = true, prepared = true }
 		end)
-		bind_reply_loop(scope, stage_ep, function(payload)
-			assert(type(payload.artifact_ref) == 'string')
-			return { ok = true, staged = payload.artifact_ref, expected_version = payload.expected_version }
+		bind_reply_loop(scope, receive_ep, function(payload)
+			assert(type(payload.artefact) == 'table')
+			assert(type(payload.artefact.open_source) == 'function')
+			return { ok = true, accepted = true }
 		end)
 		bind_reply_loop(scope, commit_ep, function(payload)
 			incarnation.mcu = incarnation.mcu + 1
@@ -379,6 +427,8 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 			})
 		end)
 		assert(ok2, tostring(err2))
+
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'fabric', 'transfer' }, a_ctl_tx)
 
 		local ok3, err3 = scope:spawn(function()
 			device.start(bus:connect(), { name = 'device', env = 'dev' })

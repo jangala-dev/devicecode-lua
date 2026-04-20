@@ -47,7 +47,6 @@ function T.bigbox_v1_cm_2_config_defines_fabric_device_and_mcu_only_update_backe
   assert(type(mcu.get_topic) == 'table')
   assert(type(mcu.actions) == 'table')
   assert(type(mcu.actions.prepare_update) == 'table')
-  assert(type(mcu.actions.stage_update) == 'table')
   assert(type(mcu.actions.commit_update) == 'table')
 
   assert(type(cfg.update) == 'table')
@@ -55,6 +54,9 @@ function T.bigbox_v1_cm_2_config_defines_fabric_device_and_mcu_only_update_backe
   assert(type(cfg.update.components) == 'table')
   assert(type(cfg.update.components.mcu) == 'table')
   assert(cfg.update.components.mcu.backend == 'mcu_component')
+  assert(type(cfg.update.components.mcu.transfer) == 'table')
+  assert(cfg.update.components.mcu.transfer.link_id == 'cm5-uart-mcu')
+  assert(type(cfg.update.components.mcu.transfer.receiver) == 'table')
   assert(cfg.update.components.cm5 == nil)
 
   assert(cfg.bridge == nil)
