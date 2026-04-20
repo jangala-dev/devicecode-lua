@@ -10,9 +10,9 @@ function M.new(opts)
         timeout_stage = opts.timeout_stage or 60.0,
         timeout_commit = opts.timeout_commit or 10.0,
         reconcile = function(state, job)
-            local version = type(state) == 'table' and (state.fw_version or state.version) or nil
-            local incarnation = type(state) == 'table' and (state.incarnation or state.generation) or nil
-            local phase = type(state) == 'table' and (state.updater_state or state.state) or nil
+            local version = type(state) == 'table' and state.version or nil
+            local incarnation = type(state) == 'table' and state.incarnation or nil
+            local phase = type(state) == 'table' and state.state or nil
             local last_error = type(state) == 'table' and state.last_error or nil
             if phase == 'failed' or phase == 'rollback_detected' then
                 return { done = true, success = false, version = version, incarnation = incarnation, error = tostring(last_error or phase), raw = state }

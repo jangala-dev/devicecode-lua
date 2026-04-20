@@ -21,7 +21,12 @@ function M.new(opts)
     end
 
     function backend:status(conn)
-        return conn:call({ 'cmd', 'device', 'component', 'get' }, { component = component }, { timeout = timeout_prepare })
+        local value, err = conn:call({ 'cmd', 'device', 'component', 'get' }, { component = component }, { timeout = timeout_prepare })
+        if value == nil then return nil, err end
+        local component_view = type(value) == 'table' and value.component or nil
+        local status = type(component_view) == 'table' and component_view.status or nil
+        if type(status) ~= 'table' then return nil, 'invalid_component_status' end
+        return status, nil
     end
 
     function backend:prepare(conn, job)
@@ -50,10 +55,9 @@ function M.new(opts)
     end
 
     function backend:reconcile(conn, job)
-        local value, err = self:status(conn)
-        if value == nil then return nil, err end
-        local state = (type(value) == 'table' and value.component and value.component.status) or value.state or value
-        return reconcile_fn(state, job), nil
+        local status, err = self:status(conn)
+        if status == nil then return nil, err end
+        return reconcile_fn(status, job), nil
     end
 
     return backend

@@ -30,7 +30,7 @@ local function start_cm5_updater_cap(scope, conn, state)
     local function publish_status()
         conn:publish({ 'cap', 'updater', 'cm5', 'state', 'status' }, {
             state = state.state,
-            fw_version = state.fw_version,
+            version = state.version,
             expected_version = state.expected_version,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
@@ -45,7 +45,7 @@ local function start_cm5_updater_cap(scope, conn, state)
     bind_reply_loop(scope, status_ep, function()
         return {
             state = state.state,
-            fw_version = state.fw_version,
+            version = state.version,
             expected_version = state.expected_version,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
@@ -53,7 +53,7 @@ local function start_cm5_updater_cap(scope, conn, state)
     end)
 
     bind_reply_loop(scope, prepare_ep, function(payload)
-        return { ok = true, prepared = true, fw_version = state.fw_version }
+        return { ok = true, prepared = true, version = state.version }
     end)
 
     bind_reply_loop(scope, stage_ep, function(payload)
@@ -118,7 +118,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
         local updater_state = {
             state = 'idle',
-            fw_version = 'cm5-v0',
+            version = 'cm5-v0',
             expected_version = nil,
             staged = false,
             artifact_ref = nil,
@@ -179,7 +179,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         updater_state.state = 'running'
         updater_state.staged = false
         updater_state.artifact_ref = nil
-        updater_state.fw_version = 'cm5-v2'
+        updater_state.version = 'cm5-v2'
         publish_status()
 
         local update_scope2 = start_update_service(scope, bus)

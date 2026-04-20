@@ -207,7 +207,7 @@ function PlatformDriver:updater_status(opts)
         expected_version = raw_state.expected_version,
         last_error = raw_state.last_error,
         updated_at = raw_state.updated_at,
-        fw_version = self.identity.fw_version,
+        version = self.identity.fw_version,
         hw_revision = self.identity.hw_revision,
         serial = self.identity.serial,
         board_revision = self.identity.board_revision,

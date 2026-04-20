@@ -8,10 +8,9 @@ end
 
 function M.run_stage(conn, job, backend, tx)
     local status_before = backend:status(conn)
-    local status_before_state = (type(status_before) == 'table' and status_before.component and status_before.component.status) or (type(status_before) == 'table' and status_before.state) or status_before
     local pre_commit_incarnation = nil
-    if type(status_before_state) == 'table' then
-        pre_commit_incarnation = status_before_state.incarnation or status_before_state.generation
+    if type(status_before) == 'table' then
+        pre_commit_incarnation = status_before.incarnation
     end
 
     local prep, perr = backend:prepare(conn, job)
