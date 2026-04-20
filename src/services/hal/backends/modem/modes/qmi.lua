@@ -6,6 +6,27 @@ local op = require "fibers.op"
 
 local modem_types = require "services.hal.types.modem"
 
+-- ---@param status string?
+-- ---@return string card_status
+-- ---@return string error
+-- local function parse_slot_status(status)
+--     if not status or status == "" then
+--         return "", "Command closed"
+--     end
+
+--     local card_state = status:match("Card state:%s*'([^']+)'")
+--     if not card_state then
+--         return "", "could not parse card state"
+--     end
+
+--     if card_state == "present" then
+--         return "present", ""
+--     end
+
+--     return "absent", ""
+-- end
+
+--- Parses the output of a sim slot status entry
 ---@param status string?
 ---@return string card_status
 ---@return string error
@@ -13,17 +34,13 @@ local function parse_slot_status(status)
     if not status or status == "" then
         return "", "Command closed"
     end
-
-    local card_state = status:match("Card state:%s*'([^']+)'")
-    if not card_state then
-        return "", "could not parse card state"
+    for card_status, slot_status in status:gmatch("Card status:%s*(%S+).-Slot status:%s*(%S+)") do
+        if slot_status == "active" then
+            return card_status, ""
+        end
     end
 
-    if card_state == "present" then
-        return "present", ""
-    end
-
-    return "absent", ""
+    return "", 'could not parse (no active slot or invalid string format)'
 end
 
 ---@param identity ModemIdentity
@@ -119,6 +136,7 @@ local function read_rf_band_info(identity)
 end
 
 local function add_mode_funcs(ModemBackend)
+    ---@cast ModemBackend ModemBackend
     local base_read_network_info = ModemBackend.read_network_info
     local base_read_sim_info = ModemBackend.read_sim_info
 
@@ -192,7 +210,7 @@ local function add_mode_funcs(ModemBackend)
     function ModemBackend:is_sim_present()
         local st, _, present_or_err = fibers.run_scope(function()
             local cmd = exec.command {
-                "qmicli", "-p", "-d", self.identity.mode_port, "--uim-get-card-status",
+                "qmicli", "-p", "-d", self.identity.mode_port, "--uim-get-slot-status",
                 stdin = "null",
                 stdout = "pipe",
                 stderr = "stdout"

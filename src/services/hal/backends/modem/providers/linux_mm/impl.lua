@@ -190,7 +190,8 @@ local function read_modem_info(address)
 
     local data, json_err = json.decode(output)
     if not data then
-        return nil, "Failed to decode mmcli output as JSON: " .. tostring(json_err) .. ", output: " .. tostring(output)
+        return nil, "Failed to decode mmcli info output as JSON: "
+            .. tostring(json_err) .. ", output: " .. tostring(output)
     end
     if type(data.modem) ~= 'table' then
         return nil, "No modem info found in mmcli output"
@@ -207,11 +208,11 @@ local function read_modem_info(address)
     return flat, ""
 end
 
----@param address string
+---@param identity ModemIdentity
 ---@return string?
 ---@return string error
-local function read_firmware_version(address)
-    local output, err = run_command(address, { "mmcli", "-m", address, "--firmware-status" })
+local function read_firmware_version(identity)
+    local output, err = run_command(identity.address, { "mmcli", "-m", identity.address, "--firmware-status" })
     if not output then
         return nil, err
     end
@@ -384,6 +385,9 @@ end
 local ModemBackend = {}
 ModemBackend.__index = ModemBackend
 
+-- Default firmware fetch; model hooks may override this via self-dispatch
+ModemBackend._read_firmware = read_firmware_version
+
 ---@return ModemIdentityInfo?
 ---@return string error
 function ModemBackend:read_identity()
@@ -392,10 +396,10 @@ function ModemBackend:read_identity()
         return nil, err
     end
 
-    local firmware, firmware_err = read_firmware_version(self.identity.address)
-    if firmware_err ~= "" then
-        return nil, firmware_err
-    end
+    local firmware, firmware_err = self._read_firmware(self.identity)
+    -- Non-fatal: firmware may not be available yet, or the model hook may not be installed yet.
+    -- The driver will re-call read_identity() after model hooks are applied.
+    firmware = firmware or nil
 
     return modem_types.new.ModemIdentityInfo(
         modem_info.imei,

@@ -3,6 +3,7 @@ local fibers = require "fibers"
 local sleep = require "fibers.sleep"
 local scope = require "fibers.scope"
 local op = require "fibers.op"
+local at = require "services.hal.backends.modem.at"
 
 local SIM_POLL_INTERVAL = 5
 
@@ -25,6 +26,41 @@ local function firmware_version_code(version_str)
 end
 
 local funcs = {
+    {
+        name = '_read_firmware',
+        conditionals = {
+            function(_, identity_info)
+                return identity_info.model == 'rm520n'
+            end
+        },
+        func = function(identity)
+            local AT_TIMEOUT = 10
+            local at_send_op = at.send_op(identity.at_port, "AT+QGMR", {
+                terminal_patterns = {
+                    { pattern = "^%w+_%w+%.%w+%.%w+%.%w+$", is_error = false }
+                }
+            })
+            local source, resp, err = fibers.perform(op.named_choice({
+                at = at_send_op,
+                timeout = sleep.sleep_op(AT_TIMEOUT)
+            }))
+
+            if err then
+                return nil, "Failed to get firmware version: " .. err
+            end
+
+            if source == "timeout" then
+                return nil, "Timed out while getting firmware version"
+            elseif source == "at" and resp[#resp] then
+                local firmware_version = string.match(resp[#resp], "([%w]+_[%w]+%.[%w]+%.[%w]+%.[%w]+)")
+                if firmware_version then
+                    return firmware_version, ""
+                else
+                    return nil, "Firmware version not found in AT response"
+                end
+            end
+        end
+    },
     {
         name = 'connect',
         conditionals = {
@@ -65,8 +101,10 @@ local funcs = {
     },
     {
         name = 'wait_for_sim_present_op',
+        -- NOTE: _read_firmware must be listed before this hook in funcs so that any
+        -- model-specific override is already installed when this conditional runs.
         conditionals = {
-            function(_, identity_info)
+            function(backend, identity_info)
                 local model = identity_info and identity_info.model or nil
                 if model == 'em06' then
                     return true
@@ -74,8 +112,8 @@ local funcs = {
                 if model ~= 'eg25' then
                     return false
                 end
-                local firmware_version = identity_info and identity_info.firmware or nil
-                if not firmware_version then
+                local firmware_version = backend:_read_firmware(backend.identity.address)
+                if not firmware_version or firmware_version == "" then
                     return false
                 end
                 local version_code = firmware_version_code(firmware_version_string(firmware_version))
@@ -93,14 +131,14 @@ local funcs = {
                                 error("Failed to poll SIM presence: " .. err)
                             end
 
-                            local state = backend.last_state_event
-                            local state_to = state and state.to or nil
-
-                            if present ~= backend.last_sim_state or (present == false and state_to ~= 'failed') then
-                                local last_state = backend.last_sim_state
+                            if present ~= backend.last_sim_state then
+                                local prev = backend.last_sim_state
                                 ---@diagnostic disable-next-line: inject-field
                                 backend.last_sim_state = present
-                                if last_state ~= nil then
+                                -- Skip the very first poll: we only want to report changes,
+                                -- not the initial state on boot. The lifecycle monitor decides
+                                -- whether a SIM-absent report should trigger a reset.
+                                if prev ~= nil then
                                     return present, ""
                                 end
                             end

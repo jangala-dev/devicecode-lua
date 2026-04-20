@@ -15,6 +15,9 @@ local BACKEND_FUNCTIONS = list_to_map {
     "read_signal",
     "read_traffic",
 
+    -- Private reads
+    "_read_firmware",
+
     -- State monitoring
     "start_state_monitor",
     "monitor_state_op",
