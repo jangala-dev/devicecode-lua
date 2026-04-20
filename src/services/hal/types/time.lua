@@ -21,29 +21,29 @@ local new = {}
 ---@return NTPEvent?
 ---@return string error
 function new.NTPEvent(stratum, action, offset, freq_drift_ppm)
-	if type(stratum) ~= 'number' then
-		return nil, "invalid stratum"
-	end
+    if type(stratum) ~= 'number' then
+        return nil, "invalid stratum"
+    end
 
-	if type(action) ~= 'string' or action == '' then
-		return nil, "invalid action"
-	end
+    if type(action) ~= 'string' or action == '' then
+        return nil, "invalid action"
+    end
 
-	if type(offset) ~= 'number' then
-		return nil, "invalid offset"
-	end
+    if type(offset) ~= 'number' then
+        return nil, "invalid offset"
+    end
 
-	if type(freq_drift_ppm) ~= 'number' then
-		return nil, "invalid freq_drift_ppm"
-	end
+    if type(freq_drift_ppm) ~= 'number' then
+        return nil, "invalid freq_drift_ppm"
+    end
 
-	local event = setmetatable({
-		stratum = stratum,
-		action = action,
-		offset = offset,
-		freq_drift_ppm = freq_drift_ppm,
-	}, NTPEvent)
-	return event, ""
+    local event = setmetatable({
+        stratum = stratum,
+        action = action,
+        offset = offset,
+        freq_drift_ppm = freq_drift_ppm,
+    }, NTPEvent)
+    return event, ""
 end
 
 ---@class TimeBackend
@@ -54,7 +54,7 @@ local TimeBackend = {}
 TimeBackend.__index = TimeBackend
 
 return {
-	NTPEvent = NTPEvent,
-	TimeBackend = TimeBackend,
-	new = new,
+    NTPEvent = NTPEvent,
+    TimeBackend = TimeBackend,
+    new = new,
 }
