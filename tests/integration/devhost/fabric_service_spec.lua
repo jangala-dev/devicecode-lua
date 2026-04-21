@@ -3,6 +3,7 @@ local duplex     = require 'tests.support.duplex_stream'
 local probe      = require 'tests.support.bus_probe'
 local runfibers  = require 'tests.support.run_fibers'
 local safe       = require 'coxpcall'
+local test_diag  = require 'tests.support.test_diag'
 
 local fabric     = require 'services.fabric'
 
@@ -25,6 +26,8 @@ function T.fabric_services_reach_ready_on_separate_buses_over_duplex_streams()
 		local bus_b = busmod.new()
 		local obs_a = bus_a:connect()
 		local obs_b = bus_b:connect()
+		local diag_a = test_diag.for_stack(scope, bus_a, { fabric = true, obs = true, max_records = 240 })
+		local diag_b = test_diag.for_stack(scope, bus_b, { fabric = true, obs = true, max_records = 240 })
 
 		local a_stream, b_stream = duplex.new_pair()
 
@@ -74,13 +77,14 @@ function T.fabric_services_reach_ready_on_separate_buses_over_duplex_streams()
 		end)
 		assert(ok2, tostring(err2))
 
-		assert(wait_ready(obs_a, 'wan0', 2.0) == true)
-		assert(wait_ready(obs_b, 'wan0', 2.0) == true)
+		if not wait_ready(obs_a, 'wan0', 2.0) then diag_a:fail('expected fabric side A to reach ready') end
+		if not wait_ready(obs_b, 'wan0', 2.0) then diag_b:fail('expected fabric side B to reach ready') end
 
 		obs_a:publish({ 'local', 'wifi' }, { up = true })
-		local seen = probe.wait_payload(obs_b, { 'seen', 'wifi' }, { timeout = 1.0 })
-		assert(type(seen) == 'table')
-		assert(seen.up == true)
+		local ok_seen, seen = safe.pcall(function() return probe.wait_payload(obs_b, { 'seen', 'wifi' }, { timeout = 1.0 }) end)
+		if not ok_seen or type(seen) ~= 'table' or seen.up ~= true then
+			diag_b:fail('expected published wifi state to be imported on side B')
+		end
 	end, { timeout = 3.0 })
 end
 

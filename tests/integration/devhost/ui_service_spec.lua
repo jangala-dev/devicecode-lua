@@ -1,6 +1,7 @@
 local busmod = require 'bus'
 local runfibers = require 'tests.support.run_fibers'
 local probe = require 'tests.support.bus_probe'
+local test_diag = require 'tests.support.test_diag'
 local ui_service = require 'services.ui.service'
 local ui_fakes = require 'tests.support.ui_fakes'
 
@@ -25,6 +26,10 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 		end, { queue_len = 8 })
 
 		local connect, connect_calls = ui_fakes.connect_factory(bus)
+		local diag = test_diag.for_stack(scope, bus, { config = true, obs = true, rpc = true, max_records = 320 })
+		test_diag.add_calls(diag, 'config_calls', config_calls)
+		test_diag.add_calls(diag, 'rpc_calls', rpc_calls)
+		test_diag.add_calls(diag, 'connect_calls', connect_calls)
 		local captured = {}
 		local ok, err = scope:spawn(function()
 			ui_service.start(bus:connect(), {
@@ -43,65 +48,77 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 				model_ready_timeout_s = 0.5,
 			})
 		end)
-		assert(ok, tostring(err))
-		assert(probe.wait_until(function() return captured.app ~= nil end, { timeout = 0.5, interval = 0.01 }))
+		if not ok then diag:fail('failed to spawn ui service: ' .. tostring(err)) end
+		if not probe.wait_until(function() return captured.app ~= nil end, { timeout = 0.5, interval = 0.01 }) then
+			diag:fail('expected ui app to be captured by fake http runner')
+		end
 
 		local session, lerr = captured.app.login('admin', 'pw')
-		assert(lerr == nil)
+		if lerr ~= nil or type(session) ~= 'table' or type(session.session_id) ~= 'string' or session.session_id == '' then
+			diag:fail('expected successful ui login')
+		end
 		local sid = session.session_id
-		assert(type(sid) == 'string' and sid ~= '')
 
-		local exact = assert(captured.app.model_exact(sid, { 'cfg', 'net' }))
-		assert(exact.payload.rev == 2)
-		assert(exact.payload.data.answer == 42)
+		local exact = captured.app.model_exact(sid, { 'cfg', 'net' })
+		if type(exact) ~= 'table' or type(exact.payload) ~= 'table' or exact.payload.rev ~= 2 or exact.payload.data.answer ~= 42 then
+			diag:fail('expected exact cfg/net payload from ui model')
+		end
 
-		local snap = assert(captured.app.model_snapshot(sid, { 'svc', '#' }))
-		assert(type(snap.entries) == 'table' and #snap.entries >= 2)
+		local snap = captured.app.model_snapshot(sid, { 'svc', '#' })
+		if type(snap) ~= 'table' or type(snap.entries) ~= 'table' or #snap.entries < 2 then
+			diag:fail('expected non-trivial service snapshot from ui model')
+		end
 
-		local cfg = assert(captured.app.config_get(sid, 'net'))
-		assert(cfg.rev == 2)
-		assert(cfg.data.answer == 42)
+		local cfg = captured.app.config_get(sid, 'net')
+		if type(cfg) ~= 'table' or cfg.rev ~= 2 or cfg.data.answer ~= 42 then
+			diag:fail('expected config_get(net) to return retained config state')
+		end
 
-		local svcs = assert(captured.app.services_snapshot(sid))
-		assert(svcs.announce.alpha.role == 'alpha')
-		assert(svcs.status.alpha.state == 'running')
+		local svcs = captured.app.services_snapshot(sid)
+		if type(svcs) ~= 'table' or svcs.announce.alpha.role ~= 'alpha' or svcs.status.alpha.state ~= 'running' then
+			diag:fail('expected services snapshot to contain seeded announce/status state')
+		end
 
-		local fabric = assert(captured.app.fabric_status(sid))
-		assert(fabric.main.kind == 'fabric.summary')
-		assert(fabric.links.wan0.session.status.ready == true)
+		local fabric = captured.app.fabric_status(sid)
+		if type(fabric) ~= 'table' or fabric.main.kind ~= 'fabric.summary' or fabric.links.wan0.session.status.ready ~= true then
+			diag:fail('expected fabric summary to contain ready wan0 link')
+		end
 
-		local link = assert(captured.app.fabric_link_status(sid, 'wan0'))
-		assert(link.session.status.ready == true)
-		assert(link.bridge.status.connected == true)
-		assert(link.transfer.status.idle == true)
+		local link = captured.app.fabric_link_status(sid, 'wan0')
+		if type(link) ~= 'table' or link.session.status.ready ~= true or link.bridge.status.connected ~= true or link.transfer.status.idle ~= true then
+			diag:fail('expected fabric_link_status(wan0) to show ready/connected/idle')
+		end
 
-		local caps = assert(captured.app.capability_snapshot(sid))
-		assert(type(caps.capabilities['cap/fs/config/meta']) == 'table')
-		assert(type(caps.devices['dev/modem/m1/meta']) == 'table')
+		local caps = captured.app.capability_snapshot(sid)
+		if type(caps) ~= 'table' or type(caps.capabilities['cap/fs/config/meta']) ~= 'table' or type(caps.devices['dev/modem/m1/meta']) ~= 'table' then
+			diag:fail('expected capability snapshot to contain seeded caps/devices')
+		end
 
-		local cfgset = assert(captured.app.config_set(sid, 'net', { schema = 'devicecode.net/1', next = 99 }))
-		assert(cfgset.ok == true)
-		assert(#config_calls == 1)
-		assert(config_calls[1].data.next == 99)
+		local cfgset = captured.app.config_set(sid, 'net', { schema = 'devicecode.net/1', next = 99 })
+		if type(cfgset) ~= 'table' or cfgset.ok ~= true or #config_calls ~= 1 or config_calls[1].data.next ~= 99 then
+			diag:fail('expected config_set(net) to call endpoint and return ok')
+		end
 
-		local reply = assert(captured.app.call(sid, { 'rpc', 'svc', 'echo' }, { msg = 'hello' }, 0.25))
-		assert(reply.echoed.msg == 'hello')
-		assert(reply.via == 'echo')
-		assert(#rpc_calls == 1)
+		local reply = captured.app.call(sid, { 'rpc', 'svc', 'echo' }, { msg = 'hello' }, 0.25)
+		if type(reply) ~= 'table' or reply.echoed.msg ~= 'hello' or reply.via ~= 'echo' or #rpc_calls ~= 1 then
+			diag:fail('expected ui rpc call to reach fake echo endpoint')
+		end
 
-		local watch = assert(captured.app.watch_open(sid, { 'cfg', '#' }, { queue_len = 16 }))
+		local watch = captured.app.watch_open(sid, { 'cfg', '#' }, { queue_len = 16 })
+		if type(watch) ~= 'table' then diag:fail('expected watch_open to return a watcher') end
 		local ev1 = select(1, watch:recv())
-		assert(ev1.op == 'retain' and ev1.phase == 'replay')
 		local ev2 = select(1, watch:recv())
-		assert(ev2.op == 'replay_done')
+		if not (type(ev1) == 'table' and ev1.op == 'retain' and ev1.phase == 'replay' and type(ev2) == 'table' and ev2.op == 'replay_done') then
+			diag:fail('expected cfg watch replay to emit retain then replay_done')
+		end
 		seed:retain({ 'cfg', 'wifi' }, { enabled = true })
 		local ev3 = select(1, watch:recv())
-		assert(ev3.op == 'retain' and ev3.phase == 'live')
-		assert(ev3.topic[2] == 'wifi')
-		assert(ev3.payload.enabled == true)
+		if not (type(ev3) == 'table' and ev3.op == 'retain' and ev3.phase == 'live' and ev3.topic[2] == 'wifi' and ev3.payload.enabled == true) then
+			diag:fail('expected cfg watch to receive live wifi retain event')
+		end
 		watch:close('done')
 
-		assert(#connect_calls >= 2)
+		if #connect_calls < 2 then diag:fail('expected at least two ui-originated bus connections') end
 		local saw_cfg, saw_call = false, false
 		for i = 1, #connect_calls do
 			local extra = connect_calls[i].origin_extra
@@ -110,8 +127,9 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 				if extra.ui.op == 'call' then saw_call = true end
 			end
 		end
-		assert(saw_cfg == true)
-		assert(saw_call == true)
+		if not (saw_cfg == true and saw_call == true) then
+			diag:fail('expected connect_factory origin_extra to record config_set and call operations')
+		end
 	end, { timeout = 3.0 })
 end
 

@@ -4,6 +4,7 @@ local probe      = require 'tests.support.bus_probe'
 local runfibers  = require 'tests.support.run_fibers'
 local safe       = require 'coxpcall'
 local mailbox    = require 'fibers.mailbox'
+local test_diag  = require 'tests.support.test_diag'
 
 local session    = require 'services.fabric.session'
 
@@ -36,6 +37,7 @@ function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 	runfibers.run(function(scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
+		local diag = test_diag.for_stack(scope, bus, { fabric = true, rpc = true, max_records = 320 })
 
 		local a_stream, b_stream = duplex.new_pair()
 		local a_ctl_tx, a_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
@@ -106,19 +108,20 @@ function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 		end)
 		assert(ok3, tostring(err3))
 
-		assert(wait_ready(conn, 'link-a', 2.0) == true)
-		assert(wait_ready(conn, 'link-b', 2.0) == true)
+		if not wait_ready(conn, 'link-a', 2.0) then diag:fail('expected link-a to reach ready') end
+		if not wait_ready(conn, 'link-b', 2.0) then diag:fail('expected link-b to reach ready') end
 
 		conn:publish({ 'local', 'wifi' }, { up = true })
-		local seen = probe.wait_payload(conn, { 'seen', 'wifi' }, { timeout = 1.0 })
-		assert(type(seen) == 'table')
-		assert(seen.up == true)
+		local ok_seen, seen = safe.pcall(function() return probe.wait_payload(conn, { 'seen', 'wifi' }, { timeout = 1.0 }) end)
+		if not ok_seen or type(seen) ~= 'table' or seen.up ~= true then
+			diag:fail('expected bridged publish to arrive on seen/wifi')
+		end
 
 		local reply, cerr = conn:call({ 'rpc', 'proxy', 'echo' }, { msg = 'hello' }, { timeout = 1.0 })
-		assert(reply ~= nil, tostring(cerr))
-		assert(type(reply.echoed) == 'table')
-		assert(reply.echoed.msg == 'hello')
-		assert(reply.from == 'local-echo')
+		if reply == nil then diag:fail('expected rpc reply, got error: ' .. tostring(cerr)) end
+		if type(reply.echoed) ~= 'table' or reply.echoed.msg ~= 'hello' or reply.from ~= 'local-echo' then
+			diag:fail('unexpected rpc echo reply shape')
+		end
 	end, { timeout = 3.0 })
 end
 

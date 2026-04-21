@@ -5,6 +5,7 @@ local probe      = require 'tests.support.bus_probe'
 local runfibers  = require 'tests.support.run_fibers'
 local safe       = require 'coxpcall'
 local mailbox    = require 'fibers.mailbox'
+local test_diag  = require 'tests.support.test_diag'
 
 local session    = require 'services.fabric.session'
 
@@ -68,6 +69,7 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
     runfibers.run(function(scope)
         local bus = busmod.new()
         local caller = bus:connect()
+        local diag = test_diag.for_stack(scope, bus, { fabric = true, max_records = 360 })
 
         local a_stream, b_stream = duplex.new_pair()
         local a_ctl_tx, a_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
@@ -131,8 +133,8 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
 
         spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'xfer', 'link-a' }, a_ctl_tx)
 
-        assert(wait_ready(caller, 'link-a', 2.0) == true)
-        assert(wait_ready(caller, 'link-b', 2.0) == true)
+        if not wait_ready(caller, 'link-a', 2.0) then diag:fail('expected link-a to reach ready') end
+        if not wait_ready(caller, 'link-b', 2.0) then diag:fail('expected link-b to reach ready') end
 
         local transfer_sub = caller:subscribe({ 'state', 'fabric', 'link', 'link-b', 'transfer' }, { queue_len = 8, full = 'drop_oldest' })
 
@@ -144,19 +146,22 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
             meta = { kind = 'firmware', version = 'mcu-v9' },
         }, { timeout = 1.0 })
 
-        assert(err == nil)
-        assert(type(reply) == 'table')
-        assert(reply.ok == true)
+        if err ~= nil or type(reply) ~= 'table' or reply.ok ~= true then
+            diag:fail('expected successful fabric transfer reply, got error=' .. tostring(err))
+        end
 
-        assert(#received == 1)
+        if #received ~= 1 then diag:fail('expected receiver handoff to run exactly once') end
         local payload = received[1]
-        assert(type(payload.artefact) == 'table')
-        assert(payload.data == 'firmware-bytes')
-        assert(payload.artefact:checksum() == payload.checksum)
-        assert(payload.size == #'firmware-bytes')
-        assert(type(payload.meta) == 'table')
-        assert(payload.meta.kind == 'firmware')
-        assert(payload.meta.version == 'mcu-v9')
+        if type(payload.artefact) ~= 'table'
+            or payload.data ~= 'firmware-bytes'
+            or payload.artefact:checksum() ~= payload.checksum
+            or payload.size ~= #'firmware-bytes'
+            or type(payload.meta) ~= 'table'
+            or payload.meta.kind ~= 'firmware'
+            or payload.meta.version ~= 'mcu-v9'
+        then
+            diag:fail('unexpected receiver handoff payload')
+        end
 
         local retained
         while true do
@@ -168,10 +173,13 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
             end
         end
         transfer_sub:unsubscribe()
-        assert(retained.kind == 'fabric.link.transfer')
-        assert(type(retained.status) == 'table')
-        assert(retained.status.state == 'done')
-        assert(retained.status.direction == 'in')
+        if retained.kind ~= 'fabric.link.transfer'
+            or type(retained.status) ~= 'table'
+            or retained.status.state ~= 'done'
+            or retained.status.direction ~= 'in'
+        then
+            diag:fail('expected retained inbound transfer state to be done')
+        end
     end, { timeout = 3.0 })
 end
 
@@ -179,6 +187,7 @@ function T.devhost_fabric_transfer_receiver_failure_aborts_sender_request()
     runfibers.run(function(scope)
         local bus = busmod.new()
         local caller = bus:connect()
+        local diag = test_diag.for_stack(scope, bus, { fabric = true, max_records = 360 })
 
         local a_stream, b_stream = duplex.new_pair()
         local a_ctl_tx, a_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
@@ -228,8 +237,8 @@ function T.devhost_fabric_transfer_receiver_failure_aborts_sender_request()
 
         spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'xfer', 'link-a' }, a_ctl_tx)
 
-        assert(wait_ready(caller, 'link-a', 2.0) == true)
-        assert(wait_ready(caller, 'link-b', 2.0) == true)
+        if not wait_ready(caller, 'link-a', 2.0) then diag:fail('expected link-a to reach ready') end
+        if not wait_ready(caller, 'link-b', 2.0) then diag:fail('expected link-b to reach ready') end
 
         local transfer_sub = caller:subscribe({ 'state', 'fabric', 'link', 'link-b', 'transfer' }, { queue_len = 8, full = 'drop_oldest' })
 
@@ -241,9 +250,9 @@ function T.devhost_fabric_transfer_receiver_failure_aborts_sender_request()
             meta = { kind = 'firmware' },
         }, { timeout = 1.0 })
 
-        assert(reply == nil)
-        assert(type(err) == 'string')
-        assert(err:match('ingest_rejected') ~= nil)
+        if not (reply == nil and type(err) == 'string' and err:match('ingest_rejected') ~= nil) then
+            diag:fail('expected receiver rejection to abort sender request')
+        end
     end, { timeout = 3.0 })
 end
 
