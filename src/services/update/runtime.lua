@@ -1,42 +1,22 @@
-local safe = require 'coxpcall'
+local worker_slot_mod = require 'services.update.worker_slot'
 
 local M = {}
 local Runtime = {}
 Runtime.__index = Runtime
 
 function M.new(ctx)
-    return setmetatable({ ctx = ctx }, Runtime)
+    return setmetatable({ ctx = ctx, slot = worker_slot_mod.new(ctx) }, Runtime)
 end
 
 function Runtime:release_active(job_id)
-    local ctx = self.ctx
-    local job = ctx.state.store.jobs[job_id]
-
-    ctx.model.release_lock(ctx.state, job, ctx.now(), ctx.service_run_id)
-
-    if ctx.state.active_job and ctx.state.active_job.job_id == job_id then
-        ctx.model.clear_active_job(ctx.state)
-    end
-
-    if job then
-        local ok, err = ctx.store_sync.save_job(ctx.repo, job)
-        if not ok then
-            ctx.on_store_error(job_id, err)
-        end
-    end
-
-    -- Important: releasing the active slot may make a resumable reconcile
-    -- job admissible immediately. Signal the main loop so it can reconsider
-    -- resumable work even if no further observer event arrives.
-    ctx.changed:signal()
+    return self.slot:release(job_id)
 end
 
 function Runtime:spawn_runner(mode, job)
     local ctx = self.ctx
     local backend = ctx.state.backends[job.component]
     if not backend then return nil, 'backend_missing' end
-    local child, err = ctx.service_scope:child()
-    if not child then return nil, err end
+
     local stage_source = nil
     if mode == 'stage' then
         local component_cfg = ctx.state.cfg.components[job.component]
@@ -49,12 +29,10 @@ function Runtime:spawn_runner(mode, job)
             stage_source = opened
         end
     end
-    ctx.model.acquire_lock(ctx.state, job, ctx.now(), ctx.service_run_id)
-    local ok, save_err = ctx.store_sync.save_job(ctx.repo, job)
-    if not ok then ctx.on_store_error(job.job_id, save_err) end
+
     local cfg_reconcile = ctx.state.cfg.reconcile
     local snapshot = ctx.copy_job(job)
-    local spawned, spawn_err = child:spawn(function()
+    return self.slot:spawn(job, mode, function()
         if mode == 'stage' then
             return ctx.runner.run_stage(ctx.conn, snapshot, backend, ctx.runner_tx, stage_source)
         elseif mode == 'commit' then
@@ -63,15 +41,10 @@ function Runtime:spawn_runner(mode, job)
             return ctx.runner.run_reconcile(ctx.conn, snapshot, backend, ctx.runner_tx, cfg_reconcile, ctx.observer)
         end
     end)
-    if not spawned then
-        ctx.model.release_lock(ctx.state, job, ctx.now(), ctx.service_run_id)
-        local ok2, err2 = ctx.store_sync.save_job(ctx.repo, job)
-        if not ok2 then ctx.on_store_error(job.job_id, err2) end
-        return nil, spawn_err
-    end
-    ctx.model.set_active_job(ctx.state, { job_id = job.job_id, scope = child, component = job.component, started_at = ctx.now(), mode = mode })
-    ctx.changed:signal()
-    return true, nil
+end
+
+function Runtime:active_join_op()
+    return self.slot:join_op()
 end
 
 function Runtime:handle_runner_event(ev)
@@ -148,12 +121,12 @@ end
 
 function Runtime:handle_active_join(ev)
     local ctx = self.ctx
-    local current_active = ctx.state.active_job and ctx.state.active_job.job_id or nil
+    local current_active = self.slot:current()
 
     self:release_active(ev.job_id)
 
     local job = ctx.state.store.jobs[ev.job_id]
-    if not (ev and job and current_active == ev.job_id) then
+    if not (ev and job and current_active and current_active.job_id == ev.job_id) then
         return
     end
 

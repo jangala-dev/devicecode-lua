@@ -224,10 +224,9 @@ function M.start(conn, opts)
         for key, rec in pairs(state.component_obs) do
             ops[key] = rec.watch:recv_op()
         end
-        if state.active_job then
-            ops.active_join = state.active_job.scope:join_op():wrap(function(st, _report, primary)
-                return { job_id = state.active_job.job_id, st = st, primary = primary }
-            end)
+        local active_join_op = runtime:active_join_op()
+        if active_join_op then
+            ops.active_join = active_join_op
         end
 
         local which, req, err = fibers.perform(fibers.named_choice(ops))
