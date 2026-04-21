@@ -44,11 +44,11 @@ local unpack = unpack or table.unpack
 -- Lua 5.3 frexp polyfill
 -- From https://github.com/excessive/cpml/blob/master/modules/utils.lua
 if not frexp then
-    local log, abs, floor = math.log, math.abs, math.floor
+    local log, abs, lfloor = math.log, math.abs, math.floor
     local log2 = log(2)
     frexp = function(x)
         if x == 0 then return 0, 0 end
-        local e = floor(log(abs(x)) / log2 + 1)
+        local e = lfloor(log(abs(x)) / log2 + 1)
         return x / 2 ^ e, e
     end
 end
@@ -228,15 +228,15 @@ local function newbinser()
     local resources_by_name = {}
     local types = {}
 
-    types["nil"] = function(x, visited, accum)
+    types["nil"] = function(_, _, accum)
         accum[#accum + 1] = "\202"
     end
 
-    function types.number(x, visited, accum)
+    function types.number(x, _, accum)
         accum[#accum + 1] = number_to_str(x)
     end
 
-    function types.boolean(x, visited, accum)
+    function types.boolean(x, _, accum)
         accum[#accum + 1] = x and "\204" or "\205"
     end
 
@@ -379,7 +379,7 @@ local function newbinser()
         elseif t == 206 then
             local length, dataindex = number_from_str(str, index + 1)
             local nextindex = dataindex + length
-            if not (length >= 0) then error("Bad string length") end
+            if length < 0 then error("Bad string length") end
             if #str < nextindex - 1 then error("Expected more bytes of string") end
             local substr = sub(str, dataindex, nextindex - 1)
             visited[#visited + 1] = substr
@@ -400,7 +400,7 @@ local function newbinser()
                 if nextindex == oldindex then error("Expected more bytes of input.") end
             end
             count, nextindex = number_from_str(str, nextindex)
-            for i = 1, count do
+            for _ = 1, count do
                 local k, v
                 local oldindex = nextindex
                 k, nextindex = deserialize_value(str, nextindex, visited)
@@ -435,7 +435,7 @@ local function newbinser()
         elseif t == 210 then
             local length, dataindex = number_from_str(str, index + 1)
             local nextindex = dataindex + length
-            if not (length >= 0) then error("Bad string length") end
+            if length < 0 then error("Bad string length") end
             if #str < nextindex - 1 then error("Expected more bytes of string") end
             local ret = loadstring(sub(str, dataindex, nextindex - 1))
             visited[#visited + 1] = ret
