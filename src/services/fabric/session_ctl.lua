@@ -167,6 +167,10 @@ function M.run(ctx)
 	local next_ping_at = runtime.now() + ping_interval
 	local last_summary = nil
 
+	local function schedule_ping_from(at)
+		next_ping_at = (at or runtime.now()) + ping_interval
+	end
+
 	local function snapshot()
 		return session:get()
 	end
@@ -217,8 +221,12 @@ function M.run(ctx)
 			if s.state ~= 'down' then
 				if ready then
 					s.state = 'ready'
-				else
+				elseif s.state ~= 'reconnecting' then
+					-- Preserve the transient reconnecting state until the hello
+					-- loop re-establishes the session.
 					s.state = 'establishing'
+				else
+					s.state = 'reconnecting'
 				end
 			end
 		end)
@@ -300,7 +308,7 @@ function M.run(ctx)
 				if msg.type == 'hello' then
 					send_control({ type = 'hello_ack', sid = snapshot().local_sid, node = ctx.node_id or link_id })
 				end
-				next_ping_at = runtime.now() + ping_interval
+				schedule_ping_from(snapshot().last_tx_at)
 				refresh_ready()
 			elseif msg.type == 'ping' then
 				activity_mut(function(s)
@@ -318,9 +326,17 @@ function M.run(ctx)
 				activity_mut(function(s) s.last_rx_at = item.at end)
 			elseif item.kind == 'tx_activity' then
 				activity_mut(function(s) s.last_tx_at = item.at end)
+				schedule_ping_from(item.at)
 			elseif item.kind == 'rpc_ready' then
 				rpc_ready = not not item.ready
 				refresh_ready()
+			elseif item.kind == 'reconnect_requested' then
+				state_mut(function(s)
+					s.state = 'reconnecting'
+					s.ready = false
+					s.established = false
+				end)
+				next_hello_at = runtime.now()
 			end
 		elseif which == 'timer' then
 			local now = runtime.now()

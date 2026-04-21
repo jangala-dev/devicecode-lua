@@ -325,7 +325,6 @@ local function next_shell_event(state, cfg_watch, transfer_ep, report_rx)
 		report = report_event_op(report_rx),
 	}
 
-
 	for link_id, at in pairs(state.restart_at) do
 		local dt = at - fibers.now()
 		if dt < 0 then dt = 0 end

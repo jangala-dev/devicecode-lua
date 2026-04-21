@@ -1,5 +1,7 @@
 local busmod     = require 'bus'
+local fibers     = require 'fibers'
 local mailbox    = require 'fibers.mailbox'
+local sleep      = require 'fibers.sleep'
 local runfibers  = require 'tests.support.run_fibers'
 local probe      = require 'tests.support.bus_probe'
 
@@ -9,10 +11,22 @@ local checksum     = require 'services.fabric.checksum'
 
 local T = {}
 
+local function recv_with_timeout(rx, timeout)
+	local which, a, b = fibers.perform(fibers.named_choice({
+		msg = rx:recv_op(),
+		timer = sleep.sleep_op(timeout):wrap(function() return true end),
+	}))
+	if which == 'timer' then
+		return nil, 'timeout'
+	end
+	return a, b
+end
+
 local function new_env(bus, link_id)
 	local state_conn = bus:connect()
 	local session = session_ctl.new_state(link_id, state_conn)
 	local xfer_tx, xfer_rx = mailbox.new(64, { full = 'reject_newest' })
+	local status_tx, status_rx = mailbox.new(64, { full = 'reject_newest' })
 	local tx_control_tx, tx_control_rx = mailbox.new(64, { full = 'reject_newest' })
 	local tx_bulk_tx, tx_bulk_rx = mailbox.new(64, { full = 'reject_newest' })
 	local transfer_ctl_tx, transfer_ctl_rx = mailbox.new(16, { full = 'reject_newest' })
@@ -24,6 +38,8 @@ local function new_env(bus, link_id)
 		session = session,
 		xfer_tx = xfer_tx,
 		xfer_rx = xfer_rx,
+		status_tx = status_tx,
+		status_rx = status_rx,
 		tx_control_tx = tx_control_tx,
 		tx_control_rx = tx_control_rx,
 		tx_bulk_tx = tx_bulk_tx,
@@ -43,18 +59,38 @@ local function recv_mailbox(rx)
 	return item
 end
 
-local function spawn_transfer_endpoint(scope, env)
-	local ok, err = scope:spawn(function ()
-		while true do
-			local req, rerr = env.ep:recv()
-			if not req then return end
-			local sok, sreason = env.transfer_ctl_tx:send(req)
-			if sok ~= true then
-				req:fail(sreason or 'queue_closed')
-			end
-		end
-	end)
-	assert(ok, tostring(err))
+local function new_request(payload)
+	local req = {
+		payload = payload,
+		_done = false,
+		reply_payload = nil,
+		fail_err = nil,
+	}
+
+	function req:done()
+		return self._done
+	end
+
+	function req:reply(value)
+		self._done = true
+		self.reply_payload = value
+		return true
+	end
+
+	function req:fail(err)
+		self._done = true
+		self.fail_err = err
+		return true
+	end
+
+	return req
+end
+
+local function send_request(env, payload)
+	local req = new_request(payload)
+	local ok, err = env.transfer_ctl_tx:send(req)
+	assert(ok == true, tostring(err))
+	return req
 end
 
 function T.outgoing_transfer_happy_path_emits_begin_chunk_commit_and_reply()
@@ -62,14 +98,13 @@ function T.outgoing_transfer_happy_path_emits_begin_chunk_commit_and_reply()
 		local bus = busmod.new()
 		local env = new_env(bus, 'link-x1')
 
-		spawn_transfer_endpoint(scope, env)
-
 		local ok, err = scope:spawn(function ()
 			transfer_mgr.run({
 				link_id = 'link-x1',
 				conn = env.conn,
 				session = env.session,
 				xfer_rx = env.xfer_rx,
+				status_tx = env.status_tx,
 				tx_control = env.tx_control_tx,
 				tx_bulk = env.tx_bulk_tx,
 				transfer_ctl_rx = env.transfer_ctl_rx,
@@ -79,15 +114,11 @@ function T.outgoing_transfer_happy_path_emits_begin_chunk_commit_and_reply()
 		end)
 		assert(ok, tostring(err))
 
-		local reply, reply_err
-		local okc, errc = scope:spawn(function ()
-			reply, reply_err = env.rpc_caller:call(env.topic, {
-				op = 'send_blob',
-				link_id = 'link-x1',
-				source = 'hello world',
-			}, { timeout = 1.0 })
-		end)
-		assert(okc, tostring(errc))
+		local req = send_request(env, {
+			op = 'send_blob',
+			link_id = 'link-x1',
+			source = 'hello world',
+		})
 
 		local begin = recv_mailbox(env.tx_control_rx).frame
 		assert(begin.type == 'xfer_begin')
@@ -107,11 +138,11 @@ function T.outgoing_transfer_happy_path_emits_begin_chunk_commit_and_reply()
 		assert(commit.size == #'hello world')
 
 		env.xfer_tx:send({ msg = { type = 'xfer_done', xfer_id = begin.xfer_id } })
-		assert(probe.wait_until(function () return reply ~= nil end, { timeout = 0.5, interval = 0.01 }))
-		assert(reply_err == nil)
-		assert(reply.ok == true)
-		assert(reply.xfer_id == begin.xfer_id)
-		assert(reply.size == #'hello world')
+		assert(probe.wait_until(function () return req:done() end, { timeout = 0.5, interval = 0.01 }))
+		assert(req.fail_err == nil)
+		assert(req.reply_payload.ok == true)
+		assert(req.reply_payload.xfer_id == begin.xfer_id)
+		assert(req.reply_payload.size == #'hello world')
 	end)
 end
 
@@ -129,6 +160,7 @@ function T.incoming_transfer_happy_path_accepts_chunks_and_commits()
 				conn = env.conn,
 				session = env.session,
 				xfer_rx = env.xfer_rx,
+				status_tx = env.status_tx,
 				tx_control = env.tx_control_tx,
 				tx_bulk = env.tx_bulk_tx,
 				transfer_ctl_rx = env.transfer_ctl_rx,
@@ -169,14 +201,13 @@ function T.session_generation_change_aborts_outgoing_transfer()
 		local bus = busmod.new()
 		local env = new_env(bus, 'link-x3')
 
-		spawn_transfer_endpoint(scope, env)
-
 		local ok, err = scope:spawn(function ()
 			transfer_mgr.run({
 				link_id = 'link-x3',
 				conn = env.conn,
 				session = env.session,
 				xfer_rx = env.xfer_rx,
+				status_tx = env.status_tx,
 				tx_control = env.tx_control_tx,
 				tx_bulk = env.tx_bulk_tx,
 				transfer_ctl_rx = env.transfer_ctl_rx,
@@ -186,15 +217,11 @@ function T.session_generation_change_aborts_outgoing_transfer()
 		end)
 		assert(ok, tostring(err))
 
-		local reply, reply_err
-		local okc, errc = scope:spawn(function ()
-			reply, reply_err = env.rpc_caller:call(env.topic, {
-				op = 'send_blob',
-				link_id = 'link-x3',
-				source = 'abcdefgh',
-			}, { timeout = 1.0 })
-		end)
-		assert(okc, tostring(errc))
+		local req = send_request(env, {
+			op = 'send_blob',
+			link_id = 'link-x3',
+			source = 'abcdefgh',
+		})
 
 		local begin = recv_mailbox(env.tx_control_rx).frame
 		assert(begin.type == 'xfer_begin')
@@ -203,7 +230,7 @@ function T.session_generation_change_aborts_outgoing_transfer()
 			s.generation = s.generation + 1
 		end, { bump_pulse = true })
 
-		assert(probe.wait_until(function () return reply == nil and tostring(reply_err):match('session_reset') ~= nil end,
+		assert(probe.wait_until(function () return req:done() and tostring(req.fail_err):match('session_reset') ~= nil end,
 			{ timeout = 0.5, interval = 0.01 }))
 	end)
 end
@@ -213,14 +240,13 @@ function T.only_one_outgoing_transfer_is_admitted_at_a_time()
 		local bus = busmod.new()
 		local env = new_env(bus, 'link-x4')
 
-		spawn_transfer_endpoint(scope, env)
-
 		local ok, err = scope:spawn(function ()
 			transfer_mgr.run({
 				link_id = 'link-x4',
 				conn = env.conn,
 				session = env.session,
 				xfer_rx = env.xfer_rx,
+				status_tx = env.status_tx,
 				tx_control = env.tx_control_tx,
 				tx_bulk = env.tx_bulk_tx,
 				transfer_ctl_rx = env.transfer_ctl_rx,
@@ -230,18 +256,14 @@ function T.only_one_outgoing_transfer_is_admitted_at_a_time()
 		end)
 		assert(ok, tostring(err))
 
-		local reply1, err1
-		local ok1, spawn1 = scope:spawn(function ()
-			reply1, err1 = env.rpc_caller:call(env.topic, { op = 'send_blob', link_id = 'link-x4', source = 'first' }, { timeout = 1.0 })
-		end)
-		assert(ok1, tostring(spawn1))
+		local req1 = send_request(env, { op = 'send_blob', link_id = 'link-x4', source = 'first' })
 
 		local begin = recv_mailbox(env.tx_control_rx).frame
 		assert(begin.type == 'xfer_begin')
 
-		local reply2, err2 = env.rpc_caller:call(env.topic, { op = 'send_blob', link_id = 'link-x4', source = 'second' }, { timeout = 0.5 })
-		assert(reply2 == nil)
-		assert(tostring(err2):match('busy'))
+		local req2 = send_request(env, { op = 'send_blob', link_id = 'link-x4', source = 'second' })
+		assert(probe.wait_until(function () return req2:done() end, { timeout = 0.5, interval = 0.01 }))
+		assert(tostring(req2.fail_err):match('busy'))
 
 		env.xfer_tx:send({ msg = { type = 'xfer_ready', xfer_id = begin.xfer_id } })
 		assert(recv_mailbox(env.tx_bulk_rx).frame.type == 'xfer_chunk')
@@ -249,9 +271,174 @@ function T.only_one_outgoing_transfer_is_admitted_at_a_time()
 		assert(recv_mailbox(env.tx_control_rx).frame.type == 'xfer_commit')
 		env.xfer_tx:send({ msg = { type = 'xfer_done', xfer_id = begin.xfer_id } })
 
-		assert(probe.wait_until(function () return reply1 ~= nil end, { timeout = 0.5, interval = 0.01 }))
-		assert(err1 == nil)
-		assert(reply1.ok == true)
+		assert(probe.wait_until(function () return req1:done() end, { timeout = 0.5, interval = 0.01 }))
+		assert(req1.fail_err == nil)
+		assert(req1.reply_payload.ok == true)
+	end)
+end
+
+function T.outgoing_transfer_progress_is_throttled_while_sending()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local observer = bus:connect()
+		local env = new_env(bus, 'link-x5')
+		local source = string.rep('a', 33)
+
+		local ok, err = scope:spawn(function ()
+			transfer_mgr.run({
+				link_id = 'link-x5',
+				conn = env.conn,
+				session = env.session,
+				xfer_rx = env.xfer_rx,
+				status_tx = env.status_tx,
+				tx_control = env.tx_control_tx,
+				tx_bulk = env.tx_bulk_tx,
+				transfer_ctl_rx = env.transfer_ctl_rx,
+				chunk_size = 1,
+				transfer_phase_timeout_s = 1.0,
+			})
+		end)
+		assert(ok, tostring(err))
+
+		local transfer_sub = observer:subscribe({ 'state', 'fabric', 'link', 'link-x5', 'transfer' }, {
+			queue_len = 16,
+			full = 'drop_oldest',
+		})
+
+		local req = send_request(env, {
+			op = 'send_blob',
+			link_id = 'link-x5',
+			source = source,
+		})
+
+		local begin = recv_mailbox(env.tx_control_rx).frame
+		assert(begin.type == 'xfer_begin')
+
+		env.xfer_tx:send({ msg = { type = 'xfer_ready', xfer_id = begin.xfer_id } })
+		for i = 0, #source - 1 do
+			local chunk = recv_mailbox(env.tx_bulk_rx).frame
+			assert(chunk.type == 'xfer_chunk')
+			assert(chunk.xfer_id == begin.xfer_id)
+			assert(chunk.offset == i)
+			assert(chunk.data == 'a')
+			env.xfer_tx:send({ msg = { type = 'xfer_need', xfer_id = begin.xfer_id, next = i + 1 } })
+		end
+
+		local commit = recv_mailbox(env.tx_control_rx).frame
+		assert(commit.type == 'xfer_commit')
+		env.xfer_tx:send({ msg = { type = 'xfer_done', xfer_id = begin.xfer_id } })
+
+		assert(probe.wait_until(function () return req:done() end, { timeout = 0.5, interval = 0.01 }))
+		assert(req.fail_err == nil)
+
+		local statuses = {}
+		while true do
+			local msg, serr = recv_with_timeout(transfer_sub, 0.25)
+			assert(msg ~= nil, tostring(serr))
+			statuses[#statuses + 1] = msg.payload.status
+			if msg.payload.status.state == 'done' then
+				break
+			end
+		end
+		transfer_sub:unsubscribe()
+		if statuses[1] and statuses[1].state == 'idle' then
+			table.remove(statuses, 1)
+		end
+
+		assert(#statuses == 5)
+		assert(statuses[1].state == 'waiting_ready' and statuses[1].offset == 0)
+		assert(statuses[2].state == 'sending' and statuses[2].offset == 32)
+		assert(statuses[3].state == 'sending' and statuses[3].offset == 33)
+		assert(statuses[4].state == 'committing' and statuses[4].offset == 33)
+		assert(statuses[5].state == 'done' and statuses[5].offset == 33)
+	end)
+end
+
+function T.firmware_transfer_completion_requests_reconnect()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local env = new_env(bus, 'link-x6')
+
+		local ok, err = scope:spawn(function ()
+			transfer_mgr.run({
+				link_id = 'link-x6',
+				conn = env.conn,
+				session = env.session,
+				xfer_rx = env.xfer_rx,
+				status_tx = env.status_tx,
+				tx_control = env.tx_control_tx,
+				tx_bulk = env.tx_bulk_tx,
+				transfer_ctl_rx = env.transfer_ctl_rx,
+				chunk_size = 32,
+				transfer_phase_timeout_s = 1.0,
+			})
+		end)
+		assert(ok, tostring(err))
+
+		local req = send_request(env, {
+			op = 'send_blob',
+			link_id = 'link-x6',
+			source = 'firmware',
+			meta = { kind = 'firmware.rp2350' },
+		})
+
+		local begin = recv_mailbox(env.tx_control_rx).frame
+		env.xfer_tx:send({ msg = { type = 'xfer_ready', xfer_id = begin.xfer_id } })
+		assert(recv_mailbox(env.tx_bulk_rx).frame.type == 'xfer_chunk')
+		env.xfer_tx:send({ msg = { type = 'xfer_need', xfer_id = begin.xfer_id, next = #'firmware' } })
+		assert(recv_mailbox(env.tx_control_rx).frame.type == 'xfer_commit')
+		env.xfer_tx:send({ msg = { type = 'xfer_done', xfer_id = begin.xfer_id } })
+
+		assert(probe.wait_until(function () return req:done() end, { timeout = 0.5, interval = 0.01 }))
+		assert(req.fail_err == nil)
+
+		local status, serr = recv_with_timeout(env.status_rx, 0.25)
+		assert(status ~= nil, tostring(serr))
+		assert(status.kind == 'reconnect_requested')
+	end)
+end
+
+function T.non_firmware_transfer_completion_does_not_request_reconnect()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local env = new_env(bus, 'link-x7')
+
+		local ok, err = scope:spawn(function ()
+			transfer_mgr.run({
+				link_id = 'link-x7',
+				conn = env.conn,
+				session = env.session,
+				xfer_rx = env.xfer_rx,
+				status_tx = env.status_tx,
+				tx_control = env.tx_control_tx,
+				tx_bulk = env.tx_bulk_tx,
+				transfer_ctl_rx = env.transfer_ctl_rx,
+				chunk_size = 32,
+				transfer_phase_timeout_s = 1.0,
+			})
+		end)
+		assert(ok, tostring(err))
+
+		local req = send_request(env, {
+			op = 'send_blob',
+			link_id = 'link-x7',
+			source = 'payload',
+			meta = { kind = 'blob' },
+		})
+
+		local begin = recv_mailbox(env.tx_control_rx).frame
+		env.xfer_tx:send({ msg = { type = 'xfer_ready', xfer_id = begin.xfer_id } })
+		assert(recv_mailbox(env.tx_bulk_rx).frame.type == 'xfer_chunk')
+		env.xfer_tx:send({ msg = { type = 'xfer_need', xfer_id = begin.xfer_id, next = #'payload' } })
+		assert(recv_mailbox(env.tx_control_rx).frame.type == 'xfer_commit')
+		env.xfer_tx:send({ msg = { type = 'xfer_done', xfer_id = begin.xfer_id } })
+
+		assert(probe.wait_until(function () return req:done() end, { timeout = 0.5, interval = 0.01 }))
+		assert(req.fail_err == nil)
+
+		local status, serr = recv_with_timeout(env.status_rx, 0.1)
+		assert(status == nil)
+		assert(serr == 'timeout')
 	end)
 end
 

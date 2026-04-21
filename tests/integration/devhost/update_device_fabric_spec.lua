@@ -67,6 +67,16 @@ local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
 	end)
 end
 
+local function drain_mailbox(scope, rx)
+	local ok, err = scope:spawn(function()
+		while true do
+			local item = rx:recv()
+			if item == nil then return end
+		end
+	end)
+	assert(ok, tostring(err))
+end
+
 local function wait_retained_state(conn, topic, pred, timeout)
     return probe.wait_until(function()
         local ok, payload = safe.pcall(function()
@@ -139,6 +149,8 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		local b_ctl_tx, b_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
 		local a_report_tx, a_report_rx = mailbox.new(8, { full = 'reject_newest' })
 		local b_report_tx, b_report_rx = mailbox.new(8, { full = 'reject_newest' })
+		drain_mailbox(scope, a_report_rx)
+		drain_mailbox(scope, b_report_rx)
 
 		local versions = { mcu = 'mcu-v0' }
 		local incarnation = { mcu = 1 }
@@ -350,6 +362,8 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		local b_ctl_tx, b_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
 		local a_report_tx, a_report_rx = mailbox.new(8, { full = 'reject_newest' })
 		local b_report_tx, b_report_rx = mailbox.new(8, { full = 'reject_newest' })
+		drain_mailbox(scope, a_report_rx)
+		drain_mailbox(scope, b_report_rx)
 
 		local versions = { mcu = 'mcu-v0' }
 		local incarnation = { mcu = 1 }

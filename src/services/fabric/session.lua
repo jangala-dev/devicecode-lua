@@ -156,6 +156,7 @@ function M.run(params)
 			conn                     = state_conn,
 			session                  = session,
 			xfer_rx                  = xfer_in_rx,
+			status_tx                = status_tx,
 			tx_control               = tx_control_tx,
 			tx_bulk                  = tx_bulk_tx,
 			transfer_ctl_rx          = transfer_ctl_rx,
