@@ -12,9 +12,6 @@ local fibers  = require 'fibers'
 local runtime = require 'fibers.runtime'
 local sleep   = require 'fibers.sleep'
 
-local perform      = fibers.perform
-local named_choice = fibers.named_choice
-
 local M = {}
 
 local function t(...) return { ... } end

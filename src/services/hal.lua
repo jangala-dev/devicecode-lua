@@ -108,17 +108,6 @@ function HalService.start(conn, opts)
     local devices = {}
     local capabilities = {}
 
-    local function merge_fields(a, b)
-        local out = {}
-        if type(a) == 'table' then
-            for k, v in pairs(a) do out[k] = v end
-        end
-        if type(b) == 'table' then
-            for k, v in pairs(b) do out[k] = v end
-        end
-        return out
-    end
-
     local function obs_emitter(level, payload)
         svc:obs_log(level, payload)
     end
@@ -274,9 +263,9 @@ function HalService.start(conn, opts)
     end
 
     ---Handles running driver functions for control requests
-    ---@param msg Message
-    local function on_cap_ctrl(msg)
-        local class, id, verb = msg.topic[2], msg.topic[3], msg.topic[5]
+    ---@param req Request
+    local function on_cap_ctrl(req)
+        local class, id, verb = req.topic[2], req.topic[3], req.topic[5]
 
         if not class_valid(class) then
             svc:obs_log('warn', { what = 'invalid_cap_class', class = tostring(class) })
@@ -290,7 +279,7 @@ function HalService.start(conn, opts)
 
         local control_req, ctrl_req_err = types.new.ControlRequest(
             verb,
-            msg.payload,
+            req.payload,
             channel.new()
         )
         if not control_req then
@@ -301,14 +290,20 @@ function HalService.start(conn, opts)
                 id = id,
                 verb = verb,
             })
+            -- ordinary publish traffic does not reach bound endpoints
+            req:fail(tostring(ctrl_req_err))
             return
         end
 
         local cap_entry = get_cap(class, id)
-        if not cap_entry then return end
+        -- A missing cap is not inherently a HAL error here; it may be owned elsewhere.
+        if not cap_entry then
+            return
+        end
 
         if not cap_entry.inst.offerings[verb] then
             svc:obs_log('warn', { what = 'control_verb_unavailable', class = class, id = id, verb = verb })
+            req:fail('control verb unavailable')
             return
         end
 
@@ -318,17 +313,18 @@ function HalService.start(conn, opts)
             if not reply then
                 reply = types.new.Reply(false, reply_err)
             end
-            if msg.reply_to and reply then
-                local ok, pub_err = conn:publish_one(msg.reply_to, reply)
+            if reply then
+                local ok = req:reply(reply)
                 if not ok then
                     svc:obs_log('error', {
-                        what = 'control_reply_publish_failed',
+                        what = 'control_reply_deliver_failed',
                         class = class,
                         id = id,
                         verb = verb,
-                        err = tostring(pub_err),
                     })
                 end
+            else
+                req:fail(tostring(reply_err or 'control failed'))
             end
         end)
     end
