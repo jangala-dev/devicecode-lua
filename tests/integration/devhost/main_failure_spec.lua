@@ -9,7 +9,7 @@ local safe = require 'coxpcall'
 local runfibers     = require 'tests.support.run_fibers'
 local probe         = require 'tests.support.bus_probe'
 local fake_hal_mod  = require 'tests.support.fake_hal'
-local diag          = require 'tests.support.stack_diag'
+local test_diag     = require 'tests.support.test_diag'
 
 local mainmod       = require 'devicecode.main'
 
@@ -122,11 +122,10 @@ function T.devhost_main_fails_fast_when_child_service_errors()
 			scripted = {},
 		})
 
-		local rec = diag.start(scope, bus, {
-			{ label = 'obs', topic = { 'obs', '#' } },
-			{ label = 'svc', topic = { 'svc', '#' } },
-		}, {
-			max_records = 300,
+		local diag = test_diag.for_stack(scope, bus, { obs = true, ui = true, max_records = 300, fake_hal = fake_hal })
+		test_diag.add_table(diag, 'linger_box', function() return linger_box end)
+		test_diag.add_subsystem(diag, 'ui', {
+			main_fn = test_diag.retained_fn(bus:connect(), { 'state', 'ui', 'main' }),
 		})
 
 		local main_scope = spawn_main(scope, bus, fake_hal, linger_box, 'hal,linger,boom')
@@ -139,11 +138,7 @@ function T.devhost_main_fails_fast_when_child_service_errors()
 		end, { timeout = 0.75 })
 
 		if main_failed == nil then
-			error(diag.explain(
-				'expected main to fail because boom service errored',
-				rec,
-				fake_hal
-			), 0)
+			diag:fail('expected main to fail because boom service errored')
 		end
 
 		local boom_failed = wait_retained_payload_matching(conn, { 'obs', 'state', 'service', 'boom' }, function(payload)
@@ -154,11 +149,7 @@ function T.devhost_main_fails_fast_when_child_service_errors()
 		end, { timeout = 0.75 })
 
 		if boom_failed == nil then
-			error(diag.explain(
-				'expected failing boom service state to be retained',
-				rec,
-				fake_hal
-			), 0)
+			diag:fail('expected failing boom service state to be retained')
 		end
 
 		-- Cancellation is not join. Join the main child scope so that cancelled
@@ -173,19 +164,15 @@ function T.devhost_main_fails_fast_when_child_service_errors()
 		end, { timeout = 0.75, interval = 0.01 })
 
 		if not linger_final then
-			error(diag.explain(
-				('expected sibling linger service to be cancelled and finalised'
-					.. ' after joining main scope'
-					.. ' (join_status=%s finalised=%s aborted=%s status=%s primary=%s)'):format(
-						tostring(jst),
-						tostring(linger_box.finalised),
-						tostring(linger_box.aborted),
-						tostring(linger_box.status),
-						tostring(linger_box.primary)
-					),
-				rec,
-				fake_hal
-			), 0)
+			diag:fail(('expected sibling linger service to be cancelled and finalised'
+				.. ' after joining main scope'
+				.. ' (join_status=%s finalised=%s aborted=%s status=%s primary=%s)'):format(
+					tostring(jst),
+					tostring(linger_box.finalised),
+					tostring(linger_box.aborted),
+					tostring(linger_box.status),
+					tostring(linger_box.primary)
+				))
 		end
 	end, { timeout = 1.25 })
 end

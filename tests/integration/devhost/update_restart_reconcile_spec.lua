@@ -1,5 +1,6 @@
 local busmod      = require 'bus'
 local runfibers   = require 'tests.support.run_fibers'
+local test_diag = require 'tests.support.test_diag'
 local probe       = require 'tests.support.bus_probe'
 local fibers      = require 'fibers'
 local sleep_mod   = require 'fibers.sleep'
@@ -118,6 +119,16 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         local caller = bus:connect()
         local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
         local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+        local diag = test_diag.for_stack(scope, bus, { update = true, device = true, max_records = 320 })
+        test_diag.add_subsystem(diag, 'update', {
+            service_fn = test_diag.retained_fn(caller, { 'svc', 'update', 'status' }),
+            store_fn = function() return control.namespaces['update/jobs'] or {} end,
+            artifacts_fn = function() return artifacts.artifacts end,
+        })
+        test_diag.add_subsystem(diag, 'device', {
+            summary_fn = test_diag.retained_fn(caller, { 'state', 'device' }),
+            cm5_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'cm5' }),
+        })
         local updater_state = {
             state = 'idle',
             fw_version = 'cm5-v0',

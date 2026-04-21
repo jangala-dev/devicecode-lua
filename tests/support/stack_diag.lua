@@ -187,4 +187,11 @@ function M.explain(message, rec, fake_hal)
 	return table.concat(parts, '\n')
 end
 
+---@param rec table
+---@param opts? { max_records?: integer }
+---@return string
+function M.render_records(rec, opts)
+	return M.render(rec, opts)
+end
+
 return M

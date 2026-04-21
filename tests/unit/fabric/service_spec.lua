@@ -1,6 +1,7 @@
 local busmod    = require 'bus'
 local runfibers = require 'tests.support.run_fibers'
 local probe     = require 'tests.support.bus_probe'
+local test_diag = require 'tests.support.test_diag'
 local fabric    = require 'services.fabric'
 local safe      = require 'coxpcall'
 
@@ -10,13 +11,18 @@ function T.fabric_service_applies_empty_config_and_exposes_transfer_endpoint()
 	runfibers.run(function(scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
+		local diag = test_diag.for_stack(scope, bus, { fabric = true, max_records = 240 })
+		test_diag.add_subsystem(diag, 'fabric', {
+			service_fn = test_diag.retained_fn(conn, { 'svc', 'fabric', 'status' }),
+			summary_fn = test_diag.retained_fn(conn, { 'state', 'fabric' }),
+		})
 
 		conn:retain({ 'cfg', 'fabric' }, { links = {} })
 
 		local ok_spawn, err = scope:spawn(function()
 			fabric.start(bus:connect(), { name = 'fabric', env = 'dev' })
 		end)
-		assert(ok_spawn, tostring(err))
+		if not ok_spawn then diag:fail('failed to spawn fabric service: ' .. tostring(err)) end
 
 		local st
 		assert(probe.wait_until(function()

@@ -5,7 +5,7 @@ local safe           = require 'coxpcall'
 local runfibers      = require 'tests.support.run_fibers'
 local probe          = require 'tests.support.bus_probe'
 local fake_hal_mod   = require 'tests.support.fake_hal'
-local diag           = require 'tests.support.stack_diag'
+local test_diag      = require 'tests.support.test_diag'
 
 local config_service = require 'services.config'
 
@@ -44,13 +44,14 @@ function T.devhost_config_recovers_after_failed_persist_retry()
 		})
 		fake_hal:start(bus:connect(), { name = 'hal' })
 
-		local rec = diag.start(scope, bus, {
-			{ label = 'obs', topic = { 'obs', '#' } },
-			{ label = 'cfg', topic = { 'cfg', '#' } },
-		}, { max_records = 300 })
+		local status_events = {}
+		local diag = test_diag.for_stack(scope, bus, { config = true, obs = true, max_records = 300, fake_hal = fake_hal })
+		test_diag.add_calls(diag, 'status_events', status_events)
+		test_diag.add_subsystem(diag, 'device', {
+			summary_fn = test_diag.retained_fn(bus:connect(), { 'state', 'device' }),
+		})
 
 		local conn = bus:connect()
-		local status_events = {}
 		local sub = conn:subscribe({ 'svc', 'config', 'status' }, { queue_len = 32 })
 		local ok_collector, cerr = scope:spawn(function()
 			while true do
@@ -73,7 +74,7 @@ function T.devhost_config_recovers_after_failed_persist_retry()
 			end
 			return false
 		end, { timeout = 0.75, interval = 0.01 })
-		if not ready then error(diag.explain('expected config to reach running', rec, fake_hal), 0) end
+		if not ready then diag:fail('expected config to reach running') end
 
 		local req_conn = bus:connect()
 		local reply, rerr = req_conn:call({ 'cmd', 'config', 'set' }, {
@@ -94,7 +95,7 @@ function T.devhost_config_recovers_after_failed_persist_retry()
 			end
 			return false
 		end, { timeout = 0.75, interval = 0.01 })
-		if not saw_degraded then error(diag.explain('expected degraded after failed persist', rec, fake_hal), 0) end
+		if not saw_degraded then diag:fail('expected degraded after failed persist') end
 
 		local saw_recovered = probe.wait_until(function()
 			if degraded_index == nil then return false end
@@ -104,7 +105,7 @@ function T.devhost_config_recovers_after_failed_persist_retry()
 			end
 			return false
 		end, { timeout = 0.75, interval = 0.01 })
-		if not saw_recovered then error(diag.explain('expected recovery to running after retry', rec, fake_hal), 0) end
+		if not saw_recovered then diag:fail('expected recovery to running after retry') end
 
 		local writes = {}
 		for i = 1, #fake_hal.calls do

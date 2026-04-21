@@ -70,6 +70,12 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
         local bus = busmod.new()
         local caller = bus:connect()
         local diag = test_diag.for_stack(scope, bus, { fabric = true, max_records = 360 })
+        test_diag.add_subsystem(diag, 'fabric', {
+            service_fn = test_diag.retained_fn(caller, { 'svc', 'fabric', 'status' }),
+            summary_fn = test_diag.retained_fn(caller, { 'state', 'fabric' }),
+            session_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'link-a', 'session' }),
+            transfer_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'link-a', 'transfer' }),
+        })
 
         local a_stream, b_stream = duplex.new_pair()
         local a_ctl_tx, a_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
@@ -188,6 +194,12 @@ function T.devhost_fabric_transfer_receiver_failure_aborts_sender_request()
         local bus = busmod.new()
         local caller = bus:connect()
         local diag = test_diag.for_stack(scope, bus, { fabric = true, max_records = 360 })
+        test_diag.add_subsystem(diag, 'fabric', {
+            service_fn = test_diag.retained_fn(caller, { 'svc', 'fabric', 'status' }),
+            summary_fn = test_diag.retained_fn(caller, { 'state', 'fabric' }),
+            session_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'link-a', 'session' }),
+            transfer_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'link-a', 'transfer' }),
+        })
 
         local a_stream, b_stream = duplex.new_pair()
         local a_ctl_tx, a_ctl_rx = mailbox.new(8, { full = 'reject_newest' })

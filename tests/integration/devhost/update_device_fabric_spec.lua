@@ -1,5 +1,6 @@
 local busmod      = require 'bus'
 local duplex      = require 'tests.support.duplex_stream'
+local test_diag = require 'tests.support.test_diag'
 local probe       = require 'tests.support.bus_probe'
 local runfibers   = require 'tests.support.run_fibers'
 local safe        = require 'coxpcall'
@@ -102,6 +103,21 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		local caller = bus:connect()
 		local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
 		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+		local diag = test_diag.for_stack(scope, bus, { update = true, device = true, fabric = true, max_records = 360 })
+		test_diag.add_subsystem(diag, 'update', {
+			service_fn = test_diag.retained_fn(caller, { 'svc', 'update', 'status' }),
+			store_fn = function() return control.namespaces['update/jobs'] or {} end,
+			artifacts_fn = function() return artifacts.artifacts end,
+		})
+		test_diag.add_subsystem(diag, 'device', {
+			summary_fn = test_diag.retained_fn(caller, { 'state', 'device' }),
+			mcu_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'mcu' }),
+		})
+		test_diag.add_subsystem(diag, 'fabric', {
+			summary_fn = test_diag.retained_fn(caller, { 'state', 'fabric' }),
+			session_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'session' }),
+			transfer_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'transfer' }),
+		})
 		local seed = bus:connect()
 
 		seed:retain({ 'cfg', 'update' }, {
@@ -309,8 +325,23 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 
 		local bus = busmod.new()
 		local caller = bus:connect()
-		storagecaps.start_control_store_cap(scope, bus:connect(), {})
+		local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
 		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+		local diag = test_diag.for_stack(scope, bus, { update = true, device = true, fabric = true, max_records = 360 })
+		test_diag.add_subsystem(diag, 'update', {
+			service_fn = test_diag.retained_fn(caller, { 'svc', 'update', 'status' }),
+			store_fn = function() return control.namespaces['update/jobs'] or {} end,
+			artifacts_fn = function() return artifacts.artifacts end,
+		})
+		test_diag.add_subsystem(diag, 'device', {
+			summary_fn = test_diag.retained_fn(caller, { 'state', 'device' }),
+			mcu_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'mcu' }),
+		})
+		test_diag.add_subsystem(diag, 'fabric', {
+			summary_fn = test_diag.retained_fn(caller, { 'state', 'fabric' }),
+			session_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'session' }),
+			transfer_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'transfer' }),
+		})
 		local seed = bus:connect()
 
 		seed:retain({ 'cfg', 'update' }, {

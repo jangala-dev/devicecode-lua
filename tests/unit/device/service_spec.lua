@@ -1,6 +1,7 @@
 local busmod    = require 'bus'
 local runfibers = require 'tests.support.run_fibers'
 local probe     = require 'tests.support.bus_probe'
+local test_diag = require 'tests.support.test_diag'
 local device    = require 'services.device'
 local safe      = require 'coxpcall'
 
@@ -32,6 +33,12 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
     local bus = busmod.new()
     local caller = bus:connect()
     local provider = bus:connect()
+    local diag = test_diag.for_stack(scope, bus, { device = true, max_records = 240 })
+    test_diag.add_subsystem(diag, 'device', {
+      service_fn = test_diag.retained_fn(caller, { 'svc', 'device', 'status' }),
+      summary_fn = test_diag.retained_fn(caller, { 'state', 'device' }),
+      cm5_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'cm5' }),
+    })
 
     local status_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'status' }, { queue_len = 16 })
     local prepare_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'prepare' }, { queue_len = 16 })
@@ -54,7 +61,7 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
     local ok, err = scope:spawn(function()
       device.start(bus:connect(), { name = 'device', env = 'dev' })
     end)
-    assert(ok, tostring(err))
+    if not ok then diag:fail('failed to spawn device service: ' .. tostring(err)) end
 
     wait_service_running(caller, 'device')
 
@@ -86,6 +93,12 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
     local caller = bus:connect()
     local seed = bus:connect()
     local provider = bus:connect()
+    local diag = test_diag.for_stack(scope, bus, { device = true, config = true, max_records = 240 })
+    test_diag.add_subsystem(diag, 'device', {
+      service_fn = test_diag.retained_fn(caller, { 'svc', 'device', 'status' }),
+      summary_fn = test_diag.retained_fn(caller, { 'state', 'device' }),
+      mcu_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'mcu' }),
+    })
 
     seed:retain({ 'cfg', 'device' }, {
       schema = 'devicecode.config/device/1',
@@ -114,7 +127,7 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
     local ok, err = scope:spawn(function()
       device.start(bus:connect(), { name = 'device', env = 'dev' })
     end)
-    assert(ok, tostring(err))
+    if not ok then diag:fail('failed to spawn device service: ' .. tostring(err)) end
 
     wait_service_running(caller, 'device')
 

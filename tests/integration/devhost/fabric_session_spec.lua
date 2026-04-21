@@ -38,6 +38,13 @@ function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 		local bus = busmod.new()
 		local conn = bus:connect()
 		local diag = test_diag.for_stack(scope, bus, { fabric = true, rpc = true, max_records = 320 })
+		test_diag.add_subsystem(diag, 'fabric', {
+			service_fn = test_diag.retained_fn(conn, { 'svc', 'fabric', 'status' }),
+			summary_fn = test_diag.retained_fn(conn, { 'state', 'fabric' }),
+			session_fn = test_diag.retained_fn(conn, { 'state', 'fabric', 'link', 'wan0', 'session' }),
+			bridge_fn = test_diag.retained_fn(conn, { 'state', 'fabric', 'link', 'wan0', 'bridge' }),
+			transfer_fn = test_diag.retained_fn(conn, { 'state', 'fabric', 'link', 'wan0', 'transfer' }),
+		})
 
 		local a_stream, b_stream = duplex.new_pair()
 		local a_ctl_tx, a_ctl_rx = mailbox.new(8, { full = 'reject_newest' })

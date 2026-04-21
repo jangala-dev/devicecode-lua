@@ -28,6 +28,20 @@ function T.fabric_services_reach_ready_on_separate_buses_over_duplex_streams()
 		local obs_b = bus_b:connect()
 		local diag_a = test_diag.for_stack(scope, bus_a, { fabric = true, obs = true, max_records = 240 })
 		local diag_b = test_diag.for_stack(scope, bus_b, { fabric = true, obs = true, max_records = 240 })
+		test_diag.add_subsystem(diag_a, 'fabric', {
+			service_fn = test_diag.retained_fn(bus_a:connect(), { 'svc', 'fabric', 'status' }),
+			summary_fn = test_diag.retained_fn(bus_a:connect(), { 'state', 'fabric' }),
+			session_fn = test_diag.retained_fn(bus_a:connect(), { 'state', 'fabric', 'link', 'ab', 'session' }),
+			bridge_fn = test_diag.retained_fn(bus_a:connect(), { 'state', 'fabric', 'link', 'ab', 'bridge' }),
+			transfer_fn = test_diag.retained_fn(bus_a:connect(), { 'state', 'fabric', 'link', 'ab', 'transfer' }),
+		})
+		test_diag.add_subsystem(diag_b, 'fabric', {
+			service_fn = test_diag.retained_fn(bus_b:connect(), { 'svc', 'fabric', 'status' }),
+			summary_fn = test_diag.retained_fn(bus_b:connect(), { 'state', 'fabric' }),
+			session_fn = test_diag.retained_fn(bus_b:connect(), { 'state', 'fabric', 'link', 'ba', 'session' }),
+			bridge_fn = test_diag.retained_fn(bus_b:connect(), { 'state', 'fabric', 'link', 'ba', 'bridge' }),
+			transfer_fn = test_diag.retained_fn(bus_b:connect(), { 'state', 'fabric', 'link', 'ba', 'transfer' }),
+		})
 
 		local a_stream, b_stream = duplex.new_pair()
 

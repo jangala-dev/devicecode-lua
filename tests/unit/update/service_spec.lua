@@ -31,6 +31,25 @@ local function wait_service_running(conn, name)
   end, { timeout = 0.75, interval = 0.01 }))
 end
 
+local function new_update_diag(scope, bus, caller, control, artifacts, extra)
+  local diag = test_diag.for_stack(scope, bus, { update = true, device = true, fabric = true, max_records = 320 })
+  test_diag.add_subsystem(diag, 'update', {
+    service_fn = test_diag.retained_fn(caller, { 'svc', 'update', 'status' }),
+    store_fn = function() return control and control.namespaces['update/jobs'] or {} end,
+    artifacts_fn = function() return artifacts and artifacts.artifacts or {} end,
+    extra_fn = extra,
+  })
+  test_diag.add_subsystem(diag, 'device', {
+    summary_fn = test_diag.retained_fn(caller, { 'state', 'device' }),
+    cm5_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'cm5' }),
+    mcu_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'mcu' }),
+  })
+  test_diag.add_subsystem(diag, 'fabric', {
+    member_fn = test_diag.retained_fn(caller, { 'state', 'member', 'mcu', 'updater' }),
+  })
+  return diag
+end
+
 local function bind_device_double(scope, device_conn, versions, opts)
   opts = opts or {}
   local device_get_ep = device_conn:bind({ 'cmd', 'device', 'component', 'get' }, { queue_len = 32 })
@@ -135,22 +154,15 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     })
     bind_fabric_transfer_double(scope, bus:connect(), fabric_calls)
 
-    local diag = test_diag.start(scope, bus, {
-      topics = {
-        { label = 'update', topic = { 'state', 'update', '#' } },
-        { label = 'device', topic = { 'state', 'device', '#' } },
-        { label = 'ucmd',   topic = { 'cmd', 'update', '#' } },
-        { label = 'dcmd',   topic = { 'cmd', 'device', '#' } },
-      },
-      extra_sections = {
-        { label = 'device_calls', calls = device_calls },
-        { label = 'fabric_calls', calls = fabric_calls },
-        { render = function()
-            local ns = control.namespaces['update/jobs'] or {}
-            return '-- control_store update/jobs --\n' .. require('cjson.safe').encode(ns)
-          end },
-      },
-    })
+    local job
+    local diag = new_update_diag(scope, bus, caller, control, artifacts, function()
+      if job and job.job_id then
+        return test_diag.retained_fn(caller, { 'state', 'update', 'jobs', job.job_id })()
+      end
+      return { pending = true }
+    end)
+    test_diag.add_calls(diag, 'device_calls', device_calls)
+    test_diag.add_calls(diag, 'fabric_calls', fabric_calls)
 
     local function ensure(cond, message)
       if not cond then diag:fail(message) end
@@ -159,7 +171,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     local ok, err = scope:spawn(function()
       update.start(bus:connect(), { name = 'update', env = 'dev' })
     end)
-    assert(ok, tostring(err))
+    if not ok then diag:fail('failed to spawn update service: ' .. tostring(err)) end
 
     wait_service_running(caller, 'update')
 
@@ -171,7 +183,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     }, { timeout = 0.5 })
     ensure(cerr == nil, 'expected create call to succeed')
     ensure(created and created.ok == true, 'expected create response ok=true')
-    local job = created.job
+    job = created.job
     ensure(type(job.job_id) == 'string', 'expected string job_id')
     ensure(job.component == 'mcu', 'expected component=mcu')
     ensure(type(job.lifecycle.created_seq) == 'number', 'expected created_seq')
@@ -224,8 +236,9 @@ function T.update_service_cancels_staged_job_before_commit()
   runfibers.run(function(scope)
     local bus = busmod.new()
     local caller = bus:connect()
-    storagecaps.start_control_store_cap(scope, bus:connect(), {})
+    local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    local diag = new_update_diag(scope, bus, caller, control, artifacts)
     bind_device_double(scope, bus:connect(), { mcu = 'mcu-v0' }, { artifact_retention = 'release' })
     bind_fabric_transfer_double(scope, bus:connect())
 
@@ -266,6 +279,7 @@ function T.update_service_applies_per_component_artifact_storage_policy()
     local caller = bus:connect()
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), { durable_enabled = true })
+    local diag = new_update_diag(scope, bus, caller, control, artifacts)
     bind_device_double(scope, bus:connect(), { cm5 = 'cm5-v0', mcu = 'mcu-v0' }, { artifact_retention = 'keep' })
 
     local cfg_conn = bus:connect()
@@ -317,8 +331,9 @@ function T.update_service_rejects_second_active_job_globally()
 
     local bus = busmod.new()
     local caller = bus:connect()
-    storagecaps.start_control_store_cap(scope, bus:connect(), {})
+    local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    local diag = new_update_diag(scope, bus, caller, control, artifacts)
     bind_device_double(scope, bus:connect(), { cm5 = 'cm5-v0', mcu = 'mcu-v0' }, {
       prepare_sleep = 0.1,
       artifact_retention = 'release',
@@ -356,8 +371,9 @@ function T.update_service_supports_upload_attach_and_auto_start()
   runfibers.run(function(scope)
     local bus = busmod.new()
     local caller = bus:connect()
-    storagecaps.start_control_store_cap(scope, bus:connect(), {})
+    local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    local diag = new_update_diag(scope, bus, caller, control, artifacts)
     local versions = { mcu = 'mcu-v0' }
     local inc = { mcu = 1 }
     local boot = { mcu = 'boot-1' }
