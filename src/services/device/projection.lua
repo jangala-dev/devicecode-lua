@@ -24,11 +24,12 @@ end
 
 function M.component_view(name, rec, now_ts)
     local status = model.copy_value(rec.raw_status)
-    local state = type(status) == 'table' and status.state or nil
-    local version = type(status) == 'table' and status.version or nil
-    local incarnation = type(status) == 'table' and status.incarnation or nil
+    local state = type(status) == 'table' and (status.state or status.status or status.kind) or nil
+    local version = type(status) == 'table' and (status.version or status.fw_version) or nil
+    local incarnation = type(status) == 'table' and (status.incarnation or status.generation) or nil
     local actions = {}
     for action_name in pairs(rec.operations or {}) do actions[action_name] = true end
+    local updater_state = type(status) == 'table' and (status.updater_state or state) or state
     local health = (state == nil and 'unknown') or ((state == 'failed' or state == 'unavailable') and 'degraded' or 'ok')
     return {
         kind = 'device.component',
@@ -53,7 +54,7 @@ function M.component_view(name, rec, now_ts)
                 incarnation = incarnation,
             },
             update = {
-                state = state,
+                state = updater_state,
             },
         },
         status = status,

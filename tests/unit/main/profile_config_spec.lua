@@ -47,6 +47,7 @@ function T.bigbox_v1_cm_2_config_defines_fabric_device_and_mcu_only_update_backe
   assert(type(mcu.get_topic) == 'table')
   assert(type(mcu.actions) == 'table')
   assert(type(mcu.actions.prepare_update) == 'table')
+  assert(mcu.actions.stage_update == nil)
   assert(type(mcu.actions.commit_update) == 'table')
 
   assert(type(cfg.update) == 'table')

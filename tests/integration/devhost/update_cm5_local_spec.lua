@@ -30,7 +30,7 @@ local function start_cm5_updater_cap(scope, conn, state)
     local function publish_status()
         conn:publish({ 'cap', 'updater', 'cm5', 'state', 'status' }, {
             state = state.state,
-            version = state.version,
+            fw_version = state.fw_version,
             expected_version = state.expected_version,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
@@ -45,7 +45,7 @@ local function start_cm5_updater_cap(scope, conn, state)
     bind_reply_loop(scope, status_ep, function()
         return {
             state = state.state,
-            version = state.version,
+            fw_version = state.fw_version,
             expected_version = state.expected_version,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
@@ -53,7 +53,7 @@ local function start_cm5_updater_cap(scope, conn, state)
     end)
 
     bind_reply_loop(scope, prepare_ep, function(payload)
-        return { ok = true, prepared = true, version = state.version }
+        return { ok = true, prepared = true, fw_version = state.fw_version }
     end)
 
     bind_reply_loop(scope, stage_ep, function(payload)
@@ -74,7 +74,7 @@ local function start_cm5_updater_cap(scope, conn, state)
             state.state = 'running'
             state.staged = false
             state.artifact_ref = nil
-            state.version = next_version
+            state.fw_version = next_version
             publish_status()
         end)
         assert(ok, tostring(err))
@@ -110,7 +110,7 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
         local publish_status = start_cm5_updater_cap(scope, bus:connect(), {
             state = 'idle',
-            version = 'cm5-v0',
+            fw_version = 'cm5-v0',
             expected_version = nil,
             staged = false,
             artifact_ref = nil,

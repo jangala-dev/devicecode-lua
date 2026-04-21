@@ -45,7 +45,7 @@ local function bind_reply_loop(scope, ep, handler)
 			local reply, ferr = handler(req.payload or {}, req)
 			if reply == nil then
 				if ferr == '__forwarded__' then
-					-- transfer endpoint will answer later
+					-- transfer manager will answer later
 				else
 					req:fail(ferr or 'failed')
 				end
@@ -57,14 +57,14 @@ end
 
 
 local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
-    local ep = conn:bind(topic, { queue_len = 16 })
-    bind_reply_loop(scope, ep, function(_payload, req)
-        local ok, reason = transfer_ctl_tx:send(req)
-        if ok ~= true then
-            return nil, reason or 'queue_closed'
-        end
-        return nil, '__forwarded__'
-    end)
+	local ep = conn:bind(topic, { queue_len = 16 })
+	bind_reply_loop(scope, ep, function(_payload, req)
+		local ok, reason = transfer_ctl_tx:send(req)
+		if ok ~= true then
+			return nil, reason or 'queue_closed'
+		end
+		return nil, '__forwarded__'
+	end)
 end
 
 local function wait_retained_state(conn, topic, pred, timeout)
@@ -334,7 +334,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 					get_topic = { 'rpc', 'member', 'mcu', 'status' },
 					actions = {
 						prepare_update = { 'rpc', 'member', 'mcu', 'prepare' },
-							commit_update = { 'rpc', 'member', 'mcu', 'commit' },
+						commit_update = { 'rpc', 'member', 'mcu', 'commit' },
 					},
 				},
 			},

@@ -52,7 +52,7 @@ function M.default_cfg(schema)
         },
         components = {
             cm5 = { backend = 'cm5_swupdate' },
-            mcu = { backend = 'mcu_component' },
+            mcu = { backend = 'mcu_component', transfer = { link_id = 'cm5-uart-mcu', receiver = { 'rpc', 'member', 'mcu', 'receive' }, timeout_s = 60.0 } },
         },
         admission = {
             mode = 'global_single',

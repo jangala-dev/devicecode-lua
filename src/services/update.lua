@@ -257,10 +257,16 @@ function M.start(conn, opts)
         local child, err = service_scope:child()
         if not child then return nil, err end
         local stage_source = nil
-        if mode == 'stage' and type(job.artifact_ref) == 'string' and job.artifact_ref ~= '' then
-            local opened, oerr = artifact_open(job.artifact_ref)
-            if not opened then return nil, oerr or 'artifact_open_failed' end
-            stage_source = opened
+        if mode == 'stage' then
+            local component_cfg = state.cfg.components[job.component]
+            if type(component_cfg) == 'table' and component_cfg.backend == 'mcu_component' then
+                if type(job.artifact_ref) ~= 'string' or job.artifact_ref == '' then
+                    return nil, 'missing_artifact_ref'
+                end
+                local opened, oerr = artifact_open(job.artifact_ref)
+                if not opened then return nil, oerr or 'artifact_open_failed' end
+                stage_source = opened
+            end
         end
         model.acquire_lock(state, job, now(), service_run_id)
         local ok, save_err = store_sync.save_job(repo, job)
