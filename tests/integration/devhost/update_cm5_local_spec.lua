@@ -34,6 +34,7 @@ local function start_cm5_updater_cap(scope, conn, state)
             expected_version = state.expected_version,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
+            boot_id = state.boot_id,
         })
     end
 
@@ -49,6 +50,7 @@ local function start_cm5_updater_cap(scope, conn, state)
             expected_version = state.expected_version,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
+            boot_id = state.boot_id,
         }
     end)
 
@@ -75,6 +77,7 @@ local function start_cm5_updater_cap(scope, conn, state)
             state.staged = false
             state.artifact_ref = nil
             state.fw_version = next_version
+            state.boot_id = tostring((state.boot_id or 'cm5-boot') .. '-next')
             publish_status()
         end)
         assert(ok, tostring(err))
@@ -114,6 +117,7 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
             expected_version = nil,
             staged = false,
             artifact_ref = nil,
+            boot_id = 'cm5-boot-1',
         })
 
         local ok1, err1 = scope:spawn(function()

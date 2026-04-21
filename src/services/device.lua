@@ -171,10 +171,10 @@ function M.start(conn, opts)
                         model.note_status(state, name, value)
                         publish_component(name)
                         publish_summary()
-                        req:reply({ ok = true, component = projection.component_view(name, rec, svc:now()) })
+                        req:reply(projection.component_view(name, rec, svc:now()))
                     end
                 else
-                    req:reply({ ok = true, component = projection.component_view(name, rec, svc:now()) })
+                    req:reply(projection.component_view(name, rec, svc:now()))
                 end
             end
         elseif which == 'do_req' then

@@ -22,15 +22,77 @@ function M.summary_topic()
     return { 'state', 'device', 'components' }
 end
 
+local function copy(t)
+    return model.copy_value(t)
+end
+
+local function normalize_plain_status(raw)
+    raw = type(raw) == 'table' and raw or {}
+    local version = raw.version or raw.fw_version or nil
+    local build = raw.build or nil
+    local image_id = raw.image_id or nil
+    local boot_id = raw.boot_id or nil
+    local incarnation = raw.incarnation or raw.generation or nil
+    local updater_state = raw.updater_state or raw.state or raw.status or raw.kind or nil
+    local last_error = raw.last_error or raw.err or nil
+    return {
+        available = next(raw) ~= nil,
+        ready = raw.ready ~= false,
+        software = {
+            version = version,
+            build = build,
+            image_id = image_id,
+            boot_id = boot_id,
+            incarnation = incarnation,
+        },
+        updater = {
+            state = updater_state,
+            last_error = last_error,
+        },
+        raw = copy(raw),
+    }
+end
+
+local function normalize_canonical(raw)
+    local out = copy(raw)
+    out.available = raw.available ~= false
+    out.ready = raw.ready ~= false
+    out.software = type(out.software) == 'table' and out.software or {}
+    out.updater = type(out.updater) == 'table' and out.updater or {}
+    out.capabilities = type(out.capabilities) == 'table' and out.capabilities or {}
+    return out
+end
+
 function M.component_view(name, rec, now_ts)
-    local status = model.copy_value(rec.raw_status)
-    local state = type(status) == 'table' and (status.state or status.status or status.kind) or nil
-    local version = type(status) == 'table' and (status.version or status.fw_version) or nil
-    local incarnation = type(status) == 'table' and (status.incarnation or status.generation) or nil
+    local raw = rec.raw_status
+    local base
+    if type(raw) == 'table' and (type(raw.software) == 'table' or type(raw.updater) == 'table') then
+        base = normalize_canonical(raw)
+    else
+        base = normalize_plain_status(raw)
+    end
+
     local actions = {}
     for action_name in pairs(rec.operations or {}) do actions[action_name] = true end
-    local updater_state = type(status) == 'table' and (status.updater_state or state) or state
-    local health = (state == nil and 'unknown') or ((state == 'failed' or state == 'unavailable') and 'degraded' or 'ok')
+    local capabilities = copy(base.capabilities or {})
+    if next(actions) ~= nil then capabilities.update = true end
+    local available = (rec.source_up == true) and (base.available ~= false)
+    local ready = available and (base.ready ~= false)
+    local updater_state = type(base.updater) == 'table' and base.updater.state or nil
+    local health = base.health
+    if health == nil then
+        health = (not available and 'unknown') or ((updater_state == 'failed' or updater_state == 'unavailable') and 'degraded' or 'ok')
+    end
+    local source = copy(base.source or {})
+    source.member = rec.member
+    source.member_class = rec.member_class
+    source.link_class = rec.link_class
+    source.role = rec.role
+    source.kind = source.kind or ((rec.class == 'host') and 'host' or 'member')
+    source.status = {
+        watch_topic = model.copy_array(rec.channels and rec.channels.status and rec.channels.status.watch_topic),
+        get_topic = model.copy_array(rec.channels and rec.channels.status and rec.channels.status.get_topic),
+    }
     return {
         kind = 'device.component',
         ts = now_ts,
@@ -42,32 +104,15 @@ function M.component_view(name, rec, now_ts)
         member_class = rec.member_class,
         link_class = rec.link_class,
         present = rec.present ~= false,
-        available = status ~= nil,
+        available = available,
+        ready = ready,
         health = health,
-        state = state,
-        version = version,
-        incarnation = incarnation,
         actions = actions,
-        facets = {
-            software = {
-                version = version,
-                incarnation = incarnation,
-            },
-            update = {
-                state = updater_state,
-            },
-        },
-        status = status,
-        source = {
-            member = rec.member,
-            member_class = rec.member_class,
-            link_class = rec.link_class,
-            role = rec.role,
-            status = {
-                watch_topic = model.copy_array(rec.channels and rec.channels.status and rec.channels.status.watch_topic),
-                get_topic = model.copy_array(rec.channels and rec.channels.status and rec.channels.status.get_topic),
-            },
-        },
+        capabilities = capabilities,
+        software = copy(base.software),
+        updater = copy(base.updater),
+        source = source,
+        raw = base.raw,
     }
 end
 
@@ -88,11 +133,11 @@ function M.summary_payload(state, now_ts)
             link_class = view.link_class,
             present = view.present,
             available = view.available,
+            ready = view.ready,
             health = view.health,
-            state = view.state,
-            version = view.version,
-            incarnation = view.incarnation,
             actions = view.actions,
+            software = copy(view.software),
+            updater = copy(view.updater),
         }
     end
     return {
@@ -115,30 +160,27 @@ end
 
 function M.software_payload(name, rec, now_ts)
     local view = M.component_view(name, rec, now_ts)
-    return {
-        kind = 'device.component.software',
-        ts = now_ts,
-        component = name,
-        version = view.version,
-        incarnation = view.incarnation,
-        role = view.role,
-        member = view.member,
-        member_class = view.member_class,
-        link_class = view.link_class,
-    }
+    local sw = copy(view.software)
+    sw.kind = 'device.component.software'
+    sw.ts = now_ts
+    sw.component = name
+    sw.role = view.role
+    sw.member = view.member
+    sw.member_class = view.member_class
+    sw.link_class = view.link_class
+    return sw
 end
 
 function M.update_payload(name, rec, now_ts)
     local view = M.component_view(name, rec, now_ts)
-    return {
-        kind = 'device.component.update',
-        ts = now_ts,
-        component = name,
-        state = view.facets.update.state,
-        available = view.available,
-        health = view.health,
-        actions = view.actions,
-    }
+    local upd = copy(view.updater)
+    upd.kind = 'device.component.update'
+    upd.ts = now_ts
+    upd.component = name
+    upd.available = view.available
+    upd.health = view.health
+    upd.actions = view.actions
+    return upd
 end
 
 return M

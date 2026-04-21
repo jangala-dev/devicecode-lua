@@ -34,6 +34,7 @@ local function start_cm5_updater_cap(scope, conn, state)
             expected_version = state.expected_version,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
+            boot_id = state.boot_id,
         })
     end
 
@@ -49,6 +50,7 @@ local function start_cm5_updater_cap(scope, conn, state)
             expected_version = state.expected_version,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
+            boot_id = state.boot_id,
         }
     end)
 
@@ -122,6 +124,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
             expected_version = nil,
             staged = false,
             artifact_ref = nil,
+            boot_id = 'cm5-boot-1',
         }
         local publish_status = start_cm5_updater_cap(scope, bus:connect(), updater_state)
 
@@ -180,6 +183,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         updater_state.staged = false
         updater_state.artifact_ref = nil
         updater_state.fw_version = 'cm5-v2'
+        updater_state.boot_id = 'cm5-boot-2'
         publish_status()
 
         local update_scope2 = start_update_service(scope, bus)

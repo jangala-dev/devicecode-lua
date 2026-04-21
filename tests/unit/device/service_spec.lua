@@ -39,7 +39,7 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
     local commit_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'commit' }, { queue_len = 16 })
 
     bind_reply_loop(scope, status_ep, function()
-      return { version = 'cm5-v1', state = 'running' }
+      return { component = 'cm5', available = true, ready = true, software = { version = 'cm5-v1' }, updater = { state = 'running' }, source = { kind = 'host' } }
     end)
     bind_reply_loop(scope, prepare_ep, function(payload)
       return { ok = true, prepared = payload.component }
@@ -60,12 +60,13 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
 
     local status, serr = caller:call({ 'cmd', 'device', 'component', 'get' }, { component = 'cm5' }, { timeout = 0.5 })
     assert(serr == nil)
-    assert(status.ok == true)
-    assert(type(status.component) == 'table')
-    assert(status.component.component == 'cm5')
-    assert(type(status.component.status) == 'table')
-    assert(status.component.status.version == 'cm5-v1')
-    assert(status.component.actions.stage_update == true)
+    assert(type(status) == 'table')
+    assert(status.component == 'cm5')
+    assert(type(status.software) == 'table')
+    assert(status.software.version == 'cm5-v1')
+    assert(type(status.updater) == 'table')
+    assert(status.updater.state == 'running')
+    assert(status.actions.stage_update == true)
 
     local staged, terr = caller:call({ 'cmd', 'device', 'component', 'do' }, {
       component = 'cm5',
@@ -104,7 +105,7 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
     local status_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'status' }, { queue_len = 16 })
     local prepare_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'prepare' }, { queue_len = 16 })
     bind_reply_loop(scope, status_ep, function()
-      return { version = 'mcu-v2', state = 'running', incarnation = 7 }
+      return { component = 'mcu', available = true, ready = true, software = { version = 'mcu-v2', incarnation = 7 }, updater = { state = 'running' }, source = { kind = 'member' } }
     end)
     bind_reply_loop(scope, prepare_ep, function(payload)
       return { ok = true, prepared = payload.target or 'mcu' }
@@ -118,9 +119,12 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
     wait_service_running(caller, 'device')
 
     provider:publish({ 'cap', 'updater', 'mcu', 'state', 'status' }, {
-      version = 'mcu-v2',
-      state = 'running',
-      incarnation = 7,
+      component = 'mcu',
+      available = true,
+      ready = true,
+      software = { version = 'mcu-v2', incarnation = 7 },
+      updater = { state = 'running' },
+      source = { kind = 'member' },
     })
 
     assert(probe.wait_until(function()
@@ -130,9 +134,9 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
       return okp
         and type(payload) == 'table'
         and payload.kind == 'device.component'
-        and type(payload.status) == 'table'
-        and payload.status.version == 'mcu-v2'
-        and payload.incarnation == 7
+        and type(payload.software) == 'table'
+        and payload.software.version == 'mcu-v2'
+        and payload.software.incarnation == 7
         and payload.member_class == 'mcu'
         and payload.link_class == nil
         and type(payload.source) == 'table' and payload.source.member_class == 'mcu'

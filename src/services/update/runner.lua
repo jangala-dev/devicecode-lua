@@ -1,3 +1,4 @@
+local fibers = require 'fibers'
 local sleep = require 'fibers.sleep'
 
 local M = {}
@@ -8,10 +9,12 @@ end
 
 function M.run_stage(conn, job, backend, tx, source)
     local status_before = backend:status(conn)
-    local status_before_state = (type(status_before) == 'table' and status_before.component and status_before.component.status) or (type(status_before) == 'table' and status_before.state) or status_before
+    local sw = type(status_before) == 'table' and status_before.software or nil
     local pre_commit_incarnation = nil
-    if type(status_before_state) == 'table' then
-        pre_commit_incarnation = status_before_state.incarnation or status_before_state.generation
+    local pre_commit_boot_id = nil
+    if type(sw) == 'table' then
+        pre_commit_incarnation = sw.incarnation or sw.generation
+        pre_commit_boot_id = sw.boot_id
     end
 
     local prep, perr = backend:prepare(conn, job)
@@ -31,44 +34,67 @@ function M.run_stage(conn, job, backend, tx, source)
         job_id = job.job_id,
         staged = staged,
         pre_commit_incarnation = pre_commit_incarnation,
+        pre_commit_boot_id = pre_commit_boot_id,
     })
 end
 
-local function reconcile_loop(conn, job, backend, tx, interval_s, timeout_s)
-    local deadline = require('fibers').now() + timeout_s
-    while true do
-        local result, rerr = backend:reconcile(conn, job)
-        if result ~= nil then
-            if result.done and result.success then
-                emit(tx, { tag = 'reconciled_success', job_id = job.job_id, result = result })
-                return
-            elseif result.done then
-                emit(tx, { tag = 'reconciled_failure', job_id = job.job_id, result = result, err = tostring(result.error or rerr or 'failed') })
-                return
-            else
-                emit(tx, { tag = 'reconcile_progress', job_id = job.job_id, result = result })
-            end
+local function evaluate_once(conn, job, backend, tx, observe)
+    local facts = observe and observe.facts_for and observe:facts_for(job.component) or nil
+    if backend.status and facts == nil then
+        local current = backend:status(conn)
+        if current ~= nil then
+            if observe and observe.note_component then observe:note_component(job.component, current) end
+            facts = observe and observe.facts_for and observe:facts_for(job.component) or current
         end
-        if require('fibers').now() >= deadline then
-            emit(tx, { tag = 'timed_out', job_id = job.job_id, err = tostring(rerr or 'timeout') })
-            return
-        end
-        sleep.sleep(interval_s)
     end
+    local result = backend.evaluate and backend:evaluate(job, facts) or nil
+    if result ~= nil then
+        if result.done and result.success then
+            emit(tx, { tag = 'reconciled_success', job_id = job.job_id, result = result })
+            return true
+        elseif result.done then
+            emit(tx, { tag = 'reconciled_failure', job_id = job.job_id, result = result, err = tostring(result.error or 'failed') })
+            return true
+        else
+            emit(tx, { tag = 'reconcile_progress', job_id = job.job_id, result = result })
+        end
+    end
+    return false
 end
 
-function M.run_commit(conn, job, backend, tx, reconcile_cfg)
+function M.run_commit(conn, job, backend, tx, _reconcile_cfg)
     local committed, cerr = backend:commit(conn, job)
     if committed == nil then
         emit(tx, { tag = 'failed', job_id = job.job_id, err = tostring(cerr or 'commit_failed') })
         return
     end
     emit(tx, { tag = 'commit_started', job_id = job.job_id, result = committed })
-    reconcile_loop(conn, job, backend, tx, reconcile_cfg.interval_s, reconcile_cfg.timeout_s)
 end
 
-function M.run_reconcile(conn, job, backend, tx, reconcile_cfg)
-    reconcile_loop(conn, job, backend, tx, reconcile_cfg.interval_s, reconcile_cfg.timeout_s)
+function M.run_reconcile(conn, job, backend, tx, reconcile_cfg, observe)
+    local timeout_s = reconcile_cfg.timeout_s
+    local deadline = fibers.now() + timeout_s
+
+    if evaluate_once(conn, job, backend, tx, observe) then return end
+
+    local seen = observe and observe:version() or 0
+    while true do
+        local remaining = deadline - fibers.now()
+        if remaining <= 0 then
+            emit(tx, { tag = 'timed_out', job_id = job.job_id, err = 'timeout' })
+            return
+        end
+        local which, v = fibers.perform(fibers.named_choice({
+            changed = observe:changed_op(seen),
+            timeout = sleep.sleep_op(remaining):wrap(function() return true end),
+        }))
+        if which == 'timeout' then
+            emit(tx, { tag = 'timed_out', job_id = job.job_id, err = 'timeout' })
+            return
+        end
+        if v ~= nil then seen = v end
+        if evaluate_once(conn, job, backend, tx, observe) then return end
+    end
 end
 
 return M

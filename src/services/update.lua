@@ -8,6 +8,7 @@ local model       = require 'services.update.model'
 local projection  = require 'services.update.projection'
 local store_sync  = require 'services.update.store_sync'
 local reconcile   = require 'services.update.reconcile'
+local observe_mod = require 'services.update.observe'
 local runner      = require 'services.update.runner'
 local component_backend_mod = require 'services.update.backends.component_proxy'
 local cm5_backend_mod = require 'services.update.backends.cm5_swupdate'
@@ -82,6 +83,7 @@ function M.start(conn, opts)
     model.load_store(state, loaded)
 
     local changed = pulse.scoped({ close_reason = 'update service stopping' })
+    local observer = observe_mod.new()
     local service_run_id = tostring(uuid.new())
     local runner_tx, runner_rx = mailbox.new(64, { full = 'drop_oldest' })
 
@@ -150,6 +152,8 @@ function M.start(conn, opts)
         end
         state.component_obs = {}
         for component, ccfg in pairs(state.cfg.components) do
+            local cwatch = conn:watch_retained({ 'state', 'device', 'component', component }, { replay = true, queue_len = 16, full = 'drop_oldest' })
+            state.component_obs['comp:' .. component] = { kind = 'component', component = component, watch = cwatch }
             local transfer = type(ccfg) == 'table' and ccfg.transfer or nil
             local link_id = type(transfer) == 'table' and transfer.link_id or nil
             if type(link_id) == 'string' and link_id ~= '' then
@@ -314,7 +318,7 @@ function M.start(conn, opts)
             elseif mode == 'commit' then
                 return runner.run_commit(conn, snapshot, backend, runner_tx, cfg_reconcile)
             else
-                return runner.run_reconcile(conn, snapshot, backend, runner_tx, cfg_reconcile)
+                return runner.run_reconcile(conn, snapshot, backend, runner_tx, cfg_reconcile, observer)
             end
         end)
         if not spawned then
@@ -398,6 +402,7 @@ function M.start(conn, opts)
                         release_artifact_if_present(job)
                     elseif ev.tag == 'staged' then
                         if ev.pre_commit_incarnation ~= nil then job.pre_commit_incarnation = ev.pre_commit_incarnation end
+                        if ev.pre_commit_boot_id ~= nil then job.pre_commit_boot_id = ev.pre_commit_boot_id end
                         patch_job(job, {
                             state = 'awaiting_commit',
                             stage = 'staged_on_mcu',
@@ -410,16 +415,16 @@ function M.start(conn, opts)
                             release_artifact_if_present(job)
                         end
                     elseif ev.tag == 'commit_started' then
-                        job.result = ev.result
-                        job.stage = 'awaiting_member_return'
-                        model.touch_job(state, job, now(), service_run_id, false, {
+                        patch_job(job, {
+                            state = 'awaiting_return',
+                            stage = 'awaiting_member_return',
+                            result = ev.result,
+                            error = nil,
+                            next_step = 'reconcile',
+                        }, { runtime_merge = {
                             awaiting_return_run_id = service_run_id,
                             awaiting_return_mono = now(),
-                        })
-                        local ok, serr3 = store_sync.save_job(repo, job)
-                        if not ok then on_store_error(job.job_id, serr3) end
-                        model.mark_job_dirty(state, job.job_id)
-                        changed:signal()
+                        } })
                     elseif ev.tag == 'reconciled_success' then
                         patch_job(job, {
                             state = 'succeeded',
@@ -480,13 +485,24 @@ function M.start(conn, opts)
                     else
                         patch_job(job, { state = 'failed', stage = 'failed', error = tostring(aerr3 or 'auto_commit_blocked'), next_step = nil })
                     end
+                elseif ev.st == 'ok' and job.state == 'awaiting_return' and job.next_step == 'reconcile' then
+                    local wok, werr = spawn_runner('reconcile', job)
+                    if not wok then
+                        patch_job(job, { state = 'failed', stage = 'failed', error = tostring(werr or 'reconcile_spawn_failed'), next_step = nil })
+                    end
                 end
             end
         elseif type(which) == 'string' and state.component_obs[which] then
             local rec = state.component_obs[which]
             local ev = req
             local job = state.active_job and state.store.jobs[state.active_job.job_id] or nil
-            if rec and rec.kind == 'transfer' and job and job.component == rec.component and job.state == 'staging' and type(ev) == 'table' and ev.op == 'retain' and type(ev.payload) == 'table' then
+            if rec and rec.kind == 'component' then
+                if type(ev) == 'table' and ev.op == 'retain' and type(ev.payload) == 'table' then
+                    observer:note_component(rec.component, ev.payload)
+                elseif type(ev) == 'table' and ev.op == 'unretain' then
+                    observer:clear_component(rec.component)
+                end
+            elseif rec and rec.kind == 'transfer' and job and job.component == rec.component and job.state == 'staging' and type(ev) == 'table' and ev.op == 'retain' and type(ev.payload) == 'table' then
                 local status = ev.payload.status or {}
                 local sent = tonumber(status.offset) or 0
                 local total = tonumber(status.size) or nil

@@ -48,12 +48,14 @@ function M.new(opts)
             metadata = job.metadata,
         }, timeout_commit)
     end
+    function backend:evaluate(job, facts)
+        return reconcile_fn(facts, job)
+    end
 
     function backend:reconcile(conn, job)
         local value, err = self:status(conn)
         if value == nil then return nil, err end
-        local state = (type(value) == 'table' and value.component and value.component.status) or value.state or value
-        return reconcile_fn(state, job), nil
+        return self:evaluate(job, value), nil
     end
 
     return backend

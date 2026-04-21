@@ -18,24 +18,26 @@ function M.new(opts)
         timeout_prepare = timeout_prepare,
         timeout_stage = timeout_stage,
         timeout_commit = timeout_commit,
-        reconcile = function(state, job)
-            local version = type(state) == 'table' and (state.fw_version or state.version) or nil
-            local incarnation = type(state) == 'table' and (state.incarnation or state.generation) or nil
-            local phase = type(state) == 'table' and (state.updater_state or state.state) or nil
-            local last_error = type(state) == 'table' and state.last_error or nil
+        reconcile = function(component_state, job)
+            local sw = type(component_state) == 'table' and component_state.software or nil
+            local upd = type(component_state) == 'table' and component_state.updater or nil
+            local version = type(sw) == 'table' and sw.version or nil
+            local build = type(sw) == 'table' and sw.build or nil
+            local incarnation = type(sw) == 'table' and (sw.incarnation or sw.generation) or nil
+            local boot_id = type(sw) == 'table' and sw.boot_id or nil
+            local phase = type(upd) == 'table' and upd.state or nil
+            local last_error = type(upd) == 'table' and upd.last_error or nil
             if phase == 'failed' or phase == 'rollback_detected' then
-                return { done = true, success = false, version = version, incarnation = incarnation, error = tostring(last_error or phase), raw = state }
+                return { done = true, success = false, version = version, build = build, incarnation = incarnation, boot_id = boot_id, error = tostring(last_error or phase), raw = component_state }
             end
             if job.expected_version and version == job.expected_version then
-                return { done = true, success = true, version = version, incarnation = incarnation, raw = state }
-            end
-            if job.pre_commit_incarnation ~= nil and incarnation ~= nil and incarnation ~= job.pre_commit_incarnation then
-                if type(state) == 'table' and (phase == 'running' or phase == 'ready') then
-                    return { done = true, success = true, version = version, incarnation = incarnation, raw = state }
+                local boot_changed = (job.pre_commit_boot_id ~= nil and boot_id ~= nil and boot_id ~= job.pre_commit_boot_id)
+                local inc_changed = (job.pre_commit_incarnation ~= nil and incarnation ~= nil and incarnation ~= job.pre_commit_incarnation)
+                if boot_changed or inc_changed or (phase == 'running' or phase == 'ready' or phase == 'idle' or phase == nil) then
+                    return { done = true, success = true, version = version, build = build, incarnation = incarnation, boot_id = boot_id, raw = component_state }
                 end
-                return { done = false, raw = state }
             end
-            return { done = false, raw = state }
+            return { done = false, version = version, build = build, incarnation = incarnation, boot_id = boot_id, raw = component_state }
         end,
     }
 

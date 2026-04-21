@@ -2,6 +2,7 @@ local fibers      = require 'fibers'
 local busmod      = require 'bus'
 local runfibers   = require 'tests.support.run_fibers'
 local probe       = require 'tests.support.bus_probe'
+local test_diag   = require 'tests.support.test_diag'
 local storagecaps = require 'tests.support.storage_caps'
 local update      = require 'services.update'
 local sleep_mod   = require 'fibers.sleep'
@@ -36,20 +37,27 @@ local function bind_device_double(scope, device_conn, versions, opts)
   local device_do_ep = device_conn:bind({ 'cmd', 'device', 'component', 'do' }, { queue_len = 32 })
 
   bind_reply_loop(scope, device_get_ep, function(payload)
+    if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'get', req = payload } end
     return {
-      ok = true,
-      component = {
-        component = payload.component,
-        status = {
-          version = versions[payload.component] or 'unknown',
-          state = (opts.get_state and opts.get_state[payload.component]) or 'running',
-          incarnation = (opts.incarnation and opts.incarnation[payload.component]) or nil,
-        },
+      kind = 'device.component',
+      component = payload.component,
+      available = true,
+      ready = true,
+      software = {
+        version = versions[payload.component] or 'unknown',
+        incarnation = (opts.incarnation and opts.incarnation[payload.component]) or nil,
+        boot_id = (opts.boot_id and opts.boot_id[payload.component]) or nil,
       },
+      updater = {
+        state = (opts.get_state and opts.get_state[payload.component]) or 'running',
+      },
+      actions = { prepare_update = true, stage_update = true, commit_update = true },
+      source = { kind = 'member', member = payload.component, member_class = payload.component },
     }
   end)
 
   bind_reply_loop(scope, device_do_ep, function(payload)
+    if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'do', req = payload } end
     if payload.action == 'prepare_update' then
       if opts.prepare_sleep then sleep_mod.sleep(opts.prepare_sleep) end
       return { ok = true, prepared = true }
@@ -64,6 +72,9 @@ local function bind_device_double(scope, device_conn, versions, opts)
       if opts.incarnation and component and opts.bump_incarnation then
         opts.incarnation[component] = (opts.incarnation[component] or 0) + 1
       end
+      if opts.boot_id and component and opts.bump_boot_id then
+        opts.boot_id[component] = tostring((opts.boot_id[component] or component .. '-boot') .. '-next')
+      end
       return { ok = true, started = true }
     end
     return nil, 'unsupported_action'
@@ -71,9 +82,10 @@ local function bind_device_double(scope, device_conn, versions, opts)
 
 end
 
-local function bind_fabric_transfer_double(scope, conn)
+local function bind_fabric_transfer_double(scope, conn, calls)
   local transfer_ep = conn:bind({ 'cmd', 'fabric', 'transfer' }, { queue_len = 32 })
   bind_reply_loop(scope, transfer_ep, function(payload)
+    if calls then calls[#calls + 1] = payload end
     assert(payload.op == 'send_blob')
     assert(type(payload.link_id) == 'string')
     assert(type(payload.source) == 'table')
@@ -96,13 +108,40 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
     local versions = { mcu = 'mcu-v0' }
     local inc = { mcu = 1 }
+    local boot = { mcu = 'boot-1' }
+    local device_calls = {}
+    local fabric_calls = {}
     bind_device_double(scope, bus:connect(), versions, {
       artifact_retention = 'release',
       commit_version = { mcu = 'mcu-v1' },
       incarnation = inc,
       bump_incarnation = true,
+      boot_id = boot,
+      bump_boot_id = true,
+      calls = device_calls,
     })
-    bind_fabric_transfer_double(scope, bus:connect())
+    bind_fabric_transfer_double(scope, bus:connect(), fabric_calls)
+
+    local diag = test_diag.start(scope, bus, {
+      topics = {
+        { label = 'update', topic = { 'state', 'update', '#' } },
+        { label = 'device', topic = { 'state', 'device', '#' } },
+        { label = 'ucmd',   topic = { 'cmd', 'update', '#' } },
+        { label = 'dcmd',   topic = { 'cmd', 'device', '#' } },
+      },
+      extra_sections = {
+        { label = 'device_calls', calls = device_calls },
+        { label = 'fabric_calls', calls = fabric_calls },
+        { render = function()
+            local ns = control.namespaces['update/jobs'] or {}
+            return '-- control_store update/jobs --\n' .. require('cjson.safe').encode(ns)
+          end },
+      },
+    })
+
+    local function ensure(cond, message)
+      if not cond then diag:fail(message) end
+    end
 
     local ok, err = scope:spawn(function()
       update.start(bus:connect(), { name = 'update', env = 'dev' })
@@ -117,51 +156,51 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
       expected_version = 'mcu-v1',
       metadata = { channel = 'test' },
     }, { timeout = 0.5 })
-    assert(cerr == nil)
-    assert(created.ok == true)
+    ensure(cerr == nil, 'expected create call to succeed')
+    ensure(created and created.ok == true, 'expected create response ok=true')
     local job = created.job
-    assert(type(job.job_id) == 'string')
-    assert(job.component == 'mcu')
-    assert(type(job.lifecycle.created_seq) == 'number')
-    assert(type(job.lifecycle.updated_seq) == 'number')
+    ensure(type(job.job_id) == 'string', 'expected string job_id')
+    ensure(job.component == 'mcu', 'expected component=mcu')
+    ensure(type(job.lifecycle.created_seq) == 'number', 'expected created_seq')
+    ensure(type(job.lifecycle.updated_seq) == 'number', 'expected updated_seq')
 
     local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
-    assert(serr == nil)
-    assert(started.ok == true)
-    assert(job.lifecycle.state == 'created')
-    assert(type(job.artifact.ref) == 'string')
+    ensure(serr == nil, 'expected start call to succeed')
+    ensure(started and started.ok == true, 'expected start response ok=true')
+    ensure(job.lifecycle.state == 'created', 'expected local job copy still in created state')
+    ensure(type(job.artifact.ref) == 'string', 'expected artifact ref on created job')
 
-    assert(probe.wait_until(function()
+    diag:assert_until('job never reached awaiting_commit with released artifact', function()
       local okp, payload = safe.pcall(function()
         return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
       end)
       return okp and type(payload) == 'table' and type(payload.job) == 'table'
         and payload.job.lifecycle.state == 'awaiting_commit'
         and payload.job.artifact.ref == nil and payload.job.artifact.released_at ~= nil
-    end, { timeout = 0.75, interval = 0.01 }))
-    assert(next(artifacts.artifacts) == nil)
+    end, { timeout = 0.75, interval = 0.01 })
+    ensure(next(artifacts.artifacts) == nil, 'expected transient artifact to be released after staging')
 
     local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
-    assert(perr == nil)
-    assert(committed.ok == true)
-    assert(committed.job.lifecycle.state == 'awaiting_commit' or committed.job.lifecycle.state == 'awaiting_return' or committed.job.lifecycle.state == 'succeeded')
+    ensure(perr == nil, 'expected commit call to succeed')
+    ensure(committed and committed.ok == true, 'expected commit response ok=true')
+    ensure(committed.job and (committed.job.lifecycle.state == 'awaiting_commit' or committed.job.lifecycle.state == 'awaiting_return' or committed.job.lifecycle.state == 'succeeded'), 'expected commit response state to be awaiting_commit/awaiting_return/succeeded')
 
-    assert(probe.wait_until(function()
+    diag:assert_until('job never reached succeeded after commit', function()
       local okp, payload = safe.pcall(function()
         return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
       end)
       return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'succeeded'
-    end, { timeout = 0.75, interval = 0.01 }))
+    end, { timeout = 0.75, interval = 0.01 })
 
     local got, gerr = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
-    assert(gerr == nil)
-    assert(got.ok == true)
-    assert(got.job.lifecycle.state == 'succeeded')
-    assert(type(got.job.result) == 'table')
-    assert(got.job.result.version == 'mcu-v1')
+    ensure(gerr == nil, 'expected get call to succeed')
+    ensure(got and got.ok == true, 'expected get response ok=true')
+    ensure(got.job.lifecycle.state == 'succeeded', 'expected final job state succeeded')
+    ensure(type(got.job.result) == 'table', 'expected result table')
+    ensure(got.job.result.version == 'mcu-v1', 'expected final version mcu-v1')
 
-    assert(type(control.namespaces['update/jobs']) == 'table')
-    assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')
+    ensure(type(control.namespaces['update/jobs']) == 'table', 'expected update/jobs namespace in control store')
+    ensure(type(control.namespaces['update/jobs'][job.job_id]) == 'table', 'expected persisted job in control store')
   end, { timeout = 3.0 })
 end
 
@@ -305,11 +344,14 @@ function T.update_service_supports_upload_attach_and_auto_start()
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
     local versions = { mcu = 'mcu-v0' }
     local inc = { mcu = 1 }
+    local boot = { mcu = 'boot-1' }
     bind_device_double(scope, bus:connect(), versions, {
       artifact_retention = 'release',
       commit_version = { mcu = 'mcu-v1' },
       incarnation = inc,
       bump_incarnation = true,
+      boot_id = boot,
+      bump_boot_id = true,
     })
     bind_fabric_transfer_double(scope, bus:connect())
 

@@ -45,6 +45,7 @@ function M.public_job(job)
         observation = {
             pre_commit_incarnation = job.pre_commit_incarnation,
             post_commit_incarnation = job.post_commit_incarnation,
+            pre_commit_boot_id = job.pre_commit_boot_id,
         },
         actions = model.job_actions(job),
         result = copy_value(job.result),

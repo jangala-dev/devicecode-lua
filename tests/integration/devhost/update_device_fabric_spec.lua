@@ -142,13 +142,17 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		local versions = { mcu = 'mcu-v0' }
 		local incarnation = { mcu = 1 }
+		local boot_id = { mcu = 'mcu-boot-1' }
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status()
 			remote_member_conn:retain({ 'member', 'mcu', 'status' }, {
-				version = versions.mcu,
-				state = 'running',
-				incarnation = incarnation.mcu,
+				component = 'mcu',
+				available = true,
+				ready = true,
+				software = { version = versions.mcu, incarnation = incarnation.mcu, boot_id = boot_id.mcu },
+				updater = { state = 'running' },
+				source = { kind = 'member' },
 			})
 		end
 
@@ -158,7 +162,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		local commit_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'commit' }, { queue_len = 16 })
 
 		bind_reply_loop(scope, status_ep, function()
-			return { version = versions.mcu, state = 'running', incarnation = incarnation.mcu }
+			return { component = 'mcu', available = true, ready = true, software = { version = versions.mcu, incarnation = incarnation.mcu, boot_id = boot_id.mcu }, updater = { state = 'running' }, source = { kind = 'member' } }
 		end)
 		bind_reply_loop(scope, prepare_ep, function(payload)
 			return { ok = true, prepared = true }
@@ -171,6 +175,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		bind_reply_loop(scope, commit_ep, function(payload)
 			versions.mcu = payload.metadata and payload.metadata.next_version or 'mcu-v1'
 			incarnation.mcu = incarnation.mcu + 1
+			boot_id.mcu = 'mcu-boot-' .. tostring(incarnation.mcu)
 			publish_remote_status()
 			return { ok = true, started = true }
 		end)
@@ -240,7 +245,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		publish_remote_status()
 		assert(wait_device_component(caller, 'mcu', function(payload)
-			return payload.available == true and payload.version == versions.mcu and payload.incarnation == incarnation.mcu
+			return payload.available == true and type(payload.software) == 'table' and payload.software.version == versions.mcu and payload.software.incarnation == incarnation.mcu
 		end, 1.5))
 
 		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
@@ -348,13 +353,17 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 
 		local versions = { mcu = 'mcu-v0' }
 		local incarnation = { mcu = 1 }
+		local boot_id = { mcu = 'mcu-boot-1' }
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status(st)
 			remote_member_conn:retain({ 'member', 'mcu', 'status' }, st or {
-				version = versions.mcu,
-				state = 'running',
-				incarnation = incarnation.mcu,
+				component = 'mcu',
+				available = true,
+				ready = true,
+				software = { version = versions.mcu, incarnation = incarnation.mcu, boot_id = boot_id.mcu },
+				updater = { state = 'running' },
+				source = { kind = 'member' },
 			})
 		end
 
@@ -363,7 +372,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		local receive_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'receive' }, { queue_len = 16 })
 		local commit_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'commit' }, { queue_len = 16 })
 
-		local current_state = { version = 'mcu-v0', state = 'running', incarnation = 1 }
+		local current_state = { component = 'mcu', available = true, ready = true, software = { version = 'mcu-v0', incarnation = 1, boot_id = 'mcu-boot-1' }, updater = { state = 'running' }, source = { kind = 'member' } }
 		bind_reply_loop(scope, status_ep, function()
 			return current_state
 		end)
@@ -377,7 +386,8 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		end)
 		bind_reply_loop(scope, commit_ep, function(payload)
 			incarnation.mcu = incarnation.mcu + 1
-			current_state = { version = 'mcu-v0', state = 'failed', incarnation = incarnation.mcu, last_error = 'apply_failed' }
+			boot_id.mcu = 'mcu-boot-' .. tostring(incarnation.mcu)
+			current_state = { component = 'mcu', available = true, ready = true, software = { version = 'mcu-v0', incarnation = incarnation.mcu, boot_id = boot_id.mcu }, updater = { state = 'failed', last_error = 'apply_failed' }, source = { kind = 'member' } }
 			publish_remote_status(current_state)
 			return { ok = true, started = true }
 		end)
@@ -446,7 +456,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		assert(wait_service_running(caller, 'update', 1.5) == true)
 		publish_remote_status(current_state)
 		assert(wait_device_component(caller, 'mcu', function(payload)
-			return payload.available == true and payload.version == current_state.version and payload.incarnation == current_state.incarnation
+			return payload.available == true and type(payload.software) == 'table' and payload.software.version == current_state.software.version and payload.software.incarnation == current_state.software.incarnation
 		end, 1.5))
 
 		local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
