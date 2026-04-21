@@ -184,7 +184,8 @@ local function add_mode_funcs(ModemBackend)
 
                         local card_status, parse_err = parse_slot_status(chunk)
                         if parse_err == "" and card_status ~= "" then
-                            return card_status == "present", ""
+                            local sim_present = card_status == "present"
+                            return sim_present, ""
                         end
                     end
                 end)
@@ -246,7 +247,7 @@ local function add_mode_funcs(ModemBackend)
                 stdout = "pipe",
                 stderr = "stdout"
             }
-            local _, status, code, _, power_err = fibers.perform(cmd:combined_output_op())
+            local out, status, code, _, power_err = fibers.perform(cmd:combined_output_op())
             if status ~= "exited" or code ~= 0 then
                 table.insert(errors, "Failed to execute qmicli power off command: " .. tostring(power_err))
             end
@@ -259,7 +260,7 @@ local function add_mode_funcs(ModemBackend)
                 stdout = "pipe",
                 stderr = "stdout"
             }
-            local _, status_on, code_on, _, err_on = fibers.perform(cmd_on:combined_output_op())
+            local out_on, status_on, code_on, _, err_on = fibers.perform(cmd_on:combined_output_op())
             if status_on ~= "exited" or code_on ~= 0 then
                 table.insert(errors, "Failed to execute qmicli power on command: " .. tostring(err_on))
             end

@@ -25,6 +25,43 @@ local function firmware_version_code(version_str)
     return nil, "Invalid firmware version format"
 end
 
+---@param out string
+---@return boolean present
+---@return string error
+local function parse_card_status(out)
+    if not out or out == "" then
+        return false, "Empty output"
+    end
+    local card_state = out:match("Card state:%s*'([^']+)'")
+    if not card_state then
+        return false, "Could not parse card state from --uim-get-card-status output"
+    end
+    return card_state == "present", ""
+end
+
+--- Helper for checking if a modem runs "legacy" firmware
+---@param model string
+---@param firmware_fn function
+---@return boolean
+local function is_legacy_modem(model, firmware_fn)
+    --- all em06 devices are legacy
+    if model == 'em06' then
+        return true
+    end
+    --- only em06 and eg25 devices have capability to be legacy
+    if model ~= 'eg25' then
+        return false
+    end
+
+    local firmware_version = firmware_fn()
+    if not firmware_version or firmware_version == "" then
+        return false
+    end
+
+    local version_code = firmware_version_code(firmware_version_string(firmware_version))
+    return version_code ~= nil and version_code <= firmware_version_code("01.002")
+end
+
 local funcs = {
     {
         name = '_read_firmware',
@@ -82,7 +119,7 @@ local funcs = {
                     error(err or "Failed to clear initial bearer settings")
                 end
                 local connect_cmd = exec.command {
-                    "mmcli", "-m", backend.identity.address, "--connect=" .. connection_string,
+                    "mmcli", "-m", backend.identity.address, "--simple-connect=" .. connection_string,
                     stdin = "null",
                     stdout = "pipe",
                     stderr = "stdout"
@@ -105,44 +142,25 @@ local funcs = {
         -- model-specific override is already installed when this conditional runs.
         conditionals = {
             function(backend, identity_info)
-                local model = identity_info and identity_info.model or nil
-                if model == 'em06' then
-                    return true
-                end
-                if model ~= 'eg25' then
-                    return false
-                end
-                local firmware_version = backend:_read_firmware(backend.identity.address)
-                if not firmware_version or firmware_version == "" then
-                    return false
-                end
-                local version_code = firmware_version_code(firmware_version_string(firmware_version))
-                return version_code ~= nil and version_code <= firmware_version_code("01.002")
+                return is_legacy_modem(
+                    identity_info.model,
+                    function()
+                        return backend._read_firmware(backend.identity)
+                    end
+                )
             end
         },
         func = function(backend)
             ---@cast backend ModemBackend
             return op.guard(function()
                 return scope.run_op(function(s)
-                        while true do
-                            s:perform(sleep.sleep_op(SIM_POLL_INTERVAL))
-                            local present, err = backend:is_sim_present()
-                            if err ~= "" then
-                                error("Failed to poll SIM presence: " .. err)
-                            end
-
-                            if present ~= backend.last_sim_state then
-                                local prev = backend.last_sim_state
-                                ---@diagnostic disable-next-line: inject-field
-                                backend.last_sim_state = present
-                                -- Skip the very first poll: we only want to report changes,
-                                -- not the initial state on boot. The lifecycle monitor decides
-                                -- whether a SIM-absent report should trigger a reset.
-                                if prev ~= nil then
-                                    return present, ""
-                                end
-                            end
+                        s:perform(sleep.sleep_op(SIM_POLL_INTERVAL))
+                        local present, err = backend:is_sim_present()
+                        if err ~= "" then
+                            return false, "Failed to poll SIM presence: " .. err
                         end
+
+                        return present, ""
                     end)
                     :wrap(function(st, _, ...)
                         if st == 'ok' then
@@ -155,7 +173,50 @@ local funcs = {
                     end)
             end)
         end
-    }
+    },
+    {
+        name = 'is_sim_present',
+        conditionals = {
+            function(backend, identity_info)
+                ---@cast backend ModemBackend
+                ---@cast identity_info ModemIdentityInfo
+                local is_legacy = is_legacy_modem(
+                    identity_info.model,
+                    function()
+                        local firmware, err = backend._read_firmware(backend.identity)
+                        return firmware
+                    end
+                ) and identity_info.mode == "qmi"
+                return is_legacy
+            end
+        },
+        func = function(backend)
+            ---@cast backend ModemBackend
+            local st, _, present_or_err = fibers.run_scope(function()
+                local cmd = exec.command {
+                    "qmicli", "-p", "-d", backend.identity.mode_port, "--uim-get-card-status",
+                    stdin = "null",
+                    stdout = "pipe",
+                    stderr = "stdout"
+                }
+                local out, status, code, _, err = fibers.perform(cmd:combined_output_op())
+                if status ~= "exited" or code ~= 0 then
+                    error("Failed to execute qmicli --uim-get-card-status: " .. tostring(err))
+                end
+
+                local present, parse_err = parse_card_status(out)
+                if parse_err ~= "" then
+                    error("Failed to parse qmicli output: " .. tostring(parse_err))
+                end
+                return present
+            end)
+
+            if st == "ok" then
+                return present_or_err, ""
+            end
+            return false, present_or_err or "Unknown error"
+        end
+    },
 }
 
 ---@param backend ModemBackend
@@ -164,6 +225,7 @@ local function add_model_funcs(backend, identity_info)
     for _, func_def in ipairs(funcs) do
         for _, cond in ipairs(func_def.conditionals) do
             if cond(backend, identity_info) then
+                print("attaching method:", func_def.name, "to modem", identity_info.model)
                 backend[func_def.name] = func_def.func
                 break
             end
