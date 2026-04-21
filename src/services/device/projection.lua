@@ -28,7 +28,7 @@ local function copy(t)
 end
 
 function M.component_view(name, rec, now_ts)
-    local base = normalize.normalize_component_status(rec.raw_status)
+    local base = normalize.normalize_component_status(rec, rec.raw_status)
 
     local actions = {}
     for action_name in pairs(rec.operations or {}) do actions[action_name] = true end

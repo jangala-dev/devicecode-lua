@@ -1,6 +1,8 @@
 local T = {}
 
 local ui_fakes = require 'tests.support.ui_fakes'
+local runfibers = require 'tests.support.run_fibers'
+local op = require 'fibers.op'
 local uploads_mod = require 'services.ui.uploads'
 
 function T.uploads_manager_streams_into_sink_and_creates_started_job_once()
@@ -36,32 +38,38 @@ function T.uploads_manager_streams_into_sink_and_creates_started_job_once()
             end
             return nil, 'unexpected'
         end,
+        call_op = function(self, topic, payload)
+            local reply, err = self:call(topic, payload)
+            return op.always(reply, err)
+        end,
     }
-    local uploads = uploads_mod.new({
-        require_session = function(session_id)
-            assert(session_id == 'sess-1')
-            return { principal = ui_fakes.principal('u1') }, nil
-        end,
-        with_user_conn = function(_principal, _origin, fn)
-            return fn(fake_conn)
-        end,
-    })
-    local stream = ui_fakes.fake_http_stream({
-        method = 'POST',
-        path = '/api/update/uploads',
-        body = 'abcdef',
-        headers = {
-            [':method'] = 'POST',
-            [':path'] = '/api/update/uploads',
-            ['content-length'] = '6',
-            ['x-artifact-name'] = 'mcu.bin',
-                        ['x-artifact-version'] = 'mcu-v1',
-        },
-    })
-    local out, err = uploads:upload_update('sess-1', stream, stream:get_headers())
-    assert(err == nil)
-    assert(out.ok == true)
-    assert(out.artifact.ref == 'artifact:1')
+    runfibers.run(function()
+        local uploads = uploads_mod.new({
+            require_session = function(session_id)
+                assert(session_id == 'sess-1')
+                return { principal = ui_fakes.principal('u1') }, nil
+            end,
+            with_user_conn = function(_principal, _origin, fn)
+                return fn(fake_conn)
+            end,
+        })
+        local stream = ui_fakes.fake_http_stream({
+            method = 'POST',
+            path = '/api/update/uploads',
+            body = 'abcdef',
+            headers = {
+                [':method'] = 'POST',
+                [':path'] = '/api/update/uploads',
+                ['content-length'] = '6',
+                ['x-artifact-name'] = 'mcu.bin',
+                ['x-artifact-version'] = 'mcu-v1',
+            },
+        })
+        local out, err = uploads:upload_update('sess-1', stream, stream:get_headers())
+        assert(err == nil)
+        assert(out.ok == true)
+        assert(out.artifact.ref == 'artifact:1')
+    end)
     local ops = {}
     for i = 1, #calls do
         local name = calls[i].op == 'call' and calls[i].key or calls[i].op

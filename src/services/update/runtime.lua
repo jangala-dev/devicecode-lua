@@ -34,6 +34,34 @@ function Runtime:active_join_op()
     return self.slot:join_op()
 end
 
+function Runtime:spawn_reconcile(job)
+    local ctx = self.ctx
+    ctx.store_sync.flush_jobs(ctx.repo, ctx.state, ctx.on_store_error)
+    local rok, rerr = self:spawn_runner('reconcile', job)
+    if not rok then
+        ctx.patch_job(job, {
+            state = 'failed',
+            stage = 'failed',
+            error = tostring(rerr or 'reconcile_spawn_failed'),
+            next_step = nil,
+        })
+        return nil, rerr
+    end
+    return true, nil
+end
+
+function Runtime:on_changed_tick()
+    local ctx = self.ctx
+    ctx.publisher:flush_publications()
+    local resumable = ctx.model.select_resumable_job(ctx.state)
+    if resumable then
+        local ok, rerr = self:spawn_reconcile(resumable)
+        if not ok then
+            ctx.svc:obs_log('warn', { what = 'adopted_job_resume_failed', job_id = resumable.job_id, err = tostring(rerr) })
+        end
+    end
+end
+
 function Runtime:handle_runner_event(ev)
     local ctx = self.ctx
     if not (ev and ev.job_id) then return end
@@ -130,21 +158,8 @@ function Runtime:handle_active_join(ev)
         return
     end
 
-    -- If a successful commit worker has already transitioned the job into
-    -- awaiting_return/reconcile, hand off directly to the reconcile worker.
-    -- This avoids a race where the device/fabric observer state changes before
-    -- the main loop notices that the active slot has been released.
     if job.state == 'awaiting_return' and job.next_step == 'reconcile' then
-        ctx.store_sync.flush_jobs(ctx.repo, ctx.state, ctx.on_store_error)
-        local rok, rerr = self:spawn_runner('reconcile', job)
-        if not rok then
-            ctx.patch_job(job, {
-                state = 'failed',
-                stage = 'failed',
-                error = tostring(rerr or 'reconcile_spawn_failed'),
-                next_step = nil,
-            })
-        end
+        self:spawn_reconcile(job)
         return
     end
 
@@ -152,9 +167,6 @@ function Runtime:handle_active_join(ev)
         local ok3, aerr3 = ctx.model.can_activate(ctx.state, job)
         if ok3 then
             ctx.enter_awaiting_return(job, 'commit_sent')
-
-            ctx.store_sync.flush_jobs(ctx.repo, ctx.state, ctx.on_store_error)
-
             local wok, werr = self:spawn_runner('commit', job)
             if not wok then
                 ctx.patch_job(job, {

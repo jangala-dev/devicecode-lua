@@ -12,6 +12,7 @@ local observe_mod = require 'services.update.observe'
 local runner      = require 'services.update.runner'
 local publish_mod = require 'services.update.publish'
 local runtime_mod = require 'services.update.runtime'
+local artifacts_mod = require 'services.update.artifacts'
 local commands_mod = require 'services.update.commands'
 local component_backend_mod = require 'services.update.backends.component_proxy'
 local cm5_backend_mod = require 'services.update.backends.cm5_swupdate'
@@ -109,6 +110,7 @@ function M.start(conn, opts)
         runner_tx = runner_tx,
         on_store_error = on_store_error,
         copy_job = copy_job,
+        svc = svc,
     }
 
     local function patch_job(job, patch, opts_)
@@ -141,13 +143,16 @@ function M.start(conn, opts)
     end
     ctx.enter_awaiting_return = enter_awaiting_return
 
+    local artifacts = artifacts_mod.new(ctx)
+    ctx.artifacts = artifacts
+    ctx.artifact_open = function(...) return artifacts:open(...) end
+
     local commands = commands_mod.new(ctx)
-    ctx.artifact_open = function(...) return commands:artifact_open(...) end
 
     local function release_artifact_if_present(job)
         if not job or type(job.artifact_ref) ~= 'string' or job.artifact_ref == '' then return end
         local ref = job.artifact_ref
-        local ok, err = commands:artifact_delete(ref)
+        local ok, err = artifacts:delete(ref)
         if not ok and err ~= 'not_found' then
             svc:obs_log('warn', { what = 'artifact_delete_failed', artifact_ref = ref, err = tostring(err) })
             return
@@ -259,12 +264,7 @@ function M.start(conn, opts)
         local which, req, err = fibers.perform(fibers.named_choice(ops))
 
         if which == 'changed' then
-            publisher:flush_publications()
-            local resumable = model.select_resumable_job(state)
-            if resumable then
-                local ok, rerr = runtime:spawn_runner('reconcile', resumable)
-                if not ok then svc:obs_log('warn', { what = 'adopted_job_resume_failed', job_id = resumable.job_id, err = tostring(rerr) }) end
-            end
+            runtime:on_changed_tick()
         elseif which == 'runner' then
             runtime:handle_runner_event(req)
         elseif which == 'active_join' then

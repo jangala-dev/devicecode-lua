@@ -45,6 +45,8 @@ local function normalize_component(name, spec)
         member_class = spec.member_class or spec.subtype or spec.class or name,
         link_class = spec.link_class or nil,
         present = spec.present ~= false,
+        provider = type(spec.provider) == 'string' and spec.provider or 'status_watch',
+        provider_opts = type(spec.provider_opts) == 'table' and copy_value(spec.provider_opts) or {},
         channels = {
             status = {
                 watch_topic = type(spec.status_topic) == 'table' and copy_array(spec.status_topic) or nil,
@@ -102,6 +104,8 @@ function M.merge_components(cfg, schema)
             if type(spec.member_class) == 'string' and spec.member_class ~= '' then base.member_class = spec.member_class end
             if type(spec.link_class) == 'string' and spec.link_class ~= '' then base.link_class = spec.link_class end
             if spec.present ~= nil then base.present = spec.present ~= false end
+            if type(spec.provider) == 'string' and spec.provider ~= '' then base.provider = spec.provider end
+            if type(spec.provider_opts) == 'table' then base.provider_opts = copy_value(spec.provider_opts) end
             if type(spec.status_topic) == 'table' then base.channels.status.watch_topic = copy_array(spec.status_topic) end
             if type(spec.get_topic) == 'table' then base.channels.status.get_topic = copy_array(spec.get_topic) end
             if type(spec.actions) == 'table' then base.operations = normalize_action_routes(spec.actions) end
