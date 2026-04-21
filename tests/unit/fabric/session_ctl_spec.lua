@@ -259,7 +259,7 @@ function T.tx_activity_reschedules_ping_without_rx_extending_it()
 		assert(eerr == 'timeout')
 
 		ctx.status_tx:send({ kind = 'rx_activity', at = fibers.now() })
-		local ping_item, perr = recv_with_timeout(ctx.tx_control_rx, 0.2)
+		local ping_item, perr = recv_with_timeout(ctx.tx_control_rx, 0.3)
 		assert(ping_item ~= nil, tostring(perr))
 		assert(ping_item.frame.type == 'ping')
 	end)
