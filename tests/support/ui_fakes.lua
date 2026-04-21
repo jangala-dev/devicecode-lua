@@ -83,6 +83,7 @@ function M.fake_http_stream(opts)
 		state = 'open',
 		_req_headers = req_headers,
 		_req_body = opts.body or '',
+		_req_off = 1,
 		_resp_headers = nil,
 		_resp_chunks = {},
 	}
@@ -93,6 +94,14 @@ function M.fake_http_stream(opts)
 
 	function stream:get_body_as_string()
 		return self._req_body
+	end
+
+	function stream:get_body_chars(n)
+		n = tonumber(n) or #self._req_body
+		if self._req_off > #self._req_body then return '' end
+		local chunk = self._req_body:sub(self._req_off, self._req_off + n - 1)
+		self._req_off = self._req_off + #chunk
+		return chunk
 	end
 
 	function stream:write_headers(h, end_stream)

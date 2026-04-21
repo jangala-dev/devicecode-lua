@@ -5,6 +5,7 @@ local services_h = require 'services.ui.handlers.services'
 local fabric_h   = require 'services.ui.handlers.fabric'
 local call_h     = require 'services.ui.handlers.call'
 local watch_h    = require 'services.ui.handlers.watch'
+local update_h   = require 'services.ui.handlers.update'
 local queries    = require 'services.ui.queries'
 
 local M = {}
@@ -72,6 +73,26 @@ function M.new(ctx)
 
 	function app.watch_open(session_id, pattern, opts)
 		return watch_h.open(ctx, session_id, pattern, opts)
+	end
+
+	function app.update_job_create(session_id, payload)
+		return update_h.create(ctx, session_id, payload)
+	end
+
+	function app.update_job_get(session_id, job_id)
+		return update_h.get(ctx, session_id, job_id)
+	end
+
+	function app.update_job_list(session_id)
+		return update_h.list(ctx, session_id)
+	end
+
+	function app.update_job_do(session_id, job_id, payload)
+		return update_h.do_job(ctx, session_id, job_id, payload)
+	end
+
+	function app.update_job_upload(session_id, job_id, stream, req_headers)
+		return update_h.upload_artifact(ctx, session_id, job_id, stream, req_headers)
 	end
 
 	return app

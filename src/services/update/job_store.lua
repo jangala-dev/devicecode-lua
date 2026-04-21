@@ -2,9 +2,20 @@ local cap_sdk = require 'services.hal.sdk.cap'
 
 local M = {}
 
+local function copy_shallow_table(t)
+    if type(t) ~= 'table' then return t end
+    local out = {}
+    for k, v in pairs(t) do out[k] = v end
+    return out
+end
+
 local function copy_job(job)
     local out = {}
-    for k, v in pairs(job) do out[k] = v end
+    for k, v in pairs(job) do
+        if k ~= 'runtime' then
+            out[k] = v
+        end
+    end
     return out
 end
 

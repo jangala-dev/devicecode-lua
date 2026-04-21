@@ -352,6 +352,15 @@ end
 
 -- artifact_store capability -------------------------------------------------
 
+function PlatformDriver:artifact_store_create_sink(opts)
+    if opts == nil or getmetatable(opts) ~= cap_args.ArtifactStoreCreateSinkOpts then
+        return false, 'invalid opts'
+    end
+    local sink, err = self.artifact_store:create_sink(opts.meta, { policy = opts.policy })
+    if not sink then return false, err end
+    return true, sink
+end
+
 function PlatformDriver:artifact_store_import_path(opts)
     if opts == nil or getmetatable(opts) ~= cap_args.ArtifactStoreImportPathOpts then
         return false, 'invalid opts'
@@ -509,6 +518,7 @@ function PlatformDriver:start()
         status = function(opts) return self:control_store_status(opts) end,
     }
     local artifact_methods = {
+        create_sink = function(opts) return self:artifact_store_create_sink(opts) end,
         import_path = function(opts) return self:artifact_store_import_path(opts) end,
         import_source = function(opts) return self:artifact_store_import_source(opts) end,
         open = function(opts) return self:artifact_store_open(opts) end,

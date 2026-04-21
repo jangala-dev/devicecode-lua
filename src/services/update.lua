@@ -144,6 +144,21 @@ function M.start(conn, opts)
         end
     end
 
+    local function rebuild_component_obs()
+        for _, rec in pairs(state.component_obs) do
+            pcall(function() rec.watch:unwatch() end)
+        end
+        state.component_obs = {}
+        for component, ccfg in pairs(state.cfg.components) do
+            local transfer = type(ccfg) == 'table' and ccfg.transfer or nil
+            local link_id = type(transfer) == 'table' and transfer.link_id or nil
+            if type(link_id) == 'string' and link_id ~= '' then
+                local watch = conn:watch_retained({ 'state', 'fabric', 'link', link_id, 'transfer' }, { replay = true, queue_len = 16, full = 'drop_oldest' })
+                state.component_obs['xfer:' .. component] = { kind = 'transfer', component = component, link_id = link_id, watch = watch }
+            end
+        end
+    end
+
     local function flush_publications()
         store_sync.flush_jobs(repo, state, on_store_error)
         for _, id in ipairs(state.store.order) do
@@ -156,6 +171,11 @@ function M.start(conn, opts)
             retain_best_effort(conn, projection.summary_topic(), projection.summary_payload(state))
             model.set_summary_clean(state)
         end
+    end
+
+    local function publish_job_only(job)
+        if not job then return end
+        retain_best_effort(conn, projection.job_topic(job.job_id), { job = projection.public_job(job) })
     end
 
     local function patch_job(job, patch, opts_)
@@ -191,6 +211,7 @@ function M.start(conn, opts)
 
         local artifact_ref = payload.artifact_ref
         local artifact_meta = nil
+        local source_kind = type(payload.source) == 'table' and payload.source.kind or nil
         if type(artifact_ref) == 'string' and artifact_ref ~= '' then
             local artefact, derr = artifact_open(artifact_ref)
             if not artefact then return nil, nil, derr end
@@ -202,23 +223,37 @@ function M.start(conn, opts)
             if not ref then return nil, nil, ierr end
             artifact_ref, artifact_meta = ref, meta
         end
-        if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, nil, 'artifact_required' end
+        if type(artifact_ref) ~= 'string' or artifact_ref == '' then
+            if source_kind == 'upload' then return nil, nil, nil end
+            return nil, nil, 'artifact_required'
+        end
         return artifact_ref, artifact_meta, nil
     end
 
     local function create_job(payload)
         local component = assert(payload.component, 'component required')
         if not state.cfg.components[component] then return nil, 'unknown_component' end
+        local source_kind = type(payload.source) == 'table' and payload.source.kind or nil
         local artifact_ref, artifact_meta, aerr = build_job_artifact(payload)
-        if not artifact_ref then return nil, aerr end
+        if aerr ~= nil then return nil, aerr end
+        if type(source_kind) ~= 'string' or source_kind == '' then
+            source_kind = (artifact_ref and 'baked') or nil
+        end
+        if type(artifact_ref) ~= 'string' or artifact_ref == '' then
+            if source_kind ~= 'upload' then return nil, 'artifact_required' end
+            artifact_ref, artifact_meta = nil, nil
+        end
         local job = model.create_job(state, {
             job_id = tostring(uuid.new()),
             offer_id = payload.offer_id,
             component = component,
+            source_kind = source_kind,
             artifact_ref = artifact_ref,
             artifact_meta = artifact_meta,
             expected_version = payload.expected_version,
-            metadata = type(payload.metadata) == 'table' and payload.metadata or nil,
+            metadata = type(payload.metadata) == 'table' and model.copy_value(payload.metadata) or nil,
+            auto_start = (type(payload.options) == 'table' and payload.options.auto_start == true),
+            auto_commit = (type(payload.options) == 'table' and payload.options.auto_commit == true),
         }, now(), service_run_id)
         local ok, err = store_sync.save_job(repo, job)
         if not ok then return nil, err end
@@ -318,6 +353,7 @@ function M.start(conn, opts)
     end)
 
     rebuild_backends()
+    rebuild_component_obs()
     reconcile.normalise_persisted(state, now(), service_run_id, model)
     model.mark_all_jobs_dirty(state)
     flush_publications()
@@ -335,6 +371,9 @@ function M.start(conn, opts)
             runner = runner_rx:recv_op(),
             changed = changed:changed_op(seen):wrap(function(ver) seen = ver; return ver end),
         }
+        for key, rec in pairs(state.component_obs) do
+            ops[key] = rec.watch:recv_op()
+        end
         if state.active_job then
             ops.active_join = state.active_job.scope:join_op():wrap(function(st, _report, primary)
                 return { job_id = state.active_job.job_id, st = st, primary = primary }
@@ -355,12 +394,13 @@ function M.start(conn, opts)
                 local job = state.store.jobs[ev.job_id]
                 if job then
                     if ev.tag == 'failed' then
-                        patch_job(job, { state = 'failed', error = tostring(ev.err or 'failed'), next_step = nil })
+                        patch_job(job, { state = 'failed', stage = 'failed', error = tostring(ev.err or 'failed'), next_step = nil })
                         release_artifact_if_present(job)
                     elseif ev.tag == 'staged' then
                         if ev.pre_commit_incarnation ~= nil then job.pre_commit_incarnation = ev.pre_commit_incarnation end
                         patch_job(job, {
                             state = 'awaiting_commit',
+                            stage = 'staged_on_mcu',
                             next_step = 'commit',
                             result = ev.staged,
                             staged_meta = ev.staged,
@@ -371,6 +411,7 @@ function M.start(conn, opts)
                         end
                     elseif ev.tag == 'commit_started' then
                         job.result = ev.result
+                        job.stage = 'awaiting_member_return'
                         model.touch_job(state, job, now(), service_run_id, false, {
                             awaiting_return_run_id = service_run_id,
                             awaiting_return_mono = now(),
@@ -382,6 +423,7 @@ function M.start(conn, opts)
                     elseif ev.tag == 'reconciled_success' then
                         patch_job(job, {
                             state = 'succeeded',
+                            stage = 'succeeded',
                             result = ev.result,
                             error = nil,
                             next_step = nil,
@@ -391,6 +433,7 @@ function M.start(conn, opts)
                     elseif ev.tag == 'reconciled_failure' then
                         patch_job(job, {
                             state = 'failed',
+                            stage = 'failed',
                             result = ev.result,
                             error = tostring(ev.err or 'failed'),
                             next_step = nil,
@@ -398,6 +441,7 @@ function M.start(conn, opts)
                     elseif ev.tag == 'reconcile_progress' then
                         patch_job(job, {
                             state = 'awaiting_return',
+                            stage = 'verifying_postboot',
                             result = ev.result,
                             error = nil,
                             next_step = 'reconcile',
@@ -408,6 +452,7 @@ function M.start(conn, opts)
                     elseif ev.tag == 'timed_out' then
                         patch_job(job, {
                             state = 'timed_out',
+                            stage = 'timed_out',
                             result = nil,
                             error = tostring(ev.err or 'timeout'),
                             next_step = nil,
@@ -421,13 +466,41 @@ function M.start(conn, opts)
             local current_active = state.active_job and state.active_job.job_id or nil
             if ev then release_active(ev.job_id) end
             if ev and job and current_active == ev.job_id then
-                if not model.is_terminal(job.state) and not model.PASSIVE_STATES[job.state] then
-                    if ev.st == 'failed' then
-                        patch_job(job, { state = 'failed', error = tostring(ev.primary or 'worker_failed'), next_step = nil })
-                    elseif ev.st == 'cancelled' then
-                        patch_job(job, { state = 'cancelled', error = tostring(ev.primary or 'worker_cancelled'), next_step = nil })
+                if ev.st == 'failed' and not model.is_terminal(job.state) then
+                    patch_job(job, { state = 'failed', stage = 'failed', error = tostring(ev.primary or 'worker_failed'), next_step = nil })
+                elseif ev.st == 'cancelled' and not model.is_terminal(job.state) then
+                    patch_job(job, { state = 'cancelled', stage = 'failed', error = tostring(ev.primary or 'worker_cancelled'), next_step = nil })
+                elseif ev.st == 'ok' and job.state == 'awaiting_commit' and job.auto_commit then
+                    local ok3, aerr3 = model.can_activate(state, job)
+                    if ok3 then
+                        patch_job(job, { state = 'awaiting_return', stage = 'commit_sent', next_step = 'reconcile', error = nil }, { runtime_merge = { awaiting_return_run_id = service_run_id, awaiting_return_mono = now() } })
+                        store_sync.flush_jobs(repo, state, on_store_error)
+                        local wok, werr = spawn_runner('commit', job)
+                        if not wok then patch_job(job, { state = 'failed', stage = 'failed', error = tostring(werr), next_step = nil }) end
+                    else
+                        patch_job(job, { state = 'failed', stage = 'failed', error = tostring(aerr3 or 'auto_commit_blocked'), next_step = nil })
                     end
                 end
+            end
+        elseif type(which) == 'string' and state.component_obs[which] then
+            local rec = state.component_obs[which]
+            local ev = req
+            local job = state.active_job and state.store.jobs[state.active_job.job_id] or nil
+            if rec and rec.kind == 'transfer' and job and job.component == rec.component and job.state == 'staging' and type(ev) == 'table' and ev.op == 'retain' and type(ev.payload) == 'table' then
+                local status = ev.payload.status or {}
+                local sent = tonumber(status.offset) or 0
+                local total = tonumber(status.size) or nil
+                local pct = (total and total > 0) and (sent * 100.0 / total) or nil
+                job.runtime = type(job.runtime) == 'table' and job.runtime or {}
+                job.runtime.progress = job.runtime.progress or {}
+                job.runtime.progress.transfer = { sent = sent, total = total, pct = pct }
+                local tstate = tostring(status.state or '')
+                if tstate == 'done' then
+                    job.stage = 'staged_on_mcu'
+                elseif tstate ~= '' and tstate ~= 'idle' then
+                    job.stage = 'transferring_to_mcu'
+                end
+                publish_job_only(job)
             end
         elseif which == 'cfg' then
             local ev = req
@@ -442,6 +515,7 @@ function M.start(conn, opts)
                 state.cfg = model.default_cfg(SCHEMA)
             end
             rebuild_backends()
+            rebuild_component_obs()
             local new_ns = state.cfg.jobs_namespace
             if new_ns ~= old_ns then
                 if state.active_job or state.locks.global ~= nil then
@@ -460,8 +534,17 @@ function M.start(conn, opts)
             changed:signal()
         elseif which == 'create' then
             if not req then error('update create endpoint closed: ' .. tostring(err), 0) end
-            local job, jerr = create_job(req.payload or {})
-            if not job then req:fail(jerr) else req:reply({ ok = true, job = projection.public_job(job) }) end
+            local payload = req.payload or {}
+            local job, jerr = create_job(payload)
+            if not job then
+                req:fail(jerr)
+            else
+                local reply = { ok = true, job = projection.public_job(job) }
+                if job.source_kind == 'upload' and (type(job.artifact_ref) ~= 'string' or job.artifact_ref == '') then
+                    reply.upload = { required = true }
+                end
+                req:reply(reply)
+            end
         elseif which == 'job_do' then
             if not req then error('update job do endpoint closed: ' .. tostring(err), 0) end
             local payload = req.payload or {}
@@ -479,10 +562,10 @@ function M.start(conn, opts)
                     if not ok then
                         req:fail(aerr)
                     else
-                        patch_job(job, { state = 'staging', next_step = 'stage', error = nil })
+                        patch_job(job, { state = 'staging', stage = 'validating_artifact', next_step = 'stage', error = nil })
                         local wok, werr = spawn_runner('stage', job)
                         if not wok then
-                            patch_job(job, { state = 'failed', error = tostring(werr), next_step = nil })
+                            patch_job(job, { state = 'failed', stage = 'failed', error = tostring(werr), next_step = nil })
                             req:fail(tostring(werr))
                         else
                             req:reply({ ok = true, job = projection.public_job(job) })
@@ -497,7 +580,7 @@ function M.start(conn, opts)
                     if not ok then
                         req:fail(aerr)
                     else
-                        patch_job(job, { state = 'awaiting_return', next_step = 'reconcile', error = nil }, { runtime_merge = {
+                        patch_job(job, { state = 'awaiting_return', stage = 'commit_sent', next_step = 'reconcile', error = nil }, { runtime_merge = {
                             awaiting_return_run_id = service_run_id,
                             awaiting_return_mono = now(),
                         } })
@@ -505,11 +588,63 @@ function M.start(conn, opts)
                         store_sync.flush_jobs(repo, state, on_store_error)
                         local wok, werr = spawn_runner('commit', job)
                         if not wok then
-                            patch_job(job, { state = 'failed', error = tostring(werr), next_step = nil })
+                            patch_job(job, { state = 'failed', stage = 'failed', error = tostring(werr), next_step = nil })
                             req:fail(tostring(werr))
                         else
                             req:reply({ ok = true, job = projection.public_job(job) })
                         end
+                    end
+                end
+            elseif op == 'upload_progress' then
+                if job.state ~= 'created' or (type(job.artifact_ref) == 'string' and job.artifact_ref ~= '') then
+                    req:fail('job_not_uploadable')
+                else
+                    job.stage = 'uploading_to_cm5'
+                    job.runtime = type(job.runtime) == 'table' and job.runtime or {}
+                    job.runtime.progress = job.runtime.progress or {}
+                    local sent = tonumber(payload.sent) or 0
+                    local total = tonumber(payload.total)
+                    local pct = (total and total > 0) and (sent * 100.0 / total) or nil
+                    job.runtime.progress.upload = { sent = sent, total = total, pct = pct }
+                    publish_job_only(job)
+                    req:reply({ ok = true, job = projection.public_job(job) })
+                end
+            elseif op == 'upload_failed' then
+                if job.state ~= 'created' then
+                    req:fail('job_not_uploadable')
+                else
+                    patch_job(job, { state = 'failed', stage = 'failed', error = tostring(payload.error or 'upload_failed'), next_step = nil })
+                    req:reply({ ok = true, job = projection.public_job(job) })
+                end
+            elseif op == 'attach_artifact' then
+                if job.state ~= 'created' or (type(job.artifact_ref) == 'string' and job.artifact_ref ~= '') then
+                    req:fail('job_not_attachable')
+                elseif type(payload.artifact_ref) ~= 'string' or payload.artifact_ref == '' then
+                    req:fail('invalid_artifact_ref')
+                else
+                    job.artifact_ref = payload.artifact_ref
+                    job.artifact_meta = payload.artifact_meta
+                    job.stage = 'uploaded_to_cm5'
+                    job.next_step = nil
+                    job.runtime = type(job.runtime) == 'table' and job.runtime or {}
+                    job.runtime.progress = job.runtime.progress or {}
+                    local auto_start = payload.auto_start
+                    if auto_start == nil then auto_start = job.auto_start end
+                    if auto_start then
+                        patch_job(job, { state = 'staging', stage = 'validating_artifact', next_step = 'stage', error = nil })
+                        local wok, werr = spawn_runner('stage', job)
+                        if not wok then
+                            patch_job(job, { state = 'failed', stage = 'failed', error = tostring(werr), next_step = nil })
+                            req:fail(tostring(werr))
+                        else
+                            req:reply({ ok = true, job = projection.public_job(job) })
+                        end
+                    else
+                        local ok, serr2 = store_sync.save_job(repo, job)
+                        if not ok then on_store_error(job.job_id, serr2) end
+                        model.mark_job_dirty(state, job.job_id)
+                        changed:signal()
+                        req:reply({ ok = true, job = projection.public_job(job) })
                     end
                 end
             elseif op == 'cancel' then

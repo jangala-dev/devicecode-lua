@@ -16,11 +16,13 @@ end
 
 function M.public_job(job)
     local staged_meta = type(job.staged_meta) == 'table' and job.staged_meta or nil
+    local runtime = type(job.runtime) == 'table' and job.runtime or {}
     return {
         job_id = job.job_id,
         component = job.component,
         source = {
             offer_id = job.offer_id,
+            kind = job.source_kind,
         },
         artifact = {
             ref = job.artifact_ref,
@@ -31,6 +33,7 @@ function M.public_job(job)
         },
         lifecycle = {
             state = job.state,
+            stage = job.stage,
             next_step = job.next_step,
             created_seq = job.created_seq,
             updated_seq = job.updated_seq,
@@ -38,6 +41,7 @@ function M.public_job(job)
             updated_mono = job.updated_mono,
             error = job.error,
         },
+        progress = copy_value(runtime.progress),
         observation = {
             pre_commit_incarnation = job.pre_commit_incarnation,
             post_commit_incarnation = job.post_commit_incarnation,

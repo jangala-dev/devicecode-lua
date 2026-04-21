@@ -325,6 +325,19 @@ function new.ControlStoreStatusOpts(verbose)
     return setmetatable({ verbose = verbose }, ControlStoreStatusOpts), ''
 end
 
+
+---@class ArtifactStoreCreateSinkOpts
+---@field meta table|nil
+---@field policy string|nil
+local ArtifactStoreCreateSinkOpts = {}
+ArtifactStoreCreateSinkOpts.__index = ArtifactStoreCreateSinkOpts
+
+function new.ArtifactStoreCreateSinkOpts(meta, policy)
+    if meta ~= nil and type(meta) ~= 'table' then return nil, 'invalid meta' end
+    if policy ~= nil and type(policy) ~= 'string' then return nil, 'invalid policy' end
+    return setmetatable({ meta = meta, policy = policy }, ArtifactStoreCreateSinkOpts), ''
+end
+
 ---@class ArtifactStoreImportPathOpts
 ---@field path string
 ---@field meta table|nil
@@ -477,6 +490,7 @@ return {
     ControlStoreDeleteOpts = ControlStoreDeleteOpts,
     ControlStoreListOpts = ControlStoreListOpts,
     ControlStoreStatusOpts = ControlStoreStatusOpts,
+    ArtifactStoreCreateSinkOpts = ArtifactStoreCreateSinkOpts,
     ArtifactStoreImportPathOpts = ArtifactStoreImportPathOpts,
     ArtifactStoreImportSourceOpts = ArtifactStoreImportSourceOpts,
     ArtifactStoreOpenOpts = ArtifactStoreOpenOpts,

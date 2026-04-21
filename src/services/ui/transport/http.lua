@@ -246,6 +246,36 @@ local function handle_api(svc, app, stream, req_method, req_path, req_headers)
 		return write_api_result(stream, app.model_snapshot(session_id_from_headers(req_headers), body.pattern))
 	end
 
+	if req_path == '/api/update/jobs' then
+		local sid = session_id_from_headers(req_headers)
+		if req_method == 'GET' then
+			return write_api_result(stream, app.update_job_list(sid))
+		elseif req_method == 'POST' then
+			local body, err = read_json_body(stream)
+			if not body then return write_api_result(stream, nil, err) end
+			return write_api_result(stream, app.update_job_create(sid, body))
+		end
+		write_text(stream, 405, 'method not allowed\n')
+		return true
+	end
+
+	if #parts == 4 and parts[1] == 'api' and parts[2] == 'update' and parts[3] == 'jobs' then
+		if req_method ~= 'GET' then write_text(stream, 405, 'method not allowed\n'); return true end
+		return write_api_result(stream, app.update_job_get(session_id_from_headers(req_headers), parts[4]))
+	end
+
+	if #parts == 5 and parts[1] == 'api' and parts[2] == 'update' and parts[3] == 'jobs' and parts[5] == 'do' then
+		if req_method ~= 'POST' then write_text(stream, 405, 'method not allowed\n'); return true end
+		local body, err = read_json_body(stream)
+		if not body then return write_api_result(stream, nil, err) end
+		return write_api_result(stream, app.update_job_do(session_id_from_headers(req_headers), parts[4], body))
+	end
+
+	if #parts == 5 and parts[1] == 'api' and parts[2] == 'update' and parts[3] == 'jobs' and parts[5] == 'artifact' then
+		if req_method ~= 'POST' then write_text(stream, 405, 'method not allowed\n'); return true end
+		return write_api_result(stream, app.update_job_upload(session_id_from_headers(req_headers), parts[4], stream, req_headers))
+	end
+
 	if req_path == '/api/call' then
 		if req_method ~= 'POST' then write_text(stream, 405, 'method not allowed\n'); return true end
 		local body, err = read_json_body(stream)

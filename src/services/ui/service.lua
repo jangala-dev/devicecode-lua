@@ -48,6 +48,11 @@ local function default_announce(svc)
 			capability_snapshot = true,
 			call = true,
 			watch = true,
+			update_job_create = true,
+			update_job_get = true,
+			update_job_list = true,
+			update_job_do = true,
+			update_job_upload = true,
 		},
 	}
 end

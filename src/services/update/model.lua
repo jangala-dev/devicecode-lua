@@ -202,8 +202,9 @@ end
 function M.job_actions(job)
     local st = job and job.state or nil
     local has_retry_artifact = type(job) == 'table' and type(job.artifact_ref) == 'string' and job.artifact_ref ~= ''
+    local upload_pending = type(job) == 'table' and job.source_kind == 'upload' and not has_retry_artifact
     return {
-        start = (st == 'created'),
+        start = (st == 'created' and not upload_pending),
         commit = (st == 'awaiting_commit'),
         cancel = (st == 'created' or st == 'awaiting_commit'),
         retry = has_retry_artifact and (st == 'failed' or st == 'rolled_back' or st == 'timed_out' or st == 'cancelled'),
@@ -337,16 +338,22 @@ end
 
 function M.create_job(state, spec, now_mono, service_run_id)
     local created_seq = M.next_seq(state)
+    local source_kind = spec.source_kind or ((spec.artifact_ref or spec.artifact_path) and 'baked' or 'upload')
+    local upload_pending = source_kind == 'upload' and (type(spec.artifact_ref) ~= 'string' or spec.artifact_ref == '')
     local job = {
         job_id = spec.job_id,
         offer_id = spec.offer_id,
         component = spec.component,
+        source_kind = source_kind,
         artifact_ref = spec.artifact_ref,
         artifact_meta = spec.artifact_meta,
         expected_version = spec.expected_version,
         metadata = spec.metadata,
+        auto_start = (spec.auto_start ~= false),
+        auto_commit = (spec.auto_commit == true),
         state = 'created',
-        next_step = nil,
+        stage = upload_pending and 'awaiting_upload' or 'created',
+        next_step = upload_pending and 'upload' or nil,
         created_seq = created_seq,
         updated_seq = created_seq,
         created_mono = now_mono,

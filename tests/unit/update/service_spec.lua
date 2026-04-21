@@ -297,4 +297,64 @@ function T.update_service_rejects_second_active_job_globally()
   end, { timeout = 3.0 })
 end
 
+function T.update_service_supports_upload_attach_and_auto_start()
+  runfibers.run(function(scope)
+    local bus = busmod.new()
+    local caller = bus:connect()
+    storagecaps.start_control_store_cap(scope, bus:connect(), {})
+    local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    local versions = { mcu = 'mcu-v0' }
+    local inc = { mcu = 1 }
+    bind_device_double(scope, bus:connect(), versions, {
+      artifact_retention = 'release',
+      commit_version = { mcu = 'mcu-v1' },
+      incarnation = inc,
+      bump_incarnation = true,
+    })
+    bind_fabric_transfer_double(scope, bus:connect())
+
+    local ok, err = scope:spawn(function()
+      update.start(bus:connect(), { name = 'update', env = 'dev' })
+    end)
+    assert(ok, tostring(err))
+    wait_service_running(caller, 'update')
+
+    local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+      component = 'mcu',
+      source = { kind = 'upload' },
+      expected_version = 'mcu-v1',
+    }, { timeout = 0.5 })
+    assert(cerr == nil)
+    local job = created.job
+    assert(job.source.kind == 'upload')
+    assert(job.lifecycle.stage == 'awaiting_upload')
+
+    local prog = assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'upload_progress', job_id = job.job_id, sent = 5, total = 10 }, { timeout = 0.5 }))
+    assert(prog.job.lifecycle.stage == 'uploading_to_cm5')
+    assert(prog.job.progress.upload.sent == 5)
+
+    local art_path = storagecaps.seed_import_path(artifacts, '/tmp/upl.bin', 'uploaded-image')
+    local imported = assert(caller:call({ 'cap', 'artifact_store', 'main', 'rpc', 'import_path' }, { path = art_path, meta = { kind = 'update' }, policy = 'transient_only' }, { timeout = 0.5 }))
+    local art = imported.reason
+    local desc = art:describe()
+
+    local attached, aerr = caller:call({ 'cmd', 'update', 'job', 'do' }, {
+      op = 'attach_artifact',
+      job_id = job.job_id,
+      artifact_ref = art:ref(),
+      artifact_meta = desc,
+      auto_start = true,
+    }, { timeout = 0.5 })
+    assert(aerr == nil)
+    assert(attached.ok == true)
+
+    assert(probe.wait_until(function()
+      local okp, payload = safe.pcall(function()
+        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
+      end)
+      return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
+    end, { timeout = 0.75, interval = 0.01 }))
+  end, { timeout = 3.0 })
+end
+
 return T

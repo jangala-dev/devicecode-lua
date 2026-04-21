@@ -113,7 +113,7 @@ function M.start_artifact_store_cap(scope, conn, backing)
   conn:retain({ 'cap', 'artifact_store', 'main', 'state' }, 'added')
   conn:retain({ 'cap', 'artifact_store', 'main', 'meta' }, {
     offerings = {
-      import_path = true, import_source = true, open = true,
+      create_sink = true, import_path = true, import_source = true, open = true,
       delete = true, status = true,
     }
   })
@@ -136,6 +136,7 @@ function M.start_artifact_store_cap(scope, conn, backing)
     return nil, 'invalid_policy'
   end
 
+  local create_sink_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'create_sink' }, { queue_len = 32 })
   local import_path_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'import_path' }, { queue_len = 32 })
   local import_source_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'import_source' }, { queue_len = 32 })
   local open_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'open' }, { queue_len = 32 })
@@ -171,6 +172,50 @@ function M.start_artifact_store_cap(scope, conn, backing)
     backing.artifacts[ref] = rec
     return mk_mem_artifact(backing, rec), ''
   end
+
+  bind_reply_loop(scope, create_sink_ep, function(payload)
+    local durability, err = choose(payload.policy)
+    if not durability then return { ok = false, reason = err } end
+    local ref = mkref()
+    local rec = {
+      artifact_ref = ref,
+      state = 'writing',
+      durability = durability,
+      size = 0,
+      checksum = nil,
+      meta = clone(payload.meta or {}),
+      data = '',
+      created_at = os.time(),
+      updated_at = os.time(),
+    }
+    local sink = {
+      write_chunk = function(_, offset, data)
+        if type(data) ~= 'string' then return nil, 'invalid_chunk' end
+        if offset ~= #rec.data then return nil, 'unexpected_offset' end
+        rec.data = rec.data .. data
+        rec.size = #rec.data
+        rec.updated_at = os.time()
+        return true
+      end,
+      size = function() return rec.size end,
+      checksum = function() return checksum.digest_hex(rec.data) end,
+      commit = function()
+        rec.state = 'ready'
+        rec.checksum = checksum.digest_hex(rec.data)
+        rec.updated_at = os.time()
+        backing.artifacts[ref] = rec
+        return mk_mem_artifact(backing, rec), ''
+      end,
+      abort = function()
+        backing.artifacts[ref] = nil
+        return true
+      end,
+      status = function()
+        return { artifact_ref = ref, state = rec.state, durability = rec.durability, size = rec.size }
+      end,
+    }
+    return { ok = true, reason = sink }
+  end)
 
   bind_reply_loop(scope, import_path_ep, function(payload)
     local data = backing.import_paths[payload.path]
