@@ -22,6 +22,8 @@ The current design is intentionally simple:
 - component-specific mechanics in backends
 - service-level policy, persistence, and publication in the shell
 
+**The reason Update exists is to make software change a durable, observable and restart-safe operation, so component updates can be staged, committed and reconciled through one consistent job model instead of ad hoc per-target flows.**
+
 ## Dependencies
 
 ### Retained configuration
