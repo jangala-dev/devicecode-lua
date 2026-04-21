@@ -44,11 +44,6 @@ local ACCESS_TECH_MAP = {
 	{ tokens = { 'cdma1x' },      tech = 'cdma1x' },
 }
 
----@return table
-local function t(...)
-	return { ... }
-end
-
 -- Topic helpers (centralized so we can remap if needed)
 ---@param name string
 ---@return table
@@ -60,13 +55,6 @@ end
 ---@return table
 local function t_obs_metric(key)
 	return { 'obs', 'v1', 'gsm', 'metric', key }
-end
-
----@param id string|number
----@param key string
----@return table
-local function t_obs_event(id, key)
-	return { 'obs', 'v1', 'gsm', 'event', id, key }
 end
 
 ---@param cap CapabilityReference
@@ -453,7 +441,7 @@ function GsmModem:_emit_event(key, value)
 	if value == nil then
 		return
 	end
-	self.conn:publish(t_obs_event(self.id, key), value)
+	self.svc:obs_event(key, { modem = self.name, value = value })
 end
 
 ---@return nil
