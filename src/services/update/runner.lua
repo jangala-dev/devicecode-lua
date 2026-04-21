@@ -38,15 +38,8 @@ function M.run_stage(conn, job, backend, tx, source)
     })
 end
 
-local function evaluate_once(conn, job, backend, tx, observe)
+local function evaluate_once(_conn, job, backend, tx, observe)
     local facts = observe and observe.facts_for and observe:facts_for(job.component) or nil
-    if backend.status and facts == nil then
-        local current = backend:status(conn)
-        if current ~= nil then
-            if observe and observe.note_component then observe:note_component(job.component, current) end
-            facts = observe and observe.facts_for and observe:facts_for(job.component) or current
-        end
-    end
     local result = backend.evaluate and backend:evaluate(job, facts) or nil
     if result ~= nil then
         if result.done and result.success then

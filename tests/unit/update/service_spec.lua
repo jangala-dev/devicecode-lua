@@ -36,24 +36,36 @@ local function bind_device_double(scope, device_conn, versions, opts)
   local device_get_ep = device_conn:bind({ 'cmd', 'device', 'component', 'get' }, { queue_len = 32 })
   local device_do_ep = device_conn:bind({ 'cmd', 'device', 'component', 'do' }, { queue_len = 32 })
 
-  bind_reply_loop(scope, device_get_ep, function(payload)
-    if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'get', req = payload } end
+  local function component_payload(component)
     return {
       kind = 'device.component',
-      component = payload.component,
+      component = component,
       available = true,
       ready = true,
       software = {
-        version = versions[payload.component] or 'unknown',
-        incarnation = (opts.incarnation and opts.incarnation[payload.component]) or nil,
-        boot_id = (opts.boot_id and opts.boot_id[payload.component]) or nil,
+        version = versions[component] or 'unknown',
+        incarnation = (opts.incarnation and opts.incarnation[component]) or nil,
+        boot_id = (opts.boot_id and opts.boot_id[component]) or nil,
       },
       updater = {
-        state = (opts.get_state and opts.get_state[payload.component]) or 'running',
+        state = (opts.get_state and opts.get_state[component]) or 'running',
       },
       actions = { prepare_update = true, stage_update = true, commit_update = true },
-      source = { kind = 'member', member = payload.component, member_class = payload.component },
+      source = { kind = 'member', member = component, member_class = component },
     }
+  end
+
+  local function publish_component(component)
+    device_conn:retain({ 'state', 'device', 'component', component }, component_payload(component))
+  end
+
+  for component, _ in pairs(versions) do
+    publish_component(component)
+  end
+
+  bind_reply_loop(scope, device_get_ep, function(payload)
+    if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'get', req = payload } end
+    return component_payload(payload.component)
   end)
 
   bind_reply_loop(scope, device_do_ep, function(payload)
@@ -75,6 +87,7 @@ local function bind_device_double(scope, device_conn, versions, opts)
       if opts.boot_id and component and opts.bump_boot_id then
         opts.boot_id[component] = tostring((opts.boot_id[component] or component .. '-boot') .. '-next')
       end
+      publish_component(component)
       return { ok = true, started = true }
     end
     return nil, 'unsupported_action'
@@ -198,6 +211,9 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     ensure(got.job.lifecycle.state == 'succeeded', 'expected final job state succeeded')
     ensure(type(got.job.result) == 'table', 'expected result table')
     ensure(got.job.result.version == 'mcu-v1', 'expected final version mcu-v1')
+    local get_calls = 0
+    for _, call in ipairs(device_calls) do if call.kind == 'get' then get_calls = get_calls + 1 end end
+    ensure(get_calls == 1, 'expected exactly one device get call (pre-stage seed), got ' .. tostring(get_calls))
 
     ensure(type(control.namespaces['update/jobs']) == 'table', 'expected update/jobs namespace in control store')
     ensure(type(control.namespaces['update/jobs'][job.job_id]) == 'table', 'expected persisted job in control store')
