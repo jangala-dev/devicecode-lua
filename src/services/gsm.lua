@@ -20,6 +20,7 @@ local REQUEST_TIMEOUT = 10
 local DEFAULT_RETRY_TIMEOUT = 20
 local DEFAULT_METRICS_INTERVAL = 120
 local DEFAULT_SIGNAL_FREQ = 5
+local APN_SETTLE_TIMEOUT = 3 -- seconds to wait for modem to enter 'connecting' after a failed attempt
 
 local SCHEMA_STANDARD = "devicecode.config/gsm/1"
 
@@ -321,13 +322,49 @@ local function get_modem_config(cfg, imei, device)
 	return modem_base, "", ""
 end
 
---- Waits for a modem state to move out of connecting
+--- Waits for a modem connection attempt to settle.
+--- Phase 1: waits for the modem to enter 'connecting'. If the modem never enters
+--- 'connecting' within APN_SETTLE_TIMEOUT seconds (ModemManager rejected the command
+--- immediately), we consider it settled and return. Phase 2: once connecting, waits
+--- (without a timeout) until the modem leaves 'connecting'.
+--- Expects that the caller has already drained the retained current-state message from
+--- the subscription so only live transitions are seen here.
 ---@param name string
 ---@param state_sub Subscription
+---@param log_fn function?
 ---@return boolean ok
 ---@return string error
 local function wait_for_connection(name, state_sub, log_fn)
 	log_fn = log_fn or function() end
+
+	-- Phase 1: wait for 'connecting', or give up after APN_SETTLE_TIMEOUT seconds.
+	while true do
+		local which, msg = perform(op.named_choice({
+			state  = state_sub:recv_op(),
+			settle = sleep.sleep_op(APN_SETTLE_TIMEOUT),
+		}))
+
+		if which == 'settle' then
+			-- Modem never entered 'connecting'; ModemManager likely rejected the command
+			-- immediately (e.g. modem busy, wrong state). Treat as settled.
+			log_fn('debug', { what = 'connection_settled', modem = name })
+			return true, ""
+		end
+
+		if not msg then
+			return false, "state subscription interrupted"
+		end
+
+		local state = msg.payload and msg.payload.to
+		log_fn('debug', { what = 'connection_progress', modem = name, modem_state = tostring(state) })
+
+		if state == 'connecting' then
+			break
+		end
+		-- Any other state (e.g. a transient non-connecting event): keep waiting.
+	end
+
+	-- Phase 2: modem entered 'connecting'; wait until it leaves.
 	while true do
 		local msg, err = state_sub:recv()
 		if err then
@@ -590,6 +627,16 @@ function GsmModem:_apn_connect()
 			-- Build and send connect RPC
 			local opts, opts_err = cap_sdk.args.new.ModemConnectOpts(conn_str)
 			if opts then
+				-- Subscribe before connecting so we capture real state transitions.
+				-- Retained messages are delivered synchronously into the mailbox during
+				-- subscribe(), so recv() returns immediately with the stale current state.
+				-- Draining it here ensures wait_for_connection only sees live transitions.
+				local state_sub = self.cap:get_state_sub('card', {
+					queue_len = 4,
+					full = 'drop_oldest',
+				})
+				state_sub:recv() -- drain the retained current state
+
 				self.svc:obs_log('debug',
 					{ what = 'apn_connect_attempt', modem = self.name, apn = ranking.name, conn_str = conn_str })
 
@@ -600,24 +647,21 @@ function GsmModem:_apn_connect()
 				if conn_err == "" then
 					-- Connect succeeded
 					self.svc:obs_log('debug', { what = 'apn_connected', modem = self.name, apn = ranking.name })
+					state_sub:unsubscribe()
 					return apn_table, "", nil
 				end
 
 				-- Check for throttled error
 				if string.find(conn_err, "pdn-ipv4-call-throttled") then
 					self.svc:obs_log('debug', { what = 'apn_throttled', modem = self.name })
+					state_sub:unsubscribe()
 					return nil, conn_err, 360 -- 6-minute backoff
 				end
 
-				-- Connection attempt failed, wait for modem state to stabilize before trying next APN
+				-- Connection attempt failed; wait for modem state to stabilize before trying next APN.
 				self.svc:obs_log('debug',
 					{ what = 'apn_connect_failed', modem = self.name, apn = ranking.name, err = conn_err })
 
-				-- Subscribe to state changes to monitor connection progress
-				local state_sub = self.cap:get_state_sub('card', {
-					queue_len = 1,
-					full = 'drop_oldest',
-				})
 				local ok, wait_err = wait_for_connection(
 					self.name, state_sub,
 					function(level, payload) self.svc:obs_log(level, payload) end
@@ -697,13 +741,24 @@ function GsmModem:_autoconnect_loop()
 				if err == "" then
 					self:_emit_event('autoconnect', 'connected')
 				end
+				local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
+				local _, sig_err = modem_set_signal_freq(self.cap, signal_freq)
+				if sig_err ~= "" then
+					self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = sig_err })
+				end
 			end
 
 			if err and err ~= "" then
 				backoff = retry_timeout or DEFAULT_RETRY_TIMEOUT
 				self.svc:obs_log('error',
-					{ what = 'autoconnect_failed', modem = self.name, state = current_state, err = err, retry_after =
-					backoff })
+					{
+						what = 'autoconnect_failed',
+						modem = self.name,
+						state = current_state,
+						err = err,
+						retry_after =
+							backoff
+					})
 			else
 				backoff = math.huge
 			end
@@ -737,17 +792,6 @@ function GsmModem:start(parent_scope)
 	end)
 
 	local ok, spawn_err = child:spawn(function()
-		local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
-		local _, sig_err = modem_set_signal_freq(self.cap, signal_freq)
-		if sig_err ~= "" then
-			self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = sig_err })
-		end
-	end)
-	if not ok then
-		return false, spawn_err or "failed to spawn signal update"
-	end
-
-	ok, spawn_err = child:spawn(function()
 		self:_metrics_loop()
 	end)
 	if not ok then
