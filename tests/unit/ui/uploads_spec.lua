@@ -55,8 +55,7 @@ function T.uploads_manager_streams_into_sink_and_creates_started_job_once()
             [':path'] = '/api/update/uploads',
             ['content-length'] = '6',
             ['x-artifact-name'] = 'mcu.bin',
-            ['x-update-component'] = 'mcu',
-            ['x-artifact-version'] = 'mcu-v1',
+                        ['x-artifact-version'] = 'mcu-v1',
         },
     })
     local out, err = uploads:upload_update('sess-1', stream, stream:get_headers())

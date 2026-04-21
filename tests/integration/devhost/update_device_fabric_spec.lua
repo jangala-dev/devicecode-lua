@@ -103,20 +103,11 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		local caller = bus:connect()
 		local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
 		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
-		local diag = test_diag.for_stack(scope, bus, { update = true, device = true, fabric = true, max_records = 360 })
-		test_diag.add_subsystem(diag, 'update', {
-			service_fn = test_diag.retained_fn(caller, { 'svc', 'update', 'status' }),
-			store_fn = function() return control.namespaces['update/jobs'] or {} end,
-			artifacts_fn = function() return artifacts.artifacts end,
-		})
-		test_diag.add_subsystem(diag, 'device', {
-			summary_fn = test_diag.retained_fn(caller, { 'state', 'device' }),
-			mcu_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'mcu' }),
-		})
-		test_diag.add_subsystem(diag, 'fabric', {
-			summary_fn = test_diag.retained_fn(caller, { 'state', 'fabric' }),
-			session_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'session' }),
-			transfer_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'transfer' }),
+		local diag = test_diag.start_profile(scope, bus, 'update_stack', {
+			conn = caller,
+			control = control,
+			artifacts = artifacts,
+			max_records = 360,
 		})
 		local seed = bus:connect()
 
@@ -264,7 +255,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
 			component = 'mcu',
-			artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
+			artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
 			expected_version = 'mcu-v1',
 			metadata = { channel = 'test', next_version = 'mcu-v1' },
 		}, { timeout = 0.5 })
@@ -325,20 +316,11 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		local caller = bus:connect()
 		local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
 		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
-		local diag = test_diag.for_stack(scope, bus, { update = true, device = true, fabric = true, max_records = 360 })
-		test_diag.add_subsystem(diag, 'update', {
-			service_fn = test_diag.retained_fn(caller, { 'svc', 'update', 'status' }),
-			store_fn = function() return control.namespaces['update/jobs'] or {} end,
-			artifacts_fn = function() return artifacts.artifacts end,
-		})
-		test_diag.add_subsystem(diag, 'device', {
-			summary_fn = test_diag.retained_fn(caller, { 'state', 'device' }),
-			mcu_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'mcu' }),
-		})
-		test_diag.add_subsystem(diag, 'fabric', {
-			summary_fn = test_diag.retained_fn(caller, { 'state', 'fabric' }),
-			session_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'session' }),
-			transfer_fn = test_diag.retained_fn(caller, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'transfer' }),
+		local diag = test_diag.start_profile(scope, bus, 'update_stack', {
+			conn = caller,
+			control = control,
+			artifacts = artifacts,
+			max_records = 360,
 		})
 		local seed = bus:connect()
 
@@ -488,7 +470,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 
 		local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
 			component = 'mcu',
-			artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-fail.bin', 'mcu-image-fail') },
+			artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-fail.bin', 'mcu-image-fail') },
 			expected_version = 'mcu-v1',
 			metadata = { next_version = 'mcu-v1' },
 		}, { timeout = 0.5 }))

@@ -122,6 +122,25 @@ function M.start(conn, opts)
     end
     ctx.patch_job = patch_job
 
+    local function enter_awaiting_return(job, stage, result, opts_)
+        opts_ = opts_ or {}
+        local runtime_merge = model.copy_value(opts_.runtime_merge) or {}
+        runtime_merge.awaiting_return_run_id = service_run_id
+        runtime_merge.awaiting_return_mono = now()
+        patch_job(job, {
+            state = 'awaiting_return',
+            stage = stage or 'awaiting_member_return',
+            next_step = 'reconcile',
+            error = nil,
+            result = result,
+        }, {
+            no_save = opts_.no_save,
+            no_signal = opts_.no_signal,
+            runtime_merge = runtime_merge,
+        })
+    end
+    ctx.enter_awaiting_return = enter_awaiting_return
+
     local commands = commands_mod.new(ctx)
     ctx.artifact_open = function(...) return commands:artifact_open(...) end
 

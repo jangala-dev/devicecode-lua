@@ -1,6 +1,7 @@
 local pulse = require 'fibers.pulse'
 local cap_sdk = require 'services.hal.sdk.cap'
 local errors = require 'services.ui.errors'
+local uuid = require 'uuid'
 
 local M = {}
 local Uploads = {}
@@ -47,8 +48,8 @@ function Uploads:upload_update(session_id, stream, req_headers)
     local rec, err = self._require_session(session_id)
     if not rec then return nil, err end
 
-    local upload_id = tostring(os.time()) .. '-' .. tostring(math.random(1, 999999))
-    local component = req_headers:get('x-update-component') or 'mcu'
+    local upload_id = tostring(uuid.new())
+    local component = 'mcu'
     local content_length = tonumber(req_headers:get('content-length'))
     local name = req_headers:get('x-artifact-name')
     local version = req_headers:get('x-artifact-version')
@@ -123,6 +124,8 @@ function Uploads:upload_update(session_id, stream, req_headers)
         end
         local started, serr = update_do(user_conn, { op = 'start', job_id = created.job.job_id }, 10.0)
         if started == nil then
+            local delete_opts = assert(cap_sdk.args.new.ArtifactStoreDeleteOpts(artefact:ref()))
+            pcall(function() artifact_cap:call_control('delete', delete_opts) end)
             self:_set_session(upload_id, { state = 'failed', error = tostring(serr or 'update_start_failed'), sent = offset, updated_at = os.time() })
             return nil, serr or errors.upstream('update_start failed')
         end

@@ -32,22 +32,14 @@ local function wait_service_running(conn, name)
 end
 
 local function new_update_diag(scope, bus, caller, control, artifacts, extra)
-  local diag = test_diag.for_stack(scope, bus, { update = true, device = true, fabric = true, max_records = 320 })
-  test_diag.add_subsystem(diag, 'update', {
-    service_fn = test_diag.retained_fn(caller, { 'svc', 'update', 'status' }),
-    store_fn = function() return control and control.namespaces['update/jobs'] or {} end,
-    artifacts_fn = function() return artifacts and artifacts.artifacts or {} end,
-    extra_fn = extra,
+  return test_diag.start_profile(scope, bus, 'update_stack', {
+    conn = caller,
+    control = control,
+    artifacts = artifacts,
+    max_records = 320,
+    fabric = { session_fn = false, transfer_fn = false },
+    update = { extra_fn = extra },
   })
-  test_diag.add_subsystem(diag, 'device', {
-    summary_fn = test_diag.retained_fn(caller, { 'state', 'device' }),
-    cm5_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'cm5' }),
-    mcu_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'mcu' }),
-  })
-  test_diag.add_subsystem(diag, 'fabric', {
-    member_fn = test_diag.retained_fn(caller, { 'state', 'member', 'mcu', 'updater' }),
-  })
-  return diag
 end
 
 local function bind_device_double(scope, device_conn, versions, opts)
@@ -170,7 +162,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
 
     local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
       component = 'mcu',
-      artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
+      artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
       expected_version = 'mcu-v1',
       metadata = { channel = 'test' },
     }, { timeout = 0.5 })
@@ -243,7 +235,7 @@ function T.update_service_cancels_staged_job_before_commit()
     wait_service_running(caller, 'update')
 
     local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'mcu', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image') }
+      component = 'mcu', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image') }
     }, { timeout = 0.5 })
     assert(cerr == nil)
     local job = created.job
@@ -296,10 +288,10 @@ function T.update_service_applies_per_component_artifact_storage_policy()
     sleep_mod.sleep(0.05)
 
     local cm5_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'cm5', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-image.bin', 'cm5-image') }
+      component = 'cm5', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-image.bin', 'cm5-image') }
     }, { timeout = 0.5 }))
     local mcu_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'mcu', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image') }
+      component = 'mcu', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image') }
     }, { timeout = 0.5 }))
 
     local cm5_ref = cm5_created.job.artifact.ref
@@ -339,8 +331,8 @@ function T.update_service_rejects_second_active_job_globally()
     assert(ok, tostring(err))
     wait_service_running(caller, 'update')
 
-    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'mcu', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/a.bin', 'a') } }, { timeout = 0.5 })).job
-    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'cm5', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/b.bin', 'b') } }, { timeout = 0.5 })).job
+    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'mcu', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/a.bin', 'a') } }, { timeout = 0.5 })).job
+    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'cm5', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/b.bin', 'b') } }, { timeout = 0.5 })).job
     assert(j1.lifecycle.state == 'created')
     assert(j2.lifecycle.state == 'created')
 

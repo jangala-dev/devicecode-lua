@@ -60,7 +60,7 @@ function Commands:resolve_job_artifact(payload)
     local artifact = payload.artifact
     if type(artifact) ~= 'table' then return nil, nil, 'artifact_required' end
 
-    if artifact.kind == 'path' then
+    if artifact.kind == 'import_path' then
         if type(artifact.path) ~= 'string' or artifact.path == '' then return nil, nil, 'invalid_artifact_path' end
         return self:artifact_import_path(artifact.path, component, payload.metadata)
     elseif artifact.kind == 'ref' then
@@ -179,10 +179,7 @@ function Commands:handle_do(req)
             if not ok then
                 req:fail(aerr)
             else
-                ctx.patch_job(job, { state = 'awaiting_return', stage = 'commit_sent', next_step = 'reconcile', error = nil }, { runtime_merge = {
-                    awaiting_return_run_id = ctx.service_run_id,
-                    awaiting_return_mono = ctx.now(),
-                } })
+                ctx.enter_awaiting_return(job, 'commit_sent')
                 ctx.store_sync.flush_jobs(ctx.repo, ctx.state, ctx.on_store_error)
                 local wok, werr = ctx.runtime:spawn_runner('commit', job)
                 if not wok then

@@ -26,21 +26,21 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 		end, { queue_len = 8 })
 
 		local connect, connect_calls = ui_fakes.connect_factory(bus)
-		local diag = test_diag.for_stack(scope, bus, { config = true, obs = true, rpc = true, max_records = 320 })
+		local diag = test_diag.start_profile(scope, bus, 'ui_stack', {
+			conn = bus:connect(),
+			max_records = 320,
+			ui = {
+				services_fn = function()
+					return {
+						announce = test_diag.retained_fn(bus:connect(), { 'svc', 'alpha', 'announce' })(),
+						status = test_diag.retained_fn(bus:connect(), { 'svc', 'alpha', 'status' })(),
+					}
+				end,
+			},
+		})
 		test_diag.add_calls(diag, 'config_calls', config_calls)
 		test_diag.add_calls(diag, 'rpc_calls', rpc_calls)
 		test_diag.add_calls(diag, 'connect_calls', connect_calls)
-		test_diag.add_subsystem(diag, 'ui', {
-			main_fn = test_diag.retained_fn(bus:connect(), { 'state', 'ui', 'main' }),
-			config_net_fn = test_diag.retained_fn(bus:connect(), { 'cfg', 'net' }),
-			services_fn = function()
-				return {
-					announce = test_diag.retained_fn(bus:connect(), { 'svc', 'alpha', 'announce' })(),
-					status = test_diag.retained_fn(bus:connect(), { 'svc', 'alpha', 'status' })(),
-				}
-			end,
-			fabric_fn = test_diag.retained_fn(bus:connect(), { 'state', 'fabric' }),
-		})
 		local captured = {}
 		local ok, err = scope:spawn(function()
 			ui_service.start(bus:connect(), {

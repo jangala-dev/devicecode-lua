@@ -128,7 +128,7 @@ function T.http_handler_routes_update_job_and_artifact_upload()
 	local s1 = ui_fakes.fake_http_stream({
 		method = 'POST',
 		path = '/api/update/jobs',
-		body = cjson.encode({ component = 'mcu', artifact = { kind = 'path', path = '/rom/mcu.bin' } }),
+		body = cjson.encode({ component = 'mcu', artifact = { kind = 'import_path', path = '/rom/mcu.bin' } }),
 		headers = {
 			[':method'] = 'POST',
 			[':path'] = '/api/update/jobs',

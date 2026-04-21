@@ -148,9 +148,18 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
 
         assert(wait_service_running(caller, { 'svc', 'update', 'status' }))
 
+        local diag = test_diag.start_profile(scope, bus, 'update_stack', {
+            conn = caller,
+            control = control,
+            artifacts = artifacts,
+            max_records = 320,
+            fabric = { session_fn = false, transfer_fn = false, summary_fn = false, service_fn = false },
+            device = { cm5_fn = false, mcu_fn = false, service_fn = false, summary_fn = false },
+        })
+
         local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
             component = 'cm5',
-            artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-firmware-image-v2.bin', 'cm5-firmware-image-v2') },
+            artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-firmware-image-v2.bin', 'cm5-firmware-image-v2') },
             expected_version = 'cm5-v2',
             metadata = { next_version = 'cm5-v2' },
         }, { timeout = 0.5 }))
@@ -172,10 +181,14 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         assert(committed.ok == true)
         assert(type(artifacts.artifacts[artifact_ref]) == 'table')
 
-        local awaiting = wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
-            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_return'
-        end, 0.75)
-        assert(awaiting)
+        test_diag.assert_retained_transitions(diag, caller, { 'state', 'update', 'jobs', job.job_id }, { 'awaiting_commit', 'awaiting_return' }, {
+            label = 'job did not move from awaiting_commit to awaiting_return in order',
+            timeout = 0.75,
+            interval = 0.01,
+            selector = function(payload)
+                return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle and payload.job.lifecycle.state or nil
+            end,
+        })
 
         local mid, mid_err = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
         assert(mid_err == nil)
@@ -203,6 +216,15 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         end)
 
         assert(wait_service_running(caller, { 'svc', 'update', 'status' }))
+
+        test_diag.assert_retained_transitions(diag, caller, { 'state', 'update', 'jobs', job.job_id }, { 'awaiting_return', 'succeeded' }, {
+            label = 'job did not move from awaiting_return to succeeded in order',
+            timeout = 1.5,
+            interval = 0.01,
+            selector = function(payload)
+                return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle and payload.job.lifecycle.state or nil
+            end,
+        })
 
         assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
             return type(payload) == 'table'

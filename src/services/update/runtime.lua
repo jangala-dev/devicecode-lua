@@ -56,16 +56,7 @@ function Runtime:handle_runner_event(ev)
             ctx.release_artifact_if_present(job)
         end
     elseif ev.tag == 'commit_started' then
-        ctx.patch_job(job, {
-            state = 'awaiting_return',
-            stage = 'awaiting_member_return',
-            result = ev.result,
-            error = nil,
-            next_step = 'reconcile',
-        }, { runtime_merge = {
-            awaiting_return_run_id = ctx.service_run_id,
-            awaiting_return_mono = ctx.now(),
-        } })
+        ctx.enter_awaiting_return(job, 'awaiting_member_return', ev.result)
     elseif ev.tag == 'reconciled_success' then
         ctx.patch_job(job, {
             state = 'succeeded',
@@ -160,17 +151,7 @@ function Runtime:handle_active_join(ev)
     if job.state == 'awaiting_commit' and job.auto_commit then
         local ok3, aerr3 = ctx.model.can_activate(ctx.state, job)
         if ok3 then
-            ctx.patch_job(job, {
-                state = 'awaiting_return',
-                stage = 'commit_sent',
-                next_step = 'reconcile',
-                error = nil,
-            }, {
-                runtime_merge = {
-                    awaiting_return_run_id = ctx.service_run_id,
-                    awaiting_return_mono = ctx.now(),
-                }
-            })
+            ctx.enter_awaiting_return(job, 'commit_sent')
 
             ctx.store_sync.flush_jobs(ctx.repo, ctx.state, ctx.on_store_error)
 
