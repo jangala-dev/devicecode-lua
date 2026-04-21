@@ -63,4 +63,10 @@ function Logger:error(payload)
     self._emit('error', payload)
 end
 
+---@param payload any
+function Logger:trace(payload)
+    if type(payload) == 'table' then payload = merge(self._fields, payload) end
+    self._emit('trace', payload)
+end
+
 return Logger
