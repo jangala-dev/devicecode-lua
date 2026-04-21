@@ -10,10 +10,8 @@ end
 function M.run_stage(conn, job, backend, tx, source)
     local status_before = backend:status(conn)
     local sw = type(status_before) == 'table' and status_before.software or nil
-    local pre_commit_incarnation = nil
     local pre_commit_boot_id = nil
     if type(sw) == 'table' then
-        pre_commit_incarnation = sw.incarnation or sw.generation
         pre_commit_boot_id = sw.boot_id
     end
 
@@ -33,7 +31,6 @@ function M.run_stage(conn, job, backend, tx, source)
         tag = 'staged',
         job_id = job.job_id,
         staged = staged,
-        pre_commit_incarnation = pre_commit_incarnation,
         pre_commit_boot_id = pre_commit_boot_id,
     })
 end

@@ -23,21 +23,19 @@ function M.new(opts)
             local upd = type(component_state) == 'table' and component_state.updater or nil
             local version = type(sw) == 'table' and sw.version or nil
             local build = type(sw) == 'table' and sw.build or nil
-            local incarnation = type(sw) == 'table' and (sw.incarnation or sw.generation) or nil
             local boot_id = type(sw) == 'table' and sw.boot_id or nil
             local phase = type(upd) == 'table' and upd.state or nil
             local last_error = type(upd) == 'table' and upd.last_error or nil
             if phase == 'failed' or phase == 'rollback_detected' then
-                return { done = true, success = false, version = version, build = build, incarnation = incarnation, boot_id = boot_id, error = tostring(last_error or phase), raw = component_state }
+                return { done = true, success = false, version = version, build = build, boot_id = boot_id, error = tostring(last_error or phase), raw = component_state }
             end
             if job.expected_version and version == job.expected_version then
                 local boot_changed = (job.pre_commit_boot_id ~= nil and boot_id ~= nil and boot_id ~= job.pre_commit_boot_id)
-                local inc_changed = (job.pre_commit_incarnation ~= nil and incarnation ~= nil and incarnation ~= job.pre_commit_incarnation)
-                if boot_changed or inc_changed or (phase == 'running' or phase == 'ready' or phase == 'idle' or phase == nil) then
-                    return { done = true, success = true, version = version, build = build, incarnation = incarnation, boot_id = boot_id, raw = component_state }
+                if boot_changed or (phase == 'running' or phase == 'ready' or phase == 'idle' or phase == nil) then
+                    return { done = true, success = true, version = version, build = build, boot_id = boot_id, raw = component_state }
                 end
             end
-            return { done = false, version = version, build = build, incarnation = incarnation, boot_id = boot_id, raw = component_state }
+            return { done = false, version = version, build = build, boot_id = boot_id, raw = component_state }
         end,
     }
 

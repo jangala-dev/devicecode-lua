@@ -63,7 +63,6 @@ local function bind_device_double(scope, device_conn, versions, opts)
       ready = true,
       software = {
         version = versions[component] or 'unknown',
-        incarnation = (opts.incarnation and opts.incarnation[component]) or nil,
         boot_id = (opts.boot_id and opts.boot_id[component]) or nil,
       },
       updater = {
@@ -100,9 +99,6 @@ local function bind_device_double(scope, device_conn, versions, opts)
     elseif payload.action == 'commit_update' then
       local component = payload.component
       if opts.commit_version and opts.commit_version[component] then versions[component] = opts.commit_version[component] end
-      if opts.incarnation and component and opts.bump_incarnation then
-        opts.incarnation[component] = (opts.incarnation[component] or 0) + 1
-      end
       if opts.boot_id and component and opts.bump_boot_id then
         opts.boot_id[component] = tostring((opts.boot_id[component] or component .. '-boot') .. '-next')
       end
@@ -139,15 +135,12 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
     local versions = { mcu = 'mcu-v0' }
-    local inc = { mcu = 1 }
     local boot = { mcu = 'boot-1' }
     local device_calls = {}
     local fabric_calls = {}
     bind_device_double(scope, bus:connect(), versions, {
       artifact_retention = 'release',
       commit_version = { mcu = 'mcu-v1' },
-      incarnation = inc,
-      bump_incarnation = true,
       boot_id = boot,
       bump_boot_id = true,
       calls = device_calls,
@@ -375,13 +368,10 @@ function T.update_service_supports_upload_attach_and_auto_start()
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
     local diag = new_update_diag(scope, bus, caller, control, artifacts)
     local versions = { mcu = 'mcu-v0' }
-    local inc = { mcu = 1 }
     local boot = { mcu = 'boot-1' }
     bind_device_double(scope, bus:connect(), versions, {
       artifact_retention = 'release',
       commit_version = { mcu = 'mcu-v1' },
-      incarnation = inc,
-      bump_incarnation = true,
       boot_id = boot,
       bump_boot_id = true,
     })

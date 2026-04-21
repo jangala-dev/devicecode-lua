@@ -118,7 +118,7 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
     local status_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'status' }, { queue_len = 16 })
     local prepare_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'prepare' }, { queue_len = 16 })
     bind_reply_loop(scope, status_ep, function()
-      return { component = 'mcu', available = true, ready = true, software = { version = 'mcu-v2', incarnation = 7 }, updater = { state = 'running' }, source = { kind = 'member' } }
+      return { component = 'mcu', available = true, ready = true, software = { version = 'mcu-v2', boot_id = 'mcu-boot-7' }, updater = { state = 'running' }, source = { kind = 'member' } }
     end)
     bind_reply_loop(scope, prepare_ep, function(payload)
       return { ok = true, prepared = payload.target or 'mcu' }
@@ -135,7 +135,7 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
       component = 'mcu',
       available = true,
       ready = true,
-      software = { version = 'mcu-v2', incarnation = 7 },
+      software = { version = 'mcu-v2', boot_id = 'mcu-boot-7' },
       updater = { state = 'running' },
       source = { kind = 'member' },
     })
@@ -149,7 +149,7 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
         and payload.kind == 'device.component'
         and type(payload.software) == 'table'
         and payload.software.version == 'mcu-v2'
-        and payload.software.incarnation == 7
+        and payload.software.boot_id == 'mcu-boot-7'
         and payload.member_class == 'mcu'
         and payload.link_class == nil
         and type(payload.source) == 'table' and payload.source.member_class == 'mcu'

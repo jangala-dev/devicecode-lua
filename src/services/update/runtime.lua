@@ -56,7 +56,6 @@ function Runtime:handle_runner_event(ev)
         ctx.patch_job(job, { state = 'failed', stage = 'failed', error = tostring(ev.err or 'failed'), next_step = nil })
         ctx.release_artifact_if_present(job)
     elseif ev.tag == 'staged' then
-        if ev.pre_commit_incarnation ~= nil then job.pre_commit_incarnation = ev.pre_commit_incarnation end
         if ev.pre_commit_boot_id ~= nil then job.pre_commit_boot_id = ev.pre_commit_boot_id end
         ctx.patch_job(job, {
             state = 'awaiting_commit',
@@ -87,7 +86,6 @@ function Runtime:handle_runner_event(ev)
             result = ev.result,
             error = nil,
             next_step = nil,
-            post_commit_incarnation = type(ev.result) == 'table' and ev.result.observed_incarnation or nil,
         })
         ctx.release_artifact_if_present(job)
     elseif ev.tag == 'reconciled_failure' then

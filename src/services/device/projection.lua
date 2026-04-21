@@ -32,7 +32,6 @@ local function normalize_plain_status(raw)
     local build = raw.build or nil
     local image_id = raw.image_id or nil
     local boot_id = raw.boot_id or nil
-    local incarnation = raw.incarnation or raw.generation or nil
     local updater_state = raw.updater_state or raw.state or raw.status or raw.kind or nil
     local last_error = raw.last_error or raw.err or nil
     return {
@@ -43,7 +42,6 @@ local function normalize_plain_status(raw)
             build = build,
             image_id = image_id,
             boot_id = boot_id,
-            incarnation = incarnation,
         },
         updater = {
             state = updater_state,
