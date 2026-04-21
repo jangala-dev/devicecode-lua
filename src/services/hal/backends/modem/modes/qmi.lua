@@ -247,7 +247,7 @@ local function add_mode_funcs(ModemBackend)
                 stdout = "pipe",
                 stderr = "stdout"
             }
-            local out, status, code, _, power_err = fibers.perform(cmd:combined_output_op())
+            local _, status, code, _, power_err = fibers.perform(cmd:combined_output_op())
             if status ~= "exited" or code ~= 0 then
                 table.insert(errors, "Failed to execute qmicli power off command: " .. tostring(power_err))
             end
@@ -260,7 +260,7 @@ local function add_mode_funcs(ModemBackend)
                 stdout = "pipe",
                 stderr = "stdout"
             }
-            local out_on, status_on, code_on, _, err_on = fibers.perform(cmd_on:combined_output_op())
+            local _, status_on, code_on, _, err_on = fibers.perform(cmd_on:combined_output_op())
             if status_on ~= "exited" or code_on ~= 0 then
                 table.insert(errors, "Failed to execute qmicli power on command: " .. tostring(err_on))
             end

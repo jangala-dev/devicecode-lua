@@ -396,7 +396,7 @@ function ModemBackend:read_identity()
         return nil, err
     end
 
-    local firmware, firmware_err = self._read_firmware(self.identity)
+    local firmware = self._read_firmware(self.identity)
     -- Non-fatal: firmware may not be available yet, or the model hook may not be installed yet.
     -- The driver will re-call read_identity() after model hooks are applied.
     firmware = firmware or nil
