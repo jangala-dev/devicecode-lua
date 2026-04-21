@@ -1,6 +1,5 @@
 local file = require "fibers.io.file"
 local exec = require "fibers.io.exec"
-local op = require "fibers.op"
 local fibers = require "fibers"
 
 local backend = require "services.hal.backends.modem.providers.linux_mm.impl"
@@ -30,7 +29,7 @@ local function has_mmcli()
         stdout = "pipe",
         stderr = "stdout"
     }
-    local _, status, code, _, err = fibers.perform(cmd:combined_output_op())
+    local _, status, code, _, _ = fibers.perform(cmd:combined_output_op())
     if status == "exited" and code == 0 then
         return true
     end

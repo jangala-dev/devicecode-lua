@@ -183,7 +183,7 @@ local funcs = {
                 local is_legacy = is_legacy_modem(
                     identity_info.model,
                     function()
-                        local firmware, err = backend._read_firmware(backend.identity)
+                        local firmware = backend._read_firmware(backend.identity)
                         return firmware
                     end
                 ) and identity_info.mode == "qmi"
