@@ -150,7 +150,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
 
         local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
             component = 'cm5',
-            artifact = storagecaps.seed_import_path(artifacts, '/tmp/cm5-firmware-image-v2.bin', 'cm5-firmware-image-v2'),
+            artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-firmware-image-v2.bin', 'cm5-firmware-image-v2') },
             expected_version = 'cm5-v2',
             metadata = { next_version = 'cm5-v2' },
         }, { timeout = 0.5 }))

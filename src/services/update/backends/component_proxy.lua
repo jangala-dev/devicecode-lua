@@ -24,14 +24,14 @@ function M.new(opts)
         return conn:call({ 'cmd', 'device', 'component', 'get' }, { component = component }, { timeout = timeout_prepare })
     end
 
-    function backend:prepare(conn, job)
+    function backend:prepare(conn, job, _ctx)
         return device_call(conn, 'prepare_update', {
             target = job.component,
             metadata = job.metadata,
         }, timeout_prepare)
     end
 
-    function backend:stage(conn, job)
+    function backend:stage(conn, job, _ctx)
         local value, err = device_call(conn, 'stage_update', {
             artifact_ref = job.artifact_ref,
             metadata = job.metadata,
@@ -42,20 +42,37 @@ function M.new(opts)
         return value, nil
     end
 
-    function backend:commit(conn, job)
+    function backend:commit(conn, job, _ctx)
         return device_call(conn, 'commit_update', {
             mode = job.component,
             metadata = job.metadata,
         }, timeout_commit)
     end
+
     function backend:evaluate(job, facts)
         return reconcile_fn(facts, job)
     end
 
-    function backend:reconcile(conn, job)
+    function backend:reconcile(conn, job, _ctx)
         local value, err = self:status(conn)
         if value == nil then return nil, err end
         return self:evaluate(job, value), nil
+    end
+
+    function backend:observe_specs(_component_cfg)
+        return {
+            {
+                key = 'component:' .. component,
+                topic = { 'state', 'device', 'component', component },
+                on_event = function(ctx, _rec, ev)
+                    if type(ev) == 'table' and ev.op == 'retain' and type(ev.payload) == 'table' then
+                        ctx.observer:note_component(component, ev.payload)
+                    elseif type(ev) == 'table' and ev.op == 'unretain' then
+                        ctx.observer:clear_component(component)
+                    end
+                end,
+            },
+        }
     end
 
     return backend

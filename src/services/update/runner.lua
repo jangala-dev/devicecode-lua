@@ -7,7 +7,7 @@ local function emit(tx, ev)
     tx:send(ev)
 end
 
-function M.run_stage(conn, job, backend, tx, source)
+function M.run_stage(conn, job, backend, tx, ctx)
     local status_before = backend:status(conn)
     local sw = type(status_before) == 'table' and status_before.software or nil
     local pre_commit_boot_id = nil
@@ -21,7 +21,7 @@ function M.run_stage(conn, job, backend, tx, source)
         return
     end
 
-    local staged, serr = backend:stage(conn, job, source)
+    local staged, serr = backend:stage(conn, job, ctx)
     if staged == nil then
         emit(tx, { tag = 'failed', job_id = job.job_id, err = tostring(serr or 'stage_failed') })
         return
@@ -35,8 +35,8 @@ function M.run_stage(conn, job, backend, tx, source)
     })
 end
 
-function M.run_commit(conn, job, backend, tx, _reconcile_cfg)
-    local committed, cerr = backend:commit(conn, job)
+function M.run_commit(conn, job, backend, tx, _reconcile_cfg, ctx)
+    local committed, cerr = backend:commit(conn, job, ctx)
     if committed == nil then
         emit(tx, { tag = 'failed', job_id = job.job_id, err = tostring(cerr or 'commit_failed') })
         return
@@ -48,7 +48,7 @@ local function current_version(observe)
     return (observe and observe.version and observe:version()) or 0
 end
 
-function M.run_reconcile(conn, job, backend, tx, reconcile_cfg, observe)
+function M.run_reconcile(conn, job, backend, tx, reconcile_cfg, observe, ctx)
     local outcome, result = await_mod.until_changed_or_timeout({
         timeout_s = reconcile_cfg.timeout_s,
         version = function() return current_version(observe) end,

@@ -111,14 +111,13 @@ function T.http_handler_routes_update_job_and_artifact_upload()
 		update_job_create = function(session_id, payload)
 			seen.create_sid = session_id
 			seen.create_payload = payload
-			return { ok = true, job = { job_id = 'job-1' }, upload = { required = true, path = '/api/update/jobs/job-1/artifact' } }, nil
+			return { ok = true, job = { job_id = 'job-1' } }, nil
 		end,
-		update_job_upload = function(session_id, job_id, stream, req_headers)
+		update_job_upload = function(session_id, stream, req_headers)
 			seen.upload_sid = session_id
-			seen.upload_job_id = job_id
 			seen.upload_body = stream:get_body_as_string()
 			seen.upload_name = req_headers:get('x-artifact-name')
-			return { ok = true, artifact = { ref = 'art-1' }, job = { job_id = job_id } }, nil
+			return { ok = true, artifact = { ref = 'art-1' }, job = { job_id = 'job-2' } }, nil
 		end,
 	}
 	local handler = http.build_handler(make_svc(), app, {
@@ -129,7 +128,7 @@ function T.http_handler_routes_update_job_and_artifact_upload()
 	local s1 = ui_fakes.fake_http_stream({
 		method = 'POST',
 		path = '/api/update/jobs',
-		body = cjson.encode({ target = 'mcu', source = { kind = 'upload' } }),
+		body = cjson.encode({ component = 'mcu', artifact = { kind = 'path', path = '/rom/mcu.bin' } }),
 		headers = {
 			[':method'] = 'POST',
 			[':path'] = '/api/update/jobs',
@@ -138,17 +137,17 @@ function T.http_handler_routes_update_job_and_artifact_upload()
 	})
 	handler(nil, s1)
 	assert(seen.create_sid == 'sess-cookie')
-	assert(seen.create_payload.target == 'mcu')
+	assert(seen.create_payload.component == 'mcu')
 	assert(s1:status() == '200')
 	assert(s1:json().data.job.job_id == 'job-1')
 
 	local s2 = ui_fakes.fake_http_stream({
 		method = 'POST',
-		path = '/api/update/jobs/job-1/artifact',
+		path = '/api/update/uploads',
 		body = 'firmware-bits',
 		headers = {
 			[':method'] = 'POST',
-			[':path'] = '/api/update/jobs/job-1/artifact',
+			[':path'] = '/api/update/uploads',
 			['content-length'] = tostring(#'firmware-bits'),
 			['x-artifact-name'] = 'mcu.bin',
 			cookie = 'devicecode_session=sess-cookie',
@@ -156,7 +155,6 @@ function T.http_handler_routes_update_job_and_artifact_upload()
 	})
 	handler(nil, s2)
 	assert(seen.upload_sid == 'sess-cookie')
-	assert(seen.upload_job_id == 'job-1')
 	assert(seen.upload_body == 'firmware-bits')
 	assert(seen.upload_name == 'mcu.bin')
 	assert(s2:status() == '200')

@@ -55,72 +55,64 @@ function Commands:artifact_import_path(path, component, metadata)
     return artefact:ref(), rec, nil
 end
 
-function Commands:build_job_artifact(payload)
-    local ctx = self.ctx
+function Commands:resolve_job_artifact(payload)
     local component = assert(payload.component, 'component required')
-    if not ctx.state.cfg.components[component] then return nil, nil, 'unknown_component' end
+    local artifact = payload.artifact
+    if type(artifact) ~= 'table' then return nil, nil, 'artifact_required' end
 
-    local artifact_ref = payload.artifact_ref
-    local artifact_meta = nil
-    local source_kind = type(payload.source) == 'table' and payload.source.kind or nil
-    if type(artifact_ref) == 'string' and artifact_ref ~= '' then
-        local artefact, derr = self:artifact_open(artifact_ref)
+    if artifact.kind == 'path' then
+        if type(artifact.path) ~= 'string' or artifact.path == '' then return nil, nil, 'invalid_artifact_path' end
+        return self:artifact_import_path(artifact.path, component, payload.metadata)
+    elseif artifact.kind == 'ref' then
+        if type(artifact.ref) ~= 'string' or artifact.ref == '' then return nil, nil, 'invalid_artifact_ref' end
+        local artefact, derr = self:artifact_open(artifact.ref)
         if not artefact then return nil, nil, derr end
         local desc, derr2 = self:artifact_snapshot(artefact)
         if not desc then return nil, nil, derr2 end
-        artifact_meta = desc
-    elseif type(payload.artifact) == 'string' and payload.artifact ~= '' then
-        local ref, meta, ierr = self:artifact_import_path(payload.artifact, component, payload.metadata)
-        if not ref then return nil, nil, ierr end
-        artifact_ref, artifact_meta = ref, meta
+        return artifact.ref, desc, nil
     end
-    if type(artifact_ref) ~= 'string' or artifact_ref == '' then
-        if source_kind == 'upload' then return nil, nil, nil end
-        return nil, nil, 'artifact_required'
-    end
-    return artifact_ref, artifact_meta, nil
+
+    return nil, nil, 'invalid_artifact_kind'
 end
 
-function Commands:create_job(payload)
+function Commands:create_job_from_spec(spec)
     local ctx = self.ctx
-    local component = assert(payload.component, 'component required')
-    if not ctx.state.cfg.components[component] then return nil, 'unknown_component' end
-    local source_kind = type(payload.source) == 'table' and payload.source.kind or nil
-    local artifact_ref, artifact_meta, aerr = self:build_job_artifact(payload)
-    if aerr ~= nil then return nil, aerr end
-    if type(source_kind) ~= 'string' or source_kind == '' then
-        source_kind = (artifact_ref and 'baked') or nil
-    end
-    if type(artifact_ref) ~= 'string' or artifact_ref == '' then
-        if source_kind ~= 'upload' then return nil, 'artifact_required' end
-        artifact_ref, artifact_meta = nil, nil
-    end
-    local job = ctx.model.create_job(ctx.state, {
-        job_id = tostring(uuid.new()),
-        offer_id = payload.offer_id,
-        component = component,
-        source_kind = source_kind,
-        artifact_ref = artifact_ref,
-        artifact_meta = artifact_meta,
-        expected_version = payload.expected_version,
-        metadata = type(payload.metadata) == 'table' and ctx.model.copy_value(payload.metadata) or nil,
-        auto_start = (type(payload.options) == 'table' and payload.options.auto_start == true),
-        auto_commit = (type(payload.options) == 'table' and payload.options.auto_commit == true),
-    }, ctx.now(), ctx.service_run_id)
+    local job = ctx.model.create_job(ctx.state, spec, ctx.now(), ctx.service_run_id)
     local ok, err = ctx.store_sync.save_job(ctx.repo, job)
     if not ok then return nil, err end
     ctx.changed:signal()
     return job, nil
 end
 
+function Commands:create_job(payload)
+    local ctx = self.ctx
+    local component = assert(payload.component, 'component required')
+    if not ctx.state.cfg.components[component] then return nil, 'unknown_component' end
+    local artifact_ref, artifact_meta, aerr = self:resolve_job_artifact(payload)
+    if aerr ~= nil then return nil, aerr end
+    return self:create_job_from_spec {
+        job_id = tostring(uuid.new()),
+        offer_id = payload.offer_id,
+        component = component,
+        artifact_ref = artifact_ref,
+        artifact_meta = artifact_meta,
+        expected_version = payload.expected_version,
+        metadata = type(payload.metadata) == 'table' and ctx.model.copy_value(payload.metadata) or nil,
+        auto_start = (type(payload.options) == 'table' and payload.options.auto_start == true),
+        auto_commit = (type(payload.options) == 'table' and payload.options.auto_commit == true),
+    }
+end
+
 function Commands:clone_job_for_retry(src)
-    local job, err = self:create_job({
+    local job, err = self:create_job_from_spec {
+        job_id = tostring(uuid.new()),
         component = src.component,
         offer_id = src.offer_id,
         artifact_ref = src.artifact_ref,
+        artifact_meta = src.artifact_meta,
         expected_version = src.expected_version,
         metadata = self.ctx.model.copy_value(src.metadata),
-    })
+    }
     if not job then return nil, err end
     self.ctx.patch_job(src, { state = 'superseded', next_step = nil, error = nil })
     return job, nil
@@ -131,13 +123,25 @@ function Commands:handle_create(req)
     local job, jerr = self:create_job(payload)
     if not job then
         req:fail(jerr)
-    else
-        local reply = { ok = true, job = self.ctx.projection.public_job(job) }
-        if job.source_kind == 'upload' and (type(job.artifact_ref) ~= 'string' or job.artifact_ref == '') then
-            reply.upload = { required = true }
-        end
-        req:reply(reply)
+        return
     end
+
+    if job.auto_start then
+        local ok, aerr = self.ctx.model.can_activate(self.ctx.state, job)
+        if not ok then
+            req:fail(aerr)
+            return
+        end
+        self.ctx.patch_job(job, { state = 'staging', stage = 'validating_artifact', next_step = 'stage', error = nil })
+        local wok, werr = self.ctx.runtime:spawn_runner('stage', job)
+        if not wok then
+            self.ctx.patch_job(job, { state = 'failed', stage = 'failed', error = tostring(werr), next_step = nil })
+            req:fail(tostring(werr))
+            return
+        end
+    end
+
+    req:reply({ ok = true, job = self.ctx.projection.public_job(job) })
 end
 
 function Commands:handle_do(req)
@@ -187,49 +191,6 @@ function Commands:handle_do(req)
                 else
                     req:reply({ ok = true, job = ctx.projection.public_job(job) })
                 end
-            end
-        end
-    elseif op == 'upload_begin' then
-        if job.state ~= 'created' or (type(job.artifact_ref) == 'string' and job.artifact_ref ~= '') then
-            req:fail('job_not_uploadable')
-        else
-            ctx.patch_job(job, { stage = 'uploading_to_cm5' }, { no_save = true })
-            req:reply({ ok = true, job = ctx.projection.public_job(job) })
-        end
-    elseif op == 'upload_failed' then
-        if job.state ~= 'created' then
-            req:fail('job_not_uploadable')
-        else
-            ctx.patch_job(job, { state = 'failed', stage = 'failed', error = tostring(payload.error or 'upload_failed'), next_step = nil })
-            req:reply({ ok = true, job = ctx.projection.public_job(job) })
-        end
-    elseif op == 'attach_artifact' then
-        if job.state ~= 'created' or (type(job.artifact_ref) == 'string' and job.artifact_ref ~= '') then
-            req:fail('job_not_attachable')
-        elseif type(payload.artifact_ref) ~= 'string' or payload.artifact_ref == '' then
-            req:fail('invalid_artifact_ref')
-        else
-            job.artifact_ref = payload.artifact_ref
-            job.artifact_meta = payload.artifact_meta
-            job.stage = 'uploaded_to_cm5'
-            job.next_step = nil
-            local auto_start = payload.auto_start
-            if auto_start == nil then auto_start = job.auto_start end
-            if auto_start then
-                ctx.patch_job(job, { state = 'staging', stage = 'validating_artifact', next_step = 'stage', error = nil })
-                local wok, werr = ctx.runtime:spawn_runner('stage', job)
-                if not wok then
-                    ctx.patch_job(job, { state = 'failed', stage = 'failed', error = tostring(werr), next_step = nil })
-                    req:fail(tostring(werr))
-                else
-                    req:reply({ ok = true, job = ctx.projection.public_job(job) })
-                end
-            else
-                local ok, serr2 = ctx.store_sync.save_job(ctx.repo, job)
-                if not ok then ctx.on_store_error(job.job_id, serr2) end
-                ctx.model.mark_job_dirty(ctx.state, job.job_id)
-                ctx.changed:signal()
-                req:reply({ ok = true, job = ctx.projection.public_job(job) })
             end
         end
     elseif op == 'cancel' then

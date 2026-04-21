@@ -22,7 +22,6 @@ function M.public_job(job)
         component = job.component,
         source = {
             offer_id = job.offer_id,
-            kind = job.source_kind,
         },
         artifact = {
             ref = job.artifact_ref,

@@ -264,7 +264,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
 			component = 'mcu',
-			artifact = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1'),
+			artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
 			expected_version = 'mcu-v1',
 			metadata = { channel = 'test', next_version = 'mcu-v1' },
 		}, { timeout = 0.5 })
@@ -488,7 +488,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 
 		local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
 			component = 'mcu',
-			artifact = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-fail.bin', 'mcu-image-fail'),
+			artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-fail.bin', 'mcu-image-fail') },
 			expected_version = 'mcu-v1',
 			metadata = { next_version = 'mcu-v1' },
 		}, { timeout = 0.5 }))

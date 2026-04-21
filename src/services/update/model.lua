@@ -54,9 +54,6 @@ function M.default_cfg(schema)
             cm5 = { backend = 'cm5_swupdate' },
             mcu = { backend = 'mcu_component', transfer = { link_id = 'cm5-uart-mcu', receiver = { 'rpc', 'member', 'mcu', 'receive' }, timeout_s = 60.0 } },
         },
-        admission = {
-            mode = 'global_single',
-        },
     }
 end
 
@@ -110,11 +107,6 @@ function M.merge_cfg(payload, schema)
             end
         end
     end
-
-    if type(data.admission) == 'table' and type(data.admission.mode) == 'string' and data.admission.mode ~= '' then
-        cfg.admission.mode = data.admission.mode
-    end
-
     return cfg
 end
 
@@ -124,7 +116,7 @@ function M.new_state(cfg)
         store = { jobs = {}, order = {} },
         seq = 0,
         active_job = nil,
-        locks = { global = nil, component = {} },
+        locks = { global = nil },
         backends = {},
         dirty_jobs = {},
         summary_dirty = false,
@@ -202,9 +194,8 @@ end
 function M.job_actions(job)
     local st = job and job.state or nil
     local has_retry_artifact = type(job) == 'table' and type(job.artifact_ref) == 'string' and job.artifact_ref ~= ''
-    local upload_pending = type(job) == 'table' and job.source_kind == 'upload' and not has_retry_artifact
     return {
-        start = (st == 'created' and not upload_pending),
+        start = (st == 'created'),
         commit = (st == 'awaiting_commit'),
         cancel = (st == 'created' or st == 'awaiting_commit'),
         retry = has_retry_artifact and (st == 'failed' or st == 'rolled_back' or st == 'timed_out' or st == 'cancelled'),
@@ -273,7 +264,6 @@ end
 
 function M.acquire_lock(state, job, now_mono, service_run_id)
     state.locks.global = job.job_id
-    state.locks.component[job.component] = job.job_id
     job.runtime = type(job.runtime) == 'table' and job.runtime or {}
     job.runtime.active_lock = 'global:' .. tostring(job.job_id)
     M.touch_job(state, job, now_mono, service_run_id, false, nil)
@@ -288,9 +278,6 @@ function M.release_lock(state, job, now_mono, service_run_id)
         M.mark_job_dirty(state, job.job_id)
     end
     if state.locks.global == job.job_id then state.locks.global = nil end
-    for component, holder in pairs(state.locks.component) do
-        if holder == job.job_id then state.locks.component[component] = nil end
-    end
     M.mark_summary_dirty(state)
 end
 
@@ -338,22 +325,19 @@ end
 
 function M.create_job(state, spec, now_mono, service_run_id)
     local created_seq = M.next_seq(state)
-    local source_kind = spec.source_kind or ((spec.artifact_ref or spec.artifact_path) and 'baked' or 'upload')
-    local upload_pending = source_kind == 'upload' and (type(spec.artifact_ref) ~= 'string' or spec.artifact_ref == '')
     local job = {
         job_id = spec.job_id,
         offer_id = spec.offer_id,
         component = spec.component,
-        source_kind = source_kind,
         artifact_ref = spec.artifact_ref,
         artifact_meta = spec.artifact_meta,
         expected_version = spec.expected_version,
         metadata = spec.metadata,
-        auto_start = (spec.auto_start ~= false),
+        auto_start = (spec.auto_start == true),
         auto_commit = (spec.auto_commit == true),
         state = 'created',
-        stage = upload_pending and 'awaiting_upload' or 'created',
-        next_step = upload_pending and 'upload' or nil,
+        stage = 'created',
+        next_step = nil,
         created_seq = created_seq,
         updated_seq = created_seq,
         created_mono = now_mono,

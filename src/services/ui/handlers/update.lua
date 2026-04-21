@@ -22,20 +22,10 @@ function M.create(ctx, session_id, payload)
     local rec, err = ctx.require_session(session_id)
     if not rec then return nil, err end
     payload = type(payload) == 'table' and payload or {}
-    if type(payload.source) == 'table' and payload.source.kind == 'upload' then
-        payload.options = type(payload.options) == 'table' and payload.options or {}
-        if payload.options.auto_start == nil then payload.options.auto_start = true end
-        if payload.options.auto_commit == nil then payload.options.auto_commit = true end
-    end
     local out, cerr = ctx.with_user_conn(rec.principal, { ui = { op = 'update_create' } }, function(user_conn)
         return update_call(user_conn, payload)
     end)
     if out == nil then return nil, cerr or errors.upstream('update_create failed') end
-    if type(out) == 'table' and type(out.job) == 'table' and type(payload) == 'table' and type(payload.source) == 'table' and payload.source.kind == 'upload' then
-        out.upload = out.upload or { required = true }
-        out.upload.method = 'POST'
-        out.upload.path = '/api/update/jobs/' .. tostring(out.job.job_id) .. '/artifact'
-    end
     return out, nil
 end
 
@@ -73,9 +63,9 @@ function M.do_job(ctx, session_id, job_id, payload)
     return out, nil
 end
 
-function M.upload_artifact(ctx, session_id, job_id, stream, req_headers)
+function M.upload_artifact(ctx, session_id, stream, req_headers)
     if not ctx.uploads then return nil, errors.unavailable('upload manager unavailable') end
-    return ctx.uploads:upload_for_job(session_id, job_id, stream, req_headers)
+    return ctx.uploads:upload_update(session_id, stream, req_headers)
 end
 
 return M

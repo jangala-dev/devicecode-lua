@@ -159,7 +159,7 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
 
         local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
             component = 'cm5',
-            artifact = storagecaps.seed_import_path(artifacts, '/tmp/getbox-firmware-image-v2.bin', 'getbox-firmware-image-v2'),
+            artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/getbox-firmware-image-v2.bin', 'getbox-firmware-image-v2') },
             expected_version = 'cm5-v2',
             metadata = { next_version = 'cm5-v2' },
         }, { timeout = 0.5 })

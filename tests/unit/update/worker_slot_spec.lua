@@ -6,7 +6,7 @@ local worker_slot_mod = require 'services.update.worker_slot'
 local T = {}
 
 local function fake_ctx()
-  local state = { store = { jobs = {} }, locks = { global = nil, component = {} }, active_job = nil }
+  local state = { store = { jobs = {} }, locks = { global = nil }, active_job = nil }
   local changed = pulse.scoped({ close_reason = 'done' })
   local marks = { acquire = 0, release = 0, saves = 0 }
   local ctx = {
@@ -17,8 +17,8 @@ local function fake_ctx()
     now = fibers.now,
     on_store_error = function() end,
     model = {
-      acquire_lock = function(st, job) marks.acquire = marks.acquire + 1; st.locks.global = job.job_id; st.locks.component[job.component] = job.job_id end,
-      release_lock = function(st, job) marks.release = marks.release + 1; if st.locks.global == job.job_id then st.locks.global = nil end; st.locks.component[job.component] = nil end,
+      acquire_lock = function(st, job) marks.acquire = marks.acquire + 1; st.locks.global = job.job_id end,
+      release_lock = function(st, job) marks.release = marks.release + 1; if st.locks.global == job.job_id then st.locks.global = nil end end,
       set_active_job = function(st, rec) st.active_job = rec end,
       clear_active_job = function(st) st.active_job = nil end,
     },

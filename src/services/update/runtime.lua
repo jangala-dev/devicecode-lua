@@ -17,28 +17,15 @@ function Runtime:spawn_runner(mode, job)
     local backend = ctx.state.backends[job.component]
     if not backend then return nil, 'backend_missing' end
 
-    local stage_source = nil
-    if mode == 'stage' then
-        local component_cfg = ctx.state.cfg.components[job.component]
-        if type(component_cfg) == 'table' and component_cfg.backend == 'mcu_component' then
-            if type(job.artifact_ref) ~= 'string' or job.artifact_ref == '' then
-                return nil, 'missing_artifact_ref'
-            end
-            local opened, oerr = ctx.artifact_open(job.artifact_ref)
-            if not opened then return nil, oerr or 'artifact_open_failed' end
-            stage_source = opened
-        end
-    end
-
     local cfg_reconcile = ctx.state.cfg.reconcile
     local snapshot = ctx.copy_job(job)
     return self.slot:spawn(job, mode, function()
         if mode == 'stage' then
-            return ctx.runner.run_stage(ctx.conn, snapshot, backend, ctx.runner_tx, stage_source)
+            return ctx.runner.run_stage(ctx.conn, snapshot, backend, ctx.runner_tx, ctx)
         elseif mode == 'commit' then
-            return ctx.runner.run_commit(ctx.conn, snapshot, backend, ctx.runner_tx, cfg_reconcile)
+            return ctx.runner.run_commit(ctx.conn, snapshot, backend, ctx.runner_tx, cfg_reconcile, ctx)
         else
-            return ctx.runner.run_reconcile(ctx.conn, snapshot, backend, ctx.runner_tx, cfg_reconcile, ctx.observer)
+            return ctx.runner.run_reconcile(ctx.conn, snapshot, backend, ctx.runner_tx, cfg_reconcile, ctx.observer, ctx)
         end
     end)
 end

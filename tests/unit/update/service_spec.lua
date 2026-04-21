@@ -170,7 +170,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
 
     local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
       component = 'mcu',
-      artifact = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1'),
+      artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
       expected_version = 'mcu-v1',
       metadata = { channel = 'test' },
     }, { timeout = 0.5 })
@@ -243,7 +243,7 @@ function T.update_service_cancels_staged_job_before_commit()
     wait_service_running(caller, 'update')
 
     local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'mcu', artifact = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image')
+      component = 'mcu', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image') }
     }, { timeout = 0.5 })
     assert(cerr == nil)
     local job = created.job
@@ -296,10 +296,10 @@ function T.update_service_applies_per_component_artifact_storage_policy()
     sleep_mod.sleep(0.05)
 
     local cm5_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'cm5', artifact = storagecaps.seed_import_path(artifacts, '/tmp/cm5-image.bin', 'cm5-image')
+      component = 'cm5', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-image.bin', 'cm5-image') }
     }, { timeout = 0.5 }))
     local mcu_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'mcu', artifact = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image')
+      component = 'mcu', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image') }
     }, { timeout = 0.5 }))
 
     local cm5_ref = cm5_created.job.artifact.ref
@@ -339,8 +339,8 @@ function T.update_service_rejects_second_active_job_globally()
     assert(ok, tostring(err))
     wait_service_running(caller, 'update')
 
-    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'mcu', artifact = storagecaps.seed_import_path(artifacts, '/tmp/a.bin', 'a') }, { timeout = 0.5 })).job
-    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'cm5', artifact = storagecaps.seed_import_path(artifacts, '/tmp/b.bin', 'b') }, { timeout = 0.5 })).job
+    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'mcu', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/a.bin', 'a') } }, { timeout = 0.5 })).job
+    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'cm5', artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/b.bin', 'b') } }, { timeout = 0.5 })).job
     assert(j1.lifecycle.state == 'created')
     assert(j2.lifecycle.state == 'created')
 
@@ -360,7 +360,7 @@ function T.update_service_rejects_second_active_job_globally()
   end, { timeout = 3.0 })
 end
 
-function T.update_service_supports_upload_attach_and_auto_start()
+function T.update_service_supports_ref_artifacts_and_auto_start()
   runfibers.run(function(scope)
     local bus = busmod.new()
     local caller = bus:connect()
@@ -383,33 +383,19 @@ function T.update_service_supports_upload_attach_and_auto_start()
     assert(ok, tostring(err))
     wait_service_running(caller, 'update')
 
-    local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
-      component = 'mcu',
-      source = { kind = 'upload' },
-      expected_version = 'mcu-v1',
-    }, { timeout = 0.5 })
-    assert(cerr == nil)
-    local job = created.job
-    assert(job.source.kind == 'upload')
-    assert(job.lifecycle.stage == 'awaiting_upload')
-
-    local begun = assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'upload_begin', job_id = job.job_id }, { timeout = 0.5 }))
-    assert(begun.job.lifecycle.stage == 'uploading_to_cm5')
-
     local art_path = storagecaps.seed_import_path(artifacts, '/tmp/upl.bin', 'uploaded-image')
     local imported = assert(caller:call({ 'cap', 'artifact_store', 'main', 'rpc', 'import_path' }, { path = art_path, meta = { kind = 'update' }, policy = 'transient_only' }, { timeout = 0.5 }))
     local art = imported.reason
-    local desc = art:describe()
 
-    local attached, aerr = caller:call({ 'cmd', 'update', 'job', 'do' }, {
-      op = 'attach_artifact',
-      job_id = job.job_id,
-      artifact_ref = art:ref(),
-      artifact_meta = desc,
-      auto_start = true,
+    local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+      component = 'mcu',
+      artifact = { kind = 'ref', ref = art:ref() },
+      expected_version = 'mcu-v1',
+      options = { auto_start = true },
     }, { timeout = 0.5 })
-    assert(aerr == nil)
-    assert(attached.ok == true)
+    assert(cerr == nil)
+    assert(created.ok == true)
+    local job = created.job
 
     assert(probe.wait_until(function()
       local okp, payload = safe.pcall(function()

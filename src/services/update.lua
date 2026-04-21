@@ -166,13 +166,21 @@ function M.start(conn, opts)
         end
         state.component_obs = {}
         for component, ccfg in pairs(state.cfg.components) do
-            local cwatch = conn:watch_retained({ 'state', 'device', 'component', component }, { replay = true, queue_len = 16, full = 'drop_oldest' })
-            state.component_obs['comp:' .. component] = { kind = 'component', component = component, watch = cwatch }
-            local transfer = type(ccfg) == 'table' and ccfg.transfer or nil
-            local link_id = type(transfer) == 'table' and transfer.link_id or nil
-            if type(link_id) == 'string' and link_id ~= '' then
-                local watch = conn:watch_retained({ 'state', 'fabric', 'link', link_id, 'transfer' }, { replay = true, queue_len = 16, full = 'drop_oldest' })
-                state.component_obs['xfer:' .. component] = { kind = 'transfer', component = component, link_id = link_id, watch = watch }
+            local backend = state.backends[component]
+            if backend and type(backend.observe_specs) == 'function' then
+                local specs = backend:observe_specs(ccfg) or {}
+                for _, spec in ipairs(specs) do
+                    if type(spec) == 'table' and type(spec.key) == 'string' and type(spec.topic) == 'table' and type(spec.on_event) == 'function' then
+                        local watch = conn:watch_retained(spec.topic, { replay = true, queue_len = 16, full = 'drop_oldest' })
+                        state.component_obs[spec.key] = {
+                            component = component,
+                            key = spec.key,
+                            topic = spec.topic,
+                            on_event = spec.on_event,
+                            watch = watch,
+                        }
+                    end
+                end
             end
         end
     end
@@ -245,29 +253,7 @@ function M.start(conn, opts)
         elseif type(which) == 'string' and state.component_obs[which] then
             local rec = state.component_obs[which]
             local ev = req
-            local job = state.active_job and state.store.jobs[state.active_job.job_id] or nil
-            if rec and rec.kind == 'component' then
-                if type(ev) == 'table' and ev.op == 'retain' and type(ev.payload) == 'table' then
-                    observer:note_component(rec.component, ev.payload)
-                elseif type(ev) == 'table' and ev.op == 'unretain' then
-                    observer:clear_component(rec.component)
-                end
-            elseif rec and rec.kind == 'transfer' and job and job.component == rec.component and job.state == 'staging' and type(ev) == 'table' and ev.op == 'retain' and type(ev.payload) == 'table' then
-                local status = ev.payload.status or {}
-                local sent = tonumber(status.offset) or 0
-                local total = tonumber(status.size) or nil
-                local pct = (total and total > 0) and (sent * 100.0 / total) or nil
-                job.runtime = type(job.runtime) == 'table' and job.runtime or {}
-                job.runtime.progress = job.runtime.progress or {}
-                job.runtime.progress.transfer = { sent = sent, total = total, pct = pct }
-                local tstate = tostring(status.state or '')
-                if tstate == 'done' then
-                    job.stage = 'staged_on_mcu'
-                elseif tstate ~= '' and tstate ~= 'idle' then
-                    job.stage = 'transferring_to_mcu'
-                end
-                publisher:publish_job_only(job)
-            end
+            rec.on_event(ctx, rec, ev)
         elseif which == 'cfg' then
             local ev = req
             if not ev then

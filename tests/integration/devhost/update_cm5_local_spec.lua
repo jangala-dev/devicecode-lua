@@ -152,7 +152,7 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
 
         local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
             component = 'cm5',
-            artifact = storagecaps.seed_import_path(artifacts, '/tmp/cm5-firmware-image.bin', 'cm5-firmware-image'),
+            artifact = { kind = 'path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-firmware-image.bin', 'cm5-firmware-image') },
             expected_version = 'cm5-v1',
             metadata = { next_version = 'cm5-v1' },
         }, { timeout = 0.5 })

@@ -91,8 +91,8 @@ function M.new(ctx)
 		return update_h.do_job(ctx, session_id, job_id, payload)
 	end
 
-	function app.update_job_upload(session_id, job_id, stream, req_headers)
-		return update_h.upload_artifact(ctx, session_id, job_id, stream, req_headers)
+	function app.update_job_upload(session_id, stream, req_headers)
+		return update_h.upload_artifact(ctx, session_id, stream, req_headers)
 	end
 
 	return app

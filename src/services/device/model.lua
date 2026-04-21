@@ -27,7 +27,6 @@ local function normalize_action_routes(actions)
         if type(action_name) == 'string' and type(topic) == 'table' then
             out[action_name] = {
                 name = action_name,
-                kind = action_name:match('_update$') and 'update' or 'call',
                 call_topic = copy_array(topic),
             }
         end
