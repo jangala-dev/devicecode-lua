@@ -13,6 +13,8 @@ It does not implement hardware drivers or device policy. Instead it:
 
 The service is intentionally thin. It consumes whatever topics a component definition names, and republishes a uniform local shape for the rest of the system.
 
+**The reason Device exists is to give the rest of DeviceCode one stable, appliance-level view of the machine, so a composite product such as Big Box can be treated as a single device rather than as a loose collection of host and member components.**
+
 ## Dependencies
 
 ### Retained configuration

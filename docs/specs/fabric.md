@@ -19,6 +19,8 @@ Each live link runs in its own child scope. The child owns:
 
 This keeps restart policy and aggregate visibility in the shell while isolating link faults inside child scopes.
 
+**The reason Fabric exists is to let separate compute elements communicate as one structured local control plane, so components such as the CM5, switch and MCU can exchange state, calls and artefacts reliably without each service needing transport-specific logic.**
+
 ## Dependencies
 
 ### Retained configuration

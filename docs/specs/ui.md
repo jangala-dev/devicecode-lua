@@ -1,6 +1,6 @@
 # UI Service
 
-## Description
+## Purpose
 
 The UI Service is the local operator-facing application service responsible for:
 
@@ -16,6 +16,8 @@ The service is intentionally a **thin front-door** rather than a policy engine. 
 - opens a user-scoped local bus connection,
 - delegates to the existing command/config/update surfaces,
 - and provides a stable browser-facing transport over HTTP and WebSocket.
+
+**The reason UI exists is to provide one local, authenticated operator surface over the appliance’s retained state and command model, so management, inspection and update actions can be performed consistently without coupling browsers directly to internal service topology.**
 
 ## Dependencies
 
