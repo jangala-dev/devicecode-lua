@@ -1,4 +1,3 @@
-local cap_sdk = require 'services.hal.sdk.cap'
 local errors = require 'services.ui.errors'
 
 local M = {}
@@ -75,65 +74,8 @@ function M.do_job(ctx, session_id, job_id, payload)
 end
 
 function M.upload_artifact(ctx, session_id, job_id, stream, req_headers)
-    local rec, err = ctx.require_session(session_id)
-    if not rec then return nil, err end
-    local content_length = tonumber(req_headers:get('content-length'))
-    local name = req_headers:get('x-artifact-name')
-    local version = req_headers:get('x-artifact-version')
-    local build = req_headers:get('x-artifact-build')
-    local checksum = req_headers:get('x-artifact-checksum')
-
-    local out, cerr = ctx.with_user_conn(rec.principal, { ui = { op = 'update_upload', job_id = job_id } }, function(user_conn)
-        local artifact_cap = cap_sdk.new_cap_ref(user_conn, 'artifact_store', 'main')
-        local create_opts = assert(cap_sdk.args.new.ArtifactStoreCreateSinkOpts({
-            kind = 'update_upload',
-            component = 'mcu',
-            name = name,
-            version = version,
-            build = build,
-            checksum = checksum,
-            job_id = job_id,
-        }, 'transient_only'))
-        local reply, aerr = artifact_cap:call_control('create_sink', create_opts)
-        if not reply then return nil, errors.from(aerr, 502) end
-        if reply.ok ~= true then return nil, errors.from(reply.reason, 502) end
-        local sink = reply.reason
-        local offset = 0
-        while true do
-            local chunk, rerr = stream:get_body_chars(64 * 1024)
-            if chunk == nil then
-                pcall(function() sink:abort() end)
-                update_do(user_conn, { op = 'upload_failed', job_id = job_id, error = tostring(rerr or 'body_read_failed') }, 5.0)
-                return nil, errors.bad_request('body_read_failed: ' .. tostring(rerr or 'body_read_failed'))
-            end
-            if chunk == '' then break end
-            local ok, werr = sink:write_chunk(offset, chunk)
-            if not ok then
-                pcall(function() sink:abort() end)
-                update_do(user_conn, { op = 'upload_failed', job_id = job_id, error = tostring(werr or 'sink_write_failed') }, 5.0)
-                return nil, errors.from(werr or 'sink_write_failed', 502)
-            end
-            offset = offset + #chunk
-            update_do(user_conn, { op = 'upload_progress', job_id = job_id, sent = offset, total = content_length }, 5.0)
-        end
-        local artefact, commit_err = sink:commit()
-        if not artefact then
-            update_do(user_conn, { op = 'upload_failed', job_id = job_id, error = tostring(commit_err or 'sink_commit_failed') }, 5.0)
-            return nil, errors.from(commit_err or 'sink_commit_failed', 502)
-        end
-        local desc = artefact:describe()
-        local attached, atterr = update_do(user_conn, {
-            op = 'attach_artifact',
-            job_id = job_id,
-            artifact_ref = artefact:ref(),
-            artifact_meta = desc,
-            auto_start = true,
-        }, 10.0)
-        if attached == nil then return nil, atterr or errors.upstream('attach_artifact failed') end
-        return { ok = true, job = attached.job, artifact = { ref = artefact:ref(), size = desc.size, checksum = desc.checksum } }, nil
-    end)
-    if out == nil then return nil, cerr or errors.upstream('update_upload failed') end
-    return out, nil
+    if not ctx.uploads then return nil, errors.unavailable('upload manager unavailable') end
+    return ctx.uploads:upload_for_job(session_id, job_id, stream, req_headers)
 end
 
 return M

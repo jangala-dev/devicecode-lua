@@ -64,29 +64,36 @@ function M.run_commit(conn, job, backend, tx, _reconcile_cfg)
     emit(tx, { tag = 'commit_started', job_id = job.job_id, result = committed })
 end
 
+local function current_version(observe)
+    return (observe and observe.version and observe:version()) or 0
+end
+
 function M.run_reconcile(conn, job, backend, tx, reconcile_cfg, observe)
     local timeout_s = reconcile_cfg.timeout_s
     local deadline = fibers.now() + timeout_s
 
-    if evaluate_once(conn, job, backend, tx, observe) then return end
-
-    local seen = observe and observe:version() or 0
     while true do
+        local seen = current_version(observe)
+
+        if evaluate_once(conn, job, backend, tx, observe) then
+            return
+        end
+
         local remaining = deadline - fibers.now()
         if remaining <= 0 then
             emit(tx, { tag = 'timed_out', job_id = job.job_id, err = 'timeout' })
             return
         end
-        local which, v = fibers.perform(fibers.named_choice({
+
+        local which = fibers.perform(fibers.named_choice({
             changed = observe:changed_op(seen),
             timeout = sleep.sleep_op(remaining):wrap(function() return true end),
         }))
+
         if which == 'timeout' then
             emit(tx, { tag = 'timed_out', job_id = job.job_id, err = 'timeout' })
             return
         end
-        if v ~= nil then seen = v end
-        if evaluate_once(conn, job, backend, tx, observe) then return end
     end
 end
 

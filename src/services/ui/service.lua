@@ -9,6 +9,7 @@ local auth_mod  = require 'services.ui.auth'
 local sessions  = require 'services.ui.sessions'
 local model_mod = require 'services.ui.model'
 local app_mod   = require 'services.ui.app'
+local uploads_mod = require 'services.ui.uploads'
 local http_mod  = require 'services.ui.transport.http'
 local errors    = require 'services.ui.errors'
 
@@ -201,6 +202,10 @@ function M.start(conn, opts)
 		note_session_count = note_session_count,
 		audit = audit,
 	}
+	ctx.uploads = uploads_mod.new({
+		require_session = require_session,
+		with_user_conn = with_user_conn,
+	})
 
 	local app = app_mod.new(ctx)
 	local run_http = opts.run_http or http_mod.run

@@ -387,9 +387,8 @@ function T.update_service_supports_upload_attach_and_auto_start()
     assert(job.source.kind == 'upload')
     assert(job.lifecycle.stage == 'awaiting_upload')
 
-    local prog = assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'upload_progress', job_id = job.job_id, sent = 5, total = 10 }, { timeout = 0.5 }))
-    assert(prog.job.lifecycle.stage == 'uploading_to_cm5')
-    assert(prog.job.progress.upload.sent == 5)
+    local begun = assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'upload_begin', job_id = job.job_id }, { timeout = 0.5 }))
+    assert(begun.job.lifecycle.stage == 'uploading_to_cm5')
 
     local art_path = storagecaps.seed_import_path(artifacts, '/tmp/upl.bin', 'uploaded-image')
     local imported = assert(caller:call({ 'cap', 'artifact_store', 'main', 'rpc', 'import_path' }, { path = art_path, meta = { kind = 'update' }, policy = 'transient_only' }, { timeout = 0.5 }))
