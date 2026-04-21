@@ -1,80 +1,60 @@
 # Fabric Service
 
-## Description
+## Purpose
 
-The Fabric Service is an application-layer service responsible for:
+The Fabric service is the shell responsible for supervising in-process peer links.
+It owns:
 
-1. **Link supervision** — consuming retained `cfg/fabric`, normalising the desired link set, and supervising one child link scope per configured link.
-2. **Session establishment and liveness** — opening the configured transport, exchanging `hello` / `hello_ack`, tracking generation and readiness, and publishing per-link session state.
-3. **RPC/pub-sub bridging** — exporting selected local pub/sub and retained topics to the peer, importing selected peer topics into the local bus, and proxying request/reply calls in both directions according to configured topic-map rules.
-4. **Blob transfer** — exposing a service-level transfer RPC (`cmd/fabric/transfer`), routing requests to the target link, and managing staged incoming and outgoing transfers.
-5. **Aggregate fabric state** — publishing a retained summary of desired links, live links, and coarse per-link readiness under `state/fabric`.
+1. retained `cfg/fabric` consumption
+2. desired-vs-live link supervision
+3. aggregate retained summary under `state/fabric`
+4. a service-level transfer RPC that routes requests to the correct link child
 
-The service itself is a **shell**: it owns desired-vs-live link supervision, aggregate retained state, and the service-level transfer endpoint. Each link child owns all per-link mechanics:
+Each live link runs in its own child scope. The child owns:
 
-- transport
-- session control
-- RPC bridge
-- transfer manager
+- transport open/close
+- handshake and liveness
+- RPC / retained bridging
+- blob transfer
 
-This keeps restart policy and aggregate state in one place, while isolating link faults to child scopes.
+This keeps restart policy and aggregate visibility in the shell while isolating link faults inside child scopes.
 
 ## Dependencies
 
-### Consumed retained configuration
+### Retained configuration
 
-| Topic            | Usage |
-|-----------------|-------|
-| `{'cfg','fabric'}` | Desired link configuration. Retained; replayed on startup. |
+| Topic | Purpose |
+|---|---|
+| `{'cfg','fabric'}` | Desired link configuration. Retained and replayed on startup. |
 
-### HAL capabilities consumed indirectly
+### Transport opening
 
-The shell does not talk to HAL directly, but each link child may open a transport through the `transport_uart` adapter. By default this uses a HAL capability with:
+The shell does not talk to HAL directly. Each link child opens its transport through `services.fabric.transport_uart` unless a custom transport factory is supplied in config.
 
-| Capability class | Id source | Usage |
-|------------------|-----------|-------|
-| `uart` (default) | `cfg.transport.id` or `cfg.capability_id` or `cfg.uart_id` or `link_id` | Open a `fibers` Stream via control verb `open`. |
+Default transport selection uses a HAL capability via `cap_sdk` with:
 
-A custom transport may instead be supplied by `cfg.transport.open(conn, link_id, cfg)`.
+| Capability class | Id selection |
+|---|---|
+| `uart` (default) | `cfg.transport.id` or `cfg.capability_id` or `cfg.uart_id` or `link_id` |
 
-### Service-level command endpoint exposed
+By default the transport control verb is `open`, and the returned object must behave like a `fibers` stream.
 
-| Topic | Usage |
-|-------|-------|
-| `{'cmd','fabric','transfer'}` | Start, query, or abort a transfer on a specific link. |
+### Service-level command endpoint
 
-### Per-link retained state published
-
-Each child link retains component state under:
-
-| Topic | Owner |
-|-------|-------|
-| `{'state','fabric','link', <link_id>, 'session'}` | `session_ctl` |
-| `{'state','fabric','link', <link_id>, 'bridge'}` | `rpc_bridge` |
-| `{'state','fabric','link', <link_id>, 'transfer'}` | `transfer_mgr` |
-
-The shell retains the aggregate summary under:
-
-| Topic | Payload kind |
-|-------|---------------|
-| `{'state','fabric'}` | `fabric.summary` |
+| Topic | Purpose |
+|---|---|
+| `{'cmd','fabric','transfer'}` | Route one transfer control request to a link child. |
 
 ## Configuration
 
-Received via retained bus message on `{'cfg','fabric'}`.
-
 The service accepts either:
 
-- a payload whose `data.links` field is a table keyed by link id, or
-- a top-level table of link records.
+- `payload.data.links`
+- or a top-level table of link records
 
-Each link record is cloned into the shell’s desired-state table and must include a non-empty id, taken from:
+Each link record is normalised with `id = v.id or v.link_id or key`.
 
-- `id`
-- or `link_id`
-- or the table key.
-
-### Configuration schema (effective)
+Effective link config shape:
 
 ```lua
 {
@@ -85,24 +65,22 @@ Each link record is cloned into the shell’s desired-state table and must inclu
       member_class = <string|nil>,
       link_class = <string|nil>,
 
-      -- restart policy
       restart_backoff_s = <number|nil>,
 
-      -- transport selection
       capability_id = <string|nil>,
       uart_id = <string|nil>,
       transport = {
-        class = <string|nil>,         -- default 'uart'
+        class = <string|nil>,       -- default 'uart'
         id = <string|nil>,
-        terminator = <string|nil>,    -- default '\n'
-        open_verb = <string|nil>,     -- default 'open'
+        terminator = <string|nil>,  -- default '
+'
+        open_verb = <string|nil>,   -- default 'open'
         open_opts = <table|nil>,
         read = <boolean|nil>,
         write = <boolean|nil>,
-        open = <function|nil>,        -- custom transport factory
-      },
+        open = <function|nil>,      -- optional custom transport factory
+      } | nil,
 
-      -- session behaviour
       hello_interval_s = <number|nil>,
       ping_interval_s = <number|nil>,
       liveness_timeout_s = <number|nil>,
@@ -110,16 +88,14 @@ Each link record is cloned into the shell’s desired-state table and must inclu
       bad_frame_limit = <number|nil>,
       bad_frame_window_s = <number|nil>,
 
-      -- writer scheduling
       rpc_quantum = <number|nil>,
       bulk_quantum = <number|nil>,
 
-      -- transfer behaviour
       chunk_size = <number|nil>,
       transfer_phase_timeout_s = <number|nil>,
 
-      -- bridge rules
       export_publish_rules = { <rule>, ... } | nil,
+      export_publish = { <rule>, ... } | nil,
       export_retained_rules = { <rule>, ... } | nil,
       import_rules = { <rule>, ... } | nil,
       outbound_call_rules = { <rule>, ... } | nil,
@@ -132,10 +108,9 @@ Each link record is cloned into the shell’s desired-state table and must inclu
 }
 ```
 
-### Topic-mapping rules
+### Topic map rules
 
-Rules are declarative prefix mappings normalised by `services.fabric.topicmap`.
-A rule may be written with any of the following equivalent fields:
+`services.fabric.topicmap` normalises declarative prefix rules. Accepted fields include:
 
 ```lua
 {
@@ -146,26 +121,24 @@ A rule may be written with any of the following equivalent fields:
   remote_prefix = { ... } | nil,
   from = { ... } | nil,
   to = { ... } | nil,
-  topic = { ... } | nil,   -- optional exact-match topic
-  timeout = <number|nil>,  -- used by outbound call rules
+  topic = { ... } | nil,   -- optional exact match
+  timeout = <number|nil>,
 }
 ```
 
 Semantics:
 
-- `export_publish_rules`: local ephemeral pub/sub → remote `pub retain=false`
-- `export_retained_rules`: local retained watch → remote `pub retain=true`
-- `import_rules`: remote `pub` / `unretain` → local pub / retain / unretain
-- `outbound_call_rules`: local bound endpoint → remote `call`
-- `inbound_call_rules`: remote `call` → local bus topic call
+- `export_publish_rules` / `export_publish`: local non-retained pub/sub -> remote `pub retain=false`
+- `export_retained_rules`: local retained watch -> remote `pub retain=true`
+- `import_rules`: remote `pub` / `unretain` -> local publish / retain / unretain
+- `outbound_call_rules`: local bound endpoint -> remote `call`
+- `inbound_call_rules`: remote `call` -> local bus call
 
-## Service-level transfer API
+## Exposed command API
 
-The shell exposes one endpoint:
+## `cmd/fabric/transfer`
 
-### `{'cmd','fabric','transfer'}`
-
-The request payload must include:
+Request payload must include:
 
 ```lua
 {
@@ -175,7 +148,7 @@ The request payload must include:
 }
 ```
 
-Supported operations:
+The shell validates `link_id`, resolves the live link, and forwards the whole request object to that link child’s transfer mailbox.
 
 ### `send_blob`
 
@@ -190,12 +163,15 @@ Supported operations:
 }
 ```
 
-The shell forwards the request object unchanged to the target link child. The child:
+The link child:
 
 1. normalises the source via `blob_source.normalise_source`
 2. sends `xfer_begin`
-3. streams chunks and commit frames
-4. replies to the original caller only when the remote side acknowledges `xfer_done`
+3. waits for `xfer_ready`
+4. streams ordered chunks
+5. sends `xfer_commit`
+6. waits for `xfer_done`
+7. replies to the original caller only after remote completion
 
 ### `status`
 
@@ -203,7 +179,7 @@ The shell forwards the request object unchanged to the target link child. The ch
 { link_id = <string>, op = 'status' }
 ```
 
-Returns the current outgoing/incoming transfer snapshot for that link.
+Returns the link’s current outgoing/incoming transfer snapshot.
 
 ### `abort`
 
@@ -215,16 +191,22 @@ Aborts any live incoming and outgoing transfer for the link.
 
 ### Failure cases
 
-The shell rejects the request if:
+The shell rejects the request when:
 
-- `link_id` is missing
+- `link_id` is missing or empty
 - `op` is unsupported
-- the link does not currently exist
-- the child transfer mailbox is closed/full.
+- the link is not currently live
+- the child transfer mailbox rejects the request
 
-## Aggregate retained summary
+## Retained topics published
 
-The shell retains:
+### Aggregate shell topic
+
+| Topic | Payload |
+|---|---|
+| `{'state','fabric'}` | aggregate `fabric.summary` |
+
+Payload shape:
 
 ```lua
 {
@@ -249,142 +231,176 @@ The shell retains:
 }
 ```
 
-The aggregate summary is updated when:
+This summary is republished whenever desired links change, a child reports a new summary, a child exits, or a desired link is restarted.
 
-- config changes
-- a child publishes a new coarse summary
-- a child exits
-- a desired link is restarted.
+### Per-link retained topics
 
-## Per-link responsibilities
+Each live child owns its own retained subtree:
 
-## Session control (`session_ctl`)
+| Topic | Owner |
+|---|---|
+| `{'state','fabric','link', <id>, 'session'}` | `session_ctl` |
+| `{'state','fabric','link', <id>, 'bridge'}` | `rpc_bridge` |
+| `{'state','fabric','link', <id>, 'transfer'}` | `transfer_mgr` |
 
-Owns:
-- `state/fabric/link/<id>/session`
-
-Responsibilities:
-- generate `local_sid`
-- handle `hello`, `hello_ack`, `ping`, `pong`
-- track `peer_sid`, `peer_node`, `generation`
-- maintain `established` and `ready`
-- detect liveness timeout
-- bump generation on new handshakes
-- publish coarse link summary back to the shell
-
-Retained payload shape:
+All of these payloads use the common envelope produced by `statefmt.link_component(...)`:
 
 ```lua
 {
-  kind = 'fabric.link.session',
+  kind = 'fabric.link.<component>',
   link_id = <id>,
-  component = 'session',
+  component = <component>,
   ts = <monotonic seconds>,
-  status = {
-    state = 'opening' | 'establishing' | 'ready' | 'down',
-    local_sid = <string>,
-    peer_sid = <string|nil>,
-    peer_node = <string|nil>,
-    generation = <number>,
-    last_rx_at = <number|nil>,
-    last_tx_at = <number|nil>,
-    last_pong_at = <number|nil>,
-    established = <boolean>,
-    ready = <boolean>,
-  }
+  status = { ... },
 }
 ```
 
-`ready` is true only when:
-- the session is established, and
-- the RPC bridge has reported readiness.
+## Link child responsibilities
 
-## RPC bridge (`rpc_bridge`)
+## Session control
 
-Owns:
-- `state/fabric/link/<id>/bridge`
+`session_ctl` owns `state/fabric/link/<id>/session`.
 
 Responsibilities:
-- subscribe to local export pub/sub topics
-- watch local retained topics for replayable export
-- bind local outbound endpoints and turn requests into remote `call` frames
-- accept remote `pub`, `unretain`, `call`, and `reply` frames
-- maintain a pending call table with timeouts
-- maintain a bounded helper pool for inbound local calls
-- re-replay retained export cache when a new session becomes established
 
-Retained bridge payload includes coarse counts and readiness, with pending-call/helper load tracked by the bridge component.
+- generate and retain `local_sid`
+- exchange `hello`, `hello_ack`, `ping`, `pong`
+- track `peer_sid`, `peer_node`, and handshake generation
+- track last RX/TX/PONG timestamps
+- maintain `established` and `ready`
+- detect liveness timeout
+- publish coarse summary updates upward to the shell
 
-## Transfer manager (`transfer_mgr`)
+Retained session status shape:
 
-Owns:
-- `state/fabric/link/<id>/transfer`
+```lua
+{
+  state = 'opening' | 'establishing' | 'ready' | 'down',
+  local_sid = <string>,
+  peer_sid = <string|nil>,
+  peer_node = <string|nil>,
+  generation = <number>,
+  last_rx_at = <number|nil>,
+  last_tx_at = <number|nil>,
+  last_pong_at = <number|nil>,
+  established = <boolean>,
+  ready = <boolean>,
+}
+```
+
+`ready` is only true once both of these hold:
+
+- the session is established
+- the RPC bridge has reported itself ready for the current generation
+
+## RPC bridge
+
+`rpc_bridge` owns `state/fabric/link/<id>/bridge`.
 
 Responsibilities:
-- manage one outgoing transfer and one incoming transfer per link
-- normalise sources
-- stream chunked bulk data
+
+- subscribe to local non-retained export topics
+- watch local retained export topics
+- bind local outbound call helpers
+- translate remote `pub`, `unretain`, `call`, and `reply` frames
+- maintain pending outbound calls and helper counts
+- replay retained exports after a fresh session establishment
+
+Retained bridge status shape:
+
+```lua
+{
+  ready = <boolean>,
+  replay_pending = <integer>,
+  pending_calls = <integer>,
+  inbound_helpers = <integer>,
+  session_generation = <number>,
+  peer_sid = <string|nil>,
+  established = <boolean>,
+}
+```
+
+## Transfer manager
+
+`transfer_mgr` owns `state/fabric/link/<id>/transfer`.
+
+Responsibilities:
+
+- manage at most one outgoing transfer and one incoming transfer per link
+- normalise outgoing sources
+- send and receive ordered chunked data
 - verify incoming size/checksum
-- commit incoming sink
-- optionally deliver the committed artefact to a local receiver topic
-- abort on timeout or session generation change
+- commit incoming sink to an artefact
+- optionally call a local receiver topic after commit
+- abort transfers on timeout, reset, or session generation change
 
 Outgoing flow:
-1. receive `send_blob`
+
+1. accept `send_blob`
 2. normalise source
 3. send `xfer_begin`
 4. wait for `xfer_ready`
-5. send `xfer_chunk` frames, paced by `xfer_need`
+5. send ordered `xfer_chunk` frames
 6. send `xfer_commit`
-7. await `xfer_done`
-8. reply `{ ok=true, xfer_id, size, checksum }`
+7. wait for `xfer_done`
+8. reply `{ ok = true, xfer_id, size, checksum }`
 
 Incoming flow:
-1. receive `xfer_begin`
-2. open sink (default `memory_sink` if no custom sink factory is supplied)
-3. reply `xfer_ready`
+
+1. accept `xfer_begin`
+2. open a sink (`memory_sink` by default if no sink factory is supplied)
+3. send `xfer_ready`
 4. accept ordered `xfer_chunk` frames
 5. send `xfer_need` after each accepted chunk
 6. on `xfer_commit`, verify size and checksum
-7. commit sink to an artefact
+7. commit the sink to an artefact
 8. if `meta.receiver` is a topic, call it with `{ link_id, xfer_id, size, checksum, meta, artefact }`
 9. send `xfer_done`
 
-Retained transfer payload reports:
-- `idle`
-- outgoing/incoming state
-- offsets
-- size
-- checksum on completion
-- latest transfer error if any.
+Retained transfer status is coarse but enough for UI and higher-level services. It always includes `state`, and when a transfer is active or complete it may also include:
+
+- `xfer_id`
+- `direction` (`'in'` or `'out'`)
+- `size`
+- `offset`
+- `checksum`
+- `err`
+
+The transfer topic is unretained when the manager stops.
 
 ## Reader / writer scheduling
 
-### Reader
+## Reader
+
 The reader:
+
 - reads line-delimited frames from the transport
-- decodes and validates via `protocol.decode_line`
-- classifies frames into control / rpc / transfer mailboxes
-- reports RX activity timestamps to session control.
+- decodes them with `protocol.decode_line`
+- routes them to the control, RPC, or transfer mailboxes
+- reports RX activity to session control
 
 Bad frames are tolerated up to:
+
 - `bad_frame_limit` within `bad_frame_window_s`
 
-After that the reader faults the link child.
+If that threshold is exceeded, the reader faults the link child.
 
-### Writer
+## Writer
+
 The writer:
+
 - consumes pre-encoded writer items from three queues: control, rpc, bulk
-- gives strict priority to control
-- applies weighted round-robin between rpc and bulk using `rpc_quantum` and `bulk_quantum`
-- writes line-delimited frames to the transport
-- reports TX activity timestamps.
+- always prioritises control traffic
+- uses weighted round-robin between RPC and bulk traffic with `rpc_quantum` and `bulk_quantum`
+- writes line-delimited encoded frames to the transport
+- reports TX activity to session control
 
 ## Protocol classes
 
-Supported frame classes are defined in `services.fabric.protocol`.
+All wire frames are JSON-encoded line-delimited objects.
 
-### Control
+### Control frames
+
 - `hello`
 - `hello_ack`
 - `ping`
@@ -396,20 +412,18 @@ Supported frame classes are defined in `services.fabric.protocol`.
 - `xfer_done`
 - `xfer_abort`
 
-### RPC/pub-sub
+### RPC / pub-sub frames
+
 - `pub`
 - `unretain`
 - `call`
 - `reply`
 
-### Bulk
+### Bulk frames
+
 - `xfer_chunk`
 
-All frames are JSON-encoded line-delimited objects.
-
-## Service Flow
-
-### Fabric shell
+## Shell flow
 
 ```mermaid
 flowchart TD
@@ -424,21 +438,18 @@ flowchart TD
   G --> C
   C -->|link_summary| H(Update coarse per-link summary)
   H --> F
-  F --> C
   C -->|link_exit| I(Remove live link, join child, schedule restart if still desired)
   I --> F
-  F --> C
   C -->|restart timer| J(Respawn desired link)
   J --> F
-  F --> C
 ```
 
-### Link child
+## Link child flow
 
 ```mermaid
 flowchart TD
   St[Start] --> A(Open transport)
-  A --> B(Allocate inbound/outbound mailboxes)
+  A --> B(Allocate control/rpc/transfer mailboxes)
   B --> C(Spawn reader)
   C --> D(Spawn writer)
   D --> E(Spawn session_ctl)
@@ -448,81 +459,11 @@ flowchart TD
   H --> En[Child exits on fault/cancellation]
 ```
 
+## Architecture notes
 
-## Additional Review Diagrams
-
-### Service position in the platform
-
-```mermaid
-flowchart LR
-  HAL[HAL capabilities / UART open]
-  CFG[retained cfg/fabric]
-  FAB[Fabric service shell]
-  LINK[per-link child]
-  DEV[Device service]
-  UPD[Update service]
-  MON[Monitor / other listeners]
-
-  CFG --> FAB
-  FAB --> LINK
-  HAL -. default transport open .-> LINK
-  LINK --> DEV
-  LINK --> MON
-  UPD --> FAB
-```
-
-### Session establishment sequence
-
-```mermaid
-sequenceDiagram
-  participant CM5 as CM5 fabric link child
-  participant UART as UART transport
-  participant MCU as MCU fabric peer
-  participant RPC as rpc_bridge/session_ctl
-
-  CM5->>UART: hello(local_sid, node_id, link metadata)
-  UART->>MCU: line frame
-  MCU->>UART: hello_ack(peer_sid, node_id)
-  UART->>CM5: line frame
-  CM5->>RPC: mark established, peer identity known
-  Note over RPC: generation changes only when the peer SID changes
-  RPC-->>CM5: bridge ready when exports/imports armed
-  CM5->>UART: ping
-  MCU->>UART: pong
-  CM5->>RPC: mark ready
-```
-
-### MCU firmware transfer over fabric
-
-```mermaid
-sequenceDiagram
-  participant U as Update service
-  participant F as Fabric shell
-  participant L as Link transfer_mgr
-  participant M as MCU receiver / sink
-  participant D as Device service
-
-  U->>F: cmd/fabric/transfer send_blob(link_id, source, receiver, meta)
-  F->>L: route request to link mailbox
-  L->>M: xfer_begin(meta)
-  M-->>L: xfer_ready
-  loop chunked bulk transfer
-    L->>M: xfer_chunk(offset, data)
-    M-->>L: xfer_need(next_offset)
-  end
-  L->>M: xfer_commit(size, checksum)
-  M->>M: verify, commit sink
-  M-->>L: xfer_done(artefact / staged-ok)
-  L-->>F: ok, xfer_id, size, checksum
-  F-->>U: transfer staged successfully
-  U->>D: commit_update
-```
-
-## Architecture
-
-- The shell owns `desired`, `links`, and restart scheduling.
-- Each link child owns all mechanics below the aggregate state line.
-- Link faults are isolated to child scopes; the shell decides whether to restart.
-- All retained state written by the service is best-effort and monotonic-time stamped.
-- The transport contract is a `fibers` Stream opened from HAL by default, but a custom transport factory may be injected per link.
-- Transfer delivery to a receiver topic happens **after** incoming sink commit, so receivers operate on an artefact object, not on raw transfer chunks.
+- the shell owns desired links, live link bookkeeping, and restart policy
+- each link child owns everything below the aggregate state line
+- link faults are isolated to child scopes; the shell decides whether to restart
+- retained state is best-effort and monotonic-time stamped
+- the default transport contract is a `fibers` stream opened through HAL, but a custom transport factory can be injected per link
+- transfer delivery to a local receiver topic happens after sink commit, so receivers work with artefacts rather than raw chunks
