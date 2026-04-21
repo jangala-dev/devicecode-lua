@@ -454,7 +454,7 @@ function GsmModem:_emit_metrics_once()
 			self:_emit_metric('access_tech', access_tech)
 			local access_family = get_access_family(access_tech)
 			if access_family ~= "" then
-				self:_emit_metric('access_family', access_family)
+				self:_emit_metric('access_fam', access_family)
 			end
 		end
 	end
@@ -486,7 +486,7 @@ function GsmModem:_emit_metrics_once()
 
 	local firmware, firmware_err = modem_get_field(self.cap, 'firmware', REQUEST_TIMEOUT)
 	if firmware_err == "" then
-		self:_emit_metric('firmware', firmware)
+		self:_emit_metric('fw_version', firmware)
 	end
 
 	local state_sub = self.cap:get_state_sub('card')
@@ -504,7 +504,7 @@ function GsmModem:_emit_metrics_once()
 	if net_ports_err == "" then
 		local interface = net_ports and net_ports[1]
 		if interface then
-			self:_emit_metric('interface', interface)
+			self:_emit_metric('wwan_type', interface)
 		else
 			self.svc:obs_log('debug', { what = 'no_net_ports', modem = self.name })
 		end
@@ -535,6 +535,10 @@ function GsmModem:_emit_metrics_once()
 
 	if rsrq then
 		self:_emit_metric('rsrq', rsrq)
+	end
+
+	if rssi then
+		self:_emit_metric('rssi', rssi)
 	end
 
 	local bars_access_tech, signal_value, signal_type = select_signal_for_bars(
