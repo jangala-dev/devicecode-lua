@@ -473,24 +473,31 @@
     ]
   },
   "gsm": {
-    "modems": {
-      "default": {
-        "enabled": true
-      },
-      "known": [
-        {
-          "name": "primary",
-          "id_field": "device",
-          "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
-          "autoconnect": true
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/gsm/1",
+      "modems": {
+        "default": {
+          "enabled": true,
+          "signal_freq": 10
         },
-        {
-          "name": "secondary",
-          "id_field": "device",
-          "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4",
-          "autoconnect": true
-        }
-      ]
+        "known": [
+          {
+            "name": "primary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
+            "autoconnect": true,
+            "metrics_interval": 60
+          },
+          {
+            "name": "secondary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4",
+            "autoconnect": true,
+            "metrics_interval": 60
+          }
+        ]
+      }
     }
   },
   "metrics": {
