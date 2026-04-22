@@ -1,4 +1,7 @@
-local safe    = require 'coxpcall'
+-- services/ui/handlers/config.lua
+--
+-- UI config handlers.
+
 local errors  = require 'services.ui.errors'
 local queries = require 'services.ui.queries'
 
@@ -13,6 +16,7 @@ end
 function M.set(ctx, session_id, service_name, data, user_conn)
 	local rec, err = ctx.require_session(session_id)
 	if not rec then return nil, err end
+
 	if type(service_name) ~= 'string' or service_name == '' then
 		return nil, errors.bad_request('service_name must be a non-empty string')
 	end
@@ -20,23 +24,24 @@ function M.set(ctx, session_id, service_name, data, user_conn)
 		return nil, errors.bad_request('data must be a plain table')
 	end
 
-	local function do_call(conn)
-		local ok, out, call_err = safe.pcall(function()
+	local out, cerr = ctx.run_user_call(
+		rec,
+		{ ui = { op = 'config_set', service = service_name } },
+		user_conn,
+		function(conn)
 			return conn:call({ 'config', service_name, 'set' }, { data = data })
-		end)
-		if not ok then return nil, errors.from(out, 502) end
-		return out, call_err
+		end
+	)
+
+	if out == nil then
+		return nil, cerr or errors.upstream('config_set failed')
 	end
 
-	local out, cerr
-	if user_conn then
-		out, cerr = do_call(user_conn)
-	else
-		out, cerr = ctx.with_user_conn(rec.principal, { ui = { op = 'config_set', service = service_name } }, do_call)
-	end
-	if out == nil then return nil, cerr or errors.upstream('config_set failed') end
+	ctx.audit('config_set', {
+		user = rec.user.id,
+		service = service_name,
+	})
 
-	ctx.audit('config_set', { user = rec.user.id, service = service_name })
 	return out, nil
 end
 

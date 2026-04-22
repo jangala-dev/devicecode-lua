@@ -1,3 +1,10 @@
+-- services/ui/errors.lua
+--
+-- UI boundary error vocabulary.
+--
+-- Handlers and transports should return or translate through this module so
+-- that HTTP/WebSocket callers see a stable code/message/status shape.
+
 local M = {}
 
 local ERR_MT = {}
@@ -48,19 +55,49 @@ function M.http_status(err)
 	return M.is_error(err) and (err.http_status or 500) or 500
 end
 
+-- Heuristic classifier for foreign/local string errors at the UI boundary.
+-- This is intentionally best-effort rather than protocol-authoritative.
 function M.from(err, fallback_http)
 	if M.is_error(err) then return err end
 	if err == nil then return nil end
+
 	local s = tostring(err)
-	if s == '' then return new('error', 'error', fallback_http or 500) end
-	if s == 'timeout' or s:find('timeout', 1, true) then return M.timeout(s) end
-	if s == 'no_route' or s == 'closed' or s == 'full' or s:find('queue', 1, true) then return M.unavailable(s) end
-	if s:find('not found', 1, true) or s == 'no_such_link' then return M.not_found(s) end
+	if s == '' then
+		return new('error', 'error', fallback_http or 500)
+	end
+
+	if s == 'timeout' or s:find('timeout', 1, true) then
+		return M.timeout(s)
+	end
+	if s == 'not_ready' or s:find('not ready', 1, true) then
+		return M.not_ready(s)
+	end
+	if s == 'no_route' or s == 'closed' or s == 'full' or s:find('queue', 1, true) then
+		return M.unavailable(s)
+	end
+	if s:find('not found', 1, true) or s == 'no_such_link' then
+		return M.not_found(s)
+	end
 	if s:find('invalid', 1, true) or s:find('missing', 1, true) or s:find('must be', 1, true) then
 		return M.bad_request(s)
 	end
-	if s:find('unauthor', 1, true) or s == 'forbidden' then return M.unauthorised(s) end
+	if s == 'forbidden' or s:find('forbidden', 1, true) then
+		return M.forbidden(s)
+	end
+	if s:find('unauthor', 1, true) then
+		return M.unauthorised(s)
+	end
+
 	return new('error', s, fallback_http or 500)
+end
+
+function M.to_response(err, fallback_http)
+	local e = M.from(err, fallback_http)
+	return M.http_status(e), {
+		ok = false,
+		err = M.message(e),
+		code = M.code(e),
+	}
 end
 
 return M

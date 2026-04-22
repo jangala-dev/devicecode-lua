@@ -1,15 +1,34 @@
+-- services/ui/transport/ws_client.lua
+--
+-- One websocket client session.
+--
+-- Responsibilities:
+--   * upgrade one HTTP stream into a websocket
+--   * maintain one authenticated user connection for the current session
+--   * multiplex inbound client frames with local UI model watch events
+--   * forward replies/events using a small JSON message protocol
+--
+-- Design notes:
+--   * next_event_op(...) is a pure op constructor
+--   * the shell loop is the only place that performs event ops
+--   * already-ready watch events are drained before blocking on the combined
+--     event choice so local model traffic is not needlessly delayed behind a
+--     later inbound frame
+
 local fibers    = require 'fibers'
 local mailbox   = require 'fibers.mailbox'
 local websocket = require 'http.websocket'
 local cjson     = require 'cjson.safe'
 local errors    = require 'services.ui.errors'
-local safe    = require 'coxpcall'
+local safe      = require 'coxpcall'
 
 local perform = fibers.perform
 local choice  = fibers.choice
 local unpack  = rawget(table, 'unpack') or _G.unpack
 
 local M = {}
+
+local NO_READY = {}
 
 local function ws_send(ws, obj)
 	local txt = cjson.encode(obj or {}) or '{"ok":false,"err":"json_encode_failed"}'
@@ -26,7 +45,9 @@ end
 
 local function send_reply(send_out, id, ok, data, err)
 	local payload = { id = id, ok = ok == true }
-	if data ~= nil then payload.data = data end
+	if data ~= nil then
+		payload.data = data
+	end
 	if err ~= nil then
 		local e = errors.from(err)
 		payload.err = errors.message(e)
@@ -36,11 +57,11 @@ local function send_reply(send_out, id, ok, data, err)
 end
 
 local function inbound_event_op(inbound_rx)
-	return inbound_rx:recv_op():wrap(function (item, why)
+	return inbound_rx:recv_op():wrap(function(item, why)
 		return {
-			tag  = 'inbound',
+			tag = 'inbound',
 			item = item,
-			why  = why,
+			why = why,
 		}
 	end)
 end
@@ -48,12 +69,12 @@ end
 local function watch_choice_op(watches)
 	local ops = {}
 	for watch_id, rec in pairs(watches) do
-		ops[#ops + 1] = rec.watch:recv_op():wrap(function (ev, why)
+		ops[#ops + 1] = rec.watch:recv_op():wrap(function(ev, why)
 			return {
-				tag      = 'watch',
+				tag = 'watch',
 				watch_id = watch_id,
-				ev       = ev,
-				why      = why,
+				ev = ev,
+				why = why,
 			}
 		end)
 	end
@@ -61,24 +82,251 @@ local function watch_choice_op(watches)
 	return choice(unpack(ops))
 end
 
-local function next_event(inbound_rx, watches)
+-- Pure combined event op.
+--
+-- This is the blocking event choice used once no watch event is already ready.
+local function next_event_op(inbound_rx, watches)
 	local winbound = inbound_event_op(inbound_rx)
 	local wwatch = watch_choice_op(watches)
 	if not wwatch then
-		return perform(winbound)
+		return winbound
+	end
+	return choice(wwatch, winbound)
+end
+
+-- Non-blocking probe for already-ready watch traffic.
+--
+-- This preserves the previous UI property that locally ready watch events are
+-- delivered before we block waiting for the next inbound client frame.
+local function take_ready_watch_event(watches)
+	local wwatch = watch_choice_op(watches)
+	if not wwatch then
+		return nil
 	end
 
-	-- Preserve the useful UI property that watch events already ready locally are
-	-- delivered before we consume the next inbound client frame. This avoids a
-	-- later logout/close frame racing ahead of a watch event that has already
-	-- arrived. If no watch is immediately ready, fall back to a normal fair
-	-- choice between inbound frames and watch events.
-	local immediate = perform(wwatch:or_else(function () return nil end))
-	if immediate ~= nil then
-		return immediate
+	local ev = perform(wwatch:or_else(function()
+		return NO_READY
+	end))
+
+	if ev == NO_READY then
+		return nil
 	end
 
-	return perform(choice(wwatch, winbound))
+	return ev
+end
+
+local function valid_watch_id(watch_id)
+	return type(watch_id) == 'string' and watch_id ~= ''
+end
+
+local function close_watch(state, watch_id, reason)
+	local rec = state.watches[watch_id]
+	if not rec then return false end
+	state.watches[watch_id] = nil
+	rec.watch:close(reason or 'closed')
+	return true
+end
+
+local function close_all_watches(state, reason)
+	for id in pairs(state.watches) do
+		close_watch(state, id, reason)
+	end
+end
+
+local function clear_user_conn(state, reason)
+	close_all_watches(state, reason or 'logout')
+	if state.user_conn then
+		state.user_conn:disconnect()
+	end
+	state.user_conn = nil
+	state.current_session = nil
+end
+
+local function adopt_session(state, session_id)
+	if session_id == nil or session_id == '' then
+		clear_user_conn(state, 'logout')
+		return nil, errors.unauthorised('missing session')
+	end
+
+	local rec, err = state.require_session(session_id)
+	if not rec then
+		clear_user_conn(state, 'invalid_session')
+		return nil, err
+	end
+
+	if state.current_session == rec.id and state.user_conn then
+		return rec, nil
+	end
+
+	clear_user_conn(state, 'session_change')
+
+	local conn, cerr = state.open_user_conn(rec.principal, {
+		ui = { transport = 'ws', session_id = rec.id },
+	})
+	if not conn then
+		return nil, cerr or errors.unavailable('failed to open user connection')
+	end
+
+	state.user_conn = conn
+	state.current_session = rec.id
+	return rec, nil
+end
+
+local function start_watch(state, app, watch_id, pattern, watch_opts)
+	if not valid_watch_id(watch_id) then
+		return nil, errors.bad_request('watch_id must be a non-empty string')
+	end
+
+	local rec, err = adopt_session(state, state.current_session)
+	if not rec then return nil, err end
+
+	close_watch(state, watch_id, 'replaced')
+
+	local watch, werr = app.watch_open(rec.id, pattern, watch_opts)
+	if not watch then return nil, werr end
+
+	state.watches[watch_id] = { watch = watch }
+	return { watch_id = watch_id }, nil
+end
+
+local function build_ops(state, app)
+	return {
+		hello = function(_obj)
+			return { service = state.svc.name }, nil
+		end,
+
+		session = function(obj)
+			return app.get_session(obj.session_id or state.current_session)
+		end,
+
+		health = function(_obj)
+			return app.health()
+		end,
+
+		login = function(obj)
+			local out, err = app.login(obj.username, obj.password)
+			if out and out.session_id then
+				adopt_session(state, out.session_id)
+			end
+			return out, err
+		end,
+
+		logout = function(obj)
+			local out, err = app.logout(obj.session_id or state.current_session)
+			if out then
+				clear_user_conn(state, 'logout')
+			end
+			return out, err
+		end,
+
+		config_get = function(obj)
+			return app.config_get(obj.session_id or state.current_session, obj.service)
+		end,
+
+		config_set = function(obj)
+			return app.config_set(obj.session_id or state.current_session, obj.service, obj.data, state.user_conn)
+		end,
+
+		service_status = function(obj)
+			return app.service_status(obj.session_id or state.current_session, obj.service)
+		end,
+
+		services_snapshot = function(obj)
+			return app.services_snapshot(obj.session_id or state.current_session)
+		end,
+
+		fabric_status = function(obj)
+			return app.fabric_status(obj.session_id or state.current_session)
+		end,
+
+		fabric_link_status = function(obj)
+			return app.fabric_link_status(obj.session_id or state.current_session, obj.link_id)
+		end,
+
+		capability_snapshot = function(obj)
+			return app.capability_snapshot(obj.session_id or state.current_session)
+		end,
+
+		model_exact = function(obj)
+			return app.model_exact(obj.session_id or state.current_session, obj.topic)
+		end,
+
+		model_snapshot = function(obj)
+			return app.model_snapshot(obj.session_id or state.current_session, obj.pattern)
+		end,
+
+		call = function(obj)
+			return app.call(obj.session_id or state.current_session, obj.topic, obj.payload, obj.timeout, state.user_conn)
+		end,
+
+		watch_open = function(obj)
+			return start_watch(state, app, obj.watch_id, obj.pattern, { queue_len = obj.queue_len })
+		end,
+
+		watch_close = function(obj)
+			if not valid_watch_id(obj.watch_id) then
+				return nil, errors.bad_request('watch_id must be a non-empty string')
+			end
+			close_watch(state, obj.watch_id, 'client_stop')
+			return { watch_id = obj.watch_id }, nil
+		end,
+	}
+end
+
+local function handle_watch_event(state, send_out, ev)
+	if ev.ev == nil then
+		state.watches[ev.watch_id] = nil
+		send_out({
+			op = 'watch_closed',
+			watch_id = ev.watch_id,
+			reason = tostring(ev.why or 'closed'),
+		})
+	else
+		send_out({
+			op = 'watch_event',
+			watch_id = ev.watch_id,
+			event = ev.ev,
+		})
+	end
+end
+
+local function handle_inbound_item(state, send_out, ops, item)
+	if item == nil then
+		return false
+	end
+
+	if item.kind == 'socket_closed' then
+		state.svc:obs_log('info', {
+			what = 'ui_ws_disconnected',
+			err = tostring(item.err),
+		})
+		return false
+	end
+
+	if item.opcode ~= 'text' then
+		send_reply(send_out, nil, false, nil, errors.bad_request('only text frames are supported'))
+		return true
+	end
+
+	local obj, jerr = decode_json(item.msg)
+	if not obj then
+		send_reply(send_out, nil, false, nil, jerr)
+		return true
+	end
+
+	local id = obj.id
+	local op_name = obj.op
+	local handler = ops[op_name]
+	local out, err
+
+	if not handler then
+		err = errors.bad_request('unknown op: ' .. tostring(op_name))
+	else
+		out, err = handler(obj)
+	end
+
+	send_reply(send_out, id, out ~= nil, out, err)
+	return true
 end
 
 function M.run(svc, app, stream, req_headers, opts)
@@ -104,166 +352,74 @@ function M.run(svc, app, stream, req_headers, opts)
 	on_opened()
 
 	local inbound_tx, inbound_rx = mailbox.new(64, { full = 'reject_newest' })
-	local watches = {}
-	local alive = true
-	local current_session = nil
-	local current_rec = nil
-	local user_conn = nil
+
+	local state = {
+		svc = svc,
+		alive = true,
+		watches = {},
+		current_session = nil,
+		user_conn = nil,
+		open_user_conn = open_user_conn,
+		require_session = require_session,
+	}
+	local ops = build_ops(state, app)
 
 	local function send_out(msg)
 		local ok, ret = safe.pcall(ws_send, ws, msg)
 		if (not ok) or ret == nil or ret == false then
-			alive = false
+			state.alive = false
 			return false
 		end
 		return true
 	end
 
-	local function close_watch(watch_id, reason)
-		local rec = watches[watch_id]
-		if not rec then return false end
-		watches[watch_id] = nil
-		rec.watch:close(reason or 'closed')
-		return true
-	end
-
-	local function close_all_watches(reason)
-		for id in pairs(watches) do close_watch(id, reason) end
-	end
-
-	local function clear_user_conn(reason)
-		close_all_watches(reason or 'logout')
-		if user_conn then user_conn:disconnect() end
-		user_conn = nil
-		current_session = nil
-		current_rec = nil
-	end
-
-	local function adopt_session(session_id)
-		if session_id == nil or session_id == '' then
-			clear_user_conn('logout')
-			return nil, errors.unauthorised('missing session')
-		end
-		local rec, err = require_session(session_id)
-		if not rec then
-			clear_user_conn('invalid_session')
-			return nil, err
-		end
-		if current_session == rec.id and user_conn then
-			current_rec = rec
-			return rec, nil
-		end
-		clear_user_conn('session_change')
-		local conn, cerr = open_user_conn(rec.principal, { ui = { transport = 'ws', session_id = rec.id } })
-		if not conn then return nil, cerr or errors.unavailable('failed to open user connection') end
-		user_conn = conn
-		current_session = rec.id
-		current_rec = rec
-		return rec, nil
-	end
-
-	local function start_watch(watch_id, pattern, watch_opts)
-		local rec, err = adopt_session(current_session)
-		if not rec then return nil, err end
-		close_watch(watch_id, 'replaced')
-		local watch, werr2 = app.watch_open(rec.id, pattern, watch_opts)
-		if not watch then return nil, werr2 end
-		watches[watch_id] = { watch = watch }
-		return { watch_id = watch_id }, nil
-	end
-
 	local sid = session_id_from_headers(req_headers)
-	if sid then adopt_session(sid) end
+	if sid then
+		adopt_session(state, sid)
+	end
 
 	local ok_reader, reader_err = fibers.current_scope():spawn(function()
-		while alive do
+		while state.alive do
 			local msg, opcode, err = ws:receive()
 			if msg == nil then
-				inbound_tx:send({ kind = 'socket_closed', err = tostring(err) })
+				local ok = inbound_tx:send({ kind = 'socket_closed', err = tostring(err) })
+				if ok ~= true then
+					state.alive = false
+				end
 				break
 			end
-			inbound_tx:send({ kind = 'frame', msg = msg, opcode = opcode })
+
+			local ok = inbound_tx:send({ kind = 'frame', msg = msg, opcode = opcode })
+			if ok ~= true then
+				state.alive = false
+				break
+			end
 		end
 		inbound_tx:close('reader_done')
 	end)
-	if not ok_reader then error(reader_err, 0) end
+	if not ok_reader then
+		error(reader_err, 0)
+	end
 
 	svc:obs_log('info', { what = 'ui_ws_connected' })
-	while alive do
-		local ev = next_event(inbound_rx, watches)
+
+	while state.alive do
+		local ev = take_ready_watch_event(state.watches)
+		if ev == nil then
+			ev = perform(next_event_op(inbound_rx, state.watches))
+		end
+
 		if ev.tag == 'watch' then
-			if ev.ev == nil then
-				watches[ev.watch_id] = nil
-				send_out({ op = 'watch_closed', watch_id = ev.watch_id, reason = tostring(ev.why or 'closed') })
-			else
-				send_out({ op = 'watch_event', watch_id = ev.watch_id, event = ev.ev })
-			end
+			handle_watch_event(state, send_out, ev)
 		else
-			local item = ev.item
-			if item == nil then
+			if not handle_inbound_item(state, send_out, ops, ev.item) then
 				break
-			elseif item.kind == 'socket_closed' then
-				svc:obs_log('info', { what = 'ui_ws_disconnected', err = tostring(item.err) })
-				break
-			elseif item.opcode ~= 'text' then
-				send_reply(send_out, nil, false, nil, errors.bad_request('only text frames are supported'))
-			else
-				local obj, jerr = decode_json(item.msg)
-				if not obj then
-					send_reply(send_out, nil, false, nil, jerr)
-				else
-					local id = obj.id
-					local op_name = obj.op
-					local out, err
-					if op_name == 'hello' then
-						out = { service = svc.name }
-					elseif op_name == 'session' then
-						out, err = app.get_session(obj.session_id or current_session)
-					elseif op_name == 'health' then
-						out, err = app.health()
-					elseif op_name == 'login' then
-						out, err = app.login(obj.username, obj.password)
-						if out and out.session_id then adopt_session(out.session_id) end
-					elseif op_name == 'logout' then
-						out, err = app.logout(obj.session_id or current_session)
-						if out then clear_user_conn('logout') end
-					elseif op_name == 'config_get' then
-						out, err = app.config_get(obj.session_id or current_session, obj.service)
-					elseif op_name == 'config_set' then
-						out, err = app.config_set(obj.session_id or current_session, obj.service, obj.data, user_conn)
-					elseif op_name == 'service_status' then
-						out, err = app.service_status(obj.session_id or current_session, obj.service)
-					elseif op_name == 'services_snapshot' then
-						out, err = app.services_snapshot(obj.session_id or current_session)
-					elseif op_name == 'fabric_status' then
-						out, err = app.fabric_status(obj.session_id or current_session)
-					elseif op_name == 'fabric_link_status' then
-						out, err = app.fabric_link_status(obj.session_id or current_session, obj.link_id)
-					elseif op_name == 'capability_snapshot' then
-						out, err = app.capability_snapshot(obj.session_id or current_session)
-					elseif op_name == 'model_exact' then
-						out, err = app.model_exact(obj.session_id or current_session, obj.topic)
-					elseif op_name == 'model_snapshot' then
-						out, err = app.model_snapshot(obj.session_id or current_session, obj.pattern)
-					elseif op_name == 'call' then
-						out, err = app.call(obj.session_id or current_session, obj.topic, obj.payload, obj.timeout, user_conn)
-					elseif op_name == 'watch_open' then
-						out, err = start_watch(obj.watch_id, obj.pattern, { queue_len = obj.queue_len })
-					elseif op_name == 'watch_close' then
-						close_watch(obj.watch_id, 'client_stop')
-						out = { watch_id = obj.watch_id }
-					else
-						err = errors.bad_request('unknown op: ' .. tostring(op_name))
-					end
-					send_reply(send_out, id, out ~= nil, out, err)
-				end
 			end
 		end
 	end
 
-	clear_user_conn('socket_closed')
+	clear_user_conn(state, 'socket_closed')
 	inbound_tx:close('done')
-	-- close on a stream-backed websocket may yield
 	ws:close()
 	on_closed()
 end

@@ -1,3 +1,7 @@
+-- services/ui/handlers/services.lua
+--
+-- UI service-state read handlers.
+
 local queries = require 'services.ui.queries'
 
 local M = {}

@@ -1,3 +1,7 @@
+-- services/ui/handlers/fabric.lua
+--
+-- UI fabric read handlers.
+
 local queries = require 'services.ui.queries'
 
 local M = {}

@@ -1,17 +1,34 @@
-local fibers  = require 'fibers'
-local pulse   = require 'fibers.pulse'
-local safe    = require 'coxpcall'
-local scope   = require 'fibers.scope'
-local op      = require 'fibers.op'
+-- services/ui/service.lua
+--
+-- UI service shell.
+--
+-- Responsibilities:
+--   * own session store and aggregate UI state
+--   * own the UI read model
+--   * publish retained UI state:
+--       svc/ui/announce
+--       state/ui/main
+--   * host the HTTP/WebSocket transport
+--
+-- Design notes:
+--   * local state changes are signalled via a scoped pulse
+--   * model changes are consumed as first-class events
+--   * authenticated user work is centralised through run_user_call(...)
 
-local base      = require 'devicecode.service_base'
-local auth_mod  = require 'services.ui.auth'
-local sessions  = require 'services.ui.sessions'
-local model_mod = require 'services.ui.model'
-local app_mod   = require 'services.ui.app'
+local fibers    = require 'fibers'
+local pulse     = require 'fibers.pulse'
+local safe      = require 'coxpcall'
+local scope     = require 'fibers.scope'
+local op        = require 'fibers.op'
+
+local base        = require 'devicecode.service_base'
+local auth_mod    = require 'services.ui.auth'
+local sessions    = require 'services.ui.sessions'
+local model_mod   = require 'services.ui.model'
+local app_mod     = require 'services.ui.app'
 local uploads_mod = require 'services.ui.uploads'
-local http_mod  = require 'services.ui.transport.http'
-local errors    = require 'services.ui.errors'
+local http_mod    = require 'services.ui.transport.http'
+local errors      = require 'services.ui.errors'
 
 local M = {}
 
@@ -22,11 +39,17 @@ end
 local function start_child(fn)
 	local parent = scope.current()
 	local child, err = parent:child()
-	if not child then error(err or 'failed to create child scope', 0) end
+	if not child then
+		error(err or 'failed to create child scope', 0)
+	end
+
 	local ok, serr = child:spawn(function(s)
 		fn(s)
 	end)
-	if not ok then error(serr or 'failed to start child scope', 0) end
+	if not ok then
+		error(serr or 'failed to start child scope', 0)
+	end
+
 	return child
 end
 
@@ -60,7 +83,10 @@ end
 
 function M.start(conn, opts)
 	opts = opts or {}
-	if type(opts.connect) ~= 'function' then error('ui: opts.connect(principal, origin_extra) is required', 2) end
+	if type(opts.connect) ~= 'function' then
+		error('ui: opts.connect(principal, origin_extra) is required', 2)
+	end
+
 	local svc = base.new(conn, { name = opts.name or 'ui', env = opts.env })
 	local verify_login = opts.verify_login or auth_mod.bootstrap_verify_login
 	local session_ttl_s = (type(opts.session_ttl_s) == 'number' and opts.session_ttl_s > 0) and opts.session_ttl_s or 3600
@@ -69,6 +95,7 @@ function M.start(conn, opts)
 
 	local shell_pulse = pulse.scoped({ close_reason = 'ui shell closed' })
 	local session_store = sessions.new_store({ now = now })
+
 	local aggregate = {
 		sessions = 0,
 		clients = 0,
@@ -76,10 +103,18 @@ function M.start(conn, opts)
 		model_seq = 0,
 		status = 'starting',
 	}
+
 	local client_count = 0
 	local model
 
-	local function retain_state(extra)
+	local function publish_main_state(extra)
+		local status = {
+			sessions = aggregate.sessions,
+			clients = aggregate.clients,
+			model_ready = aggregate.model_ready,
+			model_seq = aggregate.model_seq,
+		}
+
 		local payload = {
 			status = aggregate.status,
 			sessions = aggregate.sessions,
@@ -88,7 +123,11 @@ function M.start(conn, opts)
 			model_seq = aggregate.model_seq,
 			t = now(),
 		}
-		for k, v in pairs(extra or {}) do payload[k] = v end
+		for k, v in pairs(extra or {}) do
+			payload[k] = v
+		end
+
+		svc:status(aggregate.status, status)
 		conn:retain({ 'state', 'ui', 'main' }, payload)
 	end
 
@@ -127,6 +166,7 @@ function M.start(conn, opts)
 				end
 				return { tag = 'local_changed', ver = ver }
 			end),
+
 			model:next_change_op(last_model_seq, prune_s):wrap(function(seq, err)
 				if seq == nil then
 					if err == 'timeout' then
@@ -143,11 +183,11 @@ function M.start(conn, opts)
 		shell_pulse:signal()
 	end
 
-	local function note_session_count()
+	local function notify_sessions_changed()
 		signal_shell_change()
 	end
 
-	local function note_client_delta(delta)
+	local function notify_client_delta(delta)
 		client_count = math.max(0, client_count + (delta or 0))
 		signal_shell_change()
 	end
@@ -160,34 +200,63 @@ function M.start(conn, opts)
 		if type(session_id) ~= 'string' or session_id == '' then
 			return nil, errors.unauthorised('missing session')
 		end
+
 		local rec = session_store:get(session_id)
 		if not rec then
 			return nil, errors.unauthorised('invalid or expired session')
 		end
+
 		session_store:touch(session_id, session_ttl_s)
 		return rec, nil
 	end
 
+	-- Boundary for user-supplied connection acquisition.
 	local function open_user_conn(principal, origin_extra)
 		local ok, a, b = safe.pcall(opts.connect, principal, origin_extra)
-		if not ok then return nil, errors.unavailable(tostring(a)) end
-		if not a then return nil, errors.unavailable(tostring(b or 'connect failed')) end
+		if not ok then
+			return nil, errors.unavailable(tostring(a))
+		end
+		if not a then
+			return nil, errors.unavailable(tostring(b or 'connect failed'))
+		end
 		return a, nil
 	end
 
+	-- Open a temporary user connection for one bounded unit of work.
 	local function with_user_conn(principal, origin_extra, fn)
-		local st, _, a, b, c = scope.run(function(s)
+		local st, _report, a, b, c = scope.run(function(s)
 			local user_conn, err = open_user_conn(principal, origin_extra)
-			if not user_conn then error(err, 0) end
+			if not user_conn then
+				error(err, 0)
+			end
+
 			s:finally(function()
 				user_conn:disconnect()
 			end)
-			local ok, r1, r2, r3 = safe.pcall(fn, user_conn)
-			if not ok then error(r1, 0) end
-			return r1, r2, r3
+
+			return fn(user_conn)
 		end)
-		if st ~= 'ok' then return nil, errors.from(a, 502) end
+
+		if st ~= 'ok' then
+			return nil, errors.from(a, 502)
+		end
 		return a, b, c
+	end
+
+	-- Run one authenticated user operation either against an existing connection
+	-- or a temporary one, while mapping thrown failures into UI errors.
+	local function run_user_call(rec, origin_extra, existing_conn, fn)
+		if existing_conn then
+			local st, _report, a, b, c = scope.run(function()
+				return fn(existing_conn)
+			end)
+			if st ~= 'ok' then
+				return nil, errors.from(a, 502)
+			end
+			return a, b, c
+		end
+
+		return with_user_conn(rec.principal, origin_extra, fn)
 	end
 
 	model = model_mod.start(conn, {
@@ -205,7 +274,8 @@ function M.start(conn, opts)
 		require_session = require_session,
 		open_user_conn = open_user_conn,
 		with_user_conn = with_user_conn,
-		note_session_count = note_session_count,
+		run_user_call = run_user_call,
+		note_session_count = notify_sessions_changed,
 		audit = audit,
 	}
 	ctx.uploads = uploads_mod.new({
@@ -216,65 +286,85 @@ function M.start(conn, opts)
 	local app = app_mod.new(ctx)
 	local run_http = opts.run_http or http_mod.run
 
-	svc:status('starting')
+	fibers.current_scope():finally(function()
+		if model then
+			model:close('ui service stopping')
+		end
+		conn:unretain({ 'state', 'ui', 'main' })
+		conn:unretain({ 'svc', svc.name, 'announce' })
+	end)
+
+	aggregate.status = 'starting'
 	conn:retain({ 'svc', svc.name, 'announce' }, default_announce(svc))
-	retain_state()
+	publish_main_state()
+
 	local ok_ready, ready_err = model:await_ready(model_ready_timeout_s)
 	if not ok_ready then
 		aggregate.status = 'failed'
-		retain_state({ reason = errors.message(ready_err) })
+		publish_main_state({ reason = errors.message(ready_err) })
 		error('ui: failed to bootstrap retained model: ' .. tostring(errors.message(ready_err)), 0)
 	end
 
 	aggregate.status = 'running'
 	recompute_aggregate()
-	svc:status('running')
-	retain_state()
+	publish_main_state()
 
-	fibers.spawn(function()
+	local ok_http, err_http = fibers.spawn(function()
 		run_http(svc, app, {
 			host = opts.host,
 			port = opts.port,
 			www_root = opts.www_root,
 			spawn_ws_client = function(fn)
-				start_child(function() fn() end)
+				start_child(function()
+					fn()
+				end)
 			end,
 			ws_opts = {
 				session_id_from_headers = http_mod.session_id_from_headers,
 				open_user_conn = open_user_conn,
 				require_session = require_session,
-				on_opened = function() note_client_delta(1) end,
-				on_closed = function() note_client_delta(-1) end,
+				on_opened = function() notify_client_delta(1) end,
+				on_closed = function() notify_client_delta(-1) end,
 			},
 		})
 	end)
+	if ok_http ~= true then
+		aggregate.status = 'failed'
+		publish_main_state({ reason = tostring(err_http or 'failed to start http transport') })
+		error(err_http or 'failed to start http transport', 0)
+	end
 
 	local last_local_ver = shell_pulse:version()
 	local last_model_seq = model:seq()
 
 	while true do
 		local ev = fibers.perform(next_shell_event_op(last_local_ver, last_model_seq, session_prune_s))
+
 		if ev.tag == 'shell_closed' then
 			error('ui shell pulse closed: ' .. tostring(ev.reason or 'closed'), 0)
+
 		elseif ev.tag == 'prune_tick' then
 			local removed = session_store:prune()
 			if removed > 0 then
 				recompute_aggregate()
-				retain_state()
+				publish_main_state()
 			end
+
 		elseif ev.tag == 'local_changed' then
 			last_local_ver = ev.ver or shell_pulse:version()
 			if recompute_aggregate() then
-				retain_state()
+				publish_main_state()
 			end
+
 		elseif ev.tag == 'model_changed' then
 			last_model_seq = ev.seq or model:seq()
 			if recompute_aggregate() then
-				retain_state()
+				publish_main_state()
 			end
+
 		elseif ev.tag == 'model_closed' then
 			aggregate.status = 'failed'
-			retain_state({ reason = tostring(ev.reason or 'closed') })
+			publish_main_state({ reason = tostring(ev.reason or 'closed') })
 			error('ui model closed: ' .. tostring(ev.reason or 'closed'), 0)
 		end
 	end

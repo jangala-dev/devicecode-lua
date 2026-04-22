@@ -1,3 +1,16 @@
+-- services/ui/model.lua
+--
+-- UI retained-state read model.
+--
+-- Responsibilities:
+--   * subscribe to retained bus subtrees
+--   * merge replay and live retained events into one local store
+--   * expose exact/snapshot query surfaces
+--   * expose local watches over the derived read model
+--
+-- This is an in-memory projection for the UI only. It does not own upstream
+-- retained state; it only mirrors and fans it out locally.
+
 local fibers = require 'fibers'
 local op     = require 'fibers.op'
 local pulse  = require 'fibers.pulse'
@@ -49,12 +62,14 @@ function Model:close(reason)
 	if self._closed then return true end
 	self._closed = true
 	self._close_reason = reason or 'closed'
+
 	for _, rw in pairs(self._source_watches) do
 		rw:unwatch()
 	end
 	for key in pairs(self._watchers) do
 		watcher_close(self, key, self._close_reason)
 	end
+
 	self._pulse:close(self._close_reason)
 	self._ready_cond:signal()
 	return true
@@ -97,12 +112,13 @@ function Model:next_change_op(last_seq, timeout_s)
 		return op.always(self._seq, nil)
 	end
 
-	local change_ev = self._pulse:changed_op(last_seq)
-		:wrap(function(ver, reason)
-			if ver == nil then return nil, reason or self._close_reason or 'closed' end
-			self._seq = math.max(self._seq, ver)
-			return ver, nil
-		end)
+	local change_ev = self._pulse:changed_op(last_seq):wrap(function(ver, reason)
+		if ver == nil then
+			return nil, reason or self._close_reason or 'closed'
+		end
+		self._seq = math.max(self._seq, ver)
+		return ver, nil
+	end)
 
 	if type(timeout_s) ~= 'number' or timeout_s <= 0 then
 		return change_ev
@@ -117,17 +133,24 @@ function Model:next_change_op(last_seq, timeout_s)
 end
 
 function Model:get_exact(topic)
-	local norm, err = topics.normalise_topic(topic, { allow_wildcards = false, allow_numbers = true })
+	local norm, err = topics.normalise_topic(topic, {
+		allow_wildcards = false,
+		allow_numbers = true,
+	})
 	if not norm then return nil, errors.bad_request(err) end
 	if self._closed then return nil, errors.unavailable(self._close_reason or 'closed') end
 	if not self._ready then return nil, errors.not_ready('ui model is not ready') end
+
 	local rec = self._by_key[topics.topic_key(norm)]
 	if not rec then return nil, errors.not_found('not found') end
 	return snapshot_entry_copy(rec), nil
 end
 
 function Model:snapshot(pattern)
-	local norm, err = topics.normalise_topic(pattern, { allow_wildcards = true, allow_numbers = true })
+	local norm, err = topics.normalise_topic(pattern, {
+		allow_wildcards = true,
+		allow_numbers = true,
+	})
 	if not norm then return nil, errors.bad_request(err) end
 	if self._closed then return nil, errors.unavailable(self._close_reason or 'closed') end
 	if not self._ready then return nil, errors.not_ready('ui model is not ready') end
@@ -137,6 +160,7 @@ function Model:snapshot(pattern)
 		entries[#entries + 1] = snapshot_entry_copy(rec)
 	end)
 	topics.sort_entries(entries)
+
 	return {
 		seq = self._seq,
 		entries = entries,
@@ -145,7 +169,11 @@ end
 
 function Model:open_watch(pattern, opts)
 	opts = opts or {}
-	local norm, err = topics.normalise_topic(pattern, { allow_wildcards = true, allow_numbers = true })
+
+	local norm, err = topics.normalise_topic(pattern, {
+		allow_wildcards = true,
+		allow_numbers = true,
+	})
 	if not norm then return nil, errors.bad_request(err) end
 	if self._closed then return nil, errors.unavailable(self._close_reason or 'closed') end
 	if not self._ready then return nil, errors.not_ready('ui model is not ready') end
@@ -153,7 +181,9 @@ function Model:open_watch(pattern, opts)
 	local qlen = (type(opts.queue_len) == 'number' and opts.queue_len >= 0) and opts.queue_len or 128
 	local mailbox = require 'fibers.mailbox'
 	local tx, rx = mailbox.new(qlen, { full = 'reject_newest' })
+
 	local key = {}
+	-- _watchers[key] = { pattern = <topic pattern>, tx = <watch mailbox tx> }
 	self._watchers[key] = { pattern = norm, tx = tx }
 
 	local function close(reason)
@@ -193,13 +223,17 @@ function Model:open_watch(pattern, opts)
 	return {
 		recv_op = function()
 			return rx:recv_op():wrap(function(item)
-				if item == nil then return nil, tostring(rx:why() or 'closed') end
+				if item == nil then
+					return nil, tostring(rx:why() or 'closed')
+				end
 				return item, nil
 			end)
 		end,
+
 		recv = function(self_watch)
 			return fibers.perform(self_watch:recv_op())
 		end,
+
 		close = close,
 	}, nil
 end
@@ -225,6 +259,7 @@ local function apply_retain(self, ev)
 	}
 	self._store:insert(topic, rec)
 	self._by_key[topics.topic_key(topic)] = rec
+
 	fanout(self, {
 		op = 'retain',
 		phase = 'live',
@@ -239,6 +274,7 @@ local function apply_unretain(self, ev)
 	local topic = topics.copy_plain(ev.topic)
 	self._store:delete(topic)
 	self._by_key[topics.topic_key(topic)] = nil
+
 	fanout(self, {
 		op = 'unretain',
 		phase = 'live',
@@ -290,6 +326,7 @@ end
 
 function M.start(conn, opts)
 	opts = opts or {}
+
 	local self = setmetatable({
 		_conn = assert(conn, 'ui model requires a connection'),
 		_sources = opts.sources or DEFAULT_SOURCES,
@@ -302,10 +339,17 @@ function M.start(conn, opts)
 		_close_reason = nil,
 		_pending = {},
 		_watchers = {},
+		-- _source_watches[name] = retained watch for one upstream subtree
 		_source_watches = {},
 		_pulse = pulse.new(0),
 		_ready_cond = cond.new(),
 	}, Model)
+
+	if fibers.current_scope() then
+		fibers.current_scope():finally(function()
+			self:close('scope_exit')
+		end)
+	end
 
 	for i = 1, #self._sources do
 		local source = self._sources[i]
@@ -317,9 +361,13 @@ function M.start(conn, opts)
 		})
 	end
 
-	fibers.spawn(function()
+	local ok, err = fibers.spawn(function()
 		run(self)
 	end)
+	if ok ~= true then
+		self:close('start_failed')
+		error(err or 'failed to start ui model', 0)
+	end
 
 	return self
 end
