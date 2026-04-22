@@ -1,4 +1,5 @@
 local fibers = require 'fibers'
+local scope = require 'fibers.scope'
 local await_mod = require 'services.update.await'
 
 local M = {}
@@ -7,7 +8,40 @@ local function emit(tx, ev)
     tx:send(ev)
 end
 
-function M.run_stage(conn, job, backend, tx, ctx)
+local function runner_context(conn, job, backend, tx, reconcile_cfg, observe, service_ctx)
+    return {
+        conn = conn,
+        job = job,
+        backend = backend,
+        tx = tx,
+        reconcile_cfg = reconcile_cfg,
+        observe = observe,
+        service_ctx = service_ctx,
+        emit = function(ev)
+            emit(tx, ev)
+        end,
+    }
+end
+
+local function run_work_unit(ctx, body)
+    local st, _rep, primary = fibers.run_scope(function()
+        return body(ctx)
+    end)
+
+    if st == 'ok' then
+        return true
+    elseif st == 'cancelled' then
+        error(scope.cancelled(primary), 0)
+    else
+        ctx.emit({ tag = 'failed', job_id = ctx.job.job_id, err = tostring(primary or 'runner_failed') })
+        return nil, primary
+    end
+end
+
+local function stage_body(ctx)
+    local conn, job, backend = ctx.conn, ctx.job, ctx.backend
+    local service_ctx = ctx.service_ctx
+
     local status_before = backend:status(conn)
     local sw = type(status_before) == 'table' and status_before.software or nil
     local pre_commit_boot_id = nil
@@ -17,17 +51,17 @@ function M.run_stage(conn, job, backend, tx, ctx)
 
     local prep, perr = backend:prepare(conn, job)
     if prep == nil then
-        emit(tx, { tag = 'failed', job_id = job.job_id, err = tostring(perr or 'prepare_failed') })
+        ctx.emit({ tag = 'failed', job_id = job.job_id, err = tostring(perr or 'prepare_failed') })
         return
     end
 
-    local staged, serr = backend:stage(conn, job, ctx)
+    local staged, serr = backend:stage(conn, job, service_ctx)
     if staged == nil then
-        emit(tx, { tag = 'failed', job_id = job.job_id, err = tostring(serr or 'stage_failed') })
+        ctx.emit({ tag = 'failed', job_id = job.job_id, err = tostring(serr or 'stage_failed') })
         return
     end
 
-    emit(tx, {
+    ctx.emit({
         tag = 'staged',
         job_id = job.job_id,
         staged = staged,
@@ -35,40 +69,55 @@ function M.run_stage(conn, job, backend, tx, ctx)
     })
 end
 
-function M.run_commit(conn, job, backend, tx, _reconcile_cfg, ctx)
-    local committed, cerr = backend:commit(conn, job, ctx)
+local function commit_body(ctx)
+    local committed, cerr = ctx.backend:commit(ctx.conn, ctx.job, ctx.service_ctx)
     if committed == nil then
-        emit(tx, { tag = 'failed', job_id = job.job_id, err = tostring(cerr or 'commit_failed') })
+        ctx.emit({ tag = 'failed', job_id = ctx.job.job_id, err = tostring(cerr or 'commit_failed') })
         return
     end
-    emit(tx, { tag = 'commit_started', job_id = job.job_id, result = committed })
+    ctx.emit({ tag = 'commit_started', job_id = ctx.job.job_id, result = committed })
 end
 
 local function current_version(observe)
     return (observe and observe.version and observe:version()) or 0
 end
 
-function M.run_reconcile(conn, job, backend, tx, reconcile_cfg, observe, ctx)
+local function reconcile_body(ctx)
     local outcome, result = await_mod.until_changed_or_timeout({
-        timeout_s = reconcile_cfg.timeout_s,
-        version = function() return current_version(observe) end,
-        changed_op = function(seen) return observe:changed_op(seen) end,
+        timeout_s = ctx.reconcile_cfg.timeout_s,
+        version = function() return current_version(ctx.observe) end,
+        changed_op = function(seen) return ctx.observe:changed_op(seen) end,
         evaluate = function()
-            local facts = observe and observe.facts_for and observe:facts_for(job.component) or nil
-            return backend.evaluate and backend:evaluate(job, facts) or nil
+            local facts = ctx.observe and ctx.observe.facts_for and ctx.observe:facts_for(ctx.job.component) or nil
+            return ctx.backend.evaluate and ctx.backend:evaluate(ctx.job, facts) or nil
         end,
         on_progress = function(progress)
-            emit(tx, { tag = 'reconcile_progress', job_id = job.job_id, result = progress })
+            ctx.emit({ tag = 'reconcile_progress', job_id = ctx.job.job_id, result = progress })
         end,
     })
 
     if outcome == 'success' then
-        emit(tx, { tag = 'reconciled_success', job_id = job.job_id, result = result })
+        ctx.emit({ tag = 'reconciled_success', job_id = ctx.job.job_id, result = result })
     elseif outcome == 'failure' then
-        emit(tx, { tag = 'reconciled_failure', job_id = job.job_id, result = result, err = tostring(result and result.error or 'failed') })
+        ctx.emit({ tag = 'reconciled_failure', job_id = ctx.job.job_id, result = result, err = tostring(result and result.error or 'failed') })
     else
-        emit(tx, { tag = 'timed_out', job_id = job.job_id, err = 'timeout' })
+        ctx.emit({ tag = 'timed_out', job_id = ctx.job.job_id, err = 'timeout' })
     end
+end
+
+function M.run_stage(conn, job, backend, tx, service_ctx)
+    local ctx = runner_context(conn, job, backend, tx, nil, nil, service_ctx)
+    return run_work_unit(ctx, stage_body)
+end
+
+function M.run_commit(conn, job, backend, tx, _reconcile_cfg, service_ctx)
+    local ctx = runner_context(conn, job, backend, tx, nil, nil, service_ctx)
+    return run_work_unit(ctx, commit_body)
+end
+
+function M.run_reconcile(conn, job, backend, tx, reconcile_cfg, observe, service_ctx)
+    local ctx = runner_context(conn, job, backend, tx, reconcile_cfg, observe, service_ctx)
+    return run_work_unit(ctx, reconcile_body)
 end
 
 return M
