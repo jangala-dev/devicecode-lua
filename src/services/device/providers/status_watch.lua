@@ -1,39 +1,77 @@
+-- services/device/providers/status_watch.lua
+--
+-- Default device component provider.
+--
+-- Behaviour:
+--   * if a status get route exists, attempt one initial fetch
+--   * if a status watch route exists, subscribe and emit subsequent changes
+--   * if the watch closes, emit source_down and stop
+--
+-- Policy note:
+--   * initial fetch failure is intentionally non-fatal
+--   * if the one-shot fetch fails or times out, the provider still proceeds to
+--     the watch stream when one is available
+--   * this keeps steady-state observation preferred over failing fast on a
+--     transient startup/status-read problem
+
 local fibers = require 'fibers'
+local proxy = require 'services.device.proxy'
 
 local M = {}
 
+local function initial_status_op(ctx)
+	local rec = ctx.rec
+	local get_topic = rec.channels and rec.channels.status and rec.channels.status.get_topic or nil
+	if type(get_topic) ~= 'table' then
+		return fibers.always(nil, 'no_initial_status')
+	end
+	return proxy.fetch_status_op(ctx.conn, rec, {}, 0.5)
+end
+
+local function next_status_message_op(sub)
+	return sub:recv_op()
+end
+
 function M.run(ctx)
-    local conn = ctx.conn
-    local name = ctx.component
-    local rec = ctx.rec
-    local emit = ctx.emit
+	local conn = ctx.conn
+	local name = ctx.component
+	local rec = ctx.rec
+	local emit = ctx.emit
 
-    local watch_topic = rec.channels and rec.channels.status and rec.channels.status.watch_topic or nil
-    local get_topic = rec.channels and rec.channels.status and rec.channels.status.get_topic or nil
+	local watch_topic = rec.channels and rec.channels.status and rec.channels.status.watch_topic or nil
 
-    if type(get_topic) == 'table' then
-        local value = conn:call(get_topic, {}, { timeout = 0.5 })
-        if value ~= nil then
-            emit({ tag = 'raw_changed', component = name, payload = value })
-        end
-    end
+	local value = fibers.perform(initial_status_op(ctx))
+	if value ~= nil then
+		emit({ tag = 'raw_changed', component = name, payload = value })
+	end
 
-    if type(watch_topic) ~= 'table' then return end
+	if type(watch_topic) ~= 'table' then
+		return
+	end
 
-    local sub = conn:subscribe(watch_topic, { queue_len = 16, full = 'drop_oldest' })
-    fibers.current_scope():finally(function()
-        sub:unsubscribe()
-    end)
+	local sub = conn:subscribe(watch_topic, { queue_len = 16, full = 'drop_oldest' })
 
-    while true do
-        local msg, err2 = sub:recv()
-        if msg then
-            emit({ tag = 'raw_changed', component = name, payload = msg.payload or msg })
-        else
-            emit({ tag = 'source_down', component = name, reason = tostring(err2 or 'closed') })
-            return
-        end
-    end
+	fibers.current_scope():finally(function()
+		sub:unsubscribe()
+	end)
+
+	while true do
+		local msg, err = fibers.perform(next_status_message_op(sub))
+		if msg then
+			emit({
+				tag = 'raw_changed',
+				component = name,
+				payload = msg.payload or msg,
+			})
+		else
+			emit({
+				tag = 'source_down',
+				component = name,
+				reason = tostring(err or 'closed'),
+			})
+			return
+		end
+	end
 end
 
 return M
