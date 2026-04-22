@@ -1,322 +1,474 @@
-local fibers      = require 'fibers'
-local pulse       = require 'fibers.pulse'
-local mailbox     = require 'fibers.mailbox'
-local base        = require 'devicecode.service_base'
-local cap_sdk     = require 'services.hal.sdk.cap'
-local job_store   = require 'services.update.job_store'
-local model       = require 'services.update.model'
-local projection  = require 'services.update.projection'
-local store_sync  = require 'services.update.store_sync'
-local reconcile   = require 'services.update.reconcile'
-local observe_mod = require 'services.update.observe'
-local runner      = require 'services.update.runner'
-local publish_mod = require 'services.update.publish'
-local runtime_mod = require 'services.update.runtime'
+-- services/update.lua
+--
+-- Update service shell.
+--
+-- Shell responsibilities:
+--   * consume retained cfg/update
+--   * load and publish durable update job state
+--   * build component backends and observer feeds
+--   * expose update RPC endpoints:
+--       cmd/update/job/create
+--       cmd/update/job/do
+--       cmd/update/job/get
+--       cmd/update/job/list
+--   * supervise exactly one active update worker via runtime/worker_slot
+--
+-- Ownership model:
+--   * update.lua             -> service shell and event selection
+--   * model.lua              -> in-memory state and transition helpers
+--   * commands.lua           -> request validation and command wiring
+--   * runner.lua             -> bounded stage/commit/reconcile work units
+--   * runtime.lua            -> runner interpretation and slot orchestration
+--   * projection/publish.lua -> retained public state
+
+local fibers        = require 'fibers'
+local pulse         = require 'fibers.pulse'
+local mailbox       = require 'fibers.mailbox'
+local base          = require 'devicecode.service_base'
+local cap_sdk       = require 'services.hal.sdk.cap'
+local job_store     = require 'services.update.job_store'
+local model         = require 'services.update.model'
+local projection    = require 'services.update.projection'
+local store_sync    = require 'services.update.store_sync'
+local reconcile     = require 'services.update.reconcile'
+local observe_mod   = require 'services.update.observe'
+local runner        = require 'services.update.runner'
+local publish_mod   = require 'services.update.publish'
+local runtime_mod   = require 'services.update.runtime'
 local artifacts_mod = require 'services.update.artifacts'
-local commands_mod = require 'services.update.commands'
+local commands_mod  = require 'services.update.commands'
 local component_backend_mod = require 'services.update.backends.component_proxy'
 local cm5_backend_mod = require 'services.update.backends.cm5_swupdate'
 local mcu_backend_mod = require 'services.update.backends.mcu_component'
-local uuid        = require 'uuid'
-local safe        = require 'coxpcall'
+local uuid          = require 'uuid'
+
+local named_choice = fibers.named_choice
 
 local M = {}
 local SCHEMA = 'devicecode.config/update/1'
 
 local function build_backend(component, component_cfg)
-    local opts = { component = component, proxy_mod = component_backend_mod }
-    if type(component_cfg) == 'table' then
-        for k, v in pairs(component_cfg) do
-            if k ~= 'backend' and opts[k] == nil then opts[k] = v end
-        end
-    end
-    if component_cfg.backend == 'cm5_swupdate' then
-        return cm5_backend_mod.new(opts)
-    end
-    if component_cfg.backend == 'mcu_component' then
-        return mcu_backend_mod.new(opts)
-    end
-    return nil, 'unknown_backend:' .. tostring(component_cfg.backend)
+	local opts = {
+		component = component,
+		proxy_mod = component_backend_mod,
+	}
+
+	if type(component_cfg) == 'table' then
+		for k, v in pairs(component_cfg) do
+			if k ~= 'backend' and opts[k] == nil then
+				opts[k] = v
+			end
+		end
+	end
+
+	local backend_name = type(component_cfg) == 'table' and component_cfg.backend or nil
+	if backend_name == 'cm5_swupdate' then
+		return cm5_backend_mod.new(opts)
+	end
+	if backend_name == 'mcu_component' then
+		return mcu_backend_mod.new(opts)
+	end
+
+	return nil, 'unknown_backend:' .. tostring(backend_name)
 end
 
 local function discover_cap(conn, class, id, timeout)
-    local listener = cap_sdk.new_cap_listener(conn, class, id)
-    local cap, err = listener:wait_for_cap({ timeout = timeout or 30.0 })
-    listener:close()
-    return cap, err
+	local listener = cap_sdk.new_cap_listener(conn, class, id)
+	local cap, err = listener:wait_for_cap({ timeout = timeout or 30.0 })
+	listener:close()
+	return cap, err
 end
 
 local function copy_job(job)
-    return model.copy_value(job)
+	return model.copy_value(job)
+end
+
+-- Update shell event algebra.
+--
+-- First-class events:
+--   * config changes
+--   * command endpoint requests
+--   * runner events
+--   * active worker completion
+--   * component observer retained events
+--   * changed pulse ticks
+local function next_update_event_op(state, cfg_watch, endpoints, runner_rx, changed, seen, active_join_op)
+	local ops = {
+		cfg = cfg_watch:recv_op(),
+		create = endpoints.create and endpoints.create:recv_op() or nil,
+		job_do = endpoints.job_do and endpoints.job_do:recv_op() or nil,
+		get = endpoints.get and endpoints.get:recv_op() or nil,
+		list = endpoints.list and endpoints.list:recv_op() or nil,
+		runner = runner_rx:recv_op(),
+		changed = changed:changed_op(seen):wrap(function(ver)
+			return ver
+		end),
+	}
+
+	for key, rec in pairs(state.component_obs) do
+		ops[key] = rec.watch:recv_op()
+	end
+
+	if active_join_op then
+		ops.active_join = active_join_op
+	end
+
+	return named_choice(ops)
 end
 
 function M.start(conn, opts)
-    opts = opts or {}
-    local service_scope = assert(fibers.current_scope())
-    local svc = base.new(conn, { name = opts.name or 'update', env = opts.env })
-    local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
-    svc:spawn_heartbeat(heartbeat_s, 'tick')
-    svc:status('starting')
+	opts = opts or {}
 
-    local store_cap, serr = discover_cap(conn, 'control_store', 'update', 30.0)
-    if serr ~= '' or not store_cap then
-        svc:status('failed', { reason = tostring(serr or 'control_store capability not found') })
-        error('update: failed to discover control_store/update capability: ' .. tostring(serr), 0)
-    end
+	local service_scope = assert(fibers.current_scope())
+	local svc = base.new(conn, { name = opts.name or 'update', env = opts.env })
+	local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
 
-    local artifact_cap, aerr = discover_cap(conn, 'artifact_store', 'main', 30.0)
-    if aerr ~= '' or not artifact_cap then
-        svc:status('failed', { reason = tostring(aerr or 'artifact_store capability not found') })
-        error('update: failed to discover artifact_store/main capability: ' .. tostring(aerr), 0)
-    end
+	svc:spawn_heartbeat(heartbeat_s, 'tick')
+	svc:status('starting')
 
-    local cfg_watch = conn:watch_retained({ 'cfg', 'update' }, { replay = true, queue_len = 8, full = 'drop_oldest' })
-    local cfg = model.default_cfg(SCHEMA)
-    local repo = job_store.open(store_cap, { namespace = cfg.jobs_namespace })
-    local loaded, lerr = store_sync.load(repo)
-    if not loaded then
-        svc:status('failed', { reason = tostring(lerr) })
-        error('update: failed to load job store: ' .. tostring(lerr), 0)
-    end
+	local store_cap, serr = discover_cap(conn, 'control_store', 'update', 30.0)
+	if not store_cap then
+		svc:status('failed', { reason = tostring(serr or 'control_store capability not found') })
+		error('update: failed to discover control_store/update capability: ' .. tostring(serr), 0)
+	end
 
-    local state = model.new_state(cfg)
-    model.load_store(state, loaded)
+	local artifact_cap, aerr = discover_cap(conn, 'artifact_store', 'main', 30.0)
+	if not artifact_cap then
+		svc:status('failed', { reason = tostring(aerr or 'artifact_store capability not found') })
+		error('update: failed to discover artifact_store/main capability: ' .. tostring(aerr), 0)
+	end
 
-    local changed = pulse.scoped({ close_reason = 'update service stopping' })
-    local observer = observe_mod.new()
-    local service_run_id = tostring(uuid.new())
-    local runner_tx, runner_rx = mailbox.new(64, { full = 'drop_oldest' })
+	local cfg_watch = conn:watch_retained({ 'cfg', 'update' }, {
+		replay = true,
+		queue_len = 8,
+		full = 'drop_oldest',
+	})
 
-    local function now() return svc:now() end
+	local cfg = model.default_cfg(SCHEMA)
+	local repo = job_store.open(store_cap, { namespace = cfg.jobs_namespace })
 
-    local function on_store_error(job_id, err)
-        svc:obs_log('error', { what = 'job_save_failed', err = tostring(err), job_id = job_id })
-    end
+	local loaded, lerr = store_sync.load(repo)
+	if not loaded then
+		svc:status('failed', { reason = tostring(lerr) })
+		error('update: failed to load job store: ' .. tostring(lerr), 0)
+	end
 
-    local ctx = {
-        conn = conn,
-        state = state,
-        model = model,
-        projection = projection,
-        store_sync = store_sync,
-        repo = repo,
-        artifact_cap = artifact_cap,
-        service_scope = service_scope,
-        service_run_id = service_run_id,
-        now = now,
-        changed = changed,
-        observer = observer,
-        runner = runner,
-        runner_tx = runner_tx,
-        on_store_error = on_store_error,
-        copy_job = copy_job,
-        svc = svc,
-    }
+	local state = model.new_state(cfg)
+	model.load_store(state, loaded)
 
-    local function patch_job(job, patch, opts_)
-        opts_ = opts_ or {}
-        model.patch_job(state, job, patch, now(), service_run_id, opts_)
-        if not opts_.no_save then
-            local ok, err = store_sync.save_job(repo, job)
-            if not ok then on_store_error(job and job.job_id, err) end
-        end
-        if not opts_.no_signal then changed:signal() end
-    end
-    ctx.patch_job = patch_job
+	local changed = pulse.scoped({ close_reason = 'update service stopping' })
+	local observer = observe_mod.new()
+	local service_run_id = tostring(uuid.new())
+	local runner_tx, runner_rx = mailbox.new(64, { full = 'drop_oldest' })
 
-    local function enter_awaiting_return(job, stage, result, opts_)
-        opts_ = opts_ or {}
-        local runtime_merge = model.copy_value(opts_.runtime_merge) or {}
-        runtime_merge.awaiting_return_run_id = service_run_id
-        runtime_merge.awaiting_return_mono = now()
-        patch_job(job, {
-            state = 'awaiting_return',
-            stage = stage or 'awaiting_member_return',
-            next_step = 'reconcile',
-            error = nil,
-            result = result,
-        }, {
-            no_save = opts_.no_save,
-            no_signal = opts_.no_signal,
-            runtime_merge = runtime_merge,
-        })
-    end
-    ctx.enter_awaiting_return = enter_awaiting_return
+	local function now()
+		return svc:now()
+	end
 
-    local artifacts = artifacts_mod.new(ctx)
-    ctx.artifacts = artifacts
-    ctx.artifact_open = function(...) return artifacts:open(...) end
+	local function on_store_error(job_id, err)
+		svc:obs_log('error', {
+			what = 'job_save_failed',
+			err = tostring(err),
+			job_id = job_id,
+		})
+	end
 
-    local commands = commands_mod.new(ctx)
+	local ctx = {
+		conn = conn,
+		state = state,
+		model = model,
+		projection = projection,
+		store_sync = store_sync,
+		repo = repo,
+		artifact_cap = artifact_cap,
+		service_scope = service_scope,
+		service_run_id = service_run_id,
+		now = now,
+		changed = changed,
+		observer = observer,
+		runner = runner,
+		runner_tx = runner_tx,
+		on_store_error = on_store_error,
+		copy_job = copy_job,
+		svc = svc,
+	}
 
-    local function release_artifact_if_present(job)
-        if not job or type(job.artifact_ref) ~= 'string' or job.artifact_ref == '' then return end
-        local ref = job.artifact_ref
-        local ok, err = artifacts:delete(ref)
-        if not ok and err ~= 'not_found' then
-            svc:obs_log('warn', { what = 'artifact_delete_failed', artifact_ref = ref, err = tostring(err) })
-            return
-        end
-        job.artifact_ref = nil
-        job.artifact_released_at = now()
-        model.touch_job(state, job, now(), service_run_id, false, nil)
-        local sok, serr2 = store_sync.save_job(repo, job)
-        if not sok then on_store_error(job.job_id, serr2) end
-        model.mark_job_dirty(state, job.job_id)
-        changed:signal()
-    end
-    ctx.release_artifact_if_present = release_artifact_if_present
+	local function patch_job(job, patch, opts_)
+		opts_ = opts_ or {}
 
-    local publisher = publish_mod.new(ctx)
-    ctx.publisher = publisher
-    local runtime = runtime_mod.new(ctx)
-    ctx.runtime = runtime
+		model.patch_job(state, job, patch, now(), service_run_id, opts_)
 
-    local function rebuild_backends()
-        state.backends = {}
-        for component, ccfg in pairs(state.cfg.components) do
-            local backend, berr = build_backend(component, ccfg)
-            if backend then
-                state.backends[component] = backend
-            else
-                svc:obs_log('warn', { what = 'backend_build_failed', component = component, err = tostring(berr) })
-            end
-        end
-    end
+		if not opts_.no_save then
+			local ok, err = store_sync.save_job(repo, job)
+			if not ok then on_store_error(job and job.job_id, err) end
+		end
 
-    local function rebuild_component_obs()
-        for _, rec in pairs(state.component_obs) do
-            rec.watch:unwatch()
-        end
-        state.component_obs = {}
-        for component, ccfg in pairs(state.cfg.components) do
-            local backend = state.backends[component]
-            if backend and type(backend.observe_specs) == 'function' then
-                local specs = backend:observe_specs(ccfg) or {}
-                for _, spec in ipairs(specs) do
-                    if type(spec) == 'table' and type(spec.key) == 'string' and type(spec.topic) == 'table' and type(spec.on_event) == 'function' then
-                        local watch = conn:watch_retained(spec.topic, { replay = true, queue_len = 16, full = 'drop_oldest' })
-                        state.component_obs[spec.key] = {
-                            component = component,
-                            key = spec.key,
-                            topic = spec.topic,
-                            on_event = spec.on_event,
-                            watch = watch,
-                        }
-                    end
-                end
-            end
-        end
-    end
+		if not opts_.no_signal then
+			changed:signal()
+		end
+	end
+	ctx.patch_job = patch_job
 
-    local create_ep = conn:bind({ 'cmd', 'update', 'job', 'create' }, { queue_len = 32 })
-    local do_ep = conn:bind({ 'cmd', 'update', 'job', 'do' }, { queue_len = 32 })
-    local get_ep = conn:bind({ 'cmd', 'update', 'job', 'get' }, { queue_len = 32 })
-    local list_ep = conn:bind({ 'cmd', 'update', 'job', 'list' }, { queue_len = 32 })
+	local function enter_awaiting_return(job, stage, result, opts_)
+		opts_ = opts_ or {}
 
-    local function adopt_repo(new_repo)
-        local loaded2, err = store_sync.load(new_repo)
-        if not loaded2 then
-            svc:obs_log('warn', { what = 'repo_reload_failed', err = tostring(err) })
-            return nil, err
-        end
-        repo = new_repo
-        ctx.repo = repo
-        model.load_store(state, loaded2)
-        model.mark_all_jobs_dirty(state)
-        return true, nil
-    end
+		local runtime_merge = model.copy_value(opts_.runtime_merge) or {}
+		runtime_merge.awaiting_return_run_id = service_run_id
+		runtime_merge.awaiting_return_mono = now()
 
-    fibers.current_scope():finally(function()
-        create_ep:unbind()
-        do_ep:unbind()
-        get_ep:unbind()
-        list_ep:unbind()
-    end)
+		patch_job(job, {
+			state = 'awaiting_return',
+			stage = stage or 'awaiting_member_return',
+			next_step = 'reconcile',
+			error = nil,
+			result = result,
+		}, {
+			no_save = opts_.no_save,
+			no_signal = opts_.no_signal,
+			runtime_merge = runtime_merge,
+		})
+	end
+	ctx.enter_awaiting_return = enter_awaiting_return
 
-    rebuild_backends()
-    rebuild_component_obs()
-    reconcile.normalise_persisted(state, now(), service_run_id, model)
-    model.mark_all_jobs_dirty(state)
-    publisher:flush_publications()
-    changed:signal()
-    svc:status('running')
+	local artifacts = artifacts_mod.new(ctx)
+	ctx.artifacts = artifacts
+	ctx.artifact_open = function(...)
+		return artifacts:open(...)
+	end
 
-    local seen = changed:version()
-    while true do
-        local ops = {
-            cfg = cfg_watch:recv_op(),
-            create = create_ep and create_ep:recv_op() or nil,
-            job_do = do_ep and do_ep:recv_op() or nil,
-            get = get_ep and get_ep:recv_op() or nil,
-            list = list_ep and list_ep:recv_op() or nil,
-            runner = runner_rx:recv_op(),
-            changed = changed:changed_op(seen):wrap(function(ver) seen = ver; return ver end),
-        }
-        for key, rec in pairs(state.component_obs) do
-            ops[key] = rec.watch:recv_op()
-        end
-        local active_join_op = runtime:active_join_op()
-        if active_join_op then
-            ops.active_join = active_join_op
-        end
+	local commands = commands_mod.new(ctx)
 
-        local which, req, err = fibers.perform(fibers.named_choice(ops))
+	local function release_artifact_if_present(job)
+		if not job or type(job.artifact_ref) ~= 'string' or job.artifact_ref == '' then
+			return
+		end
 
-        if which == 'changed' then
-            runtime:on_changed_tick()
-        elseif which == 'runner' then
-            runtime:handle_runner_event(req)
-        elseif which == 'active_join' then
-            runtime:handle_active_join(req)
-        elseif type(which) == 'string' and state.component_obs[which] then
-            local rec = state.component_obs[which]
-            local ev = req
-            rec.on_event(ctx, rec, ev)
-        elseif which == 'cfg' then
-            local ev = req
-            if not ev then
-                svc:status('failed', { reason = tostring(err or 'cfg_watch_closed') })
-                error('update cfg watch closed: ' .. tostring(err), 0)
-            end
-            local old_ns = state.cfg.jobs_namespace
-            if ev.op == 'retain' then
-                state.cfg = model.merge_cfg(ev.payload, SCHEMA)
-            elseif ev.op == 'unretain' then
-                state.cfg = model.default_cfg(SCHEMA)
-            end
-            rebuild_backends()
-            rebuild_component_obs()
-            local new_ns = state.cfg.jobs_namespace
-            if new_ns ~= old_ns then
-                if state.active_job or state.locks.global ~= nil then
-                    svc:obs_log('warn', { what = 'jobs_namespace_change_ignored_while_active', old = tostring(old_ns), new = tostring(new_ns) })
-                    state.cfg.jobs_namespace = old_ns
-                else
-                    local new_repo = job_store.open(store_cap, { namespace = new_ns })
-                    local ok, aerr = adopt_repo(new_repo)
-                    if ok then
-                        reconcile.normalise_persisted(state, now(), service_run_id, model)
-                    else
-                        svc:obs_log('warn', { what = 'repo_adopt_failed', err = tostring(aerr) })
-                    end
-                end
-            end
-            changed:signal()
-        elseif which == 'create' then
-            if not req then error('update create endpoint closed: ' .. tostring(err), 0) end
-            commands:handle_create(req)
-        elseif which == 'job_do' then
-            if not req then error('update job do endpoint closed: ' .. tostring(err), 0) end
-            commands:handle_do(req)
-        elseif which == 'get' then
-            if not req then error('update get endpoint closed: ' .. tostring(err), 0) end
-            commands:handle_get(req)
-        elseif which == 'list' then
-            if not req then error('update list endpoint closed: ' .. tostring(err), 0) end
-            commands:handle_list(req)
-        end
-    end
+		local ref = job.artifact_ref
+		local ok, err = artifacts:delete(ref)
+		if not ok and err ~= 'not_found' then
+			svc:obs_log('warn', {
+				what = 'artifact_delete_failed',
+				artifact_ref = ref,
+				err = tostring(err),
+			})
+			return
+		end
+
+		job.artifact_ref = nil
+		job.artifact_released_at = now()
+		model.touch_job(state, job, now(), service_run_id, false, nil)
+
+		local sok, serr2 = store_sync.save_job(repo, job)
+		if not sok then on_store_error(job.job_id, serr2) end
+
+		model.mark_job_dirty(state, job.job_id)
+		changed:signal()
+	end
+	ctx.release_artifact_if_present = release_artifact_if_present
+
+	local publisher = publish_mod.new(ctx)
+	ctx.publisher = publisher
+
+	local runtime = runtime_mod.new(ctx)
+	ctx.runtime = runtime
+
+	local function rebuild_backends()
+		state.backends = {}
+		for component, ccfg in pairs(state.cfg.components) do
+			local backend, berr = build_backend(component, ccfg)
+			if backend then
+				state.backends[component] = backend
+			else
+				svc:obs_log('warn', {
+					what = 'backend_build_failed',
+					component = component,
+					err = tostring(berr),
+				})
+			end
+		end
+	end
+
+	local function rebuild_component_obs()
+		for _, rec in pairs(state.component_obs) do
+			rec.watch:unwatch()
+		end
+		state.component_obs = {}
+
+		for component, ccfg in pairs(state.cfg.components) do
+			local backend = state.backends[component]
+			if backend and type(backend.observe_specs) == 'function' then
+				local specs = backend:observe_specs(ccfg) or {}
+				for _, spec in ipairs(specs) do
+					if type(spec) == 'table'
+						and type(spec.key) == 'string'
+						and type(spec.topic) == 'table'
+						and type(spec.on_event) == 'function'
+					then
+						if state.component_obs[spec.key] then
+							state.component_obs[spec.key].watch:unwatch()
+							svc:obs_log('warn', {
+								what = 'duplicate_component_observer_key',
+								key = spec.key,
+								component = component,
+							})
+						end
+
+						state.component_obs[spec.key] = {
+							component = component,
+							key = spec.key,
+							topic = spec.topic,
+							on_event = spec.on_event,
+							watch = conn:watch_retained(spec.topic, {
+								replay = true,
+								queue_len = 16,
+								full = 'drop_oldest',
+							}),
+						}
+					end
+				end
+			end
+		end
+	end
+
+	local create_ep = conn:bind({ 'cmd', 'update', 'job', 'create' }, { queue_len = 32 })
+	local do_ep = conn:bind({ 'cmd', 'update', 'job', 'do' }, { queue_len = 32 })
+	local get_ep = conn:bind({ 'cmd', 'update', 'job', 'get' }, { queue_len = 32 })
+	local list_ep = conn:bind({ 'cmd', 'update', 'job', 'list' }, { queue_len = 32 })
+
+	local endpoints = {
+		create = create_ep,
+		job_do = do_ep,
+		get = get_ep,
+		list = list_ep,
+	}
+
+	local function adopt_repo(new_repo)
+		local loaded2, err = store_sync.load(new_repo)
+		if not loaded2 then
+			svc:obs_log('warn', {
+				what = 'repo_reload_failed',
+				err = tostring(err),
+			})
+			return nil, err
+		end
+
+		repo = new_repo
+		ctx.repo = repo
+		model.load_store(state, loaded2)
+		model.mark_all_jobs_dirty(state)
+		return true, nil
+	end
+
+	fibers.current_scope():finally(function()
+		cfg_watch:unwatch()
+		for _, rec in pairs(state.component_obs) do
+			rec.watch:unwatch()
+		end
+		create_ep:unbind()
+		do_ep:unbind()
+		get_ep:unbind()
+		list_ep:unbind()
+	end)
+
+	rebuild_backends()
+	rebuild_component_obs()
+	reconcile.normalise_persisted(state, now(), service_run_id, model)
+	model.mark_all_jobs_dirty(state)
+	publisher:flush_publications()
+	changed:signal()
+	svc:status('running')
+
+	local seen = changed:version()
+
+	while true do
+		local active_join_op = runtime:active_join_op()
+		local which, req, err = fibers.perform(
+			next_update_event_op(state, cfg_watch, endpoints, runner_rx, changed, seen, active_join_op)
+		)
+
+		if which == 'changed' then
+			seen = req or seen
+			runtime:on_changed_tick()
+
+		elseif which == 'runner' then
+			runtime:handle_runner_event(req)
+
+		elseif which == 'active_join' then
+			runtime:handle_active_join(req)
+
+		elseif type(which) == 'string' and state.component_obs[which] then
+			local rec = state.component_obs[which]
+			rec.on_event(ctx, rec, req)
+
+		elseif which == 'cfg' then
+			local ev = req
+			if not ev then
+				svc:status('failed', { reason = tostring(err or 'cfg_watch_closed') })
+				error('update cfg watch closed: ' .. tostring(err), 0)
+			end
+
+			local old_ns = state.cfg.jobs_namespace
+
+			if ev.op == 'retain' then
+				state.cfg = model.merge_cfg(ev.payload, SCHEMA)
+			elseif ev.op == 'unretain' then
+				state.cfg = model.default_cfg(SCHEMA)
+			end
+
+			rebuild_backends()
+			rebuild_component_obs()
+
+			local new_ns = state.cfg.jobs_namespace
+			if new_ns ~= old_ns then
+				if state.active_job or state.locks.global ~= nil then
+					svc:obs_log('warn', {
+						what = 'jobs_namespace_change_ignored_while_active',
+						old = tostring(old_ns),
+						new = tostring(new_ns),
+					})
+					state.cfg.jobs_namespace = old_ns
+				else
+					local new_repo = job_store.open(store_cap, { namespace = new_ns })
+					local ok, aerr = adopt_repo(new_repo)
+					if ok then
+						reconcile.normalise_persisted(state, now(), service_run_id, model)
+					else
+						state.cfg.jobs_namespace = old_ns
+						svc:obs_log('warn', {
+							what = 'repo_adopt_failed',
+							err = tostring(aerr),
+						})
+					end
+				end
+			end
+
+			changed:signal()
+
+		elseif which == 'create' then
+			if not req then
+				error('update create endpoint closed: ' .. tostring(err), 0)
+			end
+			commands:handle_create(req)
+
+		elseif which == 'job_do' then
+			if not req then
+				error('update job do endpoint closed: ' .. tostring(err), 0)
+			end
+			commands:handle_do(req)
+
+		elseif which == 'get' then
+			if not req then
+				error('update get endpoint closed: ' .. tostring(err), 0)
+			end
+			commands:handle_get(req)
+
+		elseif which == 'list' then
+			if not req then
+				error('update list endpoint closed: ' .. tostring(err), 0)
+			end
+			commands:handle_list(req)
+		end
+	end
 end
 
 return M
