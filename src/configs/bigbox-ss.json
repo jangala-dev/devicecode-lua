@@ -993,17 +993,21 @@
     }
   },
   "system": {
-    "report_period": 60,
-    "usb3_enabled": false,
-    "alarms": [
-      {
-        "time": "5:00",
-        "repeats": "daily",
-        "payload": {
-          "name": "daily reboot",
-          "type": "reboot"
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/system/1",
+      "report_period": 60,
+      "usb3_enabled": false,
+      "alarms": [
+        {
+          "time": "5:00",
+          "repeats": "daily",
+          "payload": {
+            "name": "daily reboot",
+            "type": "reboot"
+          }
         }
-      }
-    ]
+      ]
+    }
   }
 }
