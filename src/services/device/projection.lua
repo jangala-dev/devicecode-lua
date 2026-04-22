@@ -143,6 +143,42 @@ function M.component_view(name, rec, now_ts)
 	}
 end
 
+-- Combined public payload family for one component.
+--
+-- This is the common publication path used by the service shell:
+--   * component
+--   * software
+--   * update
+--
+-- Narrower payloads are derived from one canonical component view so the shell
+-- does not recompute normalisation/projection three times.
+function M.component_payloads(name, rec, now_ts)
+	local view = M.component_view(name, rec, now_ts)
+
+	local sw = copy(view.software)
+	sw.kind = 'device.component.software'
+	sw.ts = now_ts
+	sw.component = name
+	sw.role = view.role
+	sw.member = view.member
+	sw.member_class = view.member_class
+	sw.link_class = view.link_class
+
+	local upd = copy(view.updater)
+	upd.kind = 'device.component.update'
+	upd.ts = now_ts
+	upd.component = name
+	upd.available = view.available
+	upd.health = view.health
+	upd.actions = view.actions
+
+	return {
+		component = view,
+		software = sw,
+		update = upd,
+	}
+end
+
 function M.summary_payload(state, now_ts)
 	local items = {}
 	local counts = {
@@ -198,32 +234,11 @@ function M.self_payload(state, now_ts)
 end
 
 function M.software_payload(name, rec, now_ts)
-	local view = M.component_view(name, rec, now_ts)
-	local sw = copy(view.software)
-
-	sw.kind = 'device.component.software'
-	sw.ts = now_ts
-	sw.component = name
-	sw.role = view.role
-	sw.member = view.member
-	sw.member_class = view.member_class
-	sw.link_class = view.link_class
-
-	return sw
+	return M.component_payloads(name, rec, now_ts).software
 end
 
 function M.update_payload(name, rec, now_ts)
-	local view = M.component_view(name, rec, now_ts)
-	local upd = copy(view.updater)
-
-	upd.kind = 'device.component.update'
-	upd.ts = now_ts
-	upd.component = name
-	upd.available = view.available
-	upd.health = view.health
-	upd.actions = view.actions
-
-	return upd
+	return M.component_payloads(name, rec, now_ts).update
 end
 
 return M

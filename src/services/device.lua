@@ -29,6 +29,12 @@
 --   * helpers report completion back to the shell over a mailbox
 --   * only the shell mutates service state and publishes retained state
 --   * retained publication flows through the changed pulse only
+--
+-- Observer lifecycle notes:
+--   * each observer runs in its own child scope
+--   * config rebuild explicitly retires old observers: cancel, then join
+--   * observer events are stamped with a generation so stale events from
+--     retired observers can be ignored safely
 
 local fibers     = require 'fibers'
 local pulse      = require 'fibers.pulse'
@@ -91,10 +97,10 @@ local function publish_component(conn, svc, state, name)
 	local rec = state.components[name]
 	if not rec then return end
 
-	local ts = svc:now()
-	conn:retain(projection.component_topic(name), projection.component_view(name, rec, ts))
-	conn:retain(projection.component_software_topic(name), projection.software_payload(name, rec, ts))
-	conn:retain(projection.component_update_topic(name), projection.update_payload(name, rec, ts))
+	local payloads = projection.component_payloads(name, rec, svc:now())
+	conn:retain(projection.component_topic(name), payloads.component)
+	conn:retain(projection.component_software_topic(name), payloads.software)
+	conn:retain(projection.component_update_topic(name), payloads.update)
 	model.clear_component_dirty(state, name)
 end
 
@@ -118,20 +124,51 @@ end
 -- Observer lifecycle
 ----------------------------------------------------------------------
 
-local function close_observers(observer_scopes)
-	for _, child in pairs(observer_scopes) do
-		child:cancel('rebuild observers')
-	end
+-- observer_state = {
+--   generation = <monotonic observer generation>,
+--   slots = {
+--     [component] = {
+--       component = <name>,
+--       generation = <generation>,
+--       scope = <observer child scope>,
+--     },
+--   },
+-- }
+local function new_observer_state()
+	return {
+		generation = 0,
+		slots = {},
+	}
 end
 
-local function rebuild_observers(service_scope, conn, svc, state, obs_tx, observer_scopes)
-	close_observers(observer_scopes)
+local function close_observers(observer_state)
+	local slots = observer_state.slots
 
-	local next_scopes = {}
+	-- First signal retirement to all live observers.
+	for _, slot in pairs(slots) do
+		slot.scope:cancel('rebuild observers')
+	end
+
+	-- Then reap them explicitly. Destructive join is appropriate here because
+	-- these child scopes are being retired permanently.
+	for _, slot in pairs(slots) do
+		fibers.perform(slot.scope:join_op())
+	end
+
+	observer_state.slots = {}
+end
+
+local function rebuild_observers(service_scope, conn, svc, state, obs_tx, observer_state)
+	close_observers(observer_state)
+
+	observer_state.generation = observer_state.generation + 1
+	local generation = observer_state.generation
+
+	local next_slots = {}
 	for name, rec in pairs(state.components) do
-		local child, err = observers.spawn_component(service_scope, conn, name, rec, obs_tx)
-		if child then
-			next_scopes[name] = child
+		local slot, err = observers.spawn_component(service_scope, conn, name, rec, obs_tx, generation)
+		if slot then
+			next_slots[name] = slot
 		else
 			svc:obs_log('warn', {
 				what = 'observer_spawn_failed',
@@ -141,14 +178,14 @@ local function rebuild_observers(service_scope, conn, svc, state, obs_tx, observ
 		end
 	end
 
-	return next_scopes
+	observer_state.slots = next_slots
 end
 
 ----------------------------------------------------------------------
 -- Config and observer events
 ----------------------------------------------------------------------
 
-local function apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_scopes, payload)
+local function apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_state, payload)
 	local old = {}
 	for name in pairs(state.components) do
 		old[name] = true
@@ -164,31 +201,42 @@ local function apply_cfg(service_scope, conn, svc, state, changed, obs_tx, obser
 		end
 	end
 
-	local next_scopes = rebuild_observers(service_scope, conn, svc, state, obs_tx, observer_scopes)
+	rebuild_observers(service_scope, conn, svc, state, obs_tx, observer_state)
 	changed:signal()
-	return next_scopes
 end
 
-local function handle_cfg_event(service_scope, conn, svc, state, changed, obs_tx, observer_scopes, ev, err)
+local function handle_cfg_event(service_scope, conn, svc, state, changed, obs_tx, observer_state, ev, err)
 	if not ev then
 		svc:status('failed', { reason = tostring(err or 'cfg_watch_closed') })
 		error('device cfg watch closed: ' .. tostring(err), 0)
 	end
 
 	if ev.op == 'retain' then
-		return apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_scopes, ev.payload)
+		apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_state, ev.payload)
 	elseif ev.op == 'unretain' then
-		return apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_scopes, nil)
+		apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_state, nil)
 	end
-
-	return observer_scopes
 end
 
-local function handle_observer_event(state, changed, ev)
-	if ev and ev.tag == 'raw_changed' then
+local function handle_observer_event(state, changed, observer_state, ev)
+	if not ev then
+		return
+	end
+
+	local slot = observer_state.slots[ev.component]
+	if not slot then
+		return
+	end
+
+	-- Drop stale events from retired observers.
+	if ev.generation ~= slot.generation then
+		return
+	end
+
+	if ev.tag == 'raw_changed' then
 		model.note_status(state, ev.component, ev.payload)
 		changed:signal()
-	elseif ev and ev.tag == 'source_down' then
+	elseif ev.tag == 'source_down' then
 		model.note_source_down(state, ev.component, ev.reason)
 		changed:signal()
 	end
@@ -206,12 +254,9 @@ end
 --   * spawned under the service scope
 --   * execute the blocking call inside fibers.run_scope(...)
 --   * never mutate shared service state directly
-
-local function spawn_get_helper(work_tx, conn, req, name, rec, payload)
+local function spawn_work_helper(work_tx, spec)
 	spawn_required(function()
-		local st, _report, value, err = fibers.run_scope(function()
-			return proxy.fetch_status(conn, rec, payload.args or {}, payload.timeout)
-		end)
+		local st, _report, value, err = fibers.run_scope(spec.run)
 
 		if st == 'cancelled' then
 			return
@@ -219,76 +264,34 @@ local function spawn_get_helper(work_tx, conn, req, name, rec, payload)
 
 		if st == 'failed' then
 			send_required(work_tx, {
-				tag = 'get_done',
-				req = req,
-				component = name,
+				tag = spec.done_tag,
+				req = spec.req,
+				component = spec.component,
 				ok = false,
 				err = tostring(value or 'helper_failed'),
-			}, 'device_get_done_overflow')
+			}, spec.overflow_what)
 			return
 		end
 
 		if value == nil then
 			send_required(work_tx, {
-				tag = 'get_done',
-				req = req,
-				component = name,
+				tag = spec.done_tag,
+				req = spec.req,
+				component = spec.component,
 				ok = false,
 				err = err,
-			}, 'device_get_done_overflow')
+			}, spec.overflow_what)
 			return
 		end
 
 		send_required(work_tx, {
-			tag = 'get_done',
-			req = req,
-			component = name,
+			tag = spec.done_tag,
+			req = spec.req,
+			component = spec.component,
 			ok = true,
 			value = value,
-		}, 'device_get_done_overflow')
-	end, 'device_get_helper_spawn')
-end
-
-local function spawn_do_helper(work_tx, conn, req, name, rec, action, payload)
-	spawn_required(function()
-		local st, _report, value, err = fibers.run_scope(function()
-			return proxy.perform_action(conn, rec, action, payload.args or {}, payload.timeout)
-		end)
-
-		if st == 'cancelled' then
-			return
-		end
-
-		if st == 'failed' then
-			send_required(work_tx, {
-				tag = 'do_done',
-				req = req,
-				component = name,
-				ok = false,
-				err = tostring(value or 'helper_failed'),
-			}, 'device_do_done_overflow')
-			return
-		end
-
-		if value == nil then
-			send_required(work_tx, {
-				tag = 'do_done',
-				req = req,
-				component = name,
-				ok = false,
-				err = err,
-			}, 'device_do_done_overflow')
-			return
-		end
-
-		send_required(work_tx, {
-			tag = 'do_done',
-			req = req,
-			component = name,
-			ok = true,
-			value = value,
-		}, 'device_do_done_overflow')
-	end, 'device_do_helper_spawn')
+		}, spec.overflow_what)
+	end, spec.spawn_what)
 end
 
 ----------------------------------------------------------------------
@@ -340,7 +343,16 @@ local function handle_get_req(work_tx, conn, req, err, state, svc)
 	end
 
 	-- Slow path: fetch in a helper so the shell remains responsive.
-	spawn_get_helper(work_tx, conn, req, name, rec, payload)
+	spawn_work_helper(work_tx, {
+		done_tag = 'get_done',
+		req = req,
+		component = name,
+		spawn_what = 'device_get_helper_spawn',
+		overflow_what = 'device_get_done_overflow',
+		run = function()
+			return proxy.fetch_status(conn, rec, payload.args or {}, payload.timeout)
+		end,
+	})
 end
 
 local function handle_do_req(work_tx, conn, req, err, state)
@@ -358,7 +370,16 @@ local function handle_do_req(work_tx, conn, req, err, state)
 		return
 	end
 
-	spawn_do_helper(work_tx, conn, req, name, rec, action, payload)
+	spawn_work_helper(work_tx, {
+		done_tag = 'do_done',
+		req = req,
+		component = name,
+		spawn_what = 'device_do_helper_spawn',
+		overflow_what = 'device_do_done_overflow',
+		run = function()
+			return proxy.perform_action(conn, rec, action, payload.args or {}, payload.timeout)
+		end,
+	})
 end
 
 local function handle_work_event(state, changed, ev, svc)
@@ -430,7 +451,7 @@ function M.start(conn, opts)
 	local obs_tx, obs_rx = mailbox.new(128, { full = 'drop_oldest' })
 	local work_tx, work_rx = mailbox.new(64, { full = 'reject_newest' })
 
-	local observer_scopes = {}
+	local observer_state = new_observer_state()
 
 	local self_ep = conn:bind({ 'cmd', 'device', 'get' }, { queue_len = 32 })
 	local list_ep = conn:bind({ 'cmd', 'device', 'component', 'list' }, { queue_len = 32 })
@@ -449,12 +470,12 @@ function M.start(conn, opts)
 		seen = changed:version(),
 	}
 
-	observer_scopes = apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_scopes, nil)
+	apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_state, nil)
 
 	svc:status('running')
 
 	fibers.current_scope():finally(function()
-		close_observers(observer_scopes)
+		close_observers(observer_state)
 
 		cfg_watch:unwatch()
 
@@ -477,12 +498,12 @@ function M.start(conn, opts)
 		local which, a, b = fibers.perform(next_device_event_op(shell_state))
 
 		if which == 'cfg' then
-			observer_scopes = handle_cfg_event(
-				service_scope, conn, svc, state, changed, obs_tx, observer_scopes, a, b
+			handle_cfg_event(
+				service_scope, conn, svc, state, changed, obs_tx, observer_state, a, b
 			)
 
 		elseif which == 'obs' then
-			handle_observer_event(state, changed, a)
+			handle_observer_event(state, changed, observer_state, a)
 
 		elseif which == 'work' then
 			handle_work_event(state, changed, a, svc)

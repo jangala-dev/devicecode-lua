@@ -13,6 +13,10 @@
 --     the watch stream when one is available
 --   * this keeps steady-state observation preferred over failing fast on a
 --     transient startup/status-read problem
+--
+-- Boundary note:
+--   * ctx.emit(...) stamps component/generation at the observer boundary
+--   * providers therefore emit only logical event contents
 
 local fibers = require 'fibers'
 local proxy = require 'services.device.proxy'
@@ -28,21 +32,16 @@ local function initial_status_op(ctx)
 	return proxy.fetch_status_op(ctx.conn, rec, {}, 0.5)
 end
 
-local function next_status_message_op(sub)
-	return sub:recv_op()
-end
-
 function M.run(ctx)
 	local conn = ctx.conn
-	local name = ctx.component
 	local rec = ctx.rec
 	local emit = ctx.emit
 
 	local watch_topic = rec.channels and rec.channels.status and rec.channels.status.watch_topic or nil
 
-	local value = fibers.perform(initial_status_op(ctx))
+	local value, _ = fibers.perform(initial_status_op(ctx))
 	if value ~= nil then
-		emit({ tag = 'raw_changed', component = name, payload = value })
+		emit({ tag = 'raw_changed', payload = value })
 	end
 
 	if type(watch_topic) ~= 'table' then
@@ -56,17 +55,15 @@ function M.run(ctx)
 	end)
 
 	while true do
-		local msg, err = fibers.perform(next_status_message_op(sub))
+		local msg, err = fibers.perform(sub:recv_op())
 		if msg then
 			emit({
 				tag = 'raw_changed',
-				component = name,
 				payload = msg.payload or msg,
 			})
 		else
 			emit({
 				tag = 'source_down',
-				component = name,
 				reason = tostring(err or 'closed'),
 			})
 			return
