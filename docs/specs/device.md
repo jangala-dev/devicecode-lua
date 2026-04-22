@@ -2,18 +2,16 @@
 
 ## Purpose
 
-The Device service is the appliance-level façade over local and member-backed components.
-It does not implement hardware drivers or device policy. Instead it:
+The Device service is the appliance-facing façade over configured components.
+It does not implement drivers, transport, or device policy. Instead it:
 
 1. consumes retained `cfg/device`
-2. maintains a canonical in-memory component map
-3. observes each configured component through its configured status watch / status get topics
-4. projects a stable retained device view under `state/device/...`
-5. exposes stable local command topics for reading component state and dispatching component actions
+2. maintains an in-memory component table
+3. supervises one observer child per configured component
+4. projects canonical retained device state under `state/device/...`
+5. exposes local command topics for aggregate reads, component reads, and component actions
 
-The service is intentionally thin. It consumes whatever topics a component definition names, and republishes a uniform local shape for the rest of the system.
-
-**The reason Device exists is to give the rest of DeviceCode one stable, appliance-level view of the machine, so a composite product such as Big Box can be treated as a single device rather than as a loose collection of host and member components.**
+The service is intentionally thin. It consumes whatever a component definition names and republishes a stable local shape for the rest of DeviceCode.
 
 ## Dependencies
 
@@ -25,13 +23,14 @@ The service is intentionally thin. It consumes whatever topics a component defin
 
 ### Consumed topics and calls
 
-The service has no direct HAL dependency. It consumes whatever each component definition names:
+The service has no direct HAL dependency. It consumes whatever each component definition names.
 
 | Config field | Purpose |
 |---|---|
-| `status_topic` | Optional watch topic for ongoing status updates. |
-| `get_topic` | Optional call topic used for one initial fetch and explicit `get` requests. |
-| `actions.*` | Call topics used by `cmd/device/component/do`. |
+| `provider` | Observer/provider kind. Defaults to `status_watch`. |
+| `channels.status.watch_topic` | Optional watch topic for ongoing status updates. |
+| `channels.status.get_topic` | Optional call topic for initial fetch and explicit `get` requests. |
+| `operations.*.call_topic` | Call topics used by `cmd/device/component/do`. |
 
 ### Built-in default component
 
@@ -43,17 +42,21 @@ cm5 = {
   subtype = 'cm5',
   role = 'primary',
   member = 'local',
-  status_topic = { 'cap', 'updater', 'cm5', 'state', 'status' },
-  get_topic = { 'cap', 'updater', 'cm5', 'rpc', 'status' },
-  actions = {
-    prepare_update = { 'cap', 'updater', 'cm5', 'rpc', 'prepare' },
-    stage_update   = { 'cap', 'updater', 'cm5', 'rpc', 'stage' },
-    commit_update  = { 'cap', 'updater', 'cm5', 'rpc', 'commit' },
+  channels = {
+    status = {
+      watch_topic = { 'cap', 'updater', 'cm5', 'state', 'status' },
+      get_topic = { 'cap', 'updater', 'cm5', 'rpc', 'status' },
+    },
+  },
+  operations = {
+    prepare_update = { call_topic = { 'cap', 'updater', 'cm5', 'rpc', 'prepare' } },
+    stage_update   = { call_topic = { 'cap', 'updater', 'cm5', 'rpc', 'stage' } },
+    commit_update  = { call_topic = { 'cap', 'updater', 'cm5', 'rpc', 'commit' } },
   },
 }
 ```
 
-Configured components extend or override this default map.
+Configured components merge over this default map by component name.
 
 ## Configuration
 
@@ -71,23 +74,45 @@ Retained payload on `{'cfg','device'}`:
       member_class = <string|nil>,
       link_class = <string|nil>,
       present = <boolean|nil>,
+
+      provider = <string|nil>,
+      provider_opts = <table|nil>,
+
       status_topic = <topic|nil>,
       get_topic = <topic|nil>,
+
+      channels = {
+        status = {
+          watch_topic = <topic|nil>,
+          get_topic = <topic|nil>,
+        },
+      } | nil,
+
       actions = {
         [<action_name>] = <topic>,
       } | nil,
-    }
-  }
+
+      operations = {
+        [<action_name>] = {
+          call_topic = <topic>,
+        },
+      } | nil,
+    },
+  },
 }
 ```
 
-Notes:
+### Normalisation rules
 
-- if `schema` is present and does not match `devicecode.config/device/1`, the service falls back to defaults
-- configured components are merged over the built-in defaults by name
-- each configured action becomes an operation record with:
+- if `schema` is present and does not match `devicecode.config/device/1`, defaults are used
+- configured components are merged by name over the built-in defaults
+- legacy convenience fields are accepted:
+  - `status_topic` maps to `channels.status.watch_topic`
+  - `get_topic` maps to `channels.status.get_topic`
+  - `actions.<name> = <topic>` maps to `operations.<name>.call_topic`
+- if `provider` is not supplied, it defaults to `status_watch`
+- operations are normalised to records of the form:
   - `name`
-  - `kind` (`'update'` for names ending in `_update`, otherwise `'call'`)
   - `call_topic`
 
 ## Exposed commands
@@ -99,7 +124,7 @@ The service binds four command topics:
 | `{'cmd','device','get'}` | Return the aggregate `device.self` payload. |
 | `{'cmd','device','component','list'}` | Return all public component views. |
 | `{'cmd','device','component','get'}` | Return one public component view. |
-| `{'cmd','device','component','do'}` | Dispatch a configured action for one component. |
+| `{'cmd','device','component','do'}` | Dispatch a configured component action. |
 
 ### `cmd/device/get`
 
@@ -127,23 +152,33 @@ Response:
 }
 ```
 
-The list is sorted by component name before reply.
+The list is sorted by component name.
 
 ### `cmd/device/component/get`
 
 Request:
 
 ```lua
-{ component = <string>, args = <table|nil>, timeout = <number|nil> }
+{
+  component = <string>,
+  args = <table|nil>,
+  timeout = <number|nil>,
+}
 ```
 
 Behaviour:
 
-- if the component already has cached raw status, reply from the current projection
-- otherwise, if `get_topic` is configured, perform an on-demand fetch, update local state, publish the refreshed component and summary, then reply
+- if cached raw status is already present, reply immediately with the projected component view
+- otherwise, if `channels.status.get_topic` is configured, fetch in a helper fibre, update local state, signal publication, and reply with the projected component view
 - otherwise fail with `no_status_available`
 
-Fails with `unknown_component` if the component is not known.
+Failures:
+
+- `unknown_component`
+- `no_status_available`
+- any upstream fetch error
+
+Successful reply is the component view itself, not an `{ ok = true, ... }` envelope.
 
 ### `cmd/device/component/do`
 
@@ -160,16 +195,16 @@ Request:
 
 Behaviour:
 
-- resolve `component.operations[action].call_topic`
-- call that topic with `args`
+- resolve `operations[action].call_topic`
+- call that topic in a helper fibre
 - return the callee reply unchanged
 
-Fails with:
+Failures:
 
 - `unknown_component`
 - `missing_action`
 - `unsupported_action`
-- the underlying call error
+- any upstream call error
 
 ## Retained topics published
 
@@ -187,16 +222,23 @@ Removed components are explicitly unretained when config changes or the service 
 
 Each configured component gets one child observer scope.
 
-Per observer:
+### Provider model
 
-1. if `get_topic` exists, issue one initial call with `{}` and timeout `0.5s`
+Providers are selected by `rec.provider`.
+Current built-in provider:
+
+- `status_watch`
+
+`status_watch` behaviour:
+
+1. if `channels.status.get_topic` exists, issue one initial call with `{}` and timeout `0.5s`
 2. if that call succeeds, emit `raw_changed`
-3. if `status_topic` exists, subscribe to it with bounded buffering
+3. if `channels.status.watch_topic` exists, subscribe to it with bounded buffering
 4. for each received message:
    - use `msg.payload` if present
-   - otherwise use `msg` itself
+   - otherwise use `msg`
    - emit `raw_changed`
-5. if the subscription closes, emit `source_down` and exit
+5. if the watch closes or the provider faults, emit `source_down`
 
 Shell-side effects:
 
@@ -209,7 +251,7 @@ Shell-side effects:
   - `source_up = false`
   - `source_err = <reason>`
 
-The service does not try to interpret source protocols deeply. It preserves source detail and projects a canonical shape from it.
+Observer events are stamped with a generation. The shell ignores stale events from retired observers.
 
 ## Public component projection
 
@@ -237,7 +279,6 @@ Primary retained payload shape:
     build = <string|nil>,
     image_id = <string|nil>,
     boot_id = <string|nil>,
-    incarnation = <number|nil>,
   },
   updater = {
     state = <string|nil>,
@@ -262,9 +303,9 @@ Primary retained payload shape:
 
 ### Projection rules
 
-The service supports two input shapes:
+The service supports two input shapes.
 
-### A. Canonical component payloads
+#### A. Canonical component payloads
 
 If raw status already contains `software` or `updater` tables, it is treated as canonical and copied forward with light normalisation:
 
@@ -272,7 +313,7 @@ If raw status already contains `software` or `updater` tables, it is treated as 
 - `ready` defaults to `true` unless explicitly `false`
 - `software`, `updater`, and `capabilities` are normalised to tables
 
-### B. Plain status payloads
+#### B. Plain status payloads
 
 Otherwise the service derives a canonical form from the source payload:
 
@@ -280,17 +321,56 @@ Otherwise the service derives a canonical form from the source payload:
 - `software.build` from `raw.build`
 - `software.image_id` from `raw.image_id`
 - `software.boot_id` from `raw.boot_id`
-- `software.incarnation` from `raw.incarnation` or `raw.generation`
 - `updater.state` from `raw.updater_state`, else `raw.state`, else `raw.status`, else `raw.kind`
 - `updater.last_error` from `raw.last_error` or `raw.err`
 - `available = next(raw) ~= nil`
 - `ready = raw.ready ~= false`
+
+### MCU-specific normalisation
+
+When a component resolves to subtype `mcu`, the service uses the MCU-specific normaliser.
+
+Canonical MCU payloads are recognised when any of these are present:
+
+- `software`
+- `updater`
+- `incarnation`
+
+For plain MCU status payloads, the normaliser derives:
+
+- `available = next(raw) ~= nil`
+- `ready = raw.ready ~= false`
+- `incarnation = raw.incarnation or raw.boot_id or nil`
+- `software.version` from `raw.version` or `raw.fw_version`
+- `software.build` from `raw.build`
+- `software.image_id` from `raw.image_id`
+- `software.boot_id` from `raw.boot_id`
+- `updater.state` from `raw.updater_state`, else `raw.state`, else `raw.status`, else `raw.kind`
+- `updater.last_error` from `raw.last_error` or `raw.err`
+- `source` copied from `raw.source` if present
+- `raw` as a deep copy of the original payload
+
+For canonical MCU payloads, the normaliser preserves:
+
+- `available`
+- `ready`
+- `incarnation`
+- `software`
+- `updater`
+- `capabilities`
+- `source`
+- `health`
+- `raw` (or the whole payload when `raw` is absent)
+
+When the source is down, the shell still records `raw_status = { state = 'unavailable', err = <reason> }`; the MCU normaliser then projects that into an unavailable updater state in the same way as any other plain MCU payload.
 
 ### Derived fields
 
 - `available = rec.source_up and base.available`
 - `ready = available and base.ready`
 - `capabilities.update = true` whenever the component has any actions
+- `source.member`, `source.member_class`, `source.link_class`, and `source.role` are always derived from the component record
+- `source.kind` defaults to `'host'` for host components and `'member'` otherwise when the source payload does not already provide a kind
 - `health`:
   - use `base.health` if supplied by the source
   - otherwise `unknown` when unavailable
@@ -320,13 +400,13 @@ Otherwise the service derives a canonical form from the source payload:
       actions = { ... },
       software = { ... },
       updater = { ... },
-    }
+    },
   },
   counts = {
     total = <integer>,
     available = <integer>,
     degraded = <integer>,
-  }
+  },
 }
 ```
 

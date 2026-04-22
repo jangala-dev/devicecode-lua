@@ -22,8 +22,6 @@ The current design is intentionally simple:
 - component-specific mechanics in backends
 - service-level policy, persistence, and publication in the shell
 
-**The reason Update exists is to make software change a durable, observable and restart-safe operation, so component updates can be staged, committed and reconciled through one consistent job model instead of ad hoc per-target flows.**
-
 ## Dependencies
 
 ### Retained configuration
@@ -87,10 +85,7 @@ Retained payload on `{'cfg','update'}`:
       timeout_prepare = <number|nil>,
       timeout_stage = <number|nil>,
       timeout_commit = <number|nil>,
-    }
-  } | nil,
-  admission = {
-    mode = 'global_single' | <string>,
+    },
   } | nil,
 }
 ```
@@ -125,17 +120,14 @@ Retained payload on `{'cfg','update'}`:
       },
     },
   },
-  admission = {
-    mode = 'global_single',
-  },
 }
 ```
 
 Notes:
 
 - if `cfg.components` is supplied, it replaces the default component-backend table completely
-- `reconcile.interval_s` remains part of config but current reconcile waiting is driven by retained-state changes plus timeout, not interval polling
-- admission currently only implements the global single-job policy
+- `reconcile.interval_s` remains part of config, but current live reconcile is driven by retained-state changes plus timeout rather than interval polling
+- admission is currently global-single in practice; the state model keeps only `locks.global`
 
 ## Exposed commands
 
@@ -148,48 +140,52 @@ Notes:
 
 ## Artefact model
 
-The service never carries filesystem paths past job creation.
+The service works on artefact refs after job creation.
 
 A job may be created from:
 
-### Existing artefact ref
-
-```lua
-{ artifact_ref = <string> }
-```
-
-The service opens it through `artifact_store.open` and snapshots its descriptor.
-
-### Filesystem path
-
-```lua
-{ artifact = <string path> }
-```
-
-The service imports it through `artifact_store.import_path(path, meta, policy)` and stores only:
-
-- the resulting artefact ref
-- a descriptor snapshot
-
-### Upload-backed creation
-
-A job may also be created with:
+### Imported filesystem path
 
 ```lua
 {
   component = <string>,
-  source = { kind = 'upload' },
-  ...
+  artifact = {
+    kind = 'import_path',
+    path = <string>,
+  },
+  expected_version = <string|nil>,
+  metadata = <table|nil>,
+  options = {
+    auto_start = <boolean|nil>,
+    auto_commit = <boolean|nil>,
+  } | nil,
 }
 ```
 
-In that case the job is created without an attached artefact and starts in stage `awaiting_upload`. An external ingress path may then:
+The service imports the path through `artifact_store.import_path(...)` and stores only:
 
-- mark upload begin
-- attach an artefact ref
-- optionally auto-start the job
+- the resulting artefact ref
+- a descriptor snapshot
 
-The core update service only knows about the job and the artefact ref attachment. It does not own HTTP upload ingress itself.
+### Existing artefact ref
+
+```lua
+{
+  component = <string>,
+  artifact = {
+    kind = 'ref',
+    ref = <string>,
+  },
+  expected_version = <string|nil>,
+  metadata = <table|nil>,
+  options = {
+    auto_start = <boolean|nil>,
+    auto_commit = <boolean|nil>,
+  } | nil,
+}
+```
+
+The service opens it through `artifact_store.open(...)` and snapshots its descriptor.
 
 ### Retention policy
 
@@ -197,15 +193,32 @@ Import policy is chosen by:
 
 1. `cfg.artifacts.policies[component]`
 2. otherwise `cfg.artifacts.default_policy`
-3. otherwise `'prefer_durable'` in the command helper fallback
+3. otherwise `'prefer_durable'`
 
 During execution, staged metadata may also return `artifact_retention`.
+
 Current behaviour:
 
-- `release` -> the artefact is deleted after staging success or final terminal completion, depending on the path
+- `release` -> the artefact is deleted after staging success or terminal completion, depending on the path
 - anything else -> keep the artefact until explicit discard or other cleanup
 
 ## Job model
+
+Top-level in-memory service state:
+
+```lua
+{
+  cfg = <merged service config>,
+  store = { jobs = { [id] = job }, order = { id... } },
+  seq = <monotonic in-service sequence>,
+  active_job = { job_id, scope, component, started_at, mode } | nil,
+  locks = { global = job_id | nil },
+  backends = { [component] = backend },
+  dirty_jobs = { [job_id] = true },
+  summary_dirty = <boolean>,
+  component_obs = { [key] = observer_rec },
+}
+```
 
 Persisted job fields include:
 
@@ -214,7 +227,6 @@ Persisted job fields include:
   job_id = <string>,
   offer_id = <string|nil>,
   component = <string>,
-  source_kind = 'baked' | 'upload' | <string|nil>,
   artifact_ref = <string|nil>,
   artifact_meta = <table|nil>,
   expected_version = <string|nil>,
@@ -230,22 +242,21 @@ Persisted job fields include:
   updated_mono = <number>,
   result = <table|nil>,
   error = <string|nil>,
-  pre_commit_incarnation = <number|nil>,
   pre_commit_boot_id = <string|nil>,
-  post_commit_incarnation = <number|nil>,
   artifact_released_at = <number|nil>,
   staged_meta = <table|nil>,
   runtime = {
-    attempt = <integer>,
-    adopted = <boolean>,
-    active_lock = <string|nil>,
-    last_progress = <any|nil>,
-    phase_run_id = <string>,
-    phase_mono = <number>,
+    phase_run_id = <string|nil>,
+    phase_mono = <number|nil>,
+    awaiting_return_run_id = <string|nil>,
+    awaiting_return_mono = <number|nil>,
+    progress = <table|nil>,
     ...
-  },
+  } | nil,
 }
 ```
+
+Runtime-only fields under `job.runtime` are stripped before persistence.
 
 ## Job states
 
@@ -267,7 +278,9 @@ Persisted job fields include:
 - `cancelled`
 - `timed_out`
 - `superseded`
-- `discarded` (enum only; discarded jobs are removed rather than retained as visible job records)
+- `discarded`
+
+`discarded` exists in the model enums, but discarded jobs are removed from the store rather than retained as visible job records.
 
 ## Public job view
 
@@ -279,7 +292,6 @@ Retained per-job payload under `{'state','update','jobs', <job_id>}`:
   component = <string>,
   source = {
     offer_id = <string|nil>,
-    kind = <string|nil>,
   },
   artifact = {
     ref = <string|nil>,
@@ -300,8 +312,6 @@ Retained per-job payload under `{'state','update','jobs', <job_id>}`:
   },
   progress = <table|nil>,
   observation = {
-    pre_commit_incarnation = <number|nil>,
-    post_commit_incarnation = <number|nil>,
     pre_commit_boot_id = <string|nil>,
   },
   actions = {
@@ -343,7 +353,6 @@ Retained under `{'state','update','summary'}`:
   } | nil,
   locks = {
     global = <job_id|nil>,
-    component = { [<component>] = <job_id|nil> },
   },
 }
 ```
@@ -352,7 +361,7 @@ Retained under `{'state','update','summary'}`:
 
 Derived from job state:
 
-- `start` when `state == 'created'` and the job is not an upload job still waiting for an artefact
+- `start` when `state == 'created'`
 - `commit` when `state == 'awaiting_commit'`
 - `cancel` when `state == 'created'` or `state == 'awaiting_commit'`
 - `retry` when terminal and an artefact ref is still present (`failed`, `rolled_back`, `timed_out`, `cancelled`)
@@ -368,9 +377,13 @@ Accepted payload:
 {
   component = <string>,
   offer_id = <string|nil>,
-  artifact_ref = <string|nil>,
-  artifact = <string path|nil>,
-  source = { kind = <string|nil> } | nil,
+  artifact = {
+    kind = 'import_path',
+    path = <string>,
+  } | {
+    kind = 'ref',
+    ref = <string>,
+  },
   expected_version = <string|nil>,
   metadata = <table|nil>,
   options = {
@@ -383,18 +396,10 @@ Accepted payload:
 Behaviour:
 
 1. validate component exists in current config
-2. resolve or import the artefact, unless `source.kind == 'upload'`
+2. resolve or import the artefact through `artifact_store`
 3. create a job in `created`
-4. if upload-backed with no artefact yet, set:
-   - `stage = 'awaiting_upload'`
-   - `next_step = 'upload'`
+4. if `auto_start` is true, immediately transition to `staging` and spawn a stage worker
 5. persist and publish the job
-
-If the created job is upload-backed and has no artefact ref yet, the reply also includes:
-
-```lua
-{ upload = { required = true } }
-```
 
 ### `cmd/update/job/do`
 
@@ -403,8 +408,7 @@ Accepted shape:
 ```lua
 {
   job_id = <string>,
-  op = 'start' | 'commit' | 'upload_begin' | 'upload_failed' | 'attach_artifact' | 'cancel' | 'retry' | 'discard',
-  ...
+  op = 'start' | 'commit' | 'cancel' | 'retry' | 'discard',
 }
 ```
 
@@ -413,7 +417,6 @@ Accepted shape:
 Allowed only when:
 
 - `state == 'created'`
-- the job is not still waiting for upload
 - no active global lock exists
 
 Effects:
@@ -433,51 +436,6 @@ Effects:
 1. patch job to `state='awaiting_return'`, `stage='commit_sent'`, `next_step='reconcile'`
 2. flush dirty jobs immediately before commit
 3. spawn a commit worker
-
-#### `upload_begin`
-
-Allowed only when:
-
-- `state == 'created'`
-- no artefact ref is attached yet
-
-Effect:
-
-- patch `stage='uploading_to_cm5'` without forcing a store save
-
-#### `upload_failed`
-
-Allowed only when `state == 'created'`.
-
-Effect:
-
-- patch to terminal `failed` with `stage='failed'`
-
-#### `attach_artifact`
-
-Allowed only when:
-
-- `state == 'created'`
-- no artefact ref is attached yet
-
-Request fields:
-
-```lua
-{
-  job_id = <string>,
-  op = 'attach_artifact',
-  artifact_ref = <string>,
-  artifact_meta = <table|nil>,
-  auto_start = <boolean|nil>,
-}
-```
-
-Effects:
-
-1. attach `artifact_ref` and `artifact_meta`
-2. set `stage='uploaded_to_cm5'`
-3. if `auto_start` is true (or the job default is true), immediately transition to staging and spawn a stage worker
-4. otherwise persist the attached-but-not-started job
 
 #### `cancel`
 
@@ -504,7 +462,7 @@ Effect:
 
 1. release/delete any retained artefact if still present
 2. delete the job from the control store
-3. remove it from local state
+3. delete it from local state
 4. unretain `state/update/jobs/<job_id>`
 
 Discarded jobs are removed rather than published in a visible `discarded` lifecycle state.
@@ -539,7 +497,7 @@ Response:
 
 The service constructs one backend instance per configured component.
 
-## `cm5_swupdate`
+### `cm5_swupdate`
 
 Built on top of the generic component-proxy backend.
 
@@ -552,7 +510,6 @@ Uses `device` to:
 
 Stage path:
 
-- open the artefact via `artifact_store`
 - call `stage_update` with:
   - `artifact_ref`
   - `expected_version`
@@ -570,7 +527,7 @@ Reconcile failure when:
 
 Default staged artefact retention for this backend is `keep`.
 
-## `mcu_component`
+### `mcu_component`
 
 Built on top of the component-proxy backend, but overrides stage.
 
@@ -606,7 +563,6 @@ Reconcile success when:
 - observed software version matches `expected_version`
 - and at least one of these is true:
   - boot id changed from `pre_commit_boot_id`
-  - incarnation changed from `pre_commit_incarnation`
   - updater state is already `running`, `ready`, `idle`, or absent
 
 Reconcile failure when:
@@ -634,7 +590,7 @@ Adoption rules:
 
 - `staging` -> `created` if the artefact ref still exists, else `failed` with `interrupted_before_stage`
 - `awaiting_return` stays resumable and gets `next_step='reconcile'`
-- `awaiting_approval`, `deferred`, or `staged` -> `awaiting_commit`
+- `awaiting_commit` stays passive and committable
 
 The service currently resumes at most one post-commit reconcile job automatically, because admission is global-single.
 
@@ -670,16 +626,18 @@ Current admission policy is one active job globally.
 State fields:
 
 - `state.locks.global`
-- `state.locks.component[component]`
 - `state.active_job`
 
-`can_activate()` currently enforces only the global lock, even though component lock state is also tracked and published.
+`can_activate()` currently enforces only the global lock.
 
 A worker slot owns:
 
+- worker-scope creation
 - lock acquisition
 - lock release
-- active worker join observation
+- `join_op()` for the current active worker
+
+The update service shell is responsible for observing active-worker completion and applying the resulting state transitions.
 
 ## Service flow
 
@@ -702,7 +660,7 @@ flowchart TD
   L --> H
   H -->|do:commit| M(Patch to awaiting_return, flush store, spawn commit worker)
   M --> H
-  H -->|do:upload_begin / attach_artifact / cancel / retry / discard| N(Apply lifecycle mutation)
+  H -->|do:cancel / retry / discard| N(Apply lifecycle mutation)
   N --> J
   H -->|runner staged| O(Patch to awaiting_commit; maybe release artefact)
   O --> J
@@ -724,7 +682,6 @@ flowchart TD
 
 - the shell owns durable state, locks, publication, and command handling
 - stage / commit / reconcile work runs in child scopes and reports back through a bounded mailbox
-- all material is referred to indirectly by artefact ref after job creation or upload attachment
-- upload-backed jobs are modelled directly in the same job lifecycle rather than as a separate update system
+- all material is referred to indirectly by artefact ref after job creation
 - destructive commit is followed by explicit observation and timeout-bounded reconcile
 - the current scheduling policy is intentionally simple: one active job globally

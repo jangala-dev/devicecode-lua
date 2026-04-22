@@ -2,51 +2,46 @@
 
 ## Purpose
 
-The UI Service is the local operator-facing application service responsible for:
+The UI service is the local operator-facing application service responsible for:
 
-1. **HTTP and WebSocket front-door** — serving static assets, exposing an authenticated JSON HTTP API, and exposing a session-bound WebSocket control channel.
-2. **Session-based local authentication** — issuing and pruning in-memory local UI sessions, attaching them to bus principals, and propagating those principals into per-request user connections.
-3. **Retained model cache** — maintaining a local read-mostly cache of selected retained topic spaces (`cfg`, `svc`, `state`, `cap`, `dev`) for exact reads, snapshots, and watch streams.
-4. **Local operator façades** — exposing helper endpoints for config, service status, fabric status, generic bus calls, and update job management, while delegating the underlying work to the existing service mesh over user-scoped bus connections.
-5. **Aggregate UI state publication** — publishing coarse retained service state under `state/ui/main`, including session count, connected WebSocket client count, and retained-model readiness.
+1. serving static assets
+2. exposing an authenticated JSON HTTP API
+3. exposing a session-bound WebSocket control channel
+4. maintaining a local retained-state read model over selected topic spaces
+5. opening user-scoped bus connections for delegated operations
+6. publishing coarse retained UI state under `state/ui/main`
+7. publishing a service announcement under `svc/<name>/announce`
 
-The service is intentionally a **thin front-door** rather than a policy engine. It does not implement business logic for config, updates, fabric, or device operations. Instead it:
-
-- authenticates a user,
-- opens a user-scoped local bus connection,
-- delegates to the existing command/config/update surfaces,
-- and provides a stable browser-facing transport over HTTP and WebSocket.
-
-**The reason UI exists is to provide one local, authenticated operator surface over the appliance’s retained state and command model, so management, inspection and update actions can be performed consistently without coupling browsers directly to internal service topology.**
+The service is intentionally a thin front door rather than a policy engine. It does not implement config, update, fabric, or device policy itself. It authenticates a user, opens a user-scoped connection, delegates to existing service endpoints, and serves a stable browser-facing surface over HTTP and WebSocket.
 
 ## Dependencies
 
-### Consumed retained topics (via internal UI model)
+### Internal retained model sources
 
 By default the service starts an internal retained-state model that replays and follows:
 
 | Pattern | Usage |
-|--------|-------|
-| `{'cfg', '#'}` | Configuration reads and config snapshots. |
-| `{'svc', '#'}` | Service announce/status inspection. |
-| `{'state', '#'}` | State inspection, fabric views, update job views, device views, and general UI reads/watches. |
-| `{'cap', '#'}` | Capability advertisement snapshots. |
-| `{'dev', '#'}` | Device advertisement snapshots. |
+|---|---|
+| `{'cfg','#'}` | Configuration reads and config snapshots |
+| `{'svc','#'}` | Service announce/status inspection |
+| `{'state','#'}` | State inspection, fabric views, update job views, device views, and general UI reads/watches |
+| `{'cap','#'}` | Capability advertisement snapshots |
+| `{'dev','#'}` | Device advertisement snapshots |
 
-These are not consumed directly by browser callers. They are normalised into the UI model and then served through exact/snapshot/watch APIs.
+These are consumed through the in-process UI model rather than being exposed directly to browser callers.
 
-### Service connections consumed on demand
+### User-scoped connections
 
-The service does not own a permanent generic bus helper connection for operator actions. Instead, for authenticated operations it calls `opts.connect(principal, origin_extra)` to create a **user-scoped connection** on demand.
+For authenticated operations the service uses `opts.connect(principal, origin_extra)` to create or adopt a user-scoped local bus connection.
 
 That user connection is then used for delegated operations such as:
 
 | Surface | Usage |
-|--------|-------|
+|---|---|
 | arbitrary `conn:call(topic, payload, ...)` | generic UI call façade |
 | `{'config', <service>, 'set'}` | config set helper |
 | `{'cmd','update','job', ...}` | update job create/get/list/do |
-| `artifact_store/main` capability | update upload ingress (`create_sink`) |
+| `artifact_store/main` capability | update upload ingress |
 
 The UI service itself does not talk to HAL directly.
 
@@ -55,12 +50,12 @@ The UI service itself does not talk to HAL directly.
 The default bootstrap login verifier uses:
 
 | Variable | Usage |
-|---------|-------|
-| `DEVICECODE_UI_ADMIN_PASSWORD` | Password for the built-in `admin` user when `opts.verify_login` is not supplied. |
+|---|---|
+| `DEVICECODE_UI_ADMIN_PASSWORD` | Password for the built-in `admin` user when `opts.verify_login` is not supplied |
 
-## Configuration / startup options
+## Startup options
 
-The current service is configured primarily through `start(conn, opts)` rather than through a retained `cfg/ui` topic.
+The current service is configured through `start(conn, opts)` rather than through retained `cfg/ui`.
 
 Relevant options are:
 
@@ -108,7 +103,7 @@ If not supplied:
 }
 ```
 
-There is no retained config watch in the current implementation; changing UI runtime parameters requires restarting the service with different options.
+There is no retained config watch in the current implementation.
 
 ## Authentication and session model
 
@@ -155,15 +150,15 @@ Set-Cookie: devicecode_session=<id>; Path=/; HttpOnly; SameSite=Strict
 
 On logout, it clears that cookie.
 
-## Retained state published
+## Retained topics published
 
 ### Service announce
 
 The service retains:
 
 | Topic | Usage |
-|------|-------|
-| `{'svc', <service_name>, 'announce'}` | Coarse operator-facing service capability advertisement. |
+|---|---|
+| `{'svc', <service_name>, 'announce'}` | Coarse operator-facing service capability advertisement |
 
 Default announce payload:
 
@@ -200,7 +195,7 @@ Default announce payload:
 The service retains:
 
 | Topic | Payload kind |
-|------|---------------|
+|---|---|
 | `{'state','ui','main'}` | `ui.main` |
 
 Payload shape:
@@ -229,8 +224,8 @@ Semantics:
 The service publishes local operator audit events under:
 
 | Topic prefix | Usage |
-|-------------|-------|
-| `{'obs','audit','ui', <kind>}` | Successful login/logout and config set audit facts. |
+|---|---|
+| `{'obs','audit','ui', <kind>}` | Successful login/logout and config set audit facts |
 
 Current audit kinds emitted directly by the service include:
 - `login`
@@ -309,8 +304,6 @@ The service currently exposes:
 - JSON HTTP API under `/api/...`
 - WebSocket API at `/ws`
 
-The HTTP transport is built on `lua-http` and the WebSocket transport is built on `http.websocket` over the same server.
-
 ## HTTP API
 
 Unless otherwise noted:
@@ -321,6 +314,7 @@ Unless otherwise noted:
 ### Authentication/session endpoints
 
 #### `POST /api/login`
+
 Request:
 
 ```lua
@@ -336,6 +330,7 @@ Response data:
 Also sets the session cookie.
 
 #### `POST /api/logout`
+
 Uses current session from cookie/header.
 
 Response data:
@@ -347,11 +342,13 @@ Response data:
 Also clears the session cookie.
 
 #### `GET /api/session`
+
 Returns the current public session record.
 
 ### Health and retained-model endpoints
 
 #### `GET /api/health`
+
 Returns:
 
 ```lua
@@ -365,6 +362,7 @@ Returns:
 ```
 
 #### `POST /api/model/exact`
+
 Request:
 
 ```lua
@@ -374,6 +372,7 @@ Request:
 Returns one model entry.
 
 #### `POST /api/model/snapshot`
+
 Request:
 
 ```lua
@@ -385,20 +384,24 @@ Returns one model snapshot.
 ### Service/config/fabric inspection endpoints
 
 #### `GET /api/services`
+
 Returns a snapshot containing:
 - retained `svc/*/announce`
 - retained `svc/*/status`
 
 #### `GET /api/capabilities`
+
 Returns a snapshot containing:
 - retained `cap/#`
 - retained `dev/#`
-- and the same service snapshot used by `/api/services`
+- the same service snapshot used by `/api/services`
 
 #### `GET /api/config/<service>`
+
 Returns retained `cfg/<service>` from the UI model.
 
 #### `POST /api/config/<service>`
+
 Request:
 
 ```lua
@@ -414,14 +417,17 @@ Delegates to:
 over a user-scoped bus connection.
 
 #### `GET /api/service/<service>/status`
+
 Returns retained `svc/<service>/status` from the UI model.
 
 #### `GET /api/fabric`
+
 Returns a combined fabric view containing:
 - retained `state/fabric`
 - retained `state/fabric/link/<id>/<view>` grouped by link id
 
 #### `GET /api/fabric/link/<link_id>`
+
 Returns:
 - `session`
 - `bridge`
@@ -432,6 +438,7 @@ for that retained fabric link state, if present.
 ### Generic call endpoint
 
 #### `POST /api/call`
+
 Request:
 
 ```lua
@@ -456,64 +463,45 @@ Returns the raw bus reply.
 ### Update job endpoints
 
 #### `GET /api/update/jobs`
+
 Returns the result of `cmd/update/job/list`.
 
 #### `POST /api/update/jobs`
+
 Request payload is forwarded to `cmd/update/job/create`.
 
-If the payload contains:
-
-```lua
-{ source = { kind = 'upload' } }
-```
-
-the handler forces:
-
-```lua
-options.auto_start = true
-options.auto_commit = true
-```
-
-unless already explicitly supplied.
-
-On success, upload-backed jobs are annotated with:
-
-```lua
-upload = {
-  required = true,
-  method = 'POST',
-  path = '/api/update/jobs/<job_id>/artifact',
-}
-```
-
 #### `GET /api/update/jobs/<job_id>`
+
 Returns the result of `cmd/update/job/get`.
 
 #### `POST /api/update/jobs/<job_id>/do`
+
 Request body is forwarded to `cmd/update/job/do` after injecting `job_id`.
 
-#### `POST /api/update/jobs/<job_id>/artifact`
-This is the browser upload ingress path for upload-backed update jobs.
+#### `POST /api/update/uploads`
+
+This is the browser upload ingress path for uploaded update artefacts.
 
 Request body:
 - raw octet stream
 
 Optional headers:
-- `content-length`
+- `x-artifact-component`
 - `x-artifact-name`
 - `x-artifact-version`
 - `x-artifact-build`
 - `x-artifact-checksum`
 
 Flow:
+
 1. validate session
 2. open a user-scoped connection
 3. open `artifact_store/main`
 4. call `create_sink` with transient upload metadata
 5. stream request body into the sink in chunks
-6. report interim upload progress through `cmd/update/job/do` with `op='upload_progress'`
-7. on success, `commit()` the sink to an artifact
-8. call `cmd/update/job/do` with `op='attach_artifact'`
+6. `commit()` the sink to an artefact
+7. create an update job referencing that artefact
+8. start the job immediately
 
 Response data:
 
@@ -575,93 +563,32 @@ When the active session changes:
 
 ### Supported WebSocket operations
 
-#### `hello`
-Returns:
-
-```lua
-{ service = <service name> }
-```
-
-#### `session`
-Returns current session record.
-
-#### `health`
-Returns the same payload as HTTP `/api/health`.
-
-#### `login`
-Request:
-
-```lua
-{ op = 'login', username = <string>, password = <string> }
-```
-
-Returns a public session record and adopts that session for subsequent socket operations.
-
-#### `logout`
-Logs out the current session and clears the active user connection for the socket.
-
-#### `config_get`
-Equivalent to HTTP config get.
-
-#### `config_set`
-Equivalent to HTTP config set.
-
-#### `service_status`
-Equivalent to HTTP service status.
-
-#### `services_snapshot`
-Equivalent to HTTP services snapshot.
-
-#### `fabric_status`
-Equivalent to HTTP fabric status.
-
-#### `fabric_link_status`
-Equivalent to HTTP fabric link status.
-
-#### `capability_snapshot`
-Equivalent to HTTP capability snapshot.
-
-#### `model_exact`
-Equivalent to HTTP model exact.
-
-#### `model_snapshot`
-Equivalent to HTTP model snapshot.
-
-#### `call`
-Equivalent to HTTP generic call.
-
-#### `watch_open`
-Request:
-
-```lua
-{
-  op = 'watch_open',
-  watch_id = <opaque client id>,
-  pattern = <topic pattern>,
-  queue_len = <number|nil>,
-}
-```
-
-Creates a retained-model watch and starts sending `watch_event` / `watch_closed` frames for that `watch_id`.
-
-#### `watch_close`
-Request:
-
-```lua
-{ op = 'watch_close', watch_id = <opaque client id> }
-```
-
-Closes the watch.
+- `hello`
+- `session`
+- `health`
+- `login`
+- `logout`
+- `config_get`
+- `config_set`
+- `service_status`
+- `services_snapshot`
+- `fabric_status`
+- `fabric_link_status`
+- `capability_snapshot`
+- `model_exact`
+- `model_snapshot`
+- `call`
+- `watch_open`
+- `watch_close`
 
 ### Not exposed on WebSocket today
 
-The current WebSocket implementation does **not** expose update-job create/get/list/do/upload operations. Those are currently HTTP-only.
+The current WebSocket implementation does **not** expose update-job create/get/list/do/upload operations.
 
 ## Query/helper semantics
 
-The service implements a small set of higher-level helper reads over the retained UI model.
-
 ### `services_snapshot`
+
 Returns:
 
 ```lua
@@ -673,6 +600,7 @@ Returns:
 ```
 
 ### `fabric_status`
+
 Returns:
 
 ```lua
@@ -691,6 +619,7 @@ Returns:
 ```
 
 ### `fabric_link_status`
+
 Returns:
 
 ```lua
@@ -702,6 +631,7 @@ Returns:
 ```
 
 ### `capability_snapshot`
+
 Returns:
 
 ```lua
@@ -736,81 +666,39 @@ HTTP routes and WebSocket replies both surface these normalised errors.
 
 ### UI shell
 
-```mermaid
-flowchart TD
-  St[Start] --> A(Require opts.connect)
-  A --> B(Create session store)
-  B --> C(Start retained UI model)
-  C --> D(Wait for model bootstrap)
-  D --> E(Retain svc/ui/announce)
-  E --> F(Retain state/ui/main)
-  F --> G(Spawn HTTP server)
-  G --> H{choice: shell pulse, model pulse/timeout}
-  H -->|session count or client count changed| I(Recompute aggregate)
-  I --> J(Retain state/ui/main)
-  J --> H
-  H -->|model changed| K(Update model_seq/model_ready)
-  K --> J
-  J --> H
-  H -->|prune tick| L(Prune expired sessions)
-  L --> I
-  H -->|model closed| M(Retain failed state)
-  M --> En[Exit with error]
-```
+1. require `opts.connect`
+2. create session store
+3. start retained UI model
+4. wait for model bootstrap
+5. retain `svc/ui/announce`
+6. retain `state/ui/main`
+7. spawn HTTP server
+8. react to local state changes, model changes, and prune ticks
+9. republish aggregate state whenever sessions, clients, or model status changes
 
 ### HTTP request path
 
-```mermaid
-sequenceDiagram
-  participant B as Browser
-  participant H as HTTP transport
-  participant A as UI app/handler
-  participant M as UI model
-  participant C as User bus connection
-  participant S as Service mesh
-
-  B->>H: HTTP request
-  H->>A: route + decoded body/session
-  alt model read helper
-    A->>M: exact/snapshot/helper query
-    M-->>A: retained view
-  else delegated action
-    A->>C: open/adopt user connection
-    C->>S: bus call / capability call
-    S-->>C: reply
-    C-->>A: reply
-  end
-  A-->>H: result or error
-  H-->>B: JSON response
-```
+1. transport decodes request and session
+2. route onto the UI app façade
+3. for read helpers, query the local UI model
+4. for delegated actions, open or reuse a user-scoped connection and call into the service mesh
+5. encode result or normalised error as JSON
 
 ### WebSocket watch path
 
-```mermaid
-sequenceDiagram
-  participant B as Browser
-  participant W as WS transport
-  participant A as UI app
-  participant M as UI model
+1. open WebSocket
+2. optionally adopt session from headers
+3. create or replace watches on `watch_open`
+4. replay retained snapshot
+5. emit live retain/unretain events
+6. close all watches when session changes or the socket closes
 
-  B->>W: watch_open(pattern, watch_id)
-  W->>A: watch_open
-  A->>M: open_watch(pattern)
-  M-->>W: replay retain events
-  W-->>B: watch_event(replay...)
-  W-->>B: watch_event(replay_done)
-  loop live updates
-    M-->>W: retain/unretain event
-    W-->>B: watch_event(live...)
-  end
-```
+## Architecture notes
 
-## Architecture
-
-- The service is deliberately a **local operator façade**, not a business-logic service.
-- Authentication is local-session based and currently bootstrap-friendly by default.
-- All privileged work runs through user-scoped bus connections so that the caller principal is preserved.
-- The retained UI model is the read path for snapshots and watches; it avoids repeated direct retained walks by browser callers.
-- HTTP and WebSocket share the same app surface, but not every capability is exposed on both transports.
-- The update upload path uses `artifact_store.create_sink` so browser artefacts are normalised through capability backends rather than by direct filesystem access.
-- Browser-visible aggregate state is intentionally small: the service publishes only a coarse retained summary under `state/ui/main`, while richer reads come from the UI model and delegated helper endpoints.
+- the service is deliberately a local operator façade, not a business-logic service
+- authentication is local-session based and currently bootstrap-friendly by default
+- all privileged work runs through user-scoped bus connections so the caller principal is preserved
+- the retained UI model is the read path for snapshots and watches; it avoids repeated direct retained walks by browser callers
+- HTTP and WebSocket share the same app façade, but not every capability is exposed on both transports
+- uploaded artefacts are normalised through `artifact_store.create_sink` rather than direct filesystem access
+- browser-visible aggregate state is intentionally small: rich reads come from the UI model and delegated helper endpoints

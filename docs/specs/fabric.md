@@ -2,13 +2,13 @@
 
 ## Purpose
 
-The Fabric service is the shell responsible for supervising in-process peer links.
+The Fabric service supervises in-process peer links.
 It owns:
 
 1. retained `cfg/fabric` consumption
 2. desired-vs-live link supervision
 3. aggregate retained summary under `state/fabric`
-4. a service-level transfer RPC that routes requests to the correct link child
+4. a service-level transfer RPC that routes requests to the correct live link child
 
 Each live link runs in its own child scope. The child owns:
 
@@ -18,8 +18,6 @@ Each live link runs in its own child scope. The child owns:
 - blob transfer
 
 This keeps restart policy and aggregate visibility in the shell while isolating link faults inside child scopes.
-
-**The reason Fabric exists is to let separate compute elements communicate as one structured local control plane, so components such as the CM5, switch and MCU can exchange state, calls and artefacts reliably without each service needing transport-specific logic.**
 
 ## Dependencies
 
@@ -72,15 +70,14 @@ Effective link config shape:
       capability_id = <string|nil>,
       uart_id = <string|nil>,
       transport = {
-        class = <string|nil>,       -- default 'uart'
+        class = <string|nil>,
         id = <string|nil>,
-        terminator = <string|nil>,  -- default '
-'
-        open_verb = <string|nil>,   -- default 'open'
+        terminator = <string|nil>,
+        open_verb = <string|nil>,
         open_opts = <table|nil>,
         read = <boolean|nil>,
         write = <boolean|nil>,
-        open = <function|nil>,      -- optional custom transport factory
+        open = <function|nil>,
       } | nil,
 
       hello_interval_s = <number|nil>,
@@ -105,12 +102,12 @@ Effective link config shape:
       max_pending_calls = <number|nil>,
       max_inbound_helpers = <number|nil>,
       call_timeout_s = <number|nil>,
-    }
-  }
+    },
+  },
 }
 ```
 
-### Topic map rules
+### Topic-map rules
 
 `services.fabric.topicmap` normalises declarative prefix rules. Accepted fields include:
 
@@ -123,7 +120,7 @@ Effective link config shape:
   remote_prefix = { ... } | nil,
   from = { ... } | nil,
   to = { ... } | nil,
-  topic = { ... } | nil,   -- optional exact match
+  topic = { ... } | nil,
   timeout = <number|nil>,
 }
 ```
@@ -138,7 +135,7 @@ Semantics:
 
 ## Exposed command API
 
-## `cmd/fabric/transfer`
+### `cmd/fabric/transfer`
 
 Request payload must include:
 
@@ -151,6 +148,13 @@ Request payload must include:
 ```
 
 The shell validates `link_id`, resolves the live link, and forwards the whole request object to that link child’s transfer mailbox.
+
+Failures at the shell level:
+
+- `invalid_link_id`
+- `unknown_transfer_op`
+- `link_not_live`
+- `transfer_request_rejected`
 
 ### `send_blob`
 
@@ -175,13 +179,33 @@ The link child:
 6. waits for `xfer_done`
 7. replies to the original caller only after remote completion
 
+On success the final reply payload is whatever the transfer manager returned, typically including:
+
+```lua
+{
+  ok = true,
+  xfer_id = <string>,
+  size = <integer>,
+  checksum = <string|nil>,
+}
+```
+
 ### `status`
 
 ```lua
 { link_id = <string>, op = 'status' }
 ```
 
-Returns the link’s current outgoing/incoming transfer snapshot.
+Returns a coarse snapshot such as:
+
+```lua
+{
+  ok = true,
+  link_id = <string>,
+  outgoing = <table|nil>,
+  incoming = <table|nil>,
+}
+```
 
 ### `abort`
 
@@ -189,16 +213,11 @@ Returns the link’s current outgoing/incoming transfer snapshot.
 { link_id = <string>, op = 'abort', reason = <string|nil> }
 ```
 
-Aborts any live incoming and outgoing transfer for the link.
+Aborts any live incoming and outgoing transfer for the link and replies with:
 
-### Failure cases
-
-The shell rejects the request when:
-
-- `link_id` is missing or empty
-- `op` is unsupported
-- the link is not currently live
-- the child transfer mailbox rejects the request
+```lua
+{ ok = true }
+```
 
 ## Retained topics published
 
@@ -228,8 +247,8 @@ Payload shape:
       member_class = <string|nil>,
       link_class = <string|nil>,
       node_id = <string|nil>,
-    }
-  }
+    },
+  },
 }
 ```
 
@@ -259,7 +278,7 @@ All of these payloads use the common envelope produced by `statefmt.link_compone
 
 ## Link child responsibilities
 
-## Session control
+### Session control
 
 `session_ctl` owns `state/fabric/link/<id>/session`.
 
@@ -290,12 +309,12 @@ Retained session status shape:
 }
 ```
 
-`ready` is only true once both of these hold:
+`ready` is only true once both hold:
 
 - the session is established
 - the RPC bridge has reported itself ready for the current generation
 
-## RPC bridge
+### RPC bridge
 
 `rpc_bridge` owns `state/fabric/link/<id>/bridge`.
 
@@ -322,7 +341,7 @@ Retained bridge status shape:
 }
 ```
 
-## Transfer manager
+### Transfer manager
 
 `transfer_mgr` owns `state/fabric/link/<id>/transfer`.
 
@@ -359,7 +378,7 @@ Incoming flow:
 8. if `meta.receiver` is a topic, call it with `{ link_id, xfer_id, size, checksum, meta, artefact }`
 9. send `xfer_done`
 
-Retained transfer status is coarse but enough for UI and higher-level services. It always includes `state`, and when a transfer is active or complete it may also include:
+Retained transfer status is coarse but enough for observability. It always includes `state`, and when a transfer is active or complete it may also include:
 
 - `xfer_id`
 - `direction` (`'in'` or `'out'`)
@@ -372,7 +391,7 @@ The transfer topic is unretained when the manager stops.
 
 ## Reader / writer scheduling
 
-## Reader
+### Reader
 
 The reader:
 
@@ -387,7 +406,7 @@ Bad frames are tolerated up to:
 
 If that threshold is exceeded, the reader faults the link child.
 
-## Writer
+### Writer
 
 The writer:
 
@@ -427,39 +446,26 @@ All wire frames are JSON-encoded line-delimited objects.
 
 ## Shell flow
 
-```mermaid
-flowchart TD
-  St[Start] --> A(Watch retained cfg/fabric)
-  A --> B(Bind cmd/fabric/transfer)
-  B --> C{choice: cfg event, transfer req, child report, restart timer}
-  C -->|cfg retain/unretain| D(Normalise desired links)
-  D --> E(Spawn new links, stop changed links, remove missing links)
-  E --> F(Publish state/fabric summary)
-  F --> C
-  C -->|transfer req| G(Route request to target link transfer mailbox)
-  G --> C
-  C -->|link_summary| H(Update coarse per-link summary)
-  H --> F
-  C -->|link_exit| I(Remove live link, join child, schedule restart if still desired)
-  I --> F
-  C -->|restart timer| J(Respawn desired link)
-  J --> F
-```
+1. watch retained `cfg/fabric`
+2. bind `cmd/fabric/transfer`
+3. normalise desired links
+4. spawn new links, stop changed links, remove missing links
+5. publish aggregate `state/fabric`
+6. route transfer requests to the target link child
+7. consume child summary reports
+8. consume child exit reports and schedule restart when still desired
+9. respawn desired links after `restart_backoff_s`
 
 ## Link child flow
 
-```mermaid
-flowchart TD
-  St[Start] --> A(Open transport)
-  A --> B(Allocate control/rpc/transfer mailboxes)
-  B --> C(Spawn reader)
-  C --> D(Spawn writer)
-  D --> E(Spawn session_ctl)
-  E --> F(Spawn rpc_bridge)
-  F --> G(Spawn transfer_mgr)
-  G --> H(Block on current scope not_ok_op)
-  H --> En[Child exits on fault/cancellation]
-```
+1. open transport
+2. allocate control, RPC, transfer, and writer mailboxes
+3. spawn reader
+4. spawn writer
+5. spawn session control
+6. spawn RPC bridge
+7. spawn transfer manager
+8. exit the child scope on fault or cancellation
 
 ## Architecture notes
 
