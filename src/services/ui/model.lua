@@ -24,7 +24,7 @@ local function watcher_close(self, key, reason)
 	local rec = self._watchers[key]
 	if not rec then return false end
 	self._watchers[key] = nil
-	pcall(function() rec.tx:close(reason or 'closed') end)
+	rec.tx:close(reason or 'closed')
 	return true
 end
 
@@ -50,7 +50,7 @@ function Model:close(reason)
 	self._closed = true
 	self._close_reason = reason or 'closed'
 	for _, rw in pairs(self._source_watches) do
-		pcall(function() rw:unwatch() end)
+		rw:unwatch()
 	end
 	for key in pairs(self._watchers) do
 		watcher_close(self, key, self._close_reason)

@@ -101,14 +101,6 @@ local function link_summary(rec)
 	}
 end
 
-local function retain_best_effort(conn, topic, payload)
-	safe.pcall(function() conn:retain(topic, payload) end)
-end
-
-local function unretain_best_effort(conn, topic)
-	safe.pcall(function() conn:unretain(topic) end)
-end
-
 local function publish_summary(conn, svc, state)
 	local links = {}
 
@@ -125,7 +117,7 @@ local function publish_summary(conn, svc, state)
 
 	svc:status('running', status)
 	svc:obs_state('summary', payload)
-	retain_best_effort(conn, FABRIC_STATE_TOPIC, payload)
+	conn:retain(FABRIC_STATE_TOPIC, payload)
 end
 
 local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
@@ -342,7 +334,7 @@ function M.start(conn, opts)
 	local svc = base.new(conn, { name = opts.name or 'fabric', env = opts.env })
 
 	fibers.current_scope():finally(function()
-		unretain_best_effort(conn, FABRIC_STATE_TOPIC)
+		conn:unretain(FABRIC_STATE_TOPIC)
 	end)
 
 	local report_tx, report_rx = q(64)

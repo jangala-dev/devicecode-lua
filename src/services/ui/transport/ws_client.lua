@@ -123,7 +123,7 @@ function M.run(svc, app, stream, req_headers, opts)
 		local rec = watches[watch_id]
 		if not rec then return false end
 		watches[watch_id] = nil
-		pcall(function() rec.watch:close(reason or 'closed') end)
+		rec.watch:close(reason or 'closed')
 		return true
 	end
 
@@ -133,7 +133,7 @@ function M.run(svc, app, stream, req_headers, opts)
 
 	local function clear_user_conn(reason)
 		close_all_watches(reason or 'logout')
-		if user_conn then pcall(function() user_conn:disconnect() end) end
+		if user_conn then user_conn:disconnect() end
 		user_conn = nil
 		current_session = nil
 		current_rec = nil
@@ -184,7 +184,7 @@ function M.run(svc, app, stream, req_headers, opts)
 			end
 			inbound_tx:send({ kind = 'frame', msg = msg, opcode = opcode })
 		end
-		pcall(function() inbound_tx:close('reader_done') end)
+		inbound_tx:close('reader_done')
 	end)
 	if not ok_reader then error(reader_err, 0) end
 
@@ -262,9 +262,9 @@ function M.run(svc, app, stream, req_headers, opts)
 	end
 
 	clear_user_conn('socket_closed')
-	pcall(function() inbound_tx:close('done') end)
+	inbound_tx:close('done')
 	-- close on a stream-backed websocket may yield
-	safe.pcall(function() ws:close() end)
+	ws:close()
 	on_closed()
 end
 

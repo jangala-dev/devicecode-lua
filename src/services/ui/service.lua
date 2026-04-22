@@ -176,11 +176,17 @@ function M.start(conn, opts)
 	end
 
 	local function with_user_conn(principal, origin_extra, fn)
-		local user_conn, err = open_user_conn(principal, origin_extra)
-		if not user_conn then return nil, err end
-		local ok, a, b, c = safe.pcall(fn, user_conn)
-		pcall(function() user_conn:disconnect() end)
-		if not ok then return nil, errors.from(a, 502) end
+		local st, _, a, b, c = scope.run(function(s)
+			local user_conn, err = open_user_conn(principal, origin_extra)
+			if not user_conn then error(err, 0) end
+			s:finally(function()
+				user_conn:disconnect()
+			end)
+			local ok, r1, r2, r3 = safe.pcall(fn, user_conn)
+			if not ok then error(r1, 0) end
+			return r1, r2, r3
+		end)
+		if st ~= 'ok' then return nil, errors.from(a, 502) end
 		return a, b, c
 	end
 

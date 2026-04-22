@@ -2,7 +2,6 @@ local fibers    = require 'fibers'
 local pulse     = require 'fibers.pulse'
 local mailbox   = require 'fibers.mailbox'
 local base      = require 'devicecode.service_base'
-local safe      = require 'coxpcall'
 local model     = require 'services.device.model'
 local projection= require 'services.device.projection'
 local observers = require 'services.device.observers'
@@ -10,14 +9,6 @@ local proxy     = require 'services.device.proxy'
 
 local M = {}
 local SCHEMA = 'devicecode.config/device/1'
-
-local function retain_best_effort(conn, topic, payload)
-    safe.pcall(function() conn:retain(topic, payload) end)
-end
-
-local function unretain_best_effort(conn, topic)
-    safe.pcall(function() conn:unretain(topic) end)
-end
 
 function M.start(conn, opts)
     opts = opts or {}
@@ -41,22 +32,22 @@ function M.start(conn, opts)
         local rec = state.components[name]
         if not rec then return end
         local ts = svc:now()
-        retain_best_effort(conn, projection.component_topic(name), projection.component_view(name, rec, ts))
-        retain_best_effort(conn, projection.component_software_topic(name), projection.software_payload(name, rec, ts))
-        retain_best_effort(conn, projection.component_update_topic(name), projection.update_payload(name, rec, ts))
+        conn:retain(projection.component_topic(name), projection.component_view(name, rec, ts))
+        conn:retain(projection.component_software_topic(name), projection.software_payload(name, rec, ts))
+        conn:retain(projection.component_update_topic(name), projection.update_payload(name, rec, ts))
         model.clear_component_dirty(state, name)
     end
 
     local function publish_summary()
         local ts = svc:now()
-        retain_best_effort(conn, projection.summary_topic(), projection.summary_payload(state, ts))
-        retain_best_effort(conn, projection.self_topic(), projection.self_payload(state, ts))
+        conn:retain(projection.summary_topic(), projection.summary_payload(state, ts))
+        conn:retain(projection.self_topic(), projection.self_payload(state, ts))
         model.set_summary_clean(state)
     end
 
     local function close_observers()
         for _, child in pairs(observer_scopes) do
-            safe.pcall(function() child:cancel('rebuild observers') end)
+            child:cancel('rebuild observers')
         end
         observer_scopes = {}
     end
@@ -79,9 +70,9 @@ function M.start(conn, opts)
         model.apply_cfg(state, payload)
         for name in pairs(old) do
             if not state.components[name] then
-                unretain_best_effort(conn, projection.component_topic(name))
-                unretain_best_effort(conn, projection.component_software_topic(name))
-                unretain_best_effort(conn, projection.component_update_topic(name))
+                conn:unretain(projection.component_topic(name))
+                conn:unretain(projection.component_software_topic(name))
+                conn:unretain(projection.component_update_topic(name))
             end
         end
         rebuild_observers()
@@ -94,17 +85,17 @@ function M.start(conn, opts)
 
     fibers.current_scope():finally(function()
         close_observers()
-        safe.pcall(function() self_ep:unbind() end)
-        safe.pcall(function() list_ep:unbind() end)
-        safe.pcall(function() get_ep:unbind() end)
-        safe.pcall(function() do_ep:unbind() end)
+        self_ep:unbind()
+        list_ep:unbind()
+        get_ep:unbind()
+        do_ep:unbind()
         for name, _ in pairs(state.components) do
-            unretain_best_effort(conn, projection.component_topic(name))
-            unretain_best_effort(conn, projection.component_software_topic(name))
-            unretain_best_effort(conn, projection.component_update_topic(name))
+            conn:unretain(projection.component_topic(name))
+            conn:unretain(projection.component_software_topic(name))
+            conn:unretain(projection.component_update_topic(name))
         end
-        unretain_best_effort(conn, projection.self_topic())
-        unretain_best_effort(conn, projection.summary_topic())
+        conn:unretain(projection.self_topic())
+        conn:unretain(projection.summary_topic())
     end)
 
     local seen = changed:version()

@@ -7,7 +7,6 @@ local fibers    = require 'fibers'
 local pulse_mod = require 'fibers.pulse'
 local runtime   = require 'fibers.runtime'
 local sleep     = require 'fibers.sleep'
-local safe      = require 'coxpcall'
 local uuid      = require 'uuid'
 
 local statefmt  = require 'services.fabric.statefmt'
@@ -43,22 +42,18 @@ local function same_snapshot(a, b)
 		and a.ready == b.ready
 end
 
-local function retain_best_effort(conn, topic, payload)
+local function retain_required(conn, topic, payload)
 	if not conn then return end
-	safe.pcall(function ()
-		conn:retain(topic, payload)
-	end)
+	conn:retain(topic, payload)
 end
 
-local function unretain_best_effort(conn, topic)
+local function unretain_required(conn, topic)
 	if not conn then return end
-	safe.pcall(function ()
-		conn:unretain(topic)
-	end)
+	conn:unretain(topic)
 end
 
 local function publish_state(conn, topic, link_id, snapshot)
-	retain_best_effort(conn, topic, statefmt.link_component('session', link_id, {
+	retain_required(conn, topic, statefmt.link_component('session', link_id, {
 		state = snapshot.state,
 		local_sid = snapshot.local_sid,
 		peer_sid = snapshot.peer_sid,
@@ -127,7 +122,7 @@ function M.new_state(link_id, state_conn)
 	end
 
 	function holder:unretain()
-		unretain_best_effort(state_conn, topic)
+		unretain_required(state_conn, topic)
 	end
 
 	maybe_publish(true)
@@ -258,7 +253,7 @@ function M.run(ctx)
 			s.ready = false
 			s.established = false
 		end)
-		unretain_best_effort(state_conn, topic)
+		unretain_required(state_conn, topic)
 	end)
 
 	while true do

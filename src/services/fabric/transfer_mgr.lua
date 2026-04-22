@@ -38,12 +38,12 @@ local function fail_req(req, err)
 	req:fail(err)
 end
 
-local function retain_best_effort(conn, topic, payload)
-	pcall(function() conn:retain(topic, payload) end)
+local function retain_required(conn, topic, payload)
+	conn:retain(topic, payload)
 end
 
-local function unretain_best_effort(conn, topic)
-	pcall(function() conn:unretain(topic) end)
+local function unretain_required(conn, topic)
+	conn:unretain(topic)
 end
 
 function M.run(ctx)
@@ -60,7 +60,7 @@ function M.run(ctx)
 	local transfer_topic = statefmt.component_topic(link_id, 'transfer')
 
 	fibers.current_scope():finally(function()
-		unretain_best_effort(conn, transfer_topic)
+		unretain_required(conn, transfer_topic)
 	end)
 
 	local outgoing = nil
@@ -69,7 +69,7 @@ function M.run(ctx)
 	local last_generation = session:get().generation
 
 	local function publish_state(status)
-		retain_best_effort(conn, transfer_topic, statefmt.link_component('transfer', link_id, status))
+		retain_required(conn, transfer_topic, statefmt.link_component('transfer', link_id, status))
 	end
 
 	publish_state({ state = 'idle' })
@@ -84,7 +84,7 @@ function M.run(ctx)
 
 	local function clear_incoming(reason)
 		if incoming and incoming.sink and incoming.sink.abort then
-			pcall(function() incoming.sink:abort() end)
+			incoming.sink:abort()
 		end
 		incoming = nil
 		publish_state({ state = 'idle', err = reason })
@@ -271,7 +271,7 @@ function M.run(ctx)
 				artefact = artefact,
 			}, { timeout = phase_timeout })
 			if reply == nil then
-				pcall(function() artefact:delete() end)
+				artefact:delete()
 				send_frame(tx_control, 'control', { type = 'xfer_abort', xfer_id = frame.xfer_id, err = tostring(err or 'receiver_failed') })
 				clear_incoming(tostring(err or 'receiver_failed'))
 				return

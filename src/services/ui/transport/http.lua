@@ -137,18 +137,20 @@ local function serve_static(stream, req_method, req_path, www_root)
 	if not path then write_text(stream, 404, 'not found\n'); return true end
 	local s = file.open(path, 'r')
 	if not s then write_text(stream, 404, 'not found\n'); return true end
+	fibers.current_scope():finally(function()
+		s:close()
+	end)
 	local h = response_headers(200, mime_for_path(path))
 	assert(stream:write_headers(h, req_method == 'HEAD'))
 	if req_method ~= 'HEAD' then
 		while true do
 			local chunk, rerr = s:read_some(16384)
-			if rerr ~= nil then safe.pcall(function() s:close() end); write_text(stream, 500, 'read error\n'); return true end
+			if rerr ~= nil then write_text(stream, 500, 'read error\n'); return true end
 			if chunk == nil then break end
 			assert(stream:write_chunk(chunk, false))
 		end
 		assert(stream:write_chunk('', true))
 	end
-	s:close()
 	return true
 end
 
@@ -348,7 +350,7 @@ function M.run(svc, app, opts)
 				ok, err = safe.pcall(self.onstream, self, stream)
 			end
 			if not ok then self:onerror()(self, stream, 'onstream', err) end
-			if stream.state ~= 'closed' then safe.pcall(function() stream:shutdown() end) end
+			if stream.state ~= 'closed' then stream:shutdown() end
 		end)
 	end
 

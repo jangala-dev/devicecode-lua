@@ -1,6 +1,7 @@
 local fibers = require "fibers"
 local file   = require "fibers.io.file"
 local cjson  = require "cjson.safe"
+local safe = require 'coxpcall'
 
 local perform = fibers.perform
 
@@ -53,12 +54,12 @@ local function write_file(path, data)
     local n, werr = f:write(data)
     f:close()
     if n == nil then
-        pcall(function() file.unlink(tmp) end)
+        safe.pcall(function() file.unlink(tmp) end)
         return false, tostring(werr)
     end
     local ok_rename, rerr = file.rename(tmp, path)
     if not ok_rename then
-        pcall(function() file.unlink(tmp) end)
+        safe.pcall(function() file.unlink(tmp) end)
         return false, tostring(rerr)
     end
     return true, ''
@@ -174,7 +175,7 @@ end
 function Store:delete(ns, key)
     if not valid_ns(ns) then return false, 'invalid_namespace' end
     if not valid_key(key) then return false, 'invalid_key' end
-    pcall(function() file.unlink(record_path(self, ns, key)) end)
+    safe.pcall(function() file.unlink(record_path(self, ns, key)) end)
     local keys, err = load_index(self, ns)
     if not keys then return false, err end
     local out = {}

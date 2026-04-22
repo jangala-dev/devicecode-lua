@@ -71,14 +71,14 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta)
     while true do
         local chunk, rerr = stream:get_body_chars(64 * 1024)
         if chunk == nil then
-            pcall(function() sink:abort() end)
+            sink:abort()
             self:_set_session(upload_id, { state = 'failed', error = tostring(rerr or 'body_read_failed'), sent = offset, updated_at = os.time() })
             return nil, errors.bad_request('body_read_failed: ' .. tostring(rerr or 'body_read_failed'))
         end
         if chunk == '' then break end
         local ok, werr = sink:write_chunk(offset, chunk)
         if not ok then
-            pcall(function() sink:abort() end)
+            sink:abort()
             self:_set_session(upload_id, { state = 'failed', error = tostring(werr or 'sink_write_failed'), sent = offset, updated_at = os.time() })
             return nil, errors.from(werr or 'sink_write_failed', 502)
         end
@@ -139,7 +139,7 @@ function Uploads:upload_update(session_id, stream, req_headers)
         local created, uerr = self:_create_update_job(user_conn, artefact, meta)
         if created == nil then
             local delete_opts = assert(cap_sdk.args.new.ArtifactStoreDeleteOpts(artefact:ref()))
-            pcall(function() artifact_cap:call_control('delete', delete_opts) end)
+            artifact_cap:call_control('delete', delete_opts)
             self:_set_session(upload_id, { state = 'failed', error = tostring(uerr or 'update_create_failed'), updated_at = os.time() })
             return nil, uerr
         end
@@ -147,7 +147,7 @@ function Uploads:upload_update(session_id, stream, req_headers)
         local started, serr = self:_start_update_job(user_conn, created.job.job_id)
         if started == nil then
             local delete_opts = assert(cap_sdk.args.new.ArtifactStoreDeleteOpts(artefact:ref()))
-            pcall(function() artifact_cap:call_control('delete', delete_opts) end)
+            artifact_cap:call_control('delete', delete_opts)
             self:_set_session(upload_id, { state = 'failed', error = tostring(serr or 'update_start_failed'), updated_at = os.time() })
             return nil, serr
         end

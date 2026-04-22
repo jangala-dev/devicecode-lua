@@ -6,6 +6,7 @@
 -- in-memory helpers for tests and simple local flows.
 
 local checksum = require 'services.fabric.checksum'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -203,29 +204,54 @@ function M.copy(source, sink, opts)
     local expected_size = opts.expected_size or src:size()
     local expected_checksum = opts.expected_checksum or src:checksum()
 
-    while true do
-        local chunk, rerr = src:read_chunk(offset, chunk_size)
-        if chunk == nil then
-            pcall(function() sink:abort() end)
-            return nil, rerr or 'read_failed'
+    local committed = false
+
+    local function abort_uncommitted()
+        if not committed then
+            sink:abort()
         end
-        if chunk == '' then break end
-        local ok, werr = sink:write_chunk(offset, chunk)
-        if not ok then
-            pcall(function() sink:abort() end)
-            return nil, werr or 'write_failed'
+    end
+
+    local function run_copy()
+        while true do
+            local chunk, rerr = src:read_chunk(offset, chunk_size)
+            if chunk == nil then
+                abort_uncommitted()
+                return nil, rerr or 'read_failed'
+            end
+            if chunk == '' then break end
+            local ok, werr = sink:write_chunk(offset, chunk)
+            if not ok then
+                abort_uncommitted()
+                return nil, werr or 'write_failed'
+            end
+            offset = offset + #chunk
         end
-        offset = offset + #chunk
+        if offset ~= expected_size then
+            abort_uncommitted()
+            return nil, 'size_mismatch'
+        end
+        if sink:checksum() ~= expected_checksum then
+            abort_uncommitted()
+            return nil, 'checksum_mismatch'
+        end
+        local artefact, cerr = sink:commit()
+        if artefact == nil then
+            abort_uncommitted()
+            return nil, cerr
+        end
+        committed = true
+        return artefact, nil
     end
-    if offset ~= expected_size then
-        pcall(function() sink:abort() end)
-        return nil, 'size_mismatch'
+
+    local ok, artefact, copy_err = safe.xpcall(run_copy, function(e)
+        abort_uncommitted()
+        return e
+    end)
+    if not ok then
+        error(artefact, 0)
     end
-    if sink:checksum() ~= expected_checksum then
-        pcall(function() sink:abort() end)
-        return nil, 'checksum_mismatch'
-    end
-    return sink:commit()
+    return artefact, copy_err
 end
 
 return M

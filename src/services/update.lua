@@ -186,7 +186,7 @@ function M.start(conn, opts)
 
     local function rebuild_component_obs()
         for _, rec in pairs(state.component_obs) do
-            pcall(function() rec.watch:unwatch() end)
+            rec.watch:unwatch()
         end
         state.component_obs = {}
         for component, ccfg in pairs(state.cfg.components) do
@@ -228,10 +228,10 @@ function M.start(conn, opts)
     end
 
     fibers.current_scope():finally(function()
-        safe.pcall(function() create_ep:unbind() end)
-        safe.pcall(function() do_ep:unbind() end)
-        safe.pcall(function() get_ep:unbind() end)
-        safe.pcall(function() list_ep:unbind() end)
+        create_ep:unbind()
+        do_ep:unbind()
+        get_ep:unbind()
+        list_ep:unbind()
     end)
 
     rebuild_backends()

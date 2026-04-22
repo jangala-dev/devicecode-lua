@@ -9,6 +9,7 @@ local sleep = require "fibers.sleep"
 local op = require "fibers.op"
 local channel = require "fibers.channel"
 local file = require "fibers.io.file"
+local safe = require 'coxpcall'
 
 ---@class FSDriver
 ---@field scope Scope
@@ -247,7 +248,7 @@ function FSDriver:control_manager()
             ok = false
             reason = "no function exists for verb: " .. tostring(validation_err)
         else
-            local call_ok, fn_ok, fn_reason, fn_code = pcall(fn, self, root_name, request.opts)
+            local call_ok, fn_ok, fn_reason, fn_code = safe.pcall(fn, self, root_name, request.opts)
             if not call_ok then
                 ok = false
                 reason = "internal error: " .. tostring(fn_ok)

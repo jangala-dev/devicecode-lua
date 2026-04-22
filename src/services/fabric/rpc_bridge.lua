@@ -27,14 +27,14 @@ local function send_rpc(tx_rpc, frame)
 	send_required(tx_rpc, item, 'tx_rpc_overflow')
 end
 
-local function retain_best_effort(conn, topic, payload)
+local function retain_required(conn, topic, payload)
 	if not conn then return end
-	pcall(function() conn:retain(topic, payload) end)
+	conn:retain(topic, payload)
 end
 
-local function unretain_best_effort(conn, topic)
+local function unretain_required(conn, topic)
 	if not conn then return end
-	pcall(function() conn:unretain(topic) end)
+	conn:unretain(topic)
 end
 
 local function is_import_origin(origin, link_id)
@@ -175,13 +175,13 @@ function M.run(ctx)
 			or last_bridge.established ~= status.established
 
 		if changed then
-			retain_best_effort(state_conn, bridge_topic, statefmt.link_component('bridge', link_id, status))
+			retain_required(state_conn, bridge_topic, statefmt.link_component('bridge', link_id, status))
 			last_bridge = status
 		end
 	end
 
 	fibers.current_scope():finally(function()
-		unretain_best_effort(state_conn, bridge_topic)
+		unretain_required(state_conn, bridge_topic)
 	end)
 
 	publish_bridge_state(true)

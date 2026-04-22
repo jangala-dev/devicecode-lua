@@ -1,4 +1,3 @@
-local safe = require 'coxpcall'
 local uuid = require 'uuid'
 
 local M = {}
@@ -105,7 +104,7 @@ function Commands:discard_job(job)
     end
     local _ = ctx.store_sync.delete_job(ctx.repo, job.job_id)
     ctx.model.remove_job(ctx.state, job.job_id)
-    safe.pcall(function() ctx.conn:unretain(ctx.projection.job_topic(job.job_id)) end)
+    ctx.conn:unretain(ctx.projection.job_topic(job.job_id))
     ctx.changed:signal()
     return { ok = true }, nil
 end

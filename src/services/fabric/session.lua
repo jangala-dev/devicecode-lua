@@ -13,7 +13,6 @@
 
 local fibers         = require 'fibers'
 local mailbox        = require 'fibers.mailbox'
-local safe           = require 'coxpcall'
 local op             = require 'fibers.op'
 
 local session_ctl    = require 'services.fabric.session_ctl'
@@ -52,7 +51,7 @@ function M.run(params)
 	end
 
 	fibers.current_scope():finally(function()
-		safe.pcall(function() transport:close() end)
+		transport:close()
 	end)
 
 	local control_in_tx, control_in_rx = q(32)
