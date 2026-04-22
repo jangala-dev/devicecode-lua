@@ -23,17 +23,28 @@ local function runner_context(conn, job, backend, tx, reconcile_cfg, observe, se
     }
 end
 
-local function run_work_unit(ctx, body)
-    local st, _rep, primary = fibers.run_scope(function()
+local function run_work_unit_op(ctx, body)
+    return fibers.run_scope_op(function()
         return body(ctx)
+    end):wrap(function(st, _rep, primary)
+        if st == 'ok' then
+            return 'ok'
+        elseif st == 'cancelled' then
+            return 'cancelled', primary
+        else
+            ctx.emit({ tag = 'failed', job_id = ctx.job.job_id, err = tostring(primary or 'runner_failed') })
+            return 'failed', primary
+        end
     end)
+end
 
+local function run_work_unit(ctx, body)
+    local st, primary = fibers.perform(run_work_unit_op(ctx, body))
     if st == 'ok' then
         return true
     elseif st == 'cancelled' then
         error(scope.cancelled(primary), 0)
     else
-        ctx.emit({ tag = 'failed', job_id = ctx.job.job_id, err = tostring(primary or 'runner_failed') })
         return nil, primary
     end
 end
@@ -83,7 +94,7 @@ local function current_version(observe)
 end
 
 local function reconcile_body(ctx)
-    local outcome, result = await_mod.until_changed_or_timeout({
+    local outcome, result = fibers.perform(await_mod.until_changed_or_timeout_op({
         timeout_s = ctx.reconcile_cfg.timeout_s,
         version = function() return current_version(ctx.observe) end,
         changed_op = function(seen) return ctx.observe:changed_op(seen) end,
@@ -94,15 +105,24 @@ local function reconcile_body(ctx)
         on_progress = function(progress)
             ctx.emit({ tag = 'reconcile_progress', job_id = ctx.job.job_id, result = progress })
         end,
-    })
+    }))
 
     if outcome == 'success' then
         ctx.emit({ tag = 'reconciled_success', job_id = ctx.job.job_id, result = result })
     elseif outcome == 'failure' then
         ctx.emit({ tag = 'reconciled_failure', job_id = ctx.job.job_id, result = result, err = tostring(result and result.error or 'failed') })
-    else
+    elseif outcome == 'timeout' then
         ctx.emit({ tag = 'timed_out', job_id = ctx.job.job_id, err = 'timeout' })
+    elseif outcome == 'cancelled' then
+        error(scope.cancelled(result), 0)
+    else
+        error(result or 'reconcile_failed', 0)
     end
+end
+
+function M.run_stage_op(conn, job, backend, tx, service_ctx)
+    local ctx = runner_context(conn, job, backend, tx, nil, nil, service_ctx)
+    return run_work_unit_op(ctx, stage_body)
 end
 
 function M.run_stage(conn, job, backend, tx, service_ctx)
@@ -110,9 +130,19 @@ function M.run_stage(conn, job, backend, tx, service_ctx)
     return run_work_unit(ctx, stage_body)
 end
 
+function M.run_commit_op(conn, job, backend, tx, _reconcile_cfg, service_ctx)
+    local ctx = runner_context(conn, job, backend, tx, nil, nil, service_ctx)
+    return run_work_unit_op(ctx, commit_body)
+end
+
 function M.run_commit(conn, job, backend, tx, _reconcile_cfg, service_ctx)
     local ctx = runner_context(conn, job, backend, tx, nil, nil, service_ctx)
     return run_work_unit(ctx, commit_body)
+end
+
+function M.run_reconcile_op(conn, job, backend, tx, reconcile_cfg, observe, service_ctx)
+    local ctx = runner_context(conn, job, backend, tx, reconcile_cfg, observe, service_ctx)
+    return run_work_unit_op(ctx, reconcile_body)
 end
 
 function M.run_reconcile(conn, job, backend, tx, reconcile_cfg, observe, service_ctx)

@@ -28,30 +28,35 @@ local function provider_context(conn, name, rec, tx)
     }
 end
 
-local function run_provider(ctx, provider)
-    return provider.run(ctx)
+local function provider_outcome_op(ctx, provider)
+    return fibers.run_scope_op(function()
+        return provider.run(ctx)
+    end):wrap(function(st, _rep, primary)
+        return st, primary
+    end)
 end
 
-function M.spawn_component(scope, conn, name, rec, tx)
+local function run_provider(ctx, provider)
+    local st, primary = fibers.perform(provider_outcome_op(ctx, provider))
+    if st == 'failed' then
+        ctx.emit({ tag = 'source_down', component = ctx.component, reason = tostring(primary or 'provider_failed') })
+        error(primary or 'provider_failed', 0)
+    elseif st == 'cancelled' then
+        ctx.emit({ tag = 'source_down', component = ctx.component, reason = tostring(primary or 'cancelled') })
+    end
+end
+
+function M.spawn_component(scope_obj, conn, name, rec, tx)
     local provider, provider_name = provider_for(rec)
     if not provider or type(provider.run) ~= 'function' then
         return nil, 'unknown_provider:' .. tostring(provider_name)
     end
 
-    local child, err = scope:child()
+    local child, err = scope_obj:child()
     if not child then return nil, err end
 
     local ok, spawn_err = child:spawn(function()
-        local st, _rep, primary = fibers.run_scope(function()
-            return run_provider(provider_context(conn, name, rec, tx), provider)
-        end)
-
-        if st == 'failed' then
-            emit(tx, { tag = 'source_down', component = name, reason = tostring(primary or 'provider_failed') })
-            error(primary or 'provider_failed', 0)
-        elseif st == 'cancelled' then
-            emit(tx, { tag = 'source_down', component = name, reason = tostring(primary or 'cancelled') })
-        end
+        return run_provider(provider_context(conn, name, rec, tx), provider)
     end)
     if not ok then return nil, spawn_err end
     return child, nil
