@@ -1,8 +1,10 @@
 -- services/fabric/checksum.lua
 --
--- Small, dependency-free digest helpers.
--- This is intentionally simple; it provides a deterministic checksum for
--- transfer integrity and tests without pulling in a crypto dependency.
+-- Small, dependency-free checksum helpers.
+--
+-- This is intentionally simple; it provides a deterministic integrity checksum
+-- for transfer protocol use and tests without pulling in a crypto dependency.
+-- It is not a security primitive.
 
 local M = {}
 

@@ -10,10 +10,11 @@
 --   * session_ctl  -> state/fabric/link/<id>/session
 --   * rpc_bridge   -> state/fabric/link/<id>/bridge
 --   * transfer_mgr -> state/fabric/link/<id>/transfer
+--
+-- The outer fabric shell owns restart policy entirely.
 
 local fibers         = require 'fibers'
 local mailbox        = require 'fibers.mailbox'
-local op             = require 'fibers.op'
 
 local session_ctl    = require 'services.fabric.session_ctl'
 local reader         = require 'services.fabric.reader'
@@ -24,7 +25,7 @@ local transport_uart = require 'services.fabric.transport_uart'
 
 local M = {}
 
-local function q(cap)
+local function new_mailbox(cap)
 	return mailbox.new(cap, { full = 'reject_newest' })
 end
 
@@ -54,16 +55,16 @@ function M.run(params)
 		transport:close()
 	end)
 
-	local control_in_tx, control_in_rx = q(32)
-	local rpc_in_tx,     rpc_in_rx     = q(64)
-	local xfer_in_tx,    xfer_in_rx    = q(64)
+	local control_in_tx, control_in_rx = new_mailbox(32)
+	local rpc_in_tx,     rpc_in_rx     = new_mailbox(64)
+	local xfer_in_tx,    xfer_in_rx    = new_mailbox(64)
 
-	local tx_control_tx, tx_control_rx = q(32)
-	local tx_rpc_tx,     tx_rpc_rx     = q(128)
-	local tx_bulk_tx,    tx_bulk_rx    = q(64)
+	local tx_control_tx, tx_control_rx = new_mailbox(32)
+	local tx_rpc_tx,     tx_rpc_rx     = new_mailbox(128)
+	local tx_bulk_tx,    tx_bulk_rx    = new_mailbox(64)
 
-	local helper_done_tx, helper_done_rx = q(64)
-	local status_tx,      status_rx      = q(64)
+	local helper_done_tx, helper_done_rx = new_mailbox(64)
+	local status_tx,      status_rx      = new_mailbox(64)
 
 	local state_conn = root_conn:derive()
 	local session = session_ctl.new_state(link_id, state_conn)
@@ -164,10 +165,8 @@ function M.run(params)
 	end, 'transfer_mgr_spawn')
 
 	-- Keep the child scope alive until one worker faults or the scope is
-	-- cancelled. This blocks without polling and lets the shell own restart
-	-- policy via the child scope join outcome.
-	local scope = fibers.current_scope()
-	return op.perform_raw(scope:not_ok_op())
+	-- cancelled. Restart policy lives entirely in the outer shell.
+	return fibers.perform(fibers.current_scope():not_ok_op())
 end
 
 return M

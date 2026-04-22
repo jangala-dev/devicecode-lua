@@ -2,6 +2,11 @@
 --
 -- Shared retained-state envelope helpers for fabric.
 --
+-- These are intentionally dumb formatters:
+--   * no ownership decisions
+--   * no lifecycle policy
+--   * no cross-component interpretation
+--
 -- Per-link component subtrees all use the same payload shape:
 --   {
 --     kind = 'fabric.link.<component>',
@@ -18,7 +23,9 @@ local M = {}
 local function shallow_copy(t)
 	local out = {}
 	if t then
-		for k, v in pairs(t) do out[k] = v end
+		for k, v in pairs(t) do
+			out[k] = v
+		end
 	end
 	return out
 end
@@ -37,7 +44,9 @@ function M.link_component(component, link_id, status, extra)
 	}
 
 	if extra then
-		for k, v in pairs(extra) do payload[k] = v end
+		for k, v in pairs(extra) do
+			payload[k] = v
+		end
 	end
 
 	return payload
@@ -53,7 +62,9 @@ function M.summary(status, links, extra)
 	}
 
 	if extra then
-		for k, v in pairs(extra) do payload[k] = v end
+		for k, v in pairs(extra) do
+			payload[k] = v
+		end
 	end
 
 	return payload

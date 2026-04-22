@@ -1,3 +1,4 @@
+local runfibers      = require 'tests.support.run_fibers'
 local blob_source = require 'services.fabric.blob_source'
 local checksum    = require 'services.fabric.checksum'
 
@@ -44,12 +45,14 @@ function T.memory_sink_rejects_unexpected_offset()
 end
 
 function T.copy_streams_source_into_sink_and_returns_stored_artefact()
-	local src = blob_source.from_string(('x'):rep(1000))
-	local sink = blob_source.memory_sink({ purpose = 'copy-test' })
-	local artefact = assert(blob_source.copy(src, sink, { chunk_size = 64 }))
-	assert(artefact:size() == 1000)
-	assert(artefact:checksum() == src:checksum())
-	assert(artefact:meta().purpose == 'copy-test')
+	runfibers.run(function()
+		local src = blob_source.from_string(('x'):rep(1000))
+		local sink = blob_source.memory_sink({ purpose = 'copy-test' })
+		local artefact = assert(blob_source.copy(src, sink, { chunk_size = 64 }))
+		assert(artefact:size() == 1000)
+		assert(artefact:checksum() == src:checksum())
+		assert(artefact:meta().purpose == 'copy-test')
+	end, { timeout = 2.0 })
 end
 
 return T

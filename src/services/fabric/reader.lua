@@ -1,4 +1,14 @@
 -- services/fabric/reader.lua
+--
+-- Inbound framed transport reader.
+--
+-- Responsibilities:
+--   * read framed lines from the transport
+--   * decode and validate protocol frames
+--   * classify frames into control / rpc / transfer lanes
+--   * emit rx activity to the session controller
+--
+-- This module does not interpret session state or business policy.
 
 local fibers   = require 'fibers'
 local protocol = require 'services.fabric.protocol'
@@ -32,7 +42,9 @@ function M.run(ctx)
 			bad_window_start = now
 			bad_count = 0
 		end
+
 		bad_count = bad_count + 1
+
 		if svc then
 			svc:obs_log('warn', {
 				what = 'fabric_bad_frame',
@@ -42,6 +54,7 @@ function M.run(ctx)
 				line = line,
 			})
 		end
+
 		if bad_count >= bad_limit then
 			error('too_many_bad_frames', 0)
 		end
@@ -60,6 +73,7 @@ function M.run(ctx)
 			else
 				local now = runtime.now()
 				send_or_fail(status_tx, { kind = 'rx_activity', at = now }, 'status_overflow')
+
 				local item = { msg = msg, at = now }
 				if msg.type == 'hello' or msg.type == 'hello_ack' or msg.type == 'ping' or msg.type == 'pong' then
 					send_or_fail(control_tx, item, 'control_in_overflow')

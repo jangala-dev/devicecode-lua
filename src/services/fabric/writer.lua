@@ -1,8 +1,26 @@
 -- services/fabric/writer.lua
+--
+-- Outbound framed transport writer.
+--
+-- Responsibilities:
+--   * arbitrate among outbound control / rpc / bulk lanes
+--   * always prioritise control traffic
+--   * share remaining bandwidth between rpc and bulk via weighted round-robin
+--   * emit tx activity to the session controller
+--
+-- This module does not inspect protocol semantics; it writes pre-encoded
+-- writer items only.
+--
+-- Design notes:
+--   * control traffic always bypasses fairness and is sent first
+--   * rpc/bulk fairness only applies once the control lane is empty
+--   * queue readiness is expressed as a waitable op rather than a polling loop
 
 local fibers   = require 'fibers'
 local runtime  = require 'fibers.runtime'
 local wait     = require 'fibers.wait'
+
+local perform = fibers.perform
 
 local M = {}
 
@@ -29,6 +47,7 @@ function M.run(ctx)
 	local tx_bulk = assert(ctx.tx_bulk, 'writer requires tx_bulk')
 	local status_tx = assert(ctx.status_tx, 'writer requires status_tx')
 
+	-- Weighted round-robin state for the non-control lanes only.
 	local rpc_quota = tonumber(ctx.rpc_quota or ctx.rpc_quantum) or 4
 	local bulk_quota = tonumber(ctx.bulk_quota or ctx.bulk_quantum) or 1
 	local turn = 'rpc'
@@ -36,7 +55,7 @@ function M.run(ctx)
 
 	local function write_item(item)
 		local line = assert(item and item.line, 'writer requires pre-encoded writer items')
-		local ok, err = fibers.perform(transport:write_line_op(line))
+		local ok, err = perform(transport:write_line_op(line))
 		if not ok then
 			error('transport_write_failed: ' .. tostring(err), 0)
 		end
@@ -65,7 +84,7 @@ function M.run(ctx)
 			return tx_bulk
 		end
 
-		-- both ready: apply weighted RR only here
+		-- Both ready: apply weighted round-robin only after control traffic.
 		if quota_left <= 0 then
 			if turn == 'rpc' then
 				turn = 'bulk'
@@ -81,10 +100,16 @@ function M.run(ctx)
 	end
 
 	local function choose_ready_rx()
-		if has_item(tx_control) then return tx_control end
+		if has_item(tx_control) then
+			return tx_control
+		end
 		return choose_non_control_rx()
 	end
 
+	-- Wait until at least one outbound queue may now succeed.
+	--
+	-- The scheduler is only reawakened when one of the three queues transitions
+	-- into a state where recv() may succeed.
 	local function wait_any_queue_op()
 		local function register(task, waker)
 			local t1 = tx_control:on_message(task, waker)
@@ -102,7 +127,9 @@ function M.run(ctx)
 
 		local function probe_step()
 			local chosen = choose_ready_rx()
-			if chosen then return true, chosen end
+			if chosen then
+				return true, chosen
+			end
 			return false
 		end
 
@@ -112,7 +139,7 @@ function M.run(ctx)
 	while true do
 		local chosen = choose_ready_rx()
 		if not chosen then
-			chosen = fibers.perform(wait_any_queue_op())
+			chosen = perform(wait_any_queue_op())
 			chosen = choose_ready_rx() or chosen
 		end
 		write_item(recv_now(chosen))

@@ -8,25 +8,34 @@
 --   * expose service-level transfer RPC and route requests to the right link
 --   * own and publish aggregate fabric state only
 --
--- The shell owns state.desired/state.links and arbitrates directly over its
--- event sources using a dynamic choice() set. Cross-owner reports from link
--- children still flow over a bounded mailbox.
+-- Ownership model:
+--   * fabric.lua       -> aggregate shell state and restart policy
+--   * session.lua      -> one link child scope
+--   * session_ctl.lua  -> handshake, readiness, liveness
+--   * rpc_bridge.lua   -> pub/rpc bridging
+--   * transfer_mgr.lua -> object transfer
+--   * reader/writer    -> framed I/O only
+--
+-- Cross-owner reports from link children flow upward over a bounded mailbox.
 
 local fibers   = require 'fibers'
 local mailbox  = require 'fibers.mailbox'
 local sleep    = require 'fibers.sleep'
-local op       = require 'fibers.op'
-local safe     = require 'coxpcall'
 
 local base     = require 'devicecode.service_base'
 local session  = require 'services.fabric.session'
 local statefmt = require 'services.fabric.statefmt'
 
+local perform = fibers.perform
+local named_choice = fibers.named_choice
+local run_scope = fibers.run_scope
+local now = fibers.now
+
 local M = {}
 
 local FABRIC_STATE_TOPIC = { 'state', 'fabric' }
 
-local function q(cap)
+local function new_mailbox(cap)
 	return mailbox.new(cap, { full = 'reject_newest' })
 end
 
@@ -37,7 +46,11 @@ local function send_required(tx, value, what)
 	end
 end
 
-local function extract_cfg(payload)
+----------------------------------------------------------------------
+-- Config normalisation
+----------------------------------------------------------------------
+
+local function extract_fabric_cfg(payload)
 	if type(payload) ~= 'table' then return {} end
 	local data = payload.data or payload
 	if type(data) ~= 'table' then return {} end
@@ -54,7 +67,9 @@ local function normalise_links(cfg)
 			local id = v.id or v.link_id or k
 			if type(id) == 'string' and id ~= '' then
 				local rec = {}
-				for kk, vv in pairs(v) do rec[kk] = vv end
+				for kk, vv in pairs(v) do
+					rec[kk] = vv
+				end
 				rec.id = id
 				out[id] = rec
 			end
@@ -64,7 +79,7 @@ local function normalise_links(cfg)
 	return out
 end
 
-local function same_plain(a, b, seen)
+local function deep_equal_plain(a, b, seen)
 	if a == b then return true end
 	if type(a) ~= type(b) then return false end
 	if type(a) ~= 'table' then return false end
@@ -74,19 +89,29 @@ local function same_plain(a, b, seen)
 	seen[a] = b
 
 	for k, va in pairs(a) do
-		if not same_plain(va, b[k], seen) then return false end
+		if not deep_equal_plain(va, b[k], seen) then
+			return false
+		end
 	end
 	for k in pairs(b) do
-		if a[k] == nil then return false end
+		if a[k] == nil then
+			return false
+		end
 	end
 	return true
 end
 
 local function count_keys(t)
 	local n = 0
-	for _ in pairs(t) do n = n + 1 end
+	for _ in pairs(t) do
+		n = n + 1
+	end
 	return n
 end
+
+----------------------------------------------------------------------
+-- Aggregate publication
+----------------------------------------------------------------------
 
 local function link_summary(rec)
 	local s = rec.summary or {}
@@ -103,7 +128,6 @@ end
 
 local function publish_summary(conn, svc, state)
 	local links = {}
-
 	for link_id, rec in pairs(state.links) do
 		links[link_id] = link_summary(rec)
 	end
@@ -120,6 +144,10 @@ local function publish_summary(conn, svc, state)
 	conn:retain(FABRIC_STATE_TOPIC, payload)
 end
 
+----------------------------------------------------------------------
+-- Link child lifecycle
+----------------------------------------------------------------------
+
 local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
 	local parent = fibers.current_scope()
 	local child, err = parent:child()
@@ -127,7 +155,7 @@ local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
 		error(err or 'failed to create link scope', 0)
 	end
 
-	local transfer_tx, transfer_rx = q(8)
+	local transfer_tx, transfer_rx = new_mailbox(8)
 
 	state.links[link_id] = {
 		id = link_id,
@@ -147,7 +175,8 @@ local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
 
 	local ok, serr = child:spawn(function()
 		local link_conn = conn:derive()
-		local ok_run, st, primary = safe.pcall(function()
+
+		local st, _report, primary = run_scope(function()
 			return session.run({
 				svc = svc,
 				conn = link_conn,
@@ -158,26 +187,18 @@ local function spawn_link(state, svc, conn, report_tx, link_id, cfg)
 			})
 		end)
 
-		if ok_run then
-			send_required(report_tx, {
-				tag = 'link_exit',
-				link_id = link_id,
-				st = st or 'ok',
-				primary = primary,
-			}, 'fabric_link_exit_report')
-			if st == 'failed' then
-				error(primary or 'link_failed', 0)
-			end
-		else
-			send_required(report_tx, {
-				tag = 'link_exit',
-				link_id = link_id,
-				st = 'failed',
-				primary = st,
-			}, 'fabric_link_exit_report')
-			error(st, 0)
+		send_required(report_tx, {
+			tag = 'link_exit',
+			link_id = link_id,
+			st = st or 'ok',
+			primary = primary,
+		}, 'fabric_link_exit_report')
+
+		if st == 'failed' then
+			error(primary or 'link_failed', 0)
 		end
 	end)
+
 	if not ok then
 		state.links[link_id] = nil
 		error('link spawn failed: ' .. tostring(serr), 0)
@@ -192,44 +213,16 @@ local function stop_link(state, link_id, reason)
 	end
 end
 
-local function reconcile(state, svc, conn, report_tx, cfg_payload)
-	local next_desired = normalise_links(extract_cfg(cfg_payload))
-
-	for link_id, cfg in pairs(next_desired) do
-		local current = state.desired[link_id]
-		state.desired[link_id] = cfg
-
-		if not current then
-			spawn_link(state, svc, conn, report_tx, link_id, cfg)
-		elseif not same_plain(current, cfg) then
-			local rec = state.links[link_id]
-			if rec then
-				rec.cfg = cfg
-				stop_link(state, link_id, 'config_changed')
-			end
-		end
-	end
-
-	for link_id in pairs(state.desired) do
-		if not next_desired[link_id] then
-			state.desired[link_id] = nil
-			state.restart_at[link_id] = nil
-			stop_link(state, link_id, 'config_removed')
-		end
-	end
-
-	publish_summary(conn, svc, state)
-end
-
 local function handle_link_exit(state, svc, conn, ev)
 	local link_id = ev.link_id
 	local rec = state.links[link_id]
+
 	if rec then
 		state.links[link_id] = nil
 		if rec.scope then
-			safe.pcall(function()
-				op.perform_raw(rec.scope:join_op())
-			end)
+			-- Destructive join is acceptable here: the child has exited and the
+			-- shell is reclaiming the link scope.
+			perform(rec.scope:join_op())
 		end
 	end
 
@@ -253,7 +246,7 @@ local function handle_link_exit(state, svc, conn, ev)
 
 	if desired then
 		local backoff = tonumber(desired.restart_backoff_s) or 2.0
-		state.restart_at[link_id] = fibers.now() + backoff
+		state.restart_at[link_id] = now() + backoff
 	else
 		state.restart_at[link_id] = nil
 	end
@@ -261,10 +254,8 @@ local function handle_link_exit(state, svc, conn, ev)
 	publish_summary(conn, svc, state)
 end
 
-local function dispatch_transfer_req(state, req)
-	if req:done() then
-		return
-	end
+local function dispatch_transfer_request(state, req)
+	if req:done() then return end
 
 	local payload = req.payload or {}
 	local link_id = payload.link_id
@@ -292,41 +283,60 @@ local function dispatch_transfer_req(state, req)
 	end
 end
 
-local function cfg_event_op(cfg_watch)
-	return cfg_watch:recv_op():wrap(function(ev, err)
-		return { ev = ev, err = err }
-	end)
+----------------------------------------------------------------------
+-- Reconcile and event selection
+----------------------------------------------------------------------
+
+local function reconcile(state, svc, conn, report_tx, cfg_payload)
+	local next_desired = normalise_links(extract_fabric_cfg(cfg_payload))
+
+	for link_id, cfg in pairs(next_desired) do
+		local current = state.desired[link_id]
+		state.desired[link_id] = cfg
+
+		if not current then
+			spawn_link(state, svc, conn, report_tx, link_id, cfg)
+		elseif not deep_equal_plain(current, cfg) then
+			local rec = state.links[link_id]
+			if rec then
+				rec.cfg = cfg
+				stop_link(state, link_id, 'config_changed')
+			end
+		end
+	end
+
+	for link_id in pairs(state.desired) do
+		if not next_desired[link_id] then
+			state.desired[link_id] = nil
+			state.restart_at[link_id] = nil
+			stop_link(state, link_id, 'config_removed')
+		end
+	end
+
+	publish_summary(conn, svc, state)
 end
 
-local function transfer_event_op(transfer_ep)
-	return transfer_ep:recv_op():wrap(function(req, err)
-		return { req = req, err = err }
-	end)
-end
-
-local function report_event_op(report_rx)
-	return report_rx:recv_op():wrap(function(ev, err)
-		return { ev = ev, err = err }
-	end)
-end
-
-local function next_shell_event(state, cfg_watch, transfer_ep, report_rx)
+-- All shell concerns are first-class events:
+--   * config changes
+--   * transfer requests
+--   * child reports
+--   * restart timers
+local function next_shell_event_op(state, cfg_watch, transfer_ep, report_rx)
 	local ops = {
-		cfg = cfg_event_op(cfg_watch),
-		transfer = transfer_event_op(transfer_ep),
-		report = report_event_op(report_rx),
+		cfg = cfg_watch:recv_op(),
+		transfer = transfer_ep:recv_op(),
+		report = report_rx:recv_op(),
 	}
 
-
 	for link_id, at in pairs(state.restart_at) do
-		local dt = at - fibers.now()
+		local dt = at - now()
 		if dt < 0 then dt = 0 end
 		ops['restart:' .. link_id] = sleep.sleep_op(dt):wrap(function()
-			return { link_id = link_id }
+			return link_id
 		end)
 	end
 
-	return fibers.named_choice(ops)
+	return named_choice(ops)
 end
 
 function M.start(conn, opts)
@@ -337,7 +347,7 @@ function M.start(conn, opts)
 		conn:unretain(FABRIC_STATE_TOPIC)
 	end)
 
-	local report_tx, report_rx = q(64)
+	local report_tx, report_rx = new_mailbox(64)
 	local state = {
 		desired = {},
 		links = {},
@@ -358,34 +368,37 @@ function M.start(conn, opts)
 	})
 
 	while true do
-		local which, item = fibers.perform(next_shell_event(state, cfg_watch, transfer_ep, report_rx))
+		local which, a, b = perform(next_shell_event_op(state, cfg_watch, transfer_ep, report_rx))
 
 		if which == 'cfg' then
-			if not item.ev then
-				svc:status('failed', { reason = tostring(item.err or 'cfg_watch_closed') })
-				error('fabric config watch closed: ' .. tostring(item.err), 0)
+			local ev, err = a, b
+			if not ev then
+				svc:status('failed', { reason = tostring(err or 'cfg_watch_closed') })
+				error('fabric config watch closed: ' .. tostring(err), 0)
 			end
-			local ev = item.ev
+
 			if ev.op == 'retain' then
 				reconcile(state, svc, conn, report_tx, ev.payload)
 			elseif ev.op == 'unretain' then
 				reconcile(state, svc, conn, report_tx, { links = {} })
 			elseif ev.op == 'replay_done' then
-				-- nothing to do
+				-- nothing further to do
 			end
 
 		elseif which == 'transfer' then
-			if not item.req then
-				svc:status('failed', { reason = tostring(item.err or 'transfer_ep_closed') })
-				error('fabric transfer endpoint closed: ' .. tostring(item.err), 0)
+			local req, err = a, b
+			if not req then
+				svc:status('failed', { reason = tostring(err or 'transfer_ep_closed') })
+				error('fabric transfer endpoint closed: ' .. tostring(err), 0)
 			end
-			dispatch_transfer_req(state, item.req)
+			dispatch_transfer_request(state, req)
 
 		elseif which == 'report' then
-			if not item.ev then
-				error('fabric report channel closed: ' .. tostring(item.err), 0)
+			local ev, err = a, b
+			if not ev then
+				error('fabric report channel closed: ' .. tostring(err), 0)
 			end
-			local ev = item.ev
+
 			if ev.tag == 'link_summary' then
 				local rec = state.links[ev.link_id]
 				if rec then
@@ -397,15 +410,21 @@ function M.start(conn, opts)
 					}
 					publish_summary(conn, svc, state)
 				end
+
 			elseif ev.tag == 'link_exit' then
 				handle_link_exit(state, svc, conn, ev)
+
 			else
-				svc:obs_log('warn', { what = 'unknown_fabric_report', tag = tostring(ev.tag) })
+				svc:obs_log('warn', {
+					what = 'unknown_fabric_report',
+					tag = tostring(ev.tag),
+				})
 			end
 
-		elseif string.sub(which, 1, 8) == 'restart:' then
-			local link_id = item.link_id
+		elseif which and which:sub(1, 8) == 'restart:' then
+			local link_id = a
 			state.restart_at[link_id] = nil
+
 			local cfg = state.desired[link_id]
 			if cfg and not state.links[link_id] then
 				spawn_link(state, svc, conn, report_tx, link_id, cfg)
@@ -413,7 +432,10 @@ function M.start(conn, opts)
 			end
 
 		else
-			svc:obs_log('warn', { what = 'unknown_fabric_event', tag = tostring(which) })
+			svc:obs_log('warn', {
+				what = 'unknown_fabric_event',
+				tag = tostring(which),
+			})
 		end
 	end
 end
