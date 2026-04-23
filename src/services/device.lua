@@ -236,6 +236,9 @@ local function handle_observer_event(state, changed, observer_state, ev)
 	if ev.tag == 'raw_changed' then
 		model.note_status(state, ev.component, ev.payload)
 		changed:signal()
+	elseif ev.tag == 'fact_changed' then
+		model.note_fact(state, ev.component, ev.fact, ev.payload)
+		changed:signal()
 	elseif ev.tag == 'source_down' then
 		model.note_source_down(state, ev.component, ev.reason)
 		changed:signal()
@@ -337,7 +340,7 @@ local function handle_get_req(work_tx, conn, req, err, state, svc)
 	end
 
 	-- Fast path: answer from cached/raw state already observed by providers.
-	if rec.raw_status ~= nil then
+	if rec.raw_status ~= nil or model.has_facts(rec) then
 		req:reply(projection.component_view(name, rec, svc:now()))
 		return
 	end

@@ -40,14 +40,27 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
       cm5_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'cm5' }),
     })
 
-    local status_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'status' }, { queue_len = 16 })
+    provider:retain({ 'cap', 'updater', 'cm5', 'state', 'software' }, {
+      version = 'cm5-v1',
+      boot_id = 'cm5-boot-1',
+      image_id = 'cm5-v1',
+    })
+    provider:retain({ 'cap', 'updater', 'cm5', 'state', 'updater' }, {
+      state = 'running',
+      staged = false,
+      artifact_ref = nil,
+      expected_version = nil,
+      last_error = nil,
+    })
+    provider:retain({ 'cap', 'updater', 'cm5', 'state', 'health' }, {
+      state = 'ok',
+      reason = nil,
+    })
+
     local prepare_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'prepare' }, { queue_len = 16 })
     local stage_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'stage' }, { queue_len = 16 })
     local commit_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'commit' }, { queue_len = 16 })
 
-    bind_reply_loop(scope, status_ep, function()
-      return { component = 'cm5', available = true, ready = true, software = { version = 'cm5-v1' }, updater = { state = 'running' }, source = { kind = 'host' } }
-    end)
     bind_reply_loop(scope, prepare_ep, function(payload)
       return { ok = true, prepared = payload.component }
     end)
@@ -64,6 +77,20 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
     if not ok then diag:fail('failed to spawn device service: ' .. tostring(err)) end
 
     wait_service_running(caller, 'device')
+
+    assert(probe.wait_until(function()
+      local okp, payload = safe.pcall(function()
+        return probe.wait_payload(caller, { 'state', 'device', 'component', 'cm5' }, { timeout = 0.02 })
+      end)
+      return okp
+        and type(payload) == 'table'
+        and payload.available == true
+        and payload.ready == true
+        and type(payload.software) == 'table'
+        and payload.software.version == 'cm5-v1'
+        and type(payload.updater) == 'table'
+        and payload.updater.state == 'running'
+    end, { timeout = 0.75, interval = 0.01 }))
 
     local status, serr = caller:call({ 'cmd', 'device', 'component', 'get' }, { component = 'cm5' }, { timeout = 0.5 })
     assert(serr == nil)
@@ -87,7 +114,7 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
   end, { timeout = 2.0 })
 end
 
-function T.device_service_merges_configured_components_and_tracks_status_topics()
+function T.device_service_merges_configured_components_and_tracks_split_fact_topics()
   runfibers.run(function(scope)
     local bus = busmod.new()
     local caller = bus:connect()
@@ -106,8 +133,11 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
         mcu = {
           class = 'member',
           subtype = 'mcu',
-          status_topic = { 'cap', 'updater', 'mcu', 'state', 'status' },
-          get_topic = { 'cap', 'updater', 'mcu', 'rpc', 'status' },
+          facts = {
+            software = { 'state', 'member', 'mcu', 'software' },
+            updater = { 'state', 'member', 'mcu', 'updater' },
+            health = { 'state', 'member', 'mcu', 'health' },
+          },
           actions = {
             prepare_update = { 'cap', 'updater', 'mcu', 'rpc', 'prepare' },
           },
@@ -115,14 +145,21 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
       },
     })
 
-    local status_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'status' }, { queue_len = 16 })
     local prepare_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'prepare' }, { queue_len = 16 })
-    bind_reply_loop(scope, status_ep, function()
-      return { component = 'mcu', available = true, ready = true, software = { version = 'mcu-v2', boot_id = 'mcu-boot-7' }, updater = { state = 'running' }, source = { kind = 'member' } }
-    end)
     bind_reply_loop(scope, prepare_ep, function(payload)
       return { ok = true, prepared = payload.target or 'mcu' }
     end)
+
+    provider:retain({ 'state', 'member', 'mcu', 'software' }, {
+      version = 'mcu-v2',
+      boot_id = 'mcu-boot-7',
+    })
+    provider:retain({ 'state', 'member', 'mcu', 'updater' }, {
+      state = 'running',
+    })
+    provider:retain({ 'state', 'member', 'mcu', 'health' }, {
+      state = 'ok',
+    })
 
     local ok, err = scope:spawn(function()
       device.start(bus:connect(), { name = 'device', env = 'dev' })
@@ -131,15 +168,6 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
 
     wait_service_running(caller, 'device')
 
-    provider:publish({ 'cap', 'updater', 'mcu', 'state', 'status' }, {
-      component = 'mcu',
-      available = true,
-      ready = true,
-      software = { version = 'mcu-v2', boot_id = 'mcu-boot-7' },
-      updater = { state = 'running' },
-      source = { kind = 'member' },
-    })
-
     assert(probe.wait_until(function()
       local okp, payload = safe.pcall(function()
         return probe.wait_payload(caller, { 'state', 'device', 'component', 'mcu' }, { timeout = 0.02 })
@@ -147,12 +175,18 @@ function T.device_service_merges_configured_components_and_tracks_status_topics(
       return okp
         and type(payload) == 'table'
         and payload.kind == 'device.component'
+        and payload.available == true
+        and payload.ready == true
         and type(payload.software) == 'table'
         and payload.software.version == 'mcu-v2'
         and payload.software.boot_id == 'mcu-boot-7'
+        and type(payload.updater) == 'table'
+        and payload.updater.state == 'running'
         and payload.member_class == 'mcu'
         and payload.link_class == nil
         and type(payload.source) == 'table' and payload.source.member_class == 'mcu'
+        and type(payload.source.facts) == 'table'
+        and type(payload.source.facts.software) == 'table'
         and payload.actions.stage_update == nil
     end, { timeout = 0.75, interval = 0.01 }))
 

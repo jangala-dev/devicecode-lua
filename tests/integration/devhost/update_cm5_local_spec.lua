@@ -26,34 +26,30 @@ end
 
 local function start_cm5_updater_cap(scope, conn, state)
     conn:retain({ 'cap', 'updater', 'cm5', 'state' }, 'added')
-    conn:retain({ 'cap', 'updater', 'cm5', 'meta' }, { offerings = { prepare = true, stage = true, commit = true, status = true } })
+    conn:retain({ 'cap', 'updater', 'cm5', 'meta' }, { offerings = { prepare = true, stage = true, commit = true } })
 
     local function publish_status()
-        conn:publish({ 'cap', 'updater', 'cm5', 'state', 'status' }, {
+        conn:retain({ 'cap', 'updater', 'cm5', 'state', 'software' }, {
+            version = state.fw_version,
+            boot_id = state.boot_id,
+            image_id = state.expected_version or state.fw_version,
+        })
+        conn:retain({ 'cap', 'updater', 'cm5', 'state', 'updater' }, {
             state = state.state,
-            fw_version = state.fw_version,
-            expected_version = state.expected_version,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
-            boot_id = state.boot_id,
+            expected_version = state.expected_version,
+            last_error = state.last_error,
+        })
+        conn:retain({ 'cap', 'updater', 'cm5', 'state', 'health' }, {
+            state = state.health or 'ok',
+            reason = state.health_reason,
         })
     end
 
-    local status_ep = conn:bind({ 'cap', 'updater', 'cm5', 'rpc', 'status' }, { queue_len = 16 })
     local prepare_ep = conn:bind({ 'cap', 'updater', 'cm5', 'rpc', 'prepare' }, { queue_len = 16 })
     local stage_ep = conn:bind({ 'cap', 'updater', 'cm5', 'rpc', 'stage' }, { queue_len = 16 })
     local commit_ep = conn:bind({ 'cap', 'updater', 'cm5', 'rpc', 'commit' }, { queue_len = 16 })
-
-    bind_reply_loop(scope, status_ep, function()
-        return {
-            state = state.state,
-            fw_version = state.fw_version,
-            expected_version = state.expected_version,
-            staged = state.staged,
-            artifact_ref = state.artifact_ref,
-            boot_id = state.boot_id,
-        }
-    end)
 
     bind_reply_loop(scope, prepare_ep, function(payload)
         return { ok = true, prepared = true, fw_version = state.fw_version }
@@ -89,6 +85,7 @@ local function start_cm5_updater_cap(scope, conn, state)
     return publish_status
 end
 
+
 local function wait_retained_state(conn, topic, pred, timeout)
     return probe.wait_until(function()
         local ok, payload = safe.pcall(function()
@@ -96,6 +93,16 @@ local function wait_retained_state(conn, topic, pred, timeout)
         end)
         return ok and pred(payload)
     end, { timeout = timeout or 1.0, interval = 0.01 })
+end
+
+local function wait_cm5_component_ready(conn)
+    return wait_retained_state(conn, { 'state', 'device', 'component', 'cm5' }, function(payload)
+        return type(payload) == 'table'
+            and payload.available == true
+            and payload.ready == true
+            and type(payload.software) == 'table'
+            and type(payload.updater) == 'table'
+    end, 0.75)
 end
 
 function T.devhost_cm5_update_flows_via_device_and_update_service()
@@ -149,6 +156,7 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         end, { timeout = 0.75, interval = 0.01 }))
 
         publish_status()
+        assert(wait_cm5_component_ready(caller))
 
         local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
             component = 'cm5',

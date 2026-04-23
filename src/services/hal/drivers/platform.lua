@@ -144,10 +144,65 @@ function PlatformDriver:_write_updater_state(state)
     return self.control_store:put('updater/cm5', 'state', state)
 end
 
-function PlatformDriver:_emit_updater_status()
+local function health_from_status(status)
+    status = type(status) == 'table' and status or {}
+    local state = tostring(status.state or '')
+    if state == 'failed' or state == 'rollback_detected' then
+        return { state = 'degraded', reason = tostring(status.last_error or state) }
+    end
+    if state == 'unavailable' then
+        return { state = 'unknown', reason = tostring(status.last_error or state) }
+    end
+    return { state = 'ok', reason = nil }
+end
+
+function PlatformDriver:_emit_updater_facts()
     if not self.cap_emit_ch then return end
     local ok, status = self:updater_status(cap_args.new.UpdaterStatusOpts(false))
     if not ok then return end
+
+    local software_payload, software_err = hal_types.new.Emit('updater', 'cm5', 'state', 'software', {
+        version = status.fw_version,
+        build = nil,
+        image_id = status.targetfw or status.fw_version,
+        boot_id = status.bootedfw,
+        bootedfw = status.bootedfw,
+        targetfw = status.targetfw,
+        upgrade_available = status.upgrade_available,
+        hw_revision = status.hw_revision,
+        serial = status.serial,
+        board_revision = status.board_revision,
+    })
+    if software_payload then
+        self.cap_emit_ch:put(software_payload)
+    else
+        dlog(self.logger, 'debug', { what = 'updater_software_emit_failed', err = tostring(software_err) })
+    end
+
+    local updater_payload, updater_err = hal_types.new.Emit('updater', 'cm5', 'state', 'updater', {
+        state = status.state,
+        raw_state = status.raw_state,
+        staged = status.staged,
+        artifact_ref = status.artifact_ref,
+        artifact_meta = status.artifact_meta,
+        expected_version = status.expected_version,
+        last_error = status.last_error,
+        updated_at = status.updated_at,
+    })
+    if updater_payload then
+        self.cap_emit_ch:put(updater_payload)
+    else
+        dlog(self.logger, 'debug', { what = 'updater_fact_emit_failed', err = tostring(updater_err) })
+    end
+
+    local health_payload, health_err = hal_types.new.Emit('updater', 'cm5', 'state', 'health', health_from_status(status))
+    if health_payload then
+        self.cap_emit_ch:put(health_payload)
+    else
+        dlog(self.logger, 'debug', { what = 'updater_health_emit_failed', err = tostring(health_err) })
+    end
+
+    -- Transitional compatibility: keep the composite status retained as well.
     local payload, err = hal_types.new.Emit('updater', 'cm5', 'state', 'status', status)
     if payload then
         self.cap_emit_ch:put(payload)
@@ -247,7 +302,7 @@ function PlatformDriver:updater_stage(opts)
     local ok, werr = self:_write_updater_state(state)
     if not ok then return false, werr end
 
-    self:_emit_updater_status()
+    self:_emit_updater_facts()
     return true, {
         staged = true,
         artifact_ref = opts.artifact_ref,
@@ -279,7 +334,7 @@ function PlatformDriver:updater_commit(opts)
     state.updated_at = os.time()
     local ok, err = self:_write_updater_state(state)
     if not ok then return false, err end
-    self:_emit_updater_status()
+    self:_emit_updater_facts()
 
     local env = {
         DEVICECODE_STAGED_ARTIFACT = resolved.path,
@@ -498,7 +553,7 @@ function PlatformDriver:start()
         local artifact_meta, artifact_meta_err = hal_types.new.Emit('artifact_store', 'main', 'meta', 'info', { provider = 'hal', version = 1 })
         if artifact_meta then self.cap_emit_ch:put(artifact_meta) else dlog(self.logger, 'debug', { what = 'artifact_store_meta_emit_failed', err = tostring(artifact_meta_err) }) end
 
-        self:_emit_updater_status()
+        self:_emit_updater_facts()
     end
 
     local platform_methods = {

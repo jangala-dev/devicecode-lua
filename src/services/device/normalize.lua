@@ -4,12 +4,13 @@
 --
 -- Ownership split:
 --   * normalize.lua          -> generic dispatch and generic status rules
---   * component_mcu.lua      -> MCU-specific normalisation rules
+--   * component_mcu.lua      -> MCU-specific normalisation/composition rules
 --
--- Callers should use `normalize_component_status(...)`, which selects the
--- appropriate subtype-specific normaliser where needed.
+-- Callers should use `normalize_component(...)`, which selects the
+-- appropriate subtype-specific path where needed.
 
 local component_mcu = require 'services.device.component_mcu'
+local component_host = require 'services.device.component_host'
 local model = require 'services.device.model'
 
 local M = {}
@@ -84,6 +85,20 @@ function M.normalize_component_status(rec, raw)
 	end
 
 	return M.normalize_generic(raw)
+end
+
+function M.normalize_component(rec)
+	local subtype = type(rec) == 'table' and (rec.subtype or rec.member_class or rec.name) or nil
+
+	if model.has_facts(rec) then
+		if subtype == 'mcu' then
+			return component_mcu.compose(rec.raw_facts or {}, rec.fact_state or {})
+		else
+			return component_host.compose(rec.raw_facts or {}, rec.fact_state or {})
+		end
+	end
+
+	return M.normalize_component_status(rec, rec and rec.raw_status or nil)
 end
 
 return M

@@ -400,20 +400,29 @@
                 "cm5": {
                     "class": "host",
                     "subtype": "cm5",
-                    "status_topic": [
-                        "cap",
-                        "updater",
-                        "cm5",
-                        "state",
-                        "status"
-                    ],
-                    "get_topic": [
-                        "cap",
-                        "updater",
-                        "cm5",
-                        "rpc",
-                        "status"
-                    ],
+                    "facts": {
+                        "software": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "state",
+                            "software"
+                        ],
+                        "updater": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "state",
+                            "updater"
+                        ],
+                        "health": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "state",
+                            "health"
+                        ]
+                    },
                     "actions": {
                         "prepare_update": [
                             "cap",
@@ -441,19 +450,6 @@
                 "mcu": {
                     "class": "member",
                     "subtype": "mcu",
-                    "status_topic": [
-                        "state",
-                        "member",
-                        "mcu",
-                        "updater"
-                    ],
-                    "get_topic": [
-                        "cmd",
-                        "member",
-                        "mcu",
-                        "updater",
-                        "status"
-                    ],
                     "actions": {
                         "prepare_update": [
                             "cmd",
@@ -468,6 +464,26 @@
                             "mcu",
                             "updater",
                             "commit"
+                        ]
+                    },
+                    "facts": {
+                        "software": [
+                            "state",
+                            "member",
+                            "mcu",
+                            "software"
+                        ],
+                        "updater": [
+                            "state",
+                            "member",
+                            "mcu",
+                            "updater"
+                        ],
+                        "health": [
+                            "state",
+                            "member",
+                            "mcu",
+                            "health"
                         ]
                     }
                 }

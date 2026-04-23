@@ -81,6 +81,15 @@ local function derive_source(rec, base)
 		get_topic = model.copy_array(rec.channels and rec.channels.status and rec.channels.status.get_topic),
 	}
 
+	if type(rec.facts) == 'table' and next(rec.facts) ~= nil then
+		source.facts = {}
+		for fact_name, fact in pairs(rec.facts) do
+			source.facts[fact_name] = {
+				watch_topic = model.copy_array(fact.watch_topic),
+			}
+		end
+	end
+
 	return source
 end
 
@@ -103,7 +112,7 @@ end
 
 -- Canonical public view of one component.
 function M.component_view(name, rec, now_ts)
-	local base = normalize.normalize_component_status(rec, rec.raw_status)
+	local base = normalize.normalize_component(rec)
 
 	local actions = public_actions(rec)
 	local capabilities = derive_capabilities(base, actions)

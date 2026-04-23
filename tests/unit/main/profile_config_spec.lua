@@ -43,8 +43,12 @@ function T.bigbox_v1_cm_2_config_defines_fabric_device_and_mcu_only_update_backe
   assert(type(mcu) == 'table')
   assert(mcu.member_class == 'mcu')
   assert(mcu.link_class == 'member_uart')
-  assert(type(mcu.status_topic) == 'table')
-  assert(type(mcu.get_topic) == 'table')
+  assert(type(mcu.facts) == 'table')
+  assert(type(mcu.facts.software) == 'table')
+  assert(type(mcu.facts.updater) == 'table')
+  assert(type(mcu.facts.health) == 'table')
+  assert(mcu.status_topic == nil)
+  assert(mcu.get_topic == nil)
   assert(type(mcu.actions) == 'table')
   assert(type(mcu.actions.prepare_update) == 'table')
   assert(mcu.actions.stage_update == nil)
@@ -61,6 +65,22 @@ function T.bigbox_v1_cm_2_config_defines_fabric_device_and_mcu_only_update_backe
   assert(cfg.update.components.cm5 == nil)
 
   assert(cfg.bridge == nil)
+end
+
+
+function T.default_config_models_cm5_as_fact_backed_component()
+  local cfg = assert(cjson.decode(read_file('../src/configs/config.json')))
+  assert(type(cfg) == 'table')
+  assert(type(cfg.device) == 'table')
+  assert(type(cfg.device.data) == 'table')
+  local cm5 = cfg.device.data.components.cm5
+  assert(type(cm5) == 'table')
+  assert(type(cm5.facts) == 'table')
+  assert(type(cm5.facts.software) == 'table')
+  assert(type(cm5.facts.updater) == 'table')
+  assert(type(cm5.facts.health) == 'table')
+  assert(cm5.status_topic == nil)
+  assert(cm5.get_topic == nil)
 end
 
 return T

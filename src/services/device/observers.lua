@@ -24,11 +24,14 @@
 
 local fibers = require 'fibers'
 local status_watch = require 'services.device.providers.status_watch'
+local fact_watch = require 'services.device.providers.fact_watch'
 
 local M = {}
 
 local PROVIDERS = {
 	status_watch = status_watch,
+	fact_watch = fact_watch,
+	mcu_split_watch = fact_watch,
 }
 
 local function send_required(tx, value, what)

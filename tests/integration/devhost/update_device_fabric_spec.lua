@@ -131,8 +131,11 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 				mcu = {
 					class = 'member',
 					subtype = 'mcu',
-					status_topic = { 'imported', 'member', 'mcu', 'status' },
-					get_topic = { 'rpc', 'member', 'mcu', 'status' },
+					facts = {
+						software = { 'imported', 'member', 'mcu', 'software' },
+						updater = { 'imported', 'member', 'mcu', 'updater' },
+						health = { 'imported', 'member', 'mcu', 'health' },
+					},
 					actions = {
 						prepare_update = { 'rpc', 'member', 'mcu', 'prepare' },
 						commit_update = { 'rpc', 'member', 'mcu', 'commit' },
@@ -152,24 +155,22 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status()
-			remote_member_conn:retain({ 'member', 'mcu', 'status' }, {
-				component = 'mcu',
-				available = true,
-				ready = true,
-				software = { version = versions.mcu, boot_id = boot_id.mcu },
-				updater = { state = 'running' },
-				source = { kind = 'member' },
+			remote_member_conn:retain({ 'member', 'mcu', 'software' }, {
+				version = versions.mcu,
+				boot_id = boot_id.mcu,
+			})
+			remote_member_conn:retain({ 'member', 'mcu', 'updater' }, {
+				state = 'running',
+			})
+			remote_member_conn:retain({ 'member', 'mcu', 'health' }, {
+				state = 'ok',
 			})
 		end
 
-		local status_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'status' }, { queue_len = 16 })
 		local prepare_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'prepare' }, { queue_len = 16 })
 		local receive_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'receive' }, { queue_len = 16 })
 		local commit_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'commit' }, { queue_len = 16 })
 
-		bind_reply_loop(scope, status_ep, function()
-			return { component = 'mcu', available = true, ready = true, software = { version = versions.mcu, boot_id = boot_id.mcu }, updater = { state = 'running' }, source = { kind = 'member' } }
-		end)
 		bind_reply_loop(scope, prepare_ep, function(payload)
 			return { ok = true, prepared = true }
 		end)
@@ -198,7 +199,9 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 					link_class = 'member_uart',
 					transport = { open = function() return a_stream end },
 					import_rules = {
-						{ ['local'] = { 'imported', 'member', 'mcu', 'status' }, ['remote'] = { 'remote', 'member', 'mcu', 'status' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'software' }, ['remote'] = { 'remote', 'member', 'mcu', 'software' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'updater' }, ['remote'] = { 'remote', 'member', 'mcu', 'updater' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'health' }, ['remote'] = { 'remote', 'member', 'mcu', 'health' } },
 					},
 					outbound_call_rules = {
 						{ ['local'] = { 'rpc', 'member', 'mcu' }, ['remote'] = { 'rpc', 'member', 'mcu' }, timeout = 1.0 },
@@ -220,8 +223,10 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 					member_class = 'mcu',
 					link_class = 'member_uart',
 					transport = { open = function() return b_stream end },
-					export_publish_rules = {
-						{ ['local'] = { 'member', 'mcu', 'status' }, ['remote'] = { 'remote', 'member', 'mcu', 'status' } },
+					export_retained_rules = {
+						{ ['local'] = { 'member', 'mcu', 'software' }, ['remote'] = { 'remote', 'member', 'mcu', 'software' } },
+						{ ['local'] = { 'member', 'mcu', 'updater' },  ['remote'] = { 'remote', 'member', 'mcu', 'updater' } },
+						{ ['local'] = { 'member', 'mcu', 'health' },   ['remote'] = { 'remote', 'member', 'mcu', 'health' } },
 					},
 					inbound_call_rules = {
 						{ ['local'] = { 'rpc', 'member', 'mcu' }, ['remote'] = { 'rpc', 'member', 'mcu' }, timeout = 1.0 },
@@ -346,8 +351,11 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 					subtype = 'mcu',
 					member_class = 'mcu',
 					link_class = 'member_uart',
-					status_topic = { 'imported', 'member', 'mcu', 'status' },
-					get_topic = { 'rpc', 'member', 'mcu', 'status' },
+					facts = {
+						software = { 'imported', 'member', 'mcu', 'software' },
+						updater = { 'imported', 'member', 'mcu', 'updater' },
+						health = { 'imported', 'member', 'mcu', 'health' },
+					},
 					actions = {
 						prepare_update = { 'rpc', 'member', 'mcu', 'prepare' },
 						commit_update = { 'rpc', 'member', 'mcu', 'commit' },
@@ -367,25 +375,21 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status(st)
-			remote_member_conn:retain({ 'member', 'mcu', 'status' }, st or {
-				component = 'mcu',
-				available = true,
-				ready = true,
+			st = st or {
 				software = { version = versions.mcu, boot_id = boot_id.mcu },
 				updater = { state = 'running' },
-				source = { kind = 'member' },
-			})
+				health = { state = 'ok' },
+			}
+			remote_member_conn:retain({ 'member', 'mcu', 'software' }, st.software)
+			remote_member_conn:retain({ 'member', 'mcu', 'updater' }, st.updater)
+			remote_member_conn:retain({ 'member', 'mcu', 'health' }, st.health or { state = 'ok' })
 		end
 
-		local status_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'status' }, { queue_len = 16 })
 		local prepare_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'prepare' }, { queue_len = 16 })
 		local receive_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'receive' }, { queue_len = 16 })
 		local commit_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'commit' }, { queue_len = 16 })
 
-		local current_state = { component = 'mcu', available = true, ready = true, software = { version = 'mcu-v0', boot_id = 'mcu-boot-1' }, updater = { state = 'running' }, source = { kind = 'member' } }
-		bind_reply_loop(scope, status_ep, function()
-			return current_state
-		end)
+		local current_state = { software = { version = 'mcu-v0', boot_id = 'mcu-boot-1' }, updater = { state = 'running' }, health = { state = 'ok' } }
 		bind_reply_loop(scope, prepare_ep, function(payload)
 			return { ok = true, prepared = true }
 		end)
@@ -396,7 +400,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		end)
 		bind_reply_loop(scope, commit_ep, function(payload)
 			boot_id.mcu = 'mcu-boot-2'
-			current_state = { component = 'mcu', available = true, ready = true, software = { version = 'mcu-v0', boot_id = boot_id.mcu }, updater = { state = 'failed', last_error = 'apply_failed' }, source = { kind = 'member' } }
+			current_state = { software = { version = 'mcu-v0', boot_id = boot_id.mcu }, updater = { state = 'failed', last_error = 'apply_failed' }, health = { state = 'degraded' } }
 			publish_remote_status(current_state)
 			return { ok = true, started = true }
 		end)
@@ -414,7 +418,9 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 					link_class = 'member_uart',
 					transport = { open = function() return a_stream end },
 					import_rules = {
-						{ ['local'] = { 'imported', 'member', 'mcu', 'status' }, ['remote'] = { 'remote', 'member', 'mcu', 'status' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'software' }, ['remote'] = { 'remote', 'member', 'mcu', 'software' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'updater' }, ['remote'] = { 'remote', 'member', 'mcu', 'updater' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'health' }, ['remote'] = { 'remote', 'member', 'mcu', 'health' } },
 					},
 					outbound_call_rules = {
 						{ ['local'] = { 'rpc', 'member', 'mcu' }, ['remote'] = { 'rpc', 'member', 'mcu' }, timeout = 1.0 },
@@ -436,8 +442,10 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 					member_class = 'mcu',
 					link_class = 'member_uart',
 					transport = { open = function() return b_stream end },
-					export_publish_rules = {
-						{ ['local'] = { 'member', 'mcu', 'status' }, ['remote'] = { 'remote', 'member', 'mcu', 'status' } },
+					export_retained_rules = {
+						{ ['local'] = { 'member', 'mcu', 'software' }, ['remote'] = { 'remote', 'member', 'mcu', 'software' } },
+						{ ['local'] = { 'member', 'mcu', 'updater' }, ['remote'] = { 'remote', 'member', 'mcu', 'updater' } },
+						{ ['local'] = { 'member', 'mcu', 'health' }, ['remote'] = { 'remote', 'member', 'mcu', 'health' } },
 					},
 					inbound_call_rules = {
 						{ ['local'] = { 'rpc', 'member', 'mcu' }, ['remote'] = { 'rpc', 'member', 'mcu' }, timeout = 1.0 },
