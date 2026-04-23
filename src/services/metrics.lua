@@ -109,6 +109,27 @@ local function set_timestamps_realtime_millis(base_time, metrics)
 end
 
 -------------------------------------------------------------------------------
+-- Service state
+-------------------------------------------------------------------------------
+
+---@type ServiceState
+local State = {
+	conn             = nil,
+	svc              = nil,
+	name             = nil,
+	http_send_ch     = nil,
+	pipelines_map    = {},
+	metric_states    = {},
+	endpoint_to_pipe = {},
+	metric_values    = {},
+	publish_period   = nil,
+	cloud_url        = nil,
+	mainflux_config  = nil,
+	cloud_config     = nil,
+	base_time        = nil,
+}
+
+-------------------------------------------------------------------------------
 -- Config warnings (pure: no service state)
 -------------------------------------------------------------------------------
 
@@ -150,27 +171,6 @@ local function process_config_warnings(warns, config)
 		dropped_templates = dt_list,
 	})
 end
-
--------------------------------------------------------------------------------
--- Service state
--------------------------------------------------------------------------------
-
----@type ServiceState
-local State = {
-	conn             = nil,
-	svc              = nil,
-	name             = nil,
-	http_send_ch     = nil,
-	pipelines_map    = {},
-	metric_states    = {},
-	endpoint_to_pipe = {},
-	metric_values    = {},
-	publish_period   = nil,
-	cloud_url        = nil,
-	mainflux_config  = nil,
-	cloud_config     = nil,
-	base_time        = nil,
-}
 
 -------------------------------------------------------------------------------
 -- Cloud config
