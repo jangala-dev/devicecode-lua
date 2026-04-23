@@ -34,11 +34,6 @@ function T.ui_ws_client_handles_login_call_and_watch_lifecycle()
 			health = function()
 				return { ok = true }, nil
 			end,
-			call = function(session_id, topic, payload, timeout, user_conn)
-				assert(session_id == 'sess-1')
-				assert(type(user_conn) == 'table')
-				return { echoed = payload, topic = topic, timeout = timeout }, nil
-			end,
 			watch_open = function(session_id, pattern, opts)
 				assert(session_id == 'sess-1')
 				return {
@@ -66,7 +61,6 @@ function T.ui_ws_client_handles_login_call_and_watch_lifecycle()
 			services_snapshot = function() return { announce = {}, status = {} }, nil end,
 			fabric_status = function() return { links = {} }, nil end,
 			fabric_link_status = function() return { session = {} }, nil end,
-			capability_snapshot = function() return { capabilities = {} }, nil end,
 			model_exact = function() return { payload = {} }, nil end,
 			model_snapshot = function() return { entries = {} }, nil end,
 		}
@@ -96,14 +90,13 @@ function T.ui_ws_client_handles_login_call_and_watch_lifecycle()
 
 		fake_ws:inject_text({ id = 1, op = 'hello' })
 		fake_ws:inject_text({ id = 2, op = 'login', username = 'admin', password = 'pw' })
-		fake_ws:inject_text({ id = 3, op = 'call', topic = { 'rpc', 'svc', 'echo' }, payload = { msg = 'hi' }, timeout = 0.25 })
-		fake_ws:inject_text({ id = 4, op = 'watch_open', watch_id = 'w1', pattern = { 'cfg', '#' } })
+		fake_ws:inject_text({ id = 3, op = 'watch_open', watch_id = 'w1', pattern = { 'cfg', '#' } })
 		watch_tx:send({ op = 'retain', phase = 'live', topic = { 'cfg', 'net' }, payload = { ok = true } })
-		fake_ws:inject_text({ id = 5, op = 'logout' })
+		fake_ws:inject_text({ id = 4, op = 'logout' })
 		fake_ws:disconnect('done')
 
 		assert(require('tests.support.bus_probe').wait_until(function()
-			return #fake_ws.sent >= 6 and closed == 1
+			return #fake_ws.sent >= 5 and closed == 1
 		end, { timeout = 1.0, interval = 0.01 }))
 
 		local frames = fake_ws:sent_objects()
@@ -111,8 +104,7 @@ function T.ui_ws_client_handles_login_call_and_watch_lifecycle()
 		assert(disconnected >= 1)
 		assert(find_reply(frames, 1).ok == true)
 		assert(find_reply(frames, 2).data.session_id == 'sess-1')
-		assert(find_reply(frames, 3).data.echoed.msg == 'hi')
-		assert(find_reply(frames, 4).data.watch_id == 'w1')
+		assert(find_reply(frames, 3).data.watch_id == 'w1')
 		local saw_watch_event = false
 		for i = 1, #frames do
 			if frames[i].op == 'watch_event' and frames[i].watch_id == 'w1' then
@@ -121,7 +113,7 @@ function T.ui_ws_client_handles_login_call_and_watch_lifecycle()
 			end
 		end
 		assert(saw_watch_event == true)
-		assert(find_reply(frames, 5).ok == true)
+		assert(find_reply(frames, 4).ok == true)
 
 		restore()
 	end, { timeout = 2.0 })

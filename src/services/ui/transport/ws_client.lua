@@ -243,9 +243,6 @@ local function build_ops(state, app)
 			return app.fabric_link_status(obj.session_id or state.current_session, obj.link_id)
 		end,
 
-		capability_snapshot = function(obj)
-			return app.capability_snapshot(obj.session_id or state.current_session)
-		end,
 
 		model_exact = function(obj)
 			return app.model_exact(obj.session_id or state.current_session, obj.topic)
@@ -255,9 +252,6 @@ local function build_ops(state, app)
 			return app.model_snapshot(obj.session_id or state.current_session, obj.pattern)
 		end,
 
-		call = function(obj)
-			return app.call(obj.session_id or state.current_session, obj.topic, obj.payload, obj.timeout, state.user_conn)
-		end,
 
 		watch_open = function(obj)
 			return start_watch(state, app, obj.watch_id, obj.pattern, { queue_len = obj.queue_len })

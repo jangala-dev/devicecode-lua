@@ -3,6 +3,7 @@
 -- UI façade over the update command surface.
 
 local errors = require 'services.ui.errors'
+local update_client = require 'services.ui.update_client'
 
 local M = {}
 
@@ -13,11 +14,6 @@ local function nonempty_string(value, name)
 	return value, nil
 end
 
-local function update_call(conn, verb, payload, timeout)
-	return conn:call({ 'cmd', 'update', 'job', verb }, payload or {}, {
-		timeout = timeout or 10.0,
-	})
-end
 
 function M.create(ctx, session_id, payload)
 	local rec, err = ctx.require_session(session_id)
@@ -30,7 +26,7 @@ function M.create(ctx, session_id, payload)
 		{ ui = { op = 'update_create' } },
 		nil,
 		function(user_conn)
-			return update_call(user_conn, 'create', payload)
+			return update_client.create(user_conn, payload)
 		end
 	)
 
@@ -52,7 +48,7 @@ function M.get(ctx, session_id, job_id)
 		{ ui = { op = 'update_get', job_id = id } },
 		nil,
 		function(user_conn)
-			return update_call(user_conn, 'get', { job_id = id })
+			return update_client.get(user_conn, id)
 		end
 	)
 
@@ -71,7 +67,7 @@ function M.list(ctx, session_id)
 		{ ui = { op = 'update_list' } },
 		nil,
 		function(user_conn)
-			return update_call(user_conn, 'list', {})
+			return update_client.list(user_conn)
 		end
 	)
 
@@ -102,7 +98,7 @@ function M.do_job(ctx, session_id, job_id, payload)
 		{ ui = { op = 'update_do', job_id = id, action = req.op } },
 		nil,
 		function(user_conn)
-			return update_call(user_conn, 'do', req)
+			return update_client.do_job(user_conn, req)
 		end
 	)
 

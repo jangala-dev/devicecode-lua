@@ -3,11 +3,10 @@
 -- Generic device-component update backend.
 --
 -- Backend contract:
---   * status(conn)
 --   * prepare(conn, job, ctx)
 --   * stage(conn, job, ctx)
 --   * commit(conn, job, ctx)
---   * evaluate(job, facts)
+--   * evaluate(job, component_state)
 --   * observe_specs(component_cfg) -> optional observer feed descriptions
 --
 -- This backend talks to the device service's generic component RPC surface and
@@ -23,7 +22,7 @@ function M.new(opts)
 	local timeout_prepare = opts.timeout_prepare or 10.0
 	local timeout_stage = opts.timeout_stage or 60.0
 	local timeout_commit = opts.timeout_commit or 10.0
-	local reconcile_fn = assert(opts.reconcile, 'reconcile fn required')
+	local evaluate_fn = assert(opts.reconcile, 'reconcile fn required')
 
 	local backend = {}
 
@@ -34,14 +33,6 @@ function M.new(opts)
 			args = args or {},
 			timeout = timeout,
 		}, { timeout = timeout })
-	end
-
-	function backend:status(conn)
-		return conn:call(
-			{ 'cmd', 'device', 'component', 'get' },
-			{ component = component },
-			{ timeout = timeout_prepare }
-		)
 	end
 
 	function backend:prepare(conn, job, _ctx)
@@ -71,18 +62,10 @@ function M.new(opts)
 		}, timeout_commit)
 	end
 
-	function backend:evaluate(job, facts)
-		return reconcile_fn(facts, job)
+	function backend:evaluate(job, component_state)
+		return evaluate_fn(component_state, job)
 	end
 
-	function backend:reconcile(conn, job, _ctx)
-		local value, err = self:status(conn)
-		if value == nil then return nil, err end
-		return self:evaluate(job, value), nil
-	end
-
-	-- Observer feeds allow a backend to subscribe to retained state relevant to
-	-- reconcile/progress decisions. The update service owns watch lifetime.
 	function backend:observe_specs(_component_cfg)
 		return {
 			{

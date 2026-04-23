@@ -177,8 +177,8 @@ end
 
 local function open_transport_blocking(conn, link_id, cfg)
 	cfg = cfg or {}
-	local transport = cfg.transport or cfg.uart or {}
-	local uart_id = transport.id or cfg.capability_id or cfg.uart_id or link_id
+	local transport = cfg.transport or {}
+	local uart_id = transport.id or link_id
 	local class = transport.class or 'uart'
 	local open_verb = transport.open_verb or 'open'
 	local term = transport.terminator
@@ -214,7 +214,7 @@ local function wrap_custom_transport(link_id, cfg, obj)
 		return obj
 	end
 	if is_stream(obj) then
-		local transport = (cfg and cfg.transport) or (cfg and cfg.uart) or {}
+		local transport = (cfg and cfg.transport) or {}
 		local term = transport.terminator
 		if term == nil then term = '\n' end
 		return setmetatable({

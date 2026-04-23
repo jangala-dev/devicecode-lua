@@ -55,6 +55,12 @@ local function run_work_unit_op(ctx, body)
 	end)
 end
 
+local function current_component_state(ctx)
+	local obs = ctx.observe or (ctx.service_ctx and ctx.service_ctx.observer) or nil
+	if not (obs and obs.component_state_for) then return nil end
+	return obs:component_state_for(ctx.job.component)
+end
+
 local function run_work_unit(ctx, body)
 	local st, primary = fibers.perform(run_work_unit_op(ctx, body))
 	if st == 'ok' then
@@ -67,17 +73,17 @@ local function run_work_unit(ctx, body)
 end
 
 local function stage_body(ctx)
-	local conn, job, backend = ctx.conn, ctx.job, ctx.backend
+	local _conn, job, backend = ctx.conn, ctx.job, ctx.backend
 	local service_ctx = ctx.service_ctx
 
-	local status_before = backend:status(conn)
+	local status_before = current_component_state(ctx)
 	local sw = type(status_before) == 'table' and status_before.software or nil
 	local pre_commit_boot_id = nil
 	if type(sw) == 'table' then
 		pre_commit_boot_id = sw.boot_id
 	end
 
-	local prep, perr = backend:prepare(conn, job)
+	local prep, perr = backend:prepare(ctx.conn, job)
 	if prep == nil then
 		ctx.emit({
 			tag = 'failed',
@@ -87,7 +93,7 @@ local function stage_body(ctx)
 		return
 	end
 
-	local staged, serr = backend:stage(conn, job, service_ctx)
+	local staged, serr = backend:stage(ctx.conn, job, service_ctx)
 	if staged == nil then
 		ctx.emit({
 			tag = 'failed',
@@ -137,8 +143,8 @@ local function reconcile_body(ctx)
 			return ctx.observe:changed_op(seen)
 		end,
 		evaluate = function()
-			local facts = ctx.observe and ctx.observe.facts_for and ctx.observe:facts_for(ctx.job.component) or nil
-			return ctx.backend.evaluate and ctx.backend:evaluate(ctx.job, facts) or nil
+			local component_state = current_component_state(ctx)
+			return ctx.backend.evaluate and ctx.backend:evaluate(ctx.job, component_state) or nil
 		end,
 		on_progress = function(progress)
 			ctx.emit({

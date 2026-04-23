@@ -46,10 +46,5 @@ function M.snapshot(ctx, session_id, pattern)
 	return ctx.model:snapshot(norm)
 end
 
-function M.capability_snapshot(ctx, session_id)
-	local rec, err = ctx.require_session(session_id)
-	if not rec then return nil, err end
-	return queries.capability_snapshot(ctx.model)
-end
 
 return M

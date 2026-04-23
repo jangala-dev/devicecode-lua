@@ -69,8 +69,6 @@ local function default_announce(svc)
 			services_snapshot = true,
 			fabric_status = true,
 			fabric_link_status = true,
-			capability_snapshot = true,
-			call = true,
 			watch = true,
 			update_job_create = true,
 			update_job_get = true,

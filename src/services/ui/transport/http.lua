@@ -286,10 +286,6 @@ local function handle_query_api(app, stream, req_method, req_path, sid, body_or_
 		return write_api_result(stream, app.services_snapshot(sid)), true
 	end
 
-	if req_path == '/api/capabilities' then
-		if req_method ~= 'GET' then return method_not_allowed(stream), true end
-		return write_api_result(stream, app.capability_snapshot(sid)), true
-	end
 
 	if req_path == '/api/model/exact' then
 		if req_method ~= 'POST' then return method_not_allowed(stream), true end
@@ -374,16 +370,6 @@ local function handle_update_api(app, stream, req_method, req_path, parts, sid, 
 	return false
 end
 
-local function handle_call_api(app, stream, req_method, req_path, sid, body_or_reply)
-	if req_path ~= '/api/call' then
-		return false
-	end
-
-	if req_method ~= 'POST' then return method_not_allowed(stream), true end
-	local body = body_or_reply()
-	if not body then return true, true end
-	return write_api_result(stream, app.call(sid, body.topic, body.payload, body.timeout)), true
-end
 
 local function handle_api(svc, app, stream, req_method, req_path, req_headers)
 	local parts = split_path(req_path)
@@ -408,7 +394,6 @@ local function handle_api(svc, app, stream, req_method, req_path, req_headers)
 		or select(2, handle_config_api(app, stream, req_method, parts, sid, body_or_reply))
 		or select(2, handle_fabric_api(app, stream, req_method, req_path, parts, sid))
 		or select(2, handle_update_api(app, stream, req_method, req_path, parts, sid, req_headers, body_or_reply))
-		or select(2, handle_call_api(app, stream, req_method, req_path, sid, body_or_reply))
 
 	if handled then
 		return true

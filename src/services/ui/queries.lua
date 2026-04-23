@@ -22,18 +22,6 @@ local function by_name(entries, idx)
 	return out
 end
 
-local function by_topic(entries)
-	local out = {}
-	for i = 1, #(entries or {}) do
-		local rec = entries[i]
-		local parts = {}
-		for j = 1, #(rec.topic or {}) do
-			parts[j] = tostring(rec.topic[j])
-		end
-		out[table.concat(parts, '/')] = rec.payload
-	end
-	return out
-end
 
 local function require_name(value, name)
 	if type(value) ~= 'string' or value == '' then
@@ -133,23 +121,5 @@ function M.fabric_link_status(model, link_id)
 	}, nil
 end
 
--- Composite capability-oriented snapshot used by the UI.
-function M.capability_snapshot(model)
-	local caps, cerr = model:snapshot({ 'cap', '#' })
-	if not caps then return nil, cerr end
-
-	local devs, derr = model:snapshot({ 'dev', '#' })
-	if not devs then return nil, derr end
-
-	local svcs, serr = M.services_snapshot(model)
-	if not svcs then return nil, serr end
-
-	return {
-		seq = math.max(caps.seq, devs.seq, svcs.seq),
-		capabilities = by_topic(caps.entries),
-		devices = by_topic(devs.entries),
-		services = svcs,
-	}, nil
-end
 
 return M

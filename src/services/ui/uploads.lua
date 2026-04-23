@@ -12,23 +12,13 @@
 
 local cap_sdk = require 'services.hal.sdk.cap'
 local errors  = require 'services.ui.errors'
+local update_client = require 'services.ui.update_client'
 local uuid    = require 'uuid'
 
 local M = {}
 local Uploads = {}
 Uploads.__index = Uploads
 
-local function update_create(user_conn, payload, timeout)
-	return user_conn:call({ 'cmd', 'update', 'job', 'create' }, payload, {
-		timeout = timeout or 10.0,
-	})
-end
-
-local function update_do(user_conn, payload, timeout)
-	return user_conn:call({ 'cmd', 'update', 'job', 'do' }, payload, {
-		timeout = timeout or 10.0,
-	})
-end
 
 function M.new(opts)
 	opts = opts or {}
@@ -104,7 +94,7 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta)
 end
 
 function Uploads:_create_update_job(user_conn, artefact, meta)
-	local created, uerr = update_create(user_conn, {
+	local created, uerr = update_client.create(user_conn, {
 		component = meta.component,
 		artifact = { kind = 'ref', ref = artefact:ref() },
 		expected_version = meta.version,
@@ -123,7 +113,7 @@ function Uploads:_create_update_job(user_conn, artefact, meta)
 end
 
 function Uploads:_start_update_job(user_conn, job_id)
-	local started, serr = update_do(user_conn, {
+	local started, serr = update_client.do_job(user_conn, {
 		op = 'start',
 		job_id = job_id,
 	}, 10.0)

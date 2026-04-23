@@ -1399,7 +1399,6 @@
                 "node_id": "cm5",
                 "member_class": "mcu",
                 "link_class": "member_uart",
-                "capability_id": "uart0",
                 "transport": {
                     "class": "uart",
                     "id": "uart0",

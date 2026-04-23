@@ -18,7 +18,6 @@ function M.empty()
 	return {
 		available = false,
 		ready = false,
-		incarnation = nil,
 		software = {},
 		updater = {},
 		capabilities = {},
@@ -72,15 +71,10 @@ function M.compose(raw_facts, _fact_state)
 	local software = normalize_software_fact(software_raw)
 	local updater = normalize_updater_fact(updater_raw)
 	local health = normalize_health_fact(health_raw)
-	local incarnation = software.boot_id
-		or (type(updater_raw) == 'table' and updater_raw.boot_id)
-		or (type(health_raw) == 'table' and health_raw.boot_id)
-		or nil
 
 	return {
 		available = any_seen,
 		ready = software_raw ~= nil and updater_raw ~= nil,
-		incarnation = incarnation,
 		software = software,
 		updater = updater,
 		health = health,

@@ -139,7 +139,7 @@ function M.run(params)
 			status_tx             = status_tx,
 			helper_done_rx        = helper_done_rx,
 			helper_done_tx        = helper_done_tx,
-			export_publish_rules  = cfg.export_publish_rules or cfg.export_publish,
+			export_publish_rules  = cfg.export_publish_rules,
 			export_retained_rules = cfg.export_retained_rules,
 			import_rules          = cfg.import_rules,
 			outbound_call_rules   = cfg.outbound_call_rules,

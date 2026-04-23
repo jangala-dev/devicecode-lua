@@ -100,20 +100,12 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 			diag:fail('expected fabric_link_status(wan0) to show ready/connected/idle')
 		end
 
-		local caps = captured.app.capability_snapshot(sid)
-		if type(caps) ~= 'table' or type(caps.capabilities['cap/fs/config/meta']) ~= 'table' or type(caps.devices['dev/modem/m1/meta']) ~= 'table' then
-			diag:fail('expected capability snapshot to contain seeded caps/devices')
-		end
 
 		local cfgset = captured.app.config_set(sid, 'net', { schema = 'devicecode.net/1', next = 99 })
 		if type(cfgset) ~= 'table' or cfgset.ok ~= true or #config_calls ~= 1 or config_calls[1].data.next ~= 99 then
 			diag:fail('expected config_set(net) to call endpoint and return ok')
 		end
 
-		local reply = captured.app.call(sid, { 'rpc', 'svc', 'echo' }, { msg = 'hello' }, 0.25)
-		if type(reply) ~= 'table' or reply.echoed.msg ~= 'hello' or reply.via ~= 'echo' or #rpc_calls ~= 1 then
-			diag:fail('expected ui rpc call to reach fake echo endpoint')
-		end
 
 		local watch = captured.app.watch_open(sid, { 'cfg', '#' }, { queue_len = 16 })
 		if type(watch) ~= 'table' then diag:fail('expected watch_open to return a watcher') end
@@ -129,17 +121,16 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 		end
 		watch:close('done')
 
-		if #connect_calls < 2 then diag:fail('expected at least two ui-originated bus connections') end
-		local saw_cfg, saw_call = false, false
+		if #connect_calls < 1 then diag:fail('expected at least one ui-originated bus connection') end
+		local saw_cfg = false
 		for i = 1, #connect_calls do
 			local extra = connect_calls[i].origin_extra
 			if type(extra) == 'table' and type(extra.ui) == 'table' then
 				if extra.ui.op == 'config_set' then saw_cfg = true end
-				if extra.ui.op == 'call' then saw_call = true end
 			end
 		end
-		if not (saw_cfg == true and saw_call == true) then
-			diag:fail('expected connect_factory origin_extra to record config_set and call operations')
+		if not (saw_cfg == true) then
+			diag:fail('expected connect_factory origin_extra to record config_set operation')
 		end
 	end, { timeout = 3.0 })
 end

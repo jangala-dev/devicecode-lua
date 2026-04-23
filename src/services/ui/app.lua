@@ -13,7 +13,6 @@ local query_h    = require 'services.ui.handlers.query'
 local config_h   = require 'services.ui.handlers.config'
 local services_h = require 'services.ui.handlers.services'
 local fabric_h   = require 'services.ui.handlers.fabric'
-local call_h     = require 'services.ui.handlers.call'
 local watch_h    = require 'services.ui.handlers.watch'
 local update_h   = require 'services.ui.handlers.update'
 
@@ -45,9 +44,6 @@ function M.new(ctx)
 			return query_h.snapshot(ctx, session_id, pattern)
 		end,
 
-		capability_snapshot = function(session_id)
-			return query_h.capability_snapshot(ctx, session_id)
-		end,
 
 		config_get = function(session_id, service_name)
 			return config_h.get(ctx, session_id, service_name)
@@ -73,9 +69,6 @@ function M.new(ctx)
 			return fabric_h.link_status(ctx, session_id, link_id)
 		end,
 
-		call = function(session_id, topic, payload, timeout, user_conn)
-			return call_h.call(ctx, session_id, topic, payload, timeout, user_conn)
-		end,
 
 		watch_open = function(session_id, pattern, opts)
 			return watch_h.open(ctx, session_id, pattern, opts)

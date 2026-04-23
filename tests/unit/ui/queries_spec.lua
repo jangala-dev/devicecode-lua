@@ -62,20 +62,5 @@ function T.fabric_status_and_link_status_return_aggregated_view()
 	assert(link.transfer.idle == true)
 end
 
-function T.capability_snapshot_collects_cap_device_and_service_views()
-	local model = fake_model({
-		{ topic = { 'cap', 'fs', 'config', 'meta' }, payload = { offerings = { read = true } } },
-		{ topic = { 'dev', 'modem', 'm1', 'meta' }, payload = { model = 'X1' } },
-		{ topic = { 'svc', 'alpha', 'announce' }, payload = { role = 'a' } },
-		{ topic = { 'svc', 'alpha', 'status' }, payload = { state = 'running' } },
-	})
-	local out, err = queries.capability_snapshot(model)
-	assert(err == nil)
-	assert(type(out.capabilities['cap/fs/config/meta']) == 'table')
-	assert(out.capabilities['cap/fs/config/meta'].offerings.read == true)
-	assert(out.devices['dev/modem/m1/meta'].model == 'X1')
-	assert(out.services.announce.alpha.role == 'a')
-	assert(out.services.status.alpha.state == 'running')
-end
 
 return T

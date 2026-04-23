@@ -169,7 +169,7 @@ function M.run(ctx)
 	local link_id = assert(ctx.link_id, 'rpc_bridge requires link_id')
 	local svc = ctx.svc
 
-	local export_pub_rules = topicmap.normalise_prefix_rules(ctx.export_publish_rules or ctx.export_rules or {}, 'export_publish')
+	local export_pub_rules = topicmap.normalise_prefix_rules(ctx.export_publish_rules or {}, 'export_publish')
 	local export_retained_rules = topicmap.normalise_prefix_rules(ctx.export_retained_rules or {}, 'export_retained')
 	local import_rules = topicmap.normalise_prefix_rules(ctx.import_rules or {}, 'import')
 	local outbound_call_rules = topicmap.normalise_prefix_rules(ctx.outbound_call_rules or {}, 'outbound_call')

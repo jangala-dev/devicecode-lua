@@ -209,9 +209,19 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     ensure(type(got.job.result) == 'table', 'expected result table')
     ensure(got.job.result.version == 'mcu-v1', 'expected final version mcu-v1')
     local get_calls = 0
-    for _, call in ipairs(device_calls) do if call.kind == 'get' then get_calls = get_calls + 1 end end
-    ensure(get_calls == 1, 'expected exactly one device get call (pre-stage seed), got ' .. tostring(get_calls))
-
+    for _, call in ipairs(device_calls) do
+      if call.kind == 'get' then
+        get_calls = get_calls + 1
+      end
+    end
+    ensure(get_calls == 0, 'expected no device get calls in observer-driven mode, got ' .. tostring(get_calls))
+    local do_calls = 0
+    for _, call in ipairs(device_calls) do
+      if call.kind == 'do' then
+        do_calls = do_calls + 1
+      end
+    end
+    ensure(do_calls == 2, 'expected exactly two device action calls, got ' .. tostring(do_calls))
     ensure(type(control.namespaces['update/jobs']) == 'table', 'expected update/jobs namespace in control store')
     ensure(type(control.namespaces['update/jobs'][job.job_id]) == 'table', 'expected persisted job in control store')
   end, { timeout = 3.0 })

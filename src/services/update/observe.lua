@@ -40,7 +40,7 @@ function Observe:clear_component(name)
 	self.changed:signal()
 end
 
-function Observe:facts_for(name)
+function Observe:component_state_for(name)
 	return self.components[name]
 end
 
