@@ -17,7 +17,21 @@
             "sysmon": {},
             "platform": {},
             "power": {},
-            "usb": {}
+            "usb": {},
+            "wlan": {
+                "radios": [
+                    {
+                        "name": "radio0",
+                        "type": "mac80211",
+                        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0"
+                    },
+                    {
+                        "name": "radio1",
+                        "type": "mac80211",
+                        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1"
+                    }
+                ]
+            }
         }
     },
     "gsm": {
@@ -43,6 +57,135 @@
                         "autoconnect": true
                     }
                 ]
+            }
+        }
+    },
+    "wifi": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/wifi/1",
+            "report_period": 10,
+            "radios": [
+                {
+                    "name": "radio0",
+                    "band": "2g",
+                    "channel": "auto",
+                    "channels": ["1", "6", "11"],
+                    "country": "GB",
+                    "htmode": "HE20",
+                    "txpower": "20",
+                    "disabled": false
+                },
+                {
+                    "name": "radio1",
+                    "band": "5g",
+                    "channel": "36",
+                    "country": "GB",
+                    "htmode": "HE80",
+                    "txpower": "23",
+                    "disabled": false
+                }
+            ],
+            "ssids": [
+                {
+                    "mainflux_path": "mainflux.cfg",
+                    "encryption": "psk2",
+                    "mode": "access_point",
+                    "radios": ["radio0", "radio1"]
+                },
+                {
+                    "name": "Jangala",
+                    "mode": "access_point",
+                    "encryption": "none",
+                    "network": "jan",
+                    "radios": ["radio0", "radio1"]
+                }
+            ],
+            "band_steering": {
+                "globals": {
+                    "rrm_mode": "PAT",
+                    "kicking": {
+                        "kick_mode": "both",
+                        "bandwidth_threshold": 0,
+                        "kicking_threshold": 15,
+                        "evals_before_kick": 3
+                    },
+                    "stations": {
+                        "use_station_count": false,
+                        "max_station_diff": 1
+                    },
+                    "neighbor_reports": {
+                        "dyn_report_num": 2,
+                        "disassoc_report_len": 6
+                    },
+                    "legacy": {
+                        "eval_probe_req": true,
+                        "eval_assoc_req": false,
+                        "eval_auth_req": false,
+                        "min_probe_count": 2,
+                        "deny_auth_reason": 1,
+                        "deny_assoc_reason": 17
+                    }
+                },
+                "timings": {
+                    "updates": {
+                        "client": 10,
+                        "chan_util": 5,
+                        "beacon_reports": 5,
+                        "hostapd": 10,
+                        "tcp_con": 10
+                    },
+                    "cleanup": {
+                        "client": 15,
+                        "probe": 40,
+                        "ap": 460
+                    },
+                    "inactive_client_kickoff": 60
+                },
+                "bands": {
+                    "2g": {
+                        "initial_score": 90,
+                        "rssi_scoring": {
+                            "center": "-69",
+                            "weight": 2,
+                            "good_threshold": "-66",
+                            "good_reward": 12,
+                            "bad_threshold": "-75",
+                            "bad_penalty": "-15"
+                        },
+                        "chan_util_scoring": {
+                            "good_threshold": 140,
+                            "good_reward": 5,
+                            "bad_threshold": 170,
+                            "bad_penalty": "-20"
+                        },
+                        "support_bonuses": {
+                            "vht": 5,
+                            "ht": 5
+                        }
+                    },
+                    "5g": {
+                        "initial_score": 95,
+                        "rssi_scoring": {
+                            "center": "-64",
+                            "weight": 4,
+                            "good_threshold": "-62",
+                            "good_reward": 10,
+                            "bad_threshold": "-70",
+                            "bad_penalty": "-28"
+                        },
+                        "chan_util_scoring": {
+                            "good_threshold": 140,
+                            "good_reward": 5,
+                            "bad_threshold": 170,
+                            "bad_penalty": "-20"
+                        },
+                        "support_bonuses": {
+                            "vht": 2,
+                            "ht": 2
+                        }
+                    }
+                }
             }
         }
     },
