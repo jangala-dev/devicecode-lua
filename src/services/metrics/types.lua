@@ -153,6 +153,7 @@ end
 ---@alias MetricValues  table<string, table<string, MetricSample>>
 
 ---@class ServiceState
+---@field svc              ServiceBase?
 ---@field conn             Connection?   nil before M.start() is called
 ---@field name             string?       nil before M.start() is called
 ---@field http_send_ch     Channel?      nil before M.start() is called

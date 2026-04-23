@@ -42,10 +42,6 @@ local NAME = 'metrics'
 -- Topic helpers
 -------------------------------------------------------------------------------
 
----@param name string
----@return table
-local function t_svc_status(name) return { 'svc', name, 'status' } end
-
 ---@param service string
 ---@param name string
 ---@return table
