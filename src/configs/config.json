@@ -17,7 +17,8 @@
             "sysmon": {},
             "platform": {},
             "power": {},
-            "usb": {}
+            "usb": {},
+            "time": {}
         }
     },
     "gsm": {
