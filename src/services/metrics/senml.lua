@@ -62,14 +62,15 @@ local function encode_r(base_topic, values, output)
             end
         end
 
-        if type(v) == 'table' and not (v.value and v.time) then
+        if type(v) == 'table' and (v.value == nil or v.time == nil) then
             local _, err = encode_r(topic, v, output)
             if err then return nil, err end
         else
+            local clean_metric = v
             if type(v) ~= 'table' then
-                v = { value = v }
+                clean_metric = { value = v }
             end
-            local obj, err = encode(topic, v.value, v.time)
+            local obj, err = encode(topic, clean_metric.value, clean_metric.time)
             if err then return nil, err end
             table.insert(output, obj)
         end
