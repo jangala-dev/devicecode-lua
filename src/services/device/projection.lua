@@ -17,6 +17,7 @@
 local model = require 'services.device.model'
 local normalize = require 'services.device.normalize'
 local topics = require 'services.device.topics'
+local availability = require 'services.device.availability'
 
 local M = {}
 
@@ -127,6 +128,7 @@ function M.component_view(name, rec, now_ts)
 	local actions = public_actions(rec)
 	local capabilities = derive_capabilities(base, actions)
 
+	local status = availability.source_status(rec, { required_facts = nil })
 	local base_available = base.available
 	if base_available == false and not model.has_facts(rec)
 		and type(rec.events) == 'table' and next(rec.events) ~= nil
@@ -134,7 +136,7 @@ function M.component_view(name, rec, now_ts)
 		base_available = true
 	end
 
-	local available = (rec.source_up == true) and (base_available ~= false)
+	local available = (status.source_up == true) and (base_available ~= false or status.available)
 	local ready = available and (base.ready ~= false)
 
 	local updater_state = type(base.updater) == 'table' and base.updater.state or nil

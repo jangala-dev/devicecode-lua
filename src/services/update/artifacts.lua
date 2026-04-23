@@ -12,6 +12,7 @@
 -- This module does not own job lifecycle or publication.
 
 local cap_sdk = require 'services.hal.sdk.cap'
+local sources = require 'services.update.artifact_sources'
 
 local M = {}
 local Artifacts = {}
@@ -81,29 +82,7 @@ function Artifacts:resolve_job_artifact(payload)
 	if type(component) ~= 'string' or component == '' then
 		return nil, nil, 'component_required'
 	end
-
-	local artifact = payload.artifact
-	if type(artifact) ~= 'table' then
-		return nil, nil, 'artifact_required'
-	end
-
-	if artifact.kind == 'import_path' then
-		if type(artifact.path) ~= 'string' or artifact.path == '' then
-			return nil, nil, 'invalid_artifact_path'
-		end
-		return self:import_path(artifact.path, component, payload.metadata)
-	elseif artifact.kind == 'ref' then
-		if type(artifact.ref) ~= 'string' or artifact.ref == '' then
-			return nil, nil, 'invalid_artifact_ref'
-		end
-		local stored, derr = self:open(artifact.ref)
-		if not stored then return nil, nil, derr end
-		local desc, derr2 = self:describe_artifact(stored)
-		if not desc then return nil, nil, derr2 end
-		return artifact.ref, desc, nil
-	end
-
-	return nil, nil, 'invalid_artifact_kind'
+	return sources.resolve(self, component, payload and payload.artifact or nil, payload and payload.metadata or nil)
 end
 
 return M

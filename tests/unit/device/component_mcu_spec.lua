@@ -7,6 +7,10 @@ function T.component_mcu_composes_split_facts()
     software = { version = 'mcu-v1', boot_id = 'boot-1' },
     updater = { state = 'running' },
     health = { state = 'ok' },
+  }, {
+    software = { seen = true },
+    updater = { seen = true },
+    health = { seen = true },
   })
   assert(out.available == true)
   assert(out.ready == true)
@@ -19,6 +23,8 @@ end
 function T.component_mcu_marks_partial_fact_sets_not_ready()
   local out = component_mcu.compose({
     updater = { state = 'running' },
+  }, {
+    updater = { seen = true },
   })
   assert(out.available == true)
   assert(out.ready == false)

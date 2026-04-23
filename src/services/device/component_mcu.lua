@@ -4,6 +4,7 @@
 
 local model = require 'services.device.model'
 local schema = require 'services.device.schemas.mcu'
+local availability = require 'services.device.availability'
 
 local M = {}
 
@@ -49,24 +50,14 @@ function M.compose(raw_facts, fact_state)
 	local updater_raw = raw_facts.updater
 	local health_raw = raw_facts.health
 
-	local any_seen = false
-	for _, meta in pairs(fact_state) do
-		if type(meta) == 'table' and meta.seen == true then
-			any_seen = true
-			break
-		end
-	end
-	if not any_seen then
-		any_seen = software_raw ~= nil or updater_raw ~= nil or health_raw ~= nil
-	end
+	local status = availability.source_status({ fact_state = fact_state, raw_facts = raw_facts }, { required_facts = { 'software', 'updater' } })
 	local software = normalize_software_fact(software_raw)
 	local updater = normalize_updater_fact(updater_raw)
 	local health = normalize_health_fact(health_raw)
 
 	return {
-		available = any_seen,
-		ready = ((type(fact_state.software) == 'table' and fact_state.software.seen == true) or software_raw ~= nil)
-			and ((type(fact_state.updater) == 'table' and fact_state.updater.seen == true) or updater_raw ~= nil),
+		available = status.available,
+		ready = status.ready,
 		software = software,
 		updater = updater,
 		health = health,
