@@ -122,11 +122,8 @@ function T.devhost_main_fails_fast_when_child_service_errors()
 			scripted = {},
 		})
 
-		local diag = test_diag.for_stack(scope, bus, { obs = true, ui = true, max_records = 300, fake_hal = fake_hal })
+		local diag = test_diag.for_stack(scope, bus, { obs = true, max_records = 300, fake_hal = fake_hal })
 		test_diag.add_table(diag, 'linger_box', function() return linger_box end)
-		test_diag.add_subsystem(diag, 'ui', {
-			main_fn = test_diag.retained_fn(bus:connect(), { 'state', 'ui', 'main' }),
-		})
 
 		local main_scope = spawn_main(scope, bus, fake_hal, linger_box, 'hal,linger,boom')
 
