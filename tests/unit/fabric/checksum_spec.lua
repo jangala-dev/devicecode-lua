@@ -2,12 +2,17 @@ local checksum = require 'services.fabric.checksum'
 
 local T = {}
 
-function T.adler32_matches_known_vector()
-	assert(checksum.adler32('123456789') == 0x091e01de)
+function T.xxhash32_matches_known_vectors()
+	assert(checksum.xxhash32('') == 0x02cc5d05)
+	assert(checksum.xxhash32('123456789') == 0x937bad67)
 end
 
-function T.digest_hex_matches_known_vector()
-	assert(checksum.digest_hex('123456789') == '091e01de')
+function T.digest_hex_matches_known_vectors()
+	assert(checksum.digest_hex('') == '02cc5d05')
+	assert(checksum.digest_hex('a') == '550d7456')
+	assert(checksum.digest_hex('abc') == '32d153ff')
+	assert(checksum.digest_hex('123456789') == '937bad67')
+	assert(checksum.digest_hex('Nobody inspects the spammish repetition') == 'e2293b2f')
 end
 
 function T.verify_hex_reports_match()

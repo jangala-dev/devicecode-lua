@@ -42,19 +42,15 @@ local function remove_tree(path)
     return st == 'exited'
 end
 
-local function adler32_stream(stream)
-    local a, b = 1, 0
-    local mod = 65521
+local function xxhash32_stream(stream)
+    local st = checksum.new()
     while true do
         local chunk, err = stream:read_some(64 * 1024)
         if err ~= nil then return nil, tostring(err) end
         if chunk == nil then break end
-        for i = 1, #chunk do
-            a = (a + chunk:byte(i)) % mod
-            b = (b + a) % mod
-        end
+        checksum.update(st, chunk)
     end
-    return ('%08x'):format(b * 65536 + a), ''
+    return checksum.digest_hex_state(st), ''
 end
 
 local function read_file(path)
@@ -164,7 +160,7 @@ function FileArtefactSource:checksum()
     if self._checksum then return self._checksum end
     local f, err = file.open(self._path, 'r')
     if not f then error(tostring(err), 0) end
-    local sum, serr = adler32_stream(f)
+    local sum, serr = xxhash32_stream(f)
     f:close()
     if not sum then error(tostring(serr), 0) end
     self._checksum = sum
