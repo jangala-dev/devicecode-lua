@@ -2,6 +2,7 @@ local busmod    = require 'bus'
 local runfibers = require 'tests.support.run_fibers'
 local probe     = require 'tests.support.bus_probe'
 local test_diag = require 'tests.support.test_diag'
+local model = require 'services.device.model'
 local device    = require 'services.device'
 local safe      = require 'coxpcall'
 
@@ -199,5 +200,25 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
     assert(reply.ok == true)
   end, { timeout = 2.0 })
 end
+
+function T.device_service_rejects_components_without_facts()
+  local ok, err = pcall(function()
+    model.merge_components({
+      schema = 'devicecode.config/device/1',
+      components = {
+        broken = {
+          class = 'member',
+          subtype = 'mcu',
+          actions = {
+            prepare_update = { 'cmd', 'x' },
+          },
+        },
+      },
+    }, 'devicecode.config/device/1')
+  end)
+  assert(ok == false)
+  assert(tostring(err):match('facts') ~= nil)
+end
+
 
 return T

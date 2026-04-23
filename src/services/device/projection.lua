@@ -76,10 +76,6 @@ local function derive_source(rec, base)
 	source.role = rec.role
 	source.kind = source.kind or ((rec.class == 'host') and 'host' or 'member')
 
-	source.status = {
-		watch_topic = model.copy_array(rec.channels and rec.channels.status and rec.channels.status.watch_topic),
-		get_topic = model.copy_array(rec.channels and rec.channels.status and rec.channels.status.get_topic),
-	}
 
 	if type(rec.facts) == 'table' and next(rec.facts) ~= nil then
 		source.facts = {}

@@ -2,54 +2,9 @@
 --
 -- Device service state and mutation helpers.
 --
--- This module owns:
---   * the in-memory device state record
---   * config merge/application
---   * component record normalisation
---   * dirty tracking for retained publication
---
--- It does not own:
---   * observation/provider lifetime
---   * projection/public payload shapes
---   * transport or endpoint policy
---
--- State shape:
---   state = {
---     schema = <config schema id>,
---     components = { [name] = component_record, ... },
---     dirty_components = { [name] = true, ... },
---     summary_dirty = <boolean>,
---   }
---
--- Component record shape:
---   rec = {
---     name, class, subtype, role,
---     member, member_class, link_class,
---     present,
---     provider, provider_opts,
---     channels = {
---       status = {
---         watch_topic = {...}|nil,
---         get_topic = {...}|nil,
---       },
---     },
---     facts = {
---       [fact_name] = {
---         watch_topic = {...}|nil,
---       },
---     },
---     operations = {
---       [action_name] = {
---         name = <string>,
---         call_topic = {...},
---       },
---     },
---     raw_status = <last raw status>|nil,
---     raw_facts = { [fact_name] = payload|nil, ... },
---     fact_state = { [fact_name] = { seen = <boolean>, updated_at = <number|nil> }, ... },
---     source_up = <boolean>,
---     source_err = <string|nil>,
---   }
+-- Components are strictly fact-backed. Each component defines a non-empty
+-- set of retained fact topics and the device service composes those facts
+-- into a stable local component view.
 
 local M = {}
 
@@ -111,19 +66,27 @@ local function normalize_action_routes(actions)
 	return out
 end
 
-local function normalize_fact_routes(facts)
-	local out = {}
+local function normalize_fact_routes(facts, where)
 	if type(facts) ~= 'table' then
-		return out
+		error((where or 'component') .. ': facts must be a non-empty table', 0)
 	end
 
+	local out = {}
 	for fact_name, topic in pairs(facts) do
-		if type(fact_name) == 'string' and type(topic) == 'table' then
-			out[fact_name] = {
-				name = fact_name,
-				watch_topic = copy_array(topic),
-			}
+		if type(fact_name) ~= 'string' or fact_name == '' then
+			error((where or 'component') .. ': fact names must be non-empty strings', 0)
 		end
+		if type(topic) ~= 'table' or #topic == 0 then
+			error((where or 'component') .. ': fact ' .. tostring(fact_name) .. ' must be a non-empty topic array', 0)
+		end
+		out[fact_name] = {
+			name = fact_name,
+			watch_topic = copy_array(topic),
+		}
+	end
+
+	if next(out) == nil then
+		error((where or 'component') .. ': facts must not be empty', 0)
 	end
 
 	return out
@@ -139,19 +102,9 @@ local function new_fact_state(facts)
 	return raw_facts, fact_state
 end
 
-local function default_provider_for(spec)
-	if type(spec.provider) == 'string' and spec.provider ~= '' then
-		return spec.provider
-	end
-	if type(spec.facts) == 'table' and next(spec.facts) ~= nil then
-		return 'fact_watch'
-	end
-	return 'status_watch'
-end
-
 local function normalize_component(name, spec)
 	spec = type(spec) == 'table' and spec or {}
-	local facts = normalize_fact_routes(spec.facts)
+	local facts = normalize_fact_routes(spec.facts, 'component ' .. tostring(name))
 	local raw_facts, fact_state = new_fact_state(facts)
 
 	return {
@@ -164,20 +117,12 @@ local function normalize_component(name, spec)
 		link_class = spec.link_class or nil,
 		present = spec.present ~= false,
 
-		provider = default_provider_for(spec),
+		provider = 'fact_watch',
 		provider_opts = type(spec.provider_opts) == 'table' and copy_value(spec.provider_opts) or {},
 
-		channels = {
-			status = {
-				watch_topic = type(spec.status_topic) == 'table' and copy_array(spec.status_topic) or nil,
-				get_topic = type(spec.get_topic) == 'table' and copy_array(spec.get_topic) or nil,
-			},
-		},
 		facts = facts,
-
 		operations = normalize_action_routes(spec.actions),
 
-		raw_status = nil,
 		raw_facts = raw_facts,
 		fact_state = fact_state,
 		source_up = false,
@@ -254,29 +199,17 @@ local function apply_component_overrides(base, spec)
 	if type(spec.link_class) == 'string' and spec.link_class ~= '' then
 		base.link_class = spec.link_class
 	end
-
 	if spec.present ~= nil then
 		base.present = spec.present ~= false
 	end
 
-	if type(spec.provider) == 'string' and spec.provider ~= '' then
-		base.provider = spec.provider
-	elseif type(spec.facts) == 'table' and next(spec.facts) ~= nil then
-		base.provider = 'mcu_split_watch'
-	end
+	base.provider = 'fact_watch'
 	if type(spec.provider_opts) == 'table' then
 		base.provider_opts = copy_value(spec.provider_opts)
 	end
 
-	if type(spec.status_topic) == 'table' then
-		base.channels.status.watch_topic = copy_array(spec.status_topic)
-	end
-	if type(spec.get_topic) == 'table' then
-		base.channels.status.get_topic = copy_array(spec.get_topic)
-	end
-
-	if type(spec.facts) == 'table' then
-		base.facts = normalize_fact_routes(spec.facts)
+	if spec.facts ~= nil then
+		base.facts = normalize_fact_routes(spec.facts, 'component ' .. tostring(base.name))
 		base.raw_facts, base.fact_state = new_fact_state(base.facts)
 	end
 
@@ -284,12 +217,6 @@ local function apply_component_overrides(base, spec)
 		base.operations = normalize_action_routes(spec.actions)
 	end
 
-	-- Configuration redefines the observation plan. Live/source state is reset
-	-- and will be repopulated by observers.
-	base.raw_status = nil
-	if not has_facts(base) then
-		base.raw_facts, base.fact_state = {}, {}
-	end
 	base.source_up = false
 	base.source_err = nil
 
@@ -313,7 +240,7 @@ function M.merge_components(cfg, schema)
 
 	for name, spec in pairs(comps) do
 		if type(name) == 'string' and type(spec) == 'table' then
-			local base = out[name] or normalize_component(name, {})
+			local base = out[name] or normalize_component(name, { facts = spec.facts or {} })
 			out[name] = apply_component_overrides(base, spec)
 		end
 	end
@@ -334,21 +261,6 @@ end
 ----------------------------------------------------------------------
 -- Observation mutation
 ----------------------------------------------------------------------
-
-function M.note_status(state, name, status)
-	local rec = state.components[name]
-	if not rec then
-		return nil
-	end
-
-	rec.raw_status = status
-	rec.source_up = true
-	rec.source_err = nil
-
-	state.dirty_components[name] = true
-	state.summary_dirty = true
-	return rec
-end
 
 function M.note_fact(state, name, fact_name, payload, updated_at)
 	local rec = state.components[name]
@@ -374,9 +286,6 @@ function M.note_source_down(state, name, reason)
 		return nil
 	end
 
-	if not has_facts(rec) then
-		rec.raw_status = { state = 'unavailable', err = reason }
-	end
 	rec.source_up = false
 	rec.source_err = reason
 

@@ -1,13 +1,6 @@
 -- services/device/normalize.lua
 --
--- Generic public-status normalisation for device components.
---
--- Ownership split:
---   * normalize.lua          -> generic dispatch and generic status rules
---   * component_mcu.lua      -> MCU-specific normalisation/composition rules
---
--- Callers should use `normalize_component(...)`, which selects the
--- appropriate subtype-specific path where needed.
+-- Public-status normalisation for fact-backed device components.
 
 local component_mcu = require 'services.device.component_mcu'
 local component_host = require 'services.device.component_host'
@@ -15,90 +8,18 @@ local model = require 'services.device.model'
 
 local M = {}
 
-local function copy(t)
-	return model.copy_value(t)
-end
-
-----------------------------------------------------------------------
--- Generic status normalisation
-----------------------------------------------------------------------
-
-local function normalize_plain_status(raw)
-	raw = type(raw) == 'table' and raw or {}
-
-	local version = raw.version or raw.fw_version or nil
-	local build = raw.build or nil
-	local image_id = raw.image_id or nil
-	local boot_id = raw.boot_id or nil
-	local updater_state = raw.updater_state or raw.state or raw.status or raw.kind or nil
-	local last_error = raw.last_error or raw.err or nil
-
-	return {
-		available = next(raw) ~= nil,
-		ready = raw.ready ~= false,
-		software = {
-			version = version,
-			build = build,
-			image_id = image_id,
-			boot_id = boot_id,
-		},
-		updater = {
-			state = updater_state,
-			last_error = last_error,
-		},
-		raw = copy(raw),
-	}
-end
-
-local function normalize_canonical_status(raw)
-	local out = copy(raw)
-
-	out.available = raw.available ~= false
-	out.ready = raw.ready ~= false
-	out.software = type(out.software) == 'table' and out.software or {}
-	out.updater = type(out.updater) == 'table' and out.updater or {}
-	out.capabilities = type(out.capabilities) == 'table' and out.capabilities or {}
-
-	return out
-end
-
-function M.normalize_generic(raw)
-	if type(raw) == 'table' and (
-		type(raw.software) == 'table' or
-		type(raw.updater) == 'table'
-	) then
-		return normalize_canonical_status(raw)
-	end
-
-	return normalize_plain_status(raw)
-end
-
-----------------------------------------------------------------------
--- Component-aware dispatch
-----------------------------------------------------------------------
-
-function M.normalize_component_status(rec, raw)
-	local subtype = type(rec) == 'table' and (rec.subtype or rec.member_class or rec.name) or nil
-
-	if subtype == 'mcu' then
-		return component_mcu.normalize_status(raw)
-	end
-
-	return M.normalize_generic(raw)
-end
-
 function M.normalize_component(rec)
 	local subtype = type(rec) == 'table' and (rec.subtype or rec.member_class or rec.name) or nil
 
-	if model.has_facts(rec) then
-		if subtype == 'mcu' then
-			return component_mcu.compose(rec.raw_facts or {}, rec.fact_state or {})
-		else
-			return component_host.compose(rec.raw_facts or {}, rec.fact_state or {})
-		end
+	if not model.has_facts(rec) then
+		error('device component is not fact-backed: ' .. tostring(subtype or 'unknown'), 0)
 	end
 
-	return M.normalize_component_status(rec, rec and rec.raw_status or nil)
+	if subtype == 'mcu' then
+		return component_mcu.compose(rec.raw_facts or {}, rec.fact_state or {})
+	end
+
+	return component_host.compose(rec.raw_facts or {}, rec.fact_state or {})
 end
 
 return M

@@ -202,13 +202,6 @@ function PlatformDriver:_emit_updater_facts()
         dlog(self.logger, 'debug', { what = 'updater_health_emit_failed', err = tostring(health_err) })
     end
 
-    -- Transitional compatibility: keep the composite status retained as well.
-    local payload, err = hal_types.new.Emit('updater', 'cm5', 'state', 'status', status)
-    if payload then
-        self.cap_emit_ch:put(payload)
-    else
-        dlog(self.logger, 'debug', { what = 'updater_state_emit_failed', err = tostring(err) })
-    end
 end
 
 -- platform capability -------------------------------------------------------

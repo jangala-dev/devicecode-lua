@@ -21,7 +21,7 @@
 --   * projection.lua  -> public retained payload shapes
 --   * observers.lua   -> provider lifetime and failure boundary
 --   * providers/*     -> concrete observation sources
---   * proxy.lua       -> op-first call helpers for status/actions
+--   * proxy.lua       -> op-first call helpers for actions
 --
 -- Design notes:
 --   * the main shell should stay responsive; potentially blocking component
@@ -233,10 +233,7 @@ local function handle_observer_event(state, changed, observer_state, ev)
 		return
 	end
 
-	if ev.tag == 'raw_changed' then
-		model.note_status(state, ev.component, ev.payload)
-		changed:signal()
-	elseif ev.tag == 'fact_changed' then
+	if ev.tag == 'fact_changed' then
 		model.note_fact(state, ev.component, ev.fact, ev.payload)
 		changed:signal()
 	elseif ev.tag == 'source_down' then
@@ -250,7 +247,6 @@ end
 ----------------------------------------------------------------------
 
 -- Helper completion events are reported back to the shell:
---   * get_done -> { tag, req, component, ok, value|err }
 --   * do_done  -> { tag, req, component, ok, value|err }
 --
 -- Helpers are bounded units of work:
@@ -325,7 +321,7 @@ local function handle_list_req(req, err, state, svc)
 	req:reply({ ok = true, components = items })
 end
 
-local function handle_get_req(work_tx, conn, req, err, state, svc)
+local function handle_get_req(_work_tx, _conn, req, err, state, svc)
 	if not req then
 		error('device get endpoint closed: ' .. tostring(err), 0)
 	end
@@ -339,23 +335,7 @@ local function handle_get_req(work_tx, conn, req, err, state, svc)
 		return
 	end
 
-	-- Fast path: answer from cached/raw state already observed by providers.
-	if rec.raw_status ~= nil or model.has_facts(rec) then
-		req:reply(projection.component_view(name, rec, svc:now()))
-		return
-	end
-
-	-- Slow path: fetch in a helper so the shell remains responsive.
-	spawn_work_helper(work_tx, {
-		done_tag = 'get_done',
-		req = req,
-		component = name,
-		spawn_what = 'device_get_helper_spawn',
-		overflow_what = 'device_get_done_overflow',
-		run = function()
-			return proxy.fetch_status(conn, rec, payload.args or {}, payload.timeout)
-		end,
-	})
+	req:reply(projection.component_view(name, rec, svc:now()))
 end
 
 local function handle_do_req(work_tx, conn, req, err, state)
@@ -385,34 +365,9 @@ local function handle_do_req(work_tx, conn, req, err, state)
 	})
 end
 
-local function handle_work_event(state, changed, ev, svc)
+local function handle_work_event(_state, _changed, ev, _svc)
 	if not ev then
 		error('device work mailbox closed', 0)
-	end
-
-	if ev.tag == 'get_done' then
-		local req = ev.req
-		local name = ev.component
-		local rec = state.components[name]
-
-		if not req or req:done() then
-			return
-		end
-
-		if not ev.ok then
-			req:fail(ev.err)
-			return
-		end
-
-		if not rec then
-			req:fail('unknown_component')
-			return
-		end
-
-		model.note_status(state, name, ev.value)
-		changed:signal()
-		req:reply(projection.component_view(name, rec, svc:now()))
-		return
 	end
 
 	if ev.tag == 'do_done' then

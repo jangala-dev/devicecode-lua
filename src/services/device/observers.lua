@@ -15,7 +15,7 @@
 --       - observer generation stamping for stale-event suppression
 --   * providers/* own:
 --       - source-specific watching/fetch logic
---       - emission of raw_changed / source_down events as appropriate
+--       - emission of fact_changed / source_down events as appropriate
 --
 -- Lifecycle notes:
 --   * each observer runs in its own child scope
@@ -23,15 +23,12 @@
 --   * outer cancellation does not emit source_down; only provider failure does
 
 local fibers = require 'fibers'
-local status_watch = require 'services.device.providers.status_watch'
 local fact_watch = require 'services.device.providers.fact_watch'
 
 local M = {}
 
 local PROVIDERS = {
-	status_watch = status_watch,
 	fact_watch = fact_watch,
-	mcu_split_watch = fact_watch,
 }
 
 local function send_required(tx, value, what)
@@ -46,7 +43,7 @@ local function provider_for(rec)
 		and type(rec.provider) == 'string'
 		and rec.provider ~= '')
 		and rec.provider
-		or 'status_watch'
+		or 'fact_watch'
 
 	return PROVIDERS[name], name
 end
