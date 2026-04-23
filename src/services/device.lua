@@ -218,7 +218,7 @@ local function handle_cfg_event(service_scope, conn, svc, state, changed, obs_tx
 	end
 end
 
-local function handle_observer_event(state, changed, observer_state, ev)
+local function handle_observer_event(conn, state, changed, observer_state, ev)
 	if not ev then
 		return
 	end
@@ -235,6 +235,10 @@ local function handle_observer_event(state, changed, observer_state, ev)
 
 	if ev.tag == 'fact_changed' then
 		model.note_fact(state, ev.component, ev.fact, ev.payload)
+		changed:signal()
+	elseif ev.tag == 'event_seen' then
+		model.note_event(state, ev.component, ev.event, ev.payload)
+		conn:publish(projection.component_event_topic(ev.component, ev.event), ev.payload)
 		changed:signal()
 	elseif ev.tag == 'source_down' then
 		model.note_source_down(state, ev.component, ev.reason)
@@ -461,7 +465,7 @@ function M.start(conn, opts)
 			)
 
 		elseif which == 'obs' then
-			handle_observer_event(state, changed, observer_state, a)
+			handle_observer_event(conn, state, changed, observer_state, a)
 
 		elseif which == 'work' then
 			handle_work_event(state, changed, a, svc)

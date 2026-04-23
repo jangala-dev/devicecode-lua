@@ -2,9 +2,11 @@
 --
 -- Device service state and mutation helpers.
 --
--- Components are strictly fact-backed. Each component defines a non-empty
--- set of retained fact topics and the device service composes those facts
--- into a stable local component view.
+-- Components are observation-backed. Each component defines retained fact
+-- topics, event topics, or both; the device service composes those
+-- observations into a stable local component view.
+
+local topics = require 'services.device.topics'
 
 local M = {}
 
@@ -67,11 +69,12 @@ local function normalize_action_routes(actions)
 end
 
 local function normalize_fact_routes(facts, where)
+	local out = {}
+	if facts == nil then return out end
 	if type(facts) ~= 'table' then
-		error((where or 'component') .. ': facts must be a non-empty table', 0)
+		error((where or 'component') .. ': facts must be a table', 0)
 	end
 
-	local out = {}
 	for fact_name, topic in pairs(facts) do
 		if type(fact_name) ~= 'string' or fact_name == '' then
 			error((where or 'component') .. ': fact names must be non-empty strings', 0)
@@ -85,8 +88,33 @@ local function normalize_fact_routes(facts, where)
 		}
 	end
 
-	if next(out) == nil then
-		error((where or 'component') .. ': facts must not be empty', 0)
+	return out
+end
+
+local function normalize_event_routes(events, where)
+	local out = {}
+	if events == nil then return out end
+	if type(events) ~= 'table' then
+		error((where or 'component') .. ': events must be a table', 0)
+	end
+
+	for event_name, spec in pairs(events) do
+		if type(event_name) ~= 'string' or event_name == '' then
+			error((where or 'component') .. ': event names must be non-empty strings', 0)
+		end
+
+		local topic = spec
+		if type(spec) == 'table' and spec.subscribe_topic ~= nil then
+			topic = spec.subscribe_topic
+		end
+		if type(topic) ~= 'table' or #topic == 0 then
+			error((where or 'component') .. ': event ' .. tostring(event_name) .. ' must be a non-empty topic array', 0)
+		end
+
+		out[event_name] = {
+			name = event_name,
+			subscribe_topic = copy_array(topic),
+		}
 	end
 
 	return out
@@ -102,10 +130,25 @@ local function new_fact_state(facts)
 	return raw_facts, fact_state
 end
 
+local function new_event_state(events)
+	local raw_events = {}
+	local event_state = {}
+	for event_name in pairs(events or {}) do
+		raw_events[event_name] = nil
+		event_state[event_name] = { seen = false, updated_at = nil, count = 0 }
+	end
+	return raw_events, event_state
+end
+
 local function normalize_component(name, spec)
 	spec = type(spec) == 'table' and spec or {}
 	local facts = normalize_fact_routes(spec.facts, 'component ' .. tostring(name))
+	local events = normalize_event_routes(spec.events, 'component ' .. tostring(name))
+	if next(facts) == nil and next(events) == nil then
+		error('component ' .. tostring(name) .. ': at least one fact or event is required', 0)
+	end
 	local raw_facts, fact_state = new_fact_state(facts)
+	local raw_events, event_state = new_event_state(events)
 
 	return {
 		name = name,
@@ -121,10 +164,13 @@ local function normalize_component(name, spec)
 		provider_opts = type(spec.provider_opts) == 'table' and copy_value(spec.provider_opts) or {},
 
 		facts = facts,
+		events = events,
 		operations = normalize_action_routes(spec.actions),
 
 		raw_facts = raw_facts,
 		fact_state = fact_state,
+		raw_events = raw_events,
+		event_state = event_state,
 		source_up = false,
 		source_err = nil,
 	}
@@ -134,7 +180,14 @@ local function has_facts(rec)
 	return type(rec) == 'table' and type(rec.facts) == 'table' and next(rec.facts) ~= nil
 end
 
+local function has_observations(rec)
+	return type(rec) == 'table'
+		and ((type(rec.facts) == 'table' and next(rec.facts) ~= nil)
+			or (type(rec.events) == 'table' and next(rec.events) ~= nil))
+end
+
 M.has_facts = has_facts
+M.has_observations = has_observations
 
 ----------------------------------------------------------------------
 -- Defaults
@@ -149,15 +202,15 @@ local function default_components()
 			member = 'local',
 
 			facts = {
-				software = { 'cap', 'updater', 'cm5', 'state', 'software' },
-				updater = { 'cap', 'updater', 'cm5', 'state', 'updater' },
-				health = { 'cap', 'updater', 'cm5', 'state', 'health' },
+				software = topics.cap_updater_state('cm5', 'software'),
+				updater = topics.cap_updater_state('cm5', 'updater'),
+				health = topics.cap_updater_state('cm5', 'health'),
 			},
 
 			actions = {
-				prepare_update = { 'cap', 'updater', 'cm5', 'rpc', 'prepare' },
-				stage_update = { 'cap', 'updater', 'cm5', 'rpc', 'stage' },
-				commit_update = { 'cap', 'updater', 'cm5', 'rpc', 'commit' },
+				prepare_update = topics.cap_updater_rpc('cm5', 'prepare'),
+				stage_update = topics.cap_updater_rpc('cm5', 'stage'),
+				commit_update = topics.cap_updater_rpc('cm5', 'commit'),
 			},
 		}),
 	}
@@ -213,6 +266,15 @@ local function apply_component_overrides(base, spec)
 		base.raw_facts, base.fact_state = new_fact_state(base.facts)
 	end
 
+	if spec.events ~= nil then
+		base.events = normalize_event_routes(spec.events, 'component ' .. tostring(base.name))
+		base.raw_events, base.event_state = new_event_state(base.events)
+	end
+
+	if next(base.facts or {}) == nil and next(base.events or {}) == nil then
+		error('component ' .. tostring(base.name) .. ': at least one fact or event is required', 0)
+	end
+
 	if type(spec.actions) == 'table' then
 		base.operations = normalize_action_routes(spec.actions)
 	end
@@ -240,7 +302,7 @@ function M.merge_components(cfg, schema)
 
 	for name, spec in pairs(comps) do
 		if type(name) == 'string' and type(spec) == 'table' then
-			local base = out[name] or normalize_component(name, { facts = spec.facts or {} })
+			local base = out[name] or normalize_component(name, spec)
 			out[name] = apply_component_overrides(base, spec)
 		end
 	end
@@ -272,6 +334,31 @@ function M.note_fact(state, name, fact_name, payload, updated_at)
 	rec.fact_state[fact_name] = rec.fact_state[fact_name] or { seen = false, updated_at = nil }
 	rec.fact_state[fact_name].seen = true
 	rec.fact_state[fact_name].updated_at = updated_at or rec.fact_state[fact_name].updated_at
+	rec.source_up = true
+	rec.source_err = nil
+
+	state.dirty_components[name] = true
+	state.summary_dirty = true
+	return rec
+end
+
+
+function M.note_event(state, name, event_name, payload, updated_at)
+	local rec = state.components[name]
+	if not rec or type(event_name) ~= 'string' or event_name == '' then
+		return nil
+	end
+
+	rec.raw_events = rec.raw_events or {}
+	rec.event_state = rec.event_state or {}
+	rec.raw_events[event_name] = payload
+
+	local st = rec.event_state[event_name] or { seen = false, updated_at = nil, count = 0 }
+	st.seen = true
+	st.updated_at = updated_at or st.updated_at
+	st.count = (st.count or 0) + 1
+	rec.event_state[event_name] = st
+
 	rec.source_up = true
 	rec.source_err = nil
 

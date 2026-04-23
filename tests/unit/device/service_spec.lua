@@ -201,7 +201,7 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
   end, { timeout = 2.0 })
 end
 
-function T.device_service_rejects_components_without_facts()
+function T.device_service_rejects_components_without_observations()
   local ok, err = pcall(function()
     model.merge_components({
       schema = 'devicecode.config/device/1',
@@ -217,8 +217,70 @@ function T.device_service_rejects_components_without_facts()
     }, 'devicecode.config/device/1')
   end)
   assert(ok == false)
-  assert(tostring(err):match('facts') ~= nil)
+  assert(tostring(err):match('observation') ~= nil or tostring(err):match('fact') ~= nil)
 end
 
+
+
+function T.device_service_republishes_component_events_and_records_last_event()
+  runfibers.run(function(scope)
+    local bus = busmod.new()
+    local caller = bus:connect()
+    local seed = bus:connect()
+    local provider = bus:connect()
+
+    seed:retain({ 'cfg', 'device' }, {
+      schema = 'devicecode.config/device/1',
+      components = {
+        mcu = {
+          class = 'member',
+          subtype = 'mcu',
+          facts = {
+            software = { 'state', 'member', 'mcu', 'software' },
+            updater = { 'state', 'member', 'mcu', 'updater' },
+          },
+          events = {
+            charger_alert = { 'event', 'member', 'mcu', 'power', 'charger', 'alert' },
+          },
+        },
+      },
+    })
+
+    provider:retain({ 'state', 'member', 'mcu', 'software' }, { version = 'mcu-v2' })
+    provider:retain({ 'state', 'member', 'mcu', 'updater' }, { state = 'running' })
+
+    local sub = caller:subscribe({ 'event', 'device', 'component', 'mcu', 'charger_alert' }, { queue_len = 4 })
+
+    local ok, err = scope:spawn(function()
+      device.start(bus:connect(), { name = 'device', env = 'dev' })
+    end)
+    assert(ok, tostring(err))
+    wait_service_running(caller, 'device')
+
+    provider:publish({ 'event', 'member', 'mcu', 'power', 'charger', 'alert' }, {
+      kind = 'vin_lo',
+      severity = 'warn',
+    })
+
+    local ev, eerr = sub:recv()
+    assert(eerr == nil)
+    assert(type(ev) == 'table')
+    assert(type(ev.payload) == 'table')
+    assert(ev.payload.kind == 'vin_lo')
+
+    assert(probe.wait_until(function()
+      local okp, payload = safe.pcall(function()
+        return probe.wait_payload(caller, { 'state', 'device', 'component', 'mcu' }, { timeout = 0.02 })
+      end)
+      return okp
+        and type(payload) == 'table'
+        and type(payload.events) == 'table'
+        and type(payload.events.charger_alert) == 'table'
+        and payload.events.charger_alert.kind == 'vin_lo'
+    end, { timeout = 0.75, interval = 0.01 }))
+
+    sub:unsubscribe()
+  end, { timeout = 2.0 })
+end
 
 return T

@@ -16,6 +16,7 @@
 
 local model = require 'services.device.model'
 local normalize = require 'services.device.normalize'
+local topics = require 'services.device.topics'
 
 local M = {}
 
@@ -24,23 +25,27 @@ local M = {}
 ----------------------------------------------------------------------
 
 function M.self_topic()
-	return { 'state', 'device', 'self' }
+	return topics.self()
 end
 
 function M.component_topic(name)
-	return { 'state', 'device', 'component', name }
+	return topics.component(name)
 end
 
 function M.component_software_topic(name)
-	return { 'state', 'device', 'component', name, 'software' }
+	return topics.component_software(name)
 end
 
 function M.component_update_topic(name)
-	return { 'state', 'device', 'component', name, 'update' }
+	return topics.component_update(name)
+end
+
+function M.component_event_topic(name, event_name)
+	return topics.component_event(name, event_name)
 end
 
 function M.summary_topic()
-	return { 'state', 'device', 'components' }
+	return topics.components()
 end
 
 ----------------------------------------------------------------------
@@ -86,6 +91,15 @@ local function derive_source(rec, base)
 		end
 	end
 
+	if type(rec.events) == 'table' and next(rec.events) ~= nil then
+		source.events = {}
+		for event_name, event in pairs(rec.events) do
+			source.events[event_name] = {
+				subscribe_topic = model.copy_array(event.subscribe_topic),
+			}
+		end
+	end
+
 	return source
 end
 
@@ -113,7 +127,14 @@ function M.component_view(name, rec, now_ts)
 	local actions = public_actions(rec)
 	local capabilities = derive_capabilities(base, actions)
 
-	local available = (rec.source_up == true) and (base.available ~= false)
+	local base_available = base.available
+	if base_available == false and not model.has_facts(rec)
+		and type(rec.events) == 'table' and next(rec.events) ~= nil
+	then
+		base_available = true
+	end
+
+	local available = (rec.source_up == true) and (base_available ~= false)
 	local ready = available and (base.ready ~= false)
 
 	local updater_state = type(base.updater) == 'table' and base.updater.state or nil
@@ -143,6 +164,8 @@ function M.component_view(name, rec, now_ts)
 
 		software = copy(base.software),
 		updater = copy(base.updater),
+		events = copy(rec.raw_events or {}),
+		event_state = copy(rec.event_state or {}),
 		source = source,
 		raw = base.raw,
 	}
@@ -217,6 +240,7 @@ function M.summary_payload(state, now_ts)
 			actions = view.actions,
 			software = copy(view.software),
 			updater = copy(view.updater),
+			event_state = copy(view.event_state),
 		}
 	end
 

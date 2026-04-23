@@ -24,6 +24,7 @@
 
 local fibers = require 'fibers'
 local fact_watch = require 'services.device.providers.fact_watch'
+local contract = require 'services.device.provider_contract'
 
 local M = {}
 
@@ -59,7 +60,9 @@ local function provider_context(conn, name, rec, tx, generation)
 		-- The boundary layer stamps component/generation so the shell can drop
 		-- stale events from retired observers.
 		emit = function(ev)
-			assert(type(ev) == 'table', 'observer emit expects table event')
+			local normalised, nerr = contract.normalise_event(ev)
+			if not normalised then error(nerr, 2) end
+			ev = normalised
 			if ev.component == nil then
 				ev.component = name
 			end
@@ -97,8 +100,9 @@ end
 --   }
 function M.spawn_component(scope_obj, conn, name, rec, tx, generation)
 	local provider, provider_name = provider_for(rec)
-	if not provider or type(provider.run) ~= 'function' then
-		return nil, 'unknown_provider:' .. tostring(provider_name)
+	local ok_provider, perr = contract.assert_provider(provider, provider_name)
+	if not ok_provider then
+		return nil, 'unknown_provider:' .. tostring(perr or provider_name)
 	end
 
 	local child, err = scope_obj:child()

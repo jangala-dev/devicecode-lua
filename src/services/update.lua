@@ -36,6 +36,7 @@ local runner        = require 'services.update.runner'
 local publish_mod   = require 'services.update.publish'
 local runtime_mod   = require 'services.update.runtime'
 local artifacts_mod = require 'services.update.artifacts'
+local backend_contract = require 'services.update.backend_contract'
 local commands_mod  = require 'services.update.commands'
 local component_backend_mod = require 'services.update.backends.component_proxy'
 local cm5_backend_mod = require 'services.update.backends.cm5_swupdate'
@@ -62,14 +63,16 @@ local function build_backend(component, component_cfg)
 	end
 
 	local backend_name = type(component_cfg) == 'table' and component_cfg.backend or nil
+	local backend
 	if backend_name == 'cm5_swupdate' then
-		return cm5_backend_mod.new(opts)
-	end
-	if backend_name == 'mcu_component' then
-		return mcu_backend_mod.new(opts)
+		backend = cm5_backend_mod.new(opts)
+	elseif backend_name == 'mcu_component' then
+		backend = mcu_backend_mod.new(opts)
+	else
+		return nil, 'unknown_backend:' .. tostring(backend_name)
 	end
 
-	return nil, 'unknown_backend:' .. tostring(backend_name)
+	return backend_contract.validate(backend_name .. ':' .. tostring(component), backend)
 end
 
 local function discover_cap(conn, class, id, timeout)
@@ -296,8 +299,17 @@ function M.start(conn, opts)
 
 		for component, ccfg in pairs(state.cfg.components) do
 			local backend = state.backends[component]
-			if backend and type(backend.observe_specs) == 'function' then
-				local specs = backend:observe_specs(ccfg) or {}
+			if backend then
+				local specs, serr = backend_contract.observe_specs(component, backend, ccfg)
+				if not specs then
+					svc:obs_log('warn', {
+						what = 'backend_observe_specs_failed',
+						component = component,
+						err = tostring(serr),
+					})
+					specs = {}
+				end
+
 				for _, spec in ipairs(specs) do
 					if type(spec) == 'table'
 						and type(spec.key) == 'string'

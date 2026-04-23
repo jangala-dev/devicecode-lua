@@ -3,6 +3,7 @@
 -- MCU-specific fact composition.
 
 local model = require 'services.device.model'
+local schema = require 'services.device.schemas.mcu'
 
 local M = {}
 
@@ -23,58 +24,49 @@ function M.empty()
 		capabilities = {},
 		source = {},
 		health = nil,
+		events = {},
 		raw = {},
 	}
 end
 
 local function normalize_software_fact(raw)
-	raw = ensure_table(raw)
-	return {
-		version = raw.version or raw.fw_version or nil,
-		build = raw.build or nil,
-		image_id = raw.image_id or nil,
-		boot_id = raw.boot_id or nil,
-	}
+	return schema.normalize_software(raw)
 end
 
 local function normalize_updater_fact(raw)
-	raw = ensure_table(raw)
-	return {
-		state = raw.state or raw.status or raw.kind or nil,
-		last_error = raw.last_error or raw.err or nil,
-		pending_version = raw.pending_version or nil,
-	}
+	return schema.normalize_updater(raw)
 end
 
 local function normalize_health_fact(raw)
-	raw = ensure_table(raw)
-	if raw.state ~= nil then
-		return raw.state
-	end
-	if raw.health ~= nil then
-		return raw.health
-	end
-	if next(raw) ~= nil then
-		return 'ok'
-	end
-	return nil
+	return schema.normalize_health(raw)
 end
 
-function M.compose(raw_facts, _fact_state)
+function M.compose(raw_facts, fact_state)
 	raw_facts = type(raw_facts) == 'table' and raw_facts or {}
+	fact_state = type(fact_state) == 'table' and fact_state or {}
 
 	local software_raw = raw_facts.software
 	local updater_raw = raw_facts.updater
 	local health_raw = raw_facts.health
 
-	local any_seen = software_raw ~= nil or updater_raw ~= nil or health_raw ~= nil
+	local any_seen = false
+	for _, meta in pairs(fact_state) do
+		if type(meta) == 'table' and meta.seen == true then
+			any_seen = true
+			break
+		end
+	end
+	if not any_seen then
+		any_seen = software_raw ~= nil or updater_raw ~= nil or health_raw ~= nil
+	end
 	local software = normalize_software_fact(software_raw)
 	local updater = normalize_updater_fact(updater_raw)
 	local health = normalize_health_fact(health_raw)
 
 	return {
 		available = any_seen,
-		ready = software_raw ~= nil and updater_raw ~= nil,
+		ready = ((type(fact_state.software) == 'table' and fact_state.software.seen == true) or software_raw ~= nil)
+			and ((type(fact_state.updater) == 'table' and fact_state.updater.seen == true) or updater_raw ~= nil),
 		software = software,
 		updater = updater,
 		health = health,
@@ -82,6 +74,7 @@ function M.compose(raw_facts, _fact_state)
 		source = {
 			kind = 'member',
 		},
+		events = {},
 		raw = {
 			software = copy(software_raw),
 			updater = copy(updater_raw),
