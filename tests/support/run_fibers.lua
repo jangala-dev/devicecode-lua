@@ -21,6 +21,7 @@ function M.run(fn, opts)
 			end
 
 			local done = pulse.new()
+			local done_ver = done:version()
 			local body_err = nil
 
 			local ok_spawn, spawn_err = test_scope:spawn(function(s)
@@ -42,7 +43,7 @@ function M.run(fn, opts)
 
 			local ok_timer, timer_err = root_scope:spawn(function()
 				local completed = fibers.perform(op.boolean_choice(
-					done:next_op():wrap(function() return true end),
+					done:changed_op(done_ver):wrap(function() return true end),
 					sleep.sleep_op(timeout):wrap(function() return false end)
 				))
 
@@ -56,7 +57,7 @@ function M.run(fn, opts)
 				error(timer_err, 0)
 			end
 
-			done:next()
+			done:changed(done_ver)
 
 			test_scope:cancel('test complete')
 			fibers.perform(test_scope:join_op())

@@ -1,0 +1,249 @@
+-- services/device/projection.lua
+--
+-- Public retained payload shapes for the device service.
+--
+-- This module owns:
+--   * retained topic helpers
+--   * projection from model state into public payloads
+--
+-- It does not own:
+--   * config/state mutation
+--   * provider/runtime policy
+--   * transport or endpoint handling
+--
+-- The central projection is `component_view(...)`. All other payload helpers
+-- are narrower derived views of the same underlying component state.
+
+local model = require 'services.device.model'
+local normalize = require 'services.device.normalize'
+
+local M = {}
+
+----------------------------------------------------------------------
+-- Topic helpers
+----------------------------------------------------------------------
+
+function M.self_topic()
+	return { 'state', 'device', 'self' }
+end
+
+function M.component_topic(name)
+	return { 'state', 'device', 'component', name }
+end
+
+function M.component_software_topic(name)
+	return { 'state', 'device', 'component', name, 'software' }
+end
+
+function M.component_update_topic(name)
+	return { 'state', 'device', 'component', name, 'update' }
+end
+
+function M.summary_topic()
+	return { 'state', 'device', 'components' }
+end
+
+----------------------------------------------------------------------
+-- Small helpers
+----------------------------------------------------------------------
+
+local function copy(t)
+	return model.copy_value(t)
+end
+
+local function public_actions(rec)
+	local actions = {}
+	for action_name in pairs(rec.operations or {}) do
+		actions[action_name] = true
+	end
+	return actions
+end
+
+local function derive_capabilities(base, actions)
+	local capabilities = copy(base.capabilities or {})
+	if next(actions) ~= nil then
+		capabilities.update = true
+	end
+	return capabilities
+end
+
+local function derive_source(rec, base)
+	local source = copy(base.source or {})
+
+	source.member = rec.member
+	source.member_class = rec.member_class
+	source.link_class = rec.link_class
+	source.role = rec.role
+	source.kind = source.kind or ((rec.class == 'host') and 'host' or 'member')
+
+
+	if type(rec.facts) == 'table' and next(rec.facts) ~= nil then
+		source.facts = {}
+		for fact_name, fact in pairs(rec.facts) do
+			source.facts[fact_name] = {
+				watch_topic = model.copy_array(fact.watch_topic),
+			}
+		end
+	end
+
+	return source
+end
+
+local function derive_health(available, updater_state, explicit_health)
+	if explicit_health ~= nil then
+		return explicit_health
+	end
+	if not available then
+		return 'unknown'
+	end
+	if updater_state == 'failed' or updater_state == 'unavailable' then
+		return 'degraded'
+	end
+	return 'ok'
+end
+
+----------------------------------------------------------------------
+-- Public projections
+----------------------------------------------------------------------
+
+-- Canonical public view of one component.
+function M.component_view(name, rec, now_ts)
+	local base = normalize.normalize_component(rec)
+
+	local actions = public_actions(rec)
+	local capabilities = derive_capabilities(base, actions)
+
+	local available = (rec.source_up == true) and (base.available ~= false)
+	local ready = available and (base.ready ~= false)
+
+	local updater_state = type(base.updater) == 'table' and base.updater.state or nil
+	local health = derive_health(available, updater_state, base.health)
+
+	local source = derive_source(rec, base)
+
+	return {
+		kind = 'device.component',
+		ts = now_ts,
+
+		component = name,
+		class = rec.class,
+		subtype = rec.subtype,
+		role = rec.role,
+		member = rec.member,
+		member_class = rec.member_class,
+		link_class = rec.link_class,
+		present = rec.present ~= false,
+
+		available = available,
+		ready = ready,
+		health = health,
+
+		actions = actions,
+		capabilities = capabilities,
+
+		software = copy(base.software),
+		updater = copy(base.updater),
+		source = source,
+		raw = base.raw,
+	}
+end
+
+-- Combined public payload family for one component.
+--
+-- This is the common publication path used by the service shell:
+--   * component
+--   * software
+--   * update
+--
+-- Narrower payloads are derived from one canonical component view so the shell
+-- does not recompute normalisation/projection three times.
+function M.component_payloads(name, rec, now_ts)
+	local view = M.component_view(name, rec, now_ts)
+
+	local sw = copy(view.software)
+	sw.kind = 'device.component.software'
+	sw.ts = now_ts
+	sw.component = name
+	sw.role = view.role
+	sw.member = view.member
+	sw.member_class = view.member_class
+	sw.link_class = view.link_class
+
+	local upd = copy(view.updater)
+	upd.kind = 'device.component.update'
+	upd.ts = now_ts
+	upd.component = name
+	upd.available = view.available
+	upd.health = view.health
+	upd.actions = view.actions
+
+	return {
+		component = view,
+		software = sw,
+		update = upd,
+	}
+end
+
+function M.summary_payload(state, now_ts)
+	local items = {}
+	local counts = {
+		total = 0,
+		available = 0,
+		degraded = 0,
+	}
+
+	for name, rec in pairs(state.components) do
+		local view = M.component_view(name, rec, now_ts)
+
+		counts.total = counts.total + 1
+		if view.available then
+			counts.available = counts.available + 1
+		end
+		if view.health ~= 'ok' then
+			counts.degraded = counts.degraded + 1
+		end
+
+		items[name] = {
+			class = view.class,
+			subtype = view.subtype,
+			role = view.role,
+			member = view.member,
+			member_class = view.member_class,
+			link_class = view.link_class,
+			present = view.present,
+			available = view.available,
+			ready = view.ready,
+			health = view.health,
+			actions = view.actions,
+			software = copy(view.software),
+			updater = copy(view.updater),
+		}
+	end
+
+	return {
+		kind = 'device.components',
+		ts = now_ts,
+		components = items,
+		counts = counts,
+	}
+end
+
+function M.self_payload(state, now_ts)
+	local summary = M.summary_payload(state, now_ts)
+	return {
+		kind = 'device.self',
+		ts = now_ts,
+		counts = summary.counts,
+		components = summary.components,
+	}
+end
+
+function M.software_payload(name, rec, now_ts)
+	return M.component_payloads(name, rec, now_ts).software
+end
+
+function M.update_payload(name, rec, now_ts)
+	return M.component_payloads(name, rec, now_ts).update
+end
+
+return M

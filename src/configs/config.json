@@ -391,5 +391,142 @@
                 }
             }
         }
+    },
+    "device": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/device/1",
+            "components": {
+                "cm5": {
+                    "class": "host",
+                    "subtype": "cm5",
+                    "facts": {
+                        "software": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "state",
+                            "software"
+                        ],
+                        "updater": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "state",
+                            "updater"
+                        ],
+                        "health": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "state",
+                            "health"
+                        ]
+                    },
+                    "actions": {
+                        "prepare_update": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "prepare"
+                        ],
+                        "stage_update": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "stage"
+                        ],
+                        "commit_update": [
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "commit"
+                        ]
+                    }
+                },
+                "mcu": {
+                    "class": "member",
+                    "subtype": "mcu",
+                    "actions": {
+                        "prepare_update": [
+                            "cmd",
+                            "member",
+                            "mcu",
+                            "updater",
+                            "prepare"
+                        ],
+                        "commit_update": [
+                            "cmd",
+                            "member",
+                            "mcu",
+                            "updater",
+                            "commit"
+                        ]
+                    },
+                    "facts": {
+                        "software": [
+                            "state",
+                            "member",
+                            "mcu",
+                            "software"
+                        ],
+                        "updater": [
+                            "state",
+                            "member",
+                            "mcu",
+                            "updater"
+                        ],
+                        "health": [
+                            "state",
+                            "member",
+                            "mcu",
+                            "health"
+                        ]
+                    }
+                }
+            }
+        }
+    },
+    "update": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/update/1",
+            "jobs_namespace": "update/jobs",
+            "components": {
+                "cm5": {
+                    "backend": "cm5_swupdate"
+                },
+                "mcu": {
+                    "backend": "mcu_component",
+                    "transfer": {
+                        "link_id": "cm5-uart-mcu",
+                        "receiver": [
+                            "rpc",
+                            "member",
+                            "mcu",
+                            "receive"
+                        ],
+                        "timeout_s": 60.0
+                    }
+                }
+            },
+            "artifacts": {
+                "default_policy": "transient_only",
+                "policies": {
+                    "cm5": "transient_only",
+                    "mcu": "transient_only"
+                }
+            },
+            "reconcile": {
+                "interval_s": 10.0,
+                "timeout_s": 180.0
+            },
+            "admission": {
+                "mode": "global_single"
+            }
+        }
     }
 }

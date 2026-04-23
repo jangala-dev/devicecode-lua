@@ -264,11 +264,238 @@ function new.PowerActionOpts(delay)
     return setmetatable({ delay = delay }, PowerActionOpts), ""
 end
 
+
+
+
+---@class ControlStoreGetOpts
+---@field ns string
+---@field key string
+local ControlStoreGetOpts = {}
+ControlStoreGetOpts.__index = ControlStoreGetOpts
+
+function new.ControlStoreGetOpts(ns, key)
+    if type(ns) ~= 'string' or ns == '' then return nil, 'invalid ns' end
+    if type(key) ~= 'string' or key == '' then return nil, 'invalid key' end
+    return setmetatable({ ns = ns, key = key }, ControlStoreGetOpts), ''
+end
+
+---@class ControlStorePutOpts
+---@field ns string
+---@field key string
+---@field value table
+local ControlStorePutOpts = {}
+ControlStorePutOpts.__index = ControlStorePutOpts
+
+function new.ControlStorePutOpts(ns, key, value)
+    if type(ns) ~= 'string' or ns == '' then return nil, 'invalid ns' end
+    if type(key) ~= 'string' or key == '' then return nil, 'invalid key' end
+    if type(value) ~= 'table' then return nil, 'invalid value' end
+    return setmetatable({ ns = ns, key = key, value = value }, ControlStorePutOpts), ''
+end
+
+---@class ControlStoreDeleteOpts
+---@field ns string
+---@field key string
+local ControlStoreDeleteOpts = {}
+ControlStoreDeleteOpts.__index = ControlStoreDeleteOpts
+
+function new.ControlStoreDeleteOpts(ns, key)
+    if type(ns) ~= 'string' or ns == '' then return nil, 'invalid ns' end
+    if type(key) ~= 'string' or key == '' then return nil, 'invalid key' end
+    return setmetatable({ ns = ns, key = key }, ControlStoreDeleteOpts), ''
+end
+
+---@class ControlStoreListOpts
+---@field ns string
+local ControlStoreListOpts = {}
+ControlStoreListOpts.__index = ControlStoreListOpts
+
+function new.ControlStoreListOpts(ns)
+    if type(ns) ~= 'string' or ns == '' then return nil, 'invalid ns' end
+    return setmetatable({ ns = ns }, ControlStoreListOpts), ''
+end
+
+---@class ControlStoreStatusOpts
+---@field verbose boolean|nil
+local ControlStoreStatusOpts = {}
+ControlStoreStatusOpts.__index = ControlStoreStatusOpts
+
+function new.ControlStoreStatusOpts(verbose)
+    if verbose ~= nil and type(verbose) ~= 'boolean' then return nil, 'invalid verbose' end
+    return setmetatable({ verbose = verbose }, ControlStoreStatusOpts), ''
+end
+
+
+---@class ArtifactStoreCreateSinkOpts
+---@field meta table|nil
+---@field policy string|nil
+local ArtifactStoreCreateSinkOpts = {}
+ArtifactStoreCreateSinkOpts.__index = ArtifactStoreCreateSinkOpts
+
+function new.ArtifactStoreCreateSinkOpts(meta, policy)
+    if meta ~= nil and type(meta) ~= 'table' then return nil, 'invalid meta' end
+    if policy ~= nil and type(policy) ~= 'string' then return nil, 'invalid policy' end
+    return setmetatable({ meta = meta, policy = policy }, ArtifactStoreCreateSinkOpts), ''
+end
+
+---@class ArtifactStoreImportPathOpts
+---@field path string
+---@field meta table|nil
+---@field policy string|nil
+local ArtifactStoreImportPathOpts = {}
+ArtifactStoreImportPathOpts.__index = ArtifactStoreImportPathOpts
+
+function new.ArtifactStoreImportPathOpts(path, meta, policy)
+    if type(path) ~= 'string' or path == '' then return nil, 'invalid path' end
+    if meta ~= nil and type(meta) ~= 'table' then return nil, 'invalid meta' end
+    if policy ~= nil and type(policy) ~= 'string' then return nil, 'invalid policy' end
+    return setmetatable({ path = path, meta = meta, policy = policy }, ArtifactStoreImportPathOpts), ''
+end
+
+---@class ArtifactStoreImportSourceOpts
+---@field source table
+---@field meta table|nil
+---@field policy string|nil
+local ArtifactStoreImportSourceOpts = {}
+ArtifactStoreImportSourceOpts.__index = ArtifactStoreImportSourceOpts
+
+function new.ArtifactStoreImportSourceOpts(source, meta, policy)
+    if type(source) ~= 'table' then return nil, 'invalid source' end
+    if meta ~= nil and type(meta) ~= 'table' then return nil, 'invalid meta' end
+    if policy ~= nil and type(policy) ~= 'string' then return nil, 'invalid policy' end
+    return setmetatable({ source = source, meta = meta, policy = policy }, ArtifactStoreImportSourceOpts), ''
+end
+
+---@class ArtifactStoreOpenOpts
+---@field artifact_ref string
+local ArtifactStoreOpenOpts = {}
+ArtifactStoreOpenOpts.__index = ArtifactStoreOpenOpts
+
+function new.ArtifactStoreOpenOpts(artifact_ref)
+    if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, 'invalid artifact_ref' end
+    return setmetatable({ artifact_ref = artifact_ref }, ArtifactStoreOpenOpts), ''
+end
+
+---@class ArtifactStoreDeleteOpts
+---@field artifact_ref string
+local ArtifactStoreDeleteOpts = {}
+ArtifactStoreDeleteOpts.__index = ArtifactStoreDeleteOpts
+
+function new.ArtifactStoreDeleteOpts(artifact_ref)
+    if type(artifact_ref) ~= 'string' or artifact_ref == '' then return nil, 'invalid artifact_ref' end
+    return setmetatable({ artifact_ref = artifact_ref }, ArtifactStoreDeleteOpts), ''
+end
+
+---@class ArtifactStoreStatusOpts
+---@field verbose boolean|nil
+local ArtifactStoreStatusOpts = {}
+ArtifactStoreStatusOpts.__index = ArtifactStoreStatusOpts
+
+function new.ArtifactStoreStatusOpts(verbose)
+    if verbose ~= nil and type(verbose) ~= 'boolean' then return nil, 'invalid verbose' end
+    return setmetatable({ verbose = verbose }, ArtifactStoreStatusOpts), ''
+end
+
+---@class UpdaterPrepareOpts
+---@field target string|nil
+---@field metadata table|nil
+local UpdaterPrepareOpts = {}
+UpdaterPrepareOpts.__index = UpdaterPrepareOpts
+
+---Create a new UpdaterPrepareOpts.
+---@param target string|nil
+---@param metadata table|nil
+---@return UpdaterPrepareOpts?
+---@return string error
+function new.UpdaterPrepareOpts(target, metadata)
+    if target ~= nil and (type(target) ~= 'string' or target == '') then
+        return nil, "invalid target"
+    end
+    if metadata ~= nil and type(metadata) ~= 'table' then
+        return nil, "invalid metadata"
+    end
+    return setmetatable({ target = target, metadata = metadata }, UpdaterPrepareOpts), ""
+end
+
+---@class UpdaterStageOpts
+---@field artifact_ref string
+---@field metadata table|nil
+---@field expected_version string|nil
+local UpdaterStageOpts = {}
+UpdaterStageOpts.__index = UpdaterStageOpts
+
+---Create a new UpdaterStageOpts.
+---@param artifact_ref string
+---@param metadata table|nil
+---@param expected_version string|nil
+---@return UpdaterStageOpts?
+---@return string error
+function new.UpdaterStageOpts(artifact_ref, metadata, expected_version)
+    if type(artifact_ref) ~= 'string' or artifact_ref == '' then
+        return nil, "invalid artifact_ref"
+    end
+    if metadata ~= nil and type(metadata) ~= 'table' then
+        return nil, "invalid metadata"
+    end
+    if expected_version ~= nil and type(expected_version) ~= 'string' then
+        return nil, "invalid expected_version"
+    end
+    return setmetatable({ artifact_ref = artifact_ref, metadata = metadata, expected_version = expected_version }, UpdaterStageOpts), ""
+end
+
+---@class UpdaterCommitOpts
+---@field mode string|nil
+---@field metadata table|nil
+local UpdaterCommitOpts = {}
+UpdaterCommitOpts.__index = UpdaterCommitOpts
+
+---Create a new UpdaterCommitOpts.
+---@param mode string|nil
+---@param metadata table|nil
+---@return UpdaterCommitOpts?
+---@return string error
+function new.UpdaterCommitOpts(mode, metadata)
+    if mode ~= nil and type(mode) ~= 'string' then
+        return nil, "invalid mode"
+    end
+    if metadata ~= nil and type(metadata) ~= 'table' then
+        return nil, "invalid metadata"
+    end
+    return setmetatable({ mode = mode, metadata = metadata }, UpdaterCommitOpts), ""
+end
+
+---@class UpdaterStatusOpts
+---@field verbose boolean|nil
+local UpdaterStatusOpts = {}
+UpdaterStatusOpts.__index = UpdaterStatusOpts
+
+---Create a new UpdaterStatusOpts.
+---@param verbose boolean|nil
+---@return UpdaterStatusOpts?
+---@return string error
+function new.UpdaterStatusOpts(verbose)
+    if verbose ~= nil and type(verbose) ~= 'boolean' then
+        return nil, "invalid verbose"
+    end
+    return setmetatable({ verbose = verbose }, UpdaterStatusOpts), ""
+end
+
 return {
     ModemGetOpts = ModemGetOpts,
     ModemConnectOpts = ModemConnectOpts,
     FilesystemReadOpts = FilesystemReadOpts,
     FilesystemWriteOpts = FilesystemWriteOpts,
+    ControlStoreGetOpts = ControlStoreGetOpts,
+    ControlStorePutOpts = ControlStorePutOpts,
+    ControlStoreDeleteOpts = ControlStoreDeleteOpts,
+    ControlStoreListOpts = ControlStoreListOpts,
+    ControlStoreStatusOpts = ControlStoreStatusOpts,
+    ArtifactStoreCreateSinkOpts = ArtifactStoreCreateSinkOpts,
+    ArtifactStoreImportPathOpts = ArtifactStoreImportPathOpts,
+    ArtifactStoreImportSourceOpts = ArtifactStoreImportSourceOpts,
+    ArtifactStoreOpenOpts = ArtifactStoreOpenOpts,
+    ArtifactStoreDeleteOpts = ArtifactStoreDeleteOpts,
+    ArtifactStoreStatusOpts = ArtifactStoreStatusOpts,
     UARTOpenOpts = UARTOpenOpts,
     UARTWriteOpts = UARTWriteOpts,
     MemoryGetOpts = MemoryGetOpts,
@@ -276,5 +503,9 @@ return {
     ThermalGetOpts = ThermalGetOpts,
     PlatformGetOpts = PlatformGetOpts,
     PowerActionOpts = PowerActionOpts,
+    UpdaterPrepareOpts = UpdaterPrepareOpts,
+    UpdaterStageOpts = UpdaterStageOpts,
+    UpdaterCommitOpts = UpdaterCommitOpts,
+    UpdaterStatusOpts = UpdaterStatusOpts,
     new = new,
 }
