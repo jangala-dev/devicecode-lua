@@ -25,8 +25,6 @@ By default the service starts an internal retained-state model that replays and 
 | `{'cfg','#'}` | Configuration reads and config snapshots |
 | `{'svc','#'}` | Service announce/status inspection |
 | `{'state','#'}` | State inspection, fabric views, update job views, device views, and general UI reads/watches |
-| `{'cap','#'}` | Capability advertisement snapshots |
-| `{'dev','#'}` | Device advertisement snapshots |
 
 These are consumed through the in-process UI model rather than being exposed directly to browser callers.
 
@@ -38,7 +36,6 @@ That user connection is then used for delegated operations such as:
 
 | Surface | Usage |
 |---|---|
-| arbitrary `conn:call(topic, payload, ...)` | generic UI call façade |
 | `{'config', <service>, 'set'}` | config set helper |
 | `{'cmd','update','job', ...}` | update job create/get/list/do |
 | `artifact_store/main` capability | update upload ingress |
@@ -95,8 +92,6 @@ If not supplied:
     { name = 'cfg',   pattern = { 'cfg', '#' } },
     { name = 'svc',   pattern = { 'svc', '#' } },
     { name = 'state', pattern = { 'state', '#' } },
-    { name = 'cap',   pattern = { 'cap', '#' } },
-    { name = 'dev',   pattern = { 'dev', '#' } },
   },
   host = '0.0.0.0',
   port = 80,
@@ -178,8 +173,6 @@ Default announce payload:
     services_snapshot = true,
     fabric_status = true,
     fabric_link_status = true,
-    capability_snapshot = true,
-    call = true,
     watch = true,
     update_job_create = true,
     update_job_get = true,
@@ -389,13 +382,6 @@ Returns a snapshot containing:
 - retained `svc/*/announce`
 - retained `svc/*/status`
 
-#### `GET /api/capabilities`
-
-Returns a snapshot containing:
-- retained `cap/#`
-- retained `dev/#`
-- the same service snapshot used by `/api/services`
-
 #### `GET /api/config/<service>`
 
 Returns retained `cfg/<service>` from the UI model.
@@ -434,31 +420,6 @@ Returns:
 - `transfer`
 
 for that retained fabric link state, if present.
-
-### Generic call endpoint
-
-#### `POST /api/call`
-
-Request:
-
-```lua
-{
-  topic = <concrete topic>,
-  payload = <any|nil>,
-  timeout = <number|nil>,
-}
-```
-
-The service opens or reuses a user-scoped connection and calls:
-
-```lua
-conn:call(topic, payload, {
-  timeout = timeout,
-  extra = { via = 'ui' },
-})
-```
-
-Returns the raw bus reply.
 
 ### Update job endpoints
 
@@ -574,10 +535,8 @@ When the active session changes:
 - `services_snapshot`
 - `fabric_status`
 - `fabric_link_status`
-- `capability_snapshot`
 - `model_exact`
 - `model_snapshot`
-- `call`
 - `watch_open`
 - `watch_close`
 
@@ -627,19 +586,6 @@ Returns:
   session = <payload|nil>,
   bridge = <payload|nil>,
   transfer = <payload|nil>,
-}
-```
-
-### `capability_snapshot`
-
-Returns:
-
-```lua
-{
-  seq = <integer>,
-  capabilities = { [<topic_debug>] = <payload>, ... },
-  devices = { [<topic_debug>] = <payload>, ... },
-  services = <services_snapshot>,
 }
 ```
 

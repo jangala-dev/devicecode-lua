@@ -47,7 +47,6 @@ Backends call into the rest of the system through stable local services.
 
 | Topic | Purpose |
 |---|---|
-| `{'cmd','device','component','get'}` | Read current component state. |
 | `{'cmd','device','component','do'}` | Dispatch `prepare_update`, `stage_update`, or `commit_update`. |
 
 #### Through `fabric`
@@ -55,6 +54,15 @@ Backends call into the rest of the system through stable local services.
 | Topic | Purpose |
 |---|---|
 | `{'cmd','fabric','transfer'}` | Stage MCU artefacts to a remote member over a fabric link. |
+
+### Observed retained state
+
+The service observes retained state for:
+
+| Topic pattern | Purpose |
+|---|---|
+| `{'state','device','component', <component>}` | Component reconcile state |
+| `{'state','fabric','link', <link_id>, 'transfer'}` | Fabric transfer progress for backends that declare a transfer link |
 
 ## Configuration
 
@@ -126,7 +134,7 @@ Retained payload on `{'cfg','update'}`:
 Notes:
 
 - if `cfg.components` is supplied, it replaces the default component-backend table completely
-- `reconcile.interval_s` remains part of config, but current live reconcile is driven by retained-state changes plus timeout rather than interval polling
+- `reconcile.interval_s` remains part of config, but live reconcile is driven by retained-state changes plus timeout rather than interval polling
 - admission is currently global-single in practice; the state model keeps only `locks.global`
 
 ## Exposed commands
@@ -503,7 +511,6 @@ Built on top of the generic component-proxy backend.
 
 Uses `device` to:
 
-- read component status
 - `prepare_update`
 - `stage_update`
 - `commit_update`
@@ -603,11 +610,11 @@ The service watches retained state for:
 - `{'state','device','component', <component>}` for every configured component
 - `{'state','fabric','link', <link_id>, 'transfer'}` for components that declare a transfer link
 
-Observed component payloads are fed into `observe.lua`, which maintains the latest facts per component and signals a pulse whenever those facts change.
+Observed component payloads are fed into `observe.lua`, which maintains the latest component state per component and signals a pulse whenever that state changes.
 
 The reconcile worker then waits on:
 
-- observed-facts change
+- observed component-state change
 - or timeout
 
 On each change it re-evaluates backend-specific reconcile predicates. Progress updates are emitted whenever evaluation returns a non-terminal in-progress result.
@@ -615,7 +622,7 @@ On each change it re-evaluates backend-specific reconcile predicates. Progress u
 This means:
 
 - live reconcile is event-driven while the process is running
-- restart reconcile is rebuilt from persisted jobs plus fresh retained facts after restart
+- restart reconcile is rebuilt from persisted jobs plus fresh retained component state after restart
 
 `reconcile.interval_s` remains in config but is not the primary driver of progress detection in the current code.
 
@@ -670,7 +677,7 @@ flowchart TD
   Q --> H
   H -->|runner success/failure/timeout| R(Patch terminal state; maybe release artefact)
   R --> J
-  H -->|observer change| S(Update facts or transfer progress)
+  H -->|observer change| S(Update observed component state or transfer progress)
   S --> H
   H -->|changed pulse| T(Flush dirty jobs; publish summary; auto-resume reconcile if needed)
   T --> H

@@ -33,9 +33,9 @@ The shell does not talk to HAL directly. Each link child opens its transport thr
 
 Default transport selection uses a HAL capability via `cap_sdk` with:
 
-| Capability class | Id selection |
+| Transport class | Id selection |
 |---|---|
-| `uart` (default) | `cfg.transport.id` or `cfg.capability_id` or `cfg.uart_id` or `link_id` |
+| `uart` (default) | `cfg.transport.id` or `link_id` |
 
 By default the transport control verb is `open`, and the returned object must behave like a `fibers` stream.
 
@@ -67,8 +67,6 @@ Effective link config shape:
 
       restart_backoff_s = <number|nil>,
 
-      capability_id = <string|nil>,
-      uart_id = <string|nil>,
       transport = {
         class = <string|nil>,
         id = <string|nil>,
@@ -94,7 +92,6 @@ Effective link config shape:
       transfer_phase_timeout_s = <number|nil>,
 
       export_publish_rules = { <rule>, ... } | nil,
-      export_publish = { <rule>, ... } | nil,
       export_retained_rules = { <rule>, ... } | nil,
       import_rules = { <rule>, ... } | nil,
       outbound_call_rules = { <rule>, ... } | nil,
@@ -127,7 +124,7 @@ Effective link config shape:
 
 Semantics:
 
-- `export_publish_rules` / `export_publish`: local non-retained pub/sub -> remote `pub retain=false`
+- `export_publish_rules`: local non-retained pub/sub -> remote `pub retain=false`
 - `export_retained_rules`: local retained watch -> remote `pub retain=true`
 - `import_rules`: remote `pub` / `unretain` -> local publish / retain / unretain
 - `outbound_call_rules`: local bound endpoint -> remote `call`
