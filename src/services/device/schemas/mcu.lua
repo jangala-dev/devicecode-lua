@@ -1,10 +1,11 @@
 -- services/device/schemas/mcu.lua
 --
 -- Canonical MCU fact/event names and lightweight payload normalisation.
--- This module deliberately owns names and field spellings only; component
+-- This module owns MCU field spellings and topic names.  Component
 -- composition remains in component_mcu.lua.
 
 local topics = require 'services.device.topics'
+local model = require 'services.device.model'
 
 local M = {}
 
@@ -67,6 +68,28 @@ local function table_or_empty(v)
 	return type(v) == 'table' and v or {}
 end
 
+local function copy(v)
+	return model.copy_value(v)
+end
+
+local function number_or_nil(v)
+	return type(v) == 'number' and v or nil
+end
+
+local function bool_or_nil(v)
+	return type(v) == 'boolean' and v or nil
+end
+
+local function copy_named(raw, names)
+	local out = {}
+	raw = table_or_empty(raw)
+	for i = 1, #names do
+		local name = names[i]
+		if raw[name] ~= nil then out[name] = raw[name] end
+	end
+	return out
+end
+
 function M.normalize_software(raw)
 	raw = table_or_empty(raw)
 	return {
@@ -92,6 +115,95 @@ function M.normalize_health(raw)
 	if raw.health ~= nil then return raw.health end
 	if next(raw) ~= nil then return 'ok' end
 	return nil
+end
+
+function M.normalize_battery(raw)
+	raw = table_or_empty(raw)
+	return copy_named(raw, {
+		'pack_mV',
+		'per_cell_mV',
+		'ibat_mA',
+		'temp_mC',
+		'bsr_uohm_per_cell',
+		'seq',
+		'uptime_ms',
+	})
+end
+
+function M.normalize_charger(raw)
+	raw = table_or_empty(raw)
+	local out = copy_named(raw, {
+		'vin_mV',
+		'vsys_mV',
+		'iin_mA',
+		'state_bits',
+		'status_bits',
+		'system_bits',
+		'seq',
+		'uptime_ms',
+	})
+	if type(raw.state) == 'table' then out.state = copy(raw.state) end
+	if type(raw.status) == 'table' then out.status = copy(raw.status) end
+	if type(raw.system) == 'table' then out.system = copy(raw.system) end
+	return out
+end
+
+function M.normalize_charger_config(raw)
+	raw = table_or_empty(raw)
+	local out = {
+		schema = raw.schema,
+		source = raw.source,
+		alert_mask_bits = raw.alert_mask_bits,
+		seq = raw.seq,
+		uptime_ms = raw.uptime_ms,
+	}
+	if type(raw.thresholds) == 'table' then
+		out.thresholds = copy_named(raw.thresholds, {
+			'vin_lo_mV',
+			'vin_hi_mV',
+			'bsr_high_uohm_per_cell',
+		})
+	end
+	if type(raw.alert_mask) == 'table' then
+		out.alert_mask = {}
+		for kind in pairs(M.alert_kinds) do
+			local v = bool_or_nil(raw.alert_mask[kind])
+			if v ~= nil then out.alert_mask[kind] = v end
+		end
+	end
+	return out
+end
+
+function M.normalize_temperature(raw)
+	raw = table_or_empty(raw)
+	return copy_named(raw, { 'deci_c', 'seq', 'uptime_ms' })
+end
+
+function M.normalize_humidity(raw)
+	raw = table_or_empty(raw)
+	return copy_named(raw, { 'rh_x100', 'seq', 'uptime_ms' })
+end
+
+function M.normalize_runtime_memory(raw)
+	raw = table_or_empty(raw)
+	return copy_named(raw, { 'alloc_bytes', 'seq', 'uptime_ms' })
+end
+
+function M.normalize_charger_alert(raw)
+	raw = table_or_empty(raw)
+	local kind = raw.kind
+	local out = {
+		kind = type(kind) == 'string' and kind or nil,
+		known = type(kind) == 'string' and M.alert_kinds[kind] == true or false,
+		severity = raw.severity,
+		source = raw.source,
+		state_bits = number_or_nil(raw.state_bits),
+		status_bits = number_or_nil(raw.status_bits),
+		system_bits = number_or_nil(raw.system_bits),
+		seq = raw.seq,
+		uptime_ms = raw.uptime_ms,
+	}
+	return out
 end
 
 return M

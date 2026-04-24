@@ -166,6 +166,10 @@ function M.component_view(name, rec, now_ts)
 
 		software = copy(base.software),
 		updater = copy(base.updater),
+		power = copy(base.power or {}),
+		environment = copy(base.environment or {}),
+		runtime = copy(base.runtime or {}),
+		alerts = copy(base.alerts or {}),
 		events = copy(rec.raw_events or {}),
 		event_state = copy(rec.event_state or {}),
 		source = source,
@@ -242,6 +246,10 @@ function M.summary_payload(state, now_ts)
 			actions = view.actions,
 			software = copy(view.software),
 			updater = copy(view.updater),
+			power = copy(view.power),
+			environment = copy(view.environment),
+			runtime = copy(view.runtime),
+			alerts = copy(view.alerts),
 			event_state = copy(view.event_state),
 		}
 	end

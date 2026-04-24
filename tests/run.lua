@@ -65,6 +65,7 @@ local files = {
 	'integration.devhost.config_recovery_spec',
 	'integration.devhost.fabric_service_spec',
 	'integration.devhost.fabric_session_spec',
+	'integration.devhost.device_mcu_telemetry_fabric_spec',
 	'integration.devhost.fabric_transfer_receiver_handoff_spec',
 	'integration.devhost.hal_uart_spec',
 	'integration.devhost.main_failure_spec',

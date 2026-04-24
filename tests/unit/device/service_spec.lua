@@ -138,6 +138,12 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
             software = { 'state', 'member', 'mcu', 'software' },
             updater = { 'state', 'member', 'mcu', 'updater' },
             health = { 'state', 'member', 'mcu', 'health' },
+            power_battery = { 'state', 'member', 'mcu', 'power', 'battery' },
+            power_charger = { 'state', 'member', 'mcu', 'power', 'charger' },
+            power_charger_config = { 'state', 'member', 'mcu', 'power', 'charger', 'config' },
+            environment_temperature = { 'state', 'member', 'mcu', 'environment', 'temperature' },
+            environment_humidity = { 'state', 'member', 'mcu', 'environment', 'humidity' },
+            runtime_memory = { 'state', 'member', 'mcu', 'runtime', 'memory' },
           },
           actions = {
             prepare_update = { 'cap', 'updater', 'mcu', 'rpc', 'prepare' },
@@ -160,6 +166,48 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
     })
     provider:retain({ 'state', 'member', 'mcu', 'health' }, {
       state = 'ok',
+    })
+
+    provider:retain({ 'state', 'member', 'mcu', 'power', 'battery' }, {
+      pack_mV = 2412,
+      per_cell_mV = 1206,
+      ibat_mA = 7,
+      temp_mC = 198000,
+      bsr_uohm_per_cell = 42,
+    })
+    provider:retain({ 'state', 'member', 'mcu', 'power', 'charger' }, {
+      vin_mV = 24317,
+      vsys_mV = 24233,
+      iin_mA = 658,
+      state_bits = 1,
+      status_bits = 2,
+      system_bits = 4,
+      state = { bat_missing_fault = true },
+      status = { const_current = true },
+      system = { ok_to_charge = true },
+    })
+    provider:retain({ 'state', 'member', 'mcu', 'power', 'charger', 'config' }, {
+      schema = 1,
+      source = 'ltc4015',
+      thresholds = {
+        vin_lo_mV = 9000,
+        vin_hi_mV = 32000,
+        bsr_high_uohm_per_cell = 50000,
+      },
+      alert_mask_bits = 16383,
+      alert_mask = {
+        vin_lo = true,
+        cv_phase = true,
+      },
+    })
+    provider:retain({ 'state', 'member', 'mcu', 'environment', 'temperature' }, {
+      deci_c = 191,
+    })
+    provider:retain({ 'state', 'member', 'mcu', 'environment', 'humidity' }, {
+      rh_x100 = 4690,
+    })
+    provider:retain({ 'state', 'member', 'mcu', 'runtime', 'memory' }, {
+      alloc_bytes = 85680,
     })
 
     local ok, err = scope:spawn(function()
@@ -189,6 +237,19 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
         and type(payload.source.facts) == 'table'
         and type(payload.source.facts.software) == 'table'
         and payload.actions.stage_update == nil
+        and type(payload.power) == 'table'
+        and type(payload.power.battery) == 'table'
+        and payload.power.battery.pack_mV == 2412
+        and type(payload.power.charger) == 'table'
+        and payload.power.charger.vin_mV == 24317
+        and payload.power.charger.state.bat_missing_fault == true
+        and type(payload.power.charger_config) == 'table'
+        and payload.power.charger_config.thresholds.vin_lo_mV == 9000
+        and type(payload.environment) == 'table'
+        and payload.environment.temperature.deci_c == 191
+        and payload.environment.humidity.rh_x100 == 4690
+        and type(payload.runtime) == 'table'
+        and payload.runtime.memory.alloc_bytes == 85680
     end, { timeout = 0.75, interval = 0.01 }))
 
     local reply, rerr = caller:call({ 'cmd', 'device', 'component', 'do' }, {
@@ -277,6 +338,10 @@ function T.device_service_republishes_component_events_and_records_last_event()
         and type(payload.events) == 'table'
         and type(payload.events.charger_alert) == 'table'
         and payload.events.charger_alert.kind == 'vin_lo'
+        and type(payload.alerts) == 'table'
+        and type(payload.alerts.charger_alert) == 'table'
+        and payload.alerts.charger_alert.kind == 'vin_lo'
+        and payload.alerts.charger_alert.known == true
     end, { timeout = 0.75, interval = 0.01 }))
 
     sub:unsubscribe()

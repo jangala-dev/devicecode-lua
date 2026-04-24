@@ -16,7 +16,7 @@ function M.normalize_component(rec)
 	end
 
 	if subtype == 'mcu' then
-		return component_mcu.compose(rec.raw_facts or {}, rec.fact_state or {})
+		return component_mcu.compose(rec.raw_facts or {}, rec.fact_state or {}, rec.raw_events or {}, rec.event_state or {})
 	end
 
 	return component_host.compose(rec.raw_facts or {}, rec.fact_state or {})

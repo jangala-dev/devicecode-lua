@@ -1409,39 +1409,22 @@
                         "local": [
                             "state",
                             "member",
-                            "mcu",
-                            "updater"
+                            "mcu"
                         ],
                         "remote": [
                             "state",
-                            "self",
-                            "updater"
+                            "self"
                         ]
                     },
                     {
                         "local": [
-                            "state",
+                            "event",
                             "member",
-                            "mcu",
-                            "software"
+                            "mcu"
                         ],
                         "remote": [
-                            "state",
-                            "self",
-                            "software"
-                        ]
-                    },
-                    {
-                        "local": [
-                            "state",
-                            "member",
-                            "mcu",
-                            "health"
-                        ],
-                        "remote": [
-                            "state",
-                            "self",
-                            "health"
+                            "event",
+                            "self"
                         ]
                     }
                 ],
@@ -1513,6 +1496,59 @@
                         "member",
                         "mcu",
                         "health"
+                    ],
+                    "power_battery": [
+                        "state",
+                        "member",
+                        "mcu",
+                        "power",
+                        "battery"
+                    ],
+                    "power_charger": [
+                        "state",
+                        "member",
+                        "mcu",
+                        "power",
+                        "charger"
+                    ],
+                    "power_charger_config": [
+                        "state",
+                        "member",
+                        "mcu",
+                        "power",
+                        "charger",
+                        "config"
+                    ],
+                    "environment_temperature": [
+                        "state",
+                        "member",
+                        "mcu",
+                        "environment",
+                        "temperature"
+                    ],
+                    "environment_humidity": [
+                        "state",
+                        "member",
+                        "mcu",
+                        "environment",
+                        "humidity"
+                    ],
+                    "runtime_memory": [
+                        "state",
+                        "member",
+                        "mcu",
+                        "runtime",
+                        "memory"
+                    ]
+                },
+                "events": {
+                    "charger_alert": [
+                        "event",
+                        "member",
+                        "mcu",
+                        "power",
+                        "charger",
+                        "alert"
                     ]
                 }
             }
