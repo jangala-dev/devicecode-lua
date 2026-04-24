@@ -76,18 +76,19 @@ local function bind_device_double(scope, device_conn, versions, opts)
   local publish_component
 
   local function component_payload(component)
+    local not_ready = opts.not_ready and opts.not_ready[component] == true
     return {
       kind = 'device.component',
       component = component,
       available = true,
-      ready = true,
-      software = {
+      ready = (not not_ready),
+      software = not_ready and {} or {
         version = versions[component] or 'unknown',
         image_id = (opts.image_ids and opts.image_ids[component]) or nil,
         payload_sha256 = (opts.payload_sha256 and opts.payload_sha256[component]) or nil,
         boot_id = (opts.boot_id and opts.boot_id[component]) or nil,
       },
-      updater = { state = (opts.get_state and opts.get_state[component]) or 'running' },
+      updater = not_ready and {} or { state = (opts.get_state and opts.get_state[component]) or 'running' },
       actions = { prepare_update = true, stage_update = true, commit_update = true },
       source = { kind = 'member', member = component, member_class = component },
     }
@@ -317,6 +318,103 @@ function T.bundled_reconcile_respects_hold_mode_and_does_not_create_job()
       return next(jobs) == nil
     end, { timeout = 1.0, interval = 0.01 }))
   end, { timeout = 3.0 })
+end
+
+function T.bundled_reconcile_waits_for_component_readiness_before_probing_or_running()
+	runfibers.run(function(scope)
+		local orig_sleep = sleep_mod.sleep
+		sleep_mod.sleep = function(dt) return orig_sleep(math.min(dt, 0.01)) end
+		fibers.current_scope():finally(function() sleep_mod.sleep = orig_sleep end)
+
+		local bus = busmod.new()
+		local caller = bus:connect()
+		local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
+		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+		local cfg_conn = bus:connect()
+		local dcmcu_path = '/rom/mcu/current.dcmcu'
+		storagecaps.seed_import_path(artifacts, dcmcu_path, make_dcmcu({ version = 'mcu-v1', image_id = 'mcu-image-1', sha256 = string.rep('b', 64) }))
+		cfg_conn:retain({ 'cfg', 'update' }, {
+			schema = 'devicecode.config/update/1',
+			bundled = {
+				components = {
+					mcu = {
+						enabled = true,
+						follow_mode_default = 'auto',
+						auto_start = true,
+						auto_commit = true,
+						source = { kind = 'bundled', path = dcmcu_path },
+						target = { product_family = 'bigbox', hardware_profile = 'bb-v1-cm5-2', mcu_board_family = 'rp2354a' },
+					},
+				},
+			},
+		})
+
+		bind_device_double(scope, bus:connect(), { cm5 = 'cm5-v2', mcu = 'mcu-v0' }, {
+			image_ids = { cm5 = 'cm5-release-2', mcu = 'mcu-image-0' },
+			payload_sha256 = { mcu = string.rep('0', 64) },
+			boot_id = { cm5 = 'cm5-boot-1', mcu = 'mcu-boot-1' },
+			get_state = { mcu = 'running' },
+			not_ready = { mcu = true },
+		})
+
+		local us = start_update_scope(scope, bus)
+		fibers.current_scope():finally(function() us:cancel('shutdown') end)
+		wait_service_running(caller)
+
+		sleep_mod.sleep(0.25)
+		assert((control.namespaces['update/jobs'] and next(control.namespaces['update/jobs'])) == nil)
+		assert((control.namespaces['update/state/bundled'] and control.namespaces['update/state/bundled'].mcu) == nil)
+	end, { timeout = 3.0 })
+end
+
+function T.bundled_reconcile_manual_success_hold_marks_satisfied_when_current_matches_desired()
+		local rec_saved
+		local retained
+		local bundled = require 'services.update.bundled_reconcile'
+		local inst = bundled.new({
+			observer = {
+				component_state_for = function(_, component)
+					if component == 'mcu' then
+						return {
+							available = true,
+							ready = true,
+							software = {
+								version = 'mcu-v1',
+								image_id = 'mcu-image-1',
+								payload_sha256 = string.rep('b', 64),
+								boot_id = 'mcu-boot-2',
+							},
+						}
+					end
+				end,
+			},
+			now = function() return 123 end,
+			svc = { obs_log = function() end },
+			conn = { retain = function(_, _, payload) retained = payload end },
+		}, {}, {
+			get = function()
+				return {
+					follow_mode = 'auto',
+					desired = {
+						image_id = 'mcu-image-1',
+						payload_sha256 = string.rep('b', 64),
+						version = 'mcu-v1',
+					},
+				}
+			end,
+			put = function(_, component, rec)
+				assert(component == 'mcu')
+				rec_saved = rec
+				return true
+			end,
+		})
+
+		inst:mark_job_success({ component = 'mcu', job_id = 'job-1', metadata = { source = 'ui_upload' } }, {})
+		assert(type(rec_saved) == 'table')
+		assert(rec_saved.follow_mode == 'hold')
+		assert(rec_saved.sync_state == 'satisfied')
+		assert(rec_saved.last_result == 'manual_success_hold_satisfied')
+		assert(type(retained) == 'table' and retained.sync_state == 'satisfied')
 end
 
 function T.bundled_reconcile_retries_after_restart_when_previous_attempt_failed()

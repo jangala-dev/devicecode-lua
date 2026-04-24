@@ -23,6 +23,9 @@ end
 local function software_identity(component_state)
 	local sw = type(component_state) == 'table' and component_state.software or nil
 	if type(sw) ~= 'table' then return nil end
+	if sw.version == nil and sw.image_id == nil and sw.payload_sha256 == nil then
+		return nil
+	end
 	return {
 		version = sw.version,
 		build_id = sw.build,
@@ -105,9 +108,17 @@ function Bundled:mark_job_success(job, result)
 	end
 
 	local rec = self.store:get(job.component) or {}
+	local current_state = self.ctx.observer:component_state_for(job.component)
+	local current = software_identity(current_state)
+	local desired = type(rec.desired) == 'table' and rec.desired or nil
 	rec.follow_mode = 'hold'
-	rec.sync_state = 'diverged'
-	rec.last_result = 'manual_success_hold'
+	if identities_match(current, desired) then
+		rec.sync_state = 'satisfied'
+		rec.last_result = 'manual_success_hold_satisfied'
+	else
+		rec.sync_state = 'diverged'
+		rec.last_result = 'manual_success_hold'
+	end
 	rec.last_manual_job_id = job.job_id
 	rec.updated_at = self.ctx.now()
 	self:save_record(job.component, rec)
@@ -128,6 +139,8 @@ function Bundled:maybe_component(component, bcfg)
 
 	local current_state = self.ctx.observer:component_state_for(component)
 	if type(current_state) ~= 'table' or current_state.available == false then return end
+	if current_state.ready ~= true then return end
+	if not software_identity(current_state) then return end
 
 	local artifact = { kind = 'bundled' }
 	local ref, desc, aerr = self.ctx.artifacts:resolve_job_artifact({
