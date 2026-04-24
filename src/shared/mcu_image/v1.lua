@@ -1,12 +1,12 @@
--- services/update/mcu_image_v1.lua
+-- shared/mcu_image/v1.lua
 --
 -- Inspector for the Big Box signed MCU image container, format version 1.
 -- This module performs CM5-side preflight checks that do not require OS
--- access.  Ed25519 verification is delegated to an optional verifier callback;
+-- access.  Ed25519 verification is delegated to an optional verifier object;
 -- the MCU remains the authoritative verifier/stager for release safety.
 
 local cjson = require 'cjson.safe'
-local blob_source = require 'services.fabric.blob_source'
+local blob_source = require 'shared.blob_source'
 
 local M = {}
 
@@ -124,9 +124,9 @@ function M.inspect_bytes(data, opts)
 	if not ok then return nil, merr end
 	if manifest.payload.length ~= payload_len then return nil, 'payload_length_mismatch' end
 
-	local verify = opts.verify_signature
-	if type(verify) == 'function' then
-		local vok, verr = verify({
+	local verifier = opts.verifier
+	if verifier and type(verifier.verify_message) == 'function' then
+		local vok, verr = verifier:verify_message({
 			key_id = manifest.signing.key_id,
 			alg = manifest.signing.sig_alg,
 			message = manifest_bytes,

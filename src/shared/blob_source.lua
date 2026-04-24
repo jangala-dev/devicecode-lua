@@ -1,4 +1,4 @@
--- services/fabric/blob_source.lua
+-- shared/blob_source.lua
 --
 -- Small, OS-agnostic object source/sink helpers shared by fabric transfer
 -- and higher-level services.
@@ -18,7 +18,7 @@
 --     performs the op
 
 local fibers   = require 'fibers'
-local checksum = require 'services.fabric.checksum'
+local checksum = require 'shared.hash.xxhash32'
 local safe     = require 'coxpcall'
 local scope    = require 'fibers.scope'
 

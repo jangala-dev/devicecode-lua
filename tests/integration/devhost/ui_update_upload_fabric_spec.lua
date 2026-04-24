@@ -4,7 +4,7 @@ local mailbox      = require 'fibers.mailbox'
 local fibers       = require 'fibers'
 local sleep_mod    = require 'fibers.sleep'
 
-local checksum     = require 'services.fabric.checksum'
+local checksum     = require 'shared.hash.xxhash32'
 local session      = require 'services.fabric.session'
 local device       = require 'services.device'
 local update       = require 'services.update'

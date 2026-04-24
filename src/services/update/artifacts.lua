@@ -13,7 +13,10 @@
 
 local cap_sdk = require 'services.hal.sdk.cap'
 local sources = require 'services.update.artifact_sources'
-local mcu_image_v1 = require 'services.update.mcu_image_v1'
+local mcu_image_v1 = require 'shared.mcu_image.v1'
+local crypto_provider = require 'shared.crypto.provider'
+local crypto_keyring = require 'shared.crypto.keyring'
+local crypto_verifier = require 'shared.crypto.verifier'
 
 
 local function merge_meta(a, b)
@@ -113,9 +116,20 @@ function Artifacts:inspect_mcu_artifact(artifact, bundled_cfg)
 	end
 	local preflight = type(bundled_cfg) == 'table' and bundled_cfg.preflight or nil
 	preflight = type(preflight) == 'table' and preflight or {}
+	local verifier = nil
+	local trusted = preflight.trusted_keys or preflight.keys
+	if preflight.require_signature == true or (type(trusted) == 'table' and next(trusted) ~= nil) then
+		if not self.ctx.signature_verify_cap then
+			return nil, 'signature_verifier_unavailable'
+		end
+		local keyring = crypto_keyring.from_config(preflight)
+		local provider = crypto_provider.from_cap(self.ctx.signature_verify_cap)
+		verifier = crypto_verifier.new({ provider = provider, keyring = keyring })
+	end
 	local opts = {
 		target = type(bundled_cfg) == 'table' and bundled_cfg.target or nil,
 		require_signature = preflight.require_signature == true,
+		verifier = verifier,
 	}
 	return mcu_image_v1.inspect_source(artifact, opts)
 end

@@ -5,7 +5,7 @@ local probe      = require 'tests.support.bus_probe'
 
 local session_ctl  = require 'services.fabric.session_ctl'
 local transfer_mgr = require 'services.fabric.transfer_mgr'
-local checksum     = require 'services.fabric.checksum'
+local checksum     = require 'shared.hash.xxhash32'
 
 local T = {}
 

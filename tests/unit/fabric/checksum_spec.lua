@@ -1,4 +1,4 @@
-local checksum = require 'services.fabric.checksum'
+local checksum = require 'shared.hash.xxhash32'
 
 local T = {}
 

@@ -1,6 +1,6 @@
 local runfibers    = require 'tests.support.run_fibers'
 local store_mod    = require 'services.hal.drivers.artifact_store'
-local blob_source  = require 'services.fabric.blob_source'
+local blob_source  = require 'shared.blob_source'
 local file         = require 'fibers.io.file'
 local exec         = require 'fibers.io.exec'
 local fibers       = require 'fibers'

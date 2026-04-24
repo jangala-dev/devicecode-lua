@@ -1,5 +1,5 @@
-local checksum    = require 'services.fabric.checksum'
-local blob_source = require 'services.fabric.blob_source'
+local checksum    = require 'shared.hash.xxhash32'
+local blob_source = require 'shared.blob_source'
 local cjson       = require 'cjson.safe'
 
 local M = {}

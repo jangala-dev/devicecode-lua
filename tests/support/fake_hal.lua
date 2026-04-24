@@ -62,6 +62,7 @@ end
 local function method_offerings(method)
 	if method == 'read_state' then return 'fs', 'config', { read = true } end
 	if method == 'write_state' then return 'fs', 'state', { write = true } end
+	if method == 'verify_ed25519' then return 'signature_verify', 'main', { verify_ed25519 = true } end
 	return nil, nil, nil
 end
 

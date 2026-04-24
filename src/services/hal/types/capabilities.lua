@@ -218,6 +218,16 @@ function new.ArtifactStoreCapability(id, control_ch)
     return new.Capability('artifact_store', id, control_ch, { 'import_path', 'import_source', 'open', 'delete', 'status' })
 end
 
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.SignatureVerifyCapability(id, control_ch)
+    return new.Capability('signature_verify', id, control_ch, { 'verify_ed25519' })
+end
+
+
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?

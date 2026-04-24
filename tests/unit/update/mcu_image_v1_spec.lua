@@ -1,6 +1,6 @@
 
 local cjson = require 'cjson.safe'
-local mcu_image_v1 = require 'services.update.mcu_image_v1'
+local mcu_image_v1 = require 'shared.mcu_image.v1'
 
 local T = {}
 
@@ -110,17 +110,19 @@ function T.inspect_requires_signature_verifier_when_requested()
   assert(err == 'signature_verifier_unavailable')
 end
 
-function T.inspect_uses_signature_verifier_callback()
+function T.inspect_uses_signature_verifier_object()
   local called = false
   local out, err = mcu_image_v1.inspect_bytes(make_image(), {
-    verify_signature = function(rec)
-      called = true
-      assert(rec.key_id == 'test-key')
-      assert(rec.alg == 'ed25519')
-      assert(type(rec.message) == 'string' and #rec.message > 0)
-      assert(type(rec.signature) == 'string' and #rec.signature == 64)
-      return true
-    end,
+    verifier = {
+      verify_message = function(_, rec)
+        called = true
+        assert(rec.key_id == 'test-key')
+        assert(rec.alg == 'ed25519')
+        assert(type(rec.message) == 'string' and #rec.message > 0)
+        assert(type(rec.signature) == 'string' and #rec.signature == 64)
+        return true
+      end,
+    },
   })
   assert(err == nil)
   assert(type(out) == 'table')

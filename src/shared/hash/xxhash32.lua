@@ -1,4 +1,4 @@
--- services/fabric/checksum.lua
+-- shared/hash/xxhash32.lua
 --
 -- Small, dependency-free xxHash32 helpers.
 --
@@ -10,7 +10,7 @@ local ok_bit32, bit32_mod = pcall(require, 'bit32')
 local ok_bit, bit_mod = pcall(require, 'bit')
 
 local bitops = ok_bit32 and bit32_mod or bit_mod
-assert(bitops, 'services.fabric.checksum requires bit32 or bit')
+assert(bitops, 'shared.hash.xxhash32 requires bit32 or bit')
 
 local band   = assert(bitops.band,   'bit library missing band')
 local bor    = assert(bitops.bor,    'bit library missing bor')

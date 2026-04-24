@@ -396,6 +396,21 @@ function new.ArtifactStoreStatusOpts(verbose)
     return setmetatable({ verbose = verbose }, ArtifactStoreStatusOpts), ''
 end
 
+---@class SignatureVerifyEd25519Opts
+---@field pubkey_pem string
+---@field message string
+---@field signature string
+local SignatureVerifyEd25519Opts = {}
+SignatureVerifyEd25519Opts.__index = SignatureVerifyEd25519Opts
+
+function new.SignatureVerifyEd25519Opts(pubkey_pem, message, signature)
+    if type(pubkey_pem) ~= 'string' or pubkey_pem == '' then return nil, 'invalid public_key' end
+    if type(message) ~= 'string' then return nil, 'invalid message' end
+    if type(signature) ~= 'string' or signature == '' then return nil, 'invalid signature' end
+    return setmetatable({ pubkey_pem = pubkey_pem, message = message, signature = signature }, SignatureVerifyEd25519Opts), ''
+end
+
+
 ---@class UpdaterPrepareOpts
 ---@field target string|nil
 ---@field metadata table|nil
@@ -496,6 +511,7 @@ return {
     ArtifactStoreOpenOpts = ArtifactStoreOpenOpts,
     ArtifactStoreDeleteOpts = ArtifactStoreDeleteOpts,
     ArtifactStoreStatusOpts = ArtifactStoreStatusOpts,
+    SignatureVerifyEd25519Opts = SignatureVerifyEd25519Opts,
     UARTOpenOpts = UARTOpenOpts,
     UARTWriteOpts = UARTWriteOpts,
     MemoryGetOpts = MemoryGetOpts,

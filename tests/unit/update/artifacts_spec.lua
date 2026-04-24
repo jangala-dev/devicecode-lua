@@ -37,4 +37,15 @@ function T.artifacts_module_imports_path_with_component_policy()
   assert(called[1].op == 'import_path')
 end
 
+function T.inspect_mcu_artifact_requires_signature_cap_when_signature_is_needed()
+  local ctx = { state = { cfg = {} } }
+  local artifacts = artifacts_mod.new(ctx)
+  local art = {
+    open_source = function() return require('shared.blob_source').from_string('x') end,
+  }
+  local out, err = artifacts:inspect_mcu_artifact(art, { preflight = { require_signature = true } })
+  assert(out == nil)
+  assert(err == 'signature_verifier_unavailable')
+end
+
 return T

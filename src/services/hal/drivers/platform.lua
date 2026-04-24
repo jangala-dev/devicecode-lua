@@ -21,6 +21,7 @@ local cap_args       = require 'services.hal.types.capability_args'
 local cache_mod      = require 'shared.cache'
 local control_store_mod = require 'services.hal.drivers.control_store'
 local artifact_store_mod = require 'services.hal.drivers.artifact_store'
+local signature_verify_openssl = require 'services.hal.drivers.signature_verify_openssl'
 
 local perform = fibers.perform
 
@@ -45,6 +46,8 @@ end
 ---@field updater_ch Channel
 ---@field control_store_ch Channel
 ---@field artifact_store_ch Channel
+---@field signature_verify any
+---@field signature_verify_ch Channel
 local PlatformDriver = {}
 PlatformDriver.__index = PlatformDriver
 
@@ -353,6 +356,14 @@ function PlatformDriver:updater_commit(opts)
     }
 end
 
+function PlatformDriver:signature_verify_verify_ed25519(opts)
+    if opts == nil or getmetatable(opts) ~= cap_args.SignatureVerifyEd25519Opts then
+        return false, 'invalid opts'
+    end
+    return self.signature_verify:verify_ed25519(opts.pubkey_pem, opts.message, opts.signature)
+end
+
+
 -- control_store capability --------------------------------------------------
 
 function PlatformDriver:control_store_get(opts)
@@ -498,6 +509,7 @@ function PlatformDriver:init()
     local as, aerr = artifact_store_mod.new({}, self.logger)
     if not as then return 'artifact store init failed: ' .. tostring(aerr) end
     self.artifact_store = as
+    self.signature_verify = signature_verify_openssl.new({ logger = self.logger })
 
     self.initialised = true
     return ''
@@ -524,6 +536,10 @@ function PlatformDriver:capabilities(emit_ch)
     if not artifact_cap then return nil, aerr end
     caps[#caps + 1] = artifact_cap
 
+    local sig_cap, serr = cap_types.new.SignatureVerifyCapability('main', self.signature_verify_ch)
+    if not sig_cap then return nil, serr end
+    caps[#caps + 1] = sig_cap
+
     return caps, ''
 end
 
@@ -545,6 +561,9 @@ function PlatformDriver:start()
 
         local artifact_meta, artifact_meta_err = hal_types.new.Emit('artifact_store', 'main', 'meta', 'info', { provider = 'hal', version = 1 })
         if artifact_meta then self.cap_emit_ch:put(artifact_meta) else dlog(self.logger, 'debug', { what = 'artifact_store_meta_emit_failed', err = tostring(artifact_meta_err) }) end
+
+        local sig_meta, sig_meta_err = hal_types.new.Emit('signature_verify', 'main', 'meta', 'info', { provider = 'hal', backend = 'openssl-cli', version = 1 })
+        if sig_meta then self.cap_emit_ch:put(sig_meta) else dlog(self.logger, 'debug', { what = 'signature_verify_meta_emit_failed', err = tostring(sig_meta_err) }) end
 
         self:_emit_updater_facts()
     end
@@ -573,6 +592,9 @@ function PlatformDriver:start()
         delete = function(opts) return self:artifact_store_delete(opts) end,
         status = function(opts) return self:artifact_store_status(opts) end,
     }
+    local signature_methods = {
+        verify_ed25519 = function(opts) return self:signature_verify_verify_ed25519(opts) end,
+    }
 
     local ok, err = self.scope:spawn(function() run_control_loop(self.platform_ch, platform_methods, self.logger, 'platform_control_manager') end)
     if not ok then return false, 'failed to spawn platform manager: ' .. tostring(err) end
@@ -582,6 +604,8 @@ function PlatformDriver:start()
     if not ok then return false, 'failed to spawn control_store manager: ' .. tostring(err) end
     ok, err = self.scope:spawn(function() run_control_loop(self.artifact_store_ch, artifact_methods, self.logger, 'artifact_store_manager') end)
     if not ok then return false, 'failed to spawn artifact_store manager: ' .. tostring(err) end
+    ok, err = self.scope:spawn(function() run_control_loop(self.signature_verify_ch, signature_methods, self.logger, 'signature_verify_manager') end)
+    if not ok then return false, 'failed to spawn signature_verify manager: ' .. tostring(err) end
 
     return true, ''
 end
@@ -622,6 +646,7 @@ local function new(logger)
         updater_ch = channel.new(CONTROL_Q_LEN),
         control_store_ch = channel.new(CONTROL_Q_LEN),
         artifact_store_ch = channel.new(CONTROL_Q_LEN),
+        signature_verify_ch = channel.new(CONTROL_Q_LEN),
     }, PlatformDriver), ''
 end
 

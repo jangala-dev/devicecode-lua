@@ -187,6 +187,7 @@ function M.start(conn, opts)
 		repo = repo,
 		store_cap = store_cap,
 		artifact_cap = artifact_cap,
+		signature_verify_cap = cap_sdk.new_cap_ref(conn, 'signature_verify', 'main'),
 		service_scope = service_scope,
 		service_run_id = service_run_id,
 		now = now,

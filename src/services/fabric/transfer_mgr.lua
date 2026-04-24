@@ -26,7 +26,7 @@ local runtime     = require 'fibers.runtime'
 local sleep       = require 'fibers.sleep'
 local uuid        = require 'uuid'
 
-local blob_source = require 'services.fabric.blob_source'
+local blob_source = require 'shared.blob_source'
 local protocol    = require 'services.fabric.protocol'
 local statefmt    = require 'services.fabric.statefmt'
 
