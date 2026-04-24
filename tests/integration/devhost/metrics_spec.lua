@@ -94,9 +94,9 @@ local function start_mock_hal(conn, root_scope)
 
 	root_scope:spawn(function()
 		while true do
-			local req, err = perform(ep:recv_op())
+			local req, _ = perform(ep:recv_op())
 			if not req then break end
-			conn:publish_one(req.reply_to, { ok = true, reason = MAINFLUX_CFG })
+			req:reply({ ok = true, reason = MAINFLUX_CFG })
 		end
 	end)
 end
@@ -141,6 +141,7 @@ local T = {}
 function T.metric_published_via_bus()
 	runfibers.run(function(scope)
 		local clock     = new_test_clock()
+		scope:finally(function() clock:restore() end)
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
@@ -176,6 +177,7 @@ end
 function T.namespace_overrides_topic_key()
 	runfibers.run(function(scope)
 		local clock     = new_test_clock()
+		scope:finally(function() clock:restore() end)
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
@@ -214,6 +216,7 @@ end
 function T.unknown_metric_dropped()
 	runfibers.run(function(scope)
 		local clock     = new_test_clock()
+		scope:finally(function() clock:restore() end)
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
@@ -250,6 +253,7 @@ end
 function T.difftrigger_suppresses_unchanged_value()
 	runfibers.run(function(scope)
 		local clock     = new_test_clock()
+		scope:finally(function() clock:restore() end)
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
@@ -302,6 +306,7 @@ end
 function T.delta_value_pipeline()
 	runfibers.run(function(scope)
 		local clock     = new_test_clock()
+		scope:finally(function() clock:restore() end)
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
@@ -366,6 +371,7 @@ function T.http_pipeline_enqueues_request_payload()
 	local ok_run, run_err = pcall(function()
 		runfibers.run(function(scope)
 			local clock     = new_test_clock()
+			scope:finally(function() clock:restore() end)
 			local bus       = make_bus()
 			local test_conn = bus:connect()
 
@@ -425,6 +431,7 @@ end
 function T.config_update_replaces_pipelines()
 	runfibers.run(function(scope)
 		local clock     = new_test_clock()
+		scope:finally(function() clock:restore() end)
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
@@ -472,6 +479,7 @@ end
 function T.per_endpoint_state_isolation()
 	runfibers.run(function(scope)
 		local clock     = new_test_clock()
+		scope:finally(function() clock:restore() end)
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
