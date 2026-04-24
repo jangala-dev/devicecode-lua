@@ -500,17 +500,7 @@
                     "backend": "cm5_swupdate"
                 },
                 "mcu": {
-                    "backend": "mcu_component",
-                    "transfer": {
-                        "link_id": "cm5-uart-mcu",
-                        "receiver": [
-                            "rpc",
-                            "member",
-                            "mcu",
-                            "receive"
-                        ],
-                        "timeout_s": 60.0
-                    }
+                    "backend": "mcu_component"
                 }
             },
             "artifacts": {
@@ -526,6 +516,10 @@
             },
             "admission": {
                 "mode": "global_single"
+            },
+            "bundled": {
+                "namespace": "update/state/bundled",
+                "components": {}
             }
         }
     }

@@ -94,9 +94,10 @@ function M.normalize_software(raw)
 	raw = table_or_empty(raw)
 	return {
 		version = raw.version or raw.fw_version or nil,
-		build = raw.build or nil,
+		build = raw.build or raw.build_id or nil,
 		image_id = raw.image_id or nil,
 		boot_id = raw.boot_id or nil,
+		payload_sha256 = raw.payload_sha256 or nil,
 	}
 end
 

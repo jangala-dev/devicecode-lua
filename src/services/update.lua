@@ -38,6 +38,8 @@ local runtime_mod   = require 'services.update.runtime'
 local artifacts_mod = require 'services.update.artifacts'
 local backend_contract = require 'services.update.backend_contract'
 local commands_mod  = require 'services.update.commands'
+local bundled_state_mod = require 'services.update.bundled_state'
+local bundled_reconcile_mod = require 'services.update.bundled_reconcile'
 local component_backend_mod = require 'services.update.backends.component_proxy'
 local cm5_backend_mod = require 'services.update.backends.cm5_swupdate'
 local mcu_backend_mod = require 'services.update.backends.mcu_component'
@@ -183,6 +185,7 @@ function M.start(conn, opts)
 		projection = projection,
 		store_sync = store_sync,
 		repo = repo,
+		store_cap = store_cap,
 		artifact_cap = artifact_cap,
 		service_scope = service_scope,
 		service_run_id = service_run_id,
@@ -240,6 +243,7 @@ function M.start(conn, opts)
 	end
 
 	local commands = commands_mod.new(ctx)
+	ctx.commands = commands
 
 	local function release_artifact_if_present(job)
 		if not job or type(job.artifact_ref) ~= 'string' or job.artifact_ref == '' then
@@ -274,6 +278,13 @@ function M.start(conn, opts)
 
 	local runtime = runtime_mod.new(ctx)
 	ctx.runtime = runtime
+
+	local bundled_store = bundled_state_mod.open(store_cap, { namespace = state.cfg.bundled and state.cfg.bundled.namespace })
+	local bundled = bundled_reconcile_mod.new(ctx, commands, bundled_store)
+	ctx.bundled = bundled
+	ctx.on_job_succeeded = function(job, result)
+		bundled:mark_job_success(job, result)
+	end
 
 	local function rebuild_backends()
 		state.backends = {}
@@ -401,6 +412,7 @@ function M.start(conn, opts)
 		if which == 'changed' then
 			seen = req or seen
 			runtime:on_changed_tick()
+			bundled:maybe_run()
 
 		elseif which == 'runner' then
 			runtime:handle_runner_event(req)
@@ -452,6 +464,13 @@ function M.start(conn, opts)
 						})
 					end
 				end
+			end
+
+			bundled_store = bundled_state_mod.open(store_cap, { namespace = state.cfg.bundled and state.cfg.bundled.namespace })
+			bundled = bundled_reconcile_mod.new(ctx, commands, bundled_store)
+			ctx.bundled = bundled
+			ctx.on_job_succeeded = function(job, result)
+				bundled:mark_job_success(job, result)
 			end
 
 			changed:signal()

@@ -130,6 +130,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     local boot = { mcu = 'boot-1' }
     local device_calls = {}
     local fabric_calls = {}
+
     bind_device_double(scope, bus:connect(), versions, {
       artifact_retention = 'release',
       commit_version = { mcu = 'mcu-v1' },
@@ -137,6 +138,9 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
       bump_boot_id = true,
       calls = device_calls,
     })
+
+    -- This is no longer exercised directly by update in this unit test,
+    -- but we keep it bound so we can assert that update did not bypass device.
     bind_fabric_transfer_double(scope, bus:connect(), fabric_calls)
 
     local job
@@ -162,10 +166,14 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
 
     local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
       component = 'mcu',
-      artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
+      artifact = {
+        kind = 'import_path',
+        path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1'),
+      },
       expected_version = 'mcu-v1',
       metadata = { channel = 'test' },
     }, { timeout = 0.5 })
+
     ensure(cerr == nil, 'expected create call to succeed')
     ensure(created and created.ok == true, 'expected create response ok=true')
     job = created.job
@@ -174,7 +182,11 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     ensure(type(job.lifecycle.created_seq) == 'number', 'expected created_seq')
     ensure(type(job.lifecycle.updated_seq) == 'number', 'expected updated_seq')
 
-    local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
+    local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, {
+      op = 'start',
+      job_id = job.job_id,
+    }, { timeout = 0.5 })
+
     ensure(serr == nil, 'expected start call to succeed')
     ensure(started and started.ok == true, 'expected start response ok=true')
     ensure(job.lifecycle.state == 'created', 'expected local job copy still in created state')
@@ -184,44 +196,74 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
       local okp, payload = safe.pcall(function()
         return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
       end)
-      return okp and type(payload) == 'table' and type(payload.job) == 'table'
+      return okp
+        and type(payload) == 'table'
+        and type(payload.job) == 'table'
         and payload.job.lifecycle.state == 'awaiting_commit'
-        and payload.job.artifact.ref == nil and payload.job.artifact.released_at ~= nil
+        and payload.job.artifact.ref == nil
+        and payload.job.artifact.released_at ~= nil
     end, { timeout = 0.75, interval = 0.01 })
+
     ensure(next(artifacts.artifacts) == nil, 'expected transient artifact to be released after staging')
 
-    local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
+    local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, {
+      op = 'commit',
+      job_id = job.job_id,
+    }, { timeout = 1.0 })
+
     ensure(perr == nil, 'expected commit call to succeed')
     ensure(committed and committed.ok == true, 'expected commit response ok=true')
-    ensure(committed.job and (committed.job.lifecycle.state == 'awaiting_commit' or committed.job.lifecycle.state == 'awaiting_return' or committed.job.lifecycle.state == 'succeeded'), 'expected commit response state to be awaiting_commit/awaiting_return/succeeded')
+    ensure(
+      committed.job
+        and (
+          committed.job.lifecycle.state == 'awaiting_commit'
+          or committed.job.lifecycle.state == 'awaiting_return'
+          or committed.job.lifecycle.state == 'succeeded'
+        ),
+      'expected commit response state to be awaiting_commit/awaiting_return/succeeded'
+    )
 
     diag:assert_until('job never reached succeeded after commit', function()
       local okp, payload = safe.pcall(function()
         return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
       end)
-      return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'succeeded'
+      return okp
+        and type(payload) == 'table'
+        and type(payload.job) == 'table'
+        and payload.job.lifecycle.state == 'succeeded'
     end, { timeout = 0.75, interval = 0.01 })
 
-    local got, gerr = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
+    local got, gerr = caller:call({ 'cmd', 'update', 'job', 'get' }, {
+      job_id = job.job_id,
+    }, { timeout = 0.5 })
+
     ensure(gerr == nil, 'expected get call to succeed')
     ensure(got and got.ok == true, 'expected get response ok=true')
     ensure(got.job.lifecycle.state == 'succeeded', 'expected final job state succeeded')
     ensure(type(got.job.result) == 'table', 'expected result table')
     ensure(got.job.result.version == 'mcu-v1', 'expected final version mcu-v1')
+
     local get_calls = 0
+    local do_calls = 0
+    local actions = {}
+
     for _, call in ipairs(device_calls) do
       if call.kind == 'get' then
         get_calls = get_calls + 1
-      end
-    end
-    ensure(get_calls == 0, 'expected no device get calls in observer-driven mode, got ' .. tostring(get_calls))
-    local do_calls = 0
-    for _, call in ipairs(device_calls) do
-      if call.kind == 'do' then
+      elseif call.kind == 'do' then
         do_calls = do_calls + 1
+        actions[#actions + 1] = call.req.action
       end
     end
-    ensure(do_calls == 2, 'expected exactly two device action calls, got ' .. tostring(do_calls))
+
+    ensure(get_calls == 0, 'expected no device get calls in observer-driven mode, got ' .. tostring(get_calls))
+    ensure(do_calls == 3, 'expected exactly three device action calls, got ' .. tostring(do_calls))
+    ensure(actions[1] == 'prepare_update', 'expected first device action prepare_update, got ' .. tostring(actions[1]))
+    ensure(actions[2] == 'stage_update', 'expected second device action stage_update, got ' .. tostring(actions[2]))
+    ensure(actions[3] == 'commit_update', 'expected third device action commit_update, got ' .. tostring(actions[3]))
+
+    ensure(#fabric_calls == 0, 'expected no direct fabric calls from update, got ' .. tostring(#fabric_calls))
+
     ensure(type(control.namespaces['update/jobs']) == 'table', 'expected update/jobs namespace in control store')
     ensure(type(control.namespaces['update/jobs'][job.job_id]) == 'table', 'expected persisted job in control store')
   end, { timeout = 3.0 })

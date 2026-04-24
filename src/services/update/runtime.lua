@@ -133,6 +133,9 @@ function Runtime:handle_runner_event(ev)
 			error = nil,
 			next_step = nil,
 		})
+		if ctx.on_job_succeeded then
+			ctx.on_job_succeeded(job, ev.result)
+		end
 		ctx.release_artifact_if_present(job)
 
 	elseif ev.tag == 'reconciled_failure' then

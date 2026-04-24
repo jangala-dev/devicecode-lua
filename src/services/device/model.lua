@@ -50,18 +50,61 @@ M.copy_value = copy_value
 -- Component normalisation
 ----------------------------------------------------------------------
 
+local function is_array(t)
+	if type(t) ~= 'table' then return false end
+	if #t == 0 then return false end
+	for k in pairs(t) do
+		if type(k) ~= 'number' or k < 1 or k % 1 ~= 0 or k > #t then
+			return false
+		end
+	end
+	return true
+end
+
 local function normalize_action_routes(actions)
 	local out = {}
 	if type(actions) ~= 'table' then
 		return out
 	end
 
-	for action_name, topic in pairs(actions) do
-		if type(action_name) == 'string' and type(topic) == 'table' then
-			out[action_name] = {
-				name = action_name,
-				call_topic = copy_array(topic),
-			}
+	for action_name, spec in pairs(actions) do
+		if type(action_name) == 'string' and action_name ~= '' and type(spec) == 'table' then
+			-- Backwards-compatible shorthand: action = { 'cmd', ... }
+			if is_array(spec) then
+				out[action_name] = {
+					name = action_name,
+					kind = 'rpc',
+					call_topic = copy_array(spec),
+				}
+
+			else
+				local kind = spec.kind or 'rpc'
+				if kind == 'rpc' then
+					local topic = spec.call_topic or spec.topic
+					if is_array(topic) then
+						out[action_name] = {
+							name = action_name,
+							kind = 'rpc',
+							call_topic = copy_array(topic),
+						}
+					end
+
+				elseif kind == 'fabric_stage' then
+					local receiver = spec.receiver
+					if type(spec.link_id) == 'string' and spec.link_id ~= ''
+						and is_array(receiver)
+					then
+						out[action_name] = {
+							name = action_name,
+							kind = 'fabric_stage',
+							artifact_store = spec.artifact_store or 'main',
+							link_id = spec.link_id,
+							receiver = copy_array(receiver),
+							timeout_s = tonumber(spec.timeout_s) or nil,
+						}
+					end
+				end
+			end
 		end
 	end
 

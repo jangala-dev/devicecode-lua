@@ -74,14 +74,11 @@ function M.default_cfg(schema)
 		},
 		components = {
 			cm5 = { backend = 'cm5_swupdate' },
-			mcu = {
-				backend = 'mcu_component',
-				transfer = {
-					link_id = 'cm5-uart-mcu',
-					receiver = { 'rpc', 'member', 'mcu', 'receive' },
-					timeout_s = 60.0,
-				},
-			},
+			mcu = { backend = 'mcu_component' },
+		},
+		bundled = {
+			namespace = 'update/state/bundled',
+			components = {},
 		},
 	}
 end
@@ -138,6 +135,26 @@ function M.merge_cfg(payload, schema)
 						rec.timeout_commit = spec.timeout_commit
 					end
 					cfg.components[component] = rec
+				end
+			end
+		end
+	end
+
+	if type(data.bundled) == 'table' then
+		if type(data.bundled.namespace) == 'string' and data.bundled.namespace ~= '' then
+			cfg.bundled.namespace = data.bundled.namespace
+		end
+		if type(data.bundled.components) == 'table' then
+			cfg.bundled.components = {}
+			for component, spec in pairs(data.bundled.components) do
+				if type(component) == 'string' and type(spec) == 'table' then
+					local rec = copy_value(spec)
+					rec.enabled = spec.enabled == true
+					rec.follow_mode_default = (spec.follow_mode_default == 'hold') and 'hold' or 'auto'
+					rec.auto_start = spec.auto_start ~= false
+					rec.auto_commit = spec.auto_commit ~= false
+					rec.retry_on_boot = spec.retry_on_boot ~= false
+					cfg.bundled.components[component] = rec
 				end
 			end
 		end

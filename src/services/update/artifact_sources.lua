@@ -23,6 +23,11 @@ local SOURCES = {
       return artifact.ref, desc, nil
     end,
   },
+  bundled = {
+    resolve = function(artifacts, component, artifact, metadata)
+      return artifacts:import_bundled(component, artifact, metadata)
+    end,
+  },
 }
 
 function M.register(kind, resolver)

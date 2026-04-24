@@ -1476,7 +1476,19 @@
                         "mcu",
                         "updater",
                         "commit"
-                    ]
+                    ],
+                    "stage_update": {
+                        "kind": "fabric_stage",
+                        "artifact_store": "main",
+                        "link_id": "cm5-uart-mcu",
+                        "receiver": [
+                            "rpc",
+                            "member",
+                            "mcu",
+                            "receive"
+                        ],
+                        "timeout_s": 60.0
+                    }
                 },
                 "facts": {
                     "software": [
@@ -1559,17 +1571,7 @@
         "jobs_namespace": "update/jobs",
         "components": {
             "mcu": {
-                "backend": "mcu_component",
-                "transfer": {
-                    "link_id": "cm5-uart-mcu",
-                    "receiver": [
-                        "rpc",
-                        "member",
-                        "mcu",
-                        "receive"
-                    ],
-                    "timeout_s": 60.0
-                }
+                "backend": "mcu_component"
             }
         },
         "artifacts": {
@@ -1584,6 +1586,36 @@
         },
         "admission": {
             "mode": "global_single"
+        },
+        "bundled": {
+            "namespace": "update/state/bundled",
+            "components": {
+                "mcu": {
+                    "enabled": true,
+                    "follow_mode_default": "auto",
+                    "source": {
+                        "kind": "bundled",
+                        "path": "/rom/mcu/current.dcmcu",
+                        "target": {
+                            "product_family": "bigbox",
+                            "hardware_profile": "bb-v1-cm5-2",
+                            "mcu_board_family": "rp2354a"
+                        },
+                        "preflight": {
+                            "require_signature": false
+                        }
+                    },
+                    "target": {
+                        "product_family": "bigbox",
+                        "hardware_profile": "bb-v1-cm5-2",
+                        "mcu_board_family": "rp2354a"
+                    },
+                    "cm5_release_id_field": "image_id",
+                    "auto_start": true,
+                    "auto_commit": true,
+                    "retry_on_boot": true
+                }
+            }
         }
     }
 }

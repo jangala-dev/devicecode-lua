@@ -44,6 +44,7 @@ local model      = require 'services.device.model'
 local projection = require 'services.device.projection'
 local observers  = require 'services.device.observers'
 local proxy      = require 'services.device.proxy'
+local cap_sdk    = require 'services.hal.sdk.cap'
 
 local M = {}
 local SCHEMA = 'devicecode.config/device/1'
@@ -297,6 +298,63 @@ local function spawn_work_helper(work_tx, spec)
 	end, spec.spawn_what)
 end
 
+
+local function open_artifact(conn, artifact_store_id, artifact_ref)
+	if type(artifact_ref) ~= 'string' or artifact_ref == '' then
+		return nil, 'missing_artifact_ref'
+	end
+
+	local cap = cap_sdk.new_cap_ref(conn, 'artifact_store', artifact_store_id or 'main')
+	local opts_ = assert(cap_sdk.args.new.ArtifactStoreOpenOpts(artifact_ref))
+	local reply, err = cap:call_control('open', opts_)
+	if not reply then return nil, err end
+	if reply.ok ~= true then return nil, reply.reason end
+	return reply.reason, nil
+end
+
+local function perform_fabric_stage(conn, rec, action_name, args, timeout)
+	local op = rec.operations and rec.operations[action_name] or nil
+	if not op then return nil, 'unknown_action' end
+
+	args = type(args) == 'table' and args or {}
+	local artifact, aerr = open_artifact(conn, op.artifact_store, args.artifact_ref)
+	if not artifact then return nil, aerr or 'artifact_open_failed' end
+
+	local desc = type(artifact.describe) == 'function' and artifact:describe() or nil
+	local meta = type(args.metadata) == 'table' and model.copy_value(args.metadata) or nil
+	local payload = {
+		op = 'send_blob',
+		link_id = op.link_id,
+		receiver = model.copy_array(op.receiver),
+		source = artifact,
+		meta = {
+			kind = 'firmware',
+			component = rec.name,
+			version = args.expected_version,
+			job_id = args.job_id,
+			size = (type(desc) == 'table' and desc.size) or (type(artifact.size) == 'function' and artifact:size() or nil),
+			checksum = (type(desc) == 'table' and desc.checksum) or (type(artifact.checksum) == 'function' and artifact:checksum() or nil),
+			metadata = meta,
+		},
+	}
+
+	local value, err = conn:call({ 'cmd', 'fabric', 'transfer' }, payload, { timeout = op.timeout_s or timeout })
+	if value == nil then return nil, err end
+	if type(value) ~= 'table' then value = { ok = true } end
+	if value.artifact_retention == nil then value.artifact_retention = 'release' end
+	value.staged = true
+	return value, nil
+end
+
+local function perform_component_action(conn, rec, action, args, timeout)
+	local op = rec.operations and rec.operations[action] or nil
+	if not op then return nil, 'unknown_action' end
+	if op.kind == 'fabric_stage' then
+		return perform_fabric_stage(conn, rec, action, args, timeout)
+	end
+	return proxy.perform_action(conn, rec, action, args, timeout)
+end
+
 ----------------------------------------------------------------------
 -- Endpoint handlers
 ----------------------------------------------------------------------
@@ -364,7 +422,7 @@ local function handle_do_req(work_tx, conn, req, err, state)
 		spawn_what = 'device_do_helper_spawn',
 		overflow_what = 'device_do_done_overflow',
 		run = function()
-			return proxy.perform_action(conn, rec, action, payload.args or {}, payload.timeout)
+			return perform_component_action(conn, rec, action, payload.args or {}, payload.timeout)
 		end,
 	})
 end

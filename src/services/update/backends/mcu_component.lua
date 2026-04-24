@@ -2,9 +2,10 @@
 --
 -- MCU update backend.
 --
--- This backend builds on the generic component proxy backend, but overrides
--- stage() so the update artefact is pushed over fabric transfer before commit.
--- It also contributes an extra observer feed for transfer progress.
+-- This backend builds on the generic component proxy backend.  The device
+-- service owns the component staging action, including any fabric transfer
+-- details.  This backend owns only MCU-specific reconcile policy and transfer
+-- progress observation for update job display.
 
 local reconcile = require 'services.update.backends.component_reconcile'
 
@@ -25,10 +26,10 @@ function M.new(opts)
 	local timeout_stage = opts.timeout_stage or 60.0
 	local timeout_commit = opts.timeout_commit or 10.0
 
+	-- transfer is retained only as an optional observer hint for this release.
+	-- Staging transport lives in the device component action configuration.
 	local transfer = type(opts.transfer) == 'table' and opts.transfer or {}
 	local link_id = transfer.link_id or 'cm5-uart-mcu'
-	local receiver = transfer.receiver
-	local transfer_timeout = transfer.timeout_s or timeout_stage
 
 	local backend = proxy.new({
 		component = component,
@@ -40,44 +41,6 @@ function M.new(opts)
 	})
 
 	local proxy_observe_specs = backend.observe_specs
-
-	function backend:stage(conn, job, ctx)
-		if type(job.artifact_ref) ~= 'string' or job.artifact_ref == '' then
-			return nil, 'missing_artifact_ref'
-		end
-
-		local source, oerr = ctx.artifact_open(job.artifact_ref)
-		if not source then
-			return nil, oerr or 'artifact_open_failed'
-		end
-
-		local payload = {
-			op = 'send_blob',
-			link_id = link_id,
-			source = source,
-			meta = {
-				kind = 'firmware',
-				component = component,
-				version = job.expected_version,
-				job_id = job.job_id,
-				size = type(source.size) == 'function' and source:size() or nil,
-				checksum = type(source.checksum) == 'function' and source:checksum() or nil,
-				metadata = job.metadata,
-			},
-		}
-		if type(receiver) == 'table' then
-			payload.receiver = receiver
-		end
-
-		local value, err = conn:call({ 'cmd', 'fabric', 'transfer' }, payload, { timeout = transfer_timeout })
-		if value == nil then return nil, err end
-		if type(value) ~= 'table' then value = { ok = true } end
-		if value.artifact_retention == nil then
-			value.artifact_retention = 'release'
-		end
-		value.staged = true
-		return value, nil
-	end
 
 	function backend:observe_specs(component_cfg)
 		local specs = proxy_observe_specs(self, component_cfg)

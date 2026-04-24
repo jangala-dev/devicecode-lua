@@ -59,14 +59,33 @@ function Commands:create_job(payload)
 		return nil, aerr
 	end
 
+	local metadata = type(payload.metadata) == 'table' and ctx.model.copy_value(payload.metadata) or {}
+	local expected_version = payload.expected_version
+	local img = type(artifact_meta) == 'table' and artifact_meta.mcu_image or nil
+	if expected_version == nil and type(img) == 'table' and type(img.build) == 'table' then
+		expected_version = img.build.version
+	end
+	if type(payload.artifact) == 'table' and payload.artifact.kind == 'bundled' then
+		metadata.source = metadata.source or 'bundled'
+		if type(img) == 'table' and type(img.build) == 'table' then
+			metadata.bundled = {
+				version = img.build.version,
+				build_id = img.build.build_id,
+				image_id = img.build.image_id,
+				payload_sha256 = type(img.payload) == 'table' and img.payload.sha256 or nil,
+			}
+		end
+	end
+	if next(metadata) == nil then metadata = nil end
+
 	return self:create_job_from_spec({
 		job_id = tostring(uuid.new()),
 		offer_id = payload.offer_id,
 		component = component,
 		artifact_ref = artifact_ref,
 		artifact_meta = artifact_meta,
-		expected_version = payload.expected_version,
-		metadata = type(payload.metadata) == 'table' and ctx.model.copy_value(payload.metadata) or nil,
+		expected_version = expected_version,
+		metadata = metadata,
 		auto_start = (type(payload.options) == 'table' and payload.options.auto_start == true),
 		auto_commit = (type(payload.options) == 'table' and payload.options.auto_commit == true),
 	})

@@ -28,6 +28,8 @@ function M.new(opts)
 	return setmetatable({
 		_require_session = opts.require_session,
 		_with_user_conn = opts.with_user_conn,
+		_max_bytes = opts.max_bytes or (512 * 1024),
+		_allowed_components = opts.allowed_components or { mcu = true },
 	}, Uploads)
 end
 
@@ -83,6 +85,10 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta)
 		end
 
 		offset = offset + #chunk
+		if self._max_bytes and offset > self._max_bytes then
+			sink:abort()
+			return nil, errors.bad_request('upload_too_large')
+		end
 	end
 
 	local artefact, commit_err = sink:commit()
@@ -99,6 +105,7 @@ function Uploads:_create_update_job(user_conn, artefact, meta)
 		artifact = { kind = 'ref', ref = artefact:ref() },
 		expected_version = meta.version,
 		metadata = {
+			source = 'ui_upload',
 			name = meta.name,
 			build = meta.build,
 			checksum = meta.checksum,
@@ -136,6 +143,9 @@ function Uploads:upload_update(session_id, stream, req_headers)
 		build = req_headers:get('x-artifact-build'),
 		checksum = req_headers:get('x-artifact-checksum'),
 	}
+	if self._allowed_components and self._allowed_components[meta.component] ~= true then
+		return nil, errors.bad_request('component_not_allowed')
+	end
 
 	local out, cerr = self._with_user_conn(
 		rec.principal,

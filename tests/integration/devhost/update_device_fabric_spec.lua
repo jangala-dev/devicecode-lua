@@ -138,6 +138,12 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 					},
 					actions = {
 						prepare_update = { 'rpc', 'member', 'mcu', 'prepare' },
+						stage_update = {
+							kind = 'fabric_stage',
+							link_id = 'cm5-uart-mcu',
+							receiver = { 'rpc', 'member', 'mcu', 'receive' },
+							timeout_s = 1.0,
+						},
 						commit_update = { 'rpc', 'member', 'mcu', 'commit' },
 					},
 				},
@@ -358,6 +364,12 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 					},
 					actions = {
 						prepare_update = { 'rpc', 'member', 'mcu', 'prepare' },
+						stage_update = {
+							kind = 'fabric_stage',
+							link_id = 'cm5-uart-mcu',
+							receiver = { 'rpc', 'member', 'mcu', 'receive' },
+							timeout_s = 1.0,
+						},
 						commit_update = { 'rpc', 'member', 'mcu', 'commit' },
 					},
 				},
