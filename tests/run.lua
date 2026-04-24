@@ -28,7 +28,12 @@ local files = {
 	'unit.main.service_spec',
 	'unit.config.service_spec',
 	'integration.devhost.main_failure_spec',
-	'integration.devhost.config_recovery_spec'
+	'integration.devhost.config_recovery_spec',
+	'unit.metrics.processing_spec',
+	'unit.metrics.config_spec',
+	'unit.metrics.senml_spec',
+	'unit.metrics.http_spec',
+	'integration.devhost.metrics_spec',
 }
 
 local function monotonic_now()
