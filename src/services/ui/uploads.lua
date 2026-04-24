@@ -5,7 +5,9 @@
 -- Current scope:
 --   * receive one uploaded artefact body from the HTTP transport
 --   * stream it into the artifact_store capability
---   * create and start an update job that references the stored artefact
+--   * create and stage an update job that references the stored artefact
+--   * leave uploaded MCU jobs awaiting an explicit commit action before the
+--     power-cycling cutover occurs
 --
 -- This module is intentionally stateless for now. If upload progress becomes a
 -- first-class UI feature later, state/pulse/watch machinery can be added then.
@@ -110,6 +112,8 @@ function Uploads:_create_update_job(user_conn, artefact, meta)
 			build = meta.build,
 			checksum = meta.checksum,
 			uploaded = true,
+			commit_policy = 'manual',
+			require_explicit_commit = true,
 		},
 	}, 10.0)
 
@@ -178,6 +182,11 @@ function Uploads:upload_update(session_id, stream, req_headers)
 					ref = artefact:ref(),
 					size = desc.size,
 					checksum = desc.checksum,
+				},
+				update_flow = {
+					staged = true,
+					requires_commit = true,
+					next_action = 'commit',
 				},
 			}, nil
 		end

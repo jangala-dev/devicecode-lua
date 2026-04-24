@@ -338,6 +338,10 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 		assert(type(upload_json.data) == 'table')
 		assert(type(upload_json.data.artifact) == 'table')
 		assert(upload_json.data.artifact.checksum == body_checksum)
+		assert(type(upload_json.data.update_flow) == 'table')
+		assert(upload_json.data.update_flow.staged == true)
+		assert(upload_json.data.update_flow.requires_commit == true)
+		assert(upload_json.data.update_flow.next_action == 'commit')
 		local job_id = assert(upload_json.data.job and upload_json.data.job.job_id)
 		local artifact_ref = assert(upload_json.data.artifact.ref)
 
@@ -347,6 +351,9 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 				and type(payload.job.lifecycle) == 'table'
 				and payload.job.lifecycle.state == 'awaiting_commit'
 				and payload.job.lifecycle.stage == 'staged_on_mcu'
+				and type(payload.job.engagement) == 'table'
+				and payload.job.engagement.commit_required == true
+				and payload.job.engagement.commit_mode == 'manual'
 		end, 1.5))
 		assert(received_blob == body)
 		assert(artifacts.next_id >= 1)

@@ -27,6 +27,21 @@ function M.public_job(job)
 	local staged_meta = type(job.staged_meta) == 'table' and job.staged_meta or nil
 	local runtime = type(job.runtime) == 'table' and job.runtime or {}
 
+	local metadata = copy_value(job.metadata)
+	local require_explicit_commit = false
+	local commit_mode = nil
+	if type(job.metadata) == 'table' then
+		if job.metadata.require_explicit_commit == true then
+			require_explicit_commit = true
+		end
+		if type(job.metadata.commit_policy) == 'string' and job.metadata.commit_policy ~= '' then
+			commit_mode = job.metadata.commit_policy
+			if job.metadata.commit_policy == 'manual' then
+				require_explicit_commit = true
+			end
+		end
+	end
+
 	return {
 		job_id = job.job_id,
 		component = job.component,
@@ -56,7 +71,11 @@ function M.public_job(job)
 		},
 		actions = model.job_actions(job),
 		result = copy_value(job.result),
-		metadata = copy_value(job.metadata),
+		metadata = metadata,
+		engagement = {
+			commit_required = require_explicit_commit,
+			commit_mode = commit_mode,
+		},
 	}
 end
 

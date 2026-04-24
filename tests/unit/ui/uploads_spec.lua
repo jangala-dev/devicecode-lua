@@ -69,6 +69,14 @@ function T.uploads_manager_streams_into_sink_and_creates_started_job_once()
         assert(err == nil)
         assert(out.ok == true)
         assert(out.artifact.ref == 'artifact:1')
+        assert(type(out.update_flow) == 'table')
+        assert(out.update_flow.staged == true)
+        assert(out.update_flow.requires_commit == true)
+        assert(out.update_flow.next_action == 'commit')
+        local create_payload = calls[#calls - 1].payload
+        assert(type(create_payload) == 'table' and type(create_payload.metadata) == 'table')
+        assert(create_payload.metadata.commit_policy == 'manual')
+        assert(create_payload.metadata.require_explicit_commit == true)
     end)
     local ops = {}
     for i = 1, #calls do
