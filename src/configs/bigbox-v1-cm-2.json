@@ -25,7 +25,11 @@
                         "mode": "8N1"
                     }
                 ]
-            }
+            },
+            "artifact_store": {},
+            "control_store": {},
+            "signature_verify": {},
+            "updater": {}
         }
     },
     "net": {

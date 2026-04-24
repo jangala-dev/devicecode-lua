@@ -215,7 +215,7 @@ end
 ---@return Capability?
 ---@return string error
 function new.ArtifactStoreCapability(id, control_ch)
-    return new.Capability('artifact_store', id, control_ch, { 'import_path', 'import_source', 'open', 'delete', 'status' })
+    return new.Capability('artifact_store', id, control_ch, { 'create_sink', 'import_path', 'import_source', 'open', 'delete', 'status' })
 end
 
 

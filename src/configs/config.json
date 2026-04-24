@@ -17,7 +17,11 @@
             "sysmon": {},
             "platform": {},
             "power": {},
-            "usb": {}
+            "usb": {},
+            "artifact_store": {},
+            "control_store": {},
+            "signature_verify": {},
+            "updater": {}
         }
     },
     "gsm": {
