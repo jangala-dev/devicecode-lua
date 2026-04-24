@@ -70,6 +70,7 @@ local files = {
 	'integration.devhost.hal_uart_spec',
 	'integration.devhost.main_failure_spec',
 	'integration.devhost.ui_service_spec',
+	'integration.devhost.ui_update_upload_fabric_spec',
 	'integration.devhost.ui_ws_spec',
 	'integration.devhost.update_cm5_local_spec',
 	'integration.devhost.update_device_fabric_spec',
