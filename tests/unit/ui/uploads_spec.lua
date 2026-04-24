@@ -81,4 +81,86 @@ function T.uploads_manager_streams_into_sink_and_creates_started_job_once()
     assert(ops[#ops] == 'cmd/update/job/do')
 end
 
+function T.uploads_manager_rejects_component_not_allowed()
+    local uploads = uploads_mod.new({
+        require_session = function() return { principal = ui_fakes.principal('u1') }, nil end,
+        with_user_conn = function(_principal, _origin, fn)
+            return fn({
+                call = function() error('should_not_call_upstream') end,
+                call_op = function() error('should_not_call_upstream') end,
+            })
+        end,
+        allowed_components = { cm5 = true },
+    })
+    local stream = ui_fakes.fake_http_stream({
+        method = 'POST',
+        path = '/api/update/uploads',
+        body = 'abcdef',
+        headers = {
+            [':method'] = 'POST',
+            [':path'] = '/api/update/uploads',
+            ['content-length'] = '6',
+            ['x-artifact-component'] = 'mcu',
+        },
+    })
+    local out, err = uploads:upload_update('sess-1', stream, stream:get_headers())
+    assert(out == nil)
+    assert(type(err) == 'table')
+    assert(err.code == 'bad_request')
+    assert(err.http_status == 400)
+end
+
+function T.uploads_manager_rejects_too_large_body()
+    local calls = {}
+    local sink = {
+        write_chunk = function(_, _offset, _data)
+            calls[#calls + 1] = 'write_chunk'
+            return true
+        end,
+        abort = function()
+            calls[#calls + 1] = 'abort'
+            return true
+        end,
+        commit = function() error('should_not_commit') end,
+    }
+    local fake_conn = {
+        call = function(_, topic, _payload)
+            local key = table.concat(topic, '/')
+            if key == 'cap/artifact_store/main/rpc/create_sink' then
+                return { ok = true, reason = sink }, nil
+            end
+            error('unexpected call: ' .. key)
+        end,
+        call_op = function(self, topic, payload)
+            local reply, err = self:call(topic, payload)
+            return op.always(reply, err)
+        end,
+    }
+    runfibers.run(function()
+        local uploads = uploads_mod.new({
+            require_session = function() return { principal = ui_fakes.principal('u1') }, nil end,
+            with_user_conn = function(_principal, _origin, fn) return fn(fake_conn) end,
+            max_bytes = 3,
+        })
+        local stream = ui_fakes.fake_http_stream({
+            method = 'POST',
+            path = '/api/update/uploads',
+            body = 'abcdef',
+            headers = {
+                [':method'] = 'POST',
+                [':path'] = '/api/update/uploads',
+                ['content-length'] = '6',
+                ['x-artifact-component'] = 'mcu',
+            },
+        })
+        local out, err = uploads:upload_update('sess-1', stream, stream:get_headers())
+        assert(out == nil)
+        assert(type(err) == 'table')
+        assert(err.code == 'bad_request')
+        assert(err.http_status == 400)
+    end)
+    assert(calls[1] == 'write_chunk')
+    assert(calls[#calls] == 'abort')
+end
+
 return T

@@ -423,6 +423,7 @@ function M.start(conn, opts)
 		elseif type(which) == 'string' and state.component_obs[which] then
 			local rec = state.component_obs[which]
 			rec.on_event(ctx, rec, req)
+			bundled:maybe_run()
 
 		elseif which == 'cfg' then
 			local ev = req

@@ -450,4 +450,57 @@ function T.update_service_supports_ref_artifacts_and_auto_start()
   end, { timeout = 3.0 })
 end
 
+function T.update_service_marks_bundled_hold_after_manual_mcu_success()
+  runfibers.run(function(scope)
+    local orig_sleep = sleep_mod.sleep
+    sleep_mod.sleep = function(dt) return orig_sleep(math.min(dt, 0.01)) end
+    fibers.current_scope():finally(function() sleep_mod.sleep = orig_sleep end)
+
+    local bus = busmod.new()
+    local caller = bus:connect()
+    local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
+    local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    bind_device_double(scope, bus:connect(), { mcu = 'mcu-v0' }, {
+      artifact_retention = 'release',
+      commit_version = { mcu = 'mcu-v1-manual' },
+      boot_id = { mcu = 'boot-1' },
+      bump_boot_id = true,
+    })
+
+    local ok, err = scope:spawn(function()
+      update.start(bus:connect(), { name = 'update', env = 'dev' })
+    end)
+    assert(ok, tostring(err))
+    wait_service_running(caller, 'update')
+
+    local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
+      component = 'mcu',
+      artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/manual.bin', 'manual') },
+      expected_version = 'mcu-v1-manual',
+      metadata = { source = 'ui_upload' },
+    }, { timeout = 0.5 }))
+    local job_id = created.job.job_id
+    assert(assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job_id }, { timeout = 0.5 })).ok == true)
+    assert(probe.wait_until(function()
+      local okp, payload = safe.pcall(function()
+        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job_id }, { timeout = 0.02 })
+      end)
+      return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
+    end, { timeout = 0.75, interval = 0.01 }))
+    assert(assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job_id }, { timeout = 1.0 })).ok == true)
+    assert(probe.wait_until(function()
+      local okp, payload = safe.pcall(function()
+        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job_id }, { timeout = 0.02 })
+      end)
+      return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'succeeded'
+    end, { timeout = 0.75, interval = 0.01 }))
+    assert(probe.wait_until(function()
+      local okp, payload = safe.pcall(function()
+        return probe.wait_payload(caller, { 'state', 'update', 'bundled', 'mcu' }, { timeout = 0.02 })
+      end)
+      return okp and type(payload) == 'table' and payload.follow_mode == 'hold' and payload.last_result == 'manual_success_hold'
+    end, { timeout = 0.75, interval = 0.01 }))
+  end, { timeout = 3.0 })
+end
+
 return T
