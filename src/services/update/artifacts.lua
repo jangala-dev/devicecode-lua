@@ -220,11 +220,11 @@ function Artifacts:resolve_job_artifact(payload)
 		return nil, nil, 'component_required'
 	end
 	local artifact_spec = payload and payload.artifact or nil
-	local ref, desc, err = sources.resolve(self, component, artifact_spec, payload and payload.metadata or nil)
+	local ref, desc, cleanup_on_failure, err = sources.resolve(self, component, artifact_spec, payload and payload.metadata or nil)
 	if not ref then return nil, nil, err end
 	local preflighted, perr = self:preflight_artifact(component, ref, desc, artifact_spec)
 	if not preflighted then
-		if type(artifact_spec) == 'table' and artifact_spec.kind ~= 'ref' then
+		if cleanup_on_failure == true then
 			self:delete(ref)
 		end
 		return nil, nil, perr
