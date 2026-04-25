@@ -1,4 +1,4 @@
-local b64url = require 'services.fabric.b64url'
+local b64url = require 'shared.encoding.b64url'
 
 local T = {}
 

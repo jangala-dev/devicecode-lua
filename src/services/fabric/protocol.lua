@@ -11,7 +11,7 @@
 -- This module does not interpret session semantics or service policy.
 
 local cjson  = require 'cjson.safe'
-local b64url = require 'services.fabric.b64url'
+local b64url = require 'shared.encoding.b64url'
 
 local M = {}
 
