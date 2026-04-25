@@ -9,6 +9,18 @@ local fabric     = require 'services.fabric'
 
 local T = {}
 
+local function wait_fabric_service_ready(conn, timeout)
+	return probe.wait_until(function()
+		local ok, payload = safe.pcall(function()
+			return probe.wait_payload(conn, { 'svc', 'fabric', 'status' }, { timeout = 0.02 })
+		end)
+		return ok and type(payload) == 'table'
+			and payload.state == 'running'
+			and payload.ready == true
+			and type(payload.run_id) == 'string'
+	end, { timeout = timeout or 2.0, interval = 0.01 })
+end
+
 local function wait_ready(conn, link_id, timeout)
 	return probe.wait_until(function()
 		local ok, payload = safe.pcall(function()
@@ -91,8 +103,10 @@ function T.fabric_services_reach_ready_on_separate_buses_over_duplex_streams()
 		end)
 		assert(ok2, tostring(err2))
 
-		if not wait_ready(obs_a, 'wan0', 2.0) then diag_a:fail('expected fabric side A to reach ready') end
-		if not wait_ready(obs_b, 'wan0', 2.0) then diag_b:fail('expected fabric side B to reach ready') end
+		if not wait_fabric_service_ready(obs_a, 2.0) then diag_a:fail('expected fabric service side A to reach ready') end
+		if not wait_fabric_service_ready(obs_b, 2.0) then diag_b:fail('expected fabric service side B to reach ready') end
+		if not wait_ready(obs_a, 'wan0', 2.0) then diag_a:fail('expected fabric side A link to reach ready') end
+		if not wait_ready(obs_b, 'wan0', 2.0) then diag_b:fail('expected fabric side B link to reach ready') end
 
 		obs_a:publish({ 'local', 'wifi' }, { up = true })
 		local ok_seen, seen = safe.pcall(function() return probe.wait_payload(obs_b, { 'seen', 'wifi' }, { timeout = 1.0 }) end)
