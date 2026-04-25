@@ -248,7 +248,7 @@ local function copy_blocking(source, sink, opts)
 	assert(M.is_sink(sink), 'blob_source.copy expects sink')
 
 	local offset = 0
-	local chunk_size = tonumber(opts.chunk_size) or 64 * 1024
+	local chunk_size = tonumber(opts.chunk_size) or (64 * 1024)
 	local expected_size = opts.expected_size or src:size()
 	local expected_checksum = opts.expected_checksum or src:checksum()
 
