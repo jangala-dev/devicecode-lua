@@ -58,9 +58,12 @@ end
 local function topic_key(topic)
 	local parts = {}
 	for i = 1, #topic do
-		parts[#parts + 1] = tostring(topic[i])
+		local v = topic[i]
+		local tv = type(v)
+		local s = tostring(v)
+		parts[#parts + 1] = tv:sub(1, 1) .. #s .. ':' .. s
 	end
-	return table.concat(parts, '/')
+	return table.concat(parts, '|')
 end
 
 local function watch_topic_for_prefix(prefix, multi_wild)
@@ -209,8 +212,6 @@ function M.run(ctx)
 		endpoints[i] = conn:bind(outbound_call_rules[i].local_prefix, { queue_len = 16 })
 	end
 
-	send_required(status_tx, { kind = 'rpc_ready', ready = (replay_pending == 0) }, 'rpc_ready_status')
-
 	-- pending[id] = {
 	--   id = <wire call id>,
 	--   req = <bus endpoint request>,
@@ -225,6 +226,7 @@ function M.run(ctx)
 	local last_peer_sid = snap0.peer_sid
 	local last_established = snap0.established
 	local last_bridge = nil
+	local last_rpc_ready = nil
 
 	local state = {
 		conn = conn,
@@ -242,10 +244,24 @@ function M.run(ctx)
 		session_seen = session_seen,
 	}
 
+	-- Bridge readiness is purely the bridge's own replay readiness.
+	-- session_ctl combines this with handshake establishment.
+	local function current_rpc_ready()
+		return replay_pending == 0
+	end
+
+	local function emit_rpc_ready(force)
+		local ready = current_rpc_ready()
+		if force or ready ~= last_rpc_ready then
+			send_required(status_tx, { kind = 'rpc_ready', ready = ready }, 'rpc_ready_status')
+			last_rpc_ready = ready
+		end
+	end
+
 	local function publish_bridge_state(force)
 		local snap = session:get()
 		local status = {
-			ready = (replay_pending == 0) and snap.ready or false,
+			ready = current_rpc_ready(),
 			replay_pending = replay_pending,
 			pending_calls = pending_count(pending),
 			inbound_helpers = inbound_helpers,
@@ -274,6 +290,7 @@ function M.run(ctx)
 		state_conn:unretain(bridge_topic)
 	end)
 
+	emit_rpc_ready(true)
 	publish_bridge_state(true)
 
 	local function fail_expired_pending_calls()
@@ -301,9 +318,9 @@ function M.run(ctx)
 		end
 
 		if session_replaced or session_established then
-			send_required(status_tx, { kind = 'rpc_ready', ready = false }, 'rpc_ready_status')
+			emit_rpc_ready(true) -- clear edge during replay if watchers exist
 			maybe_replay_retained(retained_cache, session, tx_rpc)
-			send_required(status_tx, { kind = 'rpc_ready', ready = (replay_pending == 0) }, 'rpc_ready_status')
+			emit_rpc_ready(true)
 		end
 
 		last_peer_sid = snap.peer_sid
@@ -327,7 +344,7 @@ function M.run(ctx)
 	local function export_retained_event(rule, index, ev)
 		if ev.op == 'replay_done' then
 			if replay_pending > 0 then replay_pending = replay_pending - 1 end
-			send_required(status_tx, { kind = 'rpc_ready', ready = (replay_pending == 0) }, 'rpc_ready_status')
+			emit_rpc_ready(false)
 			publish_bridge_state(false)
 			return
 		end

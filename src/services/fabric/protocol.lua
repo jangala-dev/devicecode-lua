@@ -5,7 +5,8 @@
 -- Responsibilities:
 --   * validate wire shape only
 --   * encode/decode JSON lines
---   * classify frames into control / rpc / bulk lanes
+--   * classify frames into writer priority classes
+--   * dispatch validated frames to their in-process owner lanes
 --   * encode/decode bulk chunk payloads for transport-safe transfer
 --
 -- This module does not interpret session semantics or service policy.
@@ -15,6 +16,7 @@ local b64url = require 'shared.encoding.b64url'
 
 local M = {}
 
+-- Writer priority class (used by writer.lua).
 local FRAME_CLASS = {
 	hello = 'control',
 	hello_ack = 'control',
@@ -35,6 +37,27 @@ local FRAME_CLASS = {
 	xfer_chunk = 'bulk',
 }
 
+-- In-process owner lane (used by reader.lua).
+local FRAME_LANE = {
+	hello = 'session_control',
+	hello_ack = 'session_control',
+	ping = 'session_control',
+	pong = 'session_control',
+
+	xfer_begin = 'transfer',
+	xfer_ready = 'transfer',
+	xfer_need = 'transfer',
+	xfer_commit = 'transfer',
+	xfer_done = 'transfer',
+	xfer_abort = 'transfer',
+	xfer_chunk = 'transfer',
+
+	pub = 'rpc',
+	unretain = 'rpc',
+	call = 'rpc',
+	reply = 'rpc',
+}
+
 local function topic_ok(topic)
 	if type(topic) ~= 'table' then return false end
 	for i = 1, #topic do
@@ -50,6 +73,14 @@ local function frame_type_ok(frame)
 	return type(frame) == 'table'
 		and type(frame.type) == 'string'
 		and frame.type ~= ''
+end
+
+local function require_xfer_id(frame)
+	return type(frame.xfer_id) == 'string' and frame.xfer_id ~= ''
+end
+
+local function require_nonneg_number(v)
+	return type(v) == 'number' and v >= 0
 end
 
 local function validate_control(frame)
@@ -68,10 +99,10 @@ local function validate_control(frame)
 	end
 
 	if t == 'xfer_begin' then
-		if type(frame.xfer_id) ~= 'string' or frame.xfer_id == '' then
+		if not require_xfer_id(frame) then
 			return nil, 'missing_xfer_id'
 		end
-		if type(frame.size) ~= 'number' or frame.size < 0 then
+		if not require_nonneg_number(frame.size) then
 			return nil, 'invalid_xfer_size'
 		end
 		if type(frame.checksum) ~= 'string' or frame.checksum == '' then
@@ -79,12 +110,45 @@ local function validate_control(frame)
 		end
 	end
 
-	if t == 'xfer_need' then
-		if type(frame.xfer_id) ~= 'string' or frame.xfer_id == '' then
+	if t == 'xfer_ready' then
+		if not require_xfer_id(frame) then
 			return nil, 'missing_xfer_id'
 		end
-		if type(frame.next) ~= 'number' or frame.next < 0 then
+	end
+
+	if t == 'xfer_need' then
+		if not require_xfer_id(frame) then
+			return nil, 'missing_xfer_id'
+		end
+		if not require_nonneg_number(frame.next) then
 			return nil, 'invalid_next'
+		end
+	end
+
+	if t == 'xfer_commit' then
+		if not require_xfer_id(frame) then
+			return nil, 'missing_xfer_id'
+		end
+		if not require_nonneg_number(frame.size) then
+			return nil, 'invalid_xfer_size'
+		end
+		if type(frame.checksum) ~= 'string' or frame.checksum == '' then
+			return nil, 'invalid_xfer_checksum'
+		end
+	end
+
+	if t == 'xfer_done' then
+		if not require_xfer_id(frame) then
+			return nil, 'missing_xfer_id'
+		end
+	end
+
+	if t == 'xfer_abort' then
+		if not require_xfer_id(frame) then
+			return nil, 'missing_xfer_id'
+		end
+		if frame.err ~= nil and type(frame.err) ~= 'string' then
+			return nil, 'invalid_xfer_err'
 		end
 	end
 
@@ -129,10 +193,10 @@ local function validate_rpc(frame)
 end
 
 local function validate_bulk(frame)
-	if type(frame.xfer_id) ~= 'string' or frame.xfer_id == '' then
+	if not require_xfer_id(frame) then
 		return nil, 'missing_xfer_id'
 	end
-	if type(frame.offset) ~= 'number' or frame.offset < 0 then
+	if not require_nonneg_number(frame.offset) then
 		return nil, 'invalid_offset'
 	end
 	if type(frame.data) ~= 'string' then
@@ -165,6 +229,10 @@ end
 
 function M.classify(frame)
 	return frame and FRAME_CLASS[frame.type] or nil
+end
+
+function M.dispatch_lane(frame)
+	return frame and FRAME_LANE[frame.type] or nil
 end
 
 function M.encode_line(frame)

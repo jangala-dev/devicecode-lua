@@ -5,7 +5,7 @@
 -- Responsibilities:
 --   * read framed lines from the transport
 --   * decode and validate protocol frames
---   * classify frames into control / rpc / transfer lanes
+--   * dispatch frames to their in-process owner lanes
 --   * emit rx activity to the session controller
 --
 -- This module does not interpret session state or business policy.
@@ -75,26 +75,19 @@ function M.run(ctx)
 				send_or_fail(status_tx, { kind = 'rx_activity', at = now }, 'status_overflow')
 
 				local item = { msg = msg, at = now }
-				local class = protocol.classify(msg)
+				local lane = protocol.dispatch_lane(msg)
 
-				if class == 'rpc' then
+				if lane == 'rpc' then
 					send_or_fail(rpc_tx, item, 'rpc_in_overflow')
 
-				elseif class == 'bulk' then
+				elseif lane == 'transfer' then
 					send_or_fail(xfer_tx, item, 'xfer_in_overflow')
 
-				elseif class == 'control' then
-					-- Fabric uses a narrower "control" lane than protocol.classify():
-					-- session control frames stay on control_tx, but transfer protocol
-					-- control frames are owned by transfer_mgr and therefore flow on xfer_tx.
-					if msg.type and msg.type:match('^xfer_') then
-						send_or_fail(xfer_tx, item, 'xfer_in_overflow')
-					else
-						send_or_fail(control_tx, item, 'control_in_overflow')
-					end
+				elseif lane == 'session_control' then
+					send_or_fail(control_tx, item, 'control_in_overflow')
 
 				else
-					note_bad('unknown_class', line)
+					note_bad('unknown_lane', line)
 				end
 			end
 		end

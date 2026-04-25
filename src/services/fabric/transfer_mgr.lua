@@ -3,9 +3,9 @@
 -- Per-link transfer manager.
 --
 -- Responsibilities:
---   * own one active outgoing transfer per link
---   * own one active incoming transfer per link
---   * reset both directions on session generation change
+--   * own at most one active transfer per link
+--   * transfer direction is part of the active transfer state
+--   * reset the active transfer on session generation change
 --   * publish retained transfer observability state:
 --       state/fabric/link/<id>/transfer
 --
@@ -76,8 +76,7 @@ end
 --   * transfer_ctl_rx
 --   * xfer_rx
 --   * session / session_seen
---   * outgoing :: active outgoing record | nil
---   * incoming :: active incoming record | nil
+--   * active :: active transfer record | nil
 local function next_transfer_event_op(state)
 	local ops = {
 		ctl = state.transfer_ctl_rx:recv_op(),
@@ -86,11 +85,8 @@ local function next_transfer_event_op(state)
 	}
 
 	local nearest = math.huge
-	if state.outgoing and state.outgoing.deadline < nearest then
-		nearest = state.outgoing.deadline
-	end
-	if state.incoming and state.incoming.deadline < nearest then
-		nearest = state.incoming.deadline
+	if state.active and state.active.deadline < nearest then
+		nearest = state.active.deadline
 	end
 
 	if nearest < math.huge then
@@ -121,8 +117,7 @@ function M.run(ctx)
 		conn:unretain(transfer_topic)
 	end)
 
-	local outgoing = nil
-	local incoming = nil
+	local active = nil
 	local session_seen = session:pulse():version()
 	local last_generation = session:get().generation
 
@@ -131,51 +126,64 @@ function M.run(ctx)
 		xfer_rx = xfer_rx,
 		transfer_ctl_rx = transfer_ctl_rx,
 		session_seen = session_seen,
-		outgoing = outgoing,
-		incoming = incoming,
+		active = active,
 	}
 
-	local function publish_transfer_state(status)
-		conn:retain(transfer_topic, statefmt.link_component('transfer', link_id, status))
+	local function current_transfer_status()
+		if not active then
+			return { state = 'idle' }
+		end
+
+		return {
+			state = active.state,
+			xfer_id = active.xfer_id,
+			direction = active.direction,
+			size = active.size,
+			offset = active.offset,
+			checksum = active.checksum,
+		}
 	end
 
-	publish_transfer_state({ state = 'idle' })
-
-	local function clear_outgoing(reason)
-		if outgoing and outgoing.req then
-			fail_req(outgoing.req, reason or 'aborted')
-		end
-		outgoing = nil
-		state.outgoing = nil
-		publish_transfer_state({ state = 'idle', err = reason })
+	local function publish_current()
+		conn:retain(transfer_topic, statefmt.link_component('transfer', link_id, current_transfer_status()))
 	end
 
-	local function clear_incoming(reason)
-		if incoming and incoming.sink and incoming.sink.abort then
-			incoming.sink:abort()
+	publish_current()
+
+	local function clear_active(reason)
+		if not active then
+			publish_current()
+			return
 		end
-		incoming = nil
-		state.incoming = nil
-		publish_transfer_state({ state = 'idle', err = reason })
+
+		if active.direction == 'out' then
+			fail_req(active.req, reason or 'aborted')
+		elseif active.direction == 'in' then
+			if active.sink and active.sink.abort then
+				active.sink:abort()
+			end
+		end
+
+		active = nil
+		state.active = nil
+		publish_current()
 	end
 
-	local function abort_all(reason)
-		-- Generation changes and fatal protocol errors reset both directions.
-		if outgoing then
-			send_abort(tx_control, outgoing.xfer_id, reason)
-			clear_outgoing(reason)
+	local function abort_active(reason)
+		if not active then
+			return
 		end
-		if incoming then
-			send_abort(tx_control, incoming.xfer_id, reason)
-			clear_incoming(reason)
-		end
+
+		send_abort(tx_control, active.xfer_id, reason)
+		clear_active(reason)
 	end
 
 	------------------------------------------------------------------
 	-- Outgoing
 	------------------------------------------------------------------
 
-	-- outgoing = {
+	-- active (outgoing) = {
+	--   direction = 'out',
 	--   xfer_id = <wire transfer id>,
 	--   req = <local request awaiting completion>,
 	--   source = <blob source>,
@@ -187,13 +195,13 @@ function M.run(ctx)
 	-- }
 	local function begin_outgoing(req)
 		if req:done() then return end
-		if outgoing then
+		if active then
 			fail_req(req, 'busy')
 			return
 		end
 
 		local payload = req.payload or {}
-		local source, err = blob_source.normalise_source(payload.source or payload.data)
+		local source, err = blob_source.normalise_source(payload.source)
 		if not source then
 			fail_req(req, err)
 			return
@@ -205,7 +213,8 @@ function M.run(ctx)
 			meta.receiver = payload.receiver
 		end
 
-		outgoing = {
+		active = {
+			direction = 'out',
 			xfer_id = xfer_id,
 			req = req,
 			source = source,
@@ -215,83 +224,66 @@ function M.run(ctx)
 			state = 'waiting_ready',
 			deadline = runtime.now() + phase_timeout,
 		}
-		state.outgoing = outgoing
+		state.active = active
 
 		send_frame(tx_control, 'control', {
 			type = 'xfer_begin',
 			xfer_id = xfer_id,
-			size = outgoing.size,
-			checksum = outgoing.checksum,
+			size = active.size,
+			checksum = active.checksum,
 			meta = meta,
 		})
 
-		publish_transfer_state({
-			state = outgoing.state,
-			xfer_id = xfer_id,
-			direction = 'out',
-			size = outgoing.size,
-			offset = 0,
-		})
+		publish_current()
 	end
 
 	local function maybe_send_outgoing_chunk(trigger_offset)
-		if not outgoing then return end
-		if outgoing.state ~= 'waiting_ready' and outgoing.state ~= 'sending' then return end
-		if trigger_offset ~= nil and trigger_offset ~= outgoing.offset then return end
+		if not active or active.direction ~= 'out' then return end
+		if active.state ~= 'waiting_ready' and active.state ~= 'sending' then return end
+		if trigger_offset ~= nil and trigger_offset ~= active.offset then return end
 
-		if outgoing.offset >= outgoing.size then
-			outgoing.state = 'committing'
-			outgoing.deadline = runtime.now() + phase_timeout
+		if active.offset >= active.size then
+			active.state = 'committing'
+			active.deadline = runtime.now() + phase_timeout
 
 			send_frame(tx_control, 'control', {
 				type = 'xfer_commit',
-				xfer_id = outgoing.xfer_id,
-				size = outgoing.size,
-				checksum = outgoing.checksum,
+				xfer_id = active.xfer_id,
+				size = active.size,
+				checksum = active.checksum,
 			})
 
-			publish_transfer_state({
-				state = outgoing.state,
-				xfer_id = outgoing.xfer_id,
-				direction = 'out',
-				size = outgoing.size,
-				offset = outgoing.offset,
-			})
+			publish_current()
 			return
 		end
 
-		local raw, err = outgoing.source:read_chunk(outgoing.offset, chunk_size)
+		local raw, err = active.source:read_chunk(active.offset, chunk_size)
 		if raw == nil then
-			clear_outgoing(err or 'source_error')
+			clear_active(err or 'source_error')
 			return
 		end
 
-		local frame, ferr = protocol.make_xfer_chunk(outgoing.xfer_id, outgoing.offset, raw)
+		local frame, ferr = protocol.make_xfer_chunk(active.xfer_id, active.offset, raw)
 		if not frame then
-			clear_outgoing(ferr or 'chunk_encode_failed')
+			clear_active(ferr or 'chunk_encode_failed')
 			return
 		end
 
-		outgoing.state = 'sending'
+		active.state = 'sending'
 		send_frame(tx_bulk, 'bulk', frame)
 
-		outgoing.offset = outgoing.offset + #raw
-		outgoing.deadline = runtime.now() + phase_timeout
+		active.offset = active.offset + #raw
+		active.deadline = runtime.now() + phase_timeout
 
-		publish_transfer_state({
-			state = outgoing.state,
-			xfer_id = outgoing.xfer_id,
-			direction = 'out',
-			size = outgoing.size,
-			offset = outgoing.offset,
-		})
+		publish_current()
 	end
 
 	------------------------------------------------------------------
 	-- Incoming
 	------------------------------------------------------------------
 
-	-- incoming = {
+	-- active (incoming) = {
+	--   direction = 'in',
 	--   xfer_id = <wire transfer id>,
 	--   size = <expected bytes>,
 	--   checksum = <expected hex digest>,
@@ -302,7 +294,7 @@ function M.run(ctx)
 	--   deadline = <phase timeout>,
 	-- }
 	local function handle_incoming_begin(frame)
-		if incoming then
+		if active then
 			send_abort(tx_control, frame.xfer_id, 'busy')
 			return
 		end
@@ -317,7 +309,8 @@ function M.run(ctx)
 			return
 		end
 
-		incoming = {
+		active = {
+			direction = 'in',
 			xfer_id = frame.xfer_id,
 			size = frame.size,
 			checksum = frame.checksum,
@@ -327,109 +320,97 @@ function M.run(ctx)
 			state = 'receiving',
 			deadline = runtime.now() + phase_timeout,
 		}
-		state.incoming = incoming
+		state.active = active
 
 		send_frame(tx_control, 'control', {
 			type = 'xfer_ready',
 			xfer_id = frame.xfer_id,
 		})
 
-		publish_transfer_state({
-			state = incoming.state,
-			xfer_id = frame.xfer_id,
-			direction = 'in',
-			size = frame.size,
-			offset = 0,
-		})
+		publish_current()
 	end
 
 	local function handle_incoming_chunk(frame)
-		if not incoming or frame.xfer_id ~= incoming.xfer_id then return end
+		if not active or active.direction ~= 'in' or frame.xfer_id ~= active.xfer_id then return end
 
-		if frame.offset ~= incoming.offset then
+		if frame.offset ~= active.offset then
 			send_abort(tx_control, frame.xfer_id, 'unexpected_offset')
-			clear_incoming('unexpected_offset')
+			clear_active('unexpected_offset')
 			return
 		end
 
 		local raw, derr = protocol.read_xfer_chunk(frame)
 		if raw == nil then
 			send_abort(tx_control, frame.xfer_id, derr or 'invalid_chunk_encoding')
-			clear_incoming(derr or 'invalid_chunk_encoding')
+			clear_active(derr or 'invalid_chunk_encoding')
 			return
 		end
 
-		local ok, err = incoming.sink:write_chunk(frame.offset, raw)
+		local ok, err = active.sink:write_chunk(frame.offset, raw)
 		if not ok then
 			send_abort(tx_control, frame.xfer_id, err)
-			clear_incoming(err)
+			clear_active(err)
 			return
 		end
 
-		incoming.offset = incoming.offset + #raw
-		incoming.deadline = runtime.now() + phase_timeout
+		active.offset = active.offset + #raw
+		active.deadline = runtime.now() + phase_timeout
 
 		send_frame(tx_control, 'control', {
 			type = 'xfer_need',
 			xfer_id = frame.xfer_id,
-			next = incoming.offset,
+			next = active.offset,
 		})
 
-		publish_transfer_state({
-			state = incoming.state,
-			xfer_id = incoming.xfer_id,
-			direction = 'in',
-			size = incoming.size,
-			offset = incoming.offset,
-		})
+		publish_current()
 	end
 
 	local function handle_incoming_commit(frame)
-		if not incoming or frame.xfer_id ~= incoming.xfer_id then return end
+		if not active or active.direction ~= 'in' or frame.xfer_id ~= active.xfer_id then return end
 
-		if incoming.offset ~= incoming.size then
+		if frame.size ~= active.size or frame.checksum ~= active.checksum then
+			send_abort(tx_control, frame.xfer_id, 'commit_mismatch')
+			clear_active('commit_mismatch')
+			return
+		end
+
+		if active.offset ~= active.size then
 			send_abort(tx_control, frame.xfer_id, 'short_transfer')
-			clear_incoming('short_transfer')
+			clear_active('short_transfer')
 			return
 		end
 
-		if incoming.sink:checksum() ~= incoming.checksum then
+		if active.sink:checksum() ~= active.checksum then
 			send_abort(tx_control, frame.xfer_id, 'checksum_mismatch')
-			clear_incoming('checksum_mismatch')
+			clear_active('checksum_mismatch')
 			return
 		end
 
-		local artefact, cerr = incoming.sink:commit()
+		local artefact, cerr = active.sink:commit()
 		if not artefact then
 			send_abort(tx_control, frame.xfer_id, tostring(cerr or 'commit_failed'))
-			clear_incoming(tostring(cerr or 'commit_failed'))
+			clear_active(tostring(cerr or 'commit_failed'))
 			return
 		end
 
-		local receiver_topic = incoming.meta and incoming.meta.receiver or nil
+		local receiver_topic = active.meta and active.meta.receiver or nil
 		if type(receiver_topic) == 'table' then
-			incoming.state = 'delivering'
-			publish_transfer_state({
-				state = incoming.state,
-				xfer_id = incoming.xfer_id,
-				direction = 'in',
-				size = incoming.size,
-				offset = incoming.offset,
-			})
+			active.state = 'delivering'
+			publish_current()
 
 			local reply, err = conn:call(receiver_topic, {
 				link_id = link_id,
-				xfer_id = incoming.xfer_id,
-				size = incoming.size,
-				checksum = incoming.checksum,
-				meta = incoming.meta,
+				xfer_id = active.xfer_id,
+				size = active.size,
+				checksum = active.checksum,
+				meta = active.meta,
 				artefact = artefact,
 			}, { timeout = phase_timeout })
 
 			if reply == nil then
 				artefact:delete()
 				send_abort(tx_control, frame.xfer_id, tostring(err or 'receiver_failed'))
-				clear_incoming(tostring(err or 'receiver_failed'))
+				clear_active(tostring(err or 'receiver_failed'))
 				return
 			end
 		end
@@ -439,17 +420,10 @@ function M.run(ctx)
 			xfer_id = frame.xfer_id,
 		})
 
-		publish_transfer_state({
-			state = 'done',
-			xfer_id = frame.xfer_id,
-			direction = 'in',
-			size = incoming.size,
-			offset = incoming.offset,
-			checksum = incoming.checksum,
-		})
-
-		incoming = nil
-		state.incoming = nil
+		active.state = 'done'
+		publish_current()
+		active = nil
+		state.active = nil
 	end
 
 	------------------------------------------------------------------
@@ -457,21 +431,26 @@ function M.run(ctx)
 	------------------------------------------------------------------
 
 	local function current_status_snapshot()
-		return {
+		local status = {
 			ok = true,
-			outgoing = outgoing and {
-				xfer_id = outgoing.xfer_id,
-				state = outgoing.state,
-				size = outgoing.size,
-				offset = outgoing.offset,
-			},
-			incoming = incoming and {
-				xfer_id = incoming.xfer_id,
-				state = incoming.state,
-				size = incoming.size,
-				offset = incoming.offset,
-			},
+			active = active and {
+				xfer_id = active.xfer_id,
+				state = active.state,
+				size = active.size,
+				offset = active.offset,
+				direction = active.direction,
+			} or nil,
+			outgoing = nil,
+			incoming = nil,
 		}
+
+		if active and active.direction == 'out' then
+			status.outgoing = status.active
+		elseif active and active.direction == 'in' then
+			status.incoming = status.active
+		end
+
+		return status
 	end
 
 	local function handle_control_request(req)
@@ -485,7 +464,7 @@ function M.run(ctx)
 		elseif op_name == 'status' then
 			reply_req(req, current_status_snapshot())
 		elseif op_name == 'abort' then
-			abort_all(payload.reason or 'aborted')
+			abort_active(payload.reason or 'aborted')
 			reply_req(req, { ok = true })
 		else
 			fail_req(req, 'unsupported_op')
@@ -497,14 +476,14 @@ function M.run(ctx)
 			handle_incoming_begin(frame)
 
 		elseif frame.type == 'xfer_ready' then
-			if outgoing and frame.xfer_id == outgoing.xfer_id then
-				outgoing.state = 'sending'
-				outgoing.deadline = runtime.now() + phase_timeout
+			if active and active.direction == 'out' and frame.xfer_id == active.xfer_id then
+				active.state = 'sending'
+				active.deadline = runtime.now() + phase_timeout
 				maybe_send_outgoing_chunk(0)
 			end
 
 		elseif frame.type == 'xfer_need' then
-			if outgoing and frame.xfer_id == outgoing.xfer_id then
+			if active and active.direction == 'out' and frame.xfer_id == active.xfer_id then
 				maybe_send_outgoing_chunk(frame.next)
 			end
 
@@ -512,31 +491,22 @@ function M.run(ctx)
 			handle_incoming_commit(frame)
 
 		elseif frame.type == 'xfer_done' then
-			if outgoing and frame.xfer_id == outgoing.xfer_id then
-				reply_req(outgoing.req, {
+			if active and active.direction == 'out' and frame.xfer_id == active.xfer_id then
+				reply_req(active.req, {
 					ok = true,
-					xfer_id = outgoing.xfer_id,
-					size = outgoing.size,
-					checksum = outgoing.checksum,
+					xfer_id = active.xfer_id,
+					size = active.size,
+					checksum = active.checksum,
 				})
-				publish_transfer_state({
-					state = 'done',
-					xfer_id = outgoing.xfer_id,
-					direction = 'out',
-					size = outgoing.size,
-					offset = outgoing.offset,
-					checksum = outgoing.checksum,
-				})
-				outgoing = nil
-				state.outgoing = nil
+				active.state = 'done'
+				publish_current()
+				active = nil
+				state.active = nil
 			end
 
 		elseif frame.type == 'xfer_abort' then
-			if outgoing and frame.xfer_id == outgoing.xfer_id then
-				clear_outgoing(frame.err or 'remote_abort')
-			end
-			if incoming and frame.xfer_id == incoming.xfer_id then
-				clear_incoming(frame.err or 'remote_abort')
+			if active and frame.xfer_id == active.xfer_id then
+				clear_active(frame.err or 'remote_abort')
 			end
 
 		elseif frame.type == 'xfer_chunk' then
@@ -545,12 +515,6 @@ function M.run(ctx)
 	end
 
 	while true do
-		local snap = session:get()
-		if snap.generation ~= last_generation then
-			last_generation = snap.generation
-			abort_all('session_reset')
-		end
-
 		state.session_seen = session_seen
 		local which, a, b = perform(next_transfer_event_op(state))
 
@@ -562,16 +526,21 @@ function M.run(ctx)
 
 		elseif which == 'session' then
 			session_seen = a or session_seen
-			local snap2 = b or session:get()
-			if snap2.generation ~= last_generation then
-				last_generation = snap2.generation
-				abort_all('session_reset')
+			local snap = b or session:get()
+			if snap.generation ~= last_generation then
+				last_generation = snap.generation
+				abort_active('session_reset')
 			end
 
 		elseif which == 'timeout' then
 			local now = runtime.now()
-			if outgoing and outgoing.deadline <= now then clear_outgoing('timeout') end
-			if incoming and incoming.deadline <= now then clear_incoming('timeout') end
+			if active and active.deadline <= now then
+				if active.direction == 'out' then
+					clear_active('timeout')
+				else
+					clear_active('timeout')
+				end
+			end
 		end
 	end
 end

@@ -2,13 +2,23 @@ local topicmap = require 'services.fabric.topicmap'
 
 local T = {}
 
-function T.normalise_prefix_rules_accepts_reserved_keys()
+function T.normalise_prefix_rules_accepts_local_and_remote_keys()
 	local rules = topicmap.normalise_prefix_rules({
 		{ ['local'] = { 'a' }, ['remote'] = { 'b' } },
 	}, 'test')
 	assert(#rules == 1)
 	assert(rules[1].local_prefix[1] == 'a')
 	assert(rules[1].remote_prefix[1] == 'b')
+end
+
+function T.normalise_prefix_rules_rejects_legacy_alias_keys()
+	local ok, err = pcall(function()
+		topicmap.normalise_prefix_rules({
+			{ local_prefix = { 'a' }, remote_prefix = { 'b' } },
+		}, 'test')
+	end)
+	assert(ok == false)
+	assert(tostring(err):match('must use "local"'))
 end
 
 function T.map_local_to_remote_replaces_prefix()

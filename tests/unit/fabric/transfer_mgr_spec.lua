@@ -227,7 +227,7 @@ function T.session_generation_change_aborts_outgoing_transfer()
 	end)
 end
 
-function T.only_one_outgoing_transfer_is_admitted_at_a_time()
+function T.only_one_active_transfer_is_admitted_at_a_time()
 	runfibers.run(function(scope)
 		local bus = busmod.new()
 		local env = new_env(bus, 'link-x4')
@@ -270,6 +270,19 @@ function T.only_one_outgoing_transfer_is_admitted_at_a_time()
 		assert(reply2 == nil)
 		assert(tostring(err2):match('busy'))
 
+		env.xfer_tx:send({
+			msg = {
+				type = 'xfer_begin',
+				xfer_id = 'incoming-other',
+				size = 3,
+				checksum = checksum.digest_hex('abc'),
+			}
+		})
+		local abort = recv_mailbox(env.tx_control_rx).frame
+		assert(abort.type == 'xfer_abort')
+		assert(abort.xfer_id == 'incoming-other')
+		assert(abort.err == 'busy')
+
 		env.xfer_tx:send({ msg = { type = 'xfer_ready', xfer_id = begin.xfer_id } })
 		assert(recv_mailbox(env.tx_bulk_rx).frame.type == 'xfer_chunk')
 		env.xfer_tx:send({ msg = { type = 'xfer_need', xfer_id = begin.xfer_id, next = #'first' } })
@@ -279,6 +292,57 @@ function T.only_one_outgoing_transfer_is_admitted_at_a_time()
 		assert(probe.wait_until(function () return reply1 ~= nil end, { timeout = 0.5, interval = 0.01 }))
 		assert(err1 == nil)
 		assert(reply1.ok == true)
+	end)
+end
+
+function T.incoming_commit_must_match_begin_metadata()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local env = new_env(bus, 'link-x5')
+		local raw = 'payload'
+		local digest = checksum.digest_hex(raw)
+
+		local ok, err = scope:spawn(function ()
+			transfer_mgr.run({
+				link_id = 'link-x5',
+				conn = env.conn,
+				session = env.session,
+				xfer_rx = env.xfer_rx,
+				tx_control = env.tx_control_tx,
+				tx_bulk = env.tx_bulk_tx,
+				transfer_ctl_rx = env.transfer_ctl_rx,
+				chunk_size = 32,
+				transfer_phase_timeout_s = 0.5,
+			})
+		end)
+		assert(ok, tostring(err))
+
+		env.xfer_tx:send({
+			msg = {
+				type = 'xfer_begin',
+				xfer_id = 'in-bad-commit',
+				size = #raw,
+				checksum = digest,
+			}
+		})
+		assert(recv_mailbox(env.tx_control_rx).frame.type == 'xfer_ready')
+
+		local chunk_frame = assert(protocol.make_xfer_chunk('in-bad-commit', 0, raw))
+		env.xfer_tx:send({ msg = chunk_frame })
+		assert(recv_mailbox(env.tx_control_rx).frame.type == 'xfer_need')
+
+		env.xfer_tx:send({
+			msg = {
+				type = 'xfer_commit',
+				xfer_id = 'in-bad-commit',
+				size = #raw + 1,
+				checksum = digest,
+			}
+		})
+		local abort = recv_mailbox(env.tx_control_rx).frame
+		assert(abort.type == 'xfer_abort')
+		assert(abort.xfer_id == 'in-bad-commit')
+		assert(abort.err == 'commit_mismatch')
 	end)
 end
 

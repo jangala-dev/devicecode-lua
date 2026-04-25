@@ -6,6 +6,11 @@
 --   * rules are order-sensitive
 --   * exact-topic rules are supported via `topic = {...}`
 --   * broader prefix replacement only applies if no earlier rule matched
+--   * accepted rule keys are:
+--       - local
+--       - remote
+--       - topic
+--       - timeout
 
 local M = {}
 
@@ -47,11 +52,24 @@ local function replace_prefix(topic, from_prefix, to_prefix)
 	return out
 end
 
+local function has_legacy_aliases(rule)
+	return rule.local_prefix ~= nil
+		or rule.from ~= nil
+		or rule.from_prefix ~= nil
+		or rule.remote_prefix ~= nil
+		or rule.to ~= nil
+		or rule.to_prefix ~= nil
+end
+
 local function normalise_rule(rule, kind)
 	assert(type(rule) == 'table', kind .. ' rule must be a table')
 
-	local local_prefix = normalise_topic(rule['local'] or rule.local_prefix or rule.from or rule.from_prefix or {})
-	local remote_prefix = normalise_topic(rule['remote'] or rule.remote_prefix or rule.to or rule.to_prefix or {})
+	if has_legacy_aliases(rule) then
+		error(kind .. ' rule must use "local" and "remote" keys only', 2)
+	end
+
+	local local_prefix = normalise_topic(rule['local'] or {})
+	local remote_prefix = normalise_topic(rule['remote'] or {})
 
 	return {
 		id = rule.id,
@@ -70,8 +88,8 @@ local function match_rule(rule, topic, from_field, to_field)
 			return nil, nil
 		end
 
-		for j = 1, #topic do
-			if topic[j] ~= wanted[j] then
+		for i = 1, #topic do
+			if topic[i] ~= wanted[i] then
 				return nil, nil
 			end
 		end
@@ -94,7 +112,6 @@ local function match_rule_set(rules, topic, from_field, to_field)
 			return mapped, rule
 		end
 	end
-
 	return nil, nil
 end
 
