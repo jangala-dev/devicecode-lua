@@ -7,6 +7,7 @@ local safe        = require 'coxpcall'
 local mailbox     = require 'fibers.mailbox'
 local fibers      = require 'fibers'
 local sleep_mod   = require 'fibers.sleep'
+local update_preflight = require 'tests.support.update_preflight'
 local storagecaps = require 'tests.support.storage_caps'
 
 local session = require 'services.fabric.session'
@@ -14,6 +15,11 @@ local device  = require 'services.device'
 local update  = require 'services.update'
 
 local T = {}
+
+local function install_fake_mcu_preflight()
+	local restore = update_preflight.install_fake_mcu_preflight()
+	fibers.current_scope():finally(restore)
+end
 
 local function make_svc(conn)
 	return {
@@ -91,6 +97,7 @@ end
 
 function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 	runfibers.run(function(scope)
+		install_fake_mcu_preflight()
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))
@@ -315,6 +322,7 @@ end
 
 function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_after_commit()
 	runfibers.run(function(scope)
+		install_fake_mcu_preflight()
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))

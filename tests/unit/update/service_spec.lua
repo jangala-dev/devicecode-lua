@@ -4,11 +4,17 @@ local runfibers   = require 'tests.support.run_fibers'
 local probe       = require 'tests.support.bus_probe'
 local test_diag   = require 'tests.support.test_diag'
 local storagecaps = require 'tests.support.storage_caps'
+local update_preflight = require 'tests.support.update_preflight'
 local update      = require 'services.update'
 local sleep_mod   = require 'fibers.sleep'
 local safe        = require 'coxpcall'
 
 local T = {}
+
+local function install_fake_mcu_preflight()
+  local restore = update_preflight.install_fake_mcu_preflight()
+  fibers.current_scope():finally(restore)
+end
 
 local function bind_reply_loop(scope, ep, handler)
   local ok, err = scope:spawn(function()
@@ -118,6 +124,8 @@ end
 
 function T.update_service_creates_starts_commits_and_reconciles_job_via_device_proxy()
   runfibers.run(function(scope)
+    install_fake_mcu_preflight()
+    install_fake_mcu_preflight()
     local orig_sleep = sleep_mod.sleep
     sleep_mod.sleep = function(dt) return orig_sleep(math.min(dt, 0.01)) end
     fibers.current_scope():finally(function() sleep_mod.sleep = orig_sleep end)
@@ -271,6 +279,8 @@ end
 
 function T.update_service_cancels_staged_job_before_commit()
   runfibers.run(function(scope)
+    install_fake_mcu_preflight()
+    install_fake_mcu_preflight()
     local bus = busmod.new()
     local caller = bus:connect()
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
@@ -312,6 +322,8 @@ end
 
 function T.update_service_applies_per_component_artifact_storage_policy()
   runfibers.run(function(scope)
+    install_fake_mcu_preflight()
+    install_fake_mcu_preflight()
     local bus = busmod.new()
     local caller = bus:connect()
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
@@ -362,6 +374,8 @@ end
 
 function T.update_service_rejects_second_active_job_globally()
   runfibers.run(function(scope)
+    install_fake_mcu_preflight()
+    install_fake_mcu_preflight()
     local orig_sleep = sleep_mod.sleep
     sleep_mod.sleep = function(dt) return orig_sleep(math.min(dt, 0.01)) end
     fibers.current_scope():finally(function() sleep_mod.sleep = orig_sleep end)
@@ -406,6 +420,8 @@ end
 
 function T.update_service_supports_ref_artifacts_and_auto_start()
   runfibers.run(function(scope)
+    install_fake_mcu_preflight()
+    install_fake_mcu_preflight()
     local bus = busmod.new()
     local caller = bus:connect()
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
@@ -452,6 +468,8 @@ end
 
 function T.update_service_marks_bundled_hold_after_manual_mcu_success()
   runfibers.run(function(scope)
+    install_fake_mcu_preflight()
+    install_fake_mcu_preflight()
     local orig_sleep = sleep_mod.sleep
     sleep_mod.sleep = function(dt) return orig_sleep(math.min(dt, 0.01)) end
     fibers.current_scope():finally(function() sleep_mod.sleep = orig_sleep end)

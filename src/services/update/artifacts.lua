@@ -18,6 +18,7 @@ local crypto_provider = require 'shared.crypto.provider'
 local crypto_keyring = require 'shared.crypto.keyring'
 local crypto_verifier = require 'shared.crypto.verifier'
 
+local default_preflighters = {}
 
 local function merge_meta(a, b)
 	local out = {}
@@ -34,7 +35,31 @@ local Artifacts = {}
 Artifacts.__index = Artifacts
 
 function M.new(ctx)
-	return setmetatable({ ctx = ctx }, Artifacts)
+	return setmetatable({ ctx = ctx, preflighters = {} }, Artifacts)
+end
+
+function M.set_default_preflighter(component, fn)
+	if fn == nil then
+		default_preflighters[component] = nil
+	else
+		default_preflighters[component] = assert(type(fn) == 'function' and fn or nil)
+	end
+end
+
+function M.reset_default_preflighters()
+	for k in pairs(default_preflighters) do default_preflighters[k] = nil end
+end
+
+function Artifacts:set_preflighter(component, fn)
+	if fn == nil then
+		self.preflighters[component] = nil
+	else
+		self.preflighters[component] = assert(type(fn) == 'function' and fn or nil)
+	end
+end
+
+function Artifacts:reset_preflighters()
+	for k in pairs(self.preflighters) do self.preflighters[k] = nil end
 end
 
 function Artifacts:policy_for_component(component)
@@ -148,25 +173,45 @@ function Artifacts:import_bundled(component, artifact, metadata)
 	})
 	local ref, desc, err = self:import_path(path, component, meta)
 	if not ref then return nil, nil, err end
-
-	local artifact_obj, oerr = self:open(ref)
-	if not artifact_obj then
-		self:delete(ref)
-		return nil, nil, oerr or 'artifact_open_failed'
-	end
-
-	local inspected, ierr = self:inspect_mcu_artifact(artifact_obj, cfg)
-	if not inspected then
-		self:delete(ref)
-		return nil, nil, ierr or 'mcu_image_invalid'
-	end
-
 	desc = type(desc) == 'table' and desc or {}
-	desc.mcu_image = inspected
 	desc.source = desc.source or 'bundled'
 	desc.bundled = true
 	desc.bundled_policy = type(rec) == 'table' and rec or nil
 	return ref, desc, nil
+end
+
+function Artifacts:preflighter_for(component)
+	local own = self.preflighters and self.preflighters[component] or nil
+	if own ~= nil then return own end
+	local injected = self.ctx and self.ctx.preflighters and self.ctx.preflighters[component] or nil
+	if injected ~= nil then return injected end
+	local def = default_preflighters[component]
+	if def ~= nil then return def end
+	if component == 'mcu' then
+		return function(artifacts, ref, desc, artifact_spec)
+			local cfg = select(1, artifacts:bundled_cfg_for(component, artifact_spec))
+			local artifact_obj, oerr = artifacts:open(ref)
+			if not artifact_obj then
+				return nil, oerr or 'artifact_open_failed'
+			end
+			local inspected, ierr = artifacts:inspect_mcu_artifact(artifact_obj, cfg)
+			if not inspected then
+				return nil, ierr or 'mcu_image_invalid'
+			end
+			desc = type(desc) == 'table' and desc or {}
+			desc.mcu_image = inspected
+			return desc, nil
+		end
+	end
+	return nil
+end
+
+function Artifacts:preflight_artifact(component, ref, desc, artifact_spec)
+	local fn = self:preflighter_for(component)
+	if not fn then
+		return desc, nil
+	end
+	return fn(self, ref, desc, artifact_spec, component)
 end
 
 function Artifacts:resolve_job_artifact(payload)
@@ -174,7 +219,17 @@ function Artifacts:resolve_job_artifact(payload)
 	if type(component) ~= 'string' or component == '' then
 		return nil, nil, 'component_required'
 	end
-	return sources.resolve(self, component, payload and payload.artifact or nil, payload and payload.metadata or nil)
+	local artifact_spec = payload and payload.artifact or nil
+	local ref, desc, err = sources.resolve(self, component, artifact_spec, payload and payload.metadata or nil)
+	if not ref then return nil, nil, err end
+	local preflighted, perr = self:preflight_artifact(component, ref, desc, artifact_spec)
+	if not preflighted then
+		if type(artifact_spec) == 'table' and artifact_spec.kind ~= 'ref' then
+			self:delete(ref)
+		end
+		return nil, nil, perr
+	end
+	return ref, preflighted, nil
 end
 
 return M

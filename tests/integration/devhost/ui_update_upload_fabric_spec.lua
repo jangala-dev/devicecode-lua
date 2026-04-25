@@ -14,10 +14,16 @@ local http_ui      = require 'services.ui.transport.http'
 local duplex       = require 'tests.support.duplex_stream'
 local probe        = require 'tests.support.bus_probe'
 local runfibers    = require 'tests.support.run_fibers'
+local update_preflight = require 'tests.support.update_preflight'
 local storagecaps  = require 'tests.support.storage_caps'
 local ui_fakes     = require 'tests.support.ui_fakes'
 
 local T = {}
+
+local function install_fake_mcu_preflight()
+	local restore = update_preflight.install_fake_mcu_preflight()
+	fibers.current_scope():finally(restore)
+end
 
 local function make_svc(conn)
 	return {
@@ -114,6 +120,8 @@ end
 
 function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric()
 	runfibers.run(function(scope)
+		install_fake_mcu_preflight()
+		install_fake_mcu_preflight()
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))
