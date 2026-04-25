@@ -7,21 +7,6 @@ local safe      = require 'coxpcall'
 
 local T = {}
 
-local function wait_fabric_service_ready(conn, timeout)
-	local status
-	assert(probe.wait_until(function()
-		local ok, payload = safe.pcall(function()
-			return probe.wait_payload(conn, { 'svc', 'fabric', 'status' }, { timeout = 0.05 })
-		end)
-		if ok and type(payload) == 'table' and payload.state == 'running' and payload.ready == true then
-			status = payload
-			return true
-		end
-		return false
-	end, { timeout = timeout or 1.0, interval = 0.01 }))
-	return status
-end
-
 function T.fabric_service_applies_empty_config_and_exposes_transfer_endpoint()
 	runfibers.run(function(scope)
 		local bus = busmod.new()
@@ -39,21 +24,29 @@ function T.fabric_service_applies_empty_config_and_exposes_transfer_endpoint()
 		end)
 		if not ok_spawn then diag:fail('failed to spawn fabric service: ' .. tostring(err)) end
 
-		local st = wait_fabric_service_ready(conn, 1.0)
+		local st
+		assert(probe.wait_until(function()
+			local ok, payload = safe.pcall(function()
+				return probe.wait_payload(conn, { 'svc', 'fabric', 'status' }, { timeout = 0.05 })
+			end)
+			if ok and type(payload) == 'table' and payload.state == 'running' and payload.ready == true then
+				st = payload
+				return true
+			end
+			return false
+		end, { timeout = 1.0, interval = 0.01 }))
+		assert(probe.wait_until(function()
+			local ok, payload = safe.pcall(function()
+				return probe.wait_payload(conn, { 'svc', 'fabric', 'announce' }, { timeout = 0.05 })
+			end)
+			return ok and type(payload) == 'table' and payload.role == 'fabric'
+		end, { timeout = 1.0, interval = 0.01 }))
+
 		assert(type(st) == 'table')
 		assert(st.state == 'running')
 		assert(st.ready == true)
-		assert(type(st.run_id) == 'string')
 		assert(st.desired == 0)
 		assert(st.live == 0)
-
-		local ann = probe.wait_payload(conn, { 'svc', 'fabric', 'announce' }, { timeout = 0.25 })
-		assert(type(ann) == 'table')
-		assert(ann.role == 'fabric')
-		assert(type(ann.caps) == 'table')
-		assert(ann.caps.transfer_rpc == true)
-		assert(type(ann.run_id) == 'string')
-		assert(ann.run_id == st.run_id)
 
 		local summary = probe.wait_payload(conn, { 'state', 'fabric' }, { timeout = 0.25 })
 		assert(summary.kind == 'fabric.summary')

@@ -152,7 +152,7 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
             local ok, payload = safe.pcall(function()
                 return probe.wait_payload(caller, { 'svc', 'update', 'status' }, { timeout = 0.02 })
             end)
-            return ok and type(payload) == 'table' and payload.state == 'running'
+            return ok and type(payload) == 'table' and payload.state == 'running' and payload.ready == true
         end, { timeout = 0.75, interval = 0.01 }))
 
         publish_status()

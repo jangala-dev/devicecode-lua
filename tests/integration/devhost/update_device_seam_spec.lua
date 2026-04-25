@@ -76,7 +76,7 @@ end
 
 local function wait_service_running(conn, name, timeout)
 	return wait_retained_state(conn, { 'svc', name, 'status' }, function(payload)
-		return type(payload) == 'table' and payload.state == 'running'
+		return type(payload) == 'table' and payload.state == 'running' and payload.ready == true
 	end, timeout or 1.5)
 end
 

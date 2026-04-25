@@ -75,17 +75,40 @@ local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
 end
 
 local function wait_retained_state(conn, topic, pred, timeout)
-    return probe.wait_until(function()
-        local ok, payload = safe.pcall(function()
-            return probe.wait_payload(conn, topic, { timeout = 0.02 })
-        end)
-        return ok and pred(payload)
-    end, { timeout = timeout or 1.0, interval = 0.01 })
+	timeout = timeout or 1.0
+	local watch = conn:watch_retained(topic, {
+		replay = true,
+		queue_len = 16,
+		full = 'drop_oldest',
+	})
+	local deadline = fibers.now() + timeout
+	while fibers.now() < deadline do
+		local remaining = deadline - fibers.now()
+		local which, a, b = fibers.perform(fibers.named_choice({
+			ev = watch:recv_op(),
+			timeout = sleep_mod.sleep_op(remaining):wrap(function() return true end),
+		}))
+		if which == 'timeout' then
+			pcall(function() watch:unwatch() end)
+			return false
+		end
+		local ev, err = a, b
+		if not ev then
+			pcall(function() watch:unwatch() end)
+			return false
+		end
+		if ev.op == 'retain' and pred(ev.payload) then
+			pcall(function() watch:unwatch() end)
+			return true
+		end
+	end
+	pcall(function() watch:unwatch() end)
+	return false
 end
 
 local function wait_service_running(conn, name, timeout)
     return wait_retained_state(conn, { 'svc', name, 'status' }, function(payload)
-        return type(payload) == 'table' and payload.state == 'running'
+        return type(payload) == 'table' and payload.state == 'running' and payload.ready == true
     end, timeout or 1.5)
 end
 
@@ -405,8 +428,10 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 				updater = { state = 'running' },
 				health = { state = 'ok' },
 			}
-			remote_member_conn:retain({ 'member', 'mcu', 'software' }, st.software)
+			-- Publish updater before software so failure/settled state is not observed
+			-- behind a newer software fact during split-fact transitions.
 			remote_member_conn:retain({ 'member', 'mcu', 'updater' }, st.updater)
+			remote_member_conn:retain({ 'member', 'mcu', 'software' }, st.software)
 			remote_member_conn:retain({ 'member', 'mcu', 'health' }, st.health or { state = 'ok' })
 		end
 
@@ -517,14 +542,11 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		end, 0.75))
 		assert(assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })).ok == true)
 
-		assert(probe.wait_until(function()
-			local ok, payload = safe.pcall(function()
-				return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
-			end)
-			return ok and type(payload) == 'table' and type(payload.job) == 'table'
+		assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+			return type(payload) == 'table' and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'failed'
 				and tostring(payload.job.lifecycle.error):match('apply_failed') ~= nil
-		end, { timeout = 2.5, interval = 0.01 }))
+		end, 2.5))
 	end, { timeout = 4.0 })
 end
 

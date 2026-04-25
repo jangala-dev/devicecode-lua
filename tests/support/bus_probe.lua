@@ -59,6 +59,46 @@ function M.wait_payload(conn, topic, opts)
 	return msg.payload, msg
 end
 
+function M.wait_retained_message(conn, topic, opts)
+	opts = opts or {}
+	local timeout = opts.timeout or 1.0
+	local watch = conn:watch_retained(topic, {
+		replay = true,
+		queue_len = opts.queue_len or 8,
+		full = opts.full or 'drop_oldest',
+	})
+
+	local pred = opts.predicate
+	local deadline = fibers.now() + timeout
+	while fibers.now() < deadline do
+		local remaining = deadline - fibers.now()
+		local which, a, b = fibers.perform(op.named_choice({
+			ev = watch:recv_op(),
+			timeout = sleep.sleep_op(remaining):wrap(function() return true end),
+		}))
+		if which == 'timeout' then
+			pcall(function() watch:unwatch() end)
+			fail(('timed out waiting for retained topic %s'):format(tostring(topic[1] or '?')))
+		end
+		local ev, err = a, b
+		if not ev then
+			pcall(function() watch:unwatch() end)
+			fail('retained watch ended: ' .. tostring(err))
+		end
+		if ev.op == 'retain' and (pred == nil or pred(ev.payload, ev)) then
+			pcall(function() watch:unwatch() end)
+			return ev
+		end
+	end
+	pcall(function() watch:unwatch() end)
+	fail(('timed out waiting for retained topic %s'):format(tostring(topic[1] or '?')))
+end
+
+function M.wait_retained_payload(conn, topic, opts)
+	local ev = M.wait_retained_message(conn, topic, opts)
+	return ev.payload, ev
+end
+
 function M.collect_messages(conn, topic, count, opts)
 	opts = opts or {}
 	local timeout = opts.timeout or 1.0

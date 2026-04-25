@@ -198,7 +198,12 @@ function M.new(conn, opts)
 	end
 
 	function svc:set_ready(ready, extra)
-		local state = self._lifecycle_state or 'running'
+		local state = self._lifecycle_state
+		if ready and (state == nil or state == 'starting') then
+			state = 'running'
+		elseif state == nil then
+			state = 'running'
+		end
 		local payload = merge_payload(self._lifecycle_extra or {}, extra)
 		payload.ready = not not ready
 		return self:lifecycle(state, payload)

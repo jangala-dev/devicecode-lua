@@ -49,9 +49,15 @@ end
 
 local function publish_summary(conn, svc, state)
   local ts = svc:now()
-  conn:retain(projection.summary_topic(), projection.summary_payload(state, ts))
+  local summary = projection.summary_payload(state, ts)
+  conn:retain(projection.summary_topic(), summary)
   conn:retain(projection.self_topic(), projection.self_payload(state, ts))
   model.set_summary_clean(state)
+  svc:set_ready(true, {
+    components_total = summary.counts and summary.counts.total or 0,
+    components_available = summary.counts and summary.counts.available or 0,
+    components_degraded = summary.counts and summary.counts.degraded or 0,
+  })
 end
 
 local function publish_dirty(conn, svc, state)
@@ -114,7 +120,7 @@ end
 
 local function handle_cfg_event(service_scope, conn, svc, state, changed, obs_tx, observer_state, ev, err)
   if not ev then
-    svc:status('failed', { reason = tostring(err or 'cfg_watch_closed') })
+    svc:failed(tostring(err or 'cfg_watch_closed'))
     error('device cfg watch closed: ' .. tostring(err), 0)
   end
   if ev.op == 'retain' then
@@ -304,7 +310,17 @@ function M.start(conn, opts)
   local service_scope = assert(fibers.current_scope())
   local svc = base.new(conn, { name = opts.name or 'device', env = opts.env })
 
-  svc:status('starting')
+  svc:announce({
+    role = 'device',
+    caps = {
+      self = true,
+      component_list = true,
+      component_get = true,
+      component_do = true,
+    },
+  })
+
+  svc:starting({ components_total = 0, components_available = 0, components_degraded = 0 })
   svc:spawn_heartbeat((opts.heartbeat_s or 30.0), 'tick')
 
   local state = model.new_state(SCHEMA)
@@ -332,7 +348,12 @@ function M.start(conn, opts)
   }
 
   apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_state, nil)
-  svc:status('running')
+  svc:running({
+    components_total = 0,
+    components_available = 0,
+    components_degraded = 0,
+  })
+  publish_dirty(conn, svc, state)
 
   fibers.current_scope():finally(function()
     close_observers(observer_state)

@@ -105,17 +105,40 @@ local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
 end
 
 local function wait_retained_state(conn, topic, pred, timeout)
-	return probe.wait_until(function()
-		local ok, payload = safe.pcall(function()
-			return probe.wait_payload(conn, topic, { timeout = 0.02 })
-		end)
-		return ok and pred(payload)
-	end, { timeout = timeout or 1.0, interval = 0.01 })
+	timeout = timeout or 1.0
+	local watch = conn:watch_retained(topic, {
+		replay = true,
+		queue_len = 16,
+		full = 'drop_oldest',
+	})
+	local deadline = fibers.now() + timeout
+	while fibers.now() < deadline do
+		local remaining = deadline - fibers.now()
+		local which, a, b = fibers.perform(fibers.named_choice({
+			ev = watch:recv_op(),
+			timeout = sleep_mod.sleep_op(remaining):wrap(function() return true end),
+		}))
+		if which == 'timeout' then
+			pcall(function() watch:unwatch() end)
+			return false
+		end
+		local ev, err = a, b
+		if not ev then
+			pcall(function() watch:unwatch() end)
+			return false
+		end
+		if ev.op == 'retain' and pred(ev.payload) then
+			pcall(function() watch:unwatch() end)
+			return true
+		end
+	end
+	pcall(function() watch:unwatch() end)
+	return false
 end
 
 local function wait_service_running(conn, name, timeout)
 	return wait_retained_state(conn, { 'svc', name, 'status' }, function(payload)
-		return type(payload) == 'table' and payload.state == 'running'
+		return type(payload) == 'table' and payload.state == 'running' and payload.ready == true
 	end, timeout or 1.5)
 end
 
@@ -247,14 +270,14 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status()
+			remote_member_conn:retain({ 'member', 'mcu', 'updater' }, {
+				state = 'running',
+			})
 			remote_member_conn:retain({ 'member', 'mcu', 'software' }, {
 				version = versions.mcu,
 				image_id = image_id.mcu,
 				payload_sha256 = versions.mcu == 'mcu-v1' and string.rep('b', 64) or string.rep('0', 64),
 				boot_id = boot_id.mcu,
-			})
-			remote_member_conn:retain({ 'member', 'mcu', 'updater' }, {
-				state = 'running',
 			})
 			remote_member_conn:retain({ 'member', 'mcu', 'health' }, {
 				state = 'ok',
@@ -367,6 +390,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		assert(created.ok == true)
 		local job = created.job
 		assert(type(job.artifact.ref) == 'string')
+		local released_ref = job.artifact.ref
 
 		local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
 		assert(serr == nil)
@@ -376,21 +400,20 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 			return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
 				and payload.job.artifact.ref == nil and payload.job.artifact.released_at ~= nil
 		end, 0.75))
-		assert(next(artifacts.artifacts) == nil)
+		assert(probe.wait_until(function()
+			return artifacts.artifacts[released_ref] == nil
+		end, { timeout = 0.25, interval = 0.01 }))
 		assert(received_blob == dcmcu_bytes)
 
 		local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
 		assert(perr == nil)
 		assert(committed.ok == true)
 
-		assert(probe.wait_until(function()
-			local ok, payload = safe.pcall(function()
-				return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
-			end)
-			return ok and type(payload) == 'table'
+		assert(wait_job(caller, job.job_id, function(payload)
+			return type(payload) == 'table'
 				and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'succeeded'
-		end, { timeout = 2.5, interval = 0.01 }))
+		end, 2.5))
 
 		local final, ferr = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
 		assert(ferr == nil)

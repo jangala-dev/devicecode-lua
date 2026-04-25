@@ -98,7 +98,7 @@ end
 
 local function wait_service_running(conn, topic)
     return wait_retained_state(conn, topic, function(payload)
-        return type(payload) == 'table' and payload.state == 'running'
+        return type(payload) == 'table' and payload.state == 'running' and payload.ready == true
     end, 0.75)
 end
 

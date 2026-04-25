@@ -34,13 +34,14 @@ function T.services_snapshot_merges_announce_and_status_by_name()
 	local model = fake_model({
 		{ topic = { 'svc', 'alpha', 'announce' }, payload = { role = 'a' } },
 		{ topic = { 'svc', 'beta', 'announce' }, payload = { role = 'b' } },
-		{ topic = { 'svc', 'alpha', 'status' }, payload = { state = 'running' } },
+		{ topic = { 'svc', 'alpha', 'status' }, payload = { state = 'running', ready = true, run_id = 'alpha-run-1' } },
 	})
 	local out, err = queries.services_snapshot(model)
 	assert(err == nil)
 	assert(out.announce.alpha.role == 'a')
 	assert(out.announce.beta.role == 'b')
 	assert(out.status.alpha.state == 'running')
+	assert(out.status.alpha.ready == true)
 end
 
 function T.fabric_status_and_link_status_return_aggregated_view()

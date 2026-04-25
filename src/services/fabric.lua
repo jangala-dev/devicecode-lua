@@ -109,17 +109,6 @@ local function count_keys(t)
 	return n
 end
 
-local function default_announce()
-	return {
-		role = 'fabric',
-		caps = {
-			transfer_rpc = true,
-			link_summary = true,
-			link_restart = true,
-		},
-	}
-end
-
 ----------------------------------------------------------------------
 -- Aggregate publication
 ----------------------------------------------------------------------
@@ -150,11 +139,7 @@ local function publish_summary(conn, svc, state)
 
 	local payload = statefmt.summary(status, links, { ts = svc:now() })
 
-	if state.service_ready then
-		svc:set_ready(true, status)
-	else
-		svc:running(status)
-	end
+	svc:set_ready(true, status)
 	svc:obs_state('summary', payload)
 	conn:retain(FABRIC_STATE_TOPIC, payload)
 end
@@ -361,15 +346,19 @@ function M.start(conn, opts)
 		conn:unretain(FABRIC_STATE_TOPIC)
 	end)
 
+	svc:announce({
+		role = 'fabric',
+		caps = { transfer = true, summary = true },
+		state_topic = FABRIC_STATE_TOPIC,
+	})
+
 	local report_tx, report_rx = new_mailbox(64)
 	local state = {
 		desired = {},
 		links = {},
 		restart_at = {},
-		service_ready = false,
 	}
 
-	svc:announce(default_announce())
 	svc:starting({ desired = 0, live = 0 })
 	svc:obs_log('info', { what = 'fabric_start' })
 
@@ -389,10 +378,7 @@ function M.start(conn, opts)
 		if which == 'cfg' then
 			local ev, err = a, b
 			if not ev then
-				svc:failed(tostring(err or 'cfg_watch_closed'), {
-					desired = count_keys(state.desired),
-					live = count_keys(state.links),
-				})
+				svc:failed(tostring(err or 'cfg_watch_closed'))
 				error('fabric config watch closed: ' .. tostring(err), 0)
 			end
 
@@ -401,17 +387,13 @@ function M.start(conn, opts)
 			elseif ev.op == 'unretain' then
 				reconcile(state, svc, conn, report_tx, { links = {} })
 			elseif ev.op == 'replay_done' then
-				state.service_ready = true
-				publish_summary(conn, svc, state)
+				-- nothing further to do
 			end
 
 		elseif which == 'transfer' then
 			local req, err = a, b
 			if not req then
-				svc:failed(tostring(err or 'transfer_ep_closed'), {
-					desired = count_keys(state.desired),
-					live = count_keys(state.links),
-				})
+				svc:failed(tostring(err or 'transfer_ep_closed'))
 				error('fabric transfer endpoint closed: ' .. tostring(err), 0)
 			end
 			dispatch_transfer_request(state, req)

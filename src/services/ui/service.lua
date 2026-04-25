@@ -123,9 +123,21 @@ function M.start(conn, opts)
 		}
 		for k, v in pairs(extra or {}) do
 			payload[k] = v
+			status[k] = v
 		end
 
-		svc:status(aggregate.status, status)
+		if aggregate.status == 'starting' then
+			svc:starting(status)
+		elseif aggregate.status == 'running' then
+			svc:set_ready(true, status)
+		elseif aggregate.status == 'degraded' then
+			svc:degraded(status)
+		elseif aggregate.status == 'failed' then
+			svc:failed(status.reason or 'failed', status)
+		else
+			svc:status(aggregate.status, status)
+		end
+
 		conn:retain({ 'state', 'ui', 'main' }, payload)
 	end
 
@@ -289,11 +301,10 @@ function M.start(conn, opts)
 			model:close('ui service stopping')
 		end
 		conn:unretain({ 'state', 'ui', 'main' })
-		conn:unretain({ 'svc', svc.name, 'announce' })
 	end)
 
 	aggregate.status = 'starting'
-	conn:retain({ 'svc', svc.name, 'announce' }, default_announce(svc))
+	svc:announce(default_announce(svc))
 	publish_main_state()
 
 	local ok_ready, ready_err = model:await_ready(model_ready_timeout_s)
@@ -303,9 +314,7 @@ function M.start(conn, opts)
 		error('ui: failed to bootstrap retained model: ' .. tostring(errors.message(ready_err)), 0)
 	end
 
-	aggregate.status = 'running'
 	recompute_aggregate()
-	publish_main_state()
 
 	local ok_http, err_http = fibers.spawn(function()
 		run_http(svc, app, {
@@ -331,6 +340,16 @@ function M.start(conn, opts)
 		publish_main_state({ reason = tostring(err_http or 'failed to start http transport') })
 		error(err_http or 'failed to start http transport', 0)
 	end
+
+	aggregate.status = 'running'
+	recompute_aggregate()
+	svc:running({
+		sessions = aggregate.sessions,
+		clients = aggregate.clients,
+		model_ready = aggregate.model_ready,
+		model_seq = aggregate.model_seq,
+	})
+	publish_main_state()
 
 	local last_local_ver = shell_pulse:version()
 	local last_model_seq = model:seq()

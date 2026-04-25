@@ -27,7 +27,7 @@ function T.model_bootstraps_from_retained_state_and_replays_watchers()
 		local bus = busmod.new()
 		local seed = bus:connect()
 		seed:retain({ 'cfg', 'net' }, { rev = 1, data = { foo = 'bar' } })
-		seed:retain({ 'svc', 'alpha', 'status' }, { state = 'running' })
+		seed:retain({ 'svc', 'alpha', 'status' }, { state = 'running', ready = true, run_id = 'alpha-run-1' })
 
 		local model = model_mod.start(bus:connect(), {
 			queue_len = 32,
@@ -50,6 +50,7 @@ function T.model_bootstraps_from_retained_state_and_replays_watchers()
 		assert(serr == nil)
 		assert(#snap.entries == 1)
 		assert(snap.entries[1].payload.state == 'running')
+		assert(snap.entries[1].payload.ready == true)
 
 		local watch, werr = model:open_watch({ 'cfg', '#' }, { queue_len = 16 })
 		assert(watch ~= nil, tostring(werr))

@@ -29,7 +29,7 @@ function M.seed_ui_state(conn)
 		data = { schema = 'devicecode.net/1', answer = 42 },
 	})
 	conn:retain({ 'svc', 'alpha', 'announce' }, { role = 'alpha' })
-	conn:retain({ 'svc', 'alpha', 'status' }, { state = 'running' })
+	conn:retain({ 'svc', 'alpha', 'status' }, { state = 'running', ready = true, run_id = 'alpha-run-1' })
 	conn:retain({ 'state', 'fabric' }, {
 		kind = 'fabric.summary',
 		component = 'summary',

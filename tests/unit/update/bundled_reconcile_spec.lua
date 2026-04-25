@@ -157,7 +157,7 @@ local function wait_service_running(conn)
     local okp, payload = safe.pcall(function()
       return probe.wait_payload(conn, { 'svc', 'update', 'status' }, { timeout = 0.02 })
     end)
-    return okp and type(payload) == 'table' and payload.state == 'running'
+    return okp and type(payload) == 'table' and payload.state == 'running' and payload.ready == true
   end, { timeout = 0.75, interval = 0.01 }))
 end
 

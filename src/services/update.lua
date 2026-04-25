@@ -129,12 +129,23 @@ local function flush_publications(ctx)
     end
   end
 
+  local summary = nil
   if ctx.state.summary_dirty then
+    summary = ctx.projection.summary_payload(ctx.state)
     ctx.conn:retain(
       ctx.projection.summary_topic(),
-      ctx.projection.summary_payload(ctx.state)
+      summary
     )
     ctx.model.set_summary_clean(ctx.state)
+  end
+
+  if ctx.state.cfg_bootstrapped and (summary ~= nil or not ctx.state.ready_published) then
+    summary = summary or ctx.projection.summary_payload(ctx.state)
+    ctx.svc:set_ready(true, {
+      jobs_total = summary.counts and summary.counts.total or 0,
+      jobs_active = summary.counts and summary.counts.active or 0,
+    })
+    ctx.state.ready_published = true
   end
 end
 
@@ -169,18 +180,29 @@ function M.start(conn, opts)
   local svc = base.new(conn, { name = opts.name or 'update', env = opts.env })
   local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
 
+  svc:announce({
+    role = 'update',
+    caps = {
+      create = true,
+      job_do = true,
+      get = true,
+      list = true,
+      summary = true,
+    },
+  })
+
   svc:spawn_heartbeat(heartbeat_s, 'tick')
-  svc:status('starting')
+  svc:starting({ jobs_total = 0, jobs_active = 0 })
 
   local store_cap, serr = discover_cap(conn, 'control_store', 'update', 30.0)
   if not store_cap then
-    svc:status('failed', { reason = tostring(serr or 'control_store capability not found') })
+    svc:failed(tostring(serr or 'control_store capability not found'))
     error('update: failed to discover control_store/update capability: ' .. tostring(serr), 0)
   end
 
   local artifact_cap, aerr = discover_cap(conn, 'artifact_store', 'main', 30.0)
   if not artifact_cap then
-    svc:status('failed', { reason = tostring(aerr or 'artifact_store capability not found') })
+    svc:failed(tostring(aerr or 'artifact_store capability not found'))
     error('update: failed to discover artifact_store/main capability: ' .. tostring(aerr), 0)
   end
 
@@ -195,11 +217,13 @@ function M.start(conn, opts)
 
   local loaded, lerr = repo:load_all()
   if not loaded then
-    svc:status('failed', { reason = tostring(lerr) })
+    svc:failed(tostring(lerr))
     error('update: failed to load job store: ' .. tostring(lerr), 0)
   end
 
   local state = model.new_state(cfg)
+  state.cfg_bootstrapped = false
+  state.ready_published = false
   model.load_store(state, loaded)
 
   local changed = pulse.scoped({ close_reason = 'update service stopping' })
@@ -458,9 +482,13 @@ function M.start(conn, opts)
   rebuild_component_obs()
   model.adopt_persisted_jobs(state, now(), service_run_id)
   model.mark_all_jobs_dirty(state)
+  local summary0 = projection.summary_payload(state)
+  svc:running({
+    jobs_total = summary0.counts and summary0.counts.total or 0,
+    jobs_active = summary0.counts and summary0.counts.active or 0,
+  })
   ctx.flush_publications()
   changed:signal()
-  svc:status('running')
 
   local seen = changed:version()
 
@@ -489,53 +517,58 @@ function M.start(conn, opts)
     elseif which == 'cfg' then
       local ev = req
       if not ev then
-        svc:status('failed', { reason = tostring(err or 'cfg_watch_closed') })
+        svc:failed(tostring(err or 'cfg_watch_closed'))
         error('update cfg watch closed: ' .. tostring(err), 0)
       end
 
-      local old_ns = state.cfg.jobs_namespace
+      if ev.op == 'replay_done' then
+        state.cfg_bootstrapped = true
+        changed:signal()
+      else
+        local old_ns = state.cfg.jobs_namespace
 
-      if ev.op == 'retain' then
-        state.cfg = model.merge_cfg(ev.payload, SCHEMA)
-      elseif ev.op == 'unretain' then
-        state.cfg = model.default_cfg(SCHEMA)
-      end
+        if ev.op == 'retain' then
+          state.cfg = model.merge_cfg(ev.payload, SCHEMA)
+        elseif ev.op == 'unretain' then
+          state.cfg = model.default_cfg(SCHEMA)
+        end
 
-      rebuild_backends()
-      rebuild_component_obs()
+        rebuild_backends()
+        rebuild_component_obs()
 
-      local new_ns = state.cfg.jobs_namespace
-      if new_ns ~= old_ns then
-        if state.active_job or state.locks.global ~= nil then
-          svc:obs_log('warn', {
-            what = 'jobs_namespace_change_ignored_while_active',
-            old = tostring(old_ns),
-            new = tostring(new_ns),
-          })
-          state.cfg.jobs_namespace = old_ns
-        else
-          local new_repo = job_store.open(store_cap, { namespace = new_ns })
-          local ok, aerr = adopt_repo(new_repo)
-          if ok then
-            model.adopt_persisted_jobs(state, now(), service_run_id)
-          else
-            state.cfg.jobs_namespace = old_ns
+        local new_ns = state.cfg.jobs_namespace
+        if new_ns ~= old_ns then
+          if state.active_job or state.locks.global ~= nil then
             svc:obs_log('warn', {
-              what = 'repo_adopt_failed',
-              err = tostring(aerr),
+              what = 'jobs_namespace_change_ignored_while_active',
+              old = tostring(old_ns),
+              new = tostring(new_ns),
             })
+            state.cfg.jobs_namespace = old_ns
+          else
+            local new_repo = job_store.open(store_cap, { namespace = new_ns })
+            local ok, aerr = adopt_repo(new_repo)
+            if ok then
+              model.adopt_persisted_jobs(state, now(), service_run_id)
+            else
+              state.cfg.jobs_namespace = old_ns
+              svc:obs_log('warn', {
+                what = 'repo_adopt_failed',
+                err = tostring(aerr),
+              })
+            end
           end
         end
-      end
 
-      bundled_store = bundled_state_mod.open(store_cap, { namespace = state.cfg.bundled and state.cfg.bundled.namespace })
-      bundled = bundled_reconcile_mod.new(ctx, commands, bundled_store)
-      ctx.bundled = bundled
-      ctx.on_job_succeeded = function(job, result)
-        bundled:mark_job_success(job, result)
-      end
+        bundled_store = bundled_state_mod.open(store_cap, { namespace = state.cfg.bundled and state.cfg.bundled.namespace })
+        bundled = bundled_reconcile_mod.new(ctx, commands, bundled_store)
+        ctx.bundled = bundled
+        ctx.on_job_succeeded = function(job, result)
+          bundled:mark_job_success(job, result)
+        end
 
-      changed:signal()
+        changed:signal()
+      end
 
     elseif which == 'create' then
       if not req then
