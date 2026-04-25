@@ -166,6 +166,55 @@ function T.imported_pub_retain_and_unretain_are_applied_with_fabric_origin()
 	end)
 end
 
+function T.session_generation_change_unretains_imported_retained_facts()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local env = new_bridge_env(bus, { link_id = 'link-b2' })
+		local observer = bus:connect()
+		local rw = observer:watch_retained({ 'seen', '#' }, { replay = false, queue_len = 8 })
+
+		env.session:update(function (s)
+			s.peer_sid = 'peer-b2'
+			s.peer_node = 'peer-node'
+			s.established = true
+			s.ready = true
+			s.state = 'ready'
+		end, { bump_pulse = true })
+
+		local ok, err = scope:spawn(function ()
+			rpc_bridge.run({
+				link_id = 'link-b2',
+				svc = new_stub_svc(),
+				conn = env.peer_conn,
+				state_conn = env.state_conn,
+				session = env.session,
+				rpc_rx = env.rpc_rx,
+				tx_rpc = env.tx_rpc_tx,
+				status_tx = env.status_tx,
+				helper_done_rx = env.helper_done_rx,
+				helper_done_tx = env.helper_done_tx,
+				import_rules = {
+					{ ['local'] = { 'seen' }, ['remote'] = { 'remote' } },
+				},
+			})
+		end)
+		assert(ok, tostring(err))
+
+		env.rpc_tx:send({ msg = { type = 'pub', topic = { 'remote', 'cfg' }, payload = { v = 1 }, retain = true } })
+		local ev1 = assert(select(1, rw:recv()))
+		assert(ev1.op == 'retain')
+		assert(ev1.topic[1] == 'seen' and ev1.topic[2] == 'cfg')
+
+		env.session:update(function (s)
+			s.generation = s.generation + 1
+		end, { bump_pulse = true })
+
+		local ev2 = assert(select(1, rw:recv()))
+		assert(ev2.op == 'unretain')
+		assert(ev2.topic[1] == 'seen' and ev2.topic[2] == 'cfg')
+	end)
+end
+
 function T.outbound_local_call_times_out_when_remote_reply_does_not_arrive()
 	runfibers.run(function(scope)
 		local bus = busmod.new()

@@ -197,6 +197,11 @@ function M.run(ctx)
 	-- This is only the bridge's replay cache. It mirrors what has been exported
 	-- for retained replay after a session replacement or re-establishment.
 	local retained_cache = {}
+	-- imported_retained[local_topic_key] = local_topic
+	--
+	-- Tracks currently imported retained facts for this link so they can be
+	-- invalidated when the remote session generation changes.
+	local imported_retained = {}
 	local replay_pending = 0
 	for i = 1, #export_retained_rules do
 		retained_watches[i] = conn:watch_retained(
@@ -308,6 +313,13 @@ function M.run(ctx)
 		end
 	end
 
+	local function invalidate_imported_retained()
+		for key, local_topic in pairs(imported_retained) do
+			conn:unretain(local_topic)
+			imported_retained[key] = nil
+		end
+	end
+
 	local function on_session_change(snap)
 		local session_replaced = (snap.generation ~= last_generation)
 		local session_established = snap.established and (not last_established or snap.peer_sid ~= last_peer_sid)
@@ -315,6 +327,7 @@ function M.run(ctx)
 		if session_replaced then
 			last_generation = snap.generation
 			fail_pending(pending, 'session_reset')
+			invalidate_imported_retained()
 		end
 
 		if session_replaced or session_established then
@@ -390,8 +403,10 @@ function M.run(ctx)
 			return
 		end
 
+		local local_key = topic_key(local_topic)
 		if msg.retain then
 			conn:retain(local_topic, msg.payload)
+			imported_retained[local_key] = local_topic
 		else
 			conn:publish(local_topic, msg.payload)
 		end
@@ -401,6 +416,7 @@ function M.run(ctx)
 		local local_topic = select(1, topicmap.map_remote_to_local(import_rules, msg.topic))
 		if not local_topic then return end
 		conn:unretain(local_topic)
+		imported_retained[topic_key(local_topic)] = nil
 	end
 
 	local function handle_inbound_reply(msg)
