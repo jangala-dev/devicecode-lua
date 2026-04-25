@@ -1,6 +1,6 @@
--- services/fabric/transport_uart.lua
+-- services/fabric/transport_stream.lua
 --
--- UART-backed framed transport adapter.
+-- Stream-backed framed transport adapter.
 --
 -- Responsibilities:
 --   * normalise the current HAL UART capability contract into a transport with:

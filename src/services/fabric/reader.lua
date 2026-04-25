@@ -75,12 +75,24 @@ function M.run(ctx)
 				send_or_fail(status_tx, { kind = 'rx_activity', at = now }, 'status_overflow')
 
 				local item = { msg = msg, at = now }
-				if msg.type == 'hello' or msg.type == 'hello_ack' or msg.type == 'ping' or msg.type == 'pong' then
-					send_or_fail(control_tx, item, 'control_in_overflow')
-				elseif msg.type == 'pub' or msg.type == 'unretain' or msg.type == 'call' or msg.type == 'reply' then
+				local class = protocol.classify(msg)
+
+				if class == 'rpc' then
 					send_or_fail(rpc_tx, item, 'rpc_in_overflow')
-				elseif msg.type and msg.type:match('^xfer_') then
+
+				elseif class == 'bulk' then
 					send_or_fail(xfer_tx, item, 'xfer_in_overflow')
+
+				elseif class == 'control' then
+					-- Fabric uses a narrower "control" lane than protocol.classify():
+					-- session control frames stay on control_tx, but transfer protocol
+					-- control frames are owned by transfer_mgr and therefore flow on xfer_tx.
+					if msg.type and msg.type:match('^xfer_') then
+						send_or_fail(xfer_tx, item, 'xfer_in_overflow')
+					else
+						send_or_fail(control_tx, item, 'control_in_overflow')
+					end
+
 				else
 					note_bad('unknown_class', line)
 				end

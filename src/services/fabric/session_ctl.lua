@@ -11,6 +11,11 @@
 --
 -- Important invariant:
 --   ready == (established and rpc_ready)
+--
+-- Exported session state is derived:
+--   * down          -> "down"
+--   * ready         -> "ready"
+--   * otherwise     -> "establishing"
 
 local fibers    = require 'fibers'
 local pulse_mod = require 'fibers.pulse'
@@ -26,9 +31,19 @@ local named_choice = fibers.named_choice
 
 local M = {}
 
+local function derived_state(s)
+	if s.down then
+		return 'down'
+	end
+	if s.ready then
+		return 'ready'
+	end
+	return 'establishing'
+end
+
 local function clone_snapshot(s)
 	return {
-		state = s.state,
+		down = s.down,
 		local_sid = s.local_sid,
 		peer_sid = s.peer_sid,
 		peer_node = s.peer_node,
@@ -41,9 +56,15 @@ local function clone_snapshot(s)
 	}
 end
 
+local function export_snapshot(s)
+	local out = clone_snapshot(s)
+	out.state = derived_state(s)
+	return out
+end
+
 local function same_snapshot(a, b)
 	if a == nil or b == nil then return a == b end
-	return a.state == b.state
+	return a.down == b.down
 		and a.local_sid == b.local_sid
 		and a.peer_sid == b.peer_sid
 		and a.peer_node == b.peer_node
@@ -57,7 +78,7 @@ end
 
 local function publish_state(conn, topic, link_id, snapshot)
 	conn:retain(topic, statefmt.link_component('session', link_id, {
-		state = snapshot.state,
+		state = derived_state(snapshot),
 		local_sid = snapshot.local_sid,
 		peer_sid = snapshot.peer_sid,
 		peer_node = snapshot.peer_node,
@@ -73,7 +94,7 @@ end
 function M.new_state(link_id, state_conn)
 	local pulse = pulse_mod.new()
 	local current = {
-		state = 'opening',
+		down = false,
 		local_sid = tostring(uuid.new()),
 		peer_sid = nil,
 		peer_node = nil,
@@ -97,7 +118,7 @@ function M.new_state(link_id, state_conn)
 	end
 
 	function holder:get()
-		return current
+		return export_snapshot(current)
 	end
 
 	function holder:update(mutator, opts)
@@ -124,11 +145,9 @@ function M.new_state(link_id, state_conn)
 		return pulse
 	end
 
-	-- Small op helper for consumers that want both the new pulse version and
-	-- the latest snapshot in one waitable value.
 	function holder:changed_op(seen)
 		return pulse:changed_op(seen):wrap(function(version)
-			return version, current
+			return version, export_snapshot(current)
 		end)
 	end
 
@@ -240,17 +259,8 @@ function M.run(ctx)
 	end
 
 	local function refresh_ready()
-		local snap = snapshot()
-		local ready = snap.established and rpc_ready
 		state_mut(function(s)
-			s.ready = ready
-			if s.state ~= 'down' then
-				if ready then
-					s.state = 'ready'
-				else
-					s.state = 'establishing'
-				end
-			end
+			s.ready = s.established and rpc_ready
 		end)
 	end
 
@@ -286,14 +296,11 @@ function M.run(ctx)
 		next_deadline = next_deadline,
 	}
 
-	state_mut(function(s)
-		s.state = 'establishing'
-	end)
 	maybe_report_summary(true)
 
 	fibers.current_scope():finally(function()
 		state_mut(function(s)
-			s.state = 'down'
+			s.down = true
 			s.ready = false
 			s.established = false
 		end)
@@ -310,6 +317,7 @@ function M.run(ctx)
 				if prev ~= nil and prev ~= msg.sid then
 					rpc_ready = false
 					bump_generation(function(s)
+						s.down = false
 						s.peer_sid = msg.sid
 						s.peer_node = msg.node
 						s.established = true
@@ -318,6 +326,7 @@ function M.run(ctx)
 					end)
 				else
 					state_mut(function(s)
+						s.down = false
 						s.peer_sid = msg.sid
 						s.peer_node = msg.node
 						s.established = true

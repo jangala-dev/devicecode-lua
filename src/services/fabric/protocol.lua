@@ -6,35 +6,33 @@
 --   * validate wire shape only
 --   * encode/decode JSON lines
 --   * classify frames into control / rpc / bulk lanes
+--   * encode/decode bulk chunk payloads for transport-safe transfer
 --
 -- This module does not interpret session semantics or service policy.
 
-local cjson = require 'cjson.safe'
+local cjson  = require 'cjson.safe'
+local b64url = require 'services.fabric.b64url'
 
 local M = {}
 
-local CONTROL_TYPES = {
-	hello = true,
-	hello_ack = true,
-	ping = true,
-	pong = true,
-	xfer_begin = true,
-	xfer_ready = true,
-	xfer_need = true,
-	xfer_commit = true,
-	xfer_done = true,
-	xfer_abort = true,
-}
+local FRAME_CLASS = {
+	hello = 'control',
+	hello_ack = 'control',
+	ping = 'control',
+	pong = 'control',
+	xfer_begin = 'control',
+	xfer_ready = 'control',
+	xfer_need = 'control',
+	xfer_commit = 'control',
+	xfer_done = 'control',
+	xfer_abort = 'control',
 
-local RPC_TYPES = {
-	pub = true,
-	unretain = true,
-	call = true,
-	reply = true,
-}
+	pub = 'rpc',
+	unretain = 'rpc',
+	call = 'rpc',
+	reply = 'rpc',
 
-local BULK_TYPES = {
-	xfer_chunk = true,
+	xfer_chunk = 'bulk',
 }
 
 local function topic_ok(topic)
@@ -148,14 +146,14 @@ local function validate(frame)
 		return nil, 'invalid_frame_type'
 	end
 
-	local t = frame.type
-	if CONTROL_TYPES[t] then
+	local class = FRAME_CLASS[frame.type]
+	if class == 'control' then
 		return validate_control(frame)
 	end
-	if RPC_TYPES[t] then
+	if class == 'rpc' then
 		return validate_rpc(frame)
 	end
-	if BULK_TYPES[t] then
+	if class == 'bulk' then
 		return validate_bulk(frame)
 	end
 	return nil, 'unknown_frame_type'
@@ -166,11 +164,7 @@ function M.validate(frame)
 end
 
 function M.classify(frame)
-	local t = frame.type
-	if CONTROL_TYPES[t] then return 'control' end
-	if RPC_TYPES[t] then return 'rpc' end
-	if BULK_TYPES[t] then return 'bulk' end
-	return nil
+	return frame and FRAME_CLASS[frame.type] or nil
 end
 
 function M.encode_line(frame)
@@ -214,6 +208,66 @@ function M.writer_item(class, frame)
 		cost = #line,
 		line = line,
 	}, nil
+end
+
+----------------------------------------------------------------------
+-- Bulk chunk helpers
+----------------------------------------------------------------------
+
+-- Encode raw binary chunk data into the transport-safe wire representation.
+---@param raw string
+---@return string|nil encoded
+---@return string|nil err
+function M.encode_chunk_data(raw)
+	if type(raw) ~= 'string' then
+		return nil, 'chunk_data_must_be_string'
+	end
+	return b64url.encode(raw), nil
+end
+
+-- Decode transport-safe wire chunk data back into raw binary bytes.
+---@param encoded string
+---@return string|nil raw
+---@return string|nil err
+function M.decode_chunk_data(encoded)
+	if type(encoded) ~= 'string' then
+		return nil, 'chunk_data_must_be_string'
+	end
+	return b64url.decode(encoded)
+end
+
+-- Build a validated xfer_chunk frame from raw binary bytes.
+---@param xfer_id string
+---@param offset integer
+---@param raw string
+---@return table|nil frame
+---@return string|nil err
+function M.make_xfer_chunk(xfer_id, offset, raw)
+	local data, err = M.encode_chunk_data(raw)
+	if not data then
+		return nil, err
+	end
+
+	local frame = {
+		type = 'xfer_chunk',
+		xfer_id = xfer_id,
+		offset = offset,
+		data = data,
+	}
+
+	return validate(frame)
+end
+
+-- Extract raw binary bytes from a validated xfer_chunk frame.
+---@param frame table
+---@return string|nil raw
+---@return string|nil err
+function M.read_xfer_chunk(frame)
+	local ok, err = validate_bulk(frame)
+	if not ok then
+		return nil, err
+	end
+	return M.decode_chunk_data(frame.data)
 end
 
 return M

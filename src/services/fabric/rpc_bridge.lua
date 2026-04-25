@@ -313,7 +313,7 @@ function M.run(ctx)
 
 	local function export_message(rule, msg)
 		if is_import_origin(msg.origin, link_id) then return end
-		local remote_topic = select(1, topicmap.map_local_to_remote({ rule }, msg.topic))
+		local remote_topic = select(1, topicmap.map_local_to_remote_rule(rule, msg.topic))
 		if not remote_topic then return end
 
 		send_rpc(tx_rpc, {
@@ -335,7 +335,7 @@ function M.run(ctx)
 		if ev.origin and is_import_origin(ev.origin, link_id) then return end
 		if not ev.topic then return end
 
-		local remote_topic = select(1, topicmap.map_local_to_remote({ rule }, ev.topic))
+		local remote_topic = select(1, topicmap.map_local_to_remote_rule(rule, ev.topic))
 		if not remote_topic then return end
 
 		local key = topic_key(remote_topic)
@@ -440,7 +440,7 @@ function M.run(ctx)
 		end
 		if req:done() then return end
 
-		local remote_topic = select(1, topicmap.map_local_to_remote({ rule }, req.topic))
+		local remote_topic = select(1, topicmap.map_local_to_remote_rule(rule, req.topic))
 		if not remote_topic then
 			req:fail('no_route')
 			return

@@ -20,6 +20,10 @@
 --       - phase timeouts
 --   * this module owns transfer protocol state only; file-backed artefacts and
 --     durable storage remain behind HAL/host capabilities
+--
+-- Important:
+--   * xfer_chunk.data is transported as encoded text on the wire
+--   * transfer size/offset/checksum always refer to raw bytes
 
 local fibers      = require 'fibers'
 local runtime     = require 'fibers.runtime'
@@ -56,6 +60,14 @@ end
 local function fail_req(req, err)
 	if not req or req:done() then return end
 	req:fail(err)
+end
+
+local function send_abort(tx_control, xfer_id, err)
+	send_frame(tx_control, 'control', {
+		type = 'xfer_abort',
+		xfer_id = xfer_id,
+		err = err,
+	})
 end
 
 -- Transfer shell event selection.
@@ -123,11 +135,11 @@ function M.run(ctx)
 		incoming = incoming,
 	}
 
-	local function publish_state(status)
+	local function publish_transfer_state(status)
 		conn:retain(transfer_topic, statefmt.link_component('transfer', link_id, status))
 	end
 
-	publish_state({ state = 'idle' })
+	publish_transfer_state({ state = 'idle' })
 
 	local function clear_outgoing(reason)
 		if outgoing and outgoing.req then
@@ -135,7 +147,7 @@ function M.run(ctx)
 		end
 		outgoing = nil
 		state.outgoing = nil
-		publish_state({ state = 'idle', err = reason })
+		publish_transfer_state({ state = 'idle', err = reason })
 	end
 
 	local function clear_incoming(reason)
@@ -144,31 +156,19 @@ function M.run(ctx)
 		end
 		incoming = nil
 		state.incoming = nil
-		publish_state({ state = 'idle', err = reason })
+		publish_transfer_state({ state = 'idle', err = reason })
 	end
 
 	local function abort_all(reason)
 		-- Generation changes and fatal protocol errors reset both directions.
 		if outgoing then
-			send_frame(tx_control, 'control', {
-				type = 'xfer_abort',
-				xfer_id = outgoing.xfer_id,
-				err = reason,
-			})
+			send_abort(tx_control, outgoing.xfer_id, reason)
 			clear_outgoing(reason)
 		end
 		if incoming then
-			send_frame(tx_control, 'control', {
-				type = 'xfer_abort',
-				xfer_id = incoming.xfer_id,
-				err = reason,
-			})
+			send_abort(tx_control, incoming.xfer_id, reason)
 			clear_incoming(reason)
 		end
-	end
-
-	local function publish_transfer_state(status)
-		publish_state(status)
 	end
 
 	------------------------------------------------------------------
@@ -260,21 +260,22 @@ function M.run(ctx)
 			return
 		end
 
-		local data, err = outgoing.source:read_chunk(outgoing.offset, chunk_size)
-		if data == nil then
+		local raw, err = outgoing.source:read_chunk(outgoing.offset, chunk_size)
+		if raw == nil then
 			clear_outgoing(err or 'source_error')
 			return
 		end
 
-		outgoing.state = 'sending'
-		send_frame(tx_bulk, 'bulk', {
-			type = 'xfer_chunk',
-			xfer_id = outgoing.xfer_id,
-			offset = outgoing.offset,
-			data = data,
-		})
+		local frame, ferr = protocol.make_xfer_chunk(outgoing.xfer_id, outgoing.offset, raw)
+		if not frame then
+			clear_outgoing(ferr or 'chunk_encode_failed')
+			return
+		end
 
-		outgoing.offset = outgoing.offset + #data
+		outgoing.state = 'sending'
+		send_frame(tx_bulk, 'bulk', frame)
+
+		outgoing.offset = outgoing.offset + #raw
 		outgoing.deadline = runtime.now() + phase_timeout
 
 		publish_transfer_state({
@@ -302,11 +303,7 @@ function M.run(ctx)
 	-- }
 	local function handle_incoming_begin(frame)
 		if incoming then
-			send_frame(tx_control, 'control', {
-				type = 'xfer_abort',
-				xfer_id = frame.xfer_id,
-				err = 'busy',
-			})
+			send_abort(tx_control, frame.xfer_id, 'busy')
 			return
 		end
 
@@ -316,11 +313,7 @@ function M.run(ctx)
 
 		local sink, serr = sink_factory(frame.meta, frame)
 		if not sink then
-			send_frame(tx_control, 'control', {
-				type = 'xfer_abort',
-				xfer_id = frame.xfer_id,
-				err = tostring(serr or 'sink_open_failed'),
-			})
+			send_abort(tx_control, frame.xfer_id, tostring(serr or 'sink_open_failed'))
 			return
 		end
 
@@ -354,27 +347,26 @@ function M.run(ctx)
 		if not incoming or frame.xfer_id ~= incoming.xfer_id then return end
 
 		if frame.offset ~= incoming.offset then
-			send_frame(tx_control, 'control', {
-				type = 'xfer_abort',
-				xfer_id = frame.xfer_id,
-				err = 'unexpected_offset',
-			})
+			send_abort(tx_control, frame.xfer_id, 'unexpected_offset')
 			clear_incoming('unexpected_offset')
 			return
 		end
 
-		local ok, err = incoming.sink:write_chunk(frame.offset, frame.data)
+		local raw, derr = protocol.read_xfer_chunk(frame)
+		if raw == nil then
+			send_abort(tx_control, frame.xfer_id, derr or 'invalid_chunk_encoding')
+			clear_incoming(derr or 'invalid_chunk_encoding')
+			return
+		end
+
+		local ok, err = incoming.sink:write_chunk(frame.offset, raw)
 		if not ok then
-			send_frame(tx_control, 'control', {
-				type = 'xfer_abort',
-				xfer_id = frame.xfer_id,
-				err = err,
-			})
+			send_abort(tx_control, frame.xfer_id, err)
 			clear_incoming(err)
 			return
 		end
 
-		incoming.offset = incoming.offset + #frame.data
+		incoming.offset = incoming.offset + #raw
 		incoming.deadline = runtime.now() + phase_timeout
 
 		send_frame(tx_control, 'control', {
@@ -396,38 +388,26 @@ function M.run(ctx)
 		if not incoming or frame.xfer_id ~= incoming.xfer_id then return end
 
 		if incoming.offset ~= incoming.size then
-			send_frame(tx_control, 'control', {
-				type = 'xfer_abort',
-				xfer_id = frame.xfer_id,
-				err = 'short_transfer',
-			})
+			send_abort(tx_control, frame.xfer_id, 'short_transfer')
 			clear_incoming('short_transfer')
 			return
 		end
 
 		if incoming.sink:checksum() ~= incoming.checksum then
-			send_frame(tx_control, 'control', {
-				type = 'xfer_abort',
-				xfer_id = frame.xfer_id,
-				err = 'checksum_mismatch',
-			})
+			send_abort(tx_control, frame.xfer_id, 'checksum_mismatch')
 			clear_incoming('checksum_mismatch')
 			return
 		end
 
 		local artefact, cerr = incoming.sink:commit()
 		if not artefact then
-			send_frame(tx_control, 'control', {
-				type = 'xfer_abort',
-				xfer_id = frame.xfer_id,
-				err = tostring(cerr or 'commit_failed'),
-			})
+			send_abort(tx_control, frame.xfer_id, tostring(cerr or 'commit_failed'))
 			clear_incoming(tostring(cerr or 'commit_failed'))
 			return
 		end
 
-		local receiver = incoming.meta and incoming.meta.receiver or nil
-		if type(receiver) == 'table' then
+		local receiver_topic = incoming.meta and incoming.meta.receiver or nil
+		if type(receiver_topic) == 'table' then
 			incoming.state = 'delivering'
 			publish_transfer_state({
 				state = incoming.state,
@@ -437,7 +417,7 @@ function M.run(ctx)
 				offset = incoming.offset,
 			})
 
-			local reply, err = conn:call(receiver, {
+			local reply, err = conn:call(receiver_topic, {
 				link_id = link_id,
 				xfer_id = incoming.xfer_id,
 				size = incoming.size,
@@ -448,11 +428,7 @@ function M.run(ctx)
 
 			if reply == nil then
 				artefact:delete()
-				send_frame(tx_control, 'control', {
-					type = 'xfer_abort',
-					xfer_id = frame.xfer_id,
-					err = tostring(err or 'receiver_failed'),
-				})
+				send_abort(tx_control, frame.xfer_id, tostring(err or 'receiver_failed'))
 				clear_incoming(tostring(err or 'receiver_failed'))
 				return
 			end

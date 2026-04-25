@@ -13,15 +13,15 @@
 --
 -- The outer fabric shell owns restart policy entirely.
 
-local fibers         = require 'fibers'
-local mailbox        = require 'fibers.mailbox'
+local fibers           = require 'fibers'
+local mailbox          = require 'fibers.mailbox'
 
-local session_ctl    = require 'services.fabric.session_ctl'
-local reader         = require 'services.fabric.reader'
-local writer         = require 'services.fabric.writer'
-local rpc_bridge     = require 'services.fabric.rpc_bridge'
-local transfer_mgr   = require 'services.fabric.transfer_mgr'
-local transport_uart = require 'services.fabric.transport_uart'
+local session_ctl      = require 'services.fabric.session_ctl'
+local reader           = require 'services.fabric.reader'
+local writer           = require 'services.fabric.writer'
+local rpc_bridge       = require 'services.fabric.rpc_bridge'
+local transfer_mgr     = require 'services.fabric.transfer_mgr'
+local transport_stream = require 'services.fabric.transport_stream'
 
 local M = {}
 
@@ -46,7 +46,7 @@ function M.run(params)
 	local report_tx       = assert(params.report_tx, 'session.run requires report_tx')
 	local cfg             = params.cfg or {}
 
-	local transport, err = transport_uart.open(root_conn, link_id, cfg)
+	local transport, err = transport_stream.open(root_conn, link_id, cfg)
 	if not transport then
 		error('fabric session transport open failed: ' .. tostring(err), 0)
 	end

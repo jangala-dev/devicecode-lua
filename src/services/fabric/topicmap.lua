@@ -63,29 +63,35 @@ local function normalise_rule(rule, kind)
 	}
 end
 
+local function match_rule(rule, topic, from_field, to_field)
+	if rule.topic then
+		local wanted = rule.topic
+		if #wanted ~= #topic then
+			return nil, nil
+		end
+
+		for j = 1, #topic do
+			if topic[j] ~= wanted[j] then
+				return nil, nil
+			end
+		end
+
+		return copy_topic(rule[to_field]), rule
+	end
+
+	local mapped = replace_prefix(topic, rule[from_field], rule[to_field])
+	if mapped then
+		return mapped, rule
+	end
+
+	return nil, nil
+end
+
 local function match_rule_set(rules, topic, from_field, to_field)
 	for i = 1, #rules do
-		local rule = rules[i]
-
-		if rule.topic then
-			local wanted = rule.topic
-			if #wanted == #topic then
-				local ok = true
-				for j = 1, #topic do
-					if topic[j] ~= wanted[j] then
-						ok = false
-						break
-					end
-				end
-				if ok then
-					return copy_topic(rule[to_field]), rule
-				end
-			end
-		else
-			local mapped = replace_prefix(topic, rule[from_field], rule[to_field])
-			if mapped then
-				return mapped, rule
-			end
+		local mapped, rule = match_rule(rules[i], topic, from_field, to_field)
+		if mapped then
+			return mapped, rule
 		end
 	end
 
@@ -106,6 +112,14 @@ end
 
 function M.map_remote_to_local(rules, topic)
 	return match_rule_set(rules, topic, 'remote_prefix', 'local_prefix')
+end
+
+function M.map_local_to_remote_rule(rule, topic)
+	return match_rule(rule, topic, 'local_prefix', 'remote_prefix')
+end
+
+function M.map_remote_to_local_rule(rule, topic)
+	return match_rule(rule, topic, 'remote_prefix', 'local_prefix')
 end
 
 return M

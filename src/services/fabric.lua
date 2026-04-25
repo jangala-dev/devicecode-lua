@@ -233,7 +233,6 @@ local function handle_link_exit(state, svc, conn, ev)
 			link_id = link_id,
 			status = ev.st,
 			primary = ev.primary,
-			report = ev.report,
 		})
 	else
 		svc:obs_event('link_removed', {
