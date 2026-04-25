@@ -7,17 +7,17 @@ function T.component_mcu_composes_split_facts()
     software = { version = 'mcu-v1', boot_id = 'boot-1' },
     updater = { state = 'running' },
     health = { state = 'ok' },
-  }, {
-    software = { seen = true },
-    updater = { seen = true },
-    health = { seen = true },
-  })
-  assert(out.available == true)
-  assert(out.ready == true)
+  }, {})
+
+  assert(type(out) == 'table')
   assert(type(out.software) == 'table' and out.software.version == 'mcu-v1')
+  assert(out.software.boot_id == 'boot-1')
   assert(type(out.updater) == 'table' and out.updater.state == 'running')
   assert(out.health == 'ok')
-  assert(type(out.source) == 'table' and out.source.kind == 'member')
+  assert(type(out.raw) == 'table')
+  assert(type(out.raw.software) == 'table')
+  assert(type(out.raw.updater) == 'table')
+  assert(type(out.raw.health) == 'table')
 end
 
 function T.component_mcu_composes_pmu_telemetry_config_and_last_alert()
@@ -60,15 +60,6 @@ function T.component_mcu_composes_pmu_telemetry_config_and_last_alert()
     environment_humidity = { rh_x100 = 4690 },
     runtime_memory = { alloc_bytes = 85680 },
   }, {
-    software = { seen = true },
-    updater = { seen = true },
-    power_battery = { seen = true },
-    power_charger = { seen = true },
-    power_charger_config = { seen = true },
-    environment_temperature = { seen = true },
-    environment_humidity = { seen = true },
-    runtime_memory = { seen = true },
-  }, {
     charger_alert = {
       kind = 'vin_lo',
       severity = 'warn',
@@ -77,12 +68,10 @@ function T.component_mcu_composes_pmu_telemetry_config_and_last_alert()
       status_bits = 2,
       system_bits = 4,
     },
-  }, {
-    charger_alert = { seen = true, count = 1 },
   })
 
-  assert(out.available == true)
-  assert(out.ready == true)
+  assert(type(out.software) == 'table' and out.software.version == 'mcu-v2')
+  assert(type(out.updater) == 'table' and out.updater.state == 'running')
   assert(out.power.battery.pack_mV == 2412)
   assert(out.power.battery.temp_mC == 198000)
   assert(out.power.charger.vin_mV == 24317)
@@ -98,24 +87,28 @@ function T.component_mcu_composes_pmu_telemetry_config_and_last_alert()
   assert(out.alerts.charger_alert.known == true)
 end
 
-function T.component_mcu_marks_partial_fact_sets_not_ready()
+function T.component_mcu_composes_partial_fact_sets()
   local out = component_mcu.compose({
     updater = { state = 'running' },
-  }, {
-    updater = { seen = true },
-  })
-  assert(out.available == true)
-  assert(out.ready == false)
+  }, {})
+
   assert(type(out.updater) == 'table' and out.updater.state == 'running')
   assert(type(out.software) == 'table' and out.software.version == nil)
+  assert(type(out.power) == 'table')
+  assert(type(out.environment) == 'table')
+  assert(type(out.runtime) == 'table')
+  assert(type(out.alerts) == 'table')
 end
 
-function T.component_mcu_marks_no_facts_unavailable()
-  local out = component_mcu.compose({})
-  assert(out.available == false)
-  assert(out.ready == false)
+function T.component_mcu_composes_empty_input()
+  local out = component_mcu.compose({}, {})
+
   assert(type(out.software) == 'table' and out.software.version == nil)
   assert(type(out.updater) == 'table' and out.updater.state == nil)
+  assert(type(out.power) == 'table')
+  assert(type(out.environment) == 'table')
+  assert(type(out.runtime) == 'table')
+  assert(type(out.alerts) == 'table')
 end
 
 return T

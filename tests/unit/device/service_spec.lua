@@ -134,6 +134,7 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
         mcu = {
           class = 'member',
           subtype = 'mcu',
+          required_facts = { 'software', 'updater' },
           facts = {
             software = { 'state', 'member', 'mcu', 'software' },
             updater = { 'state', 'member', 'mcu', 'updater' },
@@ -233,9 +234,8 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
         and payload.updater.state == 'running'
         and payload.member_class == 'mcu'
         and payload.link_class == nil
-        and type(payload.source) == 'table' and payload.source.member_class == 'mcu'
-        and type(payload.source.facts) == 'table'
-        and type(payload.source.facts.software) == 'table'
+        and type(payload.source) == 'table'
+        and payload.source.member_class == 'mcu'
         and payload.actions.stage_update == nil
         and type(payload.power) == 'table'
         and type(payload.power.battery) == 'table'
@@ -243,6 +243,7 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
         and type(payload.power.charger) == 'table'
         and payload.power.charger.vin_mV == 24317
         and payload.power.charger.state.bat_missing_fault == true
+        and payload.power.charger.charger_config == nil
         and type(payload.power.charger_config) == 'table'
         and payload.power.charger_config.thresholds.vin_lo_mV == 9000
         and type(payload.environment) == 'table'
@@ -281,8 +282,6 @@ function T.device_service_rejects_components_without_observations()
   assert(tostring(err):match('observation') ~= nil or tostring(err):match('fact') ~= nil)
 end
 
-
-
 function T.device_service_republishes_component_events_and_records_last_event()
   runfibers.run(function(scope)
     local bus = busmod.new()
@@ -296,6 +295,7 @@ function T.device_service_republishes_component_events_and_records_last_event()
         mcu = {
           class = 'member',
           subtype = 'mcu',
+          required_facts = { 'software', 'updater' },
           facts = {
             software = { 'state', 'member', 'mcu', 'software' },
             updater = { 'state', 'member', 'mcu', 'updater' },
@@ -335,9 +335,6 @@ function T.device_service_republishes_component_events_and_records_last_event()
       end)
       return okp
         and type(payload) == 'table'
-        and type(payload.events) == 'table'
-        and type(payload.events.charger_alert) == 'table'
-        and payload.events.charger_alert.kind == 'vin_lo'
         and type(payload.alerts) == 'table'
         and type(payload.alerts.charger_alert) == 'table'
         and payload.alerts.charger_alert.kind == 'vin_lo'

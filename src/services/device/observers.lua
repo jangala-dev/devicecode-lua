@@ -1,127 +1,49 @@
--- services/device/observers.lua
---
--- Provider boundary and lifetime management for device observers.
---
--- Provider contract:
---   * a provider module exports `run(ctx)`
---   * provider code emits raw observation events only
---   * provider code does not own its outer scope boundary
---
--- Ownership split:
---   * observers.lua owns:
---       - provider lookup
---       - child scope creation
---       - scoped provider outcome handling
---       - observer generation stamping for stale-event suppression
---   * providers/* own:
---       - source-specific watching/fetch logic
---       - emission of fact_changed / source_down events as appropriate
---
--- Lifecycle notes:
---   * each observer runs in its own child scope
---   * retirement is explicit: cancel, then join
---   * outer cancellation does not emit source_down; only provider failure does
-
 local fibers = require 'fibers'
-local fact_watch = require 'services.device.providers.fact_watch'
-local contract = require 'services.device.provider_contract'
+local observe = require 'services.device.observe'
 
 local M = {}
 
-local PROVIDERS = {
-	fact_watch = fact_watch,
-}
-
 local function send_required(tx, value, what)
-	local ok, reason = tx:send(value)
-	if ok ~= true then
-		error((what or 'observer_event_send_failed') .. ': ' .. tostring(reason or 'closed'), 0)
-	end
+  local ok, reason = tx:send(value)
+  if ok ~= true then
+    error((what or 'observer_event_send_failed') .. ': ' .. tostring(reason or 'closed'), 0)
+  end
 end
 
-local function provider_for(rec)
-	local name = (type(rec) == 'table'
-		and type(rec.provider) == 'string'
-		and rec.provider ~= '')
-		and rec.provider
-		or 'fact_watch'
-
-	return PROVIDERS[name], name
-end
-
-local function provider_context(conn, name, rec, tx, generation)
-	return {
-		conn = conn,
-		component = name,
-		rec = rec,
-		generation = generation,
-
-		-- Providers emit raw logical events only.
-		-- The boundary layer stamps component/generation so the shell can drop
-		-- stale events from retired observers.
-		emit = function(ev)
-			local normalised, nerr = contract.normalise_event(ev)
-			if not normalised then error(nerr, 2) end
-			ev = normalised
-			if ev.component == nil then
-				ev.component = name
-			end
-			ev.generation = generation
-			send_required(tx, ev, 'observer_event_overflow')
-		end,
-	}
-end
-
-local function run_provider(ctx, provider)
-	local st, _report, primary = fibers.run_scope(function()
-		return provider.run(ctx)
-	end)
-
-	if st == 'failed' then
-		ctx.emit({
-			tag = 'source_down',
-			reason = tostring(primary or 'provider_failed'),
-		})
-		error(primary or 'provider_failed', 0)
-	end
-
-	-- Outer cancellation is lifecycle control, not a source failure.
-	-- Retired observers should exit quietly.
-	if st == 'cancelled' then
-		return
-	end
-end
-
--- Returned observer slot:
---   {
---     component = <name>,
---     generation = <observer generation>,
---     scope = <child scope>,
---   }
 function M.spawn_component(scope_obj, conn, name, rec, tx, generation)
-	local provider, provider_name = provider_for(rec)
-	local ok_provider, perr = contract.assert_provider(provider, provider_name)
-	if not ok_provider then
-		return nil, 'unknown_provider:' .. tostring(perr or provider_name)
-	end
+  local child, err = scope_obj:child()
+  if not child then return nil, err end
 
-	local child, err = scope_obj:child()
-	if not child then
-		return nil, err
-	end
+  local ok, spawn_err = child:spawn(function()
+    local function emit(ev)
+      ev.component = ev.component or name
+      ev.generation = generation
+      send_required(tx, ev, 'observer_event_overflow')
+    end
 
-	local ok, spawn_err = child:spawn(function()
-		return run_provider(provider_context(conn, name, rec, tx, generation), provider)
-	end)
-	if not ok then
-		return nil, spawn_err
-	end
+    local st, _report, primary = fibers.run_scope(function()
+      return observe.run({
+        conn = conn,
+        component = name,
+        rec = rec,
+        generation = generation,
+        emit = emit,
+      })
+    end)
 
-	return {
-		component = name,
-		generation = generation,
-		scope = child,
-	}, nil
+    if st == 'failed' then
+      emit({ tag = 'source_down', reason = tostring(primary or 'provider_failed') })
+      error(primary or 'provider_failed', 0)
+    end
+  end)
+
+  if not ok then return nil, spawn_err end
+
+  return {
+    component = name,
+    generation = generation,
+    scope = child,
+  }, nil
 end
 
 return M

@@ -9,15 +9,36 @@ function T.availability_helper_uses_required_facts_for_ready()
       updater = { seen = false },
     },
   }
-  local st = availability.source_status(rec, { required_facts = { 'software', 'updater' } })
-  assert(st.available == true)
-  assert(st.ready == false)
+
+  assert(availability.any_observation_seen(rec) == true)
+  assert(availability.required_facts_ready(rec, { 'software', 'updater' }) == false)
+  assert(availability.required_facts_ready(rec, { 'software' }) == true)
 end
 
-function T.availability_helper_marks_stale_source()
-  local rec = { source_err = 'stale' }
-  local st = availability.source_status(rec, {})
-  assert(st.stale == true)
+function T.availability_helper_uses_any_seen_when_no_required_facts()
+  local rec = {
+    fact_state = {
+      updater = { seen = true },
+    },
+  }
+
+  assert(availability.any_observation_seen(rec) == true)
+  assert(availability.required_facts_ready(rec, nil) == true)
+  assert(availability.required_facts_ready(rec, {}) == true)
+end
+
+function T.availability_helper_marks_unseen_when_no_observations()
+  local rec = {
+    fact_state = {
+      software = { seen = false },
+    },
+    event_state = {
+      charger_alert = { seen = false },
+    },
+  }
+
+  assert(availability.any_observation_seen(rec) == false)
+  assert(availability.required_facts_ready(rec, nil) == false)
 end
 
 return T
