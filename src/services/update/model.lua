@@ -432,7 +432,7 @@ function M.create_job(state, spec, now_mono, service_run_id)
 		component = spec.component,
 		artifact_ref = spec.artifact_ref,
 		artifact_meta = spec.artifact_meta,
-		expected_version = spec.expected_version,
+		expected_image_id = spec.expected_image_id,
 		metadata = spec.metadata,
 		auto_start = (spec.auto_start == true),
 		auto_commit = (spec.auto_commit == true),

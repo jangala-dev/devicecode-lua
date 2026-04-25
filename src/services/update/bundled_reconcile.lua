@@ -23,14 +23,13 @@ end
 local function software_identity(component_state)
 	local sw = type(component_state) == 'table' and component_state.software or nil
 	if type(sw) ~= 'table' then return nil end
-	if sw.version == nil and sw.image_id == nil and sw.payload_sha256 == nil then
+	if sw.image_id == nil then
 		return nil
 	end
 	return {
 		version = sw.version,
 		build_id = sw.build,
 		image_id = sw.image_id,
-		payload_sha256 = sw.payload_sha256,
 		boot_id = sw.boot_id,
 	}
 end
@@ -43,19 +42,12 @@ local function image_identity(inspected)
 		version = build.version,
 		build_id = build.build_id,
 		image_id = build.image_id,
-		payload_sha256 = type(payload) == 'table' and payload.sha256 or nil,
 	}
 end
 
 local function identities_match(current, desired)
 	if not (type(current) == 'table' and type(desired) == 'table') then return false end
-	if desired.payload_sha256 and current.payload_sha256 then
-		return desired.payload_sha256 == current.payload_sha256
-	end
-	if desired.image_id and current.image_id then
-		return desired.image_id == current.image_id
-	end
-	return desired.version ~= nil and desired.version == current.version
+	return desired.image_id ~= nil and current.image_id == desired.image_id
 end
 
 local function cm5_release_id(ctx, cfg)
@@ -76,9 +68,7 @@ local function matching_job(ctx, component, desired)
 		local meta = job and job.metadata or nil
 		local b = type(meta) == 'table' and meta.bundled or nil
 		if job and job.component == component and type(b) == 'table' then
-			if (desired.image_id and b.image_id == desired.image_id)
-				or (desired.payload_sha256 and b.payload_sha256 == desired.payload_sha256)
-			then
+			if desired.image_id and b.image_id == desired.image_id then
 				return job
 			end
 		end
@@ -200,7 +190,7 @@ function Bundled:maybe_component(component, bcfg)
 		component = component,
 		artifact_ref = nil,
 		artifact_meta = nil,
-		expected_version = desired.version,
+		expected_image_id = desired.image_id,
 		metadata = {
 			source = 'bundled',
 			bundled = copy(desired),
@@ -226,7 +216,7 @@ function Bundled:maybe_component(component, bcfg)
 	end
 	new_job.artifact_ref = aref
 	new_job.artifact_meta = ameta
-	self.ctx.patch_job(new_job, { expected_version = desired.version })
+	self.ctx.patch_job(new_job, { expected_image_id = desired.image_id })
 
 	rec.last_attempt_job_id = new_job.job_id
 	self:save_record(component, rec)

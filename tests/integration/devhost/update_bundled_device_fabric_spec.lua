@@ -241,6 +241,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		local b_report_tx, b_report_rx = mailbox.new(8, { full = 'reject_newest' })
 
 		local versions = { mcu = 'mcu-v0' }
+		local image_id = { mcu = 'mcu-image-0' }
 		local boot_id = { mcu = 'mcu-boot-1' }
 		local received_blob = nil
 		local remote_member_conn = bus:connect()
@@ -248,7 +249,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		local function publish_remote_status()
 			remote_member_conn:retain({ 'member', 'mcu', 'software' }, {
 				version = versions.mcu,
-				image_id = versions.mcu == 'mcu-v1' and 'mcu-image-1' or 'mcu-image-0',
+				image_id = image_id.mcu,
 				payload_sha256 = versions.mcu == 'mcu-v1' and string.rep('b', 64) or string.rep('0', 64),
 				boot_id = boot_id.mcu,
 			})
@@ -275,6 +276,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		end)
 		bind_reply_loop(scope, commit_ep, function(_payload)
 			versions.mcu = 'mcu-v1'
+			image_id.mcu = 'mcu-image-1'
 			boot_id.mcu = 'mcu-boot-2'
 			publish_remote_status()
 			return { ok = true, started = true }
@@ -349,7 +351,11 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 
 		publish_remote_status()
 		assert(wait_device_component(caller, 'mcu', function(payload)
-			return payload.available == true and type(payload.software) == 'table' and payload.software.version == versions.mcu and payload.software.boot_id == boot_id.mcu
+			return payload.available == true
+				and type(payload.software) == 'table'
+				and payload.software.version == versions.mcu
+				and payload.software.image_id == image_id.mcu
+				and payload.software.boot_id == boot_id.mcu
 		end, 1.5))
 
 		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
@@ -391,7 +397,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		assert(final.ok == true)
 		assert(final.job.lifecycle.state == 'succeeded')
 		assert(type(final.job.result) == 'table')
-		assert(final.job.result.version == 'mcu-v1')
+		assert(final.job.result.image_id == 'mcu-image-1')
 		assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')
 	end, { timeout = 4.0 })
 end

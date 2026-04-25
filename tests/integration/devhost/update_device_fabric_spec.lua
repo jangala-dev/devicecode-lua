@@ -16,8 +16,8 @@ local update  = require 'services.update'
 
 local T = {}
 
-local function install_fake_mcu_preflight()
-	local restore = update_preflight.install_fake_mcu_preflight()
+local function install_fake_mcu_preflight(extra)
+	local restore = update_preflight.install_fake_mcu_preflight(extra)
 	fibers.current_scope():finally(restore)
 end
 
@@ -97,7 +97,7 @@ end
 
 function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 	runfibers.run(function(scope)
-		install_fake_mcu_preflight()
+		install_fake_mcu_preflight({ version = 'mcu-v1', image_id = 'mcu-image-1' })
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))
@@ -164,12 +164,15 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		local b_report_tx, b_report_rx = mailbox.new(8, { full = 'reject_newest' })
 
 		local versions = { mcu = 'mcu-v0' }
+		local image_id = { mcu = 'mcu-image-0' }
 		local boot_id = { mcu = 'mcu-boot-1' }
+		local pending_image_id = nil
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status()
 			remote_member_conn:retain({ 'member', 'mcu', 'software' }, {
 				version = versions.mcu,
+				image_id = image_id.mcu,
 				boot_id = boot_id.mcu,
 			})
 			remote_member_conn:retain({ 'member', 'mcu', 'updater' }, {
@@ -190,10 +193,12 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		bind_reply_loop(scope, receive_ep, function(payload)
 			assert(type(payload.artefact) == 'table')
 			assert(type(payload.artefact.open_source) == 'function')
+			pending_image_id = type(payload) == 'table' and type(payload.meta) == 'table' and payload.meta.image_id or nil
 			return { ok = true, accepted = true }
 		end)
-		bind_reply_loop(scope, commit_ep, function(payload)
-			versions.mcu = payload.metadata and payload.metadata.next_version or 'mcu-v1'
+		bind_reply_loop(scope, commit_ep, function(_payload)
+			versions.mcu = 'mcu-v1'
+			image_id.mcu = pending_image_id or 'mcu-image-1'
 			boot_id.mcu = 'mcu-boot-2'
 			publish_remote_status()
 			return { ok = true, started = true }
@@ -268,14 +273,14 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 
 		publish_remote_status()
 		assert(wait_device_component(caller, 'mcu', function(payload)
-			return payload.available == true and type(payload.software) == 'table' and payload.software.version == versions.mcu and payload.software.boot_id == boot_id.mcu
+			return payload.available == true and type(payload.software) == 'table' and payload.software.version == versions.mcu and payload.software.image_id == image_id.mcu and payload.software.boot_id == boot_id.mcu
 		end, 1.5))
 
 		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
 			component = 'mcu',
 			artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
-			expected_version = 'mcu-v1',
-			metadata = { channel = 'test', next_version = 'mcu-v1' },
+			expected_image_id = 'mcu-image-1',
+			metadata = { channel = 'test' },
 		}, { timeout = 0.5 })
 		assert(cerr == nil)
 		assert(created.ok == true)
@@ -314,7 +319,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		assert(final.ok == true)
 		assert(final.job.lifecycle.state == 'succeeded')
 		assert(type(final.job.result) == 'table')
-		assert(final.job.result.version == 'mcu-v1')
+		assert(final.job.result.image_id == 'mcu-image-1')
 		assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')
 	end, { timeout = 4.0 })
 end
@@ -322,7 +327,7 @@ end
 
 function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_after_commit()
 	runfibers.run(function(scope)
-		install_fake_mcu_preflight()
+		install_fake_mcu_preflight({ version = 'mcu-v1', image_id = 'mcu-image-1' })
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))
@@ -396,7 +401,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 
 		local function publish_remote_status(st)
 			st = st or {
-				software = { version = versions.mcu, boot_id = boot_id.mcu },
+				software = { version = versions.mcu, image_id = 'mcu-image-0', boot_id = boot_id.mcu },
 				updater = { state = 'running' },
 				health = { state = 'ok' },
 			}
@@ -409,18 +414,20 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		local receive_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'receive' }, { queue_len = 16 })
 		local commit_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'commit' }, { queue_len = 16 })
 
-		local current_state = { software = { version = 'mcu-v0', boot_id = 'mcu-boot-1' }, updater = { state = 'running' }, health = { state = 'ok' } }
+		local pending_image_id = nil
+		local current_state = { software = { version = 'mcu-v0', image_id = 'mcu-image-0', boot_id = 'mcu-boot-1' }, updater = { state = 'running' }, health = { state = 'ok' } }
 		bind_reply_loop(scope, prepare_ep, function(payload)
 			return { ok = true, prepared = true }
 		end)
 		bind_reply_loop(scope, receive_ep, function(payload)
 			assert(type(payload.artefact) == 'table')
 			assert(type(payload.artefact.open_source) == 'function')
+			pending_image_id = type(payload) == 'table' and type(payload.meta) == 'table' and payload.meta.image_id or nil
 			return { ok = true, accepted = true }
 		end)
-		bind_reply_loop(scope, commit_ep, function(payload)
+		bind_reply_loop(scope, commit_ep, function(_payload)
 			boot_id.mcu = 'mcu-boot-2'
-			current_state = { software = { version = 'mcu-v0', boot_id = boot_id.mcu }, updater = { state = 'failed', last_error = 'apply_failed' }, health = { state = 'degraded' } }
+			current_state = { software = { version = 'mcu-v0', image_id = pending_image_id or 'mcu-image-0', boot_id = boot_id.mcu }, updater = { state = 'failed', last_error = 'apply_failed' }, health = { state = 'degraded' } }
 			publish_remote_status(current_state)
 			return { ok = true, started = true }
 		end)
@@ -499,8 +506,8 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
 			component = 'mcu',
 			artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-fail.bin', 'mcu-image-fail') },
-			expected_version = 'mcu-v1',
-			metadata = { next_version = 'mcu-v1' },
+			expected_image_id = 'mcu-image-1',
+			metadata = {},
 		}, { timeout = 0.5 }))
 		local job = created.job
 

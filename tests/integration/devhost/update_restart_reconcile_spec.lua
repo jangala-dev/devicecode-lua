@@ -32,13 +32,13 @@ local function start_cm5_updater_cap(scope, conn, state)
         conn:retain({ 'cap', 'updater', 'cm5', 'state', 'software' }, {
             version = state.fw_version,
             boot_id = state.boot_id,
-            image_id = state.expected_version or state.fw_version,
+            image_id = state.expected_image_id or state.fw_version,
         })
         conn:retain({ 'cap', 'updater', 'cm5', 'state', 'updater' }, {
             state = state.state,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
-            expected_version = state.expected_version,
+            expected_image_id = state.expected_image_id,
             last_error = state.last_error,
         })
         conn:retain({ 'cap', 'updater', 'cm5', 'state', 'health' }, {
@@ -59,15 +59,15 @@ local function start_cm5_updater_cap(scope, conn, state)
         state.state = 'staged'
         state.staged = true
         state.artifact_ref = payload.artifact_ref
-        state.expected_version = payload.expected_version
+        state.expected_image_id = payload.expected_image_id
         publish_status()
-        return { ok = true, staged = payload.artifact_ref, expected_version = payload.expected_version, artifact_retention = 'keep' }
+        return { ok = true, staged = payload.artifact_ref, expected_image_id = payload.expected_image_id, artifact_retention = 'keep' }
     end)
 
     bind_reply_loop(scope, commit_ep, function(payload)
         state.state = 'committing'
         publish_status()
-        return { ok = true, started = true, next_version = (payload.metadata and payload.metadata.next_version) or state.expected_version }
+        return { ok = true, started = true, next_image_id = (payload.metadata and payload.metadata.next_image_id) or state.expected_image_id }
     end)
 
     publish_status()
@@ -139,7 +139,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         local updater_state = {
             state = 'idle',
             fw_version = 'cm5-v0',
-            expected_version = nil,
+            expected_image_id = nil,
             staged = false,
             artifact_ref = nil,
             boot_id = 'cm5-boot-1',
@@ -168,8 +168,8 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
             component = 'cm5',
             artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-firmware-image-v2.bin', 'cm5-firmware-image-v2') },
-            expected_version = 'cm5-v2',
-            metadata = { next_version = 'cm5-v2' },
+            expected_image_id = 'cm5-v2',
+            metadata = { next_image_id = 'cm5-v2' },
         }, { timeout = 0.5 }))
         local job = created.job
         local artifact_ref = job.artifact.ref
@@ -239,7 +239,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
                 and type(payload.job) == 'table'
                 and payload.job.lifecycle.state == 'succeeded'
                 and type(payload.job.result) == 'table'
-                and payload.job.result.version == 'cm5-v2'
+                and payload.job.result.image_id == 'cm5-v2'
                 and payload.job.artifact.ref == nil
         end, 1.5))
 

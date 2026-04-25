@@ -207,7 +207,7 @@ local function perform_fabric_stage(conn, rec, action_name, args, timeout)
     meta = {
       kind = 'firmware',
       component = rec.name,
-      version = args.expected_version,
+      image_id = args.expected_image_id,
       job_id = args.job_id,
       size = (type(desc) == 'table' and desc.size) or (type(artifact.size) == 'function' and artifact:size() or nil),
       checksum = (type(desc) == 'table' and desc.checksum) or (type(artifact.checksum) == 'function' and artifact:checksum() or nil),

@@ -65,23 +65,22 @@ local function default_updater_state()
         staged = false,
         artifact_ref = nil,
         artifact_meta = nil,
-        expected_version = nil,
+        expected_image_id = nil,
         last_error = nil,
         updated_at = nil,
     }
 end
 
-local function normalized_updater_state(raw_state, identity)
+local function normalized_updater_state(raw_state, current_image_id)
     raw_state = type(raw_state) == 'table' and raw_state or default_updater_state()
     local state = raw_state.state or 'idle'
-    local current_version = identity and identity.fw_version or nil
     if state == 'staged' then return 'staged' end
     if state == 'committing' or state == 'awaiting_reboot' then
-        if raw_state.expected_version and current_version == raw_state.expected_version then return 'running' end
+        if raw_state.expected_image_id and current_image_id == raw_state.expected_image_id then return 'running' end
         return 'awaiting_reboot'
     end
     if state == 'failed' or state == 'rollback_detected' then return state end
-    if current_version and current_version ~= '' then return 'running' end
+    if current_image_id and current_image_id ~= '' then return 'running' end
     return state
 end
 
@@ -159,7 +158,7 @@ function Driver:_emit_updater_facts()
         staged = status.staged,
         artifact_ref = status.artifact_ref,
         artifact_meta = status.artifact_meta,
-        expected_version = status.expected_version,
+        expected_image_id = status.expected_image_id,
         last_error = status.last_error,
         updated_at = status.updated_at,
     })
@@ -198,7 +197,8 @@ function Driver:status(opts)
     local bootedfw = read_fw_printenv('bootedfw')
     local targetfw = read_fw_printenv('targetfw')
     local upgrade_available = read_fw_printenv('upgrade_available')
-    local state = normalized_updater_state(raw_state, self.identity)
+    local current_image_id = (targetfw ~= '' and targetfw) or self.identity.fw_version
+    local state = normalized_updater_state(raw_state, current_image_id)
 
     return true, {
         state = state,
@@ -206,7 +206,7 @@ function Driver:status(opts)
         staged = raw_state.staged == true,
         artifact_ref = raw_state.artifact_ref,
         artifact_meta = artifact_meta or raw_state.artifact_meta,
-        expected_version = raw_state.expected_version,
+        expected_image_id = raw_state.expected_image_id,
         last_error = raw_state.last_error,
         updated_at = raw_state.updated_at,
         fw_version = self.identity.fw_version,
@@ -237,7 +237,7 @@ function Driver:stage(opts)
         staged = true,
         artifact_ref = opts.artifact_ref,
         artifact_meta = artifact,
-        expected_version = opts.expected_version,
+        expected_image_id = opts.expected_image_id,
         metadata = opts.metadata,
         last_error = nil,
         updated_at = os.time(),
@@ -250,7 +250,7 @@ function Driver:stage(opts)
         staged = true,
         artifact_ref = opts.artifact_ref,
         artifact_meta = artifact,
-        expected_version = opts.expected_version,
+        expected_image_id = opts.expected_image_id,
         artifact_retention = 'keep',
     }
 end

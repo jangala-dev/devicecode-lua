@@ -77,7 +77,7 @@ function M.new(opts)
 						active.stage = 'transferring_to_mcu'
 					end
 
-					ctx.publisher:publish_job_only(active)
+					ctx.publish_job_only(active)
 				end,
 			}
 		end

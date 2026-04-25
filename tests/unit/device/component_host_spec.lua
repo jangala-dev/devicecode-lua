@@ -5,7 +5,7 @@ local T = {}
 function T.component_host_composes_split_facts()
   local out = component_host.compose({
     software = { version = 'cm5-v1', boot_id = 'cm5-boot-1', hw_revision = 'A' },
-    updater = { state = 'running', expected_version = nil },
+    updater = { state = 'running', expected_image_id = nil },
     health = { state = 'ok' },
   })
 

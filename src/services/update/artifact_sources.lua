@@ -1,5 +1,3 @@
-local contract = require 'services.update.artifact_source_contract'
-
 local M = {}
 
 local SOURCES = {
@@ -35,9 +33,16 @@ local SOURCES = {
 }
 
 function M.register(kind, resolver)
-  local r, err = contract.validate(kind, resolver)
-  if not r then return nil, err end
-  SOURCES[kind] = r
+  if type(kind) ~= 'string' or kind == '' then
+    return nil, 'invalid_artifact_kind'
+  end
+  if type(resolver) ~= 'table' then
+    return nil, 'artifact_source_not_table:' .. tostring(kind)
+  end
+  if type(resolver.resolve) ~= 'function' then
+    return nil, 'artifact_source_missing_resolve:' .. tostring(kind)
+  end
+  SOURCES[kind] = resolver
   return true, nil
 end
 

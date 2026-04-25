@@ -47,7 +47,7 @@ function M.new(opts)
 			artifact_ref = job.artifact_ref,
 			job_id = job.job_id,
 			metadata = job.metadata,
-			expected_version = job.expected_version,
+			expected_image_id = job.expected_image_id,
 		}, timeout_stage)
 		if value == nil then return nil, err end
 		if type(value) == 'table' and value.artifact_retention == nil then

@@ -51,7 +51,7 @@ function M.public_job(job)
 		artifact = {
 			ref = job.artifact_ref,
 			meta = copy_value(job.artifact_meta),
-			expected_version = job.expected_version,
+			expected_image_id = job.expected_image_id,
 			released_at = job.artifact_released_at,
 			retention = staged_meta and staged_meta.artifact_retention or nil,
 		},

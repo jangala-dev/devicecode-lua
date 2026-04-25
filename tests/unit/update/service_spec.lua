@@ -61,6 +61,7 @@ local function bind_device_double(scope, device_conn, versions, opts)
       ready = true,
       software = {
         version = versions[component] or 'unknown',
+        image_id = versions[component] or 'unknown',
         boot_id = (opts.boot_id and opts.boot_id[component]) or nil,
       },
       updater = {
@@ -91,7 +92,7 @@ local function bind_device_double(scope, device_conn, versions, opts)
       return { ok = true, prepared = true }
     elseif payload.action == 'stage_update' then
       local reply = { ok = true, staged = payload.args.artifact_ref }
-      if payload.args.expected_version then reply.expected_version = payload.args.expected_version end
+      if payload.args.expected_image_id then reply.expected_image_id = payload.args.expected_image_id end
       reply.artifact_retention = opts.artifact_retention or 'release'
       return reply
     elseif payload.action == 'commit_update' then
@@ -178,12 +179,13 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
         kind = 'import_path',
         path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1'),
       },
-      expected_version = 'mcu-v1',
+      expected_image_id = 'mcu-v1',
       metadata = { channel = 'test' },
     }, { timeout = 0.5 })
 
     ensure(cerr == nil, 'expected create call to succeed')
     ensure(created and created.ok == true, 'expected create response ok=true')
+    ensure(created.job.artifact.expected_image_id == 'mcu-v1', 'expected canonical expected_image_id on job')
     job = created.job
     ensure(type(job.job_id) == 'string', 'expected string job_id')
     ensure(job.component == 'mcu', 'expected component=mcu')
@@ -249,7 +251,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     ensure(got and got.ok == true, 'expected get response ok=true')
     ensure(got.job.lifecycle.state == 'succeeded', 'expected final job state succeeded')
     ensure(type(got.job.result) == 'table', 'expected result table')
-    ensure(got.job.result.version == 'mcu-v1', 'expected final version mcu-v1')
+    ensure(got.job.result.image_id == 'mcu-v1', 'expected final version mcu-v1')
 
     local get_calls = 0
     local do_calls = 0
@@ -450,11 +452,12 @@ function T.update_service_supports_ref_artifacts_and_auto_start()
     local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
       component = 'mcu',
       artifact = { kind = 'ref', ref = art:ref() },
-      expected_version = 'mcu-v1',
+      expected_image_id = 'mcu-v1',
       options = { auto_start = true },
     }, { timeout = 0.5 })
     assert(cerr == nil)
     assert(created.ok == true)
+    assert(created.job.artifact.expected_image_id == 'mcu-v1')
     local job = created.job
 
     assert(probe.wait_until(function()
@@ -494,7 +497,7 @@ function T.update_service_marks_bundled_hold_after_manual_mcu_success()
     local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
       component = 'mcu',
       artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/manual.bin', 'manual') },
-      expected_version = 'mcu-v1-manual',
+      expected_image_id = 'mcu-v1-manual',
       metadata = { source = 'ui_upload' },
     }, { timeout = 0.5 }))
     local job_id = created.job.job_id

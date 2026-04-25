@@ -105,7 +105,6 @@ function Uploads:_create_update_job(user_conn, artefact, meta)
 	local created, uerr = update_client.create(user_conn, {
 		component = meta.component,
 		artifact = { kind = 'ref', ref = artefact:ref() },
-		expected_version = meta.version,
 		metadata = {
 			source = 'ui_upload',
 			name = meta.name,

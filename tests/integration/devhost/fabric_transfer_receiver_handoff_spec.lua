@@ -149,7 +149,7 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
             link_id = 'link-a',
             source = 'firmware-bytes',
             receiver = { 'cmd', 'blob', 'ingest' },
-            meta = { kind = 'firmware', version = 'mcu-v9' },
+            meta = { kind = 'firmware', image_id = 'mcu-image-9' },
         }, { timeout = 1.0 })
 
         if err ~= nil or type(reply) ~= 'table' or reply.ok ~= true then
@@ -164,7 +164,7 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
             or payload.size ~= #'firmware-bytes'
             or type(payload.meta) ~= 'table'
             or payload.meta.kind ~= 'firmware'
-            or payload.meta.version ~= 'mcu-v9'
+            or payload.meta.image_id ~= 'mcu-image-9'
         then
             diag:fail('unexpected receiver handoff payload')
         end

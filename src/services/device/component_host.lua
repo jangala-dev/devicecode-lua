@@ -34,7 +34,7 @@ local function normalize_updater_fact(raw)
     staged = raw.staged,
     artifact_ref = raw.artifact_ref,
     artifact_meta = raw.artifact_meta,
-    expected_version = raw.expected_version,
+    expected_image_id = raw.expected_image_id,
     last_error = raw.last_error or raw.err or nil,
     updated_at = raw.updated_at,
   }

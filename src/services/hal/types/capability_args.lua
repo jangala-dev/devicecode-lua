@@ -435,27 +435,27 @@ end
 ---@class UpdaterStageOpts
 ---@field artifact_ref string
 ---@field metadata table|nil
----@field expected_version string|nil
+---@field expected_image_id string|nil
 local UpdaterStageOpts = {}
 UpdaterStageOpts.__index = UpdaterStageOpts
 
 ---Create a new UpdaterStageOpts.
 ---@param artifact_ref string
 ---@param metadata table|nil
----@param expected_version string|nil
+---@param expected_image_id string|nil
 ---@return UpdaterStageOpts?
 ---@return string error
-function new.UpdaterStageOpts(artifact_ref, metadata, expected_version)
+function new.UpdaterStageOpts(artifact_ref, metadata, expected_image_id)
     if type(artifact_ref) ~= 'string' or artifact_ref == '' then
         return nil, "invalid artifact_ref"
     end
     if metadata ~= nil and type(metadata) ~= 'table' then
         return nil, "invalid metadata"
     end
-    if expected_version ~= nil and type(expected_version) ~= 'string' then
-        return nil, "invalid expected_version"
+    if expected_image_id ~= nil and type(expected_image_id) ~= 'string' then
+        return nil, "invalid expected_image_id"
     end
-    return setmetatable({ artifact_ref = artifact_ref, metadata = metadata, expected_version = expected_version }, UpdaterStageOpts), ""
+    return setmetatable({ artifact_ref = artifact_ref, metadata = metadata, expected_image_id = expected_image_id }, UpdaterStageOpts), ""
 end
 
 ---@class UpdaterCommitOpts

@@ -16,8 +16,8 @@ local storagecaps  = require 'tests.support.storage_caps'
 
 local T = {}
 
-local function install_fake_mcu_preflight()
-	local restore = update_preflight.install_fake_mcu_preflight()
+local function install_fake_mcu_preflight(extra)
+	local restore = update_preflight.install_fake_mcu_preflight(extra)
 	fibers.current_scope():finally(restore)
 end
 
@@ -100,7 +100,7 @@ end
 
 function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped()
 	runfibers.run(function(scope)
-		install_fake_mcu_preflight()
+		install_fake_mcu_preflight({ version = 'mcu-v1', image_id = 'mcu-image-1' })
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))
@@ -161,13 +161,16 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 		local b_report_tx, b_report_rx = mailbox.new(8, { full = 'reject_newest' })
 
 		local versions = { mcu = 'mcu-v0' }
+		local image_id = { mcu = 'mcu-image-0' }
 		local boot_id  = { mcu = 'mcu-boot-1' }
+		local pending_image_id = nil
 
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status()
 			remote_member_conn:retain({ 'selfish', 'software' }, {
 				version = versions.mcu,
+				image_id = image_id.mcu,
 				boot_id = boot_id.mcu,
 			})
 			remote_member_conn:retain({ 'selfish', 'updater' }, {
@@ -186,12 +189,14 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 			return { ok = true, prepared = true }
 		end)
 
-		bind_reply_loop(scope, receive_ep, function(_payload)
+		bind_reply_loop(scope, receive_ep, function(payload)
+			pending_image_id = type(payload) == 'table' and type(payload.meta) == 'table' and payload.meta.image_id or nil
 			return { ok = true, accepted = true }
 		end)
 
-		bind_reply_loop(scope, commit_ep, function(payload)
-			versions.mcu = payload.metadata and payload.metadata.next_version or 'mcu-v1'
+		bind_reply_loop(scope, commit_ep, function(_payload)
+			versions.mcu = 'mcu-v1'
+			image_id.mcu = pending_image_id or 'mcu-image-1'
 			boot_id.mcu  = 'mcu-boot-2'
 			publish_remote_status()
 			return { ok = true, started = true }
@@ -295,10 +300,9 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 				kind = 'import_path',
 				path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1'),
 			},
-			expected_version = 'mcu-v1',
+			expected_image_id = 'mcu-image-1',
 			metadata = {
 				channel = 'test',
-				next_version = 'mcu-v1',
 			},
 		}, { timeout = 0.5 })
 		assert(cerr == nil)
@@ -336,6 +340,7 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 			return payload.available == true
 				and type(payload.software) == 'table'
 				and payload.software.version == 'mcu-v1'
+				and payload.software.image_id == 'mcu-image-1'
 				and payload.software.boot_id == 'mcu-boot-2'
 		end, 2.0))
 

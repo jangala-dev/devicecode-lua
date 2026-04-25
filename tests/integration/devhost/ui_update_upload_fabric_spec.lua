@@ -20,8 +20,8 @@ local ui_fakes     = require 'tests.support.ui_fakes'
 
 local T = {}
 
-local function install_fake_mcu_preflight()
-	local restore = update_preflight.install_fake_mcu_preflight()
+local function install_fake_mcu_preflight(extra)
+	local restore = update_preflight.install_fake_mcu_preflight(extra)
 	fibers.current_scope():finally(restore)
 end
 
@@ -120,8 +120,7 @@ end
 
 function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric()
 	runfibers.run(function(scope)
-		install_fake_mcu_preflight()
-		install_fake_mcu_preflight()
+		install_fake_mcu_preflight({ version = 'mcu-v1', build_id = 'build-42', image_id = 'mcu-image-1' })
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))
@@ -182,13 +181,16 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 		local b_report_tx, b_report_rx = mailbox.new(8, { full = 'reject_newest' })
 
 		local versions = { mcu = 'mcu-v0' }
+		local image_id = { mcu = 'mcu-image-0' }
 		local boot_id = { mcu = 'mcu-boot-1' }
+		local pending_image_id = nil
 		local received_blob = nil
 		local remote_member_conn = bus:connect()
 
 		local function publish_remote_status()
 			remote_member_conn:retain({ 'member', 'mcu', 'software' }, {
 				version = versions.mcu,
+				image_id = image_id.mcu,
 				boot_id = boot_id.mcu,
 			})
 			remote_member_conn:retain({ 'member', 'mcu', 'updater' }, {
@@ -209,11 +211,13 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 		bind_reply_loop(scope, receive_ep, function(payload)
 			assert(type(payload.artefact) == 'table')
 			assert(type(payload.artefact.open_source) == 'function')
+			pending_image_id = type(payload) == 'table' and type(payload.meta) == 'table' and payload.meta.image_id or nil
 			received_blob = read_all(payload.artefact:open_source())
 			return { ok = true, accepted = true }
 		end)
-		bind_reply_loop(scope, commit_ep, function(payload)
-			versions.mcu = payload.metadata and payload.metadata.version or 'mcu-v1'
+		bind_reply_loop(scope, commit_ep, function(_payload)
+			versions.mcu = 'mcu-v1'
+			image_id.mcu = pending_image_id or 'mcu-image-1'
 			boot_id.mcu = 'mcu-boot-2'
 			publish_remote_status()
 			return { ok = true, started = true }
@@ -310,7 +314,10 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 
 		publish_remote_status()
 		assert(wait_device_component(caller, 'mcu', function(payload)
-			return payload.available == true and type(payload.software) == 'table' and payload.software.version == versions.mcu
+			return payload.available == true
+				and type(payload.software) == 'table'
+				and payload.software.version == versions.mcu
+				and payload.software.image_id == image_id.mcu
 		end, 1.5))
 
 		local session_rec, lerr = captured.app.login('admin', 'pw')
@@ -386,6 +393,7 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 			return payload.available == true
 				and type(payload.software) == 'table'
 				and payload.software.version == 'mcu-v1'
+				and payload.software.image_id == 'mcu-image-1'
 				and payload.software.boot_id == 'mcu-boot-2'
 		end, 2.0))
 

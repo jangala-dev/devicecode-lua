@@ -50,7 +50,7 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
       state = 'running',
       staged = false,
       artifact_ref = nil,
-      expected_version = nil,
+      expected_image_id = nil,
       last_error = nil,
     })
     provider:retain({ 'cap', 'updater', 'cm5', 'state', 'health' }, {
@@ -66,7 +66,7 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
       return { ok = true, prepared = payload.component }
     end)
     bind_reply_loop(scope, stage_ep, function(payload)
-      return { ok = true, staged = payload.artifact_ref, expected_version = payload.expected_version, artifact_retention = 'keep' }
+      return { ok = true, staged = payload.artifact_ref, expected_image_id = payload.expected_image_id, artifact_retention = 'keep' }
     end)
     bind_reply_loop(scope, commit_ep, function(payload)
       return { ok = true, started = true, mode = payload.component }
@@ -106,12 +106,12 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
     local staged, terr = caller:call({ 'cmd', 'device', 'component', 'do' }, {
       component = 'cm5',
       action = 'stage_update',
-      args = { artifact_ref = 'art-1', expected_version = '1.2.3' },
+      args = { artifact_ref = 'art-1', expected_image_id = '1.2.3' },
     }, { timeout = 0.5 })
     assert(terr == nil)
     assert(staged.ok == true)
     assert(staged.staged == 'art-1')
-    assert(staged.expected_version == '1.2.3')
+    assert(staged.expected_image_id == '1.2.3')
   end, { timeout = 2.0 })
 end
 

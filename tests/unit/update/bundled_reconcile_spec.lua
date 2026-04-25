@@ -125,7 +125,7 @@ local function bind_device_double(scope, device_conn, versions, opts)
         ok = true,
         staged = payload.args.artifact_ref,
         artifact_retention = 'release',
-        expected_version = payload.args.expected_version,
+        expected_image_id = payload.args.expected_image_id,
       }
 
     elseif payload.action == 'commit_update' then
