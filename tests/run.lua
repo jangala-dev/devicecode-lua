@@ -23,6 +23,7 @@ local stdlib = require 'posix.stdlib'
 assert(stdlib.setenv('CONFIG_TARGET', 'services'))
 
 local files = {
+	'unit.devicecode.service_base_spec',
 	'unit.config.codec_spec',
 	'unit.config.state_spec',
 	'unit.main.service_spec',
