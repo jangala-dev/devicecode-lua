@@ -227,7 +227,10 @@ function M.start(conn, opts)
   model.load_store(state, loaded)
 
   local changed = pulse.scoped({ close_reason = 'update service stopping' })
-  local observer = observe_mod.new()
+  local observer_changed = pulse.scoped({ close_reason = 'update observer stopping' })
+  local observer = observe_mod.new({
+    on_change = function() observer_changed:signal() end,
+  })
   local service_run_id = tostring(uuid.new())
   local runner_tx, runner_rx = mailbox.new(64, { full = 'drop_oldest' })
 
@@ -257,6 +260,9 @@ function M.start(conn, opts)
     now = now,
     changed = changed,
     observer = observer,
+    observer_changed_op = function(last_seen)
+      return observer_changed:changed_op(last_seen)
+    end,
     runner = runner,
     runner_tx = runner_tx,
     on_store_error = on_store_error,

@@ -20,6 +20,7 @@ local function runner_context(conn, job, backend, tx, reconcile_cfg, observe, se
     tx = tx,
     reconcile_cfg = reconcile_cfg,
     observe = observe,
+    observe_changed_op = service_ctx and service_ctx.observer_changed_op or nil,
     service_ctx = service_ctx,
     emit = function(ev)
       emit(tx, ev)
@@ -101,7 +102,7 @@ local function reconcile_body(ctx)
       return current_version(ctx.observe)
     end,
     changed_op = function(seen)
-      return ctx.observe:changed_op(seen)
+      return assert(ctx.observe_changed_op, 'observer_changed_op missing')(seen)
     end,
     evaluate = function()
       local component_state = current_component_state(ctx)

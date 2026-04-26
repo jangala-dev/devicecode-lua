@@ -34,7 +34,7 @@ local function recv_payload(ev)
   return ev.payload or ev
 end
 
-local function make_choice(fact_watches, event_subs, stale_after_s)
+local function make_choice(fact_watches, event_subs, stale_deadline)
   local arms = {}
   for fact_name, watch in pairs(fact_watches) do
     arms['fact:' .. fact_name] = watch:recv_op():wrap(function(ev, err)
@@ -46,12 +46,38 @@ local function make_choice(fact_watches, event_subs, stale_after_s)
       return { kind = 'event', name = event_name, msg = msg, err = err }
     end)
   end
-  if type(stale_after_s) == 'number' and stale_after_s > 0 then
-    arms._stale = sleep.sleep_op(stale_after_s):wrap(function()
+  if type(stale_deadline) == 'number' then
+    arms._stale = sleep.sleep_until_op(stale_deadline):wrap(function()
       return { kind = 'stale' }
     end)
   end
   return fibers.named_choice(arms)
+end
+
+local function freshness_predicate(rec, fact_watches, event_subs)
+  local required = {}
+  local required_count = 0
+  for _, name in ipairs(rec.required_facts or {}) do
+    if type(name) == 'string' and name ~= '' and fact_watches[name] then
+      required[name] = true
+      required_count = required_count + 1
+    end
+  end
+
+  local has_facts = next(fact_watches) ~= nil
+  local has_events = next(event_subs) ~= nil
+
+  return function(item)
+    if not item then return false end
+    if item.kind == 'fact' then
+      if required_count == 0 then return true end
+      return required[item.name] == true
+    end
+    if item.kind == 'event' then
+      return (not has_facts) and has_events
+    end
+    return false
+  end
 end
 
 function M.run(ctx)
@@ -83,21 +109,32 @@ function M.run(ctx)
   end)
 
   local stale_after_s = tonumber(opts.stale_after_s or opts.stale_after)
+  local refreshes_freshness = freshness_predicate(rec, fact_watches, event_subs)
+  local stale_deadline = (type(stale_after_s) == 'number' and stale_after_s > 0) and (fibers.now() + stale_after_s) or nil
+  local stale_latched = false
 
   while true do
-    local _which, item = fibers.perform(make_choice(fact_watches, event_subs, stale_after_s))
+    local _which, item = fibers.perform(make_choice(fact_watches, event_subs, stale_deadline))
     if not item then
       emit({ tag = 'source_down', reason = 'observer_closed' })
       return
     end
 
     if item.kind == 'stale' then
-      emit({ tag = 'source_down', reason = 'stale' })
+      if not stale_latched then
+        stale_latched = true
+        stale_deadline = nil
+        emit({ tag = 'source_down', reason = 'stale' })
+      end
     elseif item.kind == 'fact' then
       local ev = item.ev
       if not ev then
         emit({ tag = 'source_down', reason = tostring(item.err or (item.name .. ':closed')) })
         return
+      end
+      if refreshes_freshness(item) then
+        stale_latched = false
+        stale_deadline = (type(stale_after_s) == 'number' and stale_after_s > 0) and (fibers.now() + stale_after_s) or nil
       end
       if ev.op == 'retain' then
         emit({ tag = 'fact_changed', fact = item.name, payload = model.copy_value(recv_payload(ev)) })
@@ -108,6 +145,10 @@ function M.run(ctx)
       if not item.msg then
         emit({ tag = 'source_down', reason = tostring(item.err or (item.name .. ':closed')) })
         return
+      end
+      if refreshes_freshness(item) then
+        stale_latched = false
+        stale_deadline = (type(stale_after_s) == 'number' and stale_after_s > 0) and (fibers.now() + stale_after_s) or nil
       end
       emit({
         tag = 'event_seen',

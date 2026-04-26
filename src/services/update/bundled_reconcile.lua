@@ -20,6 +20,34 @@ local function copy(v, seen)
 	return out
 end
 
+local function stable_encode(v)
+	local tv = type(v)
+	if tv == 'nil' then return 'nil' end
+	if tv == 'boolean' or tv == 'number' then return tostring(v) end
+	if tv == 'string' then return string.format('%q', v) end
+	if tv ~= 'table' then return '<' .. tv .. '>' end
+	local is_array = true
+	local n = #v
+	for k in pairs(v) do
+		if type(k) ~= 'number' or k < 1 or k > n or k % 1 ~= 0 then
+			is_array = false
+			break
+		end
+	end
+	if is_array then
+		local parts = {}
+		for i = 1, n do parts[#parts + 1] = stable_encode(v[i]) end
+		return '[' .. table.concat(parts, ',') .. ']'
+	end
+	local keys, parts = {}, {}
+	for k in pairs(v) do keys[#keys + 1] = k end
+	table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+	for _, k in ipairs(keys) do
+		parts[#parts + 1] = stable_encode(k) .. ':' .. stable_encode(v[k])
+	end
+	return '{' .. table.concat(parts, ',') .. '}'
+end
+
 local function software_identity(component_state)
 	local sw = type(component_state) == 'table' and component_state.software or nil
 	if type(sw) ~= 'table' then return nil end
@@ -42,6 +70,7 @@ local function image_identity(inspected)
 		version = build.version,
 		build_id = build.build_id,
 		image_id = build.image_id,
+		payload_sha256 = type(payload) == 'table' and payload.sha256 or nil,
 	}
 end
 
@@ -76,8 +105,18 @@ local function matching_job(ctx, component, desired)
 	return nil
 end
 
+local function bundled_cache_key(component, bcfg, desired_release_id)
+	return table.concat({
+		tostring(component),
+		tostring(desired_release_id or ''),
+		stable_encode(type(bcfg) == 'table' and (bcfg.source or {}) or {}),
+		stable_encode(type(bcfg) == 'table' and (bcfg.target or {}) or {}),
+		stable_encode(type(bcfg) == 'table' and (bcfg.preflight or {}) or {}),
+	}, '|')
+end
+
 function M.new(ctx, commands, store)
-	return setmetatable({ ctx = ctx, commands = commands, store = store }, Bundled)
+	return setmetatable({ ctx = ctx, commands = commands, store = store, probe_cache = {} }, Bundled)
 end
 
 function Bundled:save_record(component, rec)
@@ -124,13 +163,12 @@ function Bundled:maybe_run()
 	end
 end
 
-function Bundled:maybe_component(component, bcfg)
-	if self.ctx.state.active_job or self.ctx.state.locks.global then return end
-
-	local current_state = self.ctx.observer:component_state_for(component)
-	if type(current_state) ~= 'table' or current_state.available == false then return end
-	if current_state.ready ~= true then return end
-	if not software_identity(current_state) then return end
+function Bundled:probe_desired(component, bcfg, desired_release_id)
+	local cache_key = bundled_cache_key(component, bcfg, desired_release_id)
+	local cached = self.probe_cache[component]
+	if cached and cached.key == cache_key then
+		return copy(cached.desired), nil
+	end
 
 	local artifact = { kind = 'bundled' }
 	local ref, desc, aerr = self.ctx.artifacts:resolve_job_artifact({
@@ -139,17 +177,35 @@ function Bundled:maybe_component(component, bcfg)
 		metadata = { source = 'bundled_probe' },
 	})
 	if not ref then
-		self.ctx.svc:obs_log('warn', { what = 'bundled_artifact_unavailable', component = component, err = tostring(aerr) })
-		return
+		return nil, aerr
 	end
-	-- Probe imports are not jobs.  They are transient and can be released after inspection.
 	self.ctx.artifacts:delete(ref)
 
 	local inspected = type(desc) == 'table' and desc.mcu_image or nil
 	local desired = image_identity(inspected)
-	if not desired then return end
+	if not desired then return nil, nil end
 	desired.source = 'bundled'
-	desired.cm5_release_id = cm5_release_id(self.ctx, bcfg)
+	desired.cm5_release_id = desired_release_id
+	self.probe_cache[component] = { key = cache_key, desired = copy(desired) }
+	return desired, nil
+end
+
+function Bundled:maybe_component(component, bcfg)
+	if self.ctx.state.active_job or self.ctx.state.locks.global then return end
+
+	local current_state = self.ctx.observer:component_state_for(component)
+	if type(current_state) ~= 'table' or current_state.available == false then return end
+	if current_state.ready ~= true then return end
+	if not software_identity(current_state) then return end
+
+	local desired_release_id = cm5_release_id(self.ctx, bcfg)
+	local desired, aerr = self:probe_desired(component, bcfg, desired_release_id)
+	if not desired then
+		if aerr then
+			self.ctx.svc:obs_log('warn', { what = 'bundled_artifact_unavailable', component = component, err = tostring(aerr) })
+		end
+		return
+	end
 
 	local current = software_identity(current_state)
 	local rec = self.store:get(component) or {}
@@ -202,9 +258,6 @@ function Bundled:maybe_component(component, bcfg)
 		self.ctx.svc:obs_log('warn', { what = 'bundled_job_create_failed', component = component, err = tostring(err) })
 		return
 	end
-	-- Resolve and attach the fresh bundled artefact immediately.  create_job_from_spec
-	-- is used so this helper can control metadata; the artefact source is still the
-	-- normal bundled source.
 	local aref, ameta, rerr = self.ctx.artifacts:resolve_job_artifact({
 		component = component,
 		artifact = { kind = 'bundled' },

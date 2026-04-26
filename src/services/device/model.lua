@@ -94,6 +94,24 @@ local function normalize_fact_routes(facts, where)
   return out
 end
 
+
+local function deep_equal(a, b, seen)
+  if a == b then return true end
+  if type(a) ~= type(b) then return false end
+  if type(a) ~= 'table' then return false end
+  seen = seen or {}
+  seen[a] = seen[a] or {}
+  if seen[a][b] then return true end
+  seen[a][b] = true
+  for k, v in pairs(a) do
+    if not deep_equal(v, b[k], seen) then return false end
+  end
+  for k in pairs(b) do
+    if a[k] == nil then return false end
+  end
+  return true
+end
+
 local function normalize_event_routes(events, where)
   local out = {}
   if events == nil then return out end
@@ -277,14 +295,24 @@ function M.note_fact(state, name, fact_name, payload, updated_at)
   if not rec or not has_facts(rec) or type(fact_name) ~= 'string' or fact_name == '' then
     return nil
   end
-  rec.raw_facts[fact_name] = payload
   rec.fact_state[fact_name] = rec.fact_state[fact_name] or { seen = false, updated_at = nil }
-  rec.fact_state[fact_name].seen = true
-  rec.fact_state[fact_name].updated_at = updated_at or rec.fact_state[fact_name].updated_at
+  local fst = rec.fact_state[fact_name]
+  local changed = (not fst.seen)
+    or (updated_at ~= nil and fst.updated_at ~= updated_at)
+    or (not deep_equal(rec.raw_facts[fact_name], payload))
+    or rec.source_up ~= true
+    or rec.source_err ~= nil
+
+  rec.raw_facts[fact_name] = payload
+  fst.seen = true
+  fst.updated_at = updated_at or fst.updated_at
   rec.source_up = true
   rec.source_err = nil
-  state.dirty_components[name] = true
-  state.summary_dirty = true
+
+  if changed then
+    state.dirty_components[name] = true
+    state.summary_dirty = true
+  end
   return rec
 end
 
@@ -311,10 +339,13 @@ end
 function M.note_source_down(state, name, reason)
   local rec = state.components[name]
   if not rec then return nil end
+  local changed = rec.source_up ~= false or rec.source_err ~= reason
   rec.source_up = false
   rec.source_err = reason
-  state.dirty_components[name] = true
-  state.summary_dirty = true
+  if changed then
+    state.dirty_components[name] = true
+    state.summary_dirty = true
+  end
   return rec
 end
 

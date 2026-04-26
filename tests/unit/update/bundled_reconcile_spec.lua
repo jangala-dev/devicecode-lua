@@ -567,4 +567,44 @@ function T.bundled_reconcile_retries_after_restart_when_previous_attempt_failed(
   end, { timeout = 5.0 })
 end
 
+
+function T.bundled_reconcile_caches_probe_by_release_and_source()
+  local calls = 0
+  local bundled = require 'services.update.bundled_reconcile'
+  local inst = bundled.new({
+    observer = {
+      component_state_for = function(_, component)
+        if component == 'cm5' then
+          return { software = { image_id = 'cm5-release-1' } }
+        end
+      end,
+    },
+    artifacts = {
+      resolve_job_artifact = function(_, payload)
+        calls = calls + 1
+        return 'art-' .. tostring(calls), {
+          mcu_image = {
+            build = { version = 'mcu-v1', build_id = 'b1', image_id = 'img-1' },
+            payload = { sha256 = string.rep('a', 64) },
+          },
+        }, nil
+      end,
+      delete = function() return true end,
+    },
+  }, {}, { get = function() return nil end, put = function() return true end })
+
+  local desired1, err1 = inst:probe_desired('mcu', { source = { kind = 'bundled', path = '/rom/mcu.dcmcu' } }, 'cm5-release-1')
+  assert(err1 == nil)
+  assert(type(desired1) == 'table' and desired1.image_id == 'img-1')
+  local desired2, err2 = inst:probe_desired('mcu', { source = { kind = 'bundled', path = '/rom/mcu.dcmcu' } }, 'cm5-release-1')
+  assert(err2 == nil)
+  assert(type(desired2) == 'table' and desired2.image_id == 'img-1')
+  assert(calls == 1)
+
+  local desired3, err3 = inst:probe_desired('mcu', { source = { kind = 'bundled', path = '/rom/mcu.dcmcu' } }, 'cm5-release-2')
+  assert(err3 == nil)
+  assert(type(desired3) == 'table' and desired3.image_id == 'img-1')
+  assert(calls == 2)
+end
+
 return T
