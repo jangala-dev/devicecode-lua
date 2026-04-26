@@ -6,21 +6,20 @@ The Update service owns durable update jobs.
 
 It is responsible for:
 
-1. creating, storing, listing, retrieving, retrying, cancelling, and discarding jobs
-2. normalising artefact inputs so the rest of the flow works on artefact refs only
+1. creating, storing, listing, retrieving, retrying, cancelling and discarding jobs
+2. normalising artefact inputs so the rest of the flow works on artefact refs and descriptor snapshots
 3. delegating component-specific work to pluggable backends
 4. persisting jobs through `control_store`
 5. publishing one retained record per job plus an aggregate summary
-6. running stage / commit / reconcile workers under a single active-worker policy
+6. running stage / commit / reconcile workers under a single active-job policy
 7. resuming post-commit reconcile after restart
+8. reconciling bundled desired state for configured components
 
-The current design is intentionally simple:
-
+The design is intentionally simple:
 - one active job globally
-- no deferred scheduler
-- explicit operator-driven jobs
+- no scheduler beyond explicit create/start/commit actions and bundled desired-state reconcile
 - component-specific mechanics in backends
-- service-level policy, persistence, and publication in the shell
+- service-level policy, persistence and publication in the shell
 
 ## Dependencies
 
@@ -34,10 +33,11 @@ The current design is intentionally simple:
 
 | Capability | Id | Purpose |
 |---|---|---|
-| `control_store` | `'update'` | Persist and reload job records under the configured namespace. |
-| `artifact_store` | `'main'` | Open, delete, and import artefacts. |
+| `control_store` | `'update'` | Persist and reload update job records and bundled desired-state records. |
+| `artifact_store` | `'main'` | Open, delete, import and stage artefacts. |
+| `signature_verify` | `'main'` | Optional signature verification for bundled MCU images. |
 
-The service discovers both capabilities before it becomes runnable.
+The service discovers `control_store/update` and `artifact_store/main` before it becomes runnable. `signature_verify/main` is referenced through a capability ref and used when bundled image policy asks for verification.
 
 ### Consumed service endpoints
 
@@ -47,17 +47,17 @@ Backends call into the rest of the system through stable local services.
 
 | Topic | Purpose |
 |---|---|
-| `{'cmd','device','component','do'}` | Dispatch `prepare_update`, `stage_update`, or `commit_update`. |
+| `{'cmd','device','component','do'}` | Dispatch `prepare_update`, `stage_update`, or `commit_update` for component backends. |
 
 #### Through `fabric`
 
 | Topic | Purpose |
 |---|---|
-| `{'cmd','fabric','transfer'}` | Stage MCU artefacts to a remote member over a fabric link. |
+| `{'cmd','fabric','transfer'}` | Stage remote artefacts to a member link for backends that use fabric transfer. |
 
 ### Observed retained state
 
-The service observes retained state for:
+The service observes retained state declared by active backends, currently including:
 
 | Topic pattern | Purpose |
 |---|---|
@@ -84,7 +84,7 @@ Retained payload on `{'cfg','update'}`:
   } | nil,
   components = {
     [<component>] = {
-      backend = 'cm5_swupdate' | 'mcu_component' | <string>,
+      backend = 'cm5_swupdate' | 'mcu_component',
       transfer = {
         link_id = <string|nil>,
         receiver = <topic|nil>,
@@ -94,6 +94,22 @@ Retained payload on `{'cfg','update'}`:
       timeout_stage = <number|nil>,
       timeout_commit = <number|nil>,
     },
+  } | nil,
+  bundled = {
+    namespace = <string|nil>,
+    components = {
+      [<component>] = {
+        enabled = <boolean>,
+        follow_mode_default = 'auto' | 'hold' | nil,
+        auto_start = <boolean|nil>,
+        auto_commit = <boolean|nil>,
+        retry_on_boot = <boolean|nil>,
+        source = <table|nil>,
+        target = <table|nil>,
+        preflight = <table|nil>,
+        cm5_release_id_field = <string|nil>,
+      },
+    } | nil,
   } | nil,
 }
 ```
@@ -116,26 +132,28 @@ Retained payload on `{'cfg','update'}`:
     },
   },
   components = {
-    cm5 = {
-      backend = 'cm5_swupdate',
-    },
-    mcu = {
-      backend = 'mcu_component',
-      transfer = {
-        link_id = 'cm5-uart-mcu',
-        receiver = { 'rpc', 'member', 'mcu', 'receive' },
-        timeout_s = 60.0,
-      },
-    },
+    cm5 = { backend = 'cm5_swupdate' },
+    mcu = { backend = 'mcu_component' },
+  },
+  bundled = {
+    namespace = 'update/state/bundled',
+    components = {},
   },
 }
 ```
 
-Notes:
+### Merge rules
 
-- if `cfg.components` is supplied, it replaces the default component-backend table completely
-- `reconcile.interval_s` remains part of config, but live reconcile is driven by retained-state changes plus timeout rather than interval polling
-- admission is currently global-single in practice; the state model keeps only `locks.global`
+- if `schema` is present and does not match `devicecode.config/update/1`, defaults are used
+- `jobs_namespace` overrides the default when it is a non-empty string
+- `reconcile.interval_s` and `reconcile.timeout_s` override defaults when positive numbers
+- `artifacts.default_policy` and `artifacts.policies` override defaults when valid strings
+- if `components` is present, it replaces the default component-backend table entirely
+- `bundled.namespace` overrides the default namespace when non-empty
+- each `bundled.components[component]` record is copied and normalised:
+  - `enabled` is `true` only when explicitly true
+  - `follow_mode_default` is `'hold'` only when explicitly set, otherwise `'auto'`
+  - `auto_start`, `auto_commit`, and `retry_on_boot` default to `true`
 
 ## Exposed commands
 
@@ -146,73 +164,149 @@ Notes:
 | `{'cmd','update','job','get'}` | Fetch one public job view. |
 | `{'cmd','update','job','list'}` | Fetch all public job views. |
 
+### `cmd/update/job/create`
+
+Request:
+
+```lua
+{
+  component = <string>,
+  offer_id = <string|nil>,
+  artifact = {
+    kind = 'import_path' | 'ref' | 'bundled',
+    ...kind-specific fields...
+  },
+  expected_image_id = <string|nil>,
+  metadata = <table|nil>,
+  options = {
+    auto_start = <boolean|nil>,
+    auto_commit = <boolean|nil>,
+  } | nil,
+}
+```
+
+Behaviour:
+- validates `component`
+- resolves the artefact through the artefact subsystem
+- captures `artifact_ref` and descriptor snapshot into the job
+- derives `expected_image_id` from bundled metadata when omitted and available
+- sets bundled metadata fields automatically when `artifact.kind == 'bundled'`
+- creates the job
+- if `options.auto_start == true`, immediately starts the job and replies with the post-start public job view
+
+Failures include:
+- `component_required`
+- `unknown_component`
+- any artefact resolution error
+- persistence failure
+
+### `cmd/update/job/do`
+
+Request:
+
+```lua
+{
+  job_id = <string>,
+  op = 'start' | 'commit' | 'cancel' | 'retry' | 'discard',
+}
+```
+
+Supported operations:
+- `start` -> transitions a `created` job into staging and spawns a stage runner
+- `commit` -> transitions an `awaiting_commit` job into `awaiting_return` and spawns a commit runner
+- `cancel` -> cancels a passive job (`created` or `awaiting_commit`)
+- `retry` -> clones a retryable terminal job into a new `created` job and supersedes the old one
+- `discard` -> discards a terminal job and unretains its retained record
+
+Failures include:
+- `invalid_op`
+- `unknown_job`
+- job-state-specific errors such as `job_not_startable`, `job_not_committable`, `job_active`, `job_terminal`, `job_not_retryable`, `job_not_discardable`
+- admission failure from `can_activate`
+
+### `cmd/update/job/get`
+
+Request:
+
+```lua
+{ job_id = <string> }
+```
+
+Success reply:
+
+```lua
+{ ok = true, job = <public job view> }
+```
+
+Failure:
+- `unknown_job`
+
+### `cmd/update/job/list`
+
+Request payload is ignored.
+
+Success reply:
+
+```lua
+{ ok = true, jobs = { <public job view>, ... } }
+```
+
 ## Artefact model
 
-The service works on artefact refs after job creation.
+After creation, the service works on artefact refs plus descriptor snapshots.
 
-A job may be created from:
+### Supported input kinds
 
-### Imported filesystem path
-
-```lua
-{
-  component = <string>,
-  artifact = {
-    kind = 'import_path',
-    path = <string>,
-  },
-  expected_version = <string|nil>,
-  metadata = <table|nil>,
-  options = {
-    auto_start = <boolean|nil>,
-    auto_commit = <boolean|nil>,
-  } | nil,
-}
-```
-
-The service imports the path through `artifact_store.import_path(...)` and stores only:
-
-- the resulting artefact ref
-- a descriptor snapshot
-
-### Existing artefact ref
+#### `import_path`
 
 ```lua
 {
-  component = <string>,
-  artifact = {
-    kind = 'ref',
-    ref = <string>,
-  },
-  expected_version = <string|nil>,
-  metadata = <table|nil>,
-  options = {
-    auto_start = <boolean|nil>,
-    auto_commit = <boolean|nil>,
-  } | nil,
+  kind = 'import_path',
+  path = <string>,
 }
 ```
 
-The service opens it through `artifact_store.open(...)` and snapshots its descriptor.
+The service imports the path through `artifact_store.import_path(...)` and stores the resulting artefact ref and descriptor snapshot.
+
+#### `ref`
+
+```lua
+{
+  kind = 'ref',
+  ref = <string>,
+}
+```
+
+The service opens the ref through `artifact_store.open(...)` and snapshots the descriptor.
+
+#### `bundled`
+
+```lua
+{
+  kind = 'bundled',
+  ...optional selector/config fields...
+}
+```
+
+The service resolves a bundled artefact for the target component through `Artifacts:import_bundled(...)`. For MCU images, this path can inspect and optionally verify a signed image bundle before it is imported into the artefact store.
 
 ### Retention policy
 
 Import policy is chosen by:
-
 1. `cfg.artifacts.policies[component]`
 2. otherwise `cfg.artifacts.default_policy`
-3. otherwise `'prefer_durable'`
+3. otherwise `'transient_only'`
 
-During execution, staged metadata may also return `artifact_retention`.
+Runtime behaviour also honours staged metadata from backends, notably `staged.artifact_retention`.
 
-Current behaviour:
-
-- `release` -> the artefact is deleted after staging success or terminal completion, depending on the path
-- anything else -> keep the artefact until explicit discard or other cleanup
+Current shell behaviour:
+- if a staged result reports `artifact_retention == 'release'`, the service deletes the artefact after staging success
+- terminal job discard also deletes any retained artefact ref before unretaining the job record
+- jobs may also explicitly release their artefact on runtime failure or success paths as directed by the runtime module
 
 ## Job model
 
-Top-level in-memory service state:
+Top-level in-memory state:
 
 ```lua
 {
@@ -228,7 +322,7 @@ Top-level in-memory service state:
 }
 ```
 
-Persisted job fields include:
+Persisted durable job fields include:
 
 ```lua
 {
@@ -237,7 +331,7 @@ Persisted job fields include:
   component = <string>,
   artifact_ref = <string|nil>,
   artifact_meta = <table|nil>,
-  expected_version = <string|nil>,
+  expected_image_id = <string|nil>,
   metadata = <table|nil>,
   auto_start = <boolean>,
   auto_commit = <boolean>,
@@ -259,27 +353,21 @@ Persisted job fields include:
     awaiting_return_run_id = <string|nil>,
     awaiting_return_mono = <number|nil>,
     progress = <table|nil>,
-    ...
-  } | nil,
+  },
 }
 ```
 
-Runtime-only fields under `job.runtime` are stripped before persistence.
+### Lifecycle states
 
-## Job states
-
-### Passive states
-
-- `created`
-- `awaiting_commit`
-
-### Active states
-
+Active states:
 - `staging`
 - `awaiting_return`
 
-### Terminal states
+Passive states:
+- `created`
+- `awaiting_commit`
 
+Terminal states:
 - `succeeded`
 - `failed`
 - `rolled_back`
@@ -288,60 +376,68 @@ Runtime-only fields under `job.runtime` are stripped before persistence.
 - `superseded`
 - `discarded`
 
-`discarded` exists in the model enums, but discarded jobs are removed from the store rather than retained as visible job records.
+Current shell policy is single-active globally through `locks.global`.
 
-## Public job view
+## Retained topics published
 
-Retained per-job payload under `{'state','update','jobs', <job_id>}`:
+| Topic | Payload |
+|---|---|
+| `{'state','update','jobs', <job_id>}` | public job view |
+| `{'state','update','summary'}` | aggregate summary |
+| `{'state','update','bundled', <component>}` | bundled desired-state record for that component |
+
+### Public job view
+
+Retained under `state/update/jobs/<job_id>` as:
 
 ```lua
 {
-  job_id = <string>,
-  component = <string>,
-  source = {
-    offer_id = <string|nil>,
+  job = {
+    job_id = <string>,
+    component = <string>,
+    source = { offer_id = <string|nil> },
+    artifact = {
+      ref = <string|nil>,
+      meta = <table|nil>,
+      expected_image_id = <string|nil>,
+      released_at = <number|nil>,
+      retention = <string|nil>,
+    },
+    lifecycle = {
+      state = <string>,
+      stage = <string>,
+      next_step = <string|nil>,
+      created_seq = <integer>,
+      updated_seq = <integer>,
+      created_mono = <number>,
+      updated_mono = <number>,
+      error = <string|nil>,
+    },
+    progress = <table|nil>,
+    observation = {
+      pre_commit_boot_id = <string|nil>,
+    },
+    actions = <job action table>,
+    result = <table|nil>,
+    metadata = <table|nil>,
+    engagement = {
+      commit_required = <boolean>,
+      commit_mode = <string|nil>,
+    },
   },
-  artifact = {
-    ref = <string|nil>,
-    meta = <table|nil>,
-    expected_version = <string|nil>,
-    released_at = <number|nil>,
-    retention = <string|nil>,
-  },
-  lifecycle = {
-    state = <string>,
-    stage = <string>,
-    next_step = <string|nil>,
-    created_seq = <integer>,
-    updated_seq = <integer>,
-    created_mono = <number>,
-    updated_mono = <number>,
-    error = <string|nil>,
-  },
-  progress = <table|nil>,
-  observation = {
-    pre_commit_boot_id = <string|nil>,
-  },
-  actions = {
-    start = <boolean>,
-    commit = <boolean>,
-    cancel = <boolean>,
-    retry = <boolean>,
-    discard = <boolean>,
-  },
-  result = <table|nil>,
-  metadata = <table|nil>,
 }
 ```
 
+`commit_required` is derived from `metadata.require_explicit_commit` or `metadata.commit_policy == 'manual'`.
+
 ### Summary payload
 
-Retained under `{'state','update','summary'}`:
+`state/update/summary` retains:
 
 ```lua
 {
   kind = 'update.summary',
-  jobs = { <public job>, ... },
+  jobs = { <public job view>, ... },
   counts = {
     total = <integer>,
     active = <integer>,
@@ -351,7 +447,7 @@ Retained under `{'state','update','summary'}`:
     created = <integer>,
     failed = <integer>,
     succeeded = <integer>,
-    ...state counters...
+    ...other state counts as present...
   },
   active = {
     job_id = <string>,
@@ -359,336 +455,68 @@ Retained under `{'state','update','summary'}`:
     state = <string>,
     since = <number>,
   } | nil,
-  locks = {
-    global = <job_id|nil>,
-  },
+  locks = <copy of state.locks>,
 }
 ```
 
-## Job actions
-
-Derived from job state:
-
-- `start` when `state == 'created'`
-- `commit` when `state == 'awaiting_commit'`
-- `cancel` when `state == 'created'` or `state == 'awaiting_commit'`
-- `retry` when terminal and an artefact ref is still present (`failed`, `rolled_back`, `timed_out`, `cancelled`)
-- `discard` when terminal
-
-## Command behaviour
-
-### `cmd/update/job/create`
-
-Accepted payload:
-
-```lua
-{
-  component = <string>,
-  offer_id = <string|nil>,
-  artifact = {
-    kind = 'import_path',
-    path = <string>,
-  } | {
-    kind = 'ref',
-    ref = <string>,
-  },
-  expected_version = <string|nil>,
-  metadata = <table|nil>,
-  options = {
-    auto_start = <boolean|nil>,
-    auto_commit = <boolean|nil>,
-  } | nil,
-}
-```
-
-Behaviour:
-
-1. validate component exists in current config
-2. resolve or import the artefact through `artifact_store`
-3. create a job in `created`
-4. if `auto_start` is true, immediately transition to `staging` and spawn a stage worker
-5. persist and publish the job
-
-### `cmd/update/job/do`
-
-Accepted shape:
-
-```lua
-{
-  job_id = <string>,
-  op = 'start' | 'commit' | 'cancel' | 'retry' | 'discard',
-}
-```
-
-#### `start`
-
-Allowed only when:
-
-- `state == 'created'`
-- no active global lock exists
-
-Effects:
-
-1. patch job to `state='staging'`, `stage='validating_artifact'`, `next_step='stage'`
-2. spawn a stage worker
-
-#### `commit`
-
-Allowed only when:
-
-- `state == 'awaiting_commit'`
-- no active global lock exists
-
-Effects:
-
-1. patch job to `state='awaiting_return'`, `stage='commit_sent'`, `next_step='reconcile'`
-2. flush dirty jobs immediately before commit
-3. spawn a commit worker
-
-#### `cancel`
-
-Allowed only when passive and non-terminal.
-
-Effect:
-
-- patch to `cancelled`
-
-#### `retry`
-
-Allowed only when `job_actions(job).retry` is true.
-
-Effect:
-
-1. create a fresh job from the same artefact ref and metadata
-2. patch the original job to `superseded`
-
-#### `discard`
-
-Allowed only when terminal.
-
-Effect:
-
-1. release/delete any retained artefact if still present
-2. delete the job from the control store
-3. delete it from local state
-4. unretain `state/update/jobs/<job_id>`
-
-Discarded jobs are removed rather than published in a visible `discarded` lifecycle state.
-
-### `cmd/update/job/get`
-
-Request:
-
-```lua
-{ job_id = <string> }
-```
-
-Response:
-
-```lua
-{ ok = true, job = <public job> }
-```
-
-Fails with `unknown_job`.
-
-### `cmd/update/job/list`
-
-Request payload is ignored.
-
-Response:
-
-```lua
-{ ok = true, jobs = { <public job>, ... } }
-```
-
-## Backends
-
-The service constructs one backend instance per configured component.
-
-### `cm5_swupdate`
-
-Built on top of the generic component-proxy backend.
-
-Uses `device` to:
-
-- `prepare_update`
-- `stage_update`
-- `commit_update`
-
-Stage path:
-
-- call `stage_update` with:
-  - `artifact_ref`
-  - `expected_version`
-  - `metadata`
-
-Reconcile success when:
-
-- observed software version matches `expected_version`
-- and updater state is compatible with `running`, `idle`, or `ready` (or absent)
-
-Reconcile failure when:
-
-- updater state is `failed`
-- or `rollback_detected`
-
-Default staged artefact retention for this backend is `keep`.
-
-### `mcu_component`
-
-Built on top of the component-proxy backend, but overrides stage.
-
-Prepare and commit still use `device` actions.
-
-Stage path uses `fabric` directly:
-
-```lua
-conn:call({ 'cmd', 'fabric', 'transfer' }, {
-  op = 'send_blob',
-  link_id = <configured link_id>,
-  source = <opened artefact source>,
-  receiver = <configured receiver topic|nil>,
-  meta = {
-    kind = 'firmware',
-    component = <component>,
-    version = job.expected_version,
-    job_id = job.job_id,
-    size = source:size(),
-    checksum = source:checksum(),
-    metadata = job.metadata,
-  },
-}, { timeout = transfer.timeout_s })
-```
-
-Stage success is normalised to:
-
-- `staged = true`
-- `artifact_retention = 'release'` if the backend did not already provide one
-
-Reconcile success when:
-
-- observed software version matches `expected_version`
-- and at least one of these is true:
-  - boot id changed from `pre_commit_boot_id`
-  - updater state is already `running`, `ready`, `idle`, or absent
-
-Reconcile failure when:
-
-- updater state is `failed`
-- or `rollback_detected`
-
-## Persistence and restart adoption
-
-Jobs are persisted under `jobs_namespace` through `control_store/update`.
-
-On startup:
-
-1. discover required capabilities
-2. open the configured repo namespace
-3. load all jobs
-4. rebuild backends and observers
-5. normalise persisted jobs
-6. mark all jobs dirty
-7. publish per-job state and summary
-8. signal `changed`
-9. if a resumable job exists, spawn a reconcile worker automatically
-
-Adoption rules:
-
-- `staging` -> `created` if the artefact ref still exists, else `failed` with `interrupted_before_stage`
-- `awaiting_return` stays resumable and gets `next_step='reconcile'`
-- `awaiting_commit` stays passive and committable
-
-The service currently resumes at most one post-commit reconcile job automatically, because admission is global-single.
-
-## Event-driven reconciliation
-
-Current reconcile is event-driven rather than interval-polled.
-
-The service watches retained state for:
-
-- `{'state','device','component', <component>}` for every configured component
-- `{'state','fabric','link', <link_id>, 'transfer'}` for components that declare a transfer link
-
-Observed component payloads are fed into `observe.lua`, which maintains the latest component state per component and signals a pulse whenever that state changes.
-
-The reconcile worker then waits on:
-
-- observed component-state change
-- or timeout
-
-On each change it re-evaluates backend-specific reconcile predicates. Progress updates are emitted whenever evaluation returns a non-terminal in-progress result.
-
-This means:
-
-- live reconcile is event-driven while the process is running
-- restart reconcile is rebuilt from persisted jobs plus fresh retained component state after restart
-
-`reconcile.interval_s` remains in config but is not the primary driver of progress detection in the current code.
-
-## Locking and admission
-
-Current admission policy is one active job globally.
-
-State fields:
-
-- `state.locks.global`
-- `state.active_job`
-
-`can_activate()` currently enforces only the global lock.
-
-A worker slot owns:
-
-- worker-scope creation
-- lock acquisition
-- lock release
-- `join_op()` for the current active worker
-
-The update service shell is responsible for observing active-worker completion and applying the resulting state transitions.
-
-## Service flow
-
-```mermaid
-flowchart TD
-  St[Start] --> A(Discover artifact_store/main and control_store/update)
-  A --> B(Open repo at jobs_namespace)
-  B --> C(Watch retained cfg/update)
-  C --> D(Bind create / do / get / list endpoints)
-  D --> E(Build backends and component observers)
-  E --> F(Load persisted jobs and normalise resumable state)
-  F --> G(Publish all jobs and summary)
-  G --> H{choice: cfg, create, do, get, list, runner event, changed pulse, active worker join, observer event}
-  H -->|cfg| I(Merge config, rebuild backends/observers, maybe adopt new repo namespace)
-  I --> J(Signal changed)
-  J --> H
-  H -->|create| K(Create and persist job)
-  K --> J
-  H -->|do:start| L(Patch to staging and spawn stage worker)
-  L --> H
-  H -->|do:commit| M(Patch to awaiting_return, flush store, spawn commit worker)
-  M --> H
-  H -->|do:cancel / retry / discard| N(Apply lifecycle mutation)
-  N --> J
-  H -->|runner staged| O(Patch to awaiting_commit; maybe release artefact)
-  O --> J
-  H -->|runner commit_started| P(Patch to awaiting_return and persist handoff)
-  P --> J
-  H -->|runner reconcile progress| Q(Publish in-progress job view)
-  Q --> H
-  H -->|runner success/failure/timeout| R(Patch terminal state; maybe release artefact)
-  R --> J
-  H -->|observer change| S(Update observed component state or transfer progress)
-  S --> H
-  H -->|changed pulse| T(Flush dirty jobs; publish summary; auto-resume reconcile if needed)
-  T --> H
-  H -->|active worker join| U(Release lock; fail/cancel job if worker died unexpectedly; hand off to reconcile or auto-commit if configured)
-  U --> J
-```
-
-## Architecture notes
-
-- the shell owns durable state, locks, publication, and command handling
-- stage / commit / reconcile work runs in child scopes and reports back through a bounded mailbox
-- all material is referred to indirectly by artefact ref after job creation
-- destructive commit is followed by explicit observation and timeout-bounded reconcile
-- the current scheduling policy is intentionally simple: one active job globally
+### Bundled desired-state record
+
+`state/update/bundled/<component>` stores the service’s long-lived reconcile state for that component, including fields such as:
+- `follow_mode`
+- `desired`
+- `sync_state`
+- `last_result`
+- `last_attempt_job_id`
+- `last_manual_job_id`
+- `updated_at`
+
+The exact shape is intentionally data-driven and stored through the bundled-state store rather than a dedicated schema module.
+
+## Runtime and reconciliation behaviour
+
+### Backends
+
+Built-in backends are:
+- `cm5_swupdate`
+- `mcu_component`
+
+All backends must implement:
+- `prepare`
+- `stage`
+- `commit`
+- `evaluate`
+
+Backends may also implement `observe_specs(cfg)` to declare retained observations required for reconcile.
+
+### Stage/commit runtime
+
+The service runtime owns:
+- spawning stage runners
+- spawning commit runners
+- adopting incomplete jobs on startup
+- releasing active locks
+- consuming runner mailbox events
+
+Important shell helpers include:
+- `enter_awaiting_return(job, stage, result, opts)`
+- post-stage release of transient artefacts when appropriate
+- post-commit startup reconcile
+
+### Observation-driven reconcile
+
+The service rebuilds backend observation watches from current config/backends and consumes observed retained state as first-class events. Reconcile is driven by:
+- changed observations
+- service restart adoption
+- bundled desired-state reconcile passes
+- timeout logic using `cfg.reconcile.timeout_s`
+
+### Bundled desired-state reconcile
+
+When enabled for a component, bundled reconcile:
+- identifies the current CM5 release from the `cm5` component software state
+- probes the bundled artefact for the component and derives desired image identity
+- compares desired image identity with the current component software identity
+- records long-lived follow/hold state in the bundled store
+- creates and optionally auto-starts/auto-commits normal update jobs when the current component diverges from the desired bundled image
+
+Bundled reconcile never bypasses the normal job model; it creates ordinary jobs and feeds them through the same update machinery.
