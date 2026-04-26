@@ -7,7 +7,7 @@
 --   * own the UI read model
 --   * publish retained UI state:
 --       svc/ui/announce
---       state/ui/main
+--       state/ui/summary
 --   * host the HTTP/WebSocket transport
 --
 -- Design notes:

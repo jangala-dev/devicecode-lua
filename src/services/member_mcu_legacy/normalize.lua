@@ -28,7 +28,7 @@ end
 --- Convert one legacy sample into canonical raw member facts.
 ---
 --- Returns a table keyed by device component fact names, suitable for
---- publishing under state/member/mcu/<...> via member_adapter.runtime.
+--- publishing under raw/member/mcu/state/<...> via member_adapter.runtime.
 function M.to_member_facts(sample)
 	if type(sample) ~= 'table' then return nil end
 

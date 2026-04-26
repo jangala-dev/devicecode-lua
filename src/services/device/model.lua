@@ -207,14 +207,14 @@ local function default_components()
       member = 'local',
       required_facts = { 'software', 'updater' },
       facts = {
-        software = topics.cap_updater_state('cm5', 'software'),
-        updater = topics.cap_updater_state('cm5', 'updater'),
-        health = topics.cap_updater_state('cm5', 'health'),
+        software = topics.public_updater_state('cm5', 'software'),
+        updater = topics.public_updater_state('cm5', 'updater'),
+        health = topics.public_updater_state('cm5', 'health'),
       },
       actions = {
-        prepare_update = topics.cap_updater_rpc('cm5', 'prepare'),
-        stage_update = topics.cap_updater_rpc('cm5', 'stage'),
-        commit_update = topics.cap_updater_rpc('cm5', 'commit'),
+        prepare_update = topics.public_updater_rpc('cm5', 'prepare'),
+        stage_update = topics.public_updater_rpc('cm5', 'stage'),
+        commit_update = topics.public_updater_rpc('cm5', 'commit'),
       },
     }),
   }
