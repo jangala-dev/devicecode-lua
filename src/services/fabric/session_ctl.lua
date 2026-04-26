@@ -25,6 +25,7 @@ local uuid      = require 'uuid'
 
 local protocol  = require 'services.fabric.protocol'
 local statefmt  = require 'services.fabric.statefmt'
+local topics    = require 'services.fabric.topics'
 
 local perform = fibers.perform
 local named_choice = fibers.named_choice
@@ -91,7 +92,8 @@ local function publish_state(conn, topic, link_id, snapshot)
 	}))
 end
 
-function M.new_state(link_id, state_conn)
+function M.new_state(link_id, state_conn, raw_opts)
+	raw_opts = raw_opts or {}
 	local pulse = pulse_mod.new()
 	local current = {
 		down = false,
@@ -107,6 +109,8 @@ function M.new_state(link_id, state_conn)
 	}
 	local last_published = nil
 	local topic = statefmt.component_topic(link_id, 'session')
+	local raw_kind = raw_opts.raw_kind or 'member'
+	local raw_source = raw_opts.raw_source or raw_opts.member or link_id
 
 	local holder = {}
 
@@ -114,6 +118,23 @@ function M.new_state(link_id, state_conn)
 		if force or not same_snapshot(current, last_published) then
 			last_published = current
 			publish_state(state_conn, topic, link_id, current)
+			local snap = export_snapshot(current)
+			state_conn:retain(topics.raw_source_meta(raw_kind, raw_source), {
+				kind = raw_kind,
+				source = raw_source,
+				link_id = link_id,
+				link_class = raw_opts.link_class,
+				member_class = raw_opts.member_class,
+				node_id = raw_opts.node_id,
+			})
+			state_conn:retain(topics.raw_source_status(raw_kind, raw_source), {
+				state = snap.state,
+				ready = snap.ready,
+				established = snap.established,
+				generation = snap.generation,
+				peer_node = snap.peer_node,
+			})
+			state_conn:retain(topics.raw_source_state(raw_kind, raw_source, 'session'), snap)
 		end
 	end
 
@@ -153,6 +174,9 @@ function M.new_state(link_id, state_conn)
 
 	function holder:unretain()
 		state_conn:unretain(topic)
+		state_conn:unretain(topics.raw_source_meta(raw_kind, raw_source))
+		state_conn:unretain(topics.raw_source_status(raw_kind, raw_source))
+		state_conn:unretain(topics.raw_source_state(raw_kind, raw_source, 'session'))
 	end
 
 	maybe_publish(true)
@@ -202,6 +226,8 @@ function M.run(ctx)
 	local liveness_timeout = tonumber(ctx.liveness_timeout_s) or 30.0
 	local link_id = ctx.link_id
 	local topic = statefmt.component_topic(link_id, 'session')
+	local raw_kind = ctx.raw_kind or 'member'
+	local raw_source = ctx.raw_source or ctx.member or link_id
 
 	local rpc_ready = false
 	local next_hello_at = runtime.now()
@@ -303,6 +329,9 @@ function M.run(ctx)
 			s.established = false
 		end)
 		state_conn:unretain(topic)
+		state_conn:unretain(topics.raw_source_meta(raw_kind, raw_source))
+		state_conn:unretain(topics.raw_source_status(raw_kind, raw_source))
+		state_conn:unretain(topics.raw_source_state(raw_kind, raw_source, 'session'))
 	end)
 
 	while true do

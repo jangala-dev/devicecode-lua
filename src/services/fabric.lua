@@ -25,6 +25,7 @@ local sleep    = require 'fibers.sleep'
 local base     = require 'devicecode.service_base'
 local session  = require 'services.fabric.session'
 local statefmt = require 'services.fabric.statefmt'
+local topics   = require 'services.fabric.topics'
 
 local perform = fibers.perform
 local named_choice = fibers.named_choice
@@ -144,6 +145,20 @@ local function publish_summary(conn, svc, state)
 	conn:retain(FABRIC_STATE_TOPIC, payload)
 end
 
+local function publish_transfer_manager(conn, svc, state)
+	local live = count_keys(state.links)
+	conn:retain(topics.transfer_mgr_meta(), {
+		owner = svc.name,
+		interface = 'devicecode.cap/transfer-manager/1',
+		methods = { ['send-blob'] = true },
+	})
+	conn:retain(topics.transfer_mgr_status(), {
+		state = 'available',
+		live_links = live,
+		desired_links = count_keys(state.desired),
+	})
+end
+
 ----------------------------------------------------------------------
 -- Link child lifecycle
 ----------------------------------------------------------------------
@@ -251,6 +266,7 @@ local function handle_link_exit(state, svc, conn, ev)
 	end
 
 	publish_summary(conn, svc, state)
+	publish_transfer_manager(conn, svc, state)
 end
 
 local function dispatch_transfer_request(state, req)
@@ -313,6 +329,7 @@ local function reconcile(state, svc, conn, report_tx, cfg_payload)
 	end
 
 	publish_summary(conn, svc, state)
+	publish_transfer_manager(conn, svc, state)
 end
 
 -- All shell concerns are first-class events:
@@ -344,6 +361,8 @@ function M.start(conn, opts)
 
 	fibers.current_scope():finally(function()
 		conn:unretain(FABRIC_STATE_TOPIC)
+	conn:unretain(topics.transfer_mgr_meta())
+	conn:unretain(topics.transfer_mgr_status())
 	end)
 
 	svc:announce({
@@ -368,7 +387,9 @@ function M.start(conn, opts)
 		full = 'drop_oldest',
 	})
 
-	local transfer_ep = conn:bind({ 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, {
+	publish_transfer_manager(conn, svc, state)
+
+	local transfer_ep = conn:bind(topics.transfer_mgr_rpc('send-blob'), {
 		queue_len = 32,
 	})
 
@@ -414,6 +435,7 @@ function M.start(conn, opts)
 						generation = ev.summary and ev.summary.generation or nil,
 					}
 					publish_summary(conn, svc, state)
+	publish_transfer_manager(conn, svc, state)
 				end
 
 			elseif ev.tag == 'link_exit' then
@@ -434,6 +456,7 @@ function M.start(conn, opts)
 			if cfg and not state.links[link_id] then
 				spawn_link(state, svc, conn, report_tx, link_id, cfg)
 				publish_summary(conn, svc, state)
+	publish_transfer_manager(conn, svc, state)
 			end
 
 		else

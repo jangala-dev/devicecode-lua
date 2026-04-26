@@ -23,6 +23,18 @@ local function t_cap_control(class, id, method)
     return { 'cap', class, id, 'rpc', method }
 end
 
+local function t_raw_host_cap_state(source, class, id, state)
+    return { 'raw', 'host', source, 'cap', class, id, 'state', state }
+end
+
+local function t_raw_host_cap_event(source, class, id, event)
+    return { 'raw', 'host', source, 'cap', class, id, 'event', event }
+end
+
+local function t_raw_host_cap_control(source, class, id, method)
+    return { 'raw', 'host', source, 'cap', class, id, 'rpc', method }
+end
+
 ---@class CapabilityReference
 ---@field conn Connection
 ---@field class CapabilityClass
@@ -31,7 +43,13 @@ local CapabilityReference = {}
 CapabilityReference.__index = CapabilityReference
 
 function CapabilityReference:call_control_op(method, args, opts)
-    return self.conn:call_op(t_cap_control(self.class, self.id, method), args, opts)
+    local topic
+    if self.raw_kind == 'host' then
+        topic = t_raw_host_cap_control(self.source, self.class, self.id, method)
+    else
+        topic = t_cap_control(self.class, self.id, method)
+    end
+    return self.conn:call_op(topic, args, opts)
 end
 
 ---@param method string
@@ -46,14 +64,26 @@ end
 ---@param opts table?
 ---@return Subscription
 function CapabilityReference:get_state_sub(field, opts)
-    return self.conn:subscribe(t_cap_state(self.class, self.id, field), opts)
+    local topic
+    if self.raw_kind == 'host' then
+        topic = t_raw_host_cap_state(self.source, self.class, self.id, field)
+    else
+        topic = t_cap_state(self.class, self.id, field)
+    end
+    return self.conn:subscribe(topic, opts)
 end
 
 ---@param field string
 ---@param opts table?
 ---@return Subscription
 function CapabilityReference:get_event_sub(field, opts)
-    return self.conn:subscribe(t_cap_event(self.class, self.id, field), opts)
+    local topic
+    if self.raw_kind == 'host' then
+        topic = t_raw_host_cap_event(self.source, self.class, self.id, field)
+    else
+        topic = t_cap_event(self.class, self.id, field)
+    end
+    return self.conn:subscribe(topic, opts)
 end
 
 ---@class CapListener
@@ -131,6 +161,15 @@ end
 ---@return CapabilityReference
 function CapSDK.new_cap_ref(conn, class, id)
     return setmetatable({ conn = conn, class = class, id = id }, CapabilityReference)
+end
+
+---@param conn Connection
+---@param source string
+---@param class CapabilityClass
+---@param id CapabilityId
+---@return CapabilityReference
+function CapSDK.new_raw_host_cap_ref(conn, source, class, id)
+    return setmetatable({ conn = conn, raw_kind = 'host', source = source, class = class, id = id }, CapabilityReference)
 end
 
 return CapSDK

@@ -192,6 +192,125 @@ function Commands:discard_job(job)
   return { ok = true }, nil
 end
 
+
+local function publish_ingest(ctx, rec)
+  if not rec or not rec.id then return end
+  ctx.conn:retain({ 'state', 'workflow', 'artifact-ingest', rec.id }, {
+    ingest = {
+      ingest_id = rec.id,
+      state = rec.state,
+      source = rec.source,
+      meta = ctx.model.copy_value(rec.meta),
+      policy = rec.policy,
+      bytes_received = rec.bytes_received or 0,
+      artifact_ref = rec.artifact_ref,
+      error = rec.error,
+      created_mono = rec.created_mono,
+      updated_mono = rec.updated_mono,
+    },
+  })
+end
+
+local function fail_ingest(ctx, rec, err)
+  if rec then
+    rec.state = 'failed'
+    rec.error = tostring(err or 'failed')
+    rec.updated_mono = ctx.now()
+    publish_ingest(ctx, rec)
+  end
+end
+
+function Commands:handle_ingest_create(req)
+  local ctx = self.ctx
+  local payload = req.payload or {}
+  local meta = payload.meta or payload.metadata or payload
+  local policy = payload.policy or 'transient_only'
+
+  local opts = ctx.cap_sdk.args.new.ArtifactStoreCreateSinkOpts(meta, policy)
+  if not opts then req:fail('invalid_ingest_create'); return end
+  local reply, err = ctx.artifact_cap:call_control('create_sink', opts)
+  if not reply then req:fail(err or 'artifact_store_unavailable'); return end
+  if reply.ok ~= true then req:fail(reply.reason or 'artifact_store_create_failed'); return end
+
+  local id = tostring(uuid.new())
+  local rec = {
+    id = id,
+    sink = reply.reason,
+    state = 'open',
+    source = meta and meta.source or meta and meta.kind or 'ui_upload',
+    meta = ctx.model.copy_value(meta),
+    policy = policy,
+    bytes_received = 0,
+    created_mono = ctx.now(),
+    updated_mono = ctx.now(),
+  }
+  ctx.ingests[id] = rec
+  publish_ingest(ctx, rec)
+
+  -- `sink` is retained in the reply as a transitional compatibility value for
+  -- older in-process callers. New callers should use append/commit/abort.
+  req:reply({ ok = true, ingest_id = id, sink = rec.sink })
+end
+
+function Commands:handle_ingest_append(req)
+  local ctx = self.ctx
+  local payload = req.payload or {}
+  local rec = ctx.ingests[payload.ingest_id]
+  if not rec then req:fail('unknown_ingest'); return end
+  if rec.state ~= 'open' then req:fail('ingest_not_open'); return end
+  local data = payload.data or payload.chunk
+  if type(data) ~= 'string' then req:fail('chunk_required'); return end
+  local offset = tonumber(payload.offset) or rec.bytes_received or 0
+  local ok, err = rec.sink:write_chunk(offset, data)
+  if not ok then fail_ingest(ctx, rec, err or 'append_failed'); req:fail(err or 'append_failed'); return end
+  rec.bytes_received = offset + #data
+  rec.updated_mono = ctx.now()
+  publish_ingest(ctx, rec)
+  req:reply({ ok = true, ingest_id = rec.id, offset = rec.bytes_received })
+end
+
+function Commands:handle_ingest_commit(req)
+  local ctx = self.ctx
+  local payload = req.payload or {}
+  local rec = ctx.ingests[payload.ingest_id]
+  if not rec then req:fail('unknown_ingest'); return end
+  if rec.state ~= 'open' then req:fail('ingest_not_open'); return end
+  local art, err = rec.sink:commit()
+  if not art then fail_ingest(ctx, rec, err or 'commit_failed'); req:fail(err or 'commit_failed'); return end
+  rec.state = 'committed'
+  rec.artifact_ref = art:ref()
+  rec.updated_mono = ctx.now()
+  publish_ingest(ctx, rec)
+  ctx.ingests[payload.ingest_id] = nil
+  req:reply({ ok = true, ingest_id = rec.id, artifact_ref = art:ref(), artifact = art })
+end
+
+function Commands:handle_ingest_abort(req)
+  local ctx = self.ctx
+  local payload = req.payload or {}
+  local rec = ctx.ingests[payload.ingest_id]
+  if not rec then req:fail('unknown_ingest'); return end
+  if rec.sink and rec.state == 'open' then rec.sink:abort() end
+  rec.state = 'aborted'
+  rec.updated_mono = ctx.now()
+  publish_ingest(ctx, rec)
+  ctx.ingests[payload.ingest_id] = nil
+  req:reply({ ok = true, ingest_id = rec.id })
+end
+
+function Commands:handle_ingest_delete(req)
+  local ctx = self.ctx
+  local payload = req.payload or {}
+  local ref = payload.artifact_ref or payload.ref
+  if type(ref) ~= 'string' or ref == '' then req:fail('artifact_ref_required'); return end
+  local opts = ctx.cap_sdk.args.new.ArtifactStoreDeleteOpts(ref)
+  if not opts then req:fail('invalid_delete'); return end
+  local reply, err = ctx.artifact_cap:call_control('delete', opts)
+  if not reply then req:fail(err or 'artifact_store_unavailable'); return end
+  if reply.ok ~= true then req:fail(reply.reason or 'delete_failed'); return end
+  req:reply({ ok = true })
+end
+
 function Commands:handle_create(req)
   local payload = req.payload or {}
   local job, err = self:create_job(payload)

@@ -45,6 +45,30 @@ local function t_cap_state(class, id)
     return { 'cap', class, id, 'state' }
 end
 
+local function path_token(s)
+    return tostring(s):gsub('_', '-')
+end
+
+local function raw_host_cap_meta(source, class, id)
+    return { 'raw', 'host', path_token(source), 'cap', path_token(class), id, 'meta' }
+end
+
+local function raw_host_cap_status(source, class, id)
+    return { 'raw', 'host', path_token(source), 'cap', path_token(class), id, 'status' }
+end
+
+local function raw_host_cap_state(source, class, id, field)
+    return { 'raw', 'host', path_token(source), 'cap', path_token(class), id, 'state', field }
+end
+
+local function raw_host_cap_event(source, class, id, event)
+    return { 'raw', 'host', path_token(source), 'cap', path_token(class), id, 'event', event }
+end
+
+local function raw_host_cap_rpc(source, class, id, method)
+    return { 'raw', 'host', path_token(source), 'cap', path_token(class), id, 'rpc', method }
+end
+
 ---@alias CapabilityEntry { inst: Capability, rpc: table<string, Endpoint> }
 
 ---@class HalService
@@ -215,9 +239,25 @@ function HalService.start(conn, opts)
                     id = cap.id,
                 })
             else
+                local cap_entry = get_cap(cap.class, cap.id)
+                if cap_entry then
+                    cap_entry.raw_source = device.class
+                    cap_entry.raw_class = cap.class
+                    for offering, _ in pairs(cap.offerings) do
+                        local key = 'raw:' .. tostring(device.class) .. ':' .. tostring(offering)
+                        cap_entry.rpc[key] = conn:bind(raw_host_cap_rpc(device.class, cap.class, cap.id, offering))
+                    end
+                end
                 svc:obs_event('capability_registered', { class = cap.class, id = cap.id })
-                conn:retain(t_cap_state(cap.class, cap.id), event_type)
-                conn:retain(t_cap_meta(cap.class, cap.id), { offerings = cap.offerings })
+                conn:retain(t_cap_state(cap.class, cap.id), event_type) -- legacy public capability presence
+                conn:retain(t_cap_meta(cap.class, cap.id), { offerings = cap.offerings }) -- legacy public capability metadata
+                conn:retain(raw_host_cap_status(device.class, cap.class, cap.id), event_type)
+                conn:retain(raw_host_cap_meta(device.class, cap.class, cap.id), {
+                    offerings = cap.offerings,
+                    provider = device.meta and device.meta.provider or ('hal.' .. tostring(device.class)),
+                    source = device.class,
+                    legacy_cap = { class = cap.class, id = cap.id },
+                })
             end
         end
 
@@ -243,6 +283,8 @@ function HalService.start(conn, opts)
                 svc:obs_event('capability_unregistered', { class = cap.class, id = cap.id })
                 conn:retain(t_cap_state(cap.class, cap.id), event_type)
                 conn:unretain(t_cap_meta(cap.class, cap.id))
+                conn:retain(raw_host_cap_status(device.class, cap.class, cap.id), event_type)
+                conn:unretain(raw_host_cap_meta(device.class, cap.class, cap.id))
             end
         end
 
@@ -265,7 +307,12 @@ function HalService.start(conn, opts)
     ---Handles running driver functions for control requests
     ---@param req Request
     local function on_cap_ctrl(req)
-        local class, id, verb = req.topic[2], req.topic[3], req.topic[5]
+        local class, id, verb
+        if req.topic[1] == 'raw' and req.topic[2] == 'host' and req.topic[4] == 'cap' then
+            class, id, verb = tostring(req.topic[5]):gsub('-', '_'), req.topic[6], req.topic[8]
+        else
+            class, id, verb = req.topic[2], req.topic[3], req.topic[5]
+        end
 
         if not class_valid(class) then
             svc:obs_log('warn', { what = 'invalid_cap_class', class = tostring(class) })
@@ -337,11 +384,24 @@ function HalService.start(conn, opts)
         end
 
         local topic = { 'cap', emit.class, emit.id, emit.mode, emit.key }
+        local cap_entry = get_cap(emit.class, emit.id)
+        local raw_topic = nil
+        if cap_entry and cap_entry.raw_source then
+            if emit.mode == 'event' then
+                raw_topic = raw_host_cap_event(cap_entry.raw_source, emit.class, emit.id, emit.key)
+            elseif emit.mode == 'state' then
+                raw_topic = raw_host_cap_state(cap_entry.raw_source, emit.class, emit.id, emit.key)
+            elseif emit.mode == 'meta' then
+                raw_topic = raw_host_cap_meta(cap_entry.raw_source, emit.class, emit.id)
+            end
+        end
 
         if emit.mode == 'event' then
-            conn:publish(topic, emit.data)
+            conn:publish(topic, emit.data) -- legacy public capability event/state plane
+            if raw_topic then conn:publish(raw_topic, emit.data) end
         else
-            conn:retain(topic, emit.data)
+            conn:retain(topic, emit.data) -- legacy public capability event/state plane
+            if raw_topic then conn:retain(raw_topic, emit.data) end
         end
     end
 

@@ -161,6 +161,9 @@ local function next_update_event_op(state, cfg_watch, endpoints, runner_rx, chan
     get = endpoints.get and endpoints.get:recv_op() or nil,
     list = endpoints.list and endpoints.list:recv_op() or nil,
     ingest_create = endpoints.ingest_create and endpoints.ingest_create:recv_op() or nil,
+    ingest_append = endpoints.ingest_append and endpoints.ingest_append:recv_op() or nil,
+    ingest_commit = endpoints.ingest_commit and endpoints.ingest_commit:recv_op() or nil,
+    ingest_abort = endpoints.ingest_abort and endpoints.ingest_abort:recv_op() or nil,
     ingest_delete = endpoints.ingest_delete and endpoints.ingest_delete:recv_op() or nil,
     runner = runner_rx:recv_op(),
     changed = changed:changed_op(seen):wrap(function(ver)
@@ -260,7 +263,12 @@ function M.start(conn, opts)
     repo = repo,
     store_cap = store_cap,
     artifact_cap = artifact_cap,
-    signature_verify_cap = cap_sdk.new_cap_ref(conn, 'signature_verify', 'main'),
+    cap_sdk = cap_sdk,
+    -- Provider-native verifier backends are HAL-owned raw host capabilities.
+    -- The crypto module normalises semantics for update; this legacy public
+    -- cap route should no longer be used by new code.
+    signature_verify_cap = cap_sdk.new_raw_host_cap_ref(conn, 'signature-verify', 'signature-verify', 'main'),
+    ingests = {},
     service_scope = service_scope,
     service_run_id = service_run_id,
     now = now,
@@ -456,6 +464,9 @@ function M.start(conn, opts)
   local get_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { queue_len = 32 })
   local list_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'list-jobs' }, { queue_len = 32 })
   local ingest_create_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'create' }, { queue_len = 32 })
+  local ingest_append_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'append' }, { queue_len = 32 })
+  local ingest_commit_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'commit' }, { queue_len = 32 })
+  local ingest_abort_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'abort' }, { queue_len = 32 })
   local ingest_delete_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'delete' }, { queue_len = 32 })
 
   local endpoints = {
@@ -468,8 +479,28 @@ function M.start(conn, opts)
     get = get_ep,
     list = list_ep,
     ingest_create = ingest_create_ep,
+    ingest_append = ingest_append_ep,
+    ingest_commit = ingest_commit_ep,
+    ingest_abort = ingest_abort_ep,
     ingest_delete = ingest_delete_ep,
   }
+
+  conn:retain({ 'cap', 'update-manager', 'main', 'meta' }, {
+    owner = svc.name,
+    interface = 'devicecode.cap/update-manager/1',
+    methods = {
+      ['create-job'] = true, ['start-job'] = true, ['commit-job'] = true,
+      ['cancel-job'] = true, ['retry-job'] = true, ['discard-job'] = true,
+      ['get-job'] = true, ['list-jobs'] = true,
+    },
+  })
+  conn:retain({ 'cap', 'update-manager', 'main', 'status' }, { state = 'available' })
+  conn:retain({ 'cap', 'artifact-ingest', 'main', 'meta' }, {
+    owner = svc.name,
+    interface = 'devicecode.cap/artifact-ingest/1',
+    methods = { create = true, append = true, commit = true, abort = true, delete = true },
+  })
+  conn:retain({ 'cap', 'artifact-ingest', 'main', 'status' }, { state = 'available' })
 
   local function adopt_repo(new_repo)
     local loaded2, err = new_repo:load_all()
@@ -496,6 +527,14 @@ function M.start(conn, opts)
     for _, rec in pairs(state.component_obs) do
       rec.watch:unwatch()
     end
+    for id, rec in pairs(ctx.ingests or {}) do
+      if rec.sink and rec.state == 'open' then pcall(function() rec.sink:abort() end) end
+      conn:unretain({ 'state', 'workflow', 'artifact-ingest', id })
+    end
+    conn:unretain({ 'cap', 'update-manager', 'main', 'meta' })
+    conn:unretain({ 'cap', 'update-manager', 'main', 'status' })
+    conn:unretain({ 'cap', 'artifact-ingest', 'main', 'meta' })
+    conn:unretain({ 'cap', 'artifact-ingest', 'main', 'status' })
     create_ep:unbind()
     start_ep:unbind()
     commit_ep:unbind()
@@ -505,6 +544,9 @@ function M.start(conn, opts)
     get_ep:unbind()
     list_ep:unbind()
     ingest_create_ep:unbind()
+    ingest_append_ep:unbind()
+    ingest_commit_ep:unbind()
+    ingest_abort_ep:unbind()
     ingest_delete_ep:unbind()
   end)
 
@@ -532,6 +574,26 @@ function M.start(conn, opts)
       seen = req or seen
       runtime:on_changed_tick()
       bundled:maybe_run()
+
+    elseif which == 'ingest_create' then
+      if not req then error('artifact-ingest create endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_ingest_create(req)
+
+    elseif which == 'ingest_append' then
+      if not req then error('artifact-ingest append endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_ingest_append(req)
+
+    elseif which == 'ingest_commit' then
+      if not req then error('artifact-ingest commit endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_ingest_commit(req)
+
+    elseif which == 'ingest_abort' then
+      if not req then error('artifact-ingest abort endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_ingest_abort(req)
+
+    elseif which == 'ingest_delete' then
+      if not req then error('artifact-ingest delete endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_ingest_delete(req)
 
     elseif which == 'runner' then
       runtime:handle_runner_event(req)
@@ -622,17 +684,6 @@ function M.start(conn, opts)
       if not req then error('update discard endpoint closed: ' .. tostring(err), 0) end
       commands:handle_method(req, 'discard')
 
-
-    elseif which == 'ingest_create' then
-      if not req then error('artifact-ingest create endpoint closed: ' .. tostring(err), 0) end
-      local payload = req.payload or {}
-      local reply, ierr = artifact_cap:call_control('create_sink', payload)
-      if not reply then req:fail(ierr) elseif reply.ok ~= true then req:fail(reply.reason) else req:reply(reply) end
-    elseif which == 'ingest_delete' then
-      if not req then error('artifact-ingest delete endpoint closed: ' .. tostring(err), 0) end
-      local payload = req.payload or {}
-      local reply, ierr = artifact_cap:call_control('delete', payload)
-      if not reply then req:fail(ierr) elseif reply.ok ~= true then req:fail(reply.reason) else req:reply(reply) end
     elseif which == 'get' then
       if not req then
         error('update get endpoint closed: ' .. tostring(err), 0)

@@ -4,7 +4,6 @@ local ui_fakes = require 'tests.support.ui_fakes'
 local runfibers = require 'tests.support.run_fibers'
 local op = require 'fibers.op'
 local uploads_mod = require 'services.ui.uploads'
-
 local sleep = require 'fibers.sleep'
 
 local function timed_http_stream(opts)
@@ -39,44 +38,114 @@ local function timed_http_stream(opts)
     return stream
 end
 
+local function make_artifact(ref, chunks, checksum)
+    return {
+        ref = function() return ref end,
+        describe = function()
+            return { size = #table.concat(chunks or {}), checksum = checksum or 'sha256:abc' }
+        end,
+    }
+end
+
+local function call_key(topic)
+    return table.concat(topic, '/')
+end
+
+local function make_fake_conn(calls, opts)
+    opts = opts or {}
+    local ingest_id = opts.ingest_id or 'ingest-1'
+    local chunks = {}
+    local expected_offset = 0
+
+    local fake_conn = {}
+
+    function fake_conn:call(topic, payload, opts3)
+        local key = call_key(topic)
+        calls[#calls + 1] = { op = 'call', key = key, payload = payload }
+
+        if key == 'cap/artifact-ingest/main/rpc/create' then
+            if opts.create_ingest_error then return nil, opts.create_ingest_error end
+            return { ok = true, ingest_id = ingest_id }, nil
+        end
+
+        if key == 'cap/artifact-ingest/main/rpc/append' then
+            if opts.append_error then return nil, opts.append_error end
+            assert(payload.ingest_id == ingest_id)
+            assert(payload.offset == expected_offset)
+            assert(type(payload.data) == 'string')
+            chunks[#chunks + 1] = payload.data
+            expected_offset = expected_offset + #payload.data
+            calls[#calls + 1] = { op = 'write_chunk', offset = payload.offset, data = payload.data }
+            return { ok = true, ingest_id = ingest_id, offset = expected_offset }, nil
+        end
+
+        if key == 'cap/artifact-ingest/main/rpc/commit' then
+            if opts.commit_error then return nil, opts.commit_error end
+            assert(payload.ingest_id == ingest_id)
+            calls[#calls + 1] = { op = 'commit' }
+            local ref = opts.artifact_ref or 'artifact:1'
+            return { ok = true, ingest_id = ingest_id, artifact = make_artifact(ref, chunks, opts.checksum) }, nil
+        end
+
+        if key == 'cap/artifact-ingest/main/rpc/abort' then
+            assert(payload.ingest_id == ingest_id)
+            calls[#calls + 1] = { op = 'abort' }
+            return { ok = true, ingest_id = ingest_id }, nil
+        end
+
+        if key == 'cap/artifact-ingest/main/rpc/delete' then
+            calls[#calls + 1] = { op = 'delete', artifact_ref = payload and payload.artifact_ref }
+            return { ok = true }, nil
+        end
+
+        if key == 'cap/update-manager/main/rpc/create-job' then
+            if opts.create_job_sleep_s then
+                sleep.sleep(opts.create_job_sleep_s)
+                if opts3 and opts3.timeout and opts.create_job_sleep_s > opts3.timeout then
+                    return nil, 'timeout'
+                end
+            end
+            if opts.create_job_error then return nil, opts.create_job_error end
+            return { ok = true, job = { job_id = opts.job_id or 'job-1' } }, nil
+        end
+
+        if key == 'cap/update-manager/main/rpc/start-job' then
+            if opts.start_job_sleep_s then
+                sleep.sleep(opts.start_job_sleep_s)
+                if opts3 and opts3.timeout and opts.start_job_sleep_s > opts3.timeout then
+                    return nil, 'timeout'
+                end
+            end
+            if opts.start_job_error then return nil, opts.start_job_error end
+            if opts.start_job_should_not_call then error('should_not_start_job') end
+            return { ok = true, job = { job_id = opts.job_id or 'job-1' } }, nil
+        end
+
+        return nil, 'unexpected:' .. key
+    end
+
+    function fake_conn:call_op(topic, payload)
+        local reply, err = self:call(topic, payload)
+        return op.always(reply, err)
+    end
+
+    return fake_conn
+end
+
+local function op_names(calls)
+    local ops = {}
+    for i = 1, #calls do
+        local c = calls[i]
+        local name = c.op == 'call' and c.key or c.op
+        if name then ops[#ops + 1] = name end
+    end
+    return ops
+end
+
 function T.uploads_manager_streams_into_sink_and_creates_started_job_once()
     local calls = {}
-    local sink = {
-        chunks = {},
-        write_chunk = function(self, offset, data)
-            calls[#calls + 1] = { op = 'write_chunk', offset = offset, data = data }
-            self.chunks[#self.chunks + 1] = data
-            return true
-        end,
-        abort = function() calls[#calls + 1] = { op = 'abort' } return true end,
-        commit = function(self)
-            calls[#calls + 1] = { op = 'commit' }
-            return {
-                ref = function() return 'artifact:1' end,
-                describe = function() return { size = #table.concat(self.chunks), checksum = 'sha256:abc' } end,
-            }, nil
-        end,
-    }
-    local fake_conn = {
-        call = function(_, topic, payload)
-            local key = table.concat(topic, '/')
-            calls[#calls + 1] = { op = 'call', key = key, payload = payload }
-            if key == 'cap/artifact-ingest/main/rpc/create' then
-                return { ok = true, reason = sink }, nil
-            elseif key == 'cap/update-manager/main/rpc/create-job' then
-                return { ok = true, job = { job_id = 'job-1' } }, nil
-            elseif key == 'cap/update-manager/main/rpc/start-job' then
-                return { ok = true, job = { job_id = 'job-1' } }, nil
-            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
-                return { ok = true }, nil
-            end
-            return nil, 'unexpected'
-        end,
-        call_op = function(self, topic, payload)
-            local reply, err = self:call(topic, payload)
-            return op.always(reply, err)
-        end,
-    }
+    local fake_conn = make_fake_conn(calls, { artifact_ref = 'artifact:1', job_id = 'job-1' })
+
     runfibers.run(function()
         local uploads = uploads_mod.new({
             require_session = function(session_id)
@@ -107,20 +176,27 @@ function T.uploads_manager_streams_into_sink_and_creates_started_job_once()
         assert(out.update_flow.staged == true)
         assert(out.update_flow.requires_commit == true)
         assert(out.update_flow.next_action == 'commit')
-        local create_payload = calls[#calls - 1].payload
+
+        local create_payload
+        for _, c in ipairs(calls) do
+            if c.key == 'cap/update-manager/main/rpc/create-job' then
+                create_payload = c.payload
+                break
+            end
+        end
         assert(type(create_payload) == 'table' and type(create_payload.metadata) == 'table')
         assert(create_payload.metadata.commit_policy == 'manual')
         assert(create_payload.metadata.require_explicit_commit == true)
     end)
-    local ops = {}
-    for i = 1, #calls do
-        local name = calls[i].op == 'call' and calls[i].key or calls[i].op
-        if name ~= nil then ops[#ops + 1] = name end
-    end
+
+    local ops = op_names(calls)
     assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
-    assert(ops[#ops - 2] == 'commit')
-    assert(ops[#ops - 1] == 'cap/update-manager/main/rpc/create-job')
-    assert(ops[#ops] == 'cap/update-manager/main/rpc/start-job')
+    assert(ops[2] == 'cap/artifact-ingest/main/rpc/append')
+    assert(ops[3] == 'write_chunk')
+    assert(ops[4] == 'cap/artifact-ingest/main/rpc/commit')
+    assert(ops[5] == 'commit')
+    assert(ops[6] == 'cap/update-manager/main/rpc/create-job')
+    assert(ops[7] == 'cap/update-manager/main/rpc/start-job')
 end
 
 function T.uploads_manager_rejects_component_not_allowed()
@@ -154,30 +230,8 @@ end
 
 function T.uploads_manager_rejects_too_large_body()
     local calls = {}
-    local sink = {
-        write_chunk = function(_, _offset, _data)
-            calls[#calls + 1] = 'write_chunk'
-            return true
-        end,
-        abort = function()
-            calls[#calls + 1] = 'abort'
-            return true
-        end,
-        commit = function() error('should_not_commit') end,
-    }
-    local fake_conn = {
-        call = function(_, topic, _payload)
-            local key = table.concat(topic, '/')
-            if key == 'cap/artifact-ingest/main/rpc/create' then
-                return { ok = true, reason = sink }, nil
-            end
-            error('unexpected call: ' .. key)
-        end,
-        call_op = function(self, topic, payload)
-            local reply, err = self:call(topic, payload)
-            return op.always(reply, err)
-        end,
-    }
+    local fake_conn = make_fake_conn(calls)
+
     runfibers.run(function()
         local uploads = uploads_mod.new({
             require_session = function() return { principal = ui_fakes.principal('u1') }, nil end,
@@ -201,46 +255,16 @@ function T.uploads_manager_rejects_too_large_body()
         assert(err.code == 'bad_request')
         assert(err.http_status == 400)
     end)
-    assert(calls[1] == 'write_chunk')
-    assert(calls[#calls] == 'abort')
+    local ops = op_names(calls)
+    assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
+    assert(ops[2] == 'cap/artifact-ingest/main/rpc/append')
+    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/abort')
+    assert(ops[#ops] == 'abort')
 end
 
 function T.uploads_manager_deletes_artifact_when_update_create_fails_after_commit()
     local calls = {}
-    local sink = {
-        chunks = {},
-        write_chunk = function(self, offset, data)
-            calls[#calls + 1] = { op = 'write_chunk', offset = offset, data = data }
-            self.chunks[#self.chunks + 1] = data
-            return true
-        end,
-        abort = function() calls[#calls + 1] = { op = 'abort' } return true end,
-        commit = function(self)
-            calls[#calls + 1] = { op = 'commit' }
-            return {
-                ref = function() return 'artifact:cleanup-create' end,
-                describe = function() return { size = #table.concat(self.chunks), checksum = 'sha256:cleanup-create' } end,
-            }, nil
-        end,
-    }
-    local fake_conn = {
-        call = function(_, topic, payload)
-            local key = table.concat(topic, '/')
-            calls[#calls + 1] = { op = 'call', key = key, payload = payload }
-            if key == 'cap/artifact-ingest/main/rpc/create' then
-                return { ok = true, reason = sink }, nil
-            elseif key == 'cap/update-manager/main/rpc/create-job' then
-                return nil, 'create_failed'
-            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
-                return { ok = true }, nil
-            end
-            error('unexpected call: ' .. key)
-        end,
-        call_op = function(self, topic, payload)
-            local reply, err = self:call(topic, payload)
-            return op.always(reply, err)
-        end,
-    }
+    local fake_conn = make_fake_conn(calls, { artifact_ref = 'artifact:cleanup-create', checksum = 'sha256:cleanup-create', create_job_error = 'create_failed' })
     runfibers.run(function()
         local uploads = uploads_mod.new({
             require_session = function() return { principal = ui_fakes.principal('u1') }, nil end,
@@ -262,54 +286,17 @@ function T.uploads_manager_deletes_artifact_when_update_create_fails_after_commi
         assert(out == nil)
         assert(err == 'create_failed')
     end)
-    local ops = {}
-    for i = 1, #calls do
-        local name = calls[i].op == 'call' and calls[i].key or calls[i].op
-        ops[#ops + 1] = name
-    end
-    assert(ops[#ops - 2] == 'commit')
-    assert(ops[#ops - 1] == 'cap/update-manager/main/rpc/create-job')
-    assert(ops[#ops] == 'cap/artifact-ingest/main/rpc/delete')
+    local ops = op_names(calls)
+    assert(ops[#ops - 4] == 'cap/artifact-ingest/main/rpc/commit')
+    assert(ops[#ops - 3] == 'commit')
+    assert(ops[#ops - 2] == 'cap/update-manager/main/rpc/create-job')
+    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/delete')
+    assert(ops[#ops] == 'delete')
 end
 
 function T.uploads_manager_deletes_artifact_when_update_start_fails_after_create()
     local calls = {}
-    local sink = {
-        chunks = {},
-        write_chunk = function(self, offset, data)
-            calls[#calls + 1] = { op = 'write_chunk', offset = offset, data = data }
-            self.chunks[#self.chunks + 1] = data
-            return true
-        end,
-        abort = function() calls[#calls + 1] = { op = 'abort' } return true end,
-        commit = function(self)
-            calls[#calls + 1] = { op = 'commit' }
-            return {
-                ref = function() return 'artifact:cleanup-start' end,
-                describe = function() return { size = #table.concat(self.chunks), checksum = 'sha256:cleanup-start' } end,
-            }, nil
-        end,
-    }
-    local fake_conn = {
-        call = function(_, topic, payload)
-            local key = table.concat(topic, '/')
-            calls[#calls + 1] = { op = 'call', key = key, payload = payload }
-            if key == 'cap/artifact-ingest/main/rpc/create' then
-                return { ok = true, reason = sink }, nil
-            elseif key == 'cap/update-manager/main/rpc/create-job' then
-                return { ok = true, job = { job_id = 'job-start-fail' } }, nil
-            elseif key == 'cap/update-manager/main/rpc/start-job' then
-                return nil, 'start_failed'
-            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
-                return { ok = true }, nil
-            end
-            error('unexpected call: ' .. key)
-        end,
-        call_op = function(self, topic, payload)
-            local reply, err = self:call(topic, payload)
-            return op.always(reply, err)
-        end,
-    }
+    local fake_conn = make_fake_conn(calls, { artifact_ref = 'artifact:cleanup-start', checksum = 'sha256:cleanup-start', job_id = 'job-start-fail', start_job_error = 'start_failed' })
     runfibers.run(function()
         local uploads = uploads_mod.new({
             require_session = function() return { principal = ui_fakes.principal('u1') }, nil end,
@@ -331,29 +318,18 @@ function T.uploads_manager_deletes_artifact_when_update_start_fails_after_create
         assert(out == nil)
         assert(err == 'start_failed')
     end)
-    local ops = {}
-    for i = 1, #calls do
-        local name = calls[i].op == 'call' and calls[i].key or calls[i].op
-        ops[#ops + 1] = name
-    end
-    assert(ops[#ops - 3] == 'commit')
-    assert(ops[#ops - 2] == 'cap/update-manager/main/rpc/create-job')
-    assert(ops[#ops - 1] == 'cap/update-manager/main/rpc/start-job')
-    assert(ops[#ops] == 'cap/artifact-ingest/main/rpc/delete')
+    local ops = op_names(calls)
+    assert(ops[#ops - 5] == 'cap/artifact-ingest/main/rpc/commit')
+    assert(ops[#ops - 4] == 'commit')
+    assert(ops[#ops - 3] == 'cap/update-manager/main/rpc/create-job')
+    assert(ops[#ops - 2] == 'cap/update-manager/main/rpc/start-job')
+    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/delete')
+    assert(ops[#ops] == 'delete')
 end
 
 function T.uploads_manager_times_out_before_artifact_create()
     local calls = {}
-    local fake_conn = {
-        call = function(_, topic, _payload)
-            calls[#calls + 1] = table.concat(topic, '/')
-            error('should_not_call_upstream')
-        end,
-        call_op = function(self, topic, payload)
-            local reply, err = self:call(topic, payload)
-            return op.always(reply, err)
-        end,
-    }
+    local fake_conn = make_fake_conn(calls)
     runfibers.run(function()
         local uploads = uploads_mod.new({
             require_session = function() return { principal = ui_fakes.principal('u1') }, nil end,
@@ -382,33 +358,7 @@ end
 
 function T.uploads_manager_aborts_sink_when_deadline_expires_during_receive()
     local calls = {}
-    local sink = {
-        write_chunk = function(_, offset, data)
-            calls[#calls + 1] = { op = 'write_chunk', offset = offset, data = data }
-            return true
-        end,
-        abort = function()
-            calls[#calls + 1] = { op = 'abort' }
-            return true
-        end,
-        commit = function()
-            error('should_not_commit')
-        end,
-    }
-    local fake_conn = {
-        call = function(_, topic, _payload)
-            local key = table.concat(topic, '/')
-            calls[#calls + 1] = { op = 'call', key = key }
-            if key == 'cap/artifact-ingest/main/rpc/create' then
-                return { ok = true, reason = sink }, nil
-            end
-            error('unexpected call: ' .. key)
-        end,
-        call_op = function(self, topic, payload)
-            local reply, err = self:call(topic, payload)
-            return op.always(reply, err)
-        end,
-    }
+    local fake_conn = make_fake_conn(calls)
     runfibers.run(function()
         local uploads = uploads_mod.new({
             require_session = function() return { principal = ui_fakes.principal('u1') }, nil end,
@@ -430,53 +380,16 @@ function T.uploads_manager_aborts_sink_when_deadline_expires_during_receive()
         assert(type(err) == 'table')
         assert(err.code == 'timeout')
     end)
-    local ops = {}
-    for i = 1, #calls do
-        local name = calls[i].op == 'call' and calls[i].key or calls[i].op
-        ops[#ops + 1] = name
-    end
+    local ops = op_names(calls)
     assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
-    assert(ops[2] == 'write_chunk')
+    assert(ops[2] == 'cap/artifact-ingest/main/rpc/append')
+    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/abort')
     assert(ops[#ops] == 'abort')
 end
 
 function T.uploads_manager_times_out_before_create_job_after_successful_receive()
     local calls = {}
-    local sink = {
-        chunks = {},
-        write_chunk = function(self, offset, data)
-            calls[#calls + 1] = { op = 'write_chunk', offset = offset, data = data }
-            self.chunks[#self.chunks + 1] = data
-            return true
-        end,
-        abort = function()
-            calls[#calls + 1] = { op = 'abort' }
-            return true
-        end,
-        commit = function(self)
-            calls[#calls + 1] = { op = 'commit' }
-            return {
-                ref = function() return 'artifact:timeout-before-create' end,
-                describe = function() return { size = #table.concat(self.chunks), checksum = 'sha256:timeout-before-create' } end,
-            }, nil
-        end,
-    }
-    local fake_conn = {
-        call = function(_, topic, _payload)
-            local key = table.concat(topic, '/')
-            calls[#calls + 1] = { op = 'call', key = key }
-            if key == 'cap/artifact-ingest/main/rpc/create' then
-                return { ok = true, reason = sink }, nil
-            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
-                return { ok = true }, nil
-            end
-            error('unexpected call: ' .. key)
-        end,
-        call_op = function(self, topic, payload)
-            local reply, err = self:call(topic, payload)
-            return op.always(reply, err)
-        end,
-    }
+    local fake_conn = make_fake_conn(calls, { artifact_ref = 'artifact:timeout-before-create', checksum = 'sha256:timeout-before-create' })
     runfibers.run(function()
         local uploads = uploads_mod.new({
             require_session = function() return { principal = ui_fakes.principal('u1') }, nil end,
@@ -500,58 +413,23 @@ function T.uploads_manager_times_out_before_create_job_after_successful_receive(
         assert(type(err) == 'table')
         assert(err.code == 'timeout')
     end)
-    local ops = {}
-    for i = 1, #calls do
-        local name = calls[i].op == 'call' and calls[i].key or calls[i].op
-        ops[#ops + 1] = name
-    end
+    local ops = op_names(calls)
     assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
-    assert(ops[#ops - 1] == 'commit')
-    assert(ops[#ops] == 'cap/artifact-ingest/main/rpc/delete')
+    assert(ops[#ops - 3] == 'cap/artifact-ingest/main/rpc/commit')
+    assert(ops[#ops - 2] == 'commit')
+    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/delete')
+    assert(ops[#ops] == 'delete')
 end
 
 function T.uploads_manager_times_out_before_start_after_create_job()
     local calls = {}
-    local sink = {
-        chunks = {},
-        write_chunk = function(self, offset, data)
-            calls[#calls + 1] = { op = 'write_chunk', offset = offset, data = data }
-            self.chunks[#self.chunks + 1] = data
-            return true
-        end,
-        abort = function()
-            calls[#calls + 1] = { op = 'abort' }
-            return true
-        end,
-        commit = function(self)
-            calls[#calls + 1] = { op = 'commit' }
-            return {
-                ref = function() return 'artifact:timeout-before-start' end,
-                describe = function() return { size = #table.concat(self.chunks), checksum = 'sha256:timeout-before-start' } end,
-            }, nil
-        end,
-    }
-    local fake_conn = {
-        call = function(_, topic, _payload)
-            local key = table.concat(topic, '/')
-            calls[#calls + 1] = { op = 'call', key = key }
-            if key == 'cap/artifact-ingest/main/rpc/create' then
-                return { ok = true, reason = sink }, nil
-            elseif key == 'cap/update-manager/main/rpc/create-job' then
-                sleep.sleep(0.02)
-                return { ok = true, job = { job_id = 'job-timeout-before-start' } }, nil
-            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
-                return { ok = true }, nil
-            elseif key == 'cap/update-manager/main/rpc/start-job' then
-                error('should_not_start_job')
-            end
-            error('unexpected call: ' .. key)
-        end,
-        call_op = function(self, topic, payload)
-            local reply, err = self:call(topic, payload)
-            return op.always(reply, err)
-        end,
-    }
+    local fake_conn = make_fake_conn(calls, {
+        artifact_ref = 'artifact:timeout-before-start',
+        checksum = 'sha256:timeout-before-start',
+        create_job_sleep_s = 0.02,
+        job_id = 'job-timeout-before-start',
+        start_job_should_not_call = true,
+    })
     runfibers.run(function()
         local uploads = uploads_mod.new({
             require_session = function() return { principal = ui_fakes.principal('u1') }, nil end,
@@ -575,15 +453,13 @@ function T.uploads_manager_times_out_before_start_after_create_job()
         assert(type(err) == 'table')
         assert(err.code == 'timeout')
     end)
-    local ops = {}
-    for i = 1, #calls do
-        local name = calls[i].op == 'call' and calls[i].key or calls[i].op
-        ops[#ops + 1] = name
-    end
+    local ops = op_names(calls)
     assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
-    assert(ops[#ops - 2] == 'commit')
-    assert(ops[#ops - 1] == 'cap/update-manager/main/rpc/create-job')
-    assert(ops[#ops] == 'cap/artifact-ingest/main/rpc/delete')
+    assert(ops[#ops - 4] == 'cap/artifact-ingest/main/rpc/commit')
+    assert(ops[#ops - 3] == 'commit')
+    assert(ops[#ops - 2] == 'cap/update-manager/main/rpc/create-job')
+    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/delete')
+    assert(ops[#ops] == 'delete')
 end
 
 return T

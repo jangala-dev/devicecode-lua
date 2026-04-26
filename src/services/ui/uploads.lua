@@ -22,6 +22,18 @@ local M = {}
 local Uploads = {}
 Uploads.__index = Uploads
 
+local function normalise_update_err(err, fallback)
+	if err == nil then
+		return errors.upstream(fallback)
+	end
+	if type(err) == 'table' then
+		return err
+	end
+	if err == 'timeout' then
+		return errors.timeout()
+	end
+	return err
+end
 
 function M.new(opts)
 	opts = opts or {}
@@ -46,8 +58,7 @@ function Uploads:_delete_artifact(artifact_cap, artifact_ref)
 		return
 	end
 
-	local delete_opts = assert(cap_sdk.args.new.ArtifactStoreDeleteOpts(artifact_ref))
-	artifact_cap:call_control('delete', delete_opts)
+	artifact_cap:call_control('delete', { artifact_ref = artifact_ref })
 end
 
 function Uploads:_upload_deadline()
@@ -69,17 +80,20 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta, deadli
 		return nil, terr
 	end
 
-	local create_opts = assert(cap_sdk.args.new.ArtifactStoreCreateSinkOpts({
-		kind = 'update_upload',
-		component = meta.component,
-		name = meta.name,
-		version = meta.version,
-		build = meta.build,
-		checksum = meta.checksum,
-		upload_id = upload_id,
-	}, 'transient_only'))
+	local create_payload = {
+		meta = {
+			kind = 'update_upload',
+			component = meta.component,
+			name = meta.name,
+			version = meta.version,
+			build = meta.build,
+			checksum = meta.checksum,
+			upload_id = upload_id,
+		},
+		policy = 'transient_only',
+	}
 
-	local reply, aerr = artifact_cap:call_control('create', create_opts)
+	local reply, aerr = artifact_cap:call_control('create', create_payload)
 	if not reply then
 		return nil, errors.from(aerr, 502)
 	end
@@ -87,41 +101,66 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta, deadli
 		return nil, errors.from(reply.reason, 502)
 	end
 
-	local sink = reply.reason
+	local ingest_id = reply.ingest_id
+	if type(ingest_id) ~= 'string' or ingest_id == '' then
+		return nil, errors.from('ingest_id_missing', 502)
+	end
+
 	local offset = 0
+	local function abort_ingest()
+		artifact_cap:call_control('abort', { ingest_id = ingest_id })
+	end
 
 	while true do
 		local remaining, terr = self:_remaining_timeout(deadline)
 		if not remaining then
-			sink:abort()
+			abort_ingest()
 			return nil, terr
 		end
 
 		local chunk, rerr = stream:get_body_chars(64 * 1024)
 		if chunk == nil then
-			sink:abort()
+			abort_ingest()
 			return nil, errors.bad_request('body_read_failed: ' .. tostring(rerr or 'body_read_failed'))
 		end
 		if chunk == '' then
 			break
 		end
 
-		local ok, werr = sink:write_chunk(offset, chunk)
+		local ok, werr = artifact_cap:call_control('append', {
+			ingest_id = ingest_id,
+			offset = offset,
+			data = chunk,
+		})
 		if not ok then
-			sink:abort()
-			return nil, errors.from(werr or 'sink_write_failed', 502)
+			abort_ingest()
+			return nil, errors.from(werr or 'ingest_append_failed', 502)
+		end
+		if ok.ok ~= true then
+			abort_ingest()
+			return nil, errors.from(ok.reason or 'ingest_append_failed', 502)
 		end
 
 		offset = offset + #chunk
 		if self._max_bytes and offset > self._max_bytes then
-			sink:abort()
+			abort_ingest()
 			return nil, errors.bad_request('upload_too_large')
 		end
 	end
 
-	local artefact, commit_err = sink:commit()
-	if not artefact then
-		return nil, errors.from(commit_err or 'sink_commit_failed', 502)
+	local committed, commit_err = artifact_cap:call_control('commit', { ingest_id = ingest_id })
+	if not committed then
+		abort_ingest()
+		return nil, errors.from(commit_err or 'ingest_commit_failed', 502)
+	end
+	if committed.ok ~= true then
+		abort_ingest()
+		return nil, errors.from(committed.reason or 'ingest_commit_failed', 502)
+	end
+
+	local artefact = committed.artifact
+	if artefact == nil then
+		return nil, errors.from('artifact_missing', 502)
 	end
 
 	return artefact, nil
@@ -148,7 +187,7 @@ function Uploads:_create_update_job(user_conn, artefact, meta, deadline)
 	}, timeout_s)
 
 	if created == nil then
-		return nil, uerr or errors.upstream('update_create failed')
+		return nil, normalise_update_err(uerr, 'update_create failed')
 	end
 	return created, nil
 end
@@ -165,7 +204,7 @@ function Uploads:_start_update_job(user_conn, job_id, deadline)
 	}, timeout_s)
 
 	if started == nil then
-		return nil, serr or errors.upstream('update_start failed')
+		return nil, normalise_update_err(serr, 'update_start failed')
 	end
 	return started, nil
 end

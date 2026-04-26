@@ -67,7 +67,15 @@ function M.run(params)
 	local status_tx,      status_rx      = new_mailbox(64)
 
 	local state_conn = root_conn:derive()
-	local session = session_ctl.new_state(link_id, state_conn)
+	local raw_kind = cfg.raw_kind or cfg.source_kind or 'member'
+	local raw_source = cfg.raw_source or cfg.member or cfg.member_id or cfg.member_class or cfg.peer_node or link_id
+	local session = session_ctl.new_state(link_id, state_conn, {
+		raw_kind = raw_kind,
+		raw_source = raw_source,
+		link_class = cfg.link_class,
+		member_class = cfg.member_class,
+		node_id = cfg.node_id,
+	})
 
 	local peer_conn = root_conn:derive({
 		origin_factory = function()
@@ -86,6 +94,10 @@ function M.run(params)
 		reader.run({
 			transport          = transport,
 			link_id            = link_id,
+			raw_kind           = raw_kind,
+			raw_source         = raw_source,
+			link_class         = cfg.link_class,
+			member_class       = cfg.member_class,
 			svc                = svc,
 			control_tx         = control_in_tx,
 			rpc_tx             = rpc_in_tx,
@@ -113,6 +125,10 @@ function M.run(params)
 	spawn_required(function()
 		session_ctl.run({
 			link_id            = link_id,
+			raw_kind           = raw_kind,
+			raw_source         = raw_source,
+			link_class         = cfg.link_class,
+			member_class       = cfg.member_class,
 			svc                = svc,
 			session            = session,
 			state_conn         = state_conn,
@@ -147,6 +163,8 @@ function M.run(params)
 			max_pending_calls     = cfg.max_pending_calls,
 			max_inbound_helpers   = cfg.max_inbound_helpers,
 			call_timeout_s        = cfg.call_timeout_s,
+			raw_kind              = raw_kind,
+			raw_source            = raw_source,
 		})
 	end, 'rpc_bridge_spawn')
 
