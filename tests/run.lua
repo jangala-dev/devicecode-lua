@@ -57,6 +57,7 @@ local files = {
 	'unit.shared.crypto.verifier_spec',
 	'unit.shared.encoding.b64url_spec',
 	'unit.ui.http_transport_spec',
+	'unit.ui.cqueues_bridge_spec',
 	'unit.ui.model_spec',
 	'unit.ui.queries_spec',
 	'unit.ui.service_spec',
