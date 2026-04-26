@@ -53,14 +53,6 @@ function Uploads:_artifact_cap(user_conn)
 	return cap_sdk.new_cap_ref(user_conn, 'artifact-ingest', 'main')
 end
 
-function Uploads:_delete_artifact(artifact_cap, artifact_ref)
-	if type(artifact_ref) ~= 'string' or artifact_ref == '' then
-		return
-	end
-
-	artifact_cap:call_control('delete', { artifact_ref = artifact_ref })
-end
-
 function Uploads:_upload_deadline()
 	local timeout_s = tonumber(self._upload_timeout_s) or 30.0
 	return fibers.now() + timeout_s
@@ -239,13 +231,11 @@ function Uploads:upload_update(session_id, stream, req_headers)
 
 			local created, uerr = self:_create_update_job(user_conn, artefact, meta, deadline)
 			if created == nil then
-				self:_delete_artifact(artifact_cap, artefact:ref())
 				return nil, uerr
 			end
 
 			local started, serr = self:_start_update_job(user_conn, created.job.job_id, deadline)
 			if started == nil then
-				self:_delete_artifact(artifact_cap, artefact:ref())
 				return nil, serr
 			end
 

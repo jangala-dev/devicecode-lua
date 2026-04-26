@@ -77,7 +77,6 @@ function M.default_cfg(schema)
 			mcu = { backend = 'mcu_component' },
 		},
 		bundled = {
-			namespace = 'update/state/bundled',
 			components = {},
 		},
 	}
@@ -141,9 +140,6 @@ function M.merge_cfg(payload, schema)
 	end
 
 	if type(data.bundled) == 'table' then
-		if type(data.bundled.namespace) == 'string' and data.bundled.namespace ~= '' then
-			cfg.bundled.namespace = data.bundled.namespace
-		end
 		if type(data.bundled.components) == 'table' then
 			cfg.bundled.components = {}
 			for component, spec in pairs(data.bundled.components) do
@@ -174,6 +170,7 @@ function M.new_state(cfg)
 		dirty_jobs = {},
 		summary_dirty = false,
 		component_obs = {},
+		component_summaries = {},
 	}
 end
 

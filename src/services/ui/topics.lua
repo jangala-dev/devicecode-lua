@@ -161,7 +161,6 @@ M.sort_entries = sort_entries
 function M.svc_status() return { 'svc', 'ui', 'status' } end
 function M.svc_meta() return { 'svc', 'ui', 'meta' } end
 function M.cfg() return { 'cfg', 'ui' } end
-function M.summary() return { 'state', 'ui', 'summary' } end
 function M.obs_event(name) return { 'obs', 'v1', 'ui', 'event', name } end
 function M.obs_metric(name) return { 'obs', 'v1', 'ui', 'metric', name } end
 function M.obs_counter(name) return { 'obs', 'v1', 'ui', 'counter', name } end

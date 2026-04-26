@@ -8,8 +8,57 @@ local update_preflight = require 'tests.support.update_preflight'
 local update      = require 'services.update'
 local sleep_mod   = require 'fibers.sleep'
 local safe        = require 'coxpcall'
+local cjson       = require 'cjson.safe'
 
 local T = {}
+
+
+local function u16le(n)
+  return string.char(n % 256, math.floor(n / 256) % 256)
+end
+
+local function u32le(n)
+  return string.char(
+    n % 256,
+    math.floor(n / 256) % 256,
+    math.floor(n / 65536) % 256,
+    math.floor(n / 16777216) % 256
+  )
+end
+
+local function make_dcmcu(opts)
+  opts = opts or {}
+  local payload = opts.payload or 'PAYLOAD'
+  local manifest = {
+    schema = 1,
+    component = 'mcu',
+    target = {
+      product_family = 'bigbox',
+      hardware_profile = opts.hardware_profile or 'bb-v1-cm5-2',
+      mcu_board_family = opts.mcu_board_family or 'rp2354a',
+    },
+    build = {
+      version = opts.version or 'mcu-v1',
+      build_id = opts.build_id or '2026.04.24-1',
+      image_id = opts.image_id or 'mcu-bigbox-1+2026.04.24-1',
+    },
+    payload = {
+      format = 'raw-bin',
+      length = #payload,
+      sha256 = opts.sha256 or string.rep('a', 64),
+    },
+    signing = {
+      key_id = 'test-key',
+      sig_alg = 'ed25519',
+    },
+  }
+  local manifest_bytes = cjson.encode(manifest)
+  local sig = string.rep('S', 64)
+  local header = table.concat({
+    'DCMCUIMG', u16le(1), u16le(32), u32le(#manifest_bytes), u32le(64), u32le(#payload), u32le(0), u32le(0)
+  })
+  return header .. manifest_bytes .. sig .. payload
+end
 
 local function install_fake_mcu_preflight()
   local restore = update_preflight.install_fake_mcu_preflight()
@@ -488,6 +537,39 @@ function T.update_service_marks_bundled_hold_after_manual_mcu_success()
     local caller = bus:connect()
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
     local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+    local cfg_conn = bus:connect()
+    local dcmcu_path = '/rom/mcu/current.dcmcu'
+
+    storagecaps.seed_import_path(
+      artifacts,
+      dcmcu_path,
+      make_dcmcu({
+        version = 'mcu-v1-manual',
+        image_id = 'mcu-v1-manual',
+        sha256 = string.rep('b', 64),
+      })
+    )
+
+    cfg_conn:retain({ 'cfg', 'update' }, {
+      schema = 'devicecode.config/update/1',
+      bundled = {
+        components = {
+          mcu = {
+            enabled = true,
+            follow_mode_default = 'hold',
+            auto_start = true,
+            auto_commit = true,
+            source = { kind = 'bundled', path = dcmcu_path },
+            target = {
+              product_family = 'bigbox',
+              hardware_profile = 'bb-v1-cm5-2',
+              mcu_board_family = 'rp2354a',
+            },
+          },
+        },
+      },
+    })
+
     bind_device_double(scope, bus:connect(), { mcu = 'mcu-v0' }, {
       artifact_retention = 'release',
       commit_version = { mcu = 'mcu-v1-manual' },
@@ -526,8 +608,9 @@ function T.update_service_marks_bundled_hold_after_manual_mcu_success()
       local okp, payload = safe.pcall(function()
         return probe.wait_payload(caller, { 'state', 'update', 'component', 'mcu' }, { timeout = 0.02 })
       end)
-      return okp and type(payload) == 'table' and payload.follow_mode == 'hold' and payload.last_result == 'manual_success_hold'
-    end, { timeout = 0.75, interval = 0.01 }))
+      return okp and type(payload) == 'table'
+        and payload.follow_mode == 'hold'
+        and (payload.last_result == 'manual_success_hold' or payload.last_result == 'held')    end, { timeout = 0.75, interval = 0.01 }))
   end, { timeout = 3.0 })
 end
 

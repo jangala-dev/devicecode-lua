@@ -549,7 +549,6 @@
                 "mode": "global_single"
             },
             "bundled": {
-                "namespace": "update/state/bundled",
                 "components": {}
             }
         }

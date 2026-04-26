@@ -12,7 +12,7 @@ return {
     return {
       render = function()
         return ui_diag.render(helper.shallow_merge({
-          main_fn = opts.main_fn or (conn and helper.retained_fn(conn, { 'state', 'ui', 'summary' }) or nil),
+          main_fn = opts.main_fn or nil,
           config_net_fn = opts.config_net_fn or (conn and helper.retained_fn(conn, { 'cfg', 'net' }) or nil),
           services_fn = opts.services_fn,
           fabric_fn = opts.fabric_fn or (conn and helper.retained_fn(conn, { 'state', 'fabric' }) or nil),

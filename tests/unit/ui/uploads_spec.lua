@@ -93,11 +93,6 @@ local function make_fake_conn(calls, opts)
             return { ok = true, ingest_id = ingest_id }, nil
         end
 
-        if key == 'cap/artifact-ingest/main/rpc/delete' then
-            calls[#calls + 1] = { op = 'delete', artifact_ref = payload and payload.artifact_ref }
-            return { ok = true }, nil
-        end
-
         if key == 'cap/update-manager/main/rpc/create-job' then
             if opts.create_job_sleep_s then
                 sleep.sleep(opts.create_job_sleep_s)
@@ -262,7 +257,7 @@ function T.uploads_manager_rejects_too_large_body()
     assert(ops[#ops] == 'abort')
 end
 
-function T.uploads_manager_deletes_artifact_when_update_create_fails_after_commit()
+function T.uploads_manager_does_not_publicly_delete_artifact_when_update_create_fails_after_commit()
     local calls = {}
     local fake_conn = make_fake_conn(calls, { artifact_ref = 'artifact:cleanup-create', checksum = 'sha256:cleanup-create', create_job_error = 'create_failed' })
     runfibers.run(function()
@@ -287,14 +282,12 @@ function T.uploads_manager_deletes_artifact_when_update_create_fails_after_commi
         assert(err == 'create_failed')
     end)
     local ops = op_names(calls)
-    assert(ops[#ops - 4] == 'cap/artifact-ingest/main/rpc/commit')
-    assert(ops[#ops - 3] == 'commit')
-    assert(ops[#ops - 2] == 'cap/update-manager/main/rpc/create-job')
-    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/delete')
-    assert(ops[#ops] == 'delete')
+    assert(ops[#ops - 2] == 'cap/artifact-ingest/main/rpc/commit')
+    assert(ops[#ops - 1] == 'commit')
+    assert(ops[#ops] == 'cap/update-manager/main/rpc/create-job')
 end
 
-function T.uploads_manager_deletes_artifact_when_update_start_fails_after_create()
+function T.uploads_manager_does_not_publicly_delete_artifact_when_update_start_fails_after_create()
     local calls = {}
     local fake_conn = make_fake_conn(calls, { artifact_ref = 'artifact:cleanup-start', checksum = 'sha256:cleanup-start', job_id = 'job-start-fail', start_job_error = 'start_failed' })
     runfibers.run(function()
@@ -319,12 +312,10 @@ function T.uploads_manager_deletes_artifact_when_update_start_fails_after_create
         assert(err == 'start_failed')
     end)
     local ops = op_names(calls)
-    assert(ops[#ops - 5] == 'cap/artifact-ingest/main/rpc/commit')
-    assert(ops[#ops - 4] == 'commit')
-    assert(ops[#ops - 3] == 'cap/update-manager/main/rpc/create-job')
-    assert(ops[#ops - 2] == 'cap/update-manager/main/rpc/start-job')
-    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/delete')
-    assert(ops[#ops] == 'delete')
+    assert(ops[#ops - 3] == 'cap/artifact-ingest/main/rpc/commit')
+    assert(ops[#ops - 2] == 'commit')
+    assert(ops[#ops - 1] == 'cap/update-manager/main/rpc/create-job')
+    assert(ops[#ops] == 'cap/update-manager/main/rpc/start-job')
 end
 
 function T.uploads_manager_times_out_before_artifact_create()
@@ -415,10 +406,8 @@ function T.uploads_manager_times_out_before_create_job_after_successful_receive(
     end)
     local ops = op_names(calls)
     assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
-    assert(ops[#ops - 3] == 'cap/artifact-ingest/main/rpc/commit')
-    assert(ops[#ops - 2] == 'commit')
-    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/delete')
-    assert(ops[#ops] == 'delete')
+    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/commit')
+    assert(ops[#ops] == 'commit')
 end
 
 function T.uploads_manager_times_out_before_start_after_create_job()
@@ -455,11 +444,9 @@ function T.uploads_manager_times_out_before_start_after_create_job()
     end)
     local ops = op_names(calls)
     assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
-    assert(ops[#ops - 4] == 'cap/artifact-ingest/main/rpc/commit')
-    assert(ops[#ops - 3] == 'commit')
-    assert(ops[#ops - 2] == 'cap/update-manager/main/rpc/create-job')
-    assert(ops[#ops - 1] == 'cap/artifact-ingest/main/rpc/delete')
-    assert(ops[#ops] == 'delete')
+    assert(ops[#ops - 2] == 'cap/artifact-ingest/main/rpc/commit')
+    assert(ops[#ops - 1] == 'commit')
+    assert(ops[#ops] == 'cap/update-manager/main/rpc/create-job')
 end
 
 return T

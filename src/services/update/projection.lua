@@ -24,6 +24,10 @@ function M.summary_topic()
 	return topics.summary()
 end
 
+function M.component_summary_topic(component)
+	return topics.component_summary(component)
+end
+
 function M.public_job(job)
 	local staged_meta = type(job.staged_meta) == 'table' and job.staged_meta or nil
 	local runtime = type(job.runtime) == 'table' and job.runtime or {}
@@ -122,10 +126,10 @@ function M.summary_payload(state)
 
 	return {
 		kind = 'update.summary',
-		jobs = M.public_jobs(state),
 		counts = counts,
 		active = active,
 		locks = copy_value(state.locks),
+		components = copy_value(state.component_summaries or {}),
 	}
 end
 

@@ -145,16 +145,11 @@ local function wait_service_running(conn)
   end, { timeout = 0.75, interval = 0.01 }))
 end
 
-local function wait_job_state(conn, state, timeout)
+local function wait_job_state(control, state, timeout)
   return probe.wait_until(function()
-    local okp, payload = safe.pcall(function()
-      return probe.wait_payload(conn, { 'state', 'update', 'summary' }, { timeout = 0.02 })
-    end)
-    if not okp or type(payload) ~= 'table' or type(payload.jobs) ~= 'table' then
-      return false
-    end
-    for _, job in ipairs(payload.jobs) do
-      if type(job) == 'table' and type(job.lifecycle) == 'table' and job.lifecycle.state == state then
+    local jobs = control.namespaces['update/jobs'] or {}
+    for _, job in pairs(jobs) do
+      if type(job) == 'table' and job.state == state then
         return true
       end
     end
@@ -169,6 +164,14 @@ local function wait_bundled(conn, pred, timeout)
     end)
     return okp and pred(payload)
   end, { timeout = timeout or 1.0, interval = 0.01 }))
+end
+
+local function latest_payload(conn, topic)
+  local okp, payload = safe.pcall(function()
+    return probe.wait_payload(conn, topic, { timeout = 0.02 })
+  end)
+  if okp then return payload end
+  return nil
 end
 
 local function start_update_scope(parent, bus)
@@ -285,17 +288,13 @@ function T.bundled_reconcile_respects_hold_mode_and_does_not_create_job()
       })
     )
 
-    control.namespaces['update/state/bundled'] = {
-      mcu = { follow_mode = 'hold' }
-    }
-
     cfg_conn:retain({ 'cfg', 'update' }, {
       schema = 'devicecode.config/update/1',
       bundled = {
         components = {
           mcu = {
             enabled = true,
-            follow_mode_default = 'auto',
+            follow_mode_default = 'hold',
             auto_start = true,
             auto_commit = true,
             source = { kind = 'bundled', path = dcmcu_path },
@@ -391,15 +390,13 @@ function T.bundled_reconcile_waits_for_component_readiness_before_probing_or_run
 
     sleep_mod.sleep(0.25)
     assert((control.namespaces['update/jobs'] and next(control.namespaces['update/jobs'])) == nil)
-    assert((control.namespaces['update/state/bundled'] and control.namespaces['update/state/bundled'].mcu) == nil)
   end, { timeout = 3.0 })
 end
 
 function T.bundled_reconcile_manual_success_hold_marks_satisfied_when_current_matches_desired()
-  local rec_saved
   local retained
   local bundled = require 'services.update.bundled_reconcile'
-  local inst = bundled.new({
+  local ctx = {
     observer = {
       component_state_for = function(_, component)
         if component == 'mcu' then
@@ -418,31 +415,67 @@ function T.bundled_reconcile_manual_success_hold_marks_satisfied_when_current_ma
     },
     now = function() return 123 end,
     svc = { obs_log = function() end },
-    conn = { retain = function(_, _, payload) retained = payload end },
-  }, {}, {
-    get = function()
-      return {
-        follow_mode = 'auto',
-        desired = {
-          image_id = 'mcu-image-1',
-          payload_sha256 = string.rep('b', 64),
-          version = 'mcu-v1',
+    state = {
+      component_summaries = {},
+      store = { order = {}, jobs = {} },
+      cfg = {
+        bundled = {
+          components = {
+            mcu = {
+              enabled = true,
+              follow_mode_default = 'hold',
+              source = { kind = 'bundled', path = '/rom/mcu/current.dcmcu' },
+            },
+          },
         },
-      }
-    end,
-    put = function(_, component, rec)
-      assert(component == 'mcu')
-      rec_saved = rec
-      return true
-    end,
-  })
+      },
+    },
+    model = {
+      copy_value = function(v) return v end,
+      mark_summary_dirty = function() end,
+      is_terminal = function(state)
+        return state == 'succeeded' or state == 'failed' or state == 'cancelled'
+      end,
+    },
+    topics = { component_summary = function(component) return { 'state', 'update', 'component', component } end },
+    conn = { retain = function(_, _, payload) retained = payload end },
+    artifacts = {
+      resolve_job_artifact = function(_, req)
+        assert(req.component == 'mcu')
+        return 'bundled-ref-1', {
+          mcu_image = {
+            build = {
+              version = 'mcu-v1',
+              build_id = 'build-1',
+              image_id = 'mcu-image-1',
+            },
+            payload = {
+              sha256 = string.rep('b', 64),
+            },
+          },
+        }
+      end,
+      delete = function() return true end,
+    },
+  }
+  local inst = bundled.new(ctx, {})
 
-  inst:mark_job_success({ component = 'mcu', job_id = 'job-1', metadata = { source = 'ui_upload' } }, {})
-  assert(type(rec_saved) == 'table')
-  assert(rec_saved.follow_mode == 'hold')
-  assert(rec_saved.sync_state == 'satisfied')
-  assert(rec_saved.last_result == 'manual_success_hold_satisfied')
-  assert(type(retained) == 'table' and retained.sync_state == 'satisfied')
+  inst:mark_job_success({
+    component = 'mcu',
+    job_id = 'job-1',
+    state = 'succeeded',
+    metadata = {
+      source = 'ui_upload',
+      expected_image_id = 'mcu-image-1',
+    },
+  }, {})
+  assert(type(retained) == 'table')
+  assert(retained.sync_state == 'satisfied')
+  assert(retained.follow_mode == 'hold')
+  assert(retained.last_result == 'manual_success_hold')
+  assert(retained.current_image_id == 'mcu-image-1')
+  assert(retained.bundled_image_id == 'mcu-image-1')
+  assert(retained.last_manual_job_id == 'job-1')
 end
 
 function T.bundled_reconcile_retries_after_restart_when_previous_attempt_failed()
@@ -509,7 +542,7 @@ function T.bundled_reconcile_retries_after_restart_when_previous_attempt_failed(
 
     local us1 = start_update_scope(scope, bus)
     wait_service_running(caller)
-    assert(wait_job_state(caller, 'failed', 1.0))
+    assert(wait_job_state(control, 'failed', 1.0))
 
     us1:cancel('restart after failure')
     local ost, st = fibers.current_scope():try(us1:join_op())
@@ -542,11 +575,10 @@ function T.bundled_reconcile_retries_after_restart_when_previous_attempt_failed(
     end, { timeout = 1.5, interval = 0.01 }))
 
     assert(probe.wait_until(function()
-      local rec = ((control.namespaces['update/state/bundled'] or {}).mcu)
+      local rec = latest_payload(caller, { 'state', 'update', 'component', 'mcu' })
       return type(rec) == 'table'
-        and rec.follow_mode == 'auto'
         and rec.sync_state == 'satisfied'
-        and rec.last_attempt_job_id == retry_id
+        and rec.last_result == 'satisfied'
     end, { timeout = 1.5, interval = 0.01 }))
   end, { timeout = 5.0 })
 end

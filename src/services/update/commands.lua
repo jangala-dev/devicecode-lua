@@ -298,19 +298,6 @@ function Commands:handle_ingest_abort(req)
   req:reply({ ok = true, ingest_id = rec.id })
 end
 
-function Commands:handle_ingest_delete(req)
-  local ctx = self.ctx
-  local payload = req.payload or {}
-  local ref = payload.artifact_ref or payload.ref
-  if type(ref) ~= 'string' or ref == '' then req:fail('artifact_ref_required'); return end
-  local opts = ctx.cap_sdk.args.new.ArtifactStoreDeleteOpts(ref)
-  if not opts then req:fail('invalid_delete'); return end
-  local reply, err = ctx.artifact_cap:call_control('delete', opts)
-  if not reply then req:fail(err or 'artifact_store_unavailable'); return end
-  if reply.ok ~= true then req:fail(reply.reason or 'delete_failed'); return end
-  req:reply({ ok = true })
-end
-
 function Commands:handle_create(req)
   local payload = req.payload or {}
   local job, err = self:create_job(payload)

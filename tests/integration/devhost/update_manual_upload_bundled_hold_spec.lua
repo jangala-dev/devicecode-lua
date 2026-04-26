@@ -140,8 +140,6 @@ local function dump_state_string(conn, control, job_id, label)
 	local comp = latest_payload(conn, { 'state', 'device', 'component', 'mcu' })
 	local link = latest_payload(conn, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'session' })
 
-	local ns = control.namespaces['update/state/bundled'] or {}
-	local persisted = ns['mcu']
 
 	return table.concat({
 		'',
@@ -150,7 +148,6 @@ local function dump_state_string(conn, control, job_id, label)
 		'  job retained      = ' .. pretty(job),
 		'  device component  = ' .. pretty(comp),
 		'  fabric session    = ' .. pretty(link),
-		'  bundled persisted = ' .. pretty(persisted),
 	}, '\n')
 end
 

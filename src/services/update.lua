@@ -16,7 +16,6 @@ local runner        = require 'services.update.runner'
 local runtime_mod   = require 'services.update.runtime'
 local artifacts_mod = require 'services.update.artifacts'
 local commands_mod  = require 'services.update.commands'
-local bundled_state_mod = require 'services.update.bundled_state'
 local bundled_reconcile_mod = require 'services.update.bundled_reconcile'
 local component_backend_mod = require 'services.update.backends.component_proxy'
 local cm5_backend_mod = require 'services.update.backends.cm5_swupdate'
@@ -201,7 +200,6 @@ local function next_update_event_op(state, cfg_watch, endpoints, runner_rx, chan
     ingest_append = endpoints.ingest_append and endpoints.ingest_append:recv_op() or nil,
     ingest_commit = endpoints.ingest_commit and endpoints.ingest_commit:recv_op() or nil,
     ingest_abort = endpoints.ingest_abort and endpoints.ingest_abort:recv_op() or nil,
-    ingest_delete = endpoints.ingest_delete and endpoints.ingest_delete:recv_op() or nil,
     runner = runner_rx:recv_op(),
     changed = changed:changed_op(seen):wrap(function(ver)
       return ver
@@ -427,8 +425,7 @@ function M.start(conn, opts)
   local runtime = runtime_mod.new(ctx)
   ctx.runtime = runtime
 
-  local bundled_store = bundled_state_mod.open(store_cap, { namespace = state.cfg.bundled and state.cfg.bundled.namespace })
-  local bundled = bundled_reconcile_mod.new(ctx, commands, bundled_store)
+  local bundled = bundled_reconcile_mod.new(ctx, commands)
   ctx.bundled = bundled
   ctx.on_job_succeeded = function(job, result)
     bundled:mark_job_success(job, result)
@@ -513,7 +510,6 @@ function M.start(conn, opts)
   local ingest_append_ep = conn:bind(topics.ingest_rpc('append'), { queue_len = 32 })
   local ingest_commit_ep = conn:bind(topics.ingest_rpc('commit'), { queue_len = 32 })
   local ingest_abort_ep = conn:bind(topics.ingest_rpc('abort'), { queue_len = 32 })
-  local ingest_delete_ep = conn:bind(topics.ingest_rpc('delete'), { queue_len = 32 })
 
   local endpoints = {
     create = create_ep,
@@ -528,7 +524,6 @@ function M.start(conn, opts)
     ingest_append = ingest_append_ep,
     ingest_commit = ingest_commit_ep,
     ingest_abort = ingest_abort_ep,
-    ingest_delete = ingest_delete_ep,
   }
 
   conn:retain(topics.manager_meta(), {
@@ -544,7 +539,7 @@ function M.start(conn, opts)
   conn:retain(topics.ingest_meta(), {
     owner = svc.name,
     interface = 'devicecode.cap/artifact-ingest/1',
-    methods = { create = true, append = true, commit = true, abort = true, delete = true },
+    methods = { create = true, append = true, commit = true, abort = true },
   })
   conn:retain(topics.ingest_status(), { state = 'available' })
 
@@ -593,7 +588,6 @@ function M.start(conn, opts)
     ingest_append_ep:unbind()
     ingest_commit_ep:unbind()
     ingest_abort_ep:unbind()
-    ingest_delete_ep:unbind()
   end)
 
   rebuild_backends()
@@ -636,10 +630,6 @@ function M.start(conn, opts)
     elseif which == 'ingest_abort' then
       if not req then error('artifact-ingest abort endpoint closed: ' .. tostring(err), 0) end
       commands:handle_ingest_abort(req)
-
-    elseif which == 'ingest_delete' then
-      if not req then error('artifact-ingest delete endpoint closed: ' .. tostring(err), 0) end
-      commands:handle_ingest_delete(req)
 
     elseif which == 'runner' then
       runtime:handle_runner_event(req)
@@ -698,8 +688,7 @@ function M.start(conn, opts)
           end
         end
 
-        bundled_store = bundled_state_mod.open(store_cap, { namespace = state.cfg.bundled and state.cfg.bundled.namespace })
-        bundled = bundled_reconcile_mod.new(ctx, commands, bundled_store)
+        bundled = bundled_reconcile_mod.new(ctx, commands)
         ctx.bundled = bundled
         ctx.on_job_succeeded = function(job, result)
           bundled:mark_job_success(job, result)

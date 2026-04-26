@@ -93,8 +93,7 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
         and payload.updater.state == 'running'
     end, { timeout = 0.75, interval = 0.01 }))
 
-    local status, serr = caller:call({ 'cap', 'device', 'main', 'rpc', 'get-component' }, { component = 'cm5' }, { timeout = 0.5 })
-    assert(serr == nil)
+    local status = probe.wait_payload(caller, { 'state', 'device', 'component', 'cm5' }, { timeout = 0.5 })
     assert(type(status) == 'table')
     assert(status.component == 'cm5')
     assert(type(status.software) == 'table')

@@ -5,9 +5,7 @@
 -- Responsibilities:
 --   * own session store and aggregate UI state
 --   * own the UI read model
---   * publish retained UI state:
---       svc/ui/announce
---       state/ui/summary
+--   * publish lifecycle through svc/ui/... and observability through obs/v1/ui/...
 --   * host the HTTP/WebSocket transport
 --
 -- Design notes:
@@ -138,7 +136,6 @@ function M.start(conn, opts)
 			svc:status(aggregate.status, status)
 		end
 
-		conn:retain({ 'state', 'ui', 'summary' }, payload)
 	end
 
 	local function recompute_aggregate()
@@ -300,7 +297,6 @@ function M.start(conn, opts)
 		if model then
 			model:close('ui service stopping')
 		end
-		conn:unretain({ 'state', 'ui', 'summary' })
 	end)
 
 	aggregate.status = 'starting'

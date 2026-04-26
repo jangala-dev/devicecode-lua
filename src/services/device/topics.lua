@@ -32,9 +32,6 @@ function M.component_cap_status(name) return { 'cap', 'component', name, 'status
 function M.component_cap_rpc(name, method) return { 'cap', 'component', name, 'rpc', method } end
 function M.component_cap_event(name, event) return { 'cap', 'component', name, 'event', event } end
 
-function M.device_cap_meta() return { 'cap', 'device', 'main', 'meta' } end
-function M.device_cap_status() return { 'cap', 'device', 'main', 'status' } end
-function M.device_cap_rpc(method) return { 'cap', 'device', 'main', 'rpc', method } end
 
 function M.raw_member_meta(member) return { 'raw', 'member', member, 'meta' } end
 function M.raw_member_status(member) return { 'raw', 'member', member, 'status' } end

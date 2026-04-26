@@ -192,9 +192,6 @@ function HalService.start(conn, opts)
             return "capability already exists"
         end
         capabilities[class][id] = { inst = cap_inst, rpc = {} }
-        for offering, _ in pairs(cap_inst.offerings) do
-            capabilities[class][id].rpc[offering] = conn:bind({ 'cap', class, id, 'rpc', offering })
-        end
     end
 
     ---Removes the capability instance
@@ -249,8 +246,6 @@ function HalService.start(conn, opts)
                     end
                 end
                 svc:obs_event('capability_registered', { class = cap.class, id = cap.id })
-                conn:retain(t_cap_state(cap.class, cap.id), event_type) -- legacy public capability presence
-                conn:retain(t_cap_meta(cap.class, cap.id), { offerings = cap.offerings }) -- legacy public capability metadata
                 conn:retain(raw_host_cap_status(device.class, cap.class, cap.id), event_type)
                 conn:retain(raw_host_cap_meta(device.class, cap.class, cap.id), {
                     offerings = cap.offerings,
@@ -281,8 +276,6 @@ function HalService.start(conn, opts)
                 })
             else
                 svc:obs_event('capability_unregistered', { class = cap.class, id = cap.id })
-                conn:retain(t_cap_state(cap.class, cap.id), event_type)
-                conn:unretain(t_cap_meta(cap.class, cap.id))
                 conn:retain(raw_host_cap_status(device.class, cap.class, cap.id), event_type)
                 conn:unretain(raw_host_cap_meta(device.class, cap.class, cap.id))
             end
@@ -311,7 +304,8 @@ function HalService.start(conn, opts)
         if req.topic[1] == 'raw' and req.topic[2] == 'host' and req.topic[4] == 'cap' then
             class, id, verb = tostring(req.topic[5]):gsub('-', '_'), req.topic[6], req.topic[8]
         else
-            class, id, verb = req.topic[2], req.topic[3], req.topic[5]
+            req:fail('raw_host_cap_required')
+            return
         end
 
         if not class_valid(class) then

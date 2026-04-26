@@ -34,9 +34,6 @@ local function next_device_event_op(shell_state)
   for key, rec in pairs(shell_state.action_eps or {}) do
     ops[key] = rec.ep:recv_op()
   end
-  for key, rec in pairs(shell_state.manager_eps or {}) do
-    ops[key] = rec.ep:recv_op()
-  end
   return fibers.named_choice(ops)
 end
 
@@ -66,18 +63,7 @@ local function publish_summary(conn, svc, state)
   local ts = svc:now()
   local summary = projection.summary_payload(state, ts)
   conn:retain(projection.summary_topic(), summary)
-  conn:retain(projection.self_topic(), projection.self_payload(state, ts))
-  conn:retain(projection.device_cap_meta_topic(), {
-    owner = svc.name,
-    interface = 'devicecode.cap/device/1',
-    methods = { ['get-component'] = true },
-    canonical_state = projection.summary_topic(),
-  })
-  conn:retain(projection.device_cap_status_topic(), {
-    state = 'available',
-    ready = true,
-    health = (summary.counts and summary.counts.degraded and summary.counts.degraded > 0) and 'degraded' or 'ok',
-  })
+  conn:retain(projection.identity_topic(), projection.self_payload(state, ts))
   model.set_summary_clean(state)
   svc:set_ready(true, {
     components_total = summary.counts and summary.counts.total or 0,
@@ -196,8 +182,8 @@ local function handle_observer_event(conn, state, changed, observer_state, ev)
     changed:signal()
   elseif ev.tag == 'event_seen' then
     model.note_event(state, ev.component, ev.event, ev.payload)
-    if type(ev.event) == 'string' and ev.event ~= '' then
-      conn:publish(projection.component_event_topic(ev.component, ev.event), ev.payload)
+    if type(ev.component) == 'string' and type(ev.event) == 'string' and ev.event ~= '' then
+      conn:publish(require('services.device.topics').component_cap_event(ev.component, ev.event), ev.payload or {})
     end
     changed:signal()
   elseif ev.tag == 'source_down' then
@@ -391,12 +377,6 @@ function M.start(conn, opts)
     obs_rx = obs_rx,
     work_rx = work_rx,
     action_eps = {},
-    manager_eps = {
-      ['manager:get-component'] = {
-        name = 'get-component',
-        ep = conn:bind(projection.device_cap_topic('get-component'), { queue_len = 32 }),
-      },
-    },
     changed = changed,
     seen = changed:version(),
   }
@@ -414,7 +394,6 @@ function M.start(conn, opts)
     close_observers(observer_state)
     cfg_watch:unwatch()
     for _, rec in pairs(shell_state.action_eps) do rec.ep:unbind() end
-    for _, rec in pairs(shell_state.manager_eps or {}) do rec.ep:unbind() end
     for name in pairs(state.components) do
       conn:unretain(projection.component_topic(name))
       conn:unretain(projection.component_software_topic(name))
@@ -422,10 +401,8 @@ function M.start(conn, opts)
       conn:unretain(projection.component_cap_meta_topic(name))
       conn:unretain(projection.component_cap_status_topic(name))
     end
-    conn:unretain(projection.self_topic())
+    conn:unretain(projection.identity_topic())
     conn:unretain(projection.summary_topic())
-    conn:unretain(projection.device_cap_meta_topic())
-    conn:unretain(projection.device_cap_status_topic())
   end)
 
   while true do
@@ -440,13 +417,6 @@ function M.start(conn, opts)
     elseif which == 'changed' then
       shell_state.seen = a or shell_state.seen
       publish_dirty(conn, svc, state)
-    elseif type(which) == 'string' and shell_state.manager_eps and shell_state.manager_eps[which] then
-      local rec = shell_state.manager_eps[which]
-      if rec.name == 'get-component' then
-        handle_get_req(a, b, state, svc, nil)
-      else
-        if a then a:fail('unknown_method') end
-      end
     elseif type(which) == 'string' and shell_state.action_eps[which] then
       local rec = shell_state.action_eps[which]
       if rec.action == 'get-status' then

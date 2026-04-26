@@ -6,7 +6,7 @@ local availability = require 'services.device.availability'
 
 local M = {}
 
-function M.self_topic()
+function M.identity_topic()
   return topics.identity()
 end
 
@@ -29,22 +29,6 @@ end
 
 function M.component_cap_topic(name, method)
   return topics.component_cap_rpc(name, method)
-end
-
-function M.component_event_topic(name, event)
-  return topics.component_cap_event(name, event)
-end
-
-function M.device_cap_meta_topic()
-  return topics.device_cap_meta()
-end
-
-function M.device_cap_status_topic()
-  return topics.device_cap_status()
-end
-
-function M.device_cap_topic(method)
-  return topics.device_cap_rpc(method)
 end
 
 function M.component_cap_meta_topic(name)
