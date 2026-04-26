@@ -12,6 +12,7 @@
 -- This module is intentionally stateless for now. If upload progress becomes a
 -- first-class UI feature later, state/pulse/watch machinery can be added then.
 
+local fibers  = require 'fibers'
 local cap_sdk = require 'services.hal.sdk.cap'
 local errors  = require 'services.ui.errors'
 local update_client = require 'services.ui.update_client'
@@ -31,6 +32,7 @@ function M.new(opts)
 		_require_session = opts.require_session,
 		_with_user_conn = opts.with_user_conn,
 		_max_bytes = opts.max_bytes or (512 * 1024),
+		_upload_timeout_s = opts.upload_timeout_s or 30.0,
 		_allowed_components = opts.allowed_components or { mcu = true },
 	}, Uploads)
 end
@@ -48,7 +50,25 @@ function Uploads:_delete_artifact(artifact_cap, artifact_ref)
 	artifact_cap:call_control('delete', delete_opts)
 end
 
-function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta)
+function Uploads:_upload_deadline()
+	local timeout_s = tonumber(self._upload_timeout_s) or 30.0
+	return fibers.now() + timeout_s
+end
+
+function Uploads:_remaining_timeout(deadline)
+	local remaining = deadline - fibers.now()
+	if remaining <= 0 then
+		return nil, errors.timeout('update_upload timed out')
+	end
+	return remaining, nil
+end
+
+function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta, deadline)
+	local create_remaining, terr = self:_remaining_timeout(deadline)
+	if not create_remaining then
+		return nil, terr
+	end
+
 	local create_opts = assert(cap_sdk.args.new.ArtifactStoreCreateSinkOpts({
 		kind = 'update_upload',
 		component = meta.component,
@@ -71,6 +91,12 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta)
 	local offset = 0
 
 	while true do
+		local remaining, terr = self:_remaining_timeout(deadline)
+		if not remaining then
+			sink:abort()
+			return nil, terr
+		end
+
 		local chunk, rerr = stream:get_body_chars(64 * 1024)
 		if chunk == nil then
 			sink:abort()
@@ -101,7 +127,12 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta)
 	return artefact, nil
 end
 
-function Uploads:_create_update_job(user_conn, artefact, meta)
+function Uploads:_create_update_job(user_conn, artefact, meta, deadline)
+	local timeout_s, terr = self:_remaining_timeout(deadline)
+	if not timeout_s then
+		return nil, terr
+	end
+
 	local created, uerr = update_client.create(user_conn, {
 		component = meta.component,
 		artifact = { kind = 'ref', ref = artefact:ref() },
@@ -114,7 +145,7 @@ function Uploads:_create_update_job(user_conn, artefact, meta)
 			commit_policy = 'manual',
 			require_explicit_commit = true,
 		},
-	}, 10.0)
+	}, timeout_s)
 
 	if created == nil then
 		return nil, uerr or errors.upstream('update_create failed')
@@ -122,11 +153,16 @@ function Uploads:_create_update_job(user_conn, artefact, meta)
 	return created, nil
 end
 
-function Uploads:_start_update_job(user_conn, job_id)
+function Uploads:_start_update_job(user_conn, job_id, deadline)
+	local timeout_s, terr = self:_remaining_timeout(deadline)
+	if not timeout_s then
+		return nil, terr
+	end
+
 	local started, serr = update_client.do_job(user_conn, {
 		op = 'start',
 		job_id = job_id,
-	}, 10.0)
+	}, timeout_s)
 
 	if started == nil then
 		return nil, serr or errors.upstream('update_start failed')
@@ -138,6 +174,7 @@ function Uploads:upload_update(session_id, stream, req_headers)
 	local rec, err = self._require_session(session_id)
 	if not rec then return nil, err end
 
+	local deadline = self:_upload_deadline()
 	local upload_id = tostring(uuid.new())
 	local meta = {
 		component = req_headers:get('x-artifact-component') or 'mcu',
@@ -156,18 +193,18 @@ function Uploads:upload_update(session_id, stream, req_headers)
 		function(user_conn)
 			local artifact_cap = self:_artifact_cap(user_conn)
 
-			local artefact, rerr = self:_receive_artifact(artifact_cap, upload_id, stream, meta)
+			local artefact, rerr = self:_receive_artifact(artifact_cap, upload_id, stream, meta, deadline)
 			if not artefact then
 				return nil, rerr
 			end
 
-			local created, uerr = self:_create_update_job(user_conn, artefact, meta)
+			local created, uerr = self:_create_update_job(user_conn, artefact, meta, deadline)
 			if created == nil then
 				self:_delete_artifact(artifact_cap, artefact:ref())
 				return nil, uerr
 			end
 
-			local started, serr = self:_start_update_job(user_conn, created.job.job_id)
+			local started, serr = self:_start_update_job(user_conn, created.job.job_id, deadline)
 			if started == nil then
 				self:_delete_artifact(artifact_cap, artefact:ref())
 				return nil, serr

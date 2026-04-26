@@ -1,3 +1,4 @@
+local fibers = require 'fibers'
 local runfibers = require 'tests.support.run_fibers'
 local pulse = require 'fibers.pulse'
 local sleep = require 'fibers.sleep'
@@ -33,6 +34,20 @@ function T.await_returns_success_after_change()
 
     assert(outcome == 'success')
     assert(type(result) == 'table' and result.value == 'ok')
+  end, { timeout = 1.0 })
+end
+
+function T.await_accepts_absolute_deadline()
+  runfibers.run(function()
+    local p = pulse.scoped({ close_reason = 'done' })
+    local deadline = fibers.now() + 0.02
+    local outcome = await_mod.until_changed_or_timeout({
+      deadline = deadline,
+      version = function() return p:version() end,
+      changed_op = function(seen) return p:changed_op(seen) end,
+      evaluate = function() return nil end,
+    })
+    assert(outcome == 'timeout')
   end, { timeout = 1.0 })
 end
 

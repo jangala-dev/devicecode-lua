@@ -96,8 +96,10 @@ local function current_version(observe)
 end
 
 local function reconcile_body(ctx)
+  local deadline = fibers.now() + ctx.reconcile_cfg.timeout_s
+
   local outcome, result = await_mod.until_changed_or_timeout({
-    timeout_s = ctx.reconcile_cfg.timeout_s,
+    deadline = deadline,
     version = function()
       return current_version(ctx.observe)
     end,

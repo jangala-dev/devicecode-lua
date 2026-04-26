@@ -146,9 +146,11 @@ function Transport:read_line_op(timeout)
 		return read_ev
 	end
 
+	local deadline = fibers.now() + timeout
+
 	return fibers.choice(
 		read_ev,
-		sleep.sleep_op(timeout):wrap(function()
+		sleep.sleep_until_op(deadline):wrap(function()
 			return nil, 'timeout'
 		end)
 	)

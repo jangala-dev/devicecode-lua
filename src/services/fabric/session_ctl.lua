@@ -182,9 +182,7 @@ local function next_session_ctl_event_op(state)
 
 	local deadline = state.next_deadline()
 	if deadline < math.huge then
-		local dt = deadline - runtime.now()
-		if dt < 0 then dt = 0 end
-		ops.timer = sleep.sleep_op(dt):wrap(function()
+		ops.timer = sleep.sleep_until_op(deadline):wrap(function()
 			return true
 		end)
 	end

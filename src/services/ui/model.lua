@@ -92,9 +92,11 @@ function Model:await_ready_op(timeout_s)
 		return ready_ev
 	end
 
+	local deadline = fibers.now() + timeout_s
+
 	return op.choice(
 		ready_ev,
-		sleep.sleep_op(timeout_s):wrap(function()
+		sleep.sleep_until_op(deadline):wrap(function()
 			return nil, 'timeout'
 		end)
 	)
@@ -124,9 +126,11 @@ function Model:next_change_op(last_seq, timeout_s)
 		return change_ev
 	end
 
+	local deadline = fibers.now() + timeout_s
+
 	return op.choice(
 		change_ev,
-		sleep.sleep_op(timeout_s):wrap(function()
+		sleep.sleep_until_op(deadline):wrap(function()
 			return nil, 'timeout'
 		end)
 	)

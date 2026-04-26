@@ -148,11 +148,9 @@ local function next_bridge_event_op(state)
 		ops['endpoint:' .. tostring(i)] = state.endpoints[i]:recv_op()
 	end
 
-	local nd = nearest_deadline(state.pending)
-	if nd < math.huge then
-		local dt = nd - runtime.now()
-		if dt < 0 then dt = 0 end
-		ops.timeout = sleep.sleep_op(dt):wrap(function()
+	local deadline = nearest_deadline(state.pending)
+	if deadline < math.huge then
+		ops.timeout = sleep.sleep_until_op(deadline):wrap(function()
 			return true
 		end)
 	end

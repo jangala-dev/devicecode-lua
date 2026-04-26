@@ -83,7 +83,8 @@ function M.install()
 		end
 
 		if t ~= math.huge then
-			choices[#choices + 1] = sleep.sleep_op(t)
+			local deadline = fibers.now() + t
+			choices[#choices + 1] = sleep.sleep_until_op(deadline)
 		end
 
 		if #choices == 0 then

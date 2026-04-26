@@ -84,15 +84,13 @@ local function next_transfer_event_op(state)
 		session = state.session:changed_op(state.session_seen),
 	}
 
-	local nearest = math.huge
-	if state.active and state.active.deadline < nearest then
-		nearest = state.active.deadline
+	local deadline = math.huge
+	if state.active and state.active.deadline < deadline then
+		deadline = state.active.deadline
 	end
 
-	if nearest < math.huge then
-		local dt = nearest - runtime.now()
-		if dt < 0 then dt = 0 end
-		ops.timeout = sleep.sleep_op(dt):wrap(function()
+	if deadline < math.huge then
+		ops.timeout = sleep.sleep_until_op(deadline):wrap(function()
 			return true
 		end)
 	end
