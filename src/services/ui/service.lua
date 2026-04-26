@@ -138,7 +138,7 @@ function M.start(conn, opts)
 			svc:status(aggregate.status, status)
 		end
 
-		conn:retain({ 'state', 'ui', 'main' }, payload)
+		conn:retain({ 'state', 'ui', 'summary' }, payload)
 	end
 
 	local function recompute_aggregate()
@@ -203,7 +203,7 @@ function M.start(conn, opts)
 	end
 
 	local function audit(kind, payload)
-		conn:publish({ 'obs', 'audit', 'ui', kind }, payload or {})
+		conn:publish({ 'obs', 'v1', 'ui', 'event', kind }, payload or {})
 	end
 
 	local function require_session(session_id)
@@ -300,7 +300,7 @@ function M.start(conn, opts)
 		if model then
 			model:close('ui service stopping')
 		end
-		conn:unretain({ 'state', 'ui', 'main' })
+		conn:unretain({ 'state', 'ui', 'summary' })
 	end)
 
 	aggregate.status = 'starting'

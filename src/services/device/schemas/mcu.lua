@@ -23,22 +23,22 @@ M.alert_kinds = {
 function M.member_fact_topics(member)
   member = member or 'mcu'
   return {
-    software = topics.member_state(member, 'software'),
-    updater = topics.member_state(member, 'updater'),
-    health = topics.member_state(member, 'health'),
-    power_battery = topics.member_state(member, 'power', 'battery'),
-    power_charger = topics.member_state(member, 'power', 'charger'),
-    power_charger_config = topics.member_state(member, 'power', 'charger', 'config'),
-    environment_temperature = topics.member_state(member, 'environment', 'temperature'),
-    environment_humidity = topics.member_state(member, 'environment', 'humidity'),
-    runtime_memory = topics.member_state(member, 'runtime', 'memory'),
+    software = topics.raw_member_state(member, 'software'),
+    updater = topics.raw_member_state(member, 'updater'),
+    health = topics.raw_member_state(member, 'health'),
+    power_battery = topics.raw_member_state(member, 'power', 'battery'),
+    power_charger = topics.raw_member_state(member, 'power', 'charger'),
+    power_charger_config = topics.raw_member_state(member, 'power', 'charger', 'config'),
+    environment_temperature = topics.raw_member_state(member, 'environment', 'temperature'),
+    environment_humidity = topics.raw_member_state(member, 'environment', 'humidity'),
+    runtime_memory = topics.raw_member_state(member, 'runtime', 'memory'),
   }
 end
 
 function M.member_event_topics(member)
   member = member or 'mcu'
   return {
-    charger_alert = topics.member_event(member, 'power', 'charger', 'alert'),
+    charger_alert = topics.raw_member_cap_event(member, 'telemetry', 'main', 'power', 'charger', 'alert'),
   }
 end
 

@@ -368,7 +368,7 @@ function M.start(conn, opts)
 		full = 'drop_oldest',
 	})
 
-	local transfer_ep = conn:bind({ 'cmd', 'fabric', 'transfer' }, {
+	local transfer_ep = conn:bind({ 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, {
 		queue_len = 32,
 	})
 

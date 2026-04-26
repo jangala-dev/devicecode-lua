@@ -16,7 +16,7 @@ local function copy_value(v)
 end
 
 function M.job_topic(id)
-	return { 'state', 'update', 'jobs', id }
+	return { 'state', 'workflow', 'update-job', id }
 end
 
 function M.summary_topic()

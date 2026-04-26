@@ -277,7 +277,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		end)
 		assert(ok2, tostring(err2))
 
-		spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'fabric', 'transfer' }, a_ctl_tx)
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, a_ctl_tx)
 
 		local ok3, err3 = scope:spawn(function()
 			device.start(bus:connect(), { name = 'device', env = 'dev' })
@@ -299,7 +299,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 			return payload.available == true and type(payload.software) == 'table' and payload.software.version == versions.mcu and payload.software.image_id == image_id.mcu and payload.software.boot_id == boot_id.mcu
 		end, 1.5))
 
-		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+		local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
 			component = 'mcu',
 			artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
 			expected_image_id = 'mcu-image-1',
@@ -314,30 +314,30 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		assert(job.lifecycle.state == 'created')
 		assert(type(job.artifact.ref) == 'string')
 
-		local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
+		local started, serr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job.job_id }, { timeout = 0.5 })
 		assert(serr == nil)
 		assert(started.ok == true)
 
-		assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
 				and payload.job.artifact.ref == nil and payload.job.artifact.released_at ~= nil
 		end, 0.75))
 		assert(next(artifacts.artifacts) == nil)
 
-		local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
+		local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })
 		assert(perr == nil)
 		assert(committed.ok == true)
 
 		assert(probe.wait_until(function()
 			local ok, payload = safe.pcall(function()
-				return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
+				return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
 			end)
 			return ok and type(payload) == 'table'
 				and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'succeeded'
 		end, { timeout = 2.5, interval = 0.01 }))
 
-		local final, ferr = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
+		local final, ferr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { job_id = job.job_id }, { timeout = 0.5 })
 		assert(ferr == nil)
 		assert(final.ok == true)
 		assert(final.job.lifecycle.state == 'succeeded')
@@ -507,7 +507,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		end)
 		assert(ok2, tostring(err2))
 
-		spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'fabric', 'transfer' }, a_ctl_tx)
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, a_ctl_tx)
 
 		local ok3, err3 = scope:spawn(function()
 			device.start(bus:connect(), { name = 'device', env = 'dev' })
@@ -528,7 +528,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 			return payload.available == true and type(payload.software) == 'table' and payload.software.version == current_state.software.version and payload.software.boot_id == current_state.software.boot_id
 		end, 1.5))
 
-		local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
+		local created = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
 			component = 'mcu',
 			artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-fail.bin', 'mcu-image-fail') },
 			expected_image_id = 'mcu-image-1',
@@ -536,13 +536,13 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		}, { timeout = 0.5 }))
 		local job = created.job
 
-		assert(assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })).ok == true)
-		assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+		assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job.job_id }, { timeout = 0.5 })).ok == true)
+		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
 		end, 0.75))
-		assert(assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })).ok == true)
+		assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })).ok == true)
 
-		assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table' and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'failed'
 				and tostring(payload.job.lifecycle.error):match('apply_failed') ~= nil

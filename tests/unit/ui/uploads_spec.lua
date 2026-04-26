@@ -61,13 +61,13 @@ function T.uploads_manager_streams_into_sink_and_creates_started_job_once()
         call = function(_, topic, payload)
             local key = table.concat(topic, '/')
             calls[#calls + 1] = { op = 'call', key = key, payload = payload }
-            if key == 'cap/artifact_store/main/rpc/create_sink' then
+            if key == 'cap/artifact-ingest/main/rpc/create' then
                 return { ok = true, reason = sink }, nil
-            elseif key == 'cmd/update/job/create' then
+            elseif key == 'cap/update-manager/main/rpc/create-job' then
                 return { ok = true, job = { job_id = 'job-1' } }, nil
-            elseif key == 'cmd/update/job/do' then
+            elseif key == 'cap/update-manager/main/rpc/start-job' then
                 return { ok = true, job = { job_id = 'job-1' } }, nil
-            elseif key == 'cap/artifact_store/main/rpc/delete' then
+            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
                 return { ok = true }, nil
             end
             return nil, 'unexpected'
@@ -117,10 +117,10 @@ function T.uploads_manager_streams_into_sink_and_creates_started_job_once()
         local name = calls[i].op == 'call' and calls[i].key or calls[i].op
         if name ~= nil then ops[#ops + 1] = name end
     end
-    assert(ops[1] == 'cap/artifact_store/main/rpc/create_sink')
+    assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
     assert(ops[#ops - 2] == 'commit')
-    assert(ops[#ops - 1] == 'cmd/update/job/create')
-    assert(ops[#ops] == 'cmd/update/job/do')
+    assert(ops[#ops - 1] == 'cap/update-manager/main/rpc/create-job')
+    assert(ops[#ops] == 'cap/update-manager/main/rpc/start-job')
 end
 
 function T.uploads_manager_rejects_component_not_allowed()
@@ -168,7 +168,7 @@ function T.uploads_manager_rejects_too_large_body()
     local fake_conn = {
         call = function(_, topic, _payload)
             local key = table.concat(topic, '/')
-            if key == 'cap/artifact_store/main/rpc/create_sink' then
+            if key == 'cap/artifact-ingest/main/rpc/create' then
                 return { ok = true, reason = sink }, nil
             end
             error('unexpected call: ' .. key)
@@ -227,11 +227,11 @@ function T.uploads_manager_deletes_artifact_when_update_create_fails_after_commi
         call = function(_, topic, payload)
             local key = table.concat(topic, '/')
             calls[#calls + 1] = { op = 'call', key = key, payload = payload }
-            if key == 'cap/artifact_store/main/rpc/create_sink' then
+            if key == 'cap/artifact-ingest/main/rpc/create' then
                 return { ok = true, reason = sink }, nil
-            elseif key == 'cmd/update/job/create' then
+            elseif key == 'cap/update-manager/main/rpc/create-job' then
                 return nil, 'create_failed'
-            elseif key == 'cap/artifact_store/main/rpc/delete' then
+            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
                 return { ok = true }, nil
             end
             error('unexpected call: ' .. key)
@@ -268,8 +268,8 @@ function T.uploads_manager_deletes_artifact_when_update_create_fails_after_commi
         ops[#ops + 1] = name
     end
     assert(ops[#ops - 2] == 'commit')
-    assert(ops[#ops - 1] == 'cmd/update/job/create')
-    assert(ops[#ops] == 'cap/artifact_store/main/rpc/delete')
+    assert(ops[#ops - 1] == 'cap/update-manager/main/rpc/create-job')
+    assert(ops[#ops] == 'cap/artifact-ingest/main/rpc/delete')
 end
 
 function T.uploads_manager_deletes_artifact_when_update_start_fails_after_create()
@@ -294,13 +294,13 @@ function T.uploads_manager_deletes_artifact_when_update_start_fails_after_create
         call = function(_, topic, payload)
             local key = table.concat(topic, '/')
             calls[#calls + 1] = { op = 'call', key = key, payload = payload }
-            if key == 'cap/artifact_store/main/rpc/create_sink' then
+            if key == 'cap/artifact-ingest/main/rpc/create' then
                 return { ok = true, reason = sink }, nil
-            elseif key == 'cmd/update/job/create' then
+            elseif key == 'cap/update-manager/main/rpc/create-job' then
                 return { ok = true, job = { job_id = 'job-start-fail' } }, nil
-            elseif key == 'cmd/update/job/do' then
+            elseif key == 'cap/update-manager/main/rpc/start-job' then
                 return nil, 'start_failed'
-            elseif key == 'cap/artifact_store/main/rpc/delete' then
+            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
                 return { ok = true }, nil
             end
             error('unexpected call: ' .. key)
@@ -337,9 +337,9 @@ function T.uploads_manager_deletes_artifact_when_update_start_fails_after_create
         ops[#ops + 1] = name
     end
     assert(ops[#ops - 3] == 'commit')
-    assert(ops[#ops - 2] == 'cmd/update/job/create')
-    assert(ops[#ops - 1] == 'cmd/update/job/do')
-    assert(ops[#ops] == 'cap/artifact_store/main/rpc/delete')
+    assert(ops[#ops - 2] == 'cap/update-manager/main/rpc/create-job')
+    assert(ops[#ops - 1] == 'cap/update-manager/main/rpc/start-job')
+    assert(ops[#ops] == 'cap/artifact-ingest/main/rpc/delete')
 end
 
 function T.uploads_manager_times_out_before_artifact_create()
@@ -399,7 +399,7 @@ function T.uploads_manager_aborts_sink_when_deadline_expires_during_receive()
         call = function(_, topic, _payload)
             local key = table.concat(topic, '/')
             calls[#calls + 1] = { op = 'call', key = key }
-            if key == 'cap/artifact_store/main/rpc/create_sink' then
+            if key == 'cap/artifact-ingest/main/rpc/create' then
                 return { ok = true, reason = sink }, nil
             end
             error('unexpected call: ' .. key)
@@ -435,7 +435,7 @@ function T.uploads_manager_aborts_sink_when_deadline_expires_during_receive()
         local name = calls[i].op == 'call' and calls[i].key or calls[i].op
         ops[#ops + 1] = name
     end
-    assert(ops[1] == 'cap/artifact_store/main/rpc/create_sink')
+    assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
     assert(ops[2] == 'write_chunk')
     assert(ops[#ops] == 'abort')
 end
@@ -465,9 +465,9 @@ function T.uploads_manager_times_out_before_create_job_after_successful_receive(
         call = function(_, topic, _payload)
             local key = table.concat(topic, '/')
             calls[#calls + 1] = { op = 'call', key = key }
-            if key == 'cap/artifact_store/main/rpc/create_sink' then
+            if key == 'cap/artifact-ingest/main/rpc/create' then
                 return { ok = true, reason = sink }, nil
-            elseif key == 'cap/artifact_store/main/rpc/delete' then
+            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
                 return { ok = true }, nil
             end
             error('unexpected call: ' .. key)
@@ -505,9 +505,9 @@ function T.uploads_manager_times_out_before_create_job_after_successful_receive(
         local name = calls[i].op == 'call' and calls[i].key or calls[i].op
         ops[#ops + 1] = name
     end
-    assert(ops[1] == 'cap/artifact_store/main/rpc/create_sink')
+    assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
     assert(ops[#ops - 1] == 'commit')
-    assert(ops[#ops] == 'cap/artifact_store/main/rpc/delete')
+    assert(ops[#ops] == 'cap/artifact-ingest/main/rpc/delete')
 end
 
 function T.uploads_manager_times_out_before_start_after_create_job()
@@ -535,14 +535,14 @@ function T.uploads_manager_times_out_before_start_after_create_job()
         call = function(_, topic, _payload)
             local key = table.concat(topic, '/')
             calls[#calls + 1] = { op = 'call', key = key }
-            if key == 'cap/artifact_store/main/rpc/create_sink' then
+            if key == 'cap/artifact-ingest/main/rpc/create' then
                 return { ok = true, reason = sink }, nil
-            elseif key == 'cmd/update/job/create' then
+            elseif key == 'cap/update-manager/main/rpc/create-job' then
                 sleep.sleep(0.02)
                 return { ok = true, job = { job_id = 'job-timeout-before-start' } }, nil
-            elseif key == 'cap/artifact_store/main/rpc/delete' then
+            elseif key == 'cap/artifact-ingest/main/rpc/delete' then
                 return { ok = true }, nil
-            elseif key == 'cmd/update/job/do' then
+            elseif key == 'cap/update-manager/main/rpc/start-job' then
                 error('should_not_start_job')
             end
             error('unexpected call: ' .. key)
@@ -580,10 +580,10 @@ function T.uploads_manager_times_out_before_start_after_create_job()
         local name = calls[i].op == 'call' and calls[i].key or calls[i].op
         ops[#ops + 1] = name
     end
-    assert(ops[1] == 'cap/artifact_store/main/rpc/create_sink')
+    assert(ops[1] == 'cap/artifact-ingest/main/rpc/create')
     assert(ops[#ops - 2] == 'commit')
-    assert(ops[#ops - 1] == 'cmd/update/job/create')
-    assert(ops[#ops] == 'cap/artifact_store/main/rpc/delete')
+    assert(ops[#ops - 1] == 'cap/update-manager/main/rpc/create-job')
+    assert(ops[#ops] == 'cap/artifact-ingest/main/rpc/delete')
 end
 
 return T

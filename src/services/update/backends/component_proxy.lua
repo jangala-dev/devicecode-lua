@@ -27,12 +27,7 @@ function M.new(opts)
 	local backend = {}
 
 	local function device_call(conn, op_name, args, timeout)
-		return conn:call({ 'cmd', 'device', 'component', 'do' }, {
-			component = component,
-			action = op_name,
-			args = args or {},
-			timeout = timeout,
-		}, { timeout = timeout })
+		return conn:call({ 'cap', 'component', component, 'rpc', op_name }, args or {}, { timeout = timeout })
 	end
 
 	function backend:prepare(conn, job, _ctx)

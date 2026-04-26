@@ -135,8 +135,8 @@ local function pretty(v)
 end
 
 local function dump_state_string(conn, control, job_id, label)
-	local bundled = latest_payload(conn, { 'state', 'update', 'bundled', 'mcu' })
-	local job = latest_payload(conn, { 'state', 'update', 'jobs', job_id })
+	local bundled = latest_payload(conn, { 'state', 'update', 'component', 'mcu' })
+	local job = latest_payload(conn, { 'state', 'workflow', 'update-job', job_id })
 	local comp = latest_payload(conn, { 'state', 'device', 'component', 'mcu' })
 	local link = latest_payload(conn, { 'state', 'fabric', 'link', 'cm5-uart-mcu', 'session' })
 
@@ -192,7 +192,7 @@ end
 
 local function wait_job(conn, control, job_id, pred, timeout, label)
 	wait_until_debug(function()
-		local payload = latest_payload(conn, { 'state', 'update', 'jobs', job_id })
+		local payload = latest_payload(conn, { 'state', 'workflow', 'update-job', job_id })
 		return type(payload) == 'table' and pred(payload)
 	end, function()
 		return dump_state_string(conn, control, job_id, label or 'job wait failed')
@@ -201,7 +201,7 @@ end
 
 local function wait_bundled(conn, control, job_id, pred, timeout, label)
 	wait_until_debug(function()
-		local payload = latest_payload(conn, { 'state', 'update', 'bundled', 'mcu' })
+		local payload = latest_payload(conn, { 'state', 'update', 'component', 'mcu' })
 		return type(payload) == 'table' and pred(payload)
 	end, function()
 		return dump_state_string(conn, control, job_id, label or 'bundled wait failed')
@@ -431,7 +431,7 @@ function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_acros
 		end)
 		assert(ok2, tostring(err2))
 
-		spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'fabric', 'transfer' }, a_ctl_tx)
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, a_ctl_tx)
 
 		local ok3, err3 = scope:spawn(function()
 			device.start(bus:connect(), { name = 'device', env = 'dev' })

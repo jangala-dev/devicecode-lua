@@ -1468,17 +1468,23 @@
                 "link_class": "member_uart",
                 "actions": {
                     "prepare_update": [
-                        "cmd",
+                        "raw",
                         "member",
                         "mcu",
+                        "cap",
                         "updater",
+                        "main",
+                        "rpc",
                         "prepare"
                     ],
                     "commit_update": [
-                        "cmd",
+                        "raw",
                         "member",
                         "mcu",
+                        "cap",
                         "updater",
+                        "main",
+                        "rpc",
                         "commit"
                     ],
                     "stage_update": {
@@ -1486,9 +1492,13 @@
                         "artifact_store": "main",
                         "link_id": "cm5-uart-mcu",
                         "receiver": [
-                            "rpc",
+                            "raw",
                             "member",
                             "mcu",
+                            "cap",
+                            "updater",
+                            "main",
+                            "rpc",
                             "receive"
                         ],
                         "timeout_s": 60.0
@@ -1496,63 +1506,72 @@
                 },
                 "facts": {
                     "software": [
-                        "state",
+                        "raw",
                         "member",
                         "mcu",
+                        "state",
                         "software"
                     ],
                     "updater": [
-                        "state",
+                        "raw",
                         "member",
                         "mcu",
+                        "state",
                         "updater"
                     ],
                     "health": [
-                        "state",
+                        "raw",
                         "member",
                         "mcu",
+                        "state",
                         "health"
                     ],
                     "power_battery": [
-                        "state",
+                        "raw",
                         "member",
                         "mcu",
+                        "state",
                         "power",
                         "battery"
                     ],
                     "power_charger": [
-                        "state",
+                        "raw",
                         "member",
                         "mcu",
+                        "state",
                         "power",
                         "charger"
                     ],
                     "power_charger_config": [
-                        "state",
+                        "raw",
                         "member",
                         "mcu",
+                        "state",
                         "power",
                         "charger",
                         "config"
                     ],
                     "environment_temperature": [
-                        "state",
+                        "raw",
                         "member",
                         "mcu",
+                        "state",
                         "environment",
                         "temperature"
                     ],
                     "environment_humidity": [
-                        "state",
+                        "raw",
                         "member",
                         "mcu",
+                        "state",
                         "environment",
                         "humidity"
                     ],
                     "runtime_memory": [
-                        "state",
+                        "raw",
                         "member",
                         "mcu",
+                        "state",
                         "runtime",
                         "memory"
                     ]

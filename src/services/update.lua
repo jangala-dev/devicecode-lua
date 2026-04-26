@@ -153,9 +153,15 @@ local function next_update_event_op(state, cfg_watch, endpoints, runner_rx, chan
   local ops = {
     cfg = cfg_watch:recv_op(),
     create = endpoints.create and endpoints.create:recv_op() or nil,
-    job_do = endpoints.job_do and endpoints.job_do:recv_op() or nil,
+    start = endpoints.start and endpoints.start:recv_op() or nil,
+    commit = endpoints.commit and endpoints.commit:recv_op() or nil,
+    cancel = endpoints.cancel and endpoints.cancel:recv_op() or nil,
+    retry = endpoints.retry and endpoints.retry:recv_op() or nil,
+    discard = endpoints.discard and endpoints.discard:recv_op() or nil,
     get = endpoints.get and endpoints.get:recv_op() or nil,
     list = endpoints.list and endpoints.list:recv_op() or nil,
+    ingest_create = endpoints.ingest_create and endpoints.ingest_create:recv_op() or nil,
+    ingest_delete = endpoints.ingest_delete and endpoints.ingest_delete:recv_op() or nil,
     runner = runner_rx:recv_op(),
     changed = changed:changed_op(seen):wrap(function(ver)
       return ver
@@ -441,16 +447,28 @@ function M.start(conn, opts)
     end
   end
 
-  local create_ep = conn:bind({ 'cmd', 'update', 'job', 'create' }, { queue_len = 32 })
-  local do_ep = conn:bind({ 'cmd', 'update', 'job', 'do' }, { queue_len = 32 })
-  local get_ep = conn:bind({ 'cmd', 'update', 'job', 'get' }, { queue_len = 32 })
-  local list_ep = conn:bind({ 'cmd', 'update', 'job', 'list' }, { queue_len = 32 })
+  local create_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, { queue_len = 32 })
+  local start_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { queue_len = 32 })
+  local commit_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { queue_len = 32 })
+  local cancel_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'cancel-job' }, { queue_len = 32 })
+  local retry_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'retry-job' }, { queue_len = 32 })
+  local discard_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'discard-job' }, { queue_len = 32 })
+  local get_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { queue_len = 32 })
+  local list_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'list-jobs' }, { queue_len = 32 })
+  local ingest_create_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'create' }, { queue_len = 32 })
+  local ingest_delete_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'delete' }, { queue_len = 32 })
 
   local endpoints = {
     create = create_ep,
-    job_do = do_ep,
+    start = start_ep,
+    commit = commit_ep,
+    cancel = cancel_ep,
+    retry = retry_ep,
+    discard = discard_ep,
     get = get_ep,
     list = list_ep,
+    ingest_create = ingest_create_ep,
+    ingest_delete = ingest_delete_ep,
   }
 
   local function adopt_repo(new_repo)
@@ -479,9 +497,15 @@ function M.start(conn, opts)
       rec.watch:unwatch()
     end
     create_ep:unbind()
-    do_ep:unbind()
+    start_ep:unbind()
+    commit_ep:unbind()
+    cancel_ep:unbind()
+    retry_ep:unbind()
+    discard_ep:unbind()
     get_ep:unbind()
     list_ep:unbind()
+    ingest_create_ep:unbind()
+    ingest_delete_ep:unbind()
   end)
 
   rebuild_backends()
@@ -582,12 +606,33 @@ function M.start(conn, opts)
       end
       commands:handle_create(req)
 
-    elseif which == 'job_do' then
-      if not req then
-        error('update job do endpoint closed: ' .. tostring(err), 0)
-      end
-      commands:handle_do(req)
+    elseif which == 'start' then
+      if not req then error('update start endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_method(req, 'start')
+    elseif which == 'commit' then
+      if not req then error('update commit endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_method(req, 'commit')
+    elseif which == 'cancel' then
+      if not req then error('update cancel endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_method(req, 'cancel')
+    elseif which == 'retry' then
+      if not req then error('update retry endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_method(req, 'retry')
+    elseif which == 'discard' then
+      if not req then error('update discard endpoint closed: ' .. tostring(err), 0) end
+      commands:handle_method(req, 'discard')
 
+
+    elseif which == 'ingest_create' then
+      if not req then error('artifact-ingest create endpoint closed: ' .. tostring(err), 0) end
+      local payload = req.payload or {}
+      local reply, ierr = artifact_cap:call_control('create_sink', payload)
+      if not reply then req:fail(ierr) elseif reply.ok ~= true then req:fail(reply.reason) else req:reply(reply) end
+    elseif which == 'ingest_delete' then
+      if not req then error('artifact-ingest delete endpoint closed: ' .. tostring(err), 0) end
+      local payload = req.payload or {}
+      local reply, ierr = artifact_cap:call_control('delete', payload)
+      if not reply then req:fail(ierr) elseif reply.ok ~= true then req:fail(reply.reason) else req:reply(reply) end
     elseif which == 'get' then
       if not req then
         error('update get endpoint closed: ' .. tostring(err), 0)

@@ -298,7 +298,7 @@ function T.devhost_mcu_charger_alert_event_flows_over_fabric_and_updates_last_al
 			return payload.available == true and payload.ready == true
 		end, 2.0))
 
-		local event_sub = caller:subscribe({ 'event', 'device', 'component', 'mcu', 'charger_alert' }, {
+		local event_sub = caller:subscribe({ 'cap', 'component', 'mcu', 'event', 'charger_alert' }, {
 			queue_len = 8,
 			full = 'drop_oldest',
 		})

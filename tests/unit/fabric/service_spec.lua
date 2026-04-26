@@ -56,11 +56,11 @@ function T.fabric_service_applies_empty_config_and_exposes_transfer_endpoint()
 		assert(summary.status.live == 0)
 		assert(type(summary.links) == 'table')
 
-		local r1, e1 = conn:call({ 'cmd', 'fabric', 'transfer' }, { op = 'status', link_id = 'missing' }, { timeout = 0.25 })
+		local r1, e1 = conn:call({ 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, { op = 'status', link_id = 'missing' }, { timeout = 0.25 })
 		assert(r1 == nil)
 		assert(tostring(e1):match('no_such_link'))
 
-		local r2, e2 = conn:call({ 'cmd', 'fabric', 'transfer' }, { op = 'abort', link_id = 'missing' }, { timeout = 0.25 })
+		local r2, e2 = conn:call({ 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, { op = 'abort', link_id = 'missing' }, { timeout = 0.25 })
 		assert(r2 == nil)
 		assert(tostring(e2):match('no_such_link'))
 	end, { timeout = 2.0 })

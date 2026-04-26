@@ -23,8 +23,8 @@ function T.member_adapter_runtime_builds_member_topics()
   local rt = runtime.new(conn, 'mcu')
   rt:retain_state({ 'software' }, { version = 'v1' })
   rt:publish_event({ 'power', 'charger', 'alert' }, { kind = 'vin_lo' })
-  assert(table.concat(published[1].topic, '/') == 'state/member/mcu/software')
-  assert(table.concat(published[2].topic, '/') == 'event/member/mcu/power/charger/alert')
+  assert(table.concat(published[1].topic, '/') == 'raw/member/mcu/state/software')
+  assert(table.concat(published[2].topic, '/') == 'raw/member/mcu/cap/telemetry/main/event/power/charger/alert')
 end
 
 return T

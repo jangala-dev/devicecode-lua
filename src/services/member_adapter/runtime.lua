@@ -25,11 +25,19 @@ function M.new(conn, member)
 end
 
 function Runtime:state_topic(suffix)
-  return append(topics.member_state(self.member), suffix)
+  return append(topics.raw_member_state(self.member), suffix)
 end
 
 function Runtime:event_topic(suffix)
-  return append(topics.member_event(self.member), suffix)
+  return append(topics.raw_member_cap_event(self.member, 'telemetry', 'main'), suffix)
+end
+
+function Runtime:retain_meta(payload)
+  return self.conn:retain(topics.raw_member_meta(self.member), payload)
+end
+
+function Runtime:retain_status(payload)
+  return self.conn:retain(topics.raw_member_status(self.member), payload)
 end
 
 function Runtime:retain_state(suffix, payload)

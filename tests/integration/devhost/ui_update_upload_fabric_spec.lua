@@ -101,7 +101,7 @@ local function wait_device_component(conn, name, pred, timeout)
 end
 
 local function wait_job(conn, job_id, pred, timeout)
-	return wait_retained_state(conn, { 'state', 'update', 'jobs', job_id }, function(payload)
+	return wait_retained_state(conn, { 'state', 'workflow', 'update-job', job_id }, function(payload)
 		return type(payload) == 'table' and pred(payload)
 	end, timeout or 1.5)
 end
@@ -273,7 +273,7 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 		end)
 		assert(ok2, tostring(err2))
 
-		spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'fabric', 'transfer' }, a_ctl_tx)
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, a_ctl_tx)
 
 		local ok3, err3 = scope:spawn(function()
 			device.start(bus:connect(), { name = 'device', env = 'dev' })

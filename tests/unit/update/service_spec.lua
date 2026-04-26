@@ -50,8 +50,17 @@ end
 
 local function bind_device_double(scope, device_conn, versions, opts)
   opts = opts or {}
-  local device_get_ep = device_conn:bind({ 'cmd', 'device', 'component', 'get' }, { queue_len = 32 })
-  local device_do_ep = device_conn:bind({ 'cmd', 'device', 'component', 'do' }, { queue_len = 32 })
+  local device_get_ep = device_conn:bind({ 'cap', 'device', 'main', 'rpc', 'get-component' }, { queue_len = 32 })
+  local eps = {}
+  local function bind_action_ep(component, action)
+    local ep = device_conn:bind({ 'cap', 'component', component, 'rpc', action }, { queue_len = 32 })
+    eps[#eps + 1] = { component = component, action = action, ep = ep }
+  end
+  for component in pairs(versions) do
+    bind_action_ep(component, 'prepare_update')
+    bind_action_ep(component, 'stage_update')
+    bind_action_ep(component, 'commit_update')
+  end
 
   local function component_payload(component)
     return {
@@ -75,28 +84,24 @@ local function bind_device_double(scope, device_conn, versions, opts)
   local function publish_component(component)
     device_conn:retain({ 'state', 'device', 'component', component }, component_payload(component))
   end
-
-  for component, _ in pairs(versions) do
-    publish_component(component)
-  end
+  for component in pairs(versions) do publish_component(component) end
 
   bind_reply_loop(scope, device_get_ep, function(payload)
     if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'get', req = payload } end
     return component_payload(payload.component)
   end)
 
-  bind_reply_loop(scope, device_do_ep, function(payload)
-    if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'do', req = payload } end
-    if payload.action == 'prepare_update' then
+  local function handle_component_action(component, action, payload)
+    if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'do', component = component, action = action, req = payload } end
+    if action == 'prepare_update' then
       if opts.prepare_sleep then sleep_mod.sleep(opts.prepare_sleep) end
       return { ok = true, prepared = true }
-    elseif payload.action == 'stage_update' then
-      local reply = { ok = true, staged = payload.args.artifact_ref }
-      if payload.args.expected_image_id then reply.expected_image_id = payload.args.expected_image_id end
+    elseif action == 'stage_update' then
+      local reply = { ok = true, staged = payload.artifact_ref }
+      if payload.expected_image_id then reply.expected_image_id = payload.expected_image_id end
       reply.artifact_retention = opts.artifact_retention or 'release'
       return reply
-    elseif payload.action == 'commit_update' then
-      local component = payload.component
+    elseif action == 'commit_update' then
       if opts.commit_version and opts.commit_version[component] then versions[component] = opts.commit_version[component] end
       if opts.boot_id and component and opts.bump_boot_id then
         opts.boot_id[component] = tostring((opts.boot_id[component] or component .. '-boot') .. '-next')
@@ -105,12 +110,16 @@ local function bind_device_double(scope, device_conn, versions, opts)
       return { ok = true, started = true }
     end
     return nil, 'unsupported_action'
-  end)
-
+  end
+  for _, rec in ipairs(eps) do
+    bind_reply_loop(scope, rec.ep, function(payload)
+      return handle_component_action(rec.component, rec.action, payload)
+    end)
+  end
 end
 
 local function bind_fabric_transfer_double(scope, conn, calls)
-  local transfer_ep = conn:bind({ 'cmd', 'fabric', 'transfer' }, { queue_len = 32 })
+  local transfer_ep = conn:bind({ 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, { queue_len = 32 })
   bind_reply_loop(scope, transfer_ep, function(payload)
     if calls then calls[#calls + 1] = payload end
     assert(payload.op == 'send_blob')
@@ -155,7 +164,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     local job
     local diag = new_update_diag(scope, bus, caller, control, artifacts, function()
       if job and job.job_id then
-        return test_diag.retained_fn(caller, { 'state', 'update', 'jobs', job.job_id })()
+        return test_diag.retained_fn(caller, { 'state', 'workflow', 'update-job', job.job_id })()
       end
       return { pending = true }
     end)
@@ -173,7 +182,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
 
     wait_service_running(caller, 'update')
 
-    local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+    local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
       component = 'mcu',
       artifact = {
         kind = 'import_path',
@@ -192,8 +201,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     ensure(type(job.lifecycle.created_seq) == 'number', 'expected created_seq')
     ensure(type(job.lifecycle.updated_seq) == 'number', 'expected updated_seq')
 
-    local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, {
-      op = 'start',
+    local started, serr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, {
       job_id = job.job_id,
     }, { timeout = 0.5 })
 
@@ -204,7 +212,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
 
     diag:assert_until('job never reached awaiting_commit with released artifact', function()
       local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
+        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
       end)
       return okp
         and type(payload) == 'table'
@@ -216,8 +224,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
 
     ensure(next(artifacts.artifacts) == nil, 'expected transient artifact to be released after staging')
 
-    local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, {
-      op = 'commit',
+    local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, {
       job_id = job.job_id,
     }, { timeout = 1.0 })
 
@@ -235,7 +242,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
 
     diag:assert_until('job never reached succeeded after commit', function()
       local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
+        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
       end)
       return okp
         and type(payload) == 'table'
@@ -243,7 +250,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
         and payload.job.lifecycle.state == 'succeeded'
     end, { timeout = 0.75, interval = 0.01 })
 
-    local got, gerr = caller:call({ 'cmd', 'update', 'job', 'get' }, {
+    local got, gerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, {
       job_id = job.job_id,
     }, { timeout = 0.5 })
 
@@ -262,7 +269,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
         get_calls = get_calls + 1
       elseif call.kind == 'do' then
         do_calls = do_calls + 1
-        actions[#actions + 1] = call.req.action
+        actions[#actions + 1] = call.action
       end
     end
 
@@ -298,24 +305,24 @@ function T.update_service_cancels_staged_job_before_commit()
 
     wait_service_running(caller, 'update')
 
-    local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+    local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
       component = 'mcu', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image') }
     }, { timeout = 0.5 })
     assert(cerr == nil)
     local job = created.job
 
-    local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
+    local started, serr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job.job_id }, { timeout = 0.5 })
     assert(serr == nil)
     assert(started.ok == true)
 
     assert(probe.wait_until(function()
       local okp, state = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
+        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
       end)
       return okp and type(state) == 'table' and type(state.job) == 'table' and state.job.lifecycle.state == 'awaiting_commit'
     end, { timeout = 0.75, interval = 0.01 }))
 
-    local cancelled, derr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'cancel', job_id = job.job_id }, { timeout = 0.5 })
+    local cancelled, derr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'cancel-job' }, { job_id = job.job_id }, { timeout = 0.5 })
     assert(derr == nil)
     assert(cancelled.ok == true)
     assert(cancelled.job.lifecycle.state == 'cancelled')
@@ -353,10 +360,10 @@ function T.update_service_applies_per_component_artifact_storage_policy()
     wait_service_running(caller, 'update')
     sleep_mod.sleep(0.05)
 
-    local cm5_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
+    local cm5_created = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
       component = 'cm5', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-image.bin', 'cm5-image') }
     }, { timeout = 0.5 }))
-    local mcu_created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
+    local mcu_created = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
       component = 'mcu', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image') }
     }, { timeout = 0.5 }))
 
@@ -399,23 +406,23 @@ function T.update_service_rejects_second_active_job_globally()
     assert(ok, tostring(err))
     wait_service_running(caller, 'update')
 
-    local j1 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'mcu', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/a.bin', 'a') } }, { timeout = 0.5 })).job
-    local j2 = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, { component = 'cm5', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/b.bin', 'b') } }, { timeout = 0.5 })).job
+    local j1 = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, { component = 'mcu', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/a.bin', 'a') } }, { timeout = 0.5 })).job
+    local j2 = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, { component = 'cm5', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/b.bin', 'b') } }, { timeout = 0.5 })).job
     assert(j1.lifecycle.state == 'created')
     assert(j2.lifecycle.state == 'created')
 
-    local s1, s1err = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = j1.job_id }, { timeout = 0.5 })
+    local s1, s1err = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = j1.job_id }, { timeout = 0.5 })
     assert(s1err == nil)
     assert(s1.ok == true)
 
-    local s2, s2err = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = j2.job_id }, { timeout = 0.5 })
+    local s2, s2err = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = j2.job_id }, { timeout = 0.5 })
     assert(s2 == nil)
     assert(s2err == 'busy_global')
 
-    local denied, derr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = j2.job_id }, { timeout = 0.5 })
+    local denied, derr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = j2.job_id }, { timeout = 0.5 })
     assert(denied == nil)
     assert(derr == 'job_not_committable')
-    local got2 = assert(caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = j2.job_id }, { timeout = 0.5 }))
+    local got2 = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { job_id = j2.job_id }, { timeout = 0.5 }))
     assert(got2.job.lifecycle.state == 'created' or got2.job.lifecycle.state == 'failed')
   end, { timeout = 3.0 })
 end
@@ -449,7 +456,7 @@ function T.update_service_supports_ref_artifacts_and_auto_start()
     local imported = assert(caller:call({ 'cap', 'artifact_store', 'main', 'rpc', 'import_path' }, { path = art_path, meta = { kind = 'update' }, policy = 'transient_only' }, { timeout = 0.5 }))
     local art = imported.reason
 
-    local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+    local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
       component = 'mcu',
       artifact = { kind = 'ref', ref = art:ref() },
       expected_image_id = 'mcu-v1',
@@ -462,7 +469,7 @@ function T.update_service_supports_ref_artifacts_and_auto_start()
 
     assert(probe.wait_until(function()
       local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
+        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
       end)
       return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
     end, { timeout = 0.75, interval = 0.01 }))
@@ -494,30 +501,30 @@ function T.update_service_marks_bundled_hold_after_manual_mcu_success()
     assert(ok, tostring(err))
     wait_service_running(caller, 'update')
 
-    local created = assert(caller:call({ 'cmd', 'update', 'job', 'create' }, {
+    local created = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
       component = 'mcu',
       artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/manual.bin', 'manual') },
       expected_image_id = 'mcu-v1-manual',
       metadata = { source = 'ui_upload' },
     }, { timeout = 0.5 }))
     local job_id = created.job.job_id
-    assert(assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job_id }, { timeout = 0.5 })).ok == true)
+    assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job_id }, { timeout = 0.5 })).ok == true)
     assert(probe.wait_until(function()
       local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job_id }, { timeout = 0.02 })
+        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job_id }, { timeout = 0.02 })
       end)
       return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
     end, { timeout = 0.75, interval = 0.01 }))
-    assert(assert(caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job_id }, { timeout = 1.0 })).ok == true)
+    assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job_id }, { timeout = 1.0 })).ok == true)
     assert(probe.wait_until(function()
       local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'update', 'jobs', job_id }, { timeout = 0.02 })
+        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job_id }, { timeout = 0.02 })
       end)
       return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'succeeded'
     end, { timeout = 0.75, interval = 0.01 }))
     assert(probe.wait_until(function()
       local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'update', 'bundled', 'mcu' }, { timeout = 0.02 })
+        return probe.wait_payload(caller, { 'state', 'update', 'component', 'mcu' }, { timeout = 0.02 })
       end)
       return okp and type(payload) == 'table' and payload.follow_mode == 'hold' and payload.last_result == 'manual_success_hold'
     end, { timeout = 0.75, interval = 0.01 }))

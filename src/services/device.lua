@@ -25,16 +25,19 @@ local function spawn_required(fn, what)
 end
 
 local function next_device_event_op(shell_state)
-  return fibers.named_choice({
+  local ops = {
     cfg = shell_state.cfg_watch:recv_op(),
     obs = shell_state.obs_rx:recv_op(),
     work = shell_state.work_rx:recv_op(),
     self_req = shell_state.self_ep:recv_op(),
     list_req = shell_state.list_ep:recv_op(),
     get_req = shell_state.get_ep:recv_op(),
-    do_req = shell_state.do_ep:recv_op(),
     changed = shell_state.changed:changed_op(shell_state.seen),
-  })
+  }
+  for key, rec in pairs(shell_state.action_eps or {}) do
+    ops[key] = rec.ep:recv_op()
+  end
+  return fibers.named_choice(ops)
 end
 
 local function publish_component(conn, svc, state, name)
@@ -118,15 +121,43 @@ local function apply_cfg(service_scope, conn, svc, state, changed, obs_tx, obser
   changed:signal()
 end
 
-local function handle_cfg_event(service_scope, conn, svc, state, changed, obs_tx, observer_state, ev, err)
+
+local function sync_action_endpoints(conn, state, shell_state)
+  local keep = {}
+  for name, rec in pairs(state.components) do
+    local methods = { ['get-status'] = true }
+    for action_name in pairs(rec.operations or {}) do methods[action_name] = true end
+    for method in pairs(methods) do
+      local key = name .. ':' .. method
+      keep[key] = true
+      if not shell_state.action_eps[key] then
+        shell_state.action_eps[key] = {
+          component = name,
+          action = method,
+          ep = conn:bind(projection.component_cap_topic(name, method), { queue_len = 32 }),
+        }
+      end
+    end
+  end
+  for key, rec in pairs(shell_state.action_eps) do
+    if not keep[key] then
+      rec.ep:unbind()
+      shell_state.action_eps[key] = nil
+    end
+  end
+end
+
+local function handle_cfg_event(service_scope, conn, svc, state, changed, obs_tx, observer_state, shell_state, ev, err)
   if not ev then
     svc:failed(tostring(err or 'cfg_watch_closed'))
     error('device cfg watch closed: ' .. tostring(err), 0)
   end
   if ev.op == 'retain' then
     apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_state, ev.payload)
+    sync_action_endpoints(conn, state, shell_state)
   elseif ev.op == 'unretain' then
     apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_state, nil)
+    sync_action_endpoints(conn, state, shell_state)
   end
 end
 
@@ -221,7 +252,7 @@ local function perform_fabric_stage(conn, rec, action_name, args, timeout)
     },
   }
 
-  local value, err = conn:call({ 'cmd', 'fabric', 'transfer' }, payload, { timeout = op.timeout_s or timeout })
+  local value, err = conn:call({ 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, payload, { timeout = op.timeout_s or timeout })
   if value == nil then return nil, err end
   if type(value) ~= 'table' then value = { ok = true } end
   if value.artifact_retention == nil then value.artifact_retention = 'release' end
@@ -261,10 +292,10 @@ local function handle_list_req(req, err, state, svc)
   req:reply({ ok = true, components = items })
 end
 
-local function handle_get_req(req, err, state, svc)
+local function handle_get_req(req, err, state, svc, forced_component)
   if not req then error('device get endpoint closed: ' .. tostring(err), 0) end
   local payload = req.payload or {}
-  local name = payload.component
+  local name = forced_component or payload.component
   local rec = state.components[name]
   if type(name) ~= 'string' or not rec then
     req:fail('unknown_component')
@@ -273,11 +304,11 @@ local function handle_get_req(req, err, state, svc)
   req:reply(projection.component_view(name, rec, svc:now()))
 end
 
-local function handle_do_req(work_tx, conn, req, err, state)
+local function handle_action_req(work_tx, conn, req, err, state, component, action)
   if not req then error('device do endpoint closed: ' .. tostring(err), 0) end
   local payload = req.payload or {}
-  local name = payload.component
-  local action = payload.action
+  local name = component or payload.component
+  action = action or payload.action
   local rec = state.components[name]
   if type(name) ~= 'string' or not rec then
     req:fail('unknown_component')
@@ -290,7 +321,8 @@ local function handle_do_req(work_tx, conn, req, err, state)
     spawn_what = 'device_do_helper_spawn',
     overflow_what = 'device_do_done_overflow',
     run = function()
-      return perform_component_action(conn, rec, action, payload.args or {}, payload.timeout)
+      local call_args = payload.args or payload or {}
+      return perform_component_action(conn, rec, action, call_args, payload.timeout)
     end,
   })
 end
@@ -330,10 +362,9 @@ function M.start(conn, opts)
   local work_tx, work_rx = mailbox.new(64, { full = 'reject_newest' })
   local observer_state = new_observer_state()
 
-  local self_ep = conn:bind({ 'cmd', 'device', 'get' }, { queue_len = 32 })
-  local list_ep = conn:bind({ 'cmd', 'device', 'component', 'list' }, { queue_len = 32 })
-  local get_ep = conn:bind({ 'cmd', 'device', 'component', 'get' }, { queue_len = 32 })
-  local do_ep = conn:bind({ 'cmd', 'device', 'component', 'do' }, { queue_len = 32 })
+  local self_ep = conn:bind({ 'cap', 'device', 'main', 'rpc', 'get-identity' }, { queue_len = 32 })
+  local list_ep = conn:bind({ 'cap', 'device', 'main', 'rpc', 'list-components' }, { queue_len = 32 })
+  local get_ep = conn:bind({ 'cap', 'device', 'main', 'rpc', 'get-component' }, { queue_len = 32 })
 
   local shell_state = {
     cfg_watch = cfg_watch,
@@ -342,12 +373,13 @@ function M.start(conn, opts)
     self_ep = self_ep,
     list_ep = list_ep,
     get_ep = get_ep,
-    do_ep = do_ep,
+    action_eps = {},
     changed = changed,
     seen = changed:version(),
   }
 
   apply_cfg(service_scope, conn, svc, state, changed, obs_tx, observer_state, nil)
+  sync_action_endpoints(conn, state, shell_state)
   svc:running({
     components_total = 0,
     components_available = 0,
@@ -361,7 +393,7 @@ function M.start(conn, opts)
     self_ep:unbind()
     list_ep:unbind()
     get_ep:unbind()
-    do_ep:unbind()
+    for _, rec in pairs(shell_state.action_eps) do rec.ep:unbind() end
     for name in pairs(state.components) do
       conn:unretain(projection.component_topic(name))
       conn:unretain(projection.component_software_topic(name))
@@ -375,7 +407,7 @@ function M.start(conn, opts)
     local which, a, b = fibers.perform(next_device_event_op(shell_state))
 
     if which == 'cfg' then
-      handle_cfg_event(service_scope, conn, svc, state, changed, obs_tx, observer_state, a, b)
+      handle_cfg_event(service_scope, conn, svc, state, changed, obs_tx, observer_state, shell_state, a, b)
     elseif which == 'obs' then
       handle_observer_event(conn, state, changed, observer_state, a)
     elseif which == 'work' then
@@ -389,8 +421,13 @@ function M.start(conn, opts)
       handle_list_req(a, b, state, svc)
     elseif which == 'get_req' then
       handle_get_req(a, b, state, svc)
-    elseif which == 'do_req' then
-      handle_do_req(work_tx, conn, a, b, state)
+    elseif type(which) == 'string' and shell_state.action_eps[which] then
+      local rec = shell_state.action_eps[which]
+      if rec.action == 'get-status' then
+        handle_get_req(a, b, state, svc, rec.component)
+      else
+        handle_action_req(work_tx, conn, a, b, state, rec.component, rec.action)
+      end
     end
   end
 end

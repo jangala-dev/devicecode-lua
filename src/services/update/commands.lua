@@ -213,6 +213,33 @@ function Commands:handle_create(req)
   req:reply({ ok = true, job = self.ctx.projection.public_job(job) })
 end
 
+function Commands:handle_method(req, op)
+  local payload = req.payload or {}
+  local action = DO_ACTIONS[op]
+  if not action then
+    req:fail('invalid_op')
+    return
+  end
+
+  local job = self.ctx.state.store.jobs[payload.job_id]
+  if not job then
+    req:fail('unknown_job')
+    return
+  end
+
+  local value, err = self[action.method](self, job)
+  if value == nil then
+    req:fail(err)
+    return
+  end
+
+  if action.wrap_job then
+    req:reply({ ok = true, job = value })
+  else
+    req:reply(value)
+  end
+end
+
 function Commands:handle_do(req)
   local payload = req.payload or {}
   local op = payload.op

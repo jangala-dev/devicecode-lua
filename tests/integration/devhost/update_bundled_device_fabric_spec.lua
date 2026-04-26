@@ -160,7 +160,7 @@ local function wait_device_component(conn, name, pred, timeout)
 end
 
 local function wait_job(conn, job_id, pred, timeout)
-	return wait_retained_state(conn, { 'state', 'update', 'jobs', job_id }, function(payload)
+	return wait_retained_state(conn, { 'state', 'workflow', 'update-job', job_id }, function(payload)
 		return type(payload) == 'table' and pred(payload)
 	end, timeout or 1.5)
 end
@@ -355,7 +355,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		end)
 		assert(ok2, tostring(err2))
 
-		spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'fabric', 'transfer' }, a_ctl_tx)
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, a_ctl_tx)
 
 		local ok3, err3 = scope:spawn(function()
 			device.start(bus:connect(), { name = 'device', env = 'dev' })
@@ -381,7 +381,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 				and payload.software.boot_id == boot_id.mcu
 		end, 1.5))
 
-		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+		local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
 			component = 'mcu',
 			artifact = { kind = 'bundled' },
 			metadata = { source = 'manual-bundled-test' },
@@ -392,7 +392,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		assert(type(job.artifact.ref) == 'string')
 		local released_ref = job.artifact.ref
 
-		local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
+		local started, serr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job.job_id }, { timeout = 0.5 })
 		assert(serr == nil)
 		assert(started.ok == true)
 
@@ -405,7 +405,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		end, { timeout = 0.25, interval = 0.01 }))
 		assert(received_blob == dcmcu_bytes)
 
-		local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
+		local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })
 		assert(perr == nil)
 		assert(committed.ok == true)
 
@@ -415,7 +415,7 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 				and payload.job.lifecycle.state == 'succeeded'
 		end, 2.5))
 
-		local final, ferr = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
+		local final, ferr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { job_id = job.job_id }, { timeout = 0.5 })
 		assert(ferr == nil)
 		assert(final.ok == true)
 		assert(final.job.lifecycle.state == 'succeeded')

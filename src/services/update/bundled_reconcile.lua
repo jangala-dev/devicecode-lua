@@ -125,7 +125,7 @@ function Bundled:save_record(component, rec)
 		self.ctx.svc:obs_log('warn', { what = 'bundled_state_save_failed', component = component, err = tostring(err) })
 		return nil, err
 	end
-	self.ctx.conn:retain({ 'state', 'update', 'bundled', component }, rec)
+	self.ctx.conn:retain({ 'state', 'update', 'component', component }, rec)
 	return true, nil
 end
 

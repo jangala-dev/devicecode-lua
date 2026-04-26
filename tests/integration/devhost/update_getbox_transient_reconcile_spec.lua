@@ -174,7 +174,7 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
             device = { cm5_fn = false, mcu_fn = false, service_fn = false, summary_fn = false },
         })
 
-        local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+        local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
             component = 'cm5',
             artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/getbox-firmware-image-v2.bin', 'getbox-firmware-image-v2') },
             expected_image_id = 'cm5-v2',
@@ -192,19 +192,19 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
 
         assert(job.lifecycle.state == 'created')
 
-        local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
+        local started, serr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job.job_id }, { timeout = 0.5 })
         assert(serr == nil)
         assert(started.ok == true)
 
-        assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+        assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
             return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
         end, 0.75))
 
-        local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
+        local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(perr == nil)
         assert(committed.ok == true)
         
-        test_diag.assert_retained_transitions(diag, caller, { 'state', 'update', 'jobs', job.job_id }, { 'awaiting_commit', 'awaiting_return' }, {
+        test_diag.assert_retained_transitions(diag, caller, { 'state', 'workflow', 'update-job', job.job_id }, { 'awaiting_commit', 'awaiting_return' }, {
             label = 'job did not move from awaiting_commit to awaiting_return in order',
             timeout = 0.75,
             interval = 0.01,
@@ -213,7 +213,7 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
             end,
         })
 
-        local mid, mid_err = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
+        local mid, mid_err = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { job_id = job.job_id }, { timeout = 0.5 })
         assert(mid_err == nil)
         assert(mid.ok == true)
         assert(mid.job.lifecycle.state == 'awaiting_return')
@@ -245,7 +245,7 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
 
         assert(wait_service_running(caller, { 'svc', 'update', 'status' }))
 
-        test_diag.assert_retained_transitions(diag, caller, { 'state', 'update', 'jobs', job.job_id }, { 'awaiting_return', 'succeeded' }, {
+        test_diag.assert_retained_transitions(diag, caller, { 'state', 'workflow', 'update-job', job.job_id }, { 'awaiting_return', 'succeeded' }, {
             label = 'job did not move from awaiting_return to succeeded in order',
             timeout = 1.5,
             interval = 0.01,
@@ -254,7 +254,7 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
             end,
         })
 
-        assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+        assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
             return type(payload) == 'table'
                 and type(payload.job) == 'table'
                 and payload.job.lifecycle.state == 'succeeded'
@@ -264,7 +264,7 @@ function T.devhost_getbox_style_cm5_update_reconciles_after_restart_with_transie
                 and type(payload.job.artifact.released_at) == 'number'
         end, 1.5))
 
-        local final, ferr = caller:call({ 'cmd', 'update', 'job', 'get' }, { job_id = job.job_id }, { timeout = 0.5 })
+        local final, ferr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { job_id = job.job_id }, { timeout = 0.5 })
         assert(ferr == nil)
         assert(final.ok == true)
         assert(final.job.lifecycle.state == 'succeeded')

@@ -63,11 +63,7 @@ local function bind_reply_loop(scope, ep, handler)
       local req = ep:recv()
       if not req then return end
       local reply, ferr = handler(req.payload or {}, req)
-      if reply == nil then
-        req:fail(ferr or 'failed')
-      else
-        req:reply(reply)
-      end
+      if reply == nil then req:fail(ferr or 'failed') else req:reply(reply) end
     end
   end)
   assert(ok, tostring(err))
@@ -75,8 +71,16 @@ end
 
 local function bind_device_double(scope, device_conn, versions, opts)
   opts = opts or {}
-  local device_do_ep = device_conn:bind({ 'cmd', 'device', 'component', 'do' }, { queue_len = 32 })
-  local publish_component
+  local eps = {}
+  local function bind_action_ep(component, action)
+    local ep = device_conn:bind({ 'cap', 'component', component, 'rpc', action }, { queue_len = 32 })
+    eps[#eps + 1] = { component = component, action = action, ep = ep }
+  end
+  for component in pairs(versions) do
+    bind_action_ep(component, 'prepare_update')
+    bind_action_ep(component, 'stage_update')
+    bind_action_ep(component, 'commit_update')
+  end
 
   local function component_payload(component)
     local not_ready = opts.not_ready and opts.not_ready[component] == true
@@ -97,57 +101,37 @@ local function bind_device_double(scope, device_conn, versions, opts)
     }
   end
 
-  publish_component = function(component)
+  local function publish_component(component)
     device_conn:retain({ 'state', 'device', 'component', component }, component_payload(component))
   end
+  for component in pairs(versions) do publish_component(component) end
 
-  for component, _ in pairs(versions) do
-    publish_component(component)
-  end
-
-  bind_reply_loop(scope, device_do_ep, function(payload)
-    if opts.calls then
-      opts.calls[#opts.calls + 1] = { kind = 'do', req = payload }
-    end
-
-    if payload.action == 'prepare_update' then
+  local function handle_component_action(component, action, payload)
+    if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'do', component = component, action = action, req = payload } end
+    if action == 'prepare_update' then
       return { ok = true, prepared = true }
-
-    elseif payload.action == 'stage_update' then
-      if opts.fail_stage_once then
-        opts.fail_stage_once = false
-        return nil, 'stage_failed_once'
-      end
-      if opts.block_stage_until_released then
-        return nil, 'stage_blocked'
-      end
+    elseif action == 'stage_update' then
+      if opts.fail_stage_once then opts.fail_stage_once = false; return nil, 'stage_failed_once' end
+      if opts.block_stage_until_released then return nil, 'stage_blocked' end
       return {
         ok = true,
-        staged = payload.args.artifact_ref,
+        staged = payload.artifact_ref,
         artifact_retention = 'release',
-        expected_image_id = payload.args.expected_image_id,
+        expected_image_id = payload.expected_image_id,
       }
-
-    elseif payload.action == 'commit_update' then
-      local c = payload.component
-      if opts.commit_version and opts.commit_version[c] then
-        versions[c] = opts.commit_version[c]
-      end
-      if opts.image_ids and opts.commit_image_id and opts.commit_image_id[c] then
-        opts.image_ids[c] = opts.commit_image_id[c]
-      end
-      if opts.payload_sha256 and opts.commit_sha and opts.commit_sha[c] then
-        opts.payload_sha256[c] = opts.commit_sha[c]
-      end
-      if opts.boot_id and opts.bump_boot_id then
-        opts.boot_id[c] = tostring((opts.boot_id[c] or c .. '-boot') .. '-next')
-      end
-      publish_component(c)
+    elseif action == 'commit_update' then
+      if opts.commit_version and opts.commit_version[component] then versions[component] = opts.commit_version[component] end
+      if opts.image_ids and opts.commit_image_id and opts.commit_image_id[component] then opts.image_ids[component] = opts.commit_image_id[component] end
+      if opts.payload_sha256 and opts.commit_sha and opts.commit_sha[component] then opts.payload_sha256[component] = opts.commit_sha[component] end
+      if opts.boot_id and opts.bump_boot_id then opts.boot_id[component] = tostring((opts.boot_id[component] or component .. '-boot') .. '-next') end
+      publish_component(component)
       return { ok = true, started = true }
     end
-
     return nil, 'unsupported_action'
-  end)
+  end
+  for _, rec in ipairs(eps) do
+    bind_reply_loop(scope, rec.ep, function(payload) return handle_component_action(rec.component, rec.action, payload) end)
+  end
 
   return publish_component
 end
@@ -181,7 +165,7 @@ end
 local function wait_bundled(conn, pred, timeout)
   assert(probe.wait_until(function()
     local okp, payload = safe.pcall(function()
-      return probe.wait_payload(conn, { 'state', 'update', 'bundled', 'mcu' }, { timeout = 0.02 })
+      return probe.wait_payload(conn, { 'state', 'update', 'component', 'mcu' }, { timeout = 0.02 })
     end)
     return okp and pred(payload)
   end, { timeout = timeout or 1.0, interval = 0.01 }))

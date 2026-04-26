@@ -158,7 +158,7 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         publish_status()
         assert(wait_cm5_component_ready(caller))
 
-        local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+        local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
             component = 'cm5',
             artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/cm5-firmware-image.bin', 'cm5-firmware-image') },
             expected_image_id = 'cm5-v1',
@@ -173,21 +173,21 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         assert(job.lifecycle.state == 'created')
         assert(type(job.artifact.ref) == 'string')
 
-        local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'start', job_id = job.job_id }, { timeout = 0.5 })
+        local started, serr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job.job_id }, { timeout = 0.5 })
         assert(serr == nil)
         assert(started.ok == true)
 
-        assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+        assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
             return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
         end, 0.75))
 
-        local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, { op = 'commit', job_id = job.job_id }, { timeout = 1.0 })
+        local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(perr == nil)
         assert(committed.ok == true)
 
         assert(probe.wait_until(function()
             local ok, payload = safe.pcall(function()
-                return probe.wait_payload(caller, { 'state', 'update', 'jobs', job.job_id }, { timeout = 0.02 })
+                return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
             end)
             return ok and type(payload) == 'table'
                 and type(payload.job) == 'table'

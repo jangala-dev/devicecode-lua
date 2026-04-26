@@ -38,7 +38,7 @@ function M.new(opts)
 end
 
 function Uploads:_artifact_cap(user_conn)
-	return cap_sdk.new_cap_ref(user_conn, 'artifact_store', 'main')
+	return cap_sdk.new_cap_ref(user_conn, 'artifact-ingest', 'main')
 end
 
 function Uploads:_delete_artifact(artifact_cap, artifact_ref)
@@ -79,7 +79,7 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta, deadli
 		upload_id = upload_id,
 	}, 'transient_only'))
 
-	local reply, aerr = artifact_cap:call_control('create_sink', create_opts)
+	local reply, aerr = artifact_cap:call_control('create', create_opts)
 	if not reply then
 		return nil, errors.from(aerr, 502)
 	end

@@ -7,7 +7,7 @@ local availability = require 'services.device.availability'
 local M = {}
 
 function M.self_topic()
-  return topics.self()
+  return topics.identity()
 end
 
 function M.component_topic(name)
@@ -29,6 +29,12 @@ end
 function M.summary_topic()
   return topics.components()
 end
+
+
+function M.component_cap_topic(name, method)
+  return topics.component_cap_rpc(name, method)
+end
+
 
 local function copy(t)
   return model.copy_value(t)
@@ -181,7 +187,7 @@ end
 function M.self_payload(state, now_ts)
   local summary = M.summary_payload(state, now_ts)
   return {
-    kind = 'device.self',
+    kind = 'device.identity',
     ts = now_ts,
     counts = summary.counts,
     components = summary.components,

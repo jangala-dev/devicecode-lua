@@ -93,7 +93,7 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
         and payload.updater.state == 'running'
     end, { timeout = 0.75, interval = 0.01 }))
 
-    local status, serr = caller:call({ 'cmd', 'device', 'component', 'get' }, { component = 'cm5' }, { timeout = 0.5 })
+    local status, serr = caller:call({ 'cap', 'device', 'main', 'rpc', 'get-component' }, { component = 'cm5' }, { timeout = 0.5 })
     assert(serr == nil)
     assert(type(status) == 'table')
     assert(status.component == 'cm5')
@@ -103,11 +103,7 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
     assert(status.updater.state == 'running')
     assert(status.actions.stage_update == true)
 
-    local staged, terr = caller:call({ 'cmd', 'device', 'component', 'do' }, {
-      component = 'cm5',
-      action = 'stage_update',
-      args = { artifact_ref = 'art-1', expected_image_id = '1.2.3' },
-    }, { timeout = 0.5 })
+    local staged, terr = caller:call({ 'cap', 'component', 'cm5', 'rpc', 'stage_update' }, { artifact_ref = 'art-1', expected_image_id = '1.2.3' }, { timeout = 0.5 })
     assert(terr == nil)
     assert(staged.ok == true)
     assert(staged.staged == 'art-1')
@@ -136,47 +132,47 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
           subtype = 'mcu',
           required_facts = { 'software', 'updater' },
           facts = {
-            software = { 'state', 'member', 'mcu', 'software' },
-            updater = { 'state', 'member', 'mcu', 'updater' },
-            health = { 'state', 'member', 'mcu', 'health' },
-            power_battery = { 'state', 'member', 'mcu', 'power', 'battery' },
-            power_charger = { 'state', 'member', 'mcu', 'power', 'charger' },
-            power_charger_config = { 'state', 'member', 'mcu', 'power', 'charger', 'config' },
-            environment_temperature = { 'state', 'member', 'mcu', 'environment', 'temperature' },
-            environment_humidity = { 'state', 'member', 'mcu', 'environment', 'humidity' },
-            runtime_memory = { 'state', 'member', 'mcu', 'runtime', 'memory' },
+            software = { 'raw', 'member', 'mcu', 'state', 'software' },
+            updater = { 'raw', 'member', 'mcu', 'state', 'updater' },
+            health = { 'raw', 'member', 'mcu', 'state', 'health' },
+            power_battery = { 'raw', 'member', 'mcu', 'state', 'power', 'battery' },
+            power_charger = { 'raw', 'member', 'mcu', 'state', 'power', 'charger' },
+            power_charger_config = { 'raw', 'member', 'mcu', 'state', 'power', 'charger', 'config' },
+            environment_temperature = { 'raw', 'member', 'mcu', 'state', 'environment', 'temperature' },
+            environment_humidity = { 'raw', 'member', 'mcu', 'state', 'environment', 'humidity' },
+            runtime_memory = { 'raw', 'member', 'mcu', 'state', 'runtime', 'memory' },
           },
           actions = {
-            prepare_update = { 'cap', 'updater', 'mcu', 'rpc', 'prepare' },
+            prepare_update = { 'raw', 'member', 'mcu', 'cap', 'updater', 'main', 'rpc', 'prepare' },
           },
         },
       },
     })
 
-    local prepare_ep = provider:bind({ 'cap', 'updater', 'mcu', 'rpc', 'prepare' }, { queue_len = 16 })
+    local prepare_ep = provider:bind({ 'raw', 'member', 'mcu', 'cap', 'updater', 'main', 'rpc', 'prepare' }, { queue_len = 16 })
     bind_reply_loop(scope, prepare_ep, function(payload)
       return { ok = true, prepared = payload.target or 'mcu' }
     end)
 
-    provider:retain({ 'state', 'member', 'mcu', 'software' }, {
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'software' }, {
       version = 'mcu-v2',
       boot_id = 'mcu-boot-7',
     })
-    provider:retain({ 'state', 'member', 'mcu', 'updater' }, {
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'updater' }, {
       state = 'running',
     })
-    provider:retain({ 'state', 'member', 'mcu', 'health' }, {
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'health' }, {
       state = 'ok',
     })
 
-    provider:retain({ 'state', 'member', 'mcu', 'power', 'battery' }, {
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'power', 'battery' }, {
       pack_mV = 2412,
       per_cell_mV = 1206,
       ibat_mA = 7,
       temp_mC = 198000,
       bsr_uohm_per_cell = 42,
     })
-    provider:retain({ 'state', 'member', 'mcu', 'power', 'charger' }, {
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'power', 'charger' }, {
       vin_mV = 24317,
       vsys_mV = 24233,
       iin_mA = 658,
@@ -187,7 +183,7 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
       status = { const_current = true },
       system = { ok_to_charge = true },
     })
-    provider:retain({ 'state', 'member', 'mcu', 'power', 'charger', 'config' }, {
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'power', 'charger', 'config' }, {
       schema = 1,
       source = 'ltc4015',
       thresholds = {
@@ -201,13 +197,13 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
         cv_phase = true,
       },
     })
-    provider:retain({ 'state', 'member', 'mcu', 'environment', 'temperature' }, {
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'environment', 'temperature' }, {
       deci_c = 191,
     })
-    provider:retain({ 'state', 'member', 'mcu', 'environment', 'humidity' }, {
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'environment', 'humidity' }, {
       rh_x100 = 4690,
     })
-    provider:retain({ 'state', 'member', 'mcu', 'runtime', 'memory' }, {
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'runtime', 'memory' }, {
       alloc_bytes = 85680,
     })
 
@@ -253,11 +249,7 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
         and payload.runtime.memory.alloc_bytes == 85680
     end, { timeout = 0.75, interval = 0.01 }))
 
-    local reply, rerr = caller:call({ 'cmd', 'device', 'component', 'do' }, {
-      component = 'mcu',
-      action = 'prepare_update',
-      args = { target = 'mcu' },
-    }, { timeout = 0.5 })
+    local reply, rerr = caller:call({ 'cap', 'component', 'mcu', 'rpc', 'prepare_update' }, { target = 'mcu' }, { timeout = 0.5 })
     assert(rerr == nil)
     assert(reply.ok == true)
   end, { timeout = 2.0 })
@@ -297,20 +289,20 @@ function T.device_service_republishes_component_events_and_records_last_event()
           subtype = 'mcu',
           required_facts = { 'software', 'updater' },
           facts = {
-            software = { 'state', 'member', 'mcu', 'software' },
-            updater = { 'state', 'member', 'mcu', 'updater' },
+            software = { 'raw', 'member', 'mcu', 'state', 'software' },
+            updater = { 'raw', 'member', 'mcu', 'state', 'updater' },
           },
           events = {
-            charger_alert = { 'event', 'member', 'mcu', 'power', 'charger', 'alert' },
+            charger_alert = { 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event', 'power', 'charger', 'alert' },
           },
         },
       },
     })
 
-    provider:retain({ 'state', 'member', 'mcu', 'software' }, { version = 'mcu-v2' })
-    provider:retain({ 'state', 'member', 'mcu', 'updater' }, { state = 'running' })
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'software' }, { version = 'mcu-v2' })
+    provider:retain({ 'raw', 'member', 'mcu', 'state', 'updater' }, { state = 'running' })
 
-    local sub = caller:subscribe({ 'event', 'device', 'component', 'mcu', 'charger_alert' }, { queue_len = 4 })
+    local sub = caller:subscribe({ 'cap', 'component', 'mcu', 'event', 'charger_alert' }, { queue_len = 4 })
 
     local ok, err = scope:spawn(function()
       device.start(bus:connect(), { name = 'device', env = 'dev' })
@@ -318,7 +310,7 @@ function T.device_service_republishes_component_events_and_records_last_event()
     assert(ok, tostring(err))
     wait_service_running(caller, 'device')
 
-    provider:publish({ 'event', 'member', 'mcu', 'power', 'charger', 'alert' }, {
+    provider:publish({ 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event', 'power', 'charger', 'alert' }, {
       kind = 'vin_lo',
       severity = 'warn',
     })

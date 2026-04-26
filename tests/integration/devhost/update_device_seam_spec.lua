@@ -263,7 +263,7 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 		end)
 		assert(ok2, tostring(err2))
 
-		spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'fabric', 'transfer' }, a_ctl_tx)
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, a_ctl_tx)
 
 		local ok3, err3 = scope:spawn(function()
 			device.start(bus:connect(), { name = 'device', env = 'dev' })
@@ -294,7 +294,7 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 		end)
 		assert(ok_default == false)
 
-		local created, cerr = caller:call({ 'cmd', 'update', 'job', 'create' }, {
+		local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
 			component = 'mcu',
 			artifact = {
 				kind = 'import_path',
@@ -310,27 +310,25 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 
 		local job = created.job
 
-		local started, serr = caller:call({ 'cmd', 'update', 'job', 'do' }, {
-			op = 'start',
+		local started, serr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, {
 			job_id = job.job_id,
 		}, { timeout = 0.5 })
 		assert(serr == nil)
 		assert(started.ok == true)
 
-		assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table'
 				and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'awaiting_commit'
 		end, 0.75))
 
-		local committed, perr = caller:call({ 'cmd', 'update', 'job', 'do' }, {
-			op = 'commit',
+		local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, {
 			job_id = job.job_id,
 		}, { timeout = 1.0 })
 		assert(perr == nil)
 		assert(committed.ok == true)
 
-		assert(wait_retained_state(caller, { 'state', 'update', 'jobs', job.job_id }, function(payload)
+		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table'
 				and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'succeeded'
@@ -344,7 +342,7 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 				and payload.software.boot_id == 'mcu-boot-2'
 		end, 2.0))
 
-		local final, ferr = caller:call({ 'cmd', 'update', 'job', 'get' }, {
+		local final, ferr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, {
 			job_id = job.job_id,
 		}, { timeout = 0.5 })
 		assert(ferr == nil)
