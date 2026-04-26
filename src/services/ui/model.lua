@@ -30,7 +30,7 @@ local DEFAULT_SOURCES = {
 	{ name = 'svc',   pattern = { 'svc', '#' } },
 	{ name = 'state', pattern = { 'state', '#' } },
 	{ name = 'cap',   pattern = { 'cap', '#' } },
-	{ name = 'dev',   pattern = { 'dev', '#' } },
+	{ name = 'raw',   pattern = { 'raw', '#' } },
 }
 
 local function watcher_close(self, key, reason)

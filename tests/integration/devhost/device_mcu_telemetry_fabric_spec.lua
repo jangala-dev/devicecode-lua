@@ -73,7 +73,7 @@ local function seed_device_cfg(conn)
 					runtime_memory = { 'raw', 'member', 'mcu', 'state', 'runtime', 'memory' },
 				},
 				events = {
-					charger_alert = { 'event', 'member', 'mcu', 'power', 'charger', 'alert' },
+					charger_alert = { 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event', 'power', 'charger', 'alert' },
 				},
 				actions = {
 					['prepare-update'] = { 'rpc', 'member', 'mcu', 'prepare' },
@@ -197,7 +197,7 @@ local function start_fabric_pair(scope, bus, a_stream, b_stream)
 				transport = { open = function() return a_stream end },
 				import_rules = {
 					{ ['local'] = { 'raw', 'member', 'mcu', 'state' }, ['remote'] = { 'state', 'self' } },
-					{ ['local'] = { 'event', 'member', 'mcu' }, ['remote'] = { 'event', 'self' } },
+					{ ['local'] = { 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event' }, ['remote'] = { 'event', 'self' } },
 				},
 				outbound_call_rules = {
 					{ ['local'] = { 'rpc', 'member', 'mcu' }, ['remote'] = { 'rpc', 'member', 'mcu' }, timeout = 1.0 },
@@ -298,10 +298,13 @@ function T.devhost_mcu_charger_alert_event_flows_over_fabric_and_updates_last_al
 			return payload.available == true and payload.ready == true
 		end, 2.0))
 
-		local event_sub = caller:subscribe({ 'cap', 'component', 'mcu', 'event', 'charger_alert' }, {
-			queue_len = 8,
-			full = 'drop_oldest',
-		})
+		local event_sub = caller:subscribe(
+			{ 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event', 'power', 'charger', 'alert' },
+			{
+				queue_len = 8,
+				full = 'drop_oldest',
+			}
+		)
 		fibers.current_scope():finally(function()
 			event_sub:unsubscribe()
 		end)

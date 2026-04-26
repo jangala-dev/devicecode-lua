@@ -240,21 +240,13 @@ function M.start(conn, opts)
 
   local store_cap, serr = discover_raw_host_cap(conn, 'control-store', 'control-store', 'update', 30.0)
   if not store_cap then
-    -- Transitional fallback for tests and deployments that have not yet moved HAL utilities to raw/host.
-    store_cap, serr = discover_cap(conn, 'control_store', 'update', 5.0)
-  end
-  if not store_cap then
-    svc:failed(tostring(serr or 'control_store capability not found'))
+    svc:failed(tostring(serr or 'raw host control-store capability not found'))
     error('update: failed to discover raw host control-store/update capability: ' .. tostring(serr), 0)
   end
 
   local artifact_cap, aerr = discover_raw_host_cap(conn, 'artifact-store', 'artifact-store', 'main', 30.0)
   if not artifact_cap then
-    -- Transitional fallback for tests and deployments that have not yet moved HAL utilities to raw/host.
-    artifact_cap, aerr = discover_cap(conn, 'artifact_store', 'main', 5.0)
-  end
-  if not artifact_cap then
-    svc:failed(tostring(aerr or 'artifact_store capability not found'))
+    svc:failed(tostring(aerr or 'raw host artifact-store capability not found'))
     error('update: failed to discover raw host artifact-store/main capability: ' .. tostring(aerr), 0)
   end
 

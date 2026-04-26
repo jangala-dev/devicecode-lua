@@ -182,11 +182,12 @@ local function open_transport_blocking(conn, link_id, cfg)
 	local transport = cfg.transport or {}
 	local uart_id = transport.id or link_id
 	local class = transport.class or 'uart'
+	local source = transport.source or class
 	local open_verb = transport.open_verb or 'open'
 	local term = transport.terminator
 	if term == nil then term = '\n' end
 
-	local cap = cap_sdk.new_cap_ref(conn, class, uart_id)
+	local cap = cap_sdk.new_raw_host_cap_ref(conn, source, class, uart_id)
 	local open_opts, oerr = build_open_opts(transport)
 	if not open_opts then
 		return nil, oerr or 'invalid_uart_open_opts'

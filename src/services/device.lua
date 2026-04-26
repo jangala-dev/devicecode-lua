@@ -182,9 +182,6 @@ local function handle_observer_event(conn, state, changed, observer_state, ev)
     changed:signal()
   elseif ev.tag == 'event_seen' then
     model.note_event(state, ev.component, ev.event, ev.payload)
-    if type(ev.component) == 'string' and type(ev.event) == 'string' and ev.event ~= '' then
-      conn:publish(require('services.device.topics').component_cap_event(ev.component, ev.event), ev.payload or {})
-    end
     changed:signal()
   elseif ev.tag == 'source_down' then
     model.note_source_down(state, ev.component, ev.reason)
