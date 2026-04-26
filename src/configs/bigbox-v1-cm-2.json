@@ -1411,9 +1411,10 @@
                 "import_rules": [
                     {
                         "local": [
-                            "state",
+                            "raw",
                             "member",
-                            "mcu"
+                            "mcu",
+                            "state"
                         ],
                         "remote": [
                             "state",
@@ -1422,9 +1423,13 @@
                     },
                     {
                         "local": [
-                            "event",
+                            "raw",
                             "member",
-                            "mcu"
+                            "mcu",
+                            "cap",
+                            "telemetry",
+                            "main",
+                            "event"
                         ],
                         "remote": [
                             "event",
@@ -1435,10 +1440,13 @@
                 "outbound_call_rules": [
                     {
                         "local": [
-                            "cmd",
+                            "raw",
                             "member",
                             "mcu",
-                            "updater"
+                            "cap",
+                            "updater",
+                            "main",
+                            "rpc"
                         ],
                         "remote": [
                             "cmd",
@@ -1467,7 +1475,7 @@
                 "member_class": "mcu",
                 "link_class": "member_uart",
                 "actions": {
-                    "prepare_update": [
+                    "prepare-update": [
                         "raw",
                         "member",
                         "mcu",
@@ -1477,7 +1485,7 @@
                         "rpc",
                         "prepare"
                     ],
-                    "commit_update": [
+                    "commit-update": [
                         "raw",
                         "member",
                         "mcu",
@@ -1487,7 +1495,7 @@
                         "rpc",
                         "commit"
                     ],
-                    "stage_update": {
+                    "stage-update": {
                         "kind": "fabric_stage",
                         "artifact_store": "main",
                         "link_id": "cm5-uart-mcu",
@@ -1578,9 +1586,13 @@
                 },
                 "events": {
                     "charger_alert": [
-                        "event",
+                        "raw",
                         "member",
                         "mcu",
+                        "cap",
+                        "telemetry",
+                        "main",
+                        "event",
                         "power",
                         "charger",
                         "alert"

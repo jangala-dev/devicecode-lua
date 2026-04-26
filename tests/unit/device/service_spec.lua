@@ -41,26 +41,26 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
       cm5_fn = test_diag.retained_fn(caller, { 'state', 'device', 'component', 'cm5' }),
     })
 
-    provider:retain({ 'cap', 'updater', 'cm5', 'state', 'software' }, {
+    provider:retain({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'state', 'software' }, {
       version = 'cm5-v1',
       boot_id = 'cm5-boot-1',
       image_id = 'cm5-v1',
     })
-    provider:retain({ 'cap', 'updater', 'cm5', 'state', 'updater' }, {
+    provider:retain({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'state', 'updater' }, {
       state = 'running',
       staged = false,
       artifact_ref = nil,
       expected_image_id = nil,
       last_error = nil,
     })
-    provider:retain({ 'cap', 'updater', 'cm5', 'state', 'health' }, {
+    provider:retain({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'state', 'health' }, {
       state = 'ok',
       reason = nil,
     })
 
-    local prepare_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'prepare' }, { queue_len = 16 })
-    local stage_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'stage' }, { queue_len = 16 })
-    local commit_ep = provider:bind({ 'cap', 'updater', 'cm5', 'rpc', 'commit' }, { queue_len = 16 })
+    local prepare_ep = provider:bind({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'prepare' }, { queue_len = 16 })
+    local stage_ep = provider:bind({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'stage' }, { queue_len = 16 })
+    local commit_ep = provider:bind({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'commit' }, { queue_len = 16 })
 
     bind_reply_loop(scope, prepare_ep, function(payload)
       return { ok = true, prepared = payload.component }
@@ -101,9 +101,9 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
     assert(status.software.version == 'cm5-v1')
     assert(type(status.updater) == 'table')
     assert(status.updater.state == 'running')
-    assert(status.actions.stage_update == true)
+    assert(status.actions['stage-update'] == true)
 
-    local staged, terr = caller:call({ 'cap', 'component', 'cm5', 'rpc', 'stage_update' }, { artifact_ref = 'art-1', expected_image_id = '1.2.3' }, { timeout = 0.5 })
+    local staged, terr = caller:call({ 'cap', 'component', 'cm5', 'rpc', 'stage-update' }, { artifact_ref = 'art-1', expected_image_id = '1.2.3' }, { timeout = 0.5 })
     assert(terr == nil)
     assert(staged.ok == true)
     assert(staged.staged == 'art-1')
@@ -143,7 +143,7 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
             runtime_memory = { 'raw', 'member', 'mcu', 'state', 'runtime', 'memory' },
           },
           actions = {
-            prepare_update = { 'raw', 'member', 'mcu', 'cap', 'updater', 'main', 'rpc', 'prepare' },
+            ['prepare-update'] = { 'raw', 'member', 'mcu', 'cap', 'updater', 'main', 'rpc', 'prepare' },
           },
         },
       },
@@ -232,7 +232,7 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
         and payload.link_class == nil
         and type(payload.source) == 'table'
         and payload.source.member_class == 'mcu'
-        and payload.actions.stage_update == nil
+        and payload.actions['stage-update'] == nil
         and type(payload.power) == 'table'
         and type(payload.power.battery) == 'table'
         and payload.power.battery.pack_mV == 2412
@@ -249,7 +249,7 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
         and payload.runtime.memory.alloc_bytes == 85680
     end, { timeout = 0.75, interval = 0.01 }))
 
-    local reply, rerr = caller:call({ 'cap', 'component', 'mcu', 'rpc', 'prepare_update' }, { target = 'mcu' }, { timeout = 0.5 })
+    local reply, rerr = caller:call({ 'cap', 'component', 'mcu', 'rpc', 'prepare-update' }, { target = 'mcu' }, { timeout = 0.5 })
     assert(rerr == nil)
     assert(reply.ok == true)
   end, { timeout = 2.0 })
@@ -264,7 +264,7 @@ function T.device_service_rejects_components_without_observations()
           class = 'member',
           subtype = 'mcu',
           actions = {
-            prepare_update = { 'cmd', 'x' },
+            ['prepare-update'] = { 'cmd', 'x' },
           },
         },
       },
@@ -272,69 +272,6 @@ function T.device_service_rejects_components_without_observations()
   end)
   assert(ok == false)
   assert(tostring(err):match('observation') ~= nil or tostring(err):match('fact') ~= nil)
-end
-
-function T.device_service_republishes_component_events_and_records_last_event()
-  runfibers.run(function(scope)
-    local bus = busmod.new()
-    local caller = bus:connect()
-    local seed = bus:connect()
-    local provider = bus:connect()
-
-    seed:retain({ 'cfg', 'device' }, {
-      schema = 'devicecode.config/device/1',
-      components = {
-        mcu = {
-          class = 'member',
-          subtype = 'mcu',
-          required_facts = { 'software', 'updater' },
-          facts = {
-            software = { 'raw', 'member', 'mcu', 'state', 'software' },
-            updater = { 'raw', 'member', 'mcu', 'state', 'updater' },
-          },
-          events = {
-            charger_alert = { 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event', 'power', 'charger', 'alert' },
-          },
-        },
-      },
-    })
-
-    provider:retain({ 'raw', 'member', 'mcu', 'state', 'software' }, { version = 'mcu-v2' })
-    provider:retain({ 'raw', 'member', 'mcu', 'state', 'updater' }, { state = 'running' })
-
-    local sub = caller:subscribe({ 'cap', 'component', 'mcu', 'event', 'charger_alert' }, { queue_len = 4 })
-
-    local ok, err = scope:spawn(function()
-      device.start(bus:connect(), { name = 'device', env = 'dev' })
-    end)
-    assert(ok, tostring(err))
-    wait_service_running(caller, 'device')
-
-    provider:publish({ 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event', 'power', 'charger', 'alert' }, {
-      kind = 'vin_lo',
-      severity = 'warn',
-    })
-
-    local ev, eerr = sub:recv()
-    assert(eerr == nil)
-    assert(type(ev) == 'table')
-    assert(type(ev.payload) == 'table')
-    assert(ev.payload.kind == 'vin_lo')
-
-    assert(probe.wait_until(function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'device', 'component', 'mcu' }, { timeout = 0.02 })
-      end)
-      return okp
-        and type(payload) == 'table'
-        and type(payload.alerts) == 'table'
-        and type(payload.alerts.charger_alert) == 'table'
-        and payload.alerts.charger_alert.kind == 'vin_lo'
-        and payload.alerts.charger_alert.known == true
-    end, { timeout = 0.75, interval = 0.01 }))
-
-    sub:unsubscribe()
-  end, { timeout = 2.0 })
 end
 
 return T

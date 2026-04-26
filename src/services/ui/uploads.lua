@@ -4,7 +4,7 @@
 --
 -- Current scope:
 --   * receive one uploaded artefact body from the HTTP transport
---   * stream it into the artifact_store capability
+--   * stream it into the public artifact-ingest manager
 --   * create and stage an update job that references the stored artefact
 --   * leave uploaded MCU jobs awaiting an explicit commit action before the
 --     power-cycling cutover occurs

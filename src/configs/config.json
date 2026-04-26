@@ -406,6 +406,9 @@
                     "subtype": "cm5",
                     "facts": {
                         "software": [
+                            "raw",
+                            "host",
+                            "updater",
                             "cap",
                             "updater",
                             "cm5",
@@ -413,6 +416,9 @@
                             "software"
                         ],
                         "updater": [
+                            "raw",
+                            "host",
+                            "updater",
                             "cap",
                             "updater",
                             "cm5",
@@ -420,6 +426,9 @@
                             "updater"
                         ],
                         "health": [
+                            "raw",
+                            "host",
+                            "updater",
                             "cap",
                             "updater",
                             "cm5",
@@ -428,21 +437,30 @@
                         ]
                     },
                     "actions": {
-                        "prepare_update": [
+                        "prepare-update": [
+                            "raw",
+                            "host",
+                            "updater",
                             "cap",
                             "updater",
                             "cm5",
                             "rpc",
                             "prepare"
                         ],
-                        "stage_update": [
+                        "stage-update": [
+                            "raw",
+                            "host",
+                            "updater",
                             "cap",
                             "updater",
                             "cm5",
                             "rpc",
                             "stage"
                         ],
-                        "commit_update": [
+                        "commit-update": [
+                            "raw",
+                            "host",
+                            "updater",
                             "cap",
                             "updater",
                             "cm5",
@@ -455,38 +473,47 @@
                     "class": "member",
                     "subtype": "mcu",
                     "actions": {
-                        "prepare_update": [
-                            "cmd",
+                        "prepare-update": [
+                            "raw",
                             "member",
                             "mcu",
+                            "cap",
                             "updater",
+                            "main",
+                            "rpc",
                             "prepare"
                         ],
-                        "commit_update": [
-                            "cmd",
+                        "commit-update": [
+                            "raw",
                             "member",
                             "mcu",
+                            "cap",
                             "updater",
+                            "main",
+                            "rpc",
                             "commit"
                         ]
                     },
                     "facts": {
                         "software": [
-                            "state",
+                            "raw",
                             "member",
                             "mcu",
+                            "state",
                             "software"
                         ],
                         "updater": [
-                            "state",
+                            "raw",
                             "member",
                             "mcu",
+                            "state",
                             "updater"
                         ],
                         "health": [
-                            "state",
+                            "raw",
                             "member",
                             "mcu",
+                            "state",
                             "health"
                         ]
                     }

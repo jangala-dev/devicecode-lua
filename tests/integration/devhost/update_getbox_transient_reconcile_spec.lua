@@ -25,31 +25,31 @@ local function bind_reply_loop(scope, ep, handler)
 end
 
 local function start_cm5_updater_cap(scope, conn, state)
-    conn:retain({ 'cap', 'updater', 'cm5', 'state' }, 'added')
-    conn:retain({ 'cap', 'updater', 'cm5', 'meta' }, { offerings = { prepare = true, stage = true, commit = true } })
+    conn:retain({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'status' }, 'added')
+    conn:retain({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'meta' }, { offerings = { prepare = true, stage = true, commit = true } })
 
     local function publish_status()
-        conn:retain({ 'cap', 'updater', 'cm5', 'state', 'software' }, {
+        conn:retain({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'state', 'software' }, {
             version = state.fw_version,
             boot_id = state.boot_id,
             image_id = state.expected_image_id or state.fw_version,
         })
-        conn:retain({ 'cap', 'updater', 'cm5', 'state', 'updater' }, {
+        conn:retain({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'state', 'updater' }, {
             state = state.state,
             staged = state.staged,
             artifact_ref = state.artifact_ref,
             expected_image_id = state.expected_image_id,
             last_error = state.last_error,
         })
-        conn:retain({ 'cap', 'updater', 'cm5', 'state', 'health' }, {
+        conn:retain({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'state', 'health' }, {
             state = state.health or 'ok',
             reason = state.health_reason,
         })
     end
 
-    local prepare_ep = conn:bind({ 'cap', 'updater', 'cm5', 'rpc', 'prepare' }, { queue_len = 16 })
-    local stage_ep = conn:bind({ 'cap', 'updater', 'cm5', 'rpc', 'stage' }, { queue_len = 16 })
-    local commit_ep = conn:bind({ 'cap', 'updater', 'cm5', 'rpc', 'commit' }, { queue_len = 16 })
+    local prepare_ep = conn:bind({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'prepare' }, { queue_len = 16 })
+    local stage_ep = conn:bind({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'stage' }, { queue_len = 16 })
+    local commit_ep = conn:bind({ 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'commit' }, { queue_len = 16 })
 
     bind_reply_loop(scope, prepare_ep, function(payload)
         return { ok = true, prepared = true, fw_version = state.fw_version }

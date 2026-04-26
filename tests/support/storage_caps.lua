@@ -45,8 +45,8 @@ function M.start_control_store_cap(scope, conn, backing)
   backing.namespaces = backing.namespaces or {}
   backing.max_record_bytes = backing.max_record_bytes or 65536
 
-  conn:retain({ 'cap', 'control_store', 'update', 'state' }, 'added')
-  conn:retain({ 'cap', 'control_store', 'update', 'meta' }, {
+  conn:retain({ 'raw', 'host', 'control-store', 'cap', 'control-store', 'update', 'status' }, 'added')
+  conn:retain({ 'raw', 'host', 'control-store', 'cap', 'control-store', 'update', 'meta' }, {
     offerings = { get = true, put = true, delete = true, list = true, status = true }
   })
 
@@ -59,11 +59,11 @@ function M.start_control_store_cap(scope, conn, backing)
     return t
   end
 
-  local get_ep = conn:bind({ 'cap', 'control_store', 'update', 'rpc', 'get' }, { queue_len = 32 })
-  local put_ep = conn:bind({ 'cap', 'control_store', 'update', 'rpc', 'put' }, { queue_len = 32 })
-  local del_ep = conn:bind({ 'cap', 'control_store', 'update', 'rpc', 'delete' }, { queue_len = 32 })
-  local list_ep = conn:bind({ 'cap', 'control_store', 'update', 'rpc', 'list' }, { queue_len = 32 })
-  local status_ep = conn:bind({ 'cap', 'control_store', 'update', 'rpc', 'status' }, { queue_len = 32 })
+  local get_ep = conn:bind({ 'raw', 'host', 'control-store', 'cap', 'control-store', 'update', 'rpc', 'get' }, { queue_len = 32 })
+  local put_ep = conn:bind({ 'raw', 'host', 'control-store', 'cap', 'control-store', 'update', 'rpc', 'put' }, { queue_len = 32 })
+  local del_ep = conn:bind({ 'raw', 'host', 'control-store', 'cap', 'control-store', 'update', 'rpc', 'delete' }, { queue_len = 32 })
+  local list_ep = conn:bind({ 'raw', 'host', 'control-store', 'cap', 'control-store', 'update', 'rpc', 'list' }, { queue_len = 32 })
+  local status_ep = conn:bind({ 'raw', 'host', 'control-store', 'cap', 'control-store', 'update', 'rpc', 'status' }, { queue_len = 32 })
 
   bind_reply_loop(scope, get_ep, function(payload)
     local ns = backing.namespaces[payload.ns]
@@ -110,8 +110,8 @@ function M.start_artifact_store_cap(scope, conn, backing)
   backing.import_paths = backing.import_paths or {}
   if backing.durable_enabled == nil then backing.durable_enabled = true end
 
-  conn:retain({ 'cap', 'artifact_store', 'main', 'state' }, 'added')
-  conn:retain({ 'cap', 'artifact_store', 'main', 'meta' }, {
+  conn:retain({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'status' }, 'added')
+  conn:retain({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'meta' }, {
     offerings = {
       create_sink = true, import_path = true, import_source = true, open = true,
       delete = true, status = true,
@@ -136,12 +136,12 @@ function M.start_artifact_store_cap(scope, conn, backing)
     return nil, 'invalid_policy'
   end
 
-  local create_sink_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'create_sink' }, { queue_len = 32 })
-  local import_path_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'import_path' }, { queue_len = 32 })
-  local import_source_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'import_source' }, { queue_len = 32 })
-  local open_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'open' }, { queue_len = 32 })
-  local delete_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'delete' }, { queue_len = 32 })
-  local status_ep = conn:bind({ 'cap', 'artifact_store', 'main', 'rpc', 'status' }, { queue_len = 32 })
+  local create_sink_ep = conn:bind({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'rpc', 'create_sink' }, { queue_len = 32 })
+  local import_path_ep = conn:bind({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'rpc', 'import_path' }, { queue_len = 32 })
+  local import_source_ep = conn:bind({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'rpc', 'import_source' }, { queue_len = 32 })
+  local open_ep = conn:bind({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'rpc', 'open' }, { queue_len = 32 })
+  local delete_ep = conn:bind({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'rpc', 'delete' }, { queue_len = 32 })
+  local status_ep = conn:bind({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'rpc', 'status' }, { queue_len = 32 })
 
   local function store_blob(source, meta, policy)
     local durability, err = choose(policy)

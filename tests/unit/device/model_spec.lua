@@ -9,7 +9,7 @@ local function new_state()
     components = {
       mcu = {
         facts = {
-          software = { 'state', 'member', 'mcu', 'software' },
+          software = { 'raw', 'member', 'mcu', 'state', 'software' },
         },
       },
     },

@@ -195,7 +195,7 @@ end
 
 local function publish_ingest(ctx, rec)
   if not rec or not rec.id then return end
-  ctx.conn:retain({ 'state', 'workflow', 'artifact-ingest', rec.id }, {
+  ctx.conn:retain(ctx.topics.workflow_ingest(rec.id), {
     ingest = {
       ingest_id = rec.id,
       state = rec.state,

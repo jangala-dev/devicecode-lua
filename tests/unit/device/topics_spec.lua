@@ -9,7 +9,6 @@ end
 
 function T.device_topics_build_canonical_component_paths()
   assert(joined(topics.component('mcu')) == 'state/device/component/mcu')
-  assert(joined(topics.component_event('mcu', 'charger_alert')) == 'cap/component/mcu/event/charger_alert')
   assert(joined(topics.raw_member_state('mcu', 'power', 'charger')) == 'raw/member/mcu/state/power/charger')
   assert(joined(topics.raw_member_state('mcu', 'power', 'charger', 'config')) == 'raw/member/mcu/state/power/charger/config')
   assert(joined(topics.raw_member_cap_event('mcu', 'telemetry', 'main', 'power', 'charger', 'alert')) == 'raw/member/mcu/cap/telemetry/main/event/power/charger/alert')

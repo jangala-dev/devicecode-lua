@@ -77,9 +77,9 @@ local function bind_device_double(scope, device_conn, versions, opts)
     eps[#eps + 1] = { component = component, action = action, ep = ep }
   end
   for component in pairs(versions) do
-    bind_action_ep(component, 'prepare_update')
-    bind_action_ep(component, 'stage_update')
-    bind_action_ep(component, 'commit_update')
+    bind_action_ep(component, 'prepare-update')
+    bind_action_ep(component, 'stage-update')
+    bind_action_ep(component, 'commit-update')
   end
 
   local function component_payload(component)
@@ -96,7 +96,7 @@ local function bind_device_double(scope, device_conn, versions, opts)
         boot_id = (opts.boot_id and opts.boot_id[component]) or nil,
       },
       updater = not_ready and {} or { state = (opts.get_state and opts.get_state[component]) or 'running' },
-      actions = { prepare_update = true, stage_update = true, commit_update = true },
+      actions = { ['prepare-update'] = true, ['stage-update'] = true, ['commit-update'] = true },
       source = { kind = 'member', member = component, member_class = component },
     }
   end
@@ -108,9 +108,9 @@ local function bind_device_double(scope, device_conn, versions, opts)
 
   local function handle_component_action(component, action, payload)
     if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'do', component = component, action = action, req = payload } end
-    if action == 'prepare_update' then
+    if action == 'prepare-update' then
       return { ok = true, prepared = true }
-    elseif action == 'stage_update' then
+    elseif action == 'stage-update' then
       if opts.fail_stage_once then opts.fail_stage_once = false; return nil, 'stage_failed_once' end
       if opts.block_stage_until_released then return nil, 'stage_blocked' end
       return {
@@ -119,7 +119,7 @@ local function bind_device_double(scope, device_conn, versions, opts)
         artifact_retention = 'release',
         expected_image_id = payload.expected_image_id,
       }
-    elseif action == 'commit_update' then
+    elseif action == 'commit-update' then
       if opts.commit_version and opts.commit_version[component] then versions[component] = opts.commit_version[component] end
       if opts.image_ids and opts.commit_image_id and opts.commit_image_id[component] then opts.image_ids[component] = opts.commit_image_id[component] end
       if opts.payload_sha256 and opts.commit_sha and opts.commit_sha[component] then opts.payload_sha256[component] = opts.commit_sha[component] end

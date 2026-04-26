@@ -79,46 +79,6 @@ local function watch_topic_for_prefix(prefix, multi_wild)
 end
 
 
-local function starts_with(topic, prefix)
-	if type(topic) ~= 'table' or #prefix > #topic then return false end
-	for i = 1, #prefix do
-		if topic[i] ~= prefix[i] then return false end
-	end
-	return true
-end
-
-local function suffix_after(topic, n)
-	local out = {}
-	for i = n + 1, #topic do out[#out + 1] = topic[i] end
-	return out
-end
-
--- Compatibility translation while configs/tests still import some member
--- surfaces into the old local state/member and cap/updater planes.  Fabric
--- owns provenance, so it mirrors such imports into the canonical raw/member
--- plane.  Consumers can switch to raw/... without requiring every profile to
--- be edited in the same patch.
-local function raw_alias_for_local_topic(topic, default_member)
-	if starts_with(topic, { 'state', 'member' }) and type(topic[3]) == 'string' then
-		return topics.raw_member_state(topic[3], suffix_after(topic, 3))
-	end
-
-	if starts_with(topic, { 'cap', 'updater' }) and type(topic[3]) == 'string' then
-		local member = topic[3] or default_member
-		if topic[4] == 'state' then
-			return topics.raw_cap_state('member', member, 'updater', 'main', suffix_after(topic, 4))
-		elseif topic[4] == 'rpc' and type(topic[5]) == 'string' then
-			return topics.raw_cap_rpc('member', member, 'updater', 'main', topic[5])
-		elseif topic[4] == 'meta' then
-			return topics.raw_cap_meta('member', member, 'updater', 'main')
-		elseif topic[4] == 'status' then
-			return topics.raw_cap_status('member', member, 'updater', 'main')
-		end
-	end
-
-	return nil
-end
-
 local function pending_count(pending)
 	local n = 0
 	for _ in pairs(pending) do
@@ -445,17 +405,11 @@ function M.run(ctx)
 		end
 
 		local local_key = topic_key(local_topic)
-		local raw_alias = raw_alias_for_local_topic(local_topic, raw_source)
 		if msg.retain then
 			conn:retain(local_topic, msg.payload)
 			imported_retained[local_key] = local_topic
-			if raw_alias then
-				conn:retain(raw_alias, msg.payload)
-				imported_retained[topic_key(raw_alias)] = raw_alias
-			end
 		else
 			conn:publish(local_topic, msg.payload)
-			if raw_alias then conn:publish(raw_alias, msg.payload) end
 		end
 	end
 
@@ -464,11 +418,6 @@ function M.run(ctx)
 		if not local_topic then return end
 		conn:unretain(local_topic)
 		imported_retained[topic_key(local_topic)] = nil
-		local raw_alias = raw_alias_for_local_topic(local_topic, raw_source)
-		if raw_alias then
-			conn:unretain(raw_alias)
-			imported_retained[topic_key(raw_alias)] = nil
-		end
 	end
 
 	local function handle_inbound_reply(msg)

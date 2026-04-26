@@ -13,7 +13,7 @@ function T.exact_topic_rules_match_only_the_declared_topic()
 	assert(mapped1[2] == 'fabric')
 	assert(mapped1[3] == 'transfer')
 
-	local mapped2, rule2 = topicmap.map_local_to_remote(rules, { 'cmd', 'fabric', 'other' })
+	local mapped2, rule2 = topicmap.map_local_to_remote(rules, { 'cap', 'transfer-manager', 'main', 'rpc', 'other' })
 	assert(mapped2 == nil)
 	assert(rule2 == nil)
 end
@@ -21,7 +21,7 @@ end
 function T.exact_topic_rule_takes_precedence_over_broader_prefix_rule_when_placed_first()
 	local rules = topicmap.normalise_prefix_rules({
 		{ topic = { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, ['remote'] = { 'rpc', 'exact' } },
-		{ ['local'] = { 'cmd', 'fabric' }, ['remote'] = { 'rpc', 'prefix' } },
+		{ ['local'] = { 'cap', 'transfer-manager', 'main', 'rpc' }, ['remote'] = { 'rpc', 'prefix' } },
 	}, 'exact')
 
 	local mapped = assert((topicmap.map_local_to_remote(rules, { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' })))

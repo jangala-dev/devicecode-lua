@@ -4,7 +4,7 @@ return {
   name = 'update',
   topic_groups = {
     { label = 'update', topic = { 'state', 'update', '#' } },
-    { label = 'ucmd', topic = { 'cmd', 'update', '#' } },
+    { label = 'ucmd', topic = { 'cap', 'update-manager', '#' } },
   },
   section = function(helper, opts)
     opts = opts or {}

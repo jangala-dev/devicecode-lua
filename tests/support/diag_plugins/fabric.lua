@@ -4,7 +4,7 @@ return {
   name = 'fabric',
   topic_groups = {
     { label = 'fabric', topic = { 'state', 'fabric', '#' } },
-    { label = 'member', topic = { 'state', 'member', '#' } },
+    { label = 'member', topic = { 'raw', 'member', '#' } },
     { label = 'mcmd', topic = { 'cmd', 'member', '#' } },
   },
   section = function(helper, opts)
@@ -20,7 +20,7 @@ return {
           summary_fn = opts.summary_fn or opts.fabric_summary_fn or (conn and helper.retained_fn(conn, { 'state', 'fabric' }) or nil),
           session_fn = opts.session_fn or (conn and helper.retained_fn(conn, { 'state', 'fabric', 'link', link_id, 'session' }) or nil),
           transfer_fn = opts.transfer_fn or (conn and helper.retained_fn(conn, { 'state', 'fabric', 'link', link_id, 'transfer' }) or nil),
-          member_fn = opts.member_fn or (conn and helper.retained_fn(conn, { 'state', 'member', member_id, 'updater' }) or nil),
+          member_fn = opts.member_fn or (conn and helper.retained_fn(conn, { 'raw', 'member', member_id, 'state', 'updater' }) or nil),
           extra_fn = opts.extra_fn or opts.fabric_extra_fn,
         }, opts))
       end,

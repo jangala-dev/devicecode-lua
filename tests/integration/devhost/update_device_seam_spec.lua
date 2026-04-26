@@ -141,14 +141,14 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 						health   = { 'state', 'odd', 'mcu', 'health'   },
 					},
 					actions = {
-						prepare_update = { 'rpc', 'weird', 'mcu', 'prepare' },
-						stage_update = {
+						['prepare-update'] = { 'rpc', 'weird', 'mcu', 'prepare' },
+						['stage-update'] = {
 							kind = 'fabric_stage',
 							link_id = 'cm5-uart-mcu',
 							receiver = { 'rpc', 'member', 'mcu', 'receive' },
 							timeout_s = 1.0,
 						},
-						commit_update = { 'rpc', 'weird', 'mcu', 'commit' },
+						['commit-update'] = { 'rpc', 'weird', 'mcu', 'commit' },
 					},
 				},
 			},
@@ -290,7 +290,7 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 		end, 1.5))
 
 		local ok_default = safe.pcall(function()
-			return probe.wait_payload(caller, { 'state', 'member', 'mcu', 'software' }, { timeout = 0.1 })
+			return probe.wait_payload(caller, { 'raw', 'member', 'mcu', 'state', 'software' }, { timeout = 0.1 })
 		end)
 		assert(ok_default == false)
 

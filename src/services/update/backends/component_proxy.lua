@@ -31,14 +31,14 @@ function M.new(opts)
 	end
 
 	function backend:prepare(conn, job, _ctx)
-		return device_call(conn, 'prepare_update', {
+		return device_call(conn, 'prepare-update', {
 			target = job.component,
 			metadata = job.metadata,
 		}, timeout_prepare)
 	end
 
 	function backend:stage(conn, job, _ctx)
-		local value, err = device_call(conn, 'stage_update', {
+		local value, err = device_call(conn, 'stage-update', {
 			artifact_ref = job.artifact_ref,
 			job_id = job.job_id,
 			metadata = job.metadata,
@@ -52,7 +52,7 @@ function M.new(opts)
 	end
 
 	function backend:commit(conn, job, _ctx)
-		return device_call(conn, 'commit_update', {
+		return device_call(conn, 'commit-update', {
 			mode = job.component,
 			metadata = job.metadata,
 		}, timeout_commit)

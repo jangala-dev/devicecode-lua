@@ -8,6 +8,7 @@
 --   * keep publication formatting separate from model/runtime code
 
 local model = require 'services.update.model'
+local topics = require 'services.update.topics'
 
 local M = {}
 
@@ -16,11 +17,11 @@ local function copy_value(v)
 end
 
 function M.job_topic(id)
-	return { 'state', 'workflow', 'update-job', id }
+	return topics.workflow_job(id)
 end
 
 function M.summary_topic()
-	return { 'state', 'update', 'summary' }
+	return topics.summary()
 end
 
 function M.public_job(job)

@@ -57,9 +57,9 @@ local function bind_device_double(scope, device_conn, versions, opts)
     eps[#eps + 1] = { component = component, action = action, ep = ep }
   end
   for component in pairs(versions) do
-    bind_action_ep(component, 'prepare_update')
-    bind_action_ep(component, 'stage_update')
-    bind_action_ep(component, 'commit_update')
+    bind_action_ep(component, 'prepare-update')
+    bind_action_ep(component, 'stage-update')
+    bind_action_ep(component, 'commit-update')
   end
 
   local function component_payload(component)
@@ -76,7 +76,7 @@ local function bind_device_double(scope, device_conn, versions, opts)
       updater = {
         state = (opts.get_state and opts.get_state[component]) or 'running',
       },
-      actions = { prepare_update = true, stage_update = true, commit_update = true },
+      actions = { ['prepare-update'] = true, ['stage-update'] = true, ['commit-update'] = true },
       source = { kind = 'member', member = component, member_class = component },
     }
   end
@@ -93,15 +93,15 @@ local function bind_device_double(scope, device_conn, versions, opts)
 
   local function handle_component_action(component, action, payload)
     if opts.calls then opts.calls[#opts.calls + 1] = { kind = 'do', component = component, action = action, req = payload } end
-    if action == 'prepare_update' then
+    if action == 'prepare-update' then
       if opts.prepare_sleep then sleep_mod.sleep(opts.prepare_sleep) end
       return { ok = true, prepared = true }
-    elseif action == 'stage_update' then
+    elseif action == 'stage-update' then
       local reply = { ok = true, staged = payload.artifact_ref }
       if payload.expected_image_id then reply.expected_image_id = payload.expected_image_id end
       reply.artifact_retention = opts.artifact_retention or 'release'
       return reply
-    elseif action == 'commit_update' then
+    elseif action == 'commit-update' then
       if opts.commit_version and opts.commit_version[component] then versions[component] = opts.commit_version[component] end
       if opts.boot_id and component and opts.bump_boot_id then
         opts.boot_id[component] = tostring((opts.boot_id[component] or component .. '-boot') .. '-next')
@@ -275,9 +275,9 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
 
     ensure(get_calls == 0, 'expected no device get calls in observer-driven mode, got ' .. tostring(get_calls))
     ensure(do_calls == 3, 'expected exactly three device action calls, got ' .. tostring(do_calls))
-    ensure(actions[1] == 'prepare_update', 'expected first device action prepare_update, got ' .. tostring(actions[1]))
-    ensure(actions[2] == 'stage_update', 'expected second device action stage_update, got ' .. tostring(actions[2]))
-    ensure(actions[3] == 'commit_update', 'expected third device action commit_update, got ' .. tostring(actions[3]))
+    ensure(actions[1] == 'prepare-update', 'expected first device action prepare-update, got ' .. tostring(actions[1]))
+    ensure(actions[2] == 'stage-update', 'expected second device action stage-update, got ' .. tostring(actions[2]))
+    ensure(actions[3] == 'commit-update', 'expected third device action commit-update, got ' .. tostring(actions[3]))
 
     ensure(#fabric_calls == 0, 'expected no direct fabric calls from update, got ' .. tostring(#fabric_calls))
 
@@ -453,7 +453,7 @@ function T.update_service_supports_ref_artifacts_and_auto_start()
     wait_service_running(caller, 'update')
 
     local art_path = storagecaps.seed_import_path(artifacts, '/tmp/upl.bin', 'uploaded-image')
-    local imported = assert(caller:call({ 'cap', 'artifact_store', 'main', 'rpc', 'import_path' }, { path = art_path, meta = { kind = 'update' }, policy = 'transient_only' }, { timeout = 0.5 }))
+    local imported = assert(caller:call({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'rpc', 'import_path' }, { path = art_path, meta = { kind = 'update' }, policy = 'transient_only' }, { timeout = 0.5 }))
     local art = imported.reason
 
     local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {

@@ -29,12 +29,12 @@ local function next_device_event_op(shell_state)
     cfg = shell_state.cfg_watch:recv_op(),
     obs = shell_state.obs_rx:recv_op(),
     work = shell_state.work_rx:recv_op(),
-    self_req = shell_state.self_ep:recv_op(),
-    list_req = shell_state.list_ep:recv_op(),
-    get_req = shell_state.get_ep:recv_op(),
     changed = shell_state.changed:changed_op(shell_state.seen),
   }
   for key, rec in pairs(shell_state.action_eps or {}) do
+    ops[key] = rec.ep:recv_op()
+  end
+  for key, rec in pairs(shell_state.manager_eps or {}) do
     ops[key] = rec.ep:recv_op()
   end
   return fibers.named_choice(ops)
@@ -47,6 +47,18 @@ local function publish_component(conn, svc, state, name)
   conn:retain(projection.component_topic(name), payloads.component)
   conn:retain(projection.component_software_topic(name), payloads.software)
   conn:retain(projection.component_update_topic(name), payloads.update)
+  conn:retain(projection.component_cap_meta_topic(name), {
+    owner = svc.name,
+    interface = 'devicecode.cap/component/1',
+    component = name,
+    methods = payloads.component.actions or {},
+    canonical_state = projection.component_topic(name),
+  })
+  conn:retain(projection.component_cap_status_topic(name), {
+    state = payloads.component.available and 'available' or 'unavailable',
+    health = payloads.component.health,
+    ready = payloads.component.ready,
+  })
   model.clear_component_dirty(state, name)
 end
 
@@ -55,6 +67,17 @@ local function publish_summary(conn, svc, state)
   local summary = projection.summary_payload(state, ts)
   conn:retain(projection.summary_topic(), summary)
   conn:retain(projection.self_topic(), projection.self_payload(state, ts))
+  conn:retain(projection.device_cap_meta_topic(), {
+    owner = svc.name,
+    interface = 'devicecode.cap/device/1',
+    methods = { ['get-component'] = true },
+    canonical_state = projection.summary_topic(),
+  })
+  conn:retain(projection.device_cap_status_topic(), {
+    state = 'available',
+    ready = true,
+    health = (summary.counts and summary.counts.degraded and summary.counts.degraded > 0) and 'degraded' or 'ok',
+  })
   model.set_summary_clean(state)
   svc:set_ready(true, {
     components_total = summary.counts and summary.counts.total or 0,
@@ -114,6 +137,8 @@ local function apply_cfg(service_scope, conn, svc, state, changed, obs_tx, obser
       conn:unretain(projection.component_topic(name))
       conn:unretain(projection.component_software_topic(name))
       conn:unretain(projection.component_update_topic(name))
+      conn:unretain(projection.component_cap_meta_topic(name))
+      conn:unretain(projection.component_cap_status_topic(name))
     end
   end
 
@@ -171,7 +196,9 @@ local function handle_observer_event(conn, state, changed, observer_state, ev)
     changed:signal()
   elseif ev.tag == 'event_seen' then
     model.note_event(state, ev.component, ev.event, ev.payload)
-    conn:publish(projection.component_event_topic(ev.component, ev.event), ev.payload)
+    if type(ev.event) == 'string' and ev.event ~= '' then
+      conn:publish(projection.component_event_topic(ev.component, ev.event), ev.payload)
+    end
     changed:signal()
   elseif ev.tag == 'source_down' then
     model.note_source_down(state, ev.component, ev.reason)
@@ -218,7 +245,7 @@ local function open_artifact(conn, artifact_store_id, artifact_ref)
   if type(artifact_ref) ~= 'string' or artifact_ref == '' then
     return nil, 'missing_artifact_ref'
   end
-  local cap = cap_sdk.new_cap_ref(conn, 'artifact_store', artifact_store_id or 'main')
+  local cap = cap_sdk.new_raw_host_cap_ref(conn, 'artifact-store', 'artifact-store', artifact_store_id or 'main')
   local opts_ = assert(cap_sdk.args.new.ArtifactStoreOpenOpts(artifact_ref))
   local reply, err = cap:call_control('open', opts_)
   if not reply then return nil, err end
@@ -345,10 +372,7 @@ function M.start(conn, opts)
   svc:announce({
     role = 'device',
     caps = {
-      self = true,
-      component_list = true,
-      component_get = true,
-      component_do = true,
+      component = true,
     },
   })
 
@@ -362,18 +386,17 @@ function M.start(conn, opts)
   local work_tx, work_rx = mailbox.new(64, { full = 'reject_newest' })
   local observer_state = new_observer_state()
 
-  local self_ep = conn:bind({ 'cap', 'device', 'main', 'rpc', 'get-identity' }, { queue_len = 32 })
-  local list_ep = conn:bind({ 'cap', 'device', 'main', 'rpc', 'list-components' }, { queue_len = 32 })
-  local get_ep = conn:bind({ 'cap', 'device', 'main', 'rpc', 'get-component' }, { queue_len = 32 })
-
   local shell_state = {
     cfg_watch = cfg_watch,
     obs_rx = obs_rx,
     work_rx = work_rx,
-    self_ep = self_ep,
-    list_ep = list_ep,
-    get_ep = get_ep,
     action_eps = {},
+    manager_eps = {
+      ['manager:get-component'] = {
+        name = 'get-component',
+        ep = conn:bind(projection.device_cap_topic('get-component'), { queue_len = 32 }),
+      },
+    },
     changed = changed,
     seen = changed:version(),
   }
@@ -390,17 +413,19 @@ function M.start(conn, opts)
   fibers.current_scope():finally(function()
     close_observers(observer_state)
     cfg_watch:unwatch()
-    self_ep:unbind()
-    list_ep:unbind()
-    get_ep:unbind()
     for _, rec in pairs(shell_state.action_eps) do rec.ep:unbind() end
+    for _, rec in pairs(shell_state.manager_eps or {}) do rec.ep:unbind() end
     for name in pairs(state.components) do
       conn:unretain(projection.component_topic(name))
       conn:unretain(projection.component_software_topic(name))
       conn:unretain(projection.component_update_topic(name))
+      conn:unretain(projection.component_cap_meta_topic(name))
+      conn:unretain(projection.component_cap_status_topic(name))
     end
     conn:unretain(projection.self_topic())
     conn:unretain(projection.summary_topic())
+    conn:unretain(projection.device_cap_meta_topic())
+    conn:unretain(projection.device_cap_status_topic())
   end)
 
   while true do
@@ -415,12 +440,13 @@ function M.start(conn, opts)
     elseif which == 'changed' then
       shell_state.seen = a or shell_state.seen
       publish_dirty(conn, svc, state)
-    elseif which == 'self_req' then
-      handle_self_req(a, b, state, svc)
-    elseif which == 'list_req' then
-      handle_list_req(a, b, state, svc)
-    elseif which == 'get_req' then
-      handle_get_req(a, b, state, svc)
+    elseif type(which) == 'string' and shell_state.manager_eps and shell_state.manager_eps[which] then
+      local rec = shell_state.manager_eps[which]
+      if rec.name == 'get-component' then
+        handle_get_req(a, b, state, svc, nil)
+      else
+        if a then a:fail('unknown_method') end
+      end
     elseif type(which) == 'string' and shell_state.action_eps[which] then
       local rec = shell_state.action_eps[which]
       if rec.action == 'get-status' then

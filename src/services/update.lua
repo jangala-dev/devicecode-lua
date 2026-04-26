@@ -10,6 +10,7 @@ local cap_sdk       = require 'services.hal.sdk.cap'
 local job_store     = require 'services.update.job_store'
 local model         = require 'services.update.model'
 local projection    = require 'services.update.projection'
+local topics        = require 'services.update.topics'
 local observe_mod   = require 'services.update.observe'
 local runner        = require 'services.update.runner'
 local runtime_mod   = require 'services.update.runtime'
@@ -84,6 +85,42 @@ local function discover_cap(conn, class, id, timeout)
   local cap, err = listener:wait_for_cap({ timeout = timeout or 30.0 })
   listener:close()
   return cap, err
+end
+
+local function raw_host_status_topic(source, class, id)
+  return { 'raw', 'host', source, 'cap', class, id, 'status' }
+end
+
+local function discover_raw_host_cap(conn, source, class, id, timeout)
+  local deadline = fibers.now() + (timeout or 30.0)
+  local watch = conn:watch_retained(raw_host_status_topic(source, class, id), {
+    replay = true,
+    queue_len = 4,
+    full = 'drop_oldest',
+  })
+
+  local function close()
+    if watch then watch:unwatch(); watch = nil end
+  end
+
+  while true do
+    local remaining = deadline - fibers.now()
+    if remaining <= 0 then close(); return nil, 'timeout' end
+    local which, ev, err = fibers.perform(fibers.named_choice {
+      status = watch:recv_op(),
+      timeout = require('fibers.sleep').sleep_op(remaining),
+    })
+    if which == 'timeout' then close(); return nil, 'timeout' end
+    if not ev then close(); return nil, err or 'raw_host_cap_status_closed' end
+    if ev.op == 'retain' then
+      local payload = ev.payload
+      local state = type(payload) == 'table' and payload.state or payload
+      if state == 'added' or state == 'available' or (type(payload) == 'table' and payload.available == true) then
+        close()
+        return cap_sdk.new_raw_host_cap_ref(conn, source, class, id), ''
+      end
+    end
+  end
 end
 
 local function copy_job(job)
@@ -203,19 +240,27 @@ function M.start(conn, opts)
   svc:spawn_heartbeat(heartbeat_s, 'tick')
   svc:starting({ jobs_total = 0, jobs_active = 0 })
 
-  local store_cap, serr = discover_cap(conn, 'control_store', 'update', 30.0)
+  local store_cap, serr = discover_raw_host_cap(conn, 'control-store', 'control-store', 'update', 30.0)
+  if not store_cap then
+    -- Transitional fallback for tests and deployments that have not yet moved HAL utilities to raw/host.
+    store_cap, serr = discover_cap(conn, 'control_store', 'update', 5.0)
+  end
   if not store_cap then
     svc:failed(tostring(serr or 'control_store capability not found'))
-    error('update: failed to discover control_store/update capability: ' .. tostring(serr), 0)
+    error('update: failed to discover raw host control-store/update capability: ' .. tostring(serr), 0)
   end
 
-  local artifact_cap, aerr = discover_cap(conn, 'artifact_store', 'main', 30.0)
+  local artifact_cap, aerr = discover_raw_host_cap(conn, 'artifact-store', 'artifact-store', 'main', 30.0)
+  if not artifact_cap then
+    -- Transitional fallback for tests and deployments that have not yet moved HAL utilities to raw/host.
+    artifact_cap, aerr = discover_cap(conn, 'artifact_store', 'main', 5.0)
+  end
   if not artifact_cap then
     svc:failed(tostring(aerr or 'artifact_store capability not found'))
-    error('update: failed to discover artifact_store/main capability: ' .. tostring(aerr), 0)
+    error('update: failed to discover raw host artifact-store/main capability: ' .. tostring(aerr), 0)
   end
 
-  local cfg_watch = conn:watch_retained({ 'cfg', 'update' }, {
+  local cfg_watch = conn:watch_retained(topics.cfg(), {
     replay = true,
     queue_len = 8,
     full = 'drop_oldest',
@@ -264,6 +309,7 @@ function M.start(conn, opts)
     store_cap = store_cap,
     artifact_cap = artifact_cap,
     cap_sdk = cap_sdk,
+    topics = topics,
     -- Provider-native verifier backends are HAL-owned raw host capabilities.
     -- The crypto module normalises semantics for update; this legacy public
     -- cap route should no longer be used by new code.
@@ -455,19 +501,19 @@ function M.start(conn, opts)
     end
   end
 
-  local create_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, { queue_len = 32 })
-  local start_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { queue_len = 32 })
-  local commit_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { queue_len = 32 })
-  local cancel_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'cancel-job' }, { queue_len = 32 })
-  local retry_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'retry-job' }, { queue_len = 32 })
-  local discard_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'discard-job' }, { queue_len = 32 })
-  local get_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { queue_len = 32 })
-  local list_ep = conn:bind({ 'cap', 'update-manager', 'main', 'rpc', 'list-jobs' }, { queue_len = 32 })
-  local ingest_create_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'create' }, { queue_len = 32 })
-  local ingest_append_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'append' }, { queue_len = 32 })
-  local ingest_commit_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'commit' }, { queue_len = 32 })
-  local ingest_abort_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'abort' }, { queue_len = 32 })
-  local ingest_delete_ep = conn:bind({ 'cap', 'artifact-ingest', 'main', 'rpc', 'delete' }, { queue_len = 32 })
+  local create_ep = conn:bind(topics.manager_rpc('create-job'), { queue_len = 32 })
+  local start_ep = conn:bind(topics.manager_rpc('start-job'), { queue_len = 32 })
+  local commit_ep = conn:bind(topics.manager_rpc('commit-job'), { queue_len = 32 })
+  local cancel_ep = conn:bind(topics.manager_rpc('cancel-job'), { queue_len = 32 })
+  local retry_ep = conn:bind(topics.manager_rpc('retry-job'), { queue_len = 32 })
+  local discard_ep = conn:bind(topics.manager_rpc('discard-job'), { queue_len = 32 })
+  local get_ep = conn:bind(topics.manager_rpc('get-job'), { queue_len = 32 })
+  local list_ep = conn:bind(topics.manager_rpc('list-jobs'), { queue_len = 32 })
+  local ingest_create_ep = conn:bind(topics.ingest_rpc('create'), { queue_len = 32 })
+  local ingest_append_ep = conn:bind(topics.ingest_rpc('append'), { queue_len = 32 })
+  local ingest_commit_ep = conn:bind(topics.ingest_rpc('commit'), { queue_len = 32 })
+  local ingest_abort_ep = conn:bind(topics.ingest_rpc('abort'), { queue_len = 32 })
+  local ingest_delete_ep = conn:bind(topics.ingest_rpc('delete'), { queue_len = 32 })
 
   local endpoints = {
     create = create_ep,
@@ -485,7 +531,7 @@ function M.start(conn, opts)
     ingest_delete = ingest_delete_ep,
   }
 
-  conn:retain({ 'cap', 'update-manager', 'main', 'meta' }, {
+  conn:retain(topics.manager_meta(), {
     owner = svc.name,
     interface = 'devicecode.cap/update-manager/1',
     methods = {
@@ -494,13 +540,13 @@ function M.start(conn, opts)
       ['get-job'] = true, ['list-jobs'] = true,
     },
   })
-  conn:retain({ 'cap', 'update-manager', 'main', 'status' }, { state = 'available' })
-  conn:retain({ 'cap', 'artifact-ingest', 'main', 'meta' }, {
+  conn:retain(topics.manager_status(), { state = 'available' })
+  conn:retain(topics.ingest_meta(), {
     owner = svc.name,
     interface = 'devicecode.cap/artifact-ingest/1',
     methods = { create = true, append = true, commit = true, abort = true, delete = true },
   })
-  conn:retain({ 'cap', 'artifact-ingest', 'main', 'status' }, { state = 'available' })
+  conn:retain(topics.ingest_status(), { state = 'available' })
 
   local function adopt_repo(new_repo)
     local loaded2, err = new_repo:load_all()
@@ -529,12 +575,12 @@ function M.start(conn, opts)
     end
     for id, rec in pairs(ctx.ingests or {}) do
       if rec.sink and rec.state == 'open' then pcall(function() rec.sink:abort() end) end
-      conn:unretain({ 'state', 'workflow', 'artifact-ingest', id })
+      conn:unretain(topics.workflow_ingest(id))
     end
-    conn:unretain({ 'cap', 'update-manager', 'main', 'meta' })
-    conn:unretain({ 'cap', 'update-manager', 'main', 'status' })
-    conn:unretain({ 'cap', 'artifact-ingest', 'main', 'meta' })
-    conn:unretain({ 'cap', 'artifact-ingest', 'main', 'status' })
+    conn:unretain(topics.manager_meta())
+    conn:unretain(topics.manager_status())
+    conn:unretain(topics.ingest_meta())
+    conn:unretain(topics.ingest_status())
     create_ep:unbind()
     start_ep:unbind()
     commit_ep:unbind()

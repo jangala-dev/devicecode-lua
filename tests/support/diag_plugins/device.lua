@@ -4,7 +4,7 @@ return {
   name = 'device',
   topic_groups = {
     { label = 'device', topic = { 'state', 'device', '#' } },
-    { label = 'dcmd', topic = { 'cmd', 'device', '#' } },
+    { label = 'dcmd', topic = { 'cap', 'component', '#' } },
   },
   section = function(helper, opts)
     opts = opts or {}

@@ -24,6 +24,13 @@ end
 M.copy_array = copy_array
 M.copy_value = copy_value
 
+local function public_method_name(name)
+  name = tostring(name or '')
+  return name:gsub('_', '-')
+end
+
+M.public_method_name = public_method_name
+
 local function is_array(t)
   if type(t) ~= 'table' then return false end
   if #t == 0 then return false end
@@ -41,9 +48,10 @@ local function normalize_action_routes(actions)
 
   for action_name, spec in pairs(actions) do
     if type(action_name) == 'string' and action_name ~= '' and type(spec) == 'table' then
+      local public_name = public_method_name(action_name)
       if is_array(spec) then
-        out[action_name] = {
-          name = action_name,
+        out[public_name] = {
+          name = public_name,
           kind = 'rpc',
           call_topic = copy_array(spec),
         }
@@ -52,8 +60,8 @@ local function normalize_action_routes(actions)
         if kind == 'rpc' then
           local topic = spec.call_topic or spec.topic
           if is_array(topic) then
-            out[action_name] = {
-              name = action_name,
+            out[public_name] = {
+              name = public_name,
               kind = 'rpc',
               call_topic = copy_array(topic),
             }
@@ -61,8 +69,8 @@ local function normalize_action_routes(actions)
         elseif kind == 'fabric_stage' then
           local receiver = spec.receiver
           if type(spec.link_id) == 'string' and spec.link_id ~= '' and is_array(receiver) then
-            out[action_name] = {
-              name = action_name,
+            out[public_name] = {
+              name = public_name,
               kind = 'fabric_stage',
               artifact_store = spec.artifact_store or 'main',
               link_id = spec.link_id,
@@ -207,14 +215,14 @@ local function default_components()
       member = 'local',
       required_facts = { 'software', 'updater' },
       facts = {
-        software = topics.public_updater_state('cm5', 'software'),
-        updater = topics.public_updater_state('cm5', 'updater'),
-        health = topics.public_updater_state('cm5', 'health'),
+        software = topics.raw_host_cap_state('updater', 'updater', 'cm5', 'software'),
+        updater = topics.raw_host_cap_state('updater', 'updater', 'cm5', 'updater'),
+        health = topics.raw_host_cap_state('updater', 'updater', 'cm5', 'health'),
       },
       actions = {
-        prepare_update = topics.public_updater_rpc('cm5', 'prepare'),
-        stage_update = topics.public_updater_rpc('cm5', 'stage'),
-        commit_update = topics.public_updater_rpc('cm5', 'commit'),
+        ['prepare-update'] = topics.raw_host_cap_rpc('updater', 'updater', 'cm5', 'prepare'),
+        ['stage-update'] = topics.raw_host_cap_rpc('updater', 'updater', 'cm5', 'stage'),
+        ['commit-update'] = topics.raw_host_cap_rpc('updater', 'updater', 'cm5', 'commit'),
       },
     }),
   }

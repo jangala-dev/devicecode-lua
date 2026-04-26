@@ -161,14 +161,14 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 						health = { 'imported', 'member', 'mcu', 'health' },
 					},
 					actions = {
-						prepare_update = { 'rpc', 'member', 'mcu', 'prepare' },
-						stage_update = {
+						['prepare-update'] = { 'rpc', 'member', 'mcu', 'prepare' },
+						['stage-update'] = {
 							kind = 'fabric_stage',
 							link_id = 'cm5-uart-mcu',
 							receiver = { 'rpc', 'member', 'mcu', 'receive' },
 							timeout_s = 1.0,
 						},
-						commit_update = { 'rpc', 'member', 'mcu', 'commit' },
+						['commit-update'] = { 'rpc', 'member', 'mcu', 'commit' },
 					},
 				},
 			},
