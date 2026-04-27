@@ -5,7 +5,6 @@ local fibers = require "fibers"
 local op = require "fibers.op"
 local channel = require "fibers.channel"
 local sleep = require "fibers.sleep"
-local safe = require 'coxpcall'
 
 ---@class TemplateDriver
 ---@field id string
@@ -100,7 +99,7 @@ function TemplateDriver:control_manager()
         if not valid then
             ok, reason, code = false, validation_err, 1
         else
-            local call_ok, fn_ok, fn_reason, fn_code = safe.pcall(fn, self, request.opts)
+            local call_ok, fn_ok, fn_reason, fn_code = pcall(fn, self, request.opts)
             if not call_ok then
                 ok, reason, code = false, tostring(fn_ok), 1
             else
