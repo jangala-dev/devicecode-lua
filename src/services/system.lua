@@ -148,14 +148,14 @@ end
 
 -- ── publish helpers ───────────────────────────────
 
----@param conn Connection
+---@param svc ServiceBase
 ---@param key string
 ---@param value number|string
 ---@param namespace? string
-local function publish_metric(conn, key, value, namespace)
+local function publish_metric(svc, key, value, namespace)
     local payload = { value = value }
     if namespace then payload.namespace = namespace end
-    conn:retain(t_obs_metric(key), payload)
+    svc:obs_metric(key, payload)
 end
 
 -- ── sysinfo fiber ────────────────────────────────
@@ -246,7 +246,7 @@ local function sysinfo_fiber(_, svc, report_period_ch)
             local id = identity_msg.payload
             for _, metric in ipairs(PLATFORM_IDENTITY_METRICS) do
                 if id[metric.field] ~= nil then
-                    publish_metric(conn, metric.metric_key, id[metric.field])
+                    publish_metric(svc, metric.metric_key, id[metric.field])
                 end
             end
             svc:obs_log('debug', 'sysinfo: published platform identity metrics')
@@ -311,7 +311,7 @@ local function sysinfo_fiber(_, svc, report_period_ch)
                                 err = err
                             })
                         else
-                            publish_metric(conn, m.metric_key, value)
+                            publish_metric(svc, m.metric_key, value)
                         end
                     end
                 end
@@ -327,7 +327,7 @@ local function sysinfo_fiber(_, svc, report_period_ch)
                     if uptime == nil or uptime_err ~= "" then
                         svc:obs_log('warn', { what = 'uptime_get_failed', err = uptime_err })
                     else
-                        publish_metric(conn, 'boot_time', os.time() - math.floor(uptime))
+                        publish_metric(svc, 'boot_time', os.time() - math.floor(uptime))
                     end
                 end
             end
