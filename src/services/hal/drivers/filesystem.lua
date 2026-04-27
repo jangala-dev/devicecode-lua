@@ -9,7 +9,6 @@ local sleep = require "fibers.sleep"
 local op = require "fibers.op"
 local channel = require "fibers.channel"
 local file = require "fibers.io.file"
-local safe = require 'coxpcall'
 
 ---@class FSDriver
 ---@field scope Scope
@@ -99,14 +98,14 @@ function FSDriver:read(root_name, opts)
     -- Open file using fibers stream
     local f, open_err = file.open(full_path, "r")
     if not f then
-        return return_error("failed to open file: " .. tostring(open_err), 1)
+        return return_error("failed to open file " .. full_path .. ": " .. tostring(open_err), 1)
     end
 
     local content, read_err = f:read_all()
     local _, close_err = f:close()
 
     if not content then
-        return return_error("failed to read file: " .. tostring(read_err), 1)
+        return return_error("failed to read file " .. full_path .. ": " .. tostring(read_err), 1)
     end
 
     if close_err then
@@ -248,7 +247,7 @@ function FSDriver:control_manager()
             ok = false
             reason = "no function exists for verb: " .. tostring(validation_err)
         else
-            local call_ok, fn_ok, fn_reason, fn_code = safe.pcall(fn, self, root_name, request.opts)
+            local call_ok, fn_ok, fn_reason, fn_code = pcall(fn, self, root_name, request.opts)
             if not call_ok then
                 ok = false
                 reason = "internal error: " .. tostring(fn_ok)
