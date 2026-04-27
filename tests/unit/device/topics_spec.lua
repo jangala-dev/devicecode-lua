@@ -12,6 +12,7 @@ function T.device_topics_build_canonical_component_paths()
   assert(joined(topics.raw_member_state('mcu', 'power', 'charger')) == 'raw/member/mcu/state/power/charger')
   assert(joined(topics.raw_member_state('mcu', 'power', 'charger', 'config')) == 'raw/member/mcu/state/power/charger/config')
   assert(joined(topics.raw_member_cap_event('mcu', 'telemetry', 'main', 'power', 'charger', 'alert')) == 'raw/member/mcu/cap/telemetry/main/event/power/charger/alert')
+  assert(joined(topics.component_cap_event('mcu', 'state-changed')) == 'cap/component/mcu/event/state-changed')
 end
 
 function T.mcu_schema_defines_fixed_alert_kind_set()

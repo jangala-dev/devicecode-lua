@@ -7,8 +7,8 @@ local function copy(v)
   return model.copy_value(v)
 end
 
-local function non_empty_or_nil(t)
-  return type(t) == 'table' and next(t) ~= nil and t or nil
+local function table_or_empty(t)
+  return type(t) == 'table' and t or {}
 end
 
 function M.compose(raw_facts, raw_events)
@@ -47,16 +47,24 @@ function M.compose(raw_facts, raw_events)
     updater = updater,
     health = health,
     power = {
-      battery = non_empty_or_nil(battery),
-      charger = non_empty_or_nil(charger),
-      charger_config = non_empty_or_nil(charger_config),
+      battery = table_or_empty(battery),
+      charger = table_or_empty(charger),
+      charger_config = {
+        schema = charger_config.schema,
+        source = charger_config.source,
+        alert_mask_bits = charger_config.alert_mask_bits,
+        seq = charger_config.seq,
+        uptime_ms = charger_config.uptime_ms,
+        thresholds = table_or_empty(charger_config.thresholds),
+        alert_mask = table_or_empty(charger_config.alert_mask),
+      },
     },
     environment = {
-      temperature = non_empty_or_nil(temperature),
-      humidity = non_empty_or_nil(humidity),
+      temperature = table_or_empty(temperature),
+      humidity = table_or_empty(humidity),
     },
     runtime = {
-      memory = non_empty_or_nil(memory),
+      memory = table_or_empty(memory),
     },
     alerts = alerts,
     raw = {

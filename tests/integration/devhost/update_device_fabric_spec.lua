@@ -82,9 +82,7 @@ local function wait_service_running(conn, name, timeout)
 end
 
 local function wait_device_component(conn, name, pred, timeout)
-    return wait_retained_state(conn, { 'state', 'device', 'component', name }, function(payload)
-        return type(payload) == 'table' and pred(payload)
-    end, timeout or 1.5)
+    return probe.wait_device_component(conn, name, pred, { timeout = timeout or 1.5 })
 end
 
 function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()

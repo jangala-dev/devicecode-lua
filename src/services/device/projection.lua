@@ -39,6 +39,10 @@ function M.component_cap_status_topic(name)
   return topics.component_cap_status(name)
 end
 
+function M.component_cap_event_topic(name, event)
+  return topics.component_cap_event(name, event)
+end
+
 
 local function copy(t)
   return model.copy_value(t)

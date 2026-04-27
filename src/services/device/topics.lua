@@ -29,6 +29,7 @@ function M.component_software(name) return append(M.component(name), 'software')
 function M.component_update(name) return append(M.component(name), 'update') end
 function M.component_cap_meta(name) return { 'cap', 'component', name, 'meta' } end
 function M.component_cap_status(name) return { 'cap', 'component', name, 'status' } end
+function M.component_cap_event(name, event) return { 'cap', 'component', name, 'event', event } end
 function M.component_cap_rpc(name, method) return { 'cap', 'component', name, 'rpc', method } end
 
 

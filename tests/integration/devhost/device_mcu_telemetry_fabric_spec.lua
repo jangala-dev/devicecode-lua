@@ -2,7 +2,6 @@ local busmod    = require 'bus'
 local duplex    = require 'tests.support.duplex_stream'
 local probe     = require 'tests.support.bus_probe'
 local runfibers = require 'tests.support.run_fibers'
-local safe      = require 'coxpcall'
 local mailbox   = require 'fibers.mailbox'
 local fibers    = require 'fibers'
 
@@ -23,33 +22,21 @@ local function make_svc(conn)
 	}
 end
 
-local function wait_retained_state(conn, topic, pred, timeout)
-	return probe.wait_until(function()
-		local ok, payload = safe.pcall(function()
-			return probe.wait_payload(conn, topic, { timeout = 0.02 })
-		end)
-		return ok and pred(payload)
-	end, { timeout = timeout or 1.0, interval = 0.01 })
-end
-
 local function wait_ready(conn, link_id, timeout)
-	return wait_retained_state(conn, { 'state', 'fabric', 'link', link_id, 'session' }, function(payload)
-		return type(payload) == 'table'
-			and type(payload.status) == 'table'
-			and payload.status.ready == true
-	end, timeout or 1.5)
+	probe.wait_fabric_link_session(conn, link_id, function(payload)
+		return type(payload.status) == 'table' and payload.status.ready == true
+	end, { timeout = timeout or 1.5 })
+	return true
 end
 
 local function wait_service_running(conn, name, timeout)
-	return wait_retained_state(conn, { 'svc', name, 'status' }, function(payload)
-		return type(payload) == 'table' and payload.state == 'running' and payload.ready == true
-	end, timeout or 1.5)
+	probe.wait_service_running(conn, name, { timeout = timeout or 1.5 })
+	return true
 end
 
 local function wait_device_component(conn, name, pred, timeout)
-	return wait_retained_state(conn, { 'state', 'device', 'component', name }, function(payload)
-		return type(payload) == 'table' and pred(payload)
-	end, timeout or 1.5)
+	probe.wait_device_component(conn, name, pred, { timeout = timeout or 1.5 })
+	return true
 end
 
 local function seed_device_cfg(conn)

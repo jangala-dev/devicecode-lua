@@ -167,11 +167,25 @@ function M.wait_retained_state(conn, topic, pred, opts)
 		full = opts.full or 'drop_oldest',
 	})
 	local deadline = fibers.now() + timeout
+	local last_predicate_err
 	while true do
 		local remaining = deadline - fibers.now()
 		if remaining <= 0 then
 			pcall(function() watch:unwatch() end)
-			fail_with_context('timed out waiting for retained state', topic, opts.describe)
+			local function describe()
+				local parts = {}
+				if last_predicate_err ~= nil then
+					parts[#parts + 1] = 'last predicate error: ' .. tostring(last_predicate_err)
+				end
+				if type(opts.describe) == 'function' then
+					local ok, extra = pcall(opts.describe)
+					if ok and extra and extra ~= '' then parts[#parts + 1] = tostring(extra) end
+				elseif opts.describe ~= nil then
+					parts[#parts + 1] = tostring(opts.describe)
+				end
+				return table.concat(parts, '\n')
+			end
+			fail_with_context('timed out waiting for retained state', topic, describe)
 		end
 		local which, a, b = fibers.perform(op.named_choice({
 			ev = watch:recv_op(),
@@ -179,16 +193,37 @@ function M.wait_retained_state(conn, topic, pred, opts)
 		}))
 		if which == 'timeout' then
 			pcall(function() watch:unwatch() end)
-			fail_with_context('timed out waiting for retained state', topic, opts.describe)
+			local function describe()
+				local parts = {}
+				if last_predicate_err ~= nil then
+					parts[#parts + 1] = 'last predicate error: ' .. tostring(last_predicate_err)
+				end
+				if type(opts.describe) == 'function' then
+					local ok, extra = pcall(opts.describe)
+					if ok and extra and extra ~= '' then parts[#parts + 1] = tostring(extra) end
+				elseif opts.describe ~= nil then
+					parts[#parts + 1] = tostring(opts.describe)
+				end
+				return table.concat(parts, '\n')
+			end
+			fail_with_context('timed out waiting for retained state', topic, describe)
 		end
 		local ev, err = a, b
 		if not ev then
 			pcall(function() watch:unwatch() end)
 			fail_with_context('retained watch ended: ' .. tostring(err), topic, opts.describe)
 		end
-		if ev.op == 'retain' and pred(ev.payload, ev) then
-			pcall(function() watch:unwatch() end)
-			return ev.payload, ev
+		if ev.op == 'retain' then
+			local ok, matched = pcall(pred, ev.payload, ev)
+			if ok then
+				last_predicate_err = nil
+				if matched then
+					pcall(function() watch:unwatch() end)
+					return ev.payload, ev
+				end
+			else
+				last_predicate_err = matched
+			end
 		end
 	end
 end
@@ -235,6 +270,34 @@ function M.wait_fabric_link_session(conn, link_id, pred, opts)
 	return M.wait_retained_state(conn, { 'state', 'fabric', 'link', link_id, 'session' }, function(payload, ev)
 		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
 	end, opts)
+end
+
+function M.wait_cap_status(conn, class, id, pred, opts)
+	return M.wait_retained_state(conn, { 'cap', class, id, 'status' }, function(payload, ev)
+		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
+function M.wait_cap_event(conn, class, id, event_name, pred, opts)
+	opts = opts or {}
+	local msg = M.wait_message(conn, { 'cap', class, id, 'event', event_name }, {
+		timeout = opts.timeout or 1.0,
+		queue_len = opts.queue_len or 8,
+		full = opts.full or 'drop_oldest',
+	})
+	local payload = msg.payload
+	if pred and not pred(payload, msg) then
+		fail_with_context('unexpected cap event payload', { 'cap', class, id, 'event', event_name }, opts.describe)
+	end
+	return payload, msg
+end
+
+function M.wait_component_cap_status(conn, component, pred, opts)
+	return M.wait_cap_status(conn, 'component', component, pred, opts)
+end
+
+function M.wait_component_event(conn, component, event_name, pred, opts)
+	return M.wait_cap_event(conn, 'component', component, event_name, pred, opts)
 end
 
 return M

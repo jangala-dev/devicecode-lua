@@ -49,13 +49,28 @@ local function publish_component(conn, svc, state, name)
     interface = 'devicecode.cap/component/1',
     component = name,
     methods = payloads.component.actions or {},
+    events = { ['state-changed'] = true },
     canonical_state = projection.component_topic(name),
   })
-  conn:retain(projection.component_cap_status_topic(name), {
+  local cap_status = {
     state = payloads.component.available and 'available' or 'unavailable',
     health = payloads.component.health,
     ready = payloads.component.ready,
-  })
+  }
+  conn:retain(projection.component_cap_status_topic(name), cap_status)
+  local should_emit_event = rec._published_once or payloads.component.available == true
+  if should_emit_event then
+    conn:publish(projection.component_cap_event_topic(name, 'state-changed'), {
+      component = name,
+      available = payloads.component.available,
+      ready = payloads.component.ready,
+      health = payloads.component.health,
+      software = payloads.software,
+      update = payloads.update,
+      status = cap_status,
+    })
+  end
+  rec._published_once = true
   model.clear_component_dirty(state, name)
 end
 

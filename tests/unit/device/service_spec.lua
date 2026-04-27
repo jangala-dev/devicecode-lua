@@ -2,9 +2,9 @@ local busmod    = require 'bus'
 local runfibers = require 'tests.support.run_fibers'
 local probe     = require 'tests.support.bus_probe'
 local test_diag = require 'tests.support.test_diag'
+local fibers    = require 'fibers'
 local model = require 'services.device.model'
 local device    = require 'services.device'
-local safe      = require 'coxpcall'
 
 local T = {}
 
@@ -18,15 +18,6 @@ local function bind_reply_loop(scope, ep, handler)
     end
   end)
   assert(ok, tostring(err))
-end
-
-local function wait_service_running(conn, name)
-  assert(probe.wait_until(function()
-    local okp, payload = safe.pcall(function()
-      return probe.wait_payload(conn, { 'svc', name, 'status' }, { timeout = 0.02 })
-    end)
-    return okp and type(payload) == 'table' and payload.state == 'running' and payload.ready == true
-  end, { timeout = 0.75, interval = 0.01 }))
 end
 
 function T.device_service_proxies_default_cm5_status_and_update_calls()
@@ -72,28 +63,32 @@ function T.device_service_proxies_default_cm5_status_and_update_calls()
       return { ok = true, started = true, mode = payload.component }
     end)
 
+    local comp_ev_sub = caller:subscribe({ 'cap', 'component', 'cm5', 'event', 'state-changed' }, { queue_len = 8, full = 'drop_oldest' })
+    fibers.current_scope():finally(function()
+      comp_ev_sub:unsubscribe()
+    end)
+
     local ok, err = scope:spawn(function()
       device.start(bus:connect(), { name = 'device', env = 'dev' })
     end)
     if not ok then diag:fail('failed to spawn device service: ' .. tostring(err)) end
 
-    wait_service_running(caller, 'device')
+    probe.wait_service_running(caller, 'device', { timeout = 0.75 })
 
-    assert(probe.wait_until(function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'device', 'component', 'cm5' }, { timeout = 0.02 })
-      end)
-      return okp
-        and type(payload) == 'table'
-        and payload.available == true
+    local ev, eerr = comp_ev_sub:recv()
+    assert(eerr == nil)
+    assert(type(ev) == 'table' and type(ev.payload) == 'table')
+    assert(ev.payload.component == 'cm5')
+    assert(ev.payload.available == true)
+
+    local status = probe.wait_device_component(caller, 'cm5', function(payload)
+      return payload.available == true
         and payload.ready == true
         and type(payload.software) == 'table'
         and payload.software.version == 'cm5-v1'
         and type(payload.updater) == 'table'
         and payload.updater.state == 'running'
-    end, { timeout = 0.75, interval = 0.01 }))
-
-    local status = probe.wait_payload(caller, { 'state', 'device', 'component', 'cm5' }, { timeout = 0.5 })
+    end, { timeout = 0.75 })
     assert(type(status) == 'table')
     assert(status.component == 'cm5')
     assert(type(status.software) == 'table')
@@ -211,15 +206,10 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
     end)
     if not ok then diag:fail('failed to spawn device service: ' .. tostring(err)) end
 
-    wait_service_running(caller, 'device')
+    probe.wait_service_running(caller, 'device', { timeout = 0.75 })
 
-    assert(probe.wait_until(function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'device', 'component', 'mcu' }, { timeout = 0.02 })
-      end)
-      return okp
-        and type(payload) == 'table'
-        and payload.kind == 'device.component'
+    local mcu = probe.wait_device_component(caller, 'mcu', function(payload)
+      return payload.kind == 'device.component'
         and payload.available == true
         and payload.ready == true
         and type(payload.software) == 'table'
@@ -246,7 +236,15 @@ function T.device_service_merges_configured_components_and_tracks_split_fact_top
         and payload.environment.humidity.rh_x100 == 4690
         and type(payload.runtime) == 'table'
         and payload.runtime.memory.alloc_bytes == 85680
-    end, { timeout = 0.75, interval = 0.01 }))
+    end, { timeout = 0.75 })
+    local cap_meta = probe.wait_retained_state(caller, { 'cap', 'component', 'mcu', 'meta' }, function(payload)
+      return type(payload) == 'table' and type(payload.events) == 'table' and payload.events['state-changed'] == true
+    end, { timeout = 0.5 })
+    assert(cap_meta.component == 'mcu')
+    local cap_status = probe.wait_component_cap_status(caller, 'mcu', function(payload)
+      return payload.state == 'available' and payload.ready == true and payload.health == 'ok'
+    end, { timeout = 0.5 })
+    assert(cap_status.state == 'available')
 
     local reply, rerr = caller:call({ 'cap', 'component', 'mcu', 'rpc', 'prepare-update' }, { target = 'mcu' }, { timeout = 0.5 })
     assert(rerr == nil)
