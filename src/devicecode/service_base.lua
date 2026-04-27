@@ -12,6 +12,8 @@ local fibers  = require 'fibers'
 local runtime = require 'fibers.runtime'
 local sleep   = require 'fibers.sleep'
 
+local DEFAULT_OBS_VERSION = 'v1'
+
 local M = {}
 
 local function t(...) return { ... } end
@@ -28,7 +30,7 @@ local function topic_to_string(topic)
 end
 
 ---@param conn any
----@param opts? { name?: string, env?: string }
+---@param opts? { name?: string, env?: string, version?: string }
 ---@return ServiceBase
 function M.new(conn, opts)
 	opts = opts or {}
@@ -39,6 +41,7 @@ function M.new(conn, opts)
 	svc.conn = conn
 	svc.name = opts.name or 'service'
 	svc.env  = opts.env or (os.getenv('DEVICECODE_ENV') or 'dev')
+	svc.version = opts.version or DEFAULT_OBS_VERSION
 
 	function svc:now() return runtime.now() end
 	function svc:wall() return wall() end
@@ -46,15 +49,19 @@ function M.new(conn, opts)
 	function svc:topic_to_string(topic) return topic_to_string(topic) end
 
 	function svc:obs_log(level, payload)
-		self.conn:publish(t('obs', 'log', self.name, level), payload)
+		self.conn:publish(t('obs', self.version, 'log', self.name, level), payload)
 	end
 
 	function svc:obs_event(name, payload)
-		self.conn:publish(t('obs', 'event', self.name, name), payload)
+		self.conn:publish(t('obs', self.version, 'event', self.name, name), payload)
+	end
+
+	function svc:obs_metric(name, payload)
+		self.conn:publish(t('obs', self.version, 'metric', self.name, name), payload)
 	end
 
 	function svc:obs_state(name, payload)
-		self.conn:retain(t('obs', 'state', self.name, name), payload)
+		self.conn:retain(t('obs', self.version, 'state', self.name, name), payload)
 	end
 
 	function svc:status(state, extra)
