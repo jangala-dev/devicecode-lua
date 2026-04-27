@@ -60,9 +60,8 @@ local function make_dcmcu(opts)
   return header .. manifest_bytes .. sig .. payload
 end
 
-local function install_fake_mcu_preflight()
-  local restore = update_preflight.install_fake_mcu_preflight()
-  fibers.current_scope():finally(restore)
+local function fake_mcu_preflighters(extra)
+  return update_preflight.preflighters(extra)
 end
 
 local function bind_reply_loop(scope, ep, handler)
@@ -174,8 +173,7 @@ end
 
 function T.update_service_creates_starts_commits_and_reconciles_job_via_device_proxy()
   runfibers.run(function(scope)
-    install_fake_mcu_preflight()
-    install_fake_mcu_preflight()
+    local preflighters = fake_mcu_preflighters()
     local orig_sleep = sleep_mod.sleep
     sleep_mod.sleep = function(dt) return orig_sleep(math.min(dt, 0.01)) end
     fibers.current_scope():finally(function() sleep_mod.sleep = orig_sleep end)
@@ -216,7 +214,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     end
 
     local ok, err = scope:spawn(function()
-      update.start(bus:connect(), { name = 'update', env = 'dev' })
+      update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
     end)
     if not ok then diag:fail('failed to spawn update service: ' .. tostring(err)) end
 
@@ -316,8 +314,7 @@ end
 
 function T.update_service_cancels_staged_job_before_commit()
   runfibers.run(function(scope)
-    install_fake_mcu_preflight()
-    install_fake_mcu_preflight()
+    local preflighters = fake_mcu_preflighters()
     local bus = busmod.new()
     local caller = bus:connect()
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
@@ -327,7 +324,7 @@ function T.update_service_cancels_staged_job_before_commit()
     bind_fabric_transfer_double(scope, bus:connect())
 
     local ok, err = scope:spawn(function()
-      update.start(bus:connect(), { name = 'update', env = 'dev' })
+      update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
     end)
     assert(ok, tostring(err))
 
@@ -356,8 +353,7 @@ end
 
 function T.update_service_applies_per_component_artifact_storage_policy()
   runfibers.run(function(scope)
-    install_fake_mcu_preflight()
-    install_fake_mcu_preflight()
+    local preflighters = fake_mcu_preflighters()
     local bus = busmod.new()
     local caller = bus:connect()
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
@@ -378,7 +374,7 @@ function T.update_service_applies_per_component_artifact_storage_policy()
     })
 
     local ok, err = scope:spawn(function()
-      update.start(bus:connect(), { name = 'update', env = 'dev' })
+      update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
     end)
     assert(ok, tostring(err))
 
@@ -408,8 +404,7 @@ end
 
 function T.update_service_rejects_second_active_job_globally()
   runfibers.run(function(scope)
-    install_fake_mcu_preflight()
-    install_fake_mcu_preflight()
+    local preflighters = fake_mcu_preflighters()
     local orig_sleep = sleep_mod.sleep
     sleep_mod.sleep = function(dt) return orig_sleep(math.min(dt, 0.01)) end
     fibers.current_scope():finally(function() sleep_mod.sleep = orig_sleep end)
@@ -426,7 +421,7 @@ function T.update_service_rejects_second_active_job_globally()
     bind_fabric_transfer_double(scope, bus:connect())
 
     local ok, err = scope:spawn(function()
-      update.start(bus:connect(), { name = 'update', env = 'dev' })
+      update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
     end)
     assert(ok, tostring(err))
     probe.wait_service_running(caller, 'update', { timeout = 0.75 })
@@ -454,8 +449,7 @@ end
 
 function T.update_service_supports_ref_artifacts_and_auto_start()
   runfibers.run(function(scope)
-    install_fake_mcu_preflight()
-    install_fake_mcu_preflight()
+    local preflighters = fake_mcu_preflighters()
     local bus = busmod.new()
     local caller = bus:connect()
     local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
@@ -472,7 +466,7 @@ function T.update_service_supports_ref_artifacts_and_auto_start()
     bind_fabric_transfer_double(scope, bus:connect())
 
     local ok, err = scope:spawn(function()
-      update.start(bus:connect(), { name = 'update', env = 'dev' })
+      update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
     end)
     assert(ok, tostring(err))
     probe.wait_service_running(caller, 'update', { timeout = 0.75 })
@@ -500,8 +494,7 @@ end
 
 function T.update_service_marks_bundled_hold_after_manual_mcu_success()
   runfibers.run(function(scope)
-    install_fake_mcu_preflight()
-    install_fake_mcu_preflight()
+    local preflighters = fake_mcu_preflighters()
     local orig_sleep = sleep_mod.sleep
     sleep_mod.sleep = function(dt) return orig_sleep(math.min(dt, 0.01)) end
     fibers.current_scope():finally(function() sleep_mod.sleep = orig_sleep end)
@@ -551,7 +544,7 @@ function T.update_service_marks_bundled_hold_after_manual_mcu_success()
     })
 
     local ok, err = scope:spawn(function()
-      update.start(bus:connect(), { name = 'update', env = 'dev' })
+      update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
     end)
     assert(ok, tostring(err))
     probe.wait_service_running(caller, 'update', { timeout = 0.75 })

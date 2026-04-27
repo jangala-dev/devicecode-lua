@@ -108,15 +108,20 @@ The service no longer uses public `cmd/update/...` trees, and job truth no longe
 
 ### Required capabilities
 
-| Capability         | Id         | Purpose                                                                      |
-| ------------------ | ---------- | ---------------------------------------------------------------------------- |
-| `control_store`    | `'update'` | Persist and reload durable update-job records and bundled-reconcile records. |
-| `artifact_store`   | `'main'`   | Open, delete, import and stage artefacts.                                    |
-| `signature_verify` | `'main'`   | Optional signature verification for bundled MCU images.                      |
+| Capability       | Id         | Purpose                                                                      |
+| ---------------- | ---------- | ---------------------------------------------------------------------------- |
+| `control_store`  | `'update'` | Persist and reload durable update-job records and bundled-reconcile records. |
+| `artifact_store` | `'main'`   | Open, delete, import and stage artefacts.                                    |
 
 The service discovers `control_store/update` and `artifact_store/main` before it becomes runnable.
 
-`signature_verify/main` is optional and is used only when bundled-image policy requires verification.
+### Verification dependency
+
+Bundled-image verification uses an **injected verifier/provider abstraction** rather than hard-wiring update logic directly to a HAL capability path.
+
+That verifier is optional and is used only when bundled-image policy requires verification.
+
+One backend for the verifier may be HAL-backed. Where a HAL-backed verifier is used, it may in turn use a raw host/provider-native verification capability behind the scenes. This is an implementation detail of the verifier backend, not part of the Update service’s public control-plane contract.
 
 ### Consumed stable local interfaces
 
@@ -478,6 +483,14 @@ The service opens the ref through `artifact_store.open(...)` and snapshots the d
 
 The service resolves a bundled artefact for the target component through the bundled artefact path. For MCU images, this path may inspect and optionally verify a signed image bundle before it is imported into the artefact store.
 
+Bundled verification is performed through an injected verifier/provider abstraction. The Update service and MCU image parser operate on that abstraction rather than directly depending on HAL capability names or transport details.
+
+### Bundled preflight scope
+
+Bundled preflight policy and helpers are scoped to the running Update service instance.
+
+They are not held in mutable process-global registries. This avoids hidden cross-instance or cross-test influence on bundled artefact inspection behaviour.
+
 ### Retention policy
 
 Import policy is chosen by:
@@ -745,4 +758,3 @@ Canonical current truth remains in:
 * `state/workflow/update-job/...`
 * `state/workflow/artifact-ingest/...`
 * `state/update/...`
-

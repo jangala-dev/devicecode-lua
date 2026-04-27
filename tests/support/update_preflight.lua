@@ -1,5 +1,3 @@
-local artifacts_mod = require 'services.update.artifacts'
-
 local M = {}
 
 function M.fake_mcu_ok(extra)
@@ -30,12 +28,9 @@ function M.fake_mcu_ok(extra)
   end
 end
 
-function M.install_fake_mcu_preflight(extra)
-  local fn = M.fake_mcu_ok(extra)
-  artifacts_mod.set_default_preflighter('mcu', fn)
-  return function()
-    artifacts_mod.set_default_preflighter('mcu', nil)
-  end
+function M.preflighters(extra)
+  return { mcu = M.fake_mcu_ok(extra) }
 end
+
 
 return M

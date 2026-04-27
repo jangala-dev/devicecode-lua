@@ -16,9 +16,8 @@ local storagecaps  = require 'tests.support.storage_caps'
 
 local T = {}
 
-local function install_fake_mcu_preflight(extra)
-	local restore = update_preflight.install_fake_mcu_preflight(extra)
-	fibers.current_scope():finally(restore)
+local function fake_mcu_preflighters(extra)
+	return update_preflight.preflighters(extra)
 end
 
 local function make_svc(conn)
@@ -67,7 +66,7 @@ end
 
 function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped()
 	runfibers.run(function(scope)
-		install_fake_mcu_preflight({ version = 'mcu-v1', image_id = 'mcu-image-1' })
+		local preflighters = fake_mcu_preflighters({ version = 'mcu-v1', image_id = 'mcu-image-1' })
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))
@@ -238,7 +237,7 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 		assert(ok3, tostring(err3))
 
 		local ok4, err4 = scope:spawn(function()
-			update.start(bus:connect(), { name = 'update', env = 'dev' })
+			update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
 		end)
 		assert(ok4, tostring(err4))
 

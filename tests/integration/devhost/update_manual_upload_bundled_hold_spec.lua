@@ -9,7 +9,6 @@ local checksum          = require 'shared.hash.xxhash32'
 local session           = require 'services.fabric.session'
 local device            = require 'services.device'
 local update            = require 'services.update'
-local update_artifacts  = require 'services.update.artifacts'
 local ui_service        = require 'services.ui.service'
 local http_ui           = require 'services.ui.transport.http'
 
@@ -189,11 +188,6 @@ end
 
 function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_across_update_restart()
 	runfibers.run(function(scope)
-		update_artifacts.reset_default_preflighters()
-		fibers.current_scope():finally(function()
-			update_artifacts.reset_default_preflighters()
-		end)
-
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))

@@ -16,9 +16,8 @@ local update  = require 'services.update'
 
 local T = {}
 
-local function install_fake_mcu_preflight(extra)
-	local restore = update_preflight.install_fake_mcu_preflight(extra)
-	fibers.current_scope():finally(restore)
+local function fake_mcu_preflighters(extra)
+	return update_preflight.preflighters(extra)
 end
 
 local function make_svc(conn)
@@ -65,7 +64,7 @@ end
 
 function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 	runfibers.run(function(scope)
-		install_fake_mcu_preflight({ version = 'mcu-v1', image_id = 'mcu-image-1' })
+		local preflighters = fake_mcu_preflighters({ version = 'mcu-v1', image_id = 'mcu-image-1' })
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))
@@ -230,7 +229,7 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		assert(ok3, tostring(err3))
 
 		local ok4, err4 = scope:spawn(function()
-			update.start(bus:connect(), { name = 'update', env = 'dev' })
+			update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
 		end)
 		assert(ok4, tostring(err4))
 
@@ -290,7 +289,7 @@ end
 
 function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_after_commit()
 	runfibers.run(function(scope)
-		install_fake_mcu_preflight({ version = 'mcu-v1', image_id = 'mcu-image-1' })
+		local preflighters = fake_mcu_preflighters({ version = 'mcu-v1', image_id = 'mcu-image-1' })
 		local orig_sleep = sleep_mod.sleep
 		sleep_mod.sleep = function(dt)
 			return orig_sleep(math.min(dt, 0.01))
@@ -455,7 +454,7 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		assert(ok3, tostring(err3))
 
 		local ok4, err4 = scope:spawn(function()
-			update.start(bus:connect(), { name = 'update', env = 'dev' })
+			update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
 		end)
 		assert(ok4, tostring(err4))
 

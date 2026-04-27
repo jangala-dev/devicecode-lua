@@ -354,7 +354,7 @@ function M.start(conn, opts)
   end
   ctx.enter_awaiting_return = enter_awaiting_return
 
-  local artifacts = artifacts_mod.new(ctx)
+  local artifacts = artifacts_mod.new(ctx, { preflighters = type(opts.preflighters) == 'table' and opts.preflighters or nil })
   ctx.artifacts = artifacts
   ctx.artifact_open = function(...)
     return artifacts:open(...)

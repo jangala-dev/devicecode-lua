@@ -16,8 +16,6 @@ local sources = require 'services.update.artifact_sources'
 local mcu_image_v1 = require 'shared.mcu_image.v1'
 local crypto_mod = require 'services.update.crypto'
 
-local default_preflighters = {}
-
 local function merge_meta(a, b)
 	local out = {}
 	for _, src in ipairs({ a, b }) do
@@ -32,20 +30,14 @@ local M = {}
 local Artifacts = {}
 Artifacts.__index = Artifacts
 
-function M.new(ctx)
-	return setmetatable({ ctx = ctx, preflighters = {} }, Artifacts)
-end
-
-function M.set_default_preflighter(component, fn)
-	if fn == nil then
-		default_preflighters[component] = nil
-	else
-		default_preflighters[component] = assert(type(fn) == 'function' and fn or nil)
+function M.new(ctx, opts)
+	opts = type(opts) == 'table' and opts or {}
+	local preflighters = {}
+	local src = opts.preflighters or nil
+	if type(src) == 'table' then
+		for k, v in pairs(src) do preflighters[k] = v end
 	end
-end
-
-function M.reset_default_preflighters()
-	for k in pairs(default_preflighters) do default_preflighters[k] = nil end
+	return setmetatable({ ctx = ctx, preflighters = preflighters }, Artifacts)
 end
 
 function Artifacts:set_preflighter(component, fn)
@@ -179,10 +171,6 @@ end
 function Artifacts:preflighter_for(component)
 	local own = self.preflighters and self.preflighters[component] or nil
 	if own ~= nil then return own end
-	local injected = self.ctx and self.ctx.preflighters and self.ctx.preflighters[component] or nil
-	if injected ~= nil then return injected end
-	local def = default_preflighters[component]
-	if def ~= nil then return def end
 	if component == 'mcu' then
 		return function(artifacts, ref, desc, artifact_spec)
 			local cfg = select(1, artifacts:bundled_cfg_for(component, artifact_spec))
