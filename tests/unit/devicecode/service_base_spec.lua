@@ -57,7 +57,7 @@ function T.service_base_status_preserves_legacy_shape()
 	end, { timeout = 2.0 })
 end
 
-function T.service_base_announce_publishes_retained_metadata()
+function T.service_base_announce_publishes_meta_and_announce()
 	runfibers.run(function()
 		local bus    = busmod.new()
 		local conn   = bus:connect()
@@ -76,13 +76,78 @@ function T.service_base_announce_publishes_retained_metadata()
 		assert(ann.schema == 'devicecode.service/demo/1')
 		assert(type(ann.run_id) == 'string')
 
-		local payload = wait_payload(reader, { 'svc', 'demo', 'announce' }, 0.2)
-		assert(type(payload) == 'table')
-		assert(payload.name == 'demo')
-		assert(payload.env == 'test')
-		assert(payload.kind == 'example')
-		assert(payload.schema == 'devicecode.service/demo/1')
-		assert(type(payload.run_id) == 'string')
+		local meta = wait_payload(reader, { 'svc', 'demo', 'meta' }, 0.2)
+		assert(type(meta) == 'table')
+		assert(meta.name == 'demo')
+		assert(meta.env == 'test')
+		assert(meta.kind == 'example')
+		assert(meta.schema == 'devicecode.service/demo/1')
+		assert(type(meta.run_id) == 'string')
+
+		local announce = wait_payload(reader, { 'svc', 'demo', 'announce' }, 0.2)
+		assert(type(announce) == 'table')
+		assert(announce.name == 'demo')
+		assert(announce.env == 'test')
+		assert(announce.kind == 'example')
+		assert(announce.schema == 'devicecode.service/demo/1')
+		assert(type(announce.run_id) == 'string')
+
+		assert(meta.run_id == announce.run_id)
+	end, { timeout = 2.0 })
+end
+
+function T.service_base_obs_helpers_publish_legacy_and_v1_topics()
+	runfibers.run(function()
+		local bus    = busmod.new()
+		local conn   = bus:connect()
+		local reader = bus:connect()
+
+		local svc = service_base.new(conn, { name = 'demo', env = 'test' })
+
+		-- Subscribe BEFORE publishing non-retained events/logs.
+		local ev_legacy_sub = reader:subscribe({ 'obs', 'event', 'demo', 'started' })
+		local ev_v1_sub     = reader:subscribe({ 'obs', 'v1', 'demo', 'event', 'started' })
+
+		local log_legacy_sub = reader:subscribe({ 'obs', 'log', 'demo', 'info' })
+		local log_v1_sub     = reader:subscribe({ 'obs', 'v1', 'demo', 'event', 'log' })
+
+		svc:obs_event('started', { phase = 'boot' })
+		svc:obs_state('health', { ok = true })
+		svc:obs_log('info', { msg = 'hello' })
+
+		local ev_legacy, err = ev_legacy_sub:recv()
+		assert(ev_legacy, tostring(err))
+		assert(type(ev_legacy.payload) == 'table')
+		assert(ev_legacy.payload.phase == 'boot')
+
+		local ev_v1, err2 = ev_v1_sub:recv()
+		assert(ev_v1, tostring(err2))
+		assert(type(ev_v1.payload) == 'table')
+		assert(ev_v1.payload.phase == 'boot')
+
+		local st_legacy = wait_payload(reader, { 'obs', 'state', 'demo', 'health' }, 0.2)
+		assert(type(st_legacy) == 'table')
+		assert(st_legacy.ok == true)
+
+		local st_v1 = wait_payload(reader, { 'obs', 'v1', 'demo', 'metric', 'health' }, 0.2)
+		assert(type(st_v1) == 'table')
+		assert(st_v1.ok == true)
+
+		local log_legacy, err3 = log_legacy_sub:recv()
+		assert(log_legacy, tostring(err3))
+		assert(type(log_legacy.payload) == 'table')
+		assert(log_legacy.payload.msg == 'hello')
+
+		local log_v1, err4 = log_v1_sub:recv()
+		assert(log_v1, tostring(err4))
+		assert(type(log_v1.payload) == 'table')
+		assert(log_v1.payload.msg == 'hello')
+		assert(log_v1.payload.level == 'info')
+
+		ev_legacy_sub:unsubscribe()
+		ev_v1_sub:unsubscribe()
+		log_legacy_sub:unsubscribe()
+		log_v1_sub:unsubscribe()
 	end, { timeout = 2.0 })
 end
 
@@ -184,20 +249,22 @@ function T.service_base_run_id_is_stable_within_one_instance_and_changes_across_
 	end, { timeout = 2.0 })
 end
 
-function T.service_base_scope_exit_unretains_status_and_announce()
+function T.service_base_scope_exit_unretains_status_meta_and_announce()
 	runfibers.run(function()
 		local bus    = busmod.new()
 		local reader = bus:connect()
 
 		local watch = reader:watch_retained({ 'svc', 'demo', '#' }, {
 			replay = true,
-			queue_len = 16,
+			queue_len = 32,
 			full = 'drop_oldest',
 		})
 
-		local saw_status_retain = false
+		local saw_status_retain   = false
+		local saw_meta_retain     = false
 		local saw_announce_retain = false
-		local saw_status_unretain = false
+		local saw_status_unretain   = false
+		local saw_meta_unretain     = false
 		local saw_announce_unretain = false
 
 		local st, rep = fibers.run_scope(function()
@@ -208,18 +275,20 @@ function T.service_base_scope_exit_unretains_status_and_announce()
 			svc:set_ready(true)
 
 			assert(wait_until(function()
-				local ev, err = watch:recv()
+				local ev = watch:recv()
 				if not ev then return false end
 
 				if ev.op == 'retain' then
-					if topic_equal(ev.topic, { 'svc', 'demo', 'announce' }) then
-						saw_announce_retain = true
-					elseif topic_equal(ev.topic, { 'svc', 'demo', 'status' }) then
+					if topic_equal(ev.topic, { 'svc', 'demo', 'status' }) then
 						saw_status_retain = true
+					elseif topic_equal(ev.topic, { 'svc', 'demo', 'meta' }) then
+						saw_meta_retain = true
+					elseif topic_equal(ev.topic, { 'svc', 'demo', 'announce' }) then
+						saw_announce_retain = true
 					end
 				end
 
-				return saw_status_retain and saw_announce_retain
+				return saw_status_retain and saw_meta_retain and saw_announce_retain
 			end, 1.0, 0.01))
 		end)
 
@@ -227,18 +296,20 @@ function T.service_base_scope_exit_unretains_status_and_announce()
 		assert(type(rep) == 'table')
 
 		assert(wait_until(function()
-			local ev, err = watch:recv()
+			local ev = watch:recv()
 			if not ev then return false end
 
 			if ev.op == 'unretain' then
 				if topic_equal(ev.topic, { 'svc', 'demo', 'status' }) then
 					saw_status_unretain = true
+				elseif topic_equal(ev.topic, { 'svc', 'demo', 'meta' }) then
+					saw_meta_unretain = true
 				elseif topic_equal(ev.topic, { 'svc', 'demo', 'announce' }) then
 					saw_announce_unretain = true
 				end
 			end
 
-			return saw_status_unretain and saw_announce_unretain
+			return saw_status_unretain and saw_meta_unretain and saw_announce_unretain
 		end, 1.0, 0.01))
 
 		watch:unwatch()
@@ -316,9 +387,18 @@ function T.service_base_topic_helpers_build_canonical_topics()
 
 		local svc = service_base.new(conn, { name = 'demo', env = 'test' })
 
-		assert(topic_equal(svc:service_topic('status'), { 'svc', 'demo', 'status' }))
-		assert(topic_equal(svc:status_topic(), { 'svc', 'demo', 'status' }))
-		assert(topic_equal(svc:announce_topic(), { 'svc', 'demo', 'announce' }))
+		assert(topic_equal(svc:service_topic('status'),   { 'svc', 'demo', 'status' }))
+		assert(topic_equal(svc:status_topic(),            { 'svc', 'demo', 'status' }))
+		assert(topic_equal(svc:meta_topic(),              { 'svc', 'demo', 'meta' }))
+		assert(topic_equal(svc:announce_topic(),          { 'svc', 'demo', 'announce' }))
+
+		assert(topic_equal(svc:obs_event_topic('boot'),   { 'obs', 'v1', 'demo', 'event', 'boot' }))
+		assert(topic_equal(svc:obs_metric_topic('health'),{ 'obs', 'v1', 'demo', 'metric', 'health' }))
+		assert(topic_equal(svc:obs_counter_topic('ticks'),{ 'obs', 'v1', 'demo', 'counter', 'ticks' }))
+
+		assert(topic_equal(svc:obs_event_legacy_topic('boot'), { 'obs', 'event', 'demo', 'boot' }))
+		assert(topic_equal(svc:obs_state_legacy_topic('health'), { 'obs', 'state', 'demo', 'health' }))
+		assert(topic_equal(svc:obs_log_legacy_topic('info'), { 'obs', 'log', 'demo', 'info' }))
 	end, { timeout = 2.0 })
 end
 
