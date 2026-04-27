@@ -4,6 +4,7 @@ local probe = require 'tests.support.bus_probe'
 local test_diag = require 'tests.support.test_diag'
 local ui_service = require 'services.ui.service'
 local ui_fakes = require 'tests.support.ui_fakes'
+local mailbox = require 'fibers.mailbox'
 
 local T = {}
 
@@ -42,6 +43,7 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 		test_diag.add_calls(diag, 'rpc_calls', rpc_calls)
 		test_diag.add_calls(diag, 'connect_calls', connect_calls)
 		local captured = {}
+		local cap_tx, cap_rx = mailbox.new(4, { full = 'reject_newest' })
 		local ok, err = scope:spawn(function()
 			ui_service.start(bus:connect(), {
 				name = 'ui',
@@ -54,15 +56,18 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 				run_http = function(_, app, http_opts)
 					captured.app = app
 					captured.ws_opts = http_opts.ws_opts
+					cap_tx:send(true)
 					while true do require('fibers.sleep').sleep(3600) end
 				end,
 				model_ready_timeout_s = 0.5,
 			})
 		end)
 		if not ok then diag:fail('failed to spawn ui service: ' .. tostring(err)) end
-		if not probe.wait_until(function() return captured.app ~= nil end, { timeout = 0.5, interval = 0.01 }) then
+		if cap_rx:recv() ~= true then
 			diag:fail('expected ui app to be captured by fake http runner')
 		end
+		probe.wait_service_running(bus:connect(), 'ui', { timeout = 0.75 })
+		probe.wait_ui_summary(bus:connect(), function(payload) return payload.status == 'running' and payload.model_ready == true end, { timeout = 0.75 })
 
 		local session, lerr = captured.app.login('admin', 'pw')
 		if lerr ~= nil or type(session) ~= 'table' or type(session.session_id) ~= 'string' or session.session_id == '' then

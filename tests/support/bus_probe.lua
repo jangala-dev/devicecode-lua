@@ -344,4 +344,10 @@ function M.wait_component_event(conn, component, event_name, pred, opts)
 	return M.wait_cap_event(conn, 'component', component, event_name, pred, opts)
 end
 
+function M.wait_ui_summary(conn, pred, opts)
+	return M.wait_retained_state(conn, { 'state', 'ui', 'summary' }, function(payload, ev)
+		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
 return M

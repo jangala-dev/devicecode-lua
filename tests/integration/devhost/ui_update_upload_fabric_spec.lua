@@ -276,6 +276,7 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 
 		local connect = ui_fakes.connect_factory(bus)
 		local captured = {}
+		local cap_tx, cap_rx = mailbox.new(4, { full = 'reject_newest' })
 		local ok5, err5 = scope:spawn(function()
 			ui_service.start(bus:connect(), {
 				name = 'ui',
@@ -288,6 +289,7 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 				run_http = function(_, app, http_opts)
 					captured.app = app
 					captured.http_opts = http_opts
+					cap_tx:send(true)
 					while true do require('fibers.sleep').sleep(3600) end
 				end,
 				model_ready_timeout_s = 0.5,
@@ -299,7 +301,9 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
 		assert(wait_service_running(caller, 'device', 1.5) == true)
 		assert(wait_service_running(caller, 'update', 1.5) == true)
-		assert(probe.wait_until(function() return captured.app ~= nil end, { timeout = 0.5, interval = 0.01 }))
+		assert(cap_rx:recv() == true)
+		probe.wait_service_running(caller, 'ui', { timeout = 0.75 })
+		probe.wait_ui_summary(caller, function(payload) return payload.status == 'running' and payload.model_ready == true end, { timeout = 0.75 })
 
 		publish_remote_status()
 		assert(wait_device_component(caller, 'mcu', function(payload)

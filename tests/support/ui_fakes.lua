@@ -142,11 +142,14 @@ end
 
 function M.fake_ws()
 	local tx, rx = mailbox.new(64, { full = 'reject_newest' })
+	local sent_tx, sent_rx = mailbox.new(128, { full = 'drop_oldest' })
 	local ws = {
 		sent = {},
 		closed = false,
 		_tx = tx,
 		_rx = rx,
+		_sent_tx = sent_tx,
+		_sent_rx = sent_rx,
 	}
 
 	function ws:accept()
@@ -163,6 +166,7 @@ function M.fake_ws()
 
 	function ws:send(txt)
 		self.sent[#self.sent + 1] = txt
+		self._sent_tx:send({ count = #self.sent, text = txt })
 		return true
 	end
 
@@ -185,6 +189,10 @@ function M.fake_ws()
 
 	function ws:disconnect(reason)
 		pcall(function() self._tx:close(reason or 'closed') end)
+	end
+
+	function ws:recv_sent()
+		return self._sent_rx:recv()
 	end
 
 	function ws:sent_objects()

@@ -95,9 +95,11 @@ function T.ui_ws_client_handles_login_call_and_watch_lifecycle()
 		fake_ws:inject_text({ id = 4, op = 'logout' })
 		fake_ws:disconnect('done')
 
-		assert(require('tests.support.bus_probe').wait_until(function()
-			return #fake_ws.sent >= 5 and closed == 1
-		end, { timeout = 1.0, interval = 0.01 }))
+		local deadline = require('fibers').now() + 1.0
+		while #fake_ws.sent < 5 and require('fibers').now() < deadline do
+			local _ = fake_ws:recv_sent()
+		end
+		assert(#fake_ws.sent >= 5 and closed == 1)
 
 		local frames = fake_ws:sent_objects()
 		assert(opened == 1)

@@ -27,6 +27,7 @@ local app_mod     = require 'services.ui.app'
 local uploads_mod = require 'services.ui.uploads'
 local http_mod    = require 'services.ui.transport.http'
 local errors      = require 'services.ui.errors'
+local topics      = require 'services.ui.topics'
 
 local M = {}
 
@@ -90,6 +91,9 @@ function M.start(conn, opts)
 	local model_ready_timeout_s = (type(opts.model_ready_timeout_s) == 'number' and opts.model_ready_timeout_s > 0) and opts.model_ready_timeout_s or 2.0
 
 	local shell_pulse = pulse.scoped({ close_reason = 'ui shell closed' })
+	fibers.current_scope():finally(function()
+		pcall(function() conn:unretain(topics.state_summary()) end)
+	end)
 	local session_store = sessions.new_store({ now = now })
 
 	local aggregate = {
@@ -135,6 +139,22 @@ function M.start(conn, opts)
 		else
 			svc:status(aggregate.status, status)
 		end
+
+		local summary = {
+			kind = 'ui.summary',
+			status = aggregate.status,
+			sessions = aggregate.sessions,
+			clients = aggregate.clients,
+			model_ready = aggregate.model_ready,
+			model_seq = aggregate.model_seq,
+			ts = now(),
+		}
+		if type(extra) == 'table' then
+			for k, v in pairs(extra) do
+				summary[k] = v
+			end
+		end
+		conn:retain(topics.state_summary(), summary)
 
 	end
 

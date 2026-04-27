@@ -436,6 +436,7 @@ function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_acros
 
 		local connect = ui_fakes.connect_factory(bus)
 		local captured = {}
+		local cap_tx, cap_rx = mailbox.new(4, { full = 'reject_newest' })
 		local ok4, err4 = scope:spawn(function()
 			ui_service.start(bus:connect(), {
 				name = 'ui',
@@ -450,6 +451,7 @@ function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_acros
 				run_http = function(_, app, http_opts)
 					captured.app = app
 					captured.http_opts = http_opts
+					cap_tx:send(true)
 					while true do
 						require('fibers.sleep').sleep(3600)
 					end
@@ -463,9 +465,11 @@ function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_acros
 		wait_ready(caller, 'mcu-uart-cm5', 2.0, control, 'n/a')
 		wait_service_running(caller, 'device', 1.5, control, 'n/a')
 		wait_service_running(caller, 'update', 1.5, control, 'n/a')
-		wait_until_debug(function() return captured.app ~= nil end, function()
-			return dump_state_string(caller, control, 'n/a', 'ui app not captured')
-		end, 0.5)
+		assert(cap_rx:recv() == true)
+		probe.wait_service_running(caller, 'ui', { timeout = 0.75 })
+		probe.wait_ui_summary(caller, function(payload) return payload.status == 'running' and payload.model_ready == true end, { timeout = 0.75, describe = function()
+			return dump_state_string(caller, control, 'n/a', 'ui summary not ready')
+		end })
 
 		publish_remote_status()
 
