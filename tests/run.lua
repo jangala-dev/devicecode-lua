@@ -47,6 +47,7 @@ local files = {
 	'unit.hal.artifact_store_driver_spec',
 	'unit.hal.control_store_driver_spec',
 	'unit.hal.sdk_cap_spec',
+	'unit.hal.service_raw_host_spec',
 	'unit.hal.signature_verify_openssl_spec',
 	'unit.main.profile_config_spec',
 	'unit.main.profile_contract_spec',
