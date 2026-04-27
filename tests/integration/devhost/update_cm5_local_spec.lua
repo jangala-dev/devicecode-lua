@@ -86,21 +86,6 @@ local function start_cm5_updater_cap(scope, conn, state)
 end
 
 
-local function wait_retained_state(conn, topic, pred, timeout)
-    probe.wait_retained_state(conn, topic, pred, { timeout = timeout or 1.0 })
-    return true
-end
-
-local function wait_cm5_component_ready(conn)
-    probe.wait_device_component(conn, 'cm5', function(payload)
-        return payload.available == true
-            and payload.ready == true
-            and type(payload.software) == 'table'
-            and type(payload.updater) == 'table'
-    end, { timeout = 0.75 })
-    return true
-end
-
 function T.devhost_cm5_update_flows_via_device_and_update_service()
     runfibers.run(function(scope)
         local orig_sleep = sleep_mod.sleep
@@ -147,7 +132,12 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
         publish_status()
-        assert(wait_cm5_component_ready(caller))
+        probe.wait_device_component(caller, 'cm5', function(payload)
+            return payload.available == true
+                and payload.ready == true
+                and type(payload.software) == 'table'
+                and type(payload.updater) == 'table'
+        end, { timeout = 0.75 })
 
         local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
             component = 'cm5',
@@ -168,9 +158,9 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         assert(serr == nil)
         assert(started.ok == true)
 
-        assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+        probe.wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
             return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
-        end, 0.75))
+        end, { timeout = 0.75 })
 
         local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })
         assert(perr == nil)

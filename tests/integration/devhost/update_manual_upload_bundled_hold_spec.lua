@@ -151,52 +151,11 @@ local function dump_state_string(conn, control, job_id, label)
 	}, '\n')
 end
 
-local function wait_until_debug(pred, debug_msg_fn, timeout)
-	local ok = probe.wait_until(pred, { timeout = timeout or 1.5, interval = 0.01 })
-	assert(ok, debug_msg_fn())
-end
-
-local function wait_service_running(conn, name, timeout, control, job_id)
-	wait_until_debug(function()
-		local payload = latest_payload(conn, { 'svc', name, 'status' })
-		return type(payload) == 'table'
-			and payload.state == 'running'
-			and payload.ready == true
-	end, function()
-		return dump_state_string(conn, control, job_id, 'service not running: ' .. tostring(name))
-	end, timeout)
-end
-
-local function wait_ready(conn, link_id, timeout, control, job_id)
-	wait_until_debug(function()
-		local payload = latest_payload(conn, { 'state', 'fabric', 'link', link_id, 'session' })
-		return type(payload) == 'table'
-			and type(payload.status) == 'table'
-			and payload.status.ready == true
-	end, function()
-		return dump_state_string(conn, control, job_id, 'fabric link not ready: ' .. tostring(link_id))
-	end, timeout)
-end
-
-local function wait_device_component(conn, control, job_id, pred, timeout, label)
-	probe.wait_device_component(conn, 'mcu', pred, {
+local function diag_opts(conn, control, job_id, label, timeout)
+	return {
 		timeout = timeout or 1.5,
-		describe = function() return dump_state_string(conn, control, job_id, label or 'device component wait failed') end,
-	})
-end
-
-local function wait_job(conn, control, job_id, pred, timeout, label)
-	probe.wait_update_job(conn, job_id, pred, {
-		timeout = timeout or 1.5,
-		describe = function() return dump_state_string(conn, control, job_id, label or 'job wait failed') end,
-	})
-end
-
-local function wait_bundled(conn, control, job_id, pred, timeout, label)
-	probe.wait_update_component(conn, 'mcu', pred, {
-		timeout = timeout or 1.5,
-		describe = function() return dump_state_string(conn, control, job_id, label or 'bundled wait failed') end,
-	})
+		describe = function() return dump_state_string(conn, control, job_id, label) end,
+	}
 end
 
 local function read_all(source)
@@ -461,10 +420,10 @@ function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_acros
 		end)
 		assert(ok4, tostring(err4))
 
-		wait_ready(caller, 'cm5-uart-mcu', 2.0, control, 'n/a')
-		wait_ready(caller, 'mcu-uart-cm5', 2.0, control, 'n/a')
-		wait_service_running(caller, 'device', 1.5, control, 'n/a')
-		wait_service_running(caller, 'update', 1.5, control, 'n/a')
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', diag_opts(caller, control, 'n/a', 'fabric link not ready: cm5-uart-mcu', 2.0))
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', diag_opts(caller, control, 'n/a', 'fabric link not ready: mcu-uart-cm5', 2.0))
+		probe.wait_service_running(caller, 'device', diag_opts(caller, control, 'n/a', 'service not running: device', 1.5))
+		probe.wait_service_running(caller, 'update', diag_opts(caller, control, 'n/a', 'service not running: update', 1.5))
 		assert(cap_rx:recv() == true)
 		probe.wait_service_running(caller, 'ui', { timeout = 0.75 })
 		probe.wait_ui_summary(caller, function(payload) return payload.status == 'running' and payload.model_ready == true end, { timeout = 0.75, describe = function()
@@ -473,19 +432,19 @@ function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_acros
 
 		publish_remote_status()
 
-		wait_device_component(caller, control, 'n/a', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true
 				and type(payload.software) == 'table'
 				and payload.software.version == current.version
 				and payload.software.image_id == current.image_id
-		end, 1.5, 'initial mcu component not ready')
+		end, diag_opts(caller, control, 'n/a', 'initial mcu component not ready', 1.5))
 
-		wait_bundled(caller, control, 'n/a', function(payload)
+		probe.wait_update_component(caller, 'mcu', function(payload)
 			return payload.follow_mode == 'auto'
 				and payload.sync_state == 'satisfied'
 				and type(payload.desired) == 'table'
 				and payload.desired.image_id == bundled_manifest.build.image_id
-		end, 1.5, 'initial bundled state should be satisfied')
+		end, diag_opts(caller, control, 'n/a', 'initial bundled state should be satisfied', 1.5))
 
 		local session_rec, lerr = captured.app.login('admin', 'pw')
 		assert(lerr == nil and type(session_rec) == 'table' and type(session_rec.session_id) == 'string' and session_rec.session_id ~= '')
@@ -528,12 +487,12 @@ function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_acros
 		assert(type(upload_json.data) == 'table')
 		local job_id = assert(upload_json.data.job and upload_json.data.job.job_id)
 
-		wait_job(caller, control, job_id, function(payload)
+		probe.wait_update_job(caller, job_id, function(payload)
 			return type(payload.job) == 'table'
 				and type(payload.job.lifecycle) == 'table'
 				and payload.job.lifecycle.state == 'awaiting_commit'
 				and payload.job.lifecycle.stage == 'staged_on_mcu'
-		end, 2.0, 'job should reach awaiting_commit')
+		end, diag_opts(caller, control, job_id, 'job should reach awaiting_commit', 2.0))
 
 		assert(received_blob == upload_body, dump_state_string(caller, control, job_id, 'received blob mismatch'))
 
@@ -550,29 +509,29 @@ function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_acros
 		handler({}, commit_stream)
 		assert(commit_stream:status() == '200')
 
-        wait_device_component(caller, control, job_id, function(payload)
+        probe.wait_device_component(caller, 'mcu', function(payload)
             return payload.available == true
                 and type(payload.software) == 'table'
                 and payload.software.image_id == upload_manifest.build.image_id
                 and payload.software.boot_id == 'mcu-boot-2'
-        end, 2.0, 'mcu component did not update after commit')
+        end, diag_opts(caller, control, job_id, 'mcu component did not update after commit', 2.0))
 
-		wait_job(caller, control, job_id, function(payload)
+		probe.wait_update_job(caller, job_id, function(payload)
 			return type(payload.job) == 'table'
 				and type(payload.job.lifecycle) == 'table'
 				and payload.job.lifecycle.state == 'succeeded'
-		end, 2.0, 'job should reach succeeded')
+		end, diag_opts(caller, control, job_id, 'job should reach succeeded', 2.0))
 
 		-- This may briefly be "manual_success_hold" before a subsequent reconcile
 		-- normalises it to "held". The important thing here is hold + diverged.
-		wait_bundled(caller, control, job_id, function(payload)
+		probe.wait_update_component(caller, 'mcu', function(payload)
 			return payload.follow_mode == 'hold'
 				and payload.sync_state == 'diverged'
 				and (payload.last_result == 'manual_success_hold' or payload.last_result == 'held')
 				and payload.last_manual_job_id == job_id
 				and type(payload.desired) == 'table'
 				and payload.desired.image_id == bundled_manifest.build.image_id
-		end, 1.5, 'bundled state should move to hold after manual success')
+		end, diag_opts(caller, control, job_id, 'bundled state should move to hold after manual success', 1.5))
 
 		assert(count_jobs(control) == 1, dump_state_string(caller, control, job_id, 'unexpected job count after manual success'))
 
@@ -586,21 +545,21 @@ function T.manual_upload_puts_bundled_mcu_following_into_hold_and_persists_acros
 			update_scope2:cancel('test shutdown 2')
 		end)
 
-		wait_service_running(caller, 'update', 1.5, control, job_id)
-		wait_device_component(caller, control, job_id, function(payload)
+		probe.wait_service_running(caller, 'update', diag_opts(caller, control, job_id, 'service not running: update', 1.5))
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true
 				and type(payload.software) == 'table'
 				and payload.software.image_id == upload_manifest.build.image_id
-		end, 1.5, 'mcu component not ready after update restart')
+		end, diag_opts(caller, control, job_id, 'mcu component not ready after update restart', 1.5))
 
-		wait_bundled(caller, control, job_id, function(payload)
+		probe.wait_update_component(caller, 'mcu', function(payload)
 			return payload.follow_mode == 'hold'
 				and payload.sync_state == 'diverged'
 				and payload.last_result == 'held'
 				and payload.last_manual_job_id == job_id
 				and type(payload.desired) == 'table'
 				and payload.desired.image_id == bundled_manifest.build.image_id
-		end, 1.5, 'bundled state should remain held after update restart')
+		end, diag_opts(caller, control, job_id, 'bundled state should remain held after update restart', 1.5))
 
 		sleep_mod.sleep(0.10)
 		assert(count_jobs(control) == 1, dump_state_string(caller, control, job_id, 'restart should not create a second job'))

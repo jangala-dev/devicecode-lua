@@ -136,10 +136,6 @@ local function bind_device_double(scope, device_conn, versions, opts)
   return publish_component
 end
 
-local function wait_service_running(conn)
-  return probe.wait_service_running(conn, 'update', { timeout = 0.75 })
-end
-
 local function wait_job_state(control, state, timeout)
   return probe.wait_until(function()
     local jobs = control.namespaces['update/jobs'] or {}
@@ -150,10 +146,6 @@ local function wait_job_state(control, state, timeout)
     end
     return false
   end, { timeout = timeout or 1.0, interval = 0.01 })
-end
-
-local function wait_bundled(conn, pred, timeout)
-  return probe.wait_update_component(conn, 'mcu', pred, { timeout = timeout or 1.0 })
 end
 
 local function latest_payload(conn, topic)
@@ -235,13 +227,13 @@ function T.bundled_reconcile_auto_runs_and_marks_satisfied_when_current_differs(
     local us = start_update_scope(scope, bus)
     fibers.current_scope():finally(function() us:cancel('shutdown') end)
 
-    wait_service_running(caller)
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
-    wait_bundled(caller, function(payload)
+    probe.wait_update_component(caller, 'mcu', function(payload)
       return type(payload) == 'table'
         and payload.follow_mode == 'auto'
         and payload.sync_state == 'satisfied'
-    end, 2.0)
+    end, { timeout = 2.0 })
 
     probe.wait_update_component(caller, 'mcu', function(payload)
       return payload.sync_state == 'satisfied'
@@ -301,13 +293,13 @@ function T.bundled_reconcile_respects_hold_mode_and_does_not_create_job()
     local us = start_update_scope(scope, bus)
     fibers.current_scope():finally(function() us:cancel('shutdown') end)
 
-    wait_service_running(caller)
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
-    wait_bundled(caller, function(payload)
+    probe.wait_update_component(caller, 'mcu', function(payload)
       return type(payload) == 'table'
         and payload.follow_mode == 'hold'
         and payload.sync_state == 'diverged'
-    end, 2.0)
+    end, { timeout = 2.0 })
 
     assert(next(control.namespaces['update/jobs'] or {}) == nil)
   end, { timeout = 3.0 })
@@ -367,7 +359,7 @@ function T.bundled_reconcile_waits_for_component_readiness_before_probing_or_run
     local us = start_update_scope(scope, bus)
     fibers.current_scope():finally(function() us:cancel('shutdown') end)
 
-    wait_service_running(caller)
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
     sleep_mod.sleep(0.25)
     assert((control.namespaces['update/jobs'] and next(control.namespaces['update/jobs'])) == nil)
@@ -522,7 +514,7 @@ function T.bundled_reconcile_retries_after_restart_when_previous_attempt_failed(
     bind_device_double(scope, bus:connect(), versions, device_opts)
 
     local us1 = start_update_scope(scope, bus)
-    wait_service_running(caller)
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
     assert(wait_job_state(control, 'failed', 1.0))
 
     us1:cancel('restart after failure')
@@ -539,7 +531,7 @@ function T.bundled_reconcile_retries_after_restart_when_previous_attempt_failed(
 
     local us2 = start_update_scope(scope, bus)
     fibers.current_scope():finally(function() us2:cancel('shutdown') end)
-    wait_service_running(caller)
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
     local retry_id
     probe.wait_update_component(caller, 'mcu', function(rec) return rec.sync_state == 'satisfied' end, { timeout = 1.5 })

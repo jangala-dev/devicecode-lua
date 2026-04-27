@@ -77,10 +77,6 @@ local function bind_reply_loop(scope, ep, handler)
   assert(ok, tostring(err))
 end
 
-local function wait_service_running(conn, name)
-  return probe.wait_service_running(conn, name, { timeout = 0.75 })
-end
-
 local function new_update_diag(scope, bus, caller, control, artifacts, extra)
   return test_diag.start_profile(scope, bus, 'update_stack', {
     conn = caller,
@@ -224,7 +220,7 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     end)
     if not ok then diag:fail('failed to spawn update service: ' .. tostring(err)) end
 
-    wait_service_running(caller, 'update')
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
     local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
       component = 'mcu',
@@ -335,7 +331,7 @@ function T.update_service_cancels_staged_job_before_commit()
     end)
     assert(ok, tostring(err))
 
-    wait_service_running(caller, 'update')
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
     local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
       component = 'mcu', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image.bin', 'mcu-image') }
@@ -386,7 +382,7 @@ function T.update_service_applies_per_component_artifact_storage_policy()
     end)
     assert(ok, tostring(err))
 
-    wait_service_running(caller, 'update')
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
     sleep_mod.sleep(0.05)
 
     local cm5_created = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
@@ -433,7 +429,7 @@ function T.update_service_rejects_second_active_job_globally()
       update.start(bus:connect(), { name = 'update', env = 'dev' })
     end)
     assert(ok, tostring(err))
-    wait_service_running(caller, 'update')
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
     local j1 = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, { component = 'mcu', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/a.bin', 'a') } }, { timeout = 0.5 })).job
     local j2 = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, { component = 'cm5', artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/b.bin', 'b') } }, { timeout = 0.5 })).job
@@ -479,7 +475,7 @@ function T.update_service_supports_ref_artifacts_and_auto_start()
       update.start(bus:connect(), { name = 'update', env = 'dev' })
     end)
     assert(ok, tostring(err))
-    wait_service_running(caller, 'update')
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
     local art_path = storagecaps.seed_import_path(artifacts, '/tmp/upl.bin', 'uploaded-image')
     local imported = assert(caller:call({ 'raw', 'host', 'artifact-store', 'cap', 'artifact-store', 'main', 'rpc', 'import_path' }, { path = art_path, meta = { kind = 'update' }, policy = 'transient_only' }, { timeout = 0.5 }))
@@ -558,7 +554,7 @@ function T.update_service_marks_bundled_hold_after_manual_mcu_success()
       update.start(bus:connect(), { name = 'update', env = 'dev' })
     end)
     assert(ok, tostring(err))
-    wait_service_running(caller, 'update')
+    probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
     local created = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
       component = 'mcu',

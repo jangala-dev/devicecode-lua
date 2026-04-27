@@ -306,6 +306,14 @@ function M.wait_fabric_link_ready(conn, link_id, opts)
 	end, opts)
 end
 
+
+function M.wait_fabric_ready(conn, link_id, opts)
+	return M.wait_fabric_link_session(conn, link_id, function(payload)
+		local s = payload and payload.status
+		return type(s) == 'table' and s.ready == true
+	end, opts)
+end
+
 function M.wait_transfer_manager_status(conn, pred, opts)
 	return M.wait_cap_status(conn, 'transfer-manager', 'main', pred, opts)
 end

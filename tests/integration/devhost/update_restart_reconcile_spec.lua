@@ -75,26 +75,6 @@ local function start_cm5_updater_cap(scope, conn, state)
 end
 
 
-local function wait_retained_state(conn, topic, pred, timeout)
-    probe.wait_retained_state(conn, topic, pred, { timeout = timeout or 0.75 })
-    return true
-end
-
-local function wait_cm5_component_ready(conn)
-    probe.wait_device_component(conn, 'cm5', function(payload)
-        return payload.available == true
-            and payload.ready == true
-            and type(payload.software) == 'table'
-            and type(payload.updater) == 'table'
-    end, { timeout = 0.75 })
-    return true
-end
-
-local function wait_service_running(conn, topic)
-    probe.wait_service_running(conn, topic, { timeout = 0.75 })
-    return true
-end
-
 local function start_update_service(parent_scope, bus)
     local s, err = parent_scope:child()
     assert(s, tostring(err))
@@ -146,8 +126,13 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
 
         local update_scope = start_update_service(scope, bus)
 
-        assert(wait_service_running(caller, { 'svc', 'update', 'status' }))
-        assert(wait_cm5_component_ready(caller))
+        probe.wait_service_running(caller, { 'svc', 'update', 'status' }, { timeout = 0.75 })
+        probe.wait_device_component(caller, 'cm5', function(payload)
+            return payload.available == true
+                and payload.ready == true
+                and type(payload.software) == 'table'
+                and type(payload.updater) == 'table'
+        end, { timeout = 0.75 })
 
         local diag = test_diag.start_profile(scope, bus, 'update_stack', {
             conn = caller,
@@ -216,7 +201,7 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
             update_scope2:cancel('test shutdown')
         end)
 
-        assert(wait_service_running(caller, { 'svc', 'update', 'status' }))
+        probe.wait_service_running(caller, { 'svc', 'update', 'status' }, { timeout = 0.75 })
 
         test_diag.assert_retained_transitions(diag, caller, { 'state', 'workflow', 'update-job', job.job_id }, { 'awaiting_return', 'succeeded' }, {
             label = 'job did not move from awaiting_return to succeeded in order',

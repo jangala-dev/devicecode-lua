@@ -22,23 +22,6 @@ local function make_svc(conn)
 	}
 end
 
-local function wait_ready(conn, link_id, timeout)
-	probe.wait_fabric_link_session(conn, link_id, function(payload)
-		return type(payload.status) == 'table' and payload.status.ready == true
-	end, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_service_running(conn, name, timeout)
-	probe.wait_service_running(conn, name, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_device_component(conn, name, pred, timeout)
-	probe.wait_device_component(conn, name, pred, { timeout = timeout or 1.5 })
-	return true
-end
-
 local function seed_device_cfg(conn)
 	conn:retain({ 'cfg', 'device' }, {
 		schema = 'devicecode.config/device/1',
@@ -237,14 +220,14 @@ function T.devhost_mcu_rich_telemetry_flows_over_fabric_into_device_component()
 		end)
 		assert(ok, tostring(err))
 
-		assert(wait_ready(caller, 'cm5-uart-mcu', 2.0) == true)
-		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
-		assert(wait_service_running(caller, 'device', 1.5) == true)
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', { timeout = 2.0 })
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', { timeout = 2.0 })
+		probe.wait_service_running(caller, 'device', { timeout = 1.5 })
 
 		local remote_member_conn = bus:connect()
 		publish_remote_mcu_state(remote_member_conn)
 
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true
 				and payload.ready == true
 				and payload.software.version == 'mcu-v1'
@@ -255,7 +238,7 @@ function T.devhost_mcu_rich_telemetry_flows_over_fabric_into_device_component()
 				and payload.environment.temperature.deci_c == 191
 				and payload.environment.humidity.rh_x100 == 4690
 				and payload.runtime.memory.alloc_bytes == 85680
-		end, 2.0))
+		end, { timeout = 2.0 })
 	end, { timeout = 4.0 })
 end
 
@@ -275,15 +258,15 @@ function T.devhost_mcu_charger_alert_event_flows_over_fabric_and_updates_last_al
 		end)
 		assert(ok, tostring(err))
 
-		assert(wait_ready(caller, 'cm5-uart-mcu', 2.0) == true)
-		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
-		assert(wait_service_running(caller, 'device', 1.5) == true)
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', { timeout = 2.0 })
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', { timeout = 2.0 })
+		probe.wait_service_running(caller, 'device', { timeout = 1.5 })
 
 		local remote_member_conn = bus:connect()
 		publish_remote_mcu_state(remote_member_conn)
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true and payload.ready == true
-		end, 2.0))
+		end, { timeout = 2.0 })
 
 		local event_sub = caller:subscribe(
 			{ 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event', 'power', 'charger', 'alert' },
@@ -314,13 +297,13 @@ function T.devhost_mcu_charger_alert_event_flows_over_fabric_and_updates_last_al
 		assert(msg.payload.kind == 'vin_lo')
 		assert(msg.payload.source == 'ltc4015')
 
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return type(payload.alerts) == 'table'
 				and type(payload.alerts.charger_alert) == 'table'
 				and payload.alerts.charger_alert.kind == 'vin_lo'
 				and payload.alerts.charger_alert.known == true
 				and payload.alerts.charger_alert.uptime_ms == 2222
-		end, 1.5))
+		end, { timeout = 1.5 })
 	end, { timeout = 4.0 })
 end
 

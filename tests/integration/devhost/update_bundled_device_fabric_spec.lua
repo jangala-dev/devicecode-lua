@@ -104,33 +104,6 @@ local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
 	end)
 end
 
-local function wait_retained_state(conn, topic, pred, timeout)
-	probe.wait_retained_state(conn, topic, pred, { timeout = timeout or 1.0 })
-	return true
-end
-
-local function wait_service_running(conn, name, timeout)
-	probe.wait_service_running(conn, name, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_ready(conn, link_id, timeout)
-	probe.wait_fabric_link_session(conn, link_id, function(payload)
-		return type(payload.status) == 'table' and payload.status.ready == true
-	end, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_device_component(conn, name, pred, timeout)
-	probe.wait_device_component(conn, name, pred, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_job(conn, job_id, pred, timeout)
-	probe.wait_update_job(conn, job_id, function(payload) return pred(payload) end, { timeout = timeout or 1.5 })
-	return true
-end
-
 local function read_all(source)
 	local chunks, offset = {}, 0
 	while true do
@@ -333,19 +306,19 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		end)
 		assert(ok4, tostring(err4))
 
-		assert(wait_ready(caller, 'cm5-uart-mcu', 2.0) == true)
-		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
-		assert(wait_service_running(caller, 'device', 1.5) == true)
-		assert(wait_service_running(caller, 'update', 1.5) == true)
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', { timeout = 2.0 })
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', { timeout = 2.0 })
+		probe.wait_service_running(caller, 'device', { timeout = 1.5 })
+		probe.wait_service_running(caller, 'update', { timeout = 1.5 })
 
 		publish_remote_status()
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true
 				and type(payload.software) == 'table'
 				and payload.software.version == versions.mcu
 				and payload.software.image_id == image_id.mcu
 				and payload.software.boot_id == boot_id.mcu
-		end, 1.5))
+		end, { timeout = 1.5 })
 
 		local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
 			component = 'mcu',
@@ -362,10 +335,10 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		assert(serr == nil)
 		assert(started.ok == true)
 
-		wait_job(caller, job.job_id, function(payload)
+		probe.wait_update_job(caller, job.job_id, function(payload)
 			return payload.job.lifecycle.state == 'awaiting_commit'
 				and payload.job.artifact.ref == nil and payload.job.artifact.released_at ~= nil
-		end, 0.75)
+		end, { timeout = 0.75 })
 		assert(probe.wait_until(function()
 			return artifacts.artifacts[released_ref] == nil
 		end, { timeout = 0.25, interval = 0.01 }))
@@ -375,9 +348,9 @@ function T.devhost_bundled_mcu_update_runs_end_to_end_over_fabric()
 		assert(perr == nil)
 		assert(committed.ok == true)
 
-		wait_job(caller, job.job_id, function(payload)
+		probe.wait_update_job(caller, job.job_id, function(payload)
 			return payload.job.lifecycle.state == 'succeeded'
-		end, 2.5)
+		end, { timeout = 2.5 })
 
 		local final, ferr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { job_id = job.job_id }, { timeout = 0.5 })
 		assert(ferr == nil)

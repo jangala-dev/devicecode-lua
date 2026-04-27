@@ -68,33 +68,6 @@ local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
 	end)
 end
 
-local function wait_retained_state(conn, topic, pred, timeout)
-	probe.wait_retained_state(conn, topic, pred, { timeout = timeout or 1.0 })
-	return true
-end
-
-local function wait_service_running(conn, name, timeout)
-	probe.wait_service_running(conn, name, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_ready(conn, link_id, timeout)
-	probe.wait_fabric_link_session(conn, link_id, function(payload)
-		return type(payload.status) == 'table' and payload.status.ready == true
-	end, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_device_component(conn, name, pred, timeout)
-	probe.wait_device_component(conn, name, pred, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_job(conn, job_id, pred, timeout)
-	probe.wait_update_job(conn, job_id, function(payload) return pred(payload) end, { timeout = timeout or 1.5 })
-	return true
-end
-
 local function read_all(source)
 	local chunks, offset = {}, 0
 	while true do
@@ -297,21 +270,21 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 		end)
 		assert(ok5, tostring(err5))
 
-		assert(wait_ready(caller, 'cm5-uart-mcu', 2.0) == true)
-		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
-		assert(wait_service_running(caller, 'device', 1.5) == true)
-		assert(wait_service_running(caller, 'update', 1.5) == true)
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', { timeout = 2.0 })
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', { timeout = 2.0 })
+		probe.wait_service_running(caller, 'device', { timeout = 1.5 })
+		probe.wait_service_running(caller, 'update', { timeout = 1.5 })
 		assert(cap_rx:recv() == true)
 		probe.wait_service_running(caller, 'ui', { timeout = 0.75 })
 		probe.wait_ui_summary(caller, function(payload) return payload.status == 'running' and payload.model_ready == true end, { timeout = 0.75 })
 
 		publish_remote_status()
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true
 				and type(payload.software) == 'table'
 				and payload.software.version == versions.mcu
 				and payload.software.image_id == image_id.mcu
-		end, 1.5))
+		end, { timeout = 1.5 })
 
 		local session_rec, lerr = captured.app.login('admin', 'pw')
 		assert(lerr == nil and type(session_rec) == 'table' and type(session_rec.session_id) == 'string' and session_rec.session_id ~= '')
@@ -353,7 +326,7 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 		local job_id = assert(upload_json.data.job and upload_json.data.job.job_id)
 		local artifact_ref = assert(upload_json.data.artifact.ref)
 
-		assert(wait_job(caller, job_id, function(payload)
+		probe.wait_update_job(caller, job_id, function(payload)
 			return type(payload) == 'table'
 				and type(payload.job) == 'table'
 				and type(payload.job.lifecycle) == 'table'
@@ -362,7 +335,7 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 				and type(payload.job.engagement) == 'table'
 				and payload.job.engagement.commit_required == true
 				and payload.job.engagement.commit_mode == 'manual'
-		end, 1.5))
+		end, { timeout = 1.5 })
 		assert(received_blob == body)
 		assert(artifacts.next_id >= 1)
 		assert(artifacts.artifacts[artifact_ref] == nil)
@@ -382,20 +355,20 @@ function T.devhost_ui_upload_creates_starts_and_transfers_mcu_update_over_fabric
 		local commit_json = commit_stream:json()
 		assert(type(commit_json) == 'table' and commit_json.ok == true)
 
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true
 				and type(payload.software) == 'table'
 				and payload.software.version == 'mcu-v1'
 				and payload.software.image_id == 'mcu-image-1'
 				and payload.software.boot_id == 'mcu-boot-2'
-		end, 2.0))
+		end, { timeout = 2.0 })
 
-	assert(wait_job(caller, job_id, function(payload)
+	probe.wait_update_job(caller, job_id, function(payload)
 		return type(payload) == 'table'
 			and type(payload.job) == 'table'
 			and type(payload.job.lifecycle) == 'table'
 			and payload.job.lifecycle.state == 'succeeded'
-	end, 2.0))
+	end, { timeout = 2.0 })
 	end, { timeout = 4.0 })
 end
 

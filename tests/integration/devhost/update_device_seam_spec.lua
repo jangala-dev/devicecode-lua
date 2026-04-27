@@ -65,28 +65,6 @@ local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
 	end)
 end
 
-local function wait_retained_state(conn, topic, pred, timeout)
-	probe.wait_retained_state(conn, topic, pred, { timeout = timeout or 1.0 })
-	return true
-end
-
-local function wait_service_running(conn, name, timeout)
-	probe.wait_service_running(conn, name, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_ready(conn, link_id, timeout)
-	probe.wait_fabric_link_session(conn, link_id, function(payload)
-		return type(payload.status) == 'table' and payload.status.ready == true
-	end, { timeout = timeout or 1.5 })
-	return true
-end
-
-local function wait_device_component(conn, name, pred, timeout)
-	probe.wait_device_component(conn, name, pred, { timeout = timeout or 1.5 })
-	return true
-end
-
 function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped()
 	runfibers.run(function(scope)
 		install_fake_mcu_preflight({ version = 'mcu-v1', image_id = 'mcu-image-1' })
@@ -264,19 +242,19 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 		end)
 		assert(ok4, tostring(err4))
 
-		assert(wait_ready(caller, 'cm5-uart-mcu', 2.0) == true)
-		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
-		assert(wait_service_running(caller, 'device', 1.5) == true)
-		assert(wait_service_running(caller, 'update', 1.5) == true)
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', { timeout = 2.0 })
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', { timeout = 2.0 })
+		probe.wait_service_running(caller, 'device', { timeout = 1.5 })
+		probe.wait_service_running(caller, 'update', { timeout = 1.5 })
 
 		publish_remote_status()
 
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true
 				and type(payload.software) == 'table'
 				and payload.software.version == 'mcu-v0'
 				and payload.software.boot_id == 'mcu-boot-1'
-		end, 1.5))
+		end, { timeout = 1.5 })
 
 		local ok_default = safe.pcall(function()
 			return probe.wait_payload(caller, { 'raw', 'member', 'mcu', 'state', 'software' }, { timeout = 0.1 })
@@ -305,11 +283,11 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 		assert(serr == nil)
 		assert(started.ok == true)
 
-		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+		probe.wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table'
 				and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'awaiting_commit'
-		end, 0.75))
+		end, { timeout = 0.75 })
 
 		local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, {
 			job_id = job.job_id,
@@ -317,19 +295,19 @@ function T.devhost_update_uses_device_seam_even_when_member_topics_are_remapped(
 		assert(perr == nil)
 		assert(committed.ok == true)
 
-		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+		probe.wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table'
 				and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'succeeded'
-		end, 2.0))
+		end, { timeout = 2.0 })
 
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true
 				and type(payload.software) == 'table'
 				and payload.software.version == 'mcu-v1'
 				and payload.software.image_id == 'mcu-image-1'
 				and payload.software.boot_id == 'mcu-boot-2'
-		end, 2.0))
+		end, { timeout = 2.0 })
 
 		local final, ferr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, {
 			job_id = job.job_id,

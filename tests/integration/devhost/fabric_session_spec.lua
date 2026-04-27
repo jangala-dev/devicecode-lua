@@ -22,11 +22,6 @@ local function make_svc(conn)
 	}
 end
 
-local function wait_ready(conn, link_id, timeout)
-	local payload = probe.wait_fabric_link_ready(conn, link_id, { timeout = timeout or 2.0 })
-	return type(payload) == 'table'
-end
-
 function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 	runfibers.run(function(scope)
 		local bus = busmod.new()
@@ -109,8 +104,8 @@ function T.devhost_sessions_bridge_publish_and_rpc_over_duplex_streams()
 		end)
 		assert(ok3, tostring(err3))
 
-		if not wait_ready(conn, 'link-a', 2.0) then diag:fail('expected link-a to reach ready') end
-		if not wait_ready(conn, 'link-b', 2.0) then diag:fail('expected link-b to reach ready') end
+		probe.wait_fabric_ready(conn, 'link-a', { timeout = 2.0, describe = function() return 'expected link-a to reach ready' end })
+		probe.wait_fabric_ready(conn, 'link-b', { timeout = 2.0, describe = function() return 'expected link-b to reach ready' end })
 
 		conn:publish({ 'local', 'wifi' }, { up = true })
 		local ok_seen, seen = safe.pcall(function() return probe.wait_payload(conn, { 'seen', 'wifi' }, { timeout = 1.0 }) end)

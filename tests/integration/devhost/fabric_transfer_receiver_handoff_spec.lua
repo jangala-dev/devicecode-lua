@@ -23,11 +23,6 @@ local function make_svc(conn)
     }
 end
 
-local function wait_ready(conn, link_id, timeout)
-	local payload = probe.wait_fabric_link_ready(conn, link_id, { timeout = timeout or 2.0 })
-	return type(payload) == 'table'
-end
-
 local function bind_reply_loop(scope, ep, handler)
     local ok, err = scope:spawn(function()
         while true do
@@ -133,8 +128,8 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
 
         spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'xfer', 'link-a' }, a_ctl_tx)
 
-        if not wait_ready(caller, 'link-a', 2.0) then diag:fail('expected link-a to reach ready') end
-        if not wait_ready(caller, 'link-b', 2.0) then diag:fail('expected link-b to reach ready') end
+        probe.wait_fabric_ready(caller, 'link-a', { timeout = 2.0, describe = function() return 'expected link-a to reach ready' end })
+        probe.wait_fabric_ready(caller, 'link-b', { timeout = 2.0, describe = function() return 'expected link-b to reach ready' end })
 
         local reply, err = caller:call({ 'cmd', 'xfer', 'link-a' }, {
             op = 'send_blob',
@@ -234,8 +229,8 @@ function T.devhost_fabric_transfer_receiver_failure_aborts_sender_request()
 
         spawn_transfer_endpoint(scope, bus:connect(), { 'cmd', 'xfer', 'link-a' }, a_ctl_tx)
 
-        if not wait_ready(caller, 'link-a', 2.0) then diag:fail('expected link-a to reach ready') end
-        if not wait_ready(caller, 'link-b', 2.0) then diag:fail('expected link-b to reach ready') end
+        probe.wait_fabric_ready(caller, 'link-a', { timeout = 2.0, describe = function() return 'expected link-a to reach ready' end })
+        probe.wait_fabric_ready(caller, 'link-b', { timeout = 2.0, describe = function() return 'expected link-b to reach ready' end })
 
         local reply, err = caller:call({ 'cmd', 'xfer', 'link-a' }, {
             op = 'send_blob',

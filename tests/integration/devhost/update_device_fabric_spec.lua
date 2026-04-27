@@ -33,13 +33,6 @@ local function make_svc(conn)
 	}
 end
 
-local function wait_ready(conn, link_id, timeout)
-	probe.wait_fabric_link_session(conn, link_id, function(payload)
-		return type(payload.status) == 'table' and payload.status.ready == true
-	end, { timeout = timeout or 1.5 })
-	return true
-end
-
 local function bind_reply_loop(scope, ep, handler)
 	local ok, err = scope:spawn(function()
 		while true do
@@ -68,21 +61,6 @@ local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
 		end
 		return nil, '__forwarded__'
 	end)
-end
-
-local function wait_retained_state(conn, topic, pred, timeout)
-	probe.wait_retained_state(conn, topic, pred, { timeout = timeout or 1.0 })
-	return true
-end
-
-local function wait_service_running(conn, name, timeout)
-    return wait_retained_state(conn, { 'svc', name, 'status' }, function(payload)
-        return type(payload) == 'table' and payload.state == 'running' and payload.ready == true
-    end, timeout or 1.5)
-end
-
-local function wait_device_component(conn, name, pred, timeout)
-    return probe.wait_device_component(conn, name, pred, { timeout = timeout or 1.5 })
 end
 
 function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
@@ -256,15 +234,15 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		end)
 		assert(ok4, tostring(err4))
 
-		assert(wait_ready(caller, 'cm5-uart-mcu', 2.0) == true)
-		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
-		assert(wait_service_running(caller, 'device', 1.5) == true)
-		assert(wait_service_running(caller, 'update', 1.5) == true)
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', { timeout = 2.0 })
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', { timeout = 2.0 })
+		probe.wait_service_running(caller, 'device', { timeout = 1.5 })
+		probe.wait_service_running(caller, 'update', { timeout = 1.5 })
 
 		publish_remote_status()
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true and type(payload.software) == 'table' and payload.software.version == versions.mcu and payload.software.image_id == image_id.mcu and payload.software.boot_id == boot_id.mcu
-		end, 1.5))
+		end, { timeout = 1.5 })
 
 		local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
 			component = 'mcu',
@@ -285,10 +263,10 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		assert(serr == nil)
 		assert(started.ok == true)
 
-		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+		probe.wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
 				and payload.job.artifact.ref == nil and payload.job.artifact.released_at ~= nil
-		end, 0.75))
+		end, { timeout = 0.75 })
 		assert(next(artifacts.artifacts) == nil)
 
 		local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })
@@ -481,14 +459,14 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		end)
 		assert(ok4, tostring(err4))
 
-		assert(wait_ready(caller, 'cm5-uart-mcu', 2.0) == true)
-		assert(wait_ready(caller, 'mcu-uart-cm5', 2.0) == true)
-		assert(wait_service_running(caller, 'device', 1.5) == true)
-		assert(wait_service_running(caller, 'update', 1.5) == true)
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', { timeout = 2.0 })
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', { timeout = 2.0 })
+		probe.wait_service_running(caller, 'device', { timeout = 1.5 })
+		probe.wait_service_running(caller, 'update', { timeout = 1.5 })
 		publish_remote_status(current_state)
-		assert(wait_device_component(caller, 'mcu', function(payload)
+		probe.wait_device_component(caller, 'mcu', function(payload)
 			return payload.available == true and type(payload.software) == 'table' and payload.software.version == current_state.software.version and payload.software.boot_id == current_state.software.boot_id
-		end, 1.5))
+		end, { timeout = 1.5 })
 
 		local created = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
 			component = 'mcu',
@@ -499,16 +477,16 @@ function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_
 		local job = created.job
 
 		assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job.job_id }, { timeout = 0.5 })).ok == true)
-		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+		probe.wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
-		end, 0.75))
+		end, { timeout = 0.75 })
 		assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })).ok == true)
 
-		assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+		probe.wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
 			return type(payload) == 'table' and type(payload.job) == 'table'
 				and payload.job.lifecycle.state == 'failed'
 				and tostring(payload.job.lifecycle.error):match('apply_failed') ~= nil
-		end, 2.5))
+		end, { timeout = 2.5 })
 	end, { timeout = 4.0 })
 end
 
