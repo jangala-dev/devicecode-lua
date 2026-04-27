@@ -137,12 +137,7 @@ local function bind_device_double(scope, device_conn, versions, opts)
 end
 
 local function wait_service_running(conn)
-  assert(probe.wait_until(function()
-    local okp, payload = safe.pcall(function()
-      return probe.wait_payload(conn, { 'svc', 'update', 'status' }, { timeout = 0.02 })
-    end)
-    return okp and type(payload) == 'table' and payload.state == 'running' and payload.ready == true
-  end, { timeout = 0.75, interval = 0.01 }))
+  return probe.wait_service_running(conn, 'update', { timeout = 0.75 })
 end
 
 local function wait_job_state(control, state, timeout)
@@ -158,17 +153,12 @@ local function wait_job_state(control, state, timeout)
 end
 
 local function wait_bundled(conn, pred, timeout)
-  assert(probe.wait_until(function()
-    local okp, payload = safe.pcall(function()
-      return probe.wait_payload(conn, { 'state', 'update', 'component', 'mcu' }, { timeout = 0.02 })
-    end)
-    return okp and pred(payload)
-  end, { timeout = timeout or 1.0, interval = 0.01 }))
+  return probe.wait_update_component(conn, 'mcu', pred, { timeout = timeout or 1.0 })
 end
 
 local function latest_payload(conn, topic)
-  local okp, payload = safe.pcall(function()
-    return probe.wait_payload(conn, topic, { timeout = 0.02 })
+  local okp, payload = pcall(function()
+    return probe.wait_retained_payload(conn, topic, { timeout = 0.02 })
   end)
   if okp then return payload end
   return nil
@@ -253,15 +243,9 @@ function T.bundled_reconcile_auto_runs_and_marks_satisfied_when_current_differs(
         and payload.sync_state == 'satisfied'
     end, 2.0)
 
-    assert(probe.wait_until(function()
-      local jobs = control.namespaces['update/jobs'] or {}
-      for _, job in pairs(jobs) do
-        if type(job) == 'table' and job.state == 'succeeded' then
-          return true
-        end
-      end
-      return false
-    end, { timeout = 1.0, interval = 0.01 }))
+    probe.wait_update_component(caller, 'mcu', function(payload)
+      return payload.sync_state == 'satisfied'
+    end, { timeout = 1.0 })
   end, { timeout = 4.0 })
 end
 
@@ -325,10 +309,7 @@ function T.bundled_reconcile_respects_hold_mode_and_does_not_create_job()
         and payload.sync_state == 'diverged'
     end, 2.0)
 
-    assert(probe.wait_until(function()
-      local jobs = control.namespaces['update/jobs'] or {}
-      return next(jobs) == nil
-    end, { timeout = 1.0, interval = 0.01 }))
+    assert(next(control.namespaces['update/jobs'] or {}) == nil)
   end, { timeout = 3.0 })
 end
 
@@ -561,25 +542,18 @@ function T.bundled_reconcile_retries_after_restart_when_previous_attempt_failed(
     wait_service_running(caller)
 
     local retry_id
-    assert(probe.wait_until(function()
-      for id, job in pairs(control.namespaces['update/jobs'] or {}) do
-        if not pre_restart_ids[id]
-          and type(job) == 'table'
-          and job.component == 'mcu'
-          and job.state == 'succeeded' then
-          retry_id = id
-          return true
-        end
+    probe.wait_update_component(caller, 'mcu', function(rec) return rec.sync_state == 'satisfied' end, { timeout = 1.5 })
+    for id, job in pairs(control.namespaces['update/jobs'] or {}) do
+      if not pre_restart_ids[id] and type(job) == 'table' and job.component == 'mcu' and job.state == 'succeeded' then
+        retry_id = id
+        break
       end
-      return false
-    end, { timeout = 1.5, interval = 0.01 }))
+    end
+    assert(type(retry_id) == 'string')
 
-    assert(probe.wait_until(function()
-      local rec = latest_payload(caller, { 'state', 'update', 'component', 'mcu' })
-      return type(rec) == 'table'
-        and rec.sync_state == 'satisfied'
-        and rec.last_result == 'satisfied'
-    end, { timeout = 1.5, interval = 0.01 }))
+    probe.wait_update_component(caller, 'mcu', function(rec)
+      return rec.sync_state == 'satisfied' and rec.last_result == 'satisfied'
+    end, { timeout = 1.5 })
   end, { timeout = 5.0 })
 end
 

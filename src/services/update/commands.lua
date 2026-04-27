@@ -195,19 +195,24 @@ end
 
 local function publish_ingest(ctx, rec)
   if not rec or not rec.id then return end
-  ctx.conn:retain(ctx.topics.workflow_ingest(rec.id), {
-    ingest = {
-      ingest_id = rec.id,
-      state = rec.state,
-      source = rec.source,
-      meta = ctx.model.copy_value(rec.meta),
-      policy = rec.policy,
-      bytes_received = rec.bytes_received or 0,
-      artifact_ref = rec.artifact_ref,
-      error = rec.error,
-      created_mono = rec.created_mono,
-      updated_mono = rec.updated_mono,
-    },
+  local public = {
+    ingest_id = rec.id,
+    state = rec.state,
+    source = rec.source,
+    meta = ctx.model.copy_value(rec.meta),
+    policy = rec.policy,
+    bytes_received = rec.bytes_received or 0,
+    artifact_ref = rec.artifact_ref,
+    error = rec.error,
+    created_mono = rec.created_mono,
+    updated_mono = rec.updated_mono,
+  }
+  ctx.conn:retain(ctx.topics.workflow_ingest(rec.id), { ingest = public })
+  ctx.conn:publish(ctx.topics.ingest_event('instance-changed'), {
+    ingest_id = public.ingest_id,
+    state = public.state,
+    bytes_received = public.bytes_received,
+    artifact_ref = public.artifact_ref,
   })
 end
 

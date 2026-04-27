@@ -87,22 +87,18 @@ end
 
 
 local function wait_retained_state(conn, topic, pred, timeout)
-    return probe.wait_until(function()
-        local ok, payload = safe.pcall(function()
-            return probe.wait_payload(conn, topic, { timeout = 0.02 })
-        end)
-        return ok and pred(payload)
-    end, { timeout = timeout or 1.0, interval = 0.01 })
+    probe.wait_retained_state(conn, topic, pred, { timeout = timeout or 1.0 })
+    return true
 end
 
 local function wait_cm5_component_ready(conn)
-    return wait_retained_state(conn, { 'state', 'device', 'component', 'cm5' }, function(payload)
-        return type(payload) == 'table'
-            and payload.available == true
+    probe.wait_device_component(conn, 'cm5', function(payload)
+        return payload.available == true
             and payload.ready == true
             and type(payload.software) == 'table'
             and type(payload.updater) == 'table'
-    end, 0.75)
+    end, { timeout = 0.75 })
+    return true
 end
 
 function T.devhost_cm5_update_flows_via_device_and_update_service()
@@ -148,12 +144,7 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         end)
         assert(ok2, tostring(err2))
 
-        assert(probe.wait_until(function()
-            local ok, payload = safe.pcall(function()
-                return probe.wait_payload(caller, { 'svc', 'update', 'status' }, { timeout = 0.02 })
-            end)
-            return ok and type(payload) == 'table' and payload.state == 'running' and payload.ready == true
-        end, { timeout = 0.75, interval = 0.01 }))
+        probe.wait_service_running(caller, 'update', { timeout = 0.75 })
 
         publish_status()
         assert(wait_cm5_component_ready(caller))
@@ -185,17 +176,12 @@ function T.devhost_cm5_update_flows_via_device_and_update_service()
         assert(perr == nil)
         assert(committed.ok == true)
 
-        assert(probe.wait_until(function()
-            local ok, payload = safe.pcall(function()
-                return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
-            end)
-            return ok and type(payload) == 'table'
-                and type(payload.job) == 'table'
-                and payload.job.lifecycle.state == 'succeeded'
+        probe.wait_update_job(caller, job.job_id, function(payload)
+            return payload.job.lifecycle.state == 'succeeded'
                 and type(payload.job.result) == 'table'
                 and payload.job.result.image_id == 'cm5-v1'
                 and payload.job.artifact.ref == nil
-        end, { timeout = 1.5, interval = 0.01 }))
+        end, { timeout = 1.5 })
 
         assert(next(artifacts.artifacts) == nil)
         assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')

@@ -31,10 +31,12 @@ function M.cfg() return { 'cfg', 'update' } end
 function M.manager_meta() return { 'cap', 'update-manager', 'main', 'meta' } end
 function M.manager_status() return { 'cap', 'update-manager', 'main', 'status' } end
 function M.manager_rpc(method) return { 'cap', 'update-manager', 'main', 'rpc', method } end
+function M.manager_event(name) return { 'cap', 'update-manager', 'main', 'event', name } end
 
 function M.ingest_meta() return { 'cap', 'artifact-ingest', 'main', 'meta' } end
 function M.ingest_status() return { 'cap', 'artifact-ingest', 'main', 'status' } end
 function M.ingest_rpc(method) return { 'cap', 'artifact-ingest', 'main', 'rpc', method } end
+function M.ingest_event(name) return { 'cap', 'artifact-ingest', 'main', 'event', name } end
 
 function M.workflow_job(id) return { 'state', 'workflow', 'update-job', id } end
 function M.workflow_ingest(id) return { 'state', 'workflow', 'artifact-ingest', id } end

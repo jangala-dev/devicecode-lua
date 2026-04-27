@@ -76,30 +76,23 @@ end
 
 
 local function wait_retained_state(conn, topic, pred, timeout)
-    local w = conn:watch_retained(topic, { replay = true, queue_len = 8, full = 'drop_oldest' })
-    local ok = probe.wait_until(function()
-        local ev = w:recv()
-        if not ev or ev.op ~= 'retain' then return false end
-        return pred(ev.payload)
-    end, { timeout = timeout or 0.75, interval = 0.01 })
-    pcall(function() w:unwatch() end)
-    return ok
+    probe.wait_retained_state(conn, topic, pred, { timeout = timeout or 0.75 })
+    return true
 end
 
 local function wait_cm5_component_ready(conn)
-    return wait_retained_state(conn, { 'state', 'device', 'component', 'cm5' }, function(payload)
-        return type(payload) == 'table'
-            and payload.available == true
+    probe.wait_device_component(conn, 'cm5', function(payload)
+        return payload.available == true
             and payload.ready == true
             and type(payload.software) == 'table'
             and type(payload.updater) == 'table'
-    end, 0.75)
+    end, { timeout = 0.75 })
+    return true
 end
 
 local function wait_service_running(conn, topic)
-    return wait_retained_state(conn, topic, function(payload)
-        return type(payload) == 'table' and payload.state == 'running' and payload.ready == true
-    end, 0.75)
+    probe.wait_service_running(conn, topic, { timeout = 0.75 })
+    return true
 end
 
 local function start_update_service(parent_scope, bus)
@@ -181,9 +174,9 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
         assert(serr == nil)
         assert(started.ok == true)
 
-        assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
-            return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
-        end, 0.75))
+        probe.wait_update_job(caller, job.job_id, function(payload)
+            return type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
+        end, { timeout = 0.75 })
 
         local committed = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 }))
         assert(committed.ok == true)
@@ -234,14 +227,14 @@ function T.devhost_update_service_reconciles_awaiting_return_job_after_restart()
             end,
         })
 
-        assert(wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+        probe.wait_update_job(caller, job.job_id, function(payload)
             return type(payload) == 'table'
                 and type(payload.job) == 'table'
                 and payload.job.lifecycle.state == 'succeeded'
                 and type(payload.job.result) == 'table'
                 and payload.job.result.image_id == 'cm5-v2'
                 and payload.job.artifact.ref == nil
-        end, 1.5))
+        end, { timeout = 1.5 })
 
         assert(next(artifacts.artifacts) == nil)
         assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')

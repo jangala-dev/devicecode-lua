@@ -133,4 +133,108 @@ function M.collect_messages(conn, topic, count, opts)
 	return out
 end
 
+
+local function topic_string(topic)
+	if type(topic) ~= 'table' then return tostring(topic) end
+	local parts = {}
+	for i = 1, #topic do parts[i] = tostring(topic[i]) end
+	return table.concat(parts, '/')
+end
+
+local function fail_with_context(prefix, topic, describe)
+	local msg = prefix
+	if topic ~= nil then
+		msg = msg .. ' [' .. topic_string(topic) .. ']'
+	end
+	if type(describe) == 'function' then
+		local ok, extra = pcall(describe)
+		if ok and extra and extra ~= '' then
+			msg = msg .. '\n' .. tostring(extra)
+		end
+	elseif describe ~= nil then
+		msg = msg .. '\n' .. tostring(describe)
+	end
+	fail(msg)
+end
+
+function M.wait_retained_state(conn, topic, pred, opts)
+	opts = opts or {}
+	pred = pred or function() return true end
+	local timeout = opts.timeout or 1.0
+	local watch = conn:watch_retained(topic, {
+		replay = (opts.replay ~= false),
+		queue_len = opts.queue_len or 16,
+		full = opts.full or 'drop_oldest',
+	})
+	local deadline = fibers.now() + timeout
+	while true do
+		local remaining = deadline - fibers.now()
+		if remaining <= 0 then
+			pcall(function() watch:unwatch() end)
+			fail_with_context('timed out waiting for retained state', topic, opts.describe)
+		end
+		local which, a, b = fibers.perform(op.named_choice({
+			ev = watch:recv_op(),
+			timeout = sleep.sleep_op(remaining):wrap(function() return true end),
+		}))
+		if which == 'timeout' then
+			pcall(function() watch:unwatch() end)
+			fail_with_context('timed out waiting for retained state', topic, opts.describe)
+		end
+		local ev, err = a, b
+		if not ev then
+			pcall(function() watch:unwatch() end)
+			fail_with_context('retained watch ended: ' .. tostring(err), topic, opts.describe)
+		end
+		if ev.op == 'retain' and pred(ev.payload, ev) then
+			pcall(function() watch:unwatch() end)
+			return ev.payload, ev
+		end
+	end
+end
+
+function M.wait_service_running(conn, service_or_topic, opts)
+	local topic = service_or_topic
+	if type(service_or_topic) == 'string' then
+		topic = { 'svc', service_or_topic, 'status' }
+	end
+	return M.wait_retained_state(conn, topic, function(payload)
+		return type(payload) == 'table' and payload.state == 'running' and payload.ready == true
+	end, opts)
+end
+
+function M.wait_workflow(conn, family, id, pred, opts)
+	return M.wait_retained_state(conn, { 'state', 'workflow', family, id }, pred, opts)
+end
+
+function M.wait_update_job(conn, id, pred, opts)
+	return M.wait_workflow(conn, 'update-job', id, function(payload, ev)
+		return type(payload) == 'table' and type(payload.job) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
+function M.wait_artifact_ingest(conn, id, pred, opts)
+	return M.wait_workflow(conn, 'artifact-ingest', id, function(payload, ev)
+		return type(payload) == 'table' and type(payload.ingest) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
+function M.wait_device_component(conn, component, pred, opts)
+	return M.wait_retained_state(conn, { 'state', 'device', 'component', component }, function(payload, ev)
+		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
+function M.wait_update_component(conn, component, pred, opts)
+	return M.wait_retained_state(conn, { 'state', 'update', 'component', component }, function(payload, ev)
+		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
+function M.wait_fabric_link_session(conn, link_id, pred, opts)
+	return M.wait_retained_state(conn, { 'state', 'fabric', 'link', link_id, 'session' }, function(payload, ev)
+		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
 return M

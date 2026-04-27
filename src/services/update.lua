@@ -110,12 +110,26 @@ local function flush_jobs(repo, state, on_error)
   return saved
 end
 
+local function emit_job_changed(ctx, public_job)
+  if not (ctx and public_job and public_job.job_id) then return end
+  ctx.conn:publish(ctx.topics.manager_event('job-changed'), {
+    job_id = public_job.job_id,
+    component = public_job.component,
+    state = public_job.lifecycle and public_job.lifecycle.state or nil,
+    stage = public_job.lifecycle and public_job.lifecycle.stage or nil,
+    next_step = public_job.lifecycle and public_job.lifecycle.next_step or nil,
+    updated_seq = public_job.lifecycle and public_job.lifecycle.updated_seq or nil,
+  })
+end
+
 local function publish_job_only(ctx, job)
   if not job then return end
+  local public_job = ctx.projection.public_job(job)
   ctx.conn:retain(
     ctx.projection.job_topic(job.job_id),
-    { job = ctx.projection.public_job(job) }
+    { job = public_job }
   )
+  emit_job_changed(ctx, public_job)
 end
 
 local function flush_publications(ctx)
@@ -489,12 +503,14 @@ function M.start(conn, opts)
       ['cancel-job'] = true, ['retry-job'] = true, ['discard-job'] = true,
       ['get-job'] = true, ['list-jobs'] = true,
     },
+    events = { ['job-changed'] = true },
   })
   conn:retain(topics.manager_status(), { state = 'available' })
   conn:retain(topics.ingest_meta(), {
     owner = svc.name,
     interface = 'devicecode.cap/artifact-ingest/1',
     methods = { create = true, append = true, commit = true, abort = true },
+    events = { ['instance-changed'] = true },
   })
   conn:retain(topics.ingest_status(), { state = 'available' })
 

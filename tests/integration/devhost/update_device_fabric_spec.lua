@@ -34,14 +34,10 @@ local function make_svc(conn)
 end
 
 local function wait_ready(conn, link_id, timeout)
-	return probe.wait_until(function()
-		local ok, payload = safe.pcall(function()
-			return probe.wait_payload(conn, { 'state', 'fabric', 'link', link_id, 'session' }, { timeout = 0.02 })
-		end)
-		return ok and type(payload) == 'table'
-			and type(payload.status) == 'table'
-			and payload.status.ready == true
-	end, { timeout = timeout or 1.5, interval = 0.01 })
+	probe.wait_fabric_link_session(conn, link_id, function(payload)
+		return type(payload.status) == 'table' and payload.status.ready == true
+	end, { timeout = timeout or 1.5 })
+	return true
 end
 
 local function bind_reply_loop(scope, ep, handler)
@@ -75,35 +71,8 @@ local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
 end
 
 local function wait_retained_state(conn, topic, pred, timeout)
-	timeout = timeout or 1.0
-	local watch = conn:watch_retained(topic, {
-		replay = true,
-		queue_len = 16,
-		full = 'drop_oldest',
-	})
-	local deadline = fibers.now() + timeout
-	while fibers.now() < deadline do
-		local remaining = deadline - fibers.now()
-		local which, a, b = fibers.perform(fibers.named_choice({
-			ev = watch:recv_op(),
-			timeout = sleep_mod.sleep_op(remaining):wrap(function() return true end),
-		}))
-		if which == 'timeout' then
-			pcall(function() watch:unwatch() end)
-			return false
-		end
-		local ev, err = a, b
-		if not ev then
-			pcall(function() watch:unwatch() end)
-			return false
-		end
-		if ev.op == 'retain' and pred(ev.payload) then
-			pcall(function() watch:unwatch() end)
-			return true
-		end
-	end
-	pcall(function() watch:unwatch() end)
-	return false
+	probe.wait_retained_state(conn, topic, pred, { timeout = timeout or 1.0 })
+	return true
 end
 
 local function wait_service_running(conn, name, timeout)
@@ -328,14 +297,9 @@ function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
 		assert(perr == nil)
 		assert(committed.ok == true)
 
-		assert(probe.wait_until(function()
-			local ok, payload = safe.pcall(function()
-				return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
-			end)
-			return ok and type(payload) == 'table'
-				and type(payload.job) == 'table'
-				and payload.job.lifecycle.state == 'succeeded'
-		end, { timeout = 2.5, interval = 0.01 }))
+		probe.wait_update_job(caller, job.job_id, function(payload)
+			return payload.job.lifecycle.state == 'succeeded'
+		end, { timeout = 2.5 })
 
 		local final, ferr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { job_id = job.job_id }, { timeout = 0.5 })
 		assert(ferr == nil)

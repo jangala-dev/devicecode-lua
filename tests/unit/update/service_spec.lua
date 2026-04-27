@@ -78,12 +78,7 @@ local function bind_reply_loop(scope, ep, handler)
 end
 
 local function wait_service_running(conn, name)
-  assert(probe.wait_until(function()
-    local okp, payload = safe.pcall(function()
-      return probe.wait_payload(conn, { 'svc', name, 'status' }, { timeout = 0.02 })
-    end)
-    return okp and type(payload) == 'table' and payload.state == 'running' and payload.ready == true
-  end, { timeout = 0.75, interval = 0.01 }))
+  return probe.wait_service_running(conn, name, { timeout = 0.75 })
 end
 
 local function new_update_diag(scope, bus, caller, control, artifacts, extra)
@@ -259,17 +254,11 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
     ensure(job.lifecycle.state == 'created', 'expected local job copy still in created state')
     ensure(type(job.artifact.ref) == 'string', 'expected artifact ref on created job')
 
-    diag:assert_until('job never reached awaiting_commit with released artifact', function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
-      end)
-      return okp
-        and type(payload) == 'table'
-        and type(payload.job) == 'table'
-        and payload.job.lifecycle.state == 'awaiting_commit'
+    probe.wait_update_job(caller, job.job_id, function(payload)
+      return payload.job.lifecycle.state == 'awaiting_commit'
         and payload.job.artifact.ref == nil
         and payload.job.artifact.released_at ~= nil
-    end, { timeout = 0.75, interval = 0.01 })
+    end, { timeout = 0.75, describe = function() return diag:render('job never reached awaiting_commit with released artifact') end })
 
     ensure(next(artifacts.artifacts) == nil, 'expected transient artifact to be released after staging')
 
@@ -289,15 +278,9 @@ function T.update_service_creates_starts_commits_and_reconciles_job_via_device_p
       'expected commit response state to be awaiting_commit/awaiting_return/succeeded'
     )
 
-    diag:assert_until('job never reached succeeded after commit', function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
-      end)
-      return okp
-        and type(payload) == 'table'
-        and type(payload.job) == 'table'
-        and payload.job.lifecycle.state == 'succeeded'
-    end, { timeout = 0.75, interval = 0.01 })
+    probe.wait_update_job(caller, job.job_id, function(payload)
+      return payload.job.lifecycle.state == 'succeeded'
+    end, { timeout = 0.75, describe = function() return diag:render('job never reached succeeded after commit') end })
 
     local got, gerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, {
       job_id = job.job_id,
@@ -364,12 +347,9 @@ function T.update_service_cancels_staged_job_before_commit()
     assert(serr == nil)
     assert(started.ok == true)
 
-    assert(probe.wait_until(function()
-      local okp, state = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
-      end)
-      return okp and type(state) == 'table' and type(state.job) == 'table' and state.job.lifecycle.state == 'awaiting_commit'
-    end, { timeout = 0.75, interval = 0.01 }))
+    probe.wait_update_job(caller, job.job_id, function(payload)
+      return payload.job.lifecycle.state == 'awaiting_commit'
+    end, { timeout = 0.75 })
 
     local cancelled, derr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'cancel-job' }, { job_id = job.job_id }, { timeout = 0.5 })
     assert(derr == nil)
@@ -516,12 +496,9 @@ function T.update_service_supports_ref_artifacts_and_auto_start()
     assert(created.job.artifact.expected_image_id == 'mcu-v1')
     local job = created.job
 
-    assert(probe.wait_until(function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job.job_id }, { timeout = 0.02 })
-      end)
-      return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
-    end, { timeout = 0.75, interval = 0.01 }))
+    probe.wait_update_job(caller, job.job_id, function(payload)
+      return payload.job.lifecycle.state == 'awaiting_commit'
+    end, { timeout = 0.75 })
   end, { timeout = 3.0 })
 end
 
@@ -591,26 +568,17 @@ function T.update_service_marks_bundled_hold_after_manual_mcu_success()
     }, { timeout = 0.5 }))
     local job_id = created.job.job_id
     assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job_id }, { timeout = 0.5 })).ok == true)
-    assert(probe.wait_until(function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job_id }, { timeout = 0.02 })
-      end)
-      return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
-    end, { timeout = 0.75, interval = 0.01 }))
+    probe.wait_update_job(caller, job_id, function(payload)
+      return payload.job.lifecycle.state == 'awaiting_commit'
+    end, { timeout = 0.75 })
     assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job_id }, { timeout = 1.0 })).ok == true)
-    assert(probe.wait_until(function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'workflow', 'update-job', job_id }, { timeout = 0.02 })
-      end)
-      return okp and type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'succeeded'
-    end, { timeout = 0.75, interval = 0.01 }))
-    assert(probe.wait_until(function()
-      local okp, payload = safe.pcall(function()
-        return probe.wait_payload(caller, { 'state', 'update', 'component', 'mcu' }, { timeout = 0.02 })
-      end)
-      return okp and type(payload) == 'table'
-        and payload.follow_mode == 'hold'
-        and (payload.last_result == 'manual_success_hold' or payload.last_result == 'held')    end, { timeout = 0.75, interval = 0.01 }))
+    probe.wait_update_job(caller, job_id, function(payload)
+      return payload.job.lifecycle.state == 'succeeded'
+    end, { timeout = 0.75 })
+    probe.wait_update_component(caller, 'mcu', function(payload)
+      return payload.follow_mode == 'hold'
+        and (payload.last_result == 'manual_success_hold' or payload.last_result == 'held')
+    end, { timeout = 0.75 })
   end, { timeout = 3.0 })
 end
 

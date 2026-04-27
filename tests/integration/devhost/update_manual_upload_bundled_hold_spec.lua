@@ -122,7 +122,7 @@ end
 
 local function latest_payload(conn, topic)
 	local ok, payload = safe.pcall(function()
-		return probe.wait_payload(conn, topic, { timeout = 0.02 })
+		return probe.wait_retained_payload(conn, topic, { timeout = 0.02 })
 	end)
 	if ok then return payload end
 	return nil
@@ -179,30 +179,24 @@ local function wait_ready(conn, link_id, timeout, control, job_id)
 end
 
 local function wait_device_component(conn, control, job_id, pred, timeout, label)
-	wait_until_debug(function()
-		local payload = latest_payload(conn, { 'state', 'device', 'component', 'mcu' })
-		return type(payload) == 'table' and pred(payload)
-	end, function()
-		return dump_state_string(conn, control, job_id, label or 'device component wait failed')
-	end, timeout)
+	probe.wait_device_component(conn, 'mcu', pred, {
+		timeout = timeout or 1.5,
+		describe = function() return dump_state_string(conn, control, job_id, label or 'device component wait failed') end,
+	})
 end
 
 local function wait_job(conn, control, job_id, pred, timeout, label)
-	wait_until_debug(function()
-		local payload = latest_payload(conn, { 'state', 'workflow', 'update-job', job_id })
-		return type(payload) == 'table' and pred(payload)
-	end, function()
-		return dump_state_string(conn, control, job_id, label or 'job wait failed')
-	end, timeout)
+	probe.wait_update_job(conn, job_id, pred, {
+		timeout = timeout or 1.5,
+		describe = function() return dump_state_string(conn, control, job_id, label or 'job wait failed') end,
+	})
 end
 
 local function wait_bundled(conn, control, job_id, pred, timeout, label)
-	wait_until_debug(function()
-		local payload = latest_payload(conn, { 'state', 'update', 'component', 'mcu' })
-		return type(payload) == 'table' and pred(payload)
-	end, function()
-		return dump_state_string(conn, control, job_id, label or 'bundled wait failed')
-	end, timeout)
+	probe.wait_update_component(conn, 'mcu', pred, {
+		timeout = timeout or 1.5,
+		describe = function() return dump_state_string(conn, control, job_id, label or 'bundled wait failed') end,
+	})
 end
 
 local function read_all(source)
