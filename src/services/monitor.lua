@@ -103,17 +103,17 @@ end
 
 local function classify(msg)
 	local t = msg.topic or {}
-	local kind = t[2]
+	local kind = t[3]
 	if kind == 'log' then
-		return 'log', t[3] or 'unknown', t[4] or 'info'
+		return 'log', t[4] or 'unknown', t[5] or 'info'
 	elseif kind == 'metric' then
-		return 'metric', t[3] or 'unknown', nil
+		return 'metric', t[4] or 'unknown', nil
 	elseif kind == 'event' then
-		return 'event', t[3] or 'unknown', t[4] or 'event'
+		return 'event', t[4] or 'unknown', t[5] or 'event'
 	elseif kind == 'state' then
-		return 'state', t[3] or 'unknown', t[4] or 'state'
+		return 'state', t[4] or 'unknown', t[5] or 'state'
 	end
-	return 'obs', t[2] or 'unknown', nil
+	return 'obs', t[3] or 'unknown', nil
 end
 
 local function format_line(msg)
