@@ -19,7 +19,7 @@ function T.ui_service_bootstraps_and_tracks_sessions_and_clients()
 		test_diag.add_calls(diag, 'connect_calls', calls)
 		test_diag.add_subsystem(diag, 'ui', {
 			service_fn = test_diag.retained_fn(bus:connect(), { 'svc', 'ui', 'status' }),
-			announce_fn = test_diag.retained_fn(bus:connect(), { 'svc', 'ui', 'announce' }),
+			meta_fn = test_diag.retained_fn(bus:connect(), { 'svc', 'ui', 'meta' }),
 			config_net_fn = test_diag.retained_fn(bus:connect(), { 'cfg', 'net' }),
 			fabric_fn = test_diag.retained_fn(bus:connect(), { 'state', 'fabric' }),
 		})
@@ -47,7 +47,7 @@ function T.ui_service_bootstraps_and_tracks_sessions_and_clients()
 		assert(probe.wait_until(function() return captured.app ~= nil and captured.ws_opts ~= nil end, { timeout = 0.5, interval = 0.01 }))
 		assert(probe.wait_until(function()
 			local okp, payload = safe.pcall(function()
-				return probe.wait_payload(bus:connect(), { 'svc', 'ui', 'announce' }, { timeout = 0.02 })
+				return probe.wait_payload(bus:connect(), { 'svc', 'ui', 'meta' }, { timeout = 0.02 })
 			end)
 			return okp and type(payload) == 'table' and payload.role == 'ui'
 		end, { timeout = 0.75, interval = 0.01 }))

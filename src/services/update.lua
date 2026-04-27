@@ -79,47 +79,12 @@ local function build_backend(component, component_cfg)
   return validate_backend(backend_name .. ':' .. tostring(component), backend)
 end
 
-local function discover_cap(conn, class, id, timeout)
-  local listener = cap_sdk.new_cap_listener(conn, class, id)
+
+local function discover_raw_host_cap(conn, source, class, id, timeout)
+  local listener = cap_sdk.new_raw_host_cap_listener(conn, source, class, id)
   local cap, err = listener:wait_for_cap({ timeout = timeout or 30.0 })
   listener:close()
   return cap, err
-end
-
-local function raw_host_status_topic(source, class, id)
-  return { 'raw', 'host', source, 'cap', class, id, 'status' }
-end
-
-local function discover_raw_host_cap(conn, source, class, id, timeout)
-  local deadline = fibers.now() + (timeout or 30.0)
-  local watch = conn:watch_retained(raw_host_status_topic(source, class, id), {
-    replay = true,
-    queue_len = 4,
-    full = 'drop_oldest',
-  })
-
-  local function close()
-    if watch then watch:unwatch(); watch = nil end
-  end
-
-  while true do
-    local remaining = deadline - fibers.now()
-    if remaining <= 0 then close(); return nil, 'timeout' end
-    local which, ev, err = fibers.perform(fibers.named_choice {
-      status = watch:recv_op(),
-      timeout = require('fibers.sleep').sleep_op(remaining),
-    })
-    if which == 'timeout' then close(); return nil, 'timeout' end
-    if not ev then close(); return nil, err or 'raw_host_cap_status_closed' end
-    if ev.op == 'retain' then
-      local payload = ev.payload
-      local state = type(payload) == 'table' and payload.state or payload
-      if state == 'added' or state == 'available' or (type(payload) == 'table' and payload.available == true) then
-        close()
-        return cap_sdk.new_raw_host_cap_ref(conn, source, class, id), ''
-      end
-    end
-  end
 end
 
 local function copy_job(job)

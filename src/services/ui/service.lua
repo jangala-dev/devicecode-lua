@@ -51,7 +51,7 @@ local function start_child(fn)
 	return child
 end
 
-local function default_announce(svc)
+local function default_meta(svc)
 	return {
 		role = 'ui',
 		auth = 'local-session',
@@ -300,7 +300,7 @@ function M.start(conn, opts)
 	end)
 
 	aggregate.status = 'starting'
-	svc:announce(default_announce(svc))
+	svc:announce(default_meta(svc))
 	publish_main_state()
 
 	local ok_ready, ready_err = model:await_ready(model_ready_timeout_s)

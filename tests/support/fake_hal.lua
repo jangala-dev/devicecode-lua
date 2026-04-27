@@ -4,6 +4,14 @@ local fibers = require 'fibers'
 
 local M = {}
 
+local function svc_meta_topic(name)
+	return { 'svc', name, 'meta' }
+end
+
+local function svc_announce_topic(name)
+	return { 'svc', name, 'announce' }
+end
+
 local function cap_state_topic(class, id)
 	return { 'cap', class, id, 'state' }
 end
@@ -152,11 +160,18 @@ end
 function FakeHal:start(conn, opts)
 	opts = opts or {}
 	local name = opts.name or 'hal'
-	conn:retain({ 'svc', name, 'announce' }, {
+
+	local payload = {
 		role = 'hal',
 		backend = self.backend,
 		caps = self.caps,
-	})
+	}
+
+	-- Canonical metadata surface
+	conn:retain(svc_meta_topic(name), payload)
+	-- Legacy compatibility surface
+	conn:retain(svc_announce_topic(name), payload)
+
 	self:_start_capabilities(conn)
 end
 

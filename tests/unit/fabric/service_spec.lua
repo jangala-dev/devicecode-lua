@@ -37,7 +37,7 @@ function T.fabric_service_applies_empty_config_and_exposes_transfer_endpoint()
 		end, { timeout = 1.0, interval = 0.01 }))
 		assert(probe.wait_until(function()
 			local ok, payload = safe.pcall(function()
-				return probe.wait_payload(conn, { 'svc', 'fabric', 'announce' }, { timeout = 0.05 })
+				return probe.wait_payload(conn, { 'svc', 'fabric', 'meta' }, { timeout = 0.05 })
 			end)
 			return ok and type(payload) == 'table' and payload.role == 'fabric'
 		end, { timeout = 1.0, interval = 0.01 }))

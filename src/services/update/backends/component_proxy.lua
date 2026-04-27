@@ -12,6 +12,8 @@
 -- This backend talks to the device service's generic component RPC surface and
 -- leaves component-specific reconcile policy to the caller.
 
+local device_topics = require 'services.device.topics'
+
 local M = {}
 
 function M.new(opts)
@@ -27,7 +29,7 @@ function M.new(opts)
 	local backend = {}
 
 	local function device_call(conn, op_name, args, timeout)
-		return conn:call({ 'cap', 'component', component, 'rpc', op_name }, args or {}, { timeout = timeout })
+		return conn:call(device_topics.component_cap_rpc(component, op_name), args or {}, { timeout = timeout })
 	end
 
 	function backend:prepare(conn, job, _ctx)

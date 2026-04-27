@@ -50,7 +50,7 @@ function M.new(opts)
 end
 
 function Uploads:_artifact_cap(user_conn)
-	return cap_sdk.new_cap_ref(user_conn, 'artifact-ingest', 'main')
+	return cap_sdk.new_curated_cap_ref(user_conn, 'artifact-ingest', 'main')
 end
 
 function Uploads:_upload_deadline()

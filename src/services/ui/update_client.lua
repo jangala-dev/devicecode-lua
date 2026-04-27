@@ -2,10 +2,12 @@
 --
 -- Shared client for the update manager interface.
 
+local update_topics = require 'services.update.topics'
+
 local M = {}
 
 local function call(conn, method, payload, timeout)
-	return conn:call({ 'cap', 'update-manager', 'main', 'rpc', method }, payload or {}, {
+	return conn:call(update_topics.manager_rpc(method), payload or {}, {
 		timeout = timeout or 10.0,
 	})
 end

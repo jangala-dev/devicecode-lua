@@ -48,17 +48,18 @@ function M.service_status(model, service_name)
 	return rec.payload, nil
 end
 
--- Merge service announce/status projections keyed by service name.
+-- Merge service meta/status projections keyed by service name.
 function M.services_snapshot(model)
-	local ann, aerr = model:snapshot({ 'svc', '+', 'announce' })
-	if not ann then return nil, aerr end
+	local meta, merr = model:snapshot({ 'svc', '+', 'meta' })
+	if not meta then return nil, merr end
 
 	local st, serr = model:snapshot({ 'svc', '+', 'status' })
 	if not st then return nil, serr end
 
+	local meta_by_name = by_name(meta.entries, 2)
 	return {
-		seq = math.max(ann.seq, st.seq),
-		announce = by_name(ann.entries, 2),
+		seq = math.max(meta.seq, st.seq),
+		meta = meta_by_name,
 		status = by_name(st.entries, 2),
 	}, nil
 end

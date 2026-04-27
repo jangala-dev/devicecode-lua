@@ -32,7 +32,7 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 			ui = {
 				services_fn = function()
 					return {
-						announce = test_diag.retained_fn(bus:connect(), { 'svc', 'alpha', 'announce' })(),
+						meta = test_diag.retained_fn(bus:connect(), { 'svc', 'alpha', 'meta' })(),
 						status = test_diag.retained_fn(bus:connect(), { 'svc', 'alpha', 'status' })(),
 					}
 				end,
@@ -86,8 +86,8 @@ function T.ui_service_end_to_end_app_operations_over_bus_and_model()
 		end
 
 		local svcs = captured.app.services_snapshot(sid)
-		if type(svcs) ~= 'table' or svcs.announce.alpha.role ~= 'alpha' or svcs.status.alpha.state ~= 'running' then
-			diag:fail('expected services snapshot to contain seeded announce/status state')
+		if type(svcs) ~= 'table' or svcs.meta.alpha.role ~= 'alpha' or svcs.status.alpha.state ~= 'running' then
+			diag:fail('expected services snapshot to contain seeded meta/status state')
 		end
 
 		local fabric = captured.app.fabric_status(sid)

@@ -58,7 +58,7 @@ function T.ui_ws_client_handles_login_call_and_watch_lifecycle()
 			config_get = function() return { rev = 1 }, nil end,
 			config_set = function() return { ok = true }, nil end,
 			service_status = function() return { state = 'running' }, nil end,
-			services_snapshot = function() return { announce = {}, status = {} }, nil end,
+			services_snapshot = function() return { meta = {}, status = {} }, nil end,
 			fabric_status = function() return { links = {} }, nil end,
 			fabric_link_status = function() return { session = {} }, nil end,
 			model_exact = function() return { payload = {} }, nil end,
