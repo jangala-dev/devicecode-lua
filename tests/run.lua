@@ -24,6 +24,9 @@ assert(stdlib.setenv('CONFIG_TARGET', 'services'))
 
 local files = {
 	'unit.devicecode.service_base_spec',
+	'unit.config.codec_spec',
+	'unit.config.service_spec',
+	'unit.config.state_spec',
 	'unit.device.availability_spec',
 	'unit.device.component_host_spec',
 	'unit.device.component_mcu_spec',
