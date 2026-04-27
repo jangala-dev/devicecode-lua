@@ -201,6 +201,33 @@ function new.FilesystemCapability(id, control_ch)
     return new.Capability('fs', id, control_ch, offerings)
 end
 
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.ControlStoreCapability(id, control_ch)
+    return new.Capability('control_store', id, control_ch, { 'get', 'put', 'delete', 'list', 'status' })
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.ArtifactStoreCapability(id, control_ch)
+    return new.Capability('artifact_store', id, control_ch, { 'create_sink', 'import_path', 'import_source', 'open', 'delete', 'status' })
+end
+
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.SignatureVerifyCapability(id, control_ch)
+    return new.Capability('signature_verify', id, control_ch, { 'verify_ed25519' })
+end
+
+
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?
@@ -242,6 +269,22 @@ end
 ---@return string error
 function new.PlatformCapability(id, control_ch)
     return new.Capability('platform', id, control_ch, { 'get' })
+end
+
+
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.UpdaterCapability(id, control_ch)
+    local offerings = {
+        'prepare',
+        'stage',
+        'commit',
+        'status',
+    }
+    return new.Capability('updater', id, control_ch, offerings)
 end
 
 ---@param id CapabilityId

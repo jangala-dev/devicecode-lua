@@ -4,6 +4,14 @@ local fibers = require 'fibers'
 
 local M = {}
 
+local function svc_meta_topic(name)
+	return { 'svc', name, 'meta' }
+end
+
+local function svc_announce_topic(name)
+	return { 'svc', name, 'announce' }
+end
+
 local function cap_state_topic(class, id)
 	return { 'cap', class, id, 'state' }
 end
@@ -14,6 +22,23 @@ end
 
 local function cap_rpc_topic(class, id, method)
 	return { 'cap', class, id, 'rpc', method }
+end
+
+
+local function path_token(s)
+	return tostring(s):gsub('_', '-')
+end
+
+local function raw_host_cap_status_topic(source, class, id)
+	return { 'raw', 'host', path_token(source), 'cap', path_token(class), id, 'status' }
+end
+
+local function raw_host_cap_meta_topic(source, class, id)
+	return { 'raw', 'host', path_token(source), 'cap', path_token(class), id, 'meta' }
+end
+
+local function raw_host_cap_rpc_topic(source, class, id, method)
+	return { 'raw', 'host', path_token(source), 'cap', path_token(class), id, 'rpc', method }
 end
 
 local function strip_json_suffix(filename)
@@ -62,6 +87,7 @@ end
 local function method_offerings(method)
 	if method == 'read_state' then return 'fs', 'config', { read = true } end
 	if method == 'write_state' then return 'fs', 'state', { write = true } end
+	if method == 'verify_ed25519' then return 'signature_verify', 'main', { verify_ed25519 = true } end
 	return nil, nil, nil
 end
 
@@ -106,30 +132,38 @@ function FakeHal:_start_capability_rpc(conn, class, id, offering, legacy_method)
 	conn:retain(cap_state_topic(class, id), 'added')
 	conn:retain(cap_meta_topic(class, id), { offerings = { [offering] = true } })
 
-	local ep = conn:bind(cap_rpc_topic(class, id, offering), { queue_len = 16 })
+	local source = class
+	conn:retain(raw_host_cap_status_topic(source, class, id), { state = 'available', source = source, class = class, id = id })
+	conn:retain(raw_host_cap_meta_topic(source, class, id), { offerings = { [offering] = true }, provider = 'fakehal' })
 
-	fibers.spawn(function()
-		while true do
-			local req, err = ep:recv()
-			if not req then return end
+	local function bind(topic)
+		local ep = conn:bind(topic, { queue_len = 16 })
+		fibers.spawn(function()
+			while true do
+				local req, err = ep:recv()
+				if not req then return end
 
-			local raw_req = req.payload or {}
-			local method, mapped_req = map_cap_call(class, id, offering, raw_req)
-			method = legacy_method or method
+				local raw_req = req.payload or {}
+				local method, mapped_req = map_cap_call(class, id, offering, raw_req)
+				method = legacy_method or method
 
-			self:_record_call(method, mapped_req, req)
+				self:_record_call(method, mapped_req, req)
 
-			local reply = self:_next_reply(method, mapped_req, req)
-			reply = map_cap_reply(method, reply)
-			if type(reply) ~= 'table' then
-				req:fail(reply)
-			elseif reply.ok == true then
-				req:reply(reply)
-			else
-				req:reply(reply)
+				local reply = self:_next_reply(method, mapped_req, req)
+				reply = map_cap_reply(method, reply)
+				if type(reply) ~= 'table' then
+					req:fail(reply)
+				elseif reply.ok == true then
+					req:reply(reply)
+				else
+					req:reply(reply)
+				end
 			end
-		end
-	end)
+		end)
+	end
+
+	bind(cap_rpc_topic(class, id, offering))
+	bind(raw_host_cap_rpc_topic(source, class, id, offering))
 end
 
 function FakeHal:_start_capabilities(conn)
@@ -151,11 +185,18 @@ end
 function FakeHal:start(conn, opts)
 	opts = opts or {}
 	local name = opts.name or 'hal'
-	conn:retain({ 'svc', name, 'announce' }, {
+
+	local payload = {
 		role = 'hal',
 		backend = self.backend,
 		caps = self.caps,
-	})
+	}
+
+	-- Canonical metadata surface
+	conn:retain(svc_meta_topic(name), payload)
+	-- Legacy compatibility surface
+	conn:retain(svc_announce_topic(name), payload)
+
 	self:_start_capabilities(conn)
 end
 

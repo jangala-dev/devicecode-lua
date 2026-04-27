@@ -17,7 +17,11 @@
             "sysmon": {},
             "platform": {},
             "power": {},
-            "usb": {}
+            "usb": {},
+            "artifact_store": {},
+            "control_store": {},
+            "signature_verify": {},
+            "updater": {}
         }
     },
     "gsm": {
@@ -389,6 +393,163 @@
                 "curr_time": {
                     "template": "any_change"
                 }
+            }
+        }
+    },
+    "device": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/device/1",
+            "components": {
+                "cm5": {
+                    "class": "host",
+                    "subtype": "cm5",
+                    "facts": {
+                        "software": [
+                            "raw",
+                            "host",
+                            "updater",
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "state",
+                            "software"
+                        ],
+                        "updater": [
+                            "raw",
+                            "host",
+                            "updater",
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "state",
+                            "updater"
+                        ],
+                        "health": [
+                            "raw",
+                            "host",
+                            "updater",
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "state",
+                            "health"
+                        ]
+                    },
+                    "actions": {
+                        "prepare-update": [
+                            "raw",
+                            "host",
+                            "updater",
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "prepare"
+                        ],
+                        "stage-update": [
+                            "raw",
+                            "host",
+                            "updater",
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "stage"
+                        ],
+                        "commit-update": [
+                            "raw",
+                            "host",
+                            "updater",
+                            "cap",
+                            "updater",
+                            "cm5",
+                            "rpc",
+                            "commit"
+                        ]
+                    }
+                },
+                "mcu": {
+                    "class": "member",
+                    "subtype": "mcu",
+                    "actions": {
+                        "prepare-update": [
+                            "raw",
+                            "member",
+                            "mcu",
+                            "cap",
+                            "updater",
+                            "main",
+                            "rpc",
+                            "prepare"
+                        ],
+                        "commit-update": [
+                            "raw",
+                            "member",
+                            "mcu",
+                            "cap",
+                            "updater",
+                            "main",
+                            "rpc",
+                            "commit"
+                        ]
+                    },
+                    "facts": {
+                        "software": [
+                            "raw",
+                            "member",
+                            "mcu",
+                            "state",
+                            "software"
+                        ],
+                        "updater": [
+                            "raw",
+                            "member",
+                            "mcu",
+                            "state",
+                            "updater"
+                        ],
+                        "health": [
+                            "raw",
+                            "member",
+                            "mcu",
+                            "state",
+                            "health"
+                        ]
+                    }
+                }
+            }
+        }
+    },
+    "update": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/update/1",
+            "jobs_namespace": "update/jobs",
+            "components": {
+                "cm5": {
+                    "backend": "cm5_swupdate"
+                },
+                "mcu": {
+                    "backend": "mcu_component"
+                }
+            },
+            "artifacts": {
+                "default_policy": "transient_only",
+                "policies": {
+                    "cm5": "transient_only",
+                    "mcu": "transient_only"
+                }
+            },
+            "reconcile": {
+                "interval_s": 10.0,
+                "timeout_s": 180.0
+            },
+            "admission": {
+                "mode": "global_single"
+            },
+            "bundled": {
+                "components": {}
             }
         }
     }

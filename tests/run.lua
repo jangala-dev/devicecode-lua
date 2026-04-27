@@ -24,14 +24,17 @@ assert(stdlib.setenv('CONFIG_TARGET', 'services'))
 
 local files = {
 	'unit.devicecode.service_base_spec',
-	'unit.config.codec_spec',
-	'unit.config.state_spec',
+	'unit.hal.artifact_store_driver_spec',
+	'unit.hal.control_store_driver_spec',
 	'unit.hal.sdk_cap_spec',
 	'unit.hal.service_raw_host_spec',
+	'unit.hal.signature_verify_openssl_spec',
+	'unit.main.profile_config_spec',
+	'unit.main.profile_contract_spec',
 	'unit.main.service_spec',
-	'unit.config.service_spec',
+	'integration.devhost.config_recovery_spec',
+	'integration.devhost.hal_uart_spec',
 	'integration.devhost.main_failure_spec',
-	'integration.devhost.config_recovery_spec'
 }
 
 local function monotonic_now()
