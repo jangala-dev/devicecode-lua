@@ -1,15 +1,17 @@
 -- devicecode/service_base.lua
 --
 -- Small service scaffold:
---   * obs helpers (log/event/state)
---   * legacy svc/<name>/status retained publishing
---   * additive lifecycle helpers (announce/starting/running/set_ready/...)
+--   * obs helpers (legacy + obs/v1 compatibility)
+--   * svc/<name>/status retained publishing
+--   * additive lifecycle helpers (meta/announce, starting/running/set_ready/...)
 --   * retained wait helper for other services
 --
--- Compatibility:
+-- Compatibility policy:
 --   * existing svc:status(...) semantics are preserved
---   * new lifecycle helpers publish richer payloads, including run_id/ready
---   * lifecycle retained topics are automatically unretained on scope exit
+--   * existing obs/log|event|state helpers are preserved
+--   * announce() now publishes BOTH svc/<name>/meta (canonical) and
+--     svc/<name>/announce (legacy-compatible)
+--   * obs helpers fan out to BOTH obs/v1/... and legacy obs/... topics
 --
 ---@module 'devicecode.service_base'
 
@@ -80,6 +82,7 @@ function M.new(conn, opts)
 	-- their current payload semantics.
 	svc.run_id = tostring(uuid.new())
 	svc._announce_published = false
+	svc._meta_published = false
 	svc._lifecycle_state = nil
 	svc._lifecycle_extra = nil
 
@@ -107,21 +110,93 @@ function M.new(conn, opts)
 		return self:service_topic('status')
 	end
 
+	-- New canonical metadata surface.
+	function svc:meta_topic()
+		return self:service_topic('meta')
+	end
+
+	-- Legacy compatibility surface.
 	function svc:announce_topic()
 		return self:service_topic('announce')
 	end
 
+	----------------------------------------------------------------------
+	-- Observability topics
+	----------------------------------------------------------------------
+
+	-- Legacy forms
+	function svc:obs_log_legacy_topic(level)
+		return t('obs', 'log', self.name, level)
+	end
+
+	function svc:obs_event_legacy_topic(name)
+		return t('obs', 'event', self.name, name)
+	end
+
+	function svc:obs_state_legacy_topic(name)
+		return t('obs', 'state', self.name, name)
+	end
+
+	-- New canonical obs/v1 forms
+	function svc:obs_event_topic(name)
+		return t('obs', 'v1', self.name, 'event', name)
+	end
+
+	function svc:obs_metric_topic(name)
+		return t('obs', 'v1', self.name, 'metric', name)
+	end
+
+	function svc:obs_counter_topic(name)
+		return t('obs', 'v1', self.name, 'counter', name)
+	end
+
+	-- Compatibility helper:
+	--   * legacy log plane remains as-is
+	--   * canonical plane treats logs as events named "log", with level attached
 	function svc:obs_log(level, payload)
-		self.conn:publish(t('obs', 'log', self.name, level), payload)
+		self.conn:publish(self:obs_log_legacy_topic(level), payload)
+
+		local v1_payload
+		if type(payload) == 'table' then
+			v1_payload = copy_table(payload)
+			v1_payload.level = level
+		else
+			v1_payload = { level = level, message = payload }
+		end
+		self.conn:publish(self:obs_event_topic('log'), v1_payload)
 	end
 
+	-- Compatibility helper:
+	--   * legacy event plane remains as-is
+	--   * canonical plane is obs/v1/<service>/event/<name>
 	function svc:obs_event(name, payload)
-		self.conn:publish(t('obs', 'event', self.name, name), payload)
+		self.conn:publish(self:obs_event_legacy_topic(name), payload)
+		self.conn:publish(self:obs_event_topic(name), payload)
 	end
 
+	-- Compatibility helper:
+	--   * legacy retained state plane remains as-is
+	--   * canonical plane is exposed as a retained metric summary
+	--
+	-- Note: this is a bridge. Over time, individual callers should migrate to
+	-- explicit obs_metric / obs_counter calls rather than using obs_state for
+	-- everything.
 	function svc:obs_state(name, payload)
-		self.conn:retain(t('obs', 'state', self.name, name), payload)
+		self.conn:retain(self:obs_state_legacy_topic(name), payload)
+		self.conn:retain(self:obs_metric_topic(name), payload)
 	end
+
+	function svc:obs_metric(name, payload)
+		self.conn:retain(self:obs_metric_topic(name), payload)
+	end
+
+	function svc:obs_counter(name, payload)
+		self.conn:publish(self:obs_counter_topic(name), payload)
+	end
+
+	----------------------------------------------------------------------
+	-- Lifecycle
+	----------------------------------------------------------------------
 
 	-- Compatibility path: keep the existing payload shape.
 	function svc:status(state, extra)
@@ -154,6 +229,7 @@ function M.new(conn, opts)
 		return payload
 	end
 
+	-- Canonical service metadata + legacy announce alias.
 	function svc:announce(meta)
 		local payload = {
 			name = self.name,
@@ -165,8 +241,15 @@ function M.new(conn, opts)
 		if type(meta) == 'table' then
 			for k, v in pairs(meta) do payload[k] = v end
 		end
+
 		self._announce_published = true
+		self._meta_published = true
+
+		-- New canonical metadata topic
+		self.conn:retain(self:meta_topic(), payload)
+		-- Legacy compatibility topic
 		self.conn:retain(self:announce_topic(), payload)
+
 		return payload
 	end
 
@@ -222,7 +305,10 @@ function M.new(conn, opts)
 		end)
 	end
 
+	----------------------------------------------------------------------
 	-- Consumer-side helper: wait on retained service status rather than probing.
+	----------------------------------------------------------------------
+
 	function svc:wait_service_ready(name, opts_)
 		opts_ = opts_ or {}
 		local timeout = (type(opts_.timeout) == 'number') and opts_.timeout or 30.0
@@ -276,13 +362,20 @@ function M.new(conn, opts)
 		end
 	end
 
-	-- Scope-exit cleanup for lifecycle topics. This is additive and safe even if
-	-- the service never used the richer helpers.
+	----------------------------------------------------------------------
+	-- Scope-exit cleanup for lifecycle topics.
+	----------------------------------------------------------------------
+
 	if runtime.current_fiber() then
 		local current_scope = fibers.current_scope and fibers.current_scope() or nil
 		if current_scope and current_scope.finally then
 			current_scope:finally(function()
 				pcall(function() svc.conn:unretain(svc:status_topic()) end)
+
+				if svc._meta_published then
+					pcall(function() svc.conn:unretain(svc:meta_topic()) end)
+				end
+
 				if svc._announce_published then
 					pcall(function() svc.conn:unretain(svc:announce_topic()) end)
 				end
