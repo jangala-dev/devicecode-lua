@@ -57,7 +57,7 @@ function M.new(conn, opts)
 	end
 
 	function svc:obs_metric(name, payload)
-		self.conn:publish(t('obs', self.version, 'metric', self.name, name), payload)
+		self.conn:retain(t('obs', self.version, 'metric', self.name, name), payload)
 	end
 
 	function svc:obs_state(name, payload)
