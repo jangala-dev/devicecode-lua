@@ -2,42 +2,75 @@
 
 ## Purpose
 
-The Device service is the local, appliance-facing façade over configured components.
-It does not open transports, touch the host OS, or implement update policy. Instead it:
+The Device service is the local, appliance-facing composition service for configured components.
+
+It does **not** open transports, touch the host OS, or implement update policy. Instead it:
 
 1. consumes retained `cfg/device`
 2. maintains an in-memory component table
 3. supervises one observer child per configured component
 4. composes canonical retained device state under `state/device/...`
-5. exposes local command topics for aggregate reads, component reads, and component actions
+5. exposes per-component public interfaces under `cap/component/<component>/...`
 
-The service is intentionally above raw member transport and raw host capability topics. It watches configured fact and event topics, composes a stable public component view, and exposes only the configured action surface.
+The service is intentionally above raw member transport and raw host/provider capability topics. It watches configured fact topics, subscribes to configured event topics, composes a stable public component view, and exposes only the configured action surface. This is consistent with the broader Devicecode runtime model, where services sit above HAL and depend on bus-published capabilities and retained state rather than direct OS interaction.
+
+---
 
 ## Dependencies
 
 ### Retained configuration
 
-| Topic | Purpose |
-|---|---|
-| `{'cfg','device'}` | Device component configuration. Retained and replayed on startup. |
+* `{'cfg','device'}`
+  Retained device component configuration. Replayed on startup.
+
+The service accepts either:
+
+* the config object directly, or
+* `{ data = <config object> }`
 
 ### Consumed topics and calls
 
-The service has no direct HAL or fabric dependency. It consumes retained fact and event topics, and it dispatches component actions to configured call topics.
+The service has no direct HAL or fabric implementation dependency.
+
+It consumes:
+
+* retained fact topics
+* subscribed event topics
+* configured action call topics
+
+It may also, for certain action kinds, call stable capability interfaces.
 
 Configured inputs are named by each component record:
 
-| Field | Purpose |
-|---|---|
-| `facts.<name>` | Retained topic watched as a fact source for the component. |
-| `events.<name>` | Retained or published event topic watched as an event source for the component. |
-| `actions.<name>` | Local action route used by `cmd/device/component/do`. |
-| `observe_opts` / `provider_opts` | Observer options passed through to the component observer. |
-| `required_facts` | Facts that must have been seen before the component is considered ready. |
+* `facts.<name>`
+  Retained topic watched with `watch_retained(...)` as a fact source.
+* `events.<name>`
+  Topic subscribed to with `subscribe(...)` as an event source.
+* `actions.<name>`
+  Action route normalised into an operation entry.
+* `observe_opts` / `provider_opts`
+  Observer options passed to the component observer runtime.
+* `required_facts`
+  Facts that must have been seen before the component is considered ready.
 
-### Built-in default component
+### Additional capability dependencies for `fabric_stage`
 
-Even with no retained config, the service includes a built-in `cm5` host component:
+If a configured action uses `kind = 'fabric_stage'`, the service additionally depends on:
+
+* raw host artifact-store capability RPC:
+
+  * `raw/host/artifact-store/cap/artifact-store/<id>/rpc/open`
+* transfer manager capability RPC:
+
+  * `cap/transfer-manager/main/rpc/send-blob`
+
+That is still consistent with the model of consuming capability interfaces rather than touching the OS directly.
+
+---
+
+## Built-in default component
+
+Even with no retained config, the service includes a built-in `cm5` host component.
 
 ```lua
 cm5 = {
@@ -47,19 +80,21 @@ cm5 = {
   member = 'local',
   required_facts = { 'software', 'updater' },
   facts = {
-    software = { 'cap', 'updater', 'cm5', 'state', 'software' },
-    updater  = { 'cap', 'updater', 'cm5', 'state', 'updater' },
-    health   = { 'cap', 'updater', 'cm5', 'state', 'health' },
+    software = { 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'state', 'software' },
+    updater  = { 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'state', 'updater' },
+    health   = { 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'state', 'health' },
   },
   actions = {
-    prepare_update = { 'cap', 'updater', 'cm5', 'rpc', 'prepare' },
-    stage_update   = { 'cap', 'updater', 'cm5', 'rpc', 'stage' },
-    commit_update  = { 'cap', 'updater', 'cm5', 'rpc', 'commit' },
+    ['prepare-update'] = { 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'prepare' },
+    ['stage-update']   = { 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'stage' },
+    ['commit-update']  = { 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'commit' },
   },
 }
 ```
 
-Configured components are merged over this default map by component name.
+Configured components are merged by name over this default map.
+
+---
 
 ## Configuration
 
@@ -87,7 +122,10 @@ Retained payload on `{'cfg','device'}`:
       } | nil,
 
       events = {
-        [<event_name>] = <topic>,
+        [<event_name>] = <topic>
+        | {
+            subscribe_topic = <topic>,
+          },
       } | nil,
 
       actions = {
@@ -110,166 +148,259 @@ Retained payload on `{'cfg','device'}`:
 }
 ```
 
-### Normalisation rules
+---
 
-- if `schema` is present and does not match `devicecode.config/device/1`, defaults are used
-- configured components are merged by name over the built-in defaults
-- each component must define at least one fact or one event after merge
-- `facts` and `events` must be tables keyed by non-empty strings with non-empty topic arrays as values
-- `actions.<name> = <topic>` normalises to an RPC action route
-- RPC actions may be expressed as `{ kind = 'rpc', call_topic = ... }` or `{ kind = 'rpc', topic = ... }`
-- `fabric_stage` actions require `link_id` and `receiver`; `artifact_store` defaults to `'main'`
-- `provider_opts` is accepted as an alias for `observe_opts`
-- `required_facts` is copied through unchanged
+## Normalisation rules
 
-## Exposed commands
+* if `schema` is present and does not equal `devicecode.config/device/1`, the service falls back to defaults
+* configured components are merged by name over the built-in defaults
+* each component must define at least one fact or one event after merge
+* `facts` must be a table keyed by non-empty strings with non-empty topic arrays as values
+* `events` must be a table keyed by non-empty strings with either:
 
-The service binds four command topics:
+  * a non-empty topic array, or
+  * `{ subscribe_topic = <non-empty topic array> }`
+* `actions.<name> = <topic>` normalises to an RPC operation
+* RPC actions may be expressed as:
 
-| Topic | Purpose |
-|---|---|
-| `{'cmd','device','get'}` | Return the aggregate `device.self` payload. |
-| `{'cmd','device','component','list'}` | Return all public component views. |
-| `{'cmd','device','component','get'}` | Return one public component view. |
-| `{'cmd','device','component','do'}` | Dispatch a configured component action. |
+  * `<topic>`
+  * `{ kind = 'rpc', call_topic = ... }`
+  * `{ kind = 'rpc', topic = ... }`
+* `fabric_stage` actions require:
 
-### `cmd/device/get`
+  * `link_id`
+  * `receiver`
+* `fabric_stage.artifact_store` defaults to `'main'`
+* `provider_opts` is accepted as an alias for `observe_opts`
+* `required_facts` is copied through unchanged
+* public action method names are normalised by replacing underscores with hyphens
 
-Request payload is ignored.
+Internally, actions are stored under `operations`, not `actions`.
 
-Response:
+---
 
-```lua
-{
-  ok = true,
-  device = <device.self payload>,
-}
-```
-
-### `cmd/device/component/list`
-
-Request payload is ignored.
-
-Response:
-
-```lua
-{
-  ok = true,
-  components = { <device.component>, ... },
-}
-```
-
-The list is sorted by component name.
-
-### `cmd/device/component/get`
-
-Request:
-
-```lua
-{
-  component = <string>,
-}
-```
-
-Behaviour:
-- returns the current locally composed component view
-- does not perform an upstream fetch
-
-Failures:
-- `unknown_component`
-
-Successful reply is the component view itself, not an `{ ok = true, ... }` envelope.
-
-### `cmd/device/component/do`
-
-Request:
-
-```lua
-{
-  component = <string>,
-  action = <string>,
-  args = <table|nil>,
-  timeout = <number|nil>,
-}
-```
-
-Behaviour:
-- resolves `operations[action]`
-- for `rpc` actions, calls `call_topic` and returns the callee reply unchanged
-- for `fabric_stage` actions:
-  - opens `args.artifact_ref` through the configured artifact store capability
-  - builds a `cmd/fabric/transfer` request with `op = 'send_blob'`
-  - forwards metadata including component, job id, image id, size, checksum and caller metadata
-  - returns the transfer reply, defaulting `artifact_retention = 'release'` when absent
-  - adds `staged = true` to the returned value
-
-Failures:
-- `unknown_component`
-- `unknown_action`
-- `unsupported_action`
-- `missing_artifact_ref`
-- `artifact_open_failed`
-- any upstream call error
+## Public interface
 
 ## Retained topics published
 
-| Topic | Payload |
-|---|---|
-| `{'state','device','self'}` | aggregate `device.self` payload |
-| `{'state','device','components'}` | aggregate `device.components` payload |
-| `{'state','device','component', <name>}` | canonical `device.component` view |
-| `{'state','device','component', <name>, 'software'}` | software facet for that component |
-| `{'state','device','component', <name>, 'update'}` | update facet for that component |
+The service publishes:
 
-Component event observations are also republished as transient publishes under:
-
-| Topic | Payload |
-|---|---|
-| `{'state','device','component', <name>, 'event', <event_name>}` | last observed event payload for that component/event |
+* `{'state','device','identity'}`
+* `{'state','device','components'}`
+* `{'state','device','component', <name>}`
+* `{'state','device','component', <name>, 'software'}`
+* `{'state','device','component', <name>, 'update'}`
+* `{'cap','component', <name>, 'meta'}`
+* `{'cap','component', <name>, 'status'}`
 
 Removed components are explicitly unretained when config changes or the service stops.
+
+### Important note
+
+The current implementation does **not** publish:
+
+* `state/device/self`
+* `state/device/component/<name>/event/<event_name>`
+
+Observed events are retained only in the service’s in-memory component record and influence composition; they are not republished as separate public event topics.
+
+## Capability metadata
+
+For each component, the service publishes retained metadata at:
+
+* `{'cap','component', <name>, 'meta'}`
+
+Payload:
+
+```lua
+{
+  owner = <service name>,
+  interface = 'devicecode.cap/component/1',
+  component = <name>,
+  methods = { [<method>] = true, ... },
+  canonical_state = { 'state', 'device', 'component', <name> },
+}
+```
+
+## Capability status
+
+For each component, the service publishes retained status at:
+
+* `{'cap','component', <name>, 'status'}`
+
+Payload:
+
+```lua
+{
+  state = 'available' | 'unavailable',
+  health = <string>,
+  ready = <boolean>,
+}
+```
+
+---
+
+## Exposed RPC methods
+
+The service does **not** currently bind aggregate `cmd/device/...` endpoints.
+
+Instead, for each component it binds:
+
+* `{'cap','component', <name>, 'rpc', 'get-status'}`
+* `{'cap','component', <name>, 'rpc', <action_name>}` for every configured action
+
+The current public control surface is therefore **per-component**.
+
+## `cap/component/<name>/rpc/get-status`
+
+Request payload is ignored.
+
+Response is the current canonical component view:
+
+```lua
+<device.component payload>
+```
+
+Failures:
+
+* `unknown_component`
+
+## `cap/component/<name>/rpc/<action>`
+
+Request payload is treated as the action argument table.
+
+The service does **not** require an outer envelope of the form:
+
+```lua
+{
+  component = ...,
+  action = ...,
+  args = ...,
+}
+```
+
+for these per-component endpoints. Those fields are only relevant to the now-unbound internal legacy-style handler shape.
+
+### RPC action behaviour
+
+For `kind = 'rpc'`:
+
+* calls the configured `call_topic`
+* passes the request payload unchanged, defaulting to `{}`
+* returns the callee reply unchanged
+
+### `fabric_stage` action behaviour
+
+For `kind = 'fabric_stage'`:
+
+* requires `artifact_ref` in the request payload
+* opens the artefact through the configured artifact-store capability
+* calls `cap/transfer-manager/main/rpc/send-blob`
+* sends:
+
+  * `link_id`
+  * `receiver`
+  * the opened artifact handle as `source`
+  * transfer metadata
+
+The metadata currently includes:
+
+```lua
+meta = {
+  kind = 'firmware',
+  component = <component name>,
+  image_id = args.expected_image_id,
+  job_id = args.job_id,
+  size = <artifact size or nil>,
+  checksum = <artifact checksum or nil>,
+  metadata = args.metadata or nil,
+}
+```
+
+Return behaviour:
+
+* returns the transfer reply
+* if the reply is not a table, coerces it to `{ ok = true }`
+* defaults `artifact_retention = 'release'` when absent
+* adds `staged = true`
+
+Failures:
+
+* `unknown_component`
+* `unknown_action`
+* `unsupported_action`
+* `missing_artifact_ref`
+* `artifact_open_failed`
+* any upstream call failure
+
+---
 
 ## Observation model
 
 Each configured component gets one child observer scope.
 
-The observer runtime is fact-and-event based:
+The observer runtime is fact-and-event based.
 
-- each configured fact topic is watched and emitted upward as `fact_changed`
-- each configured event topic is watched and emitted upward as `event_seen`
-- if the observation source closes or faults, the observer emits `source_down`
+### Fact routes
+
+For each configured fact route:
+
+* the service opens a retained watch
+* replay is enabled
+* received retained/unretained changes are turned into `fact_changed` events
+
+### Event routes
+
+For each configured event route:
+
+* the service opens a subscription
+* received messages are turned into `event_seen` events
+
+### Source-down handling
+
+The observer may emit `source_down` when:
+
+* there are no observation topics
+* a fact watch closes
+* an event subscription closes
+* staleness is latched, if `observe_opts.stale_after_s` or `observe_opts.stale_after` is configured
 
 Observer events are stamped with a generation. The shell ignores stale events from retired observers after config rebuilds.
 
 ### Fact handling
 
 On `fact_changed`:
-- `raw_facts[fact_name] = payload`
-- `fact_state[fact_name].seen = true`
-- `fact_state[fact_name].updated_at = now`
-- `source_up = true`
-- `source_err = nil`
+
+* `raw_facts[fact_name] = payload`
+* `fact_state[fact_name].seen = true`
+* `fact_state[fact_name].updated_at = <observer timestamp if provided>`
+* `source_up = true`
+* `source_err = nil`
 
 ### Event handling
 
 On `event_seen`:
-- `raw_events[event_name] = payload`
-- `event_state[event_name].seen = true`
-- `event_state[event_name].updated_at = now`
-- `source_up = true`
-- `source_err = nil`
-- the payload is published to the component event topic
+
+* `raw_events[event_name] = payload`
+* `event_state[event_name].seen = true`
+* `event_state[event_name].updated_at = <observer timestamp if provided>`
+* `event_state[event_name].count += 1`
+* `source_up = true`
+* `source_err = nil`
 
 ### Source-down handling
 
 On `source_down`:
-- last-seen fact and event caches are retained in memory
-- `source_up = false`
-- `source_err = <reason>`
+
+* last-seen fact and event caches are retained in memory
+* `source_up = false`
+* `source_err = <reason>`
+
+---
 
 ## Public projection
 
-### Aggregate summary
+## Aggregate summary
 
 `state/device/components` retains:
 
@@ -306,18 +437,18 @@ On `source_down`:
 }
 ```
 
-`state/device/self` retains:
+`state/device/identity` retains:
 
 ```lua
 {
-  kind = 'device.self',
+  kind = 'device.identity',
   ts = <monotonic seconds>,
   counts = <same counts table>,
   components = <same components table>,
 }
 ```
 
-### Per-component view
+## Per-component view
 
 `state/device/component/<name>` retains:
 
@@ -353,17 +484,38 @@ On `source_down`:
 }
 ```
 
-`available` is true when the source is up and the component has seen at least one fact or event.
+### Availability and readiness
 
-`ready` is true when the component is available and all `required_facts` have been seen. For event-only components with no facts, a live event stream is enough to mark the component ready.
+`available` is true when:
+
+* `source_up == true`
+* and at least one configured fact or event has been seen
+
+For event-only components:
+
+* if the source is up
+* there are no configured facts
+* and at least one configured event has been seen
+
+then the component is treated as both available and ready.
+
+`ready` is otherwise:
+
+* `available`
+* and all `required_facts` have been seen
+
+### Health derivation
 
 `health` is derived as follows:
-- explicit component health, when composition provides it, wins
-- otherwise `unavailable`/missing source => `'unknown'`
-- otherwise updater states `failed` or `unavailable` => `'degraded'`
-- otherwise `'ok'`
 
-### Facet payloads
+1. explicit composed health wins, if present
+2. otherwise, if not available: `'unknown'`
+3. otherwise, if updater state is `'failed'` or `'unavailable'`: `'degraded'`
+4. otherwise: `'ok'`
+
+---
+
+## Facet payloads
 
 `state/device/component/<name>/software` retains:
 
@@ -394,31 +546,36 @@ On `source_down`:
 }
 ```
 
+---
+
 ## Component composition
 
 Two built-in composition paths are present.
 
-### Host components
+## Host components
 
-Components whose subtype is not `mcu` are composed through `component_host`.
+Components whose effective subtype is not `mcu` are composed through `component_host`.
 
-Normalised host fields are:
-- `software.version`, `build`, `image_id`, `boot_id`, `bootedfw`, `targetfw`, `upgrade_available`, `hw_revision`, `serial`, `board_revision`
-- `updater.state`, `raw_state`, `staged`, `artifact_ref`, `artifact_meta`, `expected_image_id`, `last_error`, `updated_at`
-- `health` as a simple scalar string when present
+This path currently normalises host-oriented fact trees into public `software`, `updater` and optional `health` material.
 
-### MCU components
+For the built-in `cm5` path this is driven by:
 
-Components whose subtype is `mcu` are composed through `component_mcu`.
+* raw host updater `software`
+* raw host updater `updater`
+* raw host updater `health`
+
+## MCU components
+
+Components whose effective subtype is `mcu` are composed through `component_mcu`.
 
 This path currently normalises and exposes:
-- software identity and bundled-image metadata
-- updater state, staged image metadata, commit policy, last result and last error
-- high-level health and availability
-- power battery, charger and charger configuration
-- environment temperature and humidity
-- runtime memory
-- charger alert state
-- a `raw` subtree containing the last unnormalised source facts
 
-The exact field set is defined by `services/device/schemas/mcu.lua`.
+* software identity and bundled-image metadata
+* updater state, staged image metadata, commit policy, last result and last error
+* high-level health
+* power battery, charger and charger configuration
+* environment temperature and humidity
+* runtime memory
+* charger alert state
+
+The exact MCU field set is defined by `services/device/schemas/mcu.lua`.

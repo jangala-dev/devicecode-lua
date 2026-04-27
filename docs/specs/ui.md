@@ -4,51 +4,60 @@
 
 The UI service is the local operator-facing application service responsible for:
 
-1. serving static assets
+1. serving static assets when `www_root` is configured
 2. exposing an authenticated JSON HTTP API
 3. exposing a session-bound WebSocket control channel
-4. maintaining a local retained-state read model over selected topic spaces
+4. maintaining an in-process retained-state read model over selected topic spaces
 5. opening user-scoped bus connections for delegated operations
-6. publishing coarse retained UI state under `state/ui/main`
-7. publishing a service announcement under `svc/<name>/announce`
+6. publishing service lifecycle and metadata via `svc/<name>/status`, `svc/<name>/meta` and the legacy-compatible `svc/<name>/announce`
+7. emitting UI-origin observability events under `obs/v1/ui/...`
 
-The service is intentionally a thin front door rather than a policy engine. It does not implement config, update, fabric or device policy itself. It authenticates a user, opens a user-scoped connection, delegates to existing service endpoints and host capabilities, and serves a stable browser-facing surface over HTTP and WebSocket.
+The service is intentionally a thin front door rather than a policy engine. It does not implement config, update, fabric or device policy itself. It authenticates a user, opens or reuses a user-scoped connection, delegates to existing service endpoints and capabilities, and serves a stable browser-facing surface over HTTP and WebSocket.
+
+The service does **not** currently publish a UI-owned retained state document such as `state/ui/main`.
 
 ## Dependencies
 
 ### Internal retained model sources
 
-By default the service starts an internal retained-state model that replays and follows:
+By default the service starts an internal retained-state model that replays and follows these topic spaces:
 
-| Pattern | Usage |
-|---|---|
-| `{'cfg','#'}` | Configuration reads and config snapshots |
-| `{'svc','#'}` | Service announce/status inspection |
-| `{'state','#'}` | State inspection, fabric views, update job views, device views and general UI reads/watches |
+| Pattern         | Usage                                                                  |
+| --------------- | ---------------------------------------------------------------------- |
+| `{'cfg','#'}`   | Configuration reads and config snapshots                               |
+| `{'svc','#'}`   | Service metadata and service lifecycle/status inspection               |
+| `{'state','#'}` | State inspection, including fabric views and update workflow state     |
+| `{'cap','#'}`   | Capability metadata and status inspection where needed by the UI model |
+| `{'raw','#'}`   | Raw source/capability inspection where needed by the UI model          |
 
 These are consumed through the in-process UI model rather than being exposed directly to browser callers.
 
 ### User-scoped connections
 
-For authenticated operations the service uses `opts.connect(principal, origin_extra)` to create or adopt a user-scoped local bus connection.
+For authenticated delegated operations the service uses `opts.connect(principal, origin_extra)`.
 
-That user connection is then used for delegated operations such as:
+The service uses user-scoped connections in two distinct ways:
 
-| Surface | Usage |
-|---|---|
-| `{'config', <service>, 'set'}` | config set helper |
-| `{'cmd','update','job', ...}` | update job create/get/list/do |
-| `artifact_store/main` capability | update upload ingress |
+* **HTTP-style delegated work**: it opens a temporary user-scoped connection for one bounded operation
+* **WebSocket session work**: it keeps one current user-scoped connection bound to the current authenticated session and reuses it across WebSocket calls and watches until logout, session change or socket close
 
-The UI service itself does not talk to HAL directly; uploads are staged through the UI upload helper using the artifact store capability on the user-scoped connection.
+Delegated operations currently use these surfaces:
+
+| Surface                                           | Usage                                                  |
+| ------------------------------------------------- | ------------------------------------------------------ |
+| `{'config', <service>, 'set'}`                    | config set helper                                      |
+| `{'cap','update-manager','main','rpc', <method>}` | update job create/get/list/action                      |
+| `artifact-ingest/main` curated capability         | upload ingress (`create`, `append`, `commit`, `abort`) |
+
+The UI service itself does not talk to HAL directly. Uploads are staged through the curated `artifact-ingest/main` capability on a user-scoped connection.
 
 ### Environment dependency
 
-The default bootstrap login verifier uses:
+If `opts.verify_login` is not supplied, the bootstrap login verifier uses:
 
-| Variable | Usage |
-|---|---|
-| `DEVICECODE_UI_ADMIN_PASSWORD` | Password for the built-in `admin` user when `opts.verify_login` is not supplied |
+| Variable                       | Usage                                  |
+| ------------------------------ | -------------------------------------- |
+| `DEVICECODE_UI_ADMIN_PASSWORD` | Password for the built-in `admin` user |
 
 ## Startup options
 
@@ -88,26 +97,35 @@ If not supplied:
   session_ttl_s = 3600,
   session_prune_s = 60,
   model_ready_timeout_s = 2.0,
+  model_queue_len = 512,
   model_sources = {
     { name = 'cfg',   pattern = { 'cfg', '#' } },
     { name = 'svc',   pattern = { 'svc', '#' } },
     { name = 'state', pattern = { 'state', '#' } },
+    { name = 'cap',   pattern = { 'cap', '#' } },
+    { name = 'raw',   pattern = { 'raw', '#' } },
   },
   host = '0.0.0.0',
   port = 80,
 }
 ```
 
-There is no retained config watch in the current implementation.
+Notes:
+
+* `host` and `port` defaulting is ultimately applied by the HTTP transport
+* there is no retained config watch in the current implementation
+* upload limits and upload timeout are **not** currently exposed through `start(conn, opts)`; they are internal defaults of the upload helper
 
 ## Authentication and sessions
 
 ### Login verification
 
 If `opts.verify_login` is not supplied, the service uses the bootstrap verifier:
-- username must be `admin`
-- password must match `DEVICECODE_UI_ADMIN_PASSWORD`
-- success yields a principal equivalent to `authz.user_principal('admin', { roles = { 'admin' } })`
+
+* username must be `admin`
+* password must match `DEVICECODE_UI_ADMIN_PASSWORD`
+* success yields a principal equivalent to `authz.user_principal('admin', { roles = { 'admin' } })`
+* if `DEVICECODE_UI_ADMIN_PASSWORD` is unset, login fails with a service-unavailable style error
 
 A custom verifier may instead return any suitable local principal.
 
@@ -116,24 +134,41 @@ A custom verifier may instead return any suitable local principal.
 Sessions are stored in-memory only.
 
 Each session record includes:
-- `id`
-- `principal`
-- public user identity derived from that principal
-- expiry timestamp
+
+* `id`
+* `principal`
+* public user identity derived from that principal
+* `created_at`
+* `expires_at`
 
 Sessions are:
-- created on successful login
-- touched on each authenticated request
-- pruned periodically by the UI shell
-- deleted explicitly on logout
 
-The public session payload returned to clients is `sessions:public(rec)`.
+* created on successful login
+* touched on each authenticated request
+* pruned periodically by the UI shell
+* deleted explicitly on logout
+
+The public session payload returned to clients is:
+
+```lua
+{
+  session_id = <string>,
+  user = {
+    id = <string>,
+    kind = <string|nil>,
+    roles = <string[]>,
+  },
+  created_at = <number>,
+  expires_at = <number>,
+}
+```
 
 ### Session transport
 
 For HTTP and WebSocket, the service accepts session ids from either:
-- cookie `devicecode_session=<id>`
-- header `x-session-id: <id>`
+
+* cookie `devicecode_session=<id>`
+* header `x-session-id: <id>`
 
 On successful HTTP login, the service sets:
 
@@ -143,20 +178,34 @@ Set-Cookie: devicecode_session=<id>; Path=/; HttpOnly; SameSite=Strict
 
 On logout, it clears that cookie.
 
+For WebSocket:
+
+* if a session id is present in the upgrade headers, the socket adopts that session on connect
+* later `login` swaps the current session and reopens the current user connection
+* `logout` clears the current session, closes watches and drops the current user connection
+
 ## Retained topics published
 
-### Service announce
+### Service metadata and lifecycle
 
-The service retains:
+The service uses `devicecode.service_base`, so it retains:
 
-| Topic | Usage |
-|---|---|
-| `{'svc', <service_name>, 'announce'}` | Coarse operator-facing service capability advertisement |
+| Topic                                 | Usage                            |
+| ------------------------------------- | -------------------------------- |
+| `{'svc', <service_name>, 'meta'}`     | canonical service metadata       |
+| `{'svc', <service_name>, 'announce'}` | legacy-compatible announce alias |
+| `{'svc', <service_name>, 'status'}`   | lifecycle/status payload         |
 
-Default announce payload:
+The default announced metadata payload is:
 
 ```lua
 {
+  name = <service_name>,
+  env = <env>,
+  run_id = <uuid>,
+  ts = <monotonic seconds>,
+  at = <wall clock string>,
+
   role = 'ui',
   auth = 'local-session',
   caps = {
@@ -181,59 +230,77 @@ Default announce payload:
 }
 ```
 
-### Aggregate UI state
-
-The service retains:
-
-| Topic | Payload kind |
-|---|---|
-| `{'state','ui','main'}` | `ui.main` |
-
-Payload shape:
+The lifecycle/status payload currently carries:
 
 ```lua
 {
-  status = 'starting' | 'running' | 'degraded' | 'failed',
+  state = 'starting' | 'running' | 'degraded' | 'failed',
+  ts = <monotonic seconds>,
+  at = <wall clock string>,
+  run_id = <uuid>,
+
+  ready = <boolean>,
   sessions = <integer>,
   clients = <integer>,
   model_ready = <boolean>,
   model_seq = <integer>,
-  t = <monotonic seconds>,
   reason = <string|nil>,
 }
 ```
 
 Semantics:
-- `sessions` = current in-memory session count
-- `clients` = current connected WebSocket client count
-- `model_ready` = retained model bootstrap complete
-- `model_seq` = current retained model sequence
-- `status` = UI shell status
 
-### Audit events
+* `sessions` = current in-memory session count
+* `clients` = current connected WebSocket client count
+* `model_ready` = retained model bootstrap complete
+* `model_seq` = current retained model sequence
+* `state` = UI shell lifecycle state
 
-The service publishes operator audit events under:
+### UI-owned retained state
 
-| Topic prefix | Usage |
-|---|---|
-| `{'obs','audit','ui', <kind>}` | Successful login/logout and config-set audit facts |
+The current implementation does **not** publish a separate retained UI-owned state document such as `state/ui/main`.
 
-Current audit kinds emitted directly by the service include:
-- `login`
-- `logout`
-- `config_set`
+### Observability and audit events
+
+The service publishes UI-origin events under:
+
+| Topic prefix                                                              | Usage                                 |
+| ------------------------------------------------------------------------- | ------------------------------------- |
+| `{'obs','v1','ui','event', <kind>}`                                       | canonical UI events                   |
+| `{'obs','event','ui', <kind>}`                                            | legacy-compatible event fanout        |
+| `{'obs','log','ui', <level>}`                                             | legacy log fanout                     |
+| `{'obs','v1','ui','event','log'}`                                         | canonical log-as-event fanout         |
+| `{'obs','state','ui','status'}` and `{'obs','v1','ui','metric','status'}` | retained service status observability |
+
+Current UI-origin event kinds emitted directly by handlers include:
+
+* `login`
+* `logout`
+* `config_set`
+
+The service also emits log-style observability records such as:
+
+* `login_ok`
+* `login_failed`
+* `ui_ws_connected`
+* `ui_ws_disconnected`
+* `http_request`
+* `http_listening`
 
 ## Internal retained model
 
 The UI model is an in-process retained-state cache over configured source patterns.
 
 Responsibilities:
-- replay retained state from each configured source watch
-- maintain a local trie keyed by exact topic
-- provide exact lookup
-- provide pattern snapshot
-- provide watch streams with replay followed by live retain/unretain events
-- expose readiness and monotonic change sequence
+
+* replay retained state from each configured source watch
+* maintain a local trie keyed by exact topic
+* provide exact lookup
+* provide pattern snapshot
+* provide replay-then-live watch streams
+* expose readiness and monotonic change sequence
+
+The model is UI-local only. It does not own upstream retained state.
 
 ### Exact lookup
 
@@ -270,9 +337,10 @@ Responsibilities:
 ### Watch
 
 `model:open_watch(pattern, opts)` returns a replay-then-live watch handle with:
-- `recv_op()`
-- `recv()`
-- `close()`
+
+* `recv_op()`
+* `recv()`
+* `close(reason)`
 
 Replay items are sent as:
 
@@ -294,32 +362,36 @@ followed by:
 ```
 
 Live items are:
-- `retain`
-- `unretain`
+
+* `retain`
+* `unretain`
 
 with `phase = 'live'`.
 
+The model must be ready before `get_exact`, `snapshot` or `open_watch` succeed.
+
 ## Browser-facing application surface
 
-The transport-facing application façade exposes:
-- `login`
-- `logout`
-- `get_session`
-- `health`
-- `model_exact`
-- `model_snapshot`
-- `config_get`
-- `config_set`
-- `service_status`
-- `services_snapshot`
-- `fabric_status`
-- `fabric_link_status`
-- `watch_open`
-- `update_job_create`
-- `update_job_get`
-- `update_job_list`
-- `update_job_do`
-- `update_job_upload`
+The transport-facing application façade currently exposes:
+
+* `login`
+* `logout`
+* `get_session`
+* `health`
+* `model_exact`
+* `model_snapshot`
+* `config_get`
+* `config_set`
+* `service_status`
+* `services_snapshot`
+* `fabric_status`
+* `fabric_link_status`
+* `watch_open`
+* `update_job_create`
+* `update_job_get`
+* `update_job_list`
+* `update_job_do`
+* `update_job_upload`
 
 Handlers own request validation and delegation.
 
@@ -327,63 +399,141 @@ Handlers own request validation and delegation.
 
 The default HTTP transport serves static assets and exposes these JSON endpoints:
 
-| Method / Path | Operation |
-|---|---|
-| `POST /api/login` | login |
-| `POST /api/logout` | logout |
-| `GET /api/session` | current session |
-| `GET /api/health` | UI health |
-| `GET /api/services` | services snapshot |
-| `POST /api/model/exact` | exact retained lookup |
-| `POST /api/model/snapshot` | retained snapshot |
-| `GET /api/fabric` | fabric summary |
-| `GET /api/fabric/link/<id>` | one fabric link view |
-| `GET /api/update/jobs` | update job list |
-| `POST /api/update/jobs` | create update job |
-| `GET /api/update/jobs/<job_id>` | get one update job |
-| `POST /api/update/jobs/<job_id>/do` | apply update job action |
-| `POST /api/update/uploads` | upload an artefact and create a manual-commit update job |
-| `GET /ws` | WebSocket upgrade |
+| Method / Path                       | Operation                                             |
+| ----------------------------------- | ----------------------------------------------------- |
+| `POST /api/login`                   | login                                                 |
+| `POST /api/logout`                  | logout                                                |
+| `GET /api/session`                  | current session                                       |
+| `GET /api/health`                   | UI health                                             |
+| `GET /api/services`                 | services snapshot                                     |
+| `POST /api/model/exact`             | exact retained lookup                                 |
+| `POST /api/model/snapshot`          | retained snapshot                                     |
+| `GET /api/config/<service>`         | config get                                            |
+| `POST /api/config/<service>`        | config set                                            |
+| `GET /api/service/<service>/status` | one service status                                    |
+| `GET /api/fabric`                   | fabric summary                                        |
+| `GET /api/fabric/link/<id>`         | one fabric link view                                  |
+| `GET /api/update/jobs`              | update job list                                       |
+| `POST /api/update/jobs`             | create update job                                     |
+| `GET /api/update/jobs/<job_id>`     | get one update job                                    |
+| `POST /api/update/jobs/<job_id>/do` | apply update job action                               |
+| `POST /api/update/uploads`          | upload an artefact, create an update job and start it |
+| `GET /ws`                           | WebSocket upgrade                                     |
 
-Static assets are served from `www_root`. Requests that are not API or WebSocket traffic fall back to static serving, using `index.html` for extensionless paths.
+Static assets are served from `www_root` if it is configured. Requests that are not API or WebSocket traffic fall back to static serving, using `index.html` for extensionless paths. If `www_root` is not configured, non-API non-WebSocket requests return 404.
 
 ## WebSocket transport
 
-The WebSocket transport is session-bound and uses the same application surface underneath.
+The WebSocket transport is session-bound and uses the same application façade underneath, but it does **not** expose every application method.
 
-The UI shell tracks client count and folds it into `state/ui/main`.
+Current WebSocket operations are:
+
+* `hello`
+* `session`
+* `health`
+* `login`
+* `logout`
+* `config_get`
+* `config_set`
+* `service_status`
+* `services_snapshot`
+* `fabric_status`
+* `fabric_link_status`
+* `model_exact`
+* `model_snapshot`
+* `watch_open`
+* `watch_close`
+
+Watch notifications are pushed back as:
+
+* `watch_event`
+* `watch_closed`
+
+The UI shell tracks client count and folds it into `svc/ui/status`.
 
 ## Delegated operations
 
 ### Config
 
-`config_set` is delegated over a user-scoped connection to:
-- `{'config', <service>, 'set'}`
+* `config_get` is satisfied from the local UI model
+* `config_set` is delegated over a user-scoped connection to:
 
-### Services/fabric reads
+```lua
+{ 'config', <service>, 'set' }
+```
+
+### Services and fabric reads
 
 These are satisfied from the local UI model rather than by opening further upstream requests.
 
 ### Update jobs
 
 Update job operations are delegated over a user-scoped connection to:
-- `{'cmd','update','job','create'}`
-- `{'cmd','update','job','get'}`
-- `{'cmd','update','job','list'}`
-- `{'cmd','update','job','do'}`
+
+```lua
+{ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }
+{ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }
+{ 'cap', 'update-manager', 'main', 'rpc', 'list-jobs' }
+{ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }
+{ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }
+{ 'cap', 'update-manager', 'main', 'rpc', 'cancel-job' }
+{ 'cap', 'update-manager', 'main', 'rpc', 'retry-job' }
+{ 'cap', 'update-manager', 'main', 'rpc', 'discard-job' }
+```
+
+Current UI action mapping for `update_job_do` is:
+
+* `start`
+* `commit`
+* `cancel`
+* `retry`
+* `discard`
 
 ### Uploads
 
 `update_job_upload`:
-- requires an authenticated session
-- stages the uploaded request body into `artifact_store/main` through the user-scoped connection
-- commits that artefact
-- creates an update job with `artifact.kind = 'ref'`
-- sets metadata including `source = 'upload'`, file name, content type, size and checksum when available
-- forces manual commit by setting:
-  - `metadata.require_explicit_commit = true`
-  - `metadata.commit_policy = 'manual'`
-  - `options.auto_start = true`
-  - `options.auto_commit = false`
 
-The upload helper does not itself commit the update; it only stages the artefact and creates/starts the job.
+* requires an authenticated session
+* currently allows only component `mcu`
+* reads the HTTP request body incrementally with a current hard limit of `512 * 1024` bytes
+* stages the uploaded body through the curated `artifact-ingest/main` capability using:
+
+  * `create`
+  * `append`
+  * `commit`
+  * `abort`
+* creates an update job whose artefact is a ref:
+
+  * `artifact = { kind = 'ref', ref = <artifact ref> }`
+* sets update metadata:
+
+  * `source = 'ui_upload'`
+  * `name`
+  * `build`
+  * `checksum`
+  * `uploaded = true`
+  * `commit_policy = 'manual'`
+  * `require_explicit_commit = true`
+* starts the job immediately
+* does **not** auto-commit the job
+
+The current success payload is:
+
+```lua
+{
+  ok = true,
+  job = <started job>,
+  artifact = {
+    ref = <string>,
+    size = <integer>,
+    checksum = <string|nil>,
+  },
+  update_flow = {
+    staged = true,
+    requires_commit = true,
+    next_action = 'commit',
+  },
+}
+```
+
+So the upload helper both stages the artefact and starts the job, but leaves the final disruptive action as an explicit later commit.
