@@ -1,0 +1,492 @@
+local busmod      = require 'bus'
+local duplex      = require 'tests.support.duplex_stream'
+local test_diag = require 'tests.support.test_diag'
+local probe       = require 'tests.support.bus_probe'
+local runfibers   = require 'tests.support.run_fibers'
+local safe        = require 'coxpcall'
+local mailbox     = require 'fibers.mailbox'
+local fibers      = require 'fibers'
+local sleep_mod   = require 'fibers.sleep'
+local update_preflight = require 'tests.support.update_preflight'
+local storagecaps = require 'tests.support.storage_caps'
+
+local session = require 'services.fabric.session'
+local device  = require 'services.device'
+local update  = require 'services.update'
+
+local T = {}
+
+local function fake_mcu_preflighters(extra)
+	return update_preflight.preflighters(extra)
+end
+
+local function make_svc(conn)
+	return {
+		conn = conn,
+		now = function() return require('fibers').now() end,
+		wall = function() return 'now' end,
+		obs_log = function() end,
+		obs_event = function() end,
+		obs_state = function() end,
+		status = function() end,
+	}
+end
+
+local function bind_reply_loop(scope, ep, handler)
+	local ok, err = scope:spawn(function()
+		while true do
+			local req = ep:recv()
+			if not req then return end
+			local reply, ferr = handler(req.payload or {}, req)
+			if reply == nil then
+				if ferr == '__forwarded__' then
+					-- transfer manager will answer later
+				else
+					req:fail(ferr or 'failed')
+				end
+			else req:reply(reply) end
+		end
+	end)
+	assert(ok, tostring(err))
+end
+
+
+local function spawn_transfer_endpoint(scope, conn, topic, transfer_ctl_tx)
+	local ep = conn:bind(topic, { queue_len = 16 })
+	bind_reply_loop(scope, ep, function(_payload, req)
+		local ok, reason = transfer_ctl_tx:send(req)
+		if ok ~= true then
+			return nil, reason or 'queue_closed'
+		end
+		return nil, '__forwarded__'
+	end)
+end
+
+function T.devhost_update_flows_via_device_over_fabric_to_remote_mcu_member()
+	runfibers.run(function(scope)
+		local preflighters = fake_mcu_preflighters({ version = 'mcu-v1', image_id = 'mcu-image-1' })
+		local orig_sleep = sleep_mod.sleep
+		sleep_mod.sleep = function(dt)
+			return orig_sleep(math.min(dt, 0.01))
+		end
+		fibers.current_scope():finally(function()
+			sleep_mod.sleep = orig_sleep
+		end)
+
+		local bus = busmod.new()
+		local caller = bus:connect()
+		local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
+		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+		local diag = test_diag.start_profile(scope, bus, 'update_stack', {
+			conn = caller,
+			control = control,
+			artifacts = artifacts,
+			max_records = 360,
+		})
+		local seed = bus:connect()
+
+		seed:retain({ 'cfg', 'update' }, {
+			schema = 'devicecode.config/update/1',
+			components = {
+				mcu = {
+					backend = 'mcu_component',
+					transfer = {
+						link_id = 'cm5-uart-mcu',
+						receiver = { 'rpc', 'member', 'mcu', 'receive' },
+						timeout_s = 1.0,
+					},
+				},
+			},
+		})
+
+		seed:retain({ 'cfg', 'device' }, {
+			schema = 'devicecode.config/device/1',
+			components = {
+				mcu = {
+					class = 'member',
+					subtype = 'mcu',
+					facts = {
+						software = { 'imported', 'member', 'mcu', 'software' },
+						updater = { 'imported', 'member', 'mcu', 'updater' },
+						health = { 'imported', 'member', 'mcu', 'health' },
+					},
+					actions = {
+						['prepare-update'] = { 'rpc', 'member', 'mcu', 'prepare' },
+						['stage-update'] = {
+							kind = 'fabric_stage',
+							link_id = 'cm5-uart-mcu',
+							receiver = { 'rpc', 'member', 'mcu', 'receive' },
+							timeout_s = 1.0,
+						},
+						['commit-update'] = { 'rpc', 'member', 'mcu', 'commit' },
+					},
+				},
+			},
+		})
+
+		local a_stream, b_stream = duplex.new_pair()
+		local a_ctl_tx, a_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
+		local b_ctl_tx, b_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
+		local a_report_tx, a_report_rx = mailbox.new(8, { full = 'reject_newest' })
+		local b_report_tx, b_report_rx = mailbox.new(8, { full = 'reject_newest' })
+
+		local versions = { mcu = 'mcu-v0' }
+		local image_id = { mcu = 'mcu-image-0' }
+		local boot_id = { mcu = 'mcu-boot-1' }
+		local pending_image_id = nil
+		local remote_member_conn = bus:connect()
+
+		local function publish_remote_status()
+			remote_member_conn:retain({ 'member', 'mcu', 'software' }, {
+				version = versions.mcu,
+				image_id = image_id.mcu,
+				boot_id = boot_id.mcu,
+			})
+			remote_member_conn:retain({ 'member', 'mcu', 'updater' }, {
+				state = 'running',
+			})
+			remote_member_conn:retain({ 'member', 'mcu', 'health' }, {
+				state = 'ok',
+			})
+		end
+
+		local prepare_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'prepare' }, { queue_len = 16 })
+		local receive_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'receive' }, { queue_len = 16 })
+		local commit_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'commit' }, { queue_len = 16 })
+
+		bind_reply_loop(scope, prepare_ep, function(payload)
+			return { ok = true, prepared = true }
+		end)
+		bind_reply_loop(scope, receive_ep, function(payload)
+			assert(type(payload.artefact) == 'table')
+			assert(type(payload.artefact.open_source) == 'function')
+			pending_image_id = type(payload) == 'table' and type(payload.meta) == 'table' and payload.meta.image_id or nil
+			return { ok = true, accepted = true }
+		end)
+		bind_reply_loop(scope, commit_ep, function(_payload)
+			versions.mcu = 'mcu-v1'
+			image_id.mcu = pending_image_id or 'mcu-image-1'
+			boot_id.mcu = 'mcu-boot-2'
+			publish_remote_status()
+			return { ok = true, started = true }
+		end)
+
+		local ok1, err1 = scope:spawn(function()
+			session.run({
+				svc = make_svc(bus:connect()),
+				conn = bus:connect(),
+				link_id = 'cm5-uart-mcu',
+				transfer_ctl_rx = a_ctl_rx,
+				report_tx = a_report_tx,
+				cfg = {
+					node_id = 'cm5',
+					member_class = 'cm5',
+					link_class = 'member_uart',
+					transport = { open = function() return a_stream end },
+					import_rules = {
+						{ ['local'] = { 'imported', 'member', 'mcu', 'software' }, ['remote'] = { 'remote', 'member', 'mcu', 'software' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'updater' }, ['remote'] = { 'remote', 'member', 'mcu', 'updater' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'health' }, ['remote'] = { 'remote', 'member', 'mcu', 'health' } },
+					},
+					outbound_call_rules = {
+						{ ['local'] = { 'rpc', 'member', 'mcu' }, ['remote'] = { 'rpc', 'member', 'mcu' }, timeout = 1.0 },
+					},
+				},
+			})
+		end)
+		assert(ok1, tostring(err1))
+
+		local ok2, err2 = scope:spawn(function()
+			session.run({
+				svc = make_svc(bus:connect()),
+				conn = bus:connect(),
+				link_id = 'mcu-uart-cm5',
+				transfer_ctl_rx = b_ctl_rx,
+				report_tx = b_report_tx,
+				cfg = {
+					node_id = 'mcu',
+					member_class = 'mcu',
+					link_class = 'member_uart',
+					transport = { open = function() return b_stream end },
+					export_retained_rules = {
+						{ ['local'] = { 'member', 'mcu', 'software' }, ['remote'] = { 'remote', 'member', 'mcu', 'software' } },
+						{ ['local'] = { 'member', 'mcu', 'updater' },  ['remote'] = { 'remote', 'member', 'mcu', 'updater' } },
+						{ ['local'] = { 'member', 'mcu', 'health' },   ['remote'] = { 'remote', 'member', 'mcu', 'health' } },
+					},
+					inbound_call_rules = {
+						{ ['local'] = { 'rpc', 'member', 'mcu' }, ['remote'] = { 'rpc', 'member', 'mcu' }, timeout = 1.0 },
+					},
+				},
+			})
+		end)
+		assert(ok2, tostring(err2))
+
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, a_ctl_tx)
+
+		local ok3, err3 = scope:spawn(function()
+			device.start(bus:connect(), { name = 'device', env = 'dev' })
+		end)
+		assert(ok3, tostring(err3))
+
+		local ok4, err4 = scope:spawn(function()
+			update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
+		end)
+		assert(ok4, tostring(err4))
+
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', { timeout = 2.0 })
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', { timeout = 2.0 })
+		probe.wait_service_running(caller, 'device', { timeout = 1.5 })
+		probe.wait_service_running(caller, 'update', { timeout = 1.5 })
+
+		publish_remote_status()
+		probe.wait_device_component(caller, 'mcu', function(payload)
+			return payload.available == true and type(payload.software) == 'table' and payload.software.version == versions.mcu and payload.software.image_id == image_id.mcu and payload.software.boot_id == boot_id.mcu
+		end, { timeout = 1.5 })
+
+		local created, cerr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
+			component = 'mcu',
+			artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-v1.bin', 'mcu-image-v1') },
+			expected_image_id = 'mcu-image-1',
+			metadata = { channel = 'test' },
+		}, { timeout = 0.5 })
+		assert(cerr == nil)
+		assert(created.ok == true)
+		local job = created.job
+		assert(type(job.artifact.ref) == 'string')
+
+		assert(type(job) == 'table')
+		assert(job.lifecycle.state == 'created')
+		assert(type(job.artifact.ref) == 'string')
+
+		local started, serr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job.job_id }, { timeout = 0.5 })
+		assert(serr == nil)
+		assert(started.ok == true)
+
+		probe.wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+			return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
+				and payload.job.artifact.ref == nil and payload.job.artifact.released_at ~= nil
+		end, { timeout = 0.75 })
+		assert(next(artifacts.artifacts) == nil)
+
+		local committed, perr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })
+		assert(perr == nil)
+		assert(committed.ok == true)
+
+		probe.wait_update_job(caller, job.job_id, function(payload)
+			return payload.job.lifecycle.state == 'succeeded'
+		end, { timeout = 2.5 })
+
+		local final, ferr = caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'get-job' }, { job_id = job.job_id }, { timeout = 0.5 })
+		assert(ferr == nil)
+		assert(final.ok == true)
+		assert(final.job.lifecycle.state == 'succeeded')
+		assert(type(final.job.result) == 'table')
+		assert(final.job.result.image_id == 'mcu-image-1')
+		assert(type(control.namespaces['update/jobs'][job.job_id]) == 'table')
+	end, { timeout = 4.0 })
+end
+
+
+function T.devhost_update_marks_job_failed_when_remote_mcu_returns_failed_state_after_commit()
+	runfibers.run(function(scope)
+		local preflighters = fake_mcu_preflighters({ version = 'mcu-v1', image_id = 'mcu-image-1' })
+		local orig_sleep = sleep_mod.sleep
+		sleep_mod.sleep = function(dt)
+			return orig_sleep(math.min(dt, 0.01))
+		end
+		fibers.current_scope():finally(function()
+			sleep_mod.sleep = orig_sleep
+		end)
+
+		local bus = busmod.new()
+		local caller = bus:connect()
+		local control = storagecaps.start_control_store_cap(scope, bus:connect(), {})
+		local artifacts = storagecaps.start_artifact_store_cap(scope, bus:connect(), {})
+		local diag = test_diag.start_profile(scope, bus, 'update_stack', {
+			conn = caller,
+			control = control,
+			artifacts = artifacts,
+			max_records = 360,
+		})
+		local seed = bus:connect()
+
+		seed:retain({ 'cfg', 'update' }, {
+			schema = 'devicecode.config/update/1',
+			components = {
+				mcu = {
+					backend = 'mcu_component',
+					transfer = {
+						link_id = 'cm5-uart-mcu',
+						receiver = { 'rpc', 'member', 'mcu', 'receive' },
+						timeout_s = 1.0,
+					},
+				},
+			},
+		})
+
+		seed:retain({ 'cfg', 'device' }, {
+			schema = 'devicecode.config/device/1',
+			components = {
+				mcu = {
+					class = 'member',
+					subtype = 'mcu',
+					member_class = 'mcu',
+					link_class = 'member_uart',
+					facts = {
+						software = { 'imported', 'member', 'mcu', 'software' },
+						updater = { 'imported', 'member', 'mcu', 'updater' },
+						health = { 'imported', 'member', 'mcu', 'health' },
+					},
+					actions = {
+						['prepare-update'] = { 'rpc', 'member', 'mcu', 'prepare' },
+						['stage-update'] = {
+							kind = 'fabric_stage',
+							link_id = 'cm5-uart-mcu',
+							receiver = { 'rpc', 'member', 'mcu', 'receive' },
+							timeout_s = 1.0,
+						},
+						['commit-update'] = { 'rpc', 'member', 'mcu', 'commit' },
+					},
+				},
+			},
+		})
+
+		local a_stream, b_stream = duplex.new_pair()
+		local a_ctl_tx, a_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
+		local b_ctl_tx, b_ctl_rx = mailbox.new(8, { full = 'reject_newest' })
+		local a_report_tx, a_report_rx = mailbox.new(8, { full = 'reject_newest' })
+		local b_report_tx, b_report_rx = mailbox.new(8, { full = 'reject_newest' })
+
+		local versions = { mcu = 'mcu-v0' }
+		local boot_id = { mcu = 'mcu-boot-1' }
+		local remote_member_conn = bus:connect()
+
+		local function publish_remote_status(st)
+			st = st or {
+				software = { version = versions.mcu, image_id = 'mcu-image-0', boot_id = boot_id.mcu },
+				updater = { state = 'running' },
+				health = { state = 'ok' },
+			}
+			-- Publish updater before software so failure/settled state is not observed
+			-- behind a newer software fact during split-fact transitions.
+			remote_member_conn:retain({ 'member', 'mcu', 'updater' }, st.updater)
+			remote_member_conn:retain({ 'member', 'mcu', 'software' }, st.software)
+			remote_member_conn:retain({ 'member', 'mcu', 'health' }, st.health or { state = 'ok' })
+		end
+
+		local prepare_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'prepare' }, { queue_len = 16 })
+		local receive_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'receive' }, { queue_len = 16 })
+		local commit_ep = remote_member_conn:bind({ 'rpc', 'member', 'mcu', 'commit' }, { queue_len = 16 })
+
+		local pending_image_id = nil
+		local current_state = { software = { version = 'mcu-v0', image_id = 'mcu-image-0', boot_id = 'mcu-boot-1' }, updater = { state = 'running' }, health = { state = 'ok' } }
+		bind_reply_loop(scope, prepare_ep, function(payload)
+			return { ok = true, prepared = true }
+		end)
+		bind_reply_loop(scope, receive_ep, function(payload)
+			assert(type(payload.artefact) == 'table')
+			assert(type(payload.artefact.open_source) == 'function')
+			pending_image_id = type(payload) == 'table' and type(payload.meta) == 'table' and payload.meta.image_id or nil
+			return { ok = true, accepted = true }
+		end)
+		bind_reply_loop(scope, commit_ep, function(_payload)
+			boot_id.mcu = 'mcu-boot-2'
+			current_state = { software = { version = 'mcu-v0', image_id = pending_image_id or 'mcu-image-0', boot_id = boot_id.mcu }, updater = { state = 'failed', last_error = 'apply_failed' }, health = { state = 'degraded' } }
+			publish_remote_status(current_state)
+			return { ok = true, started = true }
+		end)
+
+		local ok1, err1 = scope:spawn(function()
+			session.run({
+				svc = make_svc(bus:connect()),
+				conn = bus:connect(),
+				link_id = 'cm5-uart-mcu',
+				transfer_ctl_rx = a_ctl_rx,
+				report_tx = a_report_tx,
+				cfg = {
+					node_id = 'cm5',
+					member_class = 'cm5',
+					link_class = 'member_uart',
+					transport = { open = function() return a_stream end },
+					import_rules = {
+						{ ['local'] = { 'imported', 'member', 'mcu', 'software' }, ['remote'] = { 'remote', 'member', 'mcu', 'software' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'updater' }, ['remote'] = { 'remote', 'member', 'mcu', 'updater' } },
+						{ ['local'] = { 'imported', 'member', 'mcu', 'health' }, ['remote'] = { 'remote', 'member', 'mcu', 'health' } },
+					},
+					outbound_call_rules = {
+						{ ['local'] = { 'rpc', 'member', 'mcu' }, ['remote'] = { 'rpc', 'member', 'mcu' }, timeout = 1.0 },
+					},
+				},
+			})
+		end)
+		assert(ok1, tostring(err1))
+
+		local ok2, err2 = scope:spawn(function()
+			session.run({
+				svc = make_svc(bus:connect()),
+				conn = bus:connect(),
+				link_id = 'mcu-uart-cm5',
+				transfer_ctl_rx = b_ctl_rx,
+				report_tx = b_report_tx,
+				cfg = {
+					node_id = 'mcu',
+					member_class = 'mcu',
+					link_class = 'member_uart',
+					transport = { open = function() return b_stream end },
+					export_retained_rules = {
+						{ ['local'] = { 'member', 'mcu', 'software' }, ['remote'] = { 'remote', 'member', 'mcu', 'software' } },
+						{ ['local'] = { 'member', 'mcu', 'updater' }, ['remote'] = { 'remote', 'member', 'mcu', 'updater' } },
+						{ ['local'] = { 'member', 'mcu', 'health' }, ['remote'] = { 'remote', 'member', 'mcu', 'health' } },
+					},
+					inbound_call_rules = {
+						{ ['local'] = { 'rpc', 'member', 'mcu' }, ['remote'] = { 'rpc', 'member', 'mcu' }, timeout = 1.0 },
+					},
+				},
+			})
+		end)
+		assert(ok2, tostring(err2))
+
+		spawn_transfer_endpoint(scope, bus:connect(), { 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, a_ctl_tx)
+
+		local ok3, err3 = scope:spawn(function()
+			device.start(bus:connect(), { name = 'device', env = 'dev' })
+		end)
+		assert(ok3, tostring(err3))
+
+		local ok4, err4 = scope:spawn(function()
+			update.start(bus:connect(), { name = 'update', env = 'dev', preflighters = preflighters })
+		end)
+		assert(ok4, tostring(err4))
+
+		probe.wait_fabric_ready(caller, 'cm5-uart-mcu', { timeout = 2.0 })
+		probe.wait_fabric_ready(caller, 'mcu-uart-cm5', { timeout = 2.0 })
+		probe.wait_service_running(caller, 'device', { timeout = 1.5 })
+		probe.wait_service_running(caller, 'update', { timeout = 1.5 })
+		publish_remote_status(current_state)
+		probe.wait_device_component(caller, 'mcu', function(payload)
+			return payload.available == true and type(payload.software) == 'table' and payload.software.version == current_state.software.version and payload.software.boot_id == current_state.software.boot_id
+		end, { timeout = 1.5 })
+
+		local created = assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'create-job' }, {
+			component = 'mcu',
+			artifact = { kind = 'import_path', path = storagecaps.seed_import_path(artifacts, '/tmp/mcu-image-fail.bin', 'mcu-image-fail') },
+			expected_image_id = 'mcu-image-1',
+			metadata = {},
+		}, { timeout = 0.5 }))
+		local job = created.job
+
+		assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'start-job' }, { job_id = job.job_id }, { timeout = 0.5 })).ok == true)
+		probe.wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+			return type(payload) == 'table' and type(payload.job) == 'table' and payload.job.lifecycle.state == 'awaiting_commit'
+		end, { timeout = 0.75 })
+		assert(assert(caller:call({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { job_id = job.job_id }, { timeout = 1.0 })).ok == true)
+
+		probe.wait_retained_state(caller, { 'state', 'workflow', 'update-job', job.job_id }, function(payload)
+			return type(payload) == 'table' and type(payload.job) == 'table'
+				and payload.job.lifecycle.state == 'failed'
+				and tostring(payload.job.lifecycle.error):match('apply_failed') ~= nil
+		end, { timeout = 2.5 })
+	end, { timeout = 4.0 })
+end
+
+return T
