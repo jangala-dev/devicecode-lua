@@ -1,70 +1,49 @@
 local provider_mod = require 'shared.crypto.provider'
-local cap_sdk = require 'services.hal.sdk.cap'
 
 local T = {}
 
-function T.from_cap_requires_capability_reference()
-  local ok = pcall(function() provider_mod.from_cap(nil) end)
-  assert(ok == false)
-
-  local ok2 = pcall(function() provider_mod.from_cap({}) end)
+function T.new_requires_backend_with_crypto_shape()
+  local ok1 = pcall(function() provider_mod.new() end)
+  assert(ok1 == false)
+  local ok2 = pcall(function() provider_mod.new({ backend = {} }) end)
   assert(ok2 == false)
 
-  local provider = provider_mod.from_cap({
-    call_control = function() return { ok = true, reason = true }, nil end,
-  })
-  assert(type(provider) == 'table')
-  assert(type(provider.verify_ed25519) == 'function')
+  local backend = { new_verifier = function() end }
+  local got = provider_mod.new({ backend = backend })
+  assert(got == backend)
+
+  local backend2 = { verify_ed25519 = function() end }
+  local got2 = provider_mod.new({ backend = backend2 })
+  assert(got2 == backend2)
 end
 
-function T.verify_ed25519_validates_inputs_before_calling_capability()
-  local calls = 0
-  local provider = provider_mod.from_cap({
-    call_control = function() calls = calls + 1 end,
-  })
-
-  local ok1, err1 = provider:verify_ed25519(nil, 'm', 's')
-  assert(ok1 == nil and err1 == 'public_key_required')
-  local ok2, err2 = provider:verify_ed25519('PEM', nil, 's')
-  assert(ok2 == nil and err2 == 'message_required')
-  local ok3, err3 = provider:verify_ed25519('PEM', 'm', nil)
-  assert(ok3 == nil and err3 == 'signature_required')
-  assert(calls == 0)
+function T.with_verifier_factory_returns_backend_that_already_has_factory()
+  local backend = { new_verifier = function() return 'ok' end }
+  local got = provider_mod.with_verifier_factory(backend)
+  assert(got == backend)
 end
 
-function T.verify_ed25519_maps_success_negative_and_error_replies()
-  local seen_method, seen_opts
-  local replies = {
-    { ok = true, reason = true },
-    { ok = false, reason = 'signature_verify_failed' },
-    { ok = false, reason = 'openssl_verify_failed:bad usage' },
-  }
-  local provider = provider_mod.from_cap({
-    call_control = function(_, method, opts)
-      seen_method, seen_opts = method, opts
-      return table.remove(replies, 1), nil
+function T.with_verifier_factory_wraps_operation_provider()
+  local seen = {}
+  local provider = provider_mod.with_verifier_factory({
+    verify_ed25519 = function(_, pem, msg, sig)
+      seen.pem = pem
+      seen.msg = msg
+      seen.sig = sig
+      return true, nil
     end,
   })
-
-  local ok1, err1 = provider:verify_ed25519('PEM', 'MSG', 'SIG')
-  assert(ok1 == true and err1 == nil)
-  assert(seen_method == 'verify_ed25519')
-  assert(getmetatable(seen_opts) == cap_sdk.args.SignatureVerifyEd25519Opts)
-
-  local ok2, err2 = provider:verify_ed25519('PEM', 'MSG', 'SIG')
-  assert(ok2 == false and err2 == 'signature_verify_failed')
-
-  local ok3, err3 = provider:verify_ed25519('PEM', 'MSG', 'SIG')
-  assert(ok3 == nil and err3 == 'openssl_verify_failed:bad usage')
-end
-
-function T.verify_ed25519_propagates_transport_failure()
-  local provider = provider_mod.from_cap({
-    call_control = function() return nil, 'no_route' end,
+  local verifier = provider:new_verifier({
+    keyring = { lookup = function(_, key_id)
+      assert(key_id == 'kid')
+      return 'PEM', nil
+    end },
   })
-  local ok, err = provider:verify_ed25519('PEM', 'MSG', 'SIG')
-  assert(ok == nil)
-  assert(err == 'no_route')
+  local ok, err = verifier:verify_message({ alg = 'ed25519', key_id = 'kid', message = 'MSG', signature = 'SIG' })
+  assert(ok == true and err == nil)
+  assert(seen.pem == 'PEM')
+  assert(seen.msg == 'MSG')
+  assert(seen.sig == 'SIG')
 end
 
 return T

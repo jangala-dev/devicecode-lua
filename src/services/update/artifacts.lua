@@ -14,9 +14,7 @@
 local cap_sdk = require 'services.hal.sdk.cap'
 local sources = require 'services.update.artifact_sources'
 local mcu_image_v1 = require 'shared.mcu_image.v1'
-local crypto_provider = require 'shared.crypto.provider'
-local crypto_keyring = require 'shared.crypto.keyring'
-local crypto_verifier = require 'shared.crypto.verifier'
+local crypto_mod = require 'services.update.crypto'
 
 local default_preflighters = {}
 
@@ -142,14 +140,12 @@ function Artifacts:inspect_mcu_artifact(artifact, bundled_cfg)
 	local preflight = type(bundled_cfg) == 'table' and bundled_cfg.preflight or nil
 	preflight = type(preflight) == 'table' and preflight or {}
 	local verifier = nil
-	local trusted = preflight.trusted_keys or preflight.keys
-	if preflight.require_signature == true or (type(trusted) == 'table' and next(trusted) ~= nil) then
-		if not self.ctx.signature_verify_cap then
-			return nil, 'signature_verifier_unavailable'
-		end
-		local keyring = crypto_keyring.from_config(preflight)
-		local provider = crypto_provider.from_cap(self.ctx.signature_verify_cap)
-		verifier = crypto_verifier.new({ provider = provider, keyring = keyring })
+	if self.ctx.crypto and type(self.ctx.crypto.verifier_for_preflight) == 'function' then
+		local verr
+		verifier, verr = self.ctx.crypto:verifier_for_preflight(preflight)
+		if verr then return nil, verr end
+	elseif crypto_mod.needs_verifier(preflight) then
+		return nil, 'signature_verifier_unavailable'
 	end
 	local opts = {
 		target = type(bundled_cfg) == 'table' and bundled_cfg.target or nil,

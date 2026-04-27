@@ -12,6 +12,7 @@ local model         = require 'services.update.model'
 local projection    = require 'services.update.projection'
 local topics        = require 'services.update.topics'
 local observe_mod   = require 'services.update.observe'
+local crypto_mod    = require 'services.update.crypto'
 local runner        = require 'services.update.runner'
 local runtime_mod   = require 'services.update.runtime'
 local artifacts_mod = require 'services.update.artifacts'
@@ -265,10 +266,7 @@ function M.start(conn, opts)
     artifact_cap = artifact_cap,
     cap_sdk = cap_sdk,
     topics = topics,
-    -- Provider-native verifier backends are HAL-owned raw host capabilities.
-    -- The crypto module normalises semantics for update; this legacy public
-    -- cap route should no longer be used by new code.
-    signature_verify_cap = cap_sdk.new_raw_host_cap_ref(conn, 'signature-verify', 'signature-verify', 'main'),
+    crypto = crypto_mod.new({ conn = conn }),
     ingests = {},
     service_scope = service_scope,
     service_run_id = service_run_id,

@@ -1,30 +1,53 @@
 -- shared/crypto/provider.lua
-
-local cap_sdk = require 'services.hal.sdk.cap'
+--
+-- Minimal provider adapter/factory.  Providers are ordinary Lua objects that
+-- implement crypto operations and may expose :new_verifier(opts).  This module
+-- intentionally knows nothing about HAL, bus topics, OpenSSL, files or any
+-- other OS boundary.
 
 local M = {}
+
 local Provider = {}
 Provider.__index = Provider
 
-function Provider:verify_ed25519(pubkey_pem, message, signature)
-	if type(pubkey_pem) ~= 'string' or pubkey_pem == '' then return nil, 'public_key_required' end
-	if type(message) ~= 'string' then return nil, 'message_required' end
-	if type(signature) ~= 'string' or signature == '' then return nil, 'signature_required' end
-	local opts, oerr = cap_sdk.args.new.SignatureVerifyEd25519Opts(pubkey_pem, message, signature)
-	if not opts then return nil, oerr or 'invalid_opts' end
-	local reply, err = self.cap:call_control('verify_ed25519', opts)
-	if not reply then return nil, err or 'signature_verifier_unavailable' end
-	if reply.ok == true then return true, nil end
-	local reason = type(reply.reason) == 'string' and reply.reason or tostring(reply.reason or 'verify_failed')
-	if reason == 'signature_verify_failed' then
-		return false, reason
+local function assert_backend(backend)
+	if type(backend) ~= 'table' then
+		error('crypto provider backend required', 3)
 	end
-	return nil, reason
+	if type(backend.new_verifier) ~= 'function' and type(backend.verify_ed25519) ~= 'function' then
+		error('crypto provider backend must implement :new_verifier() or :verify_ed25519()', 3)
+	end
+	return backend
 end
 
-function M.from_cap(cap)
-	assert(cap and type(cap.call_control) == 'function', 'signature verify capability required')
-	return setmetatable({ cap = cap, name = 'hal_signature_verify' }, Provider)
+--- Return a provider backend after validating its shape.
+---@param opts { backend: table }
+---@return table
+function M.new(opts)
+	opts = type(opts) == 'table' and opts or {}
+	return assert_backend(opts.backend)
+end
+
+--- Wrap a raw operation provider as a verifier provider when it does not
+--- provide :new_verifier itself.
+---@param backend table
+---@return table
+function M.with_verifier_factory(backend)
+	backend = assert_backend(backend)
+	if type(backend.new_verifier) == 'function' then return backend end
+	local verifier_mod = require 'shared.crypto.verifier'
+	return setmetatable({ backend = backend }, Provider)
+end
+
+function Provider:verify_ed25519(...)
+	return self.backend:verify_ed25519(...)
+end
+
+function Provider:new_verifier(opts)
+	opts = type(opts) == 'table' and opts or {}
+	local keyring = assert(opts.keyring, 'crypto verifier keyring required')
+	local verifier_mod = require 'shared.crypto.verifier'
+	return verifier_mod.new({ provider = self, keyring = keyring })
 end
 
 return M
