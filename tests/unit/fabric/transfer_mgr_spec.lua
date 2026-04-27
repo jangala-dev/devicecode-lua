@@ -81,13 +81,14 @@ function T.outgoing_transfer_happy_path_emits_begin_chunk_commit_and_reply()
 		end)
 		assert(ok, tostring(err))
 
-		local reply, reply_err
+		local reply_tx, reply_rx = mailbox.new(1, { full = 'reject_newest' })
 		local okc, errc = scope:spawn(function ()
-			reply, reply_err = env.rpc_caller:call(env.topic, {
+			local reply, reply_err = env.rpc_caller:call(env.topic, {
 				op = 'send_blob',
 				link_id = 'link-x1',
 				source = raw,
 			}, { timeout = 1.0 })
+			reply_tx:send({ reply = reply, err = reply_err })
 		end)
 		assert(okc, tostring(errc))
 
@@ -109,7 +110,10 @@ function T.outgoing_transfer_happy_path_emits_begin_chunk_commit_and_reply()
 		assert(commit.size == #raw)
 
 		env.xfer_tx:send({ msg = { type = 'xfer_done', xfer_id = begin.xfer_id } })
-		assert(probe.wait_until(function () return reply ~= nil end, { timeout = 0.5, interval = 0.01 }))
+		local done_msg, done_err = reply_rx:recv()
+		assert(done_msg ~= nil, tostring(done_err))
+		local reply = done_msg.reply
+		local reply_err = done_msg.err
 		assert(reply_err == nil)
 		assert(reply.ok == true)
 		assert(reply.xfer_id == begin.xfer_id)
@@ -171,7 +175,10 @@ function T.incoming_transfer_happy_path_accepts_chunks_and_commits()
 		assert(done.type == 'xfer_done')
 		assert(done.xfer_id == 'in-1')
 
-		local retained = probe.wait_payload(observer, { 'state', 'fabric', 'link', 'link-x2', 'transfer' }, { timeout = 0.25 })
+		local retained = probe.wait_fabric_link_component(observer, 'link-x2', 'transfer', function(payload)
+			local s = payload and payload.status
+			return type(s) == 'table' and s.state == 'done' and s.direction == 'in' and s.xfer_id == 'in-1'
+		end, { timeout = 0.25 })
 		assert(retained.kind == 'fabric.link.transfer')
 		assert(retained.component == 'transfer')
 		assert(retained.link_id == 'link-x2')
@@ -204,13 +211,14 @@ function T.session_generation_change_aborts_outgoing_transfer()
 		end)
 		assert(ok, tostring(err))
 
-		local reply, reply_err
+		local reply_tx, reply_rx = mailbox.new(1, { full = 'reject_newest' })
 		local okc, errc = scope:spawn(function ()
-			reply, reply_err = env.rpc_caller:call(env.topic, {
+			local reply, reply_err = env.rpc_caller:call(env.topic, {
 				op = 'send_blob',
 				link_id = 'link-x3',
 				source = 'abcdefgh',
 			}, { timeout = 1.0 })
+			reply_tx:send({ reply = reply, err = reply_err })
 		end)
 		assert(okc, tostring(errc))
 
@@ -221,9 +229,10 @@ function T.session_generation_change_aborts_outgoing_transfer()
 			s.generation = s.generation + 1
 		end, { bump_pulse = true })
 
-		assert(probe.wait_until(function ()
-			return reply == nil and tostring(reply_err):match('session_reset') ~= nil
-		end, { timeout = 0.5, interval = 0.01 }))
+		local done_msg, done_err = reply_rx:recv()
+		assert(done_msg ~= nil, tostring(done_err))
+		assert(done_msg.reply == nil)
+		assert(tostring(done_msg.err):match('session_reset') ~= nil)
 	end)
 end
 
@@ -249,13 +258,14 @@ function T.only_one_active_transfer_is_admitted_at_a_time()
 		end)
 		assert(ok, tostring(err))
 
-		local reply1, err1
+		local reply1_tx, reply1_rx = mailbox.new(1, { full = 'reject_newest' })
 		local ok1, spawn1 = scope:spawn(function ()
-			reply1, err1 = env.rpc_caller:call(env.topic, {
+			local reply1, err1 = env.rpc_caller:call(env.topic, {
 				op = 'send_blob',
 				link_id = 'link-x4',
 				source = 'first',
 			}, { timeout = 1.0 })
+			reply1_tx:send({ reply = reply1, err = err1 })
 		end)
 		assert(ok1, tostring(spawn1))
 
@@ -289,9 +299,10 @@ function T.only_one_active_transfer_is_admitted_at_a_time()
 		assert(recv_mailbox(env.tx_control_rx).frame.type == 'xfer_commit')
 		env.xfer_tx:send({ msg = { type = 'xfer_done', xfer_id = begin.xfer_id } })
 
-		assert(probe.wait_until(function () return reply1 ~= nil end, { timeout = 0.5, interval = 0.01 }))
-		assert(err1 == nil)
-		assert(reply1.ok == true)
+		local done1, derr1 = reply1_rx:recv()
+		assert(done1 ~= nil, tostring(derr1))
+		assert(done1.err == nil)
+		assert(done1.reply.ok == true)
 	end)
 end
 

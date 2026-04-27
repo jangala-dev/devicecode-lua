@@ -24,37 +24,26 @@ function T.fabric_service_applies_empty_config_and_exposes_transfer_endpoint()
 		end)
 		if not ok_spawn then diag:fail('failed to spawn fabric service: ' .. tostring(err)) end
 
-		local st
-		assert(probe.wait_until(function()
-			local ok, payload = safe.pcall(function()
-				return probe.wait_payload(conn, { 'svc', 'fabric', 'status' }, { timeout = 0.05 })
-			end)
-			if ok and type(payload) == 'table' and payload.state == 'running' and payload.ready == true then
-				st = payload
-				return true
-			end
-			return false
-		end, { timeout = 1.0, interval = 0.01 }))
-		assert(probe.wait_until(function()
-			local ok, payload = safe.pcall(function()
-				return probe.wait_payload(conn, { 'svc', 'fabric', 'meta' }, { timeout = 0.05 })
-			end)
-			return ok and type(payload) == 'table' and payload.role == 'fabric'
-		end, { timeout = 1.0, interval = 0.01 }))
+		local st = probe.wait_service_running(conn, 'fabric', { timeout = 1.0, describe = function() return diag:render() end })
+		local meta = probe.wait_retained_payload(conn, { 'svc', 'fabric', 'meta' }, { timeout = 1.0, predicate = function(payload) return type(payload) == 'table' and payload.role == 'fabric' end })
 
 		assert(type(st) == 'table')
+		assert(type(meta) == 'table')
 		assert(st.state == 'running')
 		assert(st.ready == true)
 		assert(st.desired == 0)
 		assert(st.live == 0)
 
-		local summary = probe.wait_payload(conn, { 'state', 'fabric' }, { timeout = 0.25 })
+		local summary = probe.wait_fabric_summary(conn, function(payload) return type(payload.links) == 'table' end, { timeout = 0.25 })
 		assert(summary.kind == 'fabric.summary')
 		assert(summary.component == 'summary')
 		assert(type(summary.status) == 'table')
 		assert(summary.status.desired == 0)
 		assert(summary.status.live == 0)
 		assert(type(summary.links) == 'table')
+
+		local tm = probe.wait_transfer_manager_status(conn, function(payload) return payload.live_links == 0 and payload.desired_links == 0 end, { timeout = 0.25 })
+		assert(type(tm) == 'table')
 
 		local r1, e1 = conn:call({ 'cap', 'transfer-manager', 'main', 'rpc', 'send-blob' }, { op = 'status', link_id = 'missing' }, { timeout = 0.25 })
 		assert(r1 == nil)

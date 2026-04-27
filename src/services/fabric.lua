@@ -145,18 +145,37 @@ local function publish_summary(conn, svc, state)
 	conn:retain(FABRIC_STATE_TOPIC, payload)
 end
 
+local function same_plain(a, b)
+	if a == nil or b == nil then return a == b end
+	for k, v in pairs(a) do
+		if b[k] ~= v then return false end
+	end
+	for k, v in pairs(b) do
+		if a[k] ~= v then return false end
+	end
+	return true
+end
+
 local function publish_transfer_manager(conn, svc, state)
 	local live = count_keys(state.links)
 	conn:retain(topics.transfer_mgr_meta(), {
 		owner = svc.name,
 		interface = 'devicecode.cap/transfer-manager/1',
 		methods = { ['send-blob'] = true },
+		events = { ['status-changed'] = true },
 	})
-	conn:retain(topics.transfer_mgr_status(), {
+	local status = {
 		state = 'available',
 		live_links = live,
 		desired_links = count_keys(state.desired),
-	})
+	}
+	if not same_plain(state.transfer_mgr_status, status) then
+		state.transfer_mgr_status = status
+		conn:retain(topics.transfer_mgr_status(), status)
+		conn:publish(topics.transfer_mgr_event('status-changed'), status)
+	else
+		conn:retain(topics.transfer_mgr_status(), status)
+	end
 end
 
 ----------------------------------------------------------------------
@@ -376,6 +395,7 @@ function M.start(conn, opts)
 		desired = {},
 		links = {},
 		restart_at = {},
+		transfer_mgr_status = nil,
 	}
 
 	svc:starting({ desired = 0, live = 0 })

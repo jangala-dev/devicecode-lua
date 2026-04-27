@@ -54,9 +54,11 @@ function T.handshake_and_status_readiness_drive_ready_state()
 		end)
 		assert(ok, tostring(err))
 
-		assert(probe.wait_until(function ()
-			return ctx.session:get().state == 'establishing'
-		end, { timeout = 0.5, interval = 0.01 }))
+		local initial = probe.wait_fabric_link_component(observer, 'link-1', 'session', function(payload)
+			local s = payload and payload.status
+			return type(s) == 'table' and s.state == 'establishing'
+		end, { timeout = 0.5 })
+		assert(type(initial) == 'table')
 
 		local hello_item = assert(select(1, ctx.tx_control_rx:recv()))
 		assert(hello_item.frame.type == 'hello')
@@ -69,17 +71,17 @@ function T.handshake_and_status_readiness_drive_ready_state()
 
 		ctx.status_tx:send({ kind = 'rpc_ready', ready = true })
 
-		assert(probe.wait_until(function ()
-			local snap = ctx.session:get()
-			return snap.established == true and snap.ready == true and snap.state == 'ready'
-		end, { timeout = 0.5, interval = 0.01 }))
+		probe.wait_fabric_link_ready(observer, 'link-1', { timeout = 0.5 })
 
 		local snap = ctx.session:get()
 		assert(snap.peer_sid == 'peer-sid')
 		assert(snap.peer_node == 'peer-node')
 		assert(snap.generation == before.generation)
 
-		local retained = probe.wait_payload(observer, { 'state', 'fabric', 'link', 'link-1', 'session' }, { timeout = 0.25 })
+		local retained = probe.wait_fabric_link_component(observer, 'link-1', 'session', function(payload)
+			local s = payload and payload.status
+			return type(s) == 'table' and s.state == 'ready' and s.peer_sid == 'peer-sid'
+		end, { timeout = 0.25 })
 		assert(retained.kind == 'fabric.link.session')
 		assert(retained.component == 'session')
 		assert(retained.link_id == 'link-1')
@@ -116,16 +118,16 @@ function T.peer_session_change_bumps_generation_and_updates_snapshot()
 		ctx.control_tx:send({ msg = { type = 'hello', sid = 'peer-1', node = 'peer-a' }, at = require('fibers').now() })
 		assert(select(1, ctx.tx_control_rx:recv()).frame.type == 'hello_ack')
 		ctx.status_tx:send({ kind = 'rpc_ready', ready = true })
-		assert(probe.wait_until(function () return ctx.session:get().ready == true end, { timeout = 0.5, interval = 0.01 }))
+		probe.wait_fabric_link_ready(bus:connect(), 'link-2', { timeout = 0.5 })
 
 		local first = ctx.session:get()
 		ctx.control_tx:send({ msg = { type = 'hello', sid = 'peer-2', node = 'peer-b' }, at = require('fibers').now() })
 		assert(select(1, ctx.tx_control_rx:recv()).frame.type == 'hello_ack')
 
-		assert(probe.wait_until(function ()
-			local snap = ctx.session:get()
-			return snap.peer_sid == 'peer-2' and snap.generation == first.generation + 1
-		end, { timeout = 0.5, interval = 0.01 }))
+		probe.wait_fabric_link_component(bus:connect(), 'link-2', 'session', function(payload)
+			local s = payload and payload.status
+			return type(s) == 'table' and s.peer_sid == 'peer-2' and s.generation == first.generation + 1
+		end, { timeout = 0.5 })
 	end)
 end
 
@@ -157,7 +159,7 @@ function T.liveness_timeout_faults_the_link_controller()
 		ctx.control_tx:send({ msg = { type = 'hello', sid = 'peer-live', node = 'peer-live' }, at = require('fibers').now() })
 		assert(select(1, ctx.tx_control_rx:recv()).frame.type == 'hello_ack')
 		ctx.status_tx:send({ kind = 'rpc_ready', ready = true })
-		assert(probe.wait_until(function () return ctx.session:get().ready == true end, { timeout = 0.25, interval = 0.005 }))
+		probe.wait_fabric_link_ready(bus:connect(), 'link-3', { timeout = 0.25 })
 
 		local st, rep, primary = require('fibers').perform(child:join_op())
 		assert(st == 'failed', tostring(primary))

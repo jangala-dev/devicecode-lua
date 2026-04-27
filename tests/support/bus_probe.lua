@@ -266,6 +266,50 @@ function M.wait_update_component(conn, component, pred, opts)
 	end, opts)
 end
 
+
+function M.wait_raw_source_status(conn, kind, source, pred, opts)
+	return M.wait_retained_state(conn, { 'raw', kind, source, 'status' }, function(payload, ev)
+		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
+function M.wait_raw_source_state(conn, kind, source, suffix, pred, opts)
+	local topic = { 'raw', kind, source, 'state' }
+	if type(suffix) == 'table' then
+		for i = 1, #suffix do topic[#topic + 1] = suffix[i] end
+	elseif suffix ~= nil then
+		topic[#topic + 1] = suffix
+	else
+		pred, opts = pred or function() return true end, opts
+	end
+	return M.wait_retained_state(conn, topic, function(payload, ev)
+		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
+function M.wait_fabric_summary(conn, pred, opts)
+	return M.wait_retained_state(conn, { 'state', 'fabric' }, function(payload, ev)
+		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
+function M.wait_fabric_link_component(conn, link_id, component, pred, opts)
+	return M.wait_retained_state(conn, { 'state', 'fabric', 'link', link_id, component }, function(payload, ev)
+		return type(payload) == 'table' and (pred == nil or pred(payload, ev))
+	end, opts)
+end
+
+function M.wait_fabric_link_ready(conn, link_id, opts)
+	return M.wait_fabric_link_component(conn, link_id, 'session', function(payload)
+		local s = payload and payload.status
+		return type(s) == 'table' and s.ready == true and s.state == 'ready'
+	end, opts)
+end
+
+function M.wait_transfer_manager_status(conn, pred, opts)
+	return M.wait_cap_status(conn, 'transfer-manager', 'main', pred, opts)
+end
+
 function M.wait_fabric_link_session(conn, link_id, pred, opts)
 	return M.wait_retained_state(conn, { 'state', 'fabric', 'link', link_id, 'session' }, function(payload, ev)
 		return type(payload) == 'table' and (pred == nil or pred(payload, ev))

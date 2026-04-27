@@ -58,5 +58,6 @@ end
 function M.transfer_mgr_meta() return { 'cap', 'transfer-manager', 'main', 'meta' } end
 function M.transfer_mgr_status() return { 'cap', 'transfer-manager', 'main', 'status' } end
 function M.transfer_mgr_rpc(method) return { 'cap', 'transfer-manager', 'main', 'rpc', method } end
+function M.transfer_mgr_event(name) return { 'cap', 'transfer-manager', 'main', 'event', name } end
 
 return M

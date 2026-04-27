@@ -10,14 +10,8 @@ local fabric     = require 'services.fabric'
 local T = {}
 
 local function wait_ready(conn, link_id, timeout)
-	return probe.wait_until(function()
-		local ok, payload = safe.pcall(function()
-			return probe.wait_payload(conn, { 'state', 'fabric', 'link', link_id, 'session' }, { timeout = 0.02 })
-		end)
-		return ok and type(payload) == 'table'
-			and type(payload.status) == 'table'
-			and payload.status.ready == true
-	end, { timeout = timeout or 2.0, interval = 0.01 })
+	local payload = probe.wait_fabric_link_ready(conn, link_id, { timeout = timeout or 2.0 })
+	return type(payload) == 'table'
 end
 
 function T.fabric_services_reach_ready_on_separate_buses_over_duplex_streams()

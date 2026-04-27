@@ -24,14 +24,8 @@ local function make_svc(conn)
 end
 
 local function wait_ready(conn, link_id, timeout)
-    return probe.wait_until(function()
-        local ok, payload = safe.pcall(function()
-            return probe.wait_payload(conn, { 'state', 'fabric', 'link', link_id, 'session' }, { timeout = 0.02 })
-        end)
-        return ok and type(payload) == 'table'
-            and type(payload.status) == 'table'
-            and payload.status.ready == true
-    end, { timeout = timeout or 1.5, interval = 0.01 })
+	local payload = probe.wait_fabric_link_ready(conn, link_id, { timeout = timeout or 2.0 })
+	return type(payload) == 'table'
 end
 
 local function bind_reply_loop(scope, ep, handler)
@@ -142,8 +136,6 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
         if not wait_ready(caller, 'link-a', 2.0) then diag:fail('expected link-a to reach ready') end
         if not wait_ready(caller, 'link-b', 2.0) then diag:fail('expected link-b to reach ready') end
 
-        local transfer_sub = caller:subscribe({ 'state', 'fabric', 'link', 'link-b', 'transfer' }, { queue_len = 8, full = 'drop_oldest' })
-
         local reply, err = caller:call({ 'cmd', 'xfer', 'link-a' }, {
             op = 'send_blob',
             link_id = 'link-a',
@@ -169,16 +161,9 @@ function T.devhost_fabric_transfer_hands_off_to_local_receiver_before_ack()
             diag:fail('unexpected receiver handoff payload')
         end
 
-        local retained
-        while true do
-            local msg, rerr = transfer_sub:recv()
-            assert(msg ~= nil, tostring(rerr))
-            if type(msg.payload) == 'table' and type(msg.payload.status) == 'table' and msg.payload.status.state == 'done' then
-                retained = msg.payload
-                break
-            end
-        end
-        transfer_sub:unsubscribe()
+        local retained = probe.wait_fabric_link_component(caller, 'link-b', 'transfer', function(payload)
+            return type(payload.status) == 'table' and payload.status.state == 'done'
+        end, { timeout = 1.0, describe = function() return diag:render() end })
         if retained.kind ~= 'fabric.link.transfer'
             or type(retained.status) ~= 'table'
             or retained.status.state ~= 'done'
@@ -251,8 +236,6 @@ function T.devhost_fabric_transfer_receiver_failure_aborts_sender_request()
 
         if not wait_ready(caller, 'link-a', 2.0) then diag:fail('expected link-a to reach ready') end
         if not wait_ready(caller, 'link-b', 2.0) then diag:fail('expected link-b to reach ready') end
-
-        local transfer_sub = caller:subscribe({ 'state', 'fabric', 'link', 'link-b', 'transfer' }, { queue_len = 8, full = 'drop_oldest' })
 
         local reply, err = caller:call({ 'cmd', 'xfer', 'link-a' }, {
             op = 'send_blob',
