@@ -1,0 +1,75 @@
+local busmod = require 'bus'
+local runfibers = require 'tests.support.run_fibers'
+local probe = require 'tests.support.bus_probe'
+local test_diag = require 'tests.support.test_diag'
+local ui_service = require 'services.ui.service'
+local ui_fakes = require 'tests.support.ui_fakes'
+local mailbox = require 'fibers.mailbox'
+
+local T = {}
+
+function T.ui_service_bootstraps_and_tracks_sessions_and_clients()
+	runfibers.run(function(scope)
+		local bus = busmod.new()
+		local seed = bus:connect()
+		ui_fakes.seed_ui_state(seed)
+		local connect, calls = ui_fakes.connect_factory(bus)
+		local captured = {}
+		local cap_tx, cap_rx = mailbox.new(4, { full = 'reject_newest' })
+		local diag = test_diag.for_stack(scope, bus, { ui = true, config = true, max_records = 240 })
+		test_diag.add_calls(diag, 'connect_calls', calls)
+		test_diag.add_subsystem(diag, 'ui', {
+			service_fn = test_diag.retained_fn(bus:connect(), { 'svc', 'ui', 'status' }),
+			meta_fn = test_diag.retained_fn(bus:connect(), { 'svc', 'ui', 'meta' }),
+			config_net_fn = test_diag.retained_fn(bus:connect(), { 'cfg', 'net' }),
+			fabric_fn = test_diag.retained_fn(bus:connect(), { 'state', 'fabric' }),
+		})
+
+		local ok, err = scope:spawn(function()
+			ui_service.start(bus:connect(), {
+				name = 'ui',
+				env = 'dev',
+				connect = connect,
+				verify_login = function(username, password)
+					assert(username == 'alice')
+					assert(password == 'pw')
+					return ui_fakes.principal('alice')
+				end,
+				run_http = function(_, app, http_opts)
+					captured.app = app
+					captured.ws_opts = http_opts.ws_opts
+					cap_tx:send(true)
+					while true do require('fibers.sleep').sleep(3600) end
+				end,
+				model_ready_timeout_s = 0.5,
+			})
+		end)
+		if not ok then diag:fail('failed to spawn ui service: ' .. tostring(err)) end
+
+		assert(cap_rx:recv() == true)
+		local meta = probe.wait_retained_payload(bus:connect(), { 'svc', 'ui', 'meta' }, { timeout = 0.75 })
+		assert(type(meta) == 'table' and meta.role == 'ui')
+		probe.wait_service_running(bus:connect(), 'ui', { timeout = 0.75 })
+		probe.wait_ui_summary(bus:connect(), function(payload)
+			return payload.status == 'running' and payload.model_ready == true
+		end, { timeout = 0.75 })
+
+		local sess, serr = captured.app.login('alice', 'pw')
+		assert(serr == nil)
+		assert(type(sess.session_id) == 'string')
+		probe.wait_ui_summary(bus:connect(), function(payload) return payload.sessions == 1 end, { timeout = 0.5 })
+
+		captured.ws_opts.on_opened()
+		probe.wait_ui_summary(bus:connect(), function(payload) return payload.clients == 1 end, { timeout = 0.5 })
+		captured.ws_opts.on_closed()
+		probe.wait_ui_summary(bus:connect(), function(payload) return payload.clients == 0 end, { timeout = 0.5 })
+
+		local out, lerr = captured.app.logout(sess.session_id)
+		assert(lerr == nil)
+		assert(out.ok == true)
+		probe.wait_ui_summary(bus:connect(), function(payload) return payload.sessions == 0 end, { timeout = 0.5 })
+		assert(#calls == 0)
+	end, { timeout = 2.0 })
+end
+
+return T
