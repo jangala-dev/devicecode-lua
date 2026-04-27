@@ -1,0 +1,70 @@
+local model = require 'services.device.model'
+
+local M = {}
+
+local function copy(v)
+  return model.copy_value(v)
+end
+
+local function ensure_table(v)
+  return type(v) == 'table' and v or {}
+end
+
+local function normalize_software_fact(raw)
+  raw = ensure_table(raw)
+  return {
+    version = raw.version or raw.fw_version or nil,
+    build = raw.build or nil,
+    image_id = raw.image_id or nil,
+    boot_id = raw.boot_id or nil,
+    bootedfw = raw.bootedfw or nil,
+    targetfw = raw.targetfw or nil,
+    upgrade_available = raw.upgrade_available or nil,
+    hw_revision = raw.hw_revision or nil,
+    serial = raw.serial or nil,
+    board_revision = raw.board_revision or nil,
+  }
+end
+
+local function normalize_updater_fact(raw)
+  raw = ensure_table(raw)
+  return {
+    state = raw.state or raw.raw_state or raw.status or raw.kind or nil,
+    raw_state = raw.raw_state or nil,
+    staged = raw.staged,
+    artifact_ref = raw.artifact_ref,
+    artifact_meta = raw.artifact_meta,
+    expected_image_id = raw.expected_image_id,
+    last_error = raw.last_error or raw.err or nil,
+    updated_at = raw.updated_at,
+  }
+end
+
+local function normalize_health_fact(raw)
+  raw = ensure_table(raw)
+  if raw.state ~= nil then return raw.state end
+  if raw.health ~= nil then return raw.health end
+  if next(raw) ~= nil then return 'ok' end
+  return nil
+end
+
+function M.compose(raw_facts)
+  raw_facts = ensure_table(raw_facts)
+
+  local software_raw = raw_facts.software
+  local updater_raw = raw_facts.updater
+  local health_raw = raw_facts.health
+
+  return {
+    software = normalize_software_fact(software_raw),
+    updater = normalize_updater_fact(updater_raw),
+    health = normalize_health_fact(health_raw),
+    raw = {
+      software = copy(software_raw),
+      updater = copy(updater_raw),
+      health = copy(health_raw),
+    },
+  }
+end
+
+return M
