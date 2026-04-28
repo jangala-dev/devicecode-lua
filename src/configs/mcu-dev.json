@@ -34,13 +34,13 @@
           "member_class": "cm5",
           "link_class": "member_uart",
           "hello_interval_s": 1.0,
-          "ping_interval_s": 15.0,
-          "liveness_timeout_s": 45.0,
+          "ping_interval_s": 10.0,
+          "liveness_timeout_s": 30.0,
           "transport": {
             "id": "uart-0"
           },
-          "chunk_size": 1024,
-          "transfer_phase_timeout_s": 5.0,
+          "chunk_size": 2048,
+          "transfer_phase_timeout_s": 15.0,
           "export_publish_rules": [
             {
               "local": ["config", "mcu"],
