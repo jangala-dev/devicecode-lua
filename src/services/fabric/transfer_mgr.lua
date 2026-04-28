@@ -106,7 +106,7 @@ function M.run(ctx)
 	local tx_bulk = assert(ctx.tx_bulk, 'transfer_mgr requires tx_bulk')
 	local transfer_ctl_rx = assert(ctx.transfer_ctl_rx, 'transfer_mgr requires transfer_ctl_rx')
 	local link_id = assert(ctx.link_id, 'transfer_mgr requires link_id')
-	local chunk_size = tonumber(ctx.chunk_size) or 2048
+	local default_chunk_size = tonumber(ctx.chunk_size) or 2048
 	local phase_timeout = tonumber(ctx.transfer_phase_timeout_s) or 15.0
 
 	local transfer_topic = statefmt.component_topic(link_id, 'transfer')
@@ -218,6 +218,7 @@ function M.run(ctx)
 			source = source,
 			size = source:size(),
 			checksum = source:checksum(),
+			chunk_size = tonumber(payload.chunk_size) or default_chunk_size,
 			offset = 0,
 			state = 'waiting_ready',
 			deadline = runtime.now() + phase_timeout,
@@ -255,7 +256,7 @@ function M.run(ctx)
 			return
 		end
 
-		local raw, err = active.source:read_chunk(active.offset, chunk_size)
+		local raw, err = active.source:read_chunk(active.offset, active.chunk_size)
 		if raw == nil then
 			clear_active(err or 'source_error')
 			return
@@ -482,6 +483,19 @@ function M.run(ctx)
 
 		elseif frame.type == 'xfer_need' then
 			if active and active.direction == 'out' and frame.xfer_id == active.xfer_id then
+				-- xfer_need is the receiver's authoritative next-byte
+				-- request. Always honour it -- including rewinding the
+				-- send cursor when the receiver dropped a corrupted
+				-- chunk and asked to resume from earlier than where
+				-- our streaming cursor has reached. Without this the
+				-- maybe_send_outgoing_chunk's offset-equality guard
+				-- silently dropped backward needs and the transfer
+				-- stalled at the gap until phase_timeout.
+				if frame.next ~= active.offset then
+					active.offset = frame.next
+					active.state = 'sending'
+					active.deadline = runtime.now() + phase_timeout
+				end
 				maybe_send_outgoing_chunk(frame.next)
 			end
 
