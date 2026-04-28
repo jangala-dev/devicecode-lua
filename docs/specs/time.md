@@ -18,18 +18,24 @@ Topic: `{'svc', 'time', 'status'}`
 
 ```lua
 {
-  state = 'starting' | 'running' | 'synced' | 'unsynced' | 'stopped',
+  state = 'starting' | 'running' | 'stopped',
   ts    = <number>,
 }
 ```
 
-The `state` field doubles as the authoritative sync signal: it transitions to `'synced'` or `'unsynced'` on every sync state change. It is retained so services that start later immediately receive the current state.
+### Sync state (retained)
+
+Topic: `{'state', 'time', 'synced'}`
+
+Payload: `true` (synced) or `false` (unsynced).
+
+This is the canonical retained domain truth for time-sync state. Services that need to gate behaviour on NTP sync (e.g. alarm management, boot-time metric publication) subscribe here.
 
 ### Time transition events (non-retained)
 
 Topics:
-- `{'obs', 'event', 'time', 'synced'}`
-- `{'obs', 'event', 'time', 'unsynced'}`
+- `{'obs', 'v1', 'time', 'event', 'synced'}`
+- `{'obs', 'v1', 'time', 'event', 'unsynced'}`
 
 Published on state transitions for consumers that need edge-triggered behaviour.
 
@@ -47,9 +53,9 @@ flowchart TD
   G --> H(Read single retained state message and apply sync state)
   H --> H2(Unsubscribe from state/synced)
   H2 --> K{Wait for synced event, unsynced event, or scope done}
-  K -->|synced event| L(Apply synced: set status=synced, emit obs/event/time/synced)
+  K -->|synced event| L(Apply synced: retain state/time/synced=true, emit obs/v1/time/event/synced)
   L --> K
-  K -->|unsynced event| M(Apply unsynced: set status=unsynced, emit obs/event/time/unsynced)
+  K -->|unsynced event| M(Apply unsynced: retain state/time/synced=false, emit obs/v1/time/event/unsynced)
   M --> K
   K -->|scope done| Z
 ```

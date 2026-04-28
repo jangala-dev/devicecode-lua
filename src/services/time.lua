@@ -3,7 +3,7 @@
 -- Time service:
 --  - discovers the first HAL time capability via {'cap','time','+','meta','source'}
 --  - consumes retained state + sync/unsync events from that capability
---  - publishes retained {'svc','time','synced'} for system-wide time trust state
+--  - publishes retained {'state','time','synced'} for system-wide time trust state
 --  - nudges fibers alarm wall-clock handling when sync transitions occur
 
 local fibers = require "fibers"
@@ -27,18 +27,19 @@ local function synced_from_state_payload(payload)
 end
 
 ---@param state table
+---@param conn Connection
 ---@param svc ServiceBase
 ---@param is_synced boolean
 ---@param payload table?
 ---@return nil
-local function apply_sync_state(state, svc, is_synced, payload)
+local function apply_sync_state(state, conn, svc, is_synced, payload)
 	if state.current_synced ~= is_synced then
 		svc:obs_log('info', {
 			what = 'sync_state_transition',
 			from = tostring(state.current_synced),
 			to   = tostring(is_synced),
 		})
-		svc:status(is_synced and 'synced' or 'unsynced')
+		conn:retain({ 'state', 'time', 'synced' }, is_synced)
 		svc:obs_event(is_synced and 'synced' or 'unsynced', payload or {})
 		state.current_synced = is_synced
 	end
@@ -61,10 +62,11 @@ local function apply_sync_state(state, svc, is_synced, payload)
 	end
 end
 
+---@param conn Connection
 ---@param svc ServiceBase
 ---@param cap_ref CapabilityReference
 ---@return nil
-local function monitor_capability(svc, cap_ref)
+local function monitor_capability(conn, svc, cap_ref)
 	svc:obs_log('info', { what = 'capability_monitor_start', cap_id = tostring(cap_ref.id) })
 	local sub_state    = cap_ref:get_state_sub('synced')
 	local sub_synced   = cap_ref:get_event_sub('synced')
@@ -84,7 +86,7 @@ local function monitor_capability(svc, cap_ref)
 			svc:obs_log('info', 'received initial retained sync state')
 			local is_synced = synced_from_state_payload(msg.payload)
 			if is_synced ~= nil then
-				apply_sync_state(state, svc, is_synced, msg.payload)
+				apply_sync_state(state, conn, svc, is_synced, msg.payload)
 			else
 				svc:obs_log('warn', { what = 'initial_state_invalid', reason = 'missing boolean synced field' })
 			end
@@ -106,9 +108,9 @@ local function monitor_capability(svc, cap_ref)
 		end
 
 		if which == 'synced' then
-			apply_sync_state(state, svc, true, msg.payload)
+			apply_sync_state(state, conn, svc, true, msg.payload)
 		elseif which == 'unsynced' then
-			apply_sync_state(state, svc, false, msg.payload)
+			apply_sync_state(state, conn, svc, false, msg.payload)
 		else
 			svc:obs_log('warn', { what = 'unknown_event_source', source = tostring(which) })
 		end
@@ -126,19 +128,17 @@ function M.start(conn, opts)
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
 	svc:obs_log('info', 'service start() entered')
-	svc:status('starting')
+	svc:announce({})
+	svc:starting()
 	svc:spawn_heartbeat(heartbeat_s, 'tick')
 
 	fibers.current_scope():finally(function()
-		local st, primary = fibers.current_scope():status()
-		if st == 'failed' then
-			svc:obs_log('error', { what = 'scope_failed', err = tostring(primary), status = st })
-		end
-		svc:status('stopped', { reason = tostring(primary or 'scope_exit') })
+		local _, primary = fibers.current_scope():status()
+		svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'scope_exit') })
 		svc:obs_log('info', 'service stopped')
 	end)
 
-	svc:status('running')
+	svc:running()
 
 	local cap_listener = cap_sdk.new_cap_listener(conn, 'time', '+')
 	svc:obs_log('info', { what = 'waiting_for_time_capability', timeout = wait_timeout_s })
@@ -152,7 +152,7 @@ function M.start(conn, opts)
 	end
 
 	svc:obs_log('info', { what = 'capability_selected', cap_id = tostring(cap_ref.id) })
-	monitor_capability(svc, cap_ref)
+	monitor_capability(conn, svc, cap_ref)
 end
 
 return M
