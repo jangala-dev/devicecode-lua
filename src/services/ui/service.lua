@@ -162,8 +162,16 @@ function M.start(conn, opts)
 		local changed = false
 		local sessions_n = session_store:count()
 		local model_ready = model and model:is_ready() or false
-		local model_seq = model and model:seq() or 0
 		local clients_n = client_count
+
+		-- model_seq is refreshed in the aggregate so the next publish
+		-- carries a current value, but it is intentionally NOT a
+		-- republish trigger. Why: publish_main_state retains
+		-- state/ui/summary, which the model subscribes to (state/#),
+		-- which bumps model_seq, which used to fire a republish, which
+		-- bumped model_seq again -- a tight self-feeding loop that
+		-- pinned the CPU and spammed retains.
+		aggregate.model_seq = model and model:seq() or 0
 
 		if aggregate.sessions ~= sessions_n then
 			aggregate.sessions = sessions_n
@@ -175,10 +183,6 @@ function M.start(conn, opts)
 		end
 		if aggregate.model_ready ~= model_ready then
 			aggregate.model_ready = model_ready
-			changed = true
-		end
-		if aggregate.model_seq ~= model_seq then
-			aggregate.model_seq = model_seq
 			changed = true
 		end
 
