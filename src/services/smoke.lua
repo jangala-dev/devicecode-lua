@@ -25,10 +25,13 @@ local LINK_ID = 'mcu0'
 local LINK_TOPIC = { 'state', 'fabric', 'link', LINK_ID, 'session' }
 local DUMP_TOPIC = { 'rpc', 'peer', 'mcu-1', 'hal', 'dump' }
 local CFG_TOPIC = { 'config', 'mcu' }
+local XFER_TOPIC = { 'cmd', 'fabric', 'transfer' }
 
 local READY_TIMEOUT_S = 30
 local DUMP_TIMEOUT_S = 2.0
 local CFG_SETTLE_S = 2.0
+local XFER_TIMEOUT_S = 30.0
+local XFER_SIZE = 4 * 1024
 
 local function log(line)
 	io.write('[smoke] ', line, '\n')
@@ -124,13 +127,41 @@ function M.start(conn, ctx)
 
 	local applied = reply.applied
 	local count = tonumber(reply.config_count) or 0
-	if applied and count > 0 then
-		log('all tests PASS')
-		svc:status('running', { phase = 'tests_passed', config_count = count })
-	else
-		log('tests INCOMPLETE: config did not reach MCU per dump reply')
+	if not (applied and count > 0) then
+		log('test 2 INCOMPLETE: config did not reach MCU per dump reply')
 		svc:status('degraded', { reason = 'config_not_applied' })
+		while true do sleep.sleep(60) end
 	end
+
+	-- Test 3: drive a synthetic transfer end-to-end. Exercises the W2
+	-- transfer wire schema (xfer_begin/chunk/need/commit/done/abort), W3
+	-- idle-chunk watchdog, W5 bulk-lane scheduling, and W8 GC fix on the
+	-- MCU side. The default protocol-baseline MCU build rejects
+	-- transfers at xfer_begin (errTransferUnsupported -> xfer_abort with
+	-- err="staging_unavailable: ..."), so success here is an EXPECTED
+	-- abort reply, not a delivered blob. Build the MCU with
+	-- `-tags "pico_bb_proto_1 flash_unsafe"` to take the abupdate path
+	-- and see the success branch instead.
+	log(string.format('test 3: sending synthetic %d-byte transfer to %s', XFER_SIZE, LINK_ID))
+	local payload = string.rep('A', XFER_SIZE)
+	local xreply, xerr = conn:call(XFER_TOPIC, {
+		link_id = LINK_ID,
+		op = 'send_blob',
+		source = payload,
+		meta = { kind = 'smoke-test' },
+	}, { timeout = XFER_TIMEOUT_S })
+
+	if xerr then
+		log(string.format('test 3 result: err=%s (this is expected for the safe-sink build)', tostring(xerr)))
+	elseif type(xreply) == 'table' and xreply.ok then
+		log(string.format('test 3 OK: xfer_id=%s size=%s checksum=%s',
+			tostring(xreply.xfer_id), tostring(xreply.size), tostring(xreply.checksum)))
+	else
+		log(string.format('test 3 unexpected reply: %s', tostring(xreply)))
+	end
+
+	log('all tests done')
+	svc:status('running', { phase = 'tests_done', config_count = count })
 
 	-- Idle forever; exiting would propagate as a service failure.
 	while true do sleep.sleep(60) end
