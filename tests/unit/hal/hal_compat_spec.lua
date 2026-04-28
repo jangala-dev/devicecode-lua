@@ -1,0 +1,387 @@
+local busmod     = require 'bus'
+local safe       = require 'coxpcall'
+local fibers     = require 'fibers'
+local op         = require 'fibers.op'
+local channel    = require 'fibers.channel'
+
+local runfibers  = require 'tests.support.run_fibers'
+local cap_sdk    = require 'services.hal.sdk.cap'
+local core_types = require 'services.hal.types.core'
+local cap_types  = require 'services.hal.types.capabilities'
+
+local T = {}
+
+local function patch_modules(patches, fn)
+	local saved = {}
+	for name, value in pairs(patches) do
+		saved[name] = package.loaded[name]
+		package.loaded[name] = value
+	end
+
+	local old_hal = package.loaded['services.hal']
+	package.loaded['services.hal'] = nil
+
+	local ok, a, b = safe.pcall(fn)
+
+	package.loaded['services.hal'] = old_hal
+	for name, old in pairs(saved) do
+		package.loaded[name] = old
+	end
+
+	if not ok then
+		error(a, 0)
+	end
+
+	return a, b
+end
+
+local function new_bootstrap_filesystem_manager()
+	local manager = {}
+
+	function manager.start(_logger, _dev_ev_ch, _cap_emit_ch)
+		manager.scope = fibers.current_scope()
+		return ''
+	end
+
+	function manager.apply_config(_self, cfg)
+		manager.last_cfg = cfg
+		return true, nil
+	end
+
+	function manager.stop(_self)
+		-- Deliberately returns nothing: this is the legacy normalisation case.
+	end
+
+	return manager
+end
+
+local function new_capability_manager(opts)
+	opts = opts or {}
+
+	local manager = {
+		name       = assert(opts.name, 'name required'),
+		cap_class  = assert(opts.cap_class, 'cap_class required'),
+		cap_id     = assert(opts.cap_id, 'cap_id required'),
+		offerings  = opts.offerings or { 'echo' },
+		apply_mode = opts.apply_mode or 'legacy',
+		no_reply   = not not opts.no_reply,
+		reply_fn   = opts.reply_fn,
+		calls      = {},
+		__op_only  = (opts.apply_mode == 'op'),
+	}
+
+	local control_ch = channel.new()
+	local emitted = false
+
+	local function emit_added()
+		if emitted then return end
+		emitted = true
+
+		local cap, cap_err = cap_types.new.Capability(
+			manager.cap_class,
+			manager.cap_id,
+			control_ch,
+			manager.offerings
+		)
+		assert(cap, tostring(cap_err))
+
+		local dev_ev, dev_err = core_types.new.DeviceEvent(
+			'added',
+			'testdev',
+			manager.name,
+			{},
+			{ cap }
+		)
+		assert(dev_ev, tostring(dev_err))
+
+		local sent, send_err = fibers.perform(manager.dev_ev_ch:put_op(dev_ev))
+		assert(sent ~= false, tostring(send_err))
+	end
+
+	local function control_worker(scope)
+		while true do
+			local which, a, b = fibers.perform(fibers.named_choice{
+				req  = control_ch:get_op(),
+				stop = scope:not_ok_op(),
+			})
+
+			if which == 'stop' then
+				return
+			end
+
+			local req = a
+			manager.calls[#manager.calls + 1] = {
+				verb = req.verb,
+				opts = req.opts,
+			}
+
+			if manager.no_reply then
+				-- Consume the request and deliberately never reply.
+			else
+				local ok, reason
+				if manager.reply_fn then
+					ok, reason = manager.reply_fn(req)
+				else
+					ok, reason = true, {
+						manager = manager.name,
+						verb    = req.verb,
+						echo    = req.opts and req.opts.value,
+					}
+				end
+
+				local reply, reply_err = core_types.new.Reply(ok, reason)
+				assert(reply, tostring(reply_err))
+
+				local sent, send_err = fibers.perform(req.reply_ch:put_op(reply))
+				assert(sent ~= false, tostring(send_err))
+			end
+		end
+	end
+
+	if manager.apply_mode == 'op' then
+		function manager.start_op(_logger, dev_ev_ch, _cap_emit_ch)
+			return op.guard(function()
+				manager.scope = fibers.current_scope()
+				manager.dev_ev_ch = dev_ev_ch
+
+				local ok, err = manager.scope:spawn(function(s)
+					control_worker(s)
+				end)
+				if not ok then
+					return op.always(false, tostring(err))
+				end
+
+				return op.always(true, nil)
+			end)
+		end
+
+		function manager.apply_config_op(cfg)
+			return op.guard(function()
+				manager.last_cfg = cfg
+				manager.apply_calls = (manager.apply_calls or 0) + 1
+				emit_added()
+				return op.always(true, nil)
+			end)
+		end
+
+		function manager.stop_op(_timeout)
+			return op.guard(function()
+				manager.stop_calls = (manager.stop_calls or 0) + 1
+				return op.always(true, nil)
+			end)
+		end
+	else
+		function manager.start(_logger, dev_ev_ch, _cap_emit_ch)
+			manager.scope = fibers.current_scope()
+			manager.dev_ev_ch = dev_ev_ch
+
+			local ok, err = manager.scope:spawn(function(s)
+				control_worker(s)
+			end)
+			assert(ok, tostring(err))
+
+			return ''
+		end
+
+		function manager.apply_config(_self, cfg)
+			manager.last_cfg = cfg
+			manager.apply_calls = (manager.apply_calls or 0) + 1
+			emit_added()
+			return true, nil
+		end
+
+		function manager.stop(_self)
+			manager.stop_calls = (manager.stop_calls or 0) + 1
+			-- Legacy-compatible nil return.
+		end
+	end
+
+	return manager
+end
+
+local function with_real_hal(scope, patches, body)
+	return patch_modules(patches, function()
+		local hal = require 'services.hal'
+		local bus = busmod.new()
+
+		local ok_spawn, spawn_err = scope:spawn(function()
+			hal.start(bus:connect(), { name = 'hal' })
+		end)
+		assert(ok_spawn, tostring(spawn_err))
+
+		local probe_conn = bus:connect()
+		return body(bus, probe_conn)
+	end)
+end
+
+function T.non_legacy_managers_must_expose_op_methods()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local legacy_mgr = new_capability_manager{
+			name = 'legacy_mgr',
+			cap_class = 'legacy_cap',
+			cap_id = 'cap1',
+			apply_mode = 'legacy',
+			offerings = { 'echo' },
+		}
+
+		-- Make this fixture explicitly strict, but leave apply_config_op absent.
+		legacy_mgr.__op_only = true
+
+		function legacy_mgr.start_op(_logger, dev_ev_ch, _cap_emit_ch)
+			return op.guard(function()
+				legacy_mgr.scope = fibers.current_scope()
+				legacy_mgr.dev_ev_ch = dev_ev_ch
+				return op.always(true, nil)
+			end)
+		end
+
+		function legacy_mgr.stop_op(_timeout)
+			return op.guard(function()
+				legacy_mgr.stop_calls = (legacy_mgr.stop_calls or 0) + 1
+				return op.always(true, nil)
+			end)
+		end
+
+		local ok, err = safe.pcall(function()
+			with_real_hal(scope, {
+				['services.hal.managers.filesystem'] = fs_manager,
+				['services.hal.managers.legacy_mgr'] = legacy_mgr,
+			}, function(bus, _probe_conn)
+				local admin = bus:connect()
+				admin:retain({ 'cfg', 'hal' }, {
+					data = {
+						schema = 'devicecode.config/hal/1',
+						legacy_mgr = {},
+					},
+				})
+				fibers.perform(require('fibers.sleep').sleep_op(0.05))
+			end)
+		end)
+
+		assert(ok == false)
+		assert(tostring(err):match('legacy_mgr'))
+		assert(tostring(err):match('apply_config_op'))
+	end)
+end
+
+function T.op_manager_methods_work_through_real_hal()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local op_mgr = new_capability_manager{
+			name = 'op_mgr',
+			cap_class = 'op_cap',
+			cap_id = 'cap2',
+			apply_mode = 'op',
+			offerings = { 'echo' },
+		}
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.op_mgr'] = op_mgr,
+		}, function(bus, _probe_conn)
+			local admin = bus:connect()
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					op_mgr = {},
+				},
+			})
+
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'op_cap', 'cap2')
+			local ref, err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(err))
+			assert(ref.call_control == nil)
+
+			local reply, call_err = fibers.perform(ref:call_control_op('echo', { value = 7 }))
+			assert(reply, tostring(call_err))
+			assert(reply.ok == true)
+			assert(type(reply.reason) == 'table')
+			assert(reply.reason.echo == 7)
+			assert(reply.reason.verb == 'echo')
+
+			assert((op_mgr.apply_calls or 0) == 1)
+			assert(#op_mgr.calls == 1)
+		end)
+	end)
+end
+
+function T.unsupported_control_verb_returns_negative_reply()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local mgr = new_capability_manager{
+			name = 'verb_mgr',
+			cap_class = 'verb_cap',
+			cap_id = 'cap3',
+			apply_mode = 'op',
+			offerings = { 'echo' },
+		}
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.verb_mgr'] = mgr,
+		}, function(bus, _probe_conn)
+			local admin = bus:connect()
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					verb_mgr = {},
+				},
+			})
+
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'verb_cap', 'cap3')
+			local ref, err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(err))
+
+			local reply, call_err = fibers.perform(ref:call_control_op('missing', {}))
+			assert(reply == nil)
+			assert(call_err == 'no_route' or tostring(call_err):match('no_route'))
+		end)
+	end)
+end
+
+function T.missing_capability_reply_times_out_cleanly()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local mgr = new_capability_manager{
+			name = 'timeout_mgr',
+			cap_class = 'timeout_cap',
+			cap_id = 'cap4',
+			apply_mode = 'op',
+			offerings = { 'echo' },
+			no_reply = true,
+		}
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.timeout_mgr'] = mgr,
+		}, function(bus, _probe_conn)
+			local admin = bus:connect()
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					timeout_mgr = {},
+				},
+			})
+
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'timeout_cap', 'cap4')
+			local ref, wait_err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(wait_err))
+
+			local reply, err = fibers.perform(ref:call_control_op('echo', { value = 9 }, {
+				timeout = 0.05,
+				backoff = 0.01,
+				backoff_max = 0.01,
+			}))
+
+			assert(reply == nil)
+			assert(type(err) == 'string')
+			assert(err:match('timeout'))
+		end)
+	end)
+end
+
+return T

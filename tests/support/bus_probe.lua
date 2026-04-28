@@ -29,10 +29,11 @@ end
 function M.wait_message(conn, topic, opts)
 	opts = opts or {}
 	local timeout = opts.timeout or 1.0
-	local sub = conn:subscribe(topic, {
+	local sub = opts.sub or conn:subscribe(topic, {
 		queue_len = opts.queue_len or 8,
 		full      = opts.full or 'drop_oldest',
 	})
+	local own_sub = (opts.sub == nil)
 
 	local which, a, b = fibers.perform(op.named_choice({
 		msg = sub:recv_op(),
@@ -41,7 +42,9 @@ function M.wait_message(conn, topic, opts)
 		end),
 	}))
 
-	sub:unsubscribe()
+	if own_sub then
+		sub:unsubscribe()
+	end
 
 	if which == 'timeout' then
 		fail(('timed out waiting for topic %s'):format(tostring(topic[1] or '?')))

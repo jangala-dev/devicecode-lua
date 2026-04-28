@@ -23,15 +23,16 @@ local stdlib = require 'posix.stdlib'
 assert(stdlib.setenv('CONFIG_TARGET', 'services'))
 
 local files = {
-	'unit.devicecode.service_base_spec',
 	'unit.config.codec_spec',
 	'unit.config.state_spec',
-	'unit.hal.sdk_cap_spec',
-	'unit.hal.service_raw_host_spec',
 	'unit.main.service_spec',
 	'unit.config.service_spec',
+	'unit.devicecode.service_base_spec',
+	'unit.hal.cap_sdk_spec',
+	'unit.hal.hal_compat_spec',
+	'unit.hal.service_raw_host_spec',
 	'integration.devhost.main_failure_spec',
-	'integration.devhost.config_recovery_spec'
+	'integration.devhost.config_recovery_spec',
 }
 
 local function monotonic_now()
