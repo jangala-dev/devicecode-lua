@@ -41,36 +41,24 @@
           },
           "chunk_size": 2048,
           "transfer_phase_timeout_s": 15.0,
-          "export_publish_rules": [
-            {
-              "local": ["config", "mcu"],
-              "remote": ["config", "device"]
-            }
-          ],
-          "export_retained_rules": [
-            {
-              "local": ["config", "mcu"],
-              "remote": ["config", "device"]
-            }
-          ],
+          "export_publish_rules": [],
+          "export_retained_rules": [],
           "import_rules": [
             {
               "local": ["peer", "mcu-1", "state"],
               "remote": ["state"]
-            }
-          ],
-          "inbound_call_rules": [
+            },
             {
-              "local": ["rpc", "hal", "read_state"],
-              "remote": ["rpc", "hal", "read_state"],
-              "timeout": 0.5
+              "local": ["peer", "mcu-1", "event"],
+              "remote": ["event"]
             }
           ],
+          "inbound_call_rules": [],
           "outbound_call_rules": [
             {
-              "local": ["rpc", "peer", "mcu-1", "hal", "dump"],
-              "remote": ["rpc", "hal", "dump"],
-              "timeout": 0.5
+              "local": ["raw", "member", "mcu", "cap", "updater", "main", "rpc"],
+              "remote": ["cmd", "self", "updater"],
+              "timeout": 2.0
             }
           ]
         }

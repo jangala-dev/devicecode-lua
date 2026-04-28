@@ -1,19 +1,26 @@
 -- services/smoke.lua
 --
--- Hardware bring-up smoke tests for the devicecode-go MCU
--- protocol-alignment branch. Enable by setting
+-- Hardware bring-up smoke tests for the devicecode-go fabric-update
+-- branch. Enable by setting
 --   DEVICECODE_SERVICES=monitor,hal,config,fabric,smoke
 -- and the service will, after the mcu0 fabric link reaches ready=true,
 -- run scripted canary tests against the real MCU and print [smoke]
 -- lines on stdout.
 --
 -- Tests
---   1. Push a HAL config to the MCU via `config/mcu` retain. The
---      fabric export rule maps it to `config/device` on the wire and
---      the MCU imports it as `config/hal`.
---   2. Call `rpc/peer/mcu-1/hal/dump` and check the reply.
---      `applied=true` plus a non-zero `config_count` confirms the
---      MCU received and applied the config from test 1.
+--   1. Observe state/self/software retain. The W5 identity fact must
+--      arrive on every newly established session (W10 republish edge).
+--      Verifies fabric exports + the new state/self/* surface end to
+--      end on the wire.
+--   2. Call cmd/self/updater/prepare via outbound_call_rules. Replies
+--      {ok=true, accepted=true} on success per W4.
+--   3. Drive a synthetic transfer with meta.receiver. The default
+--      MCU build's stub verifier rejects every artefact; expect
+--      xfer_abort with the verifier_stub sentinel string.
+--
+-- Notes
+-- - Pre-W12 smoke pushed config/mcu retain and used rpc/hal/dump.
+--   Both paths are gone. The new surface is what this file targets.
 
 local runtime = require 'fibers.runtime'
 local sleep   = require 'fibers.sleep'
@@ -23,72 +30,56 @@ local M = {}
 
 local LINK_ID = 'mcu0'
 local LINK_TOPIC = { 'state', 'fabric', 'link', LINK_ID, 'session' }
-local DUMP_TOPIC = { 'rpc', 'peer', 'mcu-1', 'hal', 'dump' }
-local CFG_TOPIC = { 'config', 'mcu' }
-local XFER_TOPIC = { 'cmd', 'fabric', 'transfer' }
+
+-- Imported MCU state lands at peer/mcu-1/state/self/* per the
+-- mcu-dev.json import_rules ([peer mcu-1 state] <- remote [state]).
+local SOFTWARE_FACT_TOPIC = { 'peer', 'mcu-1', 'state', 'self', 'software' }
+local UPDATER_FACT_TOPIC  = { 'peer', 'mcu-1', 'state', 'self', 'updater' }
+
+-- Outbound RPC routing (mcu-dev.json outbound_call_rules):
+-- [raw member mcu cap updater main rpc *] -> remote [cmd self updater *]
+local PREPARE_TOPIC = { 'raw', 'member', 'mcu', 'cap', 'updater', 'main', 'rpc', 'prepare' }
+local XFER_TOPIC    = { 'cmd', 'fabric', 'transfer' }
 
 local READY_TIMEOUT_S = 30
-local DUMP_TIMEOUT_S = 2.0
-local CFG_SETTLE_S = 2.0
-local XFER_TIMEOUT_S = 30.0
-local XFER_SIZE = 4 * 1024
+local FACT_TIMEOUT_S  = 10
+local RPC_TIMEOUT_S   = 2.0
+local XFER_TIMEOUT_S  = 30.0
+local XFER_SIZE       = 4 * 1024
 
 local function log(line)
 	io.write('[smoke] ', line, '\n')
 	io.flush()
 end
 
-local function payload_brief(p)
-	if type(p) ~= 'table' then return tostring(p) end
-	local s = p.status
-	if type(s) == 'table' then
-		return string.format('kind=%s component=%s status.ready=%s status.established=%s status.peer_sid=%s',
-			tostring(p.kind), tostring(p.component),
-			tostring(s.ready), tostring(s.established), tostring(s.peer_sid))
-	end
-	return string.format('kind=%s component=%s ready=%s established=%s peer_sid=%s',
-		tostring(p.kind), tostring(p.component),
-		tostring(p.ready), tostring(p.established), tostring(p.peer_sid))
-end
-
 local function wait_for_ready(conn, timeout_s)
 	local sub = conn:subscribe(LINK_TOPIC, { queue_len = 8, full = 'drop_oldest' })
-	log('subscribed to ' .. table.concat(LINK_TOPIC, '/'))
 	local deadline = runtime.now() + timeout_s
 	while runtime.now() < deadline do
 		local msg = sub:recv()
-		if msg then
-			-- Diagnostic: log every received link-state message so we can
-			-- see exactly what the lua side publishes. Helpful when this
-			-- service hangs at waiting_for_link despite the link being up.
-			log('rx ' .. payload_brief(msg.payload))
-			if type(msg.payload) == 'table' then
-				-- statefmt.link_component wraps the snapshot under .status,
-				-- but tolerate the un-wrapped shape too just in case.
-				local status = msg.payload.status
-				if type(status) == 'table' and status.ready == true then
-					return true, status
-				end
-				if msg.payload.ready == true then
-					return true, msg.payload
-				end
+		if msg and type(msg.payload) == 'table' then
+			local status = msg.payload.status
+			if type(status) == 'table' and status.ready == true then
+				return true, status
+			end
+			if msg.payload.ready == true then
+				return true, msg.payload
 			end
 		end
 	end
 	return false, 'timeout waiting for link ready'
 end
 
-local function push_config(conn)
-	conn:retain(CFG_TOPIC, {
-		schema  = 'devicecode.config/hal/1',
-		devices = {},
-		pollers = {},
-	})
-end
-
-local function call_dump(conn)
-	local reply, err = conn:call(DUMP_TOPIC, {}, { timeout = DUMP_TIMEOUT_S })
-	return reply, err
+local function wait_for_software_fact(conn, timeout_s)
+	local sub = conn:subscribe(SOFTWARE_FACT_TOPIC, { queue_len = 4, full = 'drop_oldest' })
+	local deadline = runtime.now() + timeout_s
+	while runtime.now() < deadline do
+		local msg = sub:recv()
+		if msg and type(msg.payload) == 'table' then
+			return true, msg.payload
+		end
+	end
+	return false, 'timeout waiting for state/self/software'
 end
 
 function M.start(conn, ctx)
@@ -106,62 +97,76 @@ function M.start(conn, ctx)
 	log(string.format('link ready; peer_sid=%s peer_node=%s',
 		tostring(info.peer_sid), tostring(info.peer_node)))
 
-	log('test 1: pushing config/mcu retain (-> wire config/device -> MCU config/hal)')
-	push_config(conn)
-	sleep.sleep(CFG_SETTLE_S)
+	-- Test 1: observe state/self/software retain.
+	log('test 1: observing peer/mcu-1/state/self/software (W5 identity fact)')
+	local got, sw = wait_for_software_fact(conn, FACT_TIMEOUT_S)
+	if not got then
+		log('test 1 FAIL: ' .. tostring(sw))
+		svc:status('degraded', { reason = 'no_software_fact' })
+		return
+	end
+	log(string.format('test 1 OK: version=%s build=%s image_id=%s boot_id=%s',
+		tostring(sw.version), tostring(sw.build), tostring(sw.image_id), tostring(sw.boot_id)))
+	if type(sw.boot_id) ~= 'string' or #sw.boot_id ~= 16 then
+		log('test 1 WARN: boot_id length != 16: ' .. tostring(sw.boot_id))
+	end
 
-	log('test 2: calling rpc/peer/mcu-1/hal/dump')
-	local reply, err = call_dump(conn)
+	-- Test 2: call cmd/self/updater/prepare via outbound_call_rules.
+	log('test 2: calling cmd/self/updater/prepare via outbound_call_rules')
+	local reply, err = conn:call(PREPARE_TOPIC, { target = 'img-test', metadata = nil },
+		{ timeout = RPC_TIMEOUT_S })
 	if err then
 		log('test 2 FAIL: ' .. tostring(err))
-		svc:status('degraded', { reason = 'rpc_failed', err = tostring(err) })
+		svc:status('degraded', { reason = 'prepare_failed', err = tostring(err) })
 		return
 	end
-	if type(reply) ~= 'table' or not reply.ok then
+	if type(reply) ~= 'table' or not reply.ok or not reply.accepted then
 		log('test 2 FAIL: bad reply: ' .. tostring(reply))
-		svc:status('degraded', { reason = 'rpc_bad_reply' })
+		svc:status('degraded', { reason = 'prepare_bad_reply' })
 		return
 	end
-	log(string.format('test 2 reply: ok=%s applied=%s config_count=%s',
-		tostring(reply.ok), tostring(reply.applied), tostring(reply.config_count)))
+	log('test 2 OK: prepare ok=true accepted=true')
 
-	local applied = reply.applied
-	local count = tonumber(reply.config_count) or 0
-	if not (applied and count > 0) then
-		log('test 2 INCOMPLETE: config did not reach MCU per dump reply')
-		svc:status('degraded', { reason = 'config_not_applied' })
-		while true do sleep.sleep(60) end
-	end
-
-	-- Test 3: drive a synthetic transfer end-to-end. Exercises the W2
-	-- transfer wire schema (xfer_begin/chunk/need/commit/done/abort), W3
-	-- idle-chunk watchdog, W5 bulk-lane scheduling, and W8 GC fix on the
-	-- MCU side. The default protocol-baseline MCU build rejects
-	-- transfers at xfer_begin (errTransferUnsupported -> xfer_abort with
-	-- err="staging_unavailable: ..."), so success here is an EXPECTED
-	-- abort reply, not a delivered blob. Build the MCU with
-	-- `-tags "pico_bb_proto_1 flash_unsafe"` to take the abupdate path
-	-- and see the success branch instead.
-	log(string.format('test 3: sending synthetic %d-byte transfer to %s', XFER_SIZE, LINK_ID))
+	-- Test 3: synthetic transfer with meta.receiver; expect rejection
+	-- via the safe-default stub verifier.
+	log(string.format('test 3: sending synthetic %d-byte transfer with meta.receiver', XFER_SIZE))
 	local payload = string.rep('A', XFER_SIZE)
 	local xreply, xerr = conn:call(XFER_TOPIC, {
 		link_id = LINK_ID,
 		op = 'send_blob',
 		source = payload,
-		meta = { kind = 'smoke-test' },
+		meta = {
+			kind = 'smoke-test',
+			receiver = { 'raw', 'member', 'mcu', 'cap', 'updater', 'main', 'rpc', 'receive' },
+		},
 	}, { timeout = XFER_TIMEOUT_S })
 
 	if xerr then
-		log(string.format('test 3 result: err=%s (this is expected for the safe-sink build)', tostring(xerr)))
+		log(string.format('test 3 result: err=%s (expected on stub-verifier build)', tostring(xerr)))
 	elseif type(xreply) == 'table' and xreply.ok then
-		log(string.format('test 3 OK: xfer_id=%s size=%s checksum=%s',
-			tostring(xreply.xfer_id), tostring(xreply.size), tostring(xreply.checksum)))
+		log(string.format('test 3 OK: xfer_id=%s size=%s', tostring(xreply.xfer_id), tostring(xreply.size)))
 	else
-		log(string.format('test 3 unexpected reply: %s', tostring(xreply)))
+		log('test 3 unexpected reply: ' .. tostring(xreply))
+	end
+
+	-- Optional follow-up: observe state/self/updater for the staged
+	-- transition. With the stub verifier this stays at running/idle;
+	-- with fakeVerifierAccept (from fabric-security) it would flip to
+	-- staged after test 3.
+	local upSub = conn:subscribe(UPDATER_FACT_TOPIC, { queue_len = 4, full = 'drop_oldest' })
+	local upDeadline = runtime.now() + 2
+	while runtime.now() < upDeadline do
+		local msg = upSub:recv()
+		if msg and type(msg.payload) == 'table' then
+			log(string.format('updater fact: state=%s last_error=%s pending_version=%s',
+				tostring(msg.payload.state), tostring(msg.payload.last_error),
+				tostring(msg.payload.pending_version)))
+			break
+		end
 	end
 
 	log('all tests done')
-	svc:status('running', { phase = 'tests_done', config_count = count })
+	svc:status('running', { phase = 'tests_done' })
 
 	-- Idle forever; exiting would propagate as a service failure.
 	while true do sleep.sleep(60) end
