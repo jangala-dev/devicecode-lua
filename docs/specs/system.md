@@ -26,9 +26,9 @@ HAL capabilities consumed:
 
 Service topics consumed:
 
-| Topic                       | Usage                                                              |
-|-----------------------------|--------------------------------------------------------------------|
-| `{'svc', 'time', 'synced'}` | Retained bool — both fibers subscribe; sysinfo fiber uses it to gate `boot_time` computation; main fiber uses it to sync/desync alarms |
+| Topic                         | Usage                                                              |
+|-------------------------------|--------------------------------------------------------------------|
+| `{'state', 'time', 'synced'}` | Retained bool — both fibers subscribe; sysinfo fiber uses it to gate `boot_time` computation; main fiber uses it to sync/desync alarms |
 
 ## Configuration
 
@@ -103,7 +103,7 @@ Alarms are replaced wholesale on each config update: `delete_all()` followed by 
 When an alarm with `type = 'shutdown'` or `type = 'reboot'` fires:
 
 1. Compute `deadline = monotime() + 10`.
-2. Publish retained `{'+', 'control', 'shutdown'}` with `{ reason = alarm.payload.name, deadline = deadline }`.
+2. Publish retained `{'state', 'system', 'shutdown'}` with `{ reason = alarm.payload.name, deadline = deadline }`.
 3. Create an independent scope with a deadline of `deadline + 1` (one extra second beyond the broadcast deadline).
 4. Subscribe to `{'+', 'health'}` and track all services that are not yet `'disabled'`.
 5. Wait for all tracked services to reach `'disabled'` state, or until the deadline scope expires.
@@ -118,7 +118,7 @@ The shutdown scope is independent of the service scope, since the service scope 
 
 ```mermaid
 flowchart TD
-  St[Start] --> A(Subscribe to cfg/system + svc/time/synced)
+  St[Start] --> A(Subscribe to cfg/system + state/time/synced)
   A --> B{op.choice: config msg, time synced msg, alarm fires, scope cancelled}
   B -->|config msg| C(Apply config: update report_period channel, handle USB3, reload alarms)
   C --> B
@@ -139,7 +139,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  St[Start] --> A(Subscribe to svc/time/synced + thermal cap meta)
+  St[Start] --> A(Subscribe to state/time/synced + thermal cap meta)
   A --> B(Receive report_period from config channel)
   B --> C(Read platform retained state; publish hw_revision, fw_version, serial, board_revision metrics)
   C --> D{op.choice: sleep report_period, new report_period, time synced msg, thermal meta msg, scope cancelled}
@@ -166,6 +166,6 @@ flowchart TD
 - Platform static identity fields are read once from the retained `platform` state topic at sysinfo fiber startup. Each field is immediately published as an `obs/v1/system/metric/<name>` metric. They are not re-published on each report cycle.
 - USB3 handling: if `usb3_enabled = false` in config, call `cap/usb/usb3/rpc/disable`. If `usb3_enabled = true`, call `cap/usb/usb3/rpc/enable`. This is idempotent (calling disable when already disabled is harmless).
 - The sysinfo fiber does **not** fail if any individual `get` RPC fails — it logs a warning and skips publishing that metric.
-- The sysinfo fiber subscribes to `{'svc', 'time', 'synced'}` and maintains a local `time_synced` flag. `boot_time` (`os.time() - uptime`) is only computed and published when `time_synced = true`, ensuring the wall-clock value is correct before it enters the metrics pipeline.
+- The sysinfo fiber subscribes to `{'state', 'time', 'synced'}` and maintains a local `time_synced` flag. `boot_time` (`os.time() - uptime`) is only computed and published when `time_synced = true`, ensuring the wall-clock value is correct before it enters the metrics pipeline.
 - `finally` blocks in both fibers log the reason for shutdown.
 - Thermal zone subscription tracks whether `zone0` is present. Temperature is only read and published when `zone0` is known. No per-zone metric publications are made — a single `temperature` metric name is preserved to maintain continuity with historically collected data.
