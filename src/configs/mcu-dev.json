@@ -4,22 +4,12 @@
     "data": {
       "schema": "devicecode.config/hal/1",
       "filesystem": [
-        {
-          "name": "config",
-          "root": "/data/configs/"
-        },
-        {
-          "name": "state",
-          "root": "/tmp/dc-states/"
-        }
+        { "name": "config", "root": "/data/configs/" },
+        { "name": "state",  "root": "/tmp/dc-states/" }
       ],
       "uart": {
         "serial_ports": [
-          {
-            "name": "uart-0",
-            "path": "/dev/ttyAMA0",
-            "baud": 115200
-          }
+          { "name": "uart-0", "path": "/dev/ttyAMA0", "baud": 115200 }
         ]
       }
     }
@@ -36,37 +26,88 @@
           "hello_interval_s": 1.0,
           "ping_interval_s": 10.0,
           "liveness_timeout_s": 30.0,
-          "transport": {
-            "id": "uart-0"
-          },
+          "transport": { "id": "uart-0" },
           "chunk_size": 2048,
           "transfer_phase_timeout_s": 15.0,
           "export_publish_rules": [],
           "export_retained_rules": [],
           "import_rules": [
             {
-              "local": ["peer", "mcu-1", "state"],
-              "remote": ["state"]
+              "local":  ["raw", "member", "mcu", "state"],
+              "remote": ["state", "self"]
             },
             {
-              "local": ["peer", "mcu-1", "event"],
-              "remote": ["event"]
+              "local":  ["raw", "member", "mcu", "cap", "telemetry", "main", "event"],
+              "remote": ["event", "self"]
             }
           ],
           "inbound_call_rules": [],
           "outbound_call_rules": [
             {
-              "local": ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "prepare"],
-              "remote": ["cmd", "self", "updater", "prepare"],
+              "local":   ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "prepare"],
+              "remote":  ["cmd", "self", "updater", "prepare"],
               "timeout": 2.0
             },
             {
-              "local": ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "commit"],
-              "remote": ["cmd", "self", "updater", "commit"],
+              "local":   ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "commit"],
+              "remote":  ["cmd", "self", "updater", "commit"],
               "timeout": 2.0
             }
           ]
         }
+      }
+    }
+  },
+  "device": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/device/1",
+      "components": {
+        "mcu": {
+          "class": "member",
+          "subtype": "mcu",
+          "role": "member",
+          "member": "mcu",
+          "member_class": "mcu",
+          "link_class": "member_uart",
+          "actions": {
+            "prepare-update": ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "prepare"],
+            "commit-update":  ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "commit"],
+            "stage-update": {
+              "kind": "fabric_stage",
+              "artifact_store": "main",
+              "link_id": "mcu0",
+              "receiver": ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "receive"],
+              "timeout_s": 60.0
+            }
+          },
+          "facts": {
+            "software": ["raw", "member", "mcu", "state", "software"],
+            "updater":  ["raw", "member", "mcu", "state", "updater"],
+            "health":   ["raw", "member", "mcu", "state", "health"]
+          }
+        }
+      }
+    }
+  },
+  "update": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/update/1",
+      "jobs_namespace": "update/jobs",
+      "components": {
+        "mcu": { "backend": "mcu_component" }
+      },
+      "artifacts": {
+        "default_policy": "transient_only",
+        "policies": { "mcu": "transient_only" }
+      },
+      "reconcile": {
+        "interval_s": 10.0,
+        "timeout_s": 180.0
+      },
+      "admission": {
+        "mode": "global_single"
       }
     }
   }

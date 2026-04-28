@@ -31,10 +31,12 @@ local M = {}
 local LINK_ID = 'mcu0'
 local LINK_TOPIC = { 'state', 'fabric', 'link', LINK_ID, 'session' }
 
--- Imported MCU state lands at peer/mcu-1/state/self/* per the
--- mcu-dev.json import_rules ([peer mcu-1 state] <- remote [state]).
-local SOFTWARE_FACT_TOPIC = { 'peer', 'mcu-1', 'state', 'self', 'software' }
-local UPDATER_FACT_TOPIC  = { 'peer', 'mcu-1', 'state', 'self', 'updater' }
+-- Imported MCU state lands at raw/member/mcu/state/* per the
+-- mcu-dev.json import_rules ([raw member mcu state] <- remote [state self]).
+-- Same shape as bigbox-v1-cm-2.json so the device/update services find
+-- the facts at their canonical CM5-local addresses.
+local SOFTWARE_FACT_TOPIC = { 'raw', 'member', 'mcu', 'state', 'software' }
+local UPDATER_FACT_TOPIC  = { 'raw', 'member', 'mcu', 'state', 'updater' }
 
 -- Outbound RPC routing (mcu-dev.json outbound_call_rules):
 -- [raw member mcu cap updater main rpc *] -> remote [cmd self updater *]
