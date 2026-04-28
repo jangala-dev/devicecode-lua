@@ -13,6 +13,7 @@
 
 local cjson  = require 'cjson.safe'
 local b64url = require 'shared.encoding.b64url'
+local xxhash = require 'shared.hash.xxhash32'
 
 local M = {}
 
@@ -316,11 +317,17 @@ function M.make_xfer_chunk(xfer_id, offset, raw)
 		return nil, err
 	end
 
+	-- Per-chunk xxHash32 over the raw bytes. Catches single-byte UART
+	-- corruption inside the base64 data string -- those flips don't
+	-- break JSON parsing, so without this the receiver silently
+	-- absorbs the wrong bytes and only notices at xfer_commit's
+	-- whole-payload checksum (after the entire transfer is wasted).
 	local frame = {
 		type = 'xfer_chunk',
 		xfer_id = xfer_id,
 		offset = offset,
 		data = data,
+		crc = xxhash.digest_hex(raw),
 	}
 
 	return validate(frame)
