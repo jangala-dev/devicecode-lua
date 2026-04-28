@@ -110,10 +110,16 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta, deadli
 			return nil, terr
 		end
 
-		local chunk, rerr = stream:get_body_chars(64 * 1024)
+		-- Give get_body_chars a deadline-relative timeout. Without
+		-- one some lua-http builds return (nil, nil) on the very
+		-- first read instead of waiting for body bytes, and the
+		-- caller surfaces a useless "body_read_failed: body_read_failed".
+		local chunk, rerr = stream:get_body_chars(64 * 1024, remaining)
 		if chunk == nil then
 			abort_ingest()
-			return nil, errors.bad_request('body_read_failed: ' .. tostring(rerr or 'body_read_failed'))
+			return nil, errors.bad_request('body_read_failed: '
+				.. tostring(rerr or 'body_read_failed')
+				.. ' (offset=' .. tostring(offset) .. ')')
 		end
 		if chunk == '' then
 			break
