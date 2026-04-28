@@ -11,7 +11,9 @@
         "serial_ports": [
           { "name": "uart-0", "path": "/dev/ttyAMA0", "baud": 115200 }
         ]
-      }
+      },
+      "artifact_store": {},
+      "control_store": {}
     }
   },
   "fabric": {
