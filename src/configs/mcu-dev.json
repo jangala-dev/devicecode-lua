@@ -80,7 +80,7 @@
               "artifact_store": "main",
               "link_id": "mcu0",
               "receiver": ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "receive"],
-              "timeout_s": 60.0
+              "timeout_s": 900.0
             }
           },
           "facts": {
@@ -98,7 +98,13 @@
       "schema": "devicecode.config/update/1",
       "jobs_namespace": "update/jobs",
       "components": {
-        "mcu": { "backend": "mcu_component" }
+        "mcu": {
+          "backend": "mcu_component",
+          "transfer": {
+            "link_id": "mcu0"
+          },
+          "timeout_stage": 900.0
+        }
       },
       "artifacts": {
         "default_policy": "transient_only",

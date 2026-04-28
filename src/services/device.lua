@@ -261,11 +261,23 @@ local function perform_fabric_stage(conn, rec, action_name, args, timeout)
 
   local desc = type(artifact.describe) == 'function' and artifact:describe() or nil
   local meta = type(args.metadata) == 'table' and model.copy_value(args.metadata) or nil
+  local chunk_size = nil
+  if type(meta) == 'table' then
+    local transfer_meta = type(meta.transfer) == 'table' and meta.transfer or nil
+    chunk_size = tonumber(meta.transfer_chunk_raw)
+      or tonumber(meta.transfer_chunk_size)
+      or tonumber(transfer_meta and transfer_meta.chunk_size)
+  end
+  if chunk_size ~= nil and (chunk_size <= 0 or chunk_size % 1 ~= 0) then
+    chunk_size = nil
+  end
+
   local payload = {
     op = 'send_blob',
     link_id = op.link_id,
     receiver = model.copy_array(op.receiver),
     source = artifact,
+    chunk_size = chunk_size,
     meta = {
       kind = 'firmware',
       component = rec.name,

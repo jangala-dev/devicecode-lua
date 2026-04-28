@@ -356,6 +356,36 @@ function M.start(conn, opts)
 
   local artifacts = artifacts_mod.new(ctx, { preflighters = type(opts.preflighters) == 'table' and opts.preflighters or nil })
   ctx.artifacts = artifacts
+
+  -- Dev-loop opt-out for the mcu component preflighter. The default
+  -- mcu preflighter calls mcu_image_v1.inspect_source, which checks
+  -- for the DCMCUIMG envelope (signed-image v1 format). Until
+  -- fabric-security ships imagev1 packing, raw sealed .bin artefacts
+  -- from pico2-a-b's abpack don't have that header and get rejected
+  -- with "bad_magic" before staging can even start. Set
+  -- DEVICECODE_DEV_SKIP_IMAGE_PREFLIGHT=1 to register a no-op
+  -- preflighter that lets the artefact through unchanged. The opt-out is
+  -- restricted to CONFIG_TARGET=mcu-dev so a leaked environment variable
+  -- cannot disable image preflight on production targets.
+  if os.getenv('DEVICECODE_DEV_SKIP_IMAGE_PREFLIGHT') == '1' then
+    local target = os.getenv('CONFIG_TARGET')
+    if target == 'mcu-dev' then
+      svc:obs_log('warn', {
+        what = 'preflighter_disabled',
+        component = 'mcu',
+        env = 'DEVICECODE_DEV_SKIP_IMAGE_PREFLIGHT',
+        target = target,
+      })
+      artifacts:set_preflighter('mcu', function(_, _, desc) return desc or {}, nil end)
+    else
+      svc:obs_log('warn', {
+        what = 'preflighter_disable_rejected',
+        component = 'mcu',
+        env = 'DEVICECODE_DEV_SKIP_IMAGE_PREFLIGHT',
+        target = target,
+      })
+    end
+  end
   ctx.artifact_open = function(...)
     return artifacts:open(...)
   end

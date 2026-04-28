@@ -35,6 +35,14 @@ local function normalise_update_err(err, fallback)
 	return err
 end
 
+local function positive_integer_header(headers, name)
+	local raw = headers:get(name)
+	if raw == nil or raw == '' then return nil end
+	local n = tonumber(raw)
+	if n == nil or n <= 0 or n % 1 ~= 0 then return nil end
+	return n
+end
+
 function M.new(opts)
 	opts = opts or {}
 	assert(type(opts.require_session) == 'function', 'uploads: require_session is required')
@@ -81,6 +89,7 @@ function Uploads:_receive_artifact(artifact_cap, upload_id, stream, meta, deadli
 			build = meta.build,
 			checksum = meta.checksum,
 			upload_id = upload_id,
+			transfer_chunk_raw = meta.transfer_chunk_raw,
 		},
 		policy = 'transient_only',
 	}
@@ -188,6 +197,7 @@ function Uploads:_create_update_job(user_conn, artefact, meta, deadline)
 			uploaded = true,
 			commit_policy = 'manual',
 			require_explicit_commit = true,
+			transfer_chunk_raw = meta.transfer_chunk_raw,
 		},
 	}, timeout_s)
 
@@ -226,6 +236,7 @@ function Uploads:upload_update(session_id, stream, req_headers)
 		version = req_headers:get('x-artifact-version'),
 		build = req_headers:get('x-artifact-build'),
 		checksum = req_headers:get('x-artifact-checksum'),
+		transfer_chunk_raw = positive_integer_header(req_headers, 'x-transfer-chunk-raw'),
 	}
 	if self._allowed_components and self._allowed_components[meta.component] ~= true then
 		return nil, errors.bad_request('component_not_allowed')
