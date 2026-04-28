@@ -3,7 +3,19 @@
 -- GSM service (new fibers):
 --  - consumes HAL modem capabilities
 --  - runs per-modem child scopes for autoconnect + metrics
---  - publishes derived observability metrics only
+--  - publishes derived observability metrics and canonical modem state
+--
+-- Topics consumed:
+--   cfg/<name>                              service config (retained)
+--   cap/modem/+/state                       HAL modem capability add/remove events
+--
+-- Topics produced:
+--   svc/<name>/announce                     service lifecycle announce
+--   svc/<name>/status                       service lifecycle status
+--   obs/v1/gsm/metric/<key>                 per-modem observability metrics
+--   obs/v1/gsm/event/<key>                  per-modem observability events
+--   state/gsm/modem/<name>/connected        retained: true when APN connected, false otherwise
+--   state/gsm/modem/<name>/wwan-iface       retained: kernel wwan interface name, false when unknown
 
 local fibers = require "fibers"
 local op = require "fibers.op"
@@ -51,10 +63,11 @@ local function t_cfg(name)
 	return { 'cfg', name }
 end
 
----@param key string
+---@param name string
+---@param field string
 ---@return table
-local function t_obs_metric(key)
-	return { 'obs', 'v1', 'gsm', 'metric', key }
+local function t_state_gsm_modem(name, field)
+	return { 'state', 'gsm', 'modem', name, field }
 end
 
 ---@param cap CapabilityReference
@@ -323,7 +336,7 @@ end
 ---@return boolean ok
 ---@return string error
 local function wait_for_connection(name, state_sub, log_fn)
-	log_fn = log_fn or function() end
+	log_fn = log_fn or function(_, _) end
 
 	-- Phase 1: wait for 'connecting', or give up after APN_SETTLE_TIMEOUT seconds.
 	while true do
@@ -427,11 +440,10 @@ function GsmModem:_emit_metric(key, value)
 	else
 		return
 	end
-	local metric = {
+	self.svc:obs_metric(key, {
 		value = value,
-		namespace = { 'modem', ns_name, key }
-	}
-	self.conn:publish(t_obs_metric(key), metric)
+		namespace = { 'modem', ns_name, key },
+	})
 end
 
 ---@param key string
@@ -505,6 +517,7 @@ function GsmModem:_emit_metrics_once()
 		local interface = net_ports and net_ports[1]
 		if interface then
 			self:_emit_metric('wwan_type', interface)
+			self.conn:retain(t_state_gsm_modem(self.name, 'wwan-iface'), interface)
 		else
 			self.svc:obs_log('debug', { what = 'no_net_ports', modem = self.name })
 		end
@@ -732,6 +745,9 @@ function GsmModem:_autoconnect_loop()
 				retry_timeout = retry_inner
 				if err == "" then
 					self:_emit_event('autoconnect', 'connected')
+					self.conn:retain(t_state_gsm_modem(self.name, 'connected'), true)
+				else
+					self.conn:retain(t_state_gsm_modem(self.name, 'connected'), false)
 				end
 				local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
 				local _, sig_err = modem_set_signal_freq(self.cap, signal_freq)
@@ -815,6 +831,10 @@ function GsmModem:stop(reason, close_pulse)
 	self.scope:cancel(reason or 'modem stopped')
 	perform(self.scope:join_op())
 	self.scope = nil
+
+	if self.name and self.name ~= "" then
+		self.conn:retain(t_state_gsm_modem(self.name, 'connected'), false)
+	end
 end
 
 ---@class GsmService
@@ -833,7 +853,8 @@ function GsmService.start(conn, opts)
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
 	svc:obs_log('info', 'service start() entered')
-	svc:status('starting')
+	svc:announce({})
+	svc:starting()
 	svc:spawn_heartbeat(heartbeat_s, 'tick')
 
 	local current_cfg = {}
@@ -848,12 +869,8 @@ function GsmService.start(conn, opts)
 		for _, modem in pairs(modems) do
 			modem:stop(nil, true)
 		end
-		local scope = fibers.current_scope()
-		local st, primary = scope:status()
-		if st == 'failed' then
-			svc:obs_log('error', { what = 'scope_failed', err = tostring(primary), status = st })
-		end
-		svc:status('stopped', primary and { reason = tostring(primary) } or nil)
+		local _, primary = fibers.current_scope():status()
+		svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'scope_exit') })
 		svc:obs_log('info', 'service stopped')
 	end)
 
@@ -924,15 +941,15 @@ function GsmService.start(conn, opts)
 		end
 	end
 
-	local cap_listener = cap_sdk.new_cap_listener(conn, 'modem', '+')
+	local modem_cap_sub = conn:subscribe({ 'cap', 'modem', '+', 'state' })
 
 	svc:obs_event('config_applied', {})
-	svc:status('running')
+	svc:running()
 	svc:obs_log('info', 'service running')
 
 	while true do
 		local choices = {
-			cap = cap_listener.sub:recv_op(),
+			cap = modem_cap_sub:recv_op(),
 			cfg = cfg_sub:recv_op(),
 		}
 
