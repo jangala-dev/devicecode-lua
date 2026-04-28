@@ -45,18 +45,15 @@ local function flush_ticks(max_ticks)
 	time_harness.flush_ticks(max_ticks or 20)
 end
 
--- Subscribe to svc/metrics/# and wait for the next non-status message,
+-- Subscribe to obs/v1/metrics/output/# and wait for the next message,
 -- advancing the virtual clock in steps until one arrives or timeout lapses.
 local function recv_metric(clock, sub, timeout_s)
 	local step     = 0.05
 	local max_ticks = 20
 	local elapsed  = 0
 	while true do
-		while true do
-			local ok, msg = time_harness.try_op_now(function() return sub:recv_op() end)
-			if not ok then break end
-			if msg.topic[3] ~= 'status' then return msg end
-		end
+		local ok, msg = time_harness.try_op_now(function() return sub:recv_op() end)
+		if ok then return msg end
 		if elapsed >= timeout_s then return nil end
 		local advance = math.min(step, timeout_s - elapsed)
 		clock:advance(advance)
@@ -65,7 +62,7 @@ local function recv_metric(clock, sub, timeout_s)
 	end
 end
 
--- Drain all currently-available non-status messages without advancing time.
+-- Drain all currently-available messages without advancing time.
 local function drain_non_status(sub, max_ticks)
 	max_ticks = max_ticks or 20
 	local messages = {}
@@ -75,9 +72,7 @@ local function drain_non_status(sub, max_ticks)
 			local ok, msg = time_harness.try_op_now(function() return sub:recv_op() end)
 			if not ok then break end
 			saw_any = true
-			if msg.topic[3] ~= 'status' then
-				messages[#messages + 1] = msg
-			end
+			messages[#messages + 1] = msg
 		end
 		if not saw_any or tick == max_ticks then break end
 		time_harness.flush_ticks(1)
@@ -147,10 +142,10 @@ function T.metric_published_via_bus()
 
 		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
-		test_conn:retain({ 'svc', 'time', 'synced' }, true)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
 		local result_sub = test_conn:subscribe(
-			{ 'svc', 'metrics', '#' },
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
 			{ queue_len = 10, full = 'drop_oldest' })
 
 		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1))
@@ -183,10 +178,10 @@ function T.namespace_overrides_topic_key()
 
 		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
-		test_conn:retain({ 'svc', 'time', 'synced' }, true)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
 		local result_sub = test_conn:subscribe(
-			{ 'svc', 'metrics', '#' },
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
 			{ queue_len = 10, full = 'drop_oldest' })
 
 		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1))
@@ -200,10 +195,10 @@ function T.namespace_overrides_topic_key()
 		local msg = recv_metric(clock, result_sub, 0.5)
 
 		assert(msg ~= nil, 'expected bus publish with namespace key')
-		assert(msg.topic[3] == 'wan',
-			'expected topic[3]=wan, got ' .. tostring(msg.topic[3]))
-		assert(msg.topic[4] == 'rx_bytes',
-			'expected topic[4]=rx_bytes, got ' .. tostring(msg.topic[4]))
+		assert(msg.topic[5] == 'wan',
+			'expected topic[5]=wan, got ' .. tostring(msg.topic[5]))
+		assert(msg.topic[6] == 'rx_bytes',
+			'expected topic[6]=rx_bytes, got ' .. tostring(msg.topic[6]))
 		assert(msg.payload.value == 1024,
 			'expected value=1024, got ' .. tostring(msg.payload.value))
 
@@ -222,10 +217,10 @@ function T.unknown_metric_dropped()
 
 		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
-		test_conn:retain({ 'svc', 'time', 'synced' }, true)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
 		local result_sub = test_conn:subscribe(
-			{ 'svc', 'metrics', '#' },
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
 			{ queue_len = 10, full = 'drop_oldest' })
 
 		-- Config only knows about 'sim'; we will publish 'rx_bytes'.
@@ -259,10 +254,10 @@ function T.difftrigger_suppresses_unchanged_value()
 
 		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
-		test_conn:retain({ 'svc', 'time', 'synced' }, true)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
 		local result_sub = test_conn:subscribe(
-			{ 'svc', 'metrics', '#' },
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
 			{ queue_len = 10, full = 'drop_oldest' })
 
 		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1, {
@@ -289,13 +284,8 @@ function T.difftrigger_suppresses_unchanged_value()
 		clock:advance(0.25)
 		time_harness.flush_ticks(20)
 
-		local msg2 = nil
-		while true do
-			local ok, m = time_harness.try_op_now(function() return result_sub:recv_op() end)
-			if not ok then break end
-			if m.topic[3] ~= 'status' then msg2 = m; break end
-		end
-		assert(msg2 == nil, 'second publish should be suppressed by DiffTrigger')
+		local ok, m = time_harness.try_op_now(function() return result_sub:recv_op() end)
+		assert(not ok or m == nil, 'second publish should be suppressed by DiffTrigger')
 
 		stop_scope(svc_scope)
 		clock:restore()
@@ -312,10 +302,10 @@ function T.delta_value_pipeline()
 
 		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
-		test_conn:retain({ 'svc', 'time', 'synced' }, true)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
 		local result_sub = test_conn:subscribe(
-			{ 'svc', 'metrics', '#' },
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
 			{ queue_len = 10, full = 'drop_oldest' })
 
 		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1, {
@@ -377,7 +367,7 @@ function T.http_pipeline_enqueues_request_payload()
 
 			test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
 			start_mock_hal(test_conn, scope)
-			test_conn:retain({ 'svc', 'time', 'synced' }, true)
+			test_conn:retain({ 'state', 'time', 'synced' }, true)
 
 			test_conn:retain({ 'cfg', 'metrics' }, {
 				publish_period = 0.1,
@@ -437,10 +427,10 @@ function T.config_update_replaces_pipelines()
 
 		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
-		test_conn:retain({ 'svc', 'time', 'synced' }, true)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
 		local result_sub = test_conn:subscribe(
-			{ 'svc', 'metrics', '#' },
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
 			{ queue_len = 20, full = 'drop_oldest' })
 
 		-- Initial config: pipeline for 'sim'.
@@ -485,10 +475,10 @@ function T.per_endpoint_state_isolation()
 
 		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
-		test_conn:retain({ 'svc', 'time', 'synced' }, true)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
 		local result_sub = test_conn:subscribe(
-			{ 'svc', 'metrics', '#' },
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
 			{ queue_len = 20, full = 'drop_oldest' })
 
 		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1, {
@@ -517,10 +507,10 @@ function T.per_endpoint_state_isolation()
 			end
 		end
 
-		assert(received['svc.metrics.wan.rx_bytes'] == 500,
-			'expected wan delta=500, got ' .. tostring(received['svc.metrics.wan.rx_bytes']))
-		assert(received['svc.metrics.lan.rx_bytes'] == 200,
-			'expected lan delta=200, got ' .. tostring(received['svc.metrics.lan.rx_bytes']))
+		assert(received['obs.v1.metrics.output.wan.rx_bytes'] == 500,
+			'expected wan delta=500, got ' .. tostring(received['obs.v1.metrics.output.wan.rx_bytes']))
+		assert(received['obs.v1.metrics.output.lan.rx_bytes'] == 200,
+			'expected lan delta=200, got ' .. tostring(received['obs.v1.metrics.output.lan.rx_bytes']))
 
 		stop_scope(svc_scope)
 		clock:restore()

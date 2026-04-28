@@ -166,6 +166,7 @@ end
 ---@field mainflux_config  table?
 ---@field cloud_config     CloudConfig?
 ---@field base_time        BaseTime?     nil before M.start() is called
+---@field fs_cap           CapabilityReference?  nil before filesystem cap is resolved
 
 return {
     new          = new,

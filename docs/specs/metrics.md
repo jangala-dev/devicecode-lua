@@ -204,7 +204,7 @@ As HTTP publications can fail due to lack of backhaul, boot-time metrics are ver
 ### Bus
 
 For testability a bus protocol should be provided which will publish the metrics under the topic
-`svc/metrics/<key>` for example `svc/metrics/modem/1/sim`. The payload will just be the value and timestamp of the metric.
+`obs/v1/metrics/output/<key>` for example `obs/v1/metrics/output/modem/1/sim`. The payload will just be the value and timestamp of the metric.
 
 ## Processing
 
@@ -292,7 +292,7 @@ Each metric must have an accurate time stamp. As the time at boot will be incorr
 
 The metrics service **blocks all publishing** until NTP time synchronization is confirmed:
 
-- Service subscribes to `{'svc', 'time', 'synced'}` bus topic
+- Service subscribes to `{'state', 'time', 'synced'}` bus topic
 - When `synced = true` is received:
   - **First sync**: Calculates base time offset and schedules first publish
   - **Subsequent syncs**: Continues using existing offset

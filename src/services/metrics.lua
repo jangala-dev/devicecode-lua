@@ -8,14 +8,14 @@
 --  - fetches Mainflux cloud credentials from the HAL filesystem capability
 --
 -- Topics consumed:
---   {'obs', 'v1', '+', 'metric', '+'}  - incoming metric values
---   {'cfg', 'metrics'}                  - metrics config (retained)
---   {'svc', 'time', 'synced'}           - NTP sync status (retained)
---   {'cap', 'fs', 'configs', 'state'}   - HAL filesystem capability readiness
+--   {'obs', 'v1', '+', 'metric', '+'}       - incoming metric values
+--   {'cfg', 'metrics'}                       - metrics config (retained)
+--   {'state', 'time', 'synced'}              - NTP sync status (retained)
+--   {'cap', 'fs', 'configs', ...}             - HAL filesystem capability (via cap listener)
 --
 -- Topics produced:
---   {'svc', 'metrics', 'status'}        - service lifecycle status (retained)
---   {'svc', 'metrics', ...}             - per-metric bus publications (bus protocol)
+--   {'svc', 'metrics', 'status'}             - service lifecycle status (retained)
+--   {'obs', 'v1', 'metrics', 'output', ...}  - per-metric bus publications (bus protocol)
 
 local fibers         = require 'fibers'
 local op             = require 'fibers.op'
@@ -52,18 +52,11 @@ local function t_obs_metric(service, name) return { 'obs', 'v1', service, 'metri
 local function t_cfg(name) return { 'cfg', name } end
 
 ---@return table
-local function t_time_ntp_synced() return { 'svc', 'time', 'synced' } end
-
----@return table
-local function t_cap_fs_state() return { 'cap', 'fs', 'configs', 'state' } end
-
----@param method string
----@return table
-local function t_cap_fs_rpc(method) return { 'cap', 'fs', 'configs', 'rpc', method } end
+local function t_state_time_synced() return { 'state', 'time', 'synced' } end
 
 ---@param tokens table
 ---@return table
-local function t_svc_metrics_bus(tokens) return { 'svc', 'metrics', unpack(tokens) } end
+local function t_obs_metrics_output(tokens) return { 'obs', 'v1', 'metrics', 'output', unpack(tokens) } end
 
 ---@return number
 local function now() return runtime.now() end
@@ -123,6 +116,7 @@ local State = {
 	mainflux_config  = nil,
 	cloud_config     = nil,
 	base_time        = nil,
+	fs_cap           = nil,
 }
 
 -------------------------------------------------------------------------------
@@ -195,7 +189,7 @@ local function fetch_mainflux_config()
 		return
 	end
 
-	local reply, err = State.conn:call(t_cap_fs_rpc('read'), read_opts)
+	local reply, err = State.fs_cap:call_control('read', read_opts)
 	if not reply then
 		State.svc:obs_log('warn', { what = 'mainflux_read_failed', err = tostring(err) })
 		return
@@ -227,7 +221,7 @@ local function bus_publish(data)
 		for part in endpoint_str:gmatch('[^.]+') do
 			tokens[#tokens + 1] = part
 		end
-		State.conn:publish(t_svc_metrics_bus(tokens), { value = metric.value, time = metric.time })
+		State.conn:publish(t_obs_metrics_output(tokens), { value = metric.value, time = metric.time })
 	end
 end
 
@@ -419,26 +413,6 @@ end
 -- Main loop
 -------------------------------------------------------------------------------
 
----@return boolean ok
-local function wait_for_fs_capability()
-	local sub = State.conn:subscribe(
-		t_cap_fs_state(),
-		{ queue_len = 10, full = 'drop_oldest' })
-
-	while true do
-		local msg, err = perform(sub:recv_op())
-		if not msg then
-			State.svc:obs_log('warn', { what = 'fs_cap_sub_closed', err = tostring(err) })
-			sub:unsubscribe()
-			return false
-		end
-		if msg.payload == 'added' then
-			sub:unsubscribe()
-			return true
-		end
-	end
-end
-
 local function main()
 	-- Subscribe to all observable metrics.
 	local obs_sub = State.conn:subscribe(
@@ -452,7 +426,7 @@ local function main()
 
 	-- Subscribe to NTP sync status.
 	local time_sub = State.conn:subscribe(
-		t_time_ntp_synced(),
+		t_state_time_synced(),
 		{ queue_len = 5, full = 'drop_oldest' })
 
 	local next_publish_time = math.huge
@@ -550,7 +524,8 @@ function M.start(conn, opts)
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
 	svc:obs_log('info', 'service start() entered')
-	svc:status('starting')
+	svc:announce({})
+	svc:starting()
 	svc:spawn_heartbeat(heartbeat_s, 'tick')
 
 	State.conn             = conn
@@ -568,30 +543,30 @@ function M.start(conn, opts)
 	State.mainflux_config  = nil
 	State.cloud_config     = nil
 	State.base_time        = types.new.BaseTime(now_real(), now())
+	State.fs_cap           = nil
 
 	fibers.current_scope():finally(function()
-		local scope = fibers.current_scope()
-		local st, primary = scope:status()
-		if st == 'failed' then
-			svc:obs_log('error', { what = 'scope_failed', err = tostring(primary), status = st })
-		end
-		svc:status('stopped', primary and { reason = tostring(primary) } or nil)
+		local _, primary = fibers.current_scope():status()
+		svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'scope_exit') })
 		svc:obs_log('info', 'service stopped')
 	end)
 
 	svc:obs_log('info', 'waiting for filesystem capability')
-	local fs_ok = wait_for_fs_capability()
-	if not fs_ok then
-		svc:status('failed', { reason = 'filesystem capability unavailable' })
-		svc:obs_log('error', { what = 'start_failed', err = 'filesystem capability unavailable' })
+	local fs_listener = cap_sdk.new_cap_listener(conn, 'fs', 'configs')
+	local fs_cap, cap_err = fs_listener:wait_for_cap()
+	fs_listener:close()
+	if not fs_cap then
+		svc:failed('filesystem capability unavailable')
+		svc:obs_log('error', { what = 'start_failed', err = tostring(cap_err) })
 		return
 	end
+	State.fs_cap = fs_cap
 
 	svc:obs_event('fs_ready', {})
 	svc:obs_log('info', 'fetching mainflux config')
 	fetch_mainflux_config()
 
-	svc:status('running')
+	svc:running()
 	svc:obs_log('info', 'service is live')
 
 	main()
