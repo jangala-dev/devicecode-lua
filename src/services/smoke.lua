@@ -41,8 +41,12 @@ local function wait_for_ready(conn, timeout_s)
 	while runtime.now() < deadline do
 		local msg = sub:recv()
 		if msg and type(msg.payload) == 'table' then
-			if msg.payload.ready == true then
-				return true, msg.payload
+			-- statefmt.link_component wraps the snapshot under .status:
+			--   { kind=..., link_id=..., component=..., ts=...,
+			--     status={ ready=..., established=..., peer_sid=..., ... } }
+			local status = msg.payload.status
+			if type(status) == 'table' and status.ready == true then
+				return true, status
 			end
 		end
 	end
