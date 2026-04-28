@@ -35,18 +35,40 @@ local function log(line)
 	io.flush()
 end
 
+local function payload_brief(p)
+	if type(p) ~= 'table' then return tostring(p) end
+	local s = p.status
+	if type(s) == 'table' then
+		return string.format('kind=%s component=%s status.ready=%s status.established=%s status.peer_sid=%s',
+			tostring(p.kind), tostring(p.component),
+			tostring(s.ready), tostring(s.established), tostring(s.peer_sid))
+	end
+	return string.format('kind=%s component=%s ready=%s established=%s peer_sid=%s',
+		tostring(p.kind), tostring(p.component),
+		tostring(p.ready), tostring(p.established), tostring(p.peer_sid))
+end
+
 local function wait_for_ready(conn, timeout_s)
 	local sub = conn:subscribe(LINK_TOPIC, { queue_len = 8, full = 'drop_oldest' })
+	log('subscribed to ' .. table.concat(LINK_TOPIC, '/'))
 	local deadline = runtime.now() + timeout_s
 	while runtime.now() < deadline do
 		local msg = sub:recv()
-		if msg and type(msg.payload) == 'table' then
-			-- statefmt.link_component wraps the snapshot under .status:
-			--   { kind=..., link_id=..., component=..., ts=...,
-			--     status={ ready=..., established=..., peer_sid=..., ... } }
-			local status = msg.payload.status
-			if type(status) == 'table' and status.ready == true then
-				return true, status
+		if msg then
+			-- Diagnostic: log every received link-state message so we can
+			-- see exactly what the lua side publishes. Helpful when this
+			-- service hangs at waiting_for_link despite the link being up.
+			log('rx ' .. payload_brief(msg.payload))
+			if type(msg.payload) == 'table' then
+				-- statefmt.link_component wraps the snapshot under .status,
+				-- but tolerate the un-wrapped shape too just in case.
+				local status = msg.payload.status
+				if type(status) == 'table' and status.ready == true then
+					return true, status
+				end
+				if msg.payload.ready == true then
+					return true, msg.payload
+				end
 			end
 		end
 	end
