@@ -1,0 +1,73 @@
+{
+  "hal": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/hal/1",
+      "filesystem": [
+        {
+          "name": "config",
+          "root": "/data/configs/"
+        },
+        {
+          "name": "state",
+          "root": "/tmp/dc-states/"
+        }
+      ],
+      "uart": {
+        "serial_ports": [
+          {
+            "name": "uart-0",
+            "path": "/dev/ttyAMA0",
+            "baud": 115200
+          }
+        ]
+      }
+    }
+  },
+  "fabric": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.fabric/1",
+      "links": {
+        "mcu0": {
+          "node_id": "cm5",
+          "member_class": "cm5",
+          "link_class": "member_uart",
+          "hello_interval_s": 1.0,
+          "ping_interval_s": 10.0,
+          "liveness_timeout_s": 30.0,
+          "transport": {
+            "id": "uart-0"
+          },
+          "chunk_size": 2048,
+          "transfer_phase_timeout_s": 15.0,
+          "export_publish_rules": [],
+          "export_retained_rules": [],
+          "import_rules": [
+            {
+              "local": ["peer", "mcu-1", "state"],
+              "remote": ["state"]
+            },
+            {
+              "local": ["peer", "mcu-1", "event"],
+              "remote": ["event"]
+            }
+          ],
+          "inbound_call_rules": [],
+          "outbound_call_rules": [
+            {
+              "local": ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "prepare"],
+              "remote": ["cmd", "self", "updater", "prepare"],
+              "timeout": 2.0
+            },
+            {
+              "local": ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "commit"],
+              "remote": ["cmd", "self", "updater", "commit"],
+              "timeout": 2.0
+            }
+          ]
+        }
+      }
+    }
+  }
+}
