@@ -56,8 +56,13 @@
           "inbound_call_rules": [],
           "outbound_call_rules": [
             {
-              "local": ["raw", "member", "mcu", "cap", "updater", "main", "rpc"],
-              "remote": ["cmd", "self", "updater"],
+              "local": ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "prepare"],
+              "remote": ["cmd", "self", "updater", "prepare"],
+              "timeout": 2.0
+            },
+            {
+              "local": ["raw", "member", "mcu", "cap", "updater", "main", "rpc", "commit"],
+              "remote": ["cmd", "self", "updater", "commit"],
               "timeout": 2.0
             }
           ]
