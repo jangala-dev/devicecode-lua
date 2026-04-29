@@ -21,10 +21,11 @@ local memory_driver_any = memory_driver
 ---@type any
 local thermal_driver_any = thermal_driver
 
-local fibers  = require "fibers"
-local op      = require "fibers.op"
-local sleep   = require "fibers.sleep"
-local exec    = require "fibers.io.exec"
+local fibers   = require "fibers"
+local op       = require "fibers.op"
+local sleep    = require "fibers.sleep"
+local exec     = require "fibers.io.exec"
+local cond     = require "fibers.cond"
 
 local STOP_TIMEOUT = 5.0
 
@@ -102,13 +103,8 @@ local function register_driver(driver, class, id, meta, dev_ev_ch, cap_emit_ch)
         return false
     end
 
-    local ok, start_err = driver:start()
-    if not ok then
-        dlog(SysmonManager.logger, 'error', { what = 'driver_start_failed', class = class, id = id, err = start_err })
-        return false
-    end
-
-    local device_event, ev_err = hal_types.new.DeviceEvent("added", class, id, meta, capabilities)
+    local ready_cond = cond.new()
+    local device_event, ev_err = hal_types.new.DeviceEvent("added", class, id, meta, capabilities, ready_cond)
     if not device_event then
         dlog(SysmonManager.logger, 'error', {
             what = 'device_event_create_failed', class = class, id = id, err = ev_err,
@@ -116,6 +112,13 @@ local function register_driver(driver, class, id, meta, dev_ev_ch, cap_emit_ch)
         return false
     end
     dev_ev_ch:put(device_event)
+    ready_cond:wait()
+
+    local ok, start_err = driver:start()
+    if not ok then
+        dlog(SysmonManager.logger, 'error', { what = 'driver_start_failed', class = class, id = id, err = start_err })
+        return false
+    end
     return true
 end
 
