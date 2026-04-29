@@ -56,6 +56,8 @@ local ACCESS_TECH_MAP = {
 	{ tokens = { 'cdma1x' },      tech = 'cdma1x' },
 }
 
+local STATE_CONNECTED = 'connected'
+
 -- Topic helpers (centralized so we can remap if needed)
 ---@param name string
 ---@return table
@@ -703,6 +705,7 @@ function GsmModem:_autoconnect_loop()
 	})
 
 	local current_state = nil
+	local connected = false
 	local backoff = math.huge
 
 	while true do
@@ -743,17 +746,20 @@ function GsmModem:_autoconnect_loop()
 				local _, err_inner, retry_inner = self:_apn_connect()
 				err = err_inner
 				retry_timeout = retry_inner
-				if err == "" then
-					self:_emit_event('autoconnect', 'connected')
-					self.conn:retain(t_state_gsm_modem(self.name, 'connected'), true)
-				else
-					self.conn:retain(t_state_gsm_modem(self.name, 'connected'), false)
-				end
 				local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
 				local _, sig_err = modem_set_signal_freq(self.cap, signal_freq)
 				if sig_err ~= "" then
 					self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = sig_err })
 				end
+			end
+
+			local connection_changed = (connected and current_state ~= STATE_CONNECTED)
+				or (not connected and current_state == STATE_CONNECTED)
+
+			if connection_changed then
+				connected = current_state == STATE_CONNECTED
+				self.conn:retain(t_state_gsm_modem(self.name, 'connected'), connected)
+				self.svc:obs_event('connection_changed', { modem = self.name, connected = connected })
 			end
 
 			if err and err ~= "" then
