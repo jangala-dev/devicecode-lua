@@ -31,8 +31,20 @@ local files = {
 	'unit.hal.cap_sdk_spec',
 	'unit.hal.hal_compat_spec',
 	'unit.hal.service_raw_host_spec',
+	'unit.hal.control_store_provider_spec',
+	'unit.hal.control_store_manager_spec',
+	"unit.hal.signature_verify_manager_spec",
+	"unit.hal.signature_verify_provider_spec",
+	"unit.hal.signature_verify_openssl_spec",
+	"unit.hal.artifact_store_driver_spec",
+	"unit.hal.artifact_store_provider_spec",
+	"unit.hal.artifact_store_manager_spec",
+	"unit.hal.uart_driver_spec",
+	"unit.hal.uart_manager_spec",
+	'unit.shared.blob_source_spec',
 	'integration.devhost.main_failure_spec',
 	'integration.devhost.config_recovery_spec',
+	"integration.devhost.hal_uart_spec",
 }
 
 local function monotonic_now()
