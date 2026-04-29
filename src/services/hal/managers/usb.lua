@@ -10,9 +10,10 @@ local hal_types  = require "services.hal.types.core"
 ---@type any
 local usb_driver_any = usb_driver
 
-local fibers = require "fibers"
-local op     = require "fibers.op"
-local sleep  = require "fibers.sleep"
+local fibers  = require "fibers"
+local op      = require "fibers.op"
+local sleep   = require "fibers.sleep"
+local cond    = require "fibers.cond"
 
 local STOP_TIMEOUT = 5.0
 
@@ -64,17 +65,19 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
         error("USB Manager: failed to bind capabilities: " .. tostring(cap_err))
     end
 
-    local ok, start_err = driver:start()
-    if not ok then
-        error("USB Manager: failed to start driver: " .. tostring(start_err))
-    end
-
+    local ready_cond = cond.new()
     local device_event, ev_err = hal_types.new.DeviceEvent(
-        "added", "usb", "usb3", {}, capabilities)
+        "added", "usb", "usb3", {}, capabilities, ready_cond)
     if not device_event then
         error("USB Manager: failed to create DeviceEvent: " .. tostring(ev_err))
     end
     dev_ev_ch:put(device_event)
+    ready_cond:wait()
+
+    local ok, start_err = driver:start()
+    if not ok then
+        error("USB Manager: failed to start driver: " .. tostring(start_err))
+    end
 
     dlog(UsbManager.logger, 'info', { what = 'device_registered' })
 end
