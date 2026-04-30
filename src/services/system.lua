@@ -162,14 +162,6 @@ local SYSINFO_METRICS = {
         mk_opts = cap_sdk.args.new.CpuGetOpts
     },
     {
-        class = 'cpu',
-        id = '1',
-        method = 'get',
-        field = 'frequency',
-        metric_key = 'cpu_frequency',
-        mk_opts = cap_sdk.args.new.CpuGetOpts
-    },
-    {
         class = 'memory',
         id = '1',
         method = 'get',
@@ -228,7 +220,10 @@ local function sysinfo_fiber(_, svc, report_period_ch)
             local id = identity_msg.payload
             for _, metric in ipairs(PLATFORM_IDENTITY_METRICS) do
                 if id[metric.field] ~= nil then
-                    svc:obs_metric(metric.metric_key, { value = id[metric.field] })
+                    svc:obs_metric(metric.metric_key, {
+                        namespace = { 'system', metric.metric_key },
+                        value = id[metric.field]
+                    })
                 end
             end
             svc:obs_log('debug', 'sysinfo: published platform identity metrics')
@@ -293,7 +288,10 @@ local function sysinfo_fiber(_, svc, report_period_ch)
                                 err = err
                             })
                         else
-                            svc:obs_metric(m.metric_key, { value = value })
+                            svc:obs_metric(m.metric_key, {
+                                namespace = { 'system', m.metric_key },
+                                value = value
+                            })
                         end
                     end
                 end
@@ -309,7 +307,10 @@ local function sysinfo_fiber(_, svc, report_period_ch)
                     if uptime == nil or uptime_err ~= "" then
                         svc:obs_log('warn', { what = 'uptime_get_failed', err = uptime_err })
                     else
-                        svc:obs_metric('boot_time', { value = os.time() - math.floor(uptime) })
+                        svc:obs_metric('boot_time', {
+                            namespace = { 'system', 'boot_time' },
+                            value = os.time() - math.floor(uptime)
+                        })
                     end
                 end
             end
