@@ -419,15 +419,16 @@ end
 ---@return PipelineMap pipelines_map  keyed by metric_name
 ---@return number      publish_period
 local function apply_config(config, log_fn)
+    local data = config.data
     log_fn               = log_fn or function() end
 
-    local publish_period = config.publish_period
+    local publish_period = data.publish_period
     local pipelines_map  = {}
 
-    for metric_name, metric_config in pairs(config.pipelines) do
+    for metric_name, metric_config in pairs(data.pipelines) do
         local resolved = metric_config
-        if resolved.template and config.templates and config.templates[resolved.template] then
-            resolved = merge_config(config.templates[resolved.template], resolved)
+        if resolved.template and data.templates and data.templates[resolved.template] then
+            resolved = merge_config(data.templates[resolved.template], resolved)
         end
 
         local protocol = resolved.protocol
