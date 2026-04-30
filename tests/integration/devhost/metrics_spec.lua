@@ -114,13 +114,18 @@ local function stop_scope(svc_scope)
 	perform(svc_scope:join_op())
 end
 
+local METRICS_SCHEMA = 'devicecode.config/metrics/1'
+
 local function bus_pipeline_config(metric_name, publish_period, process)
 	return {
-		publish_period = publish_period or 0.1,
-		pipelines = {
-			[metric_name] = {
-				protocol = 'bus',
-				process  = process or {},
+		data = {
+			schema         = METRICS_SCHEMA,
+			publish_period = publish_period or 0.1,
+			pipelines = {
+				[metric_name] = {
+					protocol = 'bus',
+					process  = process or {},
+				},
 			},
 		},
 	}
@@ -370,12 +375,15 @@ function T.http_pipeline_enqueues_request_payload()
 			test_conn:retain({ 'state', 'time', 'synced' }, true)
 
 			test_conn:retain({ 'cfg', 'metrics' }, {
-				publish_period = 0.1,
-				cloud_url = 'http://localhost:18080',
-				pipelines = {
-					sim = {
-						protocol = 'http',
-						process  = {},
+				data = {
+					schema         = METRICS_SCHEMA,
+					publish_period = 0.1,
+					cloud_url      = 'http://localhost:18080',
+					pipelines = {
+						sim = {
+							protocol = 'http',
+							process  = {},
+						},
 					},
 				},
 			})

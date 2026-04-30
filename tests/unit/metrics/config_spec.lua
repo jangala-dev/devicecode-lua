@@ -43,11 +43,14 @@ end
 
 function T.apply_config_builds_pipeline()
 	local map, period = conf.apply_config({
-		publish_period = 30,
-		pipelines = {
-			rx_bytes = {
-				protocol = 'log',
-				process  = { { type = 'DeltaValue' } },
+		data = {
+			schema         = 'devicecode.config/metrics/1',
+			publish_period = 30,
+			pipelines = {
+				rx_bytes = {
+					protocol = 'log',
+					process  = { { type = 'DeltaValue' } },
+				},
 			},
 		},
 	})
@@ -59,8 +62,11 @@ end
 
 function T.validate_config_rejects_bad_period()
 	local ok, _, err = conf.validate_config({
-		publish_period = -1,
-		pipelines      = { sim = { protocol = 'log', process = {} } },
+		data = {
+			schema         = 'devicecode.config/metrics/1',
+			publish_period = -1,
+			pipelines      = { sim = { protocol = 'log', process = {} } },
+		},
 	})
 	assert(ok == false, 'expected invalid config with period=-1')
 	assert(err ~= nil, 'expected error message')
@@ -68,8 +74,11 @@ end
 
 function T.validate_config_warns_bad_protocol()
 	local ok, warns = conf.validate_config({
-		publish_period = 10,
-		pipelines      = { sim = { protocol = 'invalid' } },
+		data = {
+			schema         = 'devicecode.config/metrics/1',
+			publish_period = 10,
+			pipelines      = { sim = { protocol = 'invalid' } },
+		},
 	})
 	assert(ok == true, 'expected ok=true (warnings, not fatal)')
 	assert(#warns > 0, 'expected at least one warning for invalid protocol')
@@ -77,15 +86,18 @@ end
 
 function T.validate_config_propagates_invalid_template_to_pipeline()
 	local ok, warns, err = conf.validate_config({
-		publish_period = 10,
-		templates = {
-			bad_template = {
-				protocol = 'invalid',
+		data = {
+			schema         = 'devicecode.config/metrics/1',
+			publish_period = 10,
+			templates = {
+				bad_template = {
+					protocol = 'invalid',
+				},
 			},
-		},
-		pipelines = {
-			sim = {
-				template = 'bad_template',
+			pipelines = {
+				sim = {
+					template = 'bad_template',
+				},
 			},
 		},
 	})
