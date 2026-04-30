@@ -17,7 +17,7 @@
 local processing            = require 'services.metrics.processing'
 local _types                = require 'services.metrics.types' -- luacheck: ignore (imported for annotations)
 
-local TARGET_SCHEMA = "devicecode.config/metrics/1"
+local TARGET_SCHEMA         = "devicecode.config/metrics/1"
 
 local VALID_PROTOCOLS       = { http = true, log = true, bus = true }
 local VALID_PROCESS_TYPES   = { DiffTrigger = true, TimeTrigger = true, DeltaValue = true }
@@ -334,16 +334,16 @@ local function validate_config(config)
         return false, {}, 'Config is not a table'
     end
 
-    if config.schema ~= TARGET_SCHEMA then
-        return false, {}, string.format(
-            'Unsupported config schema [%s], expected [%s]', tostring(config.schema), TARGET_SCHEMA)
-    end
-
     local data = config.data or {}
     local warnings = {}
 
     if type(data) ~= 'table' then
         return false, warnings, 'Invalid configuration message'
+    end
+
+    if data.schema ~= TARGET_SCHEMA then
+        return false, {}, string.format(
+            'Unsupported config schema [%s], expected [%s]', tostring(data.schema), TARGET_SCHEMA)
     end
 
     if type(data.publish_period) ~= 'number' then
@@ -419,7 +419,7 @@ end
 ---@return PipelineMap pipelines_map  keyed by metric_name
 ---@return number      publish_period
 local function apply_config(config, log_fn)
-    log_fn = log_fn or function() end
+    log_fn               = log_fn or function() end
 
     local publish_period = config.publish_period
     local pipelines_map  = {}
