@@ -17,6 +17,8 @@
 local processing            = require 'services.metrics.processing'
 local _types                = require 'services.metrics.types' -- luacheck: ignore (imported for annotations)
 
+local TARGET_SCHEMA = "devicecode.config/metrics/1"
+
 local VALID_PROTOCOLS       = { http = true, log = true, bus = true }
 local VALID_PROCESS_TYPES   = { DiffTrigger = true, TimeTrigger = true, DeltaValue = true }
 
@@ -328,26 +330,36 @@ end
 ---@return table   warnings
 ---@return string? error
 local function validate_config(config)
+    if type(config) ~= 'table' then
+        return false, {}, 'Config is not a table'
+    end
+
+    if config.schema ~= TARGET_SCHEMA then
+        return false, {}, string.format(
+            'Unsupported config schema [%s], expected [%s]', tostring(config.schema), TARGET_SCHEMA)
+    end
+
+    local data = config.data or {}
     local warnings = {}
 
-    if type(config) ~= 'table' then
+    if type(data) ~= 'table' then
         return false, warnings, 'Invalid configuration message'
     end
 
-    if type(config.publish_period) ~= 'number' then
+    if type(data.publish_period) ~= 'number' then
         return false, warnings,
-            'Publish period must be of number type, found ' .. type(config.publish_period)
+            'Publish period must be of number type, found ' .. type(data.publish_period)
     end
-    if config.publish_period <= 0 then
+    if data.publish_period <= 0 then
         return false, warnings, 'Publish period must be greater than 0'
     end
 
-    if type(config.pipelines) ~= 'table' then
+    if type(data.pipelines) ~= 'table' then
         return false, warnings, 'No metric pipelines defined in config'
     end
 
     local dropped_templates = {}
-    for name, tmpl in pairs(config.templates or {}) do
+    for name, tmpl in pairs(data.templates or {}) do
         local tmpl_warns = validate_template(name, tmpl)
         if #tmpl_warns > 0 then
             for _, w in ipairs(tmpl_warns) do
@@ -357,10 +369,10 @@ local function validate_config(config)
         end
     end
 
-    for endpoint, metric_config in pairs(config.pipelines) do
+    for endpoint, metric_config in pairs(data.pipelines) do
         -- Check template existence
         if metric_config.template then
-            if (not config.templates) or (not config.templates[metric_config.template]) then
+            if (not data.templates) or (not data.templates[metric_config.template]) then
                 table.insert(warnings, {
                     msg      = string.format(
                         'Metric config [%s] uses template [%s] that does not exist',
@@ -382,8 +394,8 @@ local function validate_config(config)
 
         -- Merge template then validate the resulting config
         local full_cfg = merge_config(
-            (config.templates and metric_config.template
-                and config.templates[metric_config.template]) or {},
+            (data.templates and metric_config.template
+                and data.templates[metric_config.template]) or {},
             metric_config
         )
         local metric_warns = validate_metric(endpoint, full_cfg)
