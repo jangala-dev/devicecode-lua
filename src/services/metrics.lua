@@ -376,7 +376,7 @@ local function handle_config(payload)
 	end
 
 	-- Cache cloud_url from the metrics config and rebuild cloud_config.
-	State.cloud_url = payload.cloud_url
+	State.cloud_url = payload.data and payload.data.cloud_url
 	rebuild_cloud_config()
 
 	-- Replace all pipeline state (logic may have changed).
