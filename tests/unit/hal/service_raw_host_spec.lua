@@ -8,7 +8,6 @@ local probe       = require 'tests.support.bus_probe'
 local runfibers   = require 'tests.support.run_fibers'
 local cap_sdk     = require 'services.hal.sdk.cap'
 
-local hal_service = require 'services.hal'
 local hal_types   = require 'services.hal.types.core'
 local cap_types   = require 'services.hal.types.capabilities'
 
@@ -213,16 +212,24 @@ local function new_rawprobe_manager()
 	return manager
 end
 
-local function with_real_hal(scope, patches, body)
+local function with_real_hal(scope, patches, body, hal_opts)
 	return patch_modules(patches, function()
+		local hal_service = require 'services.hal'
 		local bus = busmod.new()
 
+		local opts = {
+			name = 'hal',
+			env = 'test',
+			heartbeat_s = 60.0,
+		}
+		if hal_opts then
+			for k, v in pairs(hal_opts) do
+				opts[k] = v
+			end
+		end
+
 		local ok_spawn, spawn_err = scope:spawn(function()
-			hal_service.start(bus:connect(), {
-				name = 'hal',
-				env = 'test',
-				heartbeat_s = 60.0,
-			})
+			hal_service.start(bus:connect(), opts)
 		end)
 		assert(ok_spawn, tostring(spawn_err))
 
@@ -234,6 +241,30 @@ local function publish_hal_config(conn, cfg)
 	conn:retain({ 'cfg', 'hal' }, {
 		data = cfg,
 	})
+end
+
+local function add_rawprobe_config(overrides)
+	local cfg = {
+		op           = 'add',
+		source_id    = 'uart_main',
+		device_class = 'uart',
+		device_id    = 'main',
+		cap_class    = 'uart',
+		cap_id       = 'main',
+		offerings    = { 'open' },
+		provider     = 'hal.test.rawprobe',
+	}
+
+	if overrides then
+		for k, v in pairs(overrides) do
+			cfg[k] = v
+		end
+	end
+
+	return {
+		schema = 'devicecode.config/hal/1',
+		rawprobe = cfg,
+	}
 end
 
 function T.hal_publishes_raw_host_source_meta_and_status_on_add()
@@ -248,19 +279,7 @@ function T.hal_publishes_raw_host_source_meta_and_status_on_add()
 			local reader = bus:connect()
 			local admin  = bus:connect()
 
-			publish_hal_config(admin, {
-				schema = 'devicecode.config/hal/1',
-				rawprobe = {
-					op           = 'add',
-					source_id    = 'uart_main',
-					device_class = 'uart',
-					device_id    = 'main',
-					cap_class    = 'uart',
-					cap_id       = 'main',
-					offerings    = { 'open' },
-					provider     = 'hal.test.rawprobe',
-				},
-			})
+			publish_hal_config(admin, add_rawprobe_config())
 
 			local meta = wait_payload(reader, { 'raw', 'host', 'uart_main', 'meta' }, 0.5)
 			assert(type(meta) == 'table')
@@ -293,19 +312,7 @@ function T.hal_publishes_raw_host_cap_meta_status_and_rpc_on_add()
 			local reader = bus:connect()
 			local admin  = bus:connect()
 
-			publish_hal_config(admin, {
-				schema = 'devicecode.config/hal/1',
-				rawprobe = {
-					op           = 'add',
-					source_id    = 'uart_main',
-					device_class = 'uart',
-					device_id    = 'main',
-					cap_class    = 'uart',
-					cap_id       = 'main',
-					offerings    = { 'open' },
-					provider     = 'hal.test.rawprobe',
-				},
-			})
+			publish_hal_config(admin, add_rawprobe_config())
 
 			local meta = wait_payload(reader, {
 				'raw', 'host', 'uart_main', 'cap', 'uart', 'main', 'meta'
@@ -342,6 +349,41 @@ function T.hal_publishes_raw_host_cap_meta_status_and_rpc_on_add()
 	end)
 end
 
+function T.raw_host_rpc_is_scoped_to_declared_source()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local rawprobe   = new_rawprobe_manager()
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.rawprobe']   = rawprobe,
+		}, function(bus)
+			local admin = bus:connect()
+
+			publish_hal_config(admin, add_rawprobe_config())
+
+			local good_listener = cap_sdk.new_raw_host_cap_listener(bus:connect(), 'uart_main', 'uart', 'main')
+			local good_ref, wait_err = fibers.perform(good_listener:wait_for_cap_op())
+			assert(good_ref, tostring(wait_err))
+
+			local good_reply, good_err = fibers.perform(good_ref:call_control_op('open', { value = 115200 }))
+			assert(good_reply, tostring(good_err))
+			assert(good_reply.ok == true)
+
+			local wrong_ref = cap_sdk.new_raw_host_cap_ref(bus:connect(), 'other_source', 'uart', 'main')
+			local bad_reply, bad_err = fibers.perform(wrong_ref:call_control_op('open', { value = 9600 }, {
+				timeout = 0.05,
+			}))
+
+			assert(bad_reply == nil)
+			assert(type(bad_err) == 'string')
+			assert(bad_err == 'no_route' or bad_err:match('no_route'))
+
+			good_listener:close()
+		end)
+	end, { timeout = 2.0 })
+end
+
 function T.hal_marks_raw_host_source_and_capability_removed_and_unretains_meta()
 	runfibers.run(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
@@ -354,19 +396,7 @@ function T.hal_marks_raw_host_source_and_capability_removed_and_unretains_meta()
 			local reader = bus:connect()
 			local admin  = bus:connect()
 
-			publish_hal_config(admin, {
-				schema = 'devicecode.config/hal/1',
-				rawprobe = {
-					op           = 'add',
-					source_id    = 'uart_main',
-					device_class = 'uart',
-					device_id    = 'main',
-					cap_class    = 'uart',
-					cap_id       = 'main',
-					offerings    = { 'open' },
-					provider     = 'hal.test.rawprobe',
-				},
-			})
+			publish_hal_config(admin, add_rawprobe_config())
 
 			assert(type(wait_payload(reader, { 'raw', 'host', 'uart_main', 'status' }, 0.5)) == 'table')
 			assert(type(wait_payload(reader, {
@@ -378,38 +408,88 @@ function T.hal_marks_raw_host_source_and_capability_removed_and_unretains_meta()
 				rawprobe = { op = 'remove' },
 			})
 
-            local source_status
-            local ok = probe.wait_until(function()
-                source_status = wait_payload(reader, { 'raw', 'host', 'uart_main', 'status' }, 0.05)
-                return type(source_status) == 'table' and source_status.state == 'removed'
-            end, {
-                timeout = 0.5,
-                interval = 0.01,
-            })
-            assert(ok, 'timed out waiting for raw host source status to become removed')
-            assert(source_status.available == false)
+			local source_status
+			local ok = probe.wait_until(function()
+				source_status = wait_payload(reader, { 'raw', 'host', 'uart_main', 'status' }, 0.05)
+				return type(source_status) == 'table' and source_status.state == 'removed'
+			end, {
+				timeout = 0.5,
+				interval = 0.01,
+			})
+			assert(ok, 'timed out waiting for raw host source status to become removed')
+			assert(source_status.available == false)
 
-            local cap_status
-            ok = probe.wait_until(function()
-                cap_status = wait_payload(reader, {
-                    'raw', 'host', 'uart_main', 'cap', 'uart', 'main', 'status'
-                }, 0.05)
-                return type(cap_status) == 'table' and cap_status.state == 'removed'
-            end, {
-                timeout = 0.5,
-                interval = 0.01,
-            })
-            assert(ok, 'timed out waiting for raw host capability status to become removed')
-            assert(cap_status.available == false)
-            assert(cap_status.source_kind == 'host')
-            assert(cap_status.source == 'uart_main')
+			local cap_status
+			ok = probe.wait_until(function()
+				cap_status = wait_payload(reader, {
+					'raw', 'host', 'uart_main', 'cap', 'uart', 'main', 'status'
+				}, 0.05)
+				return type(cap_status) == 'table' and cap_status.state == 'removed'
+			end, {
+				timeout = 0.5,
+				interval = 0.01,
+			})
+			assert(ok, 'timed out waiting for raw host capability status to become removed')
+			assert(cap_status.available == false)
+			assert(cap_status.source_kind == 'host')
+			assert(cap_status.source == 'uart_main')
 
 			expect_no_message(reader, { 'raw', 'host', 'uart_main', 'meta' }, 0.05)
 			expect_no_message(reader, {
 				'raw', 'host', 'uart_main', 'cap', 'uart', 'main', 'meta'
 			}, 0.05)
+			expect_no_message(reader, { 'cap', 'uart', 'main', 'meta' }, 0.05)
 		end)
 	end)
+end
+
+function T.capability_rpc_is_unbound_after_removal()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local rawprobe   = new_rawprobe_manager()
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.rawprobe']   = rawprobe,
+		}, function(bus)
+			local admin = bus:connect()
+			local reader = bus:connect()
+
+			publish_hal_config(admin, add_rawprobe_config())
+
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'uart', 'main')
+			local ref, err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(err))
+
+			local reply, call_err = fibers.perform(ref:call_control_op('open', { value = 1 }))
+			assert(reply, tostring(call_err))
+			assert(reply.ok == true)
+
+			publish_hal_config(admin, {
+				schema = 'devicecode.config/hal/1',
+				rawprobe = { op = 'remove' },
+			})
+
+			local removed
+			assert(probe.wait_until(function()
+				removed = wait_payload(reader, { 'cap', 'uart', 'main', 'status' }, 0.05)
+				return type(removed) == 'table' and removed.state == 'removed'
+			end, {
+				timeout = 0.5,
+				interval = 0.01,
+			}))
+
+			local reply2, err2 = fibers.perform(ref:call_control_op('open', { value = 2 }, {
+				timeout = 0.05,
+			}))
+
+			assert(reply2 == nil)
+			assert(type(err2) == 'string')
+			assert(err2 == 'no_route' or err2:match('no_route'))
+
+			listener:close()
+		end)
+	end, { timeout = 2.0 })
 end
 
 function T.hal_keeps_legacy_public_capability_topics_for_compatibility()
@@ -424,19 +504,7 @@ function T.hal_keeps_legacy_public_capability_topics_for_compatibility()
 			local reader = bus:connect()
 			local admin  = bus:connect()
 
-			publish_hal_config(admin, {
-				schema = 'devicecode.config/hal/1',
-				rawprobe = {
-					op           = 'add',
-					source_id    = 'uart_main',
-					device_class = 'uart',
-					device_id    = 'main',
-					cap_class    = 'uart',
-					cap_id       = 'main',
-					offerings    = { 'open' },
-					provider     = 'hal.test.rawprobe',
-				},
-			})
+			publish_hal_config(admin, add_rawprobe_config())
 
 			local legacy_state = wait_payload(reader, { 'cap', 'uart', 'main', 'state' }, 0.5)
 			assert(legacy_state == 'added')

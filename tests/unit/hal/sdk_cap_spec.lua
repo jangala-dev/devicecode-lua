@@ -103,6 +103,35 @@ function T.cap_sdk_curated_listener_accepts_available_true_payload()
 	end, { timeout = 2.0 })
 end
 
+function T.cap_sdk_curated_listener_ignores_removed_status_payload()
+	runfibers.run(function(scope)
+		local bus      = busmod.new()
+		local pub      = bus:connect()
+		local client   = bus:connect()
+
+		local listener = cap_sdk.new_curated_cap_listener(client, 'demo', 'one')
+
+		local got_cap, got_err
+		local ok, err = scope:spawn(function()
+			got_cap, got_err = listener:wait_for_cap({ timeout = 0.1 })
+		end)
+		assert(ok, tostring(err))
+
+		pub:retain({ 'cap', 'demo', 'one', 'status' }, {
+			state = 'removed',
+			available = false,
+		})
+
+		fibers.perform(require('fibers.sleep').sleep_op(0.15))
+
+		assert(got_cap == nil)
+		assert(type(got_err) == 'string')
+		assert(got_err:match('timeout'))
+
+		listener:close()
+	end, { timeout = 1.0 })
+end
+
 function T.cap_sdk_raw_host_listener_and_ref_follow_raw_host_topics()
 	runfibers.run(function(scope)
 		local bus      = busmod.new()

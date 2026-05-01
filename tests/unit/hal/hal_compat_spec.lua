@@ -199,13 +199,66 @@ local function new_capability_manager(opts)
 	return manager
 end
 
-local function with_real_hal(scope, patches, body)
+local function new_hanging_start_manager()
+	return {
+		__op_only = true,
+
+		start_op = function()
+			return op.never()
+		end,
+
+		apply_config_op = function()
+			return op.always(true, nil)
+		end,
+
+		stop_op = function()
+			return op.always(true, nil)
+		end,
+	}
+end
+
+local function new_hanging_apply_manager()
+	local manager = {
+		__op_only = true,
+		started = false,
+	}
+
+	function manager.start_op(_logger, _dev_ev_ch, _cap_emit_ch)
+		return op.guard(function()
+			manager.started = true
+			manager.scope = fibers.current_scope()
+			return op.always(true, nil)
+		end)
+	end
+
+	function manager.apply_config_op(_cfg)
+		return op.never()
+	end
+
+	function manager.stop_op()
+		return op.always(true, nil)
+	end
+
+	return manager
+end
+
+local function with_real_hal(scope, patches, body, hal_opts)
 	return patch_modules(patches, function()
 		local hal = require 'services.hal'
 		local bus = busmod.new()
 
+		local opts = {
+			name = 'hal',
+			heartbeat_s = 60.0,
+		}
+		if hal_opts then
+			for k, v in pairs(hal_opts) do
+				opts[k] = v
+			end
+		end
+
 		local ok_spawn, spawn_err = scope:spawn(function()
-			hal.start(bus:connect(), { name = 'hal' })
+			hal.start(bus:connect(), opts)
 		end)
 		assert(ok_spawn, tostring(spawn_err))
 
@@ -303,11 +356,109 @@ function T.op_manager_methods_work_through_real_hal()
 
 			assert((op_mgr.apply_calls or 0) == 1)
 			assert(#op_mgr.calls == 1)
+
+			listener:close()
 		end)
 	end)
 end
 
-function T.unsupported_control_verb_returns_negative_reply()
+function T.op_manager_start_timeout_does_not_block_later_config()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local hanging = new_hanging_start_manager()
+		local good = new_capability_manager{
+			name = 'good_mgr',
+			cap_class = 'good_cap',
+			cap_id = 'cap_ok',
+			apply_mode = 'op',
+			offerings = { 'echo' },
+		}
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.hanging_mgr'] = hanging,
+			['services.hal.managers.good_mgr'] = good,
+		}, function(bus)
+			local admin = bus:connect()
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					hanging_mgr = {},
+				},
+			})
+
+			fibers.perform(require('fibers.sleep').sleep_op(0.05))
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					good_mgr = {},
+				},
+			})
+
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'good_cap', 'cap_ok')
+			local ref, err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(err))
+
+			listener:close()
+		end, {
+			manager_start_timeout_s = 0.02,
+			manager_apply_timeout_s = 0.02,
+		})
+	end, { timeout = 2.0 })
+end
+
+function T.op_manager_apply_timeout_does_not_block_later_config()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local hanging_apply = new_hanging_apply_manager()
+		local good = new_capability_manager{
+			name = 'good_apply_mgr',
+			cap_class = 'good_apply_cap',
+			cap_id = 'cap_ok',
+			apply_mode = 'op',
+			offerings = { 'echo' },
+		}
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.hanging_apply'] = hanging_apply,
+			['services.hal.managers.good_apply_mgr'] = good,
+		}, function(bus)
+			local admin = bus:connect()
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					hanging_apply = {},
+				},
+			})
+
+			fibers.perform(require('fibers.sleep').sleep_op(0.05))
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					good_apply_mgr = {},
+				},
+			})
+
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'good_apply_cap', 'cap_ok')
+			local ref, err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(err))
+
+			assert(hanging_apply.started == true)
+
+			listener:close()
+		end, {
+			manager_start_timeout_s = 0.02,
+			manager_apply_timeout_s = 0.02,
+		})
+	end, { timeout = 2.0 })
+end
+
+function T.unsupported_control_verb_returns_no_route()
 	runfibers.run(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local mgr = new_capability_manager{
@@ -338,11 +489,13 @@ function T.unsupported_control_verb_returns_negative_reply()
 			local reply, call_err = fibers.perform(ref:call_control_op('missing', {}))
 			assert(reply == nil)
 			assert(call_err == 'no_route' or tostring(call_err):match('no_route'))
+
+			listener:close()
 		end)
 	end)
 end
 
-function T.missing_capability_reply_times_out_cleanly()
+function T.capability_no_reply_is_completed_by_hal_control_timeout()
 	runfibers.run(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
 		local mgr = new_capability_manager{
@@ -371,17 +524,29 @@ function T.missing_capability_reply_times_out_cleanly()
 			local ref, wait_err = fibers.perform(listener:wait_for_cap_op())
 			assert(ref, tostring(wait_err))
 
+			local t0 = fibers.now()
+
 			local reply, err = fibers.perform(ref:call_control_op('echo', { value = 9 }, {
-				timeout = 0.05,
+				timeout = 0.5,
 				backoff = 0.01,
 				backoff_max = 0.01,
 			}))
 
-			assert(reply == nil)
-			assert(type(err) == 'string')
-			assert(err:match('timeout'))
-		end)
-	end)
+			local elapsed = fibers.now() - t0
+
+			assert(reply ~= nil, tostring(err))
+			assert(err == nil)
+			assert(reply.ok == false)
+			assert(type(reply.reason) == 'string')
+			assert(reply.reason:match('timeout'))
+			assert(elapsed < 0.25, 'request appears to have waited for client timeout, not HAL timeout')
+			assert(#mgr.calls == 1)
+
+			listener:close()
+		end, {
+			control_timeout_s = 0.03,
+		})
+	end, { timeout = 2.0 })
 end
 
 return T

@@ -44,6 +44,8 @@ function T.legacy_cap_listener_retains_sync_wrappers()
 		assert(reply, tostring(call_err))
 		assert(reply.ok == true)
 		assert(reply.reason == '{"hello":true}')
+
+		listener:close()
 	end)
 end
 
@@ -76,6 +78,8 @@ function T.curated_cap_listener_is_op_only_and_composes()
 		assert(reply, tostring(call_err))
 		assert(reply.ok == true)
 		assert(reply.reason == '{"x":1}')
+
+		listener:close()
 	end)
 end
 
@@ -111,6 +115,56 @@ function T.curated_cap_listener_reports_closed_subscription()
 		assert(ref == nil)
 		assert(type(err) == 'string')
 		assert(err:match('closed') or err:match('unsubscribed'))
+	end)
+end
+
+function T.curated_cap_listener_ignores_removed_status()
+	runfibers.run(function()
+		local bus = busmod.new()
+		local admin = bus:connect()
+		local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'fs', 'config')
+
+		admin:retain({ 'cap', 'fs', 'config', 'status' }, {
+			state = 'removed',
+			available = false,
+		})
+
+		local which = fibers.perform(op.named_choice{
+			cap = listener:wait_for_cap_op():wrap(function()
+				return 'cap'
+			end),
+			timeout = sleep.sleep_op(0.05):wrap(function()
+				return 'timeout'
+			end),
+		})
+
+		assert(which == 'timeout')
+		listener:close()
+	end)
+end
+
+function T.curated_cap_listener_ignores_malformed_status_payload()
+	runfibers.run(function()
+		local bus = busmod.new()
+		local admin = bus:connect()
+		local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'fs', 'config')
+
+		admin:retain({ 'cap', 'fs', 'config', 'status' }, {
+			state = 'added',
+			available = false,
+		})
+
+		local which = fibers.perform(op.named_choice{
+			cap = listener:wait_for_cap_op():wrap(function()
+				return 'cap'
+			end),
+			timeout = sleep.sleep_op(0.05):wrap(function()
+				return 'timeout'
+			end),
+		})
+
+		assert(which == 'timeout')
+		listener:close()
 	end)
 end
 
@@ -218,6 +272,27 @@ function T.raw_host_listener_requires_structured_status_not_legacy_added()
 		local listener = cap_sdk.new_raw_host_cap_listener(bus:connect(), 'uart_main', 'uart', 'main')
 
 		admin:retain({ 'raw', 'host', 'uart_main', 'cap', 'uart', 'main', 'status' }, 'added')
+
+		local which = fibers.perform(op.named_choice{
+			cap     = listener:wait_for_cap_op():wrap(function() return 'cap' end),
+			timeout = sleep.sleep_op(0.05):wrap(function() return 'timeout' end),
+		})
+
+		assert(which == 'timeout')
+		listener:close()
+	end)
+end
+
+function T.raw_host_listener_ignores_removed_status()
+	runfibers.run(function()
+		local bus = busmod.new()
+		local admin = bus:connect()
+		local listener = cap_sdk.new_raw_host_cap_listener(bus:connect(), 'uart_main', 'uart', 'main')
+
+		admin:retain({ 'raw', 'host', 'uart_main', 'cap', 'uart', 'main', 'status' }, {
+			state = 'removed',
+			available = false,
+		})
 
 		local which = fibers.perform(op.named_choice{
 			cap     = listener:wait_for_cap_op():wrap(function() return 'cap' end),
