@@ -11,21 +11,6 @@ local REPEAT_TYPES = {
     DAILY = "daily",
 }
 
-local time_source_ready = false
-
-local function ensure_time_source()
-    if time_source_ready then
-        return
-    end
-
-    local ok, err = pcall(falarm.set_time_source, os.time)
-    if not ok and not tostring(err):match("set_time_source may only be called once") then
-        error(err)
-    end
-
-    time_source_ready = true
-end
-
 ---@class AlarmTriggerTime
 ---@field hour integer
 ---@field min integer
@@ -63,7 +48,6 @@ end
 ---@param repeat_type string
 ---@return Alarm
 local function build_wait_alarm(trigger_time, repeat_type)
-    ensure_time_source()
     return falarm.new {
         next_time = function(last, now)
             return next_local_trigger(trigger_time, repeat_type, last, now)
