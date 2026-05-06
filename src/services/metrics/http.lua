@@ -60,8 +60,11 @@ local function send_http(data, log_fn)
         for k, v in response_headers:each() do
             table.insert(parts, string.format('\t%s: %s', k, v))
         end
-        log_fn('warn', { what = 'http_publish_failed', status = status,
-            headers = table.concat(parts, '\n') })
+        log_fn('warn', {
+            what = 'http_publish_failed',
+            status = status,
+            headers = table.concat(parts, '\n')
+        })
     else
         log_fn('info', { what = 'http_publish_ok', status = status })
     end
@@ -79,16 +82,25 @@ local function start_http_publisher(log_fn)
 
     local send_ch = channel.new(QUEUE_SIZE)
 
-    local scope = fibers.current_scope()
-    scope:spawn(function()
-        while true do
-            local which, payload = fibers.perform(op.named_choice({
-                msg = send_ch:get_op(),
-            }))
-            if which == 'msg' and payload ~= nil then
-                send_http(payload, log_fn)
+    fibers.spawn(function()
+        fibers.run_scope(function(s)
+            s:finally(function(aborted, _, sc_err)
+                if aborted then
+                    log_fn('fatal', "HTTP fiber: " .. tostring(sc_err))
+                else
+                    log_fn('trace', "HTTP fiber: exiting")
+                end
+            end)
+
+            while true do
+                local which, payload = fibers.perform(op.named_choice({
+                    msg = send_ch:get_op(),
+                }))
+                if which == 'msg' and payload ~= nil then
+                    send_http(payload, log_fn)
+                end
             end
-        end
+        end)
     end)
 
     return send_ch
