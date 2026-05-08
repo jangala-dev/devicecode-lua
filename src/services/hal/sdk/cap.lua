@@ -350,7 +350,7 @@ function CoreCapListener:close()
 	self.sub:unsubscribe()
 end
 
-function CoreCapListener:close_now()
+function CoreCapListener:terminate(_)
 	self:close()
 	return true, nil
 end
@@ -358,7 +358,7 @@ end
 function CoreCapListener:close_on_scope(scope)
 	assert(scope ~= nil, 'CoreCapListener:close_on_scope requires scope')
 	return scope:finally(function ()
-		self:close_now()
+		self:terminate('scope closed')
 	end)
 end
 

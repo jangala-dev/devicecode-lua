@@ -29,10 +29,17 @@ local files = {
 	'unit.config.service_spec',
 	'unit.devicecode.service_base_spec',
 	'unit.hal.cap_sdk_spec',
+	'unit.hal.control_loop_spec',
 	'unit.hal.hal_compat_spec',
 	'unit.hal.service_raw_host_spec',
 	'integration.devhost.main_failure_spec',
 	'integration.devhost.config_recovery_spec',
+	'unit.support.test_scoped_work',
+	'unit.support.test_queue',
+	'unit.support.test_priority_event',
+	'unit.support.test_request_owner',
+	'unit.support.test_resource',
+	'unit.support.test_bus_cleanup',
 }
 
 local function monotonic_now()

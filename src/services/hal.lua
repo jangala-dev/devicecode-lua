@@ -17,6 +17,7 @@ local DEFAULT_Q_LEN = 10
 local DEFAULT_CONTROL_TIMEOUT_S = 5.0
 local DEFAULT_MANAGER_START_TIMEOUT_S = 10.0
 local DEFAULT_MANAGER_APPLY_TIMEOUT_S = 10.0
+local DEFAULT_MANAGER_SHUTDOWN_TIMEOUT_S = 5.0
 
 local unpack = rawget(table, 'unpack') or _G.unpack
 local pack   = rawget(table, 'pack') or function (...)
@@ -66,11 +67,6 @@ end
 -- Generic helpers
 ----------------------------------------------------------------------
 
-local function choice_or_never(items)
-	if #items == 0 then return op.never() end
-	return op.choice(unpack(items))
-end
-
 local function class_valid(class)
 	return type(class) == 'string' and class ~= ''
 end
@@ -87,14 +83,15 @@ local function validate_config(config)
 	if config.schema ~= SCHEMA_STANDARD then
 		return false, "config schema must be " .. SCHEMA_STANDARD
 	end
-	config.schema = nil
 
 	for key, value in pairs(config) do
-		if type(key) ~= 'string' then
-			return false, "config keys must be strings"
-		end
-		if type(value) ~= 'table' then
-			return false, "config values must be tables"
+		if key ~= 'schema' then
+			if type(key) ~= 'string' then
+				return false, "config keys must be strings"
+			end
+			if type(value) ~= 'table' then
+				return false, "config values must be tables"
+			end
 		end
 	end
 
@@ -138,6 +135,302 @@ local function device_source_id(device)
 
 	return path_token(('%s_%s'):format(tostring(device.class), tostring(device.id)))
 end
+
+----------------------------------------------------------------------
+-- Manager lifecycle compatibility seam
+--
+-- Legacy managers:
+--   start(logger, dev_ch, cap_ch) -> "" | err
+--   apply_config(config)          -> true|nil, err
+--   stop()                        -> nil
+--
+-- Strict managers:
+--   start_op(...)
+--   apply_config_op(...)
+--   shutdown_op()
+--   fault_op()?                   -> Op
+--
+-- New code should use the strict form. This file keeps the old form alive
+-- for services and drivers that still depend on the legacy HAL boundary.
+----------------------------------------------------------------------
+
+local function manager_is_op_only(manager)
+	return type(manager) == 'table'
+		and (manager.api_mode == 'op_only' or manager.__op_only == true)
+end
+
+local function manager_call_op(manager_name, manager, method, ...)
+	local args = pack(...)
+	local op_name = method .. "_op"
+
+	if type(manager[op_name]) == 'function' then
+		local ev = manager[op_name](unpack(args, 1, args.n))
+		if type(ev) ~= 'table' or getmetatable(ev) ~= op.Op then
+			error(
+				('manager %q method %q must return an Op, got %s (%s)'):format(
+					tostring(manager_name),
+					op_name,
+					type(ev),
+					tostring(ev)
+				),
+				2
+			)
+		end
+		return ev
+	end
+
+	if manager_is_op_only(manager) then
+		error(
+			('manager %q must provide %q as an _op method; legacy fallback is not allowed'):format(
+				tostring(manager_name),
+				op_name
+			),
+			2
+		)
+	end
+
+	if type(manager[method]) ~= 'function' then
+		return op.always(false, ('manager %q does not implement %q'):format(
+			tostring(manager_name),
+			tostring(method)
+		))
+	end
+
+	return op.guard(function ()
+		local a, b = manager[method](unpack(args, 1, args.n))
+
+		if method == 'start' and type(a) == 'string' and b == nil then
+			return op.always(a == "", (a == "") and nil or a)
+		end
+
+		if method == 'stop' and a == nil and b == nil then
+			return op.always(true, nil)
+		end
+
+		return op.always(a, b)
+	end)
+end
+
+local function manager_call_with_timeout_op(manager_name, manager, method, timeout_s, ...)
+	local has_op_method = type(manager[method .. "_op"]) == 'function'
+	local ev = manager_call_op(manager_name, manager, method, ...)
+
+	-- Only real _op manager methods can be timed out cooperatively.
+	-- Legacy methods run synchronously inside manager_call_op's guard and are
+	-- treated as immediate compatibility code.
+	if not has_op_method or type(timeout_s) ~= 'number' or timeout_s < 0 then
+		return ev
+	end
+
+	return op.named_choice({
+		result  = ev,
+		timeout = sleep.sleep_op(timeout_s),
+	}):wrap(function(which, a, b)
+		if which == 'timeout' then return false, 'timeout' end
+		return a, b
+	end)
+end
+
+
+local function manager_shutdown_op(manager_name, manager, timeout_s)
+	if manager_is_op_only(manager) then
+		return manager_call_with_timeout_op(
+			manager_name,
+			manager,
+			'shutdown',
+			timeout_s,
+			timeout_s
+		)
+	end
+
+	return manager_call_with_timeout_op(manager_name, manager, 'stop', timeout_s)
+end
+
+local function manager_terminate_now(manager_name, manager, reason)
+	if not manager_is_op_only(manager) then
+		return true, nil
+	end
+
+	if type(manager) ~= 'table' or type(manager.terminate) ~= 'function' then
+		return true, nil
+	end
+
+	local terminate = manager.terminate
+	local use_dot_call = true
+
+	if debug and type(debug.getinfo) == 'function' then
+		local info = debug.getinfo(terminate, 'u')
+		if type(info) == 'table' and type(info.nparams) == 'number' and info.nparams > 1 then
+			use_dot_call = false
+		end
+	end
+
+	local ok, a, b
+
+	if use_dot_call then
+		ok, a, b = pcall(function ()
+			return terminate(reason)
+		end)
+
+		-- HAL managers are module-like in this tree, so dot-style terminate is the
+		-- compatibility default.  If a newer strict manager follows the object-style
+		-- colon convention and the dot call rejects, retry as a method call.
+		if not ok then
+			ok, a, b = pcall(function ()
+				return terminate(manager, reason)
+			end)
+		end
+	else
+		ok, a, b = pcall(function ()
+			return terminate(manager, reason)
+		end)
+	end
+
+	if not ok then
+		return nil, ('manager %q terminate raised: %s'):format(
+			tostring(manager_name),
+			tostring(a)
+		)
+	end
+
+	if a == false or (a == nil and b ~= nil) then
+		return nil, ('manager %q terminate failed: %s'):format(
+			tostring(manager_name),
+			tostring(b or 'termination failed')
+		)
+	end
+
+	return true, nil
+end
+
+local function manager_fault_watch_op(manager_name, manager)
+	if type(manager.fault_op) == 'function' then
+		local ev = manager.fault_op()
+		if type(ev) ~= 'table' or getmetatable(ev) ~= op.Op then
+			error(
+				('manager %q method fault_op must return an Op, got %s (%s)'):format(
+					tostring(manager_name),
+					type(ev),
+					tostring(ev)
+				),
+				2
+			)
+		end
+		return ev
+	end
+
+	if manager.scope and type(manager.scope.fault_op) == 'function' then
+		return manager.scope:fault_op()
+	end
+
+	return op.never()
+end
+
+----------------------------------------------------------------------
+-- Bus request/reply and control-dispatch helpers
+----------------------------------------------------------------------
+
+local function fallback_reply(reason)
+	return select(1, types.new.Reply(false, tostring(reason or 'control failed')))
+end
+
+local function fail_request(req, reason, fallback_to_reply)
+	local msg = tostring(reason or 'failed')
+
+	if fallback_to_reply and req and req.reply then
+		local reply = fallback_reply(msg)
+		if reply and req:reply(reply) then return true end
+	end
+
+	if req and req.fail then
+		return not not req:fail(msg)
+	end
+
+	return false
+end
+
+local function reply_control_failure(req, reason)
+	local reply = fallback_reply(reason)
+		or assert(select(1, types.new.Reply(false, 'control failed')))
+
+	if req and type(req.reply) == 'function' then
+		return req:reply(reply)
+	end
+
+	return false
+end
+
+local function remaining_sleep_op(deadline)
+	return op.guard(function()
+		local now = fibers.now()
+		if deadline <= now then return op.always() end
+		return sleep.sleep_op(deadline - now)
+	end)
+end
+
+local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s)
+	timeout_s = (type(timeout_s) == 'number' and timeout_s >= 0)
+		and timeout_s
+		or DEFAULT_CONTROL_TIMEOUT_S
+
+	if not cap_entry or cap_entry.alive == false then
+		return nil, 'capability unavailable'
+	end
+
+	local reply_ch = channel.new()
+	local control_req, ctrl_req_err = types.new.ControlRequest(verb, payload, reply_ch)
+	if not control_req then
+		return nil, tostring(ctrl_req_err or 'invalid control request')
+	end
+
+	local deadline = fibers.now() + timeout_s
+
+	local which, a, b = perform(op.named_choice({
+		sent = cap_entry.inst.control_ch:put_op(control_req):wrap(function()
+			return true
+		end),
+
+		timeout = remaining_sleep_op(deadline):wrap(function()
+			return false, 'timeout'
+		end),
+	}))
+
+	if which == 'timeout' then
+		return nil, 'timeout'
+	end
+	if which ~= 'sent' or a ~= true then
+		return nil, tostring(b or 'control channel closed')
+	end
+
+	local which2, reply_or_status, err_or_reason = perform(op.named_choice({
+		reply = reply_ch:get_op(),
+		timeout = remaining_sleep_op(deadline):wrap(function()
+			return nil, 'timeout'
+		end),
+	}))
+
+	if which2 == 'timeout' then
+		return nil, 'timeout'
+	end
+	if not reply_or_status then
+		return nil, tostring(err_or_reason or 'reply channel closed')
+	end
+
+	return reply_or_status, nil
+end
+
+----------------------------------------------------------------------
+-- Bus projection payloads and capability routing
+--
+-- Public projection:
+--   cap/<class>/<id>/...
+--
+-- Raw host provenance projection:
+--   raw/host/<source>/cap/<class>/<id>/...
+--
+-- The public projection is the stable capability surface. The raw projection
+-- records where the host discovered it.
+----------------------------------------------------------------------
 
 local function availability_state(event_type)
 	if event_type == 'added' then return 'available' end
@@ -213,200 +506,6 @@ local function parse_cap_ctrl_topic(topic)
 end
 
 ----------------------------------------------------------------------
--- Compatibility boundary helpers
-----------------------------------------------------------------------
-
-local function manager_is_op_only(manager)
-	return manager.__op_only == true or manager.api_mode == 'op_only'
-end
-
-local function manager_call_op(manager_name, manager, method, ...)
-	local args = pack(...)
-	local op_name = method .. "_op"
-
-	if type(manager[op_name]) == 'function' then
-		local ev = manager[op_name](unpack(args, 1, args.n))
-		if type(ev) ~= 'table' or getmetatable(ev) ~= op.Op then
-			error(
-				('manager %q method %q must return an Op, got %s (%s)'):format(
-					tostring(manager_name),
-					op_name,
-					type(ev),
-					tostring(ev)
-				),
-				2
-			)
-		end
-		return ev
-	end
-
-	if manager_is_op_only(manager) then
-		error(
-			('manager %q must provide %q as an _op method; legacy fallback is not allowed'):format(
-				tostring(manager_name),
-				op_name
-			),
-			2
-		)
-	end
-
-	if type(manager[method]) ~= 'function' then
-		return op.always(false, ('manager %q does not implement %q'):format(
-			tostring(manager_name),
-			tostring(method)
-		))
-	end
-
-	return op.guard(function ()
-		local a, b = manager[method](unpack(args, 1, args.n))
-
-		if method == 'start' and type(a) == 'string' and b == nil then
-			return op.always(a == "", (a == "") and nil or a)
-		end
-
-		if method == 'stop' and a == nil and b == nil then
-			return op.always(true, nil)
-		end
-
-		return op.always(a, b)
-	end)
-end
-
-local function manager_call_with_timeout_op(manager_name, manager, method, timeout_s, ...)
-	local has_op_method = type(manager[method .. "_op"]) == 'function'
-	local ev = manager_call_op(manager_name, manager, method, ...)
-
-	if not has_op_method or type(timeout_s) ~= 'number' or timeout_s < 0 then
-		return ev
-	end
-
-	return op.named_choice({
-		result  = ev,
-		timeout = sleep.sleep_op(timeout_s),
-	}):wrap(function(which, a, b)
-		if which == 'timeout' then return false, 'timeout' end
-		return a, b
-	end)
-end
-
-local function manager_fault_watch_op(manager_name, manager)
-	if type(manager.fault_op) == 'function' then
-		local ev = manager.fault_op()
-		if type(ev) ~= 'table' or getmetatable(ev) ~= op.Op then
-			error(
-				('manager %q method fault_op must return an Op, got %s (%s)'):format(
-					tostring(manager_name),
-					type(ev),
-					tostring(ev)
-				),
-				2
-			)
-		end
-		return ev
-	end
-
-	if manager.scope and type(manager.scope.fault_op) == 'function' then
-		return manager.scope:fault_op()
-	end
-
-	return op.never()
-end
-
-local function fallback_reply(reason)
-	return select(1, types.new.Reply(false, tostring(reason or 'control failed')))
-end
-
-local function fail_request(req, reason, fallback_to_reply)
-	local msg = tostring(reason or 'failed')
-
-	if fallback_to_reply and req and req.reply then
-		local reply = fallback_reply(msg)
-		if reply and req:reply(reply) then return true end
-	end
-
-	if req and req.fail then
-		return not not req:fail(msg)
-	end
-
-	return false
-end
-
-local function remaining_sleep_op(deadline)
-	return op.guard(function()
-		local now = fibers.now()
-		if deadline <= now then return op.always() end
-		return sleep.sleep_op(deadline - now)
-	end)
-end
-
-local function dispatch_cap_ctrl_op(cap_entry, verb, payload, timeout_s)
-	timeout_s = (type(timeout_s) == 'number' and timeout_s >= 0)
-		and timeout_s
-		or DEFAULT_CONTROL_TIMEOUT_S
-
-	return op.guard(function ()
-		if not cap_entry or cap_entry.alive == false then
-			return op.always(nil, 'capability unavailable')
-		end
-
-		local reply_ch = channel.new()
-		local control_req, ctrl_req_err = types.new.ControlRequest(verb, payload, reply_ch)
-		if not control_req then
-			return op.always(nil, tostring(ctrl_req_err or 'invalid control request'))
-		end
-
-		local deadline = fibers.now() + timeout_s
-
-		return fibers.run_scope_op(function(scope)
-			local which, a, b = perform(op.named_choice({
-				sent = cap_entry.inst.control_ch:put_op(control_req):wrap(function()
-					return true
-				end),
-
-				timeout = remaining_sleep_op(deadline):wrap(function()
-					return false, 'timeout'
-				end),
-
-				stop = scope:not_ok_op(),
-			}))
-
-			if which == 'stop' then
-				return nil, tostring(b or a or 'stopping')
-			end
-			if which == 'timeout' then
-				return nil, 'timeout'
-			end
-			if which ~= 'sent' or a ~= true then
-				return nil, tostring(b or 'control channel closed')
-			end
-
-			local which2, reply_or_status, err_or_reason = perform(op.named_choice({
-				reply = reply_ch:get_op(),
-				timeout = remaining_sleep_op(deadline):wrap(function()
-					return nil, 'timeout'
-				end),
-				stop = scope:not_ok_op(),
-			}))
-
-			if which2 == 'stop' then
-				return nil, tostring(err_or_reason or reply_or_status or 'stopping')
-			end
-			if which2 == 'timeout' then
-				return nil, 'timeout'
-			end
-			if not reply_or_status then
-				return nil, tostring(err_or_reason or 'reply channel closed')
-			end
-
-			return reply_or_status, nil
-		end):wrap(function(st, rep, reply, err)
-			if st == 'ok' then return reply, err end
-			return nil, tostring(reply or err or rep or st)
-		end)
-	end)
-end
-
-----------------------------------------------------------------------
 -- HAL service
 ----------------------------------------------------------------------
 
@@ -430,6 +529,9 @@ function HalService.start(conn, opts)
 	local manager_apply_timeout_s = (type(opts.manager_apply_timeout_s) == 'number')
 		and opts.manager_apply_timeout_s
 		or DEFAULT_MANAGER_APPLY_TIMEOUT_S
+	local manager_shutdown_timeout_s = (type(opts.manager_shutdown_timeout_s) == 'number')
+		and opts.manager_shutdown_timeout_s
+		or DEFAULT_MANAGER_SHUTDOWN_TIMEOUT_S
 
 	local cap_emit_ch = channel.new(DEFAULT_Q_LEN)
 	local dev_ev_ch   = channel.new(DEFAULT_Q_LEN)
@@ -458,7 +560,7 @@ function HalService.start(conn, opts)
 	end
 
 	local function spawn_service_worker(label, req, fn)
-		local ok, err = service_scope:spawn(fn)
+		local ok, err = fibers.spawn(fn)
 		if ok then return true end
 
 		local reason = tostring(err or 'service not accepting work')
@@ -467,17 +569,33 @@ function HalService.start(conn, opts)
 		return false
 	end
 
-	local function stop_manager_async(name, manager, reason)
-		return spawn_service_worker('manager_stop', nil, function()
-			local ok, stop_err = perform(manager_call_op(name, manager, 'stop'))
+	local function shutdown_manager_async(name, manager, reason)
+		return spawn_service_worker('manager_shutdown', nil, function()
+			local ok, shutdown_err = perform(manager_shutdown_op(name, manager, manager_shutdown_timeout_s))
 			if ok ~= true then
-				log('warn', 'manager_stop_failed', {
+				log('warn', 'manager_shutdown_failed', {
 					manager = name,
 					reason  = reason,
-					err     = tostring(stop_err),
+					err     = tostring(shutdown_err),
 				})
+
+				local terminated, terminate_err = manager_terminate_now(name, manager, shutdown_err or reason)
+				if terminated ~= true then
+					log('warn', 'manager_terminate_failed', {
+						manager = name,
+						reason  = reason,
+						err     = tostring(terminate_err),
+					})
+				end
 			end
 		end)
+	end
+
+	local function unbind_cap_endpoints(entry)
+		if not entry then return end
+
+		for _, ep in pairs(entry.rpc or {}) do ep:unbind() end
+		for _, ep in pairs(entry.raw_rpc or {}) do ep:unbind() end
 	end
 
 	function registry:get_device(class, id)
@@ -543,9 +661,7 @@ function HalService.start(conn, opts)
 		if not entry then return nil, 'capability does not exist' end
 
 		entry.alive = false
-
-		for _, ep in pairs(entry.rpc) do ep:unbind() end
-		for _, ep in pairs(entry.raw_rpc) do ep:unbind() end
+		unbind_cap_endpoints(entry)
 
 		for key in pairs(entry.state_keys) do
 			conn:unretain(T.cap_state(class, id, key))
@@ -569,12 +685,13 @@ function HalService.start(conn, opts)
 		return out
 	end
 
-	function registry:close_all_caps()
+	function registry:terminate_caps(reason)
+		-- reason is accepted for finaliser-shaped call sites; bus endpoints
+		-- expose immediate unbind without a reason parameter.
 		for _, class_caps in pairs(self.caps) do
 			for _, entry in pairs(class_caps) do
 				entry.alive = false
-				for _, ep in pairs(entry.rpc) do ep:unbind() end
-				for _, ep in pairs(entry.raw_rpc) do ep:unbind() end
+				unbind_cap_endpoints(entry)
 			end
 		end
 	end
@@ -609,6 +726,31 @@ function HalService.start(conn, opts)
 			conn:retain(T.raw_cap_meta(source, class, id), cap_raw_meta_payload(entry.inst, entry))
 		else
 			conn:unretain(T.raw_cap_meta(source, class, id))
+		end
+	end
+
+	local function publish_cap_event(entry, class, id, name, payload)
+		conn:publish(T.cap_event(class, id, name), payload)
+
+		if entry.source_kind == 'host' and entry.source then
+			conn:publish(T.raw_cap_event(entry.source, class, id, name), payload)
+		end
+	end
+
+	local function retain_cap_state(entry, class, id, key, payload)
+		entry.state_keys[key] = true
+		conn:retain(T.cap_state(class, id, key), payload)
+
+		if entry.source_kind == 'host' and entry.source then
+			conn:retain(T.raw_cap_state(entry.source, class, id, key), payload)
+		end
+	end
+
+	local function retain_cap_meta(entry, class, id)
+		conn:retain(T.cap_meta(class, id), cap_public_meta_payload(entry.inst, entry))
+
+		if entry.source_kind == 'host' and entry.source then
+			conn:retain(T.raw_cap_meta(entry.source, class, id), cap_raw_meta_payload(entry.inst, entry))
 		end
 	end
 
@@ -716,7 +858,7 @@ function HalService.start(conn, opts)
 			return
 		end
 
-		local reply, reply_err = perform(dispatch_cap_ctrl_op(cap_entry, verb, req.payload, control_timeout_s))
+		local reply, reply_err = dispatch_cap_ctrl(cap_entry, verb, req.payload, control_timeout_s)
 		if not reply then
 			log('warn', 'control_dispatch_failed', {
 				err   = tostring(reply_err),
@@ -724,7 +866,7 @@ function HalService.start(conn, opts)
 				id    = id,
 				verb  = verb,
 			})
-			req:reply(fallback_reply(reply_err) or assert(select(1, types.new.Reply(false, 'control failed'))))
+			reply_control_failure(req, reply_err)
 			return
 		end
 
@@ -810,28 +952,18 @@ function HalService.start(conn, opts)
 		end
 
 		if emit.mode == 'event' then
-			conn:publish(T.cap_event(emit.class, emit.id, emit.key), emit.data)
-			if entry.source_kind == 'host' and entry.source then
-				conn:publish(T.raw_cap_event(entry.source, emit.class, emit.id, emit.key), emit.data)
-			end
+			publish_cap_event(entry, emit.class, emit.id, emit.key, emit.data)
 			return
 		end
 
 		if emit.mode == 'state' then
-			entry.state_keys[emit.key] = true
-			conn:retain(T.cap_state(emit.class, emit.id, emit.key), emit.data)
-			if entry.source_kind == 'host' and entry.source then
-				conn:retain(T.raw_cap_state(entry.source, emit.class, emit.id, emit.key), emit.data)
-			end
+			retain_cap_state(entry, emit.class, emit.id, emit.key, emit.data)
 			return
 		end
 
 		if emit.mode == 'meta' then
 			entry.meta_fields[emit.key] = emit.data
-			conn:retain(T.cap_meta(emit.class, emit.id), cap_public_meta_payload(entry.inst, entry))
-			if entry.source_kind == 'host' and entry.source then
-				conn:retain(T.raw_cap_meta(entry.source, emit.class, emit.id), cap_raw_meta_payload(entry.inst, entry))
-			end
+			retain_cap_meta(entry, emit.class, emit.id)
 			return
 		end
 
@@ -924,26 +1056,28 @@ function HalService.start(conn, opts)
 		end
 
 		for name, manager_config in pairs(config) do
-			if not managers[name] then
-				local ok, manager = pcall(require, "services.hal.managers." .. name)
-				if not ok then
-					log('error', 'manager_require_failed', { manager = name, err = tostring(manager) })
-				else
-					local start_ok, start_err = start_manager(name, manager)
-					if start_ok ~= true then
-						log('error', 'manager_start_failed', { manager = name, err = tostring(start_err) })
+			if name ~= 'schema' then
+				if not managers[name] then
+					local ok, manager = pcall(require, "services.hal.managers." .. name)
+					if not ok then
+						log('error', 'manager_require_failed', { manager = name, err = tostring(manager) })
 					else
-						managers[name] = manager
-						svc:obs_event('manager_started', { manager = name })
+						local start_ok, start_err = start_manager(name, manager)
+						if start_ok ~= true then
+							log('error', 'manager_start_failed', { manager = name, err = tostring(start_err) })
+						else
+							managers[name] = manager
+							svc:obs_event('manager_started', { manager = name })
+						end
 					end
 				end
-			end
 
-			local manager = managers[name]
-			if manager then
-				local ok, apply_err = apply_manager_config(name, manager, manager_config)
-				if ok ~= true then
-					log('error', 'manager_apply_failed', { manager = name, err = tostring(apply_err) })
+				local manager = managers[name]
+				if manager then
+					local ok, apply_err = apply_manager_config(name, manager, manager_config)
+					if ok ~= true then
+						log('error', 'manager_apply_failed', { manager = name, err = tostring(apply_err) })
+					end
 				end
 			end
 		end
@@ -952,7 +1086,7 @@ function HalService.start(conn, opts)
 			if not config[name] then
 				managers[name] = nil
 				svc:obs_event('manager_stopping', { manager = name, reason = 'removed_from_config' })
-				stop_manager_async(name, manager, 'removed_from_config')
+				shutdown_manager_async(name, manager, 'removed_from_config')
 			end
 		end
 
@@ -963,16 +1097,7 @@ function HalService.start(conn, opts)
 		svc:obs_event('bootstrap_begin', {})
 
 		local fs_manager = require "services.hal.managers.filesystem"
-		local fs_logger = Logger.new(obs_emitter, {
-			service   = svc.name,
-			component = 'manager',
-			manager   = 'filesystem',
-		})
-
-		local start_ok, start_err = perform(manager_call_with_timeout_op(
-			'filesystem', fs_manager, 'start', manager_start_timeout_s,
-			fs_logger, dev_ev_ch, cap_emit_ch
-		))
+		local start_ok, start_err = start_manager('filesystem', fs_manager)
 
 		if start_ok ~= true then
 			svc:status('failed', { reason = 'filesystem manager start failed', err = tostring(start_err) })
@@ -980,15 +1105,12 @@ function HalService.start(conn, opts)
 			error("HAL bootstrap failed: Failed to start filesystem manager: " .. tostring(start_err))
 		end
 
-		local ok, cfg_err = perform(manager_call_with_timeout_op(
-			'filesystem', fs_manager, 'apply_config', manager_apply_timeout_s,
+		local ok, cfg_err = apply_manager_config('filesystem', fs_manager, {
 			{
-				{
-					name = "config",
-					root = os.getenv("DEVICECODE_CONFIG_DIR"),
-				}
+				name = "config",
+				root = os.getenv("DEVICECODE_CONFIG_DIR"),
 			}
-		))
+		})
 
 		if ok ~= true then
 			svc:status('failed', { reason = 'filesystem manager config failed', err = tostring(cfg_err) })
@@ -1018,7 +1140,7 @@ function HalService.start(conn, opts)
 		log('error', 'manager_fault', { manager = name })
 
 		managers[name] = nil
-		stop_manager_async(name, manager, 'manager_fault')
+		shutdown_manager_async(name, manager, 'manager_fault')
 	end
 
 	local function on_config_message(msg)
@@ -1029,6 +1151,8 @@ function HalService.start(conn, opts)
 			log('warn', 'config_bad_shape', { payload = msg and msg.payload })
 		end
 	end
+
+	local config_sub
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
 	svc:obs_log('info', 'service start() entered')
@@ -1041,7 +1165,24 @@ function HalService.start(conn, opts)
 			log('error', 'scope_failed', { err = tostring(primary), status = st })
 		end
 
-		registry:close_all_caps()
+		registry:terminate_caps(primary or 'scope_exit')
+
+		for name, manager in pairs(managers) do
+			local ok, err = manager_terminate_now(name, manager, primary or 'scope_exit')
+			if ok ~= true then
+				log('warn', 'manager_terminate_failed', {
+					manager = name,
+					reason  = tostring(primary or 'scope_exit'),
+					err     = tostring(err),
+				})
+			end
+			managers[name] = nil
+		end
+
+		if config_sub then
+			config_sub:unsubscribe()
+			config_sub = nil
+		end
 
 		svc:status('stopped', { reason = tostring(primary or 'scope_exit') })
 		svc:obs_log('info', 'service stopped')
@@ -1051,27 +1192,19 @@ function HalService.start(conn, opts)
 	svc:status('running')
 	svc:obs_log('info', 'bootstrap successful')
 
-	local config_sub = conn:subscribe({ 'cfg', svc.name })
+	config_sub = conn:subscribe({ 'cfg', svc.name })
 	svc:obs_log('info', { what = 'subscribed', topic = 'cfg/' .. svc.name })
 
 	while true do
 		local source, a, b = perform(op.named_choice({
-			rpc           = choice_or_never(registry:rpc_ops()),
-			manager_fault = choice_or_never(manager_fault_ops()),
+			rpc           = op.choice(registry:rpc_ops()),
+			manager_fault = op.choice(manager_fault_ops()),
 			cap_emit      = cap_emit_ch:get_op(),
 			device_event  = dev_ev_ch:get_op(),
 			config        = config_sub:recv_op(),
-			stop          = service_scope:not_ok_op(),
 		}))
 
-		if source == 'stop' then
-			local status, reason_or_primary = a, b
-			log('info', 'hal_loop_stopping', {
-				status = tostring(status),
-				reason = tostring(reason_or_primary),
-			})
-			return
-		elseif source == 'rpc' then
+		if source == 'rpc' then
 			on_cap_ctrl(a)
 		elseif source == 'cap_emit' then
 			on_cap_emit(a)

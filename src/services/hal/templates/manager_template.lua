@@ -1,5 +1,14 @@
+-- services/hal/templates/manager_template.lua
+--
+-- Strict HAL manager template.
+--
+-- New managers advertise api_mode = 'op_only'. HAL will call start_op(),
+-- apply_config_op(), shutdown_op(), and terminate(reason). Legacy stop/stop_op
+-- belong only on the compatibility side of hal.lua.
+
 local hal_types = require "services.hal.types.core"
 local driver_template = require "services.hal.templates.driver_template"
+local resource = require "services.support.resource"
 
 local fibers = require "fibers"
 local op = require "fibers.op"
@@ -7,14 +16,16 @@ local channel = require "fibers.channel"
 local sleep = require "fibers.sleep"
 
 ---@class TemplateManager
----@field scope Scope?
+---@field api_mode string
+---@field scope Scope|nil
 ---@field started boolean
 ---@field detect_ch Channel
 ---@field remove_ch Channel
 ---@field ready_driver_ch Channel
 ---@field drivers table<string, TemplateDriver>
----@field log Logger?
+---@field log Logger|nil
 local TemplateManager = {
+    api_mode = 'op_only',
     scope = nil,
     started = false,
     detect_ch = channel.new(),
@@ -24,50 +35,53 @@ local TemplateManager = {
     log = nil,
 }
 
-local STOP_TIMEOUT = 5
+local DEFAULT_SHUTDOWN_TIMEOUT = 5.0
 
--- Example detector: in a real manager this is backed by udev/mmcli/ubus/config watcher.
 local function detector(scope)
-    scope:finally(function()
+    scope:finally(function ()
         TemplateManager.log:debug({ what = "template_detector_stopped" })
     end)
 
     while true do
-        local source, payload = fibers.perform(op.named_choice {
+        local which, payload = fibers.perform(fibers.named_choice{
             detect = TemplateManager.detect_ch:get_op(),
             remove = TemplateManager.remove_ch:get_op(),
         })
 
-        if source == "detect" then
+        if which == "detect" then
             local id = payload
             local driver, err = driver_template.new(id, TemplateManager.log:child({ template = id }))
             if not driver then
                 TemplateManager.log:error({ what = "template_driver_create_failed", id = id, err = tostring(err) })
             else
-                fibers.current_scope():spawn(function()
-                    local init_err = driver:init()
-                    if init_err ~= "" then
-                        TemplateManager.log:error({ what = "template_driver_init_failed", id = id, err = init_err })
+                local ok, spawn_err = fibers.spawn(function ()
+                    local ok_init, init_err = fibers.perform(driver:init_op())
+                    if not ok_init then
+                        TemplateManager.log:error({ what = "template_driver_init_failed", id = id, err = tostring(init_err) })
                         return
                     end
-                    TemplateManager.ready_driver_ch:put(driver)
+                    fibers.perform(TemplateManager.ready_driver_ch:put_op(driver))
                 end)
+                if not ok then
+                    resource.terminate_checked(driver, tostring(spawn_err or "driver init spawn failed"), "template driver init cleanup failed")
+                end
             end
-        elseif source == "remove" then
+        elseif which == "remove" then
             local id = payload
             local driver = TemplateManager.drivers[id]
             if driver then
-                fibers.current_scope():spawn(function()
-                    driver:stop(STOP_TIMEOUT)
-                end)
                 TemplateManager.drivers[id] = nil
+                local ok, err = fibers.perform(driver:shutdown_op(DEFAULT_SHUTDOWN_TIMEOUT))
+                if not ok then
+                    resource.terminate_checked(driver, tostring(err or "driver shutdown failed"), "template driver shutdown cleanup failed")
+                end
             end
         end
     end
 end
 
-local function manager(scope, dev_ev_ch, cap_emit_ch)
-    scope:finally(function()
+local function manager_loop(scope, dev_ev_ch, cap_emit_ch)
+    scope:finally(function ()
         TemplateManager.log:debug({ what = "template_manager_loop_stopped" })
     end)
 
@@ -78,15 +92,17 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
         end
 
         repeat
-            local caps, cap_err = driver:capabilities(cap_emit_ch)
-            if cap_err ~= "" then
-                TemplateManager.log:error({ what = "template_caps_failed", err = cap_err })
+            local ok_caps, caps_or_err = fibers.perform(driver:capabilities_op(cap_emit_ch))
+            if not ok_caps then
+                TemplateManager.log:error({ what = "template_caps_failed", err = tostring(caps_or_err) })
+                resource.terminate_checked(driver, "capabilities failed", "template driver capabilities cleanup failed")
                 break
             end
 
-            local ok, start_err = driver:start()
-            if not ok then
+            local ok_start, start_err = fibers.perform(driver:start_op(scope))
+            if not ok_start then
                 TemplateManager.log:error({ what = "template_start_failed", err = tostring(start_err) })
+                resource.terminate_checked(driver, "start failed", "template driver start cleanup failed")
                 break
             end
 
@@ -97,72 +113,97 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
                 "template_device",
                 driver.id,
                 { source = "template" },
-                caps
+                caps_or_err
             )
             if not ev then
                 TemplateManager.log:error({ what = "template_device_event_failed", err = tostring(ev_err) })
                 break
             end
 
-            dev_ev_ch:put(ev)
+            fibers.perform(dev_ev_ch:put_op(ev))
         until true
     end
 end
 
----@param logger Logger
----@param dev_ev_ch Channel
----@param cap_emit_ch Channel
----@return string error
-function TemplateManager.start(logger, dev_ev_ch, cap_emit_ch)
-    if TemplateManager.started then
-        return "Already started"
-    end
+function TemplateManager.start_op(logger, dev_ev_ch, cap_emit_ch)
+    return op.guard(function ()
+        if TemplateManager.started then
+            return op.always(false, "already started")
+        end
 
-    local scope, err = fibers.current_scope():child()
-    if not scope then
-        return "Failed to create child scope: " .. tostring(err)
-    end
+        local owner_scope = fibers.current_scope()
+        local scope, err = owner_scope:child()
+        if not scope then
+            return op.always(false, tostring(err))
+        end
 
-    TemplateManager.log = logger
-    TemplateManager.scope = scope
+        TemplateManager.log = logger
+        TemplateManager.scope = scope
 
-    scope:spawn(detector)
-    scope:spawn(manager, dev_ev_ch, cap_emit_ch)
+        scope:finally(function ()
+            TemplateManager.terminate("template manager scope finalised")
+        end)
 
-    TemplateManager.started = true
-    return ""
+        local ok1, err1 = scope:spawn(detector)
+        if not ok1 then
+            TemplateManager.terminate(tostring(err1 or "detector spawn failed"))
+            return op.always(false, tostring(err1))
+        end
+
+        local ok2, err2 = scope:spawn(manager_loop, dev_ev_ch, cap_emit_ch)
+        if not ok2 then
+            TemplateManager.terminate(tostring(err2 or "manager loop spawn failed"))
+            return op.always(false, tostring(err2))
+        end
+
+        TemplateManager.started = true
+        return op.always(true, nil)
+    end)
 end
 
----@param timeout number?
----@return boolean ok
----@return string error
-function TemplateManager.stop(timeout)
-    if not TemplateManager.started or not TemplateManager.scope then
-        return false, "Not started"
+function TemplateManager.shutdown_op(timeout)
+    timeout = timeout or DEFAULT_SHUTDOWN_TIMEOUT
+
+    return op.guard(function ()
+        local scope = TemplateManager.scope
+        if not TemplateManager.started or not scope then
+            return op.always(true, nil)
+        end
+
+        scope:cancel("template manager shutdown")
+
+        return fibers.boolean_choice(
+            scope:join_op():wrap(function ()
+                TemplateManager.terminate("template manager joined")
+                return true, nil
+            end),
+            sleep.sleep_op(timeout):wrap(function ()
+                return false, "template manager shutdown timeout"
+            end)
+        ):wrap(function (completed, _a, b)
+            if completed then return true, nil end
+            return false, b
+        end)
+    end)
+end
+
+function TemplateManager.terminate(reason)
+    for id, driver in pairs(TemplateManager.drivers or {}) do
+        resource.terminate_checked(driver, reason or "template manager terminated", "template manager driver cleanup failed")
+        TemplateManager.drivers[id] = nil
     end
 
-    timeout = timeout or STOP_TIMEOUT
-    TemplateManager.scope:cancel()
-
-    local source = fibers.perform(op.named_choice {
-        join = TemplateManager.scope:join_op(),
-        timeout = sleep.sleep_op(timeout),
-    })
-
-    if source == "timeout" then
-        return false, "template manager stop timeout"
+    if TemplateManager.scope then
+        TemplateManager.scope:cancel(reason or "template manager terminated")
     end
 
+    TemplateManager.scope = nil
     TemplateManager.started = false
-    return true, ""
+    return true, nil
 end
 
--- Managers must expose apply_config even if they do not use runtime config.
----@param namespaces table
----@return boolean ok
----@return string error
-function TemplateManager.apply_config(namespaces) -- luacheck: ignore
-    return true, ""
+function TemplateManager.apply_config_op(_namespaces)
+    return op.always(true, nil)
 end
 
 return TemplateManager

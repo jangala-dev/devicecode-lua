@@ -67,7 +67,7 @@ local function new_capability_manager(opts)
 		no_reply   = not not opts.no_reply,
 		reply_fn   = opts.reply_fn,
 		calls      = {},
-		__op_only  = (opts.apply_mode == 'op'),
+		api_mode   = (opts.apply_mode == 'op') and 'op_only' or nil,
 	}
 
 	local control_ch = channel.new()
@@ -164,9 +164,9 @@ local function new_capability_manager(opts)
 			end)
 		end
 
-		function manager.stop_op(_timeout)
+		function manager.shutdown_op(_timeout)
 			return op.guard(function()
-				manager.stop_calls = (manager.stop_calls or 0) + 1
+				manager.shutdown_calls = (manager.shutdown_calls or 0) + 1
 				return op.always(true, nil)
 			end)
 		end
@@ -201,7 +201,7 @@ end
 
 local function new_hanging_start_manager()
 	return {
-		__op_only = true,
+		api_mode = 'op_only',
 
 		start_op = function()
 			return op.never()
@@ -211,7 +211,7 @@ local function new_hanging_start_manager()
 			return op.always(true, nil)
 		end,
 
-		stop_op = function()
+		shutdown_op = function()
 			return op.always(true, nil)
 		end,
 	}
@@ -219,7 +219,7 @@ end
 
 local function new_hanging_apply_manager()
 	local manager = {
-		__op_only = true,
+		api_mode = 'op_only',
 		started = false,
 	}
 
@@ -235,7 +235,7 @@ local function new_hanging_apply_manager()
 		return op.never()
 	end
 
-	function manager.stop_op()
+	function manager.shutdown_op()
 		return op.always(true, nil)
 	end
 
@@ -279,7 +279,7 @@ function T.non_legacy_managers_must_expose_op_methods()
 		}
 
 		-- Make this fixture explicitly strict, but leave apply_config_op absent.
-		legacy_mgr.__op_only = true
+		legacy_mgr.api_mode = 'op_only'
 
 		function legacy_mgr.start_op(_logger, dev_ev_ch, _cap_emit_ch)
 			return op.guard(function()
@@ -289,9 +289,9 @@ function T.non_legacy_managers_must_expose_op_methods()
 			end)
 		end
 
-		function legacy_mgr.stop_op(_timeout)
+		function legacy_mgr.shutdown_op(_timeout)
 			return op.guard(function()
-				legacy_mgr.stop_calls = (legacy_mgr.stop_calls or 0) + 1
+				legacy_mgr.shutdown_calls = (legacy_mgr.shutdown_calls or 0) + 1
 				return op.always(true, nil)
 			end)
 		end
@@ -358,6 +358,93 @@ function T.op_manager_methods_work_through_real_hal()
 			assert(#op_mgr.calls == 1)
 
 			listener:close()
+		end)
+	end)
+end
+
+
+function T.strict_manager_shutdown_uses_shutdown_op()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local op_mgr = new_capability_manager{
+			name = 'shutdown_mgr',
+			cap_class = 'shutdown_cap',
+			cap_id = 'cap_shutdown',
+			apply_mode = 'op',
+			offerings = { 'echo' },
+		}
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.shutdown_mgr'] = op_mgr,
+		}, function(bus)
+			local admin = bus:connect()
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					shutdown_mgr = {},
+				},
+			})
+
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'shutdown_cap', 'cap_shutdown')
+			local ref, err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(err))
+			listener:close()
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+				},
+			})
+
+			fibers.perform(require('fibers.sleep').sleep_op(0.05))
+
+			assert((op_mgr.shutdown_calls or 0) == 1)
+			assert(op_mgr.stop_calls == nil)
+		end)
+	end)
+end
+
+function T.legacy_manager_shutdown_uses_stop_compatibility()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local legacy_mgr = new_capability_manager{
+			name = 'legacy_shutdown_mgr',
+			cap_class = 'legacy_shutdown_cap',
+			cap_id = 'cap_legacy_shutdown',
+			apply_mode = 'legacy',
+			offerings = { 'echo' },
+		}
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.legacy_shutdown_mgr'] = legacy_mgr,
+		}, function(bus)
+			local admin = bus:connect()
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					legacy_shutdown_mgr = {},
+				},
+			})
+
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'legacy_shutdown_cap', 'cap_legacy_shutdown')
+			local ref, err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(err))
+			listener:close()
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+				},
+			})
+
+			fibers.perform(require('fibers.sleep').sleep_op(0.05))
+
+			assert((legacy_mgr.stop_calls or 0) == 1)
+			assert(legacy_mgr.shutdown_calls == nil)
 		end)
 	end)
 end

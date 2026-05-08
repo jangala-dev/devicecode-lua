@@ -108,22 +108,7 @@ function M.run_request_loop(ch, methods, logger, what)
 	end)
 
 	while true do
-		local which, a, b = perform(fibers.named_choice{
-			request = ch:get_op(),
-			stop    = scope:not_ok_op(),
-		})
-
-		if which == 'stop' then
-			local status, reason_or_primary = a, b
-			dlog(logger, 'debug', {
-				what   = tostring(what or 'control_loop') .. '_stopping',
-				status = tostring(status),
-				reason = tostring(reason_or_primary),
-			})
-			return
-		end
-
-		local request, req_err = a, b
+		local request, req_err = perform(ch:get_op())
 		if not request then
 			dlog(logger, 'debug', {
 				what = tostring(what or 'control_loop') .. '_closed',
