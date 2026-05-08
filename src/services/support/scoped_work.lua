@@ -17,9 +17,9 @@
 
 local safe   = require 'coxpcall'
 
-local fibers = require 'fibers'
-local op     = require 'fibers.op'
-local cond   = require 'fibers.cond'
+local fibers    = require 'fibers'
+local op        = require 'fibers.op'
+local cond      = require 'fibers.cond'
 
 local M = {}
 
@@ -115,6 +115,9 @@ end
 ---   reaper_delegation   : required when reaper_scope ~= lifetime_scope
 ---   setup(scope)        : non-yielding setup hook before worker admission;
 ---                         returns setup table or nil,err
+---                         setup table may include cancel_owned_now(reason),
+---                         an immediate, non-yielding cancellation hook for
+---                         setup-owned resources such as request owners
 ---   report(ev)          : immediate reporter callback; should not yield
 ---   copy_result(result) : optional body-end snapshot hook for successful result
 ---
@@ -303,6 +306,11 @@ local function start_impl(spec, opts)
 
 	local ok_worker, worker_spawn_err = child:spawn(function ()
 		local ok, ret = safe.pcall(function ()
+			-- Cancellation may have happened after admission but before this worker
+			-- fibre first ran.  Observe the child scope before entering user code so
+			-- pre-body cancellation cannot leak into HAL/Fabric work.
+			child:perform(op.always(true))
+
 			local raw = validate_result(spec.run(child, setup_result))
 			return validate_result(copy_result(raw))
 		end)
@@ -331,7 +339,20 @@ local function start_impl(spec, opts)
 	}
 
 	function handle:cancel(reason)
-		child:cancel(reason or 'cancelled')
+		reason = reason or 'cancelled'
+
+		-- Setup may have transferred ownership of immediate, caller-visible
+		-- resources into this scoped work before the worker body has started.
+		-- Give those resources a non-yielding cancellation path now; finalisers
+		-- remain the structural fallback and must be idempotent.
+		if setup_result and type(setup_result.cancel_owned_now) == 'function' then
+			local ok, err = setup_result.cancel_owned_now(reason)
+			if ok == false or ok == nil then
+				return nil, err or 'scoped_work_cancel_owned_failed'
+			end
+		end
+
+		child:cancel(reason)
 		return true
 	end
 

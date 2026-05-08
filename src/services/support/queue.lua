@@ -108,14 +108,21 @@ end
 
 --- Try to receive from a mailbox now.
 ---
---- Note that nil may also mean the mailbox is closed and drained; callers that
---- need to distinguish should inspect rx:why().
+--- Return shapes:
+---   item, nil           received an item
+---   nil, "not_ready"  would have had to wait
+---   nil, reason         closed and drained
 ---
 ---@param rx MailboxRx
 ---@return any item
 ---@return string|nil err
 function M.try_recv_now(rx)
-	return M.try_now(rx:recv_op(), nil, 'not_ready')
+	return M.try_now(rx:recv_op():wrap(function (item)
+		if item == nil then
+			return nil, tostring((rx.why and rx:why()) or 'closed')
+		end
+		return item, nil
+	end), nil, 'not_ready')
 end
 
 return M

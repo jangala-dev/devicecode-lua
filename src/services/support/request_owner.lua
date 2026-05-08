@@ -2,9 +2,10 @@
 --
 -- Small single-resolution owner for caller-visible request objects.
 --
--- A request owner belongs inside the scope that owns the request lifetime.  It
--- provides idempotent reply/fail/terminate operations so coordinators can cancel
--- scoped work without also owning the caller-visible request resolution.
+-- A request owner belongs inside the scope that owns the request lifetime. It
+-- separates visible resolution (reply/fail/finalise) from local abandonment.
+-- This keeps client-close and stale-completion paths from accidentally sending
+-- protocol-visible replies.
 
 local M = {}
 
@@ -82,11 +83,16 @@ function RequestOwner:finalise_unresolved(reason)
 	if self._done then
 		return false, 'request already resolved'
 	end
-	return self:fail_once(reason or 'request closed')
+	return self:fail_once(reason or 'request finalised')
 end
 
-function RequestOwner:terminate(reason)
-	return self:finalise_unresolved(reason or 'request owner terminated')
+function RequestOwner:abandon_unresolved(_reason)
+	if self._done then
+		return false, 'request already resolved'
+	end
+
+	self._done = true
+	return true, nil
 end
 
 M.RequestOwner = RequestOwner

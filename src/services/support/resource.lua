@@ -32,7 +32,7 @@ local function normalise_terminate_result(a, b)
 	end
 
 	-- Non-boolean truthy values are accepted as success for Lua cleanup methods
-	-- that return the closed object or another sentinel.
+	-- that return the terminated object or another sentinel.
 	return true, nil
 end
 
@@ -92,7 +92,7 @@ function M.finally(scope, obj, label)
 	local owner = M.owned(obj, { label = label })
 
 	scope:finally(function (_, status, primary)
-		owner:terminate_checked(primary or status or 'closed', label)
+		owner:terminate_checked(primary or status or 'terminated', label)
 	end)
 
 	return owner
@@ -135,7 +135,6 @@ end
 ---
 --- opts may be:
 ---   nil                                -> use resource.terminate(value, reason)
----   function(value, reason)             -> custom immediate cleanup
 ---   { terminate = function, label = ? }  -> resource-specific immediate cleanup
 function M.owned(value, opts)
 	local terminate_fn

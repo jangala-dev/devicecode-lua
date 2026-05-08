@@ -149,6 +149,25 @@ function tests.test_try_recv_now_returns_not_ready_when_empty_and_open()
 	end)
 end
 
+
+-------------------------------------------------------------------------------
+-- try_recv_now reports closed receive side distinctly from not-ready
+-------------------------------------------------------------------------------
+
+function tests.test_try_recv_now_reports_closed_mailbox()
+	fibers.run(function ()
+		local tx, rx = mailbox.new(1, { full = 'reject_newest' })
+		tx:close('closed_for_test')
+		local expected = tostring(rx:why() or 'closed')
+
+		local item, err = queue.try_recv_now(rx)
+
+		assert_nil(item)
+		assert_eq(err, expected)
+		if err == 'not_ready' then fail('closed mailbox reported not_ready') end
+	end)
+end
+
 -------------------------------------------------------------------------------
 -- assert_admit_required raises on non-immediate admission failure
 -------------------------------------------------------------------------------
