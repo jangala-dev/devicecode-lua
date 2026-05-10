@@ -235,11 +235,58 @@ end
 ---@field stop fun(): string error
 ---@field apply_config fun(config: table): boolean ok, string error
 
+----------------------------------------------------------------------
+-- UART open reply
+----------------------------------------------------------------------
+
+---@class UARTOpenReply
+---@field lease_id string
+---@field session any
+---@field path string
+---@field baud integer|nil
+---@field mode string|nil
+local UARTOpenReply = {}
+UARTOpenReply.__index = UARTOpenReply
+
+---@param lease_id string
+---@param session any
+---@param path string
+---@param baud integer|nil
+---@param mode string|nil
+---@return UARTOpenReply?|nil
+---@return string
+function new.UARTOpenReply(lease_id, session, path, baud, mode)
+    if type(lease_id) ~= 'string' or lease_id == '' then
+        return nil, 'invalid lease_id'
+    end
+    if session == nil then
+        return nil, 'missing session'
+    end
+    if type(path) ~= 'string' or path == '' then
+        return nil, 'invalid path'
+    end
+    if baud ~= nil and (type(baud) ~= 'number' or baud <= 0 or baud % 1 ~= 0) then
+        return nil, 'invalid baud'
+    end
+    if mode ~= nil and type(mode) ~= 'string' then
+        return nil, 'invalid mode'
+    end
+
+    return setmetatable({
+        lease_id = lease_id,
+        session  = session,
+        path     = path,
+        baud     = baud,
+        mode     = mode,
+    }, UARTOpenReply), ''
+end
+
 return {
     ControlRequest = ControlRequest,
     Reply = Reply,
     Emit = Emit,
     DeviceEvent = DeviceEvent,
     Device = Device,
+    UARTOpenReply = UARTOpenReply,
     new = new,
 }
