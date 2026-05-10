@@ -18,21 +18,13 @@ local perform      = fibers.perform
 local named_choice = fibers.named_choice
 
 local base = require 'devicecode.service_base'
+local tablex = require 'shared.table'
 
 local M = {}
 
 -- pretty printer kept as-is (it is purely a dev/operator tool)
 
-local function is_array(t)
-	local n = 0
-	for _ in ipairs(t) do n = n + 1 end
-	for k in pairs(t) do
-		if type(k) ~= 'number' or k < 1 or k % 1 ~= 0 or k > n then
-			return false
-		end
-	end
-	return true
-end
+local is_array = tablex.is_array
 
 local function sort_keys(t)
 	local ks = {}
