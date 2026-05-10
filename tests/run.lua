@@ -96,6 +96,21 @@ local files = {
 	'unit.support.test_bus_cleanup',
 	'unit.support.test_config_watch',
 	'unit.support.test_service_events',
+	'unit.http.transport.test_cqueues_driver',
+	'unit.http.transport.test_lua_http',
+	'unit.http.transport.test_websocket',
+	'unit.http.transport.test_terminate',
+	'unit.http.test_headers',
+	'unit.http.test_body',
+	'unit.http.test_policy',
+	'unit.http.test_config',
+	'unit.http.test_client',
+	'unit.http.test_websocket_client',
+	'unit.http.test_service',
+	'unit.http.test_service_architecture',
+	'unit.http.test_structure',
+	'integration.devhost.test_http_transport_real',
+	'integration.devhost.test_http_service_real',
 }
 
 local function monotonic_now()
