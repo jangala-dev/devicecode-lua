@@ -245,7 +245,7 @@ end
 function M.for_stack(scope, bus, opts)
   opts = opts or {}
   local topics = {}
-  for _, name in ipairs({ 'update', 'device', 'fabric', 'config', 'obs', 'rpc', 'ui' }) do
+  for _, name in ipairs({ 'update', 'device', 'fabric', 'config', 'obs', 'ui' }) do
     if opts[name] then append_plugin_topics(topics, name) end
   end
   if type(opts.topics) == 'table' then
