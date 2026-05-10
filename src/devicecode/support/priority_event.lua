@@ -1,4 +1,4 @@
--- services/support/priority_event.lua
+-- devicecode/support/priority_event.lua
 --
 -- Deterministic semantic event selection for the few places where readiness
 -- order is not enough.
@@ -18,22 +18,17 @@
 --     priority.
 
 local fibers = require 'fibers'
-local op     = require 'fibers.op'
+local op        = require 'fibers.op'
+local validate  = require 'shared.validate'
 
 local M = {}
 
 local function require_function(v, name, level)
-	if type(v) ~= 'function' then
-		error(name .. ' must be a function', (level or 1) + 1)
-	end
-	return v
+	return validate.function_(v, name, (level or 1) + 1)
 end
 
 local function require_table(v, name, level)
-	if type(v) ~= 'table' then
-		error(name .. ' must be a table', (level or 1) + 1)
-	end
-	return v
+	return validate.table(v, name, (level or 1) + 1)
 end
 
 --- Build an Op that selects ready semantic events before and after blocking.

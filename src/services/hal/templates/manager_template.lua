@@ -3,12 +3,12 @@
 -- Strict HAL manager template.
 --
 -- New managers advertise api_mode = 'op_only'. HAL will call start_op(),
--- apply_config_op(), shutdown_op(), and terminate(reason). Legacy stop/stop_op
+-- apply_config_op(), shutdown_op(), terminate(reason), and fault_op(). Legacy stop/stop_op
 -- belong only on the compatibility side of hal.lua.
 
 local hal_types = require "services.hal.types.core"
 local driver_template = require "services.hal.templates.driver_template"
-local resource = require "services.support.resource"
+local resource = require "devicecode.support.resource"
 
 local fibers = require "fibers"
 local op = require "fibers.op"
@@ -200,6 +200,13 @@ function TemplateManager.terminate(reason)
     TemplateManager.scope = nil
     TemplateManager.started = false
     return true, nil
+end
+
+function TemplateManager.fault_op()
+    if TemplateManager.scope and TemplateManager.started then
+        return TemplateManager.scope:fault_op()
+    end
+    return op.never()
 end
 
 function TemplateManager.apply_config_op(_namespaces)

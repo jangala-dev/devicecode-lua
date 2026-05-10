@@ -1,6 +1,6 @@
 -- tests/unit/support/test_scoped_work.lua
 --
--- Standalone semantic tests for services.support.scoped_work.
+-- Standalone semantic tests for devicecode.support.scoped_work.
 --
 -- Run with package.path pointing at src/, for example:
 --
@@ -8,8 +8,8 @@ local fibers      = require 'fibers'
 local sleep       = require 'fibers.sleep'
 local mailbox     = require 'fibers.mailbox'
 local cond        = require 'fibers.cond'
-local scoped_work = require 'services.support.scoped_work'
-local queue       = require 'services.support.queue'
+local scoped_work = require 'devicecode.support.scoped_work'
+local queue       = require 'devicecode.support.queue'
 
 local tests = {}
 
@@ -738,6 +738,54 @@ function tests.test_setup_failure_prevents_worker_start_and_is_structurally_repo
 		assert_eq(#rep.children, 1)
 		assert_eq(rep.children[1].status, 'cancelled')
 		assert_match(tostring(rep.children[1].primary), 'synthetic setup failure')
+	end)
+end
+
+
+-------------------------------------------------------------------------------
+-- 15. setup-owned resources are finalised on post-setup start failure
+-------------------------------------------------------------------------------
+
+function tests.test_post_setup_start_failure_runs_cancel_owned_now()
+	fibers.run(function (scope)
+		local lifetime_scope = child_scope(scope)
+		local finalised
+		local fake_report_scope = {
+			status = function () return 'running', nil end,
+			admission = function () return 'open', nil end,
+			spawn = function () return false, 'synthetic reporter spawn failure' end,
+		}
+
+		local handle, err = scoped_work.start {
+			lifetime_scope = lifetime_scope,
+			report_scope = fake_report_scope,
+
+			identity = {
+				kind = 'setup_owned_cancel_test',
+				id = 'work-15',
+			},
+
+			setup = function ()
+				return {
+					cancel_owned_now = function (reason)
+						finalised = reason
+						return true
+					end,
+				}
+			end,
+
+			run = function ()
+				return { ok = true }
+			end,
+
+			report = function ()
+				return true
+			end,
+		}
+
+		assert_nil(handle)
+		assert_match(err, 'synthetic reporter spawn failure')
+		assert_eq(finalised, 'synthetic reporter spawn failure')
 	end)
 end
 

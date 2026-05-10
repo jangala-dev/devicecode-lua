@@ -170,6 +170,22 @@ local function new_capability_manager(opts)
 				return op.always(true, nil)
 			end)
 		end
+
+		function manager.terminate(reason)
+			manager.terminate_calls = (manager.terminate_calls or 0) + 1
+			manager.terminate_reason = reason
+			if manager.scope then
+				manager.scope:cancel(tostring(reason or 'terminated'))
+			end
+			return true, nil
+		end
+
+		function manager.fault_op()
+			if manager.scope then
+				return manager.scope:fault_op()
+			end
+			return op.never()
+		end
 	else
 		function manager.start(_logger, dev_ev_ch, _cap_emit_ch)
 			manager.scope = fibers.current_scope()
@@ -214,6 +230,14 @@ local function new_hanging_start_manager()
 		shutdown_op = function()
 			return op.always(true, nil)
 		end,
+
+		terminate = function()
+			return true, nil
+		end,
+
+		fault_op = function()
+			return op.never()
+		end,
 	}
 end
 
@@ -237,6 +261,22 @@ local function new_hanging_apply_manager()
 
 	function manager.shutdown_op()
 		return op.always(true, nil)
+	end
+
+	function manager.terminate(reason)
+		manager.terminate_calls = (manager.terminate_calls or 0) + 1
+		manager.terminate_reason = reason
+		if manager.scope then
+			manager.scope:cancel(tostring(reason or 'terminated'))
+		end
+		return true, nil
+	end
+
+	function manager.fault_op()
+		if manager.scope then
+			return manager.scope:fault_op()
+		end
+		return op.never()
 	end
 
 	return manager
@@ -634,6 +674,39 @@ function T.capability_no_reply_is_completed_by_hal_control_timeout()
 			control_timeout_s = 0.03,
 		})
 	end, { timeout = 2.0 })
+end
+
+function T.strict_manager_contract_requires_terminate_and_fault_op()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local strict_mgr = {
+			api_mode = 'op_only',
+			start_op = function() return op.always(true, nil) end,
+			apply_config_op = function() return op.always(true, nil) end,
+			shutdown_op = function() return op.always(true, nil) end,
+			-- terminate and fault_op are deliberately absent.
+		}
+
+		local ok, err = safe.pcall(function()
+			with_real_hal(scope, {
+				['services.hal.managers.filesystem'] = fs_manager,
+				['services.hal.managers.strict_mgr'] = strict_mgr,
+			}, function(bus, _probe_conn)
+				local admin = bus:connect()
+				admin:retain({ 'cfg', 'hal' }, {
+					data = {
+						schema = 'devicecode.config/hal/1',
+						strict_mgr = {},
+					},
+				})
+				fibers.perform(require('fibers.sleep').sleep_op(0.05))
+			end)
+		end)
+
+		assert(ok == false)
+		assert(tostring(err):match('strict_mgr'))
+		assert(tostring(err):match('terminate'))
+	end)
 end
 
 return T

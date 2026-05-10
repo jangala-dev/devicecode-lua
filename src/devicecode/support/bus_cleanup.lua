@@ -1,4 +1,4 @@
--- services/support/bus_cleanup.lua
+-- devicecode/support/bus_cleanup.lua
 --
 -- Immediate local-bus cleanup and publication helpers.
 --

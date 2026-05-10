@@ -1,9 +1,9 @@
--- tests/services/support/test_queue.lua
+-- tests/devicecode/support/test_queue.lua
 
 local fibers   = require 'fibers'
 local scope    = require 'fibers.scope'
 local mailbox  = require 'fibers.mailbox'
-local queue    = require 'services.support.queue'
+local queue    = require 'devicecode.support.queue'
 
 local tests = {}
 

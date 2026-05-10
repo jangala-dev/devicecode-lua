@@ -9,6 +9,8 @@ local op      = require "fibers.op"
 local channel = require "fibers.channel"
 local sleep   = require "fibers.sleep"
 
+local tablex = require 'shared.table'
+
 local perform = fibers.perform
 
 local SCHEMA_STANDARD = "devicecode.config/hal/1"
@@ -98,13 +100,7 @@ local function validate_config(config)
 	return true, ""
 end
 
-local function shallow_copy(t)
-	local out = {}
-	if type(t) == 'table' then
-		for k, v in pairs(t) do out[k] = v end
-	end
-	return out
-end
+local shallow_copy = tablex.shallow_copy
 
 local function path_token(x)
 	local s = tostring(x or '')
@@ -145,18 +141,47 @@ end
 --   stop()                        -> nil
 --
 -- Strict managers:
+--   api_mode = 'op_only'
 --   start_op(...)
 --   apply_config_op(...)
 --   shutdown_op()
---   fault_op()?                   -> Op
+--   terminate(reason)             -> immediate, non-yielding cleanup
+--   fault_op()                    -> Op
 --
--- New code should use the strict form. This file keeps the old form alive
--- for services and drivers that still depend on the legacy HAL boundary.
+-- New strict managers must implement the strict form exactly.  This file keeps
+-- the old form alive only for legacy managers that still depend on the legacy
+-- HAL boundary.
 ----------------------------------------------------------------------
 
 local function manager_is_op_only(manager)
 	return type(manager) == 'table'
-		and (manager.api_mode == 'op_only' or manager.__op_only == true)
+		and manager.api_mode == 'op_only'
+end
+
+local STRICT_MANAGER_METHODS = {
+	'start_op',
+	'apply_config_op',
+	'shutdown_op',
+	'terminate',
+	'fault_op',
+}
+
+local function validate_strict_manager(manager_name, manager)
+	if not manager_is_op_only(manager) then
+		return true, nil
+	end
+
+	for i = 1, #STRICT_MANAGER_METHODS do
+		local method = STRICT_MANAGER_METHODS[i]
+		if type(manager[method]) ~= 'function' then
+			return false, ('strict manager %q missing %s'):format(
+				tostring(manager_name),
+				method
+			)
+		end
+	end
+
+	return true, nil
 end
 
 local function manager_call_op(manager_name, manager, method, ...)
@@ -246,45 +271,18 @@ local function manager_shutdown_op(manager_name, manager, timeout_s)
 	return manager_call_with_timeout_op(manager_name, manager, 'stop', timeout_s)
 end
 
-local function manager_terminate_now(manager_name, manager, reason)
+local function manager_terminate(manager_name, manager, reason)
 	if not manager_is_op_only(manager) then
 		return true, nil
 	end
 
 	if type(manager) ~= 'table' or type(manager.terminate) ~= 'function' then
-		return true, nil
+		return nil, ('strict manager %q missing terminate'):format(tostring(manager_name))
 	end
 
-	local terminate = manager.terminate
-	local use_dot_call = true
-
-	if debug and type(debug.getinfo) == 'function' then
-		local info = debug.getinfo(terminate, 'u')
-		if type(info) == 'table' and type(info.nparams) == 'number' and info.nparams > 1 then
-			use_dot_call = false
-		end
-	end
-
-	local ok, a, b
-
-	if use_dot_call then
-		ok, a, b = pcall(function ()
-			return terminate(reason)
-		end)
-
-		-- HAL managers are module-like in this tree, so dot-style terminate is the
-		-- compatibility default.  If a newer strict manager follows the object-style
-		-- colon convention and the dot call rejects, retry as a method call.
-		if not ok then
-			ok, a, b = pcall(function ()
-				return terminate(manager, reason)
-			end)
-		end
-	else
-		ok, a, b = pcall(function ()
-			return terminate(manager, reason)
-		end)
-	end
+	local ok, a, b = pcall(function ()
+		return manager.terminate(reason)
+	end)
 
 	if not ok then
 		return nil, ('manager %q terminate raised: %s'):format(
@@ -317,6 +315,13 @@ local function manager_fault_watch_op(manager_name, manager)
 			)
 		end
 		return ev
+	end
+
+	if manager_is_op_only(manager) then
+		error(
+			('strict manager %q missing fault_op'):format(tostring(manager_name)),
+			2
+		)
 	end
 
 	if manager.scope and type(manager.scope.fault_op) == 'function' then
@@ -579,7 +584,7 @@ function HalService.start(conn, opts)
 					err     = tostring(shutdown_err),
 				})
 
-				local terminated, terminate_err = manager_terminate_now(name, manager, shutdown_err or reason)
+				local terminated, terminate_err = manager_terminate(name, manager, shutdown_err or reason)
 				if terminated ~= true then
 					log('warn', 'manager_terminate_failed', {
 						manager = name,
@@ -1018,6 +1023,11 @@ function HalService.start(conn, opts)
 	end
 
 	local function start_manager(name, manager)
+		local valid, valid_err = validate_strict_manager(name, manager)
+		if not valid then
+			error(valid_err, 0)
+		end
+
 		local manager_logger = Logger.new(obs_emitter, {
 			service   = svc.name,
 			component = 'manager',
@@ -1168,7 +1178,7 @@ function HalService.start(conn, opts)
 		registry:terminate_caps(primary or 'scope_exit')
 
 		for name, manager in pairs(managers) do
-			local ok, err = manager_terminate_now(name, manager, primary or 'scope_exit')
+			local ok, err = manager_terminate(name, manager, primary or 'scope_exit')
 			if ok ~= true then
 				log('warn', 'manager_terminate_failed', {
 					manager = name,

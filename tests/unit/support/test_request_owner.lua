@@ -1,6 +1,6 @@
 -- tests/unit/support/test_request_owner.lua
 
-local request_owner = require 'services.support.request_owner'
+local request_owner = require 'devicecode.support.request_owner'
 
 local tests = {}
 

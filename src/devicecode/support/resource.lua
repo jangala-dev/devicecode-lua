@@ -1,4 +1,4 @@
--- services/support/resource.lua
+-- devicecode/support/resource.lua
 --
 -- Canonical finaliser-safe resource helpers.
 --

@@ -3,8 +3,8 @@
 local fibers        = require 'fibers'
 local mailbox       = require 'fibers.mailbox'
 local op            = require 'fibers.op'
-local queue         = require 'services.support.queue'
-local priority_event = require 'services.support.priority_event'
+local queue         = require 'devicecode.support.queue'
+local priority_event = require 'devicecode.support.priority_event'
 
 local tests = {}
 

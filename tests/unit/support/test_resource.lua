@@ -1,8 +1,8 @@
 -- tests/unit/support/test_resource.lua
 --
--- Unit tests for services.support.resource.
+-- Unit tests for devicecode.support.resource.
 
-local resource = require 'services.support.resource'
+local resource = require 'devicecode.support.resource'
 
 local tests = {}
 

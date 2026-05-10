@@ -1,4 +1,4 @@
--- services/support/queue.lua
+-- devicecode/support/queue.lua
 --
 -- Public queue helpers for service/coordinator code.
 --

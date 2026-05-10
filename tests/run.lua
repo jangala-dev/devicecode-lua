@@ -34,12 +34,17 @@ local files = {
 	'unit.hal.service_raw_host_spec',
 	'integration.devhost.main_failure_spec',
 	'integration.devhost.config_recovery_spec',
-	'unit.support.test_scoped_work',
-	'unit.support.test_queue',
+	'unit.support.test_bus_cleanup',
+	'unit.support.test_config_watch',
 	'unit.support.test_priority_event',
+	'unit.support.test_queue',
 	'unit.support.test_request_owner',
 	'unit.support.test_resource',
-	'unit.support.test_bus_cleanup',
+	'unit.support.test_scoped_work',
+	'unit.support.test_service_events',
+	'unit.shared.table_spec',
+	'unit.shared.topic_spec',
+	'unit.shared.validate_spec',
 }
 
 local function monotonic_now()

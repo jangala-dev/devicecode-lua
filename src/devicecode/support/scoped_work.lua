@@ -1,4 +1,4 @@
--- services/support/scoped_work.lua
+-- devicecode/support/scoped_work.lua
 --
 -- Shared infrastructure for scoped Fabric/service work.
 --
@@ -20,16 +20,11 @@ local safe   = require 'coxpcall'
 local fibers    = require 'fibers'
 local op        = require 'fibers.op'
 local cond      = require 'fibers.cond'
+local tablex    = require 'shared.table'
 
 local M = {}
 
-local function copy_table(t)
-	local out = {}
-	for k, v in pairs(t or {}) do
-		out[k] = v
-	end
-	return out
-end
+local copy_table = tablex.shallow_copy
 
 local function copy_value(v)
 	if type(v) == 'table' then
@@ -227,11 +222,18 @@ local function start_impl(spec, opts)
 		-- failed start, signal the body-ended barrier so an already-spawned
 		-- reaper can make progress, and cancel the empty child.
 		--
+		-- If setup already transferred caller-visible resources into this helper,
+		-- give them their immediate cancellation path now.  Parent join/finalisers
+		-- remain the structural cleanup fallback and must be idempotent.
+		--
 		-- The normal public start() path deliberately does not join here: it is
 		-- coordinator-safe and must not hide synchronous cleanup waits. Parent
 		-- join remains the structural reaper of last resort. Setup-only callers
 		-- may request bounded eager cleanup via start_setup_checked().
 		reported = true
+		if setup_result and type(setup_result.cancel_owned_now) == 'function' then
+			setup_result.cancel_owned_now(reason or 'scoped_work_start_failed')
+		end
 		body_done:signal()
 		child:cancel(reason or 'scoped_work_start_failed')
 

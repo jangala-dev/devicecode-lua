@@ -1,6 +1,6 @@
 -- tests/unit/support/test_bus_cleanup.lua
 
-local cleanup = require 'services.support.bus_cleanup'
+local cleanup = require 'devicecode.support.bus_cleanup'
 
 local tests = {}
 
