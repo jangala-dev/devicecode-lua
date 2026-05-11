@@ -10,6 +10,8 @@ local sleep         = require 'fibers.sleep'
 local scope_mod     = require 'fibers.scope'
 local request_owner = require 'devicecode.support.request_owner'
 local resource      = require 'devicecode.support.resource'
+local cap_sdk       = require 'services.hal.sdk.cap'
+local cap_args      = require 'services.hal.types.capability_args'
 local fabric_stage  = require 'services.device.fabric_stage'
 
 local M = {}
@@ -133,6 +135,89 @@ local function is_op(v)
 	return type(v) == 'table' and getmetatable(v) == op.Op
 end
 
+local function positive_integer(v)
+	if type(v) == 'string' and v:match('^%d+$') then
+		v = tonumber(v)
+	end
+	if type(v) ~= 'number' or v <= 0 or v % 1 ~= 0 then
+		return nil
+	end
+	return v
+end
+
+local function metadata_chunk_size(payload)
+	local meta = type(payload) == 'table' and (payload.metadata or payload.meta) or nil
+	if type(meta) ~= 'table' then return nil end
+
+	return positive_integer(meta.transfer_chunk_raw)
+		or positive_integer(meta.transfer_chunk_size)
+		or (type(meta.transfer) == 'table' and positive_integer(meta.transfer.chunk_size) or nil)
+end
+
+local function artifact_store_id(ctx)
+	local spec = ctx and ctx.action_spec or nil
+	return (spec and spec.artifact_store) or 'main'
+end
+
+local function source_from_artifact_op(artifact)
+	if type(artifact) == 'table' and type(artifact.read_chunk_op) == 'function' then
+		return op.always(artifact, nil)
+	end
+
+	if type(artifact) == 'table' and type(artifact.open_source_op) == 'function' then
+		return op.guard(function ()
+			local ok, source_or_err = fibers.perform(artifact:open_source_op())
+			if ok ~= true then
+				return op.always(nil, source_or_err or 'artifact_source_open_failed')
+			end
+			if type(source_or_err) ~= 'table' or type(source_or_err.read_chunk_op) ~= 'function' then
+				return op.always(nil, 'artifact_source_unavailable')
+			end
+			if type(artifact.describe) == 'function' then
+				local ok_desc, desc = pcall(function () return artifact:describe() end)
+				if ok_desc and type(desc) == 'table' then
+					source_or_err._artifact_desc = desc
+					source_or_err.size = source_or_err.size or desc.size
+					source_or_err.digest = source_or_err.digest or desc.checksum
+					source_or_err.digest_alg = source_or_err.digest_alg or 'xxhash32'
+				end
+			end
+			return op.always(source_or_err, nil)
+		end)
+	end
+
+	return op.always(nil, 'artifact_source_unavailable')
+end
+
+local function open_artifact_ref_source_op(ctx, artifact_ref)
+	if type(ctx.conn) ~= 'table' then
+		return op.always(nil, 'connection_required')
+	end
+
+	local opts, oerr = cap_args.new.ArtifactStoreOpenOpts(artifact_ref)
+	if not opts then
+		return op.always(nil, oerr or 'invalid_artifact_ref')
+	end
+
+	return op.guard(function ()
+		local cap = cap_sdk.new_curated_cap_ref(ctx.conn, 'artifact_store', artifact_store_id(ctx))
+		local reply, cerr = fibers.perform(cap:call_control_op('open', opts, {
+			timeout = (ctx.action_spec and ctx.action_spec.timeout) or ctx.timeout,
+			deadline = ctx.deadline,
+		}))
+
+		if not reply then
+			return op.always(nil, cerr or 'artifact_open_failed')
+		end
+		if type(reply) == 'table' and reply.ok == false then
+			return op.always(nil, reply.reason or reply.err or 'artifact_open_failed')
+		end
+
+		local artifact = (type(reply) == 'table' and (reply.reason or reply.value or reply.artifact)) or reply
+		return source_from_artifact_op(artifact)
+	end)
+end
+
 local function open_source_op(ctx)
 	local payload = request_payload(ctx.request) or {}
 	local opener = ctx.open_source_op
@@ -152,7 +237,10 @@ local function open_source_op(ctx)
 	end
 
 	if payload.source ~= nil then return op.always(payload.source, nil) end
-	if payload.artifact ~= nil then return op.always(payload.artifact, nil) end
+	if payload.artifact ~= nil then return source_from_artifact_op(payload.artifact) end
+	if type(payload.artifact_ref) == 'string' and payload.artifact_ref ~= '' then
+		return open_artifact_ref_source_op(ctx, payload.artifact_ref)
+	end
 	return op.always(nil, 'source_required')
 end
 
@@ -197,6 +285,7 @@ local function run_fabric_stage_op(_, ctx, owner)
 			receiver = ctx.action_spec.receiver,
 			artifact_store = ctx.action_spec.artifact_store,
 			request_payload = request_payload(ctx.request),
+			chunk_size = metadata_chunk_size(request_payload(ctx.request) or {}),
 			timeout = ctx.action_spec.timeout or ctx.timeout,
 			deadline = ctx.deadline,
 		}))
@@ -302,7 +391,7 @@ function M.run(scope, ctx)
 		error('device action worker must run in its owning scope', 0)
 	end
 	local req = assert(ctx.request, 'device action worker requires request')
-	local action_spec = assert(ctx.action_spec, 'device action worker requires action_spec')
+	assert(ctx.action_spec, 'device action worker requires action_spec')
 	local owner = ctx.request_owner or request_owner.new(req, ctx.request_owner_opts)
 
 	-- When action work is launched through action_manager, the request owner is

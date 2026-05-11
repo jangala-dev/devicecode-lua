@@ -331,4 +331,33 @@ function tests.test_sender_accepts_zero_byte_transfer_commit_after_need_zero()
 	assert_eq(out.value.sent_bytes, 0)
 end
 
+function tests.test_sender_resends_cached_chunk_when_receiver_rewinds_to_last_offset()
+	local req = make_req { data = 'abc', size = 3, xfer_id = 'xfer-retry' }
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-retry')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-retry', 0)))
+
+		local chunk1 = recv_with_timeout(io.bulk_rx, 'chunk1')
+		assert_eq(chunk1.frame.type, 'xfer_chunk')
+		assert_eq(chunk1.frame.offset, 0)
+		assert_eq(chunk1.frame.data, 'abc')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-retry', 0)))
+
+		local chunk2 = recv_with_timeout(io.bulk_rx, 'chunk2')
+		assert_eq(chunk2.frame.type, 'xfer_chunk')
+		assert_eq(chunk2.frame.offset, 0)
+		assert_eq(chunk2.frame.data, 'abc')
+
+		local commit = recv_with_timeout(io.control_rx, 'commit')
+		assert_eq(commit.frame.type, 'xfer_commit')
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-retry')))
+	end)
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.sent_bytes, 3)
+end
+
 return tests

@@ -111,6 +111,39 @@ function tests.test_upload_disconnects_owned_update_connection_after_success()
 	end)
 end
 
+function tests.test_upload_promotes_transfer_chunk_header_to_job_metadata()
+	fibers.run(function ()
+		local handle = {
+			append_chunk_op = function () return fibers.always(true, nil) end,
+			commit_op = function () return fibers.always('artifact-header', nil) end,
+			abort_now = function () error('abort must not be called after commit') end,
+		}
+		local captured
+		local conn = {
+			call_op = function (_, _topic, payload)
+				captured = payload
+				return fibers.always({ job_id = 'job-header' }, nil)
+			end,
+		}
+
+		local st, _, result = fibers.perform(upload.run_op({
+			headers = { ['X-Transfer-Chunk-Raw'] = '4096' },
+			body_stream = body_from_chunks({ 'abc' }),
+		}, {
+			ingest = ingest_client(handle),
+			create_job = true,
+			conn = conn,
+			metadata = { user = 'kept' },
+		}))
+
+		assert_eq(st, 'ok')
+		assert_eq(result.artifact_id, 'artifact-header')
+		assert_not_nil(captured)
+		assert_eq(captured.metadata.user, 'kept')
+		assert_eq(captured.metadata.transfer_chunk_raw, 4096)
+	end)
+end
+
 
 function tests.test_upload_timeout_cancels_scope_and_aborts_uncommitted_ingest()
 	fibers.run(function ()

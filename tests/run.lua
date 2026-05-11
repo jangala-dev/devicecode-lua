@@ -24,6 +24,7 @@ assert(stdlib.setenv('CONFIG_TARGET', 'services'))
 
 local files = {
 	'unit.config.codec_spec',
+	'unit.config.mcu_dev_spec',
 	'unit.config.state_spec',
 	'unit.main.service_spec',
 	'unit.config.service_spec',
@@ -64,6 +65,7 @@ local files = {
 	'unit.update.test_architecture',
 	'unit.update.test_bundled_probe',
 	'unit.update.test_config',
+	'unit.update.test_device_component_backend',
 	'unit.update.test_events',
 	'unit.update.test_generation_refactor',
 	'unit.update.test_ingest_artifacts',

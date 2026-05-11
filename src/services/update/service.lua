@@ -26,6 +26,7 @@ local topics        = require 'services.update.topics'
 local job_store_cap = require 'services.update.job_store_cap'
 local job_runtime_mod = require 'services.update.job_runtime'
 local active_runtime = require 'services.update.active_runtime'
+local device_backend = require 'services.update.backends.device_component'
 
 local M = {}
 
@@ -754,6 +755,12 @@ function M.run(scope, params)
 		error(jobs_err or 'update_job_repository_start_failed', 2)
 	end
 	local adoption = jobs:ready() and jobs:adoption() or {}
+	local backend = params.backend or device_backend.new({
+		conn = params.conn,
+		timeout_prepare = params.timeout_prepare,
+		timeout_stage = params.timeout_stage,
+		timeout_commit = params.timeout_commit,
+	})
 
 	local active_scope, active_scope_err = scope:child()
 	if not active_scope then
@@ -766,7 +773,7 @@ function M.run(scope, params)
 		work_scope = active_scope,
 		queue_len = params.active_runtime_queue_len,
 		jobs = jobs,
-		backend = params.backend,
+		backend = backend,
 		adoption = adoption,
 	})
 	if not active_component then

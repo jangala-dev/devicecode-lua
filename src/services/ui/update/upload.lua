@@ -70,6 +70,77 @@ local function remaining_timeout(opts, deadline)
 	return remaining
 end
 
+local function copy_opts(opts)
+	local out = {}
+	for k, v in pairs(opts or {}) do out[k] = v end
+	return out
+end
+
+local function copy_table(t)
+	local out = {}
+	for k, v in pairs(t or {}) do out[k] = v end
+	return out
+end
+
+local function normalise_header_name(name)
+	return tostring(name or ''):lower()
+end
+
+local function header_one(headers, name)
+	if type(headers) ~= 'table' then return nil end
+
+	local lname = normalise_header_name(name)
+	local get = headers.get
+	if type(get) == 'function' then
+		local ok, value = pcall(get, headers, lname)
+		if ok and value ~= nil then return value end
+		ok, value = pcall(get, headers, name)
+		if ok and value ~= nil then return value end
+	end
+
+	local value = headers[lname] or headers[name]
+	if value == nil then
+		for k, v in pairs(headers) do
+			if normalise_header_name(k) == lname then
+				value = v
+				break
+			end
+		end
+	end
+
+	if type(value) == 'table' then
+		return value[1]
+	end
+
+	return value
+end
+
+local function positive_integer_header(headers, name)
+	local raw = header_one(headers, name)
+	if raw == nil then return nil end
+	local n = tonumber(raw)
+	if type(n) ~= 'number' or n <= 0 or n % 1 ~= 0 then
+		return nil
+	end
+	return n
+end
+
+local function apply_upload_headers(ctx, opts)
+	local chunk_raw = positive_integer_header(ctx and ctx.headers, 'x-transfer-chunk-raw')
+	if chunk_raw == nil then return opts end
+
+	opts = copy_opts(opts)
+	local meta = opts.metadata or opts.meta
+	if type(meta) == 'table' then
+		meta = copy_table(meta)
+	else
+		meta = {}
+	end
+	meta.transfer_chunk_raw = chunk_raw
+	opts.metadata = meta
+	return opts
+end
+
 local function cancel_for_timeout(scope, on_timeout)
 	if on_timeout then on_timeout() end
 	if scope and type(scope.cancel) == 'function' then
@@ -111,7 +182,12 @@ local function upload_body_op(ctx, opts, deadline)
 			ingest_client = built
 		end
 
-		local handle, open_err = perform_with_deadline(scope, ingest.open_ingest_op(ingest_client, opts), deadline, mark_timeout)
+			local handle, open_err = perform_with_deadline(
+				scope,
+				ingest.open_ingest_op(ingest_client, opts),
+				deadline,
+				mark_timeout
+			)
 		if not handle then error(open_err or 'artifact ingest open failed', 0) end
 
 		local ingest_owner = resource.owned(handle, {
@@ -130,16 +206,26 @@ local function upload_body_op(ctx, opts, deadline)
 		local body = ctx.body_stream or ctx.body or ctx.stream or ctx
 		if body == nil then error('request body has no chunk reader', 0) end
 		while true do
-			local chunk, rerr = perform_with_deadline(scope, read_chunk_op(body, opts.chunk_size or 65536), deadline, mark_timeout)
+				local chunk, rerr = perform_with_deadline(
+					scope,
+					read_chunk_op(body, opts.chunk_size or 65536),
+					deadline,
+					mark_timeout
+				)
 			if rerr then error(rerr, 0) end
 			if chunk == nil or chunk == '' then break end
-			local ok, werr = perform_with_deadline(scope, ingest.append_chunk_op(handle, chunk), deadline, mark_timeout)
+			local ok, werr = perform_with_deadline(
+				scope,
+				ingest.append_chunk_op(handle, chunk),
+				deadline,
+				mark_timeout
+			)
 			if ok == nil or ok == false then error(werr or 'artifact append failed', 0) end
 		end
 
 		local artifact_id, cerr = perform_with_deadline(scope, ingest.commit_op(handle), deadline, mark_timeout)
 		if not artifact_id then error(cerr or 'artifact commit failed', 0) end
-		local _committed_handle, detach_err = ingest_owner:detach()
+			local _, detach_err = ingest_owner:detach()
 		if detach_err then error(detach_err, 0) end
 
 		local out = { status = 'ok', artifact_id = artifact_id }
@@ -151,12 +237,22 @@ local function upload_body_op(ctx, opts, deadline)
 			for k, v in pairs(opts) do call_opts[k] = v end
 			call_opts.timeout = remaining_timeout(opts, deadline)
 
-			local job, jerr = perform_with_deadline(scope, client.create_job_op(conn, artifact_id, call_opts), deadline, mark_timeout)
+				local job, jerr = perform_with_deadline(
+					scope,
+					client.create_job_op(conn, artifact_id, call_opts),
+					deadline,
+					mark_timeout
+				)
 			if not job then error(jerr or 'update job create failed', 0) end
 			out.job = job
 			if opts.start_job then
 				call_opts.timeout = remaining_timeout(opts, deadline)
-				local started, serr = perform_with_deadline(scope, client.start_job_op(conn, job.job_id or job.id, call_opts), deadline, mark_timeout)
+					local started, serr = perform_with_deadline(
+						scope,
+						client.start_job_op(conn, job.job_id or job.id, call_opts),
+						deadline,
+						mark_timeout
+					)
 				if not started then error(serr or 'update job start failed', 0) end
 				out.started = started
 			end
@@ -165,7 +261,7 @@ local function upload_body_op(ctx, opts, deadline)
 	end)
 end
 
-function M.run(scope, owner, ctx, opts)
+function M.run(_scope, owner, ctx, opts)
 	opts = opts or {}
 	local st, _, result_or_primary = fibers.perform(M.run_op(ctx, opts))
 	if st ~= 'ok' then
@@ -180,7 +276,7 @@ end
 
 function M.run_op(ctx, opts)
 	ctx = ctx or {}
-	opts = opts or {}
+	opts = apply_upload_headers(ctx, opts or {})
 
 	return fibers.guard(function ()
 		local deadline = deadline_from_opts(opts)

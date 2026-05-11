@@ -221,6 +221,93 @@ function tests.test_fabric_stage_failed_admission_terminates_untransferred_sourc
 	assert_eq(terminate_count, 1)
 end
 
+function tests.test_fabric_stage_passes_transfer_chunk_metadata_to_client()
+	local captured_meta
+	local captured_opts
+	fibers.run(function (scope)
+		local source = { id = 'src-chunk', terminate = function () return true end }
+		local r = req({
+			source = source,
+			metadata = { transfer_chunk_raw = '4096' },
+		})
+		local client = {
+			send_blob_op = function (_, src, meta, opts)
+				assert_eq(src, source)
+				captured_meta = meta
+				captured_opts = opts
+				return op.always({
+					ok = true,
+					source_handoff = { consumed = false },
+				})
+			end,
+		}
+
+		local result = action_worker.run(scope, {
+			request = r,
+			component_id = 'mcu',
+			action = 'stage-update',
+			request_id = 'r-chunk-size',
+			action_spec = { kind = 'fabric_stage', receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage') },
+			fabric_client = client,
+		})
+
+		assert_true(result.ok)
+	end)
+
+	assert_eq(captured_meta.chunk_size, 4096)
+	assert_eq(captured_opts.chunk_size, 4096)
+end
+
+function tests.test_fabric_stage_opens_artifact_ref_from_default_artifact_store()
+	local captured_topic
+	local captured_payload
+	fibers.run(function (scope)
+		local source = {
+			id = 'artifact-source',
+			read_chunk_op = function () return op.always(nil, nil) end,
+			terminate = function () return true end,
+		}
+		local artifact = {
+			open_source_op = function ()
+				return op.always(true, source)
+			end,
+		}
+		local conn = {
+			call_op = function (_, topic, payload)
+				captured_topic = topic
+				captured_payload = payload
+				return op.always({ ok = true, reason = artifact }, nil)
+			end,
+		}
+		local r = req({ artifact_ref = 'artifact-1' })
+		local client = {
+			send_blob_op = function (_, src)
+				assert_eq(src, source)
+				return op.always({
+					ok = true,
+					source_handoff = { consumed = false },
+				})
+			end,
+		}
+
+		local result = action_worker.run(scope, {
+			conn = conn,
+			request = r,
+			component_id = 'mcu',
+			action = 'stage-update',
+			request_id = 'r-artifact-ref',
+			action_spec = { kind = 'fabric_stage', receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage') },
+			fabric_client = client,
+		})
+
+		assert_true(result.ok)
+		assert_not_nil(r.replied)
+	end)
+
+	assert_eq(table.concat(captured_topic, '/'), 'cap/artifact_store/main/rpc/open')
+	assert_eq(captured_payload.artifact_ref, 'artifact-1')
+end
+
 function tests.test_repeated_observation_does_not_change_model_version()
 	fibers.run(function ()
 		local cat = assert(config.to_catalogue(sample_config('A')))

@@ -1,5 +1,6 @@
 -- tests/services/fabric/test_protocol.lua
 
+local cjson = require 'cjson.safe'
 local protocol = require 'services.fabric.protocol'
 
 local tests = {}
@@ -175,7 +176,7 @@ function tests.test_call_and_reply_validation()
 end
 
 
-function tests.test_rejects_legacy_checksum_field()
+function tests.test_transfer_checksum_alias_is_allowed_for_go_compatibility()
 	local ok, err = protocol.validate({
 		type = 'xfer_commit',
 		xfer_id = 'x1',
@@ -185,8 +186,28 @@ function tests.test_rejects_legacy_checksum_field()
 		checksum = 'legacy',
 	})
 
-	assert_nil(ok)
-	assert_eq(err, 'unknown_frame_field: checksum')
+	assert_not_nil(ok)
+	assert_nil(err)
+
+	local line, lerr = protocol.encode_line({
+		type = 'xfer_commit',
+		xfer_id = 'x1',
+		size = 3,
+		digest_alg = protocol.DIGEST_ALG,
+		digest = protocol.digest_hex('abc'),
+	})
+	assert_not_nil(line)
+	assert_nil(lerr)
+	local wire = assert(cjson.decode(line))
+	assert_eq(wire.checksum, protocol.digest_hex('abc'))
+
+	local decoded, derr = protocol.decode_line(
+		'{"type":"xfer_commit","xfer_id":"x1","size":3,"checksum":"' .. protocol.digest_hex('abc') .. '"}'
+	)
+	assert_not_nil(decoded)
+	assert_nil(derr)
+	assert_eq(decoded.digest_alg, protocol.DIGEST_ALG)
+	assert_eq(decoded.digest, protocol.digest_hex('abc'))
 end
 
 function tests.test_transfer_control_validation()
@@ -271,6 +292,35 @@ function tests.test_encode_decode_xfer_chunk_roundtrip_preserves_bytes()
 	assert_eq(decoded.offset, 5)
 	assert_eq(decoded.data, 'abc\0def')
 	assert_eq(decoded.chunk_digest, protocol.chunk_digest('abc\0def'))
+end
+
+function tests.test_xfer_chunk_crc_alias_roundtrips_for_go_compatibility()
+	local digest = protocol.chunk_digest('abc')
+	local line, err = protocol.encode_line({
+		type = 'xfer_chunk',
+		xfer_id = 'xfer-1',
+		offset = 0,
+		data = 'abc',
+		chunk_digest = digest,
+	})
+
+	assert_not_nil(line)
+	assert_nil(err)
+	local wire = assert(cjson.decode(line))
+	assert_eq(wire.crc, digest)
+
+	local decoded, derr = protocol.decode_line(
+		'{"type":"xfer_chunk","xfer_id":"xfer-1","offset":0,"data":"'
+			.. protocol.encode_chunk('abc')
+			.. '","crc":"'
+			.. digest
+			.. '"}'
+	)
+
+	assert_not_nil(decoded)
+	assert_nil(derr)
+	assert_eq(decoded.data, 'abc')
+	assert_eq(decoded.chunk_digest, digest)
 end
 
 function tests.test_semantic_xfer_chunk_digest_is_verified()

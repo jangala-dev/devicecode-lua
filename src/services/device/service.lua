@@ -5,11 +5,14 @@
 
 local fibers      = require 'fibers'
 local mailbox     = require 'fibers.mailbox'
+local op          = require 'fibers.op'
 local pulse       = require 'fibers.pulse'
 local runtime     = require 'fibers.runtime'
 local config_mod  = require 'services.device.config'
 local model_mod   = require 'services.device.model'
 local topics      = require 'services.device.topics'
+local fabric_topics = require 'services.fabric.topics'
+local fabric_protocol = require 'services.fabric.protocol'
 local publisher   = require 'services.device.publisher'
 local projection  = require 'services.device.projection'
 local observer_manager = require 'services.device.observer_manager'
@@ -21,17 +24,100 @@ local config_watch = require 'devicecode.support.config_watch'
 local service_events = require 'devicecode.support.service_events'
 local service_base = require 'devicecode.service_base'
 local backpressure = require 'services.device.backpressure'
-local tablex = require 'shared.table'
 
 local M = {}
 
 local DEFAULT_DONE_QUEUE = backpressure.policy.completions.default_len
 local DEFAULT_OBSERVATION_QUEUE = backpressure.policy.observations.default_len
 
-local shallow_copy = tablex.shallow_copy
-
 local function new_service_id()
 	return ('device-%d-%d'):format(os.time(), math.random(1, 1000000))
+end
+
+local function topic_string(t)
+	if type(t) ~= 'table' then return nil end
+	local out = {}
+	for i = 1, #t do out[i] = tostring(t[i]) end
+	return table.concat(out, '/')
+end
+
+local function source_desc(source)
+	if type(source) ~= 'table' then return {} end
+	if type(source._artifact_desc) == 'table' then return source._artifact_desc end
+	if type(source.describe) == 'function' then
+		local ok, desc = pcall(function () return source:describe() end)
+		if ok and type(desc) == 'table' then return desc end
+	end
+	return {}
+end
+
+local function default_transfer_client(conn)
+	if type(conn) ~= 'table' or type(conn.call_op) ~= 'function' then
+		return nil
+	end
+
+	return {
+		send_blob_op = function (_, source, meta, opts)
+			meta = meta or {}
+			opts = opts or {}
+			local desc = source_desc(source)
+			local request = type(meta.request) == 'table' and meta.request or {}
+			local target = meta.target or topic_string(meta.receiver) or meta.action or meta.component
+			local source_size = type(source) == 'table' and source.size or nil
+			local source_digest = type(source) == 'table' and source.digest or nil
+			local source_digest_alg = type(source) == 'table' and source.digest_alg or nil
+			local size = meta.size or request.size or source_size or desc.size
+			local digest = meta.digest or request.digest or source_digest or desc.checksum
+			local digest_alg = meta.digest_alg or request.digest_alg or source_digest_alg or fabric_protocol.DIGEST_ALG
+
+			if type(target) ~= 'string' or target == '' then
+				return op.always(nil, 'transfer_target_required')
+			end
+			if type(size) ~= 'number' or size < 0 or size % 1 ~= 0 then
+				return op.always(nil, 'artifact_size_required')
+			end
+			if digest_alg ~= fabric_protocol.DIGEST_ALG
+				or type(digest) ~= 'string'
+				or not fabric_protocol.digest_ok(digest)
+			then
+				return op.always(nil, 'artifact_digest_required')
+			end
+
+			return conn:call_op(fabric_topics.transfer_manager_rpc('send-blob'), {
+				source = source,
+				link_id = meta.link_id,
+				request_id = request.request_id or request.job_id,
+				target = target,
+				size = size,
+				digest_alg = digest_alg,
+				digest = digest,
+				meta = meta,
+				receiver = meta.receiver,
+				chunk_size = opts.chunk_size or meta.chunk_size,
+			}, {
+				timeout = opts.timeout,
+				deadline = opts.deadline,
+			}):wrap(function (reply, err)
+				if reply == nil then return nil, err end
+				if type(reply) == 'table' and reply.ok == false then
+					return nil, reply.err or reply.error or reply.reason or 'transfer_failed'
+				end
+				local result = type(reply) == 'table' and (reply.result or reply) or reply
+				return {
+					ok = true,
+					transfer = result,
+					reply_payload = {
+						staged = true,
+						transfer = result,
+					},
+					source_handoff = {
+						consumed = true,
+						receiver_termination_installed = true,
+					},
+				}, nil
+			end)
+		end,
+	}
 end
 
 local function request_publication(state)
@@ -770,7 +856,7 @@ local function build_state(scope, params)
 		auto_publish = params.auto_publish,
 		emit_events = params.emit_events,
 		fabric_client = params.fabric_client,
-		transfer_client = params.transfer_client,
+		transfer_client = params.transfer_client or default_transfer_client(params.conn),
 		open_source = params.open_source,
 		open_source_op = params.open_source_op,
 		terminate_source = params.terminate_source,

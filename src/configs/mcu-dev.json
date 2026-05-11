@@ -1,0 +1,108 @@
+{
+  "hal": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/hal/1",
+      "filesystem": [
+        {
+          "name": "config",
+          "root": "/data/configs/"
+        },
+        {
+          "name": "state",
+          "root": "/tmp/dc-states/"
+        }
+      ],
+      "uart": [
+        {
+          "id": "uart-0",
+          "path": "/dev/ttyAMA0",
+          "baud": 115200,
+          "mode": "8N1"
+        }
+      ],
+      "artifact_store": {},
+      "control_store": [
+        {
+          "name": "main",
+          "root": "/tmp/dc-control/"
+        }
+      ]
+    }
+  },
+  "fabric": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/fabric/1",
+      "local_node": "cm5",
+      "links": [
+        {
+          "id": "mcu0",
+          "peer_id": "mcu",
+          "transport": {
+            "kind": "uart",
+            "source": "uart_manager",
+            "class": "uart",
+            "id": "uart-0",
+            "open_opts": {},
+            "terminator": "\n"
+          },
+          "session": {
+            "local_node": "cm5",
+            "hello_interval_s": 1.0,
+            "ping_interval_s": 10.0,
+            "liveness_timeout_s": 30.0
+          },
+          "bridge": {
+            "imports": [
+              {
+                "id": "mcu-state",
+                "local": [ "raw", "member", "mcu", "state" ],
+                "remote": [ "state" ]
+              },
+              {
+                "id": "mcu-cap",
+                "local": [ "raw", "member", "mcu", "cap" ],
+                "remote": [ "cap" ]
+              }
+            ],
+            "exports": [],
+            "rpc": {
+              "outbound": [
+                {
+                  "id": "mcu-cap-rpc",
+                  "local": [ "raw", "member", "mcu", "cap" ],
+                  "remote": [ "cap" ],
+                  "timeout_s": 15.0
+                }
+              ],
+              "inbound": []
+            }
+          },
+          "transfer": {
+            "chunk_size": 2048,
+            "timeout_s": 30.0
+          }
+        }
+      ]
+    }
+  },
+  "device": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/device/1"
+    }
+  },
+  "update": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.update/1",
+      "components": {
+        "mcu": {
+          "backend": "device_component",
+          "timeout_stage": 900.0
+        }
+      }
+    }
+  }
+}

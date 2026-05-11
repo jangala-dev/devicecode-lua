@@ -133,7 +133,20 @@ local function send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
 	)
 
 	send(caps, 'bulk', frame, 'transfer_chunk_send_failed')
-	return sent + #chunk
+	return sent + #chunk, {
+		offset = sent,
+		next = sent + #chunk,
+		frame = frame,
+	}
+end
+
+local function resend_cached_chunk(caps, cache, requested)
+	if type(cache) ~= 'table' or cache.offset ~= requested then
+		return nil, 'unexpected_offset'
+	end
+
+	send(caps, 'bulk', cache.frame, 'transfer_chunk_resend_failed')
+	return cache.next, nil
 end
 
 function M.run(scope, req, caps)
@@ -157,6 +170,7 @@ function M.run(scope, req, caps)
 	send(caps, 'control', begin, 'transfer_begin_send_failed')
 
 	local sent = 0
+	local retry_cache = nil
 	local state = 'waiting_ready'
 	local deadline = fibers.now() + timeout_s
 
@@ -167,43 +181,56 @@ function M.run(scope, req, caps)
 
 		local frame = item.frame or item
 
-		if type(frame) ~= 'table' or frame.xfer_id ~= xfer_id then
-			-- Manager normally filters these.
+		if type(frame) == 'table' and frame.xfer_id == xfer_id then
+			if frame.type == 'xfer_abort' then
+				fail(caps, xfer_id, frame.err or 'remote_abort', false)
 
-		elseif frame.type == 'xfer_abort' then
-			fail(caps, xfer_id, frame.err or 'remote_abort', false)
-
-		elseif frame.type == 'xfer_ready' then
-			if state == 'waiting_ready' then
-				state = 'sending'
-				deadline = fibers.now() + timeout_s
-			end
-
-		elseif frame.type == 'xfer_need' then
-			if state ~= 'sending' then fail(caps, xfer_id, 'unexpected_need', true) end
-			if frame.next ~= sent then fail(caps, xfer_id, 'unexpected_offset', true) end
-
-			if sent >= size then
-				state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
-			else
-				sent = send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
-				deadline = fibers.now() + timeout_s
-
-				if sent == size then
-					state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+			elseif frame.type == 'xfer_ready' then
+				if state == 'waiting_ready' then
+					state = 'sending'
+					deadline = fibers.now() + timeout_s
 				end
-			end
 
-		elseif frame.type == 'xfer_done' and state == 'committing' then
-			return {
-				request_id = req.request_id,
-				target = target,
-				xfer_id = xfer_id,
-				digest_alg = alg,
-				digest = digest,
-				sent_bytes = sent,
-				size = size,
-			}
+			elseif frame.type == 'xfer_need' then
+				if frame.next < sent then
+					local resent, rerr = resend_cached_chunk(caps, retry_cache, frame.next)
+					if not resent then fail(caps, xfer_id, rerr, true) end
+					sent = resent
+					deadline = fibers.now() + timeout_s
+
+					if sent >= size then
+						state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+					else
+						state = 'sending'
+					end
+
+				else
+					if state ~= 'sending' then fail(caps, xfer_id, 'unexpected_need', true) end
+					if frame.next ~= sent then fail(caps, xfer_id, 'unexpected_offset', true) end
+
+					if sent >= size then
+						state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+					else
+						sent, retry_cache = send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
+						deadline = fibers.now() + timeout_s
+
+						if sent == size then
+							state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+						end
+					end
+				end
+
+			elseif frame.type == 'xfer_done' and state == 'committing' then
+				return {
+					request_id = req.request_id,
+					target = target,
+					xfer_id = xfer_id,
+					digest_alg = alg,
+					digest = digest,
+					sent_bytes = sent,
+					size = size,
+				}
+			end
 		end
 	end
 end

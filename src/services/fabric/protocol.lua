@@ -129,7 +129,7 @@ local FRAME_SPECS = {
 	xfer_begin = {
 		class = 'transfer_control',
 		lane = 'transfer',
-		fields = { 'type', 'xfer_id', 'target', 'size', 'digest_alg', 'digest', 'meta' },
+		fields = { 'type', 'xfer_id', 'target', 'size', 'digest_alg', 'digest', 'checksum', 'meta' },
 		required = {
 			{ 'xfer_id', 'missing_xfer_id' },
 			{ 'target',  'missing_target' },
@@ -160,7 +160,7 @@ local FRAME_SPECS = {
 	xfer_chunk = {
 		class = 'transfer_bulk',
 		lane = 'transfer',
-		fields = { 'type', 'xfer_id', 'offset', 'data', 'chunk_digest' },
+		fields = { 'type', 'xfer_id', 'offset', 'data', 'chunk_digest', 'crc' },
 		required = {
 			{ 'xfer_id',      'missing_xfer_id' },
 			{ 'offset',       'invalid_offset' },
@@ -173,7 +173,7 @@ local FRAME_SPECS = {
 	xfer_commit = {
 		class = 'transfer_control',
 		lane = 'transfer',
-		fields = { 'type', 'xfer_id', 'size', 'digest_alg', 'digest' },
+		fields = { 'type', 'xfer_id', 'size', 'digest_alg', 'digest', 'checksum' },
 		required = {
 			{ 'xfer_id', 'missing_xfer_id' },
 			{ 'size',    'invalid_xfer_size' },
@@ -689,17 +689,46 @@ function M.decode_chunk(encoded)
 end
 
 local function to_wire_frame(frame)
+	if frame.type == 'xfer_begin' or frame.type == 'xfer_commit' then
+		local out = shallow_copy(frame)
+		if out.checksum == nil then out.checksum = out.digest end
+		return out, nil
+	end
+
 	if frame.type ~= 'xfer_chunk' then
 		return frame, nil
 	end
 
 	local out = shallow_copy(frame)
 	out.data = M.encode_chunk(frame.data)
+	if out.crc == nil then out.crc = out.chunk_digest end
 
 	return out, nil
 end
 
+local function normalise_wire_aliases(frame)
+	if type(frame) ~= 'table' then return frame end
+
+	if frame.type == 'xfer_begin' or frame.type == 'xfer_commit' then
+		if frame.digest == nil and frame.checksum ~= nil then
+			frame = shallow_copy(frame)
+			frame.digest = frame.checksum
+			if frame.digest_alg == nil then frame.digest_alg = M.DIGEST_ALG end
+		end
+		return frame
+	end
+
+	if frame.type == 'xfer_chunk' and frame.chunk_digest == nil and frame.crc ~= nil then
+		frame = shallow_copy(frame)
+		frame.chunk_digest = frame.crc
+	end
+
+	return frame
+end
+
 local function from_wire_frame(frame)
+	frame = normalise_wire_aliases(frame)
+
 	if frame.type ~= 'xfer_chunk' then
 		return frame, nil
 	end
@@ -752,6 +781,8 @@ function M.decode_line(line)
 	if not wire_frame then
 		return nil, 'decode_failed: ' .. tostring(json_err)
 	end
+
+	wire_frame = normalise_wire_aliases(wire_frame)
 
 	local valid_wire, valid_err = M.validate_wire(wire_frame)
 	if not valid_wire then

@@ -12,6 +12,7 @@ local op     = require 'fibers.op'
 local protocol = require 'services.fabric.protocol'
 local resource = require 'devicecode.support.resource'
 local cap_sdk  = require 'services.hal.sdk.cap'
+local cap_args = require 'services.hal.types.capability_args'
 
 local M = {}
 
@@ -262,6 +263,20 @@ local function unwrap_open_transport_reply(reply, err)
 	return session, nil
 end
 
+local function normalise_open_opts(transport_cfg)
+	if transport_cfg.class == 'uart' then
+		local opts, err = cap_args.new.UARTOpenOpts(transport_cfg.open_opts or {})
+		if not opts then return nil, err or 'invalid uart open opts' end
+		return opts, nil
+	end
+
+	if transport_cfg.open_opts == nil then return {}, nil end
+	if type(transport_cfg.open_opts) ~= 'table' then
+		return nil, 'transport.open_opts must be a table'
+	end
+	return transport_cfg.open_opts, nil
+end
+
 function M.open_transport_op(conn, transport_cfg, transport_session)
 	transport_cfg = require_transport_cfg(transport_cfg, 2)
 
@@ -285,9 +300,14 @@ function M.open_transport_op(conn, transport_cfg, transport_session)
 			transport_cfg.id
 		)
 
+		local open_opts, open_opts_err = normalise_open_opts(transport_cfg)
+		if not open_opts then
+			return op.always(nil, open_opts_err)
+		end
+
 		return cap:call_control_op(
 			transport_cfg.open_verb or 'open',
-			transport_cfg.open_opts
+			open_opts
 		):wrap(function (reply, err)
 			local session, uerr = unwrap_open_transport_reply(reply, err)
 			if not session then
