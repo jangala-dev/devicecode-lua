@@ -747,6 +747,7 @@ function M.composed_components(scope, params, service_caps)
 				hello_interval_s = session_cfg.hello_interval_s,
 				ping_interval_s = session_cfg.ping_interval_s,
 				liveness_timeout_s = session_cfg.liveness_timeout_s,
+				rehello_after_s = session_cfg.rehello_after_s,
 				bad_frame_limit = reader_cfg.bad_frame_limit,
 				bad_frame_window_s = reader_cfg.bad_frame_window_s,
 				state_tx = state_tx,

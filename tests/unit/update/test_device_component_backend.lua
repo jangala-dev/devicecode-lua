@@ -57,4 +57,62 @@ function tests.test_reconcile_completes_successfully_by_default()
 	assert_eq(result.result.observed.software.version, '1')
 end
 
+function tests.test_reconcile_waits_until_expected_image_matches()
+	local backend = backend_mod.new()
+	local result = backend:evaluate_reconcile({
+		job_id = 'job-1',
+		component = 'mcu',
+		expected_image_id = 'image-new',
+		pre_commit_boot_id = 'boot-old',
+		metadata = { require_boot_change = true },
+	}, {
+		components = {
+			mcu = {
+				software = {
+					image_id = 'image-old',
+					version = '1',
+					build = 'build-old',
+					boot_id = 'boot-new',
+				},
+				updater = { state = 'running' },
+			},
+		},
+	}, {})
+
+	assert_eq(result.done, false)
+	assert_eq(result.result.expected_image_id, 'image-new')
+	assert_eq(result.result.image_id, 'image-old')
+	assert_eq(result.result.boot_changed, true)
+	assert_eq(result.result.phase, 'running')
+end
+
+function tests.test_reconcile_succeeds_when_expected_image_matches()
+	local backend = backend_mod.new()
+	local result = backend:evaluate_reconcile({
+		job_id = 'job-1',
+		component = 'mcu',
+		expected_image_id = 'image-new',
+		pre_commit_boot_id = 'boot-old',
+		metadata = { require_boot_change = true },
+	}, {
+		components = {
+			mcu = {
+				software = {
+					image_id = 'image-new',
+					boot_id = 'boot-new',
+				},
+				updater = { state = 'running' },
+			},
+		},
+	}, {})
+
+	assert_eq(result.done, true)
+	assert_eq(result.ok, true)
+	assert_eq(result.tag, 'reconciled_success')
+	assert_eq(result.result.expected_image_id, 'image-new')
+	assert_eq(result.result.image_id, 'image-new')
+	assert_eq(result.result.boot_changed, true)
+	assert_eq(result.result.phase, 'running')
+end
+
 return tests

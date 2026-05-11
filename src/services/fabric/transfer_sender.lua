@@ -163,6 +163,11 @@ function M.run(scope, req, caps)
 	local xfer_id, target, size, alg, digest = require_request(req)
 	local timeout_s = positive(req.timeout_s or caps.timeout_s, DEFAULT_TIMEOUT, 'timeout_s')
 	local chunk_size = positive(req.chunk_size or caps.chunk_size, DEFAULT_CHUNK_SIZE, 'chunk_size', true)
+	local begin_retry_s = positive(
+		req.xfer_begin_retry_s or caps.xfer_begin_retry_s,
+		math.min(2.0, math.max(0.25, timeout_s / 5)),
+		'xfer_begin_retry_s'
+	)
 
 	local begin = construct('xfer_begin', protocol.xfer_begin,
 		xfer_id, target, size, alg, digest, req.meta or req.metadata)
@@ -172,64 +177,74 @@ function M.run(scope, req, caps)
 	local sent = 0
 	local retry_cache = nil
 	local state = 'waiting_ready'
-	local deadline = fibers.now() + timeout_s
+	local ready_deadline = fibers.now() + timeout_s
+	local deadline = math.min(fibers.now() + begin_retry_s, ready_deadline)
 
 	while true do
 		local which, item = fibers.perform(wait_frame_op(rx, deadline))
-		if which == 'timeout' then fail(caps, xfer_id, 'timeout', true) end
-		if item == nil then error('transfer_sender_frame_feed_closed', 0) end
+		if which == 'timeout' then
+			local now = fibers.now()
+			if state == 'waiting_ready' and now < ready_deadline then
+				send(caps, 'control', begin, 'transfer_begin_send_failed')
+				deadline = math.min(now + begin_retry_s, ready_deadline)
+			else
+				fail(caps, xfer_id, 'timeout', true)
+			end
+		else
+			if item == nil then error('transfer_sender_frame_feed_closed', 0) end
 
-		local frame = item.frame or item
+			local frame = item.frame or item
 
-		if type(frame) == 'table' and frame.xfer_id == xfer_id then
-			if frame.type == 'xfer_abort' then
-				fail(caps, xfer_id, frame.err or 'remote_abort', false)
+			if type(frame) == 'table' and frame.xfer_id == xfer_id then
+				if frame.type == 'xfer_abort' then
+					fail(caps, xfer_id, frame.err or 'remote_abort', false)
 
-			elseif frame.type == 'xfer_ready' then
-				if state == 'waiting_ready' then
-					state = 'sending'
-					deadline = fibers.now() + timeout_s
-				end
-
-			elseif frame.type == 'xfer_need' then
-				if frame.next < sent then
-					local resent, rerr = resend_cached_chunk(caps, retry_cache, frame.next)
-					if not resent then fail(caps, xfer_id, rerr, true) end
-					sent = resent
-					deadline = fibers.now() + timeout_s
-
-					if sent >= size then
-						state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
-					else
+				elseif frame.type == 'xfer_ready' then
+					if state == 'waiting_ready' then
 						state = 'sending'
+						deadline = fibers.now() + timeout_s
 					end
 
-				else
-					if state ~= 'sending' then fail(caps, xfer_id, 'unexpected_need', true) end
-					if frame.next ~= sent then fail(caps, xfer_id, 'unexpected_offset', true) end
-
-					if sent >= size then
-						state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
-					else
-						sent, retry_cache = send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
+				elseif frame.type == 'xfer_need' then
+					if frame.next < sent then
+						local resent, rerr = resend_cached_chunk(caps, retry_cache, frame.next)
+						if not resent then fail(caps, xfer_id, rerr, true) end
+						sent = resent
 						deadline = fibers.now() + timeout_s
 
-						if sent == size then
+						if sent >= size then
 							state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+						else
+							state = 'sending'
+						end
+
+					else
+						if state ~= 'sending' then fail(caps, xfer_id, 'unexpected_need', true) end
+						if frame.next ~= sent then fail(caps, xfer_id, 'unexpected_offset', true) end
+
+						if sent >= size then
+							state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+						else
+							sent, retry_cache = send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
+							deadline = fibers.now() + timeout_s
+
+							if sent == size then
+								state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+							end
 						end
 					end
-				end
 
-			elseif frame.type == 'xfer_done' and state == 'committing' then
-				return {
-					request_id = req.request_id,
-					target = target,
-					xfer_id = xfer_id,
-					digest_alg = alg,
-					digest = digest,
-					sent_bytes = sent,
-					size = size,
-				}
+				elseif frame.type == 'xfer_done' and state == 'committing' then
+					return {
+						request_id = req.request_id,
+						target = target,
+						xfer_id = xfer_id,
+						digest_alg = alg,
+						digest = digest,
+						sent_bytes = sent,
+						size = size,
+					}
+				end
 			end
 		end
 	end

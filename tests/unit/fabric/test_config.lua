@@ -19,6 +19,7 @@ function T.compile_builds_canonical_runtime_plan()
 				},
 				session = {
 					hello_interval_s = 1.5,
+					rehello_after_s = 6.5,
 					identity_claim = { id = 'host-a' },
 					auth_claim = nil,
 				},
@@ -63,6 +64,7 @@ function T.compile_builds_canonical_runtime_plan()
 				transfer = {
 					chunk_size = 8192,
 					timeout_s = 22.0,
+					xfer_begin_retry_s = 1.25,
 				},
 			},
 		},
@@ -83,6 +85,7 @@ function T.compile_builds_canonical_runtime_plan()
 
 	assert(link.session.local_node == 'host-a')
 	assert(link.session.hello_interval_s == 1.5)
+	assert(link.session.rehello_after_s == 6.5)
 	assert(link.session.ping_interval_s == cfg.DEFAULTS.session.ping_interval_s)
 	assert(link.session.identity_claim.id == 'host-a')
 
@@ -101,6 +104,7 @@ function T.compile_builds_canonical_runtime_plan()
 
 	assert(link.transfer.chunk_size == 8192)
 	assert(link.transfer.timeout_s == 22.0)
+	assert(link.transfer.xfer_begin_retry_s == 1.25)
 
 	assert(compiled.routing.by_link_id['uart0'] == link)
 	assert(compiled.routing.by_peer_id['peer-main'][1] == link)
@@ -129,10 +133,12 @@ function T.compile_applies_defaults()
 	assert(link.session.hello_interval_s == cfg.DEFAULTS.session.hello_interval_s)
 	assert(link.session.ping_interval_s == cfg.DEFAULTS.session.ping_interval_s)
 	assert(link.session.liveness_timeout_s == cfg.DEFAULTS.session.liveness_timeout_s)
+	assert(link.session.rehello_after_s == nil)
 
 	assert(link.bridge.max_pending_calls == cfg.DEFAULTS.bridge.max_pending_calls)
 	assert(link.transfer.chunk_size == cfg.DEFAULTS.transfer.chunk_size)
 	assert(link.transfer.timeout_s == cfg.DEFAULTS.transfer.timeout_s)
+	assert(link.transfer.xfer_begin_retry_s == nil)
 end
 
 function T.compile_rejects_wrong_schema()

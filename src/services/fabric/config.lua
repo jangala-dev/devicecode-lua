@@ -30,6 +30,7 @@ local DEFAULTS = {
 		hello_interval_s   = 2.0,
 		ping_interval_s    = 10.0,
 		liveness_timeout_s = 30.0,
+		rehello_after_s    = nil,
 	},
 	writer = {
 		rpc_quota  = 4,
@@ -71,6 +72,7 @@ local TRANSPORT_KEYS = {
 local SESSION_KEYS = {
 	local_node = true, identity_claim = true, auth_claim = true,
 	hello_interval_s = true, ping_interval_s = true, liveness_timeout_s = true,
+	rehello_after_s = true,
 }
 
 local READER_KEYS = {
@@ -96,7 +98,7 @@ local EXPORT_RULE_KEYS = {
 }
 
 local TRANSFER_KEYS = {
-	chunk_size = true, timeout_s = true,
+	chunk_size = true, timeout_s = true, xfer_begin_retry_s = true,
 }
 
 local QUEUE_KEYS = {
@@ -307,6 +309,8 @@ local function compile_session(raw, service_local_node)
 	if e3 then return nil, e3 end
 	local live, e4 = pos_number(raw.liveness_timeout_s, 'session.liveness_timeout_s', DEFAULTS.session.liveness_timeout_s)
 	if e4 then return nil, e4 end
+	local rehello_after_s, e5 = opt_pos_number(raw.rehello_after_s, 'session.rehello_after_s')
+	if e5 then return nil, e5 end
 
 	return {
 		local_node         = local_node,
@@ -315,6 +319,7 @@ local function compile_session(raw, service_local_node)
 		hello_interval_s   = hello,
 		ping_interval_s    = ping,
 		liveness_timeout_s = live,
+		rehello_after_s    = rehello_after_s,
 	}, nil
 end
 
@@ -510,10 +515,13 @@ local function compile_transfer(raw)
 	if e2 then return nil, e2 end
 	local timeout_s, e3 = pos_number(raw.timeout_s, 'transfer.timeout_s', DEFAULTS.transfer.timeout_s)
 	if e3 then return nil, e3 end
+	local xfer_begin_retry_s, e4 = opt_pos_number(raw.xfer_begin_retry_s, 'transfer.xfer_begin_retry_s')
+	if e4 then return nil, e4 end
 
 	return {
 		chunk_size = chunk_size,
 		timeout_s  = timeout_s,
+		xfer_begin_retry_s = xfer_begin_retry_s,
 	}, nil
 end
 

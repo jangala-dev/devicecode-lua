@@ -127,7 +127,13 @@ function tests.test_upload_promotes_transfer_chunk_header_to_job_metadata()
 		}
 
 		local st, _, result = fibers.perform(upload.run_op({
-			headers = { ['X-Transfer-Chunk-Raw'] = '4096' },
+			headers = {
+				['X-Transfer-Chunk-Raw'] = '4096',
+				['X-Artifact-Name'] = 'mcu.bin',
+				['X-Artifact-Version'] = 'mcu-v1',
+				['X-Artifact-Build'] = 'build-1',
+				['X-Artifact-Image-Id'] = 'mcu-image-1',
+			},
 			body_stream = body_from_chunks({ 'abc' }),
 		}, {
 			ingest = ingest_client(handle),
@@ -139,7 +145,12 @@ function tests.test_upload_promotes_transfer_chunk_header_to_job_metadata()
 		assert_eq(st, 'ok')
 		assert_eq(result.artifact_id, 'artifact-header')
 		assert_not_nil(captured)
+		assert_eq(captured.expected_image_id, 'mcu-image-1')
 		assert_eq(captured.metadata.user, 'kept')
+		assert_eq(captured.metadata.name, 'mcu.bin')
+		assert_eq(captured.metadata.version, 'mcu-v1')
+		assert_eq(captured.metadata.build, 'build-1')
+		assert_eq(captured.metadata.image_id, 'mcu-image-1')
 		assert_eq(captured.metadata.transfer_chunk_raw, 4096)
 	end)
 end

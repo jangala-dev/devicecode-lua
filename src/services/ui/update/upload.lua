@@ -125,9 +125,32 @@ local function positive_integer_header(headers, name)
 	return n
 end
 
+local function string_header(headers, name)
+	local raw = header_one(headers, name)
+	if raw == nil then return nil end
+	raw = tostring(raw)
+	if raw == '' then return nil end
+	return raw
+end
+
 local function apply_upload_headers(ctx, opts)
-	local chunk_raw = positive_integer_header(ctx and ctx.headers, 'x-transfer-chunk-raw')
-	if chunk_raw == nil then return opts end
+	local headers = ctx and ctx.headers
+	local chunk_raw = positive_integer_header(headers, 'x-transfer-chunk-raw')
+	local artifact_name = string_header(headers, 'x-artifact-name')
+	local artifact_version = string_header(headers, 'x-artifact-version')
+	local artifact_build = string_header(headers, 'x-artifact-build')
+	local image_id = string_header(headers, 'x-artifact-image-id')
+	local checksum = string_header(headers, 'x-artifact-checksum')
+
+	if chunk_raw == nil
+		and artifact_name == nil
+		and artifact_version == nil
+		and artifact_build == nil
+		and image_id == nil
+		and checksum == nil
+	then
+		return opts
+	end
 
 	opts = copy_opts(opts)
 	local meta = opts.metadata or opts.meta
@@ -136,7 +159,15 @@ local function apply_upload_headers(ctx, opts)
 	else
 		meta = {}
 	end
-	meta.transfer_chunk_raw = chunk_raw
+	if artifact_name ~= nil then meta.name = artifact_name end
+	if artifact_version ~= nil then meta.version = artifact_version end
+	if artifact_build ~= nil then meta.build = artifact_build end
+	if image_id ~= nil then
+		meta.image_id = image_id
+		opts.expected_image_id = opts.expected_image_id or image_id
+	end
+	if checksum ~= nil then meta.checksum = checksum end
+	if chunk_raw ~= nil then meta.transfer_chunk_raw = chunk_raw end
 	opts.metadata = meta
 	return opts
 end

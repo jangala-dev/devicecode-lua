@@ -70,6 +70,7 @@ local function start_session(scope, opts)
 			hello_interval_s = opts.hello_interval_s or 10,
 			ping_interval_s = opts.ping_interval_s or 10,
 			liveness_timeout_s = opts.liveness_timeout_s or 20,
+			rehello_after_s = opts.rehello_after_s,
 			bad_frame_limit = opts.bad_frame_limit,
 			bad_frame_window_s = opts.bad_frame_window_s,
 		})
@@ -213,6 +214,75 @@ function tests.test_new_peer_sid_drops_old_generation_and_starts_next_generation
 	end)
 end
 
+function tests.test_established_link_rehellos_after_missed_ping_window()
+	fibers.run(function (scope)
+		local h = start_session(scope, {
+			hello_interval_s = 0.01,
+			ping_interval_s = 0.03,
+			rehello_after_s = 0.05,
+			liveness_timeout_s = 0.50,
+		})
+
+		recv_with_timeout(h.control_rx, 'initial hello')
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+
+		local first = recv_with_timeout(h.rpc_rx, 'first peer session')
+		assert_eq(first.kind, 'peer_session')
+		assert_eq(first.session.session_generation, 1)
+		recv_with_timeout(h.transfer_rx, 'first transfer peer session')
+
+		local ping = recv_with_timeout(h.control_rx, 'ping', 0.20)
+		assert_eq(ping.frame.type, 'ping')
+
+		local hello = recv_with_timeout(h.control_rx, 'rehello', 0.20)
+		assert_eq(hello.frame.type, 'hello')
+
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+
+		local drop = recv_with_timeout(h.rpc_rx, 'rehello drop')
+		local next = recv_with_timeout(h.rpc_rx, 'rehello peer session')
+		assert_eq(drop.kind, 'peer_session_dropped')
+		assert_eq(drop.reason, 'rehello_confirmed')
+		assert_eq(drop.session.session_generation, 1)
+		assert_eq(next.kind, 'peer_session')
+		assert_eq(next.session.session_generation, 2)
+		assert_eq(next.session.peer_sid, 'mcu-sid')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
+function tests.test_rehello_accepts_new_peer_sid_from_hello_ack()
+	fibers.run(function (scope)
+		local h = start_session(scope, {
+			hello_interval_s = 0.01,
+			ping_interval_s = 0.03,
+			rehello_after_s = 0.05,
+			liveness_timeout_s = 0.50,
+		})
+
+		recv_with_timeout(h.control_rx, 'initial hello')
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid-1', 'mcu')))
+		recv_with_timeout(h.rpc_rx, 'first peer session')
+		recv_with_timeout(h.transfer_rx, 'first transfer peer session')
+
+		recv_with_timeout(h.control_rx, 'ping', 0.20)
+		recv_with_timeout(h.control_rx, 'rehello', 0.20)
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid-2', 'mcu')))
+
+		local drop = recv_with_timeout(h.rpc_rx, 'sid change drop')
+		local next = recv_with_timeout(h.rpc_rx, 'next peer session')
+		assert_eq(drop.kind, 'peer_session_dropped')
+		assert_eq(drop.reason, 'peer_sid_changed')
+		assert_eq(next.kind, 'peer_session')
+		assert_eq(next.session.session_generation, 2)
+		assert_eq(next.session.peer_sid, 'mcu-sid-2')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
 
 
 function tests.test_wire_errors_below_limit_are_counted_without_dropping_session()

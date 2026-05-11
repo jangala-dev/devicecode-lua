@@ -327,15 +327,22 @@ local function same_peer(cur, frame)
 		and frame.sid == cur.peer_sid
 end
 
-local function establish_from_peer(self, frame, at)
+local function note_peer_rx(self, at)
+	at = at or fibers.now()
+	self._last_peer_at = at
+	self._next_rehello_at = at + self._rehello_after
+end
+
+local function establish_from_peer(self, frame, at, force_generation_reason)
 	at = at or fibers.now()
 	local cur = session_snapshot(self)
 	local first = cur.established ~= true
 	local sid_changed = cur.peer_sid ~= frame.sid
+	local force_generation = force_generation_reason ~= nil
 	local generation = cur.session_generation or 0
-	if first or sid_changed then generation = generation + 1 end
-	if sid_changed and cur.established == true then
-		publish_session_drop(self, cur, 'peer_sid_changed', at)
+	if first or sid_changed or force_generation then generation = generation + 1 end
+	if (sid_changed or force_generation) and cur.established == true then
+		publish_session_drop(self, cur, sid_changed and 'peer_sid_changed' or force_generation_reason, at)
 	end
 	local ctx = context_from_peer_frame(self, frame, generation, at)
 	update_session(self, function (s)
@@ -349,12 +356,12 @@ local function establish_from_peer(self, frame, at)
 		s.authenticated = self._authenticated
 		s.proto = frame.proto
 		s.why = nil
-		if first or sid_changed then s.session_generation = generation end
+		if first or sid_changed or force_generation then s.session_generation = generation end
 	end)
 	self._outbound:bind(ctx)
-	self._last_peer_at = at
+	note_peer_rx(self, at)
 	self._next_ping_at = at + self._ping_interval
-	if first or sid_changed then
+	if first or sid_changed or force_generation then
 		publish_lifecycle(self, peer_session_event(self, ctx, at))
 	end
 end
@@ -365,7 +372,7 @@ local function refresh_peer(self, frame, at)
 		if frame.identity ~= nil then s.peer_identity_claim = protocol.normalise_reserved_claim(frame.identity) end
 		if frame.auth ~= nil then s.peer_auth_claim = protocol.normalise_reserved_claim(frame.auth) end
 	end)
-	self._last_peer_at = at or fibers.now()
+	note_peer_rx(self, at)
 end
 
 local function reset_to_hello(self, reason, now)
@@ -389,6 +396,8 @@ local function reset_to_hello(self, reason, now)
 	self._last_peer_at = nil
 	self._next_hello_at = now
 	self._next_ping_at = math.huge
+	self._next_rehello_at = math.huge
+	self._rehello_pending = false
 end
 
 local function send_hello(self)
@@ -428,8 +437,10 @@ local function session_next_deadline(self)
 		return self._next_hello_at or now, 'hello'
 	end
 	local ping = self._next_ping_at or math.huge
+	local rehello = self._next_rehello_at or math.huge
 	local live = (self._last_peer_at or now) + self._liveness_timeout
-	if live <= ping then return live, 'liveness' end
+	if live <= rehello and live <= ping then return live, 'liveness' end
+	if rehello <= ping then return rehello, 'rehello' end
 	return ping, 'ping'
 end
 
@@ -561,15 +572,19 @@ local function handle_session_frame(self, checked, at)
 		return
 	end
 	if checked.type == 'hello' then
-		if not cur.established or cur.phase == 'hello' or not same_peer(cur, checked) then
-			establish_from_peer(self, checked, at)
+		local rehello = self._rehello_pending == true and cur.established == true and same_peer(cur, checked)
+		self._rehello_pending = false
+		if not cur.established or cur.phase == 'hello' or not same_peer(cur, checked) or rehello then
+			establish_from_peer(self, checked, at, rehello and 'rehello_confirmed' or nil)
 		else
 			refresh_peer(self, checked, at)
 		end
 		send_hello_ack(self)
 	elseif checked.type == 'hello_ack' then
-		if not cur.established or cur.phase == 'hello' then
-			establish_from_peer(self, checked, at)
+		local rehello = self._rehello_pending == true and cur.established == true and same_peer(cur, checked)
+		self._rehello_pending = false
+		if not cur.established or cur.phase == 'hello' or not same_peer(cur, checked) or rehello then
+			establish_from_peer(self, checked, at, rehello and 'rehello_confirmed' or nil)
 		elseif same_peer(cur, checked) then
 			refresh_peer(self, checked, at)
 		end
@@ -588,7 +603,7 @@ end
 local function handle_non_session_frame(self, checked, lane, at)
 	local cur = session_snapshot(self)
 	if cur.established ~= true or cur.peer_sid == nil then return end
-	self._last_peer_at = at or fibers.now()
+	note_peer_rx(self, at)
 	local ok, err = route_downstream(self, lane, checked, at)
 	if ok ~= true then error(err or 'session_downstream_frame_admit_failed', 0) end
 end
@@ -614,6 +629,13 @@ local function handle_timer(self, ev)
 	end
 	if now >= ((self._last_peer_at or now) + self._liveness_timeout) then
 		reset_to_hello(self, 'liveness_timeout', now)
+		return
+	end
+	if (due == nil or due == 'rehello') and now >= (self._next_rehello_at or math.huge) then
+		send_hello(self)
+		self._rehello_pending = true
+		self._next_rehello_at = now + self._hello_interval
+		self._next_ping_at = now + self._ping_interval
 		return
 	end
 	if (due == nil or due == 'ping') and now >= (self._next_ping_at or math.huge) then
@@ -669,6 +691,11 @@ function M.run(scope, params)
 		outbound:terminate(reason)
 	end)
 
+	local hello_interval = positive_number(params.hello_interval_s, DEFAULT_HELLO_INTERVAL, 'hello_interval_s')
+	local ping_interval = positive_number(params.ping_interval_s, DEFAULT_PING_INTERVAL, 'ping_interval_s')
+	local liveness_timeout = positive_number(params.liveness_timeout_s, DEFAULT_LIVENESS_TIMEOUT, 'liveness_timeout_s')
+	local rehello_after = positive_number(params.rehello_after_s, ping_interval + hello_interval, 'rehello_after_s')
+
 	local self = setmetatable({
 		_link_id = link_id,
 		_link_generation = link_generation,
@@ -685,14 +712,17 @@ function M.run(scope, params)
 		_authenticated = false,
 		_state_tx = params.state_tx,
 		_component_name = params.component_name or 'session',
-		_hello_interval = positive_number(params.hello_interval_s, DEFAULT_HELLO_INTERVAL, 'hello_interval_s'),
-		_ping_interval = positive_number(params.ping_interval_s, DEFAULT_PING_INTERVAL, 'ping_interval_s'),
-		_liveness_timeout = positive_number(params.liveness_timeout_s, DEFAULT_LIVENESS_TIMEOUT, 'liveness_timeout_s'),
+		_hello_interval = hello_interval,
+		_ping_interval = ping_interval,
+		_liveness_timeout = liveness_timeout,
+		_rehello_after = rehello_after,
 		_bad_frame_limit = positive_integer(params.bad_frame_limit, DEFAULT_BAD_FRAME_LIMIT, 'bad_frame_limit'),
 		_bad_frame_window_s = positive_number(params.bad_frame_window_s, DEFAULT_BAD_FRAME_WINDOW_S, 'bad_frame_window_s'),
 		_bad_frame_times = {},
 		_next_hello_at = fibers.now(),
 		_next_ping_at = math.huge,
+		_next_rehello_at = math.huge,
+		_rehello_pending = false,
 		_last_peer_at = nil,
 		_frame_closed = false,
 		_pending_frame = nil,

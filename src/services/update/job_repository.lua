@@ -37,10 +37,31 @@ end
 function M.remove(repo, job_id) if not (repo.jobs and repo.jobs[job_id]) then return false,'not_found' end; repo.jobs[job_id]=nil; repo.dirty[job_id]=true; for i=#repo.order,1,-1 do if repo.order[i]==job_id then table.remove(repo.order,i) end end; return true,nil end
 function M.next_sequence(repo) local n=repo.next_seq or 1; repo.next_seq=n+1; return n end
 function M.new_job(spec, opts)
-  spec=spec or {}; opts=opts or {}; local id=spec.job_id or spec.id or opts.job_id; if type(id)~='string' or id=='' then return nil,'job_id required' end
-  local component=spec.component; if type(component)~='string' or component=='' then return nil,'component required' end
+  spec=spec or {}; opts=opts or {}
+  local id=spec.job_id or spec.id or opts.job_id
+  if type(id)~='string' or id=='' then return nil,'job_id required' end
+  local component=spec.component
+  if type(component)~='string' or component=='' then return nil,'component required' end
   local seq=opts.seq or 0
-  return { job_id=id, component=component, state='created', phase='created', stage='created', next_step='start', generation=opts.generation, artifact=copy(spec.artifact or spec.source or spec.artifact_ref), artifact_ref=spec.artifact_ref, metadata=copy(spec.metadata or spec.meta or {}), created_seq=seq, updated_seq=seq, history={{seq=seq,state='created',reason=opts.reason or 'create_job'}} }, nil
+  local metadata=copy(spec.metadata or spec.meta or {})
+  local expected_image_id=spec.expected_image_id
+  if expected_image_id==nil and type(metadata)=='table' then expected_image_id=metadata.image_id end
+  return {
+    job_id=id,
+    component=component,
+    state='created',
+    phase='created',
+    stage='created',
+    next_step='start',
+    generation=opts.generation,
+    artifact=copy(spec.artifact or spec.source or spec.artifact_ref),
+    artifact_ref=spec.artifact_ref,
+    expected_image_id=expected_image_id,
+    metadata=metadata,
+    created_seq=seq,
+    updated_seq=seq,
+    history={{seq=seq,state='created',reason=opts.reason or 'create_job'}},
+  }, nil
 end
 local function bump(job, seq, reason) job.updated_seq=seq or ((job.updated_seq or 0)+1); job.history=type(job.history)=='table' and job.history or {}; job.history[#job.history+1]={seq=job.updated_seq,state=job.state,phase=job.phase,reason=reason} end
 function M.patch(job, patch, opts) if type(job)~='table' then return nil,'job required' end; patch=patch or {}; opts=opts or {}; for k,v in pairs(patch) do job[k]=copy(v) end; if patch.state~=nil and patch.phase==nil then job.phase=patch.state end; if patch.phase~=nil and patch.stage==nil then job.stage=patch.phase end; bump(job, opts.seq, opts.reason or patch.reason or 'patch'); return strip_runtime(job),nil end

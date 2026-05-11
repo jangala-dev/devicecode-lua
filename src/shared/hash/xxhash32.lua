@@ -9,7 +9,9 @@
 local ok_bit32, bit32_mod = pcall(require, 'bit32')
 local ok_bit, bit_mod = pcall(require, 'bit')
 
-local bitops = ok_bit32 and bit32_mod or bit_mod
+-- Prefer LuaJIT's native bit module when present. Some OpenWrt bit32 builds
+-- are available under LuaJIT but produce incorrect xxHash32 results.
+local bitops = (ok_bit and bit_mod) or (ok_bit32 and bit32_mod)
 assert(bitops, 'shared.hash.xxhash32 requires bit32 or bit')
 
 local band   = assert(bitops.band,   'bit library missing band')
@@ -50,6 +52,14 @@ local function hex8(n)
 		n = n + TWO32
 	end
 	return ('%08x'):format(n)
+end
+
+local function unsigned32(n)
+	n = u32(n)
+	if n < 0 then
+		n = n + TWO32
+	end
+	return n
 end
 
 local function mul32(a, b)
@@ -165,7 +175,7 @@ function M.digest(state)
 		i = i + 1
 	end
 
-	return avalanche(h)
+	return unsigned32(avalanche(h))
 end
 
 function M.digest_hex_state(state)

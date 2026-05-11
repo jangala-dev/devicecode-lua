@@ -50,10 +50,119 @@ local function base_payload(job, ctx)
 		job_id = job.job_id,
 		artifact_ref = job.artifact_ref,
 		artifact_id = job.artifact_ref,
-		expected_image_id = job.expected_image_id,
+		expected_image_id = job.expected_image_id
+			or (type(job.metadata) == 'table' and job.metadata.image_id or nil),
 		options = model.deep_copy(job.options or {}),
 		metadata = model.deep_copy(job.metadata or {}),
 		commit_token = ctx and ctx.commit_token or nil,
+	}
+end
+
+local function image_id_for(job)
+	if type(job) ~= 'table' then return nil end
+	if job.expected_image_id ~= nil then return job.expected_image_id end
+	local metadata = job.metadata
+	if type(metadata) == 'table' then return metadata.image_id end
+	return nil
+end
+
+local function success_phase(phase)
+	return phase == nil or phase == 'running' or phase == 'idle' or phase == 'ready'
+end
+
+local function reconcile_payload(component_state, job, opts)
+	job = type(job) == 'table' and job or {}
+	opts = type(opts) == 'table' and opts or {}
+
+	local sw = type(component_state) == 'table' and component_state.software or nil
+	local upd = type(component_state) == 'table' and component_state.updater or nil
+	local image_id = type(sw) == 'table' and sw.image_id or nil
+	local version = type(sw) == 'table' and sw.version or nil
+	local build = type(sw) == 'table' and sw.build or nil
+	local boot_id = type(sw) == 'table' and sw.boot_id or nil
+	local phase = type(upd) == 'table' and upd.state or nil
+	local last_error = type(upd) == 'table' and upd.last_error or nil
+	local expected_image_id = image_id_for(job)
+	local boot_changed = (
+		opts.require_boot_change == true
+		and job.pre_commit_boot_id ~= nil
+		and boot_id ~= nil
+		and boot_id ~= job.pre_commit_boot_id
+	)
+
+	return {
+		expected_image_id = expected_image_id,
+		image_id = image_id,
+		version = version,
+		build = build,
+		boot_id = boot_id,
+		pre_commit_boot_id = job.pre_commit_boot_id,
+		boot_changed = boot_changed,
+		phase = phase,
+		last_error = last_error,
+		raw = component_state,
+	}
+end
+
+function M.evaluate_component_state(component_state, job, opts)
+	local out = reconcile_payload(component_state, job, opts)
+
+	if out.phase == 'failed' or out.phase == 'rollback_detected' then
+		out.done = true
+		out.success = false
+		out.error = tostring(out.last_error or out.phase)
+		return out
+	end
+
+	if out.expected_image_id == nil or out.expected_image_id == '' then
+		out.done = true
+		out.success = true
+		return out
+	end
+
+	if out.image_id == out.expected_image_id then
+		if out.boot_changed or success_phase(out.phase) then
+			out.done = true
+			out.success = true
+			return out
+		end
+	end
+
+	out.done = false
+	return out
+end
+
+local function wrap_reconcile_result(job, observed, result)
+	result = result or {}
+	result.component = job and job.component or nil
+	result.observed = observed
+
+	if result.done ~= true then
+		return {
+			done = false,
+			result = result,
+			observed = observed,
+		}
+	end
+
+	if result.success == false then
+		return {
+			done = true,
+			ok = false,
+			tag = 'reconciled_failure',
+			reason = result.error or 'reconcile_failed',
+			error = result.error or 'reconcile_failed',
+			result = result,
+			observed = observed,
+		}
+	end
+
+	return {
+		done = true,
+		ok = true,
+		tag = 'reconciled_success',
+		result = result,
+		observed = observed,
 	}
 end
 
@@ -91,7 +200,7 @@ function Backend:commit_op(job, ctx)
 	)
 end
 
-function Backend:evaluate_reconcile(job, snapshot, _ctx)
+function Backend:evaluate_reconcile(job, snapshot, ctx)
 	local observed
 	if type(snapshot) == 'table'
 		and type(snapshot.components) == 'table'
@@ -100,15 +209,14 @@ function Backend:evaluate_reconcile(job, snapshot, _ctx)
 		observed = snapshot.components[job.component]
 	end
 
-	return {
-		done = true,
-		ok = true,
-		tag = 'reconciled_success',
-		result = {
-			component = job and job.component or nil,
-			observed = observed,
-		},
-	}
+	local opts = ctx or {}
+	local metadata = type(job) == 'table' and job.metadata or nil
+	if type(metadata) == 'table' and metadata.require_boot_change == true then
+		opts = model.deep_copy(opts)
+		opts.require_boot_change = true
+	end
+
+	return wrap_reconcile_result(job, observed, M.evaluate_component_state(observed, job, opts))
 end
 
 function M.new(opts)

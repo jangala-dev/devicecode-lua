@@ -66,6 +66,7 @@ local function make_sender_caps(control_tx, bulk_tx, frame_rx, opts)
 		frame_rx   = frame_rx,
 		chunk_size = opts.chunk_size or 3,
 		timeout_s  = opts.timeout_s or 0.05,
+		xfer_begin_retry_s = opts.xfer_begin_retry_s,
 
 		send_control_frame_now = function (frame, label)
 			return admit(control_tx, frame, label)
@@ -229,6 +230,41 @@ function tests.test_sender_timeout_sends_abort_and_fails_attempt()
 
 	assert_eq(out.status, 'failed')
 	assert_match(out.value, 'timeout')
+end
+
+function tests.test_sender_retries_begin_until_ready()
+	local req = make_req {
+		data = 'abc',
+		size = 3,
+		xfer_id = 'xfer-begin-retry',
+		timeout_s = 0.20,
+		xfer_begin_retry_s = 0.02,
+	}
+
+	local out = collect_result(req, function (io)
+		local begin1 = recv_with_timeout(io.control_rx, 'begin1')
+		assert_eq(begin1.frame.type, 'xfer_begin')
+
+		local begin2 = recv_with_timeout(io.control_rx, 'begin2', 0.12)
+		assert_eq(begin2.frame.type, 'xfer_begin')
+		assert_eq(begin2.frame.xfer_id, begin1.frame.xfer_id)
+		assert_eq(begin2.frame.size, begin1.frame.size)
+		assert_eq(begin2.frame.digest, begin1.frame.digest)
+
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-begin-retry')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-begin-retry', 0)))
+
+		local chunk = recv_with_timeout(io.bulk_rx, 'chunk')
+		assert_eq(chunk.frame.type, 'xfer_chunk')
+		assert_eq(chunk.frame.offset, 0)
+
+		local commit = recv_with_timeout(io.control_rx, 'commit')
+		assert_eq(commit.frame.type, 'xfer_commit')
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-begin-retry')))
+	end, { timeout_s = 0.20, xfer_begin_retry_s = 0.02 })
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.sent_bytes, 3)
 end
 
 function tests.test_sender_remote_abort_fails_without_echoing_abort()
