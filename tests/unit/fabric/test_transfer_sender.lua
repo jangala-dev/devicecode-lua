@@ -201,6 +201,7 @@ function tests.test_sender_sends_begin_chunks_commit_and_returns_after_done()
 		assert_eq(chunk1.frame.offset, 0)
 		assert_eq(chunk1.frame.data, 'abc')
 		assert_eq(chunk1.frame.chunk_digest, protocol.chunk_digest('abc'))
+		assert_eq(chunk1.frame.chunk_offset_digest, protocol.chunk_offset_digest('xfer-1', 0, 'abc'))
 		seen[#seen + 1] = chunk1.frame.type
 
 		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-1', 3)))
@@ -209,6 +210,7 @@ function tests.test_sender_sends_begin_chunks_commit_and_returns_after_done()
 		assert_eq(chunk2.frame.offset, 3)
 		assert_eq(chunk2.frame.data, 'def')
 		assert_eq(chunk2.frame.chunk_digest, protocol.chunk_digest('def'))
+		assert_eq(chunk2.frame.chunk_offset_digest, protocol.chunk_offset_digest('xfer-1', 3, 'def'))
 		seen[#seen + 1] = chunk2.frame.type
 
 		assert_no_item(io.control_rx, 'commit before final ack')

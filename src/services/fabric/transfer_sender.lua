@@ -151,7 +151,8 @@ local function send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
 		xfer_id,
 		sent,
 		chunk,
-		protocol.chunk_digest(chunk)
+		protocol.chunk_digest(chunk),
+		protocol.chunk_offset_digest(xfer_id, sent, chunk)
 	)
 
 	send(caps, 'bulk', frame, 'transfer_chunk_send_failed')

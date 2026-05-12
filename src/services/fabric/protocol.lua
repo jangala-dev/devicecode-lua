@@ -29,6 +29,7 @@ function M.is_wire_protocol_error(err)
 		or s:match('^unknown_frame_field') ~= nil
 		or s:match('^unsupported_') ~= nil
 		or s:match('^chunk_digest_mismatch') ~= nil
+		or s:match('^chunk_offset_digest_mismatch') ~= nil
 		or s:match('^non_canonical_base64url') ~= nil
 		or s:match('^line_must_be_string') ~= nil
 end
@@ -160,7 +161,7 @@ local FRAME_SPECS = {
 	xfer_chunk = {
 		class = 'transfer_bulk',
 		lane = 'transfer',
-		fields = { 'type', 'xfer_id', 'offset', 'data', 'chunk_digest', 'crc' },
+		fields = { 'type', 'xfer_id', 'offset', 'data', 'chunk_digest', 'chunk_offset_digest', 'crc' },
 		required = {
 			{ 'xfer_id',      'missing_xfer_id' },
 			{ 'offset',       'invalid_offset' },
@@ -348,6 +349,24 @@ function M.verify_chunk_digest(bytes, digest)
 	return M.verify_digest(bytes, digest)
 end
 
+function M.chunk_offset_digest(xfer_id, offset, bytes)
+	assert(type(xfer_id) == 'string', 'protocol.chunk_offset_digest expects xfer_id string')
+	assert(is_nonneg_integer(offset), 'protocol.chunk_offset_digest expects offset integer')
+	assert(type(bytes) == 'string', 'protocol.chunk_offset_digest expects bytes string')
+	return M.digest_hex(xfer_id .. '\0' .. tostring(offset) .. '\0' .. bytes)
+end
+
+function M.verify_chunk_offset_digest(xfer_id, offset, bytes, digest)
+	if not is_nonempty_string(xfer_id) or not is_nonneg_integer(offset) then
+		return false
+	end
+	if type(bytes) ~= 'string' or not is_xxhash32_hex(digest) then
+		return false
+	end
+
+	return M.chunk_offset_digest(xfer_id, offset, bytes) == digest
+end
+
 --------------------------------------------------------------------------------
 -- Validation
 --------------------------------------------------------------------------------
@@ -477,6 +496,13 @@ local function validate_special_cases(frame)
 		return nil, 'invalid_ts'
 	end
 
+	if frame.type == 'xfer_chunk'
+		and frame.chunk_offset_digest ~= nil
+		and not is_xxhash32_hex(frame.chunk_offset_digest)
+	then
+		return nil, 'invalid_chunk_offset_digest'
+	end
+
 	return true, nil
 end
 
@@ -517,6 +543,19 @@ local function validate_by_spec(frame, opts)
 		and not M.verify_chunk_digest(frame.data, frame.chunk_digest)
 	then
 		return nil, 'chunk_digest_mismatch'
+	end
+
+	if spec.semantic == 'chunk'
+		and not (opts and opts.wire)
+		and frame.chunk_offset_digest ~= nil
+		and not M.verify_chunk_offset_digest(
+			frame.xfer_id,
+			frame.offset,
+			frame.data,
+			frame.chunk_offset_digest
+		)
+	then
+		return nil, 'chunk_offset_digest_mismatch'
 	end
 
 	return frame, nil
@@ -633,7 +672,7 @@ local CTORS = {
 	xfer_begin  = { 'xfer_id', 'target', 'size', 'digest_alg', 'digest', 'meta' },
 	xfer_ready  = { 'xfer_id' },
 	xfer_need   = { 'xfer_id', 'next' },
-	xfer_chunk  = { 'xfer_id', 'offset', 'data', 'chunk_digest' },
+	xfer_chunk  = { 'xfer_id', 'offset', 'data', 'chunk_digest', 'chunk_offset_digest' },
 	xfer_commit = { 'xfer_id', 'size', 'digest_alg', 'digest' },
 	xfer_done   = { 'xfer_id' },
 	xfer_abort  = { 'xfer_id', 'err' },
@@ -749,6 +788,17 @@ local function from_wire_frame(frame)
 
 	if not M.verify_chunk_digest(bytes, out.chunk_digest) then
 		return nil, 'chunk_digest_mismatch'
+	end
+
+	if out.chunk_offset_digest ~= nil
+		and not M.verify_chunk_offset_digest(
+			out.xfer_id,
+			out.offset,
+			bytes,
+			out.chunk_offset_digest
+		)
+	then
+		return nil, 'chunk_offset_digest_mismatch'
 	end
 
 	out.data = bytes

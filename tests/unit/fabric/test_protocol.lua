@@ -290,6 +290,7 @@ function tests.test_encode_decode_xfer_chunk_roundtrip_preserves_bytes()
 		offset = 5,
 		data = 'abc\0def',
 		chunk_digest = protocol.chunk_digest('abc\0def'),
+		chunk_offset_digest = protocol.chunk_offset_digest('xfer-1', 5, 'abc\0def'),
 	}
 
 	local line, err = protocol.encode_line(frame)
@@ -306,6 +307,7 @@ function tests.test_encode_decode_xfer_chunk_roundtrip_preserves_bytes()
 	assert_eq(decoded.offset, 5)
 	assert_eq(decoded.data, 'abc\0def')
 	assert_eq(decoded.chunk_digest, protocol.chunk_digest('abc\0def'))
+	assert_eq(decoded.chunk_offset_digest, protocol.chunk_offset_digest('xfer-1', 5, 'abc\0def'))
 end
 
 function tests.test_xfer_chunk_crc_alias_roundtrips_for_go_compatibility()
@@ -361,6 +363,32 @@ function tests.test_semantic_xfer_chunk_digest_is_verified()
 	assert_nil(err)
 end
 
+function tests.test_xfer_chunk_offset_digest_binds_offset_and_transfer_id_when_present()
+	local ok, err = protocol.validate({
+		type = 'xfer_chunk',
+		xfer_id = 'xfer-1',
+		offset = 7,
+		data = 'abc',
+		chunk_digest = protocol.chunk_digest('abc'),
+		chunk_offset_digest = protocol.chunk_offset_digest('xfer-1', 7, 'abc'),
+	})
+
+	assert_not_nil(ok)
+	assert_nil(err)
+
+	ok, err = protocol.validate({
+		type = 'xfer_chunk',
+		xfer_id = 'xfer-1',
+		offset = 8,
+		data = 'abc',
+		chunk_digest = protocol.chunk_digest('abc'),
+		chunk_offset_digest = protocol.chunk_offset_digest('xfer-1', 7, 'abc'),
+	})
+
+	assert_nil(ok)
+	assert_eq(err, 'chunk_offset_digest_mismatch')
+end
+
 function tests.test_encode_line_rejects_semantic_xfer_chunk_digest_mismatch()
 	local line, err = protocol.encode_line({
 		type = 'xfer_chunk',
@@ -372,6 +400,20 @@ function tests.test_encode_line_rejects_semantic_xfer_chunk_digest_mismatch()
 
 	assert_nil(line)
 	assert_eq(err, 'chunk_digest_mismatch')
+end
+
+function tests.test_decode_line_rejects_chunk_offset_digest_mismatch()
+	local line = '{"type":"xfer_chunk","xfer_id":"xfer-1","offset":1,"data":"'
+		.. protocol.encode_chunk('abc')
+		.. '","chunk_digest":"'
+		.. protocol.chunk_digest('abc')
+		.. '","chunk_offset_digest":"'
+		.. protocol.chunk_offset_digest('xfer-1', 0, 'abc')
+		.. '"}'
+	local frame, err = protocol.decode_line(line)
+
+	assert_nil(frame)
+	assert_eq(err, 'chunk_offset_digest_mismatch')
 end
 
 
@@ -453,6 +495,7 @@ function tests.test_protocol_digest_helpers_use_xxhash32_seed_zero_vectors()
 	assert_eq(protocol.digest_hex(''), '02cc5d05')
 	assert_eq(protocol.digest_hex('abc'), '32d153ff')
 	assert_eq(protocol.chunk_digest('abc\0def'), '7955e6e5')
+	assert_eq(protocol.chunk_offset_digest('xfer-1', 5, 'abc\0def'), '72659e56')
 end
 
 function tests.test_unknown_top_level_fields_are_rejected_but_identity_auth_are_extensible()
