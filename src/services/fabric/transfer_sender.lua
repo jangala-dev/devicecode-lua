@@ -11,6 +11,7 @@ local M = {}
 
 local DEFAULT_TIMEOUT = 1.0
 local DEFAULT_CHUNK_SIZE = protocol.DEFAULT_CHUNK_SIZE or 2048
+local DEFAULT_RESEND_RETRY_S = 0.25
 
 local function nonempty(v)
 	return type(v) == 'string' and v ~= ''
@@ -64,13 +65,28 @@ local function construct(label, fn, ...)
 	return frame
 end
 
-local function send(caps, lane, frame, label)
+local function log_event(caps, level, fields)
+	local fn = caps and caps.log
+	if type(fn) ~= 'function' then return true, nil end
+	local payload = {}
+	for k, v in pairs(fields or {}) do payload[k] = v end
+	payload.component = payload.component or 'transfer_sender'
+	local ok, err = pcall(fn, level or 'debug', payload)
+	if ok then return true, nil end
+	return nil, err
+end
+
+local function send_now(caps, lane, frame, label)
 	local fn = lane == 'bulk' and caps.send_bulk_frame_now or caps.send_control_frame_now
 	if type(fn) ~= 'function' then
 		error('transfer_sender: missing session-bound sender for ' .. tostring(lane), 0)
 	end
 
-	local ok, err = fn(frame, label)
+	return fn(frame, label)
+end
+
+local function send(caps, lane, frame, label)
+	local ok, err = send_now(caps, lane, frame, label)
 	if ok ~= true then error((label or 'transfer_send_failed') .. ': ' .. tostring(err), 0) end
 	return true
 end
@@ -84,6 +100,12 @@ end
 
 local function fail(caps, xfer_id, reason, send_abort)
 	local err = tostring(reason or 'transfer_failed')
+	log_event(caps, 'warn', {
+		what = 'transfer_sender_failed',
+		xfer_id = xfer_id,
+		err = err,
+		send_abort = send_abort ~= false,
+	})
 
 	if send_abort ~= false then
 		local ok, aerr = try_abort(caps, xfer_id, err)
@@ -133,9 +155,10 @@ local function send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
 	)
 
 	send(caps, 'bulk', frame, 'transfer_chunk_send_failed')
+	local next_sent = sent + #chunk
 	return sent + #chunk, {
 		offset = sent,
-		next = sent + #chunk,
+		next = next_sent,
 		frame = frame,
 	}
 end
@@ -145,8 +168,28 @@ local function resend_cached_chunk(caps, cache, requested)
 		return nil, 'unexpected_offset'
 	end
 
-	send(caps, 'bulk', cache.frame, 'transfer_chunk_resend_failed')
+	local ok, err = send_now(caps, 'bulk', cache.frame, 'transfer_chunk_resend_failed')
+	if ok ~= true then return nil, err or 'transfer_chunk_resend_failed' end
 	return cache.next, nil
+end
+
+local function is_queue_full(err)
+	local s = tostring(err or '')
+	return s == 'full' or s:match(': full$') ~= nil
+end
+
+local function mark_inflight(cache)
+	if type(cache) ~= 'table' then return nil end
+	return {
+		offset = cache.offset,
+		next = cache.next,
+		sent_at = fibers.now(),
+	}
+end
+
+local function resend_due(inflight, requested, resend_retry_s)
+	if type(inflight) ~= 'table' or inflight.offset ~= requested then return true end
+	return fibers.now() - (inflight.sent_at or 0) >= resend_retry_s
 end
 
 function M.run(scope, req, caps)
@@ -163,6 +206,11 @@ function M.run(scope, req, caps)
 	local xfer_id, target, size, alg, digest = require_request(req)
 	local timeout_s = positive(req.timeout_s or caps.timeout_s, DEFAULT_TIMEOUT, 'timeout_s')
 	local chunk_size = positive(req.chunk_size or caps.chunk_size, DEFAULT_CHUNK_SIZE, 'chunk_size', true)
+	local resend_retry_s = positive(
+		req.resend_retry_s or caps.resend_retry_s,
+		DEFAULT_RESEND_RETRY_S,
+		'resend_retry_s'
+	)
 	local begin_retry_s = positive(
 		req.xfer_begin_retry_s or caps.xfer_begin_retry_s,
 		math.min(2.0, math.max(0.25, timeout_s / 5)),
@@ -176,6 +224,7 @@ function M.run(scope, req, caps)
 
 	local sent = 0
 	local retry_cache = nil
+	local inflight = nil
 	local state = 'waiting_ready'
 	local ready_deadline = fibers.now() + timeout_s
 	local deadline = math.min(fibers.now() + begin_retry_s, ready_deadline)
@@ -207,15 +256,21 @@ function M.run(scope, req, caps)
 
 				elseif frame.type == 'xfer_need' then
 					if frame.next < sent then
-						local resent, rerr = resend_cached_chunk(caps, retry_cache, frame.next)
-						if not resent then fail(caps, xfer_id, rerr, true) end
-						sent = resent
 						deadline = fibers.now() + timeout_s
-
-						if sent >= size then
-							state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
-						else
-							state = 'sending'
+						if resend_due(inflight, frame.next, resend_retry_s) then
+							local resent, rerr = resend_cached_chunk(caps, retry_cache, frame.next)
+							if not resent then
+								if is_queue_full(rerr) then
+									inflight = mark_inflight(retry_cache)
+									state = 'sending'
+								else
+									fail(caps, xfer_id, rerr, true)
+								end
+							else
+								sent = resent
+								inflight = mark_inflight(retry_cache)
+								state = 'sending'
+							end
 						end
 
 					else
@@ -223,13 +278,15 @@ function M.run(scope, req, caps)
 						if frame.next ~= sent then fail(caps, xfer_id, 'unexpected_offset', true) end
 
 						if sent >= size then
+							inflight = nil
 							state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
 						else
 							sent, retry_cache = send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
+							inflight = mark_inflight(retry_cache)
 							deadline = fibers.now() + timeout_s
 
 							if sent == size then
-								state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+								state, deadline = 'sending', fibers.now() + timeout_s
 							end
 						end
 					end

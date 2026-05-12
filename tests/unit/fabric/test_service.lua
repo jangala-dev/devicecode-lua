@@ -498,6 +498,35 @@ function tests.test_start_shell_loads_retained_config_and_starts_generation()
 	end)
 end
 
+function tests.test_start_shell_preserves_private_link_runtime_transfer_admission()
+	fibers.run(function ()
+		local bus = busmod.new()
+		local conn = bus:connect()
+		local saw_transfer_rx = false
+		local done_tx, done_rx = require('fibers.mailbox').new(1, { full = 'reject_newest' })
+
+		conn:retain(topics.cfg(), minimal_compiled_config('link-private'))
+
+		local st, _, primary = fibers.run_scope(function (scope)
+			start_shell_in_scope(scope, conn, {
+				_private_link_runtime = true,
+				link_runner = function (_, spec)
+					saw_transfer_rx = spec.transfer_admission_rx ~= nil
+					done_tx:send(true)
+					return { role = 'test-link' }
+				end,
+			})
+
+			local ok = fibers.perform(done_rx:recv_op())
+			assert_true(ok)
+			scope:cancel('test complete')
+		end)
+
+		assert_eq(st, 'cancelled', tostring(primary))
+		assert_eq(saw_transfer_rx, true)
+	end)
+end
+
 function tests.test_start_shell_replaces_generation_on_config_change()
 	fibers.run(function ()
 		local bus = busmod.new()

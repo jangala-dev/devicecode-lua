@@ -21,7 +21,6 @@ local config_mod    = require 'services.update.config'
 local events        = require 'services.update.events'
 local generation    = require 'services.update.generation'
 local publisher     = require 'services.update.publisher'
-local projection    = require 'services.update.projection'
 local topics        = require 'services.update.topics'
 local job_store_cap = require 'services.update.job_store_cap'
 local job_runtime_mod = require 'services.update.job_runtime'
@@ -37,6 +36,26 @@ local DEFAULT_DONE_QUEUE = 32
 
 local function copy(v)
 	return model_mod.deep_copy(v)
+end
+
+local function make_service_log(svc)
+	if type(svc) ~= 'table' or type(svc.obs_log) ~= 'function' then
+		return nil
+	end
+	return function (level, fields)
+		return svc:obs_log(level or 'debug', fields or {})
+	end
+end
+
+local function log_event(self, level, fields)
+	local fn = self and self._log
+	if type(fn) ~= 'function' then return true, nil end
+	local payload = {}
+	for k, v in pairs(fields or {}) do payload[k] = v end
+	payload.component = payload.component or 'update_service'
+	local ok, err = pcall(fn, level or 'debug', payload)
+	if ok then return true, nil end
+	return nil, err
 end
 
 local function config_from_value(value, opts)
@@ -356,6 +375,12 @@ local function consider_active_jobs(self)
 
 	local ok, err = self._active_component:consider_jobs()
 	update_active_projection(self)
+	if ok == nil then
+		log_event(self, 'warn', {
+			what = 'update_consider_active_jobs_failed',
+			err = err,
+		})
+	end
 
 	if ok == nil and err ~= 'slot_busy' and err ~= 'no_active_intent' and err ~= 'not_ready' then
 		update_model_state(self, 'failed', err)
@@ -386,7 +411,7 @@ local function handle_job_runtime_changed(self, ev)
 	consider_active_jobs(self)
 end
 
-local function handle_active_runtime_changed(self, ev)
+local function handle_active_runtime_changed(self, _ev)
 	update_active_projection(self)
 	update_service_jobs_projection(self)
 	if self._current_generation then
@@ -740,7 +765,7 @@ function M.run(scope, params)
 	local manager_ep, merr = bind_manager(scope, params.conn, params)
 	if merr then error(merr, 2) end
 
-	local config_watch, werr = open_config_watch(scope, params.conn, params)
+	local cfg_watch, werr = open_config_watch(scope, params.conn, params)
 	if werr then error(werr, 2) end
 
 	local job_store = params.job_store or job_store_cap.memory(params.initial_jobs)
@@ -755,11 +780,14 @@ function M.run(scope, params)
 		error(jobs_err or 'update_job_repository_start_failed', 2)
 	end
 	local adoption = jobs:ready() and jobs:adoption() or {}
+	local update_log = params.log or make_service_log(params.svc)
 	local backend = params.backend or device_backend.new({
 		conn = params.conn,
 		timeout_prepare = params.timeout_prepare,
 		timeout_stage = params.timeout_stage,
 		timeout_commit = params.timeout_commit,
+		commit_settle_s = params.commit_settle_s,
+		log = update_log,
 	})
 
 	local active_scope, active_scope_err = scope:child()
@@ -772,9 +800,11 @@ function M.run(scope, params)
 		done_tx = done_tx,
 		work_scope = active_scope,
 		queue_len = params.active_runtime_queue_len,
+		conn = params.conn,
 		jobs = jobs,
 		backend = backend,
 		adoption = adoption,
+		log = update_log,
 	})
 	if not active_component then
 		error(active_component_err or 'update_active_runtime_start_failed', 2)
@@ -792,8 +822,8 @@ function M.run(scope, params)
 		_active_runtime = active_component:state(),
 		_manager_ep = manager_ep,
 		manager_rx = manager_ep,
-		config_watch = config_watch,
-		config_rx = params.config_rx or config_watch,
+		config_watch = cfg_watch,
+		config_rx = params.config_rx or cfg_watch,
 		publisher = nil,
 		_publisher = nil,
 		pending = {},
@@ -808,6 +838,7 @@ function M.run(scope, params)
 		_manager_route_queue_len = params.manager_route_queue_len,
 		_generation_service_queue_len = params.generation_service_queue_len,
 		_complete = false,
+		_log = update_log,
 	}, Service)
 
 	update_service_jobs_projection(self)
@@ -850,6 +881,7 @@ function M.start(conn, opts)
 	local params = copy(opts)
 	params.conn = conn
 	params.name = opts.name or 'update'
+	params.svc = svc
 
 	M.run(scope, params)
 

@@ -17,7 +17,6 @@
 local fibers       = require 'fibers'
 local mailbox      = require 'fibers.mailbox'
 local scoped_work  = require 'devicecode.support.scoped_work'
-local queue        = require 'devicecode.support.queue'
 local service_events = require 'devicecode.support.service_events'
 local model_mod    = require 'services.fabric.model'
 local io_mod       = require 'services.fabric.io'
@@ -483,9 +482,7 @@ local function coordinator_loop(self)
 		end
 
 		if ev.kind == 'component_done' then
-			if ev.link_id ~= self._link_id or ev.link_generation ~= self._link_generation then
-				-- Stale or foreign completion. Ignore it.
-			else
+			if ev.link_id == self._link_id and ev.link_generation == self._link_generation then
 				local accepted = record_component_done(self, ev)
 
 				if accepted then
@@ -600,6 +597,7 @@ local function transfer_params_from(params, admission_rx, session_rx, outbound, 
 	t.outbound = outbound
 	t.state_tx = state_tx
 	t.component_name = 'transfer_manager'
+	t.log = params.log
 
 	return t
 end
@@ -681,10 +679,15 @@ function M.composed_components(scope, params, service_caps)
 		{ full = 'reject_newest' }
 	)
 
+	local transfer_quiet = params.transfer_quiet or {}
+
 	local outbound_gate = session_mod.new_outbound_gate {
 		tx_control = outbound_control_tx,
 		tx_rpc     = outbound_rpc_tx,
 		tx_bulk    = outbound_bulk_tx,
+		transfer_quiet = transfer_quiet,
+		log = params.log,
+		link_id = params.link_id,
 	}
 
 	local local_rx = params.local_rx
@@ -752,6 +755,8 @@ function M.composed_components(scope, params, service_caps)
 				bad_frame_window_s = reader_cfg.bad_frame_window_s,
 				state_tx = state_tx,
 				component_name = 'session',
+				transfer_quiet = transfer_quiet,
+				log = params.log,
 			})
 		end,
 	}

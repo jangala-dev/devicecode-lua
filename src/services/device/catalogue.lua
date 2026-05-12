@@ -154,6 +154,7 @@ local function normalise_actions(actions, where)
 					name = public_name,
 					kind = 'fabric_stage',
 					link_id = spec.link_id,
+					target = spec.target,
 					receiver = assert_raw_cap_rpc_topic(spec.receiver, where .. ': action ' .. action_name .. ' receiver'),
 					artifact_store = spec.artifact_store or 'main',
 					timeout = tonumber(spec.timeout or spec.timeout_s) or nil,
@@ -251,12 +252,16 @@ local function default_components()
 			facts = mcu_schema.member_fact_topics('mcu'),
 			events = mcu_schema.member_event_topics('mcu'),
 			actions = {
+				['prepare-update'] = { 'raw', 'member', 'mcu', 'cmd', 'self', 'updater', 'prepare' },
 				['restart'] = topics.raw_member_cap_rpc('mcu', 'control', 'main', 'restart'),
 				['stage-update'] = {
 					kind = 'fabric_stage',
 					receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage'),
+					target = 'updater/main',
 					artifact_store = 'main',
+					timeout = 900.0,
 				},
+				['commit-update'] = { 'raw', 'member', 'mcu', 'cmd', 'self', 'updater', 'commit' },
 			},
 		}),
 	}

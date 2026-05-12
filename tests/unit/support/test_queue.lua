@@ -1,6 +1,8 @@
 -- tests/devicecode/support/test_queue.lua
 
 local fibers   = require 'fibers'
+local sleep    = require 'fibers.sleep'
+local channel  = require 'fibers.channel'
 local scope    = require 'fibers.scope'
 local mailbox  = require 'fibers.mailbox'
 local queue    = require 'devicecode.support.queue'
@@ -214,6 +216,106 @@ function tests.test_try_send_now_still_observes_scope_cancellation()
 		assert_eq(st, 'cancelled')
 		assert_eq(primary, 'cancelled_for_test')
 		assert_eq(#rep.extra_errors, 0)
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- losing choice arms unlink blocked mailbox waiters
+-------------------------------------------------------------------------------
+
+function tests.test_mailbox_choice_unlinks_losing_recv_waiter()
+	fibers.run(function ()
+		local hot_tx, hot_rx = mailbox.new(0, { full = 'block' })
+		local _, quiet_rx = mailbox.new(0, { full = 'block' })
+
+		for i = 1, 25 do
+			fibers.spawn(function ()
+				sleep.sleep(0.001)
+				hot_tx:send('tick-' .. tostring(i))
+			end)
+
+			local which, item = fibers.perform(fibers.named_choice {
+				hot = hot_rx:recv_op(),
+				quiet = quiet_rx:recv_op(),
+			})
+
+			assert_eq(which, 'hot')
+			assert_eq(item, 'tick-' .. tostring(i))
+			assert_eq(quiet_rx._st.getq:length(), 0, 'quiet recv waiter leaked')
+		end
+	end)
+end
+
+function tests.test_mailbox_choice_unlinks_losing_send_waiter()
+	fibers.run(function ()
+		local hot_tx, hot_rx = mailbox.new(0, { full = 'block' })
+		local quiet_tx = mailbox.new(0, { full = 'block' })
+
+		for i = 1, 25 do
+			fibers.spawn(function ()
+				sleep.sleep(0.001)
+				hot_tx:send('tick-' .. tostring(i))
+			end)
+
+			local which, item = fibers.perform(fibers.named_choice {
+				hot = hot_rx:recv_op(),
+				quiet = quiet_tx:send_op({ i = i }),
+			})
+
+			assert_eq(which, 'hot')
+			assert_eq(item, 'tick-' .. tostring(i))
+			assert_eq(quiet_tx._st.putq:length(), 0, 'quiet send waiter leaked')
+		end
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- losing choice arms unlink blocked channel waiters
+-------------------------------------------------------------------------------
+
+function tests.test_channel_choice_unlinks_losing_get_waiter()
+	fibers.run(function ()
+		local hot = channel.new()
+		local quiet = channel.new()
+
+		for i = 1, 25 do
+			fibers.spawn(function ()
+				sleep.sleep(0.001)
+				hot:put('tick-' .. tostring(i))
+			end)
+
+			local which, item = fibers.perform(fibers.named_choice {
+				hot = hot:get_op(),
+				quiet = quiet:get_op(),
+			})
+
+			assert_eq(which, 'hot')
+			assert_eq(item, 'tick-' .. tostring(i))
+			assert_eq(quiet.getq:length(), 0, 'quiet get waiter leaked')
+		end
+	end)
+end
+
+function tests.test_channel_choice_unlinks_losing_put_waiter()
+	fibers.run(function ()
+		local hot = channel.new()
+		local quiet = channel.new()
+
+		for i = 1, 25 do
+			fibers.spawn(function ()
+				sleep.sleep(0.001)
+				hot:put('tick-' .. tostring(i))
+			end)
+
+			local which, item = fibers.perform(fibers.named_choice {
+				hot = hot:get_op(),
+				quiet = quiet:put_op({ i = i }),
+			})
+
+			assert_eq(which, 'hot')
+			assert_eq(item, 'tick-' .. tostring(i))
+			assert_eq(quiet.putq:length(), 0, 'quiet put waiter leaked')
+		end
 	end)
 end
 

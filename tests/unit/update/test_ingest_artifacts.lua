@@ -61,9 +61,39 @@ function tests.test_ingest_commit_transfers_sink_cleanup_ownership()
 			return assert(inst:commit_worker(scope))
 		end)
 		assert_eq(st, 'ok')
+		assert_eq(result.artifact_ref, 'artifact-1')
 		assert_eq(result.artifact.ref, 'artifact-1')
 	end)
 	assert_true(sink.committed)
+	assert_eq(sink.terminated, 0)
+end
+
+function tests.test_ingest_commit_accepts_boolean_artifact_store_reply_tuple()
+	local artifact = { ref = 'artifact-tuple' }
+	local sink = { terminated = 0 }
+	function sink:commit_op()
+		return op.always(true, artifact)
+	end
+	function sink:terminate(reason)
+		self.terminated = self.terminated + 1
+		self.reason = reason
+		return true, nil
+	end
+
+	fibers.run(function ()
+		local st, _, result = fibers.run_scope(function (scope)
+			local inst = assert(ingest.new_instance(scope, {
+				ingest_id = 'i-tuple',
+				component = 'mcu',
+				sink = sink,
+			}))
+			assert(inst:begin_commit())
+			return assert(inst:commit_worker(scope))
+		end)
+		assert_eq(st, 'ok')
+		assert_eq(result.artifact_ref, 'artifact-tuple')
+		assert_eq(result.artifact.ref, 'artifact-tuple')
+	end)
 	assert_eq(sink.terminated, 0)
 end
 
@@ -284,6 +314,7 @@ function tests.test_ingest_commit_construction_does_not_mutate_instance_state()
 			assert_eq(ok_begin, true)
 			assert_eq(inst.state, 'committing')
 			local result = assert(inst:commit_worker(scope))
+			assert_eq(result.artifact_ref, 'artifact-constructed')
 			assert_eq(result.artifact.ref, 'artifact-constructed')
 		end)
 	end)

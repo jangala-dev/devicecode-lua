@@ -4,15 +4,37 @@
 -- policy in the update service while delegating target-specific prepare, stage,
 -- and commit work to cap/component/<id>/rpc/*.
 
-local op = require 'fibers.op'
+local fibers = require 'fibers'
+local op     = require 'fibers.op'
+local sleep  = require 'fibers.sleep'
 
 local device_topics = require 'services.device.topics'
 local model         = require 'services.update.model'
 
 local M = {}
 
+local DEFAULT_COMMIT_SETTLE_S = 0.5
+
 local Backend = {}
 Backend.__index = Backend
+
+local function topic_string(topic)
+	if type(topic) ~= 'table' then return tostring(topic) end
+	local out = {}
+	for i = 1, #topic do out[i] = tostring(topic[i]) end
+	return table.concat(out, '/')
+end
+
+local function log_event(self, level, fields)
+	local fn = self and self._log
+	if type(fn) ~= 'function' then return true, nil end
+	local payload = {}
+	for k, v in pairs(fields or {}) do payload[k] = v end
+	payload.component = payload.component or 'update_device_backend'
+	local ok, err = pcall(fn, level or 'debug', payload)
+	if ok then return true, nil end
+	return nil, err
+end
 
 local function call_timeout(self, ctx, key, fallback)
 	if ctx and type(ctx.timeout) == 'number' then return ctx.timeout end
@@ -36,11 +58,65 @@ local function component_call_op(self, job, method, payload, timeout)
 		return op.always(nil, 'update backend job component required')
 	end
 
+	local topic = device_topics.component_cap_rpc(job.component, method)
+	log_event(self, 'info', {
+		what = 'update_device_backend_call_begin',
+		job_id = job.job_id,
+		component_id = job.component,
+		method = method,
+		topic = topic_string(topic),
+		timeout = timeout,
+		artifact_ref = payload and payload.artifact_ref or nil,
+		expected_image_id = payload and payload.expected_image_id or nil,
+	})
 	return self._conn:call_op(
-		device_topics.component_cap_rpc(job.component, method),
+		topic,
 		payload or {},
 		{ timeout = timeout }
-	):wrap(normalise_action_reply)
+	):wrap(function (reply, err)
+		local result, norm_err = normalise_action_reply(reply, err)
+		if result == nil then
+			log_event(self, 'warn', {
+				what = 'update_device_backend_call_failed',
+				job_id = job.job_id,
+				component_id = job.component,
+				method = method,
+				topic = topic_string(topic),
+				err = norm_err,
+			})
+			return nil, norm_err
+		end
+		log_event(self, 'info', {
+			what = 'update_device_backend_call_ok',
+			job_id = job.job_id,
+			component_id = job.component,
+			method = method,
+			topic = topic_string(topic),
+		})
+		return result, nil
+	end)
+end
+
+local function commit_settle_s(self, ctx)
+	if ctx and type(ctx.commit_settle_s) == 'number' then return ctx.commit_settle_s end
+	if type(self.commit_settle_s) == 'number' then return self.commit_settle_s end
+	return DEFAULT_COMMIT_SETTLE_S
+end
+
+local function settled_component_call_op(self, job, method, payload, timeout, settle_s)
+	if settle_s == nil or settle_s <= 0 then
+		return component_call_op(self, job, method, payload, timeout)
+	end
+
+	return fibers.run_scope_op(function ()
+		fibers.perform(sleep.sleep_op(settle_s))
+		return fibers.perform(component_call_op(self, job, method, payload, timeout))
+	end):wrap(function (st, rep, reply, err)
+		if st ~= 'ok' then
+			return nil, tostring(err or rep or st)
+		end
+		return reply, err
+	end)
 end
 
 local function base_payload(job, ctx)
@@ -64,6 +140,76 @@ local function image_id_for(job)
 	local metadata = job.metadata
 	if type(metadata) == 'table' then return metadata.image_id end
 	return nil
+end
+
+local function component_state_for(job, ctx)
+	if type(ctx) ~= 'table' then return nil end
+	if type(ctx.component_state) == 'table' then return ctx.component_state end
+	local snapshot = ctx.snapshot
+	if type(job) ~= 'table' or type(job.component) ~= 'string' then return nil end
+	if type(snapshot) ~= 'table' then return nil end
+	if type(snapshot.components) == 'table' then return snapshot.components[job.component] end
+	if type(snapshot.by_id) == 'table' then
+		local rec = snapshot.by_id[job.component]
+		if type(rec) == 'table' then return rec.state or rec end
+	end
+	return nil
+end
+
+local function legacy_streamed_commit_image_id(self, job, ctx, payload)
+	if type(payload) ~= 'table' then return nil end
+	local expected = payload.expected_image_id
+	if type(expected) ~= 'string' or expected == '' then return nil end
+
+	local metadata = type(job) == 'table' and job.metadata or nil
+	if type(metadata) ~= 'table' or metadata.image_id ~= expected then return nil end
+	local explicit = metadata.compat_commit_image_id
+	if type(explicit) == 'string' and explicit ~= '' and explicit ~= expected then
+		log_event(self, 'warn', {
+			what = 'update_device_backend_explicit_compat_commit_image_id',
+			job_id = job and job.job_id or nil,
+			component_id = job and job.component or nil,
+			expected_image_id = expected,
+			commit_expected_image_id = explicit,
+		})
+		return explicit
+	end
+
+	local observed = component_state_for(job, ctx)
+	local sw = type(observed) == 'table' and observed.software or nil
+	local upd = type(observed) == 'table' and observed.updater or nil
+	if type(upd) ~= 'table' or upd.state ~= 'staged' then return nil end
+	if upd.pending_image_id ~= expected then return nil end
+
+	local staged = upd.staged_image_id
+	if type(staged) ~= 'string' or staged == '' or staged == expected then return nil end
+
+	local running = type(sw) == 'table' and sw.image_id or nil
+	if type(running) == 'string' and running ~= '' and running ~= staged then return nil end
+
+	log_event(self, 'warn', {
+		what = 'update_device_backend_legacy_streamed_identity_commit',
+		job_id = job and job.job_id or nil,
+		component_id = job and job.component or nil,
+		expected_image_id = expected,
+		commit_expected_image_id = staged,
+		pending_image_id = upd.pending_image_id,
+		staged_image_id = staged,
+		running_image_id = running,
+	})
+	return staged
+end
+
+local function commit_payload(self, job, ctx)
+	local payload = base_payload(job, ctx)
+	local commit_image_id = legacy_streamed_commit_image_id(self, job, ctx, payload)
+	if commit_image_id ~= nil then
+		payload.metadata = model.deep_copy(payload.metadata or {})
+		payload.metadata.original_expected_image_id = payload.expected_image_id
+		payload.metadata.compat_commit_expected_image_id = commit_image_id
+		payload.expected_image_id = commit_image_id
+	end
+	return payload
 end
 
 local function success_phase(phase)
@@ -182,7 +328,7 @@ function Backend:stage_op(job, ctx)
 		job,
 		'stage-update',
 		base_payload(job, ctx),
-		call_timeout(self, ctx, 'timeout_stage', 300.0)
+		call_timeout(self, ctx, 'timeout_stage', 900.0)
 	)
 end
 
@@ -191,23 +337,20 @@ function Backend:commit_capabilities()
 end
 
 function Backend:commit_op(job, ctx)
-	return component_call_op(
+	return settled_component_call_op(
 		self,
 		job,
 		'commit-update',
-		base_payload(job, ctx),
-		call_timeout(self, ctx, 'timeout_commit', 60.0)
+		commit_payload(self, job, ctx),
+		call_timeout(self, ctx, 'timeout_commit', 60.0),
+		commit_settle_s(self, ctx)
 	)
 end
 
 function Backend:evaluate_reconcile(job, snapshot, ctx)
-	local observed
-	if type(snapshot) == 'table'
-		and type(snapshot.components) == 'table'
-		and type(job) == 'table'
-	then
-		observed = snapshot.components[job.component]
-	end
+	local observed = component_state_for(job, {
+		snapshot = snapshot,
+	})
 
 	local opts = ctx or {}
 	local metadata = type(job) == 'table' and job.metadata or nil
@@ -226,6 +369,8 @@ function M.new(opts)
 		timeout_prepare = opts.timeout_prepare,
 		timeout_stage = opts.timeout_stage,
 		timeout_commit = opts.timeout_commit,
+		commit_settle_s = opts.commit_settle_s,
+		_log = opts.log,
 	}, Backend)
 end
 

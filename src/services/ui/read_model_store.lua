@@ -284,6 +284,24 @@ local function each_candidate_key_unsorted(self, pattern, fn)
 	return true
 end
 
+function Store:count(pattern)
+	if pattern == nil then
+		local n = 0
+		for _ in pairs(self._items) do n = n + 1 end
+		return n
+	end
+
+	local n = 0
+	each_candidate_key_unsorted(self, pattern, function (key)
+		local msg = self._items[key]
+		if msg and match_topic(pattern, msg.topic, self._s_wild, self._m_wild) then
+			n = n + 1
+		end
+		return true
+	end)
+	return n
+end
+
 function Store:query_limited(pattern, limit)
 	if limit ~= false and limit ~= nil then
 		if type(limit) ~= 'number' or limit < 0 or limit % 1 ~= 0 then
@@ -342,6 +360,31 @@ function Store:changed_op(seen)
 				return nil, nil, tostring(self._close_reason or 'closed')
 			end
 			return self._version, self:snapshot(), nil
+		end)
+	end)
+end
+
+--- Wait until version > seen, returning only the version.
+---
+--- This is for service coordinators that only need to know that the model
+--- changed. It avoids deep-copying the complete retained projection on every
+--- retained-state tick.
+function Store:changed_version_op(seen)
+	assert_seen(seen, 2)
+
+	return op.guard(function ()
+		if self._closed then
+			return op.always(nil, tostring(self._close_reason or 'closed'))
+		end
+		if self._version > seen then
+			return op.always(self._version, nil)
+		end
+		local c = self._changed
+		return c:wait_op():wrap(function ()
+			if self._closed then
+				return nil, tostring(self._close_reason or 'closed')
+			end
+			return self._version, nil
 		end)
 	end)
 end

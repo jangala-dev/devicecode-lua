@@ -60,9 +60,21 @@ function tests.test_fabric_stage_receiver_requires_raw_cap_rpc_topic()
 	end
 
 	cfg.components.mcu.actions['stage-update'].receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage')
+	cfg.components.mcu.actions['stage-update'].target = 'updater/main'
 	cat, err = config.to_catalogue(cfg)
 	assert_nil(err)
 	assert_not_nil(cat.components.mcu.actions['stage-update'])
+	assert_eq(cat.components.mcu.actions['stage-update'].target, 'updater/main')
+end
+
+function tests.test_default_mcu_update_actions_match_current_wire_contract()
+	local cat, err = config.to_catalogue({ schema = config.SCHEMA })
+	assert_nil(err)
+	local actions = cat.components.mcu.actions
+	assert_eq(table.concat(actions['prepare-update'].call_topic, '/'), 'raw/member/mcu/cmd/self/updater/prepare')
+	assert_eq(actions['stage-update'].target, 'updater/main')
+	assert_eq(actions['stage-update'].timeout, 900.0)
+	assert_eq(table.concat(actions['commit-update'].call_topic, '/'), 'raw/member/mcu/cmd/self/updater/commit')
 end
 
 function tests.test_catalogue_material_comparison_is_stable_for_copies()

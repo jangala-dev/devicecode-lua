@@ -68,10 +68,22 @@ function M.decode(ctx)
 	end
 
 	if parts[2] == 'fabric' and method == 'GET' then
+		if parts[3] == 'link' and parts[4] ~= nil then
+			return { kind = 'read', query = 'fabric_link', link_id = parts[4] }
+		end
 		return { kind = 'read', query = 'fabric' }
 	end
 
-	if parts[2] == 'update' and parts[3] == 'upload' and method == 'POST' then
+	if parts[2] == 'update' and parts[3] == 'jobs' and parts[4] ~= nil then
+		if method == 'GET' and parts[5] == nil then
+			return { kind = 'read', query = 'update_job', job_id = parts[4] }
+		end
+		if method == 'POST' and parts[5] == 'do' then
+			return { kind = 'update_job_action', job_id = parts[4] }
+		end
+	end
+
+	if parts[2] == 'update' and (parts[3] == 'upload' or parts[3] == 'uploads') and method == 'POST' then
 		return { kind = 'upload' }
 	end
 

@@ -2,6 +2,7 @@
 
 local fibers = require 'fibers'
 local op = require 'fibers.op'
+local sleep = require 'fibers.sleep'
 
 local backend_mod = require 'services.update.backends.device_component'
 
@@ -21,7 +22,7 @@ function tests.test_stage_delegates_to_device_component_action()
 			call_op = function (_, topic, payload, opts)
 				captured_topic = topic
 				captured_payload = payload
-				assert_eq(opts.timeout, 300.0)
+				assert_eq(opts.timeout, 900.0)
 				return op.always({ ok = true, staged = true }, nil)
 			end,
 		}
@@ -37,6 +38,132 @@ function tests.test_stage_delegates_to_device_component_action()
 		assert_eq(table.concat(captured_topic, '/'), 'cap/component/mcu/rpc/stage-update')
 		assert_eq(captured_payload.artifact_ref, 'artifact-1')
 		assert_eq(captured_payload.metadata.transfer_chunk_raw, 4096)
+	end)
+end
+
+function tests.test_commit_can_use_explicit_compat_image_id_for_bootstrap()
+	fibers.run(function ()
+		local captured_topic
+		local captured_payload
+		local logged = {}
+		local conn = {
+			call_op = function (_, topic, payload, opts)
+				captured_topic = topic
+				captured_payload = payload
+				assert_eq(opts.timeout, 60.0)
+				return op.always({ ok = true, accepted = true }, nil)
+			end,
+		}
+		local backend = backend_mod.new({
+			conn = conn,
+			commit_settle_s = 0,
+			log = function (_level, fields) logged[#logged + 1] = fields end,
+		})
+		local result, err = fibers.perform(backend:commit_op({
+			job_id = 'job-1',
+			component = 'mcu',
+			expected_image_id = 'mcu-dev-13.0',
+			metadata = {
+				image_id = 'mcu-dev-13.0',
+				compat_commit_image_id = 'img-dev',
+			},
+		}, {}))
+
+		assert_not_nil(result, err)
+		assert_eq(table.concat(captured_topic, '/'), 'cap/component/mcu/rpc/commit-update')
+		assert_eq(captured_payload.expected_image_id, 'img-dev')
+		assert_eq(captured_payload.metadata.image_id, 'mcu-dev-13.0')
+		assert_eq(captured_payload.metadata.original_expected_image_id, 'mcu-dev-13.0')
+		assert_eq(captured_payload.metadata.compat_commit_expected_image_id, 'img-dev')
+		assert_eq(logged[1].what, 'update_device_backend_explicit_compat_commit_image_id')
+	end)
+end
+
+function tests.test_commit_can_use_observed_legacy_streamed_identity()
+	fibers.run(function ()
+		local captured_payload
+		local conn = {
+			call_op = function (_, _topic, payload)
+				captured_payload = payload
+				return op.always({ ok = true, accepted = true }, nil)
+			end,
+		}
+		local backend = backend_mod.new({ conn = conn, commit_settle_s = 0 })
+		local result, err = fibers.perform(backend:commit_op({
+			job_id = 'job-1',
+			component = 'mcu',
+			expected_image_id = 'mcu-dev-13.0',
+			metadata = { image_id = 'mcu-dev-13.0' },
+		}, {
+			component_state = {
+				software = { image_id = 'img-dev' },
+				updater = {
+					state = 'staged',
+					pending_image_id = 'mcu-dev-13.0',
+					staged_image_id = 'img-dev',
+				},
+			},
+		}))
+
+		assert_not_nil(result, err)
+		assert_eq(captured_payload.expected_image_id, 'img-dev')
+		assert_eq(captured_payload.metadata.original_expected_image_id, 'mcu-dev-13.0')
+	end)
+end
+
+function tests.test_commit_keeps_expected_image_without_compat_signal()
+	fibers.run(function ()
+		local captured_payload
+		local conn = {
+			call_op = function (_, _topic, payload)
+				captured_payload = payload
+				return op.always({ ok = true, accepted = true }, nil)
+			end,
+		}
+		local backend = backend_mod.new({ conn = conn, commit_settle_s = 0 })
+		local result, err = fibers.perform(backend:commit_op({
+			job_id = 'job-1',
+			component = 'mcu',
+			expected_image_id = 'mcu-dev-13.0',
+			metadata = { image_id = 'mcu-dev-13.0' },
+		}, {}))
+
+		assert_not_nil(result, err)
+		assert_eq(captured_payload.expected_image_id, 'mcu-dev-13.0')
+		assert_eq(captured_payload.metadata.original_expected_image_id, nil)
+	end)
+end
+
+function tests.test_commit_settle_delays_component_call()
+	fibers.run(function (scope)
+		local calls = 0
+		local done = false
+		local done_err
+		local conn = {
+			call_op = function ()
+				calls = calls + 1
+				return op.always({ ok = true, accepted = true }, nil)
+			end,
+		}
+		local backend = backend_mod.new({ conn = conn, commit_settle_s = 0.02 })
+
+		local ok, spawn_err = scope:spawn(function ()
+			local result, err = fibers.perform(backend:commit_op({
+				job_id = 'job-1',
+				component = 'mcu',
+			}, {}))
+			done_err = err
+			done = result ~= nil
+		end)
+		assert_eq(ok, true, spawn_err)
+
+		fibers.perform(sleep.sleep_op(0.005))
+		assert_eq(calls, 0)
+		assert_eq(done, false)
+
+		fibers.perform(sleep.sleep_op(0.05))
+		assert_eq(calls, 1)
+		assert_eq(done, true, done_err)
 	end)
 end
 
@@ -113,6 +240,28 @@ function tests.test_reconcile_succeeds_when_expected_image_matches()
 	assert_eq(result.result.image_id, 'image-new')
 	assert_eq(result.result.boot_changed, true)
 	assert_eq(result.result.phase, 'running')
+end
+
+function tests.test_reconcile_accepts_active_observer_by_id_snapshot()
+	local backend = backend_mod.new()
+	local result = backend:evaluate_reconcile({
+		job_id = 'job-1',
+		component = 'mcu',
+		expected_image_id = 'image-new',
+	}, {
+		by_id = {
+			mcu = {
+				state = {
+					software = { image_id = 'image-new' },
+					updater = { state = 'running' },
+				},
+			},
+		},
+	}, {})
+
+	assert_eq(result.done, true)
+	assert_eq(result.ok, true)
+	assert_eq(result.result.image_id, 'image-new')
 end
 
 return tests

@@ -22,6 +22,16 @@ local service_events = require 'devicecode.support.service_events'
 local M = {}
 local perform = fibers.perform
 
+local DEFAULT_MAX_EVENT_LOG = 256
+local EVENT_LOG_OMIT = {
+	req = true,
+	owner = true,
+	ctx = true,
+	websocket = true,
+	result = true,
+	report = true,
+}
+
 local function normalise_initial_config(opts)
 	local raw = opts.config
 	if raw == nil then raw = { id = opts.id, policy = opts.policy } end
@@ -42,7 +52,7 @@ end
 local function copy_event(ev)
 	local out = {}
 	for k, v in pairs(ev or {}) do
-		if k ~= 'req' and k ~= 'owner' and k ~= 'ctx' and k ~= 'websocket' then out[k] = v end
+		if not EVENT_LOG_OMIT[k] then out[k] = v end
 	end
 	return out
 end
@@ -79,6 +89,12 @@ local function count_where(t, pred)
 	return n
 end
 
+local function count_table(t)
+	local n = 0
+	for _ in pairs(t or {}) do n = n + 1 end
+	return n
+end
+
 function HttpService:_derive_snapshot()
 	local st = self._state
 	return {
@@ -86,16 +102,18 @@ function HttpService:_derive_snapshot()
 		backend = st.backend,
 		ready = st.ready,
 		active_listeners = count_where(st.listeners, is_live_handle),
-		active_contexts = count_where(st.contexts, function (rec) return rec.state ~= 'terminated' end),
+		active_contexts = count_table(st.contexts),
 		active_exchanges = count_where(st.exchanges, is_live_handle),
 		active_websockets = count_where(st.websockets, is_live_handle),
-		completed_exchanges = count_where(st.operations, function (rec)
-			return rec.operation == 'exchange' and rec.state == 'completed' and rec.status == 'ok'
-		end),
-		failed_exchanges = count_where(st.operations, function (rec)
-			return rec.operation == 'exchange' and rec.state == 'completed' and rec.status ~= 'ok'
-		end),
-		rejected_requests = count_where(st.requests, function (rec) return rec.state == 'rejected' end),
+		completed_exchanges = st.completed_exchanges or 0,
+		failed_exchanges = st.failed_exchanges or 0,
+		rejected_requests = st.rejected_requests or 0,
+		tracked_requests = count_table(st.requests),
+		tracked_operations = count_table(st.operations),
+		tracked_contexts = count_table(st.contexts),
+		tracked_listeners = count_table(st.listeners),
+		tracked_exchanges = count_table(st.exchanges),
+		tracked_websockets = count_table(st.websockets),
 		last_error = st.last_error,
 		policy_generation = st.policy_generation,
 	}
@@ -125,7 +143,11 @@ function HttpService:_log_event(ev)
 	self._event_seq = self._event_seq + 1
 	local saved = copy_event(ev)
 	saved.seq = self._event_seq
-	self._events[#self._events + 1] = saved
+	local max_events = self._max_event_log
+	if max_events ~= false and max_events ~= 0 then
+		self._events[#self._events + 1] = saved
+		while #self._events > max_events do table.remove(self._events, 1) end
+	end
 	return true
 end
 
@@ -220,6 +242,9 @@ function HttpService:_finish_request(request_id, state, reason)
 		rec.reason = reason
 	end
 	self._owned_requests[request_id] = nil
+	if state == nil or state == 'resolved' or state == 'cancelled' or state == 'failed' then
+		self._state.requests[request_id] = nil
+	end
 	return true
 end
 
@@ -230,9 +255,11 @@ function HttpService:_reject_request(request_id, owner, reason)
 		rec.state = 'rejected'
 		rec.reason = reason or 'invalid_args'
 	end
+	self._state.rejected_requests = (self._state.rejected_requests or 0) + 1
 	self._state.last_error = reason or 'invalid_args'
 	self:_log_event { kind = 'cap_request_rejected', request_id = request_id, reason = reason or 'invalid_args' }
 	self._owned_requests[request_id] = nil
+	self._state.requests[request_id] = nil
 	return true
 end
 
@@ -343,12 +370,7 @@ function HttpService:_record_handle_event(ev)
 			rec.owner = 'caller_after_handoff'
 		end
 	elseif kind == hkind .. '_terminated' then
-		if not rec then
-			tbl[id] = { handle_id = id, generation = generation, kind = hkind, state = 'terminated', reason = ev.reason }
-		elseif rec.state ~= 'terminated' then
-			rec.state = 'terminated'
-			rec.reason = ev.reason
-		end
+		tbl[id] = nil
 	end
 	return true
 end
@@ -400,18 +422,7 @@ function HttpService:_record_context_event(ev)
 			rec.owner = 'caller_after_handoff'
 		end
 	elseif ev.kind == 'context_terminated' then
-		if not rec then
-			self._state.contexts[id] = {
-				context_id = context_id,
-				listener_id = ev.listener_id,
-				generation = generation,
-				state = 'terminated',
-				reason = ev.reason,
-			}
-		elseif rec.state ~= 'terminated' then
-			rec.state = 'terminated'
-			rec.reason = ev.reason
-		end
+		self._state.contexts[id] = nil
 	end
 	return true
 end
@@ -465,10 +476,18 @@ function HttpService:_handle_operation_done(ev)
 	rec.report = ev.report
 	rec.result = ev.result
 	rec.primary = ev.primary
+	if rec.operation == 'exchange' then
+		if ev.status == 'ok' then
+			self._state.completed_exchanges = (self._state.completed_exchanges or 0) + 1
+		else
+			self._state.failed_exchanges = (self._state.failed_exchanges or 0) + 1
+		end
+	end
 	if ev.status ~= 'ok' then self._state.last_error = ev.primary or ev.status end
 
-	local owner = self._owned_requests[rec.request_id]
-	local reqrec = self._state.requests[rec.request_id]
+	local request_id = rec.request_id
+	local owner = request_id ~= nil and self._owned_requests[request_id] or nil
+	local reqrec = request_id ~= nil and self._state.requests[request_id] or nil
 	if ev.status == 'ok' then
 		local reply = ev.result or {}
 		local ok, rerr = true, nil
@@ -487,7 +506,11 @@ function HttpService:_handle_operation_done(ev)
 		if owner and not owner:done() then owner:fail_once(ev.primary or ev.status or 'operation_failed') end
 		if reqrec then reqrec.state = ev.status or 'failed'; reqrec.reason = ev.primary end
 	end
-	self._owned_requests[rec.request_id] = nil
+	if request_id ~= nil then
+		self._owned_requests[request_id] = nil
+		self._state.requests[request_id] = nil
+	end
+	self._state.operations[ev.operation_id] = nil
 	self:_log_event(ev)
 	return true
 end
@@ -687,6 +710,8 @@ function M.start(conn, opts)
 	opts.policy = initial_config.policy
 	local model = model_mod.new()
 	local event_tx, event_rx = mailbox.new(opts.event_queue_len or 64, { full = 'reject_newest' })
+	local max_event_log = opts.max_event_log
+	if max_event_log == nil then max_event_log = DEFAULT_MAX_EVENT_LOG end
 	local self = setmetatable({
 		_conn = conn,
 		_scope = scope,
@@ -705,6 +730,7 @@ function M.start(conn, opts)
 		_closed = false,
 		_events = {},
 		_event_seq = 0,
+		_max_event_log = max_event_log,
 		_owned_requests = {},
 		_state = {
 			service_state = 'starting',
@@ -716,6 +742,9 @@ function M.start(conn, opts)
 			config = initial_config,
 			requests = {},
 			operations = {},
+			completed_exchanges = 0,
+			failed_exchanges = 0,
+			rejected_requests = 0,
 			listeners = {},
 			contexts = {},
 			exchanges = {},

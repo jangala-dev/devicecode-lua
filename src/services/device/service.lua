@@ -41,6 +41,25 @@ local function topic_string(t)
 	return table.concat(out, '/')
 end
 
+local function make_service_log(svc)
+	if type(svc) ~= 'table' or type(svc.obs_log) ~= 'function' then
+		return nil
+	end
+	return function (level, fields)
+		return svc:obs_log(level or 'debug', fields or {})
+	end
+end
+
+local function log_event(log, level, fields)
+	if type(log) ~= 'function' then return true, nil end
+	local payload = {}
+	for k, v in pairs(fields or {}) do payload[k] = v end
+	payload.component = payload.component or 'device_service'
+	local ok, err = pcall(log, level or 'debug', payload)
+	if ok then return true, nil end
+	return nil, err
+end
+
 local function source_desc(source)
 	if type(source) ~= 'table' then return {} end
 	if type(source._artifact_desc) == 'table' then return source._artifact_desc end
@@ -51,7 +70,7 @@ local function source_desc(source)
 	return {}
 end
 
-local function default_transfer_client(conn)
+local function default_transfer_client(conn, log)
 	if type(conn) ~= 'table' or type(conn.call_op) ~= 'function' then
 		return nil
 	end
@@ -69,20 +88,47 @@ local function default_transfer_client(conn)
 			local size = meta.size or request.size or source_size or desc.size
 			local digest = meta.digest or request.digest or source_digest or desc.checksum
 			local digest_alg = meta.digest_alg or request.digest_alg or source_digest_alg or fabric_protocol.DIGEST_ALG
+			local timeout_s = opts.timeout_s or meta.timeout_s or request.timeout_s or opts.timeout
 
 			if type(target) ~= 'string' or target == '' then
+				log_event(log, 'warn', {
+					what = 'device_transfer_client_rejected',
+					err = 'transfer_target_required',
+				})
 				return op.always(nil, 'transfer_target_required')
 			end
 			if type(size) ~= 'number' or size < 0 or size % 1 ~= 0 then
+				log_event(log, 'warn', {
+					what = 'device_transfer_client_rejected',
+					err = 'artifact_size_required',
+					target = target,
+				})
 				return op.always(nil, 'artifact_size_required')
 			end
 			if digest_alg ~= fabric_protocol.DIGEST_ALG
 				or type(digest) ~= 'string'
 				or not fabric_protocol.digest_ok(digest)
 			then
+				log_event(log, 'warn', {
+					what = 'device_transfer_client_rejected',
+					err = 'artifact_digest_required',
+					target = target,
+					size = size,
+				})
 				return op.always(nil, 'artifact_digest_required')
 			end
 
+			log_event(log, 'info', {
+				what = 'device_transfer_client_call_begin',
+				target = target,
+				link_id = meta.link_id,
+				size = size,
+				digest_alg = digest_alg,
+				timeout_s = timeout_s,
+				version = meta.version,
+				build = meta.build or meta.build_id,
+				image_id = meta.image_id,
+			})
 			return conn:call_op(fabric_topics.transfer_manager_rpc('send-blob'), {
 				source = source,
 				link_id = meta.link_id,
@@ -91,6 +137,7 @@ local function default_transfer_client(conn)
 				size = size,
 				digest_alg = digest_alg,
 				digest = digest,
+				timeout_s = timeout_s,
 				meta = meta,
 				receiver = meta.receiver,
 				chunk_size = opts.chunk_size or meta.chunk_size,
@@ -98,11 +145,31 @@ local function default_transfer_client(conn)
 				timeout = opts.timeout,
 				deadline = opts.deadline,
 			}):wrap(function (reply, err)
-				if reply == nil then return nil, err end
+				if reply == nil then
+					log_event(log, 'warn', {
+						what = 'device_transfer_client_call_failed',
+						target = target,
+						link_id = meta.link_id,
+						err = err,
+					})
+					return nil, err
+				end
 				if type(reply) == 'table' and reply.ok == false then
-					return nil, reply.err or reply.error or reply.reason or 'transfer_failed'
+					local reason = reply.err or reply.error or reply.reason or 'transfer_failed'
+					log_event(log, 'warn', {
+						what = 'device_transfer_client_call_failed',
+						target = target,
+						link_id = meta.link_id,
+						err = reason,
+					})
+					return nil, reason
 				end
 				local result = type(reply) == 'table' and (reply.result or reply) or reply
+				log_event(log, 'info', {
+					what = 'device_transfer_client_call_ok',
+					target = target,
+					link_id = meta.link_id,
+				})
 				return {
 					ok = true,
 					transfer = result,
@@ -357,7 +424,10 @@ local function start_generation(state, catalogue)
 		})
 		if ok_bind ~= true then
 			local ok_rb, rb_err = rollback_generation_start(state, active, 'action_bind_failed')
-			if ok_rb ~= true then return nil, tostring(bind_err or 'action_bind_failed') .. '; rollback failed: ' .. tostring(rb_err) end
+			if ok_rb ~= true then
+				return nil, tostring(bind_err or 'action_bind_failed')
+					.. '; rollback failed: ' .. tostring(rb_err)
+			end
 			return nil, bind_err or 'action_bind_failed'
 		end
 	end
@@ -373,7 +443,10 @@ local function start_generation(state, catalogue)
 		})
 		if ok_obs ~= true then
 			local ok_rb, rb_err = rollback_generation_start(state, active, 'observer_start_failed')
-			if ok_rb ~= true then return nil, tostring(obs_err or 'observer_start_failed') .. '; rollback failed: ' .. tostring(rb_err) end
+			if ok_rb ~= true then
+				return nil, tostring(obs_err or 'observer_start_failed')
+					.. '; rollback failed: ' .. tostring(rb_err)
+			end
 			return nil, obs_err or 'observer_start_failed'
 		end
 	end
@@ -815,8 +888,14 @@ end
 local function build_state(scope, params)
 	params = params or {}
 	local service_id = params.service_id or new_service_id()
-	local done_tx, done_rx = mailbox.new(params.done_queue_len or DEFAULT_DONE_QUEUE, { full = backpressure.policy.completions.full })
-	local obs_tx, obs_rx = mailbox.new(params.observation_queue_len or DEFAULT_OBSERVATION_QUEUE, { full = backpressure.policy.observations.full })
+	local done_tx, done_rx = mailbox.new(
+		params.done_queue_len or DEFAULT_DONE_QUEUE,
+		{ full = backpressure.policy.completions.full }
+	)
+	local obs_tx, obs_rx = mailbox.new(
+		params.observation_queue_len or DEFAULT_OBSERVATION_QUEUE,
+		{ full = backpressure.policy.observations.full }
+	)
 
 	local state = {
 		scope = scope,
@@ -856,7 +935,8 @@ local function build_state(scope, params)
 		auto_publish = params.auto_publish,
 		emit_events = params.emit_events,
 		fabric_client = params.fabric_client,
-		transfer_client = params.transfer_client or default_transfer_client(params.conn),
+		log = params.log,
+		transfer_client = params.transfer_client or default_transfer_client(params.conn, params.log),
 		open_source = params.open_source,
 		open_source_op = params.open_source_op,
 		terminate_source = params.terminate_source,
@@ -980,6 +1060,7 @@ function M.start(conn, opts)
 		terminate_source = opts.terminate_source,
 		now = opts.now,
 		lifecycle = svc,
+		log = opts.log or make_service_log(svc),
 	})
 end
 

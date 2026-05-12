@@ -1,10 +1,10 @@
 -- services/http.lua
 -- Public entry point for the HTTP capability service.
 
+local fibers = require 'fibers'
 local service = require 'services.http.service'
 
-return {
-	start = service.start,
+local M = {
 	service = service,
 	sdk = require 'services.http.sdk',
 	headers = require 'services.http.headers',
@@ -17,3 +17,11 @@ return {
 	body = require 'services.http.body',
 	topics = require 'services.http.topics',
 }
+
+function M.start(conn, opts)
+	local instance, err = service.start(conn, opts)
+	if not instance then error(err or 'http service start failed', 0) end
+	fibers.perform(fibers.never())
+end
+
+return M

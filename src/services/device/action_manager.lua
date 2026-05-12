@@ -142,7 +142,7 @@ end
 
 function M.endpoint_sources(active)
 	local sources = {}
-	for key, rec in pairs((active and active.action_eps) or {}) do
+	for _, rec in pairs((active and active.action_eps) or {}) do
 		sources[#sources + 1] = rec
 	end
 	table.sort(sources, function (a, b) return tostring(a.key) < tostring(b.key) end)
@@ -229,9 +229,14 @@ function M.start_action(state, req, rec)
 				open_source = state.open_source,
 				open_source_op = state.open_source_op,
 				terminate_source = state.terminate_source,
+				log = state.log,
 			})
 		end,
-		report = completion_reporter(state, action_identity(active.generation, rec.component, rec.action, request_id), 'device_action_done_report_failed'),
+		report = completion_reporter(
+			state,
+			action_identity(active.generation, rec.component, rec.action, request_id),
+			'device_action_done_report_failed'
+		),
 	}
 
 	if not handle then

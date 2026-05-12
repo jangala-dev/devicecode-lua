@@ -1,6 +1,7 @@
 local fibers = require 'fibers'
 local mailbox = require 'fibers.mailbox'
 local op = require 'fibers.op'
+local sleep = require 'fibers.sleep'
 local active = require 'services.update.active_runtime'
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
@@ -107,6 +108,81 @@ function tests.test_component_stores_completion_before_reporting_to_service()
     assert_nil(component:state().active)
     component:cancel('test complete')
   end)
+end
+
+function tests.test_component_observer_feeds_commit_context_from_retained_device_state()
+	fibers.run(function (scope)
+		local watch_tx, watch_rx = mailbox.new(8, { full = 'reject_newest' })
+		local service_tx, service_rx = mailbox.new(8, { full = 'reject_newest' })
+		local fake_jobs = {
+			admit_transition = function (_, cmd)
+				return transition_handle({
+					status = 'persisted',
+					commit_token = cmd.commit_token,
+					commit_policy = cmd.commit_policy,
+				}), nil
+			end,
+		}
+		local conn = {
+			watch_retained = function ()
+				return {
+					recv_op = function () return watch_rx:recv_op() end,
+				}
+			end,
+			unwatch_retained = function ()
+				watch_tx:close('unwatched')
+				return true
+			end,
+		}
+		local seen_image
+		local backend = {
+			commit_capabilities = function () return { policy = 'idempotent_by_token' } end,
+			commit_op = function (_, _job, ctx)
+				seen_image = ctx.component_state
+					and ctx.component_state.software
+					and ctx.component_state.software.image_id
+				return op.always({ accepted = true }, nil)
+			end,
+		}
+		local component = assert(active.start_component(scope, {
+			service_id = 'update',
+			done_tx = service_tx,
+			work_scope = scope,
+			jobs = fake_jobs,
+			conn = conn,
+			backend = backend,
+		}))
+
+		assert_true(watch_tx:send({
+			op = 'retain',
+			topic = { 'state', 'device', 'component', 'mcu' },
+			payload = {
+				software = { image_id = 'img-dev' },
+				updater = { state = 'staged' },
+			},
+		}))
+		for _ = 1, 10 do
+			local snap = component._observer:snapshot()
+			local rec = snap.by_id and snap.by_id.mcu
+			if rec and rec.state and rec.state.software and rec.state.software.image_id == 'img-dev' then
+				break
+			end
+			fibers.perform(sleep.sleep_op(0.01))
+		end
+
+		local lease = assert(component:claim({ job_id = 'j1', generation = 1, phase = 'commit' }))
+		assert(component:start_work({
+			lease = lease,
+			job = { job_id = 'j1', component = 'mcu', active_token = lease.token },
+			backend = backend,
+		}))
+
+		local completed = fibers.perform(service_rx:recv_op())
+		assert_eq(completed.kind, 'active_runtime_changed')
+		assert_eq(completed.reason, 'active_job_completed')
+		assert_eq(seen_image, 'img-dev')
+		component:cancel('test complete')
+	end)
 end
 
 function tests.test_component_apply_start_failure_keeps_stored_completion_and_fails_component()

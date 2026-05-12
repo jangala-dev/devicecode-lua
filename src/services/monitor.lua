@@ -12,7 +12,6 @@ local OBS_VER = 'v1'
 local fibers  = require 'fibers'
 local runtime = require 'fibers.runtime'
 local file    = require 'fibers.io.file'
-local sleep   = require 'fibers.sleep'
 
 local perform      = fibers.perform
 local named_choice = fibers.named_choice
@@ -175,14 +174,8 @@ function M.start(conn, ctx)
 	out:setvbuf('line')
 
 	local function write_line(line)
-		local which, a, b = perform(named_choice {
-			wrote   = out:write_op(line, '\n'),
-			timeout = sleep.sleep_op(0.5):wrap(function () return nil, 'write timeout' end),
-		})
-		if which == 'wrote' then
-			local n, err = a, b
-			if n == nil and err ~= nil then error(err) end
-		end
+		local n, err = perform(out:write_op(line, '\n'))
+		if n == nil and err ~= nil then error(err) end
 	end
 
 	-- Tracks which (svc, canonical_kind) pairs have been seen on the canonical plane.

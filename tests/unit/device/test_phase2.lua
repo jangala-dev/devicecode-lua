@@ -15,6 +15,7 @@ local observer = require 'services.device.observer'
 local topics = require 'services.device.topics'
 local projection = require 'services.device.projection'
 local component_mcu = require 'services.device.component_mcu'
+local fabric_protocol = require 'services.fabric.protocol'
 
 local tests = {}
 
@@ -228,7 +229,13 @@ function tests.test_fabric_stage_passes_transfer_chunk_metadata_to_client()
 		local source = { id = 'src-chunk', terminate = function () return true end }
 		local r = req({
 			source = source,
-			metadata = { transfer_chunk_raw = '4096' },
+			expected_image_id = 'mcu-dev-13.0',
+			metadata = {
+				transfer_chunk_raw = '4096',
+				version = '13.0',
+				build = 'fw-update-e2e-13.0',
+				image_id = 'mcu-dev-13.0',
+			},
 		})
 		local client = {
 			send_blob_op = function (_, src, meta, opts)
@@ -247,15 +254,62 @@ function tests.test_fabric_stage_passes_transfer_chunk_metadata_to_client()
 			component_id = 'mcu',
 			action = 'stage-update',
 			request_id = 'r-chunk-size',
-			action_spec = { kind = 'fabric_stage', receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage') },
+			action_spec = {
+				kind = 'fabric_stage',
+				receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage'),
+				target = 'updater/main',
+			},
 			fabric_client = client,
 		})
 
 		assert_true(result.ok)
 	end)
 
+	assert_eq(captured_meta.target, 'updater/main')
+	assert_eq(captured_meta.version, '13.0')
+	assert_eq(captured_meta.build, 'fw-update-e2e-13.0')
+	assert_eq(captured_meta.image_id, 'mcu-dev-13.0')
+	assert_eq(captured_meta.expected_image_id, 'mcu-dev-13.0')
 	assert_eq(captured_meta.chunk_size, 4096)
 	assert_eq(captured_opts.chunk_size, 4096)
+end
+
+function tests.test_default_transfer_client_passes_stage_timeout_to_fabric_manager()
+	local captured_topic
+	local captured_payload
+	local captured_opts
+	fibers.run(function (scope)
+		local state = service.build_state(scope, {
+			conn = {
+				call_op = function (_, topic, payload, opts)
+					captured_topic = topic
+					captured_payload = payload
+					captured_opts = opts
+					return op.always({
+						ok = true,
+						result = { xfer_id = payload.request_id },
+					})
+				end,
+			},
+		})
+		local source = {
+			size = 3,
+			digest = fabric_protocol.digest_hex('abc'),
+			digest_alg = fabric_protocol.DIGEST_ALG,
+			read_chunk_op = function () return op.always('abc', nil) end,
+		}
+		local result, err = fibers.perform(state.transfer_client:send_blob_op(source, {
+			target = 'updater/main',
+			request = { job_id = 'job-timeout' },
+		}, {
+			timeout = 900.0,
+		}))
+		assert_not_nil(result, err)
+	end)
+
+	assert_eq(table.concat(captured_topic, '/'), 'cap/transfer-manager/main/rpc/send-blob')
+	assert_eq(captured_payload.timeout_s, 900.0)
+	assert_eq(captured_opts.timeout, 900.0)
 end
 
 function tests.test_fabric_stage_opens_artifact_ref_from_default_artifact_store()
@@ -1217,6 +1271,22 @@ function tests.test_component_module_normalises_mcu_software_fact()
 	assert_nil(err)
 	assert_eq(v.version, '2.3')
 	assert_eq(v.build, 'abc')
+end
+
+function tests.test_component_module_preserves_mcu_updater_identity_fields()
+	local v, err = component_mcu.normalize_fact('updater', {
+		state = 'staged',
+		pending_version = '13.0',
+		pending_image_id = 'mcu-dev-13.0',
+		staged_image_id = 'img-dev',
+		job_id = 'job-1',
+	})
+	assert_nil(err)
+	assert_eq(v.state, 'staged')
+	assert_eq(v.pending_version, '13.0')
+	assert_eq(v.pending_image_id, 'mcu-dev-13.0')
+	assert_eq(v.staged_image_id, 'img-dev')
+	assert_eq(v.job_id, 'job-1')
 end
 
 

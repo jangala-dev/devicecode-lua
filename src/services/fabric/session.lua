@@ -23,6 +23,7 @@ local DEFAULT_PING_INTERVAL = 5.0
 local DEFAULT_LIVENESS_TIMEOUT = 15.0
 local DEFAULT_BAD_FRAME_LIMIT = 5
 local DEFAULT_BAD_FRAME_WINDOW_S = 10.0
+local TRANSFER_QUIET_HOLD_S = 2.0
 
 local function require_rx(v, name, level)
 	return contracts.require_rx(v, name, (level or 1) + 1)
@@ -153,7 +154,69 @@ function OutboundGate:terminate(reason)
 	self._closed = true
 	self._session = nil
 	self._drop_reason = reason or 'session_outbound_closed'
+	if self._transfer_quiet then
+		self._transfer_quiet.active = false
+		self._transfer_quiet.xfer_id = nil
+		self._transfer_quiet.reason = self._drop_reason
+		self._transfer_quiet.hold_until = nil
+	end
 	close_unique_txs(self._lane_txs, self._drop_reason)
+	return true, nil
+end
+
+function OutboundGate:_session_ok(ctx, label)
+	if self._closed then
+		return nil, tostring(label or 'session_outbound_closed') .. ': closed'
+	end
+	local current = self._session
+	if not current then
+		return nil, tostring(label or 'session_outbound_no_session') .. ': ' .. tostring(self._drop_reason or 'no_session')
+	end
+	if not M.same_session(current, ctx) then
+		return nil, tostring(label or 'session_outbound_stale_session') .. ': stale_session'
+	end
+	return true, nil
+end
+
+function OutboundGate:_emit_log(level, payload)
+	if type(self._log) ~= 'function' then return true, nil end
+	payload = payload or {}
+	payload.component = payload.component or 'session'
+	payload.link_id = payload.link_id or self._link_id
+	return self._log(level or 'debug', payload)
+end
+
+function OutboundGate:_mark_transfer_frame(frame)
+	local q = self._transfer_quiet
+	if type(q) ~= 'table' then return end
+	local now = fibers.now()
+	q.hold_until = math.max(q.hold_until or 0, now + TRANSFER_QUIET_HOLD_S)
+	q.xfer_id = (type(frame) == 'table' and frame.xfer_id) or q.xfer_id
+	q.reason = q.active and (q.reason or 'transfer_active') or 'transfer_frame_tx'
+	q.updated_at = now
+end
+
+function OutboundGate:begin_transfer(ctx, xfer_id)
+	local ok, err = self:_session_ok(ctx, 'transfer_quiet_begin')
+	if ok ~= true then return nil, err end
+	local q = self._transfer_quiet
+	if type(q) ~= 'table' then return true, nil end
+	q.active = true
+	q.xfer_id = xfer_id
+	q.reason = 'transfer_attempt'
+	q.hold_until = nil
+	q.updated_at = fibers.now()
+	return true, nil
+end
+
+function OutboundGate:end_transfer(ctx, xfer_id, reason)
+	local q = self._transfer_quiet
+	if type(q) ~= 'table' then return true, nil end
+	q.active = false
+	q.xfer_id = xfer_id or q.xfer_id
+	q.reason = reason or 'transfer_attempt_done'
+	q.hold_until = fibers.now() + TRANSFER_QUIET_HOLD_S
+	q.updated_at = fibers.now()
 	return true, nil
 end
 
@@ -200,11 +263,15 @@ function OutboundGate:send_rpc_frame_now(ctx, frame, label)
 end
 
 function OutboundGate:send_transfer_control_frame_now(ctx, frame, label)
-	return self:_admit(ctx, frame, 'control', label)
+	local ok, err = self:_admit(ctx, frame, 'control', label)
+	if ok == true then self:_mark_transfer_frame(frame) end
+	return ok, err
 end
 
 function OutboundGate:send_transfer_bulk_frame_now(ctx, frame, label)
-	return self:_admit(ctx, frame, 'bulk', label)
+	local ok, err = self:_admit(ctx, frame, 'bulk', label)
+	if ok == true then self:_mark_transfer_frame(frame) end
+	return ok, err
 end
 
 function M.new_outbound_gate(params)
@@ -218,6 +285,9 @@ function M.new_outbound_gate(params)
 		_session = nil,
 		_drop_reason = 'no_session',
 		_closed = false,
+		_transfer_quiet = params.transfer_quiet,
+		_log = params.log,
+		_link_id = params.link_id,
 	}, OutboundGate)
 end
 
@@ -244,6 +314,14 @@ local function publish_state(self)
 		session_snapshot(self),
 		'fabric_session_state_admit_failed'
 	)
+end
+
+local function log_event(self, level, payload)
+	if type(self._log) ~= 'function' then return true, nil end
+	payload = payload or {}
+	payload.component = payload.component or 'session'
+	payload.link_id = payload.link_id or self._link_id
+	return self._log(level or 'debug', payload)
 end
 
 local function update_session(self, mutator)
@@ -330,6 +408,7 @@ end
 local function note_peer_rx(self, at)
 	at = at or fibers.now()
 	self._last_peer_at = at
+	self._next_ping_at = at + self._ping_interval
 	self._next_rehello_at = at + self._rehello_after
 end
 
@@ -378,11 +457,14 @@ end
 local function reset_to_hello(self, reason, now)
 	now = now or fibers.now()
 	local cur = session_snapshot(self)
+	local rotate_local_sid = reason ~= 'bad_frame_limit'
 	publish_session_drop(self, cur, reason, now)
 	self._outbound:drop(reason or 'session_dropped')
 	update_session(self, function (s)
 		s.phase = 'hello'
-		s.local_sid = tostring(uuid.new())
+		if rotate_local_sid then
+			s.local_sid = tostring(uuid.new())
+		end
 		s.peer_sid = nil
 		s.peer_node = nil
 		s.peer_identity_claim = nil
@@ -394,7 +476,7 @@ local function reset_to_hello(self, reason, now)
 		s.why = reason
 	end)
 	self._last_peer_at = nil
-	self._next_hello_at = now
+	self._next_hello_at = now + (rotate_local_sid and 0 or self._hello_interval)
 	self._next_ping_at = math.huge
 	self._next_rehello_at = math.huge
 	self._rehello_pending = false
@@ -428,6 +510,18 @@ end
 local function send_pong(self)
 	local cur = session_snapshot(self)
 	must_admit_control_frame_now(self._tx_control, assert(protocol.pong(cur.local_sid)), 'session_pong_send_failed')
+end
+
+local function transfer_quiet_active(self, now)
+	local q = self._transfer_quiet
+	if type(q) ~= 'table' then return false end
+	if q.active == true then
+		return true, q.reason or 'transfer_active', q.xfer_id
+	end
+	if type(q.hold_until) == 'number' and now < q.hold_until then
+		return true, q.reason or 'transfer_quiet_hold', q.xfer_id
+	end
+	return false
 end
 
 local function session_next_deadline(self)
@@ -579,6 +673,10 @@ local function handle_session_frame(self, checked, at)
 		else
 			refresh_peer(self, checked, at)
 		end
+		local quiet = transfer_quiet_active(self, at)
+		if quiet then
+			return
+		end
 		send_hello_ack(self)
 	elseif checked.type == 'hello_ack' then
 		local rehello = self._rehello_pending == true and cur.established == true and same_peer(cur, checked)
@@ -591,6 +689,11 @@ local function handle_session_frame(self, checked, at)
 	elseif checked.type == 'ping' then
 		if cur.established and same_peer(cur, checked) then
 			refresh_peer(self, checked, at)
+			local quiet = transfer_quiet_active(self, at)
+			if quiet then
+				self._next_ping_at = at + self._ping_interval
+				return
+			end
 			send_pong(self)
 		end
 	elseif checked.type == 'pong' then
@@ -611,6 +714,7 @@ end
 local function handle_frame(self, ev)
 	local checked, err = protocol.validate(ev.frame)
 	if not checked then error('session invalid frame: ' .. tostring(err), 0) end
+	self._bad_frame_times = {}
 	local lane = protocol.dispatch_lane(checked)
 	if lane == 'session_control' then
 		handle_session_frame(self, checked, ev.at or fibers.now())
@@ -632,6 +736,12 @@ local function handle_timer(self, ev)
 		return
 	end
 	if (due == nil or due == 'rehello') and now >= (self._next_rehello_at or math.huge) then
+		local quiet = transfer_quiet_active(self, now)
+		if quiet then
+			self._next_rehello_at = now + self._hello_interval
+			self._next_ping_at = now + self._ping_interval
+			return
+		end
 		send_hello(self)
 		self._rehello_pending = true
 		self._next_rehello_at = now + self._hello_interval
@@ -639,6 +749,11 @@ local function handle_timer(self, ev)
 		return
 	end
 	if (due == nil or due == 'ping') and now >= (self._next_ping_at or math.huge) then
+		local quiet = transfer_quiet_active(self, now)
+		if quiet then
+			self._next_ping_at = now + self._ping_interval
+			return
+		end
 		send_ping(self)
 	end
 end
@@ -719,6 +834,8 @@ function M.run(scope, params)
 		_bad_frame_limit = positive_integer(params.bad_frame_limit, DEFAULT_BAD_FRAME_LIMIT, 'bad_frame_limit'),
 		_bad_frame_window_s = positive_number(params.bad_frame_window_s, DEFAULT_BAD_FRAME_WINDOW_S, 'bad_frame_window_s'),
 		_bad_frame_times = {},
+		_transfer_quiet = params.transfer_quiet,
+		_log = params.log,
 		_next_hello_at = fibers.now(),
 		_next_ping_at = math.huge,
 		_next_rehello_at = math.huge,

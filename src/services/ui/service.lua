@@ -21,10 +21,28 @@ local config_watch = require 'devicecode.support.config_watch'
 local config_mod   = require 'services.ui.config'
 local service_events = require 'devicecode.support.service_events'
 local tablex = require 'shared.table'
+local authz = require 'devicecode.authz'
 
 local M = {}
 
 local shallow_copy = tablex.shallow_copy
+
+local function default_auth_opts(params, getenv)
+	params = params or {}
+	if params.auth ~= nil then return nil, 'injected_auth', true end
+	if params.auth_opts ~= nil then return params.auth_opts, 'injected_auth_opts', true end
+	getenv = getenv or os.getenv
+	local password = getenv('DEVICECODE_UI_ADMIN_PASSWORD')
+	if password == nil or password == '' then return nil, 'none', false end
+	return {
+		users = {
+			admin = {
+				password = password,
+				principal = authz.user_principal('admin', { roles = { 'admin' } }),
+			},
+		},
+	}, 'env_admin_password', true
+end
 
 local function component_summary(components)
 	local out = {}
@@ -38,15 +56,45 @@ local function component_summary(components)
 	return out
 end
 
-local function read_model_payload(state, snapshot)
+local function model_stats(model)
+	if model == nil then
+		return { version = 0, items = 0, services = 0, closed = false }
+	end
+
+	if type(model.count) == 'function' then
+		return {
+			version = type(model.version) == 'function' and model:version() or 0,
+			items = model:count(),
+			services = model:count({ 'svc', '#' }),
+			closed = type(model.is_closed) == 'function' and model:is_closed() or false,
+			reason = type(model.why) == 'function' and model:why() or nil,
+		}
+	end
+
 	local count = 0
+	local services = 0
+	local snapshot = model:snapshot()
 	for _ in pairs((snapshot and snapshot.items) or {}) do count = count + 1 end
+	for _, msg in pairs((snapshot and snapshot.items) or {}) do
+		local topic = msg and msg.topic
+		if type(topic) == 'table' and topic[1] == 'svc' then services = services + 1 end
+	end
 	return {
-		kind = 'ui.read-model',
 		version = snapshot and snapshot.version or 0,
 		items = count,
+		services = services,
 		closed = snapshot and snapshot.closed or false,
 		reason = snapshot and snapshot.reason or nil,
+	}
+end
+
+local function read_model_payload(state, stats)
+	return {
+		kind = 'ui.read-model',
+		version = stats and stats.version or 0,
+		items = stats and stats.items or 0,
+		closed = stats and stats.closed or false,
+		reason = stats and stats.reason or nil,
 		status = state.read_model_status,
 	}
 end
@@ -62,8 +110,8 @@ local function sessions_payload(state)
 end
 
 local function publish_summary(state)
-	local model_snapshot = state.model and state.model:snapshot() or nil
-	local payload = queries.summary(model_snapshot,
+	local stats = model_stats(state.model)
+	local payload = queries.summary_from_counts(stats,
 		state.sessions and state.sessions:count() or 0,
 		{
 			active_requests = state.active_requests,
@@ -80,7 +128,7 @@ local function publish_summary(state)
 	)
 	local ok, err = bus_cleanup.retain(state.conn, topics.summary(), payload)
 	if ok ~= true then error(err or 'ui summary publication failed', 0) end
-	ok, err = bus_cleanup.retain(state.conn, topics.read_model_status(), read_model_payload(state, model_snapshot))
+	ok, err = bus_cleanup.retain(state.conn, topics.read_model_status(), read_model_payload(state, stats))
 	if ok ~= true then error(err or 'ui read-model publication failed', 0) end
 	ok, err = bus_cleanup.retain(state.conn, topics.session_count(), sessions_payload(state))
 	if ok ~= true then error(err or 'ui sessions publication failed', 0) end
@@ -225,6 +273,18 @@ local function listener_config_key(cfg)
 	}, '|')
 end
 
+local function default_update_opts(params)
+	params = params or {}
+	local update_opts = shallow_copy(params.update or {})
+	if update_opts.create_job == nil then update_opts.create_job = true end
+	if update_opts.start_job == nil then update_opts.start_job = true end
+	update_opts.component = update_opts.component
+		or update_opts.target_component
+		or update_opts.update_component
+		or 'mcu'
+	return update_opts
+end
+
 local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	local params = state.params or {}
 	local h = cfg.http or {}
@@ -240,7 +300,7 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 		max_accept_queue = h.max_accept_queue,
 	}
 
-	local update_opts = shallow_copy(params.update or {})
+	local update_opts = default_update_opts(params)
 	update_opts.max_bytes = uploads.max_bytes
 	update_opts.enabled = uploads.enabled
 	update_opts.connect = update_opts.connect or params.connect
@@ -462,15 +522,27 @@ local function reduce_event(state, ev)
 end
 
 local function next_event_op(state)
-	local arms = {
-		done = state.done_rx:recv_op(),
-		cfg = state.cfg_watch:recv_op():wrap(cfg_event_from_watch),
-		model = state.model:changed_op(state.model_seen):wrap(function (version, snapshot, err)
+	local model_op
+	if type(state.model.changed_version_op) == 'function' then
+		model_op = state.model:changed_version_op(state.model_seen):wrap(function (version, err)
 			if version == nil then
 				return { kind = 'read_model_closed', err = err }
 			end
-			return { kind = 'read_model_changed', version = version, snapshot = snapshot }
-		end),
+			return { kind = 'read_model_changed', version = version }
+		end)
+	else
+		model_op = state.model:changed_op(state.model_seen):wrap(function (version, _snapshot, err)
+			if version == nil then
+				return { kind = 'read_model_closed', err = err }
+			end
+			return { kind = 'read_model_changed', version = version }
+		end)
+	end
+
+	local arms = {
+		done = state.done_rx:recv_op(),
+		cfg = state.cfg_watch:recv_op():wrap(cfg_event_from_watch),
+		model = model_op,
 	}
 
 	if state.sessions and type(state.sessions.changed_op) == 'function' then
@@ -600,11 +672,21 @@ function M.start(conn, opts)
 
 	local params = shallow_copy(opts)
 	params.conn = conn
+	local auth_opts, auth_source, auth_configured = default_auth_opts(params)
+	params.auth_opts = auth_opts
+	svc:obs_log(auth_configured and 'info' or 'warn', {
+		what = 'auth_config',
+		source = auth_source,
+		admin_env_present = os.getenv('DEVICECODE_UI_ADMIN_PASSWORD') ~= nil,
+		configured = auth_configured,
+	})
 	svc:running({ ready = true })
 	return M.run(scope, params)
 end
 
 M._test = {
+	default_auth_opts = default_auth_opts,
+	default_update_opts = default_update_opts,
 	reduce_event = reduce_event,
 	record_component_done = record_component_done,
 	apply_service_policy = apply_service_policy,

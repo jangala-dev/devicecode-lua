@@ -65,7 +65,61 @@ local function run_artifact_check(check, artifact, payload)
 	return true, nil
 end
 
+local function artifact_ref_from(value, seen)
+	if type(value) == 'string' and value ~= '' then return value end
+	if type(value) ~= 'table' then return nil end
+	seen = seen or {}
+	if seen[value] then return nil end
+	seen[value] = true
+
+	for _, key in ipairs({ 'artifact_ref', 'artifact_id', 'ref', 'id' }) do
+		if type(value[key]) == 'string' and value[key] ~= '' then
+			seen[value] = nil
+			return value[key]
+		end
+	end
+
+	if type(value.ref) == 'function' then
+		local ok, ref = pcall(value.ref, value)
+		if ok and type(ref) == 'string' and ref ~= '' then
+			seen[value] = nil
+			return ref
+		end
+	end
+
+	if type(value.describe) == 'function' then
+		local ok, desc = pcall(value.describe, value)
+		if ok then
+			local ref = artifact_ref_from(desc, seen)
+			if ref then
+				seen[value] = nil
+				return ref
+			end
+		end
+	end
+
+	for _, key in ipairs({ 'artifact', 'artifact_id', 'commit', 'result', 'record', 'value' }) do
+		local ref = artifact_ref_from(value[key], seen)
+		if ref then
+			seen[value] = nil
+			return ref
+		end
+	end
+
+	seen[value] = nil
+	return nil
+end
+
+local function normalise_artifact_identity(payload)
+	if type(payload) ~= 'table' then return end
+	if type(payload.artifact_ref) == 'string' and payload.artifact_ref ~= '' then return end
+
+	local ref = artifact_ref_from(payload.artifact_ref) or artifact_ref_from(payload.artifact_id)
+	if ref then payload.artifact_ref = ref end
+end
+
 local function maybe_resolve_create_artifact(scope, params, payload, component)
+	normalise_artifact_identity(payload)
 	local source = payload.artifact_source or payload.source
 	local artifact = payload.artifact
 

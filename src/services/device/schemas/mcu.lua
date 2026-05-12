@@ -80,6 +80,9 @@ function M.normalize_updater(raw)
 		state = raw.state or raw.status or raw.kind,
 		last_error = raw.last_error or raw.err,
 		pending_version = raw.pending_version,
+		pending_image_id = raw.pending_image_id,
+		staged_image_id = raw.staged_image_id,
+		job_id = raw.job_id,
 	}
 end
 

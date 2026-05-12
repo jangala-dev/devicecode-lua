@@ -21,6 +21,16 @@ local function request_payload(req)
 	return req.payload
 end
 
+local function log_event(log, level, fields)
+	if type(log) ~= 'function' then return true, nil end
+	local payload = {}
+	for k, v in pairs(fields or {}) do payload[k] = v end
+	payload.component = payload.component or 'device_action_worker'
+	local ok, err = pcall(log, level or 'debug', payload)
+	if ok then return true, nil end
+	return nil, err
+end
+
 local function default_call_op(conn, topic, payload, opts)
 	if type(conn) == 'table' and type(conn.call_op) == 'function' then
 		return conn:call_op(topic, payload, opts)
@@ -259,11 +269,30 @@ local function run_fabric_stage_op(_, ctx, owner)
 	-- that lifetime visible as a child scope rather than hiding it in a guard or
 	-- in the parent action finaliser.
 	return fibers.run_scope_op(function (stage_scope)
+		log_event(ctx.log, 'info', {
+			what = 'device_fabric_stage_begin',
+			component_id = ctx.component_id,
+			action = ctx.action,
+			link_id = ctx.action_spec.link_id,
+			target = ctx.action_spec.target,
+			artifact_ref = request_payload(ctx.request) and request_payload(ctx.request).artifact_ref or nil,
+		})
 		local source, err = fibers.perform(open_source_op(ctx))
 		if not source then
+			log_event(ctx.log, 'warn', {
+				what = 'device_fabric_stage_source_failed',
+				component_id = ctx.component_id,
+				action = ctx.action,
+				err = err or 'source_required',
+			})
 			owner:fail_once(err or 'source_required')
 			return public_result('rejected', { err = err or 'source_required' })
 		end
+		log_event(ctx.log, 'info', {
+			what = 'device_fabric_stage_source_ok',
+			component_id = ctx.component_id,
+			action = ctx.action,
+		})
 
 		local owned = resource.owned(source, {
 			terminate = source_terminator(ctx),
@@ -276,30 +305,57 @@ local function run_fabric_stage_op(_, ctx, owner)
 			)
 		end)
 
+		log_event(ctx.log, 'info', {
+			what = 'device_fabric_stage_transfer_begin',
+			component_id = ctx.component_id,
+			action = ctx.action,
+			link_id = ctx.action_spec.link_id,
+			target = ctx.action_spec.target,
+			timeout = ctx.action_spec.timeout or ctx.timeout,
+		})
 		local result, ferr, handoff = fibers.perform(fabric_stage.stage_source_op(stage_scope, {
 			client = ctx.fabric_client or ctx.transfer_client,
 			source = owned:value(),
 			component = ctx.component_id,
 			action = ctx.action,
 			link_id = ctx.action_spec.link_id,
+			target = ctx.action_spec.target,
 			receiver = ctx.action_spec.receiver,
 			artifact_store = ctx.action_spec.artifact_store,
 			request_payload = request_payload(ctx.request),
 			chunk_size = metadata_chunk_size(request_payload(ctx.request) or {}),
 			timeout = ctx.action_spec.timeout or ctx.timeout,
 			deadline = ctx.deadline,
+			log = ctx.log,
 		}))
 
 		if not result then
 			local reason = ferr or 'fabric_stage_failed'
+			log_event(ctx.log, 'warn', {
+				what = 'device_fabric_stage_transfer_failed',
+				component_id = ctx.component_id,
+				action = ctx.action,
+				err = reason,
+			})
 			owner:fail_once(reason)
 			return public_result('remote_failed', { err = reason })
 		end
+		log_event(ctx.log, 'info', {
+			what = 'device_fabric_stage_transfer_ok',
+			component_id = ctx.component_id,
+			action = ctx.action,
+		})
 
 		local consumed = handoff and handoff.consumed == true
 		if consumed then
 			local _, herr = owned:handoff(handoff.receiver_install)
 			if herr ~= nil then
+				log_event(ctx.log, 'warn', {
+					what = 'device_fabric_stage_handoff_failed',
+					component_id = ctx.component_id,
+					action = ctx.action,
+					err = herr,
+				})
 				owner:fail_once(herr)
 				return public_result('failed', { err = herr })
 			end

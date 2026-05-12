@@ -8,6 +8,16 @@ local op_mod = require 'fibers.op'
 
 local M = {}
 
+local function log_event(log, level, fields)
+	if type(log) ~= 'function' then return true, nil end
+	local payload = {}
+	for k, v in pairs(fields or {}) do payload[k] = v end
+	payload.component = payload.component or 'device_fabric_stage'
+	local ok, err = pcall(log, level or 'debug', payload)
+	if ok then return true, nil end
+	return nil, err
+end
+
 local function call_transfer_op(client, source, meta, opts)
 	if type(client) == 'table' and type(client.send_blob_op) == 'function' then
 		return client:send_blob_op(source, meta, opts)
@@ -26,6 +36,20 @@ end
 
 local function is_op(v)
 	return type(v) == 'table' and getmetatable(v) == op_mod.Op
+end
+
+local function copy_identity_metadata(dst, request)
+	if type(dst) ~= 'table' or type(request) ~= 'table' then return dst end
+	local metadata = request.metadata or request.meta
+	if type(metadata) == 'table' then
+		dst.version = dst.version or metadata.version
+		dst.build = dst.build or metadata.build
+		dst.build_id = dst.build_id or metadata.build_id
+		dst.image_id = dst.image_id or metadata.image_id
+	end
+	dst.expected_image_id = dst.expected_image_id or request.expected_image_id
+	if dst.image_id == nil then dst.image_id = request.expected_image_id end
+	return dst
 end
 
 local function bool_field(t, ...)
@@ -133,32 +157,84 @@ function M.stage_source_op(_, params)
 	params = params or {}
 	local source = params.source
 	if source == nil then
+		log_event(params.log, 'warn', { what = 'device_fabric_stage_rejected', err = 'source_required' })
 		return op_mod.always(nil, 'source_required', nil)
 	end
 
-	local ev, err = call_transfer_op(params.client or params.fabric_client, source, {
+	log_event(params.log, 'info', {
+		what = 'device_fabric_stage_client_begin',
+		component_id = params.component,
+		action = params.action,
+		link_id = params.link_id,
+		target = params.target,
+		receiver = params.receiver,
+		artifact_store = params.artifact_store,
+		timeout = params.timeout,
+	})
+	local request_payload = params.request_payload
+	local transfer_meta = copy_identity_metadata({
 		component = params.component,
 		action = params.action,
 		link_id = params.link_id,
+		target = params.target,
 		receiver = params.receiver,
 		artifact_store = params.artifact_store,
-		request = params.request_payload,
+		request = request_payload,
 		chunk_size = params.chunk_size,
-	}, {
+	}, request_payload)
+	local ev, err = call_transfer_op(params.client or params.fabric_client, source, transfer_meta, {
 		timeout = params.timeout,
 		deadline = params.deadline,
 		chunk_size = params.chunk_size,
 	})
 
 	if not ev then
+		log_event(params.log, 'warn', {
+			what = 'device_fabric_stage_client_unavailable',
+			component_id = params.component,
+			action = params.action,
+			err = err or 'fabric_stage_unavailable',
+		})
 		return op_mod.always(nil, err or 'fabric_stage_unavailable', nil)
 	end
 
 	if is_op(ev) then
-		return ev:wrap(map_result)
+		return ev:wrap(function (result, perr)
+			local mapped, merr, handoff = map_result(result, perr)
+			if mapped == nil then
+				log_event(params.log, 'warn', {
+					what = 'device_fabric_stage_client_failed',
+					component_id = params.component,
+					action = params.action,
+					err = merr,
+				})
+				return nil, merr, nil
+			end
+			log_event(params.log, 'info', {
+				what = 'device_fabric_stage_client_ok',
+				component_id = params.component,
+				action = params.action,
+			})
+			return mapped, nil, handoff
+		end)
 	end
 
-	return op_mod.always(map_result(ev, nil))
+	local mapped, merr, handoff = map_result(ev, nil)
+	if mapped == nil then
+		log_event(params.log, 'warn', {
+			what = 'device_fabric_stage_client_failed',
+			component_id = params.component,
+			action = params.action,
+			err = merr,
+		})
+	else
+		log_event(params.log, 'info', {
+			what = 'device_fabric_stage_client_ok',
+			component_id = params.component,
+			action = params.action,
+		})
+	end
+	return op_mod.always(mapped, merr, handoff)
 end
 
 

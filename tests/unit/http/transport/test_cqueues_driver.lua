@@ -105,6 +105,70 @@ function M.test_pollable_ready_op_reports_due_timeout_immediately()
 	end)
 end
 
+function M.test_pollable_ready_op_does_not_retain_infinite_timeout_timers()
+	local drv = assert(driver_mod.new { create_controller = false })
+	local pollable = {
+		pollfd = function () return nil end,
+		events = function () return '' end,
+		timeout = function () return math.huge end,
+	}
+
+	fibers.run(function (scope)
+		local count = 0
+		local before = runtime.current_scheduler.wheel.heap.size
+
+		assert(scope:spawn(function ()
+			while count < 20 do
+				local reason, err = fibers.perform(drv:pollable_ready_op(pollable))
+				eq(reason, 'poke')
+				eq(err, nil)
+				count = count + 1
+			end
+		end))
+
+		yield_until(function ()
+			drv:poke()
+			return count >= 20
+		end, 'pollable should wake from repeated pokes')
+
+		local after = runtime.current_scheduler.wheel.heap.size
+		eq(after, before, 'infinite cqueues timeouts must not leave scheduler timers behind')
+		drv:terminate('done')
+	end)
+end
+
+function M.test_pollable_ready_op_does_not_arm_timeout_when_fd_wait_is_present()
+	local drv = assert(driver_mod.new { create_controller = false })
+	local pollable = {
+		pollfd = function () return 0 end,
+		events = function () return 'r' end,
+		timeout = function () return 60 end,
+	}
+
+	fibers.run(function (scope)
+		local count = 0
+		local before = runtime.current_scheduler.wheel.heap.size
+
+		assert(scope:spawn(function ()
+			while count < 20 do
+				local reason, err = fibers.perform(drv:pollable_ready_op(pollable))
+				ok(reason == 'poke' or reason == 'fd')
+				eq(err, nil)
+				count = count + 1
+			end
+		end))
+
+		yield_until(function ()
+			drv:poke()
+			return count >= 20
+		end, 'pollable should wake from repeated fd waits or pokes')
+
+		local after = runtime.current_scheduler.wheel.heap.size
+		eq(after, before, 'fd-backed cqueues waits must not retain scheduler timers')
+		drv:terminate('done')
+	end)
+end
+
 function M.test_pollable_step_op_treats_spurious_timeout_step_as_nonfatal()
 	local drv = assert(driver_mod.new { create_controller = false })
 	local pollable = {

@@ -15,6 +15,7 @@ local client      = require 'services.ui.update.client'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local resource    = require 'devicecode.support.resource'
 local scope_mod   = require 'fibers.scope'
+local cap_sdk     = require 'services.hal.sdk.cap'
 
 local M = {}
 
@@ -82,6 +83,71 @@ local function copy_table(t)
 	return out
 end
 
+local function artifact_store_id(opts)
+	return opts.artifact_store_id
+		or opts.artifact_store
+		or opts.store_id
+		or 'main'
+end
+
+local function artifact_store_policy(opts)
+	return opts.artifact_store_policy
+		or opts.artifact_policy
+		or opts.sink_policy
+		or 'prefer_durable'
+end
+
+local function artifact_sink_meta(opts)
+	local meta = opts.metadata or opts.meta
+	if type(meta) == 'table' then
+		meta = copy_table(meta)
+	else
+		meta = {}
+	end
+	meta.component = meta.component
+		or opts.component
+		or opts.target_component
+		or opts.update_component
+	return meta
+end
+
+local function upload_log(opts, level, payload)
+	local fn = opts and opts.log
+	if type(fn) ~= 'function' then return end
+	local out = copy_table(payload or {})
+	out.level = level or out.level or 'info'
+	pcall(fn, out.level, out)
+end
+
+local function sink_from_create_reply(reply, err)
+	if reply == nil then return nil, err or 'artifact sink create failed' end
+	if type(reply) == 'table' and reply.ok == false then
+		return nil, reply.reason or reply.err or 'artifact sink create failed'
+	end
+	if type(reply) == 'table' and type(reply.append_op) == 'function' then
+		return reply, nil
+	end
+	if type(reply) == 'table' then
+		local sink = reply.reason or reply.value or reply.sink or reply.artifact_sink
+		if type(sink) == 'table' then return sink, nil end
+	end
+	return nil, 'artifact sink create returned no sink'
+end
+
+local function create_artifact_sink_op(conn, opts)
+	if type(conn) ~= 'table' then return fibers.always(nil, 'artifact sink connection unavailable') end
+	local create_opts, opt_err = cap_sdk.args.new.ArtifactStoreCreateSinkOpts(
+		artifact_sink_meta(opts),
+		artifact_store_policy(opts)
+	)
+	if not create_opts then return fibers.always(nil, opt_err or 'artifact sink opts invalid') end
+	local cap = cap_sdk.new_curated_cap_ref(conn, 'artifact_store', artifact_store_id(opts))
+	return cap:call_control_op('create_sink', create_opts, {
+		timeout = opts.sink_timeout or opts.artifact_store_timeout or opts.timeout,
+		deadline = opts.deadline,
+	})
+end
+
 local function normalise_header_name(name)
 	return tostring(name or ''):lower()
 end
@@ -140,6 +206,7 @@ local function apply_upload_headers(ctx, opts)
 	local artifact_version = string_header(headers, 'x-artifact-version')
 	local artifact_build = string_header(headers, 'x-artifact-build')
 	local image_id = string_header(headers, 'x-artifact-image-id')
+	local compat_commit_image_id = string_header(headers, 'x-artifact-compat-commit-image-id')
 	local checksum = string_header(headers, 'x-artifact-checksum')
 
 	if chunk_raw == nil
@@ -147,6 +214,7 @@ local function apply_upload_headers(ctx, opts)
 		and artifact_version == nil
 		and artifact_build == nil
 		and image_id == nil
+		and compat_commit_image_id == nil
 		and checksum == nil
 	then
 		return opts
@@ -166,6 +234,7 @@ local function apply_upload_headers(ctx, opts)
 		meta.image_id = image_id
 		opts.expected_image_id = opts.expected_image_id or image_id
 	end
+	if compat_commit_image_id ~= nil then meta.compat_commit_image_id = compat_commit_image_id end
 	if checksum ~= nil then meta.checksum = checksum end
 	if chunk_raw ~= nil then meta.transfer_chunk_raw = chunk_raw end
 	opts.metadata = meta
@@ -203,23 +272,98 @@ local function upload_body_op(ctx, opts, deadline)
 		local timed_out = false
 		local function mark_timeout() timed_out = true end
 
+		upload_log(opts, 'info', {
+			what = 'upload_ingest_begin',
+			create_job = opts.create_job,
+			start_job = opts.start_job,
+			component = opts.component or opts.target_component or opts.update_component,
+			expected_image_id = opts.expected_image_id,
+		})
+
 		local ingest_client = opts.ingest or opts.artifact_ingest
+		local sink_owner
 		if ingest_client == nil then
 			local conn, _, conn_err = connect_update_conn(scope, opts)
-			if not conn then error(conn_err or 'update connection unavailable', 0) end
+			if not conn then
+				upload_log(opts, 'warn', {
+					what = 'upload_connect_failed',
+					purpose = 'artifact_ingest',
+					err = conn_err or 'update connection unavailable',
+				})
+				error(conn_err or 'update connection unavailable', 0)
+			end
 			opts.update_conn = opts.update_conn or conn
+
+			if opts.sink == nil and opts.artifact_sink == nil then
+				local sink_reply, sink_call_err = perform_with_deadline(
+					scope,
+					create_artifact_sink_op(conn, opts),
+					deadline,
+					mark_timeout
+				)
+				local sink, sink_err = sink_from_create_reply(sink_reply, sink_call_err)
+				if not sink then
+					upload_log(opts, 'warn', {
+						what = 'upload_sink_create_failed',
+						artifact_store = artifact_store_id(opts),
+						err = sink_err or 'artifact sink create failed',
+					})
+					error(sink_err or 'artifact sink create failed', 0)
+				end
+				sink_owner = resource.owned(sink, { label = 'upload artifact sink cleanup' })
+				scope:finally(function (_, status, primary)
+					sink_owner:terminate_checked(
+						primary or status or 'upload_closed',
+						'upload artifact sink cleanup'
+					)
+				end)
+				opts.sink = sink
+				opts.artifact_sink = sink
+				upload_log(opts, 'info', {
+					what = 'upload_sink_create_ok',
+					artifact_store = artifact_store_id(opts),
+					ref = type(sink.status) == 'function' and sink:status().artifact_ref or nil,
+				})
+			end
+
 			local built, build_err = ingest.bus_client(conn)
-			if not built then error(build_err or 'artifact ingest bus client unavailable', 0) end
+			if not built then
+				upload_log(opts, 'warn', {
+					what = 'upload_ingest_client_failed',
+					err = build_err or 'artifact ingest bus client unavailable',
+				})
+				error(build_err or 'artifact ingest bus client unavailable', 0)
+			end
 			ingest_client = built
 		end
 
-			local handle, open_err = perform_with_deadline(
-				scope,
-				ingest.open_ingest_op(ingest_client, opts),
-				deadline,
-				mark_timeout
-			)
-		if not handle then error(open_err or 'artifact ingest open failed', 0) end
+		local handle, open_err = perform_with_deadline(
+			scope,
+			ingest.open_ingest_op(ingest_client, opts),
+			deadline,
+			mark_timeout
+		)
+		if not handle then
+			upload_log(opts, 'warn', {
+				what = 'upload_ingest_open_failed',
+				err = open_err or 'artifact ingest open failed',
+			})
+			error(open_err or 'artifact ingest open failed', 0)
+		end
+		if sink_owner ~= nil then
+			local _, detach_err = sink_owner:detach()
+			if detach_err then
+				upload_log(opts, 'warn', {
+					what = 'upload_sink_handoff_failed',
+					err = detach_err,
+				})
+				error(detach_err, 0)
+			end
+		end
+		upload_log(opts, 'info', {
+			what = 'upload_ingest_open_ok',
+			ingest_id = handle.ingest_id,
+		})
 
 		local ingest_owner = resource.owned(handle, {
 			label = 'upload ingest abort',
@@ -236,55 +380,126 @@ local function upload_body_op(ctx, opts, deadline)
 
 		local body = ctx.body_stream or ctx.body or ctx.stream or ctx
 		if body == nil then error('request body has no chunk reader', 0) end
+		local chunks = 0
+		local bytes = 0
 		while true do
-				local chunk, rerr = perform_with_deadline(
-					scope,
-					read_chunk_op(body, opts.chunk_size or 65536),
-					deadline,
-					mark_timeout
-				)
-			if rerr then error(rerr, 0) end
+			local chunk, rerr = perform_with_deadline(
+				scope,
+				read_chunk_op(body, opts.chunk_size or 65536),
+				deadline,
+				mark_timeout
+			)
+			if rerr then
+				upload_log(opts, 'warn', {
+					what = 'upload_body_read_failed',
+					chunks = chunks,
+					bytes = bytes,
+					err = rerr,
+				})
+				error(rerr, 0)
+			end
 			if chunk == nil or chunk == '' then break end
+			chunks = chunks + 1
+			if type(chunk) == 'string' then bytes = bytes + #chunk end
 			local ok, werr = perform_with_deadline(
 				scope,
 				ingest.append_chunk_op(handle, chunk),
 				deadline,
 				mark_timeout
 			)
-			if ok == nil or ok == false then error(werr or 'artifact append failed', 0) end
+			if ok == nil or ok == false then
+				upload_log(opts, 'warn', {
+					what = 'upload_append_failed',
+					chunks = chunks,
+					bytes = bytes,
+					err = werr or 'artifact append failed',
+				})
+				error(werr or 'artifact append failed', 0)
+			end
 		end
+		upload_log(opts, 'info', {
+			what = 'upload_body_read_end',
+			chunks = chunks,
+			bytes = bytes,
+		})
 
 		local artifact_id, cerr = perform_with_deadline(scope, ingest.commit_op(handle), deadline, mark_timeout)
-		if not artifact_id then error(cerr or 'artifact commit failed', 0) end
-			local _, detach_err = ingest_owner:detach()
-		if detach_err then error(detach_err, 0) end
+		if not artifact_id then
+			upload_log(opts, 'warn', {
+				what = 'upload_ingest_commit_failed',
+				err = cerr or 'artifact commit failed',
+			})
+			error(cerr or 'artifact commit failed', 0)
+		end
+		upload_log(opts, 'info', {
+			what = 'upload_ingest_commit_ok',
+			artifact_id = artifact_id,
+		})
+		local _, detach_err = ingest_owner:detach()
+		if detach_err then
+			upload_log(opts, 'warn', {
+				what = 'upload_ingest_detach_failed',
+				err = detach_err,
+			})
+			error(detach_err, 0)
+		end
 
 		local out = { status = 'ok', artifact_id = artifact_id }
 		if opts.create_job then
 			local conn, _, conn_err = connect_update_conn(scope, opts)
-			if not conn then error(conn_err or 'update connection unavailable', 0) end
+			if not conn then
+				upload_log(opts, 'warn', {
+					what = 'upload_connect_failed',
+					purpose = 'create_job',
+					err = conn_err or 'update connection unavailable',
+				})
+				error(conn_err or 'update connection unavailable', 0)
+			end
 
 			local call_opts = {}
 			for k, v in pairs(opts) do call_opts[k] = v end
 			call_opts.timeout = remaining_timeout(opts, deadline)
 
-				local job, jerr = perform_with_deadline(
-					scope,
-					client.create_job_op(conn, artifact_id, call_opts),
-					deadline,
-					mark_timeout
-				)
-			if not job then error(jerr or 'update job create failed', 0) end
+			local job, jerr = perform_with_deadline(
+				scope,
+				client.create_job_op(conn, artifact_id, call_opts),
+				deadline,
+				mark_timeout
+			)
+			if not job then
+				upload_log(opts, 'warn', {
+					what = 'upload_create_job_failed',
+					artifact_id = artifact_id,
+					err = jerr or 'update job create failed',
+				})
+				error(jerr or 'update job create failed', 0)
+			end
+			upload_log(opts, 'info', {
+				what = 'upload_create_job_ok',
+				artifact_id = artifact_id,
+				job_id = job.job_id or job.id,
+			})
 			out.job = job
 			if opts.start_job then
 				call_opts.timeout = remaining_timeout(opts, deadline)
-					local started, serr = perform_with_deadline(
-						scope,
-						client.start_job_op(conn, job.job_id or job.id, call_opts),
-						deadline,
-						mark_timeout
-					)
-				if not started then error(serr or 'update job start failed', 0) end
+				local started, serr = perform_with_deadline(
+					scope,
+					client.start_job_op(conn, job.job_id or job.id, call_opts),
+					deadline,
+					mark_timeout
+				)
+				if not started then
+					upload_log(opts, 'warn', {
+						what = 'upload_start_job_failed',
+						job_id = job.job_id or job.id,
+						err = serr or 'update job start failed',
+					})
+					error(serr or 'update job start failed', 0)
+				end
+				upload_log(opts, 'info', {
+					what = 'upload_start_job_ok',
+					job_id = job.job_id or job.id,
+				})
 				out.started = started
 			end
 		end
@@ -296,6 +511,11 @@ function M.run(_scope, owner, ctx, opts)
 	opts = opts or {}
 	local st, _, result_or_primary = fibers.perform(M.run_op(ctx, opts))
 	if st ~= 'ok' then
+		upload_log(opts, 'warn', {
+			what = 'upload_failed',
+			status = st,
+			err = result_or_primary or st,
+		})
 		local ok, werr = fibers.perform(owner:reply_error_op(nil, result_or_primary or st))
 		if ok ~= true then error(werr or 'response write failed', 0) end
 		return { status = st, err = result_or_primary or st }

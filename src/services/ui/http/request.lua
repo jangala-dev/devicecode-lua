@@ -13,6 +13,8 @@ local user_operation = require 'services.ui.user_operation'
 local upload        = require 'services.ui.update.upload'
 local resource      = require 'devicecode.support.resource'
 
+local cjson = require 'cjson.safe'
+
 local ok_http_headers, http_headers = pcall(require, 'services.http.headers')
 if not ok_http_headers then http_headers = nil end
 
@@ -67,7 +69,60 @@ end
 local function body_table(ctx)
 	if type(ctx.body) == 'table' then return ctx.body end
 	if type(ctx.json) == 'table' then return ctx.json end
+	if type(ctx.read_body_as_string_op) == 'function' then
+		local raw, read_err = fibers.perform(ctx:read_body_as_string_op())
+		if raw == nil then return {}, read_err or 'body_read_failed' end
+		if raw == '' then
+			ctx.json = {}
+			return ctx.json
+		end
+
+		local decoded, decode_err = cjson.decode(raw)
+		if type(decoded) ~= 'table' then
+			return {}, decode_err or 'json_body_must_be_object'
+		end
+		ctx.json = decoded
+		return decoded
+	end
 	return {}
+end
+
+local function copy_table(t)
+	local out = {}
+	for k, v in pairs(t or {}) do out[k] = v end
+	return out
+end
+
+local function emit_log(deps, level, payload)
+	local conn = deps and deps.conn
+	if type(conn) ~= 'table' or type(conn.publish) ~= 'function' then return end
+	local out = {}
+	for k, v in pairs(payload or {}) do out[k] = v end
+	out.level = level or out.level or 'info'
+	pcall(function ()
+		conn:publish({ 'obs', 'log', 'ui', out.level }, out)
+		conn:publish({ 'obs', 'v1', 'ui', 'event', 'log' }, out)
+	end)
+end
+
+local function principal_summary(principal)
+	if type(principal) ~= 'table' then return principal end
+	return {
+		kind = principal.kind,
+		id = principal.id,
+		roles = principal.roles,
+	}
+end
+
+local function login_body_summary(body)
+	body = body or {}
+	local username = body.username or body.user
+	return {
+		username = username,
+		username_present = username ~= nil and username ~= '',
+		password_present = body.password ~= nil and body.password ~= '',
+		body_type = type(body),
+	}
 end
 
 local function session_id_from(ctx)
@@ -85,6 +140,23 @@ local function principal_from(ctx, deps)
 	return nil, nil
 end
 
+local function upload_request_metadata(ctx, principal)
+	return {
+		what = 'upload_begin',
+		principal = principal_summary(principal),
+		session_id = session_id_from(ctx),
+		content_length = ctx_header(ctx, 'content-length'),
+		content_type = ctx_header(ctx, 'content-type'),
+		artifact_component = ctx_header(ctx, 'x-artifact-component'),
+		artifact_name = ctx_header(ctx, 'x-artifact-name'),
+		artifact_version = ctx_header(ctx, 'x-artifact-version'),
+		artifact_build = ctx_header(ctx, 'x-artifact-build'),
+		artifact_image_id = ctx_header(ctx, 'x-artifact-image-id'),
+		artifact_compat_commit_image_id = ctx_header(ctx, 'x-artifact-compat-commit-image-id'),
+		transfer_chunk_raw = ctx_header(ctx, 'x-transfer-chunk-raw'),
+	}
+end
+
 local function handle_read(owner, route, deps)
 	local model = assert(deps.model, 'HTTP read requires model')
 	local snap = model:snapshot()
@@ -95,25 +167,67 @@ local function handle_read(owner, route, deps)
 		result = queries.services_snapshot(snap)
 	elseif route.query == 'fabric' then
 		result = queries.fabric_status(snap)
+	elseif route.query == 'fabric_link' then
+		result = queries.fabric_link_status(snap, route.link_id)
+	elseif route.query == 'update_job' then
+		result = queries.update_job_status(snap, route.job_id)
 	elseif route.query == 'topic' then
 		result = queries.topic(snap, route.topic)
 	else
 		result = queries.all(snap)
+	end
+	if result == nil then
+		perform_response(owner:reply_error_op(404, 'not_found'))
+		return { status = 'not_found', route = 'read' }
 	end
 	perform_response(owner:reply_json_op(200, result))
 	return { status = 'ok', route = 'read' }
 end
 
 local function handle_login(owner, ctx, deps)
-	local principal, err = auth.verify(deps.auth, body_table(ctx))
+	local body, body_err = body_table(ctx)
+	local summary = login_body_summary(body)
+	emit_log(deps, 'info', {
+		what = 'login_attempt',
+		user = summary.username,
+		username_present = summary.username_present,
+		password_present = summary.password_present,
+		body_type = summary.body_type,
+		body_error = body_err,
+		auth_present = deps.auth ~= nil,
+	})
+	if body_err ~= nil then
+		emit_log(deps, 'warn', {
+			what = 'login_failed',
+			reason = body_err,
+			auth_present = deps.auth ~= nil,
+		})
+		perform_response(owner:reply_error_op(400, body_err))
+		return { status = 'bad_request', err = body_err }
+	end
+	local principal, err = auth.verify(deps.auth, body)
 	if not principal then
+		emit_log(deps, 'warn', {
+			what = 'login_failed',
+			user = summary.username,
+			username_present = summary.username_present,
+			password_present = summary.password_present,
+			reason = err or 'unauthenticated',
+			auth_present = deps.auth ~= nil,
+		})
 		perform_response(owner:reply_error_op(401, err or 'unauthenticated'))
 		return { status = 'unauthenticated' }
 	end
 	local sess = assert(deps.sessions, 'login requires sessions'):create(principal, {
 		data = { user_agent = ctx_header(ctx, 'user-agent') },
 	})
-	perform_response(owner:reply_json_op(200, { session = sess }))
+	emit_log(deps, 'info', {
+		what = 'login_ok',
+		user = summary.username,
+		principal = principal,
+		session_id = sess.id,
+	})
+	perform_response(owner:reply_json_op(200, { session = sess, session_id = sess.id }))
 	return { status = 'ok', session_id = sess.id }
 end
 
@@ -141,13 +255,18 @@ local function handle_command(scope, owner, ctx, route, deps)
 		perform_response(owner:reply_error_op(401, 'unauthenticated'))
 		return { status = 'unauthenticated' }
 	end
+	local body, body_err = body_table(ctx)
+	if body_err ~= nil then
+		perform_response(owner:reply_error_op(400, body_err))
+		return { status = 'bad_request', err = body_err }
+	end
 	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
 		principal = principal,
 		connect = deps.connect,
 		bus = deps.bus,
 		timeout = deps.command_timeout or 5.0,
 		run_op = function (_, conn)
-			return conn:call_op(route.topic, body_table(ctx), { timeout = deps.command_timeout or 5.0 })
+			return conn:call_op(route.topic, body, { timeout = deps.command_timeout or 5.0 })
 				:wrap(function (value, call_err)
 					if value == nil then return nil, call_err or 'upstream_failed' end
 					return { value = value }, nil
@@ -161,6 +280,101 @@ local function handle_command(scope, owner, ctx, route, deps)
 	local result = result_or_primary
 	perform_response(owner:reply_json_op(200, result))
 	return { status = 'ok' }
+end
+
+local function update_job_method(op_name)
+	op_name = tostring(op_name or '')
+	if op_name == 'commit' then return 'commit-job' end
+	if op_name == 'cancel' then return 'cancel-job' end
+	if op_name == 'retry' then return 'retry-job' end
+	if op_name == 'discard' then return 'discard-job' end
+	if op_name == 'start' or op_name == '' then return 'start-job' end
+	return nil
+end
+
+local function handle_update_job_action(scope, owner, ctx, route, deps)
+	local principal = principal_from(ctx, deps)
+	if principal == nil then
+		perform_response(owner:reply_error_op(401, 'unauthenticated'))
+		return { status = 'unauthenticated' }
+	end
+	local body, body_err = body_table(ctx)
+	if body_err ~= nil then
+		perform_response(owner:reply_error_op(400, body_err))
+		return { status = 'bad_request', err = body_err }
+	end
+	local method = update_job_method(body.op or body.action)
+	if method == nil then
+		perform_response(owner:reply_error_op(400, 'unsupported_update_job_action'))
+		return { status = 'bad_request', err = 'unsupported_update_job_action' }
+	end
+	local payload = {}
+	for k, v in pairs(body or {}) do payload[k] = v end
+	payload.job_id = route.job_id
+	payload.id = payload.id or route.job_id
+	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
+		principal = principal,
+		connect = deps.connect,
+		bus = deps.bus,
+		timeout = deps.command_timeout or 5.0,
+		run_op = function (_, conn)
+			return conn:call_op({ 'cap', 'update-manager', 'main', 'rpc', method }, payload, {
+				timeout = deps.command_timeout or 5.0,
+			}):wrap(function (value, call_err)
+				if value == nil then return nil, call_err or 'upstream_failed' end
+				return value, nil
+			end)
+		end,
+	})
+	if st ~= 'ok' then
+		perform_response(owner:reply_error_op(nil, result_or_primary))
+		return { status = 'failed', err = result_or_primary }
+	end
+	perform_response(owner:reply_json_op(200, result_or_primary))
+	return { status = 'ok' }
+end
+
+local function handle_upload(scope, owner, ctx, deps)
+	local principal = principal_from(ctx, deps)
+	if principal == nil then
+		perform_response(owner:reply_error_op(401, 'unauthenticated'))
+		return { status = 'unauthenticated' }
+	end
+
+	emit_log(deps, 'info', upload_request_metadata(ctx, principal))
+	local opts = copy_table(deps.update or deps)
+	opts.principal = principal
+	opts.connect = opts.connect or deps.connect
+	opts.bus = opts.bus or deps.bus
+	local prev_log = opts.log
+	opts.log = function (level, payload)
+		if type(prev_log) == 'function' then pcall(prev_log, level, payload) end
+		local out = copy_table(payload or {})
+		out.principal = out.principal or principal_summary(principal)
+		out.session_id = out.session_id or session_id_from(ctx)
+		emit_log(deps, level, out)
+	end
+
+	local result = upload.run(scope, owner, ctx, opts)
+	if type(result) == 'table' and (result.status == 'ok' or result.artifact_id ~= nil) then
+		emit_log(deps, 'info', {
+			what = 'upload_ok',
+			artifact_id = result.artifact_id,
+			job_id = type(result.job) == 'table' and (result.job.job_id or result.job.id) or nil,
+			started = result.started ~= nil,
+			principal = principal_summary(principal),
+			session_id = session_id_from(ctx),
+		})
+	else
+		emit_log(deps, 'warn', {
+			what = 'upload_failed',
+			status = type(result) == 'table' and result.status or nil,
+			err = type(result) == 'table' and result.err or result,
+			principal = principal_summary(principal),
+			session_id = session_id_from(ctx),
+		})
+	end
+	return result
 end
 
 function M.run(scope, ctx, deps)
@@ -184,8 +398,10 @@ function M.run(scope, ctx, deps)
 		return handle_session_get(owner, ctx, deps)
 	elseif route.kind == 'command' then
 		return handle_command(scope, owner, ctx, route, deps)
+	elseif route.kind == 'update_job_action' then
+		return handle_update_job_action(scope, owner, ctx, route, deps)
 	elseif route.kind == 'upload' then
-		return upload.run(scope, owner, ctx, deps.update or deps)
+		return handle_upload(scope, owner, ctx, deps)
 	elseif route.kind == 'sse' then
 		return sse.run(scope, owner, route, deps)
 	elseif route.kind == 'static' then

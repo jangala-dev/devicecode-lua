@@ -282,6 +282,46 @@ function tests.test_create_job_transfers_artifact_ownership_after_durable_save()
   end)
 end
 
+function tests.test_create_job_normalises_nested_upload_artifact_identity()
+  fibers.run(function ()
+    local saved = {}
+    local job_store = store_mod.wrap({
+      load_all_op = function () return op.always({ jobs = {}, order = {}, next_seq = 1 }, nil) end,
+      save_job_op = function (_, job)
+        saved[#saved + 1] = job
+        return op.always(true, nil)
+      end,
+    })
+    local req = request({
+      method = 'create_job',
+      job_id = 'j-nested',
+      component = 'mcu',
+      artifact_id = {
+        tag = 'ingest_committed',
+        artifact = { artifact_ref = 'artifact-nested' },
+        bytes = 427872,
+      },
+    })
+
+    local st, _, result = fibers.run_scope(function (scope)
+      local jobs = start_jobs(scope, job_store)
+      local out = manager_requests.create_job(scope, {
+        request = req,
+        jobs = jobs,
+        config = { components = { mcu = { id = 'mcu' } } },
+        generation = 1,
+      })
+      jobs:cancel('test complete')
+      return out
+    end)
+
+    assert_eq(st, 'ok')
+    assert_eq(result.status, 'persisted')
+    assert_eq(saved[1].artifact_ref, 'artifact-nested')
+    assert_eq(req.value.job.artifact_ref, 'artifact-nested')
+  end)
+end
+
 
 function tests.test_create_job_worker_failure_surfaces_primary_reason_to_request()
 	fibers.run(function ()

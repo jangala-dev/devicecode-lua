@@ -133,6 +133,7 @@ function tests.test_upload_promotes_transfer_chunk_header_to_job_metadata()
 				['X-Artifact-Version'] = 'mcu-v1',
 				['X-Artifact-Build'] = 'build-1',
 				['X-Artifact-Image-Id'] = 'mcu-image-1',
+				['X-Artifact-Compat-Commit-Image-Id'] = 'img-dev',
 			},
 			body_stream = body_from_chunks({ 'abc' }),
 		}, {
@@ -151,6 +152,7 @@ function tests.test_upload_promotes_transfer_chunk_header_to_job_metadata()
 		assert_eq(captured.metadata.version, 'mcu-v1')
 		assert_eq(captured.metadata.build, 'build-1')
 		assert_eq(captured.metadata.image_id, 'mcu-image-1')
+		assert_eq(captured.metadata.compat_commit_image_id, 'img-dev')
 		assert_eq(captured.metadata.transfer_chunk_raw, 4096)
 	end)
 end
@@ -227,6 +229,42 @@ function tests.test_artifact_ingest_boundary_requires_op_methods_and_abort_now()
 	ok, err = ingest.abort_now({ abort_now = function () return fibers.always(true, nil) end }, 'closed')
 	assert_nil(ok)
 	assert_eq(err, 'artifact ingest abort_now must be immediate and must not return an Op')
+end
+
+function tests.test_bus_artifact_ingest_commit_extracts_nested_artifact_ref()
+	local ingest = require 'services.ui.update.artifact_ingest'
+	fibers.run(function ()
+		local artifact = {
+			ref = function ()
+				return 'artifact-nested-ref'
+			end,
+		}
+		local conn = {
+			call_op = function (_, topic)
+				local method = topic[#topic]
+				if method == 'create' then
+					return fibers.always({ ingest = { ingest_id = 'ingest-nested' } })
+				elseif method == 'commit' then
+					return fibers.always({
+						commit = {
+							tag = 'ingest_committed',
+							ingest_id = 'ingest-nested',
+							artifact = artifact,
+							bytes = 427872,
+						},
+					})
+				end
+				return fibers.always(nil, 'unexpected method')
+			end,
+		}
+
+		local client = ingest.bus_client(conn)
+		local handle = assert(fibers.perform(ingest.open_ingest_op(client, {})))
+		local ref, err = fibers.perform(ingest.commit_op(handle))
+
+		assert_nil(err)
+		assert_eq(ref, 'artifact-nested-ref')
+	end)
 end
 
 function tests.test_upload_timeout_while_append_pending_aborts_uncommitted_ingest()

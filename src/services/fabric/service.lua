@@ -411,6 +411,32 @@ local function make_service_caps(self)
 	}
 end
 
+local function copy_log_payload(payload)
+	local out = {}
+	for k, v in pairs(payload or {}) do out[k] = v end
+	return out
+end
+
+local function merge_log_payload(payload, extra)
+	local out = copy_log_payload(payload)
+	for k, v in pairs(extra or {}) do out[k] = v end
+	return out
+end
+
+local function publish_transfer_log(state, level, payload)
+	if type(state) ~= 'table' or type(state.svc) ~= 'table' then return true, nil end
+	if type(state.svc.obs_log) ~= 'function' then return true, nil end
+	local out = copy_log_payload(payload)
+	out.component = out.component or 'transfer'
+	return state.svc:obs_log(level or 'debug', out)
+end
+
+local function transfer_log_fn(state)
+	return function (level, payload)
+		return publish_transfer_log(state, level, payload)
+	end
+end
+
 local function default_link_runner(link_scope, spec)
 	return link_mod.run(link_scope, spec)
 end
@@ -495,9 +521,7 @@ local function coordinator_loop(self)
 		end
 
 		if ev.kind == 'link_done' then
-			if ev.service_id ~= self._service_id or ev.service_generation ~= self._service_generation then
-				-- Completion for another service instance/generation. Ignore.
-			else
+			if ev.service_id == self._service_id and ev.service_generation == self._service_generation then
 				local accepted = record_link_done(self, ev)
 
 				if accepted then
@@ -715,6 +739,23 @@ local function transfer_payload(req)
 	return type(req) == 'table' and type(req.payload) == 'table' and req.payload or {}
 end
 
+local function transfer_request_summary(payload)
+	payload = payload or {}
+	return {
+		request_id = payload.request_id or payload.id,
+		link_id = payload.link_id or payload.link,
+		target = payload.target,
+		size = payload.size,
+		digest_alg = payload.digest_alg,
+		digest = payload.digest,
+		timeout_s = payload.timeout_s,
+		chunk_size = payload.chunk_size,
+		has_source = payload.source ~= nil,
+		has_source_owner = payload.source_owner ~= nil,
+		source_type = type(payload.source),
+	}
+end
+
 local function transfer_request_params(state, req)
 	local p = shallow_copy(transfer_payload(req))
 	local link_id = p.link_id or p.link
@@ -729,14 +770,48 @@ local function transfer_request_params(state, req)
 	p.admission_tx = tx
 	state.transfer_seq = (state.transfer_seq or 0) + 1
 	p.request_id = p.request_id or p.id or ('fabric-transfer-' .. tostring(state.transfer_seq))
+	p.log = p.log or state.transfer_log
 	return p, nil
 end
 
 local function run_public_transfer_request(scope, state, req)
+	local raw = transfer_payload(req)
+	publish_transfer_log(state, 'info', merge_log_payload(transfer_request_summary(raw), {
+		what = 'transfer_request_rx',
+	}))
 	local params, perr = transfer_request_params(state, req)
-	if not params then return fail_request(req, perr) end
+	if not params then
+		publish_transfer_log(state, 'warn', {
+			what = 'transfer_request_rejected',
+			err = perr,
+		})
+		return fail_request(req, perr)
+	end
+	publish_transfer_log(state, 'info', merge_log_payload(transfer_request_summary(params), {
+		what = 'transfer_client_begin',
+		link_id = params.link_id,
+	}))
 	local result, err = transfer_client.run(scope, params)
-	if not result then return fail_request(req, err or 'transfer_failed') end
+	if not result then
+		publish_transfer_log(state, 'warn', {
+			what = 'transfer_client_failed',
+			request_id = params.request_id,
+			link_id = params.link_id,
+			target = params.target,
+			size = params.size,
+			err = err or 'transfer_failed',
+		})
+		return fail_request(req, err or 'transfer_failed')
+	end
+	publish_transfer_log(state, 'info', {
+		what = 'transfer_client_ok',
+		request_id = params.request_id,
+		link_id = params.link_id,
+		target = result.target or params.target,
+		xfer_id = result.xfer_id,
+		sent_bytes = result.sent_bytes,
+		size = result.size or params.size,
+	})
 	return reply_request(req, { ok = true, result = result, link_id = params.link_id })
 end
 
@@ -801,6 +876,7 @@ local function build_generation_overrides(state, compiled)
 	for _, link in ipairs(compiled.links or {}) do
 		local override = merged_link_override(state, link.link_id)
 		override.conn = override.conn or state.conn
+		override.log = override.log or state.transfer_log
 		if override.transfer_admission_rx == nil then
 			local tx, rx = mailbox.new(state.transfer_admission_queue_len or 16, { full = 'reject_newest' })
 			state.transfer_admissions[link.link_id] = tx
@@ -836,6 +912,7 @@ local function start_generation(state, compiled)
 				conn             = state.conn,
 				link_runner      = state.link_runner,
 				link_overrides   = overrides,
+				_private_link_runtime = state.private_link_runtime,
 				policy           = state.config_generation_policy,
 				done_queue_len   = state.config_generation_done_queue_len,
 			})
@@ -1051,6 +1128,7 @@ function M.start(conn, opts)
 		config_generation_seq = 0,
 		pending_events = {},
 		link_runner = opts.link_runner,
+		private_link_runtime = not not opts._private_link_runtime,
 		link_overrides = opts.link_overrides,
 		config_generation_policy = opts.config_generation_policy,
 		config_generation_done_queue_len = opts.config_generation_done_queue_len,
@@ -1059,6 +1137,7 @@ function M.start(conn, opts)
 		transfer_seq = 0,
 		last_err = nil,
 	}
+	state.transfer_log = transfer_log_fn(state)
 
 	local transfer_ok, transfer_err = bind_transfer_manager(scope, state, opts)
 	if transfer_ok ~= true then

@@ -13,6 +13,16 @@ local sleep  = require 'fibers.sleep'
 
 local M = {}
 
+local function log_event(log, level, fields)
+	if type(log) ~= 'function' then return true, nil end
+	local payload = {}
+	for k, v in pairs(fields or {}) do payload[k] = v end
+	payload.component = payload.component or 'update_active_job'
+	local ok, err = pcall(log, level or 'debug', payload)
+	if ok then return true, nil end
+	return nil, err
+end
+
 local function backend_method(backend, name, required)
 	if type(backend) ~= 'table' then
 		error('active_job: backend required', 0)
@@ -85,8 +95,26 @@ end
 
 function M.stage(_scope, params)
 	params = params or {}
+	log_event(params.log, 'info', {
+		what = 'update_stage_begin',
+		job_id = params.job and params.job.job_id or nil,
+		component_id = params.job and params.job.component or nil,
+		artifact_ref = params.job and params.job.artifact_ref or nil,
+	})
 	local backend, job, ctx, preflight, prepared = stage_context(params)
+	log_event(params.log, 'info', {
+		what = 'update_stage_backend_begin',
+		job_id = job.job_id,
+		component_id = job.component,
+		artifact_ref = job.artifact_ref,
+	})
 	local staged = perform_backend_op(backend, 'stage_op', true, job, ctx)
+	log_event(params.log, 'info', {
+		what = 'update_stage_backend_ok',
+		job_id = job.job_id,
+		component_id = job.component,
+		artifact_ref = job.artifact_ref,
+	})
 
 	return {
 		tag       = 'staged',
@@ -167,6 +195,35 @@ local function begin_commit_attempt(params, job, ctx, policy)
 	return result
 end
 
+local function attach_commit_observation(params, job, ctx)
+	local observer = params and params.observer or nil
+	if type(observer) ~= 'table' or type(observer.snapshot) ~= 'function' then
+		return nil
+	end
+
+	local ok, snapshot = pcall(function () return observer:snapshot() end)
+	if not ok or type(snapshot) ~= 'table' then
+		return nil
+	end
+
+	ctx.snapshot = snapshot
+	if type(snapshot.components) == 'table'
+		and type(job) == 'table'
+		and type(job.component) == 'string'
+	then
+		ctx.component_state = snapshot.components[job.component]
+	elseif type(snapshot.by_id) == 'table'
+		and type(job) == 'table'
+		and type(job.component) == 'string'
+	then
+		local rec = snapshot.by_id[job.component]
+		if type(rec) == 'table' then
+			ctx.component_state = rec.state or rec
+		end
+	end
+	return snapshot
+end
+
 local function persist_commit_accepted(params, job, ctx, policy, accepted)
 	local jobs = params.jobs or (params.ctx and params.ctx.jobs)
 	local lease = params.lease
@@ -196,6 +253,7 @@ function M.commit(_scope, params)
 	local ctx = base_ctx(params, 'commit')
 	local policy = backend_commit_policy(backend)
 	local attempt = begin_commit_attempt(params, job, ctx, policy)
+	attach_commit_observation(params, job, ctx)
 
 	local accepted = perform_backend_op(backend, 'commit_op', true, job, ctx)
 	local persisted = persist_commit_accepted(params, job, ctx, policy, accepted)

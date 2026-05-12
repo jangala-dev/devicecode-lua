@@ -45,13 +45,30 @@ local function recv_with_timeout(rx, label, timeout)
 	return item
 end
 
+local function recv_optional(rx, timeout)
+	timeout = timeout or 0.03
+	local which, item = fibers.perform(fibers.named_choice{
+		item = rx:recv_op(),
+		timeout = sleep.sleep_op(timeout),
+	})
+	if which == 'timeout' then return nil end
+	return item
+end
+
 local function start_session(scope, opts)
 	opts = opts or {}
 	local frame_tx, frame_rx = mailbox.new(16, { full = 'reject_newest' })
 	local control_tx, control_rx = mailbox.new(16, { full = 'reject_newest' })
 	local rpc_tx, rpc_rx = mailbox.new(16, { full = 'reject_newest' })
 	local transfer_tx, transfer_rx = mailbox.new(16, { full = 'reject_newest' })
-	local outbound = session.new_outbound_gate { tx_control = control_tx, tx_rpc = control_tx, tx_bulk = control_tx }
+	local outbound = session.new_outbound_gate {
+		tx_control = control_tx,
+		tx_rpc = control_tx,
+		tx_bulk = control_tx,
+		transfer_quiet = opts.transfer_quiet,
+		log = opts.log,
+		link_id = opts.link_id or 'link-a',
+	}
 	local done_tx, done_rx = mailbox.new(1, { full = 'reject_newest' })
 
 	local ok, err = scope:spawn(function ()
@@ -73,6 +90,8 @@ local function start_session(scope, opts)
 			rehello_after_s = opts.rehello_after_s,
 			bad_frame_limit = opts.bad_frame_limit,
 			bad_frame_window_s = opts.bad_frame_window_s,
+			transfer_quiet = opts.transfer_quiet,
+			log = opts.log,
 		})
 		queue.try_admit_required(done_tx, result, 'session_done')
 	end)
@@ -83,6 +102,7 @@ local function start_session(scope, opts)
 		control_rx = control_rx,
 		rpc_rx = rpc_rx,
 		transfer_rx = transfer_rx,
+		outbound = outbound,
 		done_rx = done_rx,
 	}
 end
@@ -284,6 +304,93 @@ function tests.test_rehello_accepts_new_peer_sid_from_hello_ack()
 	end)
 end
 
+function tests.test_session_ping_is_suppressed_during_transfer_quiet()
+	fibers.run(function (scope)
+		local quiet = { active = true, xfer_id = 'xfer-quiet', reason = 'transfer_attempt' }
+		local h = start_session(scope, {
+			transfer_quiet = quiet,
+			ping_interval_s = 0.01,
+			rehello_after_s = 10,
+			liveness_timeout_s = 1.0,
+		})
+
+		recv_with_timeout(h.control_rx, 'initial hello')
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+		recv_with_timeout(h.rpc_rx, 'rpc peer session')
+		recv_with_timeout(h.transfer_rx, 'transfer peer session')
+
+		assert_nil(recv_optional(h.control_rx, 0.03), 'ping should pause while transfer quiet is active')
+
+		quiet.active = false
+		quiet.hold_until = nil
+
+		local ping = recv_with_timeout(h.control_rx, 'ping after transfer quiet clears', 0.20)
+		assert_eq(ping.frame.type, 'ping')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
+function tests.test_session_pong_is_suppressed_during_transfer_quiet()
+	fibers.run(function (scope)
+		local quiet = { active = true, xfer_id = 'xfer-quiet', reason = 'transfer_attempt' }
+		local h = start_session(scope, {
+			transfer_quiet = quiet,
+			ping_interval_s = 10,
+			rehello_after_s = 10,
+			liveness_timeout_s = 1.0,
+		})
+
+		recv_with_timeout(h.control_rx, 'initial hello')
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+		recv_with_timeout(h.rpc_rx, 'rpc peer session')
+		recv_with_timeout(h.transfer_rx, 'transfer peer session')
+
+		admit_frame(h.frame_tx, assert(protocol.ping('mcu-sid')))
+		assert_nil(recv_optional(h.control_rx, 0.03), 'pong should pause while transfer quiet is active')
+
+		quiet.active = false
+		quiet.hold_until = nil
+
+		admit_frame(h.frame_tx, assert(protocol.ping('mcu-sid')))
+		local pong = recv_with_timeout(h.control_rx, 'pong after transfer quiet clears', 0.20)
+		assert_eq(pong.frame.type, 'pong')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
+function tests.test_session_rehello_is_suppressed_during_transfer_quiet()
+	fibers.run(function (scope)
+		local quiet = { active = true, xfer_id = 'xfer-quiet', reason = 'transfer_attempt' }
+		local h = start_session(scope, {
+			transfer_quiet = quiet,
+			hello_interval_s = 0.01,
+			ping_interval_s = 10,
+			rehello_after_s = 0.01,
+			liveness_timeout_s = 1.0,
+		})
+
+		recv_with_timeout(h.control_rx, 'initial hello')
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+		recv_with_timeout(h.rpc_rx, 'rpc peer session')
+		recv_with_timeout(h.transfer_rx, 'transfer peer session')
+
+		assert_nil(recv_optional(h.control_rx, 0.03), 'rehello should pause while transfer quiet is active')
+
+		quiet.active = false
+		quiet.hold_until = nil
+
+		local hello = recv_with_timeout(h.control_rx, 'rehello after transfer quiet clears', 0.20)
+		assert_eq(hello.frame.type, 'hello')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
 
 function tests.test_wire_errors_below_limit_are_counted_without_dropping_session()
 	fibers.run(function (scope)
@@ -309,9 +416,35 @@ function tests.test_wire_errors_below_limit_are_counted_without_dropping_session
 	end)
 end
 
-function tests.test_bad_frame_limit_drops_current_peer_session()
+function tests.test_valid_frame_clears_bad_frame_burst()
 	fibers.run(function (scope)
 		local h = start_session(scope, { bad_frame_limit = 2, bad_frame_window_s = 10 })
+		recv_with_timeout(h.control_rx, 'initial hello')
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+		recv_with_timeout(h.rpc_rx, 'peer session')
+		recv_with_timeout(h.transfer_rx, 'transfer peer session')
+
+		admit_wire_error(h.frame_tx, 'decode_failed: stale boot fragment')
+		admit_frame(h.frame_tx, assert(protocol.pub({ 'state', 'self' }, { ok = true }, true)))
+		local routed = recv_with_timeout(h.rpc_rx, 'rpc frame after resync')
+		assert_eq(routed.kind, 'session_frame')
+		assert_eq(routed.frame.type, 'pub')
+
+		admit_wire_error(h.frame_tx, 'decode_failed: later fragment')
+		assert_nil(recv_optional(h.rpc_rx, 0.03), 'single post-resync bad frame should not drop session')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
+function tests.test_bad_frame_limit_drops_current_peer_session()
+	fibers.run(function (scope)
+		local h = start_session(scope, {
+			bad_frame_limit = 2,
+			bad_frame_window_s = 10,
+			hello_interval_s = 0.05,
+		})
 		recv_with_timeout(h.control_rx, 'initial hello')
 		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
 		recv_with_timeout(h.rpc_rx, 'peer session')
@@ -328,6 +461,11 @@ function tests.test_bad_frame_limit_drops_current_peer_session()
 
 		admit_frame(h.frame_tx, assert(protocol.pub({ 'state', 'self' }, { ok = true }, true)))
 		assert_nil(queue.try_recv_now(h.rpc_rx), 'rpc frame should be dropped after bad-frame session reset')
+
+		assert_nil(recv_optional(h.control_rx, 0.02), 'bad-frame reset should not enqueue immediate hello')
+		local hello = recv_with_timeout(h.control_rx, 'backed-off hello after bad-frame reset', 0.20)
+		assert_eq(hello.frame.type, 'hello')
+		assert_eq(hello.frame.sid, 'cm5-sid')
 
 		h.frame_tx:close('done')
 		recv_with_timeout(h.done_rx, 'session done')

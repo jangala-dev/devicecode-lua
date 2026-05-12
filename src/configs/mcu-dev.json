@@ -30,6 +30,25 @@
       ]
     }
   },
+  "http": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/http/1",
+      "id": "main"
+    }
+  },
+  "ui": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/ui/1",
+      "http": {
+        "enabled": true,
+        "cap_id": "main",
+        "host": "0.0.0.0",
+        "port": 8080
+      }
+    }
+  },
   "fabric": {
     "rev": 1,
     "data": {
@@ -41,7 +60,7 @@
           "peer_id": "mcu",
           "transport": {
             "kind": "uart",
-            "source": "uart_manager",
+            "source": "uart_uart-0",
             "class": "uart",
             "id": "uart-0",
             "open_opts": {},
@@ -58,7 +77,7 @@
               {
                 "id": "mcu-state",
                 "local": [ "raw", "member", "mcu", "state" ],
-                "remote": [ "state" ]
+                "remote": [ "state", "self" ]
               },
               {
                 "id": "mcu-cap",
@@ -70,9 +89,15 @@
             "rpc": {
               "outbound": [
                 {
-                  "id": "mcu-cap-rpc",
-                  "local": [ "raw", "member", "mcu", "cap" ],
-                  "remote": [ "cap" ],
+                  "id": "mcu-updater-prepare",
+                  "local": [ "raw", "member", "mcu", "cmd", "self", "updater", "prepare" ],
+                  "remote": [ "cmd", "self", "updater", "prepare" ],
+                  "timeout_s": 15.0
+                },
+                {
+                  "id": "mcu-updater-commit",
+                  "local": [ "raw", "member", "mcu", "cmd", "self", "updater", "commit" ],
+                  "remote": [ "cmd", "self", "updater", "commit" ],
                   "timeout_s": 15.0
                 }
               ],
