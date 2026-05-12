@@ -14,6 +14,8 @@ local model         = require 'services.update.model'
 local M = {}
 
 local DEFAULT_COMMIT_SETTLE_S = 0.5
+local DEFAULT_STAGE_RETRY_DELAY_S = 3.0
+local DEFAULT_STAGE_MAX_ATTEMPTS = 3
 
 local Backend = {}
 Backend.__index = Backend
@@ -94,6 +96,54 @@ local function component_call_op(self, job, method, payload, timeout)
 			topic = topic_string(topic),
 		})
 		return result, nil
+	end)
+end
+
+local function is_transient_stage_error(err)
+	local s = tostring(err or '')
+	return s == 'transfer_sender_frame_feed_closed'
+		or s == 'session_closed'
+		or s == 'new_peer_session'
+		or s == 'link_not_ready'
+		or s == 'no_session'
+		or s:match('session_dropped') ~= nil
+		or s:match('frame_feed_closed') ~= nil
+end
+
+local function retrying_stage_call_op(self, job, payload, timeout)
+	local max_attempts = self.stage_max_attempts or DEFAULT_STAGE_MAX_ATTEMPTS
+	local retry_delay = self.stage_retry_delay_s or DEFAULT_STAGE_RETRY_DELAY_S
+	if max_attempts <= 1 then
+		return component_call_op(self, job, 'stage-update', payload, timeout)
+	end
+
+	return fibers.run_scope_op(function ()
+		local last_err
+		for attempt = 1, max_attempts do
+			local reply, err = fibers.perform(component_call_op(self, job, 'stage-update', payload, timeout))
+			if reply ~= nil then return reply, nil end
+			last_err = err or 'stage_update_failed'
+			if attempt >= max_attempts or not is_transient_stage_error(last_err) then
+				return nil, last_err
+			end
+			log_event(self, 'warn', {
+				what = 'update_device_backend_stage_retry',
+				job_id = job.job_id,
+				component_id = job.component,
+				err = last_err,
+				attempt = attempt,
+				next_attempt = attempt + 1,
+				max_attempts = max_attempts,
+				delay_s = retry_delay,
+			})
+			fibers.perform(sleep.sleep_op(retry_delay))
+		end
+		return nil, last_err or 'stage_update_failed'
+	end):wrap(function (st, rep, reply, err)
+		if st ~= 'ok' then
+			return nil, tostring(err or rep or st)
+		end
+		return reply, err
 	end)
 end
 
@@ -323,10 +373,9 @@ function Backend:prepare_op(job, ctx)
 end
 
 function Backend:stage_op(job, ctx)
-	return component_call_op(
+	return retrying_stage_call_op(
 		self,
 		job,
-		'stage-update',
 		base_payload(job, ctx),
 		call_timeout(self, ctx, 'timeout_stage', 900.0)
 	)
@@ -370,6 +419,8 @@ function M.new(opts)
 		timeout_stage = opts.timeout_stage,
 		timeout_commit = opts.timeout_commit,
 		commit_settle_s = opts.commit_settle_s,
+		stage_max_attempts = opts.stage_max_attempts,
+		stage_retry_delay_s = opts.stage_retry_delay_s,
 		_log = opts.log,
 	}, Backend)
 end

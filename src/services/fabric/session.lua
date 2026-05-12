@@ -405,6 +405,24 @@ local function same_peer(cur, frame)
 		and frame.sid == cur.peer_sid
 end
 
+local function is_self_control_frame(self, cur, frame)
+	cur = cur or session_snapshot(self)
+	if type(frame) ~= 'table' then return false end
+	if type(frame.sid) == 'string'
+		and frame.sid ~= ''
+		and frame.sid == cur.local_sid
+	then
+		return true
+	end
+	if type(frame.node) == 'string'
+		and frame.node ~= ''
+		and frame.node == cur.local_node
+	then
+		return true
+	end
+	return false
+end
+
 local function note_peer_rx(self, at)
 	at = at or fibers.now()
 	self._last_peer_at = at
@@ -659,6 +677,9 @@ end
 
 local function handle_session_frame(self, checked, at)
 	local cur = session_snapshot(self)
+	if is_self_control_frame(self, cur, checked) then
+		return
+	end
 	if (checked.type == 'hello' or checked.type == 'hello_ack')
 		and not protocol.proto_supported(checked.proto)
 	then

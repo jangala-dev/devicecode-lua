@@ -180,6 +180,49 @@ function tests.test_non_session_frames_are_dropped_until_session_is_established(
 	end)
 end
 
+function tests.test_echoed_hello_is_ignored_before_session_establishment()
+	fibers.run(function (scope)
+		local h = start_session(scope)
+		local hello = recv_with_timeout(h.control_rx, 'initial hello')
+
+		admit_frame(h.frame_tx, hello.frame)
+		assert_nil(recv_optional(h.rpc_rx, 0.03), 'echoed hello must not establish a peer session')
+		assert_nil(recv_optional(h.control_rx, 0.03), 'echoed hello must not get hello_ack')
+
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+		local ev = recv_with_timeout(h.rpc_rx, 'real peer session')
+		assert_eq(ev.kind, 'peer_session')
+		assert_eq(ev.session.peer_node, 'mcu')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
+function tests.test_echoed_hello_is_ignored_after_session_establishment()
+	fibers.run(function (scope)
+		local h = start_session(scope, {
+			ping_interval_s = 10,
+			rehello_after_s = 10,
+		})
+		local hello = recv_with_timeout(h.control_rx, 'initial hello')
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+		recv_with_timeout(h.rpc_rx, 'rpc peer session')
+		recv_with_timeout(h.transfer_rx, 'transfer peer session')
+
+		admit_frame(h.frame_tx, hello.frame)
+		assert_nil(recv_optional(h.rpc_rx, 0.03), 'echoed hello must not drop the peer session')
+
+		admit_frame(h.frame_tx, assert(protocol.pub({ 'state', 'self' }, { ok = true }, true)))
+		local routed = recv_with_timeout(h.rpc_rx, 'rpc frame after echoed hello')
+		assert_eq(routed.kind, 'session_frame')
+		assert_eq(routed.session.peer_node, 'mcu')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
 function tests.test_transfer_frames_are_tagged_for_transfer_lane_only()
 	fibers.run(function (scope)
 		local h = start_session(scope)
@@ -359,6 +402,29 @@ function tests.test_session_pong_is_suppressed_during_transfer_quiet()
 
 		h.frame_tx:close('done')
 		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
+function tests.test_session_accepts_go_ping_timestamp_field()
+	fibers.run(function (scope)
+		local h = start_session(scope, {
+			ping_interval_s = 10,
+			rehello_after_s = 10,
+			liveness_timeout_s = 1.0,
+		})
+
+		recv_with_timeout(h.control_rx, 'initial hello')
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+		recv_with_timeout(h.rpc_rx, 'rpc peer session')
+		recv_with_timeout(h.transfer_rx, 'transfer peer session')
+
+		admit_frame(h.frame_tx, { type = 'ping', sid = 'mcu-sid', ts = 123 })
+		local pong = recv_with_timeout(h.control_rx, 'pong after timestamped ping', 0.20)
+		assert_eq(pong.frame.type, 'pong')
+
+		h.frame_tx:close('done')
+		local done = recv_with_timeout(h.done_rx, 'session done')
+		assert_eq(done.snapshot.wire_errors, 0)
 	end)
 end
 

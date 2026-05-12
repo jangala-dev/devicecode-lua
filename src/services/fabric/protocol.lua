@@ -72,7 +72,7 @@ local FRAME_SPECS = {
 	ping = {
 		class = 'session_control',
 		lane = 'session_control',
-		fields = { 'type', 'sid' },
+		fields = { 'type', 'sid', 'ts' },
 		required = {
 			{ 'sid', 'missing_sid' },
 		},
@@ -81,7 +81,7 @@ local FRAME_SPECS = {
 	pong = {
 		class = 'session_control',
 		lane = 'session_control',
-		fields = { 'type', 'sid' },
+		fields = { 'type', 'sid', 'ts' },
 		required = {
 			{ 'sid', 'missing_sid' },
 		},
@@ -468,6 +468,13 @@ local function validate_special_cases(frame)
 		and type(frame.meta) ~= 'table'
 	then
 		return nil, 'invalid_meta'
+	end
+
+	if (frame.type == 'ping' or frame.type == 'pong')
+		and frame.ts ~= nil
+		and type(frame.ts) ~= 'number'
+	then
+		return nil, 'invalid_ts'
 	end
 
 	return true, nil

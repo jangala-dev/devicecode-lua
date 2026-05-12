@@ -114,6 +114,20 @@ function tests.test_ping_and_pong_require_sid()
 	assert_nil(err)
 end
 
+function tests.test_ping_and_pong_accept_go_timestamp_field()
+	local ok, err = protocol.validate({ type = 'ping', sid = 'sid-1', ts = 123 })
+	assert_not_nil(ok)
+	assert_nil(err)
+
+	ok, err = protocol.validate({ type = 'pong', sid = 'sid-1', ts = 123 })
+	assert_not_nil(ok)
+	assert_nil(err)
+
+	ok, err = protocol.validate({ type = 'ping', sid = 'sid-1', ts = 'bad' })
+	assert_nil(ok)
+	assert_eq(err, 'invalid_ts')
+end
+
 function tests.test_pub_requires_dense_scalar_topic_and_boolean_retain()
 	local ok, err = protocol.validate({
 		type = 'pub',

@@ -41,6 +41,61 @@ function tests.test_stage_delegates_to_device_component_action()
 	end)
 end
 
+function tests.test_stage_retries_transient_transfer_session_failure()
+	fibers.run(function ()
+		local calls = 0
+		local logged = {}
+		local conn = {
+			call_op = function ()
+				calls = calls + 1
+				if calls == 1 then
+					return op.always(nil, 'transfer_sender_frame_feed_closed')
+				end
+				return op.always({ ok = true, staged = true }, nil)
+			end,
+		}
+		local backend = backend_mod.new({
+			conn = conn,
+			stage_retry_delay_s = 0.001,
+			log = function (_level, fields) logged[#logged + 1] = fields end,
+		})
+		local result, err = fibers.perform(backend:stage_op({
+			job_id = 'job-retry',
+			component = 'mcu',
+			artifact_ref = 'artifact-1',
+		}, {}))
+
+		assert_not_nil(result, err)
+		assert_eq(calls, 2)
+		assert_eq(logged[#logged].what, 'update_device_backend_call_ok')
+	end)
+end
+
+function tests.test_stage_does_not_retry_signature_failures()
+	fibers.run(function ()
+		local calls = 0
+		local conn = {
+			call_op = function ()
+				calls = calls + 1
+				return op.always(nil, 'imagev1: unknown_key')
+			end,
+		}
+		local backend = backend_mod.new({
+			conn = conn,
+			stage_retry_delay_s = 0.001,
+		})
+		local result, err = fibers.perform(backend:stage_op({
+			job_id = 'job-sig',
+			component = 'mcu',
+			artifact_ref = 'artifact-1',
+		}, {}))
+
+		assert_eq(result, nil)
+		assert_eq(err, 'imagev1: unknown_key')
+		assert_eq(calls, 1)
+	end)
+end
+
 function tests.test_commit_can_use_explicit_compat_image_id_for_bootstrap()
 	fibers.run(function ()
 		local captured_topic
