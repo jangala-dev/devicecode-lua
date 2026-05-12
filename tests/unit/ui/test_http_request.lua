@@ -1,0 +1,112 @@
+-- tests/unit/ui/test_http_request.lua
+
+local run_fibers = require 'tests.support.run_fibers'
+local fibers = require 'fibers'
+local channel = require 'fibers.channel'
+local request = require 'services.ui.http.request'
+local read_model = require 'services.ui.read_model'
+
+local tests = {}
+
+local function fail(msg) error(msg or 'assertion failed', 2) end
+local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end end
+local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end end
+
+local function fake_ctx(method, path)
+	return {
+		method = method,
+		path = path,
+		replies = {},
+		_current = nil,
+		write_headers_op = function(self, status, headers, opts)
+			return fibers.always(function ()
+				self._current = { status = status, body = '', headers = headers, end_stream = opts and opts.end_stream }
+				if opts and opts.end_stream then
+					self.replies[#self.replies + 1] = self._current
+					self._current = nil
+				end
+				return true, nil
+			end):wrap(function (th)
+				return th()
+			end)
+		end,
+		write_chunk_op = function(self, chunk, opts)
+			return fibers.always(function ()
+				assert(self._current, 'no response headers')
+				self._current.body = self._current.body .. tostring(chunk or '')
+				if opts and opts.end_stream then
+					self.replies[#self.replies + 1] = self._current
+					self._current = nil
+				end
+				return true, nil
+			end):wrap(function (th)
+				return th()
+			end)
+		end,
+		terminate = function(self, reason)
+			self.abandoned = reason
+			return true
+		end,
+	}
+end
+
+function tests.test_http_read_request_uses_model_and_replies_once()
+	run_fibers.run(function (scope)
+		local model = read_model.new()
+		model:set({ 'svc', 'ui', 'status' }, { state = 'running' })
+		local ctx = fake_ctx('GET', '/api/state/svc/ui/status')
+		local result = request.run(scope, ctx, { model = model })
+		assert_eq(result.status, 'ok')
+		assert_eq(#ctx.replies, 1)
+		assert_eq(ctx.replies[1].status, 200)
+		assert_not_nil(ctx.replies[1].body)
+	end)
+end
+
+
+function tests.test_http_response_writer_may_yield_inside_request_scope_without_blocking_peers()
+	run_fibers.run(function (scope)
+		local model = read_model.new()
+		model:set({ 'svc', 'ui', 'status' }, { state = 'running' })
+
+		local started_ch = channel.new()
+		local resume_ch = channel.new()
+		local events = {}
+		local ctx = fake_ctx('GET', '/api/state/svc/ui/status')
+		ctx.write_headers_op = function(self, status, headers, opts)
+			events[#events + 1] = 'reply-start'
+			started_ch:put(true)
+			return resume_ch:get_op():wrap(function (token)
+				events[#events + 1] = 'reply-finish:' .. tostring(token)
+				self._current = { status = status, body = '', headers = headers, end_stream = opts and opts.end_stream }
+				return true, nil
+			end)
+		end
+
+		fibers.spawn(function ()
+			started_ch:get()
+			events[#events + 1] = 'peer-fiber-ran'
+			resume_ch:put('resumed')
+		end)
+
+		local result = request.run(scope, ctx, { model = model })
+		assert_eq(result.status, 'ok')
+		assert_eq(#ctx.replies, 1)
+		assert_eq(ctx.replies[1].status, 200)
+		assert_eq(events[1], 'reply-start')
+		assert_eq(events[2], 'peer-fiber-ran')
+		assert_eq(events[3], 'reply-finish:resumed')
+	end)
+end
+
+function tests.test_unknown_route_replies_not_found_once()
+	run_fibers.run(function (scope)
+		local ctx = fake_ctx('GET', '/api/nope')
+		local result = request.run(scope, ctx, { model = read_model.new() })
+		assert_eq(result.status, 'not_found')
+		assert_eq(#ctx.replies, 1)
+		assert_eq(ctx.replies[1].status, 404)
+	end)
+end
+
+return tests
