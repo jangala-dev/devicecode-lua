@@ -16,6 +16,8 @@ local runtime = require 'fibers.runtime'
 local sleep   = require 'fibers.sleep'
 local op      = require 'fibers.op'
 
+local tablex = require 'shared.table'
+
 local ok_uuid, uuid = pcall(require, 'uuid')
 
 local M = {}
@@ -40,12 +42,7 @@ local function new_run_id()
 	return ('run-%d-%d'):format(os.time(), math.random(1, 1000000))
 end
 
-local function shallow_copy(x)
-	if type(x) ~= 'table' then return {} end
-	local out = {}
-	for k, v in pairs(x) do out[k] = v end
-	return out
-end
+local shallow_copy = tablex.shallow_copy
 
 local function merge_payload(base, extra)
 	local out = shallow_copy(base)
