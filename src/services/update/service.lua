@@ -8,6 +8,7 @@
 -- services.update.generation.
 
 local fibers       = require 'fibers'
+local op           = require 'fibers.op'
 local mailbox      = require 'fibers.mailbox'
 local scoped_work  = require 'devicecode.support.scoped_work'
 local queue        = require 'devicecode.support.queue'
@@ -69,7 +70,7 @@ local function artifact_cleanup_from_params(params)
 	return {
 		delete_artifact_op = function (_, artifact_ref)
 			local opts, opt_err = cap_sdk.args.new.ArtifactStoreDeleteOpts(artifact_ref)
-			if not opts then return fibers.always(nil, opt_err or 'invalid_artifact_ref') end
+			if not opts then return op.always(nil, opt_err or 'invalid_artifact_ref') end
 			local cap = cap_sdk.new_curated_cap_ref(params.conn, 'artifact_store', store_id)
 			return cap:call_control_op('delete', opts, { timeout = timeout })
 		end,
