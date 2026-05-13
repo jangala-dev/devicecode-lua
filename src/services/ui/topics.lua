@@ -17,18 +17,6 @@ function M.svc_meta()
 end
 
 
-function M.summary()
-	return t('state', 'ui', 'summary')
-end
-
-function M.read_model_status()
-	return t('state', 'ui', 'read-model')
-end
-
-function M.session_count()
-	return t('state', 'ui', 'sessions')
-end
-
 function M.default_retained_patterns()
 	return {
 		t('cfg', '#'),
@@ -36,6 +24,14 @@ function M.default_retained_patterns()
 		t('state', '#'),
 		t('cap', '#'),
 		t('raw', '#'),
+	}
+end
+
+
+function M.default_excluded_retained_patterns()
+	return {
+		t('state', 'ui', '#'),
+		t('obs', 'v1', 'ui', '#'),
 	}
 end
 
