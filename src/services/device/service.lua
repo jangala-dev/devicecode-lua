@@ -34,13 +34,6 @@ local function new_service_id()
 	return ('device-%d-%d'):format(os.time(), math.random(1, 1000000))
 end
 
-local function topic_string(t)
-	if type(t) ~= 'table' then return nil end
-	local out = {}
-	for i = 1, #t do out[i] = tostring(t[i]) end
-	return table.concat(out, '/')
-end
-
 local function source_desc(source)
 	if type(source) ~= 'table' then return {} end
 	if type(source._artifact_desc) == 'table' then return source._artifact_desc end
@@ -62,7 +55,7 @@ local function default_transfer_client(conn)
 			opts = opts or {}
 			local desc = source_desc(source)
 			local request = type(meta.request) == 'table' and meta.request or {}
-			local target = meta.target or topic_string(meta.receiver) or meta.action or meta.component
+			local target = meta.target
 			local source_size = type(source) == 'table' and source.size or nil
 			local source_digest = type(source) == 'table' and source.digest or nil
 			local source_digest_alg = type(source) == 'table' and source.digest_alg or nil
@@ -94,7 +87,6 @@ local function default_transfer_client(conn)
 				digest = digest,
 				timeout_s = timeout_s,
 				meta = meta,
-				receiver = meta.receiver,
 			}, {
 				timeout = opts.timeout,
 				deadline = opts.deadline,
