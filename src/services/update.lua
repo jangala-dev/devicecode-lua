@@ -15,7 +15,6 @@ local job_store_cap = require 'services.update.job_store_cap'
 local manager_requests = require 'services.update.manager_requests'
 local active_runtime = require 'services.update.active_runtime'
 local active_job = require 'services.update.active_job'
-local device_component_backend = require 'services.update.backends.device_component'
 
 return {
 	start = service.start,
@@ -34,7 +33,4 @@ return {
 	manager_requests = manager_requests,
 	active_runtime = active_runtime,
 	active_job = active_job,
-	backends = {
-		device_component = device_component_backend,
-	},
 }
