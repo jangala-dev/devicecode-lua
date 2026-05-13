@@ -70,10 +70,6 @@ local function copy_active(a)
 		request_generation = a.request_generation,
 		session = ctx(a.session),
 		status = a.status,
-		xfer_id = a.xfer_id,
-		target = a.target,
-		size = a.size,
-		sent = a.sent,
 	}
 end
 
@@ -102,10 +98,6 @@ local function snapshot_equal(a, b)
 		if aa.request_id ~= ba.request_id then return false end
 		if aa.request_generation ~= ba.request_generation then return false end
 		if aa.status ~= ba.status then return false end
-		if aa.xfer_id ~= ba.xfer_id then return false end
-		if aa.target ~= ba.target then return false end
-		if aa.size ~= ba.size then return false end
-		if aa.sent ~= ba.sent then return false end
 		if not same_ctx(aa.session, ba.session) then return false end
 	end
 
@@ -179,9 +171,6 @@ function M.claim_slot(state, rec)
 		session = require_ctx(rec.session, 'transfer.claim_slot'),
 		status = rec.status or 'leased',
 		xfer_id = rec.xfer_id,
-		target = rec.target,
-		size = rec.size,
-		sent = 0,
 		frame_tx = rec.frame_tx,
 		lease = rec.lease,
 	}
@@ -539,8 +528,6 @@ local function handle_slot_request(self, req)
 		request_generation = req_gen(req),
 		session = ctx(self._session),
 		xfer_id = req.xfer_id or id,
-		target = req.target,
-		size = req.size,
 		frame_tx = frame_tx,
 		frame_rx = frame_rx,
 	}
@@ -557,9 +544,7 @@ local function handle_slot_request(self, req)
 	self._state.active.lease = lease
 
 	local replied, err = reply_slot(req, { ok = true, lease = lease })
-	if replied ~= true then
-		lease:release(err or 'slot admission reply failed')
-	end
+	if replied ~= true then lease:release(err or 'slot admission reply failed') end
 
 	emit_model(self)
 end
@@ -611,7 +596,6 @@ local function handle_frame(self, ev)
 
 	local active = self._state.active
 	local frame = ev.frame
-	local frame_type = type(frame) == 'table' and frame.type or nil
 
 	if not active
 		or type(frame) ~= 'table'
@@ -621,18 +605,6 @@ local function handle_frame(self, ev)
 		self._state.stats.stale = self._state.stats.stale + 1
 		emit_model(self)
 		return
-	end
-
-	if frame_type == 'xfer_ready' then
-		active.status = 'ready'
-	elseif frame_type == 'xfer_need' and type(frame.next) == 'number' then
-		active.status = 'sending'
-		active.sent = frame.next
-	elseif frame_type == 'xfer_done' then
-		active.status = 'done'
-		active.sent = active.size or active.sent
-	elseif frame_type == 'xfer_abort' then
-		active.status = 'aborted'
 	end
 
 	local ok, err = queue.try_admit_required(active.frame_tx, ev,
