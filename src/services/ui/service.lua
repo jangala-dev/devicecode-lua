@@ -27,12 +27,11 @@ local M = {}
 
 local shallow_copy = tablex.shallow_copy
 
-local function default_auth_opts(params, getenv)
+local function default_auth_opts(params)
 	params = params or {}
 	if params.auth ~= nil then return nil end
 	if params.auth_opts ~= nil then return params.auth_opts end
-	getenv = getenv or os.getenv
-	local password = getenv('DEVICECODE_UI_ADMIN_PASSWORD')
+	local password = os.getenv('DEVICECODE_UI_ADMIN_PASSWORD')
 	if password == nil or password == '' then return nil end
 	return {
 		users = {
@@ -630,8 +629,7 @@ function M.start(conn, opts)
 
 	local params = shallow_copy(opts)
 	params.conn = conn
-	local auth_opts = default_auth_opts(params)
-	params.auth_opts = auth_opts
+	params.auth_opts = default_auth_opts(params)
 	svc:running({ ready = true })
 	return M.run(scope, params)
 end
