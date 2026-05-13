@@ -29,12 +29,6 @@ function M.session_count()
 	return t('state', 'ui', 'sessions')
 end
 
-function M.default_excluded_retained_patterns()
-	return {
-		t('state', 'ui', '#'),
-	}
-end
-
 function M.default_retained_patterns()
 	return {
 		t('cfg', '#'),

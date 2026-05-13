@@ -1,0 +1,133 @@
+{
+  "hal": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/hal/1",
+      "filesystem": [
+        {
+          "name": "config",
+          "root": "/data/configs/"
+        },
+        {
+          "name": "state",
+          "root": "/tmp/dc-states/"
+        }
+      ],
+      "uart": [
+        {
+          "id": "uart-0",
+          "path": "/dev/ttyAMA0",
+          "baud": 115200,
+          "mode": "8N1"
+        }
+      ],
+      "artifact_store": {},
+      "control_store": [
+        {
+          "name": "main",
+          "root": "/tmp/dc-control/"
+        }
+      ]
+    }
+  },
+  "http": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/http/1",
+      "id": "main"
+    }
+  },
+  "ui": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/ui/1",
+      "http": {
+        "enabled": true,
+        "cap_id": "main",
+        "host": "0.0.0.0",
+        "port": 8080
+      }
+    }
+  },
+  "fabric": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/fabric/1",
+      "local_node": "cm5",
+      "links": [
+        {
+          "id": "mcu0",
+          "peer_id": "mcu",
+          "transport": {
+            "kind": "uart",
+            "source": "uart_uart-0",
+            "class": "uart",
+            "id": "uart-0",
+            "open_opts": {},
+            "terminator": "\n"
+          },
+          "session": {
+            "local_node": "cm5",
+            "hello_interval_s": 1.0,
+            "ping_interval_s": 10.0,
+            "liveness_timeout_s": 30.0
+          },
+          "bridge": {
+            "imports": [
+              {
+                "id": "mcu-state",
+                "local": [ "raw", "member", "mcu", "state" ],
+                "remote": [ "state", "self" ]
+              },
+              {
+                "id": "mcu-cap",
+                "local": [ "raw", "member", "mcu", "cap" ],
+                "remote": [ "cap" ]
+              }
+            ],
+            "exports": [],
+            "rpc": {
+              "outbound": [
+                {
+                  "id": "mcu-updater-prepare",
+                  "local": [ "raw", "member", "mcu", "cmd", "self", "updater", "prepare" ],
+                  "remote": [ "cmd", "self", "updater", "prepare" ],
+                  "timeout_s": 15.0
+                },
+                {
+                  "id": "mcu-updater-commit",
+                  "local": [ "raw", "member", "mcu", "cmd", "self", "updater", "commit" ],
+                  "remote": [ "cmd", "self", "updater", "commit" ],
+                  "timeout_s": 15.0
+                }
+              ],
+              "inbound": []
+            }
+          },
+          "transfer": {
+            "chunk_size": 1024,
+            "timeout_s": 30.0
+          }
+        }
+      ]
+    }
+  },
+  "device": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/device/1"
+    }
+  },
+  "update": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.update/1",
+      "components": {
+        "mcu": {
+          "backend": "device_component",
+          "timeout_stage": 900.0
+        }
+      }
+    }
+  }
+}

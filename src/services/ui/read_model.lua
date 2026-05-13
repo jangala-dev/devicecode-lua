@@ -17,23 +17,6 @@ local topics      = require 'services.ui.topics'
 
 local M = {}
 
-local function excluded_patterns(opts)
-	opts = opts or {}
-	if opts.exclude_patterns == false then return nil end
-	return opts.exclude_patterns or topics.default_excluded_retained_patterns()
-end
-
-local function topic_excluded(topic, opts)
-	opts = opts or {}
-	if topic == nil then return false end
-	for _, pattern in ipairs(excluded_patterns(opts) or {}) do
-		if store_mod.match_topic(pattern, topic, opts.s_wild or '+', opts.m_wild or '#') then
-			return true
-		end
-	end
-	return false
-end
-
 local function start_feed_owner(scope, target, conn, pattern, opts)
 	local watch, err = bus_cleanup.watch_retained(conn, pattern, {
 		replay = true,
@@ -54,11 +37,9 @@ local function start_feed_owner(scope, target, conn, pattern, opts)
 			if ev == nil then
 				error(recv_err or 'read model retained feed closed', 0)
 			end
-			if not topic_excluded(ev.topic, opts) then
-				local changed, _msg, _op_name, ingest_err = target:ingest(ev)
-				if changed == nil then
-					error(ingest_err or 'read model ingest failed', 0)
-				end
+			local changed, _msg, _op_name, ingest_err = target:ingest(ev)
+			if changed == nil then
+				error(ingest_err or 'read model ingest failed', 0)
 			end
 		end
 	end)
