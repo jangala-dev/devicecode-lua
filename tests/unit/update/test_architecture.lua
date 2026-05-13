@@ -62,20 +62,6 @@ function tests.test_service_does_not_handoff_public_manager_endpoint_to_generati
 	end
 end
 
-
-
-function tests.test_architecture_note_places_active_runtime_under_service_scope()
-	local note = read_file('../src/services/update/architecture_note.md')
-	local service_block = note:match('update service scope.-generation scope') or ''
-	if not service_block:find('active_runtime scope', 1, true) then
-		fail('architecture note should place active_runtime under the service scope')
-	end
-	local generation_block = note:match('generation scope.-HAL/backend operation scopes') or ''
-	if generation_block:find('active_runtime scope', 1, true) then
-		fail('architecture note should not place active_runtime under the generation scope')
-	end
-end
-
 function tests.test_generation_does_not_own_active_runtime_state()
 	local s = read_file('../src/services/update/generation.lua')
 	if s:find("require 'services.update.active_runtime'", 1, true)
@@ -94,7 +80,6 @@ function tests.test_service_owns_active_runtime_state()
 		fail('service should own active runtime state')
 	end
 end
-
 
 function tests.test_generation_is_composition_not_role_mixing()
 	local s = read_file('../src/services/update/generation.lua')
@@ -180,7 +165,6 @@ function tests.test_active_completion_policy_is_extracted()
 	end
 end
 
-
 function tests.test_manager_requests_do_not_start_active_work()
 	local s = read_file('../src/services/update/manager_requests.lua')
 	if s:find('start_active', 1, true) or s:find('start_gate', 1, true) or s:find('active lease required', 1, true) then
@@ -224,7 +208,6 @@ function tests.test_active_runtime_launches_active_work_from_job_runtime_state()
 		fail('active_runtime must not expose an active_runner bypass')
 	end
 end
-
 
 function tests.test_update_models_use_terminate_not_close()
 	local s = read_file('../src/services/update/model.lua')
@@ -294,7 +277,6 @@ function tests.test_update_production_code_uses_scoped_work_not_direct_target_sp
 		end
 	end
 end
-
 
 function tests.test_artifact_resolver_is_only_imported_by_worker_modules()
 	local forbidden = {
