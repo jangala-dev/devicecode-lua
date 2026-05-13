@@ -11,7 +11,7 @@ local M = {}
 
 M.PROTO = 'fabric-jsonl/1'
 M.DIGEST_ALG = 'xxhash32'
-M.DEFAULT_CHUNK_SIZE = 2048
+M.DEFAULT_CHUNK_SIZE = 1024
 
 function M.proto_supported(proto)
 	return proto == M.PROTO

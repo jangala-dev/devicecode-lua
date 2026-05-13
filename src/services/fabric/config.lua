@@ -42,7 +42,7 @@ local DEFAULTS = {
 		call_timeout_s      = 5.0,
 	},
 	transfer = {
-		chunk_size = 2048,
+		chunk_size = 1024,
 		timeout_s  = 30.0,
 	},
 	queues = {
