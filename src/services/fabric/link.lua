@@ -17,6 +17,7 @@
 local fibers       = require 'fibers'
 local mailbox      = require 'fibers.mailbox'
 local scoped_work  = require 'devicecode.support.scoped_work'
+local queue        = require 'devicecode.support.queue'
 local service_events = require 'devicecode.support.service_events'
 local model_mod    = require 'services.fabric.model'
 local io_mod       = require 'services.fabric.io'
