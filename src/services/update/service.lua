@@ -781,7 +781,6 @@ function M.run(scope, params)
 		timeout_prepare = params.timeout_prepare,
 		timeout_stage = params.timeout_stage,
 		timeout_commit = params.timeout_commit,
-		commit_settle_s = params.commit_settle_s,
 	})
 
 	local active_scope, active_scope_err = scope:child()
