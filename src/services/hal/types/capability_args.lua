@@ -126,29 +126,33 @@ function new.FilesystemWriteOpts(filename, data)
     }, FilesystemWriteOpts), ""
 end
 
+----------------------------------------------------------------------
+-- UART
+----------------------------------------------------------------------
+
 ---@class UARTOpenOpts
----@field read boolean
----@field write boolean
 local UARTOpenOpts = {}
 UARTOpenOpts.__index = UARTOpenOpts
 
----Create a new UARTOpenOpts.
----At least one of read or write must be true.
----@param read boolean
----@param write boolean
----@return UARTOpenOpts?
----@return string error
-function new.UARTOpenOpts(read, write)
-    if type(read) ~= 'boolean' or type(write) ~= 'boolean' then
-        return nil, "read and write must be booleans"
+---@param opts table|nil
+---@return UARTOpenOpts?|nil
+---@return string
+function new.UARTOpenOpts(opts)
+    if opts ~= nil and type(opts) ~= 'table' then
+        return nil, 'invalid uart open opts'
     end
-    if not read and not write then
-        return nil, "at least one of read or write must be true"
+
+    opts = opts or {}
+
+    -- Deliberately empty for now.
+    -- On current OpenWrt targets UART line settings are assumed to come from
+    -- platform/devicetree configuration. Runtime termios configuration can be
+    -- added later without changing the capability surface.
+    for k in pairs(opts) do
+        return nil, 'unsupported uart open option: ' .. tostring(k)
     end
-    return setmetatable({
-        read  = read,
-        write = write,
-    }, UARTOpenOpts), ""
+
+    return setmetatable({}, UARTOpenOpts), ''
 end
 
 ---@class UARTWriteOpts
@@ -264,6 +268,285 @@ function new.PowerActionOpts(delay)
     return setmetatable({ delay = delay }, PowerActionOpts), ""
 end
 
+---@class ControlStoreGetOpts
+---@field key string
+local ControlStoreGetOpts = {}
+ControlStoreGetOpts.__index = ControlStoreGetOpts
+
+---@class ControlStorePutOpts
+---@field key string
+---@field data string
+local ControlStorePutOpts = {}
+ControlStorePutOpts.__index = ControlStorePutOpts
+
+---@class ControlStoreDeleteOpts
+---@field key string
+local ControlStoreDeleteOpts = {}
+ControlStoreDeleteOpts.__index = ControlStoreDeleteOpts
+
+---@class ControlStoreListOpts
+---@field prefix string|nil
+local ControlStoreListOpts = {}
+ControlStoreListOpts.__index = ControlStoreListOpts
+
+local function valid_store_key(key)
+	return type(key) == 'string'
+		and key ~= ''
+		and not key:find('[/\\]', 1)
+		and key:match('^[%w%._%-]+$') ~= nil
+end
+
+---@param key string
+---@return ControlStoreGetOpts?|nil
+---@return string
+function new.ControlStoreGetOpts(key)
+	if not valid_store_key(key) then
+		return nil, 'invalid key'
+	end
+	return setmetatable({ key = key }, ControlStoreGetOpts), ''
+end
+
+---@param key string
+---@param data string
+---@return ControlStorePutOpts?|nil
+---@return string
+function new.ControlStorePutOpts(key, data)
+	if not valid_store_key(key) then
+		return nil, 'invalid key'
+	end
+	if type(data) ~= 'string' then
+		return nil, 'data must be a string'
+	end
+	return setmetatable({ key = key, data = data }, ControlStorePutOpts), ''
+end
+
+---@param key string
+---@return ControlStoreDeleteOpts?|nil
+---@return string
+function new.ControlStoreDeleteOpts(key)
+	if not valid_store_key(key) then
+		return nil, 'invalid key'
+	end
+	return setmetatable({ key = key }, ControlStoreDeleteOpts), ''
+end
+
+---@param prefix string|nil
+---@return ControlStoreListOpts?|nil
+---@return string
+function new.ControlStoreListOpts(prefix)
+	if prefix ~= nil and type(prefix) ~= 'string' then
+		return nil, 'invalid prefix'
+	end
+	return setmetatable({ prefix = prefix }, ControlStoreListOpts), ''
+end
+
+---@class SignatureVerifyEd25519Opts
+---@field pubkey_pem string
+---@field message string
+---@field signature string
+local SignatureVerifyEd25519Opts = {}
+SignatureVerifyEd25519Opts.__index = SignatureVerifyEd25519Opts
+
+---@param pubkey_pem string
+---@param message string
+---@param signature string
+---@return SignatureVerifyEd25519Opts?
+---@return string
+function new.SignatureVerifyEd25519Opts(pubkey_pem, message, signature)
+	if type(pubkey_pem) ~= 'string' or pubkey_pem == '' then
+		return nil, 'invalid pubkey_pem'
+	end
+	if type(message) ~= 'string' then
+		return nil, 'invalid message'
+	end
+	if type(signature) ~= 'string' or signature == '' then
+		return nil, 'invalid signature'
+	end
+
+	return setmetatable({
+		pubkey_pem = pubkey_pem,
+		message    = message,
+		signature  = signature,
+	}, SignatureVerifyEd25519Opts), ''
+end
+
+----------------------------------------------------------------------
+-- Artifact store
+----------------------------------------------------------------------
+
+---@class ArtifactStoreCreateSinkOpts
+---@field meta table
+---@field policy string|nil
+local ArtifactStoreCreateSinkOpts = {}
+ArtifactStoreCreateSinkOpts.__index = ArtifactStoreCreateSinkOpts
+
+---@class ArtifactStoreImportPathOpts
+---@field path string
+---@field meta table
+---@field policy string|nil
+local ArtifactStoreImportPathOpts = {}
+ArtifactStoreImportPathOpts.__index = ArtifactStoreImportPathOpts
+
+---@class ArtifactStoreImportSourceOpts
+---@field source any
+---@field meta table
+---@field policy string|nil
+local ArtifactStoreImportSourceOpts = {}
+ArtifactStoreImportSourceOpts.__index = ArtifactStoreImportSourceOpts
+
+---@class ArtifactStoreOpenOpts
+---@field artifact_ref string
+local ArtifactStoreOpenOpts = {}
+ArtifactStoreOpenOpts.__index = ArtifactStoreOpenOpts
+
+---@class ArtifactStoreDeleteOpts
+---@field artifact_ref string
+local ArtifactStoreDeleteOpts = {}
+ArtifactStoreDeleteOpts.__index = ArtifactStoreDeleteOpts
+
+---@class ArtifactStoreStatusOpts
+local ArtifactStoreStatusOpts = {}
+ArtifactStoreStatusOpts.__index = ArtifactStoreStatusOpts
+
+local function valid_artifact_ref(ref)
+	return type(ref) == 'string' and ref ~= '' and ref:match('^[A-Za-z0-9_.-]+$') ~= nil
+end
+
+local function valid_artifact_policy(policy)
+	return policy == nil
+		or policy == 'transient_only'
+		or policy == 'prefer_durable'
+		or policy == 'require_durable'
+end
+
+local function valid_blob_source(source)
+	return type(source) == 'table'
+		and type(source.read_chunk_op) == 'function'
+end
+
+---@param meta table|nil
+---@param policy string|nil
+---@return ArtifactStoreCreateSinkOpts?|nil
+---@return string
+function new.ArtifactStoreCreateSinkOpts(meta, policy)
+	if meta ~= nil and type(meta) ~= 'table' then
+		return nil, 'invalid meta'
+	end
+	if not valid_artifact_policy(policy) then
+		return nil, 'invalid policy'
+	end
+
+	return setmetatable({
+		meta   = meta or {},
+		policy = policy,
+	}, ArtifactStoreCreateSinkOpts), ''
+end
+
+---@param path string
+---@param meta table|nil
+---@param policy string|nil
+---@return ArtifactStoreImportPathOpts?|nil
+---@return string
+function new.ArtifactStoreImportPathOpts(path, meta, policy)
+	if type(path) ~= 'string' or path == '' then
+		return nil, 'invalid path'
+	end
+	if meta ~= nil and type(meta) ~= 'table' then
+		return nil, 'invalid meta'
+	end
+	if not valid_artifact_policy(policy) then
+		return nil, 'invalid policy'
+	end
+
+	return setmetatable({
+		path   = path,
+		meta   = meta or {},
+		policy = policy,
+	}, ArtifactStoreImportPathOpts), ''
+end
+
+---@param source any
+---@param meta table|nil
+---@param policy string|nil
+---@return ArtifactStoreImportSourceOpts?|nil
+---@return string
+function new.ArtifactStoreImportSourceOpts(source, meta, policy)
+	if not valid_blob_source(source) then
+		return nil, 'invalid source'
+	end
+	if meta ~= nil and type(meta) ~= 'table' then
+		return nil, 'invalid meta'
+	end
+	if not valid_artifact_policy(policy) then
+		return nil, 'invalid policy'
+	end
+
+	return setmetatable({
+		source = source,
+		meta   = meta or {},
+		policy = policy,
+	}, ArtifactStoreImportSourceOpts), ''
+end
+
+---@param artifact_ref string
+---@return ArtifactStoreOpenOpts?|nil
+---@return string
+function new.ArtifactStoreOpenOpts(artifact_ref)
+	if not valid_artifact_ref(artifact_ref) then
+		return nil, 'invalid artifact_ref'
+	end
+	return setmetatable({
+		artifact_ref = artifact_ref,
+	}, ArtifactStoreOpenOpts), ''
+end
+
+---@param artifact_ref string
+---@return ArtifactStoreDeleteOpts?|nil
+---@return string
+function new.ArtifactStoreDeleteOpts(artifact_ref)
+	if not valid_artifact_ref(artifact_ref) then
+		return nil, 'invalid artifact_ref'
+	end
+	return setmetatable({
+		artifact_ref = artifact_ref,
+	}, ArtifactStoreDeleteOpts), ''
+end
+
+---@return ArtifactStoreStatusOpts
+---@return string
+function new.ArtifactStoreStatusOpts()
+	return setmetatable({}, ArtifactStoreStatusOpts), ''
+end
+
+----------------------------------------------------------------------
+-- UART
+----------------------------------------------------------------------
+
+---@class UARTOpenOpts
+local UARTOpenOpts = {}
+UARTOpenOpts.__index = UARTOpenOpts
+
+---@param opts table|nil
+---@return UARTOpenOpts?|nil
+---@return string
+function new.UARTOpenOpts(opts)
+    if opts ~= nil and type(opts) ~= 'table' then
+        return nil, 'invalid uart open opts'
+    end
+
+    opts = opts or {}
+
+    -- Deliberately empty for now.
+    -- On current OpenWrt targets UART line settings are assumed to come from
+    -- platform/devicetree configuration. Runtime termios configuration can be
+    -- added later without changing the capability surface.
+    for k in pairs(opts) do
+        return nil, 'unsupported uart open option: ' .. tostring(k)
+    end
+
+    return setmetatable({}, UARTOpenOpts), ''
+end
+
 return {
     ModemGetOpts = ModemGetOpts,
     ModemConnectOpts = ModemConnectOpts,
@@ -276,5 +559,16 @@ return {
     ThermalGetOpts = ThermalGetOpts,
     PlatformGetOpts = PlatformGetOpts,
     PowerActionOpts = PowerActionOpts,
+    ControlStoreGetOpts = ControlStoreGetOpts,
+    ControlStorePutOpts = ControlStorePutOpts,
+    ControlStoreDeleteOpts = ControlStoreDeleteOpts,
+    ControlStoreListOpts = ControlStoreListOpts,
+    SignatureVerifyEd25519Opts = SignatureVerifyEd25519Opts,
+    ArtifactStoreCreateSinkOpts = ArtifactStoreCreateSinkOpts,
+    ArtifactStoreImportPathOpts = ArtifactStoreImportPathOpts,
+    ArtifactStoreImportSourceOpts = ArtifactStoreImportSourceOpts,
+    ArtifactStoreOpenOpts = ArtifactStoreOpenOpts,
+    ArtifactStoreDeleteOpts = ArtifactStoreDeleteOpts,
+    ArtifactStoreStatusOpts = ArtifactStoreStatusOpts,
     new = new,
 }
