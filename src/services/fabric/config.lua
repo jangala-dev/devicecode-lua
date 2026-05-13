@@ -30,7 +30,6 @@ local DEFAULTS = {
 		hello_interval_s   = 2.0,
 		ping_interval_s    = 10.0,
 		liveness_timeout_s = 30.0,
-		rehello_after_s    = nil,
 	},
 	writer = {
 		rpc_quota  = 4,
@@ -72,7 +71,6 @@ local TRANSPORT_KEYS = {
 local SESSION_KEYS = {
 	local_node = true, identity_claim = true, auth_claim = true,
 	hello_interval_s = true, ping_interval_s = true, liveness_timeout_s = true,
-	rehello_after_s = true,
 }
 
 local READER_KEYS = {
@@ -309,8 +307,6 @@ local function compile_session(raw, service_local_node)
 	if e3 then return nil, e3 end
 	local live, e4 = pos_number(raw.liveness_timeout_s, 'session.liveness_timeout_s', DEFAULTS.session.liveness_timeout_s)
 	if e4 then return nil, e4 end
-	local rehello_after_s, e5 = opt_pos_number(raw.rehello_after_s, 'session.rehello_after_s')
-	if e5 then return nil, e5 end
 
 	return {
 		local_node         = local_node,
@@ -319,7 +315,6 @@ local function compile_session(raw, service_local_node)
 		hello_interval_s   = hello,
 		ping_interval_s    = ping,
 		liveness_timeout_s = live,
-		rehello_after_s    = rehello_after_s,
 	}, nil
 end
 
