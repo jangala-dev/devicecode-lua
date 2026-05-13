@@ -83,7 +83,7 @@ function M.decode(ctx)
 		end
 	end
 
-	if parts[2] == 'update' and (parts[3] == 'upload' or parts[3] == 'uploads') and method == 'POST' then
+	if parts[2] == 'update' and parts[3] == 'upload' and method == 'POST' then
 		return { kind = 'upload' }
 	end
 
