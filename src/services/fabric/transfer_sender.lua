@@ -195,11 +195,7 @@ function M.run(scope, req, caps)
 		DEFAULT_RESEND_RETRY_S,
 		'resend_retry_s'
 	)
-	local begin_retry_s = positive(
-		req.xfer_begin_retry_s or caps.xfer_begin_retry_s,
-		math.min(2.0, math.max(0.25, timeout_s / 5)),
-		'xfer_begin_retry_s'
-	)
+	local begin_retry_s = math.min(2.0, math.max(0.25, timeout_s / 5))
 
 	local begin = construct('xfer_begin', protocol.xfer_begin,
 		xfer_id, target, size, alg, digest, req.meta or req.metadata)

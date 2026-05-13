@@ -96,7 +96,7 @@ local EXPORT_RULE_KEYS = {
 }
 
 local TRANSFER_KEYS = {
-	chunk_size = true, timeout_s = true, xfer_begin_retry_s = true,
+	chunk_size = true, timeout_s = true,
 }
 
 local QUEUE_KEYS = {
@@ -510,13 +510,10 @@ local function compile_transfer(raw)
 	if e2 then return nil, e2 end
 	local timeout_s, e3 = pos_number(raw.timeout_s, 'transfer.timeout_s', DEFAULTS.transfer.timeout_s)
 	if e3 then return nil, e3 end
-	local xfer_begin_retry_s, e4 = opt_pos_number(raw.xfer_begin_retry_s, 'transfer.xfer_begin_retry_s')
-	if e4 then return nil, e4 end
 
 	return {
 		chunk_size = chunk_size,
 		timeout_s  = timeout_s,
-		xfer_begin_retry_s = xfer_begin_retry_s,
 	}, nil
 end
 
