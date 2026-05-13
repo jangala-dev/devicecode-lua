@@ -189,6 +189,7 @@ end
 
 local function apply_upload_headers(ctx, opts)
 	local headers = ctx and ctx.headers
+	local artifact_component = string_header(headers, 'x-artifact-component')
 	local artifact_name = string_header(headers, 'x-artifact-name')
 	local artifact_version = string_header(headers, 'x-artifact-version')
 	local artifact_build = string_header(headers, 'x-artifact-build')
@@ -196,7 +197,8 @@ local function apply_upload_headers(ctx, opts)
 	local compat_commit_image_id = string_header(headers, 'x-artifact-compat-commit-image-id')
 	local checksum = string_header(headers, 'x-artifact-checksum')
 
-	if artifact_name == nil
+	if artifact_component == nil
+		and artifact_name == nil
 		and artifact_version == nil
 		and artifact_build == nil
 		and image_id == nil
@@ -212,6 +214,10 @@ local function apply_upload_headers(ctx, opts)
 		meta = copy_table(meta)
 	else
 		meta = {}
+	end
+	if artifact_component ~= nil then
+		meta.component = artifact_component
+		opts.component = artifact_component
 	end
 	if artifact_name ~= nil then meta.name = artifact_name end
 	if artifact_version ~= nil then meta.version = artifact_version end
