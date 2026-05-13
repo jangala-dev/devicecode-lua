@@ -265,6 +265,7 @@ end
 
 local function normalise_open_opts(transport_cfg)
 	if transport_cfg.class == 'uart' then
+		-- UART drivers require typed open opts; fabric config supplies plain tables.
 		local opts, err = cap_args.new.UARTOpenOpts(transport_cfg.open_opts or {})
 		if not opts then return nil, err or 'invalid uart open opts' end
 		return opts, nil
