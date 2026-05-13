@@ -207,10 +207,6 @@ end
 local function update_job_method(op_name)
 	op_name = tostring(op_name or '')
 	if op_name == 'commit' then return 'commit-job' end
-	if op_name == 'cancel' then return 'cancel-job' end
-	if op_name == 'retry' then return 'retry-job' end
-	if op_name == 'discard' then return 'discard-job' end
-	if op_name == 'start' or op_name == '' then return 'start-job' end
 	return nil
 end
 
@@ -230,8 +226,7 @@ local function handle_update_job_action(scope, owner, ctx, route, deps)
 		perform_response(owner:reply_error_op(400, 'unsupported_update_job_action'))
 		return { status = 'bad_request', err = 'unsupported_update_job_action' }
 	end
-	local payload = {}
-	for k, v in pairs(body or {}) do payload[k] = v end
+	local payload = copy_table(body)
 	payload.job_id = route.job_id
 	payload.id = payload.id or route.job_id
 	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {

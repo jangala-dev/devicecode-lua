@@ -140,7 +140,7 @@ local function send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
 
 	send(caps, 'bulk', frame, 'transfer_chunk_send_failed')
 	local next_sent = sent + #chunk
-	return sent + #chunk, {
+	return next_sent, {
 		offset = sent,
 		next = next_sent,
 		frame = frame,

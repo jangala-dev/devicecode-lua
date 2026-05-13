@@ -95,7 +95,6 @@ local function default_transfer_client(conn)
 				timeout_s = timeout_s,
 				meta = meta,
 				receiver = meta.receiver,
-				chunk_size = opts.chunk_size or meta.chunk_size,
 			}, {
 				timeout = opts.timeout,
 				deadline = opts.deadline,

@@ -153,7 +153,7 @@ local function component_state_for(job, ctx)
 	return nil
 end
 
-local function legacy_streamed_commit_image_id(self, job, ctx, payload)
+local function legacy_streamed_commit_image_id(_self, job, ctx, payload)
 	if type(payload) ~= 'table' then return nil end
 	local expected = payload.expected_image_id
 	if type(expected) ~= 'string' or expected == '' then return nil end

@@ -29,11 +29,11 @@ local shallow_copy = tablex.shallow_copy
 
 local function default_auth_opts(params, getenv)
 	params = params or {}
-	if params.auth ~= nil then return nil, 'injected_auth', true end
-	if params.auth_opts ~= nil then return params.auth_opts, 'injected_auth_opts', true end
+	if params.auth ~= nil then return nil end
+	if params.auth_opts ~= nil then return params.auth_opts end
 	getenv = getenv or os.getenv
 	local password = getenv('DEVICECODE_UI_ADMIN_PASSWORD')
-	if password == nil or password == '' then return nil, 'none', false end
+	if password == nil or password == '' then return nil end
 	return {
 		users = {
 			admin = {
@@ -41,7 +41,7 @@ local function default_auth_opts(params, getenv)
 				principal = authz.user_principal('admin', { roles = { 'admin' } }),
 			},
 		},
-	}, 'env_admin_password', true
+	}
 end
 
 local function component_summary(components)

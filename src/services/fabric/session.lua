@@ -201,7 +201,7 @@ function OutboundGate:begin_transfer(ctx, xfer_id)
 	return true, nil
 end
 
-function OutboundGate:end_transfer(ctx, xfer_id, reason)
+function OutboundGate:end_transfer(_ctx, xfer_id, reason)
 	local q = self._transfer_quiet
 	if type(q) ~= 'table' then return true, nil end
 	q.active = false
@@ -274,11 +274,11 @@ function M.new_outbound_gate(params)
 			rpc     = require_tx(params.tx_rpc,     'fabric.session.outbound_gate: tx_rpc', 2),
 			bulk    = require_tx(params.tx_bulk,    'fabric.session.outbound_gate: tx_bulk', 2),
 		},
-			_session = nil,
-			_drop_reason = 'no_session',
-			_closed = false,
-			_transfer_quiet = params.transfer_quiet,
-		}, OutboundGate)
+		_session = nil,
+		_drop_reason = 'no_session',
+		_closed = false,
+		_transfer_quiet = params.transfer_quiet,
+	}, OutboundGate)
 end
 
 local function session_equal(a, b)
