@@ -188,12 +188,6 @@ local function default_runner(spec, lease)
 	end
 end
 
-local function topic_to_string(topic)
-	local out = {}
-	for i = 1, #(topic or {}) do out[i] = tostring(topic[i]) end
-	return table.concat(out, '/')
-end
-
 local function retained_device_component_id(topic)
 	if type(topic) ~= 'table' then return nil end
 	if topic[1] ~= 'state' or topic[2] ~= 'device' or topic[3] ~= 'component' then return nil end
@@ -248,9 +242,7 @@ local function start_device_observer(scope, conn, observer)
 				local component = retained_device_component_id(ev.topic)
 				if component ~= nil then
 					if ev.op == 'retain' and type(ev.payload) == 'table' then
-						observer:update_component(component, ev.payload, {
-							topic = topic_to_string(ev.topic),
-						})
+						observer:update_component(component, ev.payload)
 					elseif ev.op == 'unretain' then
 						observer:remove_component(component, 'unretained')
 					end
