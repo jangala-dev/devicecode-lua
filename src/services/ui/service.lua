@@ -251,6 +251,17 @@ local function default_update_opts(params)
 		or update_opts.target_component
 		or update_opts.update_component
 		or 'mcu'
+	local metadata = shallow_copy(update_opts.metadata or update_opts.meta or {})
+	if metadata.keep_artifact ~= true
+		and metadata.retain_artifact ~= true
+		and metadata.artifact_retention ~= 'keep'
+		and metadata.artifact_cleanup == nil
+		and metadata.artifact_lifecycle == nil
+		and metadata.artifact_owned_by_job == nil
+	then
+		metadata.artifact_owned_by_job = true
+	end
+	update_opts.metadata = metadata
 	return update_opts
 end
 

@@ -308,46 +308,19 @@ local function cleanup_target_for_plan(plan)
 	return ref
 end
 
-local function artifact_cleanup_op(cleanup, artifact_ref, plan)
-	if cleanup == nil then return nil, 'artifact_cleanup_unavailable' end
-	if type(cleanup) == 'function' then
-		return cleanup(artifact_ref, plan)
-	end
-	if type(cleanup) == 'table' and type(cleanup.delete_artifact_op) == 'function' then
-		return cleanup:delete_artifact_op(artifact_ref, plan)
-	end
-	if type(cleanup) == 'table' and type(cleanup.delete_op) == 'function' then
-		return cleanup:delete_op(artifact_ref, plan)
-	end
-	return nil, 'artifact_cleanup_unavailable'
-end
-
-local function cleanup_succeeded(reply, err)
-	if err ~= nil then return false, err end
-	if reply == true then return true, nil end
-	if type(reply) == 'table' then
-		if reply.ok == false then return false, reply.reason or reply.err or 'artifact_cleanup_failed' end
-		if reply.ok == true then return true, nil end
-	end
-	if reply ~= nil then return true, nil end
-	return false, 'artifact_cleanup_failed'
-end
-
 local function cleanup_artifact_after_persist(self, plan)
 	local ref = cleanup_target_for_plan(plan)
 	if ref == nil then return nil end
 	local cleanup = self and self._artifact_cleanup
-	local cop, cerr = artifact_cleanup_op(cleanup, ref, plan)
-	if cop == nil then
-		return { artifact_ref = ref, ok = false, err = cerr or 'artifact_cleanup_unavailable' }
+	if type(cleanup) ~= 'table' or type(cleanup.delete_artifact_op) ~= 'function' then
+		return { artifact_ref = ref, ok = false, err = 'artifact_cleanup_unavailable' }
 	end
-	local reply, err = fibers.perform(cop)
-	local ok, norm_err = cleanup_succeeded(reply, err)
-	return {
-		artifact_ref = ref,
-		ok = ok,
-		err = norm_err,
-	}
+	local reply, err = fibers.perform(cleanup:delete_artifact_op(ref, plan))
+	if err ~= nil then return { artifact_ref = ref, ok = false, err = err } end
+	if type(reply) == 'table' and reply.ok == false then
+		return { artifact_ref = ref, ok = false, err = reply.reason or reply.err or 'artifact_cleanup_failed' }
+	end
+	return { artifact_ref = ref, ok = true }
 end
 
 local function sorted_job_ids(jobs)
