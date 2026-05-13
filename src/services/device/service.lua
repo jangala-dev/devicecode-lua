@@ -22,11 +22,14 @@ local config_watch = require 'devicecode.support.config_watch'
 local service_events = require 'devicecode.support.service_events'
 local service_base = require 'devicecode.service_base'
 local backpressure = require 'services.device.backpressure'
+local tablex = require 'shared.table'
 
 local M = {}
 
 local DEFAULT_DONE_QUEUE = backpressure.policy.completions.default_len
 local DEFAULT_OBSERVATION_QUEUE = backpressure.policy.observations.default_len
+
+local shallow_copy = tablex.shallow_copy
 
 local function new_service_id()
 	return ('device-%d-%d'):format(os.time(), math.random(1, 1000000))
