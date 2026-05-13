@@ -226,9 +226,10 @@ local function handle_update_job_action(scope, owner, ctx, route, deps)
 		perform_response(owner:reply_error_op(400, 'unsupported_update_job_action'))
 		return { status = 'bad_request', err = 'unsupported_update_job_action' }
 	end
-	local payload = copy_table(body)
-	payload.job_id = route.job_id
-	payload.id = payload.id or route.job_id
+	local payload = {
+		job_id = route.job_id,
+		id = route.job_id,
+	}
 	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
 		principal = principal,
 		connect = deps.connect,
