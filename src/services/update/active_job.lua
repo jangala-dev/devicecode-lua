@@ -167,35 +167,6 @@ local function begin_commit_attempt(params, job, ctx, policy)
 	return result
 end
 
-local function attach_commit_observation(params, job, ctx)
-	local observer = params and params.observer or nil
-	if type(observer) ~= 'table' or type(observer.snapshot) ~= 'function' then
-		return nil
-	end
-
-	local ok, snapshot = pcall(function () return observer:snapshot() end)
-	if not ok or type(snapshot) ~= 'table' then
-		return nil
-	end
-
-	ctx.snapshot = snapshot
-	if type(snapshot.components) == 'table'
-		and type(job) == 'table'
-		and type(job.component) == 'string'
-	then
-		ctx.component_state = snapshot.components[job.component]
-	elseif type(snapshot.by_id) == 'table'
-		and type(job) == 'table'
-		and type(job.component) == 'string'
-	then
-		local rec = snapshot.by_id[job.component]
-		if type(rec) == 'table' then
-			ctx.component_state = rec.state or rec
-		end
-	end
-	return snapshot
-end
-
 local function persist_commit_accepted(params, job, ctx, policy, accepted)
 	local jobs = params.jobs or (params.ctx and params.ctx.jobs)
 	local lease = params.lease
@@ -225,7 +196,6 @@ function M.commit(_scope, params)
 	local ctx = base_ctx(params, 'commit')
 	local policy = backend_commit_policy(backend)
 	local attempt = begin_commit_attempt(params, job, ctx, policy)
-	attach_commit_observation(params, job, ctx)
 
 	local accepted = perform_backend_op(backend, 'commit_op', true, job, ctx)
 	local persisted = persist_commit_accepted(params, job, ctx, policy, accepted)
