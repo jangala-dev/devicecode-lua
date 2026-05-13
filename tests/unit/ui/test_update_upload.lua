@@ -154,6 +154,8 @@ function tests.test_upload_promotes_transfer_chunk_header_to_job_metadata()
 		assert_eq(captured.metadata.image_id, 'mcu-image-1')
 		assert_eq(captured.metadata.compat_commit_image_id, 'img-dev')
 		assert_eq(captured.metadata.transfer_chunk_raw, 4096)
+		assert_eq(captured.metadata.artifact_cleanup, 'delete_on_terminal')
+		assert_eq(captured.metadata.artifact_lifecycle, 'delete_with_job')
 	end)
 end
 

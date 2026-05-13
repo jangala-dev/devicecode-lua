@@ -281,6 +281,75 @@ local function store_delete_op(store, job_id)
 	return store:delete_job_op(job_id)
 end
 
+local function job_requests_artifact_cleanup(job)
+	local meta = type(job) == 'table' and type(job.metadata) == 'table' and job.metadata or nil
+	if meta == nil then return false end
+	if meta.keep_artifact == true or meta.retain_artifact == true or meta.artifact_retention == 'keep' then
+		return false
+	end
+	return meta.artifact_cleanup == 'delete_on_terminal'
+		or meta.artifact_lifecycle == 'delete_with_job'
+		or meta.artifact_owned_by_job == true
+end
+
+local function cleanup_target_for_plan(plan)
+	if type(plan) ~= 'table' then return nil end
+	local job = plan.job
+	if plan.kind == 'save_job' then
+		if not (job and repo_mod.is_terminal(job.state)) then return nil end
+	elseif plan.kind == 'delete_job' then
+		job = plan.job or (plan.public_result and plan.public_result.job)
+	else
+		return nil
+	end
+	if not job_requests_artifact_cleanup(job) then return nil end
+	local ref = job.artifact_ref
+	if type(ref) ~= 'string' or ref == '' then return nil end
+	return ref
+end
+
+local function artifact_cleanup_op(cleanup, artifact_ref, plan)
+	if cleanup == nil then return nil, 'artifact_cleanup_unavailable' end
+	if type(cleanup) == 'function' then
+		return cleanup(artifact_ref, plan)
+	end
+	if type(cleanup) == 'table' and type(cleanup.delete_artifact_op) == 'function' then
+		return cleanup:delete_artifact_op(artifact_ref, plan)
+	end
+	if type(cleanup) == 'table' and type(cleanup.delete_op) == 'function' then
+		return cleanup:delete_op(artifact_ref, plan)
+	end
+	return nil, 'artifact_cleanup_unavailable'
+end
+
+local function cleanup_succeeded(reply, err)
+	if err ~= nil then return false, err end
+	if reply == true then return true, nil end
+	if type(reply) == 'table' then
+		if reply.ok == false then return false, reply.reason or reply.err or 'artifact_cleanup_failed' end
+		if reply.ok == true then return true, nil end
+	end
+	if reply ~= nil then return true, nil end
+	return false, 'artifact_cleanup_failed'
+end
+
+local function cleanup_artifact_after_persist(self, plan)
+	local ref = cleanup_target_for_plan(plan)
+	if ref == nil then return nil end
+	local cleanup = self and self._artifact_cleanup
+	local cop, cerr = artifact_cleanup_op(cleanup, ref, plan)
+	if cop == nil then
+		return { artifact_ref = ref, ok = false, err = cerr or 'artifact_cleanup_unavailable' }
+	end
+	local reply, err = fibers.perform(cop)
+	local ok, norm_err = cleanup_succeeded(reply, err)
+	return {
+		artifact_ref = ref,
+		ok = ok,
+		err = norm_err,
+	}
+end
+
 local function sorted_job_ids(jobs)
 	local ids = {}
 	for id in pairs((jobs and jobs.jobs) or {}) do ids[#ids + 1] = id end
@@ -878,6 +947,8 @@ local function compute_discard(self, cmd)
 		kind = 'delete_job',
 		transition = cmd.kind,
 		job_id = cmd.job_id,
+		job = public_job(current),
+		artifact_ref = current.artifact_ref,
 		public_result = {
 			tag = 'job_discarded',
 			method = cmd.kind,
@@ -952,6 +1023,7 @@ local function start_transition_worker(self, req, plan)
 		identity = identity,
 
 		run = function ()
+			local artifact_cleanup
 			if plan.kind == 'save_job' then
 				local ok, serr = fibers.perform(store_save_op(self._store, public_job(plan.job)))
 				if ok ~= true then error(serr or 'job_save_failed', 0) end
@@ -961,12 +1033,14 @@ local function start_transition_worker(self, req, plan)
 			else
 				error('unsupported_plan_kind', 0)
 			end
+			artifact_cleanup = cleanup_artifact_after_persist(self, plan)
 
 			return {
 				tag = 'job_transition_persisted',
 				transition_id = req.id,
 				transition = plan.transition,
 				job_id = plan.job_id,
+				artifact_cleanup = artifact_cleanup,
 			}
 		end,
 
@@ -1125,6 +1199,9 @@ local function handle_transition_done(self, ev)
 		outcome = transition_outcome_from_record(rec, transition_outcome(inflight.request, inflight.plan, 'failed', reason))
 	end
 
+	if ev.status == 'ok' and ev.result and ev.result.artifact_cleanup ~= nil then
+		outcome.artifact_cleanup = copy(ev.result.artifact_cleanup)
+	end
 	record_transition_outcome(self, outcome)
 	refresh_model(self)
 	resolve_cell(inflight.request.cell, outcome, nil)
@@ -1306,6 +1383,7 @@ local function new_runtime(scope, params)
 		_scope = scope,
 		_service_id = params.service_id or 'update',
 		_store = params.store,
+		_artifact_cleanup = params.artifact_cleanup,
 		_params = params,
 		_jobs = initial_jobs,
 		_adoption = {},

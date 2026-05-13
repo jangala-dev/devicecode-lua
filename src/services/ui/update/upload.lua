@@ -111,6 +111,18 @@ local function artifact_sink_meta(opts)
 	return meta
 end
 
+local function job_artifact_metadata(opts)
+	local meta = opts.metadata or opts.meta
+	if type(meta) == 'table' then
+		meta = copy_table(meta)
+	else
+		meta = {}
+	end
+	if meta.artifact_cleanup == nil then meta.artifact_cleanup = 'delete_on_terminal' end
+	if meta.artifact_lifecycle == nil then meta.artifact_lifecycle = 'delete_with_job' end
+	return meta
+end
+
 local function upload_log(opts, level, payload)
 	local fn = opts and opts.log
 	if type(fn) ~= 'function' then return end
@@ -459,6 +471,7 @@ local function upload_body_op(ctx, opts, deadline)
 			local call_opts = {}
 			for k, v in pairs(opts) do call_opts[k] = v end
 			call_opts.timeout = remaining_timeout(opts, deadline)
+			call_opts.metadata = job_artifact_metadata(call_opts)
 
 			local job, jerr = perform_with_deadline(
 				scope,

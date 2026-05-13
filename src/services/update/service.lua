@@ -15,6 +15,7 @@ local bus_cleanup  = require 'devicecode.support.bus_cleanup'
 local config_watch   = require 'devicecode.support.config_watch'
 local service_events = require 'devicecode.support.service_events'
 local service_base   = require 'devicecode.service_base'
+local cap_sdk        = require 'services.hal.sdk.cap'
 
 local model_mod     = require 'services.update.model'
 local config_mod    = require 'services.update.config'
@@ -73,6 +74,25 @@ local function update_model_state(self, state, reason)
 		s.reason = reason
 		return s
 	end)
+end
+
+local function artifact_cleanup_from_params(params)
+	if params.artifact_cleanup == false then return nil end
+	if params.artifact_cleanup ~= nil then return params.artifact_cleanup end
+	if type(params.conn) ~= 'table' then return nil end
+
+	local store_id = params.artifact_store_id or params.artifact_store_name or params.artifact_store
+	if type(store_id) ~= 'string' or store_id == '' then store_id = 'main' end
+	local timeout = params.artifact_cleanup_timeout or params.artifact_store_timeout or 30.0
+
+	return {
+		delete_artifact_op = function (_, artifact_ref)
+			local opts, opt_err = cap_sdk.args.new.ArtifactStoreDeleteOpts(artifact_ref)
+			if not opts then return fibers.always(nil, opt_err or 'invalid_artifact_ref') end
+			local cap = cap_sdk.new_curated_cap_ref(params.conn, 'artifact_store', store_id)
+			return cap:call_control_op('delete', opts, { timeout = timeout })
+		end,
+	}
 end
 
 local function apply_generation_snapshot(self, snapshot)
@@ -775,6 +795,7 @@ function M.run(scope, params)
 		initial_jobs = params.initial_jobs,
 		done_tx = done_tx,
 		queue_len = params.job_runtime_queue_len,
+		artifact_cleanup = artifact_cleanup_from_params(params),
 	})
 	if not jobs then
 		error(jobs_err or 'update_job_repository_start_failed', 2)
