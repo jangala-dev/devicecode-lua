@@ -25,41 +25,33 @@ local function sorted_items(snapshot, pred)
 	return out
 end
 
-local function item_for(snapshot, topic)
+local function payload_for(snapshot, topic)
 	local key = topics.topic_key(topic)
 	local item = snapshot and snapshot.items and snapshot.items[key]
-	return item and copy_value(item) or nil
+	return item and copy_value(item.payload) or nil
 end
 
-local function payload_for(snapshot, topic)
-	local item = item_for(snapshot, topic)
-	return item and item.payload or nil
-end
-
-local function status_from_component_payload(payload)
+local function component_status(payload)
 	if type(payload) ~= 'table' then return nil end
-	local snap = type(payload.snapshot) == 'table' and payload.snapshot or payload
-	local out = copy_value(snap)
-	local established = snap.established == true
-	out.established = established
-	if out.ready == nil then out.ready = established end
-	if out.state == nil then
-		if out.ready == true then
-			out.state = 'ready'
+	local snap = type(payload.snapshot) == 'table' and payload.snapshot or payload.status
+	if type(snap) ~= 'table' then return nil end
+	local status = copy_value(snap)
+	if status.ready == nil and status.established ~= nil then
+		status.ready = status.established == true
+	end
+	if status.state == nil then
+		if status.ready == true then
+			status.state = 'ready'
 		else
-			out.state = snap.phase or payload.state or 'starting'
+			status.state = status.phase
 		end
 	end
-	if out.reason == nil then out.reason = snap.why or snap.reason end
-	if out.err == nil then out.err = snap.err or snap.last_err end
-	return out
-end
-
-local function component_view(payload)
-	if type(payload) ~= 'table' then return nil end
-	local out = copy_value(payload)
-	out.status = status_from_component_payload(payload) or out.status
-	return out
+	status.reason = status.reason or status.why
+	status.err = status.err or status.last_err
+	return {
+		link_id = payload.link_id,
+		status = status,
+	}
 end
 
 local function public_job(job)
@@ -83,7 +75,9 @@ function M.all(snapshot)
 end
 
 function M.topic(snapshot, topic)
-	return item_for(snapshot, topic)
+	local key = topics.topic_key(topic)
+	local item = snapshot and snapshot.items and snapshot.items[key]
+	return item and copy_value(item) or nil
 end
 
 function M.pattern(snapshot, pattern, matcher)
@@ -120,16 +114,11 @@ function M.fabric_link_status(snapshot, link_id)
 	local out = {
 		version = snapshot and snapshot.version or 0,
 		link_id = link_id,
-		link = payload_for(snapshot, { 'state', 'fabric', 'link', link_id }),
 	}
-	local components = { 'reader', 'session', 'writer', 'rpc_bridge', 'transfer_manager' }
-	for _, component in ipairs(components) do
-		local payload = payload_for(snapshot, { 'state', 'fabric', 'link', link_id, 'component', component })
-		if payload ~= nil then out[component] = component_view(payload) end
-	end
-	out.bridge = out.rpc_bridge
+	out.session = component_status(payload_for(snapshot, { 'state', 'fabric', 'link', link_id, 'component', 'session' }))
+	out.transfer_manager = component_status(payload_for(snapshot, { 'state', 'fabric', 'link', link_id, 'component', 'transfer_manager' }))
 	out.transfer = out.transfer_manager
-	if out.link == nil and out.session == nil and out.bridge == nil and out.transfer == nil then
+	if out.session == nil and out.transfer == nil then
 		return nil
 	end
 	return out
