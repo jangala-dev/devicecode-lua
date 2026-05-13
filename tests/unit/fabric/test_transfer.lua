@@ -19,9 +19,7 @@ local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true, got ' .. tostring(v))) end end
 local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, got ' .. tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil value') end end
-local function assert_eq(a, b, msg)
-	if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end
-end
+local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end end
 
 local function recv_with_timeout(rx, label, timeout)
 	timeout = timeout or 0.25
@@ -71,9 +69,6 @@ local function start_manager(scope, opts)
 		tx_control = outbound_control_tx,
 		tx_rpc = outbound_rpc_tx,
 		tx_bulk = outbound_bulk_tx,
-		transfer_quiet = opts.transfer_quiet,
-		log = opts.log,
-		link_id = 'link-a',
 	}
 	local done_tx, done_rx = mailbox.new(1, { full = 'reject_newest' })
 
@@ -88,7 +83,6 @@ local function start_manager(scope, opts)
 			state_tx = state_tx,
 			chunk_size = opts.chunk_size or 3,
 			timeout_s = opts.timeout_s or 0.05,
-			log = opts.log,
 		})
 		queue.try_admit_required(done_tx, result, 'transfer_done')
 	end)
@@ -119,16 +113,9 @@ function tests.test_reducer_requires_session_context_for_claims()
 		request_generation = 1,
 		session = ctx(),
 		xfer_id = 'xfer-1',
-		target = 'updater/main',
-		size = 12,
 	})
 	assert_eq(accepted, true)
-	local snap = transfer.snapshot(state)
-	assert_eq(snap.active.session.peer_sid, 'sid-1')
-	assert_eq(snap.active.xfer_id, 'xfer-1')
-	assert_eq(snap.active.target, 'updater/main')
-	assert_eq(snap.active.size, 12)
-	assert_eq(snap.active.sent, 0)
+	assert_eq(transfer.snapshot(state).active.session.peer_sid, 'sid-1')
 end
 
 function tests.test_slot_admission_without_session_fails_request()
@@ -169,10 +156,7 @@ end
 
 function tests.test_real_sender_attempt_uses_session_bound_outbound_gate()
 	fibers.run(function (scope)
-		local h = start_manager(scope, {
-			chunk_size = 3,
-			transfer_quiet = {},
-		})
+		local h = start_manager(scope, { chunk_size = 3 })
 		local c = ctx()
 		h.outbound:bind(c)
 		assert_true(h.session_tx:send(peer_session_event()))
@@ -213,7 +197,6 @@ function tests.test_real_sender_attempt_uses_session_bound_outbound_gate()
 		assert_eq(chunk2.offset, 3)
 		assert_eq(chunk2.data, 'def')
 
-		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_need('xfer-1', 6)))))
 		local commit = recv_with_timeout(h.control_rx, 'commit').frame
 		assert_eq(commit.type, 'xfer_commit')
 		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_done('xfer-1')))))

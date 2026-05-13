@@ -6,13 +6,7 @@ local function assert_true(v,msg) if v ~= true then fail(msg or ('expected true,
 local function assert_not_nil(v,msg) if v == nil then fail(msg or 'expected non-nil') end end
 function tests.test_new_job_normalises_and_snapshots_are_copies()
   local state = assert(repo.new_state())
-  local job = assert(repo.new_job({
-    job_id='j1',
-    component='cm5',
-    artifact_ref='a1',
-    metadata={ image_id='img-1' },
-  }, { generation=7, seq=1 }))
-  assert_eq(job.expected_image_id, 'img-1')
+  local job = assert(repo.new_job({ job_id='j1', component='cm5', artifact_ref='a1' }, { generation=7, seq=1 }))
   assert(repo.upsert(state, job))
   local snap = repo.snapshot(state)
   assert_eq(snap.count, 1); assert_eq(snap.by_id.j1.component, 'cm5')

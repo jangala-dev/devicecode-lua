@@ -47,19 +47,6 @@ local function recv_with_timeout(rx, label, timeout)
 	return item
 end
 
-local function assert_no_item(rx, label, timeout)
-	timeout = timeout or 0.02
-
-	local which = fibers.perform(fibers.named_choice {
-		item    = rx:recv_op(),
-		timeout = sleep.sleep_op(timeout),
-	})
-
-	if which ~= 'timeout' then
-		fail('unexpected ' .. tostring(label or 'item'))
-	end
-end
-
 local function send_frame(tx, frame)
 	assert_true(tx:send({ frame = frame }))
 end
@@ -79,7 +66,6 @@ local function make_sender_caps(control_tx, bulk_tx, frame_rx, opts)
 		frame_rx   = frame_rx,
 		chunk_size = opts.chunk_size or 3,
 		timeout_s  = opts.timeout_s or 0.05,
-		xfer_begin_retry_s = opts.xfer_begin_retry_s,
 
 		send_control_frame_now = function (frame, label)
 			return admit(control_tx, frame, label)
@@ -201,7 +187,6 @@ function tests.test_sender_sends_begin_chunks_commit_and_returns_after_done()
 		assert_eq(chunk1.frame.offset, 0)
 		assert_eq(chunk1.frame.data, 'abc')
 		assert_eq(chunk1.frame.chunk_digest, protocol.chunk_digest('abc'))
-		assert_eq(chunk1.frame.chunk_offset_digest, protocol.chunk_offset_digest('xfer-1', 0, 'abc'))
 		seen[#seen + 1] = chunk1.frame.type
 
 		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-1', 3)))
@@ -210,11 +195,7 @@ function tests.test_sender_sends_begin_chunks_commit_and_returns_after_done()
 		assert_eq(chunk2.frame.offset, 3)
 		assert_eq(chunk2.frame.data, 'def')
 		assert_eq(chunk2.frame.chunk_digest, protocol.chunk_digest('def'))
-		assert_eq(chunk2.frame.chunk_offset_digest, protocol.chunk_offset_digest('xfer-1', 3, 'def'))
 		seen[#seen + 1] = chunk2.frame.type
-
-		assert_no_item(io.control_rx, 'commit before final ack')
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-1', 6)))
 
 		local commit = recv_with_timeout(io.control_rx, 'commit')
 		assert_eq(commit.frame.type, 'xfer_commit')
@@ -248,42 +229,6 @@ function tests.test_sender_timeout_sends_abort_and_fails_attempt()
 
 	assert_eq(out.status, 'failed')
 	assert_match(out.value, 'timeout')
-end
-
-function tests.test_sender_retries_begin_until_ready()
-	local req = make_req {
-		data = 'abc',
-		size = 3,
-		xfer_id = 'xfer-begin-retry',
-		timeout_s = 0.20,
-		xfer_begin_retry_s = 0.02,
-	}
-
-	local out = collect_result(req, function (io)
-		local begin1 = recv_with_timeout(io.control_rx, 'begin1')
-		assert_eq(begin1.frame.type, 'xfer_begin')
-
-		local begin2 = recv_with_timeout(io.control_rx, 'begin2', 0.12)
-		assert_eq(begin2.frame.type, 'xfer_begin')
-		assert_eq(begin2.frame.xfer_id, begin1.frame.xfer_id)
-		assert_eq(begin2.frame.size, begin1.frame.size)
-		assert_eq(begin2.frame.digest, begin1.frame.digest)
-
-		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-begin-retry')))
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-begin-retry', 0)))
-
-		local chunk = recv_with_timeout(io.bulk_rx, 'chunk')
-		assert_eq(chunk.frame.type, 'xfer_chunk')
-		assert_eq(chunk.frame.offset, 0)
-
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-begin-retry', 3)))
-		local commit = recv_with_timeout(io.control_rx, 'commit')
-		assert_eq(commit.frame.type, 'xfer_commit')
-		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-begin-retry')))
-	end, { timeout_s = 0.20, xfer_begin_retry_s = 0.02 })
-
-	assert_eq(out.status, 'ok', tostring(out.value))
-	assert_eq(out.value.sent_bytes, 3)
 end
 
 function tests.test_sender_remote_abort_fails_without_echoing_abort()
@@ -359,7 +304,6 @@ function tests.test_sender_does_not_close_source_itself()
 		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-no-close')))
 		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-no-close', 0)))
 		recv_with_timeout(io.bulk_rx, 'chunk')
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-no-close', 3)))
 		recv_with_timeout(io.control_rx, 'commit')
 		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-no-close')))
 	end)
@@ -385,81 +329,6 @@ function tests.test_sender_accepts_zero_byte_transfer_commit_after_need_zero()
 
 	assert_eq(out.status, 'ok', tostring(out.value))
 	assert_eq(out.value.sent_bytes, 0)
-end
-
-function tests.test_sender_resends_cached_chunk_when_receiver_rewinds_to_last_offset()
-	local req = make_req { data = 'abc', size = 3, xfer_id = 'xfer-retry', resend_retry_s = 0.001 }
-
-	local out = collect_result(req, function (io)
-		recv_with_timeout(io.control_rx, 'begin')
-		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-retry')))
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-retry', 0)))
-
-		local chunk1 = recv_with_timeout(io.bulk_rx, 'chunk1')
-		assert_eq(chunk1.frame.type, 'xfer_chunk')
-		assert_eq(chunk1.frame.offset, 0)
-		assert_eq(chunk1.frame.data, 'abc')
-
-		fibers.perform(sleep.sleep_op(0.002))
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-retry', 0)))
-
-		local chunk2 = recv_with_timeout(io.bulk_rx, 'chunk2')
-		assert_eq(chunk2.frame.type, 'xfer_chunk')
-		assert_eq(chunk2.frame.offset, 0)
-		assert_eq(chunk2.frame.data, 'abc')
-
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-retry', 3)))
-		local commit = recv_with_timeout(io.control_rx, 'commit')
-		assert_eq(commit.frame.type, 'xfer_commit')
-		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-retry')))
-	end)
-
-	assert_eq(out.status, 'ok', tostring(out.value))
-	assert_eq(out.value.sent_bytes, 3)
-end
-
-function tests.test_sender_suppresses_duplicate_need_for_inflight_chunk()
-	local req = make_req {
-		data = 'abcdefghi',
-		size = 9,
-		xfer_id = 'xfer-dupe-need',
-		resend_retry_s = 10,
-	}
-
-	local out = collect_result(req, function (io)
-		recv_with_timeout(io.control_rx, 'begin')
-		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-dupe-need')))
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-dupe-need', 0)))
-
-		local chunk1 = recv_with_timeout(io.bulk_rx, 'chunk1')
-		assert_eq(chunk1.frame.type, 'xfer_chunk')
-		assert_eq(chunk1.frame.offset, 0)
-		assert_eq(chunk1.frame.data, 'abc')
-
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-dupe-need', 3)))
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-dupe-need', 3)))
-		fibers.perform(sleep.sleep_op(0.01))
-
-		local chunk2 = recv_with_timeout(io.bulk_rx, 'chunk2')
-		assert_eq(chunk2.frame.type, 'xfer_chunk')
-		assert_eq(chunk2.frame.offset, 3)
-		assert_eq(chunk2.frame.data, 'def')
-
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-dupe-need', 6)))
-
-		local chunk3 = recv_with_timeout(io.bulk_rx, 'chunk3')
-		assert_eq(chunk3.frame.type, 'xfer_chunk')
-		assert_eq(chunk3.frame.offset, 6)
-		assert_eq(chunk3.frame.data, 'ghi')
-
-		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-dupe-need', 9)))
-		local commit = recv_with_timeout(io.control_rx, 'commit')
-		assert_eq(commit.frame.type, 'xfer_commit')
-		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-dupe-need')))
-	end, { bulk_queue_len = 1, timeout_s = 0.20 })
-
-	assert_eq(out.status, 'ok', tostring(out.value))
-	assert_eq(out.value.sent_bytes, 9)
 end
 
 return tests

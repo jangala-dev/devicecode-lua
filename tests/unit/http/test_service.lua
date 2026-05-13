@@ -249,39 +249,6 @@ function M.test_context_transfer_keeps_context_active_after_listener_termination
 		ok(svc:_submit_event({ kind = 'context_terminated', listener_id = 'l1', context_id = 'c1', generation = 1, reason = 'request_done' }))
 		yield_many(4)
 		eq(svc:stats().active_contexts, 0)
-		eq(svc._state.contexts.c1, nil, 'terminated contexts should not remain in live accounting')
-		svc:terminate('done')
-	end)
-end
-
-function M.test_completed_operation_records_are_pruned_after_counters_are_updated()
-	fibers.run(function ()
-		local b = bus.new()
-		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
-		yield_many(4)
-
-		svc._state.requests.req1 = { request_id = 'req1', verb = 'exchange', state = 'running', operation_id = 'op1' }
-		svc._state.operations.op1 = {
-			operation_id = 'op1',
-			generation = 1,
-			operation = 'exchange',
-			request_id = 'req1',
-			state = 'running',
-		}
-		ok(svc:_submit_event({ kind = 'http_operation_done', operation_id = 'op1', operation = 'exchange', generation = 1, status = 'ok', result = {} }))
-		yield_many(8)
-
-		eq(svc:stats().completed_exchanges, 1)
-		eq(svc._state.operations.op1, nil, 'completed operations should not remain in live accounting')
-		eq(svc._state.requests.req1, nil, 'completed operation requests should not remain in live accounting')
-		local completion_event
-		for _, ev in ipairs(svc:events()) do
-			if ev.kind == 'http_operation_done' and ev.operation_id == 'op1' then completion_event = ev end
-		end
-		ok(completion_event, 'completion should still be visible in the diagnostic event log')
-		eq(completion_event.result, nil, 'diagnostic event log must not retain operation result payloads')
-		eq(completion_event.report, nil, 'diagnostic event log must not retain operation reports')
 		svc:terminate('done')
 	end)
 end

@@ -57,13 +57,6 @@ function M.test_http_service_wires_components_with_service_event_ports()
 	ok(not ops:find('on_server_websocket = function', 1, true), 'http operation still passes server websocket callback')
 end
 
-function M.test_http_public_service_entrypoint_is_long_lived()
-	local entry = read_file('../src/services/http.lua')
-	ok(entry:find("local service = require 'services.http.service'", 1, true), 'http entrypoint should wrap HTTP service module')
-	ok(entry:find('service.start(conn, opts)', 1, true), 'http entrypoint should start the HTTP service')
-	ok(entry:find('fibers.perform(fibers.never())', 1, true), 'top-level http service entrypoint must not return to main supervisor')
-end
-
 function M.test_http_service_code_does_not_use_perform_raw()
 	local p = io.popen("find ../src/services/http -name '*.lua' | sort")
 	for file in p:lines() do

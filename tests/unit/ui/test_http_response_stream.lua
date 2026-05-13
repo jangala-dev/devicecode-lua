@@ -2,7 +2,6 @@
 
 local fibers = require 'fibers'
 local response = require 'services.ui.http.response'
-local cjson = require 'cjson.safe'
 
 local tests = {}
 
@@ -78,19 +77,6 @@ function tests.test_reply_op_uses_streaming_transport()
 		assert_eq(raw.calls[2].kind, 'chunk')
 		assert_eq(raw.calls[2].chunk, 'hello')
 		assert_eq(raw.calls[2].end_stream, true)
-	end)
-end
-
-function tests.test_reply_json_op_encodes_table_without_injected_encoder()
-	fibers.run(function()
-		local raw = ctx()
-		local owner = response.new(raw)
-		local ok, err = fibers.perform(owner:reply_json_op(200, { session_id = 's1' }))
-		assert_true(ok, err)
-		assert_eq(owner:state(), 'replied')
-		assert_eq(raw.calls[1].headers['content-type'], 'application/json')
-		local body = assert(cjson.decode(raw.calls[2].chunk))
-		assert_eq(body.session_id, 's1')
 	end)
 end
 

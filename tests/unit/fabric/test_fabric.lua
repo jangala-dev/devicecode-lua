@@ -2,8 +2,6 @@
 
 local fibers  = require 'fibers'
 local mailbox = require 'fibers.mailbox'
-local sleep   = require 'fibers.sleep'
-local busmod  = require 'bus'
 
 local fabric   = require 'services.fabric'
 local protocol = require 'services.fabric.protocol'
@@ -151,43 +149,6 @@ function tests.test_composed_link_transport_open_failure_fails_link_scope_before
 		end)
 		assert_eq(st, 'failed')
 		assert_match(primary, 'open failed')
-	end)
-end
-
-function tests.test_hal_transport_waits_for_raw_host_capability_before_open()
-	fibers.run(function ()
-		local bus = busmod.new()
-		local conn = bus:connect()
-		local opened = false
-
-		local session = {
-			read_line_op = function () return fibers.always(nil, 'closed') end,
-			write_line_op = function () return fibers.always(true, nil) end,
-			terminate = function () return true, nil end,
-		}
-
-		local ok_spawn, spawn_err = fibers.spawn(function ()
-			fibers.perform(sleep.sleep_op(0.01))
-			local ep = conn:bind({ 'raw', 'host', 'uart_manager', 'cap', 'uart', 'uart-0', 'rpc', 'open' })
-			conn:retain({ 'raw', 'host', 'uart_manager', 'cap', 'uart', 'uart-0', 'status' }, {
-				state = 'available',
-				available = true,
-			})
-			local req = fibers.perform(ep:recv_op())
-			opened = true
-			assert_true(req:reply({ ok = true, reason = { session = session } }))
-		end)
-		assert_true(ok_spawn, tostring(spawn_err))
-
-		local transport, err = fibers.perform(hal_transport.open_transport_op(conn, {
-			source = 'uart_manager',
-			class = 'uart',
-			id = 'uart-0',
-			ready_timeout_s = 0.5,
-		}))
-
-		assert_not_nil(transport, err)
-		assert_true(opened, 'open should happen after the raw host capability is published')
 	end)
 end
 

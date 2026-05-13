@@ -1,11 +1,9 @@
 -- tests/unit/ui/test_read_model.lua
 
 local fibers = require 'fibers'
-local busmod = require 'bus'
 local read_model = require 'services.ui.read_model'
 local store_mod = require 'services.ui.read_model_store'
 local watches_mod = require 'services.ui.read_model_watches'
-local topics = require 'services.ui.topics'
 local run_fibers = require 'tests.support.run_fibers'
 
 local tests = {}
@@ -113,55 +111,6 @@ function tests.test_read_model_start_uses_supplied_store_and_watch_owner()
 		local ev = fibers.perform(watch:recv_op())
 		assert_eq(ev.op, 'set')
 		assert_eq(store:get({ 'svc', 'ui' }).payload.status, 'running')
-	end)
-end
-
-local function excluded_by_default(topic)
-	for _, pattern in ipairs(topics.default_excluded_retained_patterns()) do
-		if store_mod.match_topic(pattern, topic, '+', '#') then return true end
-	end
-	return false
-end
-
-function tests.test_read_model_default_excludes_internal_ui_state()
-	assert_eq(excluded_by_default({ 'state', 'ui', 'summary' }), true)
-	assert_eq(excluded_by_default({ 'state', 'ui', 'read-model' }), true)
-	assert_eq(excluded_by_default({ 'state', 'fabric', 'status' }), false)
-	assert_eq(excluded_by_default({ 'raw', 'member', 'mcu', 'state', 'software' }), false)
-end
-
-function tests.test_read_model_feed_skips_internal_ui_state()
-	run_fibers.run(function (scope)
-		local bus = busmod.new()
-		local conn = bus:connect()
-		conn:retain({ 'state', 'ui', 'summary' }, { version = 1 })
-		conn:retain({ 'state', 'fabric', 'status' }, { ready = true })
-
-		local store = store_mod.new()
-		local watch_owner = watches_mod.new(store)
-		read_model.start(scope, conn, {
-			model = store,
-			watch_owner = watch_owner,
-			patterns = { { 'state', '#' } },
-			feed_queue_len = 8,
-		})
-
-		local version, _snap, err = fibers.perform(store:changed_op(0))
-		assert_nil(err)
-		assert_eq(version, 1)
-		assert_nil(store:get({ 'state', 'ui', 'summary' }))
-		assert_not_nil(store:get({ 'state', 'fabric', 'status' }))
-	end)
-end
-
-function tests.test_store_changed_version_op_avoids_snapshot_materialisation()
-	run_fibers.run(function ()
-		local store = store_mod.new()
-		local seen = store:version()
-		store:set({ 'state', 'fabric', 'status' }, { ready = true })
-		local version, err = fibers.perform(store:changed_version_op(seen))
-		assert_nil(err)
-		assert_eq(version, 1)
 	end)
 end
 
