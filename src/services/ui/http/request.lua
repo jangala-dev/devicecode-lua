@@ -185,14 +185,13 @@ local function handle_command(scope, owner, ctx, route, deps)
 		perform_response(owner:reply_error_op(401, 'unauthenticated'))
 		return { status = 'unauthenticated' }
 	end
-	local body = body_table(ctx)
 	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
 		principal = principal,
 		connect = deps.connect,
 		bus = deps.bus,
 		timeout = deps.command_timeout or 5.0,
 		run_op = function (_, conn)
-			return conn:call_op(route.topic, body, { timeout = deps.command_timeout or 5.0 })
+			return conn:call_op(route.topic, body_table(ctx), { timeout = deps.command_timeout or 5.0 })
 				:wrap(function (value, call_err)
 					if value == nil then return nil, call_err or 'upstream_failed' end
 					return { value = value }, nil
@@ -208,27 +207,11 @@ local function handle_command(scope, owner, ctx, route, deps)
 	return { status = 'ok' }
 end
 
-local function update_job_method(op_name)
-	op_name = tostring(op_name or '')
-	if op_name == 'commit' then return 'commit-job' end
-	return nil
-end
-
 local function handle_update_job_action(scope, owner, ctx, route, deps)
 	local principal = principal_from(ctx, deps)
 	if principal == nil then
 		perform_response(owner:reply_error_op(401, 'unauthenticated'))
 		return { status = 'unauthenticated' }
-	end
-	local body, body_err = json_body_table(ctx)
-	if body_err ~= nil then
-		perform_response(owner:reply_error_op(400, body_err))
-		return { status = 'bad_request', err = body_err }
-	end
-	local method = update_job_method(body.op or body.action)
-	if method == nil then
-		perform_response(owner:reply_error_op(400, 'unsupported_update_job_action'))
-		return { status = 'bad_request', err = 'unsupported_update_job_action' }
 	end
 	local payload = {
 		job_id = route.job_id,
@@ -240,7 +223,7 @@ local function handle_update_job_action(scope, owner, ctx, route, deps)
 		bus = deps.bus,
 		timeout = deps.command_timeout or 5.0,
 		run_op = function (_, conn)
-			return conn:call_op({ 'cap', 'update-manager', 'main', 'rpc', method }, payload, {
+			return conn:call_op({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, payload, {
 				timeout = deps.command_timeout or 5.0,
 			}):wrap(function (value, call_err)
 				if value == nil then return nil, call_err or 'upstream_failed' end
