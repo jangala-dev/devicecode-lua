@@ -672,14 +672,8 @@ function M.start(conn, opts)
 
 	local params = shallow_copy(opts)
 	params.conn = conn
-	local auth_opts, auth_source, auth_configured = default_auth_opts(params)
+	local auth_opts = default_auth_opts(params)
 	params.auth_opts = auth_opts
-	svc:obs_log(auth_configured and 'info' or 'warn', {
-		what = 'auth_config',
-		source = auth_source,
-		admin_env_present = os.getenv('DEVICECODE_UI_ADMIN_PASSWORD') ~= nil,
-		configured = auth_configured,
-	})
 	svc:running({ ready = true })
 	return M.run(scope, params)
 end

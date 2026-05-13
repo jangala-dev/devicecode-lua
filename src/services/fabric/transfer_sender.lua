@@ -65,17 +65,6 @@ local function construct(label, fn, ...)
 	return frame
 end
 
-local function log_event(caps, level, fields)
-	local fn = caps and caps.log
-	if type(fn) ~= 'function' then return true, nil end
-	local payload = {}
-	for k, v in pairs(fields or {}) do payload[k] = v end
-	payload.component = payload.component or 'transfer_sender'
-	local ok, err = pcall(fn, level or 'debug', payload)
-	if ok then return true, nil end
-	return nil, err
-end
-
 local function send_now(caps, lane, frame, label)
 	local fn = lane == 'bulk' and caps.send_bulk_frame_now or caps.send_control_frame_now
 	if type(fn) ~= 'function' then
@@ -100,12 +89,6 @@ end
 
 local function fail(caps, xfer_id, reason, send_abort)
 	local err = tostring(reason or 'transfer_failed')
-	log_event(caps, 'warn', {
-		what = 'transfer_sender_failed',
-		xfer_id = xfer_id,
-		err = err,
-		send_abort = send_abort ~= false,
-	})
 
 	if send_abort ~= false then
 		local ok, aerr = try_abort(caps, xfer_id, err)

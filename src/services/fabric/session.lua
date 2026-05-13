@@ -178,14 +178,6 @@ function OutboundGate:_session_ok(ctx, label)
 	return true, nil
 end
 
-function OutboundGate:_emit_log(level, payload)
-	if type(self._log) ~= 'function' then return true, nil end
-	payload = payload or {}
-	payload.component = payload.component or 'session'
-	payload.link_id = payload.link_id or self._link_id
-	return self._log(level or 'debug', payload)
-end
-
 function OutboundGate:_mark_transfer_frame(frame)
 	local q = self._transfer_quiet
 	if type(q) ~= 'table' then return end
@@ -286,7 +278,6 @@ function M.new_outbound_gate(params)
 		_drop_reason = 'no_session',
 		_closed = false,
 		_transfer_quiet = params.transfer_quiet,
-		_log = params.log,
 		_link_id = params.link_id,
 	}, OutboundGate)
 end
@@ -314,14 +305,6 @@ local function publish_state(self)
 		session_snapshot(self),
 		'fabric_session_state_admit_failed'
 	)
-end
-
-local function log_event(self, level, payload)
-	if type(self._log) ~= 'function' then return true, nil end
-	payload = payload or {}
-	payload.component = payload.component or 'session'
-	payload.link_id = payload.link_id or self._link_id
-	return self._log(level or 'debug', payload)
 end
 
 local function update_session(self, mutator)
@@ -856,7 +839,6 @@ function M.run(scope, params)
 		_bad_frame_window_s = positive_number(params.bad_frame_window_s, DEFAULT_BAD_FRAME_WINDOW_S, 'bad_frame_window_s'),
 		_bad_frame_times = {},
 		_transfer_quiet = params.transfer_quiet,
-		_log = params.log,
 		_next_hello_at = fibers.now(),
 		_next_ping_at = math.huge,
 		_next_rehello_at = math.huge,

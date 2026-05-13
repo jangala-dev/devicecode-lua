@@ -27,8 +27,6 @@ local M = {}
 local Driver = {}
 Driver.__index = Driver
 
-local DEFAULT_MAX_POLLABLE_TIMEOUT_S = 1.0
-
 local function identity(...)
 	return ...
 end
@@ -105,7 +103,6 @@ function M.new(opts)
 		_step_fn        = opts.step_fn,
 		_wrap_fn        = opts.wrap_fn,
 		_terminate_fn   = opts.terminate_fn,
-		_max_pollable_timeout_s = opts.max_pollable_timeout_s or DEFAULT_MAX_POLLABLE_TIMEOUT_S,
 	}, Driver)
 
 	return self
@@ -249,15 +246,6 @@ function Driver:pollable_ready_op(pollable, opts)
 			if type(timeout) == 'number' and timeout <= 0 then
 				return true, 'timeout', nil
 			end
-			if type(timeout) ~= 'number'
-				or timeout ~= timeout
-				or timeout == math.huge
-				or timeout == -math.huge
-			then
-				timeout = nil
-			elseif timeout > self._max_pollable_timeout_s then
-				timeout = self._max_pollable_timeout_s
-			end
 
 			local fd
 			if type(pollable.pollfd) == 'function' then
@@ -278,7 +266,6 @@ function Driver:pollable_ready_op(pollable, opts)
 				rd = rd,
 				wr = wr,
 				timeout = timeout,
-				has_fd_interest = fd ~= nil and (rd or wr),
 				state = true,
 			}
 		end
@@ -322,11 +309,7 @@ function Driver:pollable_ready_op(pollable, opts)
 					end
 				end
 
-				-- Fibers scheduler timers are wake-only and cannot be unlinked from
-				-- the wheel. When an fd wait is already armed, fd readiness/pokes
-				-- provide progress; adding an uncancellable timeout on every pump
-				-- iteration can retain many stale timer tasks under active traffic.
-				if not want.has_fd_interest and type(want.timeout) == 'number' and want.timeout > 0 then
+				if type(want.timeout) == 'number' then
 					waker:after(want.timeout, make_wake('timeout'))
 				end
 			end
@@ -532,6 +515,5 @@ function Driver:start(scope)
 end
 
 M.Driver = Driver
-M.DEFAULT_MAX_POLLABLE_TIMEOUT_S = DEFAULT_MAX_POLLABLE_TIMEOUT_S
 
 return M

@@ -90,12 +90,7 @@ function M.start(service, verb, req, request_id, owner, run)
 	})
 	if not handle then
 		local rec = service._state.operations[identity.operation_id]
-		if rec then
-			if rec.operation == 'exchange' then
-				service._state.failed_exchanges = (service._state.failed_exchanges or 0) + 1
-			end
-			service._state.operations[identity.operation_id] = nil
-		end
+		if rec then rec.state = 'completed'; rec.status = 'failed'; rec.primary = err or 'operation_start_failed' end
 		service:_finish_request(request_id, 'failed', err or 'operation_start_failed')
 		owner:finalise_unresolved(err or 'operation_start_failed')
 		service._state.last_error = err or 'operation_start_failed'

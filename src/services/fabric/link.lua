@@ -597,7 +597,6 @@ local function transfer_params_from(params, admission_rx, session_rx, outbound, 
 	t.outbound = outbound
 	t.state_tx = state_tx
 	t.component_name = 'transfer_manager'
-	t.log = params.log
 
 	return t
 end
@@ -686,7 +685,6 @@ function M.composed_components(scope, params, service_caps)
 		tx_rpc     = outbound_rpc_tx,
 		tx_bulk    = outbound_bulk_tx,
 		transfer_quiet = transfer_quiet,
-		log = params.log,
 		link_id = params.link_id,
 	}
 
@@ -756,7 +754,6 @@ function M.composed_components(scope, params, service_caps)
 				state_tx = state_tx,
 				component_name = 'session',
 				transfer_quiet = transfer_quiet,
-				log = params.log,
 			})
 		end,
 	}

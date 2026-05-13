@@ -29,16 +29,6 @@ local function copy(v)
 	return model.deep_copy(v)
 end
 
-local function log_event(log, level, fields)
-	if type(log) ~= 'function' then return true, nil end
-	local payload = {}
-	for k, v in pairs(fields or {}) do payload[k] = v end
-	payload.component = payload.component or 'update_active_runtime'
-	local ok, err = pcall(log, level or 'debug', payload)
-	if ok then return true, nil end
-	return nil, err
-end
-
 local function token_for(job_id, generation, phase, seq)
 	return table.concat({
 		tostring(generation or 0),
@@ -194,7 +184,6 @@ local function default_runner(spec, lease)
 			ctx      = spec.ctx,
 			lease    = lease,
 			jobs     = spec.jobs,
-			log      = spec.log,
 		})
 	end
 end
@@ -213,7 +202,7 @@ local function retained_device_component_id(topic)
 	return topic[4]
 end
 
-local function start_device_observer(scope, conn, observer, log)
+local function start_device_observer(scope, conn, observer)
 	if type(conn) ~= 'table' or type(conn.watch_retained) ~= 'function' then
 		return true, nil, nil
 	end
@@ -223,10 +212,6 @@ local function start_device_observer(scope, conn, observer, log)
 		full = 'drop_oldest',
 	})
 	if not watch then
-		log_event(log, 'warn', {
-			what = 'active_device_observer_start_failed',
-			err = err or 'watch_retained_failed',
-		})
 		return nil, err or 'watch_retained_failed'
 	end
 
@@ -313,12 +298,6 @@ function Lease:start_work(lifetime_scope, spec)
 		token      = self.token,
 	}
 
-	log_event(spec.log, 'info', {
-		what = 'active_work_start_begin',
-		job_id = self.job_id,
-		phase = self.phase,
-		token = self.token,
-	})
 	local runner = default_runner(spec, self)
 	local handle, err = scoped_work.start {
 		lifetime_scope = lifetime_scope,
@@ -352,38 +331,18 @@ function Lease:start_work(lifetime_scope, spec)
 	}
 
 	if not handle then
-		log_event(spec.log, 'warn', {
-			what = 'active_work_start_failed',
-			job_id = self.job_id,
-			phase = self.phase,
-			token = self.token,
-			err = err,
-		})
 		self:release(err or 'active_start_failed')
 		return nil, err
 	end
 
 	local ok_attach, attach_err = self:attach_handle(handle, spec.job)
 	if ok_attach ~= true then
-		log_event(spec.log, 'warn', {
-			what = 'active_work_attach_failed',
-			job_id = self.job_id,
-			phase = self.phase,
-			token = self.token,
-			err = attach_err,
-		})
 		handle:cancel(attach_err or 'active_start_stale')
 		self:release(attach_err or 'active_start_stale')
 		return nil, attach_err or 'active_start_stale'
 	end
 
 	self._transferred = true
-	log_event(spec.log, 'info', {
-		what = 'active_work_start_ok',
-		job_id = self.job_id,
-		phase = self.phase,
-		token = self.token,
-	})
 
 	if local_rx ~= nil then
 		local raw_handle = handle
@@ -698,14 +657,6 @@ function Component:_launch_active_intent(job)
 		return false, 'already_started'
 	end
 
-	log_event(self._log, 'info', {
-		what = 'active_intent_launch_begin',
-		job_id = job.job_id,
-		phase = intent.phase,
-		token = intent.token,
-		state = job.state,
-		stage = job.stage,
-	})
 	self._active_launched[intent.token] = true
 	local handle, err = self:start_intent({
 		service_id = self._service_id,
@@ -716,18 +667,10 @@ function Component:_launch_active_intent(job)
 	}, job, {
 		backend = self._backend,
 		phase   = intent.phase,
-		log     = self._log,
 	})
 
 	if not handle then
 		self._active_launched[intent.token] = nil
-		log_event(self._log, 'warn', {
-			what = 'active_intent_launch_failed',
-			job_id = job.job_id,
-			phase = intent.phase,
-			token = intent.token,
-			err = err,
-		})
 		return nil, err
 	end
 
@@ -737,12 +680,6 @@ function Component:_launch_active_intent(job)
 		phase = intent.phase,
 	})
 	if ok_report ~= true then return nil, report_err end
-	log_event(self._log, 'info', {
-		what = 'active_intent_launch_ok',
-		job_id = job.job_id,
-		phase = intent.phase,
-		token = intent.token,
-	})
 	return handle, nil
 end
 
@@ -759,14 +696,6 @@ function Component:consider_jobs()
 	for _, job in ipairs(jobs) do
 		local intent = active_intent_for(job)
 		if type(intent) == 'table' and intent.token ~= nil and intent.phase ~= nil then
-			log_event(self._log, 'info', {
-				what = 'active_consider_found_intent',
-				job_id = job.job_id,
-				phase = intent.phase,
-				token = intent.token,
-				state = job.state,
-				stage = job.stage,
-			})
 			local ok, err = self:_launch_active_intent(job)
 			if ok ~= nil then return ok, err end
 			if err == 'slot_busy' then return nil, err end
@@ -799,11 +728,10 @@ function Component:start_intent(intent, job, spec)
 
 	spec.lease = lease
 	spec.job = job
-	spec.phase = intent.phase or spec.phase or lease.phase
-	spec.jobs = spec.jobs or self._jobs
-	spec.done_tx = self._local_tx
-	spec.log = spec.log or self._log
-	spec.observer = spec.observer or self._observer
+spec.phase = intent.phase or spec.phase or lease.phase
+spec.jobs = spec.jobs or self._jobs
+spec.done_tx = self._local_tx
+spec.observer = spec.observer or self._observer
 	local handle, herr = M.start_work(self._work_scope, self._state, spec)
 	if not handle then
 		lease:release(herr or 'active_intent_start_failed')
@@ -1003,7 +931,7 @@ function M.start_component(scope, params)
 	scope:finally(function (_, status, primary)
 		observer:terminate(primary or status or 'active_runtime_closed')
 	end)
-	local obs_ok, obs_err, obs_close = start_device_observer(scope, params.conn, observer, params.log)
+	local obs_ok, obs_err, obs_close = start_device_observer(scope, params.conn, observer)
 	if obs_ok ~= true then
 		local_tx:close(obs_err or 'active_runtime_observer_failed')
 		return nil, obs_err or 'active_runtime_observer_failed'
@@ -1020,7 +948,6 @@ function M.start_component(scope, params)
 		_observer = observer,
 		_observer_close = obs_close,
 		_adoption = params.adoption or {},
-		_log = params.log,
 		_active_applies = {},
 		_active_launched = {},
 		_adoption_reconcile_started = {},

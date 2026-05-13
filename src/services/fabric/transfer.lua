@@ -275,32 +275,6 @@ local function report(self, ev, label)
 	return queue.try_admit_required(self._done_tx, ev, label or 'transfer_report_failed')
 end
 
-local function log_event(self, level, fields)
-	local fn = self and self._log
-	if type(fn) ~= 'function' then return true, nil end
-	local payload = {}
-	for k, v in pairs(fields or {}) do payload[k] = v end
-	payload.component = payload.component or 'transfer_manager'
-	payload.manager_id = payload.manager_id or (self._state and self._state.manager_id)
-	payload.link_id = payload.link_id or self._link_id
-	payload.link_generation = payload.link_generation or self._link_generation
-	local ok, err = pcall(fn, level or 'debug', payload)
-	if ok then return true, nil end
-	return nil, err
-end
-
-local function log_caps_event(caps, level, fields)
-	local fn = caps and caps.log
-	if type(fn) ~= 'function' then return true, nil end
-	local payload = {}
-	for k, v in pairs(fields or {}) do payload[k] = v end
-	payload.component = payload.component or 'transfer_manager'
-	payload.manager_id = payload.manager_id or caps.manager_id
-	local ok, err = pcall(fn, level or 'debug', payload)
-	if ok then return true, nil end
-	return nil, err
-end
-
 local function attempt_identity(req)
 	return {
 		kind = 'transfer_attempt_done',
@@ -333,7 +307,6 @@ local function attempt_caps(self, frame_rx, session)
 		chunk_size = self._chunk_size,
 		timeout_s = self._timeout_s,
 		xfer_begin_retry_s = self._xfer_begin_retry_s,
-		log = self._log,
 
 		send_control_frame_now = function (frame, label)
 			return outbound:send_transfer_control_frame_now(c, frame, label)
@@ -383,33 +356,18 @@ local function run_attempt(scope, req, caps)
 
 	local quiet_started = false
 	if type(caps.transfer_quiet_begin) == 'function' then
-		local ok, qerr = caps.transfer_quiet_begin(worker_req.xfer_id)
+		local ok = caps.transfer_quiet_begin(worker_req.xfer_id)
 		if ok == true then
 			quiet_started = true
-		else
-			log_caps_event(caps, 'warn', {
-				what = 'transfer_quiet_begin_failed',
-				request_id = worker_req.request_id,
-				xfer_id = worker_req.xfer_id,
-				err = qerr or 'transfer quiet begin failed',
-			})
 		end
 	end
 
 	scope:finally(function (_, status, primary)
 		if quiet_started and type(caps.transfer_quiet_end) == 'function' then
-			local ok, qerr = caps.transfer_quiet_end(
+			caps.transfer_quiet_end(
 				worker_req.xfer_id,
 				primary or status or 'transfer_attempt_closed'
 			)
-			if ok ~= true then
-				log_caps_event(caps, 'warn', {
-					what = 'transfer_quiet_end_failed',
-					request_id = worker_req.request_id,
-					xfer_id = worker_req.xfer_id,
-					err = qerr or 'transfer quiet end failed',
-				})
-			end
 		end
 	end)
 
@@ -501,24 +459,8 @@ function SlotLease:start_attempt(request_scope, req)
 	if not raw then
 		self._attempt_started = false
 		local_tx:close(err or 'transfer attempt start failed')
-		log_event(manager, 'warn', {
-			what = 'transfer_attempt_spawn_failed',
-			request_id = attempt_req.request_id,
-			xfer_id = attempt_req.xfer_id,
-			target = attempt_req.target,
-			size = attempt_req.size,
-			err = err or 'transfer attempt start failed',
-		})
 		return nil, err
 	end
-	log_event(manager, 'info', {
-		what = 'transfer_attempt_spawned',
-		request_id = attempt_req.request_id,
-		xfer_id = attempt_req.xfer_id,
-		target = attempt_req.target,
-		size = attempt_req.size,
-		peer_sid = self._session and self._session.peer_sid or nil,
-	})
 
 	return {
 		cancel = function (_, reason) return raw:cancel(reason) end,
@@ -587,11 +529,6 @@ local function handle_slot_request(self, req)
 	end
 
 	if self._session == nil then
-		log_event(self, 'warn', {
-			what = 'transfer_slot_no_session',
-			request_id = id,
-			xfer_id = req.xfer_id,
-		})
 		fail_slot(req, 'no_session')
 		emit_model(self)
 		return
@@ -612,13 +549,6 @@ local function handle_slot_request(self, req)
 	local ok, reason = M.claim_slot(self._state, rec)
 	if not ok then
 		frame_tx:close(reason or 'slot_busy')
-		log_event(self, 'warn', {
-			what = 'transfer_slot_busy',
-			request_id = id,
-			xfer_id = rec.xfer_id,
-			err = reason or 'slot_busy',
-			peer_sid = rec.session and rec.session.peer_sid or nil,
-		})
 		fail_slot(req, reason or 'slot_busy')
 		emit_model(self)
 		return
@@ -629,22 +559,7 @@ local function handle_slot_request(self, req)
 
 	local replied, err = reply_slot(req, { ok = true, lease = lease })
 	if replied ~= true then
-		log_event(self, 'warn', {
-			what = 'transfer_slot_reply_failed',
-			request_id = id,
-			xfer_id = rec.xfer_id,
-			err = err or 'slot admission reply failed',
-		})
 		lease:release(err or 'slot admission reply failed')
-	else
-		log_event(self, 'info', {
-			what = 'transfer_slot_admitted',
-			request_id = id,
-			xfer_id = rec.xfer_id,
-			target = rec.target,
-			size = rec.size,
-			peer_sid = rec.session and rec.session.peer_sid or nil,
-		})
 	end
 
 	emit_model(self)
@@ -658,12 +573,6 @@ local function active_done(self, reason, session)
 	end
 
 	if active ~= nil then
-		log_event(self, 'warn', {
-			what = 'transfer_active_cancelled',
-			request_id = active.request_id,
-			xfer_id = active.xfer_id,
-			err = reason or 'session_dropped',
-		})
 		if active.lease and type(active.lease._poison) == 'function' then
 			active.lease:_poison(reason or 'session_dropped')
 		else
@@ -688,17 +597,6 @@ end
 
 local function handle_attempt_done(self, ev)
 	local accepted, _, active = M.apply_attempt_done(self._state, ev)
-	if accepted then
-		log_event(self, ev.status == 'ok' and 'info' or 'warn', {
-			what = 'transfer_attempt_done',
-			request_id = ev.request_id,
-			xfer_id = active and active.xfer_id or nil,
-			status = ev.status,
-			err = ev.primary,
-			sent_bytes = ev.result and ev.result.sent_bytes or nil,
-			size = ev.result and ev.result.size or nil,
-		})
-	end
 	if accepted then close_feed(active, 'transfer attempt completed') end
 	emit_model(self)
 end
@@ -754,12 +652,6 @@ local function handle_peer_session(self, ev)
 	end
 
 	self._session = ctx(c)
-	log_event(self, 'info', {
-		what = 'transfer_peer_session',
-		peer_sid = c.peer_sid,
-		peer_node = c.peer_node,
-		session_generation = c.session_generation,
-	})
 	emit_model(self)
 end
 
@@ -767,11 +659,6 @@ local function handle_peer_session_dropped(self, ev)
 	local c = require_ctx(ev_ctx(ev), 'transfer peer_session_dropped')
 	if not same_ctx(self._session, c) then return end
 
-	log_event(self, 'warn', {
-		what = 'transfer_peer_session_dropped',
-		peer_sid = c.peer_sid,
-		reason = ev.reason,
-	})
 	active_done(self, ev.reason or 'session_dropped', c)
 	self._session = nil
 	emit_model(self)
@@ -965,7 +852,6 @@ function M.run(scope, params)
 		_chunk_size = params.chunk_size,
 		_timeout_s = params.timeout_s,
 		_xfer_begin_retry_s = params.xfer_begin_retry_s,
-		_log = params.log,
 		_session = nil,
 		_event_pending = {},
 	}, Manager)

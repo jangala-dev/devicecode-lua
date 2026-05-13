@@ -93,38 +93,6 @@ local function copy_table(t)
 	return out
 end
 
-local function emit_log(deps, level, payload)
-	local conn = deps and deps.conn
-	if type(conn) ~= 'table' or type(conn.publish) ~= 'function' then return end
-	local out = {}
-	for k, v in pairs(payload or {}) do out[k] = v end
-	out.level = level or out.level or 'info'
-	pcall(function ()
-		conn:publish({ 'obs', 'log', 'ui', out.level }, out)
-		conn:publish({ 'obs', 'v1', 'ui', 'event', 'log' }, out)
-	end)
-end
-
-local function principal_summary(principal)
-	if type(principal) ~= 'table' then return principal end
-	return {
-		kind = principal.kind,
-		id = principal.id,
-		roles = principal.roles,
-	}
-end
-
-local function login_body_summary(body)
-	body = body or {}
-	local username = body.username or body.user
-	return {
-		username = username,
-		username_present = username ~= nil and username ~= '',
-		password_present = body.password ~= nil and body.password ~= '',
-		body_type = type(body),
-	}
-end
-
 local function session_id_from(ctx)
 	return ctx.session_id
 		or (ctx.cookies and (ctx.cookies.sid or ctx.cookies.session or ctx.cookies.ui_session))
@@ -138,23 +106,6 @@ local function principal_from(ctx, deps)
 		if sess then return sess.principal, sess end
 	end
 	return nil, nil
-end
-
-local function upload_request_metadata(ctx, principal)
-	return {
-		what = 'upload_begin',
-		principal = principal_summary(principal),
-		session_id = session_id_from(ctx),
-		content_length = ctx_header(ctx, 'content-length'),
-		content_type = ctx_header(ctx, 'content-type'),
-		artifact_component = ctx_header(ctx, 'x-artifact-component'),
-		artifact_name = ctx_header(ctx, 'x-artifact-name'),
-		artifact_version = ctx_header(ctx, 'x-artifact-version'),
-		artifact_build = ctx_header(ctx, 'x-artifact-build'),
-		artifact_image_id = ctx_header(ctx, 'x-artifact-image-id'),
-		artifact_compat_commit_image_id = ctx_header(ctx, 'x-artifact-compat-commit-image-id'),
-		transfer_chunk_raw = ctx_header(ctx, 'x-transfer-chunk-raw'),
-	}
 end
 
 local function handle_read(owner, route, deps)
@@ -186,46 +137,17 @@ end
 
 local function handle_login(owner, ctx, deps)
 	local body, body_err = body_table(ctx)
-	local summary = login_body_summary(body)
-	emit_log(deps, 'info', {
-		what = 'login_attempt',
-		user = summary.username,
-		username_present = summary.username_present,
-		password_present = summary.password_present,
-		body_type = summary.body_type,
-		body_error = body_err,
-		auth_present = deps.auth ~= nil,
-	})
 	if body_err ~= nil then
-		emit_log(deps, 'warn', {
-			what = 'login_failed',
-			reason = body_err,
-			auth_present = deps.auth ~= nil,
-		})
 		perform_response(owner:reply_error_op(400, body_err))
 		return { status = 'bad_request', err = body_err }
 	end
 	local principal, err = auth.verify(deps.auth, body)
 	if not principal then
-		emit_log(deps, 'warn', {
-			what = 'login_failed',
-			user = summary.username,
-			username_present = summary.username_present,
-			password_present = summary.password_present,
-			reason = err or 'unauthenticated',
-			auth_present = deps.auth ~= nil,
-		})
 		perform_response(owner:reply_error_op(401, err or 'unauthenticated'))
 		return { status = 'unauthenticated' }
 	end
 	local sess = assert(deps.sessions, 'login requires sessions'):create(principal, {
 		data = { user_agent = ctx_header(ctx, 'user-agent') },
-	})
-	emit_log(deps, 'info', {
-		what = 'login_ok',
-		user = summary.username,
-		principal = principal,
-		session_id = sess.id,
 	})
 	perform_response(owner:reply_json_op(200, { session = sess, session_id = sess.id }))
 	return { status = 'ok', session_id = sess.id }
@@ -341,40 +263,12 @@ local function handle_upload(scope, owner, ctx, deps)
 		return { status = 'unauthenticated' }
 	end
 
-	emit_log(deps, 'info', upload_request_metadata(ctx, principal))
 	local opts = copy_table(deps.update or deps)
 	opts.principal = principal
 	opts.connect = opts.connect or deps.connect
 	opts.bus = opts.bus or deps.bus
-	local prev_log = opts.log
-	opts.log = function (level, payload)
-		if type(prev_log) == 'function' then pcall(prev_log, level, payload) end
-		local out = copy_table(payload or {})
-		out.principal = out.principal or principal_summary(principal)
-		out.session_id = out.session_id or session_id_from(ctx)
-		emit_log(deps, level, out)
-	end
 
-	local result = upload.run(scope, owner, ctx, opts)
-	if type(result) == 'table' and (result.status == 'ok' or result.artifact_id ~= nil) then
-		emit_log(deps, 'info', {
-			what = 'upload_ok',
-			artifact_id = result.artifact_id,
-			job_id = type(result.job) == 'table' and (result.job.job_id or result.job.id) or nil,
-			started = result.started ~= nil,
-			principal = principal_summary(principal),
-			session_id = session_id_from(ctx),
-		})
-	else
-		emit_log(deps, 'warn', {
-			what = 'upload_failed',
-			status = type(result) == 'table' and result.status or nil,
-			err = type(result) == 'table' and result.err or result,
-			principal = principal_summary(principal),
-			session_id = session_id_from(ctx),
-		})
-	end
-	return result
+	return upload.run(scope, owner, ctx, opts)
 end
 
 function M.run(scope, ctx, deps)

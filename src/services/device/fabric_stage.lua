@@ -8,16 +8,6 @@ local op_mod = require 'fibers.op'
 
 local M = {}
 
-local function log_event(log, level, fields)
-	if type(log) ~= 'function' then return true, nil end
-	local payload = {}
-	for k, v in pairs(fields or {}) do payload[k] = v end
-	payload.component = payload.component or 'device_fabric_stage'
-	local ok, err = pcall(log, level or 'debug', payload)
-	if ok then return true, nil end
-	return nil, err
-end
-
 local function call_transfer_op(client, source, meta, opts)
 	if type(client) == 'table' and type(client.send_blob_op) == 'function' then
 		return client:send_blob_op(source, meta, opts)
@@ -157,20 +147,9 @@ function M.stage_source_op(_, params)
 	params = params or {}
 	local source = params.source
 	if source == nil then
-		log_event(params.log, 'warn', { what = 'device_fabric_stage_rejected', err = 'source_required' })
 		return op_mod.always(nil, 'source_required', nil)
 	end
 
-	log_event(params.log, 'info', {
-		what = 'device_fabric_stage_client_begin',
-		component_id = params.component,
-		action = params.action,
-		link_id = params.link_id,
-		target = params.target,
-		receiver = params.receiver,
-		artifact_store = params.artifact_store,
-		timeout = params.timeout,
-	})
 	local request_payload = params.request_payload
 	local transfer_meta = copy_identity_metadata({
 		component = params.component,
@@ -189,51 +168,16 @@ function M.stage_source_op(_, params)
 	})
 
 	if not ev then
-		log_event(params.log, 'warn', {
-			what = 'device_fabric_stage_client_unavailable',
-			component_id = params.component,
-			action = params.action,
-			err = err or 'fabric_stage_unavailable',
-		})
 		return op_mod.always(nil, err or 'fabric_stage_unavailable', nil)
 	end
 
 	if is_op(ev) then
 		return ev:wrap(function (result, perr)
-			local mapped, merr, handoff = map_result(result, perr)
-			if mapped == nil then
-				log_event(params.log, 'warn', {
-					what = 'device_fabric_stage_client_failed',
-					component_id = params.component,
-					action = params.action,
-					err = merr,
-				})
-				return nil, merr, nil
-			end
-			log_event(params.log, 'info', {
-				what = 'device_fabric_stage_client_ok',
-				component_id = params.component,
-				action = params.action,
-			})
-			return mapped, nil, handoff
+			return map_result(result, perr)
 		end)
 	end
 
 	local mapped, merr, handoff = map_result(ev, nil)
-	if mapped == nil then
-		log_event(params.log, 'warn', {
-			what = 'device_fabric_stage_client_failed',
-			component_id = params.component,
-			action = params.action,
-			err = merr,
-		})
-	else
-		log_event(params.log, 'info', {
-			what = 'device_fabric_stage_client_ok',
-			component_id = params.component,
-			action = params.action,
-		})
-	end
 	return op_mod.always(mapped, merr, handoff)
 end
 

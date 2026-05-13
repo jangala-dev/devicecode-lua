@@ -87,16 +87,6 @@ local function remaining(deadline)
 	return n > 0 and n or 0
 end
 
-local function log_event(log, level, fields)
-	if type(log) ~= 'function' then return true, nil end
-	local payload = {}
-	for k, v in pairs(fields or {}) do payload[k] = v end
-	payload.component = payload.component or 'transfer_client'
-	local ok, err = pcall(log, level or 'debug', payload)
-	if ok then return true, nil end
-	return nil, err
-end
-
 local function make_slot_request(req, reply_tx)
 	local slot = {
 		kind               = 'transfer_slot_request',
@@ -145,8 +135,6 @@ local function run_in_scope(scope, params)
 	local owner, serr = source_owner(scope, params)
 	if not owner then return nil, serr end
 
-	local log = params.log
-
 	local deadline = fibers.now() + timeout_s
 	local reply_tx, reply_rx = mailbox.new(1, { full = 'reject_newest' })
 
@@ -160,34 +148,16 @@ local function run_in_scope(scope, params)
 		'transfer_client_slot_request_failed'
 	)
 	if ok ~= true then
-		log_event(log, 'warn', {
-			what = 'transfer_slot_request_failed',
-			request_id = req.request_id,
-			link_id = params.link_id,
-			err = err or 'slot_admission_failed',
-		})
 		return nil, err or 'slot_admission_failed'
 	end
 
 	local admitted, aerr = await_reply(reply_rx, deadline, 'slot_admission_closed')
 	if not admitted then
-		log_event(log, 'warn', {
-			what = 'transfer_slot_admission_failed',
-			request_id = req.request_id,
-			link_id = params.link_id,
-			xfer_id = req.xfer_id,
-			err = aerr,
-		})
 		return nil, aerr
 	end
 
 	local lease = admitted.lease
 	if type(lease) ~= 'table' or type(lease.start_attempt) ~= 'function' then
-		log_event(log, 'warn', {
-			what = 'transfer_slot_missing_lease',
-			request_id = req.request_id,
-			link_id = params.link_id,
-		})
 		return nil, 'slot_admission_missing_lease'
 	end
 
@@ -202,28 +172,14 @@ local function run_in_scope(scope, params)
 
 	req.source_owner = owner
 	req.timeout_s = timeout_s
-	req.log = log
 
 	local handle, herr = transfer.start_attempt(scope, lease, req)
 	if not handle then
-		log_event(log, 'warn', {
-			what = 'transfer_attempt_start_failed',
-			request_id = req.request_id,
-			link_id = params.link_id,
-			xfer_id = req.xfer_id,
-			err = herr or 'transfer_attempt_start_failed',
-		})
 		return nil, herr or 'transfer_attempt_start_failed'
 	end
 
 	local handed, handoff_err = lease_owner:handoff(function () return true end)
 	if not handed then
-		log_event(log, 'warn', {
-			what = 'transfer_slot_lease_handoff_failed',
-			request_id = req.request_id,
-			link_id = params.link_id,
-			err = handoff_err or 'transfer_slot_lease_handoff_failed',
-		})
 		return nil, handoff_err or 'transfer_slot_lease_handoff_failed'
 	end
 
@@ -234,43 +190,15 @@ local function run_in_scope(scope, params)
 
 	if which == 'timeout' then
 		handle:cancel('timeout')
-		log_event(log, 'warn', {
-			what = 'transfer_attempt_timeout',
-			request_id = req.request_id,
-			link_id = params.link_id,
-			xfer_id = req.xfer_id,
-			timeout_s = timeout_s,
-		})
 		return nil, 'timeout'
 	end
 
 	if ev == nil then
-		log_event(log, 'warn', {
-			what = 'transfer_attempt_outcome_missing',
-			request_id = req.request_id,
-			link_id = params.link_id,
-		})
 		return nil, 'attempt_outcome_missing'
 	end
 	if ev.status == 'ok' then
-		log_event(log, 'info', {
-			what = 'transfer_attempt_ok',
-			request_id = req.request_id,
-			link_id = params.link_id,
-			xfer_id = req.xfer_id,
-			sent_bytes = ev.result and ev.result.sent_bytes or nil,
-			size = req.size,
-		})
 		return ev.result, nil
 	end
-	log_event(log, 'warn', {
-		what = 'transfer_attempt_failed',
-		request_id = req.request_id,
-		link_id = params.link_id,
-		xfer_id = req.xfer_id,
-		status = ev.status,
-		err = ev.primary or ev.status or 'transfer_attempt_failed',
-	})
 	return nil, ev.primary or ev.status or 'transfer_attempt_failed'
 end
 

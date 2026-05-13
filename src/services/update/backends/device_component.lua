@@ -20,24 +20,6 @@ local DEFAULT_STAGE_MAX_ATTEMPTS = 3
 local Backend = {}
 Backend.__index = Backend
 
-local function topic_string(topic)
-	if type(topic) ~= 'table' then return tostring(topic) end
-	local out = {}
-	for i = 1, #topic do out[i] = tostring(topic[i]) end
-	return table.concat(out, '/')
-end
-
-local function log_event(self, level, fields)
-	local fn = self and self._log
-	if type(fn) ~= 'function' then return true, nil end
-	local payload = {}
-	for k, v in pairs(fields or {}) do payload[k] = v end
-	payload.component = payload.component or 'update_device_backend'
-	local ok, err = pcall(fn, level or 'debug', payload)
-	if ok then return true, nil end
-	return nil, err
-end
-
 local function call_timeout(self, ctx, key, fallback)
 	if ctx and type(ctx.timeout) == 'number' then return ctx.timeout end
 	if type(self[key]) == 'number' then return self[key] end
@@ -61,16 +43,6 @@ local function component_call_op(self, job, method, payload, timeout)
 	end
 
 	local topic = device_topics.component_cap_rpc(job.component, method)
-	log_event(self, 'info', {
-		what = 'update_device_backend_call_begin',
-		job_id = job.job_id,
-		component_id = job.component,
-		method = method,
-		topic = topic_string(topic),
-		timeout = timeout,
-		artifact_ref = payload and payload.artifact_ref or nil,
-		expected_image_id = payload and payload.expected_image_id or nil,
-	})
 	return self._conn:call_op(
 		topic,
 		payload or {},
@@ -78,23 +50,8 @@ local function component_call_op(self, job, method, payload, timeout)
 	):wrap(function (reply, err)
 		local result, norm_err = normalise_action_reply(reply, err)
 		if result == nil then
-			log_event(self, 'warn', {
-				what = 'update_device_backend_call_failed',
-				job_id = job.job_id,
-				component_id = job.component,
-				method = method,
-				topic = topic_string(topic),
-				err = norm_err,
-			})
 			return nil, norm_err
 		end
-		log_event(self, 'info', {
-			what = 'update_device_backend_call_ok',
-			job_id = job.job_id,
-			component_id = job.component,
-			method = method,
-			topic = topic_string(topic),
-		})
 		return result, nil
 	end)
 end
@@ -126,16 +83,6 @@ local function retrying_stage_call_op(self, job, payload, timeout)
 			if attempt >= max_attempts or not is_transient_stage_error(last_err) then
 				return nil, last_err
 			end
-			log_event(self, 'warn', {
-				what = 'update_device_backend_stage_retry',
-				job_id = job.job_id,
-				component_id = job.component,
-				err = last_err,
-				attempt = attempt,
-				next_attempt = attempt + 1,
-				max_attempts = max_attempts,
-				delay_s = retry_delay,
-			})
 			fibers.perform(sleep.sleep_op(retry_delay))
 		end
 		return nil, last_err or 'stage_update_failed'
@@ -215,13 +162,6 @@ local function legacy_streamed_commit_image_id(self, job, ctx, payload)
 	if type(metadata) ~= 'table' or metadata.image_id ~= expected then return nil end
 	local explicit = metadata.compat_commit_image_id
 	if type(explicit) == 'string' and explicit ~= '' and explicit ~= expected then
-		log_event(self, 'warn', {
-			what = 'update_device_backend_explicit_compat_commit_image_id',
-			job_id = job and job.job_id or nil,
-			component_id = job and job.component or nil,
-			expected_image_id = expected,
-			commit_expected_image_id = explicit,
-		})
 		return explicit
 	end
 
@@ -237,16 +177,6 @@ local function legacy_streamed_commit_image_id(self, job, ctx, payload)
 	local running = type(sw) == 'table' and sw.image_id or nil
 	if type(running) == 'string' and running ~= '' and running ~= staged then return nil end
 
-	log_event(self, 'warn', {
-		what = 'update_device_backend_legacy_streamed_identity_commit',
-		job_id = job and job.job_id or nil,
-		component_id = job and job.component or nil,
-		expected_image_id = expected,
-		commit_expected_image_id = staged,
-		pending_image_id = upd.pending_image_id,
-		staged_image_id = staged,
-		running_image_id = running,
-	})
 	return staged
 end
 
@@ -421,7 +351,6 @@ function M.new(opts)
 		commit_settle_s = opts.commit_settle_s,
 		stage_max_attempts = opts.stage_max_attempts,
 		stage_retry_delay_s = opts.stage_retry_delay_s,
-		_log = opts.log,
 	}, Backend)
 end
 

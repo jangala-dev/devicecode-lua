@@ -24,12 +24,6 @@ function M.initial()
 		completed_exchanges = 0,
 		failed_exchanges = 0,
 		rejected_requests = 0,
-		tracked_requests = 0,
-		tracked_operations = 0,
-		tracked_contexts = 0,
-		tracked_listeners = 0,
-		tracked_exchanges = 0,
-		tracked_websockets = 0,
 		last_error = nil,
 		policy_generation = 1,
 	}

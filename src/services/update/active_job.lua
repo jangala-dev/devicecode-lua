@@ -13,16 +13,6 @@ local sleep  = require 'fibers.sleep'
 
 local M = {}
 
-local function log_event(log, level, fields)
-	if type(log) ~= 'function' then return true, nil end
-	local payload = {}
-	for k, v in pairs(fields or {}) do payload[k] = v end
-	payload.component = payload.component or 'update_active_job'
-	local ok, err = pcall(log, level or 'debug', payload)
-	if ok then return true, nil end
-	return nil, err
-end
-
 local function backend_method(backend, name, required)
 	if type(backend) ~= 'table' then
 		error('active_job: backend required', 0)
@@ -95,26 +85,8 @@ end
 
 function M.stage(_scope, params)
 	params = params or {}
-	log_event(params.log, 'info', {
-		what = 'update_stage_begin',
-		job_id = params.job and params.job.job_id or nil,
-		component_id = params.job and params.job.component or nil,
-		artifact_ref = params.job and params.job.artifact_ref or nil,
-	})
 	local backend, job, ctx, preflight, prepared = stage_context(params)
-	log_event(params.log, 'info', {
-		what = 'update_stage_backend_begin',
-		job_id = job.job_id,
-		component_id = job.component,
-		artifact_ref = job.artifact_ref,
-	})
 	local staged = perform_backend_op(backend, 'stage_op', true, job, ctx)
-	log_event(params.log, 'info', {
-		what = 'update_stage_backend_ok',
-		job_id = job.job_id,
-		component_id = job.component,
-		artifact_ref = job.artifact_ref,
-	})
 
 	return {
 		tag       = 'staged',
