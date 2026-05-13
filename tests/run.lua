@@ -88,6 +88,7 @@ local files = {
 	"integration.devhost.hal_uart_spec",
 	"integration.devhost.fabric_hal_uart_smoke_spec",
 	"integration.devhost.fabric_public_service_path_spec",
+	'integration.devhost.update_public_seams_spec',
 	'unit.support.test_scoped_work',
 	'unit.support.test_queue',
 	'unit.support.test_priority_event',
@@ -111,6 +112,17 @@ local files = {
 	'unit.http.test_structure',
 	'integration.devhost.test_http_transport_real',
 	'integration.devhost.test_http_service_real',
+	"unit.ui.test_architecture",
+	"unit.ui.test_config",
+	"unit.ui.test_http_listener",
+	"unit.ui.test_http_request",
+	"unit.ui.test_http_response_stream",
+	"unit.ui.test_read_model",
+	"unit.ui.test_service",
+	"unit.ui.test_sessions",
+	"unit.ui.test_supervision",
+	"unit.ui.test_update_upload",
+	"unit.ui.test_user_operation",
 }
 
 local function monotonic_now()
