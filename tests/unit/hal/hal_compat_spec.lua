@@ -709,4 +709,20 @@ function T.strict_manager_contract_requires_terminate_and_fault_op()
 	end)
 end
 
+function T.strict_hal_managers_do_not_use_perform_raw()
+	local paths = {
+		'../src/services/hal/managers/artifact_store.lua',
+		'../src/services/hal/managers/control_store.lua',
+		'../src/services/hal/managers/signature_verify.lua',
+		'../src/services/hal/managers/uart.lua',
+	}
+
+	for _, path in ipairs(paths) do
+		local f = assert(io.open(path, 'r'))
+		local s = f:read('*a')
+		f:close()
+		assert(not s:find('perform_raw', 1, true), path .. ' uses perform_raw')
+	end
+end
+
 return T
