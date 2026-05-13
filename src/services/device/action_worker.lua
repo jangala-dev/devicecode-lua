@@ -11,7 +11,6 @@ local scope_mod     = require 'fibers.scope'
 local request_owner = require 'devicecode.support.request_owner'
 local resource      = require 'devicecode.support.resource'
 local cap_sdk       = require 'services.hal.sdk.cap'
-local cap_args      = require 'services.hal.types.capability_args'
 local fabric_stage  = require 'services.device.fabric_stage'
 
 local M = {}
@@ -175,7 +174,7 @@ local function open_artifact_ref_source_op(ctx, artifact_ref)
 		return op.always(nil, 'connection_required')
 	end
 
-	local opts, oerr = cap_args.new.ArtifactStoreOpenOpts(artifact_ref)
+	local opts, oerr = cap_sdk.args.new.ArtifactStoreOpenOpts(artifact_ref)
 	if not opts then
 		return op.always(nil, oerr or 'invalid_artifact_ref')
 	end
