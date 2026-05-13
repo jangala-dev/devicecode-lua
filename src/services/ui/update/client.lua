@@ -16,15 +16,12 @@ end
 function M.create_job_op(conn, artifact_id, opts)
 	opts = opts or {}
 	local method = opts.create_method or update_manager_rpc('create-job')
-	local metadata = opts.metadata or opts.meta
 	return conn:call_op(method, {
 		artifact_id = artifact_id,
 		artifact_ref = artifact_id,
 		component = opts.component or opts.target_component or opts.update_component,
 		options = opts.options,
-		metadata = metadata,
-		expected_image_id = opts.expected_image_id
-			or (type(metadata) == 'table' and metadata.image_id or nil),
+		metadata = opts.metadata or opts.meta,
 		job_id = opts.job_id,
 	}, call_opts(opts, 10.0)):wrap(function (reply, err)
 		if reply == nil or err ~= nil then return nil, err end

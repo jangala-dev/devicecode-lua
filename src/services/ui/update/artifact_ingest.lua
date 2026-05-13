@@ -90,36 +90,6 @@ local function ingest_id_from(reply, fallback)
 	return rec and (rec.ingest_id or rec.id) or fallback
 end
 
-local function artifact_ref_from(value, depth)
-	if type(value) == 'string' and value ~= '' then return value end
-	if type(value) ~= 'table' or (depth or 0) > 4 then return nil end
-	depth = (depth or 0) + 1
-
-	for _, key in ipairs({ 'artifact_ref', 'artifact_id', 'ref', 'id' }) do
-		if type(value[key]) == 'string' and value[key] ~= '' then return value[key] end
-	end
-
-	if type(value.ref) == 'function' then
-		local ok, ref = pcall(value.ref, value)
-		if ok and type(ref) == 'string' and ref ~= '' then return ref end
-	end
-
-	if type(value.describe) == 'function' then
-		local ok, desc = pcall(value.describe, value)
-		if ok then
-			local ref = artifact_ref_from(desc, depth)
-			if ref then return ref end
-		end
-	end
-
-	for _, key in ipairs({ 'artifact', 'commit', 'result', 'record', 'value' }) do
-		local ref = artifact_ref_from(value[key], depth)
-		if ref then return ref end
-	end
-
-	return nil
-end
-
 function BusHandle:append_chunk_op(chunk)
 	if self._closed then return op.always(nil, 'artifact_ingest_handle_closed') end
 	return self._conn:call_op(ingest_rpc('append'), {
@@ -138,7 +108,7 @@ function BusHandle:commit_op()
 		if type(reply) ~= 'table' then return reply end
 		local committed = reply.commit or reply.artifact or reply.result or reply
 		if type(committed) == 'table' then
-			return artifact_ref_from(committed) or committed
+			return committed.artifact_id or committed.id or committed.ref or committed
 		end
 		return committed
 	end)

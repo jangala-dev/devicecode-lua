@@ -15,7 +15,6 @@ local client      = require 'services.ui.update.client'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local resource    = require 'devicecode.support.resource'
 local scope_mod   = require 'fibers.scope'
-local cap_sdk     = require 'services.hal.sdk.cap'
 
 local M = {}
 
@@ -71,161 +70,6 @@ local function remaining_timeout(opts, deadline)
 	return remaining
 end
 
-local function copy_table(t)
-	local out = {}
-	for k, v in pairs(t or {}) do out[k] = v end
-	return out
-end
-
-local function artifact_store_id(opts)
-	return opts.artifact_store_id
-		or opts.artifact_store
-		or opts.store_id
-		or 'main'
-end
-
-local function artifact_store_policy(opts)
-	return opts.artifact_store_policy
-		or opts.artifact_policy
-		or opts.sink_policy
-		or 'prefer_durable'
-end
-
-local function artifact_sink_meta(opts)
-	local meta = opts.metadata or opts.meta
-	if type(meta) == 'table' then
-		meta = copy_table(meta)
-	else
-		meta = {}
-	end
-	meta.component = meta.component
-		or opts.component
-		or opts.target_component
-		or opts.update_component
-	return meta
-end
-
-local function job_artifact_metadata(opts)
-	local meta = opts.metadata or opts.meta
-	if type(meta) == 'table' then
-		meta = copy_table(meta)
-	else
-		meta = {}
-	end
-	if meta.artifact_cleanup == nil then meta.artifact_cleanup = 'delete_on_terminal' end
-	if meta.artifact_lifecycle == nil then meta.artifact_lifecycle = 'delete_with_job' end
-	return meta
-end
-
-local function sink_from_create_reply(reply, err)
-	if reply == nil then return nil, err or 'artifact sink create failed' end
-	if type(reply) == 'table' and reply.ok == false then
-		return nil, reply.reason or reply.err or 'artifact sink create failed'
-	end
-	if type(reply) == 'table' and type(reply.append_op) == 'function' then
-		return reply, nil
-	end
-	if type(reply) == 'table' then
-		local sink = reply.reason or reply.value or reply.sink or reply.artifact_sink
-		if type(sink) == 'table' then return sink, nil end
-	end
-	return nil, 'artifact sink create returned no sink'
-end
-
-local function create_artifact_sink_op(conn, opts)
-	if type(conn) ~= 'table' then return fibers.always(nil, 'artifact sink connection unavailable') end
-	local create_opts, opt_err = cap_sdk.args.new.ArtifactStoreCreateSinkOpts(
-		artifact_sink_meta(opts),
-		artifact_store_policy(opts)
-	)
-	if not create_opts then return fibers.always(nil, opt_err or 'artifact sink opts invalid') end
-	local cap = cap_sdk.new_curated_cap_ref(conn, 'artifact_store', artifact_store_id(opts))
-	return cap:call_control_op('create_sink', create_opts, {
-		timeout = opts.sink_timeout or opts.artifact_store_timeout or opts.timeout,
-		deadline = opts.deadline,
-	})
-end
-
-local function normalise_header_name(name)
-	return tostring(name or ''):lower()
-end
-
-local function header_one(headers, name)
-	if type(headers) ~= 'table' then return nil end
-
-	local lname = normalise_header_name(name)
-	local get = headers.get
-	if type(get) == 'function' then
-		local ok, value = pcall(get, headers, lname)
-		if ok and value ~= nil then return value end
-		ok, value = pcall(get, headers, name)
-		if ok and value ~= nil then return value end
-	end
-
-	local value = headers[lname] or headers[name]
-	if value == nil then
-		for k, v in pairs(headers) do
-			if normalise_header_name(k) == lname then
-				value = v
-				break
-			end
-		end
-	end
-
-	if type(value) == 'table' then
-		return value[1]
-	end
-
-	return value
-end
-
-local function string_header(headers, name)
-	local raw = header_one(headers, name)
-	if raw == nil then return nil end
-	raw = tostring(raw)
-	if raw == '' then return nil end
-	return raw
-end
-
-local function apply_upload_headers(ctx, opts)
-	local headers = ctx and ctx.headers
-	local artifact_name = string_header(headers, 'x-artifact-name')
-	local artifact_version = string_header(headers, 'x-artifact-version')
-	local artifact_build = string_header(headers, 'x-artifact-build')
-	local image_id = string_header(headers, 'x-artifact-image-id')
-	local compat_commit_image_id = string_header(headers, 'x-artifact-compat-commit-image-id')
-	local checksum = string_header(headers, 'x-artifact-checksum')
-
-	if artifact_name == nil
-		and artifact_version == nil
-		and artifact_build == nil
-		and image_id == nil
-		and compat_commit_image_id == nil
-		and checksum == nil
-	then
-		return opts
-	end
-
-	opts = copy_table(opts)
-	local meta = opts.metadata or opts.meta
-	if type(meta) == 'table' then
-		meta = copy_table(meta)
-	else
-		meta = {}
-	end
-	if artifact_name ~= nil then meta.name = artifact_name end
-	if artifact_version ~= nil then meta.version = artifact_version end
-	if artifact_build ~= nil then meta.build = artifact_build end
-	if image_id ~= nil then
-		meta.image_id = image_id
-		opts.expected_image_id = opts.expected_image_id or image_id
-	end
-	if compat_commit_image_id ~= nil then meta.compat_commit_image_id = compat_commit_image_id end
-	if checksum ~= nil then meta.checksum = checksum end
-	opts.metadata = meta
-	return opts
-end
-
 local function cancel_for_timeout(scope, on_timeout)
 	if on_timeout then on_timeout() end
 	if scope and type(scope.cancel) == 'function' then
@@ -258,34 +102,10 @@ local function upload_body_op(ctx, opts, deadline)
 		local function mark_timeout() timed_out = true end
 
 		local ingest_client = opts.ingest or opts.artifact_ingest
-		local sink_owner
 		if ingest_client == nil then
 			local conn, _, conn_err = connect_update_conn(scope, opts)
 			if not conn then error(conn_err or 'update connection unavailable', 0) end
 			opts.update_conn = opts.update_conn or conn
-
-			if opts.sink == nil and opts.artifact_sink == nil then
-				local sink_reply, sink_call_err = perform_with_deadline(
-					scope,
-					create_artifact_sink_op(conn, opts),
-					deadline,
-					mark_timeout
-				)
-				local sink, sink_err = sink_from_create_reply(sink_reply, sink_call_err)
-				if not sink then
-					error(sink_err or 'artifact sink create failed', 0)
-				end
-				sink_owner = resource.owned(sink, { label = 'upload artifact sink cleanup' })
-				scope:finally(function (_, status, primary)
-					sink_owner:terminate_checked(
-						primary or status or 'upload_closed',
-						'upload artifact sink cleanup'
-					)
-				end)
-				opts.sink = sink
-				opts.artifact_sink = sink
-			end
-
 			local built, build_err = ingest.bus_client(conn)
 			if not built then error(build_err or 'artifact ingest bus client unavailable', 0) end
 			ingest_client = built
@@ -293,10 +113,6 @@ local function upload_body_op(ctx, opts, deadline)
 
 		local handle, open_err = perform_with_deadline(scope, ingest.open_ingest_op(ingest_client, opts), deadline, mark_timeout)
 		if not handle then error(open_err or 'artifact ingest open failed', 0) end
-		if sink_owner ~= nil then
-			local _, detach_err = sink_owner:detach()
-			if detach_err then error(detach_err, 0) end
-		end
 
 		local ingest_owner = resource.owned(handle, {
 			label = 'upload ingest abort',
@@ -323,7 +139,7 @@ local function upload_body_op(ctx, opts, deadline)
 
 		local artifact_id, cerr = perform_with_deadline(scope, ingest.commit_op(handle), deadline, mark_timeout)
 		if not artifact_id then error(cerr or 'artifact commit failed', 0) end
-		local _, detach_err = ingest_owner:detach()
+		local _committed_handle, detach_err = ingest_owner:detach()
 		if detach_err then error(detach_err, 0) end
 
 		local out = { status = 'ok', artifact_id = artifact_id }
@@ -334,7 +150,6 @@ local function upload_body_op(ctx, opts, deadline)
 			local call_opts = {}
 			for k, v in pairs(opts) do call_opts[k] = v end
 			call_opts.timeout = remaining_timeout(opts, deadline)
-			call_opts.metadata = job_artifact_metadata(call_opts)
 
 			local job, jerr = perform_with_deadline(scope, client.create_job_op(conn, artifact_id, call_opts), deadline, mark_timeout)
 			if not job then error(jerr or 'update job create failed', 0) end
@@ -350,7 +165,7 @@ local function upload_body_op(ctx, opts, deadline)
 	end)
 end
 
-function M.run(_scope, owner, ctx, opts)
+function M.run(scope, owner, ctx, opts)
 	opts = opts or {}
 	local st, _, result_or_primary = fibers.perform(M.run_op(ctx, opts))
 	if st ~= 'ok' then
@@ -365,7 +180,7 @@ end
 
 function M.run_op(ctx, opts)
 	ctx = ctx or {}
-	opts = apply_upload_headers(ctx, opts or {})
+	opts = opts or {}
 
 	return fibers.guard(function ()
 		local deadline = deadline_from_opts(opts)

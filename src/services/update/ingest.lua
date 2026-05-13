@@ -25,45 +25,6 @@ State.__index = State
 
 local function copy(v) return model.deep_copy(v) end
 
-local function artifact_ref_from(v)
-	if type(v) == 'string' and v ~= '' then return v end
-	if type(v) ~= 'table' then return nil end
-
-	for _, key in ipairs({ 'artifact_ref', 'artifact_id', 'ref', 'id' }) do
-		if type(v[key]) == 'string' and v[key] ~= '' then
-			return v[key]
-		end
-	end
-
-	if type(v.ref) == 'function' then
-		local ok, ref = pcall(function () return v:ref() end)
-		if ok and type(ref) == 'string' and ref ~= '' then return ref end
-	end
-
-	if type(v.describe) == 'function' then
-		local ok, desc = pcall(function () return v:describe() end)
-		if ok then return artifact_ref_from(desc) end
-	end
-
-	for _, key in ipairs({ 'artifact', 'artifact_id', 'commit', 'result', 'record', 'value' }) do
-		local ref = artifact_ref_from(v[key])
-		if ref then return ref end
-	end
-
-	return nil
-end
-
-local function commit_artifact_from(a, b)
-	if a == nil or a == false then
-		return nil, b
-	end
-	if a == true then
-		if b ~= nil then return b, nil end
-		return nil, 'artifact_commit_missing_artifact'
-	end
-	return a, nil
-end
-
 local function payload_of(req)
 	return type(req) == 'table' and type(req.payload) == 'table' and req.payload or {}
 end
@@ -191,22 +152,14 @@ function Instance:commit_worker(_scope, ...)
 	end
 	local ev, err = self._owned:commit_op(...)
 	if not ev then return nil, err end
-	local a, b = fibers.perform(ev)
-	local artifact, cerr = commit_artifact_from(a, b)
+	local artifact, cerr = fibers.perform(ev)
 	if artifact == nil then return nil, cerr or 'commit failed' end
-	local artifact_ref = artifact_ref_from(artifact)
 	self.artifact = copy(artifact)
 	self.closed = true
 	self.state = 'committed'
 	self._owned:handoff(function () return true end)
 	self:_close_scope('ingest_committed')
-	return {
-		tag = 'ingest_committed',
-		ingest_id = self.ingest_id,
-		artifact_ref = artifact_ref,
-		artifact = copy(artifact),
-		bytes = self.bytes,
-	}, nil
+	return { tag = 'ingest_committed', ingest_id = self.ingest_id, artifact = copy(artifact), bytes = self.bytes }, nil
 end
 
 function Instance:abort(reason)
