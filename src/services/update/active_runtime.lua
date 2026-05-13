@@ -353,11 +353,11 @@ function Lease:start_work(lifetime_scope, spec)
 		local token = self.token
 		handle = {}
 
-		function handle.cancel(_, reason)
+		function handle:cancel(reason)
 			return raw_handle:cancel(reason)
 		end
 
-		function handle.outcome_op()
+		function handle:outcome_op()
 			return local_rx:recv_op():wrap(function (ev, recv_err)
 				if ev == nil then
 					return {
@@ -375,11 +375,11 @@ function Lease:start_work(lifetime_scope, spec)
 			end)
 		end
 
-		function handle.outcome()
+		function handle:outcome()
 			return raw_handle:outcome()
 		end
 
-		function handle.identity()
+		function handle:identity()
 			return raw_handle:identity()
 		end
 	end
@@ -692,8 +692,7 @@ function Component:consider_jobs()
 	if not self._jobs then return false, 'not_ready' end
 	if self._state.active ~= nil then return false, 'slot_busy' end
 
-	local jobs = self._jobs:list()
-	for _, job in ipairs(jobs) do
+	for _, job in ipairs(self._jobs:list()) do
 		local intent = active_intent_for(job)
 		if type(intent) == 'table' and intent.token ~= nil and intent.phase ~= nil then
 			local ok, err = self:_launch_active_intent(job)
@@ -728,10 +727,10 @@ function Component:start_intent(intent, job, spec)
 
 	spec.lease = lease
 	spec.job = job
-spec.phase = intent.phase or spec.phase or lease.phase
-spec.jobs = spec.jobs or self._jobs
-spec.done_tx = self._local_tx
-spec.observer = spec.observer or self._observer
+	spec.phase = intent.phase or spec.phase or lease.phase
+	spec.jobs = spec.jobs or self._jobs
+	spec.done_tx = self._local_tx
+	spec.observer = spec.observer or self._observer
 	local handle, herr = M.start_work(self._work_scope, self._state, spec)
 	if not handle then
 		lease:release(herr or 'active_intent_start_failed')
@@ -872,11 +871,7 @@ function Component:_handle_apply_done(ev)
 	end
 
 	local ok_launch, launch_err = self:consider_jobs()
-	if ok_launch == nil
-		and launch_err ~= 'slot_busy'
-		and launch_err ~= 'no_active_intent'
-		and launch_err ~= 'not_ready'
-	then
+	if ok_launch == nil and launch_err ~= 'slot_busy' and launch_err ~= 'no_active_intent' and launch_err ~= 'not_ready' then
 		return nil, launch_err or 'active_intent_launch_failed'
 	end
 

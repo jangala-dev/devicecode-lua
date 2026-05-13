@@ -22,6 +22,7 @@ local config_mod    = require 'services.update.config'
 local events        = require 'services.update.events'
 local generation    = require 'services.update.generation'
 local publisher     = require 'services.update.publisher'
+local projection    = require 'services.update.projection'
 local topics        = require 'services.update.topics'
 local job_store_cap = require 'services.update.job_store_cap'
 local job_runtime_mod = require 'services.update.job_runtime'
@@ -405,7 +406,7 @@ local function handle_job_runtime_changed(self, ev)
 	consider_active_jobs(self)
 end
 
-local function handle_active_runtime_changed(self, _ev)
+local function handle_active_runtime_changed(self, ev)
 	update_active_projection(self)
 	update_service_jobs_projection(self)
 	if self._current_generation then
@@ -759,7 +760,7 @@ function M.run(scope, params)
 	local manager_ep, merr = bind_manager(scope, params.conn, params)
 	if merr then error(merr, 2) end
 
-	local cfg_watch, werr = open_config_watch(scope, params.conn, params)
+	local config_watch, werr = open_config_watch(scope, params.conn, params)
 	if werr then error(werr, 2) end
 
 	local job_store = params.job_store or job_store_cap.memory(params.initial_jobs)
@@ -814,8 +815,8 @@ function M.run(scope, params)
 		_active_runtime = active_component:state(),
 		_manager_ep = manager_ep,
 		manager_rx = manager_ep,
-		config_watch = cfg_watch,
-		config_rx = params.config_rx or cfg_watch,
+		config_watch = config_watch,
+		config_rx = params.config_rx or config_watch,
 		publisher = nil,
 		_publisher = nil,
 		pending = {},

@@ -89,7 +89,7 @@ local function handoff_from_result(result)
 	-- Some clients perform the receiver-side termination ownership internally before
 	-- returning. They must still say so explicitly; Device then turns that proof into
 	-- the receiver_install callback used by resource.owned:handoff(...).
-	local receiver_ready
+	local receiver_ready = false
 	if h then
 		receiver_ready = h.receiver_termination_installed == true or h.receiver_owns_source == true
 	else
@@ -159,12 +159,10 @@ function M.stage_source_op(_, params)
 		receiver = params.receiver,
 		artifact_store = params.artifact_store,
 		request = request_payload,
-		chunk_size = params.chunk_size,
 	}, request_payload)
 	local ev, err = call_transfer_op(params.client or params.fabric_client, source, transfer_meta, {
 		timeout = params.timeout,
 		deadline = params.deadline,
-		chunk_size = params.chunk_size,
 	})
 
 	if not ev then
@@ -172,13 +170,10 @@ function M.stage_source_op(_, params)
 	end
 
 	if is_op(ev) then
-		return ev:wrap(function (result, perr)
-			return map_result(result, perr)
-		end)
+		return ev:wrap(map_result)
 	end
 
-	local mapped, merr, handoff = map_result(ev, nil)
-	return op_mod.always(mapped, merr, handoff)
+	return op_mod.always(map_result(ev, nil))
 end
 
 

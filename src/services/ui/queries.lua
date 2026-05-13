@@ -154,31 +154,21 @@ function M.update_job_status(snapshot, job_id)
 	return { ok = true, job = job }
 end
 
-function M.summary_from_counts(stats, sessions_count, extra)
-	stats = stats or {}
-	local out = {
-		version = stats.version or 0,
-		services = stats.services or 0,
-		sessions = sessions_count or 0,
-		closed = stats.closed or false,
-		reason = stats.reason,
-	}
-	for k, v in pairs(extra or {}) do out[k] = v end
-	return out
-end
-
 function M.summary(snapshot, sessions_count, extra)
 	local items = snapshot and snapshot.items or {}
 	local services = 0
 	for _, msg in pairs(items) do
 		if topic_has_prefix(msg.topic, { 'svc' }) then services = services + 1 end
 	end
-	return M.summary_from_counts({
+	local out = {
 		version = snapshot and snapshot.version or 0,
 		services = services,
+		sessions = sessions_count or 0,
 		closed = snapshot and snapshot.closed or false,
 		reason = snapshot and snapshot.reason or nil,
-	}, sessions_count, extra)
+	}
+	for k, v in pairs(extra or {}) do out[k] = v end
+	return out
 end
 
 return M

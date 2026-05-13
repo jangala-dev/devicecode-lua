@@ -229,7 +229,6 @@ function M.start_action(state, req, rec)
 				open_source = state.open_source,
 				open_source_op = state.open_source_op,
 				terminate_source = state.terminate_source,
-				log = state.log,
 			})
 		end,
 		report = completion_reporter(state, action_identity(active.generation, rec.component, rec.action, request_id), 'device_action_done_report_failed'),

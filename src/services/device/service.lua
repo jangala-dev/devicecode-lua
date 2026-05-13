@@ -362,10 +362,7 @@ local function start_generation(state, catalogue)
 		})
 		if ok_bind ~= true then
 			local ok_rb, rb_err = rollback_generation_start(state, active, 'action_bind_failed')
-			if ok_rb ~= true then
-				return nil, tostring(bind_err or 'action_bind_failed')
-					.. '; rollback failed: ' .. tostring(rb_err)
-			end
+			if ok_rb ~= true then return nil, tostring(bind_err or 'action_bind_failed') .. '; rollback failed: ' .. tostring(rb_err) end
 			return nil, bind_err or 'action_bind_failed'
 		end
 	end
@@ -381,10 +378,7 @@ local function start_generation(state, catalogue)
 		})
 		if ok_obs ~= true then
 			local ok_rb, rb_err = rollback_generation_start(state, active, 'observer_start_failed')
-			if ok_rb ~= true then
-				return nil, tostring(obs_err or 'observer_start_failed')
-					.. '; rollback failed: ' .. tostring(rb_err)
-			end
+			if ok_rb ~= true then return nil, tostring(obs_err or 'observer_start_failed') .. '; rollback failed: ' .. tostring(rb_err) end
 			return nil, obs_err or 'observer_start_failed'
 		end
 	end
@@ -826,14 +820,8 @@ end
 local function build_state(scope, params)
 	params = params or {}
 	local service_id = params.service_id or new_service_id()
-	local done_tx, done_rx = mailbox.new(
-		params.done_queue_len or DEFAULT_DONE_QUEUE,
-		{ full = backpressure.policy.completions.full }
-	)
-	local obs_tx, obs_rx = mailbox.new(
-		params.observation_queue_len or DEFAULT_OBSERVATION_QUEUE,
-		{ full = backpressure.policy.observations.full }
-	)
+	local done_tx, done_rx = mailbox.new(params.done_queue_len or DEFAULT_DONE_QUEUE, { full = backpressure.policy.completions.full })
+	local obs_tx, obs_rx = mailbox.new(params.observation_queue_len or DEFAULT_OBSERVATION_QUEUE, { full = backpressure.policy.observations.full })
 
 	local state = {
 		scope = scope,

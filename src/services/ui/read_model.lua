@@ -118,6 +118,5 @@ M.Store = store_mod.Store
 M.WatchOwner = watches_mod.WatchOwner
 M.Watch = watches_mod.Watch
 M.match_topic = store_mod.match_topic
-M.topic_excluded = topic_excluded
 
 return M

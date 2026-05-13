@@ -71,12 +71,6 @@ local function remaining_timeout(opts, deadline)
 	return remaining
 end
 
-local function copy_opts(opts)
-	local out = {}
-	for k, v in pairs(opts or {}) do out[k] = v end
-	return out
-end
-
 local function copy_table(t)
 	local out = {}
 	for k, v in pairs(t or {}) do out[k] = v end
@@ -212,7 +206,7 @@ local function apply_upload_headers(ctx, opts)
 		return opts
 	end
 
-	opts = copy_opts(opts)
+	opts = copy_table(opts)
 	local meta = opts.metadata or opts.meta
 	if type(meta) == 'table' then
 		meta = copy_table(meta)
@@ -267,9 +261,7 @@ local function upload_body_op(ctx, opts, deadline)
 		local sink_owner
 		if ingest_client == nil then
 			local conn, _, conn_err = connect_update_conn(scope, opts)
-			if not conn then
-				error(conn_err or 'update connection unavailable', 0)
-			end
+			if not conn then error(conn_err or 'update connection unavailable', 0) end
 			opts.update_conn = opts.update_conn or conn
 
 			if opts.sink == nil and opts.artifact_sink == nil then
@@ -295,26 +287,15 @@ local function upload_body_op(ctx, opts, deadline)
 			end
 
 			local built, build_err = ingest.bus_client(conn)
-			if not built then
-				error(build_err or 'artifact ingest bus client unavailable', 0)
-			end
+			if not built then error(build_err or 'artifact ingest bus client unavailable', 0) end
 			ingest_client = built
 		end
 
-		local handle, open_err = perform_with_deadline(
-			scope,
-			ingest.open_ingest_op(ingest_client, opts),
-			deadline,
-			mark_timeout
-		)
-		if not handle then
-			error(open_err or 'artifact ingest open failed', 0)
-		end
+		local handle, open_err = perform_with_deadline(scope, ingest.open_ingest_op(ingest_client, opts), deadline, mark_timeout)
+		if not handle then error(open_err or 'artifact ingest open failed', 0) end
 		if sink_owner ~= nil then
 			local _, detach_err = sink_owner:detach()
-			if detach_err then
-				error(detach_err, 0)
-			end
+			if detach_err then error(detach_err, 0) end
 		end
 
 		local ingest_owner = resource.owned(handle, {
@@ -333,69 +314,35 @@ local function upload_body_op(ctx, opts, deadline)
 		local body = ctx.body_stream or ctx.body or ctx.stream or ctx
 		if body == nil then error('request body has no chunk reader', 0) end
 		while true do
-			local chunk, rerr = perform_with_deadline(
-				scope,
-				read_chunk_op(body, opts.chunk_size or 65536),
-				deadline,
-				mark_timeout
-			)
-			if rerr then
-				error(rerr, 0)
-			end
+			local chunk, rerr = perform_with_deadline(scope, read_chunk_op(body, opts.chunk_size or 65536), deadline, mark_timeout)
+			if rerr then error(rerr, 0) end
 			if chunk == nil or chunk == '' then break end
-			local ok, werr = perform_with_deadline(
-				scope,
-				ingest.append_chunk_op(handle, chunk),
-				deadline,
-				mark_timeout
-			)
-			if ok == nil or ok == false then
-				error(werr or 'artifact append failed', 0)
-			end
+			local ok, werr = perform_with_deadline(scope, ingest.append_chunk_op(handle, chunk), deadline, mark_timeout)
+			if ok == nil or ok == false then error(werr or 'artifact append failed', 0) end
 		end
 
 		local artifact_id, cerr = perform_with_deadline(scope, ingest.commit_op(handle), deadline, mark_timeout)
-		if not artifact_id then
-			error(cerr or 'artifact commit failed', 0)
-		end
+		if not artifact_id then error(cerr or 'artifact commit failed', 0) end
 		local _, detach_err = ingest_owner:detach()
-		if detach_err then
-			error(detach_err, 0)
-		end
+		if detach_err then error(detach_err, 0) end
 
 		local out = { status = 'ok', artifact_id = artifact_id }
 		if opts.create_job then
 			local conn, _, conn_err = connect_update_conn(scope, opts)
-			if not conn then
-				error(conn_err or 'update connection unavailable', 0)
-			end
+			if not conn then error(conn_err or 'update connection unavailable', 0) end
 
 			local call_opts = {}
 			for k, v in pairs(opts) do call_opts[k] = v end
 			call_opts.timeout = remaining_timeout(opts, deadline)
 			call_opts.metadata = job_artifact_metadata(call_opts)
 
-			local job, jerr = perform_with_deadline(
-				scope,
-				client.create_job_op(conn, artifact_id, call_opts),
-				deadline,
-				mark_timeout
-			)
-			if not job then
-				error(jerr or 'update job create failed', 0)
-			end
+			local job, jerr = perform_with_deadline(scope, client.create_job_op(conn, artifact_id, call_opts), deadline, mark_timeout)
+			if not job then error(jerr or 'update job create failed', 0) end
 			out.job = job
 			if opts.start_job then
 				call_opts.timeout = remaining_timeout(opts, deadline)
-				local started, serr = perform_with_deadline(
-					scope,
-					client.start_job_op(conn, job.job_id or job.id, call_opts),
-					deadline,
-					mark_timeout
-				)
-				if not started then
-					error(serr or 'update job start failed', 0)
-				end
+				local started, serr = perform_with_deadline(scope, client.start_job_op(conn, job.job_id or job.id, call_opts), deadline, mark_timeout)
+				if not started then error(serr or 'update job start failed', 0) end
 				out.started = started
 			end
 		end

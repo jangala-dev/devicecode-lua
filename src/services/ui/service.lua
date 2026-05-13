@@ -56,45 +56,15 @@ local function component_summary(components)
 	return out
 end
 
-local function model_stats(model)
-	if model == nil then
-		return { version = 0, items = 0, services = 0, closed = false }
-	end
-
-	if type(model.count) == 'function' then
-		return {
-			version = type(model.version) == 'function' and model:version() or 0,
-			items = model:count(),
-			services = model:count({ 'svc', '#' }),
-			closed = type(model.is_closed) == 'function' and model:is_closed() or false,
-			reason = type(model.why) == 'function' and model:why() or nil,
-		}
-	end
-
+local function read_model_payload(state, snapshot)
 	local count = 0
-	local services = 0
-	local snapshot = model:snapshot()
 	for _ in pairs((snapshot and snapshot.items) or {}) do count = count + 1 end
-	for _, msg in pairs((snapshot and snapshot.items) or {}) do
-		local topic = msg and msg.topic
-		if type(topic) == 'table' and topic[1] == 'svc' then services = services + 1 end
-	end
-	return {
-		version = snapshot and snapshot.version or 0,
-		items = count,
-		services = services,
-		closed = snapshot and snapshot.closed or false,
-		reason = snapshot and snapshot.reason or nil,
-	}
-end
-
-local function read_model_payload(state, stats)
 	return {
 		kind = 'ui.read-model',
-		version = stats and stats.version or 0,
-		items = stats and stats.items or 0,
-		closed = stats and stats.closed or false,
-		reason = stats and stats.reason or nil,
+		version = snapshot and snapshot.version or 0,
+		items = count,
+		closed = snapshot and snapshot.closed or false,
+		reason = snapshot and snapshot.reason or nil,
 		status = state.read_model_status,
 	}
 end
@@ -110,8 +80,8 @@ local function sessions_payload(state)
 end
 
 local function publish_summary(state)
-	local stats = model_stats(state.model)
-	local payload = queries.summary_from_counts(stats,
+	local model_snapshot = state.model and state.model:snapshot() or nil
+	local payload = queries.summary(model_snapshot,
 		state.sessions and state.sessions:count() or 0,
 		{
 			active_requests = state.active_requests,
@@ -128,7 +98,7 @@ local function publish_summary(state)
 	)
 	local ok, err = bus_cleanup.retain(state.conn, topics.summary(), payload)
 	if ok ~= true then error(err or 'ui summary publication failed', 0) end
-	ok, err = bus_cleanup.retain(state.conn, topics.read_model_status(), read_model_payload(state, stats))
+	ok, err = bus_cleanup.retain(state.conn, topics.read_model_status(), read_model_payload(state, model_snapshot))
 	if ok ~= true then error(err or 'ui read-model publication failed', 0) end
 	ok, err = bus_cleanup.retain(state.conn, topics.session_count(), sessions_payload(state))
 	if ok ~= true then error(err or 'ui sessions publication failed', 0) end
@@ -522,27 +492,15 @@ local function reduce_event(state, ev)
 end
 
 local function next_event_op(state)
-	local model_op
-	if type(state.model.changed_version_op) == 'function' then
-		model_op = state.model:changed_version_op(state.model_seen):wrap(function (version, err)
-			if version == nil then
-				return { kind = 'read_model_closed', err = err }
-			end
-			return { kind = 'read_model_changed', version = version }
-		end)
-	else
-		model_op = state.model:changed_op(state.model_seen):wrap(function (version, _snapshot, err)
-			if version == nil then
-				return { kind = 'read_model_closed', err = err }
-			end
-			return { kind = 'read_model_changed', version = version }
-		end)
-	end
-
 	local arms = {
 		done = state.done_rx:recv_op(),
 		cfg = state.cfg_watch:recv_op():wrap(cfg_event_from_watch),
-		model = model_op,
+		model = state.model:changed_op(state.model_seen):wrap(function (version, snapshot, err)
+			if version == nil then
+				return { kind = 'read_model_closed', err = err }
+			end
+			return { kind = 'read_model_changed', version = version, snapshot = snapshot }
+		end),
 	}
 
 	if state.sessions and type(state.sessions.changed_op) == 'function' then
@@ -679,8 +637,6 @@ function M.start(conn, opts)
 end
 
 M._test = {
-	default_auth_opts = default_auth_opts,
-	default_update_opts = default_update_opts,
 	reduce_event = reduce_event,
 	record_component_done = record_component_done,
 	apply_service_policy = apply_service_policy,

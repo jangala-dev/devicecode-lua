@@ -147,14 +147,10 @@ local function run_in_scope(scope, params)
 		make_slot_request(req, reply_tx),
 		'transfer_client_slot_request_failed'
 	)
-	if ok ~= true then
-		return nil, err or 'slot_admission_failed'
-	end
+	if ok ~= true then return nil, err or 'slot_admission_failed' end
 
 	local admitted, aerr = await_reply(reply_rx, deadline, 'slot_admission_closed')
-	if not admitted then
-		return nil, aerr
-	end
+	if not admitted then return nil, aerr end
 
 	local lease = admitted.lease
 	if type(lease) ~= 'table' or type(lease.start_attempt) ~= 'function' then
@@ -174,14 +170,10 @@ local function run_in_scope(scope, params)
 	req.timeout_s = timeout_s
 
 	local handle, herr = transfer.start_attempt(scope, lease, req)
-	if not handle then
-		return nil, herr or 'transfer_attempt_start_failed'
-	end
+	if not handle then return nil, herr or 'transfer_attempt_start_failed' end
 
 	local handed, handoff_err = lease_owner:handoff(function () return true end)
-	if not handed then
-		return nil, handoff_err or 'transfer_slot_lease_handoff_failed'
-	end
+	if not handed then return nil, handoff_err or 'transfer_slot_lease_handoff_failed' end
 
 	local which, ev = fibers.perform(fibers.named_choice {
 		attempt = handle:outcome_op(),
@@ -193,12 +185,8 @@ local function run_in_scope(scope, params)
 		return nil, 'timeout'
 	end
 
-	if ev == nil then
-		return nil, 'attempt_outcome_missing'
-	end
-	if ev.status == 'ok' then
-		return ev.result, nil
-	end
+	if ev == nil then return nil, 'attempt_outcome_missing' end
+	if ev.status == 'ok' then return ev.result, nil end
 	return nil, ev.primary or ev.status or 'transfer_attempt_failed'
 end
 

@@ -495,7 +495,9 @@ local function coordinator_loop(self)
 		end
 
 		if ev.kind == 'link_done' then
-			if ev.service_id == self._service_id and ev.service_generation == self._service_generation then
+			if ev.service_id ~= self._service_id or ev.service_generation ~= self._service_generation then
+				-- Completion for another service instance/generation. Ignore.
+			else
 				local accepted = record_link_done(self, ev)
 
 				if accepted then
@@ -732,13 +734,9 @@ end
 
 local function run_public_transfer_request(scope, state, req)
 	local params, perr = transfer_request_params(state, req)
-	if not params then
-		return fail_request(req, perr)
-	end
+	if not params then return fail_request(req, perr) end
 	local result, err = transfer_client.run(scope, params)
-	if not result then
-		return fail_request(req, err or 'transfer_failed')
-	end
+	if not result then return fail_request(req, err or 'transfer_failed') end
 	return reply_request(req, { ok = true, result = result, link_id = params.link_id })
 end
 

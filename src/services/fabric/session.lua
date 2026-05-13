@@ -274,12 +274,11 @@ function M.new_outbound_gate(params)
 			rpc     = require_tx(params.tx_rpc,     'fabric.session.outbound_gate: tx_rpc', 2),
 			bulk    = require_tx(params.tx_bulk,    'fabric.session.outbound_gate: tx_bulk', 2),
 		},
-		_session = nil,
-		_drop_reason = 'no_session',
-		_closed = false,
-		_transfer_quiet = params.transfer_quiet,
-		_link_id = params.link_id,
-	}, OutboundGate)
+			_session = nil,
+			_drop_reason = 'no_session',
+			_closed = false,
+			_transfer_quiet = params.transfer_quiet,
+		}, OutboundGate)
 end
 
 local function session_equal(a, b)

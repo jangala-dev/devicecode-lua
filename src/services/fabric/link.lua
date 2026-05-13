@@ -482,7 +482,9 @@ local function coordinator_loop(self)
 		end
 
 		if ev.kind == 'component_done' then
-			if ev.link_id == self._link_id and ev.link_generation == self._link_generation then
+			if ev.link_id ~= self._link_id or ev.link_generation ~= self._link_generation then
+				-- Stale or foreign completion. Ignore it.
+			else
 				local accepted = record_component_done(self, ev)
 
 				if accepted then
@@ -685,7 +687,6 @@ function M.composed_components(scope, params, service_caps)
 		tx_rpc     = outbound_rpc_tx,
 		tx_bulk    = outbound_bulk_tx,
 		transfer_quiet = transfer_quiet,
-		link_id = params.link_id,
 	}
 
 	local local_rx = params.local_rx
