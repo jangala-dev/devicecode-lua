@@ -1,0 +1,117 @@
+-- devicecode/support/config_watch.lua
+--
+-- Shared retained cfg/<service> watcher for service shells.
+--
+-- The helper owns only the local retained subscription and event-shaping
+-- mechanics.  Service modules still own validation, normalisation, generation
+-- policy and effects.
+
+local bus_cleanup = require 'devicecode.support.bus_cleanup'
+
+local M = {}
+local Watch = {}
+Watch.__index = Watch
+
+local function cfg_topic(service)
+	return { 'cfg', service }
+end
+
+local function payload_of(msg)
+	return msg and msg.payload or msg
+end
+
+local function data_of(payload)
+	if type(payload) == 'table' and payload.data ~= nil then
+		return payload.data
+	end
+	return payload
+end
+
+local function rev_of(payload, fallback)
+	if type(payload) == 'table' and type(payload.rev) == 'number' then
+		return payload.rev
+	end
+	return fallback
+end
+
+local function event_from_msg(self, msg, err)
+	if msg == nil then
+		return {
+			kind = self.closed_kind,
+			service = self.service,
+			err = err,
+		}
+	end
+
+	local payload = payload_of(msg)
+	self.generation = rev_of(payload, self.generation + 1)
+
+	return {
+		kind = self.changed_kind,
+		service = self.service,
+		generation = self.generation,
+		rev = rev_of(payload, nil),
+		raw = data_of(payload),
+		record = payload,
+		msg = msg,
+	}
+end
+
+function M.open(conn, service, opts)
+	opts = opts or {}
+	if type(service) ~= 'string' or service == '' then
+		return nil, 'config_watch.open: service must be a non-empty string'
+	end
+
+	local topic = opts.topic or cfg_topic(service)
+	local sub, err = bus_cleanup.subscribe(conn, topic, {
+		queue_len = opts.queue_len or opts.config_queue_len or 4,
+		full = opts.full or 'reject_newest',
+	})
+	if not sub then return nil, err or 'config subscribe failed' end
+
+	return setmetatable({
+		conn = conn,
+		service = service,
+		topic = topic,
+		sub = sub,
+		generation = opts.initial_generation or 0,
+		changed_kind = opts.changed_kind or 'config_changed',
+		closed_kind = opts.closed_kind or 'config_closed',
+	}, Watch), nil
+end
+
+function Watch:recv_op()
+	return self.sub:recv_op():wrap(function (msg, err)
+		return event_from_msg(self, msg, err)
+	end)
+end
+
+function Watch:try_recv_now()
+	local queue = require 'devicecode.support.queue'
+	local msg, err = queue.try_recv_now(self.sub)
+	if msg ~= nil then return event_from_msg(self, msg, nil) end
+	if err ~= 'not_ready' then return event_from_msg(self, nil, err) end
+	return nil
+end
+
+function Watch:close()
+	if self.sub then
+		local sub = self.sub
+		self.sub = nil
+		return bus_cleanup.unsubscribe(self.conn, sub)
+	end
+	return true, nil
+end
+
+function M.topic(service)
+	return cfg_topic(service)
+end
+
+M._test = {
+	data_of = data_of,
+	rev_of = rev_of,
+	payload_of = payload_of,
+}
+
+return M

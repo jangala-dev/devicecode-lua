@@ -4,6 +4,10 @@ local fibers = require 'fibers'
 
 local M = {}
 
+local function cap_status_topic(class, id)
+	return { 'cap', class, id, 'status' }
+end
+
 local function cap_state_topic(class, id)
 	return { 'cap', class, id, 'state' }
 end
@@ -104,6 +108,10 @@ end
 
 function FakeHal:_start_capability_rpc(conn, class, id, offering, legacy_method)
 	conn:retain(cap_state_topic(class, id), 'added')
+	conn:retain(cap_status_topic(class, id), {
+		state = 'available',
+		available = true,
+	})
 	conn:retain(cap_meta_topic(class, id), { offerings = { [offering] = true } })
 
 	local ep = conn:bind(cap_rpc_topic(class, id, offering), { queue_len = 16 })

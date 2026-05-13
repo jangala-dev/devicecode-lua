@@ -1,8 +1,13 @@
 -- services/monitor.lua
 --
 -- Monitor service:
---   * subscribes to obs/# and prints messages
+--   * subscribes to obs/<ver>/# (canonical plane) and prints messages
+--   * subscribes to obs/# (legacy plane) to detect services not using canonical endpoints
 --   * bounded, drop-oldest
+
+-- Canonical obs version token. All function/variable names are version-agnostic;
+-- bumping the canonical plane to v2 etc. is a one-line change here.
+local OBS_VER = 'v1'
 
 local fibers  = require 'fibers'
 local runtime = require 'fibers.runtime'
@@ -101,23 +106,29 @@ local function fmt_time()
 	return os.date('%Y-%m-%d %H:%M:%S') .. string.format(' (mono=%.3f)', mono)
 end
 
-local function classify(msg)
+local function classify_canonical(msg)
 	local t = msg.topic or {}
-	local kind = t[2]
-	if kind == 'log' then
-		return 'log', t[3] or 'unknown', t[4] or 'info'
+	-- canonical shape: obs/<ver>/<svc>/<kind>[/<name>]
+	local svc  = t[3] or 'unknown'
+	local kind = t[4]
+	local name = t[5]
+
+	if kind == 'event' then
+		if name == 'log' then
+			local level = (type(msg.payload) == 'table' and msg.payload.level) or 'info'
+			return 'log', svc, level
+		end
+		return 'event', svc, name or 'event'
 	elseif kind == 'metric' then
-		return 'metric', t[3] or 'unknown', nil
-	elseif kind == 'event' then
-		return 'event', t[3] or 'unknown', t[4] or 'event'
-	elseif kind == 'state' then
-		return 'state', t[3] or 'unknown', t[4] or 'state'
+		return 'metric', svc, nil
+	elseif kind == 'counter' then
+		return 'counter', svc, name or 'counter'
 	end
-	return 'obs', t[2] or 'unknown', nil
+	return 'obs', svc, nil
 end
 
-local function format_line(msg)
-	local kind, svc, lvl_or_name = classify(msg)
+local function format_canonical_line(msg)
+	local kind, svc, lvl_or_name = classify_canonical(msg)
 
 	local payload = msg.payload
 	local payload_s = (type(payload) == 'string') and payload
@@ -138,13 +149,29 @@ local function format_line(msg)
 			fmt_time(), tostring(svc), tostring(lvl_or_name or 'event'), payload_s)
 	end
 
-	if kind == 'state' then
-		return string.format('%s  STA  %-10s %-12s  %s',
-			fmt_time(), tostring(svc), tostring(lvl_or_name or 'state'), payload_s)
+	if kind == 'counter' then
+		return string.format('%s  CNT  %-10s %-12s  %s',
+			fmt_time(), tostring(svc), tostring(lvl_or_name or 'counter'), payload_s)
 	end
 
 	return string.format('%s  OBS  %-10s %-24s  %s',
 		fmt_time(), tostring(svc), topic_to_string(msg.topic), payload_s)
+end
+
+-- Formats a warning line for traffic on the legacy obs plane that indicates
+-- a service is not publishing on the canonical plane.
+-- reason: 'legacy-only'       — topic is a known dual-publish target but no canonical seen
+--         'unknown-endpoint'  — topic is outside the known obs schema entirely
+local function format_legacy_warn(msg, reason)
+	local t   = msg.topic or {}
+	local svc = tostring(t[3] or 'unknown')
+
+	local payload = msg.payload
+	local payload_s = (type(payload) == 'string') and payload
+		or pretty(payload, { max_depth = 4, max_items = 20 })
+
+	return string.format('%s  WARN  %-10s %-20s  topic=%s  %s',
+		fmt_time(), svc, tostring(reason), topic_to_string(t), payload_s)
 end
 
 function M.start(conn, ctx)
@@ -157,7 +184,7 @@ function M.start(conn, ctx)
 
 	local function write_line(line)
 		local which, a, b = perform(named_choice {
-			wrote = out:write_op(line, '\n'),
+			wrote   = out:write_op(line, '\n'),
 			timeout = sleep.sleep_op(0.5):wrap(function () return nil, 'write timeout' end),
 		})
 		if which == 'wrote' then
@@ -166,20 +193,101 @@ function M.start(conn, ctx)
 		end
 	end
 
-	svc:status('running', { subscribed = 'obs/#' })
+	-- Tracks which (svc, canonical_kind) pairs have been seen on the canonical plane.
+	-- canonical_seen[svc_name][canonical_kind] = true
+	-- Granularity is per-kind so a service publishing only metrics on the canonical
+	-- plane does not suppress warnings about its legacy-only events/states.
+	local canonical_seen = {}
 
-	local sub = conn:subscribe({ 'obs', '#' }, { queue_len = 500, full = 'drop_oldest' })
+	-- Count of consecutive legacy-only messages per (svc, legacy_kind), for pairs
+	-- not yet seen on the canonical plane. Reset per-kind when canonical arrives.
+	-- A threshold of 2 tolerates the timing race in service_base (which publishes
+	-- legacy before canonical in the same obs_log/obs_event call).
+	local legacy_count = {}
+	local LEGACY_WARN_THRESHOLD = 2
+
+	-- Known dually-supported legacy topic kinds (service_base publishes both legacy
+	-- and canonical for these). Any other kind on the legacy plane is unknown.
+	-- Maps legacy kind → the canonical kind it corresponds to:
+	--   obs/log/<svc>/...   → obs/v1/<svc>/event/log  (canonical kind: 'event')
+	--   obs/event/<svc>/... → obs/v1/<svc>/event/<n>  (canonical kind: 'event')
+	--   obs/state/<svc>/... → obs/v1/<svc>/metric/<n> (canonical kind: 'metric')
+	local legacy_to_canonical_kind = { log = 'event', event = 'event', state = 'metric' }
+
+	local canonical_sub = conn:subscribe(
+		{ 'obs', OBS_VER, '#' },
+		{ queue_len = 500, full = 'drop_oldest' }
+	)
+	local legacy_sub = conn:subscribe(
+		{ 'obs', '#' },
+		{ queue_len = 200, full = 'drop_oldest' }
+	)
+
+	local canonical_topic = 'obs/' .. OBS_VER .. '/#'
+	svc:status('running', { subscribed = canonical_topic .. ',obs/#' })
 
 	write_line(string.format('%s  STA  %-10s %-12s  %s',
-		fmt_time(), name, 'start', 'subscribed to obs/#'))
+		fmt_time(), name, 'start',
+		'subscribed to ' .. canonical_topic .. ' (canonical) + obs/# (legacy-detect)'))
 
-	for msg in sub:iter() do
-		write_line(format_line(msg))
+	while true do
+		local which, msg, err = perform(named_choice {
+			canonical = canonical_sub:recv_op(),
+			legacy    = legacy_sub:recv_op(),
+		})
+
+		if which == 'canonical' then
+			if msg == nil then
+				local why = tostring(err or 'closed')
+				write_line(string.format('%s  STA  %-10s %-12s  %s',
+					fmt_time(), name, 'stop', 'canonical subscription ended: ' .. why))
+				break
+			end
+			local svc_name = msg.topic[3]
+			local can_kind = msg.topic[4]
+			if type(svc_name) == 'string' and type(can_kind) == 'string' then
+				canonical_seen[svc_name] = canonical_seen[svc_name] or {}
+				canonical_seen[svc_name][can_kind] = true
+				-- Reset legacy counts for all legacy kinds that map to this canonical kind.
+				if legacy_count[svc_name] then
+					legacy_count[svc_name][can_kind] = nil
+				end
+			end
+			write_line(format_canonical_line(msg))
+
+		elseif which == 'legacy' then
+			if msg == nil then
+				local why = tostring(err or 'closed')
+				write_line(string.format('%s  STA  %-10s %-12s  %s',
+					fmt_time(), name, 'stop', 'legacy subscription ended: ' .. why))
+				break
+			end
+
+			local topic    = msg.topic or {}
+			local kind     = topic[2]
+			local svc_name = topic[3]
+
+			-- Messages on the canonical plane also arrive via the obs/# wildcard; skip them.
+			if kind ~= OBS_VER then
+				if legacy_to_canonical_kind[kind] then
+					local can_kind = legacy_to_canonical_kind[kind]
+					local svc_seen = canonical_seen[svc_name]
+					if not (svc_seen and svc_seen[can_kind]) then
+						-- No canonical counterpart seen yet for this kind; count toward warning.
+						local svc_counts = legacy_count[svc_name] or {}
+						legacy_count[svc_name] = svc_counts
+						local count = (svc_counts[kind] or 0) + 1
+						svc_counts[kind] = count
+						if count >= LEGACY_WARN_THRESHOLD then
+							write_line(format_legacy_warn(msg, 'legacy-only'))
+						end
+					end
+				else
+					write_line(format_legacy_warn(msg, 'unknown-endpoint'))
+				end
+			end
+		end
 	end
-
-	local why = tostring(sub:why() or 'closed')
-	write_line(string.format('%s  STA  %-10s %-12s  %s',
-		fmt_time(), name, 'stop', 'subscription ended: ' .. why))
 end
 
 return M
