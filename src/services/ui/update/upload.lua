@@ -185,16 +185,6 @@ local function header_one(headers, name)
 	return value
 end
 
-local function positive_integer_header(headers, name)
-	local raw = header_one(headers, name)
-	if raw == nil then return nil end
-	local n = tonumber(raw)
-	if type(n) ~= 'number' or n <= 0 or n % 1 ~= 0 then
-		return nil
-	end
-	return n
-end
-
 local function string_header(headers, name)
 	local raw = header_one(headers, name)
 	if raw == nil then return nil end
@@ -205,7 +195,6 @@ end
 
 local function apply_upload_headers(ctx, opts)
 	local headers = ctx and ctx.headers
-	local chunk_raw = positive_integer_header(headers, 'x-transfer-chunk-raw')
 	local artifact_name = string_header(headers, 'x-artifact-name')
 	local artifact_version = string_header(headers, 'x-artifact-version')
 	local artifact_build = string_header(headers, 'x-artifact-build')
@@ -213,8 +202,7 @@ local function apply_upload_headers(ctx, opts)
 	local compat_commit_image_id = string_header(headers, 'x-artifact-compat-commit-image-id')
 	local checksum = string_header(headers, 'x-artifact-checksum')
 
-	if chunk_raw == nil
-		and artifact_name == nil
+	if artifact_name == nil
 		and artifact_version == nil
 		and artifact_build == nil
 		and image_id == nil
@@ -240,7 +228,6 @@ local function apply_upload_headers(ctx, opts)
 	end
 	if compat_commit_image_id ~= nil then meta.compat_commit_image_id = compat_commit_image_id end
 	if checksum ~= nil then meta.checksum = checksum end
-	if chunk_raw ~= nil then meta.transfer_chunk_raw = chunk_raw end
 	opts.metadata = meta
 	return opts
 end

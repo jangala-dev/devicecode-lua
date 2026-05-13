@@ -135,25 +135,6 @@ local function is_op(v)
 	return type(v) == 'table' and getmetatable(v) == op.Op
 end
 
-local function positive_integer(v)
-	if type(v) == 'string' and v:match('^%d+$') then
-		v = tonumber(v)
-	end
-	if type(v) ~= 'number' or v <= 0 or v % 1 ~= 0 then
-		return nil
-	end
-	return v
-end
-
-local function metadata_chunk_size(payload)
-	local meta = type(payload) == 'table' and (payload.metadata or payload.meta) or nil
-	if type(meta) ~= 'table' then return nil end
-
-	return positive_integer(meta.transfer_chunk_raw)
-		or positive_integer(meta.transfer_chunk_size)
-		or (type(meta.transfer) == 'table' and positive_integer(meta.transfer.chunk_size) or nil)
-end
-
 local function artifact_store_id(ctx)
 	local spec = ctx and ctx.action_spec or nil
 	return (spec and spec.artifact_store) or 'main'
@@ -286,7 +267,6 @@ local function run_fabric_stage_op(_, ctx, owner)
 			receiver = ctx.action_spec.receiver,
 			artifact_store = ctx.action_spec.artifact_store,
 			request_payload = request_payload(ctx.request),
-			chunk_size = metadata_chunk_size(request_payload(ctx.request) or {}),
 			timeout = ctx.action_spec.timeout or ctx.timeout,
 			deadline = ctx.deadline,
 		}))
