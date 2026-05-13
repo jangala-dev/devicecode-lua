@@ -69,6 +69,14 @@ end
 local function body_table(ctx)
 	if type(ctx.body) == 'table' then return ctx.body end
 	if type(ctx.json) == 'table' then return ctx.json end
+	return {}
+end
+
+local function json_body_table(ctx)
+	local body = body_table(ctx)
+	if next(body) ~= nil or type(ctx.body) == 'table' or type(ctx.json) == 'table' then
+		return body
+	end
 	if type(ctx.read_body_as_string_op) == 'function' then
 		local raw, read_err = fibers.perform(ctx:read_body_as_string_op())
 		if raw == nil then return {}, read_err or 'body_read_failed' end
@@ -136,7 +144,7 @@ local function handle_read(owner, route, deps)
 end
 
 local function handle_login(owner, ctx, deps)
-	local body, body_err = body_table(ctx)
+	local body, body_err = json_body_table(ctx)
 	if body_err ~= nil then
 		perform_response(owner:reply_error_op(400, body_err))
 		return { status = 'bad_request', err = body_err }
@@ -177,11 +185,7 @@ local function handle_command(scope, owner, ctx, route, deps)
 		perform_response(owner:reply_error_op(401, 'unauthenticated'))
 		return { status = 'unauthenticated' }
 	end
-	local body, body_err = body_table(ctx)
-	if body_err ~= nil then
-		perform_response(owner:reply_error_op(400, body_err))
-		return { status = 'bad_request', err = body_err }
-	end
+	local body = body_table(ctx)
 	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
 		principal = principal,
 		connect = deps.connect,
@@ -216,7 +220,7 @@ local function handle_update_job_action(scope, owner, ctx, route, deps)
 		perform_response(owner:reply_error_op(401, 'unauthenticated'))
 		return { status = 'unauthenticated' }
 	end
-	local body, body_err = body_table(ctx)
+	local body, body_err = json_body_table(ctx)
 	if body_err ~= nil then
 		perform_response(owner:reply_error_op(400, body_err))
 		return { status = 'bad_request', err = body_err }
