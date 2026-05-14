@@ -993,4 +993,3 @@ a test that depends on private coordinator tables for an integration behaviour
 ```
 
 Any one of these may be justified in a narrow case. Several together usually mean the service boundary is losing shape.
-````
