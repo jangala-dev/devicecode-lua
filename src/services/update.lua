@@ -1,36 +1,28 @@
 -- services/update.lua
---
 -- Public update service entry point.
 
-local service    = require 'services.update.service'
-local generation = require 'services.update.generation'
-local events     = require 'services.update.events'
-local model      = require 'services.update.model'
-local projection = require 'services.update.projection'
-local publisher  = require 'services.update.publisher'
-local topics     = require 'services.update.topics'
-local config     = require 'services.update.config'
-local job_repository = require 'services.update.job_repository'
-local job_store_cap = require 'services.update.job_store_cap'
-local manager_requests = require 'services.update.manager_requests'
-local active_runtime = require 'services.update.active_runtime'
-local active_job = require 'services.update.active_job'
-
-return {
-	start = service.start,
-	run   = service.run,
-
-	service    = service,
-	generation = generation,
-	events     = events,
-	model      = model,
-	projection = projection,
-	publisher  = publisher,
-	topics     = topics,
-	config     = config,
-	job_repository = job_repository,
-	job_store_cap = job_store_cap,
-	manager_requests = manager_requests,
-	active_runtime = active_runtime,
-	active_job = active_job,
+local M = {
+	service    = require 'services.update.service',
+	generation = require 'services.update.generation',
+	events     = require 'services.update.events',
+	model      = require 'services.update.model',
+	projection = require 'services.update.projection',
+	publisher  = require 'services.update.publisher',
+	topics     = require 'services.update.topics',
+	config     = require 'services.update.config',
+	job_repository = require 'services.update.job_repository',
+	job_store_cap = require 'services.update.job_store_cap',
+	manager_requests = require 'services.update.manager_requests',
+	active_runtime = require 'services.update.active_runtime',
+	active_job = require 'services.update.active_job',
 }
+
+function M.start(conn, opts)
+	M.service.start(conn, opts)
+end
+
+function M.run(scope, params)
+	return M.service.run(scope, params)
+end
+
+return M

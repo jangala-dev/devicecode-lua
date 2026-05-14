@@ -90,7 +90,7 @@ local function start_cap_service(opts)
 	local memory_sinks = opts.memory_sinks or {}
 	local b = bus.new()
 	local svc_conn = b:connect({ origin_base = { kind = 'local' } })
-	local svc = ok(http_service.start(svc_conn, {
+	local svc = ok(http_service.open_handle(svc_conn, {
 		id = opts.id or 'main',
 		backend_timeout = opts.backend_timeout or 2,
 		connection_setup_timeout = opts.connection_setup_timeout or 2,

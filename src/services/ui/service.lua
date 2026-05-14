@@ -535,6 +535,9 @@ function M.run(scope, params)
 	state.service_status = 'running'
 
 	publish_summary(state)
+	if params.lifecycle and type(params.lifecycle.running) == 'function' then
+		params.lifecycle:running({ ready = true })
+	end
 
 	while true do
 		local ev = fibers.perform(next_event_op(state))
@@ -559,9 +562,11 @@ function M.start(conn, opts)
 	})
 	svc:starting({ ready = false })
 
+	svc:running({ ready = false })
+
 	local params = shallow_copy(opts)
 	params.conn = conn
-	svc:running({ ready = true })
+	params.lifecycle = svc
 	return M.run(scope, params)
 end
 

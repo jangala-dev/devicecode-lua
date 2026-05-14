@@ -79,7 +79,7 @@ function M.test_backend_run_is_named_component_with_identity_completion()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local drv = failing_run_driver()
-		local svc = ok(http_service.start(root, { driver = drv, id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = drv, id = 'main' }))
 		yield_many(10)
 		local done
 		for _, ev in ipairs(svc:events()) do
@@ -102,7 +102,7 @@ function M.test_exchange_is_named_scoped_work_with_identity_completion_and_event
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local sink = blob.to_memory()
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_driver(),
 			id = 'main',
 			request_module = request_module('hello'),

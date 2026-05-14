@@ -17,6 +17,7 @@ local queue = require 'devicecode.support.queue'
 local config_watch = require 'devicecode.support.config_watch'
 local config_mod = require 'services.http.config'
 local service_events = require 'devicecode.support.service_events'
+local service_base = require 'devicecode.service_base'
 
 local M = {}
 local perform = fibers.perform
@@ -675,10 +676,10 @@ function HttpService:events()
 	return out
 end
 
-function M.start(conn, opts)
+function M.open_handle(conn, opts)
 	opts = opts or {}
 	local scope = fibers.current_scope()
-	if not scope then return nil, 'http service must start inside a scope' end
+	if not scope then return nil, 'http.open_handle must be called inside a scope' end
 
 	local initial_config, config_err = normalise_initial_config(opts)
 	if not initial_config then return nil, config_err or 'invalid_http_config' end
@@ -779,6 +780,50 @@ function M.start(conn, opts)
 	end
 
 	return self
+end
+
+function M.run(scope, params)
+	params = params or {}
+	local conn = params.conn
+	if conn == nil then error('http.run: conn required', 2) end
+	if scope == nil then error('http.run: scope required', 2) end
+
+	local svc, err = M.open_handle(conn, params)
+	if not svc then error(err or 'http service start failed', 0) end
+
+	local lifecycle = params.lifecycle
+	if lifecycle and type(lifecycle.running) == 'function' then
+		lifecycle:running({ ready = true, http_id = params.id or 'main' })
+	end
+
+	fibers.perform(fibers.never())
+	svc:terminate('returned')
+	return nil, 'http service returned unexpectedly'
+end
+
+function M.start(conn, opts)
+	opts = opts or {}
+	if conn == nil then error('http.start: conn required', 2) end
+	local scope = fibers.current_scope()
+	if not scope then error('http.start must be called inside a fiber', 2) end
+
+	local svc = service_base.new(conn, {
+		name = opts.name or 'http',
+		env = opts.env,
+		meta = opts.meta,
+		announce = opts.announce,
+	})
+	svc:starting({ ready = false })
+
+	local params = copy(opts)
+	params.conn = conn
+	params.name = opts.name or 'http'
+	params.lifecycle = svc
+
+	M.run(scope, params)
+
+	svc:stopped({ reason = 'returned' })
+	error('http service returned unexpectedly', 0)
 end
 
 M.HttpService = HttpService
