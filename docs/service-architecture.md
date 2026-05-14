@@ -99,6 +99,30 @@ ownership transfer
 
 A fibre runs code. A scope owns lifetime.
 
+## Service entry contract
+
+A service launched by `main.lua` has a foreground entry point:
+
+```text
+start(conn, opts)
+  creates service lifecycle state
+  enters the long-lived service coordinator
+  must not return while the service is healthy
+```
+
+The lower-level coordinator body is:
+
+```text
+run(scope, params)
+  owns the service event loop
+  normally blocks until cancellation or failure
+```
+
+A helper that returns a local handle must use an explicit name such as
+`open_handle`, `new_handle`, or `open_component`. It must not be called
+`start`. If `start()` or `run()` returns in a healthy path, the service should
+publish a stopped/failed lifecycle state and raise an error.
+
 ## Programming style
 
 Devicecode service code should be direct, explicit and state-machine shaped.

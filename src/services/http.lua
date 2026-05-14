@@ -1,11 +1,8 @@
 -- services/http.lua
 -- Public entry point for the HTTP capability service.
 
-local service = require 'services.http.service'
-
-return {
-	start = service.start,
-	service = service,
+local M = {
+	service = require 'services.http.service',
 	sdk = require 'services.http.sdk',
 	headers = require 'services.http.headers',
 	config = require 'services.http.config',
@@ -17,3 +14,13 @@ return {
 	body = require 'services.http.body',
 	topics = require 'services.http.topics',
 }
+
+function M.start(conn, opts)
+	M.service.start(conn, opts)
+end
+
+function M.run(scope, params)
+	return M.service.run(scope, params)
+end
+
+return M
