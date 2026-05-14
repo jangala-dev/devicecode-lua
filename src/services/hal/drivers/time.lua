@@ -1,0 +1,327 @@
+-- HAL modules
+local hal_types = require "services.hal.types.core"
+local cap_types = require "services.hal.types.capabilities"
+
+-- Backend modules
+local time_backend_provider = require "services.hal.backends.time.provider"
+
+-- Fibers modules
+local fibers = require "fibers"
+local op = require "fibers.op"
+local channel = require "fibers.channel"
+local sleep = require "fibers.sleep"
+local exec = require "fibers.io.exec"
+
+-- Other modules
+local uuid = require "uuid"
+
+---@class TimeDriver
+---@field id CapabilityId UUID for this time source capability
+---@field cap_emit_ch Channel Capability emit channel (Emit messages)
+---@field scope Scope Child scope owning the monitor fiber
+---@field backend TimeBackend Time backend for platform-specific NTP monitoring
+---@field control_ch Channel RPC control channel (no offerings currently, reserved)
+---@field logger Logger
+---@field initialised boolean
+---@field caps_applied boolean
+---@field synced boolean Tracks last known sync state to detect transitions
+local TimeDriver = {}
+TimeDriver.__index = TimeDriver
+
+---- Constants ----
+
+local DEFAULT_STOP_TIMEOUT = 5
+local CONTROL_Q_LEN = 4
+
+---- Internal Utilities ----
+
+---@param self TimeDriver
+---@param level string
+---@param payload any
+local function dlog(self, level, payload)
+    if self.logger and self.logger[level] then
+        self.logger[level](self.logger, payload)
+    end
+end
+
+---Emit a capability state, meta, or event via the cap emit channel.
+---@param emit_ch Channel
+---@param id CapabilityId
+---@param mode EmitMode
+---@param key string
+---@param data any
+---@return boolean ok
+---@return string? error
+local function emit(emit_ch, id, mode, key, data)
+    local payload, err = hal_types.new.Emit('time', id, mode, key, data)
+    if not payload then
+        return false, err
+    end
+    emit_ch:put(payload)
+    return true
+end
+
+---Convert NTP stratum to an estimated absolute accuracy in seconds.
+---Returns nil when unsynced (stratum >= 16) or invalid input.
+---@param stratum number
+---@return number? accuracy_seconds
+local function accuracy_for_stratum(stratum)
+    if type(stratum) ~= 'number' then
+        return nil
+    end
+    if stratum >= 16 then
+        return nil
+    end
+
+    -- Coarse operational heuristic:
+    -- lower stratum generally implies lower clock error.
+    if stratum <= 1 then
+        return 0.001
+    elseif stratum <= 4 then
+        return 0.01
+    elseif stratum <= 8 then
+        return 0.1
+    else
+        return 1.0
+    end
+end
+
+---Build a meta payload table for this time source.
+---@param accuracy_seconds number?
+---@return table
+local function build_meta(accuracy_seconds)
+    return {
+        provider = 'hal',
+        source   = 'ntp',
+        version  = 1,
+        accuracy_seconds = accuracy_seconds,
+    }
+end
+
+---- Monitor Fiber ----
+
+---Listen to NTP synchronization events via the time backend and emit state/events via
+---the cap emit channel. Runs in self.scope. Exits on stream close, read error, or scope
+---cancellation. Transition events (synced/unsynced) are non-retained; the current
+---sync state is always published as a retained state emit on every hotplug event.
+---@return nil
+function TimeDriver:_ntpd_monitor()
+    fibers.current_scope():finally(function()
+        dlog(self, 'debug', { what = 'ntpd_monitor_exit' })
+    end)
+
+    -- Start the backend monitor here so the ubus command is bound to this fiber's
+    -- scope (the driver child scope). Cancelling the driver scope will then kill
+    -- the underlying process automatically.
+    local ok, start_err = self.backend:start_ntp_monitor()
+    if not ok then
+        dlog(self, 'error', { what = 'ntp_backend_start_failed', err = tostring(start_err) })
+        return
+    end
+
+    dlog(self, 'debug', { what = 'ntpd_monitor_started' })
+
+    while true do
+        local ntp_event, err = fibers.perform(self.backend:ntp_event_op())
+        if err ~= nil then
+            -- Fatal: stream closed or read error
+            dlog(self, 'warn', { what = 'ntp_event_stream_closed', err = tostring(err) })
+            break
+        end
+        if ntp_event then
+            local stratum = ntp_event.stratum
+            -- NTPEvent constructor guarantees stratum is a number, but guard anyway
+            if type(stratum) ~= 'number' then
+                dlog(self, 'warn', { what = 'ntp_event_invalid_stratum', stratum = tostring(stratum) })
+            else
+                local now_synced = stratum ~= 16
+                local was_synced = self.synced
+                local accuracy_seconds = accuracy_for_stratum(stratum)
+
+                -- Always update retained state, even if sync status did not change,
+                -- so that the latest stratum value is always visible to subscribers.
+                local emit_ok, emit_err = emit(
+                    self.cap_emit_ch, self.id, 'state', 'synced',
+                    {
+                        synced = now_synced,
+                        stratum = stratum,
+                        accuracy_seconds = accuracy_seconds,
+                    }
+                )
+                if not emit_ok then
+                    dlog(self, 'warn', { what = 'emit_state_failed', err = tostring(emit_err) })
+                end
+
+                -- Update accuracy metadata only on a sync/unsync transition.
+                if now_synced ~= was_synced then
+                    local meta_ok, meta_err = emit(
+                        self.cap_emit_ch, self.id, 'meta', 'source',
+                        build_meta(accuracy_seconds)
+                    )
+                    if not meta_ok then
+                        dlog(self, 'warn', { what = 'emit_meta_failed', err = tostring(meta_err) })
+                    end
+                end
+
+                -- Emit non-retained transition events.
+                if now_synced and not was_synced then
+                    dlog(self, 'debug', { what = 'ntp_synced', stratum = stratum })
+                    local ev_ok, ev_err = emit(
+                        self.cap_emit_ch, self.id, 'event', 'synced',
+                        {
+                            stratum = stratum,
+                            accuracy_seconds = accuracy_seconds,
+                        }
+                    )
+                    if not ev_ok then
+                        dlog(self, 'warn', { what = 'emit_synced_event_failed', err = tostring(ev_err) })
+                    end
+                elseif not now_synced and was_synced then
+                    dlog(self, 'debug', { what = 'ntp_unsynced', stratum = stratum })
+                    local ev_ok, ev_err = emit(
+                        self.cap_emit_ch, self.id, 'event', 'unsynced',
+                        {
+                            stratum = stratum,
+                            accuracy_seconds = accuracy_seconds,
+                        }
+                    )
+                    if not ev_ok then
+                        dlog(self, 'warn', { what = 'emit_unsynced_event_failed', err = tostring(ev_err) })
+                    end
+                end
+
+                self.synced = now_synced
+            end
+        end
+        -- ntp_event == nil and err == nil cannot occur: all parse failures are fatal
+    end
+end
+
+---- Driver Lifecycle ----
+
+---Initialise the time driver. Restarts sysntpd and marks the driver as initialised.
+---Must be called from inside a fiber.
+---@return string error Empty string on success.
+function TimeDriver:init()
+    dlog(self, 'debug', { what = 'init_begin' })
+
+    local status, code, _, err = fibers.perform(
+        exec.command("/etc/init.d/sysntpd", "restart"):run_op()
+    )
+    if status ~= 'exited' or code ~= 0 then
+        return "sysntpd restart failed: " .. tostring(err or ("exit code " .. tostring(code)))
+    end
+
+    self.initialised = true
+    dlog(self, 'debug', { what = 'init_done' })
+    return ""
+end
+
+---Connect the driver to the capability emit channel and return the capability list.
+---Must be called after init() and before start().
+---@param cap_emit_ch Channel
+---@return Capability[]? capabilities
+---@return string error Empty string on success.
+function TimeDriver:capabilities(cap_emit_ch)
+    if not self.initialised then
+        return nil, "driver not initialised"
+    end
+
+    self.cap_emit_ch = cap_emit_ch
+
+    local cap, cap_err = cap_types.new.TimeCapability(self.id, self.control_ch)
+    if not cap then
+        return nil, "failed to create time capability: " .. tostring(cap_err)
+    end
+
+    self.caps_applied = true
+    return { cap }, ""
+end
+
+---Start the time driver. Emits initial meta and state, then spawns the NTP monitor
+---fiber. Must be called after capabilities().
+---@return boolean ok
+---@return string? error
+function TimeDriver:start()
+    if not self.initialised then
+        return false, "driver not initialised"
+    end
+    if not self.caps_applied then
+        return false, "capabilities not applied"
+    end
+
+    -- Publish initial meta (accuracy unknown until first NTP update).
+    local meta_ok, meta_err = emit(
+        self.cap_emit_ch, self.id, 'meta', 'source',
+        build_meta(nil)
+    )
+    if not meta_ok then
+        dlog(self, 'warn', { what = 'emit_initial_meta_failed', err = tostring(meta_err) })
+    end
+
+    -- Publish initial retained state: not yet synced, stratum unknown.
+    local state_ok, state_err = emit(
+        self.cap_emit_ch, self.id, 'state', 'synced',
+        { synced = false, stratum = nil }
+    )
+    if not state_ok then
+        dlog(self, 'warn', { what = 'emit_initial_state_failed', err = tostring(state_err) })
+    end
+
+    self.scope:spawn(function() self:_ntpd_monitor() end)
+
+    dlog(self, 'debug', { what = 'started' })
+    return true, nil
+end
+
+---Stop the time driver. Cancels the driver scope, terminating the NTP monitor fiber
+---and any running ubus listen process.
+---@param timeout number? Timeout in seconds. Defaults to 5.
+---@return boolean ok
+---@return string? error
+function TimeDriver:stop(timeout)
+    timeout = timeout or DEFAULT_STOP_TIMEOUT
+    self.scope:cancel()
+
+    local source = fibers.perform(op.named_choice {
+        join    = self.scope:join_op(),
+        timeout = sleep.sleep_op(timeout),
+    })
+
+    if source == 'timeout' then
+        return false, "time driver stop timeout"
+    end
+    return true, nil
+end
+
+---- Constructor ----
+
+---Create a new TimeDriver instance. Generates a UUID for the capability id,
+---creates a child scope, and instantiates the platform-specific time backend.
+---Must be called from inside a fiber.
+---@return TimeDriver? driver
+---@return string error Empty string on success.
+local function new(logger)
+    local scope, sc_err = fibers.current_scope():child()
+    if not scope then
+        return nil, "failed to create child scope: " .. tostring(sc_err)
+    end
+
+    local backend = time_backend_provider.new()
+
+    return setmetatable({
+        id           = uuid.new(),
+        cap_emit_ch  = nil,
+        scope        = scope,
+        backend      = backend,
+        control_ch   = channel.new(CONTROL_Q_LEN),
+        logger       = logger,
+        initialised  = false,
+        caps_applied = false,
+        synced       = false,
+    }, TimeDriver), ""
+end
+
+return {
+    new = new,
+}
