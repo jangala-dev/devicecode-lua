@@ -13,7 +13,6 @@ local cap_surface = require 'services.http.cap_surface'
 local registry_mod = require 'services.http.registry'
 local operations = require 'services.http.operations'
 local operation_owner = require 'services.http.operation_owner'
-local body = require 'services.http.body'
 local queue = require 'devicecode.support.queue'
 local config_watch = require 'devicecode.support.config_watch'
 local config_mod = require 'services.http.config'
@@ -694,7 +693,6 @@ function M.start(conn, opts)
 		_opts = opts,
 		_driver = driver,
 		_backend = nil,
-		_body_registry = opts.body_registry or body.new_registry(opts.body_resolvers or {}),
 		_model = model,
 		_event_tx = event_tx,
 		_event_rx = event_rx,
