@@ -636,24 +636,31 @@
     }
   },
   "gsm": {
-    "modems": {
-      "default": {
-        "enabled": true
-      },
-      "known": [
-        {
-          "name": "primary",
-          "id_field": "device",
-          "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
-          "autoconnect": true
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/gsm/1",
+      "modems": {
+        "default": {
+          "enabled": true,
+          "signal_freq": 10
         },
-        {
-          "name": "secondary",
-          "id_field": "device",
-          "device": "/sys/devices/platform/axi/1000480000.usb/usb1/1-1",
-          "autoconnect": true
-        }
-      ]
+        "known": [
+          {
+            "name": "primary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
+            "autoconnect": true,
+            "metrics_interval": 60
+          },
+          {
+            "name": "secondary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/axi/1000480000.usb/usb1/1-1",
+            "autoconnect": true,
+            "metrics_interval": 60
+          }
+        ]
+      }
     }
   },
   "bridge": {
