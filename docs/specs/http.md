@@ -58,6 +58,7 @@ cap/http/main/meta
 cap/http/main/status
 cap/http/main/rpc/listen
 cap/http/main/rpc/open-exchange
+cap/http/main/rpc/exchange
 cap/http/main/rpc/connect-ws
 cap/http/main/state/stats
 
@@ -83,6 +84,63 @@ local listener = reply.listener
 ```
 
 The consumer owns accepted contexts after handoff. HTTP owns unaccepted contexts and transport handles until ownership transfer.
+
+
+## Body object capabilities
+
+HTTP follows the local bus object-capability style used by HAL/UART. Request
+and response bodies are passed as Lua objects with explicit Op-shaped methods;
+they are not described by remote references and are not resolved through an HTTP
+body registry.
+
+An outgoing request body is supplied as:
+
+```lua
+{
+  uri = 'https://example.test/api',
+  method = 'POST',
+  headers = { ['content-type'] = 'application/json' },
+  body_source = blob_source.from_string('{"ok":true}'),
+}
+```
+
+`body_source` must provide:
+
+```text
+read_chunk_op(max_bytes)
+terminate(reason)
+```
+
+`response_sink`, when supplied, must provide:
+
+```text
+write_chunk_op(chunk)
+terminate(reason)
+finish_op() or commit_op()   optional success finalisation
+```
+
+Inline control-plane bytes remain invalid:
+
+```text
+body
+body_string
+body_chunks
+data
+chunk
+chunks
+bytes
+```
+
+The rule is:
+
+```text
+The bus may carry local Lua object capabilities.
+It must not carry raw bulk bytes in control-plane fields.
+```
+
+If a future Fabric boundary needs to carry HTTP bodies between nodes, Fabric
+should adapt known interfaces such as BlobSource and BlobSink into protocol
+operations. HTTP should still see the local object shape.
 
 ## Op-only boundary
 

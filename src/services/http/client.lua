@@ -1,7 +1,7 @@
 -- services/http/client.lua
 -- Policy-facing outgoing HTTP client operations. lua-http request machinery is
--- confined to services.http.transport.client; descriptor leases and response
--- copying are owned here by operation scopes.
+-- confined to services.http.transport.client; request/response body object
+-- capabilities are owned here by operation scopes.
 
 local fibers = require 'fibers'
 local op = require 'fibers.op'
@@ -38,21 +38,11 @@ local function unwrap(scope_op)
 	end)
 end
 
-local function resolve_registry(opts)
-	return opts.body_registry or body.new_registry(opts.body_resolvers or {})
-end
 
-local function install_request_source(scope, checked, registry, opts)
+local function install_request_source(scope, checked, opts)
 	if not checked.body_source then return checked, nil end
 
-	local source, serr = fibers.perform(registry:resolve_op(checked.body_source, {
-		direction = 'source',
-		principal = opts.principal,
-		origin = opts.origin,
-		policy = opts.policy or opts,
-	}))
-	if not source then return nil, serr or 'invalid_args' end
-
+	local source = checked.body_source
 	local source_owned = true
 	scope:finally(function (_, status, primary)
 		if source_owned then body.terminate(source, primary or status or 'exchange_source_finalised') end
@@ -113,9 +103,8 @@ local function install_request_source(scope, checked, registry, opts)
 end
 
 local function open_exchange_result_op(driver, checked, opts)
-	local registry = resolve_registry(opts)
 	return unwrap(fibers.run_scope_op(function (scope)
-		local prepared, req_body = install_request_source(scope, checked, registry, opts)
+		local prepared, req_body = install_request_source(scope, checked, opts)
 		if not prepared then return nil, req_body end
 
 		local response_headers, stream_or_err = fibers.perform(transport_client.open_exchange_op(driver, prepared, opts))
@@ -145,21 +134,13 @@ function M.exchange_op(driver, args, opts)
 	return op.guard(function ()
 		local checked, perr = checked_args(args, { driver = driver, policy = opts.policy or opts })
 		if not checked then return op.always(nil, perr) end
-		local registry = resolve_registry(opts)
-
 		return unwrap(fibers.run_scope_op(function (scope)
 			local sink, ex
 			local sink_owned, ex_owned = false, false
 			local sink_final_reason, ex_final_reason = 'exchange_sink_finalised', 'exchange_finalised'
 
 			if checked.response_sink then
-				sink = fibers.perform(registry:resolve_op(checked.response_sink, {
-					direction = 'sink',
-					principal = opts.principal,
-					origin = opts.origin,
-					policy = opts.policy or opts,
-				}))
-				if not sink then return nil, 'invalid_args' end
+				sink = checked.response_sink
 				sink_owned = true
 				scope:finally(function (_, status, primary)
 					if sink_owned then body.terminate(sink, sink_final_reason or primary or status or 'exchange_sink_finalised') end
