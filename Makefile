@@ -8,7 +8,7 @@ LINTER     := luacheck
 
 # Default target
 .PHONY: all
-all: build-all
+all: env build-all test-all lint
 
 # Build: Copy source files into the build directory
 .PHONY: build
