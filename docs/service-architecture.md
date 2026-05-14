@@ -1,5 +1,27 @@
 # Devicecode service architecture guide
 
+> **Basis of this note**
+>
+> This architecture follows the `fibers` doctrine.
+>
+> It relies on the observed runtime contracts that:
+>
+> * `fibers.perform` is scope-aware;
+> * `fibers.spawn` spawns into the current scope;
+> * `perform_raw` bypasses scope-aware cancellation and belongs to infrastructure;
+> * scope cancellation is downward only;
+> * scope cancellation is cooperative;
+> * finalisers cannot yield, only `perform` with an `:or_else()` immediate fallback is permitted;
+> * parentage is the structural ownership mechanism;
+> * attached child scopes are joined by their parent’s join/finalisation path;
+> * `join_op()` is active finalisation, not passive observation;
+> * non-parent joining must be an explicit service discipline;
+> * `run_scope_op` is useful for deliberate whole-operation waits, but not for strict coordinator branches;
+> * `named_choice`, `choice`, and `first_ready` select readiness, not semantic priority;
+> * Lua table order must not be used as a priority mechanism;
+> * where semantic priority is **genuinely** required, Device uses `devicecode/support/priority_event.lua`;
+> * finalisers must release owned resources without waiting.
+
 ## Purpose
 
 This guide is the canonical architecture guide for Devicecode services built on `fibers` and `bus`.
