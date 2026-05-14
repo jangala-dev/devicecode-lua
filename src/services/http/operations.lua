@@ -144,7 +144,6 @@ local function run_open_exchange(service, scope, req, setup)
 	for k, v in pairs(opts.policy or {}) do opts[k] = v end
 	opts.origin = req.origin
 	opts.principal = req.origin and req.origin.principal
-	opts.body_registry = service._body_registry
 	opts.on_terminate = function (_, reason)
 		service:_remove_handle(handle_id, reason or 'exchange_terminated')
 	end
@@ -164,7 +163,6 @@ local function run_exchange(service, _scope, req, _setup)
 	for k, v in pairs(opts.policy or {}) do opts[k] = v end
 	opts.origin = req.origin
 	opts.principal = req.origin and req.origin.principal
-	opts.body_registry = service._body_registry
 	local result, err = perform(client.exchange_op(service._driver, req.payload or {}, opts))
 	if not result then error(err or 'exchange_failed', 0) end
 	return { result = result }

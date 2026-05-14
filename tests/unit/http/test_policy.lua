@@ -46,6 +46,24 @@ function M.test_validate_exchange_rejects_raw_body_bytes_over_control_plane()
 	local bad, err = policy.validate_exchange_args { uri = 'http://example.test/', method = 'POST', body = 'bytes' }
 	eq(bad, nil)
 	eq(err, 'invalid_args')
+	bad, err = policy.validate_exchange_args { uri = 'http://example.test/', method = 'POST', data = 'bytes' }
+	eq(bad, nil)
+	eq(err, 'invalid_args')
+end
+
+function M.test_validate_exchange_accepts_body_object_capabilities_and_rejects_remote_reference_tables()
+	local source = { read_chunk_op = function () end, terminate = function () return true end }
+	local sink = { write_chunk_op = function () end, terminate = function () return true end }
+	local checked = ok(policy.validate_exchange_args { uri = 'http://example.test/', method = 'POST', body_source = source, response_sink = sink })
+	eq(checked.body_source, source)
+	eq(checked.response_sink, sink)
+
+	local bad, err = policy.validate_exchange_args { uri = 'http://example.test/', method = 'POST', body_source = { kind = 'remote-ref' } }
+	eq(bad, nil)
+	eq(err, 'invalid_args')
+	bad, err = policy.validate_exchange_args { uri = 'http://example.test/', method = 'POST', source = source }
+	eq(bad, nil)
+	eq(err, 'invalid_args')
 end
 
 function M.test_validate_listen_defaults_loopback_ephemeral_port()

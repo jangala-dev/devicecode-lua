@@ -20,7 +20,6 @@ local sdk_mod      = require 'services.http.sdk'
 local driver_mod   = require 'services.http.transport.cqueues_driver'
 local lua_http     = require 'services.http.transport.lua_http'
 local ws_wrap      = require 'services.http.transport.websocket'
-local body_mod     = require 'services.http.body'
 
 local M = {}
 
@@ -62,35 +61,33 @@ local function ws_uri(port, path)
 	return ('ws://127.0.0.1:%d%s'):format(port, path or '/ws')
 end
 
+local function memory_sink(sinks, key)
+	sinks[key] = sinks[key] or { chunks = {} }
+	local rec = sinks[key]
+	return {
+		write_chunk_op = function (_, chunk) rec.chunks[#rec.chunks + 1] = chunk; return fibers.always(true) end,
+		finish_op = function () rec.finished = true; return fibers.always(true) end,
+		terminate = function (_, reason) rec.terminated = reason or true; return true end,
+	}
+end
+
+local function memory_source(sources, key)
+	local chunks = sources[key] or {}
+	local i = 0
+	return {
+		read_chunk_op = function ()
+			return fibers.guard(function ()
+				i = i + 1
+				return fibers.always(chunks[i], nil)
+			end)
+		end,
+		terminate = function (_, reason) sources[key .. '_terminated'] = reason or true; return true end,
+	}
+end
+
 local function start_cap_service(opts)
 	opts = opts or {}
 	local memory_sinks = opts.memory_sinks or {}
-	local memory_sources = opts.memory_sources or {}
-	local registry = opts.body_registry or body_mod.new_registry()
-	registry:register_resolver('memory_sink', function (desc)
-		local key = desc.ref or 'default'
-		memory_sinks[key] = memory_sinks[key] or { chunks = {} }
-		local rec = memory_sinks[key]
-		return {
-			write_chunk_op = function (_, chunk) rec.chunks[#rec.chunks + 1] = chunk; return fibers.always(true) end,
-			finish_op = function () rec.finished = true; return fibers.always(true) end,
-			terminate = function (_, reason) rec.terminated = reason or true; return true end,
-		}
-	end)
-	registry:register_resolver('memory_source', function (desc)
-		local key = desc.ref or 'default'
-		local chunks = memory_sources[key] or {}
-		local i = 0
-		return {
-			read_chunk_op = function ()
-				return fibers.guard(function ()
-					i = i + 1
-					return fibers.always(chunks[i], nil)
-				end)
-			end,
-			terminate = function (_, reason) memory_sources[key .. '_terminated'] = reason or true; return true end,
-		}
-	end)
 	local b = bus.new()
 	local svc_conn = b:connect({ origin_base = { kind = 'local' } })
 	local svc = ok(http_service.start(svc_conn, {
@@ -99,7 +96,6 @@ local function start_cap_service(opts)
 		connection_setup_timeout = opts.connection_setup_timeout or 2,
 		intra_stream_timeout = opts.intra_stream_timeout or 2,
 		max_accept_queue = opts.max_accept_queue or 32,
-		body_registry = registry,
 	}))
 
 	local user_conn = b:connect({ origin_base = { kind = 'local' } })
@@ -244,9 +240,8 @@ end
 function M.test_real_cap_exchange_get_and_post_round_trip_to_local_server()
 	fibers.run(function (scope)
 		local listener, driver, port = start_backend_listener(scope, { label = 'http-service-real-exchange-backend' })
-		local _, svc, ref, sinks = start_cap_service({
-			memory_sources = { post = { 'upload-', 'payload' } },
-		})
+		local sources = { post = { 'upload-', 'payload' } }
+		local _, svc, ref, sinks = start_cap_service()
 		local handled = 0
 
 		for _ = 1, 2 do
@@ -269,7 +264,7 @@ function M.test_real_cap_exchange_get_and_post_round_trip_to_local_server()
 			uri = http_uri(port, '/out-get'),
 			method = 'GET',
 			headers = { ['x-test'] = 'get' },
-			response_sink = { kind = 'memory_sink', ref = 'get' },
+			response_sink = memory_sink(sinks, 'get'),
 		}, { timeout = 3 })))
 		eq(get_rep.result.status, '200')
 		eq(table.concat(sinks.get.chunks), 'GET:/out-get')
@@ -278,8 +273,8 @@ function M.test_real_cap_exchange_get_and_post_round_trip_to_local_server()
 			uri = http_uri(port, '/out-post'),
 			method = 'POST',
 			headers = { ['x-test'] = 'post' },
-			body_source = { kind = 'memory_source', ref = 'post' },
-			response_sink = { kind = 'memory_sink', ref = 'post' },
+			body_source = memory_source(sources, 'post'),
+			response_sink = memory_sink(sinks, 'post'),
 		}, { timeout = 3 })))
 		eq(post_rep.result.status, '200')
 		eq(table.concat(sinks.post.chunks), 'POST:/out-post:upload-payload')

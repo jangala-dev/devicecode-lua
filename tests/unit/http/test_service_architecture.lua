@@ -4,7 +4,7 @@ local bus    = require 'bus'
 
 local http_service = require 'services.http.service'
 local sdk_mod      = require 'services.http.sdk'
-local body         = require 'services.http.body'
+local blob         = require 'devicecode.blob_source'
 
 local M = {}
 
@@ -101,28 +101,19 @@ function M.test_exchange_is_named_scoped_work_with_identity_completion_and_event
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local written = {}
-		local registry = body.new_registry()
-		registry:register_resolver('unit_sink', function ()
-			return {
-				write_chunk_op = function (_, chunk) written[#written + 1] = chunk; return fibers.always(true) end,
-				finish_op = function () return fibers.always(true) end,
-				terminate = function () return true end,
-			}
-		end)
+		local sink = blob.to_memory()
 		local svc = ok(http_service.start(root, {
 			driver = fake_driver(),
 			id = 'main',
 			request_module = request_module('hello'),
-			body_registry = registry,
 		}))
 		local user = b:connect({ origin_base = { kind = 'local' } })
 		local ref = sdk_mod.new_ref(user, 'main')
-		local rep = ok(fibers.perform(ref:exchange_op({ uri = 'http://example.test/', method = 'GET', response_sink = { kind = 'unit_sink' } })))
+		local rep = ok(fibers.perform(ref:exchange_op({ uri = 'http://example.test/', method = 'GET', response_sink = sink })))
 		eq(rep.result.status, '200')
 		eq(rep.result.body, nil)
 		eq(rep.result.response_sink.bytes, 5)
-		eq(table.concat(written), 'hello')
+		eq(sink:result(), 'hello')
 		yield_many(8)
 		local events = svc:events()
 		local started, done

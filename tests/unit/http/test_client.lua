@@ -2,7 +2,7 @@ local fibers = require 'fibers'
 local runtime = require 'fibers.runtime'
 local driver_mod = require 'services.http.transport.cqueues_driver'
 local client = require 'services.http.client'
-local body = require 'services.http.body'
+local blob = require 'devicecode.blob_source'
 
 local M = {}
 
@@ -92,25 +92,17 @@ end
 
 function M.test_exchange_op_streams_response_to_sink_without_returning_body()
 	fibers.run(function ()
-		local written = {}
-		local registry = body.new_registry()
-		registry:register_resolver('unit_sink', function ()
-			return {
-				write_chunk_op = function (_, chunk) written[#written + 1] = chunk; return fibers.always(true) end,
-				finish_op = function () return fibers.always(true) end,
-				terminate = function () return true end,
-			}
-		end)
+		local sink = blob.to_memory()
 		local result = ok(fibers.perform(client.exchange_op(fake_driver(), {
 			uri = 'http://example.test/path',
 			method = 'GET',
 			headers = { ['x-test'] = 'yes' },
-			response_sink = { kind = 'unit_sink' },
-		}, { request_module = request_module('hello'), body_registry = registry })))
+			response_sink = sink,
+		}, { request_module = request_module('hello') })))
 		eq(result.status, '202')
 		eq(result.body, nil)
 		eq(result.response_sink.bytes, 5)
-		eq(table.concat(written), 'hello')
+		eq(sink:result(), 'hello')
 		eq(result.headers['content-type'], 'text/plain')
 	end)
 end
@@ -163,25 +155,10 @@ function M.test_request_source_streams_through_fibers_native_body_pipe()
 
 	fibers.run(function (scope)
 		assert(drv:start(scope))
-		local registry = body.new_registry()
-		registry:register_resolver('op_source_only', function ()
-			local chunks = { 'ab', 'cd' }
-			local i = 0
-			return {
-				read_chunk_op = function ()
-					return fibers.guard(function ()
-						i = i + 1
-						return fibers.always(chunks[i], nil)
-					end)
-				end,
-				terminate = function () return true end,
-			}
-		end)
 		local result = ok(fibers.perform(client.exchange_op(drv, {
-			uri = 'http://example.test/', method = 'POST', body_source = { kind = 'op_source_only' },
+			uri = 'http://example.test/', method = 'POST', body_source = blob.from_string('abcd'),
 		}, {
 			request_module = request_mod,
-			body_registry = registry,
 			request_body_condition_factory = fake_condition_factory,
 		})))
 		eq(result.status, '201')
@@ -195,20 +172,17 @@ function M.test_exchange_op_does_not_terminate_committed_response_sink_after_suc
 	fibers.run(function ()
 		local committed = false
 		local terminated = nil
-		local registry = body.new_registry()
-		registry:register_resolver('committing_sink', function ()
-			return {
-				write_chunk_op = function () return fibers.always(true) end,
-				commit_op = function () committed = true; return fibers.always(true) end,
-				terminate = function (_, reason) terminated = reason or true; return true end,
-			}
-		end)
+		local sink = {
+			write_chunk_op = function () return fibers.always(true) end,
+			commit_op = function () committed = true; return fibers.always(true) end,
+			terminate = function (_, reason) terminated = reason or true; return true end,
+		}
 
 		local result = ok(fibers.perform(client.exchange_op(fake_driver(), {
 			uri = 'http://example.test/path',
 			method = 'GET',
-			response_sink = { kind = 'committing_sink' },
-		}, { request_module = request_module('hello'), body_registry = registry })))
+			response_sink = sink,
+		}, { request_module = request_module('hello') })))
 		eq(result.response_sink.bytes, 5)
 		eq(committed, true, 'sink commit must run')
 		eq(terminated, nil, 'committed sink ownership must not be reclaimed by the exchange finaliser')
@@ -218,20 +192,17 @@ end
 function M.test_exchange_op_terminates_uncommitted_response_sink_on_copy_failure()
 	fibers.run(function ()
 		local terminated = nil
-		local registry = body.new_registry()
-		registry:register_resolver('failing_sink', function ()
-			return {
-				write_chunk_op = function () return fibers.always(nil, 'sink_failed') end,
-				commit_op = function () error('commit must not run after write failure', 0) end,
-				terminate = function (_, reason) terminated = reason or true; return true end,
-			}
-		end)
+		local sink = {
+			write_chunk_op = function () return fibers.always(nil, 'sink_failed') end,
+			commit_op = function () error('commit must not run after write failure', 0) end,
+			terminate = function (_, reason) terminated = reason or true; return true end,
+		}
 
 		local result, err = fibers.perform(client.exchange_op(fake_driver(), {
 			uri = 'http://example.test/path',
 			method = 'GET',
-			response_sink = { kind = 'failing_sink' },
-		}, { request_module = request_module('hello'), body_registry = registry }))
+			response_sink = sink,
+		}, { request_module = request_module('hello') }))
 		eq(result, nil)
 		eq(err, 'sink_failed')
 		eq(terminated, 'failed', 'uncommitted sink must be terminated by the operation scope')
@@ -241,19 +212,15 @@ end
 
 function M.test_request_body_source_without_read_op_rejects_before_request_construction()
 	fibers.run(function ()
-		local registry = body.new_registry()
 		local constructed = 0
-		registry:register_resolver('bad_source', function ()
-			return { terminate = function () return true end }
-		end)
 		local request_mod = {
 			new_from_uri = function () constructed = constructed + 1; return request_module().new_from_uri('http://example.test/') end,
 		}
 		local result, err = fibers.perform(client.exchange_op(fake_driver(), {
-			uri = 'http://example.test/', method = 'POST', body_source = { kind = 'bad_source' },
-		}, { request_module = request_mod, body_registry = registry }))
+			uri = 'http://example.test/', method = 'POST', body_source = { terminate = function () return true end },
+		}, { request_module = request_mod }))
 		eq(result, nil)
-		eq(err, 'request_body_source_invalid')
+		eq(err, 'invalid_args')
 		eq(constructed, 0, 'invalid request source must reject before lua-http request construction')
 	end)
 end

@@ -126,7 +126,7 @@ end
 function M.validate_exchange_args(args, opts)
 	opts = opts or {}
 	if type(args) ~= 'table' then return nil, 'invalid_args' end
-	local ok, ferr = require_only_fields(args, { uri = true, method = true, headers = true, body_source = true, source = true, response_sink = true, sink = true })
+	local ok, ferr = require_only_fields(args, { uri = true, method = true, headers = true, body_source = true, response_sink = true })
 	if not ok then return nil, ferr end
 	local uri, uerr = M.validate_uri(args.uri, opts)
 	if not uri then return nil, uerr end
@@ -137,16 +137,16 @@ function M.validate_exchange_args(args, opts)
 	local headers, herr = copy_headers(args.headers)
 	if herr then return nil, herr end
 
-	local descriptors, derr = body.validate_exchange_descriptors(args)
-	if not descriptors then return nil, derr end
+	local bodies, derr = body.validate_exchange_bodies(args)
+	if not bodies then return nil, derr end
 
 	return {
 		uri = uri.uri,
 		method = method,
 		headers = headers,
 		_uri = uri,
-		body_source = descriptors.source,
-		response_sink = descriptors.sink,
+		body_source = bodies.source,
+		response_sink = bodies.sink,
 	}, nil
 end
 
