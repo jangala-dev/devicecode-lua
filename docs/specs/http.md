@@ -18,7 +18,7 @@ HTTP capability publication
 transport observability
 ```
 
-HTTP is an infrastructure service. UI and other services consume it through public HTTP capability handles.
+HTTP is an infrastructure service. UI and other services consume it through public HTTP capability handles. Its `start(conn, opts)` entry is a foreground service body for `main.lua` and must not return while healthy. Tests and embedded compositions that need the in-process service handle use `services.http.service.open_handle(conn, opts)`.
 
 ## Lifetime shape
 
@@ -27,6 +27,7 @@ flowchart TD
   HttpScope["http service scope"] --> Coordinator["coordinator"]
   HttpScope --> Registry["handle registry"]
   HttpScope --> Backend["transport driver scope"]
+  HttpScope --> Lifecycle["svc/http lifecycle"]
   HttpScope --> Publisher["cap/http publisher"]
 
   Coordinator --> Listener["listener scopes"]

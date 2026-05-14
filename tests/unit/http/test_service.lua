@@ -60,7 +60,7 @@ function M.test_service_retains_capability_metadata_and_status()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local drv = fake_driver()
-		local svc = ok(http_service.start(root, { driver = drv, id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = drv, id = 'main' }))
 		local user = b:connect({ origin_base = { kind = 'local' } })
 		local ref = sdk_mod.new_ref(user, 'main')
 		local rep = ok(fibers.perform(ref:status_op()))
@@ -75,7 +75,7 @@ function M.test_non_local_handle_returning_call_is_rejected_before_backend_work(
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		local drv = fake_driver()
-		local svc = ok(http_service.start(root, { driver = drv, id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = drv, id = 'main' }))
 		local remote = b:connect({ origin_base = { kind = 'local', link_id = 'fabric-link' } })
 		local ref = sdk_mod.new_ref(remote, 'main')
 		local reply, err = fibers.perform(ref:listen_op({ host = '127.0.0.1', port = 0 }))
@@ -90,7 +90,7 @@ function M.test_registry_callbacks_do_not_mutate_model_until_coordinator_receive
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 		yield_many(4)
 		eq(svc:stats().active_listeners, 0)
 		eq(svc._emit, nil, 'legacy direct reducer ingress should not exist')
@@ -121,7 +121,7 @@ function M.test_model_fields_are_recomputed_from_identity_records_and_duplicate_
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 		yield_many(4)
 
 		ok(svc:_submit_event({ kind = 'listener_registered', handle_id = 'l1', generation = 1 }))
@@ -148,7 +148,7 @@ function M.test_stale_generation_events_are_ignored()
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 		yield_many(4)
 
 		ok(svc:_submit_event({ kind = 'listener_registered', handle_id = 'l1', generation = 1 }))
@@ -170,7 +170,7 @@ function M.test_cap_request_received_then_service_shutdown_finalises_request_own
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 		local failed
 		local req = {
 			payload = {},
@@ -192,7 +192,7 @@ function M.test_event_queue_overflow_for_completion_fails_observing_service()
 		ok(child:spawn(function ()
 			local b = bus.new()
 			local root = b:connect({ origin_base = { kind = 'local' } })
-			local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main', event_queue_len = 1 }))
+			local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main', event_queue_len = 1 }))
 			return fibers.perform(tx:send_op(svc))
 		end))
 		local svc = ok(fibers.perform(rx:recv_op()))
@@ -216,7 +216,7 @@ function M.test_service_shutdown_terminates_registry_handles_and_finalises_unres
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 		local terminated
 		local id = ok(svc._registry:register('exchange', { terminate = function (_, reason) terminated = reason; return true end }, { generation = svc._generation }))
 		yield_many(4)
@@ -236,7 +236,7 @@ function M.test_context_transfer_keeps_context_active_after_listener_termination
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 		yield_many(4)
 		ok(svc:_submit_event({ kind = 'listener_registered', handle_id = 'l1', generation = 1 }))
 		ok(svc:_submit_event({ kind = 'context_admitted', listener_id = 'l1', context_id = 'c1', generation = 1 }))
@@ -381,7 +381,7 @@ function M.test_backend_failure_terminates_service_owned_handles()
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 		yield_many(4)
 
 		local terminated = {}
@@ -435,7 +435,7 @@ function M.test_listener_setup_failure_leaves_no_live_ownership()
 		}
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_polling_driver(), id = 'main', http_server = failing_server }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_polling_driver(), id = 'main', http_server = failing_server }))
 		local user = b:connect({ origin_base = { kind = 'local' } })
 		local ref = sdk_mod.new_ref(user, 'main')
 
@@ -457,7 +457,7 @@ function M.test_handle_returning_rpcs_return_public_wrappers()
 		local counters = {}
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success(counters),
@@ -489,7 +489,7 @@ function M.test_each_local_handle_rpc_rejects_non_local_before_backend_admission
 		local counters = {}
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success(counters),
@@ -522,7 +522,7 @@ function M.test_initial_retained_status_is_not_available_before_backend_ready_ev
 		local topics = require 'services.http.topics'
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 
 		local view = root:retained_view(topics.status('main'))
 		local msg = ok(view:get(topics.status('main')), 'status should be retained immediately')
@@ -537,7 +537,7 @@ function M.test_listener_owner_reports_identity_completion_when_listener_runtime
 		local counters = {}
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success(counters),
@@ -570,7 +570,7 @@ function M.test_onstream_context_admission_emits_service_event_without_reducing_
 		local counters = {}
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success(counters),
@@ -603,7 +603,7 @@ function M.test_unaccepted_context_is_listener_owned_until_accept()
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success({}),
@@ -639,7 +639,7 @@ function M.test_listener_termination_terminates_unaccepted_context_and_emits_con
 		local terminated_reason
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success({}),
@@ -668,7 +668,7 @@ function M.test_accepted_context_survives_listener_termination_until_context_ter
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success({}),
@@ -726,7 +726,7 @@ function M.test_server_side_websocket_upgrade_registers_and_deregisters_service_
 	fibers.run(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success({}),
@@ -764,7 +764,7 @@ function M.test_service_shutdown_terminates_server_side_upgraded_websocket()
 	fibers.run(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success({}),
@@ -795,7 +795,7 @@ function M.test_public_context_read_cancellation_terminates_context_and_service_
 	fibers.run(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success({}),
@@ -838,7 +838,7 @@ function M.test_public_server_websocket_receive_cancellation_terminates_websocke
 	fibers.run(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
 			http_server = http_server_success({}),
@@ -930,7 +930,7 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 	fibers.run(function (scope)
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.start(root, {
+		local svc = ok(http_service.open_handle(root, {
 			driver = drv,
 			id = 'main',
 			request_module = request_mod,
@@ -975,7 +975,7 @@ function M.test_retained_http_config_updates_policy_generation_and_policy()
 				policy = { allow_loopback = false, allowed_schemes = { https = true } },
 			},
 		})
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 		yield_until(function () return svc:stats().policy_generation == 7 end, 'retained cfg/http was not applied')
 		eq(svc._opts.policy.allow_loopback, false)
 		eq(svc._opts.policy.allowed_schemes.https, true)
@@ -989,7 +989,7 @@ function M.test_invalid_retained_http_config_marks_service_degraded_without_repl
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
 		root:retain({ 'cfg', 'http' }, { rev = 3, data = { schema = 'wrong' } })
-		local svc = ok(http_service.start(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
 		yield_until(function () return svc:stats().last_error ~= nil end, 'invalid cfg/http was not reported')
 		ok(tostring(svc:stats().last_error):find('schema', 1, true))
 		eq(svc:stats().policy_generation, 1, 'invalid config must not advance policy generation')

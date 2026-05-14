@@ -91,4 +91,26 @@ function M.test_http_service_and_support_do_not_use_private_op_internals()
 	end
 end
 
+
+function M.test_http_service_start_is_foreground_entry_not_handle_constructor()
+	local service = read_file('../src/services/http/service.lua')
+	ok(service:find('function M.run%(scope, params%)'), 'http service does not expose run(scope, params)')
+	ok(service:find('function M.start%(conn, opts%)'), 'http service does not expose start(conn, opts)')
+	ok(service:find("require 'devicecode.service_base'", 1, true), 'http start does not use service_base lifecycle')
+	ok(service:find('function M.open_handle%(conn, opts%)'), 'http handle-returning helper is not explicit')
+	ok(not service:find('function M.start%(conn, opts%)[%s%S]-return self[%s%S]-end'), 'http start returns a service handle')
+	ok(service:find('http service returned unexpectedly', 1, true), 'http start does not fail if run returns')
+end
+
+function M.test_http_unit_tests_use_explicit_handle_helper()
+	local needle = 'http_service.' .. 'start'
+	local cmd = "find ../tests/unit/http ../tests/integration/devhost -name '*.lua' | sort"
+	local p = assert(io.popen(cmd))
+	for file in p:lines() do
+		local s = read_file(file)
+		ok(not s:find(needle, 1, true), 'http tests still use start as a handle constructor: ' .. file)
+	end
+	p:close()
+end
+
 return M
