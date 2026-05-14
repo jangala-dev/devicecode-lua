@@ -228,11 +228,21 @@ function tests.test_response_headers_op_does_not_mutate_in_guard_path()
 	if not body:find('acquire_start_token_op', 1, true) then fail('write_headers_op does not use the choice-safe start token op') end
 end
 
-function tests.test_ui_summary_unretain_cleanup_is_explicitly_recorded()
+function tests.test_ui_service_does_not_retain_ui_projection_state()
 	local service = read_file('../src/services/ui/service.lua')
-	if not service:find("record_cleanup_error(state, 'ui_summary_unretain_failed'", 1, true) then
-		fail('ui summary unretain failure is not explicitly recorded')
+	for _, needle in ipairs({ 'topics.summary()', 'topics.read_model_status()', 'topics.session_count()', "'state', 'ui'" }) do
+		if service:find(needle, 1, true) then fail('ui service retains or unretains UI projection state: ' .. needle) end
 	end
+	if not service:find('self%-ingesting projection loop') then fail('ui service does not document projection feedback boundary') end
+end
+
+function tests.test_read_model_declares_self_ingestion_exclusions()
+	local topics = read_file('../src/services/ui/topics.lua')
+	local read_model = read_file('../src/services/ui/read_model.lua')
+	if not topics:find('default_excluded_retained_patterns', 1, true) then fail('ui topics do not declare retained-input exclusions') end
+	if not topics:find("t('state', 'ui', '#')", 1, true) then fail('state/ui/# is not excluded') end
+	if not topics:find("t('obs', 'v1', 'ui', '#')", 1, true) then fail('obs/v1/ui/# is not excluded') end
+	if not read_model:find('should_ingest_event', 1, true) then fail('read model has no retained-feed exclusion check') end
 end
 
 return tests

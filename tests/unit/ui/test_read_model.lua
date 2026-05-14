@@ -13,6 +13,17 @@ local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected '..tos
 local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, got '..tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end end
 
+
+function tests.test_read_model_default_exclusions_prevent_self_ingesting_ui_state()
+	local should = read_model._test.should_ingest_event
+	assert_eq(should({ op = 'retain', topic = { 'state', 'device', 'summary' }, payload = {} }, {}), true)
+	assert_eq(should({ op = 'retain', topic = { 'state', 'ui', 'summary' }, payload = {} }, {}), false)
+	assert_eq(should({ op = 'retain', topic = { 'state', 'ui', 'read-model' }, payload = {} }, {}), false)
+	assert_eq(should({ op = 'unretain', topic = { 'state', 'ui', 'sessions' } }, {}), false)
+	assert_eq(should({ op = 'retain', topic = { 'obs', 'v1', 'ui', 'metric', 'requests' }, payload = {} }, {}), false)
+	assert_eq(should({ op = 'replay_done' }, {}), true)
+end
+
 function tests.test_store_snapshot_changed_op_and_material_change()
 	run_fibers.run(function ()
 		local model = read_model.new()
