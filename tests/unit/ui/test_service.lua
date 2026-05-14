@@ -81,23 +81,21 @@ end
 
 
 
-function tests.test_publish_summary_fails_on_retain_failure()
+function tests.test_publish_summary_is_local_projection_not_retained_state()
+	local retain_calls = 0
 	local state = base_state()
 	state.conn = {
-		retain = function () return nil, 'retain_failed' end,
+		retain = function () retain_calls = retain_calls + 1; return nil, 'retain_failed' end,
 	}
 	state.sessions = { count = function () return 0 end }
 	state.active_requests = 0
 	state.rejected_requests = 0
 
-	local ok, err = pcall(function ()
-		service._test.publish_summary(state)
-	end)
-
-	if ok then fail('expected publish_summary to fail') end
-	if not tostring(err):find('retain_failed', 1, true) then
-		fail('expected retain failure, got ' .. tostring(err))
-	end
+	local payload = service._test.publish_summary(state)
+	assert_eq(payload.service_status, 'running')
+	assert_eq(payload.read_model_status, 'running')
+	assert_eq(payload.listener_status, 'running')
+	assert_eq(retain_calls, 0)
 end
 
 function tests.test_session_events_are_first_class_service_events()
@@ -151,9 +149,9 @@ end
 
 function tests.test_cleanup_error_recording_is_explicit_and_non_throwing()
 	local state = base_state()
-	local rec = service._test.record_cleanup_error(state, 'ui_summary_unretain_failed', 'unretain_failed')
-	assert_eq(rec.kind, 'ui_summary_unretain_failed')
-	assert_eq(rec.err, 'unretain_failed')
+	local rec = service._test.record_cleanup_error(state, 'ui_cleanup_failed', 'cleanup_failed')
+	assert_eq(rec.kind, 'ui_cleanup_failed')
+	assert_eq(rec.err, 'cleanup_failed')
 	assert_eq(state.last_cleanup_error, rec)
 end
 

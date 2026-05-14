@@ -10,7 +10,6 @@ local service_base = require 'devicecode.service_base'
 local scoped_work  = require 'devicecode.support.scoped_work'
 local sleep        = require 'fibers.sleep'
 local queue        = require 'devicecode.support.queue'
-local bus_cleanup  = require 'devicecode.support.bus_cleanup'
 local read_model   = require 'services.ui.read_model'
 local queries      = require 'services.ui.queries'
 local sessions_mod = require 'services.ui.sessions'
@@ -38,32 +37,9 @@ local function component_summary(components)
 	return out
 end
 
-local function read_model_payload(state, snapshot)
-	local count = 0
-	for _ in pairs((snapshot and snapshot.items) or {}) do count = count + 1 end
-	return {
-		kind = 'ui.read-model',
-		version = snapshot and snapshot.version or 0,
-		items = count,
-		closed = snapshot and snapshot.closed or false,
-		reason = snapshot and snapshot.reason or nil,
-		status = state.read_model_status,
-	}
-end
-
-local function sessions_payload(state)
-	local snap = (state.sessions and type(state.sessions.snapshot) == 'function') and state.sessions:snapshot() or nil
-	return {
-		kind = 'ui.sessions',
-		version = snap and snap.version or 0,
-		count = snap and snap.count or 0,
-		last_event = snap and snap.last_event or nil,
-	}
-end
-
-local function publish_summary(state)
+local function build_summary(state)
 	local model_snapshot = state.model and state.model:snapshot() or nil
-	local payload = queries.summary(model_snapshot,
+	return queries.summary(model_snapshot,
 		state.sessions and state.sessions:count() or 0,
 		{
 			active_requests = state.active_requests,
@@ -78,15 +54,14 @@ local function publish_summary(state)
 			last_error = state.last_error,
 		}
 	)
-	local ok, err = bus_cleanup.retain(state.conn, topics.summary(), payload)
-	if ok ~= true then error(err or 'ui summary publication failed', 0) end
-	ok, err = bus_cleanup.retain(state.conn, topics.read_model_status(), read_model_payload(state, model_snapshot))
-	if ok ~= true then error(err or 'ui read-model publication failed', 0) end
-	ok, err = bus_cleanup.retain(state.conn, topics.session_count(), sessions_payload(state))
-	if ok ~= true then error(err or 'ui sessions publication failed', 0) end
-	return payload
 end
 
+local function publish_summary(state)
+	-- UI summaries are presentation projections. They are intentionally not
+	-- retained back to the bus because the read model consumes retained state/#.
+	-- Publishing derived UI state there creates a self-ingesting projection loop.
+	return build_summary(state)
+end
 local function record_cleanup_error(state, kind, err)
 	local rec = {
 		kind = kind or 'cleanup_error',
@@ -543,20 +518,6 @@ function M.run(scope, params)
 		if not read_model_owns_model then
 			watch_owner:terminate(reason)
 			model:terminate(reason)
-		end
-		local ok, err = bus_cleanup.unretain(conn, topics.summary())
-		if ok ~= true then
-			record_cleanup_error(state, 'ui_summary_unretain_failed', err)
-		end
-
-		ok, err = bus_cleanup.unretain(conn, topics.read_model_status())
-		if ok ~= true then
-			record_cleanup_error(state, 'ui_read_model_unretain_failed', err)
-		end
-
-		ok, err = bus_cleanup.unretain(conn, topics.session_count())
-		if ok ~= true then
-			record_cleanup_error(state, 'ui_sessions_unretain_failed', err)
 		end
 	end)
 
