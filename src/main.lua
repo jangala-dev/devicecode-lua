@@ -14,6 +14,7 @@ local function add_path(prefix)
 end
 
 local env = os.getenv('DEVICECODE_ENV') or 'dev'
+add_path('/usr/lib/lua/')
 if env == 'prod' then
 	add_path('./lib/')
 else

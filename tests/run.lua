@@ -123,6 +123,11 @@ local files = {
 	"unit.ui.test_supervision",
 	"unit.ui.test_update_upload",
 	"unit.ui.test_user_operation",
+	'unit.metrics.processing_spec',
+	'unit.metrics.config_spec',
+	'unit.metrics.senml_spec',
+	'unit.metrics.http_spec',
+	'integration.devhost.metrics_spec',
 }
 
 local function monotonic_now()
