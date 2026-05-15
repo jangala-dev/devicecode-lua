@@ -128,23 +128,25 @@ function new.NetworkCapability(id, control_ch)
     return new.Capability('network', id, control_ch, offerings)
 end
 
+
 ---@param id CapabilityId
 ---@param control_ch Channel
 ---@return Capability?
 ---@return string error
-function new.WirelessCapability(id, control_ch)
+function new.RadioCapability(id, control_ch)
     local offerings = {
         'set_channels',
-        'set_country',
         'set_txpower',
-        'set_type',
+        'set_country',
         'set_enabled',
         'add_interface',
         'delete_interface',
         'clear_radio_config',
-        'apply'
+        'set_report_period',
+        'apply',
+        'rollback',
     }
-    return new.Capability('wireless', id, control_ch, offerings)
+    return new.Capability('radio', id, control_ch, offerings)
 end
 
 ---@param id CapabilityId
@@ -166,7 +168,9 @@ function new.BandCapability(id, control_ch)
         'set_client_inactive_kickoff',
         'set_cleanup',
         'set_networking',
-        'apply'
+        'apply',
+        'clear',
+        'rollback',
     }
     return new.Capability('band', id, control_ch, offerings)
 end
