@@ -1,0 +1,4 @@
+images/*
+work/*
+!images/.gitkeep
+!work/.gitkeep

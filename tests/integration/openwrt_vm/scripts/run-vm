@@ -1,0 +1,69 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+if [ -f "${OPENWRT_PID}" ] && kill -0 "$(cat "${OPENWRT_PID}")" 2>/dev/null; then
+	echo "[openwrt-vm] already running with pid $(cat "${OPENWRT_PID}")"
+	exit 0
+fi
+
+if [ ! -f "${OPENWRT_WORK_DISK}" ]; then
+	tests/integration/openwrt_vm/scripts/reset-disk
+fi
+
+mkdir -p "${OPENWRT_DIR}/work"
+rm -f "${OPENWRT_LOG}" "${OPENWRT_PID}"
+
+NETDEV="user,id=net0,net=192.168.1.0/24,hostfwd=tcp::${OPENWRT_SSH_PORT}-192.168.1.1:22"
+
+if [ "${OPENWRT_ARCH}" = "x86_64" ]; then
+	exec "${OPENWRT_QEMU}" \
+		-m "${OPENWRT_VM_MEM}" \
+		-smp "${OPENWRT_VM_CPUS}" \
+		-drive "file=${OPENWRT_WORK_DISK},format=qcow2,if=virtio" \
+		-netdev "${NETDEV}" \
+		-device virtio-net-pci,netdev=net0 \
+		-display none \
+		-monitor none \
+		-daemonize \
+		-pidfile "${OPENWRT_PID}" \
+		-serial "file:${OPENWRT_LOG}"
+fi
+
+# aarch64 / arm64
+AAVMF_CODE=""
+for p in \
+	/usr/share/AAVMF/AAVMF_CODE.fd \
+	/usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+	/usr/share/edk2/aarch64/QEMU_EFI.fd
+do
+	if [ -f "$p" ]; then
+		AAVMF_CODE="$p"
+		break
+	fi
+done
+
+if [ -z "${AAVMF_CODE}" ]; then
+	echo "could not find AArch64 EFI firmware" >&2
+	exit 1
+fi
+
+exec "${OPENWRT_QEMU}" \
+	-machine virt \
+	-cpu cortex-a72 \
+	-m "${OPENWRT_VM_MEM}" \
+	-smp "${OPENWRT_VM_CPUS}" \
+	-bios "${AAVMF_CODE}" \
+	-drive "file=${OPENWRT_WORK_DISK},format=qcow2,if=virtio" \
+	-netdev "${NETDEV}" \
+	-device virtio-net-pci,netdev=net0 \
+	-display none \
+	-monitor none \
+	-daemonize \
+	-pidfile "${OPENWRT_PID}" \
+	-serial "file:${OPENWRT_LOG}"

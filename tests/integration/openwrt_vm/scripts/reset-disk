@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+"$SCRIPT_DIR/fetch-image"
+
+mkdir -p "${OPENWRT_DIR}/work"
+rm -f "${OPENWRT_WORK_DISK}"
+
+qemu-img create \
+	-f qcow2 \
+	-F raw \
+	-b "${OPENWRT_IMAGE_RAW}" \
+	"${OPENWRT_WORK_DISK}"
+
+echo "[openwrt-vm] reset disk: ${OPENWRT_WORK_DISK}"

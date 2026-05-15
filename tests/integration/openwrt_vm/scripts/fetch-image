@@ -1,0 +1,46 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+mkdir -p "${OPENWRT_DIR}/images"
+
+if [ ! -f "${OPENWRT_IMAGE_GZ}" ]; then
+	echo "[openwrt-vm] fetching ${OPENWRT_IMAGE_NAME}"
+	curl -fL "${OPENWRT_BASE_URL}/${OPENWRT_IMAGE_NAME}" -o "${OPENWRT_IMAGE_GZ}"
+fi
+
+if [ ! -f "${OPENWRT_IMAGE_RAW}" ]; then
+	echo "[openwrt-vm] decompressing ${OPENWRT_IMAGE_NAME}"
+	tmp="${OPENWRT_IMAGE_RAW}.tmp"
+	rm -f "$tmp"
+
+	set +e
+	gzip -dc "${OPENWRT_IMAGE_GZ}" > "$tmp"
+	rc=$?
+	set -e
+
+	if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+		rm -f "$tmp"
+		echo "[openwrt-vm] gzip failed with exit code $rc" >&2
+		exit "$rc"
+	fi
+
+	if [ ! -s "$tmp" ]; then
+		rm -f "$tmp"
+		echo "[openwrt-vm] decompressed image is empty" >&2
+		exit 1
+	fi
+
+	if [ "$rc" -eq 2 ]; then
+		echo "[openwrt-vm] gzip reported trailing data; using decompressed image anyway" >&2
+	fi
+
+	mv "$tmp" "${OPENWRT_IMAGE_RAW}"
+fi
+
+echo "[openwrt-vm] image ready: ${OPENWRT_IMAGE_RAW}"
