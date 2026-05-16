@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+exec ssh \
+	-o StrictHostKeyChecking=no \
+	-o UserKnownHostsFile=/dev/null \
+	-o LogLevel=ERROR \
+	-o ConnectTimeout=3 \
+	-o ConnectionAttempts=1 \
+	-p "${OPENWRT_SSH_PORT}" \
+	root@127.0.0.1 \
+	"$@"

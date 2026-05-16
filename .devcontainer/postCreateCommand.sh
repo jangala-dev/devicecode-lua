@@ -1,19 +1,44 @@
-#!/bin/sh
+#!/usr/bin/env sh
+set -eu
 
-cd /tmp
-git clone https://github.com/jangala-dev/lua-fibers
-cd lua-fibers
-git checkout v0.4
-sudo cp -r src/* /workspaces/lua-bus/src/
-cd ..
-rm -rf lua-fibers
+echo "[devcontainer] preparing OpenWrt VM test tools"
 
-cd /tmp
-git clone https://github.com/jangala-dev/lua-trie
-cd lua-trie
-git checkout v0.2
-sudo mv src/trie.lua /workspaces/lua-bus/src/
-cd ..
-rm -rf lua-trie
+if command -v apt-get >/dev/null 2>&1; then
+	sudo apt-get update
+	sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+		curl \
+		ca-certificates \
+		gzip \
+		openssh-client \
+		rsync \
+		socat \
+		qemu-system-x86 \
+		qemu-system-arm \
+		qemu-utils \
+		ovmf \
+		qemu-efi-aarch64 \
+		make
+elif command -v apk >/dev/null 2>&1; then
+	sudo apk add --no-cache \
+		curl \
+		ca-certificates \
+		gzip \
+		openssh-client \
+		rsync \
+		socat \
+		qemu-system-x86_64 \
+		qemu-system-aarch64 \
+		qemu-img \
+		ovmf \
+		edk2-aarch64 \
+		make
+else
+	echo "[devcontainer] unsupported base image: no apt-get or apk found" >&2
+	exit 1
+fi
+
+mkdir -p tests/integration/openwrt_vm/{images,work,scripts,tests}
+
+echo "[devcontainer] OpenWrt VM tools ready"
 
 exit 0
