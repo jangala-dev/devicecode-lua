@@ -1,6 +1,6 @@
 .PHONY: \
 	preflight fetch verify reset run wait provision provision-force \
-	stop ssh smoke logs baseline test-baseline test-tc-veth test \
+	stop ssh smoke logs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-openwrt-network-provider-apply test-openwrt-network-provider-snapshot test \
 	openwrt-vm-test clean
 
 preflight:
@@ -50,6 +50,22 @@ test-tc-veth:
 	./scripts/wait-ssh
 	./tests/test_tc_veth_baseline.sh
 
+test-lua-uci:
+	./scripts/wait-ssh
+	./tests/test_lua_uci_baseline.sh
+
+test-devicecode-uci-manager:
+	./scripts/wait-ssh
+	./tests/test_devicecode_uci_manager.sh
+
+test-openwrt-network-provider-apply:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_provider_apply.sh
+
+test-openwrt-network-provider-snapshot:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_provider_snapshot.sh
+
 test-scp:
 	./scripts/wait-ssh
 	tmp="$$(mktemp)"; \
@@ -60,7 +76,7 @@ test-scp:
 	grep -q devicecode-openwrt-vm "$$tmp.out"; \
 	rm -f "$$tmp" "$$tmp.out"
 
-test: test-baseline test-tc-veth test-scp
+test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-openwrt-network-provider-apply test-openwrt-network-provider-snapshot test-scp
 
 openwrt-vm-test: preflight fetch verify reset run wait provision test
 

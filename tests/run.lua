@@ -30,6 +30,8 @@ local files = {
 	'unit.devicecode.service_base_spec',
 	'unit.hal.cap_sdk_spec',
 	'unit.hal.hal_compat_spec',
+	'unit.hal.openwrt_uci_manager_spec',
+	'unit.hal.openwrt_uci_singleton_compat_spec',
 	'unit.hal.service_raw_host_spec',
 	'unit.hal.control_store_provider_spec',
 	'unit.hal.control_store_manager_spec',

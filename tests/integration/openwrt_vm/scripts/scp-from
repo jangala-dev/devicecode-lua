@@ -13,6 +13,7 @@ if [ "$#" -ne 2 ]; then
 fi
 
 exec scp \
+	-q \
 	-O \
 	-o StrictHostKeyChecking=no \
 	-o UserKnownHostsFile=/dev/null \
