@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+deadline="${OPENWRT_SSH_WAIT_S}"
+start="$(date +%s)"
+
+echo "[openwrt-vm] waiting for SSH on 127.0.0.1:${OPENWRT_SSH_PORT}"
+
+while true; do
+	if "$SCRIPT_DIR/ssh" 'true' >/dev/null 2>&1; then
+		echo "[openwrt-vm] SSH ready"
+		exit 0
+	fi
+
+	now="$(date +%s)"
+	if [ $((now - start)) -ge "$deadline" ]; then
+		echo "[openwrt-vm] SSH did not become ready within ${deadline}s" >&2
+		echo "[openwrt-vm] last serial log lines:" >&2
+		tail -n 80 "${OPENWRT_LOG}" >&2 || true
+		exit 1
+	fi
+
+	sleep 2
+done
