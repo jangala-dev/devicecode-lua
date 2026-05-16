@@ -13,29 +13,56 @@ if [ -f "${OPENWRT_PID}" ] && kill -0 "$(cat "${OPENWRT_PID}")" 2>/dev/null; the
 fi
 
 if [ ! -f "${OPENWRT_WORK_DISK}" ]; then
-	tests/integration/openwrt_vm/scripts/reset-disk
+	"$SCRIPT_DIR/reset-disk"
 fi
 
-mkdir -p "${OPENWRT_DIR}/work"
+mkdir -p "${OPENWRT_WORK_DIR}"
 rm -f "${OPENWRT_LOG}" "${OPENWRT_PID}"
 
-NETDEV="user,id=net0,net=192.168.1.0/24,hostfwd=tcp::${OPENWRT_SSH_PORT}-192.168.1.1:22"
+NETDEV="user,id=mgmt0,net=192.168.1.0/24,hostfwd=tcp::${OPENWRT_SSH_PORT}-192.168.1.1:22"
 
-if [ "${OPENWRT_ARCH}" = "x86_64" ]; then
-	exec "${OPENWRT_QEMU}" \
+add_common_args() {
+	set -- \
 		-m "${OPENWRT_VM_MEM}" \
 		-smp "${OPENWRT_VM_CPUS}" \
 		-drive "file=${OPENWRT_WORK_DISK},format=qcow2,if=virtio" \
 		-netdev "${NETDEV}" \
-		-device virtio-net-pci,netdev=net0 \
+		-device virtio-net-pci,netdev=mgmt0 \
 		-display none \
 		-monitor none \
 		-daemonize \
 		-pidfile "${OPENWRT_PID}" \
 		-serial "file:${OPENWRT_LOG}"
+
+	idx=0
+	for tap in ${OPENWRT_TAP_IFACES:-}; do
+		idx=$((idx + 1))
+		mac="$(printf '02:dc:bb:00:00:%02x' "$idx")"
+		set -- "$@" \
+			-netdev "tap,id=data${idx},ifname=${tap},script=no,downscript=no" \
+			-device "virtio-net-pci,netdev=data${idx},mac=${mac}"
+	done
+
+	if [ "$OPENWRT_ARCH" = "x86_64" ]; then
+		case "$OPENWRT_KVM" in
+			1)
+				set -- -enable-kvm "$@"
+				;;
+			auto)
+				if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+					set -- -enable-kvm "$@"
+				fi
+				;;
+		esac
+	fi
+
+	exec "$OPENWRT_QEMU" "$@"
+}
+
+if [ "${OPENWRT_ARCH}" = "x86_64" ]; then
+	add_common_args
 fi
 
-# aarch64 / arm64
 AAVMF_CODE=""
 for p in \
 	/usr/share/AAVMF/AAVMF_CODE.fd \
@@ -53,17 +80,31 @@ if [ -z "${AAVMF_CODE}" ]; then
 	exit 1
 fi
 
-exec "${OPENWRT_QEMU}" \
+set -- \
 	-machine virt \
 	-cpu cortex-a72 \
+	-bios "${AAVMF_CODE}"
+
+# Rebuild the common tail after the AArch64 machine-specific prefix.
+set -- "$@" \
 	-m "${OPENWRT_VM_MEM}" \
 	-smp "${OPENWRT_VM_CPUS}" \
-	-bios "${AAVMF_CODE}" \
 	-drive "file=${OPENWRT_WORK_DISK},format=qcow2,if=virtio" \
 	-netdev "${NETDEV}" \
-	-device virtio-net-pci,netdev=net0 \
+	-device virtio-net-pci,netdev=mgmt0 \
 	-display none \
 	-monitor none \
 	-daemonize \
 	-pidfile "${OPENWRT_PID}" \
 	-serial "file:${OPENWRT_LOG}"
+
+idx=0
+for tap in ${OPENWRT_TAP_IFACES:-}; do
+	idx=$((idx + 1))
+	mac="$(printf '02:dc:bb:00:00:%02x' "$idx")"
+	set -- "$@" \
+		-netdev "tap,id=data${idx},ifname=${tap},script=no,downscript=no" \
+		-device "virtio-net-pci,netdev=data${idx},mac=${mac}"
+done
+
+exec "${OPENWRT_QEMU}" "$@"

@@ -1,0 +1,49 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+mkdir -p "${OPENWRT_IMAGE_DIR}"
+
+if [ ! -f "${OPENWRT_SHA256SUMS}" ]; then
+	echo "[openwrt-vm] fetching ${OPENWRT_SHA256SUMS_NAME}"
+	curl -fL "${OPENWRT_BASE_URL}/${OPENWRT_SHA256SUMS_NAME}" -o "${OPENWRT_SHA256SUMS}"
+fi
+
+if [ ! -f "${OPENWRT_IMAGE_GZ}" ]; then
+	echo "[openwrt-vm] image is missing: ${OPENWRT_IMAGE_GZ}" >&2
+	exit 1
+fi
+
+expected="$(awk -v name="${OPENWRT_IMAGE_NAME}" '
+	{
+		file=$2
+		sub(/^\*/, "", file)
+		if (file == name) { print $1; found=1; exit }
+	}
+	END { if (!found) exit 1 }
+' "${OPENWRT_SHA256SUMS}" 2>/dev/null || true)"
+
+if [ -z "$expected" ]; then
+	echo "[openwrt-vm] ${OPENWRT_IMAGE_NAME} not found in ${OPENWRT_SHA256SUMS}" >&2
+	exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+	actual="$(sha256sum "${OPENWRT_IMAGE_GZ}" | awk '{ print $1 }')"
+else
+	actual="$(shasum -a 256 "${OPENWRT_IMAGE_GZ}" | awk '{ print $1 }')"
+fi
+
+if [ "$actual" != "$expected" ]; then
+	echo "[openwrt-vm] checksum mismatch for ${OPENWRT_IMAGE_NAME}" >&2
+	echo "[openwrt-vm] expected: $expected" >&2
+	echo "[openwrt-vm] actual:   $actual" >&2
+	exit 1
+fi
+
+echo "[openwrt-vm] checksum ok: ${OPENWRT_IMAGE_NAME}"

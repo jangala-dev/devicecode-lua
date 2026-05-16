@@ -1,0 +1,78 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+missing=0
+
+need_cmd() {
+	if ! command -v "$1" >/dev/null 2>&1; then
+		echo "[openwrt-vm] missing required command: $1" >&2
+		missing=1
+	fi
+}
+
+need_cmd "$OPENWRT_QEMU"
+need_cmd qemu-img
+need_cmd curl
+need_cmd gzip
+need_cmd ssh
+need_cmd scp
+
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+	echo "[openwrt-vm] missing required checksum tool: sha256sum or shasum" >&2
+	missing=1
+fi
+
+if [ "$OPENWRT_ARCH" = "aarch64" ]; then
+	found=""
+	for p in \
+		/usr/share/AAVMF/AAVMF_CODE.fd \
+		/usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+		/usr/share/edk2/aarch64/QEMU_EFI.fd
+	do
+		if [ -f "$p" ]; then
+			found="$p"
+			break
+		fi
+	done
+	if [ -z "$found" ]; then
+		echo "[openwrt-vm] missing AArch64 EFI firmware" >&2
+		missing=1
+	else
+		echo "[openwrt-vm] AArch64 EFI firmware: $found"
+	fi
+fi
+
+if [ "$OPENWRT_KVM" = "auto" ] || [ "$OPENWRT_KVM" = "1" ]; then
+	if [ -e /dev/kvm ]; then
+		if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+			echo "[openwrt-vm] KVM available"
+		else
+			echo "[openwrt-vm] /dev/kvm exists but is not accessible to this user" >&2
+			if [ "$OPENWRT_KVM" = "1" ]; then missing=1; fi
+		fi
+	else
+		echo "[openwrt-vm] KVM not available; QEMU will use emulation"
+		if [ "$OPENWRT_KVM" = "1" ]; then missing=1; fi
+	fi
+fi
+
+if [ -n "${OPENWRT_TAP_IFACES:-}" ]; then
+	for tap in $OPENWRT_TAP_IFACES; do
+		if ! ip link show "$tap" >/dev/null 2>&1; then
+			echo "[openwrt-vm] configured tap device not present: $tap" >&2
+			missing=1
+		fi
+	done
+fi
+
+if [ "$missing" -ne 0 ]; then
+	exit 1
+fi
+
+echo "[openwrt-vm] preflight ok"

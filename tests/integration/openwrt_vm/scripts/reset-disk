@@ -9,7 +9,7 @@ VM_DIR="$(dirname "$SCRIPT_DIR")"
 
 "$SCRIPT_DIR/fetch-image"
 
-mkdir -p "${OPENWRT_DIR}/work"
+mkdir -p "${OPENWRT_WORK_DIR}"
 rm -f "${OPENWRT_WORK_DISK}"
 
 qemu-img create \

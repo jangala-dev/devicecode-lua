@@ -7,7 +7,7 @@ VM_DIR="$(dirname "$SCRIPT_DIR")"
 # shellcheck disable=SC1091
 . "$VM_DIR/env.sh"
 
-deadline="${OPENWRT_SSH_WAIT_S:-90}"
+deadline="${OPENWRT_SSH_WAIT_S}"
 start="$(date +%s)"
 
 echo "[openwrt-vm] waiting for SSH on 127.0.0.1:${OPENWRT_SSH_PORT}"

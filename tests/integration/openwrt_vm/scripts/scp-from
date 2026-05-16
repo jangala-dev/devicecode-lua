@@ -1,0 +1,22 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+if [ "$#" -ne 2 ]; then
+	echo "usage: $0 REMOTE_PATH LOCAL_PATH" >&2
+	exit 2
+fi
+
+exec scp \
+	-O \
+	-o StrictHostKeyChecking=no \
+	-o UserKnownHostsFile=/dev/null \
+	-o LogLevel=ERROR \
+	-P "${OPENWRT_SSH_PORT}" \
+	-r \
+	"root@127.0.0.1:$1" "$2"

@@ -9,22 +9,28 @@ VM_DIR="$(dirname "$SCRIPT_DIR")"
 
 "$SCRIPT_DIR/wait-ssh"
 
+if [ "${OPENWRT_PROVISION_FORCE}" != "1" ]; then
+	if "$SCRIPT_DIR/ssh" "test -f '${OPENWRT_PROVISION_MARKER}'" >/dev/null 2>&1; then
+		echo "[openwrt-vm] provision already complete; set OPENWRT_PROVISION_FORCE=1 to run again"
+		exit 0
+	fi
+fi
+
 echo "[openwrt-vm] provisioning base packages"
 
-"$SCRIPT_DIR/ssh" '
+"$SCRIPT_DIR/ssh" "
 	set -eu
 
-	echo "[openwrt-vm] configuring temporary outbound route"
-
+	echo '[openwrt-vm] configuring temporary outbound route'
 	ip route replace default via 192.168.1.2 dev br-lan || true
 
 	mkdir -p /tmp/resolv.conf.d
-	printf "nameserver 192.168.1.3\nnameserver 1.1.1.1\n" > /tmp/resolv.conf.d/resolv.conf.auto
-	printf "nameserver 192.168.1.3\nnameserver 1.1.1.1\n" > /tmp/resolv.conf
+	printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf.d/resolv.conf.auto
+	printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf
 
-	echo "[openwrt-vm] checking connectivity"
+	echo '[openwrt-vm] checking connectivity'
 	ping -c 1 -W 3 192.168.1.2 >/dev/null || {
-		echo "cannot reach QEMU user-network gateway 192.168.1.2" >&2
+		echo 'cannot reach QEMU user-network gateway 192.168.1.2' >&2
 		ip addr >&2
 		ip route >&2
 		exit 1
@@ -32,6 +38,12 @@ echo "[openwrt-vm] provisioning base packages"
 
 	opkg update
 	opkg install tc-full kmod-sched kmod-sched-core kmod-ifb kmod-veth ip-full
-'
+
+	# Optional but useful for performance tests. Do not fail provisioning if unavailable
+	# on a given target/release.
+	opkg install iperf3 || true
+
+	touch '${OPENWRT_PROVISION_MARKER}'
+"
 
 echo "[openwrt-vm] provision complete"

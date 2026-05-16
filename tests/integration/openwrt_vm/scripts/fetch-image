@@ -7,12 +7,14 @@ VM_DIR="$(dirname "$SCRIPT_DIR")"
 # shellcheck disable=SC1091
 . "$VM_DIR/env.sh"
 
-mkdir -p "${OPENWRT_DIR}/images"
+mkdir -p "${OPENWRT_IMAGE_DIR}"
 
 if [ ! -f "${OPENWRT_IMAGE_GZ}" ]; then
 	echo "[openwrt-vm] fetching ${OPENWRT_IMAGE_NAME}"
 	curl -fL "${OPENWRT_BASE_URL}/${OPENWRT_IMAGE_NAME}" -o "${OPENWRT_IMAGE_GZ}"
 fi
+
+"$SCRIPT_DIR/verify-image"
 
 if [ ! -f "${OPENWRT_IMAGE_RAW}" ]; then
 	echo "[openwrt-vm] decompressing ${OPENWRT_IMAGE_NAME}"
