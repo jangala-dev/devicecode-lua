@@ -464,6 +464,7 @@ function M.new(config, opts)
 		apply_mwan_live_weights = config.apply_mwan_live_weights,
 		mwan_run_cmd = config.mwan_run_cmd,
 		mwan_run_cmd_capture = config.mwan_run_cmd_capture,
+		mwan_run_restore = config.mwan_run_restore,
 		shaper_run_cmd = config.shaper_run_cmd or config.run_cmd,
 		speedtest_run_cmd = config.speedtest_run_cmd,
 	}, Provider)
@@ -1120,6 +1121,7 @@ function Provider:apply_live_weights_op(req)
 			apply_mwan_live_weights = self.apply_mwan_live_weights,
 			run_cmd = self.mwan_run_cmd,
 			run_cmd_capture = self.mwan_run_cmd_capture,
+			run_restore = self.mwan_run_restore,
 		})
 		local persist = req and req.persist ~= false
 		if persist then

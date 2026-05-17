@@ -18,8 +18,8 @@ local MWAN_RULESET = [[
 :mwan3_iface_in_wanc - [0:0]
 :mwan3_policy_balanced - [0:0]
 -A mwan3_iface_in_wan -i eth1 -m mark --mark 0x0/0x3f00 -m comment --comment wan -j MARK --set-xmark 0x100/0x3f00
--A mwan3_iface_in_wanb -i eth3 -m mark --mark 0x0/0x3f00 -m comment --comment wanb -j MARK --set-xmark 0x300/0x3f00
--A mwan3_iface_in_wanc -i eth4 -m mark --mark 0x0/0x3f00 -m comment --comment wanc -j MARK --set-xmark 0x500/0x3f00
+-A mwan3_iface_in_wanb -i eth2 -m mark --mark 0x0/0x3f00 -m comment --comment wanb -j MARK --set-xmark 0x300/0x3f00
+-A mwan3_iface_in_wanc -i eth3 -m mark --mark 0x0/0x3f00 -m comment --comment wanc -j MARK --set-xmark 0x500/0x3f00
 -A mwan3_policy_balanced -m mark --mark 0x0/0x3f00 -m statistic --mode random --probability 0.50000000000 -m comment --comment "wanb 3 6" -j MARK --set-xmark 0x300/0x3f00
 -A mwan3_policy_balanced -m mark --mark 0x0/0x3f00 -m comment --comment "wan 3 3" -j MARK --set-xmark 0x100/0x3f00
 COMMIT
@@ -100,9 +100,9 @@ function tests.test_apply_uses_shaper_and_writes_mwan3_without_restart()
 	end)
 end
 
-function tests.test_live_weight_update_rewrites_mwan_policy_chain_and_persists_without_restart()
+function tests.test_live_weight_update_uses_iptables_restore_and_persists_without_restart()
 	fibers.run(function()
-		local commands, restart_cmds = {}, {}
+		local restores, restart_cmds = {}, {}
 		local provider = ok(provider_loader.new({
 			provider = 'openwrt',
 			allow_fake_uci = true,
@@ -112,7 +112,8 @@ function tests.test_live_weight_update_rewrites_mwan_policy_chain_and_persists_w
 				eq(argv_s(argv), 'iptables-save -t mangle')
 				return true, MWAN_RULESET, nil
 			end,
-			mwan_run_cmd = function(argv) commands[#commands + 1] = argv; return true, nil end,
+			mwan_run_restore = function(content) restores[#restores + 1] = content; return true, nil end,
+			mwan_run_cmd = function(_argv) fail('live weights must not use sequential iptables commands') end,
 		}, {}))
 		local result = fibers.perform(provider:apply_live_weights_op({
 			policy = 'balanced',
@@ -124,12 +125,14 @@ function tests.test_live_weight_update_rewrites_mwan_policy_chain_and_persists_w
 		}))
 		eq(result.ok, true)
 		eq(result.persisted, true)
-		eq(#commands, 3, 'flush plus two append commands expected')
-		eq(argv_s(commands[1]), 'iptables -t mangle -F mwan3_policy_balanced')
-		contains(argv_s(commands[2]), '--probability 0.70000000000')
-		contains(argv_s(commands[2]), '--set-xmark 0x100/0x3f00')
-		contains(argv_s(commands[3]), '--comment wanb 30 30')
-		contains(argv_s(commands[3]), '--set-xmark 0x300/0x3f00')
+		eq(#restores, 1, 'one iptables-restore payload expected')
+		contains(restores[1], '*mangle')
+		contains(restores[1], '-F mwan3_policy_balanced')
+		contains(restores[1], '--probability 0.70000000000')
+		contains(restores[1], '--set-xmark 0x100/0x3f00')
+		contains(restores[1], '--comment "wanb 30 30"')
+		contains(restores[1], '--set-xmark 0x300/0x3f00')
+		contains(restores[1], 'COMMIT')
 		if table.concat(restart_cmds, '\n'):find('mwan3', 1, true) then fail('live weights must not restart mwan3') end
 		provider:terminate('test complete')
 	end)
@@ -137,7 +140,7 @@ end
 
 function tests.test_live_weight_three_member_conditional_probabilities()
 	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
-	local commands, err = mwan3.build_live_weight_commands({
+	local restore, err = mwan3.build_live_weight_restore({
 		policy = 'balanced',
 		members = {
 			{ interface = 'wan', weight = 50 },
@@ -145,14 +148,33 @@ function tests.test_live_weight_three_member_conditional_probabilities()
 			{ interface = 'wanc', weight = 20 },
 		},
 	}, MWAN_RULESET)
-	ok(commands, err)
-	eq(#commands, 4, 'flush plus three append commands expected')
-	contains(argv_s(commands[2]), '--probability 0.50000000000') -- 50 / 100
-	contains(argv_s(commands[2]), '--set-xmark 0x100/0x3f00')
-	contains(argv_s(commands[3]), '--probability 0.60000000000') -- 30 / remaining 50
-	contains(argv_s(commands[3]), '--set-xmark 0x300/0x3f00')
-	if argv_s(commands[4]):find('--probability', 1, true) then fail('last member should be fall-through') end
-	contains(argv_s(commands[4]), '--set-xmark 0x500/0x3f00')
+	ok(restore, err)
+	contains(restore, '--probability 0.50000000000') -- 50 / 100
+	contains(restore, '--set-xmark 0x100/0x3f00')
+	contains(restore, '--probability 0.60000000000') -- 30 / remaining 50
+	contains(restore, '--set-xmark 0x300/0x3f00')
+	contains(restore, '--comment "wanc 20 20"')
+	contains(restore, '--set-xmark 0x500/0x3f00')
+end
+
+function tests.test_live_weight_negative_cases()
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local restore, err = mwan3.build_live_weight_restore({ policy = 'balanced', members = { { interface = 'missing', weight = 1 } } }, MWAN_RULESET)
+	eq(restore, nil)
+	contains(err, 'no MWAN3 firewall mark found')
+
+	restore, err = mwan3.build_live_weight_restore({ policy = 'absent', members = { { interface = 'wan', weight = 1 } } }, MWAN_RULESET)
+	eq(restore, nil)
+	contains(err, 'MWAN3 policy chain not found')
+
+	restore, err = mwan3.build_live_weight_restore({ policy = 'balanced', members = { { interface = 'wan', weight = 1, enabled = false } } }, MWAN_RULESET)
+	eq(restore, nil)
+	contains(err, 'no enabled positive-weight')
+
+	restore, err = mwan3.build_live_weight_restore({ policy = 'balanced', members = { { interface = 'wan', weight = 1 } } }, MWAN_RULESET)
+	ok(restore, err)
+	if restore:find('%-%-probability', 1, true) then fail('single-member policy must not include random probability') end
+	contains(restore, '--comment "wan 1 1"')
 end
 
 function tests.test_speedtest_uses_mwan3_use_boundary()

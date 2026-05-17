@@ -34,7 +34,7 @@ local conf, save = tmp..'/conf', tmp..'/save'
 mkdir_p(conf); mkdir_p(save)
 for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do local f=assert(io.open(conf..'/'..pkg,'w')); f:write('# test\n'); f:close() end
 
-local shaper_cmds, restarts, live_cmds = {}, {}, {}
+local shaper_cmds, restarts, live_restores = {}, {}, {}
 local provider = assert(provider_loader.new({
   provider = 'openwrt', confdir = conf, savedir = save, debounce_s = 0.01,
   run_cmd = function(argv) restarts[#restarts+1] = table.concat(argv, ' '); return true, nil end,
@@ -54,7 +54,7 @@ local provider = assert(provider_loader.new({
 COMMIT
 ]], nil
   end,
-  mwan_run_cmd = function(argv) live_cmds[#live_cmds+1] = table.concat(argv, ' '); return true, nil end,
+  mwan_run_restore = function(content) live_restores[#live_restores+1] = content; return true, nil end,
 }, {}))
 
 local intent = {
@@ -89,8 +89,9 @@ fibers.run(function()
 end)
 
 if #shaper_cmds == 0 then fail('shaper commands expected') end
-if #live_cmds ~= 3 then fail('live weight commands expected') end
-if not live_cmds[2]:find('%-%-probability 0.80000000000') then fail('live first-member probability expected') end
+if #live_restores ~= 1 then fail('one live weight restore expected') end
+if not live_restores[1]:find('%-%-probability 0.80000000000') then fail('live first-member probability expected') end
+if not live_restores[1]:find('%*mangle', 1, false) then fail('iptables-restore mangle payload expected') end
 local joined = table.concat(restarts, '\n')
 if joined:find('mwan3', 1, true) then fail('mwan3 restart must not be used') end
 

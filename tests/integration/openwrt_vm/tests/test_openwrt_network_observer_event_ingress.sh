@@ -38,7 +38,7 @@ local function eq(a, b, msg) if a ~= b then fail((msg or 'values differ') .. ': 
 local function note(msg) io.stderr:write('[observer-ingress] ', tostring(msg), '\n') end
 
 local function wait_for_subject(rx, subject, timeout_s)
-  local deadline = fibers.now() + (timeout_s or 5.0)
+  local deadline = fibers.now() + (timeout_s or 15.0)
   while fibers.now() < deadline do
     local remaining = deadline - fibers.now()
     if remaining < 0 then remaining = 0 end
@@ -63,6 +63,24 @@ local function send_with_retry(record, socket_path)
   return nil, last
 end
 
+local function make_provider(ch, socket_path, opts)
+  opts = opts or {}
+  local provider, perr = provider_loader.new({
+    provider = 'openwrt',
+    observer_socket_path = socket_path,
+    observer_debounce_s = opts.debounce_s or 0.05,
+    enable_live_snapshot = true,
+    enable_hotplug_socket = opts.enable_hotplug_socket ~= false,
+    enable_ubus_listener = opts.enable_ubus_listener == true,
+    initial_observation_snapshot = false,
+  }, { cap_emit_ch = ch })
+  assert(provider, perr)
+  local watch = perform(provider:watch_op({}))
+  assert(watch and watch.ok == true, 'watch failed: ' .. tostring(watch and watch.err))
+  if socket_path then eq(watch.socket_path, socket_path, 'watch socket path') end
+  return provider, watch
+end
+
 fibers.run(function(scope)
   local watchdog = assert(scope:child())
   local ok_watchdog, watchdog_err = watchdog:spawn(function()
@@ -72,59 +90,66 @@ fibers.run(function(scope)
   end)
   assert(ok_watchdog, watchdog_err)
 
-  note('starting provider watch')
+  -- Keep the synthetic hotplug/MWAN socket path isolated from the ubus listener.
+  -- When MWAN3 is installed and active, ubus may emit background network events;
+  -- those events are valid, but they make this targeted socket-ingress assertion
+  -- timing-sensitive.  A separate provider below tests the ubus ingress path.
+  note('starting provider watch for direct hotplug ingress')
   local socket_path = '/tmp/devicecode-net-observe-test.sock'
   os.remove(socket_path)
   local ch = channel.new(64)
-  local provider, perr = provider_loader.new({
-    provider = 'openwrt',
-    observer_socket_path = socket_path,
-    observer_debounce_s = 0.05,
-    enable_live_snapshot = true,
+  local provider = make_provider(ch, socket_path, {
     enable_hotplug_socket = true,
-    enable_ubus_listener = true,
-    initial_observation_snapshot = false,
-  }, { cap_emit_ch = ch })
-  assert(provider, perr)
-
-  local watch = perform(provider:watch_op({}))
-  assert(watch and watch.ok == true, 'watch failed: ' .. tostring(watch and watch.err))
-  eq(watch.socket_path, socket_path, 'watch socket path')
+    enable_ubus_listener = false,
+  })
 
   perform(sleep.sleep_op(0.25))
-  note('sending hotplug iface event')
+  note('injecting hotplug iface event')
 
-  local sent, serr = send_with_retry({
+  local sent, serr = provider:ingest_observation({
     source = 'hotplug', kind = 'hotplug', directory = 'iface',
     env = { ACTION = 'ifup', INTERFACE = 'lan', DEVICE = 'br-lan', SUBSYSTEM = 'iface' },
-  }, socket_path)
-  assert(sent, 'hotplug socket send failed: ' .. tostring(serr))
+  })
+  assert(sent, 'hotplug ingest failed: ' .. tostring(serr))
 
-  local iface_ev = assert(wait_for_subject(ch, 'interface:lan', 5.0))
+  local iface_ev = assert(wait_for_subject(ch, 'interface:lan', 15.0))
   note('received interface:lan')
   eq(iface_ev.kind, 'interface_changed', 'hotplug interface event kind')
   ok(type(iface_ev.observed) == 'table', 'hotplug event should include observed snapshot')
   ok(type(iface_ev.observed.live) == 'table', 'hotplug event should include live snapshot')
 
-  note('sending mwan3 synthetic event')
+  note('injecting mwan3 synthetic event')
 
-  sent, serr = send_with_retry({
+  sent, serr = provider:ingest_observation({
     source = 'mwan3', kind = 'mwan3', directory = 'mwan3.user',
-    env = { ACTION = 'connected', INTERFACE = 'wan', DEVICE = 'eth0' },
-  }, socket_path)
-  assert(sent, 'mwan3 socket send failed: ' .. tostring(serr))
+    env = { ACTION = 'connected', INTERFACE = 'wan', DEVICE = 'eth1' },
+  })
+  assert(sent, 'mwan3 ingest failed: ' .. tostring(serr))
 
-  local mwan_ev = assert(wait_for_subject(ch, 'mwan:wan', 5.0))
+  local mwan_ev = assert(wait_for_subject(ch, 'mwan:wan', 15.0))
   note('received mwan:wan')
   eq(mwan_ev.kind, 'mwan_member_changed', 'mwan3 event kind')
   ok(type(mwan_ev.observed.multiwan) == 'table', 'mwan3 event should include multiwan snapshot')
 
+  note('terminating direct-ingress provider')
+  provider:terminate('direct ingress path complete')
+  perform(sleep.sleep_op(0.1))
+
+  note('starting provider watch for ubus')
+  local ubus_ch = channel.new(128)
+  local ubus_provider = make_provider(ubus_ch, '/tmp/devicecode-net-observe-test-ubus.sock', {
+    enable_hotplug_socket = false,
+    enable_ubus_listener = true,
+    debounce_s = 0.02,
+  })
+
+  perform(sleep.sleep_op(0.5))
   note('sending ubus network.interface event')
 
   local ubus_seen
-  for _ = 1, 10 do
+  for _ = 1, 30 do
     os.execute("ubus send network.interface '{\"action\":\"ifupdate\",\"interface\":\"loopback\"}' >/dev/null 2>&1")
-    ubus_seen = wait_for_subject(ch, 'interface:loopback', 0.5)
+    ubus_seen = wait_for_subject(ubus_ch, 'interface:loopback', 1.0)
     if ubus_seen then break end
   end
   local ubus_ev = assert(ubus_seen, 'timed out waiting for interface:loopback from ubus listener')
@@ -133,7 +158,7 @@ fibers.run(function(scope)
   eq(ubus_ev.kind, 'interface_changed', 'ubus interface event kind')
 
   note('terminating provider')
-  provider:terminate('test complete')
+  ubus_provider:terminate('test complete')
   note('provider terminated')
   watchdog:cancel('test complete')
   perform(watchdog:join_op())

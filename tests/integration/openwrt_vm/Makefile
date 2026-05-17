@@ -1,6 +1,6 @@
 .PHONY: \
-	preflight fetch verify reset run wait provision provision-force \
-	stop ssh smoke logs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-openwrt-network-provider-apply test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test \
+	preflight fetch verify reset run wait provision provision-force ensure-mwan3 \
+	stop ssh smoke logs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-openwrt-network-provider-apply test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test \
 	openwrt-vm-test clean
 
 preflight:
@@ -26,6 +26,9 @@ provision:
 
 provision-force:
 	OPENWRT_PROVISION_FORCE=1 ./scripts/provision
+
+ensure-mwan3:
+	./scripts/ensure-mwan3
 
 stop:
 	./scripts/stop-vm
@@ -78,6 +81,16 @@ test-openwrt-network-provider-vlan-mwan-shaping:
 	./scripts/wait-ssh
 	./tests/test_openwrt_network_provider_vlan_mwan_shaping.sh
 
+test-openwrt-network-provider-mwan-live-weights:
+	./scripts/wait-ssh
+	./scripts/ensure-mwan3
+	./tests/setup_mwan3_three_wan_fixture.sh
+	./tests/test_openwrt_network_provider_mwan_live_weights.sh
+
+test-openwrt-network-provider-mwan-live-weights-fast:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_provider_mwan_live_weights.sh
+
 test-scp:
 	./scripts/wait-ssh
 	tmp="$$(mktemp)"; \
@@ -88,7 +101,7 @@ test-scp:
 	grep -q devicecode-openwrt-vm "$$tmp.out"; \
 	rm -f "$$tmp" "$$tmp.out"
 
-test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-openwrt-network-provider-apply test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-scp
+test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-openwrt-network-provider-apply test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-scp
 
 openwrt-vm-test: preflight fetch verify reset run wait provision test
 

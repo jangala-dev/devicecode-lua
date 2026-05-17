@@ -119,6 +119,34 @@ local function default_run(argv)
 	return ok == true, err
 end
 
+local function default_restore(content)
+	local fibers = require 'fibers'
+	local exec = require 'fibers.io.exec'
+	local cmd = exec.command('iptables-restore', '--noflush')
+	cmd:set_stdin('pipe')
+	cmd:set_stdout('pipe')
+	cmd:set_stderr('stdout')
+	local stdin, serr = cmd:stdin_stream()
+	if not stdin then return nil, serr or 'failed to open iptables-restore stdin' end
+	local ok, werr = stdin:write(content or '')
+	if not ok then
+		pcall(function() stdin:close() end)
+		cmd:kill()
+		fibers.perform(cmd:run_op())
+		return nil, 'failed to write iptables-restore input: ' .. tostring(werr)
+	end
+	stdin:close()
+	local out, st, code, sig, err = fibers.perform(cmd:combined_output_op())
+	if st == 'exited' and code == 0 then return true, nil, out or '' end
+	local detail = err or out or ('status=' .. tostring(st))
+	if st == 'exited' then
+		detail = tostring(detail) .. ' (exit ' .. tostring(code) .. ')'
+	elseif st == 'signalled' then
+		detail = tostring(detail) .. ' (signal ' .. tostring(sig) .. ')'
+	end
+	return nil, detail, out or ''
+end
+
 local function line_has(line, needle)
 	return type(line) == 'string' and line:find(needle, 1, true) ~= nil
 end
@@ -160,7 +188,8 @@ function M.parse_mangle_ruleset(text)
 			local mask = rest:match('%-%-set%-xmark%s+0x%x+/(0x%x+)') or rest:match('%-%-mark%s+0x%x+/(0x%x+)')
 			if mask and not parsed.mask then parsed.mask = mask end
 			if achain:match('^mwan3_iface_in_') then
-				local iface = rest:match('%-%-comment%s+"?([^"%s]+)"?%s+%-j%s+MARK')
+				local iface = rest:match('%-%-comment%s+"([^"]+)"%s+%-j%s+MARK')
+					or rest:match('%-%-comment%s+([^%s]+)%s+%-j%s+MARK')
 				local mark = rest:match('%-%-set%-xmark%s+(0x%x+)/0x%x+')
 				if iface and mark and iface ~= 'default' then parsed.iface_marks[sid(iface)] = mark end
 			elseif achain:match('^mwan3_policy_') then
@@ -177,7 +206,7 @@ local function normalise_members(members, parsed)
 	local out, total = {}, 0
 	for i = 1, #(members or {}) do
 		local m = members[i]
-		if type(m) == 'table' then
+		if type(m) == 'table' and m.enabled ~= false and m.disabled ~= true then
 			local weight = math.floor(tonumber(m.weight or m.live_weight or 0) or 0)
 			if weight > 0 then
 				local iface, ierr = interface_from_member(m, i)
@@ -194,10 +223,39 @@ local function normalise_members(members, parsed)
 			end
 		end
 	end
-	if #out == 0 then return nil, 'no positive-weight MWAN3 members supplied' end
+	if #out == 0 then return nil, 'no enabled positive-weight MWAN3 members supplied' end
 	return out, nil, total
 end
 
+local function quote_restore_arg(s)
+	s = tostring(s or '')
+	if s:find('[\r\n]') then error('newline in iptables-restore argument') end
+	if s:find('%s') or s:find('"') then
+		return '"' .. s:gsub('(["\\])', '\\%1') .. '"'
+	end
+	return s
+end
+
+function M.build_policy_rule_restore_line(chain, mask, member, remaining_weight, include_statistic)
+	local parts = { '-A', chain, '-m', 'mark', '--mark', '0x0/' .. mask }
+	if include_statistic then
+		local probability = member.weight / remaining_weight
+		if probability < 0 then probability = 0 end
+		if probability > 1 then probability = 1 end
+		parts[#parts + 1] = '-m'; parts[#parts + 1] = 'statistic'
+		parts[#parts + 1] = '--mode'; parts[#parts + 1] = 'random'
+		parts[#parts + 1] = '--probability'; parts[#parts + 1] = string.format('%.11f', probability)
+	end
+	parts[#parts + 1] = '-m'; parts[#parts + 1] = 'comment'
+	parts[#parts + 1] = '--comment'; parts[#parts + 1] = string.format('%s %d %d', member.interface, member.weight, remaining_weight)
+	parts[#parts + 1] = '-j'; parts[#parts + 1] = 'MARK'
+	parts[#parts + 1] = '--set-xmark'; parts[#parts + 1] = member.mark .. '/' .. mask
+	for i = 1, #parts do parts[i] = quote_restore_arg(parts[i]) end
+	return table.concat(parts, ' ')
+end
+
+-- Kept for tests/diagnostics that prefer argv-like inspection.  The live path
+-- uses iptables-restore --noflush, not a sequence of iptables mutations.
 function M.build_policy_rule_argv(chain, mask, member, remaining_weight, include_statistic)
 	local argv = { 'iptables', '-t', 'mangle', '-A', chain, '-m', 'mark', '--mark', '0x0/' .. mask }
 	if include_statistic then
@@ -215,7 +273,7 @@ function M.build_policy_rule_argv(chain, mask, member, remaining_weight, include
 	return argv
 end
 
-function M.build_live_weight_commands(req, ruleset_text)
+function M.build_live_weight_restore(req, ruleset_text)
 	req = req or {}
 	local parsed = M.parse_mangle_ruleset(ruleset_text or '')
 	local policy = normalise_policy(req.policy or 'balanced')
@@ -226,20 +284,38 @@ function M.build_live_weight_commands(req, ruleset_text)
 	local members, merr, total = normalise_members(req.members, parsed)
 	if not members then return nil, merr end
 	local mask = tostring(req.mask or req.mmx_mask or parsed.mask or '0x3f00')
-	local commands = { { 'iptables', '-t', 'mangle', '-F', chain } }
+	local lines = { '*mangle', '-F ' .. chain }
 	local remaining = total
 	for i = 1, #members do
 		local member = members[i]
-		commands[#commands + 1] = M.build_policy_rule_argv(chain, mask, member, remaining, i < #members)
+		lines[#lines + 1] = M.build_policy_rule_restore_line(chain, mask, member, remaining, i < #members)
 		remaining = remaining - member.weight
 	end
-	return commands, nil, {
+	lines[#lines + 1] = 'COMMIT'
+	lines[#lines + 1] = ''
+	return table.concat(lines, '\n'), nil, {
 		policy = policy,
 		chain = chain,
 		mask = mask,
 		members = members,
 		total_weight = total,
+		single_member = (#members == 1),
 	}
+end
+
+function M.build_live_weight_commands(req, ruleset_text)
+	local restore, err, detail = M.build_live_weight_restore(req, ruleset_text)
+	if not restore then return nil, err end
+	local commands = {}
+	for line in restore:gmatch('[^\n]+') do
+		if line:sub(1, 3) == '-F ' then
+			commands[#commands + 1] = { 'iptables', '-t', 'mangle', '-F', line:sub(4) }
+		elseif line:sub(1, 3) == '-A ' then
+			-- Diagnostics only; argument splitting is intentionally conservative.
+			commands[#commands + 1] = { 'iptables-restore-line', line }
+		end
+	end
+	return commands, nil, detail
 end
 
 function M.apply_live_weights(req, opts)
@@ -250,29 +326,28 @@ function M.apply_live_weights(req, opts)
 	end
 
 	local capture = opts.run_cmd_capture or default_capture
-	local run_cmd = opts.run_cmd or default_run
+	local restore_runner = opts.run_restore or default_restore
 	local ok, ruleset, err = capture({ 'iptables-save', '-t', 'mangle' })
 	if ok ~= true then
 		return { ok = false, err = 'failed to read MWAN3 mangle rules: ' .. tostring(err), backend = 'openwrt', code = 'mwan_live_weights_read_failed' }
 	end
-	local commands, cerr, detail = M.build_live_weight_commands(req, ruleset or '')
-	if not commands then
+	local restore, cerr, detail = M.build_live_weight_restore(req, ruleset or '')
+	if not restore then
 		return { ok = false, err = cerr, backend = 'openwrt', code = 'mwan_live_weights_plan_failed' }
 	end
-	for i = 1, #commands do
-		local rok, rerr = run_cmd(commands[i])
-		if rok ~= true then
-			return {
-				ok = false,
-				err = 'MWAN3 live weight command failed: ' .. tostring(rerr),
-				backend = 'openwrt',
-				code = 'mwan_live_weights_apply_failed',
-				failed_command = commands[i],
-				detail = detail,
-			}
-		end
+	local rok, rerr, rout = restore_runner(restore)
+	if rok ~= true then
+		return {
+			ok = false,
+			err = 'MWAN3 live weight restore failed: ' .. tostring(rerr),
+			backend = 'openwrt',
+			code = 'mwan_live_weights_apply_failed',
+			restore = restore,
+			detail = detail,
+			output = rout,
+		}
 	end
-	return { ok = true, changed = true, applied = true, backend = 'openwrt', detail = detail, commands = commands }
+	return { ok = true, changed = true, applied = true, backend = 'openwrt', detail = detail, restore = restore, output = rout }
 end
 
 return M
