@@ -305,6 +305,165 @@ local function merge_observation(s, observed_event)
 	return s
 end
 
+
+local function upsert_gsm_uplink(s, modem, patch)
+	modem = tostring(modem or 'unknown')
+	s.gsm = s.gsm or { uplinks = {} }
+	s.gsm.uplinks = s.gsm.uplinks or {}
+	local rec = model_mod.deep_copy(s.gsm.uplinks[modem] or { modem = modem })
+	for k, v in pairs(patch or {}) do rec[k] = v end
+	rec.modem = rec.modem or modem
+	rec.updated_at = now()
+	s.gsm.uplinks[modem] = rec
+	s.gsm.last_event_at = rec.updated_at
+	s.stats.gsm_events = (s.stats.gsm_events or 0) + 1
+	return rec
+end
+
+local function speedtest_enabled(snapshot)
+	local wan = snapshot and snapshot.wan or {}
+	local lb = type(wan.load_balancing) == 'table' and wan.load_balancing or {}
+	local rt = type(wan.runtime) == 'table' and wan.runtime or {}
+	return lb.speedtest == true or lb.speedtests == true or rt.speedtest == true or rt.speedtests == true
+end
+
+local function build_speedtest_request(uplink)
+	uplink = uplink or {}
+	return {
+		interface = uplink.openwrt_interface or uplink.interface or uplink.iface,
+		device = uplink.device or uplink.linux_interface or uplink.ifname or uplink.interface,
+		url = uplink.speedtest_url,
+		max_duration_s = uplink.speedtest_duration_s,
+	}
+end
+
+local function start_speedtest_for_uplink(state, modem, uplink)
+	if not state.hal or type(state.hal.speedtest_op) ~= 'function' then return true, nil end
+	local snap = state.model:snapshot()
+	local prev = snap.wan_runtime and snap.wan_runtime.speedtests and snap.wan_runtime.speedtests[modem]
+	if prev and prev.state == 'running' then return true, nil end
+	local req = build_speedtest_request(uplink)
+	if type(req.interface) ~= 'string' or req.interface == '' then return true, nil end
+	local id = state.next_speedtest_id
+	state.next_speedtest_id = id + 1
+	state.model:update(function(s)
+		s.wan_runtime = s.wan_runtime or { speedtests = {}, live_weights = {} }
+		s.wan_runtime.speedtests[modem] = { state = 'running', id = id, modem = modem, interface = req.interface, started_at = now() }
+		s.stats.speedtests_started = (s.stats.speedtests_started or 0) + 1
+		return s
+	end)
+	local ok, err = state.scope:spawn(function()
+		local result = perform(state.hal:speedtest_op(req, { timeout = req.max_duration_s or 15 }))
+		state.done_tx:send({ kind = 'net_speedtest_done', speedtest_id = id, modem = modem, uplink = uplink, result = result })
+	end)
+	return ok, err
+end
+
+local function compute_weights_from_speedtests(snapshot)
+	local runtime = snapshot.wan_runtime or {}
+	local tests = runtime.speedtests or {}
+	local members, total = {}, 0
+	for modem, rec in pairs(tests) do
+		if rec.state == 'done' and rec.ok == true then
+			local mbps = tonumber(rec.peak_mbps) or 0
+			if mbps > 0 then
+				members[#members + 1] = { modem = modem, interface = rec.interface, mbps = mbps }
+				total = total + mbps
+			end
+		end
+	end
+	if total <= 0 or #members == 0 then return nil end
+	table.sort(members, function(a, b) return tostring(a.modem) < tostring(b.modem) end)
+	local out = {}
+	for i = 1, #members do
+		local m = members[i]
+		out[#out + 1] = {
+			id = m.modem,
+			link_id = m.modem,
+			interface = m.interface,
+			metric = 1,
+			weight = math.max(1, math.floor((m.mbps / total) * 100 + 0.5)),
+			measured_mbps = m.mbps,
+		}
+	end
+	return out
+end
+
+local function start_live_weight_apply(state, members)
+	if not members or #members == 0 or not state.hal or type(state.hal.apply_live_weights_op) ~= 'function' then return true, nil end
+	local id = state.next_weight_apply_id
+	state.next_weight_apply_id = id + 1
+	local ok, err = state.scope:spawn(function()
+		local result = perform(state.hal:apply_live_weights_op({ policy = 'balanced', members = members, persist = true }, { timeout = 10 }))
+		state.done_tx:send({ kind = 'net_live_weights_done', weight_apply_id = id, members = members, result = result })
+	end)
+	return ok, err
+end
+
+local function handle_gsm_event(state, ev)
+	local modem = ev.modem or 'unknown'
+	local should_speedtest = false
+	local uplink
+	state.model:update(function(s)
+		if ev.kind == 'gsm_uplink' and type(ev.uplink) == 'table' then
+			uplink = upsert_gsm_uplink(s, modem, ev.uplink)
+		elseif ev.kind == 'gsm_legacy' then
+			local patch = {}
+			if ev.field == 'connected' then patch.connected = ev.value == true end
+			if ev.field == 'wwan-iface' then patch.interface = ev.value; patch.device = ev.value end
+			uplink = upsert_gsm_uplink(s, modem, patch)
+		end
+		should_speedtest = uplink and uplink.connected == true and speedtest_enabled(s)
+		return s
+	end)
+	publish_snapshot(state)
+	if should_speedtest then
+		return start_speedtest_for_uplink(state, modem, uplink)
+	end
+	return true, nil
+end
+
+local function handle_speedtest_done(state, ev)
+	local result = ev.result or {}
+	state.model:update(function(s)
+		s.wan_runtime = s.wan_runtime or { speedtests = {}, live_weights = {} }
+		local rec = s.wan_runtime.speedtests[ev.modem] or { modem = ev.modem, id = ev.speedtest_id }
+		rec.state = 'done'
+		rec.ok = result.ok == true
+		rec.err = result.err
+		rec.interface = result.interface or (ev.uplink and (ev.uplink.openwrt_interface or ev.uplink.interface))
+		rec.device = result.device
+		rec.peak_mbps = result.peak_mbps
+		rec.data_mib = result.data_mib
+		rec.duration_s = result.duration_s
+		rec.completed_at = now()
+		s.wan_runtime.speedtests[ev.modem] = rec
+		s.stats.speedtests_completed = (s.stats.speedtests_completed or 0) + 1
+		return s
+	end)
+	local snap = state.model:snapshot()
+	local weights = compute_weights_from_speedtests(snap)
+	local ok, err = start_live_weight_apply(state, weights)
+	publish_snapshot(state)
+	return ok, err
+end
+
+local function handle_live_weights_done(state, ev)
+	local result = ev.result or {}
+	state.model:update(function(s)
+		s.wan_runtime = s.wan_runtime or { speedtests = {}, live_weights = {} }
+		s.wan_runtime.live_weights = {
+			state = result.ok == true and 'applied' or 'failed',
+			members = ev.members,
+			result = model_mod.deep_copy(result),
+			updated_at = now(),
+		}
+		s.stats.live_weight_applies = (s.stats.live_weight_applies or 0) + 1
+		return s
+	end)
+	return publish_snapshot(state)
+end
+
 local function handle_observed_state(state, ev)
 	local observed_event = ev and ev.event or nil
 	if type(observed_event) ~= 'table' then return true, nil end
@@ -326,6 +485,15 @@ local function handle_event(state, ev)
 		return handle_apply_done(state, ev)
 	elseif ev.kind == 'observed_state' then
 		return handle_observed_state(state, ev)
+	elseif ev.kind == 'gsm_uplink' or ev.kind == 'gsm_legacy' then
+		return handle_gsm_event(state, ev)
+	elseif ev.kind == 'net_speedtest_done' then
+		return handle_speedtest_done(state, ev)
+	elseif ev.kind == 'net_live_weights_done' then
+		return handle_live_weights_done(state, ev)
+	elseif ev.kind == 'gsm_subscription_closed' then
+		state.gsm_sub = nil
+		return true, nil
 	elseif ev.kind == 'observation_closed' then
 		state.observed_sub = nil
 		state.model:update(function (m) m.hal.network_state = 'closed'; return m end)
@@ -357,6 +525,7 @@ function M.run(scope, params)
 	local published = publisher.new_state()
 	local cfg_watch
 	local observed_sub
+	local gsm_sub
 
 	if conn then
 		local werr
@@ -378,12 +547,15 @@ function M.run(scope, params)
 		published = published,
 		config_watch = cfg_watch,
 		observed_sub = observed_sub,
+		gsm_sub = nil,
 		done_tx = done_tx,
 		done_rx = done_rx,
 		pending = {},
 		hal = params.hal or hal_client_mod.new(conn, params.hal_client or {}),
 		next_generation = 1,
 		next_apply_id = 1,
+		next_speedtest_id = 1,
+		next_weight_apply_id = 1,
 		current_generation = nil,
 		active_apply = nil,
 	}
@@ -412,10 +584,21 @@ function M.run(scope, params)
 		end
 	end
 
+
+
+	if conn and params.gsm ~= false then
+		gsm_sub = conn:subscribe({ 'state', 'gsm', 'modem', '+', '+' }, {
+			queue_len = params.gsm_queue_len or 32,
+			full = params.gsm_full or 'drop_oldest',
+		})
+		state.gsm_sub = gsm_sub
+	end
+
 	scope:finally(function (_, status, primary)
 		cancel_active_generation(state, primary or status or 'net service closed')
 		if cfg_watch then cfg_watch:close(); cfg_watch = nil end
 		if observed_sub and observed_sub.close then observed_sub:close(); observed_sub = nil end
+		if gsm_sub and gsm_sub.close then gsm_sub:close(); gsm_sub = nil end
 		done_tx:close(primary or status or 'net service closed')
 		publisher.cleanup_now(conn, published)
 		model:terminate(primary or status or 'net service closed')

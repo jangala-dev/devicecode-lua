@@ -33,6 +33,9 @@ function tests.test_network_backend_contract_requires_op_methods()
 		watch_op = function () return op.always({ ok = true }) end,
 		probe_link_op = function () return op.always({ ok = true }) end,
 		read_counters_op = function () return op.always({ ok = true }) end,
+		apply_live_weights_op = function () return op.always({ ok = true }) end,
+		apply_shaping_op = function () return op.always({ ok = true }) end,
+		speedtest_op = function () return op.always({ ok = true }) end,
 		terminate = function () return true end,
 	}
 	local valid, err = contract.validate_provider(provider)

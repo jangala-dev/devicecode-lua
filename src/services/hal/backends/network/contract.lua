@@ -14,6 +14,9 @@ local REQUIRED_OPS = {
 	'watch_op',
 	'probe_link_op',
 	'read_counters_op',
+	'apply_live_weights_op',
+	'apply_shaping_op',
+	'speedtest_op',
 }
 
 function M.validate_provider(provider)

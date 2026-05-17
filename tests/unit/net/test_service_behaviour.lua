@@ -191,4 +191,67 @@ function tests.test_observed_state_updates_model_and_drift()
 	end)
 end
 
+
+function tests.test_gsm_uplink_triggers_speedtest_and_live_weights()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+		local speedtests = {}
+		local weights = {}
+		local hal = success_hal(calls)
+		hal.speedtest_op = function (_, req)
+			speedtests[#speedtests + 1] = req
+			local mbps = req.interface == 'wan_a' and 80 or 20
+			return op.always({ ok = true, interface = req.interface, device = req.device, peak_mbps = mbps, data_mib = 1, duration_s = 0.1 })
+		end
+		hal.apply_live_weights_op = function (_, req)
+			weights[#weights + 1] = req
+			return op.always({ ok = true, changed = true, applied = true })
+		end
+
+		local c = cfg()
+		c.wan = {
+			policy = 'weighted_failover',
+			load_balancing = { speedtests = true },
+			members = {
+				gsm_a = { interface = 'wan_a', metric = 1, weight = 1 },
+				gsm_b = { interface = 'wan_b', metric = 1, weight = 1 },
+			},
+		}
+		c.interfaces.wan_a = { kind = 'cellular', role = 'wan', segment = 'wan', endpoint = { ifname = 'wwan0' }, addressing = { ipv4 = { mode = 'dhcp' } } }
+		c.interfaces.wan_b = { kind = 'cellular', role = 'wan', segment = 'wan', endpoint = { ifname = 'wwan1' }, addressing = { ipv4 = { mode = 'dhcp' } } }
+		c.segments.wan = { kind = 'wan', firewall = { zone = 'wan' } }
+
+		local child = start_service(scope, conn, { conn = conn, config = c, rev = 20, hal = hal })
+		probe.wait_retained_payload(reader, topics.summary(), { timeout = 0.5 })
+
+		conn:retain({ 'state', 'gsm', 'modem', 'gsm_a', 'uplink' }, {
+			modem = 'gsm_a', connected = true, openwrt_interface = 'wan_a', interface = 'wan_a', device = 'wwan0',
+		})
+		conn:retain({ 'state', 'gsm', 'modem', 'gsm_b', 'uplink' }, {
+			modem = 'gsm_b', connected = true, openwrt_interface = 'wan_b', interface = 'wan_b', device = 'wwan1',
+		})
+
+		local view = reader:retained_view(topics.domain('wan_runtime'))
+		local runtime = probe.wait_versioned_until('net wan runtime weights',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.domain('wan_runtime'))
+				local payload = msg and msg.payload
+				return payload and payload.live_weights and payload.live_weights.state == 'applied' and payload or nil
+			end,
+			{ timeout = 1.0 })
+		ok(#speedtests >= 2, 'expected both GSM uplinks to be speed-tested')
+		ok(#weights >= 1, 'expected live weight apply')
+		local members = runtime.live_weights.members
+		ok(type(members) == 'table' and #members >= 2, 'members expected')
+		view:close()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
 return tests

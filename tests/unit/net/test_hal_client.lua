@@ -85,4 +85,35 @@ function tests.test_network_state_watch_and_subscription_are_exposed()
 	end)
 end
 
+
+function tests.test_live_weight_shaping_and_speedtest_capabilities_are_exposed()
+	fibers.run(function ()
+		local config_calls = {}
+		local diag_calls = {}
+		local config_cap = {
+			call_control_op = function (_, method, args, opts)
+				config_calls[#config_calls + 1] = { method = method, args = args, opts = opts }
+				return op.always({ ok = true, reason = { ok = true, method = method } })
+			end,
+		}
+		local diag_cap = {
+			call_control_op = function (_, method, args, opts)
+				diag_calls[#diag_calls + 1] = { method = method, args = args, opts = opts }
+				return op.always({ ok = true, reason = { ok = true, peak_mbps = 12.5 } })
+			end,
+		}
+		local client = hal_client.new({}, { network_config_cap = config_cap, network_diagnostics_cap = diag_cap })
+		local r1 = fibers.perform(client:apply_live_weights_op({ members = {} }, { timeout = 1 }))
+		eq(r1.ok, true)
+		eq(config_calls[1].method, 'apply_live_weights')
+		local r2 = fibers.perform(client:apply_shaping_op({ links = {} }, { timeout = 1 }))
+		eq(r2.ok, true)
+		eq(config_calls[2].method, 'apply_shaping')
+		local r3 = fibers.perform(client:speedtest_op({ interface = 'wan_a' }, { timeout = 1 }))
+		eq(r3.ok, true)
+		eq(r3.peak_mbps, 12.5)
+		eq(diag_calls[1].method, 'speedtest')
+	end)
+end
+
 return tests

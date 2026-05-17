@@ -10,6 +10,9 @@ local exec = require 'fibers.io.exec'
 local cjson = require 'cjson.safe'
 local uci_manager = require 'services.hal.backends.openwrt.uci_manager'
 local observer_mod = require 'services.hal.backends.network.providers.openwrt.observer'
+local mwan3_mod = require 'services.hal.backends.network.providers.openwrt.mwan3'
+local shaper_mod = require 'services.hal.backends.network.providers.openwrt.tc_u32_shaper'
+local speedtest_mod = require 'services.hal.backends.network.providers.openwrt.speedtest'
 local hal_types = require 'services.hal.types.core'
 
 local perform = fibers.perform
@@ -228,6 +231,45 @@ local function collect_interface_maps(intent)
 	return segment_to_ifaces, iface_to_device
 end
 
+
+local function segment_vlan_id(seg)
+	local vlan = seg and seg.vlan
+	if type(vlan) == 'number' then return vlan end
+	if is_plain_table(vlan) then return vlan.id end
+	return nil
+end
+
+local function add_bridge_vlan_devices(changes, known, intent, iface_id, bridge_name, iface)
+	local segs = {}
+	if type(iface.segment) == 'string' then segs[#segs + 1] = iface.segment end
+	if type(iface.segments) == 'table' then
+		for i = 1, #iface.segments do segs[#segs + 1] = iface.segments[i] end
+	end
+	for i = 1, #segs do
+		local seg_id = segs[i]
+		local seg = (intent.segments or {})[seg_id]
+		local vid = segment_vlan_id(seg)
+		if vid then
+			local devname = bridge_name .. '.' .. tostring(vid)
+			local devsec = section_id('device', iface_id .. '_' .. tostring(vid))
+			known[devsec] = true
+			set_section(changes, 'network', devsec, 'device')
+			set_option(changes, 'network', devsec, 'type', '8021q')
+			set_option(changes, 'network', devsec, 'ifname', bridge_name)
+			set_option(changes, 'network', devsec, 'vid', vid)
+			set_option(changes, 'network', devsec, 'name', devname)
+		end
+	end
+end
+
+local function segment_interface_device(_intent, _iface_id, _iface, base_device)
+	-- Keep the logical interface on its bridge by default for compatibility.
+	-- The provider still materialises 802.1q devices for VLAN-capable segment
+	-- realisation; a later switch/DSA-specific policy can bind interfaces
+	-- directly to those devices where appropriate.
+	return base_device
+end
+
 local function build_network_changes(intent)
 	local changes = {}
 	local known = {}
@@ -247,6 +289,7 @@ local function build_network_changes(intent)
 			set_option(changes, 'network', devsec, 'name', 'br-' .. ifid)
 			set_option(changes, 'network', devsec, 'type', 'bridge')
 			set_option(changes, 'network', devsec, 'ports', iface.members or {})
+			add_bridge_vlan_devices(changes, known, intent, ifid, 'br-' .. ifid, iface)
 		end
 
 		local seg = iface.segment and (intent.segments or {})[iface.segment] or nil
@@ -261,7 +304,7 @@ local function build_network_changes(intent)
 		set_option(changes, 'network', ifsec, 'proto', proto)
 		set_option(changes, 'network', ifsec, 'auto', iface.enabled == false and '0' or '1')
 		set_option(changes, 'network', ifsec, 'disabled', iface.enabled == false and '1' or '0')
-		set_option(changes, 'network', ifsec, 'device', iface_to_device[ifid])
+		set_option(changes, 'network', ifsec, 'device', segment_interface_device(intent, ifid, iface, iface_to_device[ifid]))
 		if iface.mtu then set_option(changes, 'network', ifsec, 'mtu', iface.mtu) end
 
 		if proto == 'static' then
@@ -375,13 +418,17 @@ local function build_firewall_changes(intent, segment_to_ifaces)
 	local n = 0
 	for _, pid in ipairs(sorted_keys(policies)) do
 		local p = policies[pid]
-		if is_plain_table(p) and type(p.src) == 'string' and type(p.dest) == 'string' then
+		if is_plain_table(p) then
+			local src = p.src or p.from
+			local dest = p.dest or p.to
+			if type(src) == 'string' and type(dest) == 'string' then
 			n = n + 1
 			local sec = section_id('fwd', pid .. '_' .. tostring(n))
 			known[sec] = true
 			set_section(changes, 'firewall', sec, 'forwarding')
-			set_option(changes, 'firewall', sec, 'src', p.src)
-			set_option(changes, 'firewall', sec, 'dest', p.dest)
+			set_option(changes, 'firewall', sec, 'src', src)
+			set_option(changes, 'firewall', sec, 'dest', dest)
+			end
 		end
 	end
 
@@ -414,6 +461,11 @@ function M.new(config, opts)
 		cap_emit_ch = opts.cap_emit_ch or config.cap_emit_ch,
 		logger = opts.logger or config.logger,
 		_runs = {},
+		apply_mwan_live_weights = config.apply_mwan_live_weights,
+		mwan_run_cmd = config.mwan_run_cmd,
+		mwan_run_cmd_capture = config.mwan_run_cmd_capture,
+		shaper_run_cmd = config.shaper_run_cmd or config.run_cmd,
+		speedtest_run_cmd = config.speedtest_run_cmd,
 	}, Provider)
 	return self, nil
 end
@@ -523,14 +575,24 @@ function Provider:plan_op(req)
 	local n_changes, n_known, segment_to_ifaces = build_network_changes(intent)
 	local d_changes, d_known = build_dhcp_changes(intent)
 	local f_changes, f_known = build_firewall_changes(intent, segment_to_ifaces)
+	local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent)
+	local shaping = is_plain_table(intent.shaping) and intent.shaping or {}
+	local domains = {
+		vlan = { status = 'implemented' },
+		shaping = { status = shaping.enabled and 'implemented' or 'not_configured' },
+		multiwan = { status = (m_plan and m_plan.enabled) and 'implemented' or 'not_configured' },
+		vpn = { status = next((intent.vpn and intent.vpn.tunnels) or {}) and 'unsupported' or 'not_configured' },
+	}
 	return op.always({
 		ok = true,
 		backend = 'openwrt',
 		plan = {
+			domains = domains,
 			packages = {
 				network = { changes = #n_changes, sections = count_keys(n_known) },
 				dhcp = { changes = #d_changes, sections = count_keys(d_known) },
 				firewall = { changes = #f_changes, sections = count_keys(f_known) },
+				mwan3 = { changes = #m_changes, sections = count_keys(m_known) },
 			},
 		},
 	})
@@ -548,6 +610,7 @@ function Provider:apply_op(req)
 		local n_changes, n_known, segment_to_ifaces = build_network_changes(intent)
 		local d_changes, d_known = build_dhcp_changes(intent)
 		local f_changes, f_known = build_firewall_changes(intent, segment_to_ifaces)
+		local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent)
 
 		local ok, err, admitted = fibers.perform(apply_package(mgr, 'network', n_changes, n_known, {
 			{ kind = 'reload', target = 'network' },
@@ -562,13 +625,29 @@ function Provider:apply_op(req)
 		}))
 		if ok ~= true then return { ok = false, err = 'firewall UCI apply failed: ' .. tostring(err), admitted = admitted, backend = 'openwrt' } end
 
+		local packages = { 'network', 'dhcp', 'firewall' }
+		if #m_changes > 0 then
+			ok, err, admitted = fibers.perform(apply_package(mgr, 'mwan3', m_changes, m_known, {}))
+			if ok ~= true then return { ok = false, err = 'mwan3 UCI apply failed: ' .. tostring(err), admitted = admitted, backend = 'openwrt', partial = true } end
+			packages[#packages + 1] = 'mwan3'
+		end
+		local shaping_result = nil
+		if intent.shaping and intent.shaping.enabled == true then
+			shaping_result = shaper_mod.apply(intent.shaping, { run_cmd = self.shaper_run_cmd })
+			if not shaping_result or shaping_result.ok ~= true then
+				return { ok = false, err = 'traffic shaping apply failed: ' .. tostring(shaping_result and shaping_result.err or 'unknown'), backend = 'openwrt', partial = true }
+			end
+		end
+
 		return {
 			ok = true,
 			applied = true,
 			changed = true,
 			backend = 'openwrt',
 			intent_rev = intent.rev,
-			packages = { 'network', 'dhcp', 'firewall' },
+			packages = packages,
+			multiwan = m_plan,
+			shaping = shaping_result,
 		}
 	end):wrap(function(status, _report, result)
 		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
@@ -803,7 +882,7 @@ function read_uci_packages(config)
 	end
 	local c = uci_or_err.cursor(config.confdir or config.uci_confdir, config.savedir or config.uci_savedir)
 	local out = {}
-	for _, pkg in ipairs({ 'network', 'dhcp', 'firewall' }) do
+	for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
 		if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end
 		out[pkg] = type(c.get_all) == 'function' and c:get_all(pkg) or {}
 	end
@@ -814,6 +893,7 @@ function snapshot_from_packages(packages)
 	local network = packages.network or {}
 	local dhcp = packages.dhcp or {}
 	local firewall = packages.firewall or {}
+	local mwan3 = packages.mwan3 or {}
 
 	local observed = {
 		schema = 'devicecode.net.observed/1',
@@ -823,6 +903,8 @@ function snapshot_from_packages(packages)
 		dhcp = { pools = {} },
 		firewall = { defaults = {}, zones = {}, policies = {} },
 		routing = { routes = {} },
+		multiwan = { config = { interfaces = {}, members = {}, policies = {}, rules = {} } },
+		shaping = { applied = nil },
 	}
 
 	local bridge_by_name = {}
@@ -936,6 +1018,34 @@ function snapshot_from_packages(packages)
 		end
 	end
 
+
+	for _, secname in ipairs(sorted_keys(mwan3)) do
+		local sec = mwan3[secname]
+		if is_plain_table(sec) and sec['.type'] == 'interface' then
+			observed.multiwan.config.interfaces[secname] = {
+				name = secname,
+				enabled = bool_from_uci(sec.enabled),
+				family = sec.family,
+				track_ip = list_from_uci(sec.track_ip),
+			}
+		elseif is_plain_table(sec) and sec['.type'] == 'member' then
+			observed.multiwan.config.members[secname] = {
+				name = secname,
+				interface = sec.interface,
+				metric = tonumber(sec.metric),
+				weight = tonumber(sec.weight),
+			}
+		elseif is_plain_table(sec) and sec['.type'] == 'policy' then
+			observed.multiwan.config.policies[secname] = {
+				name = secname,
+				use_member = list_from_uci(sec.use_member),
+				last_resort = sec.last_resort,
+			}
+		elseif is_plain_table(sec) and sec['.type'] == 'rule' then
+			observed.multiwan.config.rules[secname] = copy_plain(sec)
+		end
+	end
+
 	for _, seg in pairs(observed.segments) do
 		table.sort(seg.interfaces)
 	end
@@ -1000,6 +1110,51 @@ end
 
 function Provider:read_counters_op(_req)
 	return op.always({ ok = false, err = 'openwrt network provider read_counters not implemented', backend = 'openwrt' })
+end
+
+
+function Provider:apply_live_weights_op(req)
+	return fibers.run_scope_op(function()
+		if self.terminated then return { ok = false, err = 'provider terminated', backend = 'openwrt' } end
+		local result = mwan3_mod.apply_live_weights(req or {}, {
+			apply_mwan_live_weights = self.apply_mwan_live_weights,
+			run_cmd = self.mwan_run_cmd,
+			run_cmd_capture = self.mwan_run_cmd_capture,
+		})
+		local persist = req and req.persist ~= false
+		if persist then
+			local mgr, merr = self:_ensure_started()
+			if mgr then
+				local ok, err, admitted = fibers.perform(mwan3_mod.persist_weights_op(mgr, req or {}))
+				result.persisted = ok == true
+				result.persist_err = err
+				result.persist_admitted = admitted
+			else
+				result.persisted = false
+				result.persist_err = merr
+			end
+		end
+		return result
+	end):wrap(function(status, _report, result)
+		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
+		return result
+	end)
+end
+
+function Provider:apply_shaping_op(req)
+	return fibers.run_scope_op(function()
+		if self.terminated then return { ok = false, err = 'provider terminated', backend = 'openwrt' } end
+		local result = shaper_mod.apply(req or {}, { run_cmd = self.shaper_run_cmd })
+		if not result then return { ok = false, err = 'traffic shaping apply failed', backend = 'openwrt' } end
+		return result
+	end):wrap(function(status, _report, result)
+		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
+		return result
+	end)
+end
+
+function Provider:speedtest_op(req)
+	return speedtest_mod.run_op(req or {}, { run_cmd = self.speedtest_run_cmd })
 end
 
 function Provider:terminate(reason)

@@ -45,6 +45,7 @@ local files = {
 	"unit.hal.uart_manager_spec",
 	"unit.hal.network_manager_spec",
 	"unit.hal.openwrt_network_observer_spec",
+	"unit.hal.openwrt_network_provider_advanced_spec",
 	'unit.fabric.test_model',
 	'unit.fabric.test_config',
 	'unit.fabric.test_session',

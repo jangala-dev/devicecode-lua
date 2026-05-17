@@ -53,6 +53,29 @@ function M.map_observed_event(msg)
 	}
 end
 
+
+function M.map_gsm_event(msg)
+	if msg == nil then return { kind = 'gsm_subscription_closed' } end
+	local topic = msg.topic or {}
+	local payload = msg.payload
+	local modem = topic[4]
+	local field = topic[5]
+	if field == 'uplink' then
+		return { kind = 'gsm_uplink', modem = modem, uplink = payload, topic = topic, origin = msg.origin }
+	end
+	if field == 'connected' or field == 'wwan-iface' then
+		return { kind = 'gsm_legacy', modem = modem, field = field, value = payload, topic = topic, origin = msg.origin }
+	end
+	return { kind = 'gsm_unknown', topic = topic, payload = payload }
+end
+
+local function try_gsm_now(state)
+	if not state.gsm_sub then return nil end
+	local ev = queue.try_now(state.gsm_sub:recv_op(), NOT_READY)
+	if ev == NOT_READY or ev == nil then return nil end
+	return M.map_gsm_event(ev)
+end
+
 local function try_config_now(state)
 	if not state.config_watch then return nil end
 	local ev = state.config_watch:try_recv_now()
@@ -79,6 +102,13 @@ function M.next_service_event_op(state)
 			enabled = function () return state.config_watch ~= nil end,
 			try_now = function () return try_config_now(state) end,
 			recv_op = function () return state.config_watch:recv_op():wrap(M.map_config_event) end,
+		},
+
+		{
+			name = 'gsm',
+			enabled = function () return state.gsm_sub ~= nil end,
+			try_now = function () return try_gsm_now(state) end,
+			recv_op = function () return state.gsm_sub:recv_op():wrap(M.map_gsm_event) end,
 		},
 		{
 			name = 'observed',

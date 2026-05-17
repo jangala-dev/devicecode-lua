@@ -61,6 +61,8 @@ function M.initial(service_id)
 		firewall = {},
 		routing = {},
 		wan = {},
+		gsm = { uplinks = {}, last_event_at = nil },
+		wan_runtime = { speedtests = {}, live_weights = {}, last_weight_apply = nil },
 		shaping = {},
 		vpn = {},
 		diagnostics = {},
@@ -71,6 +73,10 @@ function M.initial(service_id)
 			apply_completed = 0,
 			stale_completions = 0,
 			observations = 0,
+			gsm_events = 0,
+			speedtests_started = 0,
+			speedtests_completed = 0,
+			live_weight_applies = 0,
 		},
 	}
 end

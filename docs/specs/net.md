@@ -1,5 +1,7 @@
 # NET service specification
 
+This document is the handover overview for the `net` service.
+
 `net` is the product-level network authority for Devicecode systems. It owns network intent, reconciliation, observation, drift assessment, state publication and network policy decisions. It must not own platform implementation details.
 
 The central rule is:

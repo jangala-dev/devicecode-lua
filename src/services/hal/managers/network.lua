@@ -69,7 +69,7 @@ local function handle_request(kind, req)
 	local result
 
 	if kind == 'config' then
-		if verb == 'validate' or verb == 'plan' or verb == 'apply' then
+		if verb == 'validate' or verb == 'plan' or verb == 'apply' or verb == 'apply_live_weights' or verb == 'apply_shaping' then
 			result = call_driver(verb, req)
 		else
 			result = { ok = false, err = 'unsupported network-config verb: ' .. tostring(verb) }
@@ -87,6 +87,8 @@ local function handle_request(kind, req)
 			result = call_driver('probe_link', req)
 		elseif verb == 'read_counters' then
 			result = call_driver('read_counters', req)
+		elseif verb == 'speedtest' then
+			result = call_driver('speedtest', req)
 		else
 			result = { ok = false, err = 'unsupported network-diagnostics verb: ' .. tostring(verb) }
 		end

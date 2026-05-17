@@ -16,6 +16,7 @@
 --   obs/v1/gsm/event/<key>                  per-modem observability events
 --   state/gsm/modem/<name>/connected        retained: true when APN connected, false otherwise
 --   state/gsm/modem/<name>/wwan-iface       retained: kernel wwan interface name, false when unknown
+--   state/gsm/modem/<name>/uplink           retained: canonical cellular uplink record for NET
 
 local fibers = require "fibers"
 local op = require "fibers.op"
@@ -70,6 +71,10 @@ end
 ---@return table
 local function t_state_gsm_modem(name, field)
 	return { 'state', 'gsm', 'modem', name, field }
+end
+
+local function t_state_gsm_uplink(name)
+	return { 'state', 'gsm', 'modem', name, 'uplink' }
 end
 
 ---@param cap CapabilityReference
@@ -405,6 +410,10 @@ function GsmModem.new(cap, svc)
 	self.name = tostring(cap.id)
 	self.cfg = {}
 	self.device = ""
+	self.connected = false
+	self.wwan_iface = nil
+	self.last_access = nil
+	self.last_signal = nil
 	self.scope = nil
 	self.config_pulse = pulse.new()
 	self.svc = svc
@@ -459,6 +468,34 @@ function GsmModem:_emit_event(key, value)
 end
 
 ---@return nil
+
+---@param connected boolean?
+---@param iface string?
+---@return nil
+function GsmModem:_publish_uplink_state(connected, iface)
+	if connected ~= nil then self.connected = connected == true end
+	if type(iface) == 'string' and iface ~= '' then self.wwan_iface = iface end
+	local access_techs = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT)
+	local access_tech = derive_access_tech(access_techs)
+	local operator = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT)
+	local signal = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT)
+	local payload = {
+		modem = self.name,
+		connected = self.connected == true,
+		interface = self.wwan_iface,
+		openwrt_interface = (self.cfg and (self.cfg.openwrt_interface or self.cfg.network_interface)) or self.name,
+		device = self.wwan_iface,
+		access = {
+			tech = access_tech ~= '' and access_tech or nil,
+			family = access_tech ~= '' and get_access_family(access_tech) or nil,
+			operator = operator,
+		},
+		signal = type(signal) == 'table' and signal or nil,
+		at = self.svc and self.svc.wall and self.svc:wall() or nil,
+	}
+	self.conn:retain(t_state_gsm_uplink(self.name), payload)
+end
+
 function GsmModem:_emit_metrics_once()
 	-- Derived metrics only; HAL remains the source of truth.
 	local access_techs, access_err = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT)
@@ -518,8 +555,10 @@ function GsmModem:_emit_metrics_once()
 	if net_ports_err == "" then
 		local interface = net_ports and net_ports[1]
 		if interface then
+			self.wwan_iface = interface
 			self:_emit_metric('wwan_type', interface)
 			self.conn:retain(t_state_gsm_modem(self.name, 'wwan-iface'), interface)
+			self:_publish_uplink_state(nil, interface)
 		else
 			self.svc:obs_log('debug', { what = 'no_net_ports', modem = self.name })
 		end
@@ -758,7 +797,9 @@ function GsmModem:_autoconnect_loop()
 
 			if connection_changed then
 				connected = current_state == STATE_CONNECTED
+				self.connected = connected
 				self.conn:retain(t_state_gsm_modem(self.name, 'connected'), connected)
+				self:_publish_uplink_state(connected, self.wwan_iface)
 				self.svc:obs_event('connection_changed', { modem = self.name, connected = connected })
 			end
 
@@ -839,7 +880,9 @@ function GsmModem:stop(reason, close_pulse)
 	self.scope = nil
 
 	if self.name and self.name ~= "" then
+		self.connected = false
 		self.conn:retain(t_state_gsm_modem(self.name, 'connected'), false)
+		self:_publish_uplink_state(false, self.wwan_iface)
 	end
 end
 

@@ -61,6 +61,7 @@ function M.new(conn, opts)
 		conn = conn,
 		network_config = opts.network_config_cap,
 		network_state = opts.network_state_cap,
+		network_diagnostics = opts.network_diagnostics_cap,
 		-- Dry-run must be explicit.  A missing network-config capability should not
 		-- look like a successful host apply on production devices.
 		dry_run = opts.dry_run == true,
@@ -103,6 +104,31 @@ function Client:apply_intent_op(intent, opts)
 			detail = 'network-config HAL capability not configured',
 		},
 	})
+end
+
+
+function Client:apply_live_weights_op(req, opts)
+	opts = opts or {}
+	if self.network_config and type(self.network_config.call_control_op) == 'function' then
+		return self.network_config:call_control_op('apply_live_weights', req or {}, opts):wrap(reply_to_result)
+	end
+	return op.always({ ok = false, err = 'network-config HAL capability not configured', reason = { code = 'missing_network_config_hal' } })
+end
+
+function Client:apply_shaping_op(req, opts)
+	opts = opts or {}
+	if self.network_config and type(self.network_config.call_control_op) == 'function' then
+		return self.network_config:call_control_op('apply_shaping', req or {}, opts):wrap(reply_to_result)
+	end
+	return op.always({ ok = false, err = 'network-config HAL capability not configured', reason = { code = 'missing_network_config_hal' } })
+end
+
+function Client:speedtest_op(req, opts)
+	opts = opts or {}
+	if self.network_diagnostics and type(self.network_diagnostics.call_control_op) == 'function' then
+		return self.network_diagnostics:call_control_op('speedtest', req or {}, opts):wrap(reply_to_result)
+	end
+	return op.always({ ok = false, err = 'network-diagnostics HAL capability not configured', reason = { code = 'missing_network_diagnostics_hal' } })
 end
 
 function Client:start_observation_op(opts)

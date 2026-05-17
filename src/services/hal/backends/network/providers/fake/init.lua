@@ -80,6 +80,29 @@ function Provider:read_counters_op(req)
 	})
 end
 
+
+function Provider:apply_live_weights_op(req)
+	self.last_live_weights = copy(req or {})
+	return op.always({ ok = true, backend = 'fake', changed = true, applied = true, request = copy(req or {}) })
+end
+
+function Provider:apply_shaping_op(req)
+	self.last_shaping = copy(req or {})
+	return op.always({ ok = true, backend = 'fake', changed = true, applied = true, request = copy(req or {}) })
+end
+
+function Provider:speedtest_op(req)
+	return op.always({
+		ok = true,
+		backend = 'fake',
+		interface = req and (req.interface or req.iface),
+		device = req and req.device,
+		peak_mbps = req and req.fake_mbps or 10,
+		data_mib = 1,
+		duration_s = 0.1,
+	})
+end
+
 function Provider:terminate(reason)
 	self.terminated = reason or true
 	return true, nil

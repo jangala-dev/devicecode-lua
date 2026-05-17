@@ -144,6 +144,8 @@ function new.NetworkConfigCapability(id, control_ch)
         'validate',
         'plan',
         'apply',
+        'apply_live_weights',
+        'apply_shaping',
     })
 end
 
@@ -166,6 +168,7 @@ function new.NetworkDiagnosticsCapability(id, control_ch)
     return new.Capability('network-diagnostics', id, control_ch, {
         'probe_link',
         'read_counters',
+        'speedtest',
     })
 end
 
