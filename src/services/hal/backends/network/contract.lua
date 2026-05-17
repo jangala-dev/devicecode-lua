@@ -11,6 +11,7 @@ local REQUIRED_OPS = {
 	'plan_op',
 	'apply_op',
 	'snapshot_op',
+	'watch_op',
 	'probe_link_op',
 	'read_counters_op',
 }

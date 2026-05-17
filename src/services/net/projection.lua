@@ -38,6 +38,11 @@ function M.summary(snapshot)
 			vpn_tunnels = count_map(snapshot.vpn and snapshot.vpn.tunnels),
 			shaping_profiles = count_map(snapshot.shaping and snapshot.shaping.profiles),
 		},
+		drift = copy(snapshot.drift),
+		observed = {
+			last_event_at = snapshot.observed and snapshot.observed.last_event_at or nil,
+			last_subject = snapshot.observed and snapshot.observed.last_subject or nil,
+		},
 		stats = copy(snapshot.stats),
 	}
 end

@@ -78,7 +78,7 @@ local function handle_request(kind, req)
 		if verb == 'snapshot' then
 			result = call_driver('snapshot', req)
 		elseif verb == 'watch' then
-			result = { ok = false, err = 'network-state watch not implemented' }
+			result = call_driver('watch', req)
 		else
 			result = { ok = false, err = 'unsupported network-state verb: ' .. tostring(verb) }
 		end
@@ -165,7 +165,10 @@ end
 function M.apply_config_op(config)
 	return op.guard(function ()
 		if not state.started then return op.always(false, 'network manager not started') end
-		local driver, err = driver_mod.new(config or {}, {})
+		local driver, err = driver_mod.new(config or {}, {
+			cap_emit_ch = state.cap_emit_ch,
+			logger = logger,
+		})
 		if not driver then return op.always(false, err or 'network driver create failed') end
 		if state.driver and type(state.driver.terminate) == 'function' then
 			state.driver:terminate('replaced')

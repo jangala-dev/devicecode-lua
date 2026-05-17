@@ -42,6 +42,17 @@ function M.map_config_event(ev)
 	return { kind = 'config_event_unknown', event = ev }
 end
 
+function M.map_observed_event(msg)
+	if msg == nil then return { kind = 'observation_closed' } end
+	local payload = msg.payload or msg
+	return {
+		kind = 'observed_state',
+		event = payload,
+		origin = msg.origin,
+		topic = msg.topic,
+	}
+end
+
 local function try_config_now(state)
 	if not state.config_watch then return nil end
 	local ev = state.config_watch:try_recv_now()
@@ -49,23 +60,38 @@ local function try_config_now(state)
 	return M.map_config_event(ev)
 end
 
+local function try_observed_now(state)
+	if not state.observed_sub then return nil end
+	local ev = queue.try_now(state.observed_sub:recv_op(), NOT_READY)
+	if ev == NOT_READY or ev == nil then return nil end
+	return M.map_observed_event(ev)
+end
+
 function M.next_service_event_op(state)
+	local sources = {
+		{
+			name = 'completion',
+			try_now = function () return recv_now(state.done_rx, M.map_completion) end,
+			recv_op = function () return recv_op(state.done_rx, M.map_completion) end,
+		},
+		{
+			name = 'config',
+			enabled = function () return state.config_watch ~= nil end,
+			try_now = function () return try_config_now(state) end,
+			recv_op = function () return state.config_watch:recv_op():wrap(M.map_config_event) end,
+		},
+		{
+			name = 'observed',
+			enabled = function () return state.observed_sub ~= nil end,
+			try_now = function () return try_observed_now(state) end,
+			recv_op = function () return state.observed_sub:recv_op():wrap(M.map_observed_event) end,
+		},
+	}
+
 	return priority_event.sources_op {
 		label = 'net.service.next_event',
 		pending = state.pending,
-		sources = {
-			{
-				name = 'completion',
-				try_now = function () return recv_now(state.done_rx, M.map_completion) end,
-				recv_op = function () return recv_op(state.done_rx, M.map_completion) end,
-			},
-			{
-				name = 'config',
-				enabled = function () return state.config_watch ~= nil end,
-				try_now = function () return try_config_now(state) end,
-				recv_op = function () return state.config_watch:recv_op():wrap(M.map_config_event) end,
-			},
-		},
+		sources = sources,
 	}
 end
 

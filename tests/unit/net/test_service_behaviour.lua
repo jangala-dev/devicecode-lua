@@ -134,4 +134,61 @@ function tests.test_missing_hal_marks_apply_failed_not_running()
 	end)
 end
 
+
+function tests.test_observed_state_updates_model_and_drift()
+	fibers.run(function (scope)
+		local mailbox = require 'fibers.mailbox'
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+		local obs_tx, obs_rx = mailbox.new(8, { full = 'drop_oldest' })
+
+		local hal = success_hal(calls)
+		hal.open_observed_subscription = function () return obs_rx end
+		hal.start_observation_op = function () return op.always({ ok = true, backend = 'test', watching = true }) end
+
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = cfg(),
+			rev = 19,
+			hal = hal,
+		})
+
+		local observed = {
+			schema = 'devicecode.net.observation/1',
+			kind = 'snapshot_done',
+			source = 'test',
+			subject = 'network',
+			observed = {
+				schema = 'devicecode.net.observed/1',
+				interfaces = {
+					lan_bridge = { id = 'lan_bridge', enabled = true },
+				},
+				segments = {
+					lan = { id = 'lan', interfaces = { 'lan_bridge' } },
+				},
+			},
+		}
+		obs_tx:send({ payload = observed })
+
+		local view = reader:retained_view(topics.summary())
+		local summary = probe.wait_versioned_until('net observed summary',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				return msg and msg.payload and msg.payload.stats and msg.payload.stats.observations == 1 and msg.payload or nil
+			end,
+			{ timeout = 0.5 })
+		eq(summary.hal.network_state, 'available')
+		eq(summary.observed.last_subject, 'network')
+		eq(summary.drift.converged, true)
+		view:close()
+
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
 return tests

@@ -43,6 +43,8 @@ local files = {
 	"unit.hal.artifact_store_manager_spec",
 	"unit.hal.uart_driver_spec",
 	"unit.hal.uart_manager_spec",
+	"unit.hal.network_manager_spec",
+	"unit.hal.openwrt_network_observer_spec",
 	'unit.fabric.test_model',
 	'unit.fabric.test_config',
 	'unit.fabric.test_session',
@@ -130,6 +132,10 @@ local files = {
 	'unit.metrics.senml_spec',
 	'unit.metrics.http_spec',
 	'integration.devhost.metrics_spec',
+	"unit.net.test_architecture",
+	"unit.net.test_config",
+	"unit.net.test_hal_client",
+	"unit.net.test_service_behaviour",
 }
 
 local function monotonic_now()

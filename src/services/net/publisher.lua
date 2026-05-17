@@ -8,7 +8,7 @@ local M = {}
 
 local DOMAIN_TOPICS = {
 	'addressing', 'dns', 'dhcp', 'firewall', 'routing',
-	'wan', 'shaping', 'vpn', 'diagnostics',
+	'wan', 'shaping', 'vpn', 'diagnostics', 'observed', 'drift',
 }
 
 local function publish_map(conn, published, next_map, topic_fn, payload_fn)

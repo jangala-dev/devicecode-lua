@@ -254,11 +254,82 @@ local function handle_apply_done(state, ev)
 	return publish_snapshot(state)
 end
 
+
+local function compute_drift(snapshot)
+	local items = {}
+	local desired_ifaces = snapshot.interfaces or {}
+	local observed = snapshot.observed or {}
+	local observed_ifaces = observed.interfaces or {}
+
+	for id, _ in pairs(desired_ifaces) do
+		if observed_ifaces[id] == nil then
+			items[#items + 1] = { kind = 'missing_interface', interface = id }
+		end
+	end
+	for id, obs in pairs(observed_ifaces) do
+		local desired = desired_ifaces[id]
+		if desired == nil then
+			items[#items + 1] = { kind = 'unexpected_interface', interface = id }
+		elseif desired.enabled ~= false and obs.enabled == false then
+			items[#items + 1] = { kind = 'interface_disabled', interface = id }
+		end
+	end
+
+	return {
+		converged = #items == 0,
+		items = items,
+		updated_at = now(),
+	}
+end
+
+local function merge_observation(s, observed_event)
+	local observed = observed_event and observed_event.observed or nil
+	s.observed = s.observed or { interfaces = {}, segments = {} }
+	s.observed.last_event = observed_event
+	s.observed.last_event_at = now()
+	s.observed.last_subject = observed_event and observed_event.subject or nil
+
+	if type(observed) == 'table' then
+		if type(observed.interfaces) == 'table' then s.observed.interfaces = model_mod.deep_copy(observed.interfaces) end
+		if type(observed.segments) == 'table' then s.observed.segments = model_mod.deep_copy(observed.segments) end
+		s.observed.snapshot = model_mod.deep_copy(observed)
+	elseif observed_event and observed_event.subject and observed_event.subject:match('^interface:') and type(observed_event.interface) == 'table' then
+		local id = observed_event.subject:match('^interface:(.+)$')
+		if id then s.observed.interfaces[id] = model_mod.deep_copy(observed_event.interface) end
+	end
+
+	s.hal = s.hal or {}
+	s.hal.network_state = 'available'
+	s.stats.observations = (s.stats.observations or 0) + 1
+	s.drift = compute_drift(s)
+	return s
+end
+
+local function handle_observed_state(state, ev)
+	local observed_event = ev and ev.event or nil
+	if type(observed_event) ~= 'table' then return true, nil end
+	state.model:update(function (s)
+		return merge_observation(s, observed_event)
+	end)
+	obs_event(state.svc, 'network_observed', {
+		subject = observed_event.subject,
+		source = observed_event.source,
+		kind = observed_event.kind,
+	})
+	return publish_snapshot(state)
+end
+
 local function handle_event(state, ev)
 	if ev.kind == 'config_changed' then
 		return handle_config_changed(state, ev)
 	elseif ev.kind == 'net_apply_done' then
 		return handle_apply_done(state, ev)
+	elseif ev.kind == 'observed_state' then
+		return handle_observed_state(state, ev)
+	elseif ev.kind == 'observation_closed' then
+		state.observed_sub = nil
+		state.model:update(function (m) m.hal.network_state = 'closed'; return m end)
+		return publish_snapshot(state)
 	elseif ev.kind == 'config_watch_closed' then
 		return nil, ev.err or 'config_watch_closed'
 	elseif ev.kind == 'completion_queue_closed' then
@@ -285,6 +356,7 @@ function M.run(scope, params)
 	})
 	local published = publisher.new_state()
 	local cfg_watch
+	local observed_sub
 
 	if conn then
 		local werr
@@ -305,6 +377,7 @@ function M.run(scope, params)
 		model = model,
 		published = published,
 		config_watch = cfg_watch,
+		observed_sub = observed_sub,
 		done_tx = done_tx,
 		done_rx = done_rx,
 		pending = {},
@@ -315,9 +388,34 @@ function M.run(scope, params)
 		active_apply = nil,
 	}
 
+
+	if params.observe ~= false and state.hal and type(state.hal.open_observed_subscription) == 'function' then
+		local sub, sub_err = state.hal:open_observed_subscription({
+			queue_len = params.observation_queue_len or ((backpressure.policy.observations and backpressure.policy.observations.queue_len) or 32),
+			full = params.observation_full or ((backpressure.policy.observations and backpressure.policy.observations.full) or 'drop_oldest'),
+		})
+		if sub then
+			observed_sub = sub
+			state.observed_sub = sub
+			if type(state.hal.start_observation_op) == 'function' then
+				local result = perform(state.hal:start_observation_op(params.observation or {}))
+				state.model:update(function (m)
+					m.hal.network_state = (result and result.ok == true) and 'available' or 'unavailable'
+					if result and result.ok ~= true then
+						m.observed.last_error = result.err
+					end
+					return m
+				end)
+			end
+		else
+			obs_log(svc, 'debug', { what = 'network_observation_not_started', err = tostring(sub_err) })
+		end
+	end
+
 	scope:finally(function (_, status, primary)
 		cancel_active_generation(state, primary or status or 'net service closed')
 		if cfg_watch then cfg_watch:close(); cfg_watch = nil end
+		if observed_sub and observed_sub.close then observed_sub:close(); observed_sub = nil end
 		done_tx:close(primary or status or 'net service closed')
 		publisher.cleanup_now(conn, published)
 		model:terminate(primary or status or 'net service closed')

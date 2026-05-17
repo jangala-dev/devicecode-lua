@@ -57,4 +57,32 @@ function tests.test_structured_failure_reason_is_preserved()
 	end)
 end
 
+
+function tests.test_network_state_watch_and_subscription_are_exposed()
+	fibers.run(function ()
+		local called = false
+		local cap = {
+			call_control_op = function (_, method, args, opts)
+				called = true
+				eq(method, 'watch')
+				ok(type(args) == 'table')
+				ok(type(opts) == 'table')
+				return op.always({ ok = true, reason = { ok = true, watching = true } })
+			end,
+			get_event_sub = function (_, name, opts)
+				eq(name, 'observed')
+				return { name = name, opts = opts }
+			end,
+		}
+		local client = hal_client.new({}, { network_state_cap = cap })
+		local sub = client:open_observed_subscription({ queue_len = 7 })
+		eq(sub.name, 'observed')
+		eq(sub.opts.queue_len, 7)
+		local result = fibers.perform(client:start_observation_op({ debounce_s = 0.01 }))
+		eq(result.ok, true)
+		eq(result.watching, true)
+		ok(called, 'watch should have been called')
+	end)
+end
+
 return tests

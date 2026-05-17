@@ -35,6 +35,22 @@ function M.initial(service_id)
 
 		hal = {
 			network_config = 'not_configured',
+			network_state = 'not_configured',
+		},
+
+		observed = {
+			last_event = nil,
+			last_event_at = nil,
+			last_subject = nil,
+			snapshot = nil,
+			interfaces = {},
+			segments = {},
+		},
+
+		drift = {
+			converged = nil,
+			items = {},
+			updated_at = nil,
 		},
 
 		segments = {},
@@ -54,6 +70,7 @@ function M.initial(service_id)
 			apply_started = 0,
 			apply_completed = 0,
 			stale_completions = 0,
+			observations = 0,
 		},
 	}
 end

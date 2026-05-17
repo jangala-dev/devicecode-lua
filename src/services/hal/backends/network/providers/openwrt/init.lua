@@ -6,11 +6,22 @@
 
 local fibers = require 'fibers'
 local op = require 'fibers.op'
+local exec = require 'fibers.io.exec'
+local cjson = require 'cjson.safe'
 local uci_manager = require 'services.hal.backends.openwrt.uci_manager'
+local observer_mod = require 'services.hal.backends.network.providers.openwrt.observer'
+local hal_types = require 'services.hal.types.core'
+
+local perform = fibers.perform
+local unpack = _G.unpack or rawget(table, 'unpack')
 
 local M = {}
 local Provider = {}
 Provider.__index = Provider
+
+local read_uci_packages
+local snapshot_from_packages
+local build_observed_snapshot
 
 local function is_plain_table(v)
 	return type(v) == 'table' and getmetatable(v) == nil
@@ -399,6 +410,9 @@ function M.new(config, opts)
 		_scope = nil,
 		_uci_manager = config.uci_manager,
 		_external_uci_manager = config.uci_manager ~= nil,
+		_observer = nil,
+		cap_emit_ch = opts.cap_emit_ch or config.cap_emit_ch,
+		logger = opts.logger or config.logger,
 		_runs = {},
 	}, Provider)
 	return self, nil
@@ -444,6 +458,57 @@ function Provider:_ensure_started()
 		end
 	end
 	return mgr, nil
+end
+
+
+function Provider:_emit_observed(ev)
+	if not self.cap_emit_ch then return true, nil end
+	local payload, err = hal_types.new.Emit('network-state', 'main', 'event', 'observed', ev)
+	if not payload then return nil, err end
+	self.cap_emit_ch:put(payload)
+	return true, nil
+end
+
+function Provider:_snapshot_for_observer(subject, trigger)
+	local observed, packages_or_err = build_observed_snapshot(self, { live = true }, subject, trigger)
+	if not observed then
+		return {
+			ok = false,
+			backend = 'openwrt',
+			err = tostring(packages_or_err),
+			subject = subject,
+			trigger = trigger,
+		}
+	end
+	return {
+		ok = true,
+		backend = 'openwrt',
+		observed = observed,
+		subject = subject,
+		trigger = trigger,
+		packages = packages_or_err,
+	}
+end
+
+function Provider:_ensure_observer()
+	if self._observer then return self._observer, nil end
+	local scope = fibers.current_scope()
+	if not scope then return nil, 'current scope required' end
+	local obs, err = observer_mod.new({
+		logger = self.logger,
+		socket_path = self.config.observer_socket_path or self.config.hotplug_socket_path or '/var/run/devicecode-net-observe.sock',
+		debounce_s = self.config.observer_debounce_s or self.config.debounce_observation_s or 0.15,
+		enable_socket = self.config.enable_hotplug_socket ~= false,
+		enable_ubus = self.config.enable_ubus_listener == true,
+		initial_snapshot = self.config.initial_observation_snapshot ~= false,
+		snapshot = function(subject, trigger) return self:_snapshot_for_observer(subject, trigger) end,
+		emit = function(ev) return self:_emit_observed(ev) end,
+	})
+	if not obs then return nil, err end
+	local ok, serr = obs:start(scope)
+	if ok ~= true then return nil, serr end
+	self._observer = obs
+	return obs, nil
 end
 
 function Provider:validate_op(req)
@@ -511,7 +576,227 @@ function Provider:apply_op(req)
 	end)
 end
 
-local function read_uci_packages(config)
+
+local function append_error(list, err)
+	if err == nil then return end
+	list[#list + 1] = tostring(err)
+end
+
+local function command_capture(argv)
+	local cmd = exec.command(unpack(argv))
+	local out, st, code, sig, err = perform(cmd:combined_output_op())
+	local ok = (st == 'exited' and code == 0)
+	if ok then return true, out or '', nil end
+	local detail = err or out or ('status=' .. tostring(st))
+	if st == 'exited' then
+		detail = tostring(detail) .. ' (exit ' .. tostring(code) .. ')'
+	elseif st == 'signalled' then
+		detail = tostring(detail) .. ' (signal ' .. tostring(sig) .. ')'
+	end
+	return nil, out or '', detail
+end
+
+local function ubus_call(object, method, payload)
+	payload = payload or {}
+	local encoded = cjson.encode(payload)
+	if type(encoded) ~= 'string' then return nil, 'ubus payload encode failed' end
+	local ok, out, err = command_capture({ 'ubus', 'call', tostring(object), tostring(method), encoded })
+	if not ok then return nil, err end
+	local decoded, derr = cjson.decode(out or '')
+	if type(decoded) ~= 'table' then return nil, derr or 'ubus JSON decode failed' end
+	return decoded, nil
+end
+
+local function add_unique(list, value, seen)
+	if type(value) ~= 'string' or value == '' then return end
+	seen = seen or {}
+	if seen[value] then return end
+	seen[value] = true
+	list[#list + 1] = value
+end
+
+local function infer_interface_ids(observed, req, subject, trigger)
+	local out, seen = {}, {}
+	if type(req) == 'table' and type(req.interfaces) == 'table' then
+		for i = 1, #req.interfaces do add_unique(out, req.interfaces[i], seen) end
+	end
+	local subj_if = type(subject) == 'string' and subject:match('^interface:(.+)$') or nil
+	add_unique(out, subj_if, seen)
+	local env = type(trigger) == 'table' and (trigger.env or trigger.payload or trigger) or nil
+	if type(env) == 'table' then add_unique(out, env.INTERFACE or env.interface, seen) end
+	for ifid in pairs((observed and observed.interfaces) or {}) do add_unique(out, ifid, seen) end
+	return out
+end
+
+local function normalise_interface_status(ifid, st)
+	st = is_plain_table(st) and st or {}
+	local out = {
+		id = ifid,
+		up = st.up,
+		pending = st.pending,
+		available = st.available,
+		autostart = st.autostart,
+		uptime = st.uptime,
+		proto = st.proto,
+		device = st.device,
+		l3_device = st.l3_device,
+		ipv4 = {},
+		ipv6 = {},
+		routes = {},
+		data = copy_plain(st.data or {}),
+		raw = copy_plain(st),
+	}
+	for i = 1, #(st.address or {}) do
+		local a = st.address[i]
+		if is_plain_table(a) then
+			out.ipv4[#out.ipv4 + 1] = { address = a.address, mask = a.mask, ptpaddress = a.ptpaddress }
+		end
+	end
+	for i = 1, #(st['ipv6-address'] or st.ipv6_address or {}) do
+		local a = (st['ipv6-address'] or st.ipv6_address)[i]
+		if is_plain_table(a) then
+			out.ipv6[#out.ipv6 + 1] = { address = a.address, mask = a.mask, preferred = a.preferred, valid = a.valid }
+		end
+	end
+	for i = 1, #(st.route or {}) do
+		local r = st.route[i]
+		if is_plain_table(r) then
+			out.routes[#out.routes + 1] = {
+				interface = ifid,
+				target = r.target,
+				mask = r.mask,
+				nexthop = r.nexthop,
+				source = r.source,
+				metric = r.metric,
+				table = r.table,
+				proto = r.proto,
+			}
+		end
+	end
+	return out
+end
+
+local function normalise_device_status(name, st)
+	st = is_plain_table(st) and st or {}
+	return {
+		name = name,
+		type = st.type,
+		up = st.up,
+		link = st.link,
+		mtu = st.mtu,
+		macaddr = st.macaddr,
+		txqueuelen = st.txqueuelen,
+		statistics = copy_plain(st.statistics or {}),
+		raw = copy_plain(st),
+	}
+end
+
+local function normalise_mwan3_status(st)
+	local out = {
+		available = type(st) == 'table',
+		interfaces = {},
+		policies = {},
+		connected = {},
+		raw = copy_plain(st or {}),
+	}
+	if not is_plain_table(st) then return out end
+	for ifid, rec in pairs(st.interfaces or {}) do
+		if is_plain_table(rec) then
+			local probes = {}
+			for i = 1, #(rec.track_ip or {}) do
+				local p = rec.track_ip[i]
+				if is_plain_table(p) then
+					probes[#probes + 1] = {
+						ip = p.ip,
+						status = p.status,
+						latency_ms = tonumber(p.latency),
+						packetloss_pct = tonumber(p.packetloss),
+					}
+				end
+			end
+			local state = rec.status
+			if rec.enabled == false then state = 'disabled' end
+			out.interfaces[ifid] = {
+				interface = ifid,
+				state = state,
+				mwan3_status = rec.status,
+				enabled = rec.enabled,
+				running = rec.running,
+				tracking = rec.tracking,
+				up = rec.up,
+				age = tonumber(rec.age),
+				uptime = tonumber(rec.uptime),
+				online = tonumber(rec.online),
+				offline = tonumber(rec.offline),
+				score = tonumber(rec.score),
+				lost = tonumber(rec.lost),
+				turn = tonumber(rec.turn),
+				probes = probes,
+				raw = copy_plain(rec),
+			}
+		end
+	end
+	out.policies = copy_plain(st.policies or {})
+	out.connected = copy_plain(st.connected or {})
+	return out
+end
+
+local function augment_with_live_snapshot(config, observed, req, subject, trigger)
+	observed.live = observed.live or { interfaces = {}, devices = {}, routes = {}, errors = {} }
+	local live = observed.live
+	local ifaces = infer_interface_ids(observed, req, subject, trigger)
+	local devices, device_seen = {}, {}
+	for i = 1, #ifaces do
+		local ifid = ifaces[i]
+		local st, err = ubus_call('network.interface.' .. tostring(ifid), 'status', {})
+		if st then
+			local norm = normalise_interface_status(ifid, st)
+			live.interfaces[ifid] = norm
+			if observed.interfaces[ifid] then observed.interfaces[ifid].live = norm end
+			add_unique(devices, norm.device, device_seen)
+			add_unique(devices, norm.l3_device, device_seen)
+			for j = 1, #norm.routes do live.routes[#live.routes + 1] = norm.routes[j] end
+		else
+			append_error(live.errors, 'network.interface.' .. tostring(ifid) .. ' status: ' .. tostring(err))
+		end
+	end
+	for _, iface in pairs(observed.interfaces or {}) do
+		if iface.endpoint then add_unique(devices, iface.endpoint.ifname or iface.endpoint.device or iface.endpoint.name, device_seen) end
+		add_unique(devices, iface.device, device_seen)
+	end
+	for i = 1, #devices do
+		local dev = devices[i]
+		local st, err = ubus_call('network.device', 'status', { name = dev })
+		if st then
+			live.devices[dev] = normalise_device_status(dev, st)
+		else
+			append_error(live.errors, 'network.device status ' .. tostring(dev) .. ': ' .. tostring(err))
+		end
+	end
+	local mwan, merr = ubus_call('mwan3', 'status', {})
+	if mwan then
+		observed.multiwan = normalise_mwan3_status(mwan)
+	else
+		observed.multiwan = observed.multiwan or { available = false, interfaces = {}, policies = {}, connected = {} }
+		observed.multiwan.available = false
+		observed.multiwan.err = tostring(merr)
+		append_error(live.errors, 'mwan3 status: ' .. tostring(merr))
+	end
+	return observed
+end
+
+function build_observed_snapshot(self, req, subject, trigger)
+	req = req or {}
+	local packages, err = read_uci_packages(self.config)
+	if not packages then return nil, err end
+	local observed = snapshot_from_packages(packages)
+	if req.live ~= false and self.config.enable_live_snapshot ~= false then
+		augment_with_live_snapshot(self.config, observed, req, subject, trigger)
+	end
+	return observed, packages
+end
+
+function read_uci_packages(config)
 	local ok, uci_or_err = pcall(require, 'uci')
 	if not ok or not uci_or_err or type(uci_or_err.cursor) ~= 'function' then
 		return nil, 'uci module unavailable'
@@ -525,7 +810,7 @@ local function read_uci_packages(config)
 	return out, nil
 end
 
-local function snapshot_from_packages(packages)
+function snapshot_from_packages(packages)
 	local network = packages.network or {}
 	local dhcp = packages.dhcp or {}
 	local firewall = packages.firewall or {}
@@ -658,18 +943,54 @@ local function snapshot_from_packages(packages)
 	return observed
 end
 
-function Provider:snapshot_op(_req)
+
+function Provider:watch_op(_req)
+	-- Starting a watch installs long-lived observer workers into the caller's
+	-- current scope.  Do not create a private operation-scope boundary
+	-- here: it would be joined as soon as watch_op returned, cancelling the
+	-- socket server and ubus listener.
 	return op.guard(function()
-		local packages, err = read_uci_packages(self.config)
-		if not packages then
-			return op.always({ ok = false, err = err, backend = 'openwrt' })
+		if self.terminated then
+			return op.always({ ok = false, err = 'provider terminated', backend = 'openwrt' })
+		end
+		local _, merr = self:_ensure_started()
+		if merr then
+			return op.always({ ok = false, err = merr, backend = 'openwrt' })
+		end
+		local obs, oerr = self:_ensure_observer()
+		if not obs then
+			return op.always({ ok = false, err = oerr or 'observer unavailable', backend = 'openwrt' })
 		end
 		return op.always({
 			ok = true,
 			backend = 'openwrt',
-			observed = snapshot_from_packages(packages),
-			packages = copy_plain(packages),
+			watching = true,
+			socket_path = obs.socket_path,
 		})
+	end)
+end
+
+function Provider:ingest_observation(trigger)
+	local obs, err = self:_ensure_observer()
+	if not obs then return nil, err end
+	return obs:ingest(trigger)
+end
+
+function Provider:snapshot_op(req)
+	return fibers.run_scope_op(function()
+		local observed, packages_or_err = build_observed_snapshot(self, req or {}, nil, { source = 'snapshot', action = 'manual' })
+		if not observed then
+			return { ok = false, err = packages_or_err, backend = 'openwrt' }
+		end
+		return {
+			ok = true,
+			backend = 'openwrt',
+			observed = observed,
+			packages = copy_plain(packages_or_err),
+		}
+	end):wrap(function(status, _report, result)
+		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
+		return result
 	end)
 end
 
@@ -682,6 +1003,10 @@ function Provider:read_counters_op(_req)
 end
 
 function Provider:terminate(reason)
+	if self._observer and type(self._observer.terminate) == 'function' then
+		self._observer:terminate(reason or 'provider terminated')
+	end
+	self._observer = nil
 	self.terminated = reason or true
 	if self._uci_manager and type(self._uci_manager.terminate) == 'function' then
 		self._uci_manager:terminate(reason or 'terminated')

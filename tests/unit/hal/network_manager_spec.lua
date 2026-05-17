@@ -30,6 +30,7 @@ function tests.test_network_backend_contract_requires_op_methods()
 		plan_op = function () return op.always({ ok = true }) end,
 		apply_op = function () return op.always({ ok = true }) end,
 		snapshot_op = function () return op.always({ ok = true }) end,
+		watch_op = function () return op.always({ ok = true }) end,
 		probe_link_op = function () return op.always({ ok = true }) end,
 		read_counters_op = function () return op.always({ ok = true }) end,
 		terminate = function () return true end,

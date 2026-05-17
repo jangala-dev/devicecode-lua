@@ -60,6 +60,7 @@ function M.new(conn, opts)
 	return setmetatable({
 		conn = conn,
 		network_config = opts.network_config_cap,
+		network_state = opts.network_state_cap,
 		-- Dry-run must be explicit.  A missing network-config capability should not
 		-- look like a successful host apply on production devices.
 		dry_run = opts.dry_run == true,
@@ -68,6 +69,10 @@ end
 
 function Client:available()
 	return self.network_config ~= nil
+end
+
+function Client:observation_available()
+	return self.conn ~= nil and self.network_state ~= nil
 end
 
 function Client:apply_intent_op(intent, opts)
@@ -97,6 +102,32 @@ function Client:apply_intent_op(intent, opts)
 			code = 'missing_network_config_hal',
 			detail = 'network-config HAL capability not configured',
 		},
+	})
+end
+
+function Client:start_observation_op(opts)
+	opts = opts or {}
+	if self.network_state and type(self.network_state.call_control_op) == 'function' then
+		return self.network_state:call_control_op('watch', opts, opts):wrap(reply_to_result)
+	end
+	return op.always({
+		ok = false,
+		err = 'network-state HAL capability not configured',
+		reason = {
+			code = 'missing_network_state_hal',
+			detail = 'network-state HAL capability not configured',
+		},
+	})
+end
+
+function Client:open_observed_subscription(opts)
+	opts = opts or {}
+	if not self.network_state or type(self.network_state.get_event_sub) ~= 'function' then
+		return nil, 'network-state HAL capability not configured'
+	end
+	return self.network_state:get_event_sub('observed', {
+		queue_len = opts.queue_len or 32,
+		full = opts.full or 'drop_oldest',
 	})
 end
 

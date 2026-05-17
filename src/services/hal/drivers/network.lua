@@ -17,6 +17,7 @@ function Driver:validate_op(req) return self.provider:validate_op(req) end
 function Driver:plan_op(req) return self.provider:plan_op(req) end
 function Driver:apply_op(req) return self.provider:apply_op(req) end
 function Driver:snapshot_op(req) return self.provider:snapshot_op(req) end
+function Driver:watch_op(req) return self.provider:watch_op(req) end
 function Driver:probe_link_op(req) return self.provider:probe_link_op(req) end
 function Driver:read_counters_op(req) return self.provider:read_counters_op(req) end
 

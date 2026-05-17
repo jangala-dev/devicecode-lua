@@ -41,8 +41,9 @@ echo "[openwrt-vm] provisioning base packages"
 
 	# Dependencies used by vendored fibers/bus/trie and future real command-backed tests.
 	# Package names vary across OpenWrt feeds/releases, so keep these best-effort.
-	(opkg install luaposix || opkg install lua-posix || true)
-	(opkg install lua-bit32 || opkg install luabitop || true)
+	(opkg install luaposix || true)
+	(opkg install lua-bit32 || true)
+	(opkg install lua-cjson || true)
 
 	# Optional but useful for performance tests. Do not fail provisioning if unavailable
 	# on a given target/release.

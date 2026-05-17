@@ -49,7 +49,16 @@ function Provider:snapshot_op(_req)
 	return op.always({
 		ok = true,
 		backend = 'fake',
+		observed = copy(self.last_intent),
 		last_intent = copy(self.last_intent),
+	})
+end
+
+function Provider:watch_op(_req)
+	return op.always({
+		ok = true,
+		backend = 'fake',
+		watching = true,
 	})
 end
 
