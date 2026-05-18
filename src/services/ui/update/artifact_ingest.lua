@@ -81,8 +81,10 @@ local function ingest_rpc(method)
 end
 
 local function request_timeout(opts)
-	opts = opts or {}
-	return { timeout = opts.timeout or 10.0 }
+	local out = {}
+	for k, v in pairs(opts or {}) do out[k] = v end
+	if out.timeout == nil and out.deadline == nil then out.timeout = false end
+	return out
 end
 
 local function ingest_id_from(reply, fallback)

@@ -117,15 +117,49 @@ function M.run_request_loop(ch, methods, logger, what)
 			return
 		end
 
-		local ok, value_or_err = perform(M.evaluate_request_op(methods, request))
+		local ok, value_or_err
+		local caller_cancelled = false
+		if request.cancel_op ~= nil then
+			local which, a, b = perform(op.named_choice({
+				work = M.evaluate_request_op(methods, request),
+				cancel = request.cancel_op,
+			}))
+			if which == 'cancel' and a ~= nil and a ~= false then
+				caller_cancelled = true
+				dlog(logger, 'debug', {
+					what = tostring(what or 'control_loop') .. '_request_cancelled',
+					verb = tostring(request.verb),
+					reason = tostring(a),
+				})
+			else
+				ok, value_or_err = a, b
+			end
+		else
+			ok, value_or_err = perform(M.evaluate_request_op(methods, request))
+		end
 
-		local replied, reply_err = perform(M.reply_op(request.reply_ch, ok, value_or_err))
-		if not replied then
-			dlog(logger, 'warn', {
-				what = tostring(what or 'control_loop') .. '_reply_failed',
-				verb = tostring(request.verb),
-				err  = tostring(reply_err),
-			})
+		if not caller_cancelled then
+			local replied, reply_err
+			if request.cancel_op ~= nil then
+				local which, a, b = perform(op.named_choice({
+					reply = M.reply_op(request.reply_ch, ok, value_or_err),
+					cancel = request.cancel_op,
+				}))
+				if which == 'cancel' and a ~= nil and a ~= false then
+					caller_cancelled = true
+				else
+					replied, reply_err = a, b
+				end
+			else
+				replied, reply_err = perform(M.reply_op(request.reply_ch, ok, value_or_err))
+			end
+			if not caller_cancelled and not replied then
+				dlog(logger, 'warn', {
+					what = tostring(what or 'control_loop') .. '_reply_failed',
+					verb = tostring(request.verb),
+					err  = tostring(reply_err),
+				})
+			end
 		end
 	end
 end

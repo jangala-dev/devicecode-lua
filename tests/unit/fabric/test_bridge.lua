@@ -296,4 +296,12 @@ function tests.test_bus_adapter_remote_commands_use_local_bus_methods()
 	end)
 end
 
+
+function tests.test_bridge_local_outbound_calls_propagate_bus_request_abandonment()
+	local f = assert(io.open('../src/services/fabric/bridge.lua', 'r'))
+	local src = f:read('*a'); f:close()
+	if not src:find('cancel_op      = cancel_op', 1, true) then fail('bridge scoped work wrapper should accept cancel_op') end
+	if not src:find('owner:caller_cancel_op()', 1, true) then fail('outbound local bus calls should pass caller_cancel_op') end
+end
+
 return tests

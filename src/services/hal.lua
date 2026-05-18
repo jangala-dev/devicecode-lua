@@ -373,7 +373,7 @@ local function remaining_sleep_op(deadline)
 	end)
 end
 
-local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s)
+local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s, bus_req)
 	timeout_s = (type(timeout_s) == 'number' and timeout_s >= 0)
 		and timeout_s
 		or DEFAULT_CONTROL_TIMEOUT_S
@@ -383,14 +383,21 @@ local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s)
 	end
 
 	local reply_ch = channel.new()
-	local control_req, ctrl_req_err = types.new.ControlRequest(verb, payload, reply_ch)
+	local caller_cancel_op = nil
+	if type(bus_req) == 'table' and type(bus_req.done_op) == 'function' then
+		caller_cancel_op = bus_req:done_op():wrap(function (status, _value, err)
+			if status == 'abandoned' then return 'caller_abandoned' end
+			return false
+		end)
+	end
+	local control_req, ctrl_req_err = types.new.ControlRequest(verb, payload, reply_ch, caller_cancel_op)
 	if not control_req then
 		return nil, tostring(ctrl_req_err or 'invalid control request')
 	end
 
 	local deadline = fibers.now() + timeout_s
 
-	local which, a, b = perform(op.named_choice({
+	local send_choices = {
 		sent = cap_entry.inst.control_ch:put_op(control_req):wrap(function()
 			return true
 		end),
@@ -398,24 +405,36 @@ local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s)
 		timeout = remaining_sleep_op(deadline):wrap(function()
 			return false, 'timeout'
 		end),
-	}))
+	}
+	if caller_cancel_op ~= nil then send_choices.cancel = caller_cancel_op end
+
+	local which, a, b = perform(op.named_choice(send_choices))
 
 	if which == 'timeout' then
 		return nil, 'timeout'
+	end
+	if which == 'cancel' and a ~= nil and a ~= false then
+		return nil, tostring(a or 'caller_abandoned')
 	end
 	if which ~= 'sent' or a ~= true then
 		return nil, tostring(b or 'control channel closed')
 	end
 
-	local which2, reply_or_status, err_or_reason = perform(op.named_choice({
+	local reply_choices = {
 		reply = reply_ch:get_op(),
 		timeout = remaining_sleep_op(deadline):wrap(function()
 			return nil, 'timeout'
 		end),
-	}))
+	}
+	if caller_cancel_op ~= nil then reply_choices.cancel = caller_cancel_op end
+
+	local which2, reply_or_status, err_or_reason = perform(op.named_choice(reply_choices))
 
 	if which2 == 'timeout' then
 		return nil, 'timeout'
+	end
+	if which2 == 'cancel' and reply_or_status ~= nil and reply_or_status ~= false then
+		return nil, tostring(reply_or_status or 'caller_abandoned')
 	end
 	if not reply_or_status then
 		return nil, tostring(err_or_reason or 'reply channel closed')
@@ -863,8 +882,9 @@ function HalService.start(conn, opts)
 			return
 		end
 
-		local reply, reply_err = dispatch_cap_ctrl(cap_entry, verb, req.payload, control_timeout_s)
+		local reply, reply_err = dispatch_cap_ctrl(cap_entry, verb, req.payload, control_timeout_s, req)
 		if not reply then
+			if tostring(reply_err) == 'caller_abandoned' then return end
 			log('warn', 'control_dispatch_failed', {
 				err   = tostring(reply_err),
 				class = class,

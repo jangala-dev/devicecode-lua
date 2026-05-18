@@ -4,9 +4,11 @@
 
 local M = {}
 
-local function call_opts(opts, default_timeout)
-	opts = opts or {}
-	return { timeout = (opts.timeout ~= nil) and opts.timeout or (default_timeout or 10.0) }
+local function call_opts(opts, _default_timeout)
+	local out = {}
+	for k, v in pairs(opts or {}) do out[k] = v end
+	if out.timeout == nil and out.deadline == nil then out.timeout = false end
+	return out
 end
 
 local function update_manager_rpc(method)

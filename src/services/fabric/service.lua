@@ -29,6 +29,7 @@ local config_mod  = require 'services.fabric.config'
 local topics      = require 'services.fabric.topics'
 local transfer_client = require 'services.fabric.transfer_client'
 local service_base = require 'devicecode.service_base'
+local request_owner = require 'devicecode.support.request_owner'
 local tablex       = require 'shared.table'
 
 local M = {}
@@ -738,12 +739,21 @@ local function transfer_request_params(state, req)
 	return p, nil
 end
 
-local function run_public_transfer_request(scope, state, req)
+local function run_public_transfer_request(scope, state, req, owner)
+	owner = owner or request_owner.new(req)
 	local params, perr = transfer_request_params(state, req)
-	if not params then return fail_request(req, perr) end
+	if not params then
+		owner:fail_once(perr)
+		return { ok = false, err = perr or 'transfer_request_invalid' }
+	end
 	local result, err = transfer_client.run(scope, params)
-	if not result then return fail_request(req, err or 'transfer_failed') end
-	return reply_request(req, { ok = true, result = result, link_id = params.link_id })
+	if not result then
+		local reason = err or 'transfer_failed'
+		owner:fail_once(reason)
+		return { ok = false, err = reason, link_id = params.link_id }
+	end
+	local ok, rerr = owner:reply_once({ ok = true, result = result, link_id = params.link_id })
+	return { ok = ok == true, err = rerr, result = result, link_id = params.link_id }
 end
 
 bind_transfer_manager = function(scope, state, opts)
@@ -760,16 +770,37 @@ bind_transfer_manager = function(scope, state, opts)
 		while true do
 			local req = fibers.perform(ep:recv_op())
 			if req == nil then return { role = 'transfer_manager_endpoint', reason = 'endpoint_closed' } end
-			local spawned, serr = worker_scope:spawn(function (request_scope)
-				local ok_req, rerr = pcall(function ()
-					return run_public_transfer_request(request_scope, state, req)
-				end)
-				if ok_req ~= true then
-					fail_request(req, tostring(rerr or 'transfer_request_failed'))
-				end
-			end)
-			if spawned ~= true then
-				fail_request(req, serr or 'transfer_request_scope_start_failed')
+			local owner = request_owner.new(req)
+			local payload = type(req.payload) == 'table' and req.payload or {}
+			local transfer_id = payload.request_id or payload.xfer_id or tostring(state.transfer_seq or 0)
+			local handle, serr = scoped_work.start {
+				lifetime_scope = worker_scope,
+				reaper_scope   = worker_scope,
+				report_scope   = worker_scope,
+				identity = {
+					kind = 'public_transfer_request_done',
+					service_id = state.service_id,
+					request_id = tostring(transfer_id),
+				},
+				setup = function (request_scope)
+					request_scope:finally(function (_, status, primary)
+						owner:finalise_unresolved(primary or status or 'transfer_request_closed')
+					end)
+					return {
+						request_owner = owner,
+						cancel_owned_now = function (reason)
+							owner:abandon_unresolved(reason or 'caller_abandoned')
+							return true
+						end,
+					}
+				end,
+				cancel_op = owner:caller_cancel_op(),
+				run = function (request_scope, setup)
+					return run_public_transfer_request(request_scope, state, req, setup.request_owner)
+				end,
+			}
+			if not handle then
+				owner:fail_once(serr or 'transfer_request_scope_start_failed')
 			end
 		end
 	end)

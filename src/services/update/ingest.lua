@@ -54,6 +54,37 @@ local function fail(req, reason)
 	if ok ~= true then error(err or tostring(reason or 'ingest_failed'), 0) end
 end
 
+local request_abandoned
+
+local function fail_owner(owner, req, reason)
+	owner = owner or owner_for(req)
+	if owner:done() or request_abandoned(req) then
+		owner:abandon_unresolved(reason or 'caller_abandoned')
+		return true
+	end
+	local ok, err = owner:fail_once(reason)
+	if ok ~= true then error(err or tostring(reason or 'ingest_failed'), 0) end
+	return true
+end
+
+request_abandoned = function(req)
+	if type(req) == 'table' and type(req.status) == 'function' then
+		local status = req:status()
+		return status == 'abandoned'
+	end
+	return false
+end
+
+local function entry_abandoned(entry)
+	if not entry then return false end
+	if entry.owner and entry.owner:done() then return true end
+	if request_abandoned(entry.req) then
+		if entry.owner then entry.owner:abandon_unresolved('caller_abandoned') end
+		return true
+	end
+	return false
+end
+
 local function category_for(method)
 	if method == 'ingest_append' then return 'append' end
 	if method == 'ingest_commit' then return 'commit' end
@@ -97,7 +128,8 @@ function M.new_instance(scope, params)
 		self.closed = true
 		while #self.pending > 0 do
 			local pending = table.remove(self.pending, 1)
-			request_owner.new(pending.req):finalise_unresolved(reason)
+			local owner = pending.owner or request_owner.new(pending.req)
+			owner:finalise_unresolved(reason)
 		end
 	end)
 
@@ -321,12 +353,22 @@ local function start_ingest_work(ctx, state, inst, entry)
 			ingest_id = inst.ingest_id,
 			category = entry.category,
 		},
-		run = function (work_scope)
-			local owner = request_owner.new(entry.req)
+		setup = function (work_scope)
+			local owner = entry.owner or request_owner.new(entry.req)
 			work_scope:finally(function (_, status, primary)
-				owner:finalise_unresolved((status == 'failed' and primary) or (entry.method .. '_cancelled') or primary or status)
+				owner:finalise_unresolved((status == 'failed' and primary) or primary or (entry.method .. '_cancelled') or status)
 			end)
-			return entry.run(work_scope, owner)
+			return {
+				request_owner = owner,
+				cancel_owned_now = function (reason)
+					owner:abandon_unresolved(reason or 'caller_abandoned')
+					return true
+				end,
+			}
+		end,
+		cancel_op = entry.owner and entry.owner:caller_cancel_op() or nil,
+		run = function (work_scope, setup)
+			return entry.run(work_scope, setup and setup.request_owner or entry.owner)
 		end,
 		report = function (ev)
 			return queue.try_admit_required(ctx.done_tx, ev, 'update_ingest_completion_report_failed')
@@ -334,7 +376,7 @@ local function start_ingest_work(ctx, state, inst, entry)
 	}
 	if not handle then
 		inst.active_request_id = nil
-		fail(entry.req, err or 'ingest_work_start_failed')
+		fail_owner(entry.owner, entry.req, err or 'ingest_work_start_failed')
 		return nil, err
 	end
 	state._work[entry.request_id] = { handle = handle, ingest_id = inst.ingest_id, category = entry.category }
@@ -343,8 +385,12 @@ end
 
 start_next_for_instance = function (ctx, state, inst)
 	if not inst or inst.active_request_id ~= nil then return true end
-	local entry = table.remove(inst.pending, 1)
-	if not entry then return true end
+	local entry
+	repeat
+		entry = table.remove(inst.pending, 1)
+		if not entry then return true end
+		if entry_abandoned(entry) then entry = nil end
+	until entry ~= nil
 	inst.active_request_id = entry.request_id
 	local handle, err = start_ingest_work(ctx, state, inst, entry)
 	if not handle then
@@ -385,7 +431,7 @@ local function enqueue_instance_work(ctx, state, inst, req, method, payload, run
 		local kept = {}
 		for _, pending in ipairs(inst.pending) do
 			if pending.category == 'append' then
-				fail(pending.req, 'ingest_closing')
+				fail_owner(pending.owner, pending.req, 'ingest_closing')
 			else
 				kept[#kept + 1] = pending
 			end
@@ -399,6 +445,7 @@ local function enqueue_instance_work(ctx, state, inst, req, method, payload, run
 	local entry = {
 		request_id = tostring(payload.request_id or new_request_id(state, method, inst.ingest_id)),
 		req = req,
+		owner = request_owner.new(req),
 		method = method,
 		payload = payload,
 		category = cat,
@@ -499,7 +546,7 @@ function State:handle_done(ctx, ev)
 		-- now. Later requests are rejected at admission by state checks.
 		while #inst.pending > 0 do
 			local pending = table.remove(inst.pending, 1)
-			fail(pending.req, 'ingest_closed')
+			fail_owner(pending.owner, pending.req, 'ingest_closed')
 		end
 		inst:_close_scope('ingest_closed')
 		return true
