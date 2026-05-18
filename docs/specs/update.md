@@ -116,6 +116,10 @@ sequenceDiagram
 
 Manager requests may wait for durable admission. They must not mutate durable state directly.
 
+Manager requests are caller-owned until admitted. The manager should create a `request_owner` at admission and pass `owner:caller_cancel_op()` to any scoped request work. If the caller abandons the bus request before durable admission completes, the request scope is cancelled and late completion is local only.
+
+Durable admission is a boundary. Once an update job transition has been durably accepted, caller abandonment stops waiting for the reply but does not imply rollback of the durable fact unless the operation explicitly promises rollback.
+
 Active workers report facts. They do not directly update durable job records.
 
 ## Artifact ownership
@@ -130,6 +134,8 @@ append operations are serialised per instance
 commit transfers sink/artifact ownership durably
 abort terminates uncommitted resources immediately
 finalisers abandon unresolved requests and terminate uncommitted resources
+queued ingest requests abandoned before active admission are skipped
+active ingest requests observe caller abandonment through owner:caller_cancel_op()
 ```
 
 ## Reviewer checklist
@@ -137,7 +143,9 @@ finalisers abandon unresolved requests and terminate uncommitted resources
 ```text
 No public cmd/update/... paths.
 Manager calls are under cap/update-manager/...
+Manager request work observes caller abandonment through owner:caller_cancel_op().
 Ingest calls are under cap/artifact-ingest/...
+Ingest append/commit/abort work observes caller abandonment through owner:caller_cancel_op().
 Jobs are retained under state/workflow/update-job/<id>.
 Ingest records are retained under state/workflow/artifact-ingest/<id>.
 Update summaries are under state/update/...

@@ -483,6 +483,30 @@ local which, value = fibers.perform(fibers.named_choice {
 
 Avoid APIs where the reusable helper accepts opaque timeout parameters and hides a race internally. Return an Op and let the caller compose it.
 
+### Caller-composed timeouts
+
+Reusable SDKs and client helpers should normally return Ops with no hidden bus timeout policy.
+
+Good:
+
+```lua
+local which, result, err = fibers.perform(fibers.named_choice {
+  reply = ref:call_op(payload),
+  timeout = sleep.sleep_op(5):wrap(function ()
+    return nil, "timeout"
+  end),
+})
+```
+
+Bad:
+
+```lua
+-- Bad: a reusable client silently installs a default 5s bus timeout.
+return conn:call_op(topic, payload, { timeout = opts.timeout or 5 })
+```
+
+A reusable client may expose an explicit timeout option for convenience, but its default should be caller-composed waiting, usually by passing `timeout = false` to bus calls. Service-protection timeouts are still valid where the service owns the policy; they should live in the admitted operation scope, not be smuggled through a general SDK helper.
+
 ## Choice is readiness, not priority
 
 `choice`, `named_choice` and `first_ready` do not express semantic priority.
@@ -505,11 +529,11 @@ The shared support modules encode service discipline. Prefer them over service-l
 
 | Module | Role |
 |---|---|
-| `devicecode.support.scoped_work` | Starts identity-bearing child work, stores completion before reporting, separates body-ended from authorised reaping. |
+| `devicecode.support.scoped_work` | Starts identity-bearing child work, stores completion before reporting, separates body-ended from authorised reaping, and accepts `cancel_op` for external cancellation sources. |
 | `devicecode.support.service_events` | Stamps events with identity and generation before sending them to coordinators. |
 | `devicecode.support.priority_event` | Implements explicit semantic priority without relying on `choice` ordering. |
 | `devicecode.support.resource` | Provides immediate ownership, handoff and termination helpers. |
-| `devicecode.support.request_owner` | Ensures at-most-once reply, fail or abandon for bus/HTTP requests. |
+| `devicecode.support.request_owner` | Ensures at-most-once reply, fail or abandon for bus/HTTP requests, and provides `caller_cancel_op()` for bus request abandonment. |
 | `devicecode.support.queue` | Provides public try-now helpers built from `or_else`. |
 | `devicecode.support.config_watch` | Standard retained `cfg/<service>` watching. |
 | `devicecode.support.bus_cleanup` | Finaliser-safe bus cleanup wrappers. |
@@ -543,6 +567,58 @@ finalise unresolved once
 ```
 
 A finaliser may abandon or fail an unresolved in-memory request owner. It must not wait for graceful completion.
+
+## Bus request cancellation
+
+A public bus request may outlive the caller's interest in the result. If the caller races a bus SDK Op against another Op and the bus Op loses, the bus `Request` is abandoned. Service code must treat that abandonment as a cancellation source for any admitted caller-owned work.
+
+The canonical admission pattern is:
+
+```lua
+local owner = request_owner.new(req)
+
+local handle, err = scoped_work.start {
+  lifetime_scope = scope,
+  reaper_scope = scope,
+  report_scope = scope,
+  identity = identity,
+
+  setup = function (work_scope)
+    work_scope:finally(function (_, status, primary)
+      owner:finalise_unresolved(primary or status or "request_closed")
+    end)
+
+    return {
+      request_owner = owner,
+      cancel_owned_now = function (reason)
+        owner:abandon_unresolved(reason or "caller_abandoned")
+        return true
+      end,
+    }
+  end,
+
+  run = run_request_work,
+  report = report_completion,
+  cancel_op = owner:caller_cancel_op(),
+}
+```
+
+Use this for bus requests that admit meaningful scoped work, including device actions, update manager requests, artifact ingest, Fabric transfer requests, Fabric local-to-remote bridge calls, HTTP operations and long HAL capability operations.
+
+Do not apply `caller_cancel_op()` to service-owned background components such as observers, publishers, generation reconcilers, retained watchers or listener runtimes unless they were directly admitted from a caller-owned bus `Request`.
+
+The intended semantics are:
+
+```text
+caller abandons or times out the SDK Op
+  -> bus Request becomes abandoned
+  -> request_owner observes caller cancellation
+  -> scoped_work cancels the admitted child scope
+  -> owned resources terminate through the scope's normal cleanup path
+  -> late completion is stale or resolves only local cleanup
+```
+
+Caller abandonment is not a service fault. Log it as cancellation or abandonment, not as a backend failure.
 
 ## Resource ownership
 
@@ -917,6 +993,8 @@ Tests should include:
 ```text
 operation loses a choice
 timeout wins
+caller abandonment crosses the bus boundary into admitted scoped work
+queued bus requests abandoned before admission are skipped or resolved locally
 scope cancellation interrupts waits
 finalisers do not wait
 try-now helpers do not suspend
@@ -971,6 +1049,8 @@ Backpressure policy is explicit.
 Topic helpers are used instead of scattered literals.
 Boundary validation is pure and non-yielding.
 Tests cover losing paths.
+Bus-admitted scoped work uses owner:caller_cancel_op().
+Reusable SDK/client helpers do not install hidden bus timeouts by default.
 ```
 
 ## Signs that code is drifting
@@ -980,6 +1060,8 @@ Look closely if a service introduces:
 ```text
 a callback that updates service state
 a helper without _op that can block
+a reusable SDK/client helper with a hidden default bus timeout
+a bus request that starts scoped_work without owner:caller_cancel_op()
 a finaliser calling close_op
 a coordinator branch calling fibers.perform
 a queue send with no overflow policy
