@@ -505,21 +505,24 @@ function GsmModem:_emit_metrics_once()
 
 	local state_sub = self.cap:get_state_sub('card')
 	local state_msg, msg_err = state_sub:recv()
+	state_sub:unsubscribe()
 	if msg_err then
 		self.svc:obs_log('debug', { what = 'state_recv_error', modem = self.name, err = tostring(msg_err) })
 	end
-	local state = state_msg.payload and state_msg.payload.to
+
+	local state = state_msg.payload and state_msg.payload
 	---@cast state ModemStateEvent
 	if state then
 		self:_emit_metric('state', state.to)
 	end
 
 	local net_ports, net_ports_err = modem_get_field(self.cap, 'net_ports', REQUEST_TIMEOUT)
+	print(net_ports, net_ports_err, net_ports and #net_ports or 0, net_ports and net_ports[1])
 	if net_ports_err == "" then
 		local interface = net_ports and net_ports[1]
 		if interface then
-			self:_emit_metric('wwan_type', interface)
-			self.conn:retain(t_state_gsm_modem(self.name, 'wwan-iface'), interface)
+			self:_emit_metric('wann_type', interface)
+			self.conn:retain(t_state_gsm_modem(self.name, 'wann_type'), interface)
 		else
 			self.svc:obs_log('debug', { what = 'no_net_ports', modem = self.name })
 		end
