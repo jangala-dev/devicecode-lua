@@ -115,6 +115,9 @@ end
 ---                         setup-owned resources such as request owners
 ---   report(ev)          : immediate reporter callback; should not yield
 ---   copy_result(result) : optional body-end snapshot hook for successful result
+---   cancel_op           : optional Op, or function(child, setup_result) -> Op;
+---                         if it wins before body-ended and returns neither nil
+---                         nor false, child scope is cancelled with that reason
 ---
 ---@param spec table
 ---@return table|nil handle
@@ -172,6 +175,10 @@ local function start_impl(spec, opts)
 		return nil, 'copy_result must be a function when provided'
 	end
 
+	if spec.cancel_op ~= nil and type(spec.cancel_op) ~= 'table' and type(spec.cancel_op) ~= 'function' then
+		return nil, 'cancel_op must be an Op or function when provided'
+	end
+
 	local identity = copy_table(spec.identity)
 	local copy_result = spec.copy_result or copy_value
 
@@ -203,6 +210,20 @@ local function start_impl(spec, opts)
 
 	local function outcome_snapshot()
 		return copy_completion(outcome)
+	end
+
+	local function cancel_child_now(reason)
+		reason = reason or 'cancelled'
+
+		if setup_result and type(setup_result.cancel_owned_now) == 'function' then
+			local ok, err = setup_result.cancel_owned_now(reason)
+			if ok == false or ok == nil then
+				return nil, err or 'scoped_work_cancel_owned_failed'
+			end
+		end
+
+		child:cancel(reason)
+		return true, nil
 	end
 
 	local function outcome_op()
@@ -283,6 +304,39 @@ local function start_impl(spec, opts)
 		return nil, reaper_spawn_err or 'reaper_spawn_failed'
 	end
 
+	if spec.cancel_op ~= nil then
+		local cancel_op = spec.cancel_op
+		if type(cancel_op) == 'function' then
+			local ok_cancel_op, cop_or_err = safe.pcall(function ()
+				return cancel_op(child, setup_result)
+			end)
+			if not ok_cancel_op then
+				cancel_start_failure(cop_or_err or 'cancel_op_setup_failed')
+				return nil, tostring(cop_or_err or 'cancel_op_setup_failed')
+			end
+			cancel_op = cop_or_err
+		end
+
+		if cancel_op ~= nil then
+			local ok_cancel, cancel_spawn_err = reaper_scope:spawn(function ()
+				local which, reason = fibers.perform(op.named_choice({
+					cancel = cancel_op,
+					body_done = body_done:wait_op(),
+				}))
+
+				if which == 'cancel' and reason ~= nil and reason ~= false then
+					local ok, cerr = cancel_child_now(reason)
+					if ok ~= true then error(cerr or 'scoped_work_cancel_failed', 0) end
+				end
+			end)
+
+			if ok_cancel ~= true then
+				cancel_start_failure(cancel_spawn_err or 'cancel_watcher_spawn_failed')
+				return nil, cancel_spawn_err or 'cancel_watcher_spawn_failed'
+			end
+		end
+	end
+
 	if spec.report then
 		local ok_reporter, reporter_spawn_err = report_scope:spawn(function ()
 			-- Reporter is ordinary observing-scope code. If its scope is
@@ -341,21 +395,7 @@ local function start_impl(spec, opts)
 	}
 
 	function handle:cancel(reason)
-		reason = reason or 'cancelled'
-
-		-- Setup may have transferred ownership of immediate, caller-visible
-		-- resources into this scoped work before the worker body has started.
-		-- Give those resources a non-yielding cancellation path now; finalisers
-		-- remain the structural fallback and must be idempotent.
-		if setup_result and type(setup_result.cancel_owned_now) == 'function' then
-			local ok, err = setup_result.cancel_owned_now(reason)
-			if ok == false or ok == nil then
-				return nil, err or 'scoped_work_cancel_owned_failed'
-			end
-		end
-
-		child:cancel(reason)
-		return true
+		return cancel_child_now(reason or 'cancelled')
 	end
 
 	function handle:outcome_op()

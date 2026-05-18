@@ -789,4 +789,97 @@ function tests.test_post_setup_start_failure_runs_cancel_owned_now()
 	end)
 end
 
+
+-------------------------------------------------------------------------------
+-- 16. cancel_op cancels admitted child work and immediate owned resources
+-------------------------------------------------------------------------------
+
+function tests.test_cancel_op_cancels_child_and_setup_owned_resources()
+	fibers.run(function (scope)
+		local cancel_tx, cancel_rx = mailbox.new(1, { full = 'reject_newest' })
+		local cancel_reason
+		local worker_started = false
+
+		local handle = start_required {
+			lifetime_scope = scope,
+
+			identity = {
+				kind = 'cancel_op_test',
+				id = 'work-16',
+			},
+
+			setup = function ()
+				return {
+					cancel_owned_now = function (reason)
+						cancel_reason = reason
+						return true
+					end,
+				}
+			end,
+
+			cancel_op = cancel_rx:recv_op(),
+
+			run = function ()
+				worker_started = true
+				fibers.perform(sleep.sleep_op(10.0))
+				return { ok = true }
+			end,
+		}
+
+		assert_true(cancel_tx:send('caller_aborted'))
+		local ev = fibers.perform(handle:outcome_op())
+
+		-- The cancellation watcher may win before the worker body first runs;
+		-- the important contract is that admitted scoped work is cancelled and
+		-- setup-owned resources receive their immediate cancellation path.
+		assert_eq(cancel_reason, 'caller_aborted')
+		assert_eq(ev.kind, 'cancel_op_test')
+		assert_eq(ev.status, 'cancelled')
+		assert_eq(ev.primary, 'caller_aborted')
+	end)
+end
+
+-------------------------------------------------------------------------------
+-- 17. cancel_op losing to body_done must not rewrite successful completion
+-------------------------------------------------------------------------------
+
+function tests.test_cancel_op_loses_to_body_done()
+	fibers.run(function (scope)
+		local cancel_tx, cancel_rx = mailbox.new(1, { full = 'reject_newest' })
+		local cancel_reason
+
+		local handle = start_required {
+			lifetime_scope = scope,
+
+			identity = {
+				kind = 'cancel_op_loses_test',
+				id = 'work-17',
+			},
+
+			setup = function ()
+				return {
+					cancel_owned_now = function (reason)
+						cancel_reason = reason
+						return true
+					end,
+				}
+			end,
+
+			cancel_op = cancel_rx:recv_op(),
+
+			run = function ()
+				return { ok = true, value = 17 }
+			end,
+		}
+
+		local ev = fibers.perform(handle:outcome_op())
+		assert_eq(ev.status, 'ok')
+		assert_eq(ev.result.value, 17)
+
+		assert_true(cancel_tx:send('late_cancel'))
+		fibers.perform(sleep.sleep_op(0.001))
+		assert_eq(cancel_reason, nil)
+	end)
+end
+
 return tests

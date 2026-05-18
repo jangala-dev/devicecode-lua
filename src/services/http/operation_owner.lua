@@ -37,7 +37,9 @@ function M.operation_setup(service, owner)
 			owner = owner,
 			reserved_handles = {},
 			cancel_owned_now = function (reason)
-				owner:finalise_unresolved(reason or 'scoped_work_start_failed')
+				if not owner:done() then
+					owner:finalise_unresolved(reason or 'scoped_work_start_failed')
+				end
 				return true
 			end,
 		}
@@ -79,6 +81,8 @@ function M.start(service, verb, req, request_id, owner, run)
 	local report_event = events_port and service_events.reporter(events_port, 'http_operation_done_report_failed')
 		or function (ev) return service:_submit_event(ev, 'http_operation_done_report_failed', { fatal = true }) end
 
+	local cancel_op = owner.caller_cancel_op and owner:caller_cancel_op() or nil
+
 	local handle, err = scoped_work.start({
 		lifetime_scope = service._scope,
 		reaper_scope = service._scope,
@@ -87,6 +91,7 @@ function M.start(service, verb, req, request_id, owner, run)
 		setup = setup_fn,
 		run = run,
 		report = report_event,
+		cancel_op = cancel_op,
 	})
 	if not handle then
 		local rec = service._state.operations[identity.operation_id]

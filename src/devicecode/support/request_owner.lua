@@ -95,6 +95,24 @@ function RequestOwner:abandon_unresolved(_reason)
 	return true, nil
 end
 
+
+function RequestOwner:caller_cancel_op()
+	local req = self._request
+	if type(req) ~= 'table' or type(req.done_op) ~= 'function' then
+		return nil, 'request has no done_op'
+	end
+
+	return req:done_op():wrap(function (status, _value, err)
+		if status == 'abandoned' and not self:done() then
+			local reason = err or 'caller_abandoned'
+			self:abandon_unresolved(reason)
+			return reason
+		end
+
+		return false
+	end)
+end
+
 M.RequestOwner = RequestOwner
 
 return M

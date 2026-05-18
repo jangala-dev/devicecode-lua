@@ -11,8 +11,17 @@ function M.new_ref(conn, id)
 	return setmetatable({ conn = conn, id = id or 'main' }, Ref)
 end
 
+local function call_opts(opts)
+	local out = {}
+	for k, v in pairs(opts or {}) do out[k] = v end
+	if out.timeout == nil and out.deadline == nil then
+		out.timeout = false
+	end
+	return out
+end
+
 function Ref:call_op(verb, args, opts)
-	return self.conn:call_op(topics.rpc(self.id, verb), args or {}, opts)
+	return self.conn:call_op(topics.rpc(self.id, verb), args or {}, call_opts(opts))
 end
 
 function Ref:status_op(opts) return self:call_op('status', {}, opts) end
