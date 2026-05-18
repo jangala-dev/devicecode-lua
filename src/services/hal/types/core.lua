@@ -17,6 +17,7 @@ local new = {}
 ---@field verb string
 ---@field opts table<string, any>
 ---@field reply_ch Channel
+---@field cancel_op Op?
 local ControlRequest = {}
 ControlRequest.__index = ControlRequest
 
@@ -24,9 +25,10 @@ ControlRequest.__index = ControlRequest
 ---@param verb string
 ---@param opts table<string, any>
 ---@param reply_ch Channel
+---@param cancel_op Op?
 ---@return ControlRequest?
 ---@return string error
-function new.ControlRequest(verb, opts, reply_ch)
+function new.ControlRequest(verb, opts, reply_ch, cancel_op)
     if type(verb) ~= 'string' or verb == '' then
         return nil, "invalid verb"
     end
@@ -43,6 +45,7 @@ function new.ControlRequest(verb, opts, reply_ch)
         verb = verb,
         opts = opts,
         reply_ch = reply_ch,
+        cancel_op = cancel_op,
     }, ControlRequest), ""
 end
 

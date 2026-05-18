@@ -547,4 +547,13 @@ function tests.test_start_shell_replaces_generation_on_config_change()
 	end)
 end
 
+
+function tests.test_public_transfer_manager_uses_scoped_request_cancellation()
+	local f = assert(io.open('../src/services/fabric/service.lua', 'r'))
+	local src = f:read('*a'); f:close()
+	if not src:find("devicecode.support.request_owner", 1, true) then fail('fabric service should use request_owner for public transfer requests') end
+	if not src:find("kind = 'public_transfer_request_done'", 1, true) then fail('public transfer requests should be admitted as scoped work') end
+	if not src:find('cancel_op = owner:caller_cancel_op()', 1, true) then fail('public transfer requests should propagate caller cancellation') end
+end
+
 return tests

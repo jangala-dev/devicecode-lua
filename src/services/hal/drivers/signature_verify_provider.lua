@@ -96,14 +96,25 @@ local function emit_op(emit_ch, class, id, mode, key, data)
 	end)
 end
 
-local function reply_now(self, reply_ch, ok, value_or_err)
-	local sent, err = fibers.perform(control_loop.reply_op(reply_ch, ok, value_or_err))
+local function reply_now(self, reply_ch, ok, value_or_err, cancel_op)
+	local sent, err
+	if cancel_op ~= nil then
+		local which, a, b = fibers.perform(fibers.named_choice({
+			reply = control_loop.reply_op(reply_ch, ok, value_or_err),
+			cancel = cancel_op,
+		}))
+		if which == 'cancel' and a ~= nil and a ~= false then return true, nil end
+		sent, err = a, b
+	else
+		sent, err = fibers.perform(control_loop.reply_op(reply_ch, ok, value_or_err))
+	end
 	if not sent then
 		dlog(self, 'warn', {
 			what = 'signature_verify_reply_failed',
 			err  = tostring(err),
 		})
 	end
+	return sent, err
 end
 
 local function try_put_now(ch, value, label)
@@ -129,12 +140,12 @@ end
 local function spawn_verify_worker(self, request)
 	local ok_opts, opts_err = validate_verify_opts(request.opts)
 	if not ok_opts then
-		reply_now(self, request.reply_ch, false, opts_err)
+		reply_now(self, request.reply_ch, false, opts_err, request.cancel_op)
 		return
 	end
 
 	if self.in_flight >= self.max_in_flight then
-		reply_now(self, request.reply_ch, false, 'busy')
+		reply_now(self, request.reply_ch, false, 'busy', request.cancel_op)
 		return
 	end
 
@@ -161,6 +172,7 @@ local function spawn_verify_worker(self, request)
 		identity = {
 			kind     = 'verify_done',
 			reply_ch = request.reply_ch,
+			cancel_op = request.cancel_op,
 		},
 
 		run = function (verify_scope)
@@ -183,11 +195,12 @@ local function spawn_verify_worker(self, request)
 		report = function (ev)
 			return try_put_now(self.done_ch, ev, 'signature_verify_completion_report_failed')
 		end,
+		cancel_op = request.cancel_op,
 	}
 
 	if not handle then
 		release_slot()
-		reply_now(self, request.reply_ch, false, tostring(err or 'verify_worker_start_failed'))
+		reply_now(self, request.reply_ch, false, tostring(err or 'verify_worker_start_failed'), request.cancel_op)
 	end
 end
 
@@ -201,7 +214,7 @@ local function handle_request(self, request)
 		return true
 	end
 
-	reply_now(self, request.reply_ch, false, 'unsupported verb: ' .. tostring(request.verb))
+	reply_now(self, request.reply_ch, false, 'unsupported verb: ' .. tostring(request.verb), request.cancel_op)
 	return true
 end
 
@@ -216,9 +229,9 @@ local function handle_done(self, done)
 
 	if done.status == 'ok' then
 		local result = done.result or {}
-		reply_now(self, done.reply_ch, result.ok == true, result.err)
+		reply_now(self, done.reply_ch, result.ok == true, result.err, done.cancel_op)
 	else
-		reply_now(self, done.reply_ch, false, tostring(done.primary or done.status or 'verify_failed'))
+		reply_now(self, done.reply_ch, false, tostring(done.primary or done.status or 'verify_failed'), done.cancel_op)
 	end
 
 	return true

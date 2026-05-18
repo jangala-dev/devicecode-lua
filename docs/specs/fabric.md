@@ -103,6 +103,10 @@ after successful receiver admission: receiver owns source cleanup
 on failed admission: caller still terminates source
 ```
 
+Public transfer-manager requests are caller-owned bus requests. They should be admitted as `scoped_work`, not raw spawned fibres, and should pass `cancel_op = owner:caller_cancel_op()`. If the caller abandons `send-blob`, the transfer request scope is cancelled, source ownership is terminated or released according to the current handoff point, and late completion must not reply to the abandoned request.
+
+Local-to-remote bridge calls follow the same rule where the local bus caller is the owner. Remote-to-local bridge work is cancelled by Fabric session/protocol state rather than by `caller_cancel_op()` unless a local bus `Request` is the admitted owner.
+
 ## Reviewer checklist
 
 ```text
@@ -111,6 +115,8 @@ Link completions carry link id and generation.
 Imported retained state is cleared on peer session drop.
 Transfer source ownership is transferred visibly.
 send-blob does not leak ownership internals in public replies.
+send-blob request work observes caller abandonment through owner:caller_cancel_op().
+Local-to-remote bridge calls propagate caller cancellation into outbound scoped work.
 Fabric state is under state/fabric/...
 Public transfer manager is under cap/transfer-manager/...
 No Fabric coordinator branch waits on transport or bus calls.

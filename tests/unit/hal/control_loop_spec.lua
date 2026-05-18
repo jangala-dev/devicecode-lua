@@ -1,4 +1,5 @@
 local fibers       = require 'fibers'
+local runtime      = require 'fibers.runtime'
 local op           = require 'fibers.op'
 local channel      = require 'fibers.channel'
 local runfibers    = require 'tests.support.run_fibers'
@@ -98,6 +99,39 @@ function T.run_request_loop_exits_when_scope_is_cancelled()
 
         local st, rep, primary = fibers.perform(loop_scope:join_op())
         assert(st == 'cancelled', tostring(primary))
+    end)
+end
+
+
+function T.run_request_loop_cancels_handler_op_when_request_cancel_op_fires()
+    runfibers.run(function(scope)
+        local ch = channel.new()
+        local reply_ch = channel.new()
+        local cancel_ch = channel.new()
+        local entered = channel.new()
+        local aborted = false
+
+        local ok_spawn, err = scope:spawn(function()
+            control_loop.run_request_loop(ch, {
+                slow = function()
+                    entered:put(true)
+                    return op.never():on_abort(function () aborted = true end)
+                end,
+            }, nil, 'test_loop')
+        end)
+        assert(ok_spawn, tostring(err))
+
+        local cancel_op = cancel_ch:get_op():wrap(function (reason) return reason or 'caller_abandoned' end)
+        local req = assert(types.new.ControlRequest('slow', {}, reply_ch, cancel_op))
+        assert(fibers.perform(ch:put_op(req)) ~= false)
+        assert(fibers.perform(entered:get_op()) == true)
+        assert(fibers.perform(cancel_ch:put_op('caller_abandoned')) ~= false)
+
+        for _ = 1, 4 do runtime.yield() end
+        assert(aborted == true)
+
+        local got = fibers.perform(reply_ch:get_op():or_else(function () return nil, 'not_ready' end))
+        assert(got == nil)
     end)
 end
 

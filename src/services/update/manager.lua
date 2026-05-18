@@ -56,6 +56,7 @@ end
 
 local function start_scoped_request(ctx, req, method, runner)
 	local request_id = new_id('req')
+	local owner = request_owner.new(req)
 	local handle, err = scoped_work.start {
 		lifetime_scope = ctx.request_root,
 		reaper_scope   = ctx.request_root,
@@ -69,7 +70,30 @@ local function start_scoped_request(ctx, req, method, runner)
 			request_id = request_id,
 		},
 
-		run = runner,
+		setup = function (scope)
+			scope:finally(function (_, status, primary)
+				if not owner:done() then
+					if status == 'ok' then
+						owner:finalise_unresolved(primary or 'request_scope_closed')
+					else
+						owner:finalise_unresolved(primary or status or 'request_cancelled')
+					end
+				end
+			end)
+			return {
+				request_owner = owner,
+				cancel_owned_now = function (reason)
+					owner:abandon_unresolved(reason or 'caller_abandoned')
+					return true
+				end,
+			}
+		end,
+
+		cancel_op = owner:caller_cancel_op(),
+
+		run = function (work_scope, setup)
+			return runner(work_scope, setup and setup.request_owner or owner)
+		end,
 
 		report = function (ev)
 			return queue.try_admit_required(
@@ -81,7 +105,7 @@ local function start_scoped_request(ctx, req, method, runner)
 	}
 
 	if not handle then
-		fail_request(req, err or 'request_start_failed')
+		owner:fail_once(err or 'request_start_failed')
 		return nil, err
 	end
 
@@ -133,8 +157,9 @@ end
 
 local function handle_create(ctx, req)
 	if reject_if_jobs_not_ready(ctx, req) then return end
-	return start_scoped_request(ctx, req, 'create_job', function (work_scope)
+	return start_scoped_request(ctx, req, 'create_job', function (work_scope, owner)
 		return manager_requests.create_job(work_scope, {
+			request_owner = owner,
 			request = req,
 			jobs = ctx.jobs,
 			config = ctx.config,
@@ -170,8 +195,9 @@ local function handle_start(ctx, req, payload)
 		end
 	end
 
-	return start_scoped_request(ctx, req, phase == 'commit' and 'commit_job' or 'start_job', function (work_scope)
+	return start_scoped_request(ctx, req, phase == 'commit' and 'commit_job' or 'start_job', function (work_scope, owner)
 		return manager_requests.start_job(work_scope, {
+			request_owner = owner,
 			request = req,
 			jobs = ctx.jobs,
 			job_id = job_id,
@@ -189,8 +215,9 @@ local function handle_patch(ctx, req, payload, method, patch)
 		fail_request(req, 'job_id_required')
 		return
 	end
-	return start_scoped_request(ctx, req, method, function (work_scope)
+	return start_scoped_request(ctx, req, method, function (work_scope, owner)
 		return manager_requests.persist_job_state(work_scope, {
+			request_owner = owner,
 			request = req,
 			jobs = ctx.jobs,
 			job_id = job_id,
@@ -232,8 +259,9 @@ local function handle_discard(ctx, req, payload)
 		fail_request(req, 'job_id_required')
 		return
 	end
-	return start_scoped_request(ctx, req, 'discard_job', function (work_scope)
+	return start_scoped_request(ctx, req, 'discard_job', function (work_scope, owner)
 		return manager_requests.discard_job(work_scope, {
+			request_owner = owner,
 			request = req,
 			jobs = ctx.jobs,
 			job_id = job_id,

@@ -147,7 +147,7 @@ local function handle_command(scope, owner, ctx, route, deps)
 		bus = deps.bus,
 		timeout = deps.command_timeout or 5.0,
 		run_op = function (_, conn)
-			return conn:call_op(route.topic, body_table(ctx), { timeout = deps.command_timeout or 5.0 })
+			return conn:call_op(route.topic, body_table(ctx), { timeout = false })
 				:wrap(function (value, call_err)
 					if value == nil then return nil, call_err or 'upstream_failed' end
 					return { value = value }, nil

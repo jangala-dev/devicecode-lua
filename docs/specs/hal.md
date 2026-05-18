@@ -329,7 +329,11 @@ Cancellation and timeout belong to the operation scope that owns the work.
 
 A coordinator may cancel an operation scope, but must not join it inline.
 
-There are two normal policies.
+HAL capability calls are bus requests. When a caller abandons a capability RPC, the HAL service should propagate that abandonment into the admitted HAL operation where the operation is caller-owned. `ControlRequest` carries an optional `cancel_op`; managers and drivers that start scoped work should pass it into `scoped_work.start`.
+
+For simple immediate handlers, caller abandonment may simply stop reply delivery. For blocking or resource-owning operations, caller abandonment must cancel or terminate the owned operation scope.
+
+There are two normal service-side cancellation policies.
 
 ```text
 reply_on_abandon
@@ -454,6 +458,7 @@ operation module
   role: scoped work unit
   may perform: backend Ops, timeout/cancellation choice, local operation policy
   owns: one HAL operation lifetime
+  accepts: request.cancel_op where admitted from caller-owned capability RPC
   cleans up: with scope:finally(...)
 
 resource helper
@@ -477,6 +482,7 @@ invalid arguments return stable negative replies
 busy is returned when max in-flight is reached
 operation completion uses the standard envelope
 operation cancellation runs finalisers
+caller-abandoned capability RPC cancels admitted owned work
 operation timeout cancels owned work
 stale completions are ignored
 provider stop cancels in-flight operation scopes
@@ -529,7 +535,7 @@ What lifetime does this operation own?
 What resources are admitted into it?
 Are resources cleaned up by scope:finally(...)?
 Is cleanup bounded and non-yielding?
-How are timeout and cancellation handled?
+How are timeout and cancellation handled, including caller-abandoned bus requests?
 What one result table is returned on success?
 What failures are normal negative replies, and what failures should escape?
 ```

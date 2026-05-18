@@ -358,7 +358,7 @@ local function report_done_to(self, label)
 	end
 end
 
-local function start_bridge_work(self, identity, run, report_label)
+local function start_bridge_work(self, identity, run, report_label, cancel_op)
 	return scoped_work.start {
 		lifetime_scope = self._scope,
 		reaper_scope   = self._scope,
@@ -366,6 +366,7 @@ local function start_bridge_work(self, identity, run, report_label)
 		identity       = identity,
 		run            = run,
 		report         = report_done_to(self, report_label),
+		cancel_op      = cancel_op,
 	}
 end
 
@@ -528,7 +529,8 @@ local function start_outbound_call(self, ev)
 			call_id         = id,
 		},
 		run_outbound_call(call),
-		'bridge_outbound_call_completion_report_failed'
+		'bridge_outbound_call_completion_report_failed',
+		owner:caller_cancel_op()
 	)
 
 	if not handle then

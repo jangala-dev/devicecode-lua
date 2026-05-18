@@ -280,4 +280,12 @@ function T.cap_sdk_raw_member_listener_and_ref_follow_raw_member_topics()
 	end, { timeout = 2.0 })
 end
 
+
+function T.core_capability_control_calls_default_to_compositional_timeout()
+	local f = assert(io.open('../src/services/hal/sdk/cap.lua', 'r'))
+	local src = f:read('*a'); f:close()
+	assert(src:find('out.timeout = false', 1, true), 'HAL cap SDK should default control calls to timeout=false')
+	assert(not src:find('timeout or 1%.0'), 'HAL cap SDK must not install hidden control timeouts')
+end
+
 return T

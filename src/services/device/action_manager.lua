@@ -214,6 +214,8 @@ function M.start_action(state, req, rec)
 			}
 		end,
 
+		cancel_op = owner:caller_cancel_op(),
+
 		run = function (scope, setup)
 			return action_worker.run(scope, {
 				conn = state.conn,

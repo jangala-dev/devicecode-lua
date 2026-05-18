@@ -23,8 +23,8 @@ local function payload_of(req)
 	return type(req) == 'table' and type(req.payload) == 'table' and req.payload or {}
 end
 
-local function install_owner(scope, req, reason)
-	local owner = request_owner.new(req)
+local function install_owner(scope, req, reason, owner)
+	owner = owner or request_owner.new(req)
 	scope:finally(function (_, status, primary)
 		if status == 'failed' then
 			owner:finalise_unresolved(primary or reason or 'request_failed')
@@ -120,7 +120,7 @@ end
 function M.create_job(scope, params)
 	params = params or {}
 	local req = assert(params.request, 'create_job: request required')
-	local owner = install_owner(scope, req, 'create_job_cancelled')
+	local owner = install_owner(scope, req, 'create_job_cancelled', params.request_owner)
 	local payload = payload_of(req)
 	local component = payload.component
 
@@ -183,7 +183,7 @@ end
 function M.start_job(scope, params)
 	params = params or {}
 	local req = assert(params.request, 'start_job: request required')
-	local owner = install_owner(scope, req, 'start_job_cancelled')
+	local owner = install_owner(scope, req, 'start_job_cancelled', params.request_owner)
 	local phase = params.phase or 'stage'
 	local job_id = params.job_id or (params.job and params.job.job_id)
 
@@ -221,7 +221,7 @@ end
 function M.persist_job_state(scope, params)
 	params = params or {}
 	local req = assert(params.request, 'persist_job_state: request required')
-	local owner = install_owner(scope, req, tostring(params.method or 'request') .. '_cancelled')
+	local owner = install_owner(scope, req, tostring(params.method or 'request') .. '_cancelled', params.request_owner)
 
 	local result, err = transition(params.jobs, {
 		kind = 'patch_job',
@@ -252,7 +252,7 @@ end
 function M.discard_job(scope, params)
 	params = params or {}
 	local req = assert(params.request, 'discard_job: request required')
-	local owner = install_owner(scope, req, 'discard_job_cancelled')
+	local owner = install_owner(scope, req, 'discard_job_cancelled', params.request_owner)
 
 	local result, err = transition(params.jobs, {
 		kind = 'discard_job',
