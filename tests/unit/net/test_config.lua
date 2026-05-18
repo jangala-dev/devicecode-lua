@@ -147,4 +147,21 @@ function tests.test_bigbox_config_uses_clean_segment_authority_shape()
 	eq(intent.firewall.rules.Allow_DNS_queries_RST.dest_port, '53')
 end
 
+
+function tests.test_rejects_cross_domain_unknown_segment_reference()
+	local cfg = sample_cfg()
+	cfg.interfaces.bad = { kind = 'bridge', segment = 'missing' }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	if intent ~= nil then error('expected unknown segment reference to be rejected', 2) end
+	ok(err and err:find('unknown segment', 1, true), 'unknown segment error expected')
+end
+
+function tests.test_rejects_unknown_wan_interface_when_interface_catalogue_present()
+	local cfg = sample_cfg()
+	cfg.wan.members.bad = { interface = 'missing' }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	if intent ~= nil then error('expected unknown WAN interface to be rejected', 2) end
+	ok(err and err:find('unknown interface', 1, true), 'unknown interface error expected')
+end
+
 return tests

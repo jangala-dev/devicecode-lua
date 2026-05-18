@@ -126,7 +126,7 @@ function tests.test_missing_hal_marks_apply_failed_not_running()
 		eq(summary.state, 'degraded')
 		eq(summary.ready, false)
 		eq(summary.apply.state, 'failed')
-		contains(summary.reason, 'network-config HAL capability not configured')
+		contains(summary.reason, 'network HAL call failed')
 		view:close()
 
 		child:cancel('test complete')

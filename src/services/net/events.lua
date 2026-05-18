@@ -53,6 +53,17 @@ function M.map_observed_event(msg)
 	}
 end
 
+function M.map_capability_status(name, msg)
+	if msg == nil then return { kind = 'capability_status_closed', capability = name } end
+	return {
+		kind = 'capability_status',
+		capability = name,
+		payload = msg.payload,
+		origin = msg.origin,
+		topic = msg.topic,
+	}
+end
+
 local function try_config_now(state)
 	if not state.config_watch then return nil end
 	local ev = state.config_watch:try_recv_now()
@@ -63,8 +74,24 @@ end
 local function try_observed_now(state)
 	if not state.observed_sub then return nil end
 	local ev = queue.try_now(state.observed_sub:recv_op(), NOT_READY)
-	if ev == NOT_READY or ev == nil then return nil end
+	if ev == NOT_READY then return nil end
 	return M.map_observed_event(ev)
+end
+
+local function add_capability_sources(state, sources)
+	local subs = state.capability_status_subs or {}
+	local names = {}
+	for name in pairs(subs) do names[#names + 1] = name end
+	table.sort(names)
+	for i = 1, #names do
+		local name = names[i]
+		local sub = subs[name]
+		sources[#sources + 1] = {
+			name = 'capability_' .. tostring(name),
+			try_now = function () return recv_now(sub, function (msg) return M.map_capability_status(name, msg) end) end,
+			recv_op = function () return recv_op(sub, function (msg) return M.map_capability_status(name, msg) end) end,
+		}
+	end
 end
 
 function M.next_service_event_op(state)
@@ -87,6 +114,7 @@ function M.next_service_event_op(state)
 			recv_op = function () return state.observed_sub:recv_op():wrap(M.map_observed_event) end,
 		},
 	}
+	add_capability_sources(state, sources)
 
 	return priority_event.sources_op {
 		label = 'net.service.next_event',

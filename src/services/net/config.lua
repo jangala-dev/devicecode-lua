@@ -18,6 +18,7 @@ local vpn_dom = require 'services.net.domain.vpn'
 local dns_dom = require 'services.net.domain.dns'
 local dhcp_dom = require 'services.net.domain.dhcp'
 local diagnostics_dom = require 'services.net.domain.diagnostics'
+local config_validate = require 'services.net.config_validate'
 
 local M = {}
 
@@ -196,7 +197,7 @@ function M.normalise(value, opts)
 	local extensions, eerr = schema.copy_optional_table(t.extensions, { 'net', 'extensions' })
 	if eerr then return nil, eerr end
 
-	return ensure_shape({
+	local intent = ensure_shape({
 		schema = INTENT_SCHEMA,
 		config_schema = SCHEMA,
 		version = version,
@@ -220,7 +221,11 @@ function M.normalise(value, opts)
 		policies = policies,
 		metadata = metadata,
 		extensions = extensions,
-	}), nil
+	})
+
+	local valid, verr = config_validate.validate(intent)
+	if valid ~= true then return nil, verr end
+	return intent, nil
 end
 
 M.SCHEMA = SCHEMA

@@ -6,6 +6,7 @@
 
 local op = require 'fibers.op'
 local tablex = require 'shared.table'
+local cap_sdk = require 'services.hal.sdk.cap'
 
 local M = {}
 local Client = {}
@@ -36,7 +37,7 @@ end
 
 local function reply_to_result(reply, err)
 	if not reply then
-		return failure_result(err, 'network HAL call failed')
+		return failure_result({ err = 'network HAL call failed', detail = err }, 'network HAL call failed')
 	end
 
 	if reply.ok ~= true then
@@ -55,13 +56,19 @@ local function reply_to_result(reply, err)
 	}
 end
 
+local function default_ref(conn, class, id)
+	if not conn then return nil end
+	return cap_sdk.new_curated_cap_ref(conn, class, id or 'main')
+end
+
 function M.new(conn, opts)
 	opts = opts or {}
+	local resolve_defaults = opts.resolve_defaults ~= false
 	return setmetatable({
 		conn = conn,
-		network_config = opts.network_config_cap,
-		network_state = opts.network_state_cap,
-		network_diagnostics = opts.network_diagnostics_cap,
+		network_config = opts.network_config_cap or (resolve_defaults and default_ref(conn, 'network-config', opts.network_config_id)),
+		network_state = opts.network_state_cap or (resolve_defaults and default_ref(conn, 'network-state', opts.network_state_id)),
+		network_diagnostics = opts.network_diagnostics_cap or (resolve_defaults and default_ref(conn, 'network-diagnostics', opts.network_diagnostics_id)),
 		-- Dry-run must be explicit.  A missing network-config capability should not
 		-- look like a successful host apply on production devices.
 		dry_run = opts.dry_run == true,

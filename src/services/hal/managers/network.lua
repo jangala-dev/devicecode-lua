@@ -169,7 +169,7 @@ function M.apply_config_op(config)
 		if not state.started then return op.always(false, 'network manager not started') end
 		local driver, err = driver_mod.new(config or {}, {
 			cap_emit_ch = state.cap_emit_ch,
-			logger = logger,
+			logger = state.logger,
 		})
 		if not driver then return op.always(false, err or 'network driver create failed') end
 		if state.driver and type(state.driver.terminate) == 'function' then

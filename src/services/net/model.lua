@@ -33,9 +33,17 @@ function M.initial(service_id)
 			last_result = nil,
 		},
 
+		intent = {
+			active = nil,
+			last_rejected = nil,
+			generation = nil,
+		},
+
 		hal = {
 			network_config = 'not_configured',
 			network_state = 'not_configured',
+			network_diagnostics = 'not_configured',
+			last_status = {},
 		},
 
 		observed = {

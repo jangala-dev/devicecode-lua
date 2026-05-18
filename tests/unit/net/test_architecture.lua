@@ -61,4 +61,23 @@ function tests.test_net_config_rejects_legacy_shape_in_code_and_tests()
 	if cfg:find('raw.networks', 1, true) then fail('old networks fallback found in net config boundary') end
 end
 
+
+function tests.test_net_service_uses_named_runtime_components()
+	local svc = read_file('../src/services/net/service.lua')
+	for _, mod in ipairs({
+		"services.net.capability_resolver",
+		"services.net.observer_manager",
+		"services.net.wan_manager",
+		"services.net.drift",
+	}) do
+		if not svc:find(mod, 1, true) then fail('net service should use ' .. mod) end
+	end
+end
+
+function tests.test_net_publisher_has_dirty_publication_path()
+	local pub = read_file('../src/services/net/publisher.lua')
+	if not pub:find('publish_dirty_now', 1, true) then fail('net publisher should expose publish_dirty_now') end
+	if not pub:find('new_dirty_state', 1, true) then fail('net publisher should expose dirty state') end
+end
+
 return tests
