@@ -1,5 +1,6 @@
 local fibers = require 'fibers'
 local runtime = require 'fibers.runtime'
+local sleep   = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 local bus    = require 'bus'
 
@@ -9,6 +10,7 @@ local listener_owner = require 'services.http.listener_owner'
 local lua_http      = require 'services.http.transport.lua_http'
 local public_ws     = require 'services.http.websocket'
 local driver_mod    = require 'services.http.transport.cqueues_driver'
+local operation_owner = require 'services.http.operation_owner'
 
 local M = {}
 
@@ -210,6 +212,77 @@ function M.test_event_queue_overflow_for_completion_fails_observing_service()
 		eq(st, 'failed')
 		ok(tostring(primary):match('http_operation_done_report_failed'))
 	end)
+end
+
+
+function M.test_bus_request_abandonment_cancels_admitted_http_operation()
+	fibers.run(function ()
+		local b = bus.new()
+		local root = b:connect({ origin_base = { kind = 'local' } })
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
+		yield_many(4)
+
+		local done_tx, done_rx = mailbox.new(1, { full = 'reject_newest' })
+		local req = {
+			payload = { method = 'GET', url = 'http://example.invalid/' },
+			origin = { kind = 'local' },
+			reply = function () error('abandoned request must not be replied to', 0) end,
+			fail = function () error('abandoned request must not be failed visibly', 0) end,
+			done_op = function ()
+				return done_rx:recv_op():wrap(function (ev)
+					return ev.status, ev.value, ev.err
+				end)
+			end,
+		}
+		local request_id, owner = svc:_next_request_identity('exchange', req)
+		svc._state.requests[request_id] = { request_id = request_id, verb = 'exchange', owner = owner, state = 'received', generation = svc._generation }
+
+		ok(operation_owner.start(svc, 'exchange', req, request_id, owner, function ()
+			fibers.perform(sleep.sleep_op(10.0))
+			return { ok = true }
+		end))
+
+		local operation_id
+		for id, rec in pairs(svc._state.operations) do
+			if rec.request_id == request_id then operation_id = id end
+		end
+		ok(operation_id, 'expected operation identity')
+
+		ok(done_tx:send({ status = 'abandoned', err = 'caller_timeout' }))
+		yield_until(function ()
+			local rec = svc._state.operations[operation_id]
+			return rec and rec.state == 'completed'
+		end, 'operation should complete after caller abandonment')
+
+		local rec = svc._state.operations[operation_id]
+		eq(rec.status, 'cancelled')
+		eq(rec.primary, 'caller_timeout')
+		local reqrec = svc._state.requests[request_id]
+		eq(reqrec.state, 'cancelled')
+		eq(reqrec.reason, 'caller_timeout')
+		eq(svc._owned_requests[request_id], nil)
+		ok(owner:done(), 'owner should be locally abandoned')
+
+		svc:terminate('done')
+	end)
+end
+
+function M.test_http_sdk_uses_compositional_timeout_by_default()
+	local seen_opts
+	local ref = sdk_mod.new_ref({
+		call_op = function (_, _topic, _args, opts)
+			seen_opts = opts
+			return fibers.always('ok')
+		end,
+	}, 'main')
+
+	fibers.run(function ()
+		local v = fibers.perform(ref:exchange_op({ method = 'GET', url = 'http://example.invalid/' }))
+		eq(v, 'ok')
+	end)
+
+	ok(seen_opts, 'expected SDK to pass call opts')
+	eq(seen_opts.timeout, false)
 end
 
 function M.test_service_shutdown_terminates_registry_handles_and_finalises_unresolved_requests()
