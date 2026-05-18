@@ -128,6 +128,20 @@ function new.NetworkCapability(id, control_ch)
     return new.Capability('network', id, control_ch, offerings)
 end
 
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.WiredProviderCapability(id, control_ch)
+    return new.Capability('wired-provider', id, control_ch, {
+        'snapshot',
+        'watch',
+        'apply_attachments',
+        'set_poe',
+        'bounce',
+    })
+end
+
 
 ---@param id CapabilityId
 ---@param control_ch Channel

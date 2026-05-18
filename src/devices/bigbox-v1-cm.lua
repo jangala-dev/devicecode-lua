@@ -4,15 +4,17 @@ return {
     services = {
         "log",
         "config",
+        "http",
         "hal",
         "gsm",
         "time",
         "net",
         "metrics",
         "system",
+        "device",
+        "wired",
         "ui",
         "wifi",
-        "mcu_bridge",
-        "switch"
+        "mcu_bridge"
     }
 }

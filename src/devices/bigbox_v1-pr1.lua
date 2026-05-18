@@ -4,7 +4,10 @@ return {
     services = {
         "log",
         "config",
-        "switch",
+        "http",
+        "hal",
+        "device",
+        "wired",
         -- ... other services specific to this device version
     }
 }
