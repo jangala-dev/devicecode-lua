@@ -10,9 +10,10 @@ local hal_types       = require "services.hal.types.core"
 ---@type any
 local platform_driver_any = platform_driver
 
-local fibers = require "fibers"
-local op     = require "fibers.op"
-local sleep  = require "fibers.sleep"
+local fibers  = require "fibers"
+local op      = require "fibers.op"
+local sleep   = require "fibers.sleep"
+local cond    = require "fibers.cond"
 
 local STOP_TIMEOUT = 5.0
 
@@ -64,17 +65,19 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
         error("Platform Manager: failed to bind capabilities: " .. tostring(cap_err))
     end
 
-    local ok, start_err = driver:start()
-    if not ok then
-        error("Platform Manager: failed to start driver: " .. tostring(start_err))
-    end
-
+    local ready_cond = cond.new()
     local device_event, ev_err = hal_types.new.DeviceEvent(
-        "added", "platform", "1", {}, capabilities)
+        "added", "platform", "1", {}, capabilities, ready_cond)
     if not device_event then
         error("Platform Manager: failed to create DeviceEvent: " .. tostring(ev_err))
     end
     dev_ev_ch:put(device_event)
+    ready_cond:wait()
+
+    local ok, start_err = driver:start()
+    if not ok then
+        error("Platform Manager: failed to start driver: " .. tostring(start_err))
+    end
 
     dlog(PlatformManager.logger, 'info', { what = 'device_registered' })
 end

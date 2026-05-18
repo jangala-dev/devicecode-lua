@@ -128,6 +128,7 @@ end
 ---@field id DeviceId
 ---@field meta Meta
 ---@field capabilities CapList
+---@field ready_cond Cond? Optional one-shot condition; signalled by HAL after the device is fully registered.
 local DeviceEvent = {}
 DeviceEvent.__index = DeviceEvent
 
@@ -137,9 +138,10 @@ DeviceEvent.__index = DeviceEvent
 ---@param id DeviceId
 ---@param meta Meta?
 ---@param capabilities CapList?
+---@param ready_cond Cond? Optional one-shot condition; signalled by HAL after the device is fully registered.
 ---@return DeviceEvent?
 ---@return string error
-function new.DeviceEvent(event_type, class, id, meta, capabilities)
+function new.DeviceEvent(event_type, class, id, meta, capabilities, ready_cond)
     meta = meta or {}
     capabilities = capabilities or {}
 
@@ -168,12 +170,17 @@ function new.DeviceEvent(event_type, class, id, meta, capabilities)
         end
     end
 
+    if ready_cond ~= nil and type(ready_cond.signal) ~= 'function' then
+        return nil, "invalid ready_cond"
+    end
+
     local ev = setmetatable({
-        event_type = event_type,
-        class = class,
-        id = id,
-        meta = meta,
+        event_type  = event_type,
+        class       = class,
+        id          = id,
+        meta        = meta,
         capabilities = capabilities,
+        ready_cond  = ready_cond,
     }, DeviceEvent)
 
     return ev, ""
