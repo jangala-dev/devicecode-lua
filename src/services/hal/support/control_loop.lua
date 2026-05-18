@@ -71,11 +71,8 @@ function M.reply_op(reply_ch, ok, value_or_err)
 		end
 
 		return reply_ch:put_op(reply):wrap(function (sent, send_err)
-			if sent == true then
+			if sent ~= false then
 				return true, nil
-			end
-			if sent == nil then
-				return false, tostring(send_err or 'reply channel closed')
 			end
 			return false, tostring(send_err or 'reply delivery failed')
 		end)

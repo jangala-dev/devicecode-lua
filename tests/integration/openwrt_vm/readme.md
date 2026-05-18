@@ -14,7 +14,7 @@ tests/integration/openwrt_vm
   tests/
 ````
 
-The VM uses QEMU. A QEMU user-mode NIC is used for SSH and provisioning. Optional tap NICs may be added separately for dataplane tests.
+The VM uses QEMU. A QEMU user-mode NIC is used for SSH and provisioning. By default, three additional QEMU user-mode NICs are attached for deterministic WAN fixtures, normally appearing inside OpenWrt as `eth1`, `eth2` and `eth3`. Optional tap NICs may be added separately for stronger host-bridged dataplane tests.
 
 ## Requirements
 
@@ -61,6 +61,10 @@ The default test target currently checks:
 ```text
 OpenWrt baseline tools and state
 veth, IFB, HTB, fq_codel and ingress qdisc support
+Lua UCI and Devicecode UCI manager behaviour
+network provider apply/snapshot/observer behaviour
+VLAN/MWAN/shaping provider behaviour
+MWAN3 live-weight updates via iptables-restore --noflush
 SCP copy to and from the VM
 ```
 
@@ -118,13 +122,19 @@ This discards changes made inside the VM.
 
 The default tests create veth and IFB devices inside the VM. This is enough for many kernel traffic-control tests.
 
-For tests requiring host-side dataplane interfaces, provide tap devices explicitly:
+For the default MWAN fixture, three user-mode WAN NICs are attached automatically. Override the count with `OPENWRT_VM_WAN_IFACES` if needed:
 
 ```sh
-OPENWRT_TAP_IFACES="tap-dc0 tap-dc1" make run
+OPENWRT_VM_WAN_IFACES=3 make run
 ```
 
-The management SSH NIC remains separate from any tap dataplane NICs.
+For tests requiring host-side dataplane interfaces, provide tap devices explicitly. Each tap becomes an additional virtio NIC after the management and default WAN NICs, which allows MWAN/VLAN experiments with multiple host-bridged WAN or LAN surfaces:
+
+```sh
+OPENWRT_TAP_IFACES="tap-dc0 tap-dc1 tap-dc2" make run
+```
+
+The management SSH NIC remains separate from any tap dataplane NICs. The MWAN live-weight tests are still self-contained by default, but the tap path is available for fuller end-to-end routing and distribution tests.
 
 ## Notes
 

@@ -13,6 +13,6 @@ return {
         "ui",
         "wifi",
         "mcu_bridge",
-        "switch"
+        "wired"
     }
 }

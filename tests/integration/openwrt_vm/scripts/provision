@@ -37,7 +37,31 @@ echo "[openwrt-vm] provisioning base packages"
 	}
 
 	opkg update
-	opkg install tc-full kmod-sched kmod-sched-core kmod-ifb kmod-veth ip-full
+
+	# Install MWAN3 in a separate phase. Immediately after this SSH step returns,
+	# provision installs a known-good three-WAN fixture before any further package
+	# downloads can observe or trip over a half-configured mwan3 setup.
+	opkg install tc-full kmod-sched kmod-sched-core kmod-ifb kmod-veth ip-full lua libuci-lua
+	opkg install mwan3 iptables-nft ip6tables-nft
+"
+
+# Install a valid three-WAN network/firewall/mwan3 fixture immediately after
+# mwan3 is installed. This prevents the rest of provisioning from running with
+# a package-default or otherwise invalid multi-WAN configuration.
+"$VM_DIR/tests/setup_mwan3_three_wan_fixture.sh"
+
+"$SCRIPT_DIR/ssh" "
+	set -eu
+
+	# Keep provisioning traffic on the management network even after the WAN DHCP
+	# clients have added their own defaults.
+	ip route replace default via 192.168.1.2 dev br-lan || true
+
+	# Dependencies used by vendored fibers/bus/trie and future real command-backed tests.
+	# Package names vary across OpenWrt feeds/releases, so keep these best-effort.
+	(opkg install luaposix || true)
+	(opkg install lua-bit32 || true)
+	(opkg install lua-cjson || true)
 
 	# Optional but useful for performance tests. Do not fail provisioning if unavailable
 	# on a given target/release.

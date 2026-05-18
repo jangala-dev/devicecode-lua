@@ -49,6 +49,24 @@ function M.publish_component_now(conn, snapshot, component_id, opts)
 	ok, err = checked(bus_cleanup.retain(conn, projection.component_cap_status_topic(component_id), payloads.cap_status))
 	if not ok then return nil, err end
 
+	if payloads.wired_provider then
+		local wp = payloads.wired_provider
+		ok, err = checked(bus_cleanup.retain(conn, projection.wired_provider_cap_meta_topic(wp.id), wp.meta))
+		if not ok then return nil, err end
+		ok, err = checked(bus_cleanup.retain(conn, projection.wired_provider_cap_status_topic(wp.id), wp.status))
+		if not ok then return nil, err end
+		ok, err = checked(bus_cleanup.retain(conn, projection.wired_provider_cap_state_topic(wp.id, 'surfaces'), wp.surfaces))
+		if not ok then return nil, err end
+		ok, err = checked(bus_cleanup.retain(conn, projection.wired_provider_cap_state_topic(wp.id, 'topology'), wp.topology))
+		if not ok then return nil, err end
+	else
+		-- Defensive cleanup if this component used to curate a wired-provider cap.
+		bus_cleanup.unretain(conn, projection.wired_provider_cap_meta_topic(component_id))
+		bus_cleanup.unretain(conn, projection.wired_provider_cap_status_topic(component_id))
+		bus_cleanup.unretain(conn, projection.wired_provider_cap_state_topic(component_id, 'surfaces'))
+		bus_cleanup.unretain(conn, projection.wired_provider_cap_state_topic(component_id, 'topology'))
+	end
+
 	if opts == nil or opts.emit_event ~= false then
 		ok, err = checked(bus_cleanup.publish(
 			conn,
@@ -68,6 +86,10 @@ function M.unpublish_component_now(conn, component_id)
 		projection.component_update_topic(component_id),
 		projection.component_cap_meta_topic(component_id),
 		projection.component_cap_status_topic(component_id),
+		projection.wired_provider_cap_meta_topic(component_id),
+		projection.wired_provider_cap_status_topic(component_id),
+		projection.wired_provider_cap_state_topic(component_id, 'surfaces'),
+		projection.wired_provider_cap_state_topic(component_id, 'topology'),
 	}
 	for i = 1, #topics do
 		local ok, err = bus_cleanup.unretain(conn, topics[i])

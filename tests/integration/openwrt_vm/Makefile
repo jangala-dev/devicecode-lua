@@ -1,6 +1,6 @@
 .PHONY: \
-	preflight fetch verify reset run wait provision provision-force \
-	stop ssh smoke logs baseline test-baseline test-tc-veth test \
+	preflight fetch verify reset run wait provision provision-force ensure-mwan3 \
+	stop ssh smoke logs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-openwrt-network-provider-apply test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test \
 	openwrt-vm-test clean
 
 preflight:
@@ -27,6 +27,9 @@ provision:
 provision-force:
 	OPENWRT_PROVISION_FORCE=1 ./scripts/provision
 
+ensure-mwan3:
+	./scripts/ensure-mwan3
+
 stop:
 	./scripts/stop-vm
 
@@ -50,6 +53,61 @@ test-tc-veth:
 	./scripts/wait-ssh
 	./tests/test_tc_veth_baseline.sh
 
+test-lua-uci:
+	./scripts/wait-ssh
+	./tests/test_lua_uci_baseline.sh
+
+test-devicecode-uci-manager:
+	./scripts/wait-ssh
+	./tests/test_devicecode_uci_manager.sh
+
+test-openwrt-network-provider-apply:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_provider_apply.sh
+
+test-openwrt-network-provider-snapshot:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_provider_snapshot.sh
+
+test-openwrt-network-provider-live-snapshot:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_provider_live_snapshot.sh
+
+test-openwrt-network-observer-event-ingress:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_observer_event_ingress.sh
+
+test-openwrt-network-provider-vlan-mwan-shaping:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_provider_vlan_mwan_shaping.sh
+
+test-openwrt-network-provider-mwan-live-weights:
+	./scripts/wait-ssh
+	./scripts/ensure-mwan3
+	./tests/setup_mwan3_three_wan_fixture.sh
+	./tests/test_openwrt_network_provider_mwan_live_weights.sh
+
+test-openwrt-network-provider-mwan-live-weights-fast:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_provider_mwan_live_weights.sh
+
+
+test-openwrt-network-provider-segment-trunk:
+	./scripts/wait-ssh
+	./tests/test_openwrt_network_provider_segment_trunk.sh
+
+test-devicecode-wired-static-provider:
+	./scripts/wait-ssh
+	./tests/test_devicecode_wired_static_provider.sh
+
+test-devicecode-bigbox-phase1-composition:
+	./scripts/wait-ssh
+	./tests/test_devicecode_bigbox_phase1_composition.sh
+
+test-devicecode-bigbox-phase1-broken-trunk:
+	./scripts/wait-ssh
+	./tests/test_devicecode_bigbox_phase1_broken_trunk.sh
+
 test-scp:
 	./scripts/wait-ssh
 	tmp="$$(mktemp)"; \
@@ -60,7 +118,7 @@ test-scp:
 	grep -q devicecode-openwrt-vm "$$tmp.out"; \
 	rm -f "$$tmp" "$$tmp.out"
 
-test: test-baseline test-tc-veth test-scp
+test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-openwrt-network-provider-apply test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-scp
 
 openwrt-vm-test: preflight fetch verify reset run wait provision test
 

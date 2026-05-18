@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+"$SCRIPT_DIR/wait-ssh"
+
+"$SCRIPT_DIR/ssh" "
+	set -eu
+	missing=0
+	for x in mwan3 iptables-save iptables-restore; do
+		command -v \"\$x\" >/dev/null 2>&1 || missing=1
+	done
+	[ -x /etc/init.d/mwan3 ] || missing=1
+	if [ \"\$missing\" -ne 0 ]; then
+		echo '[openwrt-vm] installing mwan3 and iptables compatibility packages'
+		opkg update
+		opkg install mwan3 iptables-nft ip6tables-nft
+	fi
+	command -v mwan3 >/dev/null
+	command -v iptables-save >/dev/null
+	command -v iptables-restore >/dev/null
+	test -x /etc/init.d/mwan3
+"

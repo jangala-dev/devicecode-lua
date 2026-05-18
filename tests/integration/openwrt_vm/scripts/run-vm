@@ -35,6 +35,15 @@ add_common_args() {
 		-serial "file:${OPENWRT_LOG}"
 
 	idx=0
+	while [ "$idx" -lt "${OPENWRT_VM_WAN_IFACES:-3}" ]; do
+		idx=$((idx + 1))
+		mac="$(printf '02:dc:bb:01:00:%02x' "$idx")"
+		set -- "$@" \
+			-netdev "user,id=wan${idx},net=172.31.${idx}.0/24" \
+			-device "virtio-net-pci,netdev=wan${idx},mac=${mac}"
+	done
+
+	idx=0
 	for tap in ${OPENWRT_TAP_IFACES:-}; do
 		idx=$((idx + 1))
 		mac="$(printf '02:dc:bb:00:00:%02x' "$idx")"
@@ -97,6 +106,15 @@ set -- "$@" \
 	-daemonize \
 	-pidfile "${OPENWRT_PID}" \
 	-serial "file:${OPENWRT_LOG}"
+
+idx=0
+while [ "$idx" -lt "${OPENWRT_VM_WAN_IFACES:-3}" ]; do
+	idx=$((idx + 1))
+	mac="$(printf '02:dc:bb:01:00:%02x' "$idx")"
+	set -- "$@" \
+		-netdev "user,id=wan${idx},net=172.31.${idx}.0/24" \
+		-device "virtio-net-pci,netdev=wan${idx},mac=${mac}"
+done
 
 idx=0
 for tap in ${OPENWRT_TAP_IFACES:-}; do
