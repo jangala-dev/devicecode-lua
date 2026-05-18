@@ -203,6 +203,8 @@ end
 local LegacyCapabilityReference = setmetatable({}, { __index = CoreCapabilityReference })
 LegacyCapabilityReference.__index = LegacyCapabilityReference
 
+---@class CapabilityReference : LegacyCapabilityReference
+
 ---@param method string
 ---@param args any
 ---@return Reply?
