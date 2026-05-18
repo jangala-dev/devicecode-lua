@@ -319,4 +319,31 @@ function tests.test_update_service_generation_boundary_uses_events_not_callbacks
 	end
 end
 
+
+function tests.test_bus_request_scoped_work_uses_caller_cancel_op()
+	local mgr = read_file('../src/services/update/manager.lua')
+	if not mgr:find('cancel_op = owner:caller_cancel_op()', 1, true) then
+		fail('update manager scoped request work should use caller_cancel_op')
+	end
+	if not mgr:find('request_owner = owner', 1, true) then
+		fail('update manager should pass its canonical request owner to request workers')
+	end
+
+	local reqs = read_file('../src/services/update/manager_requests.lua')
+	if not reqs:find('params.request_owner', 1, true) then
+		fail('manager_requests should reuse the manager-owned request owner')
+	end
+
+	local ingest = read_file('../src/services/update/ingest.lua')
+	if not ingest:find('owner = request_owner.new(req)', 1, true) then
+		fail('ingest should create request owners at queue admission')
+	end
+	if not ingest:find('cancel_op = entry.owner and entry.owner:caller_cancel_op()', 1, true) then
+		fail('ingest scoped work should use caller_cancel_op')
+	end
+	if not ingest:find('entry_abandoned', 1, true) then
+		fail('ingest should skip requests abandoned while queued')
+	end
+end
+
 return tests

@@ -63,12 +63,6 @@ local function deadline_from_opts(opts)
 	return nil
 end
 
-local function remaining_timeout(opts, deadline)
-	if deadline == nil then return opts.timeout end
-	local remaining = deadline - fibers.now()
-	if remaining < 0 then remaining = 0 end
-	return remaining
-end
 
 local function cancel_for_timeout(scope, on_timeout)
 	if on_timeout then on_timeout() end
@@ -149,13 +143,13 @@ local function upload_body_op(ctx, opts, deadline)
 
 			local call_opts = {}
 			for k, v in pairs(opts) do call_opts[k] = v end
-			call_opts.timeout = remaining_timeout(opts, deadline)
+			call_opts.timeout = false
 
 			local job, jerr = perform_with_deadline(scope, client.create_job_op(conn, artifact_id, call_opts), deadline, mark_timeout)
 			if not job then error(jerr or 'update job create failed', 0) end
 			out.job = job
 			if opts.start_job then
-				call_opts.timeout = remaining_timeout(opts, deadline)
+				call_opts.timeout = false
 				local started, serr = perform_with_deadline(scope, client.start_job_op(conn, job.job_id, call_opts), deadline, mark_timeout)
 				if not started then error(serr or 'update job start failed', 0) end
 				out.started = started

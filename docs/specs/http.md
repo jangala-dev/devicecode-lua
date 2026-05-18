@@ -86,6 +86,19 @@ local listener = reply.listener
 
 The consumer owns accepted contexts after handoff. HTTP owns unaccepted contexts and transport handles until ownership transfer.
 
+SDK operations should be used as Ops and composed by the caller for timeout policy:
+
+```lua
+local which, result, err = fibers.perform(fibers.named_choice {
+  exchange = ref:exchange_op(args),
+  timeout = sleep.sleep_op(5):wrap(function ()
+    return nil, "timeout"
+  end),
+})
+```
+
+The HTTP SDK must not install a hidden default bus timeout. If the SDK Op loses a choice, the bus request is abandoned and the admitted HTTP operation is cancelled through request ownership and `scoped_work.cancel_op`.
+
 
 ## Body object capabilities
 
@@ -169,6 +182,8 @@ Returned handles are public wrappers, not backend objects.
 Callbacks do not reduce service state directly.
 Accepted context ownership transfer is explicit.
 Losing HTTP/WebSocket Ops terminate active backend work.
+Bus request abandonment cancels admitted HTTP operation work.
+The SDK has no hidden default bus timeout policy.
 Stats under cap/.../state are narrow.
 Metrics also appear under obs/v1/http/...
 ```
