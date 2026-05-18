@@ -13,6 +13,8 @@ end
 function M.config() return { 'cfg', 'net' } end
 function M.summary() return { 'state', 'net', 'summary' } end
 function M.apply() return { 'state', 'net', 'apply' } end
+function M.segments() return { 'state', 'net', 'segments' } end
+function M.vlan_policy() return { 'state', 'net', 'vlan-policy' } end
 function M.segment(id) return { 'state', 'net', 'segment', token(id) } end
 function M.interface(id) return { 'state', 'net', 'interface', token(id) } end
 function M.domain(name) return { 'state', 'net', token(name) } end

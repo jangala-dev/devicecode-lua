@@ -17,7 +17,7 @@ local function sample_cfg()
 				kind = 'lan',
 				vlan = { id = 10 },
 				addressing = { ipv4 = { mode = 'static', cidr = '172.28.10.1/24' } },
-				dhcp = { enabled = true, pool = 'lan' },
+				dhcp = { enabled = true, start = 10, limit = 100, lease_time = '12h' },
 				firewall = { zone = 'lan' },
 			},
 			guest = {
@@ -55,9 +55,11 @@ local function sample_cfg()
 		},
 		dns = {
 			upstreams = { '1.1.1.1', '8.8.8.8' },
+			host_files = { base_dir = '/data/devicecode/dns/hosts', sources = { ads = { file = 'ads.hosts' } } },
 		},
 		dhcp = {
-			pools = { lan = { segment = 'lan' } },
+			defaults = { lease_time = '12h' },
+			reservations = {},
 		},
 		shaping = {
 			enabled = true,
@@ -116,6 +118,33 @@ function tests.test_rejects_arrays_for_core_maps()
 	local intent, err = config.normalise(cfg, { rev = 1 })
 	if intent ~= nil then error('expected array segments to be rejected', 2) end
 	ok(err and err:find('map keyed by id', 1, true), 'map keyed by id error expected')
+end
+
+
+local function read_project_file(rel)
+	local candidates = { rel, '../' .. rel }
+	for i = 1, #candidates do
+		local f = io.open(candidates[i], 'rb')
+		if f then local data = f:read('*a'); f:close(); return data end
+	end
+	return nil, 'unable to read ' .. rel
+end
+
+function tests.test_bigbox_config_uses_clean_segment_authority_shape()
+	local cjson = require 'cjson.safe'
+	local text = ok(read_project_file('src/configs/bigbox-v1-cm-2.json'))
+	local doc = ok(cjson.decode(text), 'bigbox config must decode')
+	local intent = ok(config.normalise(doc.net, { generation = 1 }))
+	eq(intent.dhcp.pools, nil, 'top-level dhcp pools must not be authoritative')
+	eq(intent.segments.jan.dhcp.enabled, true)
+	eq(intent.segments.jan.dns.host_files[1], 'ads')
+	eq(intent.segments.jan.dns.host_files[2], 'adult')
+	eq(intent.segments.jan.shaping.profile, 'restricted_user_per_host')
+	eq(intent.shaping.profiles.restricted_user_per_host.egress.host_rate, '2mbit')
+	eq(intent.dns.host_files.base_dir, '/data/devicecode/dns/hosts')
+	eq(intent.dns.records['config.bigbox.home'].address, '172.28.8.1')
+	eq(intent.routing.routes.static_1.interface, 'wan')
+	eq(intent.firewall.rules.Allow_DNS_queries_RST.dest_port, '53')
 end
 
 return tests

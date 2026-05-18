@@ -180,6 +180,8 @@ end
 
 local function set_section(changes, config, section, stype)
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = stype }
+	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_managed', value = '1' }
+	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_owner', value = 'net' }
 end
 
 local function set_option(changes, config, section, option, value)
@@ -239,6 +241,237 @@ local function segment_vlan_id(seg)
 	return nil
 end
 
+local function platform_segment_trunk(provider_config)
+	provider_config = provider_config or {}
+	local platform = is_plain_table(provider_config.platform) and provider_config.platform or {}
+	local trunk = platform.segment_trunk or provider_config.segment_trunk
+	if not is_plain_table(trunk) then return nil end
+	local ifname = trunk.ifname or trunk.device or trunk.name
+	if type(ifname) ~= 'string' or ifname == '' then return nil end
+	return trunk, ifname
+end
+
+local function segment_is_enabled(seg)
+	return is_plain_table(seg) and seg.enabled ~= false
+end
+
+
+local function first_value(v)
+	if type(v) == 'table' then return v[1] end
+	return v
+end
+
+local function list_contains(list, value)
+	if type(list) ~= 'table' then return false end
+	for i = 1, #list do if list[i] == value then return true end end
+	return false
+end
+
+local function ensure_array(v)
+	if v == nil then return {} end
+	if type(v) == 'table' then
+		local out = {}
+		if #v > 0 then
+			for i = 1, #v do out[#out + 1] = v[i] end
+		else
+			for _, k in ipairs(sorted_keys(v)) do out[#out + 1] = v[k] end
+		end
+		return out
+	end
+	return { v }
+end
+
+local function dirname(path)
+	if type(path) ~= 'string' then return nil end
+	local d = path:match('^(.+)/[^/]+$')
+	return d
+end
+
+local function add_unique_value(out, seen, v)
+	if type(v) ~= 'string' or v == '' or seen[v] then return end
+	seen[v] = true
+	out[#out + 1] = v
+end
+
+local function dns_records_for_segment(dns, seg_id)
+	local out = {}
+	local records = is_plain_table(dns.records) and dns.records or {}
+	local function add_record(rid, rec)
+		if not is_plain_table(rec) then return end
+		local name = rec.name or rid
+		local addr = rec.address or rec.ip or rec.value
+		if type(name) ~= 'string' or name == '' or type(addr) ~= 'string' or addr == '' then return end
+		if rec.segment ~= nil and rec.segment ~= seg_id then return end
+		if rec.segments ~= nil and not list_contains(rec.segments, seg_id) then return end
+		out[#out + 1] = '/' .. name .. '/' .. addr
+	end
+	if #records > 0 then
+		for i = 1, #records do add_record(tostring(i), records[i]) end
+	else
+		for _, rid in ipairs(sorted_keys(records)) do add_record(rid, records[rid]) end
+	end
+	table.sort(out)
+	return out
+end
+
+local function resolve_host_file_sources(dns, seg)
+	local cfg = is_plain_table(dns.host_files) and dns.host_files or {}
+	local base_dir = cfg.base_dir or cfg.root or cfg.dir or '/data/devicecode/dns/hosts'
+	local sources = is_plain_table(cfg.sources) and cfg.sources or {}
+	local seg_dns = is_plain_table(seg.dns) and seg.dns or {}
+	local ids = seg_dns.host_files or seg_dns.host_sources or {}
+	local files, mounts, seen_files, seen_mounts = {}, {}, {}, {}
+	if cfg.addnmount ~= false then add_unique_value(mounts, seen_mounts, base_dir) end
+	for _, source_id in ipairs(ensure_array(ids)) do
+		local path
+		local sid = tostring(source_id)
+		local spec = is_plain_table(sources[sid]) and sources[sid] or nil
+		if spec then
+			path = spec.path or (spec.file and (base_dir .. '/' .. tostring(spec.file))) or (base_dir .. '/' .. sid .. '.hosts')
+		else
+			path = sid:sub(1, 1) == '/' and sid or (base_dir .. '/' .. sid .. '.hosts')
+		end
+		add_unique_value(files, seen_files, path)
+		add_unique_value(mounts, seen_mounts, dirname(path))
+	end
+	table.sort(files)
+	table.sort(mounts)
+	return files, mounts
+end
+
+local function segment_ipv4_cidr(seg)
+	local ipv4 = ipv4_spec(seg and seg.addressing or {}, {})
+	if type(ipv4.cidr) == 'string' then return ipv4.cidr end
+	local addr, prefix, netmask = cidr_to_addr_prefix(ipv4)
+	if type(addr) == 'string' and prefix ~= nil then return addr .. '/' .. tostring(prefix) end
+	if type(addr) == 'string' and type(netmask) == 'string' then return cidr_from_addr_netmask(addr, netmask) end
+	return nil
+end
+
+local function route_entries(routes)
+	local out = {}
+	if not is_plain_table(routes) then return out end
+	if #routes > 0 then
+		for i = 1, #routes do if is_plain_table(routes[i]) then out[#out + 1] = { id = tostring(i), rec = routes[i] } end end
+	else
+		for _, id in ipairs(sorted_keys(routes)) do if is_plain_table(routes[id]) then out[#out + 1] = { id = id, rec = routes[id] } end end
+	end
+	return out
+end
+
+
+local function merge_tables(a, b)
+	local out = {}
+	for k, v in pairs(a or {}) do out[k] = copy_plain(v) end
+	for k, v in pairs(b or {}) do out[k] = copy_plain(v) end
+	return out
+end
+
+local function resolve_shaping_profile(shaping, seg)
+	local seg_shape = is_plain_table(seg.shaping) and seg.shaping or {}
+	local profiles = is_plain_table(shaping.profiles) and shaping.profiles or {}
+	local profile_name = seg_shape.profile or seg_shape.profile_id
+	local base = {}
+	if type(profile_name) == 'string' and is_plain_table(profiles[profile_name]) then base = profiles[profile_name] end
+	local overrides = is_plain_table(seg_shape.overrides) and seg_shape.overrides or {}
+	return merge_tables(base, overrides), profile_name
+end
+
+local function segment_shaping_device(provider_config, seg_id, seg)
+	local trunk, base_ifname = platform_segment_trunk(provider_config)
+	local vid = segment_vlan_id(seg)
+	if trunk and base_ifname and vid then return base_ifname .. '.' .. tostring(vid) end
+	return nil
+end
+
+local function build_shaping_request(intent, provider_config)
+	local shaping = is_plain_table(intent.shaping) and intent.shaping or {}
+	if shaping.enabled ~= true then return shaping end
+	local links = {}
+	for k, v in pairs(shaping.links or {}) do links[k] = copy_plain(v) end
+	for _, seg_id in ipairs(sorted_keys(intent.segments or {})) do
+		local seg = intent.segments[seg_id]
+		local seg_shape = is_plain_table(seg.shaping) and seg.shaping or {}
+		if seg_shape.enabled ~= false and (seg_shape.profile or seg_shape.profile_id) then
+			local spec = resolve_shaping_profile(shaping, seg)
+			if is_plain_table(spec) and spec.enabled ~= false then
+				local iface = spec.iface or spec.device or segment_shaping_device(provider_config, seg_id, seg)
+				local subnet = spec.subnet or spec.cidr or segment_ipv4_cidr(seg)
+				if iface and subnet then
+					local one = copy_plain(spec)
+					one.iface = iface
+					one.subnet = subnet
+					one.segment = seg_id
+					one.profile = seg_shape.profile or seg_shape.profile_id
+					links[seg_id] = one
+				end
+			end
+		end
+	end
+	local out = copy_plain(shaping)
+	out.links = links
+	return out
+end
+
+
+local function build_segment_interface_proto(seg)
+	local ipv4 = ipv4_spec(seg and seg.addressing or {}, {})
+	local proto = ipv4.mode or ipv4.proto
+	if proto == nil then
+		local addr = cidr_to_addr_prefix(ipv4)
+		proto = addr and 'static' or 'none'
+	end
+	if proto == 'manual' then proto = 'none' end
+	return proto, ipv4
+end
+
+local function add_segment_trunk_interfaces(changes, known, intent, provider_config, segment_to_ifaces)
+	local _trunk, base_ifname = platform_segment_trunk(provider_config)
+	if not base_ifname then return end
+
+	for _, seg_id in ipairs(sorted_keys(intent.segments or {})) do
+		local seg = intent.segments[seg_id]
+		if segment_is_enabled(seg) and not (segment_to_ifaces[seg_id] and #segment_to_ifaces[seg_id] > 0) then
+			local vid = segment_vlan_id(seg)
+			if vid then
+				local devname = base_ifname .. '.' .. tostring(vid)
+				local devsec = section_id('device', 'seg_' .. seg_id)
+				local ifsec = section_id('interface', seg_id)
+				known[devsec] = true
+				known[ifsec] = true
+
+				set_section(changes, 'network', devsec, 'device')
+				set_option(changes, 'network', devsec, 'type', '8021q')
+				set_option(changes, 'network', devsec, 'ifname', base_ifname)
+				set_option(changes, 'network', devsec, 'vid', vid)
+				set_option(changes, 'network', devsec, 'name', devname)
+
+				local proto, ipv4 = build_segment_interface_proto(seg)
+				set_section(changes, 'network', ifsec, 'interface')
+				set_option(changes, 'network', ifsec, 'proto', proto)
+				set_option(changes, 'network', ifsec, 'auto', '1')
+				set_option(changes, 'network', ifsec, 'disabled', '0')
+				set_option(changes, 'network', ifsec, 'device', devname)
+
+				if proto == 'static' then
+					local addr, prefix, netmask = cidr_to_addr_prefix(ipv4)
+					set_option(changes, 'network', ifsec, 'ipaddr', addr)
+					set_option(changes, 'network', ifsec, 'netmask', netmask or prefix_to_netmask(prefix))
+					set_option(changes, 'network', ifsec, 'gateway', ipv4.gateway or ipv4.gw)
+					set_option(changes, 'network', ifsec, 'dns', ipv4.dns)
+				else
+					set_option(changes, 'network', ifsec, 'peerdns', bool_uci(ipv4.peerdns))
+					if ipv4.metric then set_option(changes, 'network', ifsec, 'metric', ipv4.metric) end
+				end
+
+				segment_to_ifaces[seg_id] = segment_to_ifaces[seg_id] or {}
+				segment_to_ifaces[seg_id][#segment_to_ifaces[seg_id] + 1] = ifsec
+				table.sort(segment_to_ifaces[seg_id])
+			end
+		end
+	end
+end
+
 local function add_bridge_vlan_devices(changes, known, intent, iface_id, bridge_name, iface)
 	local segs = {}
 	if type(iface.segment) == 'string' then segs[#segs + 1] = iface.segment end
@@ -270,13 +503,15 @@ local function segment_interface_device(_intent, _iface_id, _iface, base_device)
 	return base_device
 end
 
-local function build_network_changes(intent)
+local function build_network_changes(intent, provider_config)
 	local changes = {}
 	local known = {}
 	local segment_to_ifaces, iface_to_device = collect_interface_maps(intent)
 
 	set_section(changes, 'network', 'globals', 'globals')
 	known.globals = true
+
+	add_segment_trunk_interfaces(changes, known, intent, provider_config, segment_to_ifaces)
 
 	for _, ifid in ipairs(sorted_keys(intent.interfaces or {})) do
 		local iface = intent.interfaces[ifid]
@@ -320,18 +555,16 @@ local function build_network_changes(intent)
 	end
 
 	local routes = (is_plain_table(intent.routing) and intent.routing.routes) or {}
-	if type(routes) == 'table' then
-		for i = 1, #routes do
-			local r = routes[i]
-			if is_plain_table(r) then
-				local rsec = section_id('route', 'route_' .. tostring(i))
-				known[rsec] = true
-				set_section(changes, 'network', rsec, 'route')
-				set_option(changes, 'network', rsec, 'interface', r.interface or r.net)
-				set_option(changes, 'network', rsec, 'target', r.target)
-				set_option(changes, 'network', rsec, 'gateway', r.gateway or r.via)
-			end
-		end
+	for _, item in ipairs(route_entries(routes)) do
+		local r = item.rec
+		local rsec = section_id('route', 'route_' .. tostring(item.id))
+		known[rsec] = true
+		set_section(changes, 'network', rsec, 'route')
+		set_option(changes, 'network', rsec, 'interface', r.interface or r.net)
+		set_option(changes, 'network', rsec, 'target', r.target)
+		set_option(changes, 'network', rsec, 'gateway', r.gateway or r.via)
+		set_option(changes, 'network', rsec, 'metric', r.metric)
+		set_option(changes, 'network', rsec, 'table', r.table)
 	end
 
 	return changes, known, segment_to_ifaces
@@ -340,36 +573,74 @@ end
 local function build_dhcp_changes(intent)
 	local changes = {}
 	local known = {}
-	set_section(changes, 'dhcp', 'dnsmasq', 'dnsmasq')
-	known.dnsmasq = true
 	local dns = is_plain_table(intent.dns) and intent.dns or {}
-	if dns.enabled ~= false then
-		set_option(changes, 'dhcp', 'dnsmasq', 'domainneeded', '1')
-		set_option(changes, 'dhcp', 'dnsmasq', 'boguspriv', '1')
-		if type(dns.upstreams) == 'table' and #dns.upstreams > 0 then
-			set_option(changes, 'dhcp', 'dnsmasq', 'server', dns.upstreams)
-		end
-	end
+	local dhcp = is_plain_table(intent.dhcp) and intent.dhcp or {}
+	local defaults = is_plain_table(dhcp.defaults) and dhcp.defaults or {}
 
 	for _, seg_id in ipairs(sorted_keys(intent.segments or {})) do
 		local seg = intent.segments[seg_id]
 		local dh = is_plain_table(seg.dhcp) and seg.dhcp or {}
+		local seg_dns = is_plain_table(seg.dns) and seg.dns or {}
+		local wants_dns = dns.enabled ~= false and seg_dns.enabled ~= false and (seg_dns.local_server == true or seg_dns['local'] == true or dh.enabled == true or #(ensure_array(seg_dns.host_files or seg_dns.host_sources)) > 0)
+
+		if wants_dns then
+			local dnssec = section_id('dns', 'dns_' .. seg_id)
+			known[dnssec] = true
+			set_section(changes, 'dhcp', dnssec, 'dnsmasq')
+			set_option(changes, 'dhcp', dnssec, 'domainneeded', dns.domainneeded ~= nil and bool_uci(dns.domainneeded) or '1')
+			set_option(changes, 'dhcp', dnssec, 'boguspriv', dns.boguspriv ~= nil and bool_uci(dns.boguspriv) or '1')
+			set_option(changes, 'dhcp', dnssec, 'localservice', dns.localservice ~= nil and bool_uci(dns.localservice) or '1')
+			set_option(changes, 'dhcp', dnssec, 'authoritative', defaults.authoritative ~= nil and bool_uci(defaults.authoritative) or '1')
+			set_option(changes, 'dhcp', dnssec, 'interface', { seg_id })
+			if is_plain_table(dns.cache) and dns.cache.size ~= nil then set_option(changes, 'dhcp', dnssec, 'cachesize', dns.cache.size) end
+			if type(dns.upstreams) == 'table' and #dns.upstreams > 0 then set_option(changes, 'dhcp', dnssec, 'server', dns.upstreams) end
+			local domain = seg_dns.domain or dns.domain
+			if type(domain) == 'string' and domain ~= '' then
+				set_option(changes, 'dhcp', dnssec, 'domain', domain)
+				set_option(changes, 'dhcp', dnssec, 'local', '/' .. domain .. '/')
+				set_option(changes, 'dhcp', dnssec, 'expandhosts', '1')
+			end
+			local addnhosts, addnmounts = resolve_host_file_sources(dns, seg)
+			if #addnhosts > 0 then set_option(changes, 'dhcp', dnssec, 'addnhosts', addnhosts) end
+			if #addnmounts > 0 then set_option(changes, 'dhcp', dnssec, 'addnmount', addnmounts) end
+			local addresses = dns_records_for_segment(dns, seg_id)
+			if #addresses > 0 then set_option(changes, 'dhcp', dnssec, 'address', addresses) end
+		end
+
+		local sec = section_id('dhcp', seg_id)
+		known[sec] = true
+		set_section(changes, 'dhcp', sec, 'dhcp')
+		set_option(changes, 'dhcp', sec, 'interface', seg_id)
 		if dh.enabled == true then
-			local sec = section_id('dhcp', seg_id)
-			known[sec] = true
-			set_section(changes, 'dhcp', sec, 'dhcp')
-			set_option(changes, 'dhcp', sec, 'interface', seg_id)
-			set_option(changes, 'dhcp', sec, 'start', dh.start or dh.range_start or 100)
-			set_option(changes, 'dhcp', sec, 'limit', dh.limit or dh.range_limit or 150)
-			set_option(changes, 'dhcp', sec, 'leasetime', dh.leasetime or dh.lease_time or '12h')
-		elseif dh.enabled == false then
-			local sec = section_id('dhcp', seg_id)
-			known[sec] = true
-			set_section(changes, 'dhcp', sec, 'dhcp')
-			set_option(changes, 'dhcp', sec, 'interface', seg_id)
+			set_option(changes, 'dhcp', sec, 'start', dh.start or dh.range_start or defaults.start or 100)
+			set_option(changes, 'dhcp', sec, 'limit', dh.limit or dh.range_limit or defaults.limit or 150)
+			set_option(changes, 'dhcp', sec, 'leasetime', dh.leasetime or dh.lease_time or defaults.leasetime or defaults.lease_time or '12h')
+			local opts = dh.options or (is_plain_table(dhcp.options) and dhcp.options[seg_id])
+			if type(opts) == 'table' then set_option(changes, 'dhcp', sec, 'dhcp_option', opts) end
+		else
 			set_option(changes, 'dhcp', sec, 'ignore', '1')
 		end
 	end
+
+	local reservations = is_plain_table(dhcp.reservations) and dhcp.reservations or {}
+	local function add_reservation(rid, rec)
+		if not is_plain_table(rec) then return end
+		local sec = section_id('dhcp', 'host_' .. tostring(rid))
+		known[sec] = true
+		set_section(changes, 'dhcp', sec, 'host')
+		set_option(changes, 'dhcp', sec, 'name', rec.name or rid)
+		set_option(changes, 'dhcp', sec, 'mac', rec.mac)
+		set_option(changes, 'dhcp', sec, 'ip', rec.ip or rec.address)
+		set_option(changes, 'dhcp', sec, 'leasetime', rec.leasetime or rec.lease_time)
+		set_option(changes, 'dhcp', sec, 'hostid', rec.hostid)
+		set_option(changes, 'dhcp', sec, 'duid', rec.duid)
+	end
+	if #reservations > 0 then
+		for i = 1, #reservations do add_reservation(tostring(i), reservations[i]) end
+	else
+		for _, rid in ipairs(sorted_keys(reservations)) do add_reservation(rid, reservations[rid]) end
+	end
+
 	return changes, known
 end
 
@@ -380,9 +651,14 @@ local function build_firewall_changes(intent, segment_to_ifaces)
 	local defaults = is_plain_table(fw.defaults) and fw.defaults or {}
 	set_section(changes, 'firewall', 'defaults', 'defaults')
 	known.defaults = true
-	set_option(changes, 'firewall', 'defaults', 'input', defaults.input or 'REJECT')
-	set_option(changes, 'firewall', 'defaults', 'output', defaults.output or 'ACCEPT')
-	set_option(changes, 'firewall', 'defaults', 'forward', defaults.forward or 'REJECT')
+	local wrote = {}
+	for _, key in ipairs({ 'input', 'output', 'forward' }) do
+		set_option(changes, 'firewall', 'defaults', key, defaults[key] or (key == 'output' and 'ACCEPT' or 'REJECT'))
+		wrote[key] = true
+	end
+	for _, key in ipairs(sorted_keys(defaults)) do
+		if not wrote[key] then set_option(changes, 'firewall', 'defaults', key, defaults[key]) end
+	end
 
 	local zone_to_networks = {}
 	for _, seg_id in ipairs(sorted_keys(intent.segments or {})) do
@@ -398,6 +674,7 @@ local function build_firewall_changes(intent, segment_to_ifaces)
 	end
 
 	local zone_specs = is_plain_table(fw.zones) and fw.zones or {}
+	for _, zname in ipairs(sorted_keys(zone_specs)) do zone_to_networks[zname] = zone_to_networks[zname] or {} end
 	for _, zname in ipairs(sorted_keys(zone_to_networks)) do
 		local zsec = section_id('zone', zname)
 		local zspec = is_plain_table(zone_specs[zname]) and zone_specs[zname] or {}
@@ -406,12 +683,15 @@ local function build_firewall_changes(intent, segment_to_ifaces)
 		known[zsec] = true
 		set_section(changes, 'firewall', zsec, 'zone')
 		set_option(changes, 'firewall', zsec, 'name', zname)
-		set_option(changes, 'firewall', zsec, 'network', nets)
+		if #nets > 0 then set_option(changes, 'firewall', zsec, 'network', nets) end
 		set_option(changes, 'firewall', zsec, 'input', zspec.input or 'ACCEPT')
 		set_option(changes, 'firewall', zsec, 'output', zspec.output or 'ACCEPT')
 		set_option(changes, 'firewall', zsec, 'forward', zspec.forward or 'REJECT')
-		set_option(changes, 'firewall', zsec, 'masq', bool_uci(zspec.masq))
-		set_option(changes, 'firewall', zsec, 'mtu_fix', bool_uci(zspec.mtu_fix))
+		for _, key in ipairs(sorted_keys(zspec)) do
+			if key ~= 'input' and key ~= 'output' and key ~= 'forward' and key ~= 'network' then
+				set_option(changes, 'firewall', zsec, key, zspec[key])
+			end
+		end
 	end
 
 	local policies = is_plain_table(fw.policies) and fw.policies or {}
@@ -422,28 +702,66 @@ local function build_firewall_changes(intent, segment_to_ifaces)
 			local src = p.src or p.from
 			local dest = p.dest or p.to
 			if type(src) == 'string' and type(dest) == 'string' then
-			n = n + 1
-			local sec = section_id('fwd', pid .. '_' .. tostring(n))
-			known[sec] = true
-			set_section(changes, 'firewall', sec, 'forwarding')
-			set_option(changes, 'firewall', sec, 'src', src)
-			set_option(changes, 'firewall', sec, 'dest', dest)
+				n = n + 1
+				local sec = section_id('fwd', pid .. '_' .. tostring(n))
+				known[sec] = true
+				set_section(changes, 'firewall', sec, 'forwarding')
+				set_option(changes, 'firewall', sec, 'src', src)
+				set_option(changes, 'firewall', sec, 'dest', dest)
 			end
 		end
+	end
+
+	local rules = is_plain_table(fw.rules) and fw.rules or {}
+	local function add_rule(rid, r)
+		if not is_plain_table(r) then return end
+		local sec = section_id('rule', 'rule_' .. tostring(rid))
+		known[sec] = true
+		set_section(changes, 'firewall', sec, 'rule')
+		set_option(changes, 'firewall', sec, 'name', r.name or rid)
+		for _, key in ipairs({
+			'enabled', 'family', 'src', 'dest', 'proto', 'src_ip', 'dest_ip', 'src_port', 'dest_port',
+			'icmp_type', 'target', 'limit', 'limit_burst', 'extra', 'utc_time', 'weekdays', 'monthdays',
+			'start_time', 'stop_time', 'start_date', 'stop_date'
+		}) do
+			set_option(changes, 'firewall', sec, key, r[key])
+		end
+	end
+	if #rules > 0 then
+		for i = 1, #rules do add_rule(tostring(i), rules[i]) end
+	else
+		for _, rid in ipairs(sorted_keys(rules)) do add_rule(rid, rules[rid]) end
 	end
 
 	return changes, known
 end
 
-local function apply_package(mgr, pkg, changes, _known, restart_cmds)
-	-- This first provider slice uses deterministic named sections and lets UCI
-	-- replace existing values.  Later full reconciliation can add quiet deletion of
-	-- stale generated sections once provider-owned markers are in place.
-	return mgr:submit_op({
+local function reconcile_package_changes(pkg, changes, known, current_pkg)
+	local out = {}
+	for secname, rec in pairs(current_pkg or {}) do
+		if type(secname) == 'string' and secname:sub(1, 1) ~= '.' and type(rec) == 'table' then
+			-- Devicecode is the sole UCI writer on managed appliances, so OpenWrt
+			-- provider apply is fully reconciliatory: sections absent from the desired
+			-- set are removed rather than left as stale configuration.
+			if not (known and known[secname]) then
+				out[#out + 1] = { op = 'delete', config = pkg, section = secname }
+			end
+		end
+	end
+	for i = 1, #(changes or {}) do out[#out + 1] = changes[i] end
+	return out
+end
+
+local function transaction_record(pkg, changes, known, current_pkg, restart_cmds)
+	return {
 		config = pkg,
-		changes = changes,
-		restart_cmds = restart_cmds,
-	})
+		changes = reconcile_package_changes(pkg, changes, known, current_pkg),
+		restart_cmds = restart_cmds or {},
+	}
+end
+
+local function apply_package(mgr, pkg, changes, known, restart_cmds)
+	return mgr:submit_op(transaction_record(pkg, changes, known, nil, restart_cmds))
 end
 
 function M.new(config, opts)
@@ -573,11 +891,11 @@ function Provider:plan_op(req)
 	local intent = req and (req.intent or req.desired or req)
 	local valid = validate_intent(intent)
 	if not valid or valid.ok ~= true then return op.always(valid) end
-	local n_changes, n_known, segment_to_ifaces = build_network_changes(intent)
+	local n_changes, n_known, segment_to_ifaces = build_network_changes(intent, self.config)
 	local d_changes, d_known = build_dhcp_changes(intent)
 	local f_changes, f_known = build_firewall_changes(intent, segment_to_ifaces)
 	local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent)
-	local shaping = is_plain_table(intent.shaping) and intent.shaping or {}
+	local shaping = build_shaping_request(intent, self.config)
 	local domains = {
 		vlan = { status = 'implemented' },
 		shaping = { status = shaping.enabled and 'implemented' or 'not_configured' },
@@ -608,33 +926,55 @@ function Provider:apply_op(req)
 		local mgr, merr = self:_ensure_started()
 		if not mgr then return { ok = false, err = merr or 'uci manager unavailable', backend = 'openwrt' } end
 
-		local n_changes, n_known, segment_to_ifaces = build_network_changes(intent)
+		local current = {}
+		local read_current, read_err = read_uci_packages(self.config)
+		if read_current then current = read_current end
+
+		local n_changes, n_known, segment_to_ifaces = build_network_changes(intent, self.config)
 		local d_changes, d_known = build_dhcp_changes(intent)
 		local f_changes, f_known = build_firewall_changes(intent, segment_to_ifaces)
 		local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent)
 
-		local ok, err, admitted = fibers.perform(apply_package(mgr, 'network', n_changes, n_known, {
-			{ kind = 'reload', target = 'network' },
+		local records = {
+			transaction_record('network', n_changes, n_known, current.network, {
+				{ kind = 'reload', target = 'network' },
+			}),
+			transaction_record('dhcp', d_changes, d_known, current.dhcp, {
+				{ kind = 'restart', target = 'dnsmasq' },
+			}),
+			transaction_record('firewall', f_changes, f_known, current.firewall, {
+				{ kind = 'restart', target = 'firewall' },
+			}),
+			-- Always include mwan3 so stale generated multi-WAN state is removed when
+			-- WAN/multi-WAN is disabled or a member disappears.  Structural apply still
+			-- does not restart mwan3; live rules are handled separately.
+			transaction_record('mwan3', m_changes, m_known, current.mwan3, {}),
+		}
+		local packages = { 'network', 'dhcp', 'firewall', 'mwan3' }
+		local tx_result, admitted = fibers.perform(mgr:transaction_op({
+			records = records,
+			packages = packages,
+			rollback = true,
 		}))
-		if ok ~= true then return { ok = false, err = 'network UCI apply failed: ' .. tostring(err), admitted = admitted, backend = 'openwrt' } end
-		ok, err, admitted = fibers.perform(apply_package(mgr, 'dhcp', d_changes, d_known, {
-			{ kind = 'restart', target = 'dnsmasq' },
-		}))
-		if ok ~= true then return { ok = false, err = 'dhcp UCI apply failed: ' .. tostring(err), admitted = admitted, backend = 'openwrt' } end
-		ok, err, admitted = fibers.perform(apply_package(mgr, 'firewall', f_changes, f_known, {
-			{ kind = 'restart', target = 'firewall' },
-		}))
-		if ok ~= true then return { ok = false, err = 'firewall UCI apply failed: ' .. tostring(err), admitted = admitted, backend = 'openwrt' } end
-
-		local packages = { 'network', 'dhcp', 'firewall' }
-		if #m_changes > 0 then
-			ok, err, admitted = fibers.perform(apply_package(mgr, 'mwan3', m_changes, m_known, {}))
-			if ok ~= true then return { ok = false, err = 'mwan3 UCI apply failed: ' .. tostring(err), admitted = admitted, backend = 'openwrt', partial = true } end
-			packages[#packages + 1] = 'mwan3'
+		if not tx_result or tx_result.ok ~= true then
+			return {
+				ok = false,
+				backend = 'openwrt',
+				admitted = admitted,
+				status = tx_result and tx_result.status or 'failed',
+				err = tx_result and tx_result.err or 'UCI transaction failed',
+				rollback = tx_result and tx_result.rollback or nil,
+				failed_step = tx_result and tx_result.failed_step or nil,
+				failed_config = tx_result and tx_result.failed_config or nil,
+				changed = tx_result and tx_result.status == 'failed_rollback_failed' or false,
+				read_current_err = read_err,
+			}
 		end
+
 		local shaping_result = nil
-		if intent.shaping and intent.shaping.enabled == true then
-			shaping_result = shaper_mod.apply(intent.shaping, { run_cmd = self.shaper_run_cmd })
+		local shaping_request = build_shaping_request(intent, self.config)
+		if shaping_request and shaping_request.enabled == true then
+			shaping_result = shaper_mod.apply(shaping_request, { run_cmd = self.shaper_run_cmd })
 			if not shaping_result or shaping_result.ok ~= true then
 				return { ok = false, err = 'traffic shaping apply failed: ' .. tostring(shaping_result and shaping_result.err or 'unknown'), backend = 'openwrt', partial = true }
 			end
@@ -647,6 +987,7 @@ function Provider:apply_op(req)
 			backend = 'openwrt',
 			intent_rev = intent.rev,
 			packages = packages,
+			transaction = tx_result,
 			multiwan = m_plan,
 			shaping = shaping_result,
 		}
@@ -900,9 +1241,9 @@ function snapshot_from_packages(packages)
 		schema = 'devicecode.net.observed/1',
 		segments = {},
 		interfaces = {},
-		dns = { enabled = true, upstreams = {} },
+		dns = { enabled = true, upstreams = {}, records = {}, host_files = {} },
 		dhcp = { pools = {} },
-		firewall = { defaults = {}, zones = {}, policies = {} },
+		firewall = { defaults = {}, zones = {}, policies = {}, rules = {} },
 		routing = { routes = {} },
 		multiwan = { config = { interfaces = {}, members = {}, policies = {}, rules = {} } },
 		shaping = { applied = nil },
@@ -968,7 +1309,15 @@ function snapshot_from_packages(packages)
 	for _, secname in ipairs(sorted_keys(dhcp)) do
 		local sec = dhcp[secname]
 		if is_plain_table(sec) and sec['.type'] == 'dnsmasq' then
-			observed.dns.upstreams = list_from_uci(sec.server)
+			local interfaces = list_from_uci(sec.interface)
+			local upstreams = list_from_uci(sec.server)
+			for i = 1, #upstreams do observed.dns.upstreams[#observed.dns.upstreams + 1] = upstreams[i] end
+			observed.dns.cache_size = tonumber(sec.cachesize) or sec.cachesize
+			observed.dns.host_files[secname] = { interfaces = interfaces, addnhosts = list_from_uci(sec.addnhosts), addnmount = list_from_uci(sec.addnmount) }
+			for _, addr in ipairs(list_from_uci(sec.address)) do
+				local name, ip = tostring(addr):match('^/([^/]+)/([^/]+)$')
+				if name and ip then observed.dns.records[name] = { name = name, address = ip, source = secname, interfaces = interfaces } end
+			end
 		elseif is_plain_table(sec) and sec['.type'] == 'dhcp' then
 			local seg_id = sec.interface or secname
 			local enabled = sec.ignore ~= '1'
@@ -987,11 +1336,7 @@ function snapshot_from_packages(packages)
 	for _, secname in ipairs(sorted_keys(firewall)) do
 		local sec = firewall[secname]
 		if is_plain_table(sec) and sec['.type'] == 'defaults' then
-			observed.firewall.defaults = {
-				input = sec.input,
-				output = sec.output,
-				forward = sec.forward,
-			}
+			observed.firewall.defaults = copy_plain(sec)
 		elseif is_plain_table(sec) and sec['.type'] == 'zone' then
 			local zname = sec.name or secname
 			local networks = list_from_uci(sec.network)
@@ -1016,6 +1361,8 @@ function snapshot_from_packages(packages)
 				src = sec.src,
 				dest = sec.dest,
 			}
+		elseif is_plain_table(sec) and sec['.type'] == 'rule' then
+			observed.firewall.rules[secname] = copy_plain(sec)
 		end
 	end
 

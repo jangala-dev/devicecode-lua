@@ -198,4 +198,66 @@ function tests.test_speedtest_uses_mwan3_use_boundary()
 	end)
 end
 
+
+function tests.test_segment_trunk_realises_segments_without_cfg_net_interfaces()
+	fibers.run(function()
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			platform = { segment_trunk = { ifname = 'eth0', protected = true } },
+		}, {}))
+		local plan = fibers.perform(provider:plan_op({ intent = {
+			schema = 'devicecode.net.intent/1',
+			rev = 1,
+			segments = {
+				mgmt = { kind = 'system', protected = true, vlan = { id = 10 }, addressing = { ipv4 = { mode = 'static', cidr = '192.168.8.1/24' } } },
+				guest = { kind = 'guest', vlan = { id = 101 }, addressing = { ipv4 = { mode = 'static', cidr = '192.168.101.1/24' } } },
+			},
+			interfaces = {},
+			firewall = { zones = { mgmt = {}, guest = {} }, policies = {} },
+			routing = {}, dns = {}, dhcp = {}, wan = {}, shaping = {}, vpn = {}, diagnostics = {},
+		} }))
+		eq(plan.ok, true)
+		ok(plan.plan.packages.network.sections >= 5, 'segment trunk should create globals plus interface/device sections')
+		provider:terminate('test complete')
+	end)
+end
+
+
+local function read_project_file(rel)
+	local candidates = { rel, '../' .. rel }
+	for i = 1, #candidates do
+		local f = io.open(candidates[i], 'rb')
+		if f then local data = f:read('*a'); f:close(); return data end
+	end
+	return nil, 'unable to read ' .. rel
+end
+
+function tests.test_bigbox_clean_config_plans_dns_rules_routes_and_segment_shaping()
+	fibers.run(function()
+		local cjson = require 'cjson.safe'
+		local cfg_mod = require 'services.net.config'
+		local text = ok(read_project_file('src/configs/bigbox-v1-cm-2.json'))
+		local doc = ok(cjson.decode(text), 'bigbox config must decode')
+		local intent = ok(cfg_mod.normalise(doc.net, { generation = 1 }))
+		local shaper_cmds = {}
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			platform = { segment_trunk = { ifname = 'eth0' } },
+			shaper_run_cmd = function(argv) shaper_cmds[#shaper_cmds + 1] = table.concat(argv, ' '); return true, nil end,
+		}, {}))
+		local plan = fibers.perform(provider:plan_op({ intent = intent }))
+		eq(plan.ok, true)
+		ok(plan.plan.packages.dhcp.changes > 0, 'dns/dhcp changes expected')
+		ok(plan.plan.packages.firewall.changes > 0, 'firewall changes expected')
+		ok(plan.plan.packages.network.changes > 0, 'network changes expected')
+		local result = fibers.perform(provider:apply_op({ intent = intent }))
+		eq(result.ok, true)
+		ok(result.shaping and result.shaping.ok == true, 'segment-profile shaping should be applied')
+		ok(#shaper_cmds > 0, 'segment shaping should emit tc commands')
+		provider:terminate('test complete')
+	end)
+end
+
 return tests

@@ -137,6 +137,11 @@ local files = {
 	"unit.net.test_config",
 	"unit.net.test_hal_client",
 	"unit.net.test_service_behaviour",
+	"unit.wired.test_config",
+	"unit.wired.test_trunk_validation",
+	"unit.wired.test_architecture",
+	"unit.device.test_wired_provider_curation",
+	"unit.hal.wired_provider_spec",
 }
 
 local function monotonic_now()

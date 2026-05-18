@@ -513,6 +513,14 @@ local function cap_status_payload(event_type, entry)
 	})
 end
 
+-- Some host-discovered capabilities are deliberately kept raw until a higher
+-- level appliance composer curates them into a public capability.  For wired
+-- providers, Device owns the public cap/wired-provider/... surface; HAL only
+-- publishes raw/host/<source>/cap/wired-provider/... and raw RPC.
+local function public_cap_projection_enabled(class)
+	return class ~= 'wired-provider'
+end
+
 local function parse_cap_ctrl_topic(topic)
 	if topic[1] == 'cap' and topic[4] == 'rpc' then
 		return 'public', topic[2], topic[3], topic[5], nil
@@ -669,8 +677,11 @@ function HalService.start(conn, opts)
 
 		self.caps[class][id] = entry
 
+		local expose_public = public_cap_projection_enabled(class)
 		for offering in pairs(cap_inst.offerings) do
-			entry.rpc[offering] = conn:bind(T.cap_rpc(class, id, offering))
+			if expose_public then
+				entry.rpc[offering] = conn:bind(T.cap_rpc(class, id, offering))
+			end
 			if source_kind == 'host' and source then
 				entry.raw_rpc[offering] = conn:bind(T.raw_cap_rpc(source, class, id, offering))
 			end
@@ -688,7 +699,9 @@ function HalService.start(conn, opts)
 		unbind_cap_endpoints(entry)
 
 		for key in pairs(entry.state_keys) do
-			conn:unretain(T.cap_state(class, id, key))
+			if public_cap_projection_enabled(class) then
+				conn:unretain(T.cap_state(class, id, key))
+			end
 			if entry.source_kind == 'host' and entry.source then
 				conn:unretain(T.raw_cap_state(entry.source, class, id, key))
 			end
@@ -732,12 +745,19 @@ function HalService.start(conn, opts)
 	end
 
 	local function retain_cap_projection(event_type, class, id, entry)
-		conn:retain(T.cap_legacy_state(class, id), event_type)
-		conn:retain(T.cap_status(class, id), cap_status_payload(event_type, entry))
+		if public_cap_projection_enabled(class) then
+			conn:retain(T.cap_legacy_state(class, id), event_type)
+			conn:retain(T.cap_status(class, id), cap_status_payload(event_type, entry))
 
-		if event_type == 'added' then
-			conn:retain(T.cap_meta(class, id), cap_public_meta_payload(entry.inst, entry))
+			if event_type == 'added' then
+				conn:retain(T.cap_meta(class, id), cap_public_meta_payload(entry.inst, entry))
+			else
+				conn:unretain(T.cap_meta(class, id))
+			end
 		else
+			-- Defensive cleanup in case an earlier build exposed this class publicly.
+			conn:unretain(T.cap_legacy_state(class, id))
+			conn:unretain(T.cap_status(class, id))
 			conn:unretain(T.cap_meta(class, id))
 		end
 
@@ -754,7 +774,9 @@ function HalService.start(conn, opts)
 	end
 
 	local function publish_cap_event(entry, class, id, name, payload)
-		conn:publish(T.cap_event(class, id, name), payload)
+		if public_cap_projection_enabled(class) then
+			conn:publish(T.cap_event(class, id, name), payload)
+		end
 
 		if entry.source_kind == 'host' and entry.source then
 			conn:publish(T.raw_cap_event(entry.source, class, id, name), payload)
@@ -763,7 +785,9 @@ function HalService.start(conn, opts)
 
 	local function retain_cap_state(entry, class, id, key, payload)
 		entry.state_keys[key] = true
-		conn:retain(T.cap_state(class, id, key), payload)
+		if public_cap_projection_enabled(class) then
+			conn:retain(T.cap_state(class, id, key), payload)
+		end
 
 		if entry.source_kind == 'host' and entry.source then
 			conn:retain(T.raw_cap_state(entry.source, class, id, key), payload)
@@ -771,7 +795,9 @@ function HalService.start(conn, opts)
 	end
 
 	local function retain_cap_meta(entry, class, id)
-		conn:retain(T.cap_meta(class, id), cap_public_meta_payload(entry.inst, entry))
+		if public_cap_projection_enabled(class) then
+			conn:retain(T.cap_meta(class, id), cap_public_meta_payload(entry.inst, entry))
+		end
 
 		if entry.source_kind == 'host' and entry.source then
 			conn:retain(T.raw_cap_meta(entry.source, class, id), cap_raw_meta_payload(entry.inst, entry))

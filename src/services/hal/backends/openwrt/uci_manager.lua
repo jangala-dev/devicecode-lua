@@ -279,6 +279,94 @@ local function revert_record(cursor, record)
 	end
 end
 
+local function record_packages(records)
+	local seen, out = {}, {}
+	for _, record in ipairs(records or {}) do
+		if record and record.config and not seen[record.config] then
+			seen[record.config] = true
+			out[#out + 1] = record.config
+		end
+	end
+	table.sort(out)
+	return out
+end
+
+local function copy_package_table(pkg)
+	local out = {}
+	for k, v in pairs(pkg or {}) do
+		if type(k) == 'string' and k:sub(1, 1) ~= '.' then
+			out[k] = deep_copy(v)
+		end
+	end
+	return out
+end
+
+local function snapshot_packages(cursor, packages)
+	local out = {}
+	if not cursor then return out, nil end
+	if type(cursor.get_all) ~= 'function' then return nil, 'uci get_all unavailable; cannot snapshot for rollback' end
+	for _, pkg in ipairs(packages or {}) do
+		if type(cursor.load) == 'function' then pcall(function () cursor:load(pkg) end) end
+		out[pkg] = copy_package_table(cursor:get_all(pkg) or {})
+	end
+	return out, nil
+end
+
+local function delete_all_sections(cursor, pkg)
+	if not cursor then return true, nil end
+	if type(cursor.get_all) ~= 'function' then return nil, 'uci get_all unavailable; cannot clear package for rollback' end
+	local cur = cursor:get_all(pkg) or {}
+	for secname, rec in pairs(cur) do
+		if type(secname) == 'string' and secname:sub(1, 1) ~= '.' and type(rec) == 'table' then
+			local ok, err = cursor:delete(pkg, secname)
+			if ok ~= true then return nil, tostring(err or ('delete failed for ' .. pkg .. '.' .. secname)) end
+		end
+	end
+	return true, nil
+end
+
+local function restore_package(cursor, pkg, snapshot)
+	if not cursor then return true, nil end
+	if type(cursor.revert) == 'function' then pcall(function () cursor:revert(pkg) end) end
+	local ok, err = delete_all_sections(cursor, pkg)
+	if ok ~= true then return nil, err end
+	for secname, rec in pairs(snapshot or {}) do
+		if type(secname) == 'string' and secname:sub(1, 1) ~= '.' and type(rec) == 'table' then
+			local stype = rec['.type']
+			if type(stype) ~= 'string' or stype == '' then
+				return nil, 'rollback snapshot missing section type for ' .. pkg .. '.' .. secname
+			end
+			ok, err = cursor:set(pkg, secname, stype)
+			if ok ~= true then return nil, tostring(err or ('restore create failed for ' .. pkg .. '.' .. secname)) end
+			for opt, value in pairs(rec) do
+				if type(opt) == 'string' and opt:sub(1, 1) ~= '.' then
+					local uval, verr = to_uci_value(value)
+					if verr then return nil, verr end
+					ok, err = cursor:set(pkg, secname, opt, uval)
+					if ok ~= true then return nil, tostring(err or ('restore set failed for ' .. pkg .. '.' .. secname .. '.' .. opt)) end
+				end
+			end
+		end
+	end
+	ok, err = cursor:commit(pkg)
+	if ok ~= true then return nil, tostring(err or ('rollback commit failed for ' .. pkg)) end
+	return true, nil
+end
+
+local function restore_packages(cursor, snapshots, packages)
+	local restored, errors = {}, {}
+	for _, pkg in ipairs(packages or {}) do
+		local ok, err = restore_package(cursor, pkg, snapshots and snapshots[pkg] or {})
+		if ok == true then
+			restored[#restored + 1] = pkg
+		else
+			errors[#errors + 1] = tostring(pkg) .. ': ' .. tostring(err)
+		end
+	end
+	if #errors > 0 then return nil, table.concat(errors, '; '), restored end
+	return true, nil, restored
+end
+
 local function cursor_add_list(cursor, config, section, option, value)
 	if type(cursor.add_list) == 'function' then
 		local ok, err = cursor:add_list(config, section, option, value)
@@ -504,6 +592,8 @@ function M.new(opts)
 		_fake = cursor == nil,
 		_debounce_s = tonumber(opts.debounce_s) or 0.1,
 		_run_cmd = opts.run_cmd or default_run_cmd,
+		_run_cmd_explicit = type(opts.run_cmd) == 'function',
+		_pending = {},
 	}, Manager)
 end
 
@@ -534,6 +624,10 @@ function Manager:_collect_batch(first_item, owner_scope)
 		local which, item = fibers.perform(fibers.named_choice(arms))
 		if which == 'timeout' or which == 'closed' then break end
 		if item == nil then break end
+		if item.transaction then
+			self._pending[#self._pending + 1] = item
+			break
+		end
 		batch[#batch + 1] = item
 	end
 	return batch
@@ -574,17 +668,143 @@ function Manager:_apply_batch(batch)
 	end
 end
 
+
+function Manager:_apply_transaction(item)
+	local tx = item.transaction or {}
+	local records = tx.records or {}
+	local packages = tx.packages or record_packages(records)
+	local result = {
+		ok = true,
+		status = 'ok',
+		packages = packages,
+		rollback = { attempted = false, ok = nil, packages = {} },
+	}
+
+	local snapshots, snap_err = snapshot_packages(self._cursor, packages)
+	if snapshots == nil then
+		result.ok = false
+		result.status = 'failed_no_change'
+		result.err = snap_err
+		if item.reply_tx then queue.try_admit_now(item.reply_tx, result) end
+		return
+	end
+
+	local record_results = {}
+	local failed = nil
+	for _, record in ipairs(records) do
+		local ok, err
+		if self._closed then
+			ok, err = nil, 'uci manager closed'
+		else
+			ok, err = apply_with_cursor(self._cursor, record)
+		end
+		local res = { record = record, ok = ok == true, err = err or '' }
+		record_results[#record_results + 1] = res
+		if ok ~= true then
+			failed = { step = 'uci_commit', config = record.config, err = err }
+			break
+		end
+	end
+
+	if not failed then
+		local restart_entries = trim_restarts(record_results)
+		if self._fake == true and self._run_cmd_explicit ~= true then
+			-- In fake-UCI mode there is no OpenWrt system to reload.  Unit tests and
+			-- non-OpenWrt hosts should still exercise validation, reconciliation and
+			-- transaction/rollback semantics without attempting /etc/init.d commands.
+		else
+			for _, entry in ipairs(restart_entries) do
+				local rok, rerr = self._run_cmd(entry.argv)
+				if rok ~= true then
+					failed = { step = 'restart', argv = entry.argv, err = rerr }
+					break
+				end
+			end
+		end
+	end
+
+	if failed then
+		result.ok = false
+		result.failed_step = failed.step
+		result.failed_config = failed.config
+		result.err = tostring(failed.err or failed.step or 'uci transaction failed')
+		if tx.rollback ~= false then
+			result.rollback.attempted = true
+			local rok, rerr, restored = restore_packages(self._cursor, snapshots, packages)
+			result.rollback.ok = rok == true
+			result.rollback.packages = restored or {}
+			if rok == true then
+				result.status = 'failed_rolled_back'
+			else
+				result.status = 'failed_rollback_failed'
+				result.rollback.err = tostring(rerr)
+			end
+		else
+			result.status = 'failed_partial'
+		end
+	end
+
+	if item.reply_tx then queue.try_admit_now(item.reply_tx, result) end
+end
+
 function Manager:_run(owner_scope)
 	while self._closed ~= true do
-		local arms = { item = self._rx:recv_op() }
-		if owner_scope and type(owner_scope.close_op) == 'function' then
-			arms.closed = owner_scope:close_op()
+		local item = table.remove(self._pending, 1)
+		if item == nil then
+			local arms = { item = self._rx:recv_op() }
+			if owner_scope and type(owner_scope.close_op) == 'function' then
+				arms.closed = owner_scope:close_op()
+			end
+			local which, got = fibers.perform(fibers.named_choice(arms))
+			if which == 'closed' or got == nil then return end
+			item = got
 		end
-		local which, item = fibers.perform(fibers.named_choice(arms))
-		if which == 'closed' or item == nil then return end
-		local batch = self:_collect_batch(item, owner_scope)
-		self:_apply_batch(batch)
+		if item.transaction then
+			self:_apply_transaction(item)
+		else
+			local batch = self:_collect_batch(item, owner_scope)
+			self:_apply_batch(batch)
+		end
 	end
+end
+
+
+function Manager:transaction_op(spec, opts)
+	spec = spec or {}
+	opts = opts or {}
+	local admitted_flag = false
+	return fibers.run_scope_op(function ()
+		if self._closed then return { ok = false, status = 'closed', err = 'closed' }, false end
+		local records = {}
+		for i, record in ipairs(spec.records or {}) do
+			local normalised, err = normalise_record(record)
+			if not normalised then
+				return { ok = false, status = 'invalid', err = 'record ' .. tostring(i) .. ': ' .. tostring(err) }, false
+			end
+			records[#records + 1] = normalised
+		end
+		if #records == 0 then return { ok = true, status = 'ok', packages = {}, rollback = { attempted = false } }, false end
+		local reply_tx, reply_rx = mailbox.new(1, { full = 'reject_newest' })
+		local admitted, aerr = queue.try_admit_now(self._tx, {
+			transaction = {
+				records = records,
+				packages = spec.packages or record_packages(records),
+				rollback = spec.rollback ~= false,
+			},
+			reply_tx = reply_tx,
+		})
+		if admitted ~= true then
+			return { ok = false, status = 'busy', err = 'uci_manager_busy: ' .. tostring(aerr or 'not_admitted') }, false
+		end
+		admitted_flag = true
+		if type(opts.on_admitted) == 'function' then opts.on_admitted() end
+		local result = fibers.perform(reply_rx:recv_op())
+		if result == nil then return { ok = false, status = 'closed', err = 'uci manager closed' }, true end
+		return result, true
+	end):wrap(function (status, _report, result, admitted)
+		if status ~= 'ok' then return { ok = false, status = 'failed', err = tostring(result or status) }, admitted_flag end
+		return result, (admitted == true) or admitted_flag
+	end)
 end
 
 function Manager:submit_op(record, opts)

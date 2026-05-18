@@ -36,7 +36,7 @@ for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do local f=asse
 
 local shaper_cmds, restarts, live_restores = {}, {}, {}
 local provider = assert(provider_loader.new({
-  provider = 'openwrt', confdir = conf, savedir = save, debounce_s = 0.01,
+  provider = 'openwrt', confdir = conf, savedir = save, debounce_s = 0.01, platform = { segment_trunk = { ifname = 'eth0' } },
   run_cmd = function(argv) restarts[#restarts+1] = table.concat(argv, ' '); return true, nil end,
   shaper_run_cmd = function(argv) shaper_cmds[#shaper_cmds+1] = table.concat(argv, ' '); return true, nil end,
   speedtest_run_cmd = function(argv) return true, '55', nil end,
@@ -68,11 +68,27 @@ local intent = {
     wan_a = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan0'}, addressing={ipv4={mode='dhcp', metric=10}} },
     wan_b = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan1'}, addressing={ipv4={mode='dhcp', metric=20}} },
   },
-  firewall = { zones={lan={}, wan={masq=true}}, policies={lan_to_wan={from='lan', to='wan'}} },
-  routing={}, dns={}, dhcp={}, vpn={}, diagnostics={},
+  firewall = {
+    defaults={ input='ACCEPT', output='ACCEPT', forward='REJECT', synflood_protect=true },
+    zones={lan={}, wan={masq=true, mtu_fix=true}},
+    policies={lan_to_wan={from='lan', to='wan'}},
+    rules={ allow_dns={ name='Allow DNS', src='lan', proto='tcp udp', dest_port='53', target='ACCEPT' } },
+  },
+  routing={ routes={ default_lab={ target='192.168.99.1', interface='lan', gateway='192.168.10.254' } } },
+  dns={
+    domain='bigbox.home',
+    upstreams={'1.1.1.1','8.8.8.8'},
+    cache={size=1000},
+    host_files={ base_dir='/tmp/devicecode-dns-hosts', sources={ ads={file='ads.hosts'} } },
+    records={ router={ name='config.bigbox.home', address='192.168.10.1' } },
+  },
+  dhcp={ defaults={ lease_time='12h', authoritative=true }, reservations={ unifi={ name='unifi', mac='00:11:22:33:44:55', ip='192.168.10.2' } } },
+  vpn={}, diagnostics={},
   wan = { enabled=true, policy='weighted_failover', load_balancing={speedtests=true, policy='balanced'}, members={ gsm_a={interface='wan_a', metric=1, weight=1}, gsm_b={interface='wan_b', metric=1, weight=1} } },
-  shaping = { enabled=true, links={ wan_a={ iface='wwan0', egress={enabled=true, host_rate='2mbit', hosts={['192.168.10.2']={rate='1mbit'}}} } } },
+  shaping = { enabled=true, profiles={ restricted={ egress={enabled=true, host_rate='2mbit', hosts={['192.168.10.2']={rate='1mbit'}}} } } },
 }
+intent.segments.lan.dns = { local_server=true, domain='bigbox.home', host_files={'ads'} }
+intent.segments.lan.shaping = { profile='restricted' }
 
 fibers.run(function()
   local plan = perform(provider:plan_op({ intent = intent }))
@@ -101,6 +117,17 @@ if c:get('network', 'dev_lan_10') then
   eq(c:get('network', 'dev_lan_10'), 'device', 'vlan device type')
   eq(c:get('network', 'dev_lan_10', 'vid'), '10', 'vlan vid')
 end
+eq(c:get('network', 'route_default_lab'), 'route', 'map-shaped route')
+eq(c:get('dhcp', 'dns_lan'), 'dnsmasq', 'per-segment dnsmasq')
+eq(c:get('dhcp', 'dns_lan', 'cachesize'), '1000', 'dns cache size')
+local addnhosts = c:get('dhcp', 'dns_lan', 'addnhosts')
+if type(addnhosts) == 'table' then eq(addnhosts[1], '/tmp/devicecode-dns-hosts/ads.hosts', 'segment host file') else eq(addnhosts, '/tmp/devicecode-dns-hosts/ads.hosts', 'segment host file') end
+local addresses = c:get('dhcp', 'dns_lan', 'address')
+local address_s = type(addresses) == 'table' and table.concat(addresses, ' ') or tostring(addresses)
+if not address_s:find('/config.bigbox.home/192.168.10.1', 1, true) then fail('dns address record not applied: '..address_s) end
+eq(c:get('dhcp', 'host_unifi'), 'host', 'dhcp reservation')
+eq(c:get('firewall', 'rule_allow_dns'), 'rule', 'firewall rule')
+eq(c:get('firewall', 'defaults', 'synflood_protect'), '1', 'firewall synflood default')
 eq(c:get('mwan3', 'balanced'), 'policy', 'mwan balanced policy')
 eq(c:get('mwan3', 'default_rule_v4'), 'rule', 'mwan default rule')
 print('openwrt network provider VLAN/MWAN/shaping: ok')

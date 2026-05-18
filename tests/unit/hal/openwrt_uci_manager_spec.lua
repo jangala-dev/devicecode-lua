@@ -220,4 +220,42 @@ function tests.test_legacy_restart_shorthands_are_normalised()
 	eq(normalised.restart_cmds[2][2], 'restart')
 end
 
+
+function tests.test_transaction_rolls_back_touched_packages_on_partial_failure()
+	fibers.run(function (scope)
+		local calls = {}
+		local snapshots = {
+			network = {
+				lan = { ['.type'] = 'interface', proto = 'static' },
+			},
+			dhcp = {
+				dnsmasq = { ['.type'] = 'dnsmasq', domainneeded = '1' },
+			},
+		}
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function (_, pkg)
+			calls[#calls + 1] = { op = 'get_all', pkg }
+			return snapshots[pkg] or {}
+		end
+		cursor.set = function (_, config, section, option, value)
+			calls[#calls + 1] = { op = 'set', config, section, option, value }
+			if config == 'dhcp' and section == 'bad' then return nil, 'synthetic failure' end
+			return true
+		end
+		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function () return true end }))
+		ok(mgr:start(scope))
+		local result, admitted = fibers.perform(mgr:transaction_op({
+			packages = { 'network', 'dhcp' },
+			records = {
+				{ config = 'network', changes = { { op = 'set', config = 'network', section = 'wan', option = 'interface' } } },
+				{ config = 'dhcp', changes = { { op = 'set', config = 'dhcp', section = 'bad', option = 'dhcp' } } },
+			},
+		}))
+		eq(admitted, true)
+		eq(result.ok, false)
+		eq(result.status, 'failed_rolled_back')
+		eq(result.rollback.ok, true)
+	end)
+end
+
 return tests

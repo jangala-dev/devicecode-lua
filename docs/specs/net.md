@@ -71,8 +71,8 @@ wifi
   radios, SSIDs, wireless clients, AP policy, channel/power policy,
   wireless inter-links and wireless backhaul presentation
 
-switch
-  physical ports, access/trunk mode, VLAN realisation on ports,
+wired
+  direct Ethernet interfaces, switch ports, access/trunk mode, VLAN realisation on ports,
   PoE, link state, port counters and switch-chip behaviour
 
 HAL
@@ -84,15 +84,15 @@ A useful rule is:
 ```text
 If it changes who can talk to whom, it belongs to net.
 If it changes how a wireless network is advertised or associated with, it belongs to wifi.
-If it changes what a physical Ethernet port does, it belongs to switch.
+If it changes how a wired physical surface attaches to a segment, it belongs to wired.
 If it touches OpenWrt, kernel networking, modem drivers, Wi-Fi drivers or switch ASICs, it belongs behind HAL.
 ```
 
 `wifi` should attach SSIDs to `net` segment names. It should not duplicate VLAN, DHCP, firewall or WAN policy.
 
-`switch` should attach ports to `net` segment names. It should not duplicate routing, DHCP, firewall or WAN policy.
+`wired` should attach direct Ethernet interfaces and switch ports to `net` segment names. It should not duplicate routing, DHCP, firewall or WAN policy.
 
-For Big Box, `switch` may run on the RTL8380M OpenWrt switch device and receive switch fabric intent over Devicecode. For Get Box, `switch` may be local to the MT7981B system. The contract remains the same.
+For Big Box, `wired` may consume a curated `cap/wired-provider/...` capability backed initially by a manufacturer HTTP switch-fabric driver, and later by the RTL8380M devicecode member over fabric. For Get Box, `wired` may be local to the MT7981B system. The contract remains the same.
 
 ## What `net` owns
 
@@ -860,11 +860,11 @@ Topic ownership:
 ```text
 state/net/...       owned by net
 state/wifi/...      owned by wifi
-state/switch/...    owned by switch
+state/wired/...     owned by wired
 state/device/...    owned by device
 ```
 
-`net` may consume state from `device`, `wifi`, `switch` or HAL, but it must not publish into their namespaces.
+`net` may consume curated state from `device`, `wifi` or `wired` where policy requires it, but it must not publish into their namespaces or consume raw wired-provider facts directly.
 
 ## Public request surfaces
 
@@ -1001,7 +1001,7 @@ The next major priorities are:
 
 5. **Clarify relationship with `wifi` and `switch`**
 
-   Ensure SSIDs and switch ports attach to `net` segment names. Avoid duplicating network policy in those services.
+   Ensure SSIDs and wired surfaces attach to `net` segment names. Avoid duplicating network policy in those services.
 
 ## Design north star
 
@@ -1010,7 +1010,7 @@ The next major priorities are:
 ```text
 net decides connectivity policy.
 wifi realises wireless access and wireless transport.
-switch realises wired fabric.
+wired realises wired fabric.
 HAL performs host/device-specific work.
 Devicecode publishes clear, explainable state and decisions.
 ```

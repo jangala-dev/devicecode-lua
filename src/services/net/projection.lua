@@ -17,6 +17,8 @@ end
 function M.summary_topic() return topics.summary() end
 function M.apply_topic() return topics.apply() end
 function M.segment_topic(id) return topics.segment(id) end
+function M.segments_topic() return topics.segments() end
+function M.vlan_policy_topic() return topics.vlan_policy() end
 function M.interface_topic(id) return topics.interface(id) end
 function M.domain_topic(name) return topics.domain(name) end
 
@@ -48,6 +50,18 @@ function M.summary(snapshot)
 end
 
 function M.apply(snapshot) return copy((snapshot or {}).apply or {}) end
+function M.segments(snapshot)
+	snapshot = snapshot or {}
+	return {
+		service = 'net',
+		kind = 'net.segments',
+		generation = snapshot.generation,
+		rev = snapshot.config and snapshot.config.rev or nil,
+		segments = copy(snapshot.segments or {}),
+		vlan_policy = copy(snapshot.vlan_policy or ((snapshot.policies or {}).vlan) or {}),
+	}
+end
+function M.vlan_policy(snapshot) return copy((snapshot or {}).vlan_policy or (((snapshot or {}).policies or {}).vlan) or {}) end
 function M.segment(seg) return copy(seg or {}) end
 function M.interface(iface) return copy(iface or {}) end
 function M.domain(snapshot, name) return copy((snapshot or {})[name] or {}) end

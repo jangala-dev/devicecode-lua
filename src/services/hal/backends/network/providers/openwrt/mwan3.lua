@@ -19,6 +19,8 @@ local function sid(v)
 end
 local function set_section(changes, config, section, stype)
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = stype }
+	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_managed', value = '1' }
+	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_owner', value = 'net' }
 end
 local function set_option(changes, config, section, option, value)
 	if value == nil then return end

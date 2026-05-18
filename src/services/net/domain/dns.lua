@@ -7,7 +7,7 @@ local M = {}
 
 local ALLOWED = {
 	'enabled', 'upstreams', 'search', 'zones', 'records', 'forwarders',
-	'cache', 'security', 'metadata', 'extensions',
+	'cache', 'security', 'domain', 'host_files', 'metadata', 'extensions',
 }
 
 function M.normalise(v)
@@ -24,6 +24,8 @@ function M.normalise(v)
 		forwarders = schema.copy(t.forwarders or {}),
 		cache = schema.copy(t.cache or {}),
 		security = schema.copy(t.security or {}),
+		domain = t.domain,
+		host_files = schema.copy(t.host_files or {}),
 	}
 	return schema.with_optional_extensions(out, t, { 'net', 'dns' })
 end

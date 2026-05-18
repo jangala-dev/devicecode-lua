@@ -18,6 +18,8 @@ local events = require 'services.net.events'
 local publisher = require 'services.net.publisher'
 local generation_mod = require 'services.net.generation'
 local apply_runtime = require 'services.net.apply_runtime'
+local wan_runtime = require 'services.net.wan_runtime'
+local stale = require 'services.net.stale'
 local hal_client_mod = require 'services.net.hal_client'
 local backpressure = require 'services.net.backpressure'
 
@@ -78,7 +80,20 @@ local function normalise_config_event(state, ev)
 	return intent, nil
 end
 
+local function cancel_active_runtime(state, reason)
+	for _, rec in pairs(state.active_speedtests or {}) do
+		if rec.handle and type(rec.handle.cancel) == 'function' then rec.handle:cancel(reason or 'runtime_replaced') end
+	end
+	state.active_speedtests = {}
+	if state.active_weight_apply and state.active_weight_apply.handle and type(state.active_weight_apply.handle.cancel) == 'function' then
+		state.active_weight_apply.handle:cancel(reason or 'runtime_replaced')
+	end
+	state.active_weight_apply = nil
+	return true, nil
+end
+
 local function cancel_active_generation(state, reason)
+	cancel_active_runtime(state, reason or 'generation_replaced')
 	local active = state.current_generation
 	if not active then return true, nil end
 	active.state = 'replacing'
@@ -112,6 +127,8 @@ local function start_apply_for_intent(state, intent, reason)
 			version = intent.version,
 		}
 		s.segments = intent.segments or {}
+		s.vlan_policy = intent.vlan_policy or {}
+		s.policies = intent.policies or {}
 		s.interfaces = intent.interfaces or {}
 		s.addressing = intent.addressing or {}
 		s.dns = intent.dns or {}
@@ -200,18 +217,11 @@ local function handle_config_changed(state, ev)
 	return true, nil
 end
 
-local function completion_is_current(state, ev)
-	return state.active_apply
-		and state.active_apply.generation == ev.generation
-		and state.active_apply.apply_id == ev.apply_id
-end
+local start_speedtests_for_wan
 
 local function handle_apply_done(state, ev)
-	if not completion_is_current(state, ev) then
-		state.model:update(function (s)
-			s.stats.stale_completions = (s.stats.stale_completions or 0) + 1
-			return s
-		end)
+	if not stale.apply_current(state, ev) then
+		stale.reject(state, ev)
 		publish_snapshot(state)
 		return true, nil
 	end
@@ -251,7 +261,10 @@ local function handle_apply_done(state, ev)
 		reason = reason,
 	})
 
-	return publish_snapshot(state)
+	local ok_pub, pub_err = publish_snapshot(state)
+	if ok_pub ~= true then return nil, pub_err end
+	if apply_ok then return start_speedtests_for_wan(state) end
+	return true, nil
 end
 
 
@@ -306,82 +319,178 @@ local function merge_observation(s, observed_event)
 end
 
 
-local function upsert_gsm_uplink(s, modem, patch)
-	modem = tostring(modem or 'unknown')
-	s.gsm = s.gsm or { uplinks = {} }
-	s.gsm.uplinks = s.gsm.uplinks or {}
-	local rec = model_mod.deep_copy(s.gsm.uplinks[modem] or { modem = modem })
-	for k, v in pairs(patch or {}) do rec[k] = v end
-	rec.modem = rec.modem or modem
-	rec.updated_at = now()
-	s.gsm.uplinks[modem] = rec
-	s.gsm.last_event_at = rec.updated_at
-	s.stats.gsm_events = (s.stats.gsm_events or 0) + 1
-	return rec
+
+local function speedtest_flag_enabled(v)
+	if v == true then return true end
+	if type(v) == 'table' then return v.enabled ~= false end
+	return false
 end
 
 local function speedtest_enabled(snapshot)
 	local wan = snapshot and snapshot.wan or {}
 	local lb = type(wan.load_balancing) == 'table' and wan.load_balancing or {}
 	local rt = type(wan.runtime) == 'table' and wan.runtime or {}
-	return lb.speedtest == true or lb.speedtests == true or rt.speedtest == true or rt.speedtests == true
+	return speedtest_flag_enabled(lb.speedtest)
+		or speedtest_flag_enabled(lb.speedtests)
+		or speedtest_flag_enabled(rt.speedtest)
+		or speedtest_flag_enabled(rt.speedtests)
 end
 
-local function build_speedtest_request(uplink)
-	uplink = uplink or {}
+local function wan_member_interface(member, uplink_id)
+	member = member or {}
+	return member.openwrt_interface
+		or member.network_interface
+		or member.interface
+		or member.iface
+		or member.link_id
+		or uplink_id
+end
+
+local function build_speedtest_request(snapshot, uplink_id, member)
+	member = member or {}
+	local iface_id = wan_member_interface(member, uplink_id)
+	local iface = snapshot.interfaces and snapshot.interfaces[iface_id] or nil
+	local endpoint = type(iface) == 'table' and type(iface.endpoint) == 'table' and iface.endpoint or {}
 	return {
-		interface = uplink.openwrt_interface or uplink.interface or uplink.iface,
-		device = uplink.device or uplink.linux_interface or uplink.ifname or uplink.interface,
-		url = uplink.speedtest_url,
-		max_duration_s = uplink.speedtest_duration_s,
+		interface = iface_id,
+		device = member.device or member.linux_interface or member.ifname or endpoint.ifname or endpoint.device or endpoint.name or (iface and iface.device),
+		url = member.speedtest_url,
+		max_duration_s = member.speedtest_duration_s,
+		uplink_id = uplink_id,
+		metric = member.metric or member.priority or 1,
 	}
 end
 
-local function start_speedtest_for_uplink(state, modem, uplink)
+local function collect_wan_uplinks(snapshot)
+	local out = {}
+	local members = snapshot and snapshot.wan and snapshot.wan.members or {}
+	for _, uplink_id in ipairs((function(t)
+		local ks = {}
+		for k in pairs(t or {}) do ks[#ks + 1] = k end
+		table.sort(ks, function(a, b) return tostring(a) < tostring(b) end)
+		return ks
+	end)(members)) do
+		local member = members[uplink_id]
+		if type(member) == 'table' and member.enabled ~= false and member.disabled ~= true then
+			local req = build_speedtest_request(snapshot, uplink_id, member)
+			if type(req.interface) == 'string' and req.interface ~= '' then
+				out[#out + 1] = {
+					uplink_id = tostring(uplink_id),
+					member = model_mod.deep_copy(member),
+					request = req,
+				}
+			end
+		end
+	end
+	return out
+end
+
+local function start_speedtest_for_uplink(state, uplink)
 	if not state.hal or type(state.hal.speedtest_op) ~= 'function' then return true, nil end
 	local snap = state.model:snapshot()
-	local prev = snap.wan_runtime and snap.wan_runtime.speedtests and snap.wan_runtime.speedtests[modem]
-	if prev and prev.state == 'running' then return true, nil end
-	local req = build_speedtest_request(uplink)
-	if type(req.interface) ~= 'string' or req.interface == '' then return true, nil end
+	if not speedtest_enabled(snap) then return true, nil end
+	local generation = state.current_generation and state.current_generation.generation or snap.generation
+	if type(generation) ~= 'number' or generation <= 0 then return true, nil end
+	local uplink_id = uplink.uplink_id
+	local prev = snap.wan_runtime and snap.wan_runtime.speedtests and snap.wan_runtime.speedtests[uplink_id]
+	if prev and prev.state == 'running' and prev.generation == generation then return true, nil end
+
 	local id = state.next_speedtest_id
 	state.next_speedtest_id = id + 1
 	state.model:update(function(s)
-		s.wan_runtime = s.wan_runtime or { speedtests = {}, live_weights = {} }
-		s.wan_runtime.speedtests[modem] = { state = 'running', id = id, modem = modem, interface = req.interface, started_at = now() }
+		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
+		s.wan_runtime.uplinks[uplink_id] = {
+			uplink_id = uplink_id,
+			interface = uplink.request.interface,
+			device = uplink.request.device,
+			metric = uplink.request.metric,
+			updated_at = now(),
+		}
+		s.wan_runtime.speedtests[uplink_id] = {
+			state = 'running',
+			generation = generation,
+			id = id,
+			uplink_id = uplink_id,
+			interface = uplink.request.interface,
+			device = uplink.request.device,
+			metric = uplink.request.metric,
+			started_at = now(),
+		}
 		s.stats.speedtests_started = (s.stats.speedtests_started or 0) + 1
 		return s
 	end)
-	local ok, err = state.scope:spawn(function()
-		local result = perform(state.hal:speedtest_op(req, { timeout = req.max_duration_s or 15 }))
-		state.done_tx:send({ kind = 'net_speedtest_done', speedtest_id = id, modem = modem, uplink = uplink, result = result })
-	end)
-	return ok, err
+
+	local handle, err = wan_runtime.start_speedtest {
+		lifetime_scope = state.scope,
+		reaper_scope = state.scope,
+		report_scope = state.scope,
+		service_id = state.service_id,
+		generation = generation,
+		speedtest_id = id,
+		uplink_id = uplink_id,
+		request = uplink.request,
+		hal = state.hal,
+		done_tx = state.done_tx,
+	}
+	if not handle then
+		state.model:update(function(s)
+			local rec = s.wan_runtime and s.wan_runtime.speedtests and s.wan_runtime.speedtests[uplink_id]
+			if rec then rec.state = 'failed_to_start'; rec.err = tostring(err) end
+			return s
+		end)
+		return nil, err
+	end
+	state.active_speedtests[uplink_id] = { generation = generation, speedtest_id = id, handle = handle }
+	return true, nil
+end
+
+function start_speedtests_for_wan(state)
+	local snap = state.model:snapshot()
+	if not speedtest_enabled(snap) then return true, nil end
+	local uplinks = collect_wan_uplinks(snap)
+	for i = 1, #uplinks do
+		local ok, err = start_speedtest_for_uplink(state, uplinks[i])
+		if ok ~= true then return nil, err end
+	end
+	publish_snapshot(state)
+	return true, nil
+end
+
+local function all_generation_speedtests_done(snapshot, generation)
+	local uplinks = collect_wan_uplinks(snapshot)
+	if #uplinks == 0 then return false end
+	local tests = snapshot.wan_runtime and snapshot.wan_runtime.speedtests or {}
+	for i = 1, #uplinks do
+		local id = uplinks[i].uplink_id
+		local rec = tests[id]
+		if not rec or rec.generation ~= generation or rec.state == 'running' then return false end
+	end
+	return true
 end
 
 local function compute_weights_from_speedtests(snapshot)
 	local runtime = snapshot.wan_runtime or {}
 	local tests = runtime.speedtests or {}
 	local members, total = {}, 0
-	for modem, rec in pairs(tests) do
+	for uplink_id, rec in pairs(tests) do
 		if rec.state == 'done' and rec.ok == true then
 			local mbps = tonumber(rec.peak_mbps) or 0
 			if mbps > 0 then
-				members[#members + 1] = { modem = modem, interface = rec.interface, mbps = mbps }
+				members[#members + 1] = { uplink_id = uplink_id, interface = rec.interface, metric = rec.metric or 1, mbps = mbps }
 				total = total + mbps
 			end
 		end
 	end
 	if total <= 0 or #members == 0 then return nil end
-	table.sort(members, function(a, b) return tostring(a.modem) < tostring(b.modem) end)
+	table.sort(members, function(a, b) return tostring(a.uplink_id) < tostring(b.uplink_id) end)
 	local out = {}
 	for i = 1, #members do
 		local m = members[i]
 		out[#out + 1] = {
-			id = m.modem,
-			link_id = m.modem,
+			id = m.uplink_id,
+			link_id = m.uplink_id,
 			interface = m.interface,
-			metric = 1,
+			metric = math.max(1, math.floor(tonumber(m.metric or 1) or 1)),
 			weight = math.max(1, math.floor((m.mbps / total) * 100 + 0.5)),
 			measured_mbps = m.mbps,
 		}
@@ -391,57 +500,75 @@ end
 
 local function start_live_weight_apply(state, members)
 	if not members or #members == 0 or not state.hal or type(state.hal.apply_live_weights_op) ~= 'function' then return true, nil end
+	local snap = state.model:snapshot()
+	local generation = state.current_generation and state.current_generation.generation or snap.generation
+	if type(generation) ~= 'number' or generation <= 0 then return true, nil end
 	local id = state.next_weight_apply_id
 	state.next_weight_apply_id = id + 1
-	local ok, err = state.scope:spawn(function()
-		local result = perform(state.hal:apply_live_weights_op({ policy = 'balanced', members = members, persist = true }, { timeout = 10 }))
-		state.done_tx:send({ kind = 'net_live_weights_done', weight_apply_id = id, members = members, result = result })
-	end)
-	return ok, err
-end
-
-local function handle_gsm_event(state, ev)
-	local modem = ev.modem or 'unknown'
-	local should_speedtest = false
-	local uplink
+	state.active_weight_apply = { generation = generation, weight_apply_id = id }
 	state.model:update(function(s)
-		if ev.kind == 'gsm_uplink' and type(ev.uplink) == 'table' then
-			uplink = upsert_gsm_uplink(s, modem, ev.uplink)
-		elseif ev.kind == 'gsm_legacy' then
-			local patch = {}
-			if ev.field == 'connected' then patch.connected = ev.value == true end
-			if ev.field == 'wwan-iface' then patch.interface = ev.value; patch.device = ev.value end
-			uplink = upsert_gsm_uplink(s, modem, patch)
-		end
-		should_speedtest = uplink and uplink.connected == true and speedtest_enabled(s)
+		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
+		s.wan_runtime.live_weights = {
+			state = 'running',
+			generation = generation,
+			id = id,
+			members = model_mod.deep_copy(members),
+			started_at = now(),
+		}
 		return s
 	end)
-	publish_snapshot(state)
-	if should_speedtest then
-		return start_speedtest_for_uplink(state, modem, uplink)
+	local handle, err = wan_runtime.start_live_weights {
+		lifetime_scope = state.scope,
+		reaper_scope = state.scope,
+		report_scope = state.scope,
+		service_id = state.service_id,
+		generation = generation,
+		weight_apply_id = id,
+		members = members,
+		policy = 'balanced',
+		persist = true,
+		hal = state.hal,
+		done_tx = state.done_tx,
+	}
+	if not handle then
+		state.active_weight_apply = nil
+		return nil, err
 	end
+	state.active_weight_apply.handle = handle
 	return true, nil
 end
 
 local function handle_speedtest_done(state, ev)
-	local result = ev.result or {}
+	if not stale.speedtest_current(state, ev) then
+		stale.reject(state, ev)
+		return publish_snapshot(state)
+	end
+	state.active_speedtests[ev.uplink_id] = nil
+	local work_result = ev.result or {}
+	local result = work_result.result or work_result
 	state.model:update(function(s)
-		s.wan_runtime = s.wan_runtime or { speedtests = {}, live_weights = {} }
-		local rec = s.wan_runtime.speedtests[ev.modem] or { modem = ev.modem, id = ev.speedtest_id }
+		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
+		local rec = s.wan_runtime.speedtests[ev.uplink_id] or { uplink_id = ev.uplink_id, id = ev.speedtest_id }
 		rec.state = 'done'
+		rec.generation = ev.generation
+		rec.id = ev.speedtest_id
 		rec.ok = result.ok == true
 		rec.err = result.err
-		rec.interface = result.interface or (ev.uplink and (ev.uplink.openwrt_interface or ev.uplink.interface))
-		rec.device = result.device
+		rec.interface = result.interface or (work_result.request and work_result.request.interface) or rec.interface
+		rec.device = result.device or (work_result.request and work_result.request.device) or rec.device
+		rec.metric = rec.metric or (work_result.request and work_result.request.metric) or 1
 		rec.peak_mbps = result.peak_mbps
 		rec.data_mib = result.data_mib
 		rec.duration_s = result.duration_s
 		rec.completed_at = now()
-		s.wan_runtime.speedtests[ev.modem] = rec
+		s.wan_runtime.speedtests[ev.uplink_id] = rec
 		s.stats.speedtests_completed = (s.stats.speedtests_completed or 0) + 1
 		return s
 	end)
 	local snap = state.model:snapshot()
+	if not all_generation_speedtests_done(snap, ev.generation) then
+		return publish_snapshot(state)
+	end
 	local weights = compute_weights_from_speedtests(snap)
 	local ok, err = start_live_weight_apply(state, weights)
 	publish_snapshot(state)
@@ -449,12 +576,20 @@ local function handle_speedtest_done(state, ev)
 end
 
 local function handle_live_weights_done(state, ev)
-	local result = ev.result or {}
+	if not stale.live_weights_current(state, ev) then
+		stale.reject(state, ev)
+		return publish_snapshot(state)
+	end
+	state.active_weight_apply = nil
+	local work_result = ev.result or {}
+	local result = work_result.result or work_result
 	state.model:update(function(s)
-		s.wan_runtime = s.wan_runtime or { speedtests = {}, live_weights = {} }
+		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
 		s.wan_runtime.live_weights = {
 			state = result.ok == true and 'applied' or 'failed',
-			members = ev.members,
+			generation = ev.generation,
+			id = ev.weight_apply_id,
+			members = work_result.members or (work_result.request and work_result.request.members),
 			result = model_mod.deep_copy(result),
 			updated_at = now(),
 		}
@@ -485,15 +620,10 @@ local function handle_event(state, ev)
 		return handle_apply_done(state, ev)
 	elseif ev.kind == 'observed_state' then
 		return handle_observed_state(state, ev)
-	elseif ev.kind == 'gsm_uplink' or ev.kind == 'gsm_legacy' then
-		return handle_gsm_event(state, ev)
 	elseif ev.kind == 'net_speedtest_done' then
 		return handle_speedtest_done(state, ev)
 	elseif ev.kind == 'net_live_weights_done' then
 		return handle_live_weights_done(state, ev)
-	elseif ev.kind == 'gsm_subscription_closed' then
-		state.gsm_sub = nil
-		return true, nil
 	elseif ev.kind == 'observation_closed' then
 		state.observed_sub = nil
 		state.model:update(function (m) m.hal.network_state = 'closed'; return m end)
@@ -525,7 +655,6 @@ function M.run(scope, params)
 	local published = publisher.new_state()
 	local cfg_watch
 	local observed_sub
-	local gsm_sub
 
 	if conn then
 		local werr
@@ -547,7 +676,6 @@ function M.run(scope, params)
 		published = published,
 		config_watch = cfg_watch,
 		observed_sub = observed_sub,
-		gsm_sub = nil,
 		done_tx = done_tx,
 		done_rx = done_rx,
 		pending = {},
@@ -556,6 +684,8 @@ function M.run(scope, params)
 		next_apply_id = 1,
 		next_speedtest_id = 1,
 		next_weight_apply_id = 1,
+		active_speedtests = {},
+		active_weight_apply = nil,
 		current_generation = nil,
 		active_apply = nil,
 	}
@@ -586,19 +716,12 @@ function M.run(scope, params)
 
 
 
-	if conn and params.gsm ~= false then
-		gsm_sub = conn:subscribe({ 'state', 'gsm', 'modem', '+', '+' }, {
-			queue_len = params.gsm_queue_len or 32,
-			full = params.gsm_full or 'drop_oldest',
-		})
-		state.gsm_sub = gsm_sub
-	end
-
 	scope:finally(function (_, status, primary)
 		cancel_active_generation(state, primary or status or 'net service closed')
 		if cfg_watch then cfg_watch:close(); cfg_watch = nil end
 		if observed_sub and observed_sub.close then observed_sub:close(); observed_sub = nil end
-		if gsm_sub and gsm_sub.close then gsm_sub:close(); gsm_sub = nil end
+		for _, rec in pairs(state.active_speedtests or {}) do if rec.handle and rec.handle.cancel then rec.handle:cancel(primary or status or 'net service closed') end end
+		if state.active_weight_apply and state.active_weight_apply.handle and state.active_weight_apply.handle.cancel then state.active_weight_apply.handle:cancel(primary or status or 'net service closed') end
 		done_tx:close(primary or status or 'net service closed')
 		publisher.cleanup_now(conn, published)
 		model:terminate(primary or status or 'net service closed')

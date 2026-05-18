@@ -6,7 +6,7 @@ local schema = require 'services.net.schema'
 local M = {}
 
 local ALLOWED = {
-	'id', 'name', 'description', 'kind', 'enabled', 'vlan', 'addressing',
+	'id', 'name', 'description', 'kind', 'enabled', 'protected', 'user_editable', 'purpose', 'vlan', 'addressing',
 	'dhcp', 'dns', 'firewall', 'routing', 'shaping', 'vpn', 'policy',
 	'tags', 'metadata', 'extensions',
 }
@@ -20,6 +20,16 @@ local function normalise_vlan(v, path)
 	local t, err = schema.require_plain_table(v, path)
 	if not t then return nil, err end
 	local out = schema.copy(t)
+	if out.reserved ~= nil then
+		if type(out.reserved) ~= 'string' or out.reserved == '' then
+			return nil, schema.err({ schema.path(path), 'reserved' }, 'must be a non-empty reserved VLAN name')
+		end
+	end
+	if out.auto ~= nil then
+		if type(out.auto) ~= 'string' or out.auto == '' then
+			return nil, schema.err({ schema.path(path), 'auto' }, 'must be a non-empty VLAN range name')
+		end
+	end
 	if out.id ~= nil then
 		local id, ierr = schema.optional_integer(out.id, { schema.path(path), 'id' })
 		if ierr then return nil, ierr end
@@ -47,6 +57,9 @@ function M.normalise_record(id, rec, path)
 		description = t.description,
 		kind = t.kind or 'lan',
 		enabled = t.enabled ~= false,
+		protected = t.protected == true,
+		user_editable = t.user_editable ~= false,
+		purpose = t.purpose,
 		vlan = vlan,
 		addressing = schema.copy(t.addressing or {}),
 		dhcp = schema.copy(t.dhcp or {}),

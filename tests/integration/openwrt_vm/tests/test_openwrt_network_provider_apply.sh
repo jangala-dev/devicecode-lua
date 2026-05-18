@@ -77,6 +77,7 @@ local intent = {
       vlan = { id = 10 },
       addressing = { ipv4 = { mode = 'static', cidr = '192.168.10.1/24' } },
       dhcp = { enabled = true, start = 20, limit = 50, leasetime = '6h' },
+      dns = { local_server = true, domain = 'bigbox.home', host_files = { 'ads' } },
       firewall = { zone = 'lan' },
     },
     wan = {
@@ -102,9 +103,13 @@ local intent = {
   },
   dns = {
     enabled = true,
+    domain = 'bigbox.home',
     upstreams = { '1.1.1.1', '8.8.8.8' },
+    cache = { size = 1000 },
+    host_files = { base_dir = '/tmp/devicecode-dns-hosts', sources = { ads = { file = 'ads.hosts' } } },
+    records = { router = { name = 'config.bigbox.home', address = '192.168.10.1' } },
   },
-  dhcp = {},
+  dhcp = { defaults = { authoritative = true } },
   firewall = {
     defaults = { input = 'REJECT', output = 'ACCEPT', forward = 'REJECT' },
     zones = {
@@ -188,8 +193,14 @@ eq(c:get('network', 'route_1', 'interface'), 'lan', 'route interface')
 eq(c:get('network', 'route_1', 'target'), '10.0.0.0/8', 'route target')
 eq(c:get('network', 'route_1', 'gateway'), '192.168.10.254', 'route gateway')
 
-eq(c:get('dhcp', 'dnsmasq'), 'dnsmasq', 'dnsmasq type')
-assert_list(c:get('dhcp', 'dnsmasq', 'server'), { '1.1.1.1', '8.8.8.8' }, 'dns upstreams')
+eq(c:get('dhcp', 'dns_lan'), 'dnsmasq', 'dns_lan type')
+assert_list(c:get('dhcp', 'dns_lan', 'server'), { '1.1.1.1', '8.8.8.8' }, 'dns upstreams')
+eq(c:get('dhcp', 'dns_lan', 'cachesize'), '1000', 'dns cache size')
+local addnhosts = c:get('dhcp', 'dns_lan', 'addnhosts')
+if type(addnhosts) == 'table' then eq(addnhosts[1], '/tmp/devicecode-dns-hosts/ads.hosts', 'dns host file') else eq(addnhosts, '/tmp/devicecode-dns-hosts/ads.hosts', 'dns host file') end
+local addresses = c:get('dhcp', 'dns_lan', 'address')
+local address_s = type(addresses) == 'table' and table.concat(addresses, ' ') or tostring(addresses)
+if not address_s:find('/config.bigbox.home/192.168.10.1', 1, true) then fail('dns record missing: ' .. address_s) end
 eq(c:get('dhcp', 'lan'), 'dhcp', 'dhcp.lan type')
 eq(c:get('dhcp', 'lan', 'interface'), 'lan', 'dhcp interface')
 eq(c:get('dhcp', 'lan', 'start'), '20', 'dhcp start')

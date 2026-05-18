@@ -6,7 +6,7 @@ local schema = require 'services.net.schema'
 local M = {}
 
 local ALLOWED = {
-	'enabled', 'pools', 'reservations', 'options', 'relays', 'metadata', 'extensions',
+	'enabled', 'defaults', 'reservations', 'options', 'relays', 'metadata', 'extensions',
 }
 
 function M.normalise(v)
@@ -16,7 +16,7 @@ function M.normalise(v)
 	if not ok then return nil, ferr end
 	local out = {
 		enabled = t.enabled ~= false,
-		pools = schema.copy(t.pools or {}),
+		defaults = schema.copy(t.defaults or {}),
 		reservations = schema.copy(t.reservations or {}),
 		options = schema.copy(t.options or {}),
 		relays = schema.copy(t.relays or {}),

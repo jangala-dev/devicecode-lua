@@ -109,11 +109,17 @@ end
 
 function M.map(v, path, item_fn)
 	if v == nil then return {}, nil end
-	if not M.is_plain_table(v) or tablex.is_array(v) then
+	if not M.is_plain_table(v) then
+		return nil, M.err(path, 'must be a map keyed by id')
+	end
+	local keys = tablex.sorted_keys(v)
+	-- In Lua, an empty table can satisfy both array-like and map-like
+	-- predicates.  For configuration boundaries, {} is a valid empty map;
+	-- reject only non-empty array-shaped values.
+	if #keys > 0 and tablex.is_array(v) then
 		return nil, M.err(path, 'must be a map keyed by id')
 	end
 	local out = {}
-	local keys = tablex.sorted_keys(v)
 	for i = 1, #keys do
 		local id = keys[i]
 		local sid, ierr = M.id(tostring(id), { M.path(path), id })

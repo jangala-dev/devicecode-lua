@@ -8,7 +8,7 @@ local M = {}
 
 local DOMAIN_TOPICS = {
 	'addressing', 'dns', 'dhcp', 'firewall', 'routing',
-	'wan', 'gsm', 'wan_runtime', 'shaping', 'vpn', 'diagnostics', 'observed', 'drift',
+	'wan', 'wan_runtime', 'shaping', 'vpn', 'diagnostics', 'observed', 'drift',
 }
 
 local function publish_map(conn, published, next_map, topic_fn, payload_fn)
@@ -36,6 +36,8 @@ function M.new_state()
 		domains = {},
 		summary = false,
 		apply = false,
+		segments_catalogue = false,
+		vlan_policy = false,
 	}
 end
 
@@ -52,6 +54,14 @@ function M.publish_all_now(conn, snapshot, published)
 
 	ok, err = publish_map(conn, published.segments, snapshot.segments, projection.segment_topic, projection.segment)
 	if ok ~= true then return nil, err end
+
+	ok, err = bus_cleanup.retain(conn, projection.segments_topic(), projection.segments(snapshot))
+	if ok ~= true then return nil, err end
+	published.segments_catalogue = true
+
+	ok, err = bus_cleanup.retain(conn, projection.vlan_policy_topic(), projection.vlan_policy(snapshot))
+	if ok ~= true then return nil, err end
+	published.vlan_policy = true
 
 	ok, err = publish_map(conn, published.interfaces, snapshot.interfaces, projection.interface_topic, projection.interface)
 	if ok ~= true then return nil, err end
@@ -83,8 +93,12 @@ function M.cleanup_now(conn, published)
 	end
 	if published.summary then bus_cleanup.unretain(conn, projection.summary_topic()) end
 	if published.apply then bus_cleanup.unretain(conn, projection.apply_topic()) end
+	if published.segments_catalogue then bus_cleanup.unretain(conn, projection.segments_topic()) end
+	if published.vlan_policy then bus_cleanup.unretain(conn, projection.vlan_policy_topic()) end
 	published.summary = false
 	published.apply = false
+	published.segments_catalogue = false
+	published.vlan_policy = false
 	return true, nil
 end
 
