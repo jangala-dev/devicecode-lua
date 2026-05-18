@@ -2,10 +2,27 @@
 -- Scoped WAN runtime work: speedtests and live multi-WAN weighting.
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
+local op = require 'fibers.op'
 local scoped_work = require 'devicecode.support.scoped_work'
 local queue = require 'devicecode.support.queue'
 
 local M = {}
+
+local function with_timeout(work_op, timeout_s, label)
+	timeout_s = tonumber(timeout_s)
+	if not timeout_s or timeout_s < 0 then return work_op end
+	return op.named_choice({
+		work = work_op,
+		timeout = sleep.sleep_op(timeout_s):wrap(function ()
+			return { ok = false, err = tostring(label or 'operation') .. '_timeout', timeout = true }
+		end),
+	}):wrap(function (which, result)
+		if which == 'timeout' then return result end
+		return result
+	end)
+end
+
 
 local function report_to(done_tx, label)
 	return function (ev)
@@ -39,9 +56,12 @@ function M.start_speedtest(spec)
 			uplink_id = spec.uplink_id,
 		},
 		run = function ()
-			local result = fibers.perform(hal:speedtest_op(request, {
-				timeout = request.max_duration_s or spec.timeout_s or 30,
-			}))
+			local timeout_s = request.max_duration_s or spec.timeout_s or 30
+			local result = fibers.perform(with_timeout(
+				hal:speedtest_op(request, { timeout = false }),
+				timeout_s,
+				'net_speedtest'
+			))
 			return {
 				uplink_id = spec.uplink_id,
 				request = request,
@@ -81,9 +101,11 @@ function M.start_live_weights(spec)
 			weight_apply_id = spec.weight_apply_id,
 		},
 		run = function ()
-			local result = fibers.perform(hal:apply_live_weights_op(request, {
-				timeout = spec.timeout_s or 10,
-			}))
+			local result = fibers.perform(with_timeout(
+				hal:apply_live_weights_op(request, { timeout = false }),
+				spec.timeout_s or 10,
+				'net_live_weights'
+			))
 			return {
 				request = request,
 				members = request.members,

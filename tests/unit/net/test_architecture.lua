@@ -80,4 +80,31 @@ function tests.test_net_publisher_has_dirty_publication_path()
 	if not pub:find('new_dirty_state', 1, true) then fail('net publisher should expose dirty state') end
 end
 
+
+function tests.test_net_wan_runtime_uses_explicit_timeout_races_not_bus_timeouts()
+	local rt = read_file('../src/services/net/wan_runtime.lua')
+	if not rt:find('sleep.sleep_op', 1, true) or not rt:find('op.named_choice', 1, true) then
+		fail('net WAN runtime should express timeouts as explicit Op races')
+	end
+	if rt:find('timeout = request.max_duration_s', 1, true) or rt:find('timeout = spec.timeout_s', 1, true) then
+		fail('net WAN runtime should not pass positive hidden bus timeouts to HAL calls')
+	end
+	if not rt:find('timeout = false', 1, true) then
+		fail('net WAN runtime should disable hidden HAL bus timeout on inner calls')
+	end
+end
+
+function tests.test_hal_network_manager_uses_canonical_control_loop()
+	local mgr = read_file('../src/services/hal/managers/network.lua')
+	if not mgr:find("services.hal.support.control_loop", 1, true) then
+		fail('network manager should use the canonical HAL control loop')
+	end
+	if mgr:find('req.reply_ch:put_op', 1, true) then
+		fail('network manager should not reply directly; use control_loop reply/cancellation path')
+	end
+	if mgr:find('fibers.perform(driver_op)', 1, true) then
+		fail('network manager should return driver Ops rather than performing them inline')
+	end
+end
+
 return tests

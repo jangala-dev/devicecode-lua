@@ -1,13 +1,13 @@
 -- services/hal/managers/network.lua
 -- Strict op-only HAL manager for semantic network capabilities.
 
-local fibers = require 'fibers'
 local op = require 'fibers.op'
 local channel = require 'fibers.channel'
 
 local strict = require 'services.hal.support.strict_manager'
 local hal_types = require 'services.hal.types.core'
 local cap_types = require 'services.hal.types.capabilities'
+local control_loop = require 'services.hal.support.control_loop'
 local driver_mod = require 'services.hal.drivers.network'
 
 local M = strict.api_table()
@@ -28,83 +28,58 @@ local function log(level, payload)
 	end
 end
 
-local function new_reply(ok, payload)
-	local reply = assert(hal_types.new.Reply(ok == true, payload))
-	return reply
+local function result_to_reply_tuple(result)
+	if type(result) == 'table' then
+		return result.ok == true, result
+	end
+	return result == true, result
 end
 
-local function reply(req, ok, payload)
-	if not req or not req.reply_ch then return end
-	fibers.perform(req.reply_ch:put_op(new_reply(ok, payload)))
-end
-
-local function call_driver(method, req)
-	if not state.driver then
-		return { ok = false, err = 'network driver not configured' }
-	end
-	local opname = tostring(method) .. '_op'
-	local fn = state.driver[opname]
-	if type(fn) ~= 'function' then
-		return { ok = false, err = 'network driver missing ' .. opname }
-	end
-
-	local ok, driver_op = pcall(function () return fn(state.driver, req and req.opts or {}) end)
-	if not ok then
-		return { ok = false, err = tostring(driver_op) }
-	end
-	if type(driver_op) ~= 'table' then
-		return { ok = false, err = opname .. ' did not return an Op' }
-	end
-
-	local ok2, result = pcall(function () return fibers.perform(driver_op) end)
-	if not ok2 then
-		return { ok = false, err = tostring(result) }
-	end
-	if type(result) == 'table' then return result end
-	return { ok = result == true, result = result }
-end
-
-local function handle_request(kind, req)
-	local verb = req and req.verb
-	local result
-
-	if kind == 'config' then
-		if verb == 'validate' or verb == 'plan' or verb == 'apply' or verb == 'apply_live_weights' or verb == 'apply_shaping' then
-			result = call_driver(verb, req)
-		else
-			result = { ok = false, err = 'unsupported network-config verb: ' .. tostring(verb) }
+local function driver_method_op(method, req)
+	return op.guard(function ()
+		if not state.driver then
+			return op.always(false, { ok = false, err = 'network driver not configured' })
 		end
-	elseif kind == 'state' then
-		if verb == 'snapshot' then
-			result = call_driver('snapshot', req)
-		elseif verb == 'watch' then
-			result = call_driver('watch', req)
-		else
-			result = { ok = false, err = 'unsupported network-state verb: ' .. tostring(verb) }
-		end
-	elseif kind == 'diagnostics' then
-		if verb == 'probe_link' then
-			result = call_driver('probe_link', req)
-		elseif verb == 'read_counters' then
-			result = call_driver('read_counters', req)
-		elseif verb == 'speedtest' then
-			result = call_driver('speedtest', req)
-		else
-			result = { ok = false, err = 'unsupported network-diagnostics verb: ' .. tostring(verb) }
-		end
-	else
-		result = { ok = false, err = 'invalid network capability kind' }
-	end
 
-	reply(req, result and result.ok == true, result)
+		local opname = tostring(method) .. '_op'
+		local fn = state.driver[opname]
+		if type(fn) ~= 'function' then
+			return op.always(false, { ok = false, err = 'network driver missing ' .. opname })
+		end
+
+		local ok, driver_op = pcall(function () return fn(state.driver, req and req.opts or {}) end)
+		if not ok then
+			return op.always(false, { ok = false, err = tostring(driver_op) })
+		end
+		if type(driver_op) ~= 'table' then
+			return op.always(false, { ok = false, err = opname .. ' did not return an Op' })
+		end
+
+		return driver_op:wrap(result_to_reply_tuple)
+	end)
 end
 
-local function control_loop(kind, ch)
-	while true do
-		local req = fibers.perform(ch:get_op())
-		if req == nil then return end
-		handle_request(kind, req)
-	end
+local CONFIG_METHODS = {
+	validate = function (_opts, req) return driver_method_op('validate', req) end,
+	plan = function (_opts, req) return driver_method_op('plan', req) end,
+	apply = function (_opts, req) return driver_method_op('apply', req) end,
+	apply_live_weights = function (_opts, req) return driver_method_op('apply_live_weights', req) end,
+	apply_shaping = function (_opts, req) return driver_method_op('apply_shaping', req) end,
+}
+
+local STATE_METHODS = {
+	snapshot = function (_opts, req) return driver_method_op('snapshot', req) end,
+	watch = function (_opts, req) return driver_method_op('watch', req) end,
+}
+
+local DIAGNOSTICS_METHODS = {
+	probe_link = function (_opts, req) return driver_method_op('probe_link', req) end,
+	read_counters = function (_opts, req) return driver_method_op('read_counters', req) end,
+	speedtest = function (_opts, req) return driver_method_op('speedtest', req) end,
+}
+
+local function control_loop_for(kind, ch, methods)
+	control_loop.run_request_loop(ch, methods, state.logger, 'network_' .. tostring(kind))
 end
 
 local function make_capabilities()
@@ -133,7 +108,7 @@ end
 function M.start_op(logger, dev_ev_ch, cap_emit_ch)
 	return op.guard(function ()
 		if state.started then return op.always(true, nil) end
-		local parent = fibers.current_scope()
+		local parent = require('fibers').current_scope()
 		local child, cerr = parent:child()
 		if not child then return op.always(false, cerr or 'network manager scope create failed') end
 
@@ -148,12 +123,12 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch)
 			M.terminate(primary or status or 'network manager closed')
 		end)
 
-		child:spawn(function () control_loop('config', state.controls.config) end)
-		child:spawn(function () control_loop('state', state.controls.state) end)
-		child:spawn(function () control_loop('diagnostics', state.controls.diagnostics) end)
+		child:spawn(function () control_loop_for('config', state.controls.config, CONFIG_METHODS) end)
+		child:spawn(function () control_loop_for('state', state.controls.state, STATE_METHODS) end)
+		child:spawn(function () control_loop_for('diagnostics', state.controls.diagnostics, DIAGNOSTICS_METHODS) end)
 
 		return emit_added(dev_ev_ch, caps):wrap(function (ok, err)
-			if ok == false or ok == nil then
+			if ok == false then
 				child:cancel('device_event_failed')
 				return false, err or 'network device event failed'
 			end
