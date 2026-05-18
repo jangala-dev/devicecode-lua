@@ -28,20 +28,14 @@ local SCHEMA_TARGET = "devicecode.config/system/1"
 ---@return Topic
 local function t_cfg(name) return { 'cfg', name } end
 
----@param key string
 ---@return Topic
-local function t_obs_metric(key)
-    return { 'obs', 'v1', 'system', 'metric', key }
+local function t_state_time_synced()
+    return { 'state', 'time', 'synced' }
 end
 
 ---@return Topic
-local function t_svc_time_synced()
-    return { 'svc', 'time', 'synced' }
-end
-
----@return Topic
-local function t_shutdown_control()
-    return { 'svc', 'system', 'shutdown' }
+local function t_state_system_shutdown()
+    return { 'state', 'system', 'shutdown' }
 end
 
 -- ── config validation ──────────────────────────────
@@ -146,18 +140,6 @@ local function get_cap_ref(refs, class, id)
     return refs[cap_ref_key(class, id)]
 end
 
--- ── publish helpers ───────────────────────────────
-
----@param conn Connection
----@param key string
----@param value number|string
----@param namespace? string
-local function publish_metric(conn, key, value, namespace)
-    local payload = { value = value }
-    if namespace then payload.namespace = namespace end
-    conn:retain(t_obs_metric(key), payload)
-end
-
 -- ── sysinfo fiber ────────────────────────────────
 
 -- Temperature from zone0 (preserved metric name for historical continuity).
@@ -177,14 +159,6 @@ local SYSINFO_METRICS = {
         method = 'get',
         field = 'utilisation',
         metric_key = 'cpu_util',
-        mk_opts = cap_sdk.args.new.CpuGetOpts
-    },
-    {
-        class = 'cpu',
-        id = '1',
-        method = 'get',
-        field = 'frequency',
-        metric_key = 'cpu_frequency',
         mk_opts = cap_sdk.args.new.CpuGetOpts
     },
     {
@@ -246,7 +220,10 @@ local function sysinfo_fiber(_, svc, report_period_ch)
             local id = identity_msg.payload
             for _, metric in ipairs(PLATFORM_IDENTITY_METRICS) do
                 if id[metric.field] ~= nil then
-                    publish_metric(conn, metric.metric_key, id[metric.field])
+                    svc:obs_metric(metric.metric_key, {
+                        namespace = { 'system', metric.metric_key },
+                        value = id[metric.field]
+                    })
                 end
             end
             svc:obs_log('debug', 'sysinfo: published platform identity metrics')
@@ -256,7 +233,7 @@ local function sysinfo_fiber(_, svc, report_period_ch)
     end
 
     -- Subscribe to time sync.
-    local time_sub = conn:subscribe(t_svc_time_synced())
+    local time_sub = conn:subscribe(t_state_time_synced())
 
     local time_synced = false
 
@@ -311,7 +288,10 @@ local function sysinfo_fiber(_, svc, report_period_ch)
                                 err = err
                             })
                         else
-                            publish_metric(conn, m.metric_key, value)
+                            svc:obs_metric(m.metric_key, {
+                                namespace = { 'system', m.metric_key },
+                                value = value
+                            })
                         end
                     end
                 end
@@ -327,7 +307,10 @@ local function sysinfo_fiber(_, svc, report_period_ch)
                     if uptime == nil or uptime_err ~= "" then
                         svc:obs_log('warn', { what = 'uptime_get_failed', err = uptime_err })
                     else
-                        publish_metric(conn, 'boot_time', os.time() - math.floor(uptime))
+                        svc:obs_metric('boot_time', {
+                            namespace = { 'system', 'boot_time' },
+                            value = os.time() - math.floor(uptime)
+                        })
                     end
                 end
             end
@@ -358,7 +341,7 @@ local function handle_alarm(svc, power_cap, alarm)
     end
 
     -- Broadcast shutdown signal so all services can clean up within the deadline.
-    conn:retain(t_shutdown_control(), {
+    conn:retain(t_state_system_shutdown(), {
         reason   = alarm_name,
         deadline = fibers.now() + SHUTDOWN_GRACE,
     })
@@ -390,7 +373,6 @@ local function system_main(svc, report_period_ch)
     parent_scope:finally(function()
         local _, primary = parent_scope:status()
         svc:obs_log('debug', { what = 'main_stopped', reason = tostring(primary or 'ok') })
-        svc:status('stopped', { reason = tostring(primary or 'ok') })
     end)
 
     -- Acquire platform cap to read hw_revision from identity state.
@@ -423,7 +405,7 @@ local function system_main(svc, report_period_ch)
 
     local alarm_mgr = alarms.AlarmManager.new()
     local cfg_sub   = conn:subscribe(t_cfg(svc.name))
-    local time_sub  = conn:subscribe(t_svc_time_synced())
+    local time_sub  = conn:subscribe(t_state_time_synced())
 
     while true do
         local choices = {
@@ -502,7 +484,8 @@ function SystemService.start(conn, opts)
 
     svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
     svc:obs_log('info', 'service start() entered')
-    svc:status('starting')
+    svc:announce({})
+    svc:starting()
     svc:spawn_heartbeat(heartbeat_s, 'tick')
 
     -- Channel carries report_period from System Main → System Sysinfo.
@@ -511,14 +494,14 @@ function SystemService.start(conn, opts)
 
     fibers.current_scope():finally(function()
         local _, primary = fibers.current_scope():status()
-        svc:status('stopped', { reason = tostring(primary or 'ok') })
+        svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'ok') })
         svc:obs_log('info', 'service stopped')
     end)
 
     -- Spawn Sysinfo first so it is ready to receive from report_period_ch.
     fibers.current_scope():spawn(sysinfo_fiber, svc, report_period_ch)
 
-    svc:status('running')
+    svc:running()
     svc:obs_log('info', 'service running')
 
     -- Run System Main in the calling fiber.

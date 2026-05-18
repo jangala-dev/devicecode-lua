@@ -1002,6 +1002,9 @@ function HalService.start(conn, opts)
 				return
 			end
 			register_device(device_event.event_type, dev_inst)
+			if device_event.ready_cond then
+				device_event.ready_cond:signal()
+			end
 			return
 		end
 
