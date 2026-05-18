@@ -54,16 +54,47 @@ end
 function M.test_validate_exchange_accepts_body_object_capabilities_and_rejects_remote_reference_tables()
 	local source = { read_chunk_op = function () end, terminate = function () return true end }
 	local sink = { write_chunk_op = function () end, terminate = function () return true end }
-	local checked = ok(policy.validate_exchange_args { uri = 'http://example.test/', method = 'POST', body_source = source, response_sink = sink })
+	local checked = ok(policy.validate_exchange_args {
+		uri = 'http://example.test/',
+		method = 'POST',
+		body_source = source,
+		response_sink = sink,
+	})
 	eq(checked.body_source, source)
 	eq(checked.response_sink, sink)
 
-	local bad, err = policy.validate_exchange_args { uri = 'http://example.test/', method = 'POST', body_source = { kind = 'remote-ref' } }
+	local bad, err = policy.validate_exchange_args {
+		uri = 'http://example.test/',
+		method = 'POST',
+		body_source = { kind = 'remote-ref' },
+	}
 	eq(bad, nil)
 	eq(err, 'invalid_args')
 	bad, err = policy.validate_exchange_args { uri = 'http://example.test/', method = 'POST', source = source }
 	eq(bad, nil)
 	eq(err, 'invalid_args')
+end
+
+function M.test_validate_exchange_accepts_tolerant_parser_and_timeout()
+	local checked = ok(policy.validate_exchange_args {
+		uri = 'http://example.test/',
+		method = 'GET',
+		response_parser = 'tolerant-http1',
+		timeout_s = 10,
+	})
+	eq(checked.response_parser, 'tolerant-http1')
+	eq(checked.timeout_s, 10)
+
+	local bad, err = policy.validate_exchange_args { uri = 'http://example.test/', response_parser = 'raw-socket' }
+	eq(bad, nil)
+	eq(err, 'invalid_args')
+	bad, err = policy.validate_exchange_args { uri = 'http://example.test/', timeout_s = -1 }
+	eq(bad, nil)
+	eq(err, 'invalid_args')
+
+	bad, err = policy.validate_exchange_args { uri = 'https://example.test/', response_parser = 'tolerant-http1' }
+	eq(bad, nil)
+	eq(err, 'unsupported_scheme')
 end
 
 function M.test_validate_listen_defaults_loopback_ephemeral_port()

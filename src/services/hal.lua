@@ -10,6 +10,7 @@ local channel = require "fibers.channel"
 local sleep   = require "fibers.sleep"
 
 local tablex = require 'shared.table'
+local http_sdk = require 'services.http.sdk'
 
 local perform = fibers.perform
 
@@ -466,6 +467,15 @@ local function availability_flag(event_type)
 	return event_type == 'added'
 end
 
+local function narrow_http_ref(ref)
+	if ref == nil then return nil end
+	return {
+		status_op = function (_, opts) return ref:status_op(opts) end,
+		open_exchange_op = function (_, args, opts) return ref:open_exchange_op(args, opts) end,
+		exchange_op = function (_, args, opts) return ref:exchange_op(args, opts) end,
+	}
+end
+
 local function availability_payload(event_type, extra)
 	local out = {
 		state     = availability_state(event_type),
@@ -722,7 +732,7 @@ function HalService.start(conn, opts)
 		return out
 	end
 
-	function registry:terminate_caps(_reason)
+	function registry:terminate_caps(reason)
 		-- reason is accepted for finaliser-shaped call sites; bus endpoints
 		-- expose immediate unbind without a reason parameter.
 		for _, class_caps in pairs(self.caps) do
@@ -1082,6 +1092,14 @@ function HalService.start(conn, opts)
 			component = 'manager',
 			manager   = name,
 		})
+		local deps
+		if name == 'wired' then
+			deps = {
+				http_ref_for = function (cap_id)
+					return narrow_http_ref(http_sdk.new_ref(conn, cap_id or 'main'))
+				end,
+			}
+		end
 
 		return perform(manager_call_with_timeout_op(
 			name,
@@ -1091,7 +1109,7 @@ function HalService.start(conn, opts)
 			manager_logger,
 			dev_ev_ch,
 			cap_emit_ch,
-			conn
+			deps
 		))
 	end
 
@@ -1256,7 +1274,7 @@ function HalService.start(conn, opts)
 	svc:obs_log('info', { what = 'subscribed', topic = 'cfg/' .. svc.name })
 
 	while true do
-		local source, a = perform(op.named_choice({
+		local source, a, b = perform(op.named_choice({
 			rpc           = op.choice(registry:rpc_ops()),
 			manager_fault = op.choice(manager_fault_ops()),
 			cap_emit      = cap_emit_ch:get_op(),

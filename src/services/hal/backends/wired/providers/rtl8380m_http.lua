@@ -13,7 +13,6 @@ local exec = require 'fibers.io.exec'
 
 local blob_source = require 'devicecode.blob_source'
 local resource = require 'devicecode.support.resource'
-local http_sdk = require 'services.http.sdk'
 local contract = require 'services.hal.backends.wired.contract'
 local tablex = require 'shared.table'
 
@@ -47,7 +46,7 @@ local function url_escape_form(s)
 end
 
 local function urlencode_b64(s)
-	return (tostring(s or ''):gsub('[+/=]', function(c)
+	return (tostring(s or ''):gsub('[+/=]', function (c)
 		return ('%%%02X'):format(string.byte(c))
 	end))
 end
@@ -394,8 +393,8 @@ function M.new(config, opts)
 		surfaces = copy(config.surfaces or default_surfaces()),
 		topology = copy(config.topology or {}),
 		logger = opts.logger,
-		conn = opts.conn,
 		http_ref = opts.http_ref or config.http_ref,
+		http_ref_for = opts.http_ref_for or config.http_ref_for,
 		exec = opts.exec or exec,
 		tmpdir = opts.tmpdir or config.tmpdir or os.getenv('TMPDIR') or '/tmp',
 	}, Provider), nil
@@ -403,8 +402,8 @@ end
 
 function Provider:_http_ref()
 	if self.http_ref then return self.http_ref end
-	if not self.conn then return nil end
-	return http_sdk.new_ref(self.conn, self.http.cap_id)
+	if self.http_ref_for then return self.http_ref_for(self.http.cap_id) end
+	return nil
 end
 
 function Provider:_uri(path)
@@ -431,10 +430,12 @@ function Provider:_request_json_op(method, path, body, headers)
 			uri = uri,
 			method = method or 'GET',
 			headers = req_headers,
+			response_parser = 'tolerant-http1',
+			timeout_s = self.http.timeout_s,
 		}
 		if body ~= nil then args.body_source = blob_source.from_string(body) end
 
-		return ref:open_exchange_op(args, { timeout = self.http.timeout_s }):wrap(function (reply, err)
+		return ref:open_exchange_op(args):wrap(function (reply, err)
 			if not reply then return nil, err end
 			local exchange = reply.exchange or reply
 			if not exchange or type(exchange.read_body_as_string_op) ~= 'function' then
@@ -465,7 +466,6 @@ function Provider:_post_cgi_json_op(path, payload, headers)
 	headers = headers or {}
 	headers['Content-Type'] = headers['Content-Type'] or 'application/x-www-form-urlencoded; charset=UTF-8'
 	headers['X-Requested-With'] = headers['X-Requested-With'] or 'XMLHttpRequest'
-	headers['Content-Length'] = tostring(#payload)
 	return self:_request_json_op('POST', path, payload, headers)
 end
 

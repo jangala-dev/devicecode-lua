@@ -5,6 +5,7 @@
 local op = require 'fibers.op'
 local headers_mod = require 'services.http.headers'
 local terminate = require 'services.http.transport.terminate'
+local tolerant_http1 = require 'services.http.transport.tolerant_http1'
 
 local M = {}
 
@@ -37,6 +38,9 @@ end
 
 function M.open_exchange_op(driver, checked_args, opts)
 	opts = opts or {}
+	if checked_args and checked_args.response_parser == 'tolerant-http1' then
+		return tolerant_http1.open_exchange_op(driver, checked_args, opts)
+	end
 	return op.guard(function ()
 		local request_module, rerr = require_request(opts)
 		if not request_module then return op.always(nil, rerr) end

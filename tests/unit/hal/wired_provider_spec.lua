@@ -71,9 +71,31 @@ function tests.test_rtl8380m_http_provider_uses_http_ref_and_is_read_only()
 		assert_eq(snap.surfaces['port-1'].link.state, 'up')
 		assert_eq(#calls, 4)
 		assert_eq(calls[1].method, 'GET')
+		assert_eq(calls[1].response_parser, 'tolerant-http1')
+		assert_eq(calls[1].timeout_s, 10)
 		local res = fibers.perform(p:apply_attachments_op({}))
 		assert_eq(res.code, 'read_only')
 		assert_not_nil(res.err)
+	end)
+end
+
+function tests.test_rtl8380m_http_provider_accepts_narrow_http_ref_factory()
+	fibers.run(function ()
+		local calls = {}
+		local requested_cap
+		local p = assert(provider.new({
+			id = 'switch-main',
+			http = { host = '192.0.2.10', cap_id = 'switch-http' },
+		}, {
+			http_ref_for = function (cap_id)
+				requested_cap = cap_id
+				return fake_http_ref(calls)
+			end,
+		}))
+		local snap = fibers.perform(p:snapshot_op({}))
+		assert_true(snap.ok)
+		assert_eq(requested_cap, 'switch-http')
+		assert_eq(#calls, 4)
 	end)
 end
 
