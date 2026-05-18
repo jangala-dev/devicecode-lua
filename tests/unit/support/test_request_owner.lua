@@ -1,6 +1,8 @@
 -- tests/unit/support/test_request_owner.lua
 
 local request_owner = require 'devicecode.support.request_owner'
+local fibers = require 'fibers'
+local op = require 'fibers.op'
 
 local tests = {}
 
@@ -93,6 +95,49 @@ function tests.test_abandon_unresolved_resolves_without_reply_or_fail()
 
 	assert_eq(req.fails, nil)
 	assert_eq(req.replies, nil)
+end
+
+
+function tests.test_caller_cancel_op_abandons_on_bus_request_abandoned()
+	fibers.run(function ()
+		local req = new_request()
+		function req:done_op()
+			return op.always('abandoned', nil, 'timeout')
+		end
+
+		local owner = request_owner.new(req)
+		local reason = fibers.perform(owner:caller_cancel_op())
+
+		assert_eq(reason, 'timeout')
+		assert_true(owner:done())
+		assert_false(owner:reply_once('late'))
+		assert_eq(req.replies, nil)
+		assert_eq(req.fails, nil)
+	end)
+end
+
+function tests.test_caller_cancel_op_ignores_non_abandoned_done_status()
+	fibers.run(function ()
+		local req = new_request()
+		function req:done_op()
+			return op.always('replied', 'ok', nil)
+		end
+
+		local owner = request_owner.new(req)
+		local reason = fibers.perform(owner:caller_cancel_op())
+
+		assert_false(reason)
+		assert_false(owner:done())
+		assert_true(owner:reply_once('late'))
+		assert_eq(req.replies, 1)
+	end)
+end
+
+function tests.test_caller_cancel_op_requires_request_done_op()
+	local owner = request_owner.new(new_request())
+	local cancel_op, err = owner:caller_cancel_op()
+	assert_eq(cancel_op, nil)
+	assert_eq(err, 'request has no done_op')
 end
 
 return tests
