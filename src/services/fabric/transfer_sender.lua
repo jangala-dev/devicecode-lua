@@ -115,6 +115,20 @@ local function send_commit(caps, xfer_id, size, alg, digest, timeout_s)
 	return 'committing', fibers.now() + timeout_s
 end
 
+local function send_chunk(caps, xfer_id, offset, chunk)
+	local frame = construct(
+		'xfer_chunk',
+		protocol.xfer_chunk,
+		xfer_id,
+		offset,
+		chunk,
+		protocol.chunk_digest(chunk)
+	)
+
+	send(caps, 'bulk', frame, 'transfer_chunk_send_failed')
+	return true
+end
+
 local function send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
 	local want = math.min(chunk_size, size - sent)
 	local chunk, err = read_chunk(source, want)
@@ -123,17 +137,11 @@ local function send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
 	if type(chunk) ~= 'string' or #chunk == 0 then fail(caps, xfer_id, 'short_source', true) end
 	if sent + #chunk > size then fail(caps, xfer_id, 'source_overrun', true) end
 
-	local frame = construct(
-		'xfer_chunk',
-		protocol.xfer_chunk,
-		xfer_id,
-		sent,
-		chunk,
-		protocol.chunk_digest(chunk)
-	)
-
-	send(caps, 'bulk', frame, 'transfer_chunk_send_failed')
-	return sent + #chunk
+	send_chunk(caps, xfer_id, sent, chunk)
+	return sent + #chunk, {
+		offset = sent,
+		chunk = chunk,
+	}
 end
 
 function M.run(scope, req, caps)
@@ -157,6 +165,7 @@ function M.run(scope, req, caps)
 	send(caps, 'control', begin, 'transfer_begin_send_failed')
 
 	local sent = 0
+	local last_chunk = nil
 	local state = 'waiting_ready'
 	local deadline = fibers.now() + timeout_s
 
@@ -166,35 +175,40 @@ function M.run(scope, req, caps)
 		if item == nil then error('transfer_sender_frame_feed_closed', 0) end
 
 		local frame = item.frame or item
+		local handle_frame = type(frame) == 'table' and frame.xfer_id == xfer_id
 
-		if type(frame) ~= 'table' or frame.xfer_id ~= xfer_id then
-			-- Manager normally filters these.
-
-		elseif frame.type == 'xfer_abort' then
+		if handle_frame and frame.type == 'xfer_abort' then
 			fail(caps, xfer_id, frame.err or 'remote_abort', false)
 
-		elseif frame.type == 'xfer_ready' then
+		elseif handle_frame and frame.type == 'xfer_ready' then
 			if state == 'waiting_ready' then
 				state = 'sending'
 				deadline = fibers.now() + timeout_s
 			end
 
-		elseif frame.type == 'xfer_need' then
+		elseif handle_frame and frame.type == 'xfer_need' then
 			if state ~= 'sending' then fail(caps, xfer_id, 'unexpected_need', true) end
-			if frame.next ~= sent then fail(caps, xfer_id, 'unexpected_offset', true) end
-
-			if sent >= size then
+			if frame.next ~= sent then
+				if last_chunk
+					and frame.next == last_chunk.offset
+					and type(last_chunk.chunk) == 'string'
+				then
+					send_chunk(caps, xfer_id, last_chunk.offset, last_chunk.chunk)
+					deadline = fibers.now() + timeout_s
+				else
+					fail(caps, xfer_id, ('unexpected_offset:next=%s sent=%s'):format(
+						tostring(frame.next),
+						tostring(sent)
+					), true)
+				end
+			elseif sent >= size then
 				state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
 			else
-				sent = send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
+				sent, last_chunk = send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
 				deadline = fibers.now() + timeout_s
-
-				if sent == size then
-					state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
-				end
 			end
 
-		elseif frame.type == 'xfer_done' and state == 'committing' then
+		elseif handle_frame and frame.type == 'xfer_done' and state == 'committing' then
 			return {
 				request_id = req.request_id,
 				target = target,

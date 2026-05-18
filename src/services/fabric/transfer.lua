@@ -70,6 +70,10 @@ local function copy_active(a)
 		request_generation = a.request_generation,
 		session = ctx(a.session),
 		status = a.status,
+		xfer_id = a.xfer_id,
+		target = a.target,
+		size = a.size,
+		sent = a.sent,
 	}
 end
 
@@ -98,6 +102,10 @@ local function snapshot_equal(a, b)
 		if aa.request_id ~= ba.request_id then return false end
 		if aa.request_generation ~= ba.request_generation then return false end
 		if aa.status ~= ba.status then return false end
+		if aa.xfer_id ~= ba.xfer_id then return false end
+		if aa.target ~= ba.target then return false end
+		if aa.size ~= ba.size then return false end
+		if aa.sent ~= ba.sent then return false end
 		if not same_ctx(aa.session, ba.session) then return false end
 	end
 
@@ -174,6 +182,9 @@ function M.claim_slot(state, rec)
 		session = require_ctx(rec.session, 'transfer.claim_slot'),
 		status = rec.status or 'leased',
 		xfer_id = rec.xfer_id,
+		target = rec.target,
+		size = rec.size,
+		sent = 0,
 		frame_tx = rec.frame_tx,
 		lease = rec.lease,
 	}
@@ -500,6 +511,8 @@ local function handle_slot_request(self, req)
 		request_generation = req_gen(req),
 		session = ctx(self._session),
 		xfer_id = req.xfer_id,
+		target = req.target,
+		size = req.size,
 		frame_tx = frame_tx,
 		frame_rx = frame_rx,
 	}
@@ -582,6 +595,12 @@ local function handle_frame(self, ev)
 	local ok, err = queue.try_admit_required(active.frame_tx, ev,
 		'transfer_attempt_frame_admission_failed')
 	if ok ~= true then error(err or 'transfer_attempt_frame_admission_failed', 0) end
+
+	if frame.type == 'xfer_need' and type(frame.next) == 'number' then
+		active.sent = frame.next
+	elseif frame.type == 'xfer_done' and type(active.size) == 'number' then
+		active.sent = active.size
+	end
 
 	self._state.stats.frames_routed = self._state.stats.frames_routed + 1
 	emit_model(self)

@@ -35,7 +35,11 @@ Service.__index = Service
 local DEFAULT_DONE_QUEUE = 32
 
 local function copy(v)
-	return model_mod.deep_copy(v)
+	local out = {}
+	for k, value in pairs(v or {}) do
+		out[k] = value
+	end
+	return out
 end
 
 local function config_from_value(value, opts)

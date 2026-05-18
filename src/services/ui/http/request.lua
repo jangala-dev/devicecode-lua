@@ -12,6 +12,7 @@ local auth          = require 'services.ui.auth'
 local user_operation = require 'services.ui.user_operation'
 local upload        = require 'services.ui.update.upload'
 local resource      = require 'devicecode.support.resource'
+local cjson         = require 'cjson.safe'
 
 local ok_http_headers, http_headers = pcall(require, 'services.http.headers')
 if not ok_http_headers then http_headers = nil end
@@ -70,6 +71,34 @@ local function body_table(ctx)
 	return {}
 end
 
+local function copy_table(t)
+	local out = {}
+	for k, v in pairs(type(t) == 'table' and t or {}) do
+		out[k] = v
+	end
+	return out
+end
+
+local function json_body_table(ctx)
+	local body = body_table(ctx)
+	if next(body) ~= nil or type(ctx.body) == 'table' or type(ctx.json) == 'table' then
+		return body
+	end
+	if type(ctx.read_body_as_string_op) ~= 'function' then return {} end
+
+	local raw, read_err = fibers.perform(ctx:read_body_as_string_op())
+	if raw == nil then return {}, read_err or 'body_read_failed' end
+	if raw == '' then
+		ctx.json = {}
+		return ctx.json
+	end
+
+	local decoded, decode_err = cjson.decode(raw)
+	if type(decoded) ~= 'table' then return {}, decode_err or 'json_body_must_be_object' end
+	ctx.json = decoded
+	return decoded
+end
+
 local function session_id_from(ctx)
 	return ctx.session_id
 		or (ctx.cookies and (ctx.cookies.sid or ctx.cookies.session or ctx.cookies.ui_session))
@@ -105,7 +134,13 @@ local function handle_read(owner, route, deps)
 end
 
 local function handle_login(owner, ctx, deps)
-	local principal, err = auth.verify(deps.auth, body_table(ctx))
+	local body, body_err = json_body_table(ctx)
+	if body_err ~= nil then
+		perform_response(owner:reply_error_op(400, body_err))
+		return { status = 'bad_request', err = body_err }
+	end
+
+	local principal, err = auth.verify(deps.auth, body)
 	if not principal then
 		perform_response(owner:reply_error_op(401, err or 'unauthenticated'))
 		return { status = 'unauthenticated' }
@@ -113,7 +148,7 @@ local function handle_login(owner, ctx, deps)
 	local sess = assert(deps.sessions, 'login requires sessions'):create(principal, {
 		data = { user_agent = ctx_header(ctx, 'user-agent') },
 	})
-	perform_response(owner:reply_json_op(200, { session = sess }))
+	perform_response(owner:reply_json_op(200, { session = sess, session_id = sess.id }))
 	return { status = 'ok', session_id = sess.id }
 end
 
@@ -135,19 +170,24 @@ local function handle_session_get(owner, ctx, deps)
 	return { status = 'ok' }
 end
 
-local function handle_command(scope, owner, ctx, route, deps)
+local function handle_command(_, owner, ctx, route, deps)
 	local principal = principal_from(ctx, deps)
 	if principal == nil then
 		perform_response(owner:reply_error_op(401, 'unauthenticated'))
 		return { status = 'unauthenticated' }
 	end
-	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
+	local body, body_err = json_body_table(ctx)
+	if body_err ~= nil then
+		perform_response(owner:reply_error_op(400, body_err))
+		return { status = 'bad_request', err = body_err }
+	end
+	local st, _, result_or_primary = fibers.perform(user_operation.run_op {
 		principal = principal,
 		connect = deps.connect,
 		bus = deps.bus,
 		timeout = deps.command_timeout or 5.0,
 		run_op = function (_, conn)
-			return conn:call_op(route.topic, body_table(ctx), { timeout = deps.command_timeout or 5.0 })
+			return conn:call_op(route.topic, body, { timeout = deps.command_timeout or 5.0 })
 				:wrap(function (value, call_err)
 					if value == nil then return nil, call_err or 'upstream_failed' end
 					return { value = value }, nil
@@ -161,6 +201,48 @@ local function handle_command(scope, owner, ctx, route, deps)
 	local result = result_or_primary
 	perform_response(owner:reply_json_op(200, result))
 	return { status = 'ok' }
+end
+
+local function upload_options(ctx, deps)
+	local opts = copy_table(deps.update or deps)
+	local metadata = copy_table(opts.metadata)
+
+	local component = ctx_header(ctx, 'x-artifact-component')
+	if component and component ~= '' then
+		opts.component = component
+		metadata.component = component
+	end
+
+	local function metadata_header(header, key)
+		local v = ctx_header(ctx, header)
+		if v and v ~= '' then metadata[key] = v end
+	end
+
+	metadata_header('x-artifact-name', 'name')
+	metadata_header('x-artifact-version', 'version')
+	metadata_header('x-artifact-build', 'build')
+	metadata_header('x-artifact-image-id', 'image_id')
+	metadata_header('x-artifact-compat-commit-image-id', 'compat_commit_image_id')
+
+	local raw_chunk = tonumber(ctx_header(ctx, 'x-transfer-chunk-raw') or '')
+	if raw_chunk and raw_chunk > 0 and raw_chunk % 1 == 0 then
+		opts.chunk_size = raw_chunk
+		metadata.transfer_chunk_raw = raw_chunk
+	end
+
+	opts.metadata = metadata
+	return opts
+end
+
+local function handle_upload(scope, owner, ctx, deps)
+	local ok, result = xpcall(function ()
+		return upload.run(scope, owner, ctx, upload_options(ctx, deps))
+	end, debug.traceback)
+	if ok then return result end
+
+	local err = tostring(result or 'upload_failed')
+	perform_response(owner:reply_error_op(500, err))
+	return { status = 'failed', err = err }
 end
 
 function M.run(scope, ctx, deps)
@@ -185,7 +267,7 @@ function M.run(scope, ctx, deps)
 	elseif route.kind == 'command' then
 		return handle_command(scope, owner, ctx, route, deps)
 	elseif route.kind == 'upload' then
-		return upload.run(scope, owner, ctx, deps.update or deps)
+		return handle_upload(scope, owner, ctx, deps)
 	elseif route.kind == 'sse' then
 		return sse.run(scope, owner, route, deps)
 	elseif route.kind == 'static' then

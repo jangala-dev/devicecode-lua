@@ -20,10 +20,29 @@ local config_watch = require 'devicecode.support.config_watch'
 local config_mod   = require 'services.ui.config'
 local service_events = require 'devicecode.support.service_events'
 local tablex = require 'shared.table'
+local authz = require 'devicecode.authz'
 
 local M = {}
 
 local shallow_copy = tablex.shallow_copy
+
+local function default_auth_opts(params)
+	params = params or {}
+	if params.auth ~= nil then return nil end
+	if params.auth_opts ~= nil then return params.auth_opts end
+
+	local password = os.getenv('DEVICECODE_UI_ADMIN_PASSWORD')
+	if password == nil or password == '' then return nil end
+
+	return {
+		users = {
+			admin = {
+				password = password,
+				principal = authz.user_principal('admin', { roles = { 'admin' } }),
+			},
+		},
+	}
+end
 
 local function component_summary(components)
 	local out = {}
@@ -567,6 +586,7 @@ function M.start(conn, opts)
 	local params = shallow_copy(opts)
 	params.conn = conn
 	params.lifecycle = svc
+	params.auth_opts = default_auth_opts(params)
 	return M.run(scope, params)
 end
 

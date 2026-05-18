@@ -6,10 +6,10 @@
 -- transfer protocol use and tests without pulling in an external dependency.
 -- It is not a security primitive.
 
-local ok_bit32, bit32_mod = pcall(require, 'bit32')
 local ok_bit, bit_mod = pcall(require, 'bit')
+local ok_bit32, bit32_mod = pcall(require, 'bit32')
 
-local bitops = ok_bit32 and bit32_mod or bit_mod
+local bitops = ok_bit and bit_mod or (ok_bit32 and bit32_mod or nil)
 assert(bitops, 'shared.hash.xxhash32 requires bit32 or bit')
 
 local band   = assert(bitops.band,   'bit library missing band')

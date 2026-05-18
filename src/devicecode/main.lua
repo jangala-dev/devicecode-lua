@@ -7,6 +7,7 @@ local op     = require 'fibers.op'
 local sleep  = require 'fibers.sleep'
 local authz  = require 'devicecode.authz'
 local busmod = require 'bus'
+local mcu_update_wiring = require 'devicecode.mcu_update_wiring'
 
 local safe   = require 'coxpcall'
 
@@ -59,7 +60,18 @@ local function cleanup_child_scope(child, reason)
     child:cancel(reason or 'cleanup')
 end
 
-local function spawn_service(child, bus, name, mod, env, extra_opts)
+local function copy_opts(extra_opts, name, env, connect_as)
+    local opts = {}
+    for k, v in pairs(extra_opts or {}) do
+        opts[k] = v
+    end
+    opts.name = opts.name or name
+    opts.env = opts.env or env
+    opts.connect = opts.connect or connect_as
+    return opts
+end
+
+local function spawn_service(child, bus, name, mod, env, extra_opts, runtime_params)
     return child:spawn(function()
         local conn = bus:connect({
             principal = authz.service_principal(name),
@@ -71,14 +83,9 @@ local function spawn_service(child, bus, name, mod, env, extra_opts)
             })
         end
 
-        mod.start(conn, {
-            name         = name,
-            env          = env,
-            connect      = connect_as,
-            services     = extra_opts and extra_opts.services or nil,
-            run_http     = extra_opts and extra_opts.run_http or nil,
-            verify_login = extra_opts and extra_opts.verify_login or nil,
-        })
+        local opts = copy_opts(extra_opts, name, env, connect_as)
+        opts = mcu_update_wiring.apply_service_opts(name, conn, connect_as, opts, runtime_params)
+        mod.start(conn, opts)
 
         error(('service returned unexpectedly: %s'):format(tostring(name)), 0)
     end)
@@ -220,7 +227,7 @@ function M.run(scope, params)
             fail_boot(main_conn, name, 'child_scope_failed', cerr)
         end
 
-        local ok_spawn, serr = spawn_service(child, bus, name, mod, env, service_opts[name])
+        local ok_spawn, serr = spawn_service(child, bus, name, mod, env, service_opts[name], params)
         if not ok_spawn then
             cleanup_child_scope(child, 'spawn_failed')
             fail_boot(main_conn, name, 'spawn_failed', serr)

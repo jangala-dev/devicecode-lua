@@ -11,6 +11,7 @@ local fibers = require 'fibers'
 local op     = require 'fibers.op'
 local errors = require 'services.ui.errors'
 local tablex = require 'shared.table'
+local cjson  = require 'cjson.safe'
 
 local ok_http_headers, http_headers = pcall(require, 'services.http.headers')
 if not ok_http_headers then http_headers = nil end
@@ -294,7 +295,14 @@ function Response:reply_json_op(status, body, headers, opts)
 	headers = shallow_copy(headers)
 	headers['content-type'] = headers['content-type'] or 'application/json'
 	local payload = body
-	if self._encode then payload = self._encode(body) end
+	local encode = self._encode or cjson.encode
+	if type(payload) ~= 'string' then
+		local encoded, enc_err = encode(payload)
+		if encoded == nil then
+			return op.always(nil, enc_err or 'json_encode_failed')
+		end
+		payload = encoded
+	end
 	return self:reply_op(status, payload, headers, opts)
 end
 

@@ -4,7 +4,7 @@
 --
 -- Core Fabric consumes frame transports. This module adapts line/stream HAL
 -- sessions to the fabric-jsonl/1 frame transport contract, and can open such a
--- session through a raw host HAL capability.
+-- session through a local HAL capability.
 
 local fibers = require 'fibers'
 local op     = require 'fibers.op'
@@ -174,7 +174,7 @@ end
 
 function Transport:flush_op()
 	return op.guard(function ()
-		local session, closed = self:_active_session_op()
+		local session = self:_active_session_op()
 		if session == nil then
 			return op.always(true, nil)
 		end
@@ -230,7 +230,10 @@ local function require_transport_cfg(cfg, level)
 
 	for _, field in ipairs({ 'source', 'class', 'id' }) do
 		if type(cfg[field]) ~= 'string' or cfg[field] == '' then
-			error('fabric.hal_transport.open_transport_op: transport.' .. field .. ' must be a non-empty string', (level or 1) + 1)
+			error(
+				'fabric.hal_transport.open_transport_op: transport.' .. field .. ' must be a non-empty string',
+				(level or 1) + 1
+			)
 		end
 	end
 
@@ -262,6 +265,85 @@ local function unwrap_open_transport_reply(reply, err)
 	return session, nil
 end
 
+local function open_route(transport_cfg)
+	return ('raw/host/%s/cap/%s/%s/rpc/%s'):format(
+		tostring(transport_cfg.source),
+		tostring(transport_cfg.class),
+		tostring(transport_cfg.id),
+		tostring(transport_cfg.open_verb or 'open')
+	)
+end
+
+local function open_error(transport_cfg, err)
+	return ('%s route=%s'):format(
+		tostring(err or 'transport_open_failed'),
+		open_route(transport_cfg)
+	)
+end
+
+local function unwrap_opened_transport(transport_cfg, reply, err)
+	local session, uerr = unwrap_open_transport_reply(reply, err)
+	if not session then
+		return nil, uerr
+	end
+
+	local transport, terr = M.wrap_transport(session, transport_cfg)
+	if not transport then
+		return nil, terr or 'transport_wrap_failed'
+	end
+
+	return transport, nil
+end
+
+local function open_payload(transport_cfg, verb)
+	local opts = transport_cfg.open_opts
+
+	if transport_cfg.class == 'uart' and verb == 'open' then
+		local uart_opts, uerr = cap_sdk.args.new.UARTOpenOpts(opts)
+		if not uart_opts then
+			return nil, uerr or 'invalid_uart_open_opts'
+		end
+		return uart_opts, nil
+	end
+
+	return opts or {}, nil
+end
+
+local function wait_for_transport_cap_op(conn, transport_cfg)
+	return fibers.run_scope_op(function (scope)
+		local listener = cap_sdk.new_raw_host_cap_listener(
+			conn,
+			transport_cfg.source,
+			transport_cfg.class,
+			transport_cfg.id
+		)
+		listener:close_on_scope(scope)
+
+		local cap, err = fibers.perform(listener:wait_for_cap_op())
+		if not cap then
+			return nil, err or 'transport_capability_not_available'
+		end
+
+		listener:terminate('transport capability ready')
+		return cap, nil
+	end):wrap(function (st, rep, cap, err)
+		if st ~= 'ok' then
+			return nil, tostring(err or rep)
+		end
+		return cap, err
+	end)
+end
+
+local function call_open_op(conn, transport_cfg, verb, payload)
+	local cap = cap_sdk.new_raw_host_cap_ref(
+		conn,
+		transport_cfg.source,
+		transport_cfg.class,
+		transport_cfg.id
+	)
+	return cap:call_control_op(verb, payload)
+end
+
 function M.open_transport_op(conn, transport_cfg, transport_session)
 	transport_cfg = require_transport_cfg(transport_cfg, 2)
 
@@ -278,28 +360,40 @@ function M.open_transport_op(conn, transport_cfg, transport_session)
 			return op.always(nil, 'transport_open_requires_bus_connection')
 		end
 
-		local cap = cap_sdk.new_raw_host_cap_ref(
-			conn,
-			transport_cfg.source,
-			transport_cfg.class,
-			transport_cfg.id
-		)
-
-		return cap:call_control_op(
-			transport_cfg.open_verb or 'open',
-			transport_cfg.open_opts
-		):wrap(function (reply, err)
-			local session, uerr = unwrap_open_transport_reply(reply, err)
-			if not session then
-				return nil, uerr
+		return fibers.run_scope_op(function ()
+			local verb = transport_cfg.open_verb or 'open'
+			local payload, perr = open_payload(transport_cfg, verb)
+			if not payload then
+				return nil, open_error(transport_cfg, perr)
 			end
 
-			local transport, terr = M.wrap_transport(session, transport_cfg)
-			if not transport then
-				return nil, terr or 'transport_wrap_failed'
+			local reply, err = fibers.perform(call_open_op(conn, transport_cfg, verb, payload))
+			local transport, terr = unwrap_opened_transport(transport_cfg, reply, err)
+			if transport then
+				return transport, nil
 			end
 
-			return transport, nil
+			if tostring(terr) ~= 'no_route' then
+				return nil, open_error(transport_cfg, terr)
+			end
+
+			local cap, cap_err = fibers.perform(wait_for_transport_cap_op(conn, transport_cfg))
+			if not cap then
+				return nil, cap_err or 'transport_capability_not_available'
+			end
+
+			reply, err = fibers.perform(cap:call_control_op(verb, payload))
+			transport, terr = unwrap_opened_transport(transport_cfg, reply, err)
+			if transport then
+				return transport, nil
+			end
+
+			return nil, open_error(transport_cfg, terr)
+		end):wrap(function (st, rep, transport, err)
+			if st ~= 'ok' then
+				return nil, tostring(err or rep)
+			end
+			return transport, err
 		end)
 	end)
 end
