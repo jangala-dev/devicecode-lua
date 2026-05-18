@@ -124,10 +124,69 @@ end
 ---@return Capability?
 ---@return string error
 function new.NetworkCapability(id, control_ch)
-    local offerings = {}
+    local offerings = {
+        'validate',
+        'plan',
+        'apply',
+        'snapshot',
+        'probe_link',
+        'read_counters',
+    }
     return new.Capability('network', id, control_ch, offerings)
 end
 
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.NetworkConfigCapability(id, control_ch)
+    return new.Capability('network-config', id, control_ch, {
+        'validate',
+        'plan',
+        'apply',
+        'apply_live_weights',
+        'apply_shaping',
+    })
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.NetworkStateCapability(id, control_ch)
+    return new.Capability('network-state', id, control_ch, {
+        'snapshot',
+        'watch',
+    })
+end
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.NetworkDiagnosticsCapability(id, control_ch)
+    return new.Capability('network-diagnostics', id, control_ch, {
+        'probe_link',
+        'read_counters',
+        'speedtest',
+    })
+end
+
+
+
+---@param id CapabilityId
+---@param control_ch Channel
+---@return Capability?
+---@return string error
+function new.WiredProviderCapability(id, control_ch)
+    return new.Capability('wired-provider', id, control_ch, {
+        'snapshot',
+        'watch',
+        'apply_attachments',
+        'set_poe',
+        'bounce',
+    })
+end
 
 ---@param id CapabilityId
 ---@param control_ch Channel

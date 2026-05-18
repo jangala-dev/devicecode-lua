@@ -38,11 +38,11 @@ local utils    = require 'services.wifi.utils'
 ---@field report_period? number  seconds between stats reports
 
 ---@class WifiSsidConfig
----@field name? string         SSID / network name
+---@field name? string         SSID name
 ---@field mode string          access_point | client | adhoc | mesh | monitor
 ---@field encryption? RadioEncryption
 ---@field password? string
----@field network? string      UCI network interface name
+---@field segment string       NET segment id this SSID attaches to
 ---@field radios string[]      radio section names this SSID should be added to
 ---@field mainflux_path? string  path in the configs filesystem cap
 
@@ -418,7 +418,7 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
                     break
                 end
                 local base_cfg = {
-                    network    = ssid_cfg.network,
+                    segment    = ssid_cfg.segment,
                     encryption = ssid_cfg.encryption or 'none',
                     password   = ssid_cfg.password or '',
                     mode       = map_mode(ssid_cfg.mode or 'access_point'),
@@ -429,11 +429,15 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
                     break
                 end
                 for _, mssd in ipairs(ssids) do
+                    if type(mssd.segment) ~= 'string' or mssd.segment == '' then
+                        svc:obs_log('warn', { what = 'ssid_missing_segment', ssid = mssd.name or mssd.ssid })
+                        break
+                    end
                     local args, err = cap_sdk.args.new.RadioAddInterfaceOpts(
                         mssd.name or mssd.ssid or '',
                         mssd.encryption or 'none',
                         mssd.password or '',
-                        mssd.network or '',
+                        mssd.segment,
                         map_mode(mssd.mode or 'ap'),
                         enable_steering)
                     if not args then
@@ -445,7 +449,7 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
                                 what    = 'radio_iface_added',
                                 radio   = radio_id,
                                 ssid    = mssd.name or mssd.ssid,
-                                network = mssd.network,
+                                segment = mssd.segment,
                                 iface   = reply and reply.reason or nil,
                             })
                         end
@@ -453,11 +457,15 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
                 end
             else
                 -- Direct SSID from config
+                if type(ssid_cfg.segment) ~= 'string' or ssid_cfg.segment == '' then
+                    svc:obs_log('warn', { what = 'ssid_missing_segment', ssid = ssid_cfg.name })
+                    break
+                end
                 local args, err = cap_sdk.args.new.RadioAddInterfaceOpts(
                     ssid_cfg.name or '',
                     ssid_cfg.encryption or 'none',
                     ssid_cfg.password or '',
-                    ssid_cfg.network or '',
+                    ssid_cfg.segment,
                     map_mode(ssid_cfg.mode or 'access_point'),
                     enable_steering)
                 if not args then
@@ -469,7 +477,7 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
                             what    = 'radio_iface_added',
                             radio   = radio_id,
                             ssid    = ssid_cfg.name,
-                            network = ssid_cfg.network,
+                            segment = ssid_cfg.segment,
                             iface   = reply and reply.reason or nil,
                         })
                     end

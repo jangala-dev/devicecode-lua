@@ -13,6 +13,10 @@ OPENWRT_SSH_PORT="${OPENWRT_SSH_PORT:-2222}"
 OPENWRT_SSH_WAIT_S="${OPENWRT_SSH_WAIT_S:-90}"
 OPENWRT_VM_MEM="${OPENWRT_VM_MEM:-512M}"
 OPENWRT_VM_CPUS="${OPENWRT_VM_CPUS:-2}"
+# Number of additional QEMU user-mode NICs to attach as deterministic WAN
+# devices for network/MWAN integration tests. With the management NIC first,
+# OpenWrt normally sees these as eth1..ethN.
+OPENWRT_VM_WAN_IFACES="${OPENWRT_VM_WAN_IFACES:-3}"
 OPENWRT_KVM="${OPENWRT_KVM:-auto}"
 
 # Optional host tap devices for dataplane tests. These are deliberately separate

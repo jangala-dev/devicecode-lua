@@ -1065,3 +1065,16 @@ Within this model:
 * identifier scope and stability are explicit rather than assumed
 * canonical, summary and compatibility surfaces remain distinct
 * and the distinction between interface contracts and canonical retained truth remains explicit
+
+## Wired provider naming
+
+Read-only or writable wired hardware providers publish capability state under
+`cap/wired-provider/<provider_id>/...` and raw host provenance under
+`raw/host/wired/cap/wired-provider/<provider_id>/...` when provided by the local
+HAL. A future switch-fabric member running devicecode will import equivalent raw
+facts under `raw/member/<member_id>/...`; `device` may curate those into the same
+public capability identity.
+
+The appliance-level wired view is published under `state/wired/...` and should
+use stable product surface identifiers such as `cm5-eth0`, `switch-uplink-cm5`,
+`lan-1` and `lan-2`.

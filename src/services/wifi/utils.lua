@@ -2,7 +2,7 @@ local json = require "cjson.safe"
 local cap_args = require "services.hal.types.capability_args"
 
 local mainflux_to_ssid_keys = {
-    name    = "network",
+    name    = "segment",
     ssid    = "name",
 }
 
@@ -60,7 +60,7 @@ local function parse_mainflux_ssids(fs_cap, mainflux_path, base_ssid_cfg)
         for k, v in pairs(ssid_cfg) do
             local key = mainflux_to_ssid_keys[k] or k
             -- Temporary workaround: mainflux uses "jng" for what we call "adm"
-            if key == "network" and v == "jng" then
+            if key == "segment" and v == "jng" then
                 v = "adm"
             end
             ssid[key] = v
