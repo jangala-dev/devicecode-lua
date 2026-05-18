@@ -1,0 +1,569 @@
+{
+    "hal": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/hal/1",
+            "modemcard": {},
+            "filesystem": [
+                {
+                    "name": "configs",
+                    "root": "/data/configs/"
+                },
+                {
+                    "name": "state",
+                    "root": "/tmp/dc-states/"
+                }
+            ],
+            "sysmon": {},
+            "platform": {},
+            "power": {},
+            "usb": {},
+            "time": {},
+            "wlan": {
+                "radios": [
+                    {
+                        "name": "radio0",
+                        "type": "mac80211",
+                        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0"
+                    },
+                    {
+                        "name": "radio1",
+                        "type": "mac80211",
+                        "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1"
+                    }
+                ]
+            }
+        }
+    },
+    "gsm": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/gsm/1",
+            "modems": {
+                "default": {
+                    "enabled": true,
+                    "signal_freq": 10
+                },
+                "known": [
+                    {
+                        "name": "primary",
+                        "id_field": "device",
+                        "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
+                        "autoconnect": true
+                    },
+                    {
+                        "name": "secondary",
+                        "id_field": "device",
+                        "device": "/sys/devices/platform/axi/1000480000.usb/usb1/1-1",
+                        "autoconnect": true
+                    },
+                    {
+                        "name": "primary",
+                        "id_field": "device",
+                        "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
+                        "autoconnect": true
+                    },
+                    {
+                        "name": "secondary",
+                        "id_field": "device",
+                        "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4",
+                        "autoconnect": true
+                    }
+                ]
+            }
+        }
+    },
+    "wifi": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/wifi/1",
+            "report_period": 10,
+            "radios": [
+                {
+                    "name": "radio0",
+                    "band": "2g",
+                    "channel": "auto",
+                    "channels": ["1", "6", "11"],
+                    "country": "GB",
+                    "htmode": "HE20",
+                    "txpower": "20",
+                    "disabled": false
+                },
+                {
+                    "name": "radio1",
+                    "band": "5g",
+                    "channel": "36",
+                    "country": "GB",
+                    "htmode": "HE80",
+                    "txpower": "23",
+                    "disabled": false
+                }
+            ],
+            "ssids": [
+                {
+                    "mainflux_path": "mainflux.cfg",
+                    "encryption": "psk2",
+                    "mode": "access_point",
+                    "radios": ["radio0", "radio1"]
+                },
+                {
+                    "name": "Jangala",
+                    "mode": "access_point",
+                    "encryption": "none",
+                    "network": "jan",
+                    "radios": ["radio0", "radio1"]
+                }
+            ],
+            "band_steering": {
+                "globals": {
+                    "rrm_mode": "PAT",
+                    "kicking": {
+                        "kick_mode": "both",
+                        "bandwidth_threshold": 0,
+                        "kicking_threshold": 15,
+                        "evals_before_kick": 3
+                    },
+                    "stations": {
+                        "use_station_count": false,
+                        "max_station_diff": 1
+                    },
+                    "neighbor_reports": {
+                        "dyn_report_num": 2,
+                        "disassoc_report_len": 6
+                    },
+                    "legacy": {
+                        "eval_probe_req": true,
+                        "eval_assoc_req": false,
+                        "eval_auth_req": false,
+                        "min_probe_count": 2,
+                        "deny_auth_reason": 1,
+                        "deny_assoc_reason": 17
+                    }
+                },
+                "timings": {
+                    "updates": {
+                        "client": 10,
+                        "chan_util": 5,
+                        "beacon_reports": 5,
+                        "hostapd": 10,
+                        "tcp_con": 10
+                    },
+                    "cleanup": {
+                        "client": 15,
+                        "probe": 40,
+                        "ap": 460
+                    },
+                    "inactive_client_kickoff": 60
+                },
+                "bands": {
+                    "2g": {
+                        "initial_score": 90,
+                        "rssi_scoring": {
+                            "center": "-69",
+                            "weight": 2,
+                            "good_threshold": "-66",
+                            "good_reward": 12,
+                            "bad_threshold": "-75",
+                            "bad_penalty": "-15"
+                        },
+                        "chan_util_scoring": {
+                            "good_threshold": 140,
+                            "good_reward": 5,
+                            "bad_threshold": 170,
+                            "bad_penalty": "-20"
+                        },
+                        "support_bonuses": {
+                            "vht": 5,
+                            "ht": 5
+                        }
+                    },
+                    "5g": {
+                        "initial_score": 95,
+                        "rssi_scoring": {
+                            "center": "-64",
+                            "weight": 4,
+                            "good_threshold": "-62",
+                            "good_reward": 10,
+                            "bad_threshold": "-70",
+                            "bad_penalty": "-28"
+                        },
+                        "chan_util_scoring": {
+                            "good_threshold": 140,
+                            "good_reward": 5,
+                            "bad_threshold": 170,
+                            "bad_penalty": "-20"
+                        },
+                        "support_bonuses": {
+                            "vht": 2,
+                            "ht": 2
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "system": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/system/1",
+            "report_period": 60,
+            "usb3_enabled": false,
+            "alarms": [
+                {
+                    "time": "5:00",
+                    "repeats": "daily",
+                    "payload": {
+                        "name": "daily reboot",
+                        "type": "reboot"
+                    }
+                }
+            ]
+        }
+    },
+    "metrics": {
+        "rev": 1,
+        "data": {
+            "schema": "devicecode.config/metrics/1",
+            "cloud_url": "$CLOUD_URL",
+            "publish_period": 60,
+            "templates": {
+                "network_stat": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "percent",
+                            "threshold": 5,
+                            "initial_val": 0
+                        },
+                        {
+                            "type": "DeltaValue"
+                        }
+                    ]
+                },
+                "any_change": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "any-change"
+                        }
+                    ]
+                },
+                "percent_5": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "percent",
+                            "threshold": 5
+                        }
+                    ]
+                },
+                "absolute_10": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "absolute",
+                            "threshold": 10
+                        }
+                    ]
+                }
+            },
+            "pipelines": {
+                "wann_type": {
+                    "template": "any_change"
+                },
+                "access_tech": {
+                    "template": "any_change"
+                },
+                "access_fam": {
+                    "template": "any_change"
+                },
+                "rx_bytes": {
+                    "template": "network_stat"
+                },
+                "rx_packets": {
+                    "template": "network_stat"
+                },
+                "rx_dropped": {
+                    "template": "network_stat"
+                },
+                "rx_errors": {
+                    "template": "network_stat"
+                },
+                "tx_bytes": {
+                    "template": "network_stat"
+                },
+                "tx_packets": {
+                    "template": "network_stat"
+                },
+                "tx_dropped": {
+                    "template": "network_stat"
+                },
+                "tx_errors": {
+                    "template": "network_stat"
+                },
+                "firmware": {
+                    "template": "any_change"
+                },
+                "band": {
+                    "template": "any_change"
+                },
+                "access-tech": {
+                    "template": "any_change"
+                },
+                "access-family": {
+                    "template": "any_change"
+                },
+                "imei": {
+                    "template": "any_change"
+                },
+                "sim": {
+                    "template": "any_change"
+                },
+                "rssi": {
+                    "template": "percent_5"
+                },
+                "rsrp": {
+                    "template": "percent_5"
+                },
+                "rsrq": {
+                    "template": "percent_5"
+                },
+                "bars": {
+                    "template": "any_change"
+                },
+                "operator": {
+                    "template": "any_change"
+                },
+                "iccid": {
+                    "template": "any_change"
+                },
+                "state": {
+                    "template": "any_change"
+                },
+                "interface": {
+                    "template": "any_change"
+                },
+                "boot_time": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "absolute",
+                            "threshold": 1000
+                        }
+                    ]
+                },
+                "version": {
+                    "template": "any_change"
+                },
+                "fw_version": {
+                    "template": "any_change"
+                },
+                "revision": {
+                    "template": "any_change"
+                },
+                "serial": {
+                    "template": "any_change"
+                },
+                "overall_utilisation": {
+                    "template": "percent_5"
+                },
+                "util": {
+                    "template": "percent_5"
+                },
+                "temperature": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "absolute",
+                            "threshold": 2
+                        }
+                    ]
+                },
+                "alloc": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "TimeTrigger",
+                            "duration": 60
+                        }
+                    ]
+                },
+                "internal": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "absolute",
+                            "threshold": 1
+                        }
+                    ]
+                },
+                "core": {
+                    "template": "percent_5"
+                },
+                "vbat": {
+                    "template": "absolute_10"
+                },
+                "ibat": {
+                    "template": "absolute_10"
+                },
+                "vin": {
+                    "template": "absolute_10"
+                },
+                "vsys": {
+                    "template": "absolute_10"
+                },
+                "iin": {
+                    "template": "absolute_10"
+                },
+                "charger_enabled": {
+                    "template": "any_change"
+                },
+                "mppt_en_pin": {
+                    "template": "any_change"
+                },
+                "equalize_req": {
+                    "template": "any_change"
+                },
+                "drvcc_good": {
+                    "template": "any_change"
+                },
+                "cell_count_error": {
+                    "template": "any_change"
+                },
+                "ok_to_charge": {
+                    "template": "any_change"
+                },
+                "no_rt": {
+                    "template": "any_change"
+                },
+                "thermal_shutdown": {
+                    "template": "any_change"
+                },
+                "vin_ovlo": {
+                    "template": "any_change"
+                },
+                "vin_gt_vbat": {
+                    "template": "any_change"
+                },
+                "intvcc_gt_4p3v": {
+                    "template": "any_change"
+                },
+                "intvcc_gt_2p8v": {
+                    "template": "any_change"
+                },
+                "iin_limited": {
+                    "template": "any_change"
+                },
+                "uvcl_active": {
+                    "template": "any_change"
+                },
+                "cc_phase": {
+                    "template": "any_change"
+                },
+                "cv_phase": {
+                    "template": "any_change"
+                },
+                "bat_short": {
+                    "template": "any_change"
+                },
+                "bat_missing": {
+                    "template": "any_change"
+                },
+                "max_charge_time_fault": {
+                    "template": "any_change"
+                },
+                "c_over_x_term": {
+                    "template": "any_change"
+                },
+                "timer_term": {
+                    "template": "any_change"
+                },
+                "ntc_pause": {
+                    "template": "any_change"
+                },
+                "precharge": {
+                    "template": "any_change"
+                },
+                "cccv": {
+                    "template": "any_change"
+                },
+                "absorb": {
+                    "template": "any_change"
+                },
+                "equalize": {
+                    "template": "any_change"
+                },
+                "suspended": {
+                    "template": "any_change"
+                },
+                "session_start": {
+                    "protocol": "http",
+                    "process": []
+                },
+                "session_end": {
+                    "protocol": "http",
+                    "process": []
+                },
+                "hostname": {
+                    "template": "any_change"
+                },
+                "signal": {
+                    "template": "percent_5"
+                },
+                "power": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "percent",
+                            "threshold": 10,
+                            "initial_val": 0
+                        }
+                    ]
+                },
+                "channel": {
+                    "template": "any_change"
+                },
+                "noise": {
+                    "protocol": "http",
+                    "process": [
+                        {
+                            "type": "DiffTrigger",
+                            "diff_method": "percent",
+                            "threshold": 10,
+                            "initial_val": 0
+                        }
+                    ]
+                },
+                "num_sta": {
+                    "template": "percent_5"
+                },
+                "mem_util": {
+                    "template": "any_change"
+                },
+                "cpu_util": {
+                    "template": "any_change"
+                },
+                "temp": {
+                    "template": "any_change"
+                },
+                "curr_time": {
+                    "template": "any_change"
+                },
+                "fw_id": {
+                    "template": "any_change"
+                },
+                "hw_id": {
+                    "template": "any_change"
+                }
+            }
+        }
+    }
+}
