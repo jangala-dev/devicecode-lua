@@ -20,6 +20,7 @@ local state = {
 	started = false,
 	scope = nil,
 	logger = nil,
+	conn = nil,
 	dev_ev_ch = nil,
 	cap_emit_ch = nil,
 	drivers = {},
@@ -58,7 +59,12 @@ local function emit_state(class, id, key, payload)
 end
 
 local function emit_snapshot_now(provider_id, snapshot)
-	local ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'status', snapshot.status or { state = 'available', available = snapshot.ok == true }))
+	local ok, err = fibers.perform(emit_state(
+		'wired-provider',
+		provider_id,
+		'status',
+		snapshot.status or { state = 'available', available = snapshot.ok == true }
+	))
 	if ok == false or ok == nil then return nil, err end
 	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'surfaces', { surfaces = snapshot.surfaces or {} }))
 	if ok == false or ok == nil then return nil, err end
@@ -127,7 +133,9 @@ local function device_event_op(event_type, caps)
 end
 
 local function close_control_channels()
-	for _, ch in pairs(state.controls or {}) do if ch and type(ch.close) == 'function' then ch:close('reconfigured') end end
+	for _, ch in pairs(state.controls or {}) do
+		if ch and type(ch.close) == 'function' then ch:close('reconfigured') end
+	end
 	state.controls = {}
 end
 
@@ -155,9 +163,13 @@ local function normalise_provider_ids(config)
 		for i = 1, #keys do
 			local key = tostring(keys[i])
 			local rec = providers[key]
-			if type(rec) ~= 'table' then return nil, ('wired provider %s must be a table'):format(key) end
+			if type(rec) ~= 'table' then
+				return nil, ('wired provider %s must be a table'):format(key)
+			end
 			local id = rec.id or key
-			if type(id) ~= 'string' or id == '' then return nil, ('wired provider %s id must be a non-empty string'):format(key) end
+			if type(id) ~= 'string' or id == '' then
+				return nil, ('wired provider %s id must be a non-empty string'):format(key)
+			end
 			if seen[id] then return nil, ('duplicate wired provider id %s'):format(id) end
 			seen[id] = true
 			ids[#ids + 1] = id
@@ -217,7 +229,7 @@ local function reconcile_device_caps(provider_ids)
 	return true, nil
 end
 
-function M.start_op(logger, dev_ev_ch, cap_emit_ch)
+function M.start_op(logger, dev_ev_ch, cap_emit_ch, conn)
 	return op.guard(function ()
 		if state.started then return op.always(true, nil) end
 		local parent = fibers.current_scope()
@@ -226,6 +238,7 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch)
 
 		state.scope = child
 		state.logger = logger
+		state.conn = conn
 		state.dev_ev_ch = dev_ev_ch
 		state.cap_emit_ch = cap_emit_ch
 		state.controls = {}
@@ -255,21 +268,35 @@ function M.apply_config_op(config)
 				local id = provider_ids[i]
 				local pcfg = configured_provider(config or {}, id)
 				if not pcfg then
-					local eok, eerr = emit_snapshot_now(id, { status = { state = 'not_configured', available = false }, surfaces = {}, topology = {} })
+					local eok, eerr = emit_snapshot_now(id, {
+						status = { state = 'not_configured', available = false },
+						surfaces = {},
+						topology = {},
+					})
 					if eok ~= true then return false, eerr or 'wired provider status emit failed' end
 				else
 					local driver_config = {}
 					for k, v in pairs(pcfg) do driver_config[k] = v end
 					driver_config.id = driver_config.id or id
-					local driver, err = driver_mod.new(driver_config, { logger = state.logger, cap_emit_ch = state.cap_emit_ch })
-					if not driver then return false, ('wired provider %s create failed: %s'):format(id, tostring(err)) end
+					local driver, err = driver_mod.new(driver_config, {
+						logger = state.logger,
+						cap_emit_ch = state.cap_emit_ch,
+						conn = state.conn,
+					})
+					if not driver then
+						return false, ('wired provider %s create failed: %s'):format(id, tostring(err))
+					end
 					state.drivers[id] = driver
 					local result = driver_result(id, 'snapshot', {})
 					if result.ok == true then
 						local eok, eerr = emit_snapshot_now(id, result)
 						if eok ~= true then return false, eerr or 'wired provider emit failed' end
 					else
-						local eok, eerr = emit_snapshot_now(id, { status = { state = 'unavailable', available = false, err = result.err }, surfaces = {}, topology = {} })
+						local eok, eerr = emit_snapshot_now(id, {
+							status = { state = 'unavailable', available = false, err = result.err },
+							surfaces = {},
+							topology = {},
+						})
 						if eok ~= true then return false, eerr or 'wired provider status emit failed' end
 					end
 				end
@@ -298,6 +325,7 @@ function M.terminate(reason)
 	if state.scope then local scope = state.scope; state.scope = nil; scope:cancel(reason or 'terminated') end
 	state.started = false
 	state.logger = nil
+	state.conn = nil
 	state.dev_ev_ch = nil
 	state.cap_emit_ch = nil
 	return true, nil

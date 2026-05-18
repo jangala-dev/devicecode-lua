@@ -722,7 +722,7 @@ function HalService.start(conn, opts)
 		return out
 	end
 
-	function registry:terminate_caps(reason)
+	function registry:terminate_caps(_reason)
 		-- reason is accepted for finaliser-shaped call sites; bus endpoints
 		-- expose immediate unbind without a reason parameter.
 		for _, class_caps in pairs(self.caps) do
@@ -1090,7 +1090,8 @@ function HalService.start(conn, opts)
 			manager_start_timeout_s,
 			manager_logger,
 			dev_ev_ch,
-			cap_emit_ch
+			cap_emit_ch,
+			conn
 		))
 	end
 
@@ -1255,7 +1256,7 @@ function HalService.start(conn, opts)
 	svc:obs_log('info', { what = 'subscribed', topic = 'cfg/' .. svc.name })
 
 	while true do
-		local source, a, b = perform(op.named_choice({
+		local source, a = perform(op.named_choice({
 			rpc           = op.choice(registry:rpc_ops()),
 			manager_fault = op.choice(manager_fault_ops()),
 			cap_emit      = cap_emit_ch:get_op(),
