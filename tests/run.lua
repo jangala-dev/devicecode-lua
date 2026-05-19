@@ -102,6 +102,7 @@ local files = {
 	'unit.support.test_resource',
 	'unit.support.test_bus_cleanup',
 	'unit.support.test_config_watch',
+	'unit.support.test_config_watch_architecture',
 	'unit.support.test_service_events',
 	'unit.http.transport.test_cqueues_driver',
 	'unit.http.transport.test_lua_http',
