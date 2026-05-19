@@ -58,6 +58,7 @@ local files = {
 	'unit.fabric.test_transfer',
 	'unit.fabric.test_transfer_sender',
 	'unit.fabric.test_bridge',
+	'unit.fabric.test_state',
 	'unit.fabric.test_fabric',
 	'unit.device.test_action_manager',
 	'unit.device.test_catalogue',

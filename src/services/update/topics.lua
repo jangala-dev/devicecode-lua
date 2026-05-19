@@ -53,6 +53,10 @@ function M.workflow_update_job(job_id)
 	return t('state', 'workflow', 'update-job', job_id)
 end
 
+function M.workflow_update_job_timeline(job_id)
+	return t('state', 'workflow', 'update-job', job_id, 'timeline')
+end
+
 function M.workflow_artifact_ingest(ingest_id)
 	return t('state', 'workflow', 'artifact-ingest', ingest_id)
 end

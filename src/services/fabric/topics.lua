@@ -358,6 +358,10 @@ function M.state_link_component(link_id, component)
 	return append({ 'state', 'fabric', 'link', link_id, 'component' }, component)
 end
 
+function M.state_transfer(xfer_id)
+	return { 'state', 'fabric', 'transfer', xfer_id }
+end
+
 --------------------------------------------------------------------------------
 -- Stable public Fabric interfaces
 --------------------------------------------------------------------------------

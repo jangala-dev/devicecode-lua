@@ -45,6 +45,10 @@ function M.component_topic(link_id, component)
 	return topics.state_link_component(link_id, component)
 end
 
+function M.transfer_topic(xfer_id)
+	return topics.state_transfer(xfer_id)
+end
+
 function M.link_snapshot_event(link_id, link_generation, snapshot)
 	return {
 		kind = 'link_snapshot',
@@ -104,6 +108,55 @@ local function unretain(conn, topic, opts)
 	return bus_cleanup.unretain(conn, topic, opts)
 end
 
+
+local function transfer_corr_from_result(result)
+	result = type(result) == 'table' and result or {}
+	return {
+		job_id = result.job_id,
+		component = result.component,
+		image_id = result.image_id,
+		xfer_id = result.xfer_id,
+		request_id = result.request_id,
+	}
+end
+
+local function transfer_payload_from_snapshot(link_id, link_generation, snapshot)
+	if type(snapshot) ~= 'table' then return nil end
+	local rec = type(snapshot.active) == 'table' and snapshot.active or type(snapshot.last) == 'table' and snapshot.last or nil
+	if type(rec) ~= 'table' then return nil end
+	local result = type(rec.result) == 'table' and rec.result or {}
+	local xfer_id = rec.xfer_id or result.xfer_id
+	if type(xfer_id) ~= 'string' or xfer_id == '' then return nil end
+	local meta = type(rec.meta) == 'table' and rec.meta or {}
+	local corr = transfer_corr_from_result(result)
+	corr.job_id = corr.job_id or meta.job_id
+	corr.component = corr.component or meta.component
+	corr.image_id = corr.image_id or meta.image_id
+	corr.xfer_id = xfer_id
+	corr.request_id = corr.request_id or rec.request_id or result.request_id
+	return {
+		kind = 'fabric.transfer',
+		link_id = link_id,
+		link_generation = link_generation,
+		xfer_id = xfer_id,
+		request_id = rec.request_id or result.request_id,
+		direction = rec.direction,
+		state = rec.status,
+		status = rec.status,
+		target = rec.target or result.target,
+		size = result.size or rec.size,
+		sent_bytes = result.sent_bytes,
+		received_bytes = result.received_bytes,
+		digest_alg = result.digest_alg or rec.digest_alg,
+		digest = result.digest or rec.digest,
+		retransmits = result.retransmits,
+		chunk_retries = result.chunk_retries,
+		error = rec.primary,
+		correlation = corr,
+		ts = fibers.now(),
+	}
+end
+
 local function handle_event(conn, ev)
 	if ev.kind == 'link_snapshot' then
 		return retain(
@@ -116,7 +169,7 @@ local function handle_event(conn, ev)
 		)
 
 	elseif ev.kind == 'component_snapshot' then
-		return retain(
+		local ok, err = retain(
 			conn,
 			M.component_topic(ev.link_id, ev.component),
 			make_payload('fabric.component', ev.snapshot, {
@@ -125,6 +178,14 @@ local function handle_event(conn, ev)
 				component = ev.component,
 			})
 		)
+		if ok ~= true then return ok, err end
+		if ev.component == 'transfer' then
+			local payload = transfer_payload_from_snapshot(ev.link_id, ev.link_generation, ev.snapshot)
+			if payload ~= nil then
+				return retain(conn, M.transfer_topic(payload.xfer_id), payload)
+			end
+		end
+		return true, nil
 
 	elseif ev.kind == 'clear_link' then
 		return unretain(conn, M.link_topic(ev.link_id))

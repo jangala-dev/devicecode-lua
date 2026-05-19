@@ -257,6 +257,9 @@ function M.run(scope, req, caps)
 			finished = true
 			send_control(caps, construct('xfer_done', protocol.xfer_done, xfer_id), 'transfer_receive_done_send_failed')
 			return {
+				job_id = type(begin.meta) == 'table' and begin.meta.job_id or nil,
+				component = type(begin.meta) == 'table' and begin.meta.component or nil,
+				image_id = type(begin.meta) == 'table' and begin.meta.image_id or nil,
 				target = target_id,
 				xfer_id = xfer_id,
 				digest_alg = frame.digest_alg,

@@ -233,6 +233,9 @@ function M.run(scope, req, caps)
 		elseif frame.type == 'xfer_done' and state == 'committing' then
 			return {
 				request_id = req.request_id,
+				job_id = type(req.meta) == 'table' and req.meta.job_id or nil,
+				component = type(req.meta) == 'table' and req.meta.component or nil,
+				image_id = type(req.meta) == 'table' and req.meta.image_id or nil,
 				target = target,
 				xfer_id = xfer_id,
 				digest_alg = alg,

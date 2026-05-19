@@ -73,6 +73,12 @@ local function copy_active(a)
 		session = ctx(a.session),
 		status = a.status,
 		direction = a.direction,
+		xfer_id = a.xfer_id,
+		target = a.target,
+		meta = copy(a.meta),
+		size = a.size,
+		digest_alg = a.digest_alg,
+		digest = a.digest,
 	}
 
 end
@@ -103,6 +109,7 @@ local function snapshot_equal(a, b)
 		if aa.request_generation ~= ba.request_generation then return false end
 		if aa.status ~= ba.status then return false end
 		if aa.direction ~= ba.direction then return false end
+		if aa.xfer_id ~= ba.xfer_id then return false end
 		if not same_ctx(aa.session, ba.session) then return false end
 	end
 
@@ -182,6 +189,11 @@ function M.claim_slot(state, rec)
 		status = rec.status or 'leased',
 		direction = rec.direction or 'send',
 		xfer_id = rec.xfer_id,
+		target = rec.target,
+		meta = copy(rec.meta),
+		size = rec.size,
+		digest_alg = rec.digest_alg,
+		digest = rec.digest,
 		frame_tx = rec.frame_tx,
 		lease = rec.lease,
 	}
@@ -402,6 +414,11 @@ local function start_receive_attempt(self, ev)
 		frame_rx = frame_rx,
 		status = 'receiving',
 		direction = 'receive',
+		target = frame.target,
+		meta = frame.meta,
+		size = frame.size,
+		digest_alg = frame.digest_alg,
+		digest = frame.digest,
 	}
 
 	local ok, reason = M.claim_slot(self._state, rec)
@@ -496,6 +513,20 @@ function SlotLease:start_attempt(request_scope, req)
 	local manager = self._manager
 	local local_tx, local_rx = mailbox.new(1, { full = 'reject_newest' })
 	local attempt_req = copy(req or {})
+
+	local active = manager and manager._state and manager._state.active or nil
+	if active ~= nil
+		and active.request_id == self._request_id
+		and active.request_generation == self._request_generation
+	then
+		active.status = 'sending'
+		active.target = req and req.target or active.target
+		active.meta = req and req.meta or active.meta
+		active.size = req and req.size or active.size
+		active.digest_alg = req and req.digest_alg or active.digest_alg
+		active.digest = req and req.digest or active.digest
+		emit_model(manager)
+	end
 
 	attempt_req.request_id = self._request_id
 	attempt_req.request_generation = self._request_generation
@@ -610,6 +641,11 @@ local function handle_slot_request(self, req)
 		request_generation = req_gen(req),
 		session = ctx(self._session),
 		xfer_id = req.xfer_id,
+		target = req.target,
+		meta = req.meta,
+		size = req.size,
+		digest_alg = req.digest_alg,
+		digest = req.digest,
 		frame_tx = frame_tx,
 		frame_rx = frame_rx,
 	}

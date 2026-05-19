@@ -407,6 +407,7 @@ Use `state/workflow/...` for retained workflow instance records.
 Examples:
 
 * `state/workflow/update-job/<id>`
+* `state/workflow/update-job/<id>/timeline`
 * `state/workflow/artifact-ingest/<id>`
 
 Workflow state is public truth about concrete operations, not manager interfaces.
@@ -949,6 +950,7 @@ Manager interfaces:
 Retained workflow truth:
 
 * `state/workflow/update-job/<id>`
+* `state/workflow/update-job/<id>/timeline`
 
 Retained domain summaries:
 
@@ -988,6 +990,7 @@ Raw imported member truth:
 Fabric domain summaries:
 
 * `state/fabric/link/<id>`
+* `state/fabric/transfer/<xfer-id>`
 * `cap/transfer-manager/main/rpc/send-blob`
 
 Device-composed appliance truth:
