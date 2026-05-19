@@ -108,7 +108,7 @@ local function start_bridge(scope, opts)
 		state_tx = state_tx,
 		import_rules = opts.import_rules or {
 			{ remote_prefix = { 'state', 'self' }, local_prefix = { 'raw', 'member', 'mcu', 'state' } },
-			{ remote_prefix = { 'event', 'self' }, local_prefix = { 'raw', 'member', 'mcu', 'event' } },
+			{ remote_prefix = { 'event', 'self' }, local_prefix = { 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event' } },
 		},
 		export_publish_rules = opts.export_publish_rules or {
 			{ local_prefix = { 'local' }, remote_prefix = { 'remote' } },
@@ -178,6 +178,32 @@ function tests.test_remote_retained_publish_emits_bus_command_and_updates_import
 		assert_eq(cmd.topic[4], 'state')
 		assert_eq(cmd.topic[5], 'software')
 		assert_eq(cmd.session.peer_sid, 'sid-1')
+		close_bridge(h)
+	end)
+end
+
+function tests.test_remote_event_publish_maps_to_telemetry_cap_event_topic()
+	fibers.run(function (scope)
+		local h = start_bridge(scope)
+		assert_true(h.session_tx:send(peer_session_event()))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub(
+			{ 'event', 'self', 'power', 'charger', 'alert' },
+			{ kind = 'vin_lo' },
+			false
+		)))))
+		local cmd = recv_with_timeout(h.bus_rx, 'event publish command')
+		assert_eq(cmd.kind, 'publish')
+		assert_eq(cmd.topic[1], 'raw')
+		assert_eq(cmd.topic[2], 'member')
+		assert_eq(cmd.topic[3], 'mcu')
+		assert_eq(cmd.topic[4], 'cap')
+		assert_eq(cmd.topic[5], 'telemetry')
+		assert_eq(cmd.topic[6], 'main')
+		assert_eq(cmd.topic[7], 'event')
+		assert_eq(cmd.topic[8], 'power')
+		assert_eq(cmd.topic[9], 'charger')
+		assert_eq(cmd.topic[10], 'alert')
+		assert_eq(cmd.payload.kind, 'vin_lo')
 		close_bridge(h)
 	end)
 end

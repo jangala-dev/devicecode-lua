@@ -123,6 +123,7 @@ function Backend:stage_op(job, ctx)
 
 		local prepare_payload = {
 			job_id = job.job_id,
+			target = component,
 			expected_image_id = image_id,
 			metadata = metadata_of(job),
 		}

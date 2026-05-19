@@ -94,11 +94,17 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
     }
 
     local seen_payload
+    local seen_prepare
     local conn = {
       call_op = function(_, topic, payload)
         assert_eq(topic[1], 'cap')
         assert_eq(topic[2], 'component')
         assert_eq(topic[4], 'rpc')
+        if topic[5] == 'prepare-update' then
+          seen_prepare = payload
+          assert_eq(payload.target, 'mcu')
+          return op.always({ ok = true }, nil)
+        end
         if topic[5] == 'stage-update' then
           seen_payload = payload
           return op.always({ ok = true, public_status = 'succeeded', value = { transferred = true } }, nil)
@@ -113,6 +119,7 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
     local staged, serr = fibers.perform(backend:stage_op(job, {}))
     assert_eq(type(staged), 'table', tostring(serr))
     assert_true(staged.staged)
+    assert_eq(seen_prepare.target, 'mcu')
     assert_eq(staged.preflight.size, 12)
     assert_eq(staged.transfer.size, 12)
     assert_eq(seen_payload.source, source)

@@ -230,6 +230,7 @@ local function cm5_fabric_config()
     return fabric_config('cm5', 'mcu', {
         imports = {
             { id = 'mcu-state', remote = { 'state', 'self' }, ['local'] = { 'raw', 'member', 'mcu', 'state' } },
+            { id = 'mcu-event', remote = { 'event', 'self' }, ['local'] = { 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event' } },
             { id = 'mcu-cap', remote = { 'cap', 'self' }, ['local'] = { 'raw', 'member', 'mcu', 'cap' } },
         },
         rpc = {
@@ -361,6 +362,7 @@ local function start_fake_mcu(scope, bus, fake)
             local req = fibers.perform(prepare_ep:recv_op())
             if req == nil then return end
             fake.prepare_payload = req.payload
+            assert_eq(type(req.payload) == 'table' and req.payload.target or nil, 'mcu')
             fake.job_id = type(req.payload) == 'table' and req.payload.job_id or nil
             conn:retain({ 'state', 'self', 'updater' }, { state = 'ready', last_error = nil, job_id = fake.job_id })
             req:reply({ ready = true, target = 'updater/main', max_chunk_size = 2048 })
