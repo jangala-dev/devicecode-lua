@@ -99,6 +99,8 @@ local which, result, err = fibers.perform(fibers.named_choice {
 
 The HTTP SDK must not install a hidden default bus timeout. If the SDK Op loses a choice, the bus request is abandoned and the admitted HTTP operation is cancelled through request ownership and `scoped_work.cancel_op`.
 
+For outgoing request bodies backed by iterators, the lua-http backend may otherwise add `Expect: 100-continue` because the content length is not known at request-construction time. HTTP suppresses that implicit header by default so that lua-http's backend-level `expect_100_timeout` does not override the caller's Op-composed timeout policy. Callers or backend owners may opt in explicitly by setting an `Expect: 100-continue` header, by passing `expect_100_continue = true` on the request, or by configuring `expect_100_continue = true` on the backend/service options. `expect_100_timeout` may be supplied alongside that opt-in when the backend wait should have an explicit deadline.
+
 
 ## Body object capabilities
 
