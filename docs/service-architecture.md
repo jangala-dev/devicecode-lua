@@ -541,6 +541,28 @@ The shared support modules encode service discipline. Prefer them over service-l
 
 Use the shared helper unless the service has a clear reason not to.
 
+### Retained service configuration
+
+Modern service shells consume intended configuration through
+`devicecode.support.config_watch`.
+
+The helper opens a normal `lua-bus` subscription to `cfg/<service>`.  In
+`lua-bus`, subscription creation replays matching retained messages before
+subsequent live publications.  That retained replay is the bootstrap mechanism:
+a service which starts after its configuration has already been retained must
+observe that configuration as a normal `config_changed` event.
+
+Do not build service-specific retained configuration paths using an independent
+retained view plus a live subscription.  That split can reintroduce the timing
+race retained configuration was introduced to remove.  Service code should own
+validation and generation policy, but the subscription/replay mechanics belong
+in the shared helper.
+
+Direct `cfg/<service>` subscriptions in modern services are architecture debt.
+Bridge code may still subscribe to arbitrary bus topics supplied by Fabric
+routing rules, but service shell configuration should go through
+`config_watch.open`.
+
 ## Request ownership
 
 Every request-like object needs one owner.
