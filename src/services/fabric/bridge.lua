@@ -405,12 +405,7 @@ local function run_outbound_call(call)
 				call_id = call.id,
 			}
 
-			call.owner:reply_once({
-				payload = payload,
-				accepted = true,
-				frame_sent = true,
-				call_id = call.id,
-			})
+			call.owner:reply_once(payload)
 
 			return {
 				call_id = call.id,
@@ -450,12 +445,7 @@ local function run_outbound_call(call)
 		end
 
 		if reply.ok then
-			call.owner:reply_once({
-				call_id = call.id,
-				payload = reply.payload,
-				frame   = reply,
-				session = reply.session,
-			})
+			call.owner:reply_once(reply.payload)
 
 			return {
 				call_id    = call.id,
@@ -510,9 +500,7 @@ local function start_outbound_call(self, ev)
 	end
 
 	local reply_tx, reply_rx = mailbox.new(1, { full = 'reject_newest' })
-	local owner = request_owner.new(ev.request or ev, {
-		reply_payload_only = ev.reply_payload_only,
-	})
+	local owner = request_owner.new(ev.request or ev)
 
 	local rec = {
 		id             = id,

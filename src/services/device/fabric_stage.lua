@@ -1,90 +1,52 @@
 -- services/device/fabric_stage.lua
 --
--- Fabric-stage client helper with explicit source-ownership contract.
--- This module does not implement Fabric internals. It wraps an injected client
--- whose send_blob_op/source handoff contract is documented at the call site.
+-- Fabric-stage client helper with explicit source-owner transfer.  Device opens
+-- and owns the source; the Fabric client must either take that owner before
+-- returning success, or leave it owned by Device on rejection/failure.
 
 local op_mod = require 'fibers.op'
 
 local M = {}
 
-local function call_transfer_op(client, source, meta, opts)
-	if type(client) == 'table' and type(client.send_blob_op) == 'function' then
-		return client:send_blob_op(source, meta, opts)
-	end
-	return nil, 'fabric_stage client does not provide send_blob_op'
-end
-
 local function is_op(v)
 	return type(v) == 'table' and getmetatable(v) == op_mod.Op
 end
 
-local function handoff_from_result(result)
-	if type(result) ~= 'table' then
-		return nil, 'fabric_stage result must be a table with explicit source_handoff'
+local function call_transfer_op(client, params, opts)
+	if type(client) == 'table' and type(client.send_blob_op) == 'function' then
+		return client:send_blob_op(params, opts)
 	end
-
-	local h = result.source_handoff
-	if type(h) ~= 'table' then
-		return nil, 'fabric_stage result must include source_handoff table'
-	end
-
-	local consumed = h.consumed
-	if type(consumed) ~= 'boolean' then
-		return nil, 'fabric_stage source_handoff.consumed must be boolean'
-	end
-	if consumed ~= true then
-		return { consumed = false, receiver_install = nil }, nil
-	end
-
-	if type(h.receiver_install) ~= 'function' then
-		return nil, 'fabric_stage source_handoff receiver termination proof requires receiver_install function when consumed is true'
-	end
-
-	return { consumed = true, receiver_install = h.receiver_install }, nil
+	return nil, 'fabric_stage client does not provide send_blob_op'
 end
 
-local function map_result(result, perr)
+local function map_result(source_owner, result, perr)
 	if result == nil then
-		return nil, perr or 'fabric_stage_failed', nil
+		return nil, perr or 'fabric_stage_failed'
 	end
 	if type(result) == 'table' and result.ok == false then
-		return nil, result.err or 'fabric_stage_failed', nil
+		return nil, result.err or result.error or result.reason or 'fabric_stage_failed'
 	end
-
-	local handoff, herr = handoff_from_result(result)
-	if not handoff then
-		return nil, herr, nil
+	if source_owner and type(source_owner.is_owned) == 'function' and source_owner:is_owned() then
+		return nil, 'fabric_stage client did not take source ownership'
 	end
-
-	return result, nil, handoff
+	return result, nil
 end
 
---- Stage a source through Fabric as an Op.
+--- Stage an owned source through Fabric as an Op.
 ---
---- The Fabric client must expose send_blob_op(source, meta, opts) and return a
---- table that explicitly states source ownership in exactly this shape:
----
----   {
----     ok = true,
----     source_handoff = {
----       consumed = true,
----       receiver_install = function(source) ... end,
----     },
----   }
----
---- `receiver_install(source)` is called by Device immediately before it releases
---- its local termination owner. If consumed=false, Device retains ownership of
---- source termination.
+--- The Fabric client must expose send_blob_op(params, opts). params.source_owner
+--- is an owned finaliser-safe resource.  On success the client must have taken
+--- ownership by detaching or handing off that owner.  On failure it must leave
+--- ownership with the caller unless it has already accepted responsibility.
 ---
 --- Return shape when performed:
----   result, nil, handoff_table
----   nil, err, nil
+---   result, nil
+---   nil, err
 function M.stage_source_op(_, params)
 	params = params or {}
-	local source = params.source
-	if source == nil then
-		return op_mod.always(nil, 'source_required', nil)
+	local source_owner = params.source_owner
+	if source_owner == nil or type(source_owner.value) ~= 'function' or type(source_owner.is_owned) ~= 'function' then
+		return op_mod.always(nil, 'source_owner_required')
 	end
 
 	local payload = type(params.request_payload) == 'table' and params.request_payload or {}
@@ -96,9 +58,12 @@ function M.stage_source_op(_, params)
 		format = payload.format or 'dcmcu-v1',
 	}
 
-	local ev, err = call_transfer_op(params.client, source, {
+	local ev, err = call_transfer_op(params.client, {
 		component = params.component,
 		action = params.action,
+		job_id = payload.job_id,
+		request_id = payload.request_id,
+		xfer_id = payload.xfer_id,
 		link_id = params.link_id or payload.link_id,
 		target = params.target or payload.target,
 		size = payload.size,
@@ -106,9 +71,7 @@ function M.stage_source_op(_, params)
 		digest = payload.digest,
 		chunk_size = payload.chunk_size or params.chunk_size,
 		meta = transfer_meta,
-
-		-- Legacy compatibility only. New stage-update actions should use target.
-		receiver = params.receiver,
+		source_owner = source_owner,
 		artifact_store = params.artifact_store,
 		request = payload,
 	}, {
@@ -117,14 +80,16 @@ function M.stage_source_op(_, params)
 	})
 
 	if not ev then
-		return op_mod.always(nil, err or 'fabric_stage_unavailable', nil)
+		return op_mod.always(nil, err or 'fabric_stage_unavailable')
 	end
 
 	if is_op(ev) then
-		return ev:wrap(map_result)
+		return ev:wrap(function (result, perr)
+			return map_result(source_owner, result, perr)
+		end)
 	end
 
-	return op_mod.always(map_result(ev, nil))
+	return op_mod.always(map_result(source_owner, ev, nil))
 end
 
 return M

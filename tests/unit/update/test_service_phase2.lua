@@ -42,8 +42,8 @@ function tests.test_active_completion_releases_slot_before_later_start_admission
       return op.always({ job=job.job_id }, nil)
     end
     local child, caller = start_service(root_scope, { config={ schema='devicecode.update/1', components={ { component='cm5' } } }, backend=active_backend })
-    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5' }, { timeout=0.5 }))
-    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j2', component='cm5' }, { timeout=0.5 }))
+    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5', artifact_ref='artifact-j1' }, { timeout=0.5 }))
+    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j2', component='cm5', artifact_ref='artifact-j2' }, { timeout=0.5 }))
     assert_true(probe.wait_until(function() local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 }); return status and status.snapshot.jobs.by_id.j1 and status.snapshot.jobs.by_id.j2 end, { timeout=0.5, interval=0.01 }), 'expected both jobs to be visible')
     local accepted = assert(caller:call(topics.update_manager_rpc('start-job'), { job_id='j1' }, { timeout=0.5 })); assert_eq(accepted.accepted, true); fibers.perform(started_first:wait_op())
     local busy, busy_err = caller:call(topics.update_manager_rpc('start-job'), { job_id='j2' }, { timeout=0.2 }); assert_eq(busy, nil); assert_eq(busy_err, 'slot_busy')
@@ -80,7 +80,7 @@ function tests.test_commit_job_persists_awaiting_return_before_reconcile()
       job_store = backend,
       backend = active_backend,
     })
-    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5' }, { timeout=0.5 }))
+    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5', artifact_ref='artifact-j1' }, { timeout=0.5 }))
     assert_true(probe.wait_until(function()
       local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
       return status and status.snapshot.jobs.by_id.j1 ~= nil
@@ -175,7 +175,7 @@ function tests.test_slow_job_runtime_load_keeps_public_service_responsive()
     local status = assert(caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.5 }))
     assert_eq(status.ok, true)
     assert_eq(status.snapshot.state, 'starting')
-    local created, create_err = caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5' }, { timeout=0.5 })
+    local created, create_err = caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5', artifact_ref='artifact-j1' }, { timeout=0.5 })
     assert_eq(created, nil)
     assert_eq(create_err, 'job_runtime_not_ready')
     load_gate:signal()
@@ -232,7 +232,11 @@ function tests.test_default_job_store_uses_control_store_and_reloads_after_resta
       job_store_kind = 'control-store',
       config = { schema='devicecode.update/1', components={ { component='cm5' } } },
     })
-    local created, create_err = caller:call(topics.update_manager_rpc('create-job'), { job_id='j-persist', component='cm5' }, { timeout=0.5 })
+    assert_true(probe.wait_until(function()
+      local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      return status and status.snapshot and status.snapshot.state == 'running'
+    end, { timeout=0.5, interval=0.01 }), 'expected control-store job runtime to become ready')
+    local created, create_err = caller:call(topics.update_manager_rpc('create-job'), { job_id='j-persist', component='cm5', artifact_ref='artifact-j-persist' }, { timeout=0.5 })
     assert_not_nil(created, create_err)
     assert_eq(created.ok, true)
     assert_true(probe.wait_until(function()

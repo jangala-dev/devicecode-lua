@@ -40,6 +40,16 @@ local function req(payload)
 	return r
 end
 
+
+local function take_stage_source(params, expected)
+	assert_not_nil(params and params.source_owner, 'source_owner required')
+	local source = params.source_owner:value()
+	if expected ~= nil then assert_eq(source, expected) end
+	local detached, err = params.source_owner:detach()
+	assert_eq(detached, source, tostring(err))
+	return source
+end
+
 local function sample_config(display_name)
 	return {
 		schema = config.SCHEMA,
@@ -117,28 +127,18 @@ function tests.test_next_event_prioritises_config_before_ready_action_request()
 	end)
 end
 
-function tests.test_fabric_stage_handoff_does_not_terminate_source_in_action_scope()
+
+function tests.test_fabric_stage_source_owner_transfer_does_not_terminate_source_in_action_scope()
 	local terminate_count = 0
-	local receiver_installed = false
 	fibers.run(function (scope)
 		local source = { id = 'src' }
 		local r = req({ source = source })
 		local client = {
-			send_blob_op = function (_, src, meta)
-				assert_eq(src, source)
-				assert_eq(meta.component, 'mcu')
-				return op.always({
-					ok = true,
-					staged = true,
-					source_handoff = {
-						consumed = true,
-						receiver_install = function (handed_source)
-							assert_eq(handed_source, source)
-							receiver_installed = true
-							return true
-						end,
-					},
-				})
+			send_blob_op = function (_, params)
+				take_stage_source(params, source)
+				assert_eq(params.component, 'mcu')
+				assert_eq(params.target, 'updater/main')
+				return op.always({ ok = true, staged = true })
 			end,
 		}
 
@@ -147,7 +147,7 @@ function tests.test_fabric_stage_handoff_does_not_terminate_source_in_action_sco
 			component_id = 'mcu',
 			action = 'stage-update',
 			request_id = 'r1',
-			action_spec = { kind = 'fabric_stage', receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage') },
+			action_spec = { kind = 'fabric_stage', target = 'updater/main' },
 			fabric_client = client,
 			terminate_source = function () terminate_count = terminate_count + 1; return true end,
 		})
@@ -155,18 +155,18 @@ function tests.test_fabric_stage_handoff_does_not_terminate_source_in_action_sco
 		assert_true(result.ok)
 		assert_not_nil(r.replied)
 	end)
-	assert_true(receiver_installed, 'receiver termination installer was not called before handoff')
 	assert_eq(terminate_count, 0)
 end
 
-function tests.test_fabric_stage_handoff_requires_receiver_installation_proof()
+
+function tests.test_fabric_stage_requires_client_to_take_source_ownership()
 	local terminate_count = 0
 	fibers.run(function (scope)
 		local source = { id = 'src-no-proof' }
 		local r = req({ source = source })
 		local client = {
 			send_blob_op = function ()
-				return op.always({ ok = true, staged = true, source_handoff = { consumed = true } })
+				return op.always({ ok = true, staged = true })
 			end,
 		}
 
@@ -175,7 +175,7 @@ function tests.test_fabric_stage_handoff_requires_receiver_installation_proof()
 			component_id = 'mcu',
 			action = 'stage-update',
 			request_id = 'r-no-proof',
-			action_spec = { kind = 'fabric_stage', receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage') },
+			action_spec = { kind = 'fabric_stage', target = 'updater/main' },
 			fabric_client = client,
 			terminate_source = function (v)
 				assert_eq(v, source)
@@ -185,11 +185,11 @@ function tests.test_fabric_stage_handoff_requires_receiver_installation_proof()
 		})
 
 		assert_eq(result.ok, false)
-		assert_true(tostring(r.failed):find('receiver termination', 1, true) ~= nil,
-			'expected receiver termination proof error, got ' .. tostring(r.failed))
+		assert_eq(r.failed, 'fabric_stage client did not take source ownership')
 	end)
 	assert_eq(terminate_count, 1)
 end
+
 
 function tests.test_fabric_stage_failed_admission_terminates_untransferred_source()
 	local terminate_count = 0
@@ -205,7 +205,7 @@ function tests.test_fabric_stage_failed_admission_terminates_untransferred_sourc
 			component_id = 'mcu',
 			action = 'stage-update',
 			request_id = 'r2',
-			action_spec = { kind = 'fabric_stage', receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage') },
+			action_spec = { kind = 'fabric_stage', target = 'updater/main' },
 			fabric_client = client,
 			terminate_source = function (v, reason)
 				assert_eq(v, source)
@@ -604,14 +604,15 @@ function tests.test_generation_cancellation_cascades_to_in_flight_action_and_fin
 	end)
 end
 
+
 function tests.test_fabric_stage_open_source_may_be_an_explicit_op()
 	fibers.run(function (scope)
 		local source = { id = 'src-op' }
 		local r = req({})
 		local client = {
-			send_blob_op = function (_, src)
-				assert_eq(src, source)
-				return op.always({ ok = true, staged = true, source_handoff = { consumed = true, receiver_install = function () return true end } })
+			send_blob_op = function (_, params)
+				take_stage_source(params, source)
+				return op.always({ ok = true, staged = true })
 			end,
 		}
 
@@ -620,7 +621,7 @@ function tests.test_fabric_stage_open_source_may_be_an_explicit_op()
 			component_id = 'mcu',
 			action = 'stage-update',
 			request_id = 'r-source-op',
-			action_spec = { kind = 'fabric_stage', receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage') },
+			action_spec = { kind = 'fabric_stage', target = 'updater/main' },
 			fabric_client = client,
 			open_source_op = function ()
 				return sleep.sleep_op(0.001):wrap(function ()
@@ -637,6 +638,7 @@ function tests.test_fabric_stage_open_source_may_be_an_explicit_op()
 	end)
 end
 
+
 function tests.test_fabric_stage_timeout_cancels_child_stage_and_terminates_unhanded_source()
 	local terminate_count = 0
 
@@ -646,7 +648,7 @@ function tests.test_fabric_stage_timeout_cancels_child_stage_and_terminates_unha
 		local client = {
 			send_blob_op = function ()
 				return sleep.sleep_op(60):wrap(function ()
-					return { ok = true, source_handoff = { consumed = true, receiver_install = function () return true end } }
+					return { ok = true }
 				end)
 			end,
 		}
@@ -658,7 +660,7 @@ function tests.test_fabric_stage_timeout_cancels_child_stage_and_terminates_unha
 				action = 'stage-update',
 				request_id = 'fabric-timeout',
 				timeout = 0.02,
-				action_spec = { kind = 'fabric_stage', receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage') },
+				action_spec = { kind = 'fabric_stage', target = 'updater/main' },
 				fabric_client = client,
 				terminate_source = function (v, reason)
 					assert_eq(v, source)
@@ -717,6 +719,7 @@ function tests.test_completion_queue_admission_failure_fails_observing_scope()
 	end)
 end
 
+
 function tests.test_generation_cancellation_cascades_into_fabric_stage_child_scope()
 	local terminate_count = 0
 
@@ -742,7 +745,7 @@ function tests.test_generation_cancellation_cascades_into_fabric_stage_child_sco
 				-- the source and installed its stage-scope cleanup finaliser.
 				entered_stage:signal()
 				return sleep.sleep_op(60):wrap(function ()
-					return { ok = true, source_handoff = { consumed = true, receiver_install = function () return true end } }
+					return { ok = true }
 				end)
 			end,
 		}
@@ -750,7 +753,7 @@ function tests.test_generation_cancellation_cascades_into_fabric_stage_child_sco
 		local cfg = sample_config('A')
 		cfg.components.mcu.actions['stage-update'] = {
 			kind = 'fabric_stage',
-			receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage'),
+			target = 'updater/main',
 		}
 
 		local state = service.build_state(scope, {
@@ -789,8 +792,6 @@ function tests.test_generation_cancellation_cascades_into_fabric_stage_child_sco
 
 	assert_eq(terminate_count, 1)
 end
-
-
 
 local function fake_live_conn()
 	local c = {
@@ -908,6 +909,7 @@ function tests.test_config_replacement_with_live_observer_terminates_raw_watch()
 	end)
 end
 
+
 function tests.test_config_replacement_with_live_fabric_stage_endpoint_cancels_action_and_terminates_source()
 	local terminate_count = 0
 	fibers.run(function (scope)
@@ -931,7 +933,7 @@ function tests.test_config_replacement_with_live_fabric_stage_endpoint_cancels_a
 			send_blob_op = function ()
 				entered_stage:signal()
 				return sleep.sleep_op(60):wrap(function ()
-					return { ok = true, source_handoff = { consumed = true, receiver_install = function () return true end } }
+					return { ok = true }
 				end)
 			end,
 		}
@@ -939,7 +941,7 @@ function tests.test_config_replacement_with_live_fabric_stage_endpoint_cancels_a
 		local cfg = sample_config('A')
 		cfg.components.mcu.actions['stage-update'] = {
 			kind = 'fabric_stage',
-			receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage'),
+			target = 'updater/main',
 		}
 
 		local state = service.build_state(scope, {
@@ -1017,20 +1019,15 @@ function tests.test_action_start_cancelled_before_worker_body_resolves_request_w
 	end)
 end
 
+
 function tests.test_fabric_stage_public_reply_is_sanitised_of_ownership_internals()
 	fibers.run(function (scope)
 		local source = { id = 'sanitize-source' }
 		local r = req({ source = source })
 		local client = {
-			send_blob_op = function ()
-				return op.always({
-					ok = true,
-					transfer_id = 'tx1',
-					source_handoff = {
-						consumed = true,
-						receiver_install = function () return true end,
-					},
-				})
+			send_blob_op = function (_, params)
+				take_stage_source(params, source)
+				return op.always({ ok = true, transfer_id = 'tx1', source_owner = params.source_owner })
 			end,
 		}
 
@@ -1039,16 +1036,15 @@ function tests.test_fabric_stage_public_reply_is_sanitised_of_ownership_internal
 			component_id = 'mcu',
 			action = 'stage-update',
 			request_id = 'sanitize',
-			action_spec = { kind = 'fabric_stage', receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage') },
+			action_spec = { kind = 'fabric_stage', target = 'updater/main' },
 			fabric_client = client,
 			terminate_source = function () fail('source should be handed off') end,
 		})
 
 		assert_true(result.ok)
 		assert_eq(r.replied.transfer_id, 'tx1')
-		assert_nil(r.replied.source_handoff)
-		assert_nil(r.replied.receiver_install)
-		assert_nil(result.reply_payload.source_handoff)
+		assert_nil(r.replied.source_owner)
+		assert_nil(result.reply_payload.source_owner)
 	end)
 end
 

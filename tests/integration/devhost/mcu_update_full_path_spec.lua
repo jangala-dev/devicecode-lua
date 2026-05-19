@@ -391,28 +391,28 @@ end
 
 local function new_fabric_client(conn)
     local client = {}
-    function client:send_blob_op(source, meta, opts)
-        meta = meta or {}
+    function client:send_blob_op(params, opts)
+        params = params or {}
         opts = opts or {}
+        assert(params.source_owner, 'fabric client source_owner required')
         return conn:call_op(fabric_topics.transfer_manager_rpc('send-blob'), {
-            link_id = meta.link_id or 'link-a',
-            request_id = meta.request_id or ('device-stage-' .. tostring(meta.job_id or os.clock())),
-            xfer_id = meta.xfer_id,
-            target = assert(meta.target, 'fabric client meta.target required'),
-            source = source,
-            size = meta.size,
-            digest_alg = meta.digest_alg,
-            digest = meta.digest,
-            chunk_size = meta.chunk_size or 2048,
-            meta = meta.meta,
-            timeout_s = opts.timeout or meta.timeout or 4.0,
-        }, { timeout = opts.timeout or meta.timeout or 4.0 }):wrap(function (reply, err)
+            link_id = params.link_id or 'link-a',
+            request_id = params.request_id or ('device-stage-' .. tostring(params.job_id or os.clock())),
+            xfer_id = params.xfer_id,
+            target = assert(params.target, 'fabric client params.target required'),
+            source_owner = params.source_owner,
+            size = params.size,
+            digest_alg = params.digest_alg,
+            digest = params.digest,
+            chunk_size = params.chunk_size or 2048,
+            meta = params.meta,
+            timeout_s = opts.timeout or params.timeout or 4.0,
+        }, { timeout = opts.timeout or params.timeout or 4.0 }):wrap(function (reply, err)
             if reply == nil then return nil, err end
             return {
                 ok = reply.ok,
                 committed = reply.committed,
                 transfer = reply,
-                source_handoff = { consumed = false },
             }, nil
         end)
     end

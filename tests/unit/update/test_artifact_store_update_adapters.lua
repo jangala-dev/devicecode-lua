@@ -62,7 +62,7 @@ function T.artifact_store_bus_unwraps_hal_reply_envelopes()
   end)
 end
 
-function T.component_backend_unwraps_scoped_preflight_and_stage_results()
+function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
   runfibers.run(function()
     local source = {}
     function source:read_chunk_op() return op.always(nil, nil) end
@@ -110,13 +110,10 @@ function T.component_backend_unwraps_scoped_preflight_and_stage_results()
     local backend = component_backend.new({ conn = conn, artifact_store = artifact_store, component = 'mcu' })
     local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', metadata = { image_id = 'img-new' } }
 
-    local preflight, perr = fibers.perform(backend:preflight_op(job, {}))
-    assert_eq(type(preflight), 'table', tostring(perr))
-    assert_eq(preflight.size, 12)
-
-    local staged, serr = fibers.perform(backend:stage_op(job, { preflight = preflight }))
+    local staged, serr = fibers.perform(backend:stage_op(job, {}))
     assert_eq(type(staged), 'table', tostring(serr))
     assert_true(staged.staged)
+    assert_eq(staged.preflight.size, 12)
     assert_eq(staged.transfer.size, 12)
     assert_eq(seen_payload.source, source)
     assert_eq(seen_payload.size, 12)

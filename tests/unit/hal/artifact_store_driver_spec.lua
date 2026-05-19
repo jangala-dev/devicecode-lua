@@ -223,13 +223,11 @@ function T.artifact_sink_commit_is_idempotent_for_same_session()
 		local ok_write, write_err = fibers.perform(sink:write_chunk_op('payload'))
 		assert(ok_write == true, tostring(write_err))
 
-		local ok_commit1, art1_or_err = fibers.perform(sink:commit_op())
-		assert(ok_commit1 == true, tostring(art1_or_err))
-		local art1 = art1_or_err
+		local art1, err1 = fibers.perform(sink:commit_op())
+		assert(art1 ~= nil, tostring(err1))
 
-		local ok_commit2, art2_or_err = fibers.perform(sink:commit_op())
-		assert(ok_commit2 == true, tostring(art2_or_err))
-		local art2 = art2_or_err
+		local art2, err2 = fibers.perform(sink:commit_op())
+		assert(art2 ~= nil, tostring(err2))
 
 		assert(art1:ref() == art2:ref())
 		assert(art1:describe().checksum == art2:describe().checksum)

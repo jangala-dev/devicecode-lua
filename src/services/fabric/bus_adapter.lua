@@ -311,7 +311,6 @@ function M.local_runtime(scope, conn, params)
 					timeout            = rule.timeout or params.call_timeout_s,
 					reply_policy      = rule.reply_policy,
 					request            = req,
-					reply_payload_only = true,
 				}, 'fabric_bus_adapter_call_event_admit_failed')
 
 				if ok ~= true then

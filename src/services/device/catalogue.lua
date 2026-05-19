@@ -99,32 +99,6 @@ local function normalise_event_routes(events, where)
 	return out
 end
 
-local function is_raw_cap_rpc_topic(t)
-	return type(t) == 'table'
-		and (t[1] == 'raw')
-		and type(t[2]) == 'string' and t[2] ~= ''
-		and type(t[3]) == 'string' and t[3] ~= ''
-		and t[4] == 'cap'
-		and type(t[5]) == 'string' and t[5] ~= ''
-		and type(t[6]) == 'string' and t[6] ~= ''
-		and t[7] == 'rpc'
-		and type(t[8]) == 'string' and t[8] ~= ''
-		and t[9] == nil
-end
-
-local function assert_raw_cap_rpc_topic(t, where)
-	local topic = assert_topic(t, where)
-	if not is_raw_cap_rpc_topic(topic) then
-		error(where .. ': fabric_stage receiver must use raw/<kind>/<source>/cap/<class>/<id>/rpc/<method>', 0)
-	end
-	return topic
-end
-
-local function opt_raw_cap_rpc_topic(t, where)
-	if t == nil then return nil end
-	return assert_raw_cap_rpc_topic(t, where)
-end
-
 local function opt_target(v, where)
 	if v == nil then return nil end
 	if type(v) ~= 'string' or v == '' then
@@ -155,8 +129,8 @@ local function normalise_actions(actions, where)
 		local public_name = public_method_name(action_name)
 
 		if type(spec) == 'table' then
-			if spec[1] ~= nil and spec.kind == nil and spec.call_topic == nil and spec.receiver == nil then
-				error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic or receiver', 0)
+			if spec[1] ~= nil and spec.kind == nil and spec.call_topic == nil then
+				error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic', 0)
 			end
 			local kind = spec.kind or 'rpc'
 
@@ -178,9 +152,11 @@ local function normalise_actions(actions, where)
 					error(where .. ': action ' .. action_name .. ' uses deprecated timeout; use timeout_s', 0)
 				end
 
+				if spec.receiver ~= nil then
+					error(where .. ': action ' .. action_name .. ' uses deprecated receiver; use target', 0)
+				end
 				local target = opt_target(spec.target, where .. ': action ' .. action_name .. ' target')
-				local receiver = opt_raw_cap_rpc_topic(spec.receiver, where .. ': action ' .. action_name .. ' receiver')
-				if target == nil and receiver == nil then
+				if target == nil then
 					error(where .. ': action ' .. action_name .. ' requires fabric_stage target', 0)
 				end
 
@@ -189,7 +165,6 @@ local function normalise_actions(actions, where)
 					kind = 'fabric_stage',
 					link_id = spec.link_id,
 					target = target,
-					receiver = receiver, -- legacy compatibility only; prefer target.
 					chunk_size = opt_pos_int(spec.chunk_size, where .. ': action ' .. action_name .. ' chunk_size', nil),
 					artifact_store = spec.artifact_store or 'main',
 					timeout = tonumber(spec.timeout_s) or nil,
@@ -198,7 +173,7 @@ local function normalise_actions(actions, where)
 				error(where .. ': unsupported action kind for ' .. action_name .. ': ' .. tostring(kind), 0)
 			end
 		else
-			error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic or receiver', 0)
+			error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic', 0)
 		end
 	end
 

@@ -264,7 +264,7 @@ function tests.test_outbound_call_sends_call_frame_and_routes_remote_reply_to_re
 		local deadline = fibers.now() + 0.25
 		while req.resolved == false and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.001)) end
 		assert_eq(req.resolved, 'reply')
-		assert_eq(req.value.payload.ok, 'yes')
+		assert_eq(req.value.ok, 'yes')
 		close_bridge(h)
 	end)
 end

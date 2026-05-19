@@ -97,7 +97,6 @@ local function make_manager_context(self)
 		observer = self._observer,
 		ingest = self._ingest,
 		artifact_store = self._artifact_store,
-		artifact_preflight = self._artifact_preflight,
 		active = copy(self._active_snapshot),
 		snapshot = self._model:snapshot(),
 	}
@@ -295,7 +294,6 @@ function M.run(scope, params)
 		_ingest = ingest_state,
 		_bundled = bundled_state,
 		_artifact_store = params.artifact_store,
-		_artifact_preflight = params.artifact_preflight or params.preflight,
 		manager_rx = params.manager_rx,
 		service_rx = params.service_rx,
 		done_rx = done_rx,

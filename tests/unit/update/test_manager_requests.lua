@@ -201,109 +201,28 @@ function tests.test_start_job_caller_cancellation_after_transition_admission_doe
   end)
 end
 
-function tests.test_create_job_temporary_artifact_is_cleaned_when_durable_save_fails()
+
+function tests.test_create_job_requires_artifact_ref()
   fibers.run(function ()
-    local artifact = { ref = 'artifact-temp', terminated = 0 }
-    function artifact:terminate(reason)
-      self.terminated = self.terminated + 1
-      self.reason = reason
-      return true, nil
-    end
-
-    local artifact_store = {
-      import_path_op = function () return op.always(artifact, nil) end,
-    }
-    local job_store = {
-      load_all_op = function () return op.always({ jobs = {}, order = {}, next_seq = 1 }, nil) end,
-      save_job_op = function () return op.always(nil, 'save_failed') end,
-    }
-    local req = request({ method = 'create_job', job_id = 'j-art', component = 'cm5', artifact_source = { path = '/tmp/image' } })
-
-    local st, _, primary = fibers.run_scope(function (scope)
-      local jobs = start_jobs(scope, job_store)
-      local out = manager_requests.create_job(scope, {
-        request = req,
-        jobs = jobs,
-        config = { components = { cm5 = { component = 'cm5' } } },
-        generation = 1,
-        artifact_store = artifact_store,
-      })
-      jobs:cancel('test complete')
-      return out
-    end)
-
-    assert_eq(st, 'failed')
-    assert_eq(primary, 'save_failed')
-    assert_eq(artifact.terminated, 1)
-    assert_eq(req.err, 'save_failed')
-  end)
-end
-
-function tests.test_create_job_transfers_artifact_ownership_after_durable_save()
-  fibers.run(function ()
-    local artifact = { ref = 'artifact-durable', terminated = 0 }
-    function artifact:terminate(reason)
-      self.terminated = self.terminated + 1
-      self.reason = reason
-      return true, nil
-    end
-
-    local artifact_store = {
-      import_path_op = function () return op.always(artifact, nil) end,
-    }
-    local saved = {}
-    local job_store = {
-      load_all_op = function () return op.always({ jobs = {}, order = {}, next_seq = 1 }, nil) end,
-      save_job_op = function (_, job)
-        saved[#saved + 1] = job
-        return op.always(true, nil)
-      end,
-    }
-    local req = request({ method = 'create_job', job_id = 'j-art', component = 'cm5', artifact_source = { path = '/tmp/image' } })
-
+    local req = request({ method='create_job', job_id='j-missing-artifact', component='cm5' })
     local st, _, result = fibers.run_scope(function (scope)
-      local jobs = start_jobs(scope, job_store)
+      local jobs = start_jobs(scope, store_mod.new())
       local out = manager_requests.create_job(scope, {
         request = req,
         jobs = jobs,
         config = { components = { cm5 = { component = 'cm5' } } },
         generation = 1,
-        artifact_store = artifact_store,
       })
       jobs:cancel('test complete')
       return out
     end)
-
     assert_eq(st, 'ok')
-    assert_eq(result.status, 'persisted')
-    assert_eq(artifact.terminated, 0)
-    assert_eq(saved[1].artifact_ref, 'artifact-durable')
-    assert_eq(req.value.job.artifact_ref, 'artifact-durable')
+    assert_eq(result.tag, 'manager_request_rejected')
+    assert_eq(result.reason, 'artifact_ref_required')
+    local ok, _, err = fibers.perform(req:wait_op())
+    assert_eq(ok, false)
+    assert_eq(err, 'artifact_ref_required')
   end)
-end
-
-
-function tests.test_create_job_worker_failure_surfaces_primary_reason_to_request()
-	fibers.run(function ()
-		local req = {
-			payload = { method = 'create_job', job_id = 'j1', component = 'cm5', artifact = { ref = 'a1', terminate = function () return true end } },
-			fail_reason = nil,
-			reply = function () return true end,
-			fail = function (self, reason) self.fail_reason = reason; return true end,
-		}
-		local st, _, primary = fibers.run_scope(function (scope)
-			return require('services.update.manager_requests').create_job(scope, {
-				request = req,
-				jobs = { admit_transition = function () return { outcome_op = function () return op.always({ status = 'persisted', job = { job_id = 'j1' } }, nil) end }, nil end },
-				config = { components = { cm5 = {} } },
-				generation = 1,
-				artifact_preflight = function () error('preflight_boom', 0) end,
-			})
-		end)
-		assert_eq(st, 'failed')
-		assert_true(tostring(primary):find('preflight_boom', 1, true) ~= nil)
-		assert_true(tostring(req.fail_reason):find('preflight_boom', 1, true) ~= nil, 'request should receive primary failure')
-	end)
 end
 
 return tests

@@ -69,31 +69,18 @@ local function stage_context(params)
 	local backend = assert(params.backend, 'active_job.stage: backend required')
 	local job = require_job(params, 'active_job.stage')
 	local ctx = base_ctx(params, 'stage')
-
-	local preflight = perform_backend_op(backend, 'preflight_op', false, job, ctx)
-	if preflight ~= nil then
-		ctx.preflight = preflight
-	end
-
-	local prepared = perform_backend_op(backend, 'prepare_op', false, job, ctx)
-	if prepared ~= nil then
-		ctx.prepared = prepared
-	end
-
-	return backend, job, ctx, preflight, prepared
+	return backend, job, ctx
 end
 
 function M.stage(_scope, params)
 	params = params or {}
-	local backend, job, ctx, preflight, prepared = stage_context(params)
+	local backend, job, ctx = stage_context(params)
 	local staged = perform_backend_op(backend, 'stage_op', true, job, ctx)
 
 	return {
 		tag       = 'staged',
 		job_id    = job.job_id,
 		component = job.component,
-		preflight = preflight,
-		prepared  = prepared,
 		staged    = staged,
 	}
 end

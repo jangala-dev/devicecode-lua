@@ -81,10 +81,7 @@ local function collect_backing_refs(rec)
 				kind = 'fabric-stage',
 				target = spec.target,
 				link_id = spec.link_id,
-				legacy_receiver = copy_topic(spec.receiver),
 			}
-		elseif type(spec) == 'table' and spec.receiver then
-			refs.actions[name] = copy_topic(spec.receiver)
 		else
 			refs.actions[name] = copy_topic(spec)
 		end

@@ -102,65 +102,44 @@ local function describe_artifact(artifact)
 	return type(artifact) == 'table' and artifact or nil
 end
 
-function Backend:preflight_op(job, _ctx)
-	return unwrap_scope_value(fibers.run_scope_op(function ()
-		local ref = artifact_ref(job)
-		if not ref then return nil, 'artifact_ref_required' end
-		if not self._artifact_store or type(self._artifact_store.open_op) ~= 'function' then
-			return nil, 'artifact_store_unavailable'
-		end
-		local artifact, err = fibers.perform(self._artifact_store:open_op(ref))
-		if artifact == nil then return nil, err or 'artifact_open_failed' end
-		local desc = describe_artifact(artifact) or {}
-		local meta = type(desc.meta) == 'table' and desc.meta or desc.metadata or {}
-		local image_id = expected_image_id(job, { preflight = desc })
-			or meta.expected_image_id or meta.image_id
-		return {
-			component = component_of(self, job),
-			artifact_ref = desc.artifact_ref or desc.ref or ref,
-			format = meta.format or desc.format or 'dcmcu-v1',
-			expected_image_id = image_id,
-			image_id = image_id,
-			size = desc.size,
-			digest_alg = desc.digest_alg or 'xxhash32',
-			digest = desc.digest or desc.checksum,
-			payload_sha256 = meta.payload_sha256 or desc.payload_sha256,
-			metadata = copy(meta),
-		}, nil
-	end), 'component_preflight')
-end
-
-function Backend:prepare_op(job, ctx)
-	local component = component_of(self, job)
-	local payload = {
-		job_id = job.job_id,
-		expected_image_id = expected_image_id(job, ctx),
-		metadata = metadata_of(job),
-	}
-	return call_component_op(self, component, 'prepare-update', payload)
-end
-
 function Backend:stage_op(job, ctx)
 	return unwrap_scope_value(fibers.run_scope_op(function ()
 		local component = component_of(self, job)
 		local ref = artifact_ref(job)
 		if not ref then return nil, 'artifact_ref_required' end
-		if not self._artifact_store or type(self._artifact_store.open_source_op) ~= 'function' then
+		if not self._artifact_store or type(self._artifact_store.open_op) ~= 'function' then
+			return nil, 'artifact_store_unavailable'
+		end
+		if type(self._artifact_store.open_source_op) ~= 'function' then
 			return nil, 'artifact_source_unavailable'
 		end
+
+		local artifact, aerr = fibers.perform(self._artifact_store:open_op(ref))
+		if artifact == nil then return nil, aerr or 'artifact_open_failed' end
+		local desc = describe_artifact(artifact) or {}
+		local meta = type(desc.meta) == 'table' and desc.meta or desc.metadata or {}
+		local image_id = expected_image_id(job, { preflight = desc })
+			or meta.expected_image_id or meta.image_id
+
+		local prepare_payload = {
+			job_id = job.job_id,
+			expected_image_id = image_id,
+			metadata = metadata_of(job),
+		}
+		local prepared, perr = fibers.perform(call_component_op(self, component, 'prepare-update', prepare_payload))
+		if prepared == nil then return nil, perr or 'component_prepare_update_failed' end
+
 		local source, serr = fibers.perform(self._artifact_store:open_source_op(ref))
 		if source == nil then return nil, serr or 'artifact_source_open_failed' end
-		local pf = type(ctx and ctx.preflight) == 'table' and ctx.preflight or {}
-		local image_id = expected_image_id(job, ctx)
 		local payload = {
 			job_id = job.job_id,
 			expected_image_id = image_id,
 			source = source,
-			size = pf.size,
-			digest_alg = pf.digest_alg or 'xxhash32',
-			digest = pf.digest,
+			size = desc.size,
+			digest_alg = desc.digest_alg or 'xxhash32',
+			digest = desc.digest or desc.checksum,
 			chunk_size = self._chunk_size or 2048,
-			format = pf.format or 'dcmcu-v1',
+			format = meta.format or desc.format or 'dcmcu-v1',
 			metadata = metadata_of(job),
 		}
 		local reply, err = fibers.perform(call_component_op(self, component, 'stage-update', payload))
@@ -171,6 +150,19 @@ function Backend:stage_op(job, ctx)
 			staged = true,
 			component = component,
 			expected_image_id = image_id,
+			preflight = {
+				component = component,
+				artifact_ref = desc.artifact_ref or desc.ref or ref,
+				format = meta.format or desc.format or 'dcmcu-v1',
+				expected_image_id = image_id,
+				image_id = image_id,
+				size = desc.size,
+				digest_alg = desc.digest_alg or 'xxhash32',
+				digest = desc.digest or desc.checksum,
+				payload_sha256 = meta.payload_sha256 or desc.payload_sha256,
+				metadata = copy(meta),
+			},
+			prepared = prepared,
 			transfer = {
 				digest_alg = payload.digest_alg,
 				digest = payload.digest,

@@ -149,9 +149,8 @@ function T.create_sink_commit_open_and_delete_round_trip()
 		local ok_write, write_err = fibers.perform(sink:write_chunk_op('hello'))
 		assert(ok_write == true, tostring(write_err))
 
-		local ok_commit, art_or_err = fibers.perform(sink:commit_op())
-		assert(ok_commit == true, tostring(art_or_err))
-		local artifact = art_or_err
+		local artifact, commit_err = fibers.perform(sink:commit_op())
+		assert(artifact ~= nil, tostring(commit_err))
 
 		local open_opts = assert(cap_args.new.ArtifactStoreOpenOpts(artifact:ref()))
 		local open_reply = request(driver, 'open', open_opts)
@@ -320,10 +319,10 @@ function T.commit_is_idempotent_for_same_provider_sink_session()
 		local ok_write, write_err = fibers.perform(sink:write_chunk_op('abc'))
 		assert(ok_write == true, tostring(write_err))
 
-		local ok1, art1 = fibers.perform(sink:commit_op())
-		assert(ok1 == true, tostring(art1))
-		local ok2, art2 = fibers.perform(sink:commit_op())
-		assert(ok2 == true, tostring(art2))
+		local art1, err1 = fibers.perform(sink:commit_op())
+		assert(art1 ~= nil, tostring(err1))
+		local art2, err2 = fibers.perform(sink:commit_op())
+		assert(art2 ~= nil, tostring(err2))
 		assert(art1:ref() == art2:ref())
 
 		local ok_stop, stop_err = fibers.perform(driver:shutdown_op())

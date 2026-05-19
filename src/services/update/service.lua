@@ -194,7 +194,6 @@ local function start_generation(self, cfg, reason)
 				service_rx = service_rx,
 				active_snapshot = active_snapshot(self),
 				artifact_store = self._artifact_store,
-				artifact_preflight = self._artifact_preflight,
 				events_tx = self._done_tx,
 				done_queue_len = self._generation_done_queue_len,
 			})
@@ -887,7 +886,6 @@ function M.run(scope, params)
 		_jobs_seen = jobs:version(),
 		_jobs = jobs,
 		_artifact_store = artifact_store,
-		_artifact_preflight = params.artifact_preflight or params.preflight,
 		_component_observer = component_observer,
 		_component_watch = component_watch_handle,
 		_backend = backend,

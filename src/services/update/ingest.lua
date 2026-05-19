@@ -205,24 +205,8 @@ function Instance:commit_worker(_scope, ...)
 	local ev, err = self._owned:commit_op(...)
 	if not ev then return nil, err end
 
-	local first, second = fibers.perform(ev)
-	local artifact
-
-	-- Artifact sinks in the HAL path use the conventional sink protocol
-	--     true, artifact
-	-- whereas some tests and direct adapters return
-	--     artifact, nil
-	-- directly.  Normalise both forms here before deriving the committed
-	-- artifact snapshot.
-	if first == nil or first == false then
-		return nil, second or 'commit failed'
-	elseif first == true then
-		artifact = second
-	else
-		artifact = first
-	end
-
-	if artifact == nil then return nil, 'commit missing artifact' end
+	local artifact, commit_err = fibers.perform(ev)
+	if artifact == nil then return nil, commit_err or 'commit failed' end
 	local snap = artifact_snapshot(artifact)
 	self.artifact = snap
 	self.closed = true

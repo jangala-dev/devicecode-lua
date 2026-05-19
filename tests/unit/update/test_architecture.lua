@@ -301,31 +301,17 @@ function tests.test_update_production_code_uses_scoped_work_not_direct_target_sp
 	end
 end
 
-function tests.test_artifact_resolver_is_only_imported_by_worker_modules()
-	local forbidden = {
-		'../src/services/update/service.lua',
-		'../src/services/update/generation.lua',
-		'../src/services/update/events.lua',
-		'../src/services/update/generation_events.lua',
-		'../src/services/update/manager.lua',
-		'../src/services/update/active_runtime.lua',
-		'../src/services/update/ingest.lua',
-	}
-	for _, path in ipairs(forbidden) do
-		local src = read_file(path)
-		if src:find("services.update.artifacts.resolver", 1, true) then
-			fail('artifact resolver imported outside worker-owned modules: ' .. path)
+function tests.test_create_job_does_not_use_artifact_resolver_compatibility()
+	for _, path in ipairs(list_update_files()) do
+		local s = read_file(path)
+		if s:find('services.update.artifacts.resolver', 1, true)
+			or s:find('services.update.artifacts.preflight', 1, true)
+			or s:find('payload.artifact_source', 1, true)
+			or s:find('artifact_preflight', 1, true) then
+			fail('update create-job artifact compatibility remains in: ' .. path)
 		end
 	end
-	local resolver = read_file('../src/services/update/artifacts/resolver.lua')
-	if not resolver:find('function M.resolve_worker', 1, true) then
-		fail('artifact resolver should expose resolve_worker')
-	end
-	if resolver:find('function M.resolve%(', 1, false) then
-		fail('artifact resolver should not expose ambiguous resolve() entry point')
-	end
 end
-
 function tests.test_update_service_generation_boundary_uses_events_not_callbacks()
 	local svc = read_file('../src/services/update/service.lua')
 	local gen = read_file('../src/services/update/generation.lua')

@@ -31,13 +31,6 @@ local function method_op(self, name, required, job, ctx)
 	return fn(b, job, ctx)
 end
 
-function Router:preflight_op(job, ctx)
-	return method_op(self, 'preflight_op', false, job, ctx)
-end
-
-function Router:prepare_op(job, ctx)
-	return method_op(self, 'prepare_op', false, job, ctx)
-end
 
 function Router:stage_op(job, ctx)
 	return method_op(self, 'stage_op', true, job, ctx)
