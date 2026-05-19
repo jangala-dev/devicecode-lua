@@ -330,4 +330,23 @@ function tests.test_sender_accepts_zero_byte_transfer_commit_after_need_zero()
 	assert_eq(out.value.sent_bytes, 0)
 end
 
+
+function tests.test_sender_does_not_send_first_chunk_implicitly_after_ready()
+	local req = make_req { data = 'abc', size = 3, xfer_id = 'xfer-demand-driven', timeout_s = 0.03 }
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-demand-driven')))
+
+		local which = fibers.perform(fibers.named_choice {
+			bulk    = io.bulk_rx:recv_op(),
+			timeout = sleep.sleep_op(0.01),
+		})
+		assert_eq(which, 'timeout', 'sender must wait for xfer_need before sending bulk')
+	end, { timeout_s = 0.03 })
+
+	assert_eq(out.status, 'failed')
+	assert_match(out.value, 'timeout')
+end
+
 return tests

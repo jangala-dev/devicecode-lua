@@ -18,6 +18,17 @@ fabric-domain state publication
 
 Fabric is not the Device service. It does not publish appliance composition truth.
 
+
+## Wire contracts
+
+The MCU/CM5 v1 wire contract is documented separately in:
+
+```text
+docs/specs/fabric-mcu-jsonl-v1.md
+```
+
+That document is the canonical contract for `fabric-jsonl/1` MCU links, including session handshake, topic mapping, updater RPCs, transfer framing, digest rules, and post-boot update reconciliation.
+
 ## Lifetime shape
 
 ```mermaid
