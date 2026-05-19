@@ -6,7 +6,7 @@ local busmod = require 'bus'
 local service = require 'services.update.service'
 local topics = require 'services.update.topics'
 local probe = require 'tests.support.bus_probe'
-local store_mod = require 'services.update.job_store_cap'
+local store_mod = require 'services.update.job_store_memory'
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a,b,msg) if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end end
@@ -77,7 +77,7 @@ function tests.test_commit_job_persists_awaiting_return_before_reconcile()
 
     local child, caller = start_service(root_scope, {
       config={ schema='devicecode.update/1', components={ { component='cm5' } } },
-      job_store = store_mod.wrap(backend),
+      job_store = backend,
       backend = active_backend,
     })
     assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5' }, { timeout=0.5 }))
@@ -170,7 +170,7 @@ function tests.test_slow_job_runtime_load_keeps_public_service_responsive()
     end
     local child, caller = start_service(root_scope, {
       config={ schema='devicecode.update/1', components={ { component='cm5' } } },
-      job_store = store_mod.wrap(backend),
+      job_store = backend,
     })
     local status = assert(caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.5 }))
     assert_eq(status.ok, true)
@@ -206,15 +206,15 @@ local function bind_fake_control_store(scope, bus, backing)
             if k:sub(1, #prefix) == prefix then keys[#keys + 1] = k end
           end
           table.sort(keys)
-          req:reply(keys)
+          req:reply({ ok = true, reason = keys })
         elseif loop_method == 'get' then
-          if backing[p.key] == nil then req:fail('not found') else req:reply(backing[p.key]) end
+          if backing[p.key] == nil then req:reply({ ok = false, reason = 'not found' }) else req:reply({ ok = true, reason = backing[p.key] }) end
         elseif loop_method == 'put' then
           backing[p.key] = p.data
-          req:reply(true)
+          req:reply({ ok = true, reason = nil })
         elseif loop_method == 'delete' then
           backing[p.key] = nil
-          req:reply(true)
+          req:reply({ ok = true, reason = nil })
         end
       end
     end)

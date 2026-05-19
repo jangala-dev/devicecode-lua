@@ -41,16 +41,28 @@ end
 
 local function import_source(scope, store, source, ctx)
 	if type(store) ~= 'table' then error('artifact store required', 0) end
-	if type(store.import_op) == 'function' then
-		return perform_op(store:import_op(copy(source or {}), copy(ctx or {})), 'artifact_import_failed')
+	source = copy(source or {})
+	ctx = copy(ctx or {})
+
+	local meta = copy(source.meta or source.metadata or ctx.metadata or {})
+	meta.component = meta.component or ctx.component
+
+	if source.kind == 'file' or source.path ~= nil then
+		if type(store.import_path_op) ~= 'function' then
+			error('artifact store has no import_path_op', 0)
+		end
+		return perform_op(store:import_path_op(source.path, meta, {
+			policy = source.policy or ctx.policy,
+			copy = source.copy,
+		}), 'artifact_import_path_failed')
 	end
-	if type(store.probe_op) == 'function' then
-		return perform_op(store:probe_op(copy(source or {})), 'artifact_probe_failed')
+
+	if type(store.import_source_op) ~= 'function' then
+		error('artifact store has no import_source_op', 0)
 	end
-	if type(store.create_artifact_op) == 'function' then
-		return perform_op(store:create_artifact_op(copy(source or {}), copy(ctx or {})), 'artifact_create_failed')
-	end
-	error('artifact store has no import operation', 0)
+	return perform_op(store:import_source_op(source.source or source, meta, {
+		policy = source.policy or ctx.policy,
+	}), 'artifact_import_source_failed')
 end
 
 function M.resolve_worker(scope, params)

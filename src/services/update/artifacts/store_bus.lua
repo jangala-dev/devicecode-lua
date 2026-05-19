@@ -31,16 +31,19 @@ local VOID_SUCCESS = {
 
 local function unwrap_reply_for(method)
 	return function (reply, err)
-		if reply == nil then return nil, err end
-		if type(reply) == 'table' and type(reply.ok) == 'boolean' then
-			if reply.ok then
-				if reply.reason == nil and VOID_SUCCESS[method] then return true, nil end
-				return reply.reason, nil
-			end
-			return nil, tostring(reply.reason or err or 'artifact_store_call_failed')
+		if reply == nil then
+			return nil, err
 		end
-		if reply == false then return nil, err or 'artifact_store_call_failed' end
-		return reply, err
+		if type(reply) ~= 'table' or type(reply.ok) ~= 'boolean' then
+			return nil, 'invalid_artifact_store_reply'
+		end
+		if reply.ok then
+			if reply.reason == nil and VOID_SUCCESS[method] then
+				return true, nil
+			end
+			return reply.reason, nil
+		end
+		return nil, tostring(reply.reason or err or 'artifact_store_call_failed')
 	end
 end
 
@@ -111,14 +114,11 @@ function Store:open_source_op(ref)
 		if type(artifact.open_source_op) ~= 'function' then
 			return nil, 'artifact_handle_has_no_open_source_op'
 		end
-		local ok_or_source, source_or_err = fibers.perform(artifact:open_source_op())
-		if ok_or_source == true then
-			return source_or_err, nil
+		local ok_source, source_or_err = fibers.perform(artifact:open_source_op())
+		if ok_source ~= true then
+			return nil, source_or_err or 'artifact_source_open_failed'
 		end
-		if ok_or_source ~= nil and type(ok_or_source) == 'table' then
-			return ok_or_source, source_or_err
-		end
-		return nil, source_or_err or ok_or_source or 'artifact_source_open_failed'
+		return source_or_err, nil
 	end):wrap(unwrap_scope_value('artifact_source_open'))
 end
 

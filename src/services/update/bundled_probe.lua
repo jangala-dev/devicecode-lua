@@ -4,7 +4,7 @@
 --
 -- The normal fixed-path path imports the configured file into the artifact
 -- store, so downstream Update code always receives the same artifact_ref shape
--- as the browser-ingest path.  Pure probe_op backends remain supported for
+-- as the browser-ingest path. Pure probe_op backends remain supported for
 -- tests and non-importing stores.
 
 local fibers = require 'fibers'
@@ -57,13 +57,6 @@ local function import_or_probe_op(store, source, component)
 		return store:probe_op(source)
 	end
 
-	if type(store.import_op) == 'function' then
-		return store:import_op(source, {
-			component = component,
-			metadata = meta,
-			policy = source.policy,
-		})
-	end
 
 	return require('fibers.op').always(nil, 'artifact_store_import_or_probe_not_supported')
 end

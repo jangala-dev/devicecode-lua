@@ -29,11 +29,17 @@ function tests.test_update_service_defaults_to_control_store_job_store()
 	if not svc:find("control_store_jobs.new", 1, true) then
 		fail('service.lua should build the control-store job store by default')
 	end
+	if not svc:find("services.update.job_store_memory", 1, true) then
+		fail('service.lua should import strict memory job store for explicit tests/harness use')
+	end
 	if not svc:find("job_store_kind == 'memory'", 1, true) then
 		fail('memory job store should be an explicit test/harness opt-in')
 	end
-	if svc:find("params.job_store or job_store_cap.memory", 1, true) then
-		fail('service.lua must not silently default production jobs to memory storage')
+	if svc:find("services.update.job_store_cap", 1, true) then
+		fail('service.lua should not use job_store_cap compatibility wrapper')
+	end
+	if svc:find("services.update.artifacts.store_cap", 1, true) then
+		fail('service.lua should not use artifact store compatibility wrapper')
 	end
 end
 

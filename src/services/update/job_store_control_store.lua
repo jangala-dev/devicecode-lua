@@ -2,8 +2,8 @@
 --
 -- Control-store-backed durable Update job store.
 --
--- This is the production adapter for services.update.job_store_cap. It speaks
--- only to the curated HAL control-store capability surface:
+-- This is the strict production adapter for the curated HAL control-store
+-- capability surface:
 --   cap/control-store/<id>/rpc/{get,put,delete,list}
 --
 -- The store is intentionally flat because the HAL control-store provider
@@ -40,19 +40,16 @@ local function unwrap_reply_for(method)
 		if reply == nil then
 			return nil, err
 		end
-		if type(reply) == 'table' and type(reply.ok) == 'boolean' then
-			if reply.ok then
-				if reply.reason == nil and VOID_SUCCESS[method] then
-					return true, nil
-				end
-				return reply.reason, nil
+		if type(reply) ~= 'table' or type(reply.ok) ~= 'boolean' then
+			return nil, 'invalid_control_store_reply'
+		end
+		if reply.ok then
+			if reply.reason == nil and VOID_SUCCESS[method] then
+				return true, nil
 			end
-			return nil, tostring(reply.reason or err or 'control_store_call_failed')
+			return reply.reason, nil
 		end
-		if reply == false then
-			return nil, err or 'control_store_call_failed'
-		end
-		return reply, err
+		return nil, tostring(reply.reason or err or 'control_store_call_failed')
 	end
 end
 

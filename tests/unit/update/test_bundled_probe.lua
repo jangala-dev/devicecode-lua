@@ -1,7 +1,6 @@
 local fibers = require 'fibers'
 local mailbox = require 'fibers.mailbox'
 local op = require 'fibers.op'
-local store_cap = require 'services.update.artifacts.store_cap'
 local bundled_probe = require 'services.update.bundled_probe'
 local bundled_apply = require 'services.update.bundled_apply'
 local bundled = require 'services.update.bundled'
@@ -13,11 +12,11 @@ local function assert_true(v,msg) if v ~= true then fail(msg or ('expected true,
 
 
 local function import_store(ref)
-	return store_cap.wrap({
+	return {
 		import_path_op = function (_, path, meta, opts)
 			return op.always({ artifact_ref = ref or 'artifact-1', path = path, meta = meta, policy = opts and opts.policy }, nil)
 		end,
-	})
+	}
 end
 
 local function fake_jobs()
@@ -64,11 +63,11 @@ local function fake_jobs()
 end
 
 local function probe_store()
-	return store_cap.wrap({
+	return {
 		probe_op = function (_, source)
 			return op.always({ identity = source.identity or 'desired-1' }, nil)
 		end,
-	})
+	}
 end
 
 function tests.test_bundled_probe_reports_completion_without_inline_policy()

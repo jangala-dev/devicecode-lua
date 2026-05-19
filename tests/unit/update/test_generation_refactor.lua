@@ -7,7 +7,7 @@ local busmod = require 'bus'
 
 local service = require 'services.update.service'
 local topics  = require 'services.update.topics'
-local store_mod = require 'services.update.job_store_cap'
+local store_mod = require 'services.update.job_store_memory'
 local active_runtime = require 'services.update.active_runtime'
 local probe = require 'tests.support.bus_probe'
 local queue = require 'devicecode.support.queue'
@@ -86,7 +86,7 @@ local function blocking_store_for_create()
 	end
 
 	state.gate = gate
-	return store_mod.wrap(backend), state
+	return backend, state
 end
 
 function tests.test_admitted_old_generation_create_completion_remains_durable_after_replacement()
@@ -201,7 +201,7 @@ function tests.test_start_job_request_finalises_on_generation_cancellation()
 
 		local child, caller, cfg_conn = start_service(root_scope, {
 			config = config_payload('ns1'),
-			job_store = store_mod.wrap(backend),
+			job_store = backend,
 		})
 
 		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5' }, { timeout = 0.5 }))
@@ -240,7 +240,7 @@ function tests.test_accepted_start_is_saved_durably_before_reply()
 
 		local child, caller = start_service(root_scope, {
 			config = config_payload('ns1'),
-			job_store = store_mod.wrap(backend),
+			job_store = backend,
 			backend = { stage_op = function (_, job) return op.always({ job_id = job.job_id }, nil) end },
 		})
 
@@ -439,7 +439,7 @@ function tests.test_active_completion_starts_durable_job_save()
 
 		local child, caller = start_service(root_scope, {
 			config = config_payload('ns1'),
-			job_store = store_mod.wrap(backend),
+			job_store = backend,
 			backend = { stage_op = function (_, job) return op.always({ job_id = job.job_id }, nil) end },
 		})
 
@@ -464,13 +464,13 @@ end
 function tests.test_service_owns_active_completion_persistence_after_generation_replacement()
 	fibers.run(function (root_scope)
 		local saves = {}
-		local store = store_mod.wrap({
+		local store = {
 			load_all_op = function () return op.always({ jobs = {}, order = {} }, nil) end,
 			save_job_op = function (_, job)
 				saves[#saves + 1] = job
 				return op.always(true, nil)
 			end,
-		})
+		}
 		local release_active = cond.new()
 		local active_started = cond.new()
 		local backend = {}

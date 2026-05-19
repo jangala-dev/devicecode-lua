@@ -2,7 +2,7 @@ local fibers = require 'fibers'
 local cond = require 'fibers.cond'
 local op = require 'fibers.op'
 local manager_requests = require 'services.update.manager_requests'
-local store_mod = require 'services.update.job_store_cap'
+local store_mod = require 'services.update.job_store_memory'
 local job_runtime = require 'services.update.job_runtime'
 
 local tests = {}
@@ -23,7 +23,7 @@ end
 local function start_jobs(scope, store, initial)
   local jobs = assert(job_runtime.start(scope, {
     service_id = 'update',
-    store = store or store_mod.memory(initial),
+    store = store or store_mod.new(initial),
     initial_jobs = initial,
   }))
   local ready, err = fibers.perform(jobs:ready_op())
@@ -39,7 +39,7 @@ function tests.test_create_job_scope_replies_and_returns_completion_fact()
   fibers.run(function ()
     local req = request({ method='create_job', job_id='j1', component='cm5', artifact_ref='a1' })
     local st, rep, result = fibers.run_scope(function (scope)
-      local jobs = start_jobs(scope, store_mod.memory())
+      local jobs = start_jobs(scope, store_mod.new())
       local out = manager_requests.create_job(scope, { request=req, jobs=jobs, config={ components={ cm5={component='cm5'} } }, generation=3 })
       jobs:cancel('test complete')
       return out
@@ -64,10 +64,10 @@ function tests.test_start_job_persists_active_intent_without_starting_active_wor
   fibers.run(function ()
     local saves = {}
     local initial = initial_with({ job_id = 'j1', component = 'cm5', state = 'created' })
-    local store = store_mod.wrap({
+    local store = {
       load_all_op = function () return op.always(initial, nil) end,
       save_job_op = function (_, job) saves[#saves + 1] = job; return op.always(true, nil) end,
-    })
+    }
 
     local req = request({ method = 'start_job', job_id = 'j1' })
     local st, _, result = fibers.run_scope(function (scope)
@@ -105,7 +105,7 @@ function tests.test_second_start_rejected_while_durable_active_intent_exists()
     }, order = { 'j1', 'j2' }, next_seq = 10 }
     local req = request({ method = 'start_job', job_id = 'j2' })
     local st, _, result = fibers.run_scope(function (scope)
-      local jobs = start_jobs(scope, store_mod.memory(initial), initial)
+      local jobs = start_jobs(scope, store_mod.new(initial), initial)
       local out = manager_requests.start_job(scope, {
         request = req,
         jobs = jobs,
@@ -131,14 +131,14 @@ function tests.test_start_job_caller_cancellation_after_transition_admission_doe
     local save_release = cond.new()
     local saves = {}
     local initial = initial_with({ job_id = 'j1', component = 'cm5', state = 'created' })
-    local store = store_mod.wrap({
+    local store = {
       load_all_op = function () return op.always(initial, nil) end,
       save_job_op = function (_, job)
         saves[#saves + 1] = job
         save_entered:signal()
         return save_release:wait_op():wrap(function () return true, nil end)
       end,
-    })
+    }
 
     local req = request({ method = 'start_job', job_id = 'j1' })
     req.reply_count = 0
@@ -211,12 +211,12 @@ function tests.test_create_job_temporary_artifact_is_cleaned_when_durable_save_f
     end
 
     local artifact_store = {
-      import_op = function () return op.always(artifact, nil) end,
+      import_path_op = function () return op.always(artifact, nil) end,
     }
-    local job_store = store_mod.wrap({
+    local job_store = {
       load_all_op = function () return op.always({ jobs = {}, order = {}, next_seq = 1 }, nil) end,
       save_job_op = function () return op.always(nil, 'save_failed') end,
-    })
+    }
     local req = request({ method = 'create_job', job_id = 'j-art', component = 'cm5', artifact_source = { path = '/tmp/image' } })
 
     local st, _, primary = fibers.run_scope(function (scope)
@@ -249,16 +249,16 @@ function tests.test_create_job_transfers_artifact_ownership_after_durable_save()
     end
 
     local artifact_store = {
-      import_op = function () return op.always(artifact, nil) end,
+      import_path_op = function () return op.always(artifact, nil) end,
     }
     local saved = {}
-    local job_store = store_mod.wrap({
+    local job_store = {
       load_all_op = function () return op.always({ jobs = {}, order = {}, next_seq = 1 }, nil) end,
       save_job_op = function (_, job)
         saved[#saved + 1] = job
         return op.always(true, nil)
       end,
-    })
+    }
     local req = request({ method = 'create_job', job_id = 'j-art', component = 'cm5', artifact_source = { path = '/tmp/image' } })
 
     local st, _, result = fibers.run_scope(function (scope)

@@ -23,13 +23,12 @@ local generation    = require 'services.update.generation'
 local publisher     = require 'services.update.publisher'
 local projection    = require 'services.update.projection'
 local topics        = require 'services.update.topics'
-local job_store_cap = require 'services.update.job_store_cap'
+local job_store_memory = require 'services.update.job_store_memory'
 local control_store_jobs = require 'services.update.job_store_control_store'
 local job_runtime_mod = require 'services.update.job_runtime'
 local active_runtime = require 'services.update.active_runtime'
 local observe_mod = require 'services.update.observe'
 local component_watch = require 'services.update.component_watch'
-local artifact_store_cap = require 'services.update.artifacts.store_cap'
 local artifact_store_bus = require 'services.update.artifacts.store_bus'
 local component_backend_mod = require 'services.update.backends.component'
 local router_backend_mod = require 'services.update.backends.router'
@@ -770,13 +769,13 @@ function M.run(scope, params)
 	local job_store = params.job_store
 	if job_store == nil then
 		if params.job_store_kind == 'memory' or params.memory_job_store == true then
-			job_store = job_store_cap.memory(params.initial_jobs)
+			job_store = job_store_memory.new(params.initial_jobs)
 		else
-			job_store = job_store_cap.wrap(control_store_jobs.new(params.conn, {
+			job_store = control_store_jobs.new(params.conn, {
 				id = params.job_store_id or params.control_store_id or 'update',
 				prefix = params.job_store_prefix or 'update-job-',
 				call_opts = params.job_store_call_opts,
-			}))
+			})
 		end
 	end
 	local jobs, jobs_err = job_runtime_mod.start(scope, {
@@ -793,9 +792,10 @@ function M.run(scope, params)
 
 	local artifact_store = params.artifact_store
 	if artifact_store == nil then
-		artifact_store = artifact_store_cap.wrap(artifact_store_bus.new(params.conn, {
+		artifact_store = artifact_store_bus.new(params.conn, {
 			id = params.artifact_store_id or 'main',
-		}))
+			call_opts = params.artifact_store_call_opts,
+		})
 	end
 
 	local component_observer = params.component_observer or observe_mod.new({

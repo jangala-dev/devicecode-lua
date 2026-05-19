@@ -14,7 +14,7 @@ local function fake_conn()
       calls[#calls + 1] = { topic = topic, payload = payload }
       local method = topic[5]
       if topic[1] ~= 'cap' or topic[2] ~= 'control-store' or topic[3] ~= 'update' or topic[4] ~= 'rpc' then
-        return require('fibers.op').always(nil, 'bad_topic')
+        return require('fibers.op').always({ ok = false, reason = 'bad_topic' }, nil)
       end
       if method == 'list' then
         local prefix = payload and payload.prefix or ''
@@ -23,18 +23,18 @@ local function fake_conn()
           if prefix == '' or k:sub(1, #prefix) == prefix then out[#out + 1] = k end
         end
         table.sort(out)
-        return require('fibers.op').always(out, nil)
+        return require('fibers.op').always({ ok = true, reason = out }, nil)
       elseif method == 'get' then
-        if data[payload.key] == nil then return require('fibers.op').always(nil, 'not found') end
-        return require('fibers.op').always(data[payload.key], nil)
+        if data[payload.key] == nil then return require('fibers.op').always({ ok = false, reason = 'not found' }, nil) end
+        return require('fibers.op').always({ ok = true, reason = data[payload.key] }, nil)
       elseif method == 'put' then
         data[payload.key] = payload.data
-        return require('fibers.op').always(true, nil)
+        return require('fibers.op').always({ ok = true, reason = nil }, nil)
       elseif method == 'delete' then
         data[payload.key] = nil
-        return require('fibers.op').always(true, nil)
+        return require('fibers.op').always({ ok = true, reason = nil }, nil)
       end
-      return require('fibers.op').always(nil, 'bad_method')
+      return require('fibers.op').always({ ok = false, reason = 'bad_method' }, nil)
     end,
   }
 end
@@ -53,7 +53,7 @@ function T.save_load_and_delete_round_trip()
       history = {},
     }))
     assert(ok_save == true, tostring(save_err))
-    assert(conn.data['update-job-job-1.json'] ~= nil)
+    assert(conn.data['update-job-job-1'] ~= nil)
 
     local snapshot, load_err = fibers.perform(store:load_all_op())
     assert(snapshot ~= nil, tostring(load_err))
@@ -62,7 +62,7 @@ function T.save_load_and_delete_round_trip()
 
     local ok_delete, delete_err = fibers.perform(store:delete_job_op('job-1'))
     assert(ok_delete == true, tostring(delete_err))
-    assert(conn.data['update-job-job-1.json'] == nil)
+    assert(conn.data['update-job-job-1'] == nil)
   end)
 end
 
