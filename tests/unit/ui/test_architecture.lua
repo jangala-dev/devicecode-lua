@@ -264,7 +264,7 @@ function tests.test_reusable_ui_clients_have_no_hidden_bus_timeouts()
 	end
 
 	local req = read_file('../src/services/ui/http/request.lua')
-	if not req:find('conn:call_op(route.topic, body_table(ctx), { timeout = false })', 1, true) then
+	if not req:find('conn:call_op(route.topic, payload, { timeout = false })', 1, true) then
 		fail('UI command bridge should leave timeout policy to user_operation.run_op')
 	end
 

@@ -1008,11 +1008,13 @@ Curated device-facing control:
 Raw host/provider utility surfaces may include:
 
 * `raw/host/platform/cap/artifact-store/main/...`
+* `raw/host/platform/cap/control-store/update/...`
 * `raw/host/platform/cap/updater/cm5/...`
 
 Curated public manager interfaces may include:
 
 * `cap/artifact-ingest/main/...`
+* `cap/control-store/update/...`
 
 Canonical retained truth remains under:
 

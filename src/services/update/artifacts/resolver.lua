@@ -12,6 +12,25 @@ local M = {}
 
 local function copy(v) return model.deep_copy(v) end
 
+
+local function artifact_snapshot(artifact)
+	if type(artifact) == 'table' and type(artifact.describe) == 'function' then
+		local ok, rec = pcall(function () return artifact:describe() end)
+		if ok and type(rec) == 'table' then
+			rec = copy(rec)
+			rec.ref = rec.ref or rec.artifact_ref
+			rec.id = rec.id or rec.artifact_ref or rec.ref
+			return rec
+		end
+	end
+	local snap = copy(artifact)
+	if type(snap) == 'table' then
+		snap.ref = snap.ref or snap.artifact_ref
+		snap.id = snap.id or snap.artifact_ref or snap.ref
+	end
+	return snap
+end
+
 local function perform_op(ev, label)
 	local a, b = fibers.perform(ev)
 	if a == nil or a == false then
@@ -51,17 +70,22 @@ function M.resolve_worker(scope, params)
 		})
 	end
 
-	local owned, err = lifetime.own(scope, artifact, {
-		reason = params.cleanup_reason or 'artifact resolution scope closed',
-	})
-	if not owned then error(err or 'artifact_lifetime_own_failed', 0) end
+	local owned
+	if lifetime.has_immediate_cleanup(artifact) then
+		local err
+		owned, err = lifetime.own(scope, artifact, {
+			reason = params.cleanup_reason or 'artifact resolution scope closed',
+		})
+		if not owned then error(err or 'artifact_lifetime_own_failed', 0) end
+	end
 
+	local snap = artifact_snapshot(artifact)
 	return {
 		tag = 'artifact_resolved',
 		component = params.component,
 		artifact = artifact,
 		owned = owned,
-		snapshot = copy(artifact),
+		snapshot = snap,
 	}
 end
 

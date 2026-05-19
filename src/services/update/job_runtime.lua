@@ -628,6 +628,9 @@ local function compute_begin_commit_attempt(self, cmd)
 	job.commit_attempt.acceptance = job.commit_attempt.acceptance or 'unknown'
 	job.commit_attempt.started_seq = job.commit_attempt.started_seq or seq
 	job.commit_attempt.reason = cmd.reason or 'begin_commit_attempt'
+	if cmd.pre_commit ~= nil then
+		job.commit_attempt.pre_commit = copy(cmd.pre_commit)
+	end
 
 	job.active_intent = type(job.active_intent) == 'table' and copy(job.active_intent) or { token = expected_token, phase = 'commit' }
 	job.active_intent.commit_token = token

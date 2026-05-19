@@ -81,7 +81,7 @@ local function maybe_resolve_create_artifact(scope, params, payload, component)
 	if source == nil and artifact ~= nil and not lifetime.has_immediate_cleanup(artifact) then
 		local snap = copy(artifact)
 		payload.artifact = snap
-		payload.artifact_ref = payload.artifact_ref or snap.ref or snap.id
+		payload.artifact_ref = payload.artifact_ref or snap.artifact_ref or snap.ref or snap.id
 		return nil, nil
 	end
 
@@ -99,9 +99,9 @@ local function maybe_resolve_create_artifact(scope, params, payload, component)
 		return nil, check_err
 	end
 
-	local snap = copy(resolved.artifact)
+	local snap = copy(resolved.snapshot or resolved.artifact)
 	payload.artifact = snap
-	payload.artifact_ref = payload.artifact_ref or snap.ref or snap.id
+	payload.artifact_ref = payload.artifact_ref or snap.artifact_ref or snap.ref or snap.id
 
 	return resolved.owned, nil
 end

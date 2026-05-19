@@ -127,7 +127,7 @@ Examples:
 ```json
 ["state", "self", "software"]
 ["event", "self", "power", "charger", "alert"]
-["cmd", "self", "updater", "prepare"]
+["cap", "self", "updater", "main", "rpc", "prepare-update"]
 ```
 
 Remote MCU topics follow this model.
@@ -136,7 +136,7 @@ Remote MCU topics follow this model.
 | :---- | :---- |
 | `["state", "self", ...]` | retained MCU facts imported to `raw/member/mcu/state/...` |
 | `["event", "self", ...]` | MCU events imported to `raw/member/mcu/cap/telemetry/main/event/...` |
-| `["cmd", "self", "updater", <method>]` | RPC call to MCU updater capability |
+| `["cap", "self", "updater", "main", "rpc", <method>]` | RPC call to MCU updater capability |
 
 The MCU must not emit `raw/member/...` topics on the wire. Those are CM5-side provenance topics.
 
@@ -527,7 +527,7 @@ Call:
 {
   "type": "call",
   "id": "call-123",
-  "topic": ["cmd", "self", "updater", "prepare"],
+  "topic": ["cap", "self", "updater", "main", "rpc", "prepare-update"],
   "payload": {
     "job_id": "job-1",
     "target": "mcu",
@@ -575,8 +575,8 @@ Unknown payload fields should be ignored.
 Required MCU updater RPC methods for v1:
 
 ```
-cmd/self/updater/prepare
-cmd/self/updater/commit
+cap/self/updater/main/rpc/prepare-update
+cap/self/updater/main/rpc/commit-update
 ```
 
 The previous idea of `receive` is retained conceptually, but not as a required MCU RPC. In v1, binary staging is the transfer target:
@@ -587,7 +587,7 @@ updater/main
 
 ## 9\. Updater RPC behaviour
 
-### `cmd/self/updater/prepare`
+### `cap/self/updater/main/rpc/prepare-update`
 
 Host payload:
 
@@ -631,7 +631,7 @@ storage_unavailable
 invalid_request
 ```
 
-### `cmd/self/updater/commit`
+### `cap/self/updater/main/rpc/commit-update`
 
 Host payload:
 
@@ -968,7 +968,7 @@ The CM5 stores the pre-commit `boot_id` in the durable update job.
 Host calls:
 
 ```
-cmd/self/updater/prepare
+cap/self/updater/main/rpc/prepare-update
 ```
 
 Payload:
@@ -1012,7 +1012,7 @@ Per-chunk digests are only an early corruption-detection mechanism. They do not 
 
 ### Step 4: durable pre-commit record on CM5
 
-Before sending `cmd/self/updater/commit`, the CM5 must durably record enough information to reconcile after a forced reboot.
+Before sending `cap/self/updater/main/rpc/commit-update`, the CM5 must durably record enough information to reconcile after a forced reboot.
 
 Minimum durable fields:
 
@@ -1044,7 +1044,7 @@ This ordering is required because the MCU reboot also causes the CM5 to reboot.
 Host calls:
 
 ```
-cmd/self/updater/commit
+cap/self/updater/main/rpc/commit-update
 ```
 
 Payload:
@@ -1147,7 +1147,7 @@ Topic format: JSON array
 RPC reply model: call/reply by id, no reply topics
 MCU state prefix: state/self
 MCU event prefix: event/self
-MCU updater RPC prefix: cmd/self/updater
+MCU updater RPC prefix: cap/self/updater/main/rpc
 Required updater RPCs: prepare, commit
 Transfer target for firmware: updater/main
 Transfer digest field names: digest_alg, digest

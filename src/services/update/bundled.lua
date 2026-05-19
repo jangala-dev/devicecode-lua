@@ -2,11 +2,12 @@
 --
 -- Bundled update policy coordinator shape.
 --
--- This module deliberately performs no artifact probing inline. It records
--- desired/current policy state and starts bundled_probe scoped work when a
--- probe is needed.
+-- This module performs no blocking artifact or job work inline. It records
+-- desired/current policy state, starts scoped probe/import workers, and then
+-- starts scoped apply workers when policy asks for durable job creation.
 
 local bundled_probe = require 'services.update.bundled_probe'
+local bundled_apply = require 'services.update.bundled_apply'
 local model = require 'services.update.model'
 
 local M = {}
@@ -16,6 +17,24 @@ Coordinator.__index = Coordinator
 
 local function copy(v) return model.deep_copy(v) end
 
+local function component_config(cfg, component)
+	cfg = cfg or {}
+	local by_component = cfg.components or cfg.by_component or {}
+	return by_component[component] or cfg[component]
+end
+
+local function component_order(cfg)
+	local out = {}
+	local by_component = (cfg and (cfg.components or cfg.by_component)) or {}
+	for component, item in pairs(by_component) do
+		if type(component) == 'string' and component ~= '' and type(item) == 'table' then
+			out[#out + 1] = component
+		end
+	end
+	table.sort(out)
+	return out
+end
+
 function M.new(params)
 	params = params or {}
 	return setmetatable({
@@ -23,16 +42,33 @@ function M.new(params)
 		generation = params.generation,
 		config = copy(params.config or {}),
 		probes = {},
+		applies = {},
 		desired = {},
 		state = {},
+		last_apply = {},
 	}, Coordinator)
 end
 
+function Coordinator:enabled()
+	return self.config and self.config.enabled == true
+end
+
+function Coordinator:components()
+	return component_order(self.config)
+end
+
+function Coordinator:spec(component)
+	return component_config(self.config, component)
+end
+
 function Coordinator:needs_probe(component)
-	local cfg = self.config or {}
-	local by_component = cfg.components or cfg.by_component or {}
-	local item = by_component[component] or cfg[component]
-	return type(item) == 'table' and item.source ~= nil and self.desired[component] == nil
+	if not self:enabled() then return false end
+	local item = self:spec(component)
+	return type(item) == 'table'
+		and item.source ~= nil
+		and self.desired[component] == nil
+		and self.probes[component] == nil
+		and self.applies[component] == nil
 end
 
 function Coordinator:start_probe(spec)
@@ -52,7 +88,31 @@ function Coordinator:start_probe(spec)
 	}
 	if not handle then return nil, err end
 	self.probes[component] = handle
+	self.state[component] = 'probe_running'
 	return handle, nil
+end
+
+function Coordinator:start_missing_probes(spec)
+	spec = spec or {}
+	local started = {}
+	if not self:enabled() then return started, nil end
+	for _, component in ipairs(self:components()) do
+		if self:needs_probe(component) then
+			local item = assert(self:spec(component))
+			local handle, err = self:start_probe {
+				lifetime_scope = spec.lifetime_scope,
+				reaper_scope = spec.reaper_scope,
+				report_scope = spec.report_scope,
+				component = component,
+				artifact_store = spec.artifact_store,
+				source = item.source,
+				done_tx = spec.done_tx,
+			}
+			if not handle then return nil, err end
+			started[#started + 1] = component
+		end
+	end
+	return started, nil
 end
 
 function Coordinator:handle_probe_done(ev)
@@ -68,11 +128,84 @@ function Coordinator:handle_probe_done(ev)
 	return true, nil
 end
 
+function Coordinator:needs_apply(component)
+	if not self:enabled() then return false end
+	local item = self:spec(component)
+	return type(item) == 'table'
+		and item.auto_create == true
+		and self.desired[component] ~= nil
+		and self.applies[component] == nil
+		and self.last_apply[component] == nil
+end
+
+function Coordinator:start_apply(spec)
+	spec = spec or {}
+	local component = assert(spec.component, 'component required')
+	if self.applies[component] then return nil, 'apply already running' end
+	local item = spec.config or self:spec(component) or {}
+	local desired = spec.desired or self.desired[component]
+	if desired == nil then return nil, 'desired artifact missing' end
+	local apply_spec = copy(item)
+	apply_spec.component = apply_spec.component or component
+	local handle, err = bundled_apply.start {
+		lifetime_scope = assert(spec.lifetime_scope, 'lifetime_scope required'),
+		reaper_scope = spec.reaper_scope or spec.lifetime_scope,
+		report_scope = spec.report_scope or spec.lifetime_scope,
+		service_id = self.service_id,
+		generation = self.generation,
+		component = component,
+		jobs = assert(spec.jobs, 'jobs required'),
+		spec = apply_spec,
+		desired = desired,
+		done_tx = spec.done_tx,
+	}
+	if not handle then return nil, err end
+	self.applies[component] = handle
+	self.state[component] = 'apply_running'
+	return handle, nil
+end
+
+function Coordinator:start_ready_applies(spec)
+	spec = spec or {}
+	local started = {}
+	if not self:enabled() then return started, nil end
+	for _, component in ipairs(self:components()) do
+		if self:needs_apply(component) then
+			local handle, err = self:start_apply {
+				lifetime_scope = spec.lifetime_scope,
+				reaper_scope = spec.reaper_scope,
+				report_scope = spec.report_scope,
+				component = component,
+				jobs = spec.jobs,
+				done_tx = spec.done_tx,
+			}
+			if not handle then return nil, err end
+			started[#started + 1] = component
+		end
+	end
+	return started, nil
+end
+
+function Coordinator:handle_apply_done(ev)
+	if not ev or ev.kind ~= 'bundled_apply_done' then return false, 'not_apply_done' end
+	if ev.generation ~= self.generation then return false, 'stale_generation' end
+	self.applies[ev.component] = nil
+	self.last_apply[ev.component] = copy(ev)
+	if ev.status == 'ok' then
+		self.state[ev.component] = 'applied'
+	else
+		self.state[ev.component] = 'apply_failed'
+	end
+	return true, nil
+end
+
 function Coordinator:snapshot()
 	return {
 		generation = self.generation,
+		enabled = self:enabled(),
 		desired = copy(self.desired),
 		state = copy(self.state),
+		last_apply = copy(self.last_apply),
 	}
 end
 

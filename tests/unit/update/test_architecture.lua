@@ -20,6 +20,23 @@ local function list_update_files()
 	return out
 end
 
+
+function tests.test_update_service_defaults_to_control_store_job_store()
+	local svc = read_file('../src/services/update/service.lua')
+	if not svc:find("services.update.job_store_control_store", 1, true) then
+		fail('service.lua should import the control-store-backed job store')
+	end
+	if not svc:find("control_store_jobs.new", 1, true) then
+		fail('service.lua should build the control-store job store by default')
+	end
+	if not svc:find("job_store_kind == 'memory'", 1, true) then
+		fail('memory job store should be an explicit test/harness opt-in')
+	end
+	if svc:find("params.job_store or job_store_cap.memory", 1, true) then
+		fail('service.lua must not silently default production jobs to memory storage')
+	end
+end
+
 function tests.test_update_service_code_does_not_use_perform_raw()
 	for _, path in ipairs(list_update_files()) do
 		local s = read_file(path)

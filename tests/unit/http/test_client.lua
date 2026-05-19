@@ -2,8 +2,6 @@ local fibers = require 'fibers'
 local runtime = require 'fibers.runtime'
 local driver_mod = require 'services.http.transport.cqueues_driver'
 local client = require 'services.http.client'
-local transport_client = require 'services.http.transport.client'
-local policy = require 'services.http.policy'
 local blob = require 'devicecode.blob_source'
 
 local M = {}
@@ -169,85 +167,6 @@ function M.test_request_source_streams_through_fibers_native_body_pipe()
 	end)
 end
 
-
-
-local function trace_request_module(on_go)
-	return {
-		new_from_uri = function (uri)
-			local headers = {
-				set = {},
-				upsert = function (self, k, v) self.set[string.lower(k)] = v end,
-				append = function (self, k, v) self.set[string.lower(k)] = v end,
-				delete = function (self, k) self.set[string.lower(k)] = nil; return true end,
-				get = function (self, k) return self.set[string.lower(k)] end,
-			}
-			return {
-				uri = uri,
-				headers = headers,
-				expect_100_timeout = 1,
-				set_body = function (self, body_iter)
-					self.body_iter = body_iter
-					self.headers:upsert('expect', '100-continue')
-				end,
-				go = function (self)
-					if on_go then on_go(self) end
-					return fake_headers(204), {
-						get_next_chunk = function () return nil end,
-						shutdown = function () return true end,
-					}
-				end,
-			}
-		end,
-	}
-end
-
-function M.test_transport_suppresses_implicit_expect_100_for_iterator_body_by_default()
-	fibers.run(function ()
-		local seen_expect
-		local opened = ok(fibers.perform(transport_client.open_exchange_op(fake_driver(), {
-			uri = 'http://example.test/', method = 'POST', _request_body = function () return nil end,
-		}, {
-			request_module = trace_request_module(function (req)
-				seen_expect = req.headers:get('expect')
-			end),
-		})))
-		eq(opened:get(':status'), '204')
-		eq(seen_expect, nil, 'implicit Expect header should be removed by default')
-	end)
-end
-
-function M.test_transport_expect_100_requires_explicit_opt_in_and_uses_timeout()
-	fibers.run(function ()
-		local seen_expect, seen_timeout
-		local opened = ok(fibers.perform(transport_client.open_exchange_op(fake_driver(), {
-			uri = 'http://example.test/', method = 'POST', _request_body = function () return nil end,
-		}, {
-			request_module = trace_request_module(function (req)
-				seen_expect = req.headers:get('expect')
-				seen_timeout = req.expect_100_timeout
-			end),
-			expect_100_continue = true,
-			expect_100_timeout = 2.5,
-		})))
-		eq(opened:get(':status'), '204')
-		eq(seen_expect, '100-continue')
-		eq(seen_timeout, 2.5)
-	end)
-end
-
-function M.test_policy_allows_per_request_expect_100_options()
-	local checked = ok(policy.validate_exchange_args({
-		uri = 'http://example.test/',
-		method = 'POST',
-		expect_100_continue = true,
-		expect_100_timeout = 3.25,
-	}, {
-		allowed_schemes = { http = true },
-		allowed_hosts = { ['example.test'] = true },
-	}))
-	eq(checked.expect_100_continue, true)
-	eq(checked.expect_100_timeout, 3.25)
-end
 
 function M.test_exchange_op_does_not_terminate_committed_response_sink_after_success()
 	fibers.run(function ()

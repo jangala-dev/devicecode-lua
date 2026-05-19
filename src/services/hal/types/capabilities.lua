@@ -354,7 +354,7 @@ function new.ControlStoreCapability(id, control_ch)
 		'list',
 		'status',
 	}
-	return new.Capability('control_store', id, control_ch, offerings)
+	return new.Capability('control-store', id, control_ch, offerings)
 end
 
 ---@param id CapabilityId
@@ -372,10 +372,10 @@ end
 ---@return Capability?
 ---@return string error
 function new.ArtifactStoreCapability(id, control_ch)
-	return new.Capability('artifact_store', id, control_ch, {
-		'create_sink',
-		'import_path',
-		'import_source',
+	return new.Capability('artifact-store', id, control_ch, {
+		'create-sink',
+		'import-path',
+		'import-source',
 		'open',
 		'delete',
 		'status',

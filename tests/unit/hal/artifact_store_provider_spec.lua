@@ -59,11 +59,11 @@ function T.capabilities_op_returns_artifact_store_capability()
 		assert(#caps_or_err == 1)
 
 		local cap = caps_or_err[1]
-		assert(cap.class == 'artifact_store')
+		assert(cap.class == 'artifact-store')
 		assert(cap.id == 'main')
-		assert(cap.offerings.create_sink == true)
-		assert(cap.offerings.import_path == true)
-		assert(cap.offerings.import_source == true)
+		assert(cap.offerings['create-sink'] == true)
+		assert(cap.offerings['import-path'] == true)
+		assert(cap.offerings['import-source'] == true)
 		assert(cap.offerings.open == true)
 		assert(cap.offerings.delete == true)
 		assert(cap.offerings.status == true)
@@ -102,7 +102,7 @@ function T.start_op_emits_initial_meta_and_available_state()
 		assert(by_mode.meta ~= nil)
 		assert(by_mode.state ~= nil)
 
-		assert(by_mode.meta.class == 'artifact_store')
+		assert(by_mode.meta.class == 'artifact-store')
 		assert(by_mode.meta.id == 'main')
 		assert(by_mode.meta.key == 'info')
 		assert(by_mode.meta.data.transient_root == transient_root)
@@ -142,7 +142,7 @@ function T.create_sink_commit_open_and_delete_round_trip()
 			{ kind = 'update', target = 'mcu' },
 			'transient_only'
 		))
-		local create_reply = request(driver, 'create_sink', create_opts)
+		local create_reply = request(driver, 'create-sink', create_opts)
 		assert(create_reply.ok == true)
 
 		local sink = create_reply.reason
@@ -171,7 +171,7 @@ function T.create_sink_commit_open_and_delete_round_trip()
 
 		local status_reply = request(driver, 'status', assert(cap_args.new.ArtifactStoreStatusOpts()))
 		assert(status_reply.ok == true)
-		assert(status_reply.reason.kind == 'artifact_store')
+		assert(status_reply.reason.kind == 'artifact-store')
 
 		local ok_stop, stop_err = fibers.perform(driver:shutdown_op())
 		assert(ok_stop == true, tostring(stop_err))
@@ -205,7 +205,7 @@ function T.import_source_request_round_trips_success()
 			'transient_only'
 		))
 
-		local reply = request(driver, 'import_source', import_opts)
+		local reply = request(driver, 'import-source', import_opts)
 		assert(reply.ok == true)
 
 		local artifact = reply.reason
@@ -269,7 +269,7 @@ function T.create_sink_close_aborts_partial_artifact()
 			'transient_only'
 		))
 
-		local create_reply = request(driver, 'create_sink', create_opts)
+		local create_reply = request(driver, 'create-sink', create_opts)
 		assert(create_reply.ok == true)
 		local sink = create_reply.reason
 
@@ -313,7 +313,7 @@ function T.commit_is_idempotent_for_same_provider_sink_session()
 		assert(ok_start == true, tostring(start_err))
 
 		local create_opts = assert(cap_args.new.ArtifactStoreCreateSinkOpts({ kind = 'update' }, 'transient_only'))
-		local create_reply = request(driver, 'create_sink', create_opts)
+		local create_reply = request(driver, 'create-sink', create_opts)
 		assert(create_reply.ok == true)
 		local sink = create_reply.reason
 

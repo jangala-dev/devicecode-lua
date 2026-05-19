@@ -188,10 +188,6 @@ function M.run(scope, req, caps)
 			else
 				sent = send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
 				deadline = fibers.now() + timeout_s
-
-				if sent == size then
-					state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
-				end
 			end
 
 		elseif frame.type == 'xfer_done' and state == 'committing' then

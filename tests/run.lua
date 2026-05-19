@@ -95,6 +95,7 @@ local files = {
 	"integration.devhost.fabric_hal_uart_smoke_spec",
 	"integration.devhost.fabric_public_service_path_spec",
 	'integration.devhost.update_public_seams_spec',
+	'integration.devhost.mcu_update_full_path_spec',
 	'unit.support.test_scoped_work',
 	'unit.support.test_queue',
 	'unit.support.test_priority_event',

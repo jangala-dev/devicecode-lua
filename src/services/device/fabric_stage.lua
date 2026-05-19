@@ -87,13 +87,30 @@ function M.stage_source_op(_, params)
 		return op_mod.always(nil, 'source_required', nil)
 	end
 
+	local payload = type(params.request_payload) == 'table' and params.request_payload or {}
+	local transfer_meta = type(payload.meta) == 'table' and payload.meta or {
+		kind = 'firmware',
+		component = params.component,
+		job_id = payload.job_id,
+		image_id = payload.expected_image_id or payload.image_id,
+		format = payload.format or 'dcmcu-v1',
+	}
+
 	local ev, err = call_transfer_op(params.client, source, {
 		component = params.component,
 		action = params.action,
-		link_id = params.link_id,
+		link_id = params.link_id or payload.link_id,
+		target = params.target or payload.target,
+		size = payload.size,
+		digest_alg = payload.digest_alg,
+		digest = payload.digest,
+		chunk_size = payload.chunk_size or params.chunk_size,
+		meta = transfer_meta,
+
+		-- Legacy compatibility only. New stage-update actions should use target.
 		receiver = params.receiver,
 		artifact_store = params.artifact_store,
-		request = params.request_payload,
+		request = payload,
 	}, {
 		timeout = params.timeout,
 		deadline = params.deadline,

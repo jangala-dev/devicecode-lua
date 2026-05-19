@@ -31,6 +31,9 @@ local function start_service(root_scope, params)
 		params = params or {}
 		params.conn = svc_conn
 		params.service_id = params.service_id or 'update'
+		if params.job_store == nil and params.job_store_kind == nil then
+			params.job_store_kind = 'memory'
+		end
 		service.run(scope, params)
 	end)
 	assert_true(ok, err)

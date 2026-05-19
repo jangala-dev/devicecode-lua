@@ -187,6 +187,8 @@ local function run_fabric_stage_op(_, ctx, owner)
 			component = ctx.component_id,
 			action = ctx.action,
 			link_id = ctx.action_spec.link_id,
+			target = ctx.action_spec.target,
+			chunk_size = ctx.action_spec.chunk_size,
 			receiver = ctx.action_spec.receiver,
 			artifact_store = ctx.action_spec.artifact_store,
 			request_payload = request_payload(ctx.request),

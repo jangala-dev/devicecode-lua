@@ -148,7 +148,7 @@ function T.artifact_store_imports_path_and_reports_status()
 
 		local ok_status, status = fibers.perform(store:status_op())
 		assert(ok_status == true, tostring(status))
-		assert(status.kind == 'artifact_store')
+		assert(status.kind == 'artifact-store')
 		assert(status.transient_root == transient_root)
 		assert(status.durable_root == durable_root)
 		assert(status.durable_enabled == false)

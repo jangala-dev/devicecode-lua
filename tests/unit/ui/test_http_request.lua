@@ -3,8 +3,12 @@
 local run_fibers = require 'tests.support.run_fibers'
 local fibers = require 'fibers'
 local channel = require 'fibers.channel'
+local busmod = require 'bus'
 local request = require 'services.ui.http.request'
 local read_model = require 'services.ui.read_model'
+
+local ok_cjson, cjson = pcall(require, 'cjson.safe')
+if not ok_cjson then cjson = require 'cjson' end
 
 local tests = {}
 
@@ -96,6 +100,63 @@ function tests.test_http_response_writer_may_yield_inside_request_scope_without_
 		assert_eq(events[1], 'reply-start')
 		assert_eq(events[2], 'peer-fiber-ran')
 		assert_eq(events[3], 'reply-finish:resumed')
+	end)
+end
+
+
+function tests.test_http_command_route_parses_real_json_body_and_calls_bus()
+	run_fibers.run(function (scope)
+		local bus = busmod.new()
+		local admin = bus:connect({ origin_base = { service = 'ui-command-test' } })
+		local received
+		local ep = assert(admin:bind({ 'cap', 'test', 'main', 'rpc', 'echo' }, { queue_len = 1 }))
+		scope:finally(function () ep:close(); admin:disconnect() end)
+
+		fibers.spawn(function ()
+			local req = ep:recv()
+			received = req.payload
+			req:reply({ echoed = req.payload })
+		end)
+
+		local ctx = fake_ctx('POST', '/api/call/cap/test/main/rpc/echo')
+		ctx.headers = { ['content-type'] = 'application/json', ['x-session-id'] = 'sid-1' }
+		ctx.read_body_as_string_op = function ()
+			return fibers.always('{"job_id":"job-1","n":7}', nil)
+		end
+
+		local sessions = {
+			get = function (_, sid)
+				if sid == 'sid-1' then return { id = sid, principal = { kind = 'user', id = 'tester' } } end
+				return nil
+			end,
+		}
+
+		local result = request.run(scope, ctx, {
+			bus = bus,
+			sessions = sessions,
+			encode_json = function (v) return assert(cjson.encode(v)) end,
+		})
+
+		assert_eq(result.status, 'ok')
+		assert_not_nil(received)
+		assert_eq(received.job_id, 'job-1')
+		assert_eq(received.n, 7)
+		assert_eq(#ctx.replies, 1)
+		assert_eq(ctx.replies[1].status, 200)
+	end)
+end
+
+function tests.test_http_command_route_rejects_non_json_body()
+	run_fibers.run(function (scope)
+		local bus = busmod.new()
+		local ctx = fake_ctx('POST', '/api/call/cap/test/main/rpc/echo')
+		ctx.headers = { ['content-type'] = 'text/plain', ['x-session-id'] = 'sid-1' }
+		ctx.read_body_as_string_op = function () return fibers.always('not json', nil) end
+		local sessions = { get = function () return { id = 'sid-1', principal = 'tester' } end }
+		local result = request.run(scope, ctx, { bus = bus, sessions = sessions, encode_json = function (v) return assert(cjson.encode(v)) end })
+		assert_eq(result.status, 'bad_request')
+		assert_eq(#ctx.replies, 1)
+		assert_eq(ctx.replies[1].status, 415)
 	end)
 end
 

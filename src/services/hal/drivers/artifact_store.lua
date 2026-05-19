@@ -816,7 +816,7 @@ end
 
 function Store:status_op()
 	return op.always(true, {
-		kind            = 'artifact_store',
+		kind            = 'artifact-store',
 		transient_root  = self.transient_root,
 		durable_root    = self.durable_root,
 		durable_enabled = self.durable_enabled,

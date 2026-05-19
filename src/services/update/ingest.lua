@@ -25,6 +25,26 @@ State.__index = State
 
 local function copy(v) return model.deep_copy(v) end
 
+
+local function artifact_snapshot(artifact)
+	if type(artifact) == 'table' and type(artifact.describe) == 'function' then
+		local ok, rec = pcall(function () return artifact:describe() end)
+		if ok and type(rec) == 'table' then
+			rec = copy(rec)
+			rec.ref = rec.ref or rec.artifact_ref
+			rec.id = rec.id or rec.artifact_ref or rec.ref
+			return rec
+		end
+	end
+	local snap = copy(artifact)
+	if type(snap) == 'table' then
+		snap.ref = snap.ref or snap.artifact_ref
+		snap.id = snap.id or snap.artifact_ref or snap.ref
+	end
+	return snap
+end
+
+
 local function payload_of(req)
 	return type(req) == 'table' and type(req.payload) == 'table' and req.payload or {}
 end
@@ -184,14 +204,38 @@ function Instance:commit_worker(_scope, ...)
 	end
 	local ev, err = self._owned:commit_op(...)
 	if not ev then return nil, err end
-	local artifact, cerr = fibers.perform(ev)
-	if artifact == nil then return nil, cerr or 'commit failed' end
-	self.artifact = copy(artifact)
+
+	local first, second = fibers.perform(ev)
+	local artifact
+
+	-- Artifact sinks in the HAL path use the conventional sink protocol
+	--     true, artifact
+	-- whereas some tests and direct adapters return
+	--     artifact, nil
+	-- directly.  Normalise both forms here before deriving the committed
+	-- artifact snapshot.
+	if first == nil or first == false then
+		return nil, second or 'commit failed'
+	elseif first == true then
+		artifact = second
+	else
+		artifact = first
+	end
+
+	if artifact == nil then return nil, 'commit missing artifact' end
+	local snap = artifact_snapshot(artifact)
+	self.artifact = snap
 	self.closed = true
 	self.state = 'committed'
 	self._owned:handoff(function () return true end)
 	self:_close_scope('ingest_committed')
-	return { tag = 'ingest_committed', ingest_id = self.ingest_id, artifact = copy(artifact), bytes = self.bytes }, nil
+	return {
+		tag = 'ingest_committed',
+		ingest_id = self.ingest_id,
+		artifact = copy(snap),
+		artifact_ref = type(snap) == 'table' and (snap.artifact_ref or snap.ref or snap.id) or snap,
+		bytes = self.bytes,
+	}, nil
 end
 
 function Instance:abort(reason)
@@ -308,20 +352,21 @@ function State:request_op()
 	end)
 end
 
-local function create_instance_now(state, req, payload)
-	local sink = payload.sink
+local new_request_id
+
+local function create_instance_with_sink_now(state, req, payload, sink, owner)
 	if type(sink) ~= 'table' then
-		fail(req, 'ingest_sink_required')
-		return
+		fail_owner(owner, req, 'ingest_sink_required')
+		return nil, 'ingest_sink_required'
 	end
 	local ingest_id = payload.ingest_id
 	if type(ingest_id) ~= 'string' or ingest_id == '' then
-		fail(req, 'ingest_id_required')
-		return
+		fail_owner(owner, req, 'ingest_id_required')
+		return nil, 'ingest_id_required'
 	end
 	if state._instances[ingest_id] ~= nil then
-		fail(req, 'ingest_exists')
-		return
+		fail_owner(owner, req, 'ingest_exists')
+		return nil, 'ingest_exists'
 	end
 	local inst, err = M.new_instance(state._scope, {
 		ingest_id = ingest_id,
@@ -329,11 +374,89 @@ local function create_instance_now(state, req, payload)
 		sink = sink,
 	})
 	if not inst then
-		fail(req, err or 'ingest_create_failed')
-		return
+		fail_owner(owner, req, err or 'ingest_create_failed')
+		return nil, err or 'ingest_create_failed'
 	end
 	state._instances[ingest_id] = inst
-	reply(req, { ok = true, ingest = inst:snapshot() })
+	owner = owner or owner_for(req)
+	local ok, rerr = owner:reply_once({ ok = true, ingest = inst:snapshot() })
+	if ok ~= true then error(rerr or 'ingest_create_reply_failed', 0) end
+	return inst, nil
+end
+
+local function start_create_sink_work(ctx, state, req, payload)
+	if type(ctx) ~= 'table' or type(ctx.artifact_store) ~= 'table' or type(ctx.artifact_store.create_sink_op) ~= 'function' then
+		fail(req, 'artifact_store_unavailable')
+		return nil, 'artifact_store_unavailable'
+	end
+	local owner = request_owner.new(req)
+	local ingest_id = payload.ingest_id
+	local request_id = tostring(payload.request_id or new_request_id(state, 'ingest_create', ingest_id))
+	local handle, err = scoped_work.start {
+		lifetime_scope = ctx.request_root or ctx.scope,
+		reaper_scope = ctx.request_root or ctx.scope,
+		report_scope = ctx.scope,
+		identity = {
+			kind = 'ingest_create_done',
+			service_id = ctx.service_id,
+			generation = ctx.generation,
+			method = 'ingest_create',
+			request_id = request_id,
+			ingest_id = ingest_id,
+		},
+		setup = function (work_scope)
+			work_scope:finally(function (_, status, primary)
+				if owner:done() then return end
+				-- On success the unresolved request owner is intentionally
+				-- carried by the completion event and resolved by the
+				-- coordinator after the sink has been admitted to ingest
+				-- state. Do not fail it merely because the create-sink
+				-- worker scope has ended successfully.
+				if status ~= 'ok' then
+					owner:finalise_unresolved((status == 'failed' and primary) or primary or 'ingest_create_cancelled')
+				end
+			end)
+			return {
+				request_owner = owner,
+				cancel_owned_now = function (reason)
+					owner:abandon_unresolved(reason or 'caller_abandoned')
+					return true
+				end,
+			}
+		end,
+		cancel_op = owner:caller_cancel_op(),
+		run = function (_, setup)
+			local sink, serr = fibers.perform(ctx.artifact_store:create_sink_op({
+				component = payload.component,
+				meta = payload.metadata or payload.meta or {},
+				policy = payload.policy or 'prefer_durable',
+			}))
+			if sink == nil then error(serr or 'artifact_sink_create_failed', 0) end
+			return {
+				tag = 'ingest_sink_created',
+				ingest_id = ingest_id,
+				payload = copy(payload),
+				sink = sink,
+				request_owner = setup and setup.request_owner or owner,
+			}
+		end,
+		report = function (ev)
+			return queue.try_admit_required(ctx.done_tx, ev, 'update_ingest_create_completion_report_failed')
+		end,
+	}
+	if not handle then
+		fail_owner(owner, req, err or 'ingest_create_start_failed')
+		return nil, err or 'ingest_create_start_failed'
+	end
+	state._work[request_id] = { handle = handle, ingest_id = ingest_id, category = 'create', request = req, owner = owner }
+	return handle, nil
+end
+
+local function create_instance_now(ctx, state, req, payload)
+	if type(payload.sink) == 'table' then
+		return create_instance_with_sink_now(state, req, payload, payload.sink)
+	end
+	return start_create_sink_work(ctx, state, req, payload)
 end
 
 local start_next_for_instance
@@ -400,7 +523,7 @@ start_next_for_instance = function (ctx, state, inst)
 	return true, nil
 end
 
-local function new_request_id(state, method, ingest_id)
+new_request_id = function(state, method, ingest_id)
 	local n = state._next_request_id or 1
 	state._next_request_id = n + 1
 	return table.concat({ tostring(ingest_id or 'ingest'), tostring(method or 'request'), tostring(n) }, ':')
@@ -463,7 +586,7 @@ function State:handle_event(ctx, ev)
 	local method, payload = method_of(req)
 
 	if method == 'ingest_create' then
-		create_instance_now(self, req, payload)
+		create_instance_now(ctx, self, req, payload)
 		return true
 	end
 
@@ -513,13 +636,26 @@ end
 
 function State:handle_done(ctx, ev)
 	if ev == nil then return true end
-	if ev.kind ~= 'ingest_request_done' then return true end
+	if ev.kind ~= 'ingest_request_done' and ev.kind ~= 'ingest_create_done' then return true end
 	self._ctx = ctx or self._ctx
 	ctx = ctx or self._ctx
 
 	local rec = self._work[ev.request_id]
 	self._work[ev.request_id] = nil
 	local ingest_id = ev.ingest_id or (rec and rec.ingest_id)
+
+	if ev.kind == 'ingest_create_done' then
+		local result = ev.result or {}
+		local owner = result.request_owner or (rec and rec.owner)
+		local req = rec and rec.request or nil
+		if ev.status ~= 'ok' then
+			fail_owner(owner, req, ev.primary or 'ingest_create_failed')
+			return true
+		end
+		create_instance_with_sink_now(self, req, result.payload or {}, result.sink, owner)
+		return true
+	end
+
 	local inst = ingest_id and self._instances[ingest_id] or nil
 	if not inst then return true end
 

@@ -72,6 +72,7 @@ local function start_update(scope, params)
 			backend = params.backend,
 			job_store = params.job_store,
 			initial_jobs = params.initial_jobs,
+			job_store_kind = params.job_store_kind or 'memory',
 		})
 	end)
 	assert_true(ok, err)

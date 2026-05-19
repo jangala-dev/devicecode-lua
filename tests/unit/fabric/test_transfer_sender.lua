@@ -196,6 +196,8 @@ function tests.test_sender_sends_begin_chunks_commit_and_returns_after_done()
 		assert_eq(chunk2.frame.chunk_digest, protocol.chunk_digest('def'))
 		seen[#seen + 1] = chunk2.frame.type
 
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-1', 6)))
+
 		local commit = recv_with_timeout(io.control_rx, 'commit')
 		assert_eq(commit.frame.type, 'xfer_commit')
 		assert_eq(commit.frame.size, 6)
@@ -303,6 +305,7 @@ function tests.test_sender_does_not_close_source_itself()
 		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-no-close')))
 		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-no-close', 0)))
 		recv_with_timeout(io.bulk_rx, 'chunk')
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-no-close', 3)))
 		recv_with_timeout(io.control_rx, 'commit')
 		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-no-close')))
 	end)

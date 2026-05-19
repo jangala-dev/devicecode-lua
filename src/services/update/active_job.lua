@@ -159,6 +159,7 @@ local function begin_commit_attempt(params, job, ctx, policy)
 		token = active_token,
 		commit_token = commit_token,
 		commit_policy = policy,
+		pre_commit = ctx.pre_commit,
 		reason = 'active_commit_begin_attempt',
 	}, 'active_job.commit: job_runtime required before backend commit')
 
@@ -195,6 +196,8 @@ function M.commit(_scope, params)
 	local job = require_job(params, 'active_job.commit')
 	local ctx = base_ctx(params, 'commit')
 	local policy = backend_commit_policy(backend)
+	local pre_commit = perform_backend_op(backend, 'pre_commit_record_op', false, job, ctx)
+	if pre_commit ~= nil then ctx.pre_commit = pre_commit end
 	local attempt = begin_commit_attempt(params, job, ctx, policy)
 
 	local accepted = perform_backend_op(backend, 'commit_op', true, job, ctx)

@@ -36,7 +36,7 @@ function T.status_op_reports_root_and_kind()
     assert(ok == true)
     assert(type(payload) == 'table')
     assert(payload.root == root)
-    assert(payload.kind == 'control_store')
+    assert(payload.kind == 'control-store')
   end)
 
   rm_rf(root)

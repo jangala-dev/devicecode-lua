@@ -123,7 +123,24 @@
       "time": {},
       "platform": {},
       "power": {},
-      "usb": {}
+      "usb": {},
+      "artifact_store": {
+        "stores": [
+          {
+            "id": "main",
+            "transient_root": "/tmp/devicecode-artifacts",
+            "durable_root": "/data/devicecode/artifacts",
+            "import_root": "/data/devicecode/artifacts/import",
+            "durable_enabled": true
+          }
+        ]
+      },
+      "control_store": [
+        {
+          "name": "update",
+          "root": "/data/devicecode/control/update"
+        }
+      ]
     }
   },
   "net": {
@@ -807,19 +824,37 @@
                 "restart"
               ]
             },
-            "stage-update": {
-              "kind": "fabric_stage",
-              "receiver": [
+            "prepare-update": {
+              "kind": "rpc",
+              "call_topic": [
                 "raw",
                 "member",
                 "mcu",
                 "cap",
-                "update",
+                "updater",
                 "main",
                 "rpc",
-                "stage"
-              ],
+                "prepare-update"
+              ]
+            },
+            "stage-update": {
+              "kind": "fabric_stage",
+              "target": "updater/main",
+              "chunk_size": 2048,
               "artifact_store": "main"
+            },
+            "commit-update": {
+              "kind": "rpc",
+              "call_topic": [
+                "raw",
+                "member",
+                "mcu",
+                "cap",
+                "updater",
+                "main",
+                "rpc",
+                "commit-update"
+              ]
             }
           }
         },
@@ -1105,7 +1140,8 @@
               {
                 "id": "mcu-state",
                 "remote": [
-                  "state"
+                  "state",
+                  "self"
                 ],
                 "local": [
                   "raw",
@@ -1117,19 +1153,24 @@
               {
                 "id": "mcu-event",
                 "remote": [
-                  "event"
+                  "event",
+                  "self"
                 ],
                 "local": [
                   "raw",
                   "member",
                   "mcu",
+                  "cap",
+                  "telemetry",
+                  "main",
                   "event"
                 ]
               },
               {
                 "id": "mcu-cap",
                 "remote": [
-                  "cap"
+                  "cap",
+                  "self"
                 ],
                 "local": [
                   "raw",
@@ -1143,16 +1184,47 @@
             "rpc": {
               "outbound": [
                 {
-                  "id": "mcu-cap-rpc",
+                  "id": "mcu-updater-prepare",
                   "local": [
                     "raw",
                     "member",
                     "mcu",
-                    "cap"
+                    "cap",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "prepare-update"
                   ],
                   "remote": [
-                    "cap"
+                    "cap",
+                    "self",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "prepare-update"
                   ]
+                },
+                {
+                  "id": "mcu-updater-commit",
+                  "local": [
+                    "raw",
+                    "member",
+                    "mcu",
+                    "cap",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "commit-update"
+                  ],
+                  "remote": [
+                    "cap",
+                    "self",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "commit-update"
+                  ],
+                  "reply_policy": "sent-is-accepted"
                 }
               ],
               "inbound": []
@@ -1202,14 +1274,26 @@
         },
         "mcu": {
           "component": "mcu",
-          "backend": "mcu"
+          "backend": "component"
         },
         "switch-main": {
           "component": "switch-main"
         }
       },
       "bundled": {
-        "enabled": false
+        "enabled": false,
+        "components": {
+          "mcu": {
+            "component": "mcu",
+            "source": {
+              "kind": "file",
+              "path": "/data/devicecode/artifacts/import/mcu.dcmcu"
+            },
+            "auto_create": false,
+            "auto_start": false,
+            "policy": "prefer_durable"
+          }
+        }
       },
       "publish": {
         "enabled": true

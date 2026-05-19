@@ -31,6 +31,25 @@ local function recv_with_timeout(rx, label, timeout)
 	return item
 end
 
+local function wait_transfer_last_status(h, wanted, label, timeout)
+	timeout = timeout or 0.25
+	local deadline = fibers.now() + timeout
+	while fibers.now() < deadline do
+		local remaining = deadline - fibers.now()
+		local which, ev = fibers.perform(fibers.named_choice{
+			event = h.state_rx:recv_op(),
+			timeout = sleep.sleep_op(remaining),
+		})
+		if which == 'timeout' then break end
+		local snap = ev and ev.snapshot
+		local last = snap and snap.last
+		if last and last.status == wanted then
+			return snap
+		end
+	end
+	fail('timed out waiting for transfer last status ' .. tostring(wanted) .. ' for ' .. tostring(label or 'transfer'))
+end
+
 local function ctx(gen, sid)
 	return session.new_session_context {
 		link_id = 'link-a',
@@ -83,6 +102,7 @@ local function start_manager(scope, opts)
 			state_tx = state_tx,
 			chunk_size = opts.chunk_size or 3,
 			timeout_s = opts.timeout_s or 0.05,
+			receive_targets = opts.receive_targets,
 		})
 		queue.try_admit_required(done_tx, result, 'transfer_done')
 	end)
@@ -197,6 +217,10 @@ function tests.test_real_sender_attempt_uses_session_bound_outbound_gate()
 		assert_eq(chunk2.offset, 3)
 		assert_eq(chunk2.data, 'def')
 
+		-- The receiver acknowledges the final accepted chunk with next == size.
+		-- The sender must wait for this before sending xfer_commit so that
+		-- control commit cannot overtake the final bulk frame.
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_need('xfer-1', 6)))))
 		local commit = recv_with_timeout(h.control_rx, 'commit').frame
 		assert_eq(commit.type, 'xfer_commit')
 		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_done('xfer-1')))))
@@ -227,6 +251,102 @@ function tests.test_session_drop_poisoned_lease_cannot_start_attempt()
 		local h2, err = transfer.start_attempt(scope, lease, {})
 		assert_nil(h2)
 		assert_not_nil(err)
+		h.admission_tx:close('done')
+		h.session_tx:close('done')
+		recv_with_timeout(h.done_rx, 'manager done')
+	end)
+end
+
+function tests.test_manager_receives_inbound_transfer_for_registered_target()
+	fibers.run(function (scope)
+		local received = {}
+		local committed = false
+		local target = {}
+		function target:open_sink_op(req)
+			assert_eq(req.target, 'updater/main')
+			assert_eq(req.size, 6)
+			local sink = {}
+			function sink:append_op(chunk)
+				received[#received + 1] = chunk
+				return fibers.always(true, nil)
+			end
+			function sink:commit_op(req2)
+				committed = true
+				assert_eq(req2.digest, protocol.digest_hex('abcdef'))
+				return fibers.always({ staged = true }, nil)
+			end
+			function sink:abort(_) return true, nil end
+			return fibers.always(sink, nil)
+		end
+
+		local h = start_manager(scope, {
+			chunk_size = 3,
+			receive_targets = { ['updater/main'] = target },
+		})
+		local c = ctx()
+		h.outbound:bind(c)
+		assert_true(h.session_tx:send(peer_session_event()))
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_begin(
+			'xfer-in-1', 'updater/main', 6, protocol.DIGEST_ALG, protocol.digest_hex('abcdef'),
+			{ kind = 'firmware', component = 'mcu' }
+		)))))
+
+		local ready = recv_with_timeout(h.control_rx, 'receive ready').frame
+		assert_eq(ready.type, 'xfer_ready')
+		assert_eq(ready.xfer_id, 'xfer-in-1')
+
+		local need0 = recv_with_timeout(h.control_rx, 'receive need 0').frame
+		assert_eq(need0.type, 'xfer_need')
+		assert_eq(need0.next, 0)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_chunk(
+			'xfer-in-1', 0, 'abc', protocol.chunk_digest('abc')
+		)))))
+		local need3 = recv_with_timeout(h.control_rx, 'receive need 3').frame
+		assert_eq(need3.type, 'xfer_need')
+		assert_eq(need3.next, 3)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_chunk(
+			'xfer-in-1', 3, 'def', protocol.chunk_digest('def')
+		)))))
+		local need6 = recv_with_timeout(h.control_rx, 'receive need 6').frame
+		assert_eq(need6.type, 'xfer_need')
+		assert_eq(need6.next, 6)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_commit(
+			'xfer-in-1', 6, protocol.DIGEST_ALG, protocol.digest_hex('abcdef')
+		)))))
+
+		local done = recv_with_timeout(h.control_rx, 'receive done').frame
+		assert_eq(done.type, 'xfer_done')
+		assert_eq(table.concat(received), 'abcdef')
+		assert_true(committed)
+
+		local completed = wait_transfer_last_status(h, 'ok', 'inbound receive')
+		assert_eq(completed.last.result.received_bytes, 6)
+
+		h.admission_tx:close('done')
+		h.session_tx:close('done')
+		local result = recv_with_timeout(h.done_rx, 'manager done')
+		assert_eq(result.snapshot.last.status, 'ok')
+		assert_eq(result.snapshot.last.result.received_bytes, 6)
+	end)
+end
+
+function tests.test_manager_aborts_inbound_transfer_for_unknown_target()
+	fibers.run(function (scope)
+		local h = start_manager(scope)
+		local c = ctx()
+		h.outbound:bind(c)
+		assert_true(h.session_tx:send(peer_session_event()))
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_begin(
+			'xfer-unknown', 'updater/main', 0, protocol.DIGEST_ALG, protocol.digest_hex(''), nil
+		)))))
+		local abort = recv_with_timeout(h.control_rx, 'unsupported target abort').frame
+		assert_eq(abort.type, 'xfer_abort')
+		assert_eq(abort.xfer_id, 'xfer-unknown')
+		assert_eq(abort.err, 'unsupported_target')
 		h.admission_tx:close('done')
 		h.session_tx:close('done')
 		recv_with_timeout(h.done_rx, 'manager done')

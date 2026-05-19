@@ -90,6 +90,11 @@ local RULE_KEYS = {
 	id = true, ['local'] = true, remote = true, topic = true, timeout_s = true,
 }
 
+local RPC_RULE_KEYS = {
+	id = true, ['local'] = true, remote = true, topic = true,
+	timeout_s = true, reply_policy = true,
+}
+
 local EXPORT_RULE_KEYS = {
 	id = true, ['local'] = true, remote = true, topic = true,
 	timeout_s = true, publish = true, retain = true,
@@ -220,6 +225,15 @@ local function pos_int(v, path, default)
 		return nil, path .. ' must be a positive integer'
 	end
 	return n, nil
+end
+
+
+local function rpc_reply_policy(v, path)
+	if v == nil then return 'reply-required', nil end
+	if v == 'reply-required' or v == 'sent-is-accepted' then
+		return v, nil
+	end
+	return nil, path .. ' must be reply-required or sent-is-accepted'
 end
 
 local function topic_token_ok(v)
@@ -402,7 +416,7 @@ end
 
 local function compile_rpc_rule_item(raw, direction, path)
 	if type(raw) ~= 'table' then return nil, path .. ' must be a table' end
-	local ok, err = allowed(raw, RULE_KEYS, path)
+	local ok, err = allowed(raw, RPC_RULE_KEYS, path)
 	if not ok then return nil, err end
 	if raw.timeout ~= nil then return nil, path .. '.timeout is not supported; use timeout_s' end
 	if raw.topic ~= nil then return nil, path .. '.topic is not supported for rpc rules; use exact local/remote topics' end
@@ -413,12 +427,15 @@ local function compile_rpc_rule_item(raw, direction, path)
 	if e2 then return nil, e2 end
 	local timeout_s, e3 = opt_pos_number(raw.timeout_s, path .. '.timeout_s')
 	if e3 then return nil, e3 end
+	local reply_policy, e4 = rpc_reply_policy(raw.reply_policy, path .. '.reply_policy')
+	if e4 then return nil, e4 end
 
 	return {
 		id           = raw.id,
 		local_topic  = local_topic,
 		remote_topic = remote_topic,
 		timeout      = timeout_s,
+		reply_policy = reply_policy,
 		direction    = direction,
 	}, nil
 end
