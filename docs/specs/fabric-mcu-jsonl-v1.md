@@ -813,9 +813,9 @@ Initial MCU chunk size target:
 
 Lua may configure this, but the first MCU implementation should be safe with 2048-byte raw chunks.
 
-If the receiver detects a bad chunk before advancing the offset, it may either abort the transfer or ask again for the same offset. The simple V1 behaviour may be to abort.
+If the receiver detects a bad chunk before advancing the offset, it may either abort the transfer or ask again for the same offset. The CM5 implementation supports the optional same-offset retry for a digest-mismatched chunk by caching the latest sent chunk until the receiver acknowledges the next offset. This is still a stop-and-wait transfer: only the latest outstanding chunk is retryable, and there is no arbitrary seek, resume, or sliding window.
 
-Recommended simple failure:
+Recommended simple failure after retry budget is exhausted:
 
 ```json
 {

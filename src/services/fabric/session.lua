@@ -594,7 +594,7 @@ local function handle_non_session_frame(self, checked, lane, at)
 end
 
 local function handle_frame(self, ev)
-	local checked, err = protocol.validate(ev.frame)
+	local checked, err = protocol.validate_wire(ev.frame)
 	if not checked then error('session invalid frame: ' .. tostring(err), 0) end
 	local lane = protocol.dispatch_lane(checked)
 	if lane == 'session_control' then

@@ -306,6 +306,7 @@ local function attempt_caps(self, frame_rx, session)
 		session = ctx(c),
 		chunk_size = self._chunk_size,
 		timeout_s = self._timeout_s,
+		retry_limit = self._retry_limit,
 
 		send_control_frame_now = function (frame, label)
 			return outbound:send_transfer_control_frame_now(c, frame, label)
@@ -924,6 +925,7 @@ function M.run(scope, params)
 		_attempt_frame_queue_len = params.attempt_frame_queue_len or DEFAULT_ATTEMPT_FRAME_QUEUE,
 		_chunk_size = params.chunk_size,
 		_timeout_s = params.timeout_s,
+		_retry_limit = params.retry_limit,
 		_session = nil,
 		_event_pending = {},
 	}, Manager)

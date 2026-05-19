@@ -220,6 +220,41 @@ function tests.test_sender_sends_begin_chunks_commit_and_returns_after_done()
 	assert_eq(seen[4], 'xfer_commit')
 end
 
+function tests.test_sender_resends_cached_chunk_when_receiver_reasks_same_offset()
+	local req = make_req { data = 'abcdef', size = 6, xfer_id = 'xfer-retry' }
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-retry')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-retry', 0)))
+
+		local chunk1 = recv_with_timeout(io.bulk_rx, 'chunk1')
+		assert_eq(chunk1.frame.offset, 0)
+		assert_eq(chunk1.frame.data, 'abc')
+
+		-- Same offset means the receiver did not advance. The sender must
+		-- resend the cached frame without reading from the source again.
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-retry', 0)))
+		local retry1 = recv_with_timeout(io.bulk_rx, 'chunk1 retry')
+		assert_eq(retry1.frame.offset, 0)
+		assert_eq(retry1.frame.data, 'abc')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-retry', 3)))
+		local chunk2 = recv_with_timeout(io.bulk_rx, 'chunk2')
+		assert_eq(chunk2.frame.offset, 3)
+		assert_eq(chunk2.frame.data, 'def')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-retry', 6)))
+		local commit = recv_with_timeout(io.control_rx, 'commit')
+		assert_eq(commit.frame.type, 'xfer_commit')
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-retry')))
+	end)
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.sent_bytes, 6)
+	assert_eq(out.value.retransmits, 1)
+end
+
 function tests.test_sender_timeout_sends_abort_and_fails_attempt()
 	local req = make_req { data = 'abc', size = 3, xfer_id = 'xfer-timeout', timeout_s = 0.01 }
 

@@ -15,11 +15,20 @@ local xxhash32 = require 'shared.hash.xxhash32'
 local M = {}
 
 local DEFAULT_TIMEOUT = 1.0
+local DEFAULT_RETRY_LIMIT = 1
 
 local function positive(v, fallback, name)
 	v = v or fallback
 	if type(v) ~= 'number' or v <= 0 or v ~= v or v == math.huge or v == -math.huge then
 		error('transfer_receive: ' .. name .. ' must be positive', 0)
+	end
+	return v
+end
+
+local function nonneg_int(v, fallback, name)
+	if v == nil then v = fallback end
+	if type(v) ~= 'number' or v < 0 or v % 1 ~= 0 then
+		error('transfer_receive: ' .. name .. ' must be a non-negative integer', 0)
 	end
 	return v
 end
@@ -148,6 +157,7 @@ function M.run(scope, req, caps)
 	local target_id = begin.target
 	local size = begin.size
 	local timeout_s = positive(req.timeout_s or caps.timeout_s, DEFAULT_TIMEOUT, 'timeout_s')
+	local retry_limit = nonneg_int(req.retry_limit or caps.retry_limit, DEFAULT_RETRY_LIMIT, 'retry_limit')
 	local target = req.target
 	if type(target) ~= 'table' then
 		fail(caps, xfer_id, nil, 'unsupported_target', true)
@@ -179,6 +189,8 @@ function M.run(scope, req, caps)
 	local received = 0
 	local digest_state = xxhash32.new(0)
 	local deadline = fibers.now() + timeout_s
+	local retries_at_offset = 0
+	local chunk_retries = 0
 
 	while true do
 		local which, item = fibers.perform(wait_frame_op(rx, deadline))
@@ -198,19 +210,28 @@ function M.run(scope, req, caps)
 			if type(chunk) ~= 'string' then fail(caps, xfer_id, sink, 'invalid_chunk_data', true) end
 			if received + #chunk > size then fail(caps, xfer_id, sink, 'size_overrun', true) end
 			if not protocol.verify_chunk_digest(chunk, frame.chunk_digest) then
-				fail(caps, xfer_id, sink, 'chunk_digest_mismatch', true)
+				if retries_at_offset < retry_limit then
+					retries_at_offset = retries_at_offset + 1
+					chunk_retries = chunk_retries + 1
+					deadline = fibers.now() + timeout_s
+					send_control(caps, construct('xfer_need', protocol.xfer_need, xfer_id, received), 'transfer_receive_retry_need_send_failed')
+				else
+					fail(caps, xfer_id, sink, 'chunk_digest_mismatch', true)
+				end
+			else
+				local ok, werr = append_chunk(sink, chunk)
+				if ok ~= true then fail(caps, xfer_id, sink, werr or 'write_failed', true) end
+				xxhash32.update(digest_state, chunk)
+				received = received + #chunk
+				retries_at_offset = 0
+				deadline = fibers.now() + timeout_s
+				-- Acknowledge every accepted chunk, including the final one.  The
+				-- sender waits for xfer_need next == size before sending xfer_commit.
+				-- This keeps commit ordered after the receiver has actually processed
+				-- the last bulk frame, even when the writer uses separate control and
+				-- bulk lanes.
+				send_control(caps, construct('xfer_need', protocol.xfer_need, xfer_id, received), 'transfer_receive_need_send_failed')
 			end
-			local ok, werr = append_chunk(sink, chunk)
-			if ok ~= true then fail(caps, xfer_id, sink, werr or 'write_failed', true) end
-			xxhash32.update(digest_state, chunk)
-			received = received + #chunk
-			deadline = fibers.now() + timeout_s
-			-- Acknowledge every accepted chunk, including the final one.  The
-			-- sender waits for xfer_need next == size before sending xfer_commit.
-			-- This keeps commit ordered after the receiver has actually processed
-			-- the last bulk frame, even when the writer uses separate control and
-			-- bulk lanes.
-			send_control(caps, construct('xfer_need', protocol.xfer_need, xfer_id, received), 'transfer_receive_need_send_failed')
 
 		elseif frame.type == 'xfer_commit' then
 			if frame.size ~= size or frame.size ~= received then
@@ -243,6 +264,7 @@ function M.run(scope, req, caps)
 				received_bytes = received,
 				size = size,
 				commit_result = commit_result,
+				chunk_retries = chunk_retries,
 			}
 		end
 	end

@@ -102,6 +102,7 @@ local function start_manager(scope, opts)
 			state_tx = state_tx,
 			chunk_size = opts.chunk_size or 3,
 			timeout_s = opts.timeout_s or 0.05,
+			retry_limit = opts.retry_limit,
 			receive_targets = opts.receive_targets,
 		})
 		queue.try_admit_required(done_tx, result, 'transfer_done')
@@ -331,6 +332,78 @@ function tests.test_manager_receives_inbound_transfer_for_registered_target()
 		local result = recv_with_timeout(h.done_rx, 'manager done')
 		assert_eq(result.snapshot.last.status, 'ok')
 		assert_eq(result.snapshot.last.result.received_bytes, 6)
+	end)
+end
+
+function tests.test_manager_reasks_same_offset_after_bad_chunk_digest_and_accepts_retry()
+	fibers.run(function (scope)
+		local received = {}
+		local target = {}
+		function target:open_sink_op(req)
+			assert_eq(req.target, 'updater/main')
+			local sink = {}
+			function sink:append_op(chunk)
+				received[#received + 1] = chunk
+				return fibers.always(true, nil)
+			end
+			function sink:commit_op(_)
+				return fibers.always({ staged = true }, nil)
+			end
+			function sink:abort(_) return true, nil end
+			return fibers.always(sink, nil)
+		end
+
+		local h = start_manager(scope, {
+			chunk_size = 3,
+			retry_limit = 1,
+			receive_targets = { ['updater/main'] = target },
+		})
+		local c = ctx()
+		h.outbound:bind(c)
+		assert_true(h.session_tx:send(peer_session_event()))
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_begin(
+			'xfer-in-retry', 'updater/main', 3, protocol.DIGEST_ALG, protocol.digest_hex('abc'), nil
+		)))))
+
+		assert_eq(recv_with_timeout(h.control_rx, 'ready').frame.type, 'xfer_ready')
+		local need0 = recv_with_timeout(h.control_rx, 'need 0').frame
+		assert_eq(need0.type, 'xfer_need')
+		assert_eq(need0.next, 0)
+
+		-- A bad digest for the expected offset should not advance the sink.
+		assert_true(h.session_tx:send(transfer_frame_event({
+			type = 'xfer_chunk',
+			xfer_id = 'xfer-in-retry',
+			offset = 0,
+			data = 'abc',
+			chunk_digest = '00000000',
+		})))
+		local retry_need = recv_with_timeout(h.control_rx, 'retry need 0').frame
+		assert_eq(retry_need.type, 'xfer_need')
+		assert_eq(retry_need.next, 0)
+		assert_eq(#received, 0)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_chunk(
+			'xfer-in-retry', 0, 'abc', protocol.chunk_digest('abc')
+		)))))
+		local need3 = recv_with_timeout(h.control_rx, 'need 3').frame
+		assert_eq(need3.type, 'xfer_need')
+		assert_eq(need3.next, 3)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_commit(
+			'xfer-in-retry', 3, protocol.DIGEST_ALG, protocol.digest_hex('abc')
+		)))))
+		local done = recv_with_timeout(h.control_rx, 'done').frame
+		assert_eq(done.type, 'xfer_done')
+		assert_eq(table.concat(received), 'abc')
+
+		local completed = wait_transfer_last_status(h, 'ok', 'inbound retry')
+		assert_eq(completed.last.result.chunk_retries, 1)
+
+		h.admission_tx:close('done')
+		h.session_tx:close('done')
+		recv_with_timeout(h.done_rx, 'manager done')
 	end)
 end
 
