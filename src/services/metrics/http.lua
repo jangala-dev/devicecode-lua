@@ -18,13 +18,13 @@
 --     http_ref: an http SDK ref obtained via http_sdk.new_ref(conn, id)
 --     log_fn(level, payload) is an optional logger; defaults to log.debug/info.
 
-local fibers      = require 'fibers'
-local op          = require 'fibers.op'
-local sleep       = require 'fibers.sleep'
-local channel     = require 'fibers.channel'
-local blob_source = require 'devicecode.blob_source'
+local fibers       = require 'fibers'
+local op           = require 'fibers.op'
+local sleep        = require 'fibers.sleep'
+local channel      = require 'fibers.channel'
+local blob_source  = require 'devicecode.blob_source'
 
-local QUEUE_SIZE = 10
+local QUEUE_SIZE   = 10
 local HTTP_TIMEOUT = 60
 
 --- Send a single HTTP payload to the cloud via the HTTP capability service,
@@ -43,18 +43,24 @@ local function send_http(http_ref, data, log_fn)
 	local reply
 
 	while not reply do
-		local result, err = fibers.perform(http_ref:exchange_op({
-			method  = 'POST',
-			uri     = uri,
-			headers = {
-				authorization    = auth,
-				['content-type'] = 'application/senml+json',
-			},
-			body_source = blob_source.from_string(body),
-		}, { timeout = HTTP_TIMEOUT }))
+		log_fn('trace', { what = 'http_publish_attempt', status = 'started' })
+		local which, result, err = fibers.perform(op.named_choice({
+			response = http_ref:exchange_op({
+				method      = 'POST',
+				uri         = uri,
+				headers     = {
+					authorization    = auth,
+					['content-type'] = 'application/senml+json',
+				},
+				body_source = blob_source.from_string(body),
+			}),
+			timeout  = sleep.sleep_op(HTTP_TIMEOUT),
+		}))
+		log_fn('trace', { what = 'http_publish_attempt', status = which })
 
-		if not result then
-			log_fn('debug', { what = 'http_retry', retry_in_s = sleep_duration, err = tostring(err) })
+		if which == 'timeout' or not result then
+			local err_msg = which == 'timeout' and 'timeout' or tostring(err)
+			log_fn('debug', { what = 'http_retry', retry_in_s = sleep_duration, err = err_msg })
 			sleep.sleep(sleep_duration)
 			sleep_duration = math.min(sleep_duration * 2, 60)
 		else
