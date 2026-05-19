@@ -5,6 +5,12 @@
 -- The helper owns only the local retained subscription and event-shaping
 -- mechanics.  Service modules still own validation, normalisation, generation
 -- policy and effects.
+--
+-- lua-bus Subscription creation replays matching retained messages before live
+-- publications.  That replay is the service bootstrap mechanism: a service that
+-- starts after cfg/<service> was retained must still see the current config as
+-- its first config_changed event.  Do not replace this in service shells with a
+-- retained-view plus subscription pair; that would reintroduce ordering races.
 
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 
@@ -64,6 +70,8 @@ function M.open(conn, service, opts)
 	end
 
 	local topic = opts.topic or cfg_topic(service)
+	-- conn:subscribe() replays retained cfg messages.  Keep this as the single
+	-- bootstrap path used by modern service shells.
 	local sub, err = bus_cleanup.subscribe(conn, topic, {
 		queue_len = opts.queue_len or opts.config_queue_len or 4,
 		full = opts.full or 'reject_newest',
