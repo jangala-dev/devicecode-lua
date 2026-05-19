@@ -25,6 +25,18 @@ local function copy_headers(h)
 	return out, nil
 end
 
+local function bool_or_nil(v)
+	if v == nil then return nil, nil end
+	if type(v) ~= 'boolean' then return nil, 'invalid_args' end
+	return v, nil
+end
+
+local function non_negative_number_or_nil(v)
+	if v == nil then return nil, nil end
+	if type(v) ~= 'number' or v < 0 then return nil, 'invalid_args' end
+	return v, nil
+end
+
 local function reject_backend_payload_fields(args)
 	local forbidden = {
 		server = true, server_options = true, http_server = true, request_module = true,
@@ -126,7 +138,10 @@ end
 function M.validate_exchange_args(args, opts)
 	opts = opts or {}
 	if type(args) ~= 'table' then return nil, 'invalid_args' end
-	local ok, ferr = require_only_fields(args, { uri = true, method = true, headers = true, body_source = true, response_sink = true })
+	local ok, ferr = require_only_fields(args, {
+		uri = true, method = true, headers = true, body_source = true, response_sink = true,
+		expect_100_continue = true, expect_100_timeout = true,
+	})
 	if not ok then return nil, ferr end
 	local uri, uerr = M.validate_uri(args.uri, opts)
 	if not uri then return nil, uerr end
@@ -136,6 +151,12 @@ function M.validate_exchange_args(args, opts)
 	if not method then return nil, merr end
 	local headers, herr = copy_headers(args.headers)
 	if herr then return nil, herr end
+
+	local expect_100_continue, eerr = bool_or_nil(args.expect_100_continue)
+	if eerr then return nil, eerr end
+
+	local expect_100_timeout, terr = non_negative_number_or_nil(args.expect_100_timeout)
+	if terr then return nil, terr end
 
 	local bodies, derr = body.validate_exchange_bodies(args)
 	if not bodies then return nil, derr end
@@ -147,6 +168,8 @@ function M.validate_exchange_args(args, opts)
 		_uri = uri,
 		body_source = bodies.source,
 		response_sink = bodies.sink,
+		expect_100_continue = expect_100_continue,
+		expect_100_timeout = expect_100_timeout,
 	}, nil
 end
 
