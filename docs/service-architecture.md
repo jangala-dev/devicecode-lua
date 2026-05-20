@@ -798,6 +798,48 @@ models do not publish unless explicitly designed as publishers
 
 Expensive projection belongs in scoped work, not in model update logic.
 
+## Capability dependencies
+
+Capability availability is coordinator input, not service start-up ordering.
+
+Modern service shells may start concurrently, bind safe public endpoints and open
+configuration watches before their dependencies are ready.  Dependent blocking
+work must be admitted only after the coordinator has observed the required
+capabilities as effectively available.
+
+Use `devicecode.support.capability_dependencies` for repeated capability waits.
+The helper owns status subscriptions, status normalisation, effective
+availability, route-missing inference and copied snapshots.  It does not start
+work, retry work, degrade services or make policy decisions.
+
+A service coordinator should use it like this:
+
+```lua
+local deps = assert(cap_deps.open(conn, {
+  { key = 'job_store', class = 'control-store', id = 'update', required = true },
+}))
+
+-- In the coordinator event set:
+-- deps:recv_op('job_store') or deps:event_sources()
+
+if state.pending_start and deps:available('job_store') then
+  start_job_runtime(state, 'job_store_available')
+end
+```
+
+If a capability call returns `no_route`, do not convert that directly into a
+backend failure.  Record route-missing on the dependency and let the coordinator
+return the affected work to a pending or waiting state.  A later retained
+`available` status clears route-missing and wakes the coordinator.
+
+The intended split is:
+
+```text
+capability dependency helper = facts and wakeups
+service coordinator           = policy and admission
+worker/request scope           = blocking capability calls
+```
+
 ## Publication
 
 Publication should be an immediate effect over already-computed state.
