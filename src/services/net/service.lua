@@ -19,7 +19,7 @@ local generation_mod = require 'services.net.generation'
 local apply_runtime = require 'services.net.apply_runtime'
 local stale = require 'services.net.stale'
 local hal_client_mod = require 'services.net.hal_client'
-local cap_resolver_mod = require 'services.net.capability_resolver'
+local cap_deps_mod = require 'devicecode.support.capability_dependencies'
 local observer_manager = require 'services.net.observer_manager'
 local wan_manager = require 'services.net.wan_manager'
 local drift = require 'services.net.drift'
@@ -86,21 +86,43 @@ local function set_model_state(state, service_state, reason)
 	return publish_snapshot(state)
 end
 
+local function status_available(status)
+	return cap_deps_mod.status_available(status)
+end
+
 local function hal_status_value(state, key)
-	if state.cap_resolver and state.cap_resolver.status then
-		return state.cap_resolver.status[key] or 'configured'
+	if state.cap_deps and type(state.cap_deps.status) == 'function' then
+		return state.cap_deps:status(key)
 	end
-	if key == 'network_config' and state.hal and type(state.hal.available) == 'function' then
-		return state.hal:available() and 'available' or 'not_configured'
+	if key == 'network_config' and state.hal then
+		if type(state.hal.available) == 'function' then
+			return state.hal:available() and 'available' or 'not_configured'
+		end
+		if type(state.hal.apply_intent_op) == 'function' then
+			return 'available'
+		end
 	end
-	if key == 'network_state' and state.hal and type(state.hal.observation_available) == 'function' then
-		return state.hal:observation_available() and 'available' or 'not_configured'
+	if key == 'network_state' and state.hal then
+		if type(state.hal.observation_available) == 'function' then
+			return state.hal:observation_available() and 'available' or 'not_configured'
+		end
+		if type(state.hal.open_observed_subscription) == 'function' and type(state.hal.start_observation_op) == 'function' then
+			return 'available'
+		end
 	end
 	if key == 'network_diagnostics' and state.hal and type(state.hal.speedtest_op) == 'function' then
 		return 'configured'
 	end
 	return 'not_configured'
 end
+
+local function dependency_effectively_available(state, key)
+	if state.cap_deps and type(state.cap_deps.available) == 'function' then
+		return state.cap_deps:available(key)
+	end
+	return status_available(hal_status_value(state, key))
+end
+
 
 local function update_hal_statuses(state)
 	state.model:update(function (s)
@@ -132,6 +154,67 @@ local function cancel_active_generation(state, reason)
 	generation_mod.cancel(active, reason or 'generation_replaced')
 	state.current_generation = nil
 	state.active_apply = nil
+	state.pending_intent = nil
+	state.pending_apply_reason = nil
+	return true, nil
+end
+
+local function copy_intent_to_model(s, intent)
+	local generation = intent.generation
+	s.generation = generation
+	s.config = { rev = intent.rev, schema = intent.schema, config_schema = intent.config_schema, version = intent.version }
+	s.intent = s.intent or {}
+	s.intent.generation = generation
+	s.segments = intent.segments or {}
+	s.vlan_policy = intent.vlan_policy or {}
+	s.policies = intent.policies or {}
+	s.interfaces = intent.interfaces or {}
+	s.addressing = intent.addressing or {}
+	s.dns = intent.dns or {}
+	s.dhcp = intent.dhcp or {}
+	s.firewall = intent.firewall or {}
+	s.routing = intent.routing or {}
+	s.wan = intent.wan or {}
+	s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
+	s.shaping = intent.shaping or {}
+	s.vpn = intent.vpn or {}
+	s.diagnostics = intent.diagnostics or {}
+	return s
+end
+
+local function accept_pending_intent(state, intent, reason)
+	reason = reason or 'network_config_unavailable'
+	local gen = generation_mod.new(intent.generation, intent, reason, { now = now() })
+	gen.state = 'waiting_for_hal'
+	gen.reason = reason
+	gen.apply = { state = 'waiting_for_hal', reason = reason }
+
+	state.current_generation = gen
+	state.active_apply = nil
+	state.pending_intent = intent
+	state.pending_apply_reason = reason
+
+	state.model:update(function (s)
+		copy_intent_to_model(s, intent)
+		s.state = 'waiting_for_hal'
+		s.ready = false
+		s.reason = reason
+		s.intent = s.intent or {}
+		s.intent.active = generation_mod.snapshot(gen)
+		s.apply = {
+			state = 'waiting_for_hal',
+			generation = intent.generation,
+			apply_id = nil,
+			started_at = nil,
+			last_applied_rev = s.apply and s.apply.last_applied_rev or nil,
+			last_error = reason,
+			last_result = nil,
+		}
+		s.hal.network_config = hal_status_value(state, 'network_config')
+		s.stats.config_updates = (s.stats.config_updates or 0) + 1
+		return s
+	end)
+	mark_all_dirty(state)
 	return true, nil
 end
 
@@ -140,34 +223,23 @@ local function start_apply_for_intent(state, intent, reason)
 	local apply_id = state.next_apply_id
 	state.next_apply_id = apply_id + 1
 
-	local gen = generation_mod.new(generation, intent, reason, { now = now() })
+	local gen = state.current_generation
+	if not gen or gen.generation ~= generation then
+		gen = generation_mod.new(generation, intent, reason, { now = now() })
+	end
 	generation_mod.start_apply(gen, apply_id, { now = now() })
 	state.current_generation = gen
 	state.active_apply = { generation = generation, apply_id = apply_id, rev = intent.rev }
+	state.pending_intent = nil
+	state.pending_apply_reason = nil
 
 	state.model:update(function (s)
+		copy_intent_to_model(s, intent)
 		s.state = 'applying'
 		s.ready = false
 		s.reason = nil
-		s.generation = generation
-		s.config = { rev = intent.rev, schema = intent.schema, config_schema = intent.config_schema, version = intent.version }
 		s.intent = s.intent or {}
 		s.intent.active = generation_mod.snapshot(gen)
-		s.intent.generation = generation
-		s.segments = intent.segments or {}
-		s.vlan_policy = intent.vlan_policy or {}
-		s.policies = intent.policies or {}
-		s.interfaces = intent.interfaces or {}
-		s.addressing = intent.addressing or {}
-		s.dns = intent.dns or {}
-		s.dhcp = intent.dhcp or {}
-		s.firewall = intent.firewall or {}
-		s.routing = intent.routing or {}
-		s.wan = intent.wan or {}
-		s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
-		s.shaping = intent.shaping or {}
-		s.vpn = intent.vpn or {}
-		s.diagnostics = intent.diagnostics or {}
 		s.apply = {
 			state = 'running',
 			generation = generation,
@@ -178,7 +250,6 @@ local function start_apply_for_intent(state, intent, reason)
 			last_result = nil,
 		}
 		s.hal.network_config = hal_status_value(state, 'network_config')
-		s.stats.config_updates = (s.stats.config_updates or 0) + 1
 		s.stats.apply_started = (s.stats.apply_started or 0) + 1
 		return s
 	end)
@@ -214,6 +285,18 @@ local function start_apply_for_intent(state, intent, reason)
 	return true, nil
 end
 
+local function reconcile_apply_admission(state, reason)
+	if state.active_apply ~= nil then return true, nil end
+	local intent = state.pending_intent
+	if not intent then return true, nil end
+	if not dependency_effectively_available(state, 'network_config') then
+		local wait_reason = state.pending_apply_reason or 'network_config_unavailable'
+		set_status(state.svc, 'waiting_for_hal', { reason = wait_reason })
+		return publish_snapshot(state)
+	end
+	return start_apply_for_intent(state, intent, reason or state.pending_apply_reason or 'network_config_available')
+end
+
 local function handle_config_changed(state, ev)
 	local intent, err = normalise_config_event(state, ev)
 	if not intent then
@@ -239,7 +322,10 @@ local function handle_config_changed(state, ev)
 		interfaces = intent.stats and intent.stats.interfaces or nil,
 	})
 
-	local ok, apply_err = start_apply_for_intent(state, intent, 'config_changed')
+	local ok, apply_err = accept_pending_intent(state, intent, 'network_config_unavailable')
+	if ok ~= true then return nil, apply_err end
+
+	ok, apply_err = reconcile_apply_admission(state, 'config_changed')
 	if ok ~= true then
 		state.model:update(function (s)
 			s.state = 'degraded'
@@ -254,6 +340,52 @@ local function handle_config_changed(state, ev)
 	return true, nil
 end
 
+local function classify_network_config_apply_failure(state, result)
+	local failure = result and result.result or result
+	if state.cap_deps and type(state.cap_deps.classify_call_failure) == 'function' then
+		return state.cap_deps:classify_call_failure('network_config', failure)
+	end
+	return cap_deps_mod.classify_call_failure(failure)
+end
+
+local function return_apply_to_pending(state, result, reason)
+	reason = reason or 'network_config_unavailable'
+	local gen = state.current_generation
+	local intent = gen and gen.intent or nil
+	state.active_apply = nil
+	if not intent then return set_model_state(state, 'waiting_for_hal', reason) end
+
+	gen.state = 'waiting_for_hal'
+	gen.reason = reason
+	gen.apply = gen.apply or {}
+	gen.apply.state = 'waiting_for_hal'
+	gen.apply.reason = reason
+	gen.apply.result = result
+
+	state.pending_intent = intent
+	state.pending_apply_reason = reason
+
+	state.model:update(function (s)
+		s.state = 'waiting_for_hal'
+		s.ready = false
+		s.reason = reason
+		s.intent = s.intent or {}
+		s.intent.active = generation_mod.snapshot(gen)
+		s.apply = s.apply or {}
+		s.apply.state = 'waiting_for_hal'
+		s.apply.completed_at = now()
+		s.apply.last_result = result and result.result or result
+		s.apply.last_error = reason
+		s.hal.network_config = hal_status_value(state, 'network_config')
+		s.stats.apply_completed = (s.stats.apply_completed or 0) + 1
+		return s
+	end)
+	mark_apply_dirty(state)
+	set_status(state.svc, 'waiting_for_hal', { reason = reason })
+	obs_event(state.svc, 'apply_deferred', { generation = gen.generation, reason = reason })
+	return publish_snapshot(state)
+end
+
 local function handle_apply_done(state, ev)
 	if not stale.apply_current(state, ev) then
 		stale.reject(state, ev)
@@ -265,6 +397,13 @@ local function handle_apply_done(state, ev)
 	local apply_ok = ev.status == 'ok' and result.ok == true
 	local reason = nil
 	if not apply_ok then reason = ev.primary or (result.result and result.result.err) or 'apply_failed' end
+
+	if not apply_ok then
+		local failure_class = classify_network_config_apply_failure(state, result)
+		if failure_class == 'route_missing' then
+			return return_apply_to_pending(state, result, 'network_config_unavailable')
+		end
+	end
 
 	state.active_apply = nil
 	if state.current_generation then
@@ -378,6 +517,13 @@ local function stop_observer(state, reason)
 	return true, nil
 end
 
+local function reconcile_observer_admission(state, reason)
+	if dependency_effectively_available(state, 'network_state') then
+		return ensure_observer_started(state, reason or 'network_state_available')
+	end
+	return stop_observer(state, reason or ('network_state_' .. tostring(hal_status_value(state, 'network_state'))))
+end
+
 local function handle_observation_started(state, ev)
 	local work = ev.result or {}
 	local result = work.result or work
@@ -393,19 +539,30 @@ local function handle_observation_started(state, ev)
 	return publish_snapshot(state)
 end
 
-local function handle_capability_status(state, ev)
-	if not state.cap_resolver then return true, nil end
-	local status = state.cap_resolver:record_status(ev.capability, ev.payload)
+local function handle_dependency_status(state, ev)
+	local key = ev.key or ev.capability
+	local status = ev.status
+	local payload = ev.payload
+	if state.cap_deps and key then
+		status = state.cap_deps:status(key)
+		local dep = state.cap_deps:dependency(key)
+		payload = dep and dep.payload or payload
+	end
 	state.model:update(function (m)
 		m.hal = m.hal or {}
-		m.hal[ev.capability] = status
-		m.hal.last_status[ev.capability] = { status = status, payload = model_mod.deep_copy(ev.payload), updated_at = now() }
+		m.hal[key] = status
+		m.hal.last_status[key] = { status = status, payload = model_mod.deep_copy(payload), updated_at = now() }
 		return m
 	end)
 	mark_summary_dirty(state)
-	if ev.capability == 'network_state' then
-		if status == 'available' or status == 'running' then ensure_observer_started(state, 'capability_available')
-		else stop_observer(state, 'network_state_' .. tostring(status)) end
+	if key == 'network_state' then
+		local ok, err = reconcile_observer_admission(state, 'network_state_' .. tostring(status))
+		if ok ~= true then return nil, err end
+	elseif key == 'network_config' then
+		if dependency_effectively_available(state, 'network_config') then
+			local ok, err = reconcile_apply_admission(state, 'network_config_available')
+			if ok ~= true then return nil, err end
+		end
 	end
 	return publish_snapshot(state)
 end
@@ -441,10 +598,10 @@ local function handle_event(state, ev)
 		return handle_live_weights_done(state, ev)
 	elseif ev.kind == 'net_observation_started' then
 		return handle_observation_started(state, ev)
-	elseif ev.kind == 'capability_status' then
-		return handle_capability_status(state, ev)
-	elseif ev.kind == 'capability_status_closed' then
-		if state.capability_status_subs then state.capability_status_subs[ev.capability] = nil end
+	elseif ev.kind == 'capability_status' or ev.kind == 'capability_dependency_changed' then
+		return handle_dependency_status(state, ev)
+	elseif ev.kind == 'capability_status_closed' or ev.kind == 'capability_dependency_closed' then
+		if state.capability_status_subs then state.capability_status_subs[ev.capability or ev.key] = nil end
 		return true, nil
 	elseif ev.kind == 'observation_closed' then
 		state.observed_sub = nil
@@ -489,11 +646,19 @@ function M.run(scope, params)
 		if not cfg_watch then error(werr or 'net config watch failed', 2) end
 	end
 
-	local cap_resolver
+	local cap_deps
 	local hal = params.hal
 	if not hal then
-		cap_resolver = assert(cap_resolver_mod.open(conn, params.hal_client or {}))
-		hal = hal_client_mod.new(conn, cap_resolver:client_opts(params.hal_client or {}))
+		cap_deps = assert(cap_deps_mod.open(conn, {
+			{ key = 'network_config', class = 'network-config', ref = params.hal_client and params.hal_client.network_config_cap, required = true },
+			{ key = 'network_state', class = 'network-state', ref = params.hal_client and params.hal_client.network_state_cap, required = false },
+			{ key = 'network_diagnostics', class = 'network-diagnostics', ref = params.hal_client and params.hal_client.network_diagnostics_cap, required = false },
+		}, params.hal_client or {}))
+		hal = hal_client_mod.new(conn, {
+			network_config_cap = cap_deps:ref('network_config'),
+			network_state_cap = cap_deps:ref('network_state'),
+			network_diagnostics_cap = cap_deps:ref('network_diagnostics'),
+		})
 	end
 
 	local state = {
@@ -515,8 +680,8 @@ function M.run(scope, params)
 		done_rx = done_rx,
 		pending = {},
 		hal = hal,
-		cap_resolver = cap_resolver,
-		capability_status_subs = cap_resolver and cap_resolver.status_subs or nil,
+		cap_deps = cap_deps,
+		capability_status_subs = nil,
 		next_generation = 1,
 		next_apply_id = 1,
 		next_speedtest_id = 1,
@@ -525,6 +690,8 @@ function M.run(scope, params)
 		active_weight_apply = nil,
 		current_generation = nil,
 		active_apply = nil,
+		pending_intent = nil,
+		pending_apply_reason = nil,
 		now = now,
 	}
 	state.mark_dirty = function(kind, name)
@@ -539,7 +706,7 @@ function M.run(scope, params)
 		cancel_active_generation(state, reason)
 		stop_observer(state, reason)
 		if cfg_watch then cfg_watch:close(); cfg_watch = nil end
-		if cap_resolver then cap_resolver:close(); cap_resolver = nil end
+		if cap_deps then cap_deps:close(reason); cap_deps = nil end
 		done_tx:close(reason)
 		publisher.cleanup_now(conn, published)
 		model:terminate(reason)
@@ -553,7 +720,7 @@ function M.run(scope, params)
 
 	update_hal_statuses(state)
 	set_model_state(state, 'waiting_for_config', 'no_config')
-	if state.observe ~= false then ensure_observer_started(state, 'service_start') end
+	reconcile_observer_admission(state, 'service_start')
 	publish_snapshot(state)
 
 	if params.config ~= nil then

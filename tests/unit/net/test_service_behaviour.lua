@@ -1,6 +1,7 @@
 -- tests/unit/net/test_service_behaviour.lua
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local op = require 'fibers.op'
 local busmod = require 'bus'
 
@@ -44,6 +45,83 @@ local function success_hal(calls)
 			})
 		end,
 	}
+end
+
+
+local function network_config_status_topic()
+	return { 'cap', 'network-config', 'main', 'status' }
+end
+
+local function network_config_apply_topic()
+	return { 'cap', 'network-config', 'main', 'rpc', 'apply' }
+end
+
+local function network_state_status_topic()
+	return { 'cap', 'network-state', 'main', 'status' }
+end
+
+local function network_state_watch_topic()
+	return { 'cap', 'network-state', 'main', 'rpc', 'watch' }
+end
+
+local function retain_network_config_status_payload(conn, payload)
+	return conn:retain(network_config_status_topic(), payload)
+end
+
+local function retain_network_state_status_payload(conn, payload)
+	return conn:retain(network_state_status_topic(), payload)
+end
+
+local function retain_network_config_status(conn, status)
+	return conn:retain(network_config_status_topic(), {
+		schema = 'devicecode.cap.status/1',
+		state = status,
+		available = status == 'available' or status == 'running',
+	})
+end
+
+local function bind_network_config_apply(scope, conn, calls, reply_fn)
+	local ep = assert(conn:bind(network_config_apply_topic(), { queue_len = 8 }))
+	local spawned, err = scope:spawn(function ()
+		while true do
+			local req = fibers.perform(ep:recv_op())
+			if not req then return end
+			local payload = req.payload or {}
+			calls[#calls + 1] = payload
+			local reply = reply_fn and reply_fn(req, payload) or {
+				ok = true,
+				reason = {
+					ok = true,
+					applied = true,
+					changed = true,
+					backend = 'test-cap',
+					intent_rev = payload.intent and payload.intent.rev,
+				},
+			}
+			req:reply(reply)
+		end
+	end)
+	ok(spawned, err)
+	return ep
+end
+
+local function bind_network_state_watch(scope, conn, calls, reply_fn)
+	local ep = assert(conn:bind(network_state_watch_topic(), { queue_len = 8 }))
+	local spawned, err = scope:spawn(function ()
+		while true do
+			local req = fibers.perform(ep:recv_op())
+			if not req then return end
+			local payload = req.payload or {}
+			calls[#calls + 1] = payload
+			local reply = reply_fn and reply_fn(req, payload) or {
+				ok = true,
+				reason = { ok = true, watching = true, backend = 'test-cap' },
+			}
+			req:reply(reply)
+		end
+	end)
+	ok(spawned, err)
+	return ep
 end
 
 local function start_service(scope, conn, params)
@@ -101,7 +179,7 @@ function tests.test_initial_config_starts_apply_and_publishes_running_state()
 	end)
 end
 
-function tests.test_missing_hal_marks_apply_failed_not_running()
+function tests.test_config_waits_for_network_config_capability()
 	fibers.run(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
@@ -111,22 +189,25 @@ function tests.test_missing_hal_marks_apply_failed_not_running()
 			conn = conn,
 			config = cfg(),
 			rev = 18,
+			observe = false,
 		})
 
 		local view = reader:retained_view(topics.summary())
-		local summary = probe.wait_versioned_until('net degraded summary',
+		local summary = probe.wait_versioned_until('net waiting for network-config capability',
 			function () return view:version() end,
 			function (seen) return view:changed_op(seen) end,
 			function ()
 				local msg = view:get(topics.summary())
-				return msg and msg.payload and msg.payload.state == 'degraded' and msg.payload or nil
+				local payload = msg and msg.payload
+				return payload and payload.state == 'waiting_for_hal' and payload or nil
 			end,
 			{ timeout = 0.5 })
 		eq(summary.service, 'net')
-		eq(summary.state, 'degraded')
+		eq(summary.state, 'waiting_for_hal')
 		eq(summary.ready, false)
-		eq(summary.apply.state, 'failed')
-		contains(summary.reason, 'network HAL call failed')
+		eq(summary.reason, 'network_config_unavailable')
+		eq(summary.apply.state, 'waiting_for_hal')
+		eq(summary.stats.apply_started, 0)
 		view:close()
 
 		child:cancel('test complete')
@@ -134,6 +215,305 @@ function tests.test_missing_hal_marks_apply_failed_not_running()
 	end)
 end
 
+function tests.test_network_config_available_false_does_not_start_apply()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+
+		local apply_ep = bind_network_config_apply(scope, conn, calls)
+		retain_network_config_status_payload(conn, {
+			schema = 'devicecode.cap.status/1',
+			state = 'available',
+			available = false,
+		})
+
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = cfg(),
+			rev = 24,
+			observe = false,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		local summary = probe.wait_versioned_until('net does not apply when network-config is not effectively available',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				return payload and payload.state == 'waiting_for_hal'
+					and payload.stats.apply_started == 0
+					and payload or nil
+			end,
+			{ timeout = 0.5 })
+		eq(summary.reason, 'network_config_unavailable')
+		eq(#calls, 0)
+		fibers.perform(sleep.sleep_op(0.05))
+		eq(#calls, 0)
+		view:close()
+
+		apply_ep:close()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+function tests.test_network_state_running_available_false_does_not_start_observer()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+
+		local watch_ep = bind_network_state_watch(scope, conn, calls)
+		retain_network_state_status_payload(conn, {
+			schema = 'devicecode.cap.status/1',
+			state = 'running',
+			available = false,
+		})
+
+		local child = start_service(scope, conn, {
+			conn = conn,
+			observe = true,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		local summary = probe.wait_versioned_until('net records network-state status without starting observer',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				local last = payload and payload.hal and payload.hal.last_status and payload.hal.last_status.network_state
+				return last and last.status == 'running' and payload or nil
+			end,
+			{ timeout = 0.5 })
+		eq(summary.hal.network_state, 'running')
+		eq(#calls, 0)
+		fibers.perform(sleep.sleep_op(0.05))
+		eq(#calls, 0)
+		view:close()
+
+		watch_ep:close()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+function tests.test_network_config_available_starts_pending_apply()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = cfg(),
+			rev = 21,
+			observe = false,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		probe.wait_versioned_until('net pending apply before capability is available',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				return payload and payload.state == 'waiting_for_hal' and payload or nil
+			end,
+			{ timeout = 0.5 })
+
+		local apply_ep = bind_network_config_apply(scope, conn, calls)
+		retain_network_config_status(conn, 'available')
+
+		local summary = probe.wait_versioned_until('net apply after network-config becomes available',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				return payload and payload.state == 'running' and payload.apply.state == 'applied' and payload or nil
+			end,
+			{ timeout = 0.5 })
+		eq(#calls, 1)
+		eq(calls[1].intent.rev, 21)
+		eq(calls[1].opts.generation, 1)
+		eq(calls[1].opts.apply_id, 1)
+		eq(summary.apply.last_applied_rev, 21)
+		eq(summary.hal.network_config, 'available')
+		view:close()
+
+		apply_ep:close()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+function tests.test_newer_pending_config_wins_when_capability_arrives()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local writer = b:connect()
+		local reader = b:connect()
+		local calls = {}
+
+		local child = start_service(scope, conn, { conn = conn, observe = false })
+		local view = reader:retained_view(topics.summary())
+		probe.wait_versioned_until('net ready to receive config',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				return payload and payload.state == 'waiting_for_config' and payload or nil
+			end,
+			{ timeout = 0.5 })
+
+		writer:retain(topics.config(), { rev = 31, data = cfg() })
+		local c2 = cfg()
+		c2.segments.lan.vlan = 20
+		writer:retain(topics.config(), { rev = 32, data = c2 })
+
+		probe.wait_versioned_until('net records newest pending config before capability is available',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				return payload and payload.state == 'waiting_for_hal'
+					and payload.config and payload.config.rev == 32
+					and payload.stats.apply_started == 0
+					and payload or nil
+			end,
+			{ timeout = 0.5 })
+
+		local apply_ep = bind_network_config_apply(scope, conn, calls)
+		retain_network_config_status(conn, 'available')
+
+		local summary = probe.wait_versioned_until('net applies newest pending config',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				return payload and payload.state == 'running' and payload.apply.state == 'applied' and payload or nil
+			end,
+			{ timeout = 0.5 })
+		eq(#calls, 1)
+		eq(calls[1].intent.rev, 32)
+		eq(calls[1].opts.generation, 2)
+		eq(summary.generation, 2)
+		eq(summary.apply.last_applied_rev, 32)
+		view:close()
+
+		apply_ep:close()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+function tests.test_no_route_apply_returns_to_pending_not_degraded()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+
+		retain_network_config_status(conn, 'available')
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = cfg(),
+			rev = 22,
+			observe = false,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		local pending = probe.wait_versioned_until('net returns no_route apply to pending',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				return payload and payload.state == 'waiting_for_hal'
+					and payload.apply.state == 'waiting_for_hal'
+					and payload.stats.apply_started == 1
+					and payload or nil
+			end,
+			{ timeout = 0.5 })
+		eq(pending.ready, false)
+		eq(pending.reason, 'network_config_unavailable')
+
+		local apply_ep = bind_network_config_apply(scope, conn, calls)
+		retain_network_config_status(conn, 'available')
+
+		local summary = probe.wait_versioned_until('net retries pending apply after route returns',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				return payload and payload.state == 'running' and payload.apply.state == 'applied' and payload or nil
+			end,
+			{ timeout = 0.5 })
+		eq(#calls, 1)
+		eq(calls[1].intent.rev, 22)
+		eq(summary.apply.last_applied_rev, 22)
+		view:close()
+
+		apply_ep:close()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+function tests.test_network_config_backend_failure_still_degrades()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+
+		local apply_ep = bind_network_config_apply(scope, conn, calls, function ()
+			return {
+				ok = false,
+				code = 500,
+				reason = { code = 'backend_failed', err = 'nft apply failed' },
+			}
+		end)
+		retain_network_config_status(conn, 'available')
+
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = cfg(),
+			rev = 23,
+			observe = false,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		local summary = probe.wait_versioned_until('net degrades on real network-config failure',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				local payload = msg and msg.payload
+				return payload and payload.state == 'degraded' and payload or nil
+			end,
+			{ timeout = 0.5 })
+		eq(summary.ready, false)
+		eq(summary.apply.state, 'failed')
+		contains(summary.reason, 'nft apply failed')
+		eq(#calls, 1)
+		view:close()
+
+		apply_ep:close()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
 
 function tests.test_observed_state_updates_model_and_drift()
 	fibers.run(function (scope)

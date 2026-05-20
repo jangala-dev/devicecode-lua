@@ -65,7 +65,12 @@ local function normalise_status_payload(payload)
 			status = 'unavailable'
 		end
 
-		local available = payload.available == true or status_available(status)
+		local available
+		if payload.available ~= nil then
+			available = payload.available == true
+		else
+			available = status_available(status)
+		end
 		return status, available
 	end
 
@@ -100,9 +105,13 @@ local function ref_for(conn, spec)
 end
 
 local function subscribe_for(conn, dep, opts)
-	if conn == nil or dep.ref == nil or dep.watch_status == false then return nil, nil end
+	if dep.watch_status == false then return nil, nil end
 
-	if type(dep.ref.get_status_sub) == 'function' then
+	-- A supplied capability ref may be a test double or a non-bus-backed ref.
+	-- Prefer its own status subscription hook even when there is no bus
+	-- connection.  A bus connection is needed only for the fallback topic
+	-- subscription path below.
+	if dep.ref ~= nil and type(dep.ref.get_status_sub) == 'function' then
 		local ok, sub_or_err = pcall(function ()
 			return dep.ref:get_status_sub({
 				queue_len = dep.queue_len or opts.status_queue_len or opts.queue_len or 8,
@@ -114,7 +123,7 @@ local function subscribe_for(conn, dep, opts)
 		return nil, 'status subscription failed'
 	end
 
-	if dep.topic ~= nil then
+	if conn ~= nil and dep.topic ~= nil then
 		return bus_cleanup.subscribe(conn, dep.topic, {
 			queue_len = dep.queue_len or opts.status_queue_len or opts.queue_len or 8,
 			full = dep.full or opts.status_full or opts.full or 'drop_oldest',
@@ -139,7 +148,7 @@ end
 local function has_no_route(v, seen)
 	if v == nil then return false end
 	local tv = type(v)
-	if tv == 'string' then return v == 'no_route' end
+	if tv == 'string' then return v == 'no_route' or v:find('no_route', 1, true) ~= nil end
 	if tv ~= 'table' then return false end
 
 	seen = seen or {}
@@ -253,7 +262,8 @@ end
 
 function M.is_no_route(...)
 	for i = 1, select('#', ...) do
-		if has_no_route(select(i, ...)) then return true end
+		local value = select(i, ...)
+		if has_no_route(value) then return true end
 	end
 	return false
 end
@@ -375,14 +385,25 @@ function Dependencies:_signal_if_changed(before)
 end
 
 function Dependencies:_recompute(dep)
-	if dep.route_missing then
+	local observed_status = dep.observed_status or (dep.configured and 'configured' or 'not_configured')
+	local observed_available = dep.observed_available == true
+
+	-- An explicit unavailability from the publisher is a stronger fact than a
+	-- previous local no_route inference.  Keep last_error for diagnostics, but
+	-- do not continue presenting route_missing as the effective state once the
+	-- capability owner has said it is unavailable.
+	if dep.route_missing and observed_available then
 		dep.effective_status = 'route_missing'
 		dep.available = false
 		dep.reason = dep.reason or 'no_route'
 		return
 	end
-	dep.effective_status = dep.observed_status or (dep.configured and 'configured' or 'not_configured')
-	dep.available = status_available(dep.effective_status)
+
+	dep.effective_status = observed_status
+	-- Availability is an observed fact when a status payload carries an
+	-- explicit available field.  Do not infer true from state='running' or
+	-- state='available' when the publisher explicitly said available=false.
+	dep.available = observed_available
 	if dep.available then dep.reason = nil end
 end
 
@@ -393,7 +414,7 @@ function Dependencies:record_status(key, payload, meta)
 
 	local status, available = normalise_status_payload(payload)
 	local payload_copy = copy(payload)
-	local will_clear_route_missing = status_available(status) and dep.route_missing == true
+	local will_clear_route_missing = available == true and dep.route_missing == true
 	if dep.observed_status == status
 		and dep.observed_available == (available == true)
 		and tablex.deep_equal(dep.payload, payload_copy)
@@ -408,10 +429,14 @@ function Dependencies:record_status(key, payload, meta)
 	dep.payload = payload_copy
 	dep.updated_at = (meta and meta.at) or self._now()
 
-	if status_available(status) then
+	if available == true then
 		dep.route_missing = false
 		dep.last_error = nil
 		dep.last_error_at = nil
+		dep.reason = nil
+	elseif dep.route_missing then
+		-- Explicit unavailability supersedes a previous local no_route inference.
+		dep.route_missing = false
 		dep.reason = nil
 	end
 
@@ -426,10 +451,14 @@ function Dependencies:mark_route_missing(key, reason)
 	if not dep then return nil, 'unknown_dependency' end
 
 	local before = self:snapshot()
-	dep.route_missing = true
+	-- A no_route result is an availability override only when the publisher most
+	-- recently said the capability was available.  If the publisher already says
+	-- unavailable, keep that explicit observation as the effective state and record
+	-- the route failure only as diagnostic detail.
+	dep.route_missing = dep.observed_available == true
 	dep.last_error = copy(reason or 'no_route')
 	dep.last_error_at = self._now()
-	dep.reason = format_reason(reason) or 'no_route'
+	dep.reason = dep.route_missing and (format_reason(reason) or 'no_route') or nil
 	dep.updated_at = dep.last_error_at
 	self:_recompute(dep)
 	local changed, version = self:_signal_if_changed(before)
@@ -452,16 +481,31 @@ function Dependencies:clear_route_missing(key)
 	return true, version, changed
 end
 
+function M.classify_call_failure(reply, err)
+	if M.is_no_route(reply, err) then return 'route_missing', err or reply or 'no_route' end
+	return 'failure', err or reply
+end
+
 function Dependencies:classify_call_failure(key, reply, err)
-	if M.is_no_route(reply, err) then
-		return self:mark_route_missing(key, err or reply or 'no_route')
+	local class, reason = M.classify_call_failure(reply, err)
+	if class == 'route_missing' then
+		local ok, version, changed = self:mark_route_missing(key, reason or 'no_route')
+		return 'route_missing', reason or 'no_route', self:dependency(key), ok, version, changed
 	end
-	return false, nil, false
+	return class, reason, self:dependency(key), false, nil, false
 end
 
 function Dependencies:_event_from_msg(key, msg, err)
 	if msg == nil then
 		local status = self:record_status(key, { state = 'unavailable', reason = err or 'status_closed' })
+		local dep = self._deps[assert_key(key)]
+		if dep ~= nil then
+			-- A closed status feed is a terminal observation for that feed.  Remove
+			-- it from future coordinator event-source sets so callers do not spin on
+			-- an already-ready closed recv_op().  The feed is already closed; normal
+			-- finaliser cleanup remains idempotent for real bus subscriptions.
+			dep.sub = nil
+		end
 		return {
 			kind = self.closed_kind,
 			key = key,

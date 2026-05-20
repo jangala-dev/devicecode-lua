@@ -77,6 +77,7 @@ function M.service_state(snapshot)
 		update_active = copy(snapshot.update_active),
 		jobs       = copy(snapshot.jobs or { count = 0, by_id = {} }),
 		ingest     = copy(snapshot.ingest or { count = 0, by_id = {} }),
+		dependencies = copy(snapshot.dependencies),
 		publisher  = copy(snapshot.publisher),
 	}
 end

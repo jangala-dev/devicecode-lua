@@ -1,6 +1,7 @@
 -- tests/unit/support/test_capability_dependencies.lua
 
 local fibers  = require 'fibers'
+local op      = require 'fibers.op'
 local busmod  = require 'bus'
 local runfibers = require 'tests.support.run_fibers'
 local deps_mod = require 'devicecode.support.capability_dependencies'
@@ -135,6 +136,59 @@ function tests.test_route_missing_overrides_observed_available_until_next_availa
 	end)
 end
 
+
+function tests.test_explicit_unavailable_supersedes_route_missing()
+	runfibers.run(function()
+		local b = busmod.new()
+		local writer = b:connect()
+		local conn = b:connect()
+
+		retain_status(writer, 'control-store', 'update', { state = 'available', available = true })
+		local deps = new_deps(conn, {
+			{ key = 'job_store', class = 'control-store', id = 'update' },
+		})
+		fibers.perform(deps:recv_op('job_store'))
+		deps:mark_route_missing('job_store', { err = 'no_route' })
+		eq(deps:status('job_store'), 'route_missing')
+
+		retain_status(writer, 'control-store', 'update', {
+			state = 'unavailable',
+			available = false,
+			reason = 'driver_stopped',
+		})
+		local ev = fibers.perform(deps:recv_op('job_store'))
+		eq(ev.status, 'unavailable')
+		is_false(ev.available)
+		eq(deps:observed_status('job_store'), 'unavailable')
+		eq(deps:status('job_store'), 'unavailable')
+		is_false(deps:available('job_store'))
+		is_false(deps:dependency('job_store').route_missing)
+
+		deps:terminate('test complete')
+	end)
+end
+
+
+function tests.test_explicit_available_false_overrides_running_state()
+	runfibers.run(function()
+		local b = busmod.new()
+		local writer = b:connect()
+		local conn = b:connect()
+		local deps = new_deps(conn, {
+			{ key = 'network_state', class = 'network-state', id = 'main' },
+		})
+
+		retain_status(writer, 'network-state', 'main', { state = 'running', available = false })
+		local ev = fibers.perform(deps:recv_op('network_state'))
+		eq(ev.status, 'running')
+		is_false(ev.available)
+		is_false(deps:available('network_state'))
+		eq(deps:status('network_state'), 'running')
+
+		deps:terminate('test complete')
+	end)
+end
+
 function tests.test_changed_op_reports_material_status_changes_only()
 	runfibers.run(function()
 		local b = busmod.new()
@@ -187,8 +241,35 @@ end
 function tests.test_no_route_classifier_handles_nested_bus_results()
 	is_true(deps_mod.is_no_route(nil, 'no_route'))
 	is_true(deps_mod.is_no_route({ err = 'network HAL call failed', detail = 'no_route' }))
+	is_true(deps_mod.is_no_route({ reason = { err = 'backend_failed' } }, 'no_route'))
 	is_true(deps_mod.is_no_route({ result = { reason = { err = 'no_route' } } }))
 	is_false(deps_mod.is_no_route({ reason = { err = 'backend_failed' } }))
+end
+
+
+function tests.test_classify_call_failure_marks_route_missing()
+	runfibers.run(function()
+		local b = busmod.new()
+		local writer = b:connect()
+		local conn = b:connect()
+		retain_status(writer, 'control-store', 'update', { state = 'available', available = true })
+		local deps = new_deps(conn, {
+			{ key = 'job_store', class = 'control-store', id = 'update' },
+		})
+		fibers.perform(deps:recv_op('job_store'))
+
+		local class, reason, dep = deps:classify_call_failure('job_store', { result = { err = 'no_route' } })
+		eq(class, 'route_missing')
+		ok(reason, 'reason expected')
+		is_false(dep.available)
+		eq(deps:status('job_store'), 'route_missing')
+		is_false(deps:available('job_store'))
+
+		class = deps:classify_call_failure('job_store', { reason = { err = 'backend_failed' } })
+		eq(class, 'failure')
+
+		deps:terminate('test complete')
+	end)
 end
 
 function tests.test_terminate_closes_change_op_and_subscriptions()
@@ -207,6 +288,43 @@ function tests.test_terminate_closes_change_op_and_subscriptions()
 		is_nil(version)
 		is_nil(snap)
 		eq(err, 'closed_for_test')
+	end)
+end
+
+
+function tests.test_closed_status_feed_is_removed_from_event_sources()
+	runfibers.run(function()
+		local fake_sub = {}
+		function fake_sub:recv_op()
+			return op.always(nil, 'closed_for_test')
+		end
+		function fake_sub:why()
+			return 'closed_for_test'
+		end
+
+		local fake_ref = {}
+		function fake_ref:get_status_sub()
+			return fake_sub
+		end
+
+		local deps = new_deps(nil, {
+			{ key = 'closed_dep', ref = fake_ref },
+		})
+		eq(#deps:event_sources(), 1)
+
+		local ev = fibers.perform(deps:recv_op('closed_dep'))
+		eq(ev.kind, 'capability_dependency_closed')
+		eq(ev.key, 'closed_dep')
+		eq(ev.reason, 'closed_for_test')
+		eq(ev.status, 'unavailable')
+		is_false(ev.available)
+		eq(#deps:event_sources(), 0)
+
+		local ev2, err = deps:try_recv_now('closed_dep')
+		is_nil(ev2)
+		eq(err, 'not_watched')
+
+		deps:terminate('test complete')
 	end)
 end
 
