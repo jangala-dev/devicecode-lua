@@ -300,12 +300,15 @@ function tests.test_snapshot_is_copied()
 	end)
 end
 
-function tests.test_no_route_classifier_handles_nested_bus_results()
+function tests.test_no_route_classifier_handles_only_canonical_call_shapes()
 	is_true(deps_mod.is_no_route(nil, 'no_route'))
 	is_true(deps_mod.is_no_route({ err = 'network HAL call failed', detail = 'no_route' }))
 	is_true(deps_mod.is_no_route({ reason = { err = 'backend_failed' } }, 'no_route'))
 	is_true(deps_mod.is_no_route({ result = { reason = { err = 'no_route' } } }))
 	is_false(deps_mod.is_no_route({ reason = { err = 'backend_failed' } }))
+	is_false(deps_mod.is_no_route({ primary = { err = 'no_route' } }))
+	is_false(deps_mod.is_no_route({ report = { primary = { err = 'no_route' } } }))
+	is_false(deps_mod.is_no_route({ children = { { primary = { err = 'no_route' } } } }))
 end
 
 function tests.test_classify_call_failure_marks_route_missing()
@@ -447,6 +450,33 @@ function tests.test_required_watch_failure_can_be_made_unavailable_explicitly()
 		eq(snap.required_dep.status, 'watch_failed')
 		is_false(snap.required_dep.available)
 		eq(snap.required_dep.observed_status, 'watch_failed')
+		deps:terminate('test complete')
+	end)
+end
+
+
+function tests.test_ensure_adds_dynamic_dependency_and_receives_status()
+	runfibers.run(function()
+		local b = busmod.new()
+		local conn = b:connect()
+		local deps = new_deps(conn, {
+			{ key = 'first', class = 'first', id = 'main' },
+		})
+
+		local ok_add, err, dep = deps:ensure({ key = 'dynamic', class = 'dynamic', id = 'main' })
+		is_true(ok_add, err)
+		eq(dep.key, 'dynamic')
+		eq(deps:status('dynamic'), 'configured')
+		is_false(deps:available('dynamic'))
+
+		retain_status(conn, 'dynamic', 'main', { state = 'available' })
+		local ev = next_event(deps)
+		eq(ev.key, 'dynamic')
+		is_true(ev.available)
+		is_true(deps:available('dynamic'))
+
+		local ok_again = deps:ensure({ key = 'dynamic', class = 'dynamic', id = 'main' })
+		is_true(ok_again)
 		deps:terminate('test complete')
 	end)
 end

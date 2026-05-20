@@ -26,6 +26,13 @@ local M = {}
 
 local shallow_copy = tablex.shallow_copy
 
+local function dependency_snapshot(state)
+	if state and state.http_deps and type(state.http_deps.snapshot) == 'function' then
+		return state.http_deps:snapshot()
+	end
+	return {}
+end
+
 local function component_summary(components)
 	local out = {}
 	for name, c in pairs(components or {}) do
@@ -52,6 +59,7 @@ local function build_summary(state)
 			config_generation = state.config_generation,
 			service_status = state.service_status,
 			components = component_summary(state.components),
+			dependencies = dependency_snapshot(state),
 			last_error = state.last_error,
 		}
 	)
@@ -274,8 +282,50 @@ local function maybe_start_pending_listener(state, reason)
 		return true, nil
 	end
 	state.pending_listener_cfg = nil
-	state.pending_listener_generation = nil
 	return start_configured_listener(state, cfg, state.config_generation)
+end
+
+local function listener_required(state)
+	local cfg = state and state.config or nil
+	if not cfg or cfg.enabled == false then return false end
+	return listener_config_key(cfg) ~= 'disabled'
+end
+
+local function lifecycle_readiness(state)
+	local service_state = state.service_status or 'running'
+	if service_state == 'disabled' then return 'disabled', false, 'ui_disabled' end
+	if service_state == 'failed' or service_state == 'degraded' or service_state == 'stopping' then
+		return service_state, false, state.last_error or service_state
+	end
+	if state.config_status ~= 'ok' then return service_state, false, 'waiting_for_config' end
+	if state.read_model_status ~= 'running' then return service_state, false, 'read_model_not_running' end
+	if listener_required(state) and state.listener_status ~= 'running' then
+		if state.listener_status == 'waiting_for_http' then
+			return service_state, false, state.last_error or 'http_unavailable'
+		end
+		return service_state, false, 'http_listener_not_running'
+	end
+	return service_state, true, nil
+end
+
+local function update_lifecycle(state)
+	local lifecycle = state.lifecycle
+	if not lifecycle then return true, nil end
+	local service_state, ready, reason = lifecycle_readiness(state)
+	local payload = {
+		ready = ready == true,
+		reason = reason,
+		read_model_status = state.read_model_status,
+		listener_status = state.listener_status,
+		config_status = state.config_status,
+		config_generation = state.config_generation,
+		dependencies = dependency_snapshot(state),
+	}
+	if service_state == 'disabled' then return lifecycle:status('disabled', payload) end
+	if service_state == 'degraded' then return lifecycle:degraded(payload) end
+	if service_state == 'failed' then return lifecycle:failed(reason or 'ui_failed', payload) end
+	if service_state == 'stopped' then return lifecycle:stopped(payload) end
+	return lifecycle:running(payload)
 end
 
 local function build_listener_opts(state, cfg, listener_generation, listener_id)
@@ -434,7 +484,6 @@ local function apply_config(state, raw, generation)
 		cancel_session_pruner(state, 'ui_disabled')
 		terminate_http_deps(state, 'ui_disabled')
 		state.pending_listener_cfg = nil
-		state.pending_listener_generation = nil
 		state.service_status = 'disabled'
 		return { publish = true }
 	end
@@ -449,13 +498,11 @@ local function apply_config(state, raw, generation)
 	local key = listener_config_key(cfg)
 	if key == 'disabled' then
 		state.pending_listener_cfg = nil
-		state.pending_listener_generation = nil
 		cancel_listener(state, 'ui_http_disabled')
 	else
 		if not state.listener_handle or state.listener_config_key ~= key then
 			cancel_listener(state, 'ui_http_reconfigured')
 			state.pending_listener_cfg = cfg
-			state.pending_listener_generation = state.config_generation
 			maybe_start_pending_listener(state, 'config_changed')
 		end
 	end
@@ -504,7 +551,6 @@ local function reduce_event(state, ev)
 			state.listener_handle = nil
 			state.listener_config_key = nil
 			state.pending_listener_cfg = state.current_listener_cfg or state.config
-			state.pending_listener_generation = state.config_generation
 			set_listener_waiting_for_http(state, 'http_route_missing')
 			return { publish = true }
 		end
@@ -618,6 +664,7 @@ function M.run(scope, params)
 		params = params,
 		service_id = params.service_id or 'ui',
 		conn = conn,
+		lifecycle = params.lifecycle,
 		cfg_watch = cfg_watch,
 		done_tx = done_tx,
 		done_rx = done_rx,
@@ -632,7 +679,6 @@ function M.run(scope, params)
 		listener_status = 'disabled',
 		listener_generation = 0,
 		pending_listener_cfg = nil,
-		pending_listener_generation = nil,
 		http_deps = nil,
 		http_dep_cap_id = nil,
 		config_status = 'waiting',
@@ -669,16 +715,22 @@ function M.run(scope, params)
 
 	state.service_status = 'running'
 
-	publish_summary(state)
-	if params.lifecycle and type(params.lifecycle.running) == 'function' then
-		params.lifecycle:running({ ready = true })
+	if params.config ~= nil then
+		local decision = apply_config(state, params.config, params.rev or params.config_rev or 1) or {}
+		if decision.fail then error(decision.fail, 0) end
 	end
+
+	publish_summary(state)
+	update_lifecycle(state)
 
 	while true do
 		local ev = fibers.perform(next_event_op(state))
 		if ev == nil then error('ui service event source closed', 0) end
 		local decision = reduce_event(state, ev)
-		if decision.publish then publish_summary(state) end
+		if decision.publish then
+			publish_summary(state)
+			update_lifecycle(state)
+		end
 		if decision.fail then error(decision.fail, 0) end
 	end
 end
@@ -712,6 +764,8 @@ M._test = {
 	publish_summary = publish_summary,
 	record_cleanup_error = record_cleanup_error,
 	apply_config = apply_config,
+	lifecycle_readiness = lifecycle_readiness,
+	update_lifecycle = update_lifecycle,
 }
 
 

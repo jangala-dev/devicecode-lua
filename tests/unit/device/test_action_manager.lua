@@ -1,6 +1,7 @@
 -- tests/unit/device/test_action_manager.lua
 
 local fibers = require 'fibers'
+local busmod = require 'bus'
 local config = require 'services.device.config'
 local model_mod = require 'services.device.model'
 local action_manager = require 'services.device.action_manager'
@@ -155,6 +156,57 @@ function tests.test_dynamic_action_spec_rejects_payload_as_request_failure()
 	assert_eq(next(state.pending_actions), nil, 'rejected request must not admit action work')
 end
 
+
+
+function tests.test_dynamic_action_dependency_is_registered_and_blocks_admission()
+	fibers.run(function ()
+		local dynamic_module = {
+			kind = 'mcu',
+			action_spec = function (_, _, _, base_spec)
+				local spec = {}
+				for k, v in pairs(base_spec or {}) do spec[k] = v end
+				spec.dependency = { class = 'dynamic-control', id = 'main' }
+				return spec
+			end,
+		}
+
+		local cat = assert(config.to_catalogue({
+			schema = config.SCHEMA,
+			components = {
+				mcu = {
+					subtype = 'mcu',
+					module = dynamic_module,
+					facts = { software = topics.raw_member_state('mcu', 'software') },
+					actions = { restart = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'control', 'main', 'restart') } },
+				},
+			},
+		}))
+
+		local b = busmod.new()
+		local state = {
+			_action_seq = 0,
+			conn = b:connect(),
+			pending_actions = {},
+			dependency_queue_len = 4,
+			active = { generation = 41, action_root = {}, catalogue = cat },
+			update_dependency_model = function (st)
+				st.dependency_model_updated = true
+				return true, nil
+			end,
+		}
+		local r = req({})
+
+		local ok, err = action_manager.start_action(state, r, { generation = 41, component = 'mcu', action = 'restart' })
+		assert_true(ok, err)
+		assert_nil(err)
+		assert_eq(r.failed, 'dependency_unavailable:action:mcu:restart')
+		assert_not_nil(state.active.action_deps)
+		assert_not_nil(state.active.action_deps:dependency('action:mcu:restart'))
+		assert_true(state.dependency_model_updated)
+		assert_eq(next(state.pending_actions), nil)
+		state.active.action_deps:terminate('test complete')
+	end)
+end
 
 function tests.test_unbind_generation_skips_unowned_synthetic_event_sources()
 	local active = {

@@ -237,28 +237,81 @@ local function require_transport_cfg(cfg, level)
 	return cfg
 end
 
-local function unwrap_open_transport_reply(reply, err)
+local function direct_no_route(v)
+	if v == 'no_route' then return true end
+	if type(v) ~= 'table' then return false end
+	return v.err == 'no_route'
+		or v.detail == 'no_route'
+		or v.reason == 'no_route'
+		or v.code == 'no_route'
+end
+
+local function transport_open_error(cfg, err, detail)
+	local e = {
+		err = err or 'transport_open_failed',
+		detail = detail or err,
+		reason = detail or err or 'transport_open_failed',
+	}
+	if type(cfg) == 'table' then
+		e.dependency_key = cfg.dependency_key
+		e.source = cfg.source
+		e.class = cfg.class
+		e.id = cfg.id
+	end
+	if e.dependency_key ~= nil and (direct_no_route(e.err) or direct_no_route(e.detail) or direct_no_route(e.reason)) then
+		e.kind = 'dependency_failure'
+		e.err = 'no_route'
+	end
+	return e
+end
+
+local function reason_text(reason, fallback)
+	if type(reason) == 'table' then
+		return reason.err or reason.detail or reason.reason or fallback or 'transport_open_failed'
+	end
+	return reason or fallback or 'transport_open_failed'
+end
+
+local function unwrap_open_transport_reply(transport_cfg, reply, err)
+	-- Backwards-compatible public helper: old callers passed (reply, err).
+	-- New internal callers pass (transport_cfg, reply, err) so structured failures
+	-- can carry dependency_key/source/class/id.
+	if type(transport_cfg) == 'table'
+		and reply ~= nil
+		and (transport_cfg.ok ~= nil or transport_cfg.reason ~= nil or transport_cfg.err ~= nil)
+		and transport_cfg.source == nil
+		and transport_cfg.class == nil
+		and transport_cfg.dependency_key == nil
+	then
+		err = reply
+		reply = transport_cfg
+		transport_cfg = nil
+	elseif transport_cfg == nil and reply ~= nil and err == nil then
+		-- Old nil-reply call shape: unwrap_open_transport_reply(nil, err).
+		err = reply
+		reply = nil
+	end
+
 	if reply == nil then
-		return nil, err or 'transport_open_failed'
+		return nil, transport_open_error(transport_cfg, err or 'transport_open_failed', err)
 	end
 
 	if type(reply) ~= 'table' then
-		return nil, 'transport_open_reply_must_be_table'
+		return nil, transport_open_error(transport_cfg, 'transport_open_reply_must_be_table', reply)
 	end
 
 	if reply.ok ~= true then
 		local reason = reply.reason or reply.err or err or 'transport_open_failed'
-		if type(reason) == 'table' then reason = reason.err or reason.detail or reason.reason or 'transport_open_failed' end
-		return nil, tostring(reason)
+		return nil, transport_open_error(transport_cfg, reason_text(reason), reason)
 	end
 
 	if type(reply.reason) ~= 'table' then
-		return nil, 'transport_open_reply_reason_must_be_table'
+		return nil, transport_open_error(transport_cfg, 'transport_open_reply_reason_must_be_table', reply.reason)
 	end
 
 	local session = reply.reason.session
 	if session == nil then
-		return nil, 'transport_open_reply_missing_session'
+		return nil, transport_open_error(transport_cfg, 'transport_open_reply_missing_session')
 	end
 
 	return session, nil
@@ -291,7 +344,7 @@ function M.open_transport_op(conn, transport_cfg, transport_session)
 			transport_cfg.open_verb or 'open',
 			transport_cfg.open_opts
 		):wrap(function (reply, err)
-			local session, uerr = unwrap_open_transport_reply(reply, err)
+			local session, uerr = unwrap_open_transport_reply(transport_cfg, reply, err)
 			if not session then
 				return nil, uerr
 			end

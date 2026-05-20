@@ -210,6 +210,15 @@ local function normalise_link_specs(params)
 
 		apply_runtime_defaults(params, copy)
 
+		local dep = fabric_deps.transport_dependency_for_link(copy, nil)
+		if dep ~= nil then
+			copy.dependency_key = dep.key
+			if type(copy.transport) == 'table' and copy.transport.dependency_key == nil then
+				copy.transport = shallow_copy(copy.transport)
+				copy.transport.dependency_key = dep.key
+			end
+		end
+
 		out[#out + 1] = copy
 		out[id] = copy
 	end
@@ -310,6 +319,43 @@ local function record_link_done(self, ev)
 	return accepted, reject_reason
 end
 
+local function direct_no_route(v)
+	if v == 'no_route' then return true end
+	if type(v) ~= 'table' then return false end
+	return v.err == 'no_route'
+		or v.detail == 'no_route'
+		or v.reason == 'no_route'
+		or v.code == 'no_route'
+end
+
+local function canonical_dependency_route_failure(ev)
+	if type(ev) ~= 'table' then return nil end
+	local primary = ev.primary
+	local dependency_key = ev.dependency_key
+	if type(primary) == 'table' and primary.dependency_key ~= nil then
+		dependency_key = primary.dependency_key
+	end
+	if dependency_key == nil then return nil end
+	if type(primary) == 'table' and primary.kind == 'dependency_failure' and direct_no_route(primary) then
+		local out = shallow_copy(primary)
+		out.kind = 'dependency_failure'
+		out.err = 'no_route'
+		out.dependency_key = dependency_key
+		out.link_id = out.link_id or ev.link_id
+		return out
+	end
+	if direct_no_route(primary) then
+		return {
+			kind = 'dependency_failure',
+			err = 'no_route',
+			dependency_key = dependency_key,
+			link_id = ev.link_id,
+			detail = primary,
+		}
+	end
+	return nil
+end
+
 local function default_policy(_, ev)
 	if ev.kind ~= 'link_done' then
 		return { action = 'continue' }
@@ -320,6 +366,14 @@ local function default_policy(_, ev)
 	end
 
 	if ev.status == 'failed' then
+		local dependency_failure = canonical_dependency_route_failure(ev)
+		if dependency_failure ~= nil then
+			return {
+				action = 'fail',
+				reason = dependency_failure,
+			}
+		end
+
 		return {
 			action = 'fail',
 			reason = ('link %s failed: %s'):format(
@@ -399,6 +453,7 @@ local function make_link_identity(self, spec)
 		service_generation = self._service_generation,
 		link_generation = spec.link_generation,
 		link_id    = spec.link_id,
+		dependency_key = spec.dependency_key,
 	}
 end
 
@@ -440,6 +495,7 @@ local function start_link(self, spec)
 		report_scope   = self._scope,
 
 		identity = make_link_identity(self, spec),
+		preserve_error_primary = true,
 
 		run = function (link_scope)
 			return runner(link_scope, public_runner_spec(self, spec), make_service_caps(self))
@@ -866,7 +922,7 @@ end
 
 local function open_generation_deps(state, compiled)
 	terminate_generation_deps(state, 'fabric_generation_dependency_replaced')
-	if state.link_runner ~= nil or state.private_link_runtime then return true, nil end
+	if state.link_runner ~= nil and not state.private_link_runtime then return true, nil end
 	local specs = fabric_deps.transport_dependencies(compiled, state.link_overrides)
 	if #specs == 0 then return true, nil end
 	local deps, err = cap_deps_mod.open(state.conn, specs, {
@@ -936,6 +992,7 @@ function start_generation(state, compiled)
 			service_id = state.service_id,
 			config_generation = config_generation,
 		},
+		preserve_error_primary = true,
 
 		run = function (gen_scope)
 			return M.run(gen_scope, {
@@ -982,6 +1039,31 @@ local function replace_generation(state, compiled, reason)
 	return start_generation(state, compiled)
 end
 
+local function dependency_key_exists(state, key)
+	return key ~= nil and state.generation_deps ~= nil and state.generation_deps:dependency(key) ~= nil
+end
+
+local function transport_dependency_key_for_generation_failure(state, ev)
+	local primary = ev and ev.primary
+	if type(primary) == 'table' and dependency_key_exists(state, primary.dependency_key) then
+		return primary.dependency_key
+	end
+	if dependency_key_exists(state, ev and ev.dependency_key) then
+		return ev.dependency_key
+	end
+	return nil
+end
+
+local function generation_route_failure(state, ev)
+	local primary = ev and ev.primary
+	if type(primary) ~= 'table' then return nil end
+	if primary.kind ~= 'dependency_failure' then return nil end
+	if not cap_deps_mod.is_no_route(primary) then return nil end
+	local dep_key = transport_dependency_key_for_generation_failure(state, ev)
+	if dep_key == nil then return nil end
+	return dep_key, primary
+end
+
 local function handle_generation_done(state, ev)
 	local active = state.active
 	if not active or ev.config_generation ~= active.config_generation then
@@ -992,14 +1074,15 @@ local function handle_generation_done(state, ev)
 	close_transfer_admissions(state, ev.status == 'ok' and 'generation_completed' or 'generation_failed')
 	state.active = nil
 
-	if ev.status ~= 'ok' and state.generation_deps and cap_deps_mod.is_no_route(ev.primary, ev.result, ev.report) then
-		for _, spec in ipairs(state.generation_dependency_specs or {}) do
-			state.generation_deps:classify_call_failure(spec.key, ev.result, ev.primary)
+	if ev.status ~= 'ok' and state.generation_deps then
+		local dep_key, failure = generation_route_failure(state, ev)
+		if dep_key ~= nil then
+			state.generation_deps:classify_call_failure(dep_key, failure, nil)
+			state.pending_compiled = completed and completed.compiled or state.pending_compiled
+			state.pending_generation_reason = 'transport_route_missing'
+			publish_waiting_for_transport(state, 'transport_route_missing')
+			return
 		end
-		state.pending_compiled = completed and completed.compiled or state.pending_compiled
-		state.pending_generation_reason = 'transport_route_missing'
-		publish_waiting_for_transport(state, 'transport_route_missing')
-		return
 	end
 
 	if ev.status == 'ok' then
@@ -1230,5 +1313,8 @@ end
 M.default_policy = default_policy
 M.make_service_caps = make_service_caps
 M.Service = Service
+M._test = {
+	transport_dependency_key_for_generation_failure = transport_dependency_key_for_generation_failure,
+}
 
 return M

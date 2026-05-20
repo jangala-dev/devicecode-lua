@@ -18,6 +18,7 @@ local transfer_client = require 'services.fabric.transfer_client'
 local transfer_sender = require 'services.fabric.transfer_sender'
 local transfer_receive = require 'services.fabric.transfer_receive'
 local hal_transport = require 'services.fabric.hal_transport'
+local fabric_deps = require 'services.fabric.dependencies'
 local model    = require 'services.fabric.model'
 local protocol = require 'services.fabric.protocol'
 local topics   = require 'services.fabric.topics'
@@ -60,6 +61,60 @@ local function link_conn(link_spec, service_caps)
 	return link_spec.conn or (service_caps and service_caps.conn)
 end
 
+local function transport_dependency_key(link_spec)
+	if type(link_spec) ~= 'table' then return nil end
+	if type(link_spec.dependency_key) == 'string' and link_spec.dependency_key ~= '' then
+		return link_spec.dependency_key
+	end
+	if type(link_spec.transport) == 'table'
+		and type(link_spec.transport.dependency_key) == 'string'
+		and link_spec.transport.dependency_key ~= ''
+	then
+		return link_spec.transport.dependency_key
+	end
+	local dep = fabric_deps.transport_dependency_for_link(link_spec, nil)
+	return dep and dep.key or nil
+end
+
+local function direct_no_route(v)
+	if v == 'no_route' then return true end
+	if type(v) ~= 'table' then return false end
+	return v.err == 'no_route'
+		or v.detail == 'no_route'
+		or v.reason == 'no_route'
+		or v.code == 'no_route'
+end
+
+local function normalise_transport_open_error(link_spec, out)
+	out.dependency_key = out.dependency_key or transport_dependency_key(link_spec)
+	if out.link_id == nil and type(link_spec) == 'table' then out.link_id = link_spec.link_id end
+	if out.dependency_key ~= nil and (direct_no_route(out.err) or direct_no_route(out.detail) or direct_no_route(out.reason)) then
+		out.kind = 'dependency_failure'
+		out.err = 'no_route'
+	end
+	return out
+end
+
+local function transport_open_error(link_spec, err, fallback)
+	local out
+	if type(err) == 'table' then
+		out = normalise_transport_open_error(link_spec, shallow_copy(err))
+	else
+		out = normalise_transport_open_error(link_spec, {
+			err = err or fallback or 'transport_open_failed',
+			detail = err,
+			reason = err or fallback or 'transport_open_failed',
+		})
+	end
+	if type(out) == 'table' and out.kind == 'dependency_failure' then
+		return out
+	end
+	if type(err) == 'table' then
+		return out
+	end
+	return out.err or out.reason or fallback or 'transport_open_failed'
+end
+
 local function open_transport_for_link(scope, link_spec, service_caps)
 	if is_frame_transport(link_spec.transport) then
 		return link_spec.transport, nil
@@ -68,22 +123,26 @@ local function open_transport_for_link(scope, link_spec, service_caps)
 	if type(link_spec.open_transport_op) == 'function' then
 		local transport, err = fibers.perform(link_spec.open_transport_op(scope, service_caps))
 		if transport == nil then
-			return nil, err or 'transport_open_failed'
+			return nil, transport_open_error(link_spec, err, 'transport_open_failed')
 		end
 		if not is_frame_transport(transport) then
-			return nil, 'transport_open_returned_non_frame_transport'
+			return nil, transport_open_error(link_spec, 'transport_open_returned_non_frame_transport')
 		end
 		return transport, nil
 	end
 
 	if link_spec.transport ~= nil then
-		return hal_transport.open_transport(
+		local transport, err = hal_transport.open_transport(
 			link_conn(link_spec, service_caps),
 			link_spec.transport
 		)
+		if transport == nil then
+			return nil, transport_open_error(link_spec, err, 'transport_open_failed')
+		end
+		return transport, nil
 	end
 
-	return nil, 'fabric link transport required'
+	return nil, transport_open_error(link_spec, 'fabric link transport required')
 end
 
 --- Default link runner used by the public Fabric service entry point.

@@ -26,4 +26,79 @@ function T.override_transport_bypasses_dependency()
 	assert(#specs == 0)
 end
 
+
+function T.extracts_only_explicit_transport_dependency_key_from_generation_failure()
+	local service = require 'services.fabric.service'
+	local state = {
+		generation_deps = {
+			dependency = function (_, key)
+				if key == 'transport:uart0' then return { key = key } end
+				return nil
+			end,
+		},
+	}
+	local key = service._test.transport_dependency_key_for_generation_failure(state, {
+		primary = {
+			kind = 'dependency_failure',
+			err = 'no_route',
+			dependency_key = 'transport:uart0',
+		},
+	})
+	assert(key == 'transport:uart0')
+end
+
+function T.does_not_extract_transport_dependency_key_from_legacy_or_nested_shapes()
+	local service = require 'services.fabric.service'
+	local state = {
+		generation_deps = {
+			dependency = function (_, key)
+				if key == 'transport:uart0' then return { key = key } end
+				return nil
+			end,
+		},
+	}
+	local key = service._test.transport_dependency_key_for_generation_failure(state, {
+		primary = 'link uart0 failed: no_route [dependency_key=transport:uart0]',
+	})
+	assert(key == nil)
+	key = service._test.transport_dependency_key_for_generation_failure(state, {
+		report = { children = { { primary = { dependency_key = 'transport:uart0', err = 'no_route' } } } },
+	})
+	assert(key == nil)
+end
+
+
+function T.hal_transport_open_errors_preserve_dependency_key()
+	local hal_transport = require 'services.fabric.hal_transport'
+	local _, err = hal_transport.unwrap_open_transport_reply({
+		dependency_key = 'transport:uart0',
+		source = 'uart',
+		class = 'uart',
+		id = 'main',
+	}, nil, 'no_route')
+	assert(type(err) == 'table')
+	assert(err.kind == 'dependency_failure')
+	assert(err.err == 'no_route')
+	assert(err.dependency_key == 'transport:uart0')
+	assert(err.source == 'uart')
+end
+
+function T.default_policy_preserves_structured_dependency_key()
+	local service = require 'services.fabric.service'
+	local decision = service.default_policy(nil, {
+		kind = 'link_done',
+		status = 'failed',
+		link_id = 'uart0',
+		dependency_key = 'transport:uart0',
+		primary = { err = 'no_route' },
+	})
+	assert(decision.action == 'fail')
+	assert(type(decision.reason) == 'table')
+	assert(decision.reason.kind == 'dependency_failure')
+	assert(decision.reason.err == 'no_route')
+	assert(decision.reason.dependency_key == 'transport:uart0')
+	assert(decision.reason.link_id == 'uart0')
+end
+
+
 return T

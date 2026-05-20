@@ -484,6 +484,7 @@ function M.open(conn, specs, opts)
 		_closed = false,
 		_closed_reason = nil,
 		_now = now,
+		_open_opts = open_opts,
 		changed_kind = open_opts.changed_kind or 'capability_dependency_changed',
 		closed_kind = open_opts.closed_kind or 'capability_dependency_closed',
 	}, Dependencies)
@@ -526,6 +527,28 @@ function Dependencies:snapshot()
 		out[key] = dep_public_snapshot(self._deps[key])
 	end
 	return out
+end
+
+function Dependencies:add(spec)
+	if self._closed then return nil, self._closed_reason or 'closed' end
+	local dep, err = build_dep(self.conn, spec, self._open_opts or {}, self._now)
+	if not dep then return nil, err end
+	if self._deps[dep.key] ~= nil then
+		return nil, 'capability_dependencies.add: duplicate key ' .. tostring(dep.key)
+	end
+
+	local before = self:snapshot()
+	self._deps[dep.key] = dep
+	self._order[#self._order + 1] = dep.key
+	local changed, version = signal_if_changed(self, before)
+	return true, nil, self:dependency(dep.key), changed, version
+end
+
+function Dependencies:ensure(spec)
+	if type(spec) ~= 'table' then return nil, 'capability_dependencies.ensure: spec must be a table' end
+	local key = assert_key(spec.key)
+	if self._deps[key] ~= nil then return true, nil, self:dependency(key), false, self:version() end
+	return self:add(spec)
 end
 
 -- status() is diagnostic.  Coordinators should use available() for

@@ -842,6 +842,7 @@ local function build_state(scope, params)
 		terminate_source = params.terminate_source,
 		action_deps = nil,
 		dependency_queue_len = params.dependency_queue_len,
+		update_dependency_model = update_dependency_model,
 	}
 
 	state.now = params.now or function () return fibers.now() end

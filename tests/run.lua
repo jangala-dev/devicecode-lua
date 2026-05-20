@@ -96,6 +96,7 @@ local files = {
 	'integration.devhost.main_failure_spec',
 	'integration.devhost.config_recovery_spec',
 	'integration.devhost.startup_dependency_order_spec',
+	'integration.devhost.dependency_uniformity_spec',
 	"integration.devhost.hal_uart_spec",
 	"integration.devhost.fabric_hal_uart_smoke_spec",
 	"integration.devhost.fabric_public_service_path_spec",
