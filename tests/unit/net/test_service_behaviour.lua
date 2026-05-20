@@ -140,6 +140,8 @@ function tests.test_initial_config_starts_apply_and_publishes_running_state()
 		local reader = b:connect()
 		local calls = {}
 
+		retain_network_config_status(conn, 'available')
+
 		local child = start_service(scope, conn, {
 			conn = conn,
 			config = cfg(),
@@ -533,6 +535,13 @@ function tests.test_observed_state_updates_model_and_drift()
 		hal.open_observed_subscription = function () return obs_rx end
 		hal.start_observation_op = function () return op.always({ ok = true, backend = 'test', watching = true }) end
 
+		retain_network_config_status(conn, 'available')
+		retain_network_state_status_payload(conn, {
+			schema = 'devicecode.cap.status/1',
+			state = 'running',
+			available = true,
+		})
+
 		local child = start_service(scope, conn, {
 			conn = conn,
 			config = cfg(),
@@ -608,6 +617,8 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 		c.interfaces.wan_a = { kind = 'ethernet', role = 'wan', segment = 'wan', endpoint = { ifname = 'eth1' }, addressing = { ipv4 = { mode = 'dhcp' } } }
 		c.interfaces.wan_b = { kind = 'cellular', role = 'wan', segment = 'wan', endpoint = { ifname = 'wwan1' }, addressing = { ipv4 = { mode = 'dhcp' } } }
 		c.segments.wan = { kind = 'wan', firewall = { zone = 'wan' } }
+
+		retain_network_config_status(conn, 'available')
 
 		local child = start_service(scope, conn, { conn = conn, config = c, rev = 20, hal = hal })
 

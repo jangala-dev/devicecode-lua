@@ -88,47 +88,16 @@ local function set_model_state(state, service_state, reason)
 	return publish_snapshot(state)
 end
 
-local function status_available(status)
-	return cap_deps_mod.status_available(status)
-end
-
-local function hal_status_value(state, key)
-	if state.cap_deps and type(state.cap_deps.status) == 'function' then
-		return state.cap_deps:status(key)
-	end
-	if key == 'network_config' and state.hal then
-		if type(state.hal.available) == 'function' then
-			return state.hal:available() and 'available' or 'not_configured'
-		end
-		if type(state.hal.apply_intent_op) == 'function' then
-			return 'available'
-		end
-	end
-	if key == 'network_state' and state.hal then
-		if type(state.hal.observation_available) == 'function' then
-			return state.hal:observation_available() and 'available' or 'not_configured'
-		end
-		if type(state.hal.open_observed_subscription) == 'function' and type(state.hal.start_observation_op) == 'function' then
-			return 'available'
-		end
-	end
-	if key == 'network_diagnostics' and state.hal and type(state.hal.speedtest_op) == 'function' then
-		return 'configured'
-	end
-	return 'not_configured'
+local function dependency_status(state, key)
+	return state.cap_deps:status(key)
 end
 
 local function dependency_effectively_available(state, key)
-	if state.cap_deps and type(state.cap_deps.available) == 'function' then
-		return state.cap_deps:available(key)
-	end
-	return status_available(hal_status_value(state, key))
+	return state.cap_deps:available(key)
 end
 
 project_dependencies = function(state, s)
-	if state.cap_deps and type(state.cap_deps.snapshot) == 'function' then
-		s.dependencies = state.cap_deps:snapshot()
-	end
+	s.dependencies = state.cap_deps:snapshot()
 	return s
 end
 
@@ -151,9 +120,9 @@ end
 local function update_hal_statuses(state)
 	state.model:update(function (s)
 		s.hal = s.hal or {}
-		s.hal.network_config = hal_status_value(state, 'network_config')
-		s.hal.network_state = hal_status_value(state, 'network_state')
-		s.hal.network_diagnostics = hal_status_value(state, 'network_diagnostics')
+		s.hal.network_config = dependency_status(state, 'network_config')
+		s.hal.network_state = dependency_status(state, 'network_state')
+		s.hal.network_diagnostics = dependency_status(state, 'network_diagnostics')
 		return project_dependencies(state, s)
 	end)
 	mark_summary_dirty(state)
@@ -235,7 +204,7 @@ local function accept_pending_intent(state, intent, reason)
 			last_error = reason,
 			last_result = nil,
 		}
-		s.hal.network_config = hal_status_value(state, 'network_config')
+		s.hal.network_config = dependency_status(state, 'network_config')
 		s.stats.config_updates = (s.stats.config_updates or 0) + 1
 		return project_dependencies(state, s)
 	end)
@@ -275,7 +244,7 @@ local function start_apply_for_intent(state, intent, reason)
 			last_error = nil,
 			last_result = nil,
 		}
-		s.hal.network_config = hal_status_value(state, 'network_config')
+		s.hal.network_config = dependency_status(state, 'network_config')
 		s.stats.apply_started = (s.stats.apply_started or 0) + 1
 		return project_dependencies(state, s)
 	end)
@@ -368,10 +337,7 @@ end
 
 local function classify_network_config_apply_failure(state, result)
 	local failure = result and result.result or result
-	if state.cap_deps and type(state.cap_deps.classify_call_failure) == 'function' then
-		return state.cap_deps:classify_call_failure('network_config', failure)
-	end
-	return cap_deps_mod.classify_call_failure(failure)
+	return state.cap_deps:classify_call_failure('network_config', failure)
 end
 
 local function return_apply_to_pending(state, result, reason)
@@ -403,7 +369,7 @@ local function return_apply_to_pending(state, result, reason)
 		s.apply.completed_at = now()
 		s.apply.last_result = result and result.result or result
 		s.apply.last_error = reason
-		s.hal.network_config = hal_status_value(state, 'network_config')
+		s.hal.network_config = dependency_status(state, 'network_config')
 		s.stats.apply_completed = (s.stats.apply_completed or 0) + 1
 		return project_dependencies(state, s)
 	end)
@@ -549,7 +515,7 @@ local function reconcile_observer_admission(state, reason)
 	if dependency_effectively_available(state, 'network_state') then
 		return ensure_observer_started(state, reason or 'network_state_available')
 	end
-	return stop_observer(state, reason or ('network_state_' .. tostring(hal_status_value(state, 'network_state'))))
+	return stop_observer(state, reason or ('network_state_' .. tostring(dependency_status(state, 'network_state'))))
 end
 
 local function handle_observation_started(state, ev)
@@ -571,7 +537,7 @@ local function handle_dependency_status(state, ev)
 	local key = ev.key or ev.capability
 	local status = ev.status
 	local payload = ev.payload
-	if state.cap_deps and key then
+	if key then
 		status = state.cap_deps:status(key)
 		local dep = state.cap_deps:dependency(key)
 		payload = dep and dep.payload or payload
@@ -676,20 +642,17 @@ function M.run(scope, params)
 		if not cfg_watch then error(werr or 'net config watch failed', 2) end
 	end
 
-	local cap_deps
-	local hal = params.hal
-	if not hal then
-		cap_deps = assert(cap_deps_mod.open(conn, {
-			{ key = 'network_config', class = 'network-config', ref = params.hal_client and params.hal_client.network_config_cap, required = true },
-			{ key = 'network_state', class = 'network-state', ref = params.hal_client and params.hal_client.network_state_cap, required = false },
-			{ key = 'network_diagnostics', class = 'network-diagnostics', ref = params.hal_client and params.hal_client.network_diagnostics_cap, required = false },
-		}, params.hal_client or {}))
-		hal = hal_client_mod.new(conn, {
-			network_config_cap = cap_deps:ref('network_config'),
-			network_state_cap = cap_deps:ref('network_state'),
-			network_diagnostics_cap = cap_deps:ref('network_diagnostics'),
-		})
-	end
+	local cap_deps = assert(cap_deps_mod.open(conn, {
+		{ key = 'network_config', class = 'network-config', ref = params.hal_client and params.hal_client.network_config_cap, required = true },
+		{ key = 'network_state', class = 'network-state', ref = params.hal_client and params.hal_client.network_state_cap, required = false },
+		{ key = 'network_diagnostics', class = 'network-diagnostics', ref = params.hal_client and params.hal_client.network_diagnostics_cap, required = false },
+	}, params.hal_client or {}))
+
+	local hal = params.hal or hal_client_mod.new(conn, {
+		network_config_cap = cap_deps:ref('network_config'),
+		network_state_cap = cap_deps:ref('network_state'),
+		network_diagnostics_cap = cap_deps:ref('network_diagnostics'),
+	})
 
 	local state = {
 		conn = conn,
@@ -736,7 +699,7 @@ function M.run(scope, params)
 		cancel_active_generation(state, reason)
 		stop_observer(state, reason)
 		if cfg_watch then cfg_watch:close(); cfg_watch = nil end
-		if cap_deps then cap_deps:terminate(reason); cap_deps = nil end
+		cap_deps:terminate(reason)
 		done_tx:close(reason)
 		publisher.cleanup_now(conn, published)
 		model:terminate(reason)

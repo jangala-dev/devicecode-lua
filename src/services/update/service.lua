@@ -108,9 +108,7 @@ local function update_model_state(self, state, reason)
 		local extra = { ready = ready }
 		if reason ~= nil then extra.reason = reason end
 		if snapshot and snapshot.pending ~= nil then extra.pending = snapshot.pending end
-		if self._deps and type(self._deps.snapshot) == 'function' then
-			extra.dependencies = self._deps:snapshot()
-		end
+		extra.dependencies = self._deps:snapshot()
 		self._svc:status(state, extra)
 	end
 end
@@ -405,7 +403,7 @@ end
 local function method_dependency_reason(self, method)
 	if method == 'status' then return nil end
 
-	if self._job_store_dependency_required and self._deps and not self._deps:available('job_store') then
+	if self._job_store_dependency_required and not self._deps:available('job_store') then
 		return 'job_store_unavailable'
 	end
 
@@ -415,7 +413,7 @@ local function method_dependency_reason(self, method)
 	-- path is configured.
 	if method == 'list-jobs' or method == 'get-job' then return nil end
 
-	if self._artifact_store_dependency_required and self._deps and not self._deps:available('artifact_store') then
+	if self._artifact_store_dependency_required and not self._deps:available('artifact_store') then
 		return 'artifact_store_unavailable'
 	end
 
@@ -599,7 +597,7 @@ local function reduce_event(self, ev)
 
 	if ev.kind == 'job_runtime_model_closed' then
 		local reason = ev.reason or 'job_runtime_model_closed'
-		if self._deps and self._deps:classify_call_failure('job_store', ev, reason) == 'route_missing' then
+		if self._deps:classify_call_failure('job_store', ev, reason) == 'route_missing' then
 			stop_runtime_dependents(self, 'job_store_unavailable')
 			stop_job_runtime(self, 'job_store_unavailable')
 			update_dependencies_projection(self)
@@ -666,7 +664,7 @@ local function reduce_event(self, ev)
 	if ev.kind == 'component_done' and ev.component == 'job_runtime' then
 		if ev.status == 'failed' then
 			local reason = ev.primary or 'job_runtime_failed'
-			if self._deps and self._deps:classify_call_failure('job_store', ev, reason) == 'route_missing' then
+			if self._deps:classify_call_failure('job_store', ev, reason) == 'route_missing' then
 				stop_runtime_dependents(self, 'job_store_unavailable')
 				stop_job_runtime(self, 'job_store_unavailable')
 				update_dependencies_projection(self)
@@ -971,7 +969,6 @@ local function artifact_store_dependency_required(params)
 end
 
 update_dependencies_projection = function(self)
-	if not self._deps then return end
 	self._model:update(function (s)
 		s.dependencies = self._deps:snapshot()
 		return s
@@ -991,7 +988,6 @@ local function make_job_store(params)
 end
 
 local function dependency_effectively_available(self, key)
-	if not self._deps then return true end
 	return self._deps:available(key)
 end
 
@@ -1044,7 +1040,7 @@ local function artifact_store_available_for_work(self)
 end
 
 classify_dependency_route_missing = function(self, key, ev, reason)
-	return self._deps and self._deps:classify_call_failure(key, ev, reason) == 'route_missing'
+	return self._deps:classify_call_failure(key, ev, reason) == 'route_missing'
 end
 
 handle_artifact_route_missing = function(self, reason)
@@ -1274,37 +1270,33 @@ function M.run(scope, params)
 	local config_watch, werr = open_config_watch(scope, params.conn, params)
 	if werr then error(werr, 2) end
 
-	local deps
 	local job_dep_required = job_store_dependency_required(params)
 	local artifact_dep_required = artifact_store_dependency_required(params)
-	if job_dep_required or artifact_dep_required then
-		local dep_specs = {}
-		if job_dep_required then
-			dep_specs[#dep_specs + 1] = {
-				key = 'job_store',
-				class = 'control-store',
-				id = params.job_store_id or params.control_store_id or 'update',
-				required = true,
-			}
-		end
-		if artifact_dep_required then
-			dep_specs[#dep_specs + 1] = {
-				key = 'artifact_store',
-				class = 'artifact-store',
-				id = params.artifact_store_id or 'main',
-				required = true,
-			}
-		end
-		local derr
-		deps, derr = cap_deps_mod.open(params.conn, dep_specs, {
-			queue_len = params.dependency_queue_len or params.status_queue_len or 8,
-			full = params.dependency_full or params.status_full or 'drop_oldest',
-		})
-		if not deps then error(derr or 'update dependency watcher failed', 2) end
-		scope:finally(function (_, status, primary)
-			deps:terminate(primary or status or 'update dependencies closed')
-		end)
+	local dep_specs = {}
+	if job_dep_required then
+		dep_specs[#dep_specs + 1] = {
+			key = 'job_store',
+			class = 'control-store',
+			id = params.job_store_id or params.control_store_id or 'update',
+			required = true,
+		}
 	end
+	if artifact_dep_required then
+		dep_specs[#dep_specs + 1] = {
+			key = 'artifact_store',
+			class = 'artifact-store',
+			id = params.artifact_store_id or 'main',
+			required = true,
+		}
+	end
+	local deps, derr = cap_deps_mod.open(params.conn, dep_specs, {
+		queue_len = params.dependency_queue_len or params.status_queue_len or 8,
+		full = params.dependency_full or params.status_full or 'drop_oldest',
+	})
+	if not deps then error(derr or 'update dependency watcher failed', 2) end
+	scope:finally(function (_, status, primary)
+		deps:terminate(primary or status or 'update dependencies closed')
+	end)
 
 	local job_store = make_job_store(params)
 
