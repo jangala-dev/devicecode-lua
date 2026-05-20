@@ -21,6 +21,7 @@ local config_watch = require 'devicecode.support.config_watch'
 local service_events = require 'devicecode.support.service_events'
 local service_base = require 'devicecode.service_base'
 local cap_deps_mod = require 'devicecode.support.capability_dependencies'
+local dep_failure  = require 'devicecode.support.dependency_failure'
 local backpressure = require 'services.device.backpressure'
 local dependency_mod = require 'services.device.dependencies'
 local tablex = require 'shared.table'
@@ -714,7 +715,7 @@ local function handle_action_done(state, ev)
 	local public_ok
 	local public_error
 
-	if rec and rec.dependency_key and state.action_deps and cap_deps_mod.is_no_route(ev.primary, result, ev.report) then
+	if rec and rec.dependency_key and state.action_deps and dep_failure.is_no_route(ev.primary, result, ev.report) then
 		state.action_deps:classify_call_failure(rec.dependency_key, result, ev.primary)
 		update_dependency_model(state, generation_rec)
 		public_status = 'dependency_unavailable'

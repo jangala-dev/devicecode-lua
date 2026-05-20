@@ -18,12 +18,12 @@ local transfer_client = require 'services.fabric.transfer_client'
 local transfer_sender = require 'services.fabric.transfer_sender'
 local transfer_receive = require 'services.fabric.transfer_receive'
 local hal_transport = require 'services.fabric.hal_transport'
-local fabric_deps = require 'services.fabric.dependencies'
 local model    = require 'services.fabric.model'
 local protocol = require 'services.fabric.protocol'
 local topics   = require 'services.fabric.topics'
 local config   = require 'services.fabric.config'
 local state    = require 'services.fabric.state'
+local dep_failure = require 'devicecode.support.dependency_failure'
 local tablex   = require 'shared.table'
 
 local M = {
@@ -61,40 +61,31 @@ local function link_conn(link_spec, service_caps)
 	return link_spec.conn or (service_caps and service_caps.conn)
 end
 
-local function transport_dependency_key(link_spec)
+local function link_dependency_key(link_spec)
 	if type(link_spec) ~= 'table' then return nil end
 	if type(link_spec.dependency_key) == 'string' and link_spec.dependency_key ~= '' then
 		return link_spec.dependency_key
 	end
-	if type(link_spec.transport) == 'table'
-		and type(link_spec.transport.dependency_key) == 'string'
-		and link_spec.transport.dependency_key ~= ''
-	then
-		return link_spec.transport.dependency_key
+	local t = link_spec.transport
+	if type(t) == 'table' and type(t.dependency_key) == 'string' and t.dependency_key ~= '' then
+		return t.dependency_key
 	end
-	local dep = fabric_deps.transport_dependency_for_link(link_spec, nil)
-	return dep and dep.key or nil
-end
-
-local function direct_no_route(v)
-	if v == 'no_route' then return true end
-	if type(v) ~= 'table' then return false end
-	return v.err == 'no_route'
-		or v.detail == 'no_route'
-		or v.reason == 'no_route'
-		or v.code == 'no_route'
+	return nil
 end
 
 local function normalise_transport_open_error(link_spec, out)
-	out.dependency_key = out.dependency_key or transport_dependency_key(link_spec)
+	local dep_key = out.dependency_key or link_dependency_key(link_spec)
 	if out.link_id == nil and type(link_spec) == 'table' then out.link_id = link_spec.link_id end
-	if out.dependency_key ~= nil and (direct_no_route(out.err) or direct_no_route(out.detail) or direct_no_route(out.reason)) then
-		out.kind = 'dependency_failure'
-		out.err = 'no_route'
-	end
+	if dep_key ~= nil then out.dependency_key = dep_key end
+	local failure = dep_failure.from_no_route(dep_key, out, {
+		link_id = out.link_id,
+		source = out.source,
+		class = out.class,
+		id = out.id,
+	})
+	if failure ~= nil then return failure end
 	return out
 end
-
 local function transport_open_error(link_spec, err, fallback)
 	local out
 	if type(err) == 'table' then

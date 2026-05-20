@@ -12,6 +12,7 @@ local op     = require 'fibers.op'
 local protocol = require 'services.fabric.protocol'
 local resource = require 'devicecode.support.resource'
 local cap_sdk  = require 'services.hal.sdk.cap'
+local dep_failure = require 'devicecode.support.dependency_failure'
 
 local M = {}
 
@@ -237,15 +238,6 @@ local function require_transport_cfg(cfg, level)
 	return cfg
 end
 
-local function direct_no_route(v)
-	if v == 'no_route' then return true end
-	if type(v) ~= 'table' then return false end
-	return v.err == 'no_route'
-		or v.detail == 'no_route'
-		or v.reason == 'no_route'
-		or v.code == 'no_route'
-end
-
 local function transport_open_error(cfg, err, detail)
 	local e = {
 		err = err or 'transport_open_failed',
@@ -258,13 +250,13 @@ local function transport_open_error(cfg, err, detail)
 		e.class = cfg.class
 		e.id = cfg.id
 	end
-	if e.dependency_key ~= nil and (direct_no_route(e.err) or direct_no_route(e.detail) or direct_no_route(e.reason)) then
-		e.kind = 'dependency_failure'
-		e.err = 'no_route'
-	end
-	return e
+	local failure = dep_failure.from_no_route(e.dependency_key, e, {
+		source = e.source,
+		class = e.class,
+		id = e.id,
+	})
+	return failure or e
 end
-
 local function reason_text(reason, fallback)
 	if type(reason) == 'table' then
 		return reason.err or reason.detail or reason.reason or fallback or 'transport_open_failed'

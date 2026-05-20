@@ -164,7 +164,7 @@ function tests.test_initial_config_starts_apply_and_publishes_running_state()
 		eq(summary.generation, 1)
 		eq(summary.apply.state, 'applied')
 		eq(summary.apply.last_applied_rev, 17)
-		eq(summary.hal.network_config, 'available')
+		eq(summary.dependencies.network_config.status, 'available')
 		eq(summary.counts.segments, 1)
 		eq(#calls, 1)
 		eq(calls[1].intent.rev, 17)
@@ -291,11 +291,11 @@ function tests.test_network_state_running_available_false_does_not_start_observe
 			function ()
 				local msg = view:get(topics.summary())
 				local payload = msg and msg.payload
-				local last = payload and payload.hal and payload.hal.last_status and payload.hal.last_status.network_state
-				return last and last.status == 'running' and payload or nil
+				local dep = payload and payload.dependencies and payload.dependencies.network_state
+				return dep and dep.status == 'running' and payload or nil
 			end,
 			{ timeout = 0.5 })
-		eq(summary.hal.network_state, 'running')
+		eq(summary.dependencies.network_state.status, 'running')
 		eq(#calls, 0)
 		fibers.perform(sleep.sleep_op(0.05))
 		eq(#calls, 0)
@@ -349,7 +349,7 @@ function tests.test_network_config_available_starts_pending_apply()
 		eq(calls[1].opts.generation, 1)
 		eq(calls[1].opts.apply_id, 1)
 		eq(summary.apply.last_applied_rev, 21)
-		eq(summary.hal.network_config, 'available')
+		eq(summary.dependencies.network_config.status, 'available')
 		ok(summary.dependencies and summary.dependencies.network_config, 'network_config dependency expected')
 		eq(summary.dependencies.network_config.available, true)
 		view:close()
@@ -575,7 +575,8 @@ function tests.test_observed_state_updates_model_and_drift()
 				return msg and msg.payload and msg.payload.stats and msg.payload.stats.observations == 1 and msg.payload or nil
 			end,
 			{ timeout = 0.5 })
-		eq(summary.hal.network_state, 'available')
+		eq(summary.dependencies.network_state.status, 'running')
+			eq(summary.dependencies.network_state.available, true)
 		eq(summary.observed.last_subject, 'network')
 		eq(summary.drift.converged, true)
 		view:close()

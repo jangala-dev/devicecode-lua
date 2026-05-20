@@ -19,7 +19,8 @@ local supervision  = require 'services.ui.supervision'
 local config_watch = require 'devicecode.support.config_watch'
 local config_mod   = require 'services.ui.config'
 local service_events = require 'devicecode.support.service_events'
-local cap_deps_mod = require 'devicecode.support.capability_dependencies'
+local dep_slot    = require 'devicecode.support.dependency_slot'
+local dep_failure = require 'devicecode.support.dependency_failure'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -27,10 +28,7 @@ local M = {}
 local shallow_copy = tablex.shallow_copy
 
 local function dependency_snapshot(state)
-	if state and state.http_deps and type(state.http_deps.snapshot) == 'function' then
-		return state.http_deps:snapshot()
-	end
-	return {}
+	return dep_slot.snapshot(state, 'http_deps')
 end
 
 local function component_summary(components)
@@ -226,10 +224,7 @@ local function listener_needs_http_dependency(state, cfg)
 end
 
 local function terminate_http_deps(state, reason)
-	if state.http_deps and type(state.http_deps.terminate) == 'function' then
-		state.http_deps:terminate(reason or 'ui_http_dependency_closed')
-	end
-	state.http_deps = nil
+	dep_slot.terminate(state, 'http_deps', reason or 'ui_http_dependency_closed')
 	state.http_dep_cap_id = nil
 	return true
 end
@@ -242,23 +237,21 @@ local function ensure_http_dependency(state, cfg)
 
 	local cap_id = listener_http_cap_id(cfg)
 	if state.http_deps and state.http_dep_cap_id == cap_id then return true, nil end
-	terminate_http_deps(state, 'ui_http_dependency_replaced')
-	local deps, err = cap_deps_mod.open(state.conn, {
+	local ok, err = dep_slot.replace(state, 'http_deps', state.conn, {
 		{ key = 'http', class = 'http', id = cap_id, required = true },
 	}, {
+		replace_reason = 'ui_http_dependency_replaced',
 		changed_kind = 'http_dependency_changed',
 		closed_kind = 'http_dependency_closed',
 		queue_len = (state.params and state.params.dependency_queue_len) or 8,
 		full = 'drop_oldest',
 	})
-	if not deps then return nil, err or 'http_dependency_open_failed' end
-	state.http_deps = deps
+	if ok ~= true then return nil, err or 'http_dependency_open_failed' end
 	state.http_dep_cap_id = cap_id
 	return true, nil
 end
-
 local function http_dependency_available(state)
-	return state.http_deps == nil or state.http_deps:available('http') == true
+	return state.http_deps == nil or dep_slot.available(state, 'http_deps', 'http')
 end
 
 local function set_listener_waiting_for_http(state, reason)
@@ -546,7 +539,7 @@ local function reduce_event(state, ev)
 	elseif ev.kind == 'ui_component_done' then
 		local accepted = record_component_done(state, ev)
 		if not accepted then return {} end
-		if ev.component == 'http_listener' and state.http_deps and cap_deps_mod.is_no_route(ev.primary, ev.result, ev.report) then
+		if ev.component == 'http_listener' and state.http_deps and dep_failure.is_no_route(ev.primary, ev.result, ev.report) then
 			state.http_deps:classify_call_failure('http', ev.result, ev.primary)
 			state.listener_handle = nil
 			state.listener_config_key = nil
@@ -632,10 +625,8 @@ local function next_event_op(state)
 		end)
 	end
 
-	if state.http_deps then
-		local src = state.http_deps:event_source({ name = 'http' })
-		arms.http_dependency = src.recv_op()
-	end
+	local src = dep_slot.event_source(state, 'http_deps', { name = 'http' })
+	if src then arms.http_dependency = src.recv_op() end
 
 	return fibers.named_choice(arms):wrap(function (_, ev)
 		return ev

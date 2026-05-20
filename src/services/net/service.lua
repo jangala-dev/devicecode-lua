@@ -116,18 +116,6 @@ local function set_pending_apply_projection(s, intent, reason)
 	return s
 end
 
-
-local function update_hal_statuses(state)
-	state.model:update(function (s)
-		s.hal = s.hal or {}
-		s.hal.network_config = dependency_status(state, 'network_config')
-		s.hal.network_state = dependency_status(state, 'network_state')
-		s.hal.network_diagnostics = dependency_status(state, 'network_diagnostics')
-		return project_dependencies(state, s)
-	end)
-	mark_summary_dirty(state)
-end
-
 local function normalise_config_event(state, ev)
 	local generation = state.next_generation
 	local intent, err = config_mod.normalise(ev.payload, { rev = ev.rev, generation = generation })
@@ -204,7 +192,6 @@ local function accept_pending_intent(state, intent, reason)
 			last_error = reason,
 			last_result = nil,
 		}
-		s.hal.network_config = dependency_status(state, 'network_config')
 		s.stats.config_updates = (s.stats.config_updates or 0) + 1
 		return project_dependencies(state, s)
 	end)
@@ -244,7 +231,6 @@ local function start_apply_for_intent(state, intent, reason)
 			last_error = nil,
 			last_result = nil,
 		}
-		s.hal.network_config = dependency_status(state, 'network_config')
 		s.stats.apply_started = (s.stats.apply_started or 0) + 1
 		return project_dependencies(state, s)
 	end)
@@ -369,7 +355,6 @@ local function return_apply_to_pending(state, result, reason)
 		s.apply.completed_at = now()
 		s.apply.last_result = result and result.result or result
 		s.apply.last_error = reason
-		s.hal.network_config = dependency_status(state, 'network_config')
 		s.stats.apply_completed = (s.stats.apply_completed or 0) + 1
 		return project_dependencies(state, s)
 	end)
@@ -451,8 +436,6 @@ local function merge_observation(state, s, observed_event)
 		if id then s.observed.interfaces[id] = model_mod.deep_copy(observed_event.interface) end
 	end
 
-	s.hal = s.hal or {}
-	s.hal.network_state = 'available'
 	s.stats.observations = (s.stats.observations or 0) + 1
 	s.drift = drift.calculate(s, { now = now })
 	return project_dependencies(state, s)
@@ -486,7 +469,6 @@ local function ensure_observer_started(state, reason)
 	if not observer then
 		obs_log(state.svc, 'debug', { what = 'network_observation_not_started', reason = reason, err = tostring(err) })
 		state.model:update(function (m)
-			m.hal.network_state = 'unavailable'
 			m.observed.last_error = tostring(err)
 			return project_dependencies(state, m)
 		end)
@@ -497,7 +479,6 @@ local function ensure_observer_started(state, reason)
 	state.observer = observer
 	state.observed_sub = observer:subscription()
 	state.model:update(function (m)
-		m.hal.network_state = 'starting'
 		return project_dependencies(state, m)
 	end)
 	mark_summary_dirty(state)
@@ -523,7 +504,6 @@ local function handle_observation_started(state, ev)
 	local result = work.result or work
 	local ok = ev.status == 'ok' and work.ok == true and (result.ok == nil or result.ok == true)
 	state.model:update(function (m)
-		m.hal.network_state = ok and 'available' or 'unavailable'
 		if not ok then m.observed.last_error = result.err or ev.primary or 'observation_start_failed' end
 		return project_dependencies(state, m)
 	end)
@@ -535,17 +515,8 @@ end
 
 local function handle_dependency_status(state, ev)
 	local key = ev.key or ev.capability
-	local status = ev.status
-	local payload = ev.payload
-	if key then
-		status = state.cap_deps:status(key)
-		local dep = state.cap_deps:dependency(key)
-		payload = dep and dep.payload or payload
-	end
+	local status = key and state.cap_deps:status(key) or ev.status
 	state.model:update(function (m)
-		m.hal = m.hal or {}
-		m.hal[key] = status
-		m.hal.last_status[key] = { status = status, payload = model_mod.deep_copy(payload), updated_at = now() }
 		return project_dependencies(state, m)
 	end)
 	mark_summary_dirty(state)
@@ -602,7 +573,7 @@ local function handle_event(state, ev)
 	elseif ev.kind == 'observation_closed' then
 		state.observed_sub = nil
 		if state.observer then state.observer:terminate('observation_closed'); state.observer = nil end
-		state.model:update(function (m) m.hal.network_state = 'closed'; return project_dependencies(state, m) end)
+		state.model:update(function (m) return project_dependencies(state, m) end)
 		mark_summary_dirty(state)
 		return publish_snapshot(state)
 	elseif ev.kind == 'config_watch_closed' then
@@ -711,7 +682,6 @@ function M.run(scope, params)
 		obs_log(svc, 'info', { what = 'service_start' })
 	end
 
-	update_hal_statuses(state)
 	set_model_state(state, 'waiting_for_config', 'no_config')
 	reconcile_observer_admission(state, 'service_start')
 	publish_snapshot(state)

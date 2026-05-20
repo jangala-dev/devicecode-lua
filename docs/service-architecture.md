@@ -812,6 +812,15 @@ The helper owns status subscriptions, status normalisation, effective
 availability, route-missing inference and copied snapshots.  It does not start
 work, retry work, degrade services or make policy decisions.
 
+Use `devicecode.support.dependency_slot` for the repetitive owner-side mechanics
+of replacing, terminating and projecting one dependency manager field.  It owns
+boilerplate only; the coordinator still owns admission policy.
+
+Use `devicecode.support.dependency_failure` at service edges to normalise messy
+transport or backend failures into a canonical dependency failure.  Core helpers
+consume clean facts; they do not recursively search reports, child failures or
+stringified diagnostics.
+
 A service coordinator should use it like this:
 
 ```lua
@@ -829,9 +838,16 @@ end
 ```
 
 If a capability call returns `no_route`, do not convert that directly into a
-backend failure.  Record route-missing on the dependency and let the coordinator
-return the affected work to a pending or waiting state.  A later retained
-`available` status clears route-missing and wakes the coordinator.
+backend failure.  The edge that made the call should normalise it into a clean
+shape such as:
+
+```lua
+{ kind = 'dependency_failure', err = 'no_route', dependency_key = key }
+```
+
+Record route-missing on the dependency and let the coordinator return the
+affected work to a pending or waiting state.  A later retained `available`
+status clears route-missing and wakes the coordinator.
 
 The intended split is:
 

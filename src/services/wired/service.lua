@@ -12,7 +12,7 @@ local topics = require 'services.wired.topics'
 local publisher = require 'services.wired.publisher'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local config_watch = require 'devicecode.support.config_watch'
-local cap_deps_mod = require 'devicecode.support.capability_dependencies'
+local dep_slot = require 'devicecode.support.dependency_slot'
 local dependency_mod = require 'services.wired.dependencies'
 local tablex = require 'shared.table'
 
@@ -351,30 +351,24 @@ end
 
 
 local function terminate_provider_deps(state, reason)
-	if state.provider_deps and type(state.provider_deps.terminate) == 'function' then
-		state.provider_deps:terminate(reason or 'wired_provider_dependencies_closed')
-	end
-	state.provider_deps = nil
+	dep_slot.terminate(state, 'provider_deps', reason or 'wired_provider_dependencies_closed')
 	return true
 end
 
 local function open_provider_deps(state, intent)
-	terminate_provider_deps(state, 'wired_provider_dependencies_replaced')
 	local specs = dependency_mod.provider_dependencies(intent)
-	if #specs == 0 then return true, nil end
-	local deps, err = cap_deps_mod.open(state.conn, specs, {
+	local ok, err = dep_slot.replace(state, 'provider_deps', state.conn, specs, {
+		replace_reason = 'wired_provider_dependencies_replaced',
 		changed_kind = 'wired_dependency_changed',
 		closed_kind = 'wired_dependency_closed',
 		queue_len = state.dependency_queue_len or 8,
 		full = 'drop_oldest',
 	})
-	if not deps then return nil, err or 'wired_provider_dependencies_open_failed' end
-	state.provider_deps = deps
+	if ok ~= true then return nil, err or 'wired_provider_dependencies_open_failed' end
 	return true, nil
 end
-
 local function dependency_snapshot(state)
-	return state.provider_deps and state.provider_deps:snapshot() or {}
+	return dep_slot.snapshot(state, 'provider_deps')
 end
 
 local function apply_config(state, ev)
@@ -465,10 +459,8 @@ function M.next_event_op(state)
 		net = state.net_watch:recv_op():wrap(function (ev, err) return { kind = ev and 'net_segments_changed' or 'net_segments_closed', ev = ev, err = err } end),
 		provider = state.provider_watch:recv_op():wrap(function (ev, err) return { kind = ev and 'provider_changed' or 'provider_closed', ev = ev, err = err } end),
 	}
-	if state.provider_deps then
-		local src = state.provider_deps:event_source({ name = 'dependencies' })
-		arms.dependencies = src.recv_op()
-	end
+	local src = dep_slot.event_source(state, 'provider_deps', { name = 'dependencies' })
+	if src then arms.dependencies = src.recv_op() end
 	return fibers.named_choice(arms):wrap(function (_, ev) return ev end)
 end
 

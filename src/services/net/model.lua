@@ -41,13 +41,6 @@ function M.initial(service_id)
 
 		pending = {},
 
-		hal = {
-			network_config = 'not_configured',
-			network_state = 'not_configured',
-			network_diagnostics = 'not_configured',
-			last_status = {},
-		},
-
 		dependencies = {},
 
 		observed = {

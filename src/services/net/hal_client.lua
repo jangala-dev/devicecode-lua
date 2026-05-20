@@ -7,6 +7,7 @@
 local op = require 'fibers.op'
 local tablex = require 'shared.table'
 local cap_sdk = require 'services.hal.sdk.cap'
+local dep_failure = require 'devicecode.support.dependency_failure'
 
 local M = {}
 local Client = {}
@@ -35,8 +36,13 @@ local function failure_result(reason, fallback, code)
 	return out
 end
 
-local function reply_to_result(reply, err)
+local function reply_to_result(reply, err, dependency_key)
 	if not reply then
+		local dep = dep_failure.from_no_route(dependency_key, err, {
+			err = 'no_route',
+			source = 'network_hal_call',
+		})
+		if dep then return dep end
 		return failure_result({ err = 'network HAL call failed', detail = err }, 'network HAL call failed')
 	end
 
@@ -89,7 +95,7 @@ function Client:apply_intent_op(intent, opts)
 		return self.network_config:call_control_op('apply', {
 			intent = intent,
 			opts = opts,
-		}, opts):wrap(reply_to_result)
+		}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_config') end)
 	end
 
 	if self.dry_run == true then
@@ -117,7 +123,7 @@ end
 function Client:apply_live_weights_op(req, opts)
 	opts = opts or {}
 	if self.network_config and type(self.network_config.call_control_op) == 'function' then
-		return self.network_config:call_control_op('apply_live_weights', req or {}, opts):wrap(reply_to_result)
+		return self.network_config:call_control_op('apply_live_weights', req or {}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_config') end)
 	end
 	return op.always({ ok = false, err = 'network-config HAL capability not configured', reason = { code = 'missing_network_config_hal' } })
 end
@@ -125,7 +131,7 @@ end
 function Client:apply_shaping_op(req, opts)
 	opts = opts or {}
 	if self.network_config and type(self.network_config.call_control_op) == 'function' then
-		return self.network_config:call_control_op('apply_shaping', req or {}, opts):wrap(reply_to_result)
+		return self.network_config:call_control_op('apply_shaping', req or {}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_config') end)
 	end
 	return op.always({ ok = false, err = 'network-config HAL capability not configured', reason = { code = 'missing_network_config_hal' } })
 end
@@ -133,7 +139,7 @@ end
 function Client:speedtest_op(req, opts)
 	opts = opts or {}
 	if self.network_diagnostics and type(self.network_diagnostics.call_control_op) == 'function' then
-		return self.network_diagnostics:call_control_op('speedtest', req or {}, opts):wrap(reply_to_result)
+		return self.network_diagnostics:call_control_op('speedtest', req or {}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_diagnostics') end)
 	end
 	return op.always({ ok = false, err = 'network-diagnostics HAL capability not configured', reason = { code = 'missing_network_diagnostics_hal' } })
 end
@@ -141,7 +147,7 @@ end
 function Client:start_observation_op(opts)
 	opts = opts or {}
 	if self.network_state and type(self.network_state.call_control_op) == 'function' then
-		return self.network_state:call_control_op('watch', opts, opts):wrap(reply_to_result)
+		return self.network_state:call_control_op('watch', opts, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_state') end)
 	end
 	return op.always({
 		ok = false,

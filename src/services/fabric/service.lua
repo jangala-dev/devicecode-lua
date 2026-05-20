@@ -30,7 +30,8 @@ local topics      = require 'services.fabric.topics'
 local transfer_client = require 'services.fabric.transfer_client'
 local service_base = require 'devicecode.service_base'
 local request_owner = require 'devicecode.support.request_owner'
-local cap_deps_mod = require 'devicecode.support.capability_dependencies'
+local dep_slot    = require 'devicecode.support.dependency_slot'
+local dep_failure = require 'devicecode.support.dependency_failure'
 local fabric_deps = require 'services.fabric.dependencies'
 local tablex       = require 'shared.table'
 
@@ -209,15 +210,7 @@ local function normalise_link_specs(params)
 		end
 
 		apply_runtime_defaults(params, copy)
-
-		local dep = fabric_deps.transport_dependency_for_link(copy, nil)
-		if dep ~= nil then
-			copy.dependency_key = dep.key
-			if type(copy.transport) == 'table' and copy.transport.dependency_key == nil then
-				copy.transport = shallow_copy(copy.transport)
-				copy.transport.dependency_key = dep.key
-			end
-		end
+		fabric_deps.assign_transport_dependency(copy, override)
 
 		out[#out + 1] = copy
 		out[id] = copy
@@ -319,43 +312,17 @@ local function record_link_done(self, ev)
 	return accepted, reject_reason
 end
 
-local function direct_no_route(v)
-	if v == 'no_route' then return true end
-	if type(v) ~= 'table' then return false end
-	return v.err == 'no_route'
-		or v.detail == 'no_route'
-		or v.reason == 'no_route'
-		or v.code == 'no_route'
-end
-
 local function canonical_dependency_route_failure(ev)
 	if type(ev) ~= 'table' then return nil end
 	local primary = ev.primary
-	local dependency_key = ev.dependency_key
-	if type(primary) == 'table' and primary.dependency_key ~= nil then
-		dependency_key = primary.dependency_key
-	end
-	if dependency_key == nil then return nil end
-	if type(primary) == 'table' and primary.kind == 'dependency_failure' and direct_no_route(primary) then
-		local out = shallow_copy(primary)
-		out.kind = 'dependency_failure'
-		out.err = 'no_route'
-		out.dependency_key = dependency_key
-		out.link_id = out.link_id or ev.link_id
-		return out
-	end
-	if direct_no_route(primary) then
-		return {
-			kind = 'dependency_failure',
-			err = 'no_route',
-			dependency_key = dependency_key,
-			link_id = ev.link_id,
-			detail = primary,
-		}
-	end
-	return nil
+	if not dep_failure.is(primary) or not dep_failure.is_no_route(primary) then return nil end
+	local out = shallow_copy(primary)
+	out.kind = 'dependency_failure'
+	out.err = 'no_route'
+	out.dependency_key = dep_failure.key(out)
+	out.link_id = out.link_id or ev.link_id
+	return out
 end
-
 local function default_policy(_, ev)
 	if ev.kind ~= 'link_done' then
 		return { action = 'continue' }
@@ -912,10 +879,7 @@ end
 local start_generation
 
 local function terminate_generation_deps(state, reason)
-	if state.generation_deps and type(state.generation_deps.terminate) == 'function' then
-		state.generation_deps:terminate(reason or 'fabric_generation_dependency_closed')
-	end
-	state.generation_deps = nil
+	dep_slot.terminate(state, 'generation_deps', reason or 'fabric_generation_dependency_closed')
 	state.generation_dependency_specs = nil
 	return true
 end
@@ -925,24 +889,19 @@ local function open_generation_deps(state, compiled)
 	if state.link_runner ~= nil and not state.private_link_runtime then return true, nil end
 	local specs = fabric_deps.transport_dependencies(compiled, state.link_overrides)
 	if #specs == 0 then return true, nil end
-	local deps, err = cap_deps_mod.open(state.conn, specs, {
+	local ok, err = dep_slot.replace(state, 'generation_deps', state.conn, specs, {
+		replace_reason = 'fabric_generation_dependency_replaced',
 		changed_kind = 'fabric_dependency_changed',
 		closed_kind = 'fabric_dependency_closed',
 		queue_len = state.dependency_queue_len or 8,
 		full = 'drop_oldest',
 	})
-	if not deps then return nil, err or 'fabric_dependency_open_failed' end
-	state.generation_deps = deps
+	if ok ~= true then return nil, err or 'fabric_dependency_open_failed' end
 	state.generation_dependency_specs = specs
 	return true, nil
 end
-
 local function all_generation_deps_available(state)
-	if state.generation_deps == nil then return true end
-	for _, spec in ipairs(state.generation_dependency_specs or {}) do
-		if state.generation_deps:available(spec.key) ~= true then return false end
-	end
-	return true
+	return dep_slot.all_available(state, 'generation_deps', state.generation_dependency_specs)
 end
 
 local function publish_waiting_for_transport(state, reason)
@@ -1043,27 +1002,13 @@ local function dependency_key_exists(state, key)
 	return key ~= nil and state.generation_deps ~= nil and state.generation_deps:dependency(key) ~= nil
 end
 
-local function transport_dependency_key_for_generation_failure(state, ev)
-	local primary = ev and ev.primary
-	if type(primary) == 'table' and dependency_key_exists(state, primary.dependency_key) then
-		return primary.dependency_key
-	end
-	if dependency_key_exists(state, ev and ev.dependency_key) then
-		return ev.dependency_key
-	end
-	return nil
-end
-
 local function generation_route_failure(state, ev)
 	local primary = ev and ev.primary
-	if type(primary) ~= 'table' then return nil end
-	if primary.kind ~= 'dependency_failure' then return nil end
-	if not cap_deps_mod.is_no_route(primary) then return nil end
-	local dep_key = transport_dependency_key_for_generation_failure(state, ev)
-	if dep_key == nil then return nil end
+	if not dep_failure.is(primary) or not dep_failure.is_no_route(primary) then return nil end
+	local dep_key = dep_failure.key(primary)
+	if not dependency_key_exists(state, dep_key) then return nil end
 	return dep_key, primary
 end
-
 local function handle_generation_done(state, ev)
 	local active = state.active
 	if not active or ev.config_generation ~= active.config_generation then
@@ -1158,9 +1103,8 @@ local function next_shell_event_op(state)
 			end,
 		},
 	}
-	if state.generation_deps then
-		sources[#sources + 1] = state.generation_deps:event_source({ name = 'dependencies' })
-	end
+	local deps_source = dep_slot.event_source(state, 'generation_deps', { name = 'dependencies' })
+	if deps_source then sources[#sources + 1] = deps_source end
 	return priority_event.sources_op {
 		label   = 'fabric.service.shell',
 		pending = state.pending_events,
@@ -1314,7 +1258,7 @@ M.default_policy = default_policy
 M.make_service_caps = make_service_caps
 M.Service = Service
 M._test = {
-	transport_dependency_key_for_generation_failure = transport_dependency_key_for_generation_failure,
+	generation_route_failure = generation_route_failure,
 }
 
 return M

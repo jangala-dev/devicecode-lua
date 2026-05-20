@@ -27,7 +27,7 @@ function M.transport_dependency_for_link(link, override)
 	if type(t) ~= 'table' then return nil end
 	if not (non_empty(t.source) and non_empty(t.class) and non_empty(t.id)) then return nil end
 	return {
-		key = M.transport_dependency_key(link.link_id or link.id),
+		key = link.dependency_key or M.transport_dependency_key(link.link_id or link.id),
 		raw_kind = 'host',
 		source = t.source,
 		class = t.class,
@@ -35,6 +35,19 @@ function M.transport_dependency_for_link(link, override)
 		required = true,
 		link_id = link.link_id or link.id,
 	}
+end
+
+function M.assign_transport_dependency(link, override)
+	local dep = M.transport_dependency_for_link(link, override)
+	if dep == nil then return link, nil end
+	link.dependency_key = dep.key
+	if type(link.transport) == 'table' then
+		local t = {}
+		for k, v in pairs(link.transport) do t[k] = v end
+		t.dependency_key = dep.key
+		link.transport = t
+	end
+	return link, dep
 end
 
 function M.transport_dependencies(compiled, overrides)

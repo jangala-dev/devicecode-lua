@@ -27,7 +27,7 @@ function T.override_transport_bypasses_dependency()
 end
 
 
-function T.extracts_only_explicit_transport_dependency_key_from_generation_failure()
+function T.accepts_only_canonical_dependency_failure_from_generation_failure()
 	local service = require 'services.fabric.service'
 	local state = {
 		generation_deps = {
@@ -37,7 +37,7 @@ function T.extracts_only_explicit_transport_dependency_key_from_generation_failu
 			end,
 		},
 	}
-	local key = service._test.transport_dependency_key_for_generation_failure(state, {
+	local key, failure = service._test.generation_route_failure(state, {
 		primary = {
 			kind = 'dependency_failure',
 			err = 'no_route',
@@ -45,9 +45,10 @@ function T.extracts_only_explicit_transport_dependency_key_from_generation_failu
 		},
 	})
 	assert(key == 'transport:uart0')
+	assert(failure.dependency_key == 'transport:uart0')
 end
 
-function T.does_not_extract_transport_dependency_key_from_legacy_or_nested_shapes()
+function T.rejects_legacy_or_nested_dependency_failure_shapes()
 	local service = require 'services.fabric.service'
 	local state = {
 		generation_deps = {
@@ -57,11 +58,11 @@ function T.does_not_extract_transport_dependency_key_from_legacy_or_nested_shape
 			end,
 		},
 	}
-	local key = service._test.transport_dependency_key_for_generation_failure(state, {
+	local key = service._test.generation_route_failure(state, {
 		primary = 'link uart0 failed: no_route [dependency_key=transport:uart0]',
 	})
 	assert(key == nil)
-	key = service._test.transport_dependency_key_for_generation_failure(state, {
+	key = service._test.generation_route_failure(state, {
 		report = { children = { { primary = { dependency_key = 'transport:uart0', err = 'no_route' } } } },
 	})
 	assert(key == nil)
@@ -89,8 +90,7 @@ function T.default_policy_preserves_structured_dependency_key()
 		kind = 'link_done',
 		status = 'failed',
 		link_id = 'uart0',
-		dependency_key = 'transport:uart0',
-		primary = { err = 'no_route' },
+		primary = { kind = 'dependency_failure', err = 'no_route', dependency_key = 'transport:uart0' },
 	})
 	assert(decision.action == 'fail')
 	assert(type(decision.reason) == 'table')

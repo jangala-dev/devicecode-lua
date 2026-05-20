@@ -14,6 +14,7 @@ local pulse       = require 'fibers.pulse'
 local cap_sdk     = require 'services.hal.sdk.cap'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local queue       = require 'devicecode.support.queue'
+local dep_failure = require 'devicecode.support.dependency_failure'
 local tablex      = require 'shared.table'
 
 local M = {}
@@ -177,25 +178,8 @@ local function record_watch_failed(dep, err, now)
 	dep.updated_at = now
 end
 
-local function has_no_route(v, seen)
-	if v == nil then return false end
-	local tv = type(v)
-	if tv == 'string' then return v == 'no_route' or v:find('no_route', 1, true) ~= nil end
-	if tv ~= 'table' then return false end
-
-	seen = seen or {}
-	if seen[v] then return false end
-	seen[v] = true
-
-	if v.err == 'no_route' or v.detail == 'no_route' or v.reason == 'no_route' or v.code == 'no_route' then
-		return true
-	end
-
-	return has_no_route(v.err, seen)
-		or has_no_route(v.detail, seen)
-		or has_no_route(v.reason, seen)
-		or has_no_route(v.code, seen)
-		or has_no_route(v.result, seen)
+local function has_no_route(v)
+	return dep_failure.is_no_route(v)
 end
 
 local function dep_public_snapshot(dep)
@@ -461,8 +445,7 @@ function M.is_no_route(...)
 end
 
 function M.classify_call_failure(reply, err)
-	if M.is_no_route(reply, err) then return 'route_missing', err or reply or 'no_route' end
-	return 'failure', err or reply
+	return dep_failure.classify_call_failure(reply, err)
 end
 
 function M.open(conn, specs, opts)
