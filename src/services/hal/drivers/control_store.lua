@@ -96,22 +96,22 @@ local function shell_main(self)
 		finalise_shell_scope(self, shell_scope)
 	end)
 
-	local eok1, eerr1 = fibers.perform(emit_op(self.emit_ch, 'control_store', self.id, 'meta', 'details', {
+	local eok1, eerr1 = fibers.perform(emit_op(self.emit_ch, 'control-store', self.id, 'meta', 'details', {
 		root = self.root,
-		kind = 'control_store',
+		kind = 'control-store',
 	}))
 	if eok1 ~= true then
 		error(tostring(eerr1 or 'initial meta emit failed'), 0)
 	end
 
-	local eok2, eerr2 = fibers.perform(emit_op(self.emit_ch, 'control_store', self.id, 'state', 'status', {
+	local eok2, eerr2 = fibers.perform(emit_op(self.emit_ch, 'control-store', self.id, 'state', 'status', {
 		state = 'available',
 	}))
 	if eok2 ~= true then
 		error(tostring(eerr2 or 'initial state emit failed'), 0)
 	end
 
-	control_loop.run_request_loop(self.control_ch, methods_for(self), self.logger, 'control_store')
+	control_loop.run_request_loop(self.control_ch, methods_for(self), self.logger, 'control-store')
 end
 
 function Driver:capabilities_op(emit_ch)

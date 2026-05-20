@@ -99,25 +99,21 @@ local function normalise_event_routes(events, where)
 	return out
 end
 
-local function is_raw_cap_rpc_topic(t)
-	return type(t) == 'table'
-		and (t[1] == 'raw')
-		and type(t[2]) == 'string' and t[2] ~= ''
-		and type(t[3]) == 'string' and t[3] ~= ''
-		and t[4] == 'cap'
-		and type(t[5]) == 'string' and t[5] ~= ''
-		and type(t[6]) == 'string' and t[6] ~= ''
-		and t[7] == 'rpc'
-		and type(t[8]) == 'string' and t[8] ~= ''
-		and t[9] == nil
+local function opt_target(v, where)
+	if v == nil then return nil end
+	if type(v) ~= 'string' or v == '' then
+		error(where .. ': fabric_stage target must be a non-empty string', 0)
+	end
+	return v
 end
 
-local function assert_raw_cap_rpc_topic(t, where)
-	local topic = assert_topic(t, where)
-	if not is_raw_cap_rpc_topic(topic) then
-		error(where .. ': fabric_stage receiver must use raw/<kind>/<source>/cap/<class>/<id>/rpc/<method>', 0)
+local function opt_pos_int(v, where, default)
+	if v == nil then return default end
+	local n = tonumber(v)
+	if type(n) ~= 'number' or n <= 0 or n % 1 ~= 0 then
+		error(where .. ': fabric_stage chunk_size must be a positive integer', 0)
 	end
-	return topic
+	return n
 end
 
 local function normalise_actions(actions, where)
@@ -133,8 +129,8 @@ local function normalise_actions(actions, where)
 		local public_name = public_method_name(action_name)
 
 		if type(spec) == 'table' then
-			if spec[1] ~= nil and spec.kind == nil and spec.call_topic == nil and spec.receiver == nil then
-				error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic or receiver', 0)
+			if spec[1] ~= nil and spec.kind == nil and spec.call_topic == nil then
+				error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic', 0)
 			end
 			local kind = spec.kind or 'rpc'
 
@@ -155,11 +151,21 @@ local function normalise_actions(actions, where)
 				if spec.timeout ~= nil then
 					error(where .. ': action ' .. action_name .. ' uses deprecated timeout; use timeout_s', 0)
 				end
+
+				if spec.receiver ~= nil then
+					error(where .. ': action ' .. action_name .. ' uses deprecated receiver; use target', 0)
+				end
+				local target = opt_target(spec.target, where .. ': action ' .. action_name .. ' target')
+				if target == nil then
+					error(where .. ': action ' .. action_name .. ' requires fabric_stage target', 0)
+				end
+
 				out[public_name] = {
 					name = public_name,
 					kind = 'fabric_stage',
 					link_id = spec.link_id,
-					receiver = assert_raw_cap_rpc_topic(spec.receiver, where .. ': action ' .. action_name .. ' receiver'),
+					target = target,
+					chunk_size = opt_pos_int(spec.chunk_size, where .. ': action ' .. action_name .. ' chunk_size', nil),
 					artifact_store = spec.artifact_store or 'main',
 					timeout = tonumber(spec.timeout_s) or nil,
 				}
@@ -167,7 +173,7 @@ local function normalise_actions(actions, where)
 				error(where .. ': unsupported action kind for ' .. action_name .. ': ' .. tostring(kind), 0)
 			end
 		else
-			error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic or receiver', 0)
+			error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic', 0)
 		end
 	end
 
@@ -257,11 +263,14 @@ local function default_components()
 			events = mcu_schema.member_event_topics('mcu'),
 			actions = {
 				['restart'] = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'control', 'main', 'restart') },
+				['prepare-update'] = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'updater', 'main', 'prepare-update') },
 				['stage-update'] = {
 					kind = 'fabric_stage',
-					receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage'),
+					target = 'updater/main',
+					chunk_size = 2048,
 					artifact_store = 'main',
 				},
+				['commit-update'] = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'updater', 'main', 'commit-update') },
 			},
 		}),
 	}

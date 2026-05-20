@@ -53,7 +53,7 @@ function tests.test_catalogue_rejects_transitional_action_and_component_aliases(
 	cfg.components.mcu.actions.restart = topics.raw_member_cap_rpc('mcu', 'control', 'main', 'restart')
 	local cat, err = config.to_catalogue(cfg)
 	assert_nil(cat)
-	if not tostring(err):find('must be a table with kind and call_topic or receiver', 1, true) then
+	if not tostring(err):find('must be a table with kind and call_topic', 1, true) then
 		fail('unexpected error: ' .. tostring(err))
 	end
 
@@ -74,24 +74,35 @@ function tests.test_catalogue_rejects_transitional_action_and_component_aliases(
 	end
 end
 
-function tests.test_fabric_stage_receiver_requires_raw_cap_rpc_topic()
+function tests.test_fabric_stage_requires_target_and_rejects_receiver()
 	local cfg = sample_config()
 	cfg.components.mcu.actions['stage-update'] = {
 		kind = 'fabric_stage',
-		receiver = { 'raw', 'member', 'mcu', 'rpc', 'stage' },
 	}
 	local cat, err = config.to_catalogue(cfg)
 	assert_nil(cat)
-	if not tostring(err):find('raw/<kind>/<source>/cap/<class>/<id>/rpc/<method>', 1, true) then
+	if not tostring(err):find('requires fabric_stage target', 1, true) then
 		fail('unexpected error: ' .. tostring(err))
 	end
 
-	cfg.components.mcu.actions['stage-update'].receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage')
+	cfg.components.mcu.actions['stage-update'] = {
+		kind = 'fabric_stage',
+		receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage'),
+	}
+	cat, err = config.to_catalogue(cfg)
+	assert_nil(cat)
+	if not tostring(err):find('deprecated receiver; use target', 1, true) then
+		fail('unexpected error: ' .. tostring(err))
+	end
+
+	cfg.components.mcu.actions['stage-update'] = {
+		kind = 'fabric_stage',
+		target = 'updater/main',
+	}
 	cat, err = config.to_catalogue(cfg)
 	assert_nil(err)
 	assert_not_nil(cat.components.mcu.actions['stage-update'])
 end
-
 function tests.test_catalogue_material_comparison_is_stable_for_copies()
 	local a = assert(config.to_catalogue(sample_config()))
 	local b = catalogue.copy(a)

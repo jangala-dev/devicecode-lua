@@ -600,6 +600,7 @@ local function transfer_params_from(params, admission_rx, session_rx, outbound, 
 	t.outbound = outbound
 	t.state_tx = state_tx
 	t.component_name = 'transfer_manager'
+	t.receive_targets = t.receive_targets or params.receive_targets
 
 	return t
 end

@@ -46,7 +46,7 @@ function T.start_apply_config_and_stop_round_trip()
 
     local ev = recv_or_fail(dev_ev_ch)
     assert(ev.event_type == 'added')
-    assert(ev.class == 'control_store')
+    assert(ev.class == 'control-store')
     assert(ev.id == 'main')
     assert(type(ev.capabilities) == 'table' and #ev.capabilities == 1)
 
@@ -98,7 +98,7 @@ function T.cap_emit_channel_receives_initial_meta_and_state()
 
     assert(by_mode.meta ~= nil)
     assert(by_mode.state ~= nil)
-    assert(by_mode.meta.class == 'control_store')
+    assert(by_mode.meta.class == 'control-store')
     assert(by_mode.meta.id == 'main')
     assert(by_mode.meta.key == 'details')
     assert(by_mode.meta.data.root == root)

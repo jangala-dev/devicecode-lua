@@ -398,6 +398,23 @@ local function run_outbound_call(call)
 
 		call.mark_frame_admitted()
 
+		if call.reply_policy == 'sent-is-accepted' then
+			local payload = {
+				accepted = true,
+				frame_sent = true,
+				call_id = call.id,
+			}
+
+			call.owner:reply_once(payload)
+
+			return {
+				call_id = call.id,
+				ok = true,
+				frame_sent = true,
+				sent_is_accepted = true,
+			}
+		end
+
 		local which, reply, recv_err = fibers.perform(fibers.named_choice {
 			reply   = call.reply_rx:recv_op(),
 			timeout = sleep.sleep_op(call.timeout),
@@ -428,12 +445,7 @@ local function run_outbound_call(call)
 		end
 
 		if reply.ok then
-			call.owner:reply_once({
-				call_id = call.id,
-				payload = reply.payload,
-				frame   = reply,
-				session = reply.session,
-			})
+			call.owner:reply_once(reply.payload)
 
 			return {
 				call_id    = call.id,
@@ -488,9 +500,7 @@ local function start_outbound_call(self, ev)
 	end
 
 	local reply_tx, reply_rx = mailbox.new(1, { full = 'reject_newest' })
-	local owner = request_owner.new(ev.request or ev, {
-		reply_payload_only = ev.reply_payload_only,
-	})
+	local owner = request_owner.new(ev.request or ev)
 
 	local rec = {
 		id             = id,
@@ -507,6 +517,7 @@ local function start_outbound_call(self, ev)
 		payload  = ev.payload,
 		timeout  = ev.timeout or (rule and rule.timeout) or self._default_call_timeout,
 		owner    = owner,
+		reply_policy = ev.reply_policy or (rule and rule.reply_policy) or 'reply-required',
 		caps     = make_bridge_caps(self, rec.session),
 		reply_tx = reply_tx,
 		reply_rx = reply_rx,

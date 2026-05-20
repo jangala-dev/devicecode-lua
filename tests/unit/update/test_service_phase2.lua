@@ -6,15 +6,16 @@ local busmod = require 'bus'
 local service = require 'services.update.service'
 local topics = require 'services.update.topics'
 local probe = require 'tests.support.bus_probe'
-local store_mod = require 'services.update.job_store_cap'
+local store_mod = require 'services.update.job_store_memory'
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a,b,msg) if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end end
 local function assert_true(v,msg) if v ~= true then fail(msg or ('expected true, got '..tostring(v))) end end
 local function assert_not_nil(v,msg) if v == nil then fail(msg or 'expected non-nil') end end
 local function start_service(root_scope, params)
-  local bus = busmod.new(); local svc_conn = bus:connect(); local caller = bus:connect(); local child = assert(root_scope:child())
-  local ok, err = child:spawn(function (scope) params=params or {}; params.conn=svc_conn; params.service_id=params.service_id or 'update'; params.watch_config=false; service.run(scope, params) end)
+  params = params or {}
+  local bus = params.bus or busmod.new(); local svc_conn = bus:connect(); local caller = bus:connect(); local child = assert(root_scope:child())
+  local ok, err = child:spawn(function (scope) params=params or {}; params.conn=svc_conn; params.service_id=params.service_id or 'update'; params.watch_config=false; if params.job_store == nil and params.job_store_kind == nil then params.job_store_kind='memory' end; service.run(scope, params) end)
   assert_true(ok, err); fibers.perform(sleep.sleep_op(0.02)); return child, caller, bus
 end
 function tests.test_manager_create_job_is_scoped_and_updates_status_model()
@@ -41,8 +42,8 @@ function tests.test_active_completion_releases_slot_before_later_start_admission
       return op.always({ job=job.job_id }, nil)
     end
     local child, caller = start_service(root_scope, { config={ schema='devicecode.update/1', components={ { component='cm5' } } }, backend=active_backend })
-    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5' }, { timeout=0.5 }))
-    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j2', component='cm5' }, { timeout=0.5 }))
+    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5', artifact_ref='artifact-j1' }, { timeout=0.5 }))
+    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j2', component='cm5', artifact_ref='artifact-j2' }, { timeout=0.5 }))
     assert_true(probe.wait_until(function() local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 }); return status and status.snapshot.jobs.by_id.j1 and status.snapshot.jobs.by_id.j2 end, { timeout=0.5, interval=0.01 }), 'expected both jobs to be visible')
     local accepted = assert(caller:call(topics.update_manager_rpc('start-job'), { job_id='j1' }, { timeout=0.5 })); assert_eq(accepted.accepted, true); fibers.perform(started_first:wait_op())
     local busy, busy_err = caller:call(topics.update_manager_rpc('start-job'), { job_id='j2' }, { timeout=0.2 }); assert_eq(busy, nil); assert_eq(busy_err, 'slot_busy')
@@ -76,10 +77,10 @@ function tests.test_commit_job_persists_awaiting_return_before_reconcile()
 
     local child, caller = start_service(root_scope, {
       config={ schema='devicecode.update/1', components={ { component='cm5' } } },
-      job_store = store_mod.wrap(backend),
+      job_store = backend,
       backend = active_backend,
     })
-    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5' }, { timeout=0.5 }))
+    assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5', artifact_ref='artifact-j1' }, { timeout=0.5 }))
     assert_true(probe.wait_until(function()
       local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
       return status and status.snapshot.jobs.by_id.j1 ~= nil
@@ -169,12 +170,12 @@ function tests.test_slow_job_runtime_load_keeps_public_service_responsive()
     end
     local child, caller = start_service(root_scope, {
       config={ schema='devicecode.update/1', components={ { component='cm5' } } },
-      job_store = store_mod.wrap(backend),
+      job_store = backend,
     })
     local status = assert(caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.5 }))
     assert_eq(status.ok, true)
     assert_eq(status.snapshot.state, 'starting')
-    local created, create_err = caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5' }, { timeout=0.5 })
+    local created, create_err = caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5', artifact_ref='artifact-j1' }, { timeout=0.5 })
     assert_eq(created, nil)
     assert_eq(create_err, 'job_runtime_not_ready')
     load_gate:signal()
@@ -183,6 +184,85 @@ function tests.test_slow_job_runtime_load_keeps_public_service_responsive()
       return s and s.snapshot and s.snapshot.state == 'running'
     end, { timeout=0.6, interval=0.01 }), 'service should become running after job load')
     child:cancel('test complete')
+  end)
+end
+
+local function bind_fake_control_store(scope, bus, backing)
+  backing = backing or {}
+  local conn = bus:connect()
+  local methods = { 'list', 'get', 'put', 'delete' }
+  for _, method in ipairs(methods) do
+    local loop_method = method
+    local ep = assert(conn:bind({ 'cap', 'control-store', 'update', 'rpc', loop_method }))
+    scope:spawn(function ()
+      while true do
+        local req = fibers.perform(ep:recv_op())
+        if req == nil then return end
+        local p = req.payload or {}
+        if loop_method == 'list' then
+          local keys = {}
+          local prefix = p.prefix or ''
+          for k in pairs(backing) do
+            if k:sub(1, #prefix) == prefix then keys[#keys + 1] = k end
+          end
+          table.sort(keys)
+          req:reply({ ok = true, reason = keys })
+        elseif loop_method == 'get' then
+          if backing[p.key] == nil then req:reply({ ok = false, reason = 'not found' }) else req:reply({ ok = true, reason = backing[p.key] }) end
+        elseif loop_method == 'put' then
+          backing[p.key] = p.data
+          req:reply({ ok = true, reason = nil })
+        elseif loop_method == 'delete' then
+          backing[p.key] = nil
+          req:reply({ ok = true, reason = nil })
+        end
+      end
+    end)
+  end
+  return backing
+end
+
+function tests.test_default_job_store_uses_control_store_and_reloads_after_restart()
+  fibers.run(function (root_scope)
+    local bus = busmod.new()
+    local control_scope = assert(root_scope:child())
+    local backing = bind_fake_control_store(control_scope, bus, {})
+    local child, caller = start_service(root_scope, {
+      bus = bus,
+      job_store_kind = 'control-store',
+      config = { schema='devicecode.update/1', components={ { component='cm5' } } },
+    })
+    assert_true(probe.wait_until(function()
+      local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      return status and status.snapshot and status.snapshot.state == 'running'
+    end, { timeout=0.5, interval=0.01 }), 'expected control-store job runtime to become ready')
+    local created, create_err = caller:call(topics.update_manager_rpc('create-job'), { job_id='j-persist', component='cm5', artifact_ref='artifact-j-persist' }, { timeout=0.5 })
+    assert_not_nil(created, create_err)
+    assert_eq(created.ok, true)
+    assert_true(probe.wait_until(function()
+      local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      return status and status.snapshot and status.snapshot.jobs.by_id['j-persist'] ~= nil
+    end, { timeout=0.5, interval=0.01 }), 'expected first service to persist job')
+    child:cancel('first service complete')
+    fibers.perform(child:join_op())
+
+    local saw_key_after_first = false
+    for k in pairs(backing) do if k:sub(1, 11) == 'update-job-' then saw_key_after_first = true end end
+    assert_true(saw_key_after_first, 'expected first service to persist job in control-store keyspace')
+
+    local child2, caller2 = start_service(root_scope, {
+      bus = bus,
+      job_store_kind = 'control-store',
+      config = { schema='devicecode.update/1', components={ { component='cm5' } } },
+    })
+    assert_true(probe.wait_until(function()
+      local status = caller2:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      return status and status.snapshot and status.snapshot.jobs.by_id['j-persist'] ~= nil
+    end, { timeout=0.5, interval=0.01 }), 'expected restarted service to reload persisted job')
+    child2:cancel('test complete')
+    fibers.perform(child2:join_op())
+    control_scope:cancel('test complete')
+    fibers.perform(control_scope:join_op())
   end)
 end
 

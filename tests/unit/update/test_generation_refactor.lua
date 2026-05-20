@@ -7,7 +7,7 @@ local busmod = require 'bus'
 
 local service = require 'services.update.service'
 local topics  = require 'services.update.topics'
-local store_mod = require 'services.update.job_store_cap'
+local store_mod = require 'services.update.job_store_memory'
 local active_runtime = require 'services.update.active_runtime'
 local probe = require 'tests.support.bus_probe'
 local queue = require 'devicecode.support.queue'
@@ -31,6 +31,9 @@ local function start_service(root_scope, params)
 		params = params or {}
 		params.conn = svc_conn
 		params.service_id = params.service_id or 'update'
+		if params.job_store == nil and params.job_store_kind == nil then
+			params.job_store_kind = 'memory'
+		end
 		service.run(scope, params)
 	end)
 	assert_true(ok, err)
@@ -83,7 +86,7 @@ local function blocking_store_for_create()
 	end
 
 	state.gate = gate
-	return store_mod.wrap(backend), state
+	return backend, state
 end
 
 function tests.test_admitted_old_generation_create_completion_remains_durable_after_replacement()
@@ -99,6 +102,7 @@ function tests.test_admitted_old_generation_create_completion_remains_durable_af
 			reply, reply_err = caller:call(topics.update_manager_rpc('create-job'), {
 				job_id = 'old-job',
 				component = 'cm5',
+				artifact_ref = 'artifact-old-job',
 			}, { timeout = 1.0 })
 		end)
 		assert_true(ok_spawn)
@@ -145,7 +149,7 @@ function tests.test_generation_replacement_does_not_cancel_accepted_active_work(
 			backend = backend,
 		})
 
-		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5' }, { timeout = 0.5 }))
+		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5', artifact_ref = 'artifact-j1' }, { timeout = 0.5 }))
 		fibers.perform(sleep.sleep_op(0.05))
 		assert(caller:call(topics.update_manager_rpc('start-job'), { job_id = 'j1' }, { timeout = 0.5 }))
 		fibers.perform(active_started:wait_op())
@@ -198,10 +202,10 @@ function tests.test_start_job_request_finalises_on_generation_cancellation()
 
 		local child, caller, cfg_conn = start_service(root_scope, {
 			config = config_payload('ns1'),
-			job_store = store_mod.wrap(backend),
+			job_store = backend,
 		})
 
-		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5' }, { timeout = 0.5 }))
+		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5', artifact_ref = 'artifact-j1' }, { timeout = 0.5 }))
 		fibers.perform(sleep.sleep_op(0.05))
 
 		local reply, reply_err
@@ -237,11 +241,11 @@ function tests.test_accepted_start_is_saved_durably_before_reply()
 
 		local child, caller = start_service(root_scope, {
 			config = config_payload('ns1'),
-			job_store = store_mod.wrap(backend),
+			job_store = backend,
 			backend = { stage_op = function (_, job) return op.always({ job_id = job.job_id }, nil) end },
 		})
 
-		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5' }, { timeout = 0.5 }))
+		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5', artifact_ref = 'artifact-j1' }, { timeout = 0.5 }))
 		fibers.perform(sleep.sleep_op(0.05))
 		local reply = assert(caller:call(topics.update_manager_rpc('start-job'), { job_id = 'j1' }, { timeout = 0.5 }))
 		assert_eq(reply.accepted, true)
@@ -272,8 +276,8 @@ function tests.test_active_completion_and_ready_start_cannot_double_own_slot()
 			backend = backend,
 		})
 
-		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5' }, { timeout = 0.5 }))
-		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j2', component = 'cm5' }, { timeout = 0.5 }))
+		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5', artifact_ref = 'artifact-j1' }, { timeout = 0.5 }))
+		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j2', component = 'cm5', artifact_ref = 'artifact-j2' }, { timeout = 0.5 }))
 		fibers.perform(sleep.sleep_op(0.05))
 		fibers.perform(sleep.sleep_op(0.05))
 		assert(caller:call(topics.update_manager_rpc('start-job'), { job_id = 'j1' }, { timeout = 0.5 }))
@@ -405,7 +409,7 @@ function tests.test_report_failure_does_not_lose_stored_active_completion()
 			lease = lease,
 			done_tx = done_tx,
 			report_scope = report_scope,
-			job = { job_id = 'j1', component = 'cm5' },
+			job = { job_id = 'j1', component = 'cm5', artifact_ref = 'artifact-j1' },
 			backend = { stage_op = function () return op.always({ ok = true }, nil) end },
 		}))
 
@@ -436,11 +440,11 @@ function tests.test_active_completion_starts_durable_job_save()
 
 		local child, caller = start_service(root_scope, {
 			config = config_payload('ns1'),
-			job_store = store_mod.wrap(backend),
+			job_store = backend,
 			backend = { stage_op = function (_, job) return op.always({ job_id = job.job_id }, nil) end },
 		})
 
-		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5' }, { timeout = 0.5 }))
+		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5', artifact_ref = 'artifact-j1' }, { timeout = 0.5 }))
 		fibers.perform(sleep.sleep_op(0.05))
 		assert(caller:call(topics.update_manager_rpc('start-job'), { job_id = 'j1' }, { timeout = 0.5 }))
 
@@ -461,13 +465,13 @@ end
 function tests.test_service_owns_active_completion_persistence_after_generation_replacement()
 	fibers.run(function (root_scope)
 		local saves = {}
-		local store = store_mod.wrap({
+		local store = {
 			load_all_op = function () return op.always({ jobs = {}, order = {} }, nil) end,
 			save_job_op = function (_, job)
 				saves[#saves + 1] = job
 				return op.always(true, nil)
 			end,
-		})
+		}
 		local release_active = cond.new()
 		local active_started = cond.new()
 		local backend = {}
@@ -484,7 +488,7 @@ function tests.test_service_owns_active_completion_persistence_after_generation_
 			backend = backend,
 		})
 
-		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'persist-active', component = 'cm5' }, { timeout = 0.5 }))
+		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'persist-active', component = 'cm5', artifact_ref = 'artifact-persist-active' }, { timeout = 0.5 }))
 		fibers.perform(sleep.sleep_op(0.05))
 		assert(caller:call(topics.update_manager_rpc('start-job'), { job_id = 'persist-active' }, { timeout = 0.5 }))
 		fibers.perform(active_started:wait_op())

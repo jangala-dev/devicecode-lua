@@ -773,7 +773,10 @@ function ArtifactSink:commit_op(opts)
 	return sink_request_op(self, 'commit', {
 		verb = 'commit',
 		opts = opts,
-	})
+	}):wrap(function (ok, value_or_err)
+		if ok == true then return value_or_err, nil end
+		return nil, value_or_err or 'artifact_sink_commit_failed'
+	end)
 end
 
 function ArtifactSink:abort_op(reason)
@@ -816,7 +819,7 @@ end
 
 function Store:status_op()
 	return op.always(true, {
-		kind            = 'artifact_store',
+		kind            = 'artifact-store',
 		transient_root  = self.transient_root,
 		durable_root    = self.durable_root,
 		durable_enabled = self.durable_enabled,
@@ -998,12 +1001,12 @@ local function import_source_attempt_op(self, source, meta, opts)
 			return false, tostring(bytes_or_primary or rep)
 		end
 
-		local ok_commit, art_or_err = fibers.perform(sink:commit_op())
-		if not ok_commit then
-			return false, tostring(art_or_err)
+		local artifact, commit_err = fibers.perform(sink:commit_op())
+		if artifact == nil then
+			return false, tostring(commit_err or 'artifact_sink_commit_failed')
 		end
 
-		return true, art_or_err
+		return true, artifact
 	end)
 end
 

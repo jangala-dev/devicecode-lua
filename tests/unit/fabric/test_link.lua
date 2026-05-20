@@ -256,7 +256,7 @@ function tests.test_session_control_processes_ready_control_before_timer_work()
 				transfer_tx = transfer_tx,
 				hello_interval_s = 10,
 				ping_interval_s = 10,
-				liveness_timeout_s = 0.003,
+				liveness_timeout_s = 0.05,
 			})
 			queue.try_admit_required(done_tx, result, 'session_done')
 		end)
@@ -269,15 +269,21 @@ function tests.test_session_control_processes_ready_control_before_timer_work()
 		}, 'remote_hello')
 		assert_eq(fibers.perform(out_rx:recv_op()).frame.type, 'hello_ack')
 
+		-- Move close to the original liveness deadline.  If the ready ping is not
+		-- selected ahead of timer work, the session will reset when the old
+		-- liveness deadline fires.  If the ping is processed first, the deadline is
+		-- refreshed and the session should still be established at shutdown.
+		fibers.perform(sleep.sleep_op(0.04))
+
 		queue.try_admit_required(control_tx, {
 			kind = 'frame_received',
 			frame = assert(protocol.ping('peer-sid')),
 		}, 'remote_ping')
 		assert_eq(fibers.perform(out_rx:recv_op()).frame.type, 'pong')
 
-		-- Give the liveness timer enough time that a missed ready control frame
-		-- would have reset the session before shutdown.
-		fibers.perform(sleep.sleep_op(0.001))
+		-- Let the previous liveness deadline pass; the refreshed deadline should
+		-- still be in the future.
+		fibers.perform(sleep.sleep_op(0.015))
 		control_tx:close('test complete')
 		local result = fibers.perform(done_rx:recv_op())
 		assert_eq(result.snapshot.established, true)

@@ -65,14 +65,6 @@ function tests.test_fail_once_prevents_later_reply()
 	assert_eq(req.replies, nil)
 end
 
-function tests.test_reply_payload_only_uses_payload_field()
-	local req = new_request()
-	local owner = request_owner.new(req, { reply_payload_only = true })
-
-	assert_true(owner:reply_once({ payload = 'answer', frame = 'ignored' }))
-	assert_eq(req.value, 'answer')
-end
-
 function tests.test_finalise_unresolved_fails_unresolved_request_once()
 	local req = new_request()
 	local owner = request_owner.new(req)

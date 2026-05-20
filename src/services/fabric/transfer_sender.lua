@@ -115,25 +115,33 @@ local function send_commit(caps, xfer_id, size, alg, digest, timeout_s)
 	return 'committing', fibers.now() + timeout_s
 end
 
-local function send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
-	local want = math.min(chunk_size, size - sent)
+local function make_next_chunk(caps, source, xfer_id, offset, size, chunk_size)
+	local want = math.min(chunk_size, size - offset)
 	local chunk, err = read_chunk(source, want)
 
 	if err ~= nil then fail(caps, xfer_id, err, true) end
 	if type(chunk) ~= 'string' or #chunk == 0 then fail(caps, xfer_id, 'short_source', true) end
-	if sent + #chunk > size then fail(caps, xfer_id, 'source_overrun', true) end
+	if offset + #chunk > size then fail(caps, xfer_id, 'source_overrun', true) end
 
 	local frame = construct(
 		'xfer_chunk',
 		protocol.xfer_chunk,
 		xfer_id,
-		sent,
+		offset,
 		chunk,
 		protocol.chunk_digest(chunk)
 	)
 
-	send(caps, 'bulk', frame, 'transfer_chunk_send_failed')
-	return sent + #chunk
+	return {
+		offset = offset,
+		next = offset + #chunk,
+		frame = frame,
+	}
+end
+
+local function send_chunk(caps, pending)
+	send(caps, 'bulk', pending.frame, 'transfer_chunk_send_failed')
+	return true
 end
 
 function M.run(scope, req, caps)
@@ -156,7 +164,13 @@ function M.run(scope, req, caps)
 
 	send(caps, 'control', begin, 'transfer_begin_send_failed')
 
+	-- `sent` is the receiver-acknowledged offset. `pending` is the one
+	-- outstanding chunk that may be resent if the receiver asks again for the
+	-- same offset. This deliberately stays stop-and-wait; there is no seek,
+	-- resume, or sliding window in v1.
 	local sent = 0
+	local pending = nil
+	local retransmits = 0
 	local state = 'waiting_ready'
 	local deadline = fibers.now() + timeout_s
 
@@ -181,28 +195,54 @@ function M.run(scope, req, caps)
 
 		elseif frame.type == 'xfer_need' then
 			if state ~= 'sending' then fail(caps, xfer_id, 'unexpected_need', true) end
-			if frame.next ~= sent then fail(caps, xfer_id, 'unexpected_offset', true) end
 
-			if sent >= size then
-				state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+			if pending ~= nil then
+				if frame.next == pending.offset then
+					-- Receiver rejected or lost the last chunk before advancing.
+					-- Resend the cached frame without reading from the source again.
+					send_chunk(caps, pending)
+					retransmits = retransmits + 1
+					deadline = fibers.now() + timeout_s
+
+				elseif frame.next == pending.next then
+					sent = pending.next
+					pending = nil
+					if sent >= size then
+						state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+					else
+						pending = make_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
+						send_chunk(caps, pending)
+						deadline = fibers.now() + timeout_s
+					end
+
+				else
+					fail(caps, xfer_id, 'unexpected_offset', true)
+				end
+
 			else
-				sent = send_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
-				deadline = fibers.now() + timeout_s
-
-				if sent == size then
+				if frame.next ~= sent then fail(caps, xfer_id, 'unexpected_offset', true) end
+				if sent >= size then
 					state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+				else
+					pending = make_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
+					send_chunk(caps, pending)
+					deadline = fibers.now() + timeout_s
 				end
 			end
 
 		elseif frame.type == 'xfer_done' and state == 'committing' then
 			return {
 				request_id = req.request_id,
+				job_id = type(req.meta) == 'table' and req.meta.job_id or nil,
+				component = type(req.meta) == 'table' and req.meta.component or nil,
+				image_id = type(req.meta) == 'table' and req.meta.image_id or nil,
 				target = target,
 				xfer_id = xfer_id,
 				digest_alg = alg,
 				digest = digest,
 				sent_bytes = sent,
 				size = size,
+				retransmits = retransmits,
 			}
 		end
 	end

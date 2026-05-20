@@ -140,7 +140,7 @@ end
 function Provider:status_op()
 	return op.always(true, {
 		root = self.root,
-		kind = 'control_store',
+		kind = 'control-store',
 	})
 end
 
