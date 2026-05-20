@@ -17,12 +17,11 @@ local env = os.getenv('DEVICECODE_ENV') or 'dev'
 add_path('/usr/lib/lua/')
 if env == 'prod' then
 	add_path('./lib/')
+	add_path('./')
 else
 	add_path('../vendor/lua-fibers/src/')
 	add_path('../vendor/lua-bus/src/')
 	add_path('../vendor/lua-trie/src/')
-	add_path('./')
-	add_path('/usr/lib/lua/')
 end
 
 local fibers = require 'fibers'
