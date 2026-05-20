@@ -48,6 +48,58 @@ local function new_deps(conn, specs, opts)
 	return ok(deps, err)
 end
 
+local function next_event(deps)
+	return fibers.perform(deps:event_source():recv_op())
+end
+
+
+function tests.test_open_does_not_mutate_options_table()
+	runfibers.run(function()
+		local b = busmod.new()
+		local conn = b:connect()
+		local opts = { queue_len = 4, full = 'drop_oldest' }
+		local before = {}
+		for k, v in pairs(opts) do before[k] = v end
+
+		local deps = new_deps(conn, {
+			{ key = 'network_config', class = 'network-config', id = 'main' },
+		}, opts)
+
+		for k, v in pairs(opts) do eq(v, before[k], 'option table value changed for ' .. tostring(k)) end
+		for k, _ in pairs(before) do eq(opts[k], before[k], 'option table lost key ' .. tostring(k)) end
+		is_nil(opts._now, 'open should not add private fields to caller options')
+		deps:terminate('test complete')
+	end)
+end
+
+function tests.test_public_contract_is_small_model_style_surface()
+	runfibers.run(function()
+		local b = busmod.new()
+		local conn = b:connect()
+		local deps = new_deps(conn, {
+			{ key = 'network_config', class = 'network-config', id = 'main' },
+		})
+
+		for _, name in ipairs({
+			'available', 'status', 'dependency', 'snapshot',
+			'version', 'changed_op', 'event_source',
+			'ref', 'classify_call_failure', 'terminate',
+		}) do
+			if type(deps[name]) ~= 'function' then fail('expected public method ' .. name) end
+		end
+
+		for _, name in ipairs({
+			'close', 'is_terminated', 'why', 'keys', 'observed_status', 'reason',
+			'all_available', 'record_status', 'mark_route_missing', 'clear_route_missing',
+			'recv_op', 'try_recv_now', 'event_sources',
+		}) do
+			if deps[name] ~= nil then fail('unexpected public method ' .. name) end
+		end
+
+		deps:terminate('test complete')
+	end)
+end
+
 function tests.test_open_creates_curated_refs_and_initial_configured_state()
 	runfibers.run(function()
 		local b = busmod.new()
@@ -59,13 +111,14 @@ function tests.test_open_creates_curated_refs_and_initial_configured_state()
 
 		ok(deps:ref('network_config'), 'capability ref expected')
 		eq(deps:status('network_config'), 'configured')
-		eq(deps:observed_status('network_config'), 'configured')
 		is_false(deps:available('network_config'))
-		is_false(deps:all_available('required'))
 
 		local snap = deps:snapshot()
+		eq(snap.network_config.key, 'network_config')
 		eq(snap.network_config.class, 'network-config')
 		eq(snap.network_config.id, 'main')
+		eq(snap.network_config.observed_status, 'configured')
+		eq(snap.network_config.status, 'configured')
 		is_true(snap.network_config.required)
 		is_false(snap.network_config.available)
 		is_false(snap.optional_store.required)
@@ -90,14 +143,18 @@ function tests.test_retained_status_replay_updates_effective_availability()
 			{ key = 'network_config', class = 'network-config', id = 'main' },
 		})
 
-		local ev = fibers.perform(deps:recv_op('network_config'))
+		local ev = next_event(deps)
 		eq(ev.kind, 'capability_dependency_changed')
 		eq(ev.key, 'network_config')
 		eq(ev.status, 'available')
 		is_true(ev.available)
 		is_true(deps:available('network_config'))
 		eq(deps:status('network_config'), 'available')
-		is_true(deps:all_available('required'))
+
+		local dep = deps:dependency('network_config')
+		eq(dep.observed_status, 'available')
+		eq(dep.status, 'available')
+		is_true(dep.available)
 
 		deps:terminate('test complete')
 	end)
@@ -114,28 +171,27 @@ function tests.test_route_missing_overrides_observed_available_until_next_availa
 		local deps = new_deps(conn, {
 			{ key = 'job_store', class = 'control-store', id = 'update' },
 		})
-		fibers.perform(deps:recv_op('job_store'))
+		next_event(deps)
 		is_true(deps:available('job_store'))
-		eq(deps:observed_status('job_store'), 'available')
+		eq(deps:dependency('job_store').observed_status, 'available')
 
-		local ok_mark = deps:mark_route_missing('job_store', { err = 'no_route' })
-		is_true(ok_mark)
-		eq(deps:observed_status('job_store'), 'available')
+		local class = deps:classify_call_failure('job_store', { err = 'no_route' })
+		eq(class, 'route_missing')
+		eq(deps:dependency('job_store').observed_status, 'available')
 		eq(deps:status('job_store'), 'route_missing')
 		is_false(deps:available('job_store'))
-		eq(deps:reason('job_store'), 'no_route')
+		eq(deps:dependency('job_store').reason, 'no_route')
 
 		retain_status(writer, 'control-store', 'update', { state = 'available', available = true })
-		local ev = fibers.perform(deps:recv_op('job_store'))
+		local ev = next_event(deps)
 		eq(ev.status, 'available')
 		is_true(ev.available)
 		eq(deps:status('job_store'), 'available')
-		is_nil(deps:reason('job_store'))
+		is_nil(deps:dependency('job_store').reason)
 
 		deps:terminate('test complete')
 	end)
 end
-
 
 function tests.test_explicit_unavailable_supersedes_route_missing()
 	runfibers.run(function()
@@ -147,8 +203,8 @@ function tests.test_explicit_unavailable_supersedes_route_missing()
 		local deps = new_deps(conn, {
 			{ key = 'job_store', class = 'control-store', id = 'update' },
 		})
-		fibers.perform(deps:recv_op('job_store'))
-		deps:mark_route_missing('job_store', { err = 'no_route' })
+		next_event(deps)
+		deps:classify_call_failure('job_store', { err = 'no_route' })
 		eq(deps:status('job_store'), 'route_missing')
 
 		retain_status(writer, 'control-store', 'update', {
@@ -156,18 +212,21 @@ function tests.test_explicit_unavailable_supersedes_route_missing()
 			available = false,
 			reason = 'driver_stopped',
 		})
-		local ev = fibers.perform(deps:recv_op('job_store'))
+		local ev = next_event(deps)
 		eq(ev.status, 'unavailable')
 		is_false(ev.available)
-		eq(deps:observed_status('job_store'), 'unavailable')
+		eq(deps:dependency('job_store').observed_status, 'unavailable')
 		eq(deps:status('job_store'), 'unavailable')
-		is_false(deps:available('job_store'))
-		is_false(deps:dependency('job_store').route_missing)
+		eq(deps:dependency('job_store').reason, 'driver_stopped')
+
+		local snap = deps:dependency('job_store')
+		eq(snap.observed_reason, 'driver_stopped')
+		eq(snap.reason, 'driver_stopped')
+		is_false(snap.route_missing)
 
 		deps:terminate('test complete')
 	end)
 end
-
 
 function tests.test_explicit_available_false_overrides_running_state()
 	runfibers.run(function()
@@ -179,7 +238,7 @@ function tests.test_explicit_available_false_overrides_running_state()
 		})
 
 		retain_status(writer, 'network-state', 'main', { state = 'running', available = false })
-		local ev = fibers.perform(deps:recv_op('network_state'))
+		local ev = next_event(deps)
 		eq(ev.status, 'running')
 		is_false(ev.available)
 		is_false(deps:available('network_state'))
@@ -200,7 +259,7 @@ function tests.test_changed_op_reports_material_status_changes_only()
 
 		local seen = deps:version()
 		retain_status(writer, 'http', 'main', { state = 'available', available = true })
-		local ev = fibers.perform(deps:recv_op('http'))
+		local ev = next_event(deps)
 		is_true(ev.changed)
 
 		local version, snap, err = fibers.perform(deps:changed_op(seen))
@@ -210,7 +269,7 @@ function tests.test_changed_op_reports_material_status_changes_only()
 		seen = deps:version()
 
 		retain_status(writer, 'http', 'main', { state = 'available', available = true })
-		ev = fibers.perform(deps:recv_op('http'))
+		ev = next_event(deps)
 		is_false(ev.changed)
 		eq(deps:version(), seen)
 
@@ -226,13 +285,16 @@ function tests.test_snapshot_is_copied()
 			{ key = 'network_config', class = 'network-config', id = 'main' },
 		})
 
+		local class = deps:classify_call_failure('network_config', { err = 'no_route' })
+		eq(class, 'route_missing')
+
 		local snap = deps:snapshot()
 		snap.network_config.status = 'mutated'
-		snap.network_config.topic[1] = 'mutated'
+		snap.network_config.last_error.err = 'mutated'
 
 		local snap2 = deps:snapshot()
 		eq(snap2.network_config.status, 'configured')
-		eq(snap2.network_config.topic[1], 'cap')
+		eq(snap2.network_config.last_error.err, 'no_route')
 
 		deps:terminate('test complete')
 	end)
@@ -246,7 +308,6 @@ function tests.test_no_route_classifier_handles_nested_bus_results()
 	is_false(deps_mod.is_no_route({ reason = { err = 'backend_failed' } }))
 end
 
-
 function tests.test_classify_call_failure_marks_route_missing()
 	runfibers.run(function()
 		local b = busmod.new()
@@ -256,7 +317,7 @@ function tests.test_classify_call_failure_marks_route_missing()
 		local deps = new_deps(conn, {
 			{ key = 'job_store', class = 'control-store', id = 'update' },
 		})
-		fibers.perform(deps:recv_op('job_store'))
+		next_event(deps)
 
 		local class, reason, dep = deps:classify_call_failure('job_store', { result = { err = 'no_route' } })
 		eq(class, 'route_missing')
@@ -281,8 +342,6 @@ function tests.test_terminate_closes_change_op_and_subscriptions()
 		})
 		local seen = deps:version()
 		deps:terminate('closed_for_test')
-		is_true(deps:is_terminated())
-		eq(deps:why(), 'closed_for_test')
 
 		local version, snap, err = fibers.perform(deps:changed_op(seen))
 		is_nil(version)
@@ -291,8 +350,7 @@ function tests.test_terminate_closes_change_op_and_subscriptions()
 	end)
 end
 
-
-function tests.test_closed_status_feed_is_removed_from_event_sources()
+function tests.test_closed_status_feed_disables_event_source()
 	runfibers.run(function()
 		local fake_sub = {}
 		function fake_sub:recv_op()
@@ -310,20 +368,85 @@ function tests.test_closed_status_feed_is_removed_from_event_sources()
 		local deps = new_deps(nil, {
 			{ key = 'closed_dep', ref = fake_ref },
 		})
-		eq(#deps:event_sources(), 1)
+		is_true(deps:event_source().enabled())
 
-		local ev = fibers.perform(deps:recv_op('closed_dep'))
+		local ev = next_event(deps)
 		eq(ev.kind, 'capability_dependency_closed')
 		eq(ev.key, 'closed_dep')
 		eq(ev.reason, 'closed_for_test')
 		eq(ev.status, 'unavailable')
 		is_false(ev.available)
-		eq(#deps:event_sources(), 0)
+		is_false(deps:event_source().enabled())
 
-		local ev2, err = deps:try_recv_now('closed_dep')
-		is_nil(ev2)
-		eq(err, 'not_watched')
+		deps:terminate('test complete')
+	end)
+end
 
+function tests.test_required_status_watch_failure_fails_open()
+	runfibers.run(function()
+		local fake_ref = {}
+		function fake_ref:get_status_sub()
+			error('boom')
+		end
+
+		local deps, err = deps_mod.open(nil, {
+			{ key = 'required_dep', ref = fake_ref, required = true },
+		})
+		is_nil(deps)
+		ok(tostring(err):find('dependency_status_watch_failed:required_dep', 1, true), err)
+		ok(tostring(err):find('boom', 1, true), err)
+	end)
+end
+
+function tests.test_get_status_sub_returned_error_is_preserved()
+	runfibers.run(function()
+		local fake_ref = {}
+		function fake_ref:get_status_sub()
+			return nil, 'detail_from_ref'
+		end
+
+		local deps, err = deps_mod.open(nil, {
+			{ key = 'required_dep', ref = fake_ref, required = true },
+		})
+		is_nil(deps)
+		ok(tostring(err):find('dependency_status_watch_failed:required_dep', 1, true), err)
+		ok(tostring(err):find('detail_from_ref', 1, true), err)
+	end)
+end
+
+function tests.test_optional_status_watch_failure_is_reported_in_snapshot()
+	runfibers.run(function()
+		local fake_ref = {}
+		function fake_ref:get_status_sub()
+			return nil
+		end
+
+		local deps = new_deps(nil, {
+			{ key = 'optional_dep', ref = fake_ref, required = false },
+		})
+		local snap = deps:snapshot()
+		eq(snap.optional_dep.status, 'watch_failed')
+		is_false(snap.optional_dep.available)
+		eq(snap.optional_dep.observed_status, 'watch_failed')
+		ok(snap.optional_dep.observed_reason, 'observed_reason expected')
+		deps:terminate('test complete')
+	end)
+end
+
+function tests.test_required_watch_failure_can_be_made_unavailable_explicitly()
+	runfibers.run(function()
+		local fake_ref = {}
+		function fake_ref:get_status_sub()
+			return nil
+		end
+
+		local deps = new_deps(nil, {
+			{ key = 'required_dep', ref = fake_ref, required = true, watch_failure = 'unavailable' },
+		})
+		local snap = deps:snapshot()
+		eq(snap.required_dep.status, 'watch_failed')
+		is_false(snap.required_dep.available)
+		eq(snap.required_dep.observed_status, 'watch_failed')
 		deps:terminate('test complete')
 	end)
 end

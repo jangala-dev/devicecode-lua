@@ -231,10 +231,19 @@ local function bind_fake_control_store(scope, bus, backing, opts)
   return backing, conn
 end
 
+local function retain_fake_artifact_store_status(bus, status)
+  local conn = bus:connect()
+  conn:retain({ 'cap', 'artifact-store', 'main', 'status' }, {
+    schema='devicecode.cap.status/1', state=status or 'available', available=(status or 'available') == 'available'
+  })
+  return conn
+end
+
 
 function tests.test_control_store_dependency_waits_until_available()
   fibers.run(function (root_scope)
     local bus = busmod.new()
+    retain_fake_artifact_store_status(bus, 'available')
     local child, caller = start_service(root_scope, {
       bus = bus,
       job_store_kind = 'control-store',
@@ -284,6 +293,7 @@ end
 function tests.test_control_store_no_route_returns_to_waiting_not_failed()
   fibers.run(function (root_scope)
     local bus = busmod.new()
+    retain_fake_artifact_store_status(bus, 'available')
     local status_conn = bus:connect()
     status_conn:retain({ 'cap', 'control-store', 'update', 'status' }, { schema='devicecode.cap.status/1', state='available', available=true })
 
@@ -316,6 +326,7 @@ end
 function tests.test_default_job_store_uses_control_store_and_reloads_after_restart()
   fibers.run(function (root_scope)
     local bus = busmod.new()
+    retain_fake_artifact_store_status(bus, 'available')
     local control_scope = assert(root_scope:child())
     local backing = bind_fake_control_store(control_scope, bus, {})
     local child, caller = start_service(root_scope, {
@@ -361,6 +372,7 @@ end
 function tests.test_control_store_backend_failure_still_fails_update()
   fibers.run(function (root_scope)
     local bus = busmod.new()
+    retain_fake_artifact_store_status(bus, 'available')
     local control_scope = assert(root_scope:child())
     bind_fake_control_store(control_scope, bus, {}, {
       fail_list = true,
@@ -393,6 +405,7 @@ end
 function tests.test_job_store_dependency_loss_cancels_and_reloads_runtime()
   fibers.run(function (root_scope)
     local bus = busmod.new()
+    retain_fake_artifact_store_status(bus, 'available')
     local control_scope = assert(root_scope:child())
     local list_calls = { count = 0 }
     local _, control_conn = bind_fake_control_store(control_scope, bus, {}, { list_calls = list_calls })
@@ -464,5 +477,53 @@ function tests.test_job_store_dependency_loss_cancels_and_reloads_runtime()
   end)
 end
 
+
+
+function tests.test_artifact_store_dependency_gates_generation_after_job_store_ready()
+  fibers.run(function (root_scope)
+    local bus = busmod.new()
+    local control_scope = assert(root_scope:child())
+    bind_fake_control_store(control_scope, bus, {})
+
+    local child, caller = start_service(root_scope, {
+      bus = bus,
+      job_store_kind = 'control-store',
+      config = { schema='devicecode.update/1', components={ { component='cm5' } } },
+    })
+
+    local waiting
+    assert_true(probe.wait_until(function()
+      local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      waiting = status and status.snapshot
+      return waiting and waiting.state == 'waiting_for_artifact_store'
+    end, { timeout=0.7, interval=0.01 }), 'expected service to wait for artifact-store after job runtime is available')
+    assert_eq(waiting.reason, 'artifact_store_unavailable')
+    assert_eq(waiting.dependencies.artifact_store.available, false)
+    assert_true(waiting.pending and waiting.pending.runtime and waiting.pending.runtime.dependency == 'artifact_store',
+      'expected artifact-store pending runtime projection')
+
+    local listed, list_err = caller:call(topics.update_manager_rpc('list-jobs'), {}, { timeout=0.2 })
+    assert_not_nil(listed, list_err)
+    assert_eq(listed.ok, true)
+
+    local created, create_err = caller:call(topics.update_manager_rpc('create-job'), {
+      job_id='j-artifact-wait', component='cm5', artifact_ref='artifact-wait',
+    }, { timeout=0.2 })
+    assert_eq(created, nil)
+    assert_eq(create_err, 'artifact_store_unavailable')
+
+    retain_fake_artifact_store_status(bus, 'available')
+
+    assert_true(probe.wait_until(function()
+      local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      return status and status.snapshot and status.snapshot.state == 'running'
+    end, { timeout=0.8, interval=0.01 }), 'expected update to admit generation after artifact-store becomes available')
+
+    child:cancel('test complete')
+    fibers.perform(child:join_op())
+    control_scope:cancel('test complete')
+    fibers.perform(control_scope:join_op())
+  end)
+end
 
 return tests

@@ -67,6 +67,8 @@ local function mark_summary_dirty(state)
 	publisher.mark_summary(state.dirty)
 end
 
+local project_dependencies
+
 local function publish_snapshot(state)
 	if not state.conn then
 		publisher.clear_dirty(state.dirty)
@@ -80,7 +82,7 @@ local function set_model_state(state, service_state, reason)
 		s.state = service_state
 		s.ready = service_state == 'running'
 		s.reason = reason
-		return s
+		return project_dependencies(state, s)
 	end)
 	mark_summary_dirty(state)
 	return publish_snapshot(state)
@@ -123,6 +125,28 @@ local function dependency_effectively_available(state, key)
 	return status_available(hal_status_value(state, key))
 end
 
+project_dependencies = function(state, s)
+	if state.cap_deps and type(state.cap_deps.snapshot) == 'function' then
+		s.dependencies = state.cap_deps:snapshot()
+	end
+	return s
+end
+
+local function set_pending_apply_projection(s, intent, reason)
+	s.pending = s.pending or {}
+	if intent == nil then
+		s.pending.network_apply = nil
+		return s
+	end
+	s.pending.network_apply = {
+		kind = 'network_apply',
+		generation = intent.generation,
+		rev = intent.rev,
+		reason = reason or 'network_config_unavailable',
+	}
+	return s
+end
+
 
 local function update_hal_statuses(state)
 	state.model:update(function (s)
@@ -130,7 +154,7 @@ local function update_hal_statuses(state)
 		s.hal.network_config = hal_status_value(state, 'network_config')
 		s.hal.network_state = hal_status_value(state, 'network_state')
 		s.hal.network_diagnostics = hal_status_value(state, 'network_diagnostics')
-		return s
+		return project_dependencies(state, s)
 	end)
 	mark_summary_dirty(state)
 end
@@ -201,6 +225,7 @@ local function accept_pending_intent(state, intent, reason)
 		s.reason = reason
 		s.intent = s.intent or {}
 		s.intent.active = generation_mod.snapshot(gen)
+		set_pending_apply_projection(s, intent, reason)
 		s.apply = {
 			state = 'waiting_for_hal',
 			generation = intent.generation,
@@ -212,7 +237,7 @@ local function accept_pending_intent(state, intent, reason)
 		}
 		s.hal.network_config = hal_status_value(state, 'network_config')
 		s.stats.config_updates = (s.stats.config_updates or 0) + 1
-		return s
+		return project_dependencies(state, s)
 	end)
 	mark_all_dirty(state)
 	return true, nil
@@ -240,6 +265,7 @@ local function start_apply_for_intent(state, intent, reason)
 		s.reason = nil
 		s.intent = s.intent or {}
 		s.intent.active = generation_mod.snapshot(gen)
+		set_pending_apply_projection(s, nil)
 		s.apply = {
 			state = 'running',
 			generation = generation,
@@ -251,7 +277,7 @@ local function start_apply_for_intent(state, intent, reason)
 		}
 		s.hal.network_config = hal_status_value(state, 'network_config')
 		s.stats.apply_started = (s.stats.apply_started or 0) + 1
-		return s
+		return project_dependencies(state, s)
 	end)
 	mark_all_dirty(state)
 	local ok_pub, pub_err = publish_snapshot(state)
@@ -275,7 +301,7 @@ local function start_apply_for_intent(state, intent, reason)
 			s.intent.active = generation_mod.snapshot(gen)
 			s.apply.state = 'failed_to_start'
 			s.apply.last_error = tostring(err or 'apply_start_failed')
-			return s
+			return project_dependencies(state, s)
 		end)
 		mark_apply_dirty(state)
 		return nil, err
@@ -307,7 +333,7 @@ local function handle_config_changed(state, ev)
 			s.reason = tostring(err)
 			s.intent = s.intent or {}
 			s.intent.last_rejected = { rev = ev.rev, err = tostring(err), rejected_at = now() }
-			return s
+			return project_dependencies(state, s)
 		end)
 		mark_summary_dirty(state)
 		return publish_snapshot(state)
@@ -331,7 +357,7 @@ local function handle_config_changed(state, ev)
 			s.state = 'degraded'
 			s.ready = false
 			s.reason = tostring(apply_err or 'apply_start_failed')
-			return s
+			return project_dependencies(state, s)
 		end)
 		mark_summary_dirty(state)
 		publish_snapshot(state)
@@ -371,6 +397,7 @@ local function return_apply_to_pending(state, result, reason)
 		s.reason = reason
 		s.intent = s.intent or {}
 		s.intent.active = generation_mod.snapshot(gen)
+		set_pending_apply_projection(s, intent, reason)
 		s.apply = s.apply or {}
 		s.apply.state = 'waiting_for_hal'
 		s.apply.completed_at = now()
@@ -378,7 +405,7 @@ local function return_apply_to_pending(state, result, reason)
 		s.apply.last_error = reason
 		s.hal.network_config = hal_status_value(state, 'network_config')
 		s.stats.apply_completed = (s.stats.apply_completed or 0) + 1
-		return s
+		return project_dependencies(state, s)
 	end)
 	mark_apply_dirty(state)
 	set_status(state.svc, 'waiting_for_hal', { reason = reason })
@@ -417,13 +444,14 @@ local function handle_apply_done(state, ev)
 		s.reason = reason
 		s.intent = s.intent or {}
 		s.intent.active = generation_mod.snapshot(state.current_generation)
+		set_pending_apply_projection(s, nil)
 		s.apply.state = apply_ok and 'applied' or 'failed'
 		s.apply.completed_at = now()
 		s.apply.last_result = result.result
 		s.apply.last_error = reason
 		if apply_ok then s.apply.last_applied_rev = result.intent_rev or (s.config and s.config.rev) end
 		s.stats.apply_completed = (s.stats.apply_completed or 0) + 1
-		return s
+		return project_dependencies(state, s)
 	end)
 
 	mark_apply_dirty(state)
@@ -461,7 +489,7 @@ local function merge_observation(state, s, observed_event)
 	s.hal.network_state = 'available'
 	s.stats.observations = (s.stats.observations or 0) + 1
 	s.drift = drift.calculate(s, { now = now })
-	return s
+	return project_dependencies(state, s)
 end
 
 local function handle_observed_state(state, ev)
@@ -494,7 +522,7 @@ local function ensure_observer_started(state, reason)
 		state.model:update(function (m)
 			m.hal.network_state = 'unavailable'
 			m.observed.last_error = tostring(err)
-			return m
+			return project_dependencies(state, m)
 		end)
 		mark_summary_dirty(state)
 		mark_domain_dirty(state, 'observed')
@@ -504,7 +532,7 @@ local function ensure_observer_started(state, reason)
 	state.observed_sub = observer:subscription()
 	state.model:update(function (m)
 		m.hal.network_state = 'starting'
-		return m
+		return project_dependencies(state, m)
 	end)
 	mark_summary_dirty(state)
 	return true, nil
@@ -531,7 +559,7 @@ local function handle_observation_started(state, ev)
 	state.model:update(function (m)
 		m.hal.network_state = ok and 'available' or 'unavailable'
 		if not ok then m.observed.last_error = result.err or ev.primary or 'observation_start_failed' end
-		return m
+		return project_dependencies(state, m)
 	end)
 	if not ok then stop_observer(state, 'observation_start_failed') end
 	mark_summary_dirty(state)
@@ -552,7 +580,7 @@ local function handle_dependency_status(state, ev)
 		m.hal = m.hal or {}
 		m.hal[key] = status
 		m.hal.last_status[key] = { status = status, payload = model_mod.deep_copy(payload), updated_at = now() }
-		return m
+		return project_dependencies(state, m)
 	end)
 	mark_summary_dirty(state)
 	if key == 'network_state' then
@@ -600,13 +628,15 @@ local function handle_event(state, ev)
 		return handle_observation_started(state, ev)
 	elseif ev.kind == 'capability_status' or ev.kind == 'capability_dependency_changed' then
 		return handle_dependency_status(state, ev)
-	elseif ev.kind == 'capability_status_closed' or ev.kind == 'capability_dependency_closed' then
-		if state.capability_status_subs then state.capability_status_subs[ev.capability or ev.key] = nil end
+	elseif ev.kind == 'capability_dependency_closed' then
+		return handle_dependency_status(state, ev)
+	elseif ev.kind == 'capability_status_closed' then
+		if state.capability_status_subs then state.capability_status_subs[ev.capability] = nil end
 		return true, nil
 	elseif ev.kind == 'observation_closed' then
 		state.observed_sub = nil
 		if state.observer then state.observer:terminate('observation_closed'); state.observer = nil end
-		state.model:update(function (m) m.hal.network_state = 'closed'; return m end)
+		state.model:update(function (m) m.hal.network_state = 'closed'; return project_dependencies(state, m) end)
 		mark_summary_dirty(state)
 		return publish_snapshot(state)
 	elseif ev.kind == 'config_watch_closed' then
@@ -706,7 +736,7 @@ function M.run(scope, params)
 		cancel_active_generation(state, reason)
 		stop_observer(state, reason)
 		if cfg_watch then cfg_watch:close(); cfg_watch = nil end
-		if cap_deps then cap_deps:close(reason); cap_deps = nil end
+		if cap_deps then cap_deps:terminate(reason); cap_deps = nil end
 		done_tx:close(reason)
 		publisher.cleanup_now(conn, published)
 		model:terminate(reason)

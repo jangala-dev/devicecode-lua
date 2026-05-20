@@ -5,9 +5,11 @@
 -- This helper observes capability status topics and turns them into local,
 -- non-yielding facts for service coordinators.  It deliberately does not
 -- start work, retry calls, degrade services, or perform policy decisions.
--- Services should drain dependency recv Ops as coordinator inputs, inspect the
--- effective availability recorded here, and then admit their own scoped work.
+-- Services should treat it as a small observable model: inspect facts, wait for
+-- changed_op() or event_source(), and then admit their own scoped work.
 
+local fibers      = require 'fibers'
+local op          = require 'fibers.op'
 local pulse       = require 'fibers.pulse'
 local cap_sdk     = require 'services.hal.sdk.cap'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
@@ -50,6 +52,29 @@ local function status_available(status)
 	return AVAILABLE_STATUS[tostring(status or '')] == true
 end
 
+local function format_reason(reason)
+	if reason == nil then return nil end
+	if type(reason) == 'table' then
+		if reason.err ~= nil then return tostring(reason.err) end
+		if reason.detail ~= nil then return tostring(reason.detail) end
+		if reason.reason ~= nil and reason.reason ~= reason then return format_reason(reason.reason) end
+		if reason.code ~= nil then return tostring(reason.code) end
+		return 'route_missing'
+	end
+	return tostring(reason)
+end
+
+local function normalise_status_reason(payload)
+	if type(payload) ~= 'table' then return nil end
+
+	local reason = payload.reason
+	if reason == nil then reason = payload.err end
+	if reason == nil then reason = payload.error end
+	if reason == nil then reason = payload.detail end
+
+	return format_reason(reason)
+end
+
 local function normalise_status_payload(payload)
 	if type(payload) == 'table' then
 		local status
@@ -71,15 +96,16 @@ local function normalise_status_payload(payload)
 		else
 			available = status_available(status)
 		end
-		return status, available
+
+		return status, available, normalise_status_reason(payload)
 	end
 
-	if payload == nil then return 'unavailable', false end
-	if payload == true then return 'available', true end
-	if payload == false then return 'unavailable', false end
+	if payload == nil then return 'unavailable', false, nil end
+	if payload == true then return 'available', true, nil end
+	if payload == false then return 'unavailable', false, nil end
 
 	local status = tostring(payload)
-	return status, status_available(status)
+	return status, status_available(status), nil
 end
 
 local function topic_for_spec(spec)
@@ -112,15 +138,15 @@ local function subscribe_for(conn, dep, opts)
 	-- connection.  A bus connection is needed only for the fallback topic
 	-- subscription path below.
 	if dep.ref ~= nil and type(dep.ref.get_status_sub) == 'function' then
-		local ok, sub_or_err = pcall(function ()
+		local ok, sub, sub_err = pcall(function ()
 			return dep.ref:get_status_sub({
 				queue_len = dep.queue_len or opts.status_queue_len or opts.queue_len or 8,
 				full = dep.full or opts.status_full or opts.full or 'drop_oldest',
 			})
 		end)
-		if ok and sub_or_err ~= nil then return sub_or_err, nil end
-		if not ok then return nil, tostring(sub_or_err or 'status subscription failed') end
-		return nil, 'status subscription failed'
+		if ok and sub ~= nil then return sub, nil end
+		if not ok then return nil, tostring(sub or 'status subscription failed') end
+		return nil, tostring(sub_err or 'status subscription failed')
 	end
 
 	if conn ~= nil and dep.topic ~= nil then
@@ -133,16 +159,22 @@ local function subscribe_for(conn, dep, opts)
 	return nil, nil
 end
 
-local function format_reason(reason)
-	if reason == nil then return nil end
-	if type(reason) == 'table' then
-		if reason.err ~= nil then return tostring(reason.err) end
-		if reason.detail ~= nil then return tostring(reason.detail) end
-		if reason.reason ~= nil and reason.reason ~= reason then return format_reason(reason.reason) end
-		if reason.code ~= nil then return tostring(reason.code) end
-		return 'route_missing'
-	end
-	return tostring(reason)
+local function watch_failure_policy(dep)
+	if dep.watch_failure ~= nil then return dep.watch_failure end
+	return dep.required and 'fail' or 'unavailable'
+end
+
+local function dependency_watch_failed_error(dep, err)
+	return 'dependency_status_watch_failed:' .. tostring(dep.key) .. ':' .. tostring(err or 'status subscription failed')
+end
+
+local function record_watch_failed(dep, err, now)
+	dep.observed_status = 'watch_failed'
+	dep.observed_reason = tostring(err or 'status subscription failed')
+	dep.effective_status = 'watch_failed'
+	dep.available = false
+	dep.reason = dep.observed_reason
+	dep.updated_at = now
 end
 
 local function has_no_route(v, seen)
@@ -171,23 +203,19 @@ local function dep_public_snapshot(dep)
 		key = dep.key,
 		class = dep.class,
 		id = dep.id,
-		raw_kind = dep.raw_kind,
-		source = dep.source,
 		required = dep.required,
-		configured = dep.configured,
-		watched = dep.sub ~= nil,
-		topic = copy(dep.topic),
+
 		observed_status = dep.observed_status,
-		observed_available = dep.observed_available == true,
-		effective_status = dep.effective_status,
+		observed_reason = dep.observed_reason,
+
 		status = dep.effective_status,
 		available = dep.available == true,
-		route_missing = dep.route_missing == true,
 		reason = dep.reason,
-		last_error = copy(dep.last_error),
-		last_error_at = dep.last_error_at,
+
+		route_missing = dep.route_missing == true,
+
 		updated_at = dep.updated_at,
-		payload = copy(dep.payload),
+		last_error = copy(dep.last_error),
 	}
 end
 
@@ -197,7 +225,7 @@ local function ordered_specs(specs)
 	return out
 end
 
-local function build_dep(conn, spec, opts)
+local function build_dep(conn, spec, opts, now)
 	if type(spec) ~= 'table' then
 		return nil, 'capability_dependencies.open: each spec must be a table'
 	end
@@ -219,6 +247,7 @@ local function build_dep(conn, spec, opts)
 		source = spec.source,
 		required = spec.required ~= false,
 		watch_status = spec.watch_status ~= false,
+		watch_failure = spec.watch_failure,
 		queue_len = spec.queue_len,
 		full = spec.full,
 		ref = ref_for(conn, spec),
@@ -228,9 +257,9 @@ local function build_dep(conn, spec, opts)
 		effective_status = nil,
 		available = false,
 		route_missing = false,
+		observed_reason = nil,
 		reason = nil,
 		last_error = nil,
-		last_error_at = nil,
 		updated_at = nil,
 		payload = nil,
 	}
@@ -241,19 +270,182 @@ local function build_dep(conn, spec, opts)
 	dep.effective_status = dep.observed_status
 	dep.available = status_available(dep.effective_status)
 	dep.observed_available = dep.available
-	dep.updated_at = opts._now()
+	dep.updated_at = now()
 
 	local sub, err = subscribe_for(conn, dep, opts)
 	if err ~= nil then
-		dep.observed_status = 'status_unavailable'
-		dep.effective_status = 'status_unavailable'
-		dep.available = false
-		dep.reason = err
+		if watch_failure_policy(dep) == 'fail' then
+			return nil, dependency_watch_failed_error(dep, err)
+		end
+		record_watch_failed(dep, err, now())
 	else
 		dep.sub = sub
 	end
 
 	return dep, nil
+end
+
+local function recompute(dep)
+	local observed_status = dep.observed_status or (dep.configured and 'configured' or 'not_configured')
+	local observed_available = dep.observed_available == true
+
+	if dep.route_missing and observed_available then
+		dep.effective_status = 'route_missing'
+		dep.available = false
+		dep.reason = dep.reason or 'no_route'
+		return
+	end
+
+	dep.effective_status = observed_status
+	dep.available = observed_available
+
+	if dep.available then
+		dep.reason = nil
+	else
+		dep.reason = dep.observed_reason
+	end
+end
+
+local function signal_if_changed(self, before)
+	local after = self:snapshot()
+	if tablex.deep_equal(before, after) then return false, self:version() end
+	return true, self._pulse:signal()
+end
+
+local function record_status(self, key, payload, meta)
+	if self._closed then return nil, self._closed_reason or 'closed' end
+	local dep = self._deps[assert_key(key)]
+	if not dep then return nil, 'unknown_dependency' end
+
+	local status, available, observed_reason = normalise_status_payload(payload)
+	local payload_copy = copy(payload)
+	local will_clear_route_missing = available == true and dep.route_missing == true
+	if dep.observed_status == status
+		and dep.observed_available == (available == true)
+		and dep.observed_reason == observed_reason
+		and tablex.deep_equal(dep.payload, payload_copy)
+		and not will_clear_route_missing
+	then
+		return dep.effective_status, dep.available == true, false, self:version()
+	end
+
+	local before = self:snapshot()
+
+	dep.observed_status = status
+	dep.observed_available = available == true
+	dep.observed_reason = observed_reason
+	dep.payload = payload_copy
+	dep.updated_at = (meta and meta.at) or self._now()
+
+	if available == true then
+		dep.route_missing = false
+		dep.last_error = nil
+		dep.reason = nil
+	elseif dep.route_missing then
+		-- Explicit unavailability supersedes a previous local no_route inference.
+		dep.route_missing = false
+		dep.reason = nil
+	end
+
+	recompute(dep)
+	local changed, version = signal_if_changed(self, before)
+	return dep.effective_status, dep.available == true, changed, version
+end
+
+local function mark_route_missing(self, key, reason)
+	if self._closed then return nil, self._closed_reason or 'closed' end
+	local dep = self._deps[assert_key(key)]
+	if not dep then return nil, 'unknown_dependency' end
+
+	local before = self:snapshot()
+	dep.route_missing = dep.observed_available == true
+	dep.last_error = copy(reason or 'no_route')
+	dep.reason = dep.route_missing and (format_reason(reason) or 'no_route') or nil
+	dep.updated_at = self._now()
+	recompute(dep)
+	local changed, version = signal_if_changed(self, before)
+	return true, version, changed
+end
+
+local function event_from_msg(self, key, msg, err)
+	if msg == nil then
+		local status = record_status(self, key, { state = 'unavailable', reason = err or 'status_closed' })
+		local dep = self._deps[assert_key(key)]
+		if dep ~= nil then dep.sub = nil end
+		return {
+			kind = self.closed_kind,
+			key = key,
+			status = status,
+			available = self:available(key),
+			reason = err or 'status_closed',
+			dependency = self:dependency(key),
+		}
+	end
+
+	local status, available, changed, version = record_status(self, key, msg.payload, { msg = msg })
+	return {
+		kind = self.changed_kind,
+		key = key,
+		status = status,
+		available = available == true,
+		changed = changed == true,
+		version = version,
+		dependency = self:dependency(key),
+		payload = msg.payload,
+		msg = msg,
+	}
+end
+
+local function recv_op_for(self, key)
+	local dep = self._deps[assert_key(key)]
+	if not dep or not dep.sub then return op.never() end
+	return dep.sub:recv_op():wrap(function (msg, err)
+		return event_from_msg(self, key, msg, err)
+	end)
+end
+
+local function try_recv_for(self, key)
+	local dep = self._deps[assert_key(key)]
+	if not dep then return nil, 'unknown_dependency' end
+	if not dep.sub then return nil, 'not_watched' end
+	local msg, err = queue.try_recv_now(dep.sub)
+	if msg ~= nil then return event_from_msg(self, key, msg, nil), nil end
+	if err == 'not_ready' then return nil, 'not_ready' end
+	return event_from_msg(self, key, nil, err), nil
+end
+
+local function try_recv_any(self)
+	for i = 1, #self._order do
+		local key = self._order[i]
+		if self._deps[key].sub ~= nil then
+			local ev, err = try_recv_for(self, key)
+			if ev ~= nil then return ev, nil end
+			if err ~= 'not_ready' and err ~= 'not_watched' then return nil, err end
+		end
+	end
+	return nil, 'not_ready'
+end
+
+local function recv_any_op(self)
+	local arms = {}
+	for i = 1, #self._order do
+		local key = self._order[i]
+		if self._deps[key].sub ~= nil then
+			arms[key] = recv_op_for(self, key)
+		end
+	end
+	if next(arms) == nil then return op.never() end
+	return fibers.named_choice(arms):wrap(function (_key, ev)
+		return ev
+	end)
+end
+
+local function has_active_source(self)
+	if self._closed then return false end
+	for i = 1, #self._order do
+		if self._deps[self._order[i]].sub ~= nil then return true end
+	end
+	return false
 end
 
 function M.status_available(status)
@@ -268,12 +460,19 @@ function M.is_no_route(...)
 	return false
 end
 
+function M.classify_call_failure(reply, err)
+	if M.is_no_route(reply, err) then return 'route_missing', err or reply or 'no_route' end
+	return 'failure', err or reply
+end
+
 function M.open(conn, specs, opts)
-	opts = opts or {}
+	local supplied_opts = opts or {}
+	local open_opts = {}
+	for k, v in pairs(supplied_opts) do open_opts[k] = v end
 	if type(specs) ~= 'table' then
 		return nil, 'capability_dependencies.open: specs must be a table'
 	end
-	opts._now = now_fn(opts)
+	local now = now_fn(open_opts)
 
 	local deps = {}
 	local order = {}
@@ -284,13 +483,13 @@ function M.open(conn, specs, opts)
 		_pulse = pulse.new(0),
 		_closed = false,
 		_closed_reason = nil,
-		_now = opts._now,
-		changed_kind = opts.changed_kind or 'capability_dependency_changed',
-		closed_kind = opts.closed_kind or 'capability_dependency_closed',
+		_now = now,
+		changed_kind = open_opts.changed_kind or 'capability_dependency_changed',
+		closed_kind = open_opts.closed_kind or 'capability_dependency_closed',
 	}, Dependencies)
 
 	for _, spec in ipairs(ordered_specs(specs)) do
-		local dep, err = build_dep(conn, spec, opts)
+		local dep, err = build_dep(conn, spec, open_opts, now)
 		if not dep then
 			mgr:terminate('open_failed')
 			return nil, err
@@ -306,26 +505,8 @@ function M.open(conn, specs, opts)
 	return mgr, nil
 end
 
-function Dependencies:is_closed()
-	return self._closed == true
-end
-
-function Dependencies:is_terminated()
-	return self:is_closed()
-end
-
-function Dependencies:why()
-	return self._closed_reason
-end
-
 function Dependencies:version()
 	return self._pulse:version()
-end
-
-function Dependencies:keys()
-	local out = {}
-	for i = 1, #self._order do out[i] = self._order[i] end
-	return out
 end
 
 function Dependencies:ref(key)
@@ -352,230 +533,9 @@ function Dependencies:status(key)
 	return dep and dep.effective_status or 'not_configured'
 end
 
-function Dependencies:observed_status(key)
-	local dep = self._deps[assert_key(key)]
-	return dep and dep.observed_status or 'not_configured'
-end
-
 function Dependencies:available(key)
 	local dep = self._deps[assert_key(key)]
 	return dep and dep.available == true or false
-end
-
-function Dependencies:reason(key)
-	local dep = self._deps[assert_key(key)]
-	return dep and dep.reason or nil
-end
-
-function Dependencies:all_available(which)
-	local required_only = which == nil or which == true or which == 'required'
-	for i = 1, #self._order do
-		local dep = self._deps[self._order[i]]
-		if (not required_only or dep.required) and dep.available ~= true then
-			return false
-		end
-	end
-	return true
-end
-
-function Dependencies:_signal_if_changed(before)
-	local after = self:snapshot()
-	if tablex.deep_equal(before, after) then return false, self:version() end
-	return true, self._pulse:signal()
-end
-
-function Dependencies:_recompute(dep)
-	local observed_status = dep.observed_status or (dep.configured and 'configured' or 'not_configured')
-	local observed_available = dep.observed_available == true
-
-	-- An explicit unavailability from the publisher is a stronger fact than a
-	-- previous local no_route inference.  Keep last_error for diagnostics, but
-	-- do not continue presenting route_missing as the effective state once the
-	-- capability owner has said it is unavailable.
-	if dep.route_missing and observed_available then
-		dep.effective_status = 'route_missing'
-		dep.available = false
-		dep.reason = dep.reason or 'no_route'
-		return
-	end
-
-	dep.effective_status = observed_status
-	-- Availability is an observed fact when a status payload carries an
-	-- explicit available field.  Do not infer true from state='running' or
-	-- state='available' when the publisher explicitly said available=false.
-	dep.available = observed_available
-	if dep.available then dep.reason = nil end
-end
-
-function Dependencies:record_status(key, payload, meta)
-	if self._closed then return nil, self._closed_reason or 'closed' end
-	local dep = self._deps[assert_key(key)]
-	if not dep then return nil, 'unknown_dependency' end
-
-	local status, available = normalise_status_payload(payload)
-	local payload_copy = copy(payload)
-	local will_clear_route_missing = available == true and dep.route_missing == true
-	if dep.observed_status == status
-		and dep.observed_available == (available == true)
-		and tablex.deep_equal(dep.payload, payload_copy)
-		and not will_clear_route_missing
-	then
-		return dep.effective_status, dep.available == true, false, self:version()
-	end
-
-	local before = self:snapshot()
-	dep.observed_status = status
-	dep.observed_available = available == true
-	dep.payload = payload_copy
-	dep.updated_at = (meta and meta.at) or self._now()
-
-	if available == true then
-		dep.route_missing = false
-		dep.last_error = nil
-		dep.last_error_at = nil
-		dep.reason = nil
-	elseif dep.route_missing then
-		-- Explicit unavailability supersedes a previous local no_route inference.
-		dep.route_missing = false
-		dep.reason = nil
-	end
-
-	self:_recompute(dep)
-	local changed, version = self:_signal_if_changed(before)
-	return dep.effective_status, dep.available == true, changed, version
-end
-
-function Dependencies:mark_route_missing(key, reason)
-	if self._closed then return nil, self._closed_reason or 'closed' end
-	local dep = self._deps[assert_key(key)]
-	if not dep then return nil, 'unknown_dependency' end
-
-	local before = self:snapshot()
-	-- A no_route result is an availability override only when the publisher most
-	-- recently said the capability was available.  If the publisher already says
-	-- unavailable, keep that explicit observation as the effective state and record
-	-- the route failure only as diagnostic detail.
-	dep.route_missing = dep.observed_available == true
-	dep.last_error = copy(reason or 'no_route')
-	dep.last_error_at = self._now()
-	dep.reason = dep.route_missing and (format_reason(reason) or 'no_route') or nil
-	dep.updated_at = dep.last_error_at
-	self:_recompute(dep)
-	local changed, version = self:_signal_if_changed(before)
-	return true, version, changed
-end
-
-function Dependencies:clear_route_missing(key)
-	if self._closed then return nil, self._closed_reason or 'closed' end
-	local dep = self._deps[assert_key(key)]
-	if not dep then return nil, 'unknown_dependency' end
-
-	local before = self:snapshot()
-	dep.route_missing = false
-	dep.last_error = nil
-	dep.last_error_at = nil
-	dep.reason = nil
-	dep.updated_at = self._now()
-	self:_recompute(dep)
-	local changed, version = self:_signal_if_changed(before)
-	return true, version, changed
-end
-
-function M.classify_call_failure(reply, err)
-	if M.is_no_route(reply, err) then return 'route_missing', err or reply or 'no_route' end
-	return 'failure', err or reply
-end
-
-function Dependencies:classify_call_failure(key, reply, err)
-	local class, reason = M.classify_call_failure(reply, err)
-	if class == 'route_missing' then
-		local ok, version, changed = self:mark_route_missing(key, reason or 'no_route')
-		return 'route_missing', reason or 'no_route', self:dependency(key), ok, version, changed
-	end
-	return class, reason, self:dependency(key), false, nil, false
-end
-
-function Dependencies:_event_from_msg(key, msg, err)
-	if msg == nil then
-		local status = self:record_status(key, { state = 'unavailable', reason = err or 'status_closed' })
-		local dep = self._deps[assert_key(key)]
-		if dep ~= nil then
-			-- A closed status feed is a terminal observation for that feed.  Remove
-			-- it from future coordinator event-source sets so callers do not spin on
-			-- an already-ready closed recv_op().  The feed is already closed; normal
-			-- finaliser cleanup remains idempotent for real bus subscriptions.
-			dep.sub = nil
-		end
-		return {
-			kind = self.closed_kind,
-			key = key,
-			status = status,
-			available = self:available(key),
-			reason = err or 'status_closed',
-			dependency = self:dependency(key),
-		}
-	end
-
-	local status, available, changed, version = self:record_status(key, msg.payload, { msg = msg })
-	return {
-		kind = self.changed_kind,
-		key = key,
-		status = status,
-		available = available == true,
-		changed = changed == true,
-		version = version,
-		dependency = self:dependency(key),
-		msg = msg,
-	}
-end
-
-function Dependencies:recv_op(key)
-	local dep = self._deps[assert_key(key)]
-	if not dep then error('unknown dependency: ' .. tostring(key), 2) end
-	if not dep.sub then error('dependency is not watched: ' .. tostring(key), 2) end
-	return dep.sub:recv_op():wrap(function (msg, err)
-		return self:_event_from_msg(key, msg, err)
-	end)
-end
-
-function Dependencies:try_recv_now(key)
-	local dep = self._deps[assert_key(key)]
-	if not dep then return nil, 'unknown_dependency' end
-	if not dep.sub then return nil, 'not_watched' end
-	local msg, err = queue.try_recv_now(dep.sub)
-	if msg ~= nil then return self:_event_from_msg(key, msg, nil), nil end
-	if err == 'not_ready' then return nil, 'not_ready' end
-	return self:_event_from_msg(key, nil, err), nil
-end
-
-function Dependencies:event_source(key, opts)
-	opts = opts or {}
-	assert_key(key)
-	local name = opts.name or ('capability_dependency:' .. key)
-	return {
-		name = name,
-		try_now = function ()
-			local ev = self:try_recv_now(key)
-			return ev
-		end,
-		recv_op = function ()
-			return self:recv_op(key)
-		end,
-	}
-end
-
-function Dependencies:event_sources(opts)
-	opts = opts or {}
-	local out = {}
-	for i = 1, #self._order do
-		local key = self._order[i]
-		if self._deps[key].sub ~= nil then
-			out[#out + 1] = self:event_source(key, {
-				name = opts.prefix and (opts.prefix .. ':' .. key) or nil,
-			})
-		end
-	end
-	return out
 end
 
 function Dependencies:changed_op(last_seen)
@@ -588,6 +548,32 @@ function Dependencies:changed_op(last_seen)
 		end
 		return version, self:snapshot(), nil
 	end)
+end
+
+function Dependencies:event_source(opts)
+	opts = opts or {}
+	local name = opts.name or 'capability_dependencies'
+	return {
+		name = name,
+		enabled = function () return has_active_source(self) end,
+		try_now = function ()
+			while true do
+				local ev = try_recv_any(self)
+				if ev == nil then return nil end
+				if ev.changed ~= false or ev.kind == self.closed_kind then return ev end
+			end
+		end,
+		recv_op = function () return recv_any_op(self) end,
+	}
+end
+
+function Dependencies:classify_call_failure(key, reply, err)
+	local class, reason = M.classify_call_failure(reply, err)
+	if class == 'route_missing' then
+		local ok, version, changed = mark_route_missing(self, key, reason or 'no_route')
+		return 'route_missing', reason or 'no_route', self:dependency(key), ok, version, changed
+	end
+	return class, reason, self:dependency(key), false, nil, false
 end
 
 function Dependencies:terminate(reason)
@@ -603,10 +589,6 @@ function Dependencies:terminate(reason)
 	end
 	self._pulse:close(self._closed_reason)
 	return true, nil
-end
-
-function Dependencies:close(reason)
-	return self:terminate(reason or 'closed')
 end
 
 M.Dependencies = Dependencies

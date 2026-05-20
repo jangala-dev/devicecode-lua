@@ -153,9 +153,8 @@ function M.next_service_event_op(state)
 	-- Dependency changes are admission facts for the service coordinator.  Handle
 	-- them before externally-triggered manager requests so retained status replay
 	-- cannot be starved by status polling during startup.
-	if state._deps and type(state._deps.event_sources) == 'function' then
-		local dep_sources = state._deps:event_sources({ prefix = 'dependency' })
-		for i = 1, #dep_sources do sources[#sources + 1] = dep_sources[i] end
+	if state._deps and type(state._deps.event_source) == 'function' then
+		sources[#sources + 1] = state._deps:event_source({ name = 'dependencies' })
 	end
 
 	sources[#sources + 1] = {

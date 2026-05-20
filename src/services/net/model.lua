@@ -39,12 +39,16 @@ function M.initial(service_id)
 			generation = nil,
 		},
 
+		pending = {},
+
 		hal = {
 			network_config = 'not_configured',
 			network_state = 'not_configured',
 			network_diagnostics = 'not_configured',
 			last_status = {},
 		},
+
+		dependencies = {},
 
 		observed = {
 			last_event = nil,

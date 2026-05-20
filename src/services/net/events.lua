@@ -79,9 +79,8 @@ local function try_observed_now(state)
 end
 
 local function add_capability_sources(state, sources)
-	if state.cap_deps and type(state.cap_deps.event_sources) == 'function' then
-		local dep_sources = state.cap_deps:event_sources({ prefix = 'capability' })
-		for i = 1, #dep_sources do sources[#sources + 1] = dep_sources[i] end
+	if state.cap_deps and type(state.cap_deps.event_source) == 'function' then
+		sources[#sources + 1] = state.cap_deps:event_source({ name = 'capability_dependencies' })
 		return
 	end
 

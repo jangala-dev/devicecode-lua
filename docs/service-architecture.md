@@ -820,7 +820,8 @@ local deps = assert(cap_deps.open(conn, {
 }))
 
 -- In the coordinator event set:
--- deps:recv_op('job_store') or deps:event_sources()
+-- deps:event_source()
+-- or, for model-style observers, deps:changed_op(seen)
 
 if state.pending_start and deps:available('job_store') then
   start_job_runtime(state, 'job_store_available')

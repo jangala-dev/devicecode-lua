@@ -29,7 +29,9 @@ function M.service_initial(service_id, generation)
 		update_active = nil,
 		jobs       = { count = 0, by_id = {} },
 		ingest     = { count = 0, by_id = {} },
+		pending    = {},
 		publisher  = { state = 'starting' },
+		dependencies = {},
 	}
 end
 
