@@ -70,6 +70,15 @@ local function resolve_action_spec(component, action, req, base_spec)
 	return base_spec, nil
 end
 
+
+local function action_dependency_key(active, component_id, action, action_spec)
+	local by_component = active and active.action_dependency_keys and active.action_dependency_keys[component_id] or nil
+	local key = by_component and by_component[action] or nil
+	if key ~= nil then return key end
+	local dep = type(action_spec) == 'table' and action_spec.dependency or nil
+	return type(dep) == 'table' and dep.key or nil
+end
+
 local function component_actions(component)
 	local out = { ['get-status'] = true }
 	for action in pairs(component.actions or {}) do
@@ -184,6 +193,11 @@ function M.start_action(state, req, rec)
 	local action_spec, spec_err = resolve_action_spec(component, rec.action, req, base_action_spec)
 	if not action_spec then
 		return fail_public_request(req, spec_err or 'unknown_action')
+	end
+
+	local dep_key = action_dependency_key(active, rec.component, rec.action, action_spec)
+	if dep_key ~= nil and active.action_deps and active.action_deps:available(dep_key) ~= true then
+		return fail_public_request(req, 'dependency_unavailable:' .. tostring(dep_key))
 	end
 
 	local request_id = new_request_id(state)

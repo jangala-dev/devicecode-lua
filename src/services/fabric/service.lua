@@ -30,6 +30,8 @@ local topics      = require 'services.fabric.topics'
 local transfer_client = require 'services.fabric.transfer_client'
 local service_base = require 'devicecode.service_base'
 local request_owner = require 'devicecode.support.request_owner'
+local cap_deps_mod = require 'devicecode.support.capability_dependencies'
+local fabric_deps = require 'services.fabric.dependencies'
 local tablex       = require 'shared.table'
 
 local M = {}
@@ -621,6 +623,7 @@ local function service_status_payload(state, service_state, extra)
 		ready      = active ~= nil,
 		config_generation = active and active.config_generation or nil,
 		last_error   = state.last_error,
+		dependencies = state.generation_deps and state.generation_deps:snapshot() or nil,
 	}
 	for k, v in pairs(extra or {}) do
 		payload[k] = v
@@ -849,7 +852,76 @@ local function build_generation_overrides(state, compiled)
 	return overrides
 end
 
-local function start_generation(state, compiled)
+
+local start_generation
+
+local function terminate_generation_deps(state, reason)
+	if state.generation_deps and type(state.generation_deps.terminate) == 'function' then
+		state.generation_deps:terminate(reason or 'fabric_generation_dependency_closed')
+	end
+	state.generation_deps = nil
+	state.generation_dependency_specs = nil
+	return true
+end
+
+local function open_generation_deps(state, compiled)
+	terminate_generation_deps(state, 'fabric_generation_dependency_replaced')
+	if state.link_runner ~= nil or state.private_link_runtime then return true, nil end
+	local specs = fabric_deps.transport_dependencies(compiled, state.link_overrides)
+	if #specs == 0 then return true, nil end
+	local deps, err = cap_deps_mod.open(state.conn, specs, {
+		changed_kind = 'fabric_dependency_changed',
+		closed_kind = 'fabric_dependency_closed',
+		queue_len = state.dependency_queue_len or 8,
+		full = 'drop_oldest',
+	})
+	if not deps then return nil, err or 'fabric_dependency_open_failed' end
+	state.generation_deps = deps
+	state.generation_dependency_specs = specs
+	return true, nil
+end
+
+local function all_generation_deps_available(state)
+	if state.generation_deps == nil then return true end
+	for _, spec in ipairs(state.generation_dependency_specs or {}) do
+		if state.generation_deps:available(spec.key) ~= true then return false end
+	end
+	return true
+end
+
+local function publish_waiting_for_transport(state, reason)
+	state.last_error = reason or 'transport_unavailable'
+	publish_service_lifecycle(state, 'waiting_for_dependency', {
+		ready = false,
+		reason = state.last_error,
+		dependency = 'transport',
+		links = state.pending_compiled and #(state.pending_compiled.links or {}) or nil,
+	})
+	return true
+end
+
+local function maybe_start_pending_generation(state, reason)
+	if state.active ~= nil then return true, nil end
+	local compiled = state.pending_compiled
+	if compiled == nil then return true, nil end
+	if not all_generation_deps_available(state) then
+		publish_waiting_for_transport(state, reason or state.pending_generation_reason or 'transport_unavailable')
+		return true, nil
+	end
+	state.pending_compiled = nil
+	state.pending_generation_reason = nil
+	local active, err = start_generation(state, compiled)
+	if not active then return nil, err or 'generation_start_failed' end
+	state.last_error = nil
+	publish_service_lifecycle(state, 'running', {
+		ready = true,
+		config_generation = active.config_generation,
+		links = #(compiled.links or {}),
+	})
+	return true, nil
+end
+
+function start_generation(state, compiled)
 	state.config_generation_seq = state.config_generation_seq + 1
 	local config_generation = state.config_generation_seq
 	local overrides = build_generation_overrides(state, compiled)
@@ -916,7 +988,19 @@ local function handle_generation_done(state, ev)
 		return
 	end
 
+	local completed = active
+	close_transfer_admissions(state, ev.status == 'ok' and 'generation_completed' or 'generation_failed')
 	state.active = nil
+
+	if ev.status ~= 'ok' and state.generation_deps and cap_deps_mod.is_no_route(ev.primary, ev.result, ev.report) then
+		for _, spec in ipairs(state.generation_dependency_specs or {}) do
+			state.generation_deps:classify_call_failure(spec.key, ev.result, ev.primary)
+		end
+		state.pending_compiled = completed and completed.compiled or state.pending_compiled
+		state.pending_generation_reason = 'transport_route_missing'
+		publish_waiting_for_transport(state, 'transport_route_missing')
+		return
+	end
 
 	if ev.status == 'ok' then
 		state.last_error = nil
@@ -975,25 +1059,29 @@ local function try_shell_cfg_now(state)
 end
 
 local function next_shell_event_op(state)
+	local sources = {
+		{
+			name = 'done',
+			try_now = function () return try_shell_done_now(state) end,
+			recv_op = function ()
+				return state.done_rx:recv_op():wrap(done_event_from_recv)
+			end,
+		},
+		{
+			name = 'cfg',
+			try_now = function () return try_shell_cfg_now(state) end,
+			recv_op = function ()
+				return state.cfg_watch:recv_op():wrap(config_event_from_watch)
+			end,
+		},
+	}
+	if state.generation_deps then
+		sources[#sources + 1] = state.generation_deps:event_source({ name = 'dependencies' })
+	end
 	return priority_event.sources_op {
 		label   = 'fabric.service.shell',
 		pending = state.pending_events,
-		sources = {
-			{
-				name = 'done',
-				try_now = function () return try_shell_done_now(state) end,
-				recv_op = function ()
-					return state.done_rx:recv_op():wrap(done_event_from_recv)
-				end,
-			},
-			{
-				name = 'cfg',
-				try_now = function () return try_shell_cfg_now(state) end,
-				recv_op = function ()
-					return state.cfg_watch:recv_op():wrap(config_event_from_watch)
-				end,
-			},
-		},
+		sources = sources,
 	}
 end
 
@@ -1009,8 +1097,20 @@ local function handle_config_event(state, ev_or_msg)
 		return
 	end
 
-	local active, gerr = replace_generation(state, compiled, 'config_changed')
-	if not active then
+	cancel_active_generation(state, 'config_changed')
+	local ok_dep, dep_err = open_generation_deps(state, compiled)
+	if ok_dep ~= true then
+		state.last_error = tostring(dep_err or 'dependency_open_failed')
+		publish_service_lifecycle(state, 'degraded', {
+			reason = 'dependency_open_failed',
+			last_error = state.last_error,
+		})
+		return
+	end
+	state.pending_compiled = compiled
+	state.pending_generation_reason = 'transport_unavailable'
+	local ok_start, gerr = maybe_start_pending_generation(state, 'config_changed')
+	if ok_start ~= true then
 		state.last_error = tostring(gerr or 'generation_start_failed')
 		publish_service_lifecycle(state, 'degraded', {
 			reason = 'generation_start_failed',
@@ -1018,13 +1118,6 @@ local function handle_config_event(state, ev_or_msg)
 		})
 		return
 	end
-
-	state.last_error = nil
-	publish_service_lifecycle(state, 'running', {
-		ready = true,
-		config_generation = active.config_generation,
-		links = #(compiled.links or {}),
-	})
 end
 
 local function handle_shell_event(state, ev)
@@ -1032,6 +1125,9 @@ local function handle_shell_event(state, ev)
 		handle_config_event(state, ev)
 	elseif ev.kind == 'generation_done' then
 		handle_generation_done(state, ev)
+	elseif ev.kind == 'fabric_dependency_changed' or ev.kind == 'fabric_dependency_closed' then
+		local ok, err = maybe_start_pending_generation(state, ev.kind == 'fabric_dependency_changed' and 'dependency_available' or 'dependency_closed')
+		if ok ~= true then error(err or 'fabric dependency handling failed', 0) end
 	elseif ev.kind == 'cfg_closed' or ev.kind == 'done_closed' then
 		error(tostring(ev.err or ev.kind), 0)
 	else
@@ -1086,6 +1182,10 @@ function M.start(conn, opts)
 			source_id = opts.service_id or 'fabric',
 		}, { label = 'fabric_service_event_report_failed' }),
 		active     = nil,
+		pending_compiled = nil,
+		pending_generation_reason = nil,
+		generation_deps = nil,
+		generation_dependency_specs = nil,
 		config_generation_seq = 0,
 		pending_events = {},
 		link_runner = opts.link_runner,
@@ -1095,6 +1195,7 @@ function M.start(conn, opts)
 		config_generation_done_queue_len = opts.config_generation_done_queue_len,
 		transfer_admissions = {},
 		transfer_admission_queue_len = opts.transfer_admission_queue_len,
+		dependency_queue_len = opts.dependency_queue_len,
 		transfer_seq = 0,
 		last_error = nil,
 	}
@@ -1107,6 +1208,7 @@ function M.start(conn, opts)
 	scope:finally(function (_, status, primary)
 		local reason = primary or status or 'fabric_stop'
 		cancel_active_generation(state, reason)
+		terminate_generation_deps(state, reason)
 		unretain_transfer_interface(state)
 		done_tx:close(reason)
 		cfg_watch:close()

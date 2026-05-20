@@ -302,3 +302,8 @@ wired owns physical wired attachment.
 HAL/provider code owns implementation.
 ui consumes appliance-level state.
 ```
+
+
+## Provider dependency projection
+
+Configured wired providers are tracked with the common capability dependency vocabulary. Provider absence is projected as unavailable/degraded surface state and violations; it is not a service startup failure.

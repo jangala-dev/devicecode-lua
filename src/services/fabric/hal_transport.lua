@@ -247,7 +247,9 @@ local function unwrap_open_transport_reply(reply, err)
 	end
 
 	if reply.ok ~= true then
-		return nil, tostring(reply.reason or err or 'transport_open_failed')
+		local reason = reply.reason or reply.err or err or 'transport_open_failed'
+		if type(reason) == 'table' then reason = reason.err or reason.detail or reason.reason or 'transport_open_failed' end
+		return nil, tostring(reason)
 	end
 
 	if type(reply.reason) ~= 'table' then

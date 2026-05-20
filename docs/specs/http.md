@@ -189,3 +189,8 @@ The SDK has no hidden default bus timeout policy.
 Stats under cap/.../state are narrow.
 Metrics also appear under obs/v1/http/...
 ```
+
+
+## Dependency-provider status
+
+`cap/http/main/status.available=true` means the HTTP backend is ready to admit non-status capability requests. While the shell is alive but the backend is starting, status remains queryable and non-status requests should fail with `http_backend_not_ready` or an equivalent not-ready reason.

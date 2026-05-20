@@ -19,6 +19,7 @@ local supervision  = require 'services.ui.supervision'
 local config_watch = require 'devicecode.support.config_watch'
 local config_mod   = require 'services.ui.config'
 local service_events = require 'devicecode.support.service_events'
+local cap_deps_mod = require 'devicecode.support.capability_dependencies'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -187,6 +188,8 @@ local function run_session_pruner(_, sessions, interval)
 	end
 end
 
+local start_configured_listener
+
 local function listener_config_key(cfg)
 	if not cfg or not cfg.enabled or not cfg.http or cfg.http.enabled == false then return 'disabled' end
 	local h = cfg.http
@@ -198,6 +201,81 @@ local function listener_config_key(cfg)
 		tostring(h.tls or false),
 		tostring(h.max_accept_queue or ''),
 	}, '|')
+end
+
+
+local function listener_http_cap_id(cfg)
+	local h = cfg and cfg.http or nil
+	return (type(h) == 'table' and h.cap_id) or 'main'
+end
+
+local function listener_needs_http_dependency(state, cfg)
+	local params = state.params or {}
+	if params.listener ~= nil or params.obtain_listener_op ~= nil then return false end
+	if not cfg or cfg.enabled == false then return false end
+	if not cfg.http or cfg.http.enabled == false then return false end
+	return true
+end
+
+local function terminate_http_deps(state, reason)
+	if state.http_deps and type(state.http_deps.terminate) == 'function' then
+		state.http_deps:terminate(reason or 'ui_http_dependency_closed')
+	end
+	state.http_deps = nil
+	state.http_dep_cap_id = nil
+	return true
+end
+
+local function ensure_http_dependency(state, cfg)
+	if not listener_needs_http_dependency(state, cfg) then
+		terminate_http_deps(state, 'ui_http_dependency_not_required')
+		return true, nil
+	end
+
+	local cap_id = listener_http_cap_id(cfg)
+	if state.http_deps and state.http_dep_cap_id == cap_id then return true, nil end
+	terminate_http_deps(state, 'ui_http_dependency_replaced')
+	local deps, err = cap_deps_mod.open(state.conn, {
+		{ key = 'http', class = 'http', id = cap_id, required = true },
+	}, {
+		changed_kind = 'http_dependency_changed',
+		closed_kind = 'http_dependency_closed',
+		queue_len = (state.params and state.params.dependency_queue_len) or 8,
+		full = 'drop_oldest',
+	})
+	if not deps then return nil, err or 'http_dependency_open_failed' end
+	state.http_deps = deps
+	state.http_dep_cap_id = cap_id
+	return true, nil
+end
+
+local function http_dependency_available(state)
+	return state.http_deps == nil or state.http_deps:available('http') == true
+end
+
+local function set_listener_waiting_for_http(state, reason)
+	state.listener_status = 'waiting_for_http'
+	state.last_error = reason or 'http_unavailable'
+	state.components = state.components or {}
+	state.components.http_listener = {
+		status = 'waiting_for_dependency',
+		reason = state.last_error,
+		generation = state.listener_generation,
+	}
+	return true
+end
+
+local function maybe_start_pending_listener(state, reason)
+	if state.listener_handle ~= nil then return true, nil end
+	local cfg = state.pending_listener_cfg
+	if cfg == nil then return true, nil end
+	if not http_dependency_available(state) then
+		set_listener_waiting_for_http(state, reason or 'http_unavailable')
+		return true, nil
+	end
+	state.pending_listener_cfg = nil
+	state.pending_listener_generation = nil
+	return start_configured_listener(state, cfg, state.config_generation)
 end
 
 local function build_listener_opts(state, cfg, listener_generation, listener_id)
@@ -263,6 +341,7 @@ local function cancel_listener(state, reason)
 	end
 	state.listener_handle = nil
 	state.listener_config_key = nil
+	state.current_listener_cfg = nil
 	state.listener_generation = (state.listener_generation or 0) + 1
 	state.components = state.components or {}
 	state.components.http_listener = { status = 'disabled', generation = state.listener_generation }
@@ -271,7 +350,7 @@ local function cancel_listener(state, reason)
 	return true
 end
 
-local function start_configured_listener(state, cfg, generation)
+function start_configured_listener(state, cfg, generation)
 	local key = listener_config_key(cfg)
 	if key == 'disabled' then
 		cancel_listener(state, 'ui_http_disabled')
@@ -282,6 +361,7 @@ local function start_configured_listener(state, cfg, generation)
 	state.listener_generation = generation or ((state.listener_generation or 0) + 1)
 	state.listener_config_key = key
 	state.listener_status = 'starting'
+	state.current_listener_cfg = cfg
 	local listener_generation = state.listener_generation
 	local listener_id = 'http_listener:' .. tostring(listener_generation)
 	state.listener_handle = start_component(state, 'http_listener', function (component_scope)
@@ -352,11 +432,33 @@ local function apply_config(state, raw, generation)
 	if cfg.enabled == false then
 		cancel_listener(state, 'ui_disabled')
 		cancel_session_pruner(state, 'ui_disabled')
+		terminate_http_deps(state, 'ui_disabled')
+		state.pending_listener_cfg = nil
+		state.pending_listener_generation = nil
 		state.service_status = 'disabled'
 		return { publish = true }
 	end
 
-	start_configured_listener(state, cfg, state.config_generation)
+	local ok_dep, dep_err = ensure_http_dependency(state, cfg)
+	if ok_dep ~= true then
+		state.service_status = 'degraded'
+		state.last_error = dep_err or 'http_dependency_open_failed'
+		return { publish = true }
+	end
+
+	local key = listener_config_key(cfg)
+	if key == 'disabled' then
+		state.pending_listener_cfg = nil
+		state.pending_listener_generation = nil
+		cancel_listener(state, 'ui_http_disabled')
+	else
+		if not state.listener_handle or state.listener_config_key ~= key then
+			cancel_listener(state, 'ui_http_reconfigured')
+			state.pending_listener_cfg = cfg
+			state.pending_listener_generation = state.config_generation
+			maybe_start_pending_listener(state, 'config_changed')
+		end
+	end
 	start_configured_session_pruner(state, cfg, state.config_generation)
 	return { publish = true }
 end
@@ -397,7 +499,29 @@ local function reduce_event(state, ev)
 	elseif ev.kind == 'ui_component_done' then
 		local accepted = record_component_done(state, ev)
 		if not accepted then return {} end
+		if ev.component == 'http_listener' and state.http_deps and cap_deps_mod.is_no_route(ev.primary, ev.result, ev.report) then
+			state.http_deps:classify_call_failure('http', ev.result, ev.primary)
+			state.listener_handle = nil
+			state.listener_config_key = nil
+			state.pending_listener_cfg = state.current_listener_cfg or state.config
+			state.pending_listener_generation = state.config_generation
+			set_listener_waiting_for_http(state, 'http_route_missing')
+			return { publish = true }
+		end
 		return apply_service_policy(state, ev)
+	elseif ev.kind == 'http_dependency_changed' or ev.kind == 'http_dependency_closed' then
+		if ev.key == 'http' then
+			if ev.available == true then
+				state.last_error = nil
+				local ok, err = maybe_start_pending_listener(state, 'http_available')
+				if ok ~= true then state.service_status = 'degraded'; state.last_error = err or 'http_listener_start_failed' end
+			else
+				if state.pending_listener_cfg ~= nil and state.listener_handle == nil then
+					set_listener_waiting_for_http(state, ev.reason or 'http_unavailable')
+				end
+			end
+		end
+		return { publish = true }
 	elseif ev.kind == 'read_model_changed' then
 		state.model_seen = ev.version or state.model_seen
 		return { publish = true }
@@ -462,6 +586,11 @@ local function next_event_op(state)
 		end)
 	end
 
+	if state.http_deps then
+		local src = state.http_deps:event_source({ name = 'http' })
+		arms.http_dependency = src.recv_op()
+	end
+
 	return fibers.named_choice(arms):wrap(function (_, ev)
 		return ev
 	end)
@@ -501,6 +630,11 @@ function M.run(scope, params)
 		service_status = 'starting',
 		read_model_status = 'starting',
 		listener_status = 'disabled',
+		listener_generation = 0,
+		pending_listener_cfg = nil,
+		pending_listener_generation = nil,
+		http_deps = nil,
+		http_dep_cap_id = nil,
 		config_status = 'waiting',
 		config_generation = 0,
 		active_requests = 0,
@@ -513,6 +647,7 @@ function M.run(scope, params)
 		local reason = primary or status or 'ui_service_closed'
 		cancel_listener(state, reason)
 		cancel_session_pruner(state, reason)
+		terminate_http_deps(state, reason)
 		cfg_watch:close()
 		done_tx:close(reason)
 		if not read_model_owns_model then

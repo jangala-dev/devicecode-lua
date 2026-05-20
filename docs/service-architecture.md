@@ -1140,3 +1140,47 @@ a test that depends on private coordinator tables for an integration behaviour
 ```
 
 Any one of these may be justified in a narrow case. Several together usually mean the service boundary is losing shape.
+
+
+### Capability dependency admission for modern services
+
+Modern services should start their shell before all dependencies are available.
+The shell may open config watches, dependency watches, retained projections and
+safe public endpoints.  It must not start dependency-backed work merely because
+configuration has arrived.
+
+Use `devicecode.support.capability_dependencies` as a coordinator-facing model:
+
+```text
+capability dependency helper = facts and wakeups
+service coordinator           = policy and admission
+worker/request scope           = blocking capability calls
+```
+
+For admission decisions, use `deps:available(key)`, not `deps:status(key)`.
+`status()` is diagnostic: an observed capability may say `running` while carrying
+`available=false`, or may be locally overridden by `route_missing` after a
+`no_route` call.
+
+Classify dependency failures before applying service policy:
+
+```text
+no_route / capability absent / available=false
+  => admission failure; record waiting or reject the individual request
+
+accepted operation returns a domain error
+  => domain failure; degrade, fail, or record a failed job/action according to
+     the owning service's policy
+```
+
+The current modern service expectations are:
+
+```text
+HTTP    exposes cap/http status; non-status requests require backend ready.
+UI      waits for cap/http before starting configured listener work.
+Fabric  waits for HAL/raw transport capabilities before starting link generation.
+Device  gates explicitly dependency-annotated actions; observations remain tolerant.
+Wired   projects provider dependency state as model facts, not startup blockers.
+NET     gates network-config and network-state work.
+Update  gates job and artifact runtime work.
+```

@@ -528,6 +528,9 @@ function Dependencies:snapshot()
 	return out
 end
 
+-- status() is diagnostic.  Coordinators should use available() for
+-- admission decisions because an observed status such as 'running' may still
+-- carry available=false, or may be overridden locally by route_missing.
 function Dependencies:status(key)
 	local dep = self._deps[assert_key(key)]
 	return dep and dep.effective_status or 'not_configured'
@@ -537,6 +540,7 @@ function Dependencies:available(key)
 	local dep = self._deps[assert_key(key)]
 	return dep and dep.available == true or false
 end
+
 
 function Dependencies:changed_op(last_seen)
 	if type(last_seen) ~= 'number' or last_seen < 0 or last_seen % 1 ~= 0 then
