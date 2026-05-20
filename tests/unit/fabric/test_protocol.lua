@@ -328,12 +328,21 @@ function tests.test_xfer_chunk_requires_chunk_digest_and_strict_unpadded_b64url(
 	assert_eq(derr, 'invalid_chunk_encoding: invalid_base64url_unpadded')
 end
 
-function tests.test_decode_line_rejects_chunk_digest_mismatch()
+function tests.test_decode_line_preserves_xfer_chunk_digest_mismatch_for_receiver_retry()
 	local line = '{"type":"xfer_chunk","xfer_id":"xfer-1","offset":0,"data":"YQ","chunk_digest":"00000000"}'
 	local frame, err = protocol.decode_line(line)
 
-	assert_nil(frame)
-	assert_eq(err, 'chunk_digest_mismatch')
+	assert_not_nil(frame)
+	assert_nil(err)
+	assert_eq(frame.type, 'xfer_chunk')
+	assert_eq(frame.xfer_id, 'xfer-1')
+	assert_eq(frame.offset, 0)
+	assert_eq(frame.data, 'a')
+	assert_eq(frame.chunk_digest, '00000000')
+
+	local ok, verr = protocol.validate(frame)
+	assert_nil(ok)
+	assert_eq(verr, 'chunk_digest_mismatch')
 end
 
 function tests.test_decode_line_rejects_non_json()

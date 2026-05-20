@@ -34,6 +34,7 @@ function tests.test_service_run_completes_with_injected_generation_runner()
 		local st, rep, result = run_service_once {
 			publish = false,
 			service_id = 'update',
+			job_store_kind = 'memory',
 			watch_config = false,
 			generation_runner = function (_, params)
 				return {
@@ -63,6 +64,7 @@ function tests.test_manager_status_request_replies_immediately()
 			service.run(scope, {
 				conn = svc_conn,
 				service_id = 'update',
+				job_store_kind = 'memory',
 				watch_config = false,
 			})
 		end)
@@ -92,6 +94,7 @@ function tests.test_config_change_replaces_generation()
 			service.run(scope, {
 				conn = svc_conn,
 				service_id = 'update',
+				job_store_kind = 'memory',
 			})
 		end)
 		assert_true(ok, err)
@@ -135,6 +138,7 @@ function tests.test_service_shell_routes_manager_request_to_generation_private_q
 			service.run(scope, {
 				conn = svc_conn,
 				service_id = 'update',
+				job_store_kind = 'memory',
 				watch_config = false,
 				publish = false,
 				generation_runner = function (_, params)
@@ -171,6 +175,7 @@ function tests.test_publisher_failure_is_supervised_component_failure()
 			return service.run(scope, {
 				conn = svc_conn,
 				service_id = 'update',
+				job_store_kind = 'memory',
 				watch_config = false,
 				generation_runner = function ()
 					fibers.perform(sleep.sleep_op(10))
@@ -201,6 +206,7 @@ function tests.test_service_start_path_allows_injected_config_watch_for_harnesse
 				service.run(scope, {
 					publish = false,
 					service_id = 'update',
+					job_store_kind = 'memory',
 					config_watch = rx,
 					generation_runner = function ()
 						fibers.perform(sleep.sleep_op(10))

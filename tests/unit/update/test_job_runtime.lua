@@ -1,7 +1,7 @@
 local fibers = require 'fibers'
 local op = require 'fibers.op'
 local job_runtime = require 'services.update.job_runtime'
-local store_mod = require 'services.update.job_store_cap'
+local store_mod = require 'services.update.job_store_memory'
 
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
@@ -25,7 +25,7 @@ end
 function tests.test_transition_lifecycle_records_persisted_and_rejected_states()
 	fibers.run(function ()
 		local st, _, result = fibers.run_scope(function (scope)
-			local rt = start_runtime(scope, { service_id = 'update', store = store_mod.memory() })
+			local rt = start_runtime(scope, { service_id = 'update', store = store_mod.new() })
 			local created = perform_transition(rt, {
 				kind = 'create_job',
 				generation = 1,
@@ -64,10 +64,10 @@ function tests.test_restart_adoption_persists_decisions_and_marks_interrupted_jo
 			commit = { job_id = 'commit', component = 'cm5', state = 'awaiting_commit', created_seq = 2, updated_seq = 2 },
 			ret = { job_id = 'ret', component = 'cm5', state = 'awaiting_return', created_seq = 3, updated_seq = 3 },
 		}, order = { 'staging', 'commit', 'ret', 'active' }, next_seq = 10 }
-		local store = store_mod.wrap({
+		local store = {
 			load_all_op = function () return op.always(initial, nil) end,
 			save_job_op = function (_, job) saves[#saves + 1] = job; return op.always(true, nil) end,
-		})
+		}
 		local st, _, result = fibers.run_scope(function (scope)
 			local rt = start_runtime(scope, { service_id = 'update', store = store })
 			local adoption = rt:adoption()
@@ -102,10 +102,10 @@ function tests.test_failed_after_admission_keeps_admitted_lifecycle_marker()
 		local initial = { jobs = {
 			j1 = { job_id = 'j1', component = 'cm5', state = 'created', created_seq = 1, updated_seq = 1 },
 		}, order = { 'j1' }, next_seq = 10 }
-		local store = store_mod.wrap({
+		local store = {
 			load_all_op = function () return op.always(initial, nil) end,
 			save_job_op = function () return op.always(nil, 'save_failed') end,
-		})
+		}
 		local st, _, result = fibers.run_scope(function (scope)
 			local rt = start_runtime(scope, { service_id = 'update', store = store })
 			local failed = perform_transition(rt, {
@@ -129,7 +129,7 @@ end
 function tests.test_submit_transition_rejects_before_ready_without_recording_admission()
 	fibers.run(function ()
 		local st, _, result = fibers.run_scope(function (scope)
-			local rt = assert(job_runtime.start(scope, { service_id = 'update', store = store_mod.memory() }))
+			local rt = assert(job_runtime.start(scope, { service_id = 'update', store = store_mod.new() }))
 			local handle, admit_err = rt:admit_transition {
 				kind = 'create_job',
 				generation = 1,
@@ -154,7 +154,7 @@ function tests.test_job_runtime_rejects_stale_generation_before_admission()
 		local st, _, result = fibers.run_scope(function (scope)
 			local rt = start_runtime(scope, {
 				service_id = 'update',
-				store = store_mod.memory(),
+				store = store_mod.new(),
 				current_generation = 2,
 			})
 			local rejected = perform_transition(rt, {
@@ -191,10 +191,10 @@ function tests.test_job_runtime_allows_old_generation_active_apply_by_token()
 			},
 		}, order = { 'j1' }, next_seq = 10 }
 		local saved = {}
-		local store = store_mod.wrap({
+		local store = {
 			load_all_op = function () return op.always(initial, nil) end,
 			save_job_op = function (_, job) saved[#saved + 1] = job; return op.always(true, nil) end,
-		})
+		}
 		local st, _, result = fibers.run_scope(function (scope)
 			local rt = start_runtime(scope, {
 				service_id = 'update',
@@ -257,10 +257,10 @@ function tests.test_begin_commit_attempt_persists_policy_and_token_before_backen
 				commit_attempt = { token = 'commit-token', policy = 'idempotent_by_token', acceptance = 'unknown' },
 			},
 		}, order = { 'j1' }, next_seq = 10 }
-		local store = store_mod.wrap({
+		local store = {
 			load_all_op = function () return op.always(initial, nil) end,
 			save_job_op = function (_, job) saved[#saved + 1] = job; return op.always(true, nil) end,
-		})
+		}
 		local st, _, result = fibers.run_scope(function (scope)
 			local rt = start_runtime(scope, { service_id = 'update', store = store })
 			local begun = perform_transition(rt, {
@@ -306,10 +306,10 @@ function tests.test_restart_adoption_uses_commit_policy_for_uncertain_commits()
 				active_intent = { token = 'tok-missing', phase = 'commit' },
 			},
 		}, order = { 'idem', 'nodup', 'missing' }, next_seq = 20 }
-		local store = store_mod.wrap({
+		local store = {
 			load_all_op = function () return op.always(initial, nil) end,
 			save_job_op = function () return op.always(true, nil) end,
-		})
+		}
 		local st, _, result = fibers.run_scope(function (scope)
 			local rt = start_runtime(scope, { service_id = 'update', store = store })
 			local adoption = rt:adoption()

@@ -94,6 +94,11 @@ local function make_slot_request(req, reply_tx)
 		request_id         = req.request_id,
 		request_generation = req.request_generation,
 		xfer_id            = req.xfer_id,
+		target             = req.target,
+		meta               = req.meta,
+		size               = req.size,
+		digest_alg         = req.digest_alg,
+		digest             = req.digest,
 	}
 
 	function slot:reply(value)

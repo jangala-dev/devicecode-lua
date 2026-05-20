@@ -52,8 +52,7 @@ end
 
 
 local INTERNAL_PUBLIC_KEYS = {
-	source_handoff = true,
-	receiver_install = true,
+	source_owner = true,
 }
 
 local function sanitise_public_payload(value, seen)
@@ -181,13 +180,14 @@ local function run_fabric_stage_op(_, ctx, owner)
 			)
 		end)
 
-		local result, ferr, handoff = fibers.perform(fabric_stage.stage_source_op(stage_scope, {
+		local result, ferr = fibers.perform(fabric_stage.stage_source_op(stage_scope, {
 			client = ctx.fabric_client,
-			source = owned:value(),
+			source_owner = owned,
 			component = ctx.component_id,
 			action = ctx.action,
 			link_id = ctx.action_spec.link_id,
-			receiver = ctx.action_spec.receiver,
+			target = ctx.action_spec.target,
+			chunk_size = ctx.action_spec.chunk_size,
 			artifact_store = ctx.action_spec.artifact_store,
 			request_payload = request_payload(ctx.request),
 			timeout = ctx.action_spec.timeout or ctx.timeout,
@@ -198,15 +198,6 @@ local function run_fabric_stage_op(_, ctx, owner)
 			local reason = ferr or 'fabric_stage_failed'
 			owner:fail_once(reason)
 			return public_result('remote_failed', { err = reason })
-		end
-
-		local consumed = handoff and handoff.consumed == true
-		if consumed then
-			local _, herr = owned:handoff(handoff.receiver_install)
-			if herr ~= nil then
-				owner:fail_once(herr)
-				return public_result('failed', { err = herr })
-			end
 		end
 
 		local public_payload = public_reply_payload(result)

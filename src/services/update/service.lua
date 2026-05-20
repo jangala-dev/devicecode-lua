@@ -23,9 +23,15 @@ local generation    = require 'services.update.generation'
 local publisher     = require 'services.update.publisher'
 local projection    = require 'services.update.projection'
 local topics        = require 'services.update.topics'
-local job_store_cap = require 'services.update.job_store_cap'
+local job_store_memory = require 'services.update.job_store_memory'
+local control_store_jobs = require 'services.update.job_store_control_store'
 local job_runtime_mod = require 'services.update.job_runtime'
 local active_runtime = require 'services.update.active_runtime'
+local observe_mod = require 'services.update.observe'
+local component_watch = require 'services.update.component_watch'
+local artifact_store_bus = require 'services.update.artifacts.store_bus'
+local component_backend_mod = require 'services.update.backends.component'
+local router_backend_mod = require 'services.update.backends.router'
 
 local M = {}
 
@@ -187,6 +193,7 @@ local function start_generation(self, cfg, reason)
 				manager_rx = manager_rx,
 				service_rx = service_rx,
 				active_snapshot = active_snapshot(self),
+				artifact_store = self._artifact_store,
 				events_tx = self._done_tx,
 				done_queue_len = self._generation_done_queue_len,
 			})
@@ -493,6 +500,19 @@ local function reduce_event(self, ev)
 		return
 	end
 
+	if ev.kind == 'component_done' and ev.component == 'component_watch' then
+		self._component_watch = nil
+		if ev.status == 'failed' then
+			local reason = ev.primary or 'component_watch_failed'
+			update_model_state(self, 'failed', reason)
+			error('update component watch failed: ' .. tostring(reason), 0)
+		end
+		if not self._complete then
+			update_model_state(self, 'degraded', ev.primary or ev.status or 'component_watch_stopped')
+		end
+		return
+	end
+
 	if ev.kind == 'component_done' and ev.component == 'publisher' then
 		self.publisher = nil
 		self._publisher = nil
@@ -528,6 +548,9 @@ local function coordinator_loop(self)
 	end
 	if self._active_component and self._active_component.cancel then
 		self._active_component:cancel('service_complete')
+	end
+	if self._component_watch and self._component_watch.cancel then
+		self._component_watch:cancel('service_complete')
 	end
 	if self._active_scope and self._active_scope.cancel then
 		self._active_scope:cancel('service_complete')
@@ -742,7 +765,18 @@ function M.run(scope, params)
 	local config_watch, werr = open_config_watch(scope, params.conn, params)
 	if werr then error(werr, 2) end
 
-	local job_store = params.job_store or job_store_cap.memory(params.initial_jobs)
+	local job_store = params.job_store
+	if job_store == nil then
+		if params.job_store_kind == 'memory' or params.memory_job_store == true then
+			job_store = job_store_memory.new(params.initial_jobs)
+		else
+			job_store = control_store_jobs.new(params.conn, {
+				id = params.job_store_id or params.control_store_id or 'update',
+				prefix = params.job_store_prefix or 'update-job-',
+				call_opts = params.job_store_call_opts,
+			})
+		end
+	end
 	local jobs, jobs_err = job_runtime_mod.start(scope, {
 		service_id = service_id,
 		store = job_store,
@@ -755,6 +789,39 @@ function M.run(scope, params)
 	end
 	local adoption = jobs:ready() and jobs:adoption() or {}
 
+	local artifact_store = params.artifact_store
+	if artifact_store == nil then
+		artifact_store = artifact_store_bus.new(params.conn, {
+			id = params.artifact_store_id or 'main',
+			call_opts = params.artifact_store_call_opts,
+		})
+	end
+
+	local component_observer = params.component_observer or observe_mod.new({
+		service_id = service_id,
+		components = initial_cfg.components or {},
+	})
+	scope:finally(function (_, status, primary)
+		if component_observer and type(component_observer.terminate) == 'function' then
+			component_observer:terminate(primary or status or 'update component observer closed')
+		end
+	end)
+
+	local backend = params.backend
+	if backend == nil then
+		local component_backend = component_backend_mod.new({
+			conn = params.conn,
+			artifact_store = artifact_store,
+			observer = component_observer,
+			component = 'mcu',
+		})
+		backend = router_backend_mod.new({
+			components = { mcu = component_backend },
+			default = component_backend,
+			commit_policy = 'no_duplicate',
+		})
+	end
+
 	local active_scope, active_scope_err = scope:child()
 	if not active_scope then
 		error(active_scope_err or 'update_active_runtime_scope_create_failed', 2)
@@ -766,11 +833,33 @@ function M.run(scope, params)
 		work_scope = active_scope,
 		queue_len = params.active_runtime_queue_len,
 		jobs = jobs,
-		backend = params.backend,
+		backend = backend,
+		observer = component_observer,
 		adoption = adoption,
 	})
 	if not active_component then
 		error(active_component_err or 'update_active_runtime_start_failed', 2)
+	end
+
+	local component_watch_handle
+	if params.conn ~= nil and params.watch_components ~= false then
+		local cw_port = service_events.port(done_tx, {
+			service_id = service_id,
+			source = 'update_component_watch',
+			source_id = 'component_watch',
+		}, {
+			label = 'update_component_watch_completion_report_failed',
+		})
+		local cwh, cwerr = component_watch.start(scope, {
+			service_id = service_id,
+			conn = params.conn,
+			observer = component_observer,
+			config = initial_cfg,
+			queue_len = params.component_watch_queue_len,
+			report = service_events.reporter(cw_port, 'update_component_watch_completion_report_failed'),
+		})
+		if not cwh then error(cwerr or 'update_component_watch_start_failed', 2) end
+		component_watch_handle = cwh
 	end
 
 	local self = setmetatable({
@@ -796,6 +885,10 @@ function M.run(scope, params)
 		_generation_runner = params.generation_runner,
 		_jobs_seen = jobs:version(),
 		_jobs = jobs,
+		_artifact_store = artifact_store,
+		_component_observer = component_observer,
+		_component_watch = component_watch_handle,
+		_backend = backend,
 		_job_runtime_ready = jobs:ready(),
 		_generation_done_queue_len = params.generation_done_queue_len,
 		_manager_route_queue_len = params.manager_route_queue_len,

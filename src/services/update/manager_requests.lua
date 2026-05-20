@@ -9,8 +9,6 @@
 local fibers        = require 'fibers'
 local request_owner = require 'devicecode.support.request_owner'
 local model_mod     = require 'services.update.model'
-local resolver      = require 'services.update.artifacts.resolver'
-local lifetime      = require 'services.update.artifacts.lifetime'
 
 local M = {}
 
@@ -57,53 +55,15 @@ local function assert_known_component(cfg, component)
 	return true, nil
 end
 
-local function run_artifact_check(check, artifact, payload)
-	if check == nil then return true, nil end
-	if type(check) ~= 'function' then return nil, 'artifact_preflight must be a function' end
-	local ok, err = check(artifact, payload)
-	if ok == nil or ok == false then return nil, err or 'artifact_preflight_failed' end
-	return true, nil
-end
-
-local function maybe_resolve_create_artifact(scope, params, payload, component)
-	local source = payload.artifact_source
-	local artifact = payload.artifact
-
-	-- A plain artifact_ref is already a durable reference owned outside this
-	-- request scope. Do not wrap it in temporary cleanup ownership.
-	if source == nil and artifact == nil then
-		return nil, nil
+local function require_artifact_ref(payload)
+	local ref = payload.artifact_ref or payload.artifact_id
+	if type(ref) ~= 'string' or ref == '' then
+		return nil, 'artifact_ref_required'
 	end
-
-	-- A direct artifact table without an immediate cleanup path is treated as an
-	-- already-durable reference. Temporary imports from an artifact store must
-	-- provide immediate cleanup and are validated by resolver/lifetime below.
-	if source == nil and artifact ~= nil and not lifetime.has_immediate_cleanup(artifact) then
-		local snap = copy(artifact)
-		payload.artifact = snap
-		payload.artifact_ref = payload.artifact_ref or snap.ref or snap.id
-		return nil, nil
-	end
-
-	local resolved = resolver.resolve_worker(scope, {
-		store = params.artifact_store,
-		source = source,
-		artifact = artifact,
-		component = component,
-		metadata = payload.metadata,
-		cleanup_reason = 'create_job_scope_closed',
-	})
-
-	local ok_check, check_err = run_artifact_check(params.artifact_preflight or params.preflight, resolved.artifact, payload)
-	if ok_check ~= true then
-		return nil, check_err
-	end
-
-	local snap = copy(resolved.artifact)
-	payload.artifact = snap
-	payload.artifact_ref = payload.artifact_ref or snap.ref or snap.id
-
-	return resolved.owned, nil
+	payload.artifact_ref = ref
+	payload.artifact_id = payload.artifact_id or ref
+	payload.artifact = payload.artifact or ref
+	return ref, nil
 end
 
 local function transition(jobs, cmd)
@@ -143,9 +103,9 @@ function M.create_job(scope, params)
 		}
 	end
 
-	local artifact_owner, artifact_err = maybe_resolve_create_artifact(scope, params, payload, component)
+	local _, artifact_err = require_artifact_ref(payload)
 	if artifact_err ~= nil then
-		reply_or_fail(owner, nil, artifact_err, 'artifact_preflight_reply_failed')
+		reply_or_fail(owner, nil, artifact_err, 'artifact_ref_reply_failed')
 		return {
 			tag = 'manager_request_rejected',
 			method = 'create_job',
@@ -166,14 +126,6 @@ function M.create_job(scope, params)
 			return { tag = 'manager_request_rejected', method = 'create_job', reason = reason }
 		end
 		error(reason, 0)
-	end
-
-	if artifact_owner ~= nil then
-		local ok_transfer, transfer_err = artifact_owner:handoff(function () return true end)
-		if ok_transfer == nil then
-			reply_or_fail(owner, nil, transfer_err or 'artifact_ownership_transfer_failed', 'create_job_reply_failed')
-			error(transfer_err or 'artifact_ownership_transfer_failed', 0)
-		end
 	end
 
 	reply_or_fail(owner, { ok = true, job = result.job }, nil, 'create_job_reply_failed')

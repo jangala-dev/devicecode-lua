@@ -76,8 +76,12 @@ local function collect_backing_refs(rec)
 	for name, spec in pairs(rec.actions or {}) do
 		if type(spec) == 'table' and spec.call_topic then
 			refs.actions[name] = copy_topic(spec.call_topic)
-		elseif type(spec) == 'table' and spec.receiver then
-			refs.actions[name] = copy_topic(spec.receiver)
+		elseif type(spec) == 'table' and spec.kind == 'fabric_stage' then
+			refs.actions[name] = {
+				kind = 'fabric-stage',
+				target = spec.target,
+				link_id = spec.link_id,
+			}
 		else
 			refs.actions[name] = copy_topic(spec)
 		end

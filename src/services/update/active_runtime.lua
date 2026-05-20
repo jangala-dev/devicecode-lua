@@ -228,7 +228,8 @@ function Lease:start_work(lifetime_scope, spec)
 		identity = identity,
 
 		run = function (scope)
-			return runner(scope, spec)
+			local result = runner(scope, spec)
+			return result
 		end,
 
 		report = function (ev)
@@ -841,6 +842,7 @@ function M.start_component(scope, params)
 		_work_scope = work_scope,
 		_jobs = params.jobs,
 		_backend = params.backend,
+		_observer = params.observer,
 		_adoption = params.adoption or {},
 		_active_applies = {},
 		_active_launched = {},
