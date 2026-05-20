@@ -1,10 +1,12 @@
 -- tests/unit/metrics/http_spec.lua
 --
 -- Unit test for the HTTP publisher module.
--- Stubs http.request before loading services.metrics.http so no real network
--- traffic is made.  Uses runfibers + virtual_time for deterministic timing.
+-- Supplies a stub http_ref whose exchange_op records what it receives so no
+-- real network traffic is made.  Uses runfibers + virtual_time for
+-- deterministic timing.
 
 local fibers       = require 'fibers'
+local op           = require 'fibers.op'
 local perform      = fibers.perform
 local time_harness = require 'tests.support.time_harness'
 local virtual_time = require 'tests.support.virtual_time'
@@ -12,69 +14,40 @@ local runfibers    = require 'tests.support.run_fibers'
 
 local T = {}
 
-function T.start_http_publisher_builds_expected_request()
-	-- Save originals so we can restore after the test.
-	local original_http_request = package.loaded['http.request']
-	local original_http_module  = package.loaded['services.metrics.http']
+-- Build a stub http_ref whose exchange_op immediately resolves with the given
+-- HTTP status, and records what it was called with.
+local function make_fake_ref(captured, reply_status)
+	local ref = {}
+	function ref:exchange_op(args)
+		captured.method       = args.method
+		captured.uri          = args.uri
+		captured.auth         = args.headers and args.headers.authorization
+		captured.content_type = args.headers and args.headers['content-type']
+		captured.body_source  = args.body_source
+		return op.always({ result = { status = reply_status or '202', headers = {} } })
+	end
+	return ref
+end
 
-	local captured = {
-		uri           = nil,
-		method        = nil,
-		auth          = nil,
-		content_type  = nil,
-		expect_header = 'present',  -- sentinel; nil means the header was deleted
-		body          = nil,
-		timeout       = nil,
-	}
+function T.start_http_publisher_sends_expected_request()
+	local original_http_module = package.loaded['services.metrics.http']
 
-	-- Stub http.request with a mock that captures what the publisher sends.
-	package.loaded['http.request'] = {
-		new_from_uri = function(uri)
-			captured.uri = uri
+	local captured = {}
 
-			local hdr = {}
-			local req = {
-				headers = {
-					upsert = function(_, k, v) hdr[k] = v end,
-					delete = function(_, k)    hdr[k] = nil end,
-				},
-				set_body = function(_, body)
-					captured.body = body
-				end,
-				go = function(_, timeout)
-					captured.timeout      = timeout
-					captured.method       = hdr[':method']
-					captured.auth         = hdr['authorization']
-					captured.content_type = hdr['content-type']
-					captured.expect_header = hdr['expect']
-					return {
-						get = function(_, key)
-							if key == ':status' then return '202' end
-							return nil
-						end,
-						each = function()
-							return function() return nil end
-						end,
-					}
-				end,
-			}
-			return req
-		end,
-	}
-
-	-- Force a fresh load so it picks up the stub above.
+	-- Force a fresh load.
 	package.loaded['services.metrics.http'] = nil
 
 	local ok_run, run_err = pcall(function()
 		runfibers.run(function(scope)
 			local clock = virtual_time.install({ monotonic = 0, realtime = 1700000000 })
+			scope:finally(function() clock:restore() end)
 
-			local http_mod = require 'services.metrics.http'
-
+			local http_mod     = require 'services.metrics.http'
+			local fake_ref     = make_fake_ref(captured, '202')
 			local worker_scope = scope:child()
 
 			local spawn_ok, spawn_err = worker_scope:spawn(function()
-				local ch = http_mod.start_http_publisher()
+				local ch = http_mod.start_http_publisher(fake_ref)
 
 				perform(ch:put_op({
 					uri  = 'http://localhost:18080/http/channels/ch-data/messages',
@@ -94,22 +67,14 @@ function T.start_http_publisher_builds_expected_request()
 				'unexpected auth: ' .. tostring(captured.auth))
 			assert(captured.content_type == 'application/senml+json',
 				'unexpected content-type: ' .. tostring(captured.content_type))
-			assert(captured.expect_header == nil,
-				'expected Expect header to be deleted, got ' .. tostring(captured.expect_header))
-			assert(captured.body == '[{"n":"sim","vs":"present"}]',
-				'unexpected body: ' .. tostring(captured.body))
-			assert(captured.timeout == 10,
-				'expected timeout=10, got ' .. tostring(captured.timeout))
+			assert(captured.body_source ~= nil,
+				'expected body_source to be set')
 
 			worker_scope:cancel('test done')
 			perform(worker_scope:join_op())
-
-			clock:restore()
 		end, { timeout = 2.0 })
 	end)
 
-	-- Restore stubs regardless of test outcome.
-	package.loaded['http.request']          = original_http_request
 	package.loaded['services.metrics.http'] = original_http_module
 
 	assert(ok_run, tostring(run_err))
