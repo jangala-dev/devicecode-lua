@@ -156,6 +156,7 @@ end
 ---@field svc              ServiceBase?
 ---@field conn             Connection?   nil before M.start() is called
 ---@field name             string?       nil before M.start() is called
+---@field http_ref         CapabilityReference?
 ---@field http_send_ch     Channel?      nil before M.start() is called
 ---@field pipelines_map    PipelineMap
 ---@field metric_states    MetricStates
