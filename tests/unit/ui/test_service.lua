@@ -147,6 +147,41 @@ function tests.test_stale_http_listener_request_events_are_ignored()
 	assert_eq(state.active_requests, 1)
 end
 
+function tests.test_read_model_changed_updates_seen_without_lifecycle_publish()
+	local state = base_state()
+	state.model_seen = 4
+
+	local decision = service._test.reduce_event(state, {
+		kind = 'read_model_changed',
+		version = 5,
+		snapshot = { services = {} },
+	})
+
+	assert_eq(state.model_seen, 5)
+	assert_eq(next(decision), nil)
+end
+
+function tests.test_session_changed_updates_seen_without_lifecycle_publish()
+	local state = base_state()
+	state.sessions_seen = 2
+	state.last_session_event = nil
+
+	local ev = {
+		kind = 'session_changed',
+		version = 3,
+		last_event = {
+			kind = 'session_count_changed',
+			count = 1,
+		},
+	}
+
+	local decision = service._test.reduce_event(state, ev)
+
+	assert_eq(state.sessions_seen, 3)
+	assert_eq(state.last_session_event, ev.last_event)
+	assert_eq(next(decision), nil)
+end
+
 function tests.test_cleanup_error_recording_is_explicit_and_non_throwing()
 	local state = base_state()
 	local rec = service._test.record_cleanup_error(state, 'ui_cleanup_failed', 'cleanup_failed')
