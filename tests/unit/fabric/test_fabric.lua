@@ -149,7 +149,11 @@ function tests.test_composed_link_transport_open_failure_fails_link_scope_before
 			})
 		end)
 		assert_eq(st, 'failed')
-		assert_match(primary, 'open failed')
+		if type(primary) == 'table' then
+			assert_eq(primary.err, 'open failed')
+		else
+			assert_match(primary, 'open failed')
+		end
 	end)
 end
 

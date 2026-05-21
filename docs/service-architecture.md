@@ -798,6 +798,65 @@ models do not publish unless explicitly designed as publishers
 
 Expensive projection belongs in scoped work, not in model update logic.
 
+## Capability dependencies
+
+Capability availability is coordinator input, not service start-up ordering.
+
+Modern service shells may start concurrently, bind safe public endpoints and open
+configuration watches before their dependencies are ready.  Dependent blocking
+work must be admitted only after the coordinator has observed the required
+capabilities as effectively available.
+
+Use `devicecode.support.capability_dependencies` for repeated capability waits.
+The helper owns status subscriptions, status normalisation, effective
+availability, route-missing inference and copied snapshots.  It does not start
+work, retry work, degrade services or make policy decisions.
+
+Use `devicecode.support.dependency_slot` for the repetitive owner-side mechanics
+of replacing, terminating and projecting one dependency manager field.  It owns
+boilerplate only; the coordinator still owns admission policy.
+
+Use `devicecode.support.dependency_failure` at service edges to normalise messy
+transport or backend failures into a canonical dependency failure.  Core helpers
+consume clean facts; they do not recursively search reports, child failures or
+stringified diagnostics.
+
+A service coordinator should use it like this:
+
+```lua
+local deps = assert(cap_deps.open(conn, {
+  { key = 'job_store', class = 'control-store', id = 'update', required = true },
+}))
+
+-- In the coordinator event set:
+-- deps:event_source()
+-- or, for model-style observers, deps:changed_op(seen)
+
+if state.pending_start and deps:available('job_store') then
+  start_job_runtime(state, 'job_store_available')
+end
+```
+
+If a capability call returns `no_route`, do not convert that directly into a
+backend failure.  The edge that made the call should normalise it into a clean
+shape such as:
+
+```lua
+{ kind = 'dependency_failure', err = 'no_route', dependency_key = key }
+```
+
+Record route-missing on the dependency and let the coordinator return the
+affected work to a pending or waiting state.  A later retained `available`
+status clears route-missing and wakes the coordinator.
+
+The intended split is:
+
+```text
+capability dependency helper = facts and wakeups
+service coordinator           = policy and admission
+worker/request scope           = blocking capability calls
+```
+
 ## Publication
 
 Publication should be an immediate effect over already-computed state.
@@ -1097,3 +1156,47 @@ a test that depends on private coordinator tables for an integration behaviour
 ```
 
 Any one of these may be justified in a narrow case. Several together usually mean the service boundary is losing shape.
+
+
+### Capability dependency admission for modern services
+
+Modern services should start their shell before all dependencies are available.
+The shell may open config watches, dependency watches, retained projections and
+safe public endpoints.  It must not start dependency-backed work merely because
+configuration has arrived.
+
+Use `devicecode.support.capability_dependencies` as a coordinator-facing model:
+
+```text
+capability dependency helper = facts and wakeups
+service coordinator           = policy and admission
+worker/request scope           = blocking capability calls
+```
+
+For admission decisions, use `deps:available(key)`, not `deps:status(key)`.
+`status()` is diagnostic: an observed capability may say `running` while carrying
+`available=false`, or may be locally overridden by `route_missing` after a
+`no_route` call.
+
+Classify dependency failures before applying service policy:
+
+```text
+no_route / capability absent / available=false
+  => admission failure; record waiting or reject the individual request
+
+accepted operation returns a domain error
+  => domain failure; degrade, fail, or record a failed job/action according to
+     the owning service's policy
+```
+
+The current modern service expectations are:
+
+```text
+HTTP    exposes cap/http status; non-status requests require backend ready.
+UI      waits for cap/http before starting configured listener work.
+Fabric  waits for HAL/raw transport capabilities before starting link generation.
+Device  gates explicitly dependency-annotated actions; observations remain tolerant.
+Wired   projects provider dependency state as model facts, not startup blockers.
+NET     gates network-config and network-state work.
+Update  gates job and artifact runtime work.
+```

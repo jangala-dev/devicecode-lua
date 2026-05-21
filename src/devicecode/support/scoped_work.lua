@@ -41,6 +41,7 @@ local function copy_completion(ev)
 	local out = copy_table(ev)
 	out.result = copy_value(ev.result)
 	out.report = copy_value(ev.report)
+	out.primary = copy_value(ev.primary)
 	return out
 end
 
@@ -193,6 +194,7 @@ local function start_impl(spec, opts)
 	local outcome_done = cond.new()
 
 	local result
+	local failure_primary
 	local outcome
 	local reaped   = false
 	local reported = false
@@ -296,6 +298,9 @@ local function start_impl(spec, opts)
 		op.perform_raw(body_done:wait_op())
 
 		local status, report, primary = op.perform_raw(child:join_op())
+		if status == 'failed' and failure_primary ~= nil then
+			primary = copy_value(failure_primary)
+		end
 		store_once(status, report, primary)
 	end)
 
@@ -375,6 +380,8 @@ local function start_impl(spec, opts)
 			-- Snapshot the worker result before join/finalisers run. Finalisers
 			-- must not be able to mutate the eventual successful completion.
 			result = ret
+		elseif spec.preserve_error_primary == true then
+			failure_primary = copy_value(ret)
 		end
 
 		-- This is wrapper-owned, not user-owned.

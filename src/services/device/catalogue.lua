@@ -146,6 +146,7 @@ local function normalise_actions(actions, where)
 					kind = 'rpc',
 					call_topic = assert_topic(spec.call_topic, where .. ': action ' .. action_name .. ' call_topic'),
 					timeout = tonumber(spec.timeout_s) or nil,
+					dependency = copy_value(spec.dependency),
 				}
 			elseif kind == 'fabric_stage' then
 				if spec.timeout ~= nil then
@@ -168,6 +169,7 @@ local function normalise_actions(actions, where)
 					chunk_size = opt_pos_int(spec.chunk_size, where .. ': action ' .. action_name .. ' chunk_size', nil),
 					artifact_store = spec.artifact_store or 'main',
 					timeout = tonumber(spec.timeout_s) or nil,
+					dependency = copy_value(spec.dependency),
 				}
 			else
 				error(where .. ': unsupported action kind for ' .. action_name .. ': ' .. tostring(kind), 0)

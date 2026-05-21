@@ -126,13 +126,14 @@ function tests.test_config_change_replaces_generation()
 end
 
 
-function tests.test_service_shell_routes_manager_request_to_generation_private_queue()
+function tests.test_service_shell_owns_status_and_routes_generation_commands_to_private_queue()
 	fibers.run(function (root_scope)
 		local bus = busmod.new()
 		local svc_conn = bus:connect()
 		local caller = bus:connect()
 		local child = assert(root_scope:child())
 		local got_private_request = false
+		local private_method = nil
 
 		local ok, err = child:spawn(function (scope)
 			service.run(scope, {
@@ -144,7 +145,8 @@ function tests.test_service_shell_routes_manager_request_to_generation_private_q
 				generation_runner = function (_, params)
 					local req = fibers.perform(params.manager_rx:recv_op())
 					got_private_request = req ~= nil
-					if req then req:reply({ ok = true, generation = params.generation }) end
+					private_method = req and req._update_method or nil
+					if req then req:reply({ ok = true, generation = params.generation, method = private_method }) end
 					return { role = 'fake_generation', generation = params.generation }
 				end,
 			})
@@ -152,10 +154,21 @@ function tests.test_service_shell_routes_manager_request_to_generation_private_q
 		assert_true(ok, err)
 
 		fibers.perform(sleep.sleep_op(0.02))
-		local reply, call_err = caller:call(topics.update_manager_rpc('status'), {}, { timeout = 0.5 })
+		local status, status_err = caller:call(topics.update_manager_rpc('status'), {}, { timeout = 0.5 })
+		assert_not_nil(status, status_err)
+		assert_eq(status.ok, true)
+		assert_true(status.snapshot ~= nil, 'status should be answered by the service shell')
+		assert_eq(got_private_request, false)
+
+		local reply, call_err = caller:call(topics.update_manager_rpc('create-job'), {
+			job_id = 'j-private-route',
+			component = 'cm5',
+			artifact_ref = 'artifact-private-route',
+		}, { timeout = 0.5 })
 		assert_not_nil(reply, call_err)
 		assert_eq(reply.ok, true)
-		assert_true(got_private_request, 'expected request to arrive through generation private route')
+		assert_true(got_private_request, 'expected generation-owned command to arrive through private route')
+		assert_eq(private_method, 'create-job')
 
 		child:cancel('test complete')
 	end)

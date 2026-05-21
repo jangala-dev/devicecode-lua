@@ -134,3 +134,8 @@ Model updates are non-yielding.
 Publication failures are explicit.
 Config replacement cancels generation-owned observers and actions.
 ```
+
+
+## Action dependency admission
+
+Component actions may declare explicit capability dependencies. Missing or route-missing dependencies reject the individual action with dependency unavailable; they do not fail the Device service. Observation feeds remain tolerant and are projected as component state.

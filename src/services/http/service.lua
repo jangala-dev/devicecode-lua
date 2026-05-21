@@ -108,6 +108,7 @@ function HttpService:_publish_model()
 		state = snap.state,
 		available = snap.ready,
 		backend = snap.backend,
+		reason = snap.ready and nil or (snap.last_error or snap.backend),
 		last_error = snap.last_error,
 	})
 	self._conn:retain(topics.state(self._id, 'stats'), snap)
@@ -117,6 +118,19 @@ end
 function HttpService:_refresh_model()
 	local changed = self._model:set_snapshot(self:_derive_snapshot())
 	if changed ~= nil then self:_publish_model() end
+	return true
+end
+
+function HttpService:_publish_lifecycle()
+	local lifecycle = self._opts and self._opts.lifecycle or nil
+	if lifecycle and type(lifecycle.running) == 'function' then
+		lifecycle:running({
+			ready = self._state.ready == true,
+			http_id = self._id,
+			backend = self._state.backend,
+			state = self._state.service_state,
+		})
+	end
 	return true
 end
 
@@ -448,6 +462,10 @@ function HttpService:_handle_cap_request(ev)
 		return true
 	end
 
+	if self._state.ready ~= true then
+		return self:_reject_request(request_id, owner, self._state.last_error or 'http_backend_not_ready')
+	end
+
 	local ok, err = operations.validate_cap_request(self, verb, req)
 	if not ok then return self:_reject_request(request_id, owner, err or 'invalid_args') end
 	return operations.start_operation(self, verb, req, request_id, owner)
@@ -741,7 +759,7 @@ function M.open_handle(conn, opts)
 		self:terminate(primary or status or 'scope_finalised')
 	end)
 
-	cap_surface.retain_static(conn, self._id, { state = 'starting', available = false, backend = 'starting' }, model:snapshot())
+	cap_surface.retain_static(conn, self._id, { state = 'starting', available = false, backend = 'starting', reason = 'backend_starting' }, model:snapshot())
 	self._endpoints = assert(cap_surface.bind(conn, self._id, {}, { endpoint_opts = { queue_len = opts.endpoint_queue_len or 10 } }))
 
 	local ok_coord, cerr = scope:spawn(function () return self:_coordinator_loop() end)
@@ -793,7 +811,7 @@ function M.run(scope, params)
 
 	local lifecycle = params.lifecycle
 	if lifecycle and type(lifecycle.running) == 'function' then
-		lifecycle:running({ ready = true, http_id = params.id or 'main' })
+		lifecycle:running({ ready = false, http_id = params.id or 'main' })
 	end
 
 	fibers.perform(fibers.never())
