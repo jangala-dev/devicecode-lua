@@ -13,6 +13,10 @@
           "root": "/tmp/devicecode-state"
         }
       ],
+      "http": {},
+      "uci": {},
+      "ubus": {},
+      "modemcard": {},
       "network": {
         "provider": "openwrt",
         "platform": {
@@ -116,6 +120,10 @@
           }
         ]
       },
+      "time": {},
+      "platform": {},
+      "power": {},
+      "usb": {},
       "artifact_store": {
         "stores": [
           {
@@ -132,12 +140,7 @@
           "name": "update",
           "root": "/data/devicecode/control/update"
         }
-      ],
-      "time": {},
-      "platform": {},
-      "power": {},
-      "usb": {},
-      "modemcard": {}
+      ]
     }
   },
   "net": {
@@ -340,8 +343,7 @@
           "syn_flood": "1",
           "input": "ACCEPT",
           "forward": "REJECT",
-          "output": "ACCEPT",
-          "disable_ipv6": "1"
+          "output": "ACCEPT"
         },
         "zones": {
           "lan": {
@@ -937,7 +939,6 @@
   "wifi": {
     "rev": 1,
     "data": {
-      "schema": "devicecode.config/wifi/1",
       "report_period": 10,
       "radios": [
         {
@@ -966,13 +967,14 @@
       ],
       "ssids": [
         {
-          "mainflux_path": "mainflux.cfg",
+          "mainflux_path": "config/mainflux",
           "encryption": "psk2",
           "mode": "access_point",
           "radios": [
             "radio0",
             "radio1"
-          ]
+          ],
+          "segment": "adm"
         },
         {
           "name": "Jangala",
@@ -986,6 +988,7 @@
         }
       ],
       "band_steering": {
+        "log_level": 2,
         "globals": {
           "rrm_mode": "PAT",
           "kicking": {
@@ -1025,6 +1028,13 @@
             "ap": 460
           },
           "inactive_client_kickoff": 60
+        },
+        "networking": {
+          "method": "tcp+umdns",
+          "ip": "0.0.0.0",
+          "port": 1026,
+          "broadcast_port": 1025,
+          "enable_encryption": false
         },
         "bands": {
           "2g": {
@@ -1070,35 +1080,33 @@
             }
           }
         }
-      }
+      },
+      "schema": "devicecode.config/wifi/1"
     }
   },
   "gsm": {
     "rev": 1,
     "data": {
-      "schema": "devicecode.config/gsm/1",
       "modems": {
         "default": {
-          "enabled": true,
-          "signal_freq": 10
+          "enabled": true
         },
         "known": [
           {
             "name": "primary",
             "id_field": "device",
             "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
-            "autoconnect": true,
-            "metrics_interval": 60
+            "autoconnect": true
           },
           {
             "name": "secondary",
             "id_field": "device",
             "device": "/sys/devices/platform/axi/1000480000.usb/usb1/1-1",
-            "autoconnect": true,
-            "metrics_interval": 60
+            "autoconnect": true
           }
         ]
-      }
+      },
+      "schema": "devicecode.config/gsm/1"
     }
   },
   "fabric": {
@@ -1294,7 +1302,6 @@
   "system": {
     "rev": 1,
     "data": {
-      "schema": "devicecode.config/system/1",
       "report_period": 60,
       "usb3_enabled": true,
       "alarms": [
@@ -1306,353 +1313,8 @@
             "type": "reboot"
           }
         }
-      ]
-    }
-  },
-  "metrics": {
-    "rev": 1,
-    "data": {
-      "schema": "devicecode.config/metrics/1",
-      "cloud_url": "$CLOUD_URL",
-      "publish_period": 60,
-      "templates": {
-        "network_stat": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "DiffTrigger",
-              "diff_method": "percent",
-              "threshold": 5,
-              "initial_val": 0
-            },
-            {
-              "type": "DeltaValue"
-            }
-          ]
-        },
-        "any_change": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "DiffTrigger",
-              "diff_method": "any-change"
-            }
-          ]
-        },
-        "percent_5": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "DiffTrigger",
-              "diff_method": "percent",
-              "threshold": 5
-            }
-          ]
-        },
-        "absolute_10": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "DiffTrigger",
-              "diff_method": "absolute",
-              "threshold": 10
-            }
-          ]
-        }
-      },
-      "pipelines": {
-        "wann_type": {
-          "template": "any_change"
-        },
-        "access_tech": {
-          "template": "any_change"
-        },
-        "access_fam": {
-          "template": "any_change"
-        },
-        "rx_bytes": {
-          "template": "network_stat"
-        },
-        "rx_packets": {
-          "template": "network_stat"
-        },
-        "rx_dropped": {
-          "template": "network_stat"
-        },
-        "rx_errors": {
-          "template": "network_stat"
-        },
-        "tx_bytes": {
-          "template": "network_stat"
-        },
-        "tx_packets": {
-          "template": "network_stat"
-        },
-        "tx_dropped": {
-          "template": "network_stat"
-        },
-        "tx_errors": {
-          "template": "network_stat"
-        },
-        "firmware": {
-          "template": "any_change"
-        },
-        "band": {
-          "template": "any_change"
-        },
-        "access-tech": {
-          "template": "any_change"
-        },
-        "access-family": {
-          "template": "any_change"
-        },
-        "imei": {
-          "template": "any_change"
-        },
-        "sim": {
-          "template": "any_change"
-        },
-        "rssi": {
-          "template": "percent_5"
-        },
-        "rsrp": {
-          "template": "percent_5"
-        },
-        "rsrq": {
-          "template": "percent_5"
-        },
-        "bars": {
-          "template": "any_change"
-        },
-        "operator": {
-          "template": "any_change"
-        },
-        "iccid": {
-          "template": "any_change"
-        },
-        "state": {
-          "template": "any_change"
-        },
-        "interface": {
-          "template": "any_change"
-        },
-        "boot_time": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "DiffTrigger",
-              "diff_method": "absolute",
-              "threshold": 1000
-            }
-          ]
-        },
-        "version": {
-          "template": "any_change"
-        },
-        "fw_version": {
-          "template": "any_change"
-        },
-        "revision": {
-          "template": "any_change"
-        },
-        "serial": {
-          "template": "any_change"
-        },
-        "overall_utilisation": {
-          "template": "percent_5"
-        },
-        "util": {
-          "template": "percent_5"
-        },
-        "temperature": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "DiffTrigger",
-              "diff_method": "absolute",
-              "threshold": 2
-            }
-          ]
-        },
-        "alloc": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "TimeTrigger",
-              "duration": 60
-            }
-          ]
-        },
-        "internal": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "DiffTrigger",
-              "diff_method": "absolute",
-              "threshold": 1
-            }
-          ]
-        },
-        "core": {
-          "template": "percent_5"
-        },
-        "vbat": {
-          "template": "absolute_10"
-        },
-        "ibat": {
-          "template": "absolute_10"
-        },
-        "vin": {
-          "template": "absolute_10"
-        },
-        "vsys": {
-          "template": "absolute_10"
-        },
-        "iin": {
-          "template": "absolute_10"
-        },
-        "charger_enabled": {
-          "template": "any_change"
-        },
-        "mppt_en_pin": {
-          "template": "any_change"
-        },
-        "equalize_req": {
-          "template": "any_change"
-        },
-        "drvcc_good": {
-          "template": "any_change"
-        },
-        "cell_count_error": {
-          "template": "any_change"
-        },
-        "ok_to_charge": {
-          "template": "any_change"
-        },
-        "no_rt": {
-          "template": "any_change"
-        },
-        "thermal_shutdown": {
-          "template": "any_change"
-        },
-        "vin_ovlo": {
-          "template": "any_change"
-        },
-        "vin_gt_vbat": {
-          "template": "any_change"
-        },
-        "intvcc_gt_4p3v": {
-          "template": "any_change"
-        },
-        "intvcc_gt_2p8v": {
-          "template": "any_change"
-        },
-        "iin_limited": {
-          "template": "any_change"
-        },
-        "uvcl_active": {
-          "template": "any_change"
-        },
-        "cc_phase": {
-          "template": "any_change"
-        },
-        "cv_phase": {
-          "template": "any_change"
-        },
-        "bat_short": {
-          "template": "any_change"
-        },
-        "bat_missing": {
-          "template": "any_change"
-        },
-        "max_charge_time_fault": {
-          "template": "any_change"
-        },
-        "c_over_x_term": {
-          "template": "any_change"
-        },
-        "timer_term": {
-          "template": "any_change"
-        },
-        "ntc_pause": {
-          "template": "any_change"
-        },
-        "precharge": {
-          "template": "any_change"
-        },
-        "cccv": {
-          "template": "any_change"
-        },
-        "absorb": {
-          "template": "any_change"
-        },
-        "equalize": {
-          "template": "any_change"
-        },
-        "suspended": {
-          "template": "any_change"
-        },
-        "session_start": {
-          "protocol": "http",
-          "process": []
-        },
-        "session_end": {
-          "protocol": "http",
-          "process": []
-        },
-        "hostname": {
-          "template": "any_change"
-        },
-        "signal": {
-          "template": "percent_5"
-        },
-        "power": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "DiffTrigger",
-              "diff_method": "percent",
-              "threshold": 10,
-              "initial_val": 0
-            }
-          ]
-        },
-        "channel": {
-          "template": "any_change"
-        },
-        "noise": {
-          "protocol": "http",
-          "process": [
-            {
-              "type": "DiffTrigger",
-              "diff_method": "percent",
-              "threshold": 10,
-              "initial_val": 0
-            }
-          ]
-        },
-        "num_sta": {
-          "template": "percent_5"
-        },
-        "mem_util": {
-          "template": "any_change"
-        },
-        "cpu_util": {
-          "template": "any_change"
-        },
-        "temp": {
-          "template": "any_change"
-        },
-        "curr_time": {
-          "template": "any_change"
-        },
-        "fw_id": {
-          "template": "any_change"
-        },
-        "hw_id": {
-          "template": "any_change"
-        }
-      }
+      ],
+      "schema": "devicecode.config/system/1"
     }
   }
 }
