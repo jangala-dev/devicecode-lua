@@ -15,6 +15,7 @@ local bus_cleanup  = require 'devicecode.support.bus_cleanup'
 local config_watch   = require 'devicecode.support.config_watch'
 local service_events = require 'devicecode.support.service_events'
 local service_base   = require 'devicecode.service_base'
+local cap_deps_mod   = require 'devicecode.support.capability_dependencies'
 
 local model_mod     = require 'services.update.model'
 local config_mod    = require 'services.update.config'
@@ -40,6 +41,17 @@ Service.__index = Service
 
 local DEFAULT_DONE_QUEUE = 32
 
+local handle_dependency_changed
+local stop_job_runtime
+local stop_runtime_dependents
+local update_dependencies_projection
+local set_waiting_for_job_store
+local ensure_runtime_dependents
+local reconcile_runtime_components
+local classify_dependency_route_missing
+local handle_artifact_route_missing
+
+
 local function copy(v)
 	return model_mod.deep_copy(v)
 end
@@ -52,13 +64,53 @@ local function config_from_value(value, opts)
 	})
 end
 
+local function pending_for_state(state, reason)
+	if state == 'waiting_for_job_store' then
+		return {
+			kind = 'runtime_start',
+			dependency = 'job_store',
+			reason = reason or 'job_store_unavailable',
+		}
+	end
+	if state == 'waiting_for_artifact_store' then
+		return {
+			kind = 'runtime_dependents_start',
+			dependency = 'artifact_store',
+			reason = reason or 'artifact_store_unavailable',
+		}
+	end
+	if state == 'starting' and reason == 'job_runtime_loading' then
+		return {
+			kind = 'job_runtime_load',
+			reason = reason,
+		}
+	end
+	return nil
+end
+
 local function update_model_state(self, state, reason)
+	local ready = state == 'running'
 	self._model:update(function (s)
 		s.state = state
-		s.ready = state == 'running'
+		s.ready = ready
 		s.reason = reason
+		s.pending = s.pending or {}
+		if ready then
+			s.pending.runtime = nil
+		else
+			s.pending.runtime = pending_for_state(state, reason)
+		end
 		return s
 	end)
+
+	if self._svc and type(self._svc.status) == 'function' then
+		local snapshot = self._model:snapshot()
+		local extra = { ready = ready }
+		if reason ~= nil then extra.reason = reason end
+		if snapshot and snapshot.pending ~= nil then extra.pending = snapshot.pending end
+		extra.dependencies = self._deps:snapshot()
+		self._svc:status(state, extra)
+	end
 end
 
 local function apply_generation_snapshot(self, snapshot)
@@ -260,6 +312,15 @@ local function apply_config(self, payload, reason)
 	end
 
 	self._config = cfg
+	self._model:update(function (s)
+		s.config = config_mod.summary(cfg)
+		return s
+	end)
+
+	if self._jobs == nil or (self._artifact_store_dependency_required and not artifact_store_available_for_work(self)) then
+		return reconcile_runtime_components(self, reason or 'config_changed')
+	end
+
 	local ok, start_err = replace_generation(self, cfg, reason or 'config_changed')
 	if not ok then
 		update_model_state(self, 'failed', start_err or 'generation_start_failed')
@@ -294,6 +355,10 @@ local function handle_generation_done(self, ev)
 	self._current_generation = nil
 	clear_generation_snapshot(self)
 
+	if active.state == 'replacing' and ev.status == 'cancelled' then
+		return
+	end
+
 	if ev.status == 'ok' then
 		update_model_state(self, 'stopped', 'generation_completed')
 		self._complete = true
@@ -307,23 +372,112 @@ local function handle_generation_done(self, ev)
 	end
 
 	local reason = ev.primary or 'generation_failed'
+	if self._artifact_store_dependency_required and classify_dependency_route_missing(self, 'artifact_store', ev, reason) then
+		handle_artifact_route_missing(self, reason)
+		return
+	end
 	update_model_state(self, 'failed', reason)
 	error('update generation failed: ' .. tostring(reason), 0)
 end
 
+local function request_owner_for(req)
+	return require('devicecode.support.request_owner').new(req)
+end
+
 local function fail_manager_request(req, reason)
-	local owner = require('devicecode.support.request_owner').new(req)
+	local owner = request_owner_for(req)
 	local ok, err = owner:fail_once(reason)
 	if ok ~= true then error(err or tostring(reason or 'manager_request_failed'), 0) end
+end
+
+local function reply_manager_request(req, value, label)
+	local owner = request_owner_for(req)
+	local ok, err = owner:reply_once(value)
+	if ok ~= true then error(err or tostring(label or 'manager_reply_failed'), 0) end
 end
 
 local function handle_manager_without_generation(_, req)
 	fail_manager_request(req, 'generation_not_ready')
 end
 
+local function method_dependency_reason(self, method)
+	if method == 'status' then return nil end
+
+	if self._job_store_dependency_required and not self._deps:available('job_store') then
+		return 'job_store_unavailable'
+	end
+
+	-- list/get are read-only job-runtime operations.  They need the durable job
+	-- runtime, but not the artifact store.  Mutating manager and ingest operations
+	-- remain gated by the artifact-store dependency when the production artifact
+	-- path is configured.
+	if method == 'list-jobs' or method == 'get-job' then return nil end
+
+	if self._artifact_store_dependency_required and not self._deps:available('artifact_store') then
+		return 'artifact_store_unavailable'
+	end
+
+	return nil
+end
+
+local function reply_shell_manager_request(self, req, method)
+	if method == 'status' then
+		reply_manager_request(req, { ok = true, snapshot = self._model:snapshot() }, 'status_reply_failed')
+		return true
+	end
+
+	if self._jobs == nil or self._job_runtime_ready ~= true then return false end
+
+	if method == 'list-jobs' then
+		reply_manager_request(req, { ok = true, jobs = self._jobs:list() }, 'list_reply_failed')
+		return true
+	end
+
+	if method == 'get-job' then
+		local payload = req and req.payload or nil
+		payload = type(payload) == 'table' and payload or {}
+		local job = payload.job_id and self._jobs:get(payload.job_id) or nil
+		if not job then
+			fail_manager_request(req, 'not_found')
+		else
+			reply_manager_request(req, { ok = true, job = job }, 'get_reply_failed')
+		end
+		return true
+	end
+
+	return false
+end
+
 local function route_manager_request(self, req, method)
+	-- Public status is shell-owned.  It reports service-level facts such as
+	-- dependencies, pending runtime work, readiness and the latest projected job
+	-- state.  It is not routed through a generation-private queue.
+	if method == 'status' then
+		reply_shell_manager_request(self, req, method)
+		return
+	end
+
+	local dependency_reason = method_dependency_reason(self, method)
+	if dependency_reason then
+		fail_manager_request(req, dependency_reason)
+		return
+	end
+
+	-- Read-only job inspection is safe for the service shell to answer directly
+	-- while no generation has been admitted, provided the durable job runtime is
+	-- ready.  Mutating work belongs to the active generation.
 	local active = self._current_generation
-	if not active or active.state ~= 'running' or active.manager_tx == nil then
+	if not (active and active.state == 'running' and active.manager_tx ~= nil) then
+		if reply_shell_manager_request(self, req, method) then return end
+
+		if self._jobs == nil then
+			fail_manager_request(req, self._job_store_dependency_required and 'job_store_unavailable' or 'job_runtime_not_ready')
+			return
+		end
+		if self._job_runtime_ready ~= true then
+			fail_manager_request(req, 'job_runtime_not_ready')
+			return
+		end
 		handle_manager_without_generation(self, req)
 		return
 	end
@@ -333,9 +487,7 @@ local function route_manager_request(self, req, method)
 	end
 
 	local ok, err = queue.try_admit_now(active.manager_tx, req)
-	if ok == true then
-		return
-	end
+	if ok == true then return end
 
 	fail_manager_request(req, err or 'generation_busy')
 end
@@ -375,12 +527,15 @@ local function handle_job_runtime_changed(self, ev)
 	self._jobs_seen = ev.version
 	if self._jobs and self._jobs:ready() and not self._job_runtime_ready then
 		self._job_runtime_ready = true
-		if self._active_component and type(self._active_component.update_adoption) == 'function' then
-			self._active_component:update_adoption(self._jobs:adoption())
+		update_service_jobs_projection(self)
+		local ok, err = reconcile_runtime_components(self, 'job_runtime_ready')
+		if ok ~= true then
+			update_model_state(self, 'failed', err or 'runtime_dependents_start_failed')
+			error(err or 'runtime_dependents_start_failed', 0)
 		end
-		update_model_state(self, 'running')
+	else
+		update_service_jobs_projection(self)
 	end
-	update_service_jobs_projection(self)
 	if self._current_generation then
 		apply_generation_snapshot(self, self._current_generation.last_snapshot or {
 			generation = self._current_generation.generation,
@@ -441,8 +596,34 @@ local function reduce_event(self, ev)
 	end
 
 	if ev.kind == 'job_runtime_model_closed' then
-		update_model_state(self, 'failed', ev.reason or 'job_runtime_model_closed')
-		error(ev.reason or 'job_runtime_model_closed', 0)
+		local reason = ev.reason or 'job_runtime_model_closed'
+		if self._deps:classify_call_failure('job_store', ev, reason) == 'route_missing' then
+			stop_runtime_dependents(self, 'job_store_unavailable')
+			stop_job_runtime(self, 'job_store_unavailable')
+			update_dependencies_projection(self)
+			set_waiting_for_job_store(self, 'job_store_unavailable')
+			return
+		end
+
+		-- changed_op() close notifications can arrive before the scoped-work
+		-- component_done event that carries the authoritative worker failure. While
+		-- the job runtime has not become ready, defer policy to that completion.
+		-- Clear the closed runtime model as an event source so the coordinator does
+		-- not spin on an already-closed changed_op() and starve manager/dependency
+		-- events.
+		if self._suppress_dependents_reason or reason == 'job_store_unavailable' then
+			return
+		end
+
+		if self._job_store_dependency_required and self._job_runtime_ready ~= true then
+			self._jobs = nil
+			self._jobs_seen = nil
+			self._job_runtime_ready = false
+			return
+		end
+
+		update_model_state(self, 'failed', reason)
+		error(reason, 0)
 	end
 
 	if ev.kind == 'job_runtime_changed' then
@@ -457,6 +638,11 @@ local function reduce_event(self, ev)
 
 	if ev.kind == 'manager_request' then
 		route_manager_request(self, ev.request, ev.method)
+		return
+	end
+
+	if ev.kind == 'capability_dependency_changed' or ev.kind == 'capability_dependency_closed' then
+		handle_dependency_changed(self, ev)
 		return
 	end
 
@@ -478,8 +664,18 @@ local function reduce_event(self, ev)
 	if ev.kind == 'component_done' and ev.component == 'job_runtime' then
 		if ev.status == 'failed' then
 			local reason = ev.primary or 'job_runtime_failed'
+			if self._deps:classify_call_failure('job_store', ev, reason) == 'route_missing' then
+				stop_runtime_dependents(self, 'job_store_unavailable')
+				stop_job_runtime(self, 'job_store_unavailable')
+				update_dependencies_projection(self)
+				set_waiting_for_job_store(self, 'job_store_unavailable')
+				return
+			end
 			update_model_state(self, 'failed', reason)
 			error('update job runtime failed: ' .. tostring(reason), 0)
+		end
+		if ev.status == 'cancelled' and (self._suppress_dependents_reason or ev.primary == 'job_store_unavailable' or ev.primary == 'artifact_store_unavailable') then
+			return
 		end
 		if not self._complete then
 			update_model_state(self, 'degraded', ev.primary or ev.status or 'job_runtime_stopped')
@@ -488,9 +684,16 @@ local function reduce_event(self, ev)
 	end
 
 	if ev.kind == 'component_done' and ev.component == 'active_runtime' then
+		if ev.status == 'cancelled' and (self._suppress_dependents_reason or ev.primary == 'job_store_unavailable' or ev.primary == 'artifact_store_unavailable') then
+			return
+		end
 		self._active_component = nil
 		if ev.status == 'failed' then
 			local reason = ev.primary or 'active_runtime_failed'
+			if self._artifact_store_dependency_required and classify_dependency_route_missing(self, 'artifact_store', ev, reason) then
+				handle_artifact_route_missing(self, reason)
+				return
+			end
 			update_model_state(self, 'failed', reason)
 			error('update active runtime failed: ' .. tostring(reason), 0)
 		end
@@ -501,6 +704,9 @@ local function reduce_event(self, ev)
 	end
 
 	if ev.kind == 'component_done' and ev.component == 'component_watch' then
+		if ev.status == 'cancelled' and (self._suppress_dependents_reason or ev.primary == 'job_store_unavailable' or ev.primary == 'artifact_store_unavailable') then
+			return
+		end
 		self._component_watch = nil
 		if ev.status == 'failed' then
 			local reason = ev.primary or 'component_watch_failed'
@@ -667,7 +873,15 @@ local function bind_manager(scope, conn, opts)
 				is_ingest = loop_is_ingest,
 			},
 
-			run = function ()
+			run = function (ep_scope)
+				-- The endpoint loop is the first owner that is guaranteed to be
+				-- joined during service shutdown.  Unbind here as well as in the
+				-- parent finaliser so that a restarted update service cannot race
+				-- stale manager endpoints left registered on the bus.
+				ep_scope:finally(function ()
+					bus_cleanup.unbind(conn, loop_ep)
+				end)
+
 				while true do
 					local req = fibers.perform(loop_ep:recv_op())
 					if req == nil then
@@ -729,6 +943,297 @@ local function open_config_watch(scope, conn, opts)
 	return watch, nil
 end
 
+
+local function job_store_dependency_required(params)
+	if params.job_store ~= nil then return false end
+	if params.job_store_kind == 'memory' or params.memory_job_store == true then return false end
+	return params.conn ~= nil
+end
+
+local function artifact_store_dependency_required(params)
+	if params.artifact_store_dependency_required ~= nil then
+		return params.artifact_store_dependency_required == true
+	end
+	if params.require_artifact_store ~= nil then
+		return params.require_artifact_store == true
+	end
+	if params.artifact_store ~= nil then return false end
+	if params.conn == nil then return false end
+	-- The default production backend is artifact-store backed.  Tests and
+	-- specialised services that supply their own backend or in-memory job store do
+	-- not need the bus artifact-store capability for service admission unless they
+	-- opt in explicitly with artifact_store_dependency_required=true.
+	if params.backend ~= nil then return false end
+	if params.job_store_kind == 'memory' or params.memory_job_store == true or params.job_store ~= nil then return false end
+	return true
+end
+
+update_dependencies_projection = function(self)
+	self._model:update(function (s)
+		s.dependencies = self._deps:snapshot()
+		return s
+	end)
+end
+
+local function make_job_store(params)
+	if params.job_store ~= nil then return params.job_store end
+	if params.job_store_kind == 'memory' or params.memory_job_store == true then
+		return job_store_memory.new(params.initial_jobs)
+	end
+	return control_store_jobs.new(params.conn, {
+		id = params.job_store_id or params.control_store_id or 'update',
+		prefix = params.job_store_prefix or 'update-job-',
+		call_opts = params.job_store_call_opts,
+	})
+end
+
+local function dependency_effectively_available(self, key)
+	return self._deps:available(key)
+end
+
+set_waiting_for_job_store = function(self, reason)
+	reason = reason or 'job_store_unavailable'
+	update_dependencies_projection(self)
+	update_model_state(self, 'waiting_for_job_store', reason)
+	return true, nil
+end
+
+local function set_waiting_for_artifact_store(self, reason)
+	reason = reason or 'artifact_store_unavailable'
+	update_dependencies_projection(self)
+	update_model_state(self, 'waiting_for_artifact_store', reason)
+	return true, nil
+end
+
+stop_job_runtime = function(self, reason)
+	reason = reason or 'job_store_unavailable'
+	local jobs = self._jobs
+	self._jobs = nil
+	self._jobs_seen = nil
+	self._job_runtime_ready = false
+	if jobs and type(jobs.cancel) == 'function' then
+		jobs:cancel(reason)
+	end
+	update_service_jobs_projection(self)
+	return true, nil
+end
+
+stop_runtime_dependents = function(self, reason)
+	reason = reason or 'job_store_unavailable'
+	self._suppress_dependents_reason = reason
+	cancel_active_generation(self, reason)
+	if self._current_generation and self._current_generation.state == 'replacing' then
+		self._current_generation = nil
+		clear_generation_snapshot(self)
+	end
+	if self._active_component and self._active_component.cancel then self._active_component:cancel(reason or 'job_store_unavailable') end
+	if self._component_watch and self._component_watch.cancel then self._component_watch:cancel(reason or 'job_store_unavailable') end
+	if self._active_scope and self._active_scope.cancel then self._active_scope:cancel(reason or 'job_store_unavailable') end
+	self._active_scope = nil
+	self._active_component = nil
+	self._active_runtime = nil
+	self._component_watch = nil
+end
+
+local function artifact_store_available_for_work(self)
+	return not self._artifact_store_dependency_required or dependency_effectively_available(self, 'artifact_store')
+end
+
+classify_dependency_route_missing = function(self, key, ev, reason)
+	return self._deps:classify_call_failure(key, ev, reason) == 'route_missing'
+end
+
+handle_artifact_route_missing = function(self, reason)
+	stop_runtime_dependents(self, reason or 'artifact_store_unavailable')
+	update_dependencies_projection(self)
+	return set_waiting_for_artifact_store(self, 'artifact_store_unavailable')
+end
+
+local function ensure_job_runtime(self, reason)
+	if self._jobs ~= nil then return true, nil end
+	self._suppress_dependents_reason = nil
+	if self._job_store_dependency_required and not dependency_effectively_available(self, 'job_store') then
+		return set_waiting_for_job_store(self, 'job_store_unavailable')
+	end
+
+	local params = self._params or {}
+	local job_store = self._job_store or make_job_store(params)
+	self._job_store = job_store
+
+	local jobs, jobs_err = job_runtime_mod.start(self._scope, {
+		service_id = self._service_id,
+		store = job_store,
+		initial_jobs = params.initial_jobs,
+		done_tx = self._done_tx,
+		queue_len = params.job_runtime_queue_len,
+	})
+	if not jobs then
+		return nil, jobs_err or 'update_job_repository_start_failed'
+	end
+
+	self._jobs = jobs
+	self._jobs_seen = jobs:version()
+	self._job_runtime_ready = jobs:ready()
+	update_dependencies_projection(self)
+	update_service_jobs_projection(self)
+	return true, nil
+end
+
+local function ensure_active_runtime(self, reason)
+	local params = self._params or {}
+	local adoption = self._jobs:adoption() or {}
+
+	if self._active_component and type(self._active_component.update_adoption) == 'function' then
+		self._active_component:update_adoption(adoption)
+	end
+
+	if self._active_component ~= nil then return true, nil end
+
+	local active_scope, active_scope_err = self._scope:child()
+	if not active_scope then
+		return nil, active_scope_err or 'update_active_runtime_scope_create_failed'
+	end
+	self._active_scope = active_scope
+
+	local active_component, active_component_err = active_runtime.start_component(active_scope, {
+		service_id = self._service_id,
+		done_tx = self._done_tx,
+		work_scope = active_scope,
+		queue_len = params.active_runtime_queue_len,
+		jobs = self._jobs,
+		backend = self._backend,
+		observer = self._component_observer,
+		adoption = adoption,
+	})
+	if not active_component then
+		active_scope:cancel(active_component_err or 'update_active_runtime_start_failed')
+		self._active_scope = nil
+		return nil, active_component_err or 'update_active_runtime_start_failed'
+	end
+	self._active_component = active_component
+	self._active_runtime = active_component:state()
+	return true, nil
+end
+
+local function ensure_component_watch(self, reason)
+	local params = self._params or {}
+	if self._component_watch ~= nil or params.conn == nil or params.watch_components == false then
+		return true, nil
+	end
+
+	local cw_port = service_events.port(self._done_tx, {
+		service_id = self._service_id,
+		source = 'update_component_watch',
+		source_id = 'component_watch',
+	}, {
+		label = 'update_component_watch_completion_report_failed',
+	})
+	local cwh, cwerr = component_watch.start(self._scope, {
+		service_id = self._service_id,
+		conn = params.conn,
+		observer = self._component_observer,
+		config = self._config,
+		queue_len = params.component_watch_queue_len,
+		report = service_events.reporter(cw_port, 'update_component_watch_completion_report_failed'),
+	})
+	if not cwh then return nil, cwerr or 'update_component_watch_start_failed' end
+	self._component_watch = cwh
+	return true, nil
+end
+
+ensure_runtime_dependents = function(self, reason)
+	if self._jobs == nil then return nil, 'job_runtime_not_ready' end
+	if self._artifact_store_dependency_required and not artifact_store_available_for_work(self) then
+		stop_runtime_dependents(self, 'artifact_store_unavailable')
+		return set_waiting_for_artifact_store(self, 'artifact_store_unavailable')
+	end
+	self._suppress_dependents_reason = nil
+	if self._jobs.ready and not self._jobs:ready() then
+		update_dependencies_projection(self)
+		update_service_jobs_projection(self)
+		update_model_state(self, 'starting', 'job_runtime_loading')
+		return true, nil
+	end
+
+	local ok, err = ensure_active_runtime(self, reason or 'runtime_dependents')
+	if ok ~= true then return nil, err end
+	ok, err = ensure_component_watch(self, reason or 'runtime_dependents')
+	if ok ~= true then return nil, err end
+
+	update_dependencies_projection(self)
+	update_service_jobs_projection(self)
+	return true, nil
+end
+
+local function ensure_generation_running(self, reason)
+	if self._config and self._current_generation == nil then
+		local ok, err = start_generation(self, self._config, reason or 'initial')
+		if not ok then return nil, err or 'generation_start_failed' end
+	else
+		update_model_state(self, 'running')
+	end
+	return true, nil
+end
+
+reconcile_runtime_components = function(self, reason)
+	if self._job_store_dependency_required and not dependency_effectively_available(self, 'job_store') then
+		stop_runtime_dependents(self, 'job_store_unavailable')
+		stop_job_runtime(self, 'job_store_unavailable')
+		return set_waiting_for_job_store(self, 'job_store_unavailable')
+	end
+	local ok, err = ensure_job_runtime(self, reason or 'runtime_reconcile')
+	if ok ~= true then return nil, err end
+	if self._job_runtime_ready ~= true then
+		update_dependencies_projection(self)
+		update_service_jobs_projection(self)
+		update_model_state(self, 'starting', 'job_runtime_loading')
+		return true, nil
+	end
+
+	ok, err = ensure_runtime_dependents(self, reason or 'job_runtime_ready')
+	if ok ~= true then return nil, err end
+	if self._artifact_store_dependency_required and not artifact_store_available_for_work(self) then
+		return true, nil
+	end
+	ok, err = ensure_generation_running(self, reason or 'runtime_ready')
+	if ok ~= true then return nil, err end
+	consider_active_jobs(self)
+	return true, nil
+end
+
+handle_dependency_changed = function(self, ev)
+	update_dependencies_projection(self)
+	if ev.key == 'job_store' then
+		if dependency_effectively_available(self, 'job_store') then
+			local ok, err = reconcile_runtime_components(self, 'job_store_available')
+			if ok ~= true then
+				update_model_state(self, 'failed', err or 'job_runtime_start_failed')
+				error(err or 'job_runtime_start_failed', 0)
+			end
+		elseif self._job_store_dependency_required then
+			-- Required durable storage disappeared or the status feed closed.  Keep
+			-- the service shell and public status endpoint alive, but stop dependent
+			-- generation/active work, cancel the durable job runtime, and reject new
+			-- mutating manager requests until the dependency becomes effectively
+			-- available and the runtime has reloaded from the store.
+			stop_runtime_dependents(self, 'job_store_unavailable')
+			stop_job_runtime(self, 'job_store_unavailable')
+			set_waiting_for_job_store(self, 'job_store_unavailable')
+		end
+	elseif ev.key == 'artifact_store' then
+		if dependency_effectively_available(self, 'artifact_store') then
+			local ok, err = reconcile_runtime_components(self, 'artifact_store_available')
+			if ok ~= true then
+				update_model_state(self, 'failed', err or 'artifact_store_reconcile_failed')
+				error(err or 'artifact_store_reconcile_failed', 0)
+			end
+		elseif self._artifact_store_dependency_required then
+			stop_runtime_dependents(self, 'artifact_store_unavailable')
+			set_waiting_for_artifact_store(self, 'artifact_store_unavailable')
+		end
+	end
+end
+
 function M.run(scope, params)
 	if type(scope) ~= 'table' then
 		error('update.service.run: scope required', 2)
@@ -765,29 +1270,35 @@ function M.run(scope, params)
 	local config_watch, werr = open_config_watch(scope, params.conn, params)
 	if werr then error(werr, 2) end
 
-	local job_store = params.job_store
-	if job_store == nil then
-		if params.job_store_kind == 'memory' or params.memory_job_store == true then
-			job_store = job_store_memory.new(params.initial_jobs)
-		else
-			job_store = control_store_jobs.new(params.conn, {
-				id = params.job_store_id or params.control_store_id or 'update',
-				prefix = params.job_store_prefix or 'update-job-',
-				call_opts = params.job_store_call_opts,
-			})
-		end
+	local job_dep_required = job_store_dependency_required(params)
+	local artifact_dep_required = artifact_store_dependency_required(params)
+	local dep_specs = {}
+	if job_dep_required then
+		dep_specs[#dep_specs + 1] = {
+			key = 'job_store',
+			class = 'control-store',
+			id = params.job_store_id or params.control_store_id or 'update',
+			required = true,
+		}
 	end
-	local jobs, jobs_err = job_runtime_mod.start(scope, {
-		service_id = service_id,
-		store = job_store,
-		initial_jobs = params.initial_jobs,
-		done_tx = done_tx,
-		queue_len = params.job_runtime_queue_len,
+	if artifact_dep_required then
+		dep_specs[#dep_specs + 1] = {
+			key = 'artifact_store',
+			class = 'artifact-store',
+			id = params.artifact_store_id or 'main',
+			required = true,
+		}
+	end
+	local deps, derr = cap_deps_mod.open(params.conn, dep_specs, {
+		queue_len = params.dependency_queue_len or params.status_queue_len or 8,
+		full = params.dependency_full or params.status_full or 'drop_oldest',
 	})
-	if not jobs then
-		error(jobs_err or 'update_job_repository_start_failed', 2)
-	end
-	local adoption = jobs:ready() and jobs:adoption() or {}
+	if not deps then error(derr or 'update dependency watcher failed', 2) end
+	scope:finally(function (_, status, primary)
+		deps:terminate(primary or status or 'update dependencies closed')
+	end)
+
+	local job_store = make_job_store(params)
 
 	local artifact_store = params.artifact_store
 	if artifact_store == nil then
@@ -822,56 +1333,17 @@ function M.run(scope, params)
 		})
 	end
 
-	local active_scope, active_scope_err = scope:child()
-	if not active_scope then
-		error(active_scope_err or 'update_active_runtime_scope_create_failed', 2)
-	end
-
-	local active_component, active_component_err = active_runtime.start_component(active_scope, {
-		service_id = service_id,
-		done_tx = done_tx,
-		work_scope = active_scope,
-		queue_len = params.active_runtime_queue_len,
-		jobs = jobs,
-		backend = backend,
-		observer = component_observer,
-		adoption = adoption,
-	})
-	if not active_component then
-		error(active_component_err or 'update_active_runtime_start_failed', 2)
-	end
-
-	local component_watch_handle
-	if params.conn ~= nil and params.watch_components ~= false then
-		local cw_port = service_events.port(done_tx, {
-			service_id = service_id,
-			source = 'update_component_watch',
-			source_id = 'component_watch',
-		}, {
-			label = 'update_component_watch_completion_report_failed',
-		})
-		local cwh, cwerr = component_watch.start(scope, {
-			service_id = service_id,
-			conn = params.conn,
-			observer = component_observer,
-			config = initial_cfg,
-			queue_len = params.component_watch_queue_len,
-			report = service_events.reporter(cw_port, 'update_component_watch_completion_report_failed'),
-		})
-		if not cwh then error(cwerr or 'update_component_watch_start_failed', 2) end
-		component_watch_handle = cwh
-	end
-
 	local self = setmetatable({
 		_scope = scope,
 		_service_id = service_id,
+		_svc = params.svc,
 		_model = service_model,
 		_done_tx = done_tx,
 		_done_rx = done_rx,
 		done_rx = done_rx,
-		_active_scope = active_scope,
-		_active_component = active_component,
-		_active_runtime = active_component:state(),
+		_active_scope = nil,
+		_active_component = nil,
+		_active_runtime = nil,
 		_manager_ep = manager_ep,
 		manager_rx = manager_ep,
 		config_watch = config_watch,
@@ -879,25 +1351,36 @@ function M.run(scope, params)
 		publisher = nil,
 		_publisher = nil,
 		pending = {},
-		_config = nil,
+		_config = initial_cfg,
 		_current_generation = nil,
 		_next_generation = params.generation or 1,
 		_generation_runner = params.generation_runner,
-		_jobs_seen = jobs:version(),
-		_jobs = jobs,
+		_jobs_seen = nil,
+		_jobs = nil,
+		_job_store = job_store,
+		_job_store_dependency_required = job_dep_required,
+		_artifact_store_dependency_required = artifact_dep_required,
+		_deps = deps,
 		_artifact_store = artifact_store,
 		_component_observer = component_observer,
-		_component_watch = component_watch_handle,
+		_component_watch = nil,
 		_backend = backend,
-		_job_runtime_ready = jobs:ready(),
+		_job_runtime_ready = false,
 		_generation_done_queue_len = params.generation_done_queue_len,
 		_manager_route_queue_len = params.manager_route_queue_len,
 		_generation_service_queue_len = params.generation_service_queue_len,
 		_complete = false,
+		_params = params,
 	}, Service)
 
-	update_service_jobs_projection(self)
-	update_model_state(self, jobs:ready() and 'running' or 'starting', jobs:ready() and nil or 'job_runtime_loading')
+	update_dependencies_projection(self)
+	if job_dep_required and not deps:available('job_store') then
+		update_model_state(self, 'waiting_for_job_store', 'job_store_unavailable')
+	elseif artifact_dep_required and not deps:available('artifact_store') then
+		update_model_state(self, 'waiting_for_artifact_store', 'artifact_store_unavailable')
+	else
+		update_model_state(self, 'starting', 'job_runtime_loading')
+	end
 
 	if params.conn and params.publish ~= false then
 		local pub, perr = start_publisher_component(self, params.conn, service_model)
@@ -906,13 +1389,8 @@ function M.run(scope, params)
 		self._publisher = pub
 	end
 
-	self._config = initial_cfg
-	local ok, err = start_generation(self, initial_cfg, 'initial')
-	if not ok then error(err or 'generation_start_failed', 2) end
-	if not jobs:ready() then
-		update_model_state(self, 'starting', 'job_runtime_loading')
-	end
-	consider_active_jobs(self)
+	local ok, err = reconcile_runtime_components(self, 'initial')
+	if ok ~= true then error(err or 'update runtime start failed', 2) end
 
 	return coordinator_loop(self)
 end
@@ -936,6 +1414,7 @@ function M.start(conn, opts)
 	local params = copy(opts)
 	params.conn = conn
 	params.name = opts.name or 'update'
+	params.svc = svc
 
 	M.run(scope, params)
 

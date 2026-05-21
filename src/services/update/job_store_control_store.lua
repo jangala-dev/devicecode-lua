@@ -125,7 +125,12 @@ function Store:load_all_op()
 
 		return { jobs = jobs, order = sorted_ids(jobs) }, nil
 	end):wrap(function (st, rep, snapshot, err)
-		if st ~= 'ok' then return nil, tostring(err or rep) end
+		-- fibers.run_scope_op returns (status, report, result) on success and
+		-- (status, report, primary) on failure.  Preserve the primary failure so
+		-- callers can classify capability-routing errors such as `no_route`.
+		if st ~= 'ok' then
+			return nil, tostring(snapshot or err or rep)
+		end
 		return snapshot, err
 	end)
 end

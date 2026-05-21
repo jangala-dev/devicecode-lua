@@ -9,6 +9,8 @@ local publisher   = require 'services.device.publisher'
 local projection  = require 'services.device.projection'
 local action_worker = require 'services.device.action_worker'
 local request_owner = require 'devicecode.support.request_owner'
+local cap_deps_mod = require 'devicecode.support.capability_dependencies'
+local dependency_mod = require 'services.device.dependencies'
 local backpressure = require 'services.device.backpressure'
 
 local M = {}
@@ -68,6 +70,58 @@ local function resolve_action_spec(component, action, req, base_spec)
 		return spec, nil
 	end
 	return base_spec, nil
+end
+
+
+local function mapped_action_dependency_key(active, component_id, action)
+	local by_component = active and active.action_dependency_keys and active.action_dependency_keys[component_id] or nil
+	return by_component and by_component[action] or nil
+end
+
+local function remember_action_dependency_key(active, component_id, action, key)
+	if key == nil then return end
+	active.action_dependency_keys = active.action_dependency_keys or {}
+	active.action_dependency_keys[component_id] = active.action_dependency_keys[component_id] or {}
+	active.action_dependency_keys[component_id][action] = key
+end
+
+local function open_dynamic_dependency_manager(state, active, spec)
+	local deps, err = cap_deps_mod.open(state.conn, { spec }, {
+		changed_kind = 'device_dependency_changed',
+		closed_kind = 'device_dependency_closed',
+		queue_len = state.dependency_queue_len or 8,
+		full = 'drop_oldest',
+	})
+	if not deps then return nil, err or 'device_dynamic_action_dependency_open_failed' end
+	active.action_deps = deps
+	state.action_deps = deps
+	return true, nil
+end
+
+local function ensure_action_dependency(state, active, component_id, action, action_spec)
+	local mapped = mapped_action_dependency_key(active, component_id, action)
+	local spec, err = dependency_mod.action_dependency_spec(component_id, action, action_spec)
+	if err ~= nil then return nil, err end
+	if spec == nil then return mapped, nil end
+
+	local key = spec.key
+	remember_action_dependency_key(active, component_id, action, key)
+
+	if active.action_deps == nil then
+		local ok, oerr = open_dynamic_dependency_manager(state, active, spec)
+		if ok ~= true then return nil, oerr end
+	elseif type(active.action_deps.ensure) == 'function' then
+		local ok, eerr = active.action_deps:ensure(spec)
+		if ok ~= true then return nil, eerr or 'device_dynamic_action_dependency_add_failed' end
+	elseif active.action_deps:dependency(key) == nil then
+		return nil, 'device_action_dependency_manager_cannot_add:' .. tostring(key)
+	end
+
+	if type(state.update_dependency_model) == 'function' then
+		state.update_dependency_model(state, active)
+	end
+
+	return key, nil
 end
 
 local function component_actions(component)
@@ -186,6 +240,16 @@ function M.start_action(state, req, rec)
 		return fail_public_request(req, spec_err or 'unknown_action')
 	end
 
+	local dep_key, dep_err = ensure_action_dependency(state, active, rec.component, rec.action, action_spec)
+	if dep_err ~= nil then
+		return fail_public_request(req, 'dependency_invalid:' .. tostring(dep_err))
+	end
+	if dep_key ~= nil then
+		if not active.action_deps or active.action_deps:available(dep_key) ~= true then
+			return fail_public_request(req, 'dependency_unavailable:' .. tostring(dep_key))
+		end
+	end
+
 	local request_id = new_request_id(state)
 	local owner = request_owner.new(req)
 
@@ -244,6 +308,7 @@ function M.start_action(state, req, rec)
 		generation = active.generation,
 		component = rec.component,
 		action = rec.action,
+		dependency_key = dep_key,
 		handle = handle,
 	}
 

@@ -79,6 +79,11 @@ local function try_observed_now(state)
 end
 
 local function add_capability_sources(state, sources)
+	if state.cap_deps and type(state.cap_deps.event_source) == 'function' then
+		sources[#sources + 1] = state.cap_deps:event_source({ name = 'capability_dependencies' })
+		return
+	end
+
 	local subs = state.capability_status_subs or {}
 	local names = {}
 	for name in pairs(subs) do names[#names + 1] = name end

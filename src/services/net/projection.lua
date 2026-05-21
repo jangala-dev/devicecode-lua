@@ -32,6 +32,7 @@ function M.summary(snapshot)
 		generation = snapshot.generation,
 		config = copy(snapshot.config),
 		apply = copy(snapshot.apply),
+		pending = copy(snapshot.pending),
 		hal = copy(snapshot.hal),
 		counts = {
 			segments = count_map(snapshot.segments),
@@ -45,6 +46,7 @@ function M.summary(snapshot)
 			last_event_at = snapshot.observed and snapshot.observed.last_event_at or nil,
 			last_subject = snapshot.observed and snapshot.observed.last_subject or nil,
 		},
+		dependencies = copy(snapshot.dependencies),
 		stats = copy(snapshot.stats),
 	}
 end

@@ -13,7 +13,6 @@ local M = {
 	generation = require 'services.net.generation',
 	apply_runtime = require 'services.net.apply_runtime',
 	hal_client = require 'services.net.hal_client',
-	capability_resolver = require 'services.net.capability_resolver',
 	observer_manager = require 'services.net.observer_manager',
 	wan_manager = require 'services.net.wan_manager',
 	wan_policy = require 'services.net.wan_policy',

@@ -155,4 +155,32 @@ function tests.test_cleanup_error_recording_is_explicit_and_non_throwing()
 	assert_eq(state.last_cleanup_error, rec)
 end
 
+
+function tests.test_lifecycle_not_ready_until_config_and_listener_are_ready()
+	local calls = {}
+	local lifecycle = {
+		running = function (_, payload) calls[#calls + 1] = payload; return payload end,
+	}
+	local state = base_state()
+	state.lifecycle = lifecycle
+	state.config_status = 'waiting'
+
+	service._test.update_lifecycle(state)
+	assert_eq(calls[#calls].ready, false)
+	assert_eq(calls[#calls].reason, 'waiting_for_config')
+
+	state.config_status = 'ok'
+	state.config = { enabled = true, http = { enabled = true } }
+	state.listener_status = 'waiting_for_http'
+	state.last_error = 'http_unavailable'
+	service._test.update_lifecycle(state)
+	assert_eq(calls[#calls].ready, false)
+	assert_eq(calls[#calls].reason, 'http_unavailable')
+
+	state.listener_status = 'running'
+	state.last_error = nil
+	service._test.update_lifecycle(state)
+	assert_eq(calls[#calls].ready, true)
+end
+
 return tests

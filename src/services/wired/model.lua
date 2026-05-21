@@ -19,6 +19,7 @@ function M.initial(service_id)
 		config = { rev = nil, schema = nil, config_schema = nil, version = nil },
 		net = { segments_rev = nil, segments = {}, vlan_policy = {}, missing_segments = {} },
 		providers = {},
+		dependencies = {},
 		surfaces = {},
 		topology = { protected_trunks = {}, access = {}, trunks = {} },
 		violations = {},

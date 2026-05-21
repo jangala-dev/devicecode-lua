@@ -65,7 +65,7 @@ end
 function tests.test_net_service_uses_named_runtime_components()
 	local svc = read_file('../src/services/net/service.lua')
 	for _, mod in ipairs({
-		"services.net.capability_resolver",
+		"devicecode.support.capability_dependencies",
 		"services.net.observer_manager",
 		"services.net.wan_manager",
 		"services.net.drift",

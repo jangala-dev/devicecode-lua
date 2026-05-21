@@ -26,6 +26,7 @@ local function empty_snapshot()
 		generation = 0,
 		catalogue = nil,
 		components = {},
+		dependencies = {},
 	}
 end
 
@@ -129,6 +130,16 @@ function DeviceModel:update_catalogue_metadata(generation, catalogue)
 		end
 	end
 
+	return apply_if_changed(self, snap)
+end
+
+
+function DeviceModel:update_dependencies(generation, dependencies)
+	local snap = self:snapshot()
+	if snap.generation ~= generation then
+		return false, self:version(), 'stale_generation'
+	end
+	snap.dependencies = copy_value(dependencies or {})
 	return apply_if_changed(self, snap)
 end
 

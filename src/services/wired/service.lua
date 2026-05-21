@@ -12,6 +12,8 @@ local topics = require 'services.wired.topics'
 local publisher = require 'services.wired.publisher'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local config_watch = require 'devicecode.support.config_watch'
+local dep_slot = require 'devicecode.support.dependency_slot'
+local dependency_mod = require 'services.wired.dependencies'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -65,7 +67,11 @@ local function provider_surface(provider, provider_surface_id)
 	return surfaces[provider_surface_id]
 end
 
-local function provider_available(provider)
+local function provider_available(snap, provider_id, provider)
+	local dep = snap and snap.dependencies and snap.dependencies[dependency_mod.provider_dependency_key(provider_id)] or nil
+	if dep ~= nil and dep.available ~= true then
+		return false, dep.reason or dep.status or 'provider_unavailable'
+	end
 	if provider == nil then return false, 'provider_missing' end
 	local st = provider.status or {}
 	if st.available == false or st.state == 'removed' or st.state == 'unavailable' or st.state == 'not_configured' then
@@ -254,7 +260,7 @@ local function rebuild_derived(snap)
 	for id, desired in pairs((snap.config_intent and snap.config_intent.surfaces) or {}) do
 		local provider_id = desired.provider.capability_id
 		local provider = snap.providers[provider_id]
-		local p_ok, p_reason = provider_available(provider)
+		local p_ok, p_reason = provider_available(snap, provider_id, provider)
 		local p_surface = provider_surface(provider, desired.provider.provider_surface_id)
 		local link = copy((p_surface and p_surface.link) or {})
 		local observed_attachment = copy((p_surface and p_surface.attachment) or {})
@@ -343,13 +349,38 @@ local function publish(state)
 	return true, nil
 end
 
+
+local function terminate_provider_deps(state, reason)
+	dep_slot.terminate(state, 'provider_deps', reason or 'wired_provider_dependencies_closed')
+	return true
+end
+
+local function open_provider_deps(state, intent)
+	local specs = dependency_mod.provider_dependencies(intent)
+	local ok, err = dep_slot.replace(state, 'provider_deps', state.conn, specs, {
+		replace_reason = 'wired_provider_dependencies_replaced',
+		changed_kind = 'wired_dependency_changed',
+		closed_kind = 'wired_dependency_closed',
+		queue_len = state.dependency_queue_len or 8,
+		full = 'drop_oldest',
+	})
+	if ok ~= true then return nil, err or 'wired_provider_dependencies_open_failed' end
+	return true, nil
+end
+local function dependency_snapshot(state)
+	return dep_slot.snapshot(state, 'provider_deps')
+end
+
 local function apply_config(state, ev)
 	local intent, err = config_mod.normalise(ev and ev.raw or nil, { rev = ev and ev.rev, generation = ev and ev.generation })
 	if not intent then return nil, err end
+	local ok_deps, dep_err = open_provider_deps(state, intent)
+	if ok_deps ~= true then return nil, dep_err or 'wired_provider_dependencies_open_failed' end
 	local _changed, _version, uerr = state.model:update(function (snap)
 		snap.generation = (ev and ev.generation) or (snap.generation + 1)
 		snap.config = { rev = intent.rev, schema = intent.schema, config_schema = intent.config_schema, version = intent.version }
 		snap.config_intent = intent
+		snap.dependencies = dependency_snapshot(state)
 		snap.stats.config_updates = (snap.stats.config_updates or 0) + 1
 		return rebuild_derived(snap)
 	end)
@@ -381,6 +412,16 @@ local function apply_provider_event(state, ev)
 	return publish(state)
 end
 
+
+local function apply_dependency_event(state, _ev)
+	local _changed, _version, uerr = state.model:update(function (snap)
+		snap.dependencies = dependency_snapshot(state)
+		return rebuild_derived(snap)
+	end)
+	if uerr ~= nil then return nil, uerr end
+	return publish(state)
+end
+
 function M.build_state(scope, opts)
 	opts = opts or {}
 	local conn = assert(opts.conn, 'wired service requires conn')
@@ -397,12 +438,15 @@ function M.build_state(scope, opts)
 		config_watch = cfg,
 		net_watch = net_watch,
 		provider_watch = provider_watch,
+		provider_deps = nil,
+		dependency_queue_len = opts.dependency_queue_len,
 		published = publisher.new_state(),
 	}
 	scope:finally(function ()
 		cfg:close()
 		bus_cleanup.unwatch_retained(conn, net_watch)
 		bus_cleanup.unwatch_retained(conn, provider_watch)
+		terminate_provider_deps(state, 'wired_service_stopped')
 		publisher.cleanup_now(conn, state.published)
 		state.model:terminate('wired_service_stopped')
 	end)
@@ -410,11 +454,14 @@ function M.build_state(scope, opts)
 end
 
 function M.next_event_op(state)
-	return fibers.named_choice({
+	local arms = {
 		config = state.config_watch:recv_op(),
 		net = state.net_watch:recv_op():wrap(function (ev, err) return { kind = ev and 'net_segments_changed' or 'net_segments_closed', ev = ev, err = err } end),
 		provider = state.provider_watch:recv_op():wrap(function (ev, err) return { kind = ev and 'provider_changed' or 'provider_closed', ev = ev, err = err } end),
-	}):wrap(function (_, ev) return ev end)
+	}
+	local src = dep_slot.event_source(state, 'provider_deps', { name = 'dependencies' })
+	if src then arms.dependencies = src.recv_op() end
+	return fibers.named_choice(arms):wrap(function (_, ev) return ev end)
 end
 
 function M.handle_event(state, ev)
@@ -425,6 +472,7 @@ function M.handle_event(state, ev)
 	if ev.kind == 'net_segments_closed' then return nil, ev.err or 'net segments watch closed' end
 	if ev.kind == 'provider_changed' then return apply_provider_event(state, ev.ev) end
 	if ev.kind == 'provider_closed' then return nil, ev.err or 'wired provider watch closed' end
+	if ev.kind == 'wired_dependency_changed' or ev.kind == 'wired_dependency_closed' then return apply_dependency_event(state, ev) end
 	return true, nil
 end
 

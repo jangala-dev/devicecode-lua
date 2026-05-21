@@ -128,36 +128,46 @@ function M.try_job_runtime_now(state)
 end
 
 function M.next_service_event_op(state)
+	local sources = {
+		{
+			name = 'generation_done',
+			try_now = function () return M.try_generation_done_now(state) end,
+			recv_op = function () return recv_op(state.done_rx, M.map_generation_done) end,
+		},
+		{
+			name = 'job_runtime',
+			enabled = function () return state._jobs ~= nil and state._jobs_seen ~= nil end,
+			try_now = function () return M.try_job_runtime_now(state) end,
+			recv_op = function ()
+				return state._jobs:changed_op(state._jobs_seen):wrap(M.map_job_runtime_changed)
+			end,
+		},
+		{
+			name = 'config',
+			enabled = function () return state.config_rx ~= nil end,
+			try_now = function () return M.try_config_now(state) end,
+			recv_op = function () return recv_op(state.config_rx, M.map_config_event) end,
+		},
+	}
+
+	-- Dependency changes are admission facts for the service coordinator.  Handle
+	-- them before externally-triggered manager requests so retained status replay
+	-- cannot be starved by status polling during startup.
+	if state._deps and type(state._deps.event_source) == 'function' then
+		sources[#sources + 1] = state._deps:event_source({ name = 'dependencies' })
+	end
+
+	sources[#sources + 1] = {
+		name = 'manager',
+		enabled = function () return state.manager_rx ~= nil end,
+		try_now = function () return M.try_manager_now(state) end,
+		recv_op = function () return recv_op(state.manager_rx, M.map_manager_request) end,
+	}
+
 	return priority_event.sources_op {
 		label = 'update.service.next_event',
 		pending = state.pending,
-		sources = {
-			{
-				name = 'generation_done',
-				try_now = function () return M.try_generation_done_now(state) end,
-				recv_op = function () return recv_op(state.done_rx, M.map_generation_done) end,
-			},
-			{
-				name = 'job_runtime',
-				enabled = function () return state._jobs ~= nil and state._jobs_seen ~= nil end,
-				try_now = function () return M.try_job_runtime_now(state) end,
-				recv_op = function ()
-					return state._jobs:changed_op(state._jobs_seen):wrap(M.map_job_runtime_changed)
-				end,
-			},
-			{
-				name = 'config',
-				enabled = function () return state.config_rx ~= nil end,
-				try_now = function () return M.try_config_now(state) end,
-				recv_op = function () return recv_op(state.config_rx, M.map_config_event) end,
-			},
-			{
-				name = 'manager',
-				enabled = function () return state.manager_rx ~= nil end,
-				try_now = function () return M.try_manager_now(state) end,
-				recv_op = function () return recv_op(state.manager_rx, M.map_manager_request) end,
-			},
-		},
+		sources = sources,
 	}
 end
 
