@@ -563,11 +563,11 @@ local function reduce_event(state, ev)
 		return { publish = true }
 	elseif ev.kind == 'read_model_changed' then
 		state.model_seen = ev.version or state.model_seen
-		return { publish = true }
+		return {}
 	elseif ev.kind == 'session_changed' then
 		state.sessions_seen = ev.version or state.sessions_seen
 		state.last_session_event = ev.last_event or ev
-		return { publish = true }
+		return {}
 	elseif is_session_event(ev) then
 		state.last_session_event = ev
 		return { publish = true }
