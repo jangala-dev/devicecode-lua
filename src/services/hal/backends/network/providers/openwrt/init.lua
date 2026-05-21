@@ -180,6 +180,10 @@ end
 
 local function set_section(changes, config, section, stype)
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = stype }
+end
+
+local function set_managed_section(changes, config, section, stype)
+	set_section(changes, config, section, stype)
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_managed', value = '1' }
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_owner', value = 'net' }
 end
@@ -440,14 +444,14 @@ local function add_segment_trunk_interfaces(changes, known, intent, provider_con
 				known[devsec] = true
 				known[ifsec] = true
 
-				set_section(changes, 'network', devsec, 'device')
+				set_managed_section(changes, 'network', devsec, 'device')
 				set_option(changes, 'network', devsec, 'type', '8021q')
 				set_option(changes, 'network', devsec, 'ifname', base_ifname)
 				set_option(changes, 'network', devsec, 'vid', vid)
 				set_option(changes, 'network', devsec, 'name', devname)
 
 				local proto, ipv4 = build_segment_interface_proto(seg)
-				set_section(changes, 'network', ifsec, 'interface')
+				set_managed_section(changes, 'network', ifsec, 'interface')
 				set_option(changes, 'network', ifsec, 'proto', proto)
 				set_option(changes, 'network', ifsec, 'auto', '1')
 				set_option(changes, 'network', ifsec, 'disabled', '0')
@@ -486,7 +490,7 @@ local function add_bridge_vlan_devices(changes, known, intent, iface_id, bridge_
 			local devname = bridge_name .. '.' .. tostring(vid)
 			local devsec = section_id('device', iface_id .. '_' .. tostring(vid))
 			known[devsec] = true
-			set_section(changes, 'network', devsec, 'device')
+			set_managed_section(changes, 'network', devsec, 'device')
 			set_option(changes, 'network', devsec, 'type', '8021q')
 			set_option(changes, 'network', devsec, 'ifname', bridge_name)
 			set_option(changes, 'network', devsec, 'vid', vid)
@@ -508,7 +512,7 @@ local function build_network_changes(intent, provider_config)
 	local known = {}
 	local segment_to_ifaces, iface_to_device = collect_interface_maps(intent)
 
-	set_section(changes, 'network', 'globals', 'globals')
+	set_managed_section(changes, 'network', 'globals', 'globals')
 	known.globals = true
 
 	add_segment_trunk_interfaces(changes, known, intent, provider_config, segment_to_ifaces)
@@ -520,7 +524,7 @@ local function build_network_changes(intent, provider_config)
 		if iface.kind == 'bridge' then
 			local devsec = section_id('device', ifid)
 			known[devsec] = true
-			set_section(changes, 'network', devsec, 'device')
+			set_managed_section(changes, 'network', devsec, 'device')
 			set_option(changes, 'network', devsec, 'name', 'br-' .. ifid)
 			set_option(changes, 'network', devsec, 'type', 'bridge')
 			set_option(changes, 'network', devsec, 'ports', iface.members or {})
@@ -535,7 +539,7 @@ local function build_network_changes(intent, provider_config)
 		end
 		if proto == 'manual' then proto = 'none' end
 
-		set_section(changes, 'network', ifsec, 'interface')
+		set_managed_section(changes, 'network', ifsec, 'interface')
 		set_option(changes, 'network', ifsec, 'proto', proto)
 		set_option(changes, 'network', ifsec, 'auto', iface.enabled == false and '0' or '1')
 		set_option(changes, 'network', ifsec, 'disabled', iface.enabled == false and '1' or '0')
@@ -559,7 +563,7 @@ local function build_network_changes(intent, provider_config)
 		local r = item.rec
 		local rsec = section_id('route', 'route_' .. tostring(item.id))
 		known[rsec] = true
-		set_section(changes, 'network', rsec, 'route')
+		set_managed_section(changes, 'network', rsec, 'route')
 		set_option(changes, 'network', rsec, 'interface', r.interface or r.net)
 		set_option(changes, 'network', rsec, 'target', r.target)
 		set_option(changes, 'network', rsec, 'gateway', r.gateway or r.via)
@@ -586,7 +590,7 @@ local function build_dhcp_changes(intent)
 		if wants_dns then
 			local dnssec = section_id('dns', 'dns_' .. seg_id)
 			known[dnssec] = true
-			set_section(changes, 'dhcp', dnssec, 'dnsmasq')
+			set_managed_section(changes, 'dhcp', dnssec, 'dnsmasq')
 			set_option(changes, 'dhcp', dnssec, 'domainneeded', dns.domainneeded ~= nil and bool_uci(dns.domainneeded) or '1')
 			set_option(changes, 'dhcp', dnssec, 'boguspriv', dns.boguspriv ~= nil and bool_uci(dns.boguspriv) or '1')
 			set_option(changes, 'dhcp', dnssec, 'localservice', dns.localservice ~= nil and bool_uci(dns.localservice) or '1')
@@ -609,7 +613,7 @@ local function build_dhcp_changes(intent)
 
 		local sec = section_id('dhcp', seg_id)
 		known[sec] = true
-		set_section(changes, 'dhcp', sec, 'dhcp')
+		set_managed_section(changes, 'dhcp', sec, 'dhcp')
 		set_option(changes, 'dhcp', sec, 'interface', seg_id)
 		if dh.enabled == true then
 			set_option(changes, 'dhcp', sec, 'start', dh.start or dh.range_start or defaults.start or 100)
@@ -627,7 +631,7 @@ local function build_dhcp_changes(intent)
 		if not is_plain_table(rec) then return end
 		local sec = section_id('dhcp', 'host_' .. tostring(rid))
 		known[sec] = true
-		set_section(changes, 'dhcp', sec, 'host')
+		set_managed_section(changes, 'dhcp', sec, 'host')
 		set_option(changes, 'dhcp', sec, 'name', rec.name or rid)
 		set_option(changes, 'dhcp', sec, 'mac', rec.mac)
 		set_option(changes, 'dhcp', sec, 'ip', rec.ip or rec.address)

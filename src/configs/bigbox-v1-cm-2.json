@@ -340,8 +340,7 @@
           "syn_flood": "1",
           "input": "ACCEPT",
           "forward": "REJECT",
-          "output": "ACCEPT",
-          "disable_ipv6": "1"
+          "output": "ACCEPT"
         },
         "zones": {
           "lan": {
