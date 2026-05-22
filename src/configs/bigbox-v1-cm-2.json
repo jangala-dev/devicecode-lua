@@ -9,6 +9,10 @@
           "root": "/data/devicecode/configs"
         },
         {
+          "name": "credentials",
+          "root": "/data/configs"
+        },
+        {
           "name": "state",
           "root": "/tmp/devicecode-state"
         }
