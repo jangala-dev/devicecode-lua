@@ -200,18 +200,31 @@ local function memo_prefixed(self, class, key, max_len, prefix, fallback)
 end
 
 local function memo_mwan(self, role, id)
-	-- All MWAN3 UCI section names share one package namespace.  Allocate
-	-- interface/member/policy/rule names from the same used-name set and
-	-- always role-prefix them, even when the semantic id itself is short.
+	-- All MWAN3 UCI section names share one package namespace.  Prefer the
+	-- semantic name when it is valid and unused, so conventional names such as
+	-- "balanced" and "default_rule_v4" remain readable.  If another MWAN3
+	-- section already owns that name, generate a bounded role-prefixed name.
 	local prefix = ({ iface = 'mi', member = 'mm', policy = 'mp', rule = 'mr' })[role]
-	local name = memo_prefixed(self, 'mwan', role .. ':' .. tostring(id), MAX.mwan_name, prefix, role)
+	local raw_id = tostring(id or (role == 'policy' and 'balanced' or ''))
+	local key = role .. ':' .. raw_id
+	self._cache.mwan = self._cache.mwan or {}
+	local name = self._cache.mwan[key]
+	if not name then
+		local safe = safe_plain_name(raw_id, MAX.mwan_name)
+		if safe then
+			name = remember_if_available(self, 'mwan', key, safe)
+		end
+		if not name then
+			name = memo_prefixed(self, 'mwan', key, MAX.mwan_name, prefix, role)
+		end
+	end
 	-- Preserve role-specific diagnostic maps in snapshots while the allocator
 	-- itself enforces one shared MWAN3 package namespace.
 	local cache_class = 'mwan_' .. role
 	self._cache[cache_class] = self._cache[cache_class] or {}
-	self._cache[cache_class][tostring(id)] = name
+	self._cache[cache_class][raw_id] = name
 	self._reverse[cache_class] = self._reverse[cache_class] or {}
-	self._reverse[cache_class][name] = tostring(id)
+	self._reverse[cache_class][name] = raw_id
 	return name
 end
 

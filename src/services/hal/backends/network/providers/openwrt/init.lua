@@ -1339,6 +1339,9 @@ function Provider:apply_op(req)
 			}
 		end
 
+		self._last_name_ctx = name_ctx
+		self._last_openwrt_names = name_ctx:snapshot()
+
 		local shaping_result = nil
 		local shaping_request = build_shaping_request(intent, self.config)
 		if shaping_request and shaping_request.enabled == true then
@@ -1543,7 +1546,7 @@ local function augment_with_live_snapshot(config, observed, req, subject, trigge
 	local devices, device_seen = {}, {}
 	for i = 1, #ifaces do
 		local ifid = ifaces[i]
-		local st, err = ubus_call(self.config, 'network.interface.' .. tostring(ifid), 'status', {})
+		local st, err = ubus_call(config, 'network.interface.' .. tostring(ifid), 'status', {})
 		if st then
 			local norm = normalise_interface_status(ifid, st)
 			live.interfaces[ifid] = norm
@@ -1561,14 +1564,14 @@ local function augment_with_live_snapshot(config, observed, req, subject, trigge
 	end
 	for i = 1, #devices do
 		local dev = devices[i]
-		local st, err = ubus_call(self.config, 'network.device', 'status', { name = dev })
+		local st, err = ubus_call(config, 'network.device', 'status', { name = dev })
 		if st then
 			live.devices[dev] = normalise_device_status(dev, st)
 		else
 			append_error(live.errors, 'network.device status ' .. tostring(dev) .. ': ' .. tostring(err))
 		end
 	end
-	local mwan, merr = ubus_call(self.config, 'mwan3', 'status', {})
+	local mwan, merr = ubus_call(config, 'mwan3', 'status', {})
 	if mwan then
 		observed.multiwan = normalise_mwan3_status(mwan)
 	else
@@ -1835,10 +1838,68 @@ function Provider:read_counters_op(_req)
 end
 
 
+
+local function translate_mwan_policy_for_ctx(name_ctx, policy)
+	if not name_ctx or type(name_ctx.mwan_policy) ~= 'function' then return policy end
+	local p = policy or 'balanced'
+	if type(p) == 'string' and type(name_ctx.semantic_for) == 'function' and name_ctx:semantic_for('mwan_policy', p) then
+		return p
+	end
+	return name_ctx:mwan_policy(p)
+end
+
+local function translate_mwan_iface_for_ctx(name_ctx, iface)
+	if not name_ctx or type(name_ctx.mwan_iface) ~= 'function' then return iface end
+	if type(iface) ~= 'string' or iface == '' then return iface end
+	if type(name_ctx.semantic_for) == 'function' and name_ctx:semantic_for('mwan_iface', iface) then
+		return iface
+	end
+	return name_ctx:mwan_iface(iface)
+end
+
+local function translate_live_weights_req(req, name_ctx)
+	if not name_ctx then return req or {} end
+	local out = copy_plain(req or {}) or {}
+	out.policy = translate_mwan_policy_for_ctx(name_ctx, out.policy or 'balanced')
+	local members = {}
+	for i, m in ipairs((req and req.members) or {}) do
+		if is_plain_table(m) then
+			local mm = copy_plain(m) or {}
+			local semantic_iface = m.openwrt_interface or m.interface or m.iface or m.link_id or m.id
+			local generated_iface = translate_mwan_iface_for_ctx(name_ctx, semantic_iface)
+			if type(generated_iface) == 'string' and generated_iface ~= '' then
+				mm.semantic_interface = semantic_iface
+				mm.openwrt_interface = generated_iface
+				mm.interface = generated_iface
+			end
+			members[#members + 1] = mm
+		else
+			members[#members + 1] = m
+		end
+	end
+	out.members = members
+	return out
+end
+
+local function translate_speedtest_req(req, name_ctx)
+	if not name_ctx then return req or {} end
+	local out = copy_plain(req or {}) or {}
+	local semantic_iface = out.openwrt_interface or out.interface or out.iface
+	local generated_iface = translate_mwan_iface_for_ctx(name_ctx, semantic_iface)
+	if type(generated_iface) == 'string' and generated_iface ~= '' then
+		out.semantic_interface = semantic_iface
+		out.openwrt_interface = generated_iface
+		out.interface = generated_iface
+	end
+	return out
+end
+
 function Provider:apply_live_weights_op(req)
 	return fibers.run_scope_op(function()
 		if self.terminated then return { ok = false, err = 'provider terminated', backend = 'openwrt' } end
-		local result = mwan3_mod.apply_live_weights(req or {}, {
+		local original_req = req or {}
+		local live_req = translate_live_weights_req(original_req, self._last_name_ctx)
+		local result = mwan3_mod.apply_live_weights(live_req, {
 			apply_mwan_live_weights = self.apply_mwan_live_weights,
 			run_cmd = self.mwan_run_cmd,
 			run_cmd_capture = self.mwan_run_cmd_capture,
@@ -1848,7 +1909,7 @@ function Provider:apply_live_weights_op(req)
 		if persist then
 			local mgr, merr = self:_ensure_started()
 			if mgr then
-				local ok, err, admitted = fibers.perform(mwan3_mod.persist_weights_op(mgr, req or {}))
+				local ok, err, admitted = fibers.perform(mwan3_mod.persist_weights_op(mgr, original_req, self._last_name_ctx))
 				result.persisted = ok == true
 				result.persist_err = err
 				result.persist_admitted = admitted
@@ -1877,7 +1938,7 @@ function Provider:apply_shaping_op(req)
 end
 
 function Provider:speedtest_op(req)
-	return speedtest_mod.run_op(req or {}, { run_cmd = self.speedtest_run_cmd })
+	return speedtest_mod.run_op(translate_speedtest_req(req or {}, self._last_name_ctx), { run_cmd = self.speedtest_run_cmd })
 end
 
 function Provider:terminate(reason)

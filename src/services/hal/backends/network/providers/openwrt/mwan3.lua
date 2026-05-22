@@ -110,7 +110,7 @@ function M.build_changes(intent, name_ctx)
 	return changes, known, { enabled = true, policy = policy_name, members = member_sections }
 end
 
-function M.persist_weights_op(mgr, req)
+function M.persist_weights_op(mgr, req, name_ctx)
 	local members = req and req.members or {}
 	local live = { wan = { enabled = true, members = {} } }
 	for i = 1, #members do
@@ -118,7 +118,7 @@ function M.persist_weights_op(mgr, req)
 		local id = m.id or m.link_id or m.interface or ('member' .. tostring(i))
 		live.wan.members[id] = { interface = m.interface or m.iface or m.link_id, metric = m.metric or 1, weight = m.weight or 1 }
 	end
-	local changes = M.build_changes(live)
+	local changes = M.build_changes(live, name_ctx)
 	return mgr:submit_op({ config = 'mwan3', changes = changes, restart_cmds = {} })
 end
 
