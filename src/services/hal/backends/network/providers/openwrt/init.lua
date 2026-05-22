@@ -190,6 +190,8 @@ end
 
 local function ensure_pkg_file(confdir, pkg)
 	if type(confdir) ~= 'string' or confdir == '' then return true, nil end
+	local ok = os.execute("mkdir -p '" .. confdir:gsub("'", "'\\''") .. "'")
+	if ok ~= true and ok ~= 0 then return nil, 'failed to create UCI confdir ' .. confdir end
 	local path = confdir .. '/' .. pkg
 	local f = io.open(path, 'rb')
 	if f then f:close(); return true, nil end
@@ -1168,7 +1170,7 @@ function Provider:_manager()
 		end
 	end
 	local mgr, err = uci_manager.new({
-		confdir = self.config.confdir or self.config.uci_confdir,
+		confdir = self.config.confdir or self.config.uci_confdir or '/etc/config',
 		savedir = self.config.savedir or self.config.uci_savedir,
 		allow_fake = self.config.allow_fake_uci == true,
 		debounce_s = self.config.debounce_s or 0.02,
@@ -1189,8 +1191,8 @@ function Provider:_ensure_started()
 		local ok, serr = mgr:start(scope)
 		if ok ~= true then return nil, serr end
 	end
-	local confdir = self.config.confdir or self.config.uci_confdir
-	if confdir then
+	local confdir = self.config.confdir or self.config.uci_confdir or '/etc/config'
+	if mgr._fake ~= true then
 		for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
 			local ok, eerr = ensure_pkg_file(confdir, pkg)
 			if ok ~= true then return nil, eerr end
@@ -1384,11 +1386,16 @@ local function command_capture(argv)
 	return nil, out or '', detail
 end
 
-local function ubus_call(object, method, payload)
+local function ubus_call(config, object, method, payload)
 	payload = payload or {}
 	local encoded = cjson.encode(payload)
 	if type(encoded) ~= 'string' then return nil, 'ubus payload encode failed' end
-	local ok, out, err = command_capture({ 'ubus', 'call', tostring(object), tostring(method), encoded })
+
+	local timeout_s = tonumber(config and config.ubus_timeout_s) or 2
+	if timeout_s < 1 then timeout_s = 1 end
+	local argv = { 'ubus', '-t', tostring(timeout_s), 'call', tostring(object), tostring(method), encoded }
+
+	local ok, out, err = command_capture(argv)
 	if not ok then return nil, err end
 	local decoded, derr = cjson.decode(out or '')
 	if type(decoded) ~= 'table' then return nil, derr or 'ubus JSON decode failed' end
@@ -1536,7 +1543,7 @@ local function augment_with_live_snapshot(config, observed, req, subject, trigge
 	local devices, device_seen = {}, {}
 	for i = 1, #ifaces do
 		local ifid = ifaces[i]
-		local st, err = ubus_call('network.interface.' .. tostring(ifid), 'status', {})
+		local st, err = ubus_call(self.config, 'network.interface.' .. tostring(ifid), 'status', {})
 		if st then
 			local norm = normalise_interface_status(ifid, st)
 			live.interfaces[ifid] = norm
@@ -1554,14 +1561,14 @@ local function augment_with_live_snapshot(config, observed, req, subject, trigge
 	end
 	for i = 1, #devices do
 		local dev = devices[i]
-		local st, err = ubus_call('network.device', 'status', { name = dev })
+		local st, err = ubus_call(self.config, 'network.device', 'status', { name = dev })
 		if st then
 			live.devices[dev] = normalise_device_status(dev, st)
 		else
 			append_error(live.errors, 'network.device status ' .. tostring(dev) .. ': ' .. tostring(err))
 		end
 	end
-	local mwan, merr = ubus_call('mwan3', 'status', {})
+	local mwan, merr = ubus_call(self.config, 'mwan3', 'status', {})
 	if mwan then
 		observed.multiwan = normalise_mwan3_status(mwan)
 	else
@@ -1578,7 +1585,7 @@ function build_observed_snapshot(self, req, subject, trigger)
 	local packages, err = read_uci_packages(self.config)
 	if not packages then return nil, err end
 	local observed = snapshot_from_packages(packages)
-	if req.live ~= false and self.config.enable_live_snapshot ~= false then
+	if req.live == true and self.config.enable_live_snapshot ~= false then
 		augment_with_live_snapshot(self.config, observed, req, subject, trigger)
 	end
 	return observed, packages
@@ -1589,7 +1596,7 @@ function read_uci_packages(config)
 	if not ok or not uci_or_err or type(uci_or_err.cursor) ~= 'function' then
 		return nil, 'uci module unavailable'
 	end
-	local c = uci_or_err.cursor(config.confdir or config.uci_confdir, config.savedir or config.uci_savedir)
+	local c = uci_or_err.cursor(config.confdir or config.uci_confdir or '/etc/config', config.savedir or config.uci_savedir)
 	local out = {}
 	for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
 		if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end

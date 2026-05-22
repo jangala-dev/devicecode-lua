@@ -51,4 +51,43 @@ function tests.test_name_snapshot_is_stable()
 	eq(a.names.bridge_device.jan, b.names.bridge_device.jan)
 end
 
+
+function tests.test_mwan3_section_names_share_one_namespace()
+	local ctx = ok(names.allocate({
+		segments = {}, interfaces = {}, firewall = { zones = {} },
+		wan = {
+			members = {
+				wan = { interface = 'wan' },
+				balanced = { interface = 'balanced' },
+			},
+		},
+	}))
+	local lim = ctx:limits()
+	local iface_wan = ctx:mwan_iface('wan')
+	local member_wan = ctx:mwan_member('wan')
+	local iface_balanced = ctx:mwan_iface('balanced')
+	local member_balanced = ctx:mwan_member('balanced')
+	local policy_balanced = ctx:mwan_policy('balanced')
+	local rule_balanced = ctx:mwan_rule('balanced')
+	local seen = {}
+	for _, n in ipairs({ iface_wan, member_wan, iface_balanced, member_balanced, policy_balanced, rule_balanced }) do
+		ok(#n <= lim.mwan_name, 'mwan3 name length')
+		if seen[n] then fail('duplicate mwan3 UCI section name: ' .. tostring(n)) end
+		seen[n] = true
+	end
+end
+
+function tests.test_baseline_names_are_reserved()
+	local ctx = ok(names.allocate({
+		segments = {
+			loopback = { kind = 'lan', firewall = { zone = 'defaults' } },
+			globals = { kind = 'lan' },
+		},
+		interfaces = {}, firewall = { zones = { defaults = {} } }, wan = { members = {} },
+	}))
+	eq(ctx:iface('loopback') == 'loopback', false, 'segment id must not collide with network.loopback')
+	eq(ctx:iface('globals') == 'globals', false, 'segment id must not collide with network.globals')
+	eq(ctx:zone('defaults') == 'defaults', false, 'zone name must not collide with firewall defaults')
+end
+
 return tests

@@ -140,72 +140,121 @@ local function memo(self, class, key, max_len, fallback)
 	return name
 end
 
+local function reserve(self, class, name, reason)
+	self._used[class] = self._used[class] or {}
+	if self._used[class][name] and self._used[class][name] ~= 'reserved:' .. tostring(reason) then
+		error('OpenWrt reserved-name collision for ' .. tostring(class) .. ':' .. tostring(name), 2)
+	end
+	self._used[class][name] = 'reserved:' .. tostring(reason)
+end
+
+local function remember_if_available(self, class, key, name)
+	key = tostring(key)
+	local material = class .. ':' .. key
+	self._used[class] = self._used[class] or {}
+	local prior = self._used[class][name]
+	if prior ~= nil and prior ~= material then return nil end
+	self._used[class][name] = material
+	return remember(self, class, key, name)
+end
+
+local function safe_or_memo(self, class, key, max_len, fallback)
+	local safe = safe_plain_name(key, max_len)
+	if safe then
+		local name = remember_if_available(self, class, key, safe)
+		if name then return name end
+	end
+	return memo(self, class, tostring(key), max_len, fallback)
+end
+
+local function remember_prefixed_if_available(self, class, key, prefix, safe_stem)
+	if not safe_stem then return nil end
+	local name = prefix .. safe_stem
+	return remember_if_available(self, class, key, name)
+end
+
+local function memo_prefixed(self, class, key, max_len, prefix, fallback)
+	key = tostring(key)
+	self._cache[class] = self._cache[class] or {}
+	if self._cache[class][key] then return self._cache[class][key] end
+	self._used[class] = self._used[class] or {}
+	local stem_len = max_len - #prefix
+	if stem_len < 1 then error('prefix too long for OpenWrt name class ' .. tostring(class), 2) end
+	local stem_prefix_len = math.min(2, stem_len)
+	local stem_prefix = readable_prefix(key, fallback or prefix, stem_prefix_len)
+	for attempt = 0, 64 do
+		local material = class .. ':' .. key .. ':' .. tostring(attempt)
+		local hash_len = math.max(1, stem_len - #stem_prefix)
+		local name = prefix .. stem_prefix .. hash_hex(material, hash_len)
+		if #name > max_len then name = name:sub(1, max_len) end
+		local prior = self._used[class][name]
+		if prior == nil or prior == material then
+			self._used[class][name] = material
+			self._cache[class][key] = name
+			self._reverse[class] = self._reverse[class] or {}
+			self._reverse[class][name] = key
+			return name
+		end
+	end
+	error('OpenWrt name collision for ' .. tostring(class) .. ':' .. tostring(key), 2)
+end
+
+local function memo_mwan(self, role, id)
+	-- All MWAN3 UCI section names share one package namespace.  Allocate
+	-- interface/member/policy/rule names from the same used-name set and
+	-- always role-prefix them, even when the semantic id itself is short.
+	local prefix = ({ iface = 'mi', member = 'mm', policy = 'mp', rule = 'mr' })[role]
+	local name = memo_prefixed(self, 'mwan', role .. ':' .. tostring(id), MAX.mwan_name, prefix, role)
+	-- Preserve role-specific diagnostic maps in snapshots while the allocator
+	-- itself enforces one shared MWAN3 package namespace.
+	local cache_class = 'mwan_' .. role
+	self._cache[cache_class] = self._cache[cache_class] or {}
+	self._cache[cache_class][tostring(id)] = name
+	self._reverse[cache_class] = self._reverse[cache_class] or {}
+	self._reverse[cache_class][name] = tostring(id)
+	return name
+end
+
 function Ctx:iface(id)
-	local safe = safe_plain_name(id, MAX.logical_interface)
-	if safe then return remember(self, 'logical_interface', id, safe) end
-	return memo(self, 'logical_interface', tostring(id), MAX.logical_interface, 'if')
+	return safe_or_memo(self, 'logical_interface', tostring(id), MAX.logical_interface, 'if')
 end
 
 function Ctx:bridge(id)
 	local safe = safe_plain_name(id, MAX.bridge_device - 3)
-	local name
-	if safe then name = 'br-' .. safe; return remember(self, 'bridge_device', id, name) else
-	local stem = memo(self, 'bridge_stem', tostring(id), MAX.bridge_device - 2, 'br')
-	name = 'br' .. stem
-	end
-	if #name > MAX.bridge_device then error('bridge name too long after allocation: ' .. name, 2) end
-	self._reverse.bridge_device = self._reverse.bridge_device or {}
-	self._reverse.bridge_device[name] = tostring(id)
-	return name
+	local name = remember_prefixed_if_available(self, 'bridge_device', id, 'br-', safe)
+	if name then return name end
+	return memo_prefixed(self, 'bridge_device', tostring(id), MAX.bridge_device, 'br', 'br')
 end
 
 function Ctx:vlan(id)
 	local safe = safe_plain_name(id, MAX.linux_device - 3)
-	local name
-	if safe then name = 'vl-' .. safe; return remember(self, 'linux_device', id, name) else
-	local stem = memo(self, 'vlan_stem', tostring(id), MAX.linux_device - 2, 'vl')
-	name = 'v' .. stem
-	end
-	if #name > MAX.linux_device then error('VLAN device name too long after allocation: ' .. name, 2) end
-	self._reverse.linux_device = self._reverse.linux_device or {}
-	self._reverse.linux_device[name] = tostring(id)
-	return name
+	local name = remember_prefixed_if_available(self, 'linux_device', id, 'vl-', safe)
+	if name then return name end
+	return memo_prefixed(self, 'linux_device', tostring(id), MAX.linux_device, 'vl', 'vl')
 end
 
 function Ctx:zone(id)
-	local safe = safe_plain_name(id, MAX.firewall_zone)
-	if safe then return remember(self, 'firewall_zone', id, safe) end
-	return memo(self, 'firewall_zone', tostring(id), MAX.firewall_zone, 'zn')
+	return safe_or_memo(self, 'firewall_zone', tostring(id), MAX.firewall_zone, 'zn')
 end
 
 function Ctx:mwan_iface(id)
-	local safe = safe_plain_name(id, MAX.mwan_name)
-	if safe then return remember(self, 'mwan_iface', id, safe) end
-	return memo(self, 'mwan_iface', tostring(id), MAX.mwan_name, 'mw')
+	return memo_mwan(self, 'iface', id)
 end
 
 function Ctx:mwan_member(id)
-	local safe = safe_plain_name(id, MAX.mwan_name)
-	if safe then return remember(self, 'mwan_member', id, safe) end
-	return memo(self, 'mwan_member', tostring(id), MAX.mwan_name, 'mm')
+	return memo_mwan(self, 'member', id)
 end
 
 function Ctx:mwan_policy(id)
-	local safe = safe_plain_name(id or 'balanced', MAX.mwan_name)
-	if safe then return remember(self, 'mwan_policy', id or 'balanced', safe) end
-	return memo(self, 'mwan_policy', tostring(id or 'balanced'), MAX.mwan_name, 'po')
+	return memo_mwan(self, 'policy', id or 'balanced')
 end
 
 function Ctx:mwan_rule(id)
-	local safe = safe_plain_name(id, MAX.mwan_name)
-	if safe then return remember(self, 'mwan_rule', id, safe) end
-	return memo(self, 'mwan_rule', tostring(id), MAX.mwan_name, 'ru')
+	return memo_mwan(self, 'rule', id)
 end
 
 function Ctx:dns_instance(id)
-	local safe = safe_plain_name(id, MAX.dnsmasq_instance)
-	if safe then return remember(self, 'dnsmasq_instance', id, safe) end
-	return memo(self, 'dnsmasq_instance', tostring(id), MAX.dnsmasq_instance, 'dn')
+	return safe_or_memo(self, 'dnsmasq_instance', tostring(id), MAX.dnsmasq_instance, 'dn')
 end
 
 function Ctx:section(kind, id)
@@ -235,6 +284,12 @@ end
 
 function M.allocate(intent, _provider_config)
 	local ctx = setmetatable({ _cache = {}, _used = {}, _reverse = {} }, Ctx)
+	-- Reserve baseline UCI names produced by the provider.  Product ids that
+	-- would otherwise map directly to these names must be generated instead.
+	reserve(ctx, 'logical_interface', 'loopback', 'network.loopback')
+	reserve(ctx, 'logical_interface', 'globals', 'network.globals')
+	reserve(ctx, 'firewall_zone', 'defaults', 'firewall.defaults')
+	reserve(ctx, 'mwan', 'globals', 'mwan3.globals')
 	-- Pre-allocate common names to catch deterministic collisions before apply.
 	for _, seg_id in ipairs(sorted_keys((intent or {}).segments)) do
 		ctx:iface(seg_id); ctx:bridge(seg_id); ctx:vlan(seg_id)

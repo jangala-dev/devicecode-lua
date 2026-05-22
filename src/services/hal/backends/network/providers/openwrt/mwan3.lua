@@ -38,6 +38,12 @@ function M.build_changes(intent, name_ctx)
 	if wan.enabled == false or next(members) == nil then
 		return changes, known, { enabled = false }
 	end
+	if not name_ctx then
+		local ok_names, names_mod = pcall(require, 'services.hal.backends.network.providers.openwrt.names')
+		if ok_names and names_mod and type(names_mod.allocate) == 'function' then
+			name_ctx = names_mod.allocate(intent)
+		end
+	end
 	local function mw_iface(id)
 		if name_ctx and type(name_ctx.mwan_iface) == 'function' then return name_ctx:mwan_iface(id) end
 		return sid(id)

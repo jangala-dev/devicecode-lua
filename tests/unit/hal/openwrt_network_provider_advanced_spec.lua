@@ -260,4 +260,33 @@ function tests.test_bigbox_clean_config_plans_dns_rules_routes_and_segment_shapi
 	end)
 end
 
+
+function tests.test_mwan3_builder_uses_distinct_section_names_for_same_interface_and_member_ids()
+	local names = require 'services.hal.backends.network.providers.openwrt.names'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local intent_doc = {
+		wan = {
+			enabled = true,
+			health = { track_ip = { '1.1.1.1' } },
+			members = {
+				wan = { interface = 'wan', metric = 1, weight = 1 },
+				mdm0 = { interface = 'mdm0', metric = 1, weight = 1 },
+				mdm1 = { interface = 'mdm1', metric = 1, weight = 1 },
+			},
+		},
+	}
+	local ctx = ok(names.allocate(intent_doc))
+	local changes = ok(mwan3.build_changes(intent_doc, ctx))
+	local sections = {}
+	for _, ch in ipairs(changes) do
+		if ch.op == 'set' and ch.config == 'mwan3' and ch.value == nil then
+			if sections[ch.section] then fail('duplicate mwan3 section name generated: ' .. tostring(ch.section)) end
+			sections[ch.section] = ch.option
+		end
+	end
+	ok(sections[ctx:mwan_iface('wan')], 'wan interface section expected')
+	ok(sections[ctx:mwan_member('wan')], 'wan member section expected')
+	eq(ctx:mwan_iface('wan') == ctx:mwan_member('wan'), false, 'interface/member names must differ')
+end
+
 return tests

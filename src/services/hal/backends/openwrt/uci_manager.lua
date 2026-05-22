@@ -602,6 +602,8 @@ function M.new(opts)
 	if cursor == nil and opts.allow_fake == false then
 		return nil, cursor_note or 'uci unavailable'
 	end
+	local confdir = opts.confdir
+	if confdir == nil and opts.cursor == nil and cursor ~= nil then confdir = '/etc/config' end
 	return setmetatable({
 		_tx = tx,
 		_rx = rx,
@@ -610,7 +612,7 @@ function M.new(opts)
 		_cursor = cursor,
 		_cursor_note = cursor_note,
 		_fake = cursor == nil,
-		_confdir = opts.confdir,
+		_confdir = confdir,
 		_savedir = opts.savedir,
 		_debounce_s = tonumber(opts.debounce_s) or 0.1,
 		_run_cmd = opts.run_cmd or default_run_cmd,
