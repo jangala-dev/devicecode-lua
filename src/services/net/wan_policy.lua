@@ -1,5 +1,5 @@
 -- services/net/wan_policy.lua
--- Pure WAN runtime policy for speedtests and live weights.
+-- Pure WAN runtime policy for event-led speedtests and live weights.
 
 local tablex = require 'shared.table'
 
@@ -18,6 +18,18 @@ local function flag_enabled(v)
 	if v == true then return true end
 	if type(v) == 'table' then return v.enabled ~= false end
 	return false
+end
+
+local function runtime_opts(snapshot)
+	local wan = snapshot and snapshot.wan or {}
+	local lb = type(wan.load_balancing) == 'table' and wan.load_balancing or {}
+	local rt = type(wan.runtime) == 'table' and wan.runtime or {}
+	local sp = type(lb.speedtests) == 'table' and lb.speedtests
+		or type(lb.speedtest) == 'table' and lb.speedtest
+		or type(rt.speedtests) == 'table' and rt.speedtests
+		or type(rt.speedtest) == 'table' and rt.speedtest
+		or {}
+	return sp
 end
 
 function M.speedtest_enabled(snapshot)
@@ -47,18 +59,35 @@ local function member_interface(member, uplink_id)
 		or uplink_id
 end
 
+local function gsm_source(member)
+	local src = member and member.source or nil
+	if type(src) ~= 'table' then return nil end
+	if src.kind == 'gsm-uplink' then return src.id or src.role end
+	if src.kind == 'modem' then return src.modem_id or src.id or src.role end
+	return nil
+end
+
+function M.gsm_uplink_state(snapshot, member)
+	local id = gsm_source(member)
+	if not id then return nil end
+	return snapshot and snapshot.sources and snapshot.sources.gsm_uplinks and snapshot.sources.gsm_uplinks[id] or nil
+end
+
 function M.build_speedtest_request(snapshot, uplink_id, member)
 	member = member or {}
 	local iface_id = member_interface(member, uplink_id)
 	local iface = snapshot.interfaces and snapshot.interfaces[iface_id] or nil
 	local endpoint = type(iface) == 'table' and type(iface.endpoint) == 'table' and iface.endpoint or {}
+	local gsm = M.gsm_uplink_state(snapshot, member)
+	local gsm_linux = type(gsm) == 'table' and type(gsm.linux) == 'table' and gsm.linux or {}
+	local metric = tonumber(member.metric or member.priority) or 1
 	return {
 		interface = iface_id,
-		device = member.device or member.linux_interface or member.ifname or endpoint.ifname or endpoint.device or endpoint.name or (iface and iface.device),
+		device = member.device or member.linux_interface or member.ifname or endpoint.ifname or endpoint.device or endpoint.name or (iface and iface.device) or gsm_linux.ifname,
 		url = member.speedtest_url,
 		max_duration_s = member.speedtest_duration_s,
 		uplink_id = tostring(uplink_id),
-		metric = member.metric or member.priority or 1,
+		metric = metric,
 	}
 end
 
@@ -79,46 +108,113 @@ function M.collect_uplinks(snapshot)
 	return out
 end
 
-function M.all_speedtests_done(snapshot, generation)
-	local uplinks = M.collect_uplinks(snapshot)
-	if #uplinks == 0 then return false end
-	local tests = snapshot.wan_runtime and snapshot.wan_runtime.speedtests or {}
-	for i = 1, #uplinks do
-		local id = uplinks[i].uplink_id
-		local rec = tests[id]
-		if not rec or rec.generation ~= generation or rec.state == 'running' then return false end
+local function status_by_interface(snapshot, iface)
+	local mw = snapshot and snapshot.observed and snapshot.observed.snapshot and snapshot.observed.snapshot.multiwan or nil
+	if type(mw) ~= 'table' then mw = snapshot and snapshot.observed and snapshot.observed.multiwan or nil end
+	if type(mw) ~= 'table' then return nil end
+	local by_sem = mw.interfaces_by_semantic
+	if type(by_sem) == 'table' and by_sem[iface] then return by_sem[iface] end
+	local ifaces = mw.interfaces
+	if type(ifaces) == 'table' then return ifaces[iface] end
+	return nil
+end
+
+local function status_online(st)
+	if type(st) ~= 'table' then return false end
+	if st.usable == true or st.online == true or st.up == true then return true end
+	local state = tostring(st.state or st.mwan3_status or ''):lower()
+	return state == 'online' or state == 'up' or state == 'connected'
+end
+
+function M.uplink_observed_status(snapshot, uplink)
+	return status_by_interface(snapshot, uplink and uplink.request and uplink.request.interface)
+end
+
+function M.uplink_online(snapshot, uplink)
+	return status_online(M.uplink_observed_status(snapshot, uplink))
+end
+
+local function now_from_opts(opts)
+	return opts and opts.now or nil
+end
+
+function M.speedtest_due(snapshot, uplink, opts)
+	opts = opts or {}
+	if not M.speedtest_enabled(snapshot) then return false, 'speedtests_disabled' end
+	if not M.uplink_online(snapshot, uplink) then return false, 'not_online' end
+	local generation = opts.generation or snapshot.generation
+	local id = uplink.uplink_id
+	local runtime = snapshot.wan_runtime or {}
+	local rec = runtime.speedtests and runtime.speedtests[id]
+	if rec and rec.state == 'running' and rec.generation == generation then return false, 'running' end
+	local now = now_from_opts(opts)
+	if rec and rec.retry_after and now and now < rec.retry_after then return false, 'retry_later' end
+	local cfg = runtime_opts(snapshot)
+	local ttl = tonumber(cfg.interval_s or cfg.refresh_s or cfg.ttl_s or cfg.max_age_s)
+	if rec and rec.state == 'done' and rec.ok == true then
+		if not ttl or ttl <= 0 then return false, 'fresh' end
+		local completed = tonumber(rec.completed_at) or 0
+		if now and completed > 0 and now - completed < ttl then return false, 'fresh' end
 	end
+	return true, 'due'
+end
+
+local function member_fingerprint(m)
+	if type(m) ~= 'table' then return '' end
+	return table.concat({ tostring(m.id), tostring(m.interface), tostring(m.metric), tostring(m.weight) }, ':')
+end
+
+function M.weights_equal(a, b)
+	a, b = a or {}, b or {}
+	if #a ~= #b then return false end
+	local aa, bb = {}, {}
+	for i = 1, #a do aa[i] = member_fingerprint(a[i]) end
+	for i = 1, #b do bb[i] = member_fingerprint(b[i]) end
+	table.sort(aa); table.sort(bb)
+	for i = 1, #aa do if aa[i] ~= bb[i] then return false end end
 	return true
 end
 
 function M.compute_weights(snapshot, generation)
 	local runtime = snapshot.wan_runtime or {}
 	local tests = runtime.speedtests or {}
-	local members, total = {}, 0
-	local current = {}
-	for _, uplink in ipairs(M.collect_uplinks(snapshot)) do current[uplink.uplink_id] = true end
+	local measured, total = {}, 0
+	local uplinks = M.collect_uplinks(snapshot)
+	local cfg = runtime_opts(snapshot)
+	local probe_weight = math.max(1, math.floor(tonumber(cfg.probe_weight) or 1))
+	local weight_scale = math.max(1, math.floor(tonumber(cfg.weight_scale) or 100))
 
-	for uplink_id, rec in pairs(tests) do
-		if current[uplink_id] and rec.generation == generation and rec.state == 'done' and rec.ok == true then
-			local mbps = tonumber(rec.peak_mbps) or 0
-			if mbps > 0 then
-				members[#members + 1] = { uplink_id = uplink_id, interface = rec.interface, metric = rec.metric or 1, mbps = mbps }
-				total = total + mbps
-			end
+	for _, uplink in ipairs(uplinks) do
+		local id = uplink.uplink_id
+		local rec = tests[id]
+		local mbps = nil
+		if rec and rec.generation == generation and rec.state == 'done' then
+			if rec.ok == true then mbps = tonumber(rec.peak_mbps) or tonumber(rec.last_success_mbps)
+			else mbps = tonumber(rec.last_success_mbps) end
 		end
+		if mbps and mbps > 0 then total = total + mbps end
+		measured[id] = mbps
 	end
-	if total <= 0 or #members == 0 then return nil, 'no_successful_speedtests' end
-	table.sort(members, function(a, b) return tostring(a.uplink_id) < tostring(b.uplink_id) end)
+	if total <= 0 then return nil, 'no_successful_speedtests' end
+
 	local out = {}
-	for i = 1, #members do
-		local m = members[i]
+	for _, uplink in ipairs(uplinks) do
+		local id = uplink.uplink_id
+		local mbps = measured[id]
+		local metric = math.max(1, math.floor(tonumber(uplink.request.metric) or 1))
+		local weight, probe = probe_weight, true
+		if mbps and mbps > 0 then
+			weight = math.max(1, math.floor((mbps / total) * weight_scale + 0.5))
+			probe = false
+		end
 		out[#out + 1] = {
-			id = m.uplink_id,
-			link_id = m.uplink_id,
-			interface = m.interface,
-			metric = math.max(1, math.floor(tonumber(m.metric or 1) or 1)),
-			weight = math.max(1, math.floor((m.mbps / total) * 100 + 0.5)),
-			measured_mbps = m.mbps,
+			id = id,
+			link_id = id,
+			interface = uplink.request.interface,
+			metric = metric,
+			weight = weight,
+			measured_mbps = mbps,
+			probe = probe,
 		}
 	end
 	return out, nil

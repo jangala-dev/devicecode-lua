@@ -467,8 +467,8 @@
             "dynamic_weight": true,
             "family": "ipv4",
             "source": {
-              "kind": "modem",
-              "modem_id": "primary"
+              "kind": "gsm-uplink",
+              "id": "primary"
             }
           },
           "mdm1": {
@@ -478,8 +478,8 @@
             "dynamic_weight": true,
             "family": "ipv4",
             "source": {
-              "kind": "modem",
-              "modem_id": "secondary"
+              "kind": "gsm-uplink",
+              "id": "secondary"
             }
           }
         },

@@ -24,6 +24,7 @@ local observer_manager = require 'services.net.observer_manager'
 local wan_manager = require 'services.net.wan_manager'
 local drift = require 'services.net.drift'
 local backpressure = require 'services.net.backpressure'
+local gsm_uplink_watch = require 'services.net.gsm_uplink_watch'
 
 local perform = fibers.perform
 
@@ -157,6 +158,7 @@ local function copy_intent_to_model(s, intent)
 	s.routing = intent.routing or {}
 	s.wan = intent.wan or {}
 	s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
+	s.sources = s.sources or { gsm_uplinks = {} }
 	s.shaping = intent.shaping or {}
 	s.vpn = intent.vpn or {}
 	s.diagnostics = intent.diagnostics or {}
@@ -412,7 +414,7 @@ local function handle_apply_done(state, ev)
 	local ok_pub, pub_err = publish_snapshot(state)
 	if ok_pub ~= true then return nil, pub_err end
 	if apply_ok then
-		local ok, err = wan_manager.start_speedtests(state)
+		local ok, err = wan_manager.reconcile_speedtests(state, 'apply_done')
 		mark_domain_dirty(state, 'wan_runtime')
 		publish_snapshot(state)
 		return ok, err
@@ -448,7 +450,46 @@ local function handle_observed_state(state, ev)
 	mark_domain_dirty(state, 'observed')
 	mark_domain_dirty(state, 'drift')
 	obs_event(state.svc, 'network_observed', { subject = observed_event.subject, source = observed_event.source, kind = observed_event.kind })
-	return publish_snapshot(state)
+	local ok, err = wan_manager.reconcile_speedtests(state, 'observed_state')
+	mark_domain_dirty(state, 'wan_runtime')
+	local pub_ok, pub_err = publish_snapshot(state)
+	if pub_ok ~= true then return nil, pub_err end
+	return ok, err
+end
+
+local function handle_gsm_uplink_changed(state, ev)
+	if ev.kind == 'gsm_uplink_replay_done' then return true, nil end
+	if ev.kind == 'gsm_uplink_unknown' then
+		obs_log(state.svc, 'debug', { what = 'gsm_uplink_unknown', event = ev.event })
+		return true, nil
+	end
+	local role = ev.role
+	if type(role) ~= 'string' or role == '' then return true, nil end
+	local payload = model_mod.deep_copy(ev.payload or {})
+	payload.schema = payload.schema or 'devicecode.gsm.uplink/1'
+	payload.id = payload.id or role
+	payload.role = payload.role or role
+	payload.updated_at = now()
+	state.model:update(function (s)
+		s.sources = s.sources or { gsm_uplinks = {} }
+		s.sources.gsm_uplinks = s.sources.gsm_uplinks or {}
+		s.sources.gsm_uplinks[role] = payload
+		s.stats.gsm_uplink_updates = (s.stats.gsm_uplink_updates or 0) + 1
+		return project_dependencies(state, s)
+	end)
+	mark_domain_dirty(state, 'sources')
+	mark_summary_dirty(state)
+	obs_event(state.svc, 'gsm_uplink_changed', {
+		role = role,
+		state = payload.state,
+		connected = payload.connected == true,
+		ifname = payload.linux and payload.linux.ifname or payload.interface,
+	})
+	local ok, err = wan_manager.reconcile_speedtests(state, 'gsm_uplink_changed')
+	mark_domain_dirty(state, 'wan_runtime')
+	local pub_ok, pub_err = publish_snapshot(state)
+	if pub_ok ~= true then return nil, pub_err end
+	return ok, err
 end
 
 local function ensure_observer_started(state, reason)
@@ -557,6 +598,11 @@ local function handle_event(state, ev)
 		return handle_apply_done(state, ev)
 	elseif ev.kind == 'observed_state' then
 		return handle_observed_state(state, ev)
+	elseif ev.kind == 'gsm_uplink_changed' or ev.kind == 'gsm_uplink_replay_done' or ev.kind == 'gsm_uplink_unknown' then
+		return handle_gsm_uplink_changed(state, ev)
+	elseif ev.kind == 'gsm_uplink_watch_closed' then
+		state.gsm_uplink_watch = nil
+		return true, nil
 	elseif ev.kind == 'net_speedtest_done' then
 		return handle_speedtest_done(state, ev)
 	elseif ev.kind == 'net_live_weights_done' then
@@ -601,6 +647,7 @@ function M.run(scope, params)
 	local published = publisher.new_state()
 	local dirty = publisher.mark_all(publisher.new_dirty_state())
 	local cfg_watch
+	local gsm_watch
 
 	if conn then
 		local werr
@@ -611,6 +658,15 @@ function M.run(scope, params)
 			closed_kind = 'config_closed',
 		})
 		if not cfg_watch then error(werr or 'net config watch failed', 2) end
+
+		if params.gsm_uplink_watch ~= false then
+			local gerr
+			gsm_watch, gerr = gsm_uplink_watch.open(conn, {
+				queue_len = params.gsm_uplink_queue_len or ((backpressure.policy.gsm_uplinks and backpressure.policy.gsm_uplinks.queue_len) or 8),
+				full = params.gsm_uplink_full or ((backpressure.policy.gsm_uplinks and backpressure.policy.gsm_uplinks.full) or 'reject_newest'),
+			})
+			if not gsm_watch then error(gerr or 'net gsm uplink watch failed', 2) end
+		end
 	end
 
 	local cap_deps = assert(cap_deps_mod.open(conn, {
@@ -634,6 +690,7 @@ function M.run(scope, params)
 		published = published,
 		dirty = dirty,
 		config_watch = cfg_watch,
+		gsm_uplink_watch = gsm_watch,
 		observed_sub = nil,
 		observer = nil,
 		observe = params.observe ~= false,
@@ -670,6 +727,7 @@ function M.run(scope, params)
 		cancel_active_generation(state, reason)
 		stop_observer(state, reason)
 		if cfg_watch then cfg_watch:close(); cfg_watch = nil end
+		if gsm_watch then gsm_watch:close(); gsm_watch = nil end
 		cap_deps:terminate(reason)
 		done_tx:close(reason)
 		publisher.cleanup_now(conn, published)

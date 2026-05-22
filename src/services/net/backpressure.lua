@@ -19,6 +19,11 @@ M.policy = {
 		full = 'drop_oldest', -- latest observed state wins; terminal apply completions never use this queue.
 	},
 
+	gsm_uplinks = {
+		queue_len = 8,
+		full = 'reject_newest',
+	},
+
 	requests = {
 		queue_len = 16,
 		full = 'reject_newest',

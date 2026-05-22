@@ -16,7 +16,8 @@
 --   obs/v1/gsm/event/<key>                  per-modem observability events
 --   state/gsm/modem/<name>/connected        retained: true when APN connected, false otherwise
 --   state/gsm/modem/<name>/wwan-iface       retained: kernel wwan interface name, false when unknown
---   state/gsm/modem/<name>/uplink           retained: canonical cellular uplink record for NET
+--   state/gsm/uplink/<name>                 retained: canonical cellular uplink record for NET
+--   state/gsm/modem/<name>/uplink           retained: legacy compatibility cellular uplink record
 
 local fibers = require "fibers"
 local op = require "fibers.op"
@@ -74,6 +75,10 @@ local function t_state_gsm_modem(name, field)
 end
 
 local function t_state_gsm_uplink(name)
+	return { 'state', 'gsm', 'uplink', name }
+end
+
+local function t_legacy_state_gsm_uplink(name)
 	return { 'state', 'gsm', 'modem', name, 'uplink' }
 end
 
@@ -414,6 +419,7 @@ function GsmModem.new(cap, svc)
 	self.wwan_iface = nil
 	self.last_access = nil
 	self.last_signal = nil
+	self.uplink_generation = 0
 	self.scope = nil
 	self.config_pulse = pulse.new()
 	self.svc = svc
@@ -475,16 +481,33 @@ end
 function GsmModem:_publish_uplink_state(connected, iface)
 	if connected ~= nil then self.connected = connected == true end
 	if type(iface) == 'string' and iface ~= '' then self.wwan_iface = iface end
+	self.uplink_generation = (self.uplink_generation or 0) + 1
+
 	local access_techs = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT)
 	local access_tech = derive_access_tech(access_techs)
 	local operator = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT)
 	local signal = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT)
+	local logical = (self.cfg and (self.cfg.openwrt_interface or self.cfg.network_interface)) or self.name
+	local ifname = self.wwan_iface
 	local payload = {
-		modem = self.name,
+		schema = 'devicecode.gsm.uplink/1',
+		id = self.name,
+		role = self.name,
+		state = self.connected and 'connected' or 'disconnected',
 		connected = self.connected == true,
-		interface = self.wwan_iface,
-		openwrt_interface = (self.cfg and (self.cfg.openwrt_interface or self.cfg.network_interface)) or self.name,
-		device = self.wwan_iface,
+		available = self.connected == true and type(ifname) == 'string' and ifname ~= '',
+		generation = self.uplink_generation,
+		linux = { ifname = ifname },
+		network = { logical_interface = logical },
+		modem = {
+			id = tostring(self.id),
+			role = self.name,
+			device = self.device,
+		},
+		-- Compatibility fields for existing consumers.
+		interface = ifname,
+		openwrt_interface = logical,
+		device = ifname,
 		access = {
 			tech = access_tech ~= '' and access_tech or nil,
 			family = access_tech ~= '' and get_access_family(access_tech) or nil,
@@ -494,6 +517,7 @@ function GsmModem:_publish_uplink_state(connected, iface)
 		at = self.svc and self.svc.wall and self.svc:wall() or nil,
 	}
 	self.conn:retain(t_state_gsm_uplink(self.name), payload)
+	self.conn:retain(t_legacy_state_gsm_uplink(self.name), payload)
 end
 
 function GsmModem:_emit_metrics_once()

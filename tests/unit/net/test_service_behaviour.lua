@@ -589,12 +589,14 @@ end
 
 function tests.test_wan_members_trigger_speedtests_and_live_weights()
 	fibers.run(function (scope)
+		local mailbox = require 'fibers.mailbox'
 		local b = busmod.new()
 		local conn = b:connect()
 		local reader = b:connect()
 		local calls = {}
 		local speedtests = {}
 		local weights = {}
+		local obs_tx, obs_rx = mailbox.new(8, { full = 'drop_oldest' })
 		local hal = success_hal(calls)
 		hal.speedtest_op = function (_, req)
 			speedtests[#speedtests + 1] = req
@@ -605,6 +607,8 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 			weights[#weights + 1] = req
 			return op.always({ ok = true, changed = true, applied = true })
 		end
+		hal.open_observed_subscription = function () return obs_rx end
+		hal.start_observation_op = function () return op.always({ ok = true, backend = 'test', watching = true }) end
 
 		local c = cfg()
 		c.wan = {
@@ -620,8 +624,27 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 		c.segments.wan = { kind = 'wan', firewall = { zone = 'wan' } }
 
 		retain_network_config_status(conn, 'available')
+		retain_network_state_status_payload(conn, {
+			schema = 'devicecode.cap.status/1',
+			state = 'running',
+			available = true,
+		})
 
 		local child = start_service(scope, conn, { conn = conn, config = c, rev = 20, hal = hal })
+		obs_tx:send({ payload = {
+			schema = 'devicecode.net.observation/1',
+			kind = 'snapshot_done',
+			source = 'test',
+			subject = 'network',
+			observed = {
+				multiwan = {
+					interfaces_by_semantic = {
+						wan_a = { interface = 'wan_a', state = 'online', online = true, usable = true },
+						wan_b = { interface = 'wan_b', state = 'online', online = true, usable = true },
+					},
+				},
+			},
+		} })
 
 		local view = reader:retained_view(topics.domain('wan_runtime'))
 		local runtime = probe.wait_versioned_until('net wan runtime weights',

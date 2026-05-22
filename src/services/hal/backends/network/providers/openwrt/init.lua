@@ -1489,10 +1489,11 @@ local function normalise_device_status(name, st)
 	}
 end
 
-local function normalise_mwan3_status(st)
+local function normalise_mwan3_status(st, name_ctx)
 	local out = {
 		available = type(st) == 'table',
 		interfaces = {},
+		interfaces_by_semantic = {},
 		policies = {},
 		connected = {},
 		raw = copy_plain(st or {}),
@@ -1514,17 +1515,21 @@ local function normalise_mwan3_status(st)
 			end
 			local state = rec.status
 			if rec.enabled == false then state = 'disabled' end
-			out.interfaces[ifid] = {
+			local online = state == 'online' or rec.up == true or rec.online == true
+			local item = {
 				interface = ifid,
+				semantic_interface = (name_ctx and type(name_ctx.semantic_for) == 'function' and name_ctx:semantic_for('mwan_iface', ifid)) or ifid,
 				state = state,
 				mwan3_status = rec.status,
 				enabled = rec.enabled,
 				running = rec.running,
 				tracking = rec.tracking,
 				up = rec.up,
+				usable = online,
 				age = tonumber(rec.age),
 				uptime = tonumber(rec.uptime),
-				online = tonumber(rec.online),
+				online = online,
+				online_count = tonumber(rec.online),
 				offline = tonumber(rec.offline),
 				score = tonumber(rec.score),
 				lost = tonumber(rec.lost),
@@ -1532,6 +1537,8 @@ local function normalise_mwan3_status(st)
 				probes = probes,
 				raw = copy_plain(rec),
 			}
+			out.interfaces[ifid] = item
+			if item.semantic_interface then out.interfaces_by_semantic[item.semantic_interface] = item end
 		end
 	end
 	out.policies = copy_plain(st.policies or {})
@@ -1573,7 +1580,7 @@ local function augment_with_live_snapshot(config, observed, req, subject, trigge
 	end
 	local mwan, merr = ubus_call(config, 'mwan3', 'status', {})
 	if mwan then
-		observed.multiwan = normalise_mwan3_status(mwan)
+		observed.multiwan = normalise_mwan3_status(mwan, config.name_ctx)
 	else
 		observed.multiwan = observed.multiwan or { available = false, interfaces = {}, policies = {}, connected = {} }
 		observed.multiwan.available = false
@@ -1589,7 +1596,10 @@ function build_observed_snapshot(self, req, subject, trigger)
 	if not packages then return nil, err end
 	local observed = snapshot_from_packages(packages)
 	if req.live == true and self.config.enable_live_snapshot ~= false then
+		local old_ctx = self.config.name_ctx
+		self.config.name_ctx = self._last_name_ctx
 		augment_with_live_snapshot(self.config, observed, req, subject, trigger)
+		self.config.name_ctx = old_ctx
 	end
 	return observed, packages
 end

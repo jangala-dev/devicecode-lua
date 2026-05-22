@@ -21,6 +21,7 @@ function M.segments_topic() return topics.segments() end
 function M.vlan_policy_topic() return topics.vlan_policy() end
 function M.interface_topic(id) return topics.interface(id) end
 function M.domain_topic(name) return topics.domain(name) end
+function M.sources_topic() return topics.sources() end
 
 function M.summary(snapshot)
 	snapshot = snapshot or {}
@@ -38,6 +39,7 @@ function M.summary(snapshot)
 			segments = count_map(snapshot.segments),
 			interfaces = count_map(snapshot.interfaces),
 			wan_members = count_map(snapshot.wan and snapshot.wan.members),
+			gsm_uplinks = count_map(snapshot.sources and snapshot.sources.gsm_uplinks),
 			vpn_tunnels = count_map(snapshot.vpn and snapshot.vpn.tunnels),
 			shaping_profiles = count_map(snapshot.shaping and snapshot.shaping.profiles),
 		},
