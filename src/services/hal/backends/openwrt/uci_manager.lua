@@ -74,6 +74,20 @@ local function array_copy(t)
 	return out
 end
 
+local function ensure_pkg_file(confdir, pkg)
+	if type(confdir) ~= 'string' or confdir == '' or type(pkg) ~= 'string' or pkg == '' then return true, nil end
+	local ok = os.execute("mkdir -p '" .. confdir:gsub("'", "'\\''") .. "'")
+	if ok ~= true and ok ~= 0 then return nil, 'failed to create UCI confdir ' .. confdir end
+	local path = confdir .. '/' .. pkg
+	local f = io.open(path, 'rb')
+	if f then f:close(); return true, nil end
+	local nf, err = io.open(path, 'wb')
+	if not nf then return nil, tostring(err) end
+	nf:write('')
+	nf:close()
+	return true, nil
+end
+
 local function is_uci_identifier(s)
 	return type(s) == 'string' and s ~= '' and s:match('^[A-Za-z0-9_]+$') ~= nil
 end
@@ -256,6 +270,7 @@ local function normalise_record(record)
 		config = record.config,
 		changes = copy_changes(record.changes),
 		reply_tx = record.reply_tx,
+		replace_package = record.replace_package == true,
 	}
 	for i, ch in ipairs(out.changes) do
 		local ok, err = validate_change(out, ch, i)
@@ -465,6 +480,11 @@ local function apply_with_cursor(cursor, record)
 	if not cursor then
 		return true, nil -- explicit fake/no-uci mode for tests and non-OpenWrt hosts.
 	end
+	if type(cursor.load) == 'function' then pcall(function () cursor:load(record.config) end) end
+	if record.replace_package == true then
+		local ok, err = delete_all_sections(cursor, record.config)
+		if ok ~= true then return nil, err end
+	end
 	local aliases = {}
 	for _, change in ipairs(record.changes) do
 		local op = change.op
@@ -590,6 +610,8 @@ function M.new(opts)
 		_cursor = cursor,
 		_cursor_note = cursor_note,
 		_fake = cursor == nil,
+		_confdir = opts.confdir,
+		_savedir = opts.savedir,
 		_debounce_s = tonumber(opts.debounce_s) or 0.1,
 		_run_cmd = opts.run_cmd or default_run_cmd,
 		_run_cmd_explicit = type(opts.run_cmd) == 'function',
@@ -633,8 +655,26 @@ function Manager:_collect_batch(first_item, owner_scope)
 	return batch
 end
 
+function Manager:_ensure_packages(packages)
+	if self._fake == true then return true, nil end
+	for _, pkg in ipairs(packages or {}) do
+		local ok, err = ensure_pkg_file(self._confdir, pkg)
+		if ok ~= true then return nil, err end
+		if self._cursor and type(self._cursor.load) == 'function' then pcall(function () self._cursor:load(pkg) end) end
+	end
+	return true, nil
+end
+
 function Manager:_apply_batch(batch)
 	local results = {}
+	local pkgs = record_packages((function () local rs = {}; for _, item in ipairs(batch or {}) do rs[#rs + 1] = item.record end; return rs end)())
+	local eok, eerr = self:_ensure_packages(pkgs)
+	if eok ~= true then
+		for _, item in ipairs(batch or {}) do
+			if item.reply_tx then queue.try_admit_now(item.reply_tx, { ok = false, err = tostring(eerr) }) end
+		end
+		return
+	end
 	for _, item in ipairs(batch) do
 		local record = item.record
 		local ok, err
@@ -673,6 +713,12 @@ function Manager:_apply_transaction(item)
 	local tx = item.transaction or {}
 	local records = tx.records or {}
 	local packages = tx.packages or record_packages(records)
+	local eok, eerr = self:_ensure_packages(packages)
+	if eok ~= true then
+		if item.reply_tx then queue.try_admit_now(item.reply_tx, { ok = false, status = 'failed_no_change', err = tostring(eerr), packages = packages }) end
+		return
+	end
+
 	local result = {
 		ok = true,
 		status = 'ok',

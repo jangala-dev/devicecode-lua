@@ -141,10 +141,11 @@ fibers.run(function(_scope)
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
 
-  local snapshot = perform(provider:snapshot_op({}))
+  local snapshot = perform(provider:snapshot_op({ live = false }))
   assert(snapshot and snapshot.ok == true, 'snapshot failed: ' .. tostring(snapshot and snapshot.err))
   eq(snapshot.backend, 'openwrt', 'snapshot backend')
   assert(type(snapshot.packages) == 'table', 'snapshot should retain raw packages for diagnostics')
+  assert(snapshot.observed.live == nil, 'non-live snapshot should not query ubus')
 
   local observed = snapshot.observed
   assert(type(observed) == 'table', 'snapshot.observed should be a table')

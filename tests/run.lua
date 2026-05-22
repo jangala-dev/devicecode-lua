@@ -47,6 +47,7 @@ local files = {
 	"unit.hal.openwrt_network_observer_spec",
 	"unit.hal.openwrt_network_provider_advanced_spec",
 	"unit.hal.common_uci_compat_spec",
+	"unit.hal.openwrt_names_spec",
 	'unit.fabric.test_model',
 	'unit.fabric.test_config',
 	'unit.fabric.test_dependencies',

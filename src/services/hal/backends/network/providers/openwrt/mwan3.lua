@@ -19,8 +19,6 @@ local function sid(v)
 end
 local function set_section(changes, config, section, stype)
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = stype }
-	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_managed', value = '1' }
-	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_owner', value = 'net' }
 end
 local function set_option(changes, config, section, option, value)
 	if value == nil then return end
@@ -33,13 +31,30 @@ local function member_iface(id, spec)
 	return spec.interface or spec.iface or spec.network_interface or spec.openwrt_interface or id
 end
 
-function M.build_changes(intent)
+function M.build_changes(intent, name_ctx)
 	local wan = is_plain_table(intent and intent.wan) and intent.wan or {}
 	local members = is_plain_table(wan.members) and wan.members or {}
 	local changes, known = {}, {}
 	if wan.enabled == false or next(members) == nil then
 		return changes, known, { enabled = false }
 	end
+	local function mw_iface(id)
+		if name_ctx and type(name_ctx.mwan_iface) == 'function' then return name_ctx:mwan_iface(id) end
+		return sid(id)
+	end
+	local function mw_member(id)
+		if name_ctx and type(name_ctx.mwan_member) == 'function' then return name_ctx:mwan_member(id) end
+		return sid(id)
+	end
+	local function mw_policy(id)
+		if name_ctx and type(name_ctx.mwan_policy) == 'function' then return name_ctx:mwan_policy(id) end
+		return sid(id)
+	end
+	local function mw_rule(id)
+		if name_ctx and type(name_ctx.mwan_rule) == 'function' then return name_ctx:mwan_rule(id) end
+		return sid(id)
+	end
+
 	set_section(changes, 'mwan3', 'globals', 'globals')
 	known.globals = true
 	set_option(changes, 'mwan3', 'globals', 'mmx_mask', (wan.runtime and wan.runtime.mmx_mask) or '0x3F00')
@@ -49,10 +64,10 @@ function M.build_changes(intent)
 	local member_sections = {}
 	for _, mid in ipairs(sorted_keys(members)) do
 		local m = is_plain_table(members[mid]) and members[mid] or {}
-		local iface = member_iface(mid, m)
+		local iface_sem = member_iface(mid, m)
 		local metric = math.floor(tonumber(m.metric or m.priority or 1) or 1)
 		local weight = math.max(1, math.floor(tonumber(m.weight or 1) or 1))
-		local ifsec = sid(iface)
+		local ifsec = mw_iface(iface_sem)
 		known[ifsec] = true
 		set_section(changes, 'mwan3', ifsec, 'interface')
 		set_option(changes, 'mwan3', ifsec, 'enabled', '1')
@@ -64,7 +79,7 @@ function M.build_changes(intent)
 		set_option(changes, 'mwan3', ifsec, 'interval', m.interval or health.interval)
 		set_option(changes, 'mwan3', ifsec, 'up', m.up or health.up)
 		set_option(changes, 'mwan3', ifsec, 'down', m.down or health.down)
-		local member_sec = sid(mid .. '_m' .. tostring(metric) .. '_w' .. tostring(weight))
+		local member_sec = mw_member(mid)
 		known[member_sec] = true
 		set_section(changes, 'mwan3', member_sec, 'member')
 		set_option(changes, 'mwan3', member_sec, 'interface', ifsec)
@@ -74,17 +89,18 @@ function M.build_changes(intent)
 	end
 	table.sort(member_sections)
 	local policy_name = (wan.load_balancing and wan.load_balancing.policy) or wan.policy_name or 'balanced'
-	if policy_name == 'failover' or policy_name == 'weighted_failover' then policy_name = 'balanced' end
-	policy_name = sid(policy_name)
+	if policy_name == 'failover' or policy_name == 'weighted_failover' or policy_name == 'dynamic_weight' then policy_name = 'balanced' end
+	policy_name = mw_policy(policy_name)
 	known[policy_name] = true
 	set_section(changes, 'mwan3', policy_name, 'policy')
 	set_option(changes, 'mwan3', policy_name, 'use_member', member_sections)
 	set_option(changes, 'mwan3', policy_name, 'last_resort', wan.last_resort or 'unreachable')
-	known.default_rule_v4 = true
-	set_section(changes, 'mwan3', 'default_rule_v4', 'rule')
-	set_option(changes, 'mwan3', 'default_rule_v4', 'dest_ip', '0.0.0.0/0')
-	set_option(changes, 'mwan3', 'default_rule_v4', 'family', 'ipv4')
-	set_option(changes, 'mwan3', 'default_rule_v4', 'use_policy', policy_name)
+	local rule_name = mw_rule('default_rule_v4')
+	known[rule_name] = true
+	set_section(changes, 'mwan3', rule_name, 'rule')
+	set_option(changes, 'mwan3', rule_name, 'dest_ip', '0.0.0.0/0')
+	set_option(changes, 'mwan3', rule_name, 'family', 'ipv4')
+	set_option(changes, 'mwan3', rule_name, 'use_policy', policy_name)
 	return changes, known, { enabled = true, policy = policy_name, members = member_sections }
 end
 

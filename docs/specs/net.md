@@ -266,19 +266,21 @@ The OpenWrt provider applies the current Big Box config domains as follows:
 
 ```text
 network
+  unconditional loopback and globals baseline
   segment trunk VLAN devices on the configured base interface
+  bridge-backed LAN/system/user/guest segments by default
+  direct WAN/uplink segments by default
   segment logical interfaces
   explicit interfaces
-  bridge devices where configured
   map-shaped and array-shaped static routes
 
 dhcp / dnsmasq
-  per-segment dnsmasq sections where local DNS/DHCP/host files are required
+  grouped dnsmasq instances by effective DNS policy
   dns cache size
   upstream DNS servers
   top-level DNS records as dnsmasq address entries
   segment content-filter host files through addnhosts/addnmount
-  segment-local DHCP pools
+  segment-local DHCP pools bound to their dnsmasq instance
   DHCP reservations
   per-segment DHCP options where configured
 
@@ -302,7 +304,7 @@ vpn
   OpenWrt provider currently reports configured tunnels as unsupported
 ```
 
-Provider apply is fully reconciliatory for the UCI packages it owns. Sections absent from the desired set are removed. UCI application uses the scoped UCI manager transaction path with package snapshots and rollback on partial failure.
+Provider apply is a complete rewrite for the UCI packages it owns. Devicecode-generated OpenWrt packages do not carry `devicecode_*` watermark options; the provider instead returns the semantic-to-generated-name map from `plan_op` and `apply_op` under `openwrt_names`. UCI application uses the scoped UCI manager transaction path with package snapshots and rollback on partial failure. Missing package files are created before apply.
 
 ## Traffic shaping
 

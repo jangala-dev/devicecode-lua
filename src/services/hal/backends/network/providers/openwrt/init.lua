@@ -13,6 +13,7 @@ local observer_mod = require 'services.hal.backends.network.providers.openwrt.ob
 local mwan3_mod = require 'services.hal.backends.network.providers.openwrt.mwan3'
 local shaper_mod = require 'services.hal.backends.network.providers.openwrt.tc_u32_shaper'
 local speedtest_mod = require 'services.hal.backends.network.providers.openwrt.speedtest'
+local names_mod = require 'services.hal.backends.network.providers.openwrt.names'
 local hal_types = require 'services.hal.types.core'
 
 local perform = fibers.perform
@@ -180,12 +181,6 @@ end
 
 local function set_section(changes, config, section, stype)
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = stype }
-end
-
-local function set_managed_section(changes, config, section, stype)
-	set_section(changes, config, section, stype)
-	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_managed', value = '1' }
-	changes[#changes + 1] = { op = 'set', config = config, section = section, option = 'devicecode_owner', value = 'net' }
 end
 
 local function set_option(changes, config, section, option, value)
@@ -444,14 +439,14 @@ local function add_segment_trunk_interfaces(changes, known, intent, provider_con
 				known[devsec] = true
 				known[ifsec] = true
 
-				set_managed_section(changes, 'network', devsec, 'device')
+				set_section(changes, 'network', devsec, 'device')
 				set_option(changes, 'network', devsec, 'type', '8021q')
 				set_option(changes, 'network', devsec, 'ifname', base_ifname)
 				set_option(changes, 'network', devsec, 'vid', vid)
 				set_option(changes, 'network', devsec, 'name', devname)
 
 				local proto, ipv4 = build_segment_interface_proto(seg)
-				set_managed_section(changes, 'network', ifsec, 'interface')
+				set_section(changes, 'network', ifsec, 'interface')
 				set_option(changes, 'network', ifsec, 'proto', proto)
 				set_option(changes, 'network', ifsec, 'auto', '1')
 				set_option(changes, 'network', ifsec, 'disabled', '0')
@@ -490,7 +485,7 @@ local function add_bridge_vlan_devices(changes, known, intent, iface_id, bridge_
 			local devname = bridge_name .. '.' .. tostring(vid)
 			local devsec = section_id('device', iface_id .. '_' .. tostring(vid))
 			known[devsec] = true
-			set_managed_section(changes, 'network', devsec, 'device')
+			set_section(changes, 'network', devsec, 'device')
 			set_option(changes, 'network', devsec, 'type', '8021q')
 			set_option(changes, 'network', devsec, 'ifname', bridge_name)
 			set_option(changes, 'network', devsec, 'vid', vid)
@@ -512,7 +507,7 @@ local function build_network_changes(intent, provider_config)
 	local known = {}
 	local segment_to_ifaces, iface_to_device = collect_interface_maps(intent)
 
-	set_managed_section(changes, 'network', 'globals', 'globals')
+	set_section(changes, 'network', 'globals', 'globals')
 	known.globals = true
 
 	add_segment_trunk_interfaces(changes, known, intent, provider_config, segment_to_ifaces)
@@ -524,7 +519,7 @@ local function build_network_changes(intent, provider_config)
 		if iface.kind == 'bridge' then
 			local devsec = section_id('device', ifid)
 			known[devsec] = true
-			set_managed_section(changes, 'network', devsec, 'device')
+			set_section(changes, 'network', devsec, 'device')
 			set_option(changes, 'network', devsec, 'name', 'br-' .. ifid)
 			set_option(changes, 'network', devsec, 'type', 'bridge')
 			set_option(changes, 'network', devsec, 'ports', iface.members or {})
@@ -539,7 +534,7 @@ local function build_network_changes(intent, provider_config)
 		end
 		if proto == 'manual' then proto = 'none' end
 
-		set_managed_section(changes, 'network', ifsec, 'interface')
+		set_section(changes, 'network', ifsec, 'interface')
 		set_option(changes, 'network', ifsec, 'proto', proto)
 		set_option(changes, 'network', ifsec, 'auto', iface.enabled == false and '0' or '1')
 		set_option(changes, 'network', ifsec, 'disabled', iface.enabled == false and '1' or '0')
@@ -563,7 +558,7 @@ local function build_network_changes(intent, provider_config)
 		local r = item.rec
 		local rsec = section_id('route', 'route_' .. tostring(item.id))
 		known[rsec] = true
-		set_managed_section(changes, 'network', rsec, 'route')
+		set_section(changes, 'network', rsec, 'route')
 		set_option(changes, 'network', rsec, 'interface', r.interface or r.net)
 		set_option(changes, 'network', rsec, 'target', r.target)
 		set_option(changes, 'network', rsec, 'gateway', r.gateway or r.via)
@@ -590,7 +585,7 @@ local function build_dhcp_changes(intent)
 		if wants_dns then
 			local dnssec = section_id('dns', 'dns_' .. seg_id)
 			known[dnssec] = true
-			set_managed_section(changes, 'dhcp', dnssec, 'dnsmasq')
+			set_section(changes, 'dhcp', dnssec, 'dnsmasq')
 			set_option(changes, 'dhcp', dnssec, 'domainneeded', dns.domainneeded ~= nil and bool_uci(dns.domainneeded) or '1')
 			set_option(changes, 'dhcp', dnssec, 'boguspriv', dns.boguspriv ~= nil and bool_uci(dns.boguspriv) or '1')
 			set_option(changes, 'dhcp', dnssec, 'localservice', dns.localservice ~= nil and bool_uci(dns.localservice) or '1')
@@ -613,7 +608,7 @@ local function build_dhcp_changes(intent)
 
 		local sec = section_id('dhcp', seg_id)
 		known[sec] = true
-		set_managed_section(changes, 'dhcp', sec, 'dhcp')
+		set_section(changes, 'dhcp', sec, 'dhcp')
 		set_option(changes, 'dhcp', sec, 'interface', seg_id)
 		if dh.enabled == true then
 			set_option(changes, 'dhcp', sec, 'start', dh.start or dh.range_start or defaults.start or 100)
@@ -631,7 +626,7 @@ local function build_dhcp_changes(intent)
 		if not is_plain_table(rec) then return end
 		local sec = section_id('dhcp', 'host_' .. tostring(rid))
 		known[sec] = true
-		set_managed_section(changes, 'dhcp', sec, 'host')
+		set_section(changes, 'dhcp', sec, 'host')
 		set_option(changes, 'dhcp', sec, 'name', rec.name or rid)
 		set_option(changes, 'dhcp', sec, 'mac', rec.mac)
 		set_option(changes, 'dhcp', sec, 'ip', rec.ip or rec.address)
@@ -740,6 +735,374 @@ local function build_firewall_changes(intent, segment_to_ifaces)
 	return changes, known
 end
 
+
+-- Strict generated-name builders.  These supersede the older section-level
+-- reconciler path above: Devicecode owns the OpenWrt UCI packages completely,
+-- and all OpenWrt-visible names are allocated through names.lua.
+
+
+local function seg_l2_mode(seg)
+	local l2 = is_plain_table(seg and seg.l2) and seg.l2 or {}
+	if type(l2.mode) == 'string' and l2.mode ~= '' then return l2.mode end
+	local kind = seg and seg.kind or 'lan'
+	if kind == 'wan' or kind == 'uplink' then return 'direct' end
+	return 'bridge'
+end
+
+local function add_static_or_dhcp_interface(changes, ifsec, devname, proto, ipv4, auto, semantic_id)
+	set_section(changes, 'network', ifsec, 'interface')
+	set_option(changes, 'network', ifsec, 'proto', proto)
+	set_option(changes, 'network', ifsec, 'auto', auto == false and '0' or '1')
+	set_option(changes, 'network', ifsec, 'disabled', auto == false and '1' or '0')
+	set_option(changes, 'network', ifsec, 'device', devname)
+	if proto == 'static' then
+		local addr, prefix, netmask = cidr_to_addr_prefix(ipv4)
+		set_option(changes, 'network', ifsec, 'ipaddr', addr)
+		set_option(changes, 'network', ifsec, 'netmask', netmask or prefix_to_netmask(prefix))
+		set_option(changes, 'network', ifsec, 'gateway', ipv4.gateway or ipv4.gw)
+		set_option(changes, 'network', ifsec, 'dns', ipv4.dns)
+	else
+		set_option(changes, 'network', ifsec, 'peerdns', bool_uci(ipv4.peerdns))
+		set_option(changes, 'network', ifsec, 'defaultroute', bool_uci(ipv4.defaultroute))
+		if ipv4.metric then set_option(changes, 'network', ifsec, 'metric', ipv4.metric) end
+	end
+end
+
+local function build_network_changes_v2(intent, provider_config, name_ctx)
+	local changes = {}
+	local known = {}
+	local segment_to_ifaces = {}
+
+	set_section(changes, 'network', 'loopback', 'interface')
+	known.loopback = true
+	set_option(changes, 'network', 'loopback', 'device', 'lo')
+	set_option(changes, 'network', 'loopback', 'proto', 'static')
+	set_option(changes, 'network', 'loopback', 'ipaddr', '127.0.0.1')
+	set_option(changes, 'network', 'loopback', 'netmask', '255.0.0.0')
+
+	set_section(changes, 'network', 'globals', 'globals')
+	known.globals = true
+	set_option(changes, 'network', 'globals', 'ula_prefix', ((intent.addressing or {}).ipv6 or {}).ula_prefix or 'auto')
+
+	local _trunk, base_ifname = platform_segment_trunk(provider_config)
+	local explicit_segment = {}
+	for _, ifid in ipairs(sorted_keys(intent.interfaces or {})) do
+		local iface = intent.interfaces[ifid]
+		if type(iface.segment) == 'string' then explicit_segment[iface.segment] = true end
+		if type(iface.segments) == 'table' then
+			for i = 1, #iface.segments do explicit_segment[iface.segments[i]] = true end
+		end
+	end
+
+	if base_ifname then
+		for _, seg_id in ipairs(sorted_keys(intent.segments or {})) do
+			local seg = intent.segments[seg_id]
+			if segment_is_enabled(seg) and not explicit_segment[seg_id] then
+				local vid = segment_vlan_id(seg)
+				if vid then
+					local vlan_name = name_ctx:vlan(seg_id)
+					local vlan_sec = name_ctx:section('dev_vlan', seg_id)
+					known[vlan_sec] = true
+					set_section(changes, 'network', vlan_sec, 'device')
+					set_option(changes, 'network', vlan_sec, 'type', '8021q')
+					set_option(changes, 'network', vlan_sec, 'ifname', base_ifname)
+					set_option(changes, 'network', vlan_sec, 'vid', vid)
+					set_option(changes, 'network', vlan_sec, 'name', vlan_name)
+
+					local devname = vlan_name
+					if seg_l2_mode(seg) == 'bridge' then
+						local br_name = name_ctx:bridge(seg_id)
+						local br_sec = name_ctx:section('dev_bridge', seg_id)
+						known[br_sec] = true
+						set_section(changes, 'network', br_sec, 'device')
+						set_option(changes, 'network', br_sec, 'name', br_name)
+						set_option(changes, 'network', br_sec, 'type', 'bridge')
+						set_option(changes, 'network', br_sec, 'ports', { vlan_name })
+						set_option(changes, 'network', br_sec, 'bridge_empty', '1')
+						devname = br_name
+					end
+
+					local ifsec = name_ctx:iface(seg_id)
+					known[ifsec] = true
+					local proto, ipv4 = build_segment_interface_proto(seg)
+					if seg.kind == 'wan' and proto == 'dhcp' and ipv4.defaultroute == nil then ipv4.defaultroute = false end
+					add_static_or_dhcp_interface(changes, ifsec, devname, proto, ipv4, true, seg_id)
+					segment_to_ifaces[seg_id] = segment_to_ifaces[seg_id] or {}
+					segment_to_ifaces[seg_id][#segment_to_ifaces[seg_id] + 1] = ifsec
+				end
+			end
+		end
+	end
+
+	for _, ifid in ipairs(sorted_keys(intent.interfaces or {})) do
+		local iface = intent.interfaces[ifid]
+		local ifsec = name_ctx:iface(ifid)
+		known[ifsec] = true
+		local devname
+		if iface.kind == 'bridge' then
+			devname = name_ctx:bridge(ifid)
+			local devsec = name_ctx:section('dev_bridge', ifid)
+			known[devsec] = true
+			set_section(changes, 'network', devsec, 'device')
+			set_option(changes, 'network', devsec, 'name', devname)
+			set_option(changes, 'network', devsec, 'type', 'bridge')
+			set_option(changes, 'network', devsec, 'ports', iface.members or {})
+			set_option(changes, 'network', devsec, 'bridge_empty', '1')
+		else
+			local ep = is_plain_table(iface.endpoint) and iface.endpoint or {}
+			devname = ep.ifname or ep.device or ep.name or iface.device
+		end
+		local seg = iface.segment and (intent.segments or {})[iface.segment] or nil
+		local ipv4 = ipv4_spec(iface.addressing, seg and seg.addressing or {})
+		local proto = ipv4.mode or ipv4.proto
+		if proto == nil then proto = iface.role == 'wan' and 'dhcp' or 'static' end
+		if proto == 'manual' then proto = 'none' end
+		if iface.role == 'wan' and proto == 'dhcp' and ipv4.defaultroute == nil then ipv4.defaultroute = false end
+		add_static_or_dhcp_interface(changes, ifsec, devname, proto, ipv4, iface.enabled ~= false, ifid)
+		if iface.mtu then set_option(changes, 'network', ifsec, 'mtu', iface.mtu) end
+
+		local segs = {}
+		if type(iface.segment) == 'string' then segs[#segs + 1] = iface.segment end
+		if type(iface.segments) == 'table' then for i = 1, #iface.segments do segs[#segs + 1] = iface.segments[i] end end
+		for i = 1, #segs do
+			segment_to_ifaces[segs[i]] = segment_to_ifaces[segs[i]] or {}
+			segment_to_ifaces[segs[i]][#segment_to_ifaces[segs[i]] + 1] = ifsec
+		end
+	end
+	for _, list in pairs(segment_to_ifaces) do table.sort(list) end
+
+	local routes = (is_plain_table(intent.routing) and intent.routing.routes) or {}
+	for _, item in ipairs(route_entries(routes)) do
+		local r = item.rec
+		local rsec = name_ctx:section('route', item.id)
+		known[rsec] = true
+		set_section(changes, 'network', rsec, 'route')
+		set_option(changes, 'network', rsec, 'interface', r.interface and name_ctx:iface(r.interface) or r.net)
+		set_option(changes, 'network', rsec, 'target', r.target)
+		set_option(changes, 'network', rsec, 'gateway', r.gateway or r.via)
+		set_option(changes, 'network', rsec, 'metric', r.metric)
+		set_option(changes, 'network', rsec, 'table', r.table)
+	end
+
+	return changes, known, segment_to_ifaces
+end
+
+local function canonical_list(list)
+	local out = ensure_array(list)
+	table.sort(out, function(a, b) return tostring(a) < tostring(b) end)
+	return out
+end
+
+local function list_key(list)
+	local out = {}
+	for i = 1, #(list or {}) do out[i] = tostring(list[i]) end
+	return table.concat(out, ',')
+end
+
+local function dns_effective_for_segment(dns, dhcp, seg_id, seg)
+	local dh = is_plain_table(seg.dhcp) and seg.dhcp or {}
+	local seg_dns = is_plain_table(seg.dns) and seg.dns or {}
+	local host_ids = canonical_list(seg_dns.host_files or seg_dns.host_sources or {})
+	local wants_dns = dns.enabled ~= false and seg_dns.enabled ~= false and (dh.enabled == true or seg_dns.local_server == true or seg_dns['local'] == true or #host_ids > 0)
+	if not wants_dns then return nil end
+	local addnhosts, addnmounts = resolve_host_file_sources(dns, seg)
+	local addresses = dns_records_for_segment(dns, seg_id)
+	local domain = seg_dns.domain or dns.domain
+	local upstreams = canonical_list(dns.upstreams or {})
+	local label = #host_ids > 0 and table.concat(host_ids, '_') or 'standard'
+	local key = table.concat({
+		tostring(domain or ''),
+		list_key(upstreams),
+		list_key(addnhosts),
+		list_key(addnmounts),
+		list_key(addresses),
+		tostring(dns.domainneeded ~= false),
+		tostring(dns.boguspriv ~= false),
+		tostring(dns.localservice ~= false),
+	}, '|')
+	return {
+		key = key,
+		label = label,
+		domain = domain,
+		upstreams = upstreams,
+		addnhosts = addnhosts,
+		addnmounts = addnmounts,
+		addresses = addresses,
+		cachesize = is_plain_table(dns.cache) and dns.cache.size or nil,
+		authoritative = (is_plain_table(dhcp.defaults) and dhcp.defaults.authoritative),
+	}
+end
+
+local function build_dhcp_changes_v2(intent, name_ctx, segment_to_ifaces)
+	local changes = {}
+	local known = {}
+	local dns = is_plain_table(intent.dns) and intent.dns or {}
+	local dhcp = is_plain_table(intent.dhcp) and intent.dhcp or {}
+	local defaults = is_plain_table(dhcp.defaults) and dhcp.defaults or {}
+	local groups = {}
+	local seg_instance = {}
+
+	for _, seg_id in ipairs(sorted_keys(intent.segments or {})) do
+		local seg = intent.segments[seg_id]
+		local eff = dns_effective_for_segment(dns, dhcp, seg_id, seg)
+		if eff then
+			groups[eff.key] = groups[eff.key] or eff
+			groups[eff.key].segments = groups[eff.key].segments or {}
+			groups[eff.key].interfaces = groups[eff.key].interfaces or {}
+			groups[eff.key].segments[#groups[eff.key].segments + 1] = seg_id
+			local ifaces = segment_to_ifaces[seg_id] or { name_ctx:iface(seg_id) }
+			for i = 1, #ifaces do groups[eff.key].interfaces[#groups[eff.key].interfaces + 1] = ifaces[i] end
+			seg_instance[seg_id] = eff.key
+		end
+	end
+
+	for _, key in ipairs(sorted_keys(groups)) do
+		local g = groups[key]
+		table.sort(g.interfaces)
+		local dnssec = name_ctx:dns_instance(g.label .. '_' .. key)
+		known[dnssec] = true
+		set_section(changes, 'dhcp', dnssec, 'dnsmasq')
+		set_option(changes, 'dhcp', dnssec, 'domainneeded', dns.domainneeded ~= nil and bool_uci(dns.domainneeded) or '1')
+		set_option(changes, 'dhcp', dnssec, 'boguspriv', dns.boguspriv ~= nil and bool_uci(dns.boguspriv) or '1')
+		set_option(changes, 'dhcp', dnssec, 'localise_queries', '1')
+		set_option(changes, 'dhcp', dnssec, 'rebind_protection', '1')
+		set_option(changes, 'dhcp', dnssec, 'rebind_localhost', '1')
+		set_option(changes, 'dhcp', dnssec, 'expandhosts', '1')
+		set_option(changes, 'dhcp', dnssec, 'nonegcache', '0')
+		set_option(changes, 'dhcp', dnssec, 'readethers', '1')
+		set_option(changes, 'dhcp', dnssec, 'nonwildcard', '1')
+		set_option(changes, 'dhcp', dnssec, 'localservice', dns.localservice ~= nil and bool_uci(dns.localservice) or '1')
+		set_option(changes, 'dhcp', dnssec, 'authoritative', g.authoritative ~= nil and bool_uci(g.authoritative) or '1')
+		set_option(changes, 'dhcp', dnssec, 'port', '53')
+		set_option(changes, 'dhcp', dnssec, 'noresolv', '1')
+		set_option(changes, 'dhcp', dnssec, 'interface', g.interfaces)
+		set_option(changes, 'dhcp', dnssec, 'leasefile', '/tmp/dhcp.leases.' .. dnssec)
+		set_option(changes, 'dhcp', dnssec, 'resolvfile', '/tmp/resolv.conf.d/resolv.conf.auto')
+		if g.cachesize ~= nil then set_option(changes, 'dhcp', dnssec, 'cachesize', g.cachesize) end
+		if #g.upstreams > 0 then set_option(changes, 'dhcp', dnssec, 'server', g.upstreams) end
+		if type(g.domain) == 'string' and g.domain ~= '' then
+			set_option(changes, 'dhcp', dnssec, 'domain', g.domain)
+			set_option(changes, 'dhcp', dnssec, 'local', '/' .. g.domain .. '/')
+		end
+		if #g.addnhosts > 0 then set_option(changes, 'dhcp', dnssec, 'addnhosts', g.addnhosts) end
+		if #g.addnmounts > 0 then set_option(changes, 'dhcp', dnssec, 'addnmount', g.addnmounts) end
+		if #g.addresses > 0 then set_option(changes, 'dhcp', dnssec, 'address', g.addresses) end
+		g.instance = dnssec
+	end
+
+	for _, seg_id in ipairs(sorted_keys(intent.segments or {})) do
+		local seg = intent.segments[seg_id]
+		local dh = is_plain_table(seg.dhcp) and seg.dhcp or {}
+		local sec = name_ctx:section('dhcp', seg_id)
+		known[sec] = true
+		set_section(changes, 'dhcp', sec, 'dhcp')
+		set_option(changes, 'dhcp', sec, 'interface', (segment_to_ifaces[seg_id] and segment_to_ifaces[seg_id][1]) or name_ctx:iface(seg_id))
+		local g = groups[seg_instance[seg_id]]
+		if g and g.instance then set_option(changes, 'dhcp', sec, 'instance', g.instance) end
+		if dh.enabled == true then
+			set_option(changes, 'dhcp', sec, 'start', dh.start or dh.range_start or defaults.start or 100)
+			set_option(changes, 'dhcp', sec, 'limit', dh.limit or dh.range_limit or defaults.limit or 150)
+			set_option(changes, 'dhcp', sec, 'leasetime', dh.leasetime or dh.lease_time or defaults.leasetime or defaults.lease_time or '12h')
+			local opts = dh.options or (is_plain_table(dhcp.options) and dhcp.options[seg_id])
+			if type(opts) == 'table' then set_option(changes, 'dhcp', sec, 'dhcp_option', opts) end
+		else
+			set_option(changes, 'dhcp', sec, 'ignore', '1')
+		end
+	end
+
+	local reservations = is_plain_table(dhcp.reservations) and dhcp.reservations or {}
+	local function add_reservation(rid, rec)
+		if not is_plain_table(rec) then return end
+		local sec = name_ctx:section('host', rid)
+		known[sec] = true
+		set_section(changes, 'dhcp', sec, 'host')
+		set_option(changes, 'dhcp', sec, 'name', rec.name or rid)
+		set_option(changes, 'dhcp', sec, 'mac', rec.mac)
+		set_option(changes, 'dhcp', sec, 'ip', rec.ip or rec.address)
+		set_option(changes, 'dhcp', sec, 'leasetime', rec.leasetime or rec.lease_time)
+		set_option(changes, 'dhcp', sec, 'hostid', rec.hostid)
+		set_option(changes, 'dhcp', sec, 'duid', rec.duid)
+	end
+	if #reservations > 0 then for i = 1, #reservations do add_reservation(tostring(i), reservations[i]) end else for _, rid in ipairs(sorted_keys(reservations)) do add_reservation(rid, reservations[rid]) end end
+
+	return changes, known
+end
+
+local function build_firewall_changes_v2(intent, segment_to_ifaces, name_ctx)
+	local changes = {}
+	local known = {}
+	local fw = is_plain_table(intent.firewall) and intent.firewall or {}
+	local defaults = is_plain_table(fw.defaults) and fw.defaults or {}
+	set_section(changes, 'firewall', 'defaults', 'defaults')
+	known.defaults = true
+	local wrote = {}
+	for _, key in ipairs({ 'input', 'output', 'forward' }) do
+		set_option(changes, 'firewall', 'defaults', key, defaults[key] or (key == 'output' and 'ACCEPT' or 'REJECT'))
+		wrote[key] = true
+	end
+	for _, key in ipairs(sorted_keys(defaults)) do if not wrote[key] then set_option(changes, 'firewall', 'defaults', key, defaults[key]) end end
+
+	local zone_to_networks = {}
+	for _, seg_id in ipairs(sorted_keys(intent.segments or {})) do
+		local seg = intent.segments[seg_id]
+		local zname = segment_zone_name(seg_id, seg)
+		zone_to_networks[zname] = zone_to_networks[zname] or {}
+		local ifaces = segment_to_ifaces[seg_id]
+		if ifaces and #ifaces > 0 then for i = 1, #ifaces do zone_to_networks[zname][#zone_to_networks[zname] + 1] = ifaces[i] end end
+	end
+	local zone_specs = is_plain_table(fw.zones) and fw.zones or {}
+	for _, zname in ipairs(sorted_keys(zone_specs)) do zone_to_networks[zname] = zone_to_networks[zname] or {} end
+	for _, zname in ipairs(sorted_keys(zone_to_networks)) do
+		local zsec = name_ctx:section('zone', zname)
+		local zspec = is_plain_table(zone_specs[zname]) and zone_specs[zname] or {}
+		local nets = zone_to_networks[zname]
+		table.sort(nets)
+		local oz = name_ctx:zone(zname)
+		known[zsec] = true
+		set_section(changes, 'firewall', zsec, 'zone')
+		set_option(changes, 'firewall', zsec, 'name', oz)
+		if #nets > 0 then set_option(changes, 'firewall', zsec, 'network', nets) end
+		set_option(changes, 'firewall', zsec, 'input', zspec.input or 'ACCEPT')
+		set_option(changes, 'firewall', zsec, 'output', zspec.output or 'ACCEPT')
+		set_option(changes, 'firewall', zsec, 'forward', zspec.forward or 'REJECT')
+		for _, key in ipairs(sorted_keys(zspec)) do
+			if key ~= 'input' and key ~= 'output' and key ~= 'forward' and key ~= 'network' then set_option(changes, 'firewall', zsec, key, zspec[key]) end
+		end
+	end
+	local policies = is_plain_table(fw.policies) and fw.policies or {}
+	local n = 0
+	for _, pid in ipairs(sorted_keys(policies)) do
+		local p = policies[pid]
+		if is_plain_table(p) then
+			local src = p.src or p.from
+			local dest = p.dest or p.to
+			if type(src) == 'string' and type(dest) == 'string' then
+				n = n + 1
+				local sec = name_ctx:section('fwd', pid .. '_' .. tostring(n))
+				known[sec] = true
+				set_section(changes, 'firewall', sec, 'forwarding')
+				set_option(changes, 'firewall', sec, 'src', name_ctx:zone(src))
+				set_option(changes, 'firewall', sec, 'dest', name_ctx:zone(dest))
+			end
+		end
+	end
+	local rules = is_plain_table(fw.rules) and fw.rules or {}
+	local function add_rule(rid, r)
+		if not is_plain_table(r) then return end
+		local sec = name_ctx:section('rule', rid)
+		known[sec] = true
+		set_section(changes, 'firewall', sec, 'rule')
+		set_option(changes, 'firewall', sec, 'name', r.name or rid)
+		for _, key in ipairs({ 'enabled', 'family', 'proto', 'src_ip', 'dest_ip', 'src_port', 'dest_port', 'icmp_type', 'target', 'limit', 'limit_burst', 'extra', 'utc_time', 'weekdays', 'monthdays', 'start_time', 'stop_time', 'start_date', 'stop_date' }) do
+			set_option(changes, 'firewall', sec, key, r[key])
+		end
+		if r.src then set_option(changes, 'firewall', sec, 'src', name_ctx:zone(r.src)) end
+		if r.dest then set_option(changes, 'firewall', sec, 'dest', name_ctx:zone(r.dest)) end
+	end
+	if #rules > 0 then for i = 1, #rules do add_rule(tostring(i), rules[i]) end else for _, rid in ipairs(sorted_keys(rules)) do add_rule(rid, rules[rid]) end end
+	return changes, known
+end
+
 local function reconcile_package_changes(pkg, changes, known, current_pkg)
 	local out = {}
 	for secname, rec in pairs(current_pkg or {}) do
@@ -756,10 +1119,11 @@ local function reconcile_package_changes(pkg, changes, known, current_pkg)
 	return out
 end
 
-local function transaction_record(pkg, changes, known, current_pkg, restart_cmds)
+local function transaction_record(pkg, changes, _known, _current_pkg, restart_cmds)
 	return {
 		config = pkg,
-		changes = reconcile_package_changes(pkg, changes, known, current_pkg),
+		replace_package = true,
+		changes = changes or {},
 		restart_cmds = restart_cmds or {},
 	}
 end
@@ -895,10 +1259,11 @@ function Provider:plan_op(req)
 	local intent = req and (req.intent or req.desired or req)
 	local valid = validate_intent(intent)
 	if not valid or valid.ok ~= true then return op.always(valid) end
-	local n_changes, n_known, segment_to_ifaces = build_network_changes(intent, self.config)
-	local d_changes, d_known = build_dhcp_changes(intent)
-	local f_changes, f_known = build_firewall_changes(intent, segment_to_ifaces)
-	local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent)
+	local name_ctx = names_mod.allocate(intent, self.config)
+	local n_changes, n_known, segment_to_ifaces = build_network_changes_v2(intent, self.config, name_ctx)
+	local d_changes, d_known = build_dhcp_changes_v2(intent, name_ctx, segment_to_ifaces)
+	local f_changes, f_known = build_firewall_changes_v2(intent, segment_to_ifaces, name_ctx)
+	local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent, name_ctx)
 	local shaping = build_shaping_request(intent, self.config)
 	local domains = {
 		vlan = { status = 'implemented' },
@@ -917,6 +1282,7 @@ function Provider:plan_op(req)
 				firewall = { changes = #f_changes, sections = count_keys(f_known) },
 				mwan3 = { changes = #m_changes, sections = count_keys(m_known) },
 			},
+			openwrt_names = name_ctx:snapshot(),
 		},
 	})
 end
@@ -930,29 +1296,26 @@ function Provider:apply_op(req)
 		local mgr, merr = self:_ensure_started()
 		if not mgr then return { ok = false, err = merr or 'uci manager unavailable', backend = 'openwrt' } end
 
-		local current = {}
-		local read_current, read_err = read_uci_packages(self.config)
-		if read_current then current = read_current end
-
-		local n_changes, n_known, segment_to_ifaces = build_network_changes(intent, self.config)
-		local d_changes, d_known = build_dhcp_changes(intent)
-		local f_changes, f_known = build_firewall_changes(intent, segment_to_ifaces)
-		local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent)
+		local name_ctx = names_mod.allocate(intent, self.config)
+		local n_changes, n_known, segment_to_ifaces = build_network_changes_v2(intent, self.config, name_ctx)
+		local d_changes, d_known = build_dhcp_changes_v2(intent, name_ctx, segment_to_ifaces)
+		local f_changes, f_known = build_firewall_changes_v2(intent, segment_to_ifaces, name_ctx)
+		local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent, name_ctx)
 
 		local records = {
-			transaction_record('network', n_changes, n_known, current.network, {
+			transaction_record('network', n_changes, n_known, nil, {
 				{ kind = 'reload', target = 'network' },
 			}),
-			transaction_record('dhcp', d_changes, d_known, current.dhcp, {
+			transaction_record('dhcp', d_changes, d_known, nil, {
 				{ kind = 'restart', target = 'dnsmasq' },
 			}),
-			transaction_record('firewall', f_changes, f_known, current.firewall, {
+			transaction_record('firewall', f_changes, f_known, nil, {
 				{ kind = 'restart', target = 'firewall' },
 			}),
 			-- Always include mwan3 so stale generated multi-WAN state is removed when
 			-- WAN/multi-WAN is disabled or a member disappears.  Structural apply still
 			-- does not restart mwan3; live rules are handled separately.
-			transaction_record('mwan3', m_changes, m_known, current.mwan3, {}),
+			transaction_record('mwan3', m_changes, m_known, nil, {}),
 		}
 		local packages = { 'network', 'dhcp', 'firewall', 'mwan3' }
 		local tx_result, admitted = fibers.perform(mgr:transaction_op({
@@ -971,7 +1334,6 @@ function Provider:apply_op(req)
 				failed_step = tx_result and tx_result.failed_step or nil,
 				failed_config = tx_result and tx_result.failed_config or nil,
 				changed = tx_result and tx_result.status == 'failed_rollback_failed' or false,
-				read_current_err = read_err,
 			}
 		end
 
@@ -993,6 +1355,7 @@ function Provider:apply_op(req)
 			packages = packages,
 			transaction = tx_result,
 			multiwan = m_plan,
+			openwrt_names = name_ctx:snapshot(),
 			shaping = shaping_result,
 		}
 	end):wrap(function(status, _report, result)

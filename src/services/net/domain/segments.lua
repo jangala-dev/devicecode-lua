@@ -7,7 +7,7 @@ local M = {}
 
 local ALLOWED = {
 	'id', 'name', 'description', 'kind', 'enabled', 'protected', 'user_editable', 'purpose', 'vlan', 'addressing',
-	'dhcp', 'dns', 'firewall', 'routing', 'shaping', 'vpn', 'policy',
+	'dhcp', 'dns', 'firewall', 'routing', 'shaping', 'vpn', 'policy', 'l2',
 	'tags', 'metadata', 'extensions',
 }
 
@@ -62,6 +62,7 @@ function M.normalise_record(id, rec, path)
 		purpose = t.purpose,
 		vlan = vlan,
 		addressing = schema.copy(t.addressing or {}),
+		l2 = schema.copy(t.l2 or {}),
 		dhcp = schema.copy(t.dhcp or {}),
 		dns = schema.copy(t.dns or {}),
 		firewall = schema.copy(t.firewall or {}),

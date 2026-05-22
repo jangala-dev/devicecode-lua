@@ -29,6 +29,7 @@ local bus = require 'bus'
 local trie = require 'trie'
 local uci = require 'uci'
 local provider_loader = require 'services.hal.backends.network.provider'
+local names_mod = require 'services.hal.backends.network.providers.openwrt.names'
 
 assert(type(bus.new) == 'function', 'vendored bus did not load')
 assert(type(trie.new_pubsub) == 'function', 'vendored trie did not load')
@@ -131,6 +132,8 @@ local intent = {
   diagnostics = {},
 }
 
+local name_ctx = assert(names_mod.allocate(intent))
+
 fibers.run(function(_scope)
   local provider, perr = provider_loader.new({
     provider = 'openwrt',
@@ -171,53 +174,114 @@ for _, pkg in ipairs({ 'network', 'dhcp', 'firewall' }) do
   if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end
 end
 
-eq(c:get('network', 'dev_lan'), 'device', 'network.dev_lan type')
-eq(c:get('network', 'dev_lan', 'name'), 'br-lan', 'bridge name')
-eq(c:get('network', 'dev_lan', 'type'), 'bridge', 'bridge device type')
-assert_list(c:get('network', 'dev_lan', 'ports'), { 'eth0', 'eth1' }, 'bridge ports')
+local function all(pkg)
+  if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end
+  return c:get_all(pkg) or {}
+end
 
-eq(c:get('network', 'lan'), 'interface', 'network.lan type')
-eq(c:get('network', 'lan', 'proto'), 'static', 'lan proto')
-eq(c:get('network', 'lan', 'device'), 'br-lan', 'lan device')
-eq(c:get('network', 'lan', 'ipaddr'), '192.168.10.1', 'lan ipaddr')
-eq(c:get('network', 'lan', 'netmask'), '255.255.255.0', 'lan netmask')
+local function list_contains(v, item)
+  if type(v) == 'table' then
+    for i = 1, #v do if v[i] == item then return true end end
+    return false
+  end
+  return v == item
+end
 
-eq(c:get('network', 'wan'), 'interface', 'network.wan type')
-eq(c:get('network', 'wan', 'proto'), 'dhcp', 'wan proto')
-eq(c:get('network', 'wan', 'device'), 'eth2', 'wan device')
-eq(c:get('network', 'wan', 'peerdns'), '0', 'wan peerdns')
-eq(c:get('network', 'wan', 'metric'), '10', 'wan metric')
+local function section_by_name(pkg, section, stype)
+  local sec = all(pkg)[section]
+  if type(sec) ~= 'table' then fail('section not found in ' .. pkg .. ': ' .. tostring(section)) end
+  if stype ~= nil and sec['.type'] ~= stype then fail(pkg .. '.' .. tostring(section) .. ' expected type ' .. tostring(stype) .. ', got ' .. tostring(sec['.type'])) end
+  return section, sec
+end
 
-eq(c:get('network', 'route_1'), 'route', 'route type')
-eq(c:get('network', 'route_1', 'interface'), 'lan', 'route interface')
-eq(c:get('network', 'route_1', 'target'), '10.0.0.0/8', 'route target')
-eq(c:get('network', 'route_1', 'gateway'), '192.168.10.254', 'route gateway')
+local function assert_no_devicecode_metadata()
+  for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
+    for name, sec in pairs(all(pkg)) do
+      if type(sec) == 'table' then
+        for _, opt in ipairs({ 'devicecode_managed', 'devicecode_owner', 'devicecode_semantic_id', 'devicecode_role' }) do
+          if sec[opt] ~= nil then fail('unexpected UCI metadata ' .. pkg .. '.' .. tostring(name) .. '.' .. opt) end
+        end
+      end
+    end
+  end
+end
 
-eq(c:get('dhcp', 'dns_lan'), 'dnsmasq', 'dns_lan type')
-assert_list(c:get('dhcp', 'dns_lan', 'server'), { '1.1.1.1', '8.8.8.8' }, 'dns upstreams')
-eq(c:get('dhcp', 'dns_lan', 'cachesize'), '1000', 'dns cache size')
-local addnhosts = c:get('dhcp', 'dns_lan', 'addnhosts')
+local function find_firewall_zone(zone_name)
+  for name, sec in pairs(all('firewall')) do
+    if type(sec) == 'table' and sec['.type'] == 'zone' and sec.name == zone_name then
+      return name, sec
+    end
+  end
+  fail('firewall zone not found: ' .. tostring(zone_name))
+end
+
+local function find_firewall_forwarding(src, dest)
+  for name, sec in pairs(all('firewall')) do
+    if type(sec) == 'table' and sec['.type'] == 'forwarding' and sec.src == src and sec.dest == dest then
+      return name, sec
+    end
+  end
+  fail('firewall forwarding not found: ' .. tostring(src) .. ' -> ' .. tostring(dest))
+end
+
+local lan_bridge_sec, lan_bridge = section_by_name('network', name_ctx:section('dev_bridge', 'lan'), 'device')
+eq(lan_bridge.name, 'br-lan', 'bridge name')
+eq(lan_bridge.type, 'bridge', 'bridge device type')
+assert_list(lan_bridge.ports, { 'eth0', 'eth1' }, 'bridge ports')
+
+local _lan_if_sec, lan_if = section_by_name('network', name_ctx:iface('lan'), 'interface')
+eq(_lan_if_sec, 'lan', 'lan generated interface remains readable')
+eq(lan_if.proto, 'static', 'lan proto')
+eq(lan_if.device, 'br-lan', 'lan device')
+eq(lan_if.ipaddr, '192.168.10.1', 'lan ipaddr')
+eq(lan_if.netmask, '255.255.255.0', 'lan netmask')
+
+local _wan_if_sec, wan_if = section_by_name('network', name_ctx:iface('wan'), 'interface')
+eq(_wan_if_sec, 'wan', 'wan generated interface remains readable')
+eq(wan_if.proto, 'dhcp', 'wan proto')
+eq(wan_if.device, 'eth2', 'wan device')
+eq(wan_if.peerdns, '0', 'wan peerdns')
+eq(wan_if.defaultroute, '0', 'wan defaultroute disabled before admission')
+eq(wan_if.metric, '10', 'wan metric')
+
+local _route_sec, route = section_by_name('network', name_ctx:section('route', '1'), 'route')
+eq(route.interface, 'lan', 'route interface')
+eq(route.target, '10.0.0.0/8', 'route target')
+eq(route.gateway, '192.168.10.254', 'route gateway')
+
+local dns_sec, dns = nil, nil
+for name, sec in pairs(all('dhcp')) do
+  if type(sec) == 'table' and sec['.type'] == 'dnsmasq' and list_contains(sec.addnhosts, '/tmp/devicecode-dns-hosts/ads.hosts') then dns_sec, dns = name, sec; break end
+end
+if not dns then fail('ads dnsmasq instance not found') end
+assert_list(dns.server, { '1.1.1.1', '8.8.8.8' }, 'dns upstreams')
+eq(dns.cachesize, '1000', 'dns cache size')
+local addnhosts = dns.addnhosts
 if type(addnhosts) == 'table' then eq(addnhosts[1], '/tmp/devicecode-dns-hosts/ads.hosts', 'dns host file') else eq(addnhosts, '/tmp/devicecode-dns-hosts/ads.hosts', 'dns host file') end
-local addresses = c:get('dhcp', 'dns_lan', 'address')
+local addresses = dns.address
 local address_s = type(addresses) == 'table' and table.concat(addresses, ' ') or tostring(addresses)
 if not address_s:find('/config.bigbox.home/192.168.10.1', 1, true) then fail('dns record missing: ' .. address_s) end
-eq(c:get('dhcp', 'lan'), 'dhcp', 'dhcp.lan type')
-eq(c:get('dhcp', 'lan', 'interface'), 'lan', 'dhcp interface')
-eq(c:get('dhcp', 'lan', 'start'), '20', 'dhcp start')
-eq(c:get('dhcp', 'lan', 'limit'), '50', 'dhcp limit')
-eq(c:get('dhcp', 'lan', 'leasetime'), '6h', 'dhcp leasetime')
 
-eq(c:get('firewall', 'defaults'), 'defaults', 'firewall defaults type')
-eq(c:get('firewall', 'defaults', 'input'), 'REJECT', 'firewall defaults input')
-eq(c:get('firewall', 'zone_lan'), 'zone', 'lan zone type')
-eq(c:get('firewall', 'zone_lan', 'name'), 'lan', 'lan zone name')
-assert_list(c:get('firewall', 'zone_lan', 'network'), { 'lan' }, 'lan zone networks')
-eq(c:get('firewall', 'zone_wan', 'masq'), '1', 'wan zone masq')
-eq(c:get('firewall', 'zone_wan', 'mtu_fix'), '1', 'wan zone mtu_fix')
-eq(c:get('firewall', 'fwd_lan_to_wan_1'), 'forwarding', 'forwarding type')
-eq(c:get('firewall', 'fwd_lan_to_wan_1', 'src'), 'lan', 'forwarding src')
-eq(c:get('firewall', 'fwd_lan_to_wan_1', 'dest'), 'wan', 'forwarding dest')
+local _dhcp_sec, dhcp_lan = section_by_name('dhcp', name_ctx:section('dhcp', 'lan'), 'dhcp')
+eq(dhcp_lan.interface, 'lan', 'dhcp interface')
+eq(dhcp_lan.instance, dns_sec, 'dhcp instance')
+eq(dhcp_lan.start, '20', 'dhcp start')
+eq(dhcp_lan.limit, '50', 'dhcp limit')
+eq(dhcp_lan.leasetime, '6h', 'dhcp leasetime')
 
+local _fw_defaults, fw_defaults = section_by_name('firewall', 'defaults', 'defaults')
+eq(fw_defaults.input, 'REJECT', 'firewall defaults input')
+local _zone_lan_sec, zone_lan = find_firewall_zone('lan')
+eq(zone_lan.name, 'lan', 'lan zone name')
+assert_list(zone_lan.network, { 'lan' }, 'lan zone networks')
+local _zone_wan_sec, zone_wan = find_firewall_zone('wan')
+eq(zone_wan.masq, '1', 'wan zone masq')
+eq(zone_wan.mtu_fix, '1', 'wan zone mtu_fix')
+local _fwd_sec, fwd = find_firewall_forwarding('lan', 'wan')
+eq(fwd.src, 'lan', 'forwarding src')
+eq(fwd.dest, 'wan', 'forwarding dest')
+
+assert_no_devicecode_metadata()
 print('openwrt network provider minimal apply: ok')
 LUA
 

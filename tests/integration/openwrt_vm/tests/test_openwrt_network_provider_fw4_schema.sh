@@ -236,6 +236,8 @@ table.sort(sections)
 for _, section in ipairs(sections) do
   absent(c:get('firewall', section, 'devicecode_managed'), 'firewall.' .. section .. '.devicecode_managed')
   absent(c:get('firewall', section, 'devicecode_owner'), 'firewall.' .. section .. '.devicecode_owner')
+  absent(c:get('firewall', section, 'devicecode_semantic_id'), 'firewall.' .. section .. '.devicecode_semantic_id')
+  absent(c:get('firewall', section, 'devicecode_role'), 'firewall.' .. section .. '.devicecode_role')
 end
 
 -- The higher-level product config no longer models disable_ipv6 as a firewall
