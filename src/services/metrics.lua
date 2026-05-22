@@ -556,7 +556,7 @@ function M.start(conn, opts)
 	end)
 
 	svc:obs_log('info', 'waiting for filesystem capability')
-	local fs_listener = cap_sdk.new_cap_listener(conn, 'fs', 'configs')
+	local fs_listener = cap_sdk.new_cap_listener(conn, 'fs', 'credentials')
 	local fs_cap, cap_err = fs_listener:wait_for_cap()
 	fs_listener:close()
 	if not fs_cap then
