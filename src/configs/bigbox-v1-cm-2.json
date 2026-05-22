@@ -137,7 +137,8 @@
       "platform": {},
       "power": {},
       "usb": {},
-      "modemcard": {}
+      "modemcard": {},
+      "sysmon": {}
     }
   },
   "net": {
