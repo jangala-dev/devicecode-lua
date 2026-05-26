@@ -72,6 +72,25 @@ function tests.test_commit_converts_values_and_runs_restart_commands()
 	end)
 end
 
+
+function tests.test_start_accepts_already_started_owner_scope_from_caller_scope()
+	fibers.run(function (scope)
+		local owner = ok(scope:child())
+		local hold_tx, hold_rx = mailbox.new(1)
+		ok(owner:spawn(function () fibers.perform(hold_rx:recv_op()) end))
+
+		local mgr = ok(uci_manager.new({
+			cursor = fake_cursor({}),
+			run_cmd = function () return true, nil end,
+		}))
+
+		local started, err = mgr:start(owner)
+		ok(started, err)
+		owner:cancel('test_done')
+		hold_tx:close('test_done')
+	end)
+end
+
 function tests.test_queue_full_is_reported_without_admission()
 	fibers.run(function ()
 		local mgr = ok(uci_manager.new({ queue_len = 0, cursor = fake_cursor({}) }))

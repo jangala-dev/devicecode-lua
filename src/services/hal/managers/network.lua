@@ -151,6 +151,7 @@ function M.apply_config_op(config)
 		local driver, err = driver_mod.new(config or {}, {
 			cap_emit_ch = state.cap_emit_ch,
 			logger = state.logger,
+			owner_scope = state.scope,
 		})
 		if not driver then return op.always(false, err or 'network driver create failed') end
 		if state.driver and type(state.driver.terminate) == 'function' then

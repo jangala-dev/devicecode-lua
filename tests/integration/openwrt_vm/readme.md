@@ -61,8 +61,9 @@ The default test target currently checks:
 ```text
 OpenWrt baseline tools and state
 veth, IFB, HTB, fq_codel and ingress qdisc support
-Lua UCI and Devicecode UCI manager behaviour
-network provider apply/snapshot/observer behaviour
+Lua UCI and Devicecode UCI manager behaviour, including async activation ownership
+network provider apply/snapshot/observer behaviour, including async OpenWrt activation contract
+static scan for fibres-unaware OS/IO calls in NET/OpenWrt HAL paths
 VLAN/MWAN/shaping provider behaviour
 MWAN3 live-weight updates via iptables-restore --noflush
 SCP copy to and from the VM

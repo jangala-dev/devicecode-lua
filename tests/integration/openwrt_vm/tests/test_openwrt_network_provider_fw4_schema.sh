@@ -32,6 +32,7 @@ package.path = table.concat({
 }, ';')
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local uci = require 'uci'
 local provider_loader = require 'services.hal.backends.network.provider'
 local perform = fibers.perform
@@ -51,6 +52,16 @@ local function contains(list, needle)
   for i = 1, #list do if list[i] == needle then return true end end
   return false
 end
+local function wait_until(pred, timeout_s, label)
+  local deadline = fibers.now() + (timeout_s or 1)
+  while fibers.now() < deadline do
+    if pred() then return true end
+    perform(sleep.sleep_op(0.01))
+  end
+  if pred() then return true end
+  fail(label or 'condition was not satisfied before timeout')
+end
+
 local function mkdir_p(path)
   local ok = os.execute("mkdir -p '" .. path .. "'")
   if ok ~= true and ok ~= 0 then error('mkdir failed for ' .. path) end
@@ -207,6 +218,8 @@ fibers.run(function(_scope)
 
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
+  assert(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
+  wait_until(function() return #restarts == 3 end, 1, 'activation commands should run')
   provider:terminate('test complete')
 end)
 

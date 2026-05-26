@@ -860,19 +860,40 @@ function M.new(opts)
 	return mgr
 end
 
-function Manager:start(scope)
+function Manager:start(owner_scope)
 	if self._closed then return nil, 'closed' end
 	if self._scope then return true, nil end
-	scope = scope or fibers.current_scope()
-	if not scope then return nil, 'scope required' end
-	self._scope = scope
-	scope:finally(function (_, status, primary)
+	owner_scope = owner_scope or fibers.current_scope()
+	if not owner_scope then return nil, 'owner scope required' end
+
+	-- The UCI manager is long-lived owned work under the supplied lifetime
+	-- scope.  Do not install finalisers on owner_scope here: lua-fibers only
+	-- permits scope:finally on an already-started scope from inside that same
+	-- scope.  Provider apply calls may start the manager from a request fibre,
+	-- so create a private child scope and install its finaliser before it starts.
+	local child, cerr = owner_scope:child()
+	if not child then return nil, cerr or 'uci manager scope create failed' end
+
+	self._scope = child
+	child:finally(function (_, status, primary)
 		self:terminate(primary or status or 'uci manager closed')
 	end)
-	local aok, aerr = self._activation:start(scope)
-	if aok ~= true then return nil, aerr or 'activation runner start failed' end
-	local ok, err = scope:spawn(function (worker_scope) self:_run(worker_scope) end)
-	if ok ~= true then return nil, err or 'uci manager spawn failed' end
+
+	local aok, aerr = self._activation:start(child)
+	if aok ~= true then
+		self._scope = nil
+		child:cancel(aerr or 'activation runner start failed')
+		return nil, aerr or 'activation runner start failed'
+	end
+
+	local ok, err = child:spawn(function (worker_scope) self:_run(worker_scope) end)
+	if ok ~= true then
+		self._activation:terminate(err or 'uci manager spawn failed')
+		self._scope = nil
+		child:cancel(err or 'uci manager spawn failed')
+		return nil, err or 'uci manager spawn failed'
+	end
+
 	return true, nil
 end
 
@@ -1355,9 +1376,12 @@ end
 function Manager:terminate(reason)
 	if self._closed then return true, nil end
 	self._closed = true
-	if self._activation then self._activation:terminate(reason or 'uci manager terminated') end
-	self._tx:close(reason or 'uci manager terminated')
+	local why = reason or 'uci manager terminated'
+	if self._activation then self._activation:terminate(why) end
+	self._tx:close(why)
+	local scope = self._scope
 	self._scope = nil
+	if scope then scope:cancel(why) end
 	return true, nil
 end
 

@@ -20,12 +20,23 @@ package.path = table.concat({
 }, ';')
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local uci = require 'uci'
 local provider_loader = require 'services.hal.backends.network.provider'
 local perform = fibers.perform
 
 local function fail(msg) error(msg, 2) end
 local function eq(a,b,msg) if a ~= b then fail((msg or 'values differ') .. ': expected '..tostring(b)..', got '..tostring(a)) end end
+local function wait_until(pred, timeout_s, label)
+  local deadline = fibers.now() + (timeout_s or 1)
+  while fibers.now() < deadline do
+    if pred() then return true end
+    perform(sleep.sleep_op(0.01))
+  end
+  if pred() then return true end
+  fail(label or 'condition was not satisfied before timeout')
+end
+
 local function mkdir_p(path) local ok = os.execute("mkdir -p '"..path.."'"); if ok ~= true and ok ~= 0 then fail('mkdir failed') end end
 
 local tmp = '/tmp/dc-network-provider-advanced'
@@ -97,6 +108,8 @@ fibers.run(function()
   eq(plan.plan.domains.multiwan.status, 'implemented', 'mwan domain')
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result.ok == true, result.err)
+  assert(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
+  wait_until(function() return #restarts == 3 end, 1, 'activation commands should run')
   local speed = perform(provider:speedtest_op({ interface='wan_a', device='wwan0' }))
   eq(speed.peak_mbps, 55, 'speedtest fake result')
   local live = perform(provider:apply_live_weights_op({ policy='balanced', members={{link_id='gsm_a', interface='wan_a', metric=1, weight=80},{link_id='gsm_b', interface='wan_b', metric=1, weight=20}}, persist=true }))

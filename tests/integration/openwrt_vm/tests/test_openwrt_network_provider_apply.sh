@@ -25,6 +25,7 @@ package.path = table.concat({
 }, ';')
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local bus = require 'bus'
 local trie = require 'trie'
 local uci = require 'uci'
@@ -47,6 +48,16 @@ local function assert_list(v, expected, label)
   if type(v) ~= 'table' then fail((label or 'list') .. ' should be a table, got ' .. type(v)) end
   eq(#v, #expected, (label or 'list') .. ' length')
   for i = 1, #expected do eq(v[i], expected[i], (label or 'list') .. '[' .. i .. ']') end
+end
+
+local function wait_until(pred, timeout_s, label)
+  local deadline = fibers.now() + (timeout_s or 1)
+  while fibers.now() < deadline do
+    if pred() then return true end
+    perform(sleep.sleep_op(0.01))
+  end
+  if pred() then return true end
+  fail(label or 'condition was not satisfied before timeout')
 end
 
 local function mkdir_p(path)
@@ -160,6 +171,9 @@ fibers.run(function(_scope)
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
   eq(result.backend, 'openwrt', 'backend')
   eq(result.intent_rev, 101, 'intent_rev')
+  assert(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
+  eq(result.activation.commands, 3, 'activation command count')
+  wait_until(function() return #restarts == 3 end, 1, 'activation commands should run')
 
   provider:terminate('test complete')
 end)

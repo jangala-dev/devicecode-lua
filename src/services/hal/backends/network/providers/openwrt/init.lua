@@ -1146,6 +1146,7 @@ function M.new(config, opts)
 		_scope = nil,
 		_uci_manager = config.uci_manager,
 		_external_uci_manager = config.uci_manager ~= nil,
+		_owner_scope = opts.owner_scope or config.owner_scope or fibers.current_scope(),
 		_observer = nil,
 		cap_emit_ch = opts.cap_emit_ch or config.cap_emit_ch,
 		logger = opts.logger or config.logger,
@@ -1189,15 +1190,22 @@ function Provider:_manager()
 	return mgr, nil
 end
 
+function Provider:_owner()
+	if self._owner_scope then return self._owner_scope end
+	local scope = fibers.current_scope()
+	if scope then self._owner_scope = scope end
+	return self._owner_scope
+end
+
 function Provider:_ensure_started()
 	local mgr, err = self:_manager()
 	if not mgr then return nil, err end
-	local scope = fibers.current_scope()
-	if not scope then return nil, 'current scope required' end
+	local scope = self:_owner()
+	if not scope then return nil, 'provider owner scope required' end
 	if self._scope == nil then
-		self._scope = scope
 		local ok, serr = mgr:start(scope)
 		if ok ~= true then return nil, serr end
+		self._scope = scope
 	end
 	return mgr, nil
 end
@@ -1234,8 +1242,8 @@ end
 
 function Provider:_ensure_observer()
 	if self._observer then return self._observer, nil end
-	local scope = fibers.current_scope()
-	if not scope then return nil, 'current scope required' end
+	local scope = self:_owner()
+	if not scope then return nil, 'provider owner scope required' end
 	local obs, err = observer_mod.new({
 		logger = self.logger,
 		socket_path = self.config.observer_socket_path or self.config.hotplug_socket_path or '/var/run/devicecode-net-observe.sock',
