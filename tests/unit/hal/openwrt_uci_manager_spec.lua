@@ -320,4 +320,43 @@ function tests.test_manager_creates_missing_package_files_before_transaction()
 	end)
 end
 
+function tests.test_async_restart_command_replies_without_waiting_for_command_completion()
+	fibers.run(function(scope)
+		local calls = {}
+		local sync_restarts = {}
+		local async_restarts = {}
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function (_, _pkg) return {} end
+		local mgr = ok(uci_manager.new({
+			cursor = cursor,
+			debounce_s = 0.01,
+			run_cmd = function (argv)
+				sync_restarts[#sync_restarts + 1] = table.concat(argv, ' ')
+				return true, nil
+			end,
+			run_cmd_async = function (argv)
+				async_restarts[#async_restarts + 1] = table.concat(argv, ' ')
+				return true, nil
+			end,
+		}))
+		ok(mgr:start(scope))
+
+		local result = { fibers.perform(mgr:transaction_op({
+			packages = { 'network' },
+			records = {
+				{
+					config = 'network',
+					changes = { { op = 'set', config = 'network', section = 'lan', option = 'proto', value = 'static' } },
+					restart_cmds = { { kind = 'reload', target = 'network', wait = false } },
+				},
+			},
+		})) }
+
+		eq(result[1].ok, true)
+		eq(#sync_restarts, 0)
+		eq(#async_restarts, 1)
+		eq(async_restarts[1], '/etc/init.d/network reload')
+	end)
+end
+
 return tests

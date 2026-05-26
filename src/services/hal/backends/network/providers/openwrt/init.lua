@@ -23,6 +23,21 @@ local M = {}
 local Provider = {}
 Provider.__index = Provider
 
+local function elapsed_ms(t0)
+	if not t0 then return nil end
+	return math.floor(((fibers.now() - t0) * 1000) + 0.5)
+end
+
+local function log_provider(self, level, payload)
+	local logger = self and self.logger
+	if logger and type(logger[level]) == 'function' then
+		payload = payload or {}
+		payload.component = payload.component or 'provider'
+		payload.provider = payload.provider or 'openwrt'
+		logger[level](logger, payload)
+	end
+end
+
 local read_uci_packages
 local snapshot_from_packages
 local build_observed_snapshot
@@ -1161,6 +1176,7 @@ function Provider:_manager()
 		allow_fake = self.config.allow_fake_uci == true,
 		debounce_s = self.config.debounce_s or 0.02,
 		run_cmd = self.config.run_cmd,
+		logger = self.logger,
 	})
 	if not mgr then return nil, err end
 	self._uci_manager = mgr
@@ -1270,28 +1286,87 @@ end
 
 function Provider:apply_op(req)
 	return fibers.run_scope_op(function()
-		if self.terminated then return { ok = false, err = 'provider terminated', backend = 'openwrt' } end
+		local t0 = fibers.now()
+		local opts = is_plain_table(req and req.opts) and req.opts or {}
+		local trace = {
+			generation = opts.generation,
+			apply_id = opts.apply_id,
+		}
+		log_provider(self, 'info', {
+			what = 'openwrt_apply_begin',
+			generation = trace.generation,
+			apply_id = trace.apply_id,
+		})
+
+		if self.terminated then
+			log_provider(self, 'warn', {
+				what = 'openwrt_apply_done',
+				ok = false,
+				err = 'provider terminated',
+				elapsed_ms = elapsed_ms(t0),
+				generation = trace.generation,
+				apply_id = trace.apply_id,
+			})
+			return { ok = false, err = 'provider terminated', backend = 'openwrt' }
+		end
 		local intent = req and (req.intent or req.desired or req)
 		local valid = validate_intent(intent)
-		if not valid or valid.ok ~= true then return valid end
+		if not valid or valid.ok ~= true then
+			log_provider(self, 'warn', {
+				what = 'openwrt_apply_validate_failed',
+				err = valid and valid.err or 'invalid intent',
+				elapsed_ms = elapsed_ms(t0),
+				generation = trace.generation,
+				apply_id = trace.apply_id,
+			})
+			return valid
+		end
+		trace.rev = intent.rev
+
+		local phase = fibers.now()
 		local mgr, merr = self:_ensure_started()
+		log_provider(self, mgr and 'debug' or 'warn', {
+			what = 'openwrt_apply_manager_ready',
+			ok = mgr ~= nil,
+			err = merr,
+			elapsed_ms = elapsed_ms(phase),
+			apply_elapsed_ms = elapsed_ms(t0),
+			generation = trace.generation,
+			apply_id = trace.apply_id,
+		})
 		if not mgr then return { ok = false, err = merr or 'uci manager unavailable', backend = 'openwrt' } end
 
+		phase = fibers.now()
 		local name_ctx = names_mod.allocate(intent, self.config)
 		local n_changes, n_known, segment_to_ifaces = build_network_changes_v2(intent, self.config, name_ctx)
 		local d_changes, d_known = build_dhcp_changes_v2(intent, name_ctx, segment_to_ifaces)
 		local f_changes, f_known = build_firewall_changes_v2(intent, segment_to_ifaces, name_ctx)
 		local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent, name_ctx)
+		log_provider(self, 'debug', {
+			what = 'openwrt_apply_built_uci',
+			elapsed_ms = elapsed_ms(phase),
+			apply_elapsed_ms = elapsed_ms(t0),
+			generation = trace.generation,
+			apply_id = trace.apply_id,
+			network_changes = #n_changes,
+			dhcp_changes = #d_changes,
+			firewall_changes = #f_changes,
+			mwan3_changes = #m_changes,
+			network_sections = count_keys(n_known),
+			dhcp_sections = count_keys(d_known),
+			firewall_sections = count_keys(f_known),
+			mwan3_sections = count_keys(m_known),
+		})
 
 		local records = {
 			transaction_record('network', n_changes, n_known, nil, {
-				{ kind = 'reload', target = 'network' },
+				{ kind = 'reload', target = 'network', wait = false },
 			}),
 			transaction_record('dhcp', d_changes, d_known, nil, {
-				{ kind = 'restart', target = 'dnsmasq' },
+				{ kind = 'restart', target = 'dnsmasq', wait = false },
 			}),
 			transaction_record('firewall', f_changes, f_known, nil, {
-				{ kind = 'restart', target = 'firewall' },
+				{ kind = 'restart', target = 'firewall', wait = false },
 			}),
 			-- Always include mwan3 so stale generated multi-WAN state is removed when
 			-- WAN/multi-WAN is disabled or a member disappears.  Structural apply still
@@ -1299,11 +1374,39 @@ function Provider:apply_op(req)
 			transaction_record('mwan3', m_changes, m_known, nil, {}),
 		}
 		local packages = { 'network', 'dhcp', 'firewall', 'mwan3' }
+		phase = fibers.now()
+		log_provider(self, 'info', {
+			what = 'openwrt_apply_uci_transaction_begin',
+			generation = trace.generation,
+			apply_id = trace.apply_id,
+			packages = packages,
+			apply_elapsed_ms = elapsed_ms(t0),
+		})
 		local tx_result, admitted = fibers.perform(mgr:transaction_op({
 			records = records,
 			packages = packages,
 			rollback = true,
+		}, {
+			trace = {
+				what = 'net_apply',
+				generation = trace.generation,
+				apply_id = trace.apply_id,
+			},
 		}))
+		local tx_elapsed = elapsed_ms(phase)
+		log_provider(self, tx_result and tx_result.ok == true and 'info' or 'warn', {
+			what = 'openwrt_apply_uci_transaction_done',
+			generation = trace.generation,
+			apply_id = trace.apply_id,
+			ok = tx_result and tx_result.ok == true,
+			admitted = admitted,
+			status = tx_result and tx_result.status or 'missing_result',
+			err = tx_result and tx_result.err or nil,
+			failed_step = tx_result and tx_result.failed_step or nil,
+			failed_config = tx_result and tx_result.failed_config or nil,
+			elapsed_ms = tx_elapsed,
+			apply_elapsed_ms = elapsed_ms(t0),
+		})
 		if not tx_result or tx_result.ok ~= true then
 			return {
 				ok = false,
@@ -1324,13 +1427,29 @@ function Provider:apply_op(req)
 		local shaping_result = nil
 		local shaping_request = build_shaping_request(intent, self.config)
 		if shaping_request and shaping_request.enabled == true then
+			phase = fibers.now()
+			log_provider(self, 'info', {
+				what = 'openwrt_apply_shaping_begin',
+				generation = trace.generation,
+				apply_id = trace.apply_id,
+				apply_elapsed_ms = elapsed_ms(t0),
+			})
 			shaping_result = shaper_mod.apply(shaping_request, { run_cmd = self.shaper_run_cmd })
+			log_provider(self, shaping_result and shaping_result.ok == true and 'info' or 'warn', {
+				what = 'openwrt_apply_shaping_done',
+				generation = trace.generation,
+				apply_id = trace.apply_id,
+				ok = shaping_result and shaping_result.ok == true,
+				err = shaping_result and shaping_result.err or nil,
+				elapsed_ms = elapsed_ms(phase),
+				apply_elapsed_ms = elapsed_ms(t0),
+			})
 			if not shaping_result or shaping_result.ok ~= true then
 				return { ok = false, err = 'traffic shaping apply failed: ' .. tostring(shaping_result and shaping_result.err or 'unknown'), backend = 'openwrt', partial = true }
 			end
 		end
 
-		return {
+		local result = {
 			ok = true,
 			applied = true,
 			changed = true,
@@ -1342,12 +1461,26 @@ function Provider:apply_op(req)
 			openwrt_names = name_ctx:snapshot(),
 			shaping = shaping_result,
 		}
+		log_provider(self, 'info', {
+			what = 'openwrt_apply_done',
+			ok = true,
+			generation = trace.generation,
+			apply_id = trace.apply_id,
+			elapsed_ms = elapsed_ms(t0),
+		})
+		return result
 	end):wrap(function(status, _report, result)
-		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
+		if status ~= 'ok' then
+			log_provider(self, 'warn', {
+				what = 'openwrt_apply_done',
+				ok = false,
+				err = tostring(result or status),
+			})
+			return { ok = false, err = tostring(result or status), backend = 'openwrt' }
+		end
 		return result
 	end)
 end
-
 
 local function append_error(list, err)
 	if err == nil then return end

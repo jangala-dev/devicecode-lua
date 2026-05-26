@@ -32,6 +32,11 @@ local M = {}
 
 local function now() return fibers.now() end
 
+local function elapsed_ms(t0)
+	if not t0 then return nil end
+	return math.floor(((now() - t0) * 1000) + 0.5)
+end
+
 local function new_service_id(name)
 	return tostring(name or 'net')
 end
@@ -240,6 +245,8 @@ local function start_apply_for_intent(state, intent, reason)
 	local ok_pub, pub_err = publish_snapshot(state)
 	if ok_pub ~= true then return nil, pub_err end
 
+	obs_event(state.svc, 'apply_started', { generation = generation, apply_id = apply_id, rev = intent.rev, reason = reason })
+
 	local handle, err = apply_runtime.start_apply {
 		lifetime_scope = state.scope,
 		reaper_scope = state.scope,
@@ -409,7 +416,8 @@ local function handle_apply_done(state, ev)
 
 	mark_apply_dirty(state)
 	set_status(state.svc, apply_ok and 'running' or 'degraded', reason and { reason = reason } or nil)
-	obs_event(state.svc, 'apply_completed', { generation = ev.generation, apply_id = ev.apply_id, ok = apply_ok, reason = reason })
+	local started_at = state.model:snapshot().apply and state.model:snapshot().apply.started_at or nil
+	obs_event(state.svc, 'apply_completed', { generation = ev.generation, apply_id = ev.apply_id, ok = apply_ok, reason = reason, elapsed_ms = elapsed_ms(started_at) })
 
 	local ok_pub, pub_err = publish_snapshot(state)
 	if ok_pub ~= true then return nil, pub_err end
