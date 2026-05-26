@@ -1,6 +1,8 @@
 -- tests/unit/hal/openwrt_uci_manager_spec.lua
 
 local fibers = require 'fibers'
+local mailbox = require 'fibers.mailbox'
+local queue = require 'devicecode.support.queue'
 
 local uci_manager = require 'services.hal.backends.openwrt.uci_manager'
 local probe = require 'tests.support.bus_probe'
@@ -320,22 +322,19 @@ function tests.test_manager_creates_missing_package_files_before_transaction()
 	end)
 end
 
-function tests.test_async_restart_command_replies_without_waiting_for_command_completion()
+function tests.test_activation_command_replies_without_waiting_for_command_completion()
 	fibers.run(function(scope)
 		local calls = {}
-		local sync_restarts = {}
-		local async_restarts = {}
+		local activation_restarts = {}
+		local unblock_tx, unblock_rx = mailbox.new(1, { full = 'reject_newest' })
 		local cursor = fake_cursor(calls)
 		cursor.get_all = function (_, _pkg) return {} end
 		local mgr = ok(uci_manager.new({
 			cursor = cursor,
 			debounce_s = 0.01,
 			run_cmd = function (argv)
-				sync_restarts[#sync_restarts + 1] = table.concat(argv, ' ')
-				return true, nil
-			end,
-			run_cmd_async = function (argv)
-				async_restarts[#async_restarts + 1] = table.concat(argv, ' ')
+				activation_restarts[#activation_restarts + 1] = table.concat(argv, ' ')
+				fibers.perform(unblock_rx:recv_op())
 				return true, nil
 			end,
 		}))
@@ -353,9 +352,10 @@ function tests.test_async_restart_command_replies_without_waiting_for_command_co
 		})) }
 
 		eq(result[1].ok, true)
-		eq(#sync_restarts, 0)
-		eq(#async_restarts, 1)
-		eq(async_restarts[1], '/etc/init.d/network reload')
+		ok(result[1].activation and result[1].activation.state == 'scheduled', 'activation should be scheduled')
+		ok(probe.wait_until(function () return #activation_restarts == 1 end, { timeout = 0.5 }), 'activation runner should start command')
+		eq(activation_restarts[1], '/etc/init.d/network reload')
+		queue.try_admit_now(unblock_tx, true)
 	end)
 end
 

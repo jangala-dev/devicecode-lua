@@ -1404,6 +1404,7 @@ function Provider:apply_op(req)
 			err = tx_result and tx_result.err or nil,
 			failed_step = tx_result and tx_result.failed_step or nil,
 			failed_config = tx_result and tx_result.failed_config or nil,
+				activation = tx_result and tx_result.activation or nil,
 			elapsed_ms = tx_elapsed,
 			apply_elapsed_ms = elapsed_ms(t0),
 		})
@@ -1457,6 +1458,7 @@ function Provider:apply_op(req)
 			intent_rev = intent.rev,
 			packages = packages,
 			transaction = tx_result,
+				activation = tx_result and tx_result.activation or nil,
 			multiwan = m_plan,
 			openwrt_names = name_ctx:snapshot(),
 			shaping = shaping_result,
@@ -1466,6 +1468,7 @@ function Provider:apply_op(req)
 			ok = true,
 			generation = trace.generation,
 			apply_id = trace.apply_id,
+				activation = result.activation,
 			elapsed_ms = elapsed_ms(t0),
 		})
 		return result
