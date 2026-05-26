@@ -1157,6 +1157,12 @@ function M.new(config, opts)
 		shaper_run_cmd = config.shaper_run_cmd or config.run_cmd,
 		speedtest_run_cmd = config.speedtest_run_cmd,
 	}, Provider)
+	log_provider(self, 'warn', {
+		what = 'openwrt_network_provider_instrumented_build',
+		marker = 'owned_activation_runner_v1',
+		activation_runner = 'owned',
+		confdir = cfg.confdir or cfg.uci_confdir or '/etc/config',
+	})
 	return self, nil
 end
 

@@ -79,6 +79,12 @@ local DIAGNOSTICS_METHODS = {
 }
 
 local function control_loop_for(kind, ch, methods)
+	if tostring(kind) == 'config' then
+		log('warn', {
+			what = 'network_config_control_instrumented_build',
+			marker = 'owned_activation_runner_v1',
+		})
+	end
 	control_loop.run_request_loop(ch, methods, state.logger, 'network_' .. tostring(kind))
 end
 
