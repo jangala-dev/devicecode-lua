@@ -27,6 +27,7 @@ local fibers = require 'fibers'
 local sleep = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 local queue = require 'devicecode.support.queue'
+local file = require 'fibers.io.file'
 
 local M = {}
 local Manager = {}
@@ -76,15 +77,18 @@ end
 
 local function ensure_pkg_file(confdir, pkg)
 	if type(confdir) ~= 'string' or confdir == '' or type(pkg) ~= 'string' or pkg == '' then return true, nil end
-	local ok = os.execute("mkdir -p '" .. confdir:gsub("'", "'\\''") .. "'")
-	if ok ~= true and ok ~= 0 then return nil, 'failed to create UCI confdir ' .. confdir end
 	local path = confdir .. '/' .. pkg
-	local f = io.open(path, 'rb')
+
+	local f = file.open(path, 'r')
 	if f then f:close(); return true, nil end
-	local nf, err = io.open(path, 'wb')
-	if not nf then return nil, tostring(err) end
-	nf:write('')
-	nf:close()
+
+	local err
+	f, err = file.open(path, 'w')
+	if not f then return nil, tostring(err) end
+	local ok, werr = fibers.perform(f:write_op(''))
+	local cok, cerr = f:close()
+	if ok == false or ok == nil then return nil, tostring(werr or 'failed to create UCI package file ' .. path) end
+	if cok == false or cok == nil then return nil, tostring(cerr or 'failed to close UCI package file ' .. path) end
 	return true, nil
 end
 
@@ -659,6 +663,10 @@ end
 
 function Manager:_ensure_packages(packages)
 	if self._fake == true then return true, nil end
+	if type(self._confdir) == 'string' and self._confdir ~= '' then
+		local ok, err = file.mkdir_p(self._confdir)
+		if ok ~= true then return nil, 'failed to create UCI confdir ' .. self._confdir .. ': ' .. tostring(err) end
+	end
 	for _, pkg in ipairs(packages or {}) do
 		local ok, err = ensure_pkg_file(self._confdir, pkg)
 		if ok ~= true then return nil, err end

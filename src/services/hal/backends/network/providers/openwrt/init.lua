@@ -188,20 +188,6 @@ local function set_option(changes, config, section, option, value)
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = option, value = value }
 end
 
-local function ensure_pkg_file(confdir, pkg)
-	if type(confdir) ~= 'string' or confdir == '' then return true, nil end
-	local ok = os.execute("mkdir -p '" .. confdir:gsub("'", "'\\''") .. "'")
-	if ok ~= true and ok ~= 0 then return nil, 'failed to create UCI confdir ' .. confdir end
-	local path = confdir .. '/' .. pkg
-	local f = io.open(path, 'rb')
-	if f then f:close(); return true, nil end
-	local nf, err = io.open(path, 'wb')
-	if not nf then return nil, tostring(err) end
-	nf:write('# devicecode generated test config\n')
-	nf:close()
-	return true, nil
-end
-
 local function segment_zone_name(seg_id, seg)
 	local fw = is_plain_table(seg and seg.firewall) and seg.firewall or {}
 	if type(fw.zone) == 'string' and fw.zone ~= '' then return fw.zone end
@@ -1190,13 +1176,6 @@ function Provider:_ensure_started()
 		self._scope = scope
 		local ok, serr = mgr:start(scope)
 		if ok ~= true then return nil, serr end
-	end
-	local confdir = self.config.confdir or self.config.uci_confdir or '/etc/config'
-	if mgr._fake ~= true then
-		for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
-			local ok, eerr = ensure_pkg_file(confdir, pkg)
-			if ok ~= true then return nil, eerr end
-		end
 	end
 	return mgr, nil
 end
