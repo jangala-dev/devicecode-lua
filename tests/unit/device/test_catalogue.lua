@@ -102,7 +102,18 @@ function tests.test_fabric_stage_requires_target_and_rejects_receiver()
 	cat, err = config.to_catalogue(cfg)
 	assert_nil(err)
 	assert_not_nil(cat.components.mcu.actions['stage-update'])
+	assert_eq(cat.components.mcu.actions['stage-update'].timeout, 15 * 60)
 end
+
+function tests.test_default_mcu_stage_update_has_long_timeout()
+	local cat = assert(config.to_catalogue(nil))
+	local action = cat.components.mcu.actions['stage-update']
+	assert_not_nil(action)
+	assert_eq(action.kind, 'fabric_stage')
+	assert_eq(action.chunk_size, 1024)
+	assert_eq(action.timeout, 15 * 60)
+end
+
 function tests.test_catalogue_material_comparison_is_stable_for_copies()
 	local a = assert(config.to_catalogue(sample_config()))
 	local b = catalogue.copy(a)

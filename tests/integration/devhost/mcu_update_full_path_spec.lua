@@ -530,7 +530,7 @@ local function start_ui(scope, bus, port, roots)
             service_id = 'ui',
             auth_opts = {
                 users = {
-                    tester = { password = 'test-password', principal = { kind = 'user', id = 'tester' } },
+                    tester = { password = 'test-password', principal = { kind = 'user', id = 'tester', roles = { 'admin' } } },
                 },
             },
             bus = bus,
@@ -652,7 +652,8 @@ local function stop_instance(inst, reason)
     end
 end
 
-local function run_http_upload(scope, port, body)
+local function run_http_upload(scope, port, body, headers)
+    headers = headers or {}
     local driver = assert(http_driver_mod.new({ label = 'mcu-full-path-http-client' }))
     assert_true(driver:start(scope), 'HTTP upload client driver should start')
     local status, resp_body = fibers.perform(driver:run_op('mcu-full-path-upload', function ()
@@ -660,6 +661,9 @@ local function run_http_upload(scope, port, body)
         req.headers:upsert(':method', 'POST')
         req.headers:upsert('content-type', 'application/octet-stream')
         req.headers:upsert('content-length', tostring(#body))
+        for k, v in pairs(headers) do
+            req.headers:upsert(k, tostring(v))
+        end
         req:set_body(body)
         local headers, stream = assert(req:go(8))
         local status = headers:get(':status')
@@ -717,8 +721,18 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
         log('waiting for initial canonical MCU software state')
         wait_component_software(cm5.conn, 'mcu-image-old', 'mcu-boot-1')
 
+        log('logging in through real HTTP JSON')
+        local login_status, login_body, login_decoded = run_http_json(root_scope, port, '/api/login', {
+            username = 'tester',
+            password = 'test-password',
+        })
+        assert_eq(login_status, '200', login_body)
+        assert_not_nil(login_decoded and login_decoded.session, login_body)
+        local sid = login_decoded.session.id
+        assert_not_nil(sid, 'login should return a session id')
+
         log('sending real HTTP upload')
-        local status, body = run_http_upload(root_scope, port, blob)
+        local status, body = run_http_upload(root_scope, port, blob, { ['x-session-id'] = sid })
         assert_eq(status, '200', 'upload HTTP status ' .. tostring(status) .. ': ' .. tostring(body))
         local decoded = assert(cjson.decode(body), body)
         assert_eq(decoded.status, 'ok')
@@ -730,16 +744,6 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
         assert_true(probe.wait_until(function ()
             return fake.staged and fake.staged.bytes == blob
         end, { timeout = 4.0 }), 'fake MCU should stage transferred artifact')
-
-        log('logging in through real HTTP JSON')
-        local login_status, login_body, login_decoded = run_http_json(root_scope, port, '/api/login', {
-            username = 'tester',
-            password = 'test-password',
-        })
-        assert_eq(login_status, '200', login_body)
-        assert_not_nil(login_decoded and login_decoded.session, login_body)
-        local sid = login_decoded.session.id
-        assert_not_nil(sid, 'login should return a session id')
 
         log('committing job through real HTTP JSON command route')
         local commit_status, commit_body, commit_decoded = run_http_json(

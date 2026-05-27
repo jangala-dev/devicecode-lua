@@ -253,7 +253,11 @@ end
 local function open_stream_now(path, mode)
 	local stream, err = file.open(path, mode)
 	if not stream then
-		return nil, tostring(err)
+		return nil, ('open_failed path=%s mode=%s err=%s'):format(
+			tostring(path),
+			tostring(mode),
+			tostring(err)
+		)
 	end
 	return stream, nil
 end

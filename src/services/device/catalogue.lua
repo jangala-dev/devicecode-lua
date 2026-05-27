@@ -11,6 +11,8 @@ local tablex = require 'shared.table'
 
 local M = {}
 
+local DEFAULT_FABRIC_STAGE_TIMEOUT_S = 15 * 60
+
 local copy_array = tablex.array_copy
 local copy_value = tablex.deep_copy
 local deep_equal = tablex.deep_equal
@@ -168,7 +170,7 @@ local function normalise_actions(actions, where)
 					target = target,
 					chunk_size = opt_pos_int(spec.chunk_size, where .. ': action ' .. action_name .. ' chunk_size', nil),
 					artifact_store = spec.artifact_store or 'main',
-					timeout = tonumber(spec.timeout_s) or nil,
+					timeout = tonumber(spec.timeout_s) or DEFAULT_FABRIC_STAGE_TIMEOUT_S,
 					dependency = copy_value(spec.dependency),
 				}
 			else
@@ -269,8 +271,9 @@ local function default_components()
 				['stage-update'] = {
 					kind = 'fabric_stage',
 					target = 'updater/main',
-					chunk_size = 2048,
+					chunk_size = 1024,
 					artifact_store = 'main',
+					timeout_s = DEFAULT_FABRIC_STAGE_TIMEOUT_S,
 				},
 				['commit-update'] = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'updater', 'main', 'commit-update') },
 			},

@@ -95,8 +95,9 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
 
     local seen_payload
     local seen_prepare
+    local seen_stage_opts
     local conn = {
-      call_op = function(_, topic, payload)
+      call_op = function(_, topic, payload, opts)
         assert_eq(topic[1], 'cap')
         assert_eq(topic[2], 'component')
         assert_eq(topic[4], 'rpc')
@@ -107,6 +108,7 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
         end
         if topic[5] == 'stage-update' then
           seen_payload = payload
+          seen_stage_opts = opts
           return op.always({ ok = true, public_status = 'succeeded', value = { transferred = true } }, nil)
         end
         return op.always({ ok = true }, nil)
@@ -114,7 +116,7 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
     }
 
     local backend = component_backend.new({ conn = conn, artifact_store = artifact_store, component = 'mcu' })
-    local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', metadata = { image_id = 'img-new' } }
+    local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', metadata = { image_id = 'img-new', transfer_chunk_raw = 1024 } }
 
     local staged, serr = fibers.perform(backend:stage_op(job, {}))
     assert_eq(type(staged), 'table', tostring(serr))
@@ -125,6 +127,8 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
     assert_eq(seen_payload.source, source)
     assert_eq(seen_payload.size, 12)
     assert_eq(seen_payload.digest, 'abcd')
+    assert_eq(seen_payload.chunk_size, 1024)
+    assert_eq(seen_stage_opts.timeout, false)
   end)
 end
 
