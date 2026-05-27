@@ -5,6 +5,7 @@
 -- into OpenWrt UCI packages.  NET must not require this module directly.
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local op = require 'fibers.op'
 local exec = require 'fibers.io.exec'
 local cjson = require 'cjson.safe'
@@ -26,13 +27,13 @@ Provider.__index = Provider
 local HOST_NETMASK = '255.255.255.255'
 local OWNED_PACKAGES = { 'network', 'dhcp', 'firewall', 'mwan3' }
 local ACTIVATION_COMMANDS = {
-	network = { { kind = 'reload', target = 'network', wait = false } },
-	dhcp = { { kind = 'restart', target = 'dnsmasq', wait = false } },
-	firewall = { { kind = 'restart', target = 'firewall', wait = false } },
+	network = { { kind = 'reload', target = 'network', wait = true } },
+	dhcp = { { kind = 'restart', target = 'dnsmasq', wait = true } },
+	firewall = { { kind = 'restart', target = 'firewall', wait = true } },
 	-- Always include mwan3 so stale generated multi-WAN state is removed when
 	-- WAN/multi-WAN is disabled or a member disappears.  Structural apply
 	-- restarts mwan3; live weight changes do not.
-	mwan3 = { { kind = 'restart', target = 'mwan3', wait = false } },
+	mwan3 = { { kind = 'restart', target = 'mwan3', wait = true } },
 }
 
 local function elapsed_ms(t0)
@@ -50,15 +51,59 @@ local function log_provider(self, level, payload)
 	end
 end
 
+local is_plain_table
+local sorted_keys
+
+local function run_provider_command(self, argv)
+	local runner = self and self.shaper_run_cmd
+	if type(runner) == 'function' then
+		return runner(argv)
+	end
+	local cmd = exec.command(unpack(argv))
+	local status, code = perform(cmd:run_op())
+	if status == 'exited' and code == 0 then return true, nil end
+	return nil, table.concat(argv, ' ') .. ' exited with status=' .. tostring(status) .. ' code=' .. tostring(code)
+end
+
+local function wait_for_linux_device(self, dev, opts)
+	if type(dev) ~= 'string' or dev == '' then return true, nil end
+	opts = opts or {}
+	local timeout_s = tonumber(opts.timeout_s) or 10
+	local interval_s = tonumber(opts.interval_s) or 0.1
+	local deadline = fibers.now() + timeout_s
+	local last_err = nil
+	repeat
+		local ok, err = run_provider_command(self, { 'ip', 'link', 'show', 'dev', dev })
+		if ok == true then return true, nil end
+		last_err = err
+		fibers.perform(sleep.sleep_op(interval_s))
+	until fibers.now() >= deadline
+	local ok, err = run_provider_command(self, { 'ip', 'link', 'show', 'dev', dev })
+	if ok == true then return true, nil end
+	return nil, 'network activation did not produce shaping target ' .. tostring(dev) .. ': ' .. tostring(err or last_err or 'not found')
+end
+
+local function wait_for_shaping_targets(self, shaping_request, opts)
+	local links = shaping_request and shaping_request.links or {}
+	for _, link_id in ipairs(sorted_keys(links)) do
+		local link = links[link_id]
+		if is_plain_table(link) and link.enabled ~= false then
+			local ok, err = wait_for_linux_device(self, link.iface or link.device, opts)
+			if ok ~= true then return nil, tostring(link_id) .. ': ' .. tostring(err) end
+		end
+	end
+	return true, nil
+end
+
 local read_uci_packages
 local snapshot_from_packages
 local build_observed_snapshot
 
-local function is_plain_table(v)
+function is_plain_table(v)
 	return type(v) == 'table' and getmetatable(v) == nil
 end
 
-local function sorted_keys(t)
+function sorted_keys(t)
 	local ks = {}
 	for k in pairs(t or {}) do ks[#ks + 1] = k end
 	table.sort(ks, function(a, b) return tostring(a) < tostring(b) end)
@@ -351,14 +396,26 @@ local function resolve_shaping_profile(shaping, seg)
 	return merge_tables(base, overrides), profile_name
 end
 
-local function segment_shaping_device(provider_config, seg_id, seg)
+local function segment_shaping_device(provider_config, seg_id, seg, name_ctx)
 	local trunk, base_ifname = platform_segment_trunk(provider_config)
 	local vid = segment_vlan_id(seg)
-	if trunk and base_ifname and vid then return base_ifname .. '.' .. tostring(vid) end
+	if not (trunk and base_ifname and vid) then return nil end
+
+	-- The OpenWrt provider owns Linux device naming.  For trunk-derived VLAN
+	-- segments, netifd is configured to create a named VLAN device such as
+	-- "vl-jan".  Shape that provider-owned device rather than the older
+	-- trunk-dot-VLAN convention (for example "eth0.32"), unless a legacy
+	-- compatibility switch is set explicitly.
+	if trunk.legacy_shaping_device == true or trunk.legacy_dot_vlan_shaping == true then
+		return base_ifname .. '.' .. tostring(vid)
+	end
+	if name_ctx and type(name_ctx.vlan) == 'function' then
+		return name_ctx:vlan(seg_id)
+	end
 	return nil
 end
 
-local function build_shaping_request(intent, provider_config)
+local function build_shaping_request(intent, provider_config, name_ctx)
 	local shaping = is_plain_table(intent.shaping) and intent.shaping or {}
 	if shaping.enabled ~= true then return shaping end
 	local links = {}
@@ -369,7 +426,7 @@ local function build_shaping_request(intent, provider_config)
 		if seg_shape.enabled ~= false and (seg_shape.profile or seg_shape.profile_id) then
 			local spec = resolve_shaping_profile(shaping, seg)
 			if is_plain_table(spec) and spec.enabled ~= false then
-				local iface = spec.iface or spec.device or segment_shaping_device(provider_config, seg_id, seg)
+				local iface = spec.iface or spec.device or segment_shaping_device(provider_config, seg_id, seg, name_ctx)
 				local subnet = spec.subnet or spec.cidr or segment_ipv4_cidr(seg)
 				if iface and subnet then
 					local one = copy_plain(spec)
@@ -1003,7 +1060,7 @@ function Provider:plan_op(req)
 
 	local built = build_uci_plan(intent, self.config)
 	local names = built.name_ctx:snapshot()
-	local shaping = build_shaping_request(intent, self.config)
+	local shaping = build_shaping_request(intent, self.config, built.name_ctx)
 	local domains = {
 		vlan = { status = 'implemented' },
 		shaping = { status = shaping.enabled and 'implemented' or 'not_configured' },
@@ -1147,8 +1204,32 @@ function Provider:apply_op(req)
 		self._last_openwrt_names = built.name_ctx:snapshot()
 
 		local shaping_result = nil
-		local shaping_request = build_shaping_request(intent, self.config)
+		local shaping_request = build_shaping_request(intent, self.config, built.name_ctx)
 		if shaping_request and shaping_request.enabled == true then
+			phase = fibers.now()
+			log_provider(self, 'info', {
+				what = 'openwrt_apply_shaping_wait_targets_begin',
+				generation = trace.generation,
+				apply_id = trace.apply_id,
+				apply_elapsed_ms = elapsed_ms(t0),
+			})
+			local targets_ok, targets_err = wait_for_shaping_targets(self, shaping_request, {
+				timeout_s = tonumber(self.config.shaping_target_timeout_s) or 10,
+				interval_s = tonumber(self.config.shaping_target_poll_s) or 0.1,
+			})
+			log_provider(self, targets_ok == true and 'info' or 'warn', {
+				what = 'openwrt_apply_shaping_wait_targets_done',
+				generation = trace.generation,
+				apply_id = trace.apply_id,
+				ok = targets_ok == true,
+				err = targets_err,
+				elapsed_ms = elapsed_ms(phase),
+				apply_elapsed_ms = elapsed_ms(t0),
+			})
+			if targets_ok ~= true then
+				return { ok = false, err = 'traffic shaping target unavailable: ' .. tostring(targets_err), backend = 'openwrt', partial = true }
+			end
+
 			phase = fibers.now()
 			log_provider(self, 'info', {
 				what = 'openwrt_apply_shaping_begin',

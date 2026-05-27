@@ -210,13 +210,13 @@
           "addressing": {
             "ipv4": {
               "mode": "static",
-              "cidr": "172.28.32.1/22"
+              "cidr": "172.28.32.1/24"
             }
           },
           "dhcp": {
             "enabled": true,
             "start": 10,
-            "limit": 950,
+            "limit": 240,
             "lease_time": "12h"
           },
           "dns": {

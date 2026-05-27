@@ -61,7 +61,7 @@ mkdir_p(conf)
 mkdir_p(save)
 for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
   local f = assert(io.open(conf .. '/' .. pkg, 'w'))
-  f:write('# devicecode provider async activation integration test\n')
+  f:write('# devicecode provider synchronous activation integration test\n')
   f:close()
 end
 
@@ -131,20 +131,13 @@ fibers.run(function(scope)
     result = perform(provider:apply_op({ intent = intent, opts = { generation = 44, apply_id = 7 } }))
   end)
 
-  -- The provider apply path rewrites four UCI packages, so on the VM it may take
-  -- more than a very small wall-clock budget before the transaction reply is
-  -- delivered.  The contract we care about is not sub-second completion; it is
-  -- that the reply is delivered while the first activation command is still
-  -- blocked in the owned activation runner.
-  wait_until(function() return run_started == true end, 5, 'activation runner should start first command')
+  -- Provider structural apply now owns activation completion.  The apply result
+  -- must not be reported while network/dnsmasq/firewall/mwan3 activation is
+  -- still blocked.
+  wait_until(function() return run_started == true end, 5, 'activation should start first command')
   eq(restarts[1], '/etc/init.d/network reload', 'first activation command')
-
-  wait_until(function() return result ~= nil end, 5, 'provider apply should reply while async activation command is blocked')
-  assert_true(result.ok == true, 'provider apply failed: ' .. tostring(result.err))
-  assert_true(result.transaction and result.transaction.ok == true, 'transaction should succeed')
-  assert_true(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
-  eq(result.activation.commands, 4, 'provider should schedule network, dnsmasq, firewall and mwan3 activation')
-  eq(run_finished, false, 'provider apply must not wait for activation command completion')
+  perform(sleep.sleep_op(0.05))
+  assert_true(result == nil, 'provider apply must wait for activation command completion')
 
   local c = assert(uci.cursor(conf, save))
   if type(c.load) == 'function' then pcall(function() c:load('network') end) end
@@ -152,20 +145,20 @@ fibers.run(function(scope)
   eq(c:get('network', 'lan', 'proto'), 'static', 'network.lan proto committed before activation completion')
 
   assert(unblock_tx:send(true))
-  wait_until(function() return run_finished == true end, 1, 'first activation command should finish after release')
+  wait_until(function() return result ~= nil end, 5, 'provider apply should complete after activation is released')
+  assert_true(result.ok == true, 'provider apply failed: ' .. tostring(result.err))
+  assert_true(result.transaction and result.transaction.ok == true, 'transaction should succeed')
+  assert_true(result.activation == nil, 'synchronous provider activation should not return a scheduled activation token')
 
-  -- Remaining activation commands are not blocked once the first command is released.
-  wait_until(function() return #restarts == 4 end, 1, 'all provider activation commands should run')
+  eq(#restarts, 4, 'provider should run network, dnsmasq, firewall and mwan3 activation before reply')
   eq(restarts[2], '/etc/init.d/dnsmasq restart', 'second activation command')
   eq(restarts[3], '/etc/init.d/firewall restart', 'third activation command')
   eq(restarts[4], '/etc/init.d/mwan3 restart', 'fourth activation command')
 
-  local status = provider._uci_manager and provider._uci_manager:activation_status() or nil
-  assert_true(status and status.state == 'done', 'activation runner should report done')
   provider:terminate('test complete')
 end)
 
-print('openwrt network provider async activation contract: ok')
+print('openwrt network provider synchronous activation contract: ok')
 LUA
 
 "$SSH" "rm -rf '$REMOTE'; mkdir -p '$REMOTE'"

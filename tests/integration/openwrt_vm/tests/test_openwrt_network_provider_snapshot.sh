@@ -151,7 +151,7 @@ fibers.run(function(_scope)
 
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
-  assert(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
+  assert(result.activation == nil, 'provider activation should be synchronous for structural network apply')
 
   local snapshot = perform(provider:snapshot_op({ live = false }))
   assert(snapshot and snapshot.ok == true, 'snapshot failed: ' .. tostring(snapshot and snapshot.err))

@@ -218,8 +218,8 @@ fibers.run(function(_scope)
 
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
-  assert(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
-  wait_until(function() return #restarts == 4 end, 1, 'activation commands should run')
+  assert(result.activation == nil, 'provider activation should be synchronous for structural network apply')
+  eq(#restarts, 4, 'activation command count')
   provider:terminate('test complete')
 end)
 

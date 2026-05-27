@@ -121,6 +121,10 @@ local function is_uci_identifier(s)
 	return type(s) == 'string' and s ~= '' and s:match('^[A-Za-z0-9_]+$') ~= nil
 end
 
+local function is_uci_section_type(s)
+	return type(s) == 'string' and s ~= '' and s:match('^[A-Za-z0-9_-]+$') ~= nil
+end
+
 local function validate_pkg(s, label)
 	if not is_uci_identifier(s) then
 		return nil, label .. ' must be a non-empty UCI identifier'
@@ -175,8 +179,8 @@ local function validate_change(record, ch, i)
 	end
 
 	if op == 'add' then
-		if not is_uci_identifier(ch.stype or ch.section_type or ch.option) then
-			return nil, 'change ' .. i .. ' section type must be a UCI identifier'
+		if not is_uci_section_type(ch.stype or ch.section_type or ch.option) then
+			return nil, 'change ' .. i .. ' section type must be a valid UCI section type'
 		end
 		if ch.alias ~= nil and (type(ch.alias) ~= 'string' or ch.alias == '') then
 			return nil, 'change ' .. i .. ' alias must be a non-empty string when present'
@@ -192,8 +196,8 @@ local function validate_change(record, ch, i)
 			return nil, 'change ' .. i .. ' option/section type required'
 		end
 		if ch.value == nil then
-			if not is_uci_identifier(ch.option) then
-				return nil, 'change ' .. i .. ' named section type must be a UCI identifier'
+			if not is_uci_section_type(ch.option) then
+				return nil, 'change ' .. i .. ' named section type must be a valid UCI section type'
 			end
 		else
 			local _, verr = to_uci_value(ch.value)
@@ -1042,12 +1046,15 @@ function Manager:_apply_batch(batch)
 			end
 		end
 	end
-	local activation, aerr = self:_schedule_activation(async_entries)
-	if activation == nil then
-		for _, entry in ipairs(async_entries) do
-			for _, res in ipairs(entry.sessions) do
-				res.ok = false
-				res.err = res.err ~= '' and (res.err .. '; ' .. tostring(aerr)) or tostring(aerr)
+	local activation, aerr = nil, nil
+	if #async_entries > 0 then
+		activation, aerr = self:_schedule_activation(async_entries)
+		if activation == nil then
+			for _, entry in ipairs(async_entries) do
+				for _, res in ipairs(entry.sessions) do
+					res.ok = false
+					res.err = res.err ~= '' and (res.err .. '; ' .. tostring(aerr)) or tostring(aerr)
+				end
 			end
 		end
 	end
@@ -1194,7 +1201,7 @@ function Manager:_apply_transaction(item)
 					break
 				end
 			end
-			if not failed then
+			if not failed and #async_entries > 0 then
 				local activation, aerr = self:_schedule_activation(async_entries, trace)
 				if activation then
 					result.activation = activation

@@ -1,6 +1,6 @@
 .PHONY: \
 	preflight fetch verify reset run wait provision provision-force ensure-mwan3 \
-	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test \
+	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-openwrt-jan-client-dhcp-dns test \
 	openwrt-vm-test clean
 
 preflight:
@@ -140,6 +140,11 @@ test-devicecode-bigbox-phase1-composition:
 test-devicecode-bigbox-phase1-broken-trunk:
 	./scripts/wait-ssh
 	./tests/test_devicecode_bigbox_phase1_broken_trunk.sh
+
+
+test-openwrt-jan-client-dhcp-dns:
+	./scripts/ensure-jan-client-dhcp-dns-deps
+	./tests/test_openwrt_jan_client_dhcp_dns.sh
 
 test-scp:
 	./scripts/wait-ssh

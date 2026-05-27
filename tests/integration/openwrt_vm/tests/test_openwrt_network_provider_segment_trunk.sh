@@ -50,6 +50,7 @@ for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
 end
 
 local restarts = {}
+local shaper_cmds, shaper_batches = {}, {}
 local provider = assert(provider_loader.new({
   provider = 'openwrt',
   confdir = conf,
@@ -57,6 +58,15 @@ local provider = assert(provider_loader.new({
   debounce_s = 0.01,
   platform = { segment_trunk = { ifname = 'eth0', protected = true } },
   run_cmd = function(argv) restarts[#restarts + 1] = table.concat(argv, ' '); return true, nil end,
+  shaper_run_cmd = function(argv)
+    local line = table.concat(argv, ' ')
+    shaper_cmds[#shaper_cmds + 1] = line
+    if argv[1] == 'tc' and argv[2] == '-batch' and type(argv[3]) == 'string' then
+      local f = io.open(argv[3], 'r')
+      if f then shaper_batches[#shaper_batches + 1] = f:read('*a') or ''; f:close() end
+    end
+    return true, nil
+  end,
 }, {}))
 
 local intent = {
@@ -96,6 +106,7 @@ local intent = {
       addressing = { ipv4 = { mode = 'static', cidr = '192.168.100.1/24' } },
       dhcp = { enabled = true, start = 20, limit = 50, leasetime = '12h' },
       firewall = { zone = 'lan' },
+      shaping = { profile = 'restricted' },
     },
     guest = {
       kind = 'guest', vlan = { id = 101 },
@@ -115,7 +126,7 @@ local intent = {
       guest = { input = 'REJECT', output = 'ACCEPT', forward = 'REJECT' },
     },
   },
-  routing = {}, wan = {}, shaping = {}, vpn = {}, diagnostics = {},
+  routing = {}, wan = {}, shaping = { enabled = true, profiles = { restricted = { egress = { enabled = true, host_rate = '2mbit', hosts = { ['192.168.100.2'] = { rate = '1mbit' } } } } } }, vpn = {}, diagnostics = {},
 }
 
 local name_ctx = assert(names_mod.allocate(intent))
@@ -130,6 +141,12 @@ fibers.run(function()
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
   provider:terminate('test complete')
 end)
+
+if #shaper_cmds == 0 then fail('shaper commands expected for shaped trunk segment') end
+local shaper_text = table.concat(shaper_cmds, '\n') .. '\n' .. table.concat(shaper_batches, '\n')
+if not shaper_text:find('vl%-lan') then fail('trunk segment shaping should target generated VLAN device vl-lan, got: ' .. shaper_text) end
+if shaper_text:find('eth0%.100') then fail('trunk segment shaping must not target legacy eth0.100') end
+if not shaper_text:find('ifb_vl_lan') then fail('trunk segment ingress IFB should be derived from vl-lan') end
 
 local c = assert(uci.cursor(conf, save))
 for _, pkg in ipairs({ 'network', 'dhcp', 'firewall' }) do if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end end
