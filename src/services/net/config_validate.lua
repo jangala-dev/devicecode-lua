@@ -15,6 +15,20 @@ local function check_ref(map, id, path, kind)
 	return true, nil
 end
 
+local function known_l3_ref(intent, id)
+	return has(intent.interfaces, id) or has(intent.segments, id)
+end
+
+local function check_l3_ref(intent, id, path)
+	if type(id) ~= 'string' or id == '' then
+		return nil, err(path, 'interface reference must be a non-empty string')
+	end
+	if not known_l3_ref(intent, id) then
+		return nil, err(path, 'references unknown interface or segment ' .. tostring(id))
+	end
+	return true, nil
+end
+
 local function validate_interfaces(intent)
 	for id, iface in pairs(intent.interfaces or {}) do
 		local ok, e = check_ref(intent.segments, iface.segment, { 'net', 'interfaces', id, 'segment' }, 'segment')
@@ -56,13 +70,8 @@ end
 local function validate_routing(intent)
 	if type(intent.interfaces) ~= 'table' or next(intent.interfaces) == nil then return true, nil end
 	for id, route in pairs((intent.routing and intent.routing.routes) or {}) do
-		local iface = route.interface
-		if type(iface) ~= 'string' or iface == '' then
-			return nil, err({ 'net', 'routing', 'routes', id, 'interface' }, 'interface reference must be a non-empty string')
-		end
-		if not (has(intent.interfaces, iface) or has(intent.segments, iface)) then
-			return nil, err({ 'net', 'routing', 'routes', id, 'interface' }, 'references unknown interface or segment ' .. tostring(iface))
-		end
+		local ok, e = check_l3_ref(intent, route.interface, { 'net', 'routing', 'routes', id, 'interface' })
+		if not ok then return nil, e end
 	end
 	return true, nil
 end
@@ -74,10 +83,8 @@ local function validate_wan(intent)
 		local iface = member.interface
 		local src = member.source
 		if not (type(src) == 'table' and src.kind == 'gsm-uplink') then
-			if type(iface) ~= 'string' or iface == '' then return nil, err({ 'net', 'wan', 'members', id, 'interface' }, 'interface reference must be a non-empty string') end
-			if not (has(intent.interfaces, iface) or has(intent.segments, iface)) then
-				return nil, err({ 'net', 'wan', 'members', id, 'interface' }, 'references unknown interface or segment ' .. tostring(iface))
-			end
+			local ok, e = check_l3_ref(intent, iface, { 'net', 'wan', 'members', id, 'interface' })
+			if not ok then return nil, e end
 		end
 	end
 	return true, nil

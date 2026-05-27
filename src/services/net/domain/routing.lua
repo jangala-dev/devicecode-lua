@@ -5,6 +5,8 @@ local schema = require 'services.net.schema'
 
 local M = {}
 
+local HOST_NETMASK = '255.255.255.255'
+
 local ALLOWED = {
 	'tables', 'routes', 'rules', 'defaults', 'metadata', 'extensions',
 }
@@ -25,6 +27,17 @@ local function is_ipv4_addr(s)
 	return true
 end
 
+local function route_path(path, field)
+	return { schema.path(path), field }
+end
+
+local function nonempty_string(v, path)
+	local value, err = schema.optional_string(v, path)
+	if err then return nil, err end
+	if value == nil or value == '' then return nil, schema.err(path, 'must be a non-empty string') end
+	return value, nil
+end
+
 local function normalise_route(id, v, path)
 	local t, err = schema.require_plain_table(v, path)
 	if not t then return nil, err end
@@ -32,29 +45,27 @@ local function normalise_route(id, v, path)
 	if not ok then return nil, ferr end
 	local kind = t.kind
 	if kind ~= 'host' and kind ~= 'subnet' then
-		return nil, schema.err({ schema.path(path), 'kind' }, "must be 'host' or 'subnet'")
+		return nil, schema.err(route_path(path, 'kind'), "must be 'host' or 'subnet'")
 	end
-	local target, terr = schema.optional_string(t.target, { schema.path(path), 'target' })
+	local target, terr = nonempty_string(t.target, route_path(path, 'target'))
 	if terr then return nil, terr end
-	if target == nil or target == '' then return nil, schema.err({ schema.path(path), 'target' }, 'must be a non-empty string') end
-	local iface, ierr = schema.optional_string(t.interface, { schema.path(path), 'interface' })
+	local iface, ierr = nonempty_string(t.interface, route_path(path, 'interface'))
 	if ierr then return nil, ierr end
-	if iface == nil or iface == '' then return nil, schema.err({ schema.path(path), 'interface' }, 'must be a non-empty string') end
-	local netmask, nerr = schema.optional_string(t.netmask, { schema.path(path), 'netmask' })
+	local netmask, nerr = schema.optional_string(t.netmask, route_path(path, 'netmask'))
 	if nerr then return nil, nerr end
 	if kind == 'host' then
-		if not is_ipv4_addr(target) then return nil, schema.err({ schema.path(path), 'target' }, 'host route target must be a single IPv4 address') end
-		netmask = '255.255.255.255'
-	elseif kind == 'subnet' then
-		if netmask == nil or netmask == '' then return nil, schema.err({ schema.path(path), 'netmask' }, 'subnet route requires netmask') end
+		if not is_ipv4_addr(target) then return nil, schema.err(route_path(path, 'target'), 'host route target must be a single IPv4 address') end
+		netmask = HOST_NETMASK
+	elseif netmask == nil or netmask == '' then
+		return nil, schema.err(route_path(path, 'netmask'), 'subnet route requires netmask')
 	end
-	local gateway, gerr = schema.optional_string(t.gateway, { schema.path(path), 'gateway' })
+	local gateway, gerr = schema.optional_string(t.gateway, route_path(path, 'gateway'))
 	if gerr then return nil, gerr end
-	local metric, merr = schema.optional_integer(t.metric, { schema.path(path), 'metric' })
+	local metric, merr = schema.optional_integer(t.metric, route_path(path, 'metric'))
 	if merr then return nil, merr end
-	local table_name, taberr = schema.optional_string(t.table, { schema.path(path), 'table' })
+	local table_name, taberr = schema.optional_string(t.table, route_path(path, 'table'))
 	if taberr then return nil, taberr end
-	local desc, derr = schema.optional_string(t.description, { schema.path(path), 'description' })
+	local desc, derr = schema.optional_string(t.description, route_path(path, 'description'))
 	if derr then return nil, derr end
 	local out = {
 		kind = kind,

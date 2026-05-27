@@ -29,17 +29,19 @@ local function sorted_keys(t)
 	return ks
 end
 
+local function has_source(member)
+	return type(member) == 'table' and member.source ~= nil
+end
+
 local function route_metric_keys(t)
 	local ks = sorted_keys(t)
 	table.sort(ks, function(a, b)
-		local aa = type(t[a]) == 'table' and t[a].source ~= nil or false
-		local bb = type(t[b]) == 'table' and t[b].source ~= nil or false
-		if aa ~= bb then return not aa end
+		local source_a, source_b = has_source(t[a]), has_source(t[b])
+		if source_a ~= source_b then return not source_a end
 		return tostring(a) < tostring(b)
 	end)
 	return ks
 end
-
 
 local function clean_rule(id, r, policy_name)
 	r = schema.copy(r or {})
