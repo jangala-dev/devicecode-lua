@@ -1,6 +1,8 @@
 -- tests/unit/fabric/test_fabric.lua
 
 local fibers  = require 'fibers'
+local op      = require 'fibers.op'
+local sleep   = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 
 local fabric   = require 'services.fabric'
@@ -119,6 +121,41 @@ function tests.test_composed_link_wires_session_bridge_transfer_and_writer_witho
 		assert_eq(written[1].node, 'host-a')
 		assert_eq(written[2].type, 'pub')
 		assert_eq(written[2].topic[1], 'remote')
+	end)
+end
+
+function tests.test_hal_transport_drain_input_is_cancel_bounded()
+	fibers.run(function ()
+		local chunks = { 'abc', 'def' }
+		local i = 0
+		local session = {
+			read_line_op = function () return fibers.always(nil, 'eof') end,
+			write_op = function () return fibers.always(0, nil) end,
+			read_some_op = function ()
+				return op.guard(function ()
+					i = i + 1
+					if chunks[i] ~= nil then
+						return fibers.always(chunks[i], nil)
+					end
+					return sleep.sleep_op(1)
+				end)
+			end,
+			terminate = function () return true, nil end,
+		}
+
+		local wrapped = assert(hal_transport.wrap_transport(session))
+		local result, err = fibers.perform(wrapped:drain_input_op({
+			max_bytes = 64,
+			total_s = 0.050,
+			quiet_s = 0.005,
+			read_s = 0.002,
+			chunk_size = 8,
+		}))
+
+		assert_eq(err, nil)
+		assert_eq(result.bytes, 6)
+		assert_eq(result.reads, 2)
+		assert_eq(result.reason, 'quiet')
 	end)
 end
 

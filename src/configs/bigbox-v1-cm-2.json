@@ -1112,13 +1112,11 @@
           "peer_id": "mcu",
           "transport": {
             "kind": "uart",
-            "source": "uart",
+            "source": "uart_uart0",
             "class": "uart",
             "id": "uart0",
-            "terminator": "\n",
-            "open_opts": {
-              "baud": 115200
-            }
+            "cap_wait_timeout_s": 60,
+            "terminator": "\n"
           },
           "session": {
             "identity_claim": {

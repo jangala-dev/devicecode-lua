@@ -11,11 +11,9 @@ local hal_types = require 'services.hal.types.core'
 local cap_types = require 'services.hal.types.capabilities'
 local cap_args  = require 'services.hal.types.capability_args'
 local resource  = require 'devicecode.support.resource'
+local xxhash32  = require 'shared.hash.xxhash32'
 
 local unpack = rawget(table, 'unpack') or _G.unpack
-local pack   = rawget(table, 'pack') or function (...)
-	return { n = select('#', ...), ... }
-end
 
 local M = {}
 
@@ -24,6 +22,7 @@ local DEFAULT_STOP_TIMEOUT = 5.0
 
 ---@class UARTSession
 ---@field lease_id string
+---@field path string
 ---@field stream Stream
 ---@field release_lease_now function|nil
 ---@field release_lease_op function|nil
@@ -52,6 +51,22 @@ local function dlog(self, level, payload)
     if self.logger and self.logger[level] then
         self.logger[level](self.logger, payload)
     end
+end
+
+local function log_uart(self, event, fields, force)
+    if force ~= true and (not self or self.trace_io ~= true) then return end
+    local parts = { '[uart-session]', tostring(event) }
+    for k, v in pairs(fields or {}) do
+        if v ~= nil then
+            parts[#parts + 1] = tostring(k)
+            parts[#parts + 1] = tostring(v)
+        end
+    end
+    print(table.concat(parts, ' '))
+end
+
+function UARTSession:set_trace_io(trace_io)
+    self.trace_io = trace_io == true
 end
 
 local function finalise_shell_scope(self, shell_scope, status, primary)
@@ -153,9 +168,10 @@ local function session_release_lease_now(session, reason)
     return session.release_lease_now(session.lease_id, reason)
 end
 
-local function new_session(lease_id, stream, release_lease_now, release_lease_op)
+local function new_session(lease_id, path, stream, release_lease_now, release_lease_op)
     return setmetatable({
         lease_id          = lease_id,
+        path              = path,
         stream            = stream,
         release_lease_now = release_lease_now,
         release_lease_op  = release_lease_op,
@@ -206,7 +222,39 @@ function UARTSession:write_op(...)
         if self.closed then
             return op.always(nil, 'uart session closed')
         end
-        return self.stream:write_op(unpack(parts))
+        local data = {}
+        local len = 0
+        for i = 1, #parts do
+            local s = tostring(parts[i] or '')
+            data[#data + 1] = s
+            len = len + #s
+        end
+        local joined = table.concat(data)
+        log_uart(self, 'write_begin', {
+            lease = self.lease_id,
+            path = self.path,
+            len = len,
+            xxhash32 = xxhash32.digest_hex(joined),
+        })
+        return self.stream:write_op(unpack(parts)):wrap(function (n, err)
+            if n == nil then
+                log_uart(self, 'write_failed', {
+                    lease = self.lease_id,
+                    path = self.path,
+                    len = len,
+                    err = err,
+                }, true)
+            else
+                log_uart(self, 'write_done', {
+                    lease = self.lease_id,
+                    path = self.path,
+                    len = len,
+                    n = n,
+                    xxhash32 = xxhash32.digest_hex(joined),
+                })
+            end
+            return n, err
+        end)
     end)
 end
 
@@ -215,7 +263,25 @@ function UARTSession:flush_op()
         if self.closed then
             return op.always(nil, 'uart session closed')
         end
-        return self.stream:flush_op()
+        log_uart(self, 'flush_begin', {
+            lease = self.lease_id,
+            path = self.path,
+        })
+        return self.stream:flush_op():wrap(function (ok, err)
+            if ok == nil or ok == false then
+                log_uart(self, 'flush_failed', {
+                    lease = self.lease_id,
+                    path = self.path,
+                    err = err,
+                }, true)
+            else
+                log_uart(self, 'flush_done', {
+                    lease = self.lease_id,
+                    path = self.path,
+                })
+            end
+            return ok, err
+        end)
     end)
 end
 
@@ -257,7 +323,7 @@ end
 
 function UARTSession:terminate(reason)
     local why = reason or 'uart session terminated'
-    local first_err
+    local first_err = false
 
     self.closed = true
 
@@ -312,13 +378,18 @@ local function open_session_op(self)
         local handed_off = false
         scope:finally(function (_, status, primary)
             if not handed_off then
-                resource.terminate_checked(stream, primary or status or 'uart open failed', 'uart open stream cleanup failed')
+                resource.terminate_checked(
+                    stream,
+                    primary or status or 'uart open failed',
+                    'uart open stream cleanup failed'
+                )
             end
         end)
 
         local lease_id = uuid.new()
         local session = new_session(
             lease_id,
+            self.path,
             stream,
             function (active_lease_id, reason)
                 return release_session_now(self, active_lease_id, reason)
@@ -416,7 +487,11 @@ local function methods_for(self)
 
                 scope:finally(function ()
                     if not handed_off and self.active_session == reply.session then
-                        resource.terminate_checked(reply.session, 'uart open abandoned', 'UART open session cleanup failed')
+                        resource.terminate_checked(
+                            reply.session,
+                            'uart open abandoned',
+                            'UART open session cleanup failed'
+                        )
                         self.active_session  = nil
                         self.active_lease_id = nil
                     end

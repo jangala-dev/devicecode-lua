@@ -158,6 +158,14 @@ local function format_canonical_line(msg)
 		fmt_time(), tostring(svc), topic_to_string(msg.topic), payload_s)
 end
 
+local function should_print_canonical(msg)
+	local kind, svc = classify_canonical(msg)
+	if kind == 'metric' and (svc == 'ui' or svc == 'http') then
+		return false
+	end
+	return true
+end
+
 -- Formats a warning line for traffic on the legacy obs plane that indicates
 -- a service is not publishing on the canonical plane.
 -- reason: 'legacy-only'       — topic is a known dual-publish target but no canonical seen
@@ -172,6 +180,14 @@ local function format_legacy_warn(msg, reason)
 
 	return string.format('%s  WARN  %-10s %-20s  topic=%s  %s',
 		fmt_time(), svc, tostring(reason), topic_to_string(t), payload_s)
+end
+
+local function should_print_legacy_warn(msg, reason)
+	local t = msg.topic or {}
+	if t[2] == 'event' and t[3] == 'main' and t[4] == 'tick' then
+		return false
+	end
+	return true
 end
 
 function M.start(conn, ctx)
@@ -253,7 +269,9 @@ function M.start(conn, ctx)
 					legacy_count[svc_name][can_kind] = nil
 				end
 			end
-			write_line(format_canonical_line(msg))
+			if should_print_canonical(msg) then
+				write_line(format_canonical_line(msg))
+			end
 
 		elseif which == 'legacy' then
 			if msg == nil then
@@ -278,12 +296,14 @@ function M.start(conn, ctx)
 						legacy_count[svc_name] = svc_counts
 						local count = (svc_counts[kind] or 0) + 1
 						svc_counts[kind] = count
-						if count >= LEGACY_WARN_THRESHOLD then
+						if count >= LEGACY_WARN_THRESHOLD and should_print_legacy_warn(msg, 'legacy-only') then
 							write_line(format_legacy_warn(msg, 'legacy-only'))
 						end
 					end
 				else
-					write_line(format_legacy_warn(msg, 'unknown-endpoint'))
+					if should_print_legacy_warn(msg, 'unknown-endpoint') then
+						write_line(format_legacy_warn(msg, 'unknown-endpoint'))
+					end
 				end
 			end
 		end

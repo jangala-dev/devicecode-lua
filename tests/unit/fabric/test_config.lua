@@ -1,11 +1,36 @@
 local cfg = require 'services.fabric.config'
+local cjson = require 'cjson.safe'
 
 local T = {}
+
+local function read_project_file(rel)
+	local candidates = {
+		'../' .. rel,
+		rel,
+		'devicecode-lua/' .. rel,
+	}
+	for i = 1, #candidates do
+		local f = io.open(candidates[i], 'rb')
+		if f then
+			local text = f:read('*a')
+			f:close()
+			return text
+		end
+	end
+	return nil
+end
+
+local function decode_json(text)
+	local doc, err = cjson.decode(text)
+	assert(doc ~= nil, tostring(err))
+	return doc
+end
 
 function T.compile_builds_canonical_runtime_plan()
 	local compiled, err = cfg.compile({
 		schema = 'devicecode.config/fabric/1',
 		local_node = 'host-a',
+		trace_io = true,
 		links = {
 			{
 				id = 'uart0',
@@ -15,6 +40,7 @@ function T.compile_builds_canonical_runtime_plan()
 					source = 'uart',
 					id = 'main',
 					terminator = '\n',
+					cap_wait_timeout_s = 12.5,
 					open_opts = { baud = 115200 },
 				},
 				session = {
@@ -60,6 +86,9 @@ function T.compile_builds_canonical_runtime_plan()
 						},
 					},
 				},
+				writer = {
+					flush_each = false,
+				},
 				transfer = {
 					chunk_size = 8192,
 					timeout_s = 22.0,
@@ -69,6 +98,7 @@ function T.compile_builds_canonical_runtime_plan()
 	})
 
 	assert(compiled ~= nil, tostring(err))
+	assert(compiled.service.trace_io == true)
 	assert(compiled.service.local_node == 'host-a')
 	assert(#compiled.links == 1)
 
@@ -80,6 +110,7 @@ function T.compile_builds_canonical_runtime_plan()
 	assert(link.transport.class == 'uart')
 	assert(link.transport.id == 'main')
 	assert(link.transport.open_opts.baud == 115200)
+	assert(link.transport.cap_wait_timeout_s == 12.5)
 
 	assert(link.session.local_node == 'host-a')
 	assert(link.session.hello_interval_s == 1.5)
@@ -99,8 +130,10 @@ function T.compile_builds_canonical_runtime_plan()
 	assert(link.bridge.max_inbound_calls == 7)
 	assert(link.bridge.call_timeout_s == 4.5)
 
+	assert(link.writer.flush_each == false)
 	assert(link.transfer.chunk_size == 8192)
 	assert(link.transfer.timeout_s == 22.0)
+	assert(link.reader.bad_frame_quiet_s == cfg.DEFAULTS.reader.bad_frame_quiet_s)
 
 	assert(compiled.routing.by_link_id['uart0'] == link)
 	assert(compiled.routing.by_peer_id['peer-main'][1] == link)
@@ -131,8 +164,32 @@ function T.compile_applies_defaults()
 	assert(link.session.liveness_timeout_s == cfg.DEFAULTS.session.liveness_timeout_s)
 
 	assert(link.bridge.max_pending_calls == cfg.DEFAULTS.bridge.max_pending_calls)
+	assert(link.writer.flush_each == cfg.DEFAULTS.writer.flush_each)
 	assert(link.transfer.chunk_size == cfg.DEFAULTS.transfer.chunk_size)
 	assert(link.transfer.timeout_s == cfg.DEFAULTS.transfer.timeout_s)
+	assert(compiled.service.trace_io == cfg.DEFAULTS.trace_io)
+end
+
+function T.compile_accepts_trace_io_and_rejects_unknown_root_key()
+	local compiled, err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		trace_io = false,
+		links = {
+			{ id = 'uart0', peer_id = 'peer-a' },
+		},
+	})
+	assert(compiled ~= nil, tostring(err))
+	assert(compiled.service.trace_io == false)
+
+	local bad, bad_err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		trace_iio = true,
+		links = {
+			{ id = 'uart0', peer_id = 'peer-a' },
+		},
+	})
+	assert(bad == nil)
+	assert(tostring(bad_err):match('unknown field: trace_iio'))
 end
 
 function T.compile_rejects_wrong_schema()
@@ -257,6 +314,49 @@ function T.compile_rejects_profile_field()
 	})
 	assert(compiled == nil)
 	assert(tostring(err):match('unknown field: profile'))
+end
+
+function T.compile_rejects_invalid_transport_cap_wait_timeout()
+	local compiled, err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		links = {
+			{
+				id = 'uart0',
+				peer_id = 'peer-a',
+				transport = {
+					cap_wait_timeout_s = 0,
+				},
+			},
+		},
+	})
+	assert(compiled == nil)
+	assert(tostring(err):match('transport.cap_wait_timeout_s must be a positive finite number'))
+end
+
+function T.bigbox_mcu_fabric_link_uses_hal_uart_raw_source()
+	local text = assert(read_project_file('src/configs/bigbox-v1-cm-2.json'))
+	local doc = decode_json(text)
+
+	local uart_ids = {}
+	for _, port in ipairs(doc.hal.data.uart.serial_ports or {}) do
+		uart_ids[port.id] = true
+	end
+
+	local link
+	for _, candidate in ipairs(doc.fabric.data.links or {}) do
+		if candidate.id == 'mcu-uart0' then
+			link = candidate
+			break
+		end
+	end
+
+	assert(link ~= nil, 'bigbox config must define fabric link mcu-uart0')
+	assert(link.peer_id == 'mcu')
+	assert(link.transport.source == 'uart_' .. link.transport.id)
+	assert(link.transport.class == 'uart')
+	assert(link.transport.cap_wait_timeout_s >= 30)
+	assert(link.transport.open_opts == nil, 'uart line settings belong in HAL uart config, not fabric open_opts')
+	assert(uart_ids[link.transport.id] == true, 'fabric transport id must match configured HAL uart')
 end
 
 return T

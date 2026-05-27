@@ -100,7 +100,7 @@ function tests.test_session_control_establishes_from_hello_and_sends_ack()
 
 		queue.try_admit_required(control_tx, {
 			kind = 'frame_received',
-			frame = assert(protocol.hello('peer-sid', 'peer-node')),
+			frame = assert(protocol.hello('peer-sid', 'peer-a')),
 		}, 'remote_hello')
 
 		local ack = fibers.perform(out_rx:recv_op())
@@ -113,7 +113,7 @@ function tests.test_session_control_establishes_from_hello_and_sends_ack()
 		assert_eq(result.role, 'session')
 		assert_eq(result.snapshot.established, true)
 		assert_eq(result.snapshot.peer_sid, 'peer-sid')
-		assert_eq(result.snapshot.peer_node, 'peer-node')
+		assert_eq(result.snapshot.peer_node, 'peer-a')
 		assert_eq(result.snapshot.link_generation, 1)
 	end)
 end
@@ -155,7 +155,7 @@ function tests.test_session_liveness_timeout_resets_to_hello()
 		assert_eq(fibers.perform(out_rx:recv_op()).frame.type, 'hello')
 		queue.try_admit_required(control_tx, {
 			kind = 'frame_received',
-			frame = assert(protocol.hello('peer-sid', 'peer-node')),
+			frame = assert(protocol.hello('peer-sid', 'peer-a')),
 		}, 'remote_hello')
 		assert_eq(fibers.perform(out_rx:recv_op()).frame.type, 'hello_ack')
 
@@ -216,7 +216,7 @@ function tests.test_session_ping_is_emitted_before_liveness_deadline()
 		assert_eq(fibers.perform(out_rx:recv_op()).frame.type, 'hello')
 		queue.try_admit_required(control_tx, {
 			kind = 'frame_received',
-			frame = assert(protocol.hello('peer-sid', 'peer-node')),
+			frame = assert(protocol.hello('peer-sid', 'peer-a')),
 		}, 'remote_hello')
 		assert_eq(fibers.perform(out_rx:recv_op()).frame.type, 'hello_ack')
 
@@ -265,7 +265,7 @@ function tests.test_session_control_processes_ready_control_before_timer_work()
 		assert_eq(fibers.perform(out_rx:recv_op()).frame.type, 'hello')
 		queue.try_admit_required(control_tx, {
 			kind = 'frame_received',
-			frame = assert(protocol.hello('peer-sid', 'peer-node')),
+			frame = assert(protocol.hello('peer-sid', 'peer-a')),
 		}, 'remote_hello')
 		assert_eq(fibers.perform(out_rx:recv_op()).frame.type, 'hello_ack')
 

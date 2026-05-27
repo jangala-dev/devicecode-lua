@@ -45,6 +45,13 @@ local function recv_with_timeout(rx, label, timeout)
 	return item
 end
 
+local function expect_no_item(rx, label, timeout)
+	timeout = timeout or 0.05
+	fibers.perform(sleep.sleep_op(timeout))
+	local item = queue.try_recv_now(rx)
+	assert_nil(item, label or 'expected no queued item')
+end
+
 local function start_session(scope, opts)
 	opts = opts or {}
 	local frame_tx, frame_rx = mailbox.new(16, { full = 'reject_newest' })
@@ -57,7 +64,7 @@ local function start_session(scope, opts)
 	local ok, err = scope:spawn(function ()
 		local result = session.run(scope, {
 			link_id = opts.link_id or 'link-a',
-			peer_id = opts.peer_id or 'peer-a',
+			peer_id = opts.peer_id or 'mcu',
 			local_node = opts.local_node or 'cm5',
 			local_sid = opts.local_sid or 'cm5-sid',
 			identity_claim = opts.identity_claim,
@@ -99,7 +106,24 @@ local function admit_wire_error(tx, err)
 		kind = 'wire_error',
 		err = err or 'decode_failed: bad json',
 		at = fibers.now(),
+		wire_errors = 1,
+		bad_frame_count = 1,
 	}, 'test_wire_error_admit_failed')
+	assert_true(ok, admit_err)
+end
+
+local function admit_wire_recovery(tx, opts)
+	opts = opts or {}
+	local ok, admit_err = queue.try_admit_required(tx, {
+		kind = 'wire_recovery',
+		reason = opts.reason or 'bad_frame_limit',
+		at = fibers.now(),
+		wire_errors = opts.wire_errors or 2,
+		bad_frame_count = opts.bad_frame_count or 2,
+		drained_bytes = opts.drained_bytes or 7,
+		drain_err = opts.drain_err,
+		quiet_until = opts.quiet_until or (fibers.now() + 0.05),
+	}, 'test_wire_recovery_admit_failed')
 	assert_true(ok, admit_err)
 end
 
@@ -213,6 +237,33 @@ function tests.test_new_peer_sid_drops_old_generation_and_starts_next_generation
 	end)
 end
 
+function tests.test_session_rejects_wrong_peer_handshake_before_expected_peer()
+	fibers.run(function (scope)
+		local h = start_session(scope, { peer_id = 'mcu' })
+		recv_with_timeout(h.control_rx, 'initial hello')
+
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('wrong-sid', 'bigbox-cm5')))
+		expect_no_item(h.rpc_rx, 'wrong peer ack should not emit rpc peer session')
+		expect_no_item(h.transfer_rx, 'wrong peer ack should not emit transfer peer session')
+
+		admit_frame(h.frame_tx, assert(protocol.hello('mcu-sid', 'mcu')))
+		local rpc_ev = recv_with_timeout(h.rpc_rx, 'rpc peer session after real hello')
+		local xfer_ev = recv_with_timeout(h.transfer_rx, 'transfer peer session after real hello')
+		assert_eq(rpc_ev.kind, 'peer_session')
+		assert_eq(xfer_ev.kind, 'peer_session')
+		assert_eq(rpc_ev.session.peer_node, 'mcu')
+		assert_eq(rpc_ev.session.peer_sid, 'mcu-sid')
+		assert_eq(xfer_ev.session.peer_node, 'mcu')
+		assert_eq(xfer_ev.session.peer_sid, 'mcu-sid')
+
+		local ack = recv_with_timeout(h.control_rx, 'hello ack for real peer')
+		assert_eq(ack.frame.type, 'hello_ack')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
 
 
 function tests.test_wire_errors_below_limit_are_counted_without_dropping_session()
@@ -239,22 +290,22 @@ function tests.test_wire_errors_below_limit_are_counted_without_dropping_session
 	end)
 end
 
-function tests.test_bad_frame_limit_drops_current_peer_session()
+function tests.test_wire_recovery_drops_current_peer_session_and_delays_hello()
 	fibers.run(function (scope)
-		local h = start_session(scope, { bad_frame_limit = 2, bad_frame_window_s = 10 })
+		local h = start_session(scope)
 		recv_with_timeout(h.control_rx, 'initial hello')
 		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
 		recv_with_timeout(h.rpc_rx, 'peer session')
 		recv_with_timeout(h.transfer_rx, 'transfer peer session')
 
-		admit_wire_error(h.frame_tx, 'decode_failed: first')
-		assert_nil(queue.try_recv_now(h.rpc_rx), 'first bad frame should be tolerated')
-		admit_wire_error(h.frame_tx, 'decode_failed: second')
+		local quiet_until = fibers.now() + 0.08
+		admit_wire_recovery(h.frame_tx, { quiet_until = quiet_until })
 
 		local drop = recv_with_timeout(h.rpc_rx, 'peer session drop')
 		assert_eq(drop.kind, 'peer_session_dropped')
 		assert_eq(drop.reason, 'bad_frame_limit')
 		assert_eq(drop.session.peer_sid, 'mcu-sid')
+		expect_no_item(h.control_rx, 'hello should be delayed during recovery quiet', 0.02)
 
 		admit_frame(h.frame_tx, assert(protocol.pub({ 'state', 'self' }, { ok = true }, true)))
 		assert_nil(queue.try_recv_now(h.rpc_rx), 'rpc frame should be dropped after bad-frame session reset')
