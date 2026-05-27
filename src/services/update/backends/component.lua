@@ -23,6 +23,19 @@ local function metadata_of(job)
 	return type(job) == 'table' and type(job.metadata) == 'table' and job.metadata or {}
 end
 
+local function positive_int(v)
+	local n = tonumber(v)
+	if n and n > 0 and n == math.floor(n) then return n end
+	return nil
+end
+
+local function transfer_chunk_size(self, job)
+	local meta = metadata_of(job)
+	return positive_int(meta.transfer_chunk_raw)
+		or positive_int(meta.chunk_size)
+		or self._chunk_size
+end
+
 local function artifact_record(job)
 	if type(job) ~= 'table' then return nil end
 	return job.artifact or job.artifact_snapshot or job.artifact_meta
@@ -139,11 +152,11 @@ function Backend:stage_op(job, ctx)
 			size = desc.size,
 			digest_alg = desc.digest_alg or 'xxhash32',
 			digest = desc.digest or desc.checksum,
-			chunk_size = self._chunk_size or 2048,
+			chunk_size = transfer_chunk_size(self, job),
 			format = meta.format or desc.format or 'dcmcu-v1',
 			metadata = metadata_of(job),
 		}
-		local reply, err = fibers.perform(call_component_op(self, component, 'stage-update', payload))
+		local reply, err = fibers.perform(call_component_op(self, component, 'stage-update', payload, { timeout = false }))
 		if reply == nil then return nil, err or 'component_stage_update_failed' end
 		local ok_reply, rerr = validate_stage_reply(reply)
 		if ok_reply ~= true then return nil, rerr end
@@ -262,7 +275,7 @@ function M.new(opts)
 		_artifact_store = opts.artifact_store,
 		_observer = opts.observer,
 		_component = opts.component or 'mcu',
-		_chunk_size = opts.chunk_size or 2048,
+		_chunk_size = opts.chunk_size,
 		_commit_policy = opts.commit_policy,
 		_call_opts = opts.call_opts,
 	}, Backend)

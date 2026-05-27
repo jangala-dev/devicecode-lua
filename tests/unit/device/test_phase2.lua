@@ -15,6 +15,7 @@ local observer = require 'services.device.observer'
 local topics = require 'services.device.topics'
 local projection = require 'services.device.projection'
 local component_mcu = require 'services.device.component_mcu'
+local fabric_topics = require 'services.fabric.topics'
 
 local tests = {}
 
@@ -48,6 +49,39 @@ local function take_stage_source(params, expected)
 	local detached, err = params.source_owner:detach()
 	assert_eq(detached, source, tostring(err))
 	return source
+end
+
+function tests.test_default_fabric_client_uses_public_transfer_manager_rpc()
+	local called
+	local conn = {}
+	function conn:call_op(topic, payload, opts)
+		called = { topic = topic, payload = payload, opts = opts }
+		return op.always({ ok = true, result = { ok = true, staged = true } })
+	end
+
+	fibers.run(function ()
+		local client = service.default_fabric_client(conn)
+		assert_not_nil(client)
+		local result, err = fibers.perform(client:send_blob_op({
+			job_id = 'job-1',
+			target = 'updater/main',
+			source_owner = { id = 'owner' },
+			size = 123,
+			digest_alg = 'sha256',
+			digest = 'abc',
+			chunk_size = 1024,
+			meta = { kind = 'firmware' },
+		}, { timeout = 3.0 }))
+		assert_true(result.ok, tostring(err))
+	end)
+
+	assert_not_nil(called)
+	assert_eq(table.concat(called.topic, '/'), table.concat(fabric_topics.transfer_manager_rpc('send-blob'), '/'))
+	assert_eq(called.payload.request_id, 'job-1')
+	assert_eq(called.payload.target, 'updater/main')
+	assert_eq(called.payload.chunk_size, 1024)
+	assert_eq(called.payload.timeout_s, 3.0)
+	assert_eq(called.opts.timeout, 3.0)
 end
 
 local function sample_config(display_name)

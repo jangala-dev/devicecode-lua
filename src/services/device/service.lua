@@ -24,6 +24,7 @@ local cap_deps_mod = require 'devicecode.support.capability_dependencies'
 local dep_failure  = require 'devicecode.support.dependency_failure'
 local backpressure = require 'services.device.backpressure'
 local dependency_mod = require 'services.device.dependencies'
+local fabric_topics = require 'services.fabric.topics'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -35,6 +36,35 @@ local shallow_copy = tablex.shallow_copy
 
 local function new_service_id()
 	return ('device-%d-%d'):format(os.time(), math.random(1, 1000000))
+end
+
+local function default_fabric_client(conn)
+	if type(conn) ~= 'table' or type(conn.call_op) ~= 'function' then return nil end
+
+	return {
+		send_blob_op = function (_, params, opts)
+			params = params or {}
+			opts = opts or {}
+			local ev, err = conn:call_op(fabric_topics.transfer_manager_rpc('send-blob'), {
+				link_id = params.link_id,
+				request_id = params.request_id or params.job_id,
+				xfer_id = params.xfer_id,
+				target = params.target,
+				source_owner = params.source_owner,
+				size = params.size,
+				digest_alg = params.digest_alg,
+				digest = params.digest,
+				chunk_size = params.chunk_size,
+				meta = params.meta,
+				timeout_s = opts.timeout or params.timeout,
+			}, { timeout = opts.timeout or params.timeout })
+			if not ev then return nil, err end
+			return ev:wrap(function (reply, err)
+				if reply == nil then return nil, err end
+				return reply.result or reply, nil
+			end)
+		end,
+	}
 end
 
 local function request_publication(state)
@@ -837,7 +867,7 @@ local function build_state(scope, params)
 		enable_observers = params.enable_observers,
 		auto_publish = params.auto_publish,
 		emit_events = params.emit_events,
-		fabric_client = params.fabric_client,
+		fabric_client = params.fabric_client or default_fabric_client(params.conn),
 		open_source = params.open_source,
 		open_source_op = params.open_source_op,
 		terminate_source = params.terminate_source,
@@ -974,5 +1004,6 @@ M.start_generation = start_generation
 M.cancel_active_generation = cancel_active_generation
 M.flush_publication = flush_publication
 M.cleanup_publication_now = cleanup_publication_now
+M.default_fabric_client = default_fabric_client
 
 return M
