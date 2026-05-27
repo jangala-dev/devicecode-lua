@@ -562,9 +562,10 @@ local function build_network_changes(intent, provider_config)
 		local rsec = section_id('route', 'route_' .. tostring(item.id))
 		known[rsec] = true
 		set_section(changes, 'network', rsec, 'route')
-		set_option(changes, 'network', rsec, 'interface', r.interface or r.net)
+		set_option(changes, 'network', rsec, 'interface', r.interface)
 		set_option(changes, 'network', rsec, 'target', r.target)
-		set_option(changes, 'network', rsec, 'gateway', r.gateway or r.via)
+		set_option(changes, 'network', rsec, 'netmask', r.netmask or (r.kind == 'host' and '255.255.255.255' or nil))
+		set_option(changes, 'network', rsec, 'gateway', r.gateway)
 		set_option(changes, 'network', rsec, 'metric', r.metric)
 		set_option(changes, 'network', rsec, 'table', r.table)
 	end
@@ -624,6 +625,7 @@ local function build_dhcp_changes(intent)
 		end
 	end
 
+
 	local reservations = is_plain_table(dhcp.reservations) and dhcp.reservations or {}
 	local function add_reservation(rid, rec)
 		if not is_plain_table(rec) then return end
@@ -675,6 +677,14 @@ local function build_firewall_changes(intent, segment_to_ifaces)
 		end
 	end
 
+	for _, ifid in ipairs(sorted_keys(intent.interfaces or {})) do
+		local iface = intent.interfaces[ifid]
+		local zname = iface.firewall and iface.firewall.zone or (iface.role == 'wan' and 'wan' or nil)
+		if type(zname) == 'string' and zname ~= '' then
+			zone_to_networks[zname] = zone_to_networks[zname] or {}
+			zone_to_networks[zname][#zone_to_networks[zname] + 1] = name_ctx:iface(ifid)
+		end
+	end
 	local zone_specs = is_plain_table(fw.zones) and fw.zones or {}
 	for _, zname in ipairs(sorted_keys(zone_specs)) do zone_to_networks[zname] = zone_to_networks[zname] or {} end
 	for _, zname in ipairs(sorted_keys(zone_to_networks)) do
@@ -771,10 +781,61 @@ local function add_static_or_dhcp_interface(changes, ifsec, devname, proto, ipv4
 	end
 end
 
+
+local function mwan_members_by_interface(intent)
+	local out = {}
+	local members = intent and intent.wan and intent.wan.members or {}
+	local keys = sorted_keys(members)
+	for i, mid in ipairs(keys) do
+		local m = is_plain_table(members[mid]) and members[mid] or {}
+		if m.enabled ~= false and m.disabled ~= true then
+			local iface = m.interface or mid
+			if type(iface) == 'string' and iface ~= '' then
+				out[iface] = {
+					id = mid,
+					route_metric = tonumber(m.route_metric) or (10 + i),
+					mwan_metric = tonumber(m.mwan_metric) or 1,
+					member = m,
+				}
+			end
+		end
+	end
+	return out
+end
+
+local function apply_mwan_network_defaults(ipv4, rec)
+	if not rec then return ipv4 end
+	ipv4 = copy_plain(ipv4 or {}) or {}
+	ipv4.metric = ipv4.metric or rec.route_metric
+	-- mwan3 expects ordinary WAN interface routes in the main table.  We may
+	-- still honour an explicit false override, but generated configs must not
+	-- suppress the default route by default.
+	return ipv4
+end
+
+
+local function filter_unrealised_mwan_members(intent)
+	local wan = intent and intent.wan
+	local members = wan and wan.members
+	if not is_plain_table(members) then return intent end
+	local out = copy_plain(intent) or {}
+	out.wan = copy_plain(wan) or {}
+	out.wan.members = {}
+	for _, mid in ipairs(sorted_keys(members)) do
+		local m = is_plain_table(members[mid]) and members[mid] or {}
+		local iface = m.interface or mid
+		if (out.interfaces and out.interfaces[iface]) or (out.segments and out.segments[iface]) then
+			out.wan.members[mid] = copy_plain(m)
+		end
+	end
+	return out
+end
+
 local function build_network_changes_v2(intent, provider_config, name_ctx)
 	local changes = {}
 	local known = {}
 	local segment_to_ifaces = {}
+	local mwan_by_iface = mwan_members_by_interface(intent)
 
 	set_section(changes, 'network', 'loopback', 'interface')
 	known.loopback = true
@@ -791,8 +852,9 @@ local function build_network_changes_v2(intent, provider_config, name_ctx)
 	local explicit_segment = {}
 	for _, ifid in ipairs(sorted_keys(intent.interfaces or {})) do
 		local iface = intent.interfaces[ifid]
-		if type(iface.segment) == 'string' then explicit_segment[iface.segment] = true end
-		if type(iface.segments) == 'table' then
+		local owns_segment = iface.role ~= 'wan' and iface.realises_segment ~= false
+		if owns_segment and type(iface.segment) == 'string' then explicit_segment[iface.segment] = true end
+		if owns_segment and type(iface.segments) == 'table' then
 			for i = 1, #iface.segments do explicit_segment[iface.segments[i]] = true end
 		end
 	end
@@ -828,7 +890,7 @@ local function build_network_changes_v2(intent, provider_config, name_ctx)
 					local ifsec = name_ctx:iface(seg_id)
 					known[ifsec] = true
 					local proto, ipv4 = build_segment_interface_proto(seg)
-					if seg.kind == 'wan' and proto == 'dhcp' and ipv4.defaultroute == nil then ipv4.defaultroute = false end
+					ipv4 = apply_mwan_network_defaults(ipv4, mwan_by_iface[seg_id])
 					add_static_or_dhcp_interface(changes, ifsec, devname, proto, ipv4, true, seg_id)
 					segment_to_ifaces[seg_id] = segment_to_ifaces[seg_id] or {}
 					segment_to_ifaces[seg_id][#segment_to_ifaces[seg_id] + 1] = ifsec
@@ -860,7 +922,7 @@ local function build_network_changes_v2(intent, provider_config, name_ctx)
 		local proto = ipv4.mode or ipv4.proto
 		if proto == nil then proto = iface.role == 'wan' and 'dhcp' or 'static' end
 		if proto == 'manual' then proto = 'none' end
-		if iface.role == 'wan' and proto == 'dhcp' and ipv4.defaultroute == nil then ipv4.defaultroute = false end
+		ipv4 = apply_mwan_network_defaults(ipv4, mwan_by_iface[ifid])
 		add_static_or_dhcp_interface(changes, ifsec, devname, proto, ipv4, iface.enabled ~= false, ifid)
 		if iface.mtu then set_option(changes, 'network', ifsec, 'mtu', iface.mtu) end
 
@@ -880,9 +942,10 @@ local function build_network_changes_v2(intent, provider_config, name_ctx)
 		local rsec = name_ctx:section('route', item.id)
 		known[rsec] = true
 		set_section(changes, 'network', rsec, 'route')
-		set_option(changes, 'network', rsec, 'interface', r.interface and name_ctx:iface(r.interface) or r.net)
+		set_option(changes, 'network', rsec, 'interface', r.interface and name_ctx:iface(r.interface) or nil)
 		set_option(changes, 'network', rsec, 'target', r.target)
-		set_option(changes, 'network', rsec, 'gateway', r.gateway or r.via)
+		set_option(changes, 'network', rsec, 'netmask', r.netmask or (r.kind == 'host' and '255.255.255.255' or nil))
+		set_option(changes, 'network', rsec, 'gateway', r.gateway)
 		set_option(changes, 'network', rsec, 'metric', r.metric)
 		set_option(changes, 'network', rsec, 'table', r.table)
 	end
@@ -1013,6 +1076,19 @@ local function build_dhcp_changes_v2(intent, name_ctx, segment_to_ifaces)
 		end
 	end
 
+
+	for _, ifid in ipairs(sorted_keys(intent.interfaces or {})) do
+		local iface = intent.interfaces[ifid]
+		local dh = is_plain_table(iface.dhcp) and iface.dhcp or {}
+		if iface.role == 'wan' or dh.enabled == false then
+			local sec = name_ctx:section('dhcp', ifid)
+			known[sec] = true
+			set_section(changes, 'dhcp', sec, 'dhcp')
+			set_option(changes, 'dhcp', sec, 'interface', name_ctx:iface(ifid))
+			set_option(changes, 'dhcp', sec, 'ignore', '1')
+		end
+	end
+
 	local reservations = is_plain_table(dhcp.reservations) and dhcp.reservations or {}
 	local function add_reservation(rid, rec)
 		if not is_plain_table(rec) then return end
@@ -1053,12 +1129,29 @@ local function build_firewall_changes_v2(intent, segment_to_ifaces, name_ctx)
 		local ifaces = segment_to_ifaces[seg_id]
 		if ifaces and #ifaces > 0 then for i = 1, #ifaces do zone_to_networks[zname][#zone_to_networks[zname] + 1] = ifaces[i] end end
 	end
+	for _, ifid in ipairs(sorted_keys(intent.interfaces or {})) do
+		local iface = intent.interfaces[ifid]
+		local zname = iface.firewall and iface.firewall.zone or (iface.role == 'wan' and 'wan' or nil)
+		if type(zname) == 'string' and zname ~= '' then
+			zone_to_networks[zname] = zone_to_networks[zname] or {}
+			zone_to_networks[zname][#zone_to_networks[zname] + 1] = name_ctx:iface(ifid)
+		end
+	end
 	local zone_specs = is_plain_table(fw.zones) and fw.zones or {}
 	for _, zname in ipairs(sorted_keys(zone_specs)) do zone_to_networks[zname] = zone_to_networks[zname] or {} end
 	for _, zname in ipairs(sorted_keys(zone_to_networks)) do
 		local zsec = name_ctx:section('zone', zname)
 		local zspec = is_plain_table(zone_specs[zname]) and zone_specs[zname] or {}
 		local nets = zone_to_networks[zname]
+		local dedup, seen_nets = {}, {}
+		for i = 1, #(nets or {}) do
+			local n = nets[i]
+			if type(n) == 'string' and n ~= '' and not seen_nets[n] then
+				seen_nets[n] = true
+				dedup[#dedup + 1] = n
+			end
+		end
+		nets = dedup
 		table.sort(nets)
 		local oz = name_ctx:zone(zname)
 		known[zsec] = true
@@ -1274,7 +1367,8 @@ function Provider:plan_op(req)
 	local n_changes, n_known, segment_to_ifaces = build_network_changes_v2(intent, self.config, name_ctx)
 	local d_changes, d_known = build_dhcp_changes_v2(intent, name_ctx, segment_to_ifaces)
 	local f_changes, f_known = build_firewall_changes_v2(intent, segment_to_ifaces, name_ctx)
-	local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent, name_ctx)
+	local mwan_intent = filter_unrealised_mwan_members(intent)
+	local m_changes, m_known, m_plan = mwan3_mod.build_changes(mwan_intent, name_ctx)
 	local shaping = build_shaping_request(intent, self.config)
 	local domains = {
 		vlan = { status = 'implemented' },
@@ -1294,7 +1388,14 @@ function Provider:plan_op(req)
 				mwan3 = { changes = #m_changes, sections = count_keys(m_known) },
 			},
 			openwrt_names = name_ctx:snapshot(),
+			raw_changes = {
+				network = n_changes,
+				dhcp = d_changes,
+				firewall = f_changes,
+				mwan3 = m_changes,
+			},
 		},
+		openwrt_names = name_ctx:snapshot(),
 	})
 end
 
@@ -1355,7 +1456,8 @@ function Provider:apply_op(req)
 		local n_changes, n_known, segment_to_ifaces = build_network_changes_v2(intent, self.config, name_ctx)
 		local d_changes, d_known = build_dhcp_changes_v2(intent, name_ctx, segment_to_ifaces)
 		local f_changes, f_known = build_firewall_changes_v2(intent, segment_to_ifaces, name_ctx)
-		local m_changes, m_known, m_plan = mwan3_mod.build_changes(intent, name_ctx)
+		local mwan_intent = filter_unrealised_mwan_members(intent)
+		local m_changes, m_known, m_plan = mwan3_mod.build_changes(mwan_intent, name_ctx)
 		log_provider(self, 'debug', {
 			what = 'openwrt_apply_built_uci',
 			elapsed_ms = elapsed_ms(phase),
@@ -1383,9 +1485,11 @@ function Provider:apply_op(req)
 				{ kind = 'restart', target = 'firewall', wait = false },
 			}),
 			-- Always include mwan3 so stale generated multi-WAN state is removed when
-			-- WAN/multi-WAN is disabled or a member disappears.  Structural apply still
-			-- does not restart mwan3; live rules are handled separately.
-			transaction_record('mwan3', m_changes, m_known, nil, {}),
+			-- WAN/multi-WAN is disabled or a member disappears.  Structural apply
+			-- restarts mwan3; live weight changes do not.
+			transaction_record('mwan3', m_changes, m_known, nil, {
+				{ kind = 'restart', target = 'mwan3', wait = false },
+			}),
 		}
 		local packages = { 'network', 'dhcp', 'firewall', 'mwan3' }
 		phase = fibers.now()
@@ -2004,11 +2108,10 @@ local function translate_live_weights_req(req, name_ctx)
 	for i, m in ipairs((req and req.members) or {}) do
 		if is_plain_table(m) then
 			local mm = copy_plain(m) or {}
-			local semantic_iface = m.openwrt_interface or m.interface or m.iface or m.link_id or m.id
+			local semantic_iface = m.interface or m.id
 			local generated_iface = translate_mwan_iface_for_ctx(name_ctx, semantic_iface)
 			if type(generated_iface) == 'string' and generated_iface ~= '' then
 				mm.semantic_interface = semantic_iface
-				mm.openwrt_interface = generated_iface
 				mm.interface = generated_iface
 			end
 			members[#members + 1] = mm
@@ -2023,11 +2126,10 @@ end
 local function translate_speedtest_req(req, name_ctx)
 	if not name_ctx then return req or {} end
 	local out = copy_plain(req or {}) or {}
-	local semantic_iface = out.openwrt_interface or out.interface or out.iface
+	local semantic_iface = out.interface
 	local generated_iface = translate_mwan_iface_for_ctx(name_ctx, semantic_iface)
 	if type(generated_iface) == 'string' and generated_iface ~= '' then
 		out.semantic_interface = semantic_iface
-		out.openwrt_interface = generated_iface
 		out.interface = generated_iface
 	end
 	return out

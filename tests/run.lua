@@ -148,6 +148,7 @@ local files = {
 	'integration.devhost.metrics_spec',
 	"unit.net.test_architecture",
 	"unit.net.test_config",
+	"unit.net.test_intent_realiser",
 	"unit.net.test_hal_client",
 	"unit.net.test_service_behaviour",
 	"unit.net.test_wan_runtime",

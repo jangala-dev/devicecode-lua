@@ -110,7 +110,7 @@ local intent = {
       role = 'wan',
       segment = 'wan',
       endpoint = { ifname = 'eth2' },
-      addressing = { ipv4 = { mode = 'dhcp', peerdns = false, metric = 10 } },
+      addressing = { ipv4 = { mode = 'dhcp', peerdns = false } },
     },
   },
   dns = {
@@ -137,7 +137,7 @@ local intent = {
       { interface = 'lan', target = '10.0.0.0/8', gateway = '192.168.10.254' },
     },
   },
-  wan = {},
+  wan = { enabled = true, members = { wan = { interface = 'wan', mwan_metric = 1, weight = 1 } } },
   shaping = {},
   vpn = {},
   diagnostics = {},
@@ -172,16 +172,17 @@ fibers.run(function(_scope)
   eq(result.backend, 'openwrt', 'backend')
   eq(result.intent_rev, 101, 'intent_rev')
   assert(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
-  eq(result.activation.commands, 3, 'activation command count')
-  wait_until(function() return #restarts == 3 end, 1, 'activation commands should run')
+  eq(result.activation.commands, 4, 'activation command count')
+  wait_until(function() return #restarts == 4 end, 1, 'activation commands should run')
 
   provider:terminate('test complete')
 end)
 
-eq(#restarts, 3, 'restart command count')
+eq(#restarts, 4, 'restart command count')
 eq(restarts[1], '/etc/init.d/network reload', 'network reload')
 eq(restarts[2], '/etc/init.d/dnsmasq restart', 'dnsmasq restart')
 eq(restarts[3], '/etc/init.d/firewall restart', 'firewall restart')
+eq(restarts[4], '/etc/init.d/mwan3 restart', 'mwan3 restart')
 
 local c = assert(uci.cursor(conf, save))
 for _, pkg in ipairs({ 'network', 'dhcp', 'firewall' }) do
@@ -255,8 +256,8 @@ eq(_wan_if_sec, 'wan', 'wan generated interface remains readable')
 eq(wan_if.proto, 'dhcp', 'wan proto')
 eq(wan_if.device, 'eth2', 'wan device')
 eq(wan_if.peerdns, '0', 'wan peerdns')
-eq(wan_if.defaultroute, '0', 'wan defaultroute disabled before admission')
-eq(wan_if.metric, '10', 'wan metric')
+eq(wan_if.defaultroute, nil, 'wan defaultroute should use OpenWrt default')
+eq(wan_if.metric, '11', 'wan auto route metric')
 
 local _route_sec, route = section_by_name('network', name_ctx:section('route', '1'), 'route')
 eq(route.interface, 'lan', 'route interface')

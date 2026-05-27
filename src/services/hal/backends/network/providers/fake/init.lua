@@ -95,7 +95,7 @@ function Provider:speedtest_op(req)
 	return op.always({
 		ok = true,
 		backend = 'fake',
-		interface = req and (req.interface or req.iface),
+		interface = req and req.interface,
 		device = req and req.device,
 		peak_mbps = req and req.fake_mbps or 10,
 		data_mib = 1,

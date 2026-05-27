@@ -43,6 +43,25 @@ function tests.test_generated_names_are_bounded_and_readable()
 	starts(ctx:iface('123-invalid-prefix-and-extremely-long'), 'x1', 'numeric leading prefix made safe')
 end
 
+
+function tests.test_modem_logical_interface_names_keep_readable_distinguishing_stems()
+	local ctx = ok(names.allocate({
+		segments = {}, interfaces = {
+			modem_primary = {},
+			modem_secondary = {},
+			modem_primary_blue = {},
+			modem_primary_green = {},
+			modem_primary_bluey_green = {},
+		}, firewall = { zones = {} }, wan = { members = {} },
+	}))
+	starts(ctx:iface('modem_primary'), 'mopri', 'modem primary stem')
+	starts(ctx:iface('modem_secondary'), 'mosec', 'modem secondary stem')
+	starts(ctx:iface('modem_primary_blue'), 'mprbl', 'modem primary blue stem')
+	starts(ctx:iface('modem_primary_green'), 'mprgr', 'modem primary green stem')
+	starts(ctx:iface('modem_primary_bluey_green'), 'mpbgr', 'modem primary bluey green stem')
+	eq(#ctx:iface('modem_primary'), ctx:limits().logical_interface, 'stem plus hash length')
+end
+
 function tests.test_name_snapshot_is_stable()
 	local intent = { segments = { adm = {}, jan = {} }, interfaces = {}, firewall = { zones = {} }, wan = { members = {} } }
 	local a = ok(names.allocate(intent)):snapshot()

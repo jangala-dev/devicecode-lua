@@ -49,13 +49,56 @@ local function safe_plain_name(s, max_len)
 	return s
 end
 
-local function readable_prefix(seed, fallback, n)
-	local s = clean(seed)
-	if s == '' then s = clean(fallback) end
+local function words(seed)
+	local out = {}
+	for w in tostring(seed or ''):lower():gmatch('[a-z0-9]+') do
+		out[#out + 1] = w
+	end
+	return out
+end
+
+local function take(s, n)
+	s = clean(s)
+	if n <= 0 then return '' end
+	if #s >= n then return s:sub(1, n) end
+	return s
+end
+
+local function pad_stem(s, fallback, n)
+	s = clean(s)
+	local f = clean(fallback)
+	if s == '' then s = f end
 	if s == '' then s = 'x' end
-	while #s < n do s = s .. 'x' end
+	while #s < n do s = s .. (f ~= '' and f or 'x') end
 	if not s:sub(1, 1):match('%a') then s = 'x' .. s end
 	return s:sub(1, n)
+end
+
+local function modem_stem(ws, n)
+	if ws[1] ~= 'modem' or n < 5 then return nil end
+	if #ws == 2 then
+		return pad_stem(take(ws[1], 2) .. take(ws[2], n - 2), table.concat(ws, ''), n)
+	end
+	if #ws == 3 then
+		return pad_stem(take(ws[1], 1) .. take(ws[2], 2) .. take(ws[3], n - 3), table.concat(ws, ''), n)
+	end
+	if #ws >= 4 then
+		return pad_stem(take(ws[1], 1) .. take(ws[2], 1) .. take(ws[3], 1) .. take(ws[#ws], n - 3), table.concat(ws, ''), n)
+	end
+	return nil
+end
+
+local function readable_stem(seed, fallback, n)
+	local ws = words(seed)
+	local modem = modem_stem(ws, n)
+	if modem then return modem end
+	if #ws == 2 and n >= 4 then
+		local first = math.min(2, n - 2)
+		return pad_stem(take(ws[1], first) .. take(ws[2], n - first), table.concat(ws, ''), n)
+	end
+	local s = clean(seed)
+	if s == '' then s = clean(fallback) end
+	return pad_stem(s, fallback, n)
 end
 
 local function uint32_to_hex(n)
@@ -88,8 +131,9 @@ local function hash_hex(seed, len)
 end
 
 local function make_name(seed, fallback, class, max_len, used)
-	local prefix_len = math.min(2, math.max(1, max_len - 1))
-	local p = readable_prefix(seed, fallback or class, prefix_len)
+	local hash_len = max_len >= 8 and 3 or 2
+	local prefix_len = math.max(1, max_len - hash_len)
+	local p = readable_stem(seed, fallback or class, prefix_len)
 	for attempt = 0, 64 do
 		local material = class .. ':' .. tostring(seed or '') .. ':' .. tostring(attempt)
 		local hash_len = math.max(1, max_len - #p)
@@ -180,8 +224,9 @@ local function memo_prefixed(self, class, key, max_len, prefix, fallback)
 	self._used[class] = self._used[class] or {}
 	local stem_len = max_len - #prefix
 	if stem_len < 1 then error('prefix too long for OpenWrt name class ' .. tostring(class), 2) end
-	local stem_prefix_len = math.min(2, stem_len)
-	local stem_prefix = readable_prefix(key, fallback or prefix, stem_prefix_len)
+	local hash_len = stem_len >= 8 and 3 or math.min(3, math.max(1, stem_len - 1))
+	local stem_prefix_len = math.max(1, stem_len - hash_len)
+	local stem_prefix = readable_stem(key, fallback or prefix, stem_prefix_len)
 	for attempt = 0, 64 do
 		local material = class .. ':' .. key .. ':' .. tostring(attempt)
 		local hash_len = math.max(1, stem_len - #stem_prefix)
@@ -251,7 +296,26 @@ function Ctx:zone(id)
 end
 
 function Ctx:mwan_iface(id)
-	return memo_mwan(self, 'iface', id)
+	-- mwan3 interface section names are not independent identifiers: they must
+	-- exactly match the OpenWrt logical network interface names.  Long semantic
+	-- product ids such as "modem_primary" may therefore be shortened by the
+	-- logical-interface allocator, and mwan3 must use that same generated name.
+	local raw_id = tostring(id or '')
+	local name = self:iface(raw_id)
+	local key = 'iface:' .. raw_id
+	self._cache.mwan = self._cache.mwan or {}
+	if not self._cache.mwan[key] then
+		local remembered = remember_if_available(self, 'mwan', key, name)
+		if not remembered then
+			error('OpenWrt logical interface name collides in mwan3 namespace for ' .. raw_id, 2)
+		end
+	end
+	local cache_class = 'mwan_iface'
+	self._cache[cache_class] = self._cache[cache_class] or {}
+	self._cache[cache_class][raw_id] = name
+	self._reverse[cache_class] = self._reverse[cache_class] or {}
+	self._reverse[cache_class][name] = raw_id
+	return name
 end
 
 function Ctx:mwan_member(id)

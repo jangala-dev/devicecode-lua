@@ -25,6 +25,7 @@ local wan_manager = require 'services.net.wan_manager'
 local drift = require 'services.net.drift'
 local backpressure = require 'services.net.backpressure'
 local gsm_uplink_watch = require 'services.net.gsm_uplink_watch'
+local intent_realiser = require 'services.net.intent_realiser'
 
 local perform = fibers.perform
 
@@ -170,9 +171,24 @@ local function copy_intent_to_model(s, intent)
 	return s
 end
 
+
+local function realised_sources(state)
+	local snap = state.model and state.model:snapshot() or {}
+	return snap.sources or { gsm_uplinks = {} }
+end
+
+local function realise_intent(state, intent)
+	return intent_realiser.realise(intent, realised_sources(state))
+end
+
+local function realised_fingerprint(state, intent)
+	return intent_realiser.realised_fingerprint(intent, realised_sources(state))
+end
+
 local function accept_pending_intent(state, intent, reason)
 	reason = reason or 'network_config_unavailable'
-	local gen = generation_mod.new(intent.generation, intent, reason, { now = now() })
+	local apply_intent = realise_intent(state, intent)
+	local gen = generation_mod.new(apply_intent.generation, apply_intent, reason, { now = now() })
 	gen.state = 'waiting_for_hal'
 	gen.reason = reason
 	gen.apply = { state = 'waiting_for_hal', reason = reason }
@@ -181,9 +197,11 @@ local function accept_pending_intent(state, intent, reason)
 	state.active_apply = nil
 	state.pending_intent = intent
 	state.pending_apply_reason = reason
+	state.base_intent = intent
+	state.last_realised_source_fingerprint = realised_fingerprint(state, intent)
 
 	state.model:update(function (s)
-		copy_intent_to_model(s, intent)
+		copy_intent_to_model(s, apply_intent)
 		s.state = 'waiting_for_hal'
 		s.ready = false
 		s.reason = reason
@@ -207,13 +225,16 @@ local function accept_pending_intent(state, intent, reason)
 end
 
 local function start_apply_for_intent(state, intent, reason)
-	local generation = intent.generation
+	local apply_intent = realise_intent(state, intent)
+	state.base_intent = intent
+	state.last_realised_source_fingerprint = realised_fingerprint(state, intent)
+	local generation = apply_intent.generation
 	local apply_id = state.next_apply_id
 	state.next_apply_id = apply_id + 1
 
 	local gen = state.current_generation
 	if not gen or gen.generation ~= generation then
-		gen = generation_mod.new(generation, intent, reason, { now = now() })
+		gen = generation_mod.new(generation, apply_intent, reason, { now = now() })
 	end
 	generation_mod.start_apply(gen, apply_id, { now = now() })
 	state.current_generation = gen
@@ -222,7 +243,7 @@ local function start_apply_for_intent(state, intent, reason)
 	state.pending_apply_reason = nil
 
 	state.model:update(function (s)
-		copy_intent_to_model(s, intent)
+		copy_intent_to_model(s, apply_intent)
 		s.state = 'applying'
 		s.ready = false
 		s.reason = nil
@@ -245,7 +266,7 @@ local function start_apply_for_intent(state, intent, reason)
 	local ok_pub, pub_err = publish_snapshot(state)
 	if ok_pub ~= true then return nil, pub_err end
 
-	obs_event(state.svc, 'apply_started', { generation = generation, apply_id = apply_id, rev = intent.rev, reason = reason })
+	obs_event(state.svc, 'apply_started', { generation = generation, apply_id = apply_id, rev = apply_intent.rev, reason = reason })
 
 	local handle, err = apply_runtime.start_apply {
 		lifetime_scope = state.scope,
@@ -254,7 +275,7 @@ local function start_apply_for_intent(state, intent, reason)
 		service_id = state.service_id,
 		generation = generation,
 		apply_id = apply_id,
-		intent = intent,
+		intent = apply_intent,
 		hal = state.hal,
 		done_tx = state.done_tx,
 	}
@@ -304,6 +325,7 @@ local function handle_config_changed(state, ev)
 	end
 
 	state.next_generation = intent.generation + 1
+	state.base_intent = intent
 	cancel_active_generation(state, 'config_replaced')
 	obs_event(state.svc, 'config_accepted', {
 		rev = intent.rev,
@@ -493,10 +515,24 @@ local function handle_gsm_uplink_changed(state, ev)
 		connected = payload.connected == true,
 		ifname = payload.linux and payload.linux.ifname or payload.interface,
 	})
+	local structural_ok, structural_err = true, nil
+	if state.base_intent then
+		local fp = realised_fingerprint(state, state.base_intent)
+		if fp ~= state.last_realised_source_fingerprint then
+			local next_intent = model_mod.deep_copy(state.base_intent)
+			next_intent.generation = state.next_generation
+			state.next_generation = state.next_generation + 1
+			state.base_intent = next_intent
+			cancel_active_generation(state, 'gsm_uplink_binding_changed')
+			structural_ok, structural_err = accept_pending_intent(state, next_intent, 'gsm_uplink_binding_changed')
+			if structural_ok == true then structural_ok, structural_err = reconcile_apply_admission(state, 'gsm_uplink_binding_changed') end
+		end
+	end
 	local ok, err = wan_manager.reconcile_speedtests(state, 'gsm_uplink_changed')
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end
+	if structural_ok ~= true then return nil, structural_err end
 	return ok, err
 end
 

@@ -146,19 +146,18 @@
       "schema": "devicecode.config/net/1",
       "version": 1,
       "product": "bigbox-legacy-converted-phase1",
-      "description": "Converted from legacy Big Box config into segment-first Phase 1 net/wired/device style. Metrics omitted.",
+      "description": "Big Box default config using segment-first NET model, GSM-sourced modem uplinks, generated WAN route metrics, and Devicecode-owned OpenWrt UCI output.",
       "vlan_policy": {
         "reserved": {
-          "adm": 8,
-          "switch_control": 100
+          "internal": 100
         },
         "ranges": {
-          "system": {
-            "from": 1,
-            "to": 199
-          },
           "user": {
-            "from": 200,
+            "from": 1,
+            "to": 99
+          },
+          "system": {
+            "from": 100,
             "to": 399
           }
         },
@@ -172,9 +171,9 @@
           "kind": "system",
           "protected": true,
           "user_editable": false,
-          "purpose": "appliance_admin_network",
+          "purpose": "admin_network",
           "vlan": {
-            "reserved": "adm"
+            "id": 8
           },
           "addressing": {
             "ipv4": {
@@ -211,13 +210,13 @@
           "addressing": {
             "ipv4": {
               "mode": "static",
-              "cidr": "172.28.32.1/24"
+              "cidr": "172.28.32.1/22"
             }
           },
           "dhcp": {
             "enabled": true,
             "start": 10,
-            "limit": 240,
+            "limit": 950,
             "lease_time": "12h"
           },
           "dns": {
@@ -240,9 +239,9 @@
           "kind": "system",
           "protected": true,
           "user_editable": false,
-          "purpose": "switch_control_and_internal_services",
+          "purpose": "switch_ext_aps_and_internal_services",
           "vlan": {
-            "reserved": "switch_control"
+            "reserved": "internal"
           },
           "addressing": {
             "ipv4": {
@@ -295,18 +294,18 @@
           "1.1.1.1"
         ],
         "cache": {
-          "size": 1000
+          "size": 10000
         },
         "host_files": {
-          "base_dir": "/data/devicecode/dns/hosts",
+          "base_dir": "/etc/jng/hosts",
           "addnmount": true,
           "sources": {
             "ads": {
-              "file": "ads.hosts",
+              "file": "ads",
               "description": "advertising and tracking block list"
             },
             "adult": {
-              "file": "adult.hosts",
+              "file": "adult",
               "description": "adult-content block list"
             }
           }
@@ -314,9 +313,9 @@
         "records": {
           "unifi": {
             "name": "unifi",
-            "address": "172.28.8.2",
+            "address": "$UNIFI-ADDRESS",
             "segments": [
-              "adm"
+              "int"
             ]
           },
           "config.bigbox.home": {
@@ -443,44 +442,45 @@
       },
       "routing": {
         "routes": {
-          "static_1": {
+          "starlink_admin": {
+            "kind": "host",
             "target": "192.168.100.1",
-            "interface": "wan"
+            "interface": "wan",
+            "description": "Starlink dish/admin UI reachable via the wired WAN uplink"
           }
         }
       },
       "wan": {
         "enabled": true,
-        "policy": "dynamic_weight",
         "members": {
           "wan": {
             "interface": "wan",
-            "metric": 1,
             "weight": 1,
             "dynamic_weight": true,
-            "family": "ipv4"
+            "family": "ipv4",
+            "mwan_metric": 1
           },
-          "mdm0": {
-            "interface": "mdm0",
-            "metric": 1,
+          "modem_primary": {
+            "interface": "modem_primary",
             "weight": 1,
             "dynamic_weight": true,
             "family": "ipv4",
             "source": {
               "kind": "gsm-uplink",
               "id": "primary"
-            }
+            },
+            "mwan_metric": 1
           },
-          "mdm1": {
-            "interface": "mdm1",
-            "metric": 1,
+          "modem_secondary": {
+            "interface": "modem_secondary",
             "weight": 1,
             "dynamic_weight": true,
             "family": "ipv4",
             "source": {
               "kind": "gsm-uplink",
               "id": "secondary"
-            }
+            },
+            "mwan_metric": 1
           }
         },
         "health": {
@@ -502,6 +502,15 @@
           "speedtests": {
             "enabled": true,
             "interval_s": 300
+          }
+        },
+        "rules": {
+          "https": {
+            "family": "ipv4",
+            "proto": "tcp",
+            "dest_port": "443",
+            "policy": "balanced",
+            "sticky": true
           }
         }
       },

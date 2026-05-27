@@ -107,7 +107,7 @@ local intent = {
       role = 'wan',
       segment = 'wan',
       endpoint = { ifname = 'eth2' },
-      addressing = { ipv4 = { mode = 'dhcp', peerdns = false, metric = 10 } },
+      addressing = { ipv4 = { mode = 'dhcp', peerdns = false } },
     },
   },
   dns = {
@@ -130,7 +130,7 @@ local intent = {
       { interface = 'lan', target = '10.0.0.0/8', gateway = '192.168.10.254' },
     },
   },
-  wan = {},
+  wan = { enabled = true, members = { wan = { interface = 'wan', mwan_metric = 1, weight = 1 } } },
   shaping = {},
   vpn = {},
   diagnostics = {},
@@ -174,7 +174,7 @@ fibers.run(function(_scope)
   eq(observed.interfaces.wan.endpoint.ifname, 'eth2', 'wan endpoint')
   eq(observed.interfaces.wan.addressing.ipv4.mode, 'dhcp', 'wan ipv4 mode')
   eq(observed.interfaces.wan.addressing.ipv4.peerdns, false, 'wan peerdns')
-  eq(observed.interfaces.wan.addressing.ipv4.metric, 10, 'wan metric')
+  eq(observed.interfaces.wan.addressing.ipv4.metric, 11, 'wan auto route metric')
 
   eq(observed.segments.lan.firewall.zone, 'lan', 'lan segment zone')
   eq(observed.segments.lan.dhcp.enabled, true, 'lan segment dhcp enabled')
@@ -200,11 +200,11 @@ fibers.run(function(_scope)
   eq(observed.routing.routes[1].target, '10.0.0.0/8', 'route target')
   eq(observed.routing.routes[1].gateway, '192.168.10.254', 'route gateway')
 
-  wait_until(function() return #restarts == 3 end, 1, 'activation commands should run')
+  wait_until(function() return #restarts == 4 end, 1, 'activation commands should run')
   provider:terminate('test complete')
 end)
 
-eq(#restarts, 3, 'restart command count')
+eq(#restarts, 4, 'restart command count')
 
 print('openwrt network provider snapshot: ok')
 LUA

@@ -46,25 +46,18 @@ function M.live_weight_policy(snapshot)
 	local wan = snapshot and snapshot.wan or {}
 	local lb = type(wan.load_balancing) == 'table' and wan.load_balancing or {}
 	local rt = type(wan.runtime) == 'table' and wan.runtime or {}
-	return rt.weight_policy or rt.live_weight_policy or lb.weight_policy or lb.policy or wan.policy or 'balanced'
+	return rt.weight_policy or rt.live_weight_policy or lb.weight_policy or lb.policy or 'balanced'
 end
 
 local function member_interface(member, uplink_id)
 	member = member or {}
-	return member.openwrt_interface
-		or member.network_interface
-		or member.interface
-		or member.iface
-		or member.link_id
-		or uplink_id
+	return member.interface or uplink_id
 end
 
 local function gsm_source(member)
 	local src = member and member.source or nil
-	if type(src) ~= 'table' then return nil end
-	if src.kind == 'gsm-uplink' then return src.id or src.role end
-	if src.kind == 'modem' then return src.modem_id or src.id or src.role end
-	return nil
+	if type(src) ~= 'table' or src.kind ~= 'gsm-uplink' then return nil end
+	return src.id
 end
 
 function M.gsm_uplink_state(snapshot, member)
@@ -80,7 +73,7 @@ function M.build_speedtest_request(snapshot, uplink_id, member)
 	local endpoint = type(iface) == 'table' and type(iface.endpoint) == 'table' and iface.endpoint or {}
 	local gsm = M.gsm_uplink_state(snapshot, member)
 	local gsm_linux = type(gsm) == 'table' and type(gsm.linux) == 'table' and gsm.linux or {}
-	local metric = tonumber(member.metric or member.priority) or 1
+	local metric = tonumber(member.mwan_metric) or 1
 	return {
 		interface = iface_id,
 		device = member.device or member.linux_interface or member.ifname or endpoint.ifname or endpoint.device or endpoint.name or (iface and iface.device) or gsm_linux.ifname,
@@ -161,7 +154,7 @@ end
 
 local function member_fingerprint(m)
 	if type(m) ~= 'table' then return '' end
-	return table.concat({ tostring(m.id), tostring(m.interface), tostring(m.metric), tostring(m.weight) }, ':')
+	return table.concat({ tostring(m.id), tostring(m.interface), tostring(m.mwan_metric), tostring(m.weight) }, ':')
 end
 
 function M.weights_equal(a, b)
@@ -209,7 +202,6 @@ function M.compute_weights(snapshot, generation)
 		end
 		out[#out + 1] = {
 			id = id,
-			link_id = id,
 			interface = uplink.request.interface,
 			metric = metric,
 			weight = weight,

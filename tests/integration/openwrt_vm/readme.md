@@ -142,3 +142,32 @@ The management SSH NIC remains separate from any tap dataplane NICs. The MWAN li
 This lane is intentionally separate from the normal unit suite. It is for tests where container-based execution is not representative, especially OpenWrt HAL work involving UCI, networking reloads, nftables, traffic control, IFB, veth and future shaping or bandwidth-estimation tests.
 
 Keep service logic tests outside this lane where possible. Use this VM lane for behaviour that depends on OpenWrt or kernel networking semantics.
+Additional real-VM network tests apply a Devicecode-generated config directly to `/etc/config` while preserving the QEMU management LAN on `eth0` and using the deterministic VM WAN NICs `eth1`, `eth2` and `eth3`. They assert both the generated UCI shape and that mwan3 is active over the VM WAN links.
+
+
+
+### Render generated default OpenWrt config files
+
+To see the exact `/etc/config/*` files generated from `src/configs/bigbox-v1-cm-2.json` without modifying the VM's real `/etc/config`, run:
+
+```sh
+make render-default-configs
+```
+
+The files are copied to:
+
+```text
+tests/integration/openwrt_vm/work/generated-default-etc-config/
+```
+
+For a stdout dump as well, run:
+
+```sh
+make print-default-configs
+```
+
+The renderer runs the real OpenWrt provider against a temporary UCI confdir. By default it uses `eth0` as the segment trunk and no GSM uplink facts, so only wired WAN is realised. To render with modem interfaces realised, set:
+
+```sh
+DEVICECODE_RENDER_GSM_PRIMARY_IFNAME=wwan0 DEVICECODE_RENDER_GSM_SECONDARY_IFNAME=wwan1 make print-default-configs
+```

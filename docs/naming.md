@@ -1100,10 +1100,3 @@ change between boots.
 NET may consume this state as its GSM source contract.  NET should not consume
 raw modem or HAL provider topics for WAN source identity.
 
-During migration GSM may also publish the legacy compatibility topic:
-
-```text
-state/gsm/modem/<role>/uplink
-```
-
-New code should use `state/gsm/uplink/<role>`.

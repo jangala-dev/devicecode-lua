@@ -1,6 +1,6 @@
 .PHONY: \
 	preflight fetch verify reset run wait provision provision-force ensure-mwan3 \
-	stop ssh smoke logs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test \
+	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test \
 	openwrt-vm-test clean
 
 preflight:
@@ -42,6 +42,14 @@ smoke:
 
 logs:
 	tail -n 200 work/qemu.log
+
+render-default-configs:
+	./scripts/wait-ssh
+	DEVICECODE_RENDER_PRINT=0 ./scripts/render-default-configs
+
+print-default-configs:
+	./scripts/wait-ssh
+	DEVICECODE_RENDER_PRINT=1 ./scripts/render-default-configs
 
 baseline: test-baseline
 
@@ -106,6 +114,16 @@ test-openwrt-network-provider-mwan-live-weights-fast:
 	./scripts/wait-ssh
 	./tests/test_openwrt_network_provider_mwan_live_weights.sh
 
+test-openwrt-vm-generated-configs-expected:
+	./scripts/wait-ssh
+	./scripts/ensure-mwan3
+	./tests/test_openwrt_vm_generated_configs_expected.sh
+
+test-openwrt-vm-mwan-connected:
+	./scripts/wait-ssh
+	./scripts/ensure-mwan3
+	./tests/test_openwrt_vm_mwan_connected.sh
+
 
 test-openwrt-network-provider-segment-trunk:
 	./scripts/wait-ssh
@@ -133,7 +151,7 @@ test-scp:
 	grep -q devicecode-openwrt-vm "$$tmp.out"; \
 	rm -f "$$tmp" "$$tmp.out"
 
-test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-scp
+test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-scp
 
 openwrt-vm-test: preflight fetch verify reset run wait provision test
 

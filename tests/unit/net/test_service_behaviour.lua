@@ -612,11 +612,10 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 
 		local c = cfg()
 		c.wan = {
-			policy = 'weighted_failover',
-			load_balancing = { speedtests = true },
+			load_balancing = { policy = 'balanced', speedtests = true },
 			members = {
-				wan_a = { interface = 'wan_a', metric = 1, weight = 1 },
-				wan_b = { interface = 'wan_b', metric = 1, weight = 1 },
+				wan_a = { interface = 'wan_a', mwan_metric = 1, weight = 1 },
+				wan_b = { interface = 'wan_b', mwan_metric = 1, weight = 1 },
 			},
 		}
 		c.interfaces.wan_a = { kind = 'ethernet', role = 'wan', segment = 'wan', endpoint = { ifname = 'eth1' }, addressing = { ipv4 = { mode = 'dhcp' } } }

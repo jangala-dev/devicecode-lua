@@ -24,11 +24,27 @@ local function set_option(changes, config, section, option, value)
 	if value == nil then return end
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = option, value = value }
 end
+local function set_list_option(changes, config, section, option, value)
+	if value == nil then return end
+	local values = value
+	if type(values) ~= 'table' then values = { values } end
+	for i = 1, #values do
+		if values[i] ~= nil then
+			changes[#changes + 1] = { op = 'add_list', config = config, section = section, option = option, value = values[i] }
+		end
+	end
+end
 
 local function bool_uci(v) if v == nil then return nil end return v and '1' or '0' end
+local function sticky_uci(v) if v == nil then return nil end return v and '1' or '0' end
+
+local function policy_name_for(wan, fallback)
+	local lb = is_plain_table(wan and wan.load_balancing) and wan.load_balancing or {}
+	return lb.policy or fallback or 'balanced'
+end
 
 local function member_iface(id, spec)
-	return spec.interface or spec.iface or spec.network_interface or spec.openwrt_interface or id
+	return spec.interface or id
 end
 
 function M.build_changes(intent, name_ctx)
@@ -71,14 +87,15 @@ function M.build_changes(intent, name_ctx)
 	for _, mid in ipairs(sorted_keys(members)) do
 		local m = is_plain_table(members[mid]) and members[mid] or {}
 		local iface_sem = member_iface(mid, m)
-		local metric = math.floor(tonumber(m.metric or m.priority or 1) or 1)
+		local metric = math.floor(tonumber(m.mwan_metric or 1) or 1)
 		local weight = math.max(1, math.floor(tonumber(m.weight or 1) or 1))
 		local ifsec = mw_iface(iface_sem)
 		known[ifsec] = true
 		set_section(changes, 'mwan3', ifsec, 'interface')
 		set_option(changes, 'mwan3', ifsec, 'enabled', '1')
 		set_option(changes, 'mwan3', ifsec, 'family', m.family or health.family or 'ipv4')
-		set_option(changes, 'mwan3', ifsec, 'track_ip', m.track_ip or (m.health and m.health.track_ip) or health.track_ip)
+		set_list_option(changes, 'mwan3', ifsec, 'track_ip', m.track_ip or (m.health and m.health.track_ip) or health.track_ip)
+		set_option(changes, 'mwan3', ifsec, 'initial_state', m.initial_state or health.initial_state)
 		set_option(changes, 'mwan3', ifsec, 'reliability', m.reliability or health.reliability)
 		set_option(changes, 'mwan3', ifsec, 'count', m.count or health.count)
 		set_option(changes, 'mwan3', ifsec, 'timeout', m.timeout or health.timeout)
@@ -94,20 +111,40 @@ function M.build_changes(intent, name_ctx)
 		member_sections[#member_sections + 1] = member_sec
 	end
 	table.sort(member_sections)
-	local policy_name = (wan.load_balancing and wan.load_balancing.policy) or wan.policy_name or 'balanced'
-	if policy_name == 'failover' or policy_name == 'weighted_failover' or policy_name == 'dynamic_weight' then policy_name = 'balanced' end
-	policy_name = mw_policy(policy_name)
+	local policy_name = mw_policy(policy_name_for(wan, 'balanced'))
 	known[policy_name] = true
 	set_section(changes, 'mwan3', policy_name, 'policy')
-	set_option(changes, 'mwan3', policy_name, 'use_member', member_sections)
+	set_list_option(changes, 'mwan3', policy_name, 'use_member', member_sections)
 	set_option(changes, 'mwan3', policy_name, 'last_resort', wan.last_resort or 'unreachable')
+
+	local rule_sections = {}
+	for _, rid in ipairs(sorted_keys(wan.rules or {})) do
+		local r = is_plain_table(wan.rules[rid]) and wan.rules[rid] or {}
+		if r.enabled ~= false and r.disabled ~= true then
+			local rsec = mw_rule(rid)
+			known[rsec] = true
+			set_section(changes, 'mwan3', rsec, 'rule')
+			set_option(changes, 'mwan3', rsec, 'src_ip', r.src_ip)
+			set_option(changes, 'mwan3', rsec, 'dest_ip', r.dest_ip)
+			set_option(changes, 'mwan3', rsec, 'proto', r.proto)
+			set_option(changes, 'mwan3', rsec, 'src_port', r.src_port)
+			set_option(changes, 'mwan3', rsec, 'dest_port', r.dest_port)
+			set_option(changes, 'mwan3', rsec, 'family', r.family or 'ipv4')
+			set_option(changes, 'mwan3', rsec, 'sticky', sticky_uci(r.sticky))
+			set_option(changes, 'mwan3', rsec, 'timeout', r.timeout)
+			set_option(changes, 'mwan3', rsec, 'use_policy', mw_policy(r.policy or policy_name_for(wan, 'balanced')))
+			rule_sections[#rule_sections + 1] = rsec
+		end
+	end
+
 	local rule_name = mw_rule('default_rule_v4')
 	known[rule_name] = true
 	set_section(changes, 'mwan3', rule_name, 'rule')
 	set_option(changes, 'mwan3', rule_name, 'dest_ip', '0.0.0.0/0')
 	set_option(changes, 'mwan3', rule_name, 'family', 'ipv4')
 	set_option(changes, 'mwan3', rule_name, 'use_policy', policy_name)
-	return changes, known, { enabled = true, policy = policy_name, members = member_sections }
+	rule_sections[#rule_sections + 1] = rule_name
+	return changes, known, { enabled = true, policy = policy_name, members = member_sections, rules = rule_sections }
 end
 
 function M.persist_weights_op(mgr, req, name_ctx)
@@ -115,8 +152,8 @@ function M.persist_weights_op(mgr, req, name_ctx)
 	local live = { wan = { enabled = true, members = {} } }
 	for i = 1, #members do
 		local m = members[i]
-		local id = m.id or m.link_id or m.interface or ('member' .. tostring(i))
-		live.wan.members[id] = { interface = m.interface or m.iface or m.link_id, metric = m.metric or 1, weight = m.weight or 1 }
+		local id = m.id or m.interface or ('member' .. tostring(i))
+		live.wan.members[id] = { interface = m.interface, mwan_metric = m.metric or 1, weight = m.weight or 1 }
 	end
 	local changes = M.build_changes(live, name_ctx)
 	return mgr:submit_op({ config = 'mwan3', changes = changes, restart_cmds = {} })
@@ -181,7 +218,7 @@ end
 
 local function interface_from_member(m, index)
 	if type(m) ~= 'table' then return nil end
-	local iface = m.interface or m.iface or m.openwrt_interface or m.link_id or m.id
+	local iface = m.interface or m.id
 	if type(iface) ~= 'string' or iface == '' then return nil, 'members[' .. tostring(index) .. '] missing interface' end
 	return sid(iface), nil
 end

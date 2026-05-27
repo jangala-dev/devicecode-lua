@@ -52,13 +52,33 @@ local function validate_segments(intent)
 	return true, nil
 end
 
+
+local function validate_routing(intent)
+	if type(intent.interfaces) ~= 'table' or next(intent.interfaces) == nil then return true, nil end
+	for id, route in pairs((intent.routing and intent.routing.routes) or {}) do
+		local iface = route.interface
+		if type(iface) ~= 'string' or iface == '' then
+			return nil, err({ 'net', 'routing', 'routes', id, 'interface' }, 'interface reference must be a non-empty string')
+		end
+		if not (has(intent.interfaces, iface) or has(intent.segments, iface)) then
+			return nil, err({ 'net', 'routing', 'routes', id, 'interface' }, 'references unknown interface or segment ' .. tostring(iface))
+		end
+	end
+	return true, nil
+end
+
 local function validate_wan(intent)
 	-- If no interface catalogue is declared, member references are external provider names.
 	if type(intent.interfaces) ~= 'table' or next(intent.interfaces) == nil then return true, nil end
 	for id, member in pairs((intent.wan and intent.wan.members) or {}) do
-		local iface = member.interface or member.network_interface or member.openwrt_interface or member.iface
-		local ok, e = check_ref(intent.interfaces, iface, { 'net', 'wan', 'members', id, 'interface' }, 'interface')
-		if not ok then return nil, e end
+		local iface = member.interface
+		local src = member.source
+		if not (type(src) == 'table' and src.kind == 'gsm-uplink') then
+			if type(iface) ~= 'string' or iface == '' then return nil, err({ 'net', 'wan', 'members', id, 'interface' }, 'interface reference must be a non-empty string') end
+			if not (has(intent.interfaces, iface) or has(intent.segments, iface)) then
+				return nil, err({ 'net', 'wan', 'members', id, 'interface' }, 'references unknown interface or segment ' .. tostring(iface))
+			end
+		end
 	end
 	return true, nil
 end
@@ -93,6 +113,7 @@ function M.validate(intent)
 	local ok, e = validate_interfaces(intent); if not ok then return nil, e end
 	ok, e = validate_segments(intent); if not ok then return nil, e end
 	ok, e = validate_wan(intent); if not ok then return nil, e end
+	ok, e = validate_routing(intent); if not ok then return nil, e end
 	ok, e = validate_firewall(intent); if not ok then return nil, e end
 	ok, e = validate_dhcp(intent); if not ok then return nil, e end
 	return true, nil

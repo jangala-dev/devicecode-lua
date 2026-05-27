@@ -133,7 +133,7 @@ local intent = {
       role = 'wan',
       segment = 'wan',
       endpoint = { ifname = 'eth2' },
-      addressing = { ipv4 = { mode = 'dhcp', peerdns = false, metric = 10 } },
+      addressing = { ipv4 = { mode = 'dhcp', peerdns = false } },
     },
   },
   dns = {
@@ -190,7 +190,7 @@ local intent = {
     },
   },
   routing = {},
-  wan = {},
+  wan = { enabled = true, members = { wan = { interface = 'wan', mwan_metric = 1, weight = 1 } } },
   shaping = {},
   vpn = {},
   diagnostics = {},
@@ -219,11 +219,11 @@ fibers.run(function(_scope)
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
   assert(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
-  wait_until(function() return #restarts == 3 end, 1, 'activation commands should run')
+  wait_until(function() return #restarts == 4 end, 1, 'activation commands should run')
   provider:terminate('test complete')
 end)
 
-eq(restarts[#restarts], '/etc/init.d/firewall restart', 'last restart command')
+eq(restarts[#restarts], '/etc/init.d/mwan3 restart', 'last restart command')
 
 local c = assert(uci.cursor(conf, save))
 if type(c.load) == 'function' then pcall(function() c:load('firewall') end) end

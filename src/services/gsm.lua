@@ -17,7 +17,6 @@
 --   state/gsm/modem/<name>/connected        retained: true when APN connected, false otherwise
 --   state/gsm/modem/<name>/wwan-iface       retained: kernel wwan interface name, false when unknown
 --   state/gsm/uplink/<name>                 retained: canonical cellular uplink record for NET
---   state/gsm/modem/<name>/uplink           retained: legacy compatibility cellular uplink record
 
 local fibers = require "fibers"
 local op = require "fibers.op"
@@ -78,9 +77,6 @@ local function t_state_gsm_uplink(name)
 	return { 'state', 'gsm', 'uplink', name }
 end
 
-local function t_legacy_state_gsm_uplink(name)
-	return { 'state', 'gsm', 'modem', name, 'uplink' }
-end
 
 ---@param cap CapabilityReference
 ---@param method string
@@ -487,7 +483,6 @@ function GsmModem:_publish_uplink_state(connected, iface)
 	local access_tech = derive_access_tech(access_techs)
 	local operator = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT)
 	local signal = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT)
-	local logical = (self.cfg and (self.cfg.openwrt_interface or self.cfg.network_interface)) or self.name
 	local ifname = self.wwan_iface
 	local payload = {
 		schema = 'devicecode.gsm.uplink/1',
@@ -498,16 +493,11 @@ function GsmModem:_publish_uplink_state(connected, iface)
 		available = self.connected == true and type(ifname) == 'string' and ifname ~= '',
 		generation = self.uplink_generation,
 		linux = { ifname = ifname },
-		network = { logical_interface = logical },
 		modem = {
 			id = tostring(self.id),
 			role = self.name,
 			device = self.device,
 		},
-		-- Compatibility fields for existing consumers.
-		interface = ifname,
-		openwrt_interface = logical,
-		device = ifname,
 		access = {
 			tech = access_tech ~= '' and access_tech or nil,
 			family = access_tech ~= '' and get_access_family(access_tech) or nil,
@@ -517,7 +507,6 @@ function GsmModem:_publish_uplink_state(connected, iface)
 		at = self.svc and self.svc.wall and self.svc:wall() or nil,
 	}
 	self.conn:retain(t_state_gsm_uplink(self.name), payload)
-	self.conn:retain(t_legacy_state_gsm_uplink(self.name), payload)
 end
 
 function GsmModem:_emit_metrics_once()

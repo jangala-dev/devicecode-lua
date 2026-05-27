@@ -86,7 +86,7 @@ local intent = {
     },
     wan = {
       kind = 'ethernet', role = 'wan', segment = 'wan', endpoint = { ifname = 'eth1' },
-      addressing = { ipv4 = { mode = 'dhcp', metric = 10, peerdns = false } },
+      addressing = { ipv4 = { mode = 'dhcp', peerdns = false } },
     },
   },
   dns = { enabled = true, domain = 'bigbox.home', upstreams = { '1.1.1.1' }, cache = { size = 1000 } },
@@ -97,7 +97,7 @@ local intent = {
     policies = { lan_to_wan = { src = 'lan', dest = 'wan' } },
   },
   routing = { routes = {} },
-  wan = {},
+  wan = { enabled = true, members = { wan = { interface = 'wan', mwan_metric = 1, weight = 1 } } },
   shaping = {},
   vpn = {},
   diagnostics = {},
@@ -143,7 +143,7 @@ fibers.run(function(scope)
   assert_true(result.ok == true, 'provider apply failed: ' .. tostring(result.err))
   assert_true(result.transaction and result.transaction.ok == true, 'transaction should succeed')
   assert_true(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
-  eq(result.activation.commands, 3, 'provider should schedule network, dnsmasq and firewall activation')
+  eq(result.activation.commands, 4, 'provider should schedule network, dnsmasq, firewall and mwan3 activation')
   eq(run_finished, false, 'provider apply must not wait for activation command completion')
 
   local c = assert(uci.cursor(conf, save))
@@ -155,9 +155,10 @@ fibers.run(function(scope)
   wait_until(function() return run_finished == true end, 1, 'first activation command should finish after release')
 
   -- Remaining activation commands are not blocked once the first command is released.
-  wait_until(function() return #restarts == 3 end, 1, 'all provider activation commands should run')
+  wait_until(function() return #restarts == 4 end, 1, 'all provider activation commands should run')
   eq(restarts[2], '/etc/init.d/dnsmasq restart', 'second activation command')
   eq(restarts[3], '/etc/init.d/firewall restart', 'third activation command')
+  eq(restarts[4], '/etc/init.d/mwan3 restart', 'fourth activation command')
 
   local status = provider._uci_manager and provider._uci_manager:activation_status() or nil
   assert_true(status and status.state == 'done', 'activation runner should report done')

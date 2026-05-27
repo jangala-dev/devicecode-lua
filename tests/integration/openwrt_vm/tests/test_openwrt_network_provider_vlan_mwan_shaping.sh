@@ -76,8 +76,8 @@ local intent = {
   },
   interfaces = {
     lan = { kind='bridge', role='lan', segment='lan', members={'eth0'}, addressing={ipv4={mode='static', cidr='192.168.10.1/24'}} },
-    wan_a = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan0'}, addressing={ipv4={mode='dhcp', metric=10}} },
-    wan_b = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan1'}, addressing={ipv4={mode='dhcp', metric=20}} },
+    wan_a = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan0'}, addressing={ipv4={mode='dhcp'}} },
+    wan_b = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan1'}, addressing={ipv4={mode='dhcp'}} },
   },
   firewall = {
     defaults={ input='ACCEPT', output='ACCEPT', forward='REJECT', synflood_protect=true },
@@ -95,7 +95,7 @@ local intent = {
   },
   dhcp={ defaults={ lease_time='12h', authoritative=true }, reservations={ unifi={ name='unifi', mac='00:11:22:33:44:55', ip='192.168.10.2' } } },
   vpn={}, diagnostics={},
-  wan = { enabled=true, policy='weighted_failover', load_balancing={speedtests=true, policy='balanced'}, members={ gsm_a={interface='wan_a', metric=1, weight=1}, gsm_b={interface='wan_b', metric=1, weight=1} } },
+  wan = { enabled=true, policy='weighted_failover', load_balancing={speedtests=true, policy='balanced'}, members={ gsm_a={interface='wan_a', mwan_metric=1, weight=1}, gsm_b={interface='wan_b', mwan_metric=1, weight=1} } },
   shaping = { enabled=true, profiles={ restricted={ egress={enabled=true, host_rate='2mbit', hosts={['192.168.10.2']={rate='1mbit'}}} } } },
 }
 intent.segments.lan.dns = { local_server=true, domain='bigbox.home', host_files={'ads'} }
@@ -109,10 +109,10 @@ fibers.run(function()
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result.ok == true, result.err)
   assert(result.activation and result.activation.state == 'scheduled', 'activation should be scheduled')
-  wait_until(function() return #restarts == 3 end, 1, 'activation commands should run')
+  wait_until(function() return #restarts == 4 end, 1, 'activation commands should run')
   local speed = perform(provider:speedtest_op({ interface='wan_a', device='wwan0' }))
   eq(speed.peak_mbps, 55, 'speedtest fake result')
-  local live = perform(provider:apply_live_weights_op({ policy='balanced', members={{link_id='gsm_a', interface='wan_a', metric=1, weight=80},{link_id='gsm_b', interface='wan_b', metric=1, weight=20}}, persist=true }))
+  local live = perform(provider:apply_live_weights_op({ policy='balanced', members={{id='gsm_a', interface='wan_a', metric=1, weight=80},{id='gsm_b', interface='wan_b', metric=1, weight=20}}, persist=true }))
   assert(live.ok == true, live.err)
   provider:terminate('test complete')
 end)
@@ -122,7 +122,7 @@ if #live_restores ~= 1 then fail('one live weight restore expected') end
 if not live_restores[1]:find('%-%-probability 0.80000000000') then fail('live first-member probability expected') end
 if not live_restores[1]:find('%*mangle', 1, false) then fail('iptables-restore mangle payload expected') end
 local joined = table.concat(restarts, '\n')
-if joined:find('mwan3', 1, true) then fail('mwan3 restart must not be used') end
+if not joined:find('mwan3 restart', 1, true) then fail('structural apply should restart mwan3') end
 
 local c = assert(uci.cursor(conf, save))
 for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end end
