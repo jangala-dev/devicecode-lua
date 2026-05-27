@@ -22,6 +22,7 @@ else
 	add_path('../vendor/lua-fibers/src/')
 	add_path('../vendor/lua-bus/src/')
 	add_path('../vendor/lua-trie/src/')
+	add_path('./')
 end
 
 local fibers = require 'fibers'

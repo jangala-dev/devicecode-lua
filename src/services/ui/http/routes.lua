@@ -67,6 +67,10 @@ function M.decode(ctx)
 		return { kind = 'read', query = 'services' }
 	end
 
+	if parts[2] == 'fabric' and parts[3] == 'link' and parts[4] ~= nil and method == 'GET' then
+		return { kind = 'read', query = 'fabric_link', link_id = parts[4] }
+	end
+
 	if parts[2] == 'fabric' and method == 'GET' then
 		return { kind = 'read', query = 'fabric' }
 	end
