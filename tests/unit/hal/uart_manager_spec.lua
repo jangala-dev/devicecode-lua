@@ -68,6 +68,39 @@ function T.apply_config_op_adds_uart_driver_and_emits_added_event()
 		assert(type(ev.capabilities) == 'table' and #ev.capabilities == 1)
 		assert(ev.capabilities[1].class == 'uart')
 		assert(ev.meta.path == port.slave_name)
+		assert(ev.meta.source_id == 'uart_mcu')
+
+		local ok_stop, err_stop = fibers.perform(M.shutdown_op())
+		assert(ok_stop == true, tostring(err_stop))
+	end)
+end
+
+function T.apply_config_op_accepts_hal_uart_serial_ports_shape()
+	local M = fresh_manager()
+
+	runfibers.run(function(scope)
+		local port = pty.open(scope)
+		local dev_ev_ch = channel.new(8)
+		local cap_emit_ch = channel.new(16)
+
+		local ok_start, err_start = fibers.perform(M.start_op(nil, dev_ev_ch, cap_emit_ch))
+		assert(ok_start == true, tostring(err_start))
+
+		local ok_cfg, err_cfg = fibers.perform(M.apply_config_op({
+			serial_ports = {
+				{ id = 'uart0', path = port.slave_name, baud = 115200, mode = '8N1' },
+			},
+		}))
+		assert(ok_cfg == true, tostring(err_cfg))
+
+		local ev = recv_or_fail(dev_ev_ch)
+		assert(ev.event_type == 'added')
+		assert(ev.class == 'uart')
+		assert(ev.id == 'uart0')
+		assert(type(ev.capabilities) == 'table' and #ev.capabilities == 1)
+		assert(ev.capabilities[1].class == 'uart')
+		assert(ev.capabilities[1].id == 'uart0')
+		assert(ev.meta.source_id == 'uart_uart0')
 
 		local ok_stop, err_stop = fibers.perform(M.shutdown_op())
 		assert(ok_stop == true, tostring(err_stop))

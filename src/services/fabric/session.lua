@@ -8,7 +8,6 @@ local priority_event = require 'devicecode.support.priority_event'
 local model_mod      = require 'services.fabric.model'
 local protocol       = require 'services.fabric.protocol'
 local contracts      = require 'devicecode.support.contracts'
-local validate       = require 'shared.validate'
 
 local M = {}
 
@@ -21,8 +20,6 @@ OutboundGate.__index = OutboundGate
 local DEFAULT_HELLO_INTERVAL = 1.0
 local DEFAULT_PING_INTERVAL = 5.0
 local DEFAULT_LIVENESS_TIMEOUT = 15.0
-local DEFAULT_BAD_FRAME_LIMIT = 5
-local DEFAULT_BAD_FRAME_WINDOW_S = 10.0
 
 local function require_rx(v, name, level)
 	return contracts.require_rx(v, name, (level or 1) + 1)
@@ -38,11 +35,6 @@ local function positive_number(v, fallback, name)
 		error('fabric.session: ' .. name .. ' must be a positive finite number', 3)
 	end
 	return v
-end
-
-local function positive_integer(v, fallback, name)
-	if v == nil then return fallback end
-	return validate.positive_integer(v, 'fabric.session: ' .. name, 2)
 end
 
 function M.new_session_context(args)
@@ -327,6 +319,13 @@ local function same_peer(cur, frame)
 		and frame.sid == cur.peer_sid
 end
 
+local function is_unexpected_peer(self, frame)
+	local expected = self._expected_peer
+	if expected == nil or expected == '' then return false end
+	if frame.type ~= 'hello' and frame.type ~= 'hello_ack' then return false end
+	return frame.node ~= expected
+end
+
 local function establish_from_peer(self, frame, at)
 	at = at or fibers.now()
 	local cur = session_snapshot(self)
@@ -448,11 +447,27 @@ local function frame_event_from_item(item)
 			kind = 'wire_error',
 			err  = item.err or 'wire_error',
 			at   = item.at or fibers.now(),
+			wire_errors = item.wire_errors,
+			bad_frame_count = item.bad_frame_count,
+		}
+	end
+
+	if type(item) == 'table' and item.kind == 'wire_recovery' then
+		return {
+			kind = 'wire_recovery',
+			reason = item.reason or item.err or 'bad_frame_limit',
+			err = item.err or item.reason or 'bad_frame_limit',
+			at = item.at or fibers.now(),
+			wire_errors = item.wire_errors,
+			bad_frame_count = item.bad_frame_count,
+			drained_bytes = item.drained_bytes,
+			drain_err = item.drain_err,
+			quiet_until = item.quiet_until,
 		}
 	end
 	return {
 		kind = 'invalid_frame_item',
-		err  = 'fabric.session frame_rx accepts only frame_received events',
+		err  = 'fabric.session frame_rx accepts only frame_received, wire_error, or wire_recovery events',
 	}
 end
 
@@ -517,43 +532,38 @@ local function route_downstream(self, lane, frame, at)
 	return true, nil
 end
 
-local function record_bad_frame(self, at)
-	at = at or fibers.now()
-	local window_s = self._bad_frame_window_s
-	local cutoff = at - window_s
-	local kept = {}
-
-	for _, seen_at in ipairs(self._bad_frame_times or {}) do
-		if type(seen_at) == 'number' and seen_at >= cutoff then
-			kept[#kept + 1] = seen_at
-		end
-	end
-
-	kept[#kept + 1] = at
-	self._bad_frame_times = kept
-
-	return #kept
-end
-
 local function handle_wire_error(self, ev)
-	local at = (type(ev) == 'table' and ev.at) or fibers.now()
 	local err = (type(ev) == 'table' and ev.err) or 'wire_error'
-	local count = record_bad_frame(self, at)
 
 	update_session(self, function (s)
-		s.wire_errors = (s.wire_errors or 0) + 1
-		s.bad_frame_count = count
+		s.wire_errors = ev.wire_errors or ((s.wire_errors or 0) + 1)
+		s.bad_frame_count = ev.bad_frame_count or ((s.bad_frame_count or 0) + 1)
 		s.last_wire_error = tostring(err)
 	end)
+end
 
-	if count >= self._bad_frame_limit then
-		self._bad_frame_times = {}
-		reset_to_hello(self, 'bad_frame_limit', at)
-	end
+local function handle_wire_recovery(self, ev)
+	local at = (type(ev) == 'table' and ev.at) or fibers.now()
+	local reason = (type(ev) == 'table' and ev.reason) or 'bad_frame_limit'
+	local quiet_until = tonumber(type(ev) == 'table' and ev.quiet_until) or at
+
+	update_session(self, function (s)
+		s.wire_errors = ev.wire_errors or ((s.wire_errors or 0) + 1)
+		s.bad_frame_count = ev.bad_frame_count or s.bad_frame_count or 0
+		s.last_wire_error = tostring(reason)
+		s.last_drain_bytes = ev.drained_bytes
+		s.last_drain_err = ev.drain_err
+	end)
+
+	reset_to_hello(self, reason, at)
+	self._next_hello_at = quiet_until
 end
 
 local function handle_session_frame(self, checked, at)
 	local cur = session_snapshot(self)
+	if is_unexpected_peer(self, checked) then
+		return
+	end
 	if (checked.type == 'hello' or checked.type == 'hello_ack')
 		and not protocol.proto_supported(checked.proto)
 	then
@@ -679,6 +689,7 @@ function M.run(scope, params)
 		_transfer_tx = transfer_tx,
 		_session_model = session_model,
 		_local_node = local_node,
+		_expected_peer = params.peer_id,
 		_identity_claim = protocol.normalise_reserved_claim(params.identity_claim),
 		_auth_claim = protocol.normalise_reserved_claim(params.auth_claim),
 		_auth_state = 'unauthenticated',
@@ -688,9 +699,6 @@ function M.run(scope, params)
 		_hello_interval = positive_number(params.hello_interval_s, DEFAULT_HELLO_INTERVAL, 'hello_interval_s'),
 		_ping_interval = positive_number(params.ping_interval_s, DEFAULT_PING_INTERVAL, 'ping_interval_s'),
 		_liveness_timeout = positive_number(params.liveness_timeout_s, DEFAULT_LIVENESS_TIMEOUT, 'liveness_timeout_s'),
-		_bad_frame_limit = positive_integer(params.bad_frame_limit, DEFAULT_BAD_FRAME_LIMIT, 'bad_frame_limit'),
-		_bad_frame_window_s = positive_number(params.bad_frame_window_s, DEFAULT_BAD_FRAME_WINDOW_S, 'bad_frame_window_s'),
-		_bad_frame_times = {},
 		_next_hello_at = fibers.now(),
 		_next_ping_at = math.huge,
 		_last_peer_at = nil,
@@ -718,6 +726,8 @@ function M.run(scope, params)
 			handle_frame(self, ev)
 		elseif ev.kind == 'wire_error' then
 			handle_wire_error(self, ev)
+		elseif ev.kind == 'wire_recovery' then
+			handle_wire_recovery(self, ev)
 		elseif ev.kind == 'invalid_frame_item' then
 			error(ev.err or 'fabric.session invalid frame input', 0)
 		elseif ev.kind == 'timer' then

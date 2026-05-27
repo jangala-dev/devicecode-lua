@@ -22,9 +22,11 @@ local M = {}
 local SCHEMA = 'devicecode.config/fabric/1'
 
 local DEFAULTS = {
+	trace_io = false,
 	reader = {
 		bad_frame_limit    = 5,
 		bad_frame_window_s = 10.0,
+		bad_frame_quiet_s  = 2.0,
 	},
 	session = {
 		hello_interval_s   = 2.0,
@@ -34,6 +36,7 @@ local DEFAULTS = {
 	writer = {
 		rpc_quota  = 4,
 		bulk_quota = 1,
+		flush_each = true,
 	},
 	bridge = {
 		max_pending_calls   = 64,
@@ -54,7 +57,7 @@ local DEFAULTS = {
 }
 
 local ROOT_KEYS = {
-	schema = true, local_node = true, links = true,
+	schema = true, local_node = true, links = true, trace_io = true,
 }
 
 local LINK_KEYS = {
@@ -66,6 +69,7 @@ local LINK_KEYS = {
 local TRANSPORT_KEYS = {
 	kind = true, source = true, class = true, id = true,
 	open_verb = true, open_opts = true, terminator = true,
+	cap_wait_timeout_s = true,
 }
 
 local SESSION_KEYS = {
@@ -74,10 +78,10 @@ local SESSION_KEYS = {
 }
 
 local READER_KEYS = {
-	bad_frame_limit = true, bad_frame_window_s = true,
+	bad_frame_limit = true, bad_frame_window_s = true, bad_frame_quiet_s = true,
 }
 
-local WRITER_KEYS = { rpc_quota = true, bulk_quota = true }
+local WRITER_KEYS = { rpc_quota = true, bulk_quota = true, flush_each = true }
 
 local BRIDGE_KEYS = {
 	imports = true, exports = true, rpc = true,
@@ -289,6 +293,8 @@ local function compile_transport(raw, link_id)
 	if e4 then return nil, e4 end
 	local open_verb, e5 = opt_str(raw.open_verb, 'transport.open_verb', 'open')
 	if e5 then return nil, e5 end
+	local cap_wait_timeout_s, e6 = opt_pos_number(raw.cap_wait_timeout_s, 'transport.cap_wait_timeout_s')
+	if e6 then return nil, e6 end
 
 	local terminator = raw.terminator
 	if terminator == nil then terminator = '\n' end
@@ -304,6 +310,7 @@ local function compile_transport(raw, link_id)
 		open_verb  = open_verb,
 		open_opts  = copy_plain(raw.open_opts),
 		terminator = terminator,
+		cap_wait_timeout_s = cap_wait_timeout_s,
 	}, nil
 end
 
@@ -338,14 +345,29 @@ local function compile_reader(raw)
 	local ok, err = allowed(raw, READER_KEYS, 'reader')
 	if not ok then return nil, err end
 
-	local bad_frame_limit, e1 = pos_int(raw.bad_frame_limit, 'reader.bad_frame_limit', DEFAULTS.reader.bad_frame_limit)
+	local bad_frame_limit, e1 = pos_int(
+		raw.bad_frame_limit,
+		'reader.bad_frame_limit',
+		DEFAULTS.reader.bad_frame_limit
+	)
 	if e1 then return nil, e1 end
-	local bad_frame_window_s, e2 = pos_number(raw.bad_frame_window_s, 'reader.bad_frame_window_s', DEFAULTS.reader.bad_frame_window_s)
+	local bad_frame_window_s, e2 = pos_number(
+		raw.bad_frame_window_s,
+		'reader.bad_frame_window_s',
+		DEFAULTS.reader.bad_frame_window_s
+	)
 	if e2 then return nil, e2 end
+	local bad_frame_quiet_s, e3 = pos_number(
+		raw.bad_frame_quiet_s,
+		'reader.bad_frame_quiet_s',
+		DEFAULTS.reader.bad_frame_quiet_s
+	)
+	if e3 then return nil, e3 end
 
 	return {
 		bad_frame_limit    = bad_frame_limit,
 		bad_frame_window_s = bad_frame_window_s,
+		bad_frame_quiet_s  = bad_frame_quiet_s,
 	}, nil
 end
 
@@ -359,8 +381,10 @@ local function compile_writer(raw)
 	if e1 then return nil, e1 end
 	local bulk_quota, e2 = pos_int(raw.bulk_quota, 'writer.bulk_quota', DEFAULTS.writer.bulk_quota)
 	if e2 then return nil, e2 end
+	local flush_each, e3 = bool(raw.flush_each, 'writer.flush_each', DEFAULTS.writer.flush_each)
+	if e3 then return nil, e3 end
 
-	return { rpc_quota = rpc_quota, bulk_quota = bulk_quota }, nil
+	return { rpc_quota = rpc_quota, bulk_quota = bulk_quota, flush_each = flush_each }, nil
 end
 
 local function compile_rule_item(raw, direction, path, keys)
@@ -601,6 +625,8 @@ function M.compile(raw)
 
 	local local_node, nerr = opt_str(raw.local_node, 'fabric.local_node')
 	if nerr then return fail(nerr) end
+	local trace_io, terr = bool(raw.trace_io, 'fabric.trace_io', DEFAULTS.trace_io)
+	if terr then return fail(terr) end
 
 	local links_in, lerr = list_or_empty(raw.links, 'fabric.links')
 	if not links_in then return fail(lerr) end
@@ -609,6 +635,7 @@ function M.compile(raw)
 		service = {
 			schema     = raw.schema,
 			local_node = local_node,
+			trace_io   = trace_io,
 		},
 		links = {},
 		routing = {

@@ -123,9 +123,14 @@ local function open_transport_for_link(scope, link_spec, service_caps)
 	end
 
 	if link_spec.transport ~= nil then
+		local transport_cfg = link_spec.transport
+		if type(transport_cfg) == 'table' and link_spec.trace_io ~= nil then
+			transport_cfg = shallow_copy(transport_cfg)
+			transport_cfg.trace_io = link_spec.trace_io == true
+		end
 		local transport, err = hal_transport.open_transport(
 			link_conn(link_spec, service_caps),
-			link_spec.transport
+			transport_cfg
 		)
 		if transport == nil then
 			return nil, transport_open_error(link_spec, err, 'transport_open_failed')

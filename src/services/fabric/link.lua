@@ -601,6 +601,7 @@ local function transfer_params_from(params, admission_rx, session_rx, outbound, 
 	t.state_tx = state_tx
 	t.component_name = 'transfer_manager'
 	t.receive_targets = t.receive_targets or params.receive_targets
+	t.trace_io = params.trace_io == true
 
 	return t
 end
@@ -641,6 +642,12 @@ function M.composed_components(scope, params, service_caps)
 	end
 	local read_frame_op = function ()
 		return transport:read_frame_op()
+	end
+	local drain_input_op
+	if type(transport.drain_input_op) == 'function' then
+		drain_input_op = function (opts)
+			return transport:drain_input_op(opts)
+		end
 	end
 	local write_frame_op = function (frame)
 		return transport:write_frame_op(frame)
@@ -698,6 +705,11 @@ function M.composed_components(scope, params, service_caps)
 	local session_cfg = params.session or {}
 	local reader_cfg = params.reader or {}
 	local writer_cfg = params.writer or {}
+	local recovery_gate = {
+		drain_active = false,
+		hello_quiet_until = 0,
+	}
+	local trace_io = params.trace_io == true
 	if type(session_cfg) ~= 'table' then
 		error('fabric.link.run_composed: session must be a table', 2)
 	end
@@ -719,7 +731,13 @@ function M.composed_components(scope, params, service_caps)
 
 			return io_mod.run_reader(component_scope, {
 				read_frame_op = read_frame_op,
+				drain_input_op = drain_input_op,
 				downstream_tx = inbound_frame_tx,
+				recovery_gate = recovery_gate,
+				bad_frame_limit = reader_cfg.bad_frame_limit,
+				bad_frame_window_s = reader_cfg.bad_frame_window_s,
+				bad_frame_quiet_s = reader_cfg.bad_frame_quiet_s,
+				trace_io = trace_io,
 			})
 		end,
 	}
@@ -748,8 +766,7 @@ function M.composed_components(scope, params, service_caps)
 				hello_interval_s = session_cfg.hello_interval_s,
 				ping_interval_s = session_cfg.ping_interval_s,
 				liveness_timeout_s = session_cfg.liveness_timeout_s,
-				bad_frame_limit = reader_cfg.bad_frame_limit,
-				bad_frame_window_s = reader_cfg.bad_frame_window_s,
+				recovery_gate = recovery_gate,
 				state_tx = state_tx,
 				component_name = 'session',
 			})
@@ -765,7 +782,9 @@ function M.composed_components(scope, params, service_caps)
 				bulk_rx = outbound_bulk_rx,
 				write_frame_op = write_frame_op,
 				flush_op = flush_op,
-				flush_each = params.flush_each,
+				recovery_gate = recovery_gate,
+				trace_io = trace_io,
+				flush_each = writer_cfg.flush_each ~= false,
 				rpc_quota = writer_cfg.rpc_quota,
 				bulk_quota = writer_cfg.bulk_quota,
 			})

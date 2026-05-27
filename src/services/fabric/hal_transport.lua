@@ -8,13 +8,21 @@
 
 local fibers = require 'fibers'
 local op     = require 'fibers.op'
+local sleep  = require 'fibers.sleep'
 
 local protocol = require 'services.fabric.protocol'
 local resource = require 'devicecode.support.resource'
 local cap_sdk  = require 'services.hal.sdk.cap'
 local dep_failure = require 'devicecode.support.dependency_failure'
+local xxhash32 = require 'shared.hash.xxhash32'
 
 local M = {}
+
+local DEFAULT_CAP_WAIT_TIMEOUT_S = 5.0
+local DEFAULT_DRAIN_MAX_BYTES = 64 * 1024
+local DEFAULT_DRAIN_TOTAL_S = 0.100
+local DEFAULT_DRAIN_QUIET_S = 0.020
+local DEFAULT_DRAIN_READ_S = 0.010
 
 --------------------------------------------------------------------------------
 -- JSONL transport wrapper
@@ -57,6 +65,36 @@ local function write_bytes_result(n, err)
 	return true, nil
 end
 
+local function log_wire(enabled, event, fields)
+	if enabled ~= true then return end
+	local parts = { '[fabric-wire]', tostring(event) }
+	for k, v in pairs(fields or {}) do
+		if v ~= nil then
+			parts[#parts + 1] = tostring(k)
+			parts[#parts + 1] = tostring(v)
+		end
+	end
+	print(table.concat(parts, ' '))
+end
+
+local function wire_fields(frame, line)
+	local out = {
+		type = type(frame) == 'table' and frame.type or type(frame),
+		id = type(frame) == 'table' and (frame.xfer_id or frame.sid) or nil,
+		offset = type(frame) == 'table' and frame.offset or nil,
+		next = type(frame) == 'table' and frame.next or nil,
+		size = type(frame) == 'table' and frame.size or nil,
+		line_len = type(line) == 'string' and #line or nil,
+		line_xxhash32 = type(line) == 'string' and xxhash32.digest_hex(line) or nil,
+	}
+	if type(frame) == 'table' and frame.type == 'xfer_chunk' and type(frame.data) == 'string' then
+		out.raw_len = #frame.data
+		out.encoded_len = #protocol.encode_chunk(frame.data)
+		out.chunk_digest = frame.chunk_digest
+	end
+	return out
+end
+
 --- Wrap a raw HAL line/stream session as a fabric-jsonl/1 frame transport.
 ---
 --- Accepted raw shapes:
@@ -84,10 +122,15 @@ function M.wrap_transport(session, opts)
 		return nil, 'invalid_transport_terminator'
 	end
 
+	if type(session.set_trace_io) == 'function' then
+		session:set_trace_io(opts.trace_io == true)
+	end
+
 	return setmetatable({
 		_session    = session,
 		_mode       = mode,
 		_terminator = terminator,
+		_trace_io   = opts.trace_io == true,
 		_closed     = false,
 	}, Transport), nil
 end
@@ -166,16 +209,31 @@ function Transport:write_frame_op(frame)
 
 		local line, enc_err = protocol.encode_line(checked)
 		if line == nil then
+			log_wire(self._trace_io, 'encode_failed', {
+				type = type(frame) == 'table' and frame.type or type(frame),
+				id = type(frame) == 'table' and (frame.xfer_id or frame.sid) or nil,
+				err = enc_err,
+			})
 			return op.always(nil, enc_err)
 		end
 
-		return self:write_line_op(line)
+		log_wire(self._trace_io, 'write_line_begin', wire_fields(checked, line))
+		return self:write_line_op(line):wrap(function (ok, err)
+			local fields = wire_fields(checked, line)
+			fields.err = err
+			if ok == true then
+				log_wire(self._trace_io, 'write_line_done', fields)
+			else
+				log_wire(self._trace_io, 'write_line_failed', fields)
+			end
+			return ok, err
+		end)
 	end)
 end
 
 function Transport:flush_op()
 	return op.guard(function ()
-		local session, closed = self:_active_session_op()
+		local session = self:_active_session_op()
 		if session == nil then
 			return op.always(true, nil)
 		end
@@ -184,8 +242,108 @@ function Transport:flush_op()
 			return op.always(true, nil)
 		end
 
+		log_wire(self._trace_io, 'flush_begin', {})
 		return session:flush_op():wrap(function (ok, err)
+			if ok == true then
+				log_wire(self._trace_io, 'flush_done', {})
+			else
+				log_wire(self._trace_io, 'flush_failed', { err = err or 'flush_failed' })
+			end
 			return normalise_bool(ok, err, 'flush_failed')
+		end)
+	end)
+end
+
+local function drain_limits(opts)
+	opts = opts or {}
+	local max_bytes = tonumber(opts.max_bytes) or DEFAULT_DRAIN_MAX_BYTES
+	local total_s = tonumber(opts.total_s) or DEFAULT_DRAIN_TOTAL_S
+	local quiet_s = tonumber(opts.quiet_s) or DEFAULT_DRAIN_QUIET_S
+	local read_s = tonumber(opts.read_s) or DEFAULT_DRAIN_READ_S
+	local chunk_size = tonumber(opts.chunk_size) or 4096
+
+	if max_bytes < 0 then max_bytes = 0 end
+	if total_s < 0 then total_s = 0 end
+	if quiet_s < 0 then quiet_s = 0 end
+	if read_s <= 0 then read_s = DEFAULT_DRAIN_READ_S end
+	if chunk_size <= 0 then chunk_size = 4096 end
+
+	return max_bytes, total_s, quiet_s, read_s, chunk_size
+end
+
+function Transport:drain_input_op(opts)
+	return op.guard(function ()
+		local session, closed = self:_active_session_op()
+		if session == nil then
+			return closed
+		end
+		if type(session.read_some_op) ~= 'function' then
+			return op.always({
+				bytes = 0,
+				reads = 0,
+				reason = 'unsupported',
+			}, 'drain_unsupported')
+		end
+
+		return fibers.run_scope_op(function ()
+			local max_bytes, total_s, quiet_s, read_s, chunk_size = drain_limits(opts)
+			local deadline = fibers.now() + total_s
+			local quiet_until = fibers.now() + quiet_s
+			local bytes = 0
+			local reads = 0
+			local reason = 'quiet'
+
+			while bytes < max_bytes do
+				local now = fibers.now()
+				local remaining_total = deadline - now
+				local remaining_quiet = quiet_until - now
+				if remaining_total <= 0 then
+					reason = 'deadline'
+					break
+				end
+				if remaining_quiet <= 0 then
+					reason = 'quiet'
+					break
+				end
+
+				local want = max_bytes - bytes
+				if want > chunk_size then want = chunk_size end
+				local timeout_s = math.min(read_s, remaining_total, remaining_quiet)
+				local which, data, err = fibers.perform(fibers.named_choice {
+					read = session:read_some_op(want),
+					timeout = sleep.sleep_op(timeout_s),
+				})
+
+				if which ~= 'timeout' then
+					if data == nil then
+						reason = err or 'read_closed'
+						break
+					elseif data == '' then
+						reason = 'empty_read'
+						break
+					else
+						local n = #data
+						bytes = bytes + n
+						reads = reads + 1
+						quiet_until = fibers.now() + quiet_s
+						if bytes >= max_bytes then
+							reason = 'max_bytes'
+							break
+						end
+					end
+				end
+			end
+
+			return {
+				bytes = bytes,
+				reads = reads,
+				reason = reason,
+			}, nil
+		end):wrap(function (status, report, result, err)
+			if status ~= 'ok' then
+				return nil, err or report or 'drain_failed'
+			end
+			return result, err
 		end)
 	end)
 end
@@ -231,11 +389,37 @@ local function require_transport_cfg(cfg, level)
 
 	for _, field in ipairs({ 'source', 'class', 'id' }) do
 		if type(cfg[field]) ~= 'string' or cfg[field] == '' then
-			error('fabric.hal_transport.open_transport_op: transport.' .. field .. ' must be a non-empty string', (level or 1) + 1)
+			error(
+				'fabric.hal_transport.open_transport_op: transport.' .. field .. ' must be a non-empty string',
+				(level or 1) + 1
+			)
 		end
 	end
 
 	return cfg
+end
+
+local function append_field(parts, k, v)
+	if v == nil then return end
+	parts[#parts + 1] = tostring(k)
+	parts[#parts + 1] = tostring(v)
+end
+
+local function log_transport(event, cfg, fields)
+	if type(cfg) ~= 'table' or cfg.trace_io ~= true then return end
+	fields = fields or {}
+	local parts = { '[fabric-transport]', tostring(event) }
+	if type(cfg) == 'table' then
+		append_field(parts, 'source', cfg.source)
+		append_field(parts, 'class', cfg.class)
+		append_field(parts, 'id', cfg.id)
+		append_field(parts, 'dependency', cfg.dependency_key)
+	end
+	append_field(parts, 'mode', fields.mode)
+	append_field(parts, 'status', fields.status)
+	append_field(parts, 'err', fields.err)
+	append_field(parts, 'detail', fields.detail)
+	print(table.concat(parts, ' '))
 end
 
 local function transport_open_error(cfg, err, detail)
@@ -309,6 +493,18 @@ local function unwrap_open_transport_reply(transport_cfg, reply, err)
 	return session, nil
 end
 
+local function normalise_open_opts(transport_cfg)
+	local opts = transport_cfg.open_opts
+	if transport_cfg.class == 'uart' then
+		local checked, err = cap_sdk.args.new.UARTOpenOpts(opts)
+		if not checked then
+			return nil, err or 'invalid uart open opts'
+		end
+		return checked, nil
+	end
+	return opts, nil
+end
+
 function M.open_transport_op(conn, transport_cfg, transport_session)
 	transport_cfg = require_transport_cfg(transport_cfg, 2)
 
@@ -316,12 +512,15 @@ function M.open_transport_op(conn, transport_cfg, transport_session)
 		if transport_session ~= nil then
 			local transport, terr = M.wrap_transport(transport_session, transport_cfg)
 			if not transport then
+				log_transport('wrap_failed', transport_cfg, { err = terr or 'transport_wrap_failed' })
 				return op.always(nil, terr or 'transport_wrap_failed')
 			end
+			log_transport('wrap_ok', transport_cfg, { mode = transport._mode })
 			return op.always(transport, nil)
 		end
 
 		if conn == nil then
+			log_transport('open_failed', transport_cfg, { err = 'transport_open_requires_bus_connection' })
 			return op.always(nil, 'transport_open_requires_bus_connection')
 		end
 
@@ -331,28 +530,113 @@ function M.open_transport_op(conn, transport_cfg, transport_session)
 			transport_cfg.class,
 			transport_cfg.id
 		)
+		local open_opts, oerr = normalise_open_opts(transport_cfg)
+		if open_opts == nil and oerr ~= nil then
+			log_transport('open_failed', transport_cfg, { err = oerr })
+			return op.always(nil, oerr)
+		end
 
+		log_transport('open_start', transport_cfg)
 		return cap:call_control_op(
 			transport_cfg.open_verb or 'open',
-			transport_cfg.open_opts
+			open_opts
 		):wrap(function (reply, err)
 			local session, uerr = unwrap_open_transport_reply(transport_cfg, reply, err)
 			if not session then
+				log_transport('open_failed', transport_cfg, {
+					err = reason_text(uerr),
+					detail = reason_text(err),
+				})
 				return nil, uerr
 			end
 
 			local transport, terr = M.wrap_transport(session, transport_cfg)
 			if not transport then
+				log_transport('wrap_failed', transport_cfg, { err = terr or 'transport_wrap_failed' })
 				return nil, terr or 'transport_wrap_failed'
 			end
 
+			log_transport('open_ok', transport_cfg, { mode = transport._mode })
 			return transport, nil
 		end)
 	end)
 end
 
+local function wait_for_transport_cap(conn, transport_cfg)
+	local listener = cap_sdk.new_raw_host_cap_listener(
+		conn,
+		transport_cfg.source,
+		transport_cfg.class,
+		transport_cfg.id
+	)
+
+	local timeout_s = transport_cfg.cap_wait_timeout_s or DEFAULT_CAP_WAIT_TIMEOUT_S
+	local which, cap, err = fibers.perform(op.named_choice {
+		cap = listener:wait_for_cap_op(),
+		timeout = sleep.sleep_op(timeout_s),
+	})
+	listener:close()
+
+	if which == 'cap' then
+		if cap == nil then
+			return nil, err or 'transport_capability_unavailable'
+		end
+		return cap, nil
+	end
+
+	return nil, ('transport_capability_timeout source=%s class=%s id=%s timeout_s=%s'):format(
+		tostring(transport_cfg.source),
+		tostring(transport_cfg.class),
+		tostring(transport_cfg.id),
+		tostring(timeout_s)
+	)
+end
+
 function M.open_transport(conn, transport_cfg, transport_session)
-	return fibers.perform(M.open_transport_op(conn, transport_cfg, transport_session))
+	transport_cfg = require_transport_cfg(transport_cfg, 2)
+
+	if transport_session ~= nil then
+		return fibers.perform(M.open_transport_op(conn, transport_cfg, transport_session))
+	end
+
+	if conn == nil then
+		log_transport('open_failed', transport_cfg, { err = 'transport_open_requires_bus_connection' })
+		return nil, 'transport_open_requires_bus_connection'
+	end
+
+	log_transport('open_start', transport_cfg)
+	local cap, cap_err = wait_for_transport_cap(conn, transport_cfg)
+	if cap == nil then
+		log_transport('cap_wait_failed', transport_cfg, { err = cap_err })
+		return nil, cap_err
+	end
+
+	local open_opts, oerr = normalise_open_opts(transport_cfg)
+	if open_opts == nil and oerr ~= nil then
+		log_transport('open_failed', transport_cfg, { err = oerr })
+		return nil, oerr
+	end
+
+	local reply, err = fibers.perform(cap:call_control_op(
+		transport_cfg.open_verb or 'open',
+		open_opts
+	))
+	local session, uerr = unwrap_open_transport_reply(transport_cfg, reply, err)
+	if not session then
+		log_transport('open_failed', transport_cfg, {
+			err = reason_text(uerr),
+			detail = reason_text(err),
+		})
+		return nil, uerr
+	end
+
+	local transport, terr = M.wrap_transport(session, transport_cfg)
+	if not transport then
+		log_transport('wrap_failed', transport_cfg, { err = terr or 'transport_wrap_failed' })
+		return nil, terr or 'transport_wrap_failed'
+	end
+	log_transport('open_ok', transport_cfg, { mode = transport._mode })
+	return transport, nil
 end
 
 M.unwrap_open_transport_reply = unwrap_open_transport_reply

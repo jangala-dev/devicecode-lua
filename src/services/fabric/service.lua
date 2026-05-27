@@ -44,6 +44,47 @@ local DEFAULT_DONE_QUEUE = 64
 
 local shallow_copy = tablex.shallow_copy
 
+local function reason_summary(value)
+	if type(value) ~= 'table' then
+		return tostring(value)
+	end
+
+	local fields = {}
+	local keys = {
+		'kind',
+		'err',
+		'code',
+		'reason',
+		'detail',
+		'dependency_key',
+		'link_id',
+		'component',
+		'class',
+		'id',
+		'verb',
+		'status',
+	}
+
+	for i = 1, #keys do
+		local key = keys[i]
+		local v = value[key]
+		if v ~= nil and type(v) ~= 'table' then
+			fields[#fields + 1] = key .. '=' .. tostring(v)
+		end
+	end
+
+	if type(value.result) == 'table' then
+		fields[#fields + 1] = 'result={' .. reason_summary(value.result) .. '}'
+	elseif value.result ~= nil then
+		fields[#fields + 1] = 'result=' .. tostring(value.result)
+	end
+
+	if #fields == 0 then
+		return tostring(value)
+	end
+	return table.concat(fields, ' ')
+end
+
 local function copy_link_entry(v)
 	local out = shallow_copy(v)
 
@@ -145,6 +186,11 @@ local function compiled_from_params(params)
 	return c, nil
 end
 
+local function env_trace_io_enabled()
+	local v = os.getenv('DEVICECODE_FABRIC_TRACE_IO')
+	return v == '1' or v == 'true' or v == 'TRUE' or v == 'yes' or v == 'YES'
+end
+
 local function link_override(params, id, index)
 	local overrides = params.link_overrides
 	if type(overrides) ~= 'table' then
@@ -172,6 +218,12 @@ local function normalise_link_specs(params)
 	end
 
 	local list = (compiled and compiled.links) or params.links
+	local service_trace_io = compiled
+		and compiled.service
+		and compiled.service.trace_io
+	if env_trace_io_enabled() then
+		service_trace_io = true
+	end
 
 	if type(list) ~= 'table' then
 		error('fabric.service: links array required', 3)
@@ -198,6 +250,9 @@ local function normalise_link_specs(params)
 		local copy = shallow_copy(spec)
 		copy.link_id = id
 		copy.link_generation = copy.link_generation or i
+		if copy.trace_io == nil then
+			copy.trace_io = service_trace_io == true
+		end
 
 		local override = link_override(params, id, i)
 		if override ~= nil then
@@ -345,7 +400,7 @@ local function default_policy(_, ev)
 			action = 'fail',
 			reason = ('link %s failed: %s'):format(
 				tostring(ev.link_id),
-				tostring(ev.primary or 'failed')
+				reason_summary(ev.primary or 'failed')
 			),
 		}
 	end
@@ -1040,7 +1095,7 @@ local function handle_generation_done(state, ev)
 		return
 	end
 
-	state.last_error = tostring(ev.primary or ev.status or 'generation_failed')
+	state.last_error = reason_summary(ev.primary or ev.status or 'generation_failed')
 	publish_service_lifecycle(state, 'degraded', {
 		reason = 'generation_failed',
 		last_error = state.last_error,

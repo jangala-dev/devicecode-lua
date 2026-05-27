@@ -54,6 +54,23 @@ local function frames_reader(frames)
 	end
 end
 
+local function read_results(results)
+	local i = 0
+	return function ()
+		return op.guard(function ()
+			i = i + 1
+			local item = results[i]
+			if item == nil then
+				return op.always(nil, 'eof')
+			end
+			if item.err ~= nil then
+				return op.always(nil, item.err)
+			end
+			return op.always(item.frame, nil)
+		end)
+	end
+end
+
 local function closed_rx(reason)
 	local tx, rx = mailbox.new(1, { full = 'reject_newest' })
 	tx:close(reason or 'closed')
@@ -65,6 +82,22 @@ local function send_frame(tx, frame, label)
 		kind  = 'send_frame',
 		frame = frame,
 	}, label or 'send_frame')
+end
+
+local function capture_prints(fn)
+	local old_print = _G.print
+	local lines = {}
+	_G.print = function (...)
+		local parts = {}
+		for i = 1, select('#', ...) do
+			parts[#parts + 1] = tostring(select(i, ...))
+		end
+		lines[#lines + 1] = table.concat(parts, '\t')
+	end
+	local ok, err = pcall(fn, lines)
+	_G.print = old_print
+	if not ok then error(err, 0) end
+	return lines
 end
 
 -------------------------------------------------------------------------------
@@ -156,6 +189,226 @@ function tests.test_reader_read_error_fails_scope()
 	end)
 end
 
+function tests.test_reader_forwards_wire_errors_below_recovery_limit()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = read_results {
+				{ err = 'decode_failed: first' },
+			},
+			downstream_tx = tx,
+			bad_frame_limit = 2,
+			bad_frame_window_s = 10,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.wire_errors, 1)
+
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'wire_error')
+		assert_eq(ev.err, 'decode_failed: first')
+		assert_eq(ev.wire_errors, 1)
+		assert_eq(ev.bad_frame_count, 1)
+	end)
+end
+
+function tests.test_reader_coalesces_deadline_drains_until_quiet()
+	local logs = capture_prints(function ()
+		fibers.run(function (scope)
+			local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+			local gate = { drain_active = false, hello_quiet_until = 0 }
+			local drain_calls = 0
+			local quiet_seen
+			local drain_results = {
+				{ bytes = 9, reads = 1, reason = 'deadline' },
+				{ bytes = 8, reads = 1, reason = 'deadline' },
+				{ bytes = 3, reads = 1, reason = 'quiet' },
+			}
+
+				local result = io_mod.run_reader(scope, {
+					read_frame_op = read_results {
+						{ err = 'decode_failed: first' },
+						{ err = 'decode_failed: second' },
+					},
+					downstream_tx = tx,
+					recovery_gate = gate,
+					trace_io = true,
+					bad_frame_limit = 2,
+					bad_frame_window_s = 10,
+					bad_frame_quiet_s = 0.20,
+				drain_input_op = function ()
+					return op.guard(function ()
+						drain_calls = drain_calls + 1
+						assert_true(gate.drain_active, 'reader must keep drain_active throughout recovery')
+						assert_true(gate.hello_quiet_until > fibers.now(), 'reader must set hello quiet before draining')
+						quiet_seen = gate.hello_quiet_until
+						return op.always(drain_results[drain_calls], nil)
+					end)
+				end,
+			})
+
+			assert_eq(result.role, 'reader')
+			assert_eq(result.wire_errors, 2)
+			assert_eq(drain_calls, 3)
+			assert_eq(gate.drain_active, false)
+			assert_eq(gate.hello_quiet_until, quiet_seen)
+
+			local ev1 = fibers.perform(rx:recv_op())
+			local ev2 = fibers.perform(rx:recv_op())
+			assert_eq(ev1.kind, 'wire_error')
+			assert_eq(ev2.kind, 'wire_recovery')
+			assert_eq(ev2.reason, 'bad_frame_limit')
+			assert_eq(ev2.wire_errors, 2)
+			assert_eq(ev2.bad_frame_count, 2)
+			assert_eq(ev2.drained_bytes, 20)
+			assert_eq(ev2.drain_attempts, 3)
+			assert_eq(ev2.drain_reason, 'quiet')
+			assert_eq(ev2.quiet_until, quiet_seen)
+		end)
+	end)
+
+	assert_eq(#logs, 1)
+	assert_match(logs[1], 'reader_wire_recovery')
+	assert_match(logs[1], 'drain_attempts')
+	assert_match(logs[1], '3')
+end
+
+function tests.test_reader_recovery_window_expires_after_repeated_deadlines()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local gate = { drain_active = false, hello_quiet_until = 0 }
+		local drain_calls = 0
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = read_results {
+				{ err = 'decode_failed: first' },
+				{ err = 'decode_failed: second' },
+			},
+			downstream_tx = tx,
+			recovery_gate = gate,
+			bad_frame_limit = 2,
+			bad_frame_window_s = 10,
+			bad_frame_quiet_s = 0.035,
+			drain_input_op = function ()
+				return op.guard(function ()
+					drain_calls = drain_calls + 1
+					assert_true(gate.drain_active, 'reader must keep drain_active throughout recovery')
+					return sleep.sleep_op(0.020):wrap(function ()
+						return { bytes = 1, reads = 1, reason = 'deadline' }, nil
+					end)
+				end)
+			end,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.wire_errors, 2)
+		assert_eq(drain_calls, 2)
+		assert_eq(gate.drain_active, false)
+
+		local ev1 = fibers.perform(rx:recv_op())
+		local ev2 = fibers.perform(rx:recv_op())
+		assert_eq(ev1.kind, 'wire_error')
+		assert_eq(ev2.kind, 'wire_recovery')
+		assert_eq(ev2.drain_attempts, 2)
+		assert_eq(ev2.drained_bytes, 2)
+		assert_eq(ev2.drain_reason, 'recovery_window_expired')
+	end)
+end
+
+function tests.test_reader_recovery_cancellation_clears_gate_and_propagates()
+	fibers.run(function (root_scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local entered_tx, entered_rx = mailbox.new(1, { full = 'reject_newest' })
+		local gate = { drain_active = false, hello_quiet_until = 0 }
+		local child = assert(root_scope:child())
+
+		local ok, err = child:spawn(function (scope)
+			io_mod.run_reader(scope, {
+				read_frame_op = read_results {
+					{ err = 'decode_failed: first' },
+				},
+				downstream_tx = tx,
+				recovery_gate = gate,
+				bad_frame_limit = 1,
+				bad_frame_window_s = 10,
+				bad_frame_quiet_s = 1.0,
+				drain_input_op = function ()
+					return op.guard(function ()
+						queue.try_admit_required(entered_tx, true, 'drain_entered')
+						assert_true(gate.drain_active, 'reader must set drain_active before draining')
+						return op.never()
+					end)
+				end,
+			})
+		end)
+		assert_true(ok, err)
+
+		assert_true(fibers.perform(entered_rx:recv_op()))
+		assert_eq(gate.drain_active, true)
+		child:cancel('cancelled_for_test')
+
+		local st, _, primary = fibers.perform(child:join_op())
+		assert_eq(st, 'cancelled')
+		assert_eq(primary, 'cancelled_for_test')
+		assert_eq(gate.drain_active, false)
+
+		local ev, recv_err = queue.try_recv_now(rx)
+		assert_nil(ev)
+		assert_eq(recv_err, 'not_ready')
+	end)
+end
+
+function tests.test_reader_recovery_downstream_close_and_reject_clear_gate()
+	fibers.run(function (scope)
+		local tx = mailbox.new(1, { full = 'reject_newest' })
+		local gate = { drain_active = false, hello_quiet_until = 0 }
+		tx:close('downstream_done')
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = read_results {
+				{ err = 'decode_failed: first' },
+			},
+			downstream_tx = tx,
+			recovery_gate = gate,
+			bad_frame_limit = 1,
+			bad_frame_window_s = 10,
+			bad_frame_quiet_s = 0.05,
+			drain_input_op = function ()
+				return op.always({ bytes = 0, reads = 0, reason = 'quiet' }, nil)
+			end,
+		})
+
+		assert_eq(result.reason, 'downstream_done')
+		assert_eq(gate.drain_active, false)
+	end)
+
+	fibers.run(function ()
+		local tx = mailbox.new(0, { full = 'reject_newest' })
+		local gate = { drain_active = false, hello_quiet_until = 0 }
+
+		local st, _, primary = fibers.run_scope(function (scope)
+			io_mod.run_reader(scope, {
+				read_frame_op = read_results {
+					{ err = 'decode_failed: first' },
+				},
+				downstream_tx = tx,
+				recovery_gate = gate,
+				bad_frame_limit = 1,
+				bad_frame_window_s = 10,
+				bad_frame_quiet_s = 0.05,
+				drain_input_op = function ()
+					return op.always({ bytes = 0, reads = 0, reason = 'quiet' }, nil)
+				end,
+			})
+		end)
+
+		assert_eq(st, 'failed')
+		assert_match(primary, 'reader downstream rejected wire event')
+		assert_eq(gate.drain_active, false)
+	end)
+end
+
 -------------------------------------------------------------------------------
 -- Lane writer writes queued frames and flushes on close
 -------------------------------------------------------------------------------
@@ -234,6 +487,77 @@ function tests.test_lane_writer_can_flush_each_frame()
 
 		assert_eq(result.frames_written, 2)
 		assert_eq(flushes, 3)
+	end)
+end
+
+function tests.test_lane_writer_pauses_writes_while_recovery_drain_is_active()
+	fibers.run(function (scope)
+		local rpc_tx, rpc_rx = mailbox.new(8, { full = 'reject_newest' })
+		local done_tx, done_rx = mailbox.new(1, { full = 'reject_newest' })
+		local gate = { drain_active = true, hello_quiet_until = 0 }
+		local written = {}
+
+		send_frame(rpc_tx, 'rpc-frame', 'rpc_frame')
+		rpc_tx:close('rpc_done')
+
+		assert_true(scope:spawn(function ()
+			local result = io_mod.run_lane_writer(scope, {
+				control_rx = closed_rx('control_done'),
+				rpc_rx = rpc_rx,
+				bulk_rx = closed_rx('bulk_done'),
+				recovery_gate = gate,
+				write_frame_op = function (frame)
+					return op.guard(function ()
+						written[#written + 1] = frame
+						return op.always(true, nil)
+					end)
+				end,
+			})
+			queue.try_admit_required(done_tx, result, 'writer_done')
+		end))
+
+		fibers.perform(sleep.sleep_op(0.03))
+		assert_eq(#written, 0)
+		gate.drain_active = false
+
+		local result = fibers.perform(done_rx:recv_op())
+		assert_eq(result.frames_written, 1)
+		assert_eq(written[1], 'rpc-frame')
+	end)
+end
+
+function tests.test_lane_writer_delays_hello_until_recovery_quiet_expires()
+	fibers.run(function (scope)
+		local control_tx, control_rx = mailbox.new(8, { full = 'reject_newest' })
+		local done_tx, done_rx = mailbox.new(1, { full = 'reject_newest' })
+		local gate = { drain_active = false, hello_quiet_until = fibers.now() + 0.06 }
+		local written = {}
+
+		send_frame(control_tx, { type = 'hello' }, 'hello_frame')
+		control_tx:close('control_done')
+
+		assert_true(scope:spawn(function ()
+			local result = io_mod.run_lane_writer(scope, {
+				control_rx = control_rx,
+				rpc_rx = closed_rx('rpc_done'),
+				bulk_rx = closed_rx('bulk_done'),
+				recovery_gate = gate,
+				write_frame_op = function (frame)
+					return op.guard(function ()
+						written[#written + 1] = frame
+						return op.always(true, nil)
+					end)
+				end,
+			})
+			queue.try_admit_required(done_tx, result, 'writer_done')
+		end))
+
+		fibers.perform(sleep.sleep_op(0.02))
+		assert_eq(#written, 0)
+
+		local result = fibers.perform(done_rx:recv_op())
+		assert_eq(result.frames_written, 1)
+		assert_eq(written[1].type, 'hello')
 	end)
 end
 

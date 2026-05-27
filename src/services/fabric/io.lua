@@ -11,7 +11,9 @@
 -- this module.
 
 local fibers         = require 'fibers'
+local fiber_scope    = require 'fibers.scope'
 local op             = require 'fibers.op'
+local sleep          = require 'fibers.sleep'
 local protocol       = require 'services.fabric.protocol'
 local queue          = require 'devicecode.support.queue'
 local priority_event = require 'devicecode.support.priority_event'
@@ -19,6 +21,14 @@ local contracts      = require 'devicecode.support.contracts'
 local validate       = require 'shared.validate'
 
 local M = {}
+
+local DEFAULT_BAD_FRAME_LIMIT = 5
+local DEFAULT_BAD_FRAME_WINDOW_S = 10.0
+local DEFAULT_BAD_FRAME_QUIET_S = 2.0
+local DRAIN_SLICE_MAX_S = 0.100
+local DRAIN_SLICE_QUIET_S = 0.020
+local DRAIN_SLICE_READ_S = 0.010
+local DRAIN_SLICE_MAX_BYTES = 64 * 1024
 
 --------------------------------------------------------------------------------
 -- Checks and small helpers
@@ -78,6 +88,14 @@ local function positive_int(v, fallback, name)
 	return v
 end
 
+local function positive_number(v, fallback, name)
+	if v == nil then return fallback end
+	if type(v) ~= 'number' or v <= 0 or v ~= v or v == math.huge or v == -math.huge then
+		error(name .. ' must be a positive finite number', 3)
+	end
+	return v
+end
+
 local function clean_read_end(frame, err)
 	return frame == nil and (err == nil or err == 'eof' or err == 'closed')
 end
@@ -98,11 +116,30 @@ local function frame_event(frame)
 	}
 end
 
-local function wire_error_event(err)
+local function wire_error_event(err, wire_errors, bad_frame_count)
 	return {
 		kind = 'wire_error',
 		err  = err,
 		at   = fibers.now(),
+		wire_errors = wire_errors,
+		bad_frame_count = bad_frame_count,
+	}
+end
+
+local function wire_recovery_event(reason, wire_errors, bad_frame_count, drain_result, drain_err, quiet_until)
+	drain_result = drain_result or {}
+	return {
+		kind = 'wire_recovery',
+		reason = reason or 'bad_frame_limit',
+		err = reason or 'bad_frame_limit',
+		at = fibers.now(),
+		wire_errors = wire_errors,
+		bad_frame_count = bad_frame_count,
+		drained_bytes = drain_result.bytes or 0,
+		drain_attempts = drain_result.drain_attempts or 0,
+		drain_reason = drain_result.reason,
+		drain_err = drain_err,
+		quiet_until = quiet_until,
 	}
 end
 
@@ -119,6 +156,187 @@ local function send_item_frame(item)
 	return frame
 end
 
+local function log_io(enabled, event, fields)
+	if enabled ~= true then return end
+	local parts = { '[fabric-io]', tostring(event) }
+	for k, v in pairs(fields or {}) do
+		if v ~= nil then
+			parts[#parts + 1] = tostring(k)
+			parts[#parts + 1] = tostring(v)
+		end
+	end
+	print(table.concat(parts, ' '))
+end
+
+local function frame_fields(frame)
+	if type(frame) ~= 'table' then
+		return { type = type(frame) }
+	end
+	local out = {
+		type = frame.type,
+		id = frame.xfer_id or frame.sid,
+		offset = frame.offset,
+		next = frame.next,
+		size = frame.size,
+		err = frame.err,
+	}
+	if frame.type == 'xfer_chunk' and type(frame.data) == 'string' then
+		out.raw_len = #frame.data
+		out.chunk_digest = frame.chunk_digest
+	end
+	return out
+end
+
+local function record_bad_frame(times, at, window_s)
+	local kept = {}
+	local cutoff = at - window_s
+	for _, seen_at in ipairs(times or {}) do
+		if seen_at >= cutoff then
+			kept[#kept + 1] = seen_at
+		end
+	end
+	kept[#kept + 1] = at
+	return kept, #kept
+end
+
+local function max_time(a, b)
+	a = tonumber(a) or 0
+	b = tonumber(b) or 0
+	if a > b then return a end
+	return b
+end
+
+local function set_recovery_gate(gate, drain_active, quiet_until)
+	if type(gate) ~= 'table' then return end
+	gate.drain_active = drain_active == true
+	if quiet_until ~= nil then
+		gate.hello_quiet_until = max_time(gate.hello_quiet_until, quiet_until)
+	end
+end
+
+local function perform_drain(drain_input_op, opts)
+	if type(drain_input_op) ~= 'function' then
+		return { bytes = 0, reads = 0, reason = 'drain_unsupported' }, 'drain_unsupported'
+	end
+	opts = opts or {}
+	local ok, result, err = pcall(function ()
+		return fibers.perform(drain_input_op({
+			max_bytes = opts.max_bytes or DRAIN_SLICE_MAX_BYTES,
+			total_s = opts.total_s or DRAIN_SLICE_MAX_S,
+			quiet_s = opts.quiet_s or DRAIN_SLICE_QUIET_S,
+			read_s = opts.read_s or DRAIN_SLICE_READ_S,
+		}))
+	end)
+	if not ok then
+		if fiber_scope.is_cancelled(result) then
+			error(result, 0)
+		end
+		return { bytes = 0, reads = 0, reason = 'failed' }, tostring(result or 'drain_failed')
+	end
+	if result == nil then
+		return { bytes = 0, reads = 0, reason = err or 'drain_failed' }, err or 'drain_failed'
+	end
+	return result, err
+end
+
+local function recovery_fields(ev)
+	return {
+		reason = ev.reason,
+		wire_errors = ev.wire_errors,
+		bad_frame_count = ev.bad_frame_count,
+		drained_bytes = ev.drained_bytes,
+		drain_attempts = ev.drain_attempts,
+		drain_err = ev.drain_err,
+		drain_reason = ev.drain_reason,
+		quiet_until = ev.quiet_until,
+	}
+end
+
+local function should_continue_drain(reason, drain_err)
+	if drain_err ~= nil then return false end
+	return reason == 'deadline' or reason == 'max_bytes'
+end
+
+local function drain_slice_opts(quiet_until)
+	local remaining = quiet_until - fibers.now()
+	if remaining <= 0 then return nil end
+	local total_s = remaining
+	if total_s > DRAIN_SLICE_MAX_S then
+		total_s = DRAIN_SLICE_MAX_S
+	end
+	return {
+		max_bytes = DRAIN_SLICE_MAX_BYTES,
+		total_s = total_s,
+		quiet_s = DRAIN_SLICE_QUIET_S,
+		read_s = DRAIN_SLICE_READ_S,
+	}
+end
+
+local function run_recovery_window(scope, downstream_tx, recovery_gate, drain_input_op, params)
+	require_table(scope, 'fabric.io.run_recovery_window: scope', 2)
+	params = params or {}
+
+	local quiet_until = fibers.now() + params.bad_frame_quiet_s
+	local aggregate = {
+		bytes = 0,
+		reads = 0,
+		reason = 'drain_not_started',
+		drain_attempts = 0,
+	}
+	local drain_err
+
+	set_recovery_gate(recovery_gate, true, quiet_until)
+
+	local ok, send_ok, send_err = pcall(function ()
+		while true do
+			local slice_opts = drain_slice_opts(quiet_until)
+			if slice_opts == nil then
+				aggregate.reason = 'recovery_window_expired'
+				break
+			end
+
+			local drain_result, err = perform_drain(drain_input_op, slice_opts)
+			drain_result = drain_result or {}
+			aggregate.drain_attempts = aggregate.drain_attempts + 1
+			aggregate.bytes = aggregate.bytes + (tonumber(drain_result.bytes) or 0)
+			aggregate.reads = aggregate.reads + (tonumber(drain_result.reads) or 0)
+			aggregate.reason = drain_result.reason or err or 'drain_failed'
+			drain_err = err
+
+			if not should_continue_drain(aggregate.reason, drain_err) then
+				break
+			end
+
+			if fibers.now() >= quiet_until then
+				aggregate.reason = 'recovery_window_expired'
+				break
+			end
+		end
+
+		local ev = wire_recovery_event(
+			params.reason or 'bad_frame_limit',
+			params.wire_errors,
+			params.bad_frame_count,
+			aggregate,
+			drain_err,
+			quiet_until
+		)
+		log_io(params.trace_io == true, 'reader_wire_recovery', recovery_fields(ev))
+		return perform_send(downstream_tx, ev)
+	end)
+
+	set_recovery_gate(recovery_gate, false, quiet_until)
+
+	if not ok then
+		if fiber_scope.is_cancelled(send_ok) then
+			error(send_ok, 0)
+		end
+		error(send_ok, 0)
+	end
+
+	return send_ok, send_err
+end
+
 --------------------------------------------------------------------------------
 -- Reader owner
 --------------------------------------------------------------------------------
@@ -129,9 +347,31 @@ function M.run_reader(scope, params)
 
 	local read_frame_op = require_function(params.read_frame_op, 'run_reader: read_frame_op', 2)
 	local downstream_tx = require_tx(params.downstream_tx, 'run_reader: downstream_tx', 2)
+	local drain_input_op = params.drain_input_op
+	if drain_input_op ~= nil then
+		require_function(drain_input_op, 'run_reader: drain_input_op', 2)
+	end
+	local recovery_gate = params.recovery_gate
+	local trace_io = params.trace_io == true
+	local bad_frame_limit = positive_int(
+		params.bad_frame_limit,
+		DEFAULT_BAD_FRAME_LIMIT,
+		'run_reader: bad_frame_limit'
+	)
+	local bad_frame_window_s = positive_number(
+		params.bad_frame_window_s,
+		DEFAULT_BAD_FRAME_WINDOW_S,
+		'run_reader: bad_frame_window_s'
+	)
+	local bad_frame_quiet_s = positive_number(
+		params.bad_frame_quiet_s,
+		DEFAULT_BAD_FRAME_QUIET_S,
+		'run_reader: bad_frame_quiet_s'
+	)
 
 	local frames_read = 0
 	local wire_errors = 0
+	local bad_frame_times = {}
 
 	while true do
 		local frame, read_err = fibers.perform(read_frame_op())
@@ -142,6 +382,7 @@ function M.run_reader(scope, params)
 
 		local ev
 		local label
+		local sent_by_recovery = false
 
 		if frame ~= nil then
 			ev = frame_event(frame)
@@ -150,20 +391,52 @@ function M.run_reader(scope, params)
 		elseif protocol.is_wire_protocol_error
 			and protocol.is_wire_protocol_error(read_err)
 		then
-			ev = wire_error_event(read_err)
-			label = 'wire error'
+			wire_errors = wire_errors + 1
+			local at = fibers.now()
+			local count
+			bad_frame_times, count = record_bad_frame(bad_frame_times, at, bad_frame_window_s)
+			if count >= bad_frame_limit then
+				local ok, send_err = run_recovery_window(
+					scope,
+					downstream_tx,
+					recovery_gate,
+					drain_input_op,
+					{
+						reason = 'bad_frame_limit',
+						wire_errors = wire_errors,
+						bad_frame_count = count,
+							bad_frame_quiet_s = bad_frame_quiet_s,
+							trace_io = trace_io,
+						}
+					)
+				sent_by_recovery = true
+				bad_frame_times = {}
+				if ok == nil then
+					return reader_result(frames_read, wire_errors, send_err or 'downstream_closed')
+				elseif ok ~= true then
+					error('reader downstream rejected wire event: ' .. tostring(send_err or 'full'), 0)
+				end
+			else
+				ev = wire_error_event(read_err, wire_errors, count)
+			end
+			label = 'wire event'
 
 		else
 			error('reader read failed: ' .. tostring(read_err or 'unknown'), 0)
 		end
 
-		local ok, send_err = perform_send(downstream_tx, ev)
+		if sent_by_recovery then
+			ev = nil
+		end
+
+		local ok, send_err = true, nil
+		if ev ~= nil then
+			ok, send_err = perform_send(downstream_tx, ev)
+		end
 
 		if ok == true then
 			if frame ~= nil then
 				frames_read = frames_read + 1
-			else
-				wire_errors = wire_errors + 1
 			end
 
 		elseif ok == nil then
@@ -294,11 +567,42 @@ local function next_writer_item_op(state)
 	}
 end
 
+local function frame_is_hello(frame)
+	return type(frame) == 'table' and frame.type == 'hello'
+end
+
+local function wait_for_recovery_gate_op(gate, frame)
+	return op.guard(function ()
+		if type(gate) ~= 'table' then
+			return op.always(true, nil)
+		end
+
+		while true do
+			local now = fibers.now()
+			local quiet_until = tonumber(gate.hello_quiet_until) or 0
+			local wait_s
+
+			if gate.drain_active == true then
+				wait_s = 0.020
+			elseif frame_is_hello(frame) and quiet_until > now then
+				wait_s = quiet_until - now
+				if wait_s > 0.020 then wait_s = 0.020 end
+			else
+				return op.always(true, nil)
+			end
+
+			fibers.perform(sleep.sleep_op(wait_s))
+		end
+	end)
+end
+
 function M.run_lane_writer(scope, params)
 	require_table(scope, 'fabric.io.run_lane_writer: scope', 2)
 	params = require_table(params, 'fabric.io.run_lane_writer: params table', 2)
 
 	local write_frame_op = require_function(params.write_frame_op, 'run_lane_writer: write_frame_op', 2)
+	local trace_io = params.trace_io == true
+	local recovery_gate = params.recovery_gate
 
 	local flush_op = params.flush_op
 	if flush_op ~= nil then
@@ -335,29 +639,55 @@ function M.run_lane_writer(scope, params)
 		if selected ~= nil and selected.item ~= nil then
 			local lane = selected.lane
 			local frame = send_item_frame(selected.item)
+			fibers.perform(wait_for_recovery_gate_op(recovery_gate, frame))
+
+			local f = frame_fields(frame)
+			f.lane = lane
+			log_io(trace_io, 'writer_tx_begin', f)
 
 			local ok, err = perform_write(write_frame_op, frame)
 			if ok ~= true then
+				local fail_fields = frame_fields(frame)
+				fail_fields.lane = lane
+				fail_fields.err = err
+				log_io(trace_io, 'writer_tx_failed', fail_fields)
 				error('writer write failed: ' .. tostring(err), 0)
 			end
 
 			written = written + 1
 			by_lane[lane] = (by_lane[lane] or 0) + 1
+			local ok_fields = frame_fields(frame)
+			ok_fields.lane = lane
+			ok_fields.count = written
+			log_io(trace_io, 'writer_tx_done', ok_fields)
 			commit_turn(state, lane)
 
 			if flush_each then
+				local flush_fields = frame_fields(frame)
+				flush_fields.lane = lane
+				log_io(trace_io, 'writer_flush_begin', flush_fields)
 				local flushed, flush_err = perform_flush(flush_op)
 				if flushed ~= true then
+					local fail_fields = frame_fields(frame)
+					fail_fields.lane = lane
+					fail_fields.err = flush_err
+					log_io(trace_io, 'writer_flush_failed', fail_fields)
 					error('writer flush failed: ' .. tostring(flush_err), 0)
 				end
+				local done_fields = frame_fields(frame)
+				done_fields.lane = lane
+				log_io(trace_io, 'writer_flush_done', done_fields)
 			end
 		end
 	end
 
+	log_io(trace_io, 'writer_final_flush_begin', lane_counts(by_lane))
 	local flushed, flush_err = perform_flush(flush_op)
 	if flushed ~= true then
+		log_io(trace_io, 'writer_final_flush_failed', { err = flush_err })
 		error('writer flush failed: ' .. tostring(flush_err), 0)
 	end
+	log_io(trace_io, 'writer_final_flush_done', lane_counts(by_lane))
 
 	return {
 		role           = 'writer',
