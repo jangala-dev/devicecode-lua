@@ -324,6 +324,71 @@ is expressed as a rule with `proto = tcp`, `dest_port = 443`, `sticky = true`
 and `policy = balanced`; the OpenWrt provider translates that into an mwan3
 `config rule` using `option sticky '1'` and `option use_policy '<policy>'`.
 
+## OpenWrt VM generated-config renderer
+
+The OpenWrt VM lane includes a renderer for inspecting the exact generated
+`/etc/config` files for the default Big Box NET config without modifying the
+VM's real `/etc/config` packages. It is a documentation and regression tool for
+reviewing the product config, NET normalisation, GSM realisation and OpenWrt
+provider output as one chain.
+
+The renderer is:
+
+```text
+tests/integration/openwrt_vm/scripts/render-default-configs
+```
+
+The Makefile entry points are:
+
+```sh
+make render-default-configs
+make print-default-configs
+```
+
+`render-default-configs` writes files under:
+
+```text
+tests/integration/openwrt_vm/work/generated-default-etc-config/
+```
+
+`print-default-configs` does the same and also prints the rendered `network`,
+`dhcp`, `firewall` and `mwan3` files to stdout. The output directory also
+contains `manifest.json`, which records the source config, generated OpenWrt
+name map, realised WAN members, activation commands that would have been run,
+and shaping commands that would have been run.
+
+Internally the tool copies `src` and `vendor` into the VM, normalises
+`src/configs/bigbox-v1-cm-2.json`, realises the NET intent and runs the real
+OpenWrt network provider against a temporary UCI `confdir`/`savedir`. Provider
+activation and shaper command hooks are stubbed so the generated config can be
+reviewed safely without touching the VM's live network, firewall or mwan3
+state. This makes it useful for reviewing complete UCI output while keeping the
+real end-to-end connectivity tests separate.
+
+By default the renderer uses `eth0` as the segment trunk and has no GSM uplink
+facts, so only the wired WAN member is realised. The trunk and GSM realisation
+inputs can be overridden with environment variables:
+
+```sh
+DEVICECODE_RENDER_TRUNK_IFNAME=eth0 make print-default-configs
+
+DEVICECODE_RENDER_GSM_PRIMARY_IFNAME=wwan0 \
+DEVICECODE_RENDER_GSM_SECONDARY_IFNAME=wwan1 \
+make print-default-configs
+```
+
+The GSM override path is the preferred way to inspect configs where semantic
+WAN members such as `modem_primary` and `modem_secondary` have been realised
+into concrete Linux interfaces. It should show the generated OpenWrt logical
+interface names consistently across `network`, `dhcp`, `firewall` and `mwan3`,
+while preserving semantic member names where they are valid bounded mwan3
+section names.
+
+The renderer complements, but does not replace, the real VM connectivity tests.
+`test_openwrt_vm_generated_configs_expected.sh` asserts expected generated UCI
+shape, while `test_openwrt_vm_mwan_connected.sh` applies generated config to
+the VM and proves that routes and mwan3 are active over the VM WAN links.
+
 ## Traffic shaping
 
 The current OpenWrt shaping backend is:
