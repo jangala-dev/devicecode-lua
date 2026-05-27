@@ -14,6 +14,7 @@ local scoped_work = require 'devicecode.support.scoped_work'
 local queue       = require 'devicecode.support.queue'
 local model       = require 'services.update.model'
 local active_job  = require 'services.update.active_job'
+local repo_mod    = require 'services.update.job_repository'
 
 local M = {}
 
@@ -409,6 +410,28 @@ local function active_intent_for(job)
 	return job and (job.active_intent or job.active) or nil
 end
 
+local function terminal_job(job)
+	return type(job) == 'table' and repo_mod.is_terminal(job.state)
+end
+
+local function job_lookup(jobs, job_id)
+	if type(jobs) ~= 'table' or type(job_id) ~= 'string' or job_id == '' then
+		return nil
+	end
+	if type(jobs.get) == 'function' then
+		return jobs:get(job_id)
+	end
+	return jobs[job_id]
+end
+
+local function cancel_handle(handle, reason)
+	if handle and type(handle.cancel) == 'function' then
+		handle:cancel(reason)
+		return true
+	end
+	return false
+end
+
 local function reconcile_token_for(job, generation)
 	return table.concat({
 		tostring(generation or 0),
@@ -428,6 +451,55 @@ end
 
 function Component:claim(rec)
 	return M.claim(self._state, rec)
+end
+
+function M.cleanup_stale_active(state, jobs)
+	local active = state and state.active or nil
+	if active == nil then return false, 'idle' end
+
+	local phase = active.phase or 'stage'
+	local job = job_lookup(jobs, active.job_id)
+	local missing = job == nil
+	local terminal = terminal_job(job)
+
+	if phase == 'reconcile' then
+		if missing or terminal then
+			local reason
+			if missing then
+				reason = 'stale_reconcile_missing_job'
+			else
+				reason = 'stale_reconcile_terminal_job:' .. tostring(job.state)
+			end
+			cancel_handle(active.handle, reason)
+			state.active = nil
+			state.stats.released = state.stats.released + 1
+			return true, reason, {
+				action = 'released',
+				job_id = active.job_id,
+				phase = phase,
+				token = active.token,
+			}
+		end
+		return false, 'active_reconcile_current'
+	end
+
+	if (phase == 'stage' or phase == 'commit') and terminal then
+		local reason = 'stale_' .. tostring(phase) .. '_terminal_job:' .. tostring(job.state)
+		if active.cancel_requested ~= reason then
+			active.cancel_requested = reason
+			active.status = 'cancelling'
+			cancel_handle(active.handle, reason)
+			return true, reason, {
+				action = 'cancel_requested',
+				job_id = active.job_id,
+				phase = phase,
+				token = active.token,
+			}
+		end
+		return false, 'active_' .. tostring(phase) .. '_cancel_already_requested'
+	end
+
+	return false, 'active_current'
 end
 
 function Component:_report_to_service(ev, label)
@@ -451,6 +523,18 @@ function Component:_report_changed(reason, extra)
 		ev[k] = v
 	end
 	return self:_report_to_service(ev, 'update_active_runtime_changed_report_failed')
+end
+
+function Component:_cleanup_stale_active()
+	local changed, reason, extra = M.cleanup_stale_active(self._state, self._jobs)
+	if changed ~= true then
+		return changed, reason
+	end
+	extra = extra or {}
+	extra.cleanup_reason = reason
+	local ok, err = self:_report_changed('stale_active_cleanup', extra)
+	if ok ~= true then return nil, err end
+	return true, reason
 end
 
 function Component:_start_apply(ev)
@@ -520,6 +604,10 @@ end
 
 function Component:_start_reconcile(job)
 	if not (job and job.job_id) then return nil, 'not_ready' end
+	if self._state.active ~= nil then
+		local cleaned, cerr = self:_cleanup_stale_active()
+		if cleaned == nil then return nil, cerr end
+	end
 	if self._state.active ~= nil then return nil, 'slot_busy' end
 
 	self._adoption_reconcile_started = self._adoption_reconcile_started or {}
@@ -573,6 +661,10 @@ function Component:_launch_active_intent(job)
 	if type(intent) ~= 'table' or intent.token == nil or intent.phase == nil then
 		return false, 'no_active_intent'
 	end
+	if self._state.active ~= nil then
+		local cleaned, cerr = self:_cleanup_stale_active()
+		if cleaned == nil then return nil, cerr end
+	end
 	if self._state.active ~= nil then return nil, 'slot_busy' end
 	self._active_launched = self._active_launched or {}
 	if self._active_launched[intent.token] then
@@ -612,6 +704,10 @@ end
 
 function Component:consider_jobs()
 	if not self._jobs then return false, 'not_ready' end
+	if self._state.active ~= nil then
+		local cleaned, cerr = self:_cleanup_stale_active()
+		if cleaned == nil then return nil, cerr end
+	end
 	if self._state.active ~= nil then return false, 'slot_busy' end
 
 	for _, job in ipairs(self._jobs:list()) do
@@ -635,6 +731,10 @@ end
 function Component:start_intent(intent, job, spec)
 	intent = intent or {}
 	spec = spec or {}
+	if self._state.active ~= nil then
+		local cleaned, cerr = self:_cleanup_stale_active()
+		if cleaned == nil then return nil, cerr end
+	end
 	if self._state.active ~= nil then
 		return nil, 'slot_busy'
 	end

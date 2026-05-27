@@ -504,7 +504,9 @@ end
 
 local function durable_active_owner(jobs)
 	for id, job in pairs((jobs and jobs.jobs) or {}) do
-		if job.active_token ~= nil or type(job.active_intent) == 'table' then
+		if not repo_mod.is_terminal(job.state)
+			and (job.active_token ~= nil or type(job.active_intent) == 'table')
+		then
 			return id, job
 		end
 	end

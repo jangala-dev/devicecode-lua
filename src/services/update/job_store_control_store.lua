@@ -101,6 +101,14 @@ local function decode_job(key, body)
 	return job, nil
 end
 
+local function is_missing_store_entry(err)
+	if err == nil then return false end
+	local s = tostring(err):lower()
+	return s == 'not found'
+		or s:find('no such file', 1, true) ~= nil
+		or s:find('enoent', 1, true) ~= nil
+end
+
 function Store:load_all_op()
 	return fibers.run_scope_op(function ()
 		local list_opts, lerr = cap_args.new.ControlStoreListOpts(self._prefix)
@@ -116,10 +124,15 @@ function Store:load_all_op()
 				local get_opts, gerr = cap_args.new.ControlStoreGetOpts(key)
 				if not get_opts then return nil, gerr or 'invalid_control_store_get_opts' end
 				local body, berr = fibers.perform(call_op(self, 'get', get_opts))
-				if body == nil then return nil, berr or ('control_store_get_failed:' .. key) end
-				local job, derr = decode_job(key, body)
-				if not job then return nil, derr end
-				jobs[job.job_id] = copy(job)
+				if body == nil then
+					if not is_missing_store_entry(berr) then
+						return nil, berr or ('control_store_get_failed:' .. key)
+					end
+				else
+					local job, derr = decode_job(key, body)
+					if not job then return nil, derr end
+					jobs[job.job_id] = copy(job)
+				end
 			end
 		end
 

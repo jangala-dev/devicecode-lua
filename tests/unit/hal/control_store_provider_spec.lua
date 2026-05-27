@@ -135,6 +135,24 @@ function T.get_op_returns_not_found_for_missing_key()
   rm_rf(root)
 end
 
+function T.get_op_returns_not_found_for_stale_index_entry()
+  local root = mk_tmpdir('csp-stale-index')
+  local provider = fresh_provider(root)
+
+  local index = assert(io.open(root .. '/.control_store_index', 'wb'))
+  index:write('stale\n')
+  index:close()
+
+  runfibers.run(function()
+    local fibers = require 'fibers'
+    local ok, err = fibers.perform(provider:get_op(assert(cap_args.new.ControlStoreGetOpts('stale'))))
+    assert(ok == false)
+    assert(tostring(err):match('not found'))
+  end)
+
+  rm_rf(root)
+end
+
 function T.delete_op_removes_key_from_index_and_truncates_file()
   local root = mk_tmpdir('csp-delete')
   local provider = fresh_provider(root)

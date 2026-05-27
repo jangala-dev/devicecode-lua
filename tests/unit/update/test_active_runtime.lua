@@ -8,6 +8,11 @@ local function assert_eq(a,b,msg) if a ~= b then fail(msg or ('expected '..tostr
 local function assert_true(v,msg) if v ~= true then fail(msg or ('expected true, got '..tostring(v))) end end
 local function assert_nil(v,msg) if v ~= nil then fail(msg or ('expected nil, got '..tostring(v))) end end
 local function assert_not_nil(v,msg) if v == nil then fail(msg or 'expected non-nil') end end
+local function assert_contains(s, needle, msg)
+  if tostring(s or ''):find(tostring(needle), 1, true) == nil then
+    fail(msg or ('expected '..tostring(s)..' to contain '..tostring(needle)))
+  end
+end
 
 local function stage_backend(result)
   return { stage_op = function () return op.always(result or { ok = true }, nil) end }
@@ -183,6 +188,89 @@ function tests.test_component_apply_failure_after_start_keeps_completion_and_rep
     assert_eq(failed.status, 'failed')
     assert_eq(failed.primary, 'save_failed')
   end)
+end
+
+function tests.test_cleanup_releases_terminal_reconcile_active_and_reports_change()
+  fibers.run(function (scope)
+    local service_tx, service_rx = mailbox.new(8, { full = 'reject_newest' })
+    local cancelled
+    local fake_jobs = {
+      get = function (_, job_id)
+        if job_id == 'j1' then return { job_id='j1', state='cancelled' } end
+        return nil
+      end,
+      list = function () return {} end,
+    }
+    local component = assert(active.start_component(scope, {
+      service_id = 'update',
+      done_tx = service_tx,
+      work_scope = scope,
+      jobs = fake_jobs,
+    }))
+    local lease = assert(component:claim({ job_id='j1', generation=1, phase='reconcile', token='tok-reconcile' }))
+    assert_true(lease:handoff())
+    component:state().active.handle = { cancel = function (_, reason) cancelled = reason end }
+
+    local ok, reason = component:consider_jobs()
+    assert_eq(ok, false)
+    assert_eq(reason, 'no_reconcile_adoption')
+    assert_nil(component:state().active)
+    assert_contains(cancelled, 'stale_reconcile_terminal_job')
+
+    local ev = fibers.perform(service_rx:recv_op())
+    assert_eq(ev.kind, 'active_runtime_changed')
+    assert_eq(ev.reason, 'stale_active_cleanup')
+    assert_eq(ev.action, 'released')
+    assert_eq(ev.phase, 'reconcile')
+    assert_nil(ev.snapshot.active)
+    component:cancel('test complete')
+  end)
+end
+
+function tests.test_cleanup_releases_missing_reconcile_active()
+  local state = active.new_state()
+  local cancelled
+  local lease = assert(active.claim(state, { job_id='missing', generation=1, phase='reconcile', token='tok-missing' }))
+  assert_true(lease:handoff())
+  state.active.handle = { cancel = function (_, reason) cancelled = reason end }
+  local changed, reason, extra = active.cleanup_stale_active(state, { get = function () return nil end })
+  assert_true(changed)
+  assert_eq(reason, 'stale_reconcile_missing_job')
+  assert_eq(extra.action, 'released')
+  assert_nil(state.active)
+  assert_eq(cancelled, 'stale_reconcile_missing_job')
+
+  local ok, err = active.apply_completion(state, {
+    kind='active_job_done',
+    job_id='missing',
+    generation=1,
+    phase='reconcile',
+    token='tok-missing',
+    status='ok',
+  })
+  assert_eq(ok, false)
+  assert_eq(err, 'stale')
+end
+
+function tests.test_cleanup_stage_or_commit_terminal_job_only_requests_cancel()
+  local state = active.new_state()
+  local cancelled
+  local lease = assert(active.claim(state, { job_id='j1', generation=1, phase='commit', token='tok-commit' }))
+  assert_true(lease:handoff())
+  state.active.handle = { cancel = function (_, reason) cancelled = reason end }
+  local jobs = { get = function () return { job_id='j1', state='cancelled' } end }
+
+  local changed, reason, extra = active.cleanup_stale_active(state, jobs)
+  assert_true(changed)
+  assert_contains(reason, 'stale_commit_terminal_job')
+  assert_eq(extra.action, 'cancel_requested')
+  assert_not_nil(state.active)
+  assert_eq(state.active.status, 'cancelling')
+  assert_contains(cancelled, 'stale_commit_terminal_job')
+
+  local changed_again = active.cleanup_stale_active(state, jobs)
+  assert_eq(changed_again, false)
+  assert_not_nil(state.active)
 end
 
 return tests

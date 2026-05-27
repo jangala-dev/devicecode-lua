@@ -234,6 +234,9 @@ local function handle_cancel(ctx, req, payload)
 			state = 'cancelled',
 			next_step = nil,
 			error = p.reason or 'cancelled',
+			active = nil,
+			active_token = nil,
+			active_intent = nil,
 		}
 	end)
 end
