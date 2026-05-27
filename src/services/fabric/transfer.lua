@@ -77,6 +77,7 @@ local function copy_active(a)
 		target = a.target,
 		meta = copy(a.meta),
 		size = a.size,
+		sent = a.sent,
 		digest_alg = a.digest_alg,
 		digest = a.digest,
 	}
@@ -110,6 +111,7 @@ local function snapshot_equal(a, b)
 		if aa.status ~= ba.status then return false end
 		if aa.direction ~= ba.direction then return false end
 		if aa.xfer_id ~= ba.xfer_id then return false end
+		if aa.sent ~= ba.sent then return false end
 		if not same_ctx(aa.session, ba.session) then return false end
 	end
 
@@ -192,6 +194,7 @@ function M.claim_slot(state, rec)
 		target = rec.target,
 		meta = copy(rec.meta),
 		size = rec.size,
+		sent = rec.sent or 0,
 		digest_alg = rec.digest_alg,
 		digest = rec.digest,
 		frame_tx = rec.frame_tx,
@@ -250,6 +253,27 @@ function M.apply_attempt_done(state, ev)
 	end
 
 	return true, nil, active, state.last
+end
+
+function M.apply_progress(state, ev)
+	if not active_matches(state, ev) then
+		state.stats.stale = state.stats.stale + 1
+		return false, 'stale_transfer_progress'
+	end
+
+	local active = state.active
+	local sent = tonumber(ev.sent)
+	if sent == nil then return false, 'invalid_transfer_progress' end
+	if sent < 0 then sent = 0 end
+	if type(active.sent) == 'number' and sent < active.sent then
+		return false, 'regressing_transfer_progress'
+	end
+
+	active.sent = sent
+	if ev.status ~= nil then active.status = ev.status end
+	if ev.size ~= nil then active.size = ev.size end
+
+	return true, nil, active
 end
 
 local function manager_snapshot(self)
@@ -319,6 +343,11 @@ local function attempt_caps(self, frame_rx, session)
 		chunk_size = self._chunk_size,
 		timeout_s = self._timeout_s,
 		retry_limit = self._retry_limit,
+		trace_io = self._trace_io == true,
+
+		report_progress_now = function (ev)
+			return report(self, ev, 'transfer_progress_report_failed')
+		end,
 
 		send_control_frame_now = function (frame, label)
 			return outbound:send_transfer_control_frame_now(c, frame, label)
@@ -351,6 +380,20 @@ local function run_attempt(scope, req, caps)
 	local worker_req = copy(req)
 	worker_req.source = source
 	worker_req.source_owner = nil
+	worker_req.on_progress = function (progress)
+		if type(caps.report_progress_now) ~= 'function' then return true, nil end
+		progress = type(progress) == 'table' and progress or {}
+		return caps.report_progress_now({
+			kind = 'transfer_progress',
+			request_id = req_id(req),
+			request_generation = req_gen(req),
+			session = ctx(req.session),
+			xfer_id = req.xfer_id,
+			sent = progress.sent,
+			size = progress.size,
+			status = progress.status or 'sending',
+		})
+	end
 
 	local result = transfer_sender.run(scope, worker_req, caps)
 	if type(result) ~= 'table' then error('transfer attempt must return a result table', 0) end
@@ -724,6 +767,11 @@ local function handle_slot_released(self, ev)
 	emit_model(self)
 end
 
+local function handle_progress(self, ev)
+	local accepted = M.apply_progress(self._state, ev)
+	if accepted then emit_model(self) end
+end
+
 local function handle_frame(self, ev)
 	self._state.stats.frames_received = self._state.stats.frames_received + 1
 
@@ -864,6 +912,9 @@ local function dispatch(self, ev)
 	elseif ev.kind == 'transfer_attempt_done' then
 		handle_attempt_done(self, ev)
 
+	elseif ev.kind == 'transfer_progress' then
+		handle_progress(self, ev)
+
 	elseif ev.kind == 'transfer_slot_released' then
 		handle_slot_released(self, ev)
 
@@ -962,6 +1013,7 @@ function M.run(scope, params)
 		_chunk_size = params.chunk_size,
 		_timeout_s = params.timeout_s,
 		_retry_limit = params.retry_limit,
+		_trace_io = params.trace_io == true,
 		_session = nil,
 		_event_pending = {},
 	}, Manager)
