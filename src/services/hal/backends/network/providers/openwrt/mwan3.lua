@@ -175,10 +175,6 @@ local function default_capture(argv)
 	return nil, out or '', detail
 end
 
-local function default_run(argv)
-	local ok, _out, err = default_capture(argv)
-	return ok == true, err
-end
 
 local function default_restore(content)
 	local fibers = require 'fibers'
@@ -208,9 +204,6 @@ local function default_restore(content)
 	return nil, detail, out or ''
 end
 
-local function line_has(line, needle)
-	return type(line) == 'string' and line:find(needle, 1, true) ~= nil
-end
 
 local function normalise_policy(policy)
 	return sid(policy or 'balanced')

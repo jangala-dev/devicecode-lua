@@ -6,7 +6,6 @@ local tablex = require 'shared.table'
 local M = {}
 
 local function copy(v) return tablex.deep_copy(v) end
-local function is_plain_table(v) return type(v) == 'table' and getmetatable(v) == nil end
 local function sorted_keys(t)
 	local ks = {}
 	for k in pairs(t or {}) do ks[#ks + 1] = k end

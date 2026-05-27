@@ -24,16 +24,6 @@ function M.cancel(state, reason)
 	return true, nil
 end
 
-local function mark_runtime_replaced(state, generation)
-	state.model:update(function(s)
-		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
-		s.wan_runtime.generation = generation
-		s.wan_runtime.uplinks = {}
-		s.wan_runtime.speedtests = {}
-		s.wan_runtime.live_weights = { state = 'idle', generation = generation }
-		return s
-	end)
-end
 
 local function start_speedtest_for_uplink(state, uplink)
 	if not state.hal or type(state.hal.speedtest_op) ~= 'function' then return true, nil end
