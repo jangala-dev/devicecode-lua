@@ -67,6 +67,12 @@ local function perform_response(ev)
 	return true
 end
 
+local function encode_json(v)
+	local encoded, err = cjson.encode(v)
+	if encoded == nil then error(err or 'json_encode_failed', 0) end
+	return encoded
+end
+
 local function content_type_is_json(v)
 	v = tostring(v or ''):lower()
 	if v == '' then return false end
@@ -135,6 +141,24 @@ local function principal_from(ctx, deps)
 	return nil, nil
 end
 
+local function shallow_copy(t)
+	local out = {}
+	for k, v in pairs(t or {}) do out[k] = v end
+	return out
+end
+
+local function set_if_present(t, key, value)
+	if value ~= nil and value ~= '' then t[key] = value end
+end
+
+local function positive_int_header(ctx, name)
+	local raw = ctx_header(ctx, name)
+	if raw == nil or raw == '' then return nil end
+	local n = tonumber(raw)
+	if n and n > 0 and n == math.floor(n) then return n end
+	return nil
+end
+
 local function handle_read(owner, route, deps)
 	local model = assert(deps.model, 'HTTP read requires model')
 	local snap = model:snapshot()
@@ -145,6 +169,8 @@ local function handle_read(owner, route, deps)
 		result = queries.services_snapshot(snap)
 	elseif route.query == 'fabric' then
 		result = queries.fabric_status(snap)
+	elseif route.query == 'fabric_link' then
+		result = queries.fabric_link_status(snap, route.link_id)
 	elseif route.query == 'topic' then
 		result = queries.topic(snap, route.topic)
 	else
@@ -168,7 +194,7 @@ local function handle_login(owner, ctx, deps)
 	local sess = assert(deps.sessions, 'login requires sessions'):create(principal, {
 		data = { user_agent = ctx_header(ctx, 'user-agent') },
 	})
-	perform_response(owner:reply_json_op(200, { session = sess }))
+	perform_response(owner:reply_json_op(200, { session = sess, session_id = sess.id }))
 	return { status = 'ok', session_id = sess.id }
 end
 
@@ -227,9 +253,43 @@ local function handle_command(scope, owner, ctx, route, deps)
 	return { status = 'ok' }
 end
 
+local function handle_upload(scope, owner, ctx, deps)
+	local principal = principal_from(ctx, deps)
+	if principal == nil then
+		perform_response(owner:reply_error_op(401, 'unauthenticated'))
+		return { status = 'unauthenticated' }
+	end
+
+	local upload_opts = shallow_copy(deps.update or deps)
+	upload_opts.principal = principal
+
+	local component = ctx_header(ctx, 'x-artifact-component')
+	if component ~= nil and component ~= '' then
+		upload_opts.component = upload_opts.component or component
+		if upload_opts.create_job == nil then upload_opts.create_job = true end
+		if upload_opts.start_job == nil then upload_opts.start_job = true end
+	end
+
+	local metadata = shallow_copy(upload_opts.metadata)
+	set_if_present(metadata, 'name', ctx_header(ctx, 'x-artifact-name'))
+	set_if_present(metadata, 'version', ctx_header(ctx, 'x-artifact-version'))
+	set_if_present(metadata, 'build', ctx_header(ctx, 'x-artifact-build'))
+	local image_id = ctx_header(ctx, 'x-artifact-image-id')
+	set_if_present(metadata, 'image_id', image_id)
+	set_if_present(metadata, 'expected_image_id', image_id)
+	set_if_present(metadata, 'compat_commit_image_id', ctx_header(ctx, 'x-artifact-compat-commit-image-id'))
+	set_if_present(metadata, 'transfer_chunk_raw', positive_int_header(ctx, 'x-transfer-chunk-raw'))
+	if metadata.format == nil and metadata.name and tostring(metadata.name):match('%.dcmcu$') then
+		metadata.format = 'dcmcu-v1'
+	end
+	if next(metadata) ~= nil then upload_opts.metadata = metadata end
+
+	return upload.run(scope, owner, ctx, upload_opts)
+end
+
 function M.run(scope, ctx, deps)
 	deps = deps or {}
-	local owner = response_mod.new(ctx, { encode = deps.encode_json })
+	local owner = response_mod.new(ctx, { encode = deps.encode_json or encode_json })
 
 	scope:finally(function (_, status, primary)
 		resource.terminate_checked(owner, primary or status or 'request_closed', 'HTTP response termination')
@@ -249,7 +309,7 @@ function M.run(scope, ctx, deps)
 	elseif route.kind == 'command' then
 		return handle_command(scope, owner, ctx, route, deps)
 	elseif route.kind == 'upload' then
-		return upload.run(scope, owner, ctx, deps.update or deps)
+		return handle_upload(scope, owner, ctx, deps)
 	elseif route.kind == 'sse' then
 		return sse.run(scope, owner, route, deps)
 	elseif route.kind == 'static' then

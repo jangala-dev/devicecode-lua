@@ -66,6 +66,51 @@ function M.fabric_status(snapshot)
 	}
 end
 
+local function payload_at(snapshot, topic)
+	local item = M.topic(snapshot, topic)
+	return item and item.payload or nil
+end
+
+local function component_view(payload)
+	if type(payload) ~= 'table' then return nil end
+	local status = copy_value(payload.snapshot or payload.status or payload)
+	if payload.component == 'session' and type(status) == 'table' then
+		if status.ready == nil then status.ready = status.established == true end
+		if status.state == nil then
+			if status.ready then
+				status.state = 'ready'
+			else
+				status.state = status.phase
+			end
+		end
+	end
+	return {
+		link_id = payload.link_id,
+		link_generation = payload.link_generation,
+		component = payload.component,
+		state = payload.state,
+		status = status,
+	}
+end
+
+function M.fabric_link_status(snapshot, link_id)
+	local root = { 'state', 'fabric', 'link', link_id }
+	local function component(name)
+		return component_view(payload_at(snapshot, {
+			'state', 'fabric', 'link', link_id, 'component', name,
+		}))
+	end
+
+	return {
+		version = snapshot and snapshot.version or 0,
+		link = component_view(payload_at(snapshot, root)),
+		session = component('session'),
+		bridge = component('rpc_bridge') or component('bridge'),
+		transfer = component('transfer'),
+		transfer_manager = component('transfer_manager') or component('transfer'),
+	}
+end
+
 function M.update_jobs_snapshot(snapshot)
 	return {
 		version = snapshot and snapshot.version or 0,

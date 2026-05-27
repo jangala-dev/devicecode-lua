@@ -59,6 +59,66 @@ local function cleanup_child_scope(child, reason)
     child:cancel(reason or 'cleanup')
 end
 
+local function shallow_copy(t)
+    local out = {}
+    for k, v in pairs(t or {}) do
+        out[k] = v
+    end
+    return out
+end
+
+local function env_value(getenv, name)
+    local v = getenv(name)
+    if v == nil or v == '' then return nil end
+    return v
+end
+
+local function build_service_opts(base_opts, getenv)
+    getenv = getenv or os.getenv
+    local out = shallow_copy(base_opts)
+
+    local ui_password = env_value(getenv, 'DEVICECODE_UI_ADMIN_PASSWORD')
+    if ui_password == nil then
+        return out
+    end
+
+    local ui_opts = shallow_copy(out.ui)
+    if ui_opts.auth == nil and ui_opts.auth_opts == nil then
+        local username = env_value(getenv, 'DEVICECODE_UI_ADMIN_USERNAME') or 'admin'
+        ui_opts.auth_opts = {
+            users = {
+                [username] = {
+                    password = ui_password,
+                    principal = authz.user_principal(username, { roles = { 'admin' } }),
+                },
+            },
+        }
+    end
+    out.ui = ui_opts
+
+    return out
+end
+
+local function service_start_opts(name, env, connect, extra_opts)
+    local out = shallow_copy(extra_opts)
+    out.name = name
+    out.env = env
+    out.connect = connect
+    return out
+end
+
+local function auth_user_summary(opts)
+    local users = opts and opts.auth_opts and opts.auth_opts.users
+    if type(users) ~= 'table' then return nil, nil end
+    local count = 0
+    local first = nil
+    for username in pairs(users) do
+        count = count + 1
+        first = first or tostring(username)
+    end
+    return count, first
+end
+
 local function spawn_service(child, bus, name, mod, env, extra_opts)
     return child:spawn(function()
         local conn = bus:connect({
@@ -71,14 +131,7 @@ local function spawn_service(child, bus, name, mod, env, extra_opts)
             })
         end
 
-        mod.start(conn, {
-            name         = name,
-            env          = env,
-            connect      = connect_as,
-            services     = extra_opts and extra_opts.services or nil,
-            run_http     = extra_opts and extra_opts.run_http or nil,
-            verify_login = extra_opts and extra_opts.verify_login or nil,
-        })
+        mod.start(conn, service_start_opts(name, env, connect_as, extra_opts))
 
         error(('service returned unexpectedly: %s'):format(tostring(name)), 0)
     end)
@@ -186,7 +239,7 @@ function M.run(scope, params)
     local service_loader = params.service_loader or function(name)
         return require('services.' .. name)
     end
-    local service_opts = params.service_opts or {}
+    local service_opts = build_service_opts(params.service_opts)
 
     local main_conn = bus:connect({
         principal = authz.service_principal('main'),
@@ -213,6 +266,18 @@ function M.run(scope, params)
         local mod, lerr = load_service(service_loader, name)
         if not mod then
             fail_boot(main_conn, name, 'load_failed', lerr)
+        end
+
+        if name == 'ui' then
+            local user_count, first_user = auth_user_summary(service_opts[name])
+            if user_count then
+                main_conn:publish({ 'obs', 'log', 'main', 'info' }, {
+                    what = 'ui_auth_configured',
+                    source = 'service_opts',
+                    users = user_count,
+                    first_user = first_user,
+                })
+            end
         end
 
         local child, cerr = scope:child()
@@ -304,5 +369,11 @@ function M.run(scope, params)
         sleep.sleep(10.0)
     end
 end
+
+M._test = {
+    build_service_opts = build_service_opts,
+    service_start_opts = service_start_opts,
+    auth_user_summary = auth_user_summary,
+}
 
 return M
