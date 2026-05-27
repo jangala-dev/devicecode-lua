@@ -75,7 +75,11 @@ local function with_open_file_op(path, mode, body_fn)
 	return fibers.run_scope_op(function (scope)
 		local f, err = file.open(path, mode)
 		if not f then
-			return false, tostring(err)
+			return false, ('open_failed path=%s mode=%s err=%s'):format(
+				tostring(path),
+				tostring(mode),
+				tostring(err)
+			)
 		end
 
 		scope:finally(function (_, status, primary)
@@ -167,7 +171,11 @@ function Provider:get_op(opts)
 				return false, 'not found'
 			end
 
-			return fibers.perform(read_file_required_op(path_for(self.root, opts.key)))
+			local ok_body, body_or_err = fibers.perform(read_file_required_op(path_for(self.root, opts.key)))
+			if not ok_body and is_not_found_err(body_or_err) then
+				return false, 'not found'
+			end
+			return ok_body, body_or_err
 		end):wrap(function (st, rep, ok, value_or_err)
 			if st ~= 'ok' then
 				return false, tostring(value_or_err or rep)

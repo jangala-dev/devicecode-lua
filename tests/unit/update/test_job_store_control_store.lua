@@ -118,4 +118,41 @@ function T.accepts_hal_void_success_replies_for_put_and_delete()
   end)
 end
 
+function T.load_all_ignores_stale_index_entries()
+  runfibers.run(function()
+    local data = {
+      ['update-job-present'] = require('cjson.safe').encode({
+        job_id = 'present',
+        component = 'mcu',
+        state = 'created',
+      }),
+    }
+    local conn = {
+      call_op = function(_, topic, payload)
+        local method = topic[5]
+        if method == 'list' then
+          return require('fibers.op').always({
+            ok = true,
+            reason = { 'update-job-missing', 'update-job-present' },
+          }, nil)
+        elseif method == 'get' then
+          if data[payload.key] == nil then
+            return require('fibers.op').always({ ok = false, reason = 'not found' }, nil)
+          end
+          return require('fibers.op').always({ ok = true, reason = data[payload.key] }, nil)
+        end
+        return require('fibers.op').always({ ok = false, reason = 'bad method' }, nil)
+      end,
+    }
+
+    local store = store_mod.new(conn)
+    local snapshot, load_err = fibers.perform(store:load_all_op())
+    assert(snapshot ~= nil, tostring(load_err))
+    assert(snapshot.jobs.present.component == 'mcu')
+    assert(snapshot.jobs.missing == nil)
+    assert(#snapshot.order == 1)
+    assert(snapshot.order[1] == 'present')
+  end)
+end
+
 return T

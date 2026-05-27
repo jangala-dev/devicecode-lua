@@ -154,6 +154,71 @@ function tests.test_restart_adoption_starts_reconcile_for_awaiting_return()
   end)
 end
 
+function tests.test_cancelled_reconcile_active_cleanup_unblocks_new_start()
+  fibers.run(function (root_scope)
+    local reconcile_started = false
+    local initial_jobs = {
+      jobs = {
+        j1 = {
+          job_id='j1',
+          component='cm5',
+          state='awaiting_return',
+          created_seq=1,
+          updated_seq=1,
+        },
+      },
+    }
+    local active_backend = {}
+    function active_backend:stage_op(job) return op.always({ job_id=job.job_id }, nil) end
+    function active_backend:evaluate_reconcile()
+      reconcile_started = true
+      return { done=false, reason='waiting_for_test' }
+    end
+    local child, caller = start_service(root_scope, {
+      config={ schema='devicecode.update/1', components={ { component='cm5' } } },
+      initial_jobs = initial_jobs,
+      backend = active_backend,
+    })
+
+    assert_true(probe.wait_until(function()
+      local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      local active = status and status.snapshot and status.snapshot.update_active
+      return reconcile_started and active and active.job_id == 'j1' and active.phase == 'reconcile'
+    end, { timeout=0.8, interval=0.01 }), 'expected reconcile active slot')
+
+    local cancelled = assert(caller:call(topics.update_manager_rpc('cancel-job'), {
+      job_id='j1',
+      reason='test_cancel',
+    }, { timeout=0.5 }))
+    assert_eq(cancelled.ok, true)
+
+    assert_true(probe.wait_until(function()
+      local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      local job = status and status.snapshot and status.snapshot.jobs.by_id.j1
+      local active = status and status.snapshot and status.snapshot.update_active
+      return job and job.state == 'cancelled' and active == nil
+    end, { timeout=0.8, interval=0.01 }), 'expected stale reconcile active cleanup')
+
+    assert(caller:call(topics.update_manager_rpc('create-job'), {
+      job_id='j2',
+      component='cm5',
+      artifact_ref='artifact-j2',
+    }, { timeout=0.5 }))
+    local started, start_err = caller:call(
+      topics.update_manager_rpc('start-job'),
+      { job_id='j2' },
+      { timeout=0.5 }
+    )
+    assert_not_nil(started, start_err)
+    assert_eq(started.accepted, true)
+    assert_true(probe.wait_until(function()
+      local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      local job = status and status.snapshot and status.snapshot.jobs.by_id.j2
+      return job and job.state == 'awaiting_commit'
+    end, { timeout=0.8, interval=0.01 }), 'expected new start after cleanup')
+    child:cancel('test complete')
+  end)
+end
 
 function tests.test_slow_job_runtime_load_keeps_public_service_responsive()
   fibers.run(function (root_scope)
