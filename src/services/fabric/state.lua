@@ -145,7 +145,7 @@ local function transfer_payload_from_snapshot(link_id, link_generation, snapshot
 		status = rec.status,
 		target = rec.target or result.target,
 		size = result.size or rec.size,
-		sent_bytes = result.sent_bytes,
+		sent_bytes = result.sent_bytes or rec.sent,
 		received_bytes = result.received_bytes,
 		digest_alg = result.digest_alg or rec.digest_alg,
 		digest = result.digest or rec.digest,

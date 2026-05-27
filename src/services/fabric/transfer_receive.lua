@@ -200,37 +200,50 @@ function M.run(scope, req, caps)
 
 		if type(frame) ~= 'table' or frame.xfer_id ~= xfer_id then
 			-- Manager normally filters these.
+			deadline = deadline
 
 		elseif frame.type == 'xfer_abort' then
 			fail(caps, xfer_id, sink, frame.err or 'remote_abort', false)
 
 		elseif frame.type == 'xfer_chunk' then
-			if frame.offset ~= received then fail(caps, xfer_id, sink, 'unexpected_offset', true) end
-			local chunk = frame.data
-			if type(chunk) ~= 'string' then fail(caps, xfer_id, sink, 'invalid_chunk_data', true) end
-			if received + #chunk > size then fail(caps, xfer_id, sink, 'size_overrun', true) end
-			if not protocol.verify_chunk_digest(chunk, frame.chunk_digest) then
-				if retries_at_offset < retry_limit then
-					retries_at_offset = retries_at_offset + 1
-					chunk_retries = chunk_retries + 1
-					deadline = fibers.now() + timeout_s
-					send_control(caps, construct('xfer_need', protocol.xfer_need, xfer_id, received), 'transfer_receive_retry_need_send_failed')
-				else
-					fail(caps, xfer_id, sink, 'chunk_digest_mismatch', true)
-				end
-			else
-				local ok, werr = append_chunk(sink, chunk)
-				if ok ~= true then fail(caps, xfer_id, sink, werr or 'write_failed', true) end
-				xxhash32.update(digest_state, chunk)
-				received = received + #chunk
-				retries_at_offset = 0
+			if type(frame.offset) == 'number' and frame.offset < received then
+				local need = construct('xfer_need', protocol.xfer_need, xfer_id, received)
+				send_control(caps, need, 'transfer_receive_stale_need_send_failed')
 				deadline = fibers.now() + timeout_s
-				-- Acknowledge every accepted chunk, including the final one.  The
-				-- sender waits for xfer_need next == size before sending xfer_commit.
-				-- This keeps commit ordered after the receiver has actually processed
-				-- the last bulk frame, even when the writer uses separate control and
-				-- bulk lanes.
-				send_control(caps, construct('xfer_need', protocol.xfer_need, xfer_id, received), 'transfer_receive_need_send_failed')
+			elseif type(frame.offset) == 'number' and frame.offset > received then
+				local need = construct('xfer_need', protocol.xfer_need, xfer_id, received)
+				send_control(caps, need, 'transfer_receive_future_need_send_failed')
+			elseif frame.offset ~= received then
+				fail(caps, xfer_id, sink, 'unexpected_offset', true)
+			else
+				local chunk = frame.data
+				if type(chunk) ~= 'string' then fail(caps, xfer_id, sink, 'invalid_chunk_data', true) end
+				if received + #chunk > size then fail(caps, xfer_id, sink, 'size_overrun', true) end
+				if not protocol.verify_chunk_digest(chunk, frame.chunk_digest) then
+					if retries_at_offset < retry_limit then
+						retries_at_offset = retries_at_offset + 1
+						chunk_retries = chunk_retries + 1
+						deadline = fibers.now() + timeout_s
+						local need = construct('xfer_need', protocol.xfer_need, xfer_id, received)
+						send_control(caps, need, 'transfer_receive_retry_need_send_failed')
+					else
+						fail(caps, xfer_id, sink, 'chunk_digest_mismatch', true)
+					end
+				else
+					local ok, werr = append_chunk(sink, chunk)
+					if ok ~= true then fail(caps, xfer_id, sink, werr or 'write_failed', true) end
+					xxhash32.update(digest_state, chunk)
+					received = received + #chunk
+					retries_at_offset = 0
+					deadline = fibers.now() + timeout_s
+					-- Acknowledge every accepted chunk, including the final one.  The
+					-- sender waits for xfer_need next == size before sending xfer_commit.
+					-- This keeps commit ordered after the receiver has actually processed
+					-- the last bulk frame, even when the writer uses separate control and
+					-- bulk lanes.
+					local need = construct('xfer_need', protocol.xfer_need, xfer_id, received)
+					send_control(caps, need, 'transfer_receive_need_send_failed')
+				end
 			end
 
 		elseif frame.type == 'xfer_commit' then

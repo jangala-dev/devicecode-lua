@@ -19,7 +19,9 @@ local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true, got ' .. tostring(v))) end end
 local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, got ' .. tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil value') end end
-local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end end
+local function assert_eq(a, b, msg)
+	if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end
+end
 
 local function recv_with_timeout(rx, label, timeout)
 	timeout = timeout or 0.25
@@ -137,6 +139,32 @@ function tests.test_reducer_requires_session_context_for_claims()
 	})
 	assert_eq(accepted, true)
 	assert_eq(transfer.snapshot(state).active.session.peer_sid, 'sid-1')
+end
+
+function tests.test_reducer_tracks_active_send_progress()
+	local state = transfer.new_state { manager_id = 'm' }
+	assert_true(transfer.claim_slot(state, {
+		request_id = 'r-progress',
+		request_generation = 1,
+		session = ctx(),
+		xfer_id = 'xfer-progress',
+		size = 6,
+	}))
+
+	local ok, err = transfer.apply_progress(state, {
+		request_id = 'r-progress',
+		request_generation = 1,
+		session = ctx(),
+		xfer_id = 'xfer-progress',
+		sent = 3,
+		size = 6,
+		status = 'sending',
+	})
+	assert_true(ok, err)
+	local snap = transfer.snapshot(state)
+	assert_eq(snap.active.sent, 3)
+	assert_eq(snap.active.size, 6)
+	assert_eq(snap.active.status, 'sending')
 end
 
 function tests.test_slot_admission_without_session_fails_request()
@@ -263,20 +291,20 @@ function tests.test_manager_receives_inbound_transfer_for_registered_target()
 		local received = {}
 		local committed = false
 		local target = {}
-		function target:open_sink_op(req)
+		function target.open_sink_op(_, req)
 			assert_eq(req.target, 'updater/main')
 			assert_eq(req.size, 6)
 			local sink = {}
-			function sink:append_op(chunk)
+			function sink.append_op(_, chunk)
 				received[#received + 1] = chunk
 				return fibers.always(true, nil)
 			end
-			function sink:commit_op(req2)
+			function sink.commit_op(_, req2)
 				committed = true
 				assert_eq(req2.digest, protocol.digest_hex('abcdef'))
 				return fibers.always({ staged = true }, nil)
 			end
-			function sink:abort(_) return true, nil end
+			function sink.abort(_) return true, nil end
 			return fibers.always(sink, nil)
 		end
 
@@ -335,21 +363,143 @@ function tests.test_manager_receives_inbound_transfer_for_registered_target()
 	end)
 end
 
+function tests.test_manager_reacks_stale_inbound_chunk_without_rewriting()
+	fibers.run(function (scope)
+		local received = {}
+		local target = {}
+		function target.open_sink_op(_, req)
+			assert_eq(req.target, 'updater/main')
+			local sink = {}
+			function sink.append_op(_, chunk)
+				received[#received + 1] = chunk
+				return fibers.always(true, nil)
+			end
+			function sink.commit_op(_)
+				return fibers.always({ staged = true }, nil)
+			end
+			function sink.abort(_) return true, nil end
+			return fibers.always(sink, nil)
+		end
+
+		local h = start_manager(scope, {
+			chunk_size = 3,
+			receive_targets = { ['updater/main'] = target },
+		})
+		local c = ctx()
+		h.outbound:bind(c)
+		assert_true(h.session_tx:send(peer_session_event()))
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_begin(
+			'xfer-in-stale', 'updater/main', 6, protocol.DIGEST_ALG, protocol.digest_hex('abcdef'), nil
+		)))))
+
+		assert_eq(recv_with_timeout(h.control_rx, 'ready').frame.type, 'xfer_ready')
+		assert_eq(recv_with_timeout(h.control_rx, 'need 0').frame.next, 0)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_chunk(
+			'xfer-in-stale', 0, 'abc', protocol.chunk_digest('abc')
+		)))))
+		assert_eq(recv_with_timeout(h.control_rx, 'need 3').frame.next, 3)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_chunk(
+			'xfer-in-stale', 0, 'abc', protocol.chunk_digest('abc')
+		)))))
+		assert_eq(recv_with_timeout(h.control_rx, 'stale need 3').frame.next, 3)
+		assert_eq(#received, 1)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_chunk(
+			'xfer-in-stale', 3, 'def', protocol.chunk_digest('def')
+		)))))
+		assert_eq(recv_with_timeout(h.control_rx, 'need 6').frame.next, 6)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_commit(
+			'xfer-in-stale', 6, protocol.DIGEST_ALG, protocol.digest_hex('abcdef')
+		)))))
+		assert_eq(recv_with_timeout(h.control_rx, 'done').frame.type, 'xfer_done')
+		assert_eq(table.concat(received), 'abcdef')
+
+		h.admission_tx:close('done')
+		h.session_tx:close('done')
+		recv_with_timeout(h.done_rx, 'manager done')
+	end)
+end
+
+function tests.test_manager_reasks_current_offset_for_future_inbound_chunk_and_completes()
+	fibers.run(function (scope)
+		local received = {}
+		local target = {}
+		function target.open_sink_op(_, req)
+			assert_eq(req.target, 'updater/main')
+			local sink = {}
+			function sink.append_op(_, chunk)
+				received[#received + 1] = chunk
+				return fibers.always(true, nil)
+			end
+			function sink.commit_op(_)
+				return fibers.always({ staged = true }, nil)
+			end
+			function sink.abort(_) return true, nil end
+			return fibers.always(sink, nil)
+		end
+
+		local h = start_manager(scope, {
+			chunk_size = 3,
+			receive_targets = { ['updater/main'] = target },
+		})
+		local c = ctx()
+		h.outbound:bind(c)
+		assert_true(h.session_tx:send(peer_session_event()))
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_begin(
+			'xfer-in-future', 'updater/main', 6, protocol.DIGEST_ALG, protocol.digest_hex('abcdef'), nil
+		)))))
+
+		assert_eq(recv_with_timeout(h.control_rx, 'ready').frame.type, 'xfer_ready')
+		assert_eq(recv_with_timeout(h.control_rx, 'need 0').frame.next, 0)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_chunk(
+			'xfer-in-future', 3, 'def', protocol.chunk_digest('def')
+		)))))
+		assert_eq(recv_with_timeout(h.control_rx, 'future need 0').frame.next, 0)
+		assert_eq(#received, 0)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_chunk(
+			'xfer-in-future', 0, 'abc', protocol.chunk_digest('abc')
+		)))))
+		assert_eq(recv_with_timeout(h.control_rx, 'need 3').frame.next, 3)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_chunk(
+			'xfer-in-future', 3, 'def', protocol.chunk_digest('def')
+		)))))
+		assert_eq(recv_with_timeout(h.control_rx, 'need 6').frame.next, 6)
+
+		assert_true(h.session_tx:send(transfer_frame_event(assert(protocol.xfer_commit(
+			'xfer-in-future', 6, protocol.DIGEST_ALG, protocol.digest_hex('abcdef')
+		)))))
+		assert_eq(recv_with_timeout(h.control_rx, 'done').frame.type, 'xfer_done')
+		assert_eq(table.concat(received), 'abcdef')
+
+		h.admission_tx:close('done')
+		h.session_tx:close('done')
+		recv_with_timeout(h.done_rx, 'manager done')
+	end)
+end
+
 function tests.test_manager_reasks_same_offset_after_bad_chunk_digest_and_accepts_retry()
 	fibers.run(function (scope)
 		local received = {}
 		local target = {}
-		function target:open_sink_op(req)
+		function target.open_sink_op(_, req)
 			assert_eq(req.target, 'updater/main')
 			local sink = {}
-			function sink:append_op(chunk)
+			function sink.append_op(_, chunk)
 				received[#received + 1] = chunk
 				return fibers.always(true, nil)
 			end
-			function sink:commit_op(_)
+			function sink.commit_op(_)
 				return fibers.always({ staged = true }, nil)
 			end
-			function sink:abort(_) return true, nil end
+			function sink.abort(_) return true, nil end
 			return fibers.always(sink, nil)
 		end
 
