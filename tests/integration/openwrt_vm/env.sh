@@ -25,6 +25,23 @@ OPENWRT_KVM="${OPENWRT_KVM:-auto}"
 # Example: OPENWRT_TAP_IFACES="tap-dc0 tap-dc1"
 OPENWRT_TAP_IFACES="${OPENWRT_TAP_IFACES:-}"
 
+# Optional host-side Open vSwitch dataplane fixture.  This is used only by
+# explicit OVS/client targets; the default VM suite remains self-contained.
+OPENWRT_OVS_BRIDGE="${OPENWRT_OVS_BRIDGE:-brdcint}"
+OPENWRT_OVS_TAP_IFACE="${OPENWRT_OVS_TAP_IFACE:-tapdcint}"
+OPENWRT_OVS_CLIENT_NS="${OPENWRT_OVS_CLIENT_NS:-dcintc}"
+OPENWRT_OVS_CLIENT_HOST_IFACE="${OPENWRT_OVS_CLIENT_HOST_IFACE:-vdcinth}"
+# Temporary root-namespace veth peer name. It is moved into the client namespace
+# and then renamed to OPENWRT_OVS_CLIENT_NS_IFACE, because common names such as
+# eth0 already exist in the devcontainer root namespace.
+OPENWRT_OVS_CLIENT_PEER_IFACE="${OPENWRT_OVS_CLIENT_PEER_IFACE:-vdcintp}"
+OPENWRT_OVS_CLIENT_NS_IFACE="${OPENWRT_OVS_CLIENT_NS_IFACE:-eth0}"
+OPENWRT_OVS_CLIENT_VLAN="${OPENWRT_OVS_CLIENT_VLAN:-100}"
+OPENWRT_OVS_CLIENT_CIDR_PREFIX="${OPENWRT_OVS_CLIENT_CIDR_PREFIX:-172.28.100.}"
+OPENWRT_OVS_CLIENT_ROUTER="${OPENWRT_OVS_CLIENT_ROUTER:-172.28.100.1}"
+OPENWRT_OVS_PUBLIC_DNS_NAME="${OPENWRT_OVS_PUBLIC_DNS_NAME:-openwrt.org}"
+OPENWRT_OVS_PUBLIC_WEB_URL="${OPENWRT_OVS_PUBLIC_WEB_URL:-http://example.com/}"
+
 case "$(uname -m)" in
 	x86_64|amd64)
 		OPENWRT_ARCH="x86_64"

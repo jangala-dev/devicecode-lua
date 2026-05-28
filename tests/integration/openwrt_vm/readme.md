@@ -171,3 +171,41 @@ The renderer runs the real OpenWrt provider against a temporary UCI confdir. By 
 ```sh
 DEVICECODE_RENDER_GSM_PRIMARY_IFNAME=wwan0 DEVICECODE_RENDER_GSM_SECONDARY_IFNAME=wwan1 make print-default-configs
 ```
+
+### Host OVS client on internal VLAN 100
+
+For debugging real client behaviour on the internal segment, an optional target
+builds a host-side Open vSwitch dataplane and starts the VM with a tap-backed
+trunk NIC:
+
+```sh
+make test-openwrt-int-ovs-client-dhcp-dns
+```
+
+This target is intentionally not part of `make test`. It needs host privileges
+and Open vSwitch support. The harness will try to provision common Debian/Ubuntu
+packages such as `openvswitch-switch`, `iproute2`, `udhcpc`, `dnsutils`, `wget`
+and `tcpdump` when they are missing.
+
+The fixture uses:
+
+```text
+OVS bridge:       ovs-dc-int
+QEMU tap trunk:   tap-dc-int, VLAN 100 tagged toward the VM
+client namespace: dc-int-client
+client port:      veth-dc-int-host as an OVS access port on VLAN 100
+OpenWrt trunk:    eth4 by default, derived from OPENWRT_VM_WAN_IFACES + 1
+OpenWrt segment:  int / br-int / vl-int / 172.28.100.1/24
+```
+
+The test applies a small Devicecode-generated OpenWrt config, obtains a DHCP
+lease from a host network namespace over VLAN 100, and checks router reachability,
+public-IP reachability, local DNS, public DNS and a public HTTP fetch from that
+namespace. On failure it dumps both host OVS/client state and OpenWrt network,
+DHCP and dnsmasq diagnostics.
+
+Remove the host-side fixture with:
+
+```sh
+make teardown-ovs-client-fabric
+```

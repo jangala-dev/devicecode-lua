@@ -1,0 +1,234 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+as_root() {
+	if [ "$(id -u)" -eq 0 ]; then
+		"$@"
+	elif command -v sudo >/dev/null 2>&1; then
+		sudo "$@"
+	else
+		echo "[openwrt-vm] need root privileges for: $*" >&2
+		exit 1
+	fi
+}
+
+apt_install_best_effort() {
+	if command -v apt-get >/dev/null 2>&1; then
+		as_root apt-get update
+		as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" || true
+	fi
+}
+
+need_cmd() {
+	cmd="$1"
+	shift
+	if ! command -v "$cmd" >/dev/null 2>&1; then
+		apt_install_best_effort "$@"
+	fi
+	command -v "$cmd" >/dev/null 2>&1 || {
+		echo "[openwrt-vm] missing required host command: $cmd" >&2
+		exit 1
+	}
+}
+
+
+print_privilege_diagnostics() {
+	{
+		echo "[openwrt-vm] host privilege diagnostics:"
+		echo "  user: $(id 2>/dev/null || true)"
+		echo "  uname: $(uname -a 2>/dev/null || true)"
+		echo "  ip: $(command -v ip 2>/dev/null || echo missing)"
+		echo "  bridge: $(command -v bridge 2>/dev/null || echo missing)"
+		echo "  /dev/net/tun: $(ls -l /dev/net/tun 2>/dev/null || echo missing)"
+		if [ -r /proc/self/status ]; then
+			grep '^Cap' /proc/self/status | sed 's/^/  self /' || true
+		fi
+		if command -v sudo >/dev/null 2>&1; then
+			sudo sh -c 'grep "^Cap" /proc/self/status' 2>/dev/null | sed 's/^/  sudo /' || true
+		fi
+	} >&2
+}
+
+fail_privilege() {
+	what="$1"
+	log="${2:-}"
+	echo "[openwrt-vm] host-side bridge client fabric failed preflight: $what" >&2
+	if [ -n "$log" ] && [ -s "$log" ]; then
+		echo "[openwrt-vm] failing command output:" >&2
+		sed 's/^/[openwrt-vm]   /' "$log" >&2 || true
+	fi
+	print_privilege_diagnostics
+	cat >&2 <<'EOF'
+[openwrt-vm] This test creates host Linux bridges, veth pairs, network namespaces
+[openwrt-vm] and QEMU tap devices. Rebuild the devcontainer with privileged
+[openwrt-vm] networking enabled. The repository .devcontainer/devcontainer.json
+[openwrt-vm] should include privileged=true plus NET_ADMIN/NET_RAW and /dev/net/tun.
+[openwrt-vm] Then rerun: make test-openwrt-int-bridge-client-dhcp-dns
+EOF
+	exit 1
+}
+
+probe_or_fail() {
+	what="$1"
+	shift
+	log="${OPENWRT_WORK_DIR}/host-preflight-${what}.log"
+	mkdir -p "$OPENWRT_WORK_DIR"
+	rm -f "$log"
+	if as_root "$@" >"$log" 2>&1; then
+		rm -f "$log"
+		return 0
+	fi
+	fail_privilege "$what" "$log"
+}
+
+ensure_net_admin() {
+	probe="dcbr$$"
+	probe_or_fail "bridge-create" ip link add name "$probe" type bridge
+	as_root ip link del "$probe" >/dev/null 2>&1 || true
+}
+
+ensure_netns() {
+	probe="dcns$$"
+	probe_or_fail "netns-create" ip netns add "$probe"
+	as_root ip netns del "$probe" >/dev/null 2>&1 || true
+}
+
+ensure_tun() {
+	if [ ! -c /dev/net/tun ]; then
+		fail_privilege "tun-device-missing" ""
+	fi
+	probe="dctap$$"
+	probe_or_fail "tap-create" ip tuntap add dev "$probe" mode tap user "$(id -u)"
+	as_root ip tuntap del dev "$probe" mode tap >/dev/null 2>&1 || true
+}
+
+
+validate_ifname() {
+	name="$1"
+	label="$2"
+	case "$name" in
+		'')
+			echo "[openwrt-vm] empty interface name for $label" >&2
+			exit 1
+			;;
+	esac
+	if [ "${#name}" -gt 15 ]; then
+		echo "[openwrt-vm] interface name for $label is too long for Linux IFNAMSIZ: $name" >&2
+		echo "[openwrt-vm] choose <=15 characters, e.g. set $label to a shorter value" >&2
+		exit 1
+	fi
+}
+
+need_cmd ip iproute2
+need_cmd bridge iproute2
+validate_ifname "$OPENWRT_OVS_BRIDGE" OPENWRT_OVS_BRIDGE
+validate_ifname "$OPENWRT_OVS_TAP_IFACE" OPENWRT_OVS_TAP_IFACE
+validate_ifname "$OPENWRT_OVS_CLIENT_HOST_IFACE" OPENWRT_OVS_CLIENT_HOST_IFACE
+validate_ifname "$OPENWRT_OVS_CLIENT_PEER_IFACE" OPENWRT_OVS_CLIENT_PEER_IFACE
+validate_ifname "$OPENWRT_OVS_CLIENT_NS_IFACE" OPENWRT_OVS_CLIENT_NS_IFACE
+ensure_net_admin
+ensure_netns
+ensure_tun
+
+# Prefer the normal Debian busybox package for a host-side udhcpc applet.  Do
+# not request busybox-static alongside busybox: those packages conflict on
+# Debian/bookworm and can break provisioning before the dataplane is created.
+if ! command -v udhcpc >/dev/null 2>&1; then
+	apt_install_best_effort busybox
+	if ! command -v busybox >/dev/null 2>&1 || ! busybox udhcpc --help >/dev/null 2>&1; then
+		apt_install_best_effort udhcpc
+	fi
+fi
+if ! command -v nslookup >/dev/null 2>&1; then
+	apt_install_best_effort dnsutils bind9-dnsutils busybox
+fi
+if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then
+	apt_install_best_effort wget curl
+fi
+if ! command -v tcpdump >/dev/null 2>&1; then
+	apt_install_best_effort tcpdump
+fi
+
+cleanup_client_bits() {
+	as_root ip netns del "$OPENWRT_OVS_CLIENT_NS" 2>/dev/null || true
+	as_root rm -rf "/etc/netns/$OPENWRT_OVS_CLIENT_NS" 2>/dev/null || true
+	as_root ip link del "$OPENWRT_OVS_CLIENT_HOST_IFACE" 2>/dev/null || true
+	as_root ip link del "$OPENWRT_OVS_CLIENT_PEER_IFACE" 2>/dev/null || true
+}
+
+cleanup_client_bits
+
+# The first implementation used Open vSwitch.  Docker/LinuxKit hosts often do
+# not provide the openvswitch kernel module or enough service privileges, so use
+# the in-kernel Linux bridge datapath instead.  It still gives the topology we
+# need: QEMU tap as a VLAN-100 trunk, host veth client as an untagged access
+# port on VLAN 100.
+if ip link show dev "$OPENWRT_OVS_TAP_IFACE" >/dev/null 2>&1; then
+	as_root ip link set "$OPENWRT_OVS_TAP_IFACE" nomaster 2>/dev/null || true
+	as_root ip link set "$OPENWRT_OVS_TAP_IFACE" down 2>/dev/null || true
+	as_root ip tuntap del dev "$OPENWRT_OVS_TAP_IFACE" mode tap 2>/dev/null || true
+	as_root ip link del "$OPENWRT_OVS_TAP_IFACE" 2>/dev/null || true
+fi
+if ip link show dev "$OPENWRT_OVS_BRIDGE" >/dev/null 2>&1; then
+	as_root ip link set "$OPENWRT_OVS_BRIDGE" down 2>/dev/null || true
+	as_root ip link del "$OPENWRT_OVS_BRIDGE" 2>/dev/null || true
+fi
+
+as_root ip link add name "$OPENWRT_OVS_BRIDGE" type bridge
+# Some Docker/LinuxKit kernels reject bridge options during RTM_NEWLINK with
+# "Attribute failed policy validation".  Create the bridge first, then enable
+# VLAN filtering through the dedicated bridge setter (or sysfs as a fallback).
+if ! as_root ip link set dev "$OPENWRT_OVS_BRIDGE" type bridge vlan_filtering 1 >/dev/null 2>&1; then
+	if [ -w "/sys/class/net/$OPENWRT_OVS_BRIDGE/bridge/vlan_filtering" ] || as_root test -w "/sys/class/net/$OPENWRT_OVS_BRIDGE/bridge/vlan_filtering"; then
+		if [ "$(id -u)" -eq 0 ]; then
+			printf '1\n' > "/sys/class/net/$OPENWRT_OVS_BRIDGE/bridge/vlan_filtering"
+		else
+			printf '1\n' | sudo tee "/sys/class/net/$OPENWRT_OVS_BRIDGE/bridge/vlan_filtering" >/dev/null
+		fi
+	else
+		echo "[openwrt-vm] failed to enable VLAN filtering on $OPENWRT_OVS_BRIDGE" >&2
+		exit 1
+	fi
+fi
+as_root ip link set "$OPENWRT_OVS_BRIDGE" up
+as_root ip link set "$OPENWRT_OVS_BRIDGE" promisc on 2>/dev/null || true
+
+as_root ip tuntap add dev "$OPENWRT_OVS_TAP_IFACE" mode tap user "$(id -u)"
+as_root ip link set "$OPENWRT_OVS_TAP_IFACE" master "$OPENWRT_OVS_BRIDGE"
+as_root ip link set "$OPENWRT_OVS_TAP_IFACE" up
+as_root ip link set "$OPENWRT_OVS_TAP_IFACE" promisc on 2>/dev/null || true
+as_root bridge vlan del dev "$OPENWRT_OVS_TAP_IFACE" vid 1 2>/dev/null || true
+as_root bridge vlan del dev "$OPENWRT_OVS_TAP_IFACE" vid "$OPENWRT_OVS_CLIENT_VLAN" 2>/dev/null || true
+as_root bridge vlan add dev "$OPENWRT_OVS_TAP_IFACE" vid "$OPENWRT_OVS_CLIENT_VLAN"
+
+as_root ip netns add "$OPENWRT_OVS_CLIENT_NS"
+as_root ip link del "$OPENWRT_OVS_CLIENT_HOST_IFACE" 2>/dev/null || true
+as_root ip link del "$OPENWRT_OVS_CLIENT_PEER_IFACE" 2>/dev/null || true
+as_root ip link add "$OPENWRT_OVS_CLIENT_HOST_IFACE" type veth peer name "$OPENWRT_OVS_CLIENT_PEER_IFACE"
+as_root ip link set "$OPENWRT_OVS_CLIENT_PEER_IFACE" netns "$OPENWRT_OVS_CLIENT_NS"
+as_root ip netns exec "$OPENWRT_OVS_CLIENT_NS" ip link set "$OPENWRT_OVS_CLIENT_PEER_IFACE" name "$OPENWRT_OVS_CLIENT_NS_IFACE"
+as_root ip link set "$OPENWRT_OVS_CLIENT_HOST_IFACE" master "$OPENWRT_OVS_BRIDGE"
+as_root ip link set "$OPENWRT_OVS_CLIENT_HOST_IFACE" up
+as_root ip link set "$OPENWRT_OVS_CLIENT_HOST_IFACE" promisc on 2>/dev/null || true
+as_root bridge vlan del dev "$OPENWRT_OVS_CLIENT_HOST_IFACE" vid 1 2>/dev/null || true
+as_root bridge vlan del dev "$OPENWRT_OVS_CLIENT_HOST_IFACE" vid "$OPENWRT_OVS_CLIENT_VLAN" 2>/dev/null || true
+as_root bridge vlan add dev "$OPENWRT_OVS_CLIENT_HOST_IFACE" vid "$OPENWRT_OVS_CLIENT_VLAN" pvid untagged
+as_root ip netns exec "$OPENWRT_OVS_CLIENT_NS" ip link set lo up
+as_root ip netns exec "$OPENWRT_OVS_CLIENT_NS" ip link set "$OPENWRT_OVS_CLIENT_NS_IFACE" up
+
+mkdir -p "$OPENWRT_WORK_DIR"
+printf '%s\n' linux-bridge > "$OPENWRT_WORK_DIR/int-client-fabric.kind"
+
+cat <<EOF
+[openwrt-vm] Linux bridge client fabric ready
+  bridge:       $OPENWRT_OVS_BRIDGE
+  qemu tap:     $OPENWRT_OVS_TAP_IFACE trunk vlan $OPENWRT_OVS_CLIENT_VLAN
+  client ns:    $OPENWRT_OVS_CLIENT_NS
+  client iface: $OPENWRT_OVS_CLIENT_NS_IFACE access vlan $OPENWRT_OVS_CLIENT_VLAN
+EOF

@@ -49,6 +49,10 @@ for name,sec in pairs(c:get_all('dhcp') or {}) do
 end
 eq(dns_count, 3, 'identical DNS policy should be grouped')
 assert(ads_instance, 'ads instance expected'); assert(adult_instance, 'ads+adult instance expected'); assert(standard_instance, 'standard instance expected')
+local all_dhcp = c:get_all('dhcp') or {}
+assert(contains(all_dhcp[ads_instance].notinterface, 'lo'), 'ads instance should exclude loopback: '..ads_instance)
+assert(contains(all_dhcp[adult_instance].notinterface, 'lo'), 'ads+adult instance should exclude loopback: '..adult_instance)
+assert(not contains(all_dhcp[standard_instance].notinterface, 'lo'), 'standard/int instance should own loopback: '..standard_instance)
 local function dhcp_for(seg)
   local wanted = name_ctx:iface(seg)
   for _,sec in pairs(c:get_all('dhcp') or {}) do if type(sec)=='table' and sec['.type']=='dhcp' and sec.interface==wanted then return sec end end

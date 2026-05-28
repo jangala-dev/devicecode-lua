@@ -1,0 +1,35 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+as_root() {
+	if [ "$(id -u)" -eq 0 ]; then
+		"$@"
+	elif command -v sudo >/dev/null 2>&1; then
+		sudo "$@"
+	else
+		echo "[openwrt-vm] need root privileges for: $*" >&2
+		exit 1
+	fi
+}
+
+as_root ip netns del "$OPENWRT_OVS_CLIENT_NS" 2>/dev/null || true
+as_root rm -rf "/etc/netns/$OPENWRT_OVS_CLIENT_NS" 2>/dev/null || true
+as_root ip link del "$OPENWRT_OVS_CLIENT_HOST_IFACE" 2>/dev/null || true
+as_root ip link del "$OPENWRT_OVS_CLIENT_PEER_IFACE" 2>/dev/null || true
+as_root ip link set "$OPENWRT_OVS_TAP_IFACE" nomaster 2>/dev/null || true
+as_root ip link set "$OPENWRT_OVS_TAP_IFACE" down 2>/dev/null || true
+as_root ip tuntap del dev "$OPENWRT_OVS_TAP_IFACE" mode tap 2>/dev/null || true
+as_root ip link del "$OPENWRT_OVS_TAP_IFACE" 2>/dev/null || true
+if ip link show dev "$OPENWRT_OVS_BRIDGE" >/dev/null 2>&1; then
+	as_root ip link set "$OPENWRT_OVS_BRIDGE" down 2>/dev/null || true
+	as_root ip link del "$OPENWRT_OVS_BRIDGE" 2>/dev/null || true
+fi
+rm -f "$OPENWRT_WORK_DIR/int-client-fabric.kind" 2>/dev/null || true
+
+echo "[openwrt-vm] client fabric removed"

@@ -311,13 +311,6 @@
           }
         },
         "records": {
-          "unifi": {
-            "name": "unifi",
-            "address": "$UNIFI-ADDRESS",
-            "segments": [
-              "int"
-            ]
-          },
           "config.bigbox.home": {
             "name": "config.bigbox.home",
             "address": "172.28.8.1"

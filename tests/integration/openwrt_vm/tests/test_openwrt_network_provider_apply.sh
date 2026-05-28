@@ -119,7 +119,7 @@ local intent = {
     upstreams = { '1.1.1.1', '8.8.8.8' },
     cache = { size = 1000 },
     host_files = { base_dir = '/tmp/devicecode-dns-hosts', sources = { ads = { file = 'ads.hosts' } } },
-    records = { router = { name = 'config.bigbox.home', address = '192.168.10.1' } },
+    records = { router = { name = 'config.bigbox.home', address = '192.168.10.1' }, bad = { name = 'bad.bigbox.home', address = '$UNIFI-ADDRESS' } },
   },
   dhcp = { defaults = { authoritative = true } },
   firewall = {
@@ -275,6 +275,7 @@ if type(addnhosts) == 'table' then eq(addnhosts[1], '/tmp/devicecode-dns-hosts/a
 local addresses = dns.address
 local address_s = type(addresses) == 'table' and table.concat(addresses, ' ') or tostring(addresses)
 if not address_s:find('/config.bigbox.home/192.168.10.1', 1, true) then fail('dns record missing: ' .. address_s) end
+if address_s:find('$UNIFI-ADDRESS', 1, true) then fail('invalid dns record was emitted: ' .. address_s) end
 
 local _dhcp_sec, dhcp_lan = section_by_name('dhcp', name_ctx:section('dhcp', 'lan'), 'dhcp')
 eq(dhcp_lan.interface, 'lan', 'dhcp interface')

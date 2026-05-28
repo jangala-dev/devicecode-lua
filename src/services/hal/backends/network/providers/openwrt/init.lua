@@ -312,6 +312,29 @@ local function add_unique_value(out, seen, v)
 	out[#out + 1] = v
 end
 
+local function ipv4_literal(s)
+	if type(s) ~= 'string' then return false end
+	local a, b, c, d = s:match('^(%d+)%.(%d+)%.(%d+)%.(%d+)$')
+	if not a then return false end
+	for _, part in ipairs({ a, b, c, d }) do
+		local n = tonumber(part)
+		if not n or n < 0 or n > 255 then return false end
+	end
+	return true
+end
+
+local function ipv6_literal(s)
+	-- Conservative syntax check for dnsmasq address records.  It is better to
+	-- omit an invalid static record than poison the whole per-segment dnsmasq
+	-- instance, which also owns DHCP for that segment.
+	if type(s) ~= 'string' or not s:find(':', 1, true) then return false end
+	return s:match('^[0-9A-Fa-f:%.]+$') ~= nil
+end
+
+local function dns_address_literal(s)
+	return ipv4_literal(s) or ipv6_literal(s)
+end
+
 local function dns_records_for_segment(dns, seg_id)
 	local out = {}
 	local records = is_plain_table(dns.records) and dns.records or {}
@@ -322,6 +345,7 @@ local function dns_records_for_segment(dns, seg_id)
 		if type(name) ~= 'string' or name == '' or type(addr) ~= 'string' or addr == '' then return end
 		if rec.segment ~= nil and rec.segment ~= seg_id then return end
 		if rec.segments ~= nil and not list_contains(rec.segments, seg_id) then return end
+		if not dns_address_literal(addr) then return end
 		out[#out + 1] = '/' .. name .. '/' .. addr
 	end
 	if #records > 0 then
@@ -698,6 +722,8 @@ local function build_dhcp_changes(intent, name_ctx, segment_to_ifaces)
 	local dns = is_plain_table(intent.dns) and intent.dns or {}
 	local dhcp = is_plain_table(intent.dhcp) and intent.dhcp or {}
 	local defaults = is_plain_table(dhcp.defaults) and dhcp.defaults or {}
+	local loopback_segment = dns.loopback_segment or dns.local_resolver_segment
+	if loopback_segment == nil and is_plain_table(intent.segments) and intent.segments.int ~= nil then loopback_segment = 'int' end
 	local groups = {}
 	local seg_instance = {}
 
@@ -729,6 +755,16 @@ local function build_dhcp_changes(intent, name_ctx, segment_to_ifaces)
 		set_option(changes, 'dhcp', dnssec, 'nonegcache', '0')
 		set_option(changes, 'dhcp', dnssec, 'readethers', '1')
 		set_option(changes, 'dhcp', dnssec, 'nonwildcard', '1')
+		-- dnsmasq implicitly listens on loopback even when constrained to a
+		-- specific interface.  With one dnsmasq section per DNS policy, multiple
+		-- instances racing for 127.0.0.1:53 can make one or more instances fail to
+		-- start.  Keep exactly one generated instance as the router-local resolver
+		-- and exclude lo from all the others.  By default the private/int segment
+		-- owns loopback when present; configs can override this with
+		-- dns.loopback_segment / dns.local_resolver_segment.
+		if not (loopback_segment and list_contains(g.segments, loopback_segment)) then
+			set_option(changes, 'dhcp', dnssec, 'notinterface', { 'lo' })
+		end
 		set_option(changes, 'dhcp', dnssec, 'localservice', dns.localservice ~= nil and bool_uci(dns.localservice) or '1')
 		set_option(changes, 'dhcp', dnssec, 'authoritative', g.authoritative ~= nil and bool_uci(g.authoritative) or '1')
 		set_option(changes, 'dhcp', dnssec, 'port', '53')

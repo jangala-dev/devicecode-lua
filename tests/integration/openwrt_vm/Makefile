@@ -1,6 +1,7 @@
 .PHONY: \
 	preflight fetch verify reset run wait provision provision-force ensure-mwan3 \
-	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-openwrt-jan-client-dhcp-dns test \
+	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-openwrt-jan-client-dhcp-dns test-openwrt-int-ovs-client-dhcp-dns test-openwrt-int-bridge-client-dhcp-dns test-openwrt-dnsmasq-multi-instance-resilience \
+	setup-ovs-client-fabric teardown-ovs-client-fabric test \
 	openwrt-vm-test clean
 
 preflight:
@@ -145,6 +146,30 @@ test-devicecode-bigbox-phase1-broken-trunk:
 test-openwrt-jan-client-dhcp-dns:
 	./scripts/ensure-jan-client-dhcp-dns-deps
 	./tests/test_openwrt_jan_client_dhcp_dns.sh
+
+setup-ovs-client-fabric:
+	./scripts/setup-ovs-client-fabric
+
+teardown-ovs-client-fabric:
+	./scripts/teardown-ovs-client-fabric
+
+test-openwrt-int-bridge-client-dhcp-dns:
+	./scripts/stop-vm || true
+	./scripts/setup-ovs-client-fabric
+	. ./env.sh; OPENWRT_TAP_IFACES="$$OPENWRT_OVS_TAP_IFACE" ./scripts/run-vm
+	./scripts/wait-ssh
+	./scripts/provision
+	./tests/test_openwrt_int_ovs_client_dhcp_dns.sh
+
+test-openwrt-int-ovs-client-dhcp-dns: test-openwrt-int-bridge-client-dhcp-dns
+
+test-openwrt-dnsmasq-multi-instance-resilience:
+	./scripts/stop-vm || true
+	./scripts/setup-ovs-client-fabric
+	. ./env.sh; OPENWRT_TAP_IFACES="$$OPENWRT_OVS_TAP_IFACE" ./scripts/run-vm
+	./scripts/wait-ssh
+	./scripts/provision
+	./tests/test_openwrt_dnsmasq_multi_instance_resilience.sh
 
 test-scp:
 	./scripts/wait-ssh
