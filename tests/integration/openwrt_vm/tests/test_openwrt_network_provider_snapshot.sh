@@ -25,6 +25,7 @@ package.path = table.concat({
 }, ';')
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local bus = require 'bus'
 local trie = require 'trie'
 local provider_loader = require 'services.hal.backends.network.provider'
@@ -45,6 +46,16 @@ local function assert_list(v, expected, label)
   if type(v) ~= 'table' then fail((label or 'list') .. ' should be a table, got ' .. type(v)) end
   eq(#v, #expected, (label or 'list') .. ' length')
   for i = 1, #expected do eq(v[i], expected[i], (label or 'list') .. '[' .. i .. ']') end
+end
+
+local function wait_until(pred, timeout_s, label)
+  local deadline = fibers.now() + (timeout_s or 1)
+  while fibers.now() < deadline do
+    if pred() then return true end
+    perform(sleep.sleep_op(0.01))
+  end
+  if pred() then return true end
+  fail(label or 'condition was not satisfied before timeout')
 end
 
 local function mkdir_p(path)
@@ -96,7 +107,7 @@ local intent = {
       role = 'wan',
       segment = 'wan',
       endpoint = { ifname = 'eth2' },
-      addressing = { ipv4 = { mode = 'dhcp', peerdns = false, metric = 10 } },
+      addressing = { ipv4 = { mode = 'dhcp', peerdns = false } },
     },
   },
   dns = {
@@ -119,7 +130,7 @@ local intent = {
       { interface = 'lan', target = '10.0.0.0/8', gateway = '192.168.10.254' },
     },
   },
-  wan = {},
+  wan = { enabled = true, members = { wan = { interface = 'wan', mwan_metric = 1, weight = 1 } } },
   shaping = {},
   vpn = {},
   diagnostics = {},
@@ -140,11 +151,13 @@ fibers.run(function(_scope)
 
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
+  assert(result.activation == nil, 'provider activation should be synchronous for structural network apply')
 
-  local snapshot = perform(provider:snapshot_op({}))
+  local snapshot = perform(provider:snapshot_op({ live = false }))
   assert(snapshot and snapshot.ok == true, 'snapshot failed: ' .. tostring(snapshot and snapshot.err))
   eq(snapshot.backend, 'openwrt', 'snapshot backend')
   assert(type(snapshot.packages) == 'table', 'snapshot should retain raw packages for diagnostics')
+  assert(snapshot.observed.live == nil, 'non-live snapshot should not query ubus')
 
   local observed = snapshot.observed
   assert(type(observed) == 'table', 'snapshot.observed should be a table')
@@ -161,7 +174,7 @@ fibers.run(function(_scope)
   eq(observed.interfaces.wan.endpoint.ifname, 'eth2', 'wan endpoint')
   eq(observed.interfaces.wan.addressing.ipv4.mode, 'dhcp', 'wan ipv4 mode')
   eq(observed.interfaces.wan.addressing.ipv4.peerdns, false, 'wan peerdns')
-  eq(observed.interfaces.wan.addressing.ipv4.metric, 10, 'wan metric')
+  eq(observed.interfaces.wan.addressing.ipv4.metric, 11, 'wan auto route metric')
 
   eq(observed.segments.lan.firewall.zone, 'lan', 'lan segment zone')
   eq(observed.segments.lan.dhcp.enabled, true, 'lan segment dhcp enabled')
@@ -187,10 +200,11 @@ fibers.run(function(_scope)
   eq(observed.routing.routes[1].target, '10.0.0.0/8', 'route target')
   eq(observed.routing.routes[1].gateway, '192.168.10.254', 'route gateway')
 
+  wait_until(function() return #restarts == 4 end, 1, 'activation commands should run')
   provider:terminate('test complete')
 end)
 
-eq(#restarts, 3, 'restart command count')
+eq(#restarts, 4, 'restart command count')
 
 print('openwrt network provider snapshot: ok')
 LUA

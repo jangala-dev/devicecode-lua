@@ -20,12 +20,23 @@ package.path = table.concat({
 }, ';')
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local uci = require 'uci'
 local provider_loader = require 'services.hal.backends.network.provider'
 local perform = fibers.perform
 
 local function fail(msg) error(msg, 2) end
 local function eq(a,b,msg) if a ~= b then fail((msg or 'values differ') .. ': expected '..tostring(b)..', got '..tostring(a)) end end
+local function wait_until(pred, timeout_s, label)
+  local deadline = fibers.now() + (timeout_s or 1)
+  while fibers.now() < deadline do
+    if pred() then return true end
+    perform(sleep.sleep_op(0.01))
+  end
+  if pred() then return true end
+  fail(label or 'condition was not satisfied before timeout')
+end
+
 local function mkdir_p(path) local ok = os.execute("mkdir -p '"..path.."'"); if ok ~= true and ok ~= 0 then fail('mkdir failed') end end
 
 local tmp = '/tmp/dc-network-provider-advanced'
@@ -65,8 +76,8 @@ local intent = {
   },
   interfaces = {
     lan = { kind='bridge', role='lan', segment='lan', members={'eth0'}, addressing={ipv4={mode='static', cidr='192.168.10.1/24'}} },
-    wan_a = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan0'}, addressing={ipv4={mode='dhcp', metric=10}} },
-    wan_b = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan1'}, addressing={ipv4={mode='dhcp', metric=20}} },
+    wan_a = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan0'}, addressing={ipv4={mode='dhcp'}} },
+    wan_b = { kind='cellular', role='wan', segment='wan', endpoint={ifname='wwan1'}, addressing={ipv4={mode='dhcp'}} },
   },
   firewall = {
     defaults={ input='ACCEPT', output='ACCEPT', forward='REJECT', synflood_protect=true },
@@ -84,7 +95,7 @@ local intent = {
   },
   dhcp={ defaults={ lease_time='12h', authoritative=true }, reservations={ unifi={ name='unifi', mac='00:11:22:33:44:55', ip='192.168.10.2' } } },
   vpn={}, diagnostics={},
-  wan = { enabled=true, policy='weighted_failover', load_balancing={speedtests=true, policy='balanced'}, members={ gsm_a={interface='wan_a', metric=1, weight=1}, gsm_b={interface='wan_b', metric=1, weight=1} } },
+  wan = { enabled=true, policy='weighted_failover', load_balancing={speedtests=true, policy='balanced'}, members={ gsm_a={interface='wan_a', mwan_metric=1, weight=1}, gsm_b={interface='wan_b', mwan_metric=1, weight=1} } },
   shaping = { enabled=true, profiles={ restricted={ egress={enabled=true, host_rate='2mbit', hosts={['192.168.10.2']={rate='1mbit'}}} } } },
 }
 intent.segments.lan.dns = { local_server=true, domain='bigbox.home', host_files={'ads'} }
@@ -97,9 +108,11 @@ fibers.run(function()
   eq(plan.plan.domains.multiwan.status, 'implemented', 'mwan domain')
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result.ok == true, result.err)
+  assert(result.activation == nil, 'provider activation should be synchronous for structural network apply')
+  eq(#restarts, 4, 'activation command count')
   local speed = perform(provider:speedtest_op({ interface='wan_a', device='wwan0' }))
   eq(speed.peak_mbps, 55, 'speedtest fake result')
-  local live = perform(provider:apply_live_weights_op({ policy='balanced', members={{link_id='gsm_a', interface='wan_a', metric=1, weight=80},{link_id='gsm_b', interface='wan_b', metric=1, weight=20}}, persist=true }))
+  local live = perform(provider:apply_live_weights_op({ policy='balanced', members={{id='gsm_a', interface='wan_a', metric=1, weight=80},{id='gsm_b', interface='wan_b', metric=1, weight=20}}, persist=true }))
   assert(live.ok == true, live.err)
   provider:terminate('test complete')
 end)
@@ -109,20 +122,29 @@ if #live_restores ~= 1 then fail('one live weight restore expected') end
 if not live_restores[1]:find('%-%-probability 0.80000000000') then fail('live first-member probability expected') end
 if not live_restores[1]:find('%*mangle', 1, false) then fail('iptables-restore mangle payload expected') end
 local joined = table.concat(restarts, '\n')
-if joined:find('mwan3', 1, true) then fail('mwan3 restart must not be used') end
+if not joined:find('mwan3 restart', 1, true) then fail('structural apply should restart mwan3') end
 
 local c = assert(uci.cursor(conf, save))
-for _, pkg in ipairs({ 'network', 'mwan3' }) do if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end end
+for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end end
 if c:get('network', 'dev_lan_10') then
   eq(c:get('network', 'dev_lan_10'), 'device', 'vlan device type')
   eq(c:get('network', 'dev_lan_10', 'vid'), '10', 'vlan vid')
 end
 eq(c:get('network', 'route_default_lab'), 'route', 'map-shaped route')
-eq(c:get('dhcp', 'dns_lan'), 'dnsmasq', 'per-segment dnsmasq')
-eq(c:get('dhcp', 'dns_lan', 'cachesize'), '1000', 'dns cache size')
-local addnhosts = c:get('dhcp', 'dns_lan', 'addnhosts')
+local dns_sec, dns = nil, nil
+for name, sec in pairs(c:get_all('dhcp') or {}) do
+  if type(sec) == 'table' and sec['.type'] == 'dnsmasq' then
+    local ah = sec.addnhosts
+    local has_ads = false
+    if type(ah) == 'table' then for i = 1, #ah do if ah[i] == '/tmp/devicecode-dns-hosts/ads.hosts' then has_ads = true end end else has_ads = (ah == '/tmp/devicecode-dns-hosts/ads.hosts') end
+    if has_ads then dns_sec, dns = name, sec; break end
+  end
+end
+if not dns then fail('per-segment dnsmasq for ads not found') end
+eq(dns.cachesize, '1000', 'dns cache size')
+local addnhosts = dns.addnhosts
 if type(addnhosts) == 'table' then eq(addnhosts[1], '/tmp/devicecode-dns-hosts/ads.hosts', 'segment host file') else eq(addnhosts, '/tmp/devicecode-dns-hosts/ads.hosts', 'segment host file') end
-local addresses = c:get('dhcp', 'dns_lan', 'address')
+local addresses = dns.address
 local address_s = type(addresses) == 'table' and table.concat(addresses, ' ') or tostring(addresses)
 if not address_s:find('/config.bigbox.home/192.168.10.1', 1, true) then fail('dns address record not applied: '..address_s) end
 eq(c:get('dhcp', 'host_unifi'), 'host', 'dhcp reservation')

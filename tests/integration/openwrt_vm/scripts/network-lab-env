@@ -1,0 +1,80 @@
+#!/usr/bin/env sh
+# Shared configuration for the optional OpenWrt network-lab VM.
+#
+# The lab VM is a privilege boundary for dataplane integration tests that need
+# bridges, tap devices, veth pairs and network namespaces. Ordinary CI jobs can
+# stay unprivileged and delegate only these tests to the lab.
+
+if [ -z "${VM_DIR:-}" ]; then
+	VM_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+fi
+
+# Network-lab commands run as a non-login cloud user.  Keep /usr/sbin and /sbin
+# visible so iproute2's `bridge`, modprobe-adjacent helpers, etc. are found.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PATH
+
+OPENWRT_DIR="${VM_DIR}"
+OPENWRT_WORK_DIR="${OPENWRT_WORK_DIR:-${OPENWRT_DIR}/work}"
+
+NETWORK_LAB_DIR="${NETWORK_LAB_DIR:-${OPENWRT_WORK_DIR}/network-lab}"
+NETWORK_LAB_IMAGE_DIR="${NETWORK_LAB_IMAGE_DIR:-${NETWORK_LAB_DIR}/images}"
+
+if [ -z "${NETWORK_LAB_ARCH:-}" ] || [ "${NETWORK_LAB_ARCH:-}" = "auto" ]; then
+	case "$(uname -m)" in
+		x86_64|amd64) NETWORK_LAB_ARCH="amd64" ;;
+		aarch64|arm64) NETWORK_LAB_ARCH="arm64" ;;
+		*)
+			echo "[network-lab] unsupported host architecture for lab VM: $(uname -m)" >&2
+			exit 1
+			;;
+	esac
+fi
+
+case "$NETWORK_LAB_ARCH" in
+	amd64)
+		NETWORK_LAB_BASE_IMAGE_NAME="${NETWORK_LAB_BASE_IMAGE_NAME:-debian-12-genericcloud-amd64.qcow2}"
+		NETWORK_LAB_QEMU="${NETWORK_LAB_QEMU:-qemu-system-x86_64}"
+		;;
+	arm64)
+		NETWORK_LAB_BASE_IMAGE_NAME="${NETWORK_LAB_BASE_IMAGE_NAME:-debian-12-genericcloud-arm64.qcow2}"
+		NETWORK_LAB_QEMU="${NETWORK_LAB_QEMU:-qemu-system-aarch64}"
+		;;
+	*)
+		echo "[network-lab] unsupported NETWORK_LAB_ARCH=$NETWORK_LAB_ARCH" >&2
+		exit 1
+		;;
+esac
+
+if [ "${NETWORK_LAB_BASE_IMAGE_URL:-}" = "auto" ]; then
+	unset NETWORK_LAB_BASE_IMAGE_URL
+fi
+NETWORK_LAB_BASE_IMAGE_URL="${NETWORK_LAB_BASE_IMAGE_URL:-https://cloud.debian.org/images/cloud/bookworm/latest/${NETWORK_LAB_BASE_IMAGE_NAME}}"
+NETWORK_LAB_BASE_IMAGE="${NETWORK_LAB_BASE_IMAGE:-${NETWORK_LAB_IMAGE_DIR}/${NETWORK_LAB_BASE_IMAGE_NAME}}"
+NETWORK_LAB_DISK="${NETWORK_LAB_DISK:-${NETWORK_LAB_DIR}/network-lab-${NETWORK_LAB_ARCH}.qcow2}"
+NETWORK_LAB_SEED="${NETWORK_LAB_SEED:-${NETWORK_LAB_DIR}/seed.iso}"
+NETWORK_LAB_PID="${NETWORK_LAB_PID:-${NETWORK_LAB_DIR}/qemu.pid}"
+NETWORK_LAB_LOG="${NETWORK_LAB_LOG:-${NETWORK_LAB_DIR}/qemu.log}"
+NETWORK_LAB_SSH_KEY="${NETWORK_LAB_SSH_KEY:-${NETWORK_LAB_DIR}/id_ed25519}"
+NETWORK_LAB_SSH_PORT="${NETWORK_LAB_SSH_PORT:-2242}"
+NETWORK_LAB_SSH_WAIT_S="${NETWORK_LAB_SSH_WAIT_S:-180}"
+NETWORK_LAB_USER="${NETWORK_LAB_USER:-dc}"
+NETWORK_LAB_HOST="${NETWORK_LAB_HOST:-127.0.0.1}"
+NETWORK_LAB_HOSTNAME="${NETWORK_LAB_HOSTNAME:-dc-network-lab}"
+NETWORK_LAB_MEM="${NETWORK_LAB_MEM:-4096M}"
+NETWORK_LAB_CPUS="${NETWORK_LAB_CPUS:-2}"
+NETWORK_LAB_DISK_SIZE="${NETWORK_LAB_DISK_SIZE:-30G}"
+NETWORK_LAB_KVM="${NETWORK_LAB_KVM:-auto}"
+NETWORK_LAB_REPO_DIR="${NETWORK_LAB_REPO_DIR:-/home/${NETWORK_LAB_USER}/dc-lua}"
+NETWORK_LAB_TEST_TARGETS="${NETWORK_LAB_TEST_TARGETS:-test-openwrt-int-bridge-client-dhcp-dns test-openwrt-dnsmasq-multi-instance-resilience}"
+# The OpenWrt VM runs nested inside the lab VM. When nested KVM is unavailable,
+# booting through QEMU emulation can be much slower than the direct local
+# openwrt-vm-test lane, so use a lab-specific default wait budget.
+NETWORK_LAB_OPENWRT_SSH_WAIT_S="${NETWORK_LAB_OPENWRT_SSH_WAIT_S:-600}"
+NETWORK_LAB_OPENWRT_KVM="${NETWORK_LAB_OPENWRT_KVM:-auto}"
+NETWORK_LAB_RSYNC_EXCLUDES="${NETWORK_LAB_RSYNC_EXCLUDES:-.git tests/integration/openwrt_vm/work tests/integration/openwrt_vm/images}"
+
+NETWORK_LAB_SSH_OPTS="-p ${NETWORK_LAB_SSH_PORT} -i ${NETWORK_LAB_SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5"
+NETWORK_LAB_SSH="ssh ${NETWORK_LAB_SSH_OPTS} ${NETWORK_LAB_USER}@${NETWORK_LAB_HOST}"
+NETWORK_LAB_SCP="scp ${NETWORK_LAB_SSH_OPTS}"
+NETWORK_LAB_RSYNC_RSH="ssh ${NETWORK_LAB_SSH_OPTS}"

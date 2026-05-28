@@ -8,6 +8,11 @@ local perform = fibers.perform
 
 local M = {}
 
+local function elapsed_ms(t0)
+	if not t0 then return nil end
+	return math.floor(((fibers.now() - t0) * 1000) + 0.5)
+end
+
 local function dlog(logger, level, payload)
 	if logger and logger[level] then
 		logger[level](logger, payload)
@@ -114,6 +119,16 @@ function M.run_request_loop(ch, methods, logger, what)
 			return
 		end
 
+		local loop_name = tostring(what or 'control_loop')
+		local trace_control = loop_name:match('^network_') ~= nil
+		local req_t0 = fibers.now()
+		if trace_control then
+			dlog(logger, 'info', {
+				what = loop_name .. '_request_begin',
+				verb = tostring(request.verb),
+			})
+		end
+
 		local ok, value_or_err
 		local caller_cancelled = false
 		if request.cancel_op ~= nil then
@@ -123,19 +138,39 @@ function M.run_request_loop(ch, methods, logger, what)
 			}))
 			if which == 'cancel' and a ~= nil and a ~= false then
 				caller_cancelled = true
-				dlog(logger, 'debug', {
-					what = tostring(what or 'control_loop') .. '_request_cancelled',
+				dlog(logger, trace_control and 'warn' or 'debug', {
+					what = loop_name .. '_request_cancelled',
 					verb = tostring(request.verb),
 					reason = tostring(a),
+					elapsed_ms = elapsed_ms(req_t0),
 				})
 			else
 				ok, value_or_err = a, b
+				if trace_control then
+					dlog(logger, ok == true and 'info' or 'warn', {
+						what = loop_name .. '_method_done',
+						verb = tostring(request.verb),
+						ok = ok == true,
+						err = ok == true and nil or tostring(value_or_err),
+						elapsed_ms = elapsed_ms(req_t0),
+					})
+				end
 			end
 		else
 			ok, value_or_err = perform(M.evaluate_request_op(methods, request))
+			if trace_control then
+				dlog(logger, ok == true and 'info' or 'warn', {
+					what = loop_name .. '_method_done',
+					verb = tostring(request.verb),
+					ok = ok == true,
+					err = ok == true and nil or tostring(value_or_err),
+					elapsed_ms = elapsed_ms(req_t0),
+				})
+			end
 		end
 
 		if not caller_cancelled then
+			local reply_t0 = fibers.now()
 			local replied, reply_err
 			if request.cancel_op ~= nil then
 				local which, a, b = perform(op.named_choice({
@@ -144,6 +179,14 @@ function M.run_request_loop(ch, methods, logger, what)
 				}))
 				if which == 'cancel' and a ~= nil and a ~= false then
 					caller_cancelled = true
+					if trace_control then
+						dlog(logger, 'warn', {
+							what = loop_name .. '_reply_cancelled',
+							verb = tostring(request.verb),
+							reason = tostring(a),
+							elapsed_ms = elapsed_ms(req_t0),
+						})
+					end
 				else
 					replied, reply_err = a, b
 				end
@@ -152,9 +195,18 @@ function M.run_request_loop(ch, methods, logger, what)
 			end
 			if not caller_cancelled and not replied then
 				dlog(logger, 'warn', {
-					what = tostring(what or 'control_loop') .. '_reply_failed',
+					what = loop_name .. '_reply_failed',
 					verb = tostring(request.verb),
 					err  = tostring(reply_err),
+					elapsed_ms = elapsed_ms(req_t0),
+					reply_elapsed_ms = elapsed_ms(reply_t0),
+				})
+			elseif trace_control and not caller_cancelled then
+				dlog(logger, 'info', {
+					what = loop_name .. '_reply_done',
+					verb = tostring(request.verb),
+					elapsed_ms = elapsed_ms(req_t0),
+					reply_elapsed_ms = elapsed_ms(reply_t0),
 				})
 			end
 		end

@@ -8,14 +8,9 @@ local M = {}
 
 local DOMAIN_TOPICS = {
 	'addressing', 'dns', 'dhcp', 'firewall', 'routing',
-	'wan', 'wan_runtime', 'shaping', 'vpn', 'diagnostics', 'observed', 'drift',
+	'wan', 'wan_runtime', 'sources', 'shaping', 'vpn', 'diagnostics', 'observed', 'drift',
 }
 
-local function domain_set()
-	local out = {}
-	for i = 1, #DOMAIN_TOPICS do out[DOMAIN_TOPICS[i]] = true end
-	return out
-end
 
 local function publish_map(conn, published, next_map, dirty_map, topic_fn, payload_fn)
 	local seen = {}

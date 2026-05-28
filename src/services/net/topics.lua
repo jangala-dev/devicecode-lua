@@ -18,6 +18,9 @@ function M.vlan_policy() return { 'state', 'net', 'vlan-policy' } end
 function M.segment(id) return { 'state', 'net', 'segment', token(id) } end
 function M.interface(id) return { 'state', 'net', 'interface', token(id) } end
 function M.domain(name) return { 'state', 'net', token(name) } end
+function M.sources() return { 'state', 'net', 'sources' } end
+function M.gsm_uplink_pattern() return { 'state', 'gsm', 'uplink', '+' } end
+function M.gsm_uplink(role) return { 'state', 'gsm', 'uplink', token(role) } end
 function M.event(name) return { 'event', 'net', token(name) } end
 function M.rpc(method) return { 'net', 'rpc', token(method) } end
 

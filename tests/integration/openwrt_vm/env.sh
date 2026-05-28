@@ -8,6 +8,11 @@ if [ -z "${VM_DIR:-}" ]; then
 	VM_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 fi
 
+# Some minimal Debian/cloud images keep administrative networking tools such as
+# `bridge` under /usr/sbin, which is not always in a non-login user's PATH.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PATH
+
 OPENWRT_VERSION="${OPENWRT_VERSION:-24.10.4}"
 OPENWRT_SSH_PORT="${OPENWRT_SSH_PORT:-2222}"
 OPENWRT_SSH_WAIT_S="${OPENWRT_SSH_WAIT_S:-90}"
@@ -24,6 +29,23 @@ OPENWRT_KVM="${OPENWRT_KVM:-auto}"
 # VM tests, which create veth/ifb devices inside OpenWrt.
 # Example: OPENWRT_TAP_IFACES="tap-dc0 tap-dc1"
 OPENWRT_TAP_IFACES="${OPENWRT_TAP_IFACES:-}"
+
+# Optional host-side Linux bridge dataplane fixture. This is used only by
+# explicit external-client targets; the default VM suite remains self-contained.
+OPENWRT_CLIENT_BRIDGE="${OPENWRT_CLIENT_BRIDGE:-brdcint}"
+OPENWRT_CLIENT_TAP="${OPENWRT_CLIENT_TAP:-tapdcint}"
+OPENWRT_CLIENT_NS="${OPENWRT_CLIENT_NS:-dcintc}"
+OPENWRT_CLIENT_HOST_IFACE="${OPENWRT_CLIENT_HOST_IFACE:-vdcinth}"
+# Temporary root-namespace veth peer name. It is moved into the client namespace
+# and then renamed to OPENWRT_CLIENT_IFACE, because common names such as
+# eth0 already exist in the devcontainer root namespace.
+OPENWRT_CLIENT_PEER_IFACE="${OPENWRT_CLIENT_PEER_IFACE:-vdcintp}"
+OPENWRT_CLIENT_IFACE="${OPENWRT_CLIENT_IFACE:-eth0}"
+OPENWRT_CLIENT_VLAN="${OPENWRT_CLIENT_VLAN:-100}"
+OPENWRT_CLIENT_CIDR_PREFIX="${OPENWRT_CLIENT_CIDR_PREFIX:-172.28.100.}"
+OPENWRT_CLIENT_ROUTER="${OPENWRT_CLIENT_ROUTER:-172.28.100.1}"
+OPENWRT_CLIENT_PUBLIC_DNS_NAME="${OPENWRT_CLIENT_PUBLIC_DNS_NAME:-openwrt.org}"
+OPENWRT_CLIENT_PUBLIC_WEB_URL="${OPENWRT_CLIENT_PUBLIC_WEB_URL:-http://example.com/}"
 
 case "$(uname -m)" in
 	x86_64|amd64)

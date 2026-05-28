@@ -32,6 +32,7 @@ package.path = table.concat({
 }, ';')
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local uci = require 'uci'
 local provider_loader = require 'services.hal.backends.network.provider'
 local perform = fibers.perform
@@ -51,6 +52,16 @@ local function contains(list, needle)
   for i = 1, #list do if list[i] == needle then return true end end
   return false
 end
+local function wait_until(pred, timeout_s, label)
+  local deadline = fibers.now() + (timeout_s or 1)
+  while fibers.now() < deadline do
+    if pred() then return true end
+    perform(sleep.sleep_op(0.01))
+  end
+  if pred() then return true end
+  fail(label or 'condition was not satisfied before timeout')
+end
+
 local function mkdir_p(path)
   local ok = os.execute("mkdir -p '" .. path .. "'")
   if ok ~= true and ok ~= 0 then error('mkdir failed for ' .. path) end
@@ -122,7 +133,7 @@ local intent = {
       role = 'wan',
       segment = 'wan',
       endpoint = { ifname = 'eth2' },
-      addressing = { ipv4 = { mode = 'dhcp', peerdns = false, metric = 10 } },
+      addressing = { ipv4 = { mode = 'dhcp', peerdns = false } },
     },
   },
   dns = {
@@ -179,7 +190,7 @@ local intent = {
     },
   },
   routing = {},
-  wan = {},
+  wan = { enabled = true, members = { wan = { interface = 'wan', mwan_metric = 1, weight = 1 } } },
   shaping = {},
   vpn = {},
   diagnostics = {},
@@ -207,10 +218,12 @@ fibers.run(function(_scope)
 
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
+  assert(result.activation == nil, 'provider activation should be synchronous for structural network apply')
+  eq(#restarts, 4, 'activation command count')
   provider:terminate('test complete')
 end)
 
-eq(restarts[#restarts], '/etc/init.d/firewall restart', 'last restart command')
+eq(restarts[#restarts], '/etc/init.d/mwan3 restart', 'last restart command')
 
 local c = assert(uci.cursor(conf, save))
 if type(c.load) == 'function' then pcall(function() c:load('firewall') end) end
@@ -236,6 +249,8 @@ table.sort(sections)
 for _, section in ipairs(sections) do
   absent(c:get('firewall', section, 'devicecode_managed'), 'firewall.' .. section .. '.devicecode_managed')
   absent(c:get('firewall', section, 'devicecode_owner'), 'firewall.' .. section .. '.devicecode_owner')
+  absent(c:get('firewall', section, 'devicecode_semantic_id'), 'firewall.' .. section .. '.devicecode_semantic_id')
+  absent(c:get('firewall', section, 'devicecode_role'), 'firewall.' .. section .. '.devicecode_role')
 end
 
 -- The higher-level product config no longer models disable_ipv6 as a firewall
