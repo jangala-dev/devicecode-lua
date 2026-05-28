@@ -2,25 +2,11 @@
 	"name": "devicecode-lua",
 	"image": "ghcr.io/jangala-dev/mini-lua-image:latest",
 	"remoteUser": "vscode",
-	"privileged": true,
-	"capAdd": [
-		"NET_ADMIN",
-		"NET_RAW"
-	],
-	"securityOpt": [
-		"apparmor=unconfined"
-	],
-	"runArgs": [
-		"--privileged",
-		"--cap-add=NET_ADMIN",
-		"--cap-add=NET_RAW",
-		"--device=/dev/net/tun",
-		"--security-opt=apparmor=unconfined"
-	],
 	"postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
 	"forwardPorts": [
 		8081,
-		2222
+		2222,
+		2242
 	],
 	"customizations": {
 		"vscode": {

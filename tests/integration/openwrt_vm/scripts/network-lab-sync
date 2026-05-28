@@ -1,0 +1,20 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(CDPATH= cd -- "$VM_DIR/../../.." && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/network-lab-env"
+
+sh "$SCRIPT_DIR/network-lab-wait"
+
+exclude_args=""
+for x in $NETWORK_LAB_RSYNC_EXCLUDES; do
+	exclude_args="$exclude_args --exclude=$x"
+done
+
+$NETWORK_LAB_SSH "mkdir -p '$NETWORK_LAB_REPO_DIR'"
+# shellcheck disable=SC2086
+rsync -az --delete $exclude_args -e "$NETWORK_LAB_RSYNC_RSH" "$REPO_ROOT/" "${NETWORK_LAB_USER}@${NETWORK_LAB_HOST}:${NETWORK_LAB_REPO_DIR}/"
+echo "[network-lab] synced repo to ${NETWORK_LAB_REPO_DIR}"

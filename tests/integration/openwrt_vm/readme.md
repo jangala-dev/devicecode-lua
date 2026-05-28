@@ -172,28 +172,31 @@ The renderer runs the real OpenWrt provider against a temporary UCI confdir. By 
 DEVICECODE_RENDER_GSM_PRIMARY_IFNAME=wwan0 DEVICECODE_RENDER_GSM_SECONDARY_IFNAME=wwan1 make print-default-configs
 ```
 
-### Host OVS client on internal VLAN 100
+### Host bridge client on internal VLAN 100
 
 For debugging real client behaviour on the internal segment, an optional target
-builds a host-side Open vSwitch dataplane and starts the VM with a tap-backed
+builds a host-side Linux bridge dataplane and starts the VM with a tap-backed
 trunk NIC:
 
 ```sh
-make test-openwrt-int-ovs-client-dhcp-dns
+make test-openwrt-int-bridge-client-dhcp-dns
 ```
 
-This target is intentionally not part of `make test`. It needs host privileges
-and Open vSwitch support. The harness will try to provision common Debian/Ubuntu
-packages such as `openvswitch-switch`, `iproute2`, `udhcpc`, `dnsutils`, `wget`
-and `tcpdump` when they are missing.
+This target is intentionally not part of `make test`. It needs host networking
+privileges because it creates Linux bridges, veth pairs, network namespaces and
+QEMU tap devices. Prefer `make network-lab-test` in CI or from an unprivileged
+devcontainer; run this target directly only on a host that grants those
+networking permissions. The harness will try to provision common Debian/Ubuntu
+packages such as `iproute2`, `udhcpc`, `dnsutils`, `wget` and `tcpdump` when
+they are missing.
 
 The fixture uses:
 
 ```text
-OVS bridge:       ovs-dc-int
-QEMU tap trunk:   tap-dc-int, VLAN 100 tagged toward the VM
-client namespace: dc-int-client
-client port:      veth-dc-int-host as an OVS access port on VLAN 100
+Linux bridge:     brdcint
+QEMU tap trunk:   tapdcint, VLAN 100 tagged toward the VM
+client namespace: dcintc
+client port:      vdcinth as an untagged access port on VLAN 100
 OpenWrt trunk:    eth4 by default, derived from OPENWRT_VM_WAN_IFACES + 1
 OpenWrt segment:  int / br-int / vl-int / 172.28.100.1/24
 ```
@@ -201,11 +204,97 @@ OpenWrt segment:  int / br-int / vl-int / 172.28.100.1/24
 The test applies a small Devicecode-generated OpenWrt config, obtains a DHCP
 lease from a host network namespace over VLAN 100, and checks router reachability,
 public-IP reachability, local DNS, public DNS and a public HTTP fetch from that
-namespace. On failure it dumps both host OVS/client state and OpenWrt network,
+namespace. On failure it dumps both host bridge/client state and OpenWrt network,
 DHCP and dnsmasq diagnostics.
 
 Remove the host-side fixture with:
 
 ```sh
-make teardown-ovs-client-fabric
+make teardown-bridge-client-fabric
 ```
+
+
+### Network-lab VM tier
+
+The host-bridge/client targets need privileges that ordinary CI containers
+usually should not have: Linux bridges, tap devices, veth pairs and network
+namespaces. The `network-lab` tier runs those tests inside a disposable Linux VM
+instead, so the top-level devcontainer and fast CI jobs can remain unprivileged.
+
+Default lab workflow:
+
+```sh
+make network-lab-test
+```
+
+This will:
+
+```text
+1. boot a Debian cloud-image VM with QEMU user-mode SSH forwarding
+2. provision qemu, iproute2, tcpdump, dnsutils and related tools inside the lab
+3. rsync the repository into the lab VM
+4. run the privileged OpenWrt dataplane targets inside the lab VM
+```
+
+The default lab targets are:
+
+```text
+test-openwrt-int-bridge-client-dhcp-dns
+test-openwrt-dnsmasq-multi-instance-resilience
+```
+
+Run a specific target inside the lab with:
+
+```sh
+./scripts/network-lab-test test-openwrt-dnsmasq-multi-instance-resilience
+```
+
+Useful lab controls:
+
+```sh
+make network-lab-start      # boot the lab VM
+make network-lab-wait       # wait for lab SSH
+make network-lab-provision  # install lab packages
+make network-lab-sync       # rsync the repo into the lab
+make network-lab-ssh        # open a shell in the lab VM
+make network-lab-stop       # stop the lab VM
+```
+
+Important environment knobs:
+
+```text
+NETWORK_LAB_SSH_PORT=2242
+NETWORK_LAB_MEM=4096M
+NETWORK_LAB_CPUS=2
+NETWORK_LAB_KVM=auto
+NETWORK_LAB_ARCH=auto  # native by default: amd64 on x86_64, arm64 on aarch64
+NETWORK_LAB_TEST_TARGETS="test-openwrt-int-bridge-client-dhcp-dns test-openwrt-dnsmasq-multi-instance-resilience"
+NETWORK_LAB_OPENWRT_SSH_WAIT_S=600  # nested OpenWrt VM boot budget inside the lab
+NETWORK_LAB_OPENWRT_KVM=auto        # passed through to the nested OpenWrt VM lane
+NETWORK_LAB_BASE_IMAGE_URL=auto  # Debian genericcloud image matching NETWORK_LAB_ARCH
+```
+
+The lab VM is deliberately a separate integration tier. Keep fast unit/provider
+tests outside it; use it only for tests where host kernel networking permissions
+or platform isolation matter.
+
+The OpenWrt VM runs nested inside this lab VM. If KVM is unavailable either to
+the outer lab VM or to the nested OpenWrt VM, the lab remains useful as a
+permission boundary but boots much more slowly; the lab therefore uses a larger
+nested OpenWrt SSH wait budget than the direct local `openwrt-vm-test` lane.
+
+
+### Network-lab image/package footprint
+
+The network-lab uses a Debian `genericcloud` image matching the host CPU by
+default: `amd64` on x86_64 hosts and `arm64` on AArch64 hosts.  This keeps the
+lab VM native and lets the nested OpenWrt VM choose the matching OpenWrt target
+through the normal `env.sh` architecture detection.
+
+The lab provisioning intentionally installs packages with `--no-install-recommends`.
+Some GUI-looking libraries can still appear because they are hard dependencies of
+Debian's QEMU packages, not because the lab image is a desktop image.
+
+The lab scripts also normalise `PATH` to include `/usr/sbin` and `/sbin`.  On
+minimal cloud images, tools such as iproute2's `bridge` can be installed but not
+visible to the non-login SSH user unless those directories are added explicitly.

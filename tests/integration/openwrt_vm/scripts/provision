@@ -18,82 +18,83 @@ fi
 
 echo "[openwrt-vm] provisioning base packages"
 
-"$SCRIPT_DIR/ssh" "
-	set -eu
+"$SCRIPT_DIR/ssh" 'sh -s' <<'OPENWRT_PROVISION_BASE'
+set -eu
 
-	echo '[openwrt-vm] configuring temporary outbound route'
-	ip route replace default via 192.168.1.2 dev br-lan || true
+echo '[openwrt-vm] configuring temporary outbound route'
+ip route replace default via 192.168.1.2 dev br-lan || true
 
-	mkdir -p /tmp/resolv.conf.d
-	printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf.d/resolv.conf.auto
-	printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf
+mkdir -p /tmp/resolv.conf.d
+printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf.d/resolv.conf.auto
+printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf
 
-	echo '[openwrt-vm] checking connectivity'
-	ping -c 1 -W 3 192.168.1.2 >/dev/null || {
-		echo 'cannot reach QEMU user-network gateway 192.168.1.2' >&2
-		ip addr >&2
-		ip route >&2
-		exit 1
-	}
+echo '[openwrt-vm] checking connectivity'
+ping -c 1 -W 3 192.168.1.2 >/dev/null || {
+	echo 'cannot reach QEMU user-network gateway 192.168.1.2' >&2
+	ip addr >&2
+	ip route >&2
+	exit 1
+}
 
-	opkg_update_with_retry() {
-		tries=0
-		while [ "$tries" -lt 5 ]; do
-			tries=$((tries + 1))
-			if opkg update; then
-				return 0
-			fi
-			echo "[openwrt-vm] opkg update failed on attempt $tries; retrying" >&2
-			ip route replace default via 192.168.1.2 dev br-lan || true
-			printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf
-			sleep $((tries * 2))
-		done
-		echo '[openwrt-vm] opkg update failed after retries' >&2
-		ip addr >&2 || true
-		ip route >&2 || true
-		cat /tmp/resolv.conf >&2 || true
-		return 1
-	}
+opkg_update_with_retry() {
+	tries=0
+	while [ "$tries" -lt 5 ]; do
+		tries=$((tries + 1))
+		if opkg update; then
+			return 0
+		fi
+		echo "[openwrt-vm] opkg update failed on attempt $tries; retrying" >&2
+		ip route replace default via 192.168.1.2 dev br-lan || true
+		printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf
+		sleep $((tries * 2))
+	done
+	echo '[openwrt-vm] opkg update failed after retries' >&2
+	ip addr >&2 || true
+	ip route >&2 || true
+	cat /tmp/resolv.conf >&2 || true
+	return 1
+}
 
-	opkg_update_with_retry
+opkg_update_with_retry
 
-	# Install MWAN3 in a separate phase. Immediately after this SSH step returns,
-	# provision installs a known-good three-WAN fixture before any further package
-	# downloads can observe or trip over a half-configured mwan3 setup.
-	opkg install tc-full kmod-sched kmod-sched-core kmod-ifb kmod-veth ip-full lua libuci-lua
+# Install MWAN3 in a separate phase. Immediately after this SSH step returns,
+# provision installs a known-good three-WAN fixture before any further package
+# downloads can observe or trip over a half-configured mwan3 setup.
+opkg install tc-full kmod-sched kmod-sched-core kmod-ifb kmod-veth ip-full lua libuci-lua
 
-	# Some OpenWrt targets expose 8021q as built-in kernel support and do not
-	# publish a separate kmod-8021q package.  VLAN capability is checked by the
-	# jan DHCP/DNS dependency script, so keep this package best-effort here.
-	opkg install kmod-8021q || true
-	opkg install mwan3 iptables-nft ip6tables-nft
-"
+# Some OpenWrt targets expose 8021q as built-in kernel support and do not
+# publish a separate kmod-8021q package.  VLAN capability is checked by the
+# jan DHCP/DNS dependency script, so keep this package best-effort here.
+opkg install kmod-8021q || true
+opkg install mwan3 iptables-nft ip6tables-nft
+OPENWRT_PROVISION_BASE
 
 # Install a valid three-WAN network/firewall/mwan3 fixture immediately after
 # mwan3 is installed. This prevents the rest of provisioning from running with
 # a package-default or otherwise invalid multi-WAN configuration.
 "$VM_DIR/tests/setup_mwan3_three_wan_fixture.sh"
 
-"$SCRIPT_DIR/ssh" "
-	set -eu
+"$SCRIPT_DIR/ssh" 'sh -s' -- "$OPENWRT_PROVISION_MARKER" <<'OPENWRT_PROVISION_EXTRA'
+set -eu
+marker="$1"
 
-	# Keep provisioning traffic on the management network even after the WAN DHCP
-	# clients have added their own defaults.
-	ip route replace default via 192.168.1.2 dev br-lan || true
+# Keep provisioning traffic on the management network even after the WAN DHCP
+# clients have added their own defaults.
+ip route replace default via 192.168.1.2 dev br-lan || true
 
-	# Dependencies used by vendored fibers/bus/trie and future real command-backed tests.
-	# Package names vary across OpenWrt feeds/releases, so keep these best-effort.
-	(opkg install luaposix || true)
-	(opkg install lua-bit32 || true)
-	(opkg install lua-cjson || true)
+# Dependencies used by vendored fibers/bus/trie and future real command-backed tests.
+# Package names vary across OpenWrt feeds/releases, so keep these best-effort.
+(opkg install luaposix || true)
+(opkg install lua-bit32 || true)
+(opkg install lua-cjson || true)
 
-	# Optional but useful for performance tests. Do not fail provisioning if unavailable
-	# on a given target/release.
-	opkg install iperf3 || true
-	opkg install tcpdump || true
-	opkg install bind-dig || true
+# Optional but useful for performance tests. Do not fail provisioning if unavailable
+# on a given target/release.
+opkg install iperf3 || true
+opkg install tcpdump || true
+opkg install bind-dig || true
 
-	touch '${OPENWRT_PROVISION_MARKER}'
-"
+touch "$marker"
+OPENWRT_PROVISION_EXTRA
 
 echo "[openwrt-vm] provision complete"
