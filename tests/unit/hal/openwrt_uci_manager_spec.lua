@@ -1,6 +1,8 @@
 -- tests/unit/hal/openwrt_uci_manager_spec.lua
 
 local fibers = require 'fibers'
+local mailbox = require 'fibers.mailbox'
+local queue = require 'devicecode.support.queue'
 
 local uci_manager = require 'services.hal.backends.openwrt.uci_manager'
 local probe = require 'tests.support.bus_probe'
@@ -67,6 +69,25 @@ function tests.test_commit_converts_values_and_runs_restart_commands()
 		eq(calls[4].op, 'commit')
 		eq(restarts[1], '/sbin/wifi reload')
 		eq(restarts[2], '/etc/init.d/network restart')
+	end)
+end
+
+
+function tests.test_start_accepts_already_started_owner_scope_from_caller_scope()
+	fibers.run(function (scope)
+		local owner = ok(scope:child())
+		local hold_tx, hold_rx = mailbox.new(1)
+		ok(owner:spawn(function () fibers.perform(hold_rx:recv_op()) end))
+
+		local mgr = ok(uci_manager.new({
+			cursor = fake_cursor({}),
+			run_cmd = function () return true, nil end,
+		}))
+
+		local started, err = mgr:start(owner)
+		ok(started, err)
+		owner:cancel('test_done')
+		hold_tx:close('test_done')
 	end)
 end
 
@@ -255,6 +276,105 @@ function tests.test_transaction_rolls_back_touched_packages_on_partial_failure()
 		eq(result.ok, false)
 		eq(result.status, 'failed_rolled_back')
 		eq(result.rollback.ok, true)
+	end)
+end
+
+
+function tests.test_replace_package_deletes_existing_sections_before_writing_desired_state()
+	fibers.run(function (scope)
+		local calls = {}
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function (_, pkg)
+			calls[#calls + 1] = { op = 'get_all', pkg }
+			return {
+				old = { ['.type'] = 'interface', proto = 'dhcp' },
+				lan = { ['.type'] = 'interface', proto = 'static', stale = 'yes' },
+			}
+		end
+		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function () return true end }))
+		ok(mgr:start(scope))
+		local ok_commit, err = fibers.perform(mgr:submit_op({
+			config = 'network',
+			replace_package = true,
+			changes = {
+				{ op = 'set', config = 'network', section = 'lan', option = 'interface' },
+				{ op = 'set', config = 'network', section = 'lan', option = 'proto', value = 'static' },
+			},
+		}))
+		ok(ok_commit, err)
+		local seen_delete_old, seen_delete_lan, seen_set_lan = false, false, false
+		for _, c in ipairs(calls) do
+			if c.op == 'delete' and c[1] == 'network' and c[2] == 'old' then seen_delete_old = true end
+			if c.op == 'delete' and c[1] == 'network' and c[2] == 'lan' then seen_delete_lan = true end
+			if c.op == 'set' and c[1] == 'network' and c[2] == 'lan' and c[3] == 'interface' then seen_set_lan = true end
+		end
+		ok(seen_delete_old, 'old section should be removed')
+		ok(seen_delete_lan, 'surviving section should be recreated to drop stale options')
+		ok(seen_set_lan, 'desired section should be written after delete')
+	end)
+end
+
+function tests.test_manager_creates_missing_package_files_before_transaction()
+	fibers.run(function (scope)
+		local tmp = os.tmpname()
+		os.remove(tmp)
+		local calls = {}
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function (_, _pkg) return {} end
+		local mgr = ok(uci_manager.new({ confdir = tmp, cursor = cursor, run_cmd = function () return true end }))
+		ok(mgr:start(scope))
+		local result = fibers.perform(mgr:transaction_op({
+			packages = { 'network', 'dhcp' },
+			records = {
+				{ config = 'network', replace_package = true, changes = {} },
+				{ config = 'dhcp', replace_package = true, changes = {} },
+			},
+		}))
+		ok(result and result.ok == true, result and result.err)
+		local f = io.open(tmp .. '/network', 'rb')
+		ok(f, 'network file should be created')
+		f:close()
+		f = io.open(tmp .. '/dhcp', 'rb')
+		ok(f, 'dhcp file should be created')
+		f:close()
+		os.remove(tmp .. '/network'); os.remove(tmp .. '/dhcp'); os.remove(tmp)
+	end)
+end
+
+function tests.test_activation_command_replies_without_waiting_for_command_completion()
+	fibers.run(function(scope)
+		local calls = {}
+		local activation_restarts = {}
+		local unblock_tx, unblock_rx = mailbox.new(1, { full = 'reject_newest' })
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function (_, _pkg) return {} end
+		local mgr = ok(uci_manager.new({
+			cursor = cursor,
+			debounce_s = 0.01,
+			run_cmd = function (argv)
+				activation_restarts[#activation_restarts + 1] = table.concat(argv, ' ')
+				fibers.perform(unblock_rx:recv_op())
+				return true, nil
+			end,
+		}))
+		ok(mgr:start(scope))
+
+		local result = { fibers.perform(mgr:transaction_op({
+			packages = { 'network' },
+			records = {
+				{
+					config = 'network',
+					changes = { { op = 'set', config = 'network', section = 'lan', option = 'proto', value = 'static' } },
+					restart_cmds = { { kind = 'reload', target = 'network', wait = false } },
+				},
+			},
+		})) }
+
+		eq(result[1].ok, true)
+		ok(result[1].activation and result[1].activation.state == 'scheduled', 'activation should be scheduled')
+		ok(probe.wait_until(function () return #activation_restarts == 1 end, { timeout = 0.5 }), 'activation runner should start command')
+		eq(activation_restarts[1], '/etc/init.d/network reload')
+		queue.try_admit_now(unblock_tx, true)
 	end)
 end
 

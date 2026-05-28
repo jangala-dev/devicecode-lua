@@ -79,6 +79,12 @@ local DIAGNOSTICS_METHODS = {
 }
 
 local function control_loop_for(kind, ch, methods)
+	if tostring(kind) == 'config' then
+		log('warn', {
+			what = 'network_config_control_instrumented_build',
+			marker = 'owned_activation_runner_v1',
+		})
+	end
 	control_loop.run_request_loop(ch, methods, state.logger, 'network_' .. tostring(kind))
 end
 
@@ -145,6 +151,7 @@ function M.apply_config_op(config)
 		local driver, err = driver_mod.new(config or {}, {
 			cap_emit_ch = state.cap_emit_ch,
 			logger = state.logger,
+			owner_scope = state.scope,
 		})
 		if not driver then return op.always(false, err or 'network driver create failed') end
 		if state.driver and type(state.driver.terminate) == 'function' then

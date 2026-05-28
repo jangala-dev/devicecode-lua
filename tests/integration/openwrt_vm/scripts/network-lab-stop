@@ -1,0 +1,46 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/network-lab-env"
+
+stop_pid() {
+	pid="$1"
+	label="$2"
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		echo "[network-lab] stopping ${label} pid ${pid}"
+		kill "$pid" 2>/dev/null || true
+		for _ in 1 2 3 4 5; do
+			if ! kill -0 "$pid" 2>/dev/null; then break; fi
+			sleep 1
+		done
+		if kill -0 "$pid" 2>/dev/null; then
+			kill -9 "$pid" 2>/dev/null || true
+		fi
+	fi
+}
+
+if [ -f "$NETWORK_LAB_PID" ]; then
+	pid="$(cat "$NETWORK_LAB_PID")"
+	stop_pid "$pid" "recorded"
+	rm -f "$NETWORK_LAB_PID"
+fi
+
+# Failed or interrupted lab starts can leave QEMU alive after the pidfile is
+# removed.  Clean up any qemu-system process owned by this user that still owns
+# the lab SSH host-forward port.
+if command -v ss >/dev/null 2>&1; then
+	port_pids="$(ss -H -ltnp "sport = :${NETWORK_LAB_SSH_PORT}" 2>/dev/null \
+		| sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+		| sort -u)"
+	for pid in $port_pids; do
+		cmd="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+		case "$cmd" in
+			qemu-system-*)
+				stop_pid "$pid" "stale port ${NETWORK_LAB_SSH_PORT}"
+				;;
+		esac
+	done
+fi

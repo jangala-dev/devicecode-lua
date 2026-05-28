@@ -40,9 +40,10 @@ local function sample_cfg()
 			},
 		},
 		wan = {
-			policy = 'weighted_failover',
+			load_balancing = { policy = 'balanced' },
+			rules = { https = { family = 'ipv4', proto = 'tcp', dest_port = '443', policy = 'balanced', sticky = true } },
 			members = {
-				gsm_a = { interface = 'wan_modem_a', weight = 70, priority = 1 },
+				gsm_a = { interface = 'wan_modem_a', weight = 70, mwan_metric = 1 },
 			},
 		},
 		firewall = {
@@ -92,6 +93,10 @@ function tests.test_accepts_only_current_cfg_net_schema()
 	eq(intent.stats.segments, 2)
 	eq(intent.stats.interfaces, 2)
 	eq(intent.stats.wan_members, 1)
+	eq(intent.wan.rules.https.proto, 'tcp')
+	eq(intent.wan.rules.https.dest_port, '443')
+	eq(intent.wan.rules.https.policy, 'balanced')
+	eq(intent.wan.rules.https.sticky, true)
 	eq(intent.stats.vpn_tunnels, 1)
 end
 
@@ -99,7 +104,41 @@ function tests.test_accepts_config_service_record_shape_without_legacy_migration
 	local intent = ok(config.normalise({ rev = 12, data = sample_cfg() }, { generation = 4 }))
 	eq(intent.rev, 12)
 	eq(intent.generation, 4)
-	eq(intent.wan.policy, 'weighted_failover')
+	eq(intent.wan.policy, nil)
+end
+
+
+
+function tests.test_rejects_implicit_static_route_without_kind()
+	local cfg = sample_cfg()
+	cfg.routing.routes.legacy = { target = '192.168.100.1', interface = 'wan_modem_a' }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	if intent ~= nil then error('expected route without kind to be rejected', 2) end
+	ok(err and err:find('net.routing.routes.legacy.kind', 1, true), 'route kind error expected')
+end
+
+function tests.test_rejects_subnet_route_without_netmask()
+	local cfg = sample_cfg()
+	cfg.routing.routes.bad_subnet = { kind = 'subnet', target = '192.168.100.0', interface = 'wan_modem_a' }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	if intent ~= nil then error('expected subnet route without netmask to be rejected', 2) end
+	ok(err and err:find('net.routing.routes.bad_subnet.netmask', 1, true), 'route netmask error expected')
+end
+
+function tests.test_rejects_unknown_route_interface()
+	local cfg = sample_cfg()
+	cfg.routing.routes.starlink_admin = { kind = 'host', target = '192.168.100.1', interface = 'missing' }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	if intent ~= nil then error('expected unknown route interface to be rejected', 2) end
+	ok(err and err:find('net.routing.routes.starlink_admin.interface', 1, true), 'route interface error expected')
+end
+
+function tests.test_rejects_mwan_rule_for_unknown_policy()
+	local cfg = sample_cfg()
+	cfg.wan.rules.https.policy = 'not_declared'
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	eq(intent, nil)
+	ok(err and err:find('wan%.rules%.https%.policy', 1, false), 'policy error expected')
 end
 
 function tests.test_rejects_missing_or_wrong_schema()
@@ -141,9 +180,12 @@ function tests.test_bigbox_config_uses_clean_segment_authority_shape()
 	eq(intent.segments.jan.dns.host_files[2], 'adult')
 	eq(intent.segments.jan.shaping.profile, 'restricted_user_per_host')
 	eq(intent.shaping.profiles.restricted_user_per_host.egress.host_rate, '2mbit')
-	eq(intent.dns.host_files.base_dir, '/data/devicecode/dns/hosts')
 	eq(intent.dns.records['config.bigbox.home'].address, '172.28.8.1')
-	eq(intent.routing.routes.static_1.interface, 'wan')
+	eq(intent.routing.routes.starlink_admin.kind, 'host')
+	eq(intent.routing.routes.starlink_admin.interface, 'wan')
+	eq(intent.routing.routes.starlink_admin.target, '192.168.100.1')
+	eq(intent.routing.routes.starlink_admin.netmask, '255.255.255.255')
+	ok(intent.routing.routes.starlink_admin.description and intent.routing.routes.starlink_admin.description:find('Starlink', 1, true), 'Starlink route should carry context')
 	eq(intent.firewall.rules.Allow_DNS_queries_RST.dest_port, '53')
 end
 

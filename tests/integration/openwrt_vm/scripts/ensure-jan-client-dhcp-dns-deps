@@ -1,0 +1,77 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+"$SCRIPT_DIR/wait-ssh"
+
+echo "[openwrt-vm] ensuring jan client DHCP/DNS test dependencies"
+
+"$SCRIPT_DIR/ssh" '
+	set -eu
+
+	updated=0
+	need_update() {
+		if [ "$updated" -eq 0 ]; then
+			opkg update
+			updated=1
+		fi
+	}
+
+	install_best_effort() {
+		need_update
+		opkg install "$@" || true
+	}
+
+	cleanup_probe() {
+		ip link del dcdep0 2>/dev/null || true
+		ip link del dcdep0p 2>/dev/null || true
+		ip link del dcdep0.32 2>/dev/null || true
+		ip link del dcdepvlan 2>/dev/null || true
+	}
+	trap cleanup_probe EXIT INT TERM
+
+	command -v ip >/dev/null 2>&1 || install_best_effort ip-full
+	command -v udhcpc >/dev/null 2>&1 || install_best_effort busybox
+	command -v nslookup >/dev/null 2>&1 || install_best_effort bind-dig
+	command -v pgrep >/dev/null 2>&1 || install_best_effort procps-ng-pgrep
+
+	cleanup_probe
+	if ! ip link add dcdep0 type veth peer name dcdep0p >/dev/null 2>&1; then
+		install_best_effort kmod-veth ip-full
+		cleanup_probe
+		ip link add dcdep0 type veth peer name dcdep0p >/dev/null 2>&1 || {
+			echo "jan client DHCP/DNS dependency check failed: veth is unavailable" >&2
+			exit 1
+		}
+	fi
+
+	ip link set dcdep0 up >/dev/null 2>&1 || true
+	if ! ip link add link dcdep0 name dcdepvlan type vlan id 32 >/dev/null 2>&1; then
+		install_best_effort kmod-8021q
+		cleanup_probe
+		ip link add dcdep0 type veth peer name dcdep0p >/dev/null 2>&1 || {
+			echo "jan client DHCP/DNS dependency check failed: veth became unavailable" >&2
+			exit 1
+		}
+		ip link set dcdep0 up >/dev/null 2>&1 || true
+		ip link add link dcdep0 name dcdepvlan type vlan id 32 >/dev/null 2>&1 || {
+			echo "jan client DHCP/DNS dependency check failed: 8021q VLAN devices are unavailable" >&2
+			exit 1
+		}
+	fi
+
+	if ! ip netns add dcdepns >/dev/null 2>&1; then
+		echo "[openwrt-vm] network namespaces unavailable; jan test will use same-namespace veth fallback" >&2
+	else
+		ip netns del dcdepns >/dev/null 2>&1 || true
+	fi
+
+	cleanup_probe
+'
+
+echo "[openwrt-vm] jan client DHCP/DNS dependencies ready"

@@ -1083,3 +1083,20 @@ public capability identity.
 The appliance-level wired view is published under `state/wired/...` and should
 use stable product surface identifiers such as `cm5-eth0`, `switch-uplink-cm5`,
 `lan-1` and `lan-2`.
+
+## GSM uplink state consumed by NET
+
+GSM publishes curated semantic uplink state under:
+
+```text
+state/gsm/uplink/<role>
+```
+
+`<role>` is stable product identity, for example `primary` or `secondary`.  It
+must not be a volatile Linux device name.  The Linux interface name observed from
+ModemManager or the kernel is payload data, normally `linux.ifname`, and may
+change between boots.
+
+NET may consume this state as its GSM source contract.  NET should not consume
+raw modem or HAL provider topics for WAN source identity.
+

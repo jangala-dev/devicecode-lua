@@ -24,16 +24,6 @@ function M.cancel(state, reason)
 	return true, nil
 end
 
-local function mark_runtime_replaced(state, generation)
-	state.model:update(function(s)
-		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
-		s.wan_runtime.generation = generation
-		s.wan_runtime.uplinks = {}
-		s.wan_runtime.speedtests = {}
-		s.wan_runtime.live_weights = { state = 'idle', generation = generation }
-		return s
-	end)
-end
 
 local function start_speedtest_for_uplink(state, uplink)
 	if not state.hal or type(state.hal.speedtest_op) ~= 'function' then return true, nil end
@@ -97,12 +87,13 @@ local function start_speedtest_for_uplink(state, uplink)
 	return true, nil
 end
 
-function M.start_speedtests(state)
+function M.reconcile_speedtests(state, reason)
 	local snap = state.model:snapshot()
 	if not wan_policy.speedtest_enabled(snap) then return true, nil end
 	local generation = state.current_generation and state.current_generation.generation or snap.generation
-	mark_runtime_replaced(state, generation)
-	local uplinks = wan_policy.collect_uplinks(state.model:snapshot())
+	if type(generation) ~= 'number' or generation <= 0 then return true, nil end
+
+	local uplinks = wan_policy.collect_uplinks(snap)
 	if #uplinks == 0 then
 		state.model:update(function(s)
 			s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
@@ -111,12 +102,36 @@ function M.start_speedtests(state)
 		end)
 		return true, nil
 	end
+
+	state.model:update(function(s)
+		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
+		s.wan_runtime.generation = s.wan_runtime.generation or generation
+		s.wan_runtime.last_reconcile_reason = reason
+		s.wan_runtime.last_reconcile_at = now(state)
+		return s
+	end)
+
 	for i = 1, #uplinks do
-		local ok, err = start_speedtest_for_uplink(state, uplinks[i])
-		if ok ~= true then return nil, err end
+		local uplink = uplinks[i]
+		local online = wan_policy.uplink_online(snap, uplink)
+		if not online then
+			local active = state.active_speedtests[uplink.uplink_id]
+			if active and active.handle and type(active.handle.cancel) == 'function' then
+				active.handle:cancel('uplink_offline')
+			end
+			state.active_speedtests[uplink.uplink_id] = nil
+		else
+			local due = wan_policy.speedtest_due(state.model:snapshot(), uplink, { generation = generation, now = now(state) })
+			if due then
+				local ok, err = start_speedtest_for_uplink(state, uplink)
+				if ok ~= true then return nil, err end
+			end
+		end
 	end
 	return true, nil
 end
+
+M.start_speedtests = M.reconcile_speedtests
 
 local function start_live_weight_apply(state, members)
 	if not members or #members == 0 or not state.hal or type(state.hal.apply_live_weights_op) ~= 'function' then return true, nil end
@@ -184,16 +199,22 @@ function M.handle_speedtest_done(state, ev)
 		rec.interface = result.interface or (work_result.request and work_result.request.interface) or rec.interface
 		rec.device = result.device or (work_result.request and work_result.request.device) or rec.device
 		rec.metric = rec.metric or (work_result.request and work_result.request.metric) or 1
-		rec.peak_mbps = result.peak_mbps
+		if result.ok == true and result.peak_mbps ~= nil then
+			rec.peak_mbps = result.peak_mbps
+			rec.last_success_mbps = result.peak_mbps
+			rec.last_success_at = now(state)
+		elseif rec.last_success_mbps ~= nil then
+			rec.peak_mbps = rec.last_success_mbps
+		end
 		rec.data_mib = result.data_mib
 		rec.duration_s = result.duration_s
 		rec.completed_at = now(state)
+		if rec.ok ~= true then rec.retry_after = now(state) + 60 end
 		s.wan_runtime.speedtests[ev.uplink_id] = rec
 		s.stats.speedtests_completed = (s.stats.speedtests_completed or 0) + 1
 		return s
 	end)
 	local snap = state.model:snapshot()
-	if not wan_policy.all_speedtests_done(snap, ev.generation) then return true, nil end
 	local weights, werr = wan_policy.compute_weights(snap, ev.generation)
 	if not weights then
 		state.model:update(function(s)
@@ -203,6 +224,8 @@ function M.handle_speedtest_done(state, ev)
 		end)
 		return true, nil
 	end
+	local previous = snap.wan_runtime and snap.wan_runtime.last_weight_apply and snap.wan_runtime.last_weight_apply.members
+	if wan_policy.weights_equal(previous, weights) then return true, nil end
 	return start_live_weight_apply(state, weights)
 end
 
@@ -224,6 +247,9 @@ function M.handle_live_weights_done(state, ev)
 			result = model_mod.deep_copy(result),
 			updated_at = now(state),
 		}
+		if result.ok == true then
+			s.wan_runtime.last_weight_apply = { generation = ev.generation, id = ev.weight_apply_id, members = model_mod.deep_copy(work_result.members or (work_result.request and work_result.request.members) or {}), updated_at = now(state) }
+		end
 		s.stats.live_weight_applies = (s.stats.live_weight_applies or 0) + 1
 		return s
 	end)

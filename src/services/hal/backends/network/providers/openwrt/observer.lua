@@ -11,6 +11,7 @@ local sleep = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 local socket = require 'fibers.io.socket'
 local exec = require 'fibers.io.exec'
+local file = require 'fibers.io.file'
 local cjson = require 'cjson.safe'
 local safe = require 'coxpcall'
 
@@ -351,7 +352,7 @@ function Observer:handle_socket_stream(st)
 end
 
 function Observer:socket_server()
-	pcall(os.remove, self.socket_path)
+	pcall(function () file.unlink(self.socket_path) end)
 	local s, err = socket.listen_unix(self.socket_path, { ephemeral = true })
 	if not s then
 		log(self, 'warn', { what = 'hotplug_socket_listen_failed', path = self.socket_path, err = tostring(err) })
@@ -393,7 +394,7 @@ function Observer:terminate(reason)
 	self.active_streams = {}
 	if self.listener and self.listener.close then self.listener:close() end
 	if self.scope then self.scope:cancel(reason or 'observer terminated') end
-	pcall(os.remove, self.socket_path)
+	pcall(function () file.unlink(self.socket_path) end)
 	return true, nil
 end
 

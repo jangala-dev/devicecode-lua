@@ -1,0 +1,194 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+ROOT_DIR="$(CDPATH= cd -- "$VM_DIR/../../.." && pwd)"
+SSH="$VM_DIR/scripts/ssh"
+SCP_TO="$VM_DIR/scripts/scp-to"
+SCP_FROM="$VM_DIR/scripts/scp-from"
+REMOTE="/tmp/devicecode-render-default-configs"
+REMOTE_OUT="$REMOTE/out"
+WORK="$VM_DIR/work/render-default-configs"
+OUT_DIR="${DEVICECODE_RENDER_OUT_DIR:-$VM_DIR/work/generated-default-etc-config}"
+TRUNK_IFNAME="${DEVICECODE_RENDER_TRUNK_IFNAME:-eth0}"
+PRINT="${DEVICECODE_RENDER_PRINT:-1}"
+
+mkdir -p "$WORK" "$OUT_DIR"
+
+cat > "$WORK/run_devicecode_render_default_configs.lua" <<'LUA'
+package.path = table.concat({
+  './src/?.lua', './src/?/init.lua',
+  './vendor/lua-fibers/src/?.lua', './vendor/lua-fibers/src/?/init.lua',
+  './vendor/lua-bus/src/?.lua', './vendor/lua-bus/src/?/init.lua',
+  './vendor/lua-trie/src/?.lua', './vendor/lua-trie/src/?/init.lua',
+  package.path,
+}, ';')
+
+local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
+local cjson = require 'cjson.safe'
+local provider_loader = require 'services.hal.backends.network.provider'
+local net_config = require 'services.net.config'
+local intent_realiser = require 'services.net.intent_realiser'
+
+local perform = fibers.perform
+
+local function fail(msg) error(msg, 2) end
+local function read_file(path)
+  local f, err = io.open(path, 'rb')
+  if not f then fail('read failed ' .. path .. ': ' .. tostring(err)) end
+  local data = f:read('*a')
+  f:close()
+  return data
+end
+local function write_file(path, data)
+  local f, err = io.open(path, 'wb')
+  if not f then fail('write failed ' .. path .. ': ' .. tostring(err)) end
+  f:write(data or '')
+  f:close()
+end
+local function shell_quote(s)
+  s = tostring(s or '')
+  return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+local function mkdir_p(path)
+  local ok = os.execute('mkdir -p ' .. shell_quote(path))
+  if ok ~= true and ok ~= 0 then fail('mkdir failed: ' .. path) end
+end
+local function rm_rf(path)
+  local ok = os.execute('rm -rf ' .. shell_quote(path))
+  if ok ~= true and ok ~= 0 then fail('rm -rf failed: ' .. path) end
+end
+local function wait_until(pred, timeout_s, label)
+  local deadline = fibers.now() + (timeout_s or 1)
+  while fibers.now() < deadline do
+    if pred() then return true end
+    perform(sleep.sleep_op(0.05))
+  end
+  if pred() then return true end
+  fail(label or 'condition not satisfied')
+end
+
+local function maybe_gsm_sources()
+  local sources = { gsm_uplinks = {} }
+  local function add(role, env)
+    local ifname = os.getenv(env)
+    if type(ifname) == 'string' and ifname ~= '' then
+      sources.gsm_uplinks[role] = {
+        schema = 'devicecode.gsm.uplink/1',
+        id = role,
+        role = role,
+        state = 'connected',
+        connected = true,
+        available = true,
+        linux = { ifname = ifname },
+      }
+    end
+  end
+  add('primary', 'DEVICECODE_RENDER_GSM_PRIMARY_IFNAME')
+  add('secondary', 'DEVICECODE_RENDER_GSM_SECONDARY_IFNAME')
+  return sources
+end
+
+local root = os.getenv('DEVICECODE_RENDER_ROOT') or '.'
+local confdir = os.getenv('DEVICECODE_RENDER_CONFDIR') or '/tmp/devicecode-render-default-configs/conf'
+local savedir = os.getenv('DEVICECODE_RENDER_SAVEDIR') or '/tmp/devicecode-render-default-configs/save'
+local outdir = os.getenv('DEVICECODE_RENDER_OUTDIR') or '/tmp/devicecode-render-default-configs/out'
+local trunk_ifname = os.getenv('DEVICECODE_RENDER_TRUNK_IFNAME') or 'eth0'
+local print_configs = os.getenv('DEVICECODE_RENDER_PRINT') ~= '0'
+
+rm_rf(confdir)
+rm_rf(savedir)
+rm_rf(outdir)
+mkdir_p(confdir)
+mkdir_p(savedir)
+mkdir_p(outdir)
+
+fibers.run(function()
+  local doc = cjson.decode(read_file(root .. '/src/configs/bigbox-v1-cm-2.json'))
+  if type(doc) ~= 'table' then fail('default config JSON did not decode') end
+  local payload = net_config.extract_payload(doc.net)
+  local base_intent, err = net_config.normalise(payload, { generation = doc.net and doc.net.rev or 1 })
+  if not base_intent then fail('default NET config normalise failed: ' .. tostring(err)) end
+  local apply_intent = intent_realiser.realise(base_intent, maybe_gsm_sources())
+
+  local activation_cmds = {}
+  local shaping_cmds = {}
+  local provider = assert(provider_loader.new({
+    provider = 'openwrt',
+    confdir = confdir,
+    savedir = savedir,
+    debounce_s = 0.01,
+    platform = { segment_trunk = { ifname = trunk_ifname, protected = true } },
+    run_cmd = function(argv)
+      activation_cmds[#activation_cmds + 1] = table.concat(argv or {}, ' ')
+      return true, nil
+    end,
+    shaper_run_cmd = function(argv)
+      shaping_cmds[#shaping_cmds + 1] = table.concat(argv or {}, ' ')
+      return true, nil
+    end,
+  }, {}))
+
+  local valid = perform(provider:validate_op({ intent = apply_intent }))
+  if not (valid and valid.ok == true) then fail('validate failed: ' .. tostring(valid and valid.err)) end
+  local result = perform(provider:apply_op({ intent = apply_intent, opts = { generation = doc.net and doc.net.rev or 1, apply_id = 'render-default-configs' } }))
+  if not (result and result.ok == true) then fail('apply failed: ' .. tostring(result and result.err)) end
+  local mgr = provider._uci_manager
+  wait_until(function()
+    local st = mgr and mgr.activation_status and mgr:activation_status() or nil
+    return st and (st.state == 'done' or st.state == 'idle')
+  end, 5, 'activation runner should settle')
+
+  local pkgs = { 'network', 'dhcp', 'firewall', 'mwan3' }
+  for _, pkg in ipairs(pkgs) do
+    local data = read_file(confdir .. '/' .. pkg)
+    write_file(outdir .. '/' .. pkg, data)
+    if print_configs then
+      io.stdout:write('\n==> ', pkg, ' <==\n')
+      io.stdout:write(data)
+      if data:sub(-1) ~= '\n' then io.stdout:write('\n') end
+    end
+  end
+
+  local manifest = {
+    schema = 'devicecode.openwrt.generated-configs/1',
+    source_config = 'src/configs/bigbox-v1-cm-2.json',
+    config_rev = doc.net and doc.net.rev or nil,
+    trunk_ifname = trunk_ifname,
+    realised_wan_members = {},
+    activation_cmds = activation_cmds,
+    shaping_cmds = shaping_cmds,
+    openwrt_names = result.openwrt_names,
+    note = 'Generated into a temporary UCI confdir; no real /etc/config files were modified by this renderer.',
+  }
+  for id, member in pairs((apply_intent.wan and apply_intent.wan.members) or {}) do
+    manifest.realised_wan_members[#manifest.realised_wan_members + 1] = {
+      id = id,
+      interface = member.interface or id,
+      route_metric = member.route_metric,
+      mwan_metric = member.mwan_metric,
+      weight = member.weight,
+    }
+  end
+  table.sort(manifest.realised_wan_members, function(a, b) return tostring(a.id) < tostring(b.id) end)
+  write_file(outdir .. '/manifest.json', assert(cjson.encode(manifest)))
+
+  provider:terminate('render complete')
+end)
+LUA
+
+"$SSH" "rm -rf '$REMOTE'; mkdir -p '$REMOTE'"
+"$SCP_TO" "$ROOT_DIR/src" "$REMOTE/src"
+"$SCP_TO" "$ROOT_DIR/vendor" "$REMOTE/vendor"
+"$SCP_TO" "$WORK/run_devicecode_render_default_configs.lua" "$REMOTE/run_devicecode_render_default_configs.lua"
+
+echo "[openwrt-vm] rendering default Devicecode /etc/config files into $OUT_DIR"
+"$SSH" "cd '$REMOTE' && DEVICECODE_RENDER_ROOT='$REMOTE' DEVICECODE_RENDER_CONFDIR='$REMOTE/conf' DEVICECODE_RENDER_SAVEDIR='$REMOTE/save' DEVICECODE_RENDER_OUTDIR='$REMOTE_OUT' DEVICECODE_RENDER_TRUNK_IFNAME='$TRUNK_IFNAME' DEVICECODE_RENDER_PRINT='$PRINT' DEVICECODE_RENDER_GSM_PRIMARY_IFNAME='${DEVICECODE_RENDER_GSM_PRIMARY_IFNAME:-}' DEVICECODE_RENDER_GSM_SECONDARY_IFNAME='${DEVICECODE_RENDER_GSM_SECONDARY_IFNAME:-}' lua ./run_devicecode_render_default_configs.lua"
+rm -rf "$OUT_DIR"
+mkdir -p "$(dirname "$OUT_DIR")"
+"$SCP_FROM" "$REMOTE_OUT" "$OUT_DIR"
+printf '[openwrt-vm] generated configs copied to %s\n' "$OUT_DIR"
+printf '[openwrt-vm] files:\n'
+find "$OUT_DIR" -maxdepth 1 -type f | while IFS= read -r f; do basename "$f"; done | sort | sed 's/^/  /'

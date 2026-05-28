@@ -24,12 +24,19 @@ local observer_manager = require 'services.net.observer_manager'
 local wan_manager = require 'services.net.wan_manager'
 local drift = require 'services.net.drift'
 local backpressure = require 'services.net.backpressure'
+local gsm_uplink_watch = require 'services.net.gsm_uplink_watch'
+local intent_realiser = require 'services.net.intent_realiser'
 
 local perform = fibers.perform
 
 local M = {}
 
 local function now() return fibers.now() end
+
+local function elapsed_ms(t0)
+	if not t0 then return nil end
+	return math.floor(((now() - t0) * 1000) + 0.5)
+end
 
 local function new_service_id(name)
 	return tostring(name or 'net')
@@ -157,15 +164,31 @@ local function copy_intent_to_model(s, intent)
 	s.routing = intent.routing or {}
 	s.wan = intent.wan or {}
 	s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
+	s.sources = s.sources or { gsm_uplinks = {} }
 	s.shaping = intent.shaping or {}
 	s.vpn = intent.vpn or {}
 	s.diagnostics = intent.diagnostics or {}
 	return s
 end
 
+
+local function realised_sources(state)
+	local snap = state.model and state.model:snapshot() or {}
+	return snap.sources or { gsm_uplinks = {} }
+end
+
+local function realise_intent(state, intent)
+	return intent_realiser.realise(intent, realised_sources(state))
+end
+
+local function realised_fingerprint(state, intent)
+	return intent_realiser.realised_fingerprint(intent, realised_sources(state))
+end
+
 local function accept_pending_intent(state, intent, reason)
 	reason = reason or 'network_config_unavailable'
-	local gen = generation_mod.new(intent.generation, intent, reason, { now = now() })
+	local apply_intent = realise_intent(state, intent)
+	local gen = generation_mod.new(apply_intent.generation, apply_intent, reason, { now = now() })
 	gen.state = 'waiting_for_hal'
 	gen.reason = reason
 	gen.apply = { state = 'waiting_for_hal', reason = reason }
@@ -174,9 +197,11 @@ local function accept_pending_intent(state, intent, reason)
 	state.active_apply = nil
 	state.pending_intent = intent
 	state.pending_apply_reason = reason
+	state.base_intent = intent
+	state.last_realised_source_fingerprint = realised_fingerprint(state, intent)
 
 	state.model:update(function (s)
-		copy_intent_to_model(s, intent)
+		copy_intent_to_model(s, apply_intent)
 		s.state = 'waiting_for_hal'
 		s.ready = false
 		s.reason = reason
@@ -200,13 +225,16 @@ local function accept_pending_intent(state, intent, reason)
 end
 
 local function start_apply_for_intent(state, intent, reason)
-	local generation = intent.generation
+	local apply_intent = realise_intent(state, intent)
+	state.base_intent = intent
+	state.last_realised_source_fingerprint = realised_fingerprint(state, intent)
+	local generation = apply_intent.generation
 	local apply_id = state.next_apply_id
 	state.next_apply_id = apply_id + 1
 
 	local gen = state.current_generation
 	if not gen or gen.generation ~= generation then
-		gen = generation_mod.new(generation, intent, reason, { now = now() })
+		gen = generation_mod.new(generation, apply_intent, reason, { now = now() })
 	end
 	generation_mod.start_apply(gen, apply_id, { now = now() })
 	state.current_generation = gen
@@ -215,7 +243,7 @@ local function start_apply_for_intent(state, intent, reason)
 	state.pending_apply_reason = nil
 
 	state.model:update(function (s)
-		copy_intent_to_model(s, intent)
+		copy_intent_to_model(s, apply_intent)
 		s.state = 'applying'
 		s.ready = false
 		s.reason = nil
@@ -238,6 +266,8 @@ local function start_apply_for_intent(state, intent, reason)
 	local ok_pub, pub_err = publish_snapshot(state)
 	if ok_pub ~= true then return nil, pub_err end
 
+	obs_event(state.svc, 'apply_started', { generation = generation, apply_id = apply_id, rev = apply_intent.rev, reason = reason })
+
 	local handle, err = apply_runtime.start_apply {
 		lifetime_scope = state.scope,
 		reaper_scope = state.scope,
@@ -245,7 +275,7 @@ local function start_apply_for_intent(state, intent, reason)
 		service_id = state.service_id,
 		generation = generation,
 		apply_id = apply_id,
-		intent = intent,
+		intent = apply_intent,
 		hal = state.hal,
 		done_tx = state.done_tx,
 	}
@@ -295,6 +325,7 @@ local function handle_config_changed(state, ev)
 	end
 
 	state.next_generation = intent.generation + 1
+	state.base_intent = intent
 	cancel_active_generation(state, 'config_replaced')
 	obs_event(state.svc, 'config_accepted', {
 		rev = intent.rev,
@@ -407,12 +438,13 @@ local function handle_apply_done(state, ev)
 
 	mark_apply_dirty(state)
 	set_status(state.svc, apply_ok and 'running' or 'degraded', reason and { reason = reason } or nil)
-	obs_event(state.svc, 'apply_completed', { generation = ev.generation, apply_id = ev.apply_id, ok = apply_ok, reason = reason })
+	local started_at = state.model:snapshot().apply and state.model:snapshot().apply.started_at or nil
+	obs_event(state.svc, 'apply_completed', { generation = ev.generation, apply_id = ev.apply_id, ok = apply_ok, reason = reason, elapsed_ms = elapsed_ms(started_at) })
 
 	local ok_pub, pub_err = publish_snapshot(state)
 	if ok_pub ~= true then return nil, pub_err end
 	if apply_ok then
-		local ok, err = wan_manager.start_speedtests(state)
+		local ok, err = wan_manager.reconcile_speedtests(state, 'apply_done')
 		mark_domain_dirty(state, 'wan_runtime')
 		publish_snapshot(state)
 		return ok, err
@@ -448,7 +480,60 @@ local function handle_observed_state(state, ev)
 	mark_domain_dirty(state, 'observed')
 	mark_domain_dirty(state, 'drift')
 	obs_event(state.svc, 'network_observed', { subject = observed_event.subject, source = observed_event.source, kind = observed_event.kind })
-	return publish_snapshot(state)
+	local ok, err = wan_manager.reconcile_speedtests(state, 'observed_state')
+	mark_domain_dirty(state, 'wan_runtime')
+	local pub_ok, pub_err = publish_snapshot(state)
+	if pub_ok ~= true then return nil, pub_err end
+	return ok, err
+end
+
+local function handle_gsm_uplink_changed(state, ev)
+	if ev.kind == 'gsm_uplink_replay_done' then return true, nil end
+	if ev.kind == 'gsm_uplink_unknown' then
+		obs_log(state.svc, 'debug', { what = 'gsm_uplink_unknown', event = ev.event })
+		return true, nil
+	end
+	local role = ev.role
+	if type(role) ~= 'string' or role == '' then return true, nil end
+	local payload = model_mod.deep_copy(ev.payload or {})
+	payload.schema = payload.schema or 'devicecode.gsm.uplink/1'
+	payload.id = payload.id or role
+	payload.role = payload.role or role
+	payload.updated_at = now()
+	state.model:update(function (s)
+		s.sources = s.sources or { gsm_uplinks = {} }
+		s.sources.gsm_uplinks = s.sources.gsm_uplinks or {}
+		s.sources.gsm_uplinks[role] = payload
+		s.stats.gsm_uplink_updates = (s.stats.gsm_uplink_updates or 0) + 1
+		return project_dependencies(state, s)
+	end)
+	mark_domain_dirty(state, 'sources')
+	mark_summary_dirty(state)
+	obs_event(state.svc, 'gsm_uplink_changed', {
+		role = role,
+		state = payload.state,
+		connected = payload.connected == true,
+		ifname = payload.linux and payload.linux.ifname or payload.interface,
+	})
+	local structural_ok, structural_err = true, nil
+	if state.base_intent then
+		local fp = realised_fingerprint(state, state.base_intent)
+		if fp ~= state.last_realised_source_fingerprint then
+			local next_intent = model_mod.deep_copy(state.base_intent)
+			next_intent.generation = state.next_generation
+			state.next_generation = state.next_generation + 1
+			state.base_intent = next_intent
+			cancel_active_generation(state, 'gsm_uplink_binding_changed')
+			structural_ok, structural_err = accept_pending_intent(state, next_intent, 'gsm_uplink_binding_changed')
+			if structural_ok == true then structural_ok, structural_err = reconcile_apply_admission(state, 'gsm_uplink_binding_changed') end
+		end
+	end
+	local ok, err = wan_manager.reconcile_speedtests(state, 'gsm_uplink_changed')
+	mark_domain_dirty(state, 'wan_runtime')
+	local pub_ok, pub_err = publish_snapshot(state)
+	if pub_ok ~= true then return nil, pub_err end
+	if structural_ok ~= true then return nil, structural_err end
+	return ok, err
 end
 
 local function ensure_observer_started(state, reason)
@@ -557,6 +642,11 @@ local function handle_event(state, ev)
 		return handle_apply_done(state, ev)
 	elseif ev.kind == 'observed_state' then
 		return handle_observed_state(state, ev)
+	elseif ev.kind == 'gsm_uplink_changed' or ev.kind == 'gsm_uplink_replay_done' or ev.kind == 'gsm_uplink_unknown' then
+		return handle_gsm_uplink_changed(state, ev)
+	elseif ev.kind == 'gsm_uplink_watch_closed' then
+		state.gsm_uplink_watch = nil
+		return true, nil
 	elseif ev.kind == 'net_speedtest_done' then
 		return handle_speedtest_done(state, ev)
 	elseif ev.kind == 'net_live_weights_done' then
@@ -601,6 +691,7 @@ function M.run(scope, params)
 	local published = publisher.new_state()
 	local dirty = publisher.mark_all(publisher.new_dirty_state())
 	local cfg_watch
+	local gsm_watch
 
 	if conn then
 		local werr
@@ -611,6 +702,15 @@ function M.run(scope, params)
 			closed_kind = 'config_closed',
 		})
 		if not cfg_watch then error(werr or 'net config watch failed', 2) end
+
+		if params.gsm_uplink_watch ~= false then
+			local gerr
+			gsm_watch, gerr = gsm_uplink_watch.open(conn, {
+				queue_len = params.gsm_uplink_queue_len or ((backpressure.policy.gsm_uplinks and backpressure.policy.gsm_uplinks.queue_len) or 8),
+				full = params.gsm_uplink_full or ((backpressure.policy.gsm_uplinks and backpressure.policy.gsm_uplinks.full) or 'reject_newest'),
+			})
+			if not gsm_watch then error(gerr or 'net gsm uplink watch failed', 2) end
+		end
 	end
 
 	local cap_deps = assert(cap_deps_mod.open(conn, {
@@ -634,6 +734,7 @@ function M.run(scope, params)
 		published = published,
 		dirty = dirty,
 		config_watch = cfg_watch,
+		gsm_uplink_watch = gsm_watch,
 		observed_sub = nil,
 		observer = nil,
 		observe = params.observe ~= false,
@@ -670,6 +771,7 @@ function M.run(scope, params)
 		cancel_active_generation(state, reason)
 		stop_observer(state, reason)
 		if cfg_watch then cfg_watch:close(); cfg_watch = nil end
+		if gsm_watch then gsm_watch:close(); gsm_watch = nil end
 		cap_deps:terminate(reason)
 		done_tx:close(reason)
 		publisher.cleanup_now(conn, published)

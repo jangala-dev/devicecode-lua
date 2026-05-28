@@ -7,15 +7,36 @@ VM_DIR="$(dirname "$SCRIPT_DIR")"
 # shellcheck disable=SC1091
 . "$VM_DIR/env.sh"
 
-if [ -f "${OPENWRT_PID}" ]; then
-	pid="$(cat "${OPENWRT_PID}")"
-	if kill -0 "$pid" 2>/dev/null; then
-		echo "[openwrt-vm] stopping pid ${pid}"
+stop_pid() {
+	pid="$1"
+	label="$2"
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		echo "[openwrt-vm] stopping ${label} pid ${pid}"
 		kill "$pid" || true
 		sleep 1
 		if kill -0 "$pid" 2>/dev/null; then
 			kill -9 "$pid" || true
 		fi
 	fi
+}
+
+if [ -f "${OPENWRT_PID}" ]; then
+	pid="$(cat "${OPENWRT_PID}")"
+	stop_pid "$pid" "recorded"
 	rm -f "${OPENWRT_PID}"
+fi
+
+# Some failed or interrupted runs can leave QEMU alive after the pidfile is
+# removed.  If the management SSH port is still owned by a qemu-system process
+# belonging to this user, stop it too so the next run can bind hostfwd again.
+if command -v ss >/dev/null 2>&1; then
+	port_pids="$(ss -H -ltnp "sport = :${OPENWRT_SSH_PORT}" 2>/dev/null 		| sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' 		| sort -u)"
+	for pid in $port_pids; do
+		cmd="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+		case "$cmd" in
+			qemu-system-*)
+				stop_pid "$pid" "stale port ${OPENWRT_SSH_PORT}"
+				;;
+		esac
+	done
 fi
