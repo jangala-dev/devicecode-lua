@@ -29,9 +29,25 @@ build-vendor:
 	@cp -r $(VENDOR_DIR)/lua-bus/src/. $(BUILD_DIR)/lib/
 	@echo "Vendor build complete."
 
-# Build-All: Build source and vendor libs
+# Build-All: Build source and vendor libs, then substitute secrets
 .PHONY: build-all
-build-all: build build-vendor
+build-all: build build-vendor substitute-secrets
+
+# Substitute-Secrets: Replace $VAR placeholders in build configs using .env.secret
+.PHONY: substitute-secrets
+substitute-secrets:
+	@echo "Substituting secrets in build configs..."
+	@if [ ! -f .env.secret ]; then \
+		echo "WARNING: .env.secret not found — \$$VAR placeholders in build configs will not be replaced."; \
+	else \
+		while IFS='=' read -r key value; do \
+			[ -z "$$key" ] && continue; \
+			find $(BUILD_DIR)/configs -name "*.json" | while read -r f; do \
+				sed -i 's|\$$'"$$key"'|'"$$value"'|g' "$$f"; \
+			done; \
+		done < .env.secret; \
+	fi
+	@echo "Secret substitution complete."
 
 # Env: Pin each vendor submodule to the revision specified in .env
 .PHONY: env
@@ -94,7 +110,8 @@ help:
 	@echo "Targets:"
 	@echo "  build         Copy source files into $(BUILD_DIR)/"
 	@echo "  build-vendor  Copy vendor library sources into $(BUILD_DIR)/lib/"
-	@echo "  build-all     Run both build and build-vendor (default)"
+	@echo "  substitute-secrets  Replace \$$VAR placeholders in $(BUILD_DIR)/configs/ using .env.secret"
+	@echo "  build-all     Run build, build-vendor, and substitute-secrets (default)"
 	@echo "  env           Pin vendor submodules to revisions in .env"
 	@echo "  test          Run the devicecode test suite"
 	@echo "  test-all      Run devicecode and all vendor test suites"

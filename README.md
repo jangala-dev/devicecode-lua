@@ -31,6 +31,25 @@ DEVICECODE_CONFIG_DIR=/path/to/config/dir \
 CONFIG_TARGET=config \
 luajit main.lua
 ```
+## Build
+
+Run `make build-all` to copy sources into `build/` and inject secrets into config files.
+
+### Secret substitution
+
+Config files under `src/configs/` may contain `$VAR` placeholders for sensitive values (credentials, URLs, etc.). During `make build-all`, these are replaced in the **build output only** — `src/` is never modified.
+
+Create `.env.secret` in the repository root with the following keys:
+
+```
+SWITCH_USERNAME=
+SWITCH_PASSWORD=
+UNIFI_ADDRESS=
+CLOUD_URL=
+```
+
+`.env.secret` is listed in `.gitignore` and must never be committed. If the file is absent, `make build-all` will print a warning and leave placeholders unreplaced.
+
 ## Vendor Versions
 
 `lua-fibers`: v0.8.1
