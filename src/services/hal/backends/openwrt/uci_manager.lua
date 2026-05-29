@@ -121,8 +121,9 @@ local function is_uci_identifier(s)
 	return type(s) == 'string' and s ~= '' and s:match('^[A-Za-z0-9_]+$') ~= nil
 end
 
+-- UCI section types (e.g. wifi-device, wifi-iface) may contain hyphens.
 local function is_uci_section_type(s)
-	return type(s) == 'string' and s ~= '' and s:match('^[A-Za-z0-9_-]+$') ~= nil
+	return type(s) == 'string' and s ~= '' and s:match('^[A-Za-z0-9_%-]+$') ~= nil
 end
 
 local function validate_pkg(s, label)
@@ -197,7 +198,7 @@ local function validate_change(record, ch, i)
 		end
 		if ch.value == nil then
 			if not is_uci_section_type(ch.option) then
-				return nil, 'change ' .. i .. ' named section type must be a valid UCI section type'
+				return nil, 'change ' .. i .. ' named section type must be a UCI identifier'
 			end
 		else
 			local _, verr = to_uci_value(ch.value)
