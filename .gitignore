@@ -3,3 +3,4 @@ scratchpad
 src/services/modem-*
 docs/
 build/
+.env.secret
