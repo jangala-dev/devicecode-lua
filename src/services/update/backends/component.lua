@@ -107,6 +107,11 @@ local function validate_stage_reply(reply)
 	return true, nil
 end
 
+local function phase_error(prefix, err)
+	if err == nil or err == '' then return prefix end
+	return prefix .. ':' .. tostring(err)
+end
+
 local function describe_artifact(artifact)
 	if type(artifact) == 'table' and type(artifact.describe) == 'function' then
 		local ok, rec = pcall(function () return artifact:describe() end)
@@ -115,9 +120,39 @@ local function describe_artifact(artifact)
 	return type(artifact) == 'table' and artifact or nil
 end
 
+local function component_snapshot(snapshot, component)
+	if type(snapshot) ~= 'table' then return nil end
+	local by_id = snapshot.by_id or snapshot.components
+	local rec = type(by_id) == 'table' and by_id[component] or nil
+	if type(rec) == 'table' and type(rec.state) == 'table' then return rec.state end
+	if type(rec) == 'table' then return rec end
+	if snapshot.component == component then return snapshot.state or snapshot end
+	return nil
+end
+
+local function latest_component_state(self, component)
+	local obs = self._observer
+	if obs and type(obs.snapshot) == 'function' then
+		return component_snapshot(obs:snapshot(), component)
+	end
+	return nil
+end
+
+local function require_component_boot_id(self, component)
+	local state = latest_component_state(self, component)
+	local sw = state and state.software or nil
+	if type(sw) ~= 'table' or sw.boot_id == nil or sw.boot_id == '' then
+		return nil, 'component_software_boot_id_unavailable'
+	end
+	return true, nil
+end
+
 function Backend:stage_op(job, ctx)
 	return unwrap_scope_value(fibers.run_scope_op(function ()
 		local component = component_of(self, job)
+		local ready, ready_err = require_component_boot_id(self, component)
+		if ready ~= true then return nil, ready_err end
+
 		local ref = artifact_ref(job)
 		if not ref then return nil, 'artifact_ref_required' end
 		if not self._artifact_store or type(self._artifact_store.open_op) ~= 'function' then
@@ -141,7 +176,7 @@ function Backend:stage_op(job, ctx)
 			metadata = metadata_of(job),
 		}
 		local prepared, perr = fibers.perform(call_component_op(self, component, 'prepare-update', prepare_payload))
-		if prepared == nil then return nil, perr or 'component_prepare_update_failed' end
+		if prepared == nil then return nil, phase_error('component_prepare_update_failed', perr) end
 
 		local source, serr = fibers.perform(self._artifact_store:open_source_op(ref))
 		if source == nil then return nil, serr or 'artifact_source_open_failed' end
@@ -157,7 +192,7 @@ function Backend:stage_op(job, ctx)
 			metadata = metadata_of(job),
 		}
 		local reply, err = fibers.perform(call_component_op(self, component, 'stage-update', payload, { timeout = false }))
-		if reply == nil then return nil, err or 'component_stage_update_failed' end
+		if reply == nil then return nil, phase_error('component_stage_update_failed', err) end
 		local ok_reply, rerr = validate_stage_reply(reply)
 		if ok_reply ~= true then return nil, rerr end
 		return {
@@ -187,27 +222,31 @@ function Backend:stage_op(job, ctx)
 	end), 'component_stage')
 end
 
-local function component_snapshot(snapshot, component)
-	if type(snapshot) ~= 'table' then return nil end
-	local by_id = snapshot.by_id or snapshot.components
-	local rec = type(by_id) == 'table' and by_id[component] or nil
-	if type(rec) == 'table' and type(rec.state) == 'table' then return rec.state end
-	if type(rec) == 'table' then return rec end
-	if snapshot.component == component then return snapshot.state or snapshot end
-	return nil
-end
-
-local function latest_component_state(self, component)
-	local obs = self._observer
-	if obs and type(obs.snapshot) == 'function' then
-		return component_snapshot(obs:snapshot(), component)
-	end
-	return nil
-end
-
 local function updater_state(state)
 	if type(state) ~= 'table' then return nil end
 	return state.update or state.updater
+end
+
+local MCU_CRITICAL_FACTS = { 'software', 'updater', 'health' }
+
+local function fact_present(v)
+	if type(v) == 'table' then return next(v) ~= nil end
+	return v ~= nil
+end
+
+local function missing_mcu_critical_facts(state)
+	local missing = {}
+	state = type(state) == 'table' and state or {}
+	if not fact_present(state.software) then
+		missing[#missing + 1] = 'software'
+	end
+	if not fact_present(updater_state(state)) then
+		missing[#missing + 1] = 'updater'
+	end
+	if not fact_present(state.health) then
+		missing[#missing + 1] = 'health'
+	end
+	return missing
 end
 
 function Backend:pre_commit_record_op(job, ctx)
@@ -251,6 +290,19 @@ function Backend:evaluate_reconcile(job, snapshot, ctx)
 
 	if type(upd) == 'table' and (upd.state == 'failed' or upd.state == 'rollback_detected') then
 		return { done = true, ok = false, reason = upd.state, state = copy(state) }
+	end
+
+	if component == 'mcu' then
+		local missing = missing_mcu_critical_facts(state)
+		if #missing > 0 then
+			return {
+				done = false,
+				reason = 'waiting_for_mcu_critical_state',
+				missing_facts = missing,
+				required_facts = copy(MCU_CRITICAL_FACTS),
+				state = copy(state),
+			}
+		end
 	end
 
 	if type(sw) == 'table' and expected and sw.image_id == expected and pre_boot and sw.boot_id ~= pre_boot then

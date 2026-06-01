@@ -526,6 +526,60 @@ function tests.test_lane_writer_pauses_writes_while_recovery_drain_is_active()
 	end)
 end
 
+function tests.test_lane_writer_drops_queued_frames_from_stale_session()
+	fibers.run(function (scope)
+		local rpc_tx, rpc_rx = mailbox.new(8, { full = 'reject_newest' })
+		local written = {}
+		local session_gate = {
+			current_session = {
+				link_id = 'link-a',
+				link_generation = 1,
+				session_generation = 2,
+				peer_sid = 'new-peer',
+			},
+			drop_reason = 'peer_sid_changed',
+		}
+
+		queue.try_admit_required(rpc_tx, {
+			kind = 'send_frame',
+			frame = 'stale-frame',
+			session = {
+				link_id = 'link-a',
+				link_generation = 1,
+				session_generation = 1,
+				peer_sid = 'old-peer',
+			},
+		}, 'stale_frame')
+		queue.try_admit_required(rpc_tx, {
+			kind = 'send_frame',
+			frame = 'current-frame',
+			session = {
+				link_id = 'link-a',
+				link_generation = 1,
+				session_generation = 2,
+				peer_sid = 'new-peer',
+			},
+		}, 'current_frame')
+		rpc_tx:close('rpc_done')
+
+		local result = io_mod.run_lane_writer(scope, {
+			control_rx = closed_rx('control_done'),
+			rpc_rx = rpc_rx,
+			bulk_rx = closed_rx('bulk_done'),
+			session_gate = session_gate,
+			write_frame_op = function (frame)
+				return op.guard(function ()
+					written[#written + 1] = frame
+					return op.always(true, nil)
+				end)
+			end,
+		})
+
+		assert_eq(result.frames_written, 1)
+		assert_eq(written[1], 'current-frame')
+	end)
+end
+
 function tests.test_lane_writer_delays_hello_until_recovery_quiet_expires()
 	fibers.run(function (scope)
 		local control_tx, control_rx = mailbox.new(8, { full = 'reject_newest' })

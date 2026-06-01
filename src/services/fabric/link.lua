@@ -689,10 +689,16 @@ function M.composed_components(scope, params, service_caps)
 		{ full = 'reject_newest' }
 	)
 
+	local session_gate = {
+		current_session = nil,
+		drop_reason = 'no_session',
+	}
+
 	local outbound_gate = session_mod.new_outbound_gate {
 		tx_control = outbound_control_tx,
 		tx_rpc     = outbound_rpc_tx,
 		tx_bulk    = outbound_bulk_tx,
+		session_gate = session_gate,
 	}
 
 	local local_rx = params.local_rx
@@ -783,6 +789,7 @@ function M.composed_components(scope, params, service_caps)
 				write_frame_op = write_frame_op,
 				flush_op = flush_op,
 				recovery_gate = recovery_gate,
+				session_gate = session_gate,
 				trace_io = trace_io,
 				flush_each = writer_cfg.flush_each ~= false,
 				rpc_quota = writer_cfg.rpc_quota,

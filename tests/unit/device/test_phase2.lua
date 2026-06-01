@@ -911,6 +911,204 @@ local function fake_live_conn()
 	return c
 end
 
+local function recv_observation(rx, timeout_s)
+	local which, ev, err = fibers.perform(fibers.named_choice {
+		event = rx:recv_op(),
+		timeout = sleep.sleep_op(timeout_s or 1),
+	})
+	if which == 'timeout' then return nil, 'timeout' end
+	return ev, err
+end
+
+local function assert_no_observation(rx, timeout_s)
+	local ev, err = recv_observation(rx, timeout_s or 0.02)
+	assert_nil(ev, 'unexpected observation: ' .. tostring(ev and ev.tag or err))
+end
+
+local function wait_for_watches(conn, count)
+	local deadline = fibers.now() + 1
+	while #conn.watches < count and fibers.now() < deadline do
+		fibers.perform(sleep.sleep_op(0.001))
+	end
+	assert_eq(#conn.watches, count, 'observer did not open expected retained watches')
+end
+
+local function watches_by_fact(conn)
+	local out = {}
+	for _, watch in ipairs(conn.watches) do
+		out[watch.topic[#watch.topic]] = watch
+	end
+	return out
+end
+
+local function send_watch_event(watch, ev)
+	assert_not_nil(watch, 'missing retained watch')
+	assert_true(fibers.perform(watch.tx:send_op(ev)))
+end
+
+local function start_observer_worker(scope, conn, tx, component)
+	local ok, err = scope:spawn(function ()
+		observer.run(scope, {
+			conn = conn,
+			tx = tx,
+			generation = 1,
+			component_id = 'mcu',
+			component = component,
+		})
+	end)
+	assert_true(ok, err)
+end
+
+function tests.test_observer_retained_replay_done_does_not_overwrite_retained_fact()
+	fibers.run(function ()
+		local st, _rep, primary = fibers.run_scope(function (scope)
+			local conn = fake_live_conn()
+			local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+			start_observer_worker(scope, conn, tx, {
+				module = component_mcu,
+				facts = {
+					software = { watch_topic = { 'raw', 'member', 'mcu', 'state', 'software' } },
+				},
+			})
+			wait_for_watches(conn, 1)
+
+			send_watch_event(conn.watches[1], {
+				op = 'retain',
+				payload = { image_id = 'mcu-dev-15.0', boot_id = 'boot-new' },
+			})
+			local ev = assert(recv_observation(rx))
+			assert_eq(ev.tag, 'fact_retained')
+			assert_eq(ev.fact, 'software')
+			assert_eq(ev.payload.image_id, 'mcu-dev-15.0')
+			assert_eq(ev.payload.boot_id, 'boot-new')
+
+			send_watch_event(conn.watches[1], { op = 'replay_done' })
+			assert_no_observation(rx, 0.02)
+			scope:cancel('test_done')
+		end)
+		assert_eq(st, 'cancelled', tostring(primary))
+		assert_eq(primary, 'test_done')
+	end)
+end
+
+function tests.test_observer_replay_done_without_retained_fact_does_not_refresh_required_freshness()
+	fibers.run(function ()
+		local st, _rep, primary = fibers.run_scope(function (scope)
+			local conn = fake_live_conn()
+			local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+			start_observer_worker(scope, conn, tx, {
+				module = component_mcu,
+				required_facts = { 'software' },
+				observe_opts = { stale_after_s = 0.05 },
+				facts = {
+					software = { watch_topic = { 'raw', 'member', 'mcu', 'state', 'software' } },
+				},
+			})
+			wait_for_watches(conn, 1)
+			fibers.perform(sleep.sleep_op(0.04))
+
+			send_watch_event(conn.watches[1], { op = 'replay_done' })
+			local ev, err = recv_observation(rx, 0.04)
+			assert_not_nil(ev, err)
+			assert_eq(ev.tag, 'source_down')
+			assert_eq(ev.reason, 'stale')
+			scope:cancel('test_done')
+		end)
+		assert_eq(st, 'cancelled', tostring(primary))
+		assert_eq(primary, 'test_done')
+	end)
+end
+
+function tests.test_observer_mcu_critical_replay_metadata_does_not_overwrite_facts()
+	fibers.run(function ()
+		local st, _rep, primary = fibers.run_scope(function (scope)
+			local cat = assert(config.to_catalogue({
+				schema = config.SCHEMA,
+				components = {
+					mcu = {
+						subtype = 'mcu',
+						required_facts = { 'software', 'updater', 'health' },
+						facts = {
+							software = topics.raw_member_state('mcu', 'software'),
+							updater = topics.raw_member_state('mcu', 'updater'),
+							health = topics.raw_member_state('mcu', 'health'),
+						},
+					},
+				},
+			}))
+			local conn = fake_live_conn()
+			local tx, rx = mailbox.new(16, { full = 'reject_newest' })
+			local m = model_mod.new()
+			m:apply_catalogue(1, cat)
+			start_observer_worker(scope, conn, tx, cat.components.mcu)
+			wait_for_watches(conn, 3)
+
+			local watches = watches_by_fact(conn)
+			send_watch_event(watches.software, {
+				op = 'retain',
+				payload = { image_id = 'mcu-dev-15.0', boot_id = 'boot-new' },
+			})
+			send_watch_event(watches.updater, {
+				op = 'retain',
+				payload = { state = 'idle', job_id = 'job-1' },
+			})
+			send_watch_event(watches.health, {
+				op = 'retain',
+				payload = { state = 'ok' },
+			})
+
+			for _ = 1, 3 do
+				local ev = assert(recv_observation(rx))
+				assert_eq(ev.tag, 'fact_retained')
+				assert_true(m:apply_observation(1, ev))
+			end
+
+			send_watch_event(watches.software, { op = 'replay_done' })
+			send_watch_event(watches.updater, { op = 'replay_done' })
+			send_watch_event(watches.health, { op = 'replay_done' })
+			assert_no_observation(rx, 0.03)
+
+			local rec = m:snapshot().components.mcu
+			assert_eq(rec.raw_facts.software.image_id, 'mcu-dev-15.0')
+			assert_eq(rec.raw_facts.software.boot_id, 'boot-new')
+			assert_eq(rec.raw_facts.updater.state, 'idle')
+			assert_eq(rec.raw_facts.health, 'ok')
+			scope:cancel('test_done')
+		end)
+		assert_eq(st, 'cancelled', tostring(primary))
+		assert_eq(primary, 'test_done')
+	end)
+end
+
+function tests.test_observer_unretain_and_unknown_retained_watch_events_are_strict()
+	fibers.run(function ()
+		local st, _rep, primary = fibers.run_scope(function (scope)
+			local conn = fake_live_conn()
+			local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+			start_observer_worker(scope, conn, tx, {
+				facts = {
+					software = { watch_topic = { 'raw', 'member', 'mcu', 'state', 'software' } },
+				},
+			})
+			wait_for_watches(conn, 1)
+
+			send_watch_event(conn.watches[1], { op = 'unretain' })
+			local ev = assert(recv_observation(rx))
+			assert_eq(ev.tag, 'fact_unretained')
+			assert_eq(ev.fact, 'software')
+
+			send_watch_event(conn.watches[1], { op = 'replace', payload = { image_id = 'bad' } })
+			ev = assert(recv_observation(rx))
+			assert_eq(ev.tag, 'source_down')
+			assert_eq(ev.reason, 'unknown_fact_event:software:replace')
+			assert_no_observation(rx, 0.02)
+			scope:cancel('test_done')
+		end)
+		assert_eq(st, 'cancelled', tostring(primary))
+		assert_eq(primary, 'test_done')
+	end)
+end
+
 function tests.test_config_replacement_with_live_observer_terminates_raw_watch()
 	fibers.run(function (scope)
 		local conn = fake_live_conn()
