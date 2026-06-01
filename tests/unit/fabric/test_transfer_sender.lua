@@ -244,8 +244,104 @@ function tests.test_sender_sends_begin_chunks_commit_and_returns_after_done()
 	assert_eq(seen[2], 'xfer_chunk')
 	assert_eq(seen[3], 'xfer_chunk')
 	assert_eq(seen[4], 'xfer_commit')
-	assert_eq(progress[1].sent, 3)
-	assert_eq(progress[2].sent, 6)
+	assert_eq(progress[1].status, 'waiting_ready')
+	assert_eq(progress[1].sent, 0)
+	assert_eq(progress[2].status, 'sending')
+	assert_eq(progress[2].sent, 3)
+	assert_eq(progress[3].status, 'sending')
+	assert_eq(progress[3].sent, 6)
+end
+
+function tests.test_sender_retries_begin_while_waiting_ready_and_then_completes()
+	local progress = {}
+	local req = make_req {
+		data = 'abc',
+		size = 3,
+		xfer_id = 'xfer-begin-retry',
+		timeout_s = 2.5,
+		on_progress = function (p)
+			progress[#progress + 1] = p
+			return true
+		end,
+	}
+
+	local out = collect_result(req, function (io)
+		local begin1 = recv_with_timeout(io.control_rx, 'begin')
+		assert_eq(begin1.frame.type, 'xfer_begin')
+		assert_eq(begin1.frame.xfer_id, 'xfer-begin-retry')
+		assert_eq(queue.try_recv_now(io.bulk_rx), nil, 'sender must not send bulk before xfer_ready')
+
+		local begin2 = recv_with_timeout(io.control_rx, 'begin retry', 1.3)
+		assert_eq(begin2.frame.type, 'xfer_begin')
+		assert_eq(begin2.frame.xfer_id, 'xfer-begin-retry')
+		assert_eq(queue.try_recv_now(io.bulk_rx), nil, 'retry must not send bulk before xfer_ready')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-begin-retry')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-begin-retry', 0)))
+
+		local chunk = recv_with_timeout(io.bulk_rx, 'chunk after ready')
+		assert_eq(chunk.frame.type, 'xfer_chunk')
+		assert_eq(chunk.frame.offset, 0)
+		assert_eq(chunk.frame.data, 'abc')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-begin-retry', 3)))
+		local commit = recv_with_timeout(io.control_rx, 'commit')
+		assert_eq(commit.frame.type, 'xfer_commit')
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-begin-retry')))
+	end, { timeout_s = 2.5 })
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.sent_bytes, 3)
+	assert_eq(progress[1].status, 'waiting_ready')
+	assert_eq(progress[1].sent, 0)
+	assert_eq(progress[2].status, 'waiting_ready')
+	assert_eq(progress[2].sent, 0)
+	assert_eq(progress[3].status, 'sending')
+	assert_eq(progress[3].sent, 3)
+end
+
+function tests.test_sender_treats_need_zero_as_implicit_ready()
+	local req = make_req {
+		data = 'abc',
+		size = 3,
+		xfer_id = 'xfer-implicit-ready',
+		timeout_s = 0.2,
+	}
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-implicit-ready', 0)))
+		local chunk = recv_with_timeout(io.bulk_rx, 'chunk after implicit ready')
+		assert_eq(chunk.frame.type, 'xfer_chunk')
+		assert_eq(chunk.frame.offset, 0)
+		assert_eq(chunk.frame.data, 'abc')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-implicit-ready', 3)))
+		local commit = recv_with_timeout(io.control_rx, 'commit')
+		assert_eq(commit.frame.type, 'xfer_commit')
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-implicit-ready')))
+	end, { timeout_s = 0.2 })
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.sent_bytes, 3)
+end
+
+function tests.test_sender_rejects_nonzero_need_while_waiting_ready()
+	local req = make_req {
+		data = 'abc',
+		size = 3,
+		xfer_id = 'xfer-waiting-ready-bad-need',
+		timeout_s = 0.2,
+	}
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-waiting-ready-bad-need', 1)))
+	end, { timeout_s = 0.2 })
+
+	assert_eq(out.status, 'failed')
+	assert_match(out.value, 'unexpected_need')
 end
 
 function tests.test_sender_trace_logs_are_quiet_by_default_and_enabled_by_flag()
@@ -444,6 +540,38 @@ function tests.test_sender_timeout_sends_abort_and_fails_attempt()
 	assert_match(out.value, 'timeout')
 end
 
+function tests.test_sender_waiting_ready_timeout_reports_begin_attempts()
+	local req = make_req {
+		data = 'abc',
+		size = 3,
+		xfer_id = 'xfer-waiting-ready-timeout',
+		timeout_s = 10,
+		begin_retry_interval_s = 0.01,
+		begin_max_attempts = 3,
+		begin_startup_timeout_s = 0.05,
+	}
+
+	local out = collect_result(req, function (io)
+		local begin1 = recv_with_timeout(io.control_rx, 'begin')
+		assert_eq(begin1.frame.type, 'xfer_begin')
+
+		local begin2 = recv_with_timeout(io.control_rx, 'begin retry 2', 0.1)
+		assert_eq(begin2.frame.type, 'xfer_begin')
+		assert_eq(begin2.frame.xfer_id, 'xfer-waiting-ready-timeout')
+
+		local begin3 = recv_with_timeout(io.control_rx, 'begin retry 3', 0.1)
+		assert_eq(begin3.frame.type, 'xfer_begin')
+		assert_eq(begin3.frame.xfer_id, 'xfer-waiting-ready-timeout')
+		assert_eq(queue.try_recv_now(io.bulk_rx), nil, 'waiting_ready timeout must not send bulk')
+	end, { timeout_s = 10 })
+
+	assert_eq(out.status, 'failed')
+	assert_match(out.value, 'waiting_ready_timeout')
+	assert_match(out.value, 'state=waiting_ready')
+	assert_match(out.value, 'sent=0')
+	assert_match(out.value, 'begin_attempts=3')
+end
+
 function tests.test_sender_remote_abort_fails_without_echoing_abort()
 	local req = make_req { data = 'abc', size = 3, xfer_id = 'xfer-abort' }
 
@@ -507,6 +635,99 @@ function tests.test_sender_recovers_from_future_need_while_chunk_pending()
 
 	assert_eq(out.status, 'ok', tostring(out.value))
 	assert_eq(out.value.sent_bytes, 6)
+end
+
+function tests.test_sender_resends_commit_on_duplicate_need_size_after_interval()
+	local req = make_req {
+		data = 'abc',
+		size = 3,
+		xfer_id = 'xfer-commit-resend',
+		timeout_s = 1.0,
+	}
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-commit-resend')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-resend', 0)))
+		recv_with_timeout(io.bulk_rx, 'chunk')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-resend', 3)))
+		local commit1 = recv_with_timeout(io.control_rx, 'commit')
+		assert_eq(commit1.frame.type, 'xfer_commit')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-resend', 3)))
+		fibers.perform(sleep.sleep_op(0.01))
+		assert_eq(queue.try_recv_now(io.control_rx), nil, 'immediate duplicate commit need should be coalesced')
+
+		fibers.perform(sleep.sleep_op(0.3))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-resend', 3)))
+		local commit2 = recv_with_timeout(io.control_rx, 'commit retry')
+		assert_eq(commit2.frame.type, 'xfer_commit')
+		assert_eq(commit2.frame.xfer_id, 'xfer-commit-resend')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-commit-resend')))
+	end, { timeout_s = 1.0 })
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.sent_bytes, 3)
+	assert_eq(out.value.commit_resends, 1)
+end
+
+function tests.test_sender_ignores_stale_need_while_committing()
+	local req = make_req {
+		data = 'abc',
+		size = 3,
+		xfer_id = 'xfer-commit-stale-need',
+		timeout_s = 0.2,
+	}
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-commit-stale-need')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-stale-need', 0)))
+		recv_with_timeout(io.bulk_rx, 'chunk')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-stale-need', 3)))
+		local commit = recv_with_timeout(io.control_rx, 'commit')
+		assert_eq(commit.frame.type, 'xfer_commit')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-stale-need', 0)))
+		fibers.perform(sleep.sleep_op(0.01))
+		assert_eq(queue.try_recv_now(io.control_rx), nil, 'stale commit need should not resend commit')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-commit-stale-need')))
+	end, { timeout_s = 0.2 })
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.sent_bytes, 3)
+	assert_eq(out.value.commit_resends, 0)
+end
+
+function tests.test_sender_future_need_while_committing_times_out_without_refresh()
+	local req = make_req {
+		data = 'abc',
+		size = 3,
+		xfer_id = 'xfer-commit-future-need',
+		timeout_s = 0.06,
+	}
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-commit-future-need')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-future-need', 0)))
+		recv_with_timeout(io.bulk_rx, 'chunk')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-future-need', 3)))
+		local commit = recv_with_timeout(io.control_rx, 'commit')
+		assert_eq(commit.frame.type, 'xfer_commit')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-future-need', 6)))
+	end, { timeout_s = 0.06 })
+
+	assert_eq(out.status, 'failed')
+	assert_match(out.value, 'timeout')
+	assert_match(out.value, 'state=committing')
+	assert_match(out.value, 'last_need_next=6')
 end
 
 function tests.test_sender_source_read_error_sends_abort_and_fails()

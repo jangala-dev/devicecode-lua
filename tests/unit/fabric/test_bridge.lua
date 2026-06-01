@@ -34,6 +34,33 @@ local function try_recv(rx)
 	return queue.try_recv_now(rx)
 end
 
+local function topic_key(topic)
+	return table.concat(topic or {}, '/')
+end
+
+local function recv_topic_set(rx, n, label)
+	local out = {}
+	for i = 1, n do
+		local cmd = recv_with_timeout(rx, (label or 'topic command') .. ' ' .. tostring(i))
+		out[topic_key(cmd.topic)] = cmd
+	end
+	return out
+end
+
+local function recv_state_with(rx, pred, label, timeout)
+	timeout = timeout or 0.25
+	local deadline = fibers.now() + timeout
+	while fibers.now() < deadline do
+		local item = try_recv(rx)
+		if item ~= nil then
+			if pred(item) then return item end
+		else
+			fibers.perform(sleep.sleep_op(0.001))
+		end
+	end
+	fail('timed out waiting for ' .. tostring(label or 'state'))
+end
+
 local function ctx(gen, sid)
 	return session.new_session_context {
 		link_id = 'link-a',
@@ -178,6 +205,16 @@ function tests.test_remote_retained_publish_emits_bus_command_and_updates_import
 		assert_eq(cmd.topic[4], 'state')
 		assert_eq(cmd.topic[5], 'software')
 		assert_eq(cmd.session.peer_sid, 'sid-1')
+		local state = recv_state_with(h.state_rx, function (ev)
+			return ev.kind == 'component_snapshot'
+				and ev.snapshot
+				and ev.snapshot.imported_retained_count == 1
+				and ev.snapshot.last_imported_topic == 'raw/member/mcu/state/software'
+		end, 'bridge import status')
+		assert_eq(state.snapshot.peer_sid, 'sid-1')
+		assert_eq(state.snapshot.session_generation, 1)
+		assert_not_nil(state.snapshot.last_imported_at)
+		assert_eq(state.snapshot.imported_retained_topics[1], 'raw/member/mcu/state/software')
 		close_bridge(h)
 	end)
 end
@@ -233,6 +270,119 @@ function tests.test_peer_session_drop_clears_imported_retained_state_by_bus_comm
 		assert_eq(cmd.kind, 'unretain')
 		assert_eq(cmd.topic[5], 'software')
 		assert_eq(cmd.session.peer_sid, 'sid-1')
+		local state = recv_state_with(h.state_rx, function (ev)
+			return ev.kind == 'component_snapshot'
+				and ev.snapshot
+				and ev.snapshot.last_clear_reason == 'bad_frame_limit'
+		end, 'bridge clear status')
+		assert_eq(state.snapshot.last_clear_count, 1)
+		assert_eq(state.snapshot.imported_retained_count, 0)
+		assert_eq(#state.snapshot.imported_retained_topics, 0)
+		close_bridge(h)
+	end)
+end
+
+function tests.test_peer_session_drop_then_reimport_restores_software_import_status()
+	fibers.run(function (scope)
+		local h = start_bridge(scope)
+		assert_true(h.session_tx:send(peer_session_event(1, 'sid-1')))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'software' }, { image_id = 'old' }, true)), 1, 'sid-1')))
+		recv_with_timeout(h.bus_rx, 'retain command')
+		assert_true(h.session_tx:send(peer_drop_event(1, 'sid-1', 'bad_frame_limit')))
+		recv_with_timeout(h.bus_rx, 'clear command')
+
+		assert_true(h.session_tx:send(peer_session_event(2, 'sid-2')))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'software' }, {
+			image_id = 'new',
+			version = '15.2',
+			boot_id = 'boot-new',
+		}, true)), 2, 'sid-2')))
+		local cmd = recv_with_timeout(h.bus_rx, 'reimport command')
+		assert_eq(cmd.kind, 'retain')
+		assert_eq(cmd.topic[5], 'software')
+		assert_eq(cmd.payload.image_id, 'new')
+		assert_eq(cmd.session.peer_sid, 'sid-2')
+
+		local state = recv_state_with(h.state_rx, function (ev)
+			return ev.kind == 'component_snapshot'
+				and ev.snapshot
+				and ev.snapshot.peer_sid == 'sid-2'
+				and ev.snapshot.imported_retained_count == 1
+				and ev.snapshot.imported_retained_topics[1] == 'raw/member/mcu/state/software'
+		end, 'bridge reimport status')
+		assert_eq(state.snapshot.session_generation, 2)
+		close_bridge(h)
+	end)
+end
+
+function tests.test_peer_session_drop_then_reimport_restores_critical_import_status()
+	fibers.run(function (scope)
+		local h = start_bridge(scope)
+		assert_true(h.session_tx:send(peer_session_event(1, 'sid-1')))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'software' }, { image_id = 'old' }, true)), 1, 'sid-1')))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'updater' }, { state = 'rebooting' }, true)), 1, 'sid-1')))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'health' }, { state = 'ok' }, true)), 1, 'sid-1')))
+		recv_topic_set(h.bus_rx, 3, 'initial critical retain')
+
+		assert_true(h.session_tx:send(peer_drop_event(1, 'sid-1', 'bad_frame_limit')))
+		local cleared = recv_topic_set(h.bus_rx, 3, 'critical clear')
+		assert_not_nil(cleared['raw/member/mcu/state/software'])
+		assert_not_nil(cleared['raw/member/mcu/state/updater'])
+		assert_not_nil(cleared['raw/member/mcu/state/health'])
+
+		local cleared_state = recv_state_with(h.state_rx, function (ev)
+			return ev.kind == 'component_snapshot'
+				and ev.snapshot
+				and ev.snapshot.last_clear_reason == 'bad_frame_limit'
+				and ev.snapshot.last_clear_count == 3
+				and ev.snapshot.imported_retained_count == 0
+		end, 'critical clear status')
+		assert_eq(#cleared_state.snapshot.imported_retained_topics, 0)
+
+		assert_true(h.session_tx:send(peer_session_event(2, 'sid-2')))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'runtime', 'memory' }, {
+			free = 1234,
+		}, true)), 2, 'sid-2')))
+		local telemetry = recv_with_timeout(h.bus_rx, 'non-critical reimport')
+		assert_eq(telemetry.kind, 'retain')
+		assert_eq(table.concat(telemetry.topic, '/'), 'raw/member/mcu/state/runtime/memory')
+		local telemetry_state = recv_state_with(h.state_rx, function (ev)
+			return ev.kind == 'component_snapshot'
+				and ev.snapshot
+				and ev.snapshot.peer_sid == 'sid-2'
+				and ev.snapshot.imported_retained_count == 1
+				and ev.snapshot.imported_retained_topics[1] == 'raw/member/mcu/state/runtime/memory'
+		end, 'non-critical reimport status')
+		assert_eq(telemetry_state.snapshot.session_generation, 2)
+
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'software' }, {
+			image_id = 'new',
+			version = '15.2',
+			boot_id = 'boot-new',
+		}, true)), 2, 'sid-2')))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'updater' }, { state = 'running' }, true)), 2, 'sid-2')))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub({ 'state', 'self', 'health' }, { state = 'ok' }, true)), 2, 'sid-2')))
+		local imported = recv_topic_set(h.bus_rx, 3, 'critical reimport')
+		assert_eq(imported['raw/member/mcu/state/software'].payload.image_id, 'new')
+		assert_eq(imported['raw/member/mcu/state/software'].session.peer_sid, 'sid-2')
+		assert_eq(imported['raw/member/mcu/state/updater'].payload.state, 'running')
+		assert_eq(imported['raw/member/mcu/state/health'].payload.state, 'ok')
+
+		local state = recv_state_with(h.state_rx, function (ev)
+			return ev.kind == 'component_snapshot'
+				and ev.snapshot
+				and ev.snapshot.peer_sid == 'sid-2'
+				and ev.snapshot.session_generation == 2
+				and ev.snapshot.imported_retained_count == 4
+		end, 'critical reimport status')
+		local topics = {}
+		for _, topic in ipairs(state.snapshot.imported_retained_topics or {}) do
+			topics[topic] = true
+		end
+		assert_true(topics['raw/member/mcu/state/runtime/memory'], 'runtime retained import missing')
+		assert_true(topics['raw/member/mcu/state/software'], 'software retained import missing')
+		assert_true(topics['raw/member/mcu/state/updater'], 'updater retained import missing')
+		assert_true(topics['raw/member/mcu/state/health'], 'health retained import missing')
 		close_bridge(h)
 	end)
 end

@@ -196,11 +196,6 @@ function M.run(scope, ctx)
 				return { reason = 'fact_closed', fact = item.name }
 			end
 
-			if refreshes_freshness(item) then
-				stale_latched = false
-				stale_deadline = (type(stale_after_s) == 'number' and stale_after_s > 0) and (fibers.now() + stale_after_s) or nil
-			end
-
 			if item.ev.op == 'retain' then
 				local raw = recv_payload(item.ev)
 				local payload, nerr = normalise_with_component(rec, 'fact', item.name, raw)
@@ -208,17 +203,17 @@ function M.run(scope, ctx)
 					emit({ tag = 'source_down', reason = 'bad_fact:' .. item.name .. ':' .. tostring(nerr) })
 				else
 					emit({ tag = 'fact_retained', fact = item.name, payload = payload, raw = model.copy_value(raw) })
+					if refreshes_freshness(item) then
+						stale_latched = false
+						stale_deadline = (type(stale_after_s) == 'number' and stale_after_s > 0) and (fibers.now() + stale_after_s) or nil
+					end
 				end
 			elseif item.ev.op == 'unretain' then
 				emit({ tag = 'fact_unretained', fact = item.name })
+			elseif item.ev.op == 'replay_done' then
+				-- Replay lifecycle metadata is not component state.
 			else
-				local raw = recv_payload(item.ev)
-				local payload, nerr = normalise_with_component(rec, 'fact', item.name, raw)
-				if nerr ~= nil then
-					emit({ tag = 'source_down', reason = 'bad_fact:' .. item.name .. ':' .. tostring(nerr) })
-				else
-					emit({ tag = 'fact_retained', fact = item.name, payload = payload, raw = model.copy_value(raw) })
-				end
+				emit({ tag = 'source_down', reason = 'unknown_fact_event:' .. item.name .. ':' .. tostring(item.ev.op) })
 			end
 		elseif item.kind == 'event' then
 			if not item.msg then

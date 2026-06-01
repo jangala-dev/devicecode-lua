@@ -62,7 +62,7 @@ function M.apply_completion(job, ev, seq)
 		elseif result.tag == 'reconciled_success' then
 			repo_mod.mark_terminal(job, 'succeeded', nil, result, { seq = seq, reason = 'reconcile_success' })
 		elseif result.tag == 'reconcile_timeout' then
-			repo_mod.mark_terminal(job, 'timed_out', 'timeout', result, { seq = seq, reason = 'reconcile_timeout' })
+			repo_mod.mark_terminal(job, 'timed_out', result.reason or 'timeout', result, { seq = seq, reason = 'reconcile_timeout' })
 		elseif result.tag == 'reconcile_observer_closed' then
 			repo_mod.mark_terminal(job, 'failed', result.reason or 'observer_closed', result, { seq = seq, reason = 'reconcile_observer_closed' })
 		elseif result.tag == 'reconciled_failure' then

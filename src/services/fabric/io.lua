@@ -156,6 +156,21 @@ local function send_item_frame(item)
 	return frame
 end
 
+local function same_session(a, b)
+	return type(a) == 'table'
+		and type(b) == 'table'
+		and a.link_id == b.link_id
+		and a.link_generation == b.link_generation
+		and a.session_generation == b.session_generation
+		and a.peer_sid == b.peer_sid
+end
+
+local function send_item_matches_session_gate(gate, item)
+	if type(gate) ~= 'table' then return true end
+	if type(item) ~= 'table' or item.session == nil then return true end
+	return same_session(gate.current_session, item.session)
+end
+
 local function log_io(enabled, event, fields)
 	if enabled ~= true then return end
 	local parts = { '[fabric-io]', tostring(event) }
@@ -603,6 +618,7 @@ function M.run_lane_writer(scope, params)
 	local write_frame_op = require_function(params.write_frame_op, 'run_lane_writer: write_frame_op', 2)
 	local trace_io = params.trace_io == true
 	local recovery_gate = params.recovery_gate
+	local session_gate = params.session_gate
 
 	local flush_op = params.flush_op
 	if flush_op ~= nil then
@@ -639,44 +655,52 @@ function M.run_lane_writer(scope, params)
 		if selected ~= nil and selected.item ~= nil then
 			local lane = selected.lane
 			local frame = send_item_frame(selected.item)
-			fibers.perform(wait_for_recovery_gate_op(recovery_gate, frame))
+			if not send_item_matches_session_gate(session_gate, selected.item) then
+				local f = frame_fields(frame)
+				f.lane = lane
+				f.reason = (type(session_gate) == 'table' and session_gate.drop_reason) or 'stale_session'
+				log_io(trace_io, 'writer_stale_session_drop', f)
+				commit_turn(state, lane)
+			else
+				fibers.perform(wait_for_recovery_gate_op(recovery_gate, frame))
 
-			local f = frame_fields(frame)
-			f.lane = lane
-			log_io(trace_io, 'writer_tx_begin', f)
+				local f = frame_fields(frame)
+				f.lane = lane
+				log_io(trace_io, 'writer_tx_begin', f)
 
-			local ok, err = perform_write(write_frame_op, frame)
-			if ok ~= true then
-				local fail_fields = frame_fields(frame)
-				fail_fields.lane = lane
-				fail_fields.err = err
-				log_io(trace_io, 'writer_tx_failed', fail_fields)
-				error('writer write failed: ' .. tostring(err), 0)
-			end
-
-			written = written + 1
-			by_lane[lane] = (by_lane[lane] or 0) + 1
-			local ok_fields = frame_fields(frame)
-			ok_fields.lane = lane
-			ok_fields.count = written
-			log_io(trace_io, 'writer_tx_done', ok_fields)
-			commit_turn(state, lane)
-
-			if flush_each then
-				local flush_fields = frame_fields(frame)
-				flush_fields.lane = lane
-				log_io(trace_io, 'writer_flush_begin', flush_fields)
-				local flushed, flush_err = perform_flush(flush_op)
-				if flushed ~= true then
+				local ok, err = perform_write(write_frame_op, frame)
+				if ok ~= true then
 					local fail_fields = frame_fields(frame)
 					fail_fields.lane = lane
-					fail_fields.err = flush_err
-					log_io(trace_io, 'writer_flush_failed', fail_fields)
-					error('writer flush failed: ' .. tostring(flush_err), 0)
+					fail_fields.err = err
+					log_io(trace_io, 'writer_tx_failed', fail_fields)
+					error('writer write failed: ' .. tostring(err), 0)
 				end
-				local done_fields = frame_fields(frame)
-				done_fields.lane = lane
-				log_io(trace_io, 'writer_flush_done', done_fields)
+
+				written = written + 1
+				by_lane[lane] = (by_lane[lane] or 0) + 1
+				local ok_fields = frame_fields(frame)
+				ok_fields.lane = lane
+				ok_fields.count = written
+				log_io(trace_io, 'writer_tx_done', ok_fields)
+				commit_turn(state, lane)
+
+				if flush_each then
+					local flush_fields = frame_fields(frame)
+					flush_fields.lane = lane
+					log_io(trace_io, 'writer_flush_begin', flush_fields)
+					local flushed, flush_err = perform_flush(flush_op)
+					if flushed ~= true then
+						local fail_fields = frame_fields(frame)
+						fail_fields.lane = lane
+						fail_fields.err = flush_err
+						log_io(trace_io, 'writer_flush_failed', fail_fields)
+						error('writer flush failed: ' .. tostring(flush_err), 0)
+					end
+					local done_fields = frame_fields(frame)
+					done_fields.lane = lane
+					log_io(trace_io, 'writer_flush_done', done_fields)
+				end
 			end
 		end
 	end

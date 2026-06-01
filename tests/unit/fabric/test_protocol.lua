@@ -111,6 +111,10 @@ function tests.test_ping_and_pong_require_sid()
 	ok, err = protocol.validate({ type = 'pong', sid = 'sid-1' })
 	assert_not_nil(ok)
 	assert_nil(err)
+
+	ok, err = protocol.validate({ type = 'ping', sid = 'sid-1', ts = 1 })
+	assert_nil(ok)
+	assert_eq(err, 'unknown_frame_field: ts')
 end
 
 function tests.test_pub_requires_dense_scalar_topic_and_boolean_retain()

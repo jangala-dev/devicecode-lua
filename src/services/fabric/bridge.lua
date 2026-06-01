@@ -102,19 +102,44 @@ local function fail_request(req, reason)
 	return false
 end
 
+local function topic_string(topic)
+	if type(topic) ~= 'table' then return nil end
+	local out = {}
+	for i = 1, #topic do out[i] = tostring(topic[i]) end
+	return table.concat(out, '/')
+end
+
+local function imported_retained_topic_strings(self)
+	local out = {}
+	for _, rec in pairs(self._imported_retained or {}) do
+		local s = rec and topic_string(rec.topic)
+		if s ~= nil then out[#out + 1] = s end
+	end
+	table.sort(out)
+	return out
+end
+
 local function initial_snapshot(link_id, link_generation)
 	return {
 		link_id             = link_id,
 		link_generation     = link_generation,
 		state               = 'starting',
 		imported_topics     = 0,
+		imported_retained_count = 0,
+		imported_retained_topics = {},
 		pending_calls       = 0,
 		inbound_calls       = 0,
 		frames_sent         = 0,
 		frames_received     = 0,
 		last_err            = nil,
 		session             = nil,
+		session_generation  = nil,
+		peer_sid            = nil,
 		session_drop_reason = nil,
+		last_imported_topic = nil,
+		last_imported_at    = nil,
+		last_clear_reason   = nil,
+		last_clear_count    = 0,
 	}
 end
 
@@ -144,6 +169,8 @@ local function update_model(self, patch)
 		end
 
 		s.imported_topics = count_keys(self._imported_retained)
+		s.imported_retained_count = s.imported_topics
+		s.imported_retained_topics = imported_retained_topic_strings(self)
 		s.pending_calls   = count_keys(self._pending_calls)
 		s.inbound_calls   = count_keys(self._inbound_calls)
 	end)
@@ -648,9 +675,11 @@ end
 local cancel_pending_calls
 local cancel_inbound_calls
 
-local function clear_imported_retained(self)
+local function clear_imported_retained(self, reason)
+	local count = 0
 	for key, rec in pairs(self._imported_retained) do
 		self._imported_retained[key] = nil
+		count = count + 1
 
 		if rec and rec.topic then
 			local frame = protocol.unretain(rec.topic)
@@ -660,6 +689,9 @@ local function clear_imported_retained(self)
 			end
 		end
 	end
+	self._last_clear_reason = reason
+	self._last_clear_count = count
+	return count
 end
 
 local function clear_peer_session(self, reason, session, opts)
@@ -679,7 +711,7 @@ local function clear_peer_session(self, reason, session, opts)
 		return
 	end
 
-	clear_imported_retained(self)
+	clear_imported_retained(self, reason or 'session_dropped')
 
 	if opts.cancel_calls ~= false then
 		cancel_pending_calls(self, reason or 'session_dropped')
@@ -691,7 +723,11 @@ local function clear_peer_session(self, reason, session, opts)
 
 	update_model(self, {
 		session = nil,
+		session_generation = nil,
+		peer_sid = nil,
 		session_drop_reason = self._session_drop_reason,
+		last_clear_reason = self._last_clear_reason,
+		last_clear_count = self._last_clear_count,
 	})
 end
 
@@ -721,6 +757,8 @@ local function handle_peer_session(self, ev)
 
 	update_model(self, {
 		session = copy_context(self._session),
+		session_generation = self._session.session_generation,
+		peer_sid = self._session.peer_sid,
 		session_drop_reason = nil,
 	})
 
@@ -751,6 +789,8 @@ local function apply_remote_publish(self, frame, session)
 			payload = frame.payload,
 			session = copy_context(session),
 		}
+		self._last_imported_topic = topic_string(local_topic)
+		self._last_imported_at = fibers.now()
 	end
 
 	local ok, err = bus_publish_import(self, local_topic, frame.payload, local_frame, session)
@@ -758,7 +798,10 @@ local function apply_remote_publish(self, frame, session)
 		error(err or 'bridge_bus_publish_import_failed', 0)
 	end
 
-	update_model(self)
+	update_model(self, {
+		last_imported_topic = self._last_imported_topic,
+		last_imported_at = self._last_imported_at,
+	})
 end
 
 local function apply_remote_unretain(self, frame, session)
@@ -1332,6 +1375,10 @@ function M.run(scope, params)
 
 		_frames_sent           = 0,
 		_frames_received       = 0,
+		_last_imported_topic   = nil,
+		_last_imported_at      = nil,
+		_last_clear_reason     = nil,
+		_last_clear_count      = 0,
 		_event_pending         = {},
 		_next_call_seq         = 0,
 	}, Bridge)

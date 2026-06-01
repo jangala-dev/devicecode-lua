@@ -3,11 +3,37 @@ local sleep  = require 'fibers.sleep'
 local op     = require 'fibers.op'
 local observe = require 'services.update.observe'
 local active_job = require 'services.update.active_job'
+local active_policy = require 'services.update.active_policy'
+local component_backend = require 'services.update.backends.component'
 
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a,b,msg) if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end end
 local function assert_true(v,msg) if v ~= true then fail(msg or ('expected true, got '..tostring(v))) end end
+local function assert_not_nil(v,msg) if v == nil then fail(msg or 'expected non-nil') end end
+
+local function assert_list_eq(got, want)
+	assert_eq(type(got), 'table', 'expected list table')
+	assert_eq(#got, #want, 'list length mismatch')
+	for i = 1, #want do
+		assert_eq(got[i], want[i], 'list item '..i)
+	end
+end
+
+local function mcu_job()
+	return {
+		job_id = 'job-mcu',
+		component = 'mcu',
+		metadata = { expected_image_id = 'mcu-image-new' },
+		commit_attempt = {
+			pre_commit = {
+				expected_image_id = 'mcu-image-new',
+				pre_commit_image_id = 'mcu-image-old',
+				pre_commit_boot_id = 'mcu-boot-old',
+			},
+		},
+	}
+end
 
 function tests.test_observer_changed_op_wakes_with_snapshot_copy()
 	fibers.run(function ()
@@ -52,6 +78,131 @@ function tests.test_reconcile_worker_waits_on_component_observer()
 		assert_eq(result.job_id, 'j1')
 		assert_eq(result.observed.version, 'new')
 	end)
+end
+
+function tests.test_component_reconcile_completes_after_post_reboot_mcu_state_reimport()
+	fibers.run(function (scope)
+		local obs = observe.new({ components = { mcu = { component = 'mcu' } } })
+		local backend = component_backend.new({ component = 'mcu', observer = obs })
+		local job = mcu_job()
+
+		obs:update_component('mcu', {
+			software = { image_id = 'mcu-image-old', boot_id = 'mcu-boot-old' },
+			updater = { state = 'rebooting' },
+			health = { state = 'ok' },
+		})
+
+		fibers.spawn(function ()
+			fibers.perform(sleep.sleep_op(0.02))
+			obs:update_component('mcu', {
+				software = { image_id = 'mcu-image-new', version = '15.2', boot_id = 'mcu-boot-new' },
+				updater = { state = 'running' },
+				health = { state = 'ok' },
+			})
+		end)
+
+		local result = active_job.reconcile(scope, {
+			backend = backend,
+			job = job,
+			observer = obs,
+			deadline = fibers.now() + 1,
+		})
+		assert_eq(result.tag, 'reconciled_success')
+		assert_eq(result.state.software.image_id, 'mcu-image-new')
+		assert_eq(result.state.software.boot_id, 'mcu-boot-new')
+	end)
+end
+
+function tests.test_component_reconcile_waits_for_mcu_critical_state_even_when_software_matches()
+	fibers.run(function ()
+		local obs = observe.new({ components = { mcu = { component = 'mcu' } } })
+		local backend = component_backend.new({ component = 'mcu', observer = obs })
+		local job = mcu_job()
+		local snapshot = {
+			by_id = {
+				mcu = {
+					state = {
+						software = { image_id = 'mcu-image-new', boot_id = 'mcu-boot-new' },
+						runtime = { memory = { free = 1234 } },
+					},
+				},
+			},
+		}
+
+		local result = backend:evaluate_reconcile(job, snapshot, {})
+		assert_eq(result.done, false)
+		assert_eq(result.reason, 'waiting_for_mcu_critical_state')
+		assert_list_eq(result.missing_facts, { 'updater', 'health' })
+	end)
+end
+
+function tests.test_component_reconcile_timeout_reports_missing_mcu_critical_state()
+	fibers.run(function (scope)
+		local obs = observe.new({ components = { mcu = { component = 'mcu' } } })
+		local backend = component_backend.new({ component = 'mcu', observer = obs })
+		local job = mcu_job()
+
+		obs:update_component('mcu', {
+			runtime = { memory = { free = 1234 } },
+		})
+
+		local result = active_job.reconcile(scope, {
+			backend = backend,
+			job = job,
+			observer = obs,
+			deadline = fibers.now() + 0.02,
+			poll_s = 0.005,
+		})
+
+		assert_eq(result.tag, 'reconcile_timeout')
+		assert_eq(result.reason, 'mcu_critical_state_timeout')
+		assert_eq(result.last_reason, 'waiting_for_mcu_critical_state')
+		assert_list_eq(result.missing_facts, { 'software', 'updater', 'health' })
+		assert_not_nil(result.state)
+		assert_not_nil(result.state.runtime)
+	end)
+end
+
+function tests.test_component_reconcile_preserves_explicit_updater_failure()
+	fibers.run(function ()
+		local backend = component_backend.new({ component = 'mcu' })
+		local result = backend:evaluate_reconcile(mcu_job(), {
+			by_id = {
+				mcu = {
+					state = {
+						software = { image_id = 'mcu-image-new', boot_id = 'mcu-boot-new' },
+						updater = { state = 'failed' },
+					},
+				},
+			},
+		}, {})
+
+		assert_eq(result.done, true)
+		assert_eq(result.ok, false)
+		assert_eq(result.reason, 'failed')
+	end)
+end
+
+function tests.test_active_policy_persists_meaningful_reconcile_timeout_reason()
+	local job = {
+		job_id = 'job-timeout',
+		component = 'mcu',
+		state = 'awaiting_return',
+		history = {},
+	}
+	local ok, err = active_policy.apply_completion(job, {
+		kind = 'active_job_done',
+		status = 'ok',
+		result = {
+			tag = 'reconcile_timeout',
+			reason = 'mcu_critical_state_timeout',
+			missing_facts = { 'software', 'updater', 'health' },
+		},
+	}, 42)
+	assert_true(ok, err)
+	assert_eq(job.state, 'timed_out')
+	assert_eq(job.error, 'mcu_critical_state_timeout')
+	assert_list_eq(job.result.missing_facts, { 'software', 'updater', 'health' })
 end
 
 

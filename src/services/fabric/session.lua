@@ -127,12 +127,20 @@ end
 function OutboundGate:bind(ctx)
 	self._session = M.copy_context(ctx)
 	self._drop_reason = nil
+	if type(self._session_gate) == 'table' then
+		self._session_gate.current_session = M.copy_context(ctx)
+		self._session_gate.drop_reason = nil
+	end
 	return true, nil
 end
 
 function OutboundGate:drop(reason)
 	self._session = nil
 	self._drop_reason = reason or 'no_session'
+	if type(self._session_gate) == 'table' then
+		self._session_gate.current_session = nil
+		self._session_gate.drop_reason = self._drop_reason
+	end
 	return true, nil
 end
 
@@ -145,6 +153,10 @@ function OutboundGate:terminate(reason)
 	self._closed = true
 	self._session = nil
 	self._drop_reason = reason or 'session_outbound_closed'
+	if type(self._session_gate) == 'table' then
+		self._session_gate.current_session = nil
+		self._session_gate.drop_reason = self._drop_reason
+	end
 	close_unique_txs(self._lane_txs, self._drop_reason)
 	return true, nil
 end
@@ -209,6 +221,7 @@ function M.new_outbound_gate(params)
 		},
 		_session = nil,
 		_drop_reason = 'no_session',
+		_session_gate = params.session_gate,
 		_closed = false,
 	}, OutboundGate)
 end

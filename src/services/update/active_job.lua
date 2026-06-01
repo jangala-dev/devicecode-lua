@@ -13,6 +13,15 @@ local sleep  = require 'fibers.sleep'
 
 local M = {}
 
+local function copy(v)
+	if type(v) ~= 'table' then return v end
+	local out = {}
+	for k, value in pairs(v) do
+		out[k] = copy(value)
+	end
+	return out
+end
+
 local function backend_method(backend, name, required)
 	if type(backend) ~= 'table' then
 		error('active_job: backend required', 0)
@@ -222,12 +231,26 @@ local function deadline_reached(deadline)
 	return deadline ~= nil and fibers.now() >= deadline
 end
 
-local function timeout_result(job, deadline)
-	return {
+local function timeout_result(job, deadline, last_result)
+	local out = {
 		tag      = 'reconcile_timeout',
 		job_id   = job.job_id,
 		deadline = deadline,
 	}
+	if type(last_result) == 'table' then
+		out.last_reason = last_result.reason
+		out.reason = last_result.reason or 'timeout'
+		out.missing_facts = copy(last_result.missing_facts)
+		out.state = copy(last_result.state)
+		out.last_observed = copy(last_result.last_observed)
+		out.last_reconcile = copy(last_result)
+		if last_result.reason == 'waiting_for_mcu_critical_state' then
+			out.reason = 'mcu_critical_state_timeout'
+		end
+	else
+		out.reason = 'timeout'
+	end
+	return out
 end
 
 local function observer_closed_result(job, reason)
@@ -282,6 +305,7 @@ function M.reconcile(_scope, params)
 	local deadline = params.deadline
 	local seen = observer and observer.version and observer:version() or 0
 	local ctx = base_ctx(params, 'reconcile')
+	local last_result
 
 	while true do
 		local snapshot = observer and observer.snapshot and observer:snapshot() or nil
@@ -290,14 +314,18 @@ function M.reconcile(_scope, params)
 		if result.done then
 			return normalise_reconcile_done(job, result)
 		end
+		last_result = copy(result)
+		if ctx.last_observed ~= nil and type(last_result) == 'table' then
+			last_result.last_observed = copy(ctx.last_observed)
+		end
 
 		if deadline_reached(deadline) then
-			return timeout_result(job, deadline)
+			return timeout_result(job, deadline, last_result)
 		end
 
 		local status, a, b = wait_for_reconcile_progress(observer, seen, deadline, params.poll_s)
 		if status == 'timeout' then
-			return timeout_result(job, deadline)
+			return timeout_result(job, deadline, last_result)
 		end
 		if status == 'observer_closed' then
 			return observer_closed_result(job, a)
