@@ -2,17 +2,21 @@
 
 local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
+local op     = require 'fibers.op'
 local busmod = require 'bus'
 
 local update = require 'services.update'
 local service = require 'services.update.service'
 local topics = require 'services.update.topics'
+local service_base = require 'devicecode.service_base'
 local probe = require 'tests.support.bus_probe'
 
 local tests = {}
 
 local function fail(msg) error(msg or 'assertion failed', 2) end
-local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end end
+local function assert_eq(a, b, msg)
+	if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end
+end
 local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true, got ' .. tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil value') end end
 
@@ -202,11 +206,122 @@ function tests.test_publisher_failure_is_supervised_component_failure()
 	end)
 end
 
+function tests.test_initial_runtime_reconcile_failure_publishes_last_failure()
+	fibers.run(function ()
+		local bus = busmod.new()
+		local svc_conn = bus:connect()
+		local lifecycle = service_base.new(svc_conn, { name = 'update' })
+		local fake_scope = {
+			finally = function () end,
+			status = function () return 'running' end,
+			admission = function () return 'open' end,
+			child = function () return nil, 'runtime_scope_child_failed' end,
+		}
+
+		local ok, err = pcall(function ()
+			service.run(fake_scope, {
+				publish = false,
+				service_id = 'update',
+				svc = lifecycle,
+				conn = svc_conn,
+				bind_manager = false,
+				job_store_kind = 'memory',
+				watch_config = false,
+			})
+		end)
+		assert_eq(ok, false)
+		assert_true(tostring(err):find('runtime_scope_child_failed', 1, true) ~= nil)
+
+		local status = probe.wait_retained_payload(svc_conn, topics.lifecycle_status(), { timeout = 0.2 })
+		local failure = status and status.last_failure
+		assert_not_nil(failure, 'expected service status to publish last_failure')
+		assert_eq(failure.source, 'runtime_reconcile')
+		assert_eq(failure.reason, 'runtime_scope_child_failed')
+		assert_eq(failure.event_kind, 'initial_runtime_reconcile')
+		assert_eq(failure.event_status, 'failed')
+		assert_eq(failure.event_primary, 'runtime_scope_child_failed')
+	end)
+end
+
+function tests.test_active_runtime_failure_publishes_last_failure_with_current_job()
+	fibers.run(function ()
+		local bus = busmod.new()
+		local svc_conn = bus:connect()
+		local lifecycle = service_base.new(svc_conn, { name = 'update' })
+		local saves = 0
+		local store = {
+			load_all_op = function ()
+				return op.always({
+					jobs = {
+						['job-active-fail'] = {
+							job_id = 'job-active-fail',
+							component = 'cm5',
+							state = 'staging',
+							generation = 1,
+							active_intent = { token = 'tok-stage', phase = 'stage', generation = 1 },
+							created_seq = 1,
+							updated_seq = 1,
+							history = {},
+						},
+					},
+					order = { 'job-active-fail' },
+					next_seq = 2,
+				}, nil)
+			end,
+			save_job_op = function ()
+				saves = saves + 1
+				if saves == 1 then return op.always(true, nil) end
+				return op.always(nil, 'save_failed')
+			end,
+		}
+		local backend = {
+			stage_op = function (_, job)
+				return op.always({ job_id = job.job_id }, nil)
+			end,
+		}
+
+		local st, _, primary = fibers.run_scope(function (scope)
+			return service.run(scope, {
+				publish = false,
+				service_id = 'update',
+				svc = lifecycle,
+				conn = svc_conn,
+				job_store = store,
+				watch_config = false,
+				backend = backend,
+			})
+		end)
+		assert_eq(st, 'failed')
+		assert_true(tostring(primary):find('job_store_save_failed:save_failed', 1, true) ~= nil)
+
+		local status = probe.wait_retained_payload(svc_conn, topics.lifecycle_status(), { timeout = 0.2 })
+		local failure = status and status.last_failure
+		assert_not_nil(failure, 'expected service status to publish active runtime last_failure')
+		assert_eq(failure.source, 'active_runtime')
+		assert_eq(failure.reason, 'job_store_save_failed:save_failed')
+		assert_eq(failure.event_kind, 'component_done')
+		assert_eq(failure.event_status, 'failed')
+		assert_eq(failure.component, 'active_runtime')
+		assert_not_nil(failure.current_job, 'expected current job context')
+		assert_eq(failure.current_job.job_id, 'job-active-fail')
+		assert_eq(failure.current_job.state, 'staging')
+	end)
+end
+
 function tests.test_service_uses_shared_config_watch_helper()
 	local source = assert(io.open('../src/services/update/service.lua', 'r')):read('*a')
-	assert_true(source:find("devicecode.support.config_watch", 1, true) ~= nil, 'update service should require shared config_watch helper')
-	assert_true(source:find('config_watch.open', 1, true) ~= nil, 'update service should open cfg/update through shared config_watch')
-	assert_true(source:find('watch_retained(conn, topics.config()', 1, true) == nil, 'update service should not own a bespoke retained config watcher')
+	assert_true(
+		source:find("devicecode.support.config_watch", 1, true) ~= nil,
+		'update service should require shared config_watch helper'
+	)
+	assert_true(
+		source:find('config_watch.open', 1, true) ~= nil,
+		'update service should open cfg/update through shared config_watch'
+	)
+	assert_true(
+		source:find('watch_retained(conn, topics.config()', 1, true) == nil,
+		'update service should not own a bespoke retained config watcher'
+	)
 end
 
 function tests.test_service_start_path_allows_injected_config_watch_for_harnesses()

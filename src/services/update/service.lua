@@ -1487,7 +1487,15 @@ function M.run(scope, params)
 	end
 
 	local ok, err = reconcile_runtime_components(self, 'initial')
-	if ok ~= true then error(err or 'update runtime start failed', 2) end
+	if ok ~= true then
+		local reason = err or 'update_runtime_start_failed'
+		fail_update_service(self, 'runtime_reconcile', reason, {
+			kind = 'initial_runtime_reconcile',
+			status = 'failed',
+			primary = reason,
+		})
+		error(reason, 2)
+	end
 
 	return coordinator_loop(self)
 end
