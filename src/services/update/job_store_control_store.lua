@@ -35,10 +35,27 @@ local VOID_SUCCESS = {
 	delete = true,
 }
 
+local function method_timeout_reason(method)
+	if method == 'put' then return 'control_store_put_timeout' end
+	if method == 'get' then return 'control_store_get_timeout' end
+	if method == 'list' then return 'control_store_list_timeout' end
+	if method == 'delete' then return 'control_store_delete_timeout' end
+	return 'control_store_call_timeout'
+end
+
+local function normalise_call_error(method, err)
+	if err == nil then return nil end
+	local s = tostring(err)
+	if s == 'timeout' or s:lower():find('timeout', 1, true) ~= nil then
+		return method_timeout_reason(method)
+	end
+	return s
+end
+
 local function unwrap_reply_for(method)
 	return function (reply, err)
 		if reply == nil then
-			return nil, err
+			return nil, normalise_call_error(method, err)
 		end
 		if type(reply) ~= 'table' or type(reply.ok) ~= 'boolean' then
 			return nil, 'invalid_control_store_reply'
