@@ -72,6 +72,7 @@ local files = {
 	'integration.devhost.device_public_seams_spec',
 	'unit.update.test_active_runtime',
 	'unit.update.test_architecture',
+	'unit.update.test_artifact_store_update_adapters',
 	'unit.update.test_bundled_probe',
 	'unit.update.test_config',
 	'unit.update.test_events',

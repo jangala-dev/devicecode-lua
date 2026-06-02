@@ -29,11 +29,23 @@ local function positive_int(v)
 	return nil
 end
 
-local function transfer_chunk_size(self, job)
+local function transfer_chunk_size_after_prepare(self, job, prepared)
 	local meta = metadata_of(job)
-	return positive_int(meta.transfer_chunk_raw)
-		or positive_int(meta.chunk_size)
-		or self._chunk_size
+	local max_chunk_size = positive_int(type(prepared) == 'table' and prepared.max_chunk_size)
+	local forced = positive_int(meta.transfer_chunk_raw)
+	if forced then
+		if max_chunk_size and forced > max_chunk_size then
+			print('[update-mcu]', 'transfer_chunk_raw_override',
+				'chunk_size=' .. tostring(forced),
+				'max_chunk_size=' .. tostring(max_chunk_size))
+		end
+		return forced
+	end
+	local selected = positive_int(meta.chunk_size) or positive_int(self._chunk_size)
+	if selected and max_chunk_size and selected > max_chunk_size then
+		return max_chunk_size
+	end
+	return selected
 end
 
 local function artifact_record(job)
@@ -77,7 +89,8 @@ local function call_component_op(self, component, method, payload, opts)
 	if type(self._conn) ~= 'table' or type(self._conn.call_op) ~= 'function' then
 		return op.always(nil, 'component_backend_connection_required')
 	end
-	return self._conn:call_op(topics.component_rpc(component, method), payload, opts or self._call_opts):wrap(function (reply, err)
+	local target = topics.component_rpc(component, method)
+	return self._conn:call_op(target, payload, opts or self._call_opts):wrap(function (reply, err)
 		if reply == false then return nil, err or 'component_call_failed' end
 		return reply, err
 	end)
@@ -130,12 +143,64 @@ local function component_snapshot(snapshot, component)
 	return nil
 end
 
-local function latest_component_state(self, component)
+local function component_record(snapshot, component)
+	if type(snapshot) ~= 'table' then return nil end
+	local by_id = snapshot.by_id or snapshot.components
+	local rec = type(by_id) == 'table' and by_id[component] or nil
+	if type(rec) == 'table' then return rec end
+	if snapshot.component == component then return snapshot end
+	return nil
+end
+
+local function state_from_record(rec)
+	if type(rec) ~= 'table' then return nil end
+	if type(rec.state) == 'table' then return rec.state end
+	return rec
+end
+
+local function latest_component_record(self, component)
 	local obs = self._observer
 	if obs and type(obs.snapshot) == 'function' then
-		return component_snapshot(obs:snapshot(), component)
+		return component_record(obs:snapshot(), component)
 	end
 	return nil
+end
+
+local function latest_component_state(self, component)
+	return state_from_record(latest_component_record(self, component))
+end
+
+local function updater_state(state)
+	if type(state) ~= 'table' then return nil end
+	return state.update or state.updater
+end
+
+local MCU_CRITICAL_FACTS = { 'software', 'updater', 'health' }
+
+local function fact_present(v)
+	if type(v) == 'table' then return next(v) ~= nil end
+	return v ~= nil
+end
+
+local function missing_mcu_critical_facts(state)
+	local missing = {}
+	state = type(state) == 'table' and state or {}
+	if not fact_present(state.software) then
+		missing[#missing + 1] = 'software'
+	end
+	if not fact_present(updater_state(state)) then
+		missing[#missing + 1] = 'updater'
+	end
+	if not fact_present(state.health) then
+		missing[#missing + 1] = 'health'
+	end
+	return missing
+end
+
+local function comma_join(items)
+	local out = {}
+	for i = 1, #(items or {}) do out[i] = tostring(items[i]) end
+	return table.concat(out, ',')
 end
 
 local function require_component_boot_id(self, component)
@@ -147,10 +212,35 @@ local function require_component_boot_id(self, component)
 	return true, nil
 end
 
-function Backend:stage_op(job, ctx)
+local function require_update_admission(self, component)
+	if component ~= 'mcu' then
+		return require_component_boot_id(self, component)
+	end
+	local rec = latest_component_record(self, component)
+	local state = state_from_record(rec)
+	local missing = missing_mcu_critical_facts(state)
+	if #missing > 0 then
+		return nil, 'mcu_control_plane_not_ready:missing_critical_facts:' .. comma_join(missing)
+	end
+	local sw = state and state.software or nil
+	if type(sw) ~= 'table' or sw.boot_id == nil or sw.boot_id == '' then
+		return nil, 'mcu_control_plane_not_ready:software_boot_id_unavailable'
+	end
+	local actions = state and state.actions or nil
+	if type(actions) ~= 'table' or actions['prepare-update'] ~= true then
+		return nil, 'mcu_control_plane_not_ready:prepare_route_missing'
+	end
+	local source = state and state.source or nil
+	if type(source) == 'table' and source.reason ~= nil and source.reason ~= '' then
+		return nil, 'mcu_control_plane_not_ready:' .. tostring(source.reason)
+	end
+	return true, nil
+end
+
+function Backend:stage_op(job, _ctx)
 	return unwrap_scope_value(fibers.run_scope_op(function ()
 		local component = component_of(self, job)
-		local ready, ready_err = require_component_boot_id(self, component)
+		local ready, ready_err = require_update_admission(self, component)
 		if ready ~= true then return nil, ready_err end
 
 		local ref = artifact_ref(job)
@@ -187,7 +277,7 @@ function Backend:stage_op(job, ctx)
 			size = desc.size,
 			digest_alg = desc.digest_alg or 'xxhash32',
 			digest = desc.digest or desc.checksum,
-			chunk_size = transfer_chunk_size(self, job),
+			chunk_size = transfer_chunk_size_after_prepare(self, job, prepared),
 			format = meta.format or desc.format or 'dcmcu-v1',
 			metadata = metadata_of(job),
 		}
@@ -220,33 +310,6 @@ function Backend:stage_op(job, ctx)
 			reply = reply,
 		}, nil
 	end), 'component_stage')
-end
-
-local function updater_state(state)
-	if type(state) ~= 'table' then return nil end
-	return state.update or state.updater
-end
-
-local MCU_CRITICAL_FACTS = { 'software', 'updater', 'health' }
-
-local function fact_present(v)
-	if type(v) == 'table' then return next(v) ~= nil end
-	return v ~= nil
-end
-
-local function missing_mcu_critical_facts(state)
-	local missing = {}
-	state = type(state) == 'table' and state or {}
-	if not fact_present(state.software) then
-		missing[#missing + 1] = 'software'
-	end
-	if not fact_present(updater_state(state)) then
-		missing[#missing + 1] = 'updater'
-	end
-	if not fact_present(state.health) then
-		missing[#missing + 1] = 'health'
-	end
-	return missing
 end
 
 function Backend:pre_commit_record_op(job, ctx)
@@ -312,9 +375,12 @@ function Backend:evaluate_reconcile(job, snapshot, ctx)
 		return { done = true, ok = true, state = copy(state) }
 	end
 
-	if type(sw) == 'table' and expected and pre_boot and sw.boot_id ~= nil and sw.boot_id ~= pre_boot and sw.image_id ~= expected then
-		return { done = true, ok = false, reason = 'wrong_image_after_reboot', state = copy(state) }
-	end
+		if type(sw) == 'table'
+			and expected and pre_boot and sw.boot_id ~= nil
+			and sw.boot_id ~= pre_boot and sw.image_id ~= expected
+		then
+			return { done = true, ok = false, reason = 'wrong_image_after_reboot', state = copy(state) }
+		end
 
 	return { done = false, reason = 'waiting_for_component_state', state = copy(state) }
 end
