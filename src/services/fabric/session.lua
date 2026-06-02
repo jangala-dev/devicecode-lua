@@ -286,6 +286,40 @@ local function session_event(self, kind, ctx, extra, at)
 	return ev
 end
 
+local BAD_LINE_FIELDS = {
+	'last_decode_error',
+	'last_bad_line_len',
+	'last_bad_line_xxhash32',
+	'last_bad_line_head',
+	'last_bad_line_tail',
+}
+
+local RESYNC_FIELDS = {
+	'line_resync',
+	'last_line_resync_prefix_len',
+	'last_line_resync_line_len',
+	'last_line_resync_xxhash32',
+	'last_line_resync_type',
+	'last_line_resync_peer_sid',
+	'last_line_resync_xfer_id',
+}
+
+local function copy_bad_line_fields(dst, src)
+	if type(dst) ~= 'table' or type(src) ~= 'table' then return dst end
+	for _, k in ipairs(BAD_LINE_FIELDS) do
+		if src[k] ~= nil then dst[k] = src[k] end
+	end
+	return dst
+end
+
+local function copy_resync_fields(dst, src)
+	if type(dst) ~= 'table' or type(src) ~= 'table' then return dst end
+	for _, k in ipairs(RESYNC_FIELDS) do
+		if src[k] ~= nil then dst[k] = src[k] end
+	end
+	return dst
+end
+
 local function peer_session_event(self, ctx, at)
 	return session_event(self, 'peer_session', ctx, nil, at)
 end
@@ -448,25 +482,25 @@ end
 local function frame_event_from_item(item)
 	if item == nil then return { kind = 'frame_closed' } end
 	if type(item) == 'table' and item.kind == 'frame_received' then
-		return {
+		return copy_resync_fields({
 			kind  = 'frame',
 			frame = item.frame,
 			at    = item.at or fibers.now(),
-		}
+		}, item)
 	end
 
 	if type(item) == 'table' and item.kind == 'wire_error' then
-		return {
+		return copy_bad_line_fields({
 			kind = 'wire_error',
 			err  = item.err or 'wire_error',
 			at   = item.at or fibers.now(),
 			wire_errors = item.wire_errors,
 			bad_frame_count = item.bad_frame_count,
-		}
+		}, item)
 	end
 
 	if type(item) == 'table' and item.kind == 'wire_recovery' then
-		return {
+		return copy_bad_line_fields({
 			kind = 'wire_recovery',
 			reason = item.reason or item.err or 'bad_frame_limit',
 			err = item.err or item.reason or 'bad_frame_limit',
@@ -476,7 +510,7 @@ local function frame_event_from_item(item)
 			drained_bytes = item.drained_bytes,
 			drain_err = item.drain_err,
 			quiet_until = item.quiet_until,
-		}
+		}, item)
 	end
 	return {
 		kind = 'invalid_frame_item',
@@ -552,6 +586,7 @@ local function handle_wire_error(self, ev)
 		s.wire_errors = ev.wire_errors or ((s.wire_errors or 0) + 1)
 		s.bad_frame_count = ev.bad_frame_count or ((s.bad_frame_count or 0) + 1)
 		s.last_wire_error = tostring(err)
+		copy_bad_line_fields(s, ev)
 	end)
 end
 
@@ -566,10 +601,19 @@ local function handle_wire_recovery(self, ev)
 		s.last_wire_error = tostring(reason)
 		s.last_drain_bytes = ev.drained_bytes
 		s.last_drain_err = ev.drain_err
+		copy_bad_line_fields(s, ev)
 	end)
 
 	reset_to_hello(self, reason, at)
 	self._next_hello_at = quiet_until
+end
+
+local function handle_line_resync(self, ev)
+	if type(ev) ~= 'table' or ev.line_resync ~= true then return end
+	update_session(self, function (s)
+		s.line_resyncs = (s.line_resyncs or 0) + 1
+		copy_resync_fields(s, ev)
+	end)
 end
 
 local function handle_session_frame(self, checked, at)
@@ -619,6 +663,7 @@ end
 local function handle_frame(self, ev)
 	local checked, err = protocol.validate_wire(ev.frame)
 	if not checked then error('session invalid frame: ' .. tostring(err), 0) end
+	handle_line_resync(self, ev)
 	local lane = protocol.dispatch_lane(checked)
 	if lane == 'session_control' then
 		handle_session_frame(self, checked, ev.at or fibers.now())
@@ -678,6 +723,19 @@ function M.run(scope, params)
 		wire_errors = 0,
 		bad_frame_count = 0,
 		last_wire_error = nil,
+		last_decode_error = nil,
+		last_bad_line_len = nil,
+		last_bad_line_xxhash32 = nil,
+		last_bad_line_head = nil,
+		last_bad_line_tail = nil,
+		line_resyncs = 0,
+		line_resync = nil,
+		last_line_resync_prefix_len = nil,
+		last_line_resync_line_len = nil,
+		last_line_resync_xxhash32 = nil,
+		last_line_resync_type = nil,
+		last_line_resync_peer_sid = nil,
+		last_line_resync_xfer_id = nil,
 	}
 
 	local session_model = model_mod.new(initial, {

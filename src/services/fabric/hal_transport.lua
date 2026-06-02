@@ -23,6 +23,8 @@ local DEFAULT_DRAIN_MAX_BYTES = 64 * 1024
 local DEFAULT_DRAIN_TOTAL_S = 0.100
 local DEFAULT_DRAIN_QUIET_S = 0.020
 local DEFAULT_DRAIN_READ_S = 0.010
+local BAD_LINE_SNIP_BYTES = 80
+local RESYNC_PREFIX_SCAN_MAX_BYTES = 4096
 
 --------------------------------------------------------------------------------
 -- JSONL transport wrapper
@@ -93,6 +95,103 @@ local function wire_fields(frame, line)
 		out.chunk_digest = frame.chunk_digest
 	end
 	return out
+end
+
+local function escape_bytes(s)
+	if type(s) ~= 'string' then return nil end
+	local out = {}
+	for i = 1, #s do
+		local b = s:byte(i)
+		if b == 9 then
+			out[#out + 1] = '\\t'
+		elseif b == 10 then
+			out[#out + 1] = '\\n'
+		elseif b == 13 then
+			out[#out + 1] = '\\r'
+		elseif b == 92 then
+			out[#out + 1] = '\\\\'
+		elseif b >= 32 and b <= 126 then
+			out[#out + 1] = string.char(b)
+		else
+			out[#out + 1] = string.format('\\x%02x', b)
+		end
+	end
+	return table.concat(out)
+end
+
+local function bad_line_diag(line, err)
+	if type(line) ~= 'string' then
+		return err
+	end
+	local head = line:sub(1, BAD_LINE_SNIP_BYTES)
+	local tail = line
+	if #line > BAD_LINE_SNIP_BYTES then
+		tail = line:sub(#line - BAD_LINE_SNIP_BYTES + 1)
+	end
+	return {
+		err = tostring(err or 'decode_failed'),
+		last_decode_error = tostring(err or 'decode_failed'),
+		last_bad_line_len = #line,
+		last_bad_line_xxhash32 = xxhash32.digest_hex(line),
+		last_bad_line_head = escape_bytes(head),
+		last_bad_line_tail = escape_bytes(tail),
+	}
+end
+
+local function blank_line(line)
+	return type(line) == 'string' and line:match('^%s*$') ~= nil
+end
+
+local function non_printable_prefix(s)
+	if type(s) ~= 'string' or s == '' then
+		return false
+	end
+	for i = 1, #s do
+		local b = s:byte(i)
+		if b >= 32 and b <= 126 then
+			return false
+		end
+	end
+	return true
+end
+
+local function resync_diag(line, prefix_len, frame)
+	return {
+		line_resync = true,
+		last_line_resync_prefix_len = prefix_len,
+		last_line_resync_line_len = #line,
+		last_line_resync_xxhash32 = xxhash32.digest_hex(line),
+		last_line_resync_type = type(frame) == 'table' and frame.type or nil,
+		last_line_resync_peer_sid = type(frame) == 'table' and frame.sid or nil,
+		last_line_resync_xfer_id = type(frame) == 'table' and frame.xfer_id or nil,
+	}
+end
+
+local function decode_line_with_resync(line)
+	local frame, err = protocol.decode_line(line)
+	if frame ~= nil then return frame, nil, nil end
+
+	local scan = #line
+	if scan > RESYNC_PREFIX_SCAN_MAX_BYTES then
+		scan = RESYNC_PREFIX_SCAN_MAX_BYTES
+	end
+	local start = line:find('{', 1, true)
+	if start ~= nil and start > 1 then
+		if start > scan then
+			return nil, err
+		end
+		local prefix_len = start - 1
+		local prefix = line:sub(1, prefix_len)
+		if non_printable_prefix(prefix) then
+			local resynced, rerr = protocol.decode_line(line:sub(start))
+			if resynced ~= nil then
+				return resynced, nil, resync_diag(line, prefix_len, resynced)
+			end
+			return nil, rerr or err
+		end
+	end
+
+	return nil, err
 end
 
 --- Wrap a raw HAL line/stream session as a fabric-jsonl/1 frame transport.
@@ -189,11 +288,32 @@ function Transport:write_line_op(line)
 end
 
 function Transport:read_frame_op()
-	return self:read_line_op():wrap(function (line, err)
-		if line == nil then
-			return nil, err
+	return fibers.run_scope_op(function ()
+		while true do
+			local line, err = fibers.perform(self:read_line_op())
+			if line == nil then
+				return nil, err
+			end
+			if blank_line(line) then
+				log_wire(self._trace_io, 'blank_line_ignored', { line_len = #line })
+			else
+				local frame, derr, diag = decode_line_with_resync(line)
+				if frame == nil then
+					local diag = bad_line_diag(line, derr)
+					log_wire(self._trace_io, 'decode_failed', diag)
+					return nil, diag
+				end
+				if diag ~= nil then
+					log_wire(self._trace_io, 'line_resynced', diag)
+				end
+				return frame, nil, diag
+			end
 		end
-		return protocol.decode_line(line)
+	end):wrap(function (status, report, frame, err, diag)
+		if status ~= 'ok' then
+			return nil, err or report or 'read_failed'
+		end
+		return frame, err, diag
 	end)
 end
 

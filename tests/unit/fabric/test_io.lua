@@ -6,8 +6,11 @@ local sleep   = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 
 local io_mod = require 'services.fabric.io'
+local hal_transport = require 'services.fabric.hal_transport'
 local link   = require 'services.fabric.link'
+local protocol = require 'services.fabric.protocol'
 local queue  = require 'devicecode.support.queue'
+local xxhash32 = require 'shared.hash.xxhash32'
 
 local tests = {}
 
@@ -69,6 +72,26 @@ local function read_results(results)
 			return op.always(item.frame, nil)
 		end)
 	end
+end
+
+local function raw_line_transport(lines)
+	local i = 0
+	return {
+		read_line_op = function ()
+			return op.guard(function ()
+				i = i + 1
+				local line = lines[i]
+				if line == nil then
+					return op.always(nil, 'eof')
+				end
+				return op.always(line, nil)
+			end)
+		end,
+		write_line_op = function ()
+			return op.always(true, nil)
+		end,
+		terminate = function () return true, nil end,
+	}
 end
 
 local function closed_rx(reason)
@@ -210,6 +233,237 @@ function tests.test_reader_forwards_wire_errors_below_recovery_limit()
 		assert_eq(ev.err, 'decode_failed: first')
 		assert_eq(ev.wire_errors, 1)
 		assert_eq(ev.bad_frame_count, 1)
+	end)
+end
+
+function tests.test_reader_wire_error_includes_bad_line_diagnostics_from_hal_transport()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local line = '[mem] boot\r\n{"type":"hello"'
+		local wrapped = assert(hal_transport.wrap_transport(raw_line_transport { line }))
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = function () return wrapped:read_frame_op() end,
+			downstream_tx = tx,
+			bad_frame_limit = 3,
+			bad_frame_window_s = 10,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.wire_errors, 1)
+
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'wire_error')
+		assert_match(ev.err, '^decode_failed')
+		assert_match(ev.last_decode_error, '^decode_failed')
+		assert_eq(ev.last_bad_line_len, #line)
+		assert_eq(ev.last_bad_line_xxhash32, xxhash32.digest_hex(line))
+		assert_eq(ev.last_bad_line_head, '[mem] boot\\r\\n{"type":"hello"')
+		assert_eq(ev.last_bad_line_tail, '[mem] boot\\r\\n{"type":"hello"')
+	end)
+end
+
+function tests.test_reader_ignores_blank_lines_from_hal_transport()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local hello = assert(protocol.encode_line(assert(protocol.hello_ack('peer-sid', 'mcu'))))
+		local wrapped = assert(hal_transport.wrap_transport(raw_line_transport { '', ' \t\r', hello }))
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = function () return wrapped:read_frame_op() end,
+			downstream_tx = tx,
+			bad_frame_limit = 1,
+			bad_frame_window_s = 10,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.frames_read, 1)
+		assert_eq(result.wire_errors, 0)
+
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'frame_received')
+		assert_eq(ev.frame.type, 'hello_ack')
+		assert_eq(ev.frame.sid, 'peer-sid')
+	end)
+end
+
+function tests.test_reader_resyncs_short_non_printable_prefix_before_json()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local hello = assert(protocol.encode_line(assert(protocol.hello_ack('peer-sid', 'mcu'))))
+		local line = string.char(0xfe) .. hello
+		local wrapped = assert(hal_transport.wrap_transport(raw_line_transport {
+			line,
+		}))
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = function () return wrapped:read_frame_op() end,
+			downstream_tx = tx,
+			bad_frame_limit = 1,
+			bad_frame_window_s = 10,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.frames_read, 1)
+		assert_eq(result.wire_errors, 0)
+
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'frame_received')
+		assert_eq(ev.frame.type, 'hello_ack')
+		assert_eq(ev.frame.sid, 'peer-sid')
+		assert_eq(ev.line_resync, true)
+		assert_eq(ev.last_line_resync_prefix_len, 1)
+		assert_eq(ev.last_line_resync_line_len, #line)
+		assert_eq(ev.last_line_resync_xxhash32, xxhash32.digest_hex(line))
+		assert_eq(ev.last_line_resync_type, 'hello_ack')
+		assert_eq(ev.last_line_resync_peer_sid, 'peer-sid')
+	end)
+end
+
+function tests.test_reader_resyncs_long_non_printable_prefix_before_json()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local hello = assert(protocol.encode_line(assert(protocol.hello_ack('peer-sid-long', 'mcu'))))
+		local prefix = string.rep(string.char(0), 1592)
+		local line = prefix .. hello
+		local wrapped = assert(hal_transport.wrap_transport(raw_line_transport { line }))
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = function () return wrapped:read_frame_op() end,
+			downstream_tx = tx,
+			bad_frame_limit = 1,
+			bad_frame_window_s = 10,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.frames_read, 1)
+		assert_eq(result.wire_errors, 0)
+
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'frame_received')
+		assert_eq(ev.frame.type, 'hello_ack')
+		assert_eq(ev.frame.sid, 'peer-sid-long')
+		assert_eq(ev.line_resync, true)
+		assert_eq(ev.last_line_resync_prefix_len, #prefix)
+		assert_eq(ev.last_line_resync_line_len, #line)
+		assert_eq(ev.last_line_resync_xxhash32, xxhash32.digest_hex(line))
+		assert_eq(ev.last_line_resync_type, 'hello_ack')
+		assert_eq(ev.last_line_resync_peer_sid, 'peer-sid-long')
+	end)
+end
+
+function tests.test_reader_resync_rejects_printable_prefix_before_json()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local hello = assert(protocol.encode_line(assert(protocol.hello_ack('peer-sid', 'mcu'))))
+		local line = '[mem] boot ' .. hello
+		local wrapped = assert(hal_transport.wrap_transport(raw_line_transport { line }))
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = function () return wrapped:read_frame_op() end,
+			downstream_tx = tx,
+			bad_frame_limit = 2,
+			bad_frame_window_s = 10,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.frames_read, 0)
+		assert_eq(result.wire_errors, 1)
+
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'wire_error')
+		assert_match(ev.err, '^decode_failed')
+		assert_nil(ev.line_resync)
+		assert_eq(ev.last_bad_line_len, #line)
+	end)
+end
+
+function tests.test_reader_resync_rejects_prefix_beyond_scan_window()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local hello = assert(protocol.encode_line(assert(protocol.hello_ack('peer-sid', 'mcu'))))
+		local prefix = string.rep(string.char(0), 4096)
+		local line = prefix .. hello
+		local wrapped = assert(hal_transport.wrap_transport(raw_line_transport { line }))
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = function () return wrapped:read_frame_op() end,
+			downstream_tx = tx,
+			bad_frame_limit = 2,
+			bad_frame_window_s = 10,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.frames_read, 0)
+		assert_eq(result.wire_errors, 1)
+
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'wire_error')
+		assert_match(ev.err, '^decode_failed')
+		assert_nil(ev.line_resync)
+		assert_eq(ev.last_bad_line_len, #line)
+	end)
+end
+
+function tests.test_reader_resync_metadata_includes_xfer_id()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local frame = {
+			type = 'xfer_ready',
+			xfer_id = 'xfer-resync',
+		}
+		local line = string.char(1, 2, 3) .. assert(protocol.encode_line(frame))
+		local wrapped = assert(hal_transport.wrap_transport(raw_line_transport { line }))
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = function () return wrapped:read_frame_op() end,
+			downstream_tx = tx,
+			bad_frame_limit = 1,
+			bad_frame_window_s = 10,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.frames_read, 1)
+		assert_eq(result.wire_errors, 0)
+
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'frame_received')
+		assert_eq(ev.frame.type, 'xfer_ready')
+		assert_eq(ev.frame.xfer_id, 'xfer-resync')
+		assert_eq(ev.last_line_resync_prefix_len, 3)
+		assert_eq(ev.last_line_resync_type, 'xfer_ready')
+		assert_eq(ev.last_line_resync_xfer_id, 'xfer-resync')
+	end)
+end
+
+function tests.test_reader_recovery_includes_last_bad_line_diagnostics()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(8, { full = 'reject_newest' })
+		local first = '[value] first'
+		local second = '{"type":"hello"}{"type":"hello_ack"}'
+		local wrapped = assert(hal_transport.wrap_transport(raw_line_transport { first, second }))
+
+		local result = io_mod.run_reader(scope, {
+			read_frame_op = function () return wrapped:read_frame_op() end,
+			downstream_tx = tx,
+			bad_frame_limit = 2,
+			bad_frame_window_s = 10,
+			bad_frame_quiet_s = 0.01,
+		})
+
+		assert_eq(result.role, 'reader')
+		assert_eq(result.wire_errors, 2)
+
+		local ev1 = fibers.perform(rx:recv_op())
+		local ev2 = fibers.perform(rx:recv_op())
+		assert_eq(ev1.kind, 'wire_error')
+		assert_eq(ev2.kind, 'wire_recovery')
+		assert_eq(ev2.reason, 'bad_frame_limit')
+		assert_match(ev2.last_decode_error, '^decode_failed')
+		assert_eq(ev2.last_bad_line_len, #second)
+		assert_eq(ev2.last_bad_line_xxhash32, xxhash32.digest_hex(second))
+		assert_eq(ev2.last_bad_line_head, second)
+		assert_eq(ev2.last_bad_line_tail, second)
 	end)
 end
 

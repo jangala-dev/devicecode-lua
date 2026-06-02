@@ -183,6 +183,32 @@ function tests.test_component_reconcile_preserves_explicit_updater_failure()
 	end)
 end
 
+function tests.test_component_reconcile_prefers_updater_last_error_on_failed_mcu()
+	fibers.run(function ()
+		local backend = component_backend.new({ component = 'mcu' })
+		local result = backend:evaluate_reconcile(mcu_job(), {
+			by_id = {
+				mcu = {
+					state = {
+						software = { image_id = 'mcu-image-new', boot_id = 'mcu-boot-new' },
+						updater = {
+							state = 'failed',
+							last_error = 'abupdate_buy_failed',
+							boot_buy_rc = -42,
+						},
+						health = { state = 'ok' },
+					},
+				},
+			},
+		}, {})
+
+		assert_eq(result.done, true)
+		assert_eq(result.ok, false)
+		assert_eq(result.reason, 'abupdate_buy_failed')
+		assert_eq(result.state.updater.boot_buy_rc, -42)
+	end)
+end
+
 function tests.test_active_policy_persists_meaningful_reconcile_timeout_reason()
 	local job = {
 		job_id = 'job-timeout',

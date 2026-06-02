@@ -1369,6 +1369,17 @@ function tests.test_component_module_ignores_non_contract_mcu_fact_aliases()
 	assert_nil(updater.last_error)
 end
 
+function tests.test_component_module_preserves_mcu_updater_boot_buy_rc()
+	local updater = assert(component_mcu.normalise_fact('updater', {
+		state = 'failed',
+		last_error = 'abupdate_buy_failed',
+		boot_buy_rc = -42,
+	}))
+	assert_eq(updater.state, 'failed')
+	assert_eq(updater.last_error, 'abupdate_buy_failed')
+	assert_eq(updater.boot_buy_rc, -42)
+end
+
 
 function tests.test_stale_action_completion_is_archived_and_clears_pending_without_mutating_model()
 	fibers.run(function (scope)

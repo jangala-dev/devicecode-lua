@@ -309,17 +309,23 @@ function M.run(scope, req, caps)
 	local next_begin_retry_at = startup_deadline
 	local next_report_at = chunk_size
 	local last_need_next = nil
+	local last_transfer_event = nil
 	local commit_frame = nil
 	local last_commit_tx_at = 0
 	local commit_resends = 0
 
-	local function report_progress(status)
+	local function report_progress(status, event)
 		if type(req.on_progress) ~= 'function' then return end
+		if event ~= nil then last_transfer_event = event end
 		local ok, err = req.on_progress({
 			xfer_id = xfer_id,
 			sent = sent,
 			size = size,
 			status = status or state,
+			chunk_size = chunk_size,
+			pending_offset = pending and pending.offset or nil,
+			pending_next = pending and pending.next or nil,
+			last_transfer_event = last_transfer_event,
 		})
 		if ok == false then error(err or 'transfer_progress_report_failed', 0) end
 	end
@@ -375,13 +381,13 @@ function M.run(scope, req, caps)
 		})
 		send(caps, 'control', begin, 'transfer_begin_send_failed', startup_deadline)
 		next_begin_retry_at = math.min(startup_deadline, fibers.now() + begin_retry_interval_s)
-		report_progress('waiting_ready')
+		report_progress('waiting_ready', event or 'begin_tx')
 	end
 
 	local function note_report_progress()
 		if REPORT_BYTES <= 0 then return end
 		if sent < size and sent < next_report_at then return end
-		report_progress('sending')
+		report_progress('sending', 'chunk_ack')
 		while next_report_at <= sent do
 			next_report_at = next_report_at + REPORT_BYTES
 		end
@@ -399,6 +405,7 @@ function M.run(scope, req, caps)
 				requested_next = requested_next,
 				retransmits = retransmits,
 			})
+			report_progress(state, event or 'chunk_resend')
 		else
 			log_xfer(trace_io, suppressed_event or 'chunk_resend_suppressed', {
 				id = xfer_id,
@@ -601,6 +608,7 @@ function M.run(scope, req, caps)
 							else
 								pending = make_next_chunk(caps, source, xfer_id, sent, size, chunk_size, trace_io)
 								send_chunk(caps, pending, deadline, trace_io)
+								report_progress('sending', 'chunk_tx')
 								deadline = fibers.now() + timeout_s
 							end
 
@@ -648,6 +656,7 @@ function M.run(scope, req, caps)
 							else
 								pending = make_next_chunk(caps, source, xfer_id, sent, size, chunk_size, trace_io)
 								send_chunk(caps, pending, deadline, trace_io)
+								report_progress('sending', 'chunk_tx')
 								if frame.next == sent then
 									deadline = fibers.now() + timeout_s
 								end
