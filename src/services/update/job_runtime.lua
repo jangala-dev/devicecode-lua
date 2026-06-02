@@ -78,6 +78,8 @@ local function transition_record(req, state, details)
 	base.finished = details.finished
 	base.error = details.error
 	base.plan_kind = details.plan_kind
+	base.store_op = details.store_op
+	base.store_err = details.store_err
 	if state == 'admitted'
 		or state == 'persisting'
 		or state == 'persisted'
@@ -152,6 +154,9 @@ local function transition_outcome_from_record(rec, value)
 	out.token = out.token or rec.token
 	out.transition_state = rec.state
 	out.lifecycle = rec.state
+	out.plan_kind = out.plan_kind or rec.plan_kind
+	out.store_op = out.store_op or rec.store_op
+	out.store_err = out.store_err or rec.store_err
 	return out
 end
 
@@ -939,6 +944,12 @@ local function apply_plan(self, plan)
 end
 
 local function start_transition_worker(self, req, plan)
+	local store_op
+	if plan.kind == 'save_job' then
+		store_op = 'save_job_op'
+	elseif plan.kind == 'delete_job' then
+		store_op = 'delete_job_op'
+	end
 	local identity = {
 		kind = 'job_transition_done',
 		service_id = self._service_id,
@@ -948,6 +959,8 @@ local function start_transition_worker(self, req, plan)
 		generation = req.cmd and req.cmd.generation,
 		phase = req.cmd and req.cmd.phase,
 		token = req.cmd and req.cmd.token,
+		plan_kind = plan.kind,
+		store_op = store_op,
 	}
 
 	local handle, err = scoped_work.start {
@@ -959,10 +972,14 @@ local function start_transition_worker(self, req, plan)
 		run = function ()
 			if plan.kind == 'save_job' then
 				local ok, serr = fibers.perform(store_save_op(self._store, public_job(plan.job)))
-				if ok ~= true then error(serr or 'job_save_failed', 0) end
+				if ok ~= true then
+					error('job_store_save_failed:' .. tostring(serr or 'job_save_failed'), 0)
+				end
 			elseif plan.kind == 'delete_job' then
 				local ok, derr = fibers.perform(store_delete_op(self._store, plan.job_id))
-				if ok ~= true then error(derr or 'job_delete_failed', 0) end
+				if ok ~= true then
+					error('job_store_delete_failed:' .. tostring(derr or 'job_delete_failed'), 0)
+				end
 			else
 				error('unsupported_plan_kind', 0)
 			end
@@ -1014,13 +1031,13 @@ local function start_next(self)
 			refresh_model(self)
 			resolve_cell(req.cell, outcome, nil)
 		else
-			local rec = transition_set(self, req, 'admitted', {
+			transition_set(self, req, 'admitted', {
 				sequence = req.sequence,
 				plan_kind = plan.kind,
 			})
 			refresh_model(self)
 
-			rec = transition_set(self, req, 'persisting', {
+			transition_set(self, req, 'persisting', {
 				sequence = req.sequence,
 				plan_kind = plan.kind,
 			})
@@ -1028,7 +1045,7 @@ local function start_next(self)
 
 			local handle, herr = start_transition_worker(self, req, plan)
 			if not handle then
-				rec = transition_set(self, req, 'failed', {
+				local rec = transition_set(self, req, 'failed', {
 					sequence = req.sequence,
 					plan_kind = plan.kind,
 					error = herr or 'job_transition_start_failed',
@@ -1083,6 +1100,12 @@ local function transition_outcome(req, plan, status, reason)
 	out.token = plan.token or (req.cmd and req.cmd.token)
 	out.commit_token = plan.commit_token or (req.cmd and req.cmd.commit_token) or out.commit_token
 	out.commit_policy = plan.commit_policy or (req.cmd and (req.cmd.commit_policy or req.cmd.policy)) or out.commit_policy
+	out.plan_kind = plan.kind
+	if plan.kind == 'save_job' then
+		out.store_op = 'save_job_op'
+	elseif plan.kind == 'delete_job' then
+		out.store_op = 'delete_job_op'
+	end
 	if status ~= 'persisted' then out.reason = reason end
 	return out
 end
@@ -1110,6 +1133,7 @@ local function handle_transition_done(self, ev)
 			rec = transition_set(self, inflight.request, 'persisted', {
 				sequence = inflight.request.sequence,
 				plan_kind = inflight.plan.kind,
+				store_op = ev.store_op,
 			})
 			outcome = transition_outcome_from_record(rec, transition_outcome(inflight.request, inflight.plan, 'persisted'))
 		else
@@ -1117,8 +1141,17 @@ local function handle_transition_done(self, ev)
 				sequence = inflight.request.sequence,
 				plan_kind = inflight.plan.kind,
 				error = err or 'job_transition_apply_failed',
+				store_op = ev.store_op,
 			})
-			outcome = transition_outcome_from_record(rec, transition_outcome(inflight.request, inflight.plan, 'failed', err or 'job_transition_apply_failed'))
+			outcome = transition_outcome_from_record(
+				rec,
+				transition_outcome(
+					inflight.request,
+					inflight.plan,
+					'failed',
+					err or 'job_transition_apply_failed'
+				)
+			)
 		end
 	else
 		local reason = ev.primary or ev.status or 'job_transition_failed'
@@ -1126,8 +1159,11 @@ local function handle_transition_done(self, ev)
 			sequence = inflight.request.sequence,
 			plan_kind = inflight.plan.kind,
 			error = reason,
+			store_op = ev.store_op,
+			store_err = reason,
 		})
 		outcome = transition_outcome_from_record(rec, transition_outcome(inflight.request, inflight.plan, 'failed', reason))
+		outcome.store_err = reason
 	end
 
 	record_transition_outcome(self, outcome)

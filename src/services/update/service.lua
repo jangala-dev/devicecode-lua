@@ -12,7 +12,7 @@ local mailbox      = require 'fibers.mailbox'
 local scoped_work  = require 'devicecode.support.scoped_work'
 local queue        = require 'devicecode.support.queue'
 local bus_cleanup  = require 'devicecode.support.bus_cleanup'
-local config_watch   = require 'devicecode.support.config_watch'
+local config_watch = require 'devicecode.support.config_watch'
 local service_events = require 'devicecode.support.service_events'
 local service_base   = require 'devicecode.service_base'
 local cap_deps_mod   = require 'devicecode.support.capability_dependencies'
@@ -22,7 +22,6 @@ local config_mod    = require 'services.update.config'
 local events        = require 'services.update.events'
 local generation    = require 'services.update.generation'
 local publisher     = require 'services.update.publisher'
-local projection    = require 'services.update.projection'
 local topics        = require 'services.update.topics'
 local job_store_memory = require 'services.update.job_store_memory'
 local control_store_jobs = require 'services.update.job_store_control_store'
@@ -50,6 +49,8 @@ local ensure_runtime_dependents
 local reconcile_runtime_components
 local classify_dependency_route_missing
 local handle_artifact_route_missing
+local fail_update_service
+local artifact_store_available_for_work
 
 
 local function copy(v)
@@ -108,6 +109,7 @@ local function update_model_state(self, state, reason)
 		local extra = { ready = ready }
 		if reason ~= nil then extra.reason = reason end
 		if snapshot and snapshot.pending ~= nil then extra.pending = snapshot.pending end
+		if snapshot and snapshot.last_failure ~= nil then extra.last_failure = snapshot.last_failure end
 		extra.dependencies = self._deps:snapshot()
 		self._svc:status(state, extra)
 	end
@@ -183,6 +185,101 @@ local function active_snapshot(self)
 	end
 	local snap = self._active_component:snapshot()
 	return snap and snap.active or nil
+end
+
+local TERMINAL_JOB_STATE = {
+	succeeded = true,
+	failed = true,
+	cancelled = true,
+	timed_out = true,
+	superseded = true,
+	discarded = true,
+}
+
+local function current_job_snapshot(self)
+	if not self._jobs or type(self._jobs.snapshot) ~= 'function' then
+		return nil
+	end
+	local snap = self._jobs:snapshot()
+	local by_id = snap and snap.by_id or nil
+	if type(by_id) ~= 'table' then return nil end
+
+	local selected
+	for _, id in ipairs(snap.order or {}) do
+		local job = by_id[id]
+		if type(job) == 'table' then
+			if job.active_intent or job.active or not TERMINAL_JOB_STATE[job.state] then
+				selected = job
+				if job.active_intent or job.active then break end
+			end
+			if job.state == 'staging'
+				or job.state == 'awaiting_commit'
+				or job.state == 'committing'
+				or job.state == 'awaiting_return'
+			then
+				selected = job
+				break
+			end
+		end
+	end
+	if selected == nil then
+		for _, job in pairs(by_id) do
+			if type(job) == 'table' then
+				selected = job
+				break
+			end
+		end
+	end
+	if selected == nil then return nil end
+	return {
+		job_id = selected.job_id,
+		state = selected.state,
+		component = selected.component,
+		next_step = selected.next_step,
+		phase = selected.phase or (selected.active and selected.active.phase)
+			or (selected.active_intent and selected.active_intent.phase),
+	}
+end
+
+local function event_failure_fields(ev)
+	ev = type(ev) == 'table' and ev or {}
+	return {
+		event_kind = ev.kind,
+		event_status = ev.status,
+		event_primary = ev.primary,
+		component = ev.component,
+		transition_id = ev.transition_id,
+		transition = ev.transition,
+		phase = ev.phase,
+		token = ev.token,
+		plan_kind = ev.plan_kind,
+		store_op = ev.store_op,
+		store_err = ev.store_err,
+	}
+end
+
+local function make_last_failure(self, source, reason, ev)
+	local rec = event_failure_fields(ev)
+	rec.source = source or 'unknown'
+	rec.reason = tostring(reason or 'failed')
+	rec.job_runtime_ready = self._job_runtime_ready == true
+	rec.active_job = copy(active_snapshot(self))
+	rec.current_job = current_job_snapshot(self)
+	if rec.current_job then
+		rec.job_id = rec.current_job.job_id
+		rec.job_state = rec.current_job.state
+	end
+	return rec
+end
+
+fail_update_service = function(self, source, reason, ev)
+	local failure = make_last_failure(self, source, reason, ev)
+	self._last_failure = failure
+	self._model:update(function (s)
+		s.last_failure = copy(failure)
+		return s
+	end)
+	update_model_state(self, 'failed', reason)
 end
 
 local function route_generation_event(self, ev, label)
@@ -323,7 +420,7 @@ local function apply_config(self, payload, reason)
 
 	local ok, start_err = replace_generation(self, cfg, reason or 'config_changed')
 	if not ok then
-		update_model_state(self, 'failed', start_err or 'generation_start_failed')
+		fail_update_service(self, 'generation', start_err or 'generation_start_failed')
 		error(start_err or 'generation_start_failed', 0)
 	end
 
@@ -376,7 +473,7 @@ local function handle_generation_done(self, ev)
 		handle_artifact_route_missing(self, reason)
 		return
 	end
-	update_model_state(self, 'failed', reason)
+	fail_update_service(self, 'generation', reason, ev)
 	error('update generation failed: ' .. tostring(reason), 0)
 end
 
@@ -516,7 +613,7 @@ local function consider_active_jobs(self)
 	update_active_projection(self)
 
 	if ok == nil and err ~= 'slot_busy' and err ~= 'no_active_intent' and err ~= 'not_ready' then
-		update_model_state(self, 'failed', err)
+		fail_update_service(self, 'active_runtime', err)
 		error('update active runtime launch failed: ' .. tostring(err), 0)
 	end
 
@@ -530,7 +627,7 @@ local function handle_job_runtime_changed(self, ev)
 		update_service_jobs_projection(self)
 		local ok, err = reconcile_runtime_components(self, 'job_runtime_ready')
 		if ok ~= true then
-			update_model_state(self, 'failed', err or 'runtime_dependents_start_failed')
+			fail_update_service(self, 'runtime_reconcile', err or 'runtime_dependents_start_failed', ev)
 			error(err or 'runtime_dependents_start_failed', 0)
 		end
 	else
@@ -564,7 +661,7 @@ local function handle_active_runtime_changed(self, ev)
 				reason = ev and ev.reason or 'active_runtime_changed',
 			}, 'update_generation_active_snapshot_admission_failed')
 			if ok ~= true then
-				update_model_state(self, 'failed', err or 'active_snapshot_route_failed')
+				fail_update_service(self, 'manager_route', err or 'active_snapshot_route_failed', ev)
 				error(err or 'active_snapshot_route_failed', 0)
 			end
 		end
@@ -622,7 +719,7 @@ local function reduce_event(self, ev)
 			return
 		end
 
-		update_model_state(self, 'failed', reason)
+		fail_update_service(self, 'job_runtime', reason, ev)
 		error(reason, 0)
 	end
 
@@ -671,7 +768,7 @@ local function reduce_event(self, ev)
 				set_waiting_for_job_store(self, 'job_store_unavailable')
 				return
 			end
-			update_model_state(self, 'failed', reason)
+			fail_update_service(self, 'job_runtime', reason, ev)
 			error('update job runtime failed: ' .. tostring(reason), 0)
 		end
 		if ev.status == 'cancelled' and (self._suppress_dependents_reason or ev.primary == 'job_store_unavailable' or ev.primary == 'artifact_store_unavailable') then
@@ -694,7 +791,7 @@ local function reduce_event(self, ev)
 				handle_artifact_route_missing(self, reason)
 				return
 			end
-			update_model_state(self, 'failed', reason)
+			fail_update_service(self, 'active_runtime', reason, ev)
 			error('update active runtime failed: ' .. tostring(reason), 0)
 		end
 		if not self._complete then
@@ -710,7 +807,7 @@ local function reduce_event(self, ev)
 		self._component_watch = nil
 		if ev.status == 'failed' then
 			local reason = ev.primary or 'component_watch_failed'
-			update_model_state(self, 'failed', reason)
+			fail_update_service(self, 'component_watch', reason, ev)
 			error('update component watch failed: ' .. tostring(reason), 0)
 		end
 		if not self._complete then
@@ -724,7 +821,7 @@ local function reduce_event(self, ev)
 		self._publisher = nil
 		if ev.status == 'failed' then
 			local reason = ev.primary or 'publisher_failed'
-			update_model_state(self, 'failed', reason)
+			fail_update_service(self, 'publisher', reason, ev)
 			error('update publisher failed: ' .. tostring(reason), 0)
 		end
 		if not self._complete then
@@ -1035,7 +1132,7 @@ stop_runtime_dependents = function(self, reason)
 	self._component_watch = nil
 end
 
-local function artifact_store_available_for_work(self)
+artifact_store_available_for_work = function(self)
 	return not self._artifact_store_dependency_required or dependency_effectively_available(self, 'artifact_store')
 end
 
@@ -1207,7 +1304,7 @@ handle_dependency_changed = function(self, ev)
 		if dependency_effectively_available(self, 'job_store') then
 			local ok, err = reconcile_runtime_components(self, 'job_store_available')
 			if ok ~= true then
-				update_model_state(self, 'failed', err or 'job_runtime_start_failed')
+				fail_update_service(self, 'runtime_reconcile', err or 'job_runtime_start_failed', ev)
 				error(err or 'job_runtime_start_failed', 0)
 			end
 		elseif self._job_store_dependency_required then
@@ -1224,7 +1321,7 @@ handle_dependency_changed = function(self, ev)
 		if dependency_effectively_available(self, 'artifact_store') then
 			local ok, err = reconcile_runtime_components(self, 'artifact_store_available')
 			if ok ~= true then
-				update_model_state(self, 'failed', err or 'artifact_store_reconcile_failed')
+				fail_update_service(self, 'runtime_reconcile', err or 'artifact_store_reconcile_failed', ev)
 				error(err or 'artifact_store_reconcile_failed', 0)
 			end
 		elseif self._artifact_store_dependency_required then
@@ -1267,7 +1364,7 @@ function M.run(scope, params)
 	local manager_ep, merr = bind_manager(scope, params.conn, params)
 	if merr then error(merr, 2) end
 
-	local config_watch, werr = open_config_watch(scope, params.conn, params)
+	local cfg_watch, werr = open_config_watch(scope, params.conn, params)
 	if werr then error(werr, 2) end
 
 	local job_dep_required = job_store_dependency_required(params)
@@ -1346,8 +1443,8 @@ function M.run(scope, params)
 		_active_runtime = nil,
 		_manager_ep = manager_ep,
 		manager_rx = manager_ep,
-		config_watch = config_watch,
-		config_rx = params.config_rx or config_watch,
+		config_watch = cfg_watch,
+		config_rx = params.config_rx or cfg_watch,
 		publisher = nil,
 		_publisher = nil,
 		pending = {},

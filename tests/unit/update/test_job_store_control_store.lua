@@ -155,4 +155,49 @@ function T.load_all_ignores_stale_index_entries()
   end)
 end
 
+function T.maps_plain_timeouts_to_method_specific_reasons()
+  runfibers.run(function()
+    local op_mod = require('fibers.op')
+    local method
+    local conn = {
+      call_op = function(_, topic)
+        method = topic[5]
+        return op_mod.always(nil, 'timeout')
+      end,
+    }
+    local store = store_mod.new(conn)
+
+    local ok_save, save_err = fibers.perform(store:save_job_op({
+      job_id = 'job-timeout',
+      component = 'mcu',
+      state = 'created',
+    }))
+    assert(ok_save == nil)
+    assert(save_err == 'control_store_put_timeout')
+    assert(method == 'put')
+
+    local snapshot, list_err = fibers.perform(store:load_all_op())
+    assert(snapshot == nil)
+    assert(list_err == 'control_store_list_timeout')
+
+    local ok_delete, delete_err = fibers.perform(store:delete_job_op('job-timeout'))
+    assert(ok_delete == nil)
+    assert(delete_err == 'control_store_delete_timeout')
+
+    local conn2 = {
+      call_op = function(_, topic)
+        local m = topic[5]
+        if m == 'list' then
+          return op_mod.always({ ok = true, reason = { 'update-job-missing' } }, nil)
+        end
+        return op_mod.always(nil, 'timeout')
+      end,
+    }
+    local store2 = store_mod.new(conn2)
+    local snapshot2, get_err = fibers.perform(store2:load_all_op())
+    assert(snapshot2 == nil)
+    assert(get_err == 'control_store_get_timeout')
+  end)
+end
+
 return T
