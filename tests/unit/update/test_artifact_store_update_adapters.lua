@@ -15,15 +15,20 @@ local function assert_true(v, msg)
   if v ~= true then error(msg or ('expected true, got ' .. tostring(v)), 2) end
 end
 
-local function fake_observer(software)
+local function fake_observer(software, overrides)
+  local state = {
+    software = software,
+    updater = { state = 'running' },
+    health = { state = 'ok' },
+    actions = { ['prepare-update'] = true, ['stage-update'] = true, ['commit-update'] = true },
+  }
+  for k, v in pairs(overrides or {}) do state[k] = v end
   return {
     snapshot = function()
       return {
         components = {
           mcu = {
-            state = {
-              software = software,
-            },
+            state = state,
           },
         },
       }
@@ -64,7 +69,10 @@ function T.artifact_store_bus_unwraps_hal_reply_envelopes()
     }
 
     local store = store_bus.new(conn)
-    local got_sink, sink_err = fibers.perform(store:create_sink_op({ meta = { component = 'mcu' }, policy = 'prefer_durable' }))
+    local got_sink, sink_err = fibers.perform(store:create_sink_op({
+      meta = { component = 'mcu' },
+      policy = 'prefer_durable',
+    }))
     assert_eq(got_sink, sink, tostring(sink_err))
 
     local got_source, source_err = fibers.perform(store:open_source_op('artifact-1'))
@@ -120,7 +128,7 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
         if topic[5] == 'prepare-update' then
           seen_prepare = payload
           assert_eq(payload.target, 'mcu')
-          return op.always({ ok = true }, nil)
+          return op.always({ ok = true, max_chunk_size = 512 }, nil)
         end
         if topic[5] == 'stage-update' then
           seen_payload = payload
@@ -137,7 +145,12 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
       component = 'mcu',
       observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }),
     })
-    local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', metadata = { image_id = 'img-new', transfer_chunk_raw = 1024 } }
+    local job = {
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+      metadata = { image_id = 'img-new', transfer_chunk_raw = 1024 },
+    }
 
     local staged, serr = fibers.perform(backend:stage_op(job, {}))
     assert_eq(type(staged), 'table', tostring(serr))
@@ -150,6 +163,137 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
     assert_eq(seen_payload.digest, 'abcd')
     assert_eq(seen_payload.chunk_size, 1024)
     assert_eq(seen_stage_opts.timeout, false)
+  end)
+end
+
+function T.component_backend_stage_op_clamps_metadata_chunk_size_to_prepare_max()
+  runfibers.run(function()
+    local source = {}
+    function source:read_chunk_op() return op.always(nil, nil) end
+    local artifact = {}
+    function artifact:describe()
+      return { artifact_ref = 'artifact-1', size = 12, digest = 'abcd', meta = { image_id = 'img-new' } }
+    end
+    local artifact_store = {
+      open_op = function() return op.always(artifact, nil) end,
+      open_source_op = function() return op.always(source, nil) end,
+    }
+    local seen_payload
+    local conn = {
+      call_op = function(_, topic, payload)
+        if topic[5] == 'prepare-update' then
+          return op.always({ ok = true, max_chunk_size = 512 }, nil)
+        end
+        if topic[5] == 'stage-update' then
+          seen_payload = payload
+          return op.always({ ok = true, public_status = 'succeeded' }, nil)
+        end
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }),
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+      metadata = { image_id = 'img-new', chunk_size = 2048 },
+    }, {}))
+    assert_eq(type(staged), 'table', tostring(serr))
+    assert_eq(seen_payload.chunk_size, 512)
+  end)
+end
+
+function T.component_backend_stage_op_clamps_default_chunk_size_to_prepare_max()
+  runfibers.run(function()
+    local source = {}
+    function source:read_chunk_op() return op.always(nil, nil) end
+    local artifact = {}
+    function artifact:describe()
+      return { artifact_ref = 'artifact-1', size = 12, digest = 'abcd', meta = { image_id = 'img-new' } }
+    end
+    local artifact_store = {
+      open_op = function() return op.always(artifact, nil) end,
+      open_source_op = function() return op.always(source, nil) end,
+    }
+    local seen_payload
+    local conn = {
+      call_op = function(_, topic, payload)
+        if topic[5] == 'prepare-update' then
+          return op.always({ ok = true, max_chunk_size = 512 }, nil)
+        end
+        if topic[5] == 'stage-update' then
+          seen_payload = payload
+          return op.always({ ok = true, public_status = 'succeeded' }, nil)
+        end
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }),
+      chunk_size = 2048,
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+      metadata = { image_id = 'img-new' },
+    }, {}))
+    assert_eq(type(staged), 'table', tostring(serr))
+    assert_eq(seen_payload.chunk_size, 512)
+  end)
+end
+
+function T.component_backend_stage_op_keeps_configured_chunk_when_prepare_max_absent()
+  runfibers.run(function()
+    local source = {}
+    function source:read_chunk_op() return op.always(nil, nil) end
+    local artifact = {}
+    function artifact:describe()
+      return { artifact_ref = 'artifact-1', size = 12, digest = 'abcd', meta = { image_id = 'img-new' } }
+    end
+    local artifact_store = {
+      open_op = function() return op.always(artifact, nil) end,
+      open_source_op = function() return op.always(source, nil) end,
+    }
+    local seen_payload
+    local conn = {
+      call_op = function(_, topic, payload)
+        if topic[5] == 'prepare-update' then
+          return op.always({ ok = true }, nil)
+        end
+        if topic[5] == 'stage-update' then
+          seen_payload = payload
+          return op.always({ ok = true, public_status = 'succeeded' }, nil)
+        end
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }),
+      chunk_size = 2048,
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+      metadata = { image_id = 'img-new' },
+    }, {}))
+    assert_eq(type(staged), 'table', tostring(serr))
+    assert_eq(seen_payload.chunk_size, 2048)
   end)
 end
 
@@ -179,14 +323,122 @@ function T.component_backend_stage_op_requires_component_boot_id_before_prepare(
       component = 'mcu',
       observer = fake_observer({ image_id = 'img-old', version = '1.0' }),
     })
-    local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', metadata = { image_id = 'img-new' } }
+    local job = {
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+      metadata = { image_id = 'img-new' },
+    }
 
     local staged, serr = fibers.perform(backend:stage_op(job, {}))
     assert_eq(staged, nil)
-    assert_eq(serr, 'component_software_boot_id_unavailable')
+    assert_eq(serr, 'mcu_control_plane_not_ready:software_boot_id_unavailable')
     assert_eq(calls.open, nil, 'artifact should not open before boot_id readiness')
     assert_eq(calls['prepare-update'], nil, 'prepare-update should not be called before boot_id readiness')
     assert_eq(calls['stage-update'], nil, 'stage-update should not be called before boot_id readiness')
+  end)
+end
+
+function T.component_backend_stage_op_requires_mcu_critical_facts_before_artifact_open()
+  runfibers.run(function()
+    local calls = {}
+    local artifact_store = {
+      open_op = function() calls.open = true; return op.always({}, nil) end,
+      open_source_op = function() calls.source = true; return op.always({}, nil) end,
+    }
+    local conn = {
+      call_op = function(_, topic)
+        calls[topic[5]] = true
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }, {
+        updater = {},
+        health = {},
+      }),
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+    }, {}))
+    assert_eq(staged, nil)
+    assert_eq(serr, 'mcu_control_plane_not_ready:missing_critical_facts:updater,health')
+    assert_eq(calls.open, nil, 'artifact should not open before critical state readiness')
+    assert_eq(calls['prepare-update'], nil, 'prepare-update should not be called before critical state readiness')
+  end)
+end
+
+function T.component_backend_stage_op_requires_prepare_route_before_artifact_open()
+  runfibers.run(function()
+    local calls = {}
+    local artifact_store = {
+      open_op = function() calls.open = true; return op.always({}, nil) end,
+      open_source_op = function() calls.source = true; return op.always({}, nil) end,
+    }
+    local conn = {
+      call_op = function(_, topic)
+        calls[topic[5]] = true
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }, {
+        actions = { ['stage-update'] = true, ['commit-update'] = true },
+      }),
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+    }, {}))
+    assert_eq(staged, nil)
+    assert_eq(serr, 'mcu_control_plane_not_ready:prepare_route_missing')
+    assert_eq(calls.open, nil, 'artifact should not open before prepare route readiness')
+    assert_eq(calls['prepare-update'], nil, 'prepare-update should not be called before prepare route readiness')
+  end)
+end
+
+function T.component_backend_stage_op_rejects_source_reason_before_artifact_open()
+  runfibers.run(function()
+    local calls = {}
+    local artifact_store = {
+      open_op = function() calls.open = true; return op.always({}, nil) end,
+      open_source_op = function() calls.source = true; return op.always({}, nil) end,
+    }
+    local conn = {
+      call_op = function(_, topic)
+        calls[topic[5]] = true
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }, {
+        source = { reason = 'liveness_timeout' },
+      }),
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+    }, {}))
+    assert_eq(staged, nil)
+    assert_eq(serr, 'mcu_control_plane_not_ready:liveness_timeout')
+    assert_eq(calls.open, nil, 'artifact should not open before source readiness')
+    assert_eq(calls['prepare-update'], nil, 'prepare-update should not be called before source readiness')
   end)
 end
 
@@ -220,7 +472,12 @@ function T.component_backend_stage_op_labels_prepare_timeout()
       component = 'mcu',
       observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }),
     })
-    local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', metadata = { image_id = 'img-new' } }
+    local job = {
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+      metadata = { image_id = 'img-new' },
+    }
 
     local staged, serr = fibers.perform(backend:stage_op(job, {}))
     assert_eq(staged, nil)
