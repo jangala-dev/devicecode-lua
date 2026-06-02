@@ -340,6 +340,45 @@ function tests.test_commit_worker_persists_attempt_before_backend_commit_and_pas
 	end)
 end
 
+function tests.test_commit_worker_rejected_backend_commit_does_not_persist_awaiting_return()
+	fibers.run(function (scope)
+		local order = {}
+		local jobs = {}
+		function jobs:admit_transition(cmd)
+			order[#order + 1] = cmd.kind
+			if cmd.kind == 'commit_accepted' then
+				error('commit_accepted must not persist after backend rejection', 0)
+			end
+			return {
+				outcome_op = function ()
+					return op.always({ status = 'persisted' }, nil)
+				end,
+			}, nil
+		end
+		local backend = {}
+		function backend:commit_capabilities()
+			return { policy = 'idempotent_by_token' }
+		end
+		function backend:commit_op()
+			order[#order + 1] = 'backend_commit'
+			return op.always(nil, 'component_commit_rejected')
+		end
+
+		local ok, err = pcall(function ()
+			active_job.commit(scope, {
+				backend = backend,
+				jobs = jobs,
+				lease = { token = 'active-token', generation = 1 },
+				job = { job_id = 'j1', component = 'cm5', state = 'committing', active_token = 'active-token' },
+			})
+		end)
+
+		assert_eq(ok, false)
+		assert_true(tostring(err):find('component_commit_rejected', 1, true) ~= nil)
+		assert_eq(table.concat(order, ','), 'begin_commit_attempt,backend_commit')
+	end)
+end
+
 function tests.test_commit_worker_rejects_backend_without_commit_policy()
 	fibers.run(function (scope)
 		local backend = { commit_op = function () return op.always({ accepted = true }, nil) end }

@@ -11,12 +11,20 @@ local scope_mod     = require 'fibers.scope'
 local request_owner = require 'devicecode.support.request_owner'
 local resource      = require 'devicecode.support.resource'
 local fabric_stage  = require 'services.device.fabric_stage'
+local store_bus     = require 'services.update.artifacts.store_bus'
 
 local M = {}
 
 local function request_payload(req)
 	if type(req) ~= 'table' then return nil end
 	return req.payload
+end
+
+local function shallow_copy(t)
+	if type(t) ~= 'table' then return t end
+	local out = {}
+	for k, v in pairs(t) do out[k] = v end
+	return out
 end
 
 local function default_call_op(conn, topic, payload, opts)
@@ -78,6 +86,9 @@ local function public_reply_payload(result)
 	return sanitise_public_payload(result)
 end
 
+local open_source_op
+local source_terminator
+
 local function finalise_owner(owner, status, primary)
 	if owner:done() then return end
 	if status == 'cancelled' then
@@ -89,9 +100,8 @@ local function finalise_owner(owner, status, primary)
 	end
 end
 
-local function run_rpc_op(ctx, owner)
+local function rpc_call_op(ctx, owner, payload)
 	local action = ctx.action_spec
-	local payload = request_payload(ctx.request)
 	local call_ev, cerr = default_call_op(ctx.conn, action.call_topic, payload, {
 		timeout = action.timeout or ctx.timeout,
 		deadline = ctx.deadline,
@@ -121,11 +131,55 @@ local function run_rpc_op(ctx, owner)
 	end)
 end
 
+local function rpc_stage_needs_source(ctx, payload)
+	if ctx.action ~= 'stage-update' or type(payload) ~= 'table' then return false end
+	if payload.source ~= nil or payload.artifact ~= nil then return false end
+	return payload.artifact_ref ~= nil or payload.ref ~= nil
+end
+
+local function run_rpc_op(ctx, owner)
+	local payload = request_payload(ctx.request)
+	if not rpc_stage_needs_source(ctx, payload) then
+		return rpc_call_op(ctx, owner, payload)
+	end
+
+	return fibers.run_scope_op(function (source_scope)
+		local source, err = fibers.perform(open_source_op(ctx))
+		if not source then
+			owner:fail_once(err or 'source_required')
+			return public_result('rejected', { err = err or 'source_required' })
+		end
+
+		local owned = resource.owned(source, {
+			terminate = source_terminator(ctx),
+			label = 'device rpc-stage source termination',
+		})
+		source_scope:finally(function (_, status, primary)
+			owned:terminate_checked(
+				primary or status or 'rpc_stage_terminated',
+				'device rpc-stage source termination failed'
+			)
+		end)
+
+		local call_payload = shallow_copy(payload)
+		call_payload.source = owned:value()
+		return fibers.perform(rpc_call_op(ctx, owner, call_payload))
+	end):wrap(function (st, _rep, result_or_primary)
+		if st == 'ok' then
+			return result_or_primary
+		end
+
+		local reason = result_or_primary or st or 'rpc_stage_failed'
+		owner:fail_once(reason)
+		return public_result(st == 'cancelled' and 'cancelled' or 'failed', { err = reason })
+	end)
+end
+
 local function is_op(v)
 	return type(v) == 'table' and getmetatable(v) == op.Op
 end
 
-local function open_source_op(ctx)
+function open_source_op(ctx)
 	local payload = request_payload(ctx.request) or {}
 	local opener = ctx.open_source_op
 
@@ -145,11 +199,17 @@ local function open_source_op(ctx)
 
 	if payload.source ~= nil then return op.always(payload.source, nil) end
 	if payload.artifact ~= nil then return op.always(payload.artifact, nil) end
+	if payload.artifact_ref ~= nil or payload.ref ~= nil then
+		local action = ctx.action_spec or {}
+		local store_id = payload.artifact_store or action.artifact_store or 'main'
+		local store = store_bus.new(ctx.conn, { id = store_id })
+		return store:open_source_op(payload.artifact_ref or payload.ref)
+	end
 	return op.always(nil, 'source_required')
 end
 
 
-local function source_terminator(ctx)
+function source_terminator(ctx)
 	local terminate = ctx.terminate_source
 	if terminate ~= nil and type(terminate) ~= 'function' then
 		error('terminate_source must be a function', 0)
@@ -286,7 +346,7 @@ function M.run(scope, ctx)
 		error('device action worker must run in its owning scope', 0)
 	end
 	local req = assert(ctx.request, 'device action worker requires request')
-	local action_spec = assert(ctx.action_spec, 'device action worker requires action_spec')
+	assert(ctx.action_spec, 'device action worker requires action_spec')
 	local owner = ctx.request_owner or request_owner.new(req, ctx.request_owner_opts)
 
 	-- When action work is launched through action_manager, the request owner is

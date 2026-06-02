@@ -120,6 +120,36 @@ local function validate_stage_reply(reply)
 	return true, nil
 end
 
+local function commit_acceptance_payload(reply)
+	if type(reply) ~= 'table' then return nil end
+	if reply.accepted ~= nil then return reply end
+	if type(reply.value) == 'table' and reply.value.accepted ~= nil then return reply.value end
+	if type(reply.reply_payload) == 'table' and reply.reply_payload.accepted ~= nil then
+		return reply.reply_payload
+	end
+	return nil
+end
+
+local function validate_commit_reply(reply)
+	if type(reply) ~= 'table' then
+		return nil, 'invalid_commit_reply'
+	end
+	if reply.ok == false then
+		return nil, reply.err or reply.error or reply.reason or 'component_commit_update_failed'
+	end
+	if reply.public_status ~= nil and reply.public_status ~= 'succeeded' then
+		return nil, reply.err or reply.error or reply.reason or reply.public_status
+	end
+	local accepted = commit_acceptance_payload(reply)
+	if type(accepted) ~= 'table' then
+		return nil, 'component_commit_acceptance_missing'
+	end
+	if accepted.accepted ~= true then
+		return nil, accepted.err or accepted.error or accepted.reason or 'component_commit_rejected'
+	end
+	return accepted, nil
+end
+
 local function phase_error(prefix, err)
 	if err == nil or err == '' then return prefix end
 	return prefix .. ':' .. tostring(err)
@@ -248,9 +278,6 @@ function Backend:stage_op(job, _ctx)
 		if not self._artifact_store or type(self._artifact_store.open_op) ~= 'function' then
 			return nil, 'artifact_store_unavailable'
 		end
-		if type(self._artifact_store.open_source_op) ~= 'function' then
-			return nil, 'artifact_source_unavailable'
-		end
 
 		local artifact, aerr = fibers.perform(self._artifact_store:open_op(ref))
 		if artifact == nil then return nil, aerr or 'artifact_open_failed' end
@@ -268,12 +295,10 @@ function Backend:stage_op(job, _ctx)
 		local prepared, perr = fibers.perform(call_component_op(self, component, 'prepare-update', prepare_payload))
 		if prepared == nil then return nil, phase_error('component_prepare_update_failed', perr) end
 
-		local source, serr = fibers.perform(self._artifact_store:open_source_op(ref))
-		if source == nil then return nil, serr or 'artifact_source_open_failed' end
 		local payload = {
 			job_id = job.job_id,
 			expected_image_id = image_id,
-			source = source,
+			artifact_ref = ref,
 			size = desc.size,
 			digest_alg = desc.digest_alg or 'xxhash32',
 			digest = desc.digest or desc.checksum,
@@ -337,7 +362,9 @@ function Backend:commit_op(job, ctx)
 	}
 	return call_component_op(self, component, 'commit-update', payload):wrap(function (reply, err)
 		if reply == nil then return nil, err or 'component_commit_update_failed' end
-		return { accepted = true, reply = reply }
+		local accepted, rerr = validate_commit_reply(reply)
+		if accepted == nil then return nil, rerr end
+		return { accepted = true, reply = reply, component_reply = accepted }
 	end)
 end
 
@@ -375,12 +402,12 @@ function Backend:evaluate_reconcile(job, snapshot, ctx)
 		return { done = true, ok = true, state = copy(state) }
 	end
 
-		if type(sw) == 'table'
-			and expected and pre_boot and sw.boot_id ~= nil
-			and sw.boot_id ~= pre_boot and sw.image_id ~= expected
-		then
-			return { done = true, ok = false, reason = 'wrong_image_after_reboot', state = copy(state) }
-		end
+	if type(sw) == 'table'
+		and expected and pre_boot and sw.boot_id ~= nil
+		and sw.boot_id ~= pre_boot and sw.image_id ~= expected
+	then
+		return { done = true, ok = false, reason = 'wrong_image_after_reboot', state = copy(state) }
+	end
 
 	return { done = false, reason = 'waiting_for_component_state', state = copy(state) }
 end

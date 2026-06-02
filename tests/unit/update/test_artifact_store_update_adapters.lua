@@ -112,8 +112,7 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
         return op.always(artifact, nil)
       end,
       open_source_op = function(_, ref)
-        assert_eq(ref, 'artifact-1')
-        return op.always(source, nil)
+        error('component backend must not open artifact source before Device stage action: ' .. tostring(ref), 0)
       end,
     }
 
@@ -158,11 +157,73 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
     assert_eq(seen_prepare.target, 'mcu')
     assert_eq(staged.preflight.size, 12)
     assert_eq(staged.transfer.size, 12)
-    assert_eq(seen_payload.source, source)
+    assert_eq(seen_payload.source, nil)
+    assert_eq(seen_payload.artifact_ref, 'artifact-1')
     assert_eq(seen_payload.size, 12)
     assert_eq(seen_payload.digest, 'abcd')
     assert_eq(seen_payload.chunk_size, 1024)
     assert_eq(seen_stage_opts.timeout, false)
+  end)
+end
+
+function T.component_backend_commit_op_requires_explicit_acceptance()
+  runfibers.run(function()
+    local replies = {
+      accepted = {
+        reply = { accepted = true },
+        ok = true,
+      },
+      wrapped = {
+        reply = { ok = true, public_status = 'succeeded', value = { accepted = true } },
+        ok = true,
+      },
+      ok_false = {
+        reply = { ok = false, reason = 'commit_refused' },
+        err = 'commit_refused',
+      },
+      failed_public_status = {
+        reply = { ok = true, public_status = 'failed', err = 'commit_failed' },
+        err = 'commit_failed',
+      },
+      accepted_false = {
+        reply = { ok = true, public_status = 'succeeded', value = { accepted = false, reason = 'busy' } },
+        err = 'busy',
+      },
+      missing_accepted = {
+        reply = { ok = true, public_status = 'succeeded', value = { state = 'queued' } },
+        err = 'component_commit_acceptance_missing',
+      },
+    }
+
+    for _, name in ipairs({
+      'accepted',
+      'wrapped',
+      'ok_false',
+      'failed_public_status',
+      'accepted_false',
+      'missing_accepted',
+    }) do
+      local case = replies[name]
+      local conn = {
+        call_op = function(_, topic)
+          assert_eq(topic[5], 'commit-update')
+          return op.always(case.reply, nil)
+        end,
+      }
+      local backend = component_backend.new({ conn = conn, component = 'mcu' })
+      local got, err = fibers.perform(backend:commit_op({
+        job_id = 'job-commit',
+        component = 'mcu',
+        metadata = { image_id = 'img-new' },
+      }, {}))
+      if case.ok then
+        assert_eq(type(got), 'table', tostring(err))
+        assert_true(got.accepted)
+      else
+        assert_eq(got, nil)
+        assert_eq(err, case.err, name)
+      end
+    end
   end)
 end
 
@@ -405,6 +466,67 @@ function T.component_backend_stage_op_requires_prepare_route_before_artifact_ope
     assert_eq(serr, 'mcu_control_plane_not_ready:prepare_route_missing')
     assert_eq(calls.open, nil, 'artifact should not open before prepare route readiness')
     assert_eq(calls['prepare-update'], nil, 'prepare-update should not be called before prepare route readiness')
+  end)
+end
+
+function T.component_backend_stage_op_admits_real_component_projection_shape()
+  runfibers.run(function()
+    local opened = false
+    local artifact = {}
+    function artifact:describe()
+      return { artifact_ref = 'artifact-1', size = 12, digest = 'abcd', meta = { image_id = 'img-new' } }
+    end
+    local artifact_store = {
+      open_op = function(_, ref)
+        opened = true
+        assert_eq(ref, 'artifact-1')
+        return op.always(artifact, nil)
+      end,
+    }
+    local conn = {
+      call_op = function(_, topic)
+        if topic[5] == 'prepare-update' then
+          return op.always({ ok = true, max_chunk_size = 512 }, nil)
+        end
+        if topic[5] == 'stage-update' then
+          return op.always({ ok = true, public_status = 'succeeded', value = { transferred = true } }, nil)
+        end
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local observer = {
+      snapshot = function()
+        return {
+          components = {
+            mcu = {
+              kind = 'device.component',
+              component = 'mcu',
+              software = { image_id = 'img-old', version = '1.0', boot_id = 'boot-old' },
+              updater = { state = 'ready' },
+              health = 'ok',
+              actions = { ['prepare-update'] = true, ['stage-update'] = true },
+              source = { kind = 'member', member = 'mcu' },
+            },
+          },
+        }
+      end,
+    }
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = observer,
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+      metadata = { image_id = 'img-new' },
+    }, {}))
+
+    assert_eq(type(staged), 'table', tostring(serr))
+    assert_true(opened, 'artifact metadata should open after real-shape admission passes')
   end)
 end
 

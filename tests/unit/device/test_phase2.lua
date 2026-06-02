@@ -672,6 +672,134 @@ function tests.test_fabric_stage_open_source_may_be_an_explicit_op()
 	end)
 end
 
+function tests.test_fabric_stage_opens_artifact_ref_through_store_bus()
+	fibers.run(function (scope)
+		local source = { id = 'src-artifact' }
+		local artifact = {}
+		function artifact:open_source_op()
+			return op.always(true, source)
+		end
+		local conn = {
+			call_op = function (_, topic, payload)
+				assert_eq(table.concat(topic, '/'), 'cap/artifact-store/main/rpc/open')
+				assert_eq(payload.artifact_ref, 'artifact-1')
+				return op.always({ ok = true, reason = artifact }, nil)
+			end,
+		}
+		local r = req({ artifact_ref = 'artifact-1', size = 512 })
+		local client = {
+			send_blob_op = function (_, params)
+				take_stage_source(params, source)
+				assert_eq(params.request.artifact_ref, 'artifact-1')
+				return op.always({ ok = true, staged = true })
+			end,
+		}
+
+		local result = action_worker.run(scope, {
+			conn = conn,
+			request = r,
+			component_id = 'mcu',
+			action = 'stage-update',
+			request_id = 'r-artifact-ref',
+			action_spec = { kind = 'fabric_stage', target = 'updater/main', artifact_store = 'main' },
+			fabric_client = client,
+			terminate_source = function ()
+				fail('source should have been handed off, not terminated')
+			end,
+		})
+
+		assert_true(result.ok)
+		assert_not_nil(r.replied)
+	end)
+end
+
+function tests.test_fabric_stage_artifact_ref_failure_terminates_opened_source_once()
+	local terminate_count = 0
+	fibers.run(function (scope)
+		local source = { id = 'src-artifact-failed' }
+		local artifact = {}
+		function artifact:open_source_op()
+			return op.always(true, source)
+		end
+		local conn = {
+			call_op = function ()
+				return op.always({ ok = true, reason = artifact }, nil)
+			end,
+		}
+		local r = req({ artifact_ref = 'artifact-1' })
+		local client = {
+			send_blob_op = function ()
+				return op.always(nil, 'stage_rejected')
+			end,
+		}
+
+		local result = action_worker.run(scope, {
+			conn = conn,
+			request = r,
+			component_id = 'mcu',
+			action = 'stage-update',
+			request_id = 'r-artifact-ref-failed',
+			action_spec = { kind = 'fabric_stage', target = 'updater/main', artifact_store = 'main' },
+			fabric_client = client,
+			terminate_source = function (v)
+				assert_eq(v, source)
+				terminate_count = terminate_count + 1
+				return true
+			end,
+		})
+
+		assert_eq(result.ok, false)
+		assert_eq(r.failed, 'stage_rejected')
+	end)
+	assert_eq(terminate_count, 1)
+end
+
+function tests.test_rpc_stage_opens_artifact_ref_and_terminates_after_reply()
+	local terminate_count = 0
+	fibers.run(function (scope)
+		local source = { id = 'src-rpc-stage' }
+		local artifact = {}
+		function artifact:open_source_op()
+			return op.always(true, source)
+		end
+		local conn = {
+			call_op = function (_, topic, payload)
+				if table.concat(topic, '/') == 'cap/artifact-store/main/rpc/open' then
+					assert_eq(payload.artifact_ref, 'artifact-1')
+					return op.always({ ok = true, reason = artifact }, nil)
+				end
+				assert_eq(table.concat(topic, '/'), 'raw/host/updater/cap/updater/cm5/rpc/stage')
+				assert_eq(payload.artifact_ref, 'artifact-1')
+				assert_eq(payload.source, source)
+				return op.always({ accepted = true, staged = true }, nil)
+			end,
+		}
+		local r = req({ artifact_ref = 'artifact-1' })
+
+		local result = action_worker.run(scope, {
+			conn = conn,
+			request = r,
+			component_id = 'cm5',
+			action = 'stage-update',
+			request_id = 'r-rpc-artifact-ref',
+			action_spec = {
+				kind = 'rpc',
+				call_topic = { 'raw', 'host', 'updater', 'cap', 'updater', 'cm5', 'rpc', 'stage' },
+				artifact_store = 'main',
+			},
+			terminate_source = function (v)
+				assert_eq(v, source)
+				terminate_count = terminate_count + 1
+				return true
+			end,
+		})
+
+		assert_true(result.ok)
+		assert_not_nil(r.replied)
+	end)
+	assert_eq(terminate_count, 1)
+end
+
 
 function tests.test_fabric_stage_timeout_cancels_child_stage_and_terminates_unhanded_source()
 	local terminate_count = 0
