@@ -78,6 +78,10 @@ local function copy_active(a)
 		meta = copy(a.meta),
 		size = a.size,
 		sent = a.sent,
+		chunk_size = a.chunk_size,
+		pending_offset = a.pending_offset,
+		pending_next = a.pending_next,
+		last_transfer_event = a.last_transfer_event,
 		digest_alg = a.digest_alg,
 		digest = a.digest,
 	}
@@ -195,6 +199,10 @@ function M.claim_slot(state, rec)
 		meta = copy(rec.meta),
 		size = rec.size,
 		sent = rec.sent or 0,
+		chunk_size = rec.chunk_size,
+		pending_offset = rec.pending_offset,
+		pending_next = rec.pending_next,
+		last_transfer_event = rec.last_transfer_event,
 		digest_alg = rec.digest_alg,
 		digest = rec.digest,
 		frame_tx = rec.frame_tx,
@@ -272,6 +280,10 @@ function M.apply_progress(state, ev)
 	active.sent = sent
 	if ev.status ~= nil then active.status = ev.status end
 	if ev.size ~= nil then active.size = ev.size end
+	active.chunk_size = ev.chunk_size
+	active.pending_offset = ev.pending_offset
+	active.pending_next = ev.pending_next
+	active.last_transfer_event = ev.last_transfer_event
 
 	return true, nil, active
 end
@@ -392,6 +404,10 @@ local function run_attempt(scope, req, caps)
 			sent = progress.sent,
 			size = progress.size,
 			status = progress.status or 'sending',
+			chunk_size = progress.chunk_size,
+			pending_offset = progress.pending_offset,
+			pending_next = progress.pending_next,
+			last_transfer_event = progress.last_transfer_event,
 		})
 	end
 

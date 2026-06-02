@@ -83,6 +83,7 @@ function M.normalise_updater(raw)
 		pending_image_id = raw.pending_image_id,
 		staged_image_id = raw.staged_image_id,
 		job_id = raw.job_id,
+		boot_buy_rc = raw.boot_buy_rc,
 	}
 end
 

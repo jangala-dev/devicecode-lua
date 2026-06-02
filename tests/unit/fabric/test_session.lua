@@ -101,20 +101,48 @@ local function admit_frame(tx, frame)
 	assert_true(ok, err)
 end
 
-local function admit_wire_error(tx, err)
-	local ok, admit_err = queue.try_admit_required(tx, {
+local function admit_frame_event(tx, frame, extra)
+	local ev = {
+		kind = 'frame_received',
+		frame = frame,
+	}
+	for k, v in pairs(extra or {}) do
+		ev[k] = v
+	end
+	local ok, err = queue.try_admit_required(tx, ev, 'test_frame_admit_failed')
+	assert_true(ok, err)
+end
+
+local BAD_LINE_DIAG = {
+	last_decode_error = 'decode_failed: expected value',
+	last_bad_line_len = 12,
+	last_bad_line_xxhash32 = '12345678',
+	last_bad_line_head = '[mem] boot',
+	last_bad_line_tail = '[mem] boot',
+}
+
+local function add_bad_line_diag(item, opts)
+	if type(opts) ~= 'table' then return item end
+	for k, v in pairs(opts) do
+		if k:match('^last_') then item[k] = v end
+	end
+	return item
+end
+
+local function admit_wire_error(tx, err, opts)
+	local ok, admit_err = queue.try_admit_required(tx, add_bad_line_diag({
 		kind = 'wire_error',
 		err = err or 'decode_failed: bad json',
 		at = fibers.now(),
 		wire_errors = 1,
 		bad_frame_count = 1,
-	}, 'test_wire_error_admit_failed')
+	}, opts), 'test_wire_error_admit_failed')
 	assert_true(ok, admit_err)
 end
 
 local function admit_wire_recovery(tx, opts)
 	opts = opts or {}
-	local ok, admit_err = queue.try_admit_required(tx, {
+	local ok, admit_err = queue.try_admit_required(tx, add_bad_line_diag({
 		kind = 'wire_recovery',
 		reason = opts.reason or 'bad_frame_limit',
 		at = fibers.now(),
@@ -123,7 +151,7 @@ local function admit_wire_recovery(tx, opts)
 		drained_bytes = opts.drained_bytes or 7,
 		drain_err = opts.drain_err,
 		quiet_until = opts.quiet_until or (fibers.now() + 0.05),
-	}, 'test_wire_recovery_admit_failed')
+	}, opts), 'test_wire_recovery_admit_failed')
 	assert_true(ok, admit_err)
 end
 
@@ -274,7 +302,7 @@ function tests.test_wire_errors_below_limit_are_counted_without_dropping_session
 		recv_with_timeout(h.rpc_rx, 'peer session')
 		recv_with_timeout(h.transfer_rx, 'transfer peer session')
 
-		admit_wire_error(h.frame_tx, 'decode_failed: truncated line')
+		admit_wire_error(h.frame_tx, 'decode_failed: truncated line', BAD_LINE_DIAG)
 		local stale = queue.try_recv_now(h.rpc_rx)
 		assert_nil(stale, 'single bad frame should not drop session')
 
@@ -287,6 +315,42 @@ function tests.test_wire_errors_below_limit_are_counted_without_dropping_session
 		local done = recv_with_timeout(h.done_rx, 'session done')
 		assert_eq(done.snapshot.wire_errors, 1)
 		assert_eq(done.snapshot.last_wire_error, 'decode_failed: truncated line')
+		assert_eq(done.snapshot.last_decode_error, BAD_LINE_DIAG.last_decode_error)
+		assert_eq(done.snapshot.last_bad_line_len, BAD_LINE_DIAG.last_bad_line_len)
+		assert_eq(done.snapshot.last_bad_line_xxhash32, BAD_LINE_DIAG.last_bad_line_xxhash32)
+		assert_eq(done.snapshot.last_bad_line_head, BAD_LINE_DIAG.last_bad_line_head)
+		assert_eq(done.snapshot.last_bad_line_tail, BAD_LINE_DIAG.last_bad_line_tail)
+	end)
+end
+
+function tests.test_resynced_hello_ack_updates_session_status_without_wire_error()
+	fibers.run(function (scope)
+		local h = start_session(scope)
+		recv_with_timeout(h.control_rx, 'initial hello')
+		admit_frame_event(h.frame_tx, assert(protocol.hello_ack('mcu-sid-resync', 'mcu')), {
+			line_resync = true,
+			last_line_resync_prefix_len = 1592,
+			last_line_resync_line_len = 1660,
+			last_line_resync_xxhash32 = 'feed1234',
+			last_line_resync_type = 'hello_ack',
+			last_line_resync_peer_sid = 'mcu-sid-resync',
+		})
+		local peer = recv_with_timeout(h.rpc_rx, 'peer session')
+		assert_eq(peer.kind, 'peer_session')
+		assert_eq(peer.session.peer_sid, 'mcu-sid-resync')
+		recv_with_timeout(h.transfer_rx, 'transfer peer session')
+
+		h.frame_tx:close('done')
+		local done = recv_with_timeout(h.done_rx, 'session done')
+		assert_eq(done.snapshot.wire_errors, 0)
+		assert_eq(done.snapshot.bad_frame_count, 0)
+		assert_eq(done.snapshot.line_resyncs, 1)
+		assert_eq(done.snapshot.line_resync, true)
+		assert_eq(done.snapshot.last_line_resync_prefix_len, 1592)
+		assert_eq(done.snapshot.last_line_resync_line_len, 1660)
+		assert_eq(done.snapshot.last_line_resync_xxhash32, 'feed1234')
+		assert_eq(done.snapshot.last_line_resync_type, 'hello_ack')
+		assert_eq(done.snapshot.last_line_resync_peer_sid, 'mcu-sid-resync')
 	end)
 end
 
@@ -299,7 +363,14 @@ function tests.test_wire_recovery_drops_current_peer_session_and_delays_hello()
 		recv_with_timeout(h.transfer_rx, 'transfer peer session')
 
 		local quiet_until = fibers.now() + 0.08
-		admit_wire_recovery(h.frame_tx, { quiet_until = quiet_until })
+		admit_wire_recovery(h.frame_tx, {
+			quiet_until = quiet_until,
+			last_decode_error = 'decode_failed: joined objects',
+			last_bad_line_len = 34,
+			last_bad_line_xxhash32 = '87654321',
+			last_bad_line_head = '{"type":"hello"}{"type":"hello_ack"}',
+			last_bad_line_tail = '{"type":"hello"}{"type":"hello_ack"}',
+		})
 
 		local drop = recv_with_timeout(h.rpc_rx, 'peer session drop')
 		assert_eq(drop.kind, 'peer_session_dropped')
@@ -311,7 +382,12 @@ function tests.test_wire_recovery_drops_current_peer_session_and_delays_hello()
 		assert_nil(queue.try_recv_now(h.rpc_rx), 'rpc frame should be dropped after bad-frame session reset')
 
 		h.frame_tx:close('done')
-		recv_with_timeout(h.done_rx, 'session done')
+		local done = recv_with_timeout(h.done_rx, 'session done')
+		assert_eq(done.snapshot.last_wire_error, 'bad_frame_limit')
+		assert_eq(done.snapshot.last_decode_error, 'decode_failed: joined objects')
+		assert_eq(done.snapshot.last_bad_line_len, 34)
+		assert_eq(done.snapshot.last_bad_line_xxhash32, '87654321')
+		assert_eq(done.snapshot.last_bad_line_head, '{"type":"hello"}{"type":"hello_ack"}')
 	end)
 end
 

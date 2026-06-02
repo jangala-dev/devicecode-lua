@@ -100,6 +100,47 @@ local function clean_read_end(frame, err)
 	return frame == nil and (err == nil or err == 'eof' or err == 'closed')
 end
 
+local BAD_LINE_FIELDS = {
+	'last_decode_error',
+	'last_bad_line_len',
+	'last_bad_line_xxhash32',
+	'last_bad_line_head',
+	'last_bad_line_tail',
+}
+
+local RESYNC_FIELDS = {
+	'line_resync',
+	'last_line_resync_prefix_len',
+	'last_line_resync_line_len',
+	'last_line_resync_xxhash32',
+	'last_line_resync_type',
+	'last_line_resync_peer_sid',
+	'last_line_resync_xfer_id',
+}
+
+local function wire_error_string(err)
+	if type(err) == 'table' then
+		return tostring(err.err or err.reason or err.last_decode_error or 'wire_error')
+	end
+	return tostring(err or 'wire_error')
+end
+
+local function copy_bad_line_fields(dst, src)
+	if type(dst) ~= 'table' or type(src) ~= 'table' then return dst end
+	for _, k in ipairs(BAD_LINE_FIELDS) do
+		if src[k] ~= nil then dst[k] = src[k] end
+	end
+	return dst
+end
+
+local function copy_resync_fields(dst, src)
+	if type(dst) ~= 'table' or type(src) ~= 'table' then return dst end
+	for _, k in ipairs(RESYNC_FIELDS) do
+		if src[k] ~= nil then dst[k] = src[k] end
+	end
+	return dst
+end
+
 local function reader_result(frames_read, wire_errors, reason)
 	return {
 		role        = 'reader',
@@ -109,26 +150,26 @@ local function reader_result(frames_read, wire_errors, reason)
 	}
 end
 
-local function frame_event(frame)
-	return {
+local function frame_event(frame, diag)
+	return copy_resync_fields({
 		kind  = 'frame_received',
 		frame = frame,
-	}
+	}, diag)
 end
 
 local function wire_error_event(err, wire_errors, bad_frame_count)
-	return {
+	return copy_bad_line_fields({
 		kind = 'wire_error',
-		err  = err,
+		err  = wire_error_string(err),
 		at   = fibers.now(),
 		wire_errors = wire_errors,
 		bad_frame_count = bad_frame_count,
-	}
+	}, err)
 end
 
-local function wire_recovery_event(reason, wire_errors, bad_frame_count, drain_result, drain_err, quiet_until)
+local function wire_recovery_event(reason, wire_errors, bad_frame_count, drain_result, drain_err, quiet_until, bad_line_diag)
 	drain_result = drain_result or {}
-	return {
+	return copy_bad_line_fields({
 		kind = 'wire_recovery',
 		reason = reason or 'bad_frame_limit',
 		err = reason or 'bad_frame_limit',
@@ -140,7 +181,7 @@ local function wire_recovery_event(reason, wire_errors, bad_frame_count, drain_r
 		drain_reason = drain_result.reason,
 		drain_err = drain_err,
 		quiet_until = quiet_until,
-	}
+	}, bad_line_diag)
 end
 
 local function send_item_frame(item)
@@ -255,7 +296,7 @@ local function perform_drain(drain_input_op, opts)
 end
 
 local function recovery_fields(ev)
-	return {
+	return copy_bad_line_fields({
 		reason = ev.reason,
 		wire_errors = ev.wire_errors,
 		bad_frame_count = ev.bad_frame_count,
@@ -264,7 +305,7 @@ local function recovery_fields(ev)
 		drain_err = ev.drain_err,
 		drain_reason = ev.drain_reason,
 		quiet_until = ev.quiet_until,
-	}
+	}, ev)
 end
 
 local function should_continue_drain(reason, drain_err)
@@ -334,7 +375,8 @@ local function run_recovery_window(scope, downstream_tx, recovery_gate, drain_in
 			params.bad_frame_count,
 			aggregate,
 			drain_err,
-			quiet_until
+			quiet_until,
+			params.bad_line_diag
 		)
 		log_io(params.trace_io == true, 'reader_wire_recovery', recovery_fields(ev))
 		return perform_send(downstream_tx, ev)
@@ -389,7 +431,7 @@ function M.run_reader(scope, params)
 	local bad_frame_times = {}
 
 	while true do
-		local frame, read_err = fibers.perform(read_frame_op())
+		local frame, read_err, read_diag = fibers.perform(read_frame_op())
 
 		if clean_read_end(frame, read_err) then
 			return reader_result(frames_read, wire_errors, read_err or 'eof')
@@ -400,7 +442,7 @@ function M.run_reader(scope, params)
 		local sent_by_recovery = false
 
 		if frame ~= nil then
-			ev = frame_event(frame)
+			ev = frame_event(frame, read_diag)
 			label = 'frame'
 
 		elseif protocol.is_wire_protocol_error
@@ -420,10 +462,11 @@ function M.run_reader(scope, params)
 						reason = 'bad_frame_limit',
 						wire_errors = wire_errors,
 						bad_frame_count = count,
-							bad_frame_quiet_s = bad_frame_quiet_s,
-							trace_io = trace_io,
-						}
-					)
+						bad_frame_quiet_s = bad_frame_quiet_s,
+						trace_io = trace_io,
+						bad_line_diag = read_err,
+					}
+				)
 				sent_by_recovery = true
 				bad_frame_times = {}
 				if ok == nil then
@@ -587,11 +630,11 @@ local function frame_is_hello(frame)
 end
 
 local function wait_for_recovery_gate_op(gate, frame)
-	return op.guard(function ()
-		if type(gate) ~= 'table' then
-			return op.always(true, nil)
-		end
+	if type(gate) ~= 'table' then
+		return op.always(true, nil)
+	end
 
+	return fibers.run_scope_op(function ()
 		while true do
 			local now = fibers.now()
 			local quiet_until = tonumber(gate.hello_quiet_until) or 0
@@ -603,11 +646,16 @@ local function wait_for_recovery_gate_op(gate, frame)
 				wait_s = quiet_until - now
 				if wait_s > 0.020 then wait_s = 0.020 end
 			else
-				return op.always(true, nil)
+				return true, nil
 			end
 
 			fibers.perform(sleep.sleep_op(wait_s))
 		end
+	end):wrap(function (status, report, ok, err)
+		if status ~= 'ok' then
+			return nil, err or report or 'recovery_gate_wait_failed'
+		end
+		return ok, err
 	end)
 end
 

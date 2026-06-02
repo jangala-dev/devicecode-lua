@@ -19,6 +19,9 @@ end
 
 function M.is_wire_protocol_error(err)
 	if err == nil then return false end
+	if type(err) == 'table' then
+		err = err.err or err.reason or err.last_decode_error
+	end
 
 	local s = tostring(err)
 

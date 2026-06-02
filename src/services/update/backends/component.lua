@@ -288,7 +288,10 @@ function Backend:evaluate_reconcile(job, snapshot, ctx)
 	local expected = expected_image_id(job, ctx) or (pre and pre.expected_image_id)
 	local pre_boot = pre and pre.pre_commit_boot_id
 
-	if type(upd) == 'table' and (upd.state == 'failed' or upd.state == 'rollback_detected') then
+	if type(upd) == 'table' and upd.state == 'failed' then
+		return { done = true, ok = false, reason = upd.last_error or upd.state, state = copy(state) }
+	end
+	if type(upd) == 'table' and upd.state == 'rollback_detected' then
 		return { done = true, ok = false, reason = upd.state, state = copy(state) }
 	end
 

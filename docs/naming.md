@@ -985,7 +985,7 @@ Raw imported member truth:
 * `raw/member/mcu/meta`
 * `raw/member/mcu/status`
 * `raw/member/mcu/state/...`
-* `raw/member/mcu/cap/updater/main/...`
+* `cap/self/updater/main/rpc/...`
 
 Fabric domain summaries:
 

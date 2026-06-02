@@ -159,12 +159,20 @@ function tests.test_reducer_tracks_active_send_progress()
 		sent = 3,
 		size = 6,
 		status = 'sending',
+		chunk_size = 3,
+		pending_offset = 3,
+		pending_next = 6,
+		last_transfer_event = 'chunk_tx',
 	})
 	assert_true(ok, err)
 	local snap = transfer.snapshot(state)
 	assert_eq(snap.active.sent, 3)
 	assert_eq(snap.active.size, 6)
 	assert_eq(snap.active.status, 'sending')
+	assert_eq(snap.active.chunk_size, 3)
+	assert_eq(snap.active.pending_offset, 3)
+	assert_eq(snap.active.pending_next, 6)
+	assert_eq(snap.active.last_transfer_event, 'chunk_tx')
 end
 
 function tests.test_slot_admission_without_session_fails_request()
