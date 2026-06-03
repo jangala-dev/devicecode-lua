@@ -9,6 +9,9 @@
 
 local M = {}
 
+local ok_probe, leak_probe = pcall(require, 'devicecode.support.leak_probe')
+if not ok_probe then leak_probe = nil end
+
 local RequestOwner = {}
 RequestOwner.__index = RequestOwner
 
@@ -40,6 +43,7 @@ function M.new(request, opts)
 	end
 
 	return setmetatable({
+		_probe_id = leak_probe and leak_probe.request_owner_created() or nil,
 		_request = request,
 		_done = false,
 		_reply = opts.reply or default_reply,
@@ -61,6 +65,7 @@ function RequestOwner:reply_once(value)
 	end
 
 	self._done = true
+	if leak_probe then leak_probe.request_owner_resolved(self._probe_id, 'reply') end
 
 	return self._reply(self._request, value)
 end
@@ -71,6 +76,7 @@ function RequestOwner:fail_once(reason)
 	end
 
 	self._done = true
+	if leak_probe then leak_probe.request_owner_resolved(self._probe_id, 'fail') end
 	return self._fail(self._request, reason)
 end
 
@@ -87,6 +93,7 @@ function RequestOwner:abandon_unresolved(_reason)
 	end
 
 	self._done = true
+	if leak_probe then leak_probe.request_owner_resolved(self._probe_id, 'abandon') end
 	return true, nil
 end
 

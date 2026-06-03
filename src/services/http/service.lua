@@ -18,6 +18,7 @@ local config_watch = require 'devicecode.support.config_watch'
 local config_mod = require 'services.http.config'
 local service_events = require 'devicecode.support.service_events'
 local service_base = require 'devicecode.service_base'
+local safe = require 'coxpcall'
 
 local M = {}
 local perform = fibers.perform
@@ -206,7 +207,7 @@ function HttpService:_event_port(identity, opts)
 end
 
 function HttpService:_submit_registry_event(ev, label)
-	local ok, r1, r2 = pcall(function ()
+	local ok, r1, r2 = safe.pcall(function ()
 		return self:_submit_event(ev, label or 'http_registry_event_report_failed', { fatal = true })
 	end)
 	if ok then return r1, r2 end

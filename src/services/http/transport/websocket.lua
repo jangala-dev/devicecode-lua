@@ -7,6 +7,7 @@
 local op = require 'fibers.op'
 local terminate = require 'services.http.transport.terminate'
 local headers_mod = require 'services.http.headers'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -70,7 +71,7 @@ function WebSocket:_notify_terminated(reason)
 	self._close_reason = reason or 'closed'
 	local hook = self._on_terminate
 	self._on_terminate = nil
-	if hook then pcall(hook, self, self._close_reason) end
+	if hook then safe.pcall(hook, self, self._close_reason) end
 	return true
 end
 
@@ -233,7 +234,7 @@ function ClientWebSocket:_notify_terminated(reason)
 	self._close_reason = reason or 'closed'
 	local hook = self._on_terminate
 	self._on_terminate = nil
-	if hook then pcall(hook, self, self._close_reason) end
+	if hook then safe.pcall(hook, self, self._close_reason) end
 	return true
 end
 

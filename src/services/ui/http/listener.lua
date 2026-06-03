@@ -10,6 +10,7 @@ local fibers      = require 'fibers'
 local resource    = require 'devicecode.support.resource'
 local scoped_work = require 'devicecode.support.scoped_work'
 local http_sdk    = require 'services.http'.sdk
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -53,7 +54,7 @@ end
 local function request_id_of(ctx, next_id)
 	if type(ctx) == 'table' then
 		if type(ctx.id) == 'function' then
-			local ok, id = pcall(function () return ctx:id() end)
+			local ok, id = safe.pcall(function () return ctx:id() end)
 			if ok and id ~= nil then return id end
 		end
 		if ctx.id ~= nil then return ctx.id end

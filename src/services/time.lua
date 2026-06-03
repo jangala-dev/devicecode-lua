@@ -13,6 +13,7 @@ local time_utils = require "fibers.utils.time"
 
 local base = require "devicecode.service_base"
 local cap_sdk = require "services.hal.sdk.cap"
+local safe = require 'coxpcall'
 
 local perform = fibers.perform
 
@@ -49,7 +50,7 @@ local function apply_sync_state(state, conn, svc, is_synced, payload)
 	if is_synced then
 		if not state.time_source_installed then
 			svc:obs_log('info', 'installing alarm time source from realtime clock')
-			local ok, err = pcall(alarm.set_time_source, time_utils.realtime)
+			local ok, err = safe.pcall(alarm.set_time_source, time_utils.realtime)
 			if ok then
 				state.time_source_installed = true
 				svc:obs_log('info', 'alarm time source installed')

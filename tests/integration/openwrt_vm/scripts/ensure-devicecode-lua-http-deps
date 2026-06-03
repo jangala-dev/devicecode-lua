@@ -1,0 +1,745 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+"$SCRIPT_DIR/wait-ssh"
+
+"$SCRIPT_DIR/ssh" 'sh -s' <<'REMOTE_SH'
+set -u
+
+log() { printf '%s\n' "[openwrt-vm/http-deps] $*" >&2; }
+warn() { printf '%s\n' "[openwrt-vm/http-deps] WARN: $*" >&2; }
+fail() { printf '%s\n' "[openwrt-vm/http-deps] FAIL: $*" >&2; exit 1; }
+STATUS_FILE="${DEVICECODE_HTTP_DEPS_STATUS_FILE:-/tmp/devicecode-lua-http-deps.status}"
+rm -f "$STATUS_FILE"
+
+choose_lua() {
+	# For the leak hunt we prefer PUC Lua in the OpenWrt VM.  The VM's
+	# packaged cqueues/luaossl modules are known to load under `lua`, while
+	# the same feed packages may fail under LuaJIT on arm64 with
+	# `bad light userdata pointer`.  Keep LuaJIT/texlua as explicit
+	# comparison runtimes via DEVICECODE_LEAK_PROBE_LUA.
+	if [ -n "${DEVICECODE_LEAK_PROBE_LUA:-}" ]; then
+		command -v "$DEVICECODE_LEAK_PROBE_LUA" >/dev/null 2>&1 || return 1
+		printf '%s
+' "$DEVICECODE_LEAK_PROBE_LUA"
+		return 0
+	fi
+	if command -v lua >/dev/null 2>&1; then printf '%s
+' lua; return 0; fi
+	for candidate in luajit luajit-openresty luajit-2.1.0-beta3 luajit-2.1; do
+		if command -v "$candidate" >/dev/null 2>&1; then printf '%s
+' "$candidate"; return 0; fi
+	done
+	if command -v texlua >/dev/null 2>&1; then printf '%s
+' texlua; return 0; fi
+	return 1
+}
+
+refresh_lua_bin() {
+	lua_bin="$(choose_lua)" || fail 'no lua, luajit or texlua interpreter found'
+	log "using Lua interpreter: $lua_bin ($($lua_bin -e 'io.write((_VERSION or "?") .. (jit and (" / " .. jit.version) or ""))' 2>/dev/null || true))"
+}
+
+# Keep dependency checks stable across OpenWrt Lua/LuaJIT package.path layouts.
+# Preserve both common OpenWrt layouts.  The cqueues package, for
+# example, installs /usr/lib/lua/cqueues.lua and /usr/lib/lua/_cqueues.so,
+# so restricting LuaJIT to /usr/share/lua hides a package which opkg has
+# correctly installed.
+export LUA_PATH="./?.lua;./?/init.lua;/usr/share/lua/?.lua;/usr/share/lua/?/init.lua;/usr/share/lua/5.1/?.lua;/usr/share/lua/5.1/?/init.lua;/usr/lib/lua/?.lua;/usr/lib/lua/?/init.lua;/usr/lib/lua/5.1/?.lua;/usr/lib/lua/5.1/?/init.lua;;"
+export LUA_CPATH="./?.so;./?/init.so;/usr/lib/lua/?.so;/usr/lib/lua/?/init.so;/usr/lib/lua/5.1/?.so;/usr/lib/lua/5.1/?/init.so;/usr/lib/lua/loadall.so;;"
+
+refresh_lua_bin
+lua_require() {
+	"$lua_bin" - "$1" <<'LUA' >/dev/null 2>&1
+local mod = arg[1]
+local ok = pcall(require, mod)
+if not ok then os.exit(1) end
+LUA
+}
+
+lua_require_verbose() {
+	"$lua_bin" - "$1" <<'LUA'
+local mod = arg[1]
+local ok, res = pcall(require, mod)
+if ok then
+  io.stderr:write("  OK   ", mod, "\n")
+  os.exit(0)
+end
+io.stderr:write("  FAIL ", mod, "\n")
+io.stderr:write(tostring(res), "\n")
+os.exit(1)
+LUA
+}
+
+have_http_stack() {
+	lua_require http.request && lua_require http.server && lua_require http.websocket && lua_require cqueues
+}
+
+if have_http_stack; then
+	log 'lua-http dependencies already available'
+	printf '%s\n' 'available' > "$STATUS_FILE"
+	exit 0
+fi
+
+log 'installing OpenWrt packages needed by lua-http/cqueues for the selected Lua runtime'
+ip route replace default via 192.168.1.2 dev br-lan || true
+mkdir -p /tmp/resolv.conf.d
+printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf.d/resolv.conf.auto
+printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf
+
+opkg_pkg_installed() {
+	pkg="$1"
+	opkg status "$pkg" 2>/dev/null | grep -q '^Status: .* installed'
+}
+
+opkg_install_best_effort() {
+	pkg="$1"
+	if opkg_pkg_installed "$pkg"; then
+		log "package already installed: $pkg"
+		return 0
+	fi
+	if opkg install "$pkg" >/tmp/devicecode-opkg-install.log 2>&1; then
+		log "installed package: $pkg"
+		return 0
+	fi
+	warn "package not installed: $pkg"
+	if [ "${DEVICECODE_HTTP_DEPS_VERBOSE_OPKG:-0}" = "1" ]; then
+		cat /tmp/devicecode-opkg-install.log >&2 || true
+	fi
+	return 0
+}
+
+ensure_luajit_binary() {
+	# Do not trust package metadata alone here: on OpenWrt images `opkg status`
+	# can be misleading for package aliases or stale state, while production
+	# plainly needs an executable `luajit` on PATH.
+	if command -v luajit >/dev/null 2>&1; then
+		return 0
+	fi
+	log 'luajit binary not found; installing OpenWrt luajit package'
+	if opkg install luajit >/tmp/devicecode-opkg-install-luajit.log 2>&1; then
+		:
+	else
+		cat /tmp/devicecode-opkg-install-luajit.log >&2 || true
+		fail 'could not install required luajit package'
+	fi
+	command -v luajit >/dev/null 2>&1 || fail 'luajit package installed but luajit binary is still not on PATH'
+}
+
+if [ "${DEVICECODE_HTTP_DEPS_SKIP_OPKG:-0}" != "1" ]; then
+	opkg update || warn 'opkg update failed; continuing with any existing package lists'
+	# OpenWrt 24.10 has cqueues, lpeg, luaossl, lua-bit32, luabitop,
+	# lua-openssl and lua-lzlib in the packages feed for this target. Keep
+	# aliases best-effort because images/feeds vary across test environments.
+	for pkg in \
+		ca-bundle ca-certificates wget-ssl wget \
+		lua liblua liblua5.1.5 luajit \
+		cqueues lua-cqueues \
+		lpeg lua-lpeg \
+		luaossl lua-luaossl lua-openssl \
+		lua-bit32 luabitop bit32 \
+		lua-lzlib lua-zlib \
+		lua-cjson \
+		luarocks lua-luarocks gcc make binutils pkgconf musl-dev libc-dev luajit-dev lua-dev liblua-dev \
+		lua-basexx basexx lua-binaryheap binaryheap lua-fifo fifo lua-lpeg-patterns lpeg-patterns compat53 lua-compat53
+	do
+		opkg_install_best_effort "$pkg"
+	done
+	# Do not force LuaJIT here.  The default VM leak probe intentionally
+	# runs under PUC Lua so OpenWrt's packaged native modules are usable.
+fi
+
+# Re-select after opkg installation. The first selection may legitimately
+# have fallen back before the selected interpreter package was installed.
+refresh_lua_bin
+
+lua_share="/usr/share/lua"
+lua_share_51="/usr/share/lua/5.1"
+lua_lib="/usr/lib/lua"
+lua_lib_51="/usr/lib/lua/5.1"
+mkdir -p "$lua_share" "$lua_share_51" "$lua_lib" "$lua_lib_51"
+
+# Make both OpenWrt Lua layouts work.  Some images search /usr/share/lua
+# while some Lua 5.1/LuaJIT-oriented layouts search /usr/share/lua/5.1.
+install_lua_file() {
+	src="$1"
+	rel="$2"
+	for base in "$lua_share" "$lua_share_51" "$lua_lib" "$lua_lib_51"; do
+		mkdir -p "$base/$(dirname "$rel")"
+		cp "$src" "$base/$rel"
+	done
+}
+
+install_lua_tree() {
+	src="$1"
+	rel="$2"
+	for base in "$lua_share" "$lua_share_51" "$lua_lib" "$lua_lib_51"; do
+		rm -rf "$base/$rel"
+		mkdir -p "$base/$(dirname "$rel")"
+		cp -R "$src" "$base/$rel"
+	done
+}
+
+# BusyBox mktemp is stricter than GNU mktemp, and some OpenWrt builds reject
+# templates such as /tmp/name.XXXXXX or suffix-bearing templates. Use a simple
+# per-process directory instead; this helper is not run concurrently inside a
+# single VM.
+tmp="/tmp/devicecode-lua-http.$$"
+rm -rf "$tmp"
+mkdir -p "$tmp"
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+fetch() {
+	url="$1"
+	out="$2"
+	if command -v wget >/dev/null 2>&1; then
+		wget -q -O "$out" "$url" && return 0
+		wget --no-check-certificate -q -O "$out" "$url" && return 0 || true
+	fi
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -O "$out" "$url" && return 0
+		uclient-fetch --no-check-certificate -q -O "$out" "$url" && return 0 || true
+	fi
+	return 1
+}
+
+unpack_github() {
+	name="$1"
+	url="$2"
+	archive="$tmp/$name.tar.gz"
+	dir="$tmp/$name"
+	mkdir -p "$dir"
+	log "fetching $name"
+	fetch "$url" "$archive" || fail "could not download $url"
+	tar -xzf "$archive" -C "$dir" || fail "could not unpack $name"
+	root="$(find "$dir" -mindepth 1 -maxdepth 1 -type d | head -n 1 || true)"
+	[ -n "$root" ] || fail "archive for $name did not contain a top-level directory"
+	printf '%s\n' "$root"
+}
+
+copy_tree() {
+	src="$1"
+	dst="$2"
+	rm -rf "$dst"
+	mkdir -p "$(dirname "$dst")"
+	cp -R "$src" "$dst" || fail "could not copy $src to $dst"
+}
+
+write_compat53_fallbacks() {
+	# lua-http v0.4 loads compat53.module for Lua 5.1/LuaJIT assert
+	# semantics and compat53.string for string.pack/unpack.  The upstream
+	# compat53 repository no longer necessarily provides a pure-Lua
+	# compat53/string.lua in the archive layout we fetch here, while OpenWrt
+	# may not package lua-compat53.  For the VM leak probe we provide a small
+	# narrow fallback covering the formats lua-http needs to load and
+	# exercise HTTP/1 plus basic HTTP/2 framing.
+	for base in "$lua_share" "$lua_share_51" "$lua_lib" "$lua_lib_51"; do
+		mkdir -p "$base/compat53"
+		if [ ! -f "$base/compat53/module.lua" ]; then
+			cat > "$base/compat53/module.lua" <<'LUA'
+local M = setmetatable({}, { __index = _G })
+function M.assert(cond, ...)
+  if cond then return cond, ... end
+  if select('#', ...) > 0 then error((...), 2) end
+  error('assertion failed!', 2)
+end
+M.string = setmetatable({}, { __index = string })
+M.table = setmetatable({ unpack = table.unpack or unpack }, { __index = table })
+M.math = setmetatable({}, { __index = math })
+return M
+LUA
+		fi
+		if [ ! -f "$base/compat53/string.lua" ]; then
+			cat > "$base/compat53/string.lua" <<'LUA'
+local bit = require 'bit'
+local band, rshift = bit.band, bit.rshift
+
+local M = {}
+
+local function parse(fmt)
+  local endian = '>'
+  local out = {}
+  local i = 1
+  while i <= #fmt do
+    local c = fmt:sub(i, i)
+    if c == ' ' then
+      i = i + 1
+    elseif c == '>' or c == '<' or c == '=' then
+      endian = c
+      i = i + 1
+    elseif c == 'B' or c == 'b' then
+      out[#out + 1] = { c, 1 }
+      i = i + 1
+    elseif c == 'I' or c == 'i' then
+      local j = i + 1
+      while j <= #fmt and fmt:sub(j, j):match('%d') do j = j + 1 end
+      local n = tonumber(fmt:sub(i + 1, j - 1)) or 4
+      out[#out + 1] = { c, n }
+      i = j
+    elseif c == 'H' or c == 'h' then
+      out[#out + 1] = { c, 2 }
+      i = i + 1
+    elseif c == 'L' or c == 'l' then
+      out[#out + 1] = { c, 4 }
+      i = i + 1
+    else
+      error('unsupported compat53.string format item: ' .. c, 3)
+    end
+  end
+  return endian, out
+end
+
+local function enc_uint(v, n, endian)
+  local bytes = {}
+  if endian == '<' then
+    for i = 1, n do bytes[i] = string.char(band(v, 0xff)); v = math.floor(v / 256) end
+  else
+    for i = n, 1, -1 do bytes[i] = string.char(band(v, 0xff)); v = math.floor(v / 256) end
+  end
+  return table.concat(bytes)
+end
+
+local function dec_uint(s, pos, n, endian)
+  if pos + n - 1 > #s then error('data string too short', 3) end
+  local v = 0
+  if endian == '<' then
+    for i = pos + n - 1, pos, -1 do v = v * 256 + s:byte(i) end
+  else
+    for i = pos, pos + n - 1 do v = v * 256 + s:byte(i) end
+  end
+  return v, pos + n
+end
+
+local function signed(v, n)
+  local limit = 2 ^ (8 * n - 1)
+  if v >= limit then return v - 2 * limit end
+  return v
+end
+
+function M.pack(fmt, ...)
+  local endian, items = parse(fmt)
+  local args = { ... }
+  local ai = 1
+  local out = {}
+  for _, item in ipairs(items) do
+    local k, n = item[1], item[2]
+    local v = assert(args[ai], 'missing value for string.pack')
+    ai = ai + 1
+    if k == 'b' then if v < 0 then v = v + 256 end end
+    if k == 'h' or k == 'i' or k == 'l' then if v < 0 then v = v + 2 ^ (8 * n) end end
+    out[#out + 1] = enc_uint(v, n, endian)
+  end
+  return table.concat(out)
+end
+
+function M.unpack(fmt, s, pos)
+  pos = pos or 1
+  local endian, items = parse(fmt)
+  local out = {}
+  for _, item in ipairs(items) do
+    local k, n = item[1], item[2]
+    local v
+    v, pos = dec_uint(s, pos, n, endian)
+    if k == 'b' or k == 'h' or k == 'i' or k == 'l' then v = signed(v, n) end
+    out[#out + 1] = v
+  end
+  out[#out + 1] = pos
+  return unpack(out, 1, #out)
+end
+
+function M.packsize(fmt)
+  local _, items = parse(fmt)
+  local n = 0
+  for _, item in ipairs(items) do n = n + item[2] end
+  return n
+end
+
+return M
+LUA
+		fi
+		if [ ! -f "$base/compat53/utf8.lua" ]; then
+			cat > "$base/compat53/utf8.lua" <<'LUA'
+local M = {}
+M.charpattern = '[%z-W94-¤][
+8-91]*'
+local function iscont(b) return b and b >= 0x80 and b <= 0xbf end
+local function decode_at(s, i)
+  local b1 = s:byte(i)
+  if not b1 then return nil, i end
+  if b1 < 0x80 then return b1, i + 1 end
+  local n, min, cp
+  if b1 >= 0xc2 and b1 <= 0xdf then n, min, cp = 2, 0x80, b1 - 0xc0
+  elseif b1 >= 0xe0 and b1 <= 0xef then n, min, cp = 3, 0x800, b1 - 0xe0
+  elseif b1 >= 0xf0 and b1 <= 0xf4 then n, min, cp = 4, 0x10000, b1 - 0xf0
+  else return nil, i + 1 end
+  for j = 2, n do
+    local b = s:byte(i + j - 1)
+    if not iscont(b) then return nil, i + 1 end
+    cp = cp * 64 + (b - 0x80)
+  end
+  if cp < min or cp > 0x10ffff or (cp >= 0xd800 and cp <= 0xdfff) then return nil, i + 1 end
+  return cp, i + n
+end
+function M.codes(s)
+  local i = 1
+  return function()
+    if i > #s then return nil end
+    local pos = i
+    local cp, ni = decode_at(s, i)
+    if not cp then error('invalid UTF-8 code', 2) end
+    i = ni
+    return pos, cp
+  end
+end
+function M.codepoint(s, i, j)
+  i = i or 1; if i < 0 then i = #s + 1 + i end
+  j = j or i; if j < 0 then j = #s + 1 + j end
+  local out, p = {}, i
+  while p <= j do
+    local cp, ni = decode_at(s, p)
+    if not cp then error('invalid UTF-8 code', 2) end
+    out[#out+1] = cp; p = ni
+  end
+  return unpack(out, 1, #out)
+end
+function M.char(...)
+  local out = {}
+  for i = 1, select('#', ...) do
+    local cp = select(i, ...)
+    if cp < 0x80 then out[#out+1] = string.char(cp)
+    elseif cp < 0x800 then out[#out+1] = string.char(0xc0 + math.floor(cp/64), 0x80 + cp%64)
+    elseif cp < 0x10000 then out[#out+1] = string.char(0xe0 + math.floor(cp/4096), 0x80 + math.floor(cp/64)%64, 0x80 + cp%64)
+    else out[#out+1] = string.char(0xf0 + math.floor(cp/262144), 0x80 + math.floor(cp/4096)%64, 0x80 + math.floor(cp/64)%64, 0x80 + cp%64) end
+  end
+  return table.concat(out)
+end
+function M.len(s, i, j)
+  i = i or 1; if i < 0 then i = #s + 1 + i end
+  j = j or #s; if j < 0 then j = #s + 1 + j end
+  local n, p = 0, i
+  while p <= j do
+    local cp, ni = decode_at(s, p)
+    if not cp then return nil, p end
+    n = n + 1; p = ni
+  end
+  return n
+end
+function M.offset(s, n, i)
+  i = i or (n >= 0 and 1 or #s + 1)
+  if n == 0 then while i > 1 and iscont(s:byte(i)) do i = i - 1 end; return i end
+  if n > 0 then for _ = 1, n - 1 do local _, ni = decode_at(s, i); i = ni end; return i end
+  for _ = 1, -n do repeat i = i - 1 until i <= 1 or not iscont(s:byte(i)) end
+  return i
+end
+return M
+LUA
+		fi
+	done
+}
+
+install_compat53() {
+	root="$1"
+	log "installing compat53 from $root"
+
+	# Prefer a real compat53 directory when the archive contains one, but do
+	# not let archive-layout surprises abort the dependency installer.  The
+	# LuaJIT fallback below is enough for the VM leak probe and gives clear
+	# diagnostics if lua-http later needs more of compat53.
+	compat_dir=""
+	for candidate in \
+		"$root/compat53" \
+		"$root/lmod/compat53" \
+		"$root/lualib/compat53" \
+		"$root/lua/compat53"
+	do
+		if [ -d "$candidate" ]; then
+			compat_dir="$candidate"
+			break
+		fi
+	done
+
+	if [ -z "$compat_dir" ]; then
+		compat_dir="$(find "$root" -type d -name compat53 2>/dev/null | head -n 1)"
+	fi
+
+	if [ -n "$compat_dir" ]; then
+		install_lua_tree "$compat_dir" compat53
+	else
+		warn "compat53 directory not found in archive; using narrow fallback shims"
+	fi
+
+	compat_file=""
+	for candidate in \
+		"$root/compat53.lua" \
+		"$root/lua/compat53.lua" \
+		"$root/lualib/compat53.lua" \
+		"$root/lmod/compat53.lua"
+	do
+		if [ -f "$candidate" ]; then
+			compat_file="$candidate"
+			break
+		fi
+	done
+	if [ -z "$compat_file" ]; then
+		compat_file="$(find "$root" -type f -name compat53.lua 2>/dev/null | head -n 1)"
+	fi
+	if [ -n "$compat_file" ]; then
+		install_lua_file "$compat_file" compat53.lua
+	fi
+
+	write_compat53_fallbacks
+
+	if [ ! -f "$lua_share/compat53/module.lua" ] || [ ! -f "$lua_share/compat53/string.lua" ]; then
+		warn "compat53 install did not create expected modules; archive tree follows"
+		find "$root" -maxdepth 3 -type f 2>/dev/null | sed 's/^/[openwrt-vm\/http-deps] compat53 file: /' >&2 || true
+		fail 'compat53 fallback installation failed'
+	fi
+}
+install_file_by_name() {
+	root="$1"
+	name="$2"
+	dst="$3"
+	for candidate in "$root/$name" "$root/lib/$name" "$root/src/$name"; do
+		if [ -f "$candidate" ]; then
+			cp "$candidate" "$dst"
+			return 0
+		fi
+	done
+	found="$(find "$root" -name "$name" -type f | head -n 1 || true)"
+	[ -n "$found" ] || return 1
+	cp "$found" "$dst"
+}
+
+
+
+ensure_lua51_headers() {
+	# OpenWrt runtime images do not normally include Lua development headers.
+	# LuaRocks may therefore fall back to a stale SDK include path such as
+	# /builder/shared-workdir/..., causing compat53 to fail at <lua.h>.
+	# Install vanilla Lua 5.1.5 headers for target-side module compilation.
+	incdir=/usr/include/lua5.1
+	if [ -f "$incdir/lua.h" ] && [ -f "$incdir/luaconf.h" ]; then
+		printf '%s\n' "$incdir"
+		return 0
+	fi
+
+	mkdir -p "$incdir" /usr/include
+	archive="$tmp/lua-5.1.5.tar.gz"
+	dir="$tmp/lua-headers"
+	mkdir -p "$dir"
+	log 'fetching Lua 5.1.5 headers for compat53 build'
+	fetch 'https://www.lua.org/ftp/lua-5.1.5.tar.gz' "$archive" \
+		|| fail 'could not download Lua 5.1.5 headers'
+	tar -xzf "$archive" -C "$dir" || fail 'could not unpack Lua 5.1.5 headers'
+	root="$dir/lua-5.1.5"
+	[ -d "$root/src" ] || fail 'Lua 5.1.5 archive did not contain src directory'
+	for h in lua.h luaconf.h lauxlib.h lualib.h lua.hpp; do
+		[ -f "$root/src/$h" ] || [ "$h" = lua.hpp ] || fail "Lua 5.1 header missing from archive: $h"
+		if [ -f "$root/src/$h" ]; then
+			cp "$root/src/$h" "$incdir/$h" || fail "could not install Lua header $h"
+			cp "$root/src/$h" "/usr/include/$h" 2>/dev/null || true
+		fi
+	done
+	log "installed Lua 5.1 headers into $incdir"
+	printf '%s\n' "$incdir"
+}
+
+
+remove_compat53_native_shadow_lua_files() {
+	# Earlier harness versions installed narrow pure-Lua compat53 fallbacks.
+	# Once LuaRocks has produced native compat53/string.so or compat53/utf8.so,
+	# the corresponding Lua files are actively harmful: require() prefers
+	# LUA_PATH over LUA_CPATH, so a fallback file shadows the compiled module.
+	removed=0
+	for mod in string utf8; do
+		found_so=0
+		for so in \
+			/usr/lib/lua/compat53/$mod.so \
+			/usr/lib/lua/5.1/compat53/$mod.so
+		do
+			[ -f "$so" ] && found_so=1
+		done
+		[ "$found_so" = "1" ] || continue
+
+		for lua in \
+			/usr/share/lua/compat53/$mod.lua \
+			/usr/share/lua/5.1/compat53/$mod.lua \
+			/usr/lib/lua/compat53/$mod.lua \
+			/usr/lib/lua/5.1/compat53/$mod.lua
+		do
+			if [ -f "$lua" ]; then
+				rm -f "$lua"
+				removed=1
+			fi
+		done
+	done
+	if [ "$removed" = "1" ]; then
+		log 'removed compat53 Lua fallback files that shadow native modules'
+	fi
+	return 0
+}
+install_compat53_with_luarocks() {
+	remove_compat53_native_shadow_lua_files || true
+	# compat53 is the one lua-http dependency which is not purely a file copy on
+	# Lua 5.1/LuaJIT: it may need compiled modules such as compat53/utf8.so.
+	# Prefer a real LuaRocks build inside the VM, matching the target runtime and
+	# libc, rather than carrying broad compatibility shims in the leak harness.
+	if lua_require compat53.string && lua_require compat53.utf8; then
+		log 'compat53 runtime modules already load'
+		return 0
+	fi
+
+	if [ "${DEVICECODE_COMPAT53_USE_LUAROCKS:-1}" != "1" ]; then
+		warn 'DEVICECODE_COMPAT53_USE_LUAROCKS=0; leaving existing compat53 files/shims in place'
+		return 0
+	fi
+
+	if ! command -v luarocks >/dev/null 2>&1; then
+		warn 'luarocks command not found after opkg install attempts'
+		return 1
+	fi
+
+	log 'installing compat53 via LuaRocks into /usr'
+	rm -f /tmp/devicecode-compat53-luarocks.log
+	# OpenWrt's LuaRocks configuration may point at build-SDK include paths
+	# which do not exist on the running VM, so install Lua 5.1 headers and
+	# force LUA_INCDIR for the selected PUC Lua runtime.
+	lua_incdir="$(ensure_lua51_headers)" || return 1
+	log "building compat53 with LUA_INCDIR=$lua_incdir using $lua_bin"
+	if luarocks --tree=/usr --lua-version=5.1 install compat53 LUA_INCDIR="$lua_incdir" LUA_BINDIR="$(dirname "$(command -v "$lua_bin")")" LUA_LIBDIR=/usr/lib >/tmp/devicecode-compat53-luarocks.log 2>&1; then
+		remove_compat53_native_shadow_lua_files || true
+	else
+		cat /tmp/devicecode-compat53-luarocks.log >&2 || true
+		warn 'LuaRocks compat53 install failed'
+		return 1
+	fi
+
+	if lua_require compat53.string && lua_require compat53.utf8; then
+		log 'compat53 installed and loadable via LuaRocks'
+		return 0
+	fi
+
+	warn 'compat53 LuaRocks install completed but modules still do not load; diagnostics follow'
+	lua_require_verbose compat53.string || true
+	lua_require_verbose compat53.utf8 || true
+	find /usr/share/lua /usr/lib/lua -path '*compat53*' -maxdepth 5 2>/dev/null | sed 's/^/[openwrt-vm\/http-deps] compat53 installed file: /' >&2 || true
+	return 1
+}
+
+install_pure_lua_deps() {
+	# Pin lua-http to the last tagged release rather than master. It is enough
+	# for request/server/websocket modules and better matches OpenWrt 24.10's
+	# cqueues/luaossl vintage.
+	http_root="$(unpack_github lua-http https://github.com/daurnimator/lua-http/archive/refs/tags/v0.4.tar.gz)"
+	[ -d "$http_root/http" ] || fail 'http directory not found in lua-http archive'
+	install_lua_tree "$http_root/http" http
+	log 'installed lua-http modules'
+
+	compat53_root="$(unpack_github compat53 https://github.com/lunarmodules/lua-compat-5.3/archive/refs/heads/master.tar.gz)"
+	install_compat53 "$compat53_root"
+	log 'installed compat53 modules or fallback shims'
+
+	basexx_root="$(unpack_github basexx https://github.com/aiq/basexx/archive/refs/heads/master.tar.gz)"
+	basexx_file="$tmp/basexx.lua"
+	install_file_by_name "$basexx_root" basexx.lua "$basexx_file" || fail 'basexx.lua not found in basexx archive'
+	install_lua_file "$basexx_file" basexx.lua
+	log 'installed basexx module'
+
+	lpeg_patterns_root="$(unpack_github lpeg_patterns https://github.com/daurnimator/lpeg_patterns/archive/refs/heads/master.tar.gz)"
+	[ -d "$lpeg_patterns_root/lpeg_patterns" ] || fail 'lpeg_patterns directory not found in archive'
+	install_lua_tree "$lpeg_patterns_root/lpeg_patterns" lpeg_patterns
+	log 'installed lpeg_patterns modules'
+
+	binaryheap_root="$(unpack_github binaryheap https://github.com/Tieske/binaryheap.lua/archive/refs/heads/master.tar.gz)"
+	binaryheap_file="$tmp/binaryheap.lua"
+	install_file_by_name "$binaryheap_root" binaryheap.lua "$binaryheap_file" || fail 'binaryheap.lua not found in archive'
+	install_lua_file "$binaryheap_file" binaryheap.lua
+	log 'installed binaryheap module'
+
+	fifo_root="$(unpack_github fifo https://github.com/daurnimator/fifo.lua/archive/refs/heads/master.tar.gz)"
+	fifo_file="$tmp/fifo.lua"
+	install_file_by_name "$fifo_root" fifo.lua "$fifo_file" || fail 'fifo.lua not found in archive'
+	install_lua_file "$fifo_file" fifo.lua
+	log 'installed fifo module'
+}
+
+install_pure_lua_deps
+
+if ! install_compat53_with_luarocks; then
+	if [ "${DEVICECODE_COMPAT53_REQUIRED:-1}" = "1" ]; then
+		fail "compat53 could not be built/loaded under $lua_bin; inspect /tmp/devicecode-compat53-luarocks.log and compat53/utf8 shim/native module ordering"
+	fi
+	warn 'continuing without compiled compat53 because DEVICECODE_COMPAT53_REQUIRED=0'
+fi
+
+log 'checking lua-http runtime dependencies'
+missing=''
+# Include leaf modules so the diagnostic points to the real missing dependency,
+# not only to http.request/http.server/http.websocket.
+for mod in \
+	cqueues cqueues.errno cqueues.socket lpeg \
+	openssl openssl.rand openssl.pkey openssl.ssl openssl.ssl.context openssl.x509 openssl.x509.name openssl.x509.altname openssl.x509.verify_param \
+	bit bit32 http.bit \
+	basexx binaryheap fifo \
+	lpeg_patterns.core lpeg_patterns.http lpeg_patterns.uri \
+	compat53.module compat53.string compat53.utf8 \
+	http.headers http.tls http.h1_connection http.h2_connection http.client \
+	http.request http.server http.websocket
+	do
+	if lua_require "$mod"; then
+		:
+	else
+		missing="$missing $mod"
+	fi
+done
+
+if [ -n "$missing" ]; then
+	cat >&2 <<'REPORT1'
+[openwrt-vm/http-deps] Missing Lua modules after provisioning:
+REPORT1
+	printf '%s
+' "$missing" >&2
+	cat >&2 <<'REPORT2'
+
+Detailed require diagnostics follow. The first FAIL whose traceback mentions a
+module not found is normally the real missing dependency. This harness now
+defaults to PUC Lua in the VM because OpenWrt's packaged cqueues/luaossl
+modules are known to load under lua on this image. Use
+DEVICECODE_LEAK_PROBE_LUA=luajit only when deliberately comparing runtimes.
+REPORT2
+	for mod in $missing; do
+		lua_require_verbose "$mod" || true
+	done
+	cat >&2 <<'REPORT3'
+
+Installed package status for likely native dependencies:
+REPORT3
+	for pkg in lua liblua liblua5.1.5 luajit luajit-openresty cqueues lpeg luaossl lua-openssl lua-bit32 luabitop lua-lzlib; do
+		opkg status "$pkg" 2>/dev/null | sed -n '1,5p' >&2 || true
+	done
+	cat >&2 <<'REPORT4'
+
+Installed Lua/OpenWrt native files of interest:
+REPORT4
+	for pat in '*cqueues*' '*openssl*' '*lpeg*' '*bit*'; do
+		find /usr/lib/lua /usr/share/lua -name "$pat" 2>/dev/null | sed 's/^/[openwrt-vm\/http-deps] file: /' >&2 || true
+	done
+	printf 'unavailable missing=%s
+' "$missing" > "$STATUS_FILE"
+	if [ "${DEVICECODE_HTTP_DEPS_REQUIRED:-0}" = "1" ]; then
+		fail "lua-http dependency check failed:$missing"
+	fi
+	warn "lua-http/cqueues dependencies unavailable under $lua_bin; continuing so the leak probe can run the core service set"
+	exit 0
+fi
+
+printf '%s
+' 'available' > "$STATUS_FILE"
+log 'lua-http/cqueues dependencies ready'
+REMOTE_SH

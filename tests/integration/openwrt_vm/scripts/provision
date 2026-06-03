@@ -60,7 +60,7 @@ opkg_update_with_retry
 # Install MWAN3 in a separate phase. Immediately after this SSH step returns,
 # provision installs a known-good three-WAN fixture before any further package
 # downloads can observe or trip over a half-configured mwan3 setup.
-opkg install tc-full kmod-sched kmod-sched-core kmod-ifb kmod-veth ip-full lua libuci-lua
+opkg install tc-full kmod-sched kmod-sched-core kmod-ifb kmod-veth ip-full lua luajit libuci-lua
 
 # Some OpenWrt targets expose 8021q as built-in kernel support and do not
 # publish a separate kmod-8021q package.  VLAN capability is checked by the
@@ -87,6 +87,10 @@ ip route replace default via 192.168.1.2 dev br-lan || true
 (opkg install luaposix || true)
 (opkg install lua-bit32 || true)
 (opkg install lua-cjson || true)
+(opkg install luajit || true)
+(opkg install cqueues || true)
+(opkg install lpeg || true)
+(opkg install luaossl || true)
 
 # Optional but useful for performance tests. Do not fail provisioning if unavailable
 # on a given target/release.

@@ -1416,6 +1416,26 @@ function M.start(conn, opts)
 	params.name = opts.name or 'update'
 	params.svc = svc
 
+	-- Leak-probe and VM runs may deliberately avoid the HAL control-store backed
+	-- durable job store.  The OpenWrt VM can bring the control-store capability
+	-- up late or slowly enough for update admission to fail before the leak probe
+	-- has a useful steady-state window.  Keep production semantics unchanged unless
+	-- the caller opts in explicitly through the environment or opts table.
+	local env_job_store = os.getenv('DEVICECODE_UPDATE_JOB_STORE')
+	local env_probe_memory = os.getenv('DEVICECODE_LEAK_PROBE_UPDATE_MEMORY_JOB_STORE')
+	local probe_memory = env_probe_memory ~= nil
+		and env_probe_memory ~= ''
+		and env_probe_memory ~= '0'
+		and env_probe_memory ~= 'false'
+	if opts.memory_job_store == true or opts.job_store_kind == 'memory'
+		or env_job_store == 'memory'
+		or probe_memory
+	then
+		params.job_store = nil
+		params.job_store_kind = 'memory'
+		params.memory_job_store = true
+	end
+
 	M.run(scope, params)
 
 	svc:stopped({ reason = 'returned' })

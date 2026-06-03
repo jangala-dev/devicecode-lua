@@ -3,6 +3,7 @@
 -- Raw Device configuration validation and normalisation.
 
 local catalogue = require 'services.device.catalogue'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -33,7 +34,7 @@ function M.to_catalogue(raw)
 	local cfg, err = M.normalise(raw)
 	if err then return nil, err end
 
-	local ok, cat_or_err = pcall(function ()
+	local ok, cat_or_err = safe.pcall(function ()
 		return catalogue.build(cfg)
 	end)
 	if not ok then

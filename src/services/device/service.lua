@@ -28,6 +28,9 @@ local tablex = require 'shared.table'
 
 local M = {}
 
+local ok_probe, leak_probe = pcall(require, 'devicecode.support.leak_probe')
+if not ok_probe then leak_probe = nil end
+
 local DEFAULT_DONE_QUEUE = backpressure.policy.completions.default_len
 local DEFAULT_OBSERVATION_QUEUE = backpressure.policy.observations.default_len
 
@@ -176,6 +179,7 @@ local function cancel_active_generation(state, reason)
 	active.cancel_reason = reason or 'generation_replaced'
 	state.generation_history = state.generation_history or {}
 	state.generation_history[active.generation] = active
+	if leak_probe then leak_probe.gauge('device.generation_history', (function(t) local n=0; for _ in pairs(t or {}) do n=n+1 end; return n end)(state.generation_history)) end
 
 	-- Public admission is a coordinator-visible resource, not merely a child
 	-- scope finaliser concern. Release generation-owned endpoints immediately so
@@ -350,6 +354,7 @@ local function start_generation(state, catalogue)
 
 	state.generation_history = state.generation_history or {}
 	state.generation_history[generation] = active
+	if leak_probe then leak_probe.gauge('device.generation_history', (function(t) local n=0; for _ in pairs(t or {}) do n=n+1 end; return n end)(state.generation_history)) end
 	state.active = active
 	return active, nil
 end

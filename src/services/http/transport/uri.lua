@@ -8,6 +8,7 @@
 
 local http_request = require 'http.request'
 local http_util    = require 'http.util'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -45,7 +46,7 @@ function M.parse(uri)
 	public_scheme = public_scheme:lower()
 
 	local parse_uri, authority_scheme = lua_http_uri(uri, public_scheme)
-	local ok, req_or_err = pcall(function ()
+	local ok, req_or_err = safe.pcall(function ()
 		return http_request.new_from_uri(parse_uri)
 	end)
 	if not ok or not req_or_err then return nil, normalise_error(req_or_err) end
@@ -58,7 +59,7 @@ function M.parse(uri)
 	if type(parsed_scheme) ~= 'string' or parsed_scheme == '' then return nil, 'invalid_args' end
 	if type(authority) ~= 'string' or authority == '' then return nil, 'invalid_args' end
 
-	local ok_split, host, port = pcall(http_util.split_authority, authority, authority_scheme)
+	local ok_split, host, port = safe.pcall(http_util.split_authority, authority, authority_scheme)
 	if not ok_split then return nil, 'invalid_args' end
 	if type(host) ~= 'string' or host == '' then return nil, 'invalid_args' end
 

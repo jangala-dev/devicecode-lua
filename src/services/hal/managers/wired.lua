@@ -6,6 +6,7 @@
 -- Device service curates them into public cap/wired-provider/... surfaces.
 
 local fibers = require 'fibers'
+local safe = require 'coxpcall'
 local op = require 'fibers.op'
 local channel = require 'fibers.channel'
 
@@ -73,10 +74,10 @@ local function driver_result(provider_id, method, opts)
 	local opname = tostring(method) .. '_op'
 	local fn = driver[opname]
 	if type(fn) ~= 'function' then return { ok = false, err = 'wired driver missing ' .. opname } end
-	local ok, driver_op = pcall(function () return fn(driver, opts or {}) end)
+	local ok, driver_op = safe.pcall(function () return fn(driver, opts or {}) end)
 	if not ok then return { ok = false, err = tostring(driver_op) } end
 	if type(driver_op) ~= 'table' then return { ok = false, err = opname .. ' did not return an Op' } end
-	local ok2, result = pcall(function () return fibers.perform(driver_op) end)
+	local ok2, result = safe.pcall(function () return fibers.perform(driver_op) end)
 	if not ok2 then return { ok = false, err = tostring(result) } end
 	if type(result) == 'table' then return result end
 	return { ok = result == true, result = result }

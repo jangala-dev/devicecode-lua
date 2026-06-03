@@ -16,6 +16,7 @@ local shaper_mod = require 'services.hal.backends.network.providers.openwrt.tc_u
 local speedtest_mod = require 'services.hal.backends.network.providers.openwrt.speedtest'
 local names_mod = require 'services.hal.backends.network.providers.openwrt.names'
 local hal_types = require 'services.hal.types.core'
+local safe = require 'coxpcall'
 
 local perform = fibers.perform
 local unpack = _G.unpack or rawget(table, 'unpack')
@@ -1562,7 +1563,7 @@ function read_uci_packages(config)
 	local c = uci_or_err.cursor(config.confdir or config.uci_confdir or '/etc/config', config.savedir or config.uci_savedir)
 	local out = {}
 	for _, pkg in ipairs(OWNED_PACKAGES) do
-		if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end
+		if type(c.load) == 'function' then safe.pcall(function() c:load(pkg) end) end
 		out[pkg] = type(c.get_all) == 'function' and c:get_all(pkg) or {}
 	end
 	return out, nil

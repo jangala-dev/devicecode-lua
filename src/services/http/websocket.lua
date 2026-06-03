@@ -3,6 +3,7 @@
 
 local transport_ws = require 'services.http.transport.websocket'
 local op = require 'fibers.op'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -31,8 +32,8 @@ local function notify_terminated(self, reason)
 	self._terminate_hooks = {}
 	local hook = self._on_terminate
 	self._on_terminate = nil
-	if hook then pcall(hook, self, self._close_reason) end
-	for _, f in ipairs(hooks) do pcall(f, self, self._close_reason) end
+	if hook then safe.pcall(hook, self, self._close_reason) end
+	for _, f in ipairs(hooks) do safe.pcall(f, self, self._close_reason) end
 	return true
 end
 

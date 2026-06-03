@@ -5,6 +5,7 @@ local cap_args  = require "services.hal.types.capability_args"
 
 local fibers  = require "fibers"
 local channel = require "fibers.channel"
+local safe = require "coxpcall"
 
 local CONTROL_Q_LEN = 16
 
@@ -383,7 +384,7 @@ end
 ---@return boolean ok
 ---@return string? reason
 function BandDriver:apply()
-    local ok, err = pcall(function() self.backend:apply(self.staged) end)
+    local ok, err = safe.pcall(function() self.backend:apply(self.staged) end)
     if not ok then
         return false, tostring(err)
     end
@@ -429,7 +430,7 @@ function BandDriver:control_manager()
         if type(fn) ~= 'function' then
             ok, reason = false, 'unknown verb: ' .. tostring(request.verb)
         else
-            local call_ok, r1, r2 = pcall(fn, self, request.opts)
+            local call_ok, r1, r2 = safe.pcall(fn, self, request.opts)
             if not call_ok then
                 ok, reason = false, tostring(r1)
             else

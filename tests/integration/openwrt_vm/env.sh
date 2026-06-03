@@ -78,8 +78,20 @@ OPENWRT_IMAGE_RAW="${OPENWRT_IMAGE_DIR}/${OPENWRT_IMAGE_NAME%.gz}"
 OPENWRT_SHA256SUMS_NAME="sha256sums"
 OPENWRT_SHA256SUMS="${OPENWRT_IMAGE_DIR}/sha256sums-${OPENWRT_VERSION}-${OPENWRT_ARCH}"
 OPENWRT_WORK_DISK="${OPENWRT_WORK_DIR}/openwrt-${OPENWRT_ARCH}.qcow2"
+# Leak-probe and dependency-build runs may need substantially more root
+# filesystem space than the stock OpenWrt image provides.  scripts/ensure-large-disk
+# uses this virtual size before provisioning/building HTTP dependencies.
+OPENWRT_WORK_DISK_SIZE="${OPENWRT_WORK_DISK_SIZE:-2G}"
+OPENWRT_GROW_WORK_DISK="${OPENWRT_GROW_WORK_DISK:-1}"
+# Minimum free space required on / after guest-side growth before
+# the build-deps leak probe attempts to install gcc/LuaRocks dependencies.
+OPENWRT_MIN_ROOT_FREE_KB="${OPENWRT_MIN_ROOT_FREE_KB:-300000}"
 OPENWRT_PID="${OPENWRT_WORK_DIR}/qemu.pid"
 OPENWRT_LOG="${OPENWRT_WORK_DIR}/qemu.log"
 
 OPENWRT_PROVISION_MARKER="${OPENWRT_PROVISION_MARKER:-/etc/devicecode-vm-provisioned}"
 OPENWRT_PROVISION_FORCE="${OPENWRT_PROVISION_FORCE:-0}"
+
+# The leak-probe VM defaults to PUC Lua so OpenWrt's packaged native Lua modules
+# load consistently. Override with DEVICECODE_LEAK_PROBE_LUA=luajit for runtime comparisons.
+DEVICECODE_LEAK_PROBE_LUA="${DEVICECODE_LEAK_PROBE_LUA:-lua}"

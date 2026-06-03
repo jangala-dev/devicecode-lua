@@ -12,6 +12,7 @@ local request_owner = require 'devicecode.support.request_owner'
 local cap_deps_mod = require 'devicecode.support.capability_dependencies'
 local dependency_mod = require 'services.device.dependencies'
 local backpressure = require 'services.device.backpressure'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -64,7 +65,7 @@ end
 local function resolve_action_spec(component, action, req, base_spec)
 	local mod = type(component) == 'table' and component.module or nil
 	if type(mod) == 'table' and type(mod.action_spec) == 'function' then
-		local ok, spec, err = pcall(mod.action_spec, component, action, request_payload(req), base_spec)
+		local ok, spec, err = safe.pcall(mod.action_spec, component, action, request_payload(req), base_spec)
 		if not ok then return nil, tostring(spec) end
 		if spec == nil then return nil, err or 'unknown_action' end
 		return spec, nil

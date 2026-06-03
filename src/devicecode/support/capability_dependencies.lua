@@ -16,6 +16,7 @@ local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local queue       = require 'devicecode.support.queue'
 local dep_failure = require 'devicecode.support.dependency_failure'
 local tablex      = require 'shared.table'
+local safe        = require 'coxpcall'
 
 local M = {}
 local Dependencies = {}
@@ -139,7 +140,7 @@ local function subscribe_for(conn, dep, opts)
 	-- connection.  A bus connection is needed only for the fallback topic
 	-- subscription path below.
 	if dep.ref ~= nil and type(dep.ref.get_status_sub) == 'function' then
-		local ok, sub, sub_err = pcall(function ()
+		local ok, sub, sub_err = safe.pcall(function ()
 			return dep.ref:get_status_sub({
 				queue_len = dep.queue_len or opts.status_queue_len or opts.queue_len or 8,
 				full = dep.full or opts.status_full or opts.full or 'drop_oldest',

@@ -11,6 +11,7 @@ local fibers = require 'fibers'
 local scoped_work = require 'devicecode.support.scoped_work'
 local queue = require 'devicecode.support.queue'
 local tablex = require 'shared.table'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -18,7 +19,7 @@ local function copy(v) return tablex.deep_copy(v) end
 
 local function artifact_snapshot(v)
 	if type(v) == 'table' and type(v.describe) == 'function' then
-		local ok, rec = pcall(function () return v:describe() end)
+		local ok, rec = safe.pcall(function () return v:describe() end)
 		if ok and type(rec) == 'table' then
 			rec = copy(rec)
 			rec.ref = rec.ref or rec.artifact_ref

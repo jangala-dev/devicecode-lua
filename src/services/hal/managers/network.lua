@@ -9,6 +9,7 @@ local hal_types = require 'services.hal.types.core'
 local cap_types = require 'services.hal.types.capabilities'
 local control_loop = require 'services.hal.support.control_loop'
 local driver_mod = require 'services.hal.drivers.network'
+local safe = require 'coxpcall'
 
 local M = strict.api_table()
 
@@ -47,7 +48,7 @@ local function driver_method_op(method, req)
 			return op.always(false, { ok = false, err = 'network driver missing ' .. opname })
 		end
 
-		local ok, driver_op = pcall(function () return fn(state.driver, req and req.opts or {}) end)
+		local ok, driver_op = safe.pcall(function () return fn(state.driver, req and req.opts or {}) end)
 		if not ok then
 			return op.always(false, { ok = false, err = tostring(driver_op) })
 		end

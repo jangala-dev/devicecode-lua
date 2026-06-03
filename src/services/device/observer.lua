@@ -9,6 +9,7 @@ local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local queue       = require 'devicecode.support.queue'
 local model       = require 'services.device.model'
 local backpressure = require 'services.device.backpressure'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -50,7 +51,7 @@ local function normalise_with_component(rec, kind, name, payload)
 		return model.copy_value(payload), nil
 	end
 
-	local ok, value, err = pcall(fn, name, payload, rec)
+	local ok, value, err = safe.pcall(fn, name, payload, rec)
 	if not ok then return nil, tostring(value) end
 	return value, err
 end

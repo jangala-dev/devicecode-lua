@@ -7,6 +7,7 @@ local op     = require 'fibers.op'
 local sleep  = require 'fibers.sleep'
 local authz  = require 'devicecode.authz'
 local busmod = require 'bus'
+local leak_probe = require 'devicecode.support.leak_probe'
 
 local safe   = require 'coxpcall'
 
@@ -191,6 +192,8 @@ function M.run(scope, params)
     local main_conn = bus:connect({
         principal = authz.service_principal('main'),
     })
+
+    leak_probe.start(scope, { conn = main_conn, note = 'devicecode main' })
 
     retain_main_state(main_conn, 'starting', {
         env      = env,

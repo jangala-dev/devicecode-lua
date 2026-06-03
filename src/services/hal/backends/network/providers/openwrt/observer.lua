@@ -302,7 +302,7 @@ function Observer:_stop_ubus_listener()
 
 	local cmd = self.ubus_cmd
 	self.ubus_cmd = nil
-	if cmd and cmd.kill then pcall(function () cmd:kill() end) end
+	if cmd and cmd.kill then safe.pcall(function () cmd:kill() end) end
 end
 
 function Observer:ubus_listener()
@@ -331,7 +331,7 @@ function Observer:ubus_listener()
 			if self.ubus_stream == stream then self.ubus_stream = nil end
 			if self.ubus_cmd == cmd then self.ubus_cmd = nil end
 			close_stream(stream)
-			pcall(function () cmd:kill() end)
+			safe.pcall(function () cmd:kill() end)
 			if not self.closed then perform(sleep.sleep_op(1.0)) end
 		end
 	end
@@ -352,7 +352,7 @@ function Observer:handle_socket_stream(st)
 end
 
 function Observer:socket_server()
-	pcall(function () file.unlink(self.socket_path) end)
+	safe.pcall(function () file.unlink(self.socket_path) end)
 	local s, err = socket.listen_unix(self.socket_path, { ephemeral = true })
 	if not s then
 		log(self, 'warn', { what = 'hotplug_socket_listen_failed', path = self.socket_path, err = tostring(err) })
@@ -394,7 +394,7 @@ function Observer:terminate(reason)
 	self.active_streams = {}
 	if self.listener and self.listener.close then self.listener:close() end
 	if self.scope then self.scope:cancel(reason or 'observer terminated') end
-	pcall(function () file.unlink(self.socket_path) end)
+	safe.pcall(function () file.unlink(self.socket_path) end)
 	return true, nil
 end
 

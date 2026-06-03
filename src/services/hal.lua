@@ -10,6 +10,7 @@ local channel = require "fibers.channel"
 local sleep   = require "fibers.sleep"
 
 local tablex = require 'shared.table'
+local safe = require 'coxpcall'
 
 local perform = fibers.perform
 
@@ -280,7 +281,7 @@ local function manager_terminate(manager_name, manager, reason)
 		return nil, ('strict manager %q missing terminate'):format(tostring(manager_name))
 	end
 
-	local ok, a, b = pcall(function ()
+	local ok, a, b = safe.pcall(function ()
 		return manager.terminate(reason)
 	end)
 

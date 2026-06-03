@@ -14,6 +14,10 @@ local queue         = require 'devicecode.support.queue'
 local request_owner = require 'devicecode.support.request_owner'
 local model         = require 'services.update.model'
 local lifetime      = require 'services.update.artifacts.lifetime'
+local safe = require 'coxpcall'
+
+local ok_probe, leak_probe = pcall(require, 'devicecode.support.leak_probe')
+if not ok_probe then leak_probe = nil end
 
 local M = {}
 
@@ -28,7 +32,7 @@ local function copy(v) return model.deep_copy(v) end
 
 local function artifact_snapshot(artifact)
 	if type(artifact) == 'table' and type(artifact.describe) == 'function' then
-		local ok, rec = pcall(function () return artifact:describe() end)
+		local ok, rec = safe.pcall(function () return artifact:describe() end)
 		if ok and type(rec) == 'table' then
 			rec = copy(rec)
 			rec.ref = rec.ref or rec.artifact_ref
@@ -141,11 +145,13 @@ function M.new_instance(scope, params)
 		terminal_requested = false,
 		_scope_closed = false,
 	}, Instance)
+	if leak_probe then leak_probe.ingest_instance_created(self.ingest_id) end
 
 	child:finally(function (_, status, primary)
 		local reason = primary or ((status ~= 'ok') and status) or 'ingest_instance_closed'
 		if self.state == 'open' then self.state = 'closed' end
 		self.closed = true
+		if leak_probe then leak_probe.ingest_instance_closed(self.ingest_id, reason) end
 		while #self.pending > 0 do
 			local pending = table.remove(self.pending, 1)
 			local owner = pending.owner or request_owner.new(pending.req)
@@ -159,6 +165,7 @@ end
 function Instance:_close_scope(reason)
 	if self._scope_closed then return true, nil end
 	self._scope_closed = true
+	if leak_probe then leak_probe.ingest_instance_closed(self.ingest_id, reason or 'ingest_instance_closed') end
 	if self._scope and type(self._scope.close) == 'function' then
 		self._scope:close(reason or 'ingest_instance_closed')
 	end
@@ -362,6 +369,7 @@ local function create_instance_with_sink_now(state, req, payload, sink, owner)
 		return nil, err or 'ingest_create_failed'
 	end
 	state._instances[ingest_id] = inst
+	if leak_probe then leak_probe.gauge('update.ingest.instances_table', (function(t) local n=0; for _ in pairs(t or {}) do n=n+1 end; return n end)(state._instances)) end
 	owner = owner or owner_for(req)
 	local ok, rerr = owner:reply_once({ ok = true, ingest = inst:snapshot() })
 	if ok ~= true then error(rerr or 'ingest_create_reply_failed', 0) end
@@ -669,6 +677,7 @@ function State:handle_done(ctx, ev)
 			fail_owner(pending.owner, pending.req, 'ingest_closed')
 		end
 		inst:_close_scope('ingest_closed')
+		if leak_probe then leak_probe.gauge('update.ingest.instances_table', (function(t) local n=0; for _ in pairs(t or {}) do n=n+1 end; return n end)(self._instances)) end
 		return true
 	end
 

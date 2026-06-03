@@ -22,6 +22,9 @@ local op        = require 'fibers.op'
 local cond      = require 'fibers.cond'
 local tablex    = require 'shared.table'
 
+local ok_probe, leak_probe = pcall(require, 'devicecode.support.leak_probe')
+if not ok_probe then leak_probe = nil end
+
 local M = {}
 
 local copy_table = tablex.shallow_copy
@@ -181,6 +184,7 @@ local function start_impl(spec, opts)
 	end
 
 	local identity = copy_table(spec.identity)
+	local probe_work_id = leak_probe and leak_probe.scoped_work_started(identity) or nil
 	local copy_result = spec.copy_result or copy_value
 
 	local child, child_err = lifetime_scope:child()
@@ -225,6 +229,7 @@ local function start_impl(spec, opts)
 		end
 
 		child:cancel(reason)
+		if leak_probe then leak_probe.scoped_work_cancelled(probe_work_id, reason) end
 		return true, nil
 	end
 
@@ -258,6 +263,7 @@ local function start_impl(spec, opts)
 			setup_result.cancel_owned_now(reason or 'scoped_work_start_failed')
 		end
 		body_done:signal()
+		if leak_probe then leak_probe.scoped_work_body_done(probe_work_id) end
 		child:cancel(reason or 'scoped_work_start_failed')
 
 		if cleanup_on_start_failure then
@@ -302,6 +308,10 @@ local function start_impl(spec, opts)
 			primary = copy_value(failure_primary)
 		end
 		store_once(status, report, primary)
+		if leak_probe then
+			leak_probe.scoped_work_reaped(probe_work_id, status)
+			if not spec.report then leak_probe.scoped_work_reported(probe_work_id) end
+		end
 	end)
 
 	if ok_reaper ~= true then
@@ -357,6 +367,7 @@ local function start_impl(spec, opts)
 			if ok ~= true then
 				error(report_err or 'scoped_work_report_failed', 0)
 			end
+			if leak_probe then leak_probe.scoped_work_reported(probe_work_id) end
 		end)
 
 		if ok_reporter ~= true then
@@ -386,6 +397,7 @@ local function start_impl(spec, opts)
 
 		-- This is wrapper-owned, not user-owned.
 		body_done:signal()
+		if leak_probe then leak_probe.scoped_work_body_done(probe_work_id) end
 
 		if not ok then
 			error(ret, 0)

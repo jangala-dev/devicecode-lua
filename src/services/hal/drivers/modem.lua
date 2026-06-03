@@ -14,6 +14,7 @@ local cache_mod = require "shared.cache"
 local fibers = require "fibers"
 local op = require "fibers.op"
 local channel = require "fibers.channel"
+local safe = require "coxpcall"
 local sleep = require "fibers.sleep"
 local cond = require "fibers.cond"
 local pulse = require "fibers.pulse"
@@ -634,7 +635,7 @@ function Modem:control_manager()
             ok = false
             reason = validation_err
         else
-            local call_ok, fn_ok, fn_reason, fn_code = pcall(fn, self, request.opts)
+            local call_ok, fn_ok, fn_reason, fn_code = safe.pcall(fn, self, request.opts)
             if not call_ok then
                 ok = false
                 reason = "internal error: " .. tostring(fn_ok)

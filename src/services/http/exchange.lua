@@ -5,6 +5,7 @@
 local op = require 'fibers.op'
 local headers_mod = require 'services.http.headers'
 local terminate = require 'services.http.transport.terminate'
+local safe = require 'coxpcall'
 
 local M = {}
 local HttpExchange = {}
@@ -78,7 +79,7 @@ function HttpExchange:shutdown_op()
 		self._close_reason = err or 'closed'
 		local hook = self._on_terminate
 		self._on_terminate = nil
-		if hook then pcall(hook, self, self._close_reason) end
+		if hook then safe.pcall(hook, self, self._close_reason) end
 		return ok, err
 	end)
 end
@@ -90,7 +91,7 @@ function HttpExchange:terminate(reason)
 	local hook = self._on_terminate
 	self._on_terminate = nil
 	terminate.terminate_stream(self._stream, self._close_reason)
-	if hook then pcall(hook, self, self._close_reason) end
+	if hook then safe.pcall(hook, self, self._close_reason) end
 	return true
 end
 

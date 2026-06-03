@@ -1,0 +1,318 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+
+# shellcheck disable=SC1091
+. "$VM_DIR/env.sh"
+
+TARGET_SIZE="${OPENWRT_WORK_DISK_SIZE:-2G}"
+ENABLE="${OPENWRT_GROW_WORK_DISK:-1}"
+MIN_FREE_KB="${OPENWRT_MIN_ROOT_FREE_KB:-300000}"
+
+log() { printf '%s\n' "[openwrt-vm/disk] $*" >&2; }
+warn() { printf '%s\n' "[openwrt-vm/disk] WARN: $*" >&2; }
+fail() { printf '%s\n' "[openwrt-vm/disk] FAIL: $*" >&2; exit 1; }
+
+[ "$ENABLE" = "1" ] || { log 'disk growth disabled by OPENWRT_GROW_WORK_DISK=0'; exit 0; }
+
+if [ ! -f "$OPENWRT_WORK_DISK" ]; then
+	log "work disk not present; creating from base image"
+	"$SCRIPT_DIR/reset-disk"
+fi
+
+# Fast path for reruns: if the VM already has enough free root space, avoid
+# stopping/restarting it and avoid repeating partition work.  This is common
+# after the two-stage OpenWrt resize helper has completed.
+if [ -f "$OPENWRT_PID" ] && kill -0 "$(cat "$OPENWRT_PID")" 2>/dev/null; then
+	if "$SCRIPT_DIR/wait-ssh" >/dev/null 2>&1; then
+		current_free="$("$SCRIPT_DIR/ssh" "df -k / | awk 'NR == 2 { print \$4 }'" 2>/dev/null || echo 0)"
+		case "$current_free" in ''|*[!0-9]*) current_free=0 ;; esac
+		if [ "$current_free" -ge "$MIN_FREE_KB" ]; then
+			log "root filesystem already has ${current_free}KB free; skipping disk growth"
+			exit 0
+		fi
+	fi
+fi
+
+was_running=0
+if [ -f "$OPENWRT_PID" ] && kill -0 "$(cat "$OPENWRT_PID")" 2>/dev/null; then
+	was_running=1
+	log 'stopping VM before host-side qcow2 resize'
+	"$SCRIPT_DIR/stop-vm" || true
+fi
+
+log "ensuring host qcow2 virtual size is at least $TARGET_SIZE"
+if qemu-img resize "$OPENWRT_WORK_DISK" "$TARGET_SIZE" >/tmp/devicecode-qemu-img-resize.log 2>&1; then
+	cat /tmp/devicecode-qemu-img-resize.log >&2 || true
+else
+	cat /tmp/devicecode-qemu-img-resize.log >&2 || true
+	warn "qemu-img resize returned non-zero; continuing with guest-side check"
+fi
+
+log 'starting VM for guest-side root filesystem growth'
+"$SCRIPT_DIR/run-vm"
+"$SCRIPT_DIR/wait-ssh"
+
+# The OpenWrt combined EFI image uses GPT.  After qemu-img resize, the kernel
+# sees the larger /dev/vda, but the GPT backup header is still at the old end of
+# disk.  GNU parted therefore prompts to "fix" the table; plain `parted -s` does
+# not answer that prompt, so resizepart later fails with "Unable to satisfy all
+# constraints".  Use parted -f/--fix where available, and fall back to the
+# pseudo-tty input form used by older parted builds.
+set +e
+"$SCRIPT_DIR/ssh" 'sh -s' <<REMOTE
+set -u
+MIN_FREE_KB='$MIN_FREE_KB'
+log() { printf '%s\n' "[openwrt-vm/disk] \$*" >&2; }
+warn() { printf '%s\n' "[openwrt-vm/disk] WARN: \$*" >&2; }
+fail() { printf '%s\n' "[openwrt-vm/disk] FAIL: \$*" >&2; exit 1; }
+
+free_kb() { df -k / | awk 'NR == 2 { print \$4 }'; }
+show_df() { df -k / >&2 || true; }
+
+log 'current root filesystem usage before grow:'
+show_df
+
+avail0="$(free_kb 2>/dev/null || echo 0)"
+case "$avail0" in ''|*[!0-9]*) avail0=0 ;; esac
+if [ "$avail0" -ge "$MIN_FREE_KB" ]; then
+	log "root filesystem already has ${avail0}KB free; no guest-side grow needed"
+	exit 0
+fi
+
+# Best-effort network setup for optional package installation.  This mirrors the
+# other OpenWrt VM provisioning helpers and is deliberately non-fatal.
+ip route replace default via 192.168.1.2 dev br-lan || true
+mkdir -p /tmp/resolv.conf.d
+printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf.d/resolv.conf.auto
+printf 'nameserver 192.168.1.3\nnameserver 1.1.1.1\n' > /tmp/resolv.conf
+
+opkg update >/tmp/devicecode-disk-opkg-update.log 2>&1 || warn 'opkg update failed during disk grow; using existing package lists'
+for pkg in e2fsprogs resize2fs parted losetup blkid block-mount; do
+	if opkg status "\$pkg" 2>/dev/null | grep -q '^Status: .* installed'; then
+		:
+	else
+		opkg install "\$pkg" >/tmp/devicecode-disk-opkg-install-"\$pkg".log 2>&1 || warn "could not install optional disk package: \$pkg"
+	fi
+done
+
+root_src="\$(awk '\$2 == "/" { print \$1; exit }' /proc/mounts)"
+root_dev="\$root_src"
+if [ "\$root_dev" = "/dev/root" ] && command -v readlink >/dev/null 2>&1; then
+	resolved="\$(readlink -f /dev/root 2>/dev/null || true)"
+	[ -n "\$resolved" ] && root_dev="\$resolved"
+fi
+if [ "\$root_dev" = "/dev/root" ]; then
+	for cand in /dev/vda2 /dev/sda2 /dev/mmcblk0p2; do
+		[ -b "\$cand" ] && { root_dev="\$cand"; break; }
+	done
+fi
+
+case "\$root_dev" in
+	/dev/mmcblk*p[0-9]*|/dev/nvme*n*p[0-9]*)
+		partnum="\${root_dev##*p}"
+		disk_dev="\${root_dev%p\$partnum}"
+		;;
+	/dev/*[0-9]*)
+		partnum="\$(printf '%s' "\$root_dev" | sed 's/.*[^0-9]\([0-9][0-9]*\)$/\1/')"
+		disk_dev="\$(printf '%s' "\$root_dev" | sed 's/[0-9][0-9]*$//')"
+		;;
+	*)
+		warn "could not identify root block device from \$root_src; skipping partition resize"
+		partnum=""
+		disk_dev=""
+		;;
+esac
+
+fix_gpt_with_parted() {
+	d="\$1"
+	if ! command -v parted >/dev/null 2>&1; then
+		return 1
+	fi
+	# Newer GNU parted: -f/--fix answers the GPT backup-table repair prompt.
+	parted -s -f "\$d" print >/tmp/devicecode-parted-fix.log 2>&1 && return 0
+	parted -s --fix "\$d" print >/tmp/devicecode-parted-fix.log 2>&1 && return 0
+	# Older builds sometimes need the explicit pseudo-tty form.  Do not rely on
+	# this succeeding; it is a best-effort fallback.
+	printf 'Fix\n' | parted ---pretend-input-tty "\$d" print >/tmp/devicecode-parted-fix.log 2>&1 && return 0
+	return 1
+}
+
+resize_partition_with_parted() {
+	d="\$1"
+	p="\$2"
+	if ! command -v parted >/dev/null 2>&1; then
+		return 1
+	fi
+	parted -s -f "\$d" resizepart "\$p" 100% >/tmp/devicecode-parted-resize.log 2>&1 && return 0
+	parted -s --fix "\$d" resizepart "\$p" 100% >/tmp/devicecode-parted-resize.log 2>&1 && return 0
+	# Some parted builds still ask for confirmation because the partition is in
+	# use.  Confirm once and continue; resize2fs below is the only filesystem step.
+	printf 'Yes\n' | parted ---pretend-input-tty "\$d" resizepart "\$p" 100% >/tmp/devicecode-parted-resize.log 2>&1 && return 0
+	return 1
+}
+
+if [ -n "\$disk_dev" ] && [ -n "\$partnum" ]; then
+	log "attempting to grow partition \$partnum on \$disk_dev for root device \$root_dev"
+	if command -v parted >/dev/null 2>&1; then
+		log 'partition table before grow:'
+		parted -s -f "\$disk_dev" print >&2 2>/tmp/devicecode-parted-print-before.log || cat /tmp/devicecode-parted-print-before.log >&2 || true
+
+		if fix_gpt_with_parted "\$disk_dev"; then
+			log 'GPT backup table check/fix completed'
+		else
+			warn 'parted could not auto-fix GPT backup table; resize may fail'
+			cat /tmp/devicecode-parted-fix.log >&2 || true
+		fi
+
+		if resize_partition_with_parted "\$disk_dev" "\$partnum"; then
+			log "partition \$partnum resize command completed"
+		else
+			warn "partition \$partnum resize command failed"
+			cat /tmp/devicecode-parted-resize.log >&2 || true
+		fi
+
+		log 'partition table after grow attempt:'
+		parted -s -f "\$disk_dev" print >&2 2>/tmp/devicecode-parted-print-after.log || cat /tmp/devicecode-parted-print-after.log >&2 || true
+	else
+		warn 'parted not available; cannot grow partition table'
+	fi
+	blockdev --rereadpt "\$disk_dev" >/dev/null 2>&1 || true
+	partprobe "\$disk_dev" >/dev/null 2>&1 || true
+fi
+
+if command -v resize2fs >/dev/null 2>&1 && [ -b "\$root_dev" ]; then
+	log "running online resize2fs on \$root_dev"
+	resize2fs "\$root_dev" >/tmp/devicecode-resize2fs-online.log 2>&1 || {
+		warn "online resize2fs failed on \$root_dev"
+		cat /tmp/devicecode-resize2fs-online.log >&2 || true
+	}
+else
+	warn "resize2fs unavailable or root device not found: \$root_dev"
+fi
+
+log 'root filesystem usage after grow:'
+show_df
+
+avail="\$(free_kb 2>/dev/null || echo 0)"
+case "\$avail" in ''|*[!0-9]*) avail=0 ;; esac
+if [ "\$avail" -lt "\$MIN_FREE_KB" ]; then
+	log "root filesystem has only \${avail}KB free after online resize; installing boot-time losetup resize helper"
+	cat >/etc/uci-defaults/80-devicecode-rootfs-resize <<'EOS'
+#!/bin/sh
+# Devicecode VM helper: OpenWrt ext4 combined images often cannot grow the
+# mounted root filesystem online.  The OpenWrt expand-root recipe performs the
+# filesystem step after a reboot and uses losetup; this helper is a small,
+# test-lane local equivalent.
+LOG=/tmp/devicecode-rootfs-resize-boot.log
+MARK=/etc/devicecode-rootfs-resized
+log() { printf '%s\n' "[devicecode-rootfs-resize] \$*" >>"\$LOG"; }
+
+free_kb() { df -k / | awk 'NR == 2 { print \$4 }'; }
+root_src="\$(awk '\$2 == "/" { print \$1; exit }' /proc/mounts)"
+root_dev="\$root_src"
+if [ "\$root_dev" = /dev/root ] && command -v readlink >/dev/null 2>&1; then
+	resolved="\$(readlink -f /dev/root 2>/dev/null || true)"
+	[ -n "\$resolved" ] && root_dev="\$resolved"
+fi
+if [ "\$root_dev" = /dev/root ]; then
+	for cand in /dev/vda2 /dev/sda2 /dev/mmcblk0p2; do
+		[ -b "\$cand" ] && { root_dev="\$cand"; break; }
+	done
+fi
+
+log "boot-time resize starting: root_src=\$root_src root_dev=\$root_dev free_before=\$(free_kb 2>/dev/null || echo unknown)"
+
+if [ -b "\$root_dev" ] && command -v resize2fs >/dev/null 2>&1; then
+	if command -v losetup >/dev/null 2>&1; then
+		loop="\$(losetup -f 2>/dev/null || true)"
+		if [ -n "\$loop" ] && losetup "\$loop" "\$root_dev" >>"\$LOG" 2>&1; then
+			log "running resize2fs -f via loop \$loop"
+			resize2fs -f "\$loop" >>"\$LOG" 2>&1 || log "resize2fs via loop failed"
+			losetup -d "\$loop" >>"\$LOG" 2>&1 || true
+		else
+			log "could not attach loop for \$root_dev; falling back to direct resize2fs"
+			resize2fs "\$root_dev" >>"\$LOG" 2>&1 || log "direct resize2fs failed"
+		fi
+	else
+		log "losetup unavailable; falling back to direct resize2fs"
+		resize2fs "\$root_dev" >>"\$LOG" 2>&1 || log "direct resize2fs failed"
+	fi
+else
+	log "resize2fs unavailable or root block device missing: \$root_dev"
+fi
+
+log "boot-time resize finished: free_after=\$(free_kb 2>/dev/null || echo unknown)"
+touch "\$MARK"
+rm -f /etc/uci-defaults/80-devicecode-rootfs-resize
+sync
+reboot -f
+EOS
+	chmod +x /etc/uci-defaults/80-devicecode-rootfs-resize
+	rm -f /etc/devicecode-rootfs-resized
+	log 'rebooting once so boot-time losetup resize helper can run'
+	sync
+	# Do the reboot from a detached background shell and return from SSH
+	# immediately.  Some BusyBox/OpenSSH combinations otherwise keep the client
+	# blocked until TCP timeout, which makes the harness look hung even though
+	# the resize helper will run successfully.
+	(sh -c 'sleep 1; reboot -f' >/dev/null 2>&1 &)
+	exit 0
+fi
+REMOTE
+remote_resize_status=$?
+set -e
+if [ "$remote_resize_status" -ne 0 ]; then
+	warn "guest-side disk grow command returned $remote_resize_status; this is expected if it rebooted during the resize sequence"
+fi
+
+# The boot-time helper above deliberately reboots again after running.  Wait for
+# the VM to return and for the marker file to appear before judging free space.
+wait_for_root_resize_marker() {
+	deadline=$(( $(date +%s) + 240 ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		"$SCRIPT_DIR/wait-ssh" >/dev/null 2>&1 || true
+		if "$SCRIPT_DIR/ssh" '[ -f /etc/devicecode-rootfs-resized ] || [ ! -f /etc/uci-defaults/80-devicecode-rootfs-resize ]' >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 3
+	done
+	return 1
+}
+
+# If the remote block rebooted, SSH may be temporarily down.  Waiting is harmless
+# when no reboot was needed.
+"$SCRIPT_DIR/wait-ssh"
+if ! wait_for_root_resize_marker; then
+	warn 'boot-time rootfs resize marker did not appear before timeout'
+fi
+"$SCRIPT_DIR/wait-ssh"
+
+# Final validation and log collection.
+"$SCRIPT_DIR/ssh" 'sh -s' <<REMOTE
+set -u
+MIN_FREE_KB='$MIN_FREE_KB'
+log() { printf '%s\n' "[openwrt-vm/disk] \$*" >&2; }
+fail() { printf '%s\n' "[openwrt-vm/disk] FAIL: \$*" >&2; exit 1; }
+free_kb() { df -k / | awk 'NR == 2 { print \$4 }'; }
+
+if [ -f /tmp/devicecode-rootfs-resize-boot.log ]; then
+	log 'boot-time rootfs resize log:'
+	cat /tmp/devicecode-rootfs-resize-boot.log >&2 || true
+fi
+log 'root filesystem usage after final grow attempt:'
+df -k / >&2 || true
+avail="\$(free_kb 2>/dev/null || echo 0)"
+case "\$avail" in ''|*[!0-9]*) avail=0 ;; esac
+if [ "\$avail" -lt "\$MIN_FREE_KB" ]; then
+	fail "root filesystem still has only \${avail}KB free; need at least \${MIN_FREE_KB}KB for build-deps.  Check /tmp/devicecode-*-resize*.log and /tmp/devicecode-parted-*.log in the VM."
+fi
+REMOTE
+
+if [ "$was_running" = "0" ]; then
+	# Leave the VM running.  Subsequent Make targets expect SSH to be available,
+	# and starting it here is harmless for callers that were about to run tests.
+	:
+fi

@@ -1,6 +1,7 @@
 -- services/hal/backends/network/providers/openwrt/mwan3.lua
 -- MWAN3 UCI and live-weight helpers for the OpenWrt network provider.
 
+local safe = require 'coxpcall'
 local unpack = _G.unpack or rawget(table, 'unpack')
 
 local M = {}
@@ -187,7 +188,7 @@ local function default_restore(content)
 	if not stdin then return nil, serr or 'failed to open iptables-restore stdin' end
 	local ok, werr = stdin:write(content or '')
 	if not ok then
-		pcall(function() stdin:close() end)
+		safe.pcall(function() stdin:close() end)
 		cmd:kill()
 		fibers.perform(cmd:run_op())
 		return nil, 'failed to write iptables-restore input: ' .. tostring(werr)

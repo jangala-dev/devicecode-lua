@@ -28,6 +28,7 @@ local sleep = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 local queue = require 'devicecode.support.queue'
 local file = require 'fibers.io.file'
+local safe = require 'coxpcall'
 
 local M = {}
 local Manager = {}
@@ -328,7 +329,7 @@ end
 
 local function revert_record(cursor, record)
 	if cursor and type(cursor.revert) == 'function' then
-		pcall(function () cursor:revert(record.config) end)
+		safe.pcall(function () cursor:revert(record.config) end)
 	end
 end
 
@@ -359,7 +360,7 @@ local function snapshot_packages(cursor, packages)
 	if not cursor then return out, nil end
 	if type(cursor.get_all) ~= 'function' then return nil, 'uci get_all unavailable; cannot snapshot for rollback' end
 	for _, pkg in ipairs(packages or {}) do
-		if type(cursor.load) == 'function' then pcall(function () cursor:load(pkg) end) end
+		if type(cursor.load) == 'function' then safe.pcall(function () cursor:load(pkg) end) end
 		out[pkg] = copy_package_table(cursor:get_all(pkg) or {})
 	end
 	return out, nil
@@ -380,7 +381,7 @@ end
 
 local function restore_package(cursor, pkg, snapshot)
 	if not cursor then return true, nil end
-	if type(cursor.revert) == 'function' then pcall(function () cursor:revert(pkg) end) end
+	if type(cursor.revert) == 'function' then safe.pcall(function () cursor:revert(pkg) end) end
 	local ok, err = delete_all_sections(cursor, pkg)
 	if ok ~= true then return nil, err end
 	for secname, rec in pairs(snapshot or {}) do
@@ -518,7 +519,7 @@ local function apply_with_cursor(cursor, record)
 	if not cursor then
 		return true, nil -- explicit fake/no-uci mode for tests and non-OpenWrt hosts.
 	end
-	if type(cursor.load) == 'function' then pcall(function () cursor:load(record.config) end) end
+	if type(cursor.load) == 'function' then safe.pcall(function () cursor:load(record.config) end) end
 	if record.replace_package == true then
 		local ok, err = delete_all_sections(cursor, record.config)
 		if ok ~= true then return nil, err end
@@ -969,7 +970,7 @@ function Manager:_ensure_packages(packages, trace)
 			return p
 		end)())
 		if ok ~= true then return nil, err end
-		if self._cursor and type(self._cursor.load) == 'function' then pcall(function () self._cursor:load(pkg) end) end
+		if self._cursor and type(self._cursor.load) == 'function' then safe.pcall(function () self._cursor:load(pkg) end) end
 	end
 	log_manager(self, 'debug', (function ()
 		local p = trace_fields(trace)
@@ -1365,7 +1366,7 @@ function Manager:submit_op(record, opts)
 		end
 		admitted_flag = true
 		if type(opts.on_admitted) == 'function' then
-			local ok_admit, admit_err = pcall(opts.on_admitted)
+			local ok_admit, admit_err = safe.pcall(opts.on_admitted)
 			if ok_admit ~= true then return false, tostring(admit_err or 'on_admitted failed'), true end
 		end
 		local result = fibers.perform(reply_rx:recv_op())

@@ -5,6 +5,7 @@
 -- owns no resources, and has no service-side effects.
 
 local tablex = require 'shared.table'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -152,7 +153,7 @@ function M.component_status(rec)
 	local base = base_component_status(rec)
 	local mod = type(rec) == 'table' and rec.module or nil
 	if type(mod) == 'table' and type(mod.availability) == 'function' then
-		local ok, refined = pcall(mod.availability, base, rec)
+		local ok, refined = safe.pcall(mod.availability, base, rec)
 		if ok and type(refined) == 'table' then
 			return set_status(base, refined)
 		elseif not ok then

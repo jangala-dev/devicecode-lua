@@ -8,6 +8,7 @@ local op     = require 'fibers.op'
 
 local model  = require 'services.update.model'
 local topics = require 'services.update.topics'
+local safe = require 'coxpcall'
 
 local M = {}
 local Backend = {}
@@ -96,7 +97,7 @@ end
 
 local function describe_artifact(artifact)
 	if type(artifact) == 'table' and type(artifact.describe) == 'function' then
-		local ok, rec = pcall(function () return artifact:describe() end)
+		local ok, rec = safe.pcall(function () return artifact:describe() end)
 		if ok and type(rec) == 'table' then return rec end
 	end
 	return type(artifact) == 'table' and artifact or nil

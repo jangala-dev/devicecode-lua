@@ -8,6 +8,7 @@
 -- in guards, because that would hide blocking provider calls behind an Op shape.
 
 local op = require 'fibers.op'
+local safe = require 'coxpcall'
 
 local M = {}
 
@@ -26,7 +27,7 @@ local function call_op_method(obj, method, owner, ...)
 	local fn, err = require_op_method(obj, method, owner)
 	if not fn then return op.always(nil, err) end
 
-	local ok, ev_or_err = pcall(function (...)
+	local ok, ev_or_err = safe.pcall(function (...)
 		return fn(obj, ...)
 	end, ...)
 
@@ -57,7 +58,7 @@ function M.abort_now(handle, reason)
 		return nil, 'artifact ingest handle must expose immediate abort_now'
 	end
 
-	local ok, a, b = pcall(function ()
+	local ok, a, b = safe.pcall(function ()
 		return handle:abort_now(reason)
 	end)
 	if not ok then
