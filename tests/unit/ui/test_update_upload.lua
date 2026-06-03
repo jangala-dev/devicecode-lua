@@ -78,6 +78,145 @@ function tests.test_committed_artifact_is_not_aborted_when_update_job_create_fai
 	end)
 end
 
+function tests.test_upload_discards_created_job_when_auto_start_fails()
+	fibers.run(function ()
+		local handle = {
+			append_chunk_op = function () return fibers.always(true, nil) end,
+			commit_op = function () return fibers.always('artifact-3', nil) end,
+			abort_now = function () error('abort must not be called after commit') end,
+		}
+		local calls = {}
+		local conn = {
+			call_op = function (_, topic, payload)
+				local method = topic[5]
+				calls[#calls + 1] = { method = method, payload = payload }
+				if method == 'create-job' then return fibers.always({ job_id = 'job-1' }, nil) end
+				if method == 'start-job' then return fibers.always(nil, 'slot_busy') end
+				if method == 'discard-job' then return fibers.always({ ok = true }, nil) end
+				return fibers.always(nil, 'unexpected_method:' .. tostring(method))
+			end,
+		}
+
+		local st, _, primary = fibers.perform(upload.run_op({
+			body_stream = body_from_chunks({ 'abc' }),
+		}, {
+			ingest = ingest_client(handle),
+			create_job = true,
+			start_job = true,
+			conn = conn,
+		}))
+
+		assert_eq(st, 'failed')
+		assert_eq(primary, 'slot_busy')
+		assert_eq(#calls, 3)
+		assert_eq(calls[1].method, 'create-job')
+		assert_eq(calls[2].method, 'start-job')
+		assert_eq(calls[3].method, 'discard-job')
+		assert_eq(calls[3].payload.job_id, 'job-1')
+		assert_eq(calls[3].payload.reason, 'upload_start_failed:slot_busy')
+	end)
+end
+
+function tests.test_upload_preserves_start_error_when_discard_cleanup_fails()
+	fibers.run(function ()
+		local handle = {
+			append_chunk_op = function () return fibers.always(true, nil) end,
+			commit_op = function () return fibers.always('artifact-4', nil) end,
+			abort_now = function () error('abort must not be called after commit') end,
+		}
+		local conn = {
+			call_op = function (_, topic)
+				local method = topic[5]
+				if method == 'create-job' then return fibers.always({ job_id = 'job-2' }, nil) end
+				if method == 'start-job' then return fibers.always(nil, 'slot_busy') end
+				if method == 'discard-job' then return fibers.always(nil, 'discard_denied') end
+				return fibers.always(nil, 'unexpected_method:' .. tostring(method))
+			end,
+		}
+
+		local st, _, primary = fibers.perform(upload.run_op({
+			body_stream = body_from_chunks({ 'abc' }),
+		}, {
+			ingest = ingest_client(handle),
+			create_job = true,
+			start_job = true,
+			conn = conn,
+		}))
+
+		assert_eq(st, 'failed')
+		assert_eq(primary, 'slot_busy; discard_job_failed:discard_denied')
+	end)
+end
+
+function tests.test_upload_does_not_discard_created_job_on_ambiguous_start_timeout()
+	fibers.run(function ()
+		local handle = {
+			append_chunk_op = function () return fibers.always(true, nil) end,
+			commit_op = function () return fibers.always('artifact-timeout-start', nil) end,
+			abort_now = function () error('abort must not be called after commit') end
+		}
+		local calls = {}
+		local conn = {
+			call_op = function (_, topic, payload)
+				local method = topic[5]
+				calls[#calls + 1] = { method = method, payload = payload }
+				if method == 'create-job' then return fibers.always({ job_id = 'job-timeout-start' }, nil) end
+				if method == 'start-job' then return fibers.always(nil, 'timeout') end
+				if method == 'discard-job' then return fibers.always({ ok = true }, nil) end
+				return fibers.always(nil, 'unexpected_method:' .. tostring(method))
+			end,
+		}
+
+		local st, _, primary = fibers.perform(upload.run_op({
+			body_stream = body_from_chunks({ 'abc' }),
+		}, {
+			ingest = ingest_client(handle),
+			create_job = true,
+			start_job = true,
+			conn = conn,
+		}))
+
+		assert_eq(st, 'failed')
+		assert_eq(primary, 'timeout')
+		assert_eq(#calls, 2)
+		assert_eq(calls[1].method, 'create-job')
+		assert_eq(calls[2].method, 'start-job')
+	end)
+end
+
+function tests.test_upload_auto_start_success_does_not_discard_job()
+	fibers.run(function ()
+		local handle = {
+			append_chunk_op = function () return fibers.always(true, nil) end,
+			commit_op = function () return fibers.always('artifact-5', nil) end,
+			abort_now = function () error('abort must not be called after commit') end,
+		}
+		local discard_called = false
+		local conn = {
+			call_op = function (_, topic)
+				local method = topic[5]
+				if method == 'create-job' then return fibers.always({ job_id = 'job-3' }, nil) end
+				if method == 'start-job' then return fibers.always({ ok = true, accepted = true }, nil) end
+				if method == 'discard-job' then discard_called = true; return fibers.always({ ok = true }, nil) end
+				return fibers.always(nil, 'unexpected_method:' .. tostring(method))
+			end,
+		}
+
+		local st, _, result = fibers.perform(upload.run_op({
+			body_stream = body_from_chunks({ 'abc' }),
+		}, {
+			ingest = ingest_client(handle),
+			create_job = true,
+			start_job = true,
+			conn = conn,
+		}))
+
+		assert_eq(st, 'ok')
+		assert_eq(result.artifact_id, 'artifact-5')
+		assert_eq(discard_called, false)
+	end)
+end
+
 function tests.test_upload_disconnects_owned_update_connection_after_success()
 	fibers.run(function ()
 		local handle = {

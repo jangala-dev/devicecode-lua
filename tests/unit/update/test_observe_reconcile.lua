@@ -379,6 +379,67 @@ function tests.test_commit_worker_rejected_backend_commit_does_not_persist_await
 	end)
 end
 
+function tests.test_commit_worker_persists_ambiguous_backend_commit_acceptance()
+	fibers.run(function (scope)
+		local accepted_payload
+		local jobs = {}
+		function jobs:admit_transition(cmd)
+			if cmd.kind == 'begin_commit_attempt' then
+				return {
+					outcome_op = function ()
+						return op.always({
+							status = 'persisted',
+							commit_token = cmd.commit_token,
+							commit_policy = cmd.commit_policy,
+						}, nil)
+					end
+				}, nil
+			end
+			if cmd.kind == 'commit_accepted' then
+				accepted_payload = cmd.accepted
+				return {
+					outcome_op = function ()
+						return op.always({
+							status = 'persisted',
+							job = {
+								job_id = cmd.job_id,
+								component = 'mcu',
+								state = 'awaiting_return',
+							},
+						}, nil)
+					end
+				}, nil
+			end
+			error('unexpected transition '..tostring(cmd.kind), 0)
+		end
+		local backend = {}
+		function backend:commit_capabilities()
+			return { policy = 'idempotent_by_token' }
+		end
+		function backend:commit_op(_, ctx)
+			return op.always({
+				accepted = true,
+				ambiguous = true,
+				reason = 'timeout',
+				token = ctx.commit_token,
+			}, nil)
+		end
+
+		local result = active_job.commit(scope, {
+			backend = backend,
+			jobs = jobs,
+			lease = { token = 'active-token', generation = 1 },
+			job = { job_id = 'j1', component = 'mcu', state = 'committing', active_token = 'active-token' },
+		})
+
+		assert_eq(result.tag, 'commit_started')
+		assert_true(result.accepted)
+		assert_true(result.commit.ambiguous)
+		assert_eq(accepted_payload.ambiguous, true)
+		assert_eq(accepted_payload.reason, 'timeout')
+	end)
+end
+
 function tests.test_commit_worker_rejects_backend_without_commit_policy()
 	fibers.run(function (scope)
 		local backend = { commit_op = function () return op.always({ accepted = true }, nil) end }

@@ -110,6 +110,8 @@ local function update_model_state(self, state, reason)
 		if reason ~= nil then extra.reason = reason end
 		if snapshot and snapshot.pending ~= nil then extra.pending = snapshot.pending end
 		if snapshot and snapshot.last_failure ~= nil then extra.last_failure = snapshot.last_failure end
+		if snapshot and snapshot.last_warning ~= nil then extra.last_warning = snapshot.last_warning end
+		if snapshot and snapshot.job_runtime ~= nil then extra.job_runtime = snapshot.job_runtime end
 		extra.dependencies = self._deps:snapshot()
 		self._svc:status(state, extra)
 	end
@@ -255,6 +257,12 @@ local function event_failure_fields(ev)
 		plan_kind = ev.plan_kind,
 		store_op = ev.store_op,
 		store_err = ev.store_err,
+		retry_attempts = ev.retry_attempts,
+		retry_delay = ev.retry_delay,
+		retry_mode = ev.retry_mode,
+		first_failed_at = ev.first_failed_at,
+		last_attempt_at = ev.last_attempt_at,
+		dependency = ev.dependency,
 	}
 end
 
@@ -280,6 +288,36 @@ fail_update_service = function(self, source, reason, ev)
 		return s
 	end)
 	update_model_state(self, 'failed', reason)
+end
+
+local function make_last_warning(_, source, reason, ev)
+	local rec = event_failure_fields(ev)
+	rec.source = source or 'unknown'
+	rec.reason = tostring(reason or 'warning')
+	return rec
+end
+
+local function persistence_warning(persistence)
+	persistence = type(persistence) == 'table' and persistence or {}
+	local reason = persistence.reason or persistence.store_err or 'update_persistence_pending'
+	return make_last_warning(nil, 'job_runtime', reason, {
+		kind = 'job_transition_retrying',
+		status = 'retrying',
+		primary = persistence.reason or persistence.store_err,
+		transition_id = persistence.transition_id,
+		transition = persistence.transition,
+		phase = persistence.phase,
+		token = persistence.token,
+		plan_kind = persistence.plan_kind,
+		store_op = persistence.store_op,
+		store_err = persistence.store_err,
+		retry_attempts = persistence.retry_attempts,
+		retry_delay = persistence.retry_delay,
+		retry_mode = persistence.retry_mode,
+		first_failed_at = persistence.first_failed_at,
+		last_attempt_at = persistence.last_attempt_at,
+		dependency = persistence.dependency,
+	})
 end
 
 local function route_generation_event(self, ev, label)
@@ -517,6 +555,16 @@ local function method_dependency_reason(self, method)
 	return nil
 end
 
+local function is_read_only_manager_method(method)
+	return method == 'status' or method == 'list-jobs' or method == 'get-job'
+end
+
+local function update_persistence_pending(self)
+	return self._jobs ~= nil
+		and type(self._jobs.persistence_pending) == 'function'
+		and self._jobs:persistence_pending() == true
+end
+
 local function reply_shell_manager_request(self, req, method)
 	if method == 'status' then
 		reply_manager_request(req, { ok = true, snapshot = self._model:snapshot() }, 'status_reply_failed')
@@ -560,6 +608,11 @@ local function route_manager_request(self, req, method)
 		return
 	end
 
+	if not is_read_only_manager_method(method) and update_persistence_pending(self) then
+		fail_manager_request(req, 'update_persistence_pending')
+		return
+	end
+
 	-- Read-only job inspection is safe for the service shell to answer directly
 	-- while no generation has been admitted, provided the durable job runtime is
 	-- ready.  Mutating work belongs to the active generation.
@@ -598,10 +651,46 @@ end
 
 local function update_service_jobs_projection(self)
 	if not self._jobs then return end
+	local runtime = self._jobs:model_snapshot()
+	local persistence = runtime and runtime.persistence or nil
 	self._model:update(function (s)
-		s.jobs = self._jobs:snapshot()
+		s.jobs = (runtime and runtime.jobs) or self._jobs:snapshot()
+		s.job_runtime = runtime and {
+			ready = runtime.ready == true,
+			transitions = copy(runtime.transitions),
+			persistence = copy(runtime.persistence),
+		} or nil
 		return s
 	end)
+	return persistence
+end
+
+local function apply_job_persistence_status(self, persistence)
+	if persistence ~= nil then
+		local warning = persistence_warning(persistence)
+		self._last_warning = warning
+		self._model:update(function (s)
+			s.pending = s.pending or {}
+			s.pending.persistence = copy(persistence)
+			s.last_warning = copy(warning)
+			return s
+		end)
+		update_model_state(self, 'degraded', 'update_persistence_pending')
+		return true
+	end
+
+	local snapshot = self._model:snapshot()
+	local was_pending = snapshot and snapshot.reason == 'update_persistence_pending'
+	self._last_warning = nil
+	self._model:update(function (s)
+		if s.pending then s.pending.persistence = nil end
+		s.last_warning = nil
+		return s
+	end)
+	if was_pending then
+		update_model_state(self, 'running')
+	end
+	return false
 end
 
 local function consider_active_jobs(self)
@@ -624,14 +713,16 @@ local function handle_job_runtime_changed(self, ev)
 	self._jobs_seen = ev.version
 	if self._jobs and self._jobs:ready() and not self._job_runtime_ready then
 		self._job_runtime_ready = true
-		update_service_jobs_projection(self)
+		local persistence = update_service_jobs_projection(self)
+		if apply_job_persistence_status(self, persistence) then return end
 		local ok, err = reconcile_runtime_components(self, 'job_runtime_ready')
 		if ok ~= true then
 			fail_update_service(self, 'runtime_reconcile', err or 'runtime_dependents_start_failed', ev)
 			error(err or 'runtime_dependents_start_failed', 0)
 		end
 	else
-		update_service_jobs_projection(self)
+		local persistence = update_service_jobs_projection(self)
+		if apply_job_persistence_status(self, persistence) then return end
 	end
 	if self._current_generation then
 		apply_generation_snapshot(self, self._current_generation.last_snapshot or {
@@ -771,7 +862,11 @@ local function reduce_event(self, ev)
 			fail_update_service(self, 'job_runtime', reason, ev)
 			error('update job runtime failed: ' .. tostring(reason), 0)
 		end
-		if ev.status == 'cancelled' and (self._suppress_dependents_reason or ev.primary == 'job_store_unavailable' or ev.primary == 'artifact_store_unavailable') then
+		if ev.status == 'cancelled'
+			and (self._suppress_dependents_reason
+				or ev.primary == 'job_store_unavailable'
+				or ev.primary == 'artifact_store_unavailable')
+		then
 			return
 		end
 		if not self._complete then
@@ -781,13 +876,27 @@ local function reduce_event(self, ev)
 	end
 
 	if ev.kind == 'component_done' and ev.component == 'active_runtime' then
-		if ev.status == 'cancelled' and (self._suppress_dependents_reason or ev.primary == 'job_store_unavailable' or ev.primary == 'artifact_store_unavailable') then
+		if ev.status == 'cancelled'
+			and (self._suppress_dependents_reason
+				or ev.primary == 'job_store_unavailable'
+				or ev.primary == 'artifact_store_unavailable')
+		then
 			return
 		end
+
 		self._active_component = nil
 		if ev.status == 'failed' then
 			local reason = ev.primary or 'active_runtime_failed'
-			if self._artifact_store_dependency_required and classify_dependency_route_missing(self, 'artifact_store', ev, reason) then
+			if self._deps:classify_call_failure('job_store', ev, reason) == 'route_missing' then
+				stop_runtime_dependents(self, 'job_store_unavailable')
+				stop_job_runtime(self, 'job_store_unavailable')
+				update_dependencies_projection(self)
+				set_waiting_for_job_store(self, 'job_store_unavailable')
+				return
+			end
+			if self._artifact_store_dependency_required
+				and classify_dependency_route_missing(self, 'artifact_store', ev, reason)
+			then
 				handle_artifact_route_missing(self, reason)
 				return
 			end
@@ -801,7 +910,11 @@ local function reduce_event(self, ev)
 	end
 
 	if ev.kind == 'component_done' and ev.component == 'component_watch' then
-		if ev.status == 'cancelled' and (self._suppress_dependents_reason or ev.primary == 'job_store_unavailable' or ev.primary == 'artifact_store_unavailable') then
+		if ev.status == 'cancelled'
+			and (self._suppress_dependents_reason
+				or ev.primary == 'job_store_unavailable'
+				or ev.primary == 'artifact_store_unavailable')
+		then
 			return
 		end
 		self._component_watch = nil
@@ -1163,6 +1276,7 @@ local function ensure_job_runtime(self, reason)
 		initial_jobs = params.initial_jobs,
 		done_tx = self._done_tx,
 		queue_len = params.job_runtime_queue_len,
+		persistence_retry_backoff = params.persistence_retry_backoff,
 	})
 	if not jobs then
 		return nil, jobs_err or 'update_job_repository_start_failed'

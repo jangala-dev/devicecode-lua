@@ -168,6 +168,7 @@ local function active_matches(state, ev)
 	return a ~= nil
 		and a.request_id == ev.request_id
 		and a.request_generation == ev.request_generation
+		and a.xfer_id == ev.xfer_id
 		and same_ctx(a.session, ev_ctx(ev))
 end
 
@@ -329,6 +330,7 @@ local function attempt_identity(req)
 		request_id = req_id(req),
 		request_generation = req_gen(req),
 		session = ctx(req.session),
+		xfer_id = req.xfer_id,
 	}
 end
 
@@ -436,6 +438,7 @@ local function receive_attempt_identity(req)
 		request_id = req_id(req),
 		request_generation = req_gen(req),
 		session = ctx(req.session),
+		xfer_id = req.xfer_id,
 	}
 end
 
@@ -627,20 +630,21 @@ function SlotLease:start_attempt(request_scope, req)
 		outcome = function () return raw:outcome() end,
 		identity = function () return raw:identity() end,
 
-		outcome_op = function ()
-			return local_rx:recv_op():wrap(function (ev, recv_err)
-				if ev ~= nil then return ev end
+			outcome_op = function ()
+				return local_rx:recv_op():wrap(function (ev, recv_err)
+					if ev ~= nil then return ev end
 
-				return {
-					kind = 'transfer_attempt_done',
-					request_id = attempt_req.request_id,
-					request_generation = attempt_req.request_generation,
-					session = ctx(attempt_req.session),
-					status = 'failed',
-					primary = recv_err or 'transfer attempt observer closed',
-				}
-			end)
-		end,
+					return {
+						kind = 'transfer_attempt_done',
+						request_id = attempt_req.request_id,
+						request_generation = attempt_req.request_generation,
+						session = ctx(attempt_req.session),
+						xfer_id = attempt_req.xfer_id,
+						status = 'failed',
+						primary = recv_err or 'transfer attempt observer closed',
+					}
+				end)
+			end,
 	}, nil
 end
 
@@ -760,6 +764,7 @@ local function active_done(self, reason, session)
 			request_id = active.request_id,
 			request_generation = active.request_generation,
 			session = ctx(active.session),
+			xfer_id = active.xfer_id,
 			status = 'cancelled',
 			primary = reason or 'session_dropped',
 		}

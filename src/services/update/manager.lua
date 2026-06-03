@@ -148,6 +148,21 @@ local function reject_if_jobs_not_ready(ctx, req)
 	return true
 end
 
+local function reject_if_persistence_pending(ctx, req)
+	if ctx.jobs
+		and type(ctx.jobs.persistence_pending) == 'function'
+		and ctx.jobs:persistence_pending() == true
+	then
+		fail_request(req, 'job_persistence_pending')
+		return true
+	end
+	return false
+end
+
+local function reject_if_jobs_blocked(ctx, req)
+	return reject_if_jobs_not_ready(ctx, req) or reject_if_persistence_pending(ctx, req)
+end
+
 local function is_ingest_method(method)
 	return method == 'ingest_create'
 		or method == 'ingest_append'
@@ -156,7 +171,7 @@ local function is_ingest_method(method)
 end
 
 local function handle_create(ctx, req)
-	if reject_if_jobs_not_ready(ctx, req) then return end
+	if reject_if_jobs_blocked(ctx, req) then return end
 	return start_scoped_request(ctx, req, 'create_job', function (work_scope, owner)
 		return manager_requests.create_job(work_scope, {
 			request_owner = owner,
@@ -169,7 +184,7 @@ local function handle_create(ctx, req)
 end
 
 local function handle_start(ctx, req, payload)
-	if reject_if_jobs_not_ready(ctx, req) then return end
+	if reject_if_jobs_blocked(ctx, req) then return end
 	payload = type(payload) == 'table' and payload or {}
 	local job_id = payload.job_id
 	local job = ctx.jobs:get(job_id)
@@ -208,7 +223,7 @@ local function handle_start(ctx, req, payload)
 end
 
 local function handle_patch(ctx, req, payload, method, patch)
-	if reject_if_jobs_not_ready(ctx, req) then return end
+	if reject_if_jobs_blocked(ctx, req) then return end
 	payload = type(payload) == 'table' and payload or {}
 	local job_id = payload.job_id
 	if type(job_id) ~= 'string' or job_id == '' then
@@ -255,7 +270,7 @@ local function handle_retry(ctx, req, payload)
 end
 
 local function handle_discard(ctx, req, payload)
-	if reject_if_jobs_not_ready(ctx, req) then return end
+	if reject_if_jobs_blocked(ctx, req) then return end
 	payload = type(payload) == 'table' and payload or {}
 	local job_id = payload.job_id
 	if type(job_id) ~= 'string' or job_id == '' then
@@ -269,6 +284,7 @@ local function handle_discard(ctx, req, payload)
 			jobs = ctx.jobs,
 			job_id = job_id,
 			generation = ctx.generation,
+			reason = payload.reason,
 		})
 	end)
 end

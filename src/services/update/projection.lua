@@ -78,6 +78,9 @@ function M.service_state(snapshot)
 		jobs       = copy(snapshot.jobs or { count = 0, by_id = {} }),
 		ingest     = copy(snapshot.ingest or { count = 0, by_id = {} }),
 		pending    = copy(snapshot.pending),
+		last_failure = copy(snapshot.last_failure),
+		last_warning = copy(snapshot.last_warning),
+		job_runtime = copy(snapshot.job_runtime),
 		dependencies = copy(snapshot.dependencies),
 		publisher  = copy(snapshot.publisher),
 	}

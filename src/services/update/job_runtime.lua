@@ -12,6 +12,7 @@ local fibers      = require 'fibers'
 local op          = require 'fibers.op'
 local cond        = require 'fibers.cond'
 local mailbox     = require 'fibers.mailbox'
+local sleep       = require 'fibers.sleep'
 local scoped_work = require 'devicecode.support.scoped_work'
 local queue       = require 'devicecode.support.queue'
 
@@ -22,6 +23,7 @@ local active_policy = require 'services.update.active_policy'
 local M = {}
 
 local DEFAULT_QUEUE = 32
+local DEFAULT_PERSISTENCE_RETRY_BACKOFF = { 0.25, 0.5, 1.0, 2.0, 5.0 }
 
 local Runtime = {}
 Runtime.__index = Runtime
@@ -80,6 +82,13 @@ local function transition_record(req, state, details)
 	base.plan_kind = details.plan_kind
 	base.store_op = details.store_op
 	base.store_err = details.store_err
+	base.retry_attempts = details.retry_attempts
+	base.retry_delay = details.retry_delay
+	base.retry_mode = details.retry_mode
+	base.first_failed_at = details.first_failed_at
+	base.last_attempt_at = details.last_attempt_at
+	base.dependency = details.dependency
+	base.persistence_pending = details.persistence_pending == true or nil
 	if state == 'admitted'
 		or state == 'persisting'
 		or state == 'persisted'
@@ -157,6 +166,13 @@ local function transition_outcome_from_record(rec, value)
 	out.plan_kind = out.plan_kind or rec.plan_kind
 	out.store_op = out.store_op or rec.store_op
 	out.store_err = out.store_err or rec.store_err
+	out.retry_attempts = out.retry_attempts or rec.retry_attempts
+	out.retry_delay = out.retry_delay or rec.retry_delay
+	out.retry_mode = out.retry_mode or rec.retry_mode
+	out.first_failed_at = out.first_failed_at or rec.first_failed_at
+	out.last_attempt_at = out.last_attempt_at or rec.last_attempt_at
+	out.dependency = out.dependency or rec.dependency
+	out.persistence_pending = out.persistence_pending or rec.persistence_pending
 	return out
 end
 
@@ -196,15 +212,18 @@ end
 local function runtime_snapshot(self_or_jobs, ready, adoption)
 	local jobs = self_or_jobs
 	local transitions
+	local persistence
 	if type(self_or_jobs) == 'table' and self_or_jobs._jobs ~= nil then
 		jobs = self_or_jobs._jobs
 		transitions = transition_snapshot(self_or_jobs)
+		persistence = copy(self_or_jobs._persistence)
 	end
 	return {
 		ready = not not ready,
 		jobs = repo_mod.snapshot(jobs),
 		adoption = copy(adoption or {}),
 		transitions = transitions,
+		persistence = persistence,
 		count = count_keys(jobs and jobs.jobs or {}),
 	}
 end
@@ -284,6 +303,61 @@ local function store_delete_op(store, job_id)
 		return op.always(true, nil)
 	end
 	return store:delete_job_op(job_id)
+end
+
+local RETRYABLE_STORE_ERRORS = {
+	control_store_put_timeout = true,
+	control_store_get_timeout = true,
+	control_store_list_timeout = true,
+	control_store_delete_timeout = true,
+	liveness_timeout = true,
+}
+
+local function strip_job_store_prefix(reason)
+	reason = tostring(reason or '')
+	return reason:match('^job_store_[^:]+_failed:(.+)$') or reason
+end
+
+local function is_retryable_store_error(reason)
+	local inner = strip_job_store_prefix(reason)
+	if RETRYABLE_STORE_ERRORS[inner] then return true end
+	if inner:match('^control_store_[%w_]+_timeout$') then return true end
+	if inner:find('liveness_timeout', 1, true) then return true end
+	return false
+end
+
+local function store_op_for_plan(plan)
+	if plan.kind == 'save_job' then return 'save_job_op' end
+	if plan.kind == 'delete_job' then return 'delete_job_op' end
+	return nil
+end
+
+local function retry_delay_for(self, attempt)
+	local configured = self._params and self._params.persistence_retry_backoff
+	if type(configured) == 'function' then
+		local delay = configured(attempt)
+		if type(delay) == 'number' and delay >= 0 then return delay end
+	elseif type(configured) == 'table' then
+		local delay = configured[attempt] or configured[#configured]
+		if type(delay) == 'number' and delay >= 0 then return delay end
+	elseif type(configured) == 'number' and configured >= 0 then
+		return configured
+	end
+	return DEFAULT_PERSISTENCE_RETRY_BACKOFF[attempt]
+		or DEFAULT_PERSISTENCE_RETRY_BACKOFF[#DEFAULT_PERSISTENCE_RETRY_BACKOFF]
+end
+
+local function persist_plan_once(self, plan)
+	if plan.kind == 'save_job' then
+		local ok, serr = fibers.perform(store_save_op(self._store, public_job(plan.job)))
+		if ok ~= true then return nil, 'job_store_save_failed:' .. tostring(serr or 'job_save_failed') end
+	elseif plan.kind == 'delete_job' then
+		local ok, derr = fibers.perform(store_delete_op(self._store, plan.job_id))
+		if ok ~= true then return nil, 'job_store_delete_failed:' .. tostring(derr or 'job_delete_failed') end
+	else
+		return nil, 'unsupported_plan_kind'
+	end
+	return true, nil
 end
 
 local function sorted_job_ids(jobs)
@@ -516,6 +590,19 @@ local function durable_active_owner(jobs)
 		end
 	end
 	return nil, nil
+end
+
+local function job_has_active_ownership(job)
+	return job ~= nil
+		and (job.active_token ~= nil
+			or type(job.active_intent) == 'table'
+			or type(job.active) == 'table')
+end
+
+local function job_is_default_discardable(job)
+	return job ~= nil
+		and job.state == 'created'
+		and not job_has_active_ownership(job)
 end
 
 local function compute_create(self, cmd)
@@ -884,6 +971,9 @@ end
 local function compute_discard(self, cmd)
 	local current = cmd.job_id and self._jobs.jobs[cmd.job_id] or nil
 	if not current then return nil, 'not_found' end
+	if cmd.force ~= true and not job_is_default_discardable(current) then
+		return nil, 'job_not_discardable'
+	end
 	return {
 		kind = 'delete_job',
 		transition = cmd.kind,
@@ -943,13 +1033,10 @@ local function apply_plan(self, plan)
 	return true, nil
 end
 
+local persistence_record_from_event
+
 local function start_transition_worker(self, req, plan)
-	local store_op
-	if plan.kind == 'save_job' then
-		store_op = 'save_job_op'
-	elseif plan.kind == 'delete_job' then
-		store_op = 'delete_job_op'
-	end
+	local store_op = store_op_for_plan(plan)
 	local identity = {
 		kind = 'job_transition_done',
 		service_id = self._service_id,
@@ -970,18 +1057,51 @@ local function start_transition_worker(self, req, plan)
 		identity = identity,
 
 		run = function ()
-			if plan.kind == 'save_job' then
-				local ok, serr = fibers.perform(store_save_op(self._store, public_job(plan.job)))
-				if ok ~= true then
-					error('job_store_save_failed:' .. tostring(serr or 'job_save_failed'), 0)
+			local attempts = 0
+			local first_failed_at
+			while true do
+				local persisted, perr = persist_plan_once(self, plan)
+				if persisted == true then
+					break
 				end
-			elseif plan.kind == 'delete_job' then
-				local ok, derr = fibers.perform(store_delete_op(self._store, plan.job_id))
-				if ok ~= true then
-					error('job_store_delete_failed:' .. tostring(derr or 'job_delete_failed'), 0)
+
+				if not is_retryable_store_error(perr) then
+					error(perr or 'job_transition_persist_failed', 0)
 				end
-			else
-				error('unsupported_plan_kind', 0)
+
+				attempts = attempts + 1
+				local attempt_at = fibers.now()
+				first_failed_at = first_failed_at or attempt_at
+				local retry_delay = retry_delay_for(self, attempts)
+				local retry_ev = {
+					kind = 'job_transition_retrying',
+					service_id = self._service_id,
+					transition_id = req.id,
+					transition = plan.transition,
+					job_id = plan.job_id,
+					generation = req.cmd and req.cmd.generation,
+					phase = plan.phase or (req.cmd and req.cmd.phase),
+					token = plan.token or (req.cmd and req.cmd.token),
+					plan_kind = plan.kind,
+					store_op = store_op,
+					store_err = perr,
+					retry_attempts = attempts,
+					retry_delay = retry_delay,
+					retry_mode = 'indefinite',
+					first_failed_at = first_failed_at,
+					last_attempt_at = attempt_at,
+					dependency = 'job_store',
+				}
+				self._persistence = persistence_record_from_event(retry_ev)
+				local ok_retry, retry_err = queue.try_admit_required(
+					self._done_tx,
+					retry_ev,
+					'job_transition_retry_report_failed'
+				)
+				if ok_retry ~= true then
+					error(retry_err or 'job_transition_retry_report_failed', 0)
+				end
+				fibers.perform(sleep.sleep_op(retry_delay))
 			end
 
 			return {
@@ -1007,6 +1127,53 @@ local function start_transition_worker(self, req, plan)
 end
 
 local record_transition_outcome
+
+function persistence_record_from_event(ev)
+	return {
+		pending = true,
+		source = 'job_runtime',
+		reason = ev.store_err,
+		transition_id = ev.transition_id,
+		transition = ev.transition,
+		job_id = ev.job_id,
+		generation = ev.generation,
+		phase = ev.phase,
+		token = ev.token,
+		plan_kind = ev.plan_kind,
+		store_op = ev.store_op,
+		store_err = ev.store_err,
+		retry_attempts = ev.retry_attempts,
+		retry_delay = ev.retry_delay,
+		retry_mode = ev.retry_mode,
+		first_failed_at = ev.first_failed_at,
+		last_attempt_at = ev.last_attempt_at,
+		dependency = ev.dependency,
+	}
+end
+
+local function handle_transition_retrying(self, ev)
+	local inflight = self._inflight
+	if not inflight or ev.transition_id ~= inflight.request.id then
+		return
+	end
+
+	transition_set(self, inflight.request, 'persisting', {
+		sequence = inflight.request.sequence,
+		plan_kind = inflight.plan.kind,
+		store_op = ev.store_op,
+		store_err = ev.store_err,
+		error = ev.store_err,
+		retry_attempts = ev.retry_attempts,
+		retry_delay = ev.retry_delay,
+		retry_mode = ev.retry_mode,
+		first_failed_at = ev.first_failed_at,
+		last_attempt_at = ev.last_attempt_at,
+		dependency = ev.dependency,
+		persistence_pending = true,
+	})
+	self._persistence = persistence_record_from_event(ev)
+	refresh_model(self)
+end
 
 local function start_next(self)
 	if self._inflight ~= nil then return true end
@@ -1034,12 +1201,14 @@ local function start_next(self)
 			transition_set(self, req, 'admitted', {
 				sequence = req.sequence,
 				plan_kind = plan.kind,
+				store_op = store_op_for_plan(plan),
 			})
 			refresh_model(self)
 
 			transition_set(self, req, 'persisting', {
 				sequence = req.sequence,
 				plan_kind = plan.kind,
+				store_op = store_op_for_plan(plan),
 			})
 			refresh_model(self)
 
@@ -1118,12 +1287,18 @@ function record_transition_outcome(self, outcome)
 end
 
 local function handle_transition_done(self, ev)
+	if ev.kind == 'job_transition_retrying' then
+		handle_transition_retrying(self, ev)
+		return
+	end
+
 	local inflight = self._inflight
 	if not inflight or ev.transition_id ~= inflight.request.id then
 		return
 	end
 
 	self._inflight = nil
+	self._persistence = nil
 
 	local outcome
 	local rec
@@ -1285,6 +1460,14 @@ function Runtime:transition_snapshot()
 	return transition_snapshot(self)
 end
 
+function Runtime:persistence_pending()
+	return self._persistence ~= nil
+end
+
+function Runtime:persistence_snapshot()
+	return copy(self._persistence)
+end
+
 function Runtime:transition_outcome(transition_id)
 	local out = self._transition_outcomes and self._transition_outcomes[transition_id] or nil
 	return out and copy(out) or nil
@@ -1313,6 +1496,10 @@ function Runtime:admit_transition(cmd)
 
 	if self._ready ~= true then
 		return nil, self._ready_err or 'job_runtime_not_ready'
+	end
+
+	if self._persistence ~= nil then
+		return nil, 'job_persistence_pending'
 	end
 
 	local ok, err = queue.try_admit_now(self._request_tx, req)

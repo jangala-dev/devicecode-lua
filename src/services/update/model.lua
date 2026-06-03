@@ -31,6 +31,8 @@ function M.service_initial(service_id, generation)
 		ingest     = { count = 0, by_id = {} },
 		pending    = {},
 		last_failure = nil,
+		last_warning = nil,
+		job_runtime = nil,
 		publisher  = { state = 'starting' },
 		dependencies = {},
 	}

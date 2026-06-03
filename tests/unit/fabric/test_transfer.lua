@@ -175,6 +175,63 @@ function tests.test_reducer_tracks_active_send_progress()
 	assert_eq(snap.active.last_transfer_event, 'chunk_tx')
 end
 
+function tests.test_reducer_requires_xfer_id_for_progress_completion_and_release()
+	local state = transfer.new_state { manager_id = 'm' }
+	assert_true(transfer.claim_slot(state, {
+		request_id = 'r-progress',
+		request_generation = 1,
+		session = ctx(),
+		xfer_id = 'xfer-current',
+		size = 6,
+	}))
+
+	local ok, err = transfer.apply_progress(state, {
+		request_id = 'r-progress',
+		request_generation = 1,
+		session = ctx(),
+		xfer_id = 'xfer-other',
+		sent = 3,
+	})
+	assert_eq(ok, false)
+	assert_eq(err, 'stale_transfer_progress')
+	assert_eq(transfer.snapshot(state).active.xfer_id, 'xfer-current')
+
+	ok, err = transfer.apply_attempt_done(state, {
+		kind = 'transfer_attempt_done',
+		request_id = 'r-progress',
+		request_generation = 1,
+		session = ctx(),
+		xfer_id = 'xfer-other',
+		status = 'ok',
+	})
+	assert_eq(ok, false)
+	assert_eq(err, 'stale_attempt_completion')
+	assert_eq(transfer.snapshot(state).active.xfer_id, 'xfer-current')
+
+	ok, err = transfer.release_slot(state, {
+		kind = 'transfer_slot_released',
+		request_id = 'r-progress',
+		request_generation = 1,
+		session = ctx(),
+		xfer_id = 'xfer-other',
+		reason = 'wrong transfer',
+	})
+	assert_eq(ok, false)
+	assert_eq(err, 'stale_slot_release')
+	assert_eq(transfer.snapshot(state).active.xfer_id, 'xfer-current')
+
+	ok, err = transfer.apply_attempt_done(state, {
+		kind = 'transfer_attempt_done',
+		request_id = 'r-progress',
+		request_generation = 1,
+		session = ctx(),
+		xfer_id = 'xfer-current',
+		status = 'ok',
+	})
+	assert_true(ok, err)
+	assert_eq(transfer.snapshot(state).active, nil)
+end
+
 function tests.test_slot_admission_without_session_fails_request()
 	fibers.run(function (scope)
 		local h = start_manager(scope)

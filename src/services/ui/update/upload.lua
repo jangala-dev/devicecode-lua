@@ -90,6 +90,38 @@ local function perform_with_deadline(scope, ev, deadline, on_timeout)
 	cancel_for_timeout(scope, on_timeout)
 end
 
+local function cleanup_opts_for_discard(opts, reason)
+	local out = {}
+	for k, v in pairs(opts or {}) do out[k] = v end
+	out.deadline = nil
+	out.timeout = out.discard_timeout or out.cleanup_timeout or 5.0
+	out.reason = reason
+	return out
+end
+
+local function discard_created_job(conn, job_id, reason, opts)
+	if type(job_id) ~= 'string' or job_id == '' then
+		return nil, 'job_id_missing'
+	end
+	local ok, reply, err = pcall(function ()
+		return fibers.perform(client.discard_job_op(conn, job_id, cleanup_opts_for_discard(opts, reason)))
+	end)
+	if not ok then
+		return nil, reply or 'discard_job_failed'
+	end
+	if reply == nil or reply == false then
+		return nil, err or 'discard_job_failed'
+	end
+	if type(reply) == 'table' and reply.ok == false then
+		return nil, reply.reason or reply.error or err or 'discard_job_failed'
+	end
+	return true, nil
+end
+
+local function start_failure_is_definitive_non_start(err)
+	return err == 'slot_busy'
+end
+
 local function upload_body_op(ctx, opts, deadline)
 	return fibers.run_scope_op(function (scope)
 		local timed_out = false
@@ -152,13 +184,25 @@ local function upload_body_op(ctx, opts, deadline)
 			local job, jerr = perform_with_deadline(scope, client.create_job_op(conn, artifact_id, call_opts), deadline, mark_timeout)
 			if not job then error(jerr or 'update job create failed', 0) end
 			out.job = job
-			if opts.start_job then
-				call_opts.timeout = false
-				local started, serr = perform_with_deadline(scope, client.start_job_op(conn, job.job_id, call_opts), deadline, mark_timeout)
-				if not started then error(serr or 'update job start failed', 0) end
-				out.started = started
+				if opts.start_job then
+					call_opts.timeout = false
+					local started, serr = perform_with_deadline(scope, client.start_job_op(conn, job.job_id, call_opts), deadline, mark_timeout)
+					if not started then
+						local start_err = serr or 'update job start failed'
+						if start_failure_is_definitive_non_start(start_err) then
+							local cleanup_reason = 'upload_start_failed:' .. tostring(start_err)
+							-- The artifact was already committed and handed off. This route
+							-- only owns cleanup for a job that definitively did not start.
+							local discarded, derr = discard_created_job(conn, job.job_id, cleanup_reason, call_opts)
+							if not discarded then
+								error(start_err .. '; discard_job_failed:' .. tostring(derr or 'discard_job_failed'), 0)
+							end
+						end
+						error(start_err, 0)
+					end
+					out.started = started
+				end
 			end
-		end
 		return out
 	end)
 end

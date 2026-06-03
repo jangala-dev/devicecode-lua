@@ -38,4 +38,13 @@ function M.start_job_op(conn, job_id, opts)
 	return conn:call_op(method, { job_id = job_id }, call_opts(opts, 10.0))
 end
 
+function M.discard_job_op(conn, job_id, opts)
+	opts = opts or {}
+	local method = update_manager_rpc('discard-job')
+	return conn:call_op(method, {
+		job_id = job_id,
+		reason = opts.reason,
+	}, call_opts(opts, 10.0))
+end
+
 return M

@@ -45,7 +45,7 @@ local function transfer_chunk_size_after_prepare(self, job, prepared)
 	if selected and max_chunk_size and selected > max_chunk_size then
 		return max_chunk_size
 	end
-	return selected
+	return selected or max_chunk_size
 end
 
 local function artifact_record(job)
@@ -148,6 +148,15 @@ local function validate_commit_reply(reply)
 		return nil, accepted.err or accepted.error or accepted.reason or 'component_commit_rejected'
 	end
 	return accepted, nil
+end
+
+local function ambiguous_commit_send_failure(err)
+	if err == nil then return true end
+	local reason = tostring(err)
+	return reason == 'timeout'
+		or reason == 'liveness_timeout'
+		or reason:find('timeout', 1, true) ~= nil
+		or reason:find('liveness', 1, true) ~= nil
 end
 
 local function phase_error(prefix, err)
@@ -361,7 +370,22 @@ function Backend:commit_op(job, ctx)
 		metadata = metadata_of(job),
 	}
 	return call_component_op(self, component, 'commit-update', payload):wrap(function (reply, err)
-		if reply == nil then return nil, err or 'component_commit_update_failed' end
+		if reply == nil then
+			if component == 'mcu' and ambiguous_commit_send_failure(err) then
+				local reason = err or 'commit_reply_missing'
+				return {
+					accepted = true,
+					ambiguous = true,
+					reason = reason,
+					component_reply = {
+						accepted = true,
+						ambiguous = true,
+						reason = reason,
+					},
+				}
+			end
+			return nil, err or 'component_commit_update_failed'
+		end
 		local accepted, rerr = validate_commit_reply(reply)
 		if accepted == nil then return nil, rerr end
 		return { accepted = true, reply = reply, component_reply = accepted }

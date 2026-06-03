@@ -227,6 +227,31 @@ function T.component_backend_commit_op_requires_explicit_acceptance()
   end)
 end
 
+function T.component_backend_commit_op_treats_mcu_timeout_as_ambiguous_acceptance()
+  runfibers.run(function()
+    local conn = {
+      call_op = function(_, topic)
+        assert_eq(topic[5], 'commit-update')
+        return op.always(nil, 'timeout')
+      end,
+    }
+    local backend = component_backend.new({ conn = conn, component = 'mcu' })
+
+    local got, err = fibers.perform(backend:commit_op({
+      job_id = 'job-commit-timeout',
+      component = 'mcu',
+      metadata = { image_id = 'img-new' },
+    }, {}))
+
+    assert_eq(type(got), 'table', tostring(err))
+    assert_true(got.accepted)
+    assert_true(got.ambiguous)
+    assert_eq(got.reason, 'timeout')
+    assert_eq(got.component_reply.accepted, true)
+    assert_eq(got.component_reply.ambiguous, true)
+  end)
+end
+
 function T.component_backend_stage_op_clamps_metadata_chunk_size_to_prepare_max()
   runfibers.run(function()
     local source = {}
@@ -301,6 +326,46 @@ function T.component_backend_stage_op_clamps_default_chunk_size_to_prepare_max()
       component = 'mcu',
       observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }),
       chunk_size = 2048,
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+      metadata = { image_id = 'img-new' },
+    }, {}))
+    assert_eq(type(staged), 'table', tostring(serr))
+    assert_eq(seen_payload.chunk_size, 512)
+  end)
+end
+
+function T.component_backend_stage_op_uses_prepare_max_when_no_chunk_size_selected()
+  runfibers.run(function()
+    local artifact = {}
+    function artifact:describe()
+      return { artifact_ref = 'artifact-1', size = 12, digest = 'abcd', meta = { image_id = 'img-new' } }
+    end
+    local artifact_store = {
+      open_op = function() return op.always(artifact, nil) end,
+    }
+    local seen_payload
+    local conn = {
+      call_op = function(_, topic, payload)
+        if topic[5] == 'prepare-update' then
+          return op.always({ ok = true, max_chunk_size = 512 }, nil)
+        end
+        if topic[5] == 'stage-update' then
+          seen_payload = payload
+          return op.always({ ok = true, public_status = 'succeeded' }, nil)
+        end
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }),
     })
 
     local staged, serr = fibers.perform(backend:stage_op({

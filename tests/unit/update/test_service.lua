@@ -4,6 +4,7 @@ local fibers = require 'fibers'
 local sleep  = require 'fibers.sleep'
 local op     = require 'fibers.op'
 local busmod = require 'bus'
+local tablex = require 'shared.table'
 
 local update = require 'services.update'
 local service = require 'services.update.service'
@@ -305,6 +306,129 @@ function tests.test_active_runtime_failure_publishes_last_failure_with_current_j
 		assert_not_nil(failure.current_job, 'expected current job context')
 		assert_eq(failure.current_job.job_id, 'job-active-fail')
 		assert_eq(failure.current_job.state, 'staging')
+	end)
+end
+
+function tests.test_retryable_active_persistence_failure_degrades_without_crashing()
+	fibers.run(function (root_scope)
+		local bus = busmod.new()
+		local svc_conn = bus:connect()
+		local caller = bus:connect()
+		local stored = { jobs = {}, order = {}, next_seq = 1 }
+		local allow_awaiting_commit = false
+		local save_attempts = 0
+		local function upsert(job)
+			stored.jobs[job.job_id] = tablex.deep_copy(job)
+			local found = false
+			for _, id in ipairs(stored.order) do
+				if id == job.job_id then found = true; break end
+			end
+			if not found then stored.order[#stored.order + 1] = job.job_id end
+			return true, nil
+		end
+		local store = {
+			load_all_op = function ()
+				return op.always(tablex.deep_copy(stored), nil)
+			end,
+			save_job_op = function (_, job)
+				save_attempts = save_attempts + 1
+				if job.state == 'awaiting_commit' and not allow_awaiting_commit then
+					return op.always(nil, 'control_store_put_timeout')
+				end
+				upsert(job)
+				return op.always(true, nil)
+			end,
+			delete_job_op = function (_, job_id)
+				stored.jobs[job_id] = nil
+				return op.always(true, nil)
+			end,
+		}
+		local backend = {
+			stage_op = function (_, job)
+				return op.always({ job_id = job.job_id, staged = true }, nil)
+			end,
+		}
+
+		local child = assert(root_scope:child())
+		local ok, err = child:spawn(function (scope)
+			service.run(scope, {
+				publish = false,
+				service_id = 'update',
+				conn = svc_conn,
+				watch_config = false,
+				config = { schema = 'devicecode.update/1', components = { { component = 'cm5' } } },
+				job_store = store,
+				backend = backend,
+				persistence_retry_backoff = 0.01,
+			})
+		end)
+		assert_true(ok, err)
+		fibers.perform(sleep.sleep_op(0.02))
+
+		local created, create_err = caller:call(topics.update_manager_rpc('create-job'), {
+			job_id = 'j-persist',
+			component = 'cm5',
+			artifact_ref = 'artifact-persist',
+		}, { timeout = 0.5 })
+		assert_not_nil(created, create_err)
+
+		local started, start_err = caller:call(topics.update_manager_rpc('start-job'), {
+			job_id = 'j-persist',
+		}, { timeout = 0.5 })
+		assert_not_nil(started, start_err)
+		assert_eq(started.accepted, true)
+
+		local status
+		assert_true(probe.wait_until(function ()
+			status = caller:call(topics.update_manager_rpc('status'), {}, { timeout = 0.05 })
+			local snap = status and status.snapshot
+			return snap
+				and snap.reason == 'update_persistence_pending'
+				and snap.last_warning
+				and snap.last_warning.store_err == 'job_store_save_failed:control_store_put_timeout'
+		end, { timeout = 0.5, interval = 0.01 }), 'expected retryable persistence pending status')
+
+		assert_eq(status.snapshot.ready, false)
+		assert_eq(status.snapshot.last_warning.source, 'job_runtime')
+		assert_eq(status.snapshot.last_warning.reason, 'job_store_save_failed:control_store_put_timeout')
+		assert_eq(status.snapshot.last_warning.retry_mode, 'indefinite')
+		assert_eq(status.snapshot.last_warning.dependency, 'job_store')
+		assert_not_nil(status.snapshot.last_warning.first_failed_at)
+		assert_not_nil(status.snapshot.last_warning.last_attempt_at)
+		assert_eq(status.snapshot.job_runtime.persistence.job_id, 'j-persist')
+		assert_eq(status.snapshot.job_runtime.persistence.retry_mode, 'indefinite')
+		assert_eq(status.snapshot.job_runtime.persistence.dependency, 'job_store')
+		assert_true(status.snapshot.job_runtime.persistence.retry_attempts >= 1)
+
+		local listed, list_err = caller:call(topics.update_manager_rpc('list-jobs'), {}, { timeout = 0.2 })
+		assert_not_nil(listed, list_err)
+		assert_eq(listed.ok, true)
+		local got, get_err = caller:call(topics.update_manager_rpc('get-job'), {
+			job_id = 'j-persist',
+		}, { timeout = 0.2 })
+		assert_not_nil(got, get_err)
+		assert_eq(got.job.job_id, 'j-persist')
+
+		local blocked, block_err = caller:call(topics.update_manager_rpc('create-job'), {
+			job_id = 'j-blocked',
+			component = 'cm5',
+			artifact_ref = 'artifact-blocked',
+		}, { timeout = 0.2 })
+		assert_eq(blocked, nil)
+		assert_eq(block_err, 'update_persistence_pending')
+
+		allow_awaiting_commit = true
+		assert_true(probe.wait_until(function ()
+			status = caller:call(topics.update_manager_rpc('status'), {}, { timeout = 0.05 })
+			local job = status and status.snapshot and status.snapshot.jobs.by_id['j-persist']
+			return job and job.state == 'awaiting_commit' and status.snapshot.reason == nil
+		end, { timeout = 0.8, interval = 0.01 }), 'expected persistence recovery to advance staged job')
+
+		assert_eq(status.snapshot.ready, true)
+		assert_eq(status.snapshot.last_warning, nil)
+		assert_eq(status.snapshot.pending.persistence, nil)
+		assert_true(save_attempts >= 3, 'expected retry attempts around awaiting_commit persistence')
+		child:cancel('test complete')
 	end)
 end
 

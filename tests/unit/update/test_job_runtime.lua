@@ -1,5 +1,7 @@
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local op = require 'fibers.op'
+local cond = require 'fibers.cond'
 local job_runtime = require 'services.update.job_runtime'
 local store_mod = require 'services.update.job_store_memory'
 
@@ -8,6 +10,17 @@ local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a,b,msg) if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end end
 local function assert_true(v,msg) if v ~= true then fail(msg or ('expected true, got '..tostring(v))) end end
 local function assert_not_nil(v,msg) if v == nil then fail(msg or 'expected non-nil') end end
+
+local function wait_until(fn, opts)
+	opts = opts or {}
+	local deadline = fibers.now() + (opts.timeout or 0.5)
+	local interval = opts.interval or 0.005
+	while fibers.now() < deadline do
+		if fn() then return true end
+		fibers.perform(sleep.sleep_op(interval))
+	end
+	return false
+end
 
 local function start_runtime(scope, params)
 	local rt = assert(job_runtime.start(scope, params or {}))
@@ -128,6 +141,265 @@ function tests.test_failed_after_admission_keeps_admitted_lifecycle_marker()
 		assert_eq(rec.store_op, 'save_job_op')
 		assert_eq(rec.store_err, 'job_store_save_failed:save_failed')
 		assert_true(rec.admitted, 'failed-after-admission should remain distinguishable from rejection')
+	end)
+end
+
+function tests.test_retryable_save_failure_stays_pending_and_recovers()
+	fibers.run(function ()
+		local allow_save = false
+		local attempts = 0
+		local saved
+		local store = {
+			save_job_op = function (_, job)
+				attempts = attempts + 1
+				if not allow_save then return op.always(nil, 'control_store_put_timeout') end
+				saved = job
+				return op.always(true, nil)
+			end,
+		}
+
+		local st, _, result = fibers.run_scope(function (scope)
+			local rt = start_runtime(scope, {
+				service_id = 'update',
+				store = store,
+				persistence_retry_backoff = 0.005,
+			})
+			local handle, admit_err = rt:admit_transition({
+				kind = 'create_job',
+				generation = 1,
+				payload = { job_id = 'j-pending', component = 'cm5', artifact_ref = 'artifact-1' },
+			})
+			assert_not_nil(handle, admit_err)
+
+			assert_true(wait_until(function ()
+				local pending = rt:persistence_snapshot()
+				return pending and pending.retry_attempts and pending.retry_attempts >= 1
+			end), 'expected retryable persistence failure to become visible')
+
+			local pending = rt:persistence_snapshot()
+			local snapshot = rt:model_snapshot()
+			local transition = snapshot.transitions.by_id[handle:transition_id()]
+			assert_eq(rt:persistence_pending(), true)
+			assert_eq(pending.store_op, 'save_job_op')
+			assert_eq(pending.store_err, 'job_store_save_failed:control_store_put_timeout')
+			assert_eq(pending.job_id, 'j-pending')
+			assert_eq(pending.retry_mode, 'indefinite')
+			assert_eq(pending.dependency, 'job_store')
+			assert_not_nil(pending.first_failed_at)
+			assert_not_nil(pending.last_attempt_at)
+			assert_true(pending.retry_attempts >= 1)
+			assert_eq(transition.state, 'persisting')
+			assert_eq(transition.persistence_pending, true)
+			assert_eq(transition.retry_mode, 'indefinite')
+			assert_eq(transition.dependency, 'job_store')
+
+			local second, second_err = rt:admit_transition({
+				kind = 'create_job',
+				generation = 1,
+				payload = { job_id = 'j-blocked', component = 'cm5', artifact_ref = 'artifact-2' },
+			})
+			assert_eq(second, nil)
+			assert_eq(second_err, 'job_persistence_pending')
+
+			allow_save = true
+			local persisted = fibers.perform(handle:outcome_op())
+			local after = rt:model_snapshot()
+			rt:cancel('test complete')
+			return { persisted = persisted, after = after }
+		end)
+
+		assert_eq(st, 'ok')
+		assert_eq(result.persisted.status, 'persisted')
+		assert_eq(result.persisted.job_id, 'j-pending')
+		assert_eq(result.after.persistence, nil)
+		assert_not_nil(saved, 'expected job to be saved after retry recovery')
+		assert_true(attempts >= 2, 'expected at least one retry before recovery')
+	end)
+end
+
+function tests.test_route_missing_store_failure_is_not_persistence_retry()
+	fibers.run(function ()
+		local store = {
+			save_job_op = function ()
+				return op.always(nil, 'no_route')
+			end,
+		}
+
+		local st, _, result = fibers.run_scope(function (scope)
+			local rt = start_runtime(scope, {
+				service_id = 'update',
+				store = store,
+				persistence_retry_backoff = 0.005,
+			})
+			local failed = perform_transition(rt, {
+				kind = 'create_job',
+				generation = 1,
+				payload = { job_id = 'j-route', component = 'cm5', artifact_ref = 'artifact-route' },
+			})
+			local transitions = rt:transition_snapshot()
+			local persistence = rt:persistence_snapshot()
+			rt:cancel('test complete')
+			return { failed = failed, transitions = transitions, persistence = persistence }
+		end)
+
+		assert_eq(st, 'ok')
+		assert_eq(result.failed.status, 'failed')
+		assert_eq(result.failed.reason, 'job_store_save_failed:no_route')
+		assert_eq(result.persistence, nil)
+		local rec = result.transitions.by_id[result.failed.transition_id]
+		assert_eq(rec.state, 'failed')
+		assert_eq(rec.store_err, 'job_store_save_failed:no_route')
+		assert_eq(rec.persistence_pending, nil)
+	end)
+end
+
+function tests.test_discard_job_allows_only_unowned_created_jobs_by_default()
+	fibers.run(function ()
+		local st, _, result = fibers.run_scope(function (scope)
+			local rt = start_runtime(scope, { service_id = 'update', store = store_mod.new() })
+			local created = perform_transition(rt, {
+				kind = 'create_job',
+				generation = 1,
+				payload = { job_id = 'j-created', component = 'cm5', artifact_ref = 'artifact-created' },
+			})
+			local discarded = perform_transition(rt, {
+				kind = 'discard_job',
+				generation = 1,
+				job_id = 'j-created',
+				reason = 'upload_start_failed:slot_busy',
+			})
+
+			perform_transition(rt, {
+				kind = 'create_job',
+				generation = 1,
+				payload = { job_id = 'j-active', component = 'cm5', artifact_ref = 'artifact-active' },
+			})
+			perform_transition(rt, {
+				kind = 'start_job',
+				generation = 1,
+				job_id = 'j-active',
+			})
+			local active_rejected = perform_transition(rt, {
+				kind = 'discard_job',
+				generation = 1,
+				job_id = 'j-active',
+				reason = 'unsafe_active_discard',
+			})
+
+			perform_transition(rt, {
+				kind = 'create_job',
+				generation = 1,
+				payload = { job_id = 'j-staging', component = 'cm5', artifact_ref = 'artifact-staging' },
+			})
+			perform_transition(rt, {
+				kind = 'patch_job',
+				generation = 1,
+				job_id = 'j-staging',
+				patch = { state = 'staging', next_step = nil },
+			})
+			local staging_rejected = perform_transition(rt, {
+				kind = 'discard_job',
+				generation = 1,
+				job_id = 'j-staging',
+			})
+
+			perform_transition(rt, {
+				kind = 'create_job',
+				generation = 1,
+				payload = { job_id = 'j-return', component = 'cm5', artifact_ref = 'artifact-return' },
+			})
+			perform_transition(rt, {
+				kind = 'patch_job',
+				generation = 1,
+				job_id = 'j-return',
+				patch = { state = 'awaiting_return', next_step = 'reconcile' },
+			})
+			local return_rejected = perform_transition(rt, {
+				kind = 'discard_job',
+				generation = 1,
+				job_id = 'j-return',
+			})
+			local forced = perform_transition(rt, {
+				kind = 'discard_job',
+				generation = 1,
+				job_id = 'j-return',
+				force = true,
+				reason = 'admin_force_discard',
+			})
+
+			local snapshot = rt:snapshot()
+			rt:cancel('test complete')
+			return {
+				created = created,
+				discarded = discarded,
+				active_rejected = active_rejected,
+				staging_rejected = staging_rejected,
+				return_rejected = return_rejected,
+				forced = forced,
+				snapshot = snapshot,
+			}
+		end)
+
+		assert_eq(st, 'ok')
+		assert_eq(result.created.status, 'persisted')
+		assert_eq(result.discarded.status, 'persisted')
+		assert_eq(result.snapshot.by_id['j-created'], nil)
+		assert_eq(result.active_rejected.status, 'rejected')
+		assert_eq(result.active_rejected.reason, 'job_not_discardable')
+		assert_eq(result.staging_rejected.status, 'rejected')
+		assert_eq(result.staging_rejected.reason, 'job_not_discardable')
+		assert_eq(result.return_rejected.status, 'rejected')
+		assert_eq(result.return_rejected.reason, 'job_not_discardable')
+		assert_eq(result.forced.status, 'persisted')
+		assert_not_nil(result.snapshot.by_id['j-active'])
+		assert_not_nil(result.snapshot.by_id['j-staging'])
+		assert_eq(result.snapshot.by_id['j-return'], nil)
+	end)
+end
+
+function tests.test_healthy_inflight_transition_queueing_is_intentional()
+	fibers.run(function ()
+		local save_entered = cond.new()
+		local release_save = cond.new()
+		local saved = {}
+		local store = {
+			save_job_op = function (_, job)
+				saved[#saved + 1] = job.job_id
+				if job.job_id == 'j-first' then
+					save_entered:signal()
+					return release_save:wait_op():wrap(function () return true, nil end)
+				end
+				return op.always(true, nil)
+			end,
+		}
+
+		local st, _, result = fibers.run_scope(function (scope)
+			local rt = start_runtime(scope, { service_id = 'update', store = store })
+			local first = assert(rt:admit_transition({
+				kind = 'create_job',
+				generation = 1,
+				payload = { job_id = 'j-first', component = 'cm5', artifact_ref = 'artifact-1' },
+			}))
+			fibers.perform(save_entered:wait_op())
+			local second, second_err = rt:admit_transition({
+				kind = 'create_job',
+				generation = 1,
+				payload = { job_id = 'j-second', component = 'cm5', artifact_ref = 'artifact-2' },
+			})
+			assert_not_nil(second, second_err)
+			assert_eq(rt:persistence_pending(), false)
+			release_save:signal()
+			local first_result = fibers.perform(first:outcome_op())
+			local second_result = fibers.perform(second:outcome_op())
+			rt:cancel('test complete')
+			return { first = first_result, second = second_result }
+		end)
+
+		assert_eq(st, 'ok')
+		assert_eq(result.first.status, 'persisted')
+		assert_eq(result.second.status, 'persisted')
+		assert_eq(saved[1], 'j-first')
+		assert_eq(saved[2], 'j-second')
 	end)
 end
 

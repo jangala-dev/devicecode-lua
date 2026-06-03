@@ -210,7 +210,8 @@ function M.discard_job(scope, params)
 		kind = 'discard_job',
 		generation = params.generation,
 		job_id = params.job_id or (params.job and params.job.job_id),
-		reason = params.method or 'discard_job',
+		reason = params.reason or params.method or 'discard_job',
+		force = params.force == true,
 	})
 	if not result or result.status ~= 'persisted' then
 		local reason = err or (result and result.reason) or 'discard_job_failed'

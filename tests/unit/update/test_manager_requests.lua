@@ -201,6 +201,46 @@ function tests.test_start_job_caller_cancellation_after_transition_admission_doe
   end)
 end
 
+function tests.test_discard_job_uses_explicit_reason()
+  fibers.run(function ()
+    local captured
+    local req = request({ method = 'discard_job', job_id = 'j1' })
+    local jobs = {
+      admit_transition = function (_, cmd)
+        captured = cmd
+        return {
+          outcome_op = function ()
+            return op.always({
+              status = 'persisted',
+              job = { job_id = 'j1', component = 'mcu', state = 'discarded' },
+            }, nil)
+          end,
+        }, nil
+      end,
+    }
+
+    local st, _, result = fibers.run_scope(function (scope)
+      return manager_requests.discard_job(scope, {
+        request = req,
+        jobs = jobs,
+        job_id = 'j1',
+        generation = 7,
+        reason = 'upload_start_failed:slot_busy',
+      })
+    end)
+
+    assert_eq(st, 'ok')
+    assert_eq(result.status, 'persisted')
+    assert_eq(captured.kind, 'discard_job')
+    assert_eq(captured.generation, 7)
+    assert_eq(captured.job_id, 'j1')
+    assert_eq(captured.reason, 'upload_start_failed:slot_busy')
+    local ok, value = fibers.perform(req:wait_op())
+    assert_true(ok)
+    assert_eq(value.discarded, true)
+  end)
+end
+
 
 function tests.test_create_job_requires_artifact_ref()
   fibers.run(function ()
