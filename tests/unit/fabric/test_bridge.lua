@@ -445,6 +445,62 @@ function tests.test_outbound_call_sends_call_frame_and_routes_remote_reply_to_re
 	end)
 end
 
+function tests.test_outbound_prepare_call_updates_bridge_diagnostics()
+	fibers.run(function (scope)
+		local local_topic = { 'raw', 'member', 'mcu', 'cap', 'updater', 'main', 'rpc', 'prepare-update' }
+		local remote_topic = { 'cap', 'self', 'updater', 'main', 'rpc', 'prepare-update' }
+		local h = start_bridge(scope, {
+			outbound_call_rules = {
+				{ local_topic = local_topic, remote_topic = remote_topic },
+			},
+		})
+		assert_true(h.session_tx:send(peer_session_event(3, 'mcu-sid-1')))
+		local req = fake_request()
+		assert_true(h.local_tx:send({
+			kind = 'call',
+			id = 'prepare-1',
+			topic = local_topic,
+			payload = {
+				job_id = 'job-prepare',
+				expected_image_id = 'mcu-dev-15.3',
+			},
+			request = req,
+		}))
+
+		local frame = recv_with_timeout(h.rpc_rx, 'outbound prepare call').frame
+		assert_eq(frame.type, 'call')
+		assert_eq(frame.id, 'prepare-1')
+		assert_eq(topic_key(frame.topic), topic_key(remote_topic))
+
+		local sent = recv_state_with(h.state_rx, function (ev)
+			local diag = ev.snapshot and ev.snapshot.last_outbound_call
+			return diag
+				and diag.event == 'sent'
+				and diag.call_id == 'prepare-1'
+				and diag.job_id == 'job-prepare'
+		end, 'outbound prepare sent diag')
+		local diag = sent.snapshot.last_outbound_call
+		assert_eq(diag.local_topic, topic_key(local_topic))
+		assert_eq(diag.remote_topic, topic_key(remote_topic))
+		assert_eq(diag.expected_image_id, 'mcu-dev-15.3')
+		assert_eq(diag.peer_sid, 'mcu-sid-1')
+		assert_eq(diag.session_generation, 3)
+		assert_eq(diag.frame_sent, true)
+
+		local reply = assert(protocol.reply('prepare-1', true, { accepted = true }, nil))
+		assert_true(h.session_tx:send(rpc_event(reply, 3, 'mcu-sid-1')))
+		local done = recv_state_with(h.state_rx, function (ev)
+			local d = ev.snapshot and ev.snapshot.last_outbound_call
+			return d and d.call_id == 'prepare-1' and d.event == 'reply_ok'
+		end, 'outbound prepare reply diag')
+		assert_eq(done.snapshot.last_outbound_call.reply_routed, true)
+		local deadline = fibers.now() + 0.25
+		while req.resolved == false and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.001)) end
+		assert_eq(req.resolved, 'reply')
+		close_bridge(h)
+	end)
+end
+
 function tests.test_bus_adapter_remote_commands_use_local_bus_methods()
 	fibers.run(function (scope)
 		local command_tx, command_rx = mailbox.new(8, { full = 'reject_newest' })

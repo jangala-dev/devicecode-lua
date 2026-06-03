@@ -140,6 +140,7 @@ local function initial_snapshot(link_id, link_generation)
 		last_imported_at    = nil,
 		last_clear_reason   = nil,
 		last_clear_count    = 0,
+		last_outbound_call  = nil,
 	}
 end
 
@@ -193,6 +194,98 @@ local function has_current_session(self)
 		and type(self._session.session_generation) == 'number'
 		and type(self._session.peer_sid) == 'string'
 		and self._session.peer_sid ~= ''
+end
+
+local function scalar_payload_field(payload, key)
+	if type(payload) ~= 'table' then return nil end
+	local v = payload[key]
+	local tv = type(v)
+	if tv == 'string' or tv == 'number' or tv == 'boolean' then
+		return tostring(v)
+	end
+	return nil
+end
+
+local function prepare_update_topic(topic)
+	return type(topic) == 'table'
+		and topic[#topic] == 'prepare-update'
+		and topic[#topic - 1] == 'rpc'
+end
+
+local function trace_outbound_call_topic(local_topic, remote_topic)
+	return prepare_update_topic(local_topic) or prepare_update_topic(remote_topic)
+end
+
+local function append_diag_print_field(parts, key, value)
+	if value == nil or value == '' then return end
+	parts[#parts + 1] = key
+	parts[#parts + 1] = tostring(value)
+end
+
+local function print_outbound_call_diag(diag)
+	local parts = { '[fabric-rpc]', 'ev', tostring(diag.event or 'unknown') }
+	append_diag_print_field(parts, 'call_id', diag.call_id)
+	append_diag_print_field(parts, 'local_topic', diag.local_topic)
+	append_diag_print_field(parts, 'remote_topic', diag.remote_topic)
+	append_diag_print_field(parts, 'job_id', diag.job_id)
+	append_diag_print_field(parts, 'expected_image_id', diag.expected_image_id)
+	append_diag_print_field(parts, 'peer_sid', diag.peer_sid)
+	append_diag_print_field(parts, 'session_generation', diag.session_generation)
+	if diag.frame_admitted ~= nil then
+		append_diag_print_field(parts, 'frame_admitted', tostring(diag.frame_admitted))
+	end
+	if diag.frame_sent ~= nil then
+		append_diag_print_field(parts, 'frame_sent', tostring(diag.frame_sent))
+	end
+	if diag.reply_routed ~= nil then
+		append_diag_print_field(parts, 'reply_routed', tostring(diag.reply_routed))
+	end
+	if diag.ok ~= nil then
+		append_diag_print_field(parts, 'ok', tostring(diag.ok))
+	end
+	append_diag_print_field(parts, 'reason', diag.reason)
+	append_diag_print_field(parts, 'err', diag.err)
+	print(table.concat(parts, ' '))
+end
+
+local function pick_bool(primary, fallback)
+	if primary ~= nil then return not not primary end
+	if fallback ~= nil then return not not fallback end
+	return nil
+end
+
+local function record_outbound_call_diag(self, rec, event, extra)
+	extra = extra or {}
+	local local_topic = extra.local_topic or (rec and rec.local_topic)
+	local remote_topic = extra.remote_topic or (rec and rec.remote_topic)
+	if not trace_outbound_call_topic(local_topic, remote_topic) then
+		return
+	end
+
+	local payload = extra.payload or (rec and rec.payload)
+	local session = extra.session or (rec and rec.session) or current_session(self)
+	local diag = {
+		event = event,
+		at = fibers.now(),
+		link_id = self._link_id,
+		link_generation = self._link_generation,
+		call_id = extra.call_id or (rec and rec.id),
+		local_topic = topic_string(local_topic),
+		remote_topic = topic_string(remote_topic),
+		job_id = scalar_payload_field(payload, 'job_id'),
+		expected_image_id = scalar_payload_field(payload, 'expected_image_id'),
+		peer_sid = session and session.peer_sid or nil,
+		session_generation = session and session.session_generation or nil,
+		frame_admitted = pick_bool(extra.frame_admitted, rec and rec.frame_admitted),
+		frame_sent = pick_bool(extra.frame_sent),
+		reply_routed = pick_bool(extra.reply_routed, rec and rec.reply_routed),
+		ok = pick_bool(extra.ok),
+		reason = extra.reason,
+		err = extra.err,
+	}
+
+	update_model(self, { last_outbound_call = diag })
+	print_outbound_call_diag(diag)
 end
 
 --------------------------------------------------------------------------------
@@ -420,10 +513,18 @@ local function run_outbound_call(call)
 				ok         = false,
 				err        = send_err or 'send_failed',
 				frame_sent = false,
+				event      = 'send_failed',
 			}
 		end
 
 		call.mark_frame_admitted()
+		call.report_diag({
+			kind       = 'outbound_call_diag',
+			call_id    = call.id,
+			event      = 'sent',
+			frame_sent = true,
+			ok         = true,
+		})
 
 		if call.reply_policy == 'sent-is-accepted' then
 			local payload = {
@@ -439,6 +540,7 @@ local function run_outbound_call(call)
 				ok = true,
 				frame_sent = true,
 				sent_is_accepted = true,
+				event = 'sent_is_accepted',
 			}
 		end
 
@@ -454,6 +556,8 @@ local function run_outbound_call(call)
 				call_id    = call.id,
 				timed_out  = true,
 				frame_sent = true,
+				event      = 'timeout',
+				err        = 'timeout',
 			}
 		end
 
@@ -468,6 +572,7 @@ local function run_outbound_call(call)
 				closed     = true,
 				err        = tostring(why),
 				frame_sent = true,
+				event      = 'closed',
 			}
 		end
 
@@ -479,6 +584,7 @@ local function run_outbound_call(call)
 				ok         = true,
 				payload    = reply.payload,
 				frame_sent = true,
+				event      = 'reply_ok',
 			}
 		end
 
@@ -490,6 +596,7 @@ local function run_outbound_call(call)
 			ok         = false,
 			err        = err,
 			frame_sent = true,
+			event      = 'reply_error',
 		}
 	end
 end
@@ -501,12 +608,26 @@ local function start_outbound_call(self, ev)
 	end
 
 	if not has_current_session(self) then
+		record_outbound_call_diag(self, nil, 'not_admitted', {
+			local_topic = checked_topic,
+			payload = ev.payload,
+			reason = 'no_session',
+			frame_admitted = false,
+			frame_sent = false,
+		})
 		fail_request(ev.request or ev, 'no_session')
 		return
 	end
 
 	local remote_topic, rule = map_local_call(self, checked_topic)
 	if not remote_topic then
+		record_outbound_call_diag(self, nil, 'not_admitted', {
+			local_topic = checked_topic,
+			payload = ev.payload,
+			reason = 'no_route',
+			frame_admitted = false,
+			frame_sent = false,
+		})
 		fail_request(ev.request or ev, 'no_route')
 		return
 	end
@@ -517,11 +638,29 @@ local function start_outbound_call(self, ev)
 	end
 
 	if self._pending_calls[id] ~= nil then
+		record_outbound_call_diag(self, nil, 'not_admitted', {
+			call_id = id,
+			local_topic = checked_topic,
+			remote_topic = remote_topic,
+			payload = ev.payload,
+			reason = 'duplicate_call_id',
+			frame_admitted = false,
+			frame_sent = false,
+		})
 		fail_request(ev.request or ev, 'duplicate_call_id')
 		error('bridge duplicate outbound call id: ' .. id, 0)
 	end
 
 	if count_keys(self._pending_calls) >= self._max_pending_calls then
+		record_outbound_call_diag(self, nil, 'not_admitted', {
+			call_id = id,
+			local_topic = checked_topic,
+			remote_topic = remote_topic,
+			payload = ev.payload,
+			reason = 'too_many_pending_calls',
+			frame_admitted = false,
+			frame_sent = false,
+		})
 		fail_request(ev.request or ev, 'too_many_pending_calls')
 		return
 	end
@@ -536,6 +675,9 @@ local function start_outbound_call(self, ev)
 		reply_routed   = false,
 		frame_admitted = false,
 		session        = current_session(self),
+		local_topic    = topics.copy(checked_topic),
+		remote_topic   = topics.copy(remote_topic),
+		payload        = ev.payload,
 	}
 
 	local call = {
@@ -548,6 +690,13 @@ local function start_outbound_call(self, ev)
 		caps     = make_bridge_caps(self, rec.session),
 		reply_tx = reply_tx,
 		reply_rx = reply_rx,
+		report_diag = function (diag)
+			return queue.try_admit_required(
+				self._done_tx,
+				diag,
+				'bridge_outbound_call_diag_report_failed'
+			)
+		end,
 
 		mark_frame_admitted = function ()
 			rec.frame_admitted = true
@@ -557,6 +706,10 @@ local function start_outbound_call(self, ev)
 
 	self._pending_calls[id] = rec
 	update_model(self)
+	record_outbound_call_diag(self, rec, 'queued', {
+		frame_admitted = false,
+		frame_sent = false,
+	})
 
 	local handle, start_err = start_bridge_work(
 		self,
@@ -575,6 +728,11 @@ local function start_outbound_call(self, ev)
 		self._pending_calls[id] = nil
 		reply_tx:close('outbound_call_start_failed')
 		update_model(self)
+		record_outbound_call_diag(self, rec, 'not_admitted', {
+			reason = start_err or 'outbound_call_start_failed',
+			frame_admitted = false,
+			frame_sent = false,
+		})
 
 		owner:fail_once(start_err or 'outbound_call_start_failed')
 		error(start_err or 'outbound_call_start_failed', 0)
@@ -840,6 +998,12 @@ local function route_remote_reply(self, frame, session)
 
 	if ok == true then
 		rec.reply_routed = true
+		record_outbound_call_diag(self, rec, 'reply_routed', {
+			reply_routed = true,
+			frame_sent = true,
+			ok = frame.ok,
+			err = frame.err,
+		})
 		return
 	end
 
@@ -1007,7 +1171,29 @@ local function handle_outbound_call_done(self, ev)
 		record_frame_sent(self)
 	end
 
+	local result = ev.result or {}
+	record_outbound_call_diag(self, rec, result.event or 'done', {
+		frame_admitted = rec.frame_admitted,
+		frame_sent = result.frame_sent,
+		reply_routed = rec.reply_routed,
+		ok = result.ok,
+		err = result.err,
+		reason = result.err,
+	})
 	update_model(self)
+end
+
+local function handle_outbound_call_diag(self, ev)
+	local rec = self._pending_calls[ev.call_id]
+	if not rec then return end
+	record_outbound_call_diag(self, rec, ev.event or 'diag', {
+		frame_admitted = rec.frame_admitted,
+		frame_sent = ev.frame_sent,
+		reply_routed = rec.reply_routed,
+		ok = ev.ok,
+		err = ev.err,
+		reason = ev.reason,
+	})
 end
 
 local function inbound_reply_frame(ev)
@@ -1057,6 +1243,9 @@ end
 local function handle_done(self, ev)
 	if ev.kind == 'outbound_call_done' then
 		handle_outbound_call_done(self, ev)
+
+	elseif ev.kind == 'outbound_call_diag' then
+		handle_outbound_call_diag(self, ev)
 
 	elseif ev.kind == 'inbound_call_done' then
 		handle_inbound_call_done(self, ev)
@@ -1276,6 +1465,7 @@ local function handle_event(self, ev)
 		handle_frame_event(self, ev)
 
 	elseif ev.kind == 'outbound_call_done'
+		or ev.kind == 'outbound_call_diag'
 		or ev.kind == 'inbound_call_done'
 	then
 		handle_done(self, ev)
@@ -1353,8 +1543,18 @@ function M.run(scope, params)
 		_done_rx               = done_rx,
 
 		_default_call_timeout  = positive_number(params.call_timeout_s, DEFAULT_CALL_TIMEOUT, 'bridge.call_timeout_s', 2),
-		_max_pending_calls     = resolve_nonneg_int(params.max_pending_calls, DEFAULT_MAX_PENDING_CALLS, 'bridge.max_pending_calls', 2),
-		_max_inbound_calls     = resolve_nonneg_int(params.max_inbound_calls, DEFAULT_MAX_INBOUND_CALLS, 'bridge.max_inbound_calls', 2),
+		_max_pending_calls     = resolve_nonneg_int(
+			params.max_pending_calls,
+			DEFAULT_MAX_PENDING_CALLS,
+			'bridge.max_pending_calls',
+			2
+		),
+		_max_inbound_calls     = resolve_nonneg_int(
+			params.max_inbound_calls,
+			DEFAULT_MAX_INBOUND_CALLS,
+			'bridge.max_inbound_calls',
+			2
+		),
 
 		_import_rules          = params.import_rules or {},
 		_export_publish_rules  = params.export_publish_rules or {},

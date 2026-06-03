@@ -164,6 +164,20 @@ local function phase_error(prefix, err)
 	return prefix .. ':' .. tostring(err)
 end
 
+local function print_prepare_diag(event, fields)
+	local parts = { '[update-prepare]', 'ev', event }
+	for _, key in ipairs({
+		'component', 'job_id', 'expected_image_id', 'duration_ms', 'ok', 'err',
+	}) do
+		local v = fields and fields[key]
+		if v ~= nil and v ~= '' then
+			parts[#parts + 1] = key
+			parts[#parts + 1] = tostring(v)
+		end
+	end
+	print(table.concat(parts, ' '))
+end
+
 local function describe_artifact(artifact)
 	if type(artifact) == 'table' and type(artifact.describe) == 'function' then
 		local ok, rec = pcall(function () return artifact:describe() end)
@@ -301,7 +315,22 @@ function Backend:stage_op(job, _ctx)
 			expected_image_id = image_id,
 			metadata = metadata_of(job),
 		}
+		local prepare_started = fibers.now()
+		print_prepare_diag('prepare_call_start', {
+			component = component,
+			job_id = job.job_id,
+			expected_image_id = image_id,
+		})
 		local prepared, perr = fibers.perform(call_component_op(self, component, 'prepare-update', prepare_payload))
+		local prepare_duration = math.floor(((fibers.now() - prepare_started) * 1000) + 0.5)
+		print_prepare_diag('prepare_call_done', {
+			component = component,
+			job_id = job.job_id,
+			expected_image_id = image_id,
+			duration_ms = prepare_duration,
+			ok = prepared ~= nil,
+			err = perr,
+		})
 		if prepared == nil then return nil, phase_error('component_prepare_update_failed', perr) end
 
 		local payload = {

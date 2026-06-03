@@ -35,6 +35,49 @@ local function default_call_op(conn, topic, payload, opts)
 	return nil, 'connection does not support call_op'
 end
 
+local function topic_string(topic)
+	if type(topic) ~= 'table' then return nil end
+	local out = {}
+	for i = 1, #topic do out[i] = tostring(topic[i]) end
+	return table.concat(out, '/')
+end
+
+local function prepare_action(ctx)
+	return ctx and ctx.action == 'prepare-update'
+end
+
+local function scalar_payload_field(payload, key)
+	if type(payload) ~= 'table' then return nil end
+	local v = payload[key]
+	local tv = type(v)
+	if tv == 'string' or tv == 'number' or tv == 'boolean' then
+		return tostring(v)
+	end
+	return nil
+end
+
+local function print_action_rpc_diag(ctx, event, payload, fields)
+	if not prepare_action(ctx) then return end
+	fields = fields or {}
+	local action = ctx.action_spec or {}
+	local parts = { '[device-action-rpc]', 'ev', event }
+	local function add(key, value)
+		if value == nil or value == '' then return end
+		parts[#parts + 1] = key
+		parts[#parts + 1] = tostring(value)
+	end
+	add('component', ctx.component_id)
+	add('action', ctx.action)
+	add('request_id', ctx.request_id)
+	add('topic', topic_string(action.call_topic))
+	add('job_id', scalar_payload_field(payload, 'job_id'))
+	add('expected_image_id', scalar_payload_field(payload, 'expected_image_id'))
+	add('duration_ms', fields.duration_ms)
+	add('status', fields.status)
+	add('err', fields.err)
+	print(table.concat(parts, ' '))
+end
+
 local function normalise_reply(reply)
 	if type(reply) == 'table' and reply.ok == false then
 		return nil, reply.reason or reply.err or 'action failed'
@@ -102,6 +145,8 @@ end
 
 local function rpc_call_op(ctx, owner, payload)
 	local action = ctx.action_spec
+	local started = fibers.now()
+	print_action_rpc_diag(ctx, 'component_action_rpc_start', payload)
 	local call_ev, cerr = default_call_op(ctx.conn, action.call_topic, payload, {
 		timeout = action.timeout or ctx.timeout,
 		deadline = ctx.deadline,
@@ -110,6 +155,11 @@ local function rpc_call_op(ctx, owner, payload)
 	if not call_ev then
 		local reason = cerr or 'rpc_unavailable'
 		owner:fail_once(reason)
+		print_action_rpc_diag(ctx, 'component_action_rpc_done', payload, {
+			duration_ms = math.floor(((fibers.now() - started) * 1000) + 0.5),
+			status = 'unavailable',
+			err = reason,
+		})
 		return op.always(public_result('unavailable', { err = reason }))
 	end
 
@@ -117,16 +167,30 @@ local function rpc_call_op(ctx, owner, payload)
 		if reply == nil then
 			local reason = err or 'rpc_failed'
 			owner:fail_once(reason)
+			print_action_rpc_diag(ctx, 'component_action_rpc_done', payload, {
+				duration_ms = math.floor(((fibers.now() - started) * 1000) + 0.5),
+				status = 'remote_failed',
+				err = reason,
+			})
 			return public_result('remote_failed', { err = reason })
 		end
 
 		local value, rerr = normalise_reply(reply)
 		if value == nil and rerr ~= nil then
 			owner:fail_once(rerr)
+			print_action_rpc_diag(ctx, 'component_action_rpc_done', payload, {
+				duration_ms = math.floor(((fibers.now() - started) * 1000) + 0.5),
+				status = 'remote_failed',
+				err = rerr,
+			})
 			return public_result('remote_failed', { err = rerr })
 		end
 
 		owner:reply_once(value)
+		print_action_rpc_diag(ctx, 'component_action_rpc_done', payload, {
+			duration_ms = math.floor(((fibers.now() - started) * 1000) + 0.5),
+			status = 'succeeded',
+		})
 		return public_result('succeeded', { value = value, reply_payload = value })
 	end)
 end
