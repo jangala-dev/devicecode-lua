@@ -75,12 +75,13 @@ show_df() { df -k / >&2 || true; }
 log 'current root filesystem usage before grow:'
 show_df
 
-avail0="$(free_kb 2>/dev/null || echo 0)"
-case "$avail0" in ''|*[!0-9]*) avail0=0 ;; esac
-if [ "$avail0" -ge "$MIN_FREE_KB" ]; then
-	log "root filesystem already has ${avail0}KB free; no guest-side grow needed"
+avail0="\$(free_kb 2>/dev/null || echo 0)"
+case "\$avail0" in ''|*[!0-9]*) avail0=0 ;; esac
+if [ "\$avail0" -ge "\$MIN_FREE_KB" ]; then
+	log "root filesystem already has \${avail0}KB free; no guest-side grow needed"
 	exit 0
 fi
+
 
 # Best-effort network setup for optional package installation.  This mirrors the
 # other OpenWrt VM provisioning helpers and is deliberately non-fatal.
