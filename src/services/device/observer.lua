@@ -202,14 +202,20 @@ function M.run(scope, ctx)
 				if nerr ~= nil then
 					emit({ tag = 'source_down', reason = 'bad_fact:' .. item.name .. ':' .. tostring(nerr) })
 				else
-					emit({ tag = 'fact_retained', fact = item.name, payload = payload, raw = model.copy_value(raw) })
+					emit({
+						tag = 'fact_retained',
+						fact = item.name,
+						payload = payload,
+						raw = model.copy_value(raw),
+						origin = item.ev.origin,
+					})
 					if refreshes_freshness(item) then
 						stale_latched = false
 						stale_deadline = (type(stale_after_s) == 'number' and stale_after_s > 0) and (fibers.now() + stale_after_s) or nil
 					end
 				end
 			elseif item.ev.op == 'unretain' then
-				emit({ tag = 'fact_unretained', fact = item.name })
+				emit({ tag = 'fact_unretained', fact = item.name, origin = item.ev.origin })
 			elseif item.ev.op == 'replay_done' then
 				-- Replay lifecycle metadata is not component state.
 			else

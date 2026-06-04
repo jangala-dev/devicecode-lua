@@ -108,6 +108,92 @@ local function derive_health(status, updater_state, explicit_health)
 	return 'ok'
 end
 
+local MCU_CRITICAL_FACTS = { 'software', 'updater', 'health' }
+
+local function fact_control_state(rec, fact)
+	local state = type(rec.fact_state) == 'table' and rec.fact_state[fact] or nil
+	state = type(state) == 'table' and state or {}
+	return {
+		seen = state.seen == true,
+		updated_at = state.updated_at,
+		fabric = copy(state.fabric),
+	}
+end
+
+local function fabric_has_session(fabric)
+	return type(fabric) == 'table'
+		and type(fabric.peer_sid) == 'string'
+		and fabric.peer_sid ~= ''
+		and fabric.session_generation ~= nil
+		and fabric.session_generation ~= ''
+end
+
+local function control_plane_status(facts)
+	local missing_facts = {}
+	local missing_origin = {}
+	local peer_sid, session_generation, link_id, link_generation
+	local mixed_sessions = false
+	local mixed_links = false
+
+	for i = 1, #MCU_CRITICAL_FACTS do
+		local fact = MCU_CRITICAL_FACTS[i]
+		local rec = facts[fact]
+		if not (type(rec) == 'table' and rec.seen == true) then
+			missing_facts[#missing_facts + 1] = fact
+		end
+		local fabric = type(rec) == 'table' and rec.fabric or nil
+		if not fabric_has_session(fabric) then
+			missing_origin[#missing_origin + 1] = fact
+		else
+			if peer_sid == nil then
+				peer_sid = fabric.peer_sid
+				session_generation = fabric.session_generation
+			elseif peer_sid ~= fabric.peer_sid or session_generation ~= fabric.session_generation then
+				mixed_sessions = true
+			end
+			if fabric.link_id ~= nil and fabric.link_id ~= '' then
+				if link_id == nil then link_id = fabric.link_id
+				elseif link_id ~= fabric.link_id then mixed_links = true end
+			end
+			if fabric.link_generation ~= nil and fabric.link_generation ~= '' then
+				if link_generation == nil then link_generation = fabric.link_generation
+				elseif link_generation ~= fabric.link_generation then mixed_links = true end
+			end
+		end
+	end
+
+	return {
+		ready = #missing_facts == 0 and #missing_origin == 0 and not mixed_sessions and not mixed_links,
+		missing_facts = missing_facts,
+		missing_origin_facts = missing_origin,
+		mixed_fact_sessions = mixed_sessions,
+		mixed_fact_links = mixed_links,
+		peer_sid = peer_sid,
+		session_generation = session_generation,
+		link_id = link_id,
+		link_generation = link_generation,
+	}
+end
+
+local function component_control_plane(rec)
+	if not (rec and (rec.subtype == 'mcu' or rec.member_class == 'mcu' or rec.class == 'mcu')) then
+		return nil
+	end
+	local facts = {}
+	for i = 1, #MCU_CRITICAL_FACTS do
+		local fact = MCU_CRITICAL_FACTS[i]
+		facts[fact] = fact_control_state(rec, fact)
+	end
+	local status = control_plane_status(facts)
+	return {
+		kind = 'mcu_control_plane',
+		ready = status.ready,
+		status = status,
+		facts = facts,
+		source = derive_source(rec),
+	}
+end
+
 function M.component_view(name, rec, now_ts)
 	rec = rec or {}
 	local base = compose_component(rec)
@@ -141,6 +227,7 @@ function M.component_view(name, rec, now_ts)
 		alerts = copy(base.alerts or {}),
 		wired_provider = copy(base.wired_provider),
 		source = derive_source(rec),
+		control_plane = component_control_plane(rec),
 		last_action = copy(rec.last_action),
 	}
 end

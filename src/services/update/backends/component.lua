@@ -150,15 +150,6 @@ local function validate_commit_reply(reply)
 	return accepted, nil
 end
 
-local function ambiguous_commit_send_failure(err)
-	if err == nil then return true end
-	local reason = tostring(err)
-	return reason == 'timeout'
-		or reason == 'liveness_timeout'
-		or reason:find('timeout', 1, true) ~= nil
-		or reason:find('liveness', 1, true) ~= nil
-end
-
 local function phase_error(prefix, err)
 	if err == nil or err == '' then return prefix end
 	return prefix .. ':' .. tostring(err)
@@ -265,6 +256,69 @@ local function require_component_boot_id(self, component)
 	return true, nil
 end
 
+local function critical_fact_fabric(state, fact)
+	local cp = type(state) == 'table' and state.control_plane or nil
+	local facts = type(cp) == 'table' and cp.facts or nil
+	local rec = type(facts) == 'table' and facts[fact] or nil
+	if type(rec) ~= 'table' then return nil end
+	return type(rec.fabric) == 'table' and rec.fabric or nil
+end
+
+local function has_session_identity(fabric)
+	if type(fabric) ~= 'table' then return false end
+	if type(fabric.peer_sid) ~= 'string' or fabric.peer_sid == '' then return false end
+	if fabric.session_generation == nil or fabric.session_generation == '' then return false end
+	return true
+end
+
+local function require_matching_mcu_fact_sessions(state)
+	local missing = {}
+	local metas = {}
+	for _, fact in ipairs(MCU_CRITICAL_FACTS) do
+		local fabric = critical_fact_fabric(state, fact)
+		if not has_session_identity(fabric) then
+			missing[#missing + 1] = fact
+		else
+			metas[fact] = fabric
+		end
+	end
+	if #missing > 0 then
+		return nil, 'mcu_control_plane_not_ready:fact_origin_missing:' .. comma_join(missing)
+	end
+
+	local peer_sid, session_generation
+	for _, fact in ipairs(MCU_CRITICAL_FACTS) do
+		local fabric = metas[fact]
+		if peer_sid == nil then
+			peer_sid = fabric.peer_sid
+			session_generation = fabric.session_generation
+		elseif peer_sid ~= fabric.peer_sid or session_generation ~= fabric.session_generation then
+			return nil, 'mcu_control_plane_not_ready:mixed_fact_sessions'
+		end
+	end
+
+	local link_id, link_generation
+	for _, fact in ipairs(MCU_CRITICAL_FACTS) do
+		local fabric = metas[fact]
+		if fabric.link_id ~= nil and fabric.link_id ~= '' then
+			if link_id == nil then
+				link_id = fabric.link_id
+			elseif link_id ~= fabric.link_id then
+				return nil, 'mcu_control_plane_not_ready:mixed_fact_links'
+			end
+		end
+		if fabric.link_generation ~= nil and fabric.link_generation ~= '' then
+			if link_generation == nil then
+				link_generation = fabric.link_generation
+			elseif link_generation ~= fabric.link_generation then
+				return nil, 'mcu_control_plane_not_ready:mixed_fact_links'
+			end
+		end
+	end
+
+	return true, nil
+end
+
 local function require_update_admission(self, component)
 	if component ~= 'mcu' then
 		return require_component_boot_id(self, component)
@@ -283,10 +337,13 @@ local function require_update_admission(self, component)
 	if type(actions) ~= 'table' or actions['prepare-update'] ~= true then
 		return nil, 'mcu_control_plane_not_ready:prepare_route_missing'
 	end
-	local source = state and state.source or nil
+	local cp = state and state.control_plane or nil
+	local source = state and (state.source or (type(cp) == 'table' and cp.source)) or nil
 	if type(source) == 'table' and source.reason ~= nil and source.reason ~= '' then
 		return nil, 'mcu_control_plane_not_ready:' .. tostring(source.reason)
 	end
+	local session_ok, session_err = require_matching_mcu_fact_sessions(state)
+	if session_ok ~= true then return nil, session_err end
 	return true, nil
 end
 
@@ -400,20 +457,7 @@ function Backend:commit_op(job, ctx)
 	}
 	return call_component_op(self, component, 'commit-update', payload):wrap(function (reply, err)
 		if reply == nil then
-			if component == 'mcu' and ambiguous_commit_send_failure(err) then
-				local reason = err or 'commit_reply_missing'
-				return {
-					accepted = true,
-					ambiguous = true,
-					reason = reason,
-					component_reply = {
-						accepted = true,
-						ambiguous = true,
-						reason = reason,
-					},
-				}
-			end
-			return nil, err or 'component_commit_update_failed'
+			return nil, phase_error('component_commit_update_failed', err)
 		end
 		local accepted, rerr = validate_commit_reply(reply)
 		if accepted == nil then return nil, rerr end

@@ -30,6 +30,34 @@ local function empty_snapshot()
 	}
 end
 
+local function fabric_origin(origin)
+	local extra = type(origin) == 'table' and origin.extra or nil
+	local fabric = type(extra) == 'table' and extra.fabric or nil
+	if type(fabric) ~= 'table' then return nil end
+	local session = type(fabric.session) == 'table' and fabric.session or {}
+	local fabric_kind = fabric.kind
+	local allow_origin_fallback = type(fabric_kind) == 'string'
+		and fabric_kind:match('^remote_') ~= nil
+	local out = {
+		kind = fabric.kind,
+		link_id = fabric.link_id,
+		link_generation = fabric.link_generation,
+		peer_sid = fabric.peer_sid
+			or session.peer_sid
+			or (allow_origin_fallback and origin.peer_sid or nil),
+		session_generation = fabric.session_generation
+			or session.session_generation
+			or (allow_origin_fallback and origin.session_generation or nil),
+	}
+	local has = false
+	for _, v in pairs(out) do
+		if v ~= nil then
+			has = true
+			break
+		end
+	end
+	return has and out or nil
+end
 
 local function recompute_component_status(rec)
 	if type(rec) ~= 'table' then return rec end
@@ -168,6 +196,7 @@ function DeviceModel:apply_observation(generation, observation)
 		rec.fact_state[fact] = rec.fact_state[fact] or {}
 		rec.fact_state[fact].seen = observation.payload ~= nil
 		rec.fact_state[fact].updated_at = ts
+		rec.fact_state[fact].fabric = fabric_origin(observation.origin)
 		rec.source_up = true
 		rec.source_err = nil
 	elseif tag == 'fact_unretained' then
@@ -179,6 +208,7 @@ function DeviceModel:apply_observation(generation, observation)
 		rec.fact_state[fact] = rec.fact_state[fact] or {}
 		rec.fact_state[fact].seen = false
 		rec.fact_state[fact].updated_at = ts
+		rec.fact_state[fact].fabric = nil
 	elseif tag == 'event' or tag == 'event_seen' then
 		local event = observation.event
 		if type(event) ~= 'string' or event == '' then

@@ -5,6 +5,7 @@ local op = require 'fibers.op'
 local cond = require 'fibers.cond'
 local mailbox = require 'fibers.mailbox'
 local sleep = require 'fibers.sleep'
+local busmod = require 'bus'
 
 local config = require 'services.device.config'
 local catalogue = require 'services.device.catalogue'
@@ -16,6 +17,9 @@ local topics = require 'services.device.topics'
 local projection = require 'services.device.projection'
 local component_mcu = require 'services.device.component_mcu'
 local fabric_topics = require 'services.fabric.topics'
+local fabric_bus_adapter = require 'services.fabric.bus_adapter'
+local fabric_protocol = require 'services.fabric.protocol'
+local fabric_session = require 'services.fabric.session'
 
 local tests = {}
 
@@ -25,6 +29,12 @@ local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true
 local function assert_false(v, msg) if v ~= false then fail(msg or ('expected false, got ' .. tostring(v))) end end
 local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, got ' .. tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end end
+
+local function join_strings(items)
+	local out = {}
+	for i = 1, #(items or {}) do out[i] = tostring(items[i]) end
+	return table.concat(out, ',')
+end
 
 local function wait_for_signal(c, msg)
 	local which = fibers.perform(fibers.named_choice{
@@ -1074,6 +1084,17 @@ local function send_watch_event(watch, ev)
 	assert_true(fibers.perform(watch.tx:send_op(ev)))
 end
 
+local function fabric_ctx(gen, sid)
+	return fabric_session.new_session_context {
+		proto = fabric_protocol.PROTO,
+		link_id = 'mcu-uart0',
+		link_generation = 4,
+		session_generation = gen or 9,
+		peer_sid = sid or 'mcu-sid-1',
+		peer_node = 'mcu',
+	}
+end
+
 local function start_observer_worker(scope, conn, tx, component)
 	local ok, err = scope:spawn(function ()
 		observer.run(scope, {
@@ -1172,17 +1193,33 @@ function tests.test_observer_mcu_critical_replay_metadata_does_not_overwrite_fac
 			wait_for_watches(conn, 3)
 
 			local watches = watches_by_fact(conn)
+			local origin = {
+				extra = {
+					fabric = {
+						kind = 'remote_retain',
+						link_id = 'mcu-uart0',
+						link_generation = 5,
+						session = {
+							peer_sid = 'mcu-sid-1',
+							session_generation = 11,
+						},
+					},
+				},
+			}
 			send_watch_event(watches.software, {
 				op = 'retain',
 				payload = { image_id = 'mcu-dev-15.0', boot_id = 'boot-new' },
+				origin = origin,
 			})
 			send_watch_event(watches.updater, {
 				op = 'retain',
 				payload = { state = 'idle', job_id = 'job-1' },
+				origin = origin,
 			})
 			send_watch_event(watches.health, {
 				op = 'retain',
 				payload = { state = 'ok' },
+				origin = origin,
 			})
 
 			for _ = 1, 3 do
@@ -1201,6 +1238,10 @@ function tests.test_observer_mcu_critical_replay_metadata_does_not_overwrite_fac
 			assert_eq(rec.raw_facts.software.boot_id, 'boot-new')
 			assert_eq(rec.raw_facts.updater.state, 'idle')
 			assert_eq(rec.raw_facts.health, 'ok')
+			local payloads = projection.component_payloads('mcu', rec, 12)
+			assert_eq(payloads.component.control_plane.facts.software.fabric.peer_sid, 'mcu-sid-1')
+			assert_eq(payloads.component.control_plane.facts.updater.fabric.session_generation, 11)
+			assert_eq(payloads.component.control_plane.facts.health.fabric.link_id, 'mcu-uart0')
 			scope:cancel('test_done')
 		end)
 		assert_eq(st, 'cancelled', tostring(primary))
@@ -1452,6 +1493,164 @@ function tests.test_mcu_fault_availability_is_stored_and_projected()
 		local payloads = projection.component_payloads('mcu', rec, 10)
 		assert_eq(payloads.component.availability, 'unavailable')
 		assert_eq(payloads.cap_status.state, 'unavailable')
+	end)
+end
+
+function tests.test_mcu_control_plane_projection_preserves_fabric_fact_origin()
+	fibers.run(function ()
+		local cat = assert(config.to_catalogue({
+			schema = config.SCHEMA,
+			components = {
+				mcu = {
+					subtype = 'mcu',
+					required_facts = { 'software', 'updater', 'health' },
+					facts = {
+						software = topics.raw_member_state('mcu', 'software'),
+						updater = topics.raw_member_state('mcu', 'updater'),
+						health = topics.raw_member_state('mcu', 'health'),
+					},
+				},
+			},
+		}))
+		local origin = {
+			extra = {
+				fabric = {
+					kind = 'remote_retain',
+					link_id = 'mcu-uart0',
+					link_generation = 4,
+					session = {
+						peer_sid = 'mcu-sid-1',
+						session_generation = 9,
+					},
+				},
+			},
+		}
+		local m = model_mod.new()
+		m:apply_catalogue(1, cat)
+		m:apply_observation(1, {
+			component = 'mcu',
+			tag = 'fact_retained',
+			fact = 'software',
+			payload = { image_id = 'img-old', boot_id = 'boot-old' },
+			origin = origin,
+		})
+		m:apply_observation(1, {
+			component = 'mcu',
+			tag = 'fact_retained',
+			fact = 'updater',
+			payload = { state = 'ready' },
+			origin = origin,
+		})
+		m:apply_observation(1, {
+			component = 'mcu',
+			tag = 'fact_retained',
+			fact = 'health',
+			payload = { state = 'ok' },
+			origin = origin,
+		})
+
+		local payloads = projection.component_payloads('mcu', m:snapshot().components.mcu, 10)
+		local cp = payloads.component.control_plane
+		assert_not_nil(cp)
+		assert_eq(cp.facts.software.fabric.peer_sid, 'mcu-sid-1')
+		assert_eq(cp.facts.updater.fabric.session_generation, 9)
+		assert_eq(cp.facts.health.fabric.link_id, 'mcu-uart0')
+		assert_eq(payloads.component.software.boot_id, 'boot-old')
+		assert_eq(payloads.component.updater.state, 'ready')
+		assert_eq(payloads.component.health, 'ok')
+
+		m:apply_observation(1, {
+			component = 'mcu',
+			tag = 'fact_unretained',
+			fact = 'health',
+			origin = origin,
+		})
+		payloads = projection.component_payloads('mcu', m:snapshot().components.mcu, 11)
+		assert_eq(payloads.component.control_plane.facts.health.seen, false)
+		assert_nil(payloads.component.control_plane.facts.health.fabric)
+	end)
+end
+
+function tests.test_mcu_control_plane_real_fabric_retained_import_replay_has_origin()
+	fibers.run(function ()
+		local st, _rep, primary = fibers.run_scope(function (scope)
+			local bus = busmod.new()
+			local import_conn = bus:connect()
+			local observe_conn = bus:connect()
+			local check_conn = bus:connect()
+			local rt = fabric_bus_adapter.local_runtime(scope, import_conn, {
+				link_id = 'mcu-uart0',
+				link_generation = 4,
+			})
+			local session = fabric_ctx(12, 'mcu-sid-real')
+			local ready_watch = assert(check_conn:watch_retained(
+				topics.raw_member_state('mcu', 'health'),
+				{ replay = false, queue_len = 4, full = 'reject_newest' }
+			))
+			local imports = {
+				{
+					topic = topics.raw_member_state('mcu', 'software'),
+					payload = { image_id = 'mcu-dev-15.7', boot_id = 'boot-real' },
+				},
+				{
+					topic = topics.raw_member_state('mcu', 'updater'),
+					payload = { state = 'ready' },
+				},
+				{
+					topic = topics.raw_member_state('mcu', 'health'),
+					payload = { state = 'ok' },
+				},
+			}
+			for _, item in ipairs(imports) do
+				assert_true(rt.command_tx:send({
+					kind = 'retain',
+					topic = item.topic,
+					payload = item.payload,
+					session = session,
+					origin_kind = 'remote_retain',
+				}))
+			end
+
+			local ready_ev = fibers.perform(ready_watch:recv_op())
+			assert_eq(ready_ev.op, 'retain')
+			assert_eq(ready_ev.origin.extra.fabric.session.peer_sid, 'mcu-sid-real')
+			assert_eq(ready_ev.origin.extra.fabric.session.session_generation, 12)
+			check_conn:unwatch_retained(ready_watch)
+
+			local cat = catalogue.build(nil)
+			local m = model_mod.new()
+			m:apply_catalogue(1, cat)
+			local tx, rx = mailbox.new(16, { full = 'reject_newest' })
+			start_observer_worker(scope, observe_conn, tx, cat.components.mcu)
+
+			local seen = {}
+			while not (seen.software and seen.updater and seen.health) do
+				local ev = assert(recv_observation(rx, 0.25))
+				if ev.tag == 'fact_retained' then
+					assert_eq(ev.origin.extra.fabric.session.peer_sid, 'mcu-sid-real')
+					m:apply_observation(1, ev)
+					seen[ev.fact] = true
+				end
+			end
+
+			local payloads = projection.component_payloads('mcu', m:snapshot().components.mcu, 20)
+			local cp = payloads.component.control_plane
+			assert_true(cp.ready, 'control plane should be ready from real Fabric retained replay; missing_origin='
+				.. join_strings(cp.status.missing_origin_facts)
+				.. ' missing_facts=' .. join_strings(cp.status.missing_facts))
+			assert_true(cp.status.ready, 'control plane status should be ready')
+			assert_eq(#cp.status.missing_origin_facts, 0)
+			assert_eq(cp.status.peer_sid, 'mcu-sid-real')
+			assert_eq(cp.status.session_generation, 12)
+			assert_eq(cp.status.link_id, 'mcu-uart0')
+			assert_eq(cp.status.link_generation, 4)
+			assert_eq(cp.facts.software.fabric.peer_sid, 'mcu-sid-real')
+			assert_eq(cp.facts.updater.fabric.session_generation, 12)
+			assert_eq(cp.facts.health.fabric.link_id, 'mcu-uart0')
+			scope:cancel('test_done')
+		end)
+		assert_eq(st, 'cancelled', tostring(primary))
+		assert_eq(primary, 'test_done')
 	end)
 end
 

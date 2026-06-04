@@ -15,14 +15,41 @@ local function assert_true(v, msg)
   if v ~= true then error(msg or ('expected true, got ' .. tostring(v)), 2) end
 end
 
+local function fabric_fact(peer_sid, session_generation, link_id, link_generation)
+  return {
+    seen = true,
+    updated_at = 10,
+    fabric = {
+      peer_sid = peer_sid or 'mcu-sid-1',
+      session_generation = session_generation or 7,
+      link_id = link_id or 'mcu-uart0',
+      link_generation = link_generation or 3,
+    },
+  }
+end
+
+local function coherent_control_plane()
+  return {
+    kind = 'mcu_control_plane',
+    facts = {
+      software = fabric_fact(),
+      updater = fabric_fact(),
+      health = fabric_fact(),
+    },
+    source = { kind = 'member', member = 'mcu' },
+  }
+end
+
 local function fake_observer(software, overrides)
   local state = {
     software = software,
     updater = { state = 'running' },
     health = { state = 'ok' },
     actions = { ['prepare-update'] = true, ['stage-update'] = true, ['commit-update'] = true },
+    control_plane = coherent_control_plane(),
   }
   for k, v in pairs(overrides or {}) do state[k] = v end
+  if overrides and overrides.control_plane == false then state.control_plane = nil end
   return {
     snapshot = function()
       return {
@@ -227,7 +254,7 @@ function T.component_backend_commit_op_requires_explicit_acceptance()
   end)
 end
 
-function T.component_backend_commit_op_treats_mcu_timeout_as_ambiguous_acceptance()
+function T.component_backend_commit_op_treats_mcu_timeout_as_commit_failure()
   runfibers.run(function()
     local conn = {
       call_op = function(_, topic)
@@ -243,12 +270,8 @@ function T.component_backend_commit_op_treats_mcu_timeout_as_ambiguous_acceptanc
       metadata = { image_id = 'img-new' },
     }, {}))
 
-    assert_eq(type(got), 'table', tostring(err))
-    assert_true(got.accepted)
-    assert_true(got.ambiguous)
-    assert_eq(got.reason, 'timeout')
-    assert_eq(got.component_reply.accepted, true)
-    assert_eq(got.component_reply.ambiguous, true)
+    assert_eq(got, nil)
+    assert_eq(err, 'component_commit_update_failed:timeout')
   end)
 end
 
@@ -534,6 +557,107 @@ function T.component_backend_stage_op_requires_prepare_route_before_artifact_ope
   end)
 end
 
+function T.component_backend_stage_op_requires_mcu_fact_fabric_metadata()
+  runfibers.run(function()
+    local calls = {}
+    local artifact_store = {
+      open_op = function() calls.open = true; return op.always({}, nil) end,
+    }
+    local conn = {
+      call_op = function(_, topic)
+        calls[topic[5]] = true
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }, {
+        control_plane = false,
+      }),
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+    }, {}))
+    assert_eq(staged, nil)
+    assert_eq(serr, 'mcu_control_plane_not_ready:fact_origin_missing:software,updater,health')
+    assert_eq(calls.open, nil, 'artifact should not open before fact session readiness')
+    assert_eq(calls['prepare-update'], nil, 'prepare-update should not be called before fact session readiness')
+  end)
+end
+
+function T.component_backend_stage_op_rejects_mixed_mcu_fact_sessions()
+  runfibers.run(function()
+    local calls = {}
+    local artifact_store = {
+      open_op = function() calls.open = true; return op.always({}, nil) end,
+    }
+    local conn = {
+      call_op = function(_, topic)
+        calls[topic[5]] = true
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local cp = coherent_control_plane()
+    cp.facts.updater = fabric_fact('mcu-sid-2', 8)
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }, {
+        control_plane = cp,
+      }),
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+    }, {}))
+    assert_eq(staged, nil)
+    assert_eq(serr, 'mcu_control_plane_not_ready:mixed_fact_sessions')
+    assert_eq(calls.open, nil, 'artifact should not open with mixed critical fact sessions')
+  end)
+end
+
+function T.component_backend_stage_op_rejects_mixed_mcu_fact_links_when_present()
+  runfibers.run(function()
+    local calls = {}
+    local artifact_store = {
+      open_op = function() calls.open = true; return op.always({}, nil) end,
+    }
+    local conn = {
+      call_op = function(_, topic)
+        calls[topic[5]] = true
+        return op.always({ ok = true }, nil)
+      end,
+    }
+    local cp = coherent_control_plane()
+    cp.facts.health = fabric_fact('mcu-sid-1', 7, 'mcu-uart1', 3)
+    local backend = component_backend.new({
+      conn = conn,
+      artifact_store = artifact_store,
+      component = 'mcu',
+      observer = fake_observer({ image_id = 'img-old', version = '1.0', boot_id = 'boot-old' }, {
+        control_plane = cp,
+      }),
+    })
+
+    local staged, serr = fibers.perform(backend:stage_op({
+      job_id = 'job-1',
+      component = 'mcu',
+      artifact_ref = 'artifact-1',
+    }, {}))
+    assert_eq(staged, nil)
+    assert_eq(serr, 'mcu_control_plane_not_ready:mixed_fact_links')
+    assert_eq(calls.open, nil, 'artifact should not open with mixed critical fact links')
+  end)
+end
+
 function T.component_backend_stage_op_admits_real_component_projection_shape()
   runfibers.run(function()
     local opened = false
@@ -571,6 +695,7 @@ function T.component_backend_stage_op_admits_real_component_projection_shape()
               health = 'ok',
               actions = { ['prepare-update'] = true, ['stage-update'] = true },
               source = { kind = 'member', member = 'mcu' },
+              control_plane = coherent_control_plane(),
             },
           },
         }
