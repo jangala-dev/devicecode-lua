@@ -25,7 +25,6 @@ local DEFAULT_DRAIN_QUIET_S = 0.020
 local DEFAULT_DRAIN_READ_S = 0.010
 local BAD_LINE_SNIP_BYTES = 80
 local RESYNC_PREFIX_SCAN_MAX_BYTES = 4096
-local JSONL_RESYNC_ENV = 'DEVICECODE_FABRIC_ALLOW_JSONL_RESYNC'
 
 --------------------------------------------------------------------------------
 -- JSONL transport wrapper
@@ -168,17 +167,14 @@ local function resync_diag(line, prefix_len, frame)
 	}
 end
 
-local function env_truthy(name)
-	local v = os.getenv(name)
-	if type(v) ~= 'string' then return false end
-	v = v:lower()
-	return v == '1' or v == 'true' or v == 'yes' or v == 'on'
+local function handshake_frame(frame)
+	return type(frame) == 'table'
+		and (frame.type == 'hello' or frame.type == 'hello_ack')
 end
 
-local function decode_line_with_resync(line, allow_resync)
+local function decode_line_with_resync(line)
 	local frame, err = protocol.decode_line(line)
 	if frame ~= nil then return frame, nil, nil end
-	if allow_resync ~= true then return nil, err end
 
 	local scan = #line
 	if scan > RESYNC_PREFIX_SCAN_MAX_BYTES then
@@ -193,7 +189,7 @@ local function decode_line_with_resync(line, allow_resync)
 		local prefix = line:sub(1, prefix_len)
 		if non_printable_prefix(prefix) then
 			local resynced, rerr = protocol.decode_line(line:sub(start))
-			if resynced ~= nil then
+			if handshake_frame(resynced) then
 				return resynced, nil, resync_diag(line, prefix_len, resynced)
 			end
 			return nil, rerr or err
@@ -239,7 +235,6 @@ function M.wrap_transport(session, opts)
 		_mode       = mode,
 		_terminator = terminator,
 		_trace_io   = opts.trace_io == true,
-		_allow_jsonl_resync = opts.allow_jsonl_resync == true or env_truthy(JSONL_RESYNC_ENV),
 		_closed     = false,
 	}, Transport), nil
 end
@@ -307,7 +302,7 @@ function Transport:read_frame_op()
 			if blank_line(line) then
 				log_wire(self._trace_io, 'blank_line_ignored', { line_len = #line })
 			else
-				local frame, derr, diag = decode_line_with_resync(line, self._allow_jsonl_resync)
+				local frame, derr, diag = decode_line_with_resync(line)
 				if frame == nil then
 					local bad_diag = bad_line_diag(line, derr)
 					log_wire(self._trace_io, 'decode_failed', bad_diag)
