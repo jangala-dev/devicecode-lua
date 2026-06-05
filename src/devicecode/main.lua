@@ -10,6 +10,8 @@ local busmod = require 'bus'
 
 local safe   = require 'coxpcall'
 
+local EXIT_GRACE_PERIOD = 60.0
+
 local M      = {}
 
 local function require_env(name)
@@ -285,6 +287,8 @@ function M.run(scope, params)
             status  = jst,
             primary = tostring(jprimary),
         })
+
+        sleep.sleep(EXIT_GRACE_PERIOD)
 
 		scope:cancel(('service_not_ok:%s'):format(tostring(svc)))
     end)
