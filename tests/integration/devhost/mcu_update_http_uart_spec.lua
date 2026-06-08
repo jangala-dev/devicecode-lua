@@ -247,6 +247,119 @@ local function wait_retained_payload_where(conn, topic, label, pred, opts)
     return value
 end
 
+
+local function topic_string(topic)
+    if type(topic) ~= 'table' then return tostring(topic) end
+    local out = {}
+    for i = 1, #topic do out[i] = tostring(topic[i]) end
+    return table.concat(out, '/')
+end
+
+local function fabric_payload_snapshot(payload)
+    if type(payload) ~= 'table' then return nil end
+    return type(payload.snapshot) == 'table' and payload.snapshot or payload
+end
+
+local function compact_fabric_session(s)
+    s = type(s) == 'table' and s or {}
+    return ('phase=%s established=%s local=%s peer_node=%s peer_sid=%s gen=%s wire_errors=%s bad_frames=%s last_wire_error=%s why=%s'):format(
+        tostring(s.phase), tostring(s.established), tostring(s.local_node), tostring(s.peer_node),
+        tostring(s.peer_sid), tostring(s.session_generation), tostring(s.wire_errors or 0),
+        tostring(s.bad_frame_count or 0), tostring(s.last_wire_error), tostring(s.why)
+    )
+end
+
+local function compact_fabric_bridge(s)
+    s = type(s) == 'table' and s or {}
+    return ('state=%s imported=%s pending=%s inbound=%s frames_sent=%s frames_recv=%s session_peer=%s drop=%s err=%s'):format(
+        tostring(s.state), tostring(s.imported_topics), tostring(s.pending_calls), tostring(s.inbound_calls),
+        tostring(s.frames_sent), tostring(s.frames_received),
+        tostring(type(s.session) == 'table' and s.session.peer_sid or nil),
+        tostring(s.session_drop_reason), tostring(s.last_err)
+    )
+end
+
+local function compact_fabric_transfer(s)
+    s = type(s) == 'table' and s or {}
+    local stats = type(s.stats) == 'table' and s.stats or {}
+    local active = type(s.active) == 'table' and s.active or nil
+    local last = type(s.last) == 'table' and s.last or nil
+    return ('active=%s active_status=%s last_status=%s completed=%s failed=%s cancelled=%s stale=%s'):format(
+        tostring(active ~= nil), tostring(active and active.status), tostring(last and last.status),
+        tostring(stats.completed), tostring(stats.failed), tostring(stats.cancelled), tostring(stats.stale)
+    )
+end
+
+local function compact_fabric_link(s)
+    s = type(s) == 'table' and s or {}
+    local comps = {}
+    if type(s.components) == 'table' then
+        for name, rec in pairs(s.components) do
+            comps[#comps + 1] = tostring(name) .. '=' .. tostring(type(rec) == 'table' and rec.status or rec)
+        end
+        table.sort(comps)
+    end
+    return ('state=%s completed=%s/%s reason=%s components=[%s]'):format(
+        tostring(s.state), tostring(s.completed), tostring(s.total), tostring(s.reason), table.concat(comps, ',')
+    )
+end
+
+local function describe_fabric_status_payload(payload, component)
+    local s = fabric_payload_snapshot(payload)
+    if component == 'session' then return compact_fabric_session(s) end
+    if component == 'rpc_bridge' then return compact_fabric_bridge(s) end
+    if component == 'transfer_manager' or component == 'transfer' then return compact_fabric_transfer(s) end
+    return compact_fabric_link(s)
+end
+
+local function retained_payload_now(conn, topic)
+    local view = conn:retained_view(topic)
+    local msg = view:get(topic)
+    view:close()
+    return msg and msg.payload or nil
+end
+
+local function log_fabric_status(conn, prefix)
+    prefix = prefix or 'fabric'
+    local topics = {
+        { label = 'link', topic = fabric_topics.state_link('link-a') },
+        { label = 'session', component = 'session', topic = fabric_topics.state_link_component('link-a', 'session') },
+        { label = 'rpc_bridge', component = 'rpc_bridge', topic = fabric_topics.state_link_component('link-a', 'rpc_bridge') },
+        { label = 'transfer_manager', component = 'transfer_manager', topic = fabric_topics.state_link_component('link-a', 'transfer_manager') },
+    }
+    for _, item in ipairs(topics) do
+        local payload = retained_payload_now(conn, item.topic)
+        log(('%s %s %s -> %s'):format(prefix, item.label, topic_string(item.topic), describe_fabric_status_payload(payload, item.component)))
+    end
+end
+
+local function wait_fabric_session_established(conn, label, opts)
+    opts = opts or {}
+    local topic = fabric_topics.state_link_component('link-a', 'session')
+    local payload = wait_retained_payload_where(conn, topic, label or 'fabric session established', function (p)
+        local s = fabric_payload_snapshot(p)
+        if type(s) == 'table' and s.established == true and type(s.peer_sid) == 'string' and s.peer_sid ~= '' then
+            return p
+        end
+        return nil
+    end, { timeout = opts.timeout or 6.0 })
+    log((label or 'fabric session established') .. ': ' .. describe_fabric_status_payload(payload, 'session'))
+    return payload
+end
+
+
+local function fabric_progress_fragment(conn)
+    if conn == nil then return '' end
+    local session = retained_payload_now(conn, fabric_topics.state_link_component('link-a', 'session'))
+    local bridge = retained_payload_now(conn, fabric_topics.state_link_component('link-a', 'rpc_bridge'))
+    local transfer = retained_payload_now(conn, fabric_topics.state_link_component('link-a', 'transfer_manager'))
+    return ('fabric_session=(%s) fabric_bridge=(%s) fabric_transfer=(%s)'):format(
+        describe_fabric_status_payload(session, 'session'),
+        describe_fabric_status_payload(bridge, 'rpc_bridge'),
+        describe_fabric_status_payload(transfer, 'transfer_manager')
+    )
+end
+
 local function fresh_uart_manager()
     -- The UART manager is currently module-singleton state.  The filtered test
     -- runner still requires every spec module before it runs the selected test,
@@ -277,6 +390,15 @@ local function wait_channel_get(ch, timeout_s, what)
         error(('channel closed while waiting for %s: %s'):format(what or 'channel item', tostring(b)), 0)
     end
     return a
+end
+
+local function wait_until_test(label, pred, timeout_s, interval_s)
+    local deadline = fibers.now() + (timeout_s or 2.0)
+    while fibers.now() < deadline do
+        if pred() then return true end
+        fibers.perform(sleep.sleep_op(interval_s or 0.05))
+    end
+    error('timed out waiting for ' .. tostring(label), 0)
 end
 
 local function wait_device_event(dev_ev_ch, event_type, class, id, timeout_s)
@@ -1188,6 +1310,15 @@ local function start_fabric_pair(parent_scope, cm5_bus, fake, uart)
         return p and p.available == true and p
     end, { timeout = 6.0 })
 
+    local cm5_session = wait_fabric_session_established(cm5_conn, 'CM5 fabric hello/hello_ack session established', { timeout = 6.0 })
+    local cm5_snapshot = fabric_payload_snapshot(cm5_session) or {}
+    assert_eq(cm5_snapshot.peer_node, 'mcu', 'CM5 fabric session should identify MCU peer')
+    wait_until_test('MCU child fabric hello/hello_ack session established', function ()
+        return fake and fake.mcu_fabric_session_seen == true
+    end, 6.0, 0.05)
+    assert_eq(fake.mcu_fabric_session and fake.mcu_fabric_session.peer_node, 'cm5', 'MCU fabric session should identify CM5 peer')
+    log_fabric_status(cm5_conn, 'CM5 fabric established status')
+
     return {
         scope = pair_scope,
         cm5_conn = cm5_conn,
@@ -1289,6 +1420,15 @@ local function update_fake_from_mcu_child(fake, ev)
         fake.commit_payload = ev.payload
         fake.commit_seen = true
         fake.committed_image_id = ev.committed_image_id
+    elseif event == 'fabric_session' then
+        fake.mcu_fabric_session = ev
+        fake.mcu_fabric_session_seen = true
+        log(('MCU child fabric session: phase=%s established=%s peer_node=%s peer_sid=%s gen=%s wire_errors=%s bad_frames=%s'):format(
+            tostring(ev.phase), tostring(ev.established), tostring(ev.peer_node), tostring(ev.peer_sid),
+            tostring(ev.session_generation), tostring(ev.wire_errors or 0), tostring(ev.bad_frame_count or 0)
+        ))
+    elseif event == 'fabric_status' then
+        log(('MCU child fabric %s: %s'):format(tostring(ev.component or ev.label or 'status'), tostring(ev.summary)))
     elseif event == 'log' then
         log('MCU child: ' .. tostring(ev.message))
     end
@@ -1296,6 +1436,8 @@ end
 
 local function start_mcu_instance(parent_scope, fake, uart_port)
     assert(uart_port and uart_port.slave_name, 'MCU PTY slave required')
+    fake.mcu_fabric_session_seen = false
+    fake.mcu_fabric_session = nil
     local scope = assert(parent_scope:child())
     local ipc_path = ('/tmp/devicecode-mcu-child-%d-%d.sock'):format(os.time(), math.random(100000, 999999))
     os.remove(ipc_path)
@@ -1470,14 +1612,15 @@ function T.ui_http_mcu_update_short_stage_timeout_fails_via_outer_choice()
 
         log('short-timeout: waiting for job to fail due to the outer stage deadline')
         local failed = wait_job_chatty(cm5.conn, 'job-mcu-http-uart', 'failed', 20.0, function ()
-            return ('mcu_received=%d chunks=%d uart_bytes=%d uart_fragments=%d uart_pauses=%d uart_bad_json=%d'):format(
+            return (('mcu_received=%d chunks=%d uart_bytes=%d uart_fragments=%d uart_pauses=%d uart_bad_json=%d; %s'):format(
                 fake.receive_bytes or 0,
                 fake.receive_chunks or 0,
                 pair.uart_stats and pair.uart_stats.bytes or 0,
                 pair.uart_stats and pair.uart_stats.fragments or 0,
                 pair.uart_stats and pair.uart_stats.pauses or 0,
-                pair.uart_stats and pair.uart_stats.malformed_lines or 0
-            )
+                pair.uart_stats and pair.uart_stats.malformed_lines or 0,
+                fabric_progress_fragment(pair.cm5_conn)
+            ))
         end)
         assert_contains(failed.error, 'stage_op_timeout', 'job should fail from the active stage deadline')
         assert_true((fake.receive_bytes or 0) < #blob, 'short timeout should not stage the full artifact')
@@ -1545,14 +1688,15 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
 
         log('waiting for job awaiting_commit')
         wait_job_chatty(cm5.conn, 'job-mcu-http-uart', 'awaiting_commit', REALISTIC_TRANSFER_TIMEOUT_S, function ()
-            return ('mcu_received=%d chunks=%d uart_bytes=%d uart_fragments=%d uart_pauses=%d uart_bad_json=%d'):format(
+            return (('mcu_received=%d chunks=%d uart_bytes=%d uart_fragments=%d uart_pauses=%d uart_bad_json=%d; %s'):format(
                 fake.receive_bytes or 0,
                 fake.receive_chunks or 0,
                 pair.uart_stats and pair.uart_stats.bytes or 0,
                 pair.uart_stats and pair.uart_stats.fragments or 0,
                 pair.uart_stats and pair.uart_stats.pauses or 0,
-                pair.uart_stats and pair.uart_stats.malformed_lines or 0
-            )
+                pair.uart_stats and pair.uart_stats.malformed_lines or 0,
+                fabric_progress_fragment(pair.cm5_conn)
+            ))
         end)
         local expected_payload_digest = xxhash32.digest_hex(blob)
         assert_true(probe.wait_until(function ()
@@ -1581,6 +1725,7 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
             stage_elapsed >= ((#blob / UART_BYTES_PER_SEC) * 0.75),
             'artifact should take UART-paced time to stage'
         )
+        log_fabric_status(cm5.conn, 'CM5 fabric post-stage status')
 
         log('committing job through curl HTTP JSON command route')
         local commit_status, commit_body, commit_decoded = run_http_json(
@@ -1612,6 +1757,7 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
         local mcub = start_mcu_instance(root_scope, fake, uart_b.mcu)
         log('reboot: starting fresh Fabric pair over PTY UART middleware')
         local pair_b = start_fabric_pair(root_scope, cm5b.bus, fake, uart_b)
+        log_fabric_status(cm5b.conn, 'CM5 fabric reboot-established status')
         log('reboot: starting fresh CM5 Device/Update services')
         cm5b.start_services_after_fabric()
 

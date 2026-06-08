@@ -34,6 +34,7 @@ if not cjson_ok then cjson = require 'cjson' end
 local hal_types = require 'services.hal.types.core'
 local cap_args  = require 'services.hal.types.capability_args'
 local fabric    = require 'services.fabric'
+local fabric_topics = require 'services.fabric.topics'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local xxhash32 = require 'shared.hash.xxhash32'
 
@@ -175,6 +176,135 @@ local function start_uart_manager(scope, bus, uart_slave)
     assert_true(ok_cfg, tostring(cfg_err))
     local cap = wait_uart_cap(dev_ev_ch)
     return expose_raw_host_uart_open(scope, bus, cap, 'uart_manager')
+end
+
+
+local function fabric_payload_snapshot(payload)
+    if type(payload) ~= 'table' then return nil end
+    return type(payload.snapshot) == 'table' and payload.snapshot or payload
+end
+
+local function compact_fabric_session(s)
+    s = type(s) == 'table' and s or {}
+    return ('phase=%s established=%s local=%s peer_node=%s peer_sid=%s gen=%s wire_errors=%s bad_frames=%s last_wire_error=%s why=%s'):format(
+        tostring(s.phase), tostring(s.established), tostring(s.local_node), tostring(s.peer_node),
+        tostring(s.peer_sid), tostring(s.session_generation), tostring(s.wire_errors or 0),
+        tostring(s.bad_frame_count or 0), tostring(s.last_wire_error), tostring(s.why)
+    )
+end
+
+local function compact_fabric_bridge(s)
+    s = type(s) == 'table' and s or {}
+    return ('state=%s imported=%s pending=%s inbound=%s frames_sent=%s frames_recv=%s session_peer=%s drop=%s err=%s'):format(
+        tostring(s.state), tostring(s.imported_topics), tostring(s.pending_calls), tostring(s.inbound_calls),
+        tostring(s.frames_sent), tostring(s.frames_received),
+        tostring(type(s.session) == 'table' and s.session.peer_sid or nil),
+        tostring(s.session_drop_reason), tostring(s.last_err)
+    )
+end
+
+local function compact_fabric_transfer(s)
+    s = type(s) == 'table' and s or {}
+    local stats = type(s.stats) == 'table' and s.stats or {}
+    local active = type(s.active) == 'table' and s.active or nil
+    local last = type(s.last) == 'table' and s.last or nil
+    return ('active=%s active_status=%s last_status=%s completed=%s failed=%s cancelled=%s stale=%s'):format(
+        tostring(active ~= nil), tostring(active and active.status), tostring(last and last.status),
+        tostring(stats.completed), tostring(stats.failed), tostring(stats.cancelled), tostring(stats.stale)
+    )
+end
+
+local function compact_fabric_link(s)
+    s = type(s) == 'table' and s or {}
+    local comps = {}
+    if type(s.components) == 'table' then
+        for name, rec in pairs(s.components) do
+            comps[#comps + 1] = tostring(name) .. '=' .. tostring(type(rec) == 'table' and rec.status or rec)
+        end
+        table.sort(comps)
+    end
+    return ('state=%s completed=%s/%s reason=%s components=[%s]'):format(
+        tostring(s.state), tostring(s.completed), tostring(s.total), tostring(s.reason), table.concat(comps, ',')
+    )
+end
+
+local function describe_fabric_status_payload(payload, component)
+    local s = fabric_payload_snapshot(payload)
+    if component == 'session' then return compact_fabric_session(s) end
+    if component == 'rpc_bridge' then return compact_fabric_bridge(s) end
+    if component == 'transfer_manager' or component == 'transfer' then return compact_fabric_transfer(s) end
+    return compact_fabric_link(s)
+end
+
+local function retained_payload_now(conn, topic)
+    local view = conn:retained_view(topic)
+    local msg = view:get(topic)
+    view:close()
+    return msg and msg.payload or nil
+end
+
+local function wait_retained_payload_where(conn, topic, label, pred, timeout_s)
+    local view = conn:retained_view(topic)
+    local deadline = fibers.now() + (timeout_s or 6.0)
+    local seen = view:version()
+    while true do
+        local msg = view:get(topic)
+        local payload = msg and msg.payload or nil
+        local out = pred(payload)
+        if out then view:close(); return out end
+        local remaining = deadline - fibers.now()
+        if remaining <= 0 then view:close(); error('timed out waiting for ' .. tostring(label), 0) end
+        local which, version, reason = fibers.perform(op.named_choice({
+            changed = view:changed_op(seen),
+            timeout = sleep.sleep_op(math.min(0.50, remaining)),
+        }))
+        if which == 'changed' then
+            if version == nil then view:close(); error(tostring(label) .. ' closed: ' .. tostring(reason or 'closed'), 0) end
+            seen = version
+        end
+    end
+end
+
+local function start_fabric_status_reporter(scope, conn, emit)
+    assert_true(scope:spawn(function ()
+        local payload = wait_retained_payload_where(
+            conn,
+            fabric_topics.state_link_component('link-a', 'session'),
+            'MCU fabric session established',
+            function (p)
+                local s = fabric_payload_snapshot(p)
+                if type(s) == 'table' and s.established == true and type(s.peer_sid) == 'string' and s.peer_sid ~= '' then
+                    return p
+                end
+                return nil
+            end,
+            6.0
+        )
+        local s = fabric_payload_snapshot(payload) or {}
+        emit({
+            event = 'fabric_session',
+            phase = s.phase,
+            established = s.established,
+            local_node = s.local_node,
+            peer_node = s.peer_node,
+            peer_sid = s.peer_sid,
+            session_generation = s.session_generation,
+            wire_errors = s.wire_errors or 0,
+            bad_frame_count = s.bad_frame_count or 0,
+            last_wire_error = s.last_wire_error,
+            summary = describe_fabric_status_payload(payload, 'session'),
+        })
+        local items = {
+            { label = 'link', topic = fabric_topics.state_link('link-a') },
+            { label = 'session', component = 'session', topic = fabric_topics.state_link_component('link-a', 'session') },
+            { label = 'rpc_bridge', component = 'rpc_bridge', topic = fabric_topics.state_link_component('link-a', 'rpc_bridge') },
+            { label = 'transfer_manager', component = 'transfer_manager', topic = fabric_topics.state_link_component('link-a', 'transfer_manager') },
+        }
+        for _, item in ipairs(items) do
+            local p = retained_payload_now(conn, item.topic)
+            emit({ event = 'fabric_status', component = item.label, summary = describe_fabric_status_payload(p, item.component) })
+        end
+    end))
 end
 
 local function fabric_config(local_node, peer_node, bridge, transfer)
@@ -391,6 +521,7 @@ local function main(scope)
             },
         },
     })
+    start_fabric_status_reporter(scope, conn, emit)
 
     emit({ event = 'ready', boot_seq = fake.boot_seq, image_id = fake.committed_image_id or fake.old_image_id, uart = args.uart })
     fibers.perform(op.never())
