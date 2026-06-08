@@ -6,9 +6,10 @@
 --
 -- The middleware deliberately preserves the base Fabric protocol semantics. It
 -- fragments and paces bytes like a modestly imperfect 115200 bps UART,
--- includes occasional non-corrupt stalls and a small fake flash-write delay on
--- the MCU side, but it does not inject corrupt bytes, reorder frames, or ask
--- the sender for future transfer offsets.
+-- includes occasional non-corrupt stalls, a small fake flash-write delay on
+-- the MCU side, and a small number of standalone malformed JSONL lines
+-- between valid frames. It does not corrupt bytes inside a valid frame,
+-- reorder frames, or ask the sender for future transfer offsets.
 
 local busmod   = require 'bus'
 local fibers   = require 'fibers'
@@ -17,6 +18,7 @@ local channel  = require 'fibers.channel'
 local op       = require 'fibers.op'
 local sleep    = require 'fibers.sleep'
 local exec     = require 'fibers.io.exec'
+local socket   = require 'fibers.io.socket'
 
 local cjson_ok, cjson = pcall(require, 'cjson.safe')
 if not cjson_ok then cjson = require 'cjson' end
@@ -49,6 +51,7 @@ local update_topics   = require 'services.update.topics'
 local device_topics   = require 'services.device.topics'
 local mcu_schema      = require 'services.device.schemas.mcu'
 local http_topics     = require 'services.http.topics'
+local xxhash32        = require 'shared.hash.xxhash32'
 
 local T = {}
 local unpack = rawget(table, 'unpack') or _G.unpack
@@ -93,6 +96,9 @@ local UART_MAX_FRAGMENT_BYTES = 16
 local UART_LONG_PAUSE_EVERY_BYTES = 64 * 1024
 local UART_LONG_PAUSE_BASE_S = 0.20
 local UART_LONG_PAUSE_JITTER_S = 0.15
+local UART_MALFORMED_LINE_COUNT = 2
+local UART_MALFORMED_LINE_FIRST_AT = 1536
+local UART_MALFORMED_LINE_EVERY_BYTES = 128 * 1024
 local MCU_FLASH_WRITE_DELAY_S = 0.010
 
 local function fail(msg) error(msg or 'assertion failed', 2) end
@@ -241,24 +247,12 @@ local function wait_retained_payload_where(conn, topic, label, pred, opts)
     return value
 end
 
-local function fresh_uart_manager(scope)
-    -- The UART manager is currently module-singleton state.  Keep this test's
-    -- direct manager instance explicit and restore package.loaded afterwards so
-    -- a full-suite run is not order-dependent on this spec.
-    local manager_key = 'services.hal.managers.uart'
-    local driver_key = 'services.hal.drivers.uart'
-    local original_manager = package.loaded[manager_key]
-    local original_driver = package.loaded[driver_key]
-
-    if scope ~= nil then
-        scope:finally(function ()
-            package.loaded[manager_key] = original_manager
-            package.loaded[driver_key] = original_driver
-        end)
-    end
-
-    package.loaded[manager_key] = nil
-    package.loaded[driver_key] = nil
+local function fresh_uart_manager()
+    -- The UART manager is currently module-singleton state.  The filtered test
+    -- runner still requires every spec module before it runs the selected test,
+    -- so make this test's direct manager instance explicit and isolated.
+    package.loaded['services.hal.managers.uart'] = nil
+    package.loaded['services.hal.drivers.uart'] = nil
     return require 'services.hal.managers.uart'
 end
 
@@ -408,7 +402,7 @@ local function expose_raw_host_uart_open(scope, bus, cap, source)
 end
 
 local function start_cm5_uart_manager(scope, bus, port)
-    local uart_mgr = fresh_uart_manager(scope)
+    local uart_mgr = fresh_uart_manager()
     local dev_ev_ch = channel.new(16)
     local cap_emit_ch = channel.new(32)
 
@@ -888,23 +882,11 @@ local function hal_config(roots)
     }
 end
 
-local function install_config_dir_for_scope(scope, config_dir)
-    if not (posix_ok and stdlib and stdlib.setenv) then return end
-    local old_config_dir = os.getenv('DEVICECODE_CONFIG_DIR')
-    scope:finally(function ()
-        if old_config_dir ~= nil then
-            stdlib.setenv('DEVICECODE_CONFIG_DIR', old_config_dir, true)
-        elseif type(stdlib.unsetenv) == 'function' then
-            stdlib.unsetenv('DEVICECODE_CONFIG_DIR')
-        else
-            stdlib.setenv('DEVICECODE_CONFIG_DIR', '', true)
-        end
-    end)
-    stdlib.setenv('DEVICECODE_CONFIG_DIR', config_dir, true)
-end
-
 local function start_hal(scope, bus, roots)
     local conn = bus:connect({ origin_base = { service = 'hal' } })
+    if posix_ok and stdlib and stdlib.setenv then
+        stdlib.setenv('DEVICECODE_CONFIG_DIR', roots.config, true)
+    end
     assert_true(scope:spawn(function ()
         hal_service.start(conn, { name = 'hal', env = 'test', heartbeat_s = false })
     end))
@@ -1053,6 +1035,45 @@ local function write_all(stream, data)
     return true, nil
 end
 
+
+local function maybe_inject_malformed_jsonl(direction, output, stats)
+    if direction ~= 'cm5_to_mcu' then return true, nil end
+    if (stats.malformed_lines or 0) >= UART_MALFORMED_LINE_COUNT then return true, nil end
+    local next_at = stats.next_malformed_at or UART_MALFORMED_LINE_FIRST_AT
+    if (stats.bytes or 0) < next_at then return true, nil end
+
+    stats.malformed_lines = (stats.malformed_lines or 0) + 1
+    stats.next_malformed_at = next_at + UART_MALFORMED_LINE_EVERY_BYTES
+    local line = ('{ malformed json from mcu_http_uart test #%d }\n'):format(stats.malformed_lines)
+    local ok, err = write_all(output.master, line)
+    if ok ~= true then return nil, err or 'malformed_jsonl_inject_failed' end
+
+    stats.bytes = (stats.bytes or 0) + #line
+    stats.fragments = (stats.fragments or 0) + 1
+    stats.malformed_bytes = (stats.malformed_bytes or 0) + #line
+    log(('UART middleware injected standalone malformed JSONL line #%d on %s at %d bytes'):format(
+        stats.malformed_lines, direction, stats.bytes
+    ))
+    return true, nil
+end
+
+local function write_uart_fragment_piece(direction, output, stats, piece)
+    if piece == '' then return true, nil end
+    local ok, werr = write_all(output.master, piece)
+    if ok ~= true then
+        return nil, werr or 'write_failed'
+    end
+    stats.bytes = (stats.bytes or 0) + #piece
+    stats.fragments = (stats.fragments or 0) + 1
+
+    if piece:sub(-1) == '\n' then
+        local mok, merr = maybe_inject_malformed_jsonl(direction, output, stats)
+        if mok ~= true then return nil, merr end
+    end
+
+    return true, nil
+end
+
 local function relay_fragmented_uart(direction, input, output, stats)
     while true do
         local want = math.random(1, UART_MAX_READ_BYTES)
@@ -1065,12 +1086,22 @@ local function relay_fragmented_uart(direction, input, output, stats)
         while off <= #chunk do
             local frag_len = math.random(1, UART_MAX_FRAGMENT_BYTES)
             local frag = chunk:sub(off, off + frag_len - 1)
-            local ok, werr = write_all(output.master, frag)
-            if ok ~= true then
-                return { direction = direction, reason = werr or 'write_failed' }
+            local frag_off = 1
+            while frag_off <= #frag do
+                local nl = frag:find('\n', frag_off, true)
+                local piece
+                if nl ~= nil then
+                    piece = frag:sub(frag_off, nl)
+                    frag_off = nl + 1
+                else
+                    piece = frag:sub(frag_off)
+                    frag_off = #frag + 1
+                end
+                local ok, werr = write_uart_fragment_piece(direction, output, stats, piece)
+                if ok ~= true then
+                    return { direction = direction, reason = werr or 'write_failed' }
+                end
             end
-            stats.bytes = (stats.bytes or 0) + #frag
-            stats.fragments = (stats.fragments or 0) + 1
             off = off + #frag
 
             if stats.bytes >= (stats.next_long_pause_at or UART_LONG_PAUSE_EVERY_BYTES) then
@@ -1092,7 +1123,15 @@ local function relay_fragmented_uart(direction, input, output, stats)
 end
 
 local function start_noisy_uart_middleware(scope, cm5_port, mcu_port)
-    local stats = { bytes = 0, fragments = 0, pauses = 0, next_long_pause_at = UART_LONG_PAUSE_EVERY_BYTES }
+    local stats = {
+        bytes = 0,
+        fragments = 0,
+        pauses = 0,
+        malformed_lines = 0,
+        malformed_bytes = 0,
+        next_long_pause_at = UART_LONG_PAUSE_EVERY_BYTES,
+        next_malformed_at = UART_MALFORMED_LINE_FIRST_AT,
+    }
     local ok_a, err_a = scope:spawn(function ()
         return relay_fragmented_uart('cm5_to_mcu', cm5_port, mcu_port, stats)
     end)
@@ -1135,32 +1174,15 @@ local function mcu_pty_fabric_config()
     return cfg
 end
 
-local function start_fabric_pair(parent_scope, cm5_bus, mcu_bus, fake, uart)
+local function start_fabric_pair(parent_scope, cm5_bus, fake, uart)
     local pair_scope = assert(parent_scope:child())
     local stats = start_noisy_uart_middleware(pair_scope, assert(uart and uart.cm5, 'cm5 PTY required'), assert(uart and uart.mcu, 'mcu PTY required'))
 
     local cm5_conn = cm5_bus:connect({ origin_base = { service = 'fabric-cm5' } })
-    local mcu_conn = mcu_bus:connect({ origin_base = { service = 'fabric-mcu' } })
 
-    -- CM5 uses the real HAL raw-host UART capability path.
+    -- CM5 uses the real HAL raw-host UART capability path.  The MCU side is a
+    -- separate Lua process with its own bus, scheduler and HAL UART manager.
     start_public_fabric(pair_scope, cm5_conn, cm5_uart_fabric_config(), nil, { name = 'fabric-cm5' })
-
-    -- The MCU side is still a separate devicecode bus and real Fabric instance,
-    -- but opens the PTY slave directly to avoid starting a second singleton HAL
-    -- UART manager in this Lua VM.
-    start_public_fabric(pair_scope, mcu_conn, mcu_pty_fabric_config(), nil, {
-        name = 'fabric-mcu',
-        link_overrides = {
-            ['link-a'] = {
-                open_transport_op = function () return open_pty_transport_op(uart.mcu.slave_name) end,
-                transfer = {
-                    chunk_size = 2048,
-                    timeout_s = REALISTIC_TRANSFER_TIMEOUT_S,
-                    receive_targets = { ['updater/main'] = new_mcu_receive_target(fake) },
-                },
-            },
-        },
-    })
 
     wait_retained_payload_where(cm5_conn, fabric_topics.transfer_manager_status(), 'cm5 fabric transfer manager available', function (p)
         return p and p.available == true and p
@@ -1169,7 +1191,6 @@ local function start_fabric_pair(parent_scope, cm5_bus, mcu_bus, fake, uart)
     return {
         scope = pair_scope,
         cm5_conn = cm5_conn,
-        mcu_conn = mcu_conn,
         uart_stats = stats,
     }
 end
@@ -1180,8 +1201,8 @@ local function stop_fabric_pair(pair, reason)
         pair.scope:cancel(reason or 'fabric pair stop')
         fibers.perform(pair.scope:join_op())
     end
-    bus_cleanup.disconnect(pair.cm5_conn)
-    bus_cleanup.disconnect(pair.mcu_conn)
+    if pair.cm5_conn then bus_cleanup.disconnect(pair.cm5_conn) end
+    if pair.mcu_conn then bus_cleanup.disconnect(pair.mcu_conn) end
 end
 
 local function start_cm5_instance(parent_scope, roots, http_port, uart_port, opts)
@@ -1189,11 +1210,6 @@ local function start_cm5_instance(parent_scope, roots, http_port, uart_port, opt
     local scope = assert(parent_scope:child())
     local bus = busmod.new()
     local conn = bus:connect({ origin_base = { service = 'test-cm5' } })
-
-    -- DEVICECODE_CONFIG_DIR is process-global test harness state.  Register
-    -- its finaliser before starting any work on this scope; lua-fibers requires
-    -- scope:finally to be called from inside the target scope once started.
-    install_config_dir_for_scope(scope, roots.config)
 
     -- The test UART adapter registers finalisers on the instance scope.
     -- Do this before starting services that spawn onto the same scope; after a
@@ -1217,12 +1233,141 @@ local function start_cm5_instance(parent_scope, roots, http_port, uart_port, opt
     }
 end
 
-local function start_mcu_instance(parent_scope, fake)
+local function update_fake_from_mcu_child(fake, ev)
+    if type(ev) ~= 'table' then return end
+    local event = ev.event
+    if event == 'ready' then
+        fake.boot_seq = ev.boot_seq or fake.boot_seq
+        fake.child_ready = true
+        fake.child_pid = ev.pid
+        log(('MCU child ready: pid=%s boot_seq=%s image=%s'):format(
+            tostring(ev.pid), tostring(ev.boot_seq), tostring(ev.image_id)
+        ))
+    elseif event == 'receive_opened' then
+        fake.transfer_begin = ev
+        fake.receive_started_at = fibers.now()
+        fake.receive_bytes = 0
+        fake.receive_chunks = 0
+        log(('MCU receive target opened: target=%s size=%s job_id=%s image_id=%s'):format(
+            tostring(ev.target), tostring(ev.size), tostring(ev.job_id), tostring(ev.image_id)
+        ))
+    elseif event == 'receive_tick' then
+        fake.receive_bytes = ev.bytes or fake.receive_bytes
+        fake.receive_chunks = ev.chunks or fake.receive_chunks
+    elseif event == 'receive_progress' then
+        fake.receive_bytes = ev.bytes or fake.receive_bytes
+        fake.receive_chunks = ev.chunks or fake.receive_chunks
+        log(('MCU received %d bytes in %d chunks after %.1fs'):format(
+            fake.receive_bytes or 0, fake.receive_chunks or 0, tonumber(ev.elapsed_s) or 0
+        ))
+    elseif event == 'transfer_commit' then
+        fake.receive_bytes = ev.size or fake.receive_bytes
+        fake.receive_chunks = ev.chunks or fake.receive_chunks
+        fake.staged = {
+            size = ev.size,
+            digest = ev.digest,
+            payload_digest = ev.payload_digest,
+            image_id = ev.image_id,
+            job_id = ev.job_id,
+        }
+        fake.staged_signal = (fake.staged_signal or 0) + 1
+        log(('MCU transfer commit: %d bytes in %d chunks; digest=%s payload_digest=%s'):format(
+            ev.size or 0, ev.chunks or 0, tostring(ev.digest), tostring(ev.payload_digest)
+        ))
+    elseif event == 'transfer_abort' then
+        fake.abort_reason = ev.reason
+        fake.abort_count = ev.abort_count or ((fake.abort_count or 0) + 1)
+        fake.receive_bytes = ev.bytes or fake.receive_bytes
+        fake.receive_chunks = ev.chunks or fake.receive_chunks
+        log(('MCU transfer abort: reason=%s after %d bytes in %d chunks'):format(
+            tostring(ev.reason), fake.receive_bytes or 0, fake.receive_chunks or 0
+        ))
+    elseif event == 'prepare' then
+        fake.prepare_payload = ev.payload
+        fake.job_id = ev.job_id
+    elseif event == 'commit' then
+        fake.commit_payload = ev.payload
+        fake.commit_seen = true
+        fake.committed_image_id = ev.committed_image_id
+    elseif event == 'log' then
+        log('MCU child: ' .. tostring(ev.message))
+    end
+end
+
+local function start_mcu_instance(parent_scope, fake, uart_port)
+    assert(uart_port and uart_port.slave_name, 'MCU PTY slave required')
     local scope = assert(parent_scope:child())
-    local bus = busmod.new()
-    local conn = bus:connect({ origin_base = { service = 'test-mcu' } })
-    start_fake_mcu(scope, bus, fake)
-    return { scope = scope, bus = bus, conn = conn }
+    local ipc_path = ('/tmp/devicecode-mcu-child-%d-%d.sock'):format(os.time(), math.random(100000, 999999))
+    os.remove(ipc_path)
+
+    local server, serr = socket.listen_unix(ipc_path, { ephemeral = true })
+    assert_not_nil(server, serr or 'listen_unix failed')
+    local ready_ch = channel.new(1)
+
+    scope:finally(function ()
+        safe.pcall(function () server:close() end)
+        os.remove(ipc_path)
+    end)
+
+    assert_true(scope:spawn(function ()
+        local stream, aerr = server:accept()
+        if not stream then
+            ready_ch:put({ ok = false, err = aerr or 'mcu child ipc accept failed' })
+            return
+        end
+        while true do
+            local line, rerr = fibers.perform(stream:read_line_op())
+            if line == nil then
+                if fake.child_ready ~= true then
+                    ready_ch:put({ ok = false, err = rerr or 'mcu child ipc closed before ready' })
+                end
+                return
+            end
+            local ev, derr = cjson.decode(line)
+            if not ev then
+                log('MCU child sent invalid IPC JSON: ' .. tostring(derr))
+            else
+                update_fake_from_mcu_child(fake, ev)
+                if ev.event == 'ready' then
+                    ready_ch:put({ ok = true })
+                end
+            end
+        end
+    end))
+
+    local child_script = './integration/devhost/support/mcu_http_uart_child.lua'
+    local cmd = exec.command({
+        'lua', child_script,
+        '--ipc', ipc_path,
+        '--uart', uart_port.slave_name,
+        '--old-image', fake.old_image_id or 'mcu-image-old',
+        '--committed-image', fake.committed_image_id or '',
+        '--boot-seq', tostring((fake.boot_seq or 0) + 1),
+        cwd = '.',
+        stdin = 'null',
+        stdout = 'inherit',
+        stderr = 'inherit',
+        shutdown_grace = 1.0,
+        env = {
+            MCU_HTTP_UART_TRANSFER_TIMEOUT_S = tostring(REALISTIC_TRANSFER_TIMEOUT_S),
+            MCU_HTTP_UART_FLASH_DELAY_S = tostring(MCU_FLASH_WRITE_DELAY_S),
+        },
+    })
+
+    assert_true(scope:spawn(function ()
+        local status, code, signal, err = fibers.perform(cmd:run_op())
+        fake.child_exit = { status = status, code = code, signal = signal, err = err }
+        if status ~= 'signalled' and not (status == 'exited' and code == 0) then
+            log(('MCU child exited: status=%s code=%s signal=%s err=%s'):format(
+                tostring(status), tostring(code), tostring(signal), tostring(err)
+            ))
+        end
+    end))
+
+    local ready = wait_channel_get(ready_ch, 6.0, 'MCU child ready')
+    if not ready.ok then error(ready.err or 'MCU child failed to start', 0) end
+
+    return { scope = scope, ipc_path = ipc_path, command = cmd }
 end
 
 local function stop_instance(inst, reason)
@@ -1303,9 +1448,9 @@ function T.ui_http_mcu_update_short_stage_timeout_fails_via_outer_choice()
             stage_action_timeout_s = REALISTIC_TRANSFER_TIMEOUT_S,
         })
         log('short-timeout: booting fake MCU instance')
-        local mcu = start_mcu_instance(root_scope, fake)
+        local mcu = start_mcu_instance(root_scope, fake, uart.mcu)
         log('short-timeout: starting Fabric pair over PTY UART middleware')
-        local pair = start_fabric_pair(root_scope, cm5.bus, mcu.bus, fake, uart)
+        local pair = start_fabric_pair(root_scope, cm5.bus, fake, uart)
         log('short-timeout: starting CM5 Device/Update/UI services')
         cm5.start_services_after_fabric()
 
@@ -1325,12 +1470,13 @@ function T.ui_http_mcu_update_short_stage_timeout_fails_via_outer_choice()
 
         log('short-timeout: waiting for job to fail due to the outer stage deadline')
         local failed = wait_job_chatty(cm5.conn, 'job-mcu-http-uart', 'failed', 20.0, function ()
-            return ('mcu_received=%d chunks=%d uart_bytes=%d uart_fragments=%d uart_pauses=%d'):format(
+            return ('mcu_received=%d chunks=%d uart_bytes=%d uart_fragments=%d uart_pauses=%d uart_bad_json=%d'):format(
                 fake.receive_bytes or 0,
                 fake.receive_chunks or 0,
                 pair.uart_stats and pair.uart_stats.bytes or 0,
                 pair.uart_stats and pair.uart_stats.fragments or 0,
-                pair.uart_stats and pair.uart_stats.pauses or 0
+                pair.uart_stats and pair.uart_stats.pauses or 0,
+                pair.uart_stats and pair.uart_stats.malformed_lines or 0
             )
         end)
         assert_contains(failed.error, 'stage_op_timeout', 'job should fail from the active stage deadline')
@@ -1362,9 +1508,9 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
         log('booting initial CM5 instance')
         local cm5 = start_cm5_instance(root_scope, roots, port, uart.cm5)
         log('booting initial fake MCU instance')
-        local mcu = start_mcu_instance(root_scope, fake)
+        local mcu = start_mcu_instance(root_scope, fake, uart.mcu)
         log('starting initial Fabric pair over PTY UART middleware')
-        local pair = start_fabric_pair(root_scope, cm5.bus, mcu.bus, fake, uart)
+        local pair = start_fabric_pair(root_scope, cm5.bus, fake, uart)
         log('starting CM5 Device/Update/UI services')
         cm5.start_services_after_fabric()
 
@@ -1399,25 +1545,31 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
 
         log('waiting for job awaiting_commit')
         wait_job_chatty(cm5.conn, 'job-mcu-http-uart', 'awaiting_commit', REALISTIC_TRANSFER_TIMEOUT_S, function ()
-            return ('mcu_received=%d chunks=%d uart_bytes=%d uart_fragments=%d uart_pauses=%d'):format(
+            return ('mcu_received=%d chunks=%d uart_bytes=%d uart_fragments=%d uart_pauses=%d uart_bad_json=%d'):format(
                 fake.receive_bytes or 0,
                 fake.receive_chunks or 0,
                 pair.uart_stats and pair.uart_stats.bytes or 0,
                 pair.uart_stats and pair.uart_stats.fragments or 0,
-                pair.uart_stats and pair.uart_stats.pauses or 0
+                pair.uart_stats and pair.uart_stats.pauses or 0,
+                pair.uart_stats and pair.uart_stats.malformed_lines or 0
             )
         end)
+        local expected_payload_digest = xxhash32.digest_hex(blob)
         assert_true(probe.wait_until(function ()
-            return fake.staged and fake.staged.bytes == blob
-        end, { timeout = 10.0 }), 'fake MCU should stage transferred artifact')
+            return fake.staged
+                and fake.staged.size == #blob
+                and fake.staged.payload_digest == expected_payload_digest
+        end, { timeout = 10.0 }), 'fake MCU should stage transferred artifact with matching digest')
         local stage_elapsed = fibers.now() - stage_started
         local uart_bytes = pair.uart_stats and pair.uart_stats.bytes or 0
         local uart_fragments = pair.uart_stats and pair.uart_stats.fragments or 0
         local uart_pauses = pair.uart_stats and pair.uart_stats.pauses or 0
-        log(('artifact staged in %.1fs; middleware relayed %d bytes in %d fragments with %d long pauses'):format(
-            stage_elapsed, uart_bytes, uart_fragments, uart_pauses
+        local uart_malformed_lines = pair.uart_stats and pair.uart_stats.malformed_lines or 0
+        log(('artifact staged in %.1fs; middleware relayed %d bytes in %d fragments with %d long pauses and %d malformed JSONL lines'):format(
+            stage_elapsed, uart_bytes, uart_fragments, uart_pauses, uart_malformed_lines
         ))
         assert_true(uart_bytes >= #blob, 'UART middleware should relay at least the artifact payload size')
+        assert_true(uart_malformed_lines >= 1, 'UART middleware should inject at least one standalone malformed JSONL line')
         assert_true(
             uart_fragments >= math.floor(#blob / UART_MAX_FRAGMENT_BYTES),
             'UART middleware should fragment the byte stream heavily'
@@ -1457,9 +1609,9 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
         log('reboot: starting fresh CM5 instance')
         local cm5b = start_cm5_instance(root_scope, roots, nil, uart_b.cm5)
         log('reboot: starting fresh MCU instance')
-        local mcub = start_mcu_instance(root_scope, fake)
+        local mcub = start_mcu_instance(root_scope, fake, uart_b.mcu)
         log('reboot: starting fresh Fabric pair over PTY UART middleware')
-        local pair_b = start_fabric_pair(root_scope, cm5b.bus, mcub.bus, fake, uart_b)
+        local pair_b = start_fabric_pair(root_scope, cm5b.bus, fake, uart_b)
         log('reboot: starting fresh CM5 Device/Update services')
         cm5b.start_services_after_fabric()
 
