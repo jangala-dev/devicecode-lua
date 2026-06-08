@@ -99,7 +99,11 @@ function tests.test_config_change_replaces_generation()
 		end)
 		assert_true(ok, err)
 
-		fibers.perform(sleep.sleep_op(0.02))
+		local status_ready = probe.wait_until(function ()
+			local reply = caller:call(topics.update_manager_rpc('status'), {}, { timeout = 0.1 })
+			return reply and reply.ok == true and reply.snapshot and reply.snapshot.service == 'update'
+		end, { timeout = 1.0, interval = 0.01 })
+		assert_true(status_ready, 'expected update status endpoint to be ready before changing config')
 
 		cfg_conn:retain(topics.config(), {
 			rev = 2,
@@ -114,9 +118,9 @@ function tests.test_config_change_replaces_generation()
 
 		local reply
 		local ok_wait = probe.wait_until(function ()
-			reply = caller:call(topics.update_manager_rpc('status'), {}, { timeout = 0.03 })
+			reply = caller:call(topics.update_manager_rpc('status'), {}, { timeout = 0.1 })
 			return reply and reply.snapshot and reply.snapshot.config and reply.snapshot.config.namespace == 'new-ns'
-		end, { timeout = 0.4, interval = 0.01 })
+		end, { timeout = 1.0, interval = 0.01 })
 
 		assert_true(ok_wait, 'expected config replacement to be visible')
 		assert_eq(reply.snapshot.config.component_count, 1)

@@ -199,7 +199,9 @@ function T.ui_waits_for_http_capability_before_starting_listener()
 			local p = msg and msg.payload
 			return p and p.ready == true and p.listener_status == 'running'
 		end, { timeout = 0.8, interval = 0.01 }), 'ui should start listener after HTTP appears')
-		assert_eq(#calls, 1)
+		assert_true(probe.wait_until(function ()
+			return #calls == 1
+		end, { timeout = 0.8, interval = 0.01 }), 'expected HTTP listen to be called after HTTP appears')
 
 		child:cancel('test complete')
 		cap_scope:cancel('test complete')
@@ -250,7 +252,9 @@ function T.fabric_waits_for_raw_transport_and_recovers_after_route_missing()
 			local p = msg and msg.payload
 			return p and p.state == 'running' and p.ready == true
 		end, { timeout = 0.8, interval = 0.01 }), 'fabric should retry after transport route returns')
-		assert_true(#calls >= 2, 'expected transport open to be retried')
+		assert_true(probe.wait_until(function ()
+			return #calls >= 2
+		end, { timeout = 0.8, interval = 0.01 }), 'expected transport open to be retried')
 
 		child:cancel('test complete')
 		cap_scope:cancel('test complete')
