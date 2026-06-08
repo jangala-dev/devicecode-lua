@@ -25,6 +25,25 @@ local function sorted_count(t)
 	return n
 end
 
+local function normalise_optional_positive_number(t, key, where)
+	local v = t[key]
+	if v == nil then return true, nil end
+	local n = tonumber(v)
+	if type(n) ~= 'number' or n <= 0 then
+		return false, where .. '.' .. key .. ' must be a positive number'
+	end
+	t[key] = n
+	return true, nil
+end
+
+local function normalise_component_timeouts(c, where)
+	for _, key in ipairs({ 'timeout_s', 'stage_timeout_s', 'commit_timeout_s', 'reconcile_timeout_s' }) do
+		local ok, err = normalise_optional_positive_number(c, key, where)
+		if not ok then return nil, err end
+	end
+	return c, nil
+end
+
 local function normalise_components(raw)
 	local out = {}
 	local list = raw or {}
@@ -47,6 +66,8 @@ local function normalise_components(raw)
 			end
 			local c = copy(item)
 			c.component = id
+			local ok, terr = normalise_component_timeouts(c, 'components[' .. tostring(i) .. ']')
+			if not ok then return nil, terr end
 			out[id] = c
 		end
 	else
@@ -65,6 +86,8 @@ local function normalise_components(raw)
 			end
 			local c = copy(item)
 			c.component = id
+			local ok, terr = normalise_component_timeouts(c, 'components.' .. id)
+			if not ok then return nil, terr end
 			out[id] = c
 		end
 	end

@@ -24,6 +24,7 @@ local cap_deps_mod = require 'devicecode.support.capability_dependencies'
 local dep_failure  = require 'devicecode.support.dependency_failure'
 local backpressure = require 'services.device.backpressure'
 local dependency_mod = require 'services.device.dependencies'
+local fabric_topics  = require 'services.fabric.topics'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -35,6 +36,45 @@ local shallow_copy = tablex.shallow_copy
 
 local function new_service_id()
 	return ('device-%d-%d'):format(os.time(), math.random(1, 1000000))
+end
+
+-- Device action timeout is owned by the action worker scope.  The Fabric
+-- transfer-manager request may legitimately stay open for that whole action, so
+-- do not add lua-bus' default one-second call timeout here.  The transfer budget
+-- is passed as payload policy, while caller abandonment still aborts this Op.
+local FABRIC_SEND_BLOB_CALL_OPTS = { timeout = false }
+
+local function default_fabric_client(conn)
+	if type(conn) ~= 'table' or type(conn.call_op) ~= 'function' then return nil end
+
+	return {
+		send_blob_op = function (_, params, opts)
+			params = params or {}
+			opts = opts or {}
+			local timeout_s = opts.timeout or params.timeout
+			local ev, err = conn:call_op(fabric_topics.transfer_manager_rpc('send-blob'), {
+				link_id = params.link_id,
+				request_id = params.request_id or params.job_id,
+				xfer_id = params.xfer_id,
+				target = params.target,
+				source_owner = params.source_owner,
+				size = params.size,
+				digest_alg = params.digest_alg,
+				digest = params.digest,
+				chunk_size = params.chunk_size,
+				meta = params.meta,
+				timeout_s = timeout_s,
+			}, FABRIC_SEND_BLOB_CALL_OPTS)
+			if not ev then return nil, err end
+			return ev:wrap(function (reply, call_err)
+				if reply == nil then return nil, call_err end
+				if type(reply) == 'table' and reply.ok == false then
+					return nil, reply.err or reply.error or reply.reason or call_err or 'fabric_transfer_failed'
+				end
+				return (type(reply) == 'table' and (reply.result or reply.transfer)) or reply, nil
+			end)
+		end,
+	}
 end
 
 local function request_publication(state)
@@ -837,7 +877,7 @@ local function build_state(scope, params)
 		enable_observers = params.enable_observers,
 		auto_publish = params.auto_publish,
 		emit_events = params.emit_events,
-		fabric_client = params.fabric_client,
+		fabric_client = params.fabric_client or default_fabric_client(params.conn),
 		open_source = params.open_source,
 		open_source_op = params.open_source_op,
 		terminate_source = params.terminate_source,
@@ -974,5 +1014,6 @@ M.start_generation = start_generation
 M.cancel_active_generation = cancel_active_generation
 M.flush_publication = flush_publication
 M.cleanup_publication_now = cleanup_publication_now
+M.default_fabric_client = default_fabric_client
 
 return M
