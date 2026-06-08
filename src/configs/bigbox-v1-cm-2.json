@@ -851,7 +851,8 @@
               "kind": "fabric_stage",
               "target": "updater/main",
               "chunk_size": 2048,
-              "artifact_store": "main"
+              "artifact_store": "main",
+              "timeout_s": 300
             },
             "commit-update": {
               "kind": "rpc",
@@ -1125,13 +1126,10 @@
           "peer_id": "mcu",
           "transport": {
             "kind": "uart",
-            "source": "uart",
+            "source": "uart_manager",
             "class": "uart",
             "id": "uart0",
-            "terminator": "\n",
-            "open_opts": {
-              "baud": 115200
-            }
+            "terminator": "\n"
           },
           "session": {
             "identity_claim": {
@@ -1265,6 +1263,9 @@
         "cap_id": "main",
         "host": "0.0.0.0",
         "port": 8080
+      },
+      "uploads": {
+        "require_auth": true
       }
     }
   },
@@ -1278,7 +1279,8 @@
         },
         "mcu": {
           "component": "mcu",
-          "backend": "component"
+          "backend": "component",
+          "stage_timeout_s": 300
         },
         "switch-main": {
           "component": "switch-main"

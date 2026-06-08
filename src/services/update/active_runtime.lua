@@ -409,6 +409,28 @@ local function active_intent_for(job)
 	return job and (job.active_intent or job.active) or nil
 end
 
+local function positive_number(v)
+	local n = tonumber(v)
+	if type(n) ~= 'number' or n <= 0 then return nil end
+	return n
+end
+
+local function configured_phase_timeout_s(self, component, phase)
+	local cfg = self and self._config or nil
+	local components = cfg and cfg.components or nil
+	local rec = type(components) == 'table' and component and components[component] or nil
+	if type(rec) ~= 'table' then return nil end
+	phase = phase or 'stage'
+	return positive_number(rec[phase .. '_timeout_s'])
+		or positive_number(rec.timeout_s)
+end
+
+local function phase_deadline(self, job, phase)
+	local timeout_s = configured_phase_timeout_s(self, job and job.component, phase)
+	if timeout_s == nil then return nil end
+	return fibers.now() + timeout_s
+end
+
 local function reconcile_token_for(job, generation)
 	return table.concat({
 		tostring(generation or 0),
@@ -589,6 +611,7 @@ function Component:_launch_active_intent(job)
 	}, job, {
 		backend = self._backend,
 		phase   = intent.phase,
+		deadline = phase_deadline(self, job, intent.phase),
 	})
 
 	if not handle then
@@ -607,6 +630,11 @@ end
 
 function Component:update_adoption(adoption)
 	self._adoption = copy(adoption or {})
+	return true, nil
+end
+
+function Component:update_config(config)
+	self._config = copy(config or {})
 	return true, nil
 end
 
@@ -843,6 +871,7 @@ function M.start_component(scope, params)
 		_jobs = params.jobs,
 		_backend = params.backend,
 		_observer = params.observer,
+		_config = copy(params.config or {}),
 		_adoption = params.adoption or {},
 		_active_applies = {},
 		_active_launched = {},

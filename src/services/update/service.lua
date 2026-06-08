@@ -1086,6 +1086,9 @@ local function ensure_active_runtime(self, reason)
 	if self._active_component and type(self._active_component.update_adoption) == 'function' then
 		self._active_component:update_adoption(adoption)
 	end
+	if self._active_component and type(self._active_component.update_config) == 'function' then
+		self._active_component:update_config(self._config)
+	end
 
 	if self._active_component ~= nil then return true, nil end
 
@@ -1103,6 +1106,7 @@ local function ensure_active_runtime(self, reason)
 		jobs = self._jobs,
 		backend = self._backend,
 		observer = self._component_observer,
+		config = self._config,
 		adoption = adoption,
 	})
 	if not active_component then

@@ -103,6 +103,7 @@ local files = {
 	"integration.devhost.fabric_public_service_path_spec",
 	'integration.devhost.update_public_seams_spec',
 	'integration.devhost.mcu_update_full_path_spec',
+	'integration.devhost.mcu_update_http_uart_spec',
 	'unit.support.test_capability_dependencies',
 	'unit.support.test_dependency_failure',
 	'unit.support.test_dependency_slot',
