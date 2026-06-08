@@ -339,6 +339,7 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	local update_opts = shallow_copy(params.update or {})
 	update_opts.max_bytes = uploads.max_bytes
 	update_opts.enabled = uploads.enabled
+	update_opts.require_auth = uploads.require_auth
 	update_opts.connect = update_opts.connect or params.connect
 	update_opts.bus = update_opts.bus or params.bus
 

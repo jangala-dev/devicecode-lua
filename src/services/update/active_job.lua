@@ -72,10 +72,48 @@ local function stage_context(params)
 	return backend, job, ctx
 end
 
+local function perform_backend_op_until(backend, name, required, deadline, ...)
+	local fn = backend_method(backend, name, required)
+	if not fn then
+		return nil, nil
+	end
+
+	local backend_op = fn(backend, ...)
+	local result, err
+
+	if deadline ~= nil then
+		if fibers.now() >= deadline then
+			return nil, name .. '_timeout'
+		end
+
+		-- The update phase owns this deadline.  The backend Op, including any
+		-- bus request it opens, has no hidden call timeout.  When timeout wins the
+		-- losing backend Op is aborted, allowing lua-bus to abandon the request and
+		-- Device to observe caller cancellation.
+		local which, a, b = fibers.perform(fibers.named_choice {
+			backend = backend_op,
+			timeout = sleep.sleep_until_op(deadline),
+		})
+		if which == 'timeout' then
+			return nil, name .. '_timeout'
+		end
+		result, err = a, b
+	else
+		result, err = fibers.perform(backend_op)
+	end
+
+	if result == nil then
+		return nil, err or (name .. '_failed')
+	end
+
+	return result, nil
+end
+
 function M.stage(_scope, params)
 	params = params or {}
 	local backend, job, ctx = stage_context(params)
-	local staged = perform_backend_op(backend, 'stage_op', true, job, ctx)
+	local staged, err = perform_backend_op_until(backend, 'stage_op', true, params.deadline, job, ctx)
+	if staged == nil then error(err or 'stage_op_failed', 0) end
 
 	return {
 		tag       = 'staged',

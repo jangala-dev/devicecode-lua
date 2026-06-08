@@ -249,7 +249,15 @@ function M.run(scope, ctx, deps)
 	elseif route.kind == 'command' then
 		return handle_command(scope, owner, ctx, route, deps)
 	elseif route.kind == 'upload' then
-		return upload.run(scope, owner, ctx, deps.update or deps)
+		local update_deps = deps.update or deps
+		if update_deps.require_auth == true then
+			local principal = principal_from(ctx, deps)
+			if principal == nil then
+				perform_response(owner:reply_error_op(401, 'unauthenticated'))
+				return { status = 'unauthenticated' }
+			end
+		end
+		return upload.run(scope, owner, ctx, update_deps)
 	elseif route.kind == 'sse' then
 		return sse.run(scope, owner, route, deps)
 	elseif route.kind == 'static' then

@@ -64,6 +64,36 @@ local function sample_config(display_name)
 	}
 end
 
+
+function tests.test_default_fabric_client_disables_bus_timeout_but_passes_transfer_budget()
+	local seen_topic, seen_payload, seen_opts
+
+	fibers.run(function ()
+		local conn = {
+			call_op = function (_, topic, payload, opts)
+				seen_topic = topic
+				seen_payload = payload
+				seen_opts = opts
+				return op.always({ ok = true, result = { accepted = true } })
+			end,
+		}
+		local client = assert(service.default_fabric_client(conn))
+		local result, err = fibers.perform(client:send_blob_op({
+			request_id = 'r-fabric-stage',
+			target = 'updater/main',
+			chunk_size = 2048,
+			timeout = 300,
+		}, {}))
+		assert_nil(err)
+		assert_true(result.accepted)
+	end)
+
+	assert_eq(table.concat(seen_topic, '/'), 'cap/transfer-manager/main/rpc/send-blob')
+	assert_eq(seen_payload.timeout_s, 300)
+	assert_eq(seen_payload.target, 'updater/main')
+	assert_eq(seen_opts.timeout, false, 'Device must not hide a lua-bus timeout inside Fabric staging')
+end
+
 function tests.test_default_catalogue_includes_host_and_mcu_components()
 	local cat = catalogue.build(nil)
 	assert_not_nil(cat.components.cm5)

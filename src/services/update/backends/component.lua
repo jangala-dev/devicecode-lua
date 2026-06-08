@@ -60,11 +60,18 @@ local function transfer_from(job, ctx)
 	}
 end
 
+local NO_BUS_TIMEOUT = { timeout = false }
+
 local function call_component_op(self, component, method, payload, opts)
 	if type(self._conn) ~= 'table' or type(self._conn.call_op) ~= 'function' then
 		return op.always(nil, 'component_backend_connection_required')
 	end
-	return self._conn:call_op(topics.component_rpc(component, method), payload, opts or self._call_opts):wrap(function (reply, err)
+	-- Component update calls may legitimately take as long as the update phase
+	-- owns them for.  Do not use lua-bus' default one-second call timeout here;
+	-- callers that own a budget must compose this Op with a sleep/deadline Op.
+	-- If that outer choice loses, lua-bus observes the abort and abandons the
+	-- request through the Request owner path.
+	return self._conn:call_op(topics.component_rpc(component, method), payload, opts or self._call_opts or NO_BUS_TIMEOUT):wrap(function (reply, err)
 		if reply == false then return nil, err or 'component_call_failed' end
 		return reply, err
 	end)
