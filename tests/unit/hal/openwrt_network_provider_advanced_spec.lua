@@ -2,6 +2,7 @@
 
 local fibers = require 'fibers'
 local provider_loader = require 'services.hal.backends.network.provider'
+local names = require 'services.hal.backends.network.providers.openwrt.names'
 
 local tests = {}
 
@@ -240,6 +241,39 @@ function tests.test_speedtest_uses_mwan3_use_boundary()
 		eq(argv_seen[1], 'mwan3')
 		eq(argv_seen[2], 'use')
 		eq(argv_seen[3], 'wan_a')
+		provider:terminate('test complete')
+	end)
+end
+
+function tests.test_speedtest_translates_semantic_device_to_linux_counter_device()
+	fibers.run(function()
+		local seen_req
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			speedtest_run_cmd = function()
+				return true, '42', nil
+			end,
+		}, {}))
+		provider._last_name_ctx = ok(names.allocate({
+			segments = { wan = { kind = 'wan', vlan = 10 } },
+			interfaces = { wan = { kind = 'ethernet', role = 'wan', segment = 'wan' } },
+			wan = { members = { wan = { interface = 'wan' } } },
+		}))
+		provider.speedtest_run_cmd = function(_argv)
+			return true, '42', nil
+		end
+		local speedtest = require 'services.hal.backends.network.providers.openwrt.speedtest'
+		local original = speedtest.run_op
+		speedtest.run_op = function(req, opts)
+			seen_req = req
+			return original(req, opts)
+		end
+		local result = fibers.perform(provider:speedtest_op({ interface = 'wan' }))
+		speedtest.run_op = original
+		eq(result.ok, true)
+		eq(seen_req.interface, 'wan')
+		eq(seen_req.device, 'vl-wan')
 		provider:terminate('test complete')
 	end)
 end
