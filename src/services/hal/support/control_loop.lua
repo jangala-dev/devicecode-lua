@@ -19,6 +19,14 @@ local function dlog(logger, level, payload)
 	end
 end
 
+local function err_text(v)
+	if type(v) == 'table' then
+		return tostring(v.err or v.reason or v.message or v.code or 'structured_error')
+	end
+	if v ~= nil then return tostring(v) end
+	return nil
+end
+
 ---@param ev any
 ---@param verb string
 ---@return Op
@@ -151,7 +159,7 @@ function M.run_request_loop(ch, methods, logger, what)
 						what = loop_name .. '_method_done',
 						verb = tostring(request.verb),
 						ok = ok == true,
-						err = ok == true and nil or tostring(value_or_err),
+						err = ok == true and nil or err_text(value_or_err),
 						elapsed_ms = elapsed_ms(req_t0),
 					})
 				end
@@ -163,7 +171,7 @@ function M.run_request_loop(ch, methods, logger, what)
 					what = loop_name .. '_method_done',
 					verb = tostring(request.verb),
 					ok = ok == true,
-					err = ok == true and nil or tostring(value_or_err),
+					err = ok == true and nil or err_text(value_or_err),
 					elapsed_ms = elapsed_ms(req_t0),
 				})
 			end
