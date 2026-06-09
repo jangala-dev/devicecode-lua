@@ -84,6 +84,26 @@ local function publish_snapshot(state)
 	return publisher.publish_dirty_now(state.conn, state.model:snapshot(), state.dirty, state.published)
 end
 
+local function speedtests_blocked_by_apply(state)
+	if state.active_apply ~= nil or state.pending_intent ~= nil then return true end
+	local snap = state.model and state.model:snapshot() or nil
+	local apply_state = snap and snap.apply and snap.apply.state or nil
+	return apply_state == 'running' or apply_state == 'waiting_for_hal'
+end
+
+local function reconcile_speedtests_if_ready(state, reason)
+	if speedtests_blocked_by_apply(state) then
+		local snap = state.model and state.model:snapshot() or nil
+		obs_log(state.svc, 'debug', {
+			what = 'speedtests_deferred',
+			reason = reason,
+			apply_state = snap and snap.apply and snap.apply.state or nil,
+		})
+		return true, nil
+	end
+	return wan_manager.reconcile_speedtests(state, reason)
+end
+
 local function set_model_state(state, service_state, reason)
 	state.model:update(function (s)
 		s.state = service_state
@@ -480,7 +500,7 @@ local function handle_observed_state(state, ev)
 	mark_domain_dirty(state, 'observed')
 	mark_domain_dirty(state, 'drift')
 	obs_event(state.svc, 'network_observed', { subject = observed_event.subject, source = observed_event.source, kind = observed_event.kind })
-	local ok, err = wan_manager.reconcile_speedtests(state, 'observed_state')
+	local ok, err = reconcile_speedtests_if_ready(state, 'observed_state')
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end
@@ -528,7 +548,7 @@ local function handle_gsm_uplink_changed(state, ev)
 			if structural_ok == true then structural_ok, structural_err = reconcile_apply_admission(state, 'gsm_uplink_binding_changed') end
 		end
 	end
-	local ok, err = wan_manager.reconcile_speedtests(state, 'gsm_uplink_changed')
+	local ok, err = reconcile_speedtests_if_ready(state, 'gsm_uplink_changed')
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end
@@ -619,10 +639,21 @@ end
 
 local function handle_speedtest_done(state, ev)
 	local ok, err = wan_manager.handle_speedtest_done(state, ev)
-	if ok == true and err ~= 'stale' and state.svc then
+	if ok == true and err ~= 'stale' then
 		local snap = state.model:snapshot()
 		local rec = snap.wan_runtime and snap.wan_runtime.speedtests and snap.wan_runtime.speedtests[ev.uplink_id]
-		if rec and rec.ok == true and rec.peak_mbps ~= nil then
+		if rec then
+			obs_log(state.svc, rec.ok == true and 'info' or 'warn', {
+				what = 'speedtest_completed',
+				uplink_id = ev.uplink_id,
+				interface = rec.interface,
+				device = rec.device,
+				ok = rec.ok == true,
+				err = rec.err,
+				peak_mbps = rec.ok == true and rec.peak_mbps or nil,
+			})
+		end
+		if rec and rec.ok == true and rec.peak_mbps ~= nil and state.svc and type(state.svc.obs_metric) == 'function' then
 			state.svc:obs_metric('speedtest', {
 				value = rec.peak_mbps,
 				namespace = { 'net', rec.interface or ev.uplink_id, 'speedtest' },
