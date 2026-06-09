@@ -619,6 +619,16 @@ end
 
 local function handle_speedtest_done(state, ev)
 	local ok, err = wan_manager.handle_speedtest_done(state, ev)
+	if ok == true and err ~= 'stale' and state.svc then
+		local snap = state.model:snapshot()
+		local rec = snap.wan_runtime and snap.wan_runtime.speedtests and snap.wan_runtime.speedtests[ev.uplink_id]
+		if rec and rec.ok == true and rec.peak_mbps ~= nil then
+			state.svc:obs_metric('speedtest', {
+				value = rec.peak_mbps,
+				namespace = { 'net', rec.interface or ev.uplink_id, 'speedtest' },
+			})
+		end
+	end
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end

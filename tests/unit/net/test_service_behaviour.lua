@@ -628,6 +628,7 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 			state = 'running',
 			available = true,
 		})
+		local metric_sub = reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'speedtest' }, { queue_len = 8, full = 'drop_oldest' })
 
 		local child = start_service(scope, conn, { conn = conn, config = c, rev = 20, hal = hal })
 		obs_tx:send({ payload = {
@@ -659,6 +660,22 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 		ok(#weights >= 1, 'expected live weight apply')
 		local members = runtime.live_weights.members
 		ok(type(members) == 'table' and #members >= 2, 'members expected')
+		local seen = {}
+		for _ = 1, 2 do
+			local which, msg = fibers.perform(op.named_choice({
+				metric = metric_sub:recv_op(),
+				timeout = sleep.sleep_op(0.2),
+			}))
+			ok(which == 'metric' and msg and msg.payload, 'expected speedtest metric')
+			local ns = msg.payload.namespace
+			ok(type(ns) == 'table', 'speedtest metric namespace expected')
+			eq(ns[1], 'net')
+			eq(ns[3], 'speedtest')
+			seen[ns[2]] = msg.payload.value
+		end
+		eq(seen.wan_a, 80)
+		eq(seen.wan_b, 20)
+		metric_sub:unsubscribe()
 		view:close()
 		child:cancel('test complete')
 		fibers.perform(child:join_op())
