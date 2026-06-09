@@ -1849,6 +1849,14 @@ local function translate_speedtest_req(req, name_ctx)
 		out.semantic_interface = semantic_iface
 		out.interface = generated_iface
 	end
+	local dev = out.device or out.linux_interface or out.ifname
+	if type(name_ctx.vlan) == 'function'
+		and type(semantic_iface) == 'string'
+		and semantic_iface ~= ''
+		and (dev == nil or dev == '' or dev == semantic_iface or dev == generated_iface) then
+		out.semantic_device = dev
+		out.device = name_ctx:vlan(semantic_iface)
+	end
 	return out
 end
 
