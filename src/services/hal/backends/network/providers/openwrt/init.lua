@@ -1116,6 +1116,26 @@ function Provider:plan_op(req)
 	})
 end
 
+local function trigger_post_apply_observation(self, trace)
+	local obs = self and self._observer or nil
+	if not obs or type(obs.ingest) ~= 'function' then return true, nil end
+	local ok, err = obs:ingest({
+		source = 'apply',
+		kind = 'apply_done',
+		action = 'post_apply',
+		generation = trace and trace.generation or nil,
+		apply_id = trace and trace.apply_id or nil,
+	})
+	log_provider(self, ok == true and 'debug' or 'warn', {
+		what = 'openwrt_apply_observation_queued',
+		ok = ok == true,
+		err = err,
+		generation = trace and trace.generation or nil,
+		apply_id = trace and trace.apply_id or nil,
+	})
+	return ok, err
+end
+
 function Provider:apply_op(req)
 	return fibers.run_scope_op(function()
 		local t0 = fibers.now()
@@ -1309,6 +1329,7 @@ function Provider:apply_op(req)
 			activation = result.activation,
 			elapsed_ms = elapsed_ms(t0),
 		})
+		trigger_post_apply_observation(self, trace)
 		return result
 	end):wrap(function(status, _report, result)
 		if status ~= 'ok' then
