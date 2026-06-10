@@ -24,6 +24,9 @@ local function set_option(changes, config, section, option, value)
 	if value == nil then return end
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = option, value = value }
 end
+local function delete_option(changes, config, section, option)
+	changes[#changes + 1] = { op = 'delete', config = config, section = section, option = option }
+end
 local function set_list_option(changes, config, section, option, value)
 	if value == nil then return end
 	local values = value
@@ -47,7 +50,8 @@ local function member_iface(id, spec)
 	return spec.interface or id
 end
 
-function M.build_changes(intent, name_ctx)
+function M.build_changes(intent, name_ctx, opts)
+	opts = opts or {}
 	local wan = is_plain_table(intent and intent.wan) and intent.wan or {}
 	local members = is_plain_table(wan.members) and wan.members or {}
 	local changes, known = {}, {}
@@ -114,6 +118,7 @@ function M.build_changes(intent, name_ctx)
 	local policy_name = mw_policy(policy_name_for(wan, 'balanced'))
 	known[policy_name] = true
 	set_section(changes, 'mwan3', policy_name, 'policy')
+	if opts.clear_policy_members == true then delete_option(changes, 'mwan3', policy_name, 'use_member') end
 	set_list_option(changes, 'mwan3', policy_name, 'use_member', member_sections)
 	set_option(changes, 'mwan3', policy_name, 'last_resort', wan.last_resort or 'unreachable')
 
@@ -155,7 +160,7 @@ function M.persist_weights_op(mgr, req, name_ctx)
 		local id = m.id or m.interface or ('member' .. tostring(i))
 		live.wan.members[id] = { interface = m.interface, mwan_metric = m.metric or 1, weight = m.weight or 1 }
 	end
-	local changes = M.build_changes(live, name_ctx)
+	local changes = M.build_changes(live, name_ctx, { clear_policy_members = true })
 	return mgr:submit_op({ config = 'mwan3', changes = changes, restart_cmds = {} })
 end
 
