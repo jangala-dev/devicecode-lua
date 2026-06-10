@@ -384,15 +384,30 @@ function tests.test_mwan3_builder_uses_distinct_section_names_for_same_interface
 	local ctx = ok(names.allocate(intent_doc))
 	local changes = ok(mwan3.build_changes(intent_doc, ctx))
 	local sections = {}
+	local policy = ctx:mwan_policy('balanced')
 	for _, ch in ipairs(changes) do
 		if ch.op == 'set' and ch.config == 'mwan3' and ch.value == nil then
 			if sections[ch.section] then fail('duplicate mwan3 section name generated: ' .. tostring(ch.section)) end
 			sections[ch.section] = ch.option
+		elseif ch.config == 'mwan3' and ch.section == policy and ch.option == 'use_member' and ch.op == 'delete' then
+			fail('full mwan3 package replacement should not delete use_member before it exists')
 		end
 	end
 	ok(sections[ctx:mwan_iface('wan')], 'wan interface section expected')
 	ok(sections[ctx:mwan_member('wan')], 'wan member section expected')
 	eq(ctx:mwan_iface('wan') == ctx:mwan_member('wan'), false, 'interface/member names must differ')
+
+	local live_changes = ok(mwan3.build_changes(intent_doc, ctx, { clear_policy_members = true }))
+	local deleted_use_member_at = nil
+	local first_added_use_member_at = nil
+	for i, ch in ipairs(live_changes) do
+		if ch.config == 'mwan3' and ch.section == policy and ch.option == 'use_member' then
+			if ch.op == 'delete' then deleted_use_member_at = deleted_use_member_at or i end
+			if ch.op == 'add_list' then first_added_use_member_at = first_added_use_member_at or i end
+		end
+	end
+	ok(deleted_use_member_at, 'live policy use_member list should be cleared before replacement')
+	ok(first_added_use_member_at and deleted_use_member_at < first_added_use_member_at, 'live policy use_member clear must precede add_list entries')
 end
 
 return tests
