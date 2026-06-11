@@ -77,7 +77,7 @@ function tests.test_session_control_establishes_from_hello_and_sends_ack()
 		local ok, err = scope:spawn(function ()
 			local result = session.run(scope, {
 				link_id = 'link-session',
-				peer_id = 'peer-a',
+				peer_id = 'peer-node',
 				local_node = 'local-a',
 				local_sid = 'local-sid',
 				frame_rx = control_rx,
@@ -133,7 +133,7 @@ function tests.test_session_liveness_timeout_resets_to_hello()
 		local ok, err = scope:spawn(function ()
 			local result = session.run(scope, {
 				link_id = 'link-liveness',
-				peer_id = 'peer-a',
+				peer_id = 'peer-node',
 				local_sid = 'local-sid',
 				frame_rx = control_rx,
 				tx_control = out_tx,
@@ -198,7 +198,7 @@ function tests.test_session_ping_is_emitted_before_liveness_deadline()
 		local ok, err = scope:spawn(function ()
 			local result = session.run(scope, {
 				link_id = 'link-ping',
-				peer_id = 'peer-a',
+				peer_id = 'peer-node',
 				local_sid = 'local-sid',
 				frame_rx = control_rx,
 				tx_control = out_tx,
@@ -247,7 +247,7 @@ function tests.test_session_control_processes_ready_control_before_timer_work()
 		local ok, err = scope:spawn(function ()
 			local result = session.run(scope, {
 				link_id = 'link-control-before-timer',
-				peer_id = 'peer-a',
+				peer_id = 'peer-node',
 				local_sid = 'local-sid',
 				frame_rx = control_rx,
 				tx_control = out_tx,

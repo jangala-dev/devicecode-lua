@@ -45,6 +45,13 @@ local function recv_with_timeout(rx, label, timeout)
 	return item
 end
 
+local function expect_no_item(rx, label, timeout)
+	timeout = timeout or 0.05
+	fibers.perform(sleep.sleep_op(timeout))
+	local item = queue.try_recv_now(rx)
+	assert_nil(item, label or 'expected no queued item')
+end
+
 local function start_session(scope, opts)
 	opts = opts or {}
 	local frame_tx, frame_rx = mailbox.new(16, { full = 'reject_newest' })
@@ -57,7 +64,7 @@ local function start_session(scope, opts)
 	local ok, err = scope:spawn(function ()
 		local result = session.run(scope, {
 			link_id = opts.link_id or 'link-a',
-			peer_id = opts.peer_id or 'peer-a',
+			peer_id = opts.peer_id or 'mcu',
 			local_node = opts.local_node or 'cm5',
 			local_sid = opts.local_sid or 'cm5-sid',
 			identity_claim = opts.identity_claim,
@@ -213,7 +220,61 @@ function tests.test_new_peer_sid_drops_old_generation_and_starts_next_generation
 	end)
 end
 
+function tests.test_session_ignores_self_echoed_hello_before_expected_peer()
+	fibers.run(function (scope)
+		local h = start_session(scope)
 
+		local hello = recv_with_timeout(h.control_rx, 'initial hello')
+		assert_eq(hello.frame.type, 'hello')
+		assert_eq(hello.frame.sid, 'cm5-sid')
+		assert_eq(hello.frame.node, 'cm5')
+
+		admit_frame(h.frame_tx, assert(protocol.hello('cm5-sid', 'cm5')))
+		expect_no_item(h.rpc_rx, 'self echo should not emit rpc peer session')
+		expect_no_item(h.transfer_rx, 'self echo should not emit transfer peer session')
+		expect_no_item(h.control_rx, 'self echo should not trigger hello_ack')
+
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('mcu-sid', 'mcu')))
+		local rpc_ev = recv_with_timeout(h.rpc_rx, 'rpc peer session after real ack')
+		local xfer_ev = recv_with_timeout(h.transfer_rx, 'transfer peer session after real ack')
+		assert_eq(rpc_ev.kind, 'peer_session')
+		assert_eq(xfer_ev.kind, 'peer_session')
+		assert_eq(rpc_ev.session.peer_node, 'mcu')
+		assert_eq(rpc_ev.session.peer_sid, 'mcu-sid')
+		assert_eq(xfer_ev.session.peer_node, 'mcu')
+		assert_eq(xfer_ev.session.peer_sid, 'mcu-sid')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
+
+function tests.test_session_rejects_wrong_peer_handshake_before_expected_peer()
+	fibers.run(function (scope)
+		local h = start_session(scope, { peer_id = 'mcu' })
+		recv_with_timeout(h.control_rx, 'initial hello')
+
+		admit_frame(h.frame_tx, assert(protocol.hello_ack('wrong-sid', 'bigbox-cm5')))
+		expect_no_item(h.rpc_rx, 'wrong peer ack should not emit rpc peer session')
+		expect_no_item(h.transfer_rx, 'wrong peer ack should not emit transfer peer session')
+
+		admit_frame(h.frame_tx, assert(protocol.hello('mcu-sid', 'mcu')))
+		local rpc_ev = recv_with_timeout(h.rpc_rx, 'rpc peer session after real hello')
+		local xfer_ev = recv_with_timeout(h.transfer_rx, 'transfer peer session after real hello')
+		assert_eq(rpc_ev.kind, 'peer_session')
+		assert_eq(xfer_ev.kind, 'peer_session')
+		assert_eq(rpc_ev.session.peer_node, 'mcu')
+		assert_eq(rpc_ev.session.peer_sid, 'mcu-sid')
+		assert_eq(xfer_ev.session.peer_node, 'mcu')
+		assert_eq(xfer_ev.session.peer_sid, 'mcu-sid')
+
+		local ack = recv_with_timeout(h.control_rx, 'hello ack for real peer')
+		assert_eq(ack.frame.type, 'hello_ack')
+
+		h.frame_tx:close('done')
+		recv_with_timeout(h.done_rx, 'session done')
+	end)
+end
 
 function tests.test_wire_errors_below_limit_are_counted_without_dropping_session()
 	fibers.run(function (scope)

@@ -327,6 +327,23 @@ local function same_peer(cur, frame)
 		and frame.sid == cur.peer_sid
 end
 
+local function is_self_control_frame(cur, frame)
+	if type(frame) ~= 'table' or type(frame.sid) ~= 'string' then return false end
+	if frame.sid ~= cur.local_sid then return false end
+	if frame.type == 'hello' or frame.type == 'hello_ack' then
+		return frame.node == nil or frame.node == cur.local_node
+	end
+	if frame.type == 'ping' or frame.type == 'pong' then return true end
+	return false
+end
+
+local function is_unexpected_peer(self, frame)
+	local expected = self._expected_peer
+	if expected == nil or expected == '' then return false end
+	if frame.type ~= 'hello' and frame.type ~= 'hello_ack' then return false end
+	return frame.node ~= expected
+end
+
 local function establish_from_peer(self, frame, at)
 	at = at or fibers.now()
 	local cur = session_snapshot(self)
@@ -393,21 +410,15 @@ end
 
 local function send_hello(self)
 	local cur = session_snapshot(self)
-	must_admit_control_frame_now(
-		self._tx_control,
-		assert(protocol.hello(cur.local_sid, self._local_node, self._identity_claim, self._auth_claim)),
-		'session_hello_send_failed'
-	)
+	local frame = assert(protocol.hello(cur.local_sid, self._local_node, self._identity_claim, self._auth_claim))
+	must_admit_control_frame_now(self._tx_control, frame, 'session_hello_send_failed')
 	self._next_hello_at = fibers.now() + self._hello_interval
 end
 
 local function send_hello_ack(self)
 	local cur = session_snapshot(self)
-	must_admit_control_frame_now(
-		self._tx_control,
-		assert(protocol.hello_ack(cur.local_sid, self._local_node, self._identity_claim, self._auth_claim)),
-		'session_hello_ack_send_failed'
-	)
+	local frame = assert(protocol.hello_ack(cur.local_sid, self._local_node, self._identity_claim, self._auth_claim))
+	must_admit_control_frame_now(self._tx_control, frame, 'session_hello_ack_send_failed')
 end
 
 local function send_ping(self)
@@ -554,6 +565,12 @@ end
 
 local function handle_session_frame(self, checked, at)
 	local cur = session_snapshot(self)
+	if is_self_control_frame(cur, checked) then
+		return
+	end
+	if is_unexpected_peer(self, checked) then
+		return
+	end
 	if (checked.type == 'hello' or checked.type == 'hello_ack')
 		and not protocol.proto_supported(checked.proto)
 	then
@@ -679,6 +696,7 @@ function M.run(scope, params)
 		_transfer_tx = transfer_tx,
 		_session_model = session_model,
 		_local_node = local_node,
+		_expected_peer = params.peer_id,
 		_identity_claim = protocol.normalise_reserved_claim(params.identity_claim),
 		_auth_claim = protocol.normalise_reserved_claim(params.auth_claim),
 		_auth_state = 'unauthenticated',
