@@ -958,6 +958,26 @@ local function build_uci_plan(intent, provider_config)
 	}
 end
 
+local function trigger_post_apply_observation(self, trace)
+	local obs = self and self._observer or nil
+	if not obs or type(obs.ingest) ~= 'function' then return true, nil end
+	local ok, err = obs:ingest({
+		source = 'apply',
+		kind = 'apply_done',
+		action = 'post_apply',
+		generation = trace and trace.generation or nil,
+		apply_id = trace and trace.apply_id or nil,
+	})
+	log_provider(self, ok == true and 'debug' or 'warn', {
+		what = 'openwrt_apply_observation_queued',
+		ok = ok == true,
+		err = err,
+		generation = trace and trace.generation or nil,
+		apply_id = trace and trace.apply_id or nil,
+	})
+	return ok, err
+end
+
 function M.new(config, opts)
 	config = config or {}
 	opts = opts or {}
@@ -1114,26 +1134,6 @@ function Provider:plan_op(req)
 		},
 		openwrt_names = names,
 	})
-end
-
-local function trigger_post_apply_observation(self, trace)
-	local obs = self and self._observer or nil
-	if not obs or type(obs.ingest) ~= 'function' then return true, nil end
-	local ok, err = obs:ingest({
-		source = 'apply',
-		kind = 'apply_done',
-		action = 'post_apply',
-		generation = trace and trace.generation or nil,
-		apply_id = trace and trace.apply_id or nil,
-	})
-	log_provider(self, ok == true and 'debug' or 'warn', {
-		what = 'openwrt_apply_observation_queued',
-		ok = ok == true,
-		err = err,
-		generation = trace and trace.generation or nil,
-		apply_id = trace and trace.apply_id or nil,
-	})
-	return ok, err
 end
 
 function Provider:apply_op(req)
