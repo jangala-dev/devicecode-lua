@@ -56,6 +56,51 @@ local function move_to_front(list, wanted)
     return out
 end
 
+local function shallow_copy(t)
+    local out = {}
+    if type(t) == 'table' then
+        for k, v in pairs(t) do out[k] = v end
+    end
+    return out
+end
+
+local function env_non_empty(name)
+    local v = os.getenv(name)
+    if v == nil or v == '' then return nil end
+    return v
+end
+
+local function ui_opts_with_env_auth(opts)
+    if type(opts) == 'table' and (opts.auth ~= nil or opts.auth_opts ~= nil) then
+        return opts
+    end
+
+    local password = env_non_empty('DEVICECODE_UI_ADMIN_PASSWORD')
+    if not password then return opts end
+
+    local username = env_non_empty('DEVICECODE_UI_ADMIN_USERNAME')
+        or env_non_empty('DEVICECODE_UI_ADMIN_USER')
+        or 'admin'
+
+    local out = shallow_copy(opts)
+    out.auth_opts = {
+        users = {
+            [username] = {
+                password = password,
+                principal = { kind = 'user', id = username },
+            },
+        },
+    }
+    return out
+end
+
+local function service_opts_for(name, opts)
+    if name == 'ui' then
+        return ui_opts_with_env_auth(opts)
+    end
+    return opts
+end
+
 local function cleanup_child_scope(child, reason)
     if not child then return end
     child:cancel(reason or 'cleanup')
@@ -80,6 +125,8 @@ local function spawn_service(child, bus, name, mod, env, extra_opts)
             services     = extra_opts and extra_opts.services or nil,
             run_http     = extra_opts and extra_opts.run_http or nil,
             verify_login = extra_opts and extra_opts.verify_login or nil,
+            auth         = extra_opts and extra_opts.auth or nil,
+            auth_opts    = extra_opts and extra_opts.auth_opts or nil,
         })
 
         error(('service returned unexpectedly: %s'):format(tostring(name)), 0)
@@ -222,7 +269,7 @@ function M.run(scope, params)
             fail_boot(main_conn, name, 'child_scope_failed', cerr)
         end
 
-        local ok_spawn, serr = spawn_service(child, bus, name, mod, env, service_opts[name])
+        local ok_spawn, serr = spawn_service(child, bus, name, mod, env, service_opts_for(name, service_opts[name]))
         if not ok_spawn then
             cleanup_child_scope(child, 'spawn_failed')
             fail_boot(main_conn, name, 'spawn_failed', serr)
@@ -308,5 +355,9 @@ function M.run(scope, params)
         sleep.sleep(10.0)
     end
 end
+
+M._test = {
+    service_opts_for = service_opts_for,
+}
 
 return M
