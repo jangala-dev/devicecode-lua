@@ -6,6 +6,7 @@ local op          = require 'fibers.op'
 
 local probe       = require 'tests.support.bus_probe'
 local runfibers   = require 'tests.support.run_fibers'
+local pty         = require 'tests.support.pty'
 local cap_sdk     = require 'services.hal.sdk.cap'
 
 local hal_types   = require 'services.hal.types.core'
@@ -520,6 +521,52 @@ function T.hal_keeps_legacy_public_capability_topics_for_compatibility()
 			assert(type(legacy_meta) == 'table')
 			assert(type(legacy_meta.offerings) == 'table')
 			assert(legacy_meta.offerings.open == true)
+		end)
+	end)
+end
+
+function T.hal_config_uart_serial_ports_registers_uart_capability()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local port = pty.open(scope)
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+		}, function(bus)
+			local reader = bus:connect()
+			local admin  = bus:connect()
+
+			publish_hal_config(admin, {
+				schema = 'devicecode.config/hal/1',
+				uart = {
+					serial_ports = {
+						{
+							id = 'uart0',
+							path = port.slave_name,
+							baud = 115200,
+							mode = '8N1',
+						},
+					},
+				},
+			})
+
+			local device_meta = wait_payload(reader, { 'dev', 'uart', 'uart0', 'meta' }, 0.5)
+			assert(type(device_meta) == 'table')
+			assert(device_meta.source == 'uart_manager', 'device_source=' .. tostring(device_meta.source))
+
+			local public_status = wait_payload(reader, { 'cap', 'uart', 'uart0', 'status' }, 0.5)
+			assert(type(public_status) == 'table')
+			assert(public_status.state == 'available')
+			assert(public_status.available == true)
+			assert(public_status.source_kind == 'host')
+			assert(public_status.source == 'uart_manager', 'source=' .. tostring(public_status.source))
+
+			local raw_status = wait_payload(reader, {
+				'raw', 'host', 'uart_manager', 'cap', 'uart', 'uart0', 'status'
+			}, 0.5)
+			assert(type(raw_status) == 'table')
+			assert(raw_status.state == 'available')
+			assert(raw_status.available == true)
 		end)
 	end)
 end

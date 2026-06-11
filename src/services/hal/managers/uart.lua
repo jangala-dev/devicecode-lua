@@ -63,11 +63,47 @@ local function valid_mode(mode)
         or mode == '8O1'
 end
 
-local function validate_config(entries)
-    if type(entries) ~= 'table' then
-        return false, 'config must be a list'
-    end
+local function is_sequence(t)
+	if type(t) ~= 'table' then
+		return false
+	end
 
+	local n = 0
+	for k in pairs(t) do
+		if type(k) ~= 'number' or k < 1 or k % 1 ~= 0 then
+			return false
+		end
+		n = n + 1
+	end
+
+	return n == #t
+end
+
+local function normalise_config(raw)
+	if type(raw) ~= 'table' then
+		return nil, 'config must be a list or table with serial_ports list'
+	end
+
+	if raw.serial_ports ~= nil then
+		for k in pairs(raw) do
+			if k ~= 'serial_ports' then
+				return nil, 'uart config only supports serial_ports'
+			end
+		end
+		if not is_sequence(raw.serial_ports) then
+			return nil, 'uart serial_ports must be a list'
+		end
+		return raw.serial_ports, nil
+	end
+
+	if not is_sequence(raw) then
+		return nil, 'uart config must be a list or table with serial_ports list'
+	end
+
+	return raw, nil
+end
+
+local function validate_config(entries)
     for _, entry in ipairs(entries) do
         if type(entry) ~= 'table' then
             return false, 'each uart entry must be a table'
@@ -282,7 +318,12 @@ end
 
 function M.apply_config_op(entries)
 	return fibers.run_scope_op(function ()
-		local ok, err = validate_config(entries)
+		local normalised, norm_err = normalise_config(entries)
+		if not normalised then
+			return false, norm_err
+		end
+
+		local ok, err = validate_config(normalised)
 		if not ok then
 			return false, err
 		end
@@ -299,7 +340,7 @@ function M.apply_config_op(entries)
 		local reply_ch = channel.new(1)
 		local admitted, admit_err = fibers.perform(cfg_ch:put_op({
 			generation = generation,
-			config     = entries,
+			config     = normalised,
 			reply_ch   = reply_ch,
 		}):wrap(function ()
 			return true, nil

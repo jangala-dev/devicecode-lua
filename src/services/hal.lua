@@ -113,23 +113,20 @@ end
 
 local function device_source_id(device)
 	local meta = device.meta or {}
-	local candidates = {
-		meta.source_id,
-		meta.source,
-		meta.devpath,
-		meta.path,
-		meta.name,
-		meta.serial,
-		meta.uid,
-	}
 
-	for i = 1, #candidates do
-		local v = candidates[i]
+	local function source_token(v)
 		if type(v) == 'string' and v ~= '' then return path_token(v) end
 		if type(v) == 'number' then return path_token(v) end
 	end
 
-	return path_token(('%s_%s'):format(tostring(device.class), tostring(device.id)))
+	return source_token(meta.source_id)
+		or source_token(meta.source)
+		or source_token(meta.devpath)
+		or source_token(meta.path)
+		or source_token(meta.name)
+		or source_token(meta.serial)
+		or source_token(meta.uid)
+		or path_token(('%s_%s'):format(tostring(device.class), tostring(device.id)))
 end
 
 ----------------------------------------------------------------------

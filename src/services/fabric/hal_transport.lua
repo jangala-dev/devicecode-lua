@@ -12,6 +12,7 @@ local op     = require 'fibers.op'
 local protocol = require 'services.fabric.protocol'
 local resource = require 'devicecode.support.resource'
 local cap_sdk  = require 'services.hal.sdk.cap'
+local cap_args = require 'services.hal.types.capability_args'
 local dep_failure = require 'devicecode.support.dependency_failure'
 
 local M = {}
@@ -264,6 +265,21 @@ local function reason_text(reason, fallback)
 	return reason or fallback or 'transport_open_failed'
 end
 
+local function open_opts_for_transport(transport_cfg)
+	local opts = transport_cfg.open_opts
+	if transport_cfg.class == 'uart' then
+		if opts == nil or getmetatable(opts) ~= cap_args.UARTOpenOpts then
+			local open_opts, err = cap_args.new.UARTOpenOpts(opts)
+			if not open_opts then
+				return nil, transport_open_error(transport_cfg, err or 'invalid_uart_open_opts', err)
+			end
+			return open_opts, nil
+		end
+	end
+
+	return opts or {}, nil
+end
+
 local function unwrap_open_transport_reply(transport_cfg, reply, err)
 	-- Backwards-compatible public helper: old callers passed (reply, err).
 	-- New internal callers pass (transport_cfg, reply, err) so structured failures
@@ -331,10 +347,14 @@ function M.open_transport_op(conn, transport_cfg, transport_session)
 			transport_cfg.class,
 			transport_cfg.id
 		)
+		local open_opts, opts_err = open_opts_for_transport(transport_cfg)
+		if not open_opts then
+			return op.always(nil, opts_err)
+		end
 
 		return cap:call_control_op(
 			transport_cfg.open_verb or 'open',
-			transport_cfg.open_opts
+			open_opts
 		):wrap(function (reply, err)
 			local session, uerr = unwrap_open_transport_reply(transport_cfg, reply, err)
 			if not session then
