@@ -6,6 +6,8 @@ local channel = require 'fibers.channel'
 local busmod = require 'bus'
 local request = require 'services.ui.http.request'
 local read_model = require 'services.ui.read_model'
+local ui_auth = require 'services.ui.auth'
+local sessions = require 'services.ui.sessions'
 
 local ok_cjson, cjson = pcall(require, 'cjson.safe')
 if not ok_cjson then cjson = require 'cjson' end
@@ -100,6 +102,34 @@ function tests.test_http_response_writer_may_yield_inside_request_scope_without_
 		assert_eq(events[1], 'reply-start')
 		assert_eq(events[2], 'peer-fiber-ran')
 		assert_eq(events[3], 'reply-finish:resumed')
+	end)
+end
+
+function tests.test_login_uses_default_json_encoder_when_not_injected()
+	run_fibers.run(function (scope)
+		local ctx = fake_ctx('POST', '/api/login')
+		ctx.headers = { ['content-type'] = 'application/json' }
+		ctx.read_body_as_string_op = function ()
+			return fibers.always('{"username":"admin","password":"e2e"}', nil)
+		end
+
+		local result = request.run(scope, ctx, {
+			auth = ui_auth.new({
+				users = {
+					admin = { password = 'e2e', principal = { kind = 'user', id = 'admin' } },
+				},
+			}),
+			sessions = sessions.new(),
+		})
+
+		assert_eq(result.status, 'ok')
+		assert_eq(#ctx.replies, 1)
+		assert_eq(ctx.replies[1].status, 200)
+
+		local decoded, derr = cjson.decode(ctx.replies[1].body)
+		assert_not_nil(decoded, derr)
+		assert_not_nil(decoded.session, ctx.replies[1].body)
+		assert_not_nil(decoded.session.id, ctx.replies[1].body)
 	end)
 end
 
