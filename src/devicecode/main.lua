@@ -173,6 +173,7 @@ function M.run(scope, params)
     params = params or {}
 
     local env = params.env or (os.getenv('DEVICECODE_ENV') or 'dev')
+    local exit_grace_period = params.exit_grace_period or EXIT_GRACE_PERIOD
 
     local service_names = parse_csv(params.services_csv or require_env('DEVICECODE_SERVICES'))
     if #service_names == 0 then
@@ -288,7 +289,7 @@ function M.run(scope, params)
             primary = tostring(jprimary),
         })
 
-        sleep.sleep(params.exit_grace_period or EXIT_GRACE_PERIOD)
+        sleep.sleep(exit_grace_period)
 
 		scope:cancel(('service_not_ok:%s'):format(tostring(svc)))
     end)
