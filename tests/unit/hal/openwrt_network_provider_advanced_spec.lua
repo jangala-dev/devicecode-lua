@@ -385,29 +385,61 @@ function tests.test_mwan3_builder_uses_distinct_section_names_for_same_interface
 	local changes = ok(mwan3.build_changes(intent_doc, ctx))
 	local sections = {}
 	local policy = ctx:mwan_policy('balanced')
+	local use_members = {}
 	for _, ch in ipairs(changes) do
 		if ch.op == 'set' and ch.config == 'mwan3' and ch.value == nil then
 			if sections[ch.section] then fail('duplicate mwan3 section name generated: ' .. tostring(ch.section)) end
 			sections[ch.section] = ch.option
-		elseif ch.config == 'mwan3' and ch.section == policy and ch.option == 'use_member' and ch.op == 'delete' then
-			fail('full mwan3 package replacement should not delete use_member before it exists')
+		elseif ch.config == 'mwan3' and ch.section == policy and ch.option == 'use_member' then
+			if ch.op == 'delete' then fail('full mwan3 package replacement should not delete use_member before it exists') end
+			if ch.op == 'add_list' then use_members[tostring(ch.value)] = (use_members[tostring(ch.value)] or 0) + 1 end
 		end
 	end
 	ok(sections[ctx:mwan_iface('wan')], 'wan interface section expected')
 	ok(sections[ctx:mwan_member('wan')], 'wan member section expected')
 	eq(ctx:mwan_iface('wan') == ctx:mwan_member('wan'), false, 'interface/member names must differ')
-
-	local live_changes = ok(mwan3.build_changes(intent_doc, ctx, { clear_policy_members = true }))
-	local deleted_use_member_at = nil
-	local first_added_use_member_at = nil
-	for i, ch in ipairs(live_changes) do
-		if ch.config == 'mwan3' and ch.section == policy and ch.option == 'use_member' then
-			if ch.op == 'delete' then deleted_use_member_at = deleted_use_member_at or i end
-			if ch.op == 'add_list' then first_added_use_member_at = first_added_use_member_at or i end
-		end
+	for _, mid in ipairs({ 'wan', 'modem_primary', 'modem_secondary' }) do
+		eq(use_members[ctx:mwan_member(mid)], 1, 'use_member should contain each intended member exactly once')
 	end
-	ok(deleted_use_member_at, 'live policy use_member list should be cleared before replacement')
-	ok(first_added_use_member_at and deleted_use_member_at < first_added_use_member_at, 'live policy use_member clear must precede add_list entries')
+
+	local weight_changes = ok(mwan3.build_weight_only_changes({ members = {
+		{ id = 'wan', interface = 'wan', metric = 2, weight = 70 },
+		{ id = 'modem_primary', interface = 'modem_primary', metric = 1, weight = 30 },
+	} }, ctx))
+	local seen = {}
+	for _, ch in ipairs(weight_changes) do
+		eq(ch.config, 'mwan3')
+		eq(ch.op, 'set')
+		ok(ch.option == 'weight' or ch.option == 'metric', 'weight-only persistence must only set member weight/metric')
+		ok(ch.section == ctx:mwan_member('wan') or ch.section == ctx:mwan_member('modem_primary'), 'weight-only persistence must target member sections')
+		seen[ch.section .. '.' .. ch.option] = ch.value
+	end
+	eq(seen[ctx:mwan_member('wan') .. '.weight'], 70)
+	eq(seen[ctx:mwan_member('wan') .. '.metric'], 2)
+	eq(seen[ctx:mwan_member('modem_primary') .. '.weight'], 30)
+	eq(seen[ctx:mwan_member('modem_primary') .. '.metric'], 1)
+
+	fibers.run(function()
+		local op = require 'fibers.op'
+		local submitted
+		local mgr = {
+			submit_op = function(_, record)
+				submitted = record
+				return op.always(true, nil, true)
+			end,
+		}
+		local ok_persist, err, admitted = fibers.perform(mwan3.persist_weights_op(mgr, { members = {
+			{ id = 'wan', interface = 'wan', metric = 3, weight = 44 },
+		} }, ctx))
+		eq(ok_persist, true, tostring(err))
+		eq(admitted, true)
+		eq(submitted.config, 'mwan3')
+		eq(#submitted.restart_cmds, 0, 'weight persistence must not restart mwan3')
+		for _, ch in ipairs(submitted.changes or {}) do
+			eq(ch.op, 'set')
+			ok(ch.option == 'weight' or ch.option == 'metric', 'persist_weights_op must only set weight/metric')
+		end
+	end)
 end
 
 return tests

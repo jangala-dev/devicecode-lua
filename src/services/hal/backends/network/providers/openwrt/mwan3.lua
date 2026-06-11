@@ -24,9 +24,6 @@ local function set_option(changes, config, section, option, value)
 	if value == nil then return end
 	changes[#changes + 1] = { op = 'set', config = config, section = section, option = option, value = value }
 end
-local function delete_option(changes, config, section, option)
-	changes[#changes + 1] = { op = 'delete', config = config, section = section, option = option }
-end
 local function set_list_option(changes, config, section, option, value)
 	if value == nil then return end
 	local values = value
@@ -50,8 +47,7 @@ local function member_iface(id, spec)
 	return spec.interface or id
 end
 
-function M.build_changes(intent, name_ctx, opts)
-	opts = opts or {}
+function M.build_changes(intent, name_ctx)
 	local wan = is_plain_table(intent and intent.wan) and intent.wan or {}
 	local members = is_plain_table(wan.members) and wan.members or {}
 	local changes, known = {}, {}
@@ -118,7 +114,6 @@ function M.build_changes(intent, name_ctx, opts)
 	local policy_name = mw_policy(policy_name_for(wan, 'balanced'))
 	known[policy_name] = true
 	set_section(changes, 'mwan3', policy_name, 'policy')
-	if opts.clear_policy_members == true then delete_option(changes, 'mwan3', policy_name, 'use_member') end
 	set_list_option(changes, 'mwan3', policy_name, 'use_member', member_sections)
 	set_option(changes, 'mwan3', policy_name, 'last_resort', wan.last_resort or 'unreachable')
 
@@ -152,15 +147,27 @@ function M.build_changes(intent, name_ctx, opts)
 	return changes, known, { enabled = true, policy = policy_name, members = member_sections, rules = rule_sections }
 end
 
-function M.persist_weights_op(mgr, req, name_ctx)
+function M.build_weight_only_changes(req, name_ctx)
+	local changes = {}
 	local members = req and req.members or {}
-	local live = { wan = { enabled = true, members = {} } }
-	for i = 1, #members do
-		local m = members[i]
-		local id = m.id or m.interface or ('member' .. tostring(i))
-		live.wan.members[id] = { interface = m.interface, mwan_metric = m.metric or 1, weight = m.weight or 1 }
+	local function mw_member(id)
+		if name_ctx and type(name_ctx.mwan_member) == 'function' then return name_ctx:mwan_member(id) end
+		return sid(id)
 	end
-	local changes = M.build_changes(live, name_ctx, { clear_policy_members = true })
+	for i = 1, #members do
+		local m = is_plain_table(members[i]) and members[i] or {}
+		local id = m.id or m.member or m.interface or ('member' .. tostring(i))
+		local member_sec = mw_member(id)
+		local weight = tonumber(m.weight or m.live_weight)
+		if weight ~= nil then set_option(changes, 'mwan3', member_sec, 'weight', math.max(1, math.floor(weight))) end
+		local metric = tonumber(m.metric or m.mwan_metric)
+		if metric ~= nil then set_option(changes, 'mwan3', member_sec, 'metric', math.max(1, math.floor(metric))) end
+	end
+	return changes
+end
+
+function M.persist_weights_op(mgr, req, name_ctx)
+	local changes = M.build_weight_only_changes(req, name_ctx)
 	return mgr:submit_op({ config = 'mwan3', changes = changes, restart_cmds = {} })
 end
 
