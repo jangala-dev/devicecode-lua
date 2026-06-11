@@ -288,7 +288,7 @@ function M.run(scope, params)
             primary = tostring(jprimary),
         })
 
-        sleep.sleep(EXIT_GRACE_PERIOD)
+        sleep.sleep(params.exit_grace_period or EXIT_GRACE_PERIOD)
 
 		scope:cancel(('service_not_ok:%s'):format(tostring(svc)))
     end)
