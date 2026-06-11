@@ -432,15 +432,28 @@ end
 
 
 local function fake_stream_for_context()
-	return {
+	local stream
+	stream = {
 		terminated = false,
 		calls = {},
-		shutdown = function (self) self.terminated = true; return true end,
+		connection = {
+			take_socket = function (conn)
+				return {
+					close = function ()
+						stream.terminated = true
+						conn.taken = true
+						return true
+					end,
+				}
+			end,
+		},
+		shutdown = function () error('context termination must not use graceful stream shutdown', 0) end,
 		get_headers = function () return { ':method', 'GET' } end,
 		get_next_chunk = function () return nil end,
 		write_headers = function () return true end,
 		write_chunk = function () return true end,
 	}
+	return stream
 end
 
 local function event_seen(events, kind, pred)
@@ -984,7 +997,7 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 								while not stream.terminated do runtime.yield() end
 								return nil, 'closed'
 							end,
-							shutdown = function (stream) stream.terminated = true; return true end,
+							terminate = function (stream) stream.terminated = true; return true end,
 						}
 						return headers, first_stream
 					end

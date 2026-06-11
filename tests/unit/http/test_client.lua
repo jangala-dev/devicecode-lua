@@ -241,9 +241,10 @@ function M.test_open_exchange_active_abort_terminates_active_request_not_driver(
 				go = function (self)
 					go_active = true
 					while not req_closed do runtime.yield() end
-					return nil, 'closed'
+					return nil, 'cancelled'
 				end,
-				shutdown = function () req_closed = true; return true end,
+				cancel = function (_, reason) req_closed = reason or true; return true end,
+				shutdown = function () error('active open_exchange abort must not use graceful request shutdown', 0) end,
 			}
 		end,
 	}
@@ -271,16 +272,27 @@ function M.test_exchange_read_active_abort_terminates_exchange_not_driver()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
 	local read_active = false
-	local stream = {
+	local stream
+	stream = {
 		terminated = false,
+		connection = {
+			take_socket = function (conn)
+				return {
+					close = function ()
+						stream.terminated = true
+						conn.taken = true
+						return true
+					end,
+				}
+			end,
+		},
 		get_next_chunk = function (self)
 			read_active = true
 			while not self.terminated do runtime.yield() end
 			return nil
 		end,
-		shutdown = function (self)
-			self.terminated = true
-			return true
+		shutdown = function ()
+			error('active exchange abort must not use graceful stream shutdown', 0)
 		end,
 	}
 	local ex = client.HttpExchange and client.HttpExchange.make
