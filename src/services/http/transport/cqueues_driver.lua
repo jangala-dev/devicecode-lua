@@ -353,14 +353,49 @@ function Driver:_complete_job(job, ok, results_or_err)
 	self:_signal_changed()
 end
 
+function Driver:_finish_detached_job(job, ok, results_or_err)
+	if job.done then return end
+
+	job.done = true
+	job.phase = 'detached_done'
+	job.ok = ok
+	if ok then job.results = results_or_err or pack() else job.err = results_or_err end
+
+	local cleanup = job.on_detached_complete
+	if cleanup then safe.pcall(cleanup, job.abort_reason or 'aborted', ok, results_or_err, job) end
+
+	self._jobs[job] = nil
+	notify_waitset(self._job_waiters, job)
+	self:_signal_changed()
+end
+
 function Driver:_abandon_job(job, reason)
 	if job.done or job.abandoned then return end
 
 	local abort_reason = reason or 'aborted'
 	local phase = job.phase or 'queued'
 
+	-- Ownership invariant: once a cqueues/lua-http job has become active, the
+	-- descriptor-owning coroutine remains the only place that may clean up
+	-- cqueues-owned request, stream, connection, or socket state.  A Fibers
+	-- caller losing interest is therefore detached from the result; it must not
+	-- synchronously close or cancel descriptors that may still be installed in
+	-- the cqueues controller.  on_detached_complete is run after the cqueues
+	-- coroutine returns, when that ownership boundary is safe again.
+
 	job.abandoned = true
 	job.abort_reason = abort_reason
+
+	if phase == 'active' and job.detach_on_abort then
+		job.detached = true
+		job.phase = 'detached'
+		local on_detach = job.on_detach
+		if on_detach then safe.pcall(on_detach, abort_reason, job) end
+		notify_waitset(self._job_waiters, job)
+		self:_signal_changed()
+		return
+	end
+
 	job.phase = 'abandoned'
 	self._jobs[job] = nil
 
@@ -400,9 +435,13 @@ function Driver:_start_job(label, fn, opts)
 		results = nil,
 		err = nil,
 		abandoned = false,
+		detached = false,
 		abort_reason = nil,
+		detach_on_abort = opts.detach_on_abort,
 		on_abort = opts.on_abort,
 		on_active_abort = opts.on_active_abort,
+		on_detach = opts.on_detach,
+		on_detached_complete = opts.on_detached_complete,
 	}
 
 	self._jobs[job] = true
@@ -416,8 +455,10 @@ function Driver:_start_job(label, fn, opts)
 			return tb or tostring_error(e)
 		end)
 
-		if job.abandoned then return end
-
+		if job.abandoned then
+			self:_finish_detached_job(job, ok, result or 'cqueues job failed')
+			return
+		end
 		if ok then
 			self:_complete_job(job, true, result)
 		else
@@ -442,6 +483,8 @@ end
 
 function Driver:_job_outcome_op(job)
 	local function step()
+		if job.abandoned then return true, nil, job.abort_reason or 'aborted' end
+
 		if job.done then
 			if job.ok then
 				local r = job.results or pack()
@@ -449,8 +492,6 @@ function Driver:_job_outcome_op(job)
 			end
 			return true, nil, job.err or 'cqueues job failed'
 		end
-
-		if job.abandoned then return true, nil, job.abort_reason or 'aborted' end
 		if self._closed then return true, nil, self._close_reason or 'closed' end
 
 		return false

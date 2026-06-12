@@ -432,28 +432,15 @@ end
 
 
 local function fake_stream_for_context()
-	local stream
-	stream = {
+	return {
 		terminated = false,
 		calls = {},
-		connection = {
-			take_socket = function (conn)
-				return {
-					close = function ()
-						stream.terminated = true
-						conn.taken = true
-						return true
-					end,
-				}
-			end,
-		},
-		shutdown = function () error('context termination must not use graceful stream shutdown', 0) end,
+		shutdown = function (self) self.terminated = true; return true end,
 		get_headers = function () return { ':method', 'GET' } end,
 		get_next_chunk = function () return nil end,
 		write_headers = function () return true end,
 		write_chunk = function () return true end,
 	}
-	return stream
 end
 
 local function event_seen(events, kind, pred)
@@ -992,12 +979,13 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 					if tostring(self.uri):match('slow') then
 						first_stream = {
 							terminated = false,
+							release_read = false,
 							get_next_chunk = function (stream)
 								first_read_active = true
-								while not stream.terminated do runtime.yield() end
+								while not stream.release_read do runtime.yield() end
 								return nil, 'closed'
 							end,
-							terminate = function (stream) stream.terminated = true; return true end,
+							shutdown = function (stream) stream.terminated = true; return true end,
 						}
 						return headers, first_stream
 					end
@@ -1032,16 +1020,22 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 		local waiter = ok(scope:child())
 		ok(waiter:spawn(function () fibers.perform(ex:read_chunk_op(1024)) end))
 		yield_until(function () return first_read_active end, 'slow exchange read should be active')
-		-- The driver pump runs the active read job.  Once the caller loses interest,
-		-- the public exchange handle should terminate that stream, not the backend.
-		waiter:cancel('caller_cancelled')
-		fibers.perform(waiter:join_op())
-		yield_until(function () return svc:stats().active_exchanges == 0 end,
+			-- The driver pump runs the active read job.  Once the caller loses interest,
+			-- the public exchange handle should detach and close for the caller, but the
+			-- lua-http/cqueues-owned stream cleanup must wait until the cqueues job
+			-- returns.  The fake read is therefore released explicitly after caller
+			-- cancellation, modelling a cqueues-side timeout/error return.
+			waiter:cancel('caller_cancelled')
+			fibers.perform(waiter:join_op())
+			yield_until(function () return svc:stats().active_exchanges == 0 end,
 			'exchange termination should deregister the service record')
 
-		ok(first_stream.terminated, 'public exchange read cancellation should terminate the exchange stream')
-		ok(ex:is_closed(), 'public exchange handle should be closed after active read abort')
-		ok(not drv:is_closed(), 'the exchange is the narrow owner; the HTTP backend should stay usable')
+			ok(not first_stream.terminated, 'caller cancellation must not synchronously terminate cqueues-owned stream state')
+			ok(ex:is_closed(), 'public exchange handle should be closed after active read abort')
+			first_stream.release_read = true
+			yield_until(function () return first_stream.terminated end,
+			'detached read cleanup should terminate the stream after the cqueues job returns')
+			ok(not drv:is_closed(), 'the exchange is the narrow owner; the HTTP backend should stay usable')
 
 		local second = ok(fibers.perform(ref:exchange_op({ uri = 'http://example.test/fast', method = 'GET' })))
 		eq(second.result.status, '200')

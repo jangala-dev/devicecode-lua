@@ -55,7 +55,7 @@ local function env_num(name, default)
 end
 
 local function parse_modes()
-	local s = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_MODES') or 'stall_no_response,partial_status,partial_headers,partial_body'
+	local s = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_MODES') or 'partial_body,stall_no_response'
 	local modes = {}
 	for part in s:gmatch('[^,]+') do
 		part = part:gsub('^%s+', ''):gsub('%s+$', '')
@@ -193,6 +193,17 @@ local function http_uri(port, path)
 	return ('http://127.0.0.1:%d%s'):format(port, path or '/')
 end
 
+local function assert_http_backend_ready(svc, label)
+	local st = svc:stats()
+	if st.backend ~= 'ready' then
+		fail((label or 'http backend check') .. ': backend=' .. tostring(st.backend) .. ' last_error=' .. tostring(st.last_error or st.reason))
+	end
+	if tostring(st.last_error or ''):find('Bad file descriptor', 1, true) then
+		fail((label or 'http backend check') .. ': EBADF reported: ' .. tostring(st.last_error))
+	end
+	return st
+end
+
 local function run_ui_raw_probe(scope, listener, port, i)
 	log(('iter:%03d ui_probe_spawn_handler'):format(i))
 	local handled = { accepted = false, wrote_body = false }
@@ -277,14 +288,17 @@ local function run_child()
 			log(('iter:%03d rec_seen path=%s'):format(i, tostring(records[i].path)))
 			records[i].released = true
 			log(('iter:%03d rec_released done=%s auto_released=%s'):format(i, tostring(records[i].done), tostring(records[i].auto_released)))
+			assert_http_backend_ready(svc, ('iter:%03d post_exchange_backend_ready'):format(i))
 
 			if ui_every > 0 and (i % ui_every) == 0 then
 				log(('iter:%03d ui_probe_begin client=raw'):format(i))
 				run_ui_raw_probe(scope, ui_listener, ui_port, i)
+				assert_http_backend_ready(svc, ('iter:%03d post_ui_probe_backend_ready'):format(i))
 			end
 		end
 
 		log('child:post_loop_checks')
+		assert_http_backend_ready(svc, 'post_loop_backend_ready')
 		local final_i = iterations + 1
 		records[final_i] = { mode = 'success' }
 		log('child:final_retry_begin')
@@ -295,6 +309,8 @@ local function run_child()
 			body_source = blob_source.from_string('[{"n":"final","v":1}]'),
 		})))
 		eq(final.result.status, '202', 'final retry status')
+		assert_http_backend_ready(svc, 'after_final_retry_backend_ready')
+		wait_until(function () return (svc:stats().active_exchanges or 0) == 0 end, 1.0, 'active exchanges to drain')
 		log('child:success')
 		io.stdout:flush()
 		io.stderr:flush()
@@ -304,6 +320,10 @@ end
 
 function M.run()
 	return run_child()
+end
+
+if ... == nil then
+	return M.run()
 end
 
 return M

@@ -18,86 +18,76 @@ local function call(method, obj, ...)
 end
 
 local function get_field(obj, key)
-	if obj == nil then return nil end
+	if not obj then return nil end
 	local ok, value = safe.pcall(function () return obj[key] end)
 	if ok then return value end
 	return nil
 end
 
-local function take_and_close_socket_from_connection(conn)
-	if conn == nil or type(conn.take_socket) ~= 'function' then
-		return false, 'take_socket_unavailable'
-	end
-
-	local ok, sock = safe.pcall(function () return conn:take_socket() end)
-	if not ok or sock == nil then return false, sock or 'take_socket_failed' end
-
-	-- This is the abort boundary for daurnimator/lua-http HTTP/1 streams.  Do
-	-- not call stream:shutdown(), connection:shutdown(), or connection:close()
-	-- here: those are graceful protocol operations and may wait in cqueues.
-	-- Once the socket is taken, direct socket close is the immediate fd teardown
-	-- primitive.
-	call('close', sock)
-	return true, nil
-end
-
-local function take_and_close_socket(obj)
+local function take_and_close_connection_socket(obj)
 	local conn = get_field(obj, 'connection')
-	local ok, err = take_and_close_socket_from_connection(conn)
-	if ok then return true, nil end
+	if not conn then return false, 'connection_missing' end
 
-	if obj and type(obj.connection) == 'function' then
-		local cok, c = safe.pcall(function () return obj:connection() end)
-		if cok and c then
-			ok, err = take_and_close_socket_from_connection(c)
-			if ok then return true, nil end
+	-- lua-http exposes h1 stream.connection and h1_connection:take_socket().  In
+	-- cancellation cleanup we need a transport boundary, not a graceful protocol
+	-- shutdown.  Taking the cqueues socket and closing that socket lets cqueues
+	-- cancel its descriptor before close, which is the ordering cqueues requires.
+	if type(conn.take_socket) == 'function' then
+		local ok, sock = safe.pcall(function () return conn:take_socket() end)
+		if ok and sock then
+			local closed = call('close', sock)
+			if closed then return true end
 		end
 	end
 
-	return false, err or 'connection_socket_unavailable'
+	return false, 'take_socket_unavailable'
 end
 
 function M.terminate_stream(stream, reason)
 	if not stream then return true end
-	local ok = call('terminate', stream, reason or 'terminated')
+	local ok = take_and_close_connection_socket(stream)
 	if ok then return true end
-	-- Real lua-http response streams expose stream.connection.  Abort/finaliser
-	-- paths must tear down that transport, not fall back to graceful stream close.
-	take_and_close_socket(stream)
+	ok = call('terminate', stream, reason or 'terminated')
+	if ok then return true end
+	ok = call('close', stream)
+	if ok then return true end
+	-- Last resort only.  lua-http shutdown can be graceful and should not be the
+	-- first action on timeout/finaliser cleanup.
+	ok = call('shutdown', stream)
+	if ok then return true end
 	return true
 end
 
 function M.terminate_server(server, reason)
 	if not server then return true end
-	local ok = call('terminate', server, reason or 'terminated')
+	local ok = call('close', server)
 	if ok then return true end
-	-- lua-http server objects expose close() as their listener teardown primitive.
-	-- This is not a stream/connection graceful close_op path.
-	call('close', server)
 	return true
 end
 
 function M.terminate_websocket(ws, reason)
 	if not ws then return true end
-	local ok = call('terminate', ws, reason or 'terminated')
+	-- This is deliberately not graceful. It gives lua-http/cqueues a bounded
+	-- immediate wake/close path for finalisers and service shutdown.
+	local ok = call('close', ws, 1006, reason or 'terminated', 0)
 	if ok then return true end
-	ok = take_and_close_socket(ws)
+	ok = call('shutdown', ws)
 	if ok then return true end
-	-- If the websocket object does not expose its connection, use an abnormal
-	-- close with zero timeout as the narrow transport-level teardown primitive.
-	call('close', ws, 1006, reason or 'terminated', 0)
 	return true
 end
 
 function M.terminate_request(req, reason)
 	if not req then return true end
-	local ok = call('terminate', req, reason or 'terminated')
+	local ok = take_and_close_connection_socket(req)
 	if ok then return true end
-	ok = take_and_close_socket(req)
+	ok = call('terminate', req, reason or 'terminated')
 	if ok then return true end
-	-- lua-http requests do not always expose a connection before req:go() has
-	-- produced a stream.  cancel(), when present, is the request-level abort hook.
-	call('cancel', req, reason or 'terminated')
+	ok = call('cancel', req, reason or 'terminated')
+	if ok then return true end
+	ok = call('close', req)
+	if ok then return true end
+	ok = call('shutdown', req)
+	if ok then return true end
 	return true
 end
 
