@@ -174,6 +174,21 @@ local function start_speedtest_for_uplink(state, uplink)
 	return true, nil
 end
 
+local start_live_weight_apply
+
+local function apply_weights_if_ready(state, generation)
+	if state.active_weight_apply ~= nil then return true, nil end
+	for _, active in pairs(state.active_speedtests or {}) do
+		if active and active.generation == generation then return true, nil end
+	end
+	local snap = state.model:snapshot()
+	local weights = wan_policy.compute_weights(snap, generation)
+	if not weights then return true, nil end
+	local previous = snap.wan_runtime and snap.wan_runtime.last_weight_apply and snap.wan_runtime.last_weight_apply.members
+	if wan_policy.weights_equal(previous, weights) then return true, nil end
+	return start_live_weight_apply(state, weights)
+end
+
 function M.reconcile_speedtests(state, reason)
 	local snap = state.model:snapshot()
 	if not wan_policy.speedtest_enabled(snap) then
@@ -213,6 +228,7 @@ function M.reconcile_speedtests(state, reason)
 		return s
 	end)
 
+	local speedtest_pending = false
 	for i = 1, #uplinks do
 		local uplink = uplinks[i]
 		local observed_status = wan_policy.uplink_observed_status(snap, uplink)
@@ -234,20 +250,23 @@ function M.reconcile_speedtests(state, reason)
 			local due, due_reason = wan_policy.speedtest_due(state.model:snapshot(), uplink,
 				{ generation = generation, now = now(state) })
 			if due then
+				speedtest_pending = true
 				local ok, err = start_speedtest_for_uplink(state, uplink)
 				if ok ~= true then return nil, err end
 			else
+				if due_reason == 'running' then speedtest_pending = true end
 				mark_speedtest_skipped(state, uplink, generation, due_reason or 'not_due')
 				report_speedtest_skip(state, due_reason or 'not_due', reason, uplink, generation)
 			end
 		end
 	end
+	if not speedtest_pending then return apply_weights_if_ready(state, generation) end
 	return true, nil
 end
 
 M.start_speedtests = M.reconcile_speedtests
 
-local function start_live_weight_apply(state, members)
+function start_live_weight_apply(state, members)
 	if not members or #members == 0 or not state.hal or type(state.hal.apply_live_weights_op) ~= 'function' then
 		return
 			true, nil
