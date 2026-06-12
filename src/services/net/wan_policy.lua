@@ -181,9 +181,12 @@ function M.compute_weights(snapshot, generation)
 		local id = uplink.uplink_id
 		local rec = tests[id]
 		local mbps = nil
-		if rec and rec.generation == generation and rec.state == 'done' then
-			if rec.ok == true then mbps = tonumber(rec.peak_mbps) or tonumber(rec.last_success_mbps)
-			else mbps = tonumber(rec.last_success_mbps) end
+		if rec and rec.state == 'done' then
+			if rec.ok == true then
+				mbps = tonumber(rec.peak_mbps) or tonumber(rec.last_success_mbps)
+			elseif rec.generation == generation then
+				mbps = tonumber(rec.last_success_mbps)
+			end
 		end
 		if mbps and mbps > 0 then total = total + mbps end
 		measured[id] = mbps
