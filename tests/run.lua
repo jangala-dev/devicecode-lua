@@ -94,6 +94,7 @@ local files = {
 	"integration.devhost.hal_uart_spec",
 	"integration.devhost.fabric_hal_uart_smoke_spec",
 	"integration.devhost.fabric_public_service_path_spec",
+	'integration.devhost.rtl8380m_switch_spec',
 	'integration.devhost.update_public_seams_spec',
 	'unit.support.test_scoped_work',
 	'unit.support.test_queue',
@@ -191,21 +192,28 @@ for i = 1, #files do
 				total = total + 1
 				io.write(('[TEST] %s :: %s ... '):format(modname, name))
 				local t0 = monotonic_now()
-				local ok, err = safe.xpcall(fn, function(e)
+				local ok, ret = safe.xpcall(fn, function(e)
 					return debug.traceback(tostring(e), 2)
 				end)
 				local dt = monotonic_now() - t0
 				if ok then
-					io.write('ok ' .. format_duration_s(dt) .. '\n')
+					if type(ret) == 'table' and ret.skip == true then
+						skipped = skipped + 1
+						total = total - 1
+						io.write(('SKIP %s %s\n'):format(tostring(ret.reason or ''), format_duration_s(dt)))
+					else
+						io.write('ok ' .. format_duration_s(dt) .. '\n')
+					end
 				else
 					failed = failed + 1
+					local err_text = tostring(ret == nil and '<no error object returned>' or ret)
 					failure_rows[#failure_rows + 1] = {
 						name = ('%s :: %s'):format(modname, name),
-						err = tostring(err),
+						err = err_text,
 						dt = dt,
 					}
 					io.write('FAIL ' .. format_duration_s(dt) .. '\n')
-					io.write(tostring(err) .. '\n')
+					io.write(err_text .. '\n')
 				end
 			else
 				skipped = skipped + 1
