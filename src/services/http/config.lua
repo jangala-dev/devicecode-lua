@@ -12,6 +12,7 @@ local DEFAULTS = {
 	id = 'main',
 	policy = {
 		allowed_schemes = { http = true, https = true, ws = true, wss = true },
+		allowed_response_parsers = { strict = true },
 		allow_loopback = true,
 		max_request_body = 16 * 1024 * 1024,
 		max_response_body = 16 * 1024 * 1024,
@@ -27,6 +28,7 @@ local ROOT_KEYS = {
 
 local POLICY_KEYS = {
 	allowed_schemes = true,
+	allowed_response_parsers = true,
 	allowed_hosts = true,
 	denied_hosts = true,
 	allow_loopback = true,
@@ -92,6 +94,10 @@ local function normalise_policy(raw)
 	v, err = string_bool_map_or_nil(raw.allowed_schemes, 'policy.allowed_schemes')
 	if err then return nil, err end
 	if v ~= nil then out.allowed_schemes = v end
+
+	v, err = string_bool_map_or_nil(raw.allowed_response_parsers, 'policy.allowed_response_parsers')
+	if err then return nil, err end
+	if v ~= nil then out.allowed_response_parsers = v end
 
 	v, err = string_bool_map_or_nil(raw.allowed_hosts, 'policy.allowed_hosts')
 	if err then return nil, err end

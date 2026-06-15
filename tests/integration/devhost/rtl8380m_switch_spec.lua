@@ -101,7 +101,7 @@ local function start_http_capability(bus, opts)
 		max_accept_queue = 8,
 		policy = {
 			allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true },
-			legacy_http1_close_max_response_bytes = 1024 * 1024,
+			max_response_body = 1024 * 1024,
 		},
 	}))
 	return svc

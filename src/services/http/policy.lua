@@ -193,7 +193,7 @@ function M.validate_exchange_args(args, opts)
 		if uri.scheme ~= 'http' then return nil, 'unsupported_scheme' end
 		if method ~= 'GET' and method ~= 'POST' and method ~= 'HEAD' then return nil, 'unsupported_method' end
 		if timeout_s == nil then return nil, 'timeout_required' end
-		local policy_max = opts.legacy_http1_close_max_response_bytes or opts.max_response_body or (1024 * 1024)
+		local policy_max = opts.max_response_body or (1024 * 1024)
 		if type(policy_max) ~= 'number' or policy_max <= 0 then return nil, 'invalid_args' end
 		if max_response_bytes == nil then max_response_bytes = policy_max end
 		if max_response_bytes > policy_max then return nil, 'response_too_large' end
