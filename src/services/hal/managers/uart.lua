@@ -119,17 +119,24 @@ local function validate_config(entries)
     return true, nil
 end
 
+local UART_MANAGER_SOURCE_ID = 'uart_manager'
+
+local function uart_device_meta(driver)
+	return {
+		provider  = 'hal.uart',
+		source_id = UART_MANAGER_SOURCE_ID,
+		path      = driver.path,
+		baud      = driver.default_baud,
+		mode      = driver.default_mode,
+	}
+end
+
 local function emit_device_added_op(driver, caps)
-	return device_events.added_op(S.dev_ev_ch, 'uart', driver.id, {
-		path   = driver.path,
-		baud   = driver.default_baud,
-		mode   = driver.default_mode,
-		source = 'uart_manager',
-	}, caps)
+	return device_events.added_op(S.dev_ev_ch, 'uart', driver.id, uart_device_meta(driver), caps)
 end
 
 local function emit_device_removed_op(driver)
-	return device_events.removed_op(S.dev_ev_ch, 'uart', driver.id, {})
+	return device_events.removed_op(S.dev_ev_ch, 'uart', driver.id, uart_device_meta(driver))
 end
 
 local function same_driver_config(driver, entry)
