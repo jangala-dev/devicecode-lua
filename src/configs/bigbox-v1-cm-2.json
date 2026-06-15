@@ -1264,8 +1264,13 @@
         "host": "0.0.0.0",
         "port": 8080
       },
-      "uploads": {
-        "require_auth": true
+      "updates": {
+        "upload": {
+          "require_auth": false
+        },
+        "commit": {
+          "require_auth": false
+        }
       }
     }
   },

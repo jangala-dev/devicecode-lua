@@ -1116,7 +1116,7 @@ local function start_ui(scope, bus, port, roots)
                     image_id = 'mcu-image-new',
                 },
             },
-            uploads = { enabled = true, max_bytes = 1024 * 1024, require_auth = true },
+            updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false }, commit = { require_auth = false } },
         })
     end))
     conn:retain({ 'cfg', 'ui' }, { data = {
@@ -1124,7 +1124,7 @@ local function start_ui(scope, bus, port, roots)
         enabled = true,
         http = { enabled = true, cap_id = 'main', host = '127.0.0.1', port = port, max_active_requests = 8 },
         static = { root = roots.static, index = 'index.html' },
-        uploads = { enabled = true, max_bytes = 1024 * 1024, require_auth = true },
+        updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false }, commit = { require_auth = false } },
         sse = { enabled = false },
         sessions = { prune_interval = false },
     } })
@@ -1600,16 +1600,8 @@ function T.ui_http_mcu_update_short_stage_timeout_fails_via_outer_choice()
 
         wait_component_software(cm5.conn, 'mcu-image-old', 'mcu-boot-1')
 
-        log('short-timeout: logging in through curl')
-        local login_status, login_body, login_decoded = run_http_json(root_scope, port, '/api/login', {
-            username = 'tester',
-            password = 'test-password',
-        })
-        assert_eq(login_status, '200', login_body)
-        local sid = assert(login_decoded and login_decoded.session and login_decoded.session.id, login_body)
-
-        log(('short-timeout: sending upload through curl with %.1fs update stage deadline'):format(SHORT_STAGE_TIMEOUT_S))
-        local status, body = run_http_upload(root_scope, port, blob, { ['x-session-id'] = sid })
+        log(('short-timeout: sending unauthenticated upload through curl with %.1fs update stage deadline'):format(SHORT_STAGE_TIMEOUT_S))
+        local status, body = run_http_upload(root_scope, port, blob, nil)
         assert_eq(status, '200', 'upload HTTP status ' .. tostring(status) .. ': ' .. tostring(body))
 
         log('short-timeout: waiting for job to fail due to the outer stage deadline')
@@ -1662,26 +1654,9 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
         log('waiting for initial canonical MCU software state')
         wait_component_software(cm5.conn, 'mcu-image-old', 'mcu-boot-1')
 
-        log('checking unauthenticated upload is rejected before login')
-        local unauth_status, unauth_body = run_http_upload(root_scope, port, 'not-authorised', nil)
-        assert_true(
-            unauth_status == '401' or unauth_status == '403',
-            'unauthenticated upload should be rejected, got ' .. tostring(unauth_status) .. ': ' .. tostring(unauth_body)
-        )
-
-        log('logging in through curl before upload')
-        local login_status, login_body, login_decoded = run_http_json(root_scope, port, '/api/login', {
-            username = 'tester',
-            password = 'test-password',
-        })
-        assert_eq(login_status, '200', login_body)
-        assert_not_nil(login_decoded and login_decoded.session, login_body)
-        local sid = login_decoded.session.id
-        assert_not_nil(sid, 'login should return a session id')
-
         log(('sending real HTTP upload through curl (%d byte artifact)'):format(#blob))
         local stage_started = fibers.now()
-        local status, body = run_http_upload(root_scope, port, blob, { ['x-session-id'] = sid })
+        local status, body = run_http_upload(root_scope, port, blob, nil)
         assert_eq(status, '200', 'upload HTTP status ' .. tostring(status) .. ': ' .. tostring(body))
         local decoded = assert(cjson.decode(body), body)
         assert_eq(decoded.status, 'ok')
@@ -1729,13 +1704,13 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
         )
         log_fabric_status(cm5.conn, 'CM5 fabric post-stage status')
 
-        log('committing job through curl HTTP JSON command route')
+        log('committing job through curl HTTP update commit route')
         local commit_status, commit_body, commit_decoded = run_http_json(
             root_scope,
             port,
-            '/api/call/cap/update-manager/main/rpc/commit-job',
+            '/api/update/commit',
             { job_id = 'job-mcu-http-uart' },
-            { ['x-session-id'] = sid }
+            nil
         )
         assert_eq(commit_status, '200', commit_body)
         assert_not_nil(commit_decoded and commit_decoded.value, commit_body)

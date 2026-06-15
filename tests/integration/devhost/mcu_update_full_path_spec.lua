@@ -554,7 +554,7 @@ local function start_ui(scope, bus, port, roots)
                     image_id = 'mcu-image-new',
                 },
             },
-            uploads = { enabled = true, max_bytes = 1024 * 1024 },
+            updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false }, commit = { require_auth = false } },
         })
     end))
     conn:retain({ 'cfg', 'ui' }, { data = {
@@ -562,7 +562,7 @@ local function start_ui(scope, bus, port, roots)
         enabled = true,
         http = { enabled = true, cap_id = 'main', host = '127.0.0.1', port = port, max_active_requests = 8 },
         static = { root = roots.static, index = 'index.html' },
-        uploads = { enabled = true, max_bytes = 1024 * 1024 },
+        updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false }, commit = { require_auth = false } },
         sse = { enabled = false },
         sessions = { prune_interval = false },
     } })
@@ -731,23 +731,13 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
             return fake.staged and fake.staged.bytes == blob
         end, { timeout = 4.0 }), 'fake MCU should stage transferred artifact')
 
-        log('logging in through real HTTP JSON')
-        local login_status, login_body, login_decoded = run_http_json(root_scope, port, '/api/login', {
-            username = 'tester',
-            password = 'test-password',
-        })
-        assert_eq(login_status, '200', login_body)
-        assert_not_nil(login_decoded and login_decoded.session, login_body)
-        local sid = login_decoded.session.id
-        assert_not_nil(sid, 'login should return a session id')
-
-        log('committing job through real HTTP JSON command route')
+        log('committing job through real HTTP update commit route')
         local commit_status, commit_body, commit_decoded = run_http_json(
             root_scope,
             port,
-            '/api/call/cap/update-manager/main/rpc/commit-job',
+            '/api/update/commit',
             { job_id = 'job-mcu-full-path' },
-            { ['x-session-id'] = sid }
+            nil
         )
         assert_eq(commit_status, '200', commit_body)
         assert_not_nil(commit_decoded and commit_decoded.value, commit_body)

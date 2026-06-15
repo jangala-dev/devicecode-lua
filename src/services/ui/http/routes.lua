@@ -75,6 +75,10 @@ function M.decode(ctx)
 		return { kind = 'upload' }
 	end
 
+	if parts[2] == 'update' and parts[3] == 'commit' and method == 'POST' then
+		return { kind = 'update_commit' }
+	end
+
 	if parts[2] == 'call' and method == 'POST' then
 		local topic = {}
 		for i = 3, #parts do topic[#topic + 1] = parts[i] end

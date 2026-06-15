@@ -146,6 +146,62 @@ function tests.test_http_command_route_parses_real_json_body_and_calls_bus()
 	end)
 end
 
+
+function tests.test_update_commit_route_calls_update_manager_without_session()
+	run_fibers.run(function (scope)
+		local bus = busmod.new()
+		local admin = bus:connect({ origin_base = { service = 'ui-update-commit-test' } })
+		local received
+		local ep = assert(admin:bind({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { queue_len = 1 }))
+		scope:finally(function () ep:close(); admin:disconnect() end)
+
+		fibers.spawn(function ()
+			local req = ep:recv()
+			received = req.payload
+			req:reply({ ok = true })
+		end)
+
+		local ctx = fake_ctx('POST', '/api/update/commit')
+		ctx.headers = { ['content-type'] = 'application/json' }
+		ctx.read_body_as_string_op = function ()
+			return fibers.always('{"job_id":"job-1"}', nil)
+		end
+
+		local result = request.run(scope, ctx, {
+			bus = bus,
+			update = { bus = bus, commit_require_auth = false },
+			encode_json = function (v) return assert(cjson.encode(v)) end,
+		})
+
+		assert_eq(result.status, 'ok')
+		assert_not_nil(received)
+		assert_eq(received.job_id, 'job-1')
+		assert_eq(#ctx.replies, 1)
+		assert_eq(ctx.replies[1].status, 200)
+		local decoded = assert(cjson.decode(ctx.replies[1].body), ctx.replies[1].body)
+		assert_eq(decoded.value.ok, true)
+	end)
+end
+
+function tests.test_update_commit_route_obeys_auth_policy_when_enabled()
+	run_fibers.run(function (scope)
+		local bus = busmod.new()
+		local ctx = fake_ctx('POST', '/api/update/commit')
+		ctx.headers = { ['content-type'] = 'application/json' }
+		ctx.read_body_as_string_op = function () return fibers.always('{"job_id":"job-1"}', nil) end
+
+		local result = request.run(scope, ctx, {
+			bus = bus,
+			update = { bus = bus, commit_require_auth = true },
+			encode_json = function (v) return assert(cjson.encode(v)) end,
+		})
+
+		assert_eq(result.status, 'unauthenticated')
+		assert_eq(#ctx.replies, 1)
+		assert_eq(ctx.replies[1].status, 401)
+	end)
+end
+
 function tests.test_http_command_route_rejects_non_json_body()
 	run_fibers.run(function (scope)
 		local bus = busmod.new()

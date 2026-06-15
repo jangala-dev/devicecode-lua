@@ -21,6 +21,8 @@ if not ok_http_headers then http_headers = nil end
 
 local M = {}
 
+local UPDATE_COMMIT_TOPIC = { 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }
+
 local function default_encode_json(value)
 	local encoded, err = cjson.encode(value)
 	if encoded == nil then error(err or 'json_encode_failed', 0) end
@@ -196,6 +198,50 @@ local function handle_session_get(owner, ctx, deps)
 	return { status = 'ok' }
 end
 
+local function handle_update_commit(scope, owner, ctx, deps)
+	local update_deps = deps.update or deps
+	local principal = nil
+	if update_deps.commit_require_auth == true then
+		principal = principal_from(ctx, deps)
+		if principal == nil then
+			perform_response(owner:reply_error_op(401, 'unauthenticated'))
+			return { status = 'unauthenticated' }
+		end
+	end
+
+	local payload, perr = json_body_table(ctx, deps, { require_json_content_type = true })
+	if not payload then
+		perform_response(owner:reply_error_op(nil, perr))
+		return { status = 'bad_request', err = perr }
+	end
+	if type(payload.job_id) ~= 'string' or payload.job_id == '' then
+		perform_response(owner:reply_error_op(400, 'missing_job_id'))
+		return { status = 'bad_request', err = 'missing_job_id' }
+	end
+
+	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
+		principal = principal,
+		connect = update_deps.connect or deps.connect,
+		bus = update_deps.bus or deps.bus,
+		conn = update_deps.conn or deps.conn,
+		timeout = update_deps.commit_timeout or deps.command_timeout or 5.0,
+		run_op = function (_, conn)
+			return conn:call_op(UPDATE_COMMIT_TOPIC, payload, { timeout = false })
+				:wrap(function (value, call_err)
+					if value == nil then return nil, call_err or 'upstream_failed' end
+					return { value = value }, nil
+				end)
+		end,
+	})
+	if st ~= 'ok' then
+		perform_response(owner:reply_error_op(nil, result_or_primary))
+		return { status = 'failed', err = result_or_primary }
+	end
+	local result = result_or_primary
+	perform_response(owner:reply_json_op(200, result))
+	return { status = 'ok', route = 'update_commit' }
+end
+
 local function handle_command(scope, owner, ctx, route, deps)
 	if type(route.topic) ~= 'table' or #route.topic == 0 then
 		perform_response(owner:reply_error_op(400, 'bad_request'))
@@ -254,6 +300,8 @@ function M.run(scope, ctx, deps)
 		return handle_session_get(owner, ctx, deps)
 	elseif route.kind == 'command' then
 		return handle_command(scope, owner, ctx, route, deps)
+	elseif route.kind == 'update_commit' then
+		return handle_update_commit(scope, owner, ctx, deps)
 	elseif route.kind == 'upload' then
 		local update_deps = deps.update or deps
 		if update_deps.require_auth == true then

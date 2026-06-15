@@ -24,10 +24,15 @@ local DEFAULTS = {
 		queue_len = 32,
 		replay = true,
 	},
-	uploads = {
-		enabled = true,
-		max_bytes = 64 * 1024 * 1024,
-		require_auth = false,
+	updates = {
+		upload = {
+			enabled = true,
+			max_bytes = 64 * 1024 * 1024,
+			require_auth = false,
+		},
+		commit = {
+			require_auth = false,
+		},
 	},
 	sessions = {
 		prune_interval = 60,
@@ -40,7 +45,7 @@ local ROOT_KEYS = {
 	http = true,
 	static = true,
 	sse = true,
-	uploads = true,
+	updates = true,
 	sessions = true,
 }
 
@@ -57,7 +62,9 @@ local HTTP_KEYS = {
 
 local STATIC_KEYS = { root = true, index = true, chunk_size = true }
 local SSE_KEYS = { enabled = true, queue_len = true, max_replay = true, replay = true, pattern = true }
-local UPLOAD_KEYS = { enabled = true, max_bytes = true, require_auth = true }
+local UPDATE_KEYS = { upload = true, commit = true }
+local UPDATE_UPLOAD_KEYS = { enabled = true, max_bytes = true, require_auth = true }
+local UPDATE_COMMIT_KEYS = { require_auth = true }
 local SESSION_KEYS = { prune_interval = true }
 
 local function fail(msg) return nil, msg end
@@ -204,25 +211,52 @@ local function normalise_sse(raw)
 	return out, nil
 end
 
-local function normalise_uploads(raw)
+local function normalise_update_upload(raw)
 	local err
-	raw, err = table_or_empty(raw, 'uploads')
+	raw, err = table_or_empty(raw, 'updates.upload')
 	if not raw then return nil, err end
 	local ok
-	ok, err = allowed(raw, UPLOAD_KEYS, 'uploads')
+	ok, err = allowed(raw, UPDATE_UPLOAD_KEYS, 'updates.upload')
 	if not ok then return nil, err end
-	local out = copy_plain(DEFAULTS.uploads)
+	local out = copy_plain(DEFAULTS.updates.upload)
 	local v
-	v, err = bool_or_nil(raw.enabled, 'uploads.enabled')
+	v, err = bool_or_nil(raw.enabled, 'updates.upload.enabled')
 	if err then return nil, err end
 	if v ~= nil then out.enabled = v end
-	v, err = non_negative_int_or_nil(raw.max_bytes, 'uploads.max_bytes')
+	v, err = non_negative_int_or_nil(raw.max_bytes, 'updates.upload.max_bytes')
 	if err then return nil, err end
 	if v ~= nil then out.max_bytes = v end
-	v, err = bool_or_nil(raw.require_auth, 'uploads.require_auth')
+	v, err = bool_or_nil(raw.require_auth, 'updates.upload.require_auth')
 	if err then return nil, err end
 	if v ~= nil then out.require_auth = v end
 	return out, nil
+end
+
+local function normalise_update_commit(raw)
+	local err
+	raw, err = table_or_empty(raw, 'updates.commit')
+	if not raw then return nil, err end
+	local ok
+	ok, err = allowed(raw, UPDATE_COMMIT_KEYS, 'updates.commit')
+	if not ok then return nil, err end
+	local out = copy_plain(DEFAULTS.updates.commit)
+	local v
+	v, err = bool_or_nil(raw.require_auth, 'updates.commit.require_auth')
+	if err then return nil, err end
+	if v ~= nil then out.require_auth = v end
+	return out, nil
+end
+
+local function normalise_updates(raw)
+	local err
+	raw, err = table_or_empty(raw, 'updates')
+	if not raw then return nil, err end
+	local ok
+	ok, err = allowed(raw, UPDATE_KEYS, 'updates')
+	if not ok then return nil, err end
+	local upload; upload, err = normalise_update_upload(raw.upload); if not upload then return nil, err end
+	local commit; commit, err = normalise_update_commit(raw.commit); if not commit then return nil, err end
+	return { upload = upload, commit = commit }, nil
 end
 
 local function normalise_sessions(raw)
@@ -256,7 +290,7 @@ function M.normalise(raw)
 	local http; http, err = normalise_http(raw.http); if not http then return nil, err end
 	local static; static, err = normalise_static(raw.static); if not static then return nil, err end
 	local sse; sse, err = normalise_sse(raw.sse); if not sse then return nil, err end
-	local uploads; uploads, err = normalise_uploads(raw.uploads); if not uploads then return nil, err end
+	local updates; updates, err = normalise_updates(raw.updates); if not updates then return nil, err end
 	local sessions; sessions, err = normalise_sessions(raw.sessions); if not sessions then return nil, err end
 
 	return {
@@ -265,7 +299,7 @@ function M.normalise(raw)
 		http = http,
 		static = static,
 		sse = sse,
-		uploads = uploads,
+		updates = updates,
 		sessions = sessions,
 	}, nil
 end

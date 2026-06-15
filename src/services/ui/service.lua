@@ -326,7 +326,9 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	local h = cfg.http or {}
 	local s = cfg.static or {}
 	local sse_cfg = cfg.sse or {}
-	local uploads = cfg.uploads or {}
+	local updates = cfg.updates or {}
+	local upload = updates.upload or {}
+	local commit = updates.commit or {}
 
 	local listen = {
 		host = h.host,
@@ -337,9 +339,10 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	}
 
 	local update_opts = shallow_copy(params.update or {})
-	update_opts.max_bytes = uploads.max_bytes
-	update_opts.enabled = uploads.enabled
-	update_opts.require_auth = uploads.require_auth
+	update_opts.max_bytes = upload.max_bytes
+	update_opts.enabled = upload.enabled
+	update_opts.require_auth = upload.require_auth
+	update_opts.commit_require_auth = commit.require_auth
 	update_opts.connect = update_opts.connect or params.connect
 	update_opts.bus = update_opts.bus or params.bus
 
