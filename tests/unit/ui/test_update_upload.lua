@@ -78,6 +78,31 @@ function tests.test_committed_artifact_is_not_aborted_when_update_job_create_fai
 	end)
 end
 
+
+function tests.test_upload_fails_when_create_job_reply_has_no_job_id()
+	fibers.run(function ()
+		local handle = {
+			append_chunk_op = function () return fibers.always(true, nil) end,
+			commit_op = function () return fibers.always('artifact-missing-job-id', nil) end,
+			abort_now = function () error('abort must not be called after commit') end,
+		}
+		local conn = {
+			call_op = function () return fibers.always({}, nil) end,
+		}
+
+		local st, _, primary = fibers.perform(upload.run_op({
+			body_stream = body_from_chunks({ 'abc' }),
+		}, {
+			ingest = ingest_client(handle),
+			create_job = true,
+			conn = conn,
+		}))
+
+		assert_eq(st, 'failed')
+		assert_eq(primary, 'create_job_reply_missing_job_id')
+	end)
+end
+
 function tests.test_upload_disconnects_owned_update_connection_after_success()
 	fibers.run(function ()
 		local handle = {
@@ -88,7 +113,8 @@ function tests.test_upload_disconnects_owned_update_connection_after_success()
 		local disconnected = false
 		local conn = {
 			call_op = function (_, topic)
-				if topic[4] == 'create' then return fibers.always({ job_id = 'job-1' }, nil) end
+				if topic[5] == 'create-job' then return fibers.always({ job_id = 'job-1' }, nil) end
+				assert_eq(topic[5], 'start-job')
 				return fibers.always({ started = true }, nil)
 			end,
 			disconnect = function () disconnected = true; return true end,
@@ -105,7 +131,8 @@ function tests.test_upload_disconnects_owned_update_connection_after_success()
 
 		assert_eq(st, 'ok')
 		assert_eq(result.artifact_id, 'artifact-2')
-		assert_not_nil(result.job)
+		assert_eq(result.job_id, 'job-1')
+		assert_nil(result.job)
 		assert_not_nil(result.started)
 		assert_eq(disconnected, true)
 	end)
@@ -122,7 +149,8 @@ function tests.test_upload_uses_borrowed_service_connection_for_public_route()
 		local disconnected = false
 		local conn = {
 			call_op = function (_, topic)
-				if topic[4] == 'create' then return fibers.always({ job_id = 'job-borrowed' }, nil) end
+				if topic[5] == 'create-job' then return fibers.always({ job_id = 'job-borrowed' }, nil) end
+				assert_eq(topic[5], 'start-job')
 				return fibers.always({ started = true }, nil)
 			end,
 			disconnect = function () disconnected = true; return true end,
@@ -140,7 +168,8 @@ function tests.test_upload_uses_borrowed_service_connection_for_public_route()
 
 		assert_eq(st, 'ok')
 		assert_eq(result.artifact_id, 'artifact-borrowed')
-		assert_not_nil(result.job)
+		assert_eq(result.job_id, 'job-borrowed')
+		assert_nil(result.job)
 		assert_not_nil(result.started)
 		assert_eq(disconnected, false)
 	end)
