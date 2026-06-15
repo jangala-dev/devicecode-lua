@@ -61,6 +61,10 @@ end
 local function emit_snapshot_now(provider_id, snapshot)
 	local ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'status', snapshot.status or { state = 'available', available = snapshot.ok == true }))
 	if ok == false or ok == nil then return nil, err end
+	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'identity', snapshot.identity or {}))
+	if ok == false or ok == nil then return nil, err end
+	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'telemetry', snapshot.telemetry or {}))
+	if ok == false or ok == nil then return nil, err end
 	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'surfaces', { surfaces = snapshot.surfaces or {} }))
 	if ok == false or ok == nil then return nil, err end
 	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'topology', snapshot.topology or {}))

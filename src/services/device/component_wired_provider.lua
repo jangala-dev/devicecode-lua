@@ -21,7 +21,12 @@ local function first_non_nil(...)
 end
 
 function M.normalise_fact(fact, raw)
-	if fact == 'wired_provider_status' or fact == 'wired_provider_surfaces' or fact == 'wired_provider_topology' then
+	if fact == 'wired_provider_status'
+		or fact == 'wired_provider_identity'
+		or fact == 'wired_provider_telemetry'
+		or fact == 'wired_provider_surfaces'
+		or fact == 'wired_provider_topology'
+	then
 		return copy(raw or {}), nil
 	end
 	return copy(raw), nil
@@ -34,6 +39,8 @@ end
 function M.compose(raw_facts)
 	raw_facts = table_or_empty(raw_facts)
 	local status = table_or_empty(raw_facts.wired_provider_status)
+	local identity = table_or_empty(raw_facts.wired_provider_identity)
+	local telemetry = table_or_empty(raw_facts.wired_provider_telemetry)
 	local surfaces_payload = table_or_empty(raw_facts.wired_provider_surfaces)
 	local surfaces = surfaces_payload.surfaces or surfaces_payload
 	local topology = table_or_empty(raw_facts.wired_provider_topology)
@@ -45,6 +52,8 @@ function M.compose(raw_facts)
 		},
 		wired_provider = {
 			status = copy(status),
+			identity = copy(identity),
+			telemetry = copy(telemetry),
 			surfaces = copy(surfaces or {}),
 			topology = copy(topology or {}),
 		},

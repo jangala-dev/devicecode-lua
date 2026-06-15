@@ -55,6 +55,10 @@ function M.publish_component_now(conn, snapshot, component_id, opts)
 		if not ok then return nil, err end
 		ok, err = checked(bus_cleanup.retain(conn, projection.wired_provider_cap_status_topic(wp.id), wp.status))
 		if not ok then return nil, err end
+		ok, err = checked(bus_cleanup.retain(conn, projection.wired_provider_cap_state_topic(wp.id, 'identity'), wp.identity))
+		if not ok then return nil, err end
+		ok, err = checked(bus_cleanup.retain(conn, projection.wired_provider_cap_state_topic(wp.id, 'telemetry'), wp.telemetry))
+		if not ok then return nil, err end
 		ok, err = checked(bus_cleanup.retain(conn, projection.wired_provider_cap_state_topic(wp.id, 'surfaces'), wp.surfaces))
 		if not ok then return nil, err end
 		ok, err = checked(bus_cleanup.retain(conn, projection.wired_provider_cap_state_topic(wp.id, 'topology'), wp.topology))
@@ -63,6 +67,8 @@ function M.publish_component_now(conn, snapshot, component_id, opts)
 		-- Defensive cleanup if this component used to curate a wired-provider cap.
 		bus_cleanup.unretain(conn, projection.wired_provider_cap_meta_topic(component_id))
 		bus_cleanup.unretain(conn, projection.wired_provider_cap_status_topic(component_id))
+		bus_cleanup.unretain(conn, projection.wired_provider_cap_state_topic(component_id, 'identity'))
+		bus_cleanup.unretain(conn, projection.wired_provider_cap_state_topic(component_id, 'telemetry'))
 		bus_cleanup.unretain(conn, projection.wired_provider_cap_state_topic(component_id, 'surfaces'))
 		bus_cleanup.unretain(conn, projection.wired_provider_cap_state_topic(component_id, 'topology'))
 	end
@@ -88,6 +94,8 @@ function M.unpublish_component_now(conn, component_id)
 		projection.component_cap_status_topic(component_id),
 		projection.wired_provider_cap_meta_topic(component_id),
 		projection.wired_provider_cap_status_topic(component_id),
+		projection.wired_provider_cap_state_topic(component_id, 'identity'),
+		projection.wired_provider_cap_state_topic(component_id, 'telemetry'),
 		projection.wired_provider_cap_state_topic(component_id, 'surfaces'),
 		projection.wired_provider_cap_state_topic(component_id, 'topology'),
 	}

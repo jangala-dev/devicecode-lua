@@ -203,6 +203,8 @@ function M.component_payloads(name, rec, now_ts)
 				reason = view.reason or (view.wired_provider.status and (view.wired_provider.status.reason or view.wired_provider.status.err)),
 				mode = view.wired_provider.status and view.wired_provider.status.mode or nil,
 			},
+			identity = copy(view.wired_provider.identity or {}),
+			telemetry = copy(view.wired_provider.telemetry or {}),
 			surfaces = { surfaces = copy(view.wired_provider.surfaces or {}) },
 			topology = copy(view.wired_provider.topology or {}),
 		} or nil,

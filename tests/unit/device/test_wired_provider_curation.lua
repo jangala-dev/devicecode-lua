@@ -14,6 +14,8 @@ function tests.test_device_projects_wired_provider_capability_from_component_fac
 		module = wired_provider,
 		raw_facts = {
 			wired_provider_status = { state = 'available', available = true, mode = 'read_only' },
+			wired_provider_identity = { model = 'RTL8380', mac = '00:E0:5C:24:16:39' },
+			wired_provider_telemetry = { poe = { dev_temp_c = 28 } },
 			wired_provider_surfaces = { surfaces = { eth0 = { provider_surface_id = 'eth0' } } },
 			wired_provider_topology = { trunks = {} },
 		},
@@ -25,6 +27,9 @@ function tests.test_device_projects_wired_provider_capability_from_component_fac
 	assert_not_nil(payloads.wired_provider, 'expected curated wired-provider cap payloads')
 	assert_eq(payloads.wired_provider.id, 'cm5-local-wired')
 	assert_eq(payloads.wired_provider.status.state, 'available')
+	assert_eq(payloads.wired_provider.identity.model, 'RTL8380')
+	assert_eq(payloads.wired_provider.identity.mac, '00:E0:5C:24:16:39')
+	assert_eq(payloads.wired_provider.telemetry.poe.dev_temp_c, 28)
 	assert_not_nil(payloads.wired_provider.surfaces.surfaces.eth0)
 end
 
