@@ -105,7 +105,7 @@ local files = {
 	'unit.support.test_config_watch_architecture',
 	'unit.support.test_service_events',
 	'unit.http.transport.test_cqueues_driver',
-	'unit.http.transport.test_tolerant_http1',
+	'unit.http.transport.test_legacy_http1_close',
 	'unit.http.transport.test_lua_http',
 	'unit.http.transport.test_websocket',
 	'unit.http.transport.test_terminate',

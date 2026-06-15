@@ -430,7 +430,7 @@ function Provider:_request_json_op(method, path, body, headers)
 			uri = uri,
 			method = method or 'GET',
 			headers = req_headers,
-			response_parser = 'tolerant-http1',
+			response_parser = 'legacy-http1-close',
 			timeout_s = self.http.timeout_s,
 		}
 		if body ~= nil then args.body_source = blob_source.from_string(body) end

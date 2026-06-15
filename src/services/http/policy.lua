@@ -18,11 +18,25 @@ local function copy_headers(h)
 	if type(h) ~= 'table' then return nil, 'invalid_args' end
 	local out = {}
 	for k, v in pairs(h) do
-		if type(k) ~= 'string' then return nil, 'invalid_args' end
+		if type(k) ~= 'string' or k == '' or k:find('[\r\n:]') then return nil, 'invalid_args' end
 		if type(v) ~= 'string' and type(v) ~= 'number' then return nil, 'invalid_args' end
-		out[k] = tostring(v)
+		v = tostring(v)
+		if v:find('[\r\n]') then return nil, 'invalid_args' end
+		out[k] = v
 	end
 	return out, nil
+end
+
+local function bool_or_nil(v)
+	if v == nil then return nil, nil end
+	if type(v) ~= 'boolean' then return nil, 'invalid_args' end
+	return v, nil
+end
+
+local function non_negative_number_or_nil(v)
+	if v == nil then return nil, nil end
+	if type(v) ~= 'number' or v < 0 then return nil, 'invalid_args' end
+	return v, nil
 end
 
 local function reject_backend_payload_fields(args)
@@ -93,13 +107,7 @@ end
 function M.validate_listen_args(args)
 	args = args or {}
 	if type(args) ~= 'table' then return nil, 'invalid_args' end
-	local ok, ferr = require_only_fields(args, {
-		host = true,
-		port = true,
-		path = true,
-		tls = true,
-		max_accept_queue = true,
-	})
+	local ok, ferr = require_only_fields(args, { host = true, port = true, path = true, tls = true, max_accept_queue = true })
 	if not ok then return nil, ferr end
 	local out = {}
 	if args.host ~= nil and type(args.host) ~= 'string' then return nil, 'invalid_args' end
@@ -108,11 +116,7 @@ function M.validate_listen_args(args)
 	end
 	if args.path ~= nil and type(args.path) ~= 'string' then return nil, 'invalid_args' end
 	if args.tls ~= nil and type(args.tls) ~= 'boolean' then return nil, 'invalid_args' end
-	if args.max_accept_queue ~= nil
-		and (type(args.max_accept_queue) ~= 'number' or args.max_accept_queue < 0)
-	then
-		return nil, 'invalid_args'
-	end
+	if args.max_accept_queue ~= nil and (type(args.max_accept_queue) ~= 'number' or args.max_accept_queue < 0) then return nil, 'invalid_args' end
 	out.host = args.host
 	out.port = args.port
 	out.path = args.path
@@ -133,23 +137,32 @@ local function host_denied(parsed_uri, opts)
 	return false
 end
 
-local function validate_response_parser(v)
+local function response_parser_allowed(parser, opts)
+	parser = parser or 'strict'
+	local allowed = opts.allowed_response_parsers or { strict = true }
+	return allowed[parser] == true
+end
+
+local function validate_response_parser(v, opts)
+	if v == nil then v = 'strict' end
+	if v ~= 'strict' and v ~= 'legacy-http1-close' then return nil, 'invalid_args' end
+	if not response_parser_allowed(v, opts or {}) then return nil, 'response_parser_denied' end
+	return v, nil
+end
+
+local function positive_number_or_nil(v)
 	if v == nil then return nil, nil end
-	if v == 'strict' or v == 'tolerant-http1' then return v, nil end
-	return nil, 'invalid_args'
+	if type(v) ~= 'number' or v <= 0 then return nil, 'invalid_args' end
+	return v, nil
 end
 
 function M.validate_exchange_args(args, opts)
 	opts = opts or {}
 	if type(args) ~= 'table' then return nil, 'invalid_args' end
 	local ok, ferr = require_only_fields(args, {
-		uri = true,
-		method = true,
-		headers = true,
-		body_source = true,
-		response_sink = true,
-		response_parser = true,
-		timeout_s = true,
+		uri = true, method = true, headers = true, body_source = true, response_sink = true,
+		expect_100_continue = true, expect_100_timeout = true,
+		response_parser = true, timeout_s = true, max_response_bytes = true,
 	})
 	if not ok then return nil, ferr end
 	local uri, uerr = M.validate_uri(args.uri, opts)
@@ -160,11 +173,31 @@ function M.validate_exchange_args(args, opts)
 	if not method then return nil, merr end
 	local headers, herr = copy_headers(args.headers)
 	if herr then return nil, herr end
-	local response_parser, rperr = validate_response_parser(args.response_parser)
+
+	local expect_100_continue, eerr = bool_or_nil(args.expect_100_continue)
+	if eerr then return nil, eerr end
+
+	local expect_100_timeout, terr = non_negative_number_or_nil(args.expect_100_timeout)
+	if terr then return nil, terr end
+
+	local response_parser, rperr = validate_response_parser(args.response_parser, opts)
 	if rperr then return nil, rperr end
-	if response_parser == 'tolerant-http1' and uri.scheme ~= 'http' then return nil, 'unsupported_scheme' end
-	local timeout_s = args.timeout_s
-	if timeout_s ~= nil and (type(timeout_s) ~= 'number' or timeout_s < 0) then return nil, 'invalid_args' end
+
+	local timeout_s, toerr = positive_number_or_nil(args.timeout_s)
+	if toerr then return nil, toerr end
+
+	local max_response_bytes, mrerr = positive_number_or_nil(args.max_response_bytes)
+	if mrerr then return nil, mrerr end
+
+	if response_parser == 'legacy-http1-close' then
+		if uri.scheme ~= 'http' then return nil, 'unsupported_scheme' end
+		if method ~= 'GET' and method ~= 'POST' and method ~= 'HEAD' then return nil, 'unsupported_method' end
+		if timeout_s == nil then return nil, 'timeout_required' end
+		local policy_max = opts.legacy_http1_close_max_response_bytes or opts.max_response_body or (1024 * 1024)
+		if type(policy_max) ~= 'number' or policy_max <= 0 then return nil, 'invalid_args' end
+		if max_response_bytes == nil then max_response_bytes = policy_max end
+		if max_response_bytes > policy_max then return nil, 'response_too_large' end
+	end
 
 	local bodies, derr = body.validate_exchange_bodies(args)
 	if not bodies then return nil, derr end
@@ -176,8 +209,11 @@ function M.validate_exchange_args(args, opts)
 		_uri = uri,
 		body_source = bodies.source,
 		response_sink = bodies.sink,
+		expect_100_continue = expect_100_continue,
+		expect_100_timeout = expect_100_timeout,
 		response_parser = response_parser,
 		timeout_s = timeout_s,
+		max_response_bytes = max_response_bytes,
 	}, nil
 end
 
