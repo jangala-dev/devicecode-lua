@@ -151,9 +151,10 @@ function tests.test_update_commit_route_calls_update_manager_without_session()
 	run_fibers.run(function (scope)
 		local bus = busmod.new()
 		local admin = bus:connect({ origin_base = { service = 'ui-update-commit-test' } })
+		local caller = bus:connect({ origin_base = { service = 'ui' } })
 		local received
 		local ep = assert(admin:bind({ 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }, { queue_len = 1 }))
-		scope:finally(function () ep:close(); admin:disconnect() end)
+		scope:finally(function () ep:close(); caller:disconnect(); admin:disconnect() end)
 
 		fibers.spawn(function ()
 			local req = ep:recv()
@@ -169,7 +170,11 @@ function tests.test_update_commit_route_calls_update_manager_without_session()
 
 		local result = request.run(scope, ctx, {
 			bus = bus,
-			update = { bus = bus, commit_require_auth = false },
+			update = {
+				conn = caller,
+				commit_require_auth = false,
+				connect = function () error('public update commit should borrow supplied service conn') end,
+			},
 			encode_json = function (v) return assert(cjson.encode(v)) end,
 		})
 

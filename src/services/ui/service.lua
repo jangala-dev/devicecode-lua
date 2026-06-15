@@ -345,6 +345,10 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	update_opts.commit_require_auth = commit.require_auth
 	update_opts.connect = update_opts.connect or params.connect
 	update_opts.bus = update_opts.bus or params.bus
+	-- Public prototype update routes still make protected internal bus calls.
+	-- Borrow the UI service connection so those calls carry the UI service
+	-- principal rather than a nil HTTP-user principal.
+	update_opts.conn = update_opts.conn or state.conn
 
 	return {
 		listener = params.listener,

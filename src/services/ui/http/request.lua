@@ -219,11 +219,7 @@ local function handle_update_commit(scope, owner, ctx, deps)
 		return { status = 'bad_request', err = 'missing_job_id' }
 	end
 
-	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
-		principal = principal,
-		connect = update_deps.connect or deps.connect,
-		bus = update_deps.bus or deps.bus,
-		conn = update_deps.conn or deps.conn,
+	local op_spec = {
 		timeout = update_deps.commit_timeout or deps.command_timeout or 5.0,
 		run_op = function (_, conn)
 			return conn:call_op(UPDATE_COMMIT_TOPIC, payload, { timeout = false })
@@ -232,7 +228,26 @@ local function handle_update_commit(scope, owner, ctx, deps)
 					return { value = value }, nil
 				end)
 		end,
-	})
+	}
+	if principal ~= nil then
+		op_spec.principal = principal
+		op_spec.connect = update_deps.connect or deps.connect
+		op_spec.bus = update_deps.bus or deps.bus
+		if op_spec.connect == nil and op_spec.bus == nil then
+			op_spec.conn = update_deps.conn or deps.conn
+		end
+	else
+		-- Public prototype update commits are HTTP-public but not bus-anonymous:
+		-- they borrow the UI service connection supplied by services.ui.service.
+		op_spec.conn = update_deps.conn or deps.conn
+		if op_spec.conn == nil then
+			op_spec.principal = update_deps.principal or deps.principal
+			op_spec.connect = update_deps.connect or deps.connect
+			op_spec.bus = update_deps.bus or deps.bus
+		end
+	end
+
+	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op(op_spec))
 	if st ~= 'ok' then
 		perform_response(owner:reply_error_op(nil, result_or_primary))
 		return { status = 'failed', err = result_or_primary }

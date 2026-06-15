@@ -112,6 +112,41 @@ function tests.test_upload_disconnects_owned_update_connection_after_success()
 end
 
 
+function tests.test_upload_uses_borrowed_service_connection_for_public_route()
+	fibers.run(function ()
+		local handle = {
+			append_chunk_op = function () return fibers.always(true, nil) end,
+			commit_op = function () return fibers.always('artifact-borrowed', nil) end,
+			abort_now = function () error('abort must not be called after commit') end,
+		}
+		local disconnected = false
+		local conn = {
+			call_op = function (_, topic)
+				if topic[4] == 'create' then return fibers.always({ job_id = 'job-borrowed' }, nil) end
+				return fibers.always({ started = true }, nil)
+			end,
+			disconnect = function () disconnected = true; return true end,
+		}
+
+		local st, _, result = fibers.perform(upload.run_op({
+			body_stream = body_from_chunks({ 'abc' }),
+		}, {
+			ingest = ingest_client(handle),
+			conn = conn,
+			create_job = true,
+			start_job = true,
+			connect = function () error('public upload should borrow supplied service conn') end,
+		}))
+
+		assert_eq(st, 'ok')
+		assert_eq(result.artifact_id, 'artifact-borrowed')
+		assert_not_nil(result.job)
+		assert_not_nil(result.started)
+		assert_eq(disconnected, false)
+	end)
+end
+
+
 function tests.test_upload_timeout_cancels_scope_and_aborts_uncommitted_ingest()
 	fibers.run(function ()
 		local handle = {
