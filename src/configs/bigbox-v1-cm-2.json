@@ -9,14 +9,14 @@
           "root": "/data/devicecode/configs"
         },
         {
+          "name": "credentials",
+          "root": "/data/configs"
+        },
+        {
           "name": "state",
           "root": "/tmp/devicecode-state"
         }
       ],
-      "http": {},
-      "uci": {},
-      "ubus": {},
-      "modemcard": {},
       "network": {
         "provider": "openwrt",
         "platform": {
@@ -61,6 +61,9 @@
             "id": "switch-main",
             "mode": "read_only",
             "base_url": "http://172.28.100.9/",
+            "http": {
+              "response_parser": "legacy-http1-close"
+            },
             "username": "$SWITCH_USERNAME",
             "password": "$SWITCH_PASSWORD",
             "surfaces": {
@@ -120,10 +123,29 @@
           }
         ]
       },
+      "artifact_store": {
+        "stores": [
+          {
+            "id": "main",
+            "transient_root": "/tmp/devicecode-artifacts",
+            "durable_root": "/data/devicecode/artifacts",
+            "import_root": "/data/devicecode/artifacts/import",
+            "durable_enabled": true
+          }
+        ]
+      },
+      "control_store": [
+        {
+          "name": "update",
+          "root": "/data/devicecode/control/update"
+        }
+      ],
       "time": {},
       "platform": {},
       "power": {},
-      "usb": {}
+      "usb": {},
+      "modemcard": {},
+      "sysmon": {}
     }
   },
   "net": {
@@ -132,19 +154,18 @@
       "schema": "devicecode.config/net/1",
       "version": 1,
       "product": "bigbox-legacy-converted-phase1",
-      "description": "Converted from legacy Big Box config into segment-first Phase 1 net/wired/device style. Metrics omitted.",
+      "description": "Big Box default config using segment-first NET model, GSM-sourced modem uplinks, generated WAN route metrics, and Devicecode-owned OpenWrt UCI output.",
       "vlan_policy": {
         "reserved": {
-          "adm": 8,
-          "switch_control": 100
+          "internal": 100
         },
         "ranges": {
-          "system": {
-            "from": 1,
-            "to": 199
-          },
           "user": {
-            "from": 200,
+            "from": 1,
+            "to": 99
+          },
+          "system": {
+            "from": 100,
             "to": 399
           }
         },
@@ -158,9 +179,9 @@
           "kind": "system",
           "protected": true,
           "user_editable": false,
-          "purpose": "appliance_admin_network",
+          "purpose": "admin_network",
           "vlan": {
-            "reserved": "adm"
+            "id": 8
           },
           "addressing": {
             "ipv4": {
@@ -226,9 +247,9 @@
           "kind": "system",
           "protected": true,
           "user_editable": false,
-          "purpose": "switch_control_and_internal_services",
+          "purpose": "switch_ext_aps_and_internal_services",
           "vlan": {
-            "reserved": "switch_control"
+            "reserved": "internal"
           },
           "addressing": {
             "ipv4": {
@@ -281,18 +302,18 @@
           "1.1.1.1"
         ],
         "cache": {
-          "size": 1000
+          "size": 10000
         },
         "host_files": {
-          "base_dir": "/data/devicecode/dns/hosts",
+          "base_dir": "/etc/jng/hosts",
           "addnmount": true,
           "sources": {
             "ads": {
-              "file": "ads.hosts",
+              "file": "ads",
               "description": "advertising and tracking block list"
             },
             "adult": {
-              "file": "adult.hosts",
+              "file": "adult",
               "description": "adult-content block list"
             }
           }
@@ -300,9 +321,9 @@
         "records": {
           "unifi": {
             "name": "unifi",
-            "address": "172.28.8.2",
+            "address": "$UNIFI_ADDRESS",
             "segments": [
-              "adm"
+              "int"
             ]
           },
           "config.bigbox.home": {
@@ -326,8 +347,7 @@
           "syn_flood": "1",
           "input": "ACCEPT",
           "forward": "REJECT",
-          "output": "ACCEPT",
-          "disable_ipv6": "1"
+          "output": "ACCEPT"
         },
         "zones": {
           "lan": {
@@ -430,44 +450,45 @@
       },
       "routing": {
         "routes": {
-          "static_1": {
+          "starlink_admin": {
+            "kind": "host",
             "target": "192.168.100.1",
-            "interface": "wan"
+            "interface": "wan",
+            "description": "Starlink dish/admin UI reachable via the wired WAN uplink"
           }
         }
       },
       "wan": {
         "enabled": true,
-        "policy": "dynamic_weight",
         "members": {
           "wan": {
             "interface": "wan",
-            "metric": 1,
             "weight": 1,
             "dynamic_weight": true,
-            "family": "ipv4"
+            "family": "ipv4",
+            "mwan_metric": 1
           },
-          "mdm0": {
-            "interface": "mdm0",
-            "metric": 1,
+          "modem_primary": {
+            "interface": "modem_primary",
             "weight": 1,
             "dynamic_weight": true,
             "family": "ipv4",
             "source": {
-              "kind": "modem",
-              "modem_id": "primary"
-            }
+              "kind": "gsm-uplink",
+              "id": "primary"
+            },
+            "mwan_metric": 1
           },
-          "mdm1": {
-            "interface": "mdm1",
-            "metric": 1,
+          "modem_secondary": {
+            "interface": "modem_secondary",
             "weight": 1,
             "dynamic_weight": true,
             "family": "ipv4",
             "source": {
-              "kind": "modem",
-              "modem_id": "secondary"
-            }
+              "kind": "gsm-uplink",
+              "id": "secondary"
+            },
+            "mwan_metric": 1
           }
         },
         "health": {
@@ -489,6 +510,15 @@
           "speedtests": {
             "enabled": true,
             "interval_s": 300
+          }
+        },
+        "rules": {
+          "https": {
+            "family": "ipv4",
+            "proto": "tcp",
+            "dest_port": "443",
+            "policy": "balanced",
+            "sticky": true
           }
         }
       },
@@ -807,19 +837,38 @@
                 "restart"
               ]
             },
-            "stage-update": {
-              "kind": "fabric_stage",
-              "receiver": [
+            "prepare-update": {
+              "kind": "rpc",
+              "call_topic": [
                 "raw",
                 "member",
                 "mcu",
                 "cap",
-                "update",
+                "updater",
                 "main",
                 "rpc",
-                "stage"
-              ],
-              "artifact_store": "main"
+                "prepare-update"
+              ]
+            },
+            "stage-update": {
+              "kind": "fabric_stage",
+              "target": "updater/main",
+              "chunk_size": 2048,
+              "artifact_store": "main",
+              "timeout_s": 300
+            },
+            "commit-update": {
+              "kind": "rpc",
+              "call_topic": [
+                "raw",
+                "member",
+                "mcu",
+                "cap",
+                "updater",
+                "main",
+                "rpc",
+                "commit-update"
+              ]
             }
           }
         },
@@ -838,6 +887,26 @@
               "wired-provider",
               "cm5-local-wired",
               "status"
+            ],
+            "wired_provider_identity": [
+              "raw",
+              "host",
+              "wired",
+              "cap",
+              "wired-provider",
+              "cm5-local-wired",
+              "state",
+              "identity"
+            ],
+            "wired_provider_telemetry": [
+              "raw",
+              "host",
+              "wired",
+              "cap",
+              "wired-provider",
+              "cm5-local-wired",
+              "state",
+              "telemetry"
             ],
             "wired_provider_surfaces": [
               "raw",
@@ -877,6 +946,26 @@
               "switch-main",
               "status"
             ],
+            "wired_provider_identity": [
+              "raw",
+              "host",
+              "wired",
+              "cap",
+              "wired-provider",
+              "switch-main",
+              "state",
+              "identity"
+            ],
+            "wired_provider_telemetry": [
+              "raw",
+              "host",
+              "wired",
+              "cap",
+              "wired-provider",
+              "switch-main",
+              "state",
+              "telemetry"
+            ],
             "wired_provider_surfaces": [
               "raw",
               "host",
@@ -905,6 +994,7 @@
   "wifi": {
     "rev": 1,
     "data": {
+      "schema": "devicecode.config/wifi/1",
       "report_period": 10,
       "radios": [
         {
@@ -933,14 +1023,13 @@
       ],
       "ssids": [
         {
-          "mainflux_path": "config/mainflux",
+          "mainflux_path": "mainflux.cfg",
           "encryption": "psk2",
           "mode": "access_point",
           "radios": [
             "radio0",
             "radio1"
-          ],
-          "segment": "adm"
+          ]
         },
         {
           "name": "Jangala",
@@ -954,7 +1043,6 @@
         }
       ],
       "band_steering": {
-        "log_level": 2,
         "globals": {
           "rrm_mode": "PAT",
           "kicking": {
@@ -994,13 +1082,6 @@
             "ap": 460
           },
           "inactive_client_kickoff": 60
-        },
-        "networking": {
-          "method": "tcp+umdns",
-          "ip": "0.0.0.0",
-          "port": 1026,
-          "broadcast_port": 1025,
-          "enable_encryption": false
         },
         "bands": {
           "2g": {
@@ -1046,33 +1127,35 @@
             }
           }
         }
-      },
-      "schema": "devicecode.config/wifi/1"
+      }
     }
   },
   "gsm": {
     "rev": 1,
     "data": {
+      "schema": "devicecode.config/gsm/1",
       "modems": {
         "default": {
-          "enabled": true
+          "enabled": true,
+          "signal_freq": 10
         },
         "known": [
           {
             "name": "primary",
             "id_field": "device",
             "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
-            "autoconnect": true
+            "autoconnect": true,
+            "metrics_interval": 60
           },
           {
             "name": "secondary",
             "id_field": "device",
             "device": "/sys/devices/platform/axi/1000480000.usb/usb1/1-1",
-            "autoconnect": true
+            "autoconnect": true,
+            "metrics_interval": 60
           }
         ]
-      },
-      "schema": "devicecode.config/gsm/1"
+      }
     }
   },
   "fabric": {
@@ -1086,13 +1169,10 @@
           "peer_id": "mcu",
           "transport": {
             "kind": "uart",
-            "source": "uart",
+            "source": "uart_manager",
             "class": "uart",
             "id": "uart0",
-            "terminator": "\n",
-            "open_opts": {
-              "baud": 115200
-            }
+            "terminator": "\n"
           },
           "session": {
             "identity_claim": {
@@ -1105,7 +1185,8 @@
               {
                 "id": "mcu-state",
                 "remote": [
-                  "state"
+                  "state",
+                  "self"
                 ],
                 "local": [
                   "raw",
@@ -1117,19 +1198,24 @@
               {
                 "id": "mcu-event",
                 "remote": [
-                  "event"
+                  "event",
+                  "self"
                 ],
                 "local": [
                   "raw",
                   "member",
                   "mcu",
+                  "cap",
+                  "telemetry",
+                  "main",
                   "event"
                 ]
               },
               {
                 "id": "mcu-cap",
                 "remote": [
-                  "cap"
+                  "cap",
+                  "self"
                 ],
                 "local": [
                   "raw",
@@ -1143,16 +1229,47 @@
             "rpc": {
               "outbound": [
                 {
-                  "id": "mcu-cap-rpc",
+                  "id": "mcu-updater-prepare",
                   "local": [
                     "raw",
                     "member",
                     "mcu",
-                    "cap"
+                    "cap",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "prepare-update"
                   ],
                   "remote": [
-                    "cap"
+                    "cap",
+                    "self",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "prepare-update"
                   ]
+                },
+                {
+                  "id": "mcu-updater-commit",
+                  "local": [
+                    "raw",
+                    "member",
+                    "mcu",
+                    "cap",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "commit-update"
+                  ],
+                  "remote": [
+                    "cap",
+                    "self",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "commit-update"
+                  ],
+                  "reply_policy": "sent-is-accepted"
                 }
               ],
               "inbound": []
@@ -1189,6 +1306,9 @@
         "cap_id": "main",
         "host": "0.0.0.0",
         "port": 8080
+      },
+      "uploads": {
+        "require_auth": true
       }
     }
   },
@@ -1202,14 +1322,27 @@
         },
         "mcu": {
           "component": "mcu",
-          "backend": "mcu"
+          "backend": "component",
+          "stage_timeout_s": 300
         },
         "switch-main": {
           "component": "switch-main"
         }
       },
       "bundled": {
-        "enabled": false
+        "enabled": false,
+        "components": {
+          "mcu": {
+            "component": "mcu",
+            "source": {
+              "kind": "file",
+              "path": "/data/devicecode/artifacts/import/mcu.dcmcu"
+            },
+            "auto_create": false,
+            "auto_start": false,
+            "policy": "prefer_durable"
+          }
+        }
       },
       "publish": {
         "enabled": true
@@ -1219,6 +1352,7 @@
   "system": {
     "rev": 1,
     "data": {
+      "schema": "devicecode.config/system/1",
       "report_period": 60,
       "usb3_enabled": true,
       "alarms": [
@@ -1230,8 +1364,353 @@
             "type": "reboot"
           }
         }
-      ],
-      "schema": "devicecode.config/system/1"
+      ]
+    }
+  },
+  "metrics": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/metrics/1",
+      "cloud_url": "$CLOUD_URL",
+      "publish_period": 60,
+      "templates": {
+        "network_stat": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5,
+              "initial_val": 0
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "any_change": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "percent_5": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5
+            }
+          ]
+        },
+        "absolute_10": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 10
+            }
+          ]
+        }
+      },
+      "pipelines": {
+        "wann_type": {
+          "template": "any_change"
+        },
+        "access_tech": {
+          "template": "any_change"
+        },
+        "access_fam": {
+          "template": "any_change"
+        },
+        "rx_bytes": {
+          "template": "network_stat"
+        },
+        "rx_packets": {
+          "template": "network_stat"
+        },
+        "rx_dropped": {
+          "template": "network_stat"
+        },
+        "rx_errors": {
+          "template": "network_stat"
+        },
+        "tx_bytes": {
+          "template": "network_stat"
+        },
+        "tx_packets": {
+          "template": "network_stat"
+        },
+        "tx_dropped": {
+          "template": "network_stat"
+        },
+        "tx_errors": {
+          "template": "network_stat"
+        },
+        "firmware": {
+          "template": "any_change"
+        },
+        "band": {
+          "template": "any_change"
+        },
+        "access-tech": {
+          "template": "any_change"
+        },
+        "access-family": {
+          "template": "any_change"
+        },
+        "imei": {
+          "template": "any_change"
+        },
+        "sim": {
+          "template": "any_change"
+        },
+        "rssi": {
+          "template": "percent_5"
+        },
+        "rsrp": {
+          "template": "percent_5"
+        },
+        "rsrq": {
+          "template": "percent_5"
+        },
+        "bars": {
+          "template": "any_change"
+        },
+        "operator": {
+          "template": "any_change"
+        },
+        "iccid": {
+          "template": "any_change"
+        },
+        "state": {
+          "template": "any_change"
+        },
+        "interface": {
+          "template": "any_change"
+        },
+        "boot_time": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 1000
+            }
+          ]
+        },
+        "version": {
+          "template": "any_change"
+        },
+        "fw_version": {
+          "template": "any_change"
+        },
+        "revision": {
+          "template": "any_change"
+        },
+        "serial": {
+          "template": "any_change"
+        },
+        "overall_utilisation": {
+          "template": "percent_5"
+        },
+        "util": {
+          "template": "percent_5"
+        },
+        "temperature": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 2
+            }
+          ]
+        },
+        "alloc": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "TimeTrigger",
+              "duration": 60
+            }
+          ]
+        },
+        "internal": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 1
+            }
+          ]
+        },
+        "core": {
+          "template": "percent_5"
+        },
+        "vbat": {
+          "template": "absolute_10"
+        },
+        "ibat": {
+          "template": "absolute_10"
+        },
+        "vin": {
+          "template": "absolute_10"
+        },
+        "vsys": {
+          "template": "absolute_10"
+        },
+        "iin": {
+          "template": "absolute_10"
+        },
+        "charger_enabled": {
+          "template": "any_change"
+        },
+        "mppt_en_pin": {
+          "template": "any_change"
+        },
+        "equalize_req": {
+          "template": "any_change"
+        },
+        "drvcc_good": {
+          "template": "any_change"
+        },
+        "cell_count_error": {
+          "template": "any_change"
+        },
+        "ok_to_charge": {
+          "template": "any_change"
+        },
+        "no_rt": {
+          "template": "any_change"
+        },
+        "thermal_shutdown": {
+          "template": "any_change"
+        },
+        "vin_ovlo": {
+          "template": "any_change"
+        },
+        "vin_gt_vbat": {
+          "template": "any_change"
+        },
+        "intvcc_gt_4p3v": {
+          "template": "any_change"
+        },
+        "intvcc_gt_2p8v": {
+          "template": "any_change"
+        },
+        "iin_limited": {
+          "template": "any_change"
+        },
+        "uvcl_active": {
+          "template": "any_change"
+        },
+        "cc_phase": {
+          "template": "any_change"
+        },
+        "cv_phase": {
+          "template": "any_change"
+        },
+        "bat_short": {
+          "template": "any_change"
+        },
+        "bat_missing": {
+          "template": "any_change"
+        },
+        "max_charge_time_fault": {
+          "template": "any_change"
+        },
+        "c_over_x_term": {
+          "template": "any_change"
+        },
+        "timer_term": {
+          "template": "any_change"
+        },
+        "ntc_pause": {
+          "template": "any_change"
+        },
+        "precharge": {
+          "template": "any_change"
+        },
+        "cccv": {
+          "template": "any_change"
+        },
+        "absorb": {
+          "template": "any_change"
+        },
+        "equalize": {
+          "template": "any_change"
+        },
+        "suspended": {
+          "template": "any_change"
+        },
+        "session_start": {
+          "protocol": "http",
+          "process": []
+        },
+        "session_end": {
+          "protocol": "http",
+          "process": []
+        },
+        "hostname": {
+          "template": "any_change"
+        },
+        "signal": {
+          "template": "percent_5"
+        },
+        "power": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10,
+              "initial_val": 0
+            }
+          ]
+        },
+        "channel": {
+          "template": "any_change"
+        },
+        "noise": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10,
+              "initial_val": 0
+            }
+          ]
+        },
+        "num_sta": {
+          "template": "percent_5"
+        },
+        "mem_util": {
+          "template": "any_change"
+        },
+        "cpu_util": {
+          "template": "any_change"
+        },
+        "temp": {
+          "template": "any_change"
+        },
+        "curr_time": {
+          "template": "any_change"
+        },
+        "fw_id": {
+          "template": "any_change"
+        },
+        "hw_id": {
+          "template": "any_change"
+        }
+      }
     }
   }
 }
