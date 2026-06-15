@@ -171,7 +171,9 @@ local function start_uart_manager(scope, bus, uart_slave)
     scope:finally(function () safe.pcall(function () fibers.perform(uart_mgr.shutdown_op()) end) end)
 
     local ok_cfg, cfg_err = fibers.perform(uart_mgr.apply_config_op({
-        { id = 'uart0', path = uart_slave, baud = 115200, mode = '8N1' },
+        serial_ports = {
+        	{ id = 'uart0', path = uart_slave, baud = 115200, mode = '8N1' },
+        },
     }))
     assert_true(ok_cfg, tostring(cfg_err))
     local cap = wait_uart_cap(dev_ev_ch)

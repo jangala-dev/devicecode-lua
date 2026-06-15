@@ -21,6 +21,12 @@ if not ok_http_headers then http_headers = nil end
 
 local M = {}
 
+local function default_encode_json(value)
+	local encoded, err = cjson.encode(value)
+	if encoded == nil then error(err or 'json_encode_failed', 0) end
+	return encoded
+end
+
 local function header_one(headers, name)
 	if not headers then return nil end
 	if http_headers and type(http_headers.get_one) == 'function' then
@@ -229,7 +235,7 @@ end
 
 function M.run(scope, ctx, deps)
 	deps = deps or {}
-	local owner = response_mod.new(ctx, { encode = deps.encode_json })
+	local owner = response_mod.new(ctx, { encode = deps.encode_json or default_encode_json })
 
 	scope:finally(function (_, status, primary)
 		resource.terminate_checked(owner, primary or status or 'request_closed', 'HTTP response termination')

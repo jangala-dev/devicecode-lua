@@ -38,7 +38,9 @@ function T.apply_config_op_before_start_fails()
 
 	runfibers.run(function()
 		local ok, err = fibers.perform(M.apply_config_op({
-			{ id = 'mcu', path = '/dev/ttyS0', baud = 115200, mode = '8N1' },
+			serial_ports = {
+				{ id = 'mcu', path = '/dev/ttyS0', baud = 115200, mode = '8N1' },
+			},
 		}))
 		assert(ok == false)
 		assert(tostring(err):match('not started'))
@@ -57,7 +59,9 @@ function T.apply_config_op_adds_uart_driver_and_emits_added_event()
 		assert(ok_start == true, tostring(err_start))
 
 		local ok_cfg, err_cfg = fibers.perform(M.apply_config_op({
-			{ id = 'mcu', path = port.slave_name, baud = 115200, mode = '8N1' },
+			serial_ports = {
+				{ id = 'mcu', path = port.slave_name, baud = 115200, mode = '8N1' },
+			},
 		}))
 		assert(ok_cfg == true, tostring(err_cfg))
 
@@ -85,7 +89,9 @@ function T.reapply_same_config_is_idempotent()
 		assert(fibers.perform(M.start_op(nil, dev_ev_ch, cap_emit_ch)) == true)
 
 		local cfg = {
-			{ id = 'mcu', path = port.slave_name, baud = 115200, mode = '8N1' },
+			serial_ports = {
+				{ id = 'mcu', path = port.slave_name, baud = 115200, mode = '8N1' },
+			},
 		}
 
 		local ok1, err1 = fibers.perform(M.apply_config_op(cfg))
@@ -119,13 +125,17 @@ function T.changing_path_causes_removed_then_added()
 		assert(fibers.perform(M.start_op(nil, dev_ev_ch, cap_emit_ch)) == true)
 
 		local ok1, err1 = fibers.perform(M.apply_config_op({
-			{ id = 'mcu', path = port1.slave_name, baud = 115200, mode = '8N1' },
+			serial_ports = {
+				{ id = 'mcu', path = port1.slave_name, baud = 115200, mode = '8N1' },
+			},
 		}))
 		assert(ok1 == true, tostring(err1))
 		assert(recv_or_fail(dev_ev_ch).event_type == 'added')
 
 		local ok2, err2 = fibers.perform(M.apply_config_op({
-			{ id = 'mcu', path = port2.slave_name, baud = 115200, mode = '8N1' },
+			serial_ports = {
+				{ id = 'mcu', path = port2.slave_name, baud = 115200, mode = '8N1' },
+			},
 		}))
 		assert(ok2 == true, tostring(err2))
 
@@ -151,13 +161,17 @@ function T.changing_baud_or_mode_causes_removed_then_added()
 		assert(fibers.perform(M.start_op(nil, dev_ev_ch, cap_emit_ch)) == true)
 
 		local ok1, err1 = fibers.perform(M.apply_config_op({
-			{ id = 'mcu', path = port.slave_name, baud = 115200, mode = '8N1' },
+			serial_ports = {
+				{ id = 'mcu', path = port.slave_name, baud = 115200, mode = '8N1' },
+			},
 		}))
 		assert(ok1 == true, tostring(err1))
 		assert(recv_or_fail(dev_ev_ch).event_type == 'added')
 
 		local ok2, err2 = fibers.perform(M.apply_config_op({
-			{ id = 'mcu', path = port.slave_name, baud = 9600, mode = '8N1' },
+			serial_ports = {
+				{ id = 'mcu', path = port.slave_name, baud = 9600, mode = '8N1' },
+			},
 		}))
 		assert(ok2 == true, tostring(err2))
 
@@ -180,6 +194,27 @@ function T.fault_op_is_inert_before_start()
 			timeout = require('fibers.sleep').sleep_op(0.05):wrap(function() return 'timeout' end),
 		})
 		assert(which == 'timeout')
+	end)
+end
+
+function T.apply_config_op_rejects_bare_uart_list()
+	local M = fresh_manager()
+
+	runfibers.run(function(scope)
+		local dev_ev_ch = channel.new(8)
+		local cap_emit_ch = channel.new(16)
+
+		local ok_start, err_start = fibers.perform(M.start_op(nil, dev_ev_ch, cap_emit_ch))
+		assert(ok_start == true, tostring(err_start))
+
+		local ok_cfg, err_cfg = fibers.perform(M.apply_config_op({
+			{ id = 'mcu', path = '/dev/ttyS0', baud = 115200, mode = '8N1' },
+		}))
+		assert(ok_cfg == false)
+		assert(tostring(err_cfg):match('serial_ports') or tostring(err_cfg):match('only supports'))
+
+		local ok_stop, err_stop = fibers.perform(M.shutdown_op())
+		assert(ok_stop == true, tostring(err_stop))
 	end)
 end
 

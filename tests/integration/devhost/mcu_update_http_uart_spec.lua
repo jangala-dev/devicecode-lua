@@ -535,11 +535,13 @@ local function start_cm5_uart_manager(scope, bus, port)
     end)
 
     local ok_cfg, cfg_err = fibers.perform(uart_mgr.apply_config_op({
-        {
-            id = 'uart0',
-            path = port.slave_name,
-            baud = 115200,
-            mode = '8N1',
+        serial_ports = {
+        	{
+        		id = 'uart0',
+        		path = port.slave_name,
+        		baud = 115200,
+        		mode = '8N1',
+        	},
         },
     }))
     assert_true(ok_cfg, tostring(cfg_err))

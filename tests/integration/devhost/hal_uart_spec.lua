@@ -114,11 +114,13 @@ function T.devhost_uart_open_returns_wrapped_session_and_allows_reopen()
 		local port = pty.open(scope)
 
 		local ok_cfg, err_cfg = perform(uart_mgr.apply_config_op({
-			{
-				id   = 'uart0',
-				path = port.slave_name,
-				baud = 115200,
-				mode = '8N1',
+			serial_ports = {
+				{
+					id   = 'uart0',
+					path = port.slave_name,
+					baud = 115200,
+					mode = '8N1',
+				},
 			},
 		}))
 		assert(ok_cfg == true, tostring(err_cfg))
@@ -163,11 +165,13 @@ function T.devhost_uart_reconfigures_when_the_port_changes()
 		local port2 = pty.open(scope)
 
 		local ok1, err1 = perform(uart_mgr.apply_config_op({
-			{
-				id   = 'uart0',
-				path = port1.slave_name,
-				baud = 115200,
-				mode = '8N1',
+			serial_ports = {
+				{
+					id   = 'uart0',
+					path = port1.slave_name,
+					baud = 115200,
+					mode = '8N1',
+				},
 			},
 		}))
 		assert(ok1 == true, tostring(err1))
@@ -185,11 +189,13 @@ function T.devhost_uart_reconfigures_when_the_port_changes()
 		assert(okc1 ~= nil, tostring(cerr1))
 
 		local ok2, err2 = perform(uart_mgr.apply_config_op({
-			{
-				id   = 'uart0',
-				path = port2.slave_name,
-				baud = 115200,
-				mode = '8N1',
+			serial_ports = {
+				{
+					id   = 'uart0',
+					path = port2.slave_name,
+					baud = 115200,
+					mode = '8N1',
+				},
 			},
 		}))
 		assert(ok2 == true, tostring(err2))
@@ -218,11 +224,13 @@ function T.reconfigure_poisons_old_session_wrapper()
 		local port2 = pty.open(scope)
 
 		local ok1, err1 = perform(uart_mgr.apply_config_op({
-			{
-				id   = 'uart0',
-				path = port1.slave_name,
-				baud = 115200,
-				mode = '8N1',
+			serial_ports = {
+				{
+					id   = 'uart0',
+					path = port1.slave_name,
+					baud = 115200,
+					mode = '8N1',
+				},
 			},
 		}))
 		assert(ok1 == true, tostring(err1))
@@ -237,11 +245,13 @@ function T.reconfigure_poisons_old_session_wrapper()
 		assert(got1 == 'old', ('expected "old", got %q'):format(tostring(got1)))
 
 		local ok2, err2 = perform(uart_mgr.apply_config_op({
-			{
-				id   = 'uart0',
-				path = port2.slave_name,
-				baud = 115200,
-				mode = '8N1',
+			serial_ports = {
+				{
+					id   = 'uart0',
+					path = port2.slave_name,
+					baud = 115200,
+					mode = '8N1',
+				},
 			},
 		}))
 		assert(ok2 == true, tostring(err2))
@@ -274,11 +284,13 @@ function T.pending_read_loses_to_timeout_cleanly()
 		local port = pty.open(scope)
 
 		local ok_cfg, err_cfg = perform(uart_mgr.apply_config_op({
-			{
-				id   = 'uart0',
-				path = port.slave_name,
-				baud = 115200,
-				mode = '8N1',
+			serial_ports = {
+				{
+					id   = 'uart0',
+					path = port.slave_name,
+					baud = 115200,
+					mode = '8N1',
+				},
 			},
 		}))
 		assert(ok_cfg == true, tostring(err_cfg))
