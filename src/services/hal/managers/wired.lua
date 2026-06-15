@@ -20,7 +20,7 @@ local state = {
 	started = false,
 	scope = nil,
 	logger = nil,
-	http_ref_for = nil,
+	http_client_for = nil,
 	dev_ev_ch = nil,
 	cap_emit_ch = nil,
 	drivers = {},
@@ -218,7 +218,7 @@ local function reconcile_device_caps(provider_ids)
 	return true, nil
 end
 
-function M.start_op(logger, dev_ev_ch, cap_emit_ch, deps)
+function M.start_op(logger, dev_ev_ch, cap_emit_ch, opts)
 	return op.guard(function ()
 		if state.started then return op.always(true, nil) end
 		local parent = fibers.current_scope()
@@ -227,7 +227,7 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch, deps)
 
 		state.scope = child
 		state.logger = logger
-		state.http_ref_for = type(deps) == 'table' and deps.http_ref_for or nil
+		state.http_client_for = opts and opts.http_client_for or nil
 		state.dev_ev_ch = dev_ev_ch
 		state.cap_emit_ch = cap_emit_ch
 		state.controls = {}
@@ -264,7 +264,7 @@ function M.apply_config_op(config)
 					for k, v in pairs(pcfg) do driver_config[k] = v end
 					driver_config.id = driver_config.id or id
 					local driver_opts = { logger = state.logger, cap_emit_ch = state.cap_emit_ch }
-					if driver_config.provider == 'rtl8380m_http' then driver_opts.http_ref_for = state.http_ref_for end
+					if driver_config.provider == 'rtl8380m_http' then driver_opts.http_client_for = state.http_client_for end
 					local driver, err = driver_mod.new(driver_config, driver_opts)
 					if not driver then return false, ('wired provider %s create failed: %s'):format(id, tostring(err)) end
 					state.drivers[id] = driver
@@ -302,7 +302,7 @@ function M.terminate(reason)
 	if state.scope then local scope = state.scope; state.scope = nil; scope:cancel(reason or 'terminated') end
 	state.started = false
 	state.logger = nil
-	state.http_ref_for = nil
+	state.http_client_for = nil
 	state.dev_ev_ch = nil
 	state.cap_emit_ch = nil
 	return true, nil

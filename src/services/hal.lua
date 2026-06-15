@@ -10,7 +10,7 @@ local channel = require "fibers.channel"
 local sleep   = require "fibers.sleep"
 
 local tablex = require 'shared.table'
-local http_sdk = require 'services.http.sdk'
+local dependencies = require 'services.hal.dependencies'
 
 local perform = fibers.perform
 
@@ -465,15 +465,6 @@ end
 
 local function availability_flag(event_type)
 	return event_type == 'added'
-end
-
-local function narrow_http_ref(ref)
-	if ref == nil then return nil end
-	return {
-		status_op = function (_, opts) return ref:status_op(opts) end,
-		open_exchange_op = function (_, args, opts) return ref:open_exchange_op(args, opts) end,
-		exchange_op = function (_, args, opts) return ref:exchange_op(args, opts) end,
-	}
 end
 
 local function availability_payload(event_type, extra)
@@ -1081,6 +1072,11 @@ function HalService.start(conn, opts)
 		})
 	end
 
+
+	local dependency_resolver, dependency_resolver_err = dependencies.resolver(conn)
+	if not dependency_resolver then
+		error('HAL dependency resolver failed: ' .. tostring(dependency_resolver_err), 0)
+	end
 	local function start_manager(name, manager)
 		local valid, valid_err = validate_strict_manager(name, manager)
 		if not valid then
@@ -1092,15 +1088,6 @@ function HalService.start(conn, opts)
 			component = 'manager',
 			manager   = name,
 		})
-		local deps
-		if name == 'wired' then
-			deps = {
-				http_ref_for = function (cap_id)
-					return narrow_http_ref(http_sdk.new_ref(conn, cap_id or 'main'))
-				end,
-			}
-		end
-
 		return perform(manager_call_with_timeout_op(
 			name,
 			manager,
@@ -1109,7 +1096,7 @@ function HalService.start(conn, opts)
 			manager_logger,
 			dev_ev_ch,
 			cap_emit_ch,
-			deps
+			dependencies.manager_options(name, dependency_resolver, { service_name = svc.name })
 		))
 	end
 
