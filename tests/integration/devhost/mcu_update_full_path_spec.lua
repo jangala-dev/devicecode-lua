@@ -554,7 +554,7 @@ local function start_ui(scope, bus, port, roots)
                     image_id = 'mcu-image-new',
                 },
             },
-            updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false }, commit = { require_auth = false } },
+            updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false, component = 'mcu', create_job = true, start_job = true }, commit = { require_auth = false } },
         })
     end))
     conn:retain({ 'cfg', 'ui' }, { data = {
@@ -562,7 +562,7 @@ local function start_ui(scope, bus, port, roots)
         enabled = true,
         http = { enabled = true, cap_id = 'main', host = '127.0.0.1', port = port, max_active_requests = 8 },
         static = { root = roots.static, index = 'index.html' },
-        updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false }, commit = { require_auth = false } },
+        updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false, component = 'mcu', create_job = true, start_job = true }, commit = { require_auth = false } },
         sse = { enabled = false },
         sessions = { prune_interval = false },
     } })

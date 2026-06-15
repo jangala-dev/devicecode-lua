@@ -1266,7 +1266,12 @@
       },
       "updates": {
         "upload": {
-          "require_auth": false
+          "enabled": true,
+          "max_bytes": 67108864,
+          "require_auth": false,
+          "component": "mcu",
+          "create_job": true,
+          "start_job": true
         },
         "commit": {
           "require_auth": false

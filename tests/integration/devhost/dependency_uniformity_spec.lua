@@ -41,6 +41,17 @@ local function ui_cfg()
 		enabled = true,
 		http = { enabled = true, cap_id = 'main', host = '127.0.0.1', port = 8080 },
 		sessions = { prune_interval = false },
+		updates = {
+			upload = {
+				enabled = true,
+				max_bytes = 1024 * 1024,
+				require_auth = false,
+				component = 'mcu',
+				create_job = true,
+				start_job = true,
+			},
+			commit = { require_auth = false },
+		},
 	}
 end
 

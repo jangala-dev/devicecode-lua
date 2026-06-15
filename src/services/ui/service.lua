@@ -342,6 +342,9 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	update_opts.max_bytes = upload.max_bytes
 	update_opts.enabled = upload.enabled
 	update_opts.require_auth = upload.require_auth
+	update_opts.component = upload.component
+	update_opts.create_job = upload.create_job
+	update_opts.start_job = upload.start_job
 	update_opts.commit_require_auth = commit.require_auth
 	update_opts.connect = update_opts.connect or params.connect
 	update_opts.bus = update_opts.bus or params.bus

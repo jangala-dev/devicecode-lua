@@ -28,10 +28,6 @@ local DEFAULTS = {
 		upload = {
 			enabled = true,
 			max_bytes = 64 * 1024 * 1024,
-			require_auth = false,
-		},
-		commit = {
-			require_auth = false,
 		},
 	},
 	sessions = {
@@ -63,7 +59,7 @@ local HTTP_KEYS = {
 local STATIC_KEYS = { root = true, index = true, chunk_size = true }
 local SSE_KEYS = { enabled = true, queue_len = true, max_replay = true, replay = true, pattern = true }
 local UPDATE_KEYS = { upload = true, commit = true }
-local UPDATE_UPLOAD_KEYS = { enabled = true, max_bytes = true, require_auth = true }
+local UPDATE_UPLOAD_KEYS = { enabled = true, max_bytes = true, require_auth = true, component = true, create_job = true, start_job = true }
 local UPDATE_COMMIT_KEYS = { require_auth = true }
 local SESSION_KEYS = { prune_interval = true }
 
@@ -85,6 +81,11 @@ end
 
 local function table_or_empty(v, path)
 	if v == nil then return {}, nil end
+	if type(v) ~= 'table' then return nil, path .. ' must be a table' end
+	return v, nil
+end
+
+local function table_required(v, path)
 	if type(v) ~= 'table' then return nil, path .. ' must be a table' end
 	return v, nil
 end
@@ -213,7 +214,7 @@ end
 
 local function normalise_update_upload(raw)
 	local err
-	raw, err = table_or_empty(raw, 'updates.upload')
+	raw, err = table_required(raw, 'updates.upload')
 	if not raw then return nil, err end
 	local ok
 	ok, err = allowed(raw, UPDATE_UPLOAD_KEYS, 'updates.upload')
@@ -222,34 +223,53 @@ local function normalise_update_upload(raw)
 	local v
 	v, err = bool_or_nil(raw.enabled, 'updates.upload.enabled')
 	if err then return nil, err end
-	if v ~= nil then out.enabled = v end
+	if v == nil then return nil, 'updates.upload.enabled is required' end
+	out.enabled = v
 	v, err = non_negative_int_or_nil(raw.max_bytes, 'updates.upload.max_bytes')
 	if err then return nil, err end
-	if v ~= nil then out.max_bytes = v end
+	if v == nil then return nil, 'updates.upload.max_bytes is required' end
+	out.max_bytes = v
 	v, err = bool_or_nil(raw.require_auth, 'updates.upload.require_auth')
 	if err then return nil, err end
-	if v ~= nil then out.require_auth = v end
+	if v == nil then return nil, 'updates.upload.require_auth is required' end
+	out.require_auth = v
+	v, err = non_empty_string_or_nil(raw.component, 'updates.upload.component')
+	if err then return nil, err end
+	if v == nil then return nil, 'updates.upload.component is required' end
+	out.component = v
+	v, err = bool_or_nil(raw.create_job, 'updates.upload.create_job')
+	if err then return nil, err end
+	if v == nil then return nil, 'updates.upload.create_job is required' end
+	out.create_job = v
+	v, err = bool_or_nil(raw.start_job, 'updates.upload.start_job')
+	if err then return nil, err end
+	if v == nil then return nil, 'updates.upload.start_job is required' end
+	out.start_job = v
+	if out.start_job == true and out.create_job ~= true then
+		return nil, 'updates.upload.start_job requires updates.upload.create_job'
+	end
 	return out, nil
 end
 
 local function normalise_update_commit(raw)
 	local err
-	raw, err = table_or_empty(raw, 'updates.commit')
+	raw, err = table_required(raw, 'updates.commit')
 	if not raw then return nil, err end
 	local ok
 	ok, err = allowed(raw, UPDATE_COMMIT_KEYS, 'updates.commit')
 	if not ok then return nil, err end
-	local out = copy_plain(DEFAULTS.updates.commit)
+	local out = {}
 	local v
 	v, err = bool_or_nil(raw.require_auth, 'updates.commit.require_auth')
 	if err then return nil, err end
-	if v ~= nil then out.require_auth = v end
+	if v == nil then return nil, 'updates.commit.require_auth is required' end
+	out.require_auth = v
 	return out, nil
 end
 
 local function normalise_updates(raw)
 	local err
-	raw, err = table_or_empty(raw, 'updates')
+	raw, err = table_required(raw, 'updates')
 	if not raw then return nil, err end
 	local ok
 	ok, err = allowed(raw, UPDATE_KEYS, 'updates')
