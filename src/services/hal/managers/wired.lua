@@ -3,7 +3,7 @@
 --
 -- Provider capabilities are derived from HAL configuration.  The manager
 -- deliberately keeps wired-provider capabilities raw at the HAL boundary; the
--- Device service curates them into public cap/wired-provider/... surfaces.
+-- Wired service combines them with Device assembly into public state/wired/... surfaces.
 
 local fibers = require 'fibers'
 local op = require 'fibers.op'
@@ -22,6 +22,7 @@ local state = {
 	logger = nil,
 	dev_ev_ch = nil,
 	cap_emit_ch = nil,
+	http_client_for = nil,
 	drivers = {},
 	controls = {},
 	provider_ids = {},
@@ -59,6 +60,10 @@ end
 
 local function emit_snapshot_now(provider_id, snapshot)
 	local ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'status', snapshot.status or { state = 'available', available = snapshot.ok == true }))
+	if ok == false or ok == nil then return nil, err end
+	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'identity', snapshot.identity or {}))
+	if ok == false or ok == nil then return nil, err end
+	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'telemetry', snapshot.telemetry or {}))
 	if ok == false or ok == nil then return nil, err end
 	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'surfaces', { surfaces = snapshot.surfaces or {} }))
 	if ok == false or ok == nil then return nil, err end
@@ -217,7 +222,7 @@ local function reconcile_device_caps(provider_ids)
 	return true, nil
 end
 
-function M.start_op(logger, dev_ev_ch, cap_emit_ch)
+function M.start_op(logger, dev_ev_ch, cap_emit_ch, opts)
 	return op.guard(function ()
 		if state.started then return op.always(true, nil) end
 		local parent = fibers.current_scope()
@@ -228,6 +233,7 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch)
 		state.logger = logger
 		state.dev_ev_ch = dev_ev_ch
 		state.cap_emit_ch = cap_emit_ch
+		state.http_client_for = opts and opts.http_client_for or nil
 		state.controls = {}
 		state.drivers = {}
 		state.provider_ids = {}
@@ -261,7 +267,9 @@ function M.apply_config_op(config)
 					local driver_config = {}
 					for k, v in pairs(pcfg) do driver_config[k] = v end
 					driver_config.id = driver_config.id or id
-					local driver, err = driver_mod.new(driver_config, { logger = state.logger, cap_emit_ch = state.cap_emit_ch })
+					local driver_opts = { logger = state.logger, cap_emit_ch = state.cap_emit_ch }
+					if driver_config.provider == 'rtl8380m_http' then driver_opts.http_client_for = state.http_client_for end
+					local driver, err = driver_mod.new(driver_config, driver_opts)
 					if not driver then return false, ('wired provider %s create failed: %s'):format(id, tostring(err)) end
 					state.drivers[id] = driver
 					local result = driver_result(id, 'snapshot', {})
@@ -300,6 +308,7 @@ function M.terminate(reason)
 	state.logger = nil
 	state.dev_ev_ch = nil
 	state.cap_emit_ch = nil
+	state.http_client_for = nil
 	return true, nil
 end
 

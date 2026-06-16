@@ -70,24 +70,6 @@ local function check_allowed(t, allowed, p)
 	return true, nil
 end
 
-local PROVIDER_FIELDS = { 'capability_id', 'provider_surface_id', 'id', 'surface', 'metadata', 'extensions' }
-
-local function normalise_provider(v, p)
-	if not is_plain_table(v) then return nil, err(p, 'provider must be a table') end
-	local ok, ferr = check_allowed(v, PROVIDER_FIELDS, p)
-	if not ok then return nil, ferr end
-	local cap_id, cerr = id(v.capability_id or v.id, { path(p), 'capability_id' })
-	if not cap_id then return nil, cerr end
-	local surface, serr = id(v.provider_surface_id or v.surface, { path(p), 'provider_surface_id' })
-	if not surface then return nil, serr end
-	return {
-		capability_id = cap_id,
-		provider_surface_id = surface,
-		metadata = copy(v.metadata),
-		extensions = copy(v.extensions),
-	}, nil
-end
-
 local ATTACHMENT_FIELDS = {
 	'mode', 'segment', 'segments', 'required_segments', 'user_segments', 'native_segment',
 	'tagged', 'untagged', 'metadata', 'extensions',
@@ -148,7 +130,7 @@ end
 
 local SURFACE_FIELDS = {
 	'id', 'name', 'label', 'description', 'kind', 'role', 'enabled', 'protected',
-	'provider', 'attachment', 'capabilities', 'tags', 'metadata', 'extensions',
+	'attachment', 'capabilities', 'tags', 'metadata', 'extensions',
 }
 
 local function normalise_surface(surface_id, rec, p)
@@ -156,8 +138,6 @@ local function normalise_surface(surface_id, rec, p)
 	local ok, ferr = check_allowed(rec, SURFACE_FIELDS, p)
 	if not ok then return nil, ferr end
 	if rec.id ~= nil and rec.id ~= surface_id then return nil, err({ path(p), 'id' }, 'must match the map key') end
-	local provider, perr = normalise_provider(rec.provider or {}, { path(p), 'provider' })
-	if not provider then return nil, perr end
 	local attachment, aerr = normalise_attachment(rec.attachment or { mode = 'none' }, { path(p), 'attachment' })
 	if not attachment then return nil, aerr end
 	local protected = rec.protected == true
@@ -187,7 +167,6 @@ local function normalise_surface(surface_id, rec, p)
 		role = rec.role or 'access',
 		enabled = enabled,
 		protected = protected,
-		provider = provider,
 		attachment = attachment,
 		capabilities = copy(rec.capabilities or {}),
 		tags = tags,

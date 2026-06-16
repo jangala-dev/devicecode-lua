@@ -20,7 +20,8 @@ RTL8380M switch uplink surface
   represented by a read-only RTL8380M HTTP HAL wired provider
 
 provider composition
-  retained provider capability state under cap/wired-provider/...
+  raw provider observations under raw/host/wired/provider/...
+  Device physical assembly under state/device/assembly
   appliance-level surface projection under state/wired/...
 
 protected trunk validation
@@ -43,7 +44,7 @@ wired
   validation, protected trunk invariants, wired topology and violations
 
 device
-  appliance component composition and capability promotion
+  appliance component composition and physical product assembly
 
 HAL/provider
   static wired facts, RTL8380M HTTP telemetry, future switch APIs,
@@ -54,9 +55,10 @@ Rules:
 
 ```text
 wired consumes state/net/segments.
-wired consumes cap/wired-provider/... provider capability state.
+wired consumes state/device/assembly.
+wired consumes raw wired-provider observations.
 wired publishes state/wired/....
-wired does not subscribe to raw switch implementation topics.
+wired does not expose provider-shaped public capabilities.
 wired does not define network policy.
 ```
 
@@ -92,25 +94,33 @@ and normalises it into:
 devicecode.wired.intent/1
 ```
 
-The current Big Box config defines two protected surfaces:
+The current Big Box config defines protected internal trunks and the fixed external switch surface inventory:
 
 ```text
 cm5-eth0
   direct-nic
   internal-trunk
-  provider cm5-local-wired / eth0
+  backing surface supplied by state/device/assembly
   required segments adm, int
   user_segments all-realised-user-segments
 
 switch-uplink-cm5
   switch-port
   internal-trunk
-  provider switch-main / uplink-cm5
+  backed by RTL8380M GE8 via state/device/assembly
   required segments adm, int
   user_segments all-realised-user-segments
-```
 
-Future user-facing switch ports should be added to `cfg/wired` once the fixed RTL8380M port-to-segment layout is known.
+lan-1 .. lan-7
+  external RJ45 surfaces
+  backed by RTL8380M GE1 .. GE7 via state/device/assembly
+  semantic attachment not yet assigned in cfg/wired
+
+sfp-1 .. sfp-2
+  external SFP surfaces
+  backed by RTL8380M GE9 .. GE10 via state/device/assembly
+  semantic attachment not yet assigned in cfg/wired
+```
 
 ## Provider API
 
@@ -126,8 +136,8 @@ Provider records contain:
   writable = false,
   status = { state = "available", available = true },
   surfaces = {
-    ["uplink-cm5"] = {
-      provider_surface_id = "uplink-cm5",
+    ["GE8"] = {
+      provider_surface_id = "GE8",
       kind = "switch-port",
       capabilities = { trunk = true, access = false, poe = false },
       link = { state = "up", speed_mbps = 1000 },
@@ -196,7 +206,8 @@ It consumes:
 ```text
 cfg/wired
 state/net/segments
-cap/wired-provider/#
+state/device/assembly
+raw/host/wired/provider/#
 ```
 
 The service projects stable appliance surface ids. A UI should display `lan-1`, `cm5-eth0` or `switch-uplink-cm5`, not raw provider internals.
@@ -251,8 +262,8 @@ The CM5-side flow should be:
 
 ```text
 fabric imports switch member state
-  -> device promotes switch-main as an appliance component/capability
-  -> wired consumes appliance-level wired-provider capability
+  -> device describes switch-main in the physical assembly
+  -> wired consumes assembly plus switch observations
   -> ui consumes state/wired/...
 ```
 

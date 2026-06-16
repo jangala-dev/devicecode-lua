@@ -12,9 +12,11 @@ local DEFAULTS = {
 	id = 'main',
 	policy = {
 		allowed_schemes = { http = true, https = true, ws = true, wss = true },
+		allowed_response_parsers = { strict = true },
 		allow_loopback = true,
 		max_request_body = 16 * 1024 * 1024,
 		max_response_body = 16 * 1024 * 1024,
+		legacy_http1_close_max_response_bytes = 1024 * 1024,
 	},
 }
 
@@ -29,9 +31,11 @@ local POLICY_KEYS = {
 	allowed_schemes = true,
 	allowed_hosts = true,
 	denied_hosts = true,
+	allowed_response_parsers = true,
 	allow_loopback = true,
 	max_request_body = true,
 	max_response_body = true,
+	legacy_http1_close_max_response_bytes = true,
 }
 
 local function fail(msg) return nil, msg end
@@ -97,6 +101,10 @@ local function normalise_policy(raw)
 	if err then return nil, err end
 	if v ~= nil then out.allowed_hosts = v end
 
+	v, err = string_bool_map_or_nil(raw.allowed_response_parsers, 'policy.allowed_response_parsers')
+	if err then return nil, err end
+	if v ~= nil then out.allowed_response_parsers = v end
+
 	v, err = string_bool_map_or_nil(raw.denied_hosts, 'policy.denied_hosts')
 	if err then return nil, err end
 	if v ~= nil then out.denied_hosts = v end
@@ -112,6 +120,10 @@ local function normalise_policy(raw)
 	v, err = positive_number_or_nil(raw.max_response_body, 'policy.max_response_body')
 	if err then return nil, err end
 	if v ~= nil then out.max_response_body = v end
+
+	v, err = positive_number_or_nil(raw.legacy_http1_close_max_response_bytes, 'policy.legacy_http1_close_max_response_bytes')
+	if err then return nil, err end
+	if v ~= nil then out.legacy_http1_close_max_response_bytes = v end
 
 	return out, nil
 end

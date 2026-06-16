@@ -3,20 +3,30 @@ local deps = require 'services.wired.dependencies'
 
 local T = {}
 
-function T.derives_unique_provider_dependencies_from_surfaces()
+function T.semantic_surfaces_have_no_capability_dependencies()
 	local intent = assert(config.normalise({
 		schema = config.SCHEMA,
 		surfaces = {
-			lan1 = { provider = { capability_id = 'switch-main', provider_surface_id = 'port1' }, attachment = { mode = 'access', segment = 'lan' } },
-			lan2 = { provider = { capability_id = 'switch-main', provider_surface_id = 'port2' }, attachment = { mode = 'access', segment = 'lan' } },
+			lan1 = { attachment = { mode = 'access', segment = 'lan' } },
+			lan2 = { attachment = { mode = 'access', segment = 'lan' } },
 		},
 	}))
 	local specs = deps.provider_dependencies(intent)
-	assert(#specs == 1)
-	assert(specs[1].key == 'provider:switch-main')
-	assert(specs[1].class == 'wired-provider')
-	assert(specs[1].id == 'switch-main')
-	assert(specs[1].required == false)
+	assert(#specs == 0)
+end
+
+function T.provider_mapping_is_no_longer_accepted_in_cfg_wired()
+	local intent, err = config.normalise({
+		schema = config.SCHEMA,
+		surfaces = {
+			lan1 = {
+				provider = { capability_id = 'switch-main', provider_surface_id = 'port1' },
+				attachment = { mode = 'access', segment = 'lan' },
+			},
+		},
+	})
+	assert(intent == nil)
+	assert(type(err) == 'string' and err:find('provider', 1, true))
 end
 
 return T

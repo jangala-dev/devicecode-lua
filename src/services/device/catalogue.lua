@@ -278,6 +278,12 @@ local function default_components()
 	}
 end
 
+local function normalise_assembly(raw)
+	if raw == nil then return {} end
+	if type(raw) ~= 'table' then error('device catalogue assembly must be a table', 0) end
+	return copy_value(raw)
+end
+
 local function components_from_config(raw)
 	if raw == nil then return default_components() end
 	if type(raw) ~= 'table' then error('device catalogue config must be a table or nil', 0) end
@@ -309,6 +315,7 @@ function M.build(raw, opts)
 		kind = 'device_catalogue',
 		schema = raw and raw.schema or nil,
 		components = components,
+		assembly = normalise_assembly(raw and raw.assembly or nil),
 		meta = copy_value((raw and raw.meta) or {}),
 	}
 end

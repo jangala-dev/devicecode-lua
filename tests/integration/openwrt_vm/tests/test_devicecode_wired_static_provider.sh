@@ -63,7 +63,6 @@ local wired_intent = normalised({
   surfaces = {
     ['switch-uplink-cm5'] = {
       kind = 'switch-port', role = 'internal-trunk', protected = true,
-      provider = { capability_id = 'switch-main', provider_surface_id = 'uplink-cm5' },
       attachment = {
         mode = 'trunk',
         required_segments = { 'mgmt', 'switch_control', 'fabric' },
@@ -72,12 +71,10 @@ local wired_intent = normalised({
     },
     ['lan-1'] = {
       kind = 'ethernet-port', role = 'access', capabilities = { poe = true },
-      provider = { capability_id = 'switch-main', provider_surface_id = 'port-1' },
       attachment = { mode = 'access', segment = 'lan' },
     },
     ['trunk-1'] = {
       kind = 'ethernet-port', role = 'trunk',
-      provider = { capability_id = 'switch-main', provider_surface_id = 'port-2' },
       attachment = { mode = 'trunk', segments = { 'lan', 'guest' } },
     },
   },
@@ -86,21 +83,26 @@ local wired_intent = normalised({
 local good = {
   net = { segments = net_segments },
   config_intent = wired_intent,
+  assembly = { surfaces = {
+    ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' },
+    ['lan-1'] = { component = 'switch-main', observed_surface = 'GE1' },
+    ['trunk-1'] = { component = 'switch-main', observed_surface = 'GE2' },
+  } },
   providers = {
     ['switch-main'] = {
       status = { state = 'available', available = true },
       surfaces = {
-        ['uplink-cm5'] = {
+        ['GE8'] = {
           capabilities = { trunk = true, access = false, poe = false },
           attachment = { mode = 'trunk', vlans = { 10, 11, 12, 100, 101 } },
           link = { state = 'up', speed_mbps = 1000 },
         },
-        ['port-1'] = {
+        ['GE1'] = {
           capabilities = { access = true, trunk = true, poe = true },
           attachment = { mode = 'access', vlan = 100 },
           link = { state = 'up', speed_mbps = 1000 },
         },
-        ['port-2'] = {
+        ['GE2'] = {
           capabilities = { access = true, trunk = true, poe = false },
           attachment = { mode = 'trunk', vlans = { 100, 101 } },
         },
@@ -117,7 +119,7 @@ ok(has_required_vlan(good.topology.protected_trunks['switch-uplink-cm5'], 'guest
 ok(has_required_vlan(good.topology.protected_trunks['switch-uplink-cm5'], 'lan', 100), 'lan expanded into protected trunk')
 
 local missing_provider = {
-  net = { segments = net_segments }, config_intent = wired_intent, providers = {}, stats = {},
+  net = { segments = net_segments }, config_intent = wired_intent, assembly = good.assembly, providers = {}, stats = {},
 }
 service._test.rebuild_derived(missing_provider)
 ok(has_violation(missing_provider, 'protected_provider_missing', { surface_id = 'switch-uplink-cm5', provider_id = 'switch-main' }) ~= nil, 'protected provider missing expected')
@@ -125,13 +127,14 @@ ok(has_violation(missing_provider, 'protected_provider_missing', { surface_id = 
 local broken = {
   net = { segments = net_segments },
   config_intent = wired_intent,
+  assembly = good.assembly,
   providers = {
     ['switch-main'] = {
       status = { state = 'available', available = true },
       surfaces = {
-        ['uplink-cm5'] = { capabilities = { trunk = true }, attachment = { mode = 'trunk', vlans = { 10, 12, 100 } } },
-        ['port-1'] = { capabilities = { access = false, trunk = true, poe = false }, attachment = { mode = 'access', vlan = 100 } },
-        ['port-2'] = { capabilities = { access = true, trunk = false, poe = false }, attachment = { mode = 'access', vlan = 100 } },
+        ['GE8'] = { capabilities = { trunk = true }, attachment = { mode = 'trunk', vlans = { 10, 12, 100 } } },
+        ['GE1'] = { capabilities = { access = false, trunk = true, poe = false }, attachment = { mode = 'access', vlan = 100 } },
+        ['GE2'] = { capabilities = { access = true, trunk = false, poe = false }, attachment = { mode = 'access', vlan = 100 } },
       },
     },
   },
@@ -140,9 +143,9 @@ local broken = {
 service._test.rebuild_derived(broken)
 ok(has_violation(broken, 'missing_required_segment_carriage', { surface_id = 'switch-uplink-cm5', segment = 'switch_control', vlan = 11 }) ~= nil, 'missing switch_control expected')
 ok(has_violation(broken, 'missing_user_segment_carriage', { surface_id = 'switch-uplink-cm5', segment = 'guest', vlan = 101 }) ~= nil, 'missing guest expected')
-ok(has_violation(broken, 'provider_surface_does_not_support_access', { surface_id = 'lan-1', provider_surface_id = 'port-1' }) ~= nil, 'access capability violation expected')
-ok(has_violation(broken, 'provider_surface_does_not_support_poe', { surface_id = 'lan-1', provider_surface_id = 'port-1' }) ~= nil, 'poe capability violation expected')
-ok(has_violation(broken, 'provider_surface_does_not_support_trunk', { surface_id = 'trunk-1', provider_surface_id = 'port-2' }) ~= nil, 'trunk capability violation expected')
+ok(has_violation(broken, 'provider_surface_does_not_support_access', { surface_id = 'lan-1', provider_surface_id = 'GE1' }) ~= nil, 'access capability violation expected')
+ok(has_violation(broken, 'provider_surface_does_not_support_poe', { surface_id = 'lan-1', provider_surface_id = 'GE1' }) ~= nil, 'poe capability violation expected')
+ok(has_violation(broken, 'provider_surface_does_not_support_trunk', { surface_id = 'trunk-1', provider_surface_id = 'GE2' }) ~= nil, 'trunk capability violation expected')
 eq(broken.state, 'degraded', 'broken fixture state')
 
 print('devicecode wired static provider validation: ok')

@@ -14,7 +14,6 @@ local function protected_intent()
 				kind = 'switch-port',
 				role = 'internal-trunk',
 				protected = true,
-				provider = { capability_id = 'switch-main', provider_surface_id = 'uplink-cm5' },
 				attachment = { mode = 'trunk', required_segments = { 'mgmt', 'switch_control', 'fabric' } },
 			},
 		},
@@ -33,11 +32,12 @@ function tests.test_protected_trunk_reports_missing_required_vlan_carriage()
 			},
 		},
 		config_intent = protected_intent(),
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
 		providers = {
 			['switch-main'] = {
 				status = { state = 'available', available = true },
 				surfaces = {
-					['uplink-cm5'] = {
+					['GE8'] = {
 						attachment = { mode = 'trunk', vlans = { 10, 12 } },
 					},
 				},
@@ -67,11 +67,12 @@ function tests.test_protected_trunk_passes_when_all_required_vlans_are_observed(
 			},
 		},
 		config_intent = protected_intent(),
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
 		providers = {
 			['switch-main'] = {
 				status = { state = 'available', available = true },
 				surfaces = {
-					['uplink-cm5'] = {
+					['GE8'] = {
 						attachment = { mode = 'trunk', vlans = { 10, 11, 12, 100 } },
 					},
 				},
@@ -93,6 +94,7 @@ function tests.test_protected_trunk_reports_provider_missing()
 	local snap = {
 		net = { segments = { mgmt = { vlan = { id = 10 } } } },
 		config_intent = protected_intent(),
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
 		providers = {},
 		stats = {},
 	}
@@ -111,13 +113,14 @@ function tests.test_protected_trunk_reports_provider_surface_missing()
 	local snap = {
 		net = { segments = { mgmt = { vlan = { id = 10 } }, switch_control = { vlan = { id = 11 } }, fabric = { vlan = { id = 12 } } } },
 		config_intent = protected_intent(),
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
 		providers = { ['switch-main'] = { status = { state = 'available', available = true }, surfaces = {} } },
 		stats = {},
 	}
 	service._test.rebuild_derived(snap)
 	local found = false
 	for _, v in ipairs(snap.violations or {}) do
-		if v.kind == 'protected_provider_surface_missing' and v.provider_surface_id == 'uplink-cm5' then
+		if v.kind == 'protected_provider_surface_missing' and v.provider_surface_id == 'GE8' then
 			found = true
 			assert_eq(v.severity, 'critical')
 		end
@@ -131,7 +134,6 @@ function tests.test_all_realised_user_segments_are_checked_on_protected_trunk()
 		surfaces = {
 			['switch-uplink-cm5'] = {
 				protected = true,
-				provider = { capability_id = 'switch-main', provider_surface_id = 'uplink-cm5' },
 				attachment = { mode = 'trunk', required_segments = { 'mgmt' }, user_segments = 'all-realised-user-segments' },
 			},
 		},
@@ -146,7 +148,8 @@ function tests.test_all_realised_user_segments_are_checked_on_protected_trunk()
 			},
 		},
 		config_intent = intent,
-		providers = { ['switch-main'] = { status = { state = 'available', available = true }, surfaces = { ['uplink-cm5'] = { attachment = { mode = 'trunk', vlans = { 10, 100 } } } } } },
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
+		providers = { ['switch-main'] = { status = { state = 'available', available = true }, surfaces = { ['GE8'] = { attachment = { mode = 'trunk', vlans = { 10, 100 } } } } } },
 		stats = {},
 	}
 	service._test.rebuild_derived(snap)
@@ -162,12 +165,10 @@ function tests.test_provider_capability_checks_report_unsupported_access_trunk_a
 		schema = config.SCHEMA,
 		surfaces = {
 			['lan-1'] = {
-				provider = { capability_id = 'switch-main', provider_surface_id = 'port-1' },
 				capabilities = { poe = true },
 				attachment = { mode = 'access', segment = 'lan' },
 			},
 			['trunk-1'] = {
-				provider = { capability_id = 'switch-main', provider_surface_id = 'port-2' },
 				attachment = { mode = 'trunk', segments = { 'lan' } },
 			},
 		},
@@ -176,12 +177,13 @@ function tests.test_provider_capability_checks_report_unsupported_access_trunk_a
 	local snap = {
 		net = { segments = { lan = { vlan = { id = 100 } } } },
 		config_intent = intent,
+		assembly = { surfaces = { ['lan-1'] = { component = 'switch-main', observed_surface = 'GE1' }, ['trunk-1'] = { component = 'switch-main', observed_surface = 'GE2' } } },
 		providers = {
 			['switch-main'] = {
 				status = { state = 'available', available = true },
 				surfaces = {
-					['port-1'] = { capabilities = { access = false, trunk = true, poe = false }, attachment = { mode = 'access', vlan = 100 } },
-					['port-2'] = { capabilities = { access = true, trunk = false, poe = false }, attachment = { mode = 'access', vlan = 100 } },
+					['GE1'] = { capabilities = { access = false, trunk = true, poe = false }, attachment = { mode = 'access', vlan = 100 } },
+					['GE2'] = { capabilities = { access = true, trunk = false, poe = false }, attachment = { mode = 'access', vlan = 100 } },
 				},
 			},
 		},
