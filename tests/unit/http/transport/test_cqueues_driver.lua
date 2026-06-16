@@ -21,12 +21,42 @@ local function yield_many(n)
 	for _ = 1, n do yield_once() end
 end
 
+local function join_child_with_timeout(child, timeout_s)
+	local which = fibers.perform(fibers.named_choice {
+		joined = child:join_op(),
+		timeout = sleep.sleep_op(timeout_s or 1),
+	})
+	return which == 'joined'
+end
+
 local function yield_until(pred, msg)
 	for _ = 1, 50 do
 		if pred() then return true end
 		yield_once()
 	end
 	error(msg or 'condition was not reached', 2)
+end
+
+local function shell_quote(s)
+	s = tostring(s or '')
+	return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+local function shell_exit_status(a, b, c)
+	if type(a) == 'number' then
+		if a >= 256 then return math.floor(a / 256) end
+		return a
+	end
+	if a == true then return 0 end
+	if b == 'exit' and type(c) == 'number' then return c end
+	if type(c) == 'number' then return c end
+	return 1
+end
+
+local function run_filtered_child(filter, timeout_s)
+	local cmd = ('timeout %s env TEST_FILTER=%s luajit run.lua'):format(
+		tostring(timeout_s or 2), shell_quote(filter))
+	return shell_exit_status(os.execute(cmd))
 end
 
 local function fake_controller()
@@ -220,6 +250,56 @@ function M.test_losing_active_run_op_calls_active_abort_without_closing_driver()
 	end)
 end
 
+
+function M.test_losing_active_run_op_can_detach_and_cleanup_after_cqueues_completion()
+	local ctl = fake_controller()
+	local drv = assert(driver_mod.new { controller = ctl })
+	local active = false
+	local release = false
+	local detach_reason
+	local cleanup_reason
+	local cleanup_result
+
+	fibers.run(function (scope)
+		assert(drv:start(scope))
+
+		local waiter = assert(scope:child())
+		local result, err
+		assert(waiter:spawn(function ()
+			result, err = fibers.perform(drv:run_op('unit.active_detached', function ()
+				active = true
+				while not release do runtime.yield() end
+				return 'late_result'
+			end, {
+				detach_on_abort = true,
+				on_detach = function (reason) detach_reason = reason end,
+				on_detached_complete = function (reason, ok, packed)
+					cleanup_reason = reason
+					if ok and packed then cleanup_result = packed[1] end
+				end,
+			}))
+		end))
+
+		yield_until(function () return active end, 'job should become active')
+		waiter:cancel('stop_waiting')
+		if not join_child_with_timeout(waiter, 0.25) then
+			release = true
+			drv:terminate('detached test bounded failure')
+			join_child_with_timeout(waiter, 0.25)
+			error('detached run_op caller did not return after abort; active cqueues jobs must detach caller cleanup', 2)
+		end
+		eq(result, nil)
+		eq(err, nil)
+		eq(detach_reason, 'aborted')
+		ok(not drv:is_closed(), 'detached active abort must not close driver')
+		release = true
+		yield_until(function () return cleanup_reason == 'aborted' end, 'detached cleanup should run after cqueues job returns')
+		eq(cleanup_result, 'late_result')
+		ok(not drv:is_closed(), 'detached cleanup must not close driver')
+		drv:terminate('done')
+	end)
+end
+
 function M.test_losing_active_run_op_without_owner_terminates_driver()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
@@ -357,6 +437,18 @@ function M.test_driver_start_can_target_started_parent_scope_from_child_scope()
 		eq(start_err, nil)
 		drv:terminate('done')
 	end)
+end
+
+
+-- Keep this ownership-boundary regression under the same focused regression filter as the
+-- hostile real-HTTP test.  Run the raw payload in a subprocess: the old
+-- hard-close-only implementation can wedge the Fibers scheduler so an
+-- in-process watchdog cannot fire reliably.  The subprocess timeout turns that
+-- into a bounded, clear test failure.
+function M.test_metrics_style_exchange_timeout_regression_cqueues_driver_detaches_active_job_cleanup_to_cqueues_job()
+	local code = run_filtered_child('test_losing_active_run_op_can_detach_and_cleanup_after_cqueues_completion',
+		tonumber(os.getenv('HTTP_METRICS_TIMEOUT_UNIT_CHILD_TIMEOUT_S') or '') or 2)
+	eq(code, 0, 'detached cqueues-driver ownership payload should pass in a bounded child process')
 end
 
 return M
