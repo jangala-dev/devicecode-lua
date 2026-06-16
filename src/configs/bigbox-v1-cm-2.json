@@ -1225,8 +1225,7 @@
                     "main",
                     "rpc",
                     "commit-update"
-                  ],
-                  "reply_policy": "sent-is-accepted"
+                  ]
                 }
               ],
               "inbound": []

@@ -246,7 +246,6 @@ local function cm5_fabric_config()
                     ['local'] = { 'raw', 'member', 'mcu', 'cap', 'updater', 'main', 'rpc', 'commit-update' },
                     remote = { 'cap', 'self', 'updater', 'main', 'rpc', 'commit-update' },
                     timeout_s = 2.0,
-                    reply_policy = 'sent-is-accepted',
                 },
             },
         },
