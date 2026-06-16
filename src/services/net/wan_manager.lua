@@ -182,7 +182,7 @@ local function apply_weights_if_ready(state, generation)
 		if active and active.generation == generation then return true, nil end
 	end
 	local snap = state.model:snapshot()
-	local weights = wan_policy.compute_weights(snap, generation)
+	local weights = wan_policy.compute_weights(snap, generation, { now = now(state) })
 	if not weights then return true, nil end
 	local previous = snap.wan_runtime and snap.wan_runtime.last_weight_apply and snap.wan_runtime.last_weight_apply.members
 	if wan_policy.weights_equal(previous, weights) then return true, nil end
@@ -351,7 +351,7 @@ function M.handle_speedtest_done(state, ev)
 		return s
 	end)
 	local snap = state.model:snapshot()
-	local weights, werr = wan_policy.compute_weights(snap, ev.generation)
+	local weights, werr = wan_policy.compute_weights(snap, ev.generation, { now = now(state) })
 	if not weights then
 		state.model:update(function(s)
 			s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }

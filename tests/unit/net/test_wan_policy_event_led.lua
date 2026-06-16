@@ -48,6 +48,7 @@ end
 function tests.test_fresh_previous_generation_success_is_used_for_weights()
 	local s = snapshot()
 	s.generation = 2
+	s.wan.load_balancing.speedtests.interval_s = 100
 	s.observed.snapshot.multiwan.interfaces_by_semantic.modem_primary.online = true
 	s.wan_runtime.speedtests.wan = {
 		state = 'done',
@@ -74,12 +75,19 @@ function tests.test_fresh_previous_generation_success_is_used_for_weights()
 	eq(due, false)
 	eq(reason, 'fresh')
 
-	local weights = assert(policy.compute_weights(s, 2))
+	local weights = assert(policy.compute_weights(s, 2, { now = 30 }))
 	local by_id = {}
 	for _, m in ipairs(weights) do by_id[m.id] = m end
 	eq(by_id.wan.weight, 80)
 	eq(by_id.wan.probe, false)
 	eq(by_id.modem_primary.weight, 20)
+
+	local expired_weights = assert(policy.compute_weights(s, 2, { now = 130 }))
+	local expired_by_id = {}
+	for _, m in ipairs(expired_weights) do expired_by_id[m.id] = m end
+	eq(expired_by_id.wan.weight, 1)
+	eq(expired_by_id.wan.probe, true)
+	eq(expired_by_id.modem_primary.weight, 100)
 end
 
 return tests
