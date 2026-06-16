@@ -880,6 +880,9 @@ local function start_fake_mcu(scope, bus, fake)
             local req = fibers.perform(commit_ep:recv_op())
             if req == nil then return end
             fake.commit_payload = req.payload
+            assert_eq(type(req.payload), 'table')
+            assert_eq(req.payload.job_id, fake.job_id)
+            assert_eq(req.payload.metadata, nil)
             fake.commit_seen = true
             fake.committed_image_id = (fake.staged and fake.staged.image_id)
                 or (type(req.payload) == 'table' and req.payload.expected_image_id)

@@ -225,7 +225,6 @@ function Backend:commit_op(job, ctx)
 	local payload = {
 		job_id = job.job_id,
 		expected_image_id = expected_image_id(job, ctx),
-		metadata = metadata_of(job),
 	}
 	return call_component_op(self, component, 'commit-update', payload):wrap(function (reply, err)
 		if reply == nil then return nil, err or 'component_commit_update_failed' end
