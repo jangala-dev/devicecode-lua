@@ -114,7 +114,7 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
     }
 
     local backend = component_backend.new({ conn = conn, artifact_store = artifact_store, component = 'mcu' })
-    local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', metadata = { image_id = 'img-new' } }
+    local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', expected_image_id = 'img-new', metadata = { format = 'dcmcu-v1' } }
 
     local staged, serr = fibers.perform(backend:stage_op(job, {}))
     assert_eq(type(staged), 'table', tostring(serr))

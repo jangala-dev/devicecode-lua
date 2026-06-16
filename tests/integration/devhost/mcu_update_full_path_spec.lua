@@ -17,6 +17,7 @@ local http_request = require 'http.request'
 
 local runfibers = require 'tests.support.run_fibers'
 local probe     = require 'tests.support.bus_probe'
+local dcmcu_fixture = require 'tests.support.dcmcu_fixture'
 
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 
@@ -552,8 +553,6 @@ local function start_ui(scope, bus, port, roots)
                 metadata = {
                     source = 'browser',
                     format = 'dcmcu-v1',
-                    expected_image_id = 'mcu-image-new',
-                    image_id = 'mcu-image-new',
                 },
             },
             updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false, component = 'mcu', create_job = true, start_job = true }, commit = { require_auth = false } },
@@ -703,7 +702,7 @@ end
 function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
     runfibers.run(function (root_scope)
         local roots = temp_roots()
-        local blob = ('DCMCU-v1 manifest:%s\n'):format('mcu-image-new') .. string.rep('payload-', 64)
+        local blob = dcmcu_fixture.make('mcu-image-new')
         local port = 30000 + math.random(0, 20000)
         local fake = { old_image_id = 'mcu-image-old' }
 

@@ -30,6 +30,7 @@ local http_request = require 'http.request'
 local runfibers = require 'tests.support.run_fibers'
 local probe     = require 'tests.support.bus_probe'
 local pty       = require 'tests.support.pty'
+local dcmcu_fixture = require 'tests.support.dcmcu_fixture'
 
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 
@@ -1114,8 +1115,6 @@ local function start_ui(scope, bus, port, roots)
                 metadata = {
                     source = 'browser',
                     format = 'dcmcu-v1',
-                    expected_image_id = 'mcu-image-new',
-                    image_id = 'mcu-image-new',
                 },
             },
             updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false, component = 'mcu', create_job = true, start_job = true }, commit = { require_auth = false } },
@@ -1138,16 +1137,8 @@ end
 
 local function make_realistic_mcu_blob(image_id, target_bytes)
     target_bytes = target_bytes or REALISTIC_MCU_BLOB_BYTES
-    local prefix = ('DCMCU-v1 manifest:%s\n'):format(image_id or 'mcu-image-new')
-    local block = 'payload-0123456789abcdef-'
-    local chunks = { prefix }
-    local remaining = target_bytes - #prefix
-    while remaining > 0 do
-        local n = math.min(remaining, #block)
-        chunks[#chunks + 1] = block:sub(1, n)
-        remaining = remaining - n
-    end
-    return table.concat(chunks)
+    local payload = string.rep('payload-0123456789abcdef-', math.ceil(target_bytes / 24)):sub(1, target_bytes)
+    return dcmcu_fixture.make(image_id or 'mcu-image-new', payload)
 end
 
 local function write_all(stream, data)

@@ -4,6 +4,8 @@ local op = require 'fibers.op'
 local bundled_probe = require 'services.update.bundled_probe'
 local bundled_apply = require 'services.update.bundled_apply'
 local bundled = require 'services.update.bundled'
+local blob_source = require 'devicecode.blob_source'
+local dcmcu_fixture = require 'tests.support.dcmcu_fixture'
 
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
@@ -11,10 +13,14 @@ local function assert_eq(a,b,msg) if a ~= b then fail(msg or ('expected '..tostr
 local function assert_true(v,msg) if v ~= true then fail(msg or ('expected true, got '..tostring(v))) end end
 
 
-local function import_store(ref)
+local function import_store(ref, image_id)
 	return {
 		import_path_op = function (_, path, meta, opts)
 			return op.always({ artifact_ref = ref or 'artifact-1', path = path, meta = meta, policy = opts and opts.policy }, nil)
+		end,
+		open_source_op = function (_, artifact_ref)
+			assert_eq(artifact_ref, ref or 'artifact-1')
+			return op.always(blob_source.from_string(dcmcu_fixture.make(image_id or 'mcu-image-new')), nil)
 		end,
 	}
 end
@@ -38,6 +44,7 @@ local function fake_jobs()
 				local job = {
 					job_id = payload.job_id,
 					component = payload.component,
+					expected_image_id = payload.expected_image_id,
 					artifact_ref = payload.artifact_ref,
 					artifact = payload.artifact,
 					metadata = payload.metadata,
@@ -129,6 +136,7 @@ function tests.test_bundled_probe_imports_fixed_file_to_artifact_ref()
 		assert_eq(ev.kind, 'bundled_probe_done')
 		assert_eq(ev.status, 'ok')
 		assert_eq(ev.result.artifact_ref, 'mcu-artifact')
+		assert_eq(ev.result.desired.expected_image_id, 'mcu-image-new')
 		assert_eq(ev.result.desired.path, '/data/devicecode/artifacts/import/mcu.dcmcu')
 	end)
 end
@@ -145,7 +153,7 @@ function tests.test_bundled_apply_creates_and_optionally_starts_normal_job()
 			component = 'mcu',
 			jobs = jobs,
 			spec = { component = 'mcu', auto_start = true, source = { metadata = { format = 'dcmcu-v1' } } },
-			desired = { artifact_ref = 'mcu-artifact', artifact = { artifact_ref = 'mcu-artifact' } },
+			desired = { artifact_ref = 'mcu-artifact', expected_image_id = 'mcu-image-new', artifact = { artifact_ref = 'mcu-artifact', expected_image_id = 'mcu-image-new' } },
 			done_tx = tx,
 		}))
 		local ev = fibers.perform(rx:recv_op())
@@ -153,6 +161,7 @@ function tests.test_bundled_apply_creates_and_optionally_starts_normal_job()
 		assert_eq(ev.status, 'ok')
 		assert_eq(ev.result.job_id, 'bundled-mcu')
 		assert_eq(jobs.jobs['bundled-mcu'].artifact_ref, 'mcu-artifact')
+		assert_eq(jobs.jobs['bundled-mcu'].expected_image_id, 'mcu-image-new')
 		assert_eq(jobs.jobs['bundled-mcu'].state, 'staging')
 		assert_eq(#jobs.transitions, 2)
 	end)
@@ -196,6 +205,7 @@ function tests.test_bundled_coordinator_probe_then_apply_policy()
 		local snap = co:snapshot()
 		assert_eq(snap.state.mcu, 'applied')
 		assert_eq(jobs.jobs['bundled-mcu'].state, 'staging')
+		assert_eq(jobs.jobs['bundled-mcu'].expected_image_id, 'mcu-image-new')
 	end)
 end
 

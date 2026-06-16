@@ -47,6 +47,7 @@ function T.save_load_and_delete_round_trip()
     local ok_save, save_err = fibers.perform(store:save_job_op({
       job_id = 'job-1',
       component = 'mcu',
+      expected_image_id = 'mcu-image-test',
       state = 'created',
       created_seq = 1,
       updated_seq = 1,
@@ -70,7 +71,7 @@ function T.uses_control_store_update_capability()
   runfibers.run(function()
     local conn = fake_conn()
     local store = store_mod.new(conn)
-    local ok_save = fibers.perform(store:save_job_op({ job_id = 'job-2', component = 'mcu' }))
+    local ok_save = fibers.perform(store:save_job_op({ job_id = 'job-2', component = 'mcu', expected_image_id = 'mcu-image-test' }))
     assert(ok_save == true)
     local t = conn.calls[1].topic
     assert(t[1] == 'cap')
@@ -106,7 +107,7 @@ function T.accepts_hal_void_success_replies_for_put_and_delete()
     }
 
     local store = store_mod.new(conn)
-    local ok_save, save_err = fibers.perform(store:save_job_op({ job_id = 'job-hal', component = 'mcu', state = 'created' }))
+    local ok_save, save_err = fibers.perform(store:save_job_op({ job_id = 'job-hal', component = 'mcu', expected_image_id = 'mcu-image-test', state = 'created' }))
     assert(ok_save == true, tostring(save_err))
 
     local snapshot, load_err = fibers.perform(store:load_all_op())

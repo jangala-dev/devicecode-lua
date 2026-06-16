@@ -23,6 +23,17 @@ local function metadata_of(job)
 	return type(job) == 'table' and type(job.metadata) == 'table' and job.metadata or {}
 end
 
+local function required_string(v, field)
+	if type(v) ~= 'string' or v == '' then
+		return nil, field .. '_required'
+	end
+	return v, nil
+end
+
+local function job_expected_image_id(job)
+	return required_string(type(job) == 'table' and job.expected_image_id or nil, 'expected_image_id')
+end
+
 local function artifact_record(job)
 	if type(job) ~= 'table' then return nil end
 	return job.artifact or job.artifact_snapshot or job.artifact_meta
@@ -34,18 +45,6 @@ local function artifact_ref(job)
 	return job.artifact_ref
 		or job.ref
 		or (type(art) == 'table' and (art.artifact_ref or art.ref or art.id))
-end
-
-local function expected_image_id(job, ctx)
-	local meta = metadata_of(job)
-	local pf = ctx and ctx.preflight or nil
-	local art = artifact_record(job)
-	return job.expected_image_id
-		or meta.expected_image_id
-		or meta.image_id
-		or (type(pf) == 'table' and pf.expected_image_id)
-		or (type(pf) == 'table' and pf.image_id)
-		or (type(art) == 'table' and (art.expected_image_id or art.image_id))
 end
 
 local function transfer_from(job, ctx)
@@ -125,8 +124,8 @@ function Backend:stage_op(job, ctx)
 		if artifact == nil then return nil, aerr or 'artifact_open_failed' end
 		local desc = describe_artifact(artifact) or {}
 		local meta = type(desc.meta) == 'table' and desc.meta or desc.metadata or {}
-		local image_id = expected_image_id(job, { preflight = desc })
-			or meta.expected_image_id or meta.image_id
+		local image_id, iid_err = job_expected_image_id(job)
+		if not image_id then return nil, iid_err end
 
 		local prepare_payload = {
 			job_id = job.job_id,
@@ -210,21 +209,27 @@ function Backend:pre_commit_record_op(job, ctx)
 	local sw = state and state.software or nil
 	if type(sw) ~= 'table' then return op.always(nil, 'component_software_state_unavailable') end
 	if sw.boot_id == nil or sw.boot_id == '' then return op.always(nil, 'pre_commit_boot_id_required') end
+	local image_id, iid_err = job_expected_image_id(job)
+	if not image_id then return op.always(nil, iid_err) end
 	local transfer = transfer_from(job, ctx)
 	return op.always({
 		component = component,
-		expected_image_id = expected_image_id(job, ctx),
+		expected_image_id = image_id,
 		pre_commit_image_id = sw.image_id,
 		pre_commit_boot_id = sw.boot_id,
 		transfer = transfer,
 	}, nil)
 end
 
-function Backend:commit_op(job, ctx)
+function Backend:commit_op(job, _ctx)
 	local component = component_of(self, job)
+	local job_id, jid_err = required_string(type(job) == 'table' and job.job_id or nil, 'job_id')
+	if not job_id then return op.always(nil, jid_err) end
+	local image_id, iid_err = job_expected_image_id(job)
+	if not image_id then return op.always(nil, iid_err) end
 	local payload = {
-		job_id = job.job_id,
-		expected_image_id = expected_image_id(job, ctx),
+		job_id = job_id,
+		expected_image_id = image_id,
 	}
 	return call_component_op(self, component, 'commit-update', payload):wrap(function (reply, err)
 		if reply == nil then return nil, err or 'component_commit_update_failed' end
@@ -239,7 +244,10 @@ function Backend:evaluate_reconcile(job, snapshot, ctx)
 	local upd = updater_state(state) or {}
 	local pre = (job.commit_attempt and job.commit_attempt.pre_commit)
 		or (ctx and ctx.pre_commit)
-	local expected = expected_image_id(job, ctx) or (pre and pre.expected_image_id)
+	local expected, iid_err = job_expected_image_id(job)
+	if not expected then
+		return { done = true, ok = false, reason = iid_err, state = copy(state) }
+	end
 	local pre_boot = pre and pre.pre_commit_boot_id
 
 	if type(upd) == 'table' and (upd.state == 'failed' or upd.state == 'rollback_detected') then

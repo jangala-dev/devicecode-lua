@@ -225,4 +225,60 @@ function tests.test_create_job_requires_artifact_ref()
   end)
 end
 
+function tests.test_create_mcu_job_resolves_expected_image_id_from_dcmcu_artifact()
+  fibers.run(function ()
+    local dcmcu_fixture = require 'tests.support.dcmcu_fixture'
+    local blob_source = require 'devicecode.blob_source'
+    local req = request({ method='create_job', job_id='j-mcu', component='mcu', artifact_ref='artifact-mcu' })
+    local artifact_store = {
+      open_source_op = function (_, ref)
+        assert_eq(ref, 'artifact-mcu')
+        return op.always(blob_source.from_string(dcmcu_fixture.make('mcu-image-new')), nil)
+      end,
+    }
+    local st, _, result = fibers.run_scope(function (scope)
+      local jobs = start_jobs(scope, store_mod.new())
+      local out = manager_requests.create_job(scope, {
+        request = req,
+        jobs = jobs,
+        config = { components = { mcu = { component = 'mcu' } } },
+        artifact_store = artifact_store,
+        generation = 3,
+      })
+      jobs:cancel('test complete')
+      return out
+    end)
+    assert_eq(st, 'ok')
+    assert_eq(result.status, 'persisted')
+    assert_eq(result.job.expected_image_id, 'mcu-image-new')
+    local ok, value = fibers.perform(req:wait_op())
+    assert_true(ok)
+    assert_eq(value.job.expected_image_id, 'mcu-image-new')
+  end)
+end
+
+function tests.test_create_mcu_job_rejects_caller_supplied_expected_image_id()
+  fibers.run(function ()
+    local req = request({ method='create_job', job_id='j-mcu', component='mcu', artifact_ref='artifact-mcu', expected_image_id='caller-value' })
+    local st, _, result = fibers.run_scope(function (scope)
+      local jobs = start_jobs(scope, store_mod.new())
+      local out = manager_requests.create_job(scope, {
+        request = req,
+        jobs = jobs,
+        config = { components = { mcu = { component = 'mcu' } } },
+        artifact_store = { open_source_op = function () error('must not inspect artifact after rejecting caller expected_image_id') end },
+        generation = 3,
+      })
+      jobs:cancel('test complete')
+      return out
+    end)
+    assert_eq(st, 'ok')
+    assert_eq(result.tag, 'manager_request_rejected')
+    assert_eq(result.reason, 'expected_image_id_must_be_resolved_from_artifact')
+    local ok, _, err = fibers.perform(req:wait_op())
+    assert_eq(ok, false)
+    assert_eq(err, 'expected_image_id_must_be_resolved_from_artifact')
+  end)
+end
+
 return tests
