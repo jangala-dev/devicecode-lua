@@ -122,6 +122,14 @@ local function shquote(s)
     return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
 end
 
+local function env_non_empty(name)
+    local v = os.getenv(name)
+    if v == nil or v == '' then return nil end
+    v = tostring(v):match('^%s*(.-)%s*$')
+    if v == '' then return nil end
+    return v
+end
+
 local function mkdir_p(path)
     local ok = os.execute('mkdir -p ' .. shquote(path))
     if ok ~= true and ok ~= 0 then error('mkdir failed: ' .. tostring(path), 0) end
@@ -1308,10 +1316,12 @@ local function start_fabric_pair(parent_scope, cm5_bus, fake, uart)
     local cm5_session = wait_fabric_session_established(cm5_conn, 'CM5 fabric hello/hello_ack session established', { timeout = 6.0 })
     local cm5_snapshot = fabric_payload_snapshot(cm5_session) or {}
     assert_eq(cm5_snapshot.peer_node, 'mcu', 'CM5 fabric session should identify MCU peer')
-    wait_until_test('MCU child fabric hello/hello_ack session established', function ()
-        return fake and fake.mcu_fabric_session_seen == true
-    end, 6.0, 0.05)
-    assert_eq(fake.mcu_fabric_session and fake.mcu_fabric_session.peer_node, 'cm5', 'MCU fabric session should identify CM5 peer')
+    if not (fake and fake.expect_mcu_fabric_event == false) then
+        wait_until_test('MCU child fabric hello/hello_ack session established', function ()
+            return fake and fake.mcu_fabric_session_seen == true
+        end, 6.0, 0.05)
+        assert_eq(fake.mcu_fabric_session and fake.mcu_fabric_session.peer_node, 'cm5', 'MCU fabric session should identify CM5 peer')
+    end
     log_fabric_status(cm5_conn, 'CM5 fabric established status')
 
     return {
@@ -1415,6 +1425,13 @@ local function update_fake_from_mcu_child(fake, ev)
         fake.commit_payload = ev.payload
         fake.commit_seen = true
         fake.committed_image_id = ev.committed_image_id
+    elseif event == 'rebooting' then
+        fake.commit_seen = true
+        fake.rebooting_seen = true
+        fake.committed_image_id = ev.image_id or fake.committed_image_id
+        log(('MCU child rebooting: image=%s version=%s length=%s'):format(
+            tostring(ev.image_id), tostring(ev.version), tostring(ev.length)
+        ))
     elseif event == 'fabric_session' then
         fake.mcu_fabric_session = ev
         fake.mcu_fabric_session_seen = true
@@ -1505,6 +1522,161 @@ local function start_mcu_instance(parent_scope, fake, uart_port)
     if not ready.ok then error(ready.err or 'MCU child failed to start', 0) end
 
     return { scope = scope, ipc_path = ipc_path, command = cmd }
+end
+
+
+local GO_DEVHOST_DEFAULT_REPO = 'https://github.com/jangala-dev/devicecode-go.git'
+local GO_DEVHOST_DEFAULT_REF = 'rt-fixes'
+local GO_DEVHOST_DEFAULT_CACHE = '/tmp/devicecode-go-devhost-cache'
+
+local function go_devhost_download_enabled()
+    local v = env_non_empty('DEVICECODE_GO_DOWNLOAD')
+    return v == nil or v == '1' or v == 'true' or v == 'yes'
+end
+
+local function go_devhost_configured()
+    return env_non_empty('MCU_DEVHOST_PTY_BIN') ~= nil
+        or env_non_empty('DEVICECODE_GO_MCU_DEVHOST_PTY_BIN') ~= nil
+        or env_non_empty('DEVICECODE_GO_ROOT') ~= nil
+        or go_devhost_download_enabled()
+end
+
+local function safe_path_token(s)
+    s = tostring(s or '')
+    s = s:gsub('[^%w_.-]', '_')
+    if s == '' then s = 'default' end
+    return s
+end
+
+local function go_devhost_checkout_dir()
+    local cache = env_non_empty('DEVICECODE_GO_CACHE') or GO_DEVHOST_DEFAULT_CACHE
+    local ref = env_non_empty('DEVICECODE_GO_REF') or GO_DEVHOST_DEFAULT_REF
+    return cache .. '/devicecode-go-' .. safe_path_token(ref)
+end
+
+local function ensure_go_devhost_checkout()
+    local root = env_non_empty('DEVICECODE_GO_ROOT')
+    if root ~= nil then return root, nil end
+    if not go_devhost_download_enabled() then
+        return nil, 'set MCU_DEVHOST_PTY_BIN, DEVICECODE_GO_ROOT, or DEVICECODE_GO_DOWNLOAD=1 to run the Go devhost MCU PTY rig'
+    end
+
+    local repo = env_non_empty('DEVICECODE_GO_REPO') or GO_DEVHOST_DEFAULT_REPO
+    local ref = env_non_empty('DEVICECODE_GO_REF') or GO_DEVHOST_DEFAULT_REF
+    local dir = go_devhost_checkout_dir()
+    local script = table.concat({
+        'set -eu',
+        'mkdir -p ' .. shquote(dir),
+        'if [ ! -d ' .. shquote(dir .. '/.git') .. ' ]; then',
+        '  rm -rf ' .. shquote(dir),
+        '  mkdir -p ' .. shquote(dir),
+        '  git -C ' .. shquote(dir) .. ' init -q',
+        '  git -C ' .. shquote(dir) .. ' remote add origin ' .. shquote(repo),
+        'fi',
+        'git -C ' .. shquote(dir) .. ' fetch --depth 1 origin ' .. shquote(ref),
+        'git -C ' .. shquote(dir) .. ' checkout -q --detach FETCH_HEAD',
+        'git -C ' .. shquote(dir) .. ' reset -q --hard FETCH_HEAD',
+        'git -C ' .. shquote(dir) .. ' clean -q -fdx',
+    }, '\n')
+
+    log(('go-pty: ensuring Go devhost checkout repo=%s ref=%s dir=%s'):format(repo, ref, dir))
+    local cmd = exec.command('sh', '-c', script)
+    local out, st, code, sig, err = fibers.perform(cmd:combined_output_op())
+    if not (st == 'exited' and code == 0) then
+        return nil, ('Go devhost checkout failed: status=%s code=%s signal=%s err=%s output=%s'):format(
+            tostring(st), tostring(code), tostring(sig), tostring(err), tostring(out)
+        )
+    end
+    return dir, nil
+end
+
+local function go_devhost_command_spec(uart_slave, state_dir, fake, opts)
+    opts = opts or {}
+    local bin = env_non_empty('MCU_DEVHOST_PTY_BIN') or env_non_empty('DEVICECODE_GO_MCU_DEVHOST_PTY_BIN')
+    local root
+    local root_err
+    local argv
+    local cwd
+    if bin ~= nil then
+        argv = { bin }
+    else
+        root, root_err = ensure_go_devhost_checkout()
+        if root == nil then return nil, root_err end
+        argv = { 'go', 'run', './cmd/mcu-devhost-pty' }
+        cwd = root
+    end
+    argv[#argv + 1] = '--uart'; argv[#argv + 1] = uart_slave
+    argv[#argv + 1] = '--state-dir'; argv[#argv + 1] = state_dir
+    argv[#argv + 1] = '--node'; argv[#argv + 1] = opts.node or 'mcu'
+    argv[#argv + 1] = '--peer'; argv[#argv + 1] = opts.peer or 'bigbox-cm5'
+    argv[#argv + 1] = '--initial-image-id'; argv[#argv + 1] = fake.old_image_id or 'mcu-image-old'
+    argv[#argv + 1] = '--initial-version'; argv[#argv + 1] = fake.old_version or '10.0'
+    argv[#argv + 1] = '--initial-build-id'; argv[#argv + 1] = fake.old_build_id or 'devhost-initial'
+    argv[#argv + 1] = '--reboot-exit-code'; argv[#argv + 1] = tostring(opts.reboot_exit_code or 42)
+    argv.cwd = cwd
+    argv.stdin = 'null'
+    argv.stdout = 'pipe'
+    argv.stderr = 'inherit'
+    argv.shutdown_grace = 1.0
+    argv.env = { GOMAXPROCS = tostring(opts.gomaxprocs or 1) }
+    return argv, nil
+end
+
+local function start_go_mcu_instance(parent_scope, fake, uart_port, state_dir, opts)
+    assert(uart_port and uart_port.slave_name, 'MCU PTY slave required')
+    assert(state_dir and state_dir ~= '', 'Go MCU state dir required')
+    fake.expect_mcu_fabric_event = false
+    fake.mcu_fabric_session_seen = false
+    fake.mcu_fabric_session = nil
+    local scope = assert(parent_scope:child())
+    mkdir_p(state_dir)
+
+    local spec, spec_err = go_devhost_command_spec(uart_port.slave_name, state_dir, fake, opts)
+    assert_not_nil(spec, spec_err)
+    local cmd = exec.command(spec)
+    local stdout, sout_err = cmd:stdout_stream()
+    assert_not_nil(stdout, sout_err or 'Go MCU child stdout pipe unavailable')
+
+    local ready_ch = channel.new(1)
+
+    assert_true(scope:spawn(function ()
+        while true do
+            local line, rerr = fibers.perform(stdout:read_line_op())
+            if line == nil then
+                if fake.child_ready ~= true then
+                    ready_ch:put({ ok = false, err = rerr or 'go mcu child stdout closed before ready' })
+                end
+                return
+            end
+            local ev, derr = cjson.decode(line)
+            if not ev then
+                log('Go MCU child sent invalid JSON: ' .. tostring(derr) .. ' line=' .. tostring(line))
+            else
+                update_fake_from_mcu_child(fake, ev)
+                if ev.event == 'ready' then
+                    ready_ch:put({ ok = true })
+                end
+            end
+        end
+    end))
+
+    assert_true(scope:spawn(function ()
+        local status, code, signal, err = fibers.perform(cmd:run_op())
+        fake.child_exit = { status = status, code = code, signal = signal, err = err }
+        if status == 'exited' and code == (opts and opts.reboot_exit_code or 42) then
+            fake.reboot_exit_seen = true
+            log(('Go MCU child exited for simulated reboot: code=%s'):format(tostring(code)))
+        elseif status ~= 'signalled' and not (status == 'exited' and code == 0) then
+            log(('Go MCU child exited: status=%s code=%s signal=%s err=%s'):format(
+                tostring(status), tostring(code), tostring(signal), tostring(err)
+            ))
+        end
+    end))
+
+    local ready = wait_channel_get(ready_ch, 10.0, 'Go MCU child ready')
+    if not ready.ok then error(ready.err or 'Go MCU child failed to start', 0) end
+
+    return { scope = scope, command = cmd, state_dir = state_dir }
 end
 
 local function stop_instance(inst, reason)
@@ -1752,5 +1924,102 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
         rm_rf(roots.base)
     end, { timeout = REALISTIC_TEST_TIMEOUT_S })
 end
+
+
+function T.ui_http_mcu_update_go_devhost_pty_reboots_and_reconciles()
+    if not go_devhost_configured() then
+        log('skipping Go devhost PTY rig: set MCU_DEVHOST_PTY_BIN, DEVICECODE_GO_ROOT, or leave DEVICECODE_GO_DOWNLOAD enabled')
+        return
+    end
+    runfibers.run(function (root_scope)
+        local roots = temp_roots()
+        local state_dir = roots.base .. '/go-mcu-state'
+        local blob = make_realistic_mcu_blob('mcu-image-go-new')
+        local port = 30000 + math.random(0, 20000)
+        local fake = { old_image_id = 'mcu-image-go-old', old_version = '10.0' }
+        local uart = { cm5 = pty.open(root_scope), mcu = pty.open(root_scope) }
+
+        log('go-pty: booting initial CM5 instance')
+        local cm5 = start_cm5_instance(root_scope, roots, port, uart.cm5)
+        log('go-pty: booting Go MCU devhost instance')
+        local mcu = start_go_mcu_instance(root_scope, fake, uart.mcu, state_dir)
+        log('go-pty: starting Fabric link over PTY UART middleware')
+        local pair = start_fabric_pair(root_scope, cm5.bus, fake, uart)
+        log('go-pty: starting CM5 Device/Update/UI services')
+        cm5.start_services_after_fabric()
+
+        log('go-pty: waiting for initial MCU software fact imported from Go process')
+        wait_component_software(cm5.conn, 'mcu-image-go-old', nil)
+
+        log(('go-pty: sending HTTP upload through CM5 UI (%d byte artifact)'):format(#blob))
+        local status, body = run_http_upload(root_scope, port, blob, nil)
+        assert_eq(status, '200', 'upload HTTP status ' .. tostring(status) .. ': ' .. tostring(body))
+        local decoded = assert(cjson.decode(body), body)
+        assert_eq(decoded.status, 'ok')
+        assert_eq(decoded.job_id, 'job-mcu-http-uart')
+        assert_eq(decoded.job, nil)
+
+        log('go-pty: waiting for Go MCU-backed job awaiting_commit')
+        wait_job_chatty(cm5.conn, 'job-mcu-http-uart', 'awaiting_commit', REALISTIC_TRANSFER_TIMEOUT_S, function ()
+            return (('uart_bytes=%d uart_fragments=%d uart_pauses=%d uart_bad_json=%d; %s'):format(
+                pair.uart_stats and pair.uart_stats.bytes or 0,
+                pair.uart_stats and pair.uart_stats.fragments or 0,
+                pair.uart_stats and pair.uart_stats.pauses or 0,
+                pair.uart_stats and pair.uart_stats.malformed_lines or 0,
+                fabric_progress_fragment(pair.cm5_conn)
+            ))
+        end)
+
+        log('go-pty: committing job through public HTTP update commit route')
+        local commit_status, commit_body, commit_decoded = run_http_json(
+            root_scope,
+            port,
+            '/api/update/commit',
+            { job_id = 'job-mcu-http-uart' },
+            nil
+        )
+        assert_eq(commit_status, '200', commit_body)
+        assert_not_nil(commit_decoded and commit_decoded.value, commit_body)
+        assert_eq(commit_decoded.value.ok, true)
+        wait_job(cm5.conn, 'job-mcu-http-uart', 'awaiting_return', 8.0)
+        assert_true(probe.wait_until(function () return fake.rebooting_seen == true end, { timeout = 4.0 }), 'Go MCU child should emit rebooting event')
+        assert_true(probe.wait_until(function () return fake.reboot_exit_seen == true end, { timeout = 4.0 }), 'Go MCU child should exit with simulated reboot code')
+
+        log('go-pty reboot: stopping Fabric pair')
+        stop_fabric_pair(pair, 'go devhost fabric link reboot')
+        log('go-pty reboot: stopping CM5 instance')
+        stop_instance(cm5, 'go devhost cm5 reboot')
+        log('go-pty reboot: stopping first Go MCU instance')
+        stop_instance(mcu, 'go devhost mcu reboot')
+
+        local uart_b = { cm5 = pty.open(root_scope), mcu = pty.open(root_scope) }
+        log('go-pty reboot: starting fresh CM5 instance')
+        local cm5b = start_cm5_instance(root_scope, roots, nil, uart_b.cm5)
+        log('go-pty reboot: starting Go MCU devhost instance with same state dir')
+        local mcub = start_go_mcu_instance(root_scope, fake, uart_b.mcu, state_dir)
+        log('go-pty reboot: starting fresh Fabric link over PTY UART middleware')
+        local pair_b = start_fabric_pair(root_scope, cm5b.bus, fake, uart_b)
+        log_fabric_status(cm5b.conn, 'go-pty CM5 fabric reboot-established status')
+        log('go-pty reboot: starting fresh CM5 Device/Update services')
+        cm5b.start_services_after_fabric()
+
+        log('go-pty reboot: waiting for new MCU software image imported from restarted Go process')
+        wait_component_software(cm5b.conn, 'mcu-image-go-new', nil)
+        log('go-pty reboot: waiting for job succeeded')
+        local final_job = wait_job(cm5b.conn, 'job-mcu-http-uart', 'succeeded', 10.0)
+        assert_eq(final_job.component, 'mcu')
+        assert_eq(final_job.job_id, 'job-mcu-http-uart')
+        assert_eq(final_job.expected_image_id, 'mcu-image-go-new')
+
+        log('go-pty cleanup: stopping second Fabric pair')
+        stop_fabric_pair(pair_b, 'go devhost test complete')
+        log('go-pty cleanup: stopping second CM5 instance')
+        stop_instance(cm5b, 'go devhost test complete')
+        log('go-pty cleanup: stopping second Go MCU instance')
+        stop_instance(mcub, 'go devhost test complete')
+        rm_rf(roots.base)
+    end, { timeout = REALISTIC_TEST_TIMEOUT_S })
+end
+
 
 return T
