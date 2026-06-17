@@ -54,6 +54,19 @@ function M.decode(ctx)
 		if method == 'DELETE' or method == 'POST' then return { kind = 'logout' } end
 	end
 
+	if parts[2] == 'local-ui' and parts[3] == 'bootstrap' and method == 'GET' then
+		return { kind = 'local_ui_bootstrap' }
+	end
+
+	if parts[2] == 'gsm' and parts[3] == 'apns' and parts[4] == 'custom' then
+		if method == 'GET' then return { kind = 'gsm_apns_get' } end
+		if method == 'PUT' then return { kind = 'gsm_apns_put' } end
+	end
+
+	if parts[2] == 'diagnostics' and method == 'GET' then
+		return { kind = 'diagnostics_stub' }
+	end
+
 	if parts[2] == 'state' and method == 'GET' then
 		local topic = {}
 		for i = 3, #parts do topic[#topic + 1] = parts[i] end

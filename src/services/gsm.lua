@@ -27,7 +27,11 @@ local perform = fibers.perform
 
 local base = require 'devicecode.service_base'
 local cap_sdk = require 'services.hal.sdk.cap'
+local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local apns = require "services.gsm.apn"
+local gsm_topics = require 'services.gsm.topics'
+local apn_model = require 'services.gsm.apn_model'
+local apn_store_control = require 'services.gsm.apn_store_control_store'
 
 local REQUEST_TIMEOUT = 10
 local DEFAULT_RETRY_TIMEOUT = 20
@@ -298,6 +302,10 @@ local function normalize_config(cfg)
 	local modems_known = rawget(modems_cfg, 'known')
 	if modems_known ~= nil and type(modems_known) ~= 'table' then
 		return {}, "config.modems.known must be a list"
+	end
+	local apn_store = rawget(cfg, 'apn_store')
+	if apn_store ~= nil and not is_plain_table(apn_store) then
+		return {}, "config.apn_store must be a table"
 	end
 	local out = shallow_copy(cfg)
 	out.schema = nil
@@ -673,7 +681,7 @@ function GsmModem:_apn_connect()
 
 	-- Get ranked APNs
 	local rank_cutoff = tonumber(self.cfg.apn_rank_cutoff) or 4
-	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, nil, gid1)
+	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, nil, gid1, self.svc and self.svc.custom_apns)
 
 	-- Iterate through ranked APNs
 	for _, ranking in ipairs(rankings) do
@@ -921,11 +929,162 @@ function GsmService.start(conn, opts)
 
 	local current_cfg = {}
 	local config_ready = false
+	local custom_apns = {}
+	local apn_store = nil
 
 	---@type table<string, GsmModem>
 	local modems = {}
 
 	local parent_scope = fibers.current_scope()
+
+	local function apn_store_opts_from_config(cfg)
+		local spec = cfg and cfg.apn_store or nil
+		if spec ~= nil and type(spec) ~= 'table' then return nil, 'invalid_apn_store_config' end
+		spec = spec or {}
+		local kind = spec.kind or 'control-store'
+		if kind ~= 'control-store' then return nil, 'unsupported_apn_store_kind:' .. tostring(kind) end
+		return {
+			id = spec.id or spec.store_id or apn_store_control.DEFAULT_ID,
+			key = spec.key or apn_store_control.DEFAULT_KEY,
+		}, nil
+	end
+
+	local function publish_apn_state(extra)
+		extra = extra or {}
+		local store_desc = apn_store and apn_store:describe() or nil
+		local payload = {
+			schema = 'devicecode.gsm.apns.custom/1',
+			count = #custom_apns,
+			records = apn_model.redact_list(custom_apns),
+			store = store_desc,
+			prototype_admin_network_access = true,
+			at = svc:wall(),
+		}
+		svc:_retain(gsm_topics.custom_apns_state(), payload)
+		svc:_retain(gsm_topics.apns_status_state(), {
+			schema = 'devicecode.gsm.apns.status/1',
+			state = extra.state or 'ready',
+			ready = extra.ready ~= false,
+			reason = extra.reason,
+			store = store_desc,
+			count = #custom_apns,
+			at = svc:wall(),
+		})
+	end
+
+	local function publish_gsm_capability()
+		svc:_retain(gsm_topics.cap_status('main'), {
+			schema = 'devicecode.cap.status/1',
+			state = 'available',
+			available = true,
+			methods = gsm_topics.apn_methods(),
+		})
+		svc:_retain(gsm_topics.cap_meta('main'), {
+			schema = 'devicecode.cap.meta/1',
+			class = 'gsm',
+			id = 'main',
+			methods = gsm_topics.apn_methods(),
+		})
+	end
+
+	local function open_apn_store_for_config(cfg)
+		local opts, err = apn_store_opts_from_config(cfg)
+		if not opts then
+			apn_store = nil
+			custom_apns = {}
+			svc.custom_apns = custom_apns
+			publish_apn_state({ state = 'unavailable', ready = false, reason = err })
+			return nil, err
+		end
+		apn_store = apn_store_control.new(conn, opts)
+		local records, lerr = perform(apn_store:load_op())
+		if not records then
+			custom_apns = {}
+			svc.custom_apns = custom_apns
+			publish_apn_state({ state = 'degraded', ready = false, reason = lerr or 'apn_store_load_failed' })
+			return nil, lerr or 'apn_store_load_failed'
+		end
+		custom_apns = records
+		svc.custom_apns = custom_apns
+		publish_apn_state({ state = 'ready', ready = true })
+		return true, nil
+	end
+
+	local function signal_all_modems()
+		for _, modem in pairs(modems) do
+			modem:_signal_config_change()
+		end
+	end
+
+	local function replace_custom_apns(records)
+		if not apn_store then return nil, 'apn_store_unavailable' end
+		local list, lerr = apn_model.normalise_list(records)
+		if not list then return nil, lerr end
+		local saved, serr = perform(apn_store:save_op(list))
+		if not saved then
+			publish_apn_state({ state = 'degraded', ready = false, reason = serr or 'apn_store_save_failed' })
+			return nil, serr or 'apn_store_save_failed'
+		end
+		custom_apns = saved
+		svc.custom_apns = custom_apns
+		publish_apn_state({ state = 'ready', ready = true })
+		signal_all_modems()
+		return apn_model.redact_list(custom_apns), nil
+	end
+
+	local function handle_apn_request(method, payload)
+		if method == 'list-custom-apns' then
+			return true, apn_model.redact_list(custom_apns)
+		elseif method == 'replace-custom-apns' then
+			local records, perr = apn_model.list_from_payload(payload or {})
+			if not records then return false, perr end
+			local saved, err = replace_custom_apns(records)
+			if not saved then return false, err end
+			return true, saved
+		elseif method == 'add-custom-apn' then
+			local rec, rerr = apn_model.normalise_record((payload and (payload.record or payload)) or {})
+			if not rec then return false, rerr end
+			local next_list = apn_model.redact_list(custom_apns)
+			next_list[#next_list + 1] = rec
+			local saved, err = replace_custom_apns(next_list)
+			if not saved then return false, err end
+			return true, saved
+		elseif method == 'delete-custom-apn' then
+			local idx = tonumber(payload and payload.index)
+			if not idx or idx < 1 or idx % 1 ~= 0 or idx > #custom_apns then return false, 'invalid_index' end
+			local next_list = apn_model.redact_list(custom_apns)
+			table.remove(next_list, idx)
+			local saved, err = replace_custom_apns(next_list)
+			if not saved then return false, err end
+			return true, saved
+		end
+		return false, 'unsupported_apn_method:' .. tostring(method)
+	end
+
+	local function bind_apn_endpoints()
+		local endpoints = {}
+		local function cleanup()
+			for _, ep in pairs(endpoints) do bus_cleanup.unbind(conn, ep) end
+		end
+		parent_scope:finally(cleanup)
+		for _, method in ipairs(gsm_topics.apn_methods()) do
+			local ep, err = bus_cleanup.bind(conn, gsm_topics.rpc(method, 'main'), { queue_len = 16 })
+			if not ep then return nil, err or ('bind_failed:' .. method) end
+			endpoints[method] = ep
+			local ok, spawn_err = parent_scope:spawn(function ()
+				while true do
+					local req = perform(ep:recv_op())
+					if req == nil then return end
+					local ok_req, value = handle_apn_request(method, req.payload)
+					if type(req.reply) == 'function' then
+						req:reply({ ok = ok_req == true, reason = value })
+					end
+				end
+			end)
+			if not ok then return nil, spawn_err or ('apn_endpoint_spawn_failed:' .. method) end
+		end
+		return true, nil
+	end
 
 	parent_scope:finally(function()
 		for _, modem in pairs(modems) do
@@ -1003,6 +1162,18 @@ function GsmService.start(conn, opts)
 		end
 	end
 
+	local store_ok, store_err = open_apn_store_for_config(current_cfg)
+	if not store_ok then
+		svc:obs_log('warn', { what = 'apn_store_unavailable', err = tostring(store_err) })
+	end
+
+	local endpoints_ok, endpoints_err = bind_apn_endpoints()
+	if not endpoints_ok then
+		svc:obs_log('error', { what = 'apn_endpoint_bind_failed', err = tostring(endpoints_err) })
+		error(endpoints_err or 'apn_endpoint_bind_failed', 0)
+	end
+	publish_gsm_capability()
+
 	local modem_cap_sub = conn:subscribe({ 'cap', 'modem', '+', 'state' })
 
 	svc:obs_event('config_applied', {})
@@ -1060,6 +1231,10 @@ function GsmService.start(conn, opts)
 					svc:obs_log('debug', { what = 'invalid_config', err = cfg_err })
 				else
 					current_cfg = updated_cfg
+					local apn_reload_ok, apn_reload_err = open_apn_store_for_config(current_cfg)
+					if not apn_reload_ok then
+						svc:obs_log('warn', { what = 'apn_store_reload_failed', err = tostring(apn_reload_err) })
+					end
 					for id, modem in pairs(modems) do
 						local modem_cfg, modem_name, _ = get_modem_config(current_cfg, id, modem.device)
 						modem:apply_config(modem_cfg, modem_name)

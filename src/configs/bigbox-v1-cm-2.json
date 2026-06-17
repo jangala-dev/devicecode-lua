@@ -111,6 +111,10 @@
         {
           "name": "update",
           "root": "/data/devicecode/control/update"
+        },
+        {
+          "name": "gsm",
+          "root": "/data/devicecode/control/gsm"
         }
       ],
       "time": {},
@@ -1267,6 +1271,11 @@
             "metrics_interval": 60
           }
         ]
+      },
+      "apn_store": {
+        "kind": "control-store",
+        "id": "gsm",
+        "key": "custom-apns-v1"
       }
     }
   },
