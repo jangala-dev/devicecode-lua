@@ -99,11 +99,9 @@ local function provider_poll_interval_s(config)
 end
 
 
-local function driver_result(provider_id, method, opts)
-	local driver = state.drivers[provider_id]
-	if not driver then return { ok = false, err = 'wired provider not configured', code = 'not_configured' } end
+local function perform_driver_method(driver, method, opts)
 	local opname = tostring(method) .. '_op'
-	local fn = driver[opname]
+	local fn = driver and driver[opname]
 	if type(fn) ~= 'function' then return { ok = false, err = 'wired driver missing ' .. opname } end
 	local ok, driver_op = pcall(function () return fn(driver, opts or {}) end)
 	if not ok then return { ok = false, err = tostring(driver_op) } end
@@ -114,12 +112,22 @@ local function driver_result(provider_id, method, opts)
 	return { ok = result == true, result = result }
 end
 
+local function driver_result(provider_id, method, opts)
+	local driver = state.drivers[provider_id]
+	if not driver then return { ok = false, err = 'wired provider not configured', code = 'not_configured' } end
+	return perform_driver_method(driver, method, opts)
+end
+
+local function poller_is_current(provider_id, driver)
+	local rec = state.pollers and state.pollers[provider_id] or nil
+	return rec ~= nil and rec.driver == driver and state.drivers[provider_id] == driver
+end
+
 local function poll_loop(provider_id, driver, interval_s)
-	fibers.perform(sleep.sleep_op(interval_s))
-	while state.drivers[provider_id] == driver do
+	while poller_is_current(provider_id, driver) do
 		local started = runtime.now()
-		local result = driver_result(provider_id, 'snapshot', {})
-		if state.drivers[provider_id] ~= driver then return end
+		local result = perform_driver_method(driver, 'snapshot', {})
+		if not poller_is_current(provider_id, driver) then return end
 		if result and result.ok == true then
 			local ok, err = emit_snapshot_now(provider_id, result)
 			if ok ~= true then log('error', { what = 'wired_provider_poll_emit_failed', provider = provider_id, err = err }) end
@@ -138,9 +146,44 @@ local function poll_loop(provider_id, driver, interval_s)
 	end
 end
 
+local function cancel_pollers(reason)
+	local pollers = state.pollers or {}
+	state.pollers = {}
+	for _, rec in pairs(pollers) do
+		if rec and rec.scope then rec.scope:cancel(reason or 'wired provider poller cancelled') end
+	end
+end
+
+local function cancel_provider_poller(provider_id, reason)
+	local rec = state.pollers and state.pollers[provider_id] or nil
+	if not rec then return end
+	state.pollers[provider_id] = nil
+	if rec.scope then rec.scope:cancel(reason or 'wired provider poller cancelled') end
+end
+
 local function spawn_poll_loop(provider_id, driver, interval_s)
-	state.pollers[provider_id] = true
-	state.scope:spawn(function () poll_loop(provider_id, driver, interval_s) end)
+	if not state.scope then return nil, 'wired manager scope not started' end
+	cancel_provider_poller(provider_id, 'wired provider poller replaced')
+	local poll_scope, scope_err = state.scope:child()
+	if not poll_scope then return nil, scope_err or 'wired provider poller scope create failed' end
+
+	local rec = {
+		scope = poll_scope,
+		driver = driver,
+		interval_s = interval_s,
+	}
+	state.pollers[provider_id] = rec
+	poll_scope:finally(function ()
+		if state.pollers and state.pollers[provider_id] == rec then state.pollers[provider_id] = nil end
+	end)
+
+	local ok, err = poll_scope:spawn(function () poll_loop(provider_id, driver, interval_s) end)
+	if not ok then
+		if state.pollers[provider_id] == rec then state.pollers[provider_id] = nil end
+		poll_scope:cancel(tostring(err or 'wired provider poller spawn failed'))
+		return nil, err or 'wired provider poller spawn failed'
+	end
+	return true, nil
 end
 
 local function handle_request(provider_id, req)
@@ -293,6 +336,7 @@ function M.apply_config_op(config)
 			local provider_ids, perr = normalise_provider_ids(config or {})
 			if not provider_ids then return false, perr end
 
+			cancel_pollers('reconfigured')
 			stop_drivers('reconfigured')
 			local ok, cerr = reconcile_device_caps(provider_ids)
 			if ok ~= true then return false, cerr end
@@ -313,15 +357,19 @@ function M.apply_config_op(config)
 					local driver, err = driver_mod.new(driver_config, driver_opts)
 					if not driver then return false, ('wired provider %s create failed: %s'):format(id, tostring(err)) end
 					state.drivers[id] = driver
-					local result = driver_result(id, 'snapshot', {})
-					if result.ok == true then
-						local eok, eerr = emit_snapshot_now(id, result)
-						if eok ~= true then return false, eerr or 'wired provider emit failed' end
-					else
-						local eok, eerr = emit_status_now(id, { state = 'unavailable', available = false, err = result.err })
-						if eok ~= true then return false, eerr or 'wired provider status emit failed' end
+					local eok, eerr = emit_status_now(id, {
+						state = 'observing',
+						available = false,
+						driver = driver_config.provider,
+						polling = true,
+					})
+					if eok ~= true then return false, eerr or 'wired provider status emit failed' end
+					local spawned, spawn_err = spawn_poll_loop(id, driver, poll_interval_s)
+					if spawned ~= true then
+						state.drivers[id] = nil
+						if driver and type(driver.terminate) == 'function' then driver:terminate('poller spawn failed') end
+						return false, ('wired provider %s poller failed: %s'):format(id, tostring(spawn_err))
 					end
-					spawn_poll_loop(id, driver, poll_interval_s)
 				end
 			end
 			log('info', { what = 'wired_manager_configured', providers = provider_ids })
@@ -341,6 +389,7 @@ function M.shutdown_op(_timeout_s)
 end
 
 function M.terminate(reason)
+	cancel_pollers(reason or 'terminated')
 	stop_drivers(reason or 'terminated')
 	close_control_channels()
 	state.provider_ids = {}
