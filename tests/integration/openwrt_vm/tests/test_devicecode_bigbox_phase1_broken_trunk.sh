@@ -59,12 +59,10 @@ local intent, err = wired_config.normalise({
   surfaces = {
     ['switch-uplink-cm5'] = {
       kind = 'switch-port', role = 'internal-trunk', protected = true,
-      provider = { capability_id = 'switch-main', provider_surface_id = 'uplink-cm5' },
       attachment = { mode = 'trunk', required_segments = { 'mgmt', 'switch_control', 'fabric' }, user_segments = 'all-realised-user-segments' },
     },
     ['lan-1'] = {
       kind = 'ethernet-port', role = 'access',
-      provider = { capability_id = 'switch-main', provider_surface_id = 'port-1' },
       attachment = { mode = 'access', segment = 'lan' },
     },
   },
@@ -77,18 +75,22 @@ fibers.run(function()
   local snap = {
     net = { segments = segments },
     config_intent = intent,
-    providers = {
+    assembly = { surfaces = {
+      ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' },
+      ['lan-1'] = { component = 'switch-main', observed_surface = 'GE1' },
+    } },
+    observations = {
       ['switch-main'] = {
         status = { state = 'available', available = true, mode = 'read_only' },
         surfaces = {
-          ['uplink-cm5'] = {
-            provider_surface_id = 'uplink-cm5', kind = 'switch-port', capabilities = { trunk = true, access = false },
+          ['GE8'] = {
+            observed_surface = 'GE8', kind = 'switch-port', capabilities = { trunk = true, access = false },
             link = { state = 'up', speed_mbps = 1000 },
             -- Missing switch_control VLAN 11 and guest VLAN 101.
             attachment = { mode = 'trunk', vlans = { 10, 12, 100 } },
           },
-          ['port-1'] = {
-            provider_surface_id = 'port-1', kind = 'ethernet-port', capabilities = { access = true, trunk = true },
+          ['GE1'] = {
+            observed_surface = 'GE1', kind = 'ethernet-port', capabilities = { access = true, trunk = true },
             attachment = { mode = 'access', vlan = 100 },
           },
         },

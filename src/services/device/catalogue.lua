@@ -278,6 +278,47 @@ local function default_components()
 	}
 end
 
+local function non_empty_string(v)
+	return type(v) == 'string' and v ~= ''
+end
+
+local function reject_assembly_aliases(rec, ctx)
+	if type(rec) ~= 'table' then return end
+	if rec.provider ~= nil or rec.provider_id ~= nil or rec.provider_surface_id ~= nil or rec.surface ~= nil then
+		error(ctx .. ' must use component and observed_surface only', 0)
+	end
+end
+
+local function validate_assembly_endpoint(endpoint, ctx)
+	if type(endpoint) ~= 'table' then error(ctx .. ' must be a table', 0) end
+	reject_assembly_aliases(endpoint, ctx)
+	if not non_empty_string(endpoint.component) then error(ctx .. '.component must be a non-empty string', 0) end
+	if not non_empty_string(endpoint.observed_surface) then error(ctx .. '.observed_surface must be a non-empty string', 0) end
+end
+
+local function normalise_assembly(raw)
+	if raw == nil then return {} end
+	if type(raw) ~= 'table' then error('device catalogue assembly must be a table', 0) end
+	local surfaces = raw.surfaces or {}
+	if type(surfaces) ~= 'table' then error('device catalogue assembly.surfaces must be a table', 0) end
+	for id, rec in pairs(surfaces) do
+		if not non_empty_string(id) then error('device catalogue assembly surface id must be a non-empty string', 0) end
+		if type(rec) ~= 'table' then error('device catalogue assembly surface ' .. tostring(id) .. ' must be a table', 0) end
+		reject_assembly_aliases(rec, 'device catalogue assembly surface ' .. tostring(id))
+		if not non_empty_string(rec.component) then error('device catalogue assembly surface ' .. tostring(id) .. '.component must be a non-empty string', 0) end
+		if not non_empty_string(rec.observed_surface) then error('device catalogue assembly surface ' .. tostring(id) .. '.observed_surface must be a non-empty string', 0) end
+	end
+	local links = raw.links or {}
+	if type(links) ~= 'table' then error('device catalogue assembly.links must be a table', 0) end
+	for id, link in pairs(links) do
+		if not non_empty_string(id) then error('device catalogue assembly link id must be a non-empty string', 0) end
+		if type(link) ~= 'table' then error('device catalogue assembly link ' .. tostring(id) .. ' must be a table', 0) end
+		if link.a ~= nil then validate_assembly_endpoint(link.a, 'device catalogue assembly link ' .. tostring(id) .. '.a') end
+		if link.b ~= nil then validate_assembly_endpoint(link.b, 'device catalogue assembly link ' .. tostring(id) .. '.b') end
+	end
+	return copy_value(raw)
+end
+
 local function components_from_config(raw)
 	if raw == nil then return default_components() end
 	if type(raw) ~= 'table' then error('device catalogue config must be a table or nil', 0) end
@@ -309,6 +350,7 @@ function M.build(raw, opts)
 		kind = 'device_catalogue',
 		schema = raw and raw.schema or nil,
 		components = components,
+		assembly = normalise_assembly(raw and raw.assembly or nil),
 		meta = copy_value((raw and raw.meta) or {}),
 	}
 end

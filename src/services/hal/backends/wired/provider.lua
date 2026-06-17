@@ -4,12 +4,15 @@
 local M = {}
 
 local function provider_name(config)
-	return tostring((config and (config.provider or config.backend or config.kind)) or 'static')
+	if type(config) ~= 'table' then return nil, 'wired provider config must be a table' end
+	if type(config.provider) ~= 'string' or config.provider == '' then return nil, 'wired provider config requires provider' end
+	return config.provider, nil
 end
 
 function M.new(config, opts)
 	config = config or {}
-	local name = provider_name(config)
+	local name, name_err = provider_name(config)
+	if not name then return nil, name_err end
 	local modname = 'services.hal.backends.wired.providers.' .. name
 	local ok, mod = pcall(require, modname)
 	if not ok then return nil, ('wired provider %s not available: %s'):format(name, tostring(mod)) end

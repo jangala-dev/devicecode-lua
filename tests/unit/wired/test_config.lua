@@ -13,7 +13,6 @@ function tests.test_cm5_trunk_config_normalises()
 				kind = 'direct-nic',
 				role = 'internal-trunk',
 				protected = true,
-				provider = { capability_id = 'cm5-local-wired', provider_surface_id = 'eth0' },
 				attachment = { mode = 'trunk', required_segments = { 'mgmt', 'switch_control', 'fabric' }, user_segments = 'all-realised-user-segments' },
 			},
 		},
@@ -31,7 +30,6 @@ function tests.test_protected_surface_cannot_be_disabled()
 			['cm5-eth0'] = {
 				protected = true,
 				enabled = false,
-				provider = { capability_id = 'cm5-local-wired', provider_surface_id = 'eth0' },
 				attachment = { mode = 'trunk', required_segments = { 'mgmt' } },
 			},
 		},
@@ -46,7 +44,6 @@ function tests.test_protected_surface_must_be_trunk_with_required_segments()
 		surfaces = {
 			['cm5-eth0'] = {
 				protected = true,
-				provider = { capability_id = 'cm5-local-wired', provider_surface_id = 'eth0' },
 				attachment = { mode = 'access', segment = 'lan' },
 			},
 		},
@@ -59,7 +56,6 @@ function tests.test_protected_surface_must_be_trunk_with_required_segments()
 		surfaces = {
 			['cm5-eth0'] = {
 				protected = true,
-				provider = { capability_id = 'cm5-local-wired', provider_surface_id = 'eth0' },
 				attachment = { mode = 'trunk' },
 			},
 		},
@@ -73,13 +69,42 @@ function tests.test_access_surface_requires_segment()
 		schema = config.SCHEMA,
 		surfaces = {
 			['lan-1'] = {
-				provider = { capability_id = 'switch-main', provider_surface_id = 'port-1' },
 				attachment = { mode = 'access' },
 			},
 		},
 	})
 	if intent ~= nil then error('expected invalid config') end
 	assert_not_nil(err)
+end
+
+
+function tests.test_attachment_mode_is_required()
+	local intent, err = config.normalise({
+		schema = config.SCHEMA,
+		surfaces = {
+			['lan-1'] = {
+				attachment = { segment = 'lan' },
+			},
+		},
+	})
+	if intent ~= nil then error('expected attachment without mode to fail') end
+	assert_not_nil(err)
+	assert_true(err:find('mode', 1, true) ~= nil, tostring(err))
+end
+
+function tests.test_surface_label_is_not_accepted()
+	local intent, err = config.normalise({
+		schema = config.SCHEMA,
+		surfaces = {
+			['lan-1'] = {
+				label = 'LAN 1',
+				attachment = { mode = 'none' },
+			},
+		},
+	})
+	if intent ~= nil then error('expected label alias to fail') end
+	assert_not_nil(err)
+	assert_true(err:find('label', 1, true) ~= nil, tostring(err))
 end
 
 return tests
