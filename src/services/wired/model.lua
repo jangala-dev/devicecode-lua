@@ -18,11 +18,13 @@ function M.initial(service_id)
 		generation = 0,
 		config = { rev = nil, schema = nil, config_schema = nil, version = nil },
 		net = { segments_rev = nil, segments = {}, vlan_policy = {}, missing_segments = {} },
-		providers = {},
+		observations = {},
+		assembly = {},
+		dependencies = {},
 		surfaces = {},
 		topology = { protected_trunks = {}, access = {}, trunks = {} },
 		violations = {},
-		stats = { config_updates = 0, segment_updates = 0, provider_updates = 0, publications = 0 },
+		stats = { config_updates = 0, segment_updates = 0, observation_updates = 0, assembly_updates = 0, publications = 0 },
 	}
 end
 

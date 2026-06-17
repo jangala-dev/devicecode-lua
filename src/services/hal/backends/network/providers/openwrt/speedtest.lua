@@ -32,7 +32,7 @@ function M.run_op(req, opts)
 	return fibers.run_scope_op(function(scope)
 		req = req or {}
 		opts = opts or {}
-		local iface = req.interface or req.iface or req.openwrt_interface
+		local iface = req.interface
 		local dev = req.device or req.linux_interface or req.ifname
 		if type(iface) ~= 'string' or iface == '' then return { ok = false, err = 'speedtest interface required', backend = 'openwrt' } end
 		if type(dev) ~= 'string' or dev == '' then dev = iface end

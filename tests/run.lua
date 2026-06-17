@@ -47,8 +47,10 @@ local files = {
 	"unit.hal.openwrt_network_observer_spec",
 	"unit.hal.openwrt_network_provider_advanced_spec",
 	"unit.hal.common_uci_compat_spec",
+	"unit.hal.openwrt_names_spec",
 	'unit.fabric.test_model',
 	'unit.fabric.test_config',
+	'unit.fabric.test_dependencies',
 	'unit.fabric.test_session',
 	'unit.fabric.test_link',
 	'unit.fabric.test_io',
@@ -58,9 +60,11 @@ local files = {
 	'unit.fabric.test_transfer',
 	'unit.fabric.test_transfer_sender',
 	'unit.fabric.test_bridge',
+	'unit.fabric.test_state',
 	'unit.fabric.test_fabric',
 	'unit.device.test_action_manager',
 	'unit.device.test_catalogue',
+	'unit.device.test_dependencies',
 	'unit.device.test_model',
 	'unit.device.test_phase2',
 	'unit.device.test_publisher',
@@ -76,7 +80,8 @@ local files = {
 	'unit.update.test_ingest_artifacts',
 	'unit.update.test_job_repository',
 	'unit.update.test_job_runtime',
-	'unit.update.test_job_store_cap',
+	'unit.update.test_job_store_memory',
+	'unit.update.test_job_store_control_store',
 	'unit.update.test_manager_requests',
 	'unit.update.test_model',
 	'unit.update.test_observe_reconcile',
@@ -91,11 +96,18 @@ local files = {
 	'unit.shared.hash_xxhash32_spec',
 	'integration.devhost.main_failure_spec',
 	'integration.devhost.config_recovery_spec',
+	'integration.devhost.startup_dependency_order_spec',
+	'integration.devhost.dependency_uniformity_spec',
 	"integration.devhost.hal_uart_spec",
 	"integration.devhost.fabric_hal_uart_smoke_spec",
 	"integration.devhost.fabric_public_service_path_spec",
-	'integration.devhost.rtl8380m_switch_spec',
 	'integration.devhost.update_public_seams_spec',
+	'integration.devhost.mcu_update_full_path_spec',
+	'integration.devhost.mcu_update_http_uart_spec',
+	'unit.support.test_capdeps',
+	'unit.support.test_capability_dependencies',
+	'unit.support.test_dependency_failure',
+	'unit.support.test_dependency_slot',
 	'unit.support.test_scoped_work',
 	'unit.support.test_queue',
 	'unit.support.test_priority_event',
@@ -105,10 +117,9 @@ local files = {
 	'unit.support.test_config_watch',
 	'unit.support.test_config_watch_architecture',
 	'unit.support.test_service_events',
-	'unit.support.test_capdeps',
 	'unit.http.transport.test_cqueues_driver',
-	'unit.http.transport.test_legacy_http1_close',
 	'unit.http.transport.test_lua_http',
+	'unit.http.transport.test_legacy_http1_close',
 	'unit.http.transport.test_websocket',
 	'unit.http.transport.test_terminate',
 	'unit.http.test_headers',
@@ -139,14 +150,17 @@ local files = {
 	'unit.metrics.http_spec',
 	'integration.devhost.metrics_spec',
 	"unit.net.test_architecture",
-	"unit.net.test_capability_resolver",
 	"unit.net.test_config",
+	"unit.net.test_intent_realiser",
 	"unit.net.test_hal_client",
 	"unit.net.test_service_behaviour",
 	"unit.net.test_wan_runtime",
 	"unit.wired.test_config",
+	"unit.wired.test_dependencies",
 	"unit.wired.test_trunk_validation",
 	"unit.wired.test_architecture",
+	"integration.devhost.wired_assembly_projection_spec",
+	"integration.devhost.rtl8380m_switch_spec",
 	"unit.device.test_wired_provider_curation",
 	"unit.hal.wired_provider_spec",
 }
@@ -192,28 +206,21 @@ for i = 1, #files do
 				total = total + 1
 				io.write(('[TEST] %s :: %s ... '):format(modname, name))
 				local t0 = monotonic_now()
-				local ok, ret = safe.xpcall(fn, function(e)
+				local ok, err = safe.xpcall(fn, function(e)
 					return debug.traceback(tostring(e), 2)
 				end)
 				local dt = monotonic_now() - t0
 				if ok then
-					if type(ret) == 'table' and ret.skip == true then
-						skipped = skipped + 1
-						total = total - 1
-						io.write(('SKIP %s %s\n'):format(tostring(ret.reason or ''), format_duration_s(dt)))
-					else
-						io.write('ok ' .. format_duration_s(dt) .. '\n')
-					end
+					io.write('ok ' .. format_duration_s(dt) .. '\n')
 				else
 					failed = failed + 1
-					local err_text = tostring(ret == nil and '<no error object returned>' or ret)
 					failure_rows[#failure_rows + 1] = {
 						name = ('%s :: %s'):format(modname, name),
-						err = err_text,
+						err = tostring(err),
 						dt = dt,
 					}
 					io.write('FAIL ' .. format_duration_s(dt) .. '\n')
-					io.write(err_text .. '\n')
+					io.write(tostring(err) .. '\n')
 				end
 			else
 				skipped = skipped + 1

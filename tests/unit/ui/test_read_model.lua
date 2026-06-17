@@ -16,6 +16,9 @@ local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non
 
 function tests.test_read_model_default_exclusions_prevent_self_ingesting_ui_state()
 	local should = read_model._test.should_ingest_event
+	assert_eq(should({ op = 'retain', topic = { 'svc', 'ui', 'status' }, payload = {} }, {}), false)
+	assert_eq(should({ op = 'retain', topic = { 'svc', 'ui', 'meta' }, payload = {} }, {}), false)
+	assert_eq(should({ op = 'retain', topic = { 'svc', 'ui', 'announce' }, payload = {} }, {}), false)
 	assert_eq(should({ op = 'retain', topic = { 'state', 'device', 'summary' }, payload = {} }, {}), true)
 	assert_eq(should({ op = 'retain', topic = { 'state', 'ui', 'summary' }, payload = {} }, {}), false)
 	assert_eq(should({ op = 'retain', topic = { 'state', 'ui', 'read-model' }, payload = {} }, {}), false)

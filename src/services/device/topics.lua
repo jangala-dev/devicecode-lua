@@ -22,6 +22,10 @@ function M.components()
 	return { 'state', 'device', 'components' }
 end
 
+function M.assembly()
+	return { 'state', 'device', 'assembly' }
+end
+
 function M.component(name)
 	return { 'state', 'device', 'component', name }
 end
@@ -48,18 +52,6 @@ end
 
 function M.component_cap_rpc(name, method)
 	return { 'cap', 'component', name, 'rpc', method }
-end
-
-function M.wired_provider_cap_meta(id)
-	return { 'cap', 'wired-provider', id, 'meta' }
-end
-
-function M.wired_provider_cap_status(id)
-	return { 'cap', 'wired-provider', id, 'status' }
-end
-
-function M.wired_provider_cap_state(id, key)
-	return { 'cap', 'wired-provider', id, 'state', key }
 end
 
 function M.raw_member_state(member, ...)

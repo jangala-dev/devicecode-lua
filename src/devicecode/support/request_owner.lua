@@ -44,7 +44,6 @@ function M.new(request, opts)
 		_done = false,
 		_reply = opts.reply or default_reply,
 		_fail = opts.fail or default_fail,
-		_reply_payload_only = not not opts.reply_payload_only,
 	}, RequestOwner)
 end
 
@@ -62,10 +61,6 @@ function RequestOwner:reply_once(value)
 	end
 
 	self._done = true
-
-	if self._reply_payload_only and type(value) == 'table' then
-		return self._reply(self._request, value.payload)
-	end
 
 	return self._reply(self._request, value)
 end

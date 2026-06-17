@@ -39,12 +39,9 @@ function M.initial(service_id)
 			generation = nil,
 		},
 
-		hal = {
-			network_config = 'not_configured',
-			network_state = 'not_configured',
-			network_diagnostics = 'not_configured',
-			last_status = {},
-		},
+		pending = {},
+
+		dependencies = {},
 
 		observed = {
 			last_event = nil,
@@ -72,6 +69,7 @@ function M.initial(service_id)
 		routing = {},
 		wan = {},
 		wan_runtime = { uplinks = {}, speedtests = {}, live_weights = {}, last_weight_apply = nil },
+		sources = { gsm_uplinks = {} },
 		shaping = {},
 		vpn = {},
 		diagnostics = {},
@@ -85,6 +83,7 @@ function M.initial(service_id)
 			speedtests_started = 0,
 			speedtests_completed = 0,
 			live_weight_applies = 0,
+			gsm_uplink_updates = 0,
 		},
 	}
 end

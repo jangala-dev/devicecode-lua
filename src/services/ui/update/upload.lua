@@ -123,12 +123,16 @@ local function upload_body_op(ctx, opts, deadline)
 
 		local body = ctx.body_stream or ctx.body or ctx.stream or ctx
 		if body == nil then error('request body has no chunk reader', 0) end
+		local uploaded_bytes = 0
+		local uploaded_chunks = 0
 		while true do
 			local chunk, rerr = perform_with_deadline(scope, read_chunk_op(body, opts.chunk_size or 65536), deadline, mark_timeout)
 			if rerr then error(rerr, 0) end
 			if chunk == nil or chunk == '' then break end
 			local ok, werr = perform_with_deadline(scope, ingest.append_chunk_op(handle, chunk), deadline, mark_timeout)
 			if ok == nil or ok == false then error(werr or 'artifact append failed', 0) end
+			uploaded_chunks = uploaded_chunks + 1
+			uploaded_bytes = uploaded_bytes + #chunk
 		end
 
 		local artifact_id, cerr = perform_with_deadline(scope, ingest.commit_op(handle), deadline, mark_timeout)

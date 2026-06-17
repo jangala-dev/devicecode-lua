@@ -13,6 +13,9 @@ local user_operation = require 'services.ui.user_operation'
 local upload        = require 'services.ui.update.upload'
 local resource      = require 'devicecode.support.resource'
 
+local ok_cjson, cjson = pcall(require, 'cjson.safe')
+if not ok_cjson then cjson = require 'cjson' end
+
 local ok_http_headers, http_headers = pcall(require, 'services.http.headers')
 if not ok_http_headers then http_headers = nil end
 
@@ -64,10 +67,57 @@ local function perform_response(ev)
 	return true
 end
 
+local function content_type_is_json(v)
+	v = tostring(v or ''):lower()
+	if v == '' then return false end
+	local mime = v:match('^%s*([^;%s]+)') or v
+	return mime == 'application/json' or mime:match('%+json$') ~= nil
+end
+
 local function body_table(ctx)
+	-- Compatibility path for unit tests and internal harnesses which hand a
+	-- pre-parsed request body to the UI request boundary.  Real HTTP contexts
+	-- must use json_body_table below so parsing and validation remain explicit.
 	if type(ctx.body) == 'table' then return ctx.body end
 	if type(ctx.json) == 'table' then return ctx.json end
 	return {}
+end
+
+local function json_body_table(ctx, deps, opts)
+	opts = opts or {}
+	if type(ctx.body) == 'table' then return ctx.body, nil end
+	if type(ctx.json) == 'table' then return ctx.json, nil end
+	if type(ctx._ui_json_body) == 'table' then return ctx._ui_json_body, nil end
+
+	local ct = ctx_header(ctx, 'content-type') or ctx_header(ctx, 'Content-Type')
+	if opts.require_json_content_type ~= false and not content_type_is_json(ct) then
+		return nil, 'unsupported_media_type'
+	end
+
+	local raw
+	if type(ctx.body_string) == 'string' then
+		raw = ctx.body_string
+	elseif type(ctx.read_body_as_string_op) == 'function' then
+		raw = fibers.perform(ctx:read_body_as_string_op())
+	elseif type(ctx.read_chars_op) == 'function' then
+		-- Fallback for older HTTP contexts.  This is still one visible wait at the
+		-- request boundary; command handlers must not hide further body reads.
+		raw = fibers.perform(ctx:read_chars_op((deps and deps.max_json_body_bytes) or 1024 * 1024))
+	else
+		return nil, 'invalid_body'
+	end
+
+	if raw == nil then return nil, 'invalid_body' end
+	raw = tostring(raw or '')
+	local limit = opts.max_bytes or (deps and deps.max_json_body_bytes) or 1024 * 1024
+	if #raw > limit then return nil, 'request_body_too_large' end
+	if raw == '' then return {}, nil end
+
+	local obj, derr = cjson.decode(raw)
+	if obj == nil then return nil, 'invalid_json' end
+	if obj == cjson.null or type(obj) ~= 'table' then return nil, 'invalid_body' end
+	ctx._ui_json_body = obj
+	return obj, nil
 end
 
 local function session_id_from(ctx)
@@ -105,7 +155,12 @@ local function handle_read(owner, route, deps)
 end
 
 local function handle_login(owner, ctx, deps)
-	local principal, err = auth.verify(deps.auth, body_table(ctx))
+	local body, berr = json_body_table(ctx, deps, { require_json_content_type = false })
+	if not body then
+		perform_response(owner:reply_error_op(nil, berr))
+		return { status = 'bad_request', err = berr }
+	end
+	local principal, err = auth.verify(deps.auth, body)
 	if not principal then
 		perform_response(owner:reply_error_op(401, err or 'unauthenticated'))
 		return { status = 'unauthenticated' }
@@ -136,10 +191,19 @@ local function handle_session_get(owner, ctx, deps)
 end
 
 local function handle_command(scope, owner, ctx, route, deps)
+	if type(route.topic) ~= 'table' or #route.topic == 0 then
+		perform_response(owner:reply_error_op(400, 'bad_request'))
+		return { status = 'bad_request', err = 'missing_command_topic' }
+	end
 	local principal = principal_from(ctx, deps)
 	if principal == nil then
 		perform_response(owner:reply_error_op(401, 'unauthenticated'))
 		return { status = 'unauthenticated' }
+	end
+	local payload, perr = json_body_table(ctx, deps, { require_json_content_type = true })
+	if not payload then
+		perform_response(owner:reply_error_op(nil, perr))
+		return { status = 'bad_request', err = perr }
 	end
 	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
 		principal = principal,
@@ -147,7 +211,7 @@ local function handle_command(scope, owner, ctx, route, deps)
 		bus = deps.bus,
 		timeout = deps.command_timeout or 5.0,
 		run_op = function (_, conn)
-			return conn:call_op(route.topic, body_table(ctx), { timeout = false })
+			return conn:call_op(route.topic, payload, { timeout = false })
 				:wrap(function (value, call_err)
 					if value == nil then return nil, call_err or 'upstream_failed' end
 					return { value = value }, nil
@@ -185,7 +249,15 @@ function M.run(scope, ctx, deps)
 	elseif route.kind == 'command' then
 		return handle_command(scope, owner, ctx, route, deps)
 	elseif route.kind == 'upload' then
-		return upload.run(scope, owner, ctx, deps.update or deps)
+		local update_deps = deps.update or deps
+		if update_deps.require_auth == true then
+			local principal = principal_from(ctx, deps)
+			if principal == nil then
+				perform_response(owner:reply_error_op(401, 'unauthenticated'))
+				return { status = 'unauthenticated' }
+			end
+		end
+		return upload.run(scope, owner, ctx, update_deps)
 	elseif route.kind == 'sse' then
 		return sse.run(scope, owner, route, deps)
 	elseif route.kind == 'static' then

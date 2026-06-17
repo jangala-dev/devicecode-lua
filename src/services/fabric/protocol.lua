@@ -711,10 +711,10 @@ local function from_wire_frame(frame)
 		return nil, 'invalid_chunk_encoding: ' .. tostring(err)
 	end
 
-	if not M.verify_chunk_digest(bytes, out.chunk_digest) then
-		return nil, 'chunk_digest_mismatch'
-	end
-
+	-- Do not verify the chunk digest here. Decode-line is a wire parsing
+	-- boundary; semantic chunk acceptance belongs to the transfer receiver so
+	-- it can request a same-offset retry instead of treating the line as an
+	-- unroutable wire error.
 	out.data = bytes
 
 	return out, nil
@@ -763,7 +763,7 @@ function M.decode_line(line)
 		return nil, frame_err
 	end
 
-	return M.validate(frame)
+	return validate_by_spec(frame, { wire = true })
 end
 
 return M

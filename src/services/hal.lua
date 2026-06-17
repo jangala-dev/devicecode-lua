@@ -17,7 +17,7 @@ local perform = fibers.perform
 local SCHEMA_STANDARD = "devicecode.config/hal/1"
 
 local DEFAULT_Q_LEN = 10
-local DEFAULT_CONTROL_TIMEOUT_S = 5.0
+local DEFAULT_CONTROL_TIMEOUT_S = 30.0
 local DEFAULT_MANAGER_START_TIMEOUT_S = 10.0
 local DEFAULT_MANAGER_APPLY_TIMEOUT_S = 10.0
 local DEFAULT_MANAGER_SHUTDOWN_TIMEOUT_S = 5.0
@@ -46,23 +46,32 @@ function T.cap_rpc(class, id, verb)   return { 'cap', class, id, 'rpc', verb } e
 function T.raw_source_meta(src)       return { 'raw', 'host', src, 'meta' } end
 function T.raw_source_status(src)     return { 'raw', 'host', src, 'status' } end
 
+local function is_wired_provider_raw(src, class)
+	return src == 'wired' and class == 'wired-provider'
+end
+
 function T.raw_cap_meta(src, class, id)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'meta' } end
 	return { 'raw', 'host', src, 'cap', class, id, 'meta' }
 end
 
 function T.raw_cap_status(src, class, id)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'status' } end
 	return { 'raw', 'host', src, 'cap', class, id, 'status' }
 end
 
 function T.raw_cap_state(src, class, id, key)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'state', key } end
 	return { 'raw', 'host', src, 'cap', class, id, 'state', key }
 end
 
 function T.raw_cap_event(src, class, id, name)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'event', name } end
 	return { 'raw', 'host', src, 'cap', class, id, 'event', name }
 end
 
 function T.raw_cap_rpc(src, class, id, verb)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'rpc', verb } end
 	return { 'raw', 'host', src, 'cap', class, id, 'rpc', verb }
 end
 
@@ -452,6 +461,7 @@ end
 --
 -- Raw host provenance projection:
 --   raw/host/<source>/cap/<class>/<id>/...
+--   raw/host/wired/provider/<id>/... for local wired provider observations
 --
 -- The public projection is the stable capability surface. The raw projection
 -- records where the host discovered it.
@@ -516,8 +526,8 @@ end
 
 -- Some host-discovered capabilities are deliberately kept raw until a higher
 -- level appliance composer curates them into a public capability.  For wired
--- providers, Device owns the public cap/wired-provider/... surface; HAL only
--- publishes raw/host/<source>/cap/wired-provider/... and raw RPC.
+-- providers, HAL only publishes raw/host/wired/provider/<id>/... and raw RPC.
+-- Device owns product assembly; Wired owns the public state/wired/... projection.
 local function public_cap_projection_enabled(class)
 	return class ~= 'wired-provider'
 end
@@ -525,6 +535,15 @@ end
 local function parse_cap_ctrl_topic(topic)
 	if topic[1] == 'cap' and topic[4] == 'rpc' then
 		return 'public', topic[2], topic[3], topic[5], nil
+	end
+
+	if topic[1] == 'raw'
+		and topic[2] == 'host'
+		and topic[3] == 'wired'
+		and topic[4] == 'provider'
+		and topic[6] == 'rpc'
+	then
+		return 'raw-host', 'wired-provider', topic[5], topic[7], 'wired'
 	end
 
 	if topic[1] == 'raw'
@@ -1072,11 +1091,11 @@ function HalService.start(conn, opts)
 		})
 	end
 
-
 	local dependency_resolver, dependency_resolver_err = dependencies.resolver(conn)
 	if not dependency_resolver then
 		error('HAL dependency resolver failed: ' .. tostring(dependency_resolver_err), 0)
 	end
+
 	local function start_manager(name, manager)
 		local valid, valid_err = validate_strict_manager(name, manager)
 		if not valid then
@@ -1088,6 +1107,7 @@ function HalService.start(conn, opts)
 			component = 'manager',
 			manager   = name,
 		})
+
 		return perform(manager_call_with_timeout_op(
 			name,
 			manager,

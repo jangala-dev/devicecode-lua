@@ -19,17 +19,24 @@ local generation_mod = require 'services.net.generation'
 local apply_runtime = require 'services.net.apply_runtime'
 local stale = require 'services.net.stale'
 local hal_client_mod = require 'services.net.hal_client'
-local cap_resolver_mod = require 'services.net.capability_resolver'
+local cap_deps_mod = require 'devicecode.support.capability_dependencies'
 local observer_manager = require 'services.net.observer_manager'
 local wan_manager = require 'services.net.wan_manager'
 local drift = require 'services.net.drift'
 local backpressure = require 'services.net.backpressure'
+local gsm_uplink_watch = require 'services.net.gsm_uplink_watch'
+local intent_realiser = require 'services.net.intent_realiser'
 
 local perform = fibers.perform
 
 local M = {}
 
 local function now() return fibers.now() end
+
+local function elapsed_ms(t0)
+	if not t0 then return nil end
+	return math.floor(((now() - t0) * 1000) + 0.5)
+end
 
 local function new_service_id(name)
 	return tostring(name or 'net')
@@ -67,6 +74,8 @@ local function mark_summary_dirty(state)
 	publisher.mark_summary(state.dirty)
 end
 
+local project_dependencies
+
 local function publish_snapshot(state)
 	if not state.conn then
 		publisher.clear_dirty(state.dirty)
@@ -80,37 +89,38 @@ local function set_model_state(state, service_state, reason)
 		s.state = service_state
 		s.ready = service_state == 'running'
 		s.reason = reason
-		return s
+		return project_dependencies(state, s)
 	end)
 	mark_summary_dirty(state)
 	return publish_snapshot(state)
 end
 
-local function hal_status_value(state, key)
-	if state.cap_resolver and state.cap_resolver.status then
-		return state.cap_resolver.status[key] or 'configured'
-	end
-	if key == 'network_config' and state.hal and type(state.hal.available) == 'function' then
-		return state.hal:available() and 'available' or 'not_configured'
-	end
-	if key == 'network_state' and state.hal and type(state.hal.observation_available) == 'function' then
-		return state.hal:observation_available() and 'available' or 'not_configured'
-	end
-	if key == 'network_diagnostics' and state.hal and type(state.hal.speedtest_op) == 'function' then
-		return 'configured'
-	end
-	return 'not_configured'
+local function dependency_status(state, key)
+	return state.cap_deps:status(key)
 end
 
-local function update_hal_statuses(state)
-	state.model:update(function (s)
-		s.hal = s.hal or {}
-		s.hal.network_config = hal_status_value(state, 'network_config')
-		s.hal.network_state = hal_status_value(state, 'network_state')
-		s.hal.network_diagnostics = hal_status_value(state, 'network_diagnostics')
+local function dependency_effectively_available(state, key)
+	return state.cap_deps:available(key)
+end
+
+project_dependencies = function(state, s)
+	s.dependencies = state.cap_deps:snapshot()
+	return s
+end
+
+local function set_pending_apply_projection(s, intent, reason)
+	s.pending = s.pending or {}
+	if intent == nil then
+		s.pending.network_apply = nil
 		return s
-	end)
-	mark_summary_dirty(state)
+	end
+	s.pending.network_apply = {
+		kind = 'network_apply',
+		generation = intent.generation,
+		rev = intent.rev,
+		reason = reason or 'network_config_unavailable',
+	}
+	return s
 end
 
 local function normalise_config_event(state, ev)
@@ -132,42 +142,114 @@ local function cancel_active_generation(state, reason)
 	generation_mod.cancel(active, reason or 'generation_replaced')
 	state.current_generation = nil
 	state.active_apply = nil
+	state.pending_intent = nil
+	state.pending_apply_reason = nil
+	return true, nil
+end
+
+local function copy_intent_to_model(s, intent)
+	local generation = intent.generation
+	s.generation = generation
+	s.config = { rev = intent.rev, schema = intent.schema, config_schema = intent.config_schema, version = intent.version }
+	s.intent = s.intent or {}
+	s.intent.generation = generation
+	s.segments = intent.segments or {}
+	s.vlan_policy = intent.vlan_policy or {}
+	s.policies = intent.policies or {}
+	s.interfaces = intent.interfaces or {}
+	s.addressing = intent.addressing or {}
+	s.dns = intent.dns or {}
+	s.dhcp = intent.dhcp or {}
+	s.firewall = intent.firewall or {}
+	s.routing = intent.routing or {}
+	s.wan = intent.wan or {}
+	s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
+	s.sources = s.sources or { gsm_uplinks = {} }
+	s.shaping = intent.shaping or {}
+	s.vpn = intent.vpn or {}
+	s.diagnostics = intent.diagnostics or {}
+	return s
+end
+
+
+local function realised_sources(state)
+	local snap = state.model and state.model:snapshot() or {}
+	return snap.sources or { gsm_uplinks = {} }
+end
+
+local function realise_intent(state, intent)
+	return intent_realiser.realise(intent, realised_sources(state))
+end
+
+local function realised_fingerprint(state, intent)
+	return intent_realiser.realised_fingerprint(intent, realised_sources(state))
+end
+
+local function accept_pending_intent(state, intent, reason)
+	reason = reason or 'network_config_unavailable'
+	local apply_intent = realise_intent(state, intent)
+	local gen = generation_mod.new(apply_intent.generation, apply_intent, reason, { now = now() })
+	gen.state = 'waiting_for_hal'
+	gen.reason = reason
+	gen.apply = { state = 'waiting_for_hal', reason = reason }
+
+	state.current_generation = gen
+	state.active_apply = nil
+	state.pending_intent = intent
+	state.pending_apply_reason = reason
+	state.base_intent = intent
+	state.last_realised_source_fingerprint = realised_fingerprint(state, intent)
+
+	state.model:update(function (s)
+		copy_intent_to_model(s, apply_intent)
+		s.state = 'waiting_for_hal'
+		s.ready = false
+		s.reason = reason
+		s.intent = s.intent or {}
+		s.intent.active = generation_mod.snapshot(gen)
+		set_pending_apply_projection(s, intent, reason)
+		s.apply = {
+			state = 'waiting_for_hal',
+			generation = intent.generation,
+			apply_id = nil,
+			started_at = nil,
+			last_applied_rev = s.apply and s.apply.last_applied_rev or nil,
+			last_error = reason,
+			last_result = nil,
+		}
+		s.stats.config_updates = (s.stats.config_updates or 0) + 1
+		return project_dependencies(state, s)
+	end)
+	mark_all_dirty(state)
 	return true, nil
 end
 
 local function start_apply_for_intent(state, intent, reason)
-	local generation = intent.generation
+	local apply_intent = realise_intent(state, intent)
+	state.base_intent = intent
+	state.last_realised_source_fingerprint = realised_fingerprint(state, intent)
+	local generation = apply_intent.generation
 	local apply_id = state.next_apply_id
 	state.next_apply_id = apply_id + 1
 
-	local gen = generation_mod.new(generation, intent, reason, { now = now() })
+	local gen = state.current_generation
+	if not gen or gen.generation ~= generation then
+		gen = generation_mod.new(generation, apply_intent, reason, { now = now() })
+	end
 	generation_mod.start_apply(gen, apply_id, { now = now() })
 	state.current_generation = gen
 	state.active_apply = { generation = generation, apply_id = apply_id, rev = intent.rev }
+	state.pending_intent = nil
+	state.pending_apply_reason = nil
 
 	state.model:update(function (s)
+		copy_intent_to_model(s, apply_intent)
 		s.state = 'applying'
 		s.ready = false
 		s.reason = nil
-		s.generation = generation
-		s.config = { rev = intent.rev, schema = intent.schema, config_schema = intent.config_schema, version = intent.version }
 		s.intent = s.intent or {}
 		s.intent.active = generation_mod.snapshot(gen)
-		s.intent.generation = generation
-		s.segments = intent.segments or {}
-		s.vlan_policy = intent.vlan_policy or {}
-		s.policies = intent.policies or {}
-		s.interfaces = intent.interfaces or {}
-		s.addressing = intent.addressing or {}
-		s.dns = intent.dns or {}
-		s.dhcp = intent.dhcp or {}
-		s.firewall = intent.firewall or {}
-		s.routing = intent.routing or {}
-		s.wan = intent.wan or {}
-		s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
-		s.shaping = intent.shaping or {}
-		s.vpn = intent.vpn or {}
-		s.diagnostics = intent.diagnostics or {}
+		set_pending_apply_projection(s, nil)
 		s.apply = {
 			state = 'running',
 			generation = generation,
@@ -177,14 +259,14 @@ local function start_apply_for_intent(state, intent, reason)
 			last_error = nil,
 			last_result = nil,
 		}
-		s.hal.network_config = hal_status_value(state, 'network_config')
-		s.stats.config_updates = (s.stats.config_updates or 0) + 1
 		s.stats.apply_started = (s.stats.apply_started or 0) + 1
-		return s
+		return project_dependencies(state, s)
 	end)
 	mark_all_dirty(state)
 	local ok_pub, pub_err = publish_snapshot(state)
 	if ok_pub ~= true then return nil, pub_err end
+
+	obs_event(state.svc, 'apply_started', { generation = generation, apply_id = apply_id, rev = apply_intent.rev, reason = reason })
 
 	local handle, err = apply_runtime.start_apply {
 		lifetime_scope = state.scope,
@@ -193,7 +275,7 @@ local function start_apply_for_intent(state, intent, reason)
 		service_id = state.service_id,
 		generation = generation,
 		apply_id = apply_id,
-		intent = intent,
+		intent = apply_intent,
 		hal = state.hal,
 		done_tx = state.done_tx,
 	}
@@ -204,7 +286,7 @@ local function start_apply_for_intent(state, intent, reason)
 			s.intent.active = generation_mod.snapshot(gen)
 			s.apply.state = 'failed_to_start'
 			s.apply.last_error = tostring(err or 'apply_start_failed')
-			return s
+			return project_dependencies(state, s)
 		end)
 		mark_apply_dirty(state)
 		return nil, err
@@ -212,6 +294,18 @@ local function start_apply_for_intent(state, intent, reason)
 
 	gen.apply_handle = handle
 	return true, nil
+end
+
+local function reconcile_apply_admission(state, reason)
+	if state.active_apply ~= nil then return true, nil end
+	local intent = state.pending_intent
+	if not intent then return true, nil end
+	if not dependency_effectively_available(state, 'network_config') then
+		local wait_reason = state.pending_apply_reason or 'network_config_unavailable'
+		set_status(state.svc, 'waiting_for_hal', { reason = wait_reason })
+		return publish_snapshot(state)
+	end
+	return start_apply_for_intent(state, intent, reason or state.pending_apply_reason or 'network_config_available')
 end
 
 local function handle_config_changed(state, ev)
@@ -224,13 +318,14 @@ local function handle_config_changed(state, ev)
 			s.reason = tostring(err)
 			s.intent = s.intent or {}
 			s.intent.last_rejected = { rev = ev.rev, err = tostring(err), rejected_at = now() }
-			return s
+			return project_dependencies(state, s)
 		end)
 		mark_summary_dirty(state)
 		return publish_snapshot(state)
 	end
 
 	state.next_generation = intent.generation + 1
+	state.base_intent = intent
 	cancel_active_generation(state, 'config_replaced')
 	obs_event(state.svc, 'config_accepted', {
 		rev = intent.rev,
@@ -239,19 +334,65 @@ local function handle_config_changed(state, ev)
 		interfaces = intent.stats and intent.stats.interfaces or nil,
 	})
 
-	local ok, apply_err = start_apply_for_intent(state, intent, 'config_changed')
+	local ok, apply_err = accept_pending_intent(state, intent, 'network_config_unavailable')
+	if ok ~= true then return nil, apply_err end
+
+	ok, apply_err = reconcile_apply_admission(state, 'config_changed')
 	if ok ~= true then
 		state.model:update(function (s)
 			s.state = 'degraded'
 			s.ready = false
 			s.reason = tostring(apply_err or 'apply_start_failed')
-			return s
+			return project_dependencies(state, s)
 		end)
 		mark_summary_dirty(state)
 		publish_snapshot(state)
 		return nil, apply_err or 'net apply start failed'
 	end
 	return true, nil
+end
+
+local function classify_network_config_apply_failure(state, result)
+	local failure = result and result.result or result
+	return state.cap_deps:classify_call_failure('network_config', failure)
+end
+
+local function return_apply_to_pending(state, result, reason)
+	reason = reason or 'network_config_unavailable'
+	local gen = state.current_generation
+	local intent = gen and gen.intent or nil
+	state.active_apply = nil
+	if not intent then return set_model_state(state, 'waiting_for_hal', reason) end
+
+	gen.state = 'waiting_for_hal'
+	gen.reason = reason
+	gen.apply = gen.apply or {}
+	gen.apply.state = 'waiting_for_hal'
+	gen.apply.reason = reason
+	gen.apply.result = result
+
+	state.pending_intent = intent
+	state.pending_apply_reason = reason
+
+	state.model:update(function (s)
+		s.state = 'waiting_for_hal'
+		s.ready = false
+		s.reason = reason
+		s.intent = s.intent or {}
+		s.intent.active = generation_mod.snapshot(gen)
+		set_pending_apply_projection(s, intent, reason)
+		s.apply = s.apply or {}
+		s.apply.state = 'waiting_for_hal'
+		s.apply.completed_at = now()
+		s.apply.last_result = result and result.result or result
+		s.apply.last_error = reason
+		s.stats.apply_completed = (s.stats.apply_completed or 0) + 1
+		return project_dependencies(state, s)
+	end)
+	mark_apply_dirty(state)
+	set_status(state.svc, 'waiting_for_hal', { reason = reason })
+	obs_event(state.svc, 'apply_deferred', { generation = gen.generation, reason = reason })
+	return publish_snapshot(state)
 end
 
 local function handle_apply_done(state, ev)
@@ -266,6 +407,13 @@ local function handle_apply_done(state, ev)
 	local reason = nil
 	if not apply_ok then reason = ev.primary or (result.result and result.result.err) or 'apply_failed' end
 
+	if not apply_ok then
+		local failure_class = classify_network_config_apply_failure(state, result)
+		if failure_class == 'route_missing' then
+			return return_apply_to_pending(state, result, 'network_config_unavailable')
+		end
+	end
+
 	state.active_apply = nil
 	if state.current_generation then
 		if apply_ok then generation_mod.mark_applied(state.current_generation, result, { now = now() })
@@ -278,23 +426,25 @@ local function handle_apply_done(state, ev)
 		s.reason = reason
 		s.intent = s.intent or {}
 		s.intent.active = generation_mod.snapshot(state.current_generation)
+		set_pending_apply_projection(s, nil)
 		s.apply.state = apply_ok and 'applied' or 'failed'
 		s.apply.completed_at = now()
 		s.apply.last_result = result.result
 		s.apply.last_error = reason
 		if apply_ok then s.apply.last_applied_rev = result.intent_rev or (s.config and s.config.rev) end
 		s.stats.apply_completed = (s.stats.apply_completed or 0) + 1
-		return s
+		return project_dependencies(state, s)
 	end)
 
 	mark_apply_dirty(state)
 	set_status(state.svc, apply_ok and 'running' or 'degraded', reason and { reason = reason } or nil)
-	obs_event(state.svc, 'apply_completed', { generation = ev.generation, apply_id = ev.apply_id, ok = apply_ok, reason = reason })
+	local started_at = state.model:snapshot().apply and state.model:snapshot().apply.started_at or nil
+	obs_event(state.svc, 'apply_completed', { generation = ev.generation, apply_id = ev.apply_id, ok = apply_ok, reason = reason, elapsed_ms = elapsed_ms(started_at) })
 
 	local ok_pub, pub_err = publish_snapshot(state)
 	if ok_pub ~= true then return nil, pub_err end
 	if apply_ok then
-		local ok, err = wan_manager.start_speedtests(state)
+		local ok, err = wan_manager.reconcile_speedtests(state, 'apply_done')
 		mark_domain_dirty(state, 'wan_runtime')
 		publish_snapshot(state)
 		return ok, err
@@ -318,11 +468,9 @@ local function merge_observation(state, s, observed_event)
 		if id then s.observed.interfaces[id] = model_mod.deep_copy(observed_event.interface) end
 	end
 
-	s.hal = s.hal or {}
-	s.hal.network_state = 'available'
 	s.stats.observations = (s.stats.observations or 0) + 1
 	s.drift = drift.calculate(s, { now = now })
-	return s
+	return project_dependencies(state, s)
 end
 
 local function handle_observed_state(state, ev)
@@ -332,7 +480,60 @@ local function handle_observed_state(state, ev)
 	mark_domain_dirty(state, 'observed')
 	mark_domain_dirty(state, 'drift')
 	obs_event(state.svc, 'network_observed', { subject = observed_event.subject, source = observed_event.source, kind = observed_event.kind })
-	return publish_snapshot(state)
+	local ok, err = wan_manager.reconcile_speedtests(state, 'observed_state')
+	mark_domain_dirty(state, 'wan_runtime')
+	local pub_ok, pub_err = publish_snapshot(state)
+	if pub_ok ~= true then return nil, pub_err end
+	return ok, err
+end
+
+local function handle_gsm_uplink_changed(state, ev)
+	if ev.kind == 'gsm_uplink_replay_done' then return true, nil end
+	if ev.kind == 'gsm_uplink_unknown' then
+		obs_log(state.svc, 'debug', { what = 'gsm_uplink_unknown', event = ev.event })
+		return true, nil
+	end
+	local role = ev.role
+	if type(role) ~= 'string' or role == '' then return true, nil end
+	local payload = model_mod.deep_copy(ev.payload or {})
+	payload.schema = payload.schema or 'devicecode.gsm.uplink/1'
+	payload.id = payload.id or role
+	payload.role = payload.role or role
+	payload.updated_at = now()
+	state.model:update(function (s)
+		s.sources = s.sources or { gsm_uplinks = {} }
+		s.sources.gsm_uplinks = s.sources.gsm_uplinks or {}
+		s.sources.gsm_uplinks[role] = payload
+		s.stats.gsm_uplink_updates = (s.stats.gsm_uplink_updates or 0) + 1
+		return project_dependencies(state, s)
+	end)
+	mark_domain_dirty(state, 'sources')
+	mark_summary_dirty(state)
+	obs_event(state.svc, 'gsm_uplink_changed', {
+		role = role,
+		state = payload.state,
+		connected = payload.connected == true,
+		ifname = payload.linux and payload.linux.ifname or payload.interface,
+	})
+	local structural_ok, structural_err = true, nil
+	if state.base_intent then
+		local fp = realised_fingerprint(state, state.base_intent)
+		if fp ~= state.last_realised_source_fingerprint then
+			local next_intent = model_mod.deep_copy(state.base_intent)
+			next_intent.generation = state.next_generation
+			state.next_generation = state.next_generation + 1
+			state.base_intent = next_intent
+			cancel_active_generation(state, 'gsm_uplink_binding_changed')
+			structural_ok, structural_err = accept_pending_intent(state, next_intent, 'gsm_uplink_binding_changed')
+			if structural_ok == true then structural_ok, structural_err = reconcile_apply_admission(state, 'gsm_uplink_binding_changed') end
+		end
+	end
+	local ok, err = wan_manager.reconcile_speedtests(state, 'gsm_uplink_changed')
+	mark_domain_dirty(state, 'wan_runtime')
+	local pub_ok, pub_err = publish_snapshot(state)
+	if pub_ok ~= true then return nil, pub_err end
+	if structural_ok ~= true then return nil, structural_err end
+	return ok, err
 end
 
 local function ensure_observer_started(state, reason)
@@ -353,9 +554,8 @@ local function ensure_observer_started(state, reason)
 	if not observer then
 		obs_log(state.svc, 'debug', { what = 'network_observation_not_started', reason = reason, err = tostring(err) })
 		state.model:update(function (m)
-			m.hal.network_state = 'unavailable'
 			m.observed.last_error = tostring(err)
-			return m
+			return project_dependencies(state, m)
 		end)
 		mark_summary_dirty(state)
 		mark_domain_dirty(state, 'observed')
@@ -364,8 +564,7 @@ local function ensure_observer_started(state, reason)
 	state.observer = observer
 	state.observed_sub = observer:subscription()
 	state.model:update(function (m)
-		m.hal.network_state = 'starting'
-		return m
+		return project_dependencies(state, m)
 	end)
 	mark_summary_dirty(state)
 	return true, nil
@@ -378,14 +577,20 @@ local function stop_observer(state, reason)
 	return true, nil
 end
 
+local function reconcile_observer_admission(state, reason)
+	if dependency_effectively_available(state, 'network_state') then
+		return ensure_observer_started(state, reason or 'network_state_available')
+	end
+	return stop_observer(state, reason or ('network_state_' .. tostring(dependency_status(state, 'network_state'))))
+end
+
 local function handle_observation_started(state, ev)
 	local work = ev.result or {}
 	local result = work.result or work
 	local ok = ev.status == 'ok' and work.ok == true and (result.ok == nil or result.ok == true)
 	state.model:update(function (m)
-		m.hal.network_state = ok and 'available' or 'unavailable'
 		if not ok then m.observed.last_error = result.err or ev.primary or 'observation_start_failed' end
-		return m
+		return project_dependencies(state, m)
 	end)
 	if not ok then stop_observer(state, 'observation_start_failed') end
 	mark_summary_dirty(state)
@@ -393,19 +598,21 @@ local function handle_observation_started(state, ev)
 	return publish_snapshot(state)
 end
 
-local function handle_capability_status(state, ev)
-	if not state.cap_resolver then return true, nil end
-	local status = state.cap_resolver:record_status(ev.capability, ev.payload)
+local function handle_dependency_status(state, ev)
+	local key = ev.key or ev.capability
+	local status = key and state.cap_deps:status(key) or ev.status
 	state.model:update(function (m)
-		m.hal = m.hal or {}
-		m.hal[ev.capability] = status
-		m.hal.last_status[ev.capability] = { status = status, payload = model_mod.deep_copy(ev.payload), updated_at = now() }
-		return m
+		return project_dependencies(state, m)
 	end)
 	mark_summary_dirty(state)
-	if ev.capability == 'network_state' then
-		if status == 'available' or status == 'running' then ensure_observer_started(state, 'capability_available')
-		else stop_observer(state, 'network_state_' .. tostring(status)) end
+	if key == 'network_state' then
+		local ok, err = reconcile_observer_admission(state, 'network_state_' .. tostring(status))
+		if ok ~= true then return nil, err end
+	elseif key == 'network_config' then
+		if dependency_effectively_available(state, 'network_config') then
+			local ok, err = reconcile_apply_admission(state, 'network_config_available')
+			if ok ~= true then return nil, err end
+		end
 	end
 	return publish_snapshot(state)
 end
@@ -435,21 +642,28 @@ local function handle_event(state, ev)
 		return handle_apply_done(state, ev)
 	elseif ev.kind == 'observed_state' then
 		return handle_observed_state(state, ev)
+	elseif ev.kind == 'gsm_uplink_changed' or ev.kind == 'gsm_uplink_replay_done' or ev.kind == 'gsm_uplink_unknown' then
+		return handle_gsm_uplink_changed(state, ev)
+	elseif ev.kind == 'gsm_uplink_watch_closed' then
+		state.gsm_uplink_watch = nil
+		return true, nil
 	elseif ev.kind == 'net_speedtest_done' then
 		return handle_speedtest_done(state, ev)
 	elseif ev.kind == 'net_live_weights_done' then
 		return handle_live_weights_done(state, ev)
 	elseif ev.kind == 'net_observation_started' then
 		return handle_observation_started(state, ev)
-	elseif ev.kind == 'capability_status' then
-		return handle_capability_status(state, ev)
+	elseif ev.kind == 'capability_status' or ev.kind == 'capability_dependency_changed' then
+		return handle_dependency_status(state, ev)
+	elseif ev.kind == 'capability_dependency_closed' then
+		return handle_dependency_status(state, ev)
 	elseif ev.kind == 'capability_status_closed' then
 		if state.capability_status_subs then state.capability_status_subs[ev.capability] = nil end
 		return true, nil
 	elseif ev.kind == 'observation_closed' then
 		state.observed_sub = nil
 		if state.observer then state.observer:terminate('observation_closed'); state.observer = nil end
-		state.model:update(function (m) m.hal.network_state = 'closed'; return m end)
+		state.model:update(function (m) return project_dependencies(state, m) end)
 		mark_summary_dirty(state)
 		return publish_snapshot(state)
 	elseif ev.kind == 'config_watch_closed' then
@@ -477,6 +691,7 @@ function M.run(scope, params)
 	local published = publisher.new_state()
 	local dirty = publisher.mark_all(publisher.new_dirty_state())
 	local cfg_watch
+	local gsm_watch
 
 	if conn then
 		local werr
@@ -487,14 +702,28 @@ function M.run(scope, params)
 			closed_kind = 'config_closed',
 		})
 		if not cfg_watch then error(werr or 'net config watch failed', 2) end
+
+		if params.gsm_uplink_watch ~= false then
+			local gerr
+			gsm_watch, gerr = gsm_uplink_watch.open(conn, {
+				queue_len = params.gsm_uplink_queue_len or ((backpressure.policy.gsm_uplinks and backpressure.policy.gsm_uplinks.queue_len) or 8),
+				full = params.gsm_uplink_full or ((backpressure.policy.gsm_uplinks and backpressure.policy.gsm_uplinks.full) or 'reject_newest'),
+			})
+			if not gsm_watch then error(gerr or 'net gsm uplink watch failed', 2) end
+		end
 	end
 
-	local cap_resolver
-	local hal = params.hal
-	if not hal then
-		cap_resolver = assert(cap_resolver_mod.open(conn, params.hal_client or {}))
-		hal = hal_client_mod.new(conn, cap_resolver:client_opts(params.hal_client or {}))
-	end
+	local cap_deps = assert(cap_deps_mod.open(conn, {
+		{ key = 'network_config', class = 'network-config', ref = params.hal_client and params.hal_client.network_config_cap, required = true },
+		{ key = 'network_state', class = 'network-state', ref = params.hal_client and params.hal_client.network_state_cap, required = false },
+		{ key = 'network_diagnostics', class = 'network-diagnostics', ref = params.hal_client and params.hal_client.network_diagnostics_cap, required = false },
+	}, params.hal_client or {}))
+
+	local hal = params.hal or hal_client_mod.new(conn, {
+		network_config_cap = cap_deps:ref('network_config'),
+		network_state_cap = cap_deps:ref('network_state'),
+		network_diagnostics_cap = cap_deps:ref('network_diagnostics'),
+	})
 
 	local state = {
 		conn = conn,
@@ -505,6 +734,7 @@ function M.run(scope, params)
 		published = published,
 		dirty = dirty,
 		config_watch = cfg_watch,
+		gsm_uplink_watch = gsm_watch,
 		observed_sub = nil,
 		observer = nil,
 		observe = params.observe ~= false,
@@ -515,8 +745,8 @@ function M.run(scope, params)
 		done_rx = done_rx,
 		pending = {},
 		hal = hal,
-		cap_resolver = cap_resolver,
-		capability_status_subs = cap_resolver and cap_resolver.status_subs or nil,
+		cap_deps = cap_deps,
+		capability_status_subs = nil,
 		next_generation = 1,
 		next_apply_id = 1,
 		next_speedtest_id = 1,
@@ -525,6 +755,8 @@ function M.run(scope, params)
 		active_weight_apply = nil,
 		current_generation = nil,
 		active_apply = nil,
+		pending_intent = nil,
+		pending_apply_reason = nil,
 		now = now,
 	}
 	state.mark_dirty = function(kind, name)
@@ -539,7 +771,8 @@ function M.run(scope, params)
 		cancel_active_generation(state, reason)
 		stop_observer(state, reason)
 		if cfg_watch then cfg_watch:close(); cfg_watch = nil end
-		if cap_resolver then cap_resolver:close(); cap_resolver = nil end
+		if gsm_watch then gsm_watch:close(); gsm_watch = nil end
+		cap_deps:terminate(reason)
 		done_tx:close(reason)
 		publisher.cleanup_now(conn, published)
 		model:terminate(reason)
@@ -551,9 +784,8 @@ function M.run(scope, params)
 		obs_log(svc, 'info', { what = 'service_start' })
 	end
 
-	update_hal_statuses(state)
 	set_model_state(state, 'waiting_for_config', 'no_config')
-	if state.observe ~= false then ensure_observer_started(state, 'service_start') end
+	reconcile_observer_admission(state, 'service_start')
 	publish_snapshot(state)
 
 	if params.config ~= nil then

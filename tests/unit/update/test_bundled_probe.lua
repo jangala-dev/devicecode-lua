@@ -1,8 +1,8 @@
 local fibers = require 'fibers'
 local mailbox = require 'fibers.mailbox'
 local op = require 'fibers.op'
-local store_cap = require 'services.update.artifacts.store_cap'
 local bundled_probe = require 'services.update.bundled_probe'
+local bundled_apply = require 'services.update.bundled_apply'
 local bundled = require 'services.update.bundled'
 
 local tests = {}
@@ -10,12 +10,64 @@ local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a,b,msg) if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end end
 local function assert_true(v,msg) if v ~= true then fail(msg or ('expected true, got '..tostring(v))) end end
 
+
+local function import_store(ref)
+	return {
+		import_path_op = function (_, path, meta, opts)
+			return op.always({ artifact_ref = ref or 'artifact-1', path = path, meta = meta, policy = opts and opts.policy }, nil)
+		end,
+	}
+end
+
+local function fake_jobs()
+	local state = { jobs = {}, transitions = {} }
+	function state:ready_op()
+		return op.always(true, nil)
+	end
+	function state:get(job_id)
+		return self.jobs[job_id]
+	end
+	function state:admit_transition(cmd)
+		self.transitions[#self.transitions + 1] = cmd
+		local result
+		if cmd.kind == 'create_job' then
+			local payload = cmd.payload or {}
+			if self.jobs[payload.job_id] then
+				result = { status = 'rejected', reason = 'job_exists', job_id = payload.job_id }
+			else
+				local job = {
+					job_id = payload.job_id,
+					component = payload.component,
+					artifact_ref = payload.artifact_ref,
+					artifact = payload.artifact,
+					metadata = payload.metadata,
+					state = 'created',
+					next_step = 'start',
+				}
+				self.jobs[job.job_id] = job
+				result = { status = 'persisted', job_id = job.job_id, job = job }
+			end
+		elseif cmd.kind == 'start_job' then
+			local job = assert(self.jobs[cmd.job_id], 'start missing job')
+			job.state = 'staging'
+			job.active_intent = { phase = cmd.phase or 'stage', state = 'pending' }
+			result = { status = 'persisted', job_id = job.job_id, phase = cmd.phase or 'stage', job = job }
+		else
+			result = { status = 'rejected', reason = 'unsupported' }
+		end
+		return {
+			outcome_op = function () return op.always(result, nil) end,
+		}, nil
+	end
+	return state
+end
+
 local function probe_store()
-	return store_cap.wrap({
+	return {
 		probe_op = function (_, source)
 			return op.always({ identity = source.identity or 'desired-1' }, nil)
 		end,
-	})
+	}
 end
 
 function tests.test_bundled_probe_reports_completion_without_inline_policy()
@@ -56,6 +108,94 @@ function tests.test_bundled_coordinator_starts_probe_and_applies_stored_result()
 		local snap = co:snapshot()
 		assert_eq(snap.state.cm5, 'desired_known')
 		assert_eq(snap.desired.cm5.identity, 'desired-cm5')
+	end)
+end
+
+
+function tests.test_bundled_probe_imports_fixed_file_to_artifact_ref()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(4, { full = 'reject_newest' })
+		assert(bundled_probe.start({
+			lifetime_scope = scope,
+			report_scope = scope,
+			service_id = 'update',
+			generation = 8,
+			component = 'mcu',
+			artifact_store = import_store('mcu-artifact'),
+			source = { kind = 'file', path = '/data/devicecode/artifacts/import/mcu.dcmcu', policy = 'prefer_durable' },
+			done_tx = tx,
+		}))
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'bundled_probe_done')
+		assert_eq(ev.status, 'ok')
+		assert_eq(ev.result.artifact_ref, 'mcu-artifact')
+		assert_eq(ev.result.desired.path, '/data/devicecode/artifacts/import/mcu.dcmcu')
+	end)
+end
+
+function tests.test_bundled_apply_creates_and_optionally_starts_normal_job()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(4, { full = 'reject_newest' })
+		local jobs = fake_jobs()
+		assert(bundled_apply.start({
+			lifetime_scope = scope,
+			report_scope = scope,
+			service_id = 'update',
+			generation = 9,
+			component = 'mcu',
+			jobs = jobs,
+			spec = { component = 'mcu', auto_start = true, source = { metadata = { format = 'dcmcu-v1' } } },
+			desired = { artifact_ref = 'mcu-artifact', artifact = { artifact_ref = 'mcu-artifact' } },
+			done_tx = tx,
+		}))
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'bundled_apply_done')
+		assert_eq(ev.status, 'ok')
+		assert_eq(ev.result.job_id, 'bundled-mcu')
+		assert_eq(jobs.jobs['bundled-mcu'].artifact_ref, 'mcu-artifact')
+		assert_eq(jobs.jobs['bundled-mcu'].state, 'staging')
+		assert_eq(#jobs.transitions, 2)
+	end)
+end
+
+function tests.test_bundled_coordinator_probe_then_apply_policy()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(4, { full = 'reject_newest' })
+		local jobs = fake_jobs()
+		local co = bundled.new({
+			service_id = 'update',
+			generation = 10,
+			config = {
+				enabled = true,
+				components = {
+					mcu = {
+						component = 'mcu',
+						source = { kind = 'file', path = 'mcu.dcmcu' },
+						auto_create = true,
+						auto_start = true,
+					},
+				},
+			},
+		})
+		assert(co:start_missing_probes({
+			lifetime_scope = scope,
+			report_scope = scope,
+			artifact_store = import_store('mcu-artifact'),
+			done_tx = tx,
+		}))
+		local probe_ev = fibers.perform(rx:recv_op())
+		assert_true(co:handle_probe_done(probe_ev))
+		assert(co:start_ready_applies({
+			lifetime_scope = scope,
+			report_scope = scope,
+			jobs = jobs,
+			done_tx = tx,
+		}))
+		local apply_ev = fibers.perform(rx:recv_op())
+		assert_true(co:handle_apply_done(apply_ev))
+		local snap = co:snapshot()
+		assert_eq(snap.state.mcu, 'applied')
+		assert_eq(jobs.jobs['bundled-mcu'].state, 'staging')
 	end)
 end
 

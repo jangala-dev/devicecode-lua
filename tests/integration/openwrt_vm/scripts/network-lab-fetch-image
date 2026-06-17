@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/network-lab-env"
+
+mkdir -p "$NETWORK_LAB_IMAGE_DIR"
+
+if [ ! -f "$NETWORK_LAB_BASE_IMAGE" ]; then
+	echo "[network-lab] fetching base image: $NETWORK_LAB_BASE_IMAGE_URL"
+	tmp="${NETWORK_LAB_BASE_IMAGE}.tmp"
+	rm -f "$tmp"
+	curl -fL "$NETWORK_LAB_BASE_IMAGE_URL" -o "$tmp"
+	mv "$tmp" "$NETWORK_LAB_BASE_IMAGE"
+fi
+
+echo "[network-lab] base image ready: $NETWORK_LAB_BASE_IMAGE"

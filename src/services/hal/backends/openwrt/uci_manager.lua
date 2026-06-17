@@ -27,15 +27,41 @@ local fibers = require 'fibers'
 local sleep = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 local queue = require 'devicecode.support.queue'
+local file = require 'fibers.io.file'
 
 local M = {}
 local Manager = {}
 Manager.__index = Manager
 
+local ActivationRunner = {}
+ActivationRunner.__index = ActivationRunner
+
 local Session = {}
 Session.__index = Session
 
 local unpack = rawget(table, 'unpack') or _G.unpack
+
+local function elapsed_ms(t0)
+	if not t0 then return nil end
+	return math.floor(((fibers.now() - t0) * 1000) + 0.5)
+end
+
+local function log_manager(self, level, payload)
+	local logger = self and self._logger
+	if logger and type(logger[level]) == 'function' then
+		payload = payload or {}
+		payload.component = payload.component or 'uci_manager'
+		logger[level](logger, payload)
+	end
+end
+
+local function trace_fields(trace)
+	local out = {}
+	if type(trace) == 'table' then
+		for k, v in pairs(trace) do out[k] = v end
+	end
+	return out
+end
 
 local function shallow_copy(t)
 	local out = {}
@@ -74,8 +100,30 @@ local function array_copy(t)
 	return out
 end
 
+local function ensure_pkg_file(confdir, pkg)
+	if type(confdir) ~= 'string' or confdir == '' or type(pkg) ~= 'string' or pkg == '' then return true, nil end
+	local path = confdir .. '/' .. pkg
+
+	local f = file.open(path, 'r')
+	if f then f:close(); return true, nil end
+
+	local err
+	f, err = file.open(path, 'w')
+	if not f then return nil, tostring(err) end
+	local ok, werr = fibers.perform(f:write_op(''))
+	local cok, cerr = f:close()
+	if ok == false or ok == nil then return nil, tostring(werr or 'failed to create UCI package file ' .. path) end
+	if cok == false or cok == nil then return nil, tostring(cerr or 'failed to close UCI package file ' .. path) end
+	return true, nil
+end
+
 local function is_uci_identifier(s)
 	return type(s) == 'string' and s ~= '' and s:match('^[A-Za-z0-9_]+$') ~= nil
+end
+
+-- UCI section types (e.g. wifi-device, wifi-iface) may contain hyphens.
+local function is_uci_section_type(s)
+	return type(s) == 'string' and s ~= '' and s:match('^[A-Za-z0-9_%-]+$') ~= nil
 end
 
 local function validate_pkg(s, label)
@@ -132,8 +180,8 @@ local function validate_change(record, ch, i)
 	end
 
 	if op == 'add' then
-		if not is_uci_identifier(ch.stype or ch.section_type or ch.option) then
-			return nil, 'change ' .. i .. ' section type must be a UCI identifier'
+		if not is_uci_section_type(ch.stype or ch.section_type or ch.option) then
+			return nil, 'change ' .. i .. ' section type must be a valid UCI section type'
 		end
 		if ch.alias ~= nil and (type(ch.alias) ~= 'string' or ch.alias == '') then
 			return nil, 'change ' .. i .. ' alias must be a non-empty string when present'
@@ -149,7 +197,7 @@ local function validate_change(record, ch, i)
 			return nil, 'change ' .. i .. ' option/section type required'
 		end
 		if ch.value == nil then
-			if not is_uci_identifier(ch.option) then
+			if not is_uci_section_type(ch.option) then
 				return nil, 'change ' .. i .. ' named section type must be a UCI identifier'
 			end
 		else
@@ -230,16 +278,20 @@ local function normalise_restart_cmds(cmds)
 	for i = 1, #cmds do
 		local entry = cmds[i]
 		local argv, err
+		local wait = true
 		if type(entry) == 'table' and type(entry[1]) == 'string' then
 			local ok, verr = validate_argv(entry, 'restart_cmds[' .. i .. ']')
 			if ok ~= true then return nil, verr end
+			wait = entry.wait ~= false and entry.async ~= true
 			argv = normalise_legacy_argv(array_copy(entry))
 		elseif type(entry) == 'table' then
+			wait = entry.wait ~= false and entry.async ~= true
 			argv, err = semantic_reload_to_argv(entry)
 			if not argv then return nil, err end
 		else
 			return nil, 'restart_cmds[' .. i .. '] must be an argv or semantic reload table'
 		end
+		argv.wait = wait
 		out[#out + 1] = argv
 	end
 	return out, nil
@@ -256,6 +308,7 @@ local function normalise_record(record)
 		config = record.config,
 		changes = copy_changes(record.changes),
 		reply_tx = record.reply_tx,
+		replace_package = record.replace_package == true,
 	}
 	for i, ch in ipairs(out.changes) do
 		local ok, err = validate_change(out, ch, i)
@@ -465,6 +518,11 @@ local function apply_with_cursor(cursor, record)
 	if not cursor then
 		return true, nil -- explicit fake/no-uci mode for tests and non-OpenWrt hosts.
 	end
+	if type(cursor.load) == 'function' then pcall(function () cursor:load(record.config) end) end
+	if record.replace_package == true then
+		local ok, err = delete_all_sections(cursor, record.config)
+		if ok ~= true then return nil, err end
+	end
 	local aliases = {}
 	for _, change in ipairs(record.changes) do
 		local op = change.op
@@ -535,6 +593,8 @@ local function default_run_cmd(argv)
 	return true, nil
 end
 
+local NO_ACTIVATION = {}
+
 local function restart_key(argv)
 	return table.concat(argv, '\0')
 end
@@ -548,9 +608,13 @@ local function trim_restarts(record_results)
 				local key = restart_key(argv)
 				local entry = seen[key]
 				if not entry then
-					entry = { argv = argv, sessions = {} }
+					entry = { argv = argv, wait = argv.wait ~= false, sessions = {} }
 					seen[key] = entry
 					entries[#entries + 1] = entry
+				elseif argv.wait ~= false then
+					-- If any caller requires a synchronous restart, keep the shared
+					-- deduplicated command synchronous for all sessions that depend on it.
+					entry.wait = true
 				end
 				local duplicate = false
 				for _, s in ipairs(entry.sessions) do
@@ -561,6 +625,203 @@ local function trim_restarts(record_results)
 		end
 	end
 	return entries
+end
+
+local function split_activation_entries(entries)
+	local sync, async = {}, {}
+	for _, entry in ipairs(entries or {}) do
+		if entry.wait ~= false then sync[#sync + 1] = entry else async[#async + 1] = entry end
+	end
+	return sync, async
+end
+
+local function activation_entry_count(entries)
+	return #(entries or {})
+end
+
+local function activation_argvs(entries)
+	local out = {}
+	for i, entry in ipairs(entries or {}) do out[i] = array_copy(entry.argv or {}) end
+	return out
+end
+
+local function new_activation_runner(manager)
+	local tx, rx = mailbox.new(8, { full = 'drop_oldest' })
+	return setmetatable({
+		_manager = manager,
+		_tx = tx,
+		_rx = rx,
+		_closed = false,
+		_next_id = 0,
+		_latest_id = 0,
+		_running_id = nil,
+		_status = { state = 'idle' },
+	}, ActivationRunner)
+end
+
+function ActivationRunner:submit(entries, trace)
+	if self._closed then return nil, 'activation runner closed' end
+	if activation_entry_count(entries) == 0 then
+		return { state = 'none', commands = 0 }, nil
+	end
+	self._next_id = (self._next_id or 0) + 1
+	local item = {
+		id = self._next_id,
+		entries = entries,
+		trace = trace_fields(trace),
+		submitted_at = fibers.now(),
+	}
+	self._latest_id = item.id
+	local ok, err = queue.try_admit_now(self._tx, item)
+	if ok ~= true then return nil, err or 'activation runner busy' end
+	self._status = {
+		state = self._running_id and 'queued' or 'scheduled',
+		generation = item.id,
+		commands = activation_entry_count(entries),
+		submitted_at = item.submitted_at,
+	}
+	log_manager(self._manager, 'info', (function ()
+		local p = trace_fields(trace)
+		p.what = 'uci_activation_scheduled'
+		p.activation_id = item.id
+		p.commands = activation_entry_count(entries)
+		p.argvs = activation_argvs(entries)
+		return p
+	end)())
+	return {
+		state = 'scheduled',
+		generation = item.id,
+		commands = activation_entry_count(entries),
+	}, nil
+end
+
+function ActivationRunner:status()
+	return deep_copy(self._status or { state = 'idle' })
+end
+
+function ActivationRunner:_next_item(owner_scope)
+	local arms = { item = self._rx:recv_op() }
+	if owner_scope and type(owner_scope.close_op) == 'function' then arms.closed = owner_scope:close_op() end
+	local which, item = fibers.perform(fibers.named_choice(arms))
+	if which == 'closed' or item == nil then return nil end
+
+	local drained = 0
+	while true do
+		local newer = queue.try_now(self._rx:recv_op(), NO_ACTIVATION)
+		if newer == NO_ACTIVATION or newer == nil then break end
+		item = newer
+		drained = drained + 1
+	end
+	if drained > 0 then
+		log_manager(self._manager, 'info', (function ()
+			local p = trace_fields(item.trace)
+			p.what = 'uci_activation_coalesced'
+			p.activation_id = item.id
+			p.dropped = drained
+			return p
+		end)())
+	end
+	return item
+end
+
+function ActivationRunner:_run_entry(entry, trace, activation_id)
+	local argv = entry.argv or {}
+	local t0 = fibers.now()
+	log_manager(self._manager, 'info', (function ()
+		local p = trace_fields(trace)
+		p.what = 'uci_activation_command_begin'
+		p.activation_id = activation_id
+		p.argv = array_copy(argv)
+		return p
+	end)())
+	local ok, err = self._manager._run_cmd(argv)
+	log_manager(self._manager, ok == true and 'info' or 'warn', (function ()
+		local p = trace_fields(trace)
+		p.what = 'uci_activation_command_done'
+		p.activation_id = activation_id
+		p.argv = array_copy(argv)
+		p.ok = ok == true
+		p.err = err
+		p.elapsed_ms = elapsed_ms(t0)
+		return p
+	end)())
+	return ok == true, err
+end
+
+function ActivationRunner:_run(owner_scope)
+	while self._closed ~= true do
+		local item = self:_next_item(owner_scope)
+		if item == nil then return end
+		self._running_id = item.id
+		local t0 = fibers.now()
+		self._status = {
+			state = 'running',
+			generation = item.id,
+			commands = activation_entry_count(item.entries),
+			started_at = t0,
+		}
+		log_manager(self._manager, 'info', (function ()
+			local p = trace_fields(item.trace)
+			p.what = 'uci_activation_runner_begin'
+			p.activation_id = item.id
+			p.commands = activation_entry_count(item.entries)
+			p.argvs = activation_argvs(item.entries)
+			return p
+		end)())
+
+		local ok, err = true, nil
+		for _, entry in ipairs(item.entries or {}) do
+			local rok, rerr = self:_run_entry(entry, item.trace, item.id)
+			if rok ~= true then ok, err = false, rerr; break end
+		end
+
+		local stale = item.id < (self._latest_id or item.id)
+		self._status = {
+			state = ok and 'done' or 'failed',
+			generation = item.id,
+			commands = activation_entry_count(item.entries),
+			ok = ok == true,
+			err = err,
+			stale = stale,
+			elapsed_ms = elapsed_ms(t0),
+		}
+		if ok ~= true then
+			self._manager._last_activation_error = {
+				activation_id = item.id,
+				err = tostring(err or 'activation failed'),
+			}
+		end
+		log_manager(self._manager, ok == true and 'info' or 'warn', (function ()
+			local p = trace_fields(item.trace)
+			p.what = 'uci_activation_runner_done'
+			p.activation_id = item.id
+			p.ok = ok == true
+			p.err = err
+			p.stale = stale
+			p.elapsed_ms = elapsed_ms(t0)
+			return p
+		end)())
+		self._running_id = nil
+	end
+end
+
+function ActivationRunner:start(scope)
+	if self._closed then return nil, 'activation runner closed' end
+	if self._scope then return true, nil end
+	scope = scope or fibers.current_scope()
+	if not scope then return nil, 'scope required' end
+	self._scope = scope
+	local ok, err = scope:spawn(function (worker_scope) self:_run(worker_scope) end)
+	if ok ~= true then return nil, err or 'activation runner spawn failed' end
+	return true, nil
+end
+
+function ActivationRunner:terminate(reason)
+	if self._closed then return true, nil end
+	self._closed = true
+	self._tx:close(reason or 'activation runner terminated')
+	self._scope = nil
+	return true, nil
 end
 
 local function make_cursor(opts)
@@ -582,7 +843,9 @@ function M.new(opts)
 	if cursor == nil and opts.allow_fake == false then
 		return nil, cursor_note or 'uci unavailable'
 	end
-	return setmetatable({
+	local confdir = opts.confdir
+	if confdir == nil and opts.cursor == nil and cursor ~= nil then confdir = '/etc/config' end
+	local mgr = setmetatable({
 		_tx = tx,
 		_rx = rx,
 		_scope = nil,
@@ -590,24 +853,52 @@ function M.new(opts)
 		_cursor = cursor,
 		_cursor_note = cursor_note,
 		_fake = cursor == nil,
+		_confdir = confdir,
+		_savedir = opts.savedir,
 		_debounce_s = tonumber(opts.debounce_s) or 0.1,
 		_run_cmd = opts.run_cmd or default_run_cmd,
 		_run_cmd_explicit = type(opts.run_cmd) == 'function',
+		_logger = opts.logger,
 		_pending = {},
 	}, Manager)
+	mgr._activation = new_activation_runner(mgr)
+	return mgr
 end
 
-function Manager:start(scope)
+function Manager:start(owner_scope)
 	if self._closed then return nil, 'closed' end
 	if self._scope then return true, nil end
-	scope = scope or fibers.current_scope()
-	if not scope then return nil, 'scope required' end
-	self._scope = scope
-	scope:finally(function (_, status, primary)
+	owner_scope = owner_scope or fibers.current_scope()
+	if not owner_scope then return nil, 'owner scope required' end
+
+	-- The UCI manager is long-lived owned work under the supplied lifetime
+	-- scope.  Do not install finalisers on owner_scope here: lua-fibers only
+	-- permits scope:finally on an already-started scope from inside that same
+	-- scope.  Provider apply calls may start the manager from a request fibre,
+	-- so create a private child scope and install its finaliser before it starts.
+	local child, cerr = owner_scope:child()
+	if not child then return nil, cerr or 'uci manager scope create failed' end
+
+	self._scope = child
+	child:finally(function (_, status, primary)
 		self:terminate(primary or status or 'uci manager closed')
 	end)
-	local ok, err = scope:spawn(function (worker_scope) self:_run(worker_scope) end)
-	if ok ~= true then return nil, err or 'uci manager spawn failed' end
+
+	local aok, aerr = self._activation:start(child)
+	if aok ~= true then
+		self._scope = nil
+		child:cancel(aerr or 'activation runner start failed')
+		return nil, aerr or 'activation runner start failed'
+	end
+
+	local ok, err = child:spawn(function (worker_scope) self:_run(worker_scope) end)
+	if ok ~= true then
+		self._activation:terminate(err or 'uci manager spawn failed')
+		self._scope = nil
+		child:cancel(err or 'uci manager spawn failed')
+		return nil, err or 'uci manager spawn failed'
+	end
+
 	return true, nil
 end
 
@@ -633,8 +924,106 @@ function Manager:_collect_batch(first_item, owner_scope)
 	return batch
 end
 
+function Manager:_ensure_packages(packages, trace)
+	local t0 = fibers.now()
+	log_manager(self, 'debug', (function ()
+		local p = trace_fields(trace)
+		p.what = 'uci_ensure_packages_begin'
+		p.packages = packages or {}
+		return p
+	end)())
+	if self._fake == true then
+		log_manager(self, 'debug', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_ensure_packages_done'
+			p.fake = true
+			p.elapsed_ms = elapsed_ms(t0)
+			return p
+		end)())
+		return true, nil
+	end
+	if type(self._confdir) == 'string' and self._confdir ~= '' then
+		local ok, err = file.mkdir_p(self._confdir)
+		if ok ~= true then
+			log_manager(self, 'warn', (function ()
+				local p = trace_fields(trace)
+				p.what = 'uci_ensure_packages_done'
+				p.ok = false
+				p.err = 'failed to create UCI confdir ' .. self._confdir .. ': ' .. tostring(err)
+				p.elapsed_ms = elapsed_ms(t0)
+				return p
+			end)())
+			return nil, 'failed to create UCI confdir ' .. self._confdir .. ': ' .. tostring(err)
+		end
+	end
+	for _, pkg in ipairs(packages or {}) do
+		local pkg_t0 = fibers.now()
+		local ok, err = ensure_pkg_file(self._confdir, pkg)
+		log_manager(self, ok == true and 'debug' or 'warn', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_ensure_package_file'
+			p.package = pkg
+			p.ok = ok == true
+			p.err = err
+			p.elapsed_ms = elapsed_ms(pkg_t0)
+			return p
+		end)())
+		if ok ~= true then return nil, err end
+		if self._cursor and type(self._cursor.load) == 'function' then pcall(function () self._cursor:load(pkg) end) end
+	end
+	log_manager(self, 'debug', (function ()
+		local p = trace_fields(trace)
+		p.what = 'uci_ensure_packages_done'
+		p.ok = true
+		p.elapsed_ms = elapsed_ms(t0)
+		return p
+	end)())
+	return true, nil
+end
+
+function Manager:_run_restart_entry(entry, trace)
+	local wait = entry.wait ~= false
+	log_manager(self, 'info', (function ()
+		local p = trace_fields(trace)
+		p.what = wait and 'uci_activation_begin' or 'uci_activation_schedule_begin'
+		p.argv = array_copy(entry.argv or {})
+		p.wait = wait
+		return p
+	end)())
+	if wait then
+		local t0 = fibers.now()
+		local ok, err = self._run_cmd(entry.argv)
+		log_manager(self, ok == true and 'info' or 'warn', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_activation_done'
+			p.argv = array_copy(entry.argv or {})
+			p.ok = ok == true
+			p.err = err
+			p.elapsed_ms = elapsed_ms(t0)
+			return p
+		end)())
+		return ok, err
+	end
+	local activation, err = self:_schedule_activation({ entry }, trace)
+	return activation ~= nil, err
+end
+
+function Manager:_schedule_activation(entries, trace)
+	if not entries or #entries == 0 then return { state = 'none', commands = 0 }, nil end
+	if not self._activation then return nil, 'activation runner unavailable' end
+	return self._activation:submit(entries, trace)
+end
+
 function Manager:_apply_batch(batch)
 	local results = {}
+	local pkgs = record_packages((function () local rs = {}; for _, item in ipairs(batch or {}) do rs[#rs + 1] = item.record end; return rs end)())
+	local eok, eerr = self:_ensure_packages(pkgs)
+	if eok ~= true then
+		for _, item in ipairs(batch or {}) do
+			if item.reply_tx then queue.try_admit_now(item.reply_tx, { ok = false, err = tostring(eerr) }) end
+		end
+		return
+	end
 	for _, item in ipairs(batch) do
 		local record = item.record
 		local ok, err
@@ -648,8 +1037,9 @@ function Manager:_apply_batch(batch)
 	end
 
 	local restart_entries = trim_restarts(results)
-	for _, entry in ipairs(restart_entries) do
-		local rok, rerr = self._run_cmd(entry.argv)
+	local sync_entries, async_entries = split_activation_entries(restart_entries)
+	for _, entry in ipairs(sync_entries) do
+		local rok, rerr = self:_run_restart_entry(entry)
 		if rok ~= true then
 			for _, res in ipairs(entry.sessions) do
 				res.ok = false
@@ -657,10 +1047,22 @@ function Manager:_apply_batch(batch)
 			end
 		end
 	end
+	local activation, aerr = nil, nil
+	if #async_entries > 0 then
+		activation, aerr = self:_schedule_activation(async_entries)
+		if activation == nil then
+			for _, entry in ipairs(async_entries) do
+				for _, res in ipairs(entry.sessions) do
+					res.ok = false
+					res.err = res.err ~= '' and (res.err .. '; ' .. tostring(aerr)) or tostring(aerr)
+				end
+			end
+		end
+	end
 
 	for _, res in ipairs(results) do
 		if res.item.reply_tx then
-			local ok = queue.try_admit_now(res.item.reply_tx, { ok = res.ok, err = res.err })
+			local ok = queue.try_admit_now(res.item.reply_tx, { ok = res.ok, err = res.err, activation = activation })
 			if ok ~= true then
 				-- The caller has stopped waiting.  This is not a manager failure.
 			end
@@ -670,21 +1072,72 @@ end
 
 
 function Manager:_apply_transaction(item)
+	local t0 = fibers.now()
 	local tx = item.transaction or {}
 	local records = tx.records or {}
 	local packages = tx.packages or record_packages(records)
+	local trace = tx.trace or {}
+	log_manager(self, 'info', (function ()
+		local p = trace_fields(trace)
+		p.what = 'uci_transaction_begin'
+		p.packages = packages
+		p.records = #records
+		return p
+	end)())
+	local eok, eerr = self:_ensure_packages(packages, trace)
+	if eok ~= true then
+		log_manager(self, 'warn', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_transaction_done'
+			p.ok = false
+			p.status = 'failed_no_change'
+			p.err = tostring(eerr)
+			p.elapsed_ms = elapsed_ms(t0)
+			return p
+		end)())
+		if item.reply_tx then queue.try_admit_now(item.reply_tx, { ok = false, status = 'failed_no_change', err = tostring(eerr), packages = packages }) end
+		return
+	end
+
 	local result = {
 		ok = true,
 		status = 'ok',
 		packages = packages,
 		rollback = { attempted = false, ok = nil, packages = {} },
+		timings = {},
 	}
 
+	local phase = fibers.now()
+	log_manager(self, 'debug', (function ()
+		local p = trace_fields(trace)
+		p.what = 'uci_snapshot_begin'
+		p.packages = packages
+		return p
+	end)())
 	local snapshots, snap_err = snapshot_packages(self._cursor, packages)
+	result.timings.snapshot_ms = elapsed_ms(phase)
+	log_manager(self, snapshots and 'debug' or 'warn', (function ()
+		local p = trace_fields(trace)
+		p.what = 'uci_snapshot_done'
+		p.ok = snapshots ~= nil
+		p.err = snap_err
+		p.elapsed_ms = elapsed_ms(phase)
+		return p
+	end)())
 	if snapshots == nil then
 		result.ok = false
 		result.status = 'failed_no_change'
 		result.err = snap_err
+		result.timings.total_ms = elapsed_ms(t0)
+		log_manager(self, 'warn', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_transaction_done'
+			p.ok = false
+			p.status = result.status
+			p.err = result.err
+			p.elapsed_ms = result.timings.total_ms
+			return p
+		end)())
 		if item.reply_tx then queue.try_admit_now(item.reply_tx, result) end
 		return
 	end
@@ -692,14 +1145,34 @@ function Manager:_apply_transaction(item)
 	local record_results = {}
 	local failed = nil
 	for _, record in ipairs(records) do
+		local rt0 = fibers.now()
+		log_manager(self, 'debug', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_record_apply_begin'
+			p.config = record.config
+			p.changes = #(record.changes or {})
+			p.replace_package = record.replace_package == true
+			return p
+		end)())
 		local ok, err
 		if self._closed then
 			ok, err = nil, 'uci manager closed'
 		else
 			ok, err = apply_with_cursor(self._cursor, record)
 		end
-		local res = { record = record, ok = ok == true, err = err or '' }
+		local record_ms = elapsed_ms(rt0)
+		log_manager(self, ok == true and 'debug' or 'warn', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_record_apply_done'
+			p.config = record.config
+			p.ok = ok == true
+			p.err = err
+			p.elapsed_ms = record_ms
+			return p
+		end)())
+		local res = { record = record, ok = ok == true, err = err or '', elapsed_ms = record_ms }
 		record_results[#record_results + 1] = res
+		result.timings['commit_' .. tostring(record.config) .. '_ms'] = record_ms
 		if ok ~= true then
 			failed = { step = 'uci_commit', config = record.config, err = err }
 			break
@@ -707,20 +1180,47 @@ function Manager:_apply_transaction(item)
 	end
 
 	if not failed then
+		phase = fibers.now()
 		local restart_entries = trim_restarts(record_results)
+		log_manager(self, 'info', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_activation_phase_begin'
+			p.entries = #restart_entries
+			p.fake = self._fake == true
+			return p
+		end)())
 		if self._fake == true and self._run_cmd_explicit ~= true then
 			-- In fake-UCI mode there is no OpenWrt system to reload.  Unit tests and
 			-- non-OpenWrt hosts should still exercise validation, reconciliation and
 			-- transaction/rollback semantics without attempting /etc/init.d commands.
 		else
-			for _, entry in ipairs(restart_entries) do
-				local rok, rerr = self._run_cmd(entry.argv)
+			local sync_entries, async_entries = split_activation_entries(restart_entries)
+			for _, entry in ipairs(sync_entries) do
+				local rok, rerr = self:_run_restart_entry(entry, trace)
 				if rok ~= true then
 					failed = { step = 'restart', argv = entry.argv, err = rerr }
 					break
 				end
 			end
+			if not failed and #async_entries > 0 then
+				local activation, aerr = self:_schedule_activation(async_entries, trace)
+				if activation then
+					result.activation = activation
+				else
+					failed = { step = 'activation_schedule', err = aerr }
+				end
+			end
 		end
+		result.timings.activation_ms = elapsed_ms(phase)
+		log_manager(self, failed and 'warn' or 'info', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_activation_phase_done'
+			p.ok = failed == nil
+			p.err = failed and failed.err or nil
+			p.activation = result.activation
+			p.elapsed_ms = result.timings.activation_ms
+			return p
+		end)())
 	end
 
 	if failed then
@@ -730,9 +1230,26 @@ function Manager:_apply_transaction(item)
 		result.err = tostring(failed.err or failed.step or 'uci transaction failed')
 		if tx.rollback ~= false then
 			result.rollback.attempted = true
+			phase = fibers.now()
+			log_manager(self, 'warn', (function ()
+				local p = trace_fields(trace)
+				p.what = 'uci_rollback_begin'
+				p.failed_step = failed.step
+				p.failed_config = failed.config
+				return p
+			end)())
 			local rok, rerr, restored = restore_packages(self._cursor, snapshots, packages)
+			result.timings.rollback_ms = elapsed_ms(phase)
 			result.rollback.ok = rok == true
 			result.rollback.packages = restored or {}
+			log_manager(self, rok == true and 'info' or 'warn', (function ()
+				local p = trace_fields(trace)
+				p.what = 'uci_rollback_done'
+				p.ok = rok == true
+				p.err = rerr
+				p.elapsed_ms = result.timings.rollback_ms
+				return p
+			end)())
 			if rok == true then
 				result.status = 'failed_rolled_back'
 			else
@@ -744,7 +1261,30 @@ function Manager:_apply_transaction(item)
 		end
 	end
 
-	if item.reply_tx then queue.try_admit_now(item.reply_tx, result) end
+	result.timings.total_ms = elapsed_ms(t0)
+	log_manager(self, result.ok == true and 'info' or 'warn', (function ()
+		local p = trace_fields(trace)
+		p.what = 'uci_transaction_done'
+		p.ok = result.ok == true
+		p.status = result.status
+		p.err = result.err
+		p.failed_step = result.failed_step
+		p.failed_config = result.failed_config
+		p.activation = result.activation
+		p.elapsed_ms = result.timings.total_ms
+		return p
+	end)())
+
+	if item.reply_tx then
+		local sent = queue.try_admit_now(item.reply_tx, result)
+		log_manager(self, sent == true and 'debug' or 'warn', (function ()
+			local p = trace_fields(trace)
+			p.what = 'uci_transaction_reply'
+			p.sent = sent == true
+			p.elapsed_ms = elapsed_ms(t0)
+			return p
+		end)())
+	end
 end
 
 function Manager:_run(owner_scope)
@@ -790,6 +1330,7 @@ function Manager:transaction_op(spec, opts)
 				records = records,
 				packages = spec.packages or record_packages(records),
 				rollback = spec.rollback ~= false,
+				trace = opts.trace,
 			},
 			reply_tx = reply_tx,
 		})
@@ -843,9 +1384,18 @@ end
 function Manager:terminate(reason)
 	if self._closed then return true, nil end
 	self._closed = true
-	self._tx:close(reason or 'uci manager terminated')
+	local why = reason or 'uci manager terminated'
+	if self._activation then self._activation:terminate(why) end
+	self._tx:close(why)
+	local scope = self._scope
 	self._scope = nil
+	if scope then scope:cancel(why) end
 	return true, nil
+end
+
+function Manager:activation_status()
+	if not self._activation then return { state = 'unavailable' } end
+	return self._activation:status()
 end
 
 function Manager:fake_mode()

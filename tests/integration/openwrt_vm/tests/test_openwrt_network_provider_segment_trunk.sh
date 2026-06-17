@@ -22,6 +22,7 @@ package.path = table.concat({
 local fibers = require 'fibers'
 local uci = require 'uci'
 local provider_loader = require 'services.hal.backends.network.provider'
+local names_mod = require 'services.hal.backends.network.providers.openwrt.names'
 local perform = fibers.perform
 
 local function fail(msg) error(msg, 2) end
@@ -49,6 +50,7 @@ for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
 end
 
 local restarts = {}
+local shaper_cmds, shaper_batches = {}, {}
 local provider = assert(provider_loader.new({
   provider = 'openwrt',
   confdir = conf,
@@ -56,6 +58,15 @@ local provider = assert(provider_loader.new({
   debounce_s = 0.01,
   platform = { segment_trunk = { ifname = 'eth0', protected = true } },
   run_cmd = function(argv) restarts[#restarts + 1] = table.concat(argv, ' '); return true, nil end,
+  shaper_run_cmd = function(argv)
+    local line = table.concat(argv, ' ')
+    shaper_cmds[#shaper_cmds + 1] = line
+    if argv[1] == 'tc' and argv[2] == '-batch' and type(argv[3]) == 'string' then
+      local f = io.open(argv[3], 'r')
+      if f then shaper_batches[#shaper_batches + 1] = f:read('*a') or ''; f:close() end
+    end
+    return true, nil
+  end,
 }, {}))
 
 local intent = {
@@ -95,6 +106,7 @@ local intent = {
       addressing = { ipv4 = { mode = 'static', cidr = '192.168.100.1/24' } },
       dhcp = { enabled = true, start = 20, limit = 50, leasetime = '12h' },
       firewall = { zone = 'lan' },
+      shaping = { profile = 'restricted' },
     },
     guest = {
       kind = 'guest', vlan = { id = 101 },
@@ -114,8 +126,10 @@ local intent = {
       guest = { input = 'REJECT', output = 'ACCEPT', forward = 'REJECT' },
     },
   },
-  routing = {}, wan = {}, shaping = {}, vpn = {}, diagnostics = {},
+  routing = {}, wan = {}, shaping = { enabled = true, profiles = { restricted = { egress = { enabled = true, host_rate = '2mbit', hosts = { ['192.168.100.2'] = { rate = '1mbit' } } } } } }, vpn = {}, diagnostics = {},
 }
+
+local name_ctx = assert(names_mod.allocate(intent))
 
 fibers.run(function()
   local valid = perform(provider:validate_op({ intent = intent }))
@@ -128,8 +142,36 @@ fibers.run(function()
   provider:terminate('test complete')
 end)
 
+if #shaper_cmds == 0 then fail('shaper commands expected for shaped trunk segment') end
+local shaper_text = table.concat(shaper_cmds, '\n') .. '\n' .. table.concat(shaper_batches, '\n')
+if not shaper_text:find('vl%-lan') then fail('trunk segment shaping should target generated VLAN device vl-lan, got: ' .. shaper_text) end
+if shaper_text:find('eth0%.100') then fail('trunk segment shaping must not target legacy eth0.100') end
+if not shaper_text:find('ifb_vl_lan') then fail('trunk segment ingress IFB should be derived from vl-lan') end
+
 local c = assert(uci.cursor(conf, save))
 for _, pkg in ipairs({ 'network', 'dhcp', 'firewall' }) do if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end end
+
+local function all(pkg)
+  if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end
+  return c:get_all(pkg) or {}
+end
+local function section_by_name(pkg, section, stype)
+  local sec = all(pkg)[section]
+  if type(sec) ~= 'table' then fail('section not found: ' .. pkg .. '.' .. tostring(section)) end
+  if stype ~= nil and sec['.type'] ~= stype then fail(pkg .. '.' .. tostring(section) .. ' expected type ' .. tostring(stype) .. ', got ' .. tostring(sec['.type'])) end
+  return section, sec
+end
+
+local function find_firewall_zone(zone_name)
+  for name, sec in pairs(all('firewall')) do
+    if type(sec) == 'table' and sec['.type'] == 'zone' and sec.name == zone_name then return name, sec end
+  end
+  fail('firewall zone not found: ' .. tostring(zone_name))
+end
+local function contains(list, value)
+  if type(list) == 'table' then for i = 1, #list do if list[i] == value then return true end end end
+  return list == value
+end
 
 local expected = {
   mgmt = { vid = '10', cidr_ip = '192.168.8.1', netmask = '255.255.255.0' },
@@ -139,27 +181,39 @@ local expected = {
   guest = { vid = '101', cidr_ip = '192.168.101.1', netmask = '255.255.255.0' },
 }
 
+local iface_by_seg = {}
 for seg, e in pairs(expected) do
-  local devsec = 'dev_seg_' .. seg
-  eq(c:get('network', devsec), 'device', devsec .. ' type')
-  eq(c:get('network', devsec, 'type'), '8021q', devsec .. ' device type')
-  eq(c:get('network', devsec, 'ifname'), 'eth0', devsec .. ' ifname')
-  eq(c:get('network', devsec, 'vid'), e.vid, devsec .. ' vid')
-  eq(c:get('network', devsec, 'name'), 'eth0.' .. e.vid, devsec .. ' name')
-  eq(c:get('network', seg), 'interface', seg .. ' interface type')
-  eq(c:get('network', seg, 'device'), 'eth0.' .. e.vid, seg .. ' device')
-  eq(c:get('network', seg, 'ipaddr'), e.cidr_ip, seg .. ' ipaddr')
-  eq(c:get('network', seg, 'netmask'), e.netmask, seg .. ' netmask')
+  local _vlan_sec, vlan = section_by_name('network', name_ctx:section('dev_vlan', seg), 'device')
+  eq(vlan.type, '8021q', seg .. ' vlan device type')
+  eq(vlan.ifname, 'eth0', seg .. ' vlan ifname')
+  eq(vlan.vid, e.vid, seg .. ' vid')
+  assert(#vlan.name <= 14, seg .. ' vlan name length')
+  local _br_sec, br = section_by_name('network', name_ctx:section('dev_bridge', seg), 'device')
+  eq(br.type, 'bridge', seg .. ' bridge device type')
+  assert_list_contains(br.ports, vlan.name, seg .. ' bridge ports')
+  assert(#br.name <= 14, seg .. ' bridge name length')
+  local ifsec, iface = section_by_name('network', name_ctx:iface(seg), 'interface')
+  iface_by_seg[seg] = ifsec
+  eq(iface.device, br.name, seg .. ' interface bridge device')
+  eq(iface.ipaddr, e.cidr_ip, seg .. ' ipaddr')
+  eq(iface.netmask, e.netmask, seg .. ' netmask')
+  assert(#ifsec <= 8, seg .. ' logical interface length')
 end
 
-eq(c:get('dhcp', 'lan'), 'dhcp', 'lan dhcp type')
-eq(c:get('dhcp', 'guest'), 'dhcp', 'guest dhcp type')
-eq(c:get('dhcp', 'mgmt', 'ignore'), '1', 'mgmt dhcp ignored')
+local _dhcp_lan_sec, dhcp_lan = section_by_name('dhcp', name_ctx:section('dhcp', 'lan'), 'dhcp')
+local _dhcp_guest_sec, dhcp_guest = section_by_name('dhcp', name_ctx:section('dhcp', 'guest'), 'dhcp')
+local _dhcp_mgmt_sec, dhcp_mgmt = section_by_name('dhcp', name_ctx:section('dhcp', 'mgmt'), 'dhcp')
+eq(dhcp_lan.interface, iface_by_seg.lan, 'lan dhcp interface')
+eq(dhcp_guest.interface, iface_by_seg.guest, 'guest dhcp interface')
+eq(dhcp_mgmt.ignore, '1', 'mgmt dhcp ignored')
 
-assert_list_contains(c:get('firewall', 'zone_lan', 'network'), 'lan', 'lan zone network')
-assert_list_contains(c:get('firewall', 'zone_guest', 'network'), 'guest', 'guest zone network')
-assert_list_contains(c:get('firewall', 'zone_system', 'network'), 'switch_control', 'system zone network')
-assert_list_contains(c:get('firewall', 'zone_system', 'network'), 'fabric', 'system zone network')
+local _zone_lan_sec, zone_lan = find_firewall_zone('lan')
+local _zone_guest_sec, zone_guest = find_firewall_zone('guest')
+local _zone_system_sec, zone_system = find_firewall_zone('system')
+assert_list_contains(zone_lan.network, iface_by_seg.lan, 'lan zone network')
+assert_list_contains(zone_guest.network, iface_by_seg.guest, 'guest zone network')
+assert_list_contains(zone_system.network, iface_by_seg.switch_control, 'system zone network')
+assert_list_contains(zone_system.network, iface_by_seg.fabric, 'system zone network')
 
 print('openwrt network provider segment trunk: ok')
 LUA

@@ -132,3 +132,8 @@ Fabric state is under state/fabric/...
 Public transfer manager is under cap/transfer-manager/...
 No Fabric coordinator branch waits on transport or bus calls.
 ```
+
+
+## Transport dependency admission
+
+HAL-backed Fabric links depend on their raw host transport capability. Missing status, `available=false`, or `no_route` during transport open are admission failures and should leave the generation waiting for transport. Transport accepted and then protocol/session failure is a Fabric domain failure.

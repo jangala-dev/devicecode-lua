@@ -156,3 +156,8 @@ UI state stays narrow under state/ui/...
 Session changes are observable through the store/model, not callback sinks.
 Finalisers terminate contexts and unresolved requests immediately.
 ```
+
+
+## HTTP listener dependency
+
+A configured UI HTTP listener depends on `cap/http/<id>/status`. Missing HTTP status, `available=false`, `no_route`, or `http_backend_not_ready` are admission failures. The UI read model and session machinery may continue running while listener work is `waiting_for_http`.

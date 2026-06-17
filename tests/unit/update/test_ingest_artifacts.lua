@@ -4,7 +4,6 @@ local cond = require 'fibers.cond'
 local mailbox = require 'fibers.mailbox'
 local ingest = require 'services.update.ingest'
 local lifetime = require 'services.update.artifacts.lifetime'
-local preflight = require 'services.update.artifacts.preflight'
 
 local tests = {}
 local function fail(msg) error(msg or 'assertion failed', 2) end
@@ -103,36 +102,6 @@ function tests.test_ingest_terminal_request_is_selected_before_append()
 		local ev2 = state:try_request_now()
 		assert_eq(ev2.request, append_req)
 	end)
-end
-
-function tests.test_artifact_preflight_cleans_up_before_durable_handoff()
-	local artifact = new_sink()
-	fibers.run(function ()
-		local st, rep, primary = fibers.run_scope(function (scope)
-			return preflight.run(scope, {
-				artifact = artifact,
-				check = function () return nil, 'bad_artifact' end,
-			})
-		end)
-		assert_eq(st, 'failed')
-	end)
-	assert_eq(artifact.terminated, 1)
-end
-
-function tests.test_artifact_preflight_does_not_cleanup_after_handoff()
-	local artifact = new_sink()
-	fibers.run(function ()
-		local st, rep, result = fibers.run_scope(function (scope)
-			return preflight.run(scope, {
-				artifact = artifact,
-				transfer = true,
-				check = function () return { ok = true } end,
-			})
-		end)
-		assert_eq(st, 'ok')
-		assert_true(result.transferred)
-	end)
-	assert_eq(artifact.terminated, 0)
 end
 
 function tests.test_artifact_lifetime_rejects_close_only_resources()

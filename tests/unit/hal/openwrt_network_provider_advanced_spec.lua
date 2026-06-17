@@ -2,6 +2,7 @@
 
 local fibers = require 'fibers'
 local provider_loader = require 'services.hal.backends.network.provider'
+local net_config = require 'services.net.config'
 
 local tests = {}
 
@@ -40,19 +41,19 @@ local function intent()
 		},
 		interfaces = {
 			lan = { kind = 'bridge', role = 'lan', segment = 'lan', members = { 'eth0' }, addressing = { ipv4 = { mode = 'static', cidr = '192.168.10.1/24' } } },
-			wan_a = { kind = 'cellular', role = 'wan', segment = 'wan', endpoint = { ifname = 'wwan0' }, addressing = { ipv4 = { mode = 'dhcp', metric = 10 } } },
-			wan_b = { kind = 'cellular', role = 'wan', segment = 'wan', endpoint = { ifname = 'wwan1' }, addressing = { ipv4 = { mode = 'dhcp', metric = 20 } } },
+			wan_a = { kind = 'cellular', role = 'wan', segment = 'wan', endpoint = { ifname = 'wwan0' }, addressing = { ipv4 = { mode = 'dhcp' } } },
+			wan_b = { kind = 'cellular', role = 'wan', segment = 'wan', endpoint = { ifname = 'wwan1' }, addressing = { ipv4 = { mode = 'dhcp' } } },
 		},
 		firewall = { zones = { lan = {}, guest = {}, wan = { masq = true } }, policies = { guest_to_wan = { from = 'guest', to = 'wan' } } },
 		routing = {}, dns = {}, dhcp = {},
 		wan = {
 			enabled = true,
-			policy = 'weighted_failover',
 			load_balancing = { speedtests = true, policy = 'balanced' },
+			rules = { https = { family = 'ipv4', proto = 'tcp', dest_port = '443', policy = 'balanced', sticky = true } },
 			health = { track_ip = { '1.1.1.1', '8.8.8.8' }, reliability = 1 },
 			members = {
-				gsm_a = { interface = 'wan_a', metric = 1, weight = 1 },
-				gsm_b = { interface = 'wan_b', metric = 1, weight = 1 },
+				gsm_a = { interface = 'wan_a', mwan_metric = 1, weight = 1 },
+				gsm_b = { interface = 'wan_b', mwan_metric = 1, weight = 1 },
 			},
 		},
 		shaping = {
@@ -78,7 +79,55 @@ function tests.test_plan_reports_vlan_mwan3_and_shaping_domains()
 	end)
 end
 
-function tests.test_apply_uses_shaper_and_writes_mwan3_without_restart()
+
+function tests.test_mwan_uplinks_get_distinct_network_route_metrics_and_default_routes()
+	fibers.run(function()
+		local provider = ok(provider_loader.new({ provider = 'openwrt', allow_fake_uci = true }, {}))
+		local plan = fibers.perform(provider:plan_op({ intent = intent() }))
+		eq(plan.ok, true)
+		local names = plan.openwrt_names or {}
+		local seen = {}
+		local metrics = {}
+		for _, ch in ipairs(plan.plan and plan.plan.raw_changes and plan.plan.raw_changes.network or {}) do
+			if ch.op == 'set' and ch.config == 'network' and ch.option == 'metric' then
+				metrics[ch.section] = tostring(ch.value)
+			elseif ch.op == 'set' and ch.config == 'network' and ch.option == 'defaultroute' and ch.value == '0' then
+				fail('mwan uplink must not emit defaultroute 0 on ' .. tostring(ch.section))
+			end
+		end
+		local ctx = require('services.hal.backends.network.providers.openwrt.names').allocate(intent())
+		for _, semantic in ipairs({ 'wan_a', 'wan_b' }) do
+			local sec = ctx:iface(semantic)
+			ok(metrics[sec], 'route metric expected on ' .. semantic)
+			if seen[metrics[sec]] then fail('duplicate route metric ' .. tostring(metrics[sec])) end
+			seen[metrics[sec]] = true
+		end
+		provider:terminate('test complete')
+	end)
+end
+
+
+function tests.test_mwan_rules_flow_from_config_to_mwan3_uci()
+	fibers.run(function()
+		local provider = ok(provider_loader.new({ provider = 'openwrt', allow_fake_uci = true }, {}))
+		local plan = fibers.perform(provider:plan_op({ intent = intent() }))
+		eq(plan.ok, true)
+		local ctx = require('services.hal.backends.network.providers.openwrt.names').allocate(intent())
+		local rule = ctx:mwan_rule('https')
+		local seen = {}
+		for _, ch in ipairs(plan.plan and plan.plan.raw_changes and plan.plan.raw_changes.mwan3 or {}) do
+			if ch.config == 'mwan3' and ch.section == rule then seen[ch.option] = tostring(ch.value) end
+		end
+		eq(seen.proto, 'tcp', 'https sticky proto')
+		eq(seen.dest_port, '443', 'https sticky dest port')
+		eq(seen.family, 'ipv4', 'https sticky family')
+		eq(seen.sticky, '1', 'https sticky flag')
+		eq(seen.use_policy, ctx:mwan_policy('balanced'), 'https sticky policy')
+		provider:terminate('test complete')
+	end)
+end
+
+function tests.test_apply_uses_shaper_and_schedules_structural_mwan3_activation()
 	fibers.run(function(scope)
 		local restart_cmds = {}
 		local shaper_cmds = {}
@@ -93,8 +142,6 @@ function tests.test_apply_uses_shaper_and_writes_mwan3_without_restart()
 		eq(result.ok, true)
 		ok(result.multiwan and result.multiwan.enabled == true, 'multiwan plan expected')
 		ok(result.shaping and result.shaping.ok == true, 'shaping result expected')
-		local all_restarts = table.concat(restart_cmds, '\n')
-		if all_restarts:find('mwan3', 1, true) then fail('mwan3 must not be restarted by structural apply') end
 		ok(#shaper_cmds > 0, 'tc shaper commands expected')
 		provider:terminate('test complete')
 	end)
@@ -256,6 +303,127 @@ function tests.test_bigbox_clean_config_plans_dns_rules_routes_and_segment_shapi
 		eq(result.ok, true)
 		ok(result.shaping and result.shaping.ok == true, 'segment-profile shaping should be applied')
 		ok(#shaper_cmds > 0, 'segment shaping should emit tc commands')
+		provider:terminate('test complete')
+	end)
+end
+
+
+
+function tests.test_bigbox_starlink_admin_route_is_explicit_host_route()
+	fibers.run(function()
+		local cjson = require 'cjson.safe'
+		local cfg_mod = require 'services.net.config'
+		local text = ok(read_project_file('src/configs/bigbox-v1-cm-2.json'))
+		local doc = ok(cjson.decode(text), 'bigbox config must decode')
+		local intent = ok(cfg_mod.normalise(doc.net, { generation = 1 }))
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			platform = { segment_trunk = { ifname = 'eth0' } },
+		}, {}))
+		local plan = fibers.perform(provider:plan_op({ intent = intent }))
+		eq(plan.ok, true)
+		local route = {}
+		for _, ch in ipairs(plan.plan and plan.plan.raw_changes and plan.plan.raw_changes.network or {}) do
+			if ch.config == 'network' and ch.section == 'route_starlink_admin' then route[ch.option] = tostring(ch.value) end
+		end
+		eq(route.interface, 'wan', 'Starlink route interface')
+		eq(route.target, '192.168.100.1', 'Starlink route target')
+		eq(route.netmask, '255.255.255.255', 'Starlink host route netmask')
+		provider:terminate('test complete')
+	end)
+end
+
+function tests.test_mwan3_builder_uses_distinct_section_names_for_same_interface_and_member_ids()
+	local names = require 'services.hal.backends.network.providers.openwrt.names'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local intent_doc = {
+		wan = {
+			enabled = true,
+			health = { track_ip = { '1.1.1.1' } },
+			members = {
+				wan = { interface = 'wan', mwan_metric = 1, weight = 1 },
+				modem_primary = { interface = 'modem_primary', mwan_metric = 1, weight = 1 },
+				modem_secondary = { interface = 'modem_secondary', mwan_metric = 1, weight = 1 },
+			},
+		},
+	}
+	local ctx = ok(names.allocate(intent_doc))
+	local changes = ok(mwan3.build_changes(intent_doc, ctx))
+	local sections = {}
+	for _, ch in ipairs(changes) do
+		if ch.op == 'set' and ch.config == 'mwan3' and ch.value == nil then
+			if sections[ch.section] then fail('duplicate mwan3 section name generated: ' .. tostring(ch.section)) end
+			sections[ch.section] = ch.option
+		end
+	end
+	ok(sections[ctx:mwan_iface('wan')], 'wan interface section expected')
+	ok(sections[ctx:mwan_member('wan')], 'wan member section expected')
+	eq(ctx:mwan_iface('wan') == ctx:mwan_member('wan'), false, 'interface/member names must differ')
+end
+
+
+local function find_change(changes, fields)
+	for _, ch in ipairs(changes or {}) do
+		local ok = true
+		for k, v in pairs(fields or {}) do
+			if ch[k] ~= v then ok = false; break end
+		end
+		if ok then return ch end
+	end
+	return nil
+end
+
+function tests.test_bigbox_net_intent_still_renders_openwrt_segment_trunk_independent_of_wired_assembly()
+	fibers.run(function()
+		local intent, ierr = net_config.normalise({
+			schema = net_config.SCHEMA,
+			version = 1,
+			segments = {
+				adm = { kind = 'system', protected = true, vlan = { id = 8 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.8.1/24' } }, firewall = { zone = 'lan' } },
+				jan = { kind = 'user', vlan = { id = 32 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/24' } }, firewall = { zone = 'lan_rst' } },
+				int = { kind = 'system', protected = true, vlan = { id = 100 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.100.1/24' } }, firewall = { zone = 'lan' } },
+				wan = { kind = 'wan', vlan = { id = 4 }, addressing = { ipv4 = { mode = 'dhcp', peerdns = false } }, firewall = { zone = 'wan' } },
+			},
+			interfaces = {},
+			dns = {}, dhcp = {}, firewall = { zones = { lan = {}, lan_rst = {}, wan = { masq = true } }, policies = {}, rules = {} },
+			routing = { routes = { starlink_admin = { kind = 'host', target = '192.168.100.1', interface = 'wan' } } },
+			wan = { enabled = true, members = { wan = { interface = 'wan', weight = 1, mwan_metric = 1 } } },
+			shaping = {}, vpn = {}, diagnostics = {},
+		}, { rev = 1 })
+		ok(intent, ierr)
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			platform = { segment_trunk = { ifname = 'eth0', protected = true } },
+		}, {}))
+		local plan = fibers.perform(provider:plan_op({ intent = intent }))
+		eq(plan.ok, true)
+		local changes = plan.plan and plan.plan.raw_changes and plan.plan.raw_changes.network or {}
+
+		for _, rec in ipairs({
+			{ id = 'adm', vid = 8, vlan = 'vl-adm', bridge = 'br-adm', proto = 'static', ipaddr = '172.28.8.1' },
+			{ id = 'jan', vid = 32, vlan = 'vl-jan', bridge = 'br-jan', proto = 'static', ipaddr = '172.28.32.1' },
+			{ id = 'int', vid = 100, vlan = 'vl-int', bridge = 'br-int', proto = 'static', ipaddr = '172.28.100.1' },
+		}) do
+			local vlan_sec = 'dev_vlan_' .. rec.id
+			local bridge_sec = 'dev_bridge_' .. rec.id
+			ok(find_change(changes, { section = vlan_sec, option = 'ifname', value = 'eth0' }), rec.id .. ' VLAN should use eth0 trunk')
+			ok(find_change(changes, { section = vlan_sec, option = 'vid', value = rec.vid }), rec.id .. ' VLAN id should render')
+			ok(find_change(changes, { section = vlan_sec, option = 'name', value = rec.vlan }), rec.id .. ' VLAN device should render')
+			ok(find_change(changes, { section = bridge_sec, option = 'name', value = rec.bridge }), rec.id .. ' bridge should render')
+			ok(find_change(changes, { section = rec.id, option = 'device', value = rec.bridge }), rec.id .. ' interface should use bridge')
+			ok(find_change(changes, { section = rec.id, option = 'proto', value = rec.proto }), rec.id .. ' proto should render')
+			ok(find_change(changes, { section = rec.id, option = 'ipaddr', value = rec.ipaddr }), rec.id .. ' IP address should render')
+		end
+
+		ok(find_change(changes, { section = 'dev_vlan_wan', option = 'ifname', value = 'eth0' }), 'wan VLAN should use eth0 trunk')
+		ok(find_change(changes, { section = 'dev_vlan_wan', option = 'vid', value = 4 }), 'wan VLAN id should render')
+		ok(find_change(changes, { section = 'wan', option = 'device', value = 'vl-wan' }), 'wan interface should use WAN VLAN device')
+		ok(find_change(changes, { section = 'wan', option = 'proto', value = 'dhcp' }), 'wan interface should remain DHCP')
+		ok(find_change(changes, { section = 'wan', option = 'peerdns', value = '0' }), 'wan peerdns false should render')
+		ok(find_change(changes, { section = 'route_starlink_admin', option = 'interface', value = 'wan' }), 'Starlink route should remain on semantic wan interface')
+		ok(find_change(changes, { section = 'route_starlink_admin', option = 'target', value = '192.168.100.1' }), 'Starlink route target should render')
 		provider:terminate('test complete')
 	end)
 end

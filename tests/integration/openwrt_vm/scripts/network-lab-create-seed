@@ -1,0 +1,59 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/network-lab-env"
+
+mkdir -p "$NETWORK_LAB_DIR"
+
+if [ ! -f "$NETWORK_LAB_SSH_KEY" ]; then
+	echo "[network-lab] creating SSH key: $NETWORK_LAB_SSH_KEY"
+	ssh-keygen -q -t ed25519 -N '' -f "$NETWORK_LAB_SSH_KEY"
+fi
+
+pubkey="$(cat "${NETWORK_LAB_SSH_KEY}.pub")"
+seed_dir="${NETWORK_LAB_DIR}/seed"
+rm -rf "$seed_dir"
+mkdir -p "$seed_dir"
+
+cat > "${seed_dir}/user-data" <<EOF2
+#cloud-config
+hostname: ${NETWORK_LAB_HOSTNAME}
+manage_etc_hosts: true
+users:
+  - name: ${NETWORK_LAB_USER}
+    shell: /bin/bash
+    groups: sudo
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${pubkey}
+ssh_pwauth: false
+package_update: false
+package_upgrade: false
+EOF2
+
+cat > "${seed_dir}/meta-data" <<EOF2
+instance-id: devicecode-network-lab
+local-hostname: ${NETWORK_LAB_HOSTNAME}
+EOF2
+
+rm -f "$NETWORK_LAB_SEED"
+if command -v cloud-localds >/dev/null 2>&1; then
+	cloud-localds "$NETWORK_LAB_SEED" "${seed_dir}/user-data" "${seed_dir}/meta-data"
+elif command -v genisoimage >/dev/null 2>&1; then
+	genisoimage -quiet -output "$NETWORK_LAB_SEED" -volid cidata -joliet -rock "${seed_dir}/user-data" "${seed_dir}/meta-data"
+elif command -v mkisofs >/dev/null 2>&1; then
+	mkisofs -quiet -output "$NETWORK_LAB_SEED" -volid cidata -joliet -rock "${seed_dir}/user-data" "${seed_dir}/meta-data"
+elif command -v xorrisofs >/dev/null 2>&1; then
+	xorrisofs -quiet -output "$NETWORK_LAB_SEED" -volid cidata -joliet -rock "${seed_dir}/user-data" "${seed_dir}/meta-data"
+else
+	cat >&2 <<'MSG'
+[network-lab] missing cloud-init seed tool.
+[network-lab] Install one of: cloud-localds, genisoimage, mkisofs, xorrisofs.
+MSG
+	exit 1
+fi
+
+echo "[network-lab] seed image ready: $NETWORK_LAB_SEED"

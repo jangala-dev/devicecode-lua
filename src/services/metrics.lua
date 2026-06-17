@@ -12,6 +12,7 @@
 --   {'cfg', 'metrics'}                       - metrics config (retained)
 --   {'state', 'time', 'synced'}              - NTP sync status (retained)
 --   {'cap', 'fs', 'configs', ...}             - HAL filesystem capability (via cap listener)
+--   {'cap', 'http', 'main', 'rpc', ...}      - HTTP capability service (exchange RPC)
 --
 -- Topics produced:
 --   {'svc', 'metrics', 'status'}             - service lifecycle status (retained)
@@ -26,7 +27,8 @@ local perform        = fibers.perform
 
 local json           = require 'cjson.safe'
 local base           = require 'devicecode.service_base'
-local cap_sdk = require 'services.hal.sdk.cap'
+local cap_sdk        = require 'services.hal.sdk.cap'
+local http_sdk       = require('services.http').sdk
 
 local senml          = require 'services.metrics.senml'
 local http_m         = require 'services.metrics.http'
@@ -106,6 +108,7 @@ local State = {
 	conn             = nil,
 	svc              = nil,
 	name             = nil,
+	http_ref         = nil,
 	http_send_ch     = nil,
 	pipelines_map    = {},
 	metric_states    = {},
@@ -531,7 +534,8 @@ function M.start(conn, opts)
 	State.conn             = conn
 	State.svc              = svc
 	State.name             = name
-	State.http_send_ch     = http_m.start_http_publisher(function(level, payload)
+	State.http_ref         = http_sdk.new_ref(conn, opts.http_service_id or 'main')
+	State.http_send_ch     = http_m.start_http_publisher(State.http_ref, function(level, payload)
 		svc:obs_log(level, payload)
 	end)
 	State.pipelines_map    = {}
@@ -552,7 +556,7 @@ function M.start(conn, opts)
 	end)
 
 	svc:obs_log('info', 'waiting for filesystem capability')
-	local fs_listener = cap_sdk.new_cap_listener(conn, 'fs', 'configs')
+	local fs_listener = cap_sdk.new_cap_listener(conn, 'fs', 'credentials')
 	local fs_cap, cap_err = fs_listener:wait_for_cap()
 	fs_listener:close()
 	if not fs_cap then

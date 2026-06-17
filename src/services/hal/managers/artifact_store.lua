@@ -141,11 +141,11 @@ local function driver_matches_spec(driver, spec)
 end
 
 local function emit_device_added_op(driver, caps)
-	return device_events.added_op(S.dev_ev_ch, 'artifact_store', driver.id, { provider = 'hal.artifact_store' }, caps)
+	return device_events.added_op(S.dev_ev_ch, 'artifact-store', driver.id, { provider = 'hal.artifact_store', source_id = 'platform' }, caps)
 end
 
 local function emit_device_removed_op(driver)
-	return device_events.removed_op(S.dev_ev_ch, 'artifact_store', driver.id, { provider = 'hal.artifact_store' })
+	return device_events.removed_op(S.dev_ev_ch, 'artifact-store', driver.id, { provider = 'hal.artifact_store', source_id = 'platform' })
 end
 
 local function start_driver_op(id, opts)

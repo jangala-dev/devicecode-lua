@@ -93,7 +93,7 @@ function M.test_validate_exchange_accepts_legacy_http1_close_when_policy_allows_
 		timeout_s = 5,
 	}, {
 		allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true },
-		max_response_body = 1024 * 1024,
+		legacy_http1_close_max_response_bytes = 1024 * 1024,
 	}))
 	eq(checked.response_parser, 'legacy-http1-close')
 	eq(checked.timeout_s, 5)
@@ -142,7 +142,7 @@ function M.test_validate_exchange_legacy_http1_close_is_tightly_bounded()
 		max_response_bytes = 2048,
 	}, {
 		allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true },
-		max_response_body = 1024,
+		legacy_http1_close_max_response_bytes = 1024,
 	})
 	eq(bad, nil)
 	eq(err, 'response_too_large')

@@ -6,6 +6,10 @@ local M = {}
 
 M.codes = {
 	bad_request      = { http = 400, message = 'bad_request' },
+	invalid_json     = { http = 400, message = 'invalid_json' },
+	invalid_body     = { http = 400, message = 'invalid_body' },
+	request_body_too_large = { http = 413, message = 'request_body_too_large' },
+	unsupported_media_type = { http = 415, message = 'unsupported_media_type' },
 	unauthenticated  = { http = 401, message = 'unauthenticated' },
 	forbidden        = { http = 403, message = 'forbidden' },
 	not_found        = { http = 404, message = 'not_found' },

@@ -757,7 +757,7 @@ local function on_fs_cap(ctx, msg)
     local state = msg.payload
     if state == 'added' then
         ctx.svc:obs_log('info', { what = 'fs_configs_cap_added' })
-        ctx.fs_configs_cap = cap_sdk.new_cap_ref(ctx.conn, 'fs', 'configs')
+        ctx.fs_configs_cap = cap_sdk.new_cap_ref(ctx.conn, 'fs', 'credentials')
         reapply_all_radios(ctx)
     elseif state == 'removed' then
         ctx.svc:obs_log('info', { what = 'fs_configs_cap_removed' })
@@ -810,7 +810,7 @@ function WifiService.start(conn, opts)
     -- Subscribe to cap state notifications (radio, band, fs/configs)
     local radio_cap_listener = cap_sdk.new_cap_listener(conn, 'radio', '+')
     local band_cap_listener  = cap_sdk.new_cap_listener(conn, 'band', '1')
-    local fs_cap_listener    = cap_sdk.new_cap_listener(conn, 'fs', 'configs')
+    local fs_cap_listener    = cap_sdk.new_cap_listener(conn, 'fs', 'credentials')
 
     svc:status('running')
     svc:obs_log('info', 'service running')

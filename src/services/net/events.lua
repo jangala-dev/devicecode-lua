@@ -78,7 +78,17 @@ local function try_observed_now(state)
 	return M.map_observed_event(ev)
 end
 
+local function try_gsm_uplink_now(state)
+	if not state.gsm_uplink_watch then return nil end
+	return state.gsm_uplink_watch:try_recv_now()
+end
+
 local function add_capability_sources(state, sources)
+	if state.cap_deps and type(state.cap_deps.event_source) == 'function' then
+		sources[#sources + 1] = state.cap_deps:event_source({ name = 'capability_dependencies' })
+		return
+	end
+
 	local subs = state.capability_status_subs or {}
 	local names = {}
 	for name in pairs(subs) do names[#names + 1] = name end
@@ -106,6 +116,12 @@ function M.next_service_event_op(state)
 			enabled = function () return state.config_watch ~= nil end,
 			try_now = function () return try_config_now(state) end,
 			recv_op = function () return state.config_watch:recv_op():wrap(M.map_config_event) end,
+		},
+		{
+			name = 'gsm_uplinks',
+			enabled = function () return state.gsm_uplink_watch ~= nil end,
+			try_now = function () return try_gsm_uplink_now(state) end,
+			recv_op = function () return state.gsm_uplink_watch:recv_op() end,
 		},
 		{
 			name = 'observed',

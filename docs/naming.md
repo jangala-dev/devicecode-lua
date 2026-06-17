@@ -407,6 +407,7 @@ Use `state/workflow/...` for retained workflow instance records.
 Examples:
 
 * `state/workflow/update-job/<id>`
+* `state/workflow/update-job/<id>/timeline`
 * `state/workflow/artifact-ingest/<id>`
 
 Workflow state is public truth about concrete operations, not manager interfaces.
@@ -949,6 +950,7 @@ Manager interfaces:
 Retained workflow truth:
 
 * `state/workflow/update-job/<id>`
+* `state/workflow/update-job/<id>/timeline`
 
 Retained domain summaries:
 
@@ -988,6 +990,7 @@ Raw imported member truth:
 Fabric domain summaries:
 
 * `state/fabric/link/<id>`
+* `state/fabric/transfer/<xfer-id>`
 * `cap/transfer-manager/main/rpc/send-blob`
 
 Device-composed appliance truth:
@@ -1008,11 +1011,13 @@ Curated device-facing control:
 Raw host/provider utility surfaces may include:
 
 * `raw/host/platform/cap/artifact-store/main/...`
+* `raw/host/platform/cap/control-store/update/...`
 * `raw/host/platform/cap/updater/cm5/...`
 
 Curated public manager interfaces may include:
 
 * `cap/artifact-ingest/main/...`
+* `cap/control-store/update/...`
 
 Canonical retained truth remains under:
 
@@ -1068,13 +1073,30 @@ Within this model:
 
 ## Wired provider naming
 
-Read-only or writable wired hardware providers publish capability state under
-`cap/wired-provider/<provider_id>/...` and raw host provenance under
-`raw/host/wired/cap/wired-provider/<provider_id>/...` when provided by the local
-HAL. A future switch-fabric member running devicecode will import equivalent raw
-facts under `raw/member/<member_id>/...`; `device` may curate those into the same
-public capability identity.
+Read-only or writable wired hardware providers publish observations under
+`raw/host/wired/provider/<id>/...` when provided by the local
+HAL. Device publishes the product physical assembly under `state/device/assembly`;
+Wired combines assembly with observations and publishes the appliance-level wired
+view under `state/wired/...`. A future switch-fabric member running devicecode
+may import equivalent raw facts under `raw/member/<member_id>/...`, but the public
+wired contract remains `state/wired/...`.
 
-The appliance-level wired view is published under `state/wired/...` and should
-use stable product surface identifiers such as `cm5-eth0`, `switch-uplink-cm5`,
+The appliance-level wired view should use stable product surface identifiers such as `cm5-eth0`, `switch-uplink-cm5`,
 `lan-1` and `lan-2`.
+
+## GSM uplink state consumed by NET
+
+GSM publishes curated semantic uplink state under:
+
+```text
+state/gsm/uplink/<role>
+```
+
+`<role>` is stable product identity, for example `primary` or `secondary`.  It
+must not be a volatile Linux device name.  The Linux interface name observed from
+ModemManager or the kernel is payload data, normally `linux.ifname`, and may
+change between boots.
+
+NET may consume this state as its GSM source contract.  NET should not consume
+raw modem or HAL provider topics for WAN source identity.
+

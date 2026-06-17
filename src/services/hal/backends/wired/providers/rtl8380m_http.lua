@@ -3,9 +3,9 @@
 -- Read-only HTTP provider for RTL8380-family PoE/VLAN switches.
 --
 -- The provider keeps the manufacturer HTTP/CGI/RSA-login details below HAL and
--- returns the semantic wired-provider snapshot consumed by Device and Wired.  It
--- deliberately leaves writes unsupported until the control path has dedicated
--- tests against the switch UI's set.cgi forms.
+-- returns provider-shaped raw observations for the Wired service.  It deliberately
+-- leaves writes unsupported until the control path has dedicated tests against
+-- the switch UI's set.cgi forms.
 
 local fibers = require 'fibers'
 local op = require 'fibers.op'
@@ -35,6 +35,8 @@ local READ_COMMANDS = {
 	'poe_poe',
 	'lldp_local',
 	'lldp_neighbor',
+	'sys_cpumem',
+	'rmon_statistics',
 }
 
 local VLAN_MODE = {
@@ -70,11 +72,10 @@ local function getenv_ref(v)
 end
 
 local function ensure_base_url(url)
-	url = tostring(url or '')
-	if url == '' then return nil end
-	if not url:match('^https?://') then url = 'http://' .. url end
-	if not url:match('/$') then url = url .. '/' end
-	return url
+	if type(url) ~= 'string' or url == '' then return nil, 'base_url is required' end
+	if not url:match('^https?://') then return nil, 'base_url must include http:// or https:// scheme' end
+	if not url:match('/$') then return nil, 'base_url must end with /' end
+	return url, nil
 end
 
 local function parse_origin(url)
@@ -356,7 +357,9 @@ local function login(self)
 end
 
 local function get_cmd(self, cmd)
-	local r, err = request(self, 'GET', cgi_url(self.base_url, 'get', cmd))
+	local url = cgi_url(self.base_url, 'get', cmd)
+	if cmd == 'rmon_statistics' then url = url .. '&time=0' end
+	local r, err = request(self, 'GET', url)
 	if not r then return nil, err end
 	if r.status ~= 200 then return nil, ('%s HTTP %s'):format(cmd, tostring(r.status)) end
 	local parsed, perr = json_decode(r.body)
@@ -410,6 +413,63 @@ end
 
 local function is_lag_name(name) return tostring(name or ''):match('^LAG%d+$') ~= nil end
 
+local function percent(v)
+	local n = tonumber(v)
+	if n == nil then return nil end
+	return n
+end
+
+local function parse_runtime(sys_cpumem)
+	sys_cpumem = sys_cpumem or {}
+	return {
+		cpu = {
+			utilisation_pct = percent(sys_cpumem.cpu),
+		},
+		memory = {
+			utilisation_pct = percent(sys_cpumem.mem),
+		},
+	}
+end
+
+local function parse_power(poe)
+	poe = poe or {}
+	return {
+		poe = {
+			total_power_mw = poe.devPower,
+			total_power_w = type(poe.devPower) == 'number' and poe.devPower / 1000 or nil,
+			temperature_c = poe.devTemp,
+		},
+	}
+end
+
+local function parse_surface_counters(row)
+	if type(row) ~= 'table' then return nil end
+	local errors = 0
+	local has_error = false
+	for _, key in ipairs({ 'CRCAlignErr', 'undersizePkts', 'oversizePkts', 'fragments', 'jabbers', 'collisions' }) do
+		local n = tonumber(row[key])
+		if n then errors = errors + n; has_error = true end
+	end
+	return {
+		rx = {
+			bytes = tonumber(row.bytesRec),
+			packets = tonumber(row.pktsRec),
+			drops = tonumber(row.dropEvents),
+			errors = has_error and errors or nil,
+			broadcast_packets = tonumber(row.bPktsRec),
+			multicast_packets = tonumber(row.mPktsRec),
+		},
+		size_buckets = {
+			frames_64 = tonumber(row.frames64B),
+			frames_65_127 = tonumber(row.frames65127B),
+			frames_128_255 = tonumber(row.frames128255B),
+			frames_256_511 = tonumber(row.frames256511B),
+			frames_512_1023 = tonumber(row.frames5121023B),
+			frames_over_1024 = tonumber(row.framesOver1024B),
+		},
+	}
+end
+
 local function build_surfaces(data)
 	local home = data.home_main or {}
 	local ports = home.ports or {}
@@ -419,6 +479,7 @@ local function build_surfaces(data)
 	local vlan_port = (data.vlan_port or {}).ports or {}
 	local vlan_membership = (data.vlan_membership or {}).ports or {}
 	local poe_ports = (data.poe_poe or {}).ports or {}
+	local rmon_ports = (data.rmon_statistics or {}).ports or {}
 	local surfaces = {}
 
 	for i, port in ipairs(ports) do
@@ -429,6 +490,7 @@ local function build_surfaces(data)
 		local vp = vlan_port[i]
 		local vm = vlan_membership[i]
 		local poe = poe_ports[i]
+		local rmon = rmon_ports[i]
 		local media = parse_media(prow and prow.type, panel)
 		local membership = parse_vlan_membership_string((vm and (vm.operVlans or vm.adminVlans)) or '')
 		local vlans, tagged, untagged = vlans_from_membership(membership)
@@ -480,8 +542,12 @@ local function build_surfaces(data)
 				vlan_port = vp,
 				vlan_membership = vm,
 				poe_poe = poe,
+				rmon_statistics = rmon,
 			},
 		}
+
+		local counters = parse_surface_counters(rmon)
+		if counters then surfaces[name].counters = counters end
 
 		if poe then
 			surfaces[name].poe = {
@@ -534,110 +600,90 @@ local function build_snapshot(self, data)
 			lldp_local = data.lldp_local,
 			lldp_neighbor = data.lldp_neighbor,
 		},
-		telemetry = {
-			cpu = data.sys_cpumem and data.sys_cpumem.cpu or nil,
-			mem = data.sys_cpumem and data.sys_cpumem.mem or nil,
-			poe = {
-				dev_power_mw = poe.devPower,
-				dev_power_w = type(poe.devPower) == 'number' and poe.devPower / 1000 or nil,
-				dev_temp_c = poe.devTemp,
-			},
-		},
+		runtime = parse_runtime(data.sys_cpumem),
+		power = parse_power(poe),
 		raw = self.include_raw and data or nil,
 	}
 end
 
-local function default_surfaces()
-	return {
-		['uplink-cm5'] = {
-			provider_surface_id = 'uplink-cm5',
-			kind = 'switch-port',
-			capabilities = { trunk = true, access = false, poe = false },
-			link = { state = 'unknown' },
-			attachment = { mode = 'trunk', vlans = {} },
-		},
-	}
+local function require_http_config(config)
+	local http = config and config.http or nil
+	if type(http) ~= 'table' then return nil, 'http table is required' end
+	if type(http.capability) ~= 'string' or http.capability == '' then return nil, 'http.capability is required' end
+	if http.response_parser ~= 'legacy-http1-close' then return nil, 'http.response_parser must be legacy-http1-close' end
+	local max_response_bytes = tonumber(http.max_response_bytes) or (1024 * 1024)
+	if max_response_bytes <= 0 then return nil, 'http.max_response_bytes must be positive when supplied' end
+	return { capability = http.capability, response_parser = http.response_parser, max_response_bytes = max_response_bytes }, nil
 end
 
-local function configured_http_cap_id(config)
-	local http = type(config.http) == 'table' and config.http or {}
-	return http.capability or http.capability_id or http.cap_id
-		or config.http_capability_id or config.http_id or 'main'
-end
 
-local function configured_response_parser(config)
-	local http = type(config.http) == 'table' and config.http or {}
-	-- The RTL8380 CGI surface requires the named legacy HTTP/1 close-delimited
-	-- parser.  The only supported configuration override is http.response_parser.
-	return http.response_parser or 'legacy-http1-close'
-end
+local CONFIG_FIELDS = {
+	provider = true,
+	mode = true,
+	base_url = true,
+	username = true,
+	password = true,
+	timeout_s = true,
+	poll_interval_s = true,
+	http = true,
+	openssl_bin = true,
+	disable_login = true,
+	include_raw = true,
+	cookies = true,
+}
 
-local function configured_max_response_bytes(config)
-	local http = type(config.http) == 'table' and config.http or {}
-	return tonumber(http.max_response_bytes or config.max_response_bytes) or (1024 * 1024)
-end
-
-local function configured_http_ref(config, opts)
-	if not opts then return nil end
-	if opts.http_ref then return opts.http_ref end
-	if opts.http_client and type(opts.http_client.exchange_op) == 'function' then return opts.http_client end
-	if type(opts.http_client_for) == 'function' then
-		local ref, err = opts.http_client_for(configured_http_cap_id(config))
-		if not ref then return nil, err end
-		return ref
+local function check_allowed_config(config)
+	for k in pairs(config or {}) do
+		if not CONFIG_FIELDS[k] then return nil, 'unsupported rtl8380m_http config field: ' .. tostring(k) end
 	end
-	return nil
+	return true, nil
 end
 
-local function configured_test_client(opts)
-	local http_client = opts and opts.http_client or nil
-	if type(http_client) == 'table' and type(http_client.snapshot) == 'function' then return http_client end
-	return opts and opts.client or nil
+local function configured_http_ref(http_config, opts)
+	if type(opts.http_client_for) ~= 'function' then return nil, 'http_client_for dependency is required' end
+	local ref, err = opts.http_client_for(http_config.capability)
+	if not ref then return nil, err end
+	return ref, nil
 end
 
 function M.new(config, opts)
 	config = config or {}
 	opts = opts or {}
-	local base_url = ensure_base_url(config.base_url or config.url)
-	local http_ref, http_ref_err = configured_http_ref(config, opts)
-	if http_ref_err then return nil, http_ref_err end
+	local allowed, allowed_err = check_allowed_config(config)
+	if not allowed then return nil, allowed_err end
+	if type(opts.provider_id) ~= 'string' or opts.provider_id == '' then return nil, 'opts.provider_id is required' end
+	local base_url, base_url_err = ensure_base_url(config.base_url)
+	if not base_url then return nil, base_url_err end
+	local username = getenv_ref(config.username)
+	local password = getenv_ref(config.password)
+	if type(username) ~= 'string' or username == '' then return nil, 'username is required' end
+	if type(password) ~= 'string' or password == '' then return nil, 'password is required' end
+	local http_config, http_config_err = require_http_config(config)
+	if not http_config then return nil, http_config_err end
+	local http_ref, http_ref_err = configured_http_ref(http_config, opts)
+	if not http_ref then return nil, http_ref_err end
+	local timeout_s = tonumber(config.timeout_s)
+	if not timeout_s or timeout_s <= 0 then return nil, 'timeout_s must be a positive number' end
 	return setmetatable({
-		id = config.id or config.capability_id or 'switch-main',
+		id = opts.provider_id,
 		base_url = base_url,
 		mode = config.mode or 'read_only',
-		username = getenv_ref(config.username or config.user),
-		password = getenv_ref(config.password or config.pass),
-		timeout_s = tonumber(config.timeout_s or config.timeout or 8) or 8,
-		response_parser = configured_response_parser(config),
-		max_response_bytes = configured_max_response_bytes(config),
+		username = username,
+		password = password,
+		timeout_s = timeout_s,
+		response_parser = http_config.response_parser,
+		max_response_bytes = http_config.max_response_bytes,
 		http_ref = http_ref,
 		openssl_bin = config.openssl_bin or os.getenv('SWITCH_OPENSSL') or 'openssl',
 		disable_login = config.disable_login == true,
 		include_raw = config.include_raw == true,
-		telemetry = copy(config.telemetry or {}),
-		surfaces = copy(config.surfaces or default_surfaces()),
-		topology = copy(config.topology or {}),
 		logger = opts.logger,
 		jar = CookieJar.new(config.cookies or { cookie_language = 'defLang_en' }),
-		client = configured_test_client(opts),
 		logged_in = false,
 	}, Provider), nil
 end
 
 function Provider:fetch_snapshot()
-	if not self.base_url then
-		return {
-			ok = true,
-			provider_id = self.id,
-			mode = self.mode,
-			writable = false,
-			status = { state = 'available', available = true, mode = self.mode, driver = DRIVER, stub = true, base_url_configured = false },
-			surfaces = copy(self.surfaces),
-			topology = copy(self.topology),
-			telemetry = copy(self.telemetry),
-		}
-	end
-
 	if self.client and type(self.client.snapshot) == 'function' then
 		local data, err = self.client:snapshot(self)
 		if not data then return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, err = err } } end
@@ -694,6 +740,9 @@ M._test = {
 	parse_vlan_membership_string = parse_vlan_membership_string,
 	build_snapshot = function(provider_like, data) return build_snapshot(provider_like or { id = 'switch-main', mode = 'read_only' }, data or {}) end,
 	build_surfaces = build_surfaces,
+	parse_runtime = parse_runtime,
+	parse_power = parse_power,
+	parse_surface_counters = parse_surface_counters,
 }
 
 return M

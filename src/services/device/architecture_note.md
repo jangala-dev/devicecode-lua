@@ -55,8 +55,8 @@ Actions own caller-visible requests and blocking work.
 
 Device should not mirror every raw capability. It should curate stable appliance-level component surfaces.
 
-Fabric-stage receivers must use provider-native raw capability form:
+Fabric-stage actions use Fabric transfer targets such as:
 
 ```text
-raw/<kind>/<source>/cap/<class>/<id>/rpc/<method>
+updater/main
 ```

@@ -69,31 +69,56 @@ local function stage_context(params)
 	local backend = assert(params.backend, 'active_job.stage: backend required')
 	local job = require_job(params, 'active_job.stage')
 	local ctx = base_ctx(params, 'stage')
+	return backend, job, ctx
+end
 
-	local preflight = perform_backend_op(backend, 'preflight_op', false, job, ctx)
-	if preflight ~= nil then
-		ctx.preflight = preflight
+local function perform_backend_op_until(backend, name, required, deadline, ...)
+	local fn = backend_method(backend, name, required)
+	if not fn then
+		return nil, nil
 	end
 
-	local prepared = perform_backend_op(backend, 'prepare_op', false, job, ctx)
-	if prepared ~= nil then
-		ctx.prepared = prepared
+	local backend_op = fn(backend, ...)
+	local result, err
+
+	if deadline ~= nil then
+		if fibers.now() >= deadline then
+			return nil, name .. '_timeout'
+		end
+
+		-- The update phase owns this deadline.  The backend Op, including any
+		-- bus request it opens, has no hidden call timeout.  When timeout wins the
+		-- losing backend Op is aborted, allowing lua-bus to abandon the request and
+		-- Device to observe caller cancellation.
+		local which, a, b = fibers.perform(fibers.named_choice {
+			backend = backend_op,
+			timeout = sleep.sleep_until_op(deadline),
+		})
+		if which == 'timeout' then
+			return nil, name .. '_timeout'
+		end
+		result, err = a, b
+	else
+		result, err = fibers.perform(backend_op)
 	end
 
-	return backend, job, ctx, preflight, prepared
+	if result == nil then
+		return nil, err or (name .. '_failed')
+	end
+
+	return result, nil
 end
 
 function M.stage(_scope, params)
 	params = params or {}
-	local backend, job, ctx, preflight, prepared = stage_context(params)
-	local staged = perform_backend_op(backend, 'stage_op', true, job, ctx)
+	local backend, job, ctx = stage_context(params)
+	local staged, err = perform_backend_op_until(backend, 'stage_op', true, params.deadline, job, ctx)
+	if staged == nil then error(err or 'stage_op_failed', 0) end
 
 	return {
 		tag       = 'staged',
 		job_id    = job.job_id,
 		component = job.component,
-		preflight = preflight,
-		prepared  = prepared,
 		staged    = staged,
 	}
 end
@@ -159,6 +184,7 @@ local function begin_commit_attempt(params, job, ctx, policy)
 		token = active_token,
 		commit_token = commit_token,
 		commit_policy = policy,
+		pre_commit = ctx.pre_commit,
 		reason = 'active_commit_begin_attempt',
 	}, 'active_job.commit: job_runtime required before backend commit')
 
@@ -195,6 +221,8 @@ function M.commit(_scope, params)
 	local job = require_job(params, 'active_job.commit')
 	local ctx = base_ctx(params, 'commit')
 	local policy = backend_commit_policy(backend)
+	local pre_commit = perform_backend_op(backend, 'pre_commit_record_op', false, job, ctx)
+	if pre_commit ~= nil then ctx.pre_commit = pre_commit end
 	local attempt = begin_commit_attempt(params, job, ctx, policy)
 
 	local accepted = perform_backend_op(backend, 'commit_op', true, job, ctx)

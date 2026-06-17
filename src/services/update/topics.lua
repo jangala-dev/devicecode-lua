@@ -53,6 +53,10 @@ function M.workflow_update_job(job_id)
 	return t('state', 'workflow', 'update-job', job_id)
 end
 
+function M.workflow_update_job_timeline(job_id)
+	return t('state', 'workflow', 'update-job', job_id, 'timeline')
+end
+
 function M.workflow_artifact_ingest(ingest_id)
 	return t('state', 'workflow', 'artifact-ingest', ingest_id)
 end
@@ -91,6 +95,23 @@ end
 
 function M.obs_state(name)
 	return t('obs', 'v1', 'update', 'state', name)
+end
+
+
+function M.device_component(component)
+	return { 'state', 'device', 'component', component }
+end
+
+function M.device_component_software(component)
+	return { 'state', 'device', 'component', component, 'software' }
+end
+
+function M.device_component_update(component)
+	return { 'state', 'device', 'component', component, 'update' }
+end
+
+function M.component_rpc(component, method)
+	return { 'cap', 'component', component, 'rpc', method }
 end
 
 return M

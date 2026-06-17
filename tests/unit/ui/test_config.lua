@@ -16,6 +16,15 @@ function M.test_normalise_supplies_http_static_sse_and_upload_defaults()
 	eq(cfg.static.root, 'www')
 	eq(cfg.sse.enabled, true)
 	eq(cfg.uploads.enabled, true)
+	eq(cfg.uploads.require_auth, false)
+end
+
+function M.test_uploads_can_require_authentication()
+	local cfg = ok(config.normalise({
+		schema = config.SCHEMA,
+		uploads = { require_auth = true },
+	}))
+	eq(cfg.uploads.require_auth, true)
 end
 
 function M.test_can_disable_http_listener_without_disabling_service()

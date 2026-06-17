@@ -15,6 +15,9 @@ function M.test_normalise_supplies_safe_defaults()
 	eq(cfg.policy.allowed_schemes.https, true)
 	eq(cfg.policy.allowed_schemes.ws, true)
 	eq(cfg.policy.allowed_schemes.wss, true)
+	eq(cfg.policy.allowed_response_parsers.strict, true)
+	eq(cfg.policy.allowed_response_parsers['legacy-http1-close'], nil)
+	eq(cfg.policy.legacy_http1_close_max_response_bytes, 1024 * 1024)
 end
 
 function M.test_policy_updates_are_copied_and_validated()
@@ -24,12 +27,16 @@ function M.test_policy_updates_are_copied_and_validated()
 			allowed_schemes = { https = true },
 			allow_loopback = false,
 			allowed_hosts = { ['example.com'] = true },
+			allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true },
+			legacy_http1_close_max_response_bytes = 12345,
 		},
 	}
 	local cfg = ok(config.normalise(raw))
 	eq(cfg.policy.allowed_schemes.https, true)
 	eq(cfg.policy.allowed_schemes.http, nil)
 	eq(cfg.policy.allow_loopback, false)
+	eq(cfg.policy.allowed_response_parsers['legacy-http1-close'], true)
+	eq(cfg.policy.legacy_http1_close_max_response_bytes, 12345)
 	raw.policy.allowed_hosts['example.com'] = false
 	eq(cfg.policy.allowed_hosts['example.com'], true, 'normalised config must not alias raw tables')
 end

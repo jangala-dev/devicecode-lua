@@ -2,7 +2,7 @@
 --
 -- Minimal house-style Wired service.
 -- The coordinator owns no OS-facing work.  It composes configured appliance
--- surfaces from net segment state and public wired-provider capability state.
+-- surfaces from net segment state, Device physical assembly and raw wired observations.
 
 local fibers = require 'fibers'
 local runtime = require 'fibers.runtime'
@@ -30,27 +30,38 @@ local function topic_eq(t, a)
 	return true
 end
 
-local function update_provider_from_event(snap, ev)
+local function update_observation_from_event(snap, ev)
 	local topic = ev and ev.topic or {}
-	if topic[1] ~= 'cap' or topic[2] ~= 'wired-provider' then return false end
-	local id = topic[3]
+	if topic[1] ~= 'raw'
+		or topic[2] ~= 'host'
+		or topic[3] ~= 'wired'
+		or topic[4] ~= 'provider'
+	then
+		return false
+	end
+	local id = topic[5]
 	if type(id) ~= 'string' or id == '' then return false end
-	local rec = snap.providers[id] or { id = id, capability_id = id, status = {}, surfaces = {}, topology = {}, meta = {} }
+	local rec = snap.observations[id] or { id = id, status = {}, identity = {}, runtime = {}, power = {}, surfaces = {}, topology = {}, meta = {} }
 	if ev.op == 'unretain' then
-		if topic[4] == 'status' then rec.status = { state = 'unavailable', available = false, reason = 'unretained' }
-		elseif topic[4] == 'state' and topic[5] == 'surfaces' then rec.surfaces = {}
-		elseif topic[4] == 'state' and topic[5] == 'topology' then rec.topology = {}
-		elseif topic[4] == 'meta' then rec.meta = {} end
+		if topic[6] == 'status' then rec.status = { state = 'unavailable', available = false, reason = 'unretained' }
+		elseif topic[6] == 'state' and topic[7] == 'identity' then rec.identity = {}
+		elseif topic[6] == 'state' and topic[7] == 'runtime' then rec.runtime = {}
+		elseif topic[6] == 'state' and topic[7] == 'power' then rec.power = {}
+		elseif topic[6] == 'state' and topic[7] == 'surfaces' then rec.surfaces = {}
+		elseif topic[6] == 'state' and topic[7] == 'topology' then rec.topology = {}
+		elseif topic[6] == 'meta' then rec.meta = {} end
 	else
 		local payload = copy(ev.payload or {})
-		if topic[4] == 'status' then rec.status = payload
-		elseif topic[4] == 'state' and topic[5] == 'status' then rec.runtime_status = payload
-		elseif topic[4] == 'state' and topic[5] == 'surfaces' then rec.surfaces = payload.surfaces or payload
-		elseif topic[4] == 'state' and topic[5] == 'topology' then rec.topology = payload
-		elseif topic[4] == 'meta' then rec.meta = payload end
+		if topic[6] == 'status' then rec.status = payload
+		elseif topic[6] == 'state' and topic[7] == 'identity' then rec.identity = payload
+		elseif topic[6] == 'state' and topic[7] == 'runtime' then rec.runtime = payload
+		elseif topic[6] == 'state' and topic[7] == 'power' then rec.power = payload
+		elseif topic[6] == 'state' and topic[7] == 'surfaces' then rec.surfaces = payload.surfaces or payload
+		elseif topic[6] == 'state' and topic[7] == 'topology' then rec.topology = payload
+		elseif topic[6] == 'meta' then rec.meta = payload end
 	end
 	rec.updated_at = now()
-	snap.providers[id] = rec
+	snap.observations[id] = rec
 	return true
 end
 
@@ -59,17 +70,49 @@ local function net_segments_from_payload(payload)
 	return copy(payload.segments or payload), copy(payload.vlan_policy or {})
 end
 
-local function provider_surface(provider, provider_surface_id)
-	local surfaces = provider and provider.surfaces or nil
+local function observed_surface_record(observation, observed_surface)
+	local surfaces = observation and observation.surfaces or nil
 	if type(surfaces) ~= 'table' then return nil end
-	return surfaces[provider_surface_id]
+	return surfaces[observed_surface]
 end
 
-local function provider_available(provider)
-	if provider == nil then return false, 'provider_missing' end
-	local st = provider.status or {}
+
+local function assembly_surface(snap, surface_id)
+	local assembly = snap and snap.assembly or {}
+	local surfaces = assembly and assembly.surfaces or {}
+	return type(surfaces) == 'table' and surfaces[surface_id] or nil
+end
+
+local function resolve_observation_binding(snap, desired)
+	local a = assembly_surface(snap, desired and desired.surface_id or desired and desired.id)
+	if type(a) ~= 'table' then return nil, 'assembly_surface_missing' end
+	if type(a.component) ~= 'string' or a.component == '' then return nil, 'assembly_component_missing' end
+	if type(a.observed_surface) ~= 'string' or a.observed_surface == '' then return nil, 'assembly_observed_surface_missing' end
+	return {
+		component = a.component,
+		observed_surface = a.observed_surface,
+		exposure = a.exposure,
+		connector = a.connector,
+		assembly = copy(a),
+	}, nil
+end
+
+local function source_from_binding(binding)
+	if not binding then return nil end
+	return {
+		kind = 'local-provider',
+		component = binding.component,
+		observed_surface = binding.observed_surface,
+		exposure = binding.exposure,
+		connector = binding.connector,
+	}
+end
+
+local function observation_available(_snap, _component, observation)
+	if observation == nil then return false, 'source_missing' end
+	local st = observation.status or {}
 	if st.available == false or st.state == 'removed' or st.state == 'unavailable' or st.state == 'not_configured' then
-		return false, st.reason or st.state or 'provider_unavailable'
+		return false, st.reason or st.state or 'source_unavailable'
 	end
 	return true, nil
 end
@@ -197,27 +240,27 @@ local function expand_user_segments(attachment, segments)
 	return out
 end
 
-local function validate_provider_capabilities(violations, surface_id, desired, p_surface)
+local function validate_observed_capabilities(violations, surface_id, desired, binding, p_surface)
 	if p_surface == nil then return end
 	local caps = p_surface.capabilities
 	if not is_plain_table(caps) then return end
 	local mode = desired.attachment and desired.attachment.mode or 'none'
 	if mode == 'access' and caps.access ~= true then
-		append_violation(violations, 'provider_surface_does_not_support_access', {
+		append_violation(violations, 'observed_surface_does_not_support_access', {
 			surface_id = surface_id,
-			provider_surface_id = desired.provider and desired.provider.provider_surface_id or nil,
+			observed_surface = binding and binding.observed_surface or nil,
 		})
 	elseif mode == 'trunk' and caps.trunk ~= true then
-		append_violation(violations, 'provider_surface_does_not_support_trunk', {
+		append_violation(violations, 'observed_surface_does_not_support_trunk', {
 			surface_id = surface_id,
-			provider_surface_id = desired.provider and desired.provider.provider_surface_id or nil,
+			observed_surface = binding and binding.observed_surface or nil,
 		})
 	end
 	local dcaps = desired.capabilities
 	if is_plain_table(dcaps) and dcaps.poe == true and caps.poe ~= true then
-		append_violation(violations, 'provider_surface_does_not_support_poe', {
+		append_violation(violations, 'observed_surface_does_not_support_poe', {
 			surface_id = surface_id,
-			provider_surface_id = desired.provider and desired.provider.provider_surface_id or nil,
+			observed_surface = binding and binding.observed_surface or nil,
 		})
 	end
 end
@@ -252,19 +295,23 @@ local function rebuild_derived(snap)
 	local segments = snap.net and snap.net.segments or {}
 
 	for id, desired in pairs((snap.config_intent and snap.config_intent.surfaces) or {}) do
-		local provider_id = desired.provider.capability_id
-		local provider = snap.providers[provider_id]
-		local p_ok, p_reason = provider_available(provider)
-		local p_surface = provider_surface(provider, desired.provider.provider_surface_id)
+		local binding, binding_reason = resolve_observation_binding(snap, desired)
+		local component = binding and binding.component or nil
+		local observation = component and snap.observations[component] or nil
+		local p_ok, p_reason = observation_available(snap, component, observation)
+		if not binding then p_ok, p_reason = false, binding_reason or 'assembly_binding_missing' end
+		local p_surface = binding and observed_surface_record(observation, binding.observed_surface) or nil
 		local link = copy((p_surface and p_surface.link) or {})
 		local observed_attachment = copy((p_surface and p_surface.attachment) or {})
+		local observed_counters = copy((p_surface and p_surface.counters) or {})
+		local observed_poe = copy((p_surface and p_surface.poe) or {})
 		local availability = { state = 'available', reason = nil }
 		if desired.enabled == false then
 			availability = { state = 'disabled', reason = 'disabled_by_config' }
 		elseif not p_ok then
 			availability = { state = 'unavailable', reason = p_reason }
 		elseif p_surface == nil then
-			availability = { state = 'degraded', reason = 'provider_surface_missing' }
+			availability = { state = 'degraded', reason = 'observed_surface_missing' }
 		end
 
 		for _, segment_id in ipairs(collect_attachment_segments(desired.attachment)) do
@@ -273,20 +320,20 @@ local function rebuild_derived(snap)
 			end
 		end
 
-		validate_provider_capabilities(violations, id, desired, p_surface)
+		validate_observed_capabilities(violations, id, desired, binding, p_surface)
 
 		if desired.protected then
 			if desired.enabled == false then append_violation(violations, 'protected_surface_disabled', { surface_id = id, severity = 'critical' }) end
 			if desired.attachment.mode ~= 'trunk' then append_violation(violations, 'protected_surface_not_trunk', { surface_id = id, severity = 'critical' }) end
-			if provider == nil then
-				append_violation(violations, 'protected_provider_missing', { surface_id = id, provider_id = provider_id, severity = 'critical' })
+			if observation == nil then
+				append_violation(violations, 'protected_source_missing', { surface_id = id, component = component, severity = 'critical' })
 			elseif not p_ok then
-				append_violation(violations, 'protected_provider_unavailable', { surface_id = id, provider_id = provider_id, reason = p_reason, severity = 'critical' })
+				append_violation(violations, 'protected_source_unavailable', { surface_id = id, component = component, reason = p_reason, severity = 'critical' })
 			elseif p_surface == nil then
-				append_violation(violations, 'protected_provider_surface_missing', {
+				append_violation(violations, 'protected_observed_surface_missing', {
 					surface_id = id,
-					provider_id = provider_id,
-					provider_surface_id = desired.provider.provider_surface_id,
+					component = component,
+					observed_surface = binding and binding.observed_surface,
 					severity = 'critical',
 				})
 			end
@@ -296,7 +343,7 @@ local function rebuild_derived(snap)
 				required_segments = copy(desired.attachment.required_segments),
 				required_vlans = expected_vlans,
 				observed_vlans = observed_vlans,
-				provider = copy(desired.provider),
+				source = source_from_binding(binding),
 			}
 		end
 
@@ -307,17 +354,18 @@ local function rebuild_derived(snap)
 		surfaces[id] = {
 			surface_id = id,
 			name = desired.name,
-			label = desired.label,
 			description = desired.description,
 			kind = desired.kind,
 			role = desired.role,
 			enabled = desired.enabled,
 			protected = desired.protected,
-			provider = copy(desired.provider),
+			source = source_from_binding(binding),
 			capabilities = copy(desired.capabilities),
 			attachment = copy(desired.attachment),
-			observed = { attachment = observed_attachment },
+			observed = { attachment = observed_attachment, poe = observed_poe, counters = observed_counters, source = source_from_binding(binding) },
 			link = link,
+			poe = observed_poe,
+			counters = observed_counters,
 			availability = availability,
 			updated_at = now(),
 		}
@@ -342,6 +390,7 @@ local function publish(state)
 	end)
 	return true, nil
 end
+
 
 local function apply_config(state, ev)
 	local intent, err = config_mod.normalise(ev and ev.raw or nil, { rev = ev and ev.rev, generation = ev and ev.generation })
@@ -371,15 +420,28 @@ local function apply_net_segments(state, ev)
 	return publish(state)
 end
 
-local function apply_provider_event(state, ev)
+local function apply_assembly_event(state, ev)
 	if ev and ev.op == 'replay_done' then return true, nil end
+	local assembly = (ev and ev.op == 'unretain') and {} or copy((ev and ev.payload) or {})
 	local _changed, _version, uerr = state.model:update(function (snap)
-		if update_provider_from_event(snap, ev) then snap.stats.provider_updates = (snap.stats.provider_updates or 0) + 1 end
+		snap.assembly = assembly
+		snap.stats.assembly_updates = (snap.stats.assembly_updates or 0) + 1
 		return rebuild_derived(snap)
 	end)
 	if uerr ~= nil then return nil, uerr end
 	return publish(state)
 end
+
+local function apply_observation_event(state, ev)
+	if ev and ev.op == 'replay_done' then return true, nil end
+	local _changed, _version, uerr = state.model:update(function (snap)
+		if update_observation_from_event(snap, ev) then snap.stats.observation_updates = (snap.stats.observation_updates or 0) + 1 end
+		return rebuild_derived(snap)
+	end)
+	if uerr ~= nil then return nil, uerr end
+	return publish(state)
+end
+
 
 function M.build_state(scope, opts)
 	opts = opts or {}
@@ -388,21 +450,25 @@ function M.build_state(scope, opts)
 	if not cfg then return nil, cfg_err end
 	local net_watch, nerr = bus_cleanup.watch_retained(conn, topics.net_segments(), { replay = true, queue_len = 8, full = 'reject_newest' })
 	if not net_watch then cfg:close(); return nil, nerr end
-	local provider_watch, perr = bus_cleanup.watch_retained(conn, topics.wired_provider_cap_pattern(), { replay = true, queue_len = 32, full = 'reject_newest' })
-	if not provider_watch then cfg:close(); bus_cleanup.unwatch_retained(conn, net_watch); return nil, perr end
+	local assembly_watch, aerr = bus_cleanup.watch_retained(conn, topics.device_assembly(), { replay = true, queue_len = 8, full = 'reject_newest' })
+	if not assembly_watch then cfg:close(); bus_cleanup.unwatch_retained(conn, net_watch); return nil, aerr end
+	local observation_watch, perr = bus_cleanup.watch_retained(conn, topics.raw_wired_provider_pattern(), { replay = true, queue_len = 32, full = 'reject_newest' })
+	if not observation_watch then cfg:close(); bus_cleanup.unwatch_retained(conn, net_watch); bus_cleanup.unwatch_retained(conn, assembly_watch); return nil, perr end
 	local state = {
 		scope = scope,
 		conn = conn,
 		model = opts.model or model_mod.new(opts.service_id or new_service_id()),
 		config_watch = cfg,
 		net_watch = net_watch,
-		provider_watch = provider_watch,
+		assembly_watch = assembly_watch,
+		observation_watch = observation_watch,
 		published = publisher.new_state(),
 	}
 	scope:finally(function ()
 		cfg:close()
 		bus_cleanup.unwatch_retained(conn, net_watch)
-		bus_cleanup.unwatch_retained(conn, provider_watch)
+		bus_cleanup.unwatch_retained(conn, assembly_watch)
+		bus_cleanup.unwatch_retained(conn, observation_watch)
 		publisher.cleanup_now(conn, state.published)
 		state.model:terminate('wired_service_stopped')
 	end)
@@ -410,11 +476,13 @@ function M.build_state(scope, opts)
 end
 
 function M.next_event_op(state)
-	return fibers.named_choice({
+	local arms = {
 		config = state.config_watch:recv_op(),
 		net = state.net_watch:recv_op():wrap(function (ev, err) return { kind = ev and 'net_segments_changed' or 'net_segments_closed', ev = ev, err = err } end),
-		provider = state.provider_watch:recv_op():wrap(function (ev, err) return { kind = ev and 'provider_changed' or 'provider_closed', ev = ev, err = err } end),
-	}):wrap(function (_, ev) return ev end)
+		assembly = state.assembly_watch:recv_op():wrap(function (ev, err) return { kind = ev and 'assembly_changed' or 'assembly_closed', ev = ev, err = err } end),
+		observation = state.observation_watch:recv_op():wrap(function (ev, err) return { kind = ev and 'observation_changed' or 'observation_closed', ev = ev, err = err } end),
+	}
+	return fibers.named_choice(arms):wrap(function (_, ev) return ev end)
 end
 
 function M.handle_event(state, ev)
@@ -423,8 +491,10 @@ function M.handle_event(state, ev)
 	if ev.kind == 'wired_config_closed' then return nil, ev.err or 'wired config closed' end
 	if ev.kind == 'net_segments_changed' then return apply_net_segments(state, ev.ev) end
 	if ev.kind == 'net_segments_closed' then return nil, ev.err or 'net segments watch closed' end
-	if ev.kind == 'provider_changed' then return apply_provider_event(state, ev.ev) end
-	if ev.kind == 'provider_closed' then return nil, ev.err or 'wired provider watch closed' end
+	if ev.kind == 'assembly_changed' then return apply_assembly_event(state, ev.ev) end
+	if ev.kind == 'assembly_closed' then return nil, ev.err or 'device assembly watch closed' end
+	if ev.kind == 'observation_changed' then return apply_observation_event(state, ev.ev) end
+	if ev.kind == 'observation_closed' then return nil, ev.err or 'wired observation watch closed' end
 	return true, nil
 end
 

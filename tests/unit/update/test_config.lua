@@ -22,12 +22,13 @@ end
 function tests.test_components_array_is_normalised_to_map()
 	local cfg, err = config.normalise({
 		components = {
-			{ component = 'cm5', backend = 'swupdate' },
+			{ component = 'cm5', backend = 'swupdate', stage_timeout_s = '12.5' },
 			{ component = 'mcu', backend = 'mcu' },
 		},
 	})
 	assert_not_nil(cfg, err)
 	assert_eq(cfg.components.cm5.component, 'cm5')
+	assert_eq(cfg.components.cm5.stage_timeout_s, 12.5)
 	assert_eq(cfg.components.mcu.component, 'mcu')
 	assert_eq(cfg.summary.component_count, 2)
 end
@@ -47,6 +48,17 @@ function tests.test_unsupported_schema_is_rejected()
 	local cfg, err = config.normalise({ schema = 'wrong/schema' })
 	if cfg ~= nil then fail('expected config to be rejected') end
 	assert_not_nil(err)
+end
+
+function tests.test_component_phase_timeouts_must_be_positive_numbers()
+	local cfg, err = config.normalise({
+		components = {
+			mcu = { component = 'mcu', stage_timeout_s = 0 },
+		},
+	})
+	if cfg ~= nil then fail('expected zero stage timeout to be rejected') end
+	assert_not_nil(err)
+	assert_true(tostring(err):find('stage_timeout_s', 1, true) ~= nil, err)
 end
 
 function tests.test_extract_payload_accepts_config_service_shape()

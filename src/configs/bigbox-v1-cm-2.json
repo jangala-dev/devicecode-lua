@@ -30,7 +30,6 @@
         "providers": {
           "cm5-local-wired": {
             "provider": "static",
-            "id": "cm5-local-wired",
             "mode": "read_only",
             "surfaces": {
               "eth0": {
@@ -58,42 +57,16 @@
           },
           "switch-main": {
             "provider": "rtl8380m_http",
-            "id": "switch-main",
             "mode": "read_only",
             "base_url": "http://172.28.100.9/",
-            "http": {
-              "response_parser": "legacy-http1-close"
-            },
             "username": "$SWITCH_USERNAME",
             "password": "$SWITCH_PASSWORD",
-            "surfaces": {
-              "uplink-cm5": {
-                "provider_surface_id": "uplink-cm5",
-                "kind": "switch-port",
-                "capabilities": {
-                  "trunk": true,
-                  "access": false,
-                  "poe": false
-                },
-                "link": {
-                  "state": "unknown"
-                },
-                "attachment": {
-                  "mode": "trunk",
-                  "vlans": [
-                    8,
-                    100,
-                    32,
-                    4
-                  ]
-                }
-              }
-            },
-            "topology": {
-              "uplinks": {
-                "cm5": "uplink-cm5"
-              },
-              "phase": "one_way_http_telemetry"
+            "timeout_s": 0.8,
+            "poll_interval_s": 1.0,
+            "http": {
+              "response_parser": "legacy-http1-close",
+              "capability": "main",
+              "max_response_bytes": 1048576
             }
           }
         }
@@ -154,19 +127,18 @@
       "schema": "devicecode.config/net/1",
       "version": 1,
       "product": "bigbox-legacy-converted-phase1",
-      "description": "Converted from legacy Big Box config into segment-first Phase 1 net/wired/device style. Metrics omitted.",
+      "description": "Big Box default config using segment-first NET model, GSM-sourced modem uplinks, generated WAN route metrics, and Devicecode-owned OpenWrt UCI output.",
       "vlan_policy": {
         "reserved": {
-          "adm": 8,
-          "switch_control": 100
+          "internal": 100
         },
         "ranges": {
-          "system": {
-            "from": 1,
-            "to": 199
-          },
           "user": {
-            "from": 200,
+            "from": 1,
+            "to": 99
+          },
+          "system": {
+            "from": 100,
             "to": 399
           }
         },
@@ -180,9 +152,9 @@
           "kind": "system",
           "protected": true,
           "user_editable": false,
-          "purpose": "appliance_admin_network",
+          "purpose": "admin_network",
           "vlan": {
-            "reserved": "adm"
+            "id": 8
           },
           "addressing": {
             "ipv4": {
@@ -248,9 +220,9 @@
           "kind": "system",
           "protected": true,
           "user_editable": false,
-          "purpose": "switch_control_and_internal_services",
+          "purpose": "switch_ext_aps_and_internal_services",
           "vlan": {
-            "reserved": "switch_control"
+            "reserved": "internal"
           },
           "addressing": {
             "ipv4": {
@@ -303,18 +275,18 @@
           "1.1.1.1"
         ],
         "cache": {
-          "size": 1000
+          "size": 10000
         },
         "host_files": {
-          "base_dir": "/data/devicecode/dns/hosts",
+          "base_dir": "/etc/jng/hosts",
           "addnmount": true,
           "sources": {
             "ads": {
-              "file": "ads.hosts",
+              "file": "ads",
               "description": "advertising and tracking block list"
             },
             "adult": {
-              "file": "adult.hosts",
+              "file": "adult",
               "description": "adult-content block list"
             }
           }
@@ -322,9 +294,9 @@
         "records": {
           "unifi": {
             "name": "unifi",
-            "address": "172.28.8.2",
+            "address": "$UNIFI_ADDRESS",
             "segments": [
-              "adm"
+              "int"
             ]
           },
           "config.bigbox.home": {
@@ -348,8 +320,7 @@
           "syn_flood": "1",
           "input": "ACCEPT",
           "forward": "REJECT",
-          "output": "ACCEPT",
-          "disable_ipv6": "1"
+          "output": "ACCEPT"
         },
         "zones": {
           "lan": {
@@ -452,44 +423,45 @@
       },
       "routing": {
         "routes": {
-          "static_1": {
+          "starlink_admin": {
+            "kind": "host",
             "target": "192.168.100.1",
-            "interface": "wan"
+            "interface": "wan",
+            "description": "Starlink dish/admin UI reachable via the wired WAN uplink"
           }
         }
       },
       "wan": {
         "enabled": true,
-        "policy": "dynamic_weight",
         "members": {
           "wan": {
             "interface": "wan",
-            "metric": 1,
             "weight": 1,
             "dynamic_weight": true,
-            "family": "ipv4"
+            "family": "ipv4",
+            "mwan_metric": 1
           },
-          "mdm0": {
-            "interface": "mdm0",
-            "metric": 1,
+          "modem_primary": {
+            "interface": "modem_primary",
             "weight": 1,
             "dynamic_weight": true,
             "family": "ipv4",
             "source": {
-              "kind": "modem",
-              "modem_id": "primary"
-            }
+              "kind": "gsm-uplink",
+              "id": "primary"
+            },
+            "mwan_metric": 1
           },
-          "mdm1": {
-            "interface": "mdm1",
-            "metric": 1,
+          "modem_secondary": {
+            "interface": "modem_secondary",
             "weight": 1,
             "dynamic_weight": true,
             "family": "ipv4",
             "source": {
-              "kind": "modem",
-              "modem_id": "secondary"
-            }
+              "kind": "gsm-uplink",
+              "id": "secondary"
+            },
+            "mwan_metric": 1
           }
         },
         "health": {
@@ -511,6 +483,15 @@
           "speedtests": {
             "enabled": true,
             "interval_s": 300
+          }
+        },
+        "rules": {
+          "https": {
+            "family": "ipv4",
+            "proto": "tcp",
+            "dest_port": "443",
+            "policy": "balanced",
+            "sticky": true
           }
         }
       },
@@ -595,10 +576,6 @@
           "kind": "direct-nic",
           "role": "internal-trunk",
           "protected": true,
-          "provider": {
-            "capability_id": "cm5-local-wired",
-            "provider_surface_id": "eth0"
-          },
           "attachment": {
             "mode": "trunk",
             "required_segments": [
@@ -613,10 +590,6 @@
           "kind": "switch-port",
           "role": "internal-trunk",
           "protected": true,
-          "provider": {
-            "capability_id": "switch-main",
-            "provider_surface_id": "uplink-cm5"
-          },
           "attachment": {
             "mode": "trunk",
             "required_segments": [
@@ -624,6 +597,99 @@
               "int"
             ],
             "user_segments": "all-realised-user-segments"
+          }
+        },
+        "lan-1": {
+          "name": "LAN 1",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-2": {
+          "name": "LAN 2",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-3": {
+          "name": "LAN 3",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-4": {
+          "name": "LAN 4",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-5": {
+          "name": "LAN 5",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-6": {
+          "name": "LAN 6",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-7": {
+          "name": "LAN 7",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "sfp-1": {
+          "name": "SFP 1",
+          "kind": "sfp-port",
+          "role": "external-port",
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "sfp-2": {
+          "name": "SFP 2",
+          "kind": "sfp-port",
+          "role": "external-port",
+          "attachment": {
+            "mode": "none"
           }
         }
       },
@@ -864,64 +930,6 @@
             }
           }
         },
-        "cm5-local-wired": {
-          "kind": "wired-provider",
-          "module": "wired_provider",
-          "class": "host",
-          "role": "local-wired-provider",
-          "member": "local",
-          "facts": {
-            "wired_provider_status": [
-              "raw",
-              "host",
-              "wired",
-              "cap",
-              "wired-provider",
-              "cm5-local-wired",
-              "status"
-            ],
-            "wired_provider_identity": [
-              "raw",
-              "host",
-              "wired",
-              "cap",
-              "wired-provider",
-              "cm5-local-wired",
-              "state",
-              "identity"
-            ],
-            "wired_provider_telemetry": [
-              "raw",
-              "host",
-              "wired",
-              "cap",
-              "wired-provider",
-              "cm5-local-wired",
-              "state",
-              "telemetry"
-            ],
-            "wired_provider_surfaces": [
-              "raw",
-              "host",
-              "wired",
-              "cap",
-              "wired-provider",
-              "cm5-local-wired",
-              "state",
-              "surfaces"
-            ],
-            "wired_provider_topology": [
-              "raw",
-              "host",
-              "wired",
-              "cap",
-              "wired-provider",
-              "cm5-local-wired",
-              "state",
-              "topology"
-            ]
-          }
-        },
         "switch-main": {
           "kind": "switch",
           "module": "switch",
@@ -929,55 +937,167 @@
           "role": "switch-fabric",
           "member": "switch-main",
           "facts": {
-            "wired_provider_status": [
+            "wired_observation_status": [
               "raw",
               "host",
               "wired",
-              "cap",
-              "wired-provider",
+              "provider",
               "switch-main",
               "status"
             ],
-            "wired_provider_identity": [
+            "wired_observation_surfaces": [
               "raw",
               "host",
               "wired",
-              "cap",
-              "wired-provider",
-              "switch-main",
-              "state",
-              "identity"
-            ],
-            "wired_provider_telemetry": [
-              "raw",
-              "host",
-              "wired",
-              "cap",
-              "wired-provider",
-              "switch-main",
-              "state",
-              "telemetry"
-            ],
-            "wired_provider_surfaces": [
-              "raw",
-              "host",
-              "wired",
-              "cap",
-              "wired-provider",
+              "provider",
               "switch-main",
               "state",
               "surfaces"
             ],
-            "wired_provider_topology": [
+            "wired_observation_topology": [
               "raw",
               "host",
               "wired",
-              "cap",
-              "wired-provider",
+              "provider",
               "switch-main",
               "state",
               "topology"
             ]
+          }
+        }
+      },
+      "assembly": {
+        "schema": "devicecode.device.assembly/1",
+        "product": "big-box",
+        "components": {
+          "cm5": {
+            "kind": "compute",
+            "role": "controller"
+          },
+          "mcu": {
+            "kind": "microcontroller",
+            "role": "power-sensor-controller"
+          },
+          "switch-main": {
+            "kind": "switch",
+            "role": "wired-fabric",
+            "observation": {
+              "kind": "local-provider",
+              "source": [
+                "raw",
+                "host",
+                "wired",
+                "provider",
+                "switch-main"
+              ]
+            }
+          },
+          "cm5-local-wired": {
+            "kind": "direct-nic",
+            "role": "controller-wired-port",
+            "observation": {
+              "kind": "local-provider",
+              "source": [
+                "raw",
+                "host",
+                "wired",
+                "provider",
+                "cm5-local-wired"
+              ]
+            }
+          }
+        },
+        "links": {
+          "cm5-switch": {
+            "kind": "wired",
+            "role": "controller-switch-uplink",
+            "internal": true,
+            "a": {
+              "component": "cm5-local-wired",
+              "observed_surface": "eth0"
+            },
+            "b": {
+              "component": "switch-main",
+              "observed_surface": "GE8"
+            }
+          }
+        },
+        "surfaces": {
+          "cm5-eth0": {
+            "kind": "ethernet",
+            "exposure": "internal",
+            "component": "cm5-local-wired",
+            "observed_surface": "eth0"
+          },
+          "switch-uplink-cm5": {
+            "kind": "ethernet",
+            "exposure": "internal",
+            "component": "switch-main",
+            "observed_surface": "GE8",
+            "connector": "internal-ge8"
+          },
+          "lan-1": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE1",
+            "connector": "RJ45-1"
+          },
+          "lan-2": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE2",
+            "connector": "RJ45-2"
+          },
+          "lan-3": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE3",
+            "connector": "RJ45-3"
+          },
+          "lan-4": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE4",
+            "connector": "RJ45-4"
+          },
+          "lan-5": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE5",
+            "connector": "RJ45-5"
+          },
+          "lan-6": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE6",
+            "connector": "RJ45-6"
+          },
+          "lan-7": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE7",
+            "connector": "RJ45-7"
+          },
+          "sfp-1": {
+            "kind": "sfp",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE9",
+            "connector": "SFP-1"
+          },
+          "sfp-2": {
+            "kind": "sfp",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE10",
+            "connector": "SFP-2"
           }
         }
       }
@@ -1284,7 +1404,12 @@
           "ws": true,
           "wss": true
         },
-        "allow_loopback": true
+        "allow_loopback": true,
+        "allowed_response_parsers": {
+          "strict": true,
+          "legacy-http1-close": true
+        },
+        "legacy_http1_close_max_response_bytes": 1048576
       }
     }
   },

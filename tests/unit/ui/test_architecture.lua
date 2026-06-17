@@ -264,7 +264,7 @@ function tests.test_reusable_ui_clients_have_no_hidden_bus_timeouts()
 	end
 
 	local req = read_file('../src/services/ui/http/request.lua')
-	if not req:find('conn:call_op(route.topic, body_table(ctx), { timeout = false })', 1, true) then
+	if not req:find('conn:call_op(route.topic, payload, { timeout = false })', 1, true) then
 		fail('UI command bridge should leave timeout policy to user_operation.run_op')
 	end
 
@@ -272,6 +272,16 @@ function tests.test_reusable_ui_clients_have_no_hidden_bus_timeouts()
 	if upload:find('remaining_timeout(opts, deadline)', 1, true) then
 		fail('upload should not convert its outer deadline into hidden upstream bus timeouts')
 	end
+end
+
+
+function tests.test_ui_listener_has_no_separate_pending_generation_field()
+	local f = assert(io.open('../src/services/ui/service.lua', 'r'))
+	local src = f:read('*a'); f:close()
+	if src:find('pending_listener_generation', 1, true) then
+		error('ui listener should carry pending listener config only; pending_listener_generation is redundant', 2)
+	end
+	assert(src:find('pending_listener_cfg', 1, true), 'ui should still keep pending listener config')
 end
 
 return tests

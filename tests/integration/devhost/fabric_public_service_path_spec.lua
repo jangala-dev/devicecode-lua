@@ -38,6 +38,95 @@ local function assert_true(v, msg)
 	assert(v == true, msg or ('expected true, got ' .. tostring(v)))
 end
 
+
+local function join_topic(topic)
+	if type(topic) ~= 'table' then return tostring(topic) end
+	local parts = {}
+	for i = 1, #topic do parts[#parts + 1] = tostring(topic[i]) end
+	return table.concat(parts, '/')
+end
+
+local function compact_value(v, depth)
+	depth = depth or 0
+	local tv = type(v)
+	if tv == 'string' then
+		return string.format('%q', v)
+	end
+	if tv ~= 'table' then
+		return tostring(v)
+	end
+	if depth >= 2 then return '{...}' end
+	local parts = {}
+	local n = 0
+	for i = 1, #v do
+		n = n + 1
+		parts[#parts + 1] = compact_value(v[i], depth + 1)
+		if n >= 8 then break end
+	end
+	for k, val in pairs(v) do
+		if type(k) ~= 'number' then
+			n = n + 1
+			parts[#parts + 1] = tostring(k) .. '=' .. compact_value(val, depth + 1)
+			if n >= 12 then break end
+		end
+	end
+	return '{' .. table.concat(parts, ', ') .. '}'
+end
+
+local function frame_summary(frame)
+	if type(frame) ~= 'table' then return tostring(frame) end
+	local parts = { tostring(frame.type or '?') }
+	if frame.sid then parts[#parts + 1] = 'sid=' .. tostring(frame.sid) end
+	if frame.node then parts[#parts + 1] = 'node=' .. tostring(frame.node) end
+	if frame.id then parts[#parts + 1] = 'id=' .. tostring(frame.id) end
+	if frame.xfer_id then parts[#parts + 1] = 'xfer_id=' .. tostring(frame.xfer_id) end
+	if frame.target then parts[#parts + 1] = 'target=' .. tostring(frame.target) end
+	if frame.offset ~= nil then parts[#parts + 1] = 'offset=' .. tostring(frame.offset) end
+	if frame.next ~= nil then parts[#parts + 1] = 'next=' .. tostring(frame.next) end
+	if frame.size ~= nil then parts[#parts + 1] = 'size=' .. tostring(frame.size) end
+	if frame.digest then parts[#parts + 1] = 'digest=' .. tostring(frame.digest) end
+	if frame.chunk_digest then parts[#parts + 1] = 'chunk_digest=' .. tostring(frame.chunk_digest) end
+	if frame.topic then parts[#parts + 1] = 'topic=' .. join_topic(frame.topic) end
+	if frame.ok ~= nil then parts[#parts + 1] = 'ok=' .. tostring(frame.ok) end
+	if frame.err then parts[#parts + 1] = 'err=' .. tostring(frame.err) end
+	return table.concat(parts, ' ')
+end
+
+local function chat(label, value)
+	local msg = '[fabric-pair-send-blob] ' .. tostring(label)
+	if value ~= nil then
+		if type(value) == 'table' and value.type then
+			msg = msg .. ': ' .. frame_summary(value)
+		else
+			msg = msg .. ': ' .. compact_value(value)
+		end
+	end
+	io.stderr:write(msg .. '\n')
+end
+
+local function dump_transport(label, transport)
+	chat(label .. ' written_count', #transport.written)
+	for i, frame in ipairs(transport.written) do
+		io.stderr:write(('[fabric-pair-send-blob] %s[%d] %s\n'):format(label, i, frame_summary(frame)))
+	end
+	chat(label .. ' flushes', transport.flushes and transport.flushes() or '?')
+	chat(label .. ' closes', transport.closes and transport.closes() or '?')
+	chat(label .. ' close_reason', transport.close_reason and transport.close_reason() or nil)
+end
+
+local function trace_transport(label, transport)
+	local orig = transport.session.write_line_op
+	function transport.session:write_line_op(line)
+		local frame = protocol.decode_line(line)
+		if frame then
+			chat(label .. ' write_line', frame)
+		else
+			chat(label .. ' write_line undecodable', line)
+		end
+		return orig(self, line)
+	end
+end
+
 local function copy_frame(frame)
 	local out = {}
 	for k, v in pairs(frame or {}) do
@@ -490,6 +579,131 @@ function T.fabric_exposes_public_transfer_manager_capability()
 		assert_eq(reply, nil)
 		assert_eq(err, 'link_not_ready')
 	end, { timeout = 4.0 })
+end
+
+
+function T.fabric_pair_sends_blob_to_registered_remote_transfer_target()
+	runfibers.run(function(scope)
+		local bus_a = busmod.new()
+		local bus_b = busmod.new()
+		local conn_a = bus_a:connect()
+		local conn_b = bus_b:connect()
+		local transport_a = new_line_transport()
+		local transport_b = new_line_transport()
+		connect_line_transports(transport_a, transport_b)
+		trace_transport('node-a transport', transport_a)
+		trace_transport('node-b transport', transport_b)
+		chat('created paired in-memory line transports')
+
+		local received = {}
+		local committed = false
+		local target = {}
+		function target:open_sink_op(req)
+			chat('remote target open_sink_op', req)
+			assert_eq(req.target, 'updater/main')
+			assert_eq(req.size, 6)
+			assert_eq(req.digest, protocol.digest_hex('abcdef'))
+			local sink = {}
+			function sink:append_op(chunk)
+				chat('remote target append_op', { chunk = chunk, received_before = table.concat(received) })
+				received[#received + 1] = chunk
+				return fibers.always(true, nil)
+			end
+			function sink:commit_op(req2)
+				chat('remote target commit_op', req2)
+				committed = true
+				return fibers.always({ staged = true, digest = req2.digest }, nil)
+			end
+			function sink:abort(reason)
+				chat('remote target abort', reason)
+				return true, nil
+			end
+			return fibers.always(sink, nil)
+		end
+
+		local cfg_a = link_config({
+			local_node = 'node-a',
+			id = 'link-a',
+			peer_id = 'node-b',
+			transfer = { chunk_size = 3, timeout_s = 1.0 },
+		})
+		local cfg_b = link_config({
+			local_node = 'node-b',
+			id = 'link-a',
+			peer_id = 'node-a',
+			transfer = { chunk_size = 3, timeout_s = 1.0 },
+		})
+
+		chat('starting node-a fabric service')
+		start_public_fabric(scope, conn_a, cfg_a, transport_a)
+		chat('starting node-b fabric service with receive target updater/main')
+		start_public_fabric(scope, conn_b, cfg_b, transport_b, {
+			link_overrides = {
+				['link-a'] = {
+					open_transport_op = function () return wrap_session_op(transport_b.session) end,
+					transfer = {
+						chunk_size = 3,
+						timeout_s = 1.0,
+						receive_targets = { ['updater/main'] = target },
+					},
+				},
+			},
+		})
+
+		chat('waiting for fabric handshakes')
+		chat('saw handshake', wait_written('node-a hello', transport_a, function(frame)
+			return frame.type == 'hello' and frame.node == 'node-a'
+		end))
+		chat('saw handshake', wait_written('node-b hello', transport_b, function(frame)
+			return frame.type == 'hello' and frame.node == 'node-b'
+		end))
+		chat('saw handshake', wait_written('node-a hello_ack', transport_a, function(frame)
+			return frame.type == 'hello_ack' and frame.node == 'node-a'
+		end))
+		chat('saw handshake', wait_written('node-b hello_ack', transport_b, function(frame)
+			return frame.type == 'hello_ack' and frame.node == 'node-b'
+		end))
+
+		chat('waiting for node-a transfer manager status')
+		chat('node-a transfer manager status', wait_retained_payload_where(conn_a, topics.transfer_manager_status(), 'node-a transfer manager available', function (p)
+			return p and p.available == true
+		end, { timeout = 1.5 }))
+		chat('waiting for node-b transfer manager status')
+		chat('node-b transfer manager status', wait_retained_payload_where(conn_b, topics.transfer_manager_status(), 'node-b transfer manager available', function (p)
+			return p and p.available == true
+		end, { timeout = 1.5 }))
+
+		chat('calling node-a transfer manager send-blob')
+		local reply, err = conn_a:call(topics.transfer_manager_rpc('send-blob'), {
+			link_id = 'link-a',
+			request_id = 'xfer-real-fabric',
+			xfer_id = 'xfer-real-fabric',
+			target = 'updater/main',
+			size = 6,
+			digest = protocol.digest_hex('abcdef'),
+			data = 'abcdef',
+			chunk_size = 3,
+			timeout_s = 2.0,
+			meta = { kind = 'firmware', component = 'mcu' },
+		}, { timeout = 2.0 })
+		chat('send-blob returned', { reply = reply, err = err, received = table.concat(received), committed = committed })
+		if reply == nil then
+			dump_transport('node-a transport', transport_a)
+			dump_transport('node-b transport', transport_b)
+			local status_a = conn_a:retained_view(topics.transfer_manager_status())
+			local status_b = conn_b:retained_view(topics.transfer_manager_status())
+			local msg_a = status_a:get(topics.transfer_manager_status())
+			local msg_b = status_b:get(topics.transfer_manager_status())
+			chat('node-a retained transfer status at failure', msg_a and msg_a.payload or nil)
+			chat('node-b retained transfer status at failure', msg_b and msg_b.payload or nil)
+			status_a:close()
+			status_b:close()
+		end
+		assert(reply ~= nil, tostring(err))
+		assert_eq(reply.ok, true)
+		assert_eq(table.concat(received), 'abcdef')
+		assert_true(committed)
+	end, { timeout = 6.0 })
 end
 
 return T

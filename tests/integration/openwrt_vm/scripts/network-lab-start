@@ -1,0 +1,103 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/network-lab-env"
+
+if [ -f "$NETWORK_LAB_PID" ] && kill -0 "$(cat "$NETWORK_LAB_PID")" 2>/dev/null; then
+	echo "[network-lab] already running with pid $(cat "$NETWORK_LAB_PID")"
+	exit 0
+fi
+
+if command -v ss >/dev/null 2>&1 && ss -H -ltn "sport = :${NETWORK_LAB_SSH_PORT}" 2>/dev/null | grep -q .; then
+	echo "[network-lab] SSH port ${NETWORK_LAB_SSH_PORT} is already in use" >&2
+	echo "[network-lab] run ./scripts/network-lab-stop, or set NETWORK_LAB_SSH_PORT to a free port" >&2
+	exit 1
+fi
+
+if [ ! -f "$NETWORK_LAB_BASE_IMAGE" ]; then
+	sh "$SCRIPT_DIR/network-lab-fetch-image"
+fi
+
+if [ ! -f "$NETWORK_LAB_SEED" ] || [ ! -f "$NETWORK_LAB_SSH_KEY" ]; then
+	sh "$SCRIPT_DIR/network-lab-create-seed"
+fi
+
+mkdir -p "$NETWORK_LAB_DIR"
+
+if [ ! -f "$NETWORK_LAB_DISK" ]; then
+	echo "[network-lab] creating overlay disk: $NETWORK_LAB_DISK"
+	qemu-img create -f qcow2 -F qcow2 -b "$NETWORK_LAB_BASE_IMAGE" "$NETWORK_LAB_DISK" "$NETWORK_LAB_DISK_SIZE" >/dev/null
+fi
+
+rm -f "$NETWORK_LAB_PID" "$NETWORK_LAB_LOG"
+
+set -- \
+	-m "$NETWORK_LAB_MEM" \
+	-smp "$NETWORK_LAB_CPUS" \
+	-drive "file=${NETWORK_LAB_DISK},format=qcow2,if=virtio" \
+	-drive "file=${NETWORK_LAB_SEED},format=raw,media=cdrom,readonly=on" \
+	-netdev "user,id=net0,hostfwd=tcp::${NETWORK_LAB_SSH_PORT}-:22" \
+	-device virtio-net-pci,netdev=net0 \
+	-display none \
+	-monitor none \
+	-daemonize \
+	-pidfile "$NETWORK_LAB_PID" \
+	-serial "file:${NETWORK_LAB_LOG}"
+
+kvm_args=""
+case "$NETWORK_LAB_KVM" in
+	1)
+		kvm_args=1
+		;;
+	auto)
+		if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+			kvm_args=1
+		fi
+		;;
+	0|off|false)
+		;;
+	*)
+		echo "[network-lab] invalid NETWORK_LAB_KVM=$NETWORK_LAB_KVM" >&2
+		exit 1
+		;;
+esac
+
+case "$NETWORK_LAB_ARCH" in
+	amd64)
+		if [ -n "$kvm_args" ]; then
+			set -- -enable-kvm -cpu host "$@"
+		fi
+		;;
+	arm64)
+		firmware=""
+		for p in \
+			/usr/share/AAVMF/AAVMF_CODE.fd \
+			/usr/share/qemu-efi-aarch64/QEMU_EFI.fd \
+			/usr/share/edk2/aarch64/QEMU_EFI.fd
+		do
+			if [ -f "$p" ]; then
+				firmware="$p"
+				break
+			fi
+		done
+		if [ -z "$firmware" ]; then
+			echo "[network-lab] missing AArch64 EFI firmware for arm64 lab VM" >&2
+			exit 1
+		fi
+		if [ -n "$kvm_args" ]; then
+			set -- -enable-kvm -machine virt -cpu host -bios "$firmware" "$@"
+		else
+			set -- -machine virt -cpu cortex-a72 -bios "$firmware" "$@"
+		fi
+		;;
+	*)
+		echo "[network-lab] unsupported NETWORK_LAB_ARCH=$NETWORK_LAB_ARCH" >&2
+		exit 1
+		;;
+esac
+
+echo "[network-lab] starting $NETWORK_LAB_ARCH VM on SSH port $NETWORK_LAB_SSH_PORT"
+exec "$NETWORK_LAB_QEMU" "$@"

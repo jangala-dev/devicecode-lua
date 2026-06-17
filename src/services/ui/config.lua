@@ -27,6 +27,7 @@ local DEFAULTS = {
 	uploads = {
 		enabled = true,
 		max_bytes = 64 * 1024 * 1024,
+		require_auth = false,
 	},
 	sessions = {
 		prune_interval = 60,
@@ -56,7 +57,7 @@ local HTTP_KEYS = {
 
 local STATIC_KEYS = { root = true, index = true, chunk_size = true }
 local SSE_KEYS = { enabled = true, queue_len = true, max_replay = true, replay = true, pattern = true }
-local UPLOAD_KEYS = { enabled = true, max_bytes = true }
+local UPLOAD_KEYS = { enabled = true, max_bytes = true, require_auth = true }
 local SESSION_KEYS = { prune_interval = true }
 
 local function fail(msg) return nil, msg end
@@ -218,6 +219,9 @@ local function normalise_uploads(raw)
 	v, err = non_negative_int_or_nil(raw.max_bytes, 'uploads.max_bytes')
 	if err then return nil, err end
 	if v ~= nil then out.max_bytes = v end
+	v, err = bool_or_nil(raw.require_auth, 'uploads.require_auth')
+	if err then return nil, err end
+	if v ~= nil then out.require_auth = v end
 	return out, nil
 end
 
