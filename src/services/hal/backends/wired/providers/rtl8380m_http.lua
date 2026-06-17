@@ -39,56 +39,14 @@ local READ_COMMANDS = {
 	'rmon_statistics',
 }
 
-local STATS_COMMANDS = {
-	'sys_cpumem',
-	'rmon_statistics',
-}
-
-local PANEL_COMMANDS = {
-	'home_main',
-	'panel_info',
-}
-
 local COMMAND_GROUPS = {
-	home_main = { 'home_main' },
-	panel_info = { 'panel_info' },
-	panel = PANEL_COMMANDS,
+	panel = { 'home_main', 'panel_info' },
 	identity = { 'sys_sysinfo' },
-	port = { 'home_main', 'port_port' },
-	vlan_create = { 'home_main', 'vlan_create' },
-	vlan_conf = { 'home_main', 'vlan_conf' },
-	vlan_port = { 'home_main', 'vlan_port' },
-	vlan_membership = { 'home_main', 'vlan_membership' },
 	vlan = { 'home_main', 'vlan_create', 'vlan_conf', 'vlan_port', 'vlan_membership' },
 	poe = { 'home_main', 'poe_poe' },
-	lldp_local = { 'lldp_local' },
-	lldp_neighbor = { 'lldp_neighbor' },
 	lldp = { 'lldp_local', 'lldp_neighbor' },
 	runtime = { 'sys_cpumem' },
 	counters = { 'home_main', 'rmon_statistics' },
-	stats = STATS_COMMANDS,
-	full = READ_COMMANDS,
-}
-
-local COMMAND_GROUP_ORDER = {
-	'home_main',
-	'panel_info',
-	'panel',
-	'identity',
-	'port',
-	'vlan_create',
-	'vlan_conf',
-	'vlan_port',
-	'vlan_membership',
-	'vlan',
-	'poe',
-	'lldp_local',
-	'lldp_neighbor',
-	'lldp',
-	'runtime',
-	'counters',
-	'stats',
-	'full',
 }
 
 local VLAN_MODE = {
@@ -695,19 +653,8 @@ local function build_snapshot(self, data)
 	}
 end
 
-local function build_panel(self, data)
-	return {
-		ok = true,
-		provider_id = self.id,
-		status = base_status(self),
-		surfaces = build_surfaces(data),
-		raw = self.include_raw and data or nil,
-	}
-end
-
 local function build_group_observation(self, group, data)
 	group = tostring(group or '')
-	if group == 'full' then return build_snapshot(self, data) end
 	local out = {
 		ok = true,
 		provider_id = self.id,
@@ -722,22 +669,15 @@ local function build_group_observation(self, group, data)
 	elseif group == 'poe' then
 		out.power = parse_power(data.poe_poe)
 		out.surfaces = build_surfaces(data)
-	elseif group == 'lldp' or group == 'lldp_local' or group == 'lldp_neighbor' then
+	elseif group == 'lldp' then
 		out.topology = {
 			lldp_local = data.lldp_local,
 			lldp_neighbor = data.lldp_neighbor,
 		}
-	elseif group == 'panel' or group == 'home_main' or group == 'panel_info' or group == 'port'
-		or group == 'vlan' or group == 'vlan_create' or group == 'vlan_conf'
-		or group == 'vlan_port' or group == 'vlan_membership'
-		or group == 'counters'
-	then
-		out.surfaces = build_surfaces(data)
-	elseif group == 'stats' then
-		out.runtime = parse_runtime(data.sys_cpumem)
+	elseif group == 'panel' or group == 'vlan' or group == 'counters' then
 		out.surfaces = build_surfaces(data)
 	else
-		out.raw = self.include_raw and data or nil
+		return { ok = false, provider_id = self.id, group = group, status = { state = 'unavailable', available = false, driver = DRIVER, err = 'unknown command group: ' .. group } }
 	end
 
 	if self.include_raw then out.raw = data end
@@ -762,7 +702,6 @@ local CONFIG_FIELDS = {
 	username = true,
 	password = true,
 	timeout_s = true,
-	poll_interval_s = true,
 	http = true,
 	openssl_bin = true,
 	disable_login = true,
@@ -889,66 +828,6 @@ function Provider:fetch_command_group(group_name)
 	}
 end
 
-function Provider:fetch_panel()
-	if self.disable_login then
-		local data, err = read_commands(self, PANEL_COMMANDS)
-		if not data then return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'disabled', err = err or 'panel read failed' } } end
-		return build_panel(self, data)
-	end
-
-	local ok_login, lerr = login(self)
-	if not ok_login then
-		return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = lerr or 'login failed' } }
-	end
-
-	local data, err, code = read_commands(self, PANEL_COMMANDS)
-	if code == 'auth_invalid' then
-		reset_session(self)
-		local ok_relogin, relogin_err = login(self, { force = true })
-		if not ok_relogin then
-			return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = relogin_err or 're-login failed' } }
-		end
-		data, err, code = read_commands(self, PANEL_COMMANDS)
-	end
-	if not data then
-		return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = self.logged_in and 'confirmed' or 'failed', err = err or 'switch panel read failed' } }
-	end
-	return build_panel(self, data)
-end
-
-function Provider:fetch_stats()
-	if self.client and type(self.client.stats) == 'function' then
-		local data, err = self.client:stats(self)
-		if not data then return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, err = err } } end
-		return { ok = true, provider_id = self.id, runtime = parse_runtime(data.sys_cpumem), raw = self.include_raw and data or nil }
-	end
-
-	local ok_login, lerr = login(self)
-	if not ok_login then
-		return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = lerr or 'login failed' } }
-	end
-
-	local data, err, code = read_commands(self, STATS_COMMANDS)
-	if code == 'auth_invalid' then
-		reset_session(self)
-		local ok_relogin, relogin_err = login(self, { force = true })
-		if not ok_relogin then
-			return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = relogin_err or 're-login failed' } }
-		end
-		data, err, code = read_commands(self, STATS_COMMANDS)
-	end
-	if not data then
-		return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = self.logged_in and 'confirmed' or 'failed', err = err or 'switch stats read failed' } }
-	end
-	return {
-		ok = true,
-		provider_id = self.id,
-		status = { state = 'available', available = true, driver = DRIVER, login = self.logged_in and 'confirmed' or 'disabled' },
-		runtime = parse_runtime(data.sys_cpumem),
-		raw = self.include_raw and data or nil,
-	}
-end
-
 function Provider:fetch_snapshot_op(_req)
 	return op.guard(function ()
 		return fibers.run_scope_op(function ()
@@ -971,27 +850,6 @@ end
 
 function Provider:snapshot_op(req) return self:fetch_snapshot_op(req) end
 function Provider:watch_op(req) return self:fetch_snapshot_op(req) end
-function Provider:command_group_op(req)
-	req = req or {}
-	return op.guard(function ()
-		return fibers.run_scope_op(function ()
-			return self:fetch_command_group(req.group)
-		end):wrap(function (status, _report, result_or_primary, err)
-			if status == 'ok' then return result_or_primary, err end
-			return {
-				ok = false,
-				provider_id = self.id,
-				group = req.group,
-				status = {
-					state = 'unavailable',
-					available = false,
-					driver = DRIVER,
-					err = tostring(result_or_primary or status or 'command group failed'),
-				},
-			}, nil
-		end)
-	end)
-end
 
 function Provider:group_observation_op(req)
 	req = req or {}
@@ -1018,44 +876,6 @@ function Provider:group_observation_op(req)
 	end)
 end
 
-function Provider:panel_op(_req)
-	return op.guard(function ()
-		return fibers.run_scope_op(function ()
-			return self:fetch_panel()
-		end):wrap(function (status, _report, result_or_primary, err)
-			if status == 'ok' then return result_or_primary, err end
-			return {
-				ok = false,
-				provider_id = self.id,
-				status = {
-					state = 'unavailable',
-					available = false,
-					driver = DRIVER,
-					err = tostring(result_or_primary or status or 'panel read failed'),
-				},
-			}, nil
-		end)
-	end)
-end
-function Provider:stats_op(_req)
-	return op.guard(function ()
-		return fibers.run_scope_op(function ()
-			return self:fetch_stats()
-		end):wrap(function (status, _report, result_or_primary, err)
-			if status == 'ok' then return result_or_primary, err end
-			return {
-				ok = false,
-				provider_id = self.id,
-				status = {
-					state = 'unavailable',
-					available = false,
-					driver = DRIVER,
-					err = tostring(result_or_primary or status or 'stats failed'),
-				},
-			}, nil
-		end)
-	end)
-end
 function Provider:apply_attachments_op(_req) return op.always(contract.read_only('apply_attachments')) end
 function Provider:set_poe_op(_req) return op.always(contract.read_only('set_poe')) end
 function Provider:bounce_op(_req) return op.always(contract.read_only('bounce')) end
@@ -1073,10 +893,7 @@ M._test = {
 	parse_surface_counters = parse_surface_counters,
 	build_group_observation = function(provider_like, group, data) return build_group_observation(provider_like or { id = 'switch-main', mode = 'read_only' }, group, data or {}) end,
 	auth_invalid_body = auth_invalid_body,
-	STATS_COMMANDS = STATS_COMMANDS,
-	PANEL_COMMANDS = PANEL_COMMANDS,
 	COMMAND_GROUPS = COMMAND_GROUPS,
-	COMMAND_GROUP_ORDER = COMMAND_GROUP_ORDER,
 }
 
 return M

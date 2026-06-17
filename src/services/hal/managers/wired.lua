@@ -506,6 +506,7 @@ function M.apply_config_op(config)
 					local poll_plan, poll_err = provider_poll_plan(driver_config)
 					if not poll_plan then return false, poll_err end
 					driver_config.poll = nil
+					driver_config.poll_interval_s = nil
 					local driver, err = driver_mod.new(driver_config, driver_opts)
 					if not driver then return false, ('wired provider %s create failed: %s'):format(id, tostring(err)) end
 					driver.provider = driver_config.provider

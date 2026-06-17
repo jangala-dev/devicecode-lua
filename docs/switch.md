@@ -189,33 +189,31 @@ lldp_local
 lldp_neighbor
 ```
 
-The provider also has narrower read paths for timing and grouped polling.  Surface-bearing groups include `home_main` so that rows can be attached to the canonical switch surface names (`GE1` ... `GE10`):
+The provider has narrow read groups for grouped polling.  Surface-bearing groups include `home_main` so that rows can be attached to the canonical switch surface names (`GE1` ... `GE10`):
 
 ```text
-panel/link path: home_main, panel_info
-identity path:   sys_sysinfo
-port path:       home_main, port_port
-vlan path:       home_main, vlan_create, vlan_conf, vlan_port, vlan_membership
-poe path:        home_main, poe_poe
-lldp path:       lldp_local, lldp_neighbor
-runtime path:    sys_cpumem
-counters path:   home_main, rmon_statistics
-stats path:      sys_cpumem, rmon_statistics
-full path:       all read-side commands
+panel path:    home_main, panel_info
+identity path: sys_sysinfo
+vlan path:     home_main, vlan_create, vlan_conf, vlan_port, vlan_membership
+poe path:      home_main, poe_poe
+lldp path:     lldp_local, lldp_neighbor
+runtime path:  sys_cpumem
+counters path: home_main, rmon_statistics
 ```
 
-The panel/link path is the cheapest source of the switch front-panel state: which GE/SFP surfaces are present and whether they are connected.  It deliberately avoids `sys_cpumem` and `rmon_statistics`, which can be slower on this switch.  The devhost timing sweep can time each group separately against the fixed test switch:
+The poll plan is based on timings measured against the fixed RTL8380M switch on 192.168.1.1 using a retained admin session:
 
-```sh
-cd tests
-SWITCH_TEST_FIXED_SWITCH_TIMING=1 \
-SWITCH_TEST_TIMING_TIMEOUT_S=2.5 \
-SWITCH_TEST_TIMING_ITERATIONS=3 \
-TEST_FILTER=rtl8380m_fixed_switch_admin_command_timing_sweep \
-luajit run.lua
+```text
+panel      avg 0.303 s, max 0.344 s
+vlan       avg 0.363 s, max 0.389 s
+poe        avg 0.077 s, max 0.084 s
+lldp       avg 0.160 s, max 0.183 s
+counters   avg 0.203 s, max 0.257 s
+runtime    avg 2.085 s, max 2.089 s
+full read  avg 3.522 s, max 3.554 s, with observed timeout
 ```
 
-Use `SWITCH_TEST_TIMING_GROUPS=panel,poe,runtime,counters` to restrict the sweep, and `SWITCH_TEST_TIMING_REQUIRE_ALL=1` when failures should fail the test rather than only being reported.
+A concurrent probe over `panel,poe,counters,runtime` improved wall-clock time only modestly, from 2.688 s sequential average to 2.309 s concurrent average, so the production poller remains grouped and sequential.
 
 The driver captures the full snapshot into normalised provider observations:
 

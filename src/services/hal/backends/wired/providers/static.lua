@@ -17,7 +17,6 @@ local CONFIG_FIELDS = {
 	surfaces = true,
 	topology = true,
 	meta = true,
-	poll_interval_s = true,
 }
 
 local function check_allowed_config(config)
