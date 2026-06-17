@@ -130,6 +130,13 @@ local function env_non_empty(name)
     return v
 end
 
+
+local function command_available(name)
+    local cmd = exec.command('sh', '-c', 'command -v ' .. shquote(name) .. ' >/dev/null 2>&1')
+    local _out, st, code = fibers.perform(cmd:combined_output_op())
+    return st == 'exited' and code == 0
+end
+
 local function mkdir_p(path)
     local ok = os.execute('mkdir -p ' .. shquote(path))
     if ok ~= true and ok ~= 0 then error('mkdir failed: ' .. tostring(path), 0) end
@@ -143,6 +150,36 @@ local function write_file(path, body)
     local f = assert(io.open(path, 'wb'))
     assert(f:write(body))
     assert(f:close())
+end
+
+
+local function sha256_hex_string(data)
+    local path = os.tmpname()
+    write_file(path, data)
+    local script = table.concat({
+        'set -eu',
+        'if command -v sha256sum >/dev/null 2>&1; then',
+        '  sha256sum ' .. shquote(path) .. " | awk '{ print $1 }'",
+        'elif command -v shasum >/dev/null 2>&1; then',
+        '  shasum -a 256 ' .. shquote(path) .. " | awk '{ print $1 }'",
+        'else',
+        "  echo 'sha256sum_or_shasum_required' >&2",
+        '  exit 127',
+        'fi',
+    }, '\n')
+    local cmd = exec.command('sh', '-c', script)
+    local out, st, code, sig, err = fibers.perform(cmd:combined_output_op())
+    rm_rf(path)
+    if not (st == 'exited' and code == 0) then
+        error(('sha256 helper failed: status=%s code=%s signal=%s err=%s output=%s'):format(
+            tostring(st), tostring(code), tostring(sig), tostring(err), tostring(out)
+        ), 0)
+    end
+    local hex = tostring(out or ''):match('([0-9a-fA-F]+)')
+    if hex == nil or #hex ~= 64 then
+        error('sha256 helper returned invalid digest: ' .. tostring(out), 0)
+    end
+    return hex:lower()
 end
 
 local function temp_roots()
@@ -1146,7 +1183,9 @@ end
 local function make_realistic_mcu_blob(image_id, target_bytes)
     target_bytes = target_bytes or REALISTIC_MCU_BLOB_BYTES
     local payload = string.rep('payload-0123456789abcdef-', math.ceil(target_bytes / 24)):sub(1, target_bytes)
-    return dcmcu_fixture.make(image_id or 'mcu-image-new', payload)
+    return dcmcu_fixture.make(image_id or 'mcu-image-new', payload, {
+        payload_sha256 = sha256_hex_string(payload),
+    })
 end
 
 local function write_all(stream, data)
@@ -1161,15 +1200,27 @@ local function write_all(stream, data)
 end
 
 
+local function fault_for_direction(stats, direction)
+    local faults = type(stats.faults) == 'table' and stats.faults or {}
+    return type(faults[direction]) == 'table' and faults[direction] or {}
+end
+
 local function maybe_inject_malformed_jsonl(direction, output, stats)
-    if direction ~= 'cm5_to_mcu' then return true, nil end
-    if (stats.malformed_lines or 0) >= UART_MALFORMED_LINE_COUNT then return true, nil end
-    local next_at = stats.next_malformed_at or UART_MALFORMED_LINE_FIRST_AT
+    local f = fault_for_direction(stats, direction)
+    local default_direction = stats.default_malformed_direction or 'cm5_to_mcu'
+    if f.disable_malformed == true then return true, nil end
+    if f.malformed_line_count == nil and direction ~= default_direction then return true, nil end
+    local max_lines = f.malformed_line_count or stats.malformed_line_count or UART_MALFORMED_LINE_COUNT
+    local key = 'malformed_lines_' .. direction
+    if (stats[key] or 0) >= max_lines then return true, nil end
+    local next_key = 'next_malformed_at_' .. direction
+    local next_at = stats[next_key] or f.malformed_line_first_at or stats.malformed_line_first_at or UART_MALFORMED_LINE_FIRST_AT
     if (stats.bytes or 0) < next_at then return true, nil end
 
     stats.malformed_lines = (stats.malformed_lines or 0) + 1
-    stats.next_malformed_at = next_at + UART_MALFORMED_LINE_EVERY_BYTES
-    local line = ('{ malformed json from mcu_http_uart test #%d }\n'):format(stats.malformed_lines)
+    stats[key] = (stats[key] or 0) + 1
+    stats[next_key] = next_at + (f.malformed_line_every_bytes or stats.malformed_line_every_bytes or UART_MALFORMED_LINE_EVERY_BYTES)
+    local line = ('{ malformed json from mcu_http_uart test #%d on %s }\n'):format(stats.malformed_lines, direction)
     local ok, err = write_all(output.master, line)
     if ok ~= true then return nil, err or 'malformed_jsonl_inject_failed' end
 
@@ -1182,13 +1233,70 @@ local function maybe_inject_malformed_jsonl(direction, output, stats)
     return true, nil
 end
 
+local function apply_uart_faults(direction, stats, piece)
+    local f = fault_for_direction(stats, direction)
+    if type(piece) ~= 'string' or piece == '' then return piece end
+
+    local dir_bytes = type(stats.bytes_by_direction) == 'table' and (stats.bytes_by_direction[direction] or 0) or 0
+    local function crosses(after)
+        return type(after) == 'number' and dir_bytes < after and (dir_bytes + #piece) >= after
+    end
+
+    if f.pause_once_after_bytes and not f.pause_once_done and crosses(f.pause_once_after_bytes) then
+        f.pause_once_done = true
+        local pause_s = f.pause_s or 0.75
+        stats.fault_pauses = (stats.fault_pauses or 0) + 1
+        log(('UART middleware fault pause #%d on %s for %.3fs at %d direction-bytes'):format(
+            stats.fault_pauses, direction, pause_s, dir_bytes
+        ))
+        fibers.perform(sleep.sleep_op(pause_s))
+    end
+
+    if f.drop_byte_after_bytes and not f.drop_byte_done and crosses(f.drop_byte_after_bytes) then
+        local rel = math.max(1, math.min(#piece, f.drop_byte_after_bytes - dir_bytes))
+        f.drop_byte_done = true
+        stats.dropped_bytes = (stats.dropped_bytes or 0) + 1
+        log(('UART middleware dropped byte #%d on %s at stream byte %d rel=%d'):format(
+            stats.dropped_bytes, direction, f.drop_byte_after_bytes, rel
+        ))
+        piece = piece:sub(1, rel - 1) .. piece:sub(rel + 1)
+    end
+
+    local newline_after = f.drop_next_newline_after_bytes or f.drop_newline_after_bytes
+    if newline_after and not f.drop_newline_done then
+        if not f.drop_newline_armed and ((type(newline_after) ~= 'number') or (dir_bytes + #piece) >= newline_after) then
+            f.drop_newline_armed = true
+            log(('UART middleware armed next-newline drop on %s after %s direction-bytes'):format(
+                direction, tostring(newline_after)
+            ))
+        end
+        if f.drop_newline_armed then
+            local nl = piece:find('\n', 1, true)
+            if nl ~= nil then
+                f.drop_newline_done = true
+                stats.dropped_newlines = (stats.dropped_newlines or 0) + 1
+                log(('UART middleware dropped newline #%d on %s after threshold %s rel=%d'):format(
+                    stats.dropped_newlines, direction, tostring(newline_after), nl
+                ))
+                piece = piece:sub(1, nl - 1) .. piece:sub(nl + 1)
+            end
+        end
+    end
+
+    return piece
+end
+
 local function write_uart_fragment_piece(direction, output, stats, piece)
+    if piece == '' then return true, nil end
+    piece = apply_uart_faults(direction, stats, piece)
     if piece == '' then return true, nil end
     local ok, werr = write_all(output.master, piece)
     if ok ~= true then
         return nil, werr or 'write_failed'
     end
     stats.bytes = (stats.bytes or 0) + #piece
+    stats.bytes_by_direction = stats.bytes_by_direction or {}
+    stats.bytes_by_direction[direction] = (stats.bytes_by_direction[direction] or 0) + #piece
     stats.fragments = (stats.fragments or 0) + 1
 
     if piece:sub(-1) == '\n' then
@@ -1247,15 +1355,24 @@ local function relay_fragmented_uart(direction, input, output, stats)
     end
 end
 
-local function start_noisy_uart_middleware(scope, cm5_port, mcu_port)
+local function start_noisy_uart_middleware(scope, cm5_port, mcu_port, opts)
+    opts = opts or {}
     local stats = {
         bytes = 0,
         fragments = 0,
         pauses = 0,
         malformed_lines = 0,
         malformed_bytes = 0,
-        next_long_pause_at = UART_LONG_PAUSE_EVERY_BYTES,
-        next_malformed_at = UART_MALFORMED_LINE_FIRST_AT,
+        dropped_bytes = 0,
+        dropped_newlines = 0,
+        fault_pauses = 0,
+        next_long_pause_at = opts.long_pause_every_bytes or UART_LONG_PAUSE_EVERY_BYTES,
+        malformed_line_count = opts.malformed_line_count,
+        malformed_line_first_at = opts.malformed_line_first_at,
+        malformed_line_every_bytes = opts.malformed_line_every_bytes,
+        default_malformed_direction = opts.default_malformed_direction,
+        faults = opts.faults or {},
+        bytes_by_direction = {},
     }
     local ok_a, err_a = scope:spawn(function ()
         return relay_fragmented_uart('cm5_to_mcu', cm5_port, mcu_port, stats)
@@ -1299,9 +1416,10 @@ local function mcu_pty_fabric_config()
     return cfg
 end
 
-local function start_fabric_pair(parent_scope, cm5_bus, fake, uart)
+local function start_fabric_pair(parent_scope, cm5_bus, fake, uart, opts)
+    opts = opts or {}
     local pair_scope = assert(parent_scope:child())
-    local stats = start_noisy_uart_middleware(pair_scope, assert(uart and uart.cm5, 'cm5 PTY required'), assert(uart and uart.mcu, 'mcu PTY required'))
+    local stats = start_noisy_uart_middleware(pair_scope, assert(uart and uart.cm5, 'cm5 PTY required'), assert(uart and uart.mcu, 'mcu PTY required'), opts.uart)
 
     local cm5_conn = cm5_bus:connect({ origin_base = { service = 'fabric-cm5' } })
 
@@ -1528,6 +1646,8 @@ end
 local GO_DEVHOST_DEFAULT_REPO = 'https://github.com/jangala-dev/devicecode-go.git'
 local GO_DEVHOST_DEFAULT_REF = 'rt-fixes'
 local GO_DEVHOST_DEFAULT_CACHE = '/tmp/devicecode-go-devhost-cache'
+local PICO2_AB_DEFAULT_REPO = 'https://github.com/jangala-dev/pico2-a-b.git'
+local PICO2_AB_DEFAULT_REF = 'fabric'
 
 local function go_devhost_download_enabled()
     local v = env_non_empty('DEVICECODE_GO_DOWNLOAD')
@@ -1554,16 +1674,18 @@ local function go_devhost_checkout_dir()
     return cache .. '/devicecode-go-' .. safe_path_token(ref)
 end
 
-local function ensure_go_devhost_checkout()
-    local root = env_non_empty('DEVICECODE_GO_ROOT')
-    if root ~= nil then return root, nil end
-    if not go_devhost_download_enabled() then
-        return nil, 'set MCU_DEVHOST_PTY_BIN, DEVICECODE_GO_ROOT, or DEVICECODE_GO_DOWNLOAD=1 to run the Go devhost MCU PTY rig'
-    end
+local function pico2_ab_checkout_dir()
+    local cache = env_non_empty('DEVICECODE_GO_CACHE') or GO_DEVHOST_DEFAULT_CACHE
+    return cache .. '/pico2-a-b'
+end
 
-    local repo = env_non_empty('DEVICECODE_GO_REPO') or GO_DEVHOST_DEFAULT_REPO
+local function go_devhost_binary_path()
+    local cache = env_non_empty('DEVICECODE_GO_CACHE') or GO_DEVHOST_DEFAULT_CACHE
     local ref = env_non_empty('DEVICECODE_GO_REF') or GO_DEVHOST_DEFAULT_REF
-    local dir = go_devhost_checkout_dir()
+    return cache .. '/bin/mcu-devhost-pty-' .. safe_path_token(ref)
+end
+
+local function ensure_git_checkout(label, repo, ref, dir)
     local script = table.concat({
         'set -eu',
         'mkdir -p ' .. shquote(dir),
@@ -1579,36 +1701,126 @@ local function ensure_go_devhost_checkout()
         'git -C ' .. shquote(dir) .. ' clean -q -fdx',
     }, '\n')
 
-    log(('go-pty: ensuring Go devhost checkout repo=%s ref=%s dir=%s'):format(repo, ref, dir))
+    log(('go-pty: ensuring %s checkout repo=%s ref=%s dir=%s'):format(label, repo, ref, dir))
     local cmd = exec.command('sh', '-c', script)
     local out, st, code, sig, err = fibers.perform(cmd:combined_output_op())
     if not (st == 'exited' and code == 0) then
-        return nil, ('Go devhost checkout failed: status=%s code=%s signal=%s err=%s output=%s'):format(
-            tostring(st), tostring(code), tostring(sig), tostring(err), tostring(out)
+        return nil, ('%s checkout failed: status=%s code=%s signal=%s err=%s output=%s'):format(
+            label, tostring(st), tostring(code), tostring(sig), tostring(err), tostring(out)
         )
     end
     return dir, nil
 end
 
+local function build_go_devhost_binary(go_dir)
+    local bin = go_devhost_binary_path()
+    local script = table.concat({
+        'set -eu',
+        'mkdir -p ' .. shquote((bin:gsub('/[^/]+$', ''))),
+        'cd ' .. shquote(go_dir),
+        'GOMAXPROCS=1 go build -o ' .. shquote(bin) .. ' ./cmd/mcu-devhost-pty',
+    }, '\n')
+    log(('go-pty: building Go MCU devhost binary path=%s'):format(bin))
+    local cmd = exec.command('sh', '-c', script)
+    local out, st, code, sig, err = fibers.perform(cmd:combined_output_op())
+    if not (st == 'exited' and code == 0) then
+        return nil, ('Go devhost build failed: status=%s code=%s signal=%s err=%s output=%s'):format(
+            tostring(st), tostring(code), tostring(sig), tostring(err), tostring(out)
+        )
+    end
+    return bin, nil
+end
+
+local function ensure_go_devhost_checkout()
+    local root = env_non_empty('DEVICECODE_GO_ROOT')
+    if root ~= nil then
+        local bin, berr = build_go_devhost_binary(root)
+        if not bin then return nil, berr end
+        return root, bin, nil
+    end
+    if not go_devhost_download_enabled() then
+        return nil, nil, 'set MCU_DEVHOST_PTY_BIN, DEVICECODE_GO_ROOT, or DEVICECODE_GO_DOWNLOAD=1 to run the Go devhost MCU PTY rig'
+    end
+
+    local go_repo = env_non_empty('DEVICECODE_GO_REPO') or GO_DEVHOST_DEFAULT_REPO
+    local go_ref = env_non_empty('DEVICECODE_GO_REF') or GO_DEVHOST_DEFAULT_REF
+    local go_dir = go_devhost_checkout_dir()
+
+    local pico_repo = env_non_empty('DEVICECODE_PICO2_AB_REPO') or PICO2_AB_DEFAULT_REPO
+    local pico_ref = env_non_empty('DEVICECODE_PICO2_AB_REF') or PICO2_AB_DEFAULT_REF
+    local pico_dir = pico2_ab_checkout_dir()
+
+    local dir, err = ensure_git_checkout('Go devhost', go_repo, go_ref, go_dir)
+    if not dir then return nil, nil, err end
+
+    -- devicecode-go's go.mod uses a local replacement for pico2-a-b at
+    -- ../pico2-a-b. Keep that sibling checkout in the same cache root so
+    -- the Lua repo does not need direct access to a monorepo workspace.
+    local pdir, perr = ensure_git_checkout('pico2-a-b', pico_repo, pico_ref, pico_dir)
+    if not pdir then return nil, nil, perr end
+
+    local bin, berr = build_go_devhost_binary(go_dir)
+    if not bin then return nil, nil, berr end
+
+    return go_dir, bin, nil
+end
+
+
+local function resolve_go_devhost_provider()
+    local bin = env_non_empty('MCU_DEVHOST_PTY_BIN') or env_non_empty('DEVICECODE_GO_MCU_DEVHOST_PTY_BIN')
+    if bin ~= nil then
+        return { bin = bin }, nil
+    end
+    if not command_available('go') then
+        return nil, 'go is not installed'
+    end
+    local root = env_non_empty('DEVICECODE_GO_ROOT')
+    if root ~= nil then
+        local built_bin, berr = build_go_devhost_binary(root)
+        if not built_bin then return nil, berr end
+        return { bin = built_bin, cwd = root }, nil
+    end
+    if not go_devhost_download_enabled() then
+        return nil, 'set MCU_DEVHOST_PTY_BIN, DEVICECODE_GO_ROOT, or DEVICECODE_GO_DOWNLOAD=1 to run the Go devhost MCU PTY rig'
+    end
+    if not command_available('git') then
+        return nil, 'git is not installed'
+    end
+    local go_dir, built_bin, err = ensure_go_devhost_checkout()
+    if not go_dir or not built_bin then
+        return nil, err or 'Go devhost checkout/build unavailable'
+    end
+    return { bin = built_bin, cwd = go_dir }, nil
+end
+
 local function go_devhost_command_spec(uart_slave, state_dir, fake, opts)
     opts = opts or {}
-    local bin = env_non_empty('MCU_DEVHOST_PTY_BIN') or env_non_empty('DEVICECODE_GO_MCU_DEVHOST_PTY_BIN')
-    local root
-    local root_err
+    local provider = opts.provider
     local argv
     local cwd
-    if bin ~= nil then
-        argv = { bin }
+    if provider ~= nil then
+        argv = { provider.bin }
+        cwd = provider.cwd
     else
-        root, root_err = ensure_go_devhost_checkout()
-        if root == nil then return nil, root_err end
-        argv = { 'go', 'run', './cmd/mcu-devhost-pty' }
-        cwd = root
+        local bin = env_non_empty('MCU_DEVHOST_PTY_BIN') or env_non_empty('DEVICECODE_GO_MCU_DEVHOST_PTY_BIN')
+        local root
+        local root_err
+        if bin ~= nil then
+            argv = { bin }
+        else
+            local built_bin
+            root, built_bin, root_err = ensure_go_devhost_checkout()
+            if root == nil or built_bin == nil then return nil, root_err end
+            argv = { built_bin }
+            cwd = root
+        end
     end
     argv[#argv + 1] = '--uart'; argv[#argv + 1] = uart_slave
     argv[#argv + 1] = '--state-dir'; argv[#argv + 1] = state_dir
     argv[#argv + 1] = '--node'; argv[#argv + 1] = opts.node or 'mcu'
-    argv[#argv + 1] = '--peer'; argv[#argv + 1] = opts.peer or 'bigbox-cm5'
+    -- The devhost CM5 Fabric config in this test uses local_node='cm5'.
+    -- Keep the Go peer expectation aligned with that test-local node name.
+    argv[#argv + 1] = '--peer'; argv[#argv + 1] = opts.peer or 'cm5'
     argv[#argv + 1] = '--initial-image-id'; argv[#argv + 1] = fake.old_image_id or 'mcu-image-old'
     argv[#argv + 1] = '--initial-version'; argv[#argv + 1] = fake.old_version or '10.0'
     argv[#argv + 1] = '--initial-build-id'; argv[#argv + 1] = fake.old_build_id or 'devhost-initial'
@@ -1673,7 +1885,7 @@ local function start_go_mcu_instance(parent_scope, fake, uart_port, state_dir, o
         end
     end))
 
-    local ready = wait_channel_get(ready_ch, 10.0, 'Go MCU child ready')
+    local ready = wait_channel_get(ready_ch, 20.0, 'Go MCU child ready')
     if not ready.ok then error(ready.err or 'Go MCU child failed to start', 0) end
 
     return { scope = scope, command = cmd, state_dir = state_dir }
@@ -1926,32 +2138,40 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
 end
 
 
-function T.ui_http_mcu_update_go_devhost_pty_reboots_and_reconciles()
+local function run_go_devhost_pty_cycle(opts)
+    opts = opts or {}
     if not go_devhost_configured() then
         log('skipping Go devhost PTY rig: set MCU_DEVHOST_PTY_BIN, DEVICECODE_GO_ROOT, or leave DEVICECODE_GO_DOWNLOAD enabled')
-        return
+        return { skipped = true, reason = 'go_devhost_not_configured' }
     end
+    local result
     runfibers.run(function (root_scope)
+        local provider, skip_reason = resolve_go_devhost_provider()
+        if provider == nil then
+            log('skipping Go devhost PTY rig: ' .. tostring(skip_reason))
+            result = { skipped = true, reason = skip_reason }
+            return
+        end
         local roots = temp_roots()
         local state_dir = roots.base .. '/go-mcu-state'
-        local blob = make_realistic_mcu_blob('mcu-image-go-new')
+        local blob = make_realistic_mcu_blob(opts.image_id or 'mcu-image-go-new', opts.blob_bytes)
         local port = 30000 + math.random(0, 20000)
-        local fake = { old_image_id = 'mcu-image-go-old', old_version = '10.0' }
+        local fake = { old_image_id = opts.old_image_id or 'mcu-image-go-old', old_version = opts.old_version or '10.0' }
         local uart = { cm5 = pty.open(root_scope), mcu = pty.open(root_scope) }
+        local pair, pair_b
 
-        log('go-pty: booting initial CM5 instance')
+        log(('go-pty[%s]: booting initial CM5 instance'):format(opts.label or 'case'))
         local cm5 = start_cm5_instance(root_scope, roots, port, uart.cm5)
-        log('go-pty: booting Go MCU devhost instance')
-        local mcu = start_go_mcu_instance(root_scope, fake, uart.mcu, state_dir)
-        log('go-pty: starting Fabric link over PTY UART middleware')
-        local pair = start_fabric_pair(root_scope, cm5.bus, fake, uart)
-        log('go-pty: starting CM5 Device/Update/UI services')
+        log(('go-pty[%s]: booting Go MCU devhost instance'):format(opts.label or 'case'))
+        local mcu = start_go_mcu_instance(root_scope, fake, uart.mcu, state_dir, { provider = provider })
+        log(('go-pty[%s]: starting Fabric link over PTY UART middleware'):format(opts.label or 'case'))
+        pair = start_fabric_pair(root_scope, cm5.bus, fake, uart, { uart = opts.uart })
+        log(('go-pty[%s]: starting CM5 Device/Update/UI services'):format(opts.label or 'case'))
         cm5.start_services_after_fabric()
 
-        log('go-pty: waiting for initial MCU software fact imported from Go process')
-        wait_component_software(cm5.conn, 'mcu-image-go-old', nil)
+        wait_component_software(cm5.conn, fake.old_image_id, nil)
 
-        log(('go-pty: sending HTTP upload through CM5 UI (%d byte artifact)'):format(#blob))
+        log(('go-pty[%s]: sending HTTP upload through CM5 UI (%d byte artifact)'):format(opts.label or 'case', #blob))
         local status, body = run_http_upload(root_scope, port, blob, nil)
         assert_eq(status, '200', 'upload HTTP status ' .. tostring(status) .. ': ' .. tostring(body))
         local decoded = assert(cjson.decode(body), body)
@@ -1959,18 +2179,21 @@ function T.ui_http_mcu_update_go_devhost_pty_reboots_and_reconciles()
         assert_eq(decoded.job_id, 'job-mcu-http-uart')
         assert_eq(decoded.job, nil)
 
-        log('go-pty: waiting for Go MCU-backed job awaiting_commit')
-        wait_job_chatty(cm5.conn, 'job-mcu-http-uart', 'awaiting_commit', REALISTIC_TRANSFER_TIMEOUT_S, function ()
-            return (('uart_bytes=%d uart_fragments=%d uart_pauses=%d uart_bad_json=%d; %s'):format(
+        log(('go-pty[%s]: waiting for Go MCU-backed job awaiting_commit'):format(opts.label or 'case'))
+        wait_job_chatty(cm5.conn, 'job-mcu-http-uart', 'awaiting_commit', opts.stage_timeout_s or REALISTIC_TRANSFER_TIMEOUT_S, function ()
+            return (('uart_bytes=%d uart_fragments=%d uart_pauses=%d uart_bad_json=%d uart_drop_bytes=%d uart_drop_nl=%d fault_pauses=%d; %s'):format(
                 pair.uart_stats and pair.uart_stats.bytes or 0,
                 pair.uart_stats and pair.uart_stats.fragments or 0,
                 pair.uart_stats and pair.uart_stats.pauses or 0,
                 pair.uart_stats and pair.uart_stats.malformed_lines or 0,
+                pair.uart_stats and pair.uart_stats.dropped_bytes or 0,
+                pair.uart_stats and pair.uart_stats.dropped_newlines or 0,
+                pair.uart_stats and pair.uart_stats.fault_pauses or 0,
                 fabric_progress_fragment(pair.cm5_conn)
             ))
         end)
 
-        log('go-pty: committing job through public HTTP update commit route')
+        log(('go-pty[%s]: committing job through public HTTP update commit route'):format(opts.label or 'case'))
         local commit_status, commit_body, commit_decoded = run_http_json(
             root_scope,
             port,
@@ -1985,41 +2208,47 @@ function T.ui_http_mcu_update_go_devhost_pty_reboots_and_reconciles()
         assert_true(probe.wait_until(function () return fake.rebooting_seen == true end, { timeout = 4.0 }), 'Go MCU child should emit rebooting event')
         assert_true(probe.wait_until(function () return fake.reboot_exit_seen == true end, { timeout = 4.0 }), 'Go MCU child should exit with simulated reboot code')
 
-        log('go-pty reboot: stopping Fabric pair')
         stop_fabric_pair(pair, 'go devhost fabric link reboot')
-        log('go-pty reboot: stopping CM5 instance')
         stop_instance(cm5, 'go devhost cm5 reboot')
-        log('go-pty reboot: stopping first Go MCU instance')
         stop_instance(mcu, 'go devhost mcu reboot')
 
         local uart_b = { cm5 = pty.open(root_scope), mcu = pty.open(root_scope) }
-        log('go-pty reboot: starting fresh CM5 instance')
         local cm5b = start_cm5_instance(root_scope, roots, nil, uart_b.cm5)
-        log('go-pty reboot: starting Go MCU devhost instance with same state dir')
-        local mcub = start_go_mcu_instance(root_scope, fake, uart_b.mcu, state_dir)
-        log('go-pty reboot: starting fresh Fabric link over PTY UART middleware')
-        local pair_b = start_fabric_pair(root_scope, cm5b.bus, fake, uart_b)
+        local mcub = start_go_mcu_instance(root_scope, fake, uart_b.mcu, state_dir, { provider = provider })
+        pair_b = start_fabric_pair(root_scope, cm5b.bus, fake, uart_b, { uart = opts.reboot_uart })
         log_fabric_status(cm5b.conn, 'go-pty CM5 fabric reboot-established status')
-        log('go-pty reboot: starting fresh CM5 Device/Update services')
         cm5b.start_services_after_fabric()
 
-        log('go-pty reboot: waiting for new MCU software image imported from restarted Go process')
-        wait_component_software(cm5b.conn, 'mcu-image-go-new', nil)
-        log('go-pty reboot: waiting for job succeeded')
+        wait_component_software(cm5b.conn, opts.image_id or 'mcu-image-go-new', nil)
         local final_job = wait_job(cm5b.conn, 'job-mcu-http-uart', 'succeeded', 10.0)
         assert_eq(final_job.component, 'mcu')
         assert_eq(final_job.job_id, 'job-mcu-http-uart')
-        assert_eq(final_job.expected_image_id, 'mcu-image-go-new')
+        assert_eq(final_job.expected_image_id, opts.image_id or 'mcu-image-go-new')
 
-        log('go-pty cleanup: stopping second Fabric pair')
+        result = {
+            ok = true,
+            final_job = final_job,
+            first_uart_stats = pair and pair.uart_stats or nil,
+            second_uart_stats = pair_b and pair_b.uart_stats or nil,
+        }
+
         stop_fabric_pair(pair_b, 'go devhost test complete')
-        log('go-pty cleanup: stopping second CM5 instance')
         stop_instance(cm5b, 'go devhost test complete')
-        log('go-pty cleanup: stopping second Go MCU instance')
         stop_instance(mcub, 'go devhost test complete')
         rm_rf(roots.base)
-    end, { timeout = REALISTIC_TEST_TIMEOUT_S })
+    end, { timeout = opts.timeout_s or REALISTIC_TEST_TIMEOUT_S })
+    return result
 end
 
+function T.ui_http_mcu_update_go_devhost_pty_reboots_and_reconciles()
+    run_go_devhost_pty_cycle({ label = 'baseline' })
+end
+
+
+T.__helpers = {
+    log = log,
+    run_go_devhost_pty_cycle = run_go_devhost_pty_cycle,
+    go_devhost_configured = go_devhost_configured,
+}
 
 return T
