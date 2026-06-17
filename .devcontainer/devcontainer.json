@@ -5,7 +5,8 @@
 	"postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
 	"forwardPorts": [
 		8081,
-		2222
+		2222,
+		2242
 	],
 	"customizations": {
 		"vscode": {

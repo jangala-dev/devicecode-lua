@@ -12,6 +12,8 @@ local topics = require 'services.wired.topics'
 local publisher = require 'services.wired.publisher'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local config_watch = require 'devicecode.support.config_watch'
+local dep_slot = require 'devicecode.support.dependency_slot'
+local dependency_mod = require 'services.wired.dependencies'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -395,10 +397,13 @@ end
 local function apply_config(state, ev)
 	local intent, err = config_mod.normalise(ev and ev.raw or nil, { rev = ev and ev.rev, generation = ev and ev.generation })
 	if not intent then return nil, err end
+	local ok_deps, dep_err = open_provider_deps(state, intent)
+	if ok_deps ~= true then return nil, dep_err or 'wired_provider_dependencies_open_failed' end
 	local _changed, _version, uerr = state.model:update(function (snap)
 		snap.generation = (ev and ev.generation) or (snap.generation + 1)
 		snap.config = { rev = intent.rev, schema = intent.schema, config_schema = intent.config_schema, version = intent.version }
 		snap.config_intent = intent
+		snap.dependencies = dependency_snapshot(state)
 		snap.stats.config_updates = (snap.stats.config_updates or 0) + 1
 		return rebuild_derived(snap)
 	end)

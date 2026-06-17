@@ -112,14 +112,13 @@ function M.open_exchange_op(driver, checked_args, opts)
 			active.stream = stream
 			return response_headers, stream
 		end, {
-			on_active_abort = function (reason)
+			detach_on_abort = true,
+			on_detached_complete = function (reason)
 				local why = reason or 'open_exchange_aborted'
 				if active.stream then
 					terminate.terminate_stream(active.stream, why)
 				elseif active.request then
 					terminate.terminate_request(active.request, why)
-				elseif driver and driver.terminate then
-					driver:terminate(why)
 				end
 			end,
 		})
