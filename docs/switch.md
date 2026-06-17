@@ -81,7 +81,11 @@ The only supported switch HTTP provider configuration spellings on this path are
   username = "$SWITCH_USERNAME",
   password = "$SWITCH_PASSWORD",
   timeout_s = 0.8,
-  poll_interval_s = 1.0,
+  poll = {
+    fast = { interval_s = 1.0, groups = { "panel", "poe", "counters" } },
+    medium = { interval_s = 5.0, groups = { "vlan", "lldp" } },
+    slow = { interval_s = 30.0, groups = { "identity", "runtime" } },
+  },
   http = {
     capability = "main",
     response_parser = "legacy-http1-close",
@@ -185,7 +189,35 @@ lldp_local
 lldp_neighbor
 ```
 
-The driver captures these into normalised provider observations:
+The provider also has narrower read paths for timing and grouped polling.  Surface-bearing groups include `home_main` so that rows can be attached to the canonical switch surface names (`GE1` ... `GE10`):
+
+```text
+panel/link path: home_main, panel_info
+identity path:   sys_sysinfo
+port path:       home_main, port_port
+vlan path:       home_main, vlan_create, vlan_conf, vlan_port, vlan_membership
+poe path:        home_main, poe_poe
+lldp path:       lldp_local, lldp_neighbor
+runtime path:    sys_cpumem
+counters path:   home_main, rmon_statistics
+stats path:      sys_cpumem, rmon_statistics
+full path:       all read-side commands
+```
+
+The panel/link path is the cheapest source of the switch front-panel state: which GE/SFP surfaces are present and whether they are connected.  It deliberately avoids `sys_cpumem` and `rmon_statistics`, which can be slower on this switch.  The devhost timing sweep can time each group separately against the fixed test switch:
+
+```sh
+cd tests
+SWITCH_TEST_FIXED_SWITCH_TIMING=1 \
+SWITCH_TEST_TIMING_TIMEOUT_S=2.5 \
+SWITCH_TEST_TIMING_ITERATIONS=3 \
+TEST_FILTER=rtl8380m_fixed_switch_admin_command_timing_sweep \
+luajit run.lua
+```
+
+Use `SWITCH_TEST_TIMING_GROUPS=panel,poe,runtime,counters` to restrict the sweep, and `SWITCH_TEST_TIMING_REQUIRE_ALL=1` when failures should fail the test rather than only being reported.
+
+The driver captures the full snapshot into normalised provider observations:
 
 ```text
 raw/host/wired/provider/switch-main/status
@@ -198,7 +230,15 @@ raw/host/wired/provider/switch-main/state/topology
 
 If `include_raw = true` is set in a test, the snapshot also keeps the source command payloads for parser debugging.  Full raw CGI bodies should not be promoted to public retained state by default.
 
-The HAL wired manager owns scheduling.  For the RTL8380M provider it takes an immediate snapshot when configured and then polls at `poll_interval_s`, which is `1.0` seconds in the Big Box configuration.  Polls are non-overlapping: if a read is slow or fails, the next poll is not queued behind it.  Poll failures update only the provider status and leave the last good identity/runtime/power/surfaces/topology retained facts in place.
+The HAL wired manager owns scheduling.  For the RTL8380M provider, manager apply admits the provider and starts owned poller work; switch observation is not part of configuration admission.  The Big Box poll plan is grouped and sequential:
+
+```text
+fast, 1 Hz:   panel, poe, counters
+medium, 5 s:  vlan, lldp
+slow, 30 s: identity, runtime
+```
+
+Each poll loop is non-overlapping.  A slow runtime read therefore cannot queue behind, block, or mark the fast link-state path unavailable.  Successful groups merge into the retained raw observation cache, so `state/surfaces` carries last-known link, PoE, counter and VLAN facts together.  Group failures update provider status but leave the last good identity/runtime/power/surfaces/topology retained facts in place.
 
 Canonical observation names are deliberately strict.  CPU and memory are published as `runtime.cpu` and `runtime.memory`; PoE device-level power and temperature are published as `power.poe`; port counters are published under each surface as `counters`.  The switch path must not publish `telemetry.cpu`, `telemetry.mem`, `telemetry.poe`, or any compatibility topic for `state/telemetry`.
 

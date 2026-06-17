@@ -8,8 +8,10 @@
 local fibers = require 'fibers'
 local op = require 'fibers.op'
 local channel = require 'fibers.channel'
+local cond = require 'fibers.cond'
 local sleep = require 'fibers.sleep'
 local runtime = require 'fibers.runtime'
+local tablex = require 'shared.table'
 
 local strict = require 'services.hal.support.strict_manager'
 local hal_types = require 'services.hal.types.core'
@@ -29,6 +31,7 @@ local state = {
 	controls = {},
 	provider_ids = {},
 	pollers = {},
+	observations = {},
 	device_registered = false,
 }
 
@@ -56,6 +59,58 @@ local function shallow_copy(t)
 	local out = {}
 	for k, v in pairs(t or {}) do out[k] = v end
 	return out
+end
+
+local function copy(v) return tablex.deep_copy(v) end
+
+local function merge_table(dst, src)
+	dst = dst or {}
+	if type(src) ~= 'table' then return dst end
+	for k, v in pairs(src) do
+		if v ~= nil then
+			if type(v) == 'table' and type(dst[k]) == 'table' then
+				merge_table(dst[k], v)
+			else
+				dst[k] = copy(v)
+			end
+		end
+	end
+	return dst
+end
+
+local function observation_cache(provider_id)
+	state.observations = state.observations or {}
+	local cache = state.observations[provider_id]
+	if cache == nil then
+		cache = {
+			status = {},
+			identity = {},
+			runtime = {},
+			power = {},
+			surfaces = {},
+			topology = {},
+		}
+		state.observations[provider_id] = cache
+	end
+	return cache
+end
+
+local function merge_observation(provider_id, snapshot)
+	local cache = observation_cache(provider_id)
+	snapshot = snapshot or {}
+	if type(snapshot.status) == 'table' then merge_table(cache.status, snapshot.status) end
+	for _, key in ipairs({ 'identity', 'runtime', 'power', 'topology' }) do
+		if type(snapshot[key]) == 'table' then merge_table(cache[key], snapshot[key]) end
+	end
+	if type(snapshot.surfaces) == 'table' then
+		for surface_id, surface in pairs(snapshot.surfaces) do
+			local id = tostring(surface_id or '')
+			if id ~= '' and type(surface) == 'table' then
+				cache.surfaces[id] = merge_table(cache.surfaces[id] or {}, surface)
+			end
+		end
+	end
+	return cache
 end
 
 local function max(a, b) if a > b then return a end return b end
@@ -98,6 +153,42 @@ local function provider_poll_interval_s(config)
 	return n, nil
 end
 
+local function normalise_groups(groups, path)
+	if type(groups) ~= 'table' then return nil, path .. '.groups must be a non-empty array' end
+	local out = {}
+	for i = 1, #groups do
+		local group = groups[i]
+		if type(group) ~= 'string' or group == '' then return nil, path .. '.groups[' .. tostring(i) .. '] must be a non-empty string' end
+		out[#out + 1] = group
+	end
+	if #out == 0 then return nil, path .. '.groups must be a non-empty array' end
+	return out, nil
+end
+
+local function provider_poll_plan(config)
+	config = config or {}
+	if config.poll ~= nil then
+		if config.poll_interval_s ~= nil then return nil, 'use poll, not poll_interval_s, for grouped wired polling' end
+		if type(config.poll) ~= 'table' then return nil, 'poll must be a table' end
+		local out = {}
+		for _, name in ipairs(sorted_keys(config.poll)) do
+			local rec = config.poll[name]
+			local path = 'poll.' .. tostring(name)
+			if type(rec) ~= 'table' then return nil, path .. ' must be a table' end
+			local interval_s = tonumber(rec.interval_s)
+			if interval_s == nil or interval_s <= 0 then return nil, path .. '.interval_s must be a positive number' end
+			local groups, gerr = normalise_groups(rec.groups, path)
+			if not groups then return nil, gerr end
+			out[#out + 1] = { name = tostring(name), interval_s = interval_s, groups = groups }
+		end
+		if #out == 0 then return nil, 'poll must contain at least one poll group' end
+		return out, nil
+	end
+
+	local interval_s, err = provider_poll_interval_s(config)
+	if not interval_s then return nil, err end
+	return { { name = 'snapshot', interval_s = interval_s, method = 'snapshot' } }, nil
+end
 
 local function perform_driver_method(driver, method, opts)
 	local opname = tostring(method) .. '_op'
@@ -123,26 +214,80 @@ local function poller_is_current(provider_id, driver)
 	return rec ~= nil and rec.driver == driver and state.drivers[provider_id] == driver
 end
 
-local function poll_loop(provider_id, driver, interval_s)
+local function emit_observing_once(provider_id, driver)
+	local rec = state.pollers and state.pollers[provider_id] or nil
+	if not rec or rec.observing_emitted then return true, nil end
+	local ok, err = emit_status_now(provider_id, {
+		state = 'observing',
+		available = false,
+		driver = driver.provider or driver.driver or 'wired-provider',
+		polling = true,
+	})
+	if ok == true then rec.observing_emitted = true end
+	return ok, err
+end
+
+local function publish_observation(provider_id, snapshot)
+	local cache = merge_observation(provider_id, snapshot)
+	return emit_snapshot_now(provider_id, cache)
+end
+
+local function failure_status_for_plan(plan, result)
+	local err = result and result.err or (result and result.status and result.status.err) or 'wired provider observation failed'
+	local unavailable = false
+	if plan and plan.groups then
+		for _, group in ipairs(plan.groups) do
+			if group == 'panel' then unavailable = true end
+		end
+	else
+		unavailable = true
+	end
+	return {
+		state = unavailable and 'unavailable' or 'degraded',
+		available = not unavailable,
+		err = err,
+		poll = plan and plan.name or nil,
+		polling = true,
+	}
+end
+
+local function perform_poll_plan(provider_id, driver, plan)
+	if plan.method == 'snapshot' then
+		local result = perform_driver_method(driver, 'snapshot', {})
+		if result and result.ok == true then return publish_observation(provider_id, result) end
+		return emit_status_now(provider_id, failure_status_for_plan(plan, result))
+	end
+
+	for _, group in ipairs(plan.groups or {}) do
+		if not poller_is_current(provider_id, driver) then return true, nil end
+		local result = perform_driver_method(driver, 'group_observation', { group = group })
+		if not poller_is_current(provider_id, driver) then return true, nil end
+		if result and result.ok == true then
+			local ok, err = publish_observation(provider_id, result)
+			if ok ~= true then return nil, err end
+		else
+			local ok, err = emit_status_now(provider_id, failure_status_for_plan({ name = plan.name, groups = { group } }, result))
+			if ok ~= true then return nil, err end
+		end
+	end
+	return true, nil
+end
+
+local function poll_loop(provider_id, driver, plan, ready_cond)
+	if ready_cond ~= nil then
+		fibers.perform(ready_cond:wait_op())
+		if not poller_is_current(provider_id, driver) then return end
+	end
+
+	local ok, err = emit_observing_once(provider_id, driver)
+	if ok ~= true then log('error', { what = 'wired_provider_initial_status_emit_failed', provider = provider_id, err = err }) end
+
 	while poller_is_current(provider_id, driver) do
 		local started = runtime.now()
-		local result = perform_driver_method(driver, 'snapshot', {})
-		if not poller_is_current(provider_id, driver) then return end
-		if result and result.ok == true then
-			local ok, err = emit_snapshot_now(provider_id, result)
-			if ok ~= true then log('error', { what = 'wired_provider_poll_emit_failed', provider = provider_id, err = err }) end
-		else
-			local status = {
-				state = 'unavailable',
-				available = false,
-				err = result and result.err or 'switch snapshot failed',
-				polling = true,
-			}
-			local ok, err = emit_status_now(provider_id, status)
-			if ok ~= true then log('error', { what = 'wired_provider_poll_status_emit_failed', provider = provider_id, err = err }) end
-		end
+		local ok, err = perform_poll_plan(provider_id, driver, plan)
+		if ok ~= true then log('error', { what = 'wired_provider_poll_emit_failed', provider = provider_id, poll = plan.name, err = err }) end
 		local elapsed = runtime.now() - started
-		fibers.perform(sleep.sleep_op(max(0, interval_s - elapsed)))
+		fibers.perform(sleep.sleep_op(max(0, plan.interval_s - elapsed)))
 	end
 end
 
@@ -161,7 +306,7 @@ local function cancel_provider_poller(provider_id, reason)
 	if rec.scope then rec.scope:cancel(reason or 'wired provider poller cancelled') end
 end
 
-local function spawn_poll_loop(provider_id, driver, interval_s)
+local function spawn_provider_poller(provider_id, driver, poll_plan, ready_cond)
 	if not state.scope then return nil, 'wired manager scope not started' end
 	cancel_provider_poller(provider_id, 'wired provider poller replaced')
 	local poll_scope, scope_err = state.scope:child()
@@ -170,18 +315,22 @@ local function spawn_poll_loop(provider_id, driver, interval_s)
 	local rec = {
 		scope = poll_scope,
 		driver = driver,
-		interval_s = interval_s,
+		poll_plan = poll_plan,
+		ready_cond = ready_cond,
+		observing_emitted = false,
 	}
 	state.pollers[provider_id] = rec
 	poll_scope:finally(function ()
 		if state.pollers and state.pollers[provider_id] == rec then state.pollers[provider_id] = nil end
 	end)
 
-	local ok, err = poll_scope:spawn(function () poll_loop(provider_id, driver, interval_s) end)
-	if not ok then
-		if state.pollers[provider_id] == rec then state.pollers[provider_id] = nil end
-		poll_scope:cancel(tostring(err or 'wired provider poller spawn failed'))
-		return nil, err or 'wired provider poller spawn failed'
+	for _, plan in ipairs(poll_plan or {}) do
+		local ok, err = poll_scope:spawn(function () poll_loop(provider_id, driver, plan, ready_cond) end)
+		if not ok then
+			if state.pollers[provider_id] == rec then state.pollers[provider_id] = nil end
+			poll_scope:cancel(tostring(err or 'wired provider poller spawn failed'))
+			return nil, err or 'wired provider poller spawn failed'
+		end
 	end
 	return true, nil
 end
@@ -221,12 +370,12 @@ local function make_caps(provider_ids)
 	return caps
 end
 
-local function device_event_op(event_type, caps)
+local function device_event_op(event_type, caps, ready_cond)
 	local ev = assert(hal_types.new.DeviceEvent(event_type, 'wired', 'main', {
 		source = 'host',
 		source_id = 'wired',
 		manager = 'wired',
-	}, caps or {}))
+	}, caps or {}, ready_cond))
 	return state.dev_ev_ch:put_op(ev):wrap(function () return true, nil end)
 end
 
@@ -278,7 +427,7 @@ end
 local function reconcile_device_caps(provider_ids)
 	local new_sig = list_signature(provider_ids)
 	local old_sig = list_signature(state.provider_ids)
-	if new_sig == old_sig then return true, nil end
+	if new_sig == old_sig then return true, nil, nil end
 
 	if state.device_registered then
 		local ok, err = fibers.perform(device_event_op('removed', {}))
@@ -289,11 +438,12 @@ local function reconcile_device_caps(provider_ids)
 	close_control_channels()
 	state.provider_ids = {}
 
-	if #provider_ids == 0 then return true, nil end
+	if #provider_ids == 0 then return true, nil, nil end
 
 	local caps = make_caps(provider_ids)
 	spawn_control_loops(provider_ids)
-	local ok, err = fibers.perform(device_event_op('added', caps))
+	local ready_cond = cond.new()
+	local ok, err = fibers.perform(device_event_op('added', caps, ready_cond))
 	if ok == false or ok == nil then
 		close_control_channels()
 		return nil, err or 'wired device add event failed'
@@ -301,7 +451,7 @@ local function reconcile_device_caps(provider_ids)
 
 	state.provider_ids = provider_ids
 	state.device_registered = true
-	return true, nil
+	return true, nil, ready_cond
 end
 
 function M.start_op(logger, dev_ev_ch, cap_emit_ch, opts)
@@ -320,6 +470,7 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch, opts)
 		state.drivers = {}
 		state.provider_ids = {}
 		state.pollers = {}
+		state.observations = {}
 		state.device_registered = false
 
 		child:finally(function (_, status, primary) M.terminate(primary or status or 'wired manager closed') end)
@@ -338,33 +489,28 @@ function M.apply_config_op(config)
 
 			cancel_pollers('reconfigured')
 			stop_drivers('reconfigured')
-			local ok, cerr = reconcile_device_caps(provider_ids)
+			state.observations = {}
+			local ok, cerr, caps_ready_cond = reconcile_device_caps(provider_ids)
 			if ok ~= true then return false, cerr end
 
 			for i = 1, #provider_ids do
 				local id = provider_ids[i]
 				local pcfg = configured_provider(config or {}, id)
 				if not pcfg then
-					local eok, eerr = emit_snapshot_now(id, { status = { state = 'not_configured', available = false }, surfaces = {}, topology = {} })
-					if eok ~= true then return false, eerr or 'wired provider status emit failed' end
+					return false, ('wired provider %s missing configuration'):format(id)
 				else
 					local driver_config = {}
 					for k, v in pairs(pcfg) do driver_config[k] = v end
 					local driver_opts = { logger = state.logger, cap_emit_ch = state.cap_emit_ch, provider_id = id }
 					if driver_config.provider == 'rtl8380m_http' then driver_opts.http_client_for = state.http_client_for end
-					local poll_interval_s, poll_err = provider_poll_interval_s(driver_config)
-					if not poll_interval_s then return false, poll_err end
+					local poll_plan, poll_err = provider_poll_plan(driver_config)
+					if not poll_plan then return false, poll_err end
+					driver_config.poll = nil
 					local driver, err = driver_mod.new(driver_config, driver_opts)
 					if not driver then return false, ('wired provider %s create failed: %s'):format(id, tostring(err)) end
+					driver.provider = driver_config.provider
 					state.drivers[id] = driver
-					local eok, eerr = emit_status_now(id, {
-						state = 'observing',
-						available = false,
-						driver = driver_config.provider,
-						polling = true,
-					})
-					if eok ~= true then return false, eerr or 'wired provider status emit failed' end
-					local spawned, spawn_err = spawn_poll_loop(id, driver, poll_interval_s)
+					local spawned, spawn_err = spawn_provider_poller(id, driver, poll_plan, caps_ready_cond)
 					if spawned ~= true then
 						state.drivers[id] = nil
 						if driver and type(driver.terminate) == 'function' then driver:terminate('poller spawn failed') end
@@ -394,6 +540,7 @@ function M.terminate(reason)
 	close_control_channels()
 	state.provider_ids = {}
 	state.pollers = {}
+	state.observations = {}
 	state.device_registered = false
 	if state.scope then local scope = state.scope; state.scope = nil; scope:cancel(reason or 'terminated') end
 	state.started = false
@@ -411,6 +558,7 @@ end
 M._test = {
 	normalise_provider_ids = normalise_provider_ids,
 	provider_poll_interval_s = provider_poll_interval_s,
+	provider_poll_plan = provider_poll_plan,
 }
 
 return M
