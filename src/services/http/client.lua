@@ -65,7 +65,7 @@ local function install_request_source(scope, checked, opts)
 
 	local spawned, spawn_err = scope:spawn(function ()
 		local copied, cerr = fibers.perform(body.copy_source_to_sink_op(source, pipe, {
-			max_bytes = opts.max_request_body_bytes or math.huge,
+			max_bytes = opts.max_request_body_bytes or opts.max_request_body or math.huge,
 			max_chunk = opts.max_request_body_chunk or 65536,
 			too_large_error = 'request_body_too_large',
 		}))
@@ -104,6 +104,29 @@ end
 
 local function open_exchange_result_op(driver, checked, opts)
 	return unwrap(fibers.run_scope_op(function (scope)
+		-- lua-http consumes request bodies from a cqueues iterator.  The legacy
+		-- close-delimited transport runs in Fibers and must read the source through
+		-- its Fibers body capability directly, otherwise the cqueues condition used
+		-- by request_body.new_pipe can deadlock.
+		if checked.response_parser == 'legacy-http1-close' then
+			local prepared = copy(checked)
+			local source = checked.body_source
+			local source_owned = source ~= nil
+			if source_owned then
+				scope:finally(function (_, status, primary)
+					if source_owned then body.terminate(source, primary or status or 'legacy_exchange_source_finalised') end
+				end)
+				prepared._request_source = source
+			end
+			local response_headers, stream_or_err = fibers.perform(transport_client.open_exchange_op(driver, prepared, opts))
+			if not response_headers then return nil, stream_or_err end
+			if source_owned then
+				source_owned = false
+				body.terminate(source, 'legacy_exchange_source_consumed')
+			end
+			return { response_headers = response_headers, stream = stream_or_err }
+		end
+
 		local prepared, req_body = install_request_source(scope, checked, opts)
 		if not prepared then return nil, req_body end
 
@@ -158,7 +181,7 @@ function M.exchange_op(driver, args, opts)
 			local sink_result
 			if sink then
 				local written, werr = fibers.perform(body.copy_response_to_sink_op(ex, sink, {
-					max_bytes = opts.max_response_body_bytes or math.huge,
+					max_bytes = checked.max_response_bytes or opts.max_response_body_bytes or opts.max_response_body or math.huge,
 					max_chunk = opts.max_response_body_chunk or 65536,
 				}))
 				if not written then sink_final_reason = 'failed'; ex_final_reason = 'failed'; return nil, werr end
@@ -166,7 +189,7 @@ function M.exchange_op(driver, args, opts)
 				sink_result = { bytes = written.bytes }
 			else
 				local drained, derr = fibers.perform(body.drain_response_op(ex, {
-					max_bytes = opts.max_response_body_bytes or math.huge,
+					max_bytes = checked.max_response_bytes or opts.max_response_body_bytes or opts.max_response_body or math.huge,
 					max_chunk = opts.max_response_body_chunk or 65536,
 				}))
 				if not drained then ex_final_reason = 'failed'; return nil, derr end

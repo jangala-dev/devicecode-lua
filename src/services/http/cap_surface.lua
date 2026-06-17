@@ -31,6 +31,7 @@ function M.retain_static(conn, id, status, stats)
 		offerings = offerings_map(),
 		local_handles = { listen = true, ['open-exchange'] = true, ['connect-ws'] = true },
 		control_plane_only = true,
+		compat = { response_parsers = { strict = true, ['legacy-http1-close'] = true } },
 		state = { stats = topics.state(id, 'stats') },
 		observability = { stats = topics.obs_metric(id, 'stats') },
 	})

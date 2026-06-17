@@ -40,21 +40,33 @@ local function retained_payload(conn, topic)
   return msg.payload
 end
 
-local function build_device_capability(conn)
+local function build_device_assembly(conn)
   local catalogue, err = device_config.to_catalogue({
     schema = device_config.SCHEMA,
+    assembly = {
+      product = 'big-box',
+      components = {
+        ['switch-main'] = { kind = 'switch', role = 'wired-fabric' },
+        ['cm5-local-wired'] = { kind = 'direct-nic', role = 'controller-wired-port' },
+      },
+      links = {
+        ['cm5-switch'] = {
+          kind = 'wired', role = 'controller-switch-uplink', internal = true,
+          a = { component = 'cm5-local-wired', observed_surface = 'eth0' },
+          b = { component = 'switch-main', observed_surface = 'GE8' },
+        },
+      },
+      surfaces = {
+        ['cm5-eth0'] = { component = 'cm5-local-wired', observed_surface = 'eth0', exposure = 'internal' },
+        ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8', exposure = 'internal' },
+        ['lan-1'] = { component = 'switch-main', observed_surface = 'GE1', exposure = 'external' },
+        ['lan-2'] = { component = 'switch-main', observed_surface = 'GE2', exposure = 'external' },
+      },
+    },
     components = {
       ['switch-main'] = {
-        kind = 'switch',
-        module = 'switch',
-        class = 'member',
-        role = 'wired-provider',
-        member = 'switch-main',
-        facts = {
-          wired_provider_status = { 'raw', 'host', 'wired', 'cap', 'wired-provider', 'switch-main', 'state', 'status' },
-          wired_provider_surfaces = { 'raw', 'host', 'wired', 'cap', 'wired-provider', 'switch-main', 'state', 'surfaces' },
-          wired_provider_topology = { 'raw', 'host', 'wired', 'cap', 'wired-provider', 'switch-main', 'state', 'topology' },
-        },
+        kind = 'switch', module = 'switch', class = 'member', role = 'wired-fabric', member = 'switch-main',
+        facts = { wired_observation_status = { 'raw', 'host', 'wired', 'provider', 'switch-main', 'status' } },
       },
     },
   })
@@ -62,69 +74,68 @@ local function build_device_capability(conn)
 
   local model = device_model.new()
   ok((select(1, model:apply_catalogue(1, catalogue))) ~= nil, 'catalogue apply')
-  ok((select(1, model:apply_observation(1, {
-    component = 'switch-main', tag = 'fact_retained', fact = 'wired_provider_status',
-    payload = { state = 'available', available = true, mode = 'read_only', driver = 'rtl8380m_http' },
-  }))) ~= nil, 'status observation')
-  ok((select(1, model:apply_observation(1, {
-    component = 'switch-main', tag = 'fact_retained', fact = 'wired_provider_surfaces',
-    payload = { surfaces = {
-      ['uplink-cm5'] = {
-        provider_surface_id = 'uplink-cm5', kind = 'switch-port',
-        capabilities = { trunk = true, access = false, poe = false },
-        link = { state = 'up', speed_mbps = 1000 },
-        attachment = { mode = 'trunk', vlans = { 10, 11, 12, 100, 101 } },
-      },
-      ['port-1'] = {
-        provider_surface_id = 'port-1', kind = 'ethernet-port',
-        capabilities = { access = true, trunk = true, poe = true },
-        link = { state = 'up', speed_mbps = 1000 },
-        attachment = { mode = 'access', vlan = 100 },
-      },
-      ['port-2'] = {
-        provider_surface_id = 'port-2', kind = 'ethernet-port',
-        capabilities = { access = true, trunk = true, poe = true },
-        link = { state = 'down' },
-        attachment = { mode = 'access', vlan = 101 },
-      },
-    } },
-  }))) ~= nil, 'surfaces observation')
-  ok((select(1, model:apply_observation(1, {
-    component = 'switch-main', tag = 'fact_retained', fact = 'wired_provider_topology',
-    payload = { trunks = { ['uplink-cm5'] = { vlans = { 10, 11, 12, 100, 101 } } } },
-  }))) ~= nil, 'topology observation')
-
   local snap = model:snapshot()
-  local ok_pub, perr = device_publisher.publish_component_now(conn, snap, 'switch-main', { emit_event = false })
-  if ok_pub ~= true then fail(perr or 'device publish failed') end
+  local ok_pub, perr = device_publisher.publish_summary_now(conn, snap, { emit_event = false })
+  if ok_pub ~= true then fail(perr or 'device assembly publish failed') end
+end
+
+local function retain_raw_wired_facts(conn)
+  conn:retain({ 'raw', 'host', 'wired', 'provider', 'cm5-local-wired', 'status' }, { state = 'available', available = true })
+  conn:retain({ 'raw', 'host', 'wired', 'provider', 'cm5-local-wired', 'state', 'surfaces' }, { surfaces = {
+    eth0 = { capabilities = { trunk = true }, link = { state = 'up', speed_mbps = 1000 }, attachment = { mode = 'trunk', vlans = { 10, 11, 12, 100, 101 } } },
+  } })
+  conn:retain({ 'raw', 'host', 'wired', 'provider', 'cm5-local-wired', 'state', 'topology' }, {})
+  conn:retain({ 'raw', 'host', 'wired', 'provider', 'switch-main', 'status' }, { state = 'available', available = true, mode = 'read_only', driver = 'rtl8380m_http' })
+  conn:retain({ 'raw', 'host', 'wired', 'provider', 'switch-main', 'state', 'surfaces' }, { surfaces = {
+    ['GE8'] = {
+      observed_surface = 'GE8', kind = 'switch-port',
+      capabilities = { trunk = true, access = false, poe = false },
+      link = { state = 'up', speed_mbps = 1000 },
+      attachment = { mode = 'trunk', vlans = { 10, 11, 12, 100, 101 } },
+    },
+    ['GE1'] = {
+      observed_surface = 'GE1', kind = 'ethernet-port',
+      capabilities = { access = true, trunk = true, poe = true },
+      link = { state = 'up', speed_mbps = 1000 },
+      attachment = { mode = 'access', vlan = 100 },
+    },
+    ['GE2'] = {
+      observed_surface = 'GE2', kind = 'ethernet-port',
+      capabilities = { access = true, trunk = true, poe = true },
+      link = { state = 'down' },
+      attachment = { mode = 'access', vlan = 101 },
+    },
+  } })
+  conn:retain({ 'raw', 'host', 'wired', 'provider', 'switch-main', 'state', 'topology' }, { trunks = { ['GE8'] = { vlans = { 10, 11, 12, 100, 101 } } } })
+end
+
+local function raw_provider(conn, component)
+  local status = retained_payload(conn, { 'raw', 'host', 'wired', 'provider', component, 'status' })
+  local surfaces_payload = retained_payload(conn, { 'raw', 'host', 'wired', 'provider', component, 'state', 'surfaces' })
+  local topology_payload = retained_payload(conn, { 'raw', 'host', 'wired', 'provider', component, 'state', 'topology' })
+  return { status = status, surfaces = surfaces_payload.surfaces or surfaces_payload, topology = topology_payload }
 end
 
 local function compose_wired(conn)
-  local status = retained_payload(conn, { 'cap', 'wired-provider', 'switch-main', 'status' })
-  local surfaces_payload = retained_payload(conn, { 'cap', 'wired-provider', 'switch-main', 'state', 'surfaces' })
-  local topology_payload = retained_payload(conn, { 'cap', 'wired-provider', 'switch-main', 'state', 'topology' })
+  local assembly = retained_payload(conn, { 'state', 'device', 'assembly' })
 
   local intent, err = wired_config.normalise({
     schema = wired_config.SCHEMA,
     surfaces = {
       ['cm5-eth0'] = {
         kind = 'direct-nic', role = 'internal-trunk', protected = true,
-        provider = { capability_id = 'cm5-local-wired', provider_surface_id = 'eth0' },
         attachment = { mode = 'trunk', required_segments = { 'mgmt', 'switch_control', 'fabric' }, user_segments = 'all-realised-user-segments' },
       },
       ['switch-uplink-cm5'] = {
         kind = 'switch-port', role = 'internal-trunk', protected = true,
-        provider = { capability_id = 'switch-main', provider_surface_id = 'uplink-cm5' },
         attachment = { mode = 'trunk', required_segments = { 'mgmt', 'switch_control', 'fabric' }, user_segments = 'all-realised-user-segments' },
       },
       ['lan-1'] = {
-        kind = 'ethernet-port', role = 'access', label = 'LAN 1', capabilities = { poe = true },
-        provider = { capability_id = 'switch-main', provider_surface_id = 'port-1' },
+        kind = 'ethernet-port', role = 'access', name = 'LAN 1', capabilities = { poe = true },
         attachment = { mode = 'access', segment = 'lan' },
       },
       ['lan-2'] = {
-        kind = 'ethernet-port', role = 'access', label = 'LAN 2', capabilities = { poe = true },
-        provider = { capability_id = 'switch-main', provider_surface_id = 'port-2' },
+        kind = 'ethernet-port', role = 'access', name = 'LAN 2', capabilities = { poe = true },
         attachment = { mode = 'access', segment = 'guest' },
       },
     },
@@ -132,6 +143,7 @@ local function compose_wired(conn)
   if not intent then fail(err) end
 
   local snap = {
+    assembly = assembly,
     net = { segments = {
       mgmt = { kind = 'system', protected = true, vlan = { id = 10 } },
       switch_control = { kind = 'system', protected = true, vlan = { id = 11 } },
@@ -140,16 +152,9 @@ local function compose_wired(conn)
       guest = { kind = 'guest', vlan = { id = 101 } },
     } },
     config_intent = intent,
-    providers = {
-      ['cm5-local-wired'] = {
-        status = { state = 'available', available = true },
-        surfaces = { eth0 = { capabilities = { trunk = true }, link = { state = 'up', speed_mbps = 1000 }, attachment = { mode = 'trunk', vlans = { 10, 11, 12, 100, 101 } } } },
-      },
-      ['switch-main'] = {
-        status = status,
-        surfaces = surfaces_payload.surfaces or surfaces_payload,
-        topology = topology_payload,
-      },
+    observations = {
+      ['cm5-local-wired'] = raw_provider(conn, 'cm5-local-wired'),
+      ['switch-main'] = raw_provider(conn, 'switch-main'),
     },
     stats = {},
   }
@@ -170,9 +175,10 @@ fibers.run(function()
     guest = { kind = 'guest', vlan = { id = 101 } },
   } })
 
-  build_device_capability(conn)
-  local cap_status = retained_payload(conn, { 'cap', 'wired-provider', 'switch-main', 'status' })
-  eq(cap_status.state, 'available', 'device curated wired-provider status')
+  build_device_assembly(conn)
+  retain_raw_wired_facts(conn)
+  local assembly = retained_payload(conn, { 'state', 'device', 'assembly' })
+  eq(assembly.surfaces['lan-1'].observed_surface, 'GE1', 'device assembly maps lan-1')
 
   local snap = compose_wired(conn)
   eq(snap.state, 'running', 'wired composed state')

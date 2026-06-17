@@ -21,7 +21,7 @@ local function first_non_nil(...)
 end
 
 function M.normalise_fact(fact, raw)
-	if fact == 'wired_provider_status' or fact == 'wired_provider_surfaces' or fact == 'wired_provider_topology' then
+	if fact == 'wired_observation_status' or fact == 'wired_observation_surfaces' or fact == 'wired_observation_topology' then
 		return copy(raw or {}), nil
 	end
 	return copy(raw), nil
@@ -33,20 +33,22 @@ end
 
 function M.compose(raw_facts)
 	raw_facts = table_or_empty(raw_facts)
-	local status = table_or_empty(raw_facts.wired_provider_status)
-	local surfaces_payload = table_or_empty(raw_facts.wired_provider_surfaces)
+	local status = table_or_empty(raw_facts.wired_observation_status)
+	local surfaces_payload = table_or_empty(raw_facts.wired_observation_surfaces)
 	local surfaces = surfaces_payload.surfaces or surfaces_payload
-	local topology = table_or_empty(raw_facts.wired_provider_topology)
+	local topology = table_or_empty(raw_facts.wired_observation_topology)
 	return {
 		health = {
 			health = (status.available == false) and 'degraded' or 'ok',
 			fault = status.err or status.reason,
 			details = copy(status),
 		},
-		wired_provider = {
-			status = copy(status),
-			surfaces = copy(surfaces or {}),
-			topology = copy(topology or {}),
+		observed = {
+			wired = {
+				status = copy(status),
+				surfaces = copy(surfaces or {}),
+				topology = copy(topology or {}),
+			},
 		},
 		runtime = {
 			provider_mode = status.mode,
@@ -58,12 +60,12 @@ end
 function M.availability(base, rec)
 	local out = copy(base)
 	local facts = table_or_empty(rec and rec.raw_facts)
-	local status = table_or_empty(facts.wired_provider_status)
+	local status = table_or_empty(facts.wired_observation_status)
 	local state = first_non_nil(status.state, status.availability)
 	if status.available == false or state == 'not_configured' or state == 'unavailable' then
 		out.availability = 'degraded'
 		out.health = 'warning'
-		out.reason = status.reason or status.err or state or 'wired_provider_unavailable'
+		out.reason = status.reason or status.err or state or 'wired_observation_unavailable'
 	elseif status.available == true or state == 'available' then
 		out.availability = 'available'
 		out.health = 'ok'
