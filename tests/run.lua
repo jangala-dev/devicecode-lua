@@ -145,6 +145,7 @@ local files = {
 	"unit.ui.test_update_upload",
 	"unit.ui.test_user_operation",
 	"unit.ui.test_local_ui",
+	"integration.devhost.local_ui_http_spec",
 	'unit.metrics.processing_spec',
 	'unit.metrics.config_spec',
 	'unit.metrics.senml_spec',

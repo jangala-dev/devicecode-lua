@@ -23,4 +23,19 @@ function tests.test_normalise_list_rejects_duplicates()
 	ok(err and err:find('duplicate', 1, true))
 end
 
+
+function tests.test_redact_list_removes_apn_secrets_but_preserves_presence_flags()
+	local redacted = model.redact_list({
+		{ carrier='A', mcc='234', mnc='10', apn='internet', user='alice', password='secret', auth='token' },
+	})
+	eq(redacted[1].carrier, 'A')
+	eq(redacted[1].apn, 'internet')
+	eq(redacted[1].user, nil)
+	eq(redacted[1].password, nil)
+	eq(redacted[1].auth, nil)
+	eq(redacted[1].has_user, true)
+	eq(redacted[1].has_password, true)
+	eq(redacted[1].has_auth, true)
+end
+
 return tests

@@ -1,0 +1,8 @@
+{
+  "name": "Big Box Local UI",
+  "short_name": "Big Box",
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#6d5e9d",
+  "background_color": "#f7f7fa"
+}

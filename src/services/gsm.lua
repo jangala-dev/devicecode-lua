@@ -32,6 +32,9 @@ local apns = require "services.gsm.apn"
 local gsm_topics = require 'services.gsm.topics'
 local apn_model = require 'services.gsm.apn_model'
 local apn_store_control = require 'services.gsm.apn_store_control_store'
+local tablex = require 'shared.table'
+
+local copy = tablex.deep_copy
 
 local REQUEST_TIMEOUT = 10
 local DEFAULT_RETRY_TIMEOUT = 20
@@ -932,6 +935,13 @@ function GsmService.start(conn, opts)
 	local custom_apns = {}
 	local apn_store = nil
 
+	-- Transitional APN bridge. GSM is still on its pre-modern service
+	-- architecture; keep this surface deliberately small until GSM is migrated.
+	-- UI calls GSM-owned APN RPCs, GSM persists custom APNs through the HAL
+	-- control-store, and cfg/gsm only points at the store rather than being edited
+	-- by UI. The later GSM migration should move this to config_watch, capability
+	-- dependency gating and request_owner/scoped_work handling.
+
 	---@type table<string, GsmModem>
 	local modems = {}
 
@@ -1029,12 +1039,12 @@ function GsmService.start(conn, opts)
 		svc.custom_apns = custom_apns
 		publish_apn_state({ state = 'ready', ready = true })
 		signal_all_modems()
-		return apn_model.redact_list(custom_apns), nil
+		return copy(custom_apns), nil
 	end
 
 	local function handle_apn_request(method, payload)
 		if method == 'list-custom-apns' then
-			return true, apn_model.redact_list(custom_apns)
+			return true, copy(custom_apns)
 		elseif method == 'replace-custom-apns' then
 			local records, perr = apn_model.list_from_payload(payload or {})
 			if not records then return false, perr end
@@ -1044,7 +1054,7 @@ function GsmService.start(conn, opts)
 		elseif method == 'add-custom-apn' then
 			local rec, rerr = apn_model.normalise_record((payload and (payload.record or payload)) or {})
 			if not rec then return false, rerr end
-			local next_list = apn_model.redact_list(custom_apns)
+			local next_list = copy(custom_apns)
 			next_list[#next_list + 1] = rec
 			local saved, err = replace_custom_apns(next_list)
 			if not saved then return false, err end
@@ -1052,7 +1062,7 @@ function GsmService.start(conn, opts)
 		elseif method == 'delete-custom-apn' then
 			local idx = tonumber(payload and payload.index)
 			if not idx or idx < 1 or idx % 1 ~= 0 or idx > #custom_apns then return false, 'invalid_index' end
-			local next_list = apn_model.redact_list(custom_apns)
+			local next_list = copy(custom_apns)
 			table.remove(next_list, idx)
 			local saved, err = replace_custom_apns(next_list)
 			if not saved then return false, err end
@@ -1068,20 +1078,21 @@ function GsmService.start(conn, opts)
 		end
 		parent_scope:finally(cleanup)
 		for _, method in ipairs(gsm_topics.apn_methods()) do
-			local ep, err = bus_cleanup.bind(conn, gsm_topics.rpc(method, 'main'), { queue_len = 16 })
-			if not ep then return nil, err or ('bind_failed:' .. method) end
-			endpoints[method] = ep
+			local method_name = method
+			local ep, err = bus_cleanup.bind(conn, gsm_topics.rpc(method_name, 'main'), { queue_len = 16 })
+			if not ep then return nil, err or ('bind_failed:' .. method_name) end
+			endpoints[method_name] = ep
 			local ok, spawn_err = parent_scope:spawn(function ()
 				while true do
 					local req = perform(ep:recv_op())
 					if req == nil then return end
-					local ok_req, value = handle_apn_request(method, req.payload)
+					local ok_req, value = handle_apn_request(method_name, req.payload)
 					if type(req.reply) == 'function' then
 						req:reply({ ok = ok_req == true, reason = value })
 					end
 				end
 			end)
-			if not ok then return nil, spawn_err or ('apn_endpoint_spawn_failed:' .. method) end
+			if not ok then return nil, spawn_err or ('apn_endpoint_spawn_failed:' .. method_name) end
 		end
 		return true, nil
 	end

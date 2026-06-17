@@ -11,6 +11,7 @@ local fibers = require 'fibers'
 local op     = require 'fibers.op'
 local errors = require 'services.ui.errors'
 local tablex = require 'shared.table'
+local safe   = require 'coxpcall'
 
 local ok_http_headers, http_headers = pcall(require, 'services.http.headers')
 if not ok_http_headers then http_headers = nil end
@@ -38,7 +39,8 @@ local function terminate_ctx(ctx, reason)
 	if not ctx then return true, nil end
 	local fn = ctx.terminate or ctx.abandon_now
 	if type(fn) ~= 'function' then return nil, 'response context has no terminate' end
-	local ok, err = fn(ctx, reason)
+	local called, ok, err = safe.pcall(fn, ctx, reason)
+	if not called then return nil, ok or 'response context termination failed' end
 	if ok == false or ok == nil then return nil, err or 'response context termination failed' end
 	return true, nil
 end

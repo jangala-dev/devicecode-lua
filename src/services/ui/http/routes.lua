@@ -2,6 +2,8 @@
 --
 -- Pure route decoding for UI HTTP requests.
 
+local safe = require 'coxpcall'
+
 local M = {}
 
 local function split_path(path)
@@ -15,7 +17,7 @@ end
 
 local function method_of(ctx)
 	if ctx and type(ctx.method) == 'function' then
-		local ok, v = pcall(function () return ctx:method() end)
+		local ok, v = safe.pcall(function () return ctx:method() end)
 		if ok and v ~= nil then return string.upper(tostring(v)) end
 	end
 	return string.upper(tostring((ctx and (ctx.method or ctx.verb)) or 'GET'))
@@ -23,7 +25,7 @@ end
 
 local function path_of(ctx)
 	if ctx and type(ctx.path) == 'function' then
-		local ok, v = pcall(function () return ctx:path() end)
+		local ok, v = safe.pcall(function () return ctx:path() end)
 		if ok and v ~= nil then return v end
 	end
 	return (ctx and (ctx.path or ctx.uri)) or '/'

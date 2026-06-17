@@ -13,6 +13,7 @@ local auth          = require 'services.ui.auth'
 local user_operation = require 'services.ui.user_operation'
 local upload        = require 'services.ui.update.upload'
 local resource      = require 'devicecode.support.resource'
+local safe          = require 'coxpcall'
 
 local ok_cjson, cjson = pcall(require, 'cjson.safe')
 if not ok_cjson then cjson = require 'cjson' end
@@ -29,7 +30,7 @@ local function header_one(headers, name)
 		if v ~= nil then return v end
 	end
 	if type(headers.get) == 'function' then
-		local ok, v = pcall(function () return headers:get(string.lower(name)) end)
+		local ok, v = safe.pcall(function () return headers:get(string.lower(name)) end)
 		if ok and v ~= nil then return v end
 	end
 	if type(headers) == 'table' then

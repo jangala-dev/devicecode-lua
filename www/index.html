@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#6d5e9d">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+  <title>Big Box local UI</title>
+</head>
+<body>
+  <header class="topbar">
+    <strong>Big Box</strong>
+    <nav>
+      <a href="#overview">Overview</a>
+      <a href="#apns">APNs</a>
+      <a href="#diagnostics">Diagnostics</a>
+    </nav>
+    <span id="connection" class="pill">Loading</span>
+  </header>
+
+  <main>
+    <section id="overview" class="panel">
+      <h1>Local status</h1>
+      <p>This page reads the device state from the local UI service and updates from retained events.</p>
+      <div class="grid" id="cards"></div>
+      <h2>Components</h2>
+      <div id="components" class="list"></div>
+    </section>
+
+    <section id="apns" class="panel">
+      <h1>Custom APNs</h1>
+      <p>Prototype admin-network APN editor. Values are mediated by GSM and stored in the HAL control-store.</p>
+      <div id="apn-status" class="notice"></div>
+      <form id="apn-form" class="form-grid">
+        <input name="carrier" placeholder="Carrier" required>
+        <input name="mcc" placeholder="MCC" pattern="[0-9]{3}" required>
+        <input name="mnc" placeholder="MNC" pattern="[0-9]{1,3}" required>
+        <input name="apn" placeholder="APN" required>
+        <input name="user" placeholder="User">
+        <input name="password" placeholder="Password">
+        <input name="authtype" placeholder="Auth type, e.g. 0, 1, 2, 3">
+        <input name="mvno_type" placeholder="MVNO type, e.g. spn/gid/imsi">
+        <input name="mvno_match_data" placeholder="MVNO match data">
+        <button type="submit">Add APN</button>
+      </form>
+      <table>
+        <thead><tr><th>Carrier</th><th>MCC</th><th>MNC</th><th>APN</th><th></th></tr></thead>
+        <tbody id="apn-table"></tbody>
+      </table>
+    </section>
+
+    <section id="diagnostics" class="panel">
+      <h1>Diagnostics</h1>
+      <p>Diagnostics are stubbed in this build and will move to a separate service in a later pass.</p>
+      <button id="run-diagnostics">Run diagnostics</button>
+      <pre id="diagnostics-result"></pre>
+    </section>
+  </main>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

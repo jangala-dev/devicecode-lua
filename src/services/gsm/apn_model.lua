@@ -111,11 +111,29 @@ function M.list_from_payload(payload)
 	return M.normalise_list(payload)
 end
 
+local SECRET_KEYS = {
+	user = true,
+	password = true,
+	auth = true,
+}
+
+function M.redact_record(record)
+	local out = copy(record or {})
+	for key in pairs(SECRET_KEYS) do
+		if out[key] ~= nil then
+			out[key] = nil
+			out['has_' .. key] = true
+		end
+	end
+	return out
+end
+
 function M.redact_list(records)
-	-- Prototype APN editing is admin-network scoped and intentionally returns full
-	-- records for now. Keep this named seam so later auth policy can redact
-	-- passwords without changing callers.
-	return copy(records or {})
+	local out = {}
+	for i, record in ipairs(records or {}) do
+		out[i] = M.redact_record(record)
+	end
+	return out
 end
 
 return M
