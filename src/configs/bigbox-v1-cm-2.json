@@ -31,6 +31,14 @@
           "cm5-local-wired": {
             "provider": "static",
             "mode": "read_only",
+            "poll": {
+              "static": {
+                "interval_s": 30.0,
+                "groups": [
+                  "snapshot"
+                ]
+              }
+            },
             "surfaces": {
               "eth0": {
                 "provider_surface_id": "eth0",

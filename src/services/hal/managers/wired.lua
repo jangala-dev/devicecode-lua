@@ -146,13 +146,6 @@ local function emit_snapshot_now(provider_id, snapshot)
 	return true, nil
 end
 
-local function provider_poll_interval_s(config)
-	local n = tonumber(config and config.poll_interval_s)
-	if n == nil then return 1.0 end
-	if n <= 0 then return nil, 'poll_interval_s must be a positive number' end
-	return n, nil
-end
-
 local function normalise_groups(groups, path)
 	if type(groups) ~= 'table' then return nil, path .. '.groups must be a non-empty array' end
 	local out = {}
@@ -167,27 +160,22 @@ end
 
 local function provider_poll_plan(config)
 	config = config or {}
-	if config.poll ~= nil then
-		if config.poll_interval_s ~= nil then return nil, 'use poll, not poll_interval_s, for grouped wired polling' end
-		if type(config.poll) ~= 'table' then return nil, 'poll must be a table' end
-		local out = {}
-		for _, name in ipairs(sorted_keys(config.poll)) do
-			local rec = config.poll[name]
-			local path = 'poll.' .. tostring(name)
-			if type(rec) ~= 'table' then return nil, path .. ' must be a table' end
-			local interval_s = tonumber(rec.interval_s)
-			if interval_s == nil or interval_s <= 0 then return nil, path .. '.interval_s must be a positive number' end
-			local groups, gerr = normalise_groups(rec.groups, path)
-			if not groups then return nil, gerr end
-			out[#out + 1] = { name = tostring(name), interval_s = interval_s, groups = groups }
-		end
-		if #out == 0 then return nil, 'poll must contain at least one poll group' end
-		return out, nil
+	if config.poll_interval_s ~= nil then return nil, 'use poll, not poll_interval_s, for grouped wired polling' end
+	if config.poll == nil then return nil, 'poll is required' end
+	if type(config.poll) ~= 'table' then return nil, 'poll must be a table' end
+	local out = {}
+	for _, name in ipairs(sorted_keys(config.poll)) do
+		local rec = config.poll[name]
+		local path = 'poll.' .. tostring(name)
+		if type(rec) ~= 'table' then return nil, path .. ' must be a table' end
+		local interval_s = tonumber(rec.interval_s)
+		if interval_s == nil or interval_s <= 0 then return nil, path .. '.interval_s must be a positive number' end
+		local groups, gerr = normalise_groups(rec.groups, path)
+		if not groups then return nil, gerr end
+		out[#out + 1] = { name = tostring(name), interval_s = interval_s, groups = groups }
 	end
-
-	local interval_s, err = provider_poll_interval_s(config)
-	if not interval_s then return nil, err end
-	return { { name = 'snapshot', interval_s = interval_s, method = 'snapshot' } }, nil
+	if #out == 0 then return nil, 'poll must contain at least one poll group' end
+	return out, nil
 end
 
 local function perform_driver_method(driver, method, opts)
@@ -237,7 +225,7 @@ local function failure_status_for_plan(plan, result)
 	local unavailable = false
 	if plan and plan.groups then
 		for _, group in ipairs(plan.groups) do
-			if group == 'panel' then unavailable = true end
+			if group == 'panel' or group == 'snapshot' then unavailable = true end
 		end
 	else
 		unavailable = true
@@ -260,7 +248,12 @@ local function perform_poll_plan(provider_id, driver, plan)
 
 	for _, group in ipairs(plan.groups or {}) do
 		if not poller_is_current(provider_id, driver) then return true, nil end
-		local result = perform_driver_method(driver, 'group_observation', { group = group })
+		local result
+		if group == 'snapshot' then
+			result = perform_driver_method(driver, 'snapshot', {})
+		else
+			result = perform_driver_method(driver, 'group_observation', { group = group })
+		end
 		if not poller_is_current(provider_id, driver) then return true, nil end
 		if result and result.ok == true then
 			local ok, err = publish_observation(provider_id, result)
@@ -480,6 +473,46 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch, opts)
 	end)
 end
 
+
+local function terminate_prepared(prepared, reason)
+	for _, rec in pairs(prepared or {}) do
+		local driver = rec and rec.driver
+		if driver and type(driver.terminate) == 'function' then driver:terminate(reason or 'discarded') end
+	end
+end
+
+local function prepare_providers(config, provider_ids)
+	local prepared = {}
+	for i = 1, #provider_ids do
+		local id = provider_ids[i]
+		local pcfg = configured_provider(config or {}, id)
+		if not pcfg then
+			terminate_prepared(prepared, 'prepare failed')
+			return nil, ('wired provider %s missing configuration'):format(id)
+		end
+
+		local driver_config = {}
+		for k, v in pairs(pcfg) do driver_config[k] = v end
+		local poll_plan, poll_err = provider_poll_plan(driver_config)
+		if not poll_plan then
+			terminate_prepared(prepared, 'prepare failed')
+			return nil, ('wired provider %s poll config failed: %s'):format(id, tostring(poll_err))
+		end
+		driver_config.poll = nil
+
+		local driver_opts = { logger = state.logger, cap_emit_ch = state.cap_emit_ch, provider_id = id }
+		if driver_config.provider == 'rtl8380m_http' then driver_opts.http_client_for = state.http_client_for end
+		local driver, err = driver_mod.new(driver_config, driver_opts)
+		if not driver then
+			terminate_prepared(prepared, 'prepare failed')
+			return nil, ('wired provider %s create failed: %s'):format(id, tostring(err))
+		end
+		driver.provider = driver_config.provider
+		prepared[id] = { driver = driver, poll_plan = poll_plan }
+	end
+	return prepared, nil
+end
+
 function M.apply_config_op(config)
 	return op.guard(function ()
 		if not state.started then return op.always(false, 'wired manager not started') end
@@ -487,36 +520,32 @@ function M.apply_config_op(config)
 			local provider_ids, perr = normalise_provider_ids(config or {})
 			if not provider_ids then return false, perr end
 
+			local prepared, prep_err = prepare_providers(config or {}, provider_ids)
+			if not prepared then return false, prep_err end
+
 			cancel_pollers('reconfigured')
 			stop_drivers('reconfigured')
 			state.observations = {}
 			local ok, cerr, caps_ready_cond = reconcile_device_caps(provider_ids)
-			if ok ~= true then return false, cerr end
+			if ok ~= true then
+				terminate_prepared(prepared, 'capability reconcile failed')
+				return false, cerr
+			end
+
+			state.drivers = {}
+			for i = 1, #provider_ids do
+				local id = provider_ids[i]
+				state.drivers[id] = prepared[id].driver
+			end
 
 			for i = 1, #provider_ids do
 				local id = provider_ids[i]
-				local pcfg = configured_provider(config or {}, id)
-				if not pcfg then
-					return false, ('wired provider %s missing configuration'):format(id)
-				else
-					local driver_config = {}
-					for k, v in pairs(pcfg) do driver_config[k] = v end
-					local driver_opts = { logger = state.logger, cap_emit_ch = state.cap_emit_ch, provider_id = id }
-					if driver_config.provider == 'rtl8380m_http' then driver_opts.http_client_for = state.http_client_for end
-					local poll_plan, poll_err = provider_poll_plan(driver_config)
-					if not poll_plan then return false, poll_err end
-					driver_config.poll = nil
-					driver_config.poll_interval_s = nil
-					local driver, err = driver_mod.new(driver_config, driver_opts)
-					if not driver then return false, ('wired provider %s create failed: %s'):format(id, tostring(err)) end
-					driver.provider = driver_config.provider
-					state.drivers[id] = driver
-					local spawned, spawn_err = spawn_provider_poller(id, driver, poll_plan, caps_ready_cond)
-					if spawned ~= true then
-						state.drivers[id] = nil
-						if driver and type(driver.terminate) == 'function' then driver:terminate('poller spawn failed') end
-						return false, ('wired provider %s poller failed: %s'):format(id, tostring(spawn_err))
-					end
+				local rec = prepared[id]
+				local spawned, spawn_err = spawn_provider_poller(id, rec.driver, rec.poll_plan, caps_ready_cond)
+				if spawned ~= true then
+					cancel_pollers('poller spawn failed')
+					stop_drivers('poller spawn failed')
+					return false, ('wired provider %s poller failed: %s'):format(id, tostring(spawn_err))
 				end
 			end
 			log('info', { what = 'wired_manager_configured', providers = provider_ids })
@@ -558,7 +587,6 @@ end
 
 M._test = {
 	normalise_provider_ids = normalise_provider_ids,
-	provider_poll_interval_s = provider_poll_interval_s,
 	provider_poll_plan = provider_poll_plan,
 }
 

@@ -214,15 +214,26 @@ function tests.test_rtl8380m_http_accepts_narrow_http_client_factory()
 end
 
 
-function tests.test_wired_manager_poll_interval_is_positive_and_defaults_to_one_second()
+function tests.test_wired_manager_requires_canonical_poll_table()
 	local manager = require 'services.hal.managers.wired'
-	local n, err = manager._test.provider_poll_interval_s({})
-	assert_eq(n, 1.0, err)
-	n, err = manager._test.provider_poll_interval_s({ poll_interval_s = 0.5 })
-	assert_eq(n, 0.5, err)
-	n, err = manager._test.provider_poll_interval_s({ poll_interval_s = 0 })
-	assert_eq(n, nil)
-	assert_true(type(err) == 'string' and err:find('positive', 1, true) ~= nil, tostring(err))
+	local plan, err = manager._test.provider_poll_plan({})
+	assert_eq(plan, nil)
+	assert_true(type(err) == 'string' and err:find('poll is required', 1, true) ~= nil, tostring(err))
+
+	plan, err = manager._test.provider_poll_plan({ poll_interval_s = 0.5 })
+	assert_eq(plan, nil)
+	assert_true(type(err) == 'string' and err:find('poll_interval_s', 1, true) ~= nil, tostring(err))
+
+	plan, err = manager._test.provider_poll_plan({
+		poll = {
+			static = { interval_s = 30.0, groups = { 'snapshot' } },
+		},
+	})
+	assert_not_nil(plan, err)
+	assert_eq(#plan, 1)
+	assert_eq(plan[1].name, 'static')
+	assert_eq(plan[1].interval_s, 30.0)
+	assert_eq(plan[1].groups[1], 'snapshot')
 end
 
 return tests
