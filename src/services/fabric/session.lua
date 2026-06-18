@@ -9,6 +9,7 @@ local model_mod      = require 'services.fabric.model'
 local protocol       = require 'services.fabric.protocol'
 local contracts      = require 'devicecode.support.contracts'
 local validate       = require 'shared.validate'
+local trace          = require 'services.fabric.trace'
 
 local M = {}
 
@@ -275,6 +276,36 @@ local function must_admit_control_frame_now(tx, frame, label)
 	return true
 end
 
+local function is_transient_control_backpressure(err)
+	err = tostring(err or '')
+	return err:match(': full$') ~= nil or err:match(': would_block$') ~= nil
+end
+
+local function record_control_send_drop(self, label, err)
+	trace.error(self._state_tx, {
+		component = self._component_name or 'session',
+		link_id = self._link_id,
+		link_generation = self._link_generation,
+	}, 'tx', err or label or 'session_control_send_dropped', { event = 'maintenance_control_drop' })
+	pcall(function ()
+		update_session(self, function (s)
+			s.control_send_drops = (s.control_send_drops or 0) + 1
+			s.last_control_send_drop = tostring(err or label or 'session_control_send_dropped')
+			s.last_control_send_drop_at = fibers.now()
+		end)
+	end)
+end
+
+local function admit_maintenance_control_frame_now(self, frame, label)
+	local ok, err = admit_control_frame_now(self._tx_control, frame, label)
+	if ok == true then return true end
+	if is_transient_control_backpressure(err) then
+		record_control_send_drop(self, label, err)
+		return false, err
+	end
+	error(err or label or 'session_control_send_failed', 0)
+end
+
 local function session_event(self, kind, ctx, extra, at)
 	local ev = { kind = kind, session = M.copy_context(ctx), at = at or fibers.now() }
 	for k, v in pairs(extra or {}) do ev[k] = v end
@@ -375,7 +406,10 @@ local function reset_to_hello(self, reason, now)
 	self._outbound:drop(reason or 'session_dropped')
 	update_session(self, function (s)
 		s.phase = 'hello'
-		s.local_sid = tostring(uuid.new())
+		-- Keep the local SID stable for this session component lifetime.
+		-- Peer loss or bad-frame resync returns the same local endpoint to
+		-- hello; a new local SID is created only by starting a new session
+		-- component/generation.
 		s.peer_sid = nil
 		s.peer_node = nil
 		s.peer_identity_claim = nil
@@ -393,8 +427,8 @@ end
 
 local function send_hello(self)
 	local cur = session_snapshot(self)
-	must_admit_control_frame_now(
-		self._tx_control,
+	admit_maintenance_control_frame_now(
+		self,
 		assert(protocol.hello(cur.local_sid, self._local_node, self._identity_claim, self._auth_claim)),
 		'session_hello_send_failed'
 	)
@@ -403,8 +437,8 @@ end
 
 local function send_hello_ack(self)
 	local cur = session_snapshot(self)
-	must_admit_control_frame_now(
-		self._tx_control,
+	admit_maintenance_control_frame_now(
+		self,
 		assert(protocol.hello_ack(cur.local_sid, self._local_node, self._identity_claim, self._auth_claim)),
 		'session_hello_ack_send_failed'
 	)
@@ -412,13 +446,13 @@ end
 
 local function send_ping(self)
 	local cur = session_snapshot(self)
-	must_admit_control_frame_now(self._tx_control, assert(protocol.ping(cur.local_sid)), 'session_ping_send_failed')
+	admit_maintenance_control_frame_now(self, assert(protocol.ping(cur.local_sid)), 'session_ping_send_failed')
 	self._next_ping_at = fibers.now() + self._ping_interval
 end
 
 local function send_pong(self)
 	local cur = session_snapshot(self)
-	must_admit_control_frame_now(self._tx_control, assert(protocol.pong(cur.local_sid)), 'session_pong_send_failed')
+	admit_maintenance_control_frame_now(self, assert(protocol.pong(cur.local_sid)), 'session_pong_send_failed')
 end
 
 local function session_next_deadline(self)
@@ -655,6 +689,9 @@ function M.run(scope, params)
 		wire_errors = 0,
 		bad_frame_count = 0,
 		last_wire_error = nil,
+		control_send_drops = 0,
+		last_control_send_drop = nil,
+		last_control_send_drop_at = nil,
 	}
 
 	local session_model = model_mod.new(initial, {

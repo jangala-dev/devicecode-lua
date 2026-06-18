@@ -839,12 +839,21 @@ end
 
 local function cancel_active_generation(state, reason)
 	local active = state.active
-	close_transfer_admissions(state, reason or 'generation_cancelled')
-	if not active then return end
-	state.active = nil
+	local why = reason or 'generation_cancelled'
+	close_transfer_admissions(state, why)
+	if not active then return false end
+	if active.stopping then return true end
+	active.stopping = true
+	active.stop_reason = why
 	if active.handle and active.handle.cancel then
-		active.handle:cancel(reason or 'generation_cancelled')
+		active.handle:cancel(why)
 	end
+	publish_service_lifecycle(state, 'stopping_generation', {
+		ready = false,
+		reason = why,
+		config_generation = active.config_generation,
+	})
+	return true
 end
 
 local function merged_link_override(state, link_id)
@@ -936,6 +945,19 @@ local function maybe_start_pending_generation(state, reason)
 	return true, nil
 end
 
+local function open_deps_and_maybe_start_pending_generation(state, reason)
+	if state.active ~= nil then return true, nil end
+	local compiled = state.pending_compiled
+	if compiled == nil then return true, nil end
+
+	local ok_dep, dep_err = open_generation_deps(state, compiled)
+	if ok_dep ~= true then
+		return nil, dep_err or 'dependency_open_failed'
+	end
+
+	return maybe_start_pending_generation(state, reason or state.pending_generation_reason or 'config_changed')
+end
+
 function start_generation(state, compiled)
 	state.config_generation_seq = state.config_generation_seq + 1
 	local config_generation = state.config_generation_seq
@@ -994,8 +1016,12 @@ function start_generation(state, compiled)
 end
 
 local function replace_generation(state, compiled, reason)
-	cancel_active_generation(state, reason or 'config_changed')
-	return start_generation(state, compiled)
+	state.pending_compiled = compiled
+	state.pending_generation_reason = reason or 'config_changed'
+	if cancel_active_generation(state, state.pending_generation_reason) then
+		return true, nil
+	end
+	return open_deps_and_maybe_start_pending_generation(state, state.pending_generation_reason)
 end
 
 local function dependency_key_exists(state, key)
@@ -1016,8 +1042,35 @@ local function handle_generation_done(state, ev)
 	end
 
 	local completed = active
+	local was_stopping = active.stopping == true
 	close_transfer_admissions(state, ev.status == 'ok' and 'generation_completed' or 'generation_failed')
 	state.active = nil
+
+	if state.pending_compiled ~= nil then
+		local ok_pending, pending_err = open_deps_and_maybe_start_pending_generation(
+			state,
+			state.pending_generation_reason or (was_stopping and active.stop_reason) or 'previous_generation_stopped'
+		)
+		if ok_pending ~= true then
+			state.last_error = tostring(pending_err or 'generation_start_failed')
+			publish_service_lifecycle(state, 'degraded', {
+				reason = 'generation_start_failed',
+				last_error = state.last_error,
+				config_generation = ev.config_generation,
+			})
+		end
+		return
+	end
+
+	if was_stopping then
+		state.last_error = nil
+		publish_service_lifecycle(state, 'stopped_generation', {
+			ready = false,
+			reason = active.stop_reason or 'generation_cancelled',
+			config_generation = ev.config_generation,
+		})
+		return
+	end
 
 	if ev.status ~= 'ok' and state.generation_deps then
 		local dep_key, failure = generation_route_failure(state, ev)
@@ -1124,19 +1177,14 @@ local function handle_config_event(state, ev_or_msg)
 		return
 	end
 
-	cancel_active_generation(state, 'config_changed')
-	local ok_dep, dep_err = open_generation_deps(state, compiled)
-	if ok_dep ~= true then
-		state.last_error = tostring(dep_err or 'dependency_open_failed')
-		publish_service_lifecycle(state, 'degraded', {
-			reason = 'dependency_open_failed',
-			last_error = state.last_error,
-		})
+	state.pending_compiled = compiled
+	state.pending_generation_reason = 'config_changed'
+
+	if cancel_active_generation(state, 'config_changed') then
 		return
 	end
-	state.pending_compiled = compiled
-	state.pending_generation_reason = 'transport_unavailable'
-	local ok_start, gerr = maybe_start_pending_generation(state, 'config_changed')
+
+	local ok_start, gerr = open_deps_and_maybe_start_pending_generation(state, 'config_changed')
 	if ok_start ~= true then
 		state.last_error = tostring(gerr or 'generation_start_failed')
 		publish_service_lifecycle(state, 'degraded', {

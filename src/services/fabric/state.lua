@@ -68,6 +68,22 @@ function M.component_snapshot_event(link_id, link_generation, component, snapsho
 	}
 end
 
+function M.wire_trace_event(payload)
+	return {
+		kind = 'wire_trace',
+		payload = type(payload) == 'table' and shallow_copy(payload) or { value = payload },
+	}
+end
+
+function M.admit_wire_trace_now(tx, payload, label)
+	if tx == nil then return true, nil end
+	return queue.try_admit_required(
+		tx,
+		M.wire_trace_event(payload),
+		label or 'fabric_wire_trace_admit_failed'
+	)
+end
+
 function M.clear_link_event(link_id)
 	return { kind = 'clear_link', link_id = link_id }
 end
@@ -184,6 +200,16 @@ local function handle_event(conn, ev)
 			if payload ~= nil then
 				return retain(conn, M.transfer_topic(payload.xfer_id), payload)
 			end
+		end
+		return true, nil
+
+	elseif ev.kind == 'wire_trace' then
+		local payload = type(ev.payload) == 'table' and shallow_copy(ev.payload) or { value = ev.payload }
+		payload.kind = payload.kind or 'fabric.wire'
+		payload.ts = payload.ts or fibers.now()
+		if conn ~= nil then
+			conn:publish({ 'obs', 'event', 'fabric', 'wire' }, payload)
+			conn:publish({ 'obs', 'v1', 'fabric', 'event', 'wire' }, payload)
 		end
 		return true, nil
 

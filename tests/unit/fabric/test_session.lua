@@ -256,6 +256,10 @@ function tests.test_bad_frame_limit_drops_current_peer_session()
 		assert_eq(drop.reason, 'bad_frame_limit')
 		assert_eq(drop.session.peer_sid, 'mcu-sid')
 
+		local hello = recv_with_timeout(h.control_rx, 'hello after bad-frame reset')
+		assert_eq(hello.frame.type, 'hello')
+		assert_eq(hello.frame.sid, 'cm5-sid')
+
 		admit_frame(h.frame_tx, assert(protocol.pub({ 'state', 'self' }, { ok = true }, true)))
 		assert_nil(queue.try_recv_now(h.rpc_rx), 'rpc frame should be dropped after bad-frame session reset')
 

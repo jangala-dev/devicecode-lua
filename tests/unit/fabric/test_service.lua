@@ -498,7 +498,7 @@ function tests.test_start_shell_loads_retained_config_and_starts_generation()
 	end)
 end
 
-function tests.test_start_shell_replaces_generation_on_config_change()
+function tests.test_start_shell_replaces_generation_on_config_change_after_old_generation_stops()
 	fibers.run(function ()
 		local bus = busmod.new()
 		local conn = bus:connect()
@@ -533,10 +533,16 @@ function tests.test_start_shell_replaces_generation_on_config_change()
 
 			conn:retain(topics.cfg(), minimal_compiled_config('link-new'))
 
-			assert_eq(fibers.perform(ready_rx:recv_op()), 'link-new')
-			fibers.perform(old_finalised:wait_op())
+			local which, value = fibers.perform(fibers.named_choice{
+				old_done = old_finalised:wait_op(),
+				new_started = ready_rx:recv_op(),
+				timeout = sleep.sleep_op(0.5),
+			})
+			assert_eq(which, 'old_done')
 			assert_not_nil(old_final_status)
 			assert_eq(old_final_status.status, 'cancelled')
+
+			assert_eq(fibers.perform(ready_rx:recv_op()), 'link-new')
 
 			scope:cancel('test complete')
 		end)
