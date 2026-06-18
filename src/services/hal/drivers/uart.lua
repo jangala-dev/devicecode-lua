@@ -45,6 +45,7 @@ UARTSession.__index = UARTSession
 ---@field caps_applied boolean
 ---@field active_session UARTSession|nil
 ---@field active_lease_id string|nil
+---@field closing_lease_id string|nil
 local Driver = {}
 Driver.__index = Driver
 
@@ -72,6 +73,7 @@ local function finalise_shell_scope(self, shell_scope, status, primary)
     self.scope           = nil
     self.active_session  = nil
     self.active_lease_id = nil
+    self.closing_lease_id = nil
 end
 
 local function emit_op(emit_ch, class, id, mode, key, data)
@@ -91,8 +93,8 @@ local function status_payload(self)
     return {
         state         = 'available',
         available     = true,
-        open          = self.active_session ~= nil,
-        lease_id      = self.active_lease_id,
+        open          = self.active_session ~= nil or self.closing_lease_id ~= nil,
+        lease_id      = self.active_lease_id or self.closing_lease_id,
         path          = self.path,
         baud          = self.default_baud,
         mode          = self.default_mode,
@@ -130,12 +132,15 @@ local function reply_request_op(reply_ch, ok, value_or_err)
 end
 
 local function release_session_now(driver, lease_id, _reason)
-    if driver.active_lease_id ~= lease_id then
+    if driver.active_lease_id ~= lease_id and driver.closing_lease_id ~= lease_id then
         return true, nil
     end
 
     driver.active_session  = nil
     driver.active_lease_id = nil
+    if driver.closing_lease_id == lease_id then
+        driver.closing_lease_id = nil
+    end
     return true, nil
 end
 
@@ -259,12 +264,11 @@ function UARTSession:terminate(reason)
     local why = reason or 'uart session terminated'
     local first_err
 
-    self.closed = true
-
-    local ok_release, release_err = session_release_lease_now(self, why)
-    if ok_release ~= true and first_err == nil then
-        first_err = release_err or 'uart session lease release failed'
+    if self.closed and self.lease_released then
+        return true, nil
     end
+
+    self.closed = true
 
     local stream = self.stream
     self.stream = nil
@@ -272,6 +276,11 @@ function UARTSession:terminate(reason)
     local ok_stream, stream_err = resource.terminate(stream, why)
     if ok_stream ~= true and first_err == nil then
         first_err = stream_err or 'uart stream termination failed'
+    end
+
+    local ok_release, release_err = session_release_lease_now(self, why)
+    if ok_release ~= true and first_err == nil then
+        first_err = release_err or 'uart session lease release failed'
     end
 
     if first_err then
@@ -365,6 +374,9 @@ function release_session_gracefully_op(self, lease_id, emit_closed_event)
 
         self.active_session  = nil
         self.active_lease_id = nil
+        if self.closing_lease_id == lease_id then
+            self.closing_lease_id = nil
+        end
 
         local ok_status, status_err = fibers.perform(publish_status_op(self))
         if not ok_status then
@@ -401,7 +413,7 @@ local function methods_for(self)
                 return op.always(false, 'invalid open opts')
             end
 
-            if self.active_session ~= nil then
+            if self.active_session ~= nil or self.closing_lease_id ~= nil then
                 return op.always(false, 'busy')
             end
 
@@ -419,6 +431,9 @@ local function methods_for(self)
                         resource.terminate_checked(reply.session, 'uart open abandoned', 'UART open session cleanup failed')
                         self.active_session  = nil
                         self.active_lease_id = nil
+                        if self.closing_lease_id == reply.lease_id then
+                            self.closing_lease_id = nil
+                        end
                     end
                 end)
 
@@ -579,6 +594,7 @@ function Driver:terminate(reason)
     self.scope = nil
     self.active_session = nil
     self.active_lease_id = nil
+    self.closing_lease_id = nil
     return true, nil
 end
 
@@ -649,6 +665,7 @@ function M.new(id, path, baud, mode, logger)
         caps_applied    = false,
         active_session  = nil,
         active_lease_id = nil,
+        closing_lease_id = nil,
     }, Driver)
 end
 
