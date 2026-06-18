@@ -32,6 +32,7 @@ local state = {
 	provider_ids = {},
 	pollers = {},
 	observations = {},
+	emitted = {},
 	device_registered = false,
 }
 
@@ -62,6 +63,37 @@ local function shallow_copy(t)
 end
 
 local function copy(v) return tablex.deep_copy(v) end
+
+local function stable_signature(v)
+	local tv = type(v)
+	if tv == 'nil' or tv == 'boolean' or tv == 'number' or tv == 'string' then
+		return tv .. ':' .. tostring(v)
+	end
+	if tv ~= 'table' then return tv .. ':' .. tostring(v) end
+	local keys = {}
+	for k in pairs(v) do keys[#keys + 1] = k end
+	table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+	local out = { 'table{' }
+	for i = 1, #keys do
+		local k = keys[i]
+		out[#out + 1] = stable_signature(k)
+		out[#out + 1] = '='
+		out[#out + 1] = stable_signature(v[k])
+		out[#out + 1] = ';'
+	end
+	out[#out + 1] = '}'
+	return table.concat(out)
+end
+
+local function emitted_cache(provider_id)
+	state.emitted = state.emitted or {}
+	local rec = state.emitted[provider_id]
+	if rec == nil then
+		rec = {}
+		state.emitted[provider_id] = rec
+	end
+	return rec
+end
 
 local function merge_table(dst, src)
 	dst = dst or {}
@@ -124,25 +156,53 @@ local function emit_state(class, id, key, payload)
 	return state.cap_emit_ch:put_op(ev):wrap(function () return true, nil end)
 end
 
+local function emit_state_changed(provider_id, key, payload)
+	local cache = emitted_cache(provider_id)
+	local sig = stable_signature(payload or {})
+	if cache[key] == sig then return true, nil, false end
+	cache[key] = sig
+	local ok, err = fibers.perform(emit_state('wired-provider', provider_id, key, payload or {}))
+	if ok == false or ok == nil then
+		cache[key] = nil
+		return nil, err, false
+	end
+	return true, nil, true
+end
+
 local function emit_status_now(provider_id, status)
-	local ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'status', status or { state = 'available', available = true }))
+	local ok, err = emit_state_changed(provider_id, 'status', status or { state = 'available', available = true })
 	if ok == false or ok == nil then return nil, err end
 	return true, nil
 end
 
-local function emit_snapshot_now(provider_id, snapshot)
-	local ok, err = emit_status_now(provider_id, snapshot.status or { state = 'available', available = snapshot.ok == true })
-	if ok ~= true then return nil, err end
-	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'identity', snapshot.identity or {}))
-	if ok == false or ok == nil then return nil, err end
-	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'runtime', snapshot.runtime or {}))
-	if ok == false or ok == nil then return nil, err end
-	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'power', snapshot.power or {}))
-	if ok == false or ok == nil then return nil, err end
-	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'surfaces', { surfaces = snapshot.surfaces or {} }))
-	if ok == false or ok == nil then return nil, err end
-	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'topology', snapshot.topology or {}))
-	if ok == false or ok == nil then return nil, err end
+local function emit_snapshot_now(provider_id, snapshot, present)
+	snapshot = snapshot or {}
+	present = present or snapshot
+	local ok, err
+	if present.status ~= nil then
+		ok, err = emit_status_now(provider_id, snapshot.status or { state = 'available', available = snapshot.ok == true })
+		if ok ~= true then return nil, err end
+	end
+	if present.identity ~= nil then
+		ok, err = emit_state_changed(provider_id, 'identity', snapshot.identity or {})
+		if ok == false or ok == nil then return nil, err end
+	end
+	if present.runtime ~= nil then
+		ok, err = emit_state_changed(provider_id, 'runtime', snapshot.runtime or {})
+		if ok == false or ok == nil then return nil, err end
+	end
+	if present.power ~= nil then
+		ok, err = emit_state_changed(provider_id, 'power', snapshot.power or {})
+		if ok == false or ok == nil then return nil, err end
+	end
+	if present.surfaces ~= nil then
+		ok, err = emit_state_changed(provider_id, 'surfaces', { surfaces = snapshot.surfaces or {} })
+		if ok == false or ok == nil then return nil, err end
+	end
+	if present.topology ~= nil then
+		ok, err = emit_state_changed(provider_id, 'topology', snapshot.topology or {})
+		if ok == false or ok == nil then return nil, err end
+	end
 	return true, nil
 end
 
@@ -217,7 +277,7 @@ end
 
 local function publish_observation(provider_id, snapshot)
 	local cache = merge_observation(provider_id, snapshot)
-	return emit_snapshot_now(provider_id, cache)
+	return emit_snapshot_now(provider_id, cache, snapshot or {})
 end
 
 local function failure_status_for_plan(plan, result)
@@ -464,6 +524,7 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch, opts)
 		state.provider_ids = {}
 		state.pollers = {}
 		state.observations = {}
+		state.emitted = {}
 		state.device_registered = false
 
 		child:finally(function (_, status, primary) M.terminate(primary or status or 'wired manager closed') end)
@@ -526,6 +587,7 @@ function M.apply_config_op(config)
 			cancel_pollers('reconfigured')
 			stop_drivers('reconfigured')
 			state.observations = {}
+			state.emitted = {}
 			local ok, cerr, caps_ready_cond = reconcile_device_caps(provider_ids)
 			if ok ~= true then
 				terminate_prepared(prepared, 'capability reconcile failed')
@@ -571,6 +633,7 @@ function M.terminate(reason)
 	state.provider_ids = {}
 	state.pollers = {}
 	state.observations = {}
+	state.emitted = {}
 	state.device_registered = false
 	if state.scope then local scope = state.scope; state.scope = nil; scope:cancel(reason or 'terminated') end
 	state.started = false

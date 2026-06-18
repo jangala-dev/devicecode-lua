@@ -238,6 +238,8 @@ slow, 30 s: identity, runtime
 
 Each poll loop is non-overlapping.  A slow runtime read therefore cannot queue behind, block, or mark the fast link-state path unavailable.  Successful groups merge into the retained raw observation cache, so `state/surfaces` carries last-known link, PoE, counter and VLAN facts together.  Group failures update provider status but leave the last good identity/runtime/power/surfaces/topology retained facts in place.
 
+The HAL wired manager emits raw provider facts on a changed-retained basis.  A successful `panel` group can update `state/surfaces` without re-emitting unchanged identity/runtime/power/topology facts, and repeated identical provider statuses are suppressed.  This keeps switch visibility in the provider status and semantic `state/wired/...` surfaces rather than turning the monitor into a per-request trace.
+
 Canonical observation names are deliberately strict.  CPU and memory are published as `runtime.cpu` and `runtime.memory`; PoE device-level power and temperature are published as `power.poe`; port counters are published under each surface as `counters`.  The switch path must not publish `telemetry.cpu`, `telemetry.mem`, `telemetry.poe`, or any compatibility topic for `state/telemetry`.
 
 ## Snapshot shape
