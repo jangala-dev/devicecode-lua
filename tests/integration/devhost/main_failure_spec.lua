@@ -97,6 +97,7 @@ local function spawn_main(scope, bus, fake_hal, linger_box, services_csv)
 			services_csv   = services_csv,
 			bus            = bus,
 			service_loader = make_service_loader(fake_hal, linger_box),
+			exit_grace_period = 0.05,
 		})
 	end)
 	assert(ok_spawn, tostring(err))
