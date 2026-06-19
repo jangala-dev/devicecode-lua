@@ -70,6 +70,39 @@ local VLAN_MEMBERSHIP = {
 
 local function copy(v) return tablex.deep_copy(v) end
 
+local function merge_table(dst, src)
+	dst = dst or {}
+	if type(src) ~= 'table' then return dst end
+	for k, v in pairs(src) do
+		if v ~= nil then
+			if type(v) == 'table' and type(dst[k]) == 'table' then
+				merge_table(dst[k], v)
+			else
+				dst[k] = copy(v)
+			end
+		end
+	end
+	return dst
+end
+
+local function append_unique(out, seen, value)
+	value = tostring(value or '')
+	if value ~= '' and not seen[value] then
+		seen[value] = true
+		out[#out + 1] = value
+	end
+end
+
+local function commands_for_groups(groups)
+	local out, seen = {}, {}
+	for _, group in ipairs(groups or {}) do
+		local commands = COMMAND_GROUPS[tostring(group or '')]
+		if not commands then return nil, 'unknown command group: ' .. tostring(group) end
+		for _, cmd in ipairs(commands) do append_unique(out, seen, cmd) end
+	end
+	return out, nil
+end
+
 local function trim(s)
 	return (tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', ''))
 end
@@ -684,6 +717,30 @@ local function build_group_observation(self, group, data)
 	return out
 end
 
+local function build_groups_observation(self, groups, data)
+	local out = {
+		ok = true,
+		provider_id = self.id,
+		groups = copy(groups or {}),
+		status = base_status(self),
+	}
+	for _, group in ipairs(groups or {}) do
+		local partial = build_group_observation(self, group, data)
+		if not partial or partial.ok ~= true then return partial end
+		for _, key in ipairs({ 'identity', 'runtime', 'power', 'topology' }) do
+			if type(partial[key]) == 'table' then out[key] = merge_table(out[key] or {}, partial[key]) end
+		end
+		if type(partial.surfaces) == 'table' then
+			out.surfaces = out.surfaces or {}
+			for surface_id, surface in pairs(partial.surfaces) do
+				out.surfaces[surface_id] = merge_table(out.surfaces[surface_id] or {}, surface)
+			end
+		end
+	end
+	if self.include_raw then out.raw = data end
+	return out
+end
+
 local function require_http_config(config)
 	local http = config and config.http or nil
 	if type(http) ~= 'table' then return nil, 'http table is required' end
@@ -828,6 +885,37 @@ function Provider:fetch_command_group(group_name)
 	}
 end
 
+function Provider:fetch_command_groups(groups)
+	groups = groups or {}
+	local commands, cerr = commands_for_groups(groups)
+	if not commands then
+		return { ok = false, provider_id = self.id, groups = copy(groups), status = { state = 'unavailable', available = false, driver = DRIVER, err = cerr } }
+	end
+
+	local ok_login, lerr = login(self)
+	if not ok_login then
+		return { ok = false, provider_id = self.id, groups = copy(groups), commands = commands, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = lerr or 'login failed' } }
+	end
+
+	local data, err, code = read_commands(self, commands)
+	if code == 'auth_invalid' then
+		reset_session(self)
+		local ok_relogin, relogin_err = login(self, { force = true })
+		if not ok_relogin then
+			return { ok = false, provider_id = self.id, groups = copy(groups), commands = commands, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = relogin_err or 're-login failed' } }
+		end
+		data, err, code = read_commands(self, commands)
+	end
+
+	if not data then
+		return { ok = false, provider_id = self.id, groups = copy(groups), commands = commands, status = { state = 'unavailable', available = false, driver = DRIVER, login = self.logged_in and 'confirmed' or 'failed', err = err or 'switch command groups failed' } }
+	end
+
+	local out = build_groups_observation(self, groups, data)
+	if out and out.ok == true then out.commands = commands end
+	return out
+end
+
 function Provider:fetch_snapshot_op(_req)
 	return op.guard(function ()
 		return fibers.run_scope_op(function ()
@@ -851,20 +939,21 @@ end
 function Provider:snapshot_op(req) return self:fetch_snapshot_op(req) end
 function Provider:watch_op(req) return self:fetch_snapshot_op(req) end
 
-function Provider:group_observation_op(req)
+function Provider:observe_groups_op(req)
 	req = req or {}
+	local groups = req.groups or {}
+	if type(groups) ~= 'table' then
+		return op.always({ ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, err = 'groups must be an array' } })
+	end
 	return op.guard(function ()
 		return fibers.run_scope_op(function ()
-			local group = tostring(req.group or '')
-			local result = self:fetch_command_group(group)
-			if result.ok ~= true then return result end
-			return build_group_observation(self, group, result.raw or {})
+			return self:fetch_command_groups(groups)
 		end):wrap(function (status, _report, result_or_primary, err)
 			if status == 'ok' then return result_or_primary, err end
 			return {
 				ok = false,
 				provider_id = self.id,
-				group = req.group,
+				groups = copy(groups),
 				status = {
 					state = 'unavailable',
 					available = false,
@@ -892,6 +981,8 @@ M._test = {
 	parse_power = parse_power,
 	parse_surface_counters = parse_surface_counters,
 	build_group_observation = function(provider_like, group, data) return build_group_observation(provider_like or { id = 'switch-main', mode = 'read_only' }, group, data or {}) end,
+	build_groups_observation = function(provider_like, groups, data) return build_groups_observation(provider_like or { id = 'switch-main', mode = 'read_only' }, groups or {}, data or {}) end,
+	commands_for_groups = commands_for_groups,
 	auth_invalid_body = auth_invalid_body,
 	COMMAND_GROUPS = COMMAND_GROUPS,
 }

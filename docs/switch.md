@@ -228,7 +228,7 @@ raw/host/wired/provider/switch-main/state/topology
 
 If `include_raw = true` is set in a test, the snapshot also keeps the source command payloads for parser debugging.  Full raw CGI bodies should not be promoted to public retained state by default.
 
-The HAL wired manager owns scheduling.  For the RTL8380M provider, manager apply admits the provider and starts owned poller work; switch observation is not part of configuration admission.  The Big Box poll plan is grouped and sequential:
+The HAL wired manager owns scheduling.  For the RTL8380M provider, manager apply admits the provider and starts one owned provider runner; switch observation is not part of configuration admission.  The Big Box poll plan is grouped:
 
 ```text
 fast, 1 Hz:   panel, poe, counters
@@ -236,7 +236,11 @@ medium, 5 s:  vlan, lldp
 slow, 30 s: identity, runtime
 ```
 
-Each poll loop is non-overlapping.  A slow runtime read therefore cannot queue behind, block, or mark the fast link-state path unavailable.  Successful groups merge into the retained raw observation cache, so `state/surfaces` carries last-known link, PoE, counter and VLAN facts together.  Group failures update provider status but leave the last good identity/runtime/power/surfaces/topology retained facts in place.
+There is one runner per provider, not one fibre per poll group.  The runner lives in `services/hal/managers/wired/provider_runner.lua` and owns the backend object, request mailbox, switch session, observation cache and due-time schedule.  Capability snapshot/control requests are sent to the runner mailbox, so the RTL8380M backend is touched only by the runner fibre.  This gives serialisation by ownership rather than a lock or semaphore.
+
+Each runner cycle coalesces all due poll groups, calls the mandatory backend `observe_groups_op` once, and lets the backend de-duplicate shared CGI commands such as `home_main`.  A saturated cycle schedules the next attempt from the finish time rather than trying to catch up, and applies a short minimum idle interval before another due cycle.  Slow runtime reads can therefore degrade runtime status without creating overlapping switch sessions or a busy catch-up loop.
+
+Successful groups merge into the retained raw observation cache, so `state/surfaces` carries last-known link, PoE, counter and VLAN facts together.  Group failures update provider status but leave the last good identity/runtime/power/surfaces/topology retained facts in place.
 
 The HAL wired manager emits raw provider facts on a changed-retained basis.  A successful `panel` group can update `state/surfaces` without re-emitting unchanged identity/runtime/power/topology facts, and repeated identical provider statuses are suppressed.  This keeps switch visibility in the provider status and semantic `state/wired/...` surfaces rather than turning the monitor into a per-request trace.
 
