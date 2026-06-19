@@ -15,6 +15,7 @@ local function make(driver, response_headers, stream, opts)
 		_driver = driver,
 		_headers = response_headers,
 		_stream = stream,
+		_opts = opts or {},
 		_closed = false,
 		_close_reason = nil,
 		_id = opts and opts.id,
@@ -42,30 +43,48 @@ function HttpExchange:why()
 	return self._close_reason
 end
 
+local function stream_timeout(self)
+	return self._opts and self._opts.intra_stream_timeout or nil
+end
+
+function HttpExchange:_mark_closed(reason)
+	if self._closed then return false end
+	self._closed = true
+	self._close_reason = reason or 'closed'
+	local hook = self._on_terminate
+	self._on_terminate = nil
+	if hook then pcall(hook, self, self._close_reason) end
+	return true
+end
+
 function HttpExchange:_stream_op(label, fn)
 	if self._closed then return op.always(nil, self._close_reason or 'closed') end
 	return self._driver:run_op(label, fn, {
-		on_active_abort = function (reason)
-			self:terminate(reason or 'exchange_op_aborted')
+		detach_on_abort = true,
+		on_detach = function (reason)
+			self:_mark_closed(reason or 'exchange_op_aborted')
+		end,
+		on_detached_complete = function (reason)
+			terminate.terminate_stream(self._stream, reason or 'exchange_op_aborted')
 		end,
 	})
 end
 
 function HttpExchange:read_chunk_op(_max)
 	return self:_stream_op('http.exchange.read_chunk', function ()
-		return self._stream:get_next_chunk()
+		return self._stream:get_next_chunk(stream_timeout(self))
 	end)
 end
 
 function HttpExchange:read_chars_op(n)
 	return self:_stream_op('http.exchange.read_chars', function ()
-		return self._stream:get_body_chars(n)
+		return self._stream:get_body_chars(n, stream_timeout(self))
 	end)
 end
 
 function HttpExchange:read_body_as_string_op()
 	return self:_stream_op('http.exchange.read_body_as_string', function ()
-		return self._stream:get_body_as_string()
+		return self._stream:get_body_as_string(stream_timeout(self))
 	end)
 end
 
@@ -74,23 +93,15 @@ function HttpExchange:shutdown_op()
 		if type(self._stream.shutdown) == 'function' then return self._stream:shutdown() end
 		return true
 	end):wrap(function (ok, err)
-		self._closed = true
-		self._close_reason = err or 'closed'
-		local hook = self._on_terminate
-		self._on_terminate = nil
-		if hook then pcall(hook, self, self._close_reason) end
+		self:_mark_closed(err or 'closed')
 		return ok, err
 	end)
 end
 
 function HttpExchange:terminate(reason)
 	if self._closed then return true end
-	self._closed = true
-	self._close_reason = reason or 'closed'
-	local hook = self._on_terminate
-	self._on_terminate = nil
+	self:_mark_closed(reason or 'closed')
 	terminate.terminate_stream(self._stream, self._close_reason)
-	if hook then pcall(hook, self, self._close_reason) end
 	return true
 end
 

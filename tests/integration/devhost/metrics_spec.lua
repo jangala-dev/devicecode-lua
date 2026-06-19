@@ -84,7 +84,7 @@ end
 -- The metrics service uses the plural 'configs' path which fake_hal does not cover.
 local function start_mock_hal(conn, root_scope)
 	local ep = conn:bind(
-		{ 'cap', 'fs', 'configs', 'rpc', 'read' },
+		{ 'cap', 'fs', 'credentials', 'rpc', 'read' },
 		{ queue_len = 5 })
 
 	root_scope:spawn(function()
@@ -145,7 +145,7 @@ function T.metric_published_via_bus()
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
-		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
 		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
@@ -181,7 +181,7 @@ function T.namespace_overrides_topic_key()
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
-		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
 		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
@@ -220,7 +220,7 @@ function T.unknown_metric_dropped()
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
-		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
 		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
@@ -257,7 +257,7 @@ function T.difftrigger_suppresses_unchanged_value()
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
-		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
 		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
@@ -305,7 +305,7 @@ function T.delta_value_pipeline()
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
-		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
 		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
@@ -370,7 +370,7 @@ function T.http_pipeline_enqueues_request_payload()
 			local bus       = make_bus()
 			local test_conn = bus:connect()
 
-			test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+			test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
 			start_mock_hal(test_conn, scope)
 			test_conn:retain({ 'state', 'time', 'synced' }, true)
 
@@ -433,7 +433,7 @@ function T.config_update_replaces_pipelines()
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
-		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
 		test_conn:retain({ 'state', 'time', 'synced' }, true)
 
@@ -481,7 +481,7 @@ function T.per_endpoint_state_isolation()
 		local bus       = make_bus()
 		local test_conn = bus:connect()
 
-		test_conn:retain({ 'cap', 'fs', 'configs', 'state' }, 'added')
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
 		start_mock_hal(test_conn, scope)
 		test_conn:retain({ 'state', 'time', 'synced' }, true)
 

@@ -143,6 +143,7 @@ local function flush_publication(state)
 	if state.dirty.summary then
 		state.published_summary = true
 		state.published_identity = true
+		state.published_assembly = true
 	end
 	state.dirty.summary = false
 	state.publication_requested = false
@@ -168,12 +169,17 @@ local function cleanup_publication_now(state)
 		local ok, err = bus_cleanup.unretain(state.conn, projection.identity_topic())
 		if ok ~= true then return nil, err or 'identity publication cleanup failed' end
 	end
+	if state.published_assembly then
+		local ok, err = bus_cleanup.unretain(state.conn, projection.assembly_topic())
+		if ok ~= true then return nil, err or 'assembly publication cleanup failed' end
+	end
 
 	for i = 1, #cleaned do
 		state.published_components[cleaned[i]] = nil
 	end
 	state.published_summary = false
 	state.published_identity = false
+	state.published_assembly = false
 	return true, nil
 end
 
@@ -866,6 +872,7 @@ local function build_state(scope, params)
 		published_components = {},
 		published_summary = false,
 		published_identity = false,
+		published_assembly = false,
 		pending_actions = {},
 		action_outcomes = {},
 		stale_action_outcomes = {},

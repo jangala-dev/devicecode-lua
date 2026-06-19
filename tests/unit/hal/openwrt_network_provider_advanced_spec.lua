@@ -3,6 +3,7 @@
 local fibers = require 'fibers'
 local provider_loader = require 'services.hal.backends.network.provider'
 local names = require 'services.hal.backends.network.providers.openwrt.names'
+local net_config = require 'services.net.config'
 
 local tests = {}
 
@@ -439,6 +440,72 @@ function tests.test_mwan3_builder_uses_distinct_section_names_for_same_interface
 			eq(ch.op, 'set')
 			ok(ch.option == 'weight' or ch.option == 'metric', 'persist_weights_op must only set weight/metric')
 		end
+	end)
+end
+
+
+local function find_change(changes, fields)
+	for _, ch in ipairs(changes or {}) do
+		local ok = true
+		for k, v in pairs(fields or {}) do
+			if ch[k] ~= v then ok = false; break end
+		end
+		if ok then return ch end
+	end
+	return nil
+end
+
+function tests.test_bigbox_net_intent_still_renders_openwrt_segment_trunk_independent_of_wired_assembly()
+	fibers.run(function()
+		local intent, ierr = net_config.normalise({
+			schema = net_config.SCHEMA,
+			version = 1,
+			segments = {
+				adm = { kind = 'system', protected = true, vlan = { id = 8 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.8.1/24' } }, firewall = { zone = 'lan' } },
+				jan = { kind = 'user', vlan = { id = 32 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/24' } }, firewall = { zone = 'lan_rst' } },
+				int = { kind = 'system', protected = true, vlan = { id = 100 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.100.1/24' } }, firewall = { zone = 'lan' } },
+				wan = { kind = 'wan', vlan = { id = 4 }, addressing = { ipv4 = { mode = 'dhcp', peerdns = false } }, firewall = { zone = 'wan' } },
+			},
+			interfaces = {},
+			dns = {}, dhcp = {}, firewall = { zones = { lan = {}, lan_rst = {}, wan = { masq = true } }, policies = {}, rules = {} },
+			routing = { routes = { starlink_admin = { kind = 'host', target = '192.168.100.1', interface = 'wan' } } },
+			wan = { enabled = true, members = { wan = { interface = 'wan', weight = 1, mwan_metric = 1 } } },
+			shaping = {}, vpn = {}, diagnostics = {},
+		}, { rev = 1 })
+		ok(intent, ierr)
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			platform = { segment_trunk = { ifname = 'eth0', protected = true } },
+		}, {}))
+		local plan = fibers.perform(provider:plan_op({ intent = intent }))
+		eq(plan.ok, true)
+		local changes = plan.plan and plan.plan.raw_changes and plan.plan.raw_changes.network or {}
+
+		for _, rec in ipairs({
+			{ id = 'adm', vid = 8, vlan = 'vl-adm', bridge = 'br-adm', proto = 'static', ipaddr = '172.28.8.1' },
+			{ id = 'jan', vid = 32, vlan = 'vl-jan', bridge = 'br-jan', proto = 'static', ipaddr = '172.28.32.1' },
+			{ id = 'int', vid = 100, vlan = 'vl-int', bridge = 'br-int', proto = 'static', ipaddr = '172.28.100.1' },
+		}) do
+			local vlan_sec = 'dev_vlan_' .. rec.id
+			local bridge_sec = 'dev_bridge_' .. rec.id
+			ok(find_change(changes, { section = vlan_sec, option = 'ifname', value = 'eth0' }), rec.id .. ' VLAN should use eth0 trunk')
+			ok(find_change(changes, { section = vlan_sec, option = 'vid', value = rec.vid }), rec.id .. ' VLAN id should render')
+			ok(find_change(changes, { section = vlan_sec, option = 'name', value = rec.vlan }), rec.id .. ' VLAN device should render')
+			ok(find_change(changes, { section = bridge_sec, option = 'name', value = rec.bridge }), rec.id .. ' bridge should render')
+			ok(find_change(changes, { section = rec.id, option = 'device', value = rec.bridge }), rec.id .. ' interface should use bridge')
+			ok(find_change(changes, { section = rec.id, option = 'proto', value = rec.proto }), rec.id .. ' proto should render')
+			ok(find_change(changes, { section = rec.id, option = 'ipaddr', value = rec.ipaddr }), rec.id .. ' IP address should render')
+		end
+
+		ok(find_change(changes, { section = 'dev_vlan_wan', option = 'ifname', value = 'eth0' }), 'wan VLAN should use eth0 trunk')
+		ok(find_change(changes, { section = 'dev_vlan_wan', option = 'vid', value = 4 }), 'wan VLAN id should render')
+		ok(find_change(changes, { section = 'wan', option = 'device', value = 'vl-wan' }), 'wan interface should use WAN VLAN device')
+		ok(find_change(changes, { section = 'wan', option = 'proto', value = 'dhcp' }), 'wan interface should remain DHCP')
+		ok(find_change(changes, { section = 'wan', option = 'peerdns', value = '0' }), 'wan peerdns false should render')
+		ok(find_change(changes, { section = 'route_starlink_admin', option = 'interface', value = 'wan' }), 'Starlink route should remain on semantic wan interface')
+		ok(find_change(changes, { section = 'route_starlink_admin', option = 'target', value = '192.168.100.1' }), 'Starlink route target should render')
+		provider:terminate('test complete')
 	end)
 end
 

@@ -3,11 +3,13 @@
 --
 -- Provider capabilities are derived from HAL configuration.  The manager
 -- deliberately keeps wired-provider capabilities raw at the HAL boundary; the
--- Device service curates them into public cap/wired-provider/... surfaces.
+-- Wired service combines them with Device assembly into public state/wired/... surfaces.
 
 local fibers = require 'fibers'
 local op = require 'fibers.op'
 local channel = require 'fibers.channel'
+local sleep = require 'fibers.sleep'
+local runtime = require 'fibers.runtime'
 
 local strict = require 'services.hal.support.strict_manager'
 local hal_types = require 'services.hal.types.core'
@@ -22,9 +24,11 @@ local state = {
 	logger = nil,
 	dev_ev_ch = nil,
 	cap_emit_ch = nil,
+	http_client_for = nil,
 	drivers = {},
 	controls = {},
 	provider_ids = {},
+	pollers = {},
 	device_registered = false,
 }
 
@@ -48,6 +52,14 @@ local function sorted_keys(t)
 	return keys
 end
 
+local function shallow_copy(t)
+	local out = {}
+	for k, v in pairs(t or {}) do out[k] = v end
+	return out
+end
+
+local function max(a, b) if a > b then return a end return b end
+
 local function list_signature(list)
 	return table.concat(list or {}, '\0')
 end
@@ -57,8 +69,20 @@ local function emit_state(class, id, key, payload)
 	return state.cap_emit_ch:put_op(ev):wrap(function () return true, nil end)
 end
 
+local function emit_status_now(provider_id, status)
+	local ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'status', status or { state = 'available', available = true }))
+	if ok == false or ok == nil then return nil, err end
+	return true, nil
+end
+
 local function emit_snapshot_now(provider_id, snapshot)
-	local ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'status', snapshot.status or { state = 'available', available = snapshot.ok == true }))
+	local ok, err = emit_status_now(provider_id, snapshot.status or { state = 'available', available = snapshot.ok == true })
+	if ok ~= true then return nil, err end
+	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'identity', snapshot.identity or {}))
+	if ok == false or ok == nil then return nil, err end
+	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'runtime', snapshot.runtime or {}))
+	if ok == false or ok == nil then return nil, err end
+	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'power', snapshot.power or {}))
 	if ok == false or ok == nil then return nil, err end
 	ok, err = fibers.perform(emit_state('wired-provider', provider_id, 'surfaces', { surfaces = snapshot.surfaces or {} }))
 	if ok == false or ok == nil then return nil, err end
@@ -66,6 +90,14 @@ local function emit_snapshot_now(provider_id, snapshot)
 	if ok == false or ok == nil then return nil, err end
 	return true, nil
 end
+
+local function provider_poll_interval_s(config)
+	local n = tonumber(config and config.poll_interval_s)
+	if n == nil then return 1.0 end
+	if n <= 0 then return nil, 'poll_interval_s must be a positive number' end
+	return n, nil
+end
+
 
 local function driver_result(provider_id, method, opts)
 	local driver = state.drivers[provider_id]
@@ -80,6 +112,35 @@ local function driver_result(provider_id, method, opts)
 	if not ok2 then return { ok = false, err = tostring(result) } end
 	if type(result) == 'table' then return result end
 	return { ok = result == true, result = result }
+end
+
+local function poll_loop(provider_id, driver, interval_s)
+	fibers.perform(sleep.sleep_op(interval_s))
+	while state.drivers[provider_id] == driver do
+		local started = runtime.now()
+		local result = driver_result(provider_id, 'snapshot', {})
+		if state.drivers[provider_id] ~= driver then return end
+		if result and result.ok == true then
+			local ok, err = emit_snapshot_now(provider_id, result)
+			if ok ~= true then log('error', { what = 'wired_provider_poll_emit_failed', provider = provider_id, err = err }) end
+		else
+			local status = {
+				state = 'unavailable',
+				available = false,
+				err = result and result.err or 'switch snapshot failed',
+				polling = true,
+			}
+			local ok, err = emit_status_now(provider_id, status)
+			if ok ~= true then log('error', { what = 'wired_provider_poll_status_emit_failed', provider = provider_id, err = err }) end
+		end
+		local elapsed = runtime.now() - started
+		fibers.perform(sleep.sleep_op(max(0, interval_s - elapsed)))
+	end
+end
+
+local function spawn_poll_loop(provider_id, driver, interval_s)
+	state.pollers[provider_id] = true
+	state.scope:spawn(function () poll_loop(provider_id, driver, interval_s) end)
 end
 
 local function handle_request(provider_id, req)
@@ -148,44 +209,27 @@ end
 local function normalise_provider_ids(config)
 	config = config or {}
 	local providers = config.providers
-	local ids, seen = {}, {}
-
-	if type(providers) == 'table' then
-		local keys = sorted_keys(providers)
-		for i = 1, #keys do
-			local key = tostring(keys[i])
-			local rec = providers[key]
-			if type(rec) ~= 'table' then return nil, ('wired provider %s must be a table'):format(key) end
-			local id = rec.id or key
-			if type(id) ~= 'string' or id == '' then return nil, ('wired provider %s id must be a non-empty string'):format(key) end
-			if seen[id] then return nil, ('duplicate wired provider id %s'):format(id) end
-			seen[id] = true
-			ids[#ids + 1] = id
-		end
-	else
-		-- Compatibility for early local configs; new configs should use providers={...}.
-		if type(config.cm5_local) == 'table' then ids[#ids + 1] = config.cm5_local.id or 'cm5-local-wired' end
-		if type(config.switch_main) == 'table' then ids[#ids + 1] = config.switch_main.id or 'switch-main' end
-		if type(config.switch) == 'table' then ids[#ids + 1] = config.switch.id or 'switch-main' end
+	if type(providers) ~= 'table' then return nil, 'wired providers must be declared in providers map' end
+	local ids = {}
+	local keys = sorted_keys(providers)
+	for i = 1, #keys do
+		local key = tostring(keys[i])
+		local rec = providers[key]
+		if key == '' then return nil, 'wired provider id must be a non-empty map key' end
+		if type(rec) ~= 'table' then return nil, ('wired provider %s must be a table'):format(key) end
+		if rec.id ~= nil then return nil, ('wired provider %s must use the map key as its id'):format(key) end
+		ids[#ids + 1] = key
 	end
-
-	table.sort(ids, function(a, b) return tostring(a) < tostring(b) end)
 	return ids, nil
 end
 
 local function configured_provider(config, provider_id)
 	config = config or {}
 	local providers = config.providers
-	if type(providers) == 'table' then
-		for key, rec in pairs(providers) do
-			if type(rec) == 'table' and (rec.id or key) == provider_id then return rec end
-		end
-		return nil
-	end
-	if provider_id == (config.cm5_local and config.cm5_local.id or 'cm5-local-wired') then return config.cm5_local end
-	if provider_id == (config.switch_main and config.switch_main.id or 'switch-main') then return config.switch_main end
-	if provider_id == (config.switch and config.switch.id or 'switch-main') then return config.switch end
-	return nil
+	if type(providers) ~= 'table' then return nil end
+	local rec = providers[provider_id]
+	if type(rec) ~= 'table' then return nil end
+	return shallow_copy(rec)
 end
 
 local function reconcile_device_caps(provider_ids)
@@ -217,7 +261,7 @@ local function reconcile_device_caps(provider_ids)
 	return true, nil
 end
 
-function M.start_op(logger, dev_ev_ch, cap_emit_ch)
+function M.start_op(logger, dev_ev_ch, cap_emit_ch, opts)
 	return op.guard(function ()
 		if state.started then return op.always(true, nil) end
 		local parent = fibers.current_scope()
@@ -228,9 +272,11 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch)
 		state.logger = logger
 		state.dev_ev_ch = dev_ev_ch
 		state.cap_emit_ch = cap_emit_ch
+		state.http_client_for = opts and opts.http_client_for or nil
 		state.controls = {}
 		state.drivers = {}
 		state.provider_ids = {}
+		state.pollers = {}
 		state.device_registered = false
 
 		child:finally(function (_, status, primary) M.terminate(primary or status or 'wired manager closed') end)
@@ -260,8 +306,11 @@ function M.apply_config_op(config)
 				else
 					local driver_config = {}
 					for k, v in pairs(pcfg) do driver_config[k] = v end
-					driver_config.id = driver_config.id or id
-					local driver, err = driver_mod.new(driver_config, { logger = state.logger, cap_emit_ch = state.cap_emit_ch })
+					local driver_opts = { logger = state.logger, cap_emit_ch = state.cap_emit_ch, provider_id = id }
+					if driver_config.provider == 'rtl8380m_http' then driver_opts.http_client_for = state.http_client_for end
+					local poll_interval_s, poll_err = provider_poll_interval_s(driver_config)
+					if not poll_interval_s then return false, poll_err end
+					local driver, err = driver_mod.new(driver_config, driver_opts)
 					if not driver then return false, ('wired provider %s create failed: %s'):format(id, tostring(err)) end
 					state.drivers[id] = driver
 					local result = driver_result(id, 'snapshot', {})
@@ -269,9 +318,10 @@ function M.apply_config_op(config)
 						local eok, eerr = emit_snapshot_now(id, result)
 						if eok ~= true then return false, eerr or 'wired provider emit failed' end
 					else
-						local eok, eerr = emit_snapshot_now(id, { status = { state = 'unavailable', available = false, err = result.err }, surfaces = {}, topology = {} })
+						local eok, eerr = emit_status_now(id, { state = 'unavailable', available = false, err = result.err })
 						if eok ~= true then return false, eerr or 'wired provider status emit failed' end
 					end
+					spawn_poll_loop(id, driver, poll_interval_s)
 				end
 			end
 			log('info', { what = 'wired_manager_configured', providers = provider_ids })
@@ -294,12 +344,14 @@ function M.terminate(reason)
 	stop_drivers(reason or 'terminated')
 	close_control_channels()
 	state.provider_ids = {}
+	state.pollers = {}
 	state.device_registered = false
 	if state.scope then local scope = state.scope; state.scope = nil; scope:cancel(reason or 'terminated') end
 	state.started = false
 	state.logger = nil
 	state.dev_ev_ch = nil
 	state.cap_emit_ch = nil
+	state.http_client_for = nil
 	return true, nil
 end
 
@@ -309,6 +361,7 @@ end
 
 M._test = {
 	normalise_provider_ids = normalise_provider_ids,
+	provider_poll_interval_s = provider_poll_interval_s,
 }
 
 return M

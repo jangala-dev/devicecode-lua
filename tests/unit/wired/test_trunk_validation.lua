@@ -14,7 +14,6 @@ local function protected_intent()
 				kind = 'switch-port',
 				role = 'internal-trunk',
 				protected = true,
-				provider = { capability_id = 'switch-main', provider_surface_id = 'uplink-cm5' },
 				attachment = { mode = 'trunk', required_segments = { 'mgmt', 'switch_control', 'fabric' } },
 			},
 		},
@@ -33,11 +32,12 @@ function tests.test_protected_trunk_reports_missing_required_vlan_carriage()
 			},
 		},
 		config_intent = protected_intent(),
-		providers = {
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
+		observations = {
 			['switch-main'] = {
 				status = { state = 'available', available = true },
 				surfaces = {
-					['uplink-cm5'] = {
+					['GE8'] = {
 						attachment = { mode = 'trunk', vlans = { 10, 12 } },
 					},
 				},
@@ -67,11 +67,12 @@ function tests.test_protected_trunk_passes_when_all_required_vlans_are_observed(
 			},
 		},
 		config_intent = protected_intent(),
-		providers = {
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
+		observations = {
 			['switch-main'] = {
 				status = { state = 'available', available = true },
 				surfaces = {
-					['uplink-cm5'] = {
+					['GE8'] = {
 						attachment = { mode = 'trunk', vlans = { 10, 11, 12, 100 } },
 					},
 				},
@@ -89,40 +90,42 @@ function tests.test_protected_trunk_passes_when_all_required_vlans_are_observed(
 end
 
 
-function tests.test_protected_trunk_reports_provider_missing()
+function tests.test_protected_trunk_reports_source_missing()
 	local snap = {
 		net = { segments = { mgmt = { vlan = { id = 10 } } } },
 		config_intent = protected_intent(),
-		providers = {},
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
+		observations = {},
 		stats = {},
 	}
 	service._test.rebuild_derived(snap)
 	local found = false
 	for _, v in ipairs(snap.violations or {}) do
-		if v.kind == 'protected_provider_missing' and v.surface_id == 'switch-uplink-cm5' then
+		if v.kind == 'protected_source_missing' and v.surface_id == 'switch-uplink-cm5' then
 			found = true
 			assert_eq(v.severity, 'critical')
 		end
 	end
-	assert_true(found, 'expected protected provider missing violation')
+	assert_true(found, 'expected protected source missing violation')
 end
 
-function tests.test_protected_trunk_reports_provider_surface_missing()
+function tests.test_protected_trunk_reports_observed_surface_missing()
 	local snap = {
 		net = { segments = { mgmt = { vlan = { id = 10 } }, switch_control = { vlan = { id = 11 } }, fabric = { vlan = { id = 12 } } } },
 		config_intent = protected_intent(),
-		providers = { ['switch-main'] = { status = { state = 'available', available = true }, surfaces = {} } },
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
+		observations = { ['switch-main'] = { status = { state = 'available', available = true }, surfaces = {} } },
 		stats = {},
 	}
 	service._test.rebuild_derived(snap)
 	local found = false
 	for _, v in ipairs(snap.violations or {}) do
-		if v.kind == 'protected_provider_surface_missing' and v.provider_surface_id == 'uplink-cm5' then
+		if v.kind == 'protected_observed_surface_missing' and v.observed_surface == 'GE8' then
 			found = true
 			assert_eq(v.severity, 'critical')
 		end
 	end
-	assert_true(found, 'expected protected provider surface missing violation')
+	assert_true(found, 'expected protected observed surface missing violation')
 end
 
 function tests.test_all_realised_user_segments_are_checked_on_protected_trunk()
@@ -131,7 +134,6 @@ function tests.test_all_realised_user_segments_are_checked_on_protected_trunk()
 		surfaces = {
 			['switch-uplink-cm5'] = {
 				protected = true,
-				provider = { capability_id = 'switch-main', provider_surface_id = 'uplink-cm5' },
 				attachment = { mode = 'trunk', required_segments = { 'mgmt' }, user_segments = 'all-realised-user-segments' },
 			},
 		},
@@ -146,7 +148,8 @@ function tests.test_all_realised_user_segments_are_checked_on_protected_trunk()
 			},
 		},
 		config_intent = intent,
-		providers = { ['switch-main'] = { status = { state = 'available', available = true }, surfaces = { ['uplink-cm5'] = { attachment = { mode = 'trunk', vlans = { 10, 100 } } } } } },
+		assembly = { surfaces = { ['switch-uplink-cm5'] = { component = 'switch-main', observed_surface = 'GE8' } } },
+		observations = { ['switch-main'] = { status = { state = 'available', available = true }, surfaces = { ['GE8'] = { attachment = { mode = 'trunk', vlans = { 10, 100 } } } } } },
 		stats = {},
 	}
 	service._test.rebuild_derived(snap)
@@ -157,17 +160,15 @@ function tests.test_all_realised_user_segments_are_checked_on_protected_trunk()
 	assert_true(found, 'expected missing guest user-segment carriage violation')
 end
 
-function tests.test_provider_capability_checks_report_unsupported_access_trunk_and_poe()
+function tests.test_observed_surface_capability_checks_report_unsupported_access_trunk_and_poe()
 	local intent, err = config.normalise({
 		schema = config.SCHEMA,
 		surfaces = {
 			['lan-1'] = {
-				provider = { capability_id = 'switch-main', provider_surface_id = 'port-1' },
 				capabilities = { poe = true },
 				attachment = { mode = 'access', segment = 'lan' },
 			},
 			['trunk-1'] = {
-				provider = { capability_id = 'switch-main', provider_surface_id = 'port-2' },
 				attachment = { mode = 'trunk', segments = { 'lan' } },
 			},
 		},
@@ -176,12 +177,13 @@ function tests.test_provider_capability_checks_report_unsupported_access_trunk_a
 	local snap = {
 		net = { segments = { lan = { vlan = { id = 100 } } } },
 		config_intent = intent,
-		providers = {
+		assembly = { surfaces = { ['lan-1'] = { component = 'switch-main', observed_surface = 'GE1' }, ['trunk-1'] = { component = 'switch-main', observed_surface = 'GE2' } } },
+		observations = {
 			['switch-main'] = {
 				status = { state = 'available', available = true },
 				surfaces = {
-					['port-1'] = { capabilities = { access = false, trunk = true, poe = false }, attachment = { mode = 'access', vlan = 100 } },
-					['port-2'] = { capabilities = { access = true, trunk = false, poe = false }, attachment = { mode = 'access', vlan = 100 } },
+					['GE1'] = { capabilities = { access = false, trunk = true, poe = false }, attachment = { mode = 'access', vlan = 100 } },
+					['GE2'] = { capabilities = { access = true, trunk = false, poe = false }, attachment = { mode = 'access', vlan = 100 } },
 				},
 			},
 		},
@@ -190,9 +192,9 @@ function tests.test_provider_capability_checks_report_unsupported_access_trunk_a
 	service._test.rebuild_derived(snap)
 	local seen = {}
 	for _, v in ipairs(snap.violations or {}) do seen[v.kind] = true end
-	assert_true(seen.provider_surface_does_not_support_access, 'access capability violation expected')
-	assert_true(seen.provider_surface_does_not_support_trunk, 'trunk capability violation expected')
-	assert_true(seen.provider_surface_does_not_support_poe, 'poe capability violation expected')
+	assert_true(seen.observed_surface_does_not_support_access, 'access capability violation expected')
+	assert_true(seen.observed_surface_does_not_support_trunk, 'trunk capability violation expected')
+	assert_true(seen.observed_surface_does_not_support_poe, 'poe capability violation expected')
 end
 
 return tests

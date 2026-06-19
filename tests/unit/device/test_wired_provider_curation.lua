@@ -1,31 +1,85 @@
 local projection = require 'services.device.projection'
-local wired_provider = require 'services.device.component_wired_provider'
+local catalogue = require 'services.device.catalogue'
 
 local tests = {}
 local function assert_not_nil(v,msg) if v == nil then error(msg or 'expected non-nil',2) end end
 local function assert_eq(a,b,msg) if a ~= b then error(msg or ('expected '..tostring(b)..', got '..tostring(a)),2) end end
 
-function tests.test_device_projects_wired_provider_capability_from_component_facts()
-	local rec = {
-		class = 'host',
-		subtype = 'wired-provider',
-		role = 'local-wired-provider',
-		member = 'local',
-		module = wired_provider,
-		raw_facts = {
-			wired_provider_status = { state = 'available', available = true, mode = 'read_only' },
-			wired_provider_surfaces = { surfaces = { eth0 = { provider_surface_id = 'eth0' } } },
-			wired_provider_topology = { trunks = {} },
+function tests.test_device_projects_physical_assembly_not_wired_observation_capability()
+	local cat = catalogue.build({
+		assembly = {
+			product = 'big-box',
+			components = {
+				['switch-main'] = { kind = 'switch', role = 'wired-fabric' },
+			},
+			surfaces = {
+				['lan-1'] = {
+					component = 'switch-main',
+					observed_surface = 'GE2',
+					exposure = 'external',
+				},
+			},
 		},
-		facts = {
-			wired_provider_status = { watch_topic = { 'raw', 'host', 'wired', 'cap', 'wired-provider', 'cm5-local-wired', 'status' } },
+		components = {
+			['switch-main'] = {
+				kind = 'switch',
+				module = 'switch',
+				class = 'host',
+				role = 'switch-fabric',
+				member = 'switch-main',
+				facts = {
+					wired_observation_status = { 'raw', 'host', 'wired', 'provider', 'switch-main', 'status' },
+				},
+			},
 		},
-	}
-	local payloads = projection.component_payloads('cm5-local-wired', rec, 123)
-	assert_not_nil(payloads.wired_provider, 'expected curated wired-provider cap payloads')
-	assert_eq(payloads.wired_provider.id, 'cm5-local-wired')
-	assert_eq(payloads.wired_provider.status.state, 'available')
-	assert_not_nil(payloads.wired_provider.surfaces.surfaces.eth0)
+	})
+	local snap = { generation = 7, catalogue = cat, components = cat.components }
+	local assembly = projection.assembly_payload(snap, 123)
+	assert_eq(assembly.kind, 'device.assembly')
+	assert_eq(assembly.product, 'big-box')
+	assert_eq(assembly.generation, 7)
+	assert_eq(assembly.surfaces['lan-1'].component, 'switch-main')
+	assert_eq(assembly.surfaces['lan-1'].observed_surface, 'GE2')
+
+	local payloads = projection.component_payloads('switch-main', cat.components['switch-main'], 123)
+	assert_eq(payloads.wired_observation, nil, 'Device must not publish state/wired payloads')
+	assert_not_nil(payloads.component, 'component payload should still be projected')
+	assert_not_nil(payloads.component.observed, 'component retains observed facts locally')
+end
+
+
+function tests.test_device_assembly_rejects_provider_surface_aliases()
+	local ok, err = pcall(function ()
+		catalogue.build({
+			assembly = {
+				surfaces = {
+					['lan-1'] = {
+						provider = 'switch-main',
+						provider_surface_id = 'GE2',
+					},
+				},
+			},
+		})
+	end)
+	assert_eq(ok, false)
+	assert_not_nil(tostring(err):find('component and observed_surface only', 1, true))
+end
+
+function tests.test_device_assembly_rejects_link_surface_alias()
+	local ok, err = pcall(function ()
+		catalogue.build({
+			assembly = {
+				links = {
+					['cm5-switch'] = {
+						a = { component = 'cm5-local-wired', surface = 'eth0' },
+						b = { component = 'switch-main', observed_surface = 'GE8' },
+					},
+				},
+			},
+		})
+	end)
+	assert_eq(ok, false)
+	assert_not_nil(tostring(err):find('component and observed_surface only', 1, true))
 end
 
 return tests
