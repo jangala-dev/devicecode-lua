@@ -33,6 +33,7 @@ local component_watch = require 'services.update.component_watch'
 local artifact_store_bus = require 'services.update.artifacts.store_bus'
 local component_backend_mod = require 'services.update.backends.component'
 local router_backend_mod = require 'services.update.backends.router'
+local lifecycle_metrics = require 'services.update.lifecycle_metrics'
 
 local M = {}
 
@@ -133,6 +134,116 @@ local function update_model_state(self, state, reason)
 			self._last_logged_reason = reason
 		end
 	end
+end
+
+
+local function updater_from_fact(fact)
+	if type(fact) ~= 'table' then return nil end
+	return type(fact.updater) == 'table' and fact.updater
+		or type(fact.update) == 'table' and fact.update
+		or nil
+end
+
+local function software_from_fact(fact)
+	return type(fact) == 'table' and type(fact.software) == 'table' and fact.software or nil
+end
+
+local function expected_image_id(job)
+	if type(job) ~= 'table' then return nil end
+	local meta = type(job.metadata) == 'table' and job.metadata or {}
+	local art = type(job.artifact) == 'table' and job.artifact or nil
+	local stage = type(job.stage_result) == 'table' and job.stage_result
+		or type(job.staged) == 'table' and job.staged
+		or type(job.stage) == 'table' and job.stage
+		or nil
+	local preflight = type(stage) == 'table' and type(stage.preflight) == 'table' and stage.preflight or nil
+	local pre_commit = type(job.commit_attempt) == 'table' and type(job.commit_attempt.pre_commit) == 'table'
+		and job.commit_attempt.pre_commit or nil
+	return job.expected_image_id
+		or meta.expected_image_id
+		or meta.image_id
+		or (type(stage) == 'table' and (stage.expected_image_id or stage.image_id))
+		or (preflight and (preflight.expected_image_id or preflight.image_id))
+		or (pre_commit and pre_commit.expected_image_id)
+		or (art and (art.expected_image_id or art.image_id))
+end
+
+local function lifecycle_record(component, fact)
+	local upd = updater_from_fact(fact) or {}
+	return {
+		job_id = upd.job_id,
+		component = component or (type(fact) == 'table' and fact.component),
+		state = upd.state,
+		error = upd.last_error or upd.error,
+	}
+end
+
+local function lifecycle_metric_key(record, phase)
+	return table.concat({
+		tostring(record and record.component or 'unknown'),
+		tostring(record and record.job_id or 'unknown'),
+		tostring(phase or 'unknown'),
+	}, '/')
+end
+
+local function lifecycle_metric_sent(self, record, phase)
+	self._component_lifecycle_sent = self._component_lifecycle_sent or {}
+	return self._component_lifecycle_sent[lifecycle_metric_key(record, phase)] == true
+end
+
+local function mark_lifecycle_metric_sent(self, record, phase, sent)
+	self._component_lifecycle_sent = self._component_lifecycle_sent or {}
+	self._component_lifecycle_sent[lifecycle_metric_key(record, phase)] = sent == true or nil
+end
+
+local function emit_component_lifecycle_metric(self, record, phase, extra)
+	if lifecycle_metric_sent(self, record, phase) then
+		return true, nil
+	end
+	mark_lifecycle_metric_sent(self, record, phase, true)
+
+	local ok, err = lifecycle_metrics.emit(self._conn, self._svc, record, phase, extra)
+	if ok ~= true then
+		mark_lifecycle_metric_sent(self, record, phase, false)
+		if self._svc and type(self._svc.obs_log) == 'function' then
+			self._svc:obs_log('warn', { what = 'component_lifecycle_metric_emit_failed', err = tostring(err) })
+		end
+		return true, nil
+	end
+	return true, nil
+end
+
+local function component_fact_phase(component, fact, self)
+	local upd = updater_from_fact(fact) or {}
+	if type(upd.job_id) ~= 'string' or upd.job_id == '' then return nil end
+	if upd.state == 'cancelled' or upd.state == 'aborted' then return 'cancelled' end
+	if upd.state == 'failed' or upd.state == 'rollback_detected' or upd.last_error ~= nil or upd.error ~= nil then
+		return 'failed'
+	end
+
+	local record = lifecycle_record(component, fact)
+	if lifecycle_metric_sent(self, record, 'started') then
+		local job = self._jobs and self._jobs:get(upd.job_id) or nil
+		local expected = expected_image_id(job)
+		local sw = software_from_fact(fact)
+		if type(sw) == 'table' and expected and sw.image_id == expected then
+			return 'completed'
+		end
+	end
+
+	return 'started'
+end
+
+local function emit_component_fact_lifecycle_metric(self, ev)
+	local component = ev and ev.component or nil
+	local fact = ev and ev.payload or nil
+	local phase = component_fact_phase(component, fact, self)
+	if not phase then return true, nil end
+	local record = lifecycle_record(component, fact)
+	return emit_component_lifecycle_metric(self, record, phase, {
+		source = 'device_component_fact',
+		reason = phase,
+	})
 end
 
 local function apply_generation_snapshot(self, snapshot)
@@ -674,6 +785,11 @@ local function reduce_event(self, ev)
 		return
 	end
 
+	if ev.kind == 'component_fact_changed' then
+		emit_component_fact_lifecycle_metric(self, ev)
+		return
+	end
+
 	if ev.kind == 'active_runtime_changed' then
 		handle_active_runtime_changed(self, ev)
 		return
@@ -1168,6 +1284,7 @@ local function ensure_component_watch(self, reason)
 		config = self._config,
 		queue_len = params.component_watch_queue_len,
 		report = service_events.reporter(cw_port, 'update_component_watch_completion_report_failed'),
+		events_tx = self._done_tx,
 	})
 	if not cwh then return nil, cwerr or 'update_component_watch_start_failed' end
 	self._component_watch = cwh
@@ -1368,6 +1485,7 @@ function M.run(scope, params)
 
 	local self = setmetatable({
 		_scope = scope,
+		_conn = params.conn,
 		_service_id = service_id,
 		_svc = params.svc,
 		_model = service_model,
@@ -1398,6 +1516,7 @@ function M.run(scope, params)
 		_component_observer = component_observer,
 		_component_watch = nil,
 		_backend = backend,
+		_component_lifecycle_sent = {},
 		_job_runtime_ready = false,
 		_generation_done_queue_len = params.generation_done_queue_len,
 		_manager_route_queue_len = params.manager_route_queue_len,

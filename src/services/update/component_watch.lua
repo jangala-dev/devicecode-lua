@@ -8,6 +8,7 @@ local fibers       = require 'fibers'
 local scoped_work  = require 'devicecode.support.scoped_work'
 local bus_cleanup  = require 'devicecode.support.bus_cleanup'
 local topics       = require 'services.update.topics'
+local queue        = require 'devicecode.support.queue'
 
 local M = {}
 
@@ -45,9 +46,20 @@ local function open_watches(scope, conn, components, queue_len)
 	return watches, nil
 end
 
+local function report_component_fact(params, component, ev)
+	if not params.events_tx then return true, nil end
+	return queue.try_admit_required(params.events_tx, {
+		kind = 'component_fact_changed',
+		component = component,
+		payload = ev.payload,
+		origin = ev.origin,
+	}, 'update_component_fact_changed_admission_failed')
+end
+
 local function watch_loop(scope, params)
 	local observer = assert(params.observer, 'component_watch observer required')
-	local watches, err = open_watches(scope, assert(params.conn, 'component_watch conn required'), params.components, params.queue_len)
+	local conn = assert(params.conn, 'component_watch conn required')
+	local watches, err = open_watches(scope, conn, params.components, params.queue_len)
 	if not watches then error(err or 'component_watch_open_failed', 0) end
 
 	while true do
@@ -62,7 +74,9 @@ local function watch_loop(scope, params)
 			return { role = 'update_component_watch', reason = recv_err or 'component_watch_closed' }
 		end
 		if ev.op == 'retain' or ev.event == 'retain' or ev.type == 'retain' or ev.kind == 'retain' then
-			observer:update_component(component, ev.payload, ev.origin)
+			local ok_update, update_err = observer:update_component(component, ev.payload, ev.origin)
+			if ok_update == nil then error(update_err or 'component_observer_update_failed', 0) end
+			report_component_fact(params, component, ev)
 		elseif ev.op == 'unretain' or ev.event == 'unretain' or ev.type == 'unretain' or ev.kind == 'unretain' then
 			observer:remove_component(component, 'component_unretained')
 		end
@@ -87,6 +101,7 @@ function M.start(scope, params)
 				observer = params.observer,
 				components = components,
 				queue_len = params.queue_len,
+				events_tx = params.events_tx,
 			})
 		end,
 		report = params.report,
