@@ -83,6 +83,7 @@ local files = {
 	'unit.update.test_generation_refactor',
 	'unit.update.test_ingest_artifacts',
 	'unit.update.test_job_repository',
+	'unit.update.test_lifecycle_metrics',
 	'unit.update.test_job_runtime',
 	'unit.update.test_job_store_memory',
 	'unit.update.test_job_store_control_store',

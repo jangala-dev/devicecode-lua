@@ -514,4 +514,191 @@ function tests.test_artifact_store_dependency_gates_generation_after_job_store_r
   end)
 end
 
+
+
+local function lifecycle_metric_topic()
+	return { "obs", "v1", "update", "metric", "component_update_lifecycle" }
+end
+
+local function component_config(component)
+	return {
+		schema = "devicecode.update/1",
+		components = { { component = component or "mcu" } },
+	}
+end
+
+local function retain_component_fact(conn, component, opts)
+	opts = opts or {}
+	conn:retain(topics.device_component(component), {
+		component = component,
+		software = {
+			image_id = opts.image_id,
+			boot_id = opts.boot_id,
+		},
+		updater = {
+			state = opts.updater_state or "ready",
+			job_id = opts.job_id,
+			last_error = opts.last_error,
+		},
+	})
+end
+
+local function wait_lifecycle_metric(caller, value)
+	local metric_view = caller:retained_view(lifecycle_metric_topic())
+	local metric
+	local ok = probe.wait_until(function ()
+		local msg = metric_view:get(lifecycle_metric_topic())
+		metric = msg and msg.payload or nil
+		return metric and metric.value == value
+	end, { timeout = 0.8, interval = 0.01 })
+	metric_view:close()
+	assert_true(ok, "expected " .. tostring(value) .. " lifecycle metric")
+	return metric
+end
+
+function tests.test_component_device_fact_job_id_emits_lifecycle_started_metric()
+	fibers.run(function (root_scope)
+		local child, caller = start_service(root_scope, {
+			config = component_config("mcu"),
+		})
+
+		assert(caller:call(topics.update_manager_rpc("create-job"), {
+			job_id = "job/mcu.1",
+			component = "mcu",
+			artifact_ref = "artifact-mcu",
+		}, { timeout = 0.5 }))
+
+		retain_component_fact(caller, "mcu", {
+			job_id = "job/mcu.1",
+			image_id = "image-old",
+			boot_id = "boot-1",
+		})
+
+		local metric = wait_lifecycle_metric(caller, "started")
+		assert_eq(table.concat(metric.namespace, "."), "mcu.lifecycle.job_mcu_1.started")
+		assert_eq(metric.job_id, "job/mcu.1")
+		assert_eq(metric.component, "mcu")
+		assert_eq(metric.source, "device_component_fact")
+
+		child:cancel("test complete")
+	end)
+end
+
+function tests.test_component_device_fact_expected_image_emits_lifecycle_completed_metric()
+	fibers.run(function (root_scope)
+		local child, caller = start_service(root_scope, {
+			config = component_config("mcu"),
+		})
+
+		assert(caller:call(topics.update_manager_rpc("create-job"), {
+			job_id = "j-success",
+			component = "mcu",
+			artifact_ref = "artifact-mcu",
+			metadata = { expected_image_id = "image-new" },
+		}, { timeout = 0.5 }))
+
+		retain_component_fact(caller, "mcu", {
+			job_id = "j-success",
+			image_id = "image-old",
+			boot_id = "boot-1",
+		})
+		wait_lifecycle_metric(caller, "started")
+
+		retain_component_fact(caller, "mcu", {
+			job_id = "j-success",
+			image_id = "image-new",
+			boot_id = "boot-2",
+		})
+
+		local metric = wait_lifecycle_metric(caller, "completed")
+		assert_eq(table.concat(metric.namespace, "."), "mcu.lifecycle.j-success.completed")
+		assert_eq(metric.state, "ready")
+
+		child:cancel("test complete")
+	end)
+end
+
+function tests.test_component_device_fact_error_emits_lifecycle_failed_metric()
+	fibers.run(function (root_scope)
+		local child, caller = start_service(root_scope, {
+			config = component_config("mcu"),
+		})
+
+		assert(caller:call(topics.update_manager_rpc("create-job"), {
+			job_id = "j-fail",
+			component = "mcu",
+			artifact_ref = "artifact-mcu",
+		}, { timeout = 0.5 }))
+
+		retain_component_fact(caller, "mcu", {
+			job_id = "j-fail",
+			updater_state = "failed",
+			last_error = "wrong_image_after_reboot",
+			image_id = "image-old",
+			boot_id = "boot-1",
+		})
+
+		local metric = wait_lifecycle_metric(caller, "failed")
+		assert_eq(table.concat(metric.namespace, "."), "mcu.lifecycle.j-fail.failed")
+		assert_eq(metric.state, "failed")
+		assert_eq(metric.error, "wrong_image_after_reboot")
+
+		child:cancel("test complete")
+	end)
+end
+
+function tests.test_component_device_fact_cancelled_emits_lifecycle_cancelled_metric()
+	fibers.run(function (root_scope)
+		local child, caller = start_service(root_scope, {
+			config = component_config("mcu"),
+		})
+
+		assert(caller:call(topics.update_manager_rpc("create-job"), {
+			job_id = "j-cancel",
+			component = "mcu",
+			artifact_ref = "artifact-mcu",
+		}, { timeout = 0.5 }))
+
+		retain_component_fact(caller, "mcu", {
+			job_id = "j-cancel",
+			updater_state = "cancelled",
+			image_id = "image-old",
+			boot_id = "boot-1",
+		})
+
+		local metric = wait_lifecycle_metric(caller, "cancelled")
+		assert_eq(table.concat(metric.namespace, "."), "mcu.lifecycle.j-cancel.cancelled")
+		assert_eq(metric.state, "cancelled")
+
+		child:cancel("test complete")
+	end)
+end
+
+function tests.test_other_component_device_fact_emits_component_lifecycle_metric()
+	fibers.run(function (root_scope)
+		local child, caller = start_service(root_scope, {
+			config = component_config("cm5"),
+		})
+
+		assert(caller:call(topics.update_manager_rpc("create-job"), {
+			job_id = "j-cm5",
+			component = "cm5",
+			artifact_ref = "artifact-cm5",
+		}, { timeout = 0.5 }))
+
+		retain_component_fact(caller, "cm5", {
+			job_id = "j-cm5",
+			image_id = "cm5-old",
+			boot_id = "boot-1",
+		})
+
+		local metric = wait_lifecycle_metric(caller, "started")
+		assert_eq(table.concat(metric.namespace, "."), "cm5.lifecycle.j-cm5.started")
+		assert_eq(metric.component, "cm5")
+
+		child:cancel("test complete")
+	end)
+end
+
+
 return tests

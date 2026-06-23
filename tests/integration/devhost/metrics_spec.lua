@@ -525,4 +525,41 @@ function T.per_endpoint_state_isolation()
 	end, { timeout = 3.0 })
 end
 
+
+function T.component_update_lifecycle_metric_uses_event_namespace()
+	runfibers.run(function(scope)
+		local clock     = new_test_clock()
+		scope:finally(function() clock:restore() end)
+		local bus       = make_bus()
+		local test_conn = bus:connect()
+
+		test_conn:retain({ "cap", "fs", "credentials", "state" }, "added")
+		start_mock_hal(test_conn, scope)
+		test_conn:retain({ "state", "time", "synced" }, true)
+
+		local result_sub = test_conn:subscribe(
+			{ "obs", "v1", "metrics", "output", "#" },
+			{ queue_len = 10, full = "drop_oldest" })
+
+		test_conn:retain({ "cfg", "metrics" }, bus_pipeline_config("component_update_lifecycle", 0.1))
+		local svc_scope = start_metrics(bus, scope)
+		flush_ticks()
+
+		test_conn:publish(
+			{ "obs", "v1", "update", "metric", "component_update_lifecycle" },
+			{ value = "started", namespace = { "mcu", "lifecycle", "job-1", "started" } })
+
+		local msg = recv_metric(clock, result_sub, 0.5)
+		assert(msg ~= nil, "expected lifecycle metric publish")
+		assert(table.concat(msg.topic, ".") == "obs.v1.metrics.output.mcu.lifecycle.job-1.started",
+			"unexpected topic " .. table.concat(msg.topic, "."))
+		assert(msg.payload.value == "started",
+			"expected value=started, got " .. tostring(msg.payload.value))
+
+		stop_scope(svc_scope)
+		clock:restore()
+	end, { timeout = 3.0 })
+end
+
+
 return T

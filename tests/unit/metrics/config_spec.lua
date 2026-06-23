@@ -137,4 +137,24 @@ function T.validate_config_propagates_invalid_template_to_pipeline()
 	assert(saw_metric_invalid_protocol,      "expected warning: sim inherited invalid protocol 'invalid'")
 end
 
+local function read_project_file(rel)
+	local candidates = { rel, '../' .. rel }
+	for i = 1, #candidates do
+		local f = io.open(candidates[i], 'rb')
+		if f then local data = f:read('*a'); f:close(); return data end
+	end
+	return nil, 'unable to read ' .. rel
+end
+
+function T.bigbox_config_accepts_component_update_lifecycle_pipeline()
+	local cjson = require 'cjson.safe'
+	local text = assert(read_project_file('src/configs/bigbox-v1-cm-2.json'))
+	local doc = assert(cjson.decode(text))
+	local metrics = assert(doc.metrics)
+	local ok, _, err = conf.validate_config(metrics)
+	assert(ok == true, 'expected bigbox metrics config to validate: ' .. tostring(err))
+	assert(metrics.data.pipelines.component_update_lifecycle.protocol == 'http',
+		'expected component_update_lifecycle to use HTTP pipeline')
+end
+
 return T
