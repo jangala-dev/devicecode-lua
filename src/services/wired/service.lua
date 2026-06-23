@@ -399,7 +399,6 @@ local function apply_config(state, ev)
 		snap.generation = (ev and ev.generation) or (snap.generation + 1)
 		snap.config = { rev = intent.rev, schema = intent.schema, config_schema = intent.config_schema, version = intent.version }
 		snap.config_intent = intent
-		snap.dependencies = {}
 		snap.stats.config_updates = (snap.stats.config_updates or 0) + 1
 		return rebuild_derived(snap)
 	end)

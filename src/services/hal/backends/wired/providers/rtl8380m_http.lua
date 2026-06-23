@@ -39,6 +39,16 @@ local READ_COMMANDS = {
 	'rmon_statistics',
 }
 
+local COMMAND_GROUPS = {
+	panel = { 'home_main', 'panel_info' },
+	identity = { 'sys_sysinfo' },
+	vlan = { 'home_main', 'vlan_create', 'vlan_conf', 'vlan_port', 'vlan_membership' },
+	poe = { 'home_main', 'poe_poe' },
+	lldp = { 'lldp_local', 'lldp_neighbor' },
+	runtime = { 'sys_cpumem' },
+	counters = { 'home_main', 'rmon_statistics' },
+}
+
 local VLAN_MODE = {
 	[0] = 'hybrid',
 	[1] = 'access',
@@ -59,6 +69,39 @@ local VLAN_MEMBERSHIP = {
 }
 
 local function copy(v) return tablex.deep_copy(v) end
+
+local function merge_table(dst, src)
+	dst = dst or {}
+	if type(src) ~= 'table' then return dst end
+	for k, v in pairs(src) do
+		if v ~= nil then
+			if type(v) == 'table' and type(dst[k]) == 'table' then
+				merge_table(dst[k], v)
+			else
+				dst[k] = copy(v)
+			end
+		end
+	end
+	return dst
+end
+
+local function append_unique(out, seen, value)
+	value = tostring(value or '')
+	if value ~= '' and not seen[value] then
+		seen[value] = true
+		out[#out + 1] = value
+	end
+end
+
+local function commands_for_groups(groups)
+	local out, seen = {}, {}
+	for _, group in ipairs(groups or {}) do
+		local commands = COMMAND_GROUPS[tostring(group or '')]
+		if not commands then return nil, 'unknown command group: ' .. tostring(group) end
+		for _, cmd in ipairs(commands) do append_unique(out, seen, cmd) end
+	end
+	return out, nil
+end
 
 local function trim(s)
 	return (tostring(s or ''):gsub('^%s+', ''):gsub('%s+$', ''))
@@ -160,6 +203,18 @@ local function header_values(headers, name)
 		end
 	end
 	return values
+end
+
+local function reset_session(self)
+	self.jar = CookieJar.new({ cookie_language = 'defLang_en' })
+	self.logged_in = false
+end
+
+local function auth_invalid_body(body)
+	local s = tostring(body or ''):lower()
+	return s:find('login.html', 1, true) ~= nil
+		or s:find('home_login', 1, true) ~= nil
+		or s:find('loginstatus', 1, true) ~= nil
 end
 
 local function request(self, method, url, body, extra_headers)
@@ -317,19 +372,21 @@ local function response_status_ok(body)
 	return tostring(body or ''):find('"status"%s*:%s*"ok"') ~= nil
 end
 
-local function login(self)
-	if self.disable_login or self.logged_in then return true, nil end
+local function login(self, opts)
+	opts = opts or {}
+	if self.disable_login then return true, nil end
+	if self.logged_in and not opts.force then return true, nil end
 	if not self.username or not self.password then return false, 'switch username/password not configured' end
-	self.jar:set('cookie_language', 'defLang_en')
+	reset_session(self)
 	local info_url = cgi_url(self.base_url, 'get', 'home_login')
 	local info, err = request(self, 'GET', info_url)
-	if not info or info.status ~= 200 then return false, err or ('home_login HTTP ' .. tostring(info and info.status)) end
+	if not info or info.status ~= 200 then reset_session(self); return false, err or ('home_login HTTP ' .. tostring(info and info.status)) end
 	local info_json, jerr = json_decode(info.body)
-	if not info_json then return false, 'home_login invalid JSON: ' .. tostring(jerr) end
+	if not info_json then reset_session(self); return false, 'home_login invalid JSON: ' .. tostring(jerr) end
 	local modulus = info_json.data and info_json.data.modulus
-	if not modulus then return false, 'home_login response missing RSA modulus' end
+	if not modulus then reset_session(self); return false, 'home_login response missing RSA modulus' end
 	local encrypted, enc_err = openssl_encrypt_b64(self, modulus, self.password)
-	if not encrypted then return false, enc_err end
+	if not encrypted then reset_session(self); return false, enc_err end
 	local form_data = '_ds=1&' .. form_encode({ username = self.username, password = encrypted }) .. '&_de=1'
 	local auth_url = cgi_url(self.base_url, 'set', 'home_loginAuth', os.time())
 	local origin = parse_origin(self.base_url)
@@ -353,6 +410,7 @@ local function login(self)
 			if status and response_status_ok(status.body) then self.logged_in = true; return true, nil end
 		end
 	end
+	reset_session(self)
 	return false, 'RTL8380 RSA login was not confirmed'
 end
 
@@ -360,12 +418,26 @@ local function get_cmd(self, cmd)
 	local url = cgi_url(self.base_url, 'get', cmd)
 	if cmd == 'rmon_statistics' then url = url .. '&time=0' end
 	local r, err = request(self, 'GET', url)
-	if not r then return nil, err end
-	if r.status ~= 200 then return nil, ('%s HTTP %s'):format(cmd, tostring(r.status)) end
+	if not r then return nil, err, 'transport' end
+	if r.status == 401 or r.status == 403 then return nil, ('%s HTTP %s'):format(cmd, tostring(r.status)), 'auth_invalid' end
+	if r.status ~= 200 then return nil, ('%s HTTP %s'):format(cmd, tostring(r.status)), 'http' end
 	local parsed, perr = json_decode(r.body)
-	if not parsed then return nil, cmd .. ' invalid JSON: ' .. tostring(perr) end
-	if parsed.logout then return nil, cmd .. ' returned logout=' .. tostring(parsed.logout) .. ' reason=' .. tostring(parsed.reason) end
-	return parsed.data or parsed, nil
+	if not parsed then
+		if auth_invalid_body(r.body) then return nil, cmd .. ' returned login page', 'auth_invalid' end
+		return nil, cmd .. ' invalid JSON: ' .. tostring(perr), 'parse'
+	end
+	if parsed.logout then return nil, cmd .. ' returned logout=' .. tostring(parsed.logout) .. ' reason=' .. tostring(parsed.reason), 'auth_invalid' end
+	return parsed.data or parsed, nil, nil
+end
+
+local function read_commands(self, commands)
+	local data = {}
+	for _, cmd in ipairs(commands or {}) do
+		local d, err, code = get_cmd(self, cmd)
+		if not d then return nil, err or ('failed to read ' .. cmd), code end
+		data[cmd] = d
+	end
+	return data, nil, nil
 end
 
 local function parse_speed_mbps(v)
@@ -565,11 +637,11 @@ local function build_surfaces(data)
 	return surfaces
 end
 
-local function build_snapshot(self, data)
+local function build_identity(data)
+	data = data or {}
 	local sys = data.sys_sysinfo or {}
 	local home = data.home_main or {}
-	local poe = data.poe_poe or {}
-	local identity = {
+	return {
 		model = home.model or home.title,
 		hostname = sys.hostname,
 		mac = sys.sysMac,
@@ -581,20 +653,28 @@ local function build_snapshot(self, data)
 		management_ipv4 = sys.currIpv4,
 		management_ipv6 = sys.currIpv6,
 	}
+end
+
+local function base_status(self)
+	return {
+		state = 'available',
+		available = true,
+		mode = self.mode,
+		driver = DRIVER,
+		base_url = self.base_url,
+		login = self.logged_in and 'confirmed' or (self.disable_login and 'disabled' or 'attempted'),
+	}
+end
+
+local function build_snapshot(self, data)
+	local poe = data.poe_poe or {}
 	return {
 		ok = true,
 		provider_id = self.id,
 		mode = self.mode,
 		writable = false,
-		status = {
-			state = 'available',
-			available = true,
-			mode = self.mode,
-			driver = DRIVER,
-			base_url = self.base_url,
-			login = self.logged_in and 'confirmed' or (self.disable_login and 'disabled' or 'attempted'),
-		},
-		identity = identity,
+		status = base_status(self),
+		identity = build_identity(data),
 		surfaces = build_surfaces(data),
 		topology = {
 			lldp_local = data.lldp_local,
@@ -604,6 +684,61 @@ local function build_snapshot(self, data)
 		power = parse_power(poe),
 		raw = self.include_raw and data or nil,
 	}
+end
+
+local function build_group_observation(self, group, data)
+	group = tostring(group or '')
+	local out = {
+		ok = true,
+		provider_id = self.id,
+		group = group,
+		status = base_status(self),
+	}
+
+	if group == 'identity' then
+		out.identity = build_identity(data)
+	elseif group == 'runtime' then
+		out.runtime = parse_runtime(data.sys_cpumem)
+	elseif group == 'poe' then
+		out.power = parse_power(data.poe_poe)
+		out.surfaces = build_surfaces(data)
+	elseif group == 'lldp' then
+		out.topology = {
+			lldp_local = data.lldp_local,
+			lldp_neighbor = data.lldp_neighbor,
+		}
+	elseif group == 'panel' or group == 'vlan' or group == 'counters' then
+		out.surfaces = build_surfaces(data)
+	else
+		return { ok = false, provider_id = self.id, group = group, status = { state = 'unavailable', available = false, driver = DRIVER, err = 'unknown command group: ' .. group } }
+	end
+
+	if self.include_raw then out.raw = data end
+	return out
+end
+
+local function build_groups_observation(self, groups, data)
+	local out = {
+		ok = true,
+		provider_id = self.id,
+		groups = copy(groups or {}),
+		status = base_status(self),
+	}
+	for _, group in ipairs(groups or {}) do
+		local partial = build_group_observation(self, group, data)
+		if not partial or partial.ok ~= true then return partial end
+		for _, key in ipairs({ 'identity', 'runtime', 'power', 'topology' }) do
+			if type(partial[key]) == 'table' then out[key] = merge_table(out[key] or {}, partial[key]) end
+		end
+		if type(partial.surfaces) == 'table' then
+			out.surfaces = out.surfaces or {}
+			for surface_id, surface in pairs(partial.surfaces) do
+				out.surfaces[surface_id] = merge_table(out.surfaces[surface_id] or {}, surface)
+			end
+		end
+	end
+	if self.include_raw then out.raw = data end
+	return out
 end
 
 local function require_http_config(config)
@@ -624,7 +759,6 @@ local CONFIG_FIELDS = {
 	username = true,
 	password = true,
 	timeout_s = true,
-	poll_interval_s = true,
 	http = true,
 	openssl_bin = true,
 	disable_login = true,
@@ -692,18 +826,94 @@ function Provider:fetch_snapshot()
 
 	local ok_login, lerr = login(self)
 	if not ok_login then
-		return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, err = lerr or 'login failed' } }
+		return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = lerr or 'login failed' } }
 	end
 
-	local data = {}
-	for _, cmd in ipairs(READ_COMMANDS) do
-		local d, err = get_cmd(self, cmd)
-		if not d then
-			return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, err = err or ('failed to read ' .. cmd) } }
+	local data, err, code = read_commands(self, READ_COMMANDS)
+	if data then return build_snapshot(self, data) end
+
+	if code == 'auth_invalid' then
+		reset_session(self)
+		local ok_relogin, relogin_err = login(self, { force = true })
+		if not ok_relogin then
+			return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = relogin_err or 're-login failed' } }
 		end
-		data[cmd] = d
+		data, err, code = read_commands(self, READ_COMMANDS)
+		if data then return build_snapshot(self, data) end
 	end
-	return build_snapshot(self, data)
+
+	return { ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, login = self.logged_in and 'confirmed' or 'failed', err = err or 'switch snapshot failed' } }
+end
+
+function Provider:fetch_command_group(group_name)
+	local group = tostring(group_name or '')
+	local commands = COMMAND_GROUPS[group]
+	if not commands then
+		return {
+			ok = false,
+			provider_id = self.id,
+			status = { state = 'unavailable', available = false, driver = DRIVER, err = 'unknown command group: ' .. group },
+		}
+	end
+
+	local ok_login, lerr = login(self)
+	if not ok_login then
+		return { ok = false, provider_id = self.id, group = group, commands = commands, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = lerr or 'login failed' } }
+	end
+
+	local data, err, code = read_commands(self, commands)
+	if code == 'auth_invalid' then
+		reset_session(self)
+		local ok_relogin, relogin_err = login(self, { force = true })
+		if not ok_relogin then
+			return { ok = false, provider_id = self.id, group = group, commands = commands, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = relogin_err or 're-login failed' } }
+		end
+		data, err, code = read_commands(self, commands)
+	end
+
+	if not data then
+		return { ok = false, provider_id = self.id, group = group, commands = commands, status = { state = 'unavailable', available = false, driver = DRIVER, login = self.logged_in and 'confirmed' or 'failed', err = err or ('switch command group failed: ' .. group) } }
+	end
+
+	return {
+		ok = true,
+		provider_id = self.id,
+		group = group,
+		commands = commands,
+		status = { state = 'available', available = true, driver = DRIVER, login = self.logged_in and 'confirmed' or 'disabled' },
+		raw = data,
+	}
+end
+
+function Provider:fetch_command_groups(groups)
+	groups = groups or {}
+	local commands, cerr = commands_for_groups(groups)
+	if not commands then
+		return { ok = false, provider_id = self.id, groups = copy(groups), status = { state = 'unavailable', available = false, driver = DRIVER, err = cerr } }
+	end
+
+	local ok_login, lerr = login(self)
+	if not ok_login then
+		return { ok = false, provider_id = self.id, groups = copy(groups), commands = commands, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = lerr or 'login failed' } }
+	end
+
+	local data, err, code = read_commands(self, commands)
+	if code == 'auth_invalid' then
+		reset_session(self)
+		local ok_relogin, relogin_err = login(self, { force = true })
+		if not ok_relogin then
+			return { ok = false, provider_id = self.id, groups = copy(groups), commands = commands, status = { state = 'unavailable', available = false, driver = DRIVER, login = 'failed', err = relogin_err or 're-login failed' } }
+		end
+		data, err, code = read_commands(self, commands)
+	end
+
+	if not data then
+		return { ok = false, provider_id = self.id, groups = copy(groups), commands = commands, status = { state = 'unavailable', available = false, driver = DRIVER, login = self.logged_in and 'confirmed' or 'failed', err = err or 'switch command groups failed' } }
+	end
+
+	local out = build_groups_observation(self, groups, data)
+	if out and out.ok == true then out.commands = commands end
+	return out
 end
 
 function Provider:fetch_snapshot_op(_req)
@@ -728,10 +938,37 @@ end
 
 function Provider:snapshot_op(req) return self:fetch_snapshot_op(req) end
 function Provider:watch_op(req) return self:fetch_snapshot_op(req) end
+
+function Provider:observe_groups_op(req)
+	req = req or {}
+	local groups = req.groups or {}
+	if type(groups) ~= 'table' then
+		return op.always({ ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, driver = DRIVER, err = 'groups must be an array' } })
+	end
+	return op.guard(function ()
+		return fibers.run_scope_op(function ()
+			return self:fetch_command_groups(groups)
+		end):wrap(function (status, _report, result_or_primary, err)
+			if status == 'ok' then return result_or_primary, err end
+			return {
+				ok = false,
+				provider_id = self.id,
+				groups = copy(groups),
+				status = {
+					state = 'unavailable',
+					available = false,
+					driver = DRIVER,
+					err = tostring(result_or_primary or status or 'group observation failed'),
+				},
+			}, nil
+		end)
+	end)
+end
+
 function Provider:apply_attachments_op(_req) return op.always(contract.read_only('apply_attachments')) end
 function Provider:set_poe_op(_req) return op.always(contract.read_only('set_poe')) end
 function Provider:bounce_op(_req) return op.always(contract.read_only('bounce')) end
-function Provider:terminate(_reason) return true end
+function Provider:terminate(_reason) reset_session(self); return true end
 
 M._test = {
 	VLAN_MODE = VLAN_MODE,
@@ -743,6 +980,11 @@ M._test = {
 	parse_runtime = parse_runtime,
 	parse_power = parse_power,
 	parse_surface_counters = parse_surface_counters,
+	build_group_observation = function(provider_like, group, data) return build_group_observation(provider_like or { id = 'switch-main', mode = 'read_only' }, group, data or {}) end,
+	build_groups_observation = function(provider_like, groups, data) return build_groups_observation(provider_like or { id = 'switch-main', mode = 'read_only' }, groups or {}, data or {}) end,
+	commands_for_groups = commands_for_groups,
+	auth_invalid_body = auth_invalid_body,
+	COMMAND_GROUPS = COMMAND_GROUPS,
 }
 
 return M

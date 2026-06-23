@@ -31,6 +31,14 @@
           "cm5-local-wired": {
             "provider": "static",
             "mode": "read_only",
+            "poll": {
+              "static": {
+                "interval_s": 30.0,
+                "groups": [
+                  "snapshot"
+                ]
+              }
+            },
             "surfaces": {
               "eth0": {
                 "provider_surface_id": "eth0",
@@ -62,7 +70,30 @@
             "username": "$SWITCH_USERNAME",
             "password": "$SWITCH_PASSWORD",
             "timeout_s": 0.8,
-            "poll_interval_s": 1.0,
+            "poll": {
+              "fast": {
+                "interval_s": 1.0,
+                "groups": [
+                  "panel",
+                  "poe",
+                  "counters"
+                ]
+              },
+              "medium": {
+                "interval_s": 5.0,
+                "groups": [
+                  "vlan",
+                  "lldp"
+                ]
+              },
+              "slow": {
+                "interval_s": 30.0,
+                "groups": [
+                  "identity",
+                  "runtime"
+                ]
+              }
+            },
             "http": {
               "response_parser": "legacy-http1-close",
               "capability": "main",

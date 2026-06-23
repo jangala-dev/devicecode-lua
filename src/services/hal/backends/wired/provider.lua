@@ -17,7 +17,9 @@ function M.new(config, opts)
 	local ok, mod = pcall(require, modname)
 	if not ok then return nil, ('wired provider %s not available: %s'):format(name, tostring(mod)) end
 	if type(mod) ~= 'table' or type(mod.new) ~= 'function' then return nil, 'wired provider module must export new(config, opts)' end
-	return mod.new(config, opts or {})
+	local backend, err = mod.new(config, opts or {})
+	if not backend then return nil, err end
+	return backend, nil, name
 end
 
 return M
