@@ -153,6 +153,8 @@ local function handle_read(owner, route, deps)
 		result = queries.services_snapshot(snap)
 	elseif route.query == 'fabric' then
 		result = queries.fabric_status(snap)
+	elseif route.query == 'update_status' then
+		result = queries.update_status(snap)
 	elseif route.query == 'topic' then
 		result = queries.topic(snap, route.topic)
 	else

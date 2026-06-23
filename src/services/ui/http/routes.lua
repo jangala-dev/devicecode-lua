@@ -71,6 +71,12 @@ function M.decode(ctx)
 		return { kind = 'read', query = 'fabric' }
 	end
 
+	if parts[2] == 'update' and method == 'GET' then
+		if parts[3] == nil or parts[3] == 'status' then
+			return { kind = 'read', query = 'update_status' }
+		end
+	end
+
 	if parts[2] == 'update' and parts[3] == 'upload' and method == 'POST' then
 		return { kind = 'upload' }
 	end
