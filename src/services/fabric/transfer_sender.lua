@@ -64,6 +64,12 @@ local function construct(label, fn, ...)
 	return frame
 end
 
+local function encoded_frame_len(frame)
+	local line = protocol.encode_line(frame)
+	if type(line) == 'string' then return #line end
+	return nil
+end
+
 local function elapsed_ms(start)
 	if start == nil then return nil end
 	local dt = (fibers.now() - start) * 1000
@@ -154,6 +160,7 @@ local function make_next_chunk(caps, source, xfer_id, offset, size, chunk_size)
 		next = offset + #chunk,
 		len = #chunk,
 		digest = chunk_digest,
+		frame_len = encoded_frame_len(frame),
 		source_read_ms = source_read_ms,
 		frame = frame,
 	}
@@ -302,6 +309,7 @@ function M.run(scope, req, caps)
 						last_tx_next = pending.next,
 						chunk_len = pending.len,
 						chunk_digest = pending.digest,
+						chunk_frame_len = pending.frame_len,
 						send_ms = send_ms,
 						need_to_chunk_ms = need_to_chunk_ms,
 						retransmit = true,
@@ -336,6 +344,7 @@ function M.run(scope, req, caps)
 							last_tx_next = pending.next,
 							chunk_len = pending.len,
 							chunk_digest = pending.digest,
+							chunk_frame_len = pending.frame_len,
 							source_read_ms = pending.source_read_ms,
 							send_ms = send_ms,
 							need_to_chunk_ms = need_to_chunk_ms,
@@ -374,6 +383,7 @@ function M.run(scope, req, caps)
 						last_tx_next = pending.next,
 						chunk_len = pending.len,
 						chunk_digest = pending.digest,
+						chunk_frame_len = pending.frame_len,
 						source_read_ms = pending.source_read_ms,
 						send_ms = send_ms,
 						need_to_chunk_ms = need_to_chunk_ms,
