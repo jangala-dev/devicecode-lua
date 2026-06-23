@@ -131,6 +131,19 @@ local function now_from_opts(opts)
 	return opts and opts.now or nil
 end
 
+local function speedtest_ttl(snapshot)
+	local cfg = runtime_opts(snapshot)
+	return tonumber(cfg.interval_s or cfg.refresh_s or cfg.ttl_s or cfg.max_age_s)
+end
+
+local function speedtest_success_fresh(snapshot, rec, now)
+	if type(rec) ~= 'table' or rec.state ~= 'done' or rec.ok ~= true then return false end
+	local ttl = speedtest_ttl(snapshot)
+	if not ttl or ttl <= 0 then return true end
+	local completed = tonumber(rec.completed_at) or 0
+	return now ~= nil and completed > 0 and now - completed < ttl
+end
+
 function M.speedtest_due(snapshot, uplink, opts)
 	opts = opts or {}
 	if not M.speedtest_enabled(snapshot) then return false, 'speedtests_disabled' end
@@ -142,13 +155,7 @@ function M.speedtest_due(snapshot, uplink, opts)
 	if rec and rec.state == 'running' and rec.generation == generation then return false, 'running' end
 	local now = now_from_opts(opts)
 	if rec and rec.retry_after and now and now < rec.retry_after then return false, 'retry_later' end
-	local cfg = runtime_opts(snapshot)
-	local ttl = tonumber(cfg.interval_s or cfg.refresh_s or cfg.ttl_s or cfg.max_age_s)
-	if rec and rec.state == 'done' and rec.ok == true then
-		if not ttl or ttl <= 0 then return false, 'fresh' end
-		local completed = tonumber(rec.completed_at) or 0
-		if now and completed > 0 and now - completed < ttl then return false, 'fresh' end
-	end
+	if speedtest_success_fresh(snapshot, rec, now) then return false, 'fresh' end
 	return true, 'due'
 end
 
@@ -168,7 +175,8 @@ function M.weights_equal(a, b)
 	return true
 end
 
-function M.compute_weights(snapshot, generation)
+function M.compute_weights(snapshot, generation, opts)
+	opts = opts or {}
 	local runtime = snapshot.wan_runtime or {}
 	local tests = runtime.speedtests or {}
 	local measured, total = {}, 0
@@ -181,9 +189,12 @@ function M.compute_weights(snapshot, generation)
 		local id = uplink.uplink_id
 		local rec = tests[id]
 		local mbps = nil
-		if rec and rec.generation == generation and rec.state == 'done' then
-			if rec.ok == true then mbps = tonumber(rec.peak_mbps) or tonumber(rec.last_success_mbps)
-			else mbps = tonumber(rec.last_success_mbps) end
+		if rec and rec.state == 'done' then
+			if rec.ok == true and (rec.generation == generation or speedtest_success_fresh(snapshot, rec, now_from_opts(opts))) then
+				mbps = tonumber(rec.peak_mbps) or tonumber(rec.last_success_mbps)
+			elseif rec.generation == generation then
+				mbps = tonumber(rec.last_success_mbps)
+			end
 		end
 		if mbps and mbps > 0 then total = total + mbps end
 		measured[id] = mbps

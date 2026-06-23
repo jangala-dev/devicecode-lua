@@ -1569,6 +1569,10 @@
         "tx_errors": {
           "template": "network_stat"
         },
+        "speedtest": {
+          "protocol": "http",
+          "process": []
+        },
         "firmware": {
           "template": "any_change"
         },

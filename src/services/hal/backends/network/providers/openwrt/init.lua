@@ -958,6 +958,26 @@ local function build_uci_plan(intent, provider_config)
 	}
 end
 
+local function trigger_post_apply_observation(self, trace)
+	local obs = self and self._observer or nil
+	if not obs or type(obs.ingest) ~= 'function' then return true, nil end
+	local ok, err = obs:ingest({
+		source = 'apply',
+		kind = 'apply_done',
+		action = 'post_apply',
+		generation = trace and trace.generation or nil,
+		apply_id = trace and trace.apply_id or nil,
+	})
+	log_provider(self, ok == true and 'debug' or 'warn', {
+		what = 'openwrt_apply_observation_queued',
+		ok = ok == true,
+		err = err,
+		generation = trace and trace.generation or nil,
+		apply_id = trace and trace.apply_id or nil,
+	})
+	return ok, err
+end
+
 function M.new(config, opts)
 	config = config or {}
 	opts = opts or {}
@@ -1309,6 +1329,7 @@ function Provider:apply_op(req)
 			activation = result.activation,
 			elapsed_ms = elapsed_ms(t0),
 		})
+		trigger_post_apply_observation(self, trace)
 		return result
 	end):wrap(function(status, _report, result)
 		if status ~= 'ok' then
@@ -1848,6 +1869,14 @@ local function translate_speedtest_req(req, name_ctx)
 	if type(generated_iface) == 'string' and generated_iface ~= '' then
 		out.semantic_interface = semantic_iface
 		out.interface = generated_iface
+	end
+	local dev = out.device or out.linux_interface or out.ifname
+	if type(name_ctx.vlan) == 'function'
+		and type(semantic_iface) == 'string'
+		and semantic_iface ~= ''
+		and (dev == nil or dev == '' or dev == semantic_iface or dev == generated_iface) then
+		out.semantic_device = dev
+		out.device = name_ctx:vlan(semantic_iface)
 	end
 	return out
 end

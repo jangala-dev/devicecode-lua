@@ -587,6 +587,73 @@ function tests.test_observed_state_updates_model_and_drift()
 end
 
 
+function tests.test_wan_speedtests_wait_for_multiwan_observation()
+	fibers.run(function (scope)
+		local mailbox = require 'fibers.mailbox'
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+		local speedtests = {}
+		local obs_tx, obs_rx = mailbox.new(8, { full = 'drop_oldest' })
+		local hal = success_hal(calls)
+		hal.speedtest_op = function (_, req)
+			speedtests[#speedtests + 1] = req
+			return op.always({ ok = true, interface = req.interface, peak_mbps = 10 })
+		end
+		hal.open_observed_subscription = function () return obs_rx end
+		hal.start_observation_op = function () return op.always({ ok = true, backend = 'test', watching = true }) end
+
+		local c = cfg()
+		c.wan = {
+			load_balancing = { policy = 'balanced', speedtests = true },
+			members = {
+				wan_a = { interface = 'wan_a', mwan_metric = 1, weight = 1 },
+			},
+		}
+		c.interfaces.wan_a = { kind = 'ethernet', role = 'wan', segment = 'wan', endpoint = { ifname = 'eth1' }, addressing = { ipv4 = { mode = 'dhcp' } } }
+		c.segments.wan = { kind = 'wan', firewall = { zone = 'wan' } }
+
+		retain_network_config_status(conn, 'available')
+		retain_network_state_status_payload(conn, {
+			schema = 'devicecode.cap.status/1',
+			state = 'running',
+			available = true,
+		})
+		local skipped_sub = reader:subscribe({ 'obs', 'v1', 'net', 'event', 'speedtest_skipped' }, { queue_len = 8, full = 'drop_oldest' })
+
+		local child = start_service(scope, conn, { conn = conn, config = c, rev = 21, hal = hal })
+		local which, msg = fibers.perform(op.named_choice({
+			event = skipped_sub:recv_op(),
+			timeout = sleep.sleep_op(0.5),
+		}))
+		ok(which == 'event' and msg and msg.payload, 'expected speedtest skip event')
+		eq(msg.payload.reason, 'waiting_for_observation')
+		eq(msg.payload.observed_status, 'missing')
+		eq(#speedtests, 0, 'speedtest should wait for observed multiwan status')
+
+		obs_tx:send({ payload = {
+			schema = 'devicecode.net.observation/1',
+			kind = 'snapshot_done',
+			source = 'test',
+			subject = 'network',
+			observed = {
+				multiwan = {
+					interfaces_by_semantic = {
+						wan_a = { interface = 'wan_a', state = 'online', online = true, usable = true },
+					},
+				},
+			},
+		} })
+
+		ok(probe.wait_until(function () return #speedtests == 1 end, { timeout = 0.5 }), 'speedtest should start after observation')
+		skipped_sub:unsubscribe()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+
 function tests.test_wan_members_trigger_speedtests_and_live_weights()
 	fibers.run(function (scope)
 		local mailbox = require 'fibers.mailbox'
@@ -628,6 +695,7 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 			state = 'running',
 			available = true,
 		})
+		local metric_sub = reader:subscribe({ 'obs', 'v1', 'net', 'metric', 'speedtest' }, { queue_len = 8, full = 'drop_oldest' })
 
 		local child = start_service(scope, conn, { conn = conn, config = c, rev = 20, hal = hal })
 		obs_tx:send({ payload = {
@@ -659,6 +727,22 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 		ok(#weights >= 1, 'expected live weight apply')
 		local members = runtime.live_weights.members
 		ok(type(members) == 'table' and #members >= 2, 'members expected')
+		local seen = {}
+		for _ = 1, 2 do
+			local which, msg = fibers.perform(op.named_choice({
+				metric = metric_sub:recv_op(),
+				timeout = sleep.sleep_op(0.2),
+			}))
+			ok(which == 'metric' and msg and msg.payload, 'expected speedtest metric')
+			local ns = msg.payload.namespace
+			ok(type(ns) == 'table', 'speedtest metric namespace expected')
+			eq(ns[1], 'net')
+			eq(ns[3], 'speedtest')
+			seen[ns[2]] = msg.payload.value
+		end
+		eq(seen.wan_a, 80)
+		eq(seen.wan_b, 20)
+		metric_sub:unsubscribe()
 		view:close()
 		child:cancel('test complete')
 		fibers.perform(child:join_op())

@@ -12,6 +12,92 @@ local function now(state)
 	return state.now and state.now() or require('fibers').now()
 end
 
+local function obs_log(state, level, payload)
+	local svc = state and state.svc
+	if svc and type(svc.obs_log) == 'function' then svc:obs_log(level, payload) end
+end
+
+local function obs_event(state, kind, payload)
+	local svc = state and state.svc
+	if svc and type(svc.obs_event) == 'function' then
+		payload = payload or {}
+		payload.kind = payload.kind or kind
+		svc:obs_event(kind, payload)
+	end
+end
+
+local function observed_multiwan(snapshot)
+	local observed = snapshot and snapshot.observed or nil
+	local mw = observed and observed.snapshot and observed.snapshot.multiwan or nil
+	if type(mw) ~= 'table' then mw = observed and observed.multiwan or nil end
+	return type(mw) == 'table' and mw or nil
+end
+
+local function table_has_entries(t)
+	if type(t) ~= 'table' then return false end
+	return next(t) ~= nil
+end
+
+local function observed_multiwan_ready(snapshot)
+	local mw = observed_multiwan(snapshot)
+	if not mw then return false end
+	return table_has_entries(mw.interfaces) or table_has_entries(mw.interfaces_by_semantic)
+end
+
+local function enrich_observed_status(payload, state, uplink)
+	local snap = state and state.model and state.model:snapshot() or nil
+	local mw = observed_multiwan(snap)
+	local status = wan_policy.uplink_observed_status(snap, uplink)
+	if type(status) == 'table' then
+		payload.observed_state = status.state or status.mwan3_status
+		payload.observed_online = status.online
+		payload.observed_usable = status.usable
+		payload.observed_up = status.up
+		payload.observed_interface = status.interface
+		payload.observed_ifname = status.ifname
+	else
+		payload.observed_status = 'missing'
+	end
+	if not mw then payload.observed_multiwan = 'missing' end
+	return payload
+end
+
+local function speedtest_skip_payload(reason, trigger, uplink, generation)
+	return {
+		reason = reason,
+		trigger = trigger,
+		generation = generation,
+		uplink_id = uplink and uplink.uplink_id or nil,
+		interface = uplink and uplink.request and uplink.request.interface or nil,
+		device = uplink and uplink.request and uplink.request.device or nil,
+	}
+end
+
+local function report_speedtest_skip(state, reason, trigger, uplink, generation)
+	local payload = enrich_observed_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink)
+	payload.what = 'speedtest_skipped'
+	obs_log(state, 'debug', payload)
+	obs_event(state, 'speedtest_skipped',
+		enrich_observed_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink))
+end
+
+local function mark_speedtest_skipped(state, uplink, generation, reason)
+	state.model:update(function(s)
+		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
+		s.wan_runtime.speedtests = s.wan_runtime.speedtests or {}
+		local id = uplink.uplink_id
+		local rec = s.wan_runtime.speedtests[id] or { uplink_id = id, state = 'skipped' }
+		if rec.state == nil then rec.state = 'skipped' end
+		rec.last_skip_generation = generation
+		rec.last_skip_reason = reason
+		rec.interface = uplink.request and uplink.request.interface or rec.interface
+		rec.device = uplink.request and uplink.request.device or rec.device
+		rec.updated_at = now(state)
+		s.wan_runtime.speedtests[id] = rec
+		return s
+	end)
+end
+
 function M.cancel(state, reason)
 	for _, rec in pairs(state.active_speedtests or {}) do
 		if rec.handle and type(rec.handle.cancel) == 'function' then rec.handle:cancel(reason or 'wan_runtime_cancelled') end
@@ -23,7 +109,6 @@ function M.cancel(state, reason)
 	state.active_weight_apply = nil
 	return true, nil
 end
-
 
 local function start_speedtest_for_uplink(state, uplink)
 	if not state.hal or type(state.hal.speedtest_op) ~= 'function' then return true, nil end
@@ -78,7 +163,9 @@ local function start_speedtest_for_uplink(state, uplink)
 	if not handle then
 		state.model:update(function(s)
 			local rec = s.wan_runtime and s.wan_runtime.speedtests and s.wan_runtime.speedtests[uplink_id]
-			if rec then rec.state = 'failed_to_start'; rec.err = tostring(err) end
+			if rec then
+				rec.state = 'failed_to_start'; rec.err = tostring(err)
+			end
 			return s
 		end)
 		return nil, err
@@ -87,11 +174,41 @@ local function start_speedtest_for_uplink(state, uplink)
 	return true, nil
 end
 
+local start_live_weight_apply
+
+local function apply_weights_if_ready(state, generation)
+	if state.active_weight_apply ~= nil then return true, nil end
+	for _, active in pairs(state.active_speedtests or {}) do
+		if active and active.generation == generation then return true, nil end
+	end
+	local snap = state.model:snapshot()
+	local weights = wan_policy.compute_weights(snap, generation, { now = now(state) })
+	if not weights then return true, nil end
+	local previous = snap.wan_runtime and snap.wan_runtime.last_weight_apply and snap.wan_runtime.last_weight_apply.members
+	if wan_policy.weights_equal(previous, weights) then return true, nil end
+	return start_live_weight_apply(state, weights)
+end
+
 function M.reconcile_speedtests(state, reason)
 	local snap = state.model:snapshot()
-	if not wan_policy.speedtest_enabled(snap) then return true, nil end
+	if not wan_policy.speedtest_enabled(snap) then
+		obs_log(state, 'debug', {
+			what = 'speedtests_skipped',
+			reason = 'speedtests_disabled',
+			trigger = reason
+		})
+		return true, nil
+	end
 	local generation = state.current_generation and state.current_generation.generation or snap.generation
-	if type(generation) ~= 'number' or generation <= 0 then return true, nil end
+	if type(generation) ~= 'number' or generation <= 0 then
+		obs_log(state, 'debug', {
+			what = 'speedtests_skipped',
+			reason = 'invalid_generation',
+			trigger = reason,
+			generation = generation
+		})
+		return true, nil
+	end
 
 	local uplinks = wan_policy.collect_uplinks(snap)
 	if #uplinks == 0 then
@@ -111,30 +228,49 @@ function M.reconcile_speedtests(state, reason)
 		return s
 	end)
 
+	local speedtest_pending = false
 	for i = 1, #uplinks do
 		local uplink = uplinks[i]
+		local observed_status = wan_policy.uplink_observed_status(snap, uplink)
 		local online = wan_policy.uplink_online(snap, uplink)
 		if not online then
-			local active = state.active_speedtests[uplink.uplink_id]
-			if active and active.handle and type(active.handle.cancel) == 'function' then
-				active.handle:cancel('uplink_offline')
+			local skip_reason = 'not_online'
+			if observed_status == nil and not observed_multiwan_ready(snap) then
+				skip_reason = 'waiting_for_observation'
+			else
+				local active = state.active_speedtests[uplink.uplink_id]
+				if active and active.handle and type(active.handle.cancel) == 'function' then
+					active.handle:cancel('uplink_offline')
+				end
+				state.active_speedtests[uplink.uplink_id] = nil
 			end
-			state.active_speedtests[uplink.uplink_id] = nil
+			mark_speedtest_skipped(state, uplink, generation, skip_reason)
+			report_speedtest_skip(state, skip_reason, reason, uplink, generation)
 		else
-			local due = wan_policy.speedtest_due(state.model:snapshot(), uplink, { generation = generation, now = now(state) })
+			local due, due_reason = wan_policy.speedtest_due(state.model:snapshot(), uplink,
+				{ generation = generation, now = now(state) })
 			if due then
+				speedtest_pending = true
 				local ok, err = start_speedtest_for_uplink(state, uplink)
 				if ok ~= true then return nil, err end
+			else
+				if due_reason == 'running' then speedtest_pending = true end
+				mark_speedtest_skipped(state, uplink, generation, due_reason or 'not_due')
+				report_speedtest_skip(state, due_reason or 'not_due', reason, uplink, generation)
 			end
 		end
 	end
+	if not speedtest_pending then return apply_weights_if_ready(state, generation) end
 	return true, nil
 end
 
 M.start_speedtests = M.reconcile_speedtests
 
-local function start_live_weight_apply(state, members)
-	if not members or #members == 0 or not state.hal or type(state.hal.apply_live_weights_op) ~= 'function' then return true, nil end
+function start_live_weight_apply(state, members)
+	if not members or #members == 0 or not state.hal or type(state.hal.apply_live_weights_op) ~= 'function' then
+		return
+			true, nil
+	end
 	local snap = state.model:snapshot()
 	local generation = state.current_generation and state.current_generation.generation or snap.generation
 	if type(generation) ~= 'number' or generation <= 0 then return true, nil end
@@ -215,16 +351,23 @@ function M.handle_speedtest_done(state, ev)
 		return s
 	end)
 	local snap = state.model:snapshot()
-	local weights, werr = wan_policy.compute_weights(snap, ev.generation)
+	local weights, werr = wan_policy.compute_weights(snap, ev.generation, { now = now(state) })
 	if not weights then
 		state.model:update(function(s)
 			s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
-			s.wan_runtime.live_weights = { state = 'skipped', generation = ev.generation, reason = werr or 'no_weights', updated_at = now(state) }
+			s.wan_runtime.live_weights = {
+				state = 'skipped',
+				generation = ev.generation,
+				reason = werr or 'no_weights',
+				updated_at =
+					now(state)
+			}
 			return s
 		end)
 		return true, nil
 	end
-	local previous = snap.wan_runtime and snap.wan_runtime.last_weight_apply and snap.wan_runtime.last_weight_apply.members
+	local previous = snap.wan_runtime and snap.wan_runtime.last_weight_apply and
+		snap.wan_runtime.last_weight_apply.members
 	if wan_policy.weights_equal(previous, weights) then return true, nil end
 	return start_live_weight_apply(state, weights)
 end
@@ -248,7 +391,14 @@ function M.handle_live_weights_done(state, ev)
 			updated_at = now(state),
 		}
 		if result.ok == true then
-			s.wan_runtime.last_weight_apply = { generation = ev.generation, id = ev.weight_apply_id, members = model_mod.deep_copy(work_result.members or (work_result.request and work_result.request.members) or {}), updated_at = now(state) }
+			s.wan_runtime.last_weight_apply = {
+				generation = ev.generation,
+				id = ev.weight_apply_id,
+				members = model_mod
+					.deep_copy(work_result.members or (work_result.request and work_result.request.members) or {}),
+				updated_at =
+					now(state)
+			}
 		end
 		s.stats.live_weight_applies = (s.stats.live_weight_applies or 0) + 1
 		return s
