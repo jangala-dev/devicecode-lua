@@ -214,15 +214,76 @@ function tests.test_rtl8380m_http_accepts_narrow_http_client_factory()
 end
 
 
-function tests.test_wired_manager_poll_interval_is_positive_and_defaults_to_one_second()
+
+function tests.test_wired_driver_separates_backend_provider_name_and_provider_id()
+	local driver_mod = require 'services.hal.drivers.wired'
+	local d, err = driver_mod.new({
+		provider = 'static',
+		mode = 'read_only',
+		surfaces = { eth0 = { provider_surface_id = 'eth0' } },
+	}, { provider_id = 'cm5-local-wired' })
+	assert_not_nil(d, err)
+	assert_not_nil(d.backend)
+	assert_eq(d.provider, nil)
+	assert_eq(d.provider_name, 'static')
+	assert_eq(d.provider_id, 'cm5-local-wired')
+	assert_not_nil(d.snapshot_op)
+end
+
+function tests.test_wired_driver_requires_observe_groups_backend_contract()
+	package.loaded['services.hal.backends.wired.providers.invalid_missing_observe_groups'] = {
+		new = function ()
+			return {
+				snapshot_op = function () end,
+				watch_op = function () end,
+				apply_attachments_op = function () end,
+				set_poe_op = function () end,
+				bounce_op = function () end,
+				terminate = function () end,
+			}
+		end,
+	}
+	local driver_mod = require 'services.hal.drivers.wired'
+	local d, err = driver_mod.new({ provider = 'invalid_missing_observe_groups' }, { provider_id = 'bad' })
+	assert_eq(d, nil)
+	assert_true(type(err) == 'string' and err:find('observe_groups_op', 1, true) ~= nil, tostring(err))
+	package.loaded['services.hal.backends.wired.providers.invalid_missing_observe_groups'] = nil
+end
+
+function tests.test_rtl8380m_observe_groups_deduplicates_shared_commands()
+	local commands, err = provider._test.commands_for_groups({ 'panel', 'poe', 'counters' })
+	assert_not_nil(commands, err)
+	local seen = {}
+	for _, cmd in ipairs(commands) do
+		assert_eq(seen[cmd], nil, 'duplicate command ' .. tostring(cmd))
+		seen[cmd] = true
+	end
+	assert_true(seen.home_main == true, 'home_main should be included once')
+	assert_true(seen.panel_info == true, 'panel_info should be included')
+	assert_true(seen.poe_poe == true, 'poe_poe should be included')
+	assert_true(seen.rmon_statistics == true, 'rmon_statistics should be included')
+end
+
+function tests.test_wired_manager_requires_canonical_poll_table()
 	local manager = require 'services.hal.managers.wired'
-	local n, err = manager._test.provider_poll_interval_s({})
-	assert_eq(n, 1.0, err)
-	n, err = manager._test.provider_poll_interval_s({ poll_interval_s = 0.5 })
-	assert_eq(n, 0.5, err)
-	n, err = manager._test.provider_poll_interval_s({ poll_interval_s = 0 })
-	assert_eq(n, nil)
-	assert_true(type(err) == 'string' and err:find('positive', 1, true) ~= nil, tostring(err))
+	local plan, err = manager._test.provider_poll_plan({})
+	assert_eq(plan, nil)
+	assert_true(type(err) == 'string' and err:find('poll is required', 1, true) ~= nil, tostring(err))
+
+	plan, err = manager._test.provider_poll_plan({ poll_interval_s = 0.5 })
+	assert_eq(plan, nil)
+	assert_true(type(err) == 'string' and err:find('poll_interval_s', 1, true) ~= nil, tostring(err))
+
+	plan, err = manager._test.provider_poll_plan({
+		poll = {
+			static = { interval_s = 30.0, groups = { 'snapshot' } },
+		},
+	})
+	assert_not_nil(plan, err)
+	assert_eq(#plan, 1)
+	assert_eq(plan[1].name, 'static')
+	assert_eq(plan[1].interval_s, 30.0)
+	assert_eq(plan[1].groups[1], 'snapshot')
 end
 
 return tests

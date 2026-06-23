@@ -81,7 +81,11 @@ The only supported switch HTTP provider configuration spellings on this path are
   username = "$SWITCH_USERNAME",
   password = "$SWITCH_PASSWORD",
   timeout_s = 0.8,
-  poll_interval_s = 1.0,
+  poll = {
+    fast = { interval_s = 1.0, groups = { "panel", "poe", "counters" } },
+    medium = { interval_s = 5.0, groups = { "vlan", "lldp" } },
+    slow = { interval_s = 30.0, groups = { "identity", "runtime" } },
+  },
   http = {
     capability = "main",
     response_parser = "legacy-http1-close",
@@ -185,7 +189,33 @@ lldp_local
 lldp_neighbor
 ```
 
-The driver captures these into normalised provider observations:
+The provider has narrow read groups for grouped polling.  Surface-bearing groups include `home_main` so that rows can be attached to the canonical switch surface names (`GE1` ... `GE10`):
+
+```text
+panel path:    home_main, panel_info
+identity path: sys_sysinfo
+vlan path:     home_main, vlan_create, vlan_conf, vlan_port, vlan_membership
+poe path:      home_main, poe_poe
+lldp path:     lldp_local, lldp_neighbor
+runtime path:  sys_cpumem
+counters path: home_main, rmon_statistics
+```
+
+The poll plan is based on timings measured against the fixed RTL8380M switch on 192.168.1.1 using a retained admin session:
+
+```text
+panel      avg 0.303 s, max 0.344 s
+vlan       avg 0.363 s, max 0.389 s
+poe        avg 0.077 s, max 0.084 s
+lldp       avg 0.160 s, max 0.183 s
+counters   avg 0.203 s, max 0.257 s
+runtime    avg 2.085 s, max 2.089 s
+full read  avg 3.522 s, max 3.554 s, with observed timeout
+```
+
+A concurrent probe over `panel,poe,counters,runtime` improved wall-clock time only modestly, from 2.688 s sequential average to 2.309 s concurrent average, so the production poller remains grouped and sequential.
+
+The driver captures the full snapshot into normalised provider observations:
 
 ```text
 raw/host/wired/provider/switch-main/status
@@ -198,7 +228,21 @@ raw/host/wired/provider/switch-main/state/topology
 
 If `include_raw = true` is set in a test, the snapshot also keeps the source command payloads for parser debugging.  Full raw CGI bodies should not be promoted to public retained state by default.
 
-The HAL wired manager owns scheduling.  For the RTL8380M provider it takes an immediate snapshot when configured and then polls at `poll_interval_s`, which is `1.0` seconds in the Big Box configuration.  Polls are non-overlapping: if a read is slow or fails, the next poll is not queued behind it.  Poll failures update only the provider status and leave the last good identity/runtime/power/surfaces/topology retained facts in place.
+The HAL wired manager owns scheduling.  For the RTL8380M provider, manager apply admits the provider and starts one owned provider runner; switch observation is not part of configuration admission.  The Big Box poll plan is grouped:
+
+```text
+fast, 1 Hz:   panel, poe, counters
+medium, 5 s:  vlan, lldp
+slow, 30 s: identity, runtime
+```
+
+There is one runner per provider, not one fibre per poll group.  The runner lives in `services/hal/managers/wired/provider_runner.lua` and owns the backend object, request mailbox, switch session, observation cache and due-time schedule.  Capability snapshot/control requests are sent to the runner mailbox, so the RTL8380M backend is touched only by the runner fibre.  This gives serialisation by ownership rather than a lock or semaphore.
+
+Each runner cycle coalesces all due poll groups, calls the mandatory backend `observe_groups_op` once, and lets the backend de-duplicate shared CGI commands such as `home_main`.  A saturated cycle schedules the next attempt from the finish time rather than trying to catch up, and applies a short minimum idle interval before another due cycle.  Slow runtime reads can therefore degrade runtime status without creating overlapping switch sessions or a busy catch-up loop.
+
+Successful groups merge into the retained raw observation cache, so `state/surfaces` carries last-known link, PoE, counter and VLAN facts together.  Group failures update provider status but leave the last good identity/runtime/power/surfaces/topology retained facts in place.
+
+The HAL wired manager emits raw provider facts on a changed-retained basis.  A successful `panel` group can update `state/surfaces` without re-emitting unchanged identity/runtime/power/topology facts, and repeated identical provider statuses are suppressed.  This keeps switch visibility in the provider status and semantic `state/wired/...` surfaces rather than turning the monitor into a per-request trace.
 
 Canonical observation names are deliberately strict.  CPU and memory are published as `runtime.cpu` and `runtime.memory`; PoE device-level power and temperature are published as `power.poe`; port counters are published under each surface as `counters`.  The switch path must not publish `telemetry.cpu`, `telemetry.mem`, `telemetry.poe`, or any compatibility topic for `state/telemetry`.
 

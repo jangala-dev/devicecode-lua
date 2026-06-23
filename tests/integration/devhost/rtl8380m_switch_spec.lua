@@ -16,11 +16,13 @@
 
 local busmod = require 'bus'
 local fibers = require 'fibers'
+local channel = require 'fibers.channel'
 
 local runfibers = require 'tests.support.run_fibers'
 local probe = require 'tests.support.bus_probe'
 
 local http_service = require 'services.http.service'
+local wired_manager = require 'services.hal.managers.wired'
 local wired_service = require 'services.wired.service'
 local wired_config  = require 'services.wired.config'
 local wired_topics  = require 'services.wired.topics'
@@ -170,6 +172,22 @@ local function require_successful_snapshot(provider)
 	return snap
 end
 
+local function require_successful_observe_groups(provider, groups)
+	local result = fibers.perform(provider:observe_groups_op({ groups = groups }))
+	assert_not_nil(result, 'observe_groups should return a table')
+	if result.ok ~= true then
+		local status = result.status or {}
+		error('switch observe_groups failed: ' .. tostring(status.err or result.err or 'unknown error'), 2)
+	end
+	return result
+end
+
+local function assert_command_once(commands, command)
+	local n = 0
+	for _, cmd in ipairs(commands or {}) do if cmd == command then n = n + 1 end end
+	assert_eq(n, 1, 'expected command ' .. tostring(command) .. ' exactly once')
+end
+
 local function retain_switch_raw(conn, snap)
 	conn:retain({ 'raw', 'host', 'wired', 'provider', 'switch-main', 'status' }, snap.status or {})
 	conn:retain({ 'raw', 'host', 'wired', 'provider', 'switch-main', 'state', 'identity' }, snap.identity or {})
@@ -225,6 +243,165 @@ local function retain_wired_config(conn)
 			},
 		},
 	})
+end
+
+local function raw_provider_topic(id, suffix)
+	local topic = { 'raw', 'host', 'wired', 'provider', id }
+	for i = 1, #(suffix or {}) do topic[#topic + 1] = suffix[i] end
+	return topic
+end
+
+local function start_wired_manager_hal_harness(scope, bus, dev_ev_ch, cap_emit_ch)
+	local child = assert(scope:child())
+	local writer = bus:connect({ origin_base = { kind = 'local', component = 'wired-manager-hal-harness' } })
+
+	assert(child:spawn(function ()
+		while true do
+			local ev = fibers.perform(dev_ev_ch:get_op())
+			if ev == nil then return end
+			if ev.class == 'wired' and ev.id == 'main' then
+				if ev.event_type == 'added' then
+					for _, cap in ipairs(ev.capabilities or {}) do
+						if cap.class == 'wired-provider' then
+							writer:retain(raw_provider_topic(cap.id, { 'status' }), {
+								state = 'available',
+								available = true,
+								source_kind = 'host',
+								source = 'wired',
+							})
+							writer:retain(raw_provider_topic(cap.id, { 'meta' }), {
+								offerings = cap.offerings or {},
+								source_kind = 'host',
+								source = 'wired',
+							})
+						end
+					end
+					if ev.ready_cond then ev.ready_cond:signal() end
+				elseif ev.event_type == 'removed' then
+					for _, cap in ipairs(ev.capabilities or {}) do
+						if cap.class == 'wired-provider' then writer:unretain(raw_provider_topic(cap.id, { 'status' })) end
+					end
+					if ev.ready_cond then ev.ready_cond:signal() end
+				end
+			end
+		end
+	end))
+
+	assert(child:spawn(function ()
+		while true do
+			local emit = fibers.perform(cap_emit_ch:get_op())
+			if emit == nil then return end
+			if emit.class == 'wired-provider' and emit.mode == 'state' then
+				if emit.key == 'status' then
+					writer:retain(raw_provider_topic(emit.id, { 'status' }), emit.data or {})
+				else
+					writer:retain(raw_provider_topic(emit.id, { 'state', emit.key }), emit.data or {})
+				end
+			end
+		end
+	end))
+
+	return child
+end
+
+local function switch_manager_config(env)
+	return {
+		providers = {
+			['switch-main'] = {
+				provider = 'rtl8380m_http',
+				base_url = env.base_url,
+				username = env.username,
+				password = env.password,
+				timeout_s = env.timeout_s,
+				openssl_bin = env.openssl_bin,
+				include_raw = true,
+				http = { capability = 'main', response_parser = 'legacy-http1-close' },
+				poll = {
+					fast = { interval_s = 1.0, groups = { 'panel', 'poe', 'counters' } },
+				},
+			},
+		},
+	}
+end
+
+function T.rtl8380m_real_switch_observe_groups_via_http_capability()
+	local env, err = required_env()
+	if not env then return skip(err) end
+
+	runfibers.run(function ()
+		local b = busmod.new()
+		local http = start_http_capability(b, env)
+		wait_http_available(b)
+		local provider = new_real_switch_provider(b, env)
+		local obs = require_successful_observe_groups(provider, { 'panel', 'poe', 'counters' })
+
+		assert_eq(obs.provider_id, 'switch-main')
+		assert_eq(obs.status.driver, 'rtl8380m_http')
+		assert_true(obs.status.available, 'observe_groups status should be available')
+		assert_not_nil(obs.surfaces, 'observe_groups should include surfaces')
+		assert_not_nil(obs.surfaces.GE8, 'observe_groups should include GE8')
+		assert_not_nil(obs.surfaces.GE9, 'observe_groups should include GE9')
+		assert_eq(obs.surfaces.GE9.link.media, 'fiber')
+		assert_not_nil(obs.power, 'poe group should include power')
+		assert_not_nil(obs.power.poe, 'poe group should include power.poe')
+		assert_not_nil(obs.raw, 'include_raw=true should preserve grouped source payloads')
+		assert_not_nil(obs.raw.home_main, 'grouped observation should capture home_main')
+		assert_not_nil(obs.raw.panel_info, 'grouped observation should capture panel_info')
+		assert_not_nil(obs.raw.poe_poe, 'grouped observation should capture poe_poe')
+		assert_not_nil(obs.raw.rmon_statistics, 'grouped observation should capture rmon_statistics')
+		assert_command_once(obs.commands, 'home_main')
+		assert_command_once(obs.commands, 'panel_info')
+		assert_command_once(obs.commands, 'poe_poe')
+		assert_command_once(obs.commands, 'rmon_statistics')
+
+		provider:terminate('test complete')
+		http:terminate('test complete')
+	end, { timeout = env.run_timeout_s })
+end
+
+function T.rtl8380m_real_switch_runner_publishes_raw_observations()
+	local env, err = required_env()
+	if not env then return skip(err) end
+
+	runfibers.run(function (scope)
+		local b = busmod.new()
+		local http = start_http_capability(b, env)
+		wait_http_available(b)
+
+		local manager_conn = b:connect({ origin_base = { kind = 'local', component = 'wired-manager-real-switch-test' } })
+		local resolver = assert(hal_deps.resolver(manager_conn))
+		local dev_ev_ch = channel.new(16)
+		local cap_emit_ch = channel.new(32)
+		local harness = start_wired_manager_hal_harness(scope, b, dev_ev_ch, cap_emit_ch)
+		local reader = b:connect({ origin_base = { kind = 'local', component = 'wired-runner-test-reader' } })
+
+		wired_manager.terminate('test reset')
+		local ok_start, start_err = fibers.perform(wired_manager.start_op(nil, dev_ev_ch, cap_emit_ch, {
+			http_client_for = resolver:factory('http_client'),
+		}))
+		assert_true(ok_start, tostring(start_err))
+
+		local ok_apply, apply_err = fibers.perform(wired_manager.apply_config_op(switch_manager_config(env)))
+		assert_true(ok_apply, tostring(apply_err))
+
+		local status = probe.wait_retained_payload(reader, raw_provider_topic('switch-main', { 'status' }), { timeout = 3.0 })
+		assert_not_nil(status, 'runner should publish raw provider status')
+		assert_true(status.available == true or status.state == 'observing', 'raw provider status should be observing or available')
+
+		local surfaces_payload = probe.wait_retained_payload(reader, raw_provider_topic('switch-main', { 'state', 'surfaces' }), { timeout = env.run_timeout_s })
+		local surfaces = assert_not_nil(surfaces_payload.surfaces, 'runner should publish raw surfaces')
+		assert_not_nil(surfaces.GE8, 'runner surfaces should include GE8')
+		assert_not_nil(surfaces.GE9, 'runner surfaces should include GE9')
+		assert_eq(surfaces.GE9.link.media, 'fiber')
+
+		local power = probe.wait_retained_payload(reader, raw_provider_topic('switch-main', { 'state', 'power' }), { timeout = env.run_timeout_s })
+		assert_not_nil(power.poe, 'runner should publish PoE power')
+
+		wired_manager.terminate('test complete')
+		harness:cancel('test complete')
+		fibers.perform(harness:join_op())
+		http:terminate('test complete')
+	end, { timeout = env.run_timeout_s + 5 })
 end
 
 function T.rtl8380m_real_switch_snapshot_via_http_capability()
@@ -347,5 +524,7 @@ function T.rtl8380m_real_switch_raw_observations_project_to_state_wired()
 		http:terminate('test complete')
 	end, { timeout = env.run_timeout_s })
 end
+
+
 
 return T

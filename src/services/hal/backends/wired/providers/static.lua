@@ -17,7 +17,6 @@ local CONFIG_FIELDS = {
 	surfaces = true,
 	topology = true,
 	meta = true,
-	poll_interval_s = true,
 }
 
 local function check_allowed_config(config)
@@ -57,6 +56,19 @@ function Provider:snapshot_op(_req)
 end
 
 function Provider:watch_op(req) return self:snapshot_op(req) end
+
+function Provider:observe_groups_op(req)
+	req = req or {}
+	local groups = req.groups or {}
+	if type(groups) ~= 'table' then return op.always({ ok = false, provider_id = self.id, status = { state = 'unavailable', available = false, err = 'groups must be an array' } }) end
+	for i = 1, #groups do
+		if groups[i] ~= 'snapshot' then
+			return op.always({ ok = false, provider_id = self.id, group = groups[i], status = { state = 'unavailable', available = false, err = 'unsupported static poll group: ' .. tostring(groups[i]) } })
+		end
+	end
+	return self:snapshot_op(req)
+end
+
 function Provider:apply_attachments_op(_req) return op.always(contract.read_only('apply_attachments')) end
 function Provider:set_poe_op(_req) return op.always(contract.read_only('set_poe')) end
 function Provider:bounce_op(_req) return op.always(contract.read_only('bounce')) end
