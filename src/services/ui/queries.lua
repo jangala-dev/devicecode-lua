@@ -111,6 +111,59 @@ local function is_fabric_transfer_topic(topic)
 		and topic_at(topic, 3) == 'transfer'
 end
 
+local function is_fabric_transfer_component_topic(topic)
+	return topic_len(topic) == 6
+		and topic_at(topic, 1) == 'state'
+		and topic_at(topic, 2) == 'fabric'
+		and topic_at(topic, 3) == 'link'
+		and topic_at(topic, 5) == 'component'
+		and (topic_at(topic, 6) == 'transfer' or topic_at(topic, 6) == 'transfer_manager')
+end
+
+local function transfer_payload_from_component(payload)
+	if type(payload) ~= 'table' or type(payload.snapshot) ~= 'table' then return nil end
+	local snapshot = payload.snapshot
+	local rec = type(snapshot.active) == 'table' and snapshot.active or type(snapshot.last) == 'table' and snapshot.last or nil
+	if type(rec) ~= 'table' then return nil end
+	local result = type(rec.result) == 'table' and rec.result or {}
+	local xfer_id = rec.xfer_id or result.xfer_id
+	if type(xfer_id) ~= 'string' or xfer_id == '' then return nil end
+	local meta = type(rec.meta) == 'table' and rec.meta or {}
+	return {
+		kind = 'fabric.transfer',
+		link_id = payload.link_id,
+		link_generation = payload.link_generation,
+		xfer_id = xfer_id,
+		request_id = rec.request_id or result.request_id,
+		direction = rec.direction,
+		state = rec.status,
+		status = rec.status,
+		target = rec.target or result.target,
+		size = result.size or rec.size,
+		sent_bytes = result.sent_bytes,
+		received_bytes = result.received_bytes,
+		digest_alg = result.digest_alg or rec.digest_alg,
+		digest = result.digest or rec.digest,
+		retransmits = result.retransmits,
+		chunk_retries = result.chunk_retries,
+		chunks_sent = result.chunks_sent,
+		max_frame_queue_ms = result.max_frame_queue_ms,
+		max_need_to_chunk_ms = result.max_need_to_chunk_ms,
+		max_source_read_ms = result.max_source_read_ms,
+		max_send_ms = result.max_send_ms,
+		progress = type(rec.progress) == 'table' and copy_value(rec.progress) or nil,
+		error = rec.primary,
+		correlation = {
+			job_id = result.job_id or meta.job_id,
+			component = result.component or meta.component,
+			image_id = result.image_id or meta.image_id,
+			xfer_id = xfer_id,
+			request_id = rec.request_id or result.request_id,
+		},
+		ts = payload.ts,
+	}
+end
+
 local function is_terminal_job_state(state)
 	return state == 'succeeded'
 		or state == 'failed'
@@ -207,8 +260,19 @@ function M.update_status(snapshot)
 	local jobs = {}
 	local timelines = {}
 	local transfers = {}
+	local transfers_by_xfer = {}
 	local active_job = nil
 	local active_transfer = nil
+
+	local function add_transfer(raw)
+		if type(raw) ~= 'table' then return end
+		local transfer = augment_transfer(raw)
+		local key = transfer.xfer_id or transfer.request_id or tostring(#transfers + 1)
+		local prev = transfers_by_xfer[key]
+		if prev == nil or newest_transfer_first(transfer, prev) then
+			transfers_by_xfer[key] = transfer
+		end
+	end
 
 	for _, msg in pairs(items) do
 		local topic = msg and msg.topic or nil
@@ -225,17 +289,24 @@ function M.update_status(snapshot)
 			elseif is_update_timeline_topic(topic) then
 				timelines[topic_at(topic, 4)] = copy_value(payload)
 			elseif is_fabric_transfer_topic(topic) then
-				local transfer = augment_transfer(payload)
-				transfers[#transfers + 1] = transfer
-				if transfer_is_active(transfer) then
-					if active_transfer == nil or newest_transfer_first(transfer, active_transfer) then active_transfer = transfer end
-				end
+				add_transfer(payload)
+			elseif is_fabric_transfer_component_topic(topic) then
+				add_transfer(transfer_payload_from_component(payload))
 			end
 		end
 	end
 
+	for _, transfer in pairs(transfers_by_xfer) do
+		transfers[#transfers + 1] = transfer
+	end
+
 	table.sort(jobs, newest_job_first)
 	table.sort(transfers, newest_transfer_first)
+	for _, transfer in ipairs(transfers) do
+		if transfer_is_active(transfer) then
+			if active_transfer == nil or newest_transfer_first(transfer, active_transfer) then active_transfer = transfer end
+		end
+	end
 
 	local transfers_by_job = {}
 	for _, transfer in ipairs(transfers) do

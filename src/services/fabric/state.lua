@@ -136,6 +136,13 @@ local function transfer_corr_from_result(result)
 	}
 end
 
+local function is_transfer_component(name)
+	-- Historical code used component name "transfer"; current links publish the
+	-- manager snapshot under the component name "transfer_manager".  Treat both
+	-- as the transfer manager for retained transfer topics and monitor events.
+	return name == 'transfer' or name == 'transfer_manager'
+end
+
 local function transfer_payload_from_snapshot(link_id, link_generation, snapshot)
 	if type(snapshot) ~= 'table' then return nil end
 	local rec = type(snapshot.active) == 'table' and snapshot.active or type(snapshot.last) == 'table' and snapshot.last or nil
@@ -179,7 +186,116 @@ local function transfer_payload_from_snapshot(link_id, link_generation, snapshot
 	}
 end
 
-local function handle_event(conn, ev)
+local function transfer_bytes(progress, payload)
+	progress = type(progress) == 'table' and progress or {}
+	payload = type(payload) == 'table' and payload or {}
+	return payload.sent_bytes
+		or payload.received_bytes
+		or progress.sent_bytes
+		or progress.received_bytes
+		or progress.last_tx_next
+		or progress.requested_next
+		or progress.pending_next
+		or progress.last_rx_next
+end
+
+local function field(v)
+	if v == nil then return '-' end
+	return tostring(v)
+end
+
+local function pct(bytes, total)
+	if type(bytes) ~= 'number' or type(total) ~= 'number' or total <= 0 then return nil end
+	return math.floor((bytes * 10000 / total) + 0.5) / 100
+end
+
+local function compact_transfer_obs_payload(payload)
+	if type(payload) ~= 'table' then return nil end
+	local progress = type(payload.progress) == 'table' and payload.progress or {}
+	local bytes = transfer_bytes(progress, payload)
+	local total = payload.size or progress.size or progress.total_bytes
+	local rx = field(progress.last_rx_type) .. ':' .. field(progress.last_rx_next)
+	local tx = field(progress.last_tx_type) .. ':' .. field(progress.last_tx_offset) .. '->' .. field(progress.last_tx_next)
+	local out = {
+		kind = 'fabric.transfer_progress',
+		xfer_id = payload.xfer_id,
+		request_id = payload.request_id,
+		link_id = payload.link_id,
+		link_generation = payload.link_generation,
+		target = payload.target,
+		phase = progress.phase or payload.status or payload.state,
+		state = payload.state,
+		status = payload.status,
+		event = progress.event,
+		bytes_transferred = bytes,
+		total_bytes = total,
+		percent = pct(bytes, total),
+		last_rx_type = progress.last_rx_type,
+		last_rx_next = progress.last_rx_next,
+		last_tx_type = progress.last_tx_type,
+		last_tx_offset = progress.last_tx_offset,
+		last_tx_next = progress.last_tx_next,
+		chunk_len = progress.chunk_len,
+		chunks_sent = progress.chunks_sent or payload.chunks_sent,
+		retransmits = progress.retransmits or payload.retransmits,
+		retransmit = progress.retransmit,
+		frame_queue_ms = progress.frame_queue_ms,
+		need_to_chunk_ms = progress.need_to_chunk_ms,
+		source_read_ms = progress.source_read_ms,
+		send_ms = progress.send_ms,
+		max_frame_queue_ms = payload.max_frame_queue_ms or progress.max_frame_queue_ms,
+		max_need_to_chunk_ms = payload.max_need_to_chunk_ms or progress.max_need_to_chunk_ms,
+		max_source_read_ms = payload.max_source_read_ms or progress.max_source_read_ms,
+		max_send_ms = payload.max_send_ms or progress.max_send_ms,
+		error = payload.error or progress.err,
+		job_id = type(payload.correlation) == 'table' and payload.correlation.job_id or nil,
+		component = type(payload.correlation) == 'table' and payload.correlation.component or nil,
+		image_id = type(payload.correlation) == 'table' and payload.correlation.image_id or nil,
+		ts = fibers.now(),
+	}
+	out.summary = string.format(
+		'xfer=%s phase=%s bytes=%s/%s rx=%s tx=%s need_to_chunk_ms=%s frame_queue_ms=%s source_read_ms=%s send_ms=%s',
+		field(out.xfer_id), field(out.phase), field(bytes), field(total), rx, tx,
+		field(out.need_to_chunk_ms), field(out.frame_queue_ms), field(out.source_read_ms), field(out.send_ms)
+	)
+	return out
+end
+
+local function transfer_obs_key(payload)
+	if type(payload) ~= 'table' then return nil end
+	local progress = type(payload.progress) == 'table' and payload.progress or {}
+	return table.concat({
+		field(payload.xfer_id),
+		field(payload.state or payload.status),
+		field(progress.event),
+		field(transfer_bytes(progress, payload)),
+		field(progress.last_rx_type),
+		field(progress.last_rx_next),
+		field(progress.last_tx_type),
+		field(progress.last_tx_offset),
+		field(progress.last_tx_next),
+		field(progress.chunks_sent or payload.chunks_sent),
+		field(progress.retransmits or payload.retransmits),
+		field(progress.retransmit),
+		field(payload.error or progress.err),
+	}, '|')
+end
+
+local function publish_transfer_obs(conn, obs_state, payload)
+	if conn == nil then return true, nil end
+	local compact = compact_transfer_obs_payload(payload)
+	if compact == nil or type(compact.xfer_id) ~= 'string' or compact.xfer_id == '' then return true, nil end
+	local key = transfer_obs_key(payload)
+	obs_state.transfer_keys = obs_state.transfer_keys or {}
+	if obs_state.transfer_keys[compact.xfer_id] == key then return true, nil end
+	obs_state.transfer_keys[compact.xfer_id] = key
+	conn:publish({ 'obs', 'event', 'fabric', 'transfer_progress' }, compact)
+	conn:publish({ 'obs', 'v1', 'fabric', 'event', 'transfer_progress' }, compact)
+	return true, nil
+end
+
+local function handle_event(conn, ev, obs_state)
+	obs_state = obs_state or {}
 	if ev.kind == 'link_snapshot' then
 		return retain(
 			conn,
@@ -201,10 +317,12 @@ local function handle_event(conn, ev)
 			})
 		)
 		if ok ~= true then return ok, err end
-		if ev.component == 'transfer' then
+		if is_transfer_component(ev.component) then
 			local payload = transfer_payload_from_snapshot(ev.link_id, ev.link_generation, ev.snapshot)
 			if payload ~= nil then
-				return retain(conn, M.transfer_topic(payload.xfer_id), payload)
+				local rok, rerr = retain(conn, M.transfer_topic(payload.xfer_id), payload)
+				if rok ~= true then return rok, rerr end
+				return publish_transfer_obs(conn, obs_state, payload)
 			end
 		end
 		return true, nil
@@ -240,6 +358,7 @@ function M.run_projector(scope, params)
 	local rx = require_rx(params.state_rx, 'fabric.state: state_rx', 2)
 	local conn = params.conn
 	local count = 0
+	local obs_state = { transfer_keys = {} }
 
 	while true do
 		local ev = fibers.perform(rx:recv_op())
@@ -247,7 +366,7 @@ function M.run_projector(scope, params)
 			return { role = 'state_projector', published = count, reason = rx.why and rx:why() or 'closed' }
 		end
 
-		local ok, err = handle_event(conn, ev)
+		local ok, err = handle_event(conn, ev, obs_state)
 		if ok ~= true then
 			error(err or 'fabric state projection failed', 0)
 		end
