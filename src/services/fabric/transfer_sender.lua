@@ -64,6 +64,21 @@ local function construct(label, fn, ...)
 	return frame
 end
 
+local function elapsed_ms(start)
+	if start == nil then return nil end
+	local dt = (fibers.now() - start) * 1000
+	if dt < 0 then dt = 0 end
+	return math.floor(dt + 0.5)
+end
+
+local function observe(caps, ev)
+	if type(caps) ~= 'table' or type(caps.report_progress_now) ~= 'function' then
+		return true, nil
+	end
+	ev.at = ev.at or fibers.now()
+	return caps.report_progress_now(ev)
+end
+
 local function send(caps, lane, frame, label)
 	local fn = lane == 'bulk' and caps.send_bulk_frame_now or caps.send_control_frame_now
 	if type(fn) ~= 'function' then
@@ -104,9 +119,10 @@ local function wait_frame_op(rx, deadline)
 end
 
 local function read_chunk(source, n)
+	local started = fibers.now()
 	local chunk, err = fibers.perform(source:read_chunk_op(n))
-	if err ~= nil then return nil, err end
-	return chunk, nil
+	if err ~= nil then return nil, err, elapsed_ms(started) end
+	return chunk, nil, elapsed_ms(started)
 end
 
 local function send_commit(caps, xfer_id, size, alg, digest, timeout_s)
@@ -117,31 +133,36 @@ end
 
 local function make_next_chunk(caps, source, xfer_id, offset, size, chunk_size)
 	local want = math.min(chunk_size, size - offset)
-	local chunk, err = read_chunk(source, want)
+	local chunk, err, source_read_ms = read_chunk(source, want)
 
 	if err ~= nil then fail(caps, xfer_id, err, true) end
 	if type(chunk) ~= 'string' or #chunk == 0 then fail(caps, xfer_id, 'short_source', true) end
 	if offset + #chunk > size then fail(caps, xfer_id, 'source_overrun', true) end
 
+	local chunk_digest = protocol.chunk_digest(chunk)
 	local frame = construct(
 		'xfer_chunk',
 		protocol.xfer_chunk,
 		xfer_id,
 		offset,
 		chunk,
-		protocol.chunk_digest(chunk)
+		chunk_digest
 	)
 
 	return {
 		offset = offset,
 		next = offset + #chunk,
+		len = #chunk,
+		digest = chunk_digest,
+		source_read_ms = source_read_ms,
 		frame = frame,
 	}
 end
 
 local function send_chunk(caps, pending)
+	local started = fibers.now()
 	send(caps, 'bulk', pending.frame, 'transfer_chunk_send_failed')
-	return true
+	return true, elapsed_ms(started)
 end
 
 function M.run(scope, req, caps)
@@ -158,11 +179,45 @@ function M.run(scope, req, caps)
 	local xfer_id, target, size, alg, digest = require_request(req)
 	local timeout_s = positive(req.timeout_s or caps.timeout_s, DEFAULT_TIMEOUT, 'timeout_s')
 	local chunk_size = positive(req.chunk_size or caps.chunk_size, DEFAULT_CHUNK_SIZE, 'chunk_size', true)
+	local chunks_sent = 0
+	local retransmits = 0
+	local max_frame_queue_ms = 0
+	local max_need_to_chunk_ms = 0
+	local max_source_read_ms = 0
+	local max_send_ms = 0
+
+	local function note_max(name, value)
+		if type(value) ~= 'number' then return end
+		if name == 'frame_queue' and value > max_frame_queue_ms then max_frame_queue_ms = value end
+		if name == 'need_to_chunk' and value > max_need_to_chunk_ms then max_need_to_chunk_ms = value end
+		if name == 'source_read' and value > max_source_read_ms then max_source_read_ms = value end
+		if name == 'send' and value > max_send_ms then max_send_ms = value end
+	end
+
+	local function report(ev)
+		ev = ev or {}
+		ev.xfer_id = xfer_id
+		ev.target = target
+		ev.size = size
+		ev.digest_alg = alg
+		ev.digest = digest
+		ev.sent_bytes = ev.sent_bytes or 0
+		ev.chunks_sent = chunks_sent
+		ev.retransmits = retransmits or 0
+		ev.max_frame_queue_ms = max_frame_queue_ms
+		ev.max_need_to_chunk_ms = max_need_to_chunk_ms
+		ev.max_source_read_ms = max_source_read_ms
+		ev.max_send_ms = max_send_ms
+		return observe(caps, ev)
+	end
 
 	local begin = construct('xfer_begin', protocol.xfer_begin,
 		xfer_id, target, size, alg, digest, req.meta)
 
+	local begin_send_start = fibers.now()
 	send(caps, 'control', begin, 'transfer_begin_send_failed')
+	note_max('send', elapsed_ms(begin_send_start))
+	report { event = 'xfer_begin_tx', phase = 'waiting_ready', last_tx_type = 'xfer_begin' }
 
 	-- `sent` is the receiver-acknowledged offset. `pending` is the one
 	-- outstanding chunk that may be resent if the receiver asks again for the
@@ -170,21 +225,36 @@ function M.run(scope, req, caps)
 	-- resume, or sliding window in v1.
 	local sent = 0
 	local pending = nil
-	local retransmits = 0
 	local state = 'waiting_ready'
 	local deadline = fibers.now() + timeout_s
 
 	while true do
 		local which, item = fibers.perform(wait_frame_op(rx, deadline))
-		if which == 'timeout' then fail(caps, xfer_id, 'timeout', true) end
+		if which == 'timeout' then
+			report { event = 'timeout', phase = state, err = 'timeout', sent_bytes = sent, pending_offset = pending and pending.offset or nil, pending_next = pending and pending.next or nil }
+			fail(caps, xfer_id, 'timeout', true)
+		end
 		if item == nil then error('transfer_sender_frame_feed_closed', 0) end
 
 		local frame = item.frame or item
+		local frame_queue_ms = nil
+		if type(item) == 'table' and type(item.at) == 'number' then
+			frame_queue_ms = elapsed_ms(item.at)
+			note_max('frame_queue', frame_queue_ms)
+		end
 
 		if type(frame) ~= 'table' or frame.xfer_id ~= xfer_id then
 			-- Manager normally filters these.
 
 		elseif frame.type == 'xfer_abort' then
+			report {
+				event = 'xfer_abort_rx',
+				phase = state,
+				last_rx_type = 'xfer_abort',
+				err = frame.err or 'remote_abort',
+				frame_queue_ms = frame_queue_ms,
+				sent_bytes = sent,
+			}
 			fail(caps, xfer_id, frame.err or 'remote_abort', false)
 
 		elseif frame.type == 'xfer_ready' then
@@ -192,16 +262,51 @@ function M.run(scope, req, caps)
 				state = 'sending'
 				deadline = fibers.now() + timeout_s
 			end
+			report {
+				event = 'xfer_ready_rx',
+				phase = state,
+				last_rx_type = 'xfer_ready',
+				frame_queue_ms = frame_queue_ms,
+				sent_bytes = sent,
+			}
 
 		elseif frame.type == 'xfer_need' then
 			if state ~= 'sending' then fail(caps, xfer_id, 'unexpected_need', true) end
+			local need_at = fibers.now()
+			report {
+				event = 'xfer_need_rx',
+				phase = state,
+				last_rx_type = 'xfer_need',
+				last_rx_next = frame.next,
+				requested_next = frame.next,
+				pending_offset = pending and pending.offset or nil,
+				pending_next = pending and pending.next or nil,
+				frame_queue_ms = frame_queue_ms,
+				sent_bytes = sent,
+			}
 
 			if pending ~= nil then
 				if frame.next == pending.offset then
 					-- Receiver rejected or lost the last chunk before advancing.
 					-- Resend the cached frame without reading from the source again.
-					send_chunk(caps, pending)
+					local _, send_ms = send_chunk(caps, pending)
+					note_max('send', send_ms)
+					local need_to_chunk_ms = elapsed_ms(need_at)
+					note_max('need_to_chunk', need_to_chunk_ms)
 					retransmits = retransmits + 1
+					report {
+						event = 'xfer_chunk_tx',
+						phase = state,
+						last_tx_type = 'xfer_chunk',
+						last_tx_offset = pending.offset,
+						last_tx_next = pending.next,
+						chunk_len = pending.len,
+						chunk_digest = pending.digest,
+						send_ms = send_ms,
+						need_to_chunk_ms = need_to_chunk_ms,
+						retransmit = true,
+						sent_bytes = sent,
+					}
 					deadline = fibers.now() + timeout_s
 
 				elseif frame.next == pending.next then
@@ -209,9 +314,33 @@ function M.run(scope, req, caps)
 					pending = nil
 					if sent >= size then
 						state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+						report {
+							event = 'xfer_commit_tx',
+							phase = state,
+							last_tx_type = 'xfer_commit',
+							sent_bytes = sent,
+						}
 					else
 						pending = make_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
-						send_chunk(caps, pending)
+						note_max('source_read', pending.source_read_ms)
+						local _, send_ms = send_chunk(caps, pending)
+						note_max('send', send_ms)
+						chunks_sent = chunks_sent + 1
+						local need_to_chunk_ms = elapsed_ms(need_at)
+						note_max('need_to_chunk', need_to_chunk_ms)
+						report {
+							event = 'xfer_chunk_tx',
+							phase = state,
+							last_tx_type = 'xfer_chunk',
+							last_tx_offset = pending.offset,
+							last_tx_next = pending.next,
+							chunk_len = pending.len,
+							chunk_digest = pending.digest,
+							source_read_ms = pending.source_read_ms,
+							send_ms = send_ms,
+							need_to_chunk_ms = need_to_chunk_ms,
+							sent_bytes = sent,
+						}
 						deadline = fibers.now() + timeout_s
 					end
 
@@ -223,14 +352,45 @@ function M.run(scope, req, caps)
 				if frame.next ~= sent then fail(caps, xfer_id, 'unexpected_offset', true) end
 				if sent >= size then
 					state, deadline = send_commit(caps, xfer_id, size, alg, digest, timeout_s)
+					report {
+						event = 'xfer_commit_tx',
+						phase = state,
+						last_tx_type = 'xfer_commit',
+						sent_bytes = sent,
+					}
 				else
 					pending = make_next_chunk(caps, source, xfer_id, sent, size, chunk_size)
-					send_chunk(caps, pending)
+					note_max('source_read', pending.source_read_ms)
+					local _, send_ms = send_chunk(caps, pending)
+					note_max('send', send_ms)
+					chunks_sent = chunks_sent + 1
+					local need_to_chunk_ms = elapsed_ms(need_at)
+					note_max('need_to_chunk', need_to_chunk_ms)
+					report {
+						event = 'xfer_chunk_tx',
+						phase = state,
+						last_tx_type = 'xfer_chunk',
+						last_tx_offset = pending.offset,
+						last_tx_next = pending.next,
+						chunk_len = pending.len,
+						chunk_digest = pending.digest,
+						source_read_ms = pending.source_read_ms,
+						send_ms = send_ms,
+						need_to_chunk_ms = need_to_chunk_ms,
+						sent_bytes = sent,
+					}
 					deadline = fibers.now() + timeout_s
 				end
 			end
 
 		elseif frame.type == 'xfer_done' and state == 'committing' then
+			report {
+				event = 'xfer_done_rx',
+				phase = 'done',
+				last_rx_type = 'xfer_done',
+				frame_queue_ms = frame_queue_ms,
+				sent_bytes = sent,
+			}
 			return {
 				request_id = req.request_id,
 				job_id = type(req.meta) == 'table' and req.meta.job_id or nil,
@@ -243,6 +403,11 @@ function M.run(scope, req, caps)
 				sent_bytes = sent,
 				size = size,
 				retransmits = retransmits,
+				chunks_sent = chunks_sent,
+				max_frame_queue_ms = max_frame_queue_ms,
+				max_need_to_chunk_ms = max_need_to_chunk_ms,
+				max_source_read_ms = max_source_read_ms,
+				max_send_ms = max_send_ms,
 			}
 		end
 	end

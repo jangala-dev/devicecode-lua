@@ -79,6 +79,7 @@ local function copy_active(a)
 		size = a.size,
 		digest_alg = a.digest_alg,
 		digest = a.digest,
+		progress = copy(a.progress),
 	}
 
 end
@@ -111,6 +112,7 @@ local function snapshot_equal(a, b)
 		if aa.direction ~= ba.direction then return false end
 		if aa.xfer_id ~= ba.xfer_id then return false end
 		if not same_ctx(aa.session, ba.session) then return false end
+		if not stat_equal(aa.progress, ba.progress) then return false end
 	end
 
 	local al, bl = a.last, b.last
@@ -196,6 +198,14 @@ function M.claim_slot(state, rec)
 		digest = rec.digest,
 		frame_tx = rec.frame_tx,
 		lease = rec.lease,
+		progress = {
+			phase = rec.status or 'leased',
+			event = 'slot_claimed',
+			sent_bytes = 0,
+			chunks_sent = 0,
+			retransmits = 0,
+			at = fibers.now(),
+		},
 	}
 	state.stats.accepted = state.stats.accepted + 1
 
@@ -216,6 +226,7 @@ function M.release_slot(state, ev)
 		session = ctx(ev_ctx(ev)),
 		status = 'released',
 		primary = ev.primary or ev.reason,
+		progress = active and copy(active.progress) or nil,
 	}
 	state.active = nil
 	state.stats.released = state.stats.released + 1
@@ -239,6 +250,7 @@ function M.apply_attempt_done(state, ev)
 		report = ev.report,
 		result = ev.result,
 		primary = ev.primary,
+		progress = active and copy(active.progress) or nil,
 	}
 	state.active = nil
 	state.stats.completed = state.stats.completed + 1
@@ -319,6 +331,16 @@ local function attempt_caps(self, frame_rx, session)
 		chunk_size = self._chunk_size,
 		timeout_s = self._timeout_s,
 		retry_limit = self._retry_limit,
+
+		report_progress_now = function (ev)
+			ev = copy(ev or {})
+			ev.kind = 'transfer_progress'
+			ev.request_id = ev.request_id or (self._state.active and self._state.active.request_id)
+			ev.request_generation = ev.request_generation or (self._state.active and self._state.active.request_generation)
+			ev.session = ctx(c)
+			ev.at = ev.at or fibers.now()
+			return report(self, ev, 'transfer_progress_report_failed')
+		end,
 
 		send_control_frame_now = function (frame, label)
 			return outbound:send_transfer_control_frame_now(c, frame, label)
@@ -703,12 +725,30 @@ local function active_done(self, reason, session)
 			session = ctx(active.session),
 			status = 'cancelled',
 			primary = reason or 'session_dropped',
+			progress = active and copy(active.progress) or nil,
 		}
 
 		self._state.active = nil
 		self._state.stats.cancelled = self._state.stats.cancelled + 1
 	end
 
+	emit_model(self)
+end
+
+local function handle_progress(self, ev)
+	if not active_matches(self._state, ev) then
+		self._state.stats.stale = self._state.stats.stale + 1
+		emit_model(self)
+		return
+	end
+
+	local active = self._state.active
+	active.progress = active.progress or {}
+	for k, v in pairs(ev or {}) do
+		if k ~= 'kind' and k ~= 'request_id' and k ~= 'request_generation' and k ~= 'session' then
+			active.progress[k] = v
+		end
+	end
 	emit_model(self)
 end
 
@@ -860,6 +900,9 @@ local function dispatch(self, ev)
 
 	elseif ev.kind == 'transfer_frame' then
 		handle_frame(self, ev)
+
+	elseif ev.kind == 'transfer_progress' then
+		handle_progress(self, ev)
 
 	elseif ev.kind == 'transfer_attempt_done' then
 		handle_attempt_done(self, ev)
