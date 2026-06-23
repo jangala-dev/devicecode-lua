@@ -32,6 +32,9 @@ local DEFAULTS = {
 	sessions = {
 		prune_interval = 60,
 	},
+	observability = {
+		status_interval_s = 30,
+	},
 }
 
 local ROOT_KEYS = {
@@ -42,6 +45,7 @@ local ROOT_KEYS = {
 	sse = true,
 	uploads = true,
 	sessions = true,
+	observability = true,
 }
 
 local HTTP_KEYS = {
@@ -59,6 +63,7 @@ local STATIC_KEYS = { root = true, index = true, chunk_size = true }
 local SSE_KEYS = { enabled = true, queue_len = true, max_replay = true, replay = true, pattern = true }
 local UPLOAD_KEYS = { enabled = true, max_bytes = true, require_auth = true }
 local SESSION_KEYS = { prune_interval = true }
+local OBSERVABILITY_KEYS = { status_interval_s = true }
 
 local function fail(msg) return nil, msg end
 
@@ -240,6 +245,22 @@ local function normalise_sessions(raw)
 	return out, nil
 end
 
+
+local function normalise_observability(raw)
+	local err
+	raw, err = table_or_empty(raw, 'observability')
+	if not raw then return nil, err end
+	local ok
+	ok, err = allowed(raw, OBSERVABILITY_KEYS, 'observability')
+	if not ok then return nil, err end
+	local out = copy_plain(DEFAULTS.observability)
+	local v
+	v, err = positive_number_or_false_or_nil(raw.status_interval_s, 'observability.status_interval_s')
+	if err then return nil, err end
+	if v ~= nil then out.status_interval_s = v end
+	return out, nil
+end
+
 function M.normalise(raw)
 	if raw == nil then raw = {} end
 	if type(raw) ~= 'table' then return fail('ui config must be a table') end
@@ -258,6 +279,7 @@ function M.normalise(raw)
 	local sse; sse, err = normalise_sse(raw.sse); if not sse then return nil, err end
 	local uploads; uploads, err = normalise_uploads(raw.uploads); if not uploads then return nil, err end
 	local sessions; sessions, err = normalise_sessions(raw.sessions); if not sessions then return nil, err end
+	local observability; observability, err = normalise_observability(raw.observability); if not observability then return nil, err end
 
 	return {
 		schema = M.SCHEMA,
@@ -267,6 +289,7 @@ function M.normalise(raw)
 		sse = sse,
 		uploads = uploads,
 		sessions = sessions,
+		observability = observability,
 	}, nil
 end
 

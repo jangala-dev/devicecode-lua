@@ -191,6 +191,45 @@ function tests.test_cleanup_error_recording_is_explicit_and_non_throwing()
 end
 
 
+
+function tests.test_lifecycle_status_is_gated_by_semantic_change()
+	local calls = {}
+	local lifecycle = {
+		running = function (_, payload) calls[#calls + 1] = payload; return payload end,
+	}
+	local state = base_state()
+	state.lifecycle = lifecycle
+	state.config_status = 'ok'
+	state.config_generation = 1
+	state.config = { enabled = true, http = { enabled = true }, observability = { status_interval_s = 30 } }
+	state.lifecycle_obs = {}
+
+	service._test.update_lifecycle(state)
+	assert_eq(#calls, 1)
+	service._test.update_lifecycle(state)
+	assert_eq(#calls, 1, 'unchanged lifecycle status should not republish')
+
+	state.config_generation = 2
+	service._test.update_lifecycle(state)
+	assert_eq(#calls, 2, 'semantic lifecycle change should publish')
+end
+
+function tests.test_lifecycle_status_key_ignores_volatile_dependency_timestamps()
+	local a = service._test.lifecycle_status_key('running', {
+		ready = true,
+		dependencies = {
+			http = { status = 'ready', available = true, updated_at = 1.0 },
+		},
+	})
+	local b = service._test.lifecycle_status_key('running', {
+		ready = true,
+		dependencies = {
+			http = { status = 'ready', available = true, updated_at = 2.0 },
+		},
+	})
+	assert_eq(a, b)
+end
+
 function tests.test_lifecycle_not_ready_until_config_and_listener_are_ready()
 	local calls = {}
 	local lifecycle = {
