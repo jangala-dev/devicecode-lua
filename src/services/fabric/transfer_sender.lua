@@ -278,7 +278,29 @@ function M.run(scope, req, caps)
 			}
 
 		elseif frame.type == 'xfer_need' then
-			if state ~= 'sending' then fail(caps, xfer_id, 'unexpected_need', true) end
+			if state ~= 'sending' then
+				-- The receiver may have emitted a retry xfer_need in response to a
+				-- damaged frame that arrived before it accepted all bytes, but the
+				-- retry itself can arrive after we have already sent xfer_commit.
+				-- At that point the receiver has already proved progress by asking
+				-- for next=size, so the late need is stale. Do not fail an
+				-- otherwise completed transfer; continue waiting for done/abort.
+				if state == 'committing' then
+					report {
+						event = 'xfer_need_stale_ignored',
+						phase = state,
+						last_rx_type = 'xfer_need',
+						last_rx_next = frame.next,
+						requested_next = frame.next,
+						retry = frame.retry == true,
+						reason = frame.reason,
+						frame_queue_ms = frame_queue_ms,
+						sent_bytes = sent,
+					}
+				else
+					fail(caps, xfer_id, 'unexpected_need', true)
+				end
+			else
 			local need_at = fibers.now()
 			report {
 				event = 'xfer_need_rx',
@@ -286,6 +308,8 @@ function M.run(scope, req, caps)
 				last_rx_type = 'xfer_need',
 				last_rx_next = frame.next,
 				requested_next = frame.next,
+				retry = frame.retry == true,
+				reason = frame.reason,
 				pending_offset = pending and pending.offset or nil,
 				pending_next = pending and pending.next or nil,
 				frame_queue_ms = frame_queue_ms,
@@ -391,6 +415,8 @@ function M.run(scope, req, caps)
 					}
 					deadline = fibers.now() + timeout_s
 				end
+			end
+
 			end
 
 		elseif frame.type == 'xfer_done' and state == 'committing' then

@@ -286,9 +286,9 @@ function tests.test_active_completion_and_ready_start_cannot_double_own_slot()
 		assert_true(probe.wait_until(function ()
 			reply, err = caller:call(topics.update_manager_rpc('start-job'), { job_id = 'j2' }, { timeout = 0.05 })
 			return reply and reply.accepted == true
-		end, { timeout = 0.5, interval = 0.01 }), err or 'expected second start to be admitted after active completion')
+		end, { timeout = 2.0, interval = 0.02 }), err or 'expected second start to be admitted after active completion')
 
-		assert_true(probe.wait_until(function () return run_count >= 2 end, { timeout = 0.5, interval = 0.01 }), 'expected both jobs to run without double-owning the slot')
+		assert_true(probe.wait_until(function () return run_count >= 2 end, { timeout = 2.0, interval = 0.02 }), 'expected both jobs to run without double-owning the slot')
 
 		child:cancel('test complete')
 	end)

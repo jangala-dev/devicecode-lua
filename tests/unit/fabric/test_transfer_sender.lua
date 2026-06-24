@@ -387,4 +387,30 @@ function tests.test_sender_does_not_send_first_chunk_implicitly_after_ready()
 	assert_match(out.value, 'timeout')
 end
 
+
+function tests.test_sender_ignores_late_retry_need_after_commit()
+	local req = make_req { data = 'abcdef', size = 6, xfer_id = 'xfer-late-need' }
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-late-need')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-late-need', 0)))
+		recv_with_timeout(io.bulk_rx, 'chunk1')
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-late-need', 3)))
+		recv_with_timeout(io.bulk_rx, 'chunk2')
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-late-need', 6)))
+		local commit = recv_with_timeout(io.control_rx, 'commit')
+		assert_eq(commit.frame.type, 'xfer_commit')
+
+		-- A retry xfer_need emitted for earlier active-transfer corruption may
+		-- arrive after the receiver has already accepted all bytes and after the
+		-- sender has committed. It is stale and must not fail the attempt.
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-late-need', 0, true, 'bad_json')))
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-late-need')))
+	end)
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.sent_bytes, 6)
+end
+
 return tests

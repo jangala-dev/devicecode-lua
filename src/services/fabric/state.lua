@@ -241,6 +241,8 @@ local function compact_transfer_obs_payload(payload)
 		chunks_sent = progress.chunks_sent or payload.chunks_sent,
 		retransmits = progress.retransmits or payload.retransmits,
 		retransmit = progress.retransmit,
+		retry = progress.retry,
+		retry_reason = progress.reason,
 		frame_queue_ms = progress.frame_queue_ms,
 		need_to_chunk_ms = progress.need_to_chunk_ms,
 		source_read_ms = progress.source_read_ms,
@@ -256,9 +258,10 @@ local function compact_transfer_obs_payload(payload)
 		ts = fibers.now(),
 	}
 	out.summary = string.format(
-		'xfer=%s phase=%s bytes=%s/%s rx=%s tx=%s len=%s digest=%s frame_len=%s retransmit=%s need_to_chunk_ms=%s frame_queue_ms=%s source_read_ms=%s send_ms=%s',
+		'xfer=%s phase=%s bytes=%s/%s rx=%s tx=%s len=%s digest=%s frame_len=%s retransmit=%s retry=%s reason=%s need_to_chunk_ms=%s frame_queue_ms=%s source_read_ms=%s send_ms=%s',
 		field(out.xfer_id), field(out.phase), field(bytes), field(total), rx, tx,
 		field(out.chunk_len), field(out.chunk_digest), field(out.chunk_frame_len), field(out.retransmit),
+		field(out.retry), field(out.retry_reason),
 		field(out.need_to_chunk_ms), field(out.frame_queue_ms), field(out.source_read_ms), field(out.send_ms)
 	)
 	return out
@@ -283,6 +286,8 @@ local function transfer_obs_key(payload)
 		field(progress.chunks_sent or payload.chunks_sent),
 		field(progress.retransmits or payload.retransmits),
 		field(progress.retransmit),
+		field(progress.retry),
+		field(progress.reason),
 		field(payload.error or progress.err),
 	}, '|')
 end

@@ -15,7 +15,7 @@ local xxhash32 = require 'shared.hash.xxhash32'
 local M = {}
 
 local DEFAULT_TIMEOUT = 1.0
-local DEFAULT_RETRY_LIMIT = 1
+local DEFAULT_RETRY_LIMIT = 12
 
 local function positive(v, fallback, name)
 	v = v or fallback
@@ -47,6 +47,10 @@ local function send_control(caps, frame, label)
 	local ok, err = fn(frame, label)
 	if ok ~= true then error((label or 'transfer_receive_send_failed') .. ': ' .. tostring(err), 0) end
 	return true
+end
+
+local function need_frame(xfer_id, next, retry, reason)
+	return construct('xfer_need', protocol.xfer_need, xfer_id, next, retry == true or nil, reason)
 end
 
 local function try_abort(caps, xfer_id, reason)
@@ -184,7 +188,7 @@ function M.run(scope, req, caps)
 	end)
 
 	send_control(caps, construct('xfer_ready', protocol.xfer_ready, xfer_id), 'transfer_receive_ready_send_failed')
-	send_control(caps, construct('xfer_need', protocol.xfer_need, xfer_id, 0), 'transfer_receive_need_send_failed')
+	send_control(caps, need_frame(xfer_id, 0, false), 'transfer_receive_need_send_failed')
 
 	local received = 0
 	local digest_state = xxhash32.new(0)
@@ -192,83 +196,101 @@ function M.run(scope, req, caps)
 	local retries_at_offset = 0
 	local chunk_retries = 0
 
+	local function retry_current(reason, label)
+		if retries_at_offset >= retry_limit then return false end
+		retries_at_offset = retries_at_offset + 1
+		chunk_retries = chunk_retries + 1
+		deadline = fibers.now() + timeout_s
+		send_control(caps, need_frame(xfer_id, received, true, reason), label or 'transfer_receive_retry_need_send_failed')
+		return true
+	end
+
 	while true do
 		local which, item = fibers.perform(wait_frame_op(rx, deadline))
-		if which == 'timeout' then fail(caps, xfer_id, sink, 'timeout', true) end
-		if item == nil then fail(caps, xfer_id, sink, 'transfer_receive_frame_feed_closed', false) end
-		local frame = item.frame or item
+		if which == 'timeout' then
+			if not retry_current('idle', 'transfer_receive_idle_need_send_failed') then
+				fail(caps, xfer_id, sink, 'timeout', true)
+			end
 
-		if type(frame) ~= 'table' or frame.xfer_id ~= xfer_id then
-			-- Manager normally filters these.
+		elseif item == nil then
+			fail(caps, xfer_id, sink, 'transfer_receive_frame_feed_closed', false)
 
-		elseif frame.type == 'xfer_abort' then
-			fail(caps, xfer_id, sink, frame.err or 'remote_abort', false)
+		else
+			local frame = item.frame or item
 
-		elseif frame.type == 'xfer_chunk' then
-			if frame.offset ~= received then fail(caps, xfer_id, sink, 'unexpected_offset', true) end
-			local chunk = frame.data
-			if type(chunk) ~= 'string' then fail(caps, xfer_id, sink, 'invalid_chunk_data', true) end
-			if received + #chunk > size then fail(caps, xfer_id, sink, 'size_overrun', true) end
-			if not protocol.verify_chunk_digest(chunk, frame.chunk_digest) then
-				if retries_at_offset < retry_limit then
-					retries_at_offset = retries_at_offset + 1
-					chunk_retries = chunk_retries + 1
-					deadline = fibers.now() + timeout_s
-					send_control(caps, construct('xfer_need', protocol.xfer_need, xfer_id, received), 'transfer_receive_retry_need_send_failed')
+			if type(frame) ~= 'table' or frame.xfer_id ~= xfer_id then
+				-- Manager normally filters these.
+
+			elseif frame.type == 'xfer_abort' then
+				fail(caps, xfer_id, sink, frame.err or 'remote_abort', false)
+
+			elseif frame.type == 'xfer_chunk' then
+				if frame.offset ~= received then
+					local reason = frame.offset < received and 'duplicate_or_stale_offset' or 'future_offset'
+					if not retry_current(reason, 'transfer_receive_offset_need_send_failed') then
+						fail(caps, xfer_id, sink, 'unexpected_offset', true)
+					end
 				else
-					fail(caps, xfer_id, sink, 'chunk_digest_mismatch', true)
+					local chunk = frame.data
+					if type(chunk) ~= 'string' then fail(caps, xfer_id, sink, 'invalid_chunk_data', true) end
+					if received + #chunk > size then fail(caps, xfer_id, sink, 'size_overrun', true) end
+					if not protocol.verify_chunk_digest(chunk, frame.chunk_digest) then
+						if not retry_current('chunk_digest_mismatch', 'transfer_receive_retry_need_send_failed') then
+							fail(caps, xfer_id, sink, 'chunk_digest_mismatch', true)
+						end
+					else
+						local ok, werr = append_chunk(sink, chunk)
+						if ok ~= true then fail(caps, xfer_id, sink, werr or 'write_failed', true) end
+						xxhash32.update(digest_state, chunk)
+						received = received + #chunk
+						retries_at_offset = 0
+						deadline = fibers.now() + timeout_s
+						-- Acknowledge every accepted chunk, including the final one.  The
+						-- sender waits for xfer_need next == size before sending xfer_commit.
+						-- This keeps commit ordered after the receiver has actually processed
+						-- the last bulk frame, even when the writer uses separate control and
+						-- bulk lanes.
+						send_control(caps, need_frame(xfer_id, received, false), 'transfer_receive_need_send_failed')
+					end
 				end
-			else
-				local ok, werr = append_chunk(sink, chunk)
-				if ok ~= true then fail(caps, xfer_id, sink, werr or 'write_failed', true) end
-				xxhash32.update(digest_state, chunk)
-				received = received + #chunk
-				retries_at_offset = 0
-				deadline = fibers.now() + timeout_s
-				-- Acknowledge every accepted chunk, including the final one.  The
-				-- sender waits for xfer_need next == size before sending xfer_commit.
-				-- This keeps commit ordered after the receiver has actually processed
-				-- the last bulk frame, even when the writer uses separate control and
-				-- bulk lanes.
-				send_control(caps, construct('xfer_need', protocol.xfer_need, xfer_id, received), 'transfer_receive_need_send_failed')
-			end
 
-		elseif frame.type == 'xfer_commit' then
-			if frame.size ~= size or frame.size ~= received then
-				fail(caps, xfer_id, sink, 'short_transfer', true)
+			elseif frame.type == 'xfer_commit' then
+				if frame.size ~= size or frame.size ~= received then
+					fail(caps, xfer_id, sink, 'short_transfer', true)
+				end
+				if frame.digest_alg ~= protocol.DIGEST_ALG then
+					fail(caps, xfer_id, sink, 'unsupported_digest_alg', true)
+				end
+				local got = xxhash32.digest_hex_state(digest_state)
+				if frame.digest ~= begin.digest or frame.digest ~= got then
+					fail(caps, xfer_id, sink, 'digest_mismatch', true)
+				end
+				local commit_result, cerr = commit_sink(sink, {
+					xfer_id = xfer_id,
+					target = target_id,
+					size = size,
+					digest_alg = frame.digest_alg,
+					digest = frame.digest,
+					meta = protocol.copy_json_value(begin.meta),
+					session = req.session,
+				})
+				if commit_result == nil then fail(caps, xfer_id, sink, cerr or 'commit_failed', true) end
+				finished = true
+				send_control(caps, construct('xfer_done', protocol.xfer_done, xfer_id), 'transfer_receive_done_send_failed')
+				return {
+					job_id = type(begin.meta) == 'table' and begin.meta.job_id or nil,
+					component = type(begin.meta) == 'table' and begin.meta.component or nil,
+					image_id = type(begin.meta) == 'table' and begin.meta.image_id or nil,
+					target = target_id,
+					xfer_id = xfer_id,
+					digest_alg = frame.digest_alg,
+					digest = frame.digest,
+					received_bytes = received,
+					size = size,
+					commit_result = commit_result,
+					chunk_retries = chunk_retries,
+				}
 			end
-			if frame.digest_alg ~= protocol.DIGEST_ALG then
-				fail(caps, xfer_id, sink, 'unsupported_digest_alg', true)
-			end
-			local got = xxhash32.digest_hex_state(digest_state)
-			if frame.digest ~= begin.digest or frame.digest ~= got then
-				fail(caps, xfer_id, sink, 'digest_mismatch', true)
-			end
-			local commit_result, cerr = commit_sink(sink, {
-				xfer_id = xfer_id,
-				target = target_id,
-				size = size,
-				digest_alg = frame.digest_alg,
-				digest = frame.digest,
-				meta = protocol.copy_json_value(begin.meta),
-				session = req.session,
-			})
-			if commit_result == nil then fail(caps, xfer_id, sink, cerr or 'commit_failed', true) end
-			finished = true
-			send_control(caps, construct('xfer_done', protocol.xfer_done, xfer_id), 'transfer_receive_done_send_failed')
-			return {
-				job_id = type(begin.meta) == 'table' and begin.meta.job_id or nil,
-				component = type(begin.meta) == 'table' and begin.meta.component or nil,
-				image_id = type(begin.meta) == 'table' and begin.meta.image_id or nil,
-				target = target_id,
-				xfer_id = xfer_id,
-				digest_alg = frame.digest_alg,
-				digest = frame.digest,
-				received_bytes = received,
-				size = size,
-				commit_result = commit_result,
-				chunk_retries = chunk_retries,
-			}
 		end
 	end
 end

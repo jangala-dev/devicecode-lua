@@ -205,6 +205,8 @@ local function augment_transfer(payload)
 		type = progress.last_rx_type,
 		next = progress.last_rx_next,
 		at = progress.last_rx_at,
+		retry = progress.retry,
+		reason = progress.reason,
 	}
 	out.last_tx = {
 		type = progress.last_tx_type,

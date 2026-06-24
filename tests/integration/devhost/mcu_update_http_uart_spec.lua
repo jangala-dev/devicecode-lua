@@ -57,7 +57,6 @@ local xxhash32        = require 'shared.hash.xxhash32'
 local T = {}
 local unpack = rawget(table, 'unpack') or _G.unpack
 
-local UART_BYTES_PER_SEC = 11520
 local DEFAULT_CI_MCU_BLOB_BYTES = 6 * 1024
 local LARGE_MCU_BLOB_ENV = 'MCU_HTTP_UART_BLOB_BYTES'
 
@@ -86,12 +85,34 @@ local function env_size_bytes(name, default_value)
     return n
 end
 
+
+local function env_number(name, default_value)
+    local raw = os.getenv(name)
+    if raw == nil or raw == '' then return default_value end
+    raw = tostring(raw):match('^%s*(.-)%s*$')
+    local n = tonumber(raw)
+    if n == nil or n <= 0 then
+        error(('%s must be a positive number'):format(name), 0)
+    end
+    return n
+end
+
+local function env_bool(name, default_value)
+    local raw = os.getenv(name)
+    if raw == nil or raw == '' then return default_value end
+    raw = tostring(raw):lower():match('^%s*(.-)%s*$')
+    if raw == '1' or raw == 'true' or raw == 'yes' or raw == 'on' then return true end
+    if raw == '0' or raw == 'false' or raw == 'no' or raw == 'off' then return false end
+    error(('%s must be boolean-like'):format(name), 0)
+end
+
+local UART_BYTES_PER_SEC = env_number('MCU_HTTP_UART_BYTES_PER_SEC', env_number('MCU_HTTP_UART_BAUD', 921600) / 10)
 local REALISTIC_MCU_BLOB_BYTES = env_size_bytes(LARGE_MCU_BLOB_ENV, DEFAULT_CI_MCU_BLOB_BYTES)
 local REALISTIC_TRANSFER_TIMEOUT_S = 300.0
 local SHORT_STAGE_TIMEOUT_S = 2.0
 local REALISTIC_TEST_TIMEOUT_S = 240.0
 local MCU_PROGRESS_LOG_BYTES = 16 * 1024
-local WAIT_PROGRESS_LOG_S = 2.0
+local WAIT_PROGRESS_LOG_S = env_number('MCU_HTTP_UART_WAIT_LOG_S', 10.0)
 local UART_MAX_READ_BYTES = 128
 local UART_MAX_FRAGMENT_BYTES = 16
 local UART_LONG_PAUSE_EVERY_BYTES = 64 * 1024
@@ -101,6 +122,7 @@ local UART_MALFORMED_LINE_COUNT = 2
 local UART_MALFORMED_LINE_FIRST_AT = 1536
 local UART_MALFORMED_LINE_EVERY_BYTES = 128 * 1024
 local MCU_FLASH_WRITE_DELAY_S = 0.010
+local MCU_HTTP_UART_VERBOSE = env_bool('MCU_HTTP_UART_VERBOSE', false)
 
 local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end end
@@ -115,6 +137,7 @@ local function assert_contains(haystack, needle, msg)
 end
 
 local function log(msg)
+    if not MCU_HTTP_UART_VERBOSE then return end
     io.stderr:write('[mcu-http-uart] ' .. tostring(msg) .. '\n')
 end
 

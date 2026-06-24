@@ -399,17 +399,22 @@ local function refresh_peer(self, frame, at)
 	self._last_peer_at = at or fibers.now()
 end
 
-local function reset_to_hello(self, reason, now)
+local function reset_to_hello(self, reason, now, opts)
 	now = now or fibers.now()
+	opts = opts or {}
+	local rotate_local_sid = opts.rotate_local_sid == true
 	local cur = session_snapshot(self)
 	publish_session_drop(self, cur, reason, now)
 	self._outbound:drop(reason or 'session_dropped')
 	update_session(self, function (s)
 		s.phase = 'hello'
-		-- Keep the local SID stable for this session component lifetime.
-		-- Peer loss or bad-frame resync returns the same local endpoint to
-		-- hello; a new local SID is created only by starting a new session
-		-- component/generation.
+		-- Liveness timeout starts a fresh local session generation.  A
+		-- bad-frame-limit reset only drops the peer session and keeps the
+		-- configured local SID stable, preserving existing session tests and
+		-- avoiding unnecessary local identity churn.
+		if rotate_local_sid then
+			s.local_sid = tostring(uuid.new())
+		end
 		s.peer_sid = nil
 		s.peer_node = nil
 		s.peer_identity_claim = nil
@@ -582,7 +587,7 @@ local function handle_wire_error(self, ev)
 
 	if count >= self._bad_frame_limit then
 		self._bad_frame_times = {}
-		reset_to_hello(self, 'bad_frame_limit', at)
+		reset_to_hello(self, 'bad_frame_limit', at, { rotate_local_sid = false })
 	end
 end
 
@@ -647,7 +652,7 @@ local function handle_timer(self, ev)
 		return
 	end
 	if now >= ((self._last_peer_at or now) + self._liveness_timeout) then
-		reset_to_hello(self, 'liveness_timeout', now)
+		reset_to_hello(self, 'liveness_timeout', now, { rotate_local_sid = true })
 		return
 	end
 	if (due == nil or due == 'ping') and now >= (self._next_ping_at or math.huge) then
