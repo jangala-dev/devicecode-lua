@@ -146,6 +146,7 @@ function M.new_state(opts)
 			failed = 0,
 			cancelled = 0,
 			released = 0,
+			deferred_no_session = 0,
 		},
 	}
 end
@@ -645,15 +646,38 @@ local function fail_slot(req, reason)
 	return req:fail(reason)
 end
 
-local function handle_slot_request(self, req)
+local function defer_slot_request(self, req)
+	self._pending_slots = self._pending_slots or {}
+	self._pending_slots[#self._pending_slots + 1] = req
+	self._state.stats.deferred_no_session = (self._state.stats.deferred_no_session or 0) + 1
+	emit_model(self)
+	return true, nil
+end
+
+local function shift_pending_slot(self)
+	local pending = self._pending_slots
+	if type(pending) ~= 'table' or #pending == 0 then return nil end
+	local req = pending[1]
+	table.remove(pending, 1)
+	return req
+end
+
+local drain_pending_slots
+
+local function handle_slot_request_now(self, req, opts)
+	opts = opts or {}
 	local id = req_id(req)
 	if type(id) ~= 'string' or id == '' then
 		error('transfer slot request requires request_id', 2)
 	end
 
 	if self._session == nil then
-		fail_slot(req, 'no_session')
-		emit_model(self)
+		if opts.defer_on_no_session ~= false then
+			defer_slot_request(self, req)
+		else
+			fail_slot(req, 'no_session')
+			emit_model(self)
+		end
 		return
 	end
 
@@ -687,6 +711,18 @@ local function handle_slot_request(self, req)
 	if replied ~= true then lease:release(err or 'slot admission reply failed') end
 
 	emit_model(self)
+end
+
+local function handle_slot_request(self, req)
+	return handle_slot_request_now(self, req, { defer_on_no_session = true })
+end
+
+drain_pending_slots = function(self)
+	if self._session == nil or self._state.active ~= nil then return false end
+	local req = shift_pending_slot(self)
+	if req == nil then return false end
+	handle_slot_request_now(self, req, { defer_on_no_session = true })
+	return true
 end
 
 local function active_done(self, reason, session)
@@ -756,12 +792,14 @@ local function handle_attempt_done(self, ev)
 	local accepted, _, active = M.apply_attempt_done(self._state, ev)
 	if accepted then close_feed(active, 'transfer attempt completed') end
 	emit_model(self)
+	drain_pending_slots(self)
 end
 
 local function handle_slot_released(self, ev)
 	local accepted, _, active = M.release_slot(self._state, ev)
 	if accepted then close_feed(active, ev.reason or 'transfer slot released') end
 	emit_model(self)
+	drain_pending_slots(self)
 end
 
 local function handle_frame(self, ev)
@@ -802,6 +840,7 @@ local function handle_peer_session(self, ev)
 
 	self._session = ctx(c)
 	emit_model(self)
+	drain_pending_slots(self)
 end
 
 local function handle_peer_session_dropped(self, ev)
