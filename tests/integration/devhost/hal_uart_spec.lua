@@ -2,6 +2,7 @@ local fibers    = require 'fibers'
 local channel   = require 'fibers.channel'
 local sleep     = require 'fibers.sleep'
 local op        = require 'fibers.op'
+local exec      = require 'fibers.io.exec'
 
 local hal_types = require 'services.hal.types.core'
 local cap_args  = require 'services.hal.types.capability_args'
@@ -88,6 +89,19 @@ local function open_uart_session(cap)
 	assert(type(reply.reason) == 'table')
 	assert(type(reply.reason.session) == 'table')
 	return reply.reason.session, reply.reason
+end
+
+local function stty_output(path)
+	local cmd = exec.command('stty', '-F', tostring(path), '-a')
+	local out, status, code, _sig, err = perform(cmd:combined_output_op())
+	assert(status == 'exited' and code == 0, tostring(err or out))
+	return tostring(out or '')
+end
+
+local function assert_stty_contains(raw, token)
+	if not raw:find(token, 1, true) then
+		error(('expected stty output to contain %q, got:\n%s'):format(token, raw), 0)
+	end
 end
 
 local function start_manager(scope)
@@ -312,6 +326,61 @@ function T.pending_read_loses_to_timeout_cleanly()
 
 		local ok_c, cerr = perform(session:close_op())
 		assert(ok_c ~= nil, tostring(cerr))
+	end, { timeout = 3.0 })
+end
+
+
+function T.devhost_uart_start_applies_strict_stty_settings()
+	runfibers.run(function(scope)
+		local uart_mgr, dev_ev_ch = start_manager(scope)
+		local port = pty.open(scope)
+
+		local ok_cfg, err_cfg = perform(uart_mgr.apply_config_op({
+			serial_ports = {
+				{
+					id   = 'uart0',
+					path = port.slave_name,
+					baud = 115200,
+					mode = '8N1',
+				},
+			},
+		}))
+		assert(ok_cfg == true, tostring(err_cfg))
+		wait_device_event(dev_ev_ch, 'added', 'uart', 'uart0', 1.5)
+
+		local raw = stty_output(port.slave_name)
+		assert_stty_contains(raw, 'speed 115200')
+		for _, token in ipairs({
+			'cs8', 'cread', 'clocal',
+			'-cstopb', '-parenb', '-crtscts',
+			'-ixon', '-ixoff', '-icrnl',
+			'-icanon', '-echo', '-isig', '-iexten',
+			'-opost', '-onlcr',
+		}) do
+			assert_stty_contains(raw, token)
+		end
+		assert(raw:find('min%s*=%s*1'), 'expected VMIN/min = 1 in stty output:\n' .. raw)
+		assert(raw:find('time%s*=%s*0'), 'expected VTIME/time = 0 in stty output:\n' .. raw)
+	end, { timeout = 4.0 })
+end
+
+function T.devhost_uart_config_fails_when_stty_fails()
+	runfibers.run(function(scope)
+		local uart_mgr, _dev_ev_ch = start_manager(scope)
+
+		local ok_cfg, err_cfg = perform(uart_mgr.apply_config_op({
+			serial_ports = {
+				{
+					id   = 'uart0',
+					path = '/dev/devicecode-test-missing-uart',
+					baud = 115200,
+					mode = '8N1',
+				},
+			},
+		}))
+
+		assert(ok_cfg == false, 'expected missing UART path to fail stty configuration')
+		assert(tostring(err_cfg):find('stty', 1, true), 'expected stty error, got: ' .. tostring(err_cfg))
 	end, { timeout = 3.0 })
 end
 

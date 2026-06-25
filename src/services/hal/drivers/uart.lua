@@ -5,6 +5,7 @@ local sleep     = require 'fibers.sleep'
 local op        = require 'fibers.op'
 local channel   = require 'fibers.channel'
 local file      = require 'fibers.io.file'
+local exec      = require 'fibers.io.exec'
 local uuid      = require 'uuid'
 
 local hal_types = require 'services.hal.types.core'
@@ -37,6 +38,8 @@ UARTSession.__index = UARTSession
 ---@field path string
 ---@field default_baud integer|nil
 ---@field default_mode string|nil
+---@field termios_ok boolean
+---@field termios_error string|nil
 ---@field scope Scope|nil
 ---@field control_ch Channel
 ---@field emit_ch Channel|nil
@@ -99,6 +102,8 @@ local function status_payload(self)
         baud          = self.default_baud,
         mode          = self.default_mode,
         config_source = 'devicetree',
+        termios_ok    = self.termios_ok == true,
+        termios_error = self.termios_error,
     }
 end
 
@@ -109,6 +114,10 @@ local function meta_payload(self)
         baud          = self.default_baud,
         mode          = self.default_mode,
         config_source = 'devicetree',
+        termios = {
+            configured = self.termios_ok == true,
+            error      = self.termios_error,
+        },
     }
 end
 
@@ -291,6 +300,86 @@ function UARTSession:terminate(reason)
 end
 
 
+local function mode_stty_args(mode)
+    mode = mode or '8N1'
+    if mode == '8N1' then
+        return { 'cs8', '-cstopb', '-parenb' }
+    elseif mode == '7E1' then
+        return { 'cs7', '-cstopb', 'parenb', '-parodd' }
+    elseif mode == '8O1' then
+        return { 'cs8', '-cstopb', 'parenb', 'parodd' }
+    end
+    return nil, 'unsupported uart mode: ' .. tostring(mode)
+end
+
+local function stty_args_for(self)
+    local baud = self.default_baud or 115200
+    local mode_args, merr = mode_stty_args(self.default_mode)
+    if not mode_args then
+        return nil, merr
+    end
+
+    local args = {
+        'stty', '-F', tostring(self.path), tostring(baud),
+    }
+    for _, a in ipairs(mode_args) do args[#args + 1] = a end
+    for _, a in ipairs({
+        '-crtscts',
+        '-ixon', '-ixoff',
+        '-icrnl',
+        '-icanon', '-echo', '-isig', '-iexten',
+        '-opost', '-onlcr',
+        'min', '1', 'time', '0',
+        'clocal', 'cread',
+    }) do
+        args[#args + 1] = a
+    end
+    return args, nil
+end
+
+local function configure_termios_op(self, why)
+    return fibers.run_scope_op(function ()
+        local args, aerr = stty_args_for(self)
+        if not args then
+            self.termios_ok = false
+            self.termios_error = tostring(aerr)
+            return false, self.termios_error
+        end
+
+        local cmd = exec.command(args)
+        local output, status, code, sig, err = fibers.perform(cmd:combined_output_op())
+        if status == 'exited' and code == 0 then
+            self.termios_ok = true
+            self.termios_error = nil
+            dlog(self, 'debug', {
+                what = 'uart_termios_configured',
+                why  = why,
+                path = self.path,
+                baud = self.default_baud or 115200,
+                mode = self.default_mode or '8N1',
+            })
+            return true, nil
+        end
+
+        local detail = tostring(err or output or ('status=' .. tostring(status)))
+        if status == 'exited' then
+            detail = detail .. ' (exit ' .. tostring(code) .. ')'
+        elseif status == 'signalled' then
+            detail = detail .. ' (signal ' .. tostring(sig) .. ')'
+        end
+        self.termios_ok = false
+        self.termios_error = detail
+        return false, 'uart termios stty failed for ' .. tostring(self.path) .. ': ' .. detail
+    end):wrap(function (st, rep, ok, err)
+        if st ~= 'ok' then
+            self.termios_ok = false
+            self.termios_error = tostring(err or rep)
+            return false, self.termios_error
+        end
+        return ok, err
+    end)
+end
+
 local function open_stream_op(path)
     return fibers.run_scope_op(function ()
         -- Box the currently synchronous file.open(...) impurity inside one
@@ -312,6 +401,11 @@ local release_session_gracefully_op
 
 local function open_session_op(self)
     return fibers.run_scope_op(function (scope)
+        local ok_cfg, cfg_err = fibers.perform(configure_termios_op(self, 'open'))
+        if ok_cfg ~= true then
+            return false, tostring(cfg_err)
+        end
+
         local ok, stream_or_err = fibers.perform(open_stream_op(self.path))
         if not ok then
             return false, stream_or_err
@@ -551,20 +645,25 @@ end
 function Driver:start_op(owner_scope)
     assert(owner_scope ~= nil, 'uart driver start_op: owner_scope is required')
 
-    return op.guard(function ()
+    return fibers.run_scope_op(function ()
         if self.started then
-            return op.always(false, 'already started')
+            return false, 'already started'
         end
         if not self.caps_applied then
-            return op.always(false, 'capabilities not applied')
+            return false, 'capabilities not applied'
         end
         if not self.emit_ch then
-            return op.always(false, 'missing emit channel')
+            return false, 'missing emit channel'
+        end
+
+        local ok_cfg, cfg_err = fibers.perform(configure_termios_op(self, 'start'))
+        if ok_cfg ~= true then
+            return false, tostring(cfg_err)
         end
 
         local shell_scope, serr = owner_scope:child()
         if not shell_scope then
-            return op.always(false, tostring(serr))
+            return false, tostring(serr)
         end
 
         self.scope = shell_scope
@@ -575,11 +674,16 @@ function Driver:start_op(owner_scope)
         if not ok then
             self.scope = nil
             shell_scope:cancel(tostring(err or 'uart shell spawn failed'))
-            return op.always(false, tostring(err))
+            return false, tostring(err)
         end
 
         self.started = true
-        return op.always(true, nil)
+        return true, nil
+    end):wrap(function (st, rep, ok, err)
+        if st ~= 'ok' then
+            return false, tostring(err or rep)
+        end
+        return ok, err
     end)
 end
 
@@ -661,6 +765,8 @@ function M.new(id, path, baud, mode, logger)
         control_ch      = channel.new(CONTROL_Q_LEN),
         emit_ch         = nil,
         logger          = logger,
+        termios_ok      = false,
+        termios_error   = nil,
         started         = false,
         caps_applied    = false,
         active_session  = nil,
