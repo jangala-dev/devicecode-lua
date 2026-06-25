@@ -51,6 +51,7 @@ local function base_ctx(params, phase)
 	end
 	ctx.phase = phase
 	ctx.lease = params.lease
+	ctx.deadline = params.deadline
 	return ctx
 end
 

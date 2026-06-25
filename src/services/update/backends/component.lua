@@ -4,6 +4,7 @@
 -- state/capability surface only; it has no Fabric, UART or raw-member knowledge.
 
 local fibers = require 'fibers'
+local sleep  = require 'fibers.sleep'
 local op     = require 'fibers.op'
 
 local model  = require 'services.update.model'
@@ -76,6 +77,124 @@ local function call_component_op(self, component, method, payload, opts)
 	end)
 end
 
+local function retry_budget(self, ctx, method)
+	local cfg = type(self._rpc_retry) == 'table' and self._rpc_retry or {}
+	local attempts = tonumber(cfg.attempts) or tonumber(cfg.max_attempts) or 3
+	if method == 'stage-update' then
+		attempts = tonumber(cfg.stage_attempts) or attempts
+	elseif method == 'commit-update' then
+		attempts = tonumber(cfg.commit_attempts) or attempts
+	elseif method == 'prepare-update' then
+		attempts = tonumber(cfg.prepare_attempts) or attempts
+	end
+	if attempts < 1 then attempts = 1 end
+	return math.floor(attempts)
+end
+
+local function retry_delay_s(self, attempt)
+	local cfg = type(self._rpc_retry) == 'table' and self._rpc_retry or {}
+	local base = tonumber(cfg.delay_s) or 0.20
+	local max = tonumber(cfg.max_delay_s) or 1.00
+	local n = base * (2 ^ math.max(0, attempt - 1))
+	if n > max then n = max end
+	return n
+end
+
+local function deadline_remaining(ctx)
+	local deadline = ctx and ctx.deadline
+	if type(deadline) ~= 'number' then return nil end
+	local rem = deadline - fibers.now()
+	if rem <= 0 then return 0 end
+	return rem
+end
+
+local function call_component_retry_op(self, component, method, payload, ctx, opts)
+	return fibers.run_scope_op(function ()
+		local attempts = retry_budget(self, ctx, method)
+		local last_err
+		for attempt = 1, attempts do
+			local rem = deadline_remaining(ctx)
+			if rem ~= nil and rem <= 0 then
+				return nil, (method .. '_timeout')
+			end
+
+			local reply, err
+			if rem ~= nil then
+				local which, a, b = fibers.perform(fibers.named_choice {
+					call = call_component_op(self, component, method, payload, opts),
+					timeout = sleep.sleep_op(rem),
+				})
+				if which == 'timeout' then
+					return nil, (method .. '_timeout')
+				end
+				reply, err = a, b
+			else
+				reply, err = fibers.perform(call_component_op(self, component, method, payload, opts))
+			end
+
+			if reply ~= nil then
+				return reply, nil, attempt
+			end
+			last_err = err or (method .. '_failed')
+			if attempt >= attempts then break end
+
+			local delay = retry_delay_s(self, attempt)
+			local rem2 = deadline_remaining(ctx)
+			if rem2 ~= nil then
+				if rem2 <= 0 then return nil, (method .. '_timeout') end
+				if delay > rem2 then delay = rem2 end
+			end
+			if delay > 0 then fibers.perform(sleep.sleep_op(delay)) end
+		end
+		return nil, last_err or (method .. '_failed')
+	end):wrap(function (st, report, value, err)
+		if st == 'ok' then
+			return value, err
+		end
+		return nil, value or err or report or st or (method .. '_failed')
+	end)
+end
+
+local function call_component_once_op(self, component, method, payload, ctx, opts)
+	return fibers.run_scope_op(function ()
+		local rem = deadline_remaining(ctx)
+		if rem ~= nil and rem <= 0 then return nil, method .. '_timeout' end
+		if rem ~= nil then
+			local which, a, b = fibers.perform(fibers.named_choice {
+				call = call_component_op(self, component, method, payload, opts),
+				timeout = sleep.sleep_op(rem),
+			})
+			if which == 'timeout' then return nil, method .. '_timeout' end
+			return a, b
+		end
+		return fibers.perform(call_component_op(self, component, method, payload, opts))
+	end):wrap(function (st, report, value, err)
+		if st == 'ok' then return value, err end
+		return nil, value or err or report or st or (method .. '_failed')
+	end)
+end
+
+
+local function commit_response_may_be_missing(err)
+	-- Only timeouts/closed response paths are ambiguous enough to treat as
+	-- "commit may have reached the MCU; response may have been lost".
+	-- Definite admission/routing failures such as link_not_ready, no_route or
+	-- no_session must remain ordinary failures and must not advance the job to
+	-- awaiting_return.
+	if err == nil or err == '' then return true end
+	if err == 'timeout' or err == 'commit-update_timeout' then return true end
+	if err == 'bus_call_closed' or err == 'local_call_closed' or err == 'reply_closed' then return true end
+	return false
+end
+
+local function commit_reply_ok(reply)
+	if type(reply) ~= 'table' then return nil, 'invalid_commit_reply' end
+	if reply.ok == false then return nil, reply.err or reply.error or reply.reason or 'component_commit_update_failed' end
+	if reply.accepted == false then return nil, reply.err or reply.error or reply.reason or 'commit_not_accepted' end
+	if reply.accepted == true or reply.reboot_required ~= nil then return true, nil end
+	return nil, 'invalid_commit_reply'
+end
+
 
 local function unwrap_scope_value(scope_op, label)
 	return scope_op:wrap(function (st, report, value, err)
@@ -133,26 +252,44 @@ function Backend:stage_op(job, ctx)
 			expected_image_id = image_id,
 			metadata = metadata_of(job),
 		}
-		local prepared, perr = fibers.perform(call_component_op(self, component, 'prepare-update', prepare_payload))
+		local prepared, perr = fibers.perform(call_component_retry_op(self, component, 'prepare-update', prepare_payload, ctx))
 		if prepared == nil then return nil, perr or 'component_prepare_update_failed' end
 
-		local source, serr = fibers.perform(self._artifact_store:open_source_op(ref))
-		if source == nil then return nil, serr or 'artifact_source_open_failed' end
-		local payload = {
-			job_id = job.job_id,
-			expected_image_id = image_id,
-			source = source,
-			size = desc.size,
-			digest_alg = desc.digest_alg or 'xxhash32',
-			digest = desc.digest or desc.checksum,
-			chunk_size = self._chunk_size or 2048,
-			format = meta.format or desc.format or 'dcmcu-v1',
-			metadata = metadata_of(job),
-		}
-		local reply, err = fibers.perform(call_component_op(self, component, 'stage-update', payload))
+		local stage_attempts = retry_budget(self, ctx, 'stage-update')
+		local reply, err
+		for attempt = 1, stage_attempts do
+			local source, serr = fibers.perform(self._artifact_store:open_source_op(ref))
+			if source == nil then return nil, serr or 'artifact_source_open_failed' end
+			local payload = {
+				job_id = job.job_id,
+				expected_image_id = image_id,
+				source = source,
+				size = desc.size,
+				digest_alg = desc.digest_alg or 'xxhash32',
+				digest = desc.digest or desc.checksum,
+				chunk_size = self._chunk_size or 2048,
+				format = meta.format or desc.format or 'dcmcu-v1',
+				metadata = metadata_of(job),
+			}
+			reply, err = fibers.perform(call_component_once_op(self, component, 'stage-update', payload, ctx))
+			if reply ~= nil then break end
+			if attempt >= stage_attempts then break end
+			local delay = retry_delay_s(self, attempt)
+			local rem = deadline_remaining(ctx)
+			if rem ~= nil then
+				if rem <= 0 then return nil, 'stage-update_timeout' end
+				if delay > rem then delay = rem end
+			end
+			if delay > 0 then fibers.perform(sleep.sleep_op(delay)) end
+		end
 		if reply == nil then return nil, err or 'component_stage_update_failed' end
 		local ok_reply, rerr = validate_stage_reply(reply)
 		if ok_reply ~= true then return nil, rerr end
+		local payload = {
+			digest_alg = desc.digest_alg or 'xxhash32',
+			digest = desc.digest or desc.checksum,
+			size = desc.size,
+		}
 		return {
 			staged = true,
 			component = component,
@@ -221,7 +358,7 @@ function Backend:pre_commit_record_op(job, ctx)
 	}, nil)
 end
 
-function Backend:commit_op(job, _ctx)
+function Backend:commit_op(job, ctx)
 	local component = component_of(self, job)
 	local job_id, jid_err = required_string(type(job) == 'table' and job.job_id or nil, 'job_id')
 	if not job_id then return op.always(nil, jid_err) end
@@ -230,9 +367,22 @@ function Backend:commit_op(job, _ctx)
 	local payload = {
 		job_id = job_id,
 		expected_image_id = image_id,
+		commit_token = ctx and ctx.commit_token or nil,
 	}
-	return call_component_op(self, component, 'commit-update', payload):wrap(function (reply, err)
-		if reply == nil then return nil, err or 'component_commit_update_failed' end
+	return call_component_retry_op(self, component, 'commit-update', payload, ctx):wrap(function (reply, err)
+		if reply == nil then
+			if not commit_response_may_be_missing(err) then
+				return nil, err or 'component_commit_update_failed'
+			end
+			-- Once commit has plausibly been submitted and the response path is
+			-- uncertain, the safe update-state transition is
+			-- awaiting_return/reconcile.  A missing reply may mean the MCU accepted
+			-- and is rebooting.  Reconcile will decide whether the image actually
+			-- took.
+			return { accepted = true, uncertain = true, reason = err or 'commit_response_missing' }
+		end
+		local ok_reply, rerr = commit_reply_ok(reply)
+		if ok_reply ~= true then return nil, rerr end
 		return { accepted = true, reply = reply }
 	end)
 end
@@ -279,6 +429,7 @@ function M.new(opts)
 		_chunk_size = opts.chunk_size or 2048,
 		_commit_policy = opts.commit_policy,
 		_call_opts = opts.call_opts,
+		_rpc_retry = opts.rpc_retry,
 	}, Backend)
 end
 
