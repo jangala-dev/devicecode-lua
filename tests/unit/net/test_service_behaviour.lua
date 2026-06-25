@@ -181,6 +181,103 @@ function tests.test_initial_config_starts_apply_and_publishes_running_state()
 	end)
 end
 
+
+function tests.test_counter_metrics_publish_generic_topics_with_legacy_namespaces()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local sub_conn = b:connect()
+		local calls = {}
+		local counter_calls = {}
+		local sub = sub_conn:subscribe({ 'obs', 'v1', 'net', 'metric', '+' }, { queue_len = 256, full = 'drop_oldest' })
+
+		local hal = success_hal(calls)
+		hal.read_counters_op = function (_, req)
+			counter_calls[#counter_calls + 1] = req
+			local counters = {}
+			local bases = { adm = 1000, jan = 2000, wan = 3000, modem_primary = 4000, modem_secondary = 5000 }
+			for _, iface in ipairs(req.interfaces or {}) do
+				local stats = {}
+				local base = bases[iface] or 0
+				for i, stat in ipairs(req.stats or {}) do stats[stat] = base + i end
+				counters[iface] = { statistics = stats }
+			end
+			return op.always({ ok = true, backend = 'test', counters = counters })
+		end
+
+		local c = cfg()
+		c.segments.adm = { kind = 'lan', addressing = { ipv4 = { mode = 'static', cidr = '172.28.8.1/24' } } }
+		c.segments.jan = { kind = 'lan', addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/24' } } }
+		c.segments.wan = { kind = 'wan', addressing = { ipv4 = { mode = 'dhcp' } }, dhcp = { enabled = false } }
+		c.wan = {
+			members = {
+				modem_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
+				modem_secondary = { interface = 'modem_secondary', source = { kind = 'gsm-uplink', id = 'secondary' } },
+			},
+		}
+
+		conn:retain(topics.gsm_uplink('primary'), { connected = true, available = true, linux = { ifname = 'wwan0' } })
+		conn:retain(topics.gsm_uplink('secondary'), { connected = true, available = true, linux = { ifname = 'wwan1' } })
+		retain_network_config_status(conn, 'available')
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = c,
+			rev = 31,
+			hal = hal,
+			observe = false,
+			counter_poll_interval_s = 0.05,
+		})
+
+		local view = sub_conn:retained_view(topics.summary())
+		probe.wait_versioned_until('net counter metrics running summary',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				return msg and msg.payload and msg.payload.state == 'running' and msg.payload or nil
+			end,
+			{ timeout = 0.5 })
+		view:close()
+
+		local expected = {
+			['net.adm.rx_bytes'] = 1001,
+			['net.jan.tx_errors'] = 2008,
+			['net.wan.rx_packets'] = 3002,
+			['net.mdm0.rx_dropped'] = 4003,
+			['net.mdm1.tx_packets'] = 5006,
+		}
+		local seen = {}
+		local deadline = fibers.now() + 2.0
+		while fibers.now() < deadline do
+			local which, msg = fibers.perform(op.named_choice({
+				msg = sub:recv_op(),
+				timeout = sleep.sleep_op(0.05),
+			}))
+			if which == 'msg' and msg and msg.payload then
+				local payload = msg.payload
+				local key = table.concat(payload.namespace or {}, '.')
+				if expected[key] ~= nil then
+					local fields = 0
+					for _ in pairs(payload) do fields = fields + 1 end
+					eq(fields, 2, 'metric payload must only contain value and namespace')
+					eq(msg.topic[5], payload.namespace[3], 'generic metric topic should match stat class')
+					seen[key] = payload.value
+				end
+				local complete = true
+				for key in pairs(expected) do if seen[key] == nil then complete = false end end
+				if complete then break end
+			end
+		end
+		local requested = counter_calls[1] and table.concat(counter_calls[1].interfaces or {}, ',') or 'none'
+		for key, value in pairs(expected) do eq(seen[key], value, 'missing counter metric ' .. key .. ' requested=' .. requested) end
+		ok(#counter_calls >= 1, 'counter poll expected')
+
+		sub:unsubscribe()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
 function tests.test_config_waits_for_network_config_capability()
 	fibers.run(function (scope)
 		local b = busmod.new()

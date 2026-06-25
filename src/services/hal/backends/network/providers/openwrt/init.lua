@@ -8,6 +8,7 @@ local fibers = require 'fibers'
 local sleep = require 'fibers.sleep'
 local op = require 'fibers.op'
 local exec = require 'fibers.io.exec'
+local file = require 'fibers.io.file'
 local cjson = require 'cjson.safe'
 local uci_manager = require 'services.hal.backends.openwrt.uci_manager'
 local observer_mod = require 'services.hal.backends.network.providers.openwrt.observer'
@@ -26,6 +27,16 @@ Provider.__index = Provider
 
 local HOST_NETMASK = '255.255.255.255'
 local OWNED_PACKAGES = { 'network', 'dhcp', 'firewall', 'mwan3' }
+local COUNTER_STATS = {
+	'rx_bytes',
+	'rx_packets',
+	'rx_dropped',
+	'rx_errors',
+	'tx_bytes',
+	'tx_packets',
+	'tx_dropped',
+	'tx_errors',
+}
 local ACTIVATION_COMMANDS = {
 	network = { { kind = 'reload', target = 'network', wait = true } },
 	dhcp = { { kind = 'restart', target = 'dnsmasq', wait = true } },
@@ -1000,6 +1011,7 @@ function M.new(config, opts)
 		mwan_run_restore = config.mwan_run_restore,
 		shaper_run_cmd = config.shaper_run_cmd or config.run_cmd,
 		speedtest_run_cmd = config.speedtest_run_cmd,
+		counter_reader = config.counter_reader or config.stat_reader,
 	}, Provider)
 	log_provider(self, 'warn', {
 		what = 'openwrt_network_provider_instrumented_build',
@@ -1814,8 +1826,131 @@ function Provider:probe_link_op(_req)
 	return op.always({ ok = false, err = 'openwrt network provider probe_link not implemented', backend = 'openwrt' })
 end
 
-function Provider:read_counters_op(_req)
-	return op.always({ ok = false, err = 'openwrt network provider read_counters not implemented', backend = 'openwrt' })
+local function requested_counter_interfaces(req, observed)
+	local out = {}
+	local seen = {}
+	local function add(v)
+		if type(v) ~= 'string' or v == '' or seen[v] then return end
+		seen[v] = true
+		out[#out + 1] = v
+	end
+	if type(req) == 'table' then
+		add(req.interface)
+		local interfaces = req.interfaces or req.ids
+		if type(interfaces) == 'table' then
+			if #interfaces > 0 then
+				for i = 1, #interfaces do add(interfaces[i]) end
+			else
+				for _, id in ipairs(sorted_keys(interfaces)) do add(id) end
+			end
+		end
+	end
+	if #out == 0 then
+		for _, id in ipairs(sorted_keys(observed and observed.interfaces)) do add(id) end
+	end
+	return out
+end
+
+local function counter_stats(req)
+	local stats = req and req.stats
+	if type(stats) ~= 'table' then return COUNTER_STATS end
+	local out, seen = {}, {}
+	local function add(stat)
+		if type(stat) ~= 'string' or stat == '' or seen[stat] then return end
+		seen[stat] = true
+		out[#out + 1] = stat
+	end
+	if #stats > 0 then
+		for i = 1, #stats do add(stats[i]) end
+	else
+		for _, stat in ipairs(sorted_keys(stats)) do add(stat) end
+	end
+	return #out > 0 and out or COUNTER_STATS
+end
+
+local function translated_counter_interface(self, semantic)
+	local names = self._last_openwrt_names and self._last_openwrt_names.names or nil
+	local logical = names and names.logical_interface or nil
+	return (logical and logical[semantic]) or semantic
+end
+
+local function req_device(req, semantic, generated)
+	local devices = req and req.devices
+	if type(devices) == 'table' then
+		local dev = devices[semantic] or devices[generated]
+		if type(dev) == 'string' and dev ~= '' then return dev end
+	end
+	if req and type(req.device) == 'string' and req.device ~= '' then return req.device end
+	return nil
+end
+
+local function resolve_counter_device(observed, req, semantic, generated)
+	local explicit = req_device(req, semantic, generated)
+	if explicit then return explicit end
+	observed = observed or {}
+	local live = observed.live or {}
+	local iface = (observed.interfaces or {})[generated] or (observed.interfaces or {})[semantic] or {}
+	local live_iface = iface.live or (live.interfaces or {})[generated] or (live.interfaces or {})[semantic] or {}
+	local endpoint = iface.endpoint or {}
+	local dev = live_iface.l3_device or live_iface.device or endpoint.ifname or endpoint.device or endpoint.name or iface.device
+	if type(dev) == 'string' and dev ~= '' then return dev end
+	return nil
+end
+
+local function read_counter_file(path)
+	local f, err = file.open(path, 'r')
+	if not f then return nil, err end
+	local data, rerr = f:read_all()
+	f:close()
+	if rerr ~= nil then return nil, rerr end
+	local n = tonumber((tostring(data or ''):gsub('%s+', '')))
+	if not n then return nil, 'counter parse failed' end
+	return n, nil
+end
+
+local function read_counter(self, device, stat)
+	local reader = self.counter_reader or self.config.counter_reader or self.config.stat_reader
+	if type(reader) == 'function' then return reader(device, stat) end
+	return read_counter_file('/sys/class/net/' .. tostring(device) .. '/statistics/' .. tostring(stat))
+end
+
+function Provider:read_counters_op(req)
+	return fibers.run_scope_op(function()
+		if self.terminated then return { ok = false, err = 'provider terminated', backend = 'openwrt' } end
+		req = req or {}
+		local observed = nil
+		if type(req.devices) ~= 'table' then
+			local snapshot, snap_err = build_observed_snapshot(self, { live = true }, nil, { source = 'diagnostics', action = 'read_counters' })
+			if snapshot then observed = snapshot else observed = { interfaces = {}, live = {}, errors = { tostring(snap_err) } } end
+		end
+
+		local result = { ok = true, backend = 'openwrt', counters = {}, errors = {} }
+		local stats = counter_stats(req)
+		for _, semantic in ipairs(requested_counter_interfaces(req, observed)) do
+			local generated = translated_counter_interface(self, semantic)
+			local dev = resolve_counter_device(observed, req, semantic, generated)
+			if not dev then
+				result.errors[semantic] = { device = 'unavailable' }
+			else
+				local rec = { interface = semantic, openwrt_interface = generated, device = dev, statistics = {} }
+				for _, stat in ipairs(stats) do
+					local value, err = read_counter(self, dev, stat)
+					if value ~= nil then
+						rec.statistics[stat] = tonumber(value)
+					else
+						result.errors[semantic] = result.errors[semantic] or { device = dev }
+						result.errors[semantic][stat] = tostring(err or 'counter unavailable')
+					end
+				end
+				if next(rec.statistics) ~= nil then result.counters[semantic] = rec end
+			end
+		end
+		if observed and observed.errors and next(observed.errors) ~= nil then result.snapshot_errors = copy_plain(observed.errors) end
+		return result
+	end):wrap(function(status, _report, result)
+		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
+		return result
+	end)
 end
 
 
