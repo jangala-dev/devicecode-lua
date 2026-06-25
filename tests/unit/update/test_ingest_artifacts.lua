@@ -258,4 +258,65 @@ function tests.test_ingest_commit_construction_does_not_mutate_instance_state()
 	end)
 end
 
+
+function tests.test_ingest_create_defaults_artifact_policy_to_transient_only()
+	fibers.run(function (scope)
+		local seen_policy
+		local artifact_store = {
+			create_sink_op = function (_, opts)
+				seen_policy = opts and opts.policy
+				return op.always(new_sink(), nil)
+			end,
+		}
+		local done_tx, done_rx = mailbox.new(4, { full = 'reject_newest' })
+		local state = ingest.new_state(scope, { queue_len = 4 })
+		local ctx = {
+			scope = scope,
+			request_root = scope,
+			service_id = 'update',
+			generation = 1,
+			done_tx = done_tx,
+			artifact_store = artifact_store,
+		}
+		local req = new_req({ method = 'ingest_create', ingest_id = 'i-default', component = 'mcu' })
+		state:handle_event(ctx, { kind = 'ingest_request', request = req })
+		local ev = fibers.perform(done_rx:recv_op())
+		assert_eq(ev.kind, 'ingest_create_done')
+		assert_eq(ev.status, 'ok')
+		state:handle_done(ctx, ev)
+		assert_eq(seen_policy, 'transient_only')
+		assert_eq(req.reply_value.ok, true)
+	end)
+end
+
+function tests.test_ingest_create_honours_explicit_artifact_policy_override()
+	fibers.run(function (scope)
+		local seen_policy
+		local artifact_store = {
+			create_sink_op = function (_, opts)
+				seen_policy = opts and opts.policy
+				return op.always(new_sink(), nil)
+			end,
+		}
+		local done_tx, done_rx = mailbox.new(4, { full = 'reject_newest' })
+		local state = ingest.new_state(scope, { queue_len = 4 })
+		local ctx = {
+			scope = scope,
+			request_root = scope,
+			service_id = 'update',
+			generation = 1,
+			done_tx = done_tx,
+			artifact_store = artifact_store,
+		}
+		local req = new_req({ method = 'ingest_create', ingest_id = 'i-durable', component = 'mcu', policy = 'prefer_durable' })
+		state:handle_event(ctx, { kind = 'ingest_request', request = req })
+		local ev = fibers.perform(done_rx:recv_op())
+		assert_eq(ev.kind, 'ingest_create_done')
+		assert_eq(ev.status, 'ok')
+		state:handle_done(ctx, ev)
+		assert_eq(seen_policy, 'prefer_durable')
+		assert_eq(req.reply_value.ok, true)
+	end)
+end
+
 return tests

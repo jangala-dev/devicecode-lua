@@ -1296,22 +1296,27 @@
         }
       },
       "bundled": {
-        "enabled": false,
+        "enabled": true,
         "components": {
           "mcu": {
             "component": "mcu",
             "source": {
               "kind": "file",
-              "path": "/data/devicecode/artifacts/import/mcu.dcmcu"
+              "path": "/artifacts/mcu.dcmcu",
+              "policy": "transient_only"
             },
             "auto_create": false,
-            "auto_start": false,
-            "policy": "prefer_durable"
+            "auto_start": false
           }
         }
       },
       "publish": {
         "enabled": true
+      },
+      "retention": {
+        "terminal_max_count": 50,
+        "terminal_max_age_s": 604800,
+        "prune_on_startup": true
       }
     }
   },

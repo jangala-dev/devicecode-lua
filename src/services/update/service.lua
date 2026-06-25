@@ -1066,6 +1066,7 @@ local function ensure_job_runtime(self, reason)
 		initial_jobs = params.initial_jobs,
 		done_tx = self._done_tx,
 		queue_len = params.job_runtime_queue_len,
+		retention = (self._config and self._config.retention) or params.job_retention,
 	})
 	if not jobs then
 		return nil, jobs_err or 'update_job_repository_start_failed'

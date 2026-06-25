@@ -334,4 +334,66 @@ function tests.test_restart_adoption_uses_commit_policy_for_uncertain_commits()
 	end)
 end
 
+function tests.test_job_runtime_prunes_terminal_jobs_on_startup_by_count()
+	fibers.run(function ()
+		local initial = { jobs = {
+			old1 = { job_id = 'old1', component = 'cm5', state = 'succeeded', created_seq = 1, updated_seq = 1 },
+			old2 = { job_id = 'old2', component = 'cm5', state = 'failed', created_seq = 2, updated_seq = 2 },
+			keep1 = { job_id = 'keep1', component = 'cm5', state = 'succeeded', created_seq = 3, updated_seq = 3 },
+			keep2 = { job_id = 'keep2', component = 'cm5', state = 'cancelled', created_seq = 4, updated_seq = 4 },
+			live = { job_id = 'live', component = 'cm5', state = 'created', created_seq = 5, updated_seq = 5 },
+		}, order = { 'old1', 'old2', 'keep1', 'keep2', 'live' }, next_seq = 10 }
+		local store = store_mod.new(initial)
+		local st, _, result = fibers.run_scope(function (scope)
+			local rt = start_runtime(scope, {
+				service_id = 'update',
+				store = store,
+				retention = { prune_on_startup = true, terminal_max_count = 2 },
+			})
+			local snapshot = rt:snapshot()
+			local adoption = rt:adoption()
+			rt:cancel('test complete')
+			return { snapshot = snapshot, adoption = adoption }
+		end)
+		assert_eq(st, 'ok')
+		assert_eq(result.snapshot.by_id.old1, nil)
+		assert_eq(result.snapshot.by_id.old2, nil)
+		assert_not_nil(result.snapshot.by_id.keep1)
+		assert_not_nil(result.snapshot.by_id.keep2)
+		assert_not_nil(result.snapshot.by_id.live)
+		assert_eq(#result.adoption.pruned, 2)
+	end)
+end
+
+function tests.test_job_runtime_prunes_terminal_jobs_on_startup_by_age_when_timestamped()
+	fibers.run(function ()
+		local initial = { jobs = {
+			old = { job_id = 'old', component = 'cm5', state = 'succeeded', created_seq = 1, updated_seq = 1, terminal_at_s = 800 },
+			recent = { job_id = 'recent', component = 'cm5', state = 'failed', created_seq = 2, updated_seq = 2, terminal_at_s = 950 },
+			untimestamped = { job_id = 'untimestamped', component = 'cm5', state = 'cancelled', created_seq = 3, updated_seq = 3 },
+			live = { job_id = 'live', component = 'cm5', state = 'created', created_seq = 4, updated_seq = 4, terminal_at_s = 1 },
+		}, order = { 'old', 'recent', 'untimestamped', 'live' }, next_seq = 10 }
+		local store = store_mod.new(initial)
+		local st, _, result = fibers.run_scope(function (scope)
+			local rt = start_runtime(scope, {
+				service_id = 'update',
+				store = store,
+				now_s = 1000,
+				retention = { prune_on_startup = true, terminal_max_age_s = 100 },
+			})
+			local snapshot = rt:snapshot()
+			local adoption = rt:adoption()
+			rt:cancel('test complete')
+			return { snapshot = snapshot, adoption = adoption }
+		end)
+		assert_eq(st, 'ok')
+		assert_eq(result.snapshot.by_id.old, nil)
+		assert_not_nil(result.snapshot.by_id.recent)
+		assert_not_nil(result.snapshot.by_id.untimestamped)
+		assert_not_nil(result.snapshot.by_id.live)
+		assert_eq(#result.adoption.pruned, 1)
+		assert_eq(result.adoption.pruned[1].reason, 'startup_retention_age')
+	end)
+end
+
 return tests

@@ -182,6 +182,7 @@ local function adoption_empty()
 		awaiting_return = {},
 		active_intent = {},
 		failed = {},
+		pruned = {},
 		decisions = {},
 		diagnostics = {},
 	}
@@ -445,6 +446,128 @@ local function adopt_restart_jobs(self, jobs)
 	end
 
 	return adoption, nil
+end
+
+
+local function normalise_retention(params)
+	local retention = type(params.retention) == 'table' and copy(params.retention) or {}
+	if params.prune_terminal_jobs_on_startup ~= nil then
+		retention.prune_on_startup = params.prune_terminal_jobs_on_startup == true
+	end
+	if params.terminal_job_max_count ~= nil then
+		retention.terminal_max_count = tonumber(params.terminal_job_max_count)
+	end
+	if params.terminal_job_max_age_s ~= nil then
+		retention.terminal_max_age_s = tonumber(params.terminal_job_max_age_s)
+	end
+	return retention
+end
+
+local function terminal_job_sort_newest_first(jobs, a, b)
+	local ja, jb = jobs.jobs[a] or {}, jobs.jobs[b] or {}
+	local ua = ja.updated_seq or ja.created_seq or 0
+	local ub = jb.updated_seq or jb.created_seq or 0
+	if ua == ub then
+		local ca = ja.created_seq or 0
+		local cb = jb.created_seq or 0
+		if ca == cb then return tostring(a) > tostring(b) end
+		return ca > cb
+	end
+	return ua > ub
+end
+
+local function terminal_time_s(job)
+	if type(job) ~= 'table' then return nil end
+	for _, key in ipairs({ 'terminal_at_s', 'completed_at_s', 'updated_at_s', 'updated_wall_s', 'updated_time_s' }) do
+		local n = tonumber(job[key])
+		if n ~= nil then return n end
+	end
+	local result = type(job.result) == 'table' and job.result or nil
+	if result then
+		for _, key in ipairs({ 'terminal_at_s', 'completed_at_s', 'timestamp_s', 'time_s' }) do
+			local n = tonumber(result[key])
+			if n ~= nil then return n end
+		end
+	end
+	return nil
+end
+
+local function should_prune_terminal_by_age(job, retention, now_s)
+	local max_age = tonumber(retention.terminal_max_age_s)
+	if type(max_age) ~= 'number' or max_age <= 0 then return false end
+	now_s = tonumber(now_s)
+	if type(now_s) ~= 'number' then return false end
+	local t = terminal_time_s(job)
+	if type(t) ~= 'number' then return false end
+	return t <= (now_s - max_age)
+end
+
+local function mark_pruned(adoption, job_id, job, reason)
+	adoption.pruned = adoption.pruned or {}
+	adoption.pruned[#adoption.pruned + 1] = {
+		job_id = job_id,
+		state = job and job.state,
+		action = 'pruned_terminal',
+		reason = reason or 'startup_retention',
+	}
+	adoption.decisions[#adoption.decisions + 1] = {
+		job_id = job_id,
+		from_state = job and job.state,
+		action = 'pruned_terminal',
+		reason = reason or 'startup_retention',
+	}
+end
+
+local function prune_terminal_id(self, jobs, adoption, id, reason)
+	local job = jobs.jobs[id]
+	local ok, derr = fibers.perform(store_delete_op(self._store, id))
+	if ok == true then
+		repo_mod.remove(jobs, id)
+		mark_pruned(adoption, id, job, reason)
+		return true, nil
+	end
+	adoption.diagnostics[#adoption.diagnostics + 1] = {
+		job_id = id,
+		message = 'terminal job prune failed: ' .. tostring(derr or 'delete_failed'),
+	}
+	return false, derr
+end
+
+local function prune_terminal_jobs(self, jobs, adoption)
+	local retention = normalise_retention(self._params or {})
+	if retention.prune_on_startup ~= true then return true, nil end
+	local max_count = retention.terminal_max_count
+	local now_s = self._params and self._params.now_s or os.time()
+
+	local terminal_ids = {}
+	for id, job in pairs((jobs and jobs.jobs) or {}) do
+		if repo_mod.is_terminal(job and job.state) then
+			terminal_ids[#terminal_ids + 1] = id
+		end
+	end
+	table.sort(terminal_ids, function (a, b) return terminal_job_sort_newest_first(jobs, a, b) end)
+
+	local retained = {}
+	local pruned_seen = {}
+	for _, id in ipairs(terminal_ids) do
+		local job = jobs.jobs[id]
+		if should_prune_terminal_by_age(job, retention, now_s) then
+			local ok = prune_terminal_id(self, jobs, adoption, id, 'startup_retention_age')
+			if ok == true then pruned_seen[id] = true end
+		else
+			retained[#retained + 1] = id
+		end
+	end
+
+	if type(max_count) ~= 'number' or max_count < 0 then return true, nil end
+	if #retained <= max_count then return true, nil end
+	for i = max_count + 1, #retained do
+		local id = retained[i]
+		if not pruned_seen[id] and jobs.jobs[id] ~= nil then
+			prune_terminal_id(self, jobs, adoption, id, 'startup_retention_count')
+		end
+	end
+	return true, nil
 end
 
 local function next_sequence_value(jobs)
@@ -1171,6 +1294,12 @@ function Runtime:_run(scope)
 	local adoption, adopt_err = adopt_restart_jobs(self, jobs)
 	if not adoption then
 		self._ready_err = adopt_err or 'restart_adoption_failed'
+		self._ready_cond:signal()
+		error(self._ready_err, 0)
+	end
+	local pruned, prune_err = prune_terminal_jobs(self, jobs, adoption)
+	if pruned ~= true then
+		self._ready_err = prune_err or 'job_retention_prune_failed'
 		self._ready_cond:signal()
 		error(self._ready_err, 0)
 	end

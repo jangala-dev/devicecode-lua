@@ -129,7 +129,7 @@ function tests.test_bundled_probe_imports_fixed_file_to_artifact_ref()
 			generation = 8,
 			component = 'mcu',
 			artifact_store = import_store('mcu-artifact'),
-			source = { kind = 'file', path = '/data/devicecode/artifacts/import/mcu.dcmcu', policy = 'prefer_durable' },
+			source = { kind = 'file', path = '/artifacts/mcu.dcmcu', policy = 'transient_only' },
 			done_tx = tx,
 		}))
 		local ev = fibers.perform(rx:recv_op())
@@ -137,7 +137,8 @@ function tests.test_bundled_probe_imports_fixed_file_to_artifact_ref()
 		assert_eq(ev.status, 'ok')
 		assert_eq(ev.result.artifact_ref, 'mcu-artifact')
 		assert_eq(ev.result.desired.expected_image_id, 'mcu-image-new')
-		assert_eq(ev.result.desired.path, '/data/devicecode/artifacts/import/mcu.dcmcu')
+		assert_eq(ev.result.desired.path, '/artifacts/mcu.dcmcu')
+		assert_eq(ev.result.desired.policy, 'transient_only')
 	end)
 end
 
