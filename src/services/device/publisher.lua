@@ -49,6 +49,7 @@ function M.publish_component_now(conn, snapshot, component_id, opts)
 	ok, err = checked(bus_cleanup.retain(conn, projection.component_cap_status_topic(component_id), payloads.cap_status))
 	if not ok then return nil, err end
 
+
 	if opts == nil or opts.emit_event ~= false then
 		ok, err = checked(bus_cleanup.publish(
 			conn,
@@ -80,7 +81,9 @@ function M.publish_summary_now(conn, snapshot, opts)
 	local ts = now_value(opts)
 	local ok, err = bus_cleanup.retain(conn, projection.summary_topic(), projection.summary_payload(snapshot, ts))
 	if ok ~= true then return nil, err end
-	return bus_cleanup.retain(conn, projection.identity_topic(), projection.identity_payload(snapshot, ts))
+	ok, err = bus_cleanup.retain(conn, projection.identity_topic(), projection.identity_payload(snapshot, ts))
+	if ok ~= true then return nil, err end
+	return bus_cleanup.retain(conn, projection.assembly_topic(), projection.assembly_payload(snapshot, ts))
 end
 
 function M.publish_dirty_now(conn, snapshot, dirty, opts)

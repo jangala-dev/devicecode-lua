@@ -86,6 +86,21 @@ local listener = reply.listener
 
 The consumer owns accepted contexts after handoff. HTTP owns unaccepted contexts and transport handles until ownership transfer.
 
+SDK operations should be used as Ops and composed by the caller for timeout policy:
+
+```lua
+local which, result, err = fibers.perform(fibers.named_choice {
+  exchange = ref:exchange_op(args),
+  timeout = sleep.sleep_op(5):wrap(function ()
+    return nil, "timeout"
+  end),
+})
+```
+
+The HTTP SDK must not install a hidden default bus timeout. If the SDK Op loses a choice, the bus request is abandoned and the admitted HTTP operation is cancelled through request ownership and `scoped_work.cancel_op`.
+
+For outgoing request bodies backed by iterators, the lua-http backend may otherwise add `Expect: 100-continue` because the content length is not known at request-construction time. HTTP suppresses that implicit header by default so that lua-http's backend-level `expect_100_timeout` does not override the caller's Op-composed timeout policy. Callers or backend owners may opt in explicitly by setting an `Expect: 100-continue` header, by passing `expect_100_continue = true` on the request, or by configuring `expect_100_continue = true` on the backend/service options. `expect_100_timeout` may be supplied alongside that opt-in when the backend wait should have an explicit deadline.
+
 
 ## Body object capabilities
 
@@ -169,6 +184,13 @@ Returned handles are public wrappers, not backend objects.
 Callbacks do not reduce service state directly.
 Accepted context ownership transfer is explicit.
 Losing HTTP/WebSocket Ops terminate active backend work.
+Bus request abandonment cancels admitted HTTP operation work.
+The SDK has no hidden default bus timeout policy.
 Stats under cap/.../state are narrow.
 Metrics also appear under obs/v1/http/...
 ```
+
+
+## Dependency-provider status
+
+`cap/http/main/status.available=true` means the HTTP backend is ready to admit non-status capability requests. While the shell is alive but the backend is starting, status remains queryable and non-status requests should fail with `http_backend_not_ready` or an equivalent not-ready reason.

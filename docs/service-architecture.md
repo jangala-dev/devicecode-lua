@@ -483,6 +483,30 @@ local which, value = fibers.perform(fibers.named_choice {
 
 Avoid APIs where the reusable helper accepts opaque timeout parameters and hides a race internally. Return an Op and let the caller compose it.
 
+### Caller-composed timeouts
+
+Reusable SDKs and client helpers should normally return Ops with no hidden bus timeout policy.
+
+Good:
+
+```lua
+local which, result, err = fibers.perform(fibers.named_choice {
+  reply = ref:call_op(payload),
+  timeout = sleep.sleep_op(5):wrap(function ()
+    return nil, "timeout"
+  end),
+})
+```
+
+Bad:
+
+```lua
+-- Bad: a reusable client silently installs a default 5s bus timeout.
+return conn:call_op(topic, payload, { timeout = opts.timeout or 5 })
+```
+
+A reusable client may expose an explicit timeout option for convenience, but its default should be caller-composed waiting, usually by passing `timeout = false` to bus calls. Service-protection timeouts are still valid where the service owns the policy; they should live in the admitted operation scope, not be smuggled through a general SDK helper.
+
 ## Choice is readiness, not priority
 
 `choice`, `named_choice` and `first_ready` do not express semantic priority.
@@ -505,17 +529,39 @@ The shared support modules encode service discipline. Prefer them over service-l
 
 | Module | Role |
 |---|---|
-| `devicecode.support.scoped_work` | Starts identity-bearing child work, stores completion before reporting, separates body-ended from authorised reaping. |
+| `devicecode.support.scoped_work` | Starts identity-bearing child work, stores completion before reporting, separates body-ended from authorised reaping, and accepts `cancel_op` for external cancellation sources. |
 | `devicecode.support.service_events` | Stamps events with identity and generation before sending them to coordinators. |
 | `devicecode.support.priority_event` | Implements explicit semantic priority without relying on `choice` ordering. |
 | `devicecode.support.resource` | Provides immediate ownership, handoff and termination helpers. |
-| `devicecode.support.request_owner` | Ensures at-most-once reply, fail or abandon for bus/HTTP requests. |
+| `devicecode.support.request_owner` | Ensures at-most-once reply, fail or abandon for bus/HTTP requests, and provides `caller_cancel_op()` for bus request abandonment. |
 | `devicecode.support.queue` | Provides public try-now helpers built from `or_else`. |
 | `devicecode.support.config_watch` | Standard retained `cfg/<service>` watching. |
 | `devicecode.support.bus_cleanup` | Finaliser-safe bus cleanup wrappers. |
 | Service models | Pulse-backed observable state with snapshots, versions and `changed_op`. |
 
 Use the shared helper unless the service has a clear reason not to.
+
+### Retained service configuration
+
+Modern service shells consume intended configuration through
+`devicecode.support.config_watch`.
+
+The helper opens a normal `lua-bus` subscription to `cfg/<service>`.  In
+`lua-bus`, subscription creation replays matching retained messages before
+subsequent live publications.  That retained replay is the bootstrap mechanism:
+a service which starts after its configuration has already been retained must
+observe that configuration as a normal `config_changed` event.
+
+Do not build service-specific retained configuration paths using an independent
+retained view plus a live subscription.  That split can reintroduce the timing
+race retained configuration was introduced to remove.  Service code should own
+validation and generation policy, but the subscription/replay mechanics belong
+in the shared helper.
+
+Direct `cfg/<service>` subscriptions in modern services are architecture debt.
+Bridge code may still subscribe to arbitrary bus topics supplied by Fabric
+routing rules, but service shell configuration should go through
+`config_watch.open`.
 
 ## Request ownership
 
@@ -543,6 +589,58 @@ finalise unresolved once
 ```
 
 A finaliser may abandon or fail an unresolved in-memory request owner. It must not wait for graceful completion.
+
+## Bus request cancellation
+
+A public bus request may outlive the caller's interest in the result. If the caller races a bus SDK Op against another Op and the bus Op loses, the bus `Request` is abandoned. Service code must treat that abandonment as a cancellation source for any admitted caller-owned work.
+
+The canonical admission pattern is:
+
+```lua
+local owner = request_owner.new(req)
+
+local handle, err = scoped_work.start {
+  lifetime_scope = scope,
+  reaper_scope = scope,
+  report_scope = scope,
+  identity = identity,
+
+  setup = function (work_scope)
+    work_scope:finally(function (_, status, primary)
+      owner:finalise_unresolved(primary or status or "request_closed")
+    end)
+
+    return {
+      request_owner = owner,
+      cancel_owned_now = function (reason)
+        owner:abandon_unresolved(reason or "caller_abandoned")
+        return true
+      end,
+    }
+  end,
+
+  run = run_request_work,
+  report = report_completion,
+  cancel_op = owner:caller_cancel_op(),
+}
+```
+
+Use this for bus requests that admit meaningful scoped work, including device actions, update manager requests, artifact ingest, Fabric transfer requests, Fabric local-to-remote bridge calls, HTTP operations and long HAL capability operations.
+
+Do not apply `caller_cancel_op()` to service-owned background components such as observers, publishers, generation reconcilers, retained watchers or listener runtimes unless they were directly admitted from a caller-owned bus `Request`.
+
+The intended semantics are:
+
+```text
+caller abandons or times out the SDK Op
+  -> bus Request becomes abandoned
+  -> request_owner observes caller cancellation
+  -> scoped_work cancels the admitted child scope
+  -> owned resources terminate through the scope's normal cleanup path
+  -> late completion is stale or resolves only local cleanup
+```
+
+Caller abandonment is not a service fault. Log it as cancellation or abandonment, not as a backend failure.
 
 ## Resource ownership
 
@@ -699,6 +797,65 @@ models do not publish unless explicitly designed as publishers
 ```
 
 Expensive projection belongs in scoped work, not in model update logic.
+
+## Capability dependencies
+
+Capability availability is coordinator input, not service start-up ordering.
+
+Modern service shells may start concurrently, bind safe public endpoints and open
+configuration watches before their dependencies are ready.  Dependent blocking
+work must be admitted only after the coordinator has observed the required
+capabilities as effectively available.
+
+Use `devicecode.support.capability_dependencies` for repeated capability waits.
+The helper owns status subscriptions, status normalisation, effective
+availability, route-missing inference and copied snapshots.  It does not start
+work, retry work, degrade services or make policy decisions.
+
+Use `devicecode.support.dependency_slot` for the repetitive owner-side mechanics
+of replacing, terminating and projecting one dependency manager field.  It owns
+boilerplate only; the coordinator still owns admission policy.
+
+Use `devicecode.support.dependency_failure` at service edges to normalise messy
+transport or backend failures into a canonical dependency failure.  Core helpers
+consume clean facts; they do not recursively search reports, child failures or
+stringified diagnostics.
+
+A service coordinator should use it like this:
+
+```lua
+local deps = assert(cap_deps.open(conn, {
+  { key = 'job_store', class = 'control-store', id = 'update', required = true },
+}))
+
+-- In the coordinator event set:
+-- deps:event_source()
+-- or, for model-style observers, deps:changed_op(seen)
+
+if state.pending_start and deps:available('job_store') then
+  start_job_runtime(state, 'job_store_available')
+end
+```
+
+If a capability call returns `no_route`, do not convert that directly into a
+backend failure.  The edge that made the call should normalise it into a clean
+shape such as:
+
+```lua
+{ kind = 'dependency_failure', err = 'no_route', dependency_key = key }
+```
+
+Record route-missing on the dependency and let the coordinator return the
+affected work to a pending or waiting state.  A later retained `available`
+status clears route-missing and wakes the coordinator.
+
+The intended split is:
+
+```text
+capability dependency helper = facts and wakeups
+service coordinator           = policy and admission
+worker/request scope           = blocking capability calls
+```
 
 ## Publication
 
@@ -917,6 +1074,8 @@ Tests should include:
 ```text
 operation loses a choice
 timeout wins
+caller abandonment crosses the bus boundary into admitted scoped work
+queued bus requests abandoned before admission are skipped or resolved locally
 scope cancellation interrupts waits
 finalisers do not wait
 try-now helpers do not suspend
@@ -971,6 +1130,8 @@ Backpressure policy is explicit.
 Topic helpers are used instead of scattered literals.
 Boundary validation is pure and non-yielding.
 Tests cover losing paths.
+Bus-admitted scoped work uses owner:caller_cancel_op().
+Reusable SDK/client helpers do not install hidden bus timeouts by default.
 ```
 
 ## Signs that code is drifting
@@ -980,6 +1141,8 @@ Look closely if a service introduces:
 ```text
 a callback that updates service state
 a helper without _op that can block
+a reusable SDK/client helper with a hidden default bus timeout
+a bus request that starts scoped_work without owner:caller_cancel_op()
 a finaliser calling close_op
 a coordinator branch calling fibers.perform
 a queue send with no overflow policy
@@ -993,3 +1156,47 @@ a test that depends on private coordinator tables for an integration behaviour
 ```
 
 Any one of these may be justified in a narrow case. Several together usually mean the service boundary is losing shape.
+
+
+### Capability dependency admission for modern services
+
+Modern services should start their shell before all dependencies are available.
+The shell may open config watches, dependency watches, retained projections and
+safe public endpoints.  It must not start dependency-backed work merely because
+configuration has arrived.
+
+Use `devicecode.support.capability_dependencies` as a coordinator-facing model:
+
+```text
+capability dependency helper = facts and wakeups
+service coordinator           = policy and admission
+worker/request scope           = blocking capability calls
+```
+
+For admission decisions, use `deps:available(key)`, not `deps:status(key)`.
+`status()` is diagnostic: an observed capability may say `running` while carrying
+`available=false`, or may be locally overridden by `route_missing` after a
+`no_route` call.
+
+Classify dependency failures before applying service policy:
+
+```text
+no_route / capability absent / available=false
+  => admission failure; record waiting or reject the individual request
+
+accepted operation returns a domain error
+  => domain failure; degrade, fail, or record a failed job/action according to
+     the owning service's policy
+```
+
+The current modern service expectations are:
+
+```text
+HTTP    exposes cap/http status; non-status requests require backend ready.
+UI      waits for cap/http before starting configured listener work.
+Fabric  waits for HAL/raw transport capabilities before starting link generation.
+Device  gates explicitly dependency-annotated actions; observations remain tolerant.
+Wired   projects provider dependency state as model facts, not startup blockers.
+NET     gates network-config and network-state work.
+Update  gates job and artifact runtime work.
+```

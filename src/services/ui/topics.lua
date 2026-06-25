@@ -31,6 +31,7 @@ end
 function M.default_excluded_retained_patterns()
 	return {
 		t('state', 'ui', '#'),
+		t('svc', 'ui', '#'),
 		t('obs', 'v1', 'ui', '#'),
 	}
 end

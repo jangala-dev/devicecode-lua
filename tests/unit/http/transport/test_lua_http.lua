@@ -89,6 +89,7 @@ local function listener_with(opts)
 		max_accept_queue = opts.max_accept_queue,
 		condition_factory = function () return fake_condition() end,
 		context_terminator = opts.context_terminator,
+		intra_stream_timeout = opts.intra_stream_timeout,
 		on_context = opts.on_context,
 	})
 end
@@ -176,6 +177,23 @@ function M.test_http_context_read_helpers_preserve_http_semantics()
 		eq(body, 'body')
 		eq(stream.calls[1][1], 'body')
 		eq(stream.calls[1][2], nil)
+		ctx:terminate('done')
+		listener:terminate('done')
+	end)
+end
+
+function M.test_http_context_stream_ops_pass_intra_stream_timeout()
+	local listener = listener_with { intra_stream_timeout = 0.25 }
+	local stream = fake_stream()
+	local ctx = lua_http._new_context_for_test(listener, listener:_raw_server_for_test(), stream)
+
+	fibers.run(function (scope)
+		assert(scope:spawn(function () fibers.perform(ctx:read_chunk_op()) end))
+		yield_many(3)
+		ok(ctx:_drain_one_for_test())
+		yield_many(3)
+		eq(stream.calls[1][1], 'chunk')
+		eq(stream.calls[1][2], 0.25, 'server context should pass intra_stream_timeout to lua-http stream read')
 		ctx:terminate('done')
 		listener:terminate('done')
 	end)

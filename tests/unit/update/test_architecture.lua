@@ -20,6 +20,29 @@ local function list_update_files()
 	return out
 end
 
+
+function tests.test_update_service_defaults_to_control_store_job_store()
+	local svc = read_file('../src/services/update/service.lua')
+	if not svc:find("services.update.job_store_control_store", 1, true) then
+		fail('service.lua should import the control-store-backed job store')
+	end
+	if not svc:find("control_store_jobs.new", 1, true) then
+		fail('service.lua should build the control-store job store by default')
+	end
+	if not svc:find("services.update.job_store_memory", 1, true) then
+		fail('service.lua should import strict memory job store for explicit tests/harness use')
+	end
+	if not svc:find("job_store_kind == 'memory'", 1, true) then
+		fail('memory job store should be an explicit test/harness opt-in')
+	end
+	if svc:find("services.update.job_store_cap", 1, true) then
+		fail('service.lua should not use job_store_cap compatibility wrapper')
+	end
+	if svc:find("services.update.artifacts.store_cap", 1, true) then
+		fail('service.lua should not use artifact store compatibility wrapper')
+	end
+end
+
 function tests.test_update_service_code_does_not_use_perform_raw()
 	for _, path in ipairs(list_update_files()) do
 		local s = read_file(path)
@@ -278,31 +301,17 @@ function tests.test_update_production_code_uses_scoped_work_not_direct_target_sp
 	end
 end
 
-function tests.test_artifact_resolver_is_only_imported_by_worker_modules()
-	local forbidden = {
-		'../src/services/update/service.lua',
-		'../src/services/update/generation.lua',
-		'../src/services/update/events.lua',
-		'../src/services/update/generation_events.lua',
-		'../src/services/update/manager.lua',
-		'../src/services/update/active_runtime.lua',
-		'../src/services/update/ingest.lua',
-	}
-	for _, path in ipairs(forbidden) do
-		local src = read_file(path)
-		if src:find("services.update.artifacts.resolver", 1, true) then
-			fail('artifact resolver imported outside worker-owned modules: ' .. path)
+function tests.test_create_job_does_not_use_artifact_resolver_compatibility()
+	for _, path in ipairs(list_update_files()) do
+		local s = read_file(path)
+		if s:find('services.update.artifacts.resolver', 1, true)
+			or s:find('services.update.artifacts.preflight', 1, true)
+			or s:find('payload.artifact_source', 1, true)
+			or s:find('artifact_preflight', 1, true) then
+			fail('update create-job artifact compatibility remains in: ' .. path)
 		end
 	end
-	local resolver = read_file('../src/services/update/artifacts/resolver.lua')
-	if not resolver:find('function M.resolve_worker', 1, true) then
-		fail('artifact resolver should expose resolve_worker')
-	end
-	if resolver:find('function M.resolve%(', 1, false) then
-		fail('artifact resolver should not expose ambiguous resolve() entry point')
-	end
 end
-
 function tests.test_update_service_generation_boundary_uses_events_not_callbacks()
 	local svc = read_file('../src/services/update/service.lua')
 	local gen = read_file('../src/services/update/generation.lua')
@@ -316,6 +325,33 @@ function tests.test_update_service_generation_boundary_uses_events_not_callbacks
 	end
 	if not svc:find('generation_snapshot', 1, true) or not gen:find('events_tx', 1, true) then
 		fail('generation snapshots should be reported through service events')
+	end
+end
+
+
+function tests.test_bus_request_scoped_work_uses_caller_cancel_op()
+	local mgr = read_file('../src/services/update/manager.lua')
+	if not mgr:find('cancel_op = owner:caller_cancel_op()', 1, true) then
+		fail('update manager scoped request work should use caller_cancel_op')
+	end
+	if not mgr:find('request_owner = owner', 1, true) then
+		fail('update manager should pass its canonical request owner to request workers')
+	end
+
+	local reqs = read_file('../src/services/update/manager_requests.lua')
+	if not reqs:find('params.request_owner', 1, true) then
+		fail('manager_requests should reuse the manager-owned request owner')
+	end
+
+	local ingest = read_file('../src/services/update/ingest.lua')
+	if not ingest:find('owner = request_owner.new(req)', 1, true) then
+		fail('ingest should create request owners at queue admission')
+	end
+	if not ingest:find('cancel_op = entry.owner and entry.owner:caller_cancel_op()', 1, true) then
+		fail('ingest scoped work should use caller_cancel_op')
+	end
+	if not ingest:find('entry_abandoned', 1, true) then
+		fail('ingest should skip requests abandoned while queued')
 	end
 end
 

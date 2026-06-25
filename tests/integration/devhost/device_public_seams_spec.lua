@@ -45,7 +45,7 @@ local function mcu_config(extra)
 	local actions = extra.actions or {
 		['stage-update'] = {
 			kind = 'fabric_stage',
-			receiver = topics.raw_member_cap_rpc('mcu', 'updater', 'main', 'stage-update'),
+			target = 'updater/main',
 		},
 	}
 	return {
@@ -95,12 +95,16 @@ end
 
 local function transfer_client_for(conn)
 	return {
-		send_blob_op = function (_, source, meta, opts)
+		send_blob_op = function (_, params, opts)
+			assert(params and params.source_owner, 'source_owner required')
 			return conn:call_op(fabric_topics.transfer_manager_rpc('send-blob'), {
-				source = source,
-				meta = meta,
-				receiver = meta and meta.receiver,
-				link_id = meta and meta.link_id,
+				source_owner = params.source_owner,
+				meta = params.meta,
+				target = params.target,
+				link_id = params.link_id,
+				size = params.size,
+				digest_alg = params.digest_alg,
+				digest = params.digest,
 			}, { timeout = opts and opts.timeout or 1.0 }):wrap(function (reply, err)
 				if reply == nil then return nil, err end
 				return reply.result or reply
@@ -163,7 +167,6 @@ function T.device_stage_update_calls_public_transfer_manager_capability()
 		local bus = busmod.new()
 		local caller = bus:connect()
 		local source_terminated = 0
-		local receiver_installed = 0
 		local seen_request
 
 		local transfer_ep = caller:bind(fabric_topics.transfer_manager_rpc('send-blob'), {
@@ -172,20 +175,17 @@ function T.device_stage_update_calls_public_transfer_manager_capability()
 		local ok, err = scope:spawn(function ()
 			local req = transfer_ep:recv()
 			seen_request = req and req.payload
+			if seen_request and seen_request.source_owner then
+				local source, herr = seen_request.source_owner:detach()
+				assert_not_nil(source, herr)
+			end
 			if req then
 				req:reply({
 					ok = true,
 					result = {
 						ok = true,
-						reply_payload = { staged = true, receiver = seen_request and seen_request.receiver },
-						source_handoff = {
-							consumed = true,
-							receiver_install = function (src)
-								receiver_installed = receiver_installed + 1
-								assert_not_nil(src)
-								return true, nil
-							end,
-						},
+						reply_payload = { staged = true, target = seen_request and seen_request.target },
+						staged = true,
 					},
 				})
 			end
@@ -208,13 +208,10 @@ function T.device_stage_update_calls_public_transfer_manager_capability()
 		}, { timeout = 1.0 })
 		assert_not_nil(reply, call_err)
 		assert_eq(reply.staged, true)
-		assert_eq(reply.receiver[1], 'raw')
-		assert_eq(reply.receiver[2], 'member')
-		assert_eq(reply.receiver[3], 'mcu')
+		assert_eq(reply.target, 'updater/main')
 		assert_not_nil(seen_request)
-		assert_eq(seen_request.receiver[1], 'raw')
-		assert_eq(source_terminated, 0, 'device must release cleanup after receiver handoff')
-		assert_eq(receiver_installed, 1)
+		assert_eq(seen_request.target, 'updater/main')
+		assert_eq(source_terminated, 0, 'device must release cleanup after source-owner transfer')
 
 		local component = wait_retained_payload_where(conn, topics.component('mcu'), 'mcu stage action recorded', function (p)
 			return p and p.last_action and p.last_action.action == 'stage-update'
@@ -222,7 +219,7 @@ function T.device_stage_update_calls_public_transfer_manager_capability()
 		assert_not_nil(component.last_action)
 		assert_eq(component.last_action.action, 'stage-update')
 		assert_eq(component.last_action.ok, true)
-		assert_nil(component.last_action.result.source_handoff)
+		assert_nil(component.last_action.result.source_owner)
 
 		h.child:cancel('test complete')
 	end, { timeout = 5.0 })

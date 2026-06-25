@@ -1,0 +1,173 @@
+-- services/net/hal_client.lua
+-- NET-facing semantic HAL client.
+--
+-- This module deliberately exposes product-level operations only.  NET callers
+-- should not see host-specific command or configuration details here.
+
+local op = require 'fibers.op'
+local tablex = require 'shared.table'
+local cap_sdk = require 'services.hal.sdk.cap'
+local dep_failure = require 'devicecode.support.dependency_failure'
+
+local M = {}
+local Client = {}
+Client.__index = Client
+
+local function copy(v)
+	if type(v) == 'table' then return tablex.deep_copy(v) end
+	return v
+end
+
+local function reason_text(reason, fallback)
+	if type(reason) == 'table' then
+		return tostring(reason.err or reason.reason or reason.message or reason.code or fallback)
+	end
+	if reason ~= nil then return tostring(reason) end
+	return tostring(fallback)
+end
+
+local function failure_result(reason, fallback, code)
+	local out = {
+		ok = false,
+		err = reason_text(reason, fallback or 'network HAL rejected request'),
+		reason = copy(reason),
+	}
+	if code ~= nil then out.code = code end
+	return out
+end
+
+local function reply_to_result(reply, err, dependency_key)
+	if not reply then
+		local dep = dep_failure.from_no_route(dependency_key, err, {
+			err = 'no_route',
+			source = 'network_hal_call',
+		})
+		if dep then return dep end
+		return failure_result({ err = 'network HAL call failed', detail = err }, 'network HAL call failed')
+	end
+
+	if reply.ok ~= true then
+		return failure_result(reply.reason, 'network HAL rejected request', reply.code)
+	end
+
+	if type(reply.reason) == 'table' then
+		local out = copy(reply.reason)
+		if out.ok == nil then out.ok = true end
+		return out
+	end
+
+	return {
+		ok = true,
+		result = reply.reason,
+	}
+end
+
+local function default_ref(conn, class, id)
+	if not conn then return nil end
+	return cap_sdk.new_curated_cap_ref(conn, class, id or 'main')
+end
+
+function M.new(conn, opts)
+	opts = opts or {}
+	local resolve_defaults = opts.resolve_defaults ~= false
+	return setmetatable({
+		conn = conn,
+		network_config = opts.network_config_cap or (resolve_defaults and default_ref(conn, 'network-config', opts.network_config_id)),
+		network_state = opts.network_state_cap or (resolve_defaults and default_ref(conn, 'network-state', opts.network_state_id)),
+		network_diagnostics = opts.network_diagnostics_cap or (resolve_defaults and default_ref(conn, 'network-diagnostics', opts.network_diagnostics_id)),
+		-- Dry-run must be explicit.  A missing network-config capability should not
+		-- look like a successful host apply on production devices.
+		dry_run = opts.dry_run == true,
+	}, Client)
+end
+
+function Client:available()
+	return self.network_config ~= nil
+end
+
+function Client:observation_available()
+	return self.conn ~= nil and self.network_state ~= nil
+end
+
+function Client:apply_intent_op(intent, opts)
+	opts = opts or {}
+	if self.network_config and type(self.network_config.call_control_op) == 'function' then
+		return self.network_config:call_control_op('apply', {
+			intent = intent,
+			opts = opts,
+		}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_config') end)
+	end
+
+	if self.dry_run == true then
+		return op.always({
+			ok = true,
+			applied = false,
+			changed = false,
+			backend = 'none',
+			dry_run = true,
+			note = 'network-config HAL capability not configured; explicit dry-run apply',
+		})
+	end
+
+	return op.always({
+		ok = false,
+		err = 'network-config HAL capability not configured',
+		reason = {
+			code = 'missing_network_config_hal',
+			detail = 'network-config HAL capability not configured',
+		},
+	})
+end
+
+
+function Client:apply_live_weights_op(req, opts)
+	opts = opts or {}
+	if self.network_config and type(self.network_config.call_control_op) == 'function' then
+		return self.network_config:call_control_op('apply_live_weights', req or {}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_config') end)
+	end
+	return op.always({ ok = false, err = 'network-config HAL capability not configured', reason = { code = 'missing_network_config_hal' } })
+end
+
+function Client:apply_shaping_op(req, opts)
+	opts = opts or {}
+	if self.network_config and type(self.network_config.call_control_op) == 'function' then
+		return self.network_config:call_control_op('apply_shaping', req or {}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_config') end)
+	end
+	return op.always({ ok = false, err = 'network-config HAL capability not configured', reason = { code = 'missing_network_config_hal' } })
+end
+
+function Client:speedtest_op(req, opts)
+	opts = opts or {}
+	if self.network_diagnostics and type(self.network_diagnostics.call_control_op) == 'function' then
+		return self.network_diagnostics:call_control_op('speedtest', req or {}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_diagnostics') end)
+	end
+	return op.always({ ok = false, err = 'network-diagnostics HAL capability not configured', reason = { code = 'missing_network_diagnostics_hal' } })
+end
+
+function Client:start_observation_op(opts)
+	opts = opts or {}
+	if self.network_state and type(self.network_state.call_control_op) == 'function' then
+		return self.network_state:call_control_op('watch', opts, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_state') end)
+	end
+	return op.always({
+		ok = false,
+		err = 'network-state HAL capability not configured',
+		reason = {
+			code = 'missing_network_state_hal',
+			detail = 'network-state HAL capability not configured',
+		},
+	})
+end
+
+function Client:open_observed_subscription(opts)
+	opts = opts or {}
+	if not self.network_state or type(self.network_state.get_event_sub) ~= 'function' then
+		return nil, 'network-state HAL capability not configured'
+	end
+	return self.network_state:get_event_sub('observed', {
+		queue_len = opts.queue_len or 32,
+		full = opts.full or 'drop_oldest',
+	})
+end
+
+return M

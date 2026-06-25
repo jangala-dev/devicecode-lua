@@ -17,6 +17,7 @@ local manager_mod       = require 'services.update.manager'
 local generation_events = require 'services.update.generation_events'
 local observe_mod       = require 'services.update.observe'
 local ingest_mod        = require 'services.update.ingest'
+local bundled_mod       = require 'services.update.bundled'
 local service_events    = require 'devicecode.support.service_events'
 
 local M = {}
@@ -51,6 +52,9 @@ local function update_generation_model(self)
 		end
 		if self._ingest then
 			s.ingest = self._ingest:snapshot()
+		end
+		if self._bundled then
+			s.bundled = self._bundled:snapshot()
 		end
 		return s
 	end)
@@ -92,6 +96,7 @@ local function make_manager_context(self)
 		manager_work = self._manager_work,
 		observer = self._observer,
 		ingest = self._ingest,
+		artifact_store = self._artifact_store,
 		active = copy(self._active_snapshot),
 		snapshot = self._model:snapshot(),
 	}
@@ -113,6 +118,50 @@ end
 local function handle_service_active_snapshot(self, ev)
 	self._active_snapshot = copy(ev.snapshot)
 	assert_update_generation_model(self)
+end
+
+local function start_bundled_probes(self)
+	if not self._bundled then return true, nil end
+	local started, err = self._bundled:start_missing_probes {
+		lifetime_scope = self._scope,
+		reaper_scope = self._scope,
+		report_scope = self._scope,
+		artifact_store = self._artifact_store,
+		done_tx = self._done_tx,
+	}
+	if not started then return nil, err or 'bundled_probe_start_failed' end
+	assert_update_generation_model(self)
+	return true, nil
+end
+
+local function start_bundled_applies(self)
+	if not self._bundled then return true, nil end
+	local started, err = self._bundled:start_ready_applies {
+		lifetime_scope = self._scope,
+		reaper_scope = self._scope,
+		report_scope = self._scope,
+		jobs = self._jobs,
+		done_tx = self._done_tx,
+	}
+	if not started then return nil, err or 'bundled_apply_start_failed' end
+	assert_update_generation_model(self)
+	return true, nil
+end
+
+local function handle_bundled_probe_done(self, ev)
+	local ok, err = self._bundled:handle_probe_done(ev)
+	if ok ~= true then return ok, err end
+	local aok, aerr = start_bundled_applies(self)
+	if aok ~= true then error(aerr or 'bundled_apply_start_failed', 0) end
+	assert_update_generation_model(self)
+	return true, nil
+end
+
+local function handle_bundled_apply_done(self, ev)
+	local ok, err = self._bundled:handle_apply_done(ev)
+	if ok ~= true then return ok, err end
+	assert_update_generation_model(self)
+	return true, nil
 end
 
 local function reduce_event(self, ev)
@@ -145,9 +194,19 @@ local function reduce_event(self, ev)
 		return
 	end
 
-	if ev.kind == 'ingest_request_done' then
+	if ev.kind == 'ingest_request_done' or ev.kind == 'ingest_create_done' then
 		self._ingest:handle_done(make_manager_context(self), ev)
 		assert_update_generation_model(self)
+		return
+	end
+
+	if ev.kind == 'bundled_probe_done' then
+		handle_bundled_probe_done(self, ev)
+		return
+	end
+
+	if ev.kind == 'bundled_apply_done' then
+		handle_bundled_apply_done(self, ev)
 		return
 	end
 
@@ -205,6 +264,12 @@ function M.run(scope, params)
 		queue_len = params.ingest_queue_len,
 	})
 
+	local bundled_state = bundled_mod.new({
+		service_id = params.service_id or 'update',
+		generation = params.generation or snapshot.generation,
+		config = (params.config and params.config.bundled) or {},
+	})
+
 	local parent_events
 	if params.events_tx ~= nil then
 		parent_events = service_events.port(params.events_tx, {
@@ -227,6 +292,8 @@ function M.run(scope, params)
 		_jobs = jobs,
 		_observer = observer,
 		_ingest = ingest_state,
+		_bundled = bundled_state,
+		_artifact_store = params.artifact_store,
 		manager_rx = params.manager_rx,
 		service_rx = params.service_rx,
 		done_rx = done_rx,
@@ -237,6 +304,9 @@ function M.run(scope, params)
 		_active_snapshot = copy(params.active_snapshot),
 		_events = parent_events,
 	}, Generation)
+
+	local bok, berr = start_bundled_probes(self)
+	if bok ~= true then error(berr or 'bundled_probe_start_failed', 0) end
 
 	return coordinator_loop(self)
 end

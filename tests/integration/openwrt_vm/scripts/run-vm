@@ -12,6 +12,12 @@ if [ -f "${OPENWRT_PID}" ] && kill -0 "$(cat "${OPENWRT_PID}")" 2>/dev/null; the
 	exit 0
 fi
 
+if command -v ss >/dev/null 2>&1 && ss -H -ltn "sport = :${OPENWRT_SSH_PORT}" 2>/dev/null | grep -q .; then
+	echo "[openwrt-vm] SSH port ${OPENWRT_SSH_PORT} is already in use" >&2
+	echo "[openwrt-vm] run ./scripts/stop-vm, or set OPENWRT_SSH_PORT to a free port" >&2
+	exit 1
+fi
+
 if [ ! -f "${OPENWRT_WORK_DISK}" ]; then
 	"$SCRIPT_DIR/reset-disk"
 fi
@@ -21,13 +27,21 @@ rm -f "${OPENWRT_LOG}" "${OPENWRT_PID}"
 
 NETDEV="user,id=mgmt0,net=192.168.1.0/24,hostfwd=tcp::${OPENWRT_SSH_PORT}-192.168.1.1:22"
 
+# Debian's qemu-system-arm package does not install the iPXE option ROMs
+# unless recommended packages are enabled. We boot from disk, not PXE, so disable
+# the virtio-net PCI option ROMs on AArch64 instead of requiring ipxe-qemu.
+NET_ROMFILE_OPT=""
+if [ "${OPENWRT_ARCH}" = "aarch64" ]; then
+	NET_ROMFILE_OPT=",romfile="
+fi
+
 add_common_args() {
 	set -- \
 		-m "${OPENWRT_VM_MEM}" \
 		-smp "${OPENWRT_VM_CPUS}" \
 		-drive "file=${OPENWRT_WORK_DISK},format=qcow2,if=virtio" \
 		-netdev "${NETDEV}" \
-		-device virtio-net-pci,netdev=mgmt0 \
+		-device "virtio-net-pci,netdev=mgmt0${NET_ROMFILE_OPT}" \
 		-display none \
 		-monitor none \
 		-daemonize \
@@ -35,12 +49,21 @@ add_common_args() {
 		-serial "file:${OPENWRT_LOG}"
 
 	idx=0
+	while [ "$idx" -lt "${OPENWRT_VM_WAN_IFACES:-3}" ]; do
+		idx=$((idx + 1))
+		mac="$(printf '02:dc:bb:01:00:%02x' "$idx")"
+		set -- "$@" \
+			-netdev "user,id=wan${idx},net=172.31.${idx}.0/24" \
+			-device "virtio-net-pci,netdev=wan${idx},mac=${mac}${NET_ROMFILE_OPT}"
+	done
+
+	idx=0
 	for tap in ${OPENWRT_TAP_IFACES:-}; do
 		idx=$((idx + 1))
 		mac="$(printf '02:dc:bb:00:00:%02x' "$idx")"
 		set -- "$@" \
 			-netdev "tap,id=data${idx},ifname=${tap},script=no,downscript=no" \
-			-device "virtio-net-pci,netdev=data${idx},mac=${mac}"
+			-device "virtio-net-pci,netdev=data${idx},mac=${mac}${NET_ROMFILE_OPT}"
 	done
 
 	if [ "$OPENWRT_ARCH" = "x86_64" ]; then
@@ -80,10 +103,41 @@ if [ -z "${AAVMF_CODE}" ]; then
 	exit 1
 fi
 
-set -- \
-	-machine virt \
-	-cpu cortex-a72 \
-	-bios "${AAVMF_CODE}"
+aarch64_kvm_args=""
+case "${OPENWRT_KVM}" in
+	1)
+		if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+			aarch64_kvm_args=1
+		else
+			echo "[openwrt-vm] OPENWRT_KVM=1 but /dev/kvm is not accessible" >&2
+			exit 1
+		fi
+		;;
+	auto)
+		if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+			aarch64_kvm_args=1
+		fi
+		;;
+	0|off|false)
+		;;
+	*)
+		echo "[openwrt-vm] invalid OPENWRT_KVM=${OPENWRT_KVM}" >&2
+		exit 1
+		;;
+esac
+
+if [ -n "$aarch64_kvm_args" ]; then
+	set -- \
+		-enable-kvm \
+		-machine virt \
+		-cpu host \
+		-bios "${AAVMF_CODE}"
+else
+	set -- \
+		-machine virt \
+		-cpu cortex-a72 \
+		-bios "${AAVMF_CODE}"
+fi
 
 # Rebuild the common tail after the AArch64 machine-specific prefix.
 set -- "$@" \
@@ -91,7 +145,7 @@ set -- "$@" \
 	-smp "${OPENWRT_VM_CPUS}" \
 	-drive "file=${OPENWRT_WORK_DISK},format=qcow2,if=virtio" \
 	-netdev "${NETDEV}" \
-	-device virtio-net-pci,netdev=mgmt0 \
+	-device "virtio-net-pci,netdev=mgmt0${NET_ROMFILE_OPT}" \
 	-display none \
 	-monitor none \
 	-daemonize \
@@ -99,12 +153,21 @@ set -- "$@" \
 	-serial "file:${OPENWRT_LOG}"
 
 idx=0
+while [ "$idx" -lt "${OPENWRT_VM_WAN_IFACES:-3}" ]; do
+	idx=$((idx + 1))
+	mac="$(printf '02:dc:bb:01:00:%02x' "$idx")"
+	set -- "$@" \
+		-netdev "user,id=wan${idx},net=172.31.${idx}.0/24" \
+		-device "virtio-net-pci,netdev=wan${idx},mac=${mac}${NET_ROMFILE_OPT}"
+done
+
+idx=0
 for tap in ${OPENWRT_TAP_IFACES:-}; do
 	idx=$((idx + 1))
 	mac="$(printf '02:dc:bb:00:00:%02x' "$idx")"
 	set -- "$@" \
 		-netdev "tap,id=data${idx},ifname=${tap},script=no,downscript=no" \
-		-device "virtio-net-pci,netdev=data${idx},mac=${mac}"
+		-device "virtio-net-pci,netdev=data${idx},mac=${mac}${NET_ROMFILE_OPT}"
 done
 
 exec "${OPENWRT_QEMU}" "$@"

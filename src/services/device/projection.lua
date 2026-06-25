@@ -12,6 +12,7 @@ local M = {}
 
 function M.identity_topic() return topics.identity() end
 function M.summary_topic() return topics.components() end
+function M.assembly_topic() return topics.assembly() end
 function M.component_topic(name) return topics.component(name) end
 function M.component_software_topic(name) return topics.component_software(name) end
 function M.component_update_topic(name) return topics.component_update(name) end
@@ -73,8 +74,12 @@ local function collect_backing_refs(rec)
 	for name, spec in pairs(rec.actions or {}) do
 		if type(spec) == 'table' and spec.call_topic then
 			refs.actions[name] = copy_topic(spec.call_topic)
-		elseif type(spec) == 'table' and spec.receiver then
-			refs.actions[name] = copy_topic(spec.receiver)
+		elseif type(spec) == 'table' and spec.kind == 'fabric_stage' then
+			refs.actions[name] = {
+				kind = 'fabric-stage',
+				target = spec.target,
+				link_id = spec.link_id,
+			}
 		else
 			refs.actions[name] = copy_topic(spec)
 		end
@@ -132,6 +137,7 @@ function M.component_view(name, rec, now_ts)
 		environment = copy(base.environment or {}),
 		runtime = copy(base.runtime or {}),
 		alerts = copy(base.alerts or {}),
+		observed = copy(base.observed or {}),
 		source = derive_source(rec),
 		last_action = copy(rec.last_action),
 	}
@@ -211,6 +217,7 @@ function M.summary_payload(snapshot, now_ts)
 			environment = copy(view.environment),
 			runtime = copy(view.runtime),
 			alerts = copy(view.alerts),
+			observed = copy(view.observed or {}),
 		}
 	end
 
@@ -221,6 +228,16 @@ function M.summary_payload(snapshot, now_ts)
 		components = items,
 		counts = counts,
 	}
+end
+
+
+function M.assembly_payload(snapshot, now_ts)
+	local cat = snapshot and snapshot.catalogue or {}
+	local assembly = copy(cat.assembly or {})
+	assembly.kind = assembly.kind or 'device.assembly'
+	assembly.ts = now_ts
+	assembly.generation = snapshot and snapshot.generation or nil
+	return assembly
 end
 
 function M.identity_payload(snapshot, now_ts)

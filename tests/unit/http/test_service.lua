@@ -1,5 +1,7 @@
 local fibers = require 'fibers'
 local runtime = require 'fibers.runtime'
+local op      = require 'fibers.op'
+local sleep   = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 local bus    = require 'bus'
 
@@ -9,6 +11,7 @@ local listener_owner = require 'services.http.listener_owner'
 local lua_http      = require 'services.http.transport.lua_http'
 local public_ws     = require 'services.http.websocket'
 local driver_mod    = require 'services.http.transport.cqueues_driver'
+local operation_owner = require 'services.http.operation_owner'
 
 local M = {}
 
@@ -32,6 +35,21 @@ local function yield_until(pred, msg)
 		runtime.yield()
 	end
 	error(msg or 'condition was not reached', 2)
+end
+
+local function recv_payload(sub, label)
+	local which, msg, err = fibers.perform(op.named_choice({
+		msg = sub:recv_op(),
+		timeout = sleep.sleep_op(0.1),
+	}))
+	if which ~= 'msg' then error(label or 'timed out waiting for message', 2) end
+	ok(msg, err or label or 'expected message')
+	return msg.payload
+end
+
+local function table_empty(t)
+	for _ in pairs(t or {}) do return false end
+	return true
 end
 
 local function fake_controller()
@@ -67,6 +85,59 @@ function M.test_service_retains_capability_metadata_and_status()
 		ok(rep.status.ready, 'service should report ready')
 		svc:terminate('done')
 		eq(drv.terminated, 'done')
+	end)
+end
+
+
+function M.test_http_failure_recovery_is_visible_and_resets_suppression()
+	fibers.run(function ()
+		local topics = require 'services.http.topics'
+		local b = bus.new()
+		local root = b:connect({ origin_base = { kind = 'local' } })
+		local warn_sub = root:subscribe(topics.obs_log('main', 'warn'), { queue_len = 10 })
+		local info_sub = root:subscribe(topics.obs_log('main', 'info'), { queue_len = 10 })
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
+		yield_many(4)
+
+		local request_id = 'req-recovery'
+		svc._state.requests[request_id] = {
+			request_id = request_id,
+			target = {
+				method = 'GET',
+				host = '172.28.100.9',
+				path = '/cgi/get.cgi',
+				cmd = 'sys_cpumem',
+				response_parser = 'legacy-http1-close',
+			},
+		}
+		local rec = { operation = 'exchange', request_id = request_id }
+		local ev = { status = 'failed', primary = 'timeout' }
+
+		ok(svc:_record_http_failure(rec, ev))
+		local first_failure = recv_payload(warn_sub, 'expected first failure log')
+		eq(first_failure.what, 'request_failed')
+		eq(first_failure.reason, 'timeout')
+		eq(first_failure.cmd, 'sys_cpumem')
+
+		ok(svc:_record_http_failure(rec, ev))
+		local saw_suppressed = false
+		for _, win in pairs(svc._obs.failure_windows) do
+			if (win.suppressed or 0) == 1 then saw_suppressed = true end
+		end
+		ok(saw_suppressed, 'second equivalent failure should be suppressed within the rate limit window')
+
+		ok(svc:_record_http_recovery({ operation = 'exchange' }))
+		local recovery = recv_payload(info_sub, 'expected recovery log')
+		eq(recovery.what, 'request_recovered')
+		eq(recovery.operation, 'exchange')
+		ok(table_empty(svc._obs.failure_windows), 'recovery must clear failure suppression windows')
+
+		ok(svc:_record_http_failure(rec, ev))
+		local fresh_failure = recv_payload(warn_sub, 'expected post-recovery failure log')
+		eq(fresh_failure.what, 'request_failed')
+		eq(fresh_failure.reason, 'timeout')
+
+		svc:terminate('done')
 	end)
 end
 
@@ -210,6 +281,77 @@ function M.test_event_queue_overflow_for_completion_fails_observing_service()
 		eq(st, 'failed')
 		ok(tostring(primary):match('http_operation_done_report_failed'))
 	end)
+end
+
+
+function M.test_bus_request_abandonment_cancels_admitted_http_operation()
+	fibers.run(function ()
+		local b = bus.new()
+		local root = b:connect({ origin_base = { kind = 'local' } })
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
+		yield_many(4)
+
+		local done_tx, done_rx = mailbox.new(1, { full = 'reject_newest' })
+		local req = {
+			payload = { method = 'GET', url = 'http://example.invalid/' },
+			origin = { kind = 'local' },
+			reply = function () error('abandoned request must not be replied to', 0) end,
+			fail = function () error('abandoned request must not be failed visibly', 0) end,
+			done_op = function ()
+				return done_rx:recv_op():wrap(function (ev)
+					return ev.status, ev.value, ev.err
+				end)
+			end,
+		}
+		local request_id, owner = svc:_next_request_identity('exchange', req)
+		svc._state.requests[request_id] = { request_id = request_id, verb = 'exchange', owner = owner, state = 'received', generation = svc._generation }
+
+		ok(operation_owner.start(svc, 'exchange', req, request_id, owner, function ()
+			fibers.perform(sleep.sleep_op(10.0))
+			return { ok = true }
+		end))
+
+		local operation_id
+		for id, rec in pairs(svc._state.operations) do
+			if rec.request_id == request_id then operation_id = id end
+		end
+		ok(operation_id, 'expected operation identity')
+
+		ok(done_tx:send({ status = 'abandoned', err = 'caller_timeout' }))
+		yield_until(function ()
+			local rec = svc._state.operations[operation_id]
+			return rec and rec.state == 'completed'
+		end, 'operation should complete after caller abandonment')
+
+		local rec = svc._state.operations[operation_id]
+		eq(rec.status, 'cancelled')
+		eq(rec.primary, 'caller_timeout')
+		local reqrec = svc._state.requests[request_id]
+		eq(reqrec.state, 'cancelled')
+		eq(reqrec.reason, 'caller_timeout')
+		eq(svc._owned_requests[request_id], nil)
+		ok(owner:done(), 'owner should be locally abandoned')
+
+		svc:terminate('done')
+	end)
+end
+
+function M.test_http_sdk_uses_compositional_timeout_by_default()
+	local seen_opts
+	local ref = sdk_mod.new_ref({
+		call_op = function (_, _topic, _args, opts)
+			seen_opts = opts
+			return fibers.always('ok')
+		end,
+	}, 'main')
+
+	fibers.run(function ()
+		local v = fibers.perform(ref:exchange_op({ method = 'GET', url = 'http://example.invalid/' }))
+		eq(v, 'ok')
+	end)
+
+	ok(seen_opts, 'expected SDK to pass call opts')
+	eq(seen_opts.timeout, false)
 end
 
 function M.test_service_shutdown_terminates_registry_handles_and_finalises_unresolved_requests()
@@ -906,9 +1048,10 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 					if tostring(self.uri):match('slow') then
 						first_stream = {
 							terminated = false,
+							release_read = false,
 							get_next_chunk = function (stream)
 								first_read_active = true
-								while not stream.terminated do runtime.yield() end
+								while not stream.release_read do runtime.yield() end
 								return nil, 'closed'
 							end,
 							shutdown = function (stream) stream.terminated = true; return true end,
@@ -946,16 +1089,22 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 		local waiter = ok(scope:child())
 		ok(waiter:spawn(function () fibers.perform(ex:read_chunk_op(1024)) end))
 		yield_until(function () return first_read_active end, 'slow exchange read should be active')
-		-- The driver pump runs the active read job.  Once the caller loses interest,
-		-- the public exchange handle should terminate that stream, not the backend.
-		waiter:cancel('caller_cancelled')
-		fibers.perform(waiter:join_op())
-		yield_until(function () return svc:stats().active_exchanges == 0 end,
+			-- The driver pump runs the active read job.  Once the caller loses interest,
+			-- the public exchange handle should detach and close for the caller, but the
+			-- lua-http/cqueues-owned stream cleanup must wait until the cqueues job
+			-- returns.  The fake read is therefore released explicitly after caller
+			-- cancellation, modelling a cqueues-side timeout/error return.
+			waiter:cancel('caller_cancelled')
+			fibers.perform(waiter:join_op())
+			yield_until(function () return svc:stats().active_exchanges == 0 end,
 			'exchange termination should deregister the service record')
 
-		ok(first_stream.terminated, 'public exchange read cancellation should terminate the exchange stream')
-		ok(ex:is_closed(), 'public exchange handle should be closed after active read abort')
-		ok(not drv:is_closed(), 'the exchange is the narrow owner; the HTTP backend should stay usable')
+			ok(not first_stream.terminated, 'caller cancellation must not synchronously terminate cqueues-owned stream state')
+			ok(ex:is_closed(), 'public exchange handle should be closed after active read abort')
+			first_stream.release_read = true
+			yield_until(function () return first_stream.terminated end,
+			'detached read cleanup should terminate the stream after the cqueues job returns')
+			ok(not drv:is_closed(), 'the exchange is the narrow owner; the HTTP backend should stay usable')
 
 		local second = ok(fibers.perform(ref:exchange_op({ uri = 'http://example.test/fast', method = 'GET' })))
 		eq(second.result.status, '200')

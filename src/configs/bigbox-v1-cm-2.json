@@ -1,0 +1,1868 @@
+{
+  "hal": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/hal/1",
+      "filesystem": [
+        {
+          "name": "config",
+          "root": "/data/devicecode/configs"
+        },
+        {
+          "name": "credentials",
+          "root": "/data/configs"
+        },
+        {
+          "name": "state",
+          "root": "/tmp/devicecode-state"
+        }
+      ],
+      "network": {
+        "provider": "openwrt",
+        "platform": {
+          "segment_trunk": {
+            "ifname": "eth0",
+            "protected": true
+          }
+        }
+      },
+      "wired": {
+        "providers": {
+          "cm5-local-wired": {
+            "provider": "static",
+            "mode": "read_only",
+            "poll": {
+              "static": {
+                "interval_s": 30.0,
+                "groups": [
+                  "snapshot"
+                ]
+              }
+            },
+            "surfaces": {
+              "eth0": {
+                "provider_surface_id": "eth0",
+                "kind": "direct-nic",
+                "capabilities": {
+                  "trunk": true,
+                  "access": false,
+                  "poe": false
+                },
+                "link": {
+                  "state": "unknown"
+                },
+                "attachment": {
+                  "mode": "trunk",
+                  "vlans": [
+                    8,
+                    100,
+                    32,
+                    4
+                  ]
+                }
+              }
+            }
+          },
+          "switch-main": {
+            "provider": "rtl8380m_http",
+            "mode": "read_only",
+            "base_url": "http://172.28.100.9/",
+            "username": "$SWITCH_USERNAME",
+            "password": "$SWITCH_PASSWORD",
+            "timeout_s": 0.8,
+            "poll": {
+              "fast": {
+                "interval_s": 1.0,
+                "groups": [
+                  "panel",
+                  "poe",
+                  "counters"
+                ]
+              },
+              "medium": {
+                "interval_s": 5.0,
+                "groups": [
+                  "vlan",
+                  "lldp"
+                ]
+              },
+              "slow": {
+                "interval_s": 30.0,
+                "groups": [
+                  "identity",
+                  "runtime"
+                ]
+              }
+            },
+            "http": {
+              "response_parser": "legacy-http1-close",
+              "capability": "main",
+              "max_response_bytes": 1048576
+            }
+          }
+        }
+      },
+      "wlan": {
+        "radios": [
+          {
+            "name": "radio0",
+            "type": "mac80211",
+            "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0"
+          },
+          {
+            "name": "radio1",
+            "type": "mac80211",
+            "path": "axi/1000110000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0+1"
+          }
+        ]
+      },
+      "uart": {
+        "serial_ports": [
+          {
+            "id": "uart0",
+            "name": "uart0",
+            "path": "/dev/ttyAMA0",
+            "baud": 115200,
+            "mode": "8N1"
+          }
+        ]
+      },
+      "artifact_store": {
+        "stores": [
+          {
+            "id": "main",
+            "transient_root": "/tmp/devicecode-artifacts",
+            "durable_root": "/data/devicecode/artifacts",
+            "import_root": "/data/devicecode/artifacts/import",
+            "durable_enabled": true
+          }
+        ]
+      },
+      "control_store": [
+        {
+          "name": "update",
+          "root": "/data/devicecode/control/update"
+        }
+      ],
+      "time": {},
+      "platform": {},
+      "power": {},
+      "usb": {},
+      "modemcard": {},
+      "sysmon": {}
+    }
+  },
+  "net": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/net/1",
+      "version": 1,
+      "product": "bigbox-legacy-converted-phase1",
+      "description": "Big Box default config using segment-first NET model, GSM-sourced modem uplinks, generated WAN route metrics, and Devicecode-owned OpenWrt UCI output.",
+      "vlan_policy": {
+        "reserved": {
+          "internal": 100
+        },
+        "ranges": {
+          "user": {
+            "from": 1,
+            "to": 99
+          },
+          "system": {
+            "from": 100,
+            "to": 399
+          }
+        },
+        "metadata": {
+          "note": "Converted from legacy VLANs eth0.8, eth0.32, eth0.100 and eth0.4."
+        }
+      },
+      "segments": {
+        "adm": {
+          "name": "Admin Network",
+          "kind": "system",
+          "protected": true,
+          "user_editable": false,
+          "purpose": "admin_network",
+          "vlan": {
+            "id": 8
+          },
+          "addressing": {
+            "ipv4": {
+              "mode": "static",
+              "cidr": "172.28.8.1/24"
+            }
+          },
+          "dhcp": {
+            "enabled": true,
+            "start": 10,
+            "limit": 240,
+            "lease_time": "12h"
+          },
+          "dns": {
+            "local_server": true,
+            "host_files": [
+              "ads"
+            ],
+            "domain": "bigbox.home"
+          },
+          "firewall": {
+            "zone": "lan"
+          }
+        },
+        "jan": {
+          "name": "Jangala Network",
+          "kind": "user",
+          "protected": false,
+          "user_editable": true,
+          "purpose": "restricted_user_access",
+          "vlan": {
+            "id": 32
+          },
+          "addressing": {
+            "ipv4": {
+              "mode": "static",
+              "cidr": "172.28.32.1/24"
+            }
+          },
+          "dhcp": {
+            "enabled": true,
+            "start": 10,
+            "limit": 240,
+            "lease_time": "12h"
+          },
+          "dns": {
+            "local_server": true,
+            "host_files": [
+              "ads",
+              "adult"
+            ],
+            "domain": "bigbox.home"
+          },
+          "firewall": {
+            "zone": "lan_rst"
+          },
+          "shaping": {
+            "profile": "restricted_user_per_host"
+          }
+        },
+        "int": {
+          "name": "Internal Network",
+          "kind": "system",
+          "protected": true,
+          "user_editable": false,
+          "purpose": "switch_ext_aps_and_internal_services",
+          "vlan": {
+            "reserved": "internal"
+          },
+          "addressing": {
+            "ipv4": {
+              "mode": "static",
+              "cidr": "172.28.100.1/24"
+            }
+          },
+          "dhcp": {
+            "enabled": true,
+            "start": 10,
+            "limit": 240,
+            "lease_time": "12h"
+          },
+          "dns": {},
+          "firewall": {
+            "zone": "lan"
+          }
+        },
+        "wan": {
+          "name": "Wired Internet",
+          "kind": "wan",
+          "protected": false,
+          "user_editable": false,
+          "purpose": "wired_backhaul",
+          "vlan": {
+            "id": 4
+          },
+          "addressing": {
+            "ipv4": {
+              "mode": "dhcp",
+              "peerdns": false
+            }
+          },
+          "dhcp": {
+            "enabled": false
+          },
+          "firewall": {
+            "zone": "wan"
+          },
+          "dns": {}
+        }
+      },
+      "interfaces": {},
+      "addressing": {},
+      "dns": {
+        "enabled": true,
+        "domain": "bigbox.home",
+        "upstreams": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ],
+        "cache": {
+          "size": 10000
+        },
+        "host_files": {
+          "base_dir": "/etc/jng/hosts",
+          "addnmount": true,
+          "sources": {
+            "ads": {
+              "file": "ads",
+              "description": "advertising and tracking block list"
+            },
+            "adult": {
+              "file": "adult",
+              "description": "adult-content block list"
+            }
+          }
+        },
+        "records": {
+          "unifi": {
+            "name": "unifi",
+            "address": "$UNIFI_ADDRESS",
+            "segments": [
+              "int"
+            ]
+          },
+          "config.bigbox.home": {
+            "name": "config.bigbox.home",
+            "address": "172.28.8.1"
+          }
+        }
+      },
+      "dhcp": {
+        "enabled": true,
+        "defaults": {
+          "lease_time": "12h",
+          "authoritative": true
+        },
+        "reservations": {},
+        "options": {},
+        "relays": {}
+      },
+      "firewall": {
+        "defaults": {
+          "syn_flood": "1",
+          "input": "ACCEPT",
+          "forward": "REJECT",
+          "output": "ACCEPT"
+        },
+        "zones": {
+          "lan": {
+            "input": "ACCEPT",
+            "output": "ACCEPT",
+            "forward": "ACCEPT"
+          },
+          "lan_rst": {
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT"
+          },
+          "wan": {
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT",
+            "masq": 1,
+            "mtu_fix": 1
+          }
+        },
+        "policies": {
+          "lan_to_wan_1": {
+            "from": "lan",
+            "to": "wan",
+            "action": "allow"
+          },
+          "lan_rst_to_wan_1": {
+            "from": "lan_rst",
+            "to": "wan",
+            "action": "allow"
+          }
+        },
+        "rules": {
+          "Allow-DHCP-Renew": {
+            "name": "Allow-DHCP-Renew",
+            "src": "wan",
+            "proto": "udp",
+            "dest_port": "68",
+            "target": "ACCEPT"
+          },
+          "Allow-Ping": {
+            "name": "Allow-Ping",
+            "src": "wan",
+            "proto": "icmp",
+            "icmp_type": "echo-request",
+            "target": "ACCEPT"
+          },
+          "Allow-IGMP": {
+            "name": "Allow-IGMP",
+            "src": "wan",
+            "proto": "igmp",
+            "target": "ACCEPT"
+          },
+          "Allow-IPSec-ESP": {
+            "name": "Allow-IPSec-ESP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "esp",
+            "target": "ACCEPT"
+          },
+          "Allow-ISAKMP": {
+            "name": "Allow-ISAKMP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          },
+          "Allow-IPSec-ESP_RST": {
+            "name": "Allow-IPSec-ESP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "esp",
+            "target": "ACCEPT"
+          },
+          "Allow-ISAKMP_RST": {
+            "name": "Allow-ISAKMP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          },
+          "Allow_DHCP_request_RST": {
+            "name": "Allow DHCP request (RST)",
+            "src": "lan_rst",
+            "proto": "udp",
+            "src_port": "67-68",
+            "dest_port": "67-68",
+            "target": "ACCEPT"
+          },
+          "Allow_DNS_queries_RST": {
+            "name": "Allow DNS queries (RST)",
+            "src": "lan_rst",
+            "proto": "tcp udp",
+            "dest_port": "53",
+            "target": "ACCEPT"
+          }
+        }
+      },
+      "routing": {
+        "routes": {
+          "starlink_admin": {
+            "kind": "host",
+            "target": "192.168.100.1",
+            "interface": "wan",
+            "description": "Starlink dish/admin UI reachable via the wired WAN uplink"
+          }
+        }
+      },
+      "wan": {
+        "enabled": true,
+        "members": {
+          "wan": {
+            "interface": "wan",
+            "weight": 1,
+            "dynamic_weight": true,
+            "family": "ipv4",
+            "mwan_metric": 1
+          },
+          "modem_primary": {
+            "interface": "modem_primary",
+            "weight": 1,
+            "dynamic_weight": true,
+            "family": "ipv4",
+            "source": {
+              "kind": "gsm-uplink",
+              "id": "primary"
+            },
+            "mwan_metric": 1
+          },
+          "modem_secondary": {
+            "interface": "modem_secondary",
+            "weight": 1,
+            "dynamic_weight": true,
+            "family": "ipv4",
+            "source": {
+              "kind": "gsm-uplink",
+              "id": "secondary"
+            },
+            "mwan_metric": 1
+          }
+        },
+        "health": {
+          "track_ip": [
+            "1.1.1.1",
+            "8.8.8.8"
+          ],
+          "track_method": "ping",
+          "timeout": 2,
+          "interval": 1,
+          "down": 2,
+          "up": 1
+        },
+        "runtime": {
+          "mmx_mask": "0x3F00"
+        },
+        "load_balancing": {
+          "policy": "balanced",
+          "speedtests": {
+            "enabled": true,
+            "interval_s": 300
+          }
+        },
+        "rules": {
+          "https": {
+            "family": "ipv4",
+            "proto": "tcp",
+            "dest_port": "443",
+            "policy": "balanced",
+            "sticky": true
+          }
+        }
+      },
+      "shaping": {
+        "enabled": true,
+        "profiles": {
+          "restricted_user_per_host": {
+            "description": "Per-client restricted shaping for the Jangala user segment",
+            "egress": {
+              "enabled": true,
+              "match": "dst",
+              "pool_rate": "100mbit",
+              "pool_ceil": "100mbit",
+              "host_rate": "2mbit",
+              "host_ceil": "8mbit",
+              "host_burst": "500k",
+              "all_hosts": true,
+              "fq_codel": {
+                "flows": 1024,
+                "limit": 10240,
+                "memory_limit": "16Mb",
+                "target": "5ms",
+                "interval": "100ms"
+              }
+            },
+            "ingress": {
+              "enabled": true,
+              "match": "src",
+              "pool_rate": "100mbit",
+              "pool_ceil": "100mbit",
+              "host_rate": "1500kbit",
+              "host_ceil": "6mbit",
+              "host_burst": "225k",
+              "all_hosts": true,
+              "fq_codel": {
+                "flows": 1024,
+                "limit": 10240,
+                "memory_limit": "16Mb",
+                "target": "5ms",
+                "interval": "100ms"
+              }
+            }
+          }
+        },
+        "classes": {
+          "default": "best_effort"
+        }
+      },
+      "vpn": {
+        "enabled": false
+      },
+      "diagnostics": {
+        "reflectors": {
+          "cloudflare": {
+            "address": "1.1.1.1"
+          },
+          "google": {
+            "address": "8.8.8.8"
+          }
+        }
+      },
+      "runtime": {
+        "apply": {
+          "debounce_s": 0.25
+        },
+        "observe": {
+          "interval_s": 5
+        }
+      },
+      "metadata": {}
+    }
+  },
+  "wired": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/wired/1",
+      "version": 1,
+      "product": "bigbox-legacy-converted-phase1",
+      "surfaces": {
+        "cm5-eth0": {
+          "name": "CM5 Ethernet",
+          "kind": "direct-nic",
+          "role": "internal-trunk",
+          "protected": true,
+          "attachment": {
+            "mode": "trunk",
+            "required_segments": [
+              "adm",
+              "int"
+            ],
+            "user_segments": "all-realised-user-segments"
+          }
+        },
+        "switch-uplink-cm5": {
+          "name": "Switch uplink to CM5",
+          "kind": "switch-port",
+          "role": "internal-trunk",
+          "protected": true,
+          "attachment": {
+            "mode": "trunk",
+            "required_segments": [
+              "adm",
+              "int"
+            ],
+            "user_segments": "all-realised-user-segments"
+          }
+        },
+        "lan-1": {
+          "name": "LAN 1",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-2": {
+          "name": "LAN 2",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-3": {
+          "name": "LAN 3",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-4": {
+          "name": "LAN 4",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-5": {
+          "name": "LAN 5",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-6": {
+          "name": "LAN 6",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "lan-7": {
+          "name": "LAN 7",
+          "kind": "ethernet-port",
+          "role": "external-port",
+          "capabilities": {
+            "poe": true
+          },
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "sfp-1": {
+          "name": "SFP 1",
+          "kind": "sfp-port",
+          "role": "external-port",
+          "attachment": {
+            "mode": "none"
+          }
+        },
+        "sfp-2": {
+          "name": "SFP 2",
+          "kind": "sfp-port",
+          "role": "external-port",
+          "attachment": {
+            "mode": "none"
+          }
+        }
+      },
+      "metadata": {
+        "todo": "Add user-facing switch port surfaces once the fixed RTL8380M port-to-segment layout is known."
+      }
+    }
+  },
+  "device": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/device/1",
+      "components": {
+        "cm5": {
+          "class": "host",
+          "subtype": "cm5",
+          "role": "primary",
+          "member": "local",
+          "required_facts": [
+            "software",
+            "updater"
+          ],
+          "facts": {
+            "software": [
+              "raw",
+              "host",
+              "updater",
+              "cap",
+              "updater",
+              "cm5",
+              "state",
+              "software"
+            ],
+            "updater": [
+              "raw",
+              "host",
+              "updater",
+              "cap",
+              "updater",
+              "cm5",
+              "state",
+              "updater"
+            ],
+            "health": [
+              "raw",
+              "host",
+              "updater",
+              "cap",
+              "updater",
+              "cm5",
+              "state",
+              "health"
+            ]
+          },
+          "actions": {
+            "prepare-update": {
+              "kind": "rpc",
+              "call_topic": [
+                "raw",
+                "host",
+                "updater",
+                "cap",
+                "updater",
+                "cm5",
+                "rpc",
+                "prepare"
+              ]
+            },
+            "stage-update": {
+              "kind": "rpc",
+              "call_topic": [
+                "raw",
+                "host",
+                "updater",
+                "cap",
+                "updater",
+                "cm5",
+                "rpc",
+                "stage"
+              ]
+            },
+            "commit-update": {
+              "kind": "rpc",
+              "call_topic": [
+                "raw",
+                "host",
+                "updater",
+                "cap",
+                "updater",
+                "cm5",
+                "rpc",
+                "commit"
+              ]
+            }
+          }
+        },
+        "mcu": {
+          "class": "member",
+          "subtype": "mcu",
+          "role": "controller",
+          "member": "mcu",
+          "required_facts": [
+            "software",
+            "updater"
+          ],
+          "facts": {
+            "software": [
+              "raw",
+              "member",
+              "mcu",
+              "state",
+              "software"
+            ],
+            "updater": [
+              "raw",
+              "member",
+              "mcu",
+              "state",
+              "updater"
+            ],
+            "health": [
+              "raw",
+              "member",
+              "mcu",
+              "state",
+              "health"
+            ],
+            "power_battery": [
+              "raw",
+              "member",
+              "mcu",
+              "state",
+              "power",
+              "battery"
+            ],
+            "power_charger": [
+              "raw",
+              "member",
+              "mcu",
+              "state",
+              "power",
+              "charger"
+            ],
+            "power_charger_config": [
+              "raw",
+              "member",
+              "mcu",
+              "state",
+              "power",
+              "charger",
+              "config"
+            ],
+            "environment_temperature": [
+              "raw",
+              "member",
+              "mcu",
+              "state",
+              "environment",
+              "temperature"
+            ],
+            "environment_humidity": [
+              "raw",
+              "member",
+              "mcu",
+              "state",
+              "environment",
+              "humidity"
+            ],
+            "runtime_memory": [
+              "raw",
+              "member",
+              "mcu",
+              "state",
+              "runtime",
+              "memory"
+            ]
+          },
+          "events": {
+            "charger_alert": [
+              "raw",
+              "member",
+              "mcu",
+              "cap",
+              "telemetry",
+              "main",
+              "event",
+              "power",
+              "charger",
+              "alert"
+            ]
+          },
+          "actions": {
+            "restart": {
+              "kind": "rpc",
+              "call_topic": [
+                "raw",
+                "member",
+                "mcu",
+                "cap",
+                "control",
+                "main",
+                "rpc",
+                "restart"
+              ]
+            },
+            "prepare-update": {
+              "kind": "rpc",
+              "call_topic": [
+                "raw",
+                "member",
+                "mcu",
+                "cap",
+                "updater",
+                "main",
+                "rpc",
+                "prepare-update"
+              ]
+            },
+            "stage-update": {
+              "kind": "fabric_stage",
+              "target": "updater/main",
+              "chunk_size": 2048,
+              "artifact_store": "main",
+              "timeout_s": 300
+            },
+            "commit-update": {
+              "kind": "rpc",
+              "call_topic": [
+                "raw",
+                "member",
+                "mcu",
+                "cap",
+                "updater",
+                "main",
+                "rpc",
+                "commit-update"
+              ]
+            }
+          }
+        },
+        "switch-main": {
+          "kind": "switch",
+          "module": "switch",
+          "class": "host",
+          "role": "switch-fabric",
+          "member": "switch-main",
+          "facts": {
+            "wired_observation_status": [
+              "raw",
+              "host",
+              "wired",
+              "provider",
+              "switch-main",
+              "status"
+            ],
+            "wired_observation_surfaces": [
+              "raw",
+              "host",
+              "wired",
+              "provider",
+              "switch-main",
+              "state",
+              "surfaces"
+            ],
+            "wired_observation_topology": [
+              "raw",
+              "host",
+              "wired",
+              "provider",
+              "switch-main",
+              "state",
+              "topology"
+            ]
+          }
+        }
+      },
+      "assembly": {
+        "schema": "devicecode.device.assembly/1",
+        "product": "big-box",
+        "components": {
+          "cm5": {
+            "kind": "compute",
+            "role": "controller"
+          },
+          "mcu": {
+            "kind": "microcontroller",
+            "role": "power-sensor-controller"
+          },
+          "switch-main": {
+            "kind": "switch",
+            "role": "wired-fabric",
+            "observation": {
+              "kind": "local-provider",
+              "source": [
+                "raw",
+                "host",
+                "wired",
+                "provider",
+                "switch-main"
+              ]
+            }
+          },
+          "cm5-local-wired": {
+            "kind": "direct-nic",
+            "role": "controller-wired-port",
+            "observation": {
+              "kind": "local-provider",
+              "source": [
+                "raw",
+                "host",
+                "wired",
+                "provider",
+                "cm5-local-wired"
+              ]
+            }
+          }
+        },
+        "links": {
+          "cm5-switch": {
+            "kind": "wired",
+            "role": "controller-switch-uplink",
+            "internal": true,
+            "a": {
+              "component": "cm5-local-wired",
+              "observed_surface": "eth0"
+            },
+            "b": {
+              "component": "switch-main",
+              "observed_surface": "GE8"
+            }
+          }
+        },
+        "surfaces": {
+          "cm5-eth0": {
+            "kind": "ethernet",
+            "exposure": "internal",
+            "component": "cm5-local-wired",
+            "observed_surface": "eth0"
+          },
+          "switch-uplink-cm5": {
+            "kind": "ethernet",
+            "exposure": "internal",
+            "component": "switch-main",
+            "observed_surface": "GE8",
+            "connector": "internal-ge8"
+          },
+          "lan-1": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE1",
+            "connector": "RJ45-1"
+          },
+          "lan-2": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE2",
+            "connector": "RJ45-2"
+          },
+          "lan-3": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE3",
+            "connector": "RJ45-3"
+          },
+          "lan-4": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE4",
+            "connector": "RJ45-4"
+          },
+          "lan-5": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE5",
+            "connector": "RJ45-5"
+          },
+          "lan-6": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE6",
+            "connector": "RJ45-6"
+          },
+          "lan-7": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE7",
+            "connector": "RJ45-7"
+          },
+          "sfp-1": {
+            "kind": "sfp",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE9",
+            "connector": "SFP-1"
+          },
+          "sfp-2": {
+            "kind": "sfp",
+            "exposure": "external",
+            "component": "switch-main",
+            "observed_surface": "GE10",
+            "connector": "SFP-2"
+          }
+        }
+      }
+    }
+  },
+  "wifi": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/wifi/1",
+      "report_period": 10,
+      "radios": [
+        {
+          "name": "radio0",
+          "band": "2g",
+          "channel": "auto",
+          "channels": [
+            "1",
+            "6",
+            "11"
+          ],
+          "country": "GB",
+          "htmode": "HE20",
+          "txpower": "20",
+          "disabled": false
+        },
+        {
+          "name": "radio1",
+          "band": "5g",
+          "channel": "36",
+          "country": "GB",
+          "htmode": "HE80",
+          "txpower": "23",
+          "disabled": false
+        }
+      ],
+      "ssids": [
+        {
+          "mainflux_path": "mainflux.cfg",
+          "encryption": "psk2",
+          "mode": "access_point",
+          "radios": [
+            "radio0",
+            "radio1"
+          ]
+        },
+        {
+          "name": "Jangala",
+          "mode": "access_point",
+          "encryption": "none",
+          "radios": [
+            "radio0",
+            "radio1"
+          ],
+          "segment": "jan"
+        }
+      ],
+      "band_steering": {
+        "globals": {
+          "rrm_mode": "PAT",
+          "kicking": {
+            "kick_mode": "both",
+            "bandwidth_threshold": 0,
+            "kicking_threshold": 15,
+            "evals_before_kick": 3
+          },
+          "stations": {
+            "use_station_count": false,
+            "max_station_diff": 1
+          },
+          "neighbor_reports": {
+            "dyn_report_num": 2,
+            "disassoc_report_len": 6
+          },
+          "legacy": {
+            "eval_probe_req": true,
+            "eval_assoc_req": false,
+            "eval_auth_req": false,
+            "min_probe_count": 2,
+            "deny_auth_reason": 1,
+            "deny_assoc_reason": 17
+          }
+        },
+        "timings": {
+          "updates": {
+            "client": 10,
+            "chan_util": 5,
+            "beacon_reports": 5,
+            "hostapd": 10,
+            "tcp_con": 10
+          },
+          "cleanup": {
+            "client": 15,
+            "probe": 40,
+            "ap": 460
+          },
+          "inactive_client_kickoff": 60
+        },
+        "bands": {
+          "2g": {
+            "initial_score": 90,
+            "rssi_scoring": {
+              "center": "-69",
+              "weight": 2,
+              "good_threshold": "-66",
+              "good_reward": 12,
+              "bad_threshold": "-75",
+              "bad_penalty": "-15"
+            },
+            "chan_util_scoring": {
+              "good_threshold": 140,
+              "good_reward": 5,
+              "bad_threshold": 170,
+              "bad_penalty": "-20"
+            },
+            "support_bonuses": {
+              "vht": 5,
+              "ht": 5
+            }
+          },
+          "5g": {
+            "initial_score": 95,
+            "rssi_scoring": {
+              "center": "-64",
+              "weight": 4,
+              "good_threshold": "-62",
+              "good_reward": 10,
+              "bad_threshold": "-70",
+              "bad_penalty": "-28"
+            },
+            "chan_util_scoring": {
+              "good_threshold": 140,
+              "good_reward": 5,
+              "bad_threshold": 170,
+              "bad_penalty": "-20"
+            },
+            "support_bonuses": {
+              "vht": 2,
+              "ht": 2
+            }
+          }
+        }
+      }
+    }
+  },
+  "gsm": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/gsm/1",
+      "modems": {
+        "default": {
+          "enabled": true,
+          "signal_freq": 10
+        },
+        "known": [
+          {
+            "name": "primary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb3/3-1",
+            "autoconnect": true,
+            "metrics_interval": 60
+          },
+          {
+            "name": "secondary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/axi/1000480000.usb/usb1/1-1",
+            "autoconnect": true,
+            "metrics_interval": 60
+          }
+        ]
+      }
+    }
+  },
+  "fabric": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/fabric/1",
+      "local_node": "bigbox-cm5",
+      "links": [
+        {
+          "id": "mcu-uart0",
+          "peer_id": "mcu",
+          "transport": {
+            "kind": "uart",
+            "source": "uart_manager",
+            "class": "uart",
+            "id": "uart0",
+            "terminator": "\n"
+          },
+          "session": {
+            "identity_claim": {
+              "id": "bigbox-cm5",
+              "role": "controller"
+            }
+          },
+          "bridge": {
+            "imports": [
+              {
+                "id": "mcu-state",
+                "remote": [
+                  "state",
+                  "self"
+                ],
+                "local": [
+                  "raw",
+                  "member",
+                  "mcu",
+                  "state"
+                ]
+              },
+              {
+                "id": "mcu-event",
+                "remote": [
+                  "event",
+                  "self"
+                ],
+                "local": [
+                  "raw",
+                  "member",
+                  "mcu",
+                  "cap",
+                  "telemetry",
+                  "main",
+                  "event"
+                ]
+              },
+              {
+                "id": "mcu-cap",
+                "remote": [
+                  "cap",
+                  "self"
+                ],
+                "local": [
+                  "raw",
+                  "member",
+                  "mcu",
+                  "cap"
+                ]
+              }
+            ],
+            "exports": [],
+            "rpc": {
+              "outbound": [
+                {
+                  "id": "mcu-updater-prepare",
+                  "local": [
+                    "raw",
+                    "member",
+                    "mcu",
+                    "cap",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "prepare-update"
+                  ],
+                  "remote": [
+                    "cap",
+                    "self",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "prepare-update"
+                  ]
+                },
+                {
+                  "id": "mcu-updater-commit",
+                  "local": [
+                    "raw",
+                    "member",
+                    "mcu",
+                    "cap",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "commit-update"
+                  ],
+                  "remote": [
+                    "cap",
+                    "self",
+                    "updater",
+                    "main",
+                    "rpc",
+                    "commit-update"
+                  ],
+                  "reply_policy": "sent-is-accepted"
+                }
+              ],
+              "inbound": []
+            }
+          }
+        }
+      ]
+    }
+  },
+  "http": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/http/1",
+      "enabled": true,
+      "id": "main",
+      "policy": {
+        "allowed_schemes": {
+          "http": true,
+          "https": true,
+          "ws": true,
+          "wss": true
+        },
+        "allow_loopback": true,
+        "allowed_response_parsers": {
+          "strict": true,
+          "legacy-http1-close": true
+        },
+        "legacy_http1_close_max_response_bytes": 1048576
+      }
+    }
+  },
+  "ui": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/ui/1",
+      "enabled": true,
+      "http": {
+        "enabled": true,
+        "cap_id": "main",
+        "host": "0.0.0.0",
+        "port": 8080
+      },
+      "uploads": {
+        "require_auth": true
+      }
+    }
+  },
+  "update": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.update/1",
+      "components": {
+        "cm5": {
+          "component": "cm5"
+        },
+        "mcu": {
+          "component": "mcu",
+          "backend": "component",
+          "stage_timeout_s": 300
+        },
+        "switch-main": {
+          "component": "switch-main"
+        }
+      },
+      "bundled": {
+        "enabled": false,
+        "components": {
+          "mcu": {
+            "component": "mcu",
+            "source": {
+              "kind": "file",
+              "path": "/data/devicecode/artifacts/import/mcu.dcmcu"
+            },
+            "auto_create": false,
+            "auto_start": false,
+            "policy": "prefer_durable"
+          }
+        }
+      },
+      "publish": {
+        "enabled": true
+      }
+    }
+  },
+  "system": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/system/1",
+      "report_period": 60,
+      "usb3_enabled": true,
+      "alarms": [
+        {
+          "time": "5:00",
+          "repeats": "daily",
+          "payload": {
+            "name": "daily reboot",
+            "type": "reboot"
+          }
+        }
+      ]
+    }
+  },
+  "metrics": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/metrics/1",
+      "cloud_url": "$CLOUD_URL",
+      "publish_period": 60,
+      "templates": {
+        "network_stat": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5,
+              "initial_val": 0
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "any_change": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "percent_5": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5
+            }
+          ]
+        },
+        "absolute_10": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 10
+            }
+          ]
+        }
+      },
+      "pipelines": {
+        "wann_type": {
+          "template": "any_change"
+        },
+        "access_tech": {
+          "template": "any_change"
+        },
+        "access_fam": {
+          "template": "any_change"
+        },
+        "rx_bytes": {
+          "template": "network_stat"
+        },
+        "rx_packets": {
+          "template": "network_stat"
+        },
+        "rx_dropped": {
+          "template": "network_stat"
+        },
+        "rx_errors": {
+          "template": "network_stat"
+        },
+        "tx_bytes": {
+          "template": "network_stat"
+        },
+        "tx_packets": {
+          "template": "network_stat"
+        },
+        "tx_dropped": {
+          "template": "network_stat"
+        },
+        "tx_errors": {
+          "template": "network_stat"
+        },
+        "speedtest": {
+          "protocol": "http",
+          "process": []
+        },
+        "firmware": {
+          "template": "any_change"
+        },
+        "band": {
+          "template": "any_change"
+        },
+        "access-tech": {
+          "template": "any_change"
+        },
+        "access-family": {
+          "template": "any_change"
+        },
+        "imei": {
+          "template": "any_change"
+        },
+        "sim": {
+          "template": "any_change"
+        },
+        "rssi": {
+          "template": "percent_5"
+        },
+        "rsrp": {
+          "template": "percent_5"
+        },
+        "rsrq": {
+          "template": "percent_5"
+        },
+        "bars": {
+          "template": "any_change"
+        },
+        "operator": {
+          "template": "any_change"
+        },
+        "iccid": {
+          "template": "any_change"
+        },
+        "state": {
+          "template": "any_change"
+        },
+        "interface": {
+          "template": "any_change"
+        },
+        "boot_time": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 1000
+            }
+          ]
+        },
+        "version": {
+          "template": "any_change"
+        },
+        "fw_version": {
+          "template": "any_change"
+        },
+        "revision": {
+          "template": "any_change"
+        },
+        "serial": {
+          "template": "any_change"
+        },
+        "overall_utilisation": {
+          "template": "percent_5"
+        },
+        "util": {
+          "template": "percent_5"
+        },
+        "temperature": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 2
+            }
+          ]
+        },
+        "alloc": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "TimeTrigger",
+              "duration": 60
+            }
+          ]
+        },
+        "internal": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 1
+            }
+          ]
+        },
+        "core": {
+          "template": "percent_5"
+        },
+        "vbat": {
+          "template": "absolute_10"
+        },
+        "ibat": {
+          "template": "absolute_10"
+        },
+        "vin": {
+          "template": "absolute_10"
+        },
+        "vsys": {
+          "template": "absolute_10"
+        },
+        "iin": {
+          "template": "absolute_10"
+        },
+        "charger_enabled": {
+          "template": "any_change"
+        },
+        "mppt_en_pin": {
+          "template": "any_change"
+        },
+        "equalize_req": {
+          "template": "any_change"
+        },
+        "drvcc_good": {
+          "template": "any_change"
+        },
+        "cell_count_error": {
+          "template": "any_change"
+        },
+        "ok_to_charge": {
+          "template": "any_change"
+        },
+        "no_rt": {
+          "template": "any_change"
+        },
+        "thermal_shutdown": {
+          "template": "any_change"
+        },
+        "vin_ovlo": {
+          "template": "any_change"
+        },
+        "vin_gt_vbat": {
+          "template": "any_change"
+        },
+        "intvcc_gt_4p3v": {
+          "template": "any_change"
+        },
+        "intvcc_gt_2p8v": {
+          "template": "any_change"
+        },
+        "iin_limited": {
+          "template": "any_change"
+        },
+        "uvcl_active": {
+          "template": "any_change"
+        },
+        "cc_phase": {
+          "template": "any_change"
+        },
+        "cv_phase": {
+          "template": "any_change"
+        },
+        "bat_short": {
+          "template": "any_change"
+        },
+        "bat_missing": {
+          "template": "any_change"
+        },
+        "max_charge_time_fault": {
+          "template": "any_change"
+        },
+        "c_over_x_term": {
+          "template": "any_change"
+        },
+        "timer_term": {
+          "template": "any_change"
+        },
+        "ntc_pause": {
+          "template": "any_change"
+        },
+        "precharge": {
+          "template": "any_change"
+        },
+        "cccv": {
+          "template": "any_change"
+        },
+        "absorb": {
+          "template": "any_change"
+        },
+        "equalize": {
+          "template": "any_change"
+        },
+        "suspended": {
+          "template": "any_change"
+        },
+        "session_start": {
+          "protocol": "http",
+          "process": []
+        },
+        "session_end": {
+          "protocol": "http",
+          "process": []
+        },
+        "hostname": {
+          "template": "any_change"
+        },
+        "signal": {
+          "template": "percent_5"
+        },
+        "power": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10,
+              "initial_val": 0
+            }
+          ]
+        },
+        "channel": {
+          "template": "any_change"
+        },
+        "noise": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 10,
+              "initial_val": 0
+            }
+          ]
+        },
+        "num_sta": {
+          "template": "percent_5"
+        },
+        "mem_util": {
+          "template": "any_change"
+        },
+        "cpu_util": {
+          "template": "any_change"
+        },
+        "temp": {
+          "template": "any_change"
+        },
+        "curr_time": {
+          "template": "any_change"
+        },
+        "fw_id": {
+          "template": "any_change"
+        },
+        "hw_id": {
+          "template": "any_change"
+        }
+      }
+    }
+  }
+}

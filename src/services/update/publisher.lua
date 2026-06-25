@@ -119,12 +119,16 @@ local function sync_workflows(conn, retained, snapshot)
 		current_jobs[id] = true
 		local ok, err = retain_payload(conn, topics.workflow_update_job(id), projection.job(job))
 		if ok ~= true then return nil, err or 'update workflow job retain failed' end
+		ok, err = retain_payload(conn, topics.workflow_update_job_timeline(id), projection.job_timeline(job))
+		if ok ~= true then return nil, err or 'update workflow job timeline retain failed' end
 		retained.jobs[id] = true
 	end
 	for id in pairs(retained.jobs) do
 		if not current_jobs[id] then
 			local ok, err = unretain(conn, topics.workflow_update_job(id))
 			if ok ~= true then return nil, err or 'update workflow job unretain failed' end
+			ok, err = unretain(conn, topics.workflow_update_job_timeline(id))
+			if ok ~= true then return nil, err or 'update workflow job timeline unretain failed' end
 			retained.jobs[id] = nil
 		end
 	end
@@ -230,7 +234,11 @@ function M.run(scope, params)
 		bus_cleanup.unretain(conn, topics.update_manager_status())
 		bus_cleanup.unretain(conn, topics.artifact_ingest_meta())
 		bus_cleanup.unretain(conn, topics.artifact_ingest_status())
-		retained_set_clear(conn, retained.jobs, topics.workflow_update_job)
+		for id in pairs(retained.jobs) do
+			bus_cleanup.unretain(conn, topics.workflow_update_job(id))
+			bus_cleanup.unretain(conn, topics.workflow_update_job_timeline(id))
+			retained.jobs[id] = nil
+		end
 		retained_set_clear(conn, retained.ingest, topics.workflow_artifact_ingest)
 		retained_set_clear(conn, retained.components, topics.update_component)
 	end)

@@ -22,6 +22,10 @@ function M.components()
 	return { 'state', 'device', 'components' }
 end
 
+function M.assembly()
+	return { 'state', 'device', 'assembly' }
+end
+
 function M.component(name)
 	return { 'state', 'device', 'component', name }
 end

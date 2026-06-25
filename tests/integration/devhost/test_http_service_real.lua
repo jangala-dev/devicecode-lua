@@ -368,4 +368,83 @@ function M.test_real_cap_connect_ws_send_receive_and_close_round_trip()
 	end)
 end
 
+
+local function hostile_shquote(s)
+	s = tostring(s or '')
+	return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+local function hostile_append_file(path, text)
+	local f = assert(io.open(path, 'a'))
+	f:write(text)
+	f:close()
+end
+
+local function hostile_read_file(path)
+	local f = io.open(path, 'r')
+	if not f then return '' end
+	local data = f:read('*a') or ''
+	f:close()
+	return data
+end
+
+local function hostile_tail_lines(text, n)
+	n = tonumber(n) or 120
+	local lines = {}
+	for line in tostring(text or ''):gmatch('[^\n]+') do lines[#lines + 1] = line end
+	local first = math.max(1, #lines - n + 1)
+	local out = {}
+	for i = first, #lines do out[#out + 1] = lines[i] end
+	return table.concat(out, '\n')
+end
+
+local function hostile_shell_exit_status(a, b, c)
+	if type(a) == 'number' then
+		if a >= 256 then return math.floor(a / 256) end
+		return a
+	end
+	if a == true then return 0 end
+	if b == 'exit' and type(c) == 'number' then return c end
+	if type(c) == 'number' then return c end
+	return 1
+end
+
+function M.test_real_metrics_style_exchange_timeout_regression_hostile_tcp_keeps_backend_and_listener_ready()
+	local log_path = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_LOG') or '/tmp/devicecode-http-hostile-child.log'
+	local attempts = tonumber(os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_CHILD_ATTEMPTS') or '') or 3
+	local timeout_s = tonumber(os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_PARENT_TIMEOUT_S') or '') or 8
+	local tail_n = tonumber(os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_TAIL_LINES') or '') or 120
+	os.remove(log_path)
+
+	local env = {
+		HTTP_HOSTILE_CHILD_LOG = log_path,
+		HTTP_METRICS_TIMEOUT_HOSTILE_MODES = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_MODES') or 'partial_body,stall_no_response',
+		HTTP_METRICS_TIMEOUT_HOSTILE_ITERATIONS = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_ITERATIONS') or '4',
+		HTTP_METRICS_TIMEOUT_HOSTILE_TIMEOUT_S = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_TIMEOUT_S') or '0.05',
+		HTTP_METRICS_TIMEOUT_HOSTILE_BACKEND_TIMEOUT_S = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_BACKEND_TIMEOUT_S') or '0.10',
+		HTTP_METRICS_TIMEOUT_HOSTILE_INTRA_STREAM_TIMEOUT_S = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_INTRA_STREAM_TIMEOUT_S') or '0.10',
+		HTTP_METRICS_TIMEOUT_HOSTILE_AUTO_RELEASE_S = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_AUTO_RELEASE_S') or '0.10',
+		HTTP_METRICS_TIMEOUT_HOSTILE_UI_EVERY = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_UI_EVERY') or '3',
+	}
+	if os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_PORT_BASE') then
+		env.HTTP_METRICS_TIMEOUT_HOSTILE_PORT_BASE = os.getenv('HTTP_METRICS_TIMEOUT_HOSTILE_PORT_BASE')
+	end
+
+	for attempt = 1, attempts do
+		hostile_append_file(log_path, ('[parent %.6f] attempt:%03d begin timeout_s=%s\n'):format(os.clock(), attempt, tostring(timeout_s)))
+		local env_parts = {}
+		for k, v in pairs(env) do env_parts[#env_parts + 1] = k .. '=' .. hostile_shquote(v) end
+		table.sort(env_parts)
+		local cmd = ('timeout %s env %s luajit integration/devhost/support/http_hostile_tcp_child.lua >> %s 2>&1'):format(
+			tostring(timeout_s), table.concat(env_parts, ' '), hostile_shquote(log_path))
+		local code = hostile_shell_exit_status(os.execute(cmd))
+		hostile_append_file(log_path, ('[parent %.6f] attempt:%03d exit=%s\n'):format(os.clock(), attempt, tostring(code)))
+		if code ~= 0 then
+			local tail = hostile_tail_lines(hostile_read_file(log_path), tail_n)
+			error(('hostile TCP child failed or timed out: attempt=%d/%d exit=%s timeout_s=%s log=%s\n%s'):format(
+				attempt, attempts, tostring(code), tostring(timeout_s), log_path, tail), 0)
+		end
+	end
+end
+
 return M

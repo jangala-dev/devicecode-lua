@@ -13,7 +13,9 @@ local model_mod       = require 'services.fabric.model'
 local resource        = require 'devicecode.support.resource'
 local session_mod     = require 'services.fabric.session'
 local state_mod       = require 'services.fabric.state'
-local transfer_sender = require 'services.fabric.transfer_sender'
+local protocol        = require 'services.fabric.protocol'
+local transfer_sender  = require 'services.fabric.transfer_sender'
+local transfer_receive = require 'services.fabric.transfer_receive'
 
 local M = {}
 
@@ -70,7 +72,15 @@ local function copy_active(a)
 		request_generation = a.request_generation,
 		session = ctx(a.session),
 		status = a.status,
+		direction = a.direction,
+		xfer_id = a.xfer_id,
+		target = a.target,
+		meta = copy(a.meta),
+		size = a.size,
+		digest_alg = a.digest_alg,
+		digest = a.digest,
 	}
+
 end
 
 local function copy_done(c)
@@ -98,6 +108,8 @@ local function snapshot_equal(a, b)
 		if aa.request_id ~= ba.request_id then return false end
 		if aa.request_generation ~= ba.request_generation then return false end
 		if aa.status ~= ba.status then return false end
+		if aa.direction ~= ba.direction then return false end
+		if aa.xfer_id ~= ba.xfer_id then return false end
 		if not same_ctx(aa.session, ba.session) then return false end
 	end
 
@@ -124,7 +136,9 @@ function M.new_state(opts)
 			frames_received = 0,
 			frames_routed = 0,
 			accepted = 0,
+			received = 0,
 			rejected_busy = 0,
+			unsupported_target = 0,
 			completed = 0,
 			stale = 0,
 			failed = 0,
@@ -173,7 +187,13 @@ function M.claim_slot(state, rec)
 		request_generation = rec.request_generation,
 		session = require_ctx(rec.session, 'transfer.claim_slot'),
 		status = rec.status or 'leased',
+		direction = rec.direction or 'send',
 		xfer_id = rec.xfer_id,
+		target = rec.target,
+		meta = copy(rec.meta),
+		size = rec.size,
+		digest_alg = rec.digest_alg,
+		digest = rec.digest,
 		frame_tx = rec.frame_tx,
 		lease = rec.lease,
 	}
@@ -298,6 +318,7 @@ local function attempt_caps(self, frame_rx, session)
 		session = ctx(c),
 		chunk_size = self._chunk_size,
 		timeout_s = self._timeout_s,
+		retry_limit = self._retry_limit,
 
 		send_control_frame_now = function (frame, label)
 			return outbound:send_transfer_control_frame_now(c, frame, label)
@@ -334,6 +355,112 @@ local function run_attempt(scope, req, caps)
 	local result = transfer_sender.run(scope, worker_req, caps)
 	if type(result) ~= 'table' then error('transfer attempt must return a result table', 0) end
 	return result
+end
+
+
+local function resolve_receive_target(self, target)
+	local targets = self._receive_targets
+	if type(targets) ~= 'table' then return nil end
+	return targets[target]
+end
+
+local function send_abort_now(self, session, xfer_id, reason)
+	local c = ctx(session)
+	local frame, ferr = protocol.xfer_abort(xfer_id, tostring(reason or 'aborted'))
+	if not frame then return nil, ferr end
+	return self._outbound:send_transfer_control_frame_now(c, frame, 'transfer_receive_abort_send_failed')
+end
+
+local function receive_attempt_identity(req)
+	return {
+		kind = 'transfer_attempt_done',
+		request_id = req_id(req),
+		request_generation = req_gen(req),
+		session = ctx(req.session),
+	}
+end
+
+local function run_receive_attempt(scope, req, caps)
+	return transfer_receive.run(scope, req, caps)
+end
+
+local function start_receive_attempt(self, ev)
+	local frame = ev.frame
+	local session = require_ctx(ev_ctx(ev), 'transfer receive begin')
+	local target = resolve_receive_target(self, frame.target)
+
+	if self._state.active ~= nil then
+		self._state.stats.rejected_busy = self._state.stats.rejected_busy + 1
+		send_abort_now(self, session, frame.xfer_id, 'busy')
+		emit_model(self)
+		return
+	end
+
+	if target == nil then
+		self._state.stats.unsupported_target = self._state.stats.unsupported_target + 1
+		send_abort_now(self, session, frame.xfer_id, 'unsupported_target')
+		emit_model(self)
+		return
+	end
+
+	local frame_tx, frame_rx = mailbox.new(self._attempt_frame_queue_len, { full = 'reject_newest' })
+	local request_id = 'receive:' .. tostring(frame.xfer_id)
+	local rec = {
+		request_id = request_id,
+		request_generation = 1,
+		session = session,
+		xfer_id = frame.xfer_id,
+		frame_tx = frame_tx,
+		frame_rx = frame_rx,
+		status = 'receiving',
+		direction = 'receive',
+		target = frame.target,
+		meta = frame.meta,
+		size = frame.size,
+		digest_alg = frame.digest_alg,
+		digest = frame.digest,
+	}
+
+	local ok, reason = M.claim_slot(self._state, rec)
+	if not ok then
+		frame_tx:close(reason or 'slot_busy')
+		send_abort_now(self, session, frame.xfer_id, reason or 'slot_busy')
+		emit_model(self)
+		return
+	end
+
+	self._state.stats.received = self._state.stats.received + 1
+
+	local req = {
+		request_id = request_id,
+		request_generation = 1,
+		session = session,
+		xfer_id = frame.xfer_id,
+		initial_frame = frame,
+		target = target,
+		timeout_s = self._timeout_s,
+	}
+
+	local raw, serr = scoped_work.start {
+		lifetime_scope = self._scope,
+		reaper_scope = self._scope,
+		report_scope = self._scope,
+		identity = receive_attempt_identity(req),
+		run = function (attempt_scope)
+			return run_receive_attempt(attempt_scope, req, attempt_caps(self, frame_rx, session))
+		end,
+		report = function (done_ev)
+			return report(self, done_ev, 'transfer_receive_attempt_report_failed')
+		end,
+	}
+
+	if not raw then
+		self._state.active = nil
+		frame_tx:close(serr or 'transfer_receive_start_failed')
+		send_abort_now(self, session, frame.xfer_id, serr or 'transfer_receive_start_failed')
+	end
+
+	emit_model(self)
 end
 
 function SlotLease:release(reason)
@@ -386,6 +513,20 @@ function SlotLease:start_attempt(request_scope, req)
 	local manager = self._manager
 	local local_tx, local_rx = mailbox.new(1, { full = 'reject_newest' })
 	local attempt_req = copy(req or {})
+
+	local active = manager and manager._state and manager._state.active or nil
+	if active ~= nil
+		and active.request_id == self._request_id
+		and active.request_generation == self._request_generation
+	then
+		active.status = 'sending'
+		active.target = req and req.target or active.target
+		active.meta = req and req.meta or active.meta
+		active.size = req and req.size or active.size
+		active.digest_alg = req and req.digest_alg or active.digest_alg
+		active.digest = req and req.digest or active.digest
+		emit_model(manager)
+	end
 
 	attempt_req.request_id = self._request_id
 	attempt_req.request_generation = self._request_generation
@@ -500,6 +641,11 @@ local function handle_slot_request(self, req)
 		request_generation = req_gen(req),
 		session = ctx(self._session),
 		xfer_id = req.xfer_id,
+		target = req.target,
+		meta = req.meta,
+		size = req.size,
+		digest_alg = req.digest_alg,
+		digest = req.digest,
 		frame_tx = frame_tx,
 		frame_rx = frame_rx,
 	}
@@ -529,6 +675,21 @@ local function active_done(self, reason, session)
 	end
 
 	if active ~= nil then
+		-- Outbound transfers grant a caller-visible lease.  A session drop poisons
+		-- that lease immediately because no later receiver can make progress.
+		--
+		-- Inbound receive attempts are different: once xfer_done has been admitted
+		-- to the writer, the receive worker may already have completed and merely
+		-- be waiting for its scoped-work completion to be reported.  Do not
+		-- overwrite that successful completion with a synthetic cancellation just
+		-- because the session queue closes at the same time.  Close the frame feed
+		-- and let the owned receive worker report the authoritative result.
+		if active.direction == 'receive' then
+			close_feed(active, reason or 'session_dropped')
+			emit_model(self)
+			return
+		end
+
 		if active.lease and type(active.lease._poison) == 'function' then
 			active.lease:_poison(reason or 'session_dropped')
 		else
@@ -568,6 +729,11 @@ local function handle_frame(self, ev)
 
 	local active = self._state.active
 	local frame = ev.frame
+
+	if type(frame) == 'table' and frame.type == 'xfer_begin' then
+		start_receive_attempt(self, ev)
+		return
+	end
 
 	if not active
 		or type(frame) ~= 'table'
@@ -791,9 +957,11 @@ function M.run(scope, params)
 			link_generation = params.link_generation,
 		}, { label = 'fabric_transfer_event_report_failed' }),
 		_outbound = outbound,
+		_receive_targets = params.receive_targets,
 		_attempt_frame_queue_len = params.attempt_frame_queue_len or DEFAULT_ATTEMPT_FRAME_QUEUE,
 		_chunk_size = params.chunk_size,
 		_timeout_s = params.timeout_s,
+		_retry_limit = params.retry_limit,
 		_session = nil,
 		_event_pending = {},
 	}, Manager)

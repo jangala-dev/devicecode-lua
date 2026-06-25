@@ -1,0 +1,24 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/network-lab-env"
+
+end=$(( $(date +%s) + NETWORK_LAB_SSH_WAIT_S ))
+echo "[network-lab] waiting for SSH on ${NETWORK_LAB_HOST}:${NETWORK_LAB_SSH_PORT}"
+while [ "$(date +%s)" -lt "$end" ]; do
+	if $NETWORK_LAB_SSH 'true' >/dev/null 2>&1; then
+		echo "[network-lab] SSH ready"
+		$NETWORK_LAB_SSH 'cloud-init status --wait >/dev/null 2>&1 || true'
+		exit 0
+	fi
+	sleep 2
+done
+
+echo "[network-lab] timeout waiting for SSH" >&2
+if [ -f "$NETWORK_LAB_LOG" ]; then
+	tail -n 120 "$NETWORK_LAB_LOG" >&2 || true
+fi
+exit 1

@@ -1,6 +1,8 @@
 -- tests/unit/support/test_request_owner.lua
 
 local request_owner = require 'devicecode.support.request_owner'
+local fibers = require 'fibers'
+local op = require 'fibers.op'
 
 local tests = {}
 
@@ -63,14 +65,6 @@ function tests.test_fail_once_prevents_later_reply()
 	assert_eq(req.replies, nil)
 end
 
-function tests.test_reply_payload_only_uses_payload_field()
-	local req = new_request()
-	local owner = request_owner.new(req, { reply_payload_only = true })
-
-	assert_true(owner:reply_once({ payload = 'answer', frame = 'ignored' }))
-	assert_eq(req.value, 'answer')
-end
-
 function tests.test_finalise_unresolved_fails_unresolved_request_once()
 	local req = new_request()
 	local owner = request_owner.new(req)
@@ -93,6 +87,49 @@ function tests.test_abandon_unresolved_resolves_without_reply_or_fail()
 
 	assert_eq(req.fails, nil)
 	assert_eq(req.replies, nil)
+end
+
+
+function tests.test_caller_cancel_op_abandons_on_bus_request_abandoned()
+	fibers.run(function ()
+		local req = new_request()
+		function req:done_op()
+			return op.always('abandoned', nil, 'timeout')
+		end
+
+		local owner = request_owner.new(req)
+		local reason = fibers.perform(owner:caller_cancel_op())
+
+		assert_eq(reason, 'timeout')
+		assert_true(owner:done())
+		assert_false(owner:reply_once('late'))
+		assert_eq(req.replies, nil)
+		assert_eq(req.fails, nil)
+	end)
+end
+
+function tests.test_caller_cancel_op_ignores_non_abandoned_done_status()
+	fibers.run(function ()
+		local req = new_request()
+		function req:done_op()
+			return op.always('replied', 'ok', nil)
+		end
+
+		local owner = request_owner.new(req)
+		local reason = fibers.perform(owner:caller_cancel_op())
+
+		assert_false(reason)
+		assert_false(owner:done())
+		assert_true(owner:reply_once('late'))
+		assert_eq(req.replies, 1)
+	end)
+end
+
+function tests.test_caller_cancel_op_requires_request_done_op()
+	local owner = request_owner.new(new_request())
+	local cancel_op, err = owner:caller_cancel_op()
+	assert_eq(cancel_op, nil)
+	assert_eq(err, 'request has no done_op')
 end
 
 return tests

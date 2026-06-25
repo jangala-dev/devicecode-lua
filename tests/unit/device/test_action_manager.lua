@@ -1,5 +1,7 @@
 -- tests/unit/device/test_action_manager.lua
 
+local fibers = require 'fibers'
+local busmod = require 'bus'
 local config = require 'services.device.config'
 local model_mod = require 'services.device.model'
 local action_manager = require 'services.device.action_manager'
@@ -11,6 +13,7 @@ local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end end
 local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true, got ' .. tostring(v))) end end
 local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, got ' .. tostring(v))) end end
+local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end end
 
 local function req(payload)
 	local r = { payload = payload, replied = nil, failed = nil }
@@ -154,6 +157,57 @@ function tests.test_dynamic_action_spec_rejects_payload_as_request_failure()
 end
 
 
+
+function tests.test_dynamic_action_dependency_is_registered_and_blocks_admission()
+	fibers.run(function ()
+		local dynamic_module = {
+			kind = 'mcu',
+			action_spec = function (_, _, _, base_spec)
+				local spec = {}
+				for k, v in pairs(base_spec or {}) do spec[k] = v end
+				spec.dependency = { class = 'dynamic-control', id = 'main' }
+				return spec
+			end,
+		}
+
+		local cat = assert(config.to_catalogue({
+			schema = config.SCHEMA,
+			components = {
+				mcu = {
+					subtype = 'mcu',
+					module = dynamic_module,
+					facts = { software = topics.raw_member_state('mcu', 'software') },
+					actions = { restart = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'control', 'main', 'restart') } },
+				},
+			},
+		}))
+
+		local b = busmod.new()
+		local state = {
+			_action_seq = 0,
+			conn = b:connect(),
+			pending_actions = {},
+			dependency_queue_len = 4,
+			active = { generation = 41, action_root = {}, catalogue = cat },
+			update_dependency_model = function (st)
+				st.dependency_model_updated = true
+				return true, nil
+			end,
+		}
+		local r = req({})
+
+		local ok, err = action_manager.start_action(state, r, { generation = 41, component = 'mcu', action = 'restart' })
+		assert_true(ok, err)
+		assert_nil(err)
+		assert_eq(r.failed, 'dependency_unavailable:action:mcu:restart')
+		assert_not_nil(state.active.action_deps)
+		assert_not_nil(state.active.action_deps:dependency('action:mcu:restart'))
+		assert_true(state.dependency_model_updated)
+		assert_eq(next(state.pending_actions), nil)
+		state.active.action_deps:terminate('test complete')
+	end)
+end
+
 function tests.test_unbind_generation_skips_unowned_synthetic_event_sources()
 	local active = {
 		action_eps = {
@@ -167,6 +221,61 @@ function tests.test_unbind_generation_skips_unowned_synthetic_event_sources()
 	local ok, err = action_manager.unbind_generation(active, nil)
 	assert_true(ok, err)
 	assert_eq(next(active.action_eps), nil)
+end
+
+function tests.test_action_admission_passes_caller_cancel_op_to_scoped_work()
+	local cond = require 'fibers.cond'
+	local op = require 'fibers.op'
+	fibers.run(function ()
+		local old_start = scoped_work.start
+		local done = cond.new()
+		local r = { payload = {}, _done = false, _status = 'pending', _err = nil }
+		function r:reply(_) error('reply must not be called') end
+		function r:fail(_) error('fail must not be called') end
+		function r:abandon(reason) self._done = true; self._status = 'abandoned'; self._err = reason; done:signal(); return true end
+		function r:done_op()
+			return op.guard(function ()
+				if self._done then return op.always(self._status, nil, self._err) end
+				return done:wait_op():wrap(function () return self._status, nil, self._err end)
+			end)
+		end
+
+		scoped_work.start = function (spec)
+			assert_not_nil(spec.cancel_op, 'action scoped_work must receive caller cancel_op')
+			local fake_scope = { finally = function () return function () end end }
+			local setup = assert(spec.setup(fake_scope))
+			r:abandon('user_timeout')
+			local reason = fibers.perform(spec.cancel_op)
+			assert_eq(reason, 'user_timeout')
+			assert_true(setup.request_owner:done(), 'caller cancellation should abandon local owner')
+			return { cancel = function () return true end }, nil
+		end
+
+		local cat = assert(config.to_catalogue({
+			schema = config.SCHEMA,
+			components = {
+				mcu = {
+					subtype = 'mcu',
+					facts = { software = topics.raw_member_state('mcu', 'software') },
+					actions = { restart = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'control', 'main', 'restart') } },
+				},
+			},
+		}))
+
+		local state = {
+			_action_seq = 0,
+			scope = {},
+			conn = nil,
+			done_tx = {},
+			pending_actions = {},
+			action_timeout = 1,
+			active = { generation = 31, action_root = {}, catalogue = cat },
+		}
+
+		local ok, err = action_manager.start_action(state, r, { generation = 31, component = 'mcu', action = 'restart' })
+		scoped_work.start = old_start
+		assert_true(ok, err)
+	end)
 end
 
 return tests

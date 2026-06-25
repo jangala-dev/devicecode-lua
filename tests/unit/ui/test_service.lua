@@ -147,12 +147,114 @@ function tests.test_stale_http_listener_request_events_are_ignored()
 	assert_eq(state.active_requests, 1)
 end
 
+function tests.test_read_model_changed_updates_seen_without_lifecycle_publish()
+	local state = base_state()
+	state.model_seen = 4
+
+	local decision = service._test.reduce_event(state, {
+		kind = 'read_model_changed',
+		version = 5,
+		snapshot = { services = {} },
+	})
+
+	assert_eq(state.model_seen, 5)
+	assert_eq(next(decision), nil)
+end
+
+function tests.test_session_changed_updates_seen_without_lifecycle_publish()
+	local state = base_state()
+	state.sessions_seen = 2
+	state.last_session_event = nil
+
+	local ev = {
+		kind = 'session_changed',
+		version = 3,
+		last_event = {
+			kind = 'session_count_changed',
+			count = 1,
+		},
+	}
+
+	local decision = service._test.reduce_event(state, ev)
+
+	assert_eq(state.sessions_seen, 3)
+	assert_eq(state.last_session_event, ev.last_event)
+	assert_eq(next(decision), nil)
+end
+
 function tests.test_cleanup_error_recording_is_explicit_and_non_throwing()
 	local state = base_state()
 	local rec = service._test.record_cleanup_error(state, 'ui_cleanup_failed', 'cleanup_failed')
 	assert_eq(rec.kind, 'ui_cleanup_failed')
 	assert_eq(rec.err, 'cleanup_failed')
 	assert_eq(state.last_cleanup_error, rec)
+end
+
+
+
+function tests.test_lifecycle_status_is_gated_by_semantic_change()
+	local calls = {}
+	local lifecycle = {
+		running = function (_, payload) calls[#calls + 1] = payload; return payload end,
+	}
+	local state = base_state()
+	state.lifecycle = lifecycle
+	state.config_status = 'ok'
+	state.config_generation = 1
+	state.config = { enabled = true, http = { enabled = true }, observability = { status_interval_s = 30 } }
+	state.lifecycle_obs = {}
+
+	service._test.update_lifecycle(state)
+	assert_eq(#calls, 1)
+	service._test.update_lifecycle(state)
+	assert_eq(#calls, 1, 'unchanged lifecycle status should not republish')
+
+	state.config_generation = 2
+	service._test.update_lifecycle(state)
+	assert_eq(#calls, 2, 'semantic lifecycle change should publish')
+end
+
+function tests.test_lifecycle_status_key_ignores_volatile_dependency_timestamps()
+	local a = service._test.lifecycle_status_key('running', {
+		ready = true,
+		dependencies = {
+			http = { status = 'ready', available = true, updated_at = 1.0 },
+		},
+	})
+	local b = service._test.lifecycle_status_key('running', {
+		ready = true,
+		dependencies = {
+			http = { status = 'ready', available = true, updated_at = 2.0 },
+		},
+	})
+	assert_eq(a, b)
+end
+
+function tests.test_lifecycle_not_ready_until_config_and_listener_are_ready()
+	local calls = {}
+	local lifecycle = {
+		running = function (_, payload) calls[#calls + 1] = payload; return payload end,
+	}
+	local state = base_state()
+	state.lifecycle = lifecycle
+	state.config_status = 'waiting'
+
+	service._test.update_lifecycle(state)
+	assert_eq(calls[#calls].ready, false)
+	assert_eq(calls[#calls].reason, 'waiting_for_config')
+
+	state.config_status = 'ok'
+	state.config = { enabled = true, http = { enabled = true } }
+	state.listener_status = 'waiting_for_http'
+	state.last_error = 'http_unavailable'
+	service._test.update_lifecycle(state)
+	assert_eq(calls[#calls].ready, false)
+	assert_eq(calls[#calls].reason, 'http_unavailable')
+
+	state.listener_status = 'running'
+	state.last_error = nil
+	service._test.update_lifecycle(state)
+	assert_eq(calls[#calls].ready, true)
 end
 
 return tests

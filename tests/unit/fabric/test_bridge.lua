@@ -108,7 +108,7 @@ local function start_bridge(scope, opts)
 		state_tx = state_tx,
 		import_rules = opts.import_rules or {
 			{ remote_prefix = { 'state', 'self' }, local_prefix = { 'raw', 'member', 'mcu', 'state' } },
-			{ remote_prefix = { 'event', 'self' }, local_prefix = { 'raw', 'member', 'mcu', 'event' } },
+			{ remote_prefix = { 'event', 'self' }, local_prefix = { 'raw', 'member', 'mcu', 'cap', 'telemetry', 'main', 'event' } },
 		},
 		export_publish_rules = opts.export_publish_rules or {
 			{ local_prefix = { 'local' }, remote_prefix = { 'remote' } },
@@ -178,6 +178,32 @@ function tests.test_remote_retained_publish_emits_bus_command_and_updates_import
 		assert_eq(cmd.topic[4], 'state')
 		assert_eq(cmd.topic[5], 'software')
 		assert_eq(cmd.session.peer_sid, 'sid-1')
+		close_bridge(h)
+	end)
+end
+
+function tests.test_remote_event_publish_maps_to_telemetry_cap_event_topic()
+	fibers.run(function (scope)
+		local h = start_bridge(scope)
+		assert_true(h.session_tx:send(peer_session_event()))
+		assert_true(h.session_tx:send(rpc_event(assert(protocol.pub(
+			{ 'event', 'self', 'power', 'charger', 'alert' },
+			{ kind = 'vin_lo' },
+			false
+		)))))
+		local cmd = recv_with_timeout(h.bus_rx, 'event publish command')
+		assert_eq(cmd.kind, 'publish')
+		assert_eq(cmd.topic[1], 'raw')
+		assert_eq(cmd.topic[2], 'member')
+		assert_eq(cmd.topic[3], 'mcu')
+		assert_eq(cmd.topic[4], 'cap')
+		assert_eq(cmd.topic[5], 'telemetry')
+		assert_eq(cmd.topic[6], 'main')
+		assert_eq(cmd.topic[7], 'event')
+		assert_eq(cmd.topic[8], 'power')
+		assert_eq(cmd.topic[9], 'charger')
+		assert_eq(cmd.topic[10], 'alert')
+		assert_eq(cmd.payload.kind, 'vin_lo')
 		close_bridge(h)
 	end)
 end
@@ -264,7 +290,7 @@ function tests.test_outbound_call_sends_call_frame_and_routes_remote_reply_to_re
 		local deadline = fibers.now() + 0.25
 		while req.resolved == false and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.001)) end
 		assert_eq(req.resolved, 'reply')
-		assert_eq(req.value.payload.ok, 'yes')
+		assert_eq(req.value.ok, 'yes')
 		close_bridge(h)
 	end)
 end
@@ -294,6 +320,14 @@ function tests.test_bus_adapter_remote_commands_use_local_bus_methods()
 		assert_eq(calls[1].kind, 'retain')
 		assert_eq(calls[1].opts.extra.fabric.session.peer_sid, 'sid-1')
 	end)
+end
+
+
+function tests.test_bridge_local_outbound_calls_propagate_bus_request_abandonment()
+	local f = assert(io.open('../src/services/fabric/bridge.lua', 'r'))
+	local src = f:read('*a'); f:close()
+	if not src:find('cancel_op      = cancel_op', 1, true) then fail('bridge scoped work wrapper should accept cancel_op') end
+	if not src:find('owner:caller_cancel_op()', 1, true) then fail('outbound local bus calls should pass caller_cancel_op') end
 end
 
 return tests

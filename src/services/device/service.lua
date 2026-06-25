@@ -20,7 +20,11 @@ local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local config_watch = require 'devicecode.support.config_watch'
 local service_events = require 'devicecode.support.service_events'
 local service_base = require 'devicecode.service_base'
+local cap_deps_mod = require 'devicecode.support.capability_dependencies'
+local dep_failure  = require 'devicecode.support.dependency_failure'
 local backpressure = require 'services.device.backpressure'
+local dependency_mod = require 'services.device.dependencies'
+local fabric_topics  = require 'services.fabric.topics'
 local tablex = require 'shared.table'
 
 local M = {}
@@ -32,6 +36,45 @@ local shallow_copy = tablex.shallow_copy
 
 local function new_service_id()
 	return ('device-%d-%d'):format(os.time(), math.random(1, 1000000))
+end
+
+-- Device action timeout is owned by the action worker scope.  The Fabric
+-- transfer-manager request may legitimately stay open for that whole action, so
+-- do not add lua-bus' default one-second call timeout here.  The transfer budget
+-- is passed as payload policy, while caller abandonment still aborts this Op.
+local FABRIC_SEND_BLOB_CALL_OPTS = { timeout = false }
+
+local function default_fabric_client(conn)
+	if type(conn) ~= 'table' or type(conn.call_op) ~= 'function' then return nil end
+
+	return {
+		send_blob_op = function (_, params, opts)
+			params = params or {}
+			opts = opts or {}
+			local timeout_s = opts.timeout or params.timeout
+			local ev, err = conn:call_op(fabric_topics.transfer_manager_rpc('send-blob'), {
+				link_id = params.link_id,
+				request_id = params.request_id or params.job_id,
+				xfer_id = params.xfer_id,
+				target = params.target,
+				source_owner = params.source_owner,
+				size = params.size,
+				digest_alg = params.digest_alg,
+				digest = params.digest,
+				chunk_size = params.chunk_size,
+				meta = params.meta,
+				timeout_s = timeout_s,
+			}, FABRIC_SEND_BLOB_CALL_OPTS)
+			if not ev then return nil, err end
+			return ev:wrap(function (reply, call_err)
+				if reply == nil then return nil, call_err end
+				if type(reply) == 'table' and reply.ok == false then
+					return nil, reply.err or reply.error or reply.reason or call_err or 'fabric_transfer_failed'
+				end
+				return (type(reply) == 'table' and (reply.result or reply.transfer)) or reply, nil
+			end)
+		end,
+	}
 end
 
 local function request_publication(state)
@@ -100,6 +143,7 @@ local function flush_publication(state)
 	if state.dirty.summary then
 		state.published_summary = true
 		state.published_identity = true
+		state.published_assembly = true
 	end
 	state.dirty.summary = false
 	state.publication_requested = false
@@ -125,12 +169,17 @@ local function cleanup_publication_now(state)
 		local ok, err = bus_cleanup.unretain(state.conn, projection.identity_topic())
 		if ok ~= true then return nil, err or 'identity publication cleanup failed' end
 	end
+	if state.published_assembly then
+		local ok, err = bus_cleanup.unretain(state.conn, projection.assembly_topic())
+		if ok ~= true then return nil, err or 'assembly publication cleanup failed' end
+	end
 
 	for i = 1, #cleaned do
 		state.published_components[cleaned[i]] = nil
 	end
 	state.published_summary = false
 	state.published_identity = false
+	state.published_assembly = false
 	return true, nil
 end
 
@@ -159,6 +208,8 @@ local function cancel_generation_actions(state, generation, reason)
 	return true, nil
 end
 
+local terminate_action_deps
+
 local function cancel_active_generation(state, reason)
 	local active = state.active
 	if not active then return true, nil end
@@ -181,6 +232,8 @@ local function cancel_active_generation(state, reason)
 		return nil, unbind_err or 'generation_unbind_failed'
 	end
 
+	terminate_action_deps(active, reason or 'generation_replaced')
+	state.action_deps = nil
 	local ok_actions, action_err = cancel_generation_actions(state, active.generation, reason or 'generation_replaced')
 	if ok_actions ~= true then
 		return nil, action_err or 'generation_action_cancel_failed'
@@ -197,6 +250,40 @@ local function cancel_active_generation(state, reason)
 		active.scope:cancel(reason or 'generation_replaced')
 	end
 
+	return true, nil
+end
+
+
+function terminate_action_deps(active, reason)
+	if active and active.action_deps and type(active.action_deps.terminate) == 'function' then
+		active.action_deps:terminate(reason or 'device_action_dependencies_closed')
+	end
+	if active then active.action_deps = nil end
+	return true
+end
+
+local function open_action_deps(state, active, catalogue)
+	local specs, map, err = dependency_mod.catalogue_dependencies(catalogue)
+	if err ~= nil then return nil, err end
+	active.action_dependency_keys = map or {}
+	if #specs == 0 then return true, nil end
+	local deps, derr = cap_deps_mod.open(state.conn, specs, {
+		changed_kind = 'device_dependency_changed',
+		closed_kind = 'device_dependency_closed',
+		queue_len = state.dependency_queue_len or 8,
+		full = 'drop_oldest',
+	})
+	if not deps then return nil, derr or 'device_action_dependencies_open_failed' end
+	active.action_deps = deps
+	state.action_deps = deps
+	return true, nil
+end
+
+local function update_dependency_model(state, active)
+	if not active then return true, nil end
+	local changed, _, err = state.model:update_dependencies(active.generation, active.action_deps and active.action_deps:snapshot() or {})
+	if err ~= nil then return nil, err end
+	if changed then state.dirty.summary = true; request_publication(state) end
 	return true, nil
 end
 
@@ -245,6 +332,7 @@ end
 local function rollback_generation_start(state, active, reason)
 	if not active then return true, nil end
 	local ok_unbind, unbind_err = action_manager.unbind_generation(active, state.conn)
+	terminate_action_deps(active, reason or 'generation_start_failed')
 	active.cancel(reason or 'generation_start_failed')
 	if ok_unbind ~= true then return nil, unbind_err or 'generation_rollback_unbind_failed' end
 	return true, nil
@@ -262,6 +350,12 @@ local function start_generation(state, catalogue)
 	local active, err = create_generation_lifetime(state, generation, catalogue)
 	if not active then
 		return nil, err or 'generation_start_failed'
+	end
+
+	local ok_deps, dep_err = open_action_deps(state, active, catalogue)
+	if ok_deps ~= true then
+		local ok_rb, rb_err = rollback_generation_start(state, active, 'action_dependency_open_failed')
+		return nil, dep_err or rb_err or 'action_dependency_open_failed'
 	end
 
 	if state.enable_actions ~= false then
@@ -494,6 +588,14 @@ local function add_publication_source(state, sources)
 	end)
 end
 
+
+local function add_dependency_source(state, sources)
+	if not state.action_deps then return end
+	local src = state.action_deps:event_source({ name = 'dependencies' })
+	if src.enabled ~= nil and src.enabled() ~= true then return end
+	sources[#sources + 1] = src
+end
+
 local function take_pending_from_sources(state, sources)
 	for _, source in ipairs(sources) do
 		local ev = priority_event.take_pending(state.pending_events, source.name)
@@ -506,6 +608,7 @@ local function prune_unavailable_pending_events(state, action_sources)
 	local keep = { done = true, observation = true }
 	if config_event_op(state) ~= nil then keep.config = true end
 	if state.auto_publish ~= false then keep.publication = true end
+	if state.action_deps ~= nil then keep.dependencies = true end
 
 	for _, rec in ipairs(action_sources or {}) do
 		keep['action:' .. rec.key] = true
@@ -556,6 +659,7 @@ local function next_event_op(state)
 		add_done_source(state, sources)
 		add_observation_source(state, sources)
 		add_action_sources(state, sources, action_sources)
+		add_dependency_source(state, sources)
 		add_publication_source(state, sources)
 		return unordered_event_op(state, sources)
 	end
@@ -568,6 +672,7 @@ local function next_event_op(state)
 	local sources = {}
 	add_config_source(state, sources)
 	add_action_sources(state, sources, action_sources)
+	add_dependency_source(state, sources)
 	add_done_source(state, sources)
 	add_observation_source(state, sources)
 	add_publication_source(state, sources)
@@ -656,7 +761,13 @@ local function handle_action_done(state, ev)
 	local public_ok
 	local public_error
 
-	if ev.status == 'ok' then
+	if rec and rec.dependency_key and state.action_deps and dep_failure.is_no_route(ev.primary, result, ev.report) then
+		state.action_deps:classify_call_failure(rec.dependency_key, result, ev.primary)
+		update_dependency_model(state, generation_rec)
+		public_status = 'dependency_unavailable'
+		public_ok = false
+		public_error = 'dependency_unavailable:' .. tostring(rec.dependency_key)
+	elseif ev.status == 'ok' then
 		public_status = result.public_status or (result.ok == true and 'succeeded' or 'remote_failed')
 		public_ok = result.ok == true or public_status == 'succeeded'
 		public_error = result.error or result.err
@@ -702,6 +813,9 @@ local function reduce_event(state, ev)
 		return action_manager.start_action(state, ev.request, ev)
 	elseif ev.kind == 'component_action_done' then
 		return handle_action_done(state, ev)
+	elseif ev.kind == 'device_dependency_changed' or ev.kind == 'device_dependency_closed' then
+		if state.active then return update_dependency_model(state, state.active) end
+		return true, nil
 	elseif ev.kind == 'publication_flush' then
 		return flush_publication(state)
 	elseif ev.kind == 'publication_closed' then
@@ -758,6 +872,7 @@ local function build_state(scope, params)
 		published_components = {},
 		published_summary = false,
 		published_identity = false,
+		published_assembly = false,
 		pending_actions = {},
 		action_outcomes = {},
 		stale_action_outcomes = {},
@@ -769,10 +884,13 @@ local function build_state(scope, params)
 		enable_observers = params.enable_observers,
 		auto_publish = params.auto_publish,
 		emit_events = params.emit_events,
-		fabric_client = params.fabric_client,
+		fabric_client = params.fabric_client or default_fabric_client(params.conn),
 		open_source = params.open_source,
 		open_source_op = params.open_source_op,
 		terminate_source = params.terminate_source,
+		action_deps = nil,
+		dependency_queue_len = params.dependency_queue_len,
+		update_dependency_model = update_dependency_model,
 	}
 
 	state.now = params.now or function () return fibers.now() end
@@ -903,5 +1021,6 @@ M.start_generation = start_generation
 M.cancel_active_generation = cancel_active_generation
 M.flush_publication = flush_publication
 M.cleanup_publication_now = cleanup_publication_now
+M.default_fabric_client = default_fabric_client
 
 return M

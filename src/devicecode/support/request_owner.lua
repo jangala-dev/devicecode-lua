@@ -44,7 +44,6 @@ function M.new(request, opts)
 		_done = false,
 		_reply = opts.reply or default_reply,
 		_fail = opts.fail or default_fail,
-		_reply_payload_only = not not opts.reply_payload_only,
 	}, RequestOwner)
 end
 
@@ -62,10 +61,6 @@ function RequestOwner:reply_once(value)
 	end
 
 	self._done = true
-
-	if self._reply_payload_only and type(value) == 'table' then
-		return self._reply(self._request, value.payload)
-	end
 
 	return self._reply(self._request, value)
 end
@@ -93,6 +88,24 @@ function RequestOwner:abandon_unresolved(_reason)
 
 	self._done = true
 	return true, nil
+end
+
+
+function RequestOwner:caller_cancel_op()
+	local req = self._request
+	if type(req) ~= 'table' or type(req.done_op) ~= 'function' then
+		return nil, 'request has no done_op'
+	end
+
+	return req:done_op():wrap(function (status, _value, err)
+		if status == 'abandoned' and not self:done() then
+			local reason = err or 'caller_abandoned'
+			self:abandon_unresolved(reason)
+			return reason
+		end
+
+		return false
+	end)
 end
 
 M.RequestOwner = RequestOwner

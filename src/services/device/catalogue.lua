@@ -99,25 +99,21 @@ local function normalise_event_routes(events, where)
 	return out
 end
 
-local function is_raw_cap_rpc_topic(t)
-	return type(t) == 'table'
-		and (t[1] == 'raw')
-		and type(t[2]) == 'string' and t[2] ~= ''
-		and type(t[3]) == 'string' and t[3] ~= ''
-		and t[4] == 'cap'
-		and type(t[5]) == 'string' and t[5] ~= ''
-		and type(t[6]) == 'string' and t[6] ~= ''
-		and t[7] == 'rpc'
-		and type(t[8]) == 'string' and t[8] ~= ''
-		and t[9] == nil
+local function opt_target(v, where)
+	if v == nil then return nil end
+	if type(v) ~= 'string' or v == '' then
+		error(where .. ': fabric_stage target must be a non-empty string', 0)
+	end
+	return v
 end
 
-local function assert_raw_cap_rpc_topic(t, where)
-	local topic = assert_topic(t, where)
-	if not is_raw_cap_rpc_topic(topic) then
-		error(where .. ': fabric_stage receiver must use raw/<kind>/<source>/cap/<class>/<id>/rpc/<method>', 0)
+local function opt_pos_int(v, where, default)
+	if v == nil then return default end
+	local n = tonumber(v)
+	if type(n) ~= 'number' or n <= 0 or n % 1 ~= 0 then
+		error(where .. ': fabric_stage chunk_size must be a positive integer', 0)
 	end
-	return topic
+	return n
 end
 
 local function normalise_actions(actions, where)
@@ -133,8 +129,8 @@ local function normalise_actions(actions, where)
 		local public_name = public_method_name(action_name)
 
 		if type(spec) == 'table' then
-			if spec[1] ~= nil and spec.kind == nil and spec.call_topic == nil and spec.receiver == nil then
-				error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic or receiver', 0)
+			if spec[1] ~= nil and spec.kind == nil and spec.call_topic == nil then
+				error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic', 0)
 			end
 			local kind = spec.kind or 'rpc'
 
@@ -150,24 +146,36 @@ local function normalise_actions(actions, where)
 					kind = 'rpc',
 					call_topic = assert_topic(spec.call_topic, where .. ': action ' .. action_name .. ' call_topic'),
 					timeout = tonumber(spec.timeout_s) or nil,
+					dependency = copy_value(spec.dependency),
 				}
 			elseif kind == 'fabric_stage' then
 				if spec.timeout ~= nil then
 					error(where .. ': action ' .. action_name .. ' uses deprecated timeout; use timeout_s', 0)
 				end
+
+				if spec.receiver ~= nil then
+					error(where .. ': action ' .. action_name .. ' uses deprecated receiver; use target', 0)
+				end
+				local target = opt_target(spec.target, where .. ': action ' .. action_name .. ' target')
+				if target == nil then
+					error(where .. ': action ' .. action_name .. ' requires fabric_stage target', 0)
+				end
+
 				out[public_name] = {
 					name = public_name,
 					kind = 'fabric_stage',
 					link_id = spec.link_id,
-					receiver = assert_raw_cap_rpc_topic(spec.receiver, where .. ': action ' .. action_name .. ' receiver'),
+					target = target,
+					chunk_size = opt_pos_int(spec.chunk_size, where .. ': action ' .. action_name .. ' chunk_size', nil),
 					artifact_store = spec.artifact_store or 'main',
 					timeout = tonumber(spec.timeout_s) or nil,
+					dependency = copy_value(spec.dependency),
 				}
 			else
 				error(where .. ': unsupported action kind for ' .. action_name .. ': ' .. tostring(kind), 0)
 			end
 		else
-			error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic or receiver', 0)
+			error(where .. ': action ' .. action_name .. ' must be a table with kind and call_topic', 0)
 		end
 	end
 
@@ -257,14 +265,58 @@ local function default_components()
 			events = mcu_schema.member_event_topics('mcu'),
 			actions = {
 				['restart'] = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'control', 'main', 'restart') },
+				['prepare-update'] = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'updater', 'main', 'prepare-update') },
 				['stage-update'] = {
 					kind = 'fabric_stage',
-					receiver = topics.raw_member_cap_rpc('mcu', 'update', 'main', 'stage'),
+					target = 'updater/main',
+					chunk_size = 2048,
 					artifact_store = 'main',
 				},
+				['commit-update'] = { kind = 'rpc', call_topic = topics.raw_member_cap_rpc('mcu', 'updater', 'main', 'commit-update') },
 			},
 		}),
 	}
+end
+
+local function non_empty_string(v)
+	return type(v) == 'string' and v ~= ''
+end
+
+local function reject_assembly_aliases(rec, ctx)
+	if type(rec) ~= 'table' then return end
+	if rec.provider ~= nil or rec.provider_id ~= nil or rec.provider_surface_id ~= nil or rec.surface ~= nil then
+		error(ctx .. ' must use component and observed_surface only', 0)
+	end
+end
+
+local function validate_assembly_endpoint(endpoint, ctx)
+	if type(endpoint) ~= 'table' then error(ctx .. ' must be a table', 0) end
+	reject_assembly_aliases(endpoint, ctx)
+	if not non_empty_string(endpoint.component) then error(ctx .. '.component must be a non-empty string', 0) end
+	if not non_empty_string(endpoint.observed_surface) then error(ctx .. '.observed_surface must be a non-empty string', 0) end
+end
+
+local function normalise_assembly(raw)
+	if raw == nil then return {} end
+	if type(raw) ~= 'table' then error('device catalogue assembly must be a table', 0) end
+	local surfaces = raw.surfaces or {}
+	if type(surfaces) ~= 'table' then error('device catalogue assembly.surfaces must be a table', 0) end
+	for id, rec in pairs(surfaces) do
+		if not non_empty_string(id) then error('device catalogue assembly surface id must be a non-empty string', 0) end
+		if type(rec) ~= 'table' then error('device catalogue assembly surface ' .. tostring(id) .. ' must be a table', 0) end
+		reject_assembly_aliases(rec, 'device catalogue assembly surface ' .. tostring(id))
+		if not non_empty_string(rec.component) then error('device catalogue assembly surface ' .. tostring(id) .. '.component must be a non-empty string', 0) end
+		if not non_empty_string(rec.observed_surface) then error('device catalogue assembly surface ' .. tostring(id) .. '.observed_surface must be a non-empty string', 0) end
+	end
+	local links = raw.links or {}
+	if type(links) ~= 'table' then error('device catalogue assembly.links must be a table', 0) end
+	for id, link in pairs(links) do
+		if not non_empty_string(id) then error('device catalogue assembly link id must be a non-empty string', 0) end
+		if type(link) ~= 'table' then error('device catalogue assembly link ' .. tostring(id) .. ' must be a table', 0) end
+		if link.a ~= nil then validate_assembly_endpoint(link.a, 'device catalogue assembly link ' .. tostring(id) .. '.a') end
+		if link.b ~= nil then validate_assembly_endpoint(link.b, 'device catalogue assembly link ' .. tostring(id) .. '.b') end
+	end
+	return copy_value(raw)
 end
 
 local function components_from_config(raw)
@@ -298,6 +350,7 @@ function M.build(raw, opts)
 		kind = 'device_catalogue',
 		schema = raw and raw.schema or nil,
 		components = components,
+		assembly = normalise_assembly(raw and raw.assembly or nil),
 		meta = copy_value((raw and raw.meta) or {}),
 	}
 end

@@ -1,0 +1,42 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/network-lab-env"
+
+sh "$SCRIPT_DIR/network-lab-stop" || true
+sh "$SCRIPT_DIR/network-lab-start"
+sh "$SCRIPT_DIR/network-lab-provision"
+sh "$SCRIPT_DIR/network-lab-sync"
+
+targets="$NETWORK_LAB_TEST_TARGETS"
+if [ "$#" -gt 0 ]; then
+	targets="$*"
+fi
+
+echo "[network-lab] running targets: $targets"
+echo "[network-lab] nested OpenWrt SSH wait: ${NETWORK_LAB_OPENWRT_SSH_WAIT_S}s"
+# Pass the target list as positional arguments rather than interpolating it into
+# remote shell code. The exported OPENWRT_* values affect the nested OpenWrt VM
+# lane only; they do not change the outer lab VM lifecycle.
+# shellcheck disable=SC2086 # intentional splitting of Make target names
+$NETWORK_LAB_SSH 'sh -s' -- \
+	"$NETWORK_LAB_OPENWRT_SSH_WAIT_S" \
+	"$NETWORK_LAB_OPENWRT_KVM" \
+	"$NETWORK_LAB_REPO_DIR" \
+	$targets <<'NETWORK_LAB_RUN_TARGETS'
+set -eu
+openwrt_ssh_wait_s="$1"
+openwrt_kvm="$2"
+repo_dir="$3"
+shift 3
+export OPENWRT_SSH_WAIT_S="$openwrt_ssh_wait_s"
+export OPENWRT_KVM="$openwrt_kvm"
+cd "$repo_dir/tests/integration/openwrt_vm"
+make preflight
+for target do
+	make "$target"
+done
+NETWORK_LAB_RUN_TARGETS

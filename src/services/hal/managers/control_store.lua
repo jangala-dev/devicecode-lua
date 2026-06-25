@@ -75,11 +75,11 @@ local function validate_config(namespaces)
 end
 
 local function emit_device_added_op(driver, caps)
-	return device_events.added_op(S.dev_ev_ch, 'control_store', driver.id, { root = driver.root, source = 'control_store_manager' }, caps)
+	return device_events.added_op(S.dev_ev_ch, 'control-store', driver.id, { root = driver.root, source = 'control-store-manager' }, caps)
 end
 
 local function emit_device_removed_op(driver)
-	return device_events.removed_op(S.dev_ev_ch, 'control_store', driver.id, {})
+	return device_events.removed_op(S.dev_ev_ch, 'control-store', driver.id, {})
 end
 
 local function start_driver_op(name, root)

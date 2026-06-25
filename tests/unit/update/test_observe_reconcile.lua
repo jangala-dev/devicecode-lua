@@ -55,24 +55,14 @@ function tests.test_reconcile_worker_waits_on_component_observer()
 end
 
 
-function tests.test_stage_worker_runs_preflight_prepare_then_stage()
+function tests.test_stage_worker_runs_single_stage_op()
 	fibers.run(function (scope)
-		local order = {}
+		local called = 0
 		local backend = {}
-		function backend:preflight_op(job, ctx)
-			order[#order + 1] = 'preflight'
-			assert_eq(ctx.phase, 'stage')
-			return op.always({ compatible = true }, nil)
-		end
-		function backend:prepare_op(job, ctx)
-			order[#order + 1] = 'prepare'
-			assert_eq(ctx.preflight.compatible, true)
-			return op.always({ handle = 'prepared' }, nil)
-		end
 		function backend:stage_op(job, ctx)
-			order[#order + 1] = 'stage'
-			assert_eq(ctx.prepared.handle, 'prepared')
-			return op.always({ staged = true }, nil)
+			called = called + 1
+			assert_eq(ctx.phase, 'stage')
+			return op.always({ staged = true, preflight = { compatible = true }, prepared = { handle = 'prepared' } }, nil)
 		end
 
 		local result = active_job.stage(scope, {
@@ -81,13 +71,12 @@ function tests.test_stage_worker_runs_preflight_prepare_then_stage()
 		})
 
 		assert_eq(result.tag, 'staged')
-		assert_eq(result.preflight.compatible, true)
-		assert_eq(result.prepared.handle, 'prepared')
 		assert_eq(result.staged.staged, true)
-		assert_eq(table.concat(order, ','), 'preflight,prepare,stage')
+		assert_eq(result.staged.preflight.compatible, true)
+		assert_eq(result.staged.prepared.handle, 'prepared')
+		assert_eq(called, 1)
 	end)
 end
-
 function tests.test_reconcile_worker_returns_observer_closed_result()
 	fibers.run(function (scope)
 		local obs = observe.new({ components = { cm5 = { component = 'cm5' } } })

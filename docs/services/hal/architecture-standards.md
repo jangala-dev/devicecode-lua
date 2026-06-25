@@ -40,6 +40,21 @@ Manager channel contract:
 
 Canonical reference: `src/services/hal/managers/modemcard.lua`
 
+## Capability RPC cancellation
+
+HAL capability RPCs are bus requests. If a caller abandons a request after HAL admission, the abandonment should be visible to the manager or driver as a cancellation source, not discovered only as a failed late reply.
+
+Managers that convert capability requests into scoped work should pass the request cancellation Op into that work:
+
+```lua
+scoped_work.start {
+  ...,
+  cancel_op = request.cancel_op,
+}
+```
+
+Drivers that own long-running operation scopes should treat `request.cancel_op` as an immediate cancellation source. Immediate handlers may simply avoid blocking reply delivery after abandonment.
+
 ### Driver
 
 Responsibilities:

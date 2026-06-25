@@ -10,6 +10,8 @@ local busmod = require 'bus'
 
 local safe   = require 'coxpcall'
 
+local EXIT_GRACE_PERIOD = 60.0
+
 local M      = {}
 
 local function require_env(name)
@@ -171,6 +173,7 @@ function M.run(scope, params)
     params = params or {}
 
     local env = params.env or (os.getenv('DEVICECODE_ENV') or 'dev')
+    local exit_grace_period = params.exit_grace_period or EXIT_GRACE_PERIOD
 
     local service_names = parse_csv(params.services_csv or require_env('DEVICECODE_SERVICES'))
     if #service_names == 0 then
@@ -285,6 +288,8 @@ function M.run(scope, params)
             status  = jst,
             primary = tostring(jprimary),
         })
+
+        sleep.sleep(exit_grace_period)
 
 		scope:cancel(('service_not_ok:%s'):format(tostring(svc)))
     end)

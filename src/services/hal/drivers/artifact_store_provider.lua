@@ -64,27 +64,27 @@ local function methods_for(self)
 			return self.backend:status_op()
 		end,
 
-		create_sink = function (opts, _request)
+		['create-sink'] = function (opts, _request)
 			if type(opts) ~= 'table' or getmetatable(opts) ~= cap_args.ArtifactStoreCreateSinkOpts then
-				return op.always(false, 'invalid create_sink opts')
+				return op.always(false, 'invalid create-sink opts')
 			end
 			return self.backend:create_sink_op(opts.meta, {
 				policy = opts.policy,
 			})
 		end,
 
-		import_path = function (opts, _request)
+		['import-path'] = function (opts, _request)
 			if type(opts) ~= 'table' or getmetatable(opts) ~= cap_args.ArtifactStoreImportPathOpts then
-				return op.always(false, 'invalid import_path opts')
+				return op.always(false, 'invalid import-path opts')
 			end
 			return self.backend:import_path_op(opts.path, opts.meta, {
 				policy = opts.policy,
 			})
 		end,
 
-		import_source = function (opts, _request)
+		['import-source'] = function (opts, _request)
 			if type(opts) ~= 'table' or getmetatable(opts) ~= cap_args.ArtifactStoreImportSourceOpts then
-				return op.always(false, 'invalid import_source opts')
+				return op.always(false, 'invalid import-source opts')
 			end
 			return self.backend:import_source_op(opts.source, opts.meta, {
 				policy = opts.policy,
@@ -117,7 +117,7 @@ local function shell_main(self)
 
 	local ok_meta, meta_err = fibers.perform(emit_op(
 		self.emit_ch,
-		'artifact_store',
+		'artifact-store',
 		self.id,
 		'meta',
 		'info',
@@ -136,7 +136,7 @@ local function shell_main(self)
 
 	local ok_state, state_err = fibers.perform(emit_op(
 		self.emit_ch,
-		'artifact_store',
+		'artifact-store',
 		self.id,
 		'state',
 		'status',
@@ -150,7 +150,7 @@ local function shell_main(self)
 		self.control_ch,
 		methods_for(self),
 		self.logger,
-		'artifact_store'
+		'artifact-store'
 	)
 end
 

@@ -245,4 +245,43 @@ function tests.test_read_model_declares_self_ingestion_exclusions()
 	if not read_model:find('should_ingest_event', 1, true) then fail('read model has no retained-feed exclusion check') end
 end
 
+
+function tests.test_reusable_ui_clients_have_no_hidden_bus_timeouts()
+	local client = read_file('../src/services/ui/update/client.lua')
+	if not client:find('out.timeout = false', 1, true) then
+		fail('ui update client should default bus calls to timeout=false')
+	end
+	if client:find('default_timeout or 10.0', 1, true) or client:find('opts.timeout or 10.0', 1, true) then
+		fail('ui update client still has a hidden default timeout')
+	end
+
+	local ingest = read_file('../src/services/ui/update/artifact_ingest.lua')
+	if not ingest:find('out.timeout = false', 1, true) then
+		fail('artifact ingest bus client should default bus calls to timeout=false')
+	end
+	if ingest:find('opts.timeout or 10.0', 1, true) then
+		fail('artifact ingest bus client still has a hidden timeout')
+	end
+
+	local req = read_file('../src/services/ui/http/request.lua')
+	if not req:find('conn:call_op(route.topic, payload, { timeout = false })', 1, true) then
+		fail('UI command bridge should leave timeout policy to user_operation.run_op')
+	end
+
+	local upload = read_file('../src/services/ui/update/upload.lua')
+	if upload:find('remaining_timeout(opts, deadline)', 1, true) then
+		fail('upload should not convert its outer deadline into hidden upstream bus timeouts')
+	end
+end
+
+
+function tests.test_ui_listener_has_no_separate_pending_generation_field()
+	local f = assert(io.open('../src/services/ui/service.lua', 'r'))
+	local src = f:read('*a'); f:close()
+	if src:find('pending_listener_generation', 1, true) then
+		error('ui listener should carry pending listener config only; pending_listener_generation is redundant', 2)
+	end
+	assert(src:find('pending_listener_cfg', 1, true), 'ui should still keep pending listener config')
+end
+
 return tests

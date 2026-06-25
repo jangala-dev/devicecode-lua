@@ -328,12 +328,21 @@ function tests.test_xfer_chunk_requires_chunk_digest_and_strict_unpadded_b64url(
 	assert_eq(derr, 'invalid_chunk_encoding: invalid_base64url_unpadded')
 end
 
-function tests.test_decode_line_rejects_chunk_digest_mismatch()
+function tests.test_decode_line_preserves_xfer_chunk_digest_mismatch_for_receiver_retry()
 	local line = '{"type":"xfer_chunk","xfer_id":"xfer-1","offset":0,"data":"YQ","chunk_digest":"00000000"}'
 	local frame, err = protocol.decode_line(line)
 
-	assert_nil(frame)
-	assert_eq(err, 'chunk_digest_mismatch')
+	assert_not_nil(frame)
+	assert_nil(err)
+	assert_eq(frame.type, 'xfer_chunk')
+	assert_eq(frame.xfer_id, 'xfer-1')
+	assert_eq(frame.offset, 0)
+	assert_eq(frame.data, 'a')
+	assert_eq(frame.chunk_digest, '00000000')
+
+	local ok, verr = protocol.validate(frame)
+	assert_nil(ok)
+	assert_eq(verr, 'chunk_digest_mismatch')
 end
 
 function tests.test_decode_line_rejects_non_json()
@@ -440,6 +449,86 @@ function tests.test_transfer_digests_are_strict_xxhash32_hex()
 	})
 	assert_nil(ok)
 	assert_eq(err, 'invalid_digest')
+end
+
+
+function tests.test_contract_constants_match_fabric_jsonl_v1()
+	assert_eq(protocol.PROTO, 'fabric-jsonl/1')
+	assert_eq(protocol.DIGEST_ALG, 'xxhash32')
+	assert_eq(protocol.DEFAULT_CHUNK_SIZE, 2048)
+
+	assert_eq(protocol.classify('hello'), 'session_control')
+	assert_eq(protocol.classify('hello_ack'), 'session_control')
+	assert_eq(protocol.classify('ping'), 'session_control')
+	assert_eq(protocol.classify('pong'), 'session_control')
+
+	assert_eq(protocol.classify('pub'), 'rpc')
+	assert_eq(protocol.classify('unretain'), 'rpc')
+	assert_eq(protocol.classify('call'), 'rpc')
+	assert_eq(protocol.classify('reply'), 'rpc')
+
+	assert_eq(protocol.classify('xfer_begin'), 'transfer_control')
+	assert_eq(protocol.classify('xfer_ready'), 'transfer_control')
+	assert_eq(protocol.classify('xfer_need'), 'transfer_control')
+	assert_eq(protocol.classify('xfer_commit'), 'transfer_control')
+	assert_eq(protocol.classify('xfer_done'), 'transfer_control')
+	assert_eq(protocol.classify('xfer_abort'), 'transfer_control')
+	assert_eq(protocol.classify('xfer_chunk'), 'transfer_bulk')
+end
+
+function tests.test_unversioned_hello_is_rejected()
+	local ok, err = protocol.validate({
+		type = 'hello',
+		sid = 'sid-1',
+		node = 'cm5',
+	})
+
+	assert_nil(ok)
+	assert_eq(err, 'missing_proto')
+
+	ok, err = protocol.validate({
+		type = 'hello_ack',
+		sid = 'sid-2',
+		node = 'mcu',
+	})
+
+	assert_nil(ok)
+	assert_eq(err, 'missing_proto')
+end
+
+function tests.test_legacy_checksum_field_is_rejected_on_begin_and_commit()
+	local ok, err = protocol.validate({
+		type = 'xfer_begin',
+		xfer_id = 'x1',
+		target = 'updater/main',
+		size = 3,
+		digest_alg = protocol.DIGEST_ALG,
+		digest = protocol.digest_hex('abc'),
+		checksum = 'legacy',
+	})
+
+	assert_nil(ok)
+	assert_eq(err, 'unknown_frame_field: checksum')
+
+	ok, err = protocol.validate({
+		type = 'xfer_commit',
+		xfer_id = 'x1',
+		size = 3,
+		digest_alg = protocol.DIGEST_ALG,
+		digest = protocol.digest_hex('abc'),
+		checksum = 'legacy',
+	})
+
+	assert_nil(ok)
+	assert_eq(err, 'unknown_frame_field: checksum')
+end
+
+function tests.test_legacy_chunk_without_digest_is_rejected_on_decode()
+	local line = '{"type":"xfer_chunk","xfer_id":"xfer-1","offset":0,"data":"YQ"}'
+	local frame, err = protocol.decode_line(line)
+
+	assert_nil(frame)
+	assert_eq(err, 'missing_chunk_digest')
 end
 
 return tests

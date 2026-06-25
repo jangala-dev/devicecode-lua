@@ -165,7 +165,10 @@ local CoreCapabilityReference = {}
 CoreCapabilityReference.__index = CoreCapabilityReference
 
 function CoreCapabilityReference:call_control_op(method, args, opts)
-	return self.conn:call_op(control_topic(self, method), args, opts)
+	local out = {}
+	for k, v in pairs(opts or {}) do out[k] = v end
+	if out.timeout == nil and out.deadline == nil then out.timeout = false end
+	return self.conn:call_op(control_topic(self, method), args, out)
 end
 
 ---@param field string

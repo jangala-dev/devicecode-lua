@@ -32,6 +32,7 @@ function tests.test_public_entrypoint_exports_semantic_modules()
 	assert_eq(fabric.transfer, require 'services.fabric.transfer')
 	assert_eq(fabric.transfer_client, require 'services.fabric.transfer_client')
 	assert_eq(fabric.transfer_sender, require 'services.fabric.transfer_sender')
+	assert_eq(fabric.transfer_receive, require 'services.fabric.transfer_receive')
 	assert_eq(fabric.state, require 'services.fabric.state')
 	assert_eq(type(fabric.start), 'function')
 	assert_eq(type(fabric.run), 'function')
@@ -148,7 +149,11 @@ function tests.test_composed_link_transport_open_failure_fails_link_scope_before
 			})
 		end)
 		assert_eq(st, 'failed')
-		assert_match(primary, 'open failed')
+		if type(primary) == 'table' then
+			assert_eq(primary.err, 'open failed')
+		else
+			assert_match(primary, 'open failed')
+		end
 	end)
 end
 

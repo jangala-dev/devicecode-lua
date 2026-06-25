@@ -99,6 +99,17 @@ cap/component/<component>/rpc/commit-update
 
 A non-trivial action should run in a request/action scope. The coordinator admits or rejects. The worker waits.
 
+Actions admitted from public component bus requests must use the canonical request-owner cancellation path:
+
+```lua
+scoped_work.start {
+  ...,
+  cancel_op = owner:caller_cancel_op(),
+}
+```
+
+If the caller abandons the action request, the action scope is cancelled and late completion must not reply to the abandoned bus request.
+
 Fabric-stage action rules:
 
 ```text
@@ -117,8 +128,14 @@ Raw facts are not mirrored wholesale.
 Component ids are stable appliance ids, not raw topology ids.
 Capability metadata preserves provenance.
 Actions run in request/action scopes.
+Action request scopes observe caller abandonment through owner:caller_cancel_op().
 Fabric-stage receiver topics use raw/.../cap/.../rpc/...
 Model updates are non-yielding.
 Publication failures are explicit.
 Config replacement cancels generation-owned observers and actions.
 ```
+
+
+## Action dependency admission
+
+Component actions may declare explicit capability dependencies. Missing or route-missing dependencies reject the individual action with dependency unavailable; they do not fail the Device service. Observation feeds remain tolerant and are projected as component state.

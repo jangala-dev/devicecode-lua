@@ -125,6 +125,8 @@ timeout policy
 update job creation/start request
 ```
 
+UI request scopes own user-facing timeout policy. Reusable update and ingest clients must not install hidden bus timeouts; they should call update and ingest capabilities with `timeout = false` by default and let the UI request scope compose timeout/cancellation using Ops.
+
 On cancellation or append failure:
 
 ```text
@@ -148,8 +150,14 @@ UI does not require cqueues, lua-http or HTTP transport modules.
 UI obtains HTTP through services.http.sdk.
 Request scopes own HTTP I/O.
 Upload uses cap/artifact-ingest and cap/update-manager.
+UI update and ingest clients leave bus timeout policy to the owning request scope.
 UI does not publish workflow records owned by Update.
 UI state stays narrow under state/ui/...
 Session changes are observable through the store/model, not callback sinks.
 Finalisers terminate contexts and unresolved requests immediately.
 ```
+
+
+## HTTP listener dependency
+
+A configured UI HTTP listener depends on `cap/http/<id>/status`. Missing HTTP status, `available=false`, `no_route`, or `http_backend_not_ready` are admission failures. The UI read model and session machinery may continue running while listener work is `waiting_for_http`.

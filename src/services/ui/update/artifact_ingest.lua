@@ -81,8 +81,10 @@ local function ingest_rpc(method)
 end
 
 local function request_timeout(opts)
-	opts = opts or {}
-	return { timeout = opts.timeout or 10.0 }
+	local out = {}
+	for k, v in pairs(opts or {}) do out[k] = v end
+	if out.timeout == nil and out.deadline == nil then out.timeout = false end
+	return out
 end
 
 local function ingest_id_from(reply, fallback)
@@ -95,7 +97,9 @@ function BusHandle:append_chunk_op(chunk)
 	return self._conn:call_op(ingest_rpc('append'), {
 		ingest_id = self.ingest_id,
 		chunk = chunk,
-	}, request_timeout(self._opts))
+	}, request_timeout(self._opts)):wrap(function (reply, err)
+		return reply, err
+	end)
 end
 
 function BusHandle:commit_op()
@@ -110,9 +114,9 @@ function BusHandle:commit_op()
 		if type(committed) ~= 'table' then return nil, 'invalid_artifact_ingest_commit_reply' end
 		local artifact = committed.artifact
 		if type(artifact) == 'table' then
-			return artifact.artifact_id or artifact.ref or artifact.id or artifact
+			return artifact.artifact_ref or artifact.artifact_id or artifact.ref or artifact.id or artifact
 		end
-		return committed.artifact_id or committed.ref or committed.id or artifact
+		return committed.artifact_ref or committed.artifact_id or committed.ref or committed.id or artifact
 	end)
 end
 

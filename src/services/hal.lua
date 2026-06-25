@@ -10,13 +10,14 @@ local channel = require "fibers.channel"
 local sleep   = require "fibers.sleep"
 
 local tablex = require 'shared.table'
+local dependencies = require 'services.hal.dependencies'
 
 local perform = fibers.perform
 
 local SCHEMA_STANDARD = "devicecode.config/hal/1"
 
 local DEFAULT_Q_LEN = 10
-local DEFAULT_CONTROL_TIMEOUT_S = 5.0
+local DEFAULT_CONTROL_TIMEOUT_S = 30.0
 local DEFAULT_MANAGER_START_TIMEOUT_S = 10.0
 local DEFAULT_MANAGER_APPLY_TIMEOUT_S = 10.0
 local DEFAULT_MANAGER_SHUTDOWN_TIMEOUT_S = 5.0
@@ -45,23 +46,32 @@ function T.cap_rpc(class, id, verb)   return { 'cap', class, id, 'rpc', verb } e
 function T.raw_source_meta(src)       return { 'raw', 'host', src, 'meta' } end
 function T.raw_source_status(src)     return { 'raw', 'host', src, 'status' } end
 
+local function is_wired_provider_raw(src, class)
+	return src == 'wired' and class == 'wired-provider'
+end
+
 function T.raw_cap_meta(src, class, id)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'meta' } end
 	return { 'raw', 'host', src, 'cap', class, id, 'meta' }
 end
 
 function T.raw_cap_status(src, class, id)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'status' } end
 	return { 'raw', 'host', src, 'cap', class, id, 'status' }
 end
 
 function T.raw_cap_state(src, class, id, key)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'state', key } end
 	return { 'raw', 'host', src, 'cap', class, id, 'state', key }
 end
 
 function T.raw_cap_event(src, class, id, name)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'event', name } end
 	return { 'raw', 'host', src, 'cap', class, id, 'event', name }
 end
 
 function T.raw_cap_rpc(src, class, id, verb)
+	if is_wired_provider_raw(src, class) then return { 'raw', 'host', 'wired', 'provider', id, 'rpc', verb } end
 	return { 'raw', 'host', src, 'cap', class, id, 'rpc', verb }
 end
 
@@ -373,7 +383,7 @@ local function remaining_sleep_op(deadline)
 	end)
 end
 
-local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s)
+local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s, bus_req)
 	timeout_s = (type(timeout_s) == 'number' and timeout_s >= 0)
 		and timeout_s
 		or DEFAULT_CONTROL_TIMEOUT_S
@@ -383,14 +393,21 @@ local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s)
 	end
 
 	local reply_ch = channel.new()
-	local control_req, ctrl_req_err = types.new.ControlRequest(verb, payload, reply_ch)
+	local caller_cancel_op = nil
+	if type(bus_req) == 'table' and type(bus_req.done_op) == 'function' then
+		caller_cancel_op = bus_req:done_op():wrap(function (status, _value, err)
+			if status == 'abandoned' then return 'caller_abandoned' end
+			return false
+		end)
+	end
+	local control_req, ctrl_req_err = types.new.ControlRequest(verb, payload, reply_ch, caller_cancel_op)
 	if not control_req then
 		return nil, tostring(ctrl_req_err or 'invalid control request')
 	end
 
 	local deadline = fibers.now() + timeout_s
 
-	local which, a, b = perform(op.named_choice({
+	local send_choices = {
 		sent = cap_entry.inst.control_ch:put_op(control_req):wrap(function()
 			return true
 		end),
@@ -398,24 +415,36 @@ local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s)
 		timeout = remaining_sleep_op(deadline):wrap(function()
 			return false, 'timeout'
 		end),
-	}))
+	}
+	if caller_cancel_op ~= nil then send_choices.cancel = caller_cancel_op end
+
+	local which, a, b = perform(op.named_choice(send_choices))
 
 	if which == 'timeout' then
 		return nil, 'timeout'
+	end
+	if which == 'cancel' and a ~= nil and a ~= false then
+		return nil, tostring(a or 'caller_abandoned')
 	end
 	if which ~= 'sent' or a ~= true then
 		return nil, tostring(b or 'control channel closed')
 	end
 
-	local which2, reply_or_status, err_or_reason = perform(op.named_choice({
+	local reply_choices = {
 		reply = reply_ch:get_op(),
 		timeout = remaining_sleep_op(deadline):wrap(function()
 			return nil, 'timeout'
 		end),
-	}))
+	}
+	if caller_cancel_op ~= nil then reply_choices.cancel = caller_cancel_op end
+
+	local which2, reply_or_status, err_or_reason = perform(op.named_choice(reply_choices))
 
 	if which2 == 'timeout' then
 		return nil, 'timeout'
+	end
+	if which2 == 'cancel' and reply_or_status ~= nil and reply_or_status ~= false then
+		return nil, tostring(reply_or_status or 'caller_abandoned')
 	end
 	if not reply_or_status then
 		return nil, tostring(err_or_reason or 'reply channel closed')
@@ -432,6 +461,7 @@ end
 --
 -- Raw host provenance projection:
 --   raw/host/<source>/cap/<class>/<id>/...
+--   raw/host/wired/provider/<id>/... for local wired provider observations
 --
 -- The public projection is the stable capability surface. The raw projection
 -- records where the host discovered it.
@@ -494,9 +524,26 @@ local function cap_status_payload(event_type, entry)
 	})
 end
 
+-- Some host-discovered capabilities are deliberately kept raw until a higher
+-- level appliance composer curates them into a public capability.  For wired
+-- providers, HAL only publishes raw/host/wired/provider/<id>/... and raw RPC.
+-- Device owns product assembly; Wired owns the public state/wired/... projection.
+local function public_cap_projection_enabled(class)
+	return class ~= 'wired-provider'
+end
+
 local function parse_cap_ctrl_topic(topic)
 	if topic[1] == 'cap' and topic[4] == 'rpc' then
 		return 'public', topic[2], topic[3], topic[5], nil
+	end
+
+	if topic[1] == 'raw'
+		and topic[2] == 'host'
+		and topic[3] == 'wired'
+		and topic[4] == 'provider'
+		and topic[6] == 'rpc'
+	then
+		return 'raw-host', 'wired-provider', topic[5], topic[7], 'wired'
 	end
 
 	if topic[1] == 'raw'
@@ -650,8 +697,11 @@ function HalService.start(conn, opts)
 
 		self.caps[class][id] = entry
 
+		local expose_public = public_cap_projection_enabled(class)
 		for offering in pairs(cap_inst.offerings) do
-			entry.rpc[offering] = conn:bind(T.cap_rpc(class, id, offering))
+			if expose_public then
+				entry.rpc[offering] = conn:bind(T.cap_rpc(class, id, offering))
+			end
 			if source_kind == 'host' and source then
 				entry.raw_rpc[offering] = conn:bind(T.raw_cap_rpc(source, class, id, offering))
 			end
@@ -669,7 +719,9 @@ function HalService.start(conn, opts)
 		unbind_cap_endpoints(entry)
 
 		for key in pairs(entry.state_keys) do
-			conn:unretain(T.cap_state(class, id, key))
+			if public_cap_projection_enabled(class) then
+				conn:unretain(T.cap_state(class, id, key))
+			end
 			if entry.source_kind == 'host' and entry.source then
 				conn:unretain(T.raw_cap_state(entry.source, class, id, key))
 			end
@@ -713,12 +765,19 @@ function HalService.start(conn, opts)
 	end
 
 	local function retain_cap_projection(event_type, class, id, entry)
-		conn:retain(T.cap_legacy_state(class, id), event_type)
-		conn:retain(T.cap_status(class, id), cap_status_payload(event_type, entry))
+		if public_cap_projection_enabled(class) then
+			conn:retain(T.cap_legacy_state(class, id), event_type)
+			conn:retain(T.cap_status(class, id), cap_status_payload(event_type, entry))
 
-		if event_type == 'added' then
-			conn:retain(T.cap_meta(class, id), cap_public_meta_payload(entry.inst, entry))
+			if event_type == 'added' then
+				conn:retain(T.cap_meta(class, id), cap_public_meta_payload(entry.inst, entry))
+			else
+				conn:unretain(T.cap_meta(class, id))
+			end
 		else
+			-- Defensive cleanup in case an earlier build exposed this class publicly.
+			conn:unretain(T.cap_legacy_state(class, id))
+			conn:unretain(T.cap_status(class, id))
 			conn:unretain(T.cap_meta(class, id))
 		end
 
@@ -735,7 +794,9 @@ function HalService.start(conn, opts)
 	end
 
 	local function publish_cap_event(entry, class, id, name, payload)
-		conn:publish(T.cap_event(class, id, name), payload)
+		if public_cap_projection_enabled(class) then
+			conn:publish(T.cap_event(class, id, name), payload)
+		end
 
 		if entry.source_kind == 'host' and entry.source then
 			conn:publish(T.raw_cap_event(entry.source, class, id, name), payload)
@@ -744,7 +805,9 @@ function HalService.start(conn, opts)
 
 	local function retain_cap_state(entry, class, id, key, payload)
 		entry.state_keys[key] = true
-		conn:retain(T.cap_state(class, id, key), payload)
+		if public_cap_projection_enabled(class) then
+			conn:retain(T.cap_state(class, id, key), payload)
+		end
 
 		if entry.source_kind == 'host' and entry.source then
 			conn:retain(T.raw_cap_state(entry.source, class, id, key), payload)
@@ -752,7 +815,9 @@ function HalService.start(conn, opts)
 	end
 
 	local function retain_cap_meta(entry, class, id)
-		conn:retain(T.cap_meta(class, id), cap_public_meta_payload(entry.inst, entry))
+		if public_cap_projection_enabled(class) then
+			conn:retain(T.cap_meta(class, id), cap_public_meta_payload(entry.inst, entry))
+		end
 
 		if entry.source_kind == 'host' and entry.source then
 			conn:retain(T.raw_cap_meta(entry.source, class, id), cap_raw_meta_payload(entry.inst, entry))
@@ -863,8 +928,9 @@ function HalService.start(conn, opts)
 			return
 		end
 
-		local reply, reply_err = dispatch_cap_ctrl(cap_entry, verb, req.payload, control_timeout_s)
+		local reply, reply_err = dispatch_cap_ctrl(cap_entry, verb, req.payload, control_timeout_s, req)
 		if not reply then
+			if tostring(reply_err) == 'caller_abandoned' then return end
 			log('warn', 'control_dispatch_failed', {
 				err   = tostring(reply_err),
 				class = class,
@@ -1025,6 +1091,11 @@ function HalService.start(conn, opts)
 		})
 	end
 
+	local dependency_resolver, dependency_resolver_err = dependencies.resolver(conn)
+	if not dependency_resolver then
+		error('HAL dependency resolver failed: ' .. tostring(dependency_resolver_err), 0)
+	end
+
 	local function start_manager(name, manager)
 		local valid, valid_err = validate_strict_manager(name, manager)
 		if not valid then
@@ -1044,7 +1115,8 @@ function HalService.start(conn, opts)
 			manager_start_timeout_s,
 			manager_logger,
 			dev_ev_ch,
-			cap_emit_ch
+			cap_emit_ch,
+			dependencies.manager_options(name, dependency_resolver, { service_name = svc.name })
 		))
 	end
 

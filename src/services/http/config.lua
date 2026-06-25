@@ -12,9 +12,17 @@ local DEFAULTS = {
 	id = 'main',
 	policy = {
 		allowed_schemes = { http = true, https = true, ws = true, wss = true },
+		allowed_response_parsers = { strict = true },
 		allow_loopback = true,
 		max_request_body = 16 * 1024 * 1024,
 		max_response_body = 16 * 1024 * 1024,
+		legacy_http1_close_max_response_bytes = 1024 * 1024,
+	},
+	observability = {
+		status_interval_s = 30,
+		request_trace = false,
+		success_events = false,
+		failure_rate_limit_s = 60,
 	},
 }
 
@@ -23,15 +31,25 @@ local ROOT_KEYS = {
 	enabled = true,
 	id = true,
 	policy = true,
+	observability = true,
+}
+
+local OBSERVABILITY_KEYS = {
+	status_interval_s = true,
+	request_trace = true,
+	success_events = true,
+	failure_rate_limit_s = true,
 }
 
 local POLICY_KEYS = {
 	allowed_schemes = true,
 	allowed_hosts = true,
 	denied_hosts = true,
+	allowed_response_parsers = true,
 	allow_loopback = true,
 	max_request_body = true,
 	max_response_body = true,
+	legacy_http1_close_max_response_bytes = true,
 }
 
 local function fail(msg) return nil, msg end
@@ -97,6 +115,10 @@ local function normalise_policy(raw)
 	if err then return nil, err end
 	if v ~= nil then out.allowed_hosts = v end
 
+	v, err = string_bool_map_or_nil(raw.allowed_response_parsers, 'policy.allowed_response_parsers')
+	if err then return nil, err end
+	if v ~= nil then out.allowed_response_parsers = v end
+
 	v, err = string_bool_map_or_nil(raw.denied_hosts, 'policy.denied_hosts')
 	if err then return nil, err end
 	if v ~= nil then out.denied_hosts = v end
@@ -112,6 +134,39 @@ local function normalise_policy(raw)
 	v, err = positive_number_or_nil(raw.max_response_body, 'policy.max_response_body')
 	if err then return nil, err end
 	if v ~= nil then out.max_response_body = v end
+
+	v, err = positive_number_or_nil(raw.legacy_http1_close_max_response_bytes, 'policy.legacy_http1_close_max_response_bytes')
+	if err then return nil, err end
+	if v ~= nil then out.legacy_http1_close_max_response_bytes = v end
+
+	return out, nil
+end
+
+
+local function normalise_observability(raw)
+	if raw == nil then raw = {} end
+	if type(raw) ~= 'table' then return fail('observability must be a table') end
+	local ok, err = allowed(raw, OBSERVABILITY_KEYS, 'observability')
+	if not ok then return nil, err end
+
+	local out = copy_plain(DEFAULTS.observability)
+	local v
+
+	v, err = positive_number_or_nil(raw.status_interval_s, 'observability.status_interval_s')
+	if err then return nil, err end
+	if v ~= nil then out.status_interval_s = v end
+
+	v, err = bool_or_nil(raw.request_trace, 'observability.request_trace')
+	if err then return nil, err end
+	if v ~= nil then out.request_trace = v end
+
+	v, err = bool_or_nil(raw.success_events, 'observability.success_events')
+	if err then return nil, err end
+	if v ~= nil then out.success_events = v end
+
+	v, err = positive_number_or_nil(raw.failure_rate_limit_s, 'observability.failure_rate_limit_s')
+	if err then return nil, err end
+	if v ~= nil then out.failure_rate_limit_s = v end
 
 	return out, nil
 end
@@ -135,11 +190,15 @@ function M.normalise(raw)
 	local policy, perr = normalise_policy(raw.policy)
 	if not policy then return nil, perr end
 
+	local observability, oerr = normalise_observability(raw.observability)
+	if not observability then return nil, oerr end
+
 	return {
 		schema = M.SCHEMA,
 		enabled = enabled ~= false,
 		id = id or DEFAULTS.id,
 		policy = policy,
+		observability = observability,
 	}, nil
 end
 

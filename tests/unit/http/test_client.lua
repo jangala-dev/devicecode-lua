@@ -1,4 +1,5 @@
 local fibers = require 'fibers'
+local sleep  = require 'fibers.sleep'
 local runtime = require 'fibers.runtime'
 local driver_mod = require 'services.http.transport.cqueues_driver'
 local client = require 'services.http.client'
@@ -21,6 +22,36 @@ local function yield_until(pred, msg)
 		yield_once()
 	end
 	error(msg or 'condition was not reached', 2)
+end
+
+local function join_child_with_timeout(child, timeout_s)
+	local which = fibers.perform(fibers.named_choice {
+		joined = child:join_op(),
+		timeout = sleep.sleep_op(timeout_s or 1),
+	})
+	return which == 'joined'
+end
+
+local function shell_quote(s)
+	s = tostring(s or '')
+	return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+local function shell_exit_status(a, b, c)
+	if type(a) == 'number' then
+		if a >= 256 then return math.floor(a / 256) end
+		return a
+	end
+	if a == true then return 0 end
+	if b == 'exit' and type(c) == 'number' then return c end
+	if type(c) == 'number' then return c end
+	return 1
+end
+
+local function run_filtered_child(filter, timeout_s)
+	local cmd = ('timeout %s env TEST_FILTER=%s luajit run.lua'):format(
+		tostring(timeout_s or 2), shell_quote(filter))
+	return shell_exit_status(os.execute(cmd))
 end
 
 local function fake_controller()
@@ -225,11 +256,12 @@ function M.test_request_body_source_without_read_op_rejects_before_request_const
 	end)
 end
 
-function M.test_open_exchange_active_abort_terminates_active_request_not_driver()
+function M.test_open_exchange_active_abort_detaches_then_cleans_request_in_cqueues_job()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
 	local go_active = false
-	local req_closed = false
+	local release_go = false
+	local req_cancelled = false
 	local request_mod = {
 		new_from_uri = function (uri)
 			return {
@@ -238,12 +270,12 @@ function M.test_open_exchange_active_abort_terminates_active_request_not_driver(
 					upsert = function () end,
 					append = function () end,
 				},
-				go = function (self)
+				go = function ()
 					go_active = true
-					while not req_closed do runtime.yield() end
+					while not release_go do runtime.yield() end
 					return nil, 'closed'
 				end,
-				shutdown = function () req_closed = true; return true end,
+				cancel = function (_, reason) req_cancelled = reason or true; return true end,
 			}
 		end,
 	}
@@ -251,8 +283,9 @@ function M.test_open_exchange_active_abort_terminates_active_request_not_driver(
 	fibers.run(function (scope)
 		assert(drv:start(scope))
 		local waiter = assert(scope:child())
+		local result, err
 		assert(waiter:spawn(function ()
-			fibers.perform(client.open_exchange_op(drv, {
+			result, err = fibers.perform(client.open_exchange_op(drv, {
 				uri = 'http://example.test/',
 				method = 'GET',
 			}, { request_module = request_mod }))
@@ -260,46 +293,85 @@ function M.test_open_exchange_active_abort_terminates_active_request_not_driver(
 
 		yield_until(function () return go_active end, 'request go should become active')
 		waiter:cancel('stop_waiting')
-		fibers.perform(waiter:join_op())
-		ok(req_closed, 'active open_exchange abort should terminate the request')
-		ok(not drv:is_closed(), 'request termination is the narrow owner; driver should survive')
+		if not join_child_with_timeout(waiter, 0.25) then
+			release_go = true
+			drv:terminate('open exchange detach test bounded failure')
+			join_child_with_timeout(waiter, 0.25)
+			error('open_exchange caller did not return after abort; request cleanup must be detached to cqueues job', 2)
+		end
+		eq(result, nil)
+		eq(err, nil)
+		eq(req_cancelled, false, 'request must not be cancelled from the Fibers abort path')
+		ok(not drv:is_closed(), 'detached request must not close the driver')
+		release_go = true
+		yield_until(function () return req_cancelled == 'aborted' end, 'detached request cleanup should run after cqueues job returns')
+		ok(not drv:is_closed(), 'request cleanup is owned by cqueues job; driver should survive')
 		drv:terminate('done')
 	end)
 end
 
-function M.test_exchange_read_active_abort_terminates_exchange_not_driver()
+function M.test_exchange_read_active_abort_detaches_then_cleans_stream_in_cqueues_job()
 	local ctl = fake_controller()
 	local drv = assert(driver_mod.new { controller = ctl })
 	local read_active = false
+	local release_read = false
 	local stream = {
 		terminated = false,
-		get_next_chunk = function (self)
+		get_next_chunk = function (self, timeout)
+			self.timeout = timeout
 			read_active = true
-			while not self.terminated do runtime.yield() end
+			while not release_read do runtime.yield() end
 			return nil
 		end,
-		shutdown = function (self)
+		close = function (self)
 			self.terminated = true
 			return true
 		end,
 	}
-	local ex = client.HttpExchange and client.HttpExchange.make
-	-- The public client module exposes the class for type checks; construct via
-	-- the ordinary open path shape by requiring the handle module directly here.
-	ex = require('services.http.exchange').make(drv, fake_headers(200), stream, {})
+	local ex = require('services.http.exchange').make(drv, fake_headers(200), stream, { intra_stream_timeout = 0.125 })
 
 	fibers.run(function (scope)
 		assert(drv:start(scope))
 		local waiter = assert(scope:child())
-		assert(waiter:spawn(function () fibers.perform(ex:read_chunk_op()) end))
+		local result, err
+		assert(waiter:spawn(function () result, err = fibers.perform(ex:read_chunk_op()) end))
 		yield_until(function () return read_active end, 'exchange read should become active')
+		eq(stream.timeout, 0.125, 'exchange read should pass intra_stream_timeout to lua-http stream')
 		waiter:cancel('stop_waiting')
-		fibers.perform(waiter:join_op())
-		ok(stream.terminated, 'active exchange read abort should terminate stream')
-		ok(ex:is_closed(), 'exchange handle should be marked closed')
-		ok(not drv:is_closed(), 'exchange is the narrow owner; driver should survive')
+		if not join_child_with_timeout(waiter, 0.25) then
+			release_read = true
+			drv:terminate('exchange read detach test bounded failure')
+			join_child_with_timeout(waiter, 0.25)
+			error('exchange read caller did not return after abort; stream cleanup must be detached to cqueues job', 2)
+		end
+		eq(result, nil)
+		eq(err, nil)
+		ok(not stream.terminated, 'stream must not be terminated from the Fibers abort path')
+		ok(ex:is_closed(), 'exchange handle should be marked closed immediately')
+		ok(not drv:is_closed(), 'detached exchange read must not close driver')
+		release_read = true
+		yield_until(function () return stream.terminated end, 'detached stream cleanup should run after cqueues read returns')
+		ok(not drv:is_closed(), 'exchange cleanup is owned by cqueues job; driver should survive')
 		drv:terminate('done')
 	end)
+end
+
+-- The hostile OpenWrt regression is partly an ownership-boundary bug, not just
+-- a black-box socket behaviour.  Keep these wrappers under the same regression filter
+-- substring as the devhost hostile test so a single focused run exercises the
+-- unit-level contract that the old hard-close-only fix violated.  The payloads
+-- run in subprocesses so scheduler wedges are bounded failures rather than
+-- stalled test-suite runs.
+function M.test_metrics_style_exchange_timeout_regression_abort_detaches_open_exchange_request_cleanup_to_cqueues_job()
+	local code = run_filtered_child('test_open_exchange_active_abort_detaches_then_cleans_request_in_cqueues_job',
+		tonumber(os.getenv('HTTP_METRICS_TIMEOUT_UNIT_CHILD_TIMEOUT_S') or '') or 2)
+	eq(code, 0, 'open_exchange ownership payload should pass in a bounded child process')
+end
+
+function M.test_metrics_style_exchange_timeout_regression_abort_detaches_response_stream_cleanup_to_cqueues_job()
+	local code = run_filtered_child('test_exchange_read_active_abort_detaches_then_cleans_stream_in_cqueues_job',
+		tonumber(os.getenv('HTTP_METRICS_TIMEOUT_UNIT_CHILD_TIMEOUT_S') or '') or 2)
+	eq(code, 0, 'exchange read ownership payload should pass in a bounded child process')
 end
 
 return M

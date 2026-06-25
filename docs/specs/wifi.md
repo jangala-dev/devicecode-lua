@@ -64,7 +64,7 @@ Received via retained bus message on `{'cfg', 'wifi'}`. The message uses the sta
         name           = <string>,      -- required: SSID string
         mode           = <string>,      -- required: "access_point"|"client"|"adhoc"|"mesh"|"monitor"
         radios         = <table>,       -- required: list of radio names this SSID applies to
-        network        = <string|nil>,  -- required if mainflux_path absent: network interface name
+        segment        = <string>,      -- required: NET segment id for this SSID attachment
         mainflux_path  = <string|nil>,  -- optional: path within the configs filesystem cap to the mainflux credential file (e.g. "mainflux.json")
         encryption     = <string|nil>,  -- optional: default "none"
         password       = <string|nil>,  -- optional
@@ -127,11 +127,11 @@ When an SSID entry contains `mainflux_path`, the service reads that file from th
 cap_ref:call_control('read', FilesystemReadOpts(mainflux_path))
 ```
 
-The file is expected to contain a JSON object with a `networks.networks` array holding credential payloads. Each network entry in the array is used to derive the SSID `name`, `password`, and `encryption` for one wireless interface.
+The file is expected to contain a JSON object with a `networks.networks` array holding credential payloads. Each entry is mapped into an SSID record. The Wi-Fi service attaches the resulting SSID to the configured `segment`; it does not use an OpenWrt `network` field in service configuration.
 
 **If the file read fails or the content cannot be decoded, no SSIDs are configured for that entry at all.** No hardcoded fallback SSIDs are produced. This is an intentional strict policy — partial SSID configuration is considered worse than no configuration.
 
-When `mainflux_path` is absent, the SSID entry is applied directly using its `name`, `network`, and other fields.
+When `mainflux_path` is absent, the SSID entry is applied directly using its `name`, `segment`, and other fields. `network` is not a supported Wi-Fi service configuration field.
 
 ## Radio Capability Lifecycle
 
