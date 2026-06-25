@@ -128,6 +128,38 @@ function tests.test_mwan_rules_flow_from_config_to_mwan3_uci()
 	end)
 end
 
+
+function tests.test_read_counters_reads_requested_device_stats_and_reports_missing()
+	fibers.run(function()
+		local calls = {}
+		local values = {
+			['br-adm'] = { rx_bytes = 12345, tx_packets = 77 },
+		}
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			counter_reader = function(device, stat)
+				calls[#calls + 1] = { device = device, stat = stat }
+				local v = values[device] and values[device][stat]
+				if v == nil then return nil, 'missing counter' end
+				return v, nil
+			end,
+		}, {}))
+		local result = fibers.perform(provider:read_counters_op({
+			interfaces = { 'adm' },
+			devices = { adm = 'br-adm' },
+			stats = { 'rx_bytes', 'tx_packets', 'rx_errors' },
+		}))
+		eq(result.ok, true)
+		eq(result.counters.adm.device, 'br-adm')
+		eq(result.counters.adm.statistics.rx_bytes, 12345)
+		eq(result.counters.adm.statistics.tx_packets, 77)
+		eq(result.errors.adm.device, 'br-adm')
+		contains(result.errors.adm.rx_errors, 'missing counter')
+		eq(#calls, 3)
+		provider:terminate('test complete')
+	end)
+end
+
 function tests.test_apply_uses_shaper_and_schedules_structural_mwan3_activation()
 	fibers.run(function(scope)
 		local restart_cmds = {}

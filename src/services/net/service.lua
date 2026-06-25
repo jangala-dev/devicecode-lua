@@ -22,6 +22,7 @@ local hal_client_mod = require 'services.net.hal_client'
 local cap_deps_mod = require 'devicecode.support.capability_dependencies'
 local observer_manager = require 'services.net.observer_manager'
 local wan_manager = require 'services.net.wan_manager'
+local metrics = require 'services.net.metrics'
 local drift = require 'services.net.drift'
 local backpressure = require 'services.net.backpressure'
 local gsm_uplink_watch = require 'services.net.gsm_uplink_watch'
@@ -794,6 +795,9 @@ function M.run(scope, params)
 		next_weight_apply_id = 1,
 		active_speedtests = {},
 		active_weight_apply = nil,
+		counter_poll_enabled = params.counter_metrics ~= false and params.counter_poll ~= false,
+		counter_poll_interval_s = params.counter_poll_interval_s or params.counter_metrics_interval_s or 60,
+		counter_poll_timeout_s = params.counter_poll_timeout_s or 5,
 		current_generation = nil,
 		active_apply = nil,
 		pending_intent = nil,
@@ -805,6 +809,10 @@ function M.run(scope, params)
 		elseif kind == 'apply' then mark_apply_dirty(state)
 		elseif kind == 'summary' then mark_summary_dirty(state)
 		else mark_all_dirty(state) end
+	end
+
+	if state.counter_poll_enabled and conn then
+		scope:spawn(function () metrics.counter_metrics_loop(state) end)
 	end
 
 	scope:finally(function (_, status, primary)

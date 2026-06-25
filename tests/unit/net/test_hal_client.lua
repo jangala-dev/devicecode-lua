@@ -113,6 +113,10 @@ function tests.test_live_weight_shaping_and_speedtest_capabilities_are_exposed()
 		eq(r3.ok, true)
 		eq(r3.peak_mbps, 12.5)
 		eq(diag_calls[1].method, 'speedtest')
+		local r4 = fibers.perform(client:read_counters_op({ interfaces = { 'wan_a' } }, { timeout = 1 }))
+		eq(r4.ok, true)
+		eq(diag_calls[2].method, 'read_counters')
+		eq(diag_calls[2].args.interfaces[1], 'wan_a')
 	end)
 end
 
