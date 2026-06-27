@@ -107,7 +107,7 @@ local function cases()
                 malformed_line_count = 0,
                 faults = {
                     cm5_to_mcu = { disable_malformed = true },
-                    mcu_to_cm5 = { disable_malformed = true, drop_byte_after_bytes = 3072 },
+                    mcu_to_cm5 = { disable_malformed = true, drop_byte_in_frame_type = 'xfer_need' },
                 },
             },
             assert_stats = function (st)
@@ -144,7 +144,7 @@ local function cases()
                     mcu_to_cm5 = {
                         malformed_line_count = 1,
                         malformed_line_first_at = 1024,
-                        drop_byte_after_bytes = 4096,
+                        drop_byte_in_frame_type = 'xfer_need',
                         pause_once_after_bytes = 1024,
                         pause_s = 0.20,
                     },

@@ -1256,6 +1256,57 @@ local function maybe_inject_malformed_jsonl(direction, output, stats)
     return true, nil
 end
 
+local function fault_drop_line_pattern(f)
+    if type(f) ~= 'table' then return nil end
+    if type(f.drop_byte_when_line_contains) == 'string' and f.drop_byte_when_line_contains ~= '' then
+        return f.drop_byte_when_line_contains
+    end
+    if type(f.drop_byte_in_frame_type) == 'string' and f.drop_byte_in_frame_type ~= '' then
+        -- Fabric JSONL encoders in both Go and Lua emit compact JSON.  Match
+        -- the type field rather than a byte-count so the fault remains
+        -- deterministic as retained telemetry volume changes.
+        return '"type":"' .. f.drop_byte_in_frame_type .. '"'
+    end
+    return nil
+end
+
+local function remember_fault_line_tail(f, pattern, combined, piece)
+    if type(piece) ~= 'string' or piece == '' then return end
+    if piece:find('\n', 1, true) then
+        f.drop_line_buf = ''
+        return
+    end
+    local keep = math.max(1, math.min(#combined, #pattern - 1))
+    f.drop_line_buf = combined:sub(#combined - keep + 1)
+end
+
+local function maybe_drop_targeted_uart_byte(direction, stats, piece)
+    local f = fault_for_direction(stats, direction)
+    if f.drop_byte_done == true then return piece end
+    local pattern = fault_drop_line_pattern(f)
+    if not pattern then return piece end
+
+    local prior = f.drop_line_buf or ''
+    local combined = prior .. piece
+    local _, match_end = combined:find(pattern, 1, true)
+    if not match_end then
+        remember_fault_line_tail(f, pattern, combined, piece)
+        return piece
+    end
+
+    local rel = match_end - #prior
+    if rel < 1 then rel = 1 end
+    if rel > #piece then rel = #piece end
+
+    f.drop_byte_done = true
+    f.drop_line_buf = nil
+    stats.dropped_bytes = (stats.dropped_bytes or 0) + 1
+    log(('UART middleware dropped byte #%d on %s matching %q rel=%d'):format(
+        stats.dropped_bytes, direction, pattern, rel
+    ))
+    return piece:sub(1, rel - 1) .. piece:sub(rel + 1)
+end
+
 local function apply_uart_faults(direction, stats, piece)
     local f = fault_for_direction(stats, direction)
     if type(piece) ~= 'string' or piece == '' then return piece end
@@ -1284,6 +1335,8 @@ local function apply_uart_faults(direction, stats, piece)
         ))
         piece = piece:sub(1, rel - 1) .. piece:sub(rel + 1)
     end
+
+    piece = maybe_drop_targeted_uart_byte(direction, stats, piece)
 
     local newline_after = f.drop_next_newline_after_bytes or f.drop_newline_after_bytes
     if newline_after and not f.drop_newline_done then
