@@ -755,17 +755,28 @@ local function compute_begin_commit_attempt(self, cmd)
 		job.commit_attempt.pre_commit = copy(cmd.pre_commit)
 	end
 
-	job.active_intent = type(job.active_intent) == 'table' and copy(job.active_intent) or { token = expected_token, phase = 'commit' }
-	job.active_intent.commit_token = token
-	job.active_intent.commit_policy = policy
-	job.active_intent.state = job.active_intent.state or 'running'
-	job.active = copy(job.active_intent)
+	local pending = copy(cmd.pending or cmd.commit_result or {})
+	pending.tag = pending.tag or 'commit_pending'
+	pending.commit_token = pending.commit_token or token
+	pending.commit_policy = pending.commit_policy or policy
+	if cmd.pre_commit ~= nil and pending.pre_commit == nil then
+		pending.pre_commit = copy(cmd.pre_commit)
+	end
 
+	-- The durable boundary for MCU commits is before the commit RPC is sent.
+	-- After this point restart adoption must reconcile against the component's
+	-- reported software state and must not try to resume staging from a transient
+	-- upload artifact.
 	repo_mod.patch(job, {
+		state = 'awaiting_return',
+		next_step = 'reconcile',
+		commit_result = pending,
 		commit_attempt = job.commit_attempt,
-		active_intent = job.active_intent,
-		active = job.active,
 	}, { seq = seq, reason = cmd.reason or 'begin_commit_attempt' })
+	job.error = nil
+	job.active_token = nil
+	job.active = nil
+	job.active_intent = nil
 
 	return {
 		kind = 'save_job',
@@ -812,6 +823,8 @@ local function compute_commit_accepted(self, cmd)
 			local existing_policy = attempt.policy or attempt.commit_policy
 			if existing_policy ~= nil and existing_policy ~= policy then return nil, 'commit_policy_mismatch' end
 		end
+		local seq = next_sequence_value(self._jobs)
+		local accepted = copy(cmd.accepted or cmd.result or {})
 		local job = copy(current)
 		job.commit_attempt = copy(attempt or {})
 		job.commit_attempt.token = token
@@ -819,11 +832,15 @@ local function compute_commit_accepted(self, cmd)
 		job.commit_attempt.active_token = job.commit_attempt.active_token or expected_active_token or cmd.token
 		job.commit_attempt.acceptance = 'accepted'
 		job.commit_attempt.accepted = true
-		job.commit_attempt.accepted_result = copy(cmd.accepted or cmd.result or {})
-		job.commit_attempt.accepted_seq = job.commit_attempt.accepted_seq or next_sequence_value(self._jobs)
+		job.commit_attempt.accepted_result = accepted
+		job.commit_attempt.accepted_seq = job.commit_attempt.accepted_seq or seq
 		repo_mod.patch(job, {
 			commit_attempt = job.commit_attempt,
-		}, { seq = next_sequence_value(self._jobs), reason = cmd.reason or 'commit_accepted_idempotent' })
+			commit_result = accepted,
+		}, { seq = seq, reason = cmd.reason or 'commit_accepted_idempotent' })
+		job.active_token = nil
+		job.active = nil
+		job.active_intent = nil
 		return {
 			kind = 'save_job',
 			transition = cmd.kind,
@@ -833,7 +850,7 @@ local function compute_commit_accepted(self, cmd)
 			token = cmd.token or expected_active_token,
 			commit_token = token,
 			commit_policy = policy,
-			next_seq = next_sequence_value(self._jobs) + 1,
+			next_seq = seq + 1,
 			public_result = {
 				tag = 'commit_accepted',
 				job_id = job.job_id,
@@ -897,6 +914,72 @@ local function compute_commit_accepted(self, cmd)
 			token = expected_active_token,
 			commit_token = token,
 			commit_policy = policy,
+			job = public_job(job),
+		},
+	}, nil
+end
+
+
+local function compute_commit_failed(self, cmd)
+	local current = cmd.job_id and self._jobs.jobs[cmd.job_id] or nil
+	if not current then return nil, 'not_found' end
+
+	local token = commit_token_for(cmd, current)
+	if token == nil or token == '' then return nil, 'commit_token_required' end
+	local attempt = type(current.commit_attempt) == 'table' and current.commit_attempt or nil
+	if attempt ~= nil and attempt.token ~= nil and attempt.token ~= token then
+		return nil, 'commit_token_mismatch'
+	end
+
+	local policy, perr = normalise_commit_policy(cmd.commit_policy or cmd.policy or (attempt and (attempt.policy or attempt.commit_policy)))
+	if not policy then return nil, perr end
+	if attempt ~= nil then
+		local existing_policy = attempt.policy or attempt.commit_policy
+		if existing_policy ~= nil and existing_policy ~= policy then return nil, 'commit_policy_mismatch' end
+	end
+
+	if current.state ~= 'awaiting_return' and current.state ~= 'committing' then
+		return nil, 'job_not_committing'
+	end
+
+	local seq = next_sequence_value(self._jobs)
+	local reason = cmd.error or cmd.reason or 'commit_failed'
+	local job = copy(current)
+	job.commit_attempt = copy(attempt or {})
+	job.commit_attempt.token = token
+	job.commit_attempt.policy = policy
+	job.commit_attempt.acceptance = 'failed'
+	job.commit_attempt.accepted = false
+	job.commit_attempt.error = reason
+	job.commit_attempt.failed_seq = seq
+	repo_mod.mark_terminal(job, 'failed', reason, {
+		commit_token = token,
+		commit_policy = policy,
+		error = reason,
+		result = copy(cmd.result),
+	}, { seq = seq, reason = cmd.reason or 'commit_failed' })
+	job.active_token = nil
+	job.active = nil
+	job.active_intent = nil
+
+	return {
+		kind = 'save_job',
+		transition = cmd.kind,
+		job = job,
+		job_id = job.job_id,
+		phase = 'commit',
+		token = cmd.token,
+		commit_token = token,
+		commit_policy = policy,
+		next_seq = seq + 1,
+		public_result = {
+			tag = 'commit_failed',
+			job_id = job.job_id,
+			phase = 'commit',
+			token = cmd.token,
+			commit_token = token,
+			commit_policy = policy,
+			error = reason,
 			job = public_job(job),
 		},
 	}, nil
@@ -1030,6 +1113,8 @@ local function compute_transition(self, cmd)
 		return compute_begin_commit_attempt(self, cmd)
 	elseif cmd.kind == 'commit_accepted' then
 		return compute_commit_accepted(self, cmd)
+	elseif cmd.kind == 'commit_failed' then
+		return compute_commit_failed(self, cmd)
 	elseif cmd.kind == 'apply_active_result' then
 		return compute_apply_active(self, cmd)
 	elseif cmd.kind == 'patch_job' or cmd.kind == 'mark_job' then

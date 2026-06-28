@@ -408,6 +408,12 @@ function Backend:evaluate_reconcile(job, snapshot, ctx)
 		return { done = true, ok = true, state = copy(state) }
 	end
 
+	local commit_result = type(job) == 'table' and type(job.commit_result) == 'table' and job.commit_result or nil
+	if type(sw) == 'table' and expected and sw.image_id == expected and not pre_boot
+		and commit_result and commit_result.tag == 'artifact_missing_reconcile' then
+		return { done = true, ok = true, state = copy(state), reason = 'artifact_missing_reconciled_by_image' }
+	end
+
 	if type(sw) == 'table' and expected and pre_boot and sw.boot_id ~= nil and sw.boot_id ~= pre_boot and sw.image_id ~= expected then
 		return { done = true, ok = false, reason = 'wrong_image_after_reboot', state = copy(state) }
 	end

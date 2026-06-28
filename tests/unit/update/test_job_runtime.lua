@@ -246,7 +246,7 @@ function tests.test_job_runtime_transition_admission_is_not_an_op_builder()
 end
 
 
-function tests.test_begin_commit_attempt_persists_policy_and_token_before_backend_commit()
+function tests.test_begin_commit_attempt_persists_awaiting_return_before_backend_commit()
 	fibers.run(function ()
 		local saved = {}
 		local initial = { jobs = {
@@ -278,10 +278,16 @@ function tests.test_begin_commit_attempt_persists_policy_and_token_before_backen
 		assert_eq(st, 'ok')
 		assert_eq(result.begun.status, 'persisted')
 		assert_eq(result.begun.commit_token, 'commit-token')
+		assert_eq(result.job.state, 'awaiting_return')
+		assert_eq(result.job.next_step, 'reconcile')
+		assert_eq(result.job.active_token, nil)
+		assert_eq(result.job.active_intent, nil)
 		assert_eq(result.job.commit_attempt.token, 'commit-token')
 		assert_eq(result.job.commit_attempt.policy, 'idempotent_by_token')
 		assert_eq(result.job.commit_attempt.acceptance, 'unknown')
-		assert_eq(#saved >= 2, true, 'adoption and begin attempt should be durably saved')
+		assert_eq(result.job.commit_result.tag, 'commit_pending')
+		assert_eq(result.job.commit_result.commit_token, 'commit-token')
+		assert_eq(#saved >= 2, true, 'adoption and awaiting_return commit attempt should be durably saved')
 	end)
 end
 

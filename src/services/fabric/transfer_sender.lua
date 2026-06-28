@@ -11,6 +11,8 @@ local M = {}
 
 local DEFAULT_TIMEOUT = 1.0
 local DEFAULT_CHUNK_SIZE = protocol.DEFAULT_CHUNK_SIZE or 2048
+local DEFAULT_BEGIN_RETRY = 1.0
+local DEFAULT_COMMIT_RETRY_LIMIT = 8
 
 local function nonempty(v)
 	return type(v) == 'string' and v ~= ''
@@ -114,14 +116,22 @@ local function fail(caps, xfer_id, reason, send_abort)
 	error(err, 0)
 end
 
-local function wait_frame_op(rx, deadline)
-	local dt = deadline - fibers.now()
+local function wait_frame_op(rx, deadline, retry_at)
+	local now = fibers.now()
+	local dt = deadline - now
 	if dt < 0 then dt = 0 end
 
-	return fibers.named_choice {
+	local choices = {
 		frame   = rx:recv_op(),
 		timeout = sleep.sleep_op(dt),
 	}
+	if type(retry_at) == 'number' and retry_at < deadline then
+		local rt = retry_at - now
+		if rt < 0 then rt = 0 end
+		choices.retry = sleep.sleep_op(rt)
+	end
+
+	return fibers.named_choice(choices)
 end
 
 local function read_chunk(source, n)
@@ -186,8 +196,12 @@ function M.run(scope, req, caps)
 	local xfer_id, target, size, alg, digest = require_request(req)
 	local timeout_s = positive(req.timeout_s or caps.timeout_s, DEFAULT_TIMEOUT, 'timeout_s')
 	local chunk_size = positive(req.chunk_size or caps.chunk_size, DEFAULT_CHUNK_SIZE, 'chunk_size', true)
+	local begin_retry_s = positive(req.begin_retry_s or caps.begin_retry_s or DEFAULT_BEGIN_RETRY, DEFAULT_BEGIN_RETRY, 'begin_retry_s')
+	local commit_retry_limit = positive(req.commit_retry_limit or caps.commit_retry_limit or DEFAULT_COMMIT_RETRY_LIMIT, DEFAULT_COMMIT_RETRY_LIMIT, 'commit_retry_limit', true)
 	local chunks_sent = 0
 	local retransmits = 0
+	local begin_retries = 0
+	local commit_retries = 0
 	local max_frame_queue_ms = 0
 	local max_need_to_chunk_ms = 0
 	local max_source_read_ms = 0
@@ -211,6 +225,8 @@ function M.run(scope, req, caps)
 		ev.sent_bytes = ev.sent_bytes or 0
 		ev.chunks_sent = chunks_sent
 		ev.retransmits = retransmits or 0
+		ev.begin_retries = begin_retries or 0
+		ev.commit_retries = commit_retries or 0
 		ev.max_frame_queue_ms = max_frame_queue_ms
 		ev.max_need_to_chunk_ms = max_need_to_chunk_ms
 		ev.max_source_read_ms = max_source_read_ms
@@ -234,9 +250,21 @@ function M.run(scope, req, caps)
 	local pending = nil
 	local state = 'waiting_ready'
 	local deadline = fibers.now() + timeout_s
+	local next_begin_retry = fibers.now() + begin_retry_s
 
 	while true do
-		local which, item = fibers.perform(wait_frame_op(rx, deadline))
+		local retry_at = state == 'waiting_ready' and next_begin_retry or nil
+		local which, item = fibers.perform(wait_frame_op(rx, deadline, retry_at))
+		if which == 'retry' then
+			if state == 'waiting_ready' then
+				local started = fibers.now()
+				send(caps, 'control', begin, 'transfer_begin_send_failed')
+				note_max('send', elapsed_ms(started))
+				begin_retries = begin_retries + 1
+				report { event = 'xfer_begin_tx', phase = state, last_tx_type = 'xfer_begin', retransmit = true, sent_bytes = sent }
+				next_begin_retry = fibers.now() + begin_retry_s
+			end
+		else
 		if which == 'timeout' then
 			report { event = 'timeout', phase = state, err = 'timeout', sent_bytes = sent, pending_offset = pending and pending.offset or nil, pending_next = pending and pending.next or nil }
 			fail(caps, xfer_id, 'timeout', true)
@@ -267,6 +295,7 @@ function M.run(scope, req, caps)
 		elseif frame.type == 'xfer_ready' then
 			if state == 'waiting_ready' then
 				state = 'sending'
+				next_begin_retry = nil
 				deadline = fibers.now() + timeout_s
 			end
 			report {
@@ -279,13 +308,30 @@ function M.run(scope, req, caps)
 
 		elseif frame.type == 'xfer_need' then
 			if state ~= 'sending' then
-				-- The receiver may have emitted a retry xfer_need in response to a
-				-- damaged frame that arrived before it accepted all bytes, but the
-				-- retry itself can arrive after we have already sent xfer_commit.
-				-- At that point the receiver has already proved progress by asking
-				-- for next=size, so the late need is stale. Do not fail an
-				-- otherwise completed transfer; continue waiting for done/abort.
-				if state == 'committing' then
+				if state == 'committing' and frame.retry == true and frame.next == size then
+					if commit_retries >= commit_retry_limit then
+						fail(caps, xfer_id, 'commit_retry_limit_exceeded', true)
+					end
+					commit_retries = commit_retries + 1
+					retransmits = retransmits + 1
+					local started = fibers.now()
+					send(caps, 'control', construct('xfer_commit', protocol.xfer_commit, xfer_id, size, alg, digest), 'transfer_commit_send_failed')
+					note_max('send', elapsed_ms(started))
+					deadline = fibers.now() + timeout_s
+					report {
+						event = 'xfer_commit_tx',
+						phase = state,
+						last_rx_type = 'xfer_need',
+						last_rx_next = frame.next,
+						requested_next = frame.next,
+						retry = true,
+						reason = frame.reason,
+						frame_queue_ms = frame_queue_ms,
+						retransmit = true,
+						last_tx_type = 'xfer_commit',
+						sent_bytes = sent,
+					}
+				elseif state == 'committing' then
 					report {
 						event = 'xfer_need_stale_ignored',
 						phase = state,
@@ -439,12 +485,15 @@ function M.run(scope, req, caps)
 				sent_bytes = sent,
 				size = size,
 				retransmits = retransmits,
+				begin_retries = begin_retries,
+				commit_retries = commit_retries,
 				chunks_sent = chunks_sent,
 				max_frame_queue_ms = max_frame_queue_ms,
 				max_need_to_chunk_ms = max_need_to_chunk_ms,
 				max_source_read_ms = max_source_read_ms,
 				max_send_ms = max_send_ms,
 			}
+		end
 		end
 	end
 end

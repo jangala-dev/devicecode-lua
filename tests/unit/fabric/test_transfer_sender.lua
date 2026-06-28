@@ -66,6 +66,8 @@ local function make_sender_caps(control_tx, bulk_tx, frame_rx, opts)
 		frame_rx   = frame_rx,
 		chunk_size = opts.chunk_size or 3,
 		timeout_s  = opts.timeout_s or 0.05,
+		begin_retry_s = opts.begin_retry_s,
+		commit_retry_limit = opts.commit_retry_limit,
 
 		send_control_frame_now = function (frame, label)
 			return admit(control_tx, frame, label)
@@ -411,6 +413,58 @@ function tests.test_sender_ignores_late_retry_need_after_commit()
 
 	assert_eq(out.status, 'ok', tostring(out.value))
 	assert_eq(out.value.sent_bytes, 6)
+end
+
+
+function tests.test_sender_retries_begin_while_waiting_for_ready()
+	local req = make_req { data = 'abc', size = 3, xfer_id = 'xfer-begin-retry' }
+
+	local out = collect_result(req, function (io)
+		local begin1 = recv_with_timeout(io.control_rx, 'begin1')
+		assert_eq(begin1.frame.type, 'xfer_begin')
+		local begin2 = recv_with_timeout(io.control_rx, 'begin retry')
+		assert_eq(begin2.frame.type, 'xfer_begin')
+		assert_eq(begin2.frame.xfer_id, 'xfer-begin-retry')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-begin-retry')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-begin-retry', 0)))
+		recv_with_timeout(io.bulk_rx, 'chunk')
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-begin-retry', 3)))
+		recv_with_timeout(io.control_rx, 'commit')
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-begin-retry')))
+	end, { timeout_s = 0.12, begin_retry_s = 0.01 })
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.begin_retries >= 1, true, 'expected at least one xfer_begin retry')
+end
+
+function tests.test_sender_resends_commit_on_retry_need_at_eof_while_committing()
+	local req = make_req { data = 'abcdef', size = 6, xfer_id = 'xfer-commit-retry' }
+
+	local out = collect_result(req, function (io)
+		recv_with_timeout(io.control_rx, 'begin')
+		send_frame(io.frame_tx, assert(protocol.xfer_ready('xfer-commit-retry')))
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-retry', 0)))
+		recv_with_timeout(io.bulk_rx, 'chunk1')
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-retry', 3)))
+		recv_with_timeout(io.bulk_rx, 'chunk2')
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-retry', 6)))
+		local commit1 = recv_with_timeout(io.control_rx, 'commit1')
+		assert_eq(commit1.frame.type, 'xfer_commit')
+
+		-- The receiver did receive all bytes, but the commit frame was damaged.
+		-- A retry xfer_need at EOF must retransmit xfer_commit rather than being
+		-- discarded as stale.
+		send_frame(io.frame_tx, assert(protocol.xfer_need('xfer-commit-retry', 6, true, 'bad_json')))
+		local commit2 = recv_with_timeout(io.control_rx, 'commit retry')
+		assert_eq(commit2.frame.type, 'xfer_commit')
+		assert_eq(commit2.frame.xfer_id, 'xfer-commit-retry')
+
+		send_frame(io.frame_tx, assert(protocol.xfer_done('xfer-commit-retry')))
+	end)
+
+	assert_eq(out.status, 'ok', tostring(out.value))
+	assert_eq(out.value.commit_retries, 1)
 end
 
 return tests
