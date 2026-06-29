@@ -191,10 +191,18 @@ end
 
 local DEFAULT_ACTIVE_INTENT_RESTART_MAX = 1
 
+local function optional_number(v)
+	if type(v) == 'number' then return v end
+	if type(v) == 'string' then return tonumber(v) end
+	return nil
+end
+
 local function retention_active_intent_restart_max(params)
 	local retention = type(params and params.retention) == 'table' and params.retention or {}
-	local n = tonumber(retention.active_intent_restart_max)
-	if n == nil then n = tonumber(params and params.active_intent_restart_max) end
+	local n = optional_number(retention.active_intent_restart_max)
+	if n == nil and type(params) == 'table' then
+		n = optional_number(params.active_intent_restart_max)
+	end
 	if type(n) ~= 'number' or n < 0 or n ~= math.floor(n) then
 		return DEFAULT_ACTIVE_INTENT_RESTART_MAX
 	end
@@ -204,7 +212,7 @@ end
 local function max_number(...)
 	local out = 0
 	for i = 1, select('#', ...) do
-		local n = tonumber(select(i, ...))
+		local n = optional_number(select(i, ...))
 		if type(n) == 'number' and n > out then out = n end
 	end
 	return out
@@ -232,12 +240,16 @@ local function active_intent_restart_count(job, intent)
 	return max_number(
 		intent.restart_count,
 		intent.restart_attempts,
+		intent.attempt,
 		adoption.restart_count,
 		adoption.restart_attempts,
+		adoption.attempt,
 		runtime.active_intent_restart_count,
 		runtime.active_intent_restart_attempts,
+		runtime.active_intent_attempt,
 		type(job) == 'table' and job.active_intent_restart_count or nil,
 		type(job) == 'table' and job.active_intent_restart_attempts or nil,
+		type(job) == 'table' and job.active_intent_attempt or nil,
 		history_active_restart_count(job)
 	)
 end
@@ -254,6 +266,7 @@ local function fail_active_intent_restart_limit(job, state, intent, next_count, 
 		reason = 'active_intent_restart_limit_exceeded',
 		from_state = state,
 		restart_attempts = next_count,
+		attempt = next_count,
 		restart_max = max_count,
 		seq = seq,
 	}
@@ -262,6 +275,7 @@ local function fail_active_intent_restart_limit(job, state, intent, next_count, 
 	job.active_intent = nil
 	job.runtime = copy(job.runtime or {})
 	job.runtime.active_intent_restart_count = next_count
+	job.runtime.active_intent_attempt = next_count
 	job.runtime.active_intent_restart_max = max_count
 	return job
 end
@@ -501,6 +515,7 @@ local function adopt_restart_jobs(self, jobs)
 						action = 'failed_restart_limit',
 						reason = 'active_intent_restart_limit_exceeded',
 						restart_attempts = next_restart_count,
+						attempt = next_restart_count,
 						restart_max = active_restart_max,
 						job = pub,
 					}
@@ -508,6 +523,7 @@ local function adopt_restart_jobs(self, jobs)
 						job_id = id,
 						message = 'active intent restart limit exceeded; job failed and slot released',
 						restart_attempts = next_restart_count,
+						attempt = next_restart_count,
 						restart_max = active_restart_max,
 					}
 				else
@@ -515,10 +531,12 @@ local function adopt_restart_jobs(self, jobs)
 					job.active_intent.state = 'adopted'
 					job.active_intent.reason = 'restart_active_intent'
 					job.active_intent.restart_count = next_restart_count
+					job.active_intent.attempt = next_restart_count
 					job.active_intent.restart_max = active_restart_max
 					job.active = copy(job.active_intent)
 					job.runtime = copy(job.runtime or {})
 					job.runtime.active_intent_restart_count = next_restart_count
+					job.runtime.active_intent_attempt = next_restart_count
 					job.runtime.active_intent_restart_max = active_restart_max
 					repo_mod.patch(job, {
 						active_intent = job.active_intent,
@@ -529,6 +547,7 @@ local function adopt_restart_jobs(self, jobs)
 							reason = 'restart_active_intent',
 							from_state = state,
 							restart_attempts = next_restart_count,
+							attempt = next_restart_count,
 							restart_max = active_restart_max,
 							seq = seq,
 						},
@@ -542,6 +561,7 @@ local function adopt_restart_jobs(self, jobs)
 						from_state = state,
 						action = 'resume_active_intent',
 						restart_attempts = next_restart_count,
+						attempt = next_restart_count,
 						restart_max = active_restart_max,
 						job = pub,
 					}
