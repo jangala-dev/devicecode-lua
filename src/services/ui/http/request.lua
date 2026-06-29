@@ -65,6 +65,62 @@ local function ctx_header(ctx, name)
 end
 
 
+local function ctx_method(ctx)
+	local m = ctx and ctx.method
+	if type(m) == 'function' then
+		local ok, v = pcall(function () return m(ctx) end)
+		if ok then m = v end
+	end
+	return m
+end
+
+local function ctx_path(ctx)
+	local p = ctx and (ctx.path or ctx.uri)
+	if type(p) == 'function' then
+		local ok, v = pcall(function () return p(ctx) end)
+		if ok then p = v end
+	end
+	return p
+end
+
+local function ctx_content_length(ctx)
+	local n = tonumber(ctx_header(ctx, 'content-length') or ctx_header(ctx, 'Content-Length'))
+	return n
+end
+
+local function request_id_of(ctx)
+	if type(ctx) ~= 'table' then return nil end
+	if type(ctx.id) == 'function' then
+		local ok, v = pcall(function () return ctx:id() end)
+		if ok and v ~= nil then return v end
+	end
+	if type(ctx.id) ~= 'function' then return ctx.id or ctx.request_id end
+	return ctx.request_id
+end
+
+local function emit_ui_request_event(deps, ev)
+	local port = deps and deps.events_port
+	if not (port and type(port) == 'table') then return false end
+	ev = ev or {}
+	ev.kind = ev.kind or 'ui_request_event'
+	ev.what = ev.what or 'request_event'
+	local ok = pcall(function ()
+		if type(port.emit_now) == 'function' then
+			port:emit_now(ev)
+		elseif type(port.emit_required) == 'function' then
+			port:emit_required(ev, 'ui_request_event_report_failed')
+		end
+	end)
+	return ok == true
+end
+
+local function should_log_route(route, ctx)
+	if route and route.kind == 'upload' then return true end
+	local p = tostring(ctx_path(ctx) or '')
+	return p:find('/api/update', 1, true) ~= nil
+end
+
+
 local function perform_response(ev)
 	-- HTTP response writes may yield through the transport bridge.  They are
 	-- performed only inside the HTTP request scope, where that wait is visible.
@@ -306,6 +362,16 @@ function M.run(scope, ctx, deps)
 
 	ensure_request_metadata(ctx)
 	local route = routes.decode(ctx)
+	if should_log_route(route, ctx) then
+		emit_ui_request_event(deps, {
+			what = 'request_routed',
+			request_id = request_id_of(ctx),
+			method = ctx_method(ctx),
+			path = ctx_path(ctx),
+			route = route and route.kind,
+			content_length = ctx_content_length(ctx),
+		})
+	end
 
 	if route.kind == 'read' then
 		return handle_read(owner, route, deps)
@@ -328,7 +394,9 @@ function M.run(scope, ctx, deps)
 				return { status = 'unauthenticated' }
 			end
 		end
-		return upload.run(scope, owner, ctx, update_deps)
+		local result = upload.run(scope, owner, ctx, update_deps)
+		if type(result) == 'table' then result.route = 'upload' end
+		return result
 	elseif route.kind == 'sse' then
 		return sse.run(scope, owner, route, deps)
 	elseif route.kind == 'static' then

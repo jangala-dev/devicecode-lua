@@ -627,6 +627,18 @@ local function compact_upload_log(ev)
 	}
 end
 
+local function compact_request_log(ev)
+	return {
+		what = ev.what or 'request_event',
+		request_id = ev.request_id,
+		method = ev.method,
+		path = ev.path,
+		route = ev.route,
+		content_length = ev.content_length,
+		err = ev.err,
+	}
+end
+
 local function reduce_event(state, ev)
 	if ev.kind == 'component_started' then
 		record_component_started(state, ev.component, ev.generation)
@@ -671,6 +683,11 @@ local function reduce_event(state, ev)
 		return {}
 	elseif is_session_event(ev) then
 		state.last_session_event = ev
+		return { publish = true }
+	elseif ev.kind == 'ui_request_event' then
+		if ev.generation ~= nil and state.listener_generation ~= nil and ev.generation ~= state.listener_generation then return {} end
+		state.last_ui_request_event = compact_request_log(ev)
+		log_ui_event(state, ev.err and 'warn' or 'info', state.last_ui_request_event)
 		return { publish = true }
 	elseif ev.kind == 'upload_event' then
 		if ev.generation ~= nil and state.listener_generation ~= nil and ev.generation ~= state.listener_generation then return {} end
