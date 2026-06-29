@@ -36,6 +36,9 @@ local function normalise_job(job)
 	if type(id) ~= 'string' or id == '' then return nil, 'job_id required' end
 	local component = job.component
 	if type(component) ~= 'string' or component == '' then return nil, 'component required' end
+	if component == 'mcu' and (type(job.expected_image_id) ~= 'string' or job.expected_image_id == '') then
+		return nil, 'expected_image_id_required'
+	end
 
 	if job.phase ~= nil or job.stage ~= nil then return nil, 'job lifecycle must use state, not phase or stage' end
 
@@ -117,10 +120,15 @@ function M.new_job(spec, opts)
 	if type(id) ~= 'string' or id == '' then return nil, 'job_id required' end
 	local component = spec.component
 	if type(component) ~= 'string' or component == '' then return nil, 'component required' end
+	local expected_image_id = spec.expected_image_id
+	if component == 'mcu' and (type(expected_image_id) ~= 'string' or expected_image_id == '') then
+		return nil, 'expected_image_id_required'
+	end
 	local seq = opts.seq or 0
 	return {
 		job_id = id,
 		component = component,
+		expected_image_id = expected_image_id,
 		state = 'created',
 		next_step = 'start',
 		generation = opts.generation,

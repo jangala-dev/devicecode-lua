@@ -67,4 +67,18 @@ function tests.test_extract_payload_accepts_config_service_shape()
 	assert_eq(raw.namespace, 'prod')
 end
 
+function tests.test_retention_policy_normalises()
+	local cfg, err = config.normalise({
+		retention = {
+			prune_on_startup = true,
+			terminal_max_count = '50',
+			terminal_max_age_s = '604800',
+		},
+	})
+	assert_not_nil(cfg, err)
+	assert_true(cfg.retention.prune_on_startup)
+	assert_eq(cfg.retention.terminal_max_count, 50)
+	assert_eq(cfg.retention.terminal_max_age_s, 604800)
+end
+
 return tests

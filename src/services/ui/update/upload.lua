@@ -151,7 +151,10 @@ local function upload_body_op(ctx, opts, deadline)
 
 			local job, jerr = perform_with_deadline(scope, client.create_job_op(conn, artifact_id, call_opts), deadline, mark_timeout)
 			if not job then error(jerr or 'update job create failed', 0) end
-			out.job = job
+			if type(job) ~= 'table' or type(job.job_id) ~= 'string' or job.job_id == '' then
+				error('create_job_reply_missing_job_id', 0)
+			end
+			out.job_id = job.job_id
 			if opts.start_job then
 				call_opts.timeout = false
 				local started, serr = perform_with_deadline(scope, client.start_job_op(conn, job.job_id, call_opts), deadline, mark_timeout)

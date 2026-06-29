@@ -79,6 +79,7 @@ local function copy_active(a)
 		size = a.size,
 		digest_alg = a.digest_alg,
 		digest = a.digest,
+		progress = copy(a.progress),
 	}
 
 end
@@ -111,6 +112,7 @@ local function snapshot_equal(a, b)
 		if aa.direction ~= ba.direction then return false end
 		if aa.xfer_id ~= ba.xfer_id then return false end
 		if not same_ctx(aa.session, ba.session) then return false end
+		if not stat_equal(aa.progress, ba.progress) then return false end
 	end
 
 	local al, bl = a.last, b.last
@@ -144,6 +146,7 @@ function M.new_state(opts)
 			failed = 0,
 			cancelled = 0,
 			released = 0,
+			deferred_no_session = 0,
 		},
 	}
 end
@@ -196,6 +199,14 @@ function M.claim_slot(state, rec)
 		digest = rec.digest,
 		frame_tx = rec.frame_tx,
 		lease = rec.lease,
+		progress = {
+			phase = rec.status or 'leased',
+			event = 'slot_claimed',
+			sent_bytes = 0,
+			chunks_sent = 0,
+			retransmits = 0,
+			at = fibers.now(),
+		},
 	}
 	state.stats.accepted = state.stats.accepted + 1
 
@@ -216,6 +227,7 @@ function M.release_slot(state, ev)
 		session = ctx(ev_ctx(ev)),
 		status = 'released',
 		primary = ev.primary or ev.reason,
+		progress = active and copy(active.progress) or nil,
 	}
 	state.active = nil
 	state.stats.released = state.stats.released + 1
@@ -239,6 +251,7 @@ function M.apply_attempt_done(state, ev)
 		report = ev.report,
 		result = ev.result,
 		primary = ev.primary,
+		progress = active and copy(active.progress) or nil,
 	}
 	state.active = nil
 	state.stats.completed = state.stats.completed + 1
@@ -319,6 +332,16 @@ local function attempt_caps(self, frame_rx, session)
 		chunk_size = self._chunk_size,
 		timeout_s = self._timeout_s,
 		retry_limit = self._retry_limit,
+
+		report_progress_now = function (ev)
+			ev = copy(ev or {})
+			ev.kind = 'transfer_progress'
+			ev.request_id = ev.request_id or (self._state.active and self._state.active.request_id)
+			ev.request_generation = ev.request_generation or (self._state.active and self._state.active.request_generation)
+			ev.session = ctx(c)
+			ev.at = ev.at or fibers.now()
+			return report(self, ev, 'transfer_progress_report_failed')
+		end,
 
 		send_control_frame_now = function (frame, label)
 			return outbound:send_transfer_control_frame_now(c, frame, label)
@@ -623,15 +646,38 @@ local function fail_slot(req, reason)
 	return req:fail(reason)
 end
 
-local function handle_slot_request(self, req)
+local function defer_slot_request(self, req)
+	self._pending_slots = self._pending_slots or {}
+	self._pending_slots[#self._pending_slots + 1] = req
+	self._state.stats.deferred_no_session = (self._state.stats.deferred_no_session or 0) + 1
+	emit_model(self)
+	return true, nil
+end
+
+local function shift_pending_slot(self)
+	local pending = self._pending_slots
+	if type(pending) ~= 'table' or #pending == 0 then return nil end
+	local req = pending[1]
+	table.remove(pending, 1)
+	return req
+end
+
+local drain_pending_slots
+
+local function handle_slot_request_now(self, req, opts)
+	opts = opts or {}
 	local id = req_id(req)
 	if type(id) ~= 'string' or id == '' then
 		error('transfer slot request requires request_id', 2)
 	end
 
 	if self._session == nil then
-		fail_slot(req, 'no_session')
-		emit_model(self)
+		if opts.defer_on_no_session ~= false then
+			defer_slot_request(self, req)
+		else
+			fail_slot(req, 'no_session')
+			emit_model(self)
+		end
 		return
 	end
 
@@ -665,6 +711,18 @@ local function handle_slot_request(self, req)
 	if replied ~= true then lease:release(err or 'slot admission reply failed') end
 
 	emit_model(self)
+end
+
+local function handle_slot_request(self, req)
+	return handle_slot_request_now(self, req, { defer_on_no_session = true })
+end
+
+drain_pending_slots = function(self)
+	if self._session == nil or self._state.active ~= nil then return false end
+	local req = shift_pending_slot(self)
+	if req == nil then return false end
+	handle_slot_request_now(self, req, { defer_on_no_session = true })
+	return true
 end
 
 local function active_done(self, reason, session)
@@ -703,6 +761,7 @@ local function active_done(self, reason, session)
 			session = ctx(active.session),
 			status = 'cancelled',
 			primary = reason or 'session_dropped',
+			progress = active and copy(active.progress) or nil,
 		}
 
 		self._state.active = nil
@@ -712,16 +771,35 @@ local function active_done(self, reason, session)
 	emit_model(self)
 end
 
+local function handle_progress(self, ev)
+	if not active_matches(self._state, ev) then
+		self._state.stats.stale = self._state.stats.stale + 1
+		emit_model(self)
+		return
+	end
+
+	local active = self._state.active
+	active.progress = active.progress or {}
+	for k, v in pairs(ev or {}) do
+		if k ~= 'kind' and k ~= 'request_id' and k ~= 'request_generation' and k ~= 'session' then
+			active.progress[k] = v
+		end
+	end
+	emit_model(self)
+end
+
 local function handle_attempt_done(self, ev)
 	local accepted, _, active = M.apply_attempt_done(self._state, ev)
 	if accepted then close_feed(active, 'transfer attempt completed') end
 	emit_model(self)
+	drain_pending_slots(self)
 end
 
 local function handle_slot_released(self, ev)
 	local accepted, _, active = M.release_slot(self._state, ev)
 	if accepted then close_feed(active, ev.reason or 'transfer slot released') end
 	emit_model(self)
+	drain_pending_slots(self)
 end
 
 local function handle_frame(self, ev)
@@ -762,6 +840,7 @@ local function handle_peer_session(self, ev)
 
 	self._session = ctx(c)
 	emit_model(self)
+	drain_pending_slots(self)
 end
 
 local function handle_peer_session_dropped(self, ev)
@@ -860,6 +939,9 @@ local function dispatch(self, ev)
 
 	elseif ev.kind == 'transfer_frame' then
 		handle_frame(self, ev)
+
+	elseif ev.kind == 'transfer_progress' then
+		handle_progress(self, ev)
 
 	elseif ev.kind == 'transfer_attempt_done' then
 		handle_attempt_done(self, ev)

@@ -182,9 +182,120 @@ local function adoption_empty()
 		awaiting_return = {},
 		active_intent = {},
 		failed = {},
+		pruned = {},
 		decisions = {},
 		diagnostics = {},
 	}
+end
+
+
+local DEFAULT_ACTIVE_INTENT_RESTART_MAX = 1
+
+local function optional_number(v)
+	if type(v) == 'number' then return v end
+	if type(v) == 'string' then return tonumber(v) end
+	return nil
+end
+
+local function retention_active_intent_restart_max(params)
+	local retention = type(params and params.retention) == 'table' and params.retention or {}
+	local n = optional_number(retention.active_intent_restart_max)
+	if n == nil and type(params) == 'table' then
+		n = optional_number(params.active_intent_restart_max)
+	end
+	if type(n) ~= 'number' or n < 0 or n ~= math.floor(n) then
+		return DEFAULT_ACTIVE_INTENT_RESTART_MAX
+	end
+	return n
+end
+
+local function max_number(...)
+	local out = 0
+	for i = 1, select('#', ...) do
+		local n = optional_number(select(i, ...))
+		if type(n) == 'number' and n > out then out = n end
+	end
+	return out
+end
+
+local function history_active_restart_count(job)
+	local n = 0
+	local hist = type(job) == 'table' and type(job.history) == 'table' and job.history or {}
+	for _, row in ipairs(hist) do
+		local reason = type(row) == 'table' and row.reason or nil
+		if reason == 'restart_adoption_active_intent'
+			or reason == 'restart_active_intent'
+			or reason == 'restart_adoption_active_intent_limit_exceeded'
+		then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+local function active_intent_restart_count(job, intent)
+	intent = type(intent) == 'table' and intent or {}
+	local adoption = type(job) == 'table' and type(job.adoption) == 'table' and job.adoption or {}
+	local runtime = type(job) == 'table' and type(job.runtime) == 'table' and job.runtime or {}
+	return max_number(
+		intent.restart_count,
+		intent.restart_attempts,
+		intent.attempt,
+		adoption.restart_count,
+		adoption.restart_attempts,
+		adoption.attempt,
+		runtime.active_intent_restart_count,
+		runtime.active_intent_restart_attempts,
+		runtime.active_intent_attempt,
+		type(job) == 'table' and job.active_intent_restart_count or nil,
+		type(job) == 'table' and job.active_intent_restart_attempts or nil,
+		type(job) == 'table' and job.active_intent_attempt or nil,
+		history_active_restart_count(job)
+	)
+end
+
+local function fail_active_intent_restart_limit(job, state, intent, next_count, max_count, seq)
+	repo_mod.mark_terminal(job, 'failed', 'active_intent_restart_limit_exceeded', {
+		previous_state = state,
+		restart_attempts = next_count,
+		restart_max = max_count,
+		active_intent = copy(intent),
+	}, { seq = seq, reason = 'restart_adoption_active_intent_limit_exceeded' })
+	job.adoption = {
+		action = 'failed_restart_limit',
+		reason = 'active_intent_restart_limit_exceeded',
+		from_state = state,
+		restart_attempts = next_count,
+		attempt = next_count,
+		restart_max = max_count,
+		seq = seq,
+	}
+	job.active = nil
+	job.active_token = nil
+	job.active_intent = nil
+	job.runtime = copy(job.runtime or {})
+	job.runtime.active_intent_restart_count = next_count
+	job.runtime.active_intent_attempt = next_count
+	job.runtime.active_intent_restart_max = max_count
+	return job
+end
+
+local function clear_terminal_active_markers(job, state, seq)
+	repo_mod.patch(job, {
+		adoption = {
+			action = 'cleared_terminal_active_markers',
+			reason = 'restart_terminal_active_markers',
+			from_state = state,
+			seq = seq,
+		},
+	}, { seq = seq, reason = 'restart_clear_terminal_active_markers' })
+	-- repo.patch cannot clear fields via nil values because pairs() does not carry
+	-- them.  Clear stale ownership markers explicitly so persisted terminal jobs
+	-- cannot block durable_active_owner after a restart.
+	job.active = nil
+	job.active_token = nil
+	job.active_intent = nil
+	return job
 end
 
 
@@ -304,6 +415,7 @@ end
 
 local function adopt_restart_jobs(self, jobs)
 	local adoption = adoption_empty()
+	local active_restart_max = retention_active_intent_restart_max(self._params or {})
 
 	for _, id in ipairs(sorted_job_ids(jobs)) do
 		local current = jobs.jobs[id]
@@ -389,28 +501,71 @@ local function adopt_restart_jobs(self, jobs)
 					job = pub,
 				}
 			elseif has_intent and (state ~= 'committing' or phase ~= 'commit' or commit_policy == 'idempotent_by_token') then
-				job.active_intent = intent
-				job.active_intent.state = 'adopted'
-				job.active_intent.reason = 'restart_active_intent'
-				job.active = copy(job.active_intent)
-				repo_mod.patch(job, {
-					adoption = {
-						action = 'resume_active_intent',
-						reason = 'restart_active_intent',
+				local restart_count = active_intent_restart_count(job, intent)
+				local next_restart_count = restart_count + 1
+				if next_restart_count > active_restart_max then
+					fail_active_intent_restart_limit(job, state, intent, next_restart_count, active_restart_max, seq)
+					local ok, err = save_adopted_job(self, jobs, job)
+					if ok ~= true then return nil, err end
+					local pub = public_job(job)
+					adoption.failed[#adoption.failed + 1] = pub
+					adoption.decisions[#adoption.decisions + 1] = {
+						job_id = id,
 						from_state = state,
-						seq = seq,
-					},
-				}, { seq = seq, reason = 'restart_adoption_active_intent' })
-				local ok, err = save_adopted_job(self, jobs, job)
-				if ok ~= true then return nil, err end
-				local pub = public_job(job)
-				adoption.active_intent[#adoption.active_intent + 1] = pub
-				adoption.decisions[#adoption.decisions + 1] = {
-					job_id = id,
-					from_state = state,
-					action = 'resume_active_intent',
-					job = pub,
-				}
+						action = 'failed_restart_limit',
+						reason = 'active_intent_restart_limit_exceeded',
+						restart_attempts = next_restart_count,
+						attempt = next_restart_count,
+						restart_max = active_restart_max,
+						job = pub,
+					}
+					adoption.diagnostics[#adoption.diagnostics + 1] = {
+						job_id = id,
+						message = 'active intent restart limit exceeded; job failed and slot released',
+						restart_attempts = next_restart_count,
+						attempt = next_restart_count,
+						restart_max = active_restart_max,
+					}
+				else
+					job.active_intent = intent
+					job.active_intent.state = 'adopted'
+					job.active_intent.reason = 'restart_active_intent'
+					job.active_intent.restart_count = next_restart_count
+					job.active_intent.attempt = next_restart_count
+					job.active_intent.restart_max = active_restart_max
+					job.active = copy(job.active_intent)
+					job.runtime = copy(job.runtime or {})
+					job.runtime.active_intent_restart_count = next_restart_count
+					job.runtime.active_intent_attempt = next_restart_count
+					job.runtime.active_intent_restart_max = active_restart_max
+					repo_mod.patch(job, {
+						active_intent = job.active_intent,
+						active = job.active,
+						runtime = job.runtime,
+						adoption = {
+							action = 'resume_active_intent',
+							reason = 'restart_active_intent',
+							from_state = state,
+							restart_attempts = next_restart_count,
+							attempt = next_restart_count,
+							restart_max = active_restart_max,
+							seq = seq,
+						},
+					}, { seq = seq, reason = 'restart_adoption_active_intent' })
+					local ok, err = save_adopted_job(self, jobs, job)
+					if ok ~= true then return nil, err end
+					local pub = public_job(job)
+					adoption.active_intent[#adoption.active_intent + 1] = pub
+					adoption.decisions[#adoption.decisions + 1] = {
+						job_id = id,
+						from_state = state,
+						action = 'resume_active_intent',
+						restart_attempts = next_restart_count,
+						attempt = next_restart_count,
+						restart_max = active_restart_max,
+						job = pub,
+					}
+				end
 			else
 				local reason = (state == 'committing' and phase == 'commit') and 'restart_commit_policy_missing' or ('restart_interrupted_' .. tostring(state))
 				repo_mod.mark_terminal(job, 'failed', reason, {
@@ -441,10 +596,149 @@ local function adopt_restart_jobs(self, jobs)
 					message = 'job was interrupted during ' .. tostring(state) .. ' and was marked failed',
 				}
 			end
+		elseif repo_mod.TERMINAL[state] and (current.active_token ~= nil or type(current.active_intent) == 'table' or type(current.active) == 'table') then
+			local job = copy(current)
+			local seq = next_adoption_seq(jobs)
+			clear_terminal_active_markers(job, state, seq)
+			local ok, err = save_adopted_job(self, jobs, job)
+			if ok ~= true then return nil, err end
+			adoption.decisions[#adoption.decisions + 1] = {
+				job_id = id,
+				from_state = state,
+				action = 'cleared_terminal_active_markers',
+			}
 		end
 	end
 
 	return adoption, nil
+end
+
+
+local function normalise_retention(params)
+	local retention = type(params.retention) == 'table' and copy(params.retention) or {}
+	if params.prune_terminal_jobs_on_startup ~= nil then
+		retention.prune_on_startup = params.prune_terminal_jobs_on_startup == true
+	end
+	if params.terminal_job_max_count ~= nil then
+		retention.terminal_max_count = tonumber(params.terminal_job_max_count)
+	end
+	if params.terminal_job_max_age_s ~= nil then
+		retention.terminal_max_age_s = tonumber(params.terminal_job_max_age_s)
+	end
+	if params.active_intent_restart_max ~= nil then
+		retention.active_intent_restart_max = tonumber(params.active_intent_restart_max)
+	end
+	if retention.active_intent_restart_max == nil then
+		retention.active_intent_restart_max = DEFAULT_ACTIVE_INTENT_RESTART_MAX
+	end
+	return retention
+end
+
+local function terminal_job_sort_newest_first(jobs, a, b)
+	local ja, jb = jobs.jobs[a] or {}, jobs.jobs[b] or {}
+	local ua = ja.updated_seq or ja.created_seq or 0
+	local ub = jb.updated_seq or jb.created_seq or 0
+	if ua == ub then
+		local ca = ja.created_seq or 0
+		local cb = jb.created_seq or 0
+		if ca == cb then return tostring(a) > tostring(b) end
+		return ca > cb
+	end
+	return ua > ub
+end
+
+local function terminal_time_s(job)
+	if type(job) ~= 'table' then return nil end
+	for _, key in ipairs({ 'terminal_at_s', 'completed_at_s', 'updated_at_s', 'updated_wall_s', 'updated_time_s' }) do
+		local n = tonumber(job[key])
+		if n ~= nil then return n end
+	end
+	local result = type(job.result) == 'table' and job.result or nil
+	if result then
+		for _, key in ipairs({ 'terminal_at_s', 'completed_at_s', 'timestamp_s', 'time_s' }) do
+			local n = tonumber(result[key])
+			if n ~= nil then return n end
+		end
+	end
+	return nil
+end
+
+local function should_prune_terminal_by_age(job, retention, now_s)
+	local max_age = tonumber(retention.terminal_max_age_s)
+	if type(max_age) ~= 'number' or max_age <= 0 then return false end
+	now_s = tonumber(now_s)
+	if type(now_s) ~= 'number' then return false end
+	local t = terminal_time_s(job)
+	if type(t) ~= 'number' then return false end
+	return t <= (now_s - max_age)
+end
+
+local function mark_pruned(adoption, job_id, job, reason)
+	adoption.pruned = adoption.pruned or {}
+	adoption.pruned[#adoption.pruned + 1] = {
+		job_id = job_id,
+		state = job and job.state,
+		action = 'pruned_terminal',
+		reason = reason or 'startup_retention',
+	}
+	adoption.decisions[#adoption.decisions + 1] = {
+		job_id = job_id,
+		from_state = job and job.state,
+		action = 'pruned_terminal',
+		reason = reason or 'startup_retention',
+	}
+end
+
+local function prune_terminal_id(self, jobs, adoption, id, reason)
+	local job = jobs.jobs[id]
+	local ok, derr = fibers.perform(store_delete_op(self._store, id))
+	if ok == true then
+		repo_mod.remove(jobs, id)
+		mark_pruned(adoption, id, job, reason)
+		return true, nil
+	end
+	adoption.diagnostics[#adoption.diagnostics + 1] = {
+		job_id = id,
+		message = 'terminal job prune failed: ' .. tostring(derr or 'delete_failed'),
+	}
+	return false, derr
+end
+
+local function prune_terminal_jobs(self, jobs, adoption)
+	local retention = normalise_retention(self._params or {})
+	if retention.prune_on_startup ~= true then return true, nil end
+	local max_count = retention.terminal_max_count
+	local now_s = self._params and self._params.now_s or os.time()
+
+	local terminal_ids = {}
+	for id, job in pairs((jobs and jobs.jobs) or {}) do
+		if repo_mod.is_terminal(job and job.state) then
+			terminal_ids[#terminal_ids + 1] = id
+		end
+	end
+	table.sort(terminal_ids, function (a, b) return terminal_job_sort_newest_first(jobs, a, b) end)
+
+	local retained = {}
+	local pruned_seen = {}
+	for _, id in ipairs(terminal_ids) do
+		local job = jobs.jobs[id]
+		if should_prune_terminal_by_age(job, retention, now_s) then
+			local ok = prune_terminal_id(self, jobs, adoption, id, 'startup_retention_age')
+			if ok == true then pruned_seen[id] = true end
+		else
+			retained[#retained + 1] = id
+		end
+	end
+
+	if type(max_count) ~= 'number' or max_count < 0 then return true, nil end
+	if #retained <= max_count then return true, nil end
+	for i = max_count + 1, #retained do
+		local id = retained[i]
+		if not pruned_seen[id] and jobs.jobs[id] ~= nil then
+			prune_terminal_id(self, jobs, adoption, id, 'startup_retention_count')
+		end
+	end
+	return true, nil
 end
 
 local function next_sequence_value(jobs)
@@ -504,7 +798,7 @@ end
 
 local function durable_active_owner(jobs)
 	for id, job in pairs((jobs and jobs.jobs) or {}) do
-		if job.active_token ~= nil or type(job.active_intent) == 'table' then
+		if not repo_mod.TERMINAL[job.state] and (job.active_token ~= nil or type(job.active_intent) == 'table') then
 			return id, job
 		end
 	end
@@ -632,17 +926,28 @@ local function compute_begin_commit_attempt(self, cmd)
 		job.commit_attempt.pre_commit = copy(cmd.pre_commit)
 	end
 
-	job.active_intent = type(job.active_intent) == 'table' and copy(job.active_intent) or { token = expected_token, phase = 'commit' }
-	job.active_intent.commit_token = token
-	job.active_intent.commit_policy = policy
-	job.active_intent.state = job.active_intent.state or 'running'
-	job.active = copy(job.active_intent)
+	local pending = copy(cmd.pending or cmd.commit_result or {})
+	pending.tag = pending.tag or 'commit_pending'
+	pending.commit_token = pending.commit_token or token
+	pending.commit_policy = pending.commit_policy or policy
+	if cmd.pre_commit ~= nil and pending.pre_commit == nil then
+		pending.pre_commit = copy(cmd.pre_commit)
+	end
 
+	-- The durable boundary for MCU commits is before the commit RPC is sent.
+	-- After this point restart adoption must reconcile against the component's
+	-- reported software state and must not try to resume staging from a transient
+	-- upload artifact.
 	repo_mod.patch(job, {
+		state = 'awaiting_return',
+		next_step = 'reconcile',
+		commit_result = pending,
 		commit_attempt = job.commit_attempt,
-		active_intent = job.active_intent,
-		active = job.active,
 	}, { seq = seq, reason = cmd.reason or 'begin_commit_attempt' })
+	job.error = nil
+	job.active_token = nil
+	job.active = nil
+	job.active_intent = nil
 
 	return {
 		kind = 'save_job',
@@ -689,6 +994,8 @@ local function compute_commit_accepted(self, cmd)
 			local existing_policy = attempt.policy or attempt.commit_policy
 			if existing_policy ~= nil and existing_policy ~= policy then return nil, 'commit_policy_mismatch' end
 		end
+		local seq = next_sequence_value(self._jobs)
+		local accepted = copy(cmd.accepted or cmd.result or {})
 		local job = copy(current)
 		job.commit_attempt = copy(attempt or {})
 		job.commit_attempt.token = token
@@ -696,11 +1003,15 @@ local function compute_commit_accepted(self, cmd)
 		job.commit_attempt.active_token = job.commit_attempt.active_token or expected_active_token or cmd.token
 		job.commit_attempt.acceptance = 'accepted'
 		job.commit_attempt.accepted = true
-		job.commit_attempt.accepted_result = copy(cmd.accepted or cmd.result or {})
-		job.commit_attempt.accepted_seq = job.commit_attempt.accepted_seq or next_sequence_value(self._jobs)
+		job.commit_attempt.accepted_result = accepted
+		job.commit_attempt.accepted_seq = job.commit_attempt.accepted_seq or seq
 		repo_mod.patch(job, {
 			commit_attempt = job.commit_attempt,
-		}, { seq = next_sequence_value(self._jobs), reason = cmd.reason or 'commit_accepted_idempotent' })
+			commit_result = accepted,
+		}, { seq = seq, reason = cmd.reason or 'commit_accepted_idempotent' })
+		job.active_token = nil
+		job.active = nil
+		job.active_intent = nil
 		return {
 			kind = 'save_job',
 			transition = cmd.kind,
@@ -710,7 +1021,7 @@ local function compute_commit_accepted(self, cmd)
 			token = cmd.token or expected_active_token,
 			commit_token = token,
 			commit_policy = policy,
-			next_seq = next_sequence_value(self._jobs) + 1,
+			next_seq = seq + 1,
 			public_result = {
 				tag = 'commit_accepted',
 				job_id = job.job_id,
@@ -774,6 +1085,72 @@ local function compute_commit_accepted(self, cmd)
 			token = expected_active_token,
 			commit_token = token,
 			commit_policy = policy,
+			job = public_job(job),
+		},
+	}, nil
+end
+
+
+local function compute_commit_failed(self, cmd)
+	local current = cmd.job_id and self._jobs.jobs[cmd.job_id] or nil
+	if not current then return nil, 'not_found' end
+
+	local token = commit_token_for(cmd, current)
+	if token == nil or token == '' then return nil, 'commit_token_required' end
+	local attempt = type(current.commit_attempt) == 'table' and current.commit_attempt or nil
+	if attempt ~= nil and attempt.token ~= nil and attempt.token ~= token then
+		return nil, 'commit_token_mismatch'
+	end
+
+	local policy, perr = normalise_commit_policy(cmd.commit_policy or cmd.policy or (attempt and (attempt.policy or attempt.commit_policy)))
+	if not policy then return nil, perr end
+	if attempt ~= nil then
+		local existing_policy = attempt.policy or attempt.commit_policy
+		if existing_policy ~= nil and existing_policy ~= policy then return nil, 'commit_policy_mismatch' end
+	end
+
+	if current.state ~= 'awaiting_return' and current.state ~= 'committing' then
+		return nil, 'job_not_committing'
+	end
+
+	local seq = next_sequence_value(self._jobs)
+	local reason = cmd.error or cmd.reason or 'commit_failed'
+	local job = copy(current)
+	job.commit_attempt = copy(attempt or {})
+	job.commit_attempt.token = token
+	job.commit_attempt.policy = policy
+	job.commit_attempt.acceptance = 'failed'
+	job.commit_attempt.accepted = false
+	job.commit_attempt.error = reason
+	job.commit_attempt.failed_seq = seq
+	repo_mod.mark_terminal(job, 'failed', reason, {
+		commit_token = token,
+		commit_policy = policy,
+		error = reason,
+		result = copy(cmd.result),
+	}, { seq = seq, reason = cmd.reason or 'commit_failed' })
+	job.active_token = nil
+	job.active = nil
+	job.active_intent = nil
+
+	return {
+		kind = 'save_job',
+		transition = cmd.kind,
+		job = job,
+		job_id = job.job_id,
+		phase = 'commit',
+		token = cmd.token,
+		commit_token = token,
+		commit_policy = policy,
+		next_seq = seq + 1,
+		public_result = {
+			tag = 'commit_failed',
+			job_id = job.job_id,
+			phase = 'commit',
+			token = cmd.token,
+			commit_token = token,
+			commit_policy = policy,
+			error = reason,
 			job = public_job(job),
 		},
 	}, nil
@@ -907,6 +1284,8 @@ local function compute_transition(self, cmd)
 		return compute_begin_commit_attempt(self, cmd)
 	elseif cmd.kind == 'commit_accepted' then
 		return compute_commit_accepted(self, cmd)
+	elseif cmd.kind == 'commit_failed' then
+		return compute_commit_failed(self, cmd)
 	elseif cmd.kind == 'apply_active_result' then
 		return compute_apply_active(self, cmd)
 	elseif cmd.kind == 'patch_job' or cmd.kind == 'mark_job' then
@@ -1171,6 +1550,12 @@ function Runtime:_run(scope)
 	local adoption, adopt_err = adopt_restart_jobs(self, jobs)
 	if not adoption then
 		self._ready_err = adopt_err or 'restart_adoption_failed'
+		self._ready_cond:signal()
+		error(self._ready_err, 0)
+	end
+	local pruned, prune_err = prune_terminal_jobs(self, jobs, adoption)
+	if pruned ~= true then
+		self._ready_err = prune_err or 'job_retention_prune_failed'
 		self._ready_cond:signal()
 		error(self._ready_err, 0)
 	end

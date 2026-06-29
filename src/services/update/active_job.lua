@@ -51,6 +51,7 @@ local function base_ctx(params, phase)
 	end
 	ctx.phase = phase
 	ctx.lease = params.lease
+	ctx.deadline = params.deadline
 	return ctx
 end
 
@@ -215,6 +216,34 @@ local function persist_commit_accepted(params, job, ctx, policy, accepted)
 	error('critical_inconsistent_commit_acceptance: ' .. reason, 0)
 end
 
+local function persist_commit_failed(params, job, ctx, policy, reason)
+	local jobs = params.jobs or (params.ctx and params.ctx.jobs)
+	local lease = params.lease
+	local active_token = lease and lease.token or job.active_token or (job.active_intent and job.active_intent.token)
+	local ok, result = safe.pcall(function ()
+		return perform_transition(jobs, {
+			kind = 'commit_failed',
+			generation = (lease and lease.generation) or job.generation,
+			job_id = job.job_id,
+			phase = 'commit',
+			token = active_token,
+			commit_token = ctx.commit_token,
+			commit_policy = ctx.commit_policy or policy,
+			error = reason,
+			reason = reason or 'active_commit_failed',
+		}, 'active_job.commit: job_runtime required after backend commit failure')
+	end)
+	if ok then return result end
+	error(tostring(result or 'commit_failed_persist_failed'), 0)
+end
+
+local function perform_commit_backend_op(backend, job, ctx)
+	local fn = backend_method(backend, 'commit_op', true)
+	local result, err = fibers.perform(fn(backend, job, ctx))
+	if result == nil then return nil, err or 'commit_op_failed' end
+	return result, nil
+end
+
 function M.commit(_scope, params)
 	params = params or {}
 	local backend = assert(params.backend, 'active_job.commit: backend required')
@@ -225,7 +254,11 @@ function M.commit(_scope, params)
 	if pre_commit ~= nil then ctx.pre_commit = pre_commit end
 	local attempt = begin_commit_attempt(params, job, ctx, policy)
 
-	local accepted = perform_backend_op(backend, 'commit_op', true, job, ctx)
+	local accepted, commit_err = perform_commit_backend_op(backend, job, ctx)
+	if accepted == nil then
+		persist_commit_failed(params, job, ctx, policy, commit_err or 'component_commit_update_failed')
+		error(commit_err or 'component_commit_update_failed', 0)
+	end
 	local persisted = persist_commit_accepted(params, job, ctx, policy, accepted)
 
 	return {

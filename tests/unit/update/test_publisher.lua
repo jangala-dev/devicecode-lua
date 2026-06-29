@@ -70,7 +70,7 @@ function tests.test_publisher_retains_update_job_timeline_with_correlation()
 				by_id = {
 					['job-1'] = {
 						job_id = 'job-1',
-						component = 'mcu',
+						component = 'mcu', expected_image_id = 'mcu-image-test',
 						state = 'awaiting_commit',
 						artifact_ref = 'artifact-1',
 						metadata = { expected_image_id = 'image-1', ingest_id = 'ing-1' },

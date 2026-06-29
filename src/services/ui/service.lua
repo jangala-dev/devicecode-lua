@@ -380,7 +380,9 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	local h = cfg.http or {}
 	local s = cfg.static or {}
 	local sse_cfg = cfg.sse or {}
-	local uploads = cfg.uploads or {}
+	local updates = cfg.updates or {}
+	local upload = updates.upload or {}
+	local commit = updates.commit or {}
 
 	local listen = {
 		host = h.host,
@@ -391,11 +393,19 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	}
 
 	local update_opts = shallow_copy(params.update or {})
-	update_opts.max_bytes = uploads.max_bytes
-	update_opts.enabled = uploads.enabled
-	update_opts.require_auth = uploads.require_auth
+	update_opts.max_bytes = upload.max_bytes
+	update_opts.enabled = upload.enabled
+	update_opts.require_auth = upload.require_auth
+	update_opts.component = upload.component
+	update_opts.create_job = upload.create_job
+	update_opts.start_job = upload.start_job
+	update_opts.commit_require_auth = commit.require_auth
 	update_opts.connect = update_opts.connect or params.connect
 	update_opts.bus = update_opts.bus or params.bus
+	-- Public prototype update routes still make protected internal bus calls.
+	-- Borrow the UI service connection so those calls carry the UI service
+	-- principal rather than a nil HTTP-user principal.
+	update_opts.conn = update_opts.conn or state.conn
 
 	return {
 		listener = params.listener,

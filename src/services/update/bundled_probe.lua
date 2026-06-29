@@ -11,6 +11,7 @@ local fibers = require 'fibers'
 local scoped_work = require 'devicecode.support.scoped_work'
 local queue = require 'devicecode.support.queue'
 local tablex = require 'shared.table'
+local dcmcu  = require 'services.update.artifacts.dcmcu'
 
 local M = {}
 
@@ -68,12 +69,21 @@ function M.run(scope, params)
 	local result, err = fibers.perform(import_or_probe_op(store, source, params.component))
 	if result == nil then error(err or 'bundled_probe_failed', 0) end
 	local desired = artifact_snapshot(result)
+	local artifact_ref = type(desired) == 'table' and (desired.artifact_ref or desired.ref or desired.id) or nil
+	if params.component == 'mcu' then
+		if type(store.open_source_op) ~= 'function' then error('artifact_source_unavailable', 0) end
+		local source, serr = fibers.perform(store:open_source_op(artifact_ref))
+		if source == nil then error(serr or 'artifact_source_open_failed', 0) end
+		local identity, ierr = fibers.perform(dcmcu.identity_from_source_op(source))
+		if identity == nil then error(ierr or 'dcmcu_identity_unavailable', 0) end
+		desired.expected_image_id = identity.image_id
+	end
 	return {
 		tag = 'bundled_desired',
 		component = params.component,
 		desired = desired,
 		artifact = desired,
-		artifact_ref = type(desired) == 'table' and (desired.artifact_ref or desired.ref or desired.id) or nil,
+		artifact_ref = artifact_ref,
 	}
 end
 

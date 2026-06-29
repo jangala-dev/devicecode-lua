@@ -20,6 +20,7 @@ local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end end
 local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true, got ' .. tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end end
+local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, got ' .. tostring(v))) end end
 
 
 local function wait_retained_payload_where(conn, topic, label, pred, opts)
@@ -232,8 +233,8 @@ function T.ui_upload_drives_update_public_ingest_and_manager_caps()
 		}))
 		assert_eq(st, 'ok')
 		assert_not_nil(result)
-		assert_not_nil(result.job)
-		assert_eq(result.job.job_id, 'j-upload-1')
+		assert_eq(result.job_id, 'j-upload-1')
+		assert_nil(result.job)
 		assert_eq(sink.chunks[1], 'hello')
 		assert_eq(sink.chunks[2], 'world')
 

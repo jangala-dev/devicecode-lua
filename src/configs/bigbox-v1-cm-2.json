@@ -1411,8 +1411,7 @@
                     "main",
                     "rpc",
                     "commit-update"
-                  ],
-                  "reply_policy": "sent-is-accepted"
+                  ]
                 }
               ],
               "inbound": []
@@ -1455,8 +1454,18 @@
         "host": "0.0.0.0",
         "port": 8080
       },
-      "uploads": {
-        "require_auth": true
+      "updates": {
+        "upload": {
+          "enabled": true,
+          "max_bytes": 67108864,
+          "require_auth": false,
+          "component": "mcu",
+          "create_job": true,
+          "start_job": true
+        },
+        "commit": {
+          "require_auth": false
+        }
       }
     }
   },
@@ -1478,22 +1487,28 @@
         }
       },
       "bundled": {
-        "enabled": false,
+        "enabled": true,
         "components": {
           "mcu": {
             "component": "mcu",
             "source": {
               "kind": "file",
-              "path": "/data/devicecode/artifacts/import/mcu.dcmcu"
+              "path": "/artifacts/mcu.dcmcu",
+              "policy": "transient_only"
             },
             "auto_create": false,
-            "auto_start": false,
-            "policy": "prefer_durable"
+            "auto_start": false
           }
         }
       },
       "publish": {
         "enabled": true
+      },
+      "retention": {
+        "terminal_max_count": 50,
+        "terminal_max_age_s": 604800,
+        "active_intent_restart_max": 1,
+        "prune_on_startup": true
       }
     }
   },

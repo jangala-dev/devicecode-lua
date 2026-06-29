@@ -9,6 +9,7 @@
 local fibers        = require 'fibers'
 local request_owner = require 'devicecode.support.request_owner'
 local model_mod     = require 'services.update.model'
+local dcmcu         = require 'services.update.artifacts.dcmcu'
 
 local M = {}
 
@@ -103,7 +104,7 @@ function M.create_job(scope, params)
 		}
 	end
 
-	local _, artifact_err = require_artifact_ref(payload)
+	local artifact_ref, artifact_err = require_artifact_ref(payload)
 	if artifact_err ~= nil then
 		reply_or_fail(owner, nil, artifact_err, 'artifact_ref_reply_failed')
 		return {
@@ -111,6 +112,33 @@ function M.create_job(scope, params)
 			method = 'create_job',
 			reason = artifact_err,
 		}
+	end
+
+	if component == 'mcu' then
+		if payload.expected_image_id ~= nil then
+			reply_or_fail(owner, nil, 'expected_image_id_must_be_resolved_from_artifact', 'expected_image_id_reply_failed')
+			return {
+				tag = 'manager_request_rejected',
+				method = 'create_job',
+				reason = 'expected_image_id_must_be_resolved_from_artifact',
+			}
+		end
+		local store = params.artifact_store
+		if not store or type(store.open_source_op) ~= 'function' then
+			reply_or_fail(owner, nil, 'artifact_store_unavailable', 'artifact_store_reply_failed')
+			return { tag = 'manager_request_rejected', method = 'create_job', reason = 'artifact_store_unavailable' }
+		end
+		local source, serr = fibers.perform(store:open_source_op(artifact_ref))
+		if source == nil then
+			reply_or_fail(owner, nil, serr or 'artifact_source_open_failed', 'artifact_source_reply_failed')
+			return { tag = 'manager_request_rejected', method = 'create_job', reason = serr or 'artifact_source_open_failed' }
+		end
+		local identity, ierr = fibers.perform(dcmcu.identity_from_source_op(source))
+		if identity == nil then
+			reply_or_fail(owner, nil, ierr or 'dcmcu_identity_unavailable', 'dcmcu_identity_reply_failed')
+			return { tag = 'manager_request_rejected', method = 'create_job', reason = ierr or 'dcmcu_identity_unavailable' }
+		end
+		payload.expected_image_id = identity.image_id
 	end
 
 	local result, err = transition(params.jobs, {

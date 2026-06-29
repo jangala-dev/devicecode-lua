@@ -85,6 +85,7 @@ ip route replace default via 192.168.1.2 dev br-lan || true
 # Dependencies used by vendored fibers/bus/trie and future real command-backed tests.
 # Package names vary across OpenWrt feeds/releases, so keep these best-effort.
 (opkg install luaposix || true)
+(opkg install coreutils-stty || true)
 (opkg install lua-bit32 || true)
 (opkg install lua-cjson || true)
 

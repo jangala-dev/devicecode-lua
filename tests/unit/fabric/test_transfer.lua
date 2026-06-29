@@ -139,18 +139,27 @@ function tests.test_reducer_requires_session_context_for_claims()
 	assert_eq(transfer.snapshot(state).active.session.peer_sid, 'sid-1')
 end
 
-function tests.test_slot_admission_without_session_fails_request()
+function tests.test_slot_admission_without_session_waits_for_peer_session()
 	fibers.run(function (scope)
 		local h = start_manager(scope)
-		local req = slot_request('req-nosession')
+		local req = slot_request('req-wait-session')
 		assert_true(h.admission_tx:send(req))
+		fibers.perform(sleep.sleep_op(0.02))
+		assert_nil(req.result, 'slot request should wait while no peer session exists')
+
+		local c = ctx()
+		h.outbound:bind(c)
+		assert_true(h.session_tx:send(peer_session_event()))
 		local deadline = fibers.now() + 0.1
 		while req.result == nil and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.001)) end
-		assert_eq(req.result.ok, false)
-		assert_eq(req.result.err, 'no_session')
+		assert_eq(req.result.ok, true)
+		assert_not_nil(req.result.value.lease)
+		assert_true(req.result.value.lease:release('not used'))
+
 		h.admission_tx:close('done')
 		h.session_tx:close('done')
-		recv_with_timeout(h.done_rx, 'manager done')
+		local done = recv_with_timeout(h.done_rx, 'manager done')
+		assert_eq(done.snapshot.stats.deferred_no_session, 1)
 	end)
 end
 

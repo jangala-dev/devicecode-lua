@@ -17,6 +17,7 @@ local http_request = require 'http.request'
 
 local runfibers = require 'tests.support.run_fibers'
 local probe     = require 'tests.support.bus_probe'
+local dcmcu_fixture = require 'tests.support.dcmcu_fixture'
 
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 
@@ -246,7 +247,6 @@ local function cm5_fabric_config()
                     ['local'] = { 'raw', 'member', 'mcu', 'cap', 'updater', 'main', 'rpc', 'commit-update' },
                     remote = { 'cap', 'self', 'updater', 'main', 'rpc', 'commit-update' },
                     timeout_s = 2.0,
-                    reply_policy = 'sent-is-accepted',
                 },
             },
         },
@@ -374,6 +374,9 @@ local function start_fake_mcu(scope, bus, fake)
             local req = fibers.perform(commit_ep:recv_op())
             if req == nil then return end
             fake.commit_payload = req.payload
+            assert_eq(type(req.payload), 'table')
+            assert_eq(req.payload.job_id, fake.job_id)
+            assert_eq(req.payload.metadata, nil)
             fake.commit_seen = true
             fake.committed_image_id = (fake.staged and fake.staged.image_id)
                 or (type(req.payload) == 'table' and req.payload.expected_image_id)
@@ -550,11 +553,9 @@ local function start_ui(scope, bus, port, roots)
                 metadata = {
                     source = 'browser',
                     format = 'dcmcu-v1',
-                    expected_image_id = 'mcu-image-new',
-                    image_id = 'mcu-image-new',
                 },
             },
-            uploads = { enabled = true, max_bytes = 1024 * 1024 },
+            updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false, component = 'mcu', create_job = true, start_job = true }, commit = { require_auth = false } },
         })
     end))
     conn:retain({ 'cfg', 'ui' }, { data = {
@@ -562,7 +563,7 @@ local function start_ui(scope, bus, port, roots)
         enabled = true,
         http = { enabled = true, cap_id = 'main', host = '127.0.0.1', port = port, max_active_requests = 8 },
         static = { root = roots.static, index = 'index.html' },
-        uploads = { enabled = true, max_bytes = 1024 * 1024 },
+        updates = { upload = { enabled = true, max_bytes = 1024 * 1024, require_auth = false, component = 'mcu', create_job = true, start_job = true }, commit = { require_auth = false } },
         sse = { enabled = false },
         sessions = { prune_interval = false },
     } })
@@ -701,7 +702,7 @@ end
 function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
     runfibers.run(function (root_scope)
         local roots = temp_roots()
-        local blob = ('DCMCU-v1 manifest:%s\n'):format('mcu-image-new') .. string.rep('payload-', 64)
+        local blob = dcmcu_fixture.make('mcu-image-new')
         local port = 30000 + math.random(0, 20000)
         local fake = { old_image_id = 'mcu-image-old' }
 
@@ -722,8 +723,8 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
         assert_eq(status, '200', 'upload HTTP status ' .. tostring(status) .. ': ' .. tostring(body))
         local decoded = assert(cjson.decode(body), body)
         assert_eq(decoded.status, 'ok')
-        assert_not_nil(decoded.job, 'upload should create an update job')
-        assert_eq(decoded.job.job_id, 'job-mcu-full-path')
+        assert_eq(decoded.job_id, 'job-mcu-full-path')
+        assert_eq(decoded.job, nil)
 
         log('waiting for job awaiting_commit')
         wait_job(cm5.conn, 'job-mcu-full-path', 'awaiting_commit', 8.0)
@@ -731,23 +732,13 @@ function T.ui_http_mcu_update_survives_fake_reboot_and_reconciles()
             return fake.staged and fake.staged.bytes == blob
         end, { timeout = 4.0 }), 'fake MCU should stage transferred artifact')
 
-        log('logging in through real HTTP JSON')
-        local login_status, login_body, login_decoded = run_http_json(root_scope, port, '/api/login', {
-            username = 'tester',
-            password = 'test-password',
-        })
-        assert_eq(login_status, '200', login_body)
-        assert_not_nil(login_decoded and login_decoded.session, login_body)
-        local sid = login_decoded.session.id
-        assert_not_nil(sid, 'login should return a session id')
-
-        log('committing job through real HTTP JSON command route')
+        log('committing job through real HTTP update commit route')
         local commit_status, commit_body, commit_decoded = run_http_json(
             root_scope,
             port,
-            '/api/call/cap/update-manager/main/rpc/commit-job',
+            '/api/update/commit',
             { job_id = 'job-mcu-full-path' },
-            { ['x-session-id'] = sid }
+            nil
         )
         assert_eq(commit_status, '200', commit_body)
         assert_not_nil(commit_decoded and commit_decoded.value, commit_body)

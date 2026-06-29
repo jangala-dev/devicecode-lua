@@ -51,7 +51,7 @@ local function correlation(job)
 		request_id = transfer and transfer.request_id or nil,
 		link_id = transfer and transfer.link_id or nil,
 		call_id = type(job.commit_attempt) == 'table' and job.commit_attempt.call_id or nil,
-		expected_image_id = job.expected_image_id or meta.expected_image_id or meta.image_id or stage.expected_image_id or (pre and pre.expected_image_id),
+		expected_image_id = job.expected_image_id,
 		pre_commit_boot_id = pre and pre.pre_commit_boot_id or nil,
 		pre_commit_image_id = pre and pre.pre_commit_image_id or nil,
 	}
