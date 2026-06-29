@@ -33,6 +33,9 @@ local DEFAULTS = {
 	sessions = {
 		prune_interval = 60,
 	},
+	observability = {
+		status_interval_s = 30,
+	},
 }
 
 local ROOT_KEYS = {
@@ -43,6 +46,7 @@ local ROOT_KEYS = {
 	sse = true,
 	updates = true,
 	sessions = true,
+	observability = true,
 }
 
 local HTTP_KEYS = {
@@ -62,6 +66,7 @@ local UPDATE_KEYS = { upload = true, commit = true }
 local UPDATE_UPLOAD_KEYS = { enabled = true, max_bytes = true, require_auth = true, component = true, create_job = true, start_job = true }
 local UPDATE_COMMIT_KEYS = { require_auth = true }
 local SESSION_KEYS = { prune_interval = true }
+local OBSERVABILITY_KEYS = { status_interval_s = true }
 
 local function fail(msg) return nil, msg end
 
@@ -294,6 +299,22 @@ local function normalise_sessions(raw)
 	return out, nil
 end
 
+
+local function normalise_observability(raw)
+	local err
+	raw, err = table_or_empty(raw, 'observability')
+	if not raw then return nil, err end
+	local ok
+	ok, err = allowed(raw, OBSERVABILITY_KEYS, 'observability')
+	if not ok then return nil, err end
+	local out = copy_plain(DEFAULTS.observability)
+	local v
+	v, err = positive_number_or_false_or_nil(raw.status_interval_s, 'observability.status_interval_s')
+	if err then return nil, err end
+	if v ~= nil then out.status_interval_s = v end
+	return out, nil
+end
+
 function M.normalise(raw)
 	if raw == nil then raw = {} end
 	if type(raw) ~= 'table' then return fail('ui config must be a table') end
@@ -312,6 +333,7 @@ function M.normalise(raw)
 	local sse; sse, err = normalise_sse(raw.sse); if not sse then return nil, err end
 	local updates; updates, err = normalise_updates(raw.updates); if not updates then return nil, err end
 	local sessions; sessions, err = normalise_sessions(raw.sessions); if not sessions then return nil, err end
+	local observability; observability, err = normalise_observability(raw.observability); if not observability then return nil, err end
 
 	return {
 		schema = M.SCHEMA,
@@ -321,6 +343,7 @@ function M.normalise(raw)
 		sse = sse,
 		updates = updates,
 		sessions = sessions,
+		observability = observability,
 	}, nil
 end
 

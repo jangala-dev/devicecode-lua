@@ -9,6 +9,7 @@ local mailbox      = require 'fibers.mailbox'
 local service_base = require 'devicecode.service_base'
 local scoped_work  = require 'devicecode.support.scoped_work'
 local sleep        = require 'fibers.sleep'
+local runtime      = require 'fibers.runtime'
 local queue        = require 'devicecode.support.queue'
 local read_model   = require 'services.ui.read_model'
 local queries      = require 'services.ui.queries'
@@ -30,6 +31,56 @@ local shallow_copy = tablex.shallow_copy
 local function dependency_snapshot(state)
 	return dep_slot.snapshot(state, 'http_deps')
 end
+
+local function sorted_keys(t)
+	local keys = {}
+	for k in pairs(t or {}) do keys[#keys + 1] = k end
+	table.sort(keys, function (a, b) return tostring(a) < tostring(b) end)
+	return keys
+end
+
+local function stable_status_value(v, key)
+	if key == 'at' or key == 'ts' or key == 'run_id' or key == 'updated_at' then return '' end
+	if type(v) ~= 'table' then return tostring(v) end
+	local parts = { '{' }
+	for _, k in ipairs(sorted_keys(v)) do
+		if k ~= 'at' and k ~= 'ts' and k ~= 'run_id' and k ~= 'updated_at' then
+			parts[#parts + 1] = tostring(k)
+			parts[#parts + 1] = '='
+			parts[#parts + 1] = stable_status_value(v[k], k)
+			parts[#parts + 1] = ';'
+		end
+	end
+	parts[#parts + 1] = '}'
+	return table.concat(parts)
+end
+
+local function lifecycle_status_key(service_state, payload)
+	return stable_status_value({ state = service_state, payload = payload }, nil)
+end
+
+local function ui_observability(state)
+	local cfg = state and state.config and state.config.observability or nil
+	return cfg or config_mod.DEFAULTS.observability
+end
+
+local function should_publish_lifecycle(state, key)
+	state.lifecycle_obs = state.lifecycle_obs or {}
+	local obs = state.lifecycle_obs
+	if obs.status_key ~= key then return true end
+	local interval = ui_observability(state).status_interval_s
+	if interval == false then return false end
+	interval = tonumber(interval) or 30
+	if interval <= 0 then return false end
+	return (runtime.now() - (obs.last_status_emit_at or 0)) >= interval
+end
+
+local function note_lifecycle_published(state, key)
+	state.lifecycle_obs = state.lifecycle_obs or {}
+	state.lifecycle_obs.status_key = key
+	state.lifecycle_obs.last_status_emit_at = runtime.now()
+end
+
 
 local function component_summary(components)
 	local out = {}
@@ -314,6 +365,9 @@ local function update_lifecycle(state)
 		config_generation = state.config_generation,
 		dependencies = dependency_snapshot(state),
 	}
+	local key = lifecycle_status_key(service_state, payload)
+	if not should_publish_lifecycle(state, key) then return true, nil end
+	note_lifecycle_published(state, key)
 	if service_state == 'disabled' then return lifecycle:status('disabled', payload) end
 	if service_state == 'degraded' then return lifecycle:degraded(payload) end
 	if service_state == 'failed' then return lifecycle:failed(reason or 'ui_failed', payload) end
@@ -688,6 +742,7 @@ function M.run(scope, params)
 		active_requests = 0,
 		rejected_requests = 0,
 		components = {},
+		lifecycle_obs = {},
 		last_error = nil,
 	}
 
@@ -768,6 +823,8 @@ M._test = {
 	apply_config = apply_config,
 	lifecycle_readiness = lifecycle_readiness,
 	update_lifecycle = update_lifecycle,
+	lifecycle_status_key = lifecycle_status_key,
+	should_publish_lifecycle = should_publish_lifecycle,
 }
 
 

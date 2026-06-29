@@ -2,6 +2,8 @@
 
 local fibers = require 'fibers'
 local provider_loader = require 'services.hal.backends.network.provider'
+local names = require 'services.hal.backends.network.providers.openwrt.names'
+local net_config = require 'services.net.config'
 
 local tests = {}
 
@@ -126,6 +128,38 @@ function tests.test_mwan_rules_flow_from_config_to_mwan3_uci()
 	end)
 end
 
+
+function tests.test_read_counters_reads_requested_device_stats_and_reports_missing()
+	fibers.run(function()
+		local calls = {}
+		local values = {
+			['br-adm'] = { rx_bytes = 12345, tx_packets = 77 },
+		}
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			counter_reader = function(device, stat)
+				calls[#calls + 1] = { device = device, stat = stat }
+				local v = values[device] and values[device][stat]
+				if v == nil then return nil, 'missing counter' end
+				return v, nil
+			end,
+		}, {}))
+		local result = fibers.perform(provider:read_counters_op({
+			interfaces = { 'adm' },
+			devices = { adm = 'br-adm' },
+			stats = { 'rx_bytes', 'tx_packets', 'rx_errors' },
+		}))
+		eq(result.ok, true)
+		eq(result.counters.adm.device, 'br-adm')
+		eq(result.counters.adm.statistics.rx_bytes, 12345)
+		eq(result.counters.adm.statistics.tx_packets, 77)
+		eq(result.errors.adm.device, 'br-adm')
+		contains(result.errors.adm.rx_errors, 'missing counter')
+		eq(#calls, 3)
+		provider:terminate('test complete')
+	end)
+end
+
 function tests.test_apply_uses_shaper_and_schedules_structural_mwan3_activation()
 	fibers.run(function(scope)
 		local restart_cmds = {}
@@ -244,6 +278,39 @@ function tests.test_speedtest_uses_mwan3_use_boundary()
 	end)
 end
 
+function tests.test_speedtest_translates_semantic_device_to_linux_counter_device()
+	fibers.run(function()
+		local seen_req
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			speedtest_run_cmd = function()
+				return true, '42', nil
+			end,
+		}, {}))
+		provider._last_name_ctx = ok(names.allocate({
+			segments = { wan = { kind = 'wan', vlan = 10 } },
+			interfaces = { wan = { kind = 'ethernet', role = 'wan', segment = 'wan' } },
+			wan = { members = { wan = { interface = 'wan' } } },
+		}))
+		provider.speedtest_run_cmd = function(_argv)
+			return true, '42', nil
+		end
+		local speedtest = require 'services.hal.backends.network.providers.openwrt.speedtest'
+		local original = speedtest.run_op
+		speedtest.run_op = function(req, opts)
+			seen_req = req
+			return original(req, opts)
+		end
+		local result = fibers.perform(provider:speedtest_op({ interface = 'wan' }))
+		speedtest.run_op = original
+		eq(result.ok, true)
+		eq(seen_req.interface, 'wan')
+		eq(seen_req.device, 'vl-wan')
+		provider:terminate('test complete')
+	end)
+end
+
 
 function tests.test_segment_trunk_realises_segments_without_cfg_net_interfaces()
 	fibers.run(function()
@@ -350,15 +417,128 @@ function tests.test_mwan3_builder_uses_distinct_section_names_for_same_interface
 	local ctx = ok(names.allocate(intent_doc))
 	local changes = ok(mwan3.build_changes(intent_doc, ctx))
 	local sections = {}
+	local policy = ctx:mwan_policy('balanced')
+	local use_members = {}
 	for _, ch in ipairs(changes) do
 		if ch.op == 'set' and ch.config == 'mwan3' and ch.value == nil then
 			if sections[ch.section] then fail('duplicate mwan3 section name generated: ' .. tostring(ch.section)) end
 			sections[ch.section] = ch.option
+		elseif ch.config == 'mwan3' and ch.section == policy and ch.option == 'use_member' then
+			if ch.op == 'delete' then fail('full mwan3 package replacement should not delete use_member before it exists') end
+			if ch.op == 'add_list' then use_members[tostring(ch.value)] = (use_members[tostring(ch.value)] or 0) + 1 end
 		end
 	end
 	ok(sections[ctx:mwan_iface('wan')], 'wan interface section expected')
 	ok(sections[ctx:mwan_member('wan')], 'wan member section expected')
 	eq(ctx:mwan_iface('wan') == ctx:mwan_member('wan'), false, 'interface/member names must differ')
+	for _, mid in ipairs({ 'wan', 'modem_primary', 'modem_secondary' }) do
+		eq(use_members[ctx:mwan_member(mid)], 1, 'use_member should contain each intended member exactly once')
+	end
+
+	local weight_changes = ok(mwan3.build_weight_only_changes({ members = {
+		{ id = 'wan', interface = 'wan', metric = 2, weight = 70 },
+		{ id = 'modem_primary', interface = 'modem_primary', metric = 1, weight = 30 },
+	} }, ctx))
+	local seen = {}
+	for _, ch in ipairs(weight_changes) do
+		eq(ch.config, 'mwan3')
+		eq(ch.op, 'set')
+		ok(ch.option == 'weight' or ch.option == 'metric', 'weight-only persistence must only set member weight/metric')
+		ok(ch.section == ctx:mwan_member('wan') or ch.section == ctx:mwan_member('modem_primary'), 'weight-only persistence must target member sections')
+		seen[ch.section .. '.' .. ch.option] = ch.value
+	end
+	eq(seen[ctx:mwan_member('wan') .. '.weight'], 70)
+	eq(seen[ctx:mwan_member('wan') .. '.metric'], 2)
+	eq(seen[ctx:mwan_member('modem_primary') .. '.weight'], 30)
+	eq(seen[ctx:mwan_member('modem_primary') .. '.metric'], 1)
+
+	fibers.run(function()
+		local op = require 'fibers.op'
+		local submitted
+		local mgr = {
+			submit_op = function(_, record)
+				submitted = record
+				return op.always(true, nil, true)
+			end,
+		}
+		local ok_persist, err, admitted = fibers.perform(mwan3.persist_weights_op(mgr, { members = {
+			{ id = 'wan', interface = 'wan', metric = 3, weight = 44 },
+		} }, ctx))
+		eq(ok_persist, true, tostring(err))
+		eq(admitted, true)
+		eq(submitted.config, 'mwan3')
+		eq(#submitted.restart_cmds, 0, 'weight persistence must not restart mwan3')
+		for _, ch in ipairs(submitted.changes or {}) do
+			eq(ch.op, 'set')
+			ok(ch.option == 'weight' or ch.option == 'metric', 'persist_weights_op must only set weight/metric')
+		end
+	end)
+end
+
+
+local function find_change(changes, fields)
+	for _, ch in ipairs(changes or {}) do
+		local ok = true
+		for k, v in pairs(fields or {}) do
+			if ch[k] ~= v then ok = false; break end
+		end
+		if ok then return ch end
+	end
+	return nil
+end
+
+function tests.test_bigbox_net_intent_still_renders_openwrt_segment_trunk_independent_of_wired_assembly()
+	fibers.run(function()
+		local intent, ierr = net_config.normalise({
+			schema = net_config.SCHEMA,
+			version = 1,
+			segments = {
+				adm = { kind = 'system', protected = true, vlan = { id = 8 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.8.1/24' } }, firewall = { zone = 'lan' } },
+				jan = { kind = 'user', vlan = { id = 32 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/24' } }, firewall = { zone = 'lan_rst' } },
+				int = { kind = 'system', protected = true, vlan = { id = 100 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.100.1/24' } }, firewall = { zone = 'lan' } },
+				wan = { kind = 'wan', vlan = { id = 4 }, addressing = { ipv4 = { mode = 'dhcp', peerdns = false } }, firewall = { zone = 'wan' } },
+			},
+			interfaces = {},
+			dns = {}, dhcp = {}, firewall = { zones = { lan = {}, lan_rst = {}, wan = { masq = true } }, policies = {}, rules = {} },
+			routing = { routes = { starlink_admin = { kind = 'host', target = '192.168.100.1', interface = 'wan' } } },
+			wan = { enabled = true, members = { wan = { interface = 'wan', weight = 1, mwan_metric = 1 } } },
+			shaping = {}, vpn = {}, diagnostics = {},
+		}, { rev = 1 })
+		ok(intent, ierr)
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			platform = { segment_trunk = { ifname = 'eth0', protected = true } },
+		}, {}))
+		local plan = fibers.perform(provider:plan_op({ intent = intent }))
+		eq(plan.ok, true)
+		local changes = plan.plan and plan.plan.raw_changes and plan.plan.raw_changes.network or {}
+
+		for _, rec in ipairs({
+			{ id = 'adm', vid = 8, vlan = 'vl-adm', bridge = 'br-adm', proto = 'static', ipaddr = '172.28.8.1' },
+			{ id = 'jan', vid = 32, vlan = 'vl-jan', bridge = 'br-jan', proto = 'static', ipaddr = '172.28.32.1' },
+			{ id = 'int', vid = 100, vlan = 'vl-int', bridge = 'br-int', proto = 'static', ipaddr = '172.28.100.1' },
+		}) do
+			local vlan_sec = 'dev_vlan_' .. rec.id
+			local bridge_sec = 'dev_bridge_' .. rec.id
+			ok(find_change(changes, { section = vlan_sec, option = 'ifname', value = 'eth0' }), rec.id .. ' VLAN should use eth0 trunk')
+			ok(find_change(changes, { section = vlan_sec, option = 'vid', value = rec.vid }), rec.id .. ' VLAN id should render')
+			ok(find_change(changes, { section = vlan_sec, option = 'name', value = rec.vlan }), rec.id .. ' VLAN device should render')
+			ok(find_change(changes, { section = bridge_sec, option = 'name', value = rec.bridge }), rec.id .. ' bridge should render')
+			ok(find_change(changes, { section = rec.id, option = 'device', value = rec.bridge }), rec.id .. ' interface should use bridge')
+			ok(find_change(changes, { section = rec.id, option = 'proto', value = rec.proto }), rec.id .. ' proto should render')
+			ok(find_change(changes, { section = rec.id, option = 'ipaddr', value = rec.ipaddr }), rec.id .. ' IP address should render')
+		end
+
+		ok(find_change(changes, { section = 'dev_vlan_wan', option = 'ifname', value = 'eth0' }), 'wan VLAN should use eth0 trunk')
+		ok(find_change(changes, { section = 'dev_vlan_wan', option = 'vid', value = 4 }), 'wan VLAN id should render')
+		ok(find_change(changes, { section = 'wan', option = 'device', value = 'vl-wan' }), 'wan interface should use WAN VLAN device')
+		ok(find_change(changes, { section = 'wan', option = 'proto', value = 'dhcp' }), 'wan interface should remain DHCP')
+		ok(find_change(changes, { section = 'wan', option = 'peerdns', value = '0' }), 'wan peerdns false should render')
+		ok(find_change(changes, { section = 'route_starlink_admin', option = 'interface', value = 'wan' }), 'Starlink route should remain on semantic wan interface')
+		ok(find_change(changes, { section = 'route_starlink_admin', option = 'target', value = '192.168.100.1' }), 'Starlink route target should render')
+		provider:terminate('test complete')
+	end)
 end
 
 return tests

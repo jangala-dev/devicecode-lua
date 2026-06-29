@@ -22,6 +22,7 @@ local hal_client_mod = require 'services.net.hal_client'
 local cap_deps_mod = require 'devicecode.support.capability_dependencies'
 local observer_manager = require 'services.net.observer_manager'
 local wan_manager = require 'services.net.wan_manager'
+local metrics = require 'services.net.metrics'
 local drift = require 'services.net.drift'
 local backpressure = require 'services.net.backpressure'
 local gsm_uplink_watch = require 'services.net.gsm_uplink_watch'
@@ -82,6 +83,26 @@ local function publish_snapshot(state)
 		return true, nil
 	end
 	return publisher.publish_dirty_now(state.conn, state.model:snapshot(), state.dirty, state.published)
+end
+
+local function speedtests_blocked_by_apply(state)
+	if state.active_apply ~= nil or state.pending_intent ~= nil then return true end
+	local snap = state.model and state.model:snapshot() or nil
+	local apply_state = snap and snap.apply and snap.apply.state or nil
+	return apply_state == 'running' or apply_state == 'waiting_for_hal'
+end
+
+local function reconcile_speedtests_if_ready(state, reason)
+	if speedtests_blocked_by_apply(state) then
+		local snap = state.model and state.model:snapshot() or nil
+		obs_log(state.svc, 'debug', {
+			what = 'speedtests_deferred',
+			reason = reason,
+			apply_state = snap and snap.apply and snap.apply.state or nil,
+		})
+		return true, nil
+	end
+	return wan_manager.reconcile_speedtests(state, reason)
 end
 
 local function set_model_state(state, service_state, reason)
@@ -480,7 +501,7 @@ local function handle_observed_state(state, ev)
 	mark_domain_dirty(state, 'observed')
 	mark_domain_dirty(state, 'drift')
 	obs_event(state.svc, 'network_observed', { subject = observed_event.subject, source = observed_event.source, kind = observed_event.kind })
-	local ok, err = wan_manager.reconcile_speedtests(state, 'observed_state')
+	local ok, err = reconcile_speedtests_if_ready(state, 'observed_state')
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end
@@ -528,7 +549,7 @@ local function handle_gsm_uplink_changed(state, ev)
 			if structural_ok == true then structural_ok, structural_err = reconcile_apply_admission(state, 'gsm_uplink_binding_changed') end
 		end
 	end
-	local ok, err = wan_manager.reconcile_speedtests(state, 'gsm_uplink_changed')
+	local ok, err = reconcile_speedtests_if_ready(state, 'gsm_uplink_changed')
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end
@@ -619,6 +640,27 @@ end
 
 local function handle_speedtest_done(state, ev)
 	local ok, err = wan_manager.handle_speedtest_done(state, ev)
+	if ok == true and err ~= 'stale' then
+		local snap = state.model:snapshot()
+		local rec = snap.wan_runtime and snap.wan_runtime.speedtests and snap.wan_runtime.speedtests[ev.uplink_id]
+		if rec then
+			obs_log(state.svc, rec.ok == true and 'info' or 'warn', {
+				what = 'speedtest_completed',
+				uplink_id = ev.uplink_id,
+				interface = rec.interface,
+				device = rec.device,
+				ok = rec.ok == true,
+				err = rec.err,
+				peak_mbps = rec.ok == true and rec.peak_mbps or nil,
+			})
+		end
+		if rec and rec.ok == true and rec.peak_mbps ~= nil and state.svc and type(state.svc.obs_metric) == 'function' then
+			state.svc:obs_metric('speedtest', {
+				value = rec.peak_mbps,
+				namespace = { 'net', rec.interface or ev.uplink_id, 'speedtest' },
+			})
+		end
+	end
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end
@@ -753,6 +795,9 @@ function M.run(scope, params)
 		next_weight_apply_id = 1,
 		active_speedtests = {},
 		active_weight_apply = nil,
+		counter_poll_enabled = params.counter_metrics ~= false and params.counter_poll ~= false,
+		counter_poll_interval_s = params.counter_poll_interval_s or params.counter_metrics_interval_s or 60,
+		counter_poll_timeout_s = params.counter_poll_timeout_s or 5,
 		current_generation = nil,
 		active_apply = nil,
 		pending_intent = nil,
@@ -764,6 +809,10 @@ function M.run(scope, params)
 		elseif kind == 'apply' then mark_apply_dirty(state)
 		elseif kind == 'summary' then mark_summary_dirty(state)
 		else mark_all_dirty(state) end
+	end
+
+	if state.counter_poll_enabled and conn then
+		scope:spawn(function () metrics.counter_metrics_loop(state) end)
 	end
 
 	scope:finally(function (_, status, primary)

@@ -25,7 +25,7 @@ local function publish_map(conn, published, next_map, topic_fn, payload_fn)
 end
 
 function M.new_state()
-	return { surfaces = {}, providers = {}, summary = false, topology = false, violations = false }
+	return { surfaces = {}, summary = false, topology = false, violations = false }
 end
 
 function M.publish_all_now(conn, snapshot, published)
@@ -34,8 +34,6 @@ function M.publish_all_now(conn, snapshot, published)
 	if ok ~= true then return nil, err end
 	published.summary = true
 	ok, err = publish_map(conn, published.surfaces, snapshot.surfaces, projection.surface_topic, projection.surface)
-	if ok ~= true then return nil, err end
-	ok, err = publish_map(conn, published.providers, snapshot.providers, projection.provider_topic, projection.provider)
 	if ok ~= true then return nil, err end
 	ok, err = bus_cleanup.retain(conn, projection.topology_topic(), projection.topology(snapshot))
 	if ok ~= true then return nil, err end
@@ -49,7 +47,6 @@ end
 function M.cleanup_now(conn, published)
 	if not published then return true, nil end
 	for id in pairs(published.surfaces or {}) do bus_cleanup.unretain(conn, projection.surface_topic(id)); published.surfaces[id] = nil end
-	for id in pairs(published.providers or {}) do bus_cleanup.unretain(conn, projection.provider_topic(id)); published.providers[id] = nil end
 	if published.summary then bus_cleanup.unretain(conn, projection.summary_topic()) end
 	if published.topology then bus_cleanup.unretain(conn, projection.topology_topic()) end
 	if published.violations then bus_cleanup.unretain(conn, projection.violations_topic()) end

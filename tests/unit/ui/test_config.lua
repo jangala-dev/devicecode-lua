@@ -37,6 +37,31 @@ function M.test_normalise_supplies_http_static_sse_defaults_and_accepts_explicit
 	eq(cfg.updates.upload.create_job, true)
 	eq(cfg.updates.upload.start_job, true)
 	eq(cfg.updates.commit.require_auth, false)
+	eq(cfg.uploads.enabled, true)
+	eq(cfg.uploads.require_auth, false)
+	eq(cfg.observability.status_interval_s, 30)
+end
+
+
+function M.test_observability_status_interval_is_configurable()
+	local cfg = ok(config.normalise({
+		schema = config.SCHEMA,
+		observability = { status_interval_s = 15 },
+	}))
+	eq(cfg.observability.status_interval_s, 15)
+
+	cfg = ok(config.normalise({
+		schema = config.SCHEMA,
+		observability = { status_interval_s = false },
+	}))
+	eq(cfg.observability.status_interval_s, false)
+
+	local bad, err = config.normalise({
+		schema = config.SCHEMA,
+		observability = { every_status = true },
+	})
+	eq(bad, nil)
+	ok(tostring(err):find('observability has unknown field', 1, true))
 end
 
 function M.test_update_upload_and_commit_can_require_authentication()

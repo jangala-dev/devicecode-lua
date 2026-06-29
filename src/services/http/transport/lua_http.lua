@@ -117,6 +117,7 @@ local function new_context(listener, server, stream)
 		_active_cmd       = nil,
 		_commands_started = 0,
 		_commands_done    = 0,
+		_stream_timeout   = listener._intra_stream_timeout,
 	}, HttpContext)
 end
 
@@ -309,45 +310,49 @@ end
 
 -- HTTP stream-shaped Ops ------------------------------------------------------
 
+local function context_stream_timeout(ctx)
+	return ctx._stream_timeout
+end
+
 function HttpContext:get_headers_op()
 	return self:run_stream_op('http.get_headers', function (stream)
-		return stream:get_headers()
+		return stream:get_headers(context_stream_timeout(self))
 	end)
 end
 
 function HttpContext:read_chunk_op(_max)
 	return self:run_stream_op('http.get_next_chunk', function (stream)
-		return stream:get_next_chunk()
+		return stream:get_next_chunk(context_stream_timeout(self))
 	end)
 end
 
 function HttpContext:read_chars_op(n)
 	return self:run_stream_op('http.get_body_chars', function (stream)
-		return stream:get_body_chars(n)
+		return stream:get_body_chars(n, context_stream_timeout(self))
 	end)
 end
 
 function HttpContext:read_body_as_string_op()
 	return self:run_stream_op('http.get_body_as_string', function (stream)
-		return stream:get_body_as_string()
+		return stream:get_body_as_string(context_stream_timeout(self))
 	end)
 end
 
 function HttpContext:write_headers_op(headers, end_stream)
 	return self:run_stream_op('http.write_headers', function (stream)
-		return stream:write_headers(headers, not not end_stream)
+		return stream:write_headers(headers, not not end_stream, context_stream_timeout(self))
 	end)
 end
 
 function HttpContext:write_chunk_op(chunk, end_stream)
 	return self:run_stream_op('http.write_chunk', function (stream)
-		return stream:write_chunk(chunk, not not end_stream)
+		return stream:write_chunk(chunk, not not end_stream, context_stream_timeout(self))
 	end)
 end
 
 function HttpContext:write_body_from_string_op(str)
 	return self:run_stream_op('http.write_body_from_string', function (stream)
-		return stream:write_body_from_string(str)
+		return stream:write_body_from_string(str, context_stream_timeout(self))
 	end)
 end
 
@@ -473,6 +478,7 @@ function M.listen(opts)
 		_condition_factory  = opts.condition_factory,
 		_context_terminator = opts.context_terminator,
 		_backend_timeout    = opts.backend_timeout,
+		_intra_stream_timeout = opts.intra_stream_timeout,
 	}, Listener)
 
 	local server_opts = copy_table(opts)
@@ -491,6 +497,7 @@ function M.listen(opts)
 	server_opts.on_terminate = nil
 	server_opts.driver_options = nil
 	server_opts.backend_timeout = nil
+	server_opts.intra_stream_timeout = nil
 
 	local server, err = make_server(server_opts)
 	if not server then return nil, err end

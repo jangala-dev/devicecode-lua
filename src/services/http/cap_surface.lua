@@ -31,18 +31,20 @@ function M.retain_static(conn, id, status, stats)
 		offerings = offerings_map(),
 		local_handles = { listen = true, ['open-exchange'] = true, ['connect-ws'] = true },
 		control_plane_only = true,
+		compat = { response_parsers = { strict = true, ['legacy-http1-close'] = true } },
 		state = { stats = topics.state(id, 'stats') },
-		observability = { stats = topics.obs_metric(id, 'stats') },
+		observability = { status = topics.obs_metric(id, 'status') },
 	})
 	conn:retain(topics.status(id), status or { state = 'starting', available = false })
 	conn:retain(topics.state(id, 'stats'), stats or {})
-	conn:retain(topics.obs_metric(id, 'stats'), stats or {})
+	conn:retain(topics.obs_metric(id, 'status'), stats or {})
 end
 
 function M.unretain_static(conn, id)
 	conn:unretain(topics.meta(id))
 	conn:unretain(topics.status(id))
 	conn:unretain(topics.state(id, 'stats'))
+	conn:unretain(topics.obs_metric(id, 'status'))
 	conn:unretain(topics.obs_metric(id, 'stats'))
 end
 

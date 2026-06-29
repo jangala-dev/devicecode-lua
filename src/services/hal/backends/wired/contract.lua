@@ -4,7 +4,7 @@
 -- Providers expose product-level wired surfaces.  They do not expose switch ASIC
 -- registers, HTTP endpoints, DSA syntax or OpenWrt implementation details.
 --
--- Phase 1 providers are telemetry-only and must return read_only for control.
+-- Phase 1 providers are observation-only and must return read_only for control.
 
 local M = {}
 

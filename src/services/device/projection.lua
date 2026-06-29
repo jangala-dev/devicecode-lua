@@ -12,6 +12,7 @@ local M = {}
 
 function M.identity_topic() return topics.identity() end
 function M.summary_topic() return topics.components() end
+function M.assembly_topic() return topics.assembly() end
 function M.component_topic(name) return topics.component(name) end
 function M.component_software_topic(name) return topics.component_software(name) end
 function M.component_update_topic(name) return topics.component_update(name) end
@@ -19,9 +20,6 @@ function M.component_cap_topic(name, method) return topics.component_cap_rpc(nam
 function M.component_cap_meta_topic(name) return topics.component_cap_meta(name) end
 function M.component_cap_status_topic(name) return topics.component_cap_status(name) end
 function M.component_cap_event_topic(name, event) return topics.component_cap_event(name, event) end
-function M.wired_provider_cap_meta_topic(id) return topics.wired_provider_cap_meta(id) end
-function M.wired_provider_cap_status_topic(id) return topics.wired_provider_cap_status(id) end
-function M.wired_provider_cap_state_topic(id, key) return topics.wired_provider_cap_state(id, key) end
 
 local function copy(v)
 	return model.copy_value(v)
@@ -139,7 +137,7 @@ function M.component_view(name, rec, now_ts)
 		environment = copy(base.environment or {}),
 		runtime = copy(base.runtime or {}),
 		alerts = copy(base.alerts or {}),
-		wired_provider = copy(base.wired_provider),
+		observed = copy(base.observed or {}),
 		source = derive_source(rec),
 		last_action = copy(rec.last_action),
 	}
@@ -187,29 +185,6 @@ function M.component_payloads(name, rec, now_ts)
 			ready = view.ready,
 			reason = view.reason,
 		},
-		wired_provider = view.wired_provider and {
-			id = name,
-			meta = {
-				owner = 'device',
-				interface = 'devicecode.cap/wired-provider/1',
-				component = name,
-				canonical_state = M.component_topic(name),
-				backing_source = copy(view.source),
-				backing = collect_backing_refs(rec),
-				mode = view.wired_provider.status and view.wired_provider.status.mode or nil,
-			},
-			status = {
-				state = (view.wired_provider.status and view.wired_provider.status.state)
-					or view.availability
-					or (view.available and 'available' or 'unavailable'),
-				available = view.wired_provider.status and view.wired_provider.status.available,
-				health = view.health,
-				reason = view.reason or (view.wired_provider.status and (view.wired_provider.status.reason or view.wired_provider.status.err)),
-				mode = view.wired_provider.status and view.wired_provider.status.mode or nil,
-			},
-			surfaces = { surfaces = copy(view.wired_provider.surfaces or {}) },
-			topology = copy(view.wired_provider.topology or {}),
-		} or nil,
 	}
 end
 
@@ -242,7 +217,7 @@ function M.summary_payload(snapshot, now_ts)
 			environment = copy(view.environment),
 			runtime = copy(view.runtime),
 			alerts = copy(view.alerts),
-			wired_provider = copy(view.wired_provider),
+			observed = copy(view.observed or {}),
 		}
 	end
 
@@ -253,6 +228,16 @@ function M.summary_payload(snapshot, now_ts)
 		components = items,
 		counts = counts,
 	}
+end
+
+
+function M.assembly_payload(snapshot, now_ts)
+	local cat = snapshot and snapshot.catalogue or {}
+	local assembly = copy(cat.assembly or {})
+	assembly.kind = assembly.kind or 'device.assembly'
+	assembly.ts = now_ts
+	assembly.generation = snapshot and snapshot.generation or nil
+	return assembly
 end
 
 function M.identity_payload(snapshot, now_ts)

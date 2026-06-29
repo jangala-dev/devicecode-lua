@@ -85,4 +85,76 @@ function M.test_public_payload_validation_rejects_backend_objects()
 	eq(werr, 'invalid_args')
 end
 
+
+function M.test_validate_exchange_accepts_legacy_http1_close_when_policy_allows_it()
+	local checked = ok(policy.validate_exchange_args({
+		uri = 'http://192.168.1.1/cgi/get.cgi?cmd=home_login',
+		response_parser = 'legacy-http1-close',
+		timeout_s = 5,
+	}, {
+		allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true },
+		legacy_http1_close_max_response_bytes = 1024 * 1024,
+	}))
+	eq(checked.response_parser, 'legacy-http1-close')
+	eq(checked.timeout_s, 5)
+
+	local bad, err = policy.validate_exchange_args({
+		uri = 'https://192.168.1.1/cgi/get.cgi?cmd=home_login',
+		response_parser = 'legacy-http1-close',
+		timeout_s = 5,
+	}, { allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true } })
+	eq(bad, nil)
+	eq(err, 'unsupported_scheme')
+end
+
+function M.test_validate_exchange_denies_legacy_parser_by_default_and_requires_timeout()
+	local bad, err = policy.validate_exchange_args {
+		uri = 'http://192.168.1.1/cgi/get.cgi?cmd=home_login',
+		response_parser = 'legacy-http1-close',
+		timeout_s = 5,
+	}
+	eq(bad, nil)
+	eq(err, 'response_parser_denied')
+
+	bad, err = policy.validate_exchange_args({
+		uri = 'http://192.168.1.1/cgi/get.cgi?cmd=home_login',
+		response_parser = 'legacy-http1-close',
+	}, { allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true } })
+	eq(bad, nil)
+	eq(err, 'timeout_required')
+end
+
+
+function M.test_validate_exchange_legacy_http1_close_is_tightly_bounded()
+	local bad, err = policy.validate_exchange_args({
+		uri = 'http://192.168.1.1/cgi/get.cgi?cmd=home_login',
+		method = 'PUT',
+		response_parser = 'legacy-http1-close',
+		timeout_s = 5,
+	}, { allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true } })
+	eq(bad, nil)
+	eq(err, 'unsupported_method')
+
+	bad, err = policy.validate_exchange_args({
+		uri = 'http://192.168.1.1/cgi/get.cgi?cmd=home_login',
+		response_parser = 'legacy-http1-close',
+		timeout_s = 5,
+		max_response_bytes = 2048,
+	}, {
+		allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true },
+		legacy_http1_close_max_response_bytes = 1024,
+	})
+	eq(bad, nil)
+	eq(err, 'response_too_large')
+
+	bad, err = policy.validate_exchange_args({
+		uri = 'http://192.168.1.1/cgi/get.cgi?cmd=home_login',
+		response_parser = 'legacy-http1-close',
+		timeout_s = 5,
+		headers = { ['X-Bad'] = 'ok\r\nInjected: yes' },
+	}, { allowed_response_parsers = { strict = true, ['legacy-http1-close'] = true } })
+	eq(bad, nil)
+	eq(err, 'invalid_args')
+end
+
 return M

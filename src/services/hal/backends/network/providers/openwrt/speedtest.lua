@@ -7,8 +7,6 @@ local exec = require 'fibers.io.exec'
 local file = require 'fibers.io.file'
 
 local perform = fibers.perform
-local unpack = _G.unpack or rawget(table, 'unpack')
-
 local M = {}
 
 local DEFAULT_URL = 'https://proof.ovh.net/files/100Mb.dat'
@@ -45,13 +43,24 @@ function M.run_op(req, opts)
 			local ok, out, err = run_cmd(argv)
 			return { ok = ok == true, backend = 'openwrt', interface = iface, device = dev, peak_mbps = tonumber(out) or 0, err = ok == true and nil or tostring(err or out) }
 		end
-		local cmd = exec.command(unpack(argv))
-		cmd:setpgid(true)
-		local serr = cmd:start()
-		if serr then return { ok = false, err = serr or 'speedtest start failed', backend = 'openwrt' } end
+		local spec = { stdin = 'null', stdout = 'pipe', stderr = 'null' }
+		for i = 1, #argv do spec[i] = argv[i] end
+		local cmd = exec.command(spec)
+		local started, serr = cmd:stdout_stream()
+		if not started then return { ok = false, err = serr or 'speedtest start failed', backend = 'openwrt' } end
 		local counter = '/sys/class/net/' .. tostring(dev) .. '/statistics/rx_bytes'
 		local start_b, berr = read_counter(counter)
-		if not start_b then cmd:kill(); cmd:wait(); return { ok = false, err = berr or 'counter read failed', backend = 'openwrt' } end
+		if not start_b then
+			perform(cmd:shutdown_op(0.2))
+			return {
+				ok = false,
+				err = 'counter read failed: ' .. tostring(berr or 'unknown'),
+				backend = 'openwrt',
+				interface = iface,
+				device = dev,
+				counter = counter,
+			}
+		end
 		local t0 = monotonic()
 		local prev_t, prev_b = t0, start_b
 		local peak = 0
@@ -68,8 +77,7 @@ function M.run_op(req, opts)
 			end
 			prev_t, prev_b = t, b
 		end
-		cmd:kill()
-		cmd:wait()
+		perform(cmd:shutdown_op(0.2))
 		return { ok = true, backend = 'openwrt', interface = iface, device = dev, peak_mbps = peak, data_mib = (prev_b - start_b) / (1024 * 1024), duration_s = prev_t - t0 }
 	end):wrap(function(status, _report, result)
 		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end

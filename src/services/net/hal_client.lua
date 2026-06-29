@@ -144,6 +144,14 @@ function Client:speedtest_op(req, opts)
 	return op.always({ ok = false, err = 'network-diagnostics HAL capability not configured', reason = { code = 'missing_network_diagnostics_hal' } })
 end
 
+function Client:read_counters_op(req, opts)
+	opts = opts or {}
+	if self.network_diagnostics and type(self.network_diagnostics.call_control_op) == 'function' then
+		return self.network_diagnostics:call_control_op('read_counters', req or {}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_diagnostics') end)
+	end
+	return op.always({ ok = false, err = 'network-diagnostics HAL capability not configured', reason = { code = 'missing_network_diagnostics_hal' } })
+end
+
 function Client:start_observation_op(opts)
 	opts = opts or {}
 	if self.network_state and type(self.network_state.call_control_op) == 'function' then

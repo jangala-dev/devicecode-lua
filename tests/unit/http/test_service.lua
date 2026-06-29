@@ -1,5 +1,6 @@
 local fibers = require 'fibers'
 local runtime = require 'fibers.runtime'
+local op      = require 'fibers.op'
 local sleep   = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 local bus    = require 'bus'
@@ -36,6 +37,21 @@ local function yield_until(pred, msg)
 	error(msg or 'condition was not reached', 2)
 end
 
+local function recv_payload(sub, label)
+	local which, msg, err = fibers.perform(op.named_choice({
+		msg = sub:recv_op(),
+		timeout = sleep.sleep_op(0.1),
+	}))
+	if which ~= 'msg' then error(label or 'timed out waiting for message', 2) end
+	ok(msg, err or label or 'expected message')
+	return msg.payload
+end
+
+local function table_empty(t)
+	for _ in pairs(t or {}) do return false end
+	return true
+end
+
 local function fake_controller()
 	local q = {}
 	return {
@@ -69,6 +85,59 @@ function M.test_service_retains_capability_metadata_and_status()
 		ok(rep.status.ready, 'service should report ready')
 		svc:terminate('done')
 		eq(drv.terminated, 'done')
+	end)
+end
+
+
+function M.test_http_failure_recovery_is_visible_and_resets_suppression()
+	fibers.run(function ()
+		local topics = require 'services.http.topics'
+		local b = bus.new()
+		local root = b:connect({ origin_base = { kind = 'local' } })
+		local warn_sub = root:subscribe(topics.obs_log('main', 'warn'), { queue_len = 10 })
+		local info_sub = root:subscribe(topics.obs_log('main', 'info'), { queue_len = 10 })
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
+		yield_many(4)
+
+		local request_id = 'req-recovery'
+		svc._state.requests[request_id] = {
+			request_id = request_id,
+			target = {
+				method = 'GET',
+				host = '172.28.100.9',
+				path = '/cgi/get.cgi',
+				cmd = 'sys_cpumem',
+				response_parser = 'legacy-http1-close',
+			},
+		}
+		local rec = { operation = 'exchange', request_id = request_id }
+		local ev = { status = 'failed', primary = 'timeout' }
+
+		ok(svc:_record_http_failure(rec, ev))
+		local first_failure = recv_payload(warn_sub, 'expected first failure log')
+		eq(first_failure.what, 'request_failed')
+		eq(first_failure.reason, 'timeout')
+		eq(first_failure.cmd, 'sys_cpumem')
+
+		ok(svc:_record_http_failure(rec, ev))
+		local saw_suppressed = false
+		for _, win in pairs(svc._obs.failure_windows) do
+			if (win.suppressed or 0) == 1 then saw_suppressed = true end
+		end
+		ok(saw_suppressed, 'second equivalent failure should be suppressed within the rate limit window')
+
+		ok(svc:_record_http_recovery({ operation = 'exchange' }))
+		local recovery = recv_payload(info_sub, 'expected recovery log')
+		eq(recovery.what, 'request_recovered')
+		eq(recovery.operation, 'exchange')
+		ok(table_empty(svc._obs.failure_windows), 'recovery must clear failure suppression windows')
+
+		ok(svc:_record_http_failure(rec, ev))
+		local fresh_failure = recv_payload(warn_sub, 'expected post-recovery failure log')
+		eq(fresh_failure.what, 'request_failed')
+		eq(fresh_failure.reason, 'timeout')
+
+		svc:terminate('done')
 	end)
 end
 
@@ -979,9 +1048,10 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 					if tostring(self.uri):match('slow') then
 						first_stream = {
 							terminated = false,
+							release_read = false,
 							get_next_chunk = function (stream)
 								first_read_active = true
-								while not stream.terminated do runtime.yield() end
+								while not stream.release_read do runtime.yield() end
 								return nil, 'closed'
 							end,
 							shutdown = function (stream) stream.terminated = true; return true end,
@@ -1019,16 +1089,22 @@ function M.test_public_open_exchange_handle_read_cancellation_keeps_service_back
 		local waiter = ok(scope:child())
 		ok(waiter:spawn(function () fibers.perform(ex:read_chunk_op(1024)) end))
 		yield_until(function () return first_read_active end, 'slow exchange read should be active')
-		-- The driver pump runs the active read job.  Once the caller loses interest,
-		-- the public exchange handle should terminate that stream, not the backend.
-		waiter:cancel('caller_cancelled')
-		fibers.perform(waiter:join_op())
-		yield_until(function () return svc:stats().active_exchanges == 0 end,
+			-- The driver pump runs the active read job.  Once the caller loses interest,
+			-- the public exchange handle should detach and close for the caller, but the
+			-- lua-http/cqueues-owned stream cleanup must wait until the cqueues job
+			-- returns.  The fake read is therefore released explicitly after caller
+			-- cancellation, modelling a cqueues-side timeout/error return.
+			waiter:cancel('caller_cancelled')
+			fibers.perform(waiter:join_op())
+			yield_until(function () return svc:stats().active_exchanges == 0 end,
 			'exchange termination should deregister the service record')
 
-		ok(first_stream.terminated, 'public exchange read cancellation should terminate the exchange stream')
-		ok(ex:is_closed(), 'public exchange handle should be closed after active read abort')
-		ok(not drv:is_closed(), 'the exchange is the narrow owner; the HTTP backend should stay usable')
+			ok(not first_stream.terminated, 'caller cancellation must not synchronously terminate cqueues-owned stream state')
+			ok(ex:is_closed(), 'public exchange handle should be closed after active read abort')
+			first_stream.release_read = true
+			yield_until(function () return first_stream.terminated end,
+			'detached read cleanup should terminate the stream after the cqueues job returns')
+			ok(not drv:is_closed(), 'the exchange is the narrow owner; the HTTP backend should stay usable')
 
 		local second = ok(fibers.perform(ref:exchange_op({ uri = 'http://example.test/fast', method = 'GET' })))
 		eq(second.result.status, '200')
