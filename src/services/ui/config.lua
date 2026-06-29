@@ -24,12 +24,6 @@ local DEFAULTS = {
 		queue_len = 32,
 		replay = true,
 	},
-	updates = {
-		upload = {
-			enabled = true,
-			max_bytes = 64 * 1024 * 1024,
-		},
-	},
 	sessions = {
 		prune_interval = 60,
 	},
@@ -224,7 +218,7 @@ local function normalise_update_upload(raw)
 	local ok
 	ok, err = allowed(raw, UPDATE_UPLOAD_KEYS, 'updates.upload')
 	if not ok then return nil, err end
-	local out = copy_plain(DEFAULTS.updates.upload)
+	local out = {}
 	local v
 	v, err = bool_or_nil(raw.enabled, 'updates.upload.enabled')
 	if err then return nil, err end
