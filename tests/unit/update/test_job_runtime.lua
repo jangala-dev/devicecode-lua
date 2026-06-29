@@ -97,6 +97,80 @@ end
 
 
 
+
+function tests.test_restart_adoption_fails_active_intent_after_configured_restart_limit()
+	fibers.run(function ()
+		local saves = {}
+		local initial = { jobs = {
+			active = {
+				job_id = 'active', component = 'cm5', state = 'staging', created_seq = 1, updated_seq = 1,
+				active_token = 'tok-stage',
+				active_intent = { token = 'tok-stage', phase = 'stage', restart_count = 1 },
+			},
+		}, order = { 'active' }, next_seq = 10 }
+		local store = {
+			load_all_op = function () return op.always(initial, nil) end,
+			save_job_op = function (_, job) saves[#saves + 1] = job; return op.always(true, nil) end,
+		}
+		local st, _, result = fibers.run_scope(function (scope)
+			local rt = start_runtime(scope, {
+				service_id = 'update',
+				store = store,
+				retention = { active_intent_restart_max = 1 },
+			})
+			local job = rt:get('active')
+			local adoption = rt:adoption()
+			rt:cancel('test complete')
+			return { job = job, adoption = adoption }
+		end)
+		assert_eq(st, 'ok')
+		assert_eq(result.job.state, 'failed')
+		assert_eq(result.job.error, 'active_intent_restart_limit_exceeded')
+		assert_eq(result.job.active_token, nil)
+		assert_eq(result.job.active_intent, nil)
+		assert_eq(result.job.active, nil)
+		assert_eq(result.job.adoption.action, 'failed_restart_limit')
+		assert_eq(result.job.adoption.restart_attempts, 2)
+		assert_eq(#result.adoption.failed, 1)
+		assert_eq(#saves, 1)
+	end)
+end
+
+function tests.test_restart_adoption_counts_legacy_history_when_no_restart_field_exists()
+	fibers.run(function ()
+		local saves = {}
+		local initial = { jobs = {
+			active = {
+				job_id = 'active', component = 'cm5', state = 'staging', created_seq = 1, updated_seq = 1,
+				active_token = 'tok-stage',
+				active_intent = { token = 'tok-stage', phase = 'stage' },
+				history = {
+					{ seq = 1, state = 'staging', reason = 'restart_adoption_active_intent' },
+				},
+			},
+		}, order = { 'active' }, next_seq = 10 }
+		local store = {
+			load_all_op = function () return op.always(initial, nil) end,
+			save_job_op = function (_, job) saves[#saves + 1] = job; return op.always(true, nil) end,
+		}
+		local st, _, result = fibers.run_scope(function (scope)
+			local rt = start_runtime(scope, {
+				service_id = 'update',
+				store = store,
+				retention = { active_intent_restart_max = 1 },
+			})
+			local job = rt:get('active')
+			rt:cancel('test complete')
+			return { job = job }
+		end)
+		assert_eq(st, 'ok')
+		assert_eq(result.job.state, 'failed')
+		assert_eq(result.job.error, 'active_intent_restart_limit_exceeded')
+		assert_eq(result.job.adoption.restart_attempts, 2)
+		assert_eq(#saves, 1)
+	end)
+end
+
 function tests.test_failed_after_admission_keeps_admitted_lifecycle_marker()
 	fibers.run(function ()
 		local initial = { jobs = {

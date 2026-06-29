@@ -70,6 +70,9 @@ local function normalise_retention(raw)
 	if not ok then return nil, err end
 	ok, err = normalise_optional_positive_integer(retention, 'terminal_max_age_s', 'retention')
 	if not ok then return nil, err end
+	ok, err = normalise_non_negative_integer(retention, 'active_intent_restart_max', 'retention')
+	if not ok then return nil, err end
+	if retention.active_intent_restart_max == nil then retention.active_intent_restart_max = 1 end
 	return retention, nil
 end
 

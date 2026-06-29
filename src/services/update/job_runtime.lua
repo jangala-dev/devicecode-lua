@@ -189,6 +189,102 @@ local function adoption_empty()
 end
 
 
+local DEFAULT_ACTIVE_INTENT_RESTART_MAX = 1
+
+local function retention_active_intent_restart_max(params)
+	local retention = type(params and params.retention) == 'table' and params.retention or {}
+	local n = tonumber(retention.active_intent_restart_max)
+	if n == nil then n = tonumber(params and params.active_intent_restart_max) end
+	if type(n) ~= 'number' or n < 0 or n ~= math.floor(n) then
+		return DEFAULT_ACTIVE_INTENT_RESTART_MAX
+	end
+	return n
+end
+
+local function max_number(...)
+	local out = 0
+	for i = 1, select('#', ...) do
+		local n = tonumber(select(i, ...))
+		if type(n) == 'number' and n > out then out = n end
+	end
+	return out
+end
+
+local function history_active_restart_count(job)
+	local n = 0
+	local hist = type(job) == 'table' and type(job.history) == 'table' and job.history or {}
+	for _, row in ipairs(hist) do
+		local reason = type(row) == 'table' and row.reason or nil
+		if reason == 'restart_adoption_active_intent'
+			or reason == 'restart_active_intent'
+			or reason == 'restart_adoption_active_intent_limit_exceeded'
+		then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+local function active_intent_restart_count(job, intent)
+	intent = type(intent) == 'table' and intent or {}
+	local adoption = type(job) == 'table' and type(job.adoption) == 'table' and job.adoption or {}
+	local runtime = type(job) == 'table' and type(job.runtime) == 'table' and job.runtime or {}
+	return max_number(
+		intent.restart_count,
+		intent.restart_attempts,
+		adoption.restart_count,
+		adoption.restart_attempts,
+		runtime.active_intent_restart_count,
+		runtime.active_intent_restart_attempts,
+		type(job) == 'table' and job.active_intent_restart_count or nil,
+		type(job) == 'table' and job.active_intent_restart_attempts or nil,
+		history_active_restart_count(job)
+	)
+end
+
+local function fail_active_intent_restart_limit(job, state, intent, next_count, max_count, seq)
+	repo_mod.mark_terminal(job, 'failed', 'active_intent_restart_limit_exceeded', {
+		previous_state = state,
+		restart_attempts = next_count,
+		restart_max = max_count,
+		active_intent = copy(intent),
+	}, { seq = seq, reason = 'restart_adoption_active_intent_limit_exceeded' })
+	job.adoption = {
+		action = 'failed_restart_limit',
+		reason = 'active_intent_restart_limit_exceeded',
+		from_state = state,
+		restart_attempts = next_count,
+		restart_max = max_count,
+		seq = seq,
+	}
+	job.active = nil
+	job.active_token = nil
+	job.active_intent = nil
+	job.runtime = copy(job.runtime or {})
+	job.runtime.active_intent_restart_count = next_count
+	job.runtime.active_intent_restart_max = max_count
+	return job
+end
+
+local function clear_terminal_active_markers(job, state, seq)
+	repo_mod.patch(job, {
+		adoption = {
+			action = 'cleared_terminal_active_markers',
+			reason = 'restart_terminal_active_markers',
+			from_state = state,
+			seq = seq,
+		},
+	}, { seq = seq, reason = 'restart_clear_terminal_active_markers' })
+	-- repo.patch cannot clear fields via nil values because pairs() does not carry
+	-- them.  Clear stale ownership markers explicitly so persisted terminal jobs
+	-- cannot block durable_active_owner after a restart.
+	job.active = nil
+	job.active_token = nil
+	job.active_intent = nil
+	return job
+end
+
+
 local function runtime_snapshot(self_or_jobs, ready, adoption)
 	local jobs = self_or_jobs
 	local transitions
@@ -305,6 +401,7 @@ end
 
 local function adopt_restart_jobs(self, jobs)
 	local adoption = adoption_empty()
+	local active_restart_max = retention_active_intent_restart_max(self._params or {})
 
 	for _, id in ipairs(sorted_job_ids(jobs)) do
 		local current = jobs.jobs[id]
@@ -390,28 +487,65 @@ local function adopt_restart_jobs(self, jobs)
 					job = pub,
 				}
 			elseif has_intent and (state ~= 'committing' or phase ~= 'commit' or commit_policy == 'idempotent_by_token') then
-				job.active_intent = intent
-				job.active_intent.state = 'adopted'
-				job.active_intent.reason = 'restart_active_intent'
-				job.active = copy(job.active_intent)
-				repo_mod.patch(job, {
-					adoption = {
-						action = 'resume_active_intent',
-						reason = 'restart_active_intent',
+				local restart_count = active_intent_restart_count(job, intent)
+				local next_restart_count = restart_count + 1
+				if next_restart_count > active_restart_max then
+					fail_active_intent_restart_limit(job, state, intent, next_restart_count, active_restart_max, seq)
+					local ok, err = save_adopted_job(self, jobs, job)
+					if ok ~= true then return nil, err end
+					local pub = public_job(job)
+					adoption.failed[#adoption.failed + 1] = pub
+					adoption.decisions[#adoption.decisions + 1] = {
+						job_id = id,
 						from_state = state,
-						seq = seq,
-					},
-				}, { seq = seq, reason = 'restart_adoption_active_intent' })
-				local ok, err = save_adopted_job(self, jobs, job)
-				if ok ~= true then return nil, err end
-				local pub = public_job(job)
-				adoption.active_intent[#adoption.active_intent + 1] = pub
-				adoption.decisions[#adoption.decisions + 1] = {
-					job_id = id,
-					from_state = state,
-					action = 'resume_active_intent',
-					job = pub,
-				}
+						action = 'failed_restart_limit',
+						reason = 'active_intent_restart_limit_exceeded',
+						restart_attempts = next_restart_count,
+						restart_max = active_restart_max,
+						job = pub,
+					}
+					adoption.diagnostics[#adoption.diagnostics + 1] = {
+						job_id = id,
+						message = 'active intent restart limit exceeded; job failed and slot released',
+						restart_attempts = next_restart_count,
+						restart_max = active_restart_max,
+					}
+				else
+					job.active_intent = intent
+					job.active_intent.state = 'adopted'
+					job.active_intent.reason = 'restart_active_intent'
+					job.active_intent.restart_count = next_restart_count
+					job.active_intent.restart_max = active_restart_max
+					job.active = copy(job.active_intent)
+					job.runtime = copy(job.runtime or {})
+					job.runtime.active_intent_restart_count = next_restart_count
+					job.runtime.active_intent_restart_max = active_restart_max
+					repo_mod.patch(job, {
+						active_intent = job.active_intent,
+						active = job.active,
+						runtime = job.runtime,
+						adoption = {
+							action = 'resume_active_intent',
+							reason = 'restart_active_intent',
+							from_state = state,
+							restart_attempts = next_restart_count,
+							restart_max = active_restart_max,
+							seq = seq,
+						},
+					}, { seq = seq, reason = 'restart_adoption_active_intent' })
+					local ok, err = save_adopted_job(self, jobs, job)
+					if ok ~= true then return nil, err end
+					local pub = public_job(job)
+					adoption.active_intent[#adoption.active_intent + 1] = pub
+					adoption.decisions[#adoption.decisions + 1] = {
+						job_id = id,
+						from_state = state,
+						action = 'resume_active_intent',
+						restart_attempts = next_restart_count,
+						restart_max = active_restart_max,
+						job = pub,
+					}
+				end
 			else
 				local reason = (state == 'committing' and phase == 'commit') and 'restart_commit_policy_missing' or ('restart_interrupted_' .. tostring(state))
 				repo_mod.mark_terminal(job, 'failed', reason, {
@@ -442,6 +576,17 @@ local function adopt_restart_jobs(self, jobs)
 					message = 'job was interrupted during ' .. tostring(state) .. ' and was marked failed',
 				}
 			end
+		elseif repo_mod.TERMINAL[state] and (current.active_token ~= nil or type(current.active_intent) == 'table' or type(current.active) == 'table') then
+			local job = copy(current)
+			local seq = next_adoption_seq(jobs)
+			clear_terminal_active_markers(job, state, seq)
+			local ok, err = save_adopted_job(self, jobs, job)
+			if ok ~= true then return nil, err end
+			adoption.decisions[#adoption.decisions + 1] = {
+				job_id = id,
+				from_state = state,
+				action = 'cleared_terminal_active_markers',
+			}
 		end
 	end
 
@@ -459,6 +604,12 @@ local function normalise_retention(params)
 	end
 	if params.terminal_job_max_age_s ~= nil then
 		retention.terminal_max_age_s = tonumber(params.terminal_job_max_age_s)
+	end
+	if params.active_intent_restart_max ~= nil then
+		retention.active_intent_restart_max = tonumber(params.active_intent_restart_max)
+	end
+	if retention.active_intent_restart_max == nil then
+		retention.active_intent_restart_max = DEFAULT_ACTIVE_INTENT_RESTART_MAX
 	end
 	return retention
 end
@@ -627,7 +778,7 @@ end
 
 local function durable_active_owner(jobs)
 	for id, job in pairs((jobs and jobs.jobs) or {}) do
-		if job.active_token ~= nil or type(job.active_intent) == 'table' then
+		if not repo_mod.TERMINAL[job.state] and (job.active_token ~= nil or type(job.active_intent) == 'table') then
 			return id, job
 		end
 	end
