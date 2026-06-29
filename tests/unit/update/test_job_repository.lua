@@ -39,6 +39,6 @@ function tests.test_lifecycle_helpers_do_not_perform_work()
   repo.upsert(state, job); local stored = state.jobs.j1
   repo.mark_staging(stored, { seq=repo.next_sequence(state), reason='start' }); assert_eq(stored.state, 'staging'); assert_eq(stored.phase, nil); assert_eq(stored.stage, nil)
   repo.mark_awaiting_commit(stored, { image='ok' }, { seq=repo.next_sequence(state) }); assert_eq(stored.state, 'awaiting_commit'); assert_eq(stored.next_step, 'commit'); assert_eq(stored.phase, nil); assert_eq(stored.stage, nil)
-  repo.mark_terminal(stored, 'failed', 'boom', nil, { seq=repo.next_sequence(state) }); assert_true(repo.is_terminal(stored.state)); assert_not_nil(stored.history[1])
+  repo.mark_terminal(stored, 'failed', 'boom', nil, { seq=repo.next_sequence(state) }); assert_true(repo.is_terminal(stored.state)); assert_eq(stored.next_step, nil); assert_not_nil(stored.history[1])
 end
 return tests

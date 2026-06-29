@@ -18,17 +18,76 @@ local scope_mod   = require 'fibers.scope'
 
 local M = {}
 
+local function shallow_copy(t)
+	local out = {}
+	for k, v in pairs(t or {}) do out[k] = v end
+	return out
+end
+
+local function header_one(headers, name)
+	if type(headers) ~= 'table' then return nil end
+	if type(headers.get) == 'function' then
+		local ok, v = pcall(function () return headers:get(string.lower(name)) end)
+		if ok and v ~= nil then return v end
+	end
+	return headers[name] or headers[string.lower(name)] or headers[string.upper(name)]
+end
+
+local function request_id_of(ctx)
+	if type(ctx) ~= 'table' then return nil end
+	if type(ctx.id) == 'function' then
+		local ok, v = pcall(function () return ctx:id() end)
+		if ok and v ~= nil then return v end
+	end
+	if type(ctx.id) ~= 'function' then return ctx.id or ctx.request_id end
+	return ctx.request_id
+end
+
+local function content_length_of(ctx)
+	local h = type(ctx) == 'table' and ctx.headers or nil
+	local v = header_one(h, 'content-length') or header_one(h, 'Content-Length')
+	local n = tonumber(v)
+	return n or v
+end
+
+local function note_phase(opts, phase)
+	if type(opts) == 'table' then opts._upload_phase = phase end
+	return phase
+end
+
+local function emit_upload(opts, ev)
+	local port = opts and opts.events_port
+	if not (port and type(port) == 'table') then return false end
+	ev = shallow_copy(ev)
+	ev.kind = ev.kind or 'upload_event'
+	ev.what = ev.what or ev.phase or 'upload_event'
+	ev.phase = ev.phase or ev.what
+	ev.upload_phase = opts and opts._upload_phase or ev.phase
+	local ok = pcall(function ()
+		if type(port.emit_now) == 'function' then
+			port:emit_now(ev)
+		elseif type(port.emit_required) == 'function' then
+			port:emit_required(ev, 'ui_update_upload_event_report_failed')
+		end
+	end)
+	return ok == true
+end
+
 local function connect_update_conn(scope, opts)
 	if opts.update_conn then
+		opts._upload_conn_source = 'update_conn'
 		return opts.update_conn, false, nil
 	end
 	if opts.conn then
+		opts._upload_conn_source = 'service_conn'
 		return opts.conn, false, nil
 	end
 	local conn, err
 	if type(opts.connect) == 'function' then
+		opts._upload_conn_source = 'connect'
 		conn, err = opts.connect(opts.principal, opts)
 	elseif opts.bus and type(opts.bus.connect) == 'function' then
+		opts._upload_conn_source = 'bus'
 		conn, err = opts.bus:connect({ principal = opts.principal })
 	end
 	if not conn then return nil, false, err or 'update connection unavailable' end
@@ -94,19 +153,38 @@ local function upload_body_op(ctx, opts, deadline)
 	return fibers.run_scope_op(function (scope)
 		local timed_out = false
 		local function mark_timeout() timed_out = true end
+		local request_id = request_id_of(ctx)
+		local content_length = content_length_of(ctx)
+		note_phase(opts, 'begin')
+		emit_upload(opts, {
+			what = 'upload_begin',
+			request_id = request_id,
+			component = opts.component,
+			create_job = opts.create_job,
+			start_job = opts.start_job,
+			max_bytes = opts.max_bytes,
+			content_length = content_length,
+		})
 
 		local ingest_client = opts.ingest
 		if ingest_client == nil then
+			note_phase(opts, 'connect_ingest')
 			local conn, _, conn_err = connect_update_conn(scope, opts)
 			if not conn then error(conn_err or 'update connection unavailable', 0) end
-			opts.update_conn = opts.update_conn or conn
 			local built, build_err = ingest.bus_client(conn)
 			if not built then error(build_err or 'artifact ingest bus client unavailable', 0) end
 			ingest_client = built
 		end
 
+		note_phase(opts, 'ingest_open')
 		local handle, open_err = perform_with_deadline(scope, ingest.open_ingest_op(ingest_client, opts), deadline, mark_timeout)
 		if not handle then error(open_err or 'artifact ingest open failed', 0) end
+		emit_upload(opts, {
+			what = 'upload_ingest_opened',
+			request_id = request_id,
+			ingest_id = handle.ingest_id,
+			conn_source = opts._upload_conn_source,
+		})
 
 		local ingest_owner = resource.owned(handle, {
 			label = 'upload ingest abort',
@@ -126,19 +204,36 @@ local function upload_body_op(ctx, opts, deadline)
 		local uploaded_bytes = 0
 		local uploaded_chunks = 0
 		while true do
+			note_phase(opts, 'body_read')
 			local chunk, rerr = perform_with_deadline(scope, read_chunk_op(body, opts.chunk_size or 65536), deadline, mark_timeout)
 			if rerr then error(rerr, 0) end
 			if chunk == nil or chunk == '' then break end
+			note_phase(opts, 'ingest_append')
 			local ok, werr = perform_with_deadline(scope, ingest.append_chunk_op(handle, chunk), deadline, mark_timeout)
 			if ok == nil or ok == false then error(werr or 'artifact append failed', 0) end
 			uploaded_chunks = uploaded_chunks + 1
 			uploaded_bytes = uploaded_bytes + #chunk
 		end
+		emit_upload(opts, {
+			what = 'upload_body_read',
+			request_id = request_id,
+			bytes = uploaded_bytes,
+			chunks = uploaded_chunks,
+			content_length = content_length,
+		})
 
+		note_phase(opts, 'ingest_commit')
 		local artifact_id, cerr = perform_with_deadline(scope, ingest.commit_op(handle), deadline, mark_timeout)
 		if not artifact_id then error(cerr or 'artifact commit failed', 0) end
 		local _committed_handle, detach_err = ingest_owner:detach()
 		if detach_err then error(detach_err, 0) end
+		emit_upload(opts, {
+			what = 'upload_artifact_committed',
+			request_id = request_id,
+			artifact_id = artifact_id,
+			bytes = uploaded_bytes,
+			chunks = uploaded_chunks,
+		})
 
 		local out = { status = 'ok', artifact_id = artifact_id }
 		if opts.create_job then
@@ -149,27 +244,49 @@ local function upload_body_op(ctx, opts, deadline)
 			for k, v in pairs(opts) do call_opts[k] = v end
 			call_opts.timeout = false
 
+			emit_upload(opts, { what = 'upload_create_job_begin', request_id = request_id, artifact_id = artifact_id })
+			note_phase(opts, 'create_job')
 			local job, jerr = perform_with_deadline(scope, client.create_job_op(conn, artifact_id, call_opts), deadline, mark_timeout)
 			if not job then error(jerr or 'update job create failed', 0) end
 			if type(job) ~= 'table' or type(job.job_id) ~= 'string' or job.job_id == '' then
 				error('create_job_reply_missing_job_id', 0)
 			end
 			out.job_id = job.job_id
+			emit_upload(opts, { what = 'upload_create_job_done', request_id = request_id, artifact_id = artifact_id, job_id = job.job_id })
 			if opts.start_job then
 				call_opts.timeout = false
+				emit_upload(opts, { what = 'upload_start_job_begin', request_id = request_id, job_id = job.job_id })
+				note_phase(opts, 'start_job')
 				local started, serr = perform_with_deadline(scope, client.start_job_op(conn, job.job_id, call_opts), deadline, mark_timeout)
 				if not started then error(serr or 'update job start failed', 0) end
 				out.started = started
+				emit_upload(opts, { what = 'upload_start_job_done', request_id = request_id, job_id = job.job_id })
 			end
 		end
+		emit_upload(opts, {
+			what = 'upload_done',
+			request_id = request_id,
+			artifact_id = artifact_id,
+			job_id = out.job_id,
+			bytes = uploaded_bytes,
+			chunks = uploaded_chunks,
+		})
 		return out
 	end)
 end
 
 function M.run(scope, owner, ctx, opts)
-	opts = opts or {}
+	-- Copy per request: upload state such as _upload_phase and update_conn must not
+	-- leak back into the long-lived listener configuration table.
+	opts = shallow_copy(opts)
 	local st, _, result_or_primary = fibers.perform(M.run_op(ctx, opts))
 	if st ~= 'ok' then
+		emit_upload(opts, {
+			what = 'upload_failed',
+			request_id = request_id_of(ctx),
+			phase = opts._upload_phase,
+			err = tostring(result_or_primary or st),
+		})
 		local ok, werr = fibers.perform(owner:reply_error_op(nil, result_or_primary or st))
 		if ok ~= true then error(werr or 'response write failed', 0) end
 		return { status = st, err = result_or_primary or st }

@@ -110,6 +110,7 @@ local function build_summary(state)
 			components = component_summary(state.components),
 			dependencies = dependency_snapshot(state),
 			last_error = state.last_error,
+			last_upload_event = state.last_upload_event,
 		}
 	)
 end
@@ -406,6 +407,13 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	-- Borrow the UI service connection so those calls carry the UI service
 	-- principal rather than a nil HTTP-user principal.
 	update_opts.conn = update_opts.conn or state.conn
+	update_opts.events_port = update_opts.events_port or service_events.port(state.done_tx, {
+		service_id = state.service_id or 'ui',
+		source = 'ui_update_upload',
+		source_id = 'upload:' .. tostring(listener_generation or state.listener_generation or 0),
+		component = 'upload',
+		generation = listener_generation or state.listener_generation,
+	}, { label = 'ui_update_upload_event_report_failed' })
 
 	return {
 		listener = params.listener,
@@ -591,6 +599,34 @@ local function is_session_event(ev)
 		or k == 'session_count_changed'
 end
 
+local function log_ui_event(state, level, payload)
+	local svc = state and state.lifecycle
+	if svc and type(svc.obs_log) == 'function' then
+		svc:obs_log(level or 'info', payload)
+	end
+end
+
+local function compact_upload_log(ev)
+	return {
+		what = ev.what or ev.phase or 'upload_event',
+		request_id = ev.request_id,
+		phase = ev.phase or ev.upload_phase,
+		upload_phase = ev.upload_phase,
+		component = ev.component,
+		content_length = ev.content_length,
+		max_bytes = ev.max_bytes,
+		bytes = ev.bytes,
+		chunks = ev.chunks,
+		ingest_id = ev.ingest_id,
+		artifact_id = ev.artifact_id,
+		job_id = ev.job_id,
+		create_job = ev.create_job,
+		start_job = ev.start_job,
+		conn_source = ev.conn_source,
+		err = ev.err,
+	}
+end
+
 local function reduce_event(state, ev)
 	if ev.kind == 'component_started' then
 		record_component_started(state, ev.component, ev.generation)
@@ -636,12 +672,33 @@ local function reduce_event(state, ev)
 	elseif is_session_event(ev) then
 		state.last_session_event = ev
 		return { publish = true }
+	elseif ev.kind == 'upload_event' then
+		if ev.generation ~= nil and state.listener_generation ~= nil and ev.generation ~= state.listener_generation then return {} end
+		state.last_upload_event = compact_upload_log(ev)
+		local level = ev.what == 'upload_failed' and 'warn' or 'info'
+		log_ui_event(state, level, state.last_upload_event)
+		return { publish = true }
 	elseif ev.kind == 'http_request_done' then
 		if ev.generation ~= nil and state.listener_generation ~= nil and ev.generation ~= state.listener_generation then return {} end
 		if type(ev.active_requests) == 'number' then
 			state.active_requests = ev.active_requests
 		else
 			state.active_requests = math.max(0, (state.active_requests or 0) - 1)
+		end
+		local result = type(ev.result) == 'table' and ev.result or nil
+		local route = result and (result.route or result.status) or nil
+		if ev.status ~= 'ok' or route == 'upload' or (result and result.artifact_id ~= nil) then
+			log_ui_event(state, ev.status == 'ok' and 'info' or 'warn', {
+				what = 'http_request_done',
+				request_id = ev.request_id,
+				status = ev.status,
+				primary = ev.primary,
+				active_requests = state.active_requests,
+				result_status = result and result.status,
+				err = result and result.err,
+				artifact_id = result and result.artifact_id,
+				job_id = result and result.job_id,
+			})
 		end
 		return { publish = true }
 	elseif ev.kind == 'http_request_started' then

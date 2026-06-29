@@ -176,7 +176,13 @@ end
 
 function M.mark_terminal(job, state, reason, result, opts)
 	state = state or 'failed'
-	return M.patch(job, { state = state, next_step = nil, error = reason, result = copy(result) }, opts)
+	local public, err = M.patch(job, { state = state, error = reason, result = copy(result) }, opts)
+	if not public then return nil, err end
+	-- M.patch applies keys with pairs(), so nil values cannot be used to clear
+	-- existing durable fields.  Terminal jobs must not retain stale next_step.
+	job.next_step = nil
+	public.next_step = nil
+	return public, nil
 end
 
 function M.public_job(job) return strip_runtime(job) end
