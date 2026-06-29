@@ -1488,6 +1488,7 @@
       },
       "bundled": {
         "enabled": true,
+        "max_attempts": 30,
         "components": {
           "mcu": {
             "component": "mcu",

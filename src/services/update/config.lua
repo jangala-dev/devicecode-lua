@@ -150,7 +150,7 @@ local function normalise_enum(t, key, allowed, default, where)
 	return t, nil
 end
 
-local function normalise_bundled_job(raw, component, legacy, where)
+local function normalise_bundled_job(raw, component, legacy, inherited_max_attempts, where)
 	local job, jerr = table_or_empty(raw)
 	if not job then return nil, where .. ': ' .. tostring(jerr) end
 	legacy = legacy or {}
@@ -168,16 +168,19 @@ local function normalise_bundled_job(raw, component, legacy, where)
 	if not ok then return nil, err end
 	ok, err = normalise_enum(job, 'supersede', JOB_SUPERSEDE, 'same_job_if_image_changed', where)
 	if not ok then return nil, err end
+	ok, err = normalise_optional_positive_integer(job, 'max_attempts', where)
+	if not ok then return nil, err end
+	if job.max_attempts == nil then job.max_attempts = inherited_max_attempts end
 	return job, nil
 end
 
-local function normalise_bundled_component(id, item, where)
+local function normalise_bundled_component(id, item, inherited_max_attempts, where)
 	if type(item) ~= 'table' then return nil, where .. ' must be a table' end
 	local c = copy(item)
 	if c.component == nil then c.component = id end
 	if c.component ~= id then return nil, where .. '.component must match component map key' end
 	if c.source ~= nil and type(c.source) ~= 'table' then return nil, where .. '.source must be a table' end
-	local job, jerr = normalise_bundled_job(c.job, id, c, where .. '.job')
+	local job, jerr = normalise_bundled_job(c.job, id, c, inherited_max_attempts, where .. '.job')
 	if not job then return nil, jerr end
 	c.job = job
 	c.auto_create = nil
@@ -192,10 +195,15 @@ local function normalise_bundled(raw)
 	if bundled.enabled ~= true and bundled.enabled ~= false then return nil, 'bundled.enabled must be boolean' end
 	local comps, cerr = table_or_empty(bundled.components or bundled.by_component)
 	if not comps then return nil, 'bundled.components: ' .. tostring(cerr) end
-	local out = { enabled = bundled.enabled, components = {} }
+	local ok, err = normalise_optional_positive_integer(bundled, 'max_attempts', 'bundled')
+	if not ok then return nil, err end
+	if bundled.enabled == true and bundled.max_attempts == nil then
+		return nil, 'bundled.max_attempts must be a positive integer when bundled is enabled'
+	end
+	local out = { enabled = bundled.enabled, max_attempts = bundled.max_attempts, components = {} }
 	for component, item in pairs(comps) do
 		if type(component) ~= 'string' or component == '' then return nil, 'bundled.components keys must be non-empty strings' end
-		local normal, nerr = normalise_bundled_component(component, item, 'bundled.components.' .. component)
+		local normal, nerr = normalise_bundled_component(component, item, bundled.max_attempts, 'bundled.components.' .. component)
 		if not normal then return nil, nerr end
 		out.components[component] = normal
 	end

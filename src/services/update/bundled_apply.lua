@@ -28,6 +28,51 @@ end
 
 local TERMINAL = { succeeded = true, failed = true, cancelled = true, timed_out = true, superseded = true, discarded = true }
 
+local function optional_number(v)
+	if type(v) == 'number' then return v end
+	if type(v) == 'string' then return tonumber(v) end
+	return nil
+end
+
+local function max_attempts(policy)
+	local n = optional_number(policy and policy.max_attempts)
+	if type(n) ~= 'number' or n <= 0 or n ~= math.floor(n) then return nil end
+	return n
+end
+
+local function max_number(...)
+	local n = 0
+	for i = 1, select('#', ...) do
+		local candidate = optional_number(select(i, ...))
+		if type(candidate) == 'number' and candidate > n then n = candidate end
+	end
+	return n
+end
+
+local function job_attempt(job)
+	if type(job) ~= 'table' then return 0 end
+	local metadata = type(job.metadata) == 'table' and job.metadata or {}
+	local policy = type(job.policy) == 'table' and job.policy or {}
+	local result = type(job.result) == 'table' and job.result or {}
+	return max_number(
+		job.attempt,
+		job.bundled_attempt,
+		metadata.attempt,
+		metadata.bundled_attempt,
+		policy.attempt,
+		result.attempt,
+		result.bundled_attempt
+	)
+end
+
+local function set_payload_attempt(payload, attempt)
+	attempt = optional_number(attempt) or 1
+	payload.attempt = attempt
+	payload.metadata = merge(payload.metadata or {}, { bundled_attempt = attempt })
+	payload.policy = merge(payload.policy or {}, { attempt = attempt })
+	return payload
+end
+
 local function job_policy(spec)
 	spec = spec or {}
 	local job = copy(spec.job or {})
@@ -96,7 +141,8 @@ local function discard_existing_job(params, job_id)
 	return result, nil
 end
 
-local function create_job(params, payload)
+local function create_job(params, payload, attempt)
+	set_payload_attempt(payload, attempt)
 	local result, err = transition(params.jobs, {
 		kind = 'create_job',
 		generation = params.generation,
@@ -120,25 +166,40 @@ end
 local function create_or_reuse_job(params, payload)
 	local existing = params.jobs:get(payload.job_id)
 	if existing ~= nil then
+		local policy = type(payload.policy) == 'table' and payload.policy or {}
+		local supersede = policy.supersede
 		if existing.expected_image_id == payload.expected_image_id then
+			if TERMINAL[existing.state] == true and supersede == 'same_job_if_image_changed' then
+				local previous_attempt = job_attempt(existing)
+				local next_attempt = previous_attempt + 1
+				local limit = max_attempts(policy)
+				if limit == nil then return nil, 'bundled_max_attempts_required' end
+				if next_attempt > limit then
+					return nil, 'bundled_retry_exhausted:' .. tostring(previous_attempt) .. '/' .. tostring(limit)
+				end
+				local discarded, derr = discard_existing_job(params, payload.job_id)
+				if not discarded then return nil, derr end
+				local created, cerr = create_job(params, payload, next_attempt)
+				if created then created.superseded = discarded end
+				return created, cerr
+			end
 			return {
 				status = 'existing',
 				job_id = payload.job_id,
 				job = existing,
 			}, nil
 		end
-		local supersede = type(payload.policy) == 'table' and payload.policy.supersede or nil
 		if TERMINAL[existing.state] == true and supersede == 'same_job_if_image_changed' then
 			local discarded, derr = discard_existing_job(params, payload.job_id)
 			if not discarded then return nil, derr end
-			local created, cerr = create_job(params, payload)
+			local created, cerr = create_job(params, payload, 1)
 			if created then created.superseded = discarded end
 			return created, cerr
 		end
 		return nil, 'bundled_existing_job_image_mismatch'
 	end
 
-	return create_job(params, payload)
+	return create_job(params, payload, 1)
 end
 
 local function maybe_start_job(params, job, auto_start)

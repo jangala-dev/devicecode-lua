@@ -134,6 +134,7 @@ function M.new_job(spec, opts)
 		generation = opts.generation,
 		artifact = copy(spec.artifact or spec.artifact_ref),
 		artifact_ref = spec.artifact_ref,
+		attempt = spec.attempt,
 		metadata = copy(spec.metadata or {}),
 		policy = copy(spec.policy or spec.job_policy or {}),
 		created_seq = seq,

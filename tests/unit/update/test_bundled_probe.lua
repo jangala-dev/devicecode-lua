@@ -47,6 +47,7 @@ local function fake_jobs()
 					expected_image_id = payload.expected_image_id,
 					artifact_ref = payload.artifact_ref,
 					artifact = payload.artifact,
+					attempt = payload.attempt,
 					metadata = payload.metadata,
 					policy = payload.policy,
 					state = 'created',
@@ -170,6 +171,8 @@ function tests.test_bundled_apply_creates_and_optionally_starts_normal_job()
 		assert_eq(jobs.jobs['bundled-mcu'].artifact_ref, 'mcu-artifact')
 		assert_eq(jobs.jobs['bundled-mcu'].expected_image_id, 'mcu-image-new')
 		assert_eq(jobs.jobs['bundled-mcu'].policy.commit, 'auto')
+		assert_eq(jobs.jobs['bundled-mcu'].attempt, 1)
+		assert_eq(jobs.jobs['bundled-mcu'].metadata.bundled_attempt, 1)
 		assert_eq(jobs.jobs['bundled-mcu'].state, 'staging')
 		assert_eq(#jobs.transitions, 2)
 	end)
@@ -188,7 +191,7 @@ function tests.test_bundled_coordinator_probe_then_apply_policy()
 					mcu = {
 						component = 'mcu',
 						source = { kind = 'file', path = 'mcu.dcmcu' },
-						job = { create_if = 'image_differs', start = 'auto', commit = 'auto' },
+						job = { create_if = 'image_differs', start = 'auto', commit = 'auto', max_attempts = 3 },
 					},
 				},
 			},
@@ -225,7 +228,7 @@ function tests.test_bundled_apply_skips_when_running_image_matches_artifact()
 		local co = bundled.new({ service_id = 'update', generation = 11, config = { enabled = true, components = { mcu = {
 			component = 'mcu',
 			source = { kind = 'file', path = '/artifacts/mcu.dcmcu', policy = 'transient_only' },
-			job = { create_if = 'image_differs', start = 'auto', commit = 'auto' },
+			job = { create_if = 'image_differs', start = 'auto', commit = 'auto', max_attempts = 3 },
 		} } } })
 		assert_true(co:handle_probe_done({
 			kind = 'bundled_probe_done', generation = 11, component = 'mcu', status = 'ok',
@@ -251,7 +254,7 @@ function tests.test_bundled_apply_waits_for_current_image_before_creating_job()
 		local co = bundled.new({ service_id = 'update', generation = 12, config = { enabled = true, components = { mcu = {
 			component = 'mcu',
 			source = { kind = 'file', path = '/artifacts/mcu.dcmcu', policy = 'transient_only' },
-			job = { create_if = 'image_differs', start = 'auto', commit = 'auto' },
+			job = { create_if = 'image_differs', start = 'auto', commit = 'auto', max_attempts = 3 },
 		} } } })
 		assert_true(co:handle_probe_done({
 			kind = 'bundled_probe_done', generation = 12, component = 'mcu', status = 'ok',
@@ -298,6 +301,68 @@ function tests.test_bundled_apply_supersedes_terminal_changed_image_job()
 		assert_eq(jobs.transitions[2].kind, 'create_job')
 		assert_eq(jobs.jobs['bundled-mcu'].expected_image_id, 'mcu-image-new')
 		assert_eq(jobs.jobs['bundled-mcu'].state, 'created')
+	end)
+end
+
+
+function tests.test_bundled_apply_retries_terminal_same_image_until_attempt_limit()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(4, { full = 'reject_newest' })
+		local jobs = fake_jobs()
+		jobs.jobs['bundled-mcu'] = {
+			job_id = 'bundled-mcu', component = 'mcu', expected_image_id = 'mcu-image-new',
+			state = 'failed', attempt = 1, metadata = { bundled_attempt = 1 },
+		}
+		assert(bundled_apply.start({
+			lifetime_scope = scope,
+			report_scope = scope,
+			service_id = 'update',
+			generation = 14,
+			component = 'mcu',
+			jobs = jobs,
+			spec = { component = 'mcu', source = { metadata = { format = 'dcmcu-v1' } }, job = { job_id = 'bundled-mcu', start = 'auto', commit = 'auto', max_attempts = 3, supersede = 'same_job_if_image_changed' } },
+			desired = { artifact_ref = 'mcu-artifact', expected_image_id = 'mcu-image-new', artifact = { artifact_ref = 'mcu-artifact', expected_image_id = 'mcu-image-new' } },
+			done_tx = tx,
+		}))
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'bundled_apply_done')
+		assert_eq(ev.status, 'ok')
+		assert_eq(jobs.transitions[1].kind, 'discard_job')
+		assert_eq(jobs.transitions[2].kind, 'create_job')
+		assert_eq(jobs.transitions[3].kind, 'start_job')
+		assert_eq(jobs.jobs['bundled-mcu'].expected_image_id, 'mcu-image-new')
+		assert_eq(jobs.jobs['bundled-mcu'].attempt, 2)
+		assert_eq(jobs.jobs['bundled-mcu'].metadata.bundled_attempt, 2)
+		assert_eq(jobs.jobs['bundled-mcu'].policy.attempt, 2)
+		assert_eq(jobs.jobs['bundled-mcu'].state, 'staging')
+	end)
+end
+
+function tests.test_bundled_apply_stops_terminal_same_image_after_attempt_limit()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(4, { full = 'reject_newest' })
+		local jobs = fake_jobs()
+		jobs.jobs['bundled-mcu'] = {
+			job_id = 'bundled-mcu', component = 'mcu', expected_image_id = 'mcu-image-new',
+			state = 'failed', attempt = 3, metadata = { bundled_attempt = 3 },
+		}
+		assert(bundled_apply.start({
+			lifetime_scope = scope,
+			report_scope = scope,
+			service_id = 'update',
+			generation = 15,
+			component = 'mcu',
+			jobs = jobs,
+			spec = { component = 'mcu', source = { metadata = { format = 'dcmcu-v1' } }, job = { job_id = 'bundled-mcu', start = 'auto', commit = 'auto', max_attempts = 3, supersede = 'same_job_if_image_changed' } },
+			desired = { artifact_ref = 'mcu-artifact', expected_image_id = 'mcu-image-new', artifact = { artifact_ref = 'mcu-artifact', expected_image_id = 'mcu-image-new' } },
+			done_tx = tx,
+		}))
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'bundled_apply_done')
+		assert_eq(ev.status, 'failed')
+		assert_eq(ev.primary, 'bundled_retry_exhausted:3/3')
+		assert_eq(#jobs.transitions, 0)
+		assert_eq(jobs.jobs['bundled-mcu'].state, 'failed')
 	end)
 end
 
