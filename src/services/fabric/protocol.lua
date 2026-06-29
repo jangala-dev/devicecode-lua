@@ -150,7 +150,7 @@ local FRAME_SPECS = {
 	xfer_need = {
 		class = 'transfer_control',
 		lane = 'transfer',
-		fields = { 'type', 'xfer_id', 'next' },
+		fields = { 'type', 'xfer_id', 'next', 'retry', 'reason', 'counters' },
 		required = {
 			{ 'xfer_id', 'missing_xfer_id' },
 			{ 'next',    'invalid_next' },
@@ -463,6 +463,18 @@ local function validate_special_cases(frame)
 		return nil, 'invalid_xfer_err'
 	end
 
+	if frame.type == 'xfer_need' then
+		if frame.retry ~= nil and type(frame.retry) ~= 'boolean' then
+			return nil, 'invalid_xfer_retry'
+		end
+		if frame.reason ~= nil and type(frame.reason) ~= 'string' then
+			return nil, 'invalid_xfer_reason'
+		end
+		if frame.counters ~= nil and type(frame.counters) ~= 'table' then
+			return nil, 'invalid_xfer_counters'
+		end
+	end
+
 	if frame.type == 'xfer_begin'
 		and frame.meta ~= nil
 		and type(frame.meta) ~= 'table'
@@ -625,7 +637,7 @@ local CTORS = {
 
 	xfer_begin  = { 'xfer_id', 'target', 'size', 'digest_alg', 'digest', 'meta' },
 	xfer_ready  = { 'xfer_id' },
-	xfer_need   = { 'xfer_id', 'next' },
+	xfer_need   = { 'xfer_id', 'next', 'retry', 'reason', 'counters' },
 	xfer_chunk  = { 'xfer_id', 'offset', 'data', 'chunk_digest' },
 	xfer_commit = { 'xfer_id', 'size', 'digest_alg', 'digest' },
 	xfer_done   = { 'xfer_id' },

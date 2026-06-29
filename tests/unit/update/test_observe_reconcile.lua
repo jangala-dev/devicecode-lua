@@ -122,7 +122,7 @@ function tests.test_reconcile_worker_returns_deadline_result()
 end
 
 
-function tests.test_commit_worker_persists_attempt_before_backend_commit_and_passes_token()
+function tests.test_commit_worker_persists_awaiting_return_before_backend_commit_and_passes_token()
 	fibers.run(function (scope)
 		local order = {}
 		local jobs = {}
@@ -146,6 +146,7 @@ function tests.test_commit_worker_persists_attempt_before_backend_commit_and_pas
 			return { policy = 'idempotent_by_token' }
 		end
 		function backend:commit_op(job, ctx)
+			assert_eq(order[#order], 'begin_attempt')
 			order[#order + 1] = 'backend_commit'
 			assert_eq(ctx.commit_token, 'active-token')
 			assert_eq(ctx.commit_policy, 'idempotent_by_token')

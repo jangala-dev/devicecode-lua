@@ -114,11 +114,13 @@ end
 
 local function apply_uart_config(uart_mgr, port)
 	local ok_cfg, err_cfg = perform(uart_mgr.apply_config_op({
-		{
-			id   = 'uart0',
-			path = port.slave_name,
-			baud = 115200,
-			mode = '8N1',
+		serial_ports = {
+			{
+				id   = 'uart0',
+				path = port.slave_name,
+				baud = 115200,
+				mode = '8N1',
+			},
 		},
 	}))
 	assert(ok_cfg == true, tostring(err_cfg))

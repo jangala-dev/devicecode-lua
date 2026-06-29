@@ -10,6 +10,19 @@ local repo_mod = require 'services.update.job_repository'
 
 local M = {}
 
+local function is_artifact_missing_stage_resume(job, ev)
+	if not job or not ev then return false end
+	if ev.phase ~= 'stage' then return false end
+	local reason = ev.primary or ev.error or ev.reason
+	if reason ~= 'not_found' and reason ~= 'artifact_not_found' and reason ~= 'artifact_source_open_failed' then
+		return false
+	end
+	local adoption = type(job.adoption) == 'table' and job.adoption or {}
+	if adoption.action ~= 'resume_active_intent' then return false end
+	if job.component ~= 'mcu' then return false end
+	return type(job.expected_image_id) == 'string' and job.expected_image_id ~= ''
+end
+
 function M.phase_for(job, payload)
 	payload = type(payload) == 'table' and payload or {}
 	return payload.phase or (job and job.state == 'awaiting_commit' and 'commit' or 'stage')
@@ -72,6 +85,13 @@ function M.apply_completion(job, ev, seq)
 		end
 	elseif ev.status == 'cancelled' then
 		repo_mod.mark_terminal(job, 'cancelled', ev.primary or 'cancelled', nil, { seq = seq, reason = 'active_cancelled' })
+	elseif is_artifact_missing_stage_resume(job, ev) then
+		repo_mod.mark_awaiting_return(job, {
+			tag = 'artifact_missing_reconcile',
+			reason = ev.primary or ev.error or ev.reason or 'not_found',
+			expected_image_id = job.expected_image_id,
+			previous_state = 'staging',
+		}, { seq = seq, reason = 'artifact_missing_reconcile' })
 	else
 		repo_mod.mark_terminal(job, 'failed', ev.primary or 'failed', nil, { seq = seq, reason = 'active_failed' })
 	end

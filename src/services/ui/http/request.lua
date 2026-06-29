@@ -21,6 +21,14 @@ if not ok_http_headers then http_headers = nil end
 
 local M = {}
 
+local UPDATE_COMMIT_TOPIC = { 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }
+
+local function default_encode_json(value)
+	local encoded, err = cjson.encode(value)
+	if encoded == nil then error(err or 'json_encode_failed', 0) end
+	return encoded
+end
+
 local function header_one(headers, name)
 	if not headers then return nil end
 	if http_headers and type(http_headers.get_one) == 'function' then
@@ -145,6 +153,8 @@ local function handle_read(owner, route, deps)
 		result = queries.services_snapshot(snap)
 	elseif route.query == 'fabric' then
 		result = queries.fabric_status(snap)
+	elseif route.query == 'update_status' then
+		result = queries.update_status(snap)
 	elseif route.query == 'topic' then
 		result = queries.topic(snap, route.topic)
 	else
@@ -190,6 +200,65 @@ local function handle_session_get(owner, ctx, deps)
 	return { status = 'ok' }
 end
 
+local function handle_update_commit(scope, owner, ctx, deps)
+	local update_deps = deps.update or deps
+	local principal = nil
+	if update_deps.commit_require_auth == true then
+		principal = principal_from(ctx, deps)
+		if principal == nil then
+			perform_response(owner:reply_error_op(401, 'unauthenticated'))
+			return { status = 'unauthenticated' }
+		end
+	end
+
+	local payload, perr = json_body_table(ctx, deps, { require_json_content_type = true })
+	if not payload then
+		perform_response(owner:reply_error_op(nil, perr))
+		return { status = 'bad_request', err = perr }
+	end
+	if type(payload.job_id) ~= 'string' or payload.job_id == '' then
+		perform_response(owner:reply_error_op(400, 'missing_job_id'))
+		return { status = 'bad_request', err = 'missing_job_id' }
+	end
+
+	local op_spec = {
+		timeout = update_deps.commit_timeout or deps.command_timeout or 5.0,
+		run_op = function (_, conn)
+			return conn:call_op(UPDATE_COMMIT_TOPIC, payload, { timeout = false })
+				:wrap(function (value, call_err)
+					if value == nil then return nil, call_err or 'upstream_failed' end
+					return { value = value }, nil
+				end)
+		end,
+	}
+	if principal ~= nil then
+		op_spec.principal = principal
+		op_spec.connect = update_deps.connect or deps.connect
+		op_spec.bus = update_deps.bus or deps.bus
+		if op_spec.connect == nil and op_spec.bus == nil then
+			op_spec.conn = update_deps.conn or deps.conn
+		end
+	else
+		-- Public prototype update commits are HTTP-public but not bus-anonymous:
+		-- they borrow the UI service connection supplied by services.ui.service.
+		op_spec.conn = update_deps.conn or deps.conn
+		if op_spec.conn == nil then
+			op_spec.principal = update_deps.principal or deps.principal
+			op_spec.connect = update_deps.connect or deps.connect
+			op_spec.bus = update_deps.bus or deps.bus
+		end
+	end
+
+	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op(op_spec))
+	if st ~= 'ok' then
+		perform_response(owner:reply_error_op(nil, result_or_primary))
+		return { status = 'failed', err = result_or_primary }
+	end
+	local result = result_or_primary
+	perform_response(owner:reply_json_op(200, result))
+	return { status = 'ok', route = 'update_commit' }
+end
+
 local function handle_command(scope, owner, ctx, route, deps)
 	if type(route.topic) ~= 'table' or #route.topic == 0 then
 		perform_response(owner:reply_error_op(400, 'bad_request'))
@@ -229,7 +298,7 @@ end
 
 function M.run(scope, ctx, deps)
 	deps = deps or {}
-	local owner = response_mod.new(ctx, { encode = deps.encode_json })
+	local owner = response_mod.new(ctx, { encode = deps.encode_json or default_encode_json })
 
 	scope:finally(function (_, status, primary)
 		resource.terminate_checked(owner, primary or status or 'request_closed', 'HTTP response termination')
@@ -248,6 +317,8 @@ function M.run(scope, ctx, deps)
 		return handle_session_get(owner, ctx, deps)
 	elseif route.kind == 'command' then
 		return handle_command(scope, owner, ctx, route, deps)
+	elseif route.kind == 'update_commit' then
+		return handle_update_commit(scope, owner, ctx, deps)
 	elseif route.kind == 'upload' then
 		local update_deps = deps.update or deps
 		if update_deps.require_auth == true then

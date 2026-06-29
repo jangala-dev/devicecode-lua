@@ -76,6 +76,270 @@ function M.update_jobs_snapshot(snapshot)
 	}
 end
 
+
+local function payload_of(msg)
+	return type(msg) == 'table' and type(msg.payload) == 'table' and msg.payload or nil
+end
+
+local function topic_len(topic)
+	return type(topic) == 'table' and #topic or 0
+end
+
+local function topic_at(topic, i)
+	return type(topic) == 'table' and topic[i] or nil
+end
+
+local function is_update_job_topic(topic)
+	return topic_len(topic) == 4
+		and topic_at(topic, 1) == 'state'
+		and topic_at(topic, 2) == 'workflow'
+		and topic_at(topic, 3) == 'update-job'
+end
+
+local function is_update_timeline_topic(topic)
+	return topic_len(topic) == 5
+		and topic_at(topic, 1) == 'state'
+		and topic_at(topic, 2) == 'workflow'
+		and topic_at(topic, 3) == 'update-job'
+		and topic_at(topic, 5) == 'timeline'
+end
+
+local function is_fabric_transfer_topic(topic)
+	return topic_len(topic) == 4
+		and topic_at(topic, 1) == 'state'
+		and topic_at(topic, 2) == 'fabric'
+		and topic_at(topic, 3) == 'transfer'
+end
+
+local function is_fabric_transfer_component_topic(topic)
+	return topic_len(topic) == 6
+		and topic_at(topic, 1) == 'state'
+		and topic_at(topic, 2) == 'fabric'
+		and topic_at(topic, 3) == 'link'
+		and topic_at(topic, 5) == 'component'
+		and (topic_at(topic, 6) == 'transfer' or topic_at(topic, 6) == 'transfer_manager')
+end
+
+local function transfer_payload_from_component(payload)
+	if type(payload) ~= 'table' or type(payload.snapshot) ~= 'table' then return nil end
+	local snapshot = payload.snapshot
+	local rec = type(snapshot.active) == 'table' and snapshot.active or type(snapshot.last) == 'table' and snapshot.last or nil
+	if type(rec) ~= 'table' then return nil end
+	local result = type(rec.result) == 'table' and rec.result or {}
+	local xfer_id = rec.xfer_id or result.xfer_id
+	if type(xfer_id) ~= 'string' or xfer_id == '' then return nil end
+	local meta = type(rec.meta) == 'table' and rec.meta or {}
+	return {
+		kind = 'fabric.transfer',
+		link_id = payload.link_id,
+		link_generation = payload.link_generation,
+		xfer_id = xfer_id,
+		request_id = rec.request_id or result.request_id,
+		direction = rec.direction,
+		state = rec.status,
+		status = rec.status,
+		target = rec.target or result.target,
+		size = result.size or rec.size,
+		sent_bytes = result.sent_bytes,
+		received_bytes = result.received_bytes,
+		digest_alg = result.digest_alg or rec.digest_alg,
+		digest = result.digest or rec.digest,
+		retransmits = result.retransmits,
+		chunk_retries = result.chunk_retries,
+		chunks_sent = result.chunks_sent,
+		max_frame_queue_ms = result.max_frame_queue_ms,
+		max_need_to_chunk_ms = result.max_need_to_chunk_ms,
+		max_source_read_ms = result.max_source_read_ms,
+		max_send_ms = result.max_send_ms,
+		progress = type(rec.progress) == 'table' and copy_value(rec.progress) or nil,
+		error = rec.primary,
+		correlation = {
+			job_id = result.job_id or meta.job_id,
+			component = result.component or meta.component,
+			image_id = result.image_id or meta.image_id,
+			xfer_id = xfer_id,
+			request_id = rec.request_id or result.request_id,
+		},
+		ts = payload.ts,
+	}
+end
+
+local function is_terminal_job_state(state)
+	return state == 'succeeded'
+		or state == 'failed'
+		or state == 'cancelled'
+		or state == 'timed_out'
+		or state == 'discarded'
+end
+
+local function transfer_bytes(progress, payload)
+	progress = type(progress) == 'table' and progress or {}
+	payload = type(payload) == 'table' and payload or {}
+	return payload.sent_bytes
+		or payload.received_bytes
+		or progress.sent_bytes
+		or progress.received_bytes
+		or progress.last_tx_next
+		or progress.requested_next
+		or progress.pending_next
+		or progress.last_rx_next
+end
+
+local function transfer_total(progress, payload)
+	progress = type(progress) == 'table' and progress or {}
+	payload = type(payload) == 'table' and payload or {}
+	return payload.size or progress.size or progress.total_bytes
+end
+
+local function augment_transfer(payload)
+	local out = copy_value(payload or {})
+	local progress = type(out.progress) == 'table' and out.progress or {}
+	local bytes = transfer_bytes(progress, out)
+	local total = transfer_total(progress, out)
+	out.bytes_transferred = bytes
+	out.total_bytes = total
+	if type(bytes) == 'number' and type(total) == 'number' and total > 0 then
+		out.percent = math.floor((bytes * 10000 / total) + 0.5) / 100
+	end
+	out.last_rx = {
+		type = progress.last_rx_type,
+		next = progress.last_rx_next,
+		at = progress.last_rx_at,
+		retry = progress.retry,
+		reason = progress.reason,
+	}
+	out.last_tx = {
+		type = progress.last_tx_type,
+		offset = progress.last_tx_offset,
+		next = progress.last_tx_next,
+		at = progress.last_tx_at,
+	}
+	out.timing = {
+		frame_queue_ms = progress.frame_queue_ms,
+		need_to_chunk_ms = progress.need_to_chunk_ms,
+		source_read_ms = progress.source_read_ms,
+		send_ms = progress.send_ms,
+		max_frame_queue_ms = out.max_frame_queue_ms or progress.max_frame_queue_ms,
+		max_need_to_chunk_ms = out.max_need_to_chunk_ms or progress.max_need_to_chunk_ms,
+		max_source_read_ms = out.max_source_read_ms or progress.max_source_read_ms,
+		max_send_ms = out.max_send_ms or progress.max_send_ms,
+	}
+	return out
+end
+
+local function transfer_job_id(transfer)
+	local corr = type(transfer) == 'table' and type(transfer.correlation) == 'table' and transfer.correlation or nil
+	return corr and corr.job_id or nil
+end
+
+local function transfer_is_active(transfer)
+	local st = transfer and (transfer.state or transfer.status)
+	return st == 'leased' or st == 'sending' or st == 'receiving' or st == 'staging'
+end
+
+local function newest_job_first(a, b)
+	local av = type(a) == 'table' and (a.updated_seq or a.seq or 0) or 0
+	local bv = type(b) == 'table' and (b.updated_seq or b.seq or 0) or 0
+	if av == bv then return tostring(a and a.job_id or '') > tostring(b and b.job_id or '') end
+	return av > bv
+end
+
+local function newest_transfer_first(a, b)
+	local av = type(a) == 'table' and (a.ts or 0) or 0
+	local bv = type(b) == 'table' and (b.ts or 0) or 0
+	if av == bv then return tostring(a and a.xfer_id or '') > tostring(b and b.xfer_id or '') end
+	return av > bv
+end
+
+--- HTTP-friendly update status, including live Fabric transfer progress.
+---
+--- This is deliberately a projection over retained state rather than another
+--- update-service RPC.  It lets curl-based harnesses poll one endpoint while an
+--- upload/start request is already in flight.
+function M.update_status(snapshot)
+	local items = snapshot and snapshot.items or {}
+	local summary = nil
+	local jobs = {}
+	local timelines = {}
+	local transfers = {}
+	local transfers_by_xfer = {}
+	local active_job = nil
+	local active_transfer = nil
+
+	local function add_transfer(raw)
+		if type(raw) ~= 'table' then return end
+		local transfer = augment_transfer(raw)
+		local key = transfer.xfer_id or transfer.request_id or tostring(#transfers + 1)
+		local prev = transfers_by_xfer[key]
+		if prev == nil or newest_transfer_first(transfer, prev) then
+			transfers_by_xfer[key] = transfer
+		end
+	end
+
+	for _, msg in pairs(items) do
+		local topic = msg and msg.topic or nil
+		local payload = payload_of(msg)
+		if payload ~= nil then
+			if topic_has_prefix(topic, { 'state', 'update', 'summary' }) then
+				summary = copy_value(payload)
+			elseif is_update_job_topic(topic) then
+				local job = copy_value(payload)
+				jobs[#jobs + 1] = job
+				if not is_terminal_job_state(job.state) then
+					if active_job == nil or newest_job_first(job, active_job) then active_job = job end
+				end
+			elseif is_update_timeline_topic(topic) then
+				timelines[topic_at(topic, 4)] = copy_value(payload)
+			elseif is_fabric_transfer_topic(topic) then
+				add_transfer(payload)
+			elseif is_fabric_transfer_component_topic(topic) then
+				add_transfer(transfer_payload_from_component(payload))
+			end
+		end
+	end
+
+	for _, transfer in pairs(transfers_by_xfer) do
+		transfers[#transfers + 1] = transfer
+	end
+
+	table.sort(jobs, newest_job_first)
+	table.sort(transfers, newest_transfer_first)
+	for _, transfer in ipairs(transfers) do
+		if transfer_is_active(transfer) then
+			if active_transfer == nil or newest_transfer_first(transfer, active_transfer) then active_transfer = transfer end
+		end
+	end
+
+	local transfers_by_job = {}
+	for _, transfer in ipairs(transfers) do
+		local job_id = transfer_job_id(transfer)
+		if type(job_id) == 'string' and job_id ~= '' and transfers_by_job[job_id] == nil then
+			transfers_by_job[job_id] = transfer
+		end
+	end
+
+	for _, job in ipairs(jobs) do
+		if type(job) == 'table' then
+			job.timeline = timelines[job.job_id]
+			job.transfer_status = transfers_by_job[job.job_id]
+		end
+	end
+
+	if active_job ~= nil and type(active_job) == 'table' then
+		active_job.timeline = timelines[active_job.job_id]
+		active_job.transfer_status = transfers_by_job[active_job.job_id]
+	end
+
+	return {
+		version = snapshot and snapshot.version or 0,
+		update = summary,
+		active_job = active_job,
+		active_transfer = active_transfer,
+		jobs = jobs,
+		transfers = transfers,
+	}
+end
+
 function M.summary(snapshot, sessions_count, extra)
 	local items = snapshot and snapshot.items or {}
 	local services = 0

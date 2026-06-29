@@ -164,6 +164,7 @@ local function handle_create(ctx, req)
 			jobs = ctx.jobs,
 			config = ctx.config,
 			generation = ctx.generation,
+			artifact_store = ctx.artifact_store,
 		})
 	end)
 end

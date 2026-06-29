@@ -62,6 +62,38 @@ function T.artifact_store_bus_unwraps_hal_reply_envelopes()
   end)
 end
 
+function T.component_backend_commit_timeout_is_uncertain()
+  runfibers.run(function()
+    local conn = {
+      call_op = function(_, topic, payload)
+        assert_eq(topic[5], 'commit-update')
+        assert_eq(payload.commit_token, 'tok-1')
+        return op.always(nil, 'timeout')
+      end,
+    }
+    local backend = component_backend.new({ conn = conn, component = 'mcu', rpc_retry = { commit_attempts = 1 } })
+    local result, err = fibers.perform(backend:commit_op({ job_id = 'job-1', component = 'mcu', expected_image_id = 'img-new' }, { commit_token = 'tok-1' }))
+    assert_eq(err, nil)
+    assert_true(result and result.accepted, 'timeout commit should be accepted as uncertain')
+    assert_true(result.uncertain, 'timeout commit should be marked uncertain')
+  end)
+end
+
+function T.component_backend_commit_link_not_ready_is_not_uncertain()
+  runfibers.run(function()
+    local conn = {
+      call_op = function(_, topic, payload)
+        assert_eq(topic[5], 'commit-update')
+        return op.always(nil, 'link_not_ready')
+      end,
+    }
+    local backend = component_backend.new({ conn = conn, component = 'mcu', rpc_retry = { commit_attempts = 1 } })
+    local result, err = fibers.perform(backend:commit_op({ job_id = 'job-1', component = 'mcu', expected_image_id = 'img-new' }, { commit_token = 'tok-1' }))
+    assert_eq(result, nil)
+    assert_eq(err, 'link_not_ready')
+  end)
+end
+
 function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
   runfibers.run(function()
     local source = {}
@@ -114,7 +146,7 @@ function T.component_backend_stage_op_runs_preflight_prepare_and_stage()
     }
 
     local backend = component_backend.new({ conn = conn, artifact_store = artifact_store, component = 'mcu' })
-    local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', metadata = { image_id = 'img-new' } }
+    local job = { job_id = 'job-1', component = 'mcu', artifact_ref = 'artifact-1', expected_image_id = 'img-new', metadata = { format = 'dcmcu-v1' } }
 
     local staged, serr = fibers.perform(backend:stage_op(job, {}))
     assert_eq(type(staged), 'table', tostring(serr))

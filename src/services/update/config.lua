@@ -36,6 +36,46 @@ local function normalise_optional_positive_number(t, key, where)
 	return true, nil
 end
 
+
+local function normalise_non_negative_integer(t, key, where)
+	local v = t[key]
+	if v == nil then return true, nil end
+	local n = tonumber(v)
+	if type(n) ~= 'number' or n < 0 or n ~= math.floor(n) then
+		return false, where .. '.' .. key .. ' must be a non-negative integer'
+	end
+	t[key] = n
+	return true, nil
+end
+
+local function normalise_optional_positive_integer(t, key, where)
+	local v = t[key]
+	if v == nil then return true, nil end
+	local n = tonumber(v)
+	if type(n) ~= 'number' or n <= 0 or n ~= math.floor(n) then
+		return false, where .. '.' .. key .. ' must be a positive integer'
+	end
+	t[key] = n
+	return true, nil
+end
+
+local function normalise_retention(raw)
+	local retention, rerr = table_or_empty(raw)
+	if not retention then return nil, rerr end
+	if retention.prune_on_startup == nil then retention.prune_on_startup = false end
+	if retention.prune_on_startup ~= true and retention.prune_on_startup ~= false then
+		return nil, 'retention.prune_on_startup must be boolean'
+	end
+	local ok, err = normalise_non_negative_integer(retention, 'terminal_max_count', 'retention')
+	if not ok then return nil, err end
+	ok, err = normalise_optional_positive_integer(retention, 'terminal_max_age_s', 'retention')
+	if not ok then return nil, err end
+	ok, err = normalise_non_negative_integer(retention, 'active_intent_restart_max', 'retention')
+	if not ok then return nil, err end
+	if retention.active_intent_restart_max == nil then retention.active_intent_restart_max = 1 end
+	return retention, nil
+end
+
 local function normalise_component_timeouts(c, where)
 	for _, key in ipairs({ 'timeout_s', 'stage_timeout_s', 'commit_timeout_s', 'reconcile_timeout_s' }) do
 		local ok, err = normalise_optional_positive_number(c, key, where)
@@ -137,6 +177,9 @@ function M.normalise(raw, opts)
 	if not publish then return nil, 'publish: ' .. tostring(perr) end
 	if publish.enabled == nil then publish.enabled = true end
 
+	local retention, rerr = normalise_retention(raw.retention)
+	if not retention then return nil, 'retention: ' .. tostring(rerr) end
+
 	local out = {
 		schema     = raw.schema or M.SCHEMA,
 		rev        = opts.rev or raw.rev,
@@ -145,6 +188,7 @@ function M.normalise(raw, opts)
 		components = components,
 		bundled    = bundled,
 		publish    = publish,
+		retention  = retention,
 		raw        = copy(raw),
 	}
 

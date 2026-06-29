@@ -413,7 +413,7 @@ local function start_create_sink_work(ctx, state, req, payload)
 			local sink, serr = fibers.perform(ctx.artifact_store:create_sink_op({
 				component = payload.component,
 				meta = payload.metadata or payload.meta or {},
-				policy = payload.policy or 'prefer_durable',
+				policy = payload.policy or 'transient_only',
 			}))
 			if sink == nil then error(serr or 'artifact_sink_create_failed', 0) end
 			return {

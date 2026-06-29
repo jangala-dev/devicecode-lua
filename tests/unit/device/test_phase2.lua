@@ -1288,4 +1288,32 @@ function tests.test_generation_cancel_marks_pending_actions_until_completion_arr
 	end)
 end
 
+
+function tests.test_mcu_charger_bitfields_are_expanded_in_device_projection()
+	local raw = {
+		vin_mV = 24153,
+		vsys_mV = 24100,
+		iin_mA = 623,
+		state_bits = 0x0240,  -- absorb + cccv
+		status_bits = 0x0005, -- iin_limit + const_voltage
+		system_bits = 0x2045, -- enabled + ok_to_charge + vin_gt_vbat + intvcc_gt_2p8v
+		seq = 7,
+		uptime_ms = 1234,
+	}
+	local fact, err = component_mcu.normalise_fact('power_charger', raw)
+	assert_nil(err)
+	assert_eq(fact.vin_mV, 24153)
+	assert_eq(fact.state_bits, raw.state_bits)
+	assert_true(fact.state.absorb_charge)
+	assert_true(fact.state.cccv_charge)
+	assert_false(fact.state.bat_missing_fault)
+	assert_true(fact.status.iin_limit_active)
+	assert_true(fact.status.const_voltage)
+	assert_false(fact.status.const_current)
+	assert_true(fact.system.charger_enabled)
+	assert_true(fact.system.ok_to_charge)
+	assert_true(fact.system.vin_gt_vbat)
+	assert_true(fact.system.intvcc_gt_2p8v)
+end
+
 return tests

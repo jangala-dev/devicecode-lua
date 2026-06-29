@@ -1,36 +1,62 @@
 -- shared/hash/xxhash32.lua
 --
--- Small, dependency-free xxHash32 helpers.
+-- Portable xxHash32, seed 0 by default.
 --
--- This provides a deterministic non-cryptographic integrity checksum for
--- transfer protocol use and tests without pulling in an external dependency.
--- It is not a security primitive.
+-- This implementation does not use bit.band(x, 0xffffffff) or
+-- bit32.band(x, 0xffffffff) as a 32-bit normalisation primitive. Some bit32
+-- compatibility modules under LuaJIT/OpenWrt mishandle large Lua numeric
+-- intermediates in that pattern. Unsigned 32-bit normalisation is therefore
+-- done with arithmetic modulo 2^32, while bit libraries are used only for
+-- true bitwise operations on already-normalised values.
 
-local ok_bit32, bit32_mod = pcall(require, 'bit32')
 local ok_bit, bit_mod = pcall(require, 'bit')
+local ok_bit32, bit32_mod = pcall(require, 'bit32')
 
-local bitops = ok_bit32 and bit32_mod or bit_mod
-assert(bitops, 'shared.hash.xxhash32 requires bit32 or bit')
+local raw_bitops = ok_bit and bit_mod or (ok_bit32 and bit32_mod or nil)
+assert(raw_bitops, 'shared.hash.xxhash32 requires bit or bit32')
 
-local band   = assert(bitops.band,   'bit library missing band')
-local bor    = assert(bitops.bor,    'bit library missing bor')
-local bxor   = assert(bitops.bxor,   'bit library missing bxor')
-local lshift = assert(bitops.lshift, 'bit library missing lshift')
-local rshift = assert(bitops.rshift, 'bit library missing rshift')
+local TWO32 = 4294967296
+local TWO16 = 65536
 
-local rol
-if bitops.lrotate then
-	rol = bitops.lrotate
-elseif bitops.rol then
-	rol = bitops.rol
-else
-	rol = function (x, n)
-		n = n % 32
-		return band(bor(lshift(x, n), rshift(x, 32 - n)), 0xffffffff)
-	end
+local function u32(n)
+	-- Lua numbers are doubles in LuaJIT/Lua 5.1. All intermediates in this
+	-- implementation are kept well below 2^53, so modulo is exact here.
+	n = n % TWO32
+	if n < 0 then n = n + TWO32 end
+	return n
+end
+
+local function band(a, b)
+	return u32(raw_bitops.band(u32(a), u32(b)))
+end
+
+local function bor(a, b)
+	return u32(raw_bitops.bor(u32(a), u32(b)))
+end
+
+local function bxor(a, b)
+	return u32(raw_bitops.bxor(u32(a), u32(b)))
+end
+
+local function lshift(a, n)
+	n = n % 32
+	return u32(raw_bitops.lshift(u32(a), n))
+end
+
+local function rshift(a, n)
+	n = n % 32
+	return u32(raw_bitops.rshift(u32(a), n))
+end
+
+local function rol(a, n)
+	n = n % 32
+	a = u32(a)
+	if n == 0 then return a end
+	return bor(lshift(a, n), rshift(a, 32 - n))
 end
 
 local M = {}
+M._backend = ok_bit and 'bit' or 'bit32'
 
 local P1 = 0x9E3779B1
 local P2 = 0x85EBCA77
@@ -38,42 +64,43 @@ local P3 = 0xC2B2AE3D
 local P4 = 0x27D4EB2F
 local P5 = 0x165667B1
 
-local TWO32 = 4294967296
-
-local function u32(n)
-	return band(n, 0xffffffff)
-end
-
 local function hex8(n)
+	-- Avoid string.format('%x', n): on some plain Lua runtimes n is a float,
+	-- even when it represents an exact unsigned 32-bit integer.
 	n = u32(n)
-	if n < 0 then
-		n = n + TWO32
+	local digits = '0123456789abcdef'
+	local out = {}
+	for shift = 28, 0, -4 do
+		local nibble = math.floor(n / (2 ^ shift)) % 16
+		out[#out + 1] = digits:sub(nibble + 1, nibble + 1)
 	end
-	return ('%08x'):format(n)
+	return table.concat(out)
 end
 
 local function mul32(a, b)
+	-- Exact low 32 bits of a 32x32 multiply using 16-bit limbs.
+	-- This avoids relying on Lua's double precision for the full product and
+	-- avoids passing a >32-bit intermediate into the bit backend.
 	a = u32(a)
 	b = u32(b)
 
-	local a_lo = band(a, 0xffff)
-	local a_hi = band(rshift(a, 16), 0xffff)
-	local b_lo = band(b, 0xffff)
-	local b_hi = band(rshift(b, 16), 0xffff)
+	local a_lo = a % TWO16
+	local a_hi = math.floor(a / TWO16)
+	local b_lo = b % TWO16
+	local b_hi = math.floor(b / TWO16)
 
-	local lo  = a_lo * b_lo
+	local lo = a_lo * b_lo
 	local mid = a_hi * b_lo + a_lo * b_hi
-
-	return u32(lo + lshift(band(mid, 0xffff), 16))
+	return u32((lo % TWO32) + ((mid % TWO16) * TWO16))
 end
 
 local function read_u32_le(s, i)
 	local b1, b2, b3, b4 = s:byte(i, i + 3)
-	return bor(
-		b1 or 0,
-		lshift(b2 or 0, 8),
-		lshift(b3 or 0, 16),
-		lshift(b4 or 0, 24)
+	return u32(
+		(b1 or 0) +
+		(b2 or 0) * 0x100 +
+		(b3 or 0) * 0x10000 +
+		(b4 or 0) * 0x1000000
 	)
 end
 
@@ -110,9 +137,7 @@ end
 function M.update(state, s)
 	assert(type(state) == 'table', 'checksum.update expects state')
 	assert(type(s) == 'string', 'checksum.update expects string')
-	if s == '' then
-		return state
-	end
+	if s == '' then return state end
 
 	state.total_len = state.total_len + #s
 	local buf = state.mem .. s
@@ -186,5 +211,14 @@ end
 function M.verify_hex(s, expected)
 	return M.digest_hex(s) == tostring(expected)
 end
+
+-- Expose for diagnostics/tests only. Production callers should use digest_hex.
+M._test = {
+	u32 = u32,
+	mul32 = mul32,
+	rol = rol,
+	read_u32_le = read_u32_le,
+	hex8 = hex8,
+}
 
 return M

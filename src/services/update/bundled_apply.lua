@@ -47,9 +47,14 @@ local function create_payload(spec, desired)
 	}, source.metadata or source.meta)
 	metadata = merge(metadata, spec.metadata)
 
+	local expected_image_id = desired.expected_image_id or (type(artifact) == 'table' and artifact.expected_image_id)
+	if component == 'mcu' and (type(expected_image_id) ~= 'string' or expected_image_id == '') then
+		error('expected_image_id_required', 0)
+	end
 	return {
 		job_id = job_id,
 		component = component,
+		expected_image_id = expected_image_id,
 		artifact = artifact,
 		artifact_ref = desired.artifact_ref or artifact_ref_of(artifact),
 		metadata = metadata,

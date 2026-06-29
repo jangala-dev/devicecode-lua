@@ -802,13 +802,11 @@ function Component:_handle_apply_done(ev)
 	})
 	if ok_change ~= true then return nil, cerr end
 
-	if ev.phase == 'commit' then
-		local job = result.job
-		if job and job.state == 'awaiting_return' then
-			local ok_rec, rerr = self:_start_reconcile(job)
-			if ok_rec == nil and rerr ~= 'slot_busy' and rerr ~= 'reconcile_backend_unavailable' then
-				return nil, rerr or 'reconcile_start_failed'
-			end
+	local job = result.job
+	if job and job.state == 'awaiting_return' then
+		local ok_rec, rerr = self:_start_reconcile(job)
+		if ok_rec == nil and rerr ~= 'slot_busy' and rerr ~= 'reconcile_backend_unavailable' then
+			return nil, rerr or 'reconcile_start_failed'
 		end
 	end
 

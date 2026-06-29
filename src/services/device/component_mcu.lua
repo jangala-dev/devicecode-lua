@@ -14,6 +14,7 @@ function M.normalise_fact(fact, raw)
 	if fact == 'software' then return schema.normalise_software(raw), nil end
 	if fact == 'updater' then return schema.normalise_updater(raw), nil end
 	if fact == 'health' then return schema.normalise_health(raw), nil end
+	if fact == 'power_charger' then return schema.normalise_charger(raw), nil end
 	if fact == 'charger_alert' then return schema.normalise_charger_alert(raw), nil end
 	return copy(raw), nil
 end

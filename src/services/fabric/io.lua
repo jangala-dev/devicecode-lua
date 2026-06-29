@@ -17,6 +17,7 @@ local queue          = require 'devicecode.support.queue'
 local priority_event = require 'devicecode.support.priority_event'
 local contracts      = require 'devicecode.support.contracts'
 local validate       = require 'shared.validate'
+local trace         = require 'services.fabric.trace'
 
 local M = {}
 
@@ -129,6 +130,12 @@ function M.run_reader(scope, params)
 
 	local read_frame_op = require_function(params.read_frame_op, 'run_reader: read_frame_op', 2)
 	local downstream_tx = require_tx(params.downstream_tx, 'run_reader: downstream_tx', 2)
+	local trace_base = {
+		component = params.component_name or 'reader',
+		link_id = params.link_id,
+		link_generation = params.link_generation,
+	}
+	local state_tx = params.state_tx
 
 	local frames_read = 0
 	local wire_errors = 0
@@ -144,12 +151,14 @@ function M.run_reader(scope, params)
 		local label
 
 		if frame ~= nil then
+			trace.frame(state_tx, trace_base, 'rx', frame)
 			ev = frame_event(frame)
 			label = 'frame'
 
 		elseif protocol.is_wire_protocol_error
 			and protocol.is_wire_protocol_error(read_err)
 		then
+			trace.error(state_tx, trace_base, 'rx', read_err)
 			ev = wire_error_event(read_err)
 			label = 'wire error'
 
@@ -299,6 +308,12 @@ function M.run_lane_writer(scope, params)
 	params = require_table(params, 'fabric.io.run_lane_writer: params table', 2)
 
 	local write_frame_op = require_function(params.write_frame_op, 'run_lane_writer: write_frame_op', 2)
+	local trace_base = {
+		component = params.component_name or 'writer',
+		link_id = params.link_id,
+		link_generation = params.link_generation,
+	}
+	local state_tx = params.state_tx
 
 	local flush_op = params.flush_op
 	if flush_op ~= nil then
@@ -335,9 +350,11 @@ function M.run_lane_writer(scope, params)
 		if selected ~= nil and selected.item ~= nil then
 			local lane = selected.lane
 			local frame = send_item_frame(selected.item)
+			trace.frame(state_tx, trace_base, 'tx', frame, { lane = lane })
 
 			local ok, err = perform_write(write_frame_op, frame)
 			if ok ~= true then
+				trace.error(state_tx, trace_base, 'tx', err, { event = 'write_failed', lane = lane, frame_type = type(frame) == 'table' and frame.type or nil })
 				error('writer write failed: ' .. tostring(err), 0)
 			end
 

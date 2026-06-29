@@ -720,6 +720,10 @@ function M.composed_components(scope, params, service_caps)
 			return io_mod.run_reader(component_scope, {
 				read_frame_op = read_frame_op,
 				downstream_tx = inbound_frame_tx,
+				state_tx = state_tx,
+				link_id = params.link_id,
+				link_generation = params.link_generation,
+				component_name = 'reader',
 			})
 		end,
 	}
@@ -768,6 +772,10 @@ function M.composed_components(scope, params, service_caps)
 				flush_each = params.flush_each,
 				rpc_quota = writer_cfg.rpc_quota,
 				bulk_quota = writer_cfg.bulk_quota,
+				state_tx = state_tx,
+				link_id = params.link_id,
+				link_generation = params.link_generation,
+				component_name = 'writer',
 			})
 		end,
 	}

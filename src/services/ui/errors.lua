@@ -26,6 +26,7 @@ local function norm_key(err)
 	end
 	local s = tostring(err or 'internal')
 	if M.codes[s] then return s end
+	if s == 'slot_busy' or s:find('slot_busy', 1, true) or s:find('busy', 1, true) or s:find('conflict', 1, true) then return 'conflict' end
 	if s:find('timeout', 1, true) then return 'timeout' end
 	if s:find('unauth', 1, true) then return 'unauthenticated' end
 	if s:find('forbidden', 1, true) or s:find('permission', 1, true) then return 'forbidden' end
