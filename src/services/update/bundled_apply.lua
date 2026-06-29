@@ -170,12 +170,22 @@ local function create_or_reuse_job(params, payload)
 		local supersede = policy.supersede
 		if existing.expected_image_id == payload.expected_image_id then
 			if TERMINAL[existing.state] == true and supersede == 'same_job_if_image_changed' then
-				local previous_attempt = job_attempt(existing)
-				local next_attempt = previous_attempt + 1
+				-- A previous successful convergence for this image must not consume
+				-- retry budget if the MCU later runs a different image again
+				-- (for example after a downgrade/rollback).  Treat that as a
+				-- fresh convergence episode.  Failed/timed-out terminal jobs remain
+				-- bounded by the retry budget to avoid loops on a bad bundle.
+				local next_attempt
 				local limit = max_attempts(policy)
 				if limit == nil then return nil, 'bundled_max_attempts_required' end
-				if next_attempt > limit then
-					return nil, 'bundled_retry_exhausted:' .. tostring(previous_attempt) .. '/' .. tostring(limit)
+				if existing.state == 'succeeded' then
+					next_attempt = 1
+				else
+					local previous_attempt = job_attempt(existing)
+					next_attempt = previous_attempt + 1
+					if next_attempt > limit then
+						return nil, 'bundled_retry_exhausted:' .. tostring(previous_attempt) .. '/' .. tostring(limit)
+					end
 				end
 				local discarded, derr = discard_existing_job(params, payload.job_id)
 				if not discarded then return nil, derr end

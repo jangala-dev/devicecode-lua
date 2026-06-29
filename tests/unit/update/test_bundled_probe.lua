@@ -338,6 +338,40 @@ function tests.test_bundled_apply_retries_terminal_same_image_until_attempt_limi
 	end)
 end
 
+
+function tests.test_bundled_apply_resets_attempts_after_previous_success_for_same_image()
+	fibers.run(function (scope)
+		local tx, rx = mailbox.new(4, { full = 'reject_newest' })
+		local jobs = fake_jobs()
+		jobs.jobs['bundled-mcu'] = {
+			job_id = 'bundled-mcu', component = 'mcu', expected_image_id = 'mcu-image-new',
+			state = 'succeeded', attempt = 30, metadata = { bundled_attempt = 30 },
+		}
+		assert(bundled_apply.start({
+			lifetime_scope = scope,
+			report_scope = scope,
+			service_id = 'update',
+			generation = 16,
+			component = 'mcu',
+			jobs = jobs,
+			spec = { component = 'mcu', source = { metadata = { format = 'dcmcu-v1' } }, job = { job_id = 'bundled-mcu', start = 'auto', commit = 'auto', max_attempts = 30, supersede = 'same_job_if_image_changed' } },
+			desired = { artifact_ref = 'mcu-artifact', expected_image_id = 'mcu-image-new', artifact = { artifact_ref = 'mcu-artifact', expected_image_id = 'mcu-image-new' } },
+			done_tx = tx,
+		}))
+		local ev = fibers.perform(rx:recv_op())
+		assert_eq(ev.kind, 'bundled_apply_done')
+		assert_eq(ev.status, 'ok')
+		assert_eq(jobs.transitions[1].kind, 'discard_job')
+		assert_eq(jobs.transitions[2].kind, 'create_job')
+		assert_eq(jobs.transitions[3].kind, 'start_job')
+		assert_eq(jobs.jobs['bundled-mcu'].expected_image_id, 'mcu-image-new')
+		assert_eq(jobs.jobs['bundled-mcu'].attempt, 1)
+		assert_eq(jobs.jobs['bundled-mcu'].metadata.bundled_attempt, 1)
+		assert_eq(jobs.jobs['bundled-mcu'].policy.attempt, 1)
+		assert_eq(jobs.jobs['bundled-mcu'].state, 'staging')
+	end)
+end
+
 function tests.test_bundled_apply_stops_terminal_same_image_after_attempt_limit()
 	fibers.run(function (scope)
 		local tx, rx = mailbox.new(4, { full = 'reject_newest' })
