@@ -1496,8 +1496,14 @@
               "path": "/artifacts/mcu.dcmcu",
               "policy": "transient_only"
             },
-            "auto_create": false,
-            "auto_start": false
+            "job": {
+              "job_id": "bundled-mcu",
+              "create_if": "image_differs",
+              "start": "auto",
+              "commit": "auto",
+              "reconcile": "required",
+              "supersede": "same_job_if_image_changed"
+            }
           }
         }
       },

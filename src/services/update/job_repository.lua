@@ -135,6 +135,7 @@ function M.new_job(spec, opts)
 		artifact = copy(spec.artifact or spec.artifact_ref),
 		artifact_ref = spec.artifact_ref,
 		metadata = copy(spec.metadata or {}),
+		policy = copy(spec.policy or spec.job_policy or {}),
 		created_seq = seq,
 		updated_seq = seq,
 		history = {{ seq = seq, state = 'created', reason = opts.reason or 'create_job' }},

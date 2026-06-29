@@ -135,6 +135,73 @@ local function normalise_components(raw)
 	return out, nil
 end
 
+
+local CREATE_IF = { always = true, image_differs = true, never = true }
+local JOB_START = { auto = true, manual = true }
+local JOB_COMMIT = { auto = true, manual = true }
+local JOB_RECONCILE = { required = true, manual = true }
+local JOB_SUPERSEDE = { same_job_if_image_changed = true, never = true }
+
+local function normalise_enum(t, key, allowed, default, where)
+	if t[key] == nil then t[key] = default end
+	if allowed[t[key]] ~= true then
+		return nil, where .. '.' .. key .. ' invalid: ' .. tostring(t[key])
+	end
+	return t, nil
+end
+
+local function normalise_bundled_job(raw, component, legacy, where)
+	local job, jerr = table_or_empty(raw)
+	if not job then return nil, where .. ': ' .. tostring(jerr) end
+	legacy = legacy or {}
+	if job.job_id == nil then job.job_id = legacy.job_id or ('bundled-' .. component) end
+	if type(job.job_id) ~= 'string' or job.job_id == '' then return nil, where .. '.job_id must be a non-empty string' end
+	if job.create_if == nil and legacy.auto_create ~= nil then job.create_if = legacy.auto_create == true and 'always' or 'never' end
+	if job.start == nil and legacy.auto_start ~= nil then job.start = legacy.auto_start == true and 'auto' or 'manual' end
+	local ok, err = normalise_enum(job, 'create_if', CREATE_IF, 'image_differs', where)
+	if not ok then return nil, err end
+	ok, err = normalise_enum(job, 'start', JOB_START, 'manual', where)
+	if not ok then return nil, err end
+	ok, err = normalise_enum(job, 'commit', JOB_COMMIT, 'manual', where)
+	if not ok then return nil, err end
+	ok, err = normalise_enum(job, 'reconcile', JOB_RECONCILE, 'required', where)
+	if not ok then return nil, err end
+	ok, err = normalise_enum(job, 'supersede', JOB_SUPERSEDE, 'same_job_if_image_changed', where)
+	if not ok then return nil, err end
+	return job, nil
+end
+
+local function normalise_bundled_component(id, item, where)
+	if type(item) ~= 'table' then return nil, where .. ' must be a table' end
+	local c = copy(item)
+	if c.component == nil then c.component = id end
+	if c.component ~= id then return nil, where .. '.component must match component map key' end
+	if c.source ~= nil and type(c.source) ~= 'table' then return nil, where .. '.source must be a table' end
+	local job, jerr = normalise_bundled_job(c.job, id, c, where .. '.job')
+	if not job then return nil, jerr end
+	c.job = job
+	c.auto_create = nil
+	c.auto_start = nil
+	return c, nil
+end
+
+local function normalise_bundled(raw)
+	local bundled, berr = table_or_empty(raw)
+	if not bundled then return nil, berr end
+	if bundled.enabled == nil then bundled.enabled = false end
+	if bundled.enabled ~= true and bundled.enabled ~= false then return nil, 'bundled.enabled must be boolean' end
+	local comps, cerr = table_or_empty(bundled.components or bundled.by_component)
+	if not comps then return nil, 'bundled.components: ' .. tostring(cerr) end
+	local out = { enabled = bundled.enabled, components = {} }
+	for component, item in pairs(comps) do
+		if type(component) ~= 'string' or component == '' then return nil, 'bundled.components keys must be non-empty strings' end
+		local normal, nerr = normalise_bundled_component(component, item, 'bundled.components.' .. component)
+		if not normal then return nil, nerr end
+		out.components[component] = normal
+	end
+	return out, nil
+end
+
 local function summarise(cfg)
 	return {
 		rev             = cfg.rev,
@@ -170,7 +237,7 @@ function M.normalise(raw, opts)
 		return nil, cerr
 	end
 
-	local bundled, berr = table_or_empty(raw.bundled)
+	local bundled, berr = normalise_bundled(raw.bundled)
 	if not bundled then return nil, 'bundled: ' .. tostring(berr) end
 
 	local publish, perr = table_or_empty(raw.publish)

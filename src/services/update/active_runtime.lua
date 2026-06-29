@@ -540,6 +540,40 @@ function Component:_start_apply(ev)
 	return handle, nil
 end
 
+local function job_policy(job)
+	return type(job) == 'table' and type(job.policy) == 'table' and job.policy or {}
+end
+
+local function policy_auto_commit(job)
+	return job_policy(job).commit == 'auto'
+end
+
+function Component:_start_policy_commit(job)
+	if not (job and job.job_id) then return nil, 'not_ready' end
+	if job.state ~= 'awaiting_commit' then return false, 'not_awaiting_commit' end
+	if not policy_auto_commit(job) then return false, 'manual_commit' end
+	if not (self._jobs and type(self._jobs.admit_transition) == 'function') then return nil, 'job_runtime_unavailable' end
+	local handle, admit_err = self._jobs:admit_transition {
+		kind = 'start_job',
+		generation = job.generation or self._current_generation,
+		job_id = job.job_id,
+		phase = 'commit',
+		reason = 'policy_auto_commit',
+	}
+	if not handle then return nil, admit_err or 'policy_auto_commit_admission_failed' end
+	local result, jerr = fibers.perform(handle:outcome_op())
+	if not result or result.status ~= 'persisted' then
+		return nil, jerr or (result and result.reason) or 'policy_auto_commit_persist_failed'
+	end
+	local ok_report, report_err = self:_report_changed('policy_auto_commit_started', {
+		job_id = job.job_id,
+		phase = 'commit',
+		token = result.token,
+	})
+	if ok_report ~= true then return nil, report_err end
+	return true, nil
+end
+
 function Component:_start_reconcile(job)
 	if not (job and job.job_id) then return nil, 'not_ready' end
 	if self._state.active ~= nil then return nil, 'slot_busy' end
@@ -803,6 +837,12 @@ function Component:_handle_apply_done(ev)
 	if ok_change ~= true then return nil, cerr end
 
 	local job = result.job
+	if job and job.state == 'awaiting_commit' then
+		local ok_commit, commit_err = self:_start_policy_commit(job)
+		if ok_commit == nil and commit_err ~= 'manual_commit' then
+			return nil, commit_err or 'policy_auto_commit_failed'
+		end
+	end
 	if job and job.state == 'awaiting_return' then
 		local ok_rec, rerr = self:_start_reconcile(job)
 		if ok_rec == nil and rerr ~= 'slot_busy' and rerr ~= 'reconcile_backend_unavailable' then

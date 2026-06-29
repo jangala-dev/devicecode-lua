@@ -245,6 +245,7 @@ local function start_generation(self, cfg, reason)
 				manager_rx = manager_rx,
 				service_rx = service_rx,
 				active_snapshot = active_snapshot(self),
+				observer = self._component_observer,
 				artifact_store = self._artifact_store,
 				events_tx = self._done_tx,
 				done_queue_len = self._generation_done_queue_len,

@@ -8,6 +8,7 @@ local function fail(msg) error(msg or 'assertion failed', 2) end
 local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end end
 local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true, got ' .. tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil value') end end
+local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, got ' .. tostring(v))) end end
 
 function tests.test_default_config_normalises()
 	local cfg, err = config.normalise({})
@@ -79,6 +80,63 @@ function tests.test_retention_policy_normalises()
 	assert_true(cfg.retention.prune_on_startup)
 	assert_eq(cfg.retention.terminal_max_count, 50)
 	assert_eq(cfg.retention.terminal_max_age_s, 604800)
+end
+
+
+function tests.test_bundled_job_policy_normalises()
+	local cfg, err = config.normalise({
+		bundled = {
+			enabled = true,
+			components = {
+				mcu = {
+					component = 'mcu',
+					source = { kind = 'file', path = '/artifacts/mcu.dcmcu', policy = 'transient_only' },
+					job = {
+						job_id = 'bundled-mcu',
+						create_if = 'image_differs',
+						start = 'auto',
+						commit = 'auto',
+						reconcile = 'required',
+						supersede = 'same_job_if_image_changed',
+					},
+				},
+			},
+		},
+	})
+	assert_not_nil(cfg, err)
+	local mcu = cfg.bundled.components.mcu
+	assert_eq(mcu.job.job_id, 'bundled-mcu')
+	assert_eq(mcu.job.create_if, 'image_differs')
+	assert_eq(mcu.job.start, 'auto')
+	assert_eq(mcu.job.commit, 'auto')
+	assert_eq(mcu.job.reconcile, 'required')
+	assert_eq(mcu.job.supersede, 'same_job_if_image_changed')
+	assert_nil(mcu.auto_create)
+	assert_nil(mcu.auto_start)
+end
+
+function tests.test_bundled_legacy_auto_flags_map_to_job_policy()
+	local cfg, err = config.normalise({
+		bundled = {
+			enabled = true,
+			components = {
+				mcu = {
+					component = 'mcu',
+					source = { kind = 'file', path = '/artifacts/mcu.dcmcu' },
+					auto_create = true,
+					auto_start = true,
+				},
+			},
+		},
+	})
+	assert_not_nil(cfg, err)
+	local mcu = cfg.bundled.components.mcu
+	assert_eq(mcu.job.job_id, 'bundled-mcu')
+	assert_eq(mcu.job.create_if, 'always')
+	assert_eq(mcu.job.start, 'auto')
+	assert_eq(mcu.job.commit, 'manual')
+	assert_nil(mcu.auto_create)
+	assert_nil(mcu.auto_start)
 end
 
 return tests

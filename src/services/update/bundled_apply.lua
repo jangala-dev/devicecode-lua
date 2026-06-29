@@ -26,6 +26,26 @@ local function artifact_ref_of(artifact)
 	return artifact.artifact_ref or artifact.ref or artifact.id
 end
 
+local TERMINAL = { succeeded = true, failed = true, cancelled = true, timed_out = true, superseded = true, discarded = true }
+
+local function job_policy(spec)
+	spec = spec or {}
+	local job = copy(spec.job or {})
+	if job.job_id == nil then job.job_id = spec.job_id or (spec.source and spec.source.job_id) end
+	if job.create_if == nil then
+		if spec.auto_create ~= nil then
+			job.create_if = spec.auto_create == true and 'always' or 'never'
+		else
+			job.create_if = 'image_differs'
+		end
+	end
+	if job.start == nil then job.start = spec.auto_start == true and 'auto' or 'manual' end
+	if job.commit == nil then job.commit = 'manual' end
+	if job.reconcile == nil then job.reconcile = 'required' end
+	if job.supersede == nil then job.supersede = 'same_job_if_image_changed' end
+	return job
+end
+
 local function transition(jobs, cmd)
 	if type(jobs) ~= 'table' or type(jobs.admit_transition) ~= 'function' then
 		return nil, 'job_runtime_unavailable'
@@ -40,7 +60,8 @@ local function create_payload(spec, desired)
 	local artifact = copy(desired.artifact or desired.desired or desired)
 	local component = assert(spec.component, 'bundled_apply component required')
 	local source = spec.source or {}
-	local job_id = spec.job_id or source.job_id or ('bundled-' .. component)
+	local policy = job_policy(spec)
+	local job_id = policy.job_id or spec.job_id or source.job_id or ('bundled-' .. component)
 	local metadata = merge({
 		source = 'bundled',
 		bundled = true,
@@ -58,20 +79,24 @@ local function create_payload(spec, desired)
 		artifact = artifact,
 		artifact_ref = desired.artifact_ref or artifact_ref_of(artifact),
 		metadata = metadata,
-		auto_start = spec.auto_start == true,
+		policy = policy,
+		auto_start = policy.start == 'auto',
 	}
 end
 
-local function create_or_reuse_job(params, payload)
-	local existing = params.jobs:get(payload.job_id)
-	if existing ~= nil then
-		return {
-			status = 'existing',
-			job_id = payload.job_id,
-			job = existing,
-		}, nil
-	end
+local function discard_existing_job(params, job_id)
+	local result, err = transition(params.jobs, {
+		kind = 'discard_job',
+		generation = params.generation,
+		job_id = job_id,
+		reason = 'bundled_supersede_changed_image',
+	})
+	if not result then return nil, err or 'bundled_supersede_discard_failed' end
+	if result.status ~= 'persisted' then return nil, result.reason or 'bundled_supersede_discard_rejected' end
+	return result, nil
+end
 
+local function create_job(params, payload)
 	local result, err = transition(params.jobs, {
 		kind = 'create_job',
 		generation = params.generation,
@@ -90,6 +115,30 @@ local function create_or_reuse_job(params, payload)
 	end
 
 	return nil, result.reason or err or 'bundled_create_job_failed'
+end
+
+local function create_or_reuse_job(params, payload)
+	local existing = params.jobs:get(payload.job_id)
+	if existing ~= nil then
+		if existing.expected_image_id == payload.expected_image_id then
+			return {
+				status = 'existing',
+				job_id = payload.job_id,
+				job = existing,
+			}, nil
+		end
+		local supersede = type(payload.policy) == 'table' and payload.policy.supersede or nil
+		if TERMINAL[existing.state] == true and supersede == 'same_job_if_image_changed' then
+			local discarded, derr = discard_existing_job(params, payload.job_id)
+			if not discarded then return nil, derr end
+			local created, cerr = create_job(params, payload)
+			if created then created.superseded = discarded end
+			return created, cerr
+		end
+		return nil, 'bundled_existing_job_image_mismatch'
+	end
+
+	return create_job(params, payload)
 end
 
 local function maybe_start_job(params, job, auto_start)

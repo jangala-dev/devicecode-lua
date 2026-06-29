@@ -35,6 +35,47 @@ local function component_order(cfg)
 	return out
 end
 
+local function job_policy(item)
+	item = item or {}
+	local job = copy(item.job or {})
+	if job.create_if == nil then
+		if item.auto_create ~= nil then
+			job.create_if = item.auto_create == true and 'always' or 'never'
+		else
+			job.create_if = 'image_differs'
+		end
+	end
+	if job.start == nil then job.start = item.auto_start == true and 'auto' or 'manual' end
+	if job.commit == nil then job.commit = 'manual' end
+	return job
+end
+
+local function component_state(snapshot, component)
+	if type(snapshot) ~= 'table' then return nil end
+	local by_id = snapshot.by_id or snapshot.components
+	local rec = type(by_id) == 'table' and by_id[component] or nil
+	if type(rec) == 'table' and type(rec.state) == 'table' then return rec.state end
+	if type(rec) == 'table' then return rec end
+	if snapshot.component == component then return snapshot.state or snapshot end
+	return nil
+end
+
+local function current_image_id(snapshot, component)
+	local state = component_state(snapshot, component)
+	local software = type(state) == 'table' and (state.software or (type(state.raw_facts) == 'table' and state.raw_facts.software)) or nil
+	local image_id = type(software) == 'table' and software.image_id or nil
+	if type(image_id) == 'string' and image_id ~= '' then return image_id end
+	return nil
+end
+
+local function expected_image_id(desired)
+	if type(desired) ~= 'table' then return nil end
+	local artifact = desired.artifact or desired.desired or desired
+	local image_id = desired.expected_image_id or (type(artifact) == 'table' and artifact.expected_image_id)
+	if type(image_id) == 'string' and image_id ~= '' then return image_id end
+	return nil
+end
+
 function M.new(params)
 	params = params or {}
 	return setmetatable({
@@ -128,14 +169,36 @@ function Coordinator:handle_probe_done(ev)
 	return true, nil
 end
 
-function Coordinator:needs_apply(component)
+function Coordinator:needs_apply(component, opts)
+	opts = opts or {}
 	if not self:enabled() then return false end
 	local item = self:spec(component)
-	return type(item) == 'table'
-		and item.auto_create == true
-		and self.desired[component] ~= nil
-		and self.applies[component] == nil
-		and self.last_apply[component] == nil
+	local policy = job_policy(item)
+	local desired = self.desired[component]
+	if type(item) ~= 'table' or desired == nil or self.applies[component] ~= nil or self.last_apply[component] ~= nil then
+		return false
+	end
+	if policy.create_if == 'never' then
+		self.state[component] = 'create_disabled'
+		return false
+	end
+	if policy.create_if == 'image_differs' then
+		local expected = expected_image_id(desired)
+		local current = current_image_id(opts.current or opts.components or opts.observer_snapshot, component)
+		if expected == nil then
+			self.state[component] = 'pending_expected_image'
+			return false
+		end
+		if current == nil then
+			self.state[component] = 'pending_current_image'
+			return false
+		end
+		if current == expected then
+			self.state[component] = 'already_current'
+			return false
+		end
+	end
+	return true
 end
 
 function Coordinator:start_apply(spec)
@@ -170,7 +233,7 @@ function Coordinator:start_ready_applies(spec)
 	local started = {}
 	if not self:enabled() then return started, nil end
 	for _, component in ipairs(self:components()) do
-		if self:needs_apply(component) then
+		if self:needs_apply(component, spec) then
 			local handle, err = self:start_apply {
 				lifetime_scope = spec.lifetime_scope,
 				reaper_scope = spec.reaper_scope,
