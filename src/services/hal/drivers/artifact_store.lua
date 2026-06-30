@@ -827,6 +827,31 @@ function Store:status_op()
 	})
 end
 
+function Store:ensure_roots_op()
+	return attempt_op(function ()
+		local ok, err = fibers.perform(mkdir_p_op(self.transient_root))
+		if not ok then
+			return false, 'transient_root:' .. tostring(err)
+		end
+
+		if self.durable_enabled then
+			ok, err = fibers.perform(mkdir_p_op(self.durable_root))
+			if not ok then
+				return false, 'durable_root:' .. tostring(err)
+			end
+		end
+
+		if self.import_root ~= nil and self.import_root ~= '' then
+			ok, err = fibers.perform(mkdir_p_op(self.import_root))
+			if not ok then
+				return false, 'import_root:' .. tostring(err)
+			end
+		end
+
+		return true, nil
+	end)
+end
+
 function Store:create_sink_op(meta, opts)
 	opts = opts or {}
 	return op.guard(function ()

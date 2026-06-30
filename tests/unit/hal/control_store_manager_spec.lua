@@ -15,6 +15,11 @@ local function rm_rf(path)
   os.execute(('rm -rf %q'):format(path))
 end
 
+local function is_dir(path)
+  local ok = os.execute(('[ -d %q ]'):format(path))
+  return ok == true or ok == 0
+end
+
 local function fresh_manager()
   package.loaded['services.hal.managers.control_store'] = nil
   package.loaded['services.hal.drivers.control_store'] = nil
@@ -69,6 +74,32 @@ function T.apply_config_fails_when_not_started()
     assert(tostring(err):match('not started'))
   end)
 
+  rm_rf(root)
+end
+
+function T.apply_config_creates_missing_control_store_root()
+  local root = mk_tmpdir('csm-missing-root')
+  rm_rf(root)
+  assert(is_dir(root) == false, 'test root should start absent')
+  local M = fresh_manager()
+
+  runfibers.run(function()
+    local dev_ev_ch = channel.new(8)
+    local cap_emit_ch = channel.new(8)
+
+    local ok_start, err_start = fibers.perform(M.start_op(nil, dev_ev_ch, cap_emit_ch))
+    assert(ok_start == true, tostring(err_start))
+
+    local ok_cfg, err_cfg = fibers.perform(M.apply_config_op({
+      { name = 'main', root = root },
+    }))
+    assert(ok_cfg == true, tostring(err_cfg))
+
+    local ok_stop, err_stop = fibers.perform(M.shutdown_op())
+    assert(ok_stop == true, tostring(err_stop))
+  end)
+
+  assert(is_dir(root) == true, 'manager should create the configured control-store root')
   rm_rf(root)
 end
 

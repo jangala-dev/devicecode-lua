@@ -14,6 +14,11 @@ local function rm_rf(path)
   os.execute(('rm -rf %q'):format(path))
 end
 
+local function is_dir(path)
+  local ok = os.execute(('[ -d %q ]'):format(path))
+  return ok == true or ok == 0
+end
+
 local function read_file(path)
   local f, err = io.open(path, 'rb')
   if not f then return nil, err end
@@ -64,6 +69,23 @@ function T.put_get_and_list_round_trip()
     assert(keys[1] == 'alpha')
   end)
 
+  rm_rf(root)
+end
+
+function T.put_op_creates_missing_root_directory()
+  local root = mk_tmpdir('csp-missing-root')
+  rm_rf(root)
+  assert(is_dir(root) == false, 'test root should start absent')
+  local provider = fresh_provider(root)
+
+  runfibers.run(function()
+    local fibers = require 'fibers'
+    local ok_put, err_put = fibers.perform(provider:put_op(assert(cap_args.new.ControlStorePutOpts('alpha', 'payload'))))
+    assert(ok_put == true, tostring(err_put))
+  end)
+
+  assert(is_dir(root) == true, 'put should create the control-store root')
+  assert(read_file(root .. '/alpha') == 'payload')
   rm_rf(root)
 end
 

@@ -26,6 +26,17 @@ local function path_for(root, key)
 	return root .. '/' .. key
 end
 
+local function dirname(path)
+	if path == '/' then
+		return '/'
+	end
+	local d = tostring(path or ''):match('^(.*)/[^/]+$')
+	if d == nil or d == '' then
+		return '.'
+	end
+	return d
+end
+
 local function index_path(root)
 	return root .. '/' .. INDEX_FILE
 end
@@ -91,6 +102,25 @@ local function with_open_file_op(path, mode, body_fn)
 	end)
 end
 
+local function mkdir_p_op(path)
+	return fibers.run_scope_op(function ()
+		local ok, err = file.mkdir_p(path)
+		if not ok then
+			return false, tostring(err)
+		end
+		return true, nil
+	end):wrap(function (st, rep, ok, err)
+		if st ~= 'ok' then
+			return false, tostring(err or rep)
+		end
+		return ok, err
+	end)
+end
+
+function Provider:ensure_root_op()
+	return mkdir_p_op(self.root)
+end
+
 local function read_file_required_op(path)
 	return with_open_file_op(path, 'r', function (f)
 		local body, rerr = fibers.perform(f:read_all_op())
@@ -105,6 +135,11 @@ local function read_index_op(root)
 	local path = index_path(root)
 
 	return fibers.run_scope_op(function ()
+		local ok_root, root_err = fibers.perform(mkdir_p_op(root))
+		if not ok_root then
+			return false, root_err
+		end
+
 		local ok, body_or_err = fibers.perform(read_file_required_op(path))
 		if ok then
 			return true, sort_unique(split_lines(body_or_err))
@@ -124,12 +159,23 @@ local function read_index_op(root)
 end
 
 local function write_file_op(path, data)
-	return with_open_file_op(path, 'w', function (f)
+	return fibers.run_scope_op(function ()
+		local ok_dir, dir_err = fibers.perform(mkdir_p_op(dirname(path)))
+		if not ok_dir then
+			return false, dir_err
+		end
+		return fibers.perform(with_open_file_op(path, 'w', function (f)
 		local n, werr = fibers.perform(f:write_op(data))
 		if n == nil then
 			return false, tostring(werr)
 		end
 		return true, nil
+	end))
+	end):wrap(function (st, rep, ok, err)
+		if st ~= 'ok' then
+			return false, tostring(err or rep)
+		end
+		return ok, err
 	end)
 end
 

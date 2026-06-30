@@ -21,6 +21,11 @@ local function rm_rf(path)
 	os.execute(('rm -rf %q'):format(path))
 end
 
+local function is_dir(path)
+	local ok = os.execute(('[ -d %q ]'):format(path))
+	return ok == true or ok == 0
+end
+
 local function recv_or_fail(ch)
 	local v, err = fibers.perform(ch:get_op())
 	assert(v, tostring(err))
@@ -116,6 +121,43 @@ function T.start_op_emits_initial_meta_and_available_state()
 		assert(ok_stop == true, tostring(stop_err))
 	end)
 
+	rm_rf(base)
+end
+
+function T.start_op_creates_missing_artifact_roots_before_advertising_available()
+	local base = mk_tmpdir('as-provider-missing-roots')
+	local transient_root = base .. '/transient'
+	local durable_root = base .. '/durable'
+	local import_root = base .. '/imports'
+	local emit_ch = channel.new(8)
+	rm_rf(transient_root)
+	rm_rf(durable_root)
+	rm_rf(import_root)
+
+	runfibers.run(function(scope)
+		local driver = provider_mod.new('main', {
+			transient_root = transient_root,
+			durable_root = durable_root,
+			import_root = import_root,
+			durable_enabled = true,
+		}, nil)
+
+		local ok_caps, caps_err = fibers.perform(driver:capabilities_op(emit_ch))
+		assert(ok_caps == true, tostring(caps_err))
+
+		local ok_start, start_err = fibers.perform(driver:start_op(scope))
+		assert(ok_start == true, tostring(start_err))
+
+		recv_or_fail(emit_ch)
+		recv_or_fail(emit_ch)
+
+		local ok_stop, stop_err = fibers.perform(driver:shutdown_op())
+		assert(ok_stop == true, tostring(stop_err))
+	end)
+
+	assert(is_dir(transient_root) == true, 'transient artifact root should be created')
+	assert(is_dir(durable_root) == true, 'durable artifact root should be created')
+	assert(is_dir(import_root) == true, 'artifact import root should be created')
 	rm_rf(base)
 end
 
