@@ -141,6 +141,7 @@ local function start_bundled_applies(self)
 		reaper_scope = self._scope,
 		report_scope = self._scope,
 		jobs = self._jobs,
+		observer_snapshot = self._observer and self._observer:snapshot() or nil,
 		done_tx = self._done_tx,
 	}
 	if not started then return nil, err or 'bundled_apply_start_failed' end
@@ -176,6 +177,18 @@ local function reduce_event(self, ev)
 	if ev.kind == 'service_active_snapshot' then
 		handle_service_active_snapshot(self, ev)
 		return
+	end
+
+	if ev.kind == 'component_observer_changed' then
+		self._observer_seen = ev.version or (self._observer and self._observer:version())
+		local aok, aerr = start_bundled_applies(self)
+		if aok ~= true then error(aerr or 'bundled_apply_start_failed', 0) end
+		assert_update_generation_model(self)
+		return
+	end
+
+	if ev.kind == 'component_observer_closed' then
+		error(ev.reason or 'component_observer_closed', 0)
 	end
 
 	if ev.kind == 'manager_request' then
@@ -235,13 +248,15 @@ function M.run(scope, params)
 		m:terminate(primary or status or 'generation_closed')
 	end)
 
-	local observer = observe_mod.new({
+	local observer = params.observer or observe_mod.new({
 		service_id = params.service_id or 'update',
 		components = (params.config and params.config.components) or {},
 	})
-	scope:finally(function (_, status, primary)
-		observer:terminate(primary or status or 'generation_closed')
-	end)
+	if params.observer == nil then
+		scope:finally(function (_, status, primary)
+			observer:terminate(primary or status or 'generation_closed')
+		end)
+	end
 
 	local jobs = params.jobs
 	if not jobs then
@@ -300,6 +315,7 @@ function M.run(scope, params)
 		pending = {},
 		_done_tx = done_tx,
 		_done_rx = done_rx,
+		_observer_seen = observer and observer:version() or nil,
 		_manager_work = {},
 		_active_snapshot = copy(params.active_snapshot),
 		_events = parent_events,

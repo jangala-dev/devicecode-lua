@@ -39,6 +39,21 @@ function M.next_op(state)
 		pending = state.pending,
 		sources = {
 			{
+				name = 'observer',
+				enabled = function () return state._observer ~= nil end,
+				try_now = function ()
+					local v = state._observer:version()
+					if v == nil or v == state._observer_seen then return nil end
+					return { kind = 'component_observer_changed', version = v, snapshot = state._observer:snapshot() }
+				end,
+				recv_op = function ()
+					return state._observer:changed_op(state._observer_seen):wrap(function (version, snapshot, reason)
+						if version == nil then return { kind = 'component_observer_closed', reason = reason } end
+						return { kind = 'component_observer_changed', version = version, snapshot = snapshot, reason = reason }
+					end)
+				end,
+			},
+			{
 				name = 'done',
 				try_now = function () return try_recv_now(state.done_rx, M.map_done) end,
 				recv_op = function () return state.done_rx:recv_op():wrap(M.map_done) end,
