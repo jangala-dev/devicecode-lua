@@ -26,6 +26,71 @@ local function artifact_ref_of(artifact)
 	return artifact.artifact_ref or artifact.ref or artifact.id
 end
 
+local TERMINAL = { succeeded = true, failed = true, cancelled = true, timed_out = true, superseded = true, discarded = true }
+
+local function optional_number(v)
+	if type(v) == 'number' then return v end
+	if type(v) == 'string' then return tonumber(v) end
+	return nil
+end
+
+local function max_attempts(policy)
+	local n = optional_number(policy and policy.max_attempts)
+	if type(n) ~= 'number' or n <= 0 or n ~= math.floor(n) then return nil end
+	return n
+end
+
+local function max_number(...)
+	local n = 0
+	for i = 1, select('#', ...) do
+		local candidate = optional_number(select(i, ...))
+		if type(candidate) == 'number' and candidate > n then n = candidate end
+	end
+	return n
+end
+
+local function job_attempt(job)
+	if type(job) ~= 'table' then return 0 end
+	local metadata = type(job.metadata) == 'table' and job.metadata or {}
+	local policy = type(job.policy) == 'table' and job.policy or {}
+	local result = type(job.result) == 'table' and job.result or {}
+	return max_number(
+		job.attempt,
+		job.bundled_attempt,
+		metadata.attempt,
+		metadata.bundled_attempt,
+		policy.attempt,
+		result.attempt,
+		result.bundled_attempt
+	)
+end
+
+local function set_payload_attempt(payload, attempt)
+	attempt = optional_number(attempt) or 1
+	payload.attempt = attempt
+	payload.metadata = merge(payload.metadata or {}, { bundled_attempt = attempt })
+	payload.policy = merge(payload.policy or {}, { attempt = attempt })
+	return payload
+end
+
+local function job_policy(spec)
+	spec = spec or {}
+	local job = copy(spec.job or {})
+	if job.job_id == nil then job.job_id = spec.job_id or (spec.source and spec.source.job_id) end
+	if job.create_if == nil then
+		if spec.auto_create ~= nil then
+			job.create_if = spec.auto_create == true and 'always' or 'never'
+		else
+			job.create_if = 'image_differs'
+		end
+	end
+	if job.start == nil then job.start = spec.auto_start == true and 'auto' or 'manual' end
+	if job.commit == nil then job.commit = 'manual' end
+	if job.reconcile == nil then job.reconcile = 'required' end
+	if job.supersede == nil then job.supersede = 'same_job_if_image_changed' end
+	return job
+end
+
 local function transition(jobs, cmd)
 	if type(jobs) ~= 'table' or type(jobs.admit_transition) ~= 'function' then
 		return nil, 'job_runtime_unavailable'
@@ -40,7 +105,8 @@ local function create_payload(spec, desired)
 	local artifact = copy(desired.artifact or desired.desired or desired)
 	local component = assert(spec.component, 'bundled_apply component required')
 	local source = spec.source or {}
-	local job_id = spec.job_id or source.job_id or ('bundled-' .. component)
+	local policy = job_policy(spec)
+	local job_id = policy.job_id or spec.job_id or source.job_id or ('bundled-' .. component)
 	local metadata = merge({
 		source = 'bundled',
 		bundled = true,
@@ -58,20 +124,25 @@ local function create_payload(spec, desired)
 		artifact = artifact,
 		artifact_ref = desired.artifact_ref or artifact_ref_of(artifact),
 		metadata = metadata,
-		auto_start = spec.auto_start == true,
+		policy = policy,
+		auto_start = policy.start == 'auto',
 	}
 end
 
-local function create_or_reuse_job(params, payload)
-	local existing = params.jobs:get(payload.job_id)
-	if existing ~= nil then
-		return {
-			status = 'existing',
-			job_id = payload.job_id,
-			job = existing,
-		}, nil
-	end
+local function discard_existing_job(params, job_id)
+	local result, err = transition(params.jobs, {
+		kind = 'discard_job',
+		generation = params.generation,
+		job_id = job_id,
+		reason = 'bundled_supersede_changed_image',
+	})
+	if not result then return nil, err or 'bundled_supersede_discard_failed' end
+	if result.status ~= 'persisted' then return nil, result.reason or 'bundled_supersede_discard_rejected' end
+	return result, nil
+end
 
+local function create_job(params, payload, attempt)
+	set_payload_attempt(payload, attempt)
 	local result, err = transition(params.jobs, {
 		kind = 'create_job',
 		generation = params.generation,
@@ -90,6 +161,55 @@ local function create_or_reuse_job(params, payload)
 	end
 
 	return nil, result.reason or err or 'bundled_create_job_failed'
+end
+
+local function create_or_reuse_job(params, payload)
+	local existing = params.jobs:get(payload.job_id)
+	if existing ~= nil then
+		local policy = type(payload.policy) == 'table' and payload.policy or {}
+		local supersede = policy.supersede
+		if existing.expected_image_id == payload.expected_image_id then
+			if TERMINAL[existing.state] == true and supersede == 'same_job_if_image_changed' then
+				-- A previous successful convergence for this image must not consume
+				-- retry budget if the MCU later runs a different image again
+				-- (for example after a downgrade/rollback).  Treat that as a
+				-- fresh convergence episode.  Failed/timed-out terminal jobs remain
+				-- bounded by the retry budget to avoid loops on a bad bundle.
+				local next_attempt
+				local limit = max_attempts(policy)
+				if limit == nil then return nil, 'bundled_max_attempts_required' end
+				if existing.state == 'succeeded' then
+					next_attempt = 1
+				else
+					local previous_attempt = job_attempt(existing)
+					next_attempt = previous_attempt + 1
+					if next_attempt > limit then
+						return nil, 'bundled_retry_exhausted:' .. tostring(previous_attempt) .. '/' .. tostring(limit)
+					end
+				end
+				local discarded, derr = discard_existing_job(params, payload.job_id)
+				if not discarded then return nil, derr end
+				local created, cerr = create_job(params, payload, next_attempt)
+				if created then created.superseded = discarded end
+				return created, cerr
+			end
+			return {
+				status = 'existing',
+				job_id = payload.job_id,
+				job = existing,
+			}, nil
+		end
+		if TERMINAL[existing.state] == true and supersede == 'same_job_if_image_changed' then
+			local discarded, derr = discard_existing_job(params, payload.job_id)
+			if not discarded then return nil, derr end
+			local created, cerr = create_job(params, payload, 1)
+			if created then created.superseded = discarded end
+			return created, cerr
+		end
+		return nil, 'bundled_existing_job_image_mismatch'
+	end
+
+	return create_job(params, payload, 1)
 end
 
 local function maybe_start_job(params, job, auto_start)

@@ -185,4 +185,49 @@ function tests.test_component_apply_failure_after_start_keeps_completion_and_rep
   end)
 end
 
+function tests.test_component_auto_commit_policy_admits_commit_after_stage_apply()
+  fibers.run(function (scope)
+    local service_tx, service_rx = mailbox.new(16, { full = 'reject_newest' })
+    local seen = {}
+    local fake_jobs = {
+      admit_transition = function (_, cmd)
+        seen[#seen + 1] = cmd
+        if cmd.kind == 'apply_active_result' then
+          return transition_handle({
+            status = 'persisted',
+            job = { job_id = 'j1', component = 'cm5', generation = 1, state = 'awaiting_commit', policy = { commit = 'auto' } },
+          }), nil
+        elseif cmd.kind == 'start_job' then
+          return transition_handle({ status = 'persisted', job_id = cmd.job_id, phase = cmd.phase, token = 'commit-token', job = { job_id = cmd.job_id, component = 'cm5', state = 'committing' } }), nil
+        end
+        return transition_handle({ status = 'rejected', reason = 'unexpected' }), nil
+      end,
+      list = function () return {} end,
+    }
+    local component = assert(active.start_component(scope, {
+      service_id = 'update',
+      done_tx = service_tx,
+      work_scope = scope,
+      jobs = fake_jobs,
+    }))
+    local lease = assert(component:claim({ job_id = 'j1', generation = 1, phase = 'stage' }))
+    assert(component:start_work({
+      lease = lease,
+      job = { job_id='j1', component='cm5', generation = 1, policy = { commit = 'auto' } },
+      backend = stage_backend({ ok=true }),
+    }))
+    local completed = fibers.perform(service_rx:recv_op())
+    assert_eq(completed.reason, 'active_job_completed')
+    local applied = fibers.perform(service_rx:recv_op())
+    assert_eq(applied.reason, 'active_job_applied')
+    local auto = fibers.perform(service_rx:recv_op())
+    assert_eq(auto.reason, 'policy_auto_commit_started')
+    assert_eq(seen[1].kind, 'apply_active_result')
+    assert_eq(seen[2].kind, 'start_job')
+    assert_eq(seen[2].phase, 'commit')
+    assert_eq(seen[2].reason, 'policy_auto_commit')
+    component:cancel('test complete')
+  end)
+end
+
 return tests
