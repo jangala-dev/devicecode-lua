@@ -15,8 +15,14 @@ local TYPES = {
 	['.css']  = 'text/css',
 	['.js']   = 'application/javascript',
 	['.json'] = 'application/json',
+	['.webmanifest'] = 'application/manifest+json',
 	['.png']  = 'image/png',
 	['.svg']  = 'image/svg+xml',
+	['.ico']  = 'image/x-icon',
+	['.webp'] = 'image/webp',
+	['.woff'] = 'font/woff',
+	['.woff2'] = 'font/woff2',
+	['.ttf']  = 'font/ttf',
 	['.txt']  = 'text/plain',
 }
 
@@ -40,8 +46,17 @@ end
 
 function M.run(scope, owner, route, opts)
 	opts = opts or {}
-	local filename = clean_path(opts.root or '.', route.path)
+	local requested_path = route.path
+	local filename = clean_path(opts.root or '.', requested_path)
 	local f, err = file_io.open(filename, 'r')
+	if not f then
+		local has_ext = tostring(requested_path or ''):match('/[^/]*%.[^/%.]+$') ~= nil
+		if opts.spa_fallback ~= false and not has_ext then
+			filename = clean_path(opts.root or '.', '/index.html')
+			f, err = file_io.open(filename, 'r')
+			if f then requested_path = '/index.html' end
+		end
+	end
 	if not f then
 		perform_required(owner:reply_error_op(404, 'not_found'), 'static not found response failed')
 		return { status = 'not_found', path = route.path, err = err }
@@ -76,7 +91,7 @@ function M.run(scope, owner, route, opts)
 	perform_required(owner:end_stream_op(), 'static end write failed')
 	file_owner:terminate_checked('done', 'static file cleanup')
 	f = nil
-	return { status = 'ok', path = route.path, bytes = bytes }
+	return { status = 'ok', path = requested_path, bytes = bytes }
 end
 
 return M

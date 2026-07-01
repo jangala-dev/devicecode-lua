@@ -28,7 +28,7 @@ function M.test_normalise_supplies_http_static_sse_defaults_and_accepts_explicit
 	eq(cfg.http.enabled, true)
 	eq(cfg.http.cap_id, 'main')
 	eq(cfg.http.port, 8080)
-	eq(cfg.static.root, 'www')
+	eq(cfg.static.root, 'src/services/ui/www')
 	eq(cfg.sse.enabled, true)
 	eq(cfg.updates.upload.enabled, true)
 	eq(cfg.updates.upload.max_bytes, 1024 * 1024)

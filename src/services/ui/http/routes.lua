@@ -2,6 +2,8 @@
 --
 -- Pure route decoding for UI HTTP requests.
 
+local safe = require 'coxpcall'
+
 local M = {}
 
 local function split_path(path)
@@ -16,7 +18,7 @@ end
 
 local function method_of(ctx)
 	if ctx and type(ctx.method) == 'function' then
-		local ok, v = pcall(function () return ctx:method() end)
+		local ok, v = safe.pcall(function () return ctx:method() end)
 		if ok and v ~= nil then return string.upper(tostring(v)) end
 	end
 	return string.upper(tostring((ctx and (ctx.method or ctx.verb)) or 'GET'))
@@ -24,7 +26,7 @@ end
 
 local function path_of(ctx)
 	if ctx and type(ctx.path) == 'function' then
-		local ok, v = pcall(function () return ctx:path() end)
+		local ok, v = safe.pcall(function () return ctx:path() end)
 		if ok and v ~= nil then return v end
 	end
 	return (ctx and (ctx.path or ctx.uri)) or '/'
@@ -53,6 +55,19 @@ function M.decode(ctx)
 	if parts[2] == 'session' then
 		if method == 'GET' then return { kind = 'session_get' } end
 		if method == 'DELETE' or method == 'POST' then return { kind = 'logout' } end
+	end
+
+	if parts[2] == 'local-ui' and parts[3] == 'bootstrap' and method == 'GET' then
+		return { kind = 'local_ui_bootstrap' }
+	end
+
+	if parts[2] == 'gsm' and parts[3] == 'apns' and parts[4] == 'custom' then
+		if method == 'GET' then return { kind = 'gsm_apns_get' } end
+		if method == 'PUT' then return { kind = 'gsm_apns_put' } end
+	end
+
+	if parts[2] == 'diagnostics' and method == 'GET' then
+		return { kind = 'diagnostics_stub' }
 	end
 
 	if parts[2] == 'state' and method == 'GET' then

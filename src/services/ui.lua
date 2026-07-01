@@ -14,6 +14,7 @@ local M = {
 	read_model_store = require 'services.ui.read_model_store',
 	read_model_watches = require 'services.ui.read_model_watches',
 	queries = require 'services.ui.queries',
+	local_model = require 'services.ui.local_model',
 	user_operation = require 'services.ui.user_operation',
 	http = {
 		listener = require 'services.ui.http.listener',

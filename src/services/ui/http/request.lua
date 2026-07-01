@@ -8,10 +8,12 @@ local routes        = require 'services.ui.http.routes'
 local static        = require 'services.ui.http.static'
 local sse           = require 'services.ui.http.sse'
 local queries       = require 'services.ui.queries'
+local local_model   = require 'services.ui.local_model'
 local auth          = require 'services.ui.auth'
 local user_operation = require 'services.ui.user_operation'
 local upload        = require 'services.ui.update.upload'
 local resource      = require 'devicecode.support.resource'
+local safe          = require 'coxpcall'
 
 local ok_cjson, cjson = pcall(require, 'cjson.safe')
 if not ok_cjson then cjson = require 'cjson' end
@@ -37,7 +39,7 @@ local function header_one(headers, name)
 		if v ~= nil then return v end
 	end
 	if type(headers.get) == 'function' then
-		local ok, v = pcall(function () return headers:get(string.lower(name)) end)
+		local ok, v = safe.pcall(function () return headers:get(string.lower(name)) end)
 		if ok and v ~= nil then return v end
 	end
 	if type(headers) == 'table' then
@@ -163,6 +165,89 @@ local function handle_read(owner, route, deps)
 	end
 	perform_response(owner:reply_json_op(200, result))
 	return { status = 'ok', route = 'read' }
+end
+
+
+local function handle_local_ui_bootstrap(owner, deps)
+	local model = assert(deps.model, 'local UI bootstrap requires model')
+	local result = local_model.bootstrap(model:snapshot())
+	perform_response(owner:reply_json_op(200, result))
+	return { status = 'ok', route = 'local_ui_bootstrap' }
+end
+
+local function call_local_rpc(scope, topic, payload, deps, timeout)
+	return user_operation.run_op {
+		principal = { kind = 'service', id = 'ui-local', roles = { 'admin' } },
+		conn = deps.conn,
+		connect = deps.connect,
+		bus = deps.bus,
+		disconnect_borrowed = false,
+		timeout = timeout or deps.command_timeout or 5.0,
+		run_op = function (_, conn)
+			return conn:call_op(topic, payload or {}, { timeout = false })
+				:wrap(function (reply, call_err)
+					if reply == nil then return nil, call_err or 'upstream_failed' end
+					if type(reply) == 'table' and type(reply.ok) == 'boolean' then
+						if reply.ok then return { value = reply.reason }, nil end
+						return nil, tostring(reply.reason or call_err or 'upstream_failed')
+					end
+					return { value = reply }, nil
+				end)
+		end,
+	}
+end
+
+local function handle_gsm_apns_get(scope, owner, deps)
+	local st, _rep, result_or_primary = fibers.perform(call_local_rpc(
+		scope,
+		{ 'cap', 'gsm', 'main', 'rpc', 'list-custom-apns' },
+		{},
+		deps,
+		deps.apn_timeout or 5.0
+	))
+	if st ~= 'ok' then
+		perform_response(owner:reply_error_op(503, result_or_primary or 'gsm_apns_unavailable'))
+		return { status = 'failed', err = result_or_primary }
+	end
+	perform_response(owner:reply_json_op(200, result_or_primary.value or {}))
+	return { status = 'ok', route = 'gsm_apns_get' }
+end
+
+local function handle_gsm_apns_put(scope, owner, ctx, deps)
+	local body, berr = json_body_table(ctx, deps, { require_json_content_type = true })
+	if not body then
+		perform_response(owner:reply_error_op(nil, berr))
+		return { status = 'bad_request', err = berr }
+	end
+	local st, _rep, result_or_primary = fibers.perform(call_local_rpc(
+		scope,
+		{ 'cap', 'gsm', 'main', 'rpc', 'replace-custom-apns' },
+		body,
+		deps,
+		deps.apn_timeout or 5.0
+	))
+	if st ~= 'ok' then
+		perform_response(owner:reply_error_op(400, result_or_primary or 'gsm_apns_update_failed'))
+		return { status = 'failed', err = result_or_primary }
+	end
+	perform_response(owner:reply_json_op(200, { ok = true, apns = result_or_primary.value or {} }))
+	return { status = 'ok', route = 'gsm_apns_put' }
+end
+
+local function handle_diagnostics_stub(owner)
+	perform_response(owner:reply_json_op(200, {
+		schema = 'devicecode.diagnostics.stub/1',
+		stub = true,
+		diagnostics = {
+			bootstrap_installed = { expected = 0, installed = 0, missing = {} },
+			modems_installed = { expected = 0, installed = 0, missing = {} },
+			packages_installed = { expected = 0, installed = 0, missing = {} },
+			packages_running = { expected = 0, installed = 0, missing = {} },
+			services_running = { expected = 0, installed = 0, missing = {} },
+		},
+		diagnostics_logs = { 'Diagnostics service is not implemented in this build.' },
+	}))
+	return { status = 'ok', route = 'diagnostics_stub' }
 end
 
 local function handle_login(owner, ctx, deps)
@@ -383,6 +468,14 @@ function M.run(scope, ctx, deps)
 
 	if route.kind == 'read' then
 		return handle_read(owner, route, deps)
+	elseif route.kind == 'local_ui_bootstrap' then
+		return handle_local_ui_bootstrap(owner, deps)
+	elseif route.kind == 'gsm_apns_get' then
+		return handle_gsm_apns_get(scope, owner, deps)
+	elseif route.kind == 'gsm_apns_put' then
+		return handle_gsm_apns_put(scope, owner, ctx, deps)
+	elseif route.kind == 'diagnostics_stub' then
+		return handle_diagnostics_stub(owner)
 	elseif route.kind == 'login' then
 		return handle_login(owner, ctx, deps)
 	elseif route.kind == 'logout' then
