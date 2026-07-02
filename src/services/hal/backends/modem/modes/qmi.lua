@@ -283,7 +283,8 @@ local function add_mode_funcs(ModemBackend)
                 "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-off=1",
                 stdin = "null",
                 stdout = "pipe",
-                stderr = "stdout"
+                stderr = "stdout",
+                flags = process_flags.owned_monitor_flags(),
             }
             local _, status, code, _, power_err = fibers.perform(cmd:combined_output_op())
             if status ~= "exited" or code ~= 0 then
@@ -296,7 +297,8 @@ local function add_mode_funcs(ModemBackend)
                 "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-on=1",
                 stdin = "null",
                 stdout = "pipe",
-                stderr = "stdout"
+                stderr = "stdout",
+                flags = process_flags.owned_monitor_flags(),
             }
             local _, status_on, code_on, _, err_on = fibers.perform(cmd_on:combined_output_op())
             if status_on ~= "exited" or code_on ~= 0 then

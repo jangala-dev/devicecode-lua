@@ -38,4 +38,28 @@ function T.owned_monitor_flags_adds_parent_death_signal_only_when_supported()
     end)
 end
 
+local function read_qmi_source()
+    local candidates = {
+        '../src/services/hal/backends/modem/modes/qmi.lua',
+        'src/services/hal/backends/modem/modes/qmi.lua',
+    }
+    for _, path in ipairs(candidates) do
+        local f = io.open(path, 'r')
+        if f then
+            local src = f:read('*a')
+            f:close()
+            return src
+        end
+    end
+    error('could not read qmi.lua')
+end
+
+function T.qmi_sim_power_cycle_commands_use_owned_process_flags()
+    local src = read_qmi_source()
+    assert(src:match('uim%-sim%-power%-off=1"[%s%S]-flags%s*=%s*process_flags%.owned_monitor_flags%(%)'),
+        'qmicli SIM power-off command must use owned process flags')
+    assert(src:match('uim%-sim%-power%-on=1"[%s%S]-flags%s*=%s*process_flags%.owned_monitor_flags%(%)'),
+        'qmicli SIM power-on command must use owned process flags')
+end
+
 return T
