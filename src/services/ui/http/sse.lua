@@ -70,6 +70,9 @@ local function default_patterns()
 	for _, prefix in ipairs(local_model.ALLOW_PREFIXES or {}) do
 		if #prefix > 0 then out[#out + 1] = pattern_from_prefix(prefix) end
 	end
+	for _, pattern in ipairs(local_model.LIVE_EVENT_PATTERNS or {}) do
+		if #pattern > 0 then out[#out + 1] = copy_topic(pattern) end
+	end
 	return out
 end
 
@@ -115,7 +118,7 @@ end
 
 local function event_allowed(ev)
 	if type(ev) ~= 'table' or ev.topic == nil then return true end
-	return local_model.allowed(ev.topic)
+	return local_model.allowed_event(ev.topic)
 end
 
 local function project_event(ev)

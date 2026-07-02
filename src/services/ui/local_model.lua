@@ -31,6 +31,11 @@ local ALLOW_PREFIXES = {
 	{ 'obs', 'v1', 'system', 'metric' },
 }
 
+local LOG_EVENT_PATTERN = { 'obs', 'v1', '+', 'event', 'log' }
+local LIVE_EVENT_PATTERNS = {
+	LOG_EVENT_PATTERN,
+}
+
 local DENY_PREFIXES = {
 	{ 'cfg' },
 	{ 'raw' },
@@ -47,6 +52,23 @@ local function allowed(topic)
 		if starts_with(topic, prefix) then return true end
 	end
 	return false
+end
+
+local function matches_log_event(topic)
+	return type(topic) == 'table'
+		and #topic == 5
+		and topic[1] == 'obs'
+		and topic[2] == 'v1'
+		and topic[3] ~= nil
+		and topic[4] == 'event'
+		and topic[5] == 'log'
+end
+
+local function allowed_event(topic)
+	for _, prefix in ipairs(DENY_PREFIXES) do
+		if starts_with(topic, prefix) then return false end
+	end
+	return allowed(topic) or matches_log_event(topic)
 end
 
 local function sorted_items(snapshot)
@@ -95,7 +117,7 @@ end
 
 function M.project_event(ev)
 	if type(ev) ~= 'table' or ev.topic == nil then return copy(ev) end
-	if not allowed(ev.topic) then return nil end
+	if not allowed_event(ev.topic) then return nil end
 
 	local out = copy(ev)
 	out.topic = copy(ev.topic)
@@ -117,7 +139,10 @@ function M.bootstrap(snapshot)
 end
 
 M.allowed = allowed
+M.allowed_event = allowed_event
 M.ALLOW_PREFIXES = ALLOW_PREFIXES
 M.DENY_PREFIXES = DENY_PREFIXES
+M.LOG_EVENT_PATTERN = LOG_EVENT_PATTERN
+M.LIVE_EVENT_PATTERNS = LIVE_EVENT_PATTERNS
 
 return M

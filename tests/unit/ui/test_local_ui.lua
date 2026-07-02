@@ -33,12 +33,12 @@ function tests.test_sse_defaults_use_local_ui_prefixes_without_root_hash()
 	for _, pattern in ipairs(defaults) do
 		local key = table.concat(pattern, '/')
 		if key == '#' then fail('local-ui SSE must not subscribe to root #') end
-		eq(pattern[#pattern], '#', 'SSE default pattern should end with #')
 		seen[key] = true
 	end
 	ok(seen['state/device/#'], 'state/device stream missing')
 	ok(seen['state/net/#'], 'state/net stream missing')
 	ok(seen['obs/v1/system/metric/#'], 'system metrics stream missing')
+	ok(seen['obs/v1/+/event/log'], 'live log stream missing')
 end
 
 function tests.test_local_model_allow_list_excludes_cfg_and_raw()
@@ -71,6 +71,35 @@ function tests.test_local_model_allow_list_excludes_cfg_and_raw()
 	eq(boot.items['state/device/components'].payload.components, nil)
 	if boot.items['cfg/gsm'] then fail('cfg/gsm leaked into local-ui bootstrap') end
 	if boot.items['raw/member/mcu'] then fail('raw member leaked into local-ui bootstrap') end
+end
+
+function tests.test_local_model_admits_live_logs_without_bootstrapping_them()
+	local model = read_model.new()
+	model:set({ 'obs', 'v1', 'net', 'event', 'log' }, {
+		level = 'warn',
+		message = 'not retained',
+	})
+
+	local log_event = local_model.project_event({
+		op = 'set',
+		topic = { 'obs', 'v1', 'net', 'event', 'log' },
+		payload = {
+			level = 'warn',
+			message = 'not retained',
+		},
+	})
+	ok(log_event, 'canonical service log event should be projected')
+	eq(log_event.payload.message, 'not retained')
+
+	local ui_log = local_model.project_event({
+		op = 'set',
+		topic = { 'obs', 'v1', 'ui', 'event', 'log' },
+		payload = { level = 'info', message = 'hidden' },
+	})
+	eq(ui_log, nil, 'ui service logs should remain denied')
+
+	local boot = local_model.bootstrap(model:snapshot())
+	if boot.items['obs/v1/net/event/log'] then fail('log event leaked into local-ui bootstrap') end
 end
 
 return tests
