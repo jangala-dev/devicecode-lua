@@ -31,9 +31,6 @@ local safe = require 'coxpcall'
 local bit = rawget(_G, 'bit') or require 'bit32'
 
 local perform  = fibers.perform
-local unpack  = _G.unpack or rawget(table, 'unpack')
-
-
 local band, bor, bxor, lshift, rshift = bit.band, bit.bor, bit.bxor, bit.lshift, bit.rshift
 
 local M = {}
@@ -58,6 +55,12 @@ local function is_plain_table(x) return type(x) == 'table' and getmetatable(x) =
 local function argv_push(argv, ...)
 	local n = select('#', ...)
 	for i = 1, n do argv[#argv + 1] = select(i, ...) end
+end
+
+local function exec_spec(argv)
+	local spec = { stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
+	for i = 1, #argv do spec[i] = argv[i] end
+	return spec
 end
 
 local function sorted_keys(t)
@@ -144,7 +147,7 @@ local function run_cmd(argv)
 		return nil, out or '', err or out or 'command failed', code, st, sig
 	end
 
-	local cmd = exec_mod.command(unpack(argv))
+	local cmd = exec_mod.command(exec_spec(argv))
 	local out, st, code, sig, err = perform(cmd:combined_output_op())
 	local ok = (st == 'exited' and code == 0)
 	return ok, out or '', err, code, st, sig

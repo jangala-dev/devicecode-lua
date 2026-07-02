@@ -77,20 +77,28 @@ local function is_device_on_hub_port(hub, port)
     if not subpaths then return false, "invalid hub" end
     if not subpaths[port] then return false, "invalid port" end
     local path = USB_HUB_PREFIX .. hub .. '/' .. subpaths[port]
-    local cmd = exec.command('test', '-e', path)
+    local cmd = exec.command { 'test', '-e', path, stdin = 'null', stdout = 'null', stderr = 'null' }
     local _, _, code = perform(cmd:run_op())
     return code == 0, nil
 end
 
---- Write an integer to a sysfs path via /bin/sh.
+--- Write an integer to a sysfs path.
 ---@param path string
 ---@param value integer
 ---@return string? error
 local function exec_write_to_file(path, value)
-    local cmd = exec.command('/bin/sh', '-c', ('echo %d > %s'):format(value, path))
-    local _, _, code = perform(cmd:run_op())
-    if code ~= 0 then
-        return ("write to %s failed (exit %d)"):format(path, code or -1)
+    local f, ferr = file.open(path, 'w')
+    if not f then
+        return ("open %s failed: %s"):format(path, tostring(ferr or 'unknown'))
+    end
+
+    local n, werr = perform(f:write_op(tostring(value) .. '\n'))
+    local ok, cerr = perform(f:close_op())
+    if n == nil then
+        return ("write to %s failed: %s"):format(path, tostring(werr or 'unknown'))
+    end
+    if not ok then
+        return ("close %s failed: %s"):format(path, tostring(cerr or 'unknown'))
     end
     return nil
 end
@@ -151,7 +159,7 @@ end
 ---@param hub integer
 ---@return string? error
 local function set_usb_hub_power(enabled, hub)
-    local cmd = exec.command('uhubctl', '-e', '-l', tostring(hub), '-a', tostring(enabled and 1 or 0))
+    local cmd = exec.command { 'uhubctl', '-e', '-l', tostring(hub), '-a', tostring(enabled and 1 or 0), stdin = 'null', stdout = 'null', stderr = 'null' }
     local _, _, code = perform(cmd:run_op())
     if code ~= 0 then
         return ("uhubctl hub %d power %s failed (exit %d)"):format(
@@ -164,7 +172,7 @@ end
 ---@return integer? timestamp
 ---@return string? error
 local function get_vl805_timestamp()
-    local cmd = exec.command('vcgencmd', 'bootloader_version')
+    local cmd = exec.command { 'vcgencmd', 'bootloader_version', stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
     local out, _, code = perform(cmd:output_op())
     if code ~= 0 or not out then
         return nil, "vcgencmd bootloader_version failed"

@@ -1,6 +1,6 @@
 .PHONY: \
 	preflight fetch verify reset run wait provision provision-force ensure-mwan3 \
-	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-openwrt-jan-client-dhcp-dns test-openwrt-int-bridge-client-dhcp-dns test-openwrt-dnsmasq-multi-instance-resilience \
+	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-devicecode-exec-containment test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-openwrt-jan-client-dhcp-dns test-openwrt-int-bridge-client-dhcp-dns test-openwrt-dnsmasq-multi-instance-resilience \
 	setup-bridge-client-fabric teardown-bridge-client-fabric \
 	network-lab-fetch network-lab-start network-lab-wait network-lab-provision network-lab-sync network-lab-ssh network-lab-stop network-lab-test test-network-lab \
 	test openwrt-vm-test clean
@@ -210,10 +210,15 @@ test-scp:
 	grep -q devicecode-openwrt-vm "$$tmp.out"; \
 	rm -f "$$tmp" "$$tmp.out"
 
-test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-scp
+test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-devicecode-exec-containment test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-scp
 
 openwrt-vm-test: preflight fetch verify stop reset run wait provision test
 
 clean:
 	./scripts/stop-vm
 	rm -rf work
+
+test-devicecode-exec-containment:
+	@echo "==> devicecode exec containment"
+	@$(RUN) tests/test_devicecode_exec_containment.sh
+

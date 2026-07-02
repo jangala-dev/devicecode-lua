@@ -684,7 +684,20 @@ end
 ---@return string error
 function Modem:stop(timeout)
     timeout = timeout or DEFAULT_STOP_TIMEOUT
-    self.scope:cancel()
+
+    if self.backend and self.backend.shutdown_op then
+        local ok, err = fibers.perform(self.backend:shutdown_op(1.0))
+        if not ok then
+            self.log:warn({
+                what = "backend_shutdown_failed",
+                address = self.address,
+                imei = self.imei,
+                err = tostring(err),
+            })
+        end
+    end
+
+    self.scope:cancel("modem stopping")
 
     local source = fibers.perform(op.named_choice {
         join = self.scope:join_op(),
@@ -737,8 +750,21 @@ function Modem:init()
     local ok, err = self.scope:spawn(function()
         self.backend = modem_backend_provider.new(self.address)
 
-        self.backend:start_sim_presence_monitor()
-        self.backend:start_state_monitor()
+        self.scope:finally(function()
+            if self.backend and self.backend.terminate then
+                self.backend:terminate("modem_driver_scope_exit")
+            end
+        end)
+
+        local sim_ok, sim_err = self.backend:start_sim_presence_monitor()
+        if not sim_ok then
+            error("failed to start SIM presence monitor: " .. tostring(sim_err))
+        end
+
+        local state_ok, state_err = self.backend:start_state_monitor()
+        if not state_ok then
+            error("failed to start modem state monitor: " .. tostring(state_err))
+        end
 
         local identity_info, identity_err = self.backend:read_identity()
         if not identity_info then

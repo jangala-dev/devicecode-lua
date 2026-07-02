@@ -19,8 +19,6 @@ local names_mod = require 'services.hal.backends.network.providers.openwrt.names
 local hal_types = require 'services.hal.types.core'
 
 local perform = fibers.perform
-local unpack = _G.unpack or rawget(table, 'unpack')
-
 local M = {}
 local Provider = {}
 Provider.__index = Provider
@@ -62,6 +60,20 @@ local function log_provider(self, level, payload)
 	end
 end
 
+local function exec_spec(argv, opts)
+	opts = opts or {}
+	local spec = {}
+	for i = 1, #argv do
+		spec[i] = argv[i]
+	end
+	spec.stdin  = opts.stdin  ~= nil and opts.stdin  or 'null'
+	spec.stdout = opts.stdout ~= nil and opts.stdout or 'null'
+	spec.stderr = opts.stderr ~= nil and opts.stderr or 'null'
+	if opts.flags ~= nil then spec.flags = opts.flags end
+	if opts.shutdown_grace ~= nil then spec.shutdown_grace = opts.shutdown_grace end
+	return spec
+end
+
 local is_plain_table
 local sorted_keys
 
@@ -70,7 +82,7 @@ local function run_provider_command(self, argv)
 	if type(runner) == 'function' then
 		return runner(argv)
 	end
-	local cmd = exec.command(unpack(argv))
+	local cmd = exec.command(exec_spec(argv))
 	local status, code = perform(cmd:run_op())
 	if status == 'exited' and code == 0 then return true, nil end
 	return nil, table.concat(argv, ' ') .. ' exited with status=' .. tostring(status) .. ' code=' .. tostring(code)
@@ -1362,7 +1374,7 @@ local function append_error(list, err)
 end
 
 local function command_capture(argv)
-	local cmd = exec.command(unpack(argv))
+	local cmd = exec.command(exec_spec(argv, { stdout = 'pipe', stderr = 'stdout' }))
 	local out, st, code, sig, err = perform(cmd:combined_output_op())
 	local ok = (st == 'exited' and code == 0)
 	if ok then return true, out or '', nil end

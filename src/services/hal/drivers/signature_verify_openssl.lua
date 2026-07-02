@@ -93,7 +93,7 @@ function Driver:verify_ed25519_op(pubkey_pem, message, signature)
 				return false, serr
 			end
 
-			local cmd = self.exec.command(
+			local cmd = self.exec.command {
 				'openssl',
 				'pkeyutl',
 				'-verify',
@@ -101,8 +101,11 @@ function Driver:verify_ed25519_op(pubkey_pem, message, signature)
 				'-inkey',  pubf.path,
 				'-sigfile', sigf.path,
 				'-in',      msgf.path,
-				'-rawin'
-			)
+				'-rawin',
+				stdin = 'null',
+				stdout = 'pipe',
+				stderr = 'stdout',
+			}
 
 			local out, st, code, sig, cerr = fibers.perform(cmd:combined_output_op())
 			local detail = tostring(cerr or out or '')

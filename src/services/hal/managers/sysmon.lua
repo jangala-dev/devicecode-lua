@@ -60,7 +60,7 @@ end
 --- List /sys/class/thermal/ and return table of {zone_id, sysfs_dir} entries.
 ---@return table zones  list of {zone_id: string, sysfs_dir: string}
 local function discover_thermal_zones()
-    local cmd = exec.command('ls', '/sys/class/thermal/')
+    local cmd = exec.command { 'ls', '/sys/class/thermal/', stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
     local out, status, code = fibers.perform(cmd:output_op())
     if status ~= 'exited' or code ~= 0 then
         dlog(SysmonManager.logger, 'warn', { what = 'thermal_discovery_failed', code = tostring(code) })

@@ -53,7 +53,7 @@ function PowerDriver:shutdown(opts)
         -- Give caller time to receive the reply before the system shuts down.
         perform(sleep.sleep_op(delay))
         dlog(self.logger, 'info', { what = 'executing_shutdown' })
-        local cmd = exec.command('shutdown', '-h', 'now')
+        local cmd = exec.command { 'shutdown', '-h', 'now', stdin = 'null', stdout = 'null', stderr = 'null' }
         perform(cmd:run_op())
     end)
     return true, nil
@@ -70,7 +70,7 @@ function PowerDriver:reboot(opts)
     self.scope:spawn(function()
         perform(sleep.sleep_op(delay))
         dlog(self.logger, 'info', { what = 'executing_reboot' })
-        local cmd = exec.command('reboot')
+        local cmd = exec.command { 'reboot', stdin = 'null', stdout = 'null', stderr = 'null' }
         perform(cmd:run_op())
     end)
     return true, nil

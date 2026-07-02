@@ -16,6 +16,34 @@ local SYSFS_STATS = {
     'rx_errors', 'tx_errors',
 }
 
+local function owned_process_flags()
+    local flags = { process_group = true }
+    if type(exec.supports) == 'function' and exec.supports('parent_death_signal') then
+        flags.parent_death_signal = 'TERM'
+    end
+    return flags
+end
+
+local function terminate_command(cmd, sig)
+    if not cmd or type(cmd.kill) ~= 'function' then return true, nil end
+    local ok, a, b = pcall(function() return cmd:kill(sig or 15) end)
+    if not ok then return nil, tostring(a) end
+    if a == false or a == nil then return nil, tostring(b or 'command kill failed') end
+    return true, nil
+end
+
+local function shutdown_command_op(cmd, timeout)
+    return op.guard(function()
+        if not cmd then return op.always(true, '') end
+        return cmd:shutdown_op(timeout or 0.2):wrap(function(status, _code, _sig, err)
+            if status == 'exited' or status == 'signalled' then
+                return true, ''
+            end
+            return false, err or ('command shutdown failed: ' .. tostring(status))
+        end)
+    end)
+end
+
 ---Read a single value from /sys/class/net/<iface>/statistics/<stat>
 ---@param iface string
 ---@param stat string
@@ -268,13 +296,43 @@ function RadioBackend:start_client_monitor()
     if self._monitor then
         return false, 'client monitor already started'
     end
-    local cmd = exec.command { 'iw', 'event', stdin = 'null', stdout = 'pipe', stderr = 'null' }
+    local cmd = exec.command {
+        'iw', 'event',
+        stdin = 'null',
+        stdout = 'pipe',
+        stderr = 'null',
+        shutdown_grace = 0.2,
+        flags = owned_process_flags(),
+    }
     local stdout, err = cmd:stdout_stream()
     if not stdout then
         return false, 'failed to start iw event: ' .. tostring(err)
     end
     self._monitor = { cmd = cmd, stdout = stdout }
     return true, ''
+end
+
+---Immediate best-effort stop for finalisers.
+---@param reason string?
+function RadioBackend:terminate(reason)
+    local mon = self._monitor
+    self._monitor = nil
+    if not mon then return true, nil end
+    if mon.stdout then pcall(function() mon.stdout:terminate(reason or 'radio monitor terminated') end) end
+    return terminate_command(mon.cmd, 15)
+end
+
+---Gracefully stop the iw event subprocess.
+---@param timeout number?
+---@return Op
+function RadioBackend:stop_client_monitor_op(timeout)
+    return op.guard(function()
+        local mon = self._monitor
+        self._monitor = nil
+        if not mon then return op.always(true, '') end
+        if mon.stdout then pcall(function() mon.stdout:terminate('radio monitor stopped') end) end
+        return shutdown_command_op(mon.cmd, timeout or 0.2)
+    end)
 end
 
 ---Return an op that blocks until the next client connect/disconnect event
@@ -315,7 +373,7 @@ end
 ---@return table|nil  { txpower, channel, freq, width }
 ---@return string     err
 function RadioBackend:get_iface_info(iface)
-    local proc = exec.command { 'iw', 'dev', iface, 'info', stdout = 'pipe' }
+    local proc = exec.command { 'iw', 'dev', iface, 'info', stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
     local out, status, _, _, err = fibers.perform(proc:output_op())
     if status ~= 'exited' or err then return nil, tostring(err or 'iw dev info failed') end
     local result = parse_iw_dev_info(out)
@@ -328,7 +386,7 @@ end
 ---@return number|nil  noise value
 ---@return string      err
 function RadioBackend:get_iface_survey(iface)
-    local proc = exec.command { 'iw', iface, 'survey', 'dump', stdout = 'pipe' }
+    local proc = exec.command { 'iw', iface, 'survey', 'dump', stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
     local out, status, _, _, err = fibers.perform(proc:output_op())
     if status ~= 'exited' or err then return nil, tostring(err or 'iw survey failed') end
     local noise = parse_survey_noise(out)
@@ -342,7 +400,7 @@ end
 ---@return table|nil  { signal, tx_bytes, rx_bytes }
 ---@return string     err
 function RadioBackend:get_station_info(iface, mac)
-    local proc = exec.command { 'iw', 'dev', iface, 'station', 'get', mac, stdout = 'pipe' }
+    local proc = exec.command { 'iw', 'dev', iface, 'station', 'get', mac, stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
     local out, status, _, _, err = fibers.perform(proc:output_op())
     if status ~= 'exited' or err then return nil, tostring(err or 'iw station get failed') end
     local result = parse_station_info(out)
@@ -355,7 +413,7 @@ end
 ---@return string[]  list of MAC addresses (may be empty)
 ---@return string    err
 function RadioBackend:get_connected_macs(iface)
-    local proc = exec.command { 'iw', 'dev', iface, 'station', 'dump', stdout = 'pipe' }
+    local proc = exec.command { 'iw', 'dev', iface, 'station', 'dump', stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
     local out, status, _, _, err = fibers.perform(proc:output_op())
     if status ~= 'exited' or err then return {}, tostring(err or 'iw station dump failed') end
     return parse_station_dump_macs(out), ''

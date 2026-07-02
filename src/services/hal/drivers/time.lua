@@ -107,6 +107,9 @@ end
 ---@return nil
 function TimeDriver:_ntpd_monitor()
     fibers.current_scope():finally(function()
+        if self.backend and self.backend.terminate then
+            self.backend:terminate('time monitor stopped')
+        end
         dlog(self, 'debug', { what = 'ntpd_monitor_exit' })
     end)
 
@@ -206,7 +209,7 @@ function TimeDriver:init()
     dlog(self, 'debug', { what = 'init_begin' })
 
     local status, code, _, err = fibers.perform(
-        exec.command("/etc/init.d/sysntpd", "restart"):run_op()
+        (exec.command { "/etc/init.d/sysntpd", "restart", stdin = "null", stdout = "null", stderr = "null" }):run_op()
     )
     if status ~= 'exited' or code ~= 0 then
         return "sysntpd restart failed: " .. tostring(err or ("exit code " .. tostring(code)))
@@ -281,6 +284,13 @@ end
 ---@return string? error
 function TimeDriver:stop(timeout)
     timeout = timeout or DEFAULT_STOP_TIMEOUT
+    if self.backend and self.backend.shutdown_op then
+        local ok, stop_err = fibers.perform(self.backend:shutdown_op(0.2))
+        if not ok then
+            dlog(self, 'warn', { what = 'ntp_backend_stop_failed', err = tostring(stop_err) })
+        end
+    end
+
     self.scope:cancel()
 
     local source = fibers.perform(op.named_choice {

@@ -10,6 +10,34 @@ local exec = require "fibers.io.exec"
 -- Other modules
 local cjson = require "cjson.safe"
 
+local function owned_process_flags()
+    local flags = { process_group = true }
+    if type(exec.supports) == 'function' and exec.supports('parent_death_signal') then
+        flags.parent_death_signal = 'TERM'
+    end
+    return flags
+end
+
+local function terminate_command(cmd, sig)
+    if not cmd or type(cmd.kill) ~= 'function' then return true, nil end
+    local ok, a, b = pcall(function() return cmd:kill(sig or 15) end)
+    if not ok then return nil, tostring(a) end
+    if a == false or a == nil then return nil, tostring(b or 'command kill failed') end
+    return true, nil
+end
+
+local function shutdown_command_op(cmd, timeout)
+    return op.guard(function()
+        if not cmd then return op.always(true, '') end
+        return cmd:shutdown_op(timeout or 0.2):wrap(function(status, _code, _sig, err)
+            if status == 'exited' or status == 'signalled' then
+                return true, ''
+            end
+            return false, err or ('command shutdown failed: ' .. tostring(status))
+        end)
+    end)
+end
+
 ---@class OpenWrtTimeBackend : TimeBackend
 ---@field ntp_monitor_stream Stream? Current ubus listen stream
 ---@field ntp_monitor_cmd Command? Current ubus listen command
@@ -115,6 +143,8 @@ function OpenWrtTimeBackend:start_ntp_monitor()
         stdin  = 'null',
         stdout = 'pipe',
         stderr = 'null',
+        shutdown_grace = 0.2,
+        flags = owned_process_flags(),
     }
     local stream, stream_err = self.ntp_monitor_cmd:stdout_stream()
     if not stream then
@@ -144,13 +174,29 @@ end
 ---
 ---@return boolean ok
 ---@return string error
-function OpenWrtTimeBackend:stop()
-    if self.ntp_monitor_cmd then
-        self.ntp_monitor_cmd:kill()
-    end
+function OpenWrtTimeBackend:terminate(reason)
+    local stream = self.ntp_monitor_stream
+    local cmd = self.ntp_monitor_cmd
     self.ntp_monitor_stream = nil
     self.ntp_monitor_cmd = nil
-    return true, ""
+    if stream then pcall(function() stream:terminate(reason or 'ntp monitor terminated') end) end
+    return terminate_command(cmd, 15)
+end
+
+function OpenWrtTimeBackend:shutdown_op(timeout)
+    return op.guard(function()
+        local stream = self.ntp_monitor_stream
+        local cmd = self.ntp_monitor_cmd
+        self.ntp_monitor_stream = nil
+        self.ntp_monitor_cmd = nil
+        if stream then pcall(function() stream:terminate('ntp monitor stopped') end) end
+        return shutdown_command_op(cmd, timeout or 0.2)
+    end)
+end
+
+function OpenWrtTimeBackend:stop()
+    local fibers = require 'fibers'
+    return fibers.perform(self:shutdown_op(0.2))
 end
 
 ---- Constructor ----
