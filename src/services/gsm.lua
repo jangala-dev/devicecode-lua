@@ -242,6 +242,38 @@ local function normalize_sim_presence(sim_value)
 	return "--"
 end
 
+---@param value any
+---@return string?
+local function normalize_optional_string(value)
+	if type(value) ~= 'string' then return nil end
+	if value == '' or value == '--' then return nil end
+	return value
+end
+
+---@param connected boolean
+---@param modem_state string?
+---@param sim_lock string?
+---@return string
+local function uplink_state_for_modem(connected, modem_state, sim_lock)
+	if connected == true then return 'connected' end
+	if normalize_optional_string(sim_lock) ~= nil or modem_state == 'locked' then return 'locked' end
+	return 'disconnected'
+end
+
+---@param sim_state string?
+---@param sim_lock string?
+---@param sim_lock_retries table?
+---@return table
+local function build_sim_payload(sim_state, sim_lock, sim_lock_retries)
+	local lock = normalize_optional_string(sim_lock)
+	local state = lock and 'locked' or normalize_optional_string(sim_state)
+	return {
+		state = state or '--',
+		lock = lock,
+		lock_retries = copy(sim_lock_retries),
+	}
+end
+
 ---@param access_techs any
 ---@param rssi any
 ---@param rsrp any
@@ -529,6 +561,10 @@ function GsmModem.new(cap, svc)
 	self.device = ""
 	self.connected = false
 	self.wwan_iface = nil
+	self.modem_state = nil
+	self.sim_state = nil
+	self.sim_lock = nil
+	self.sim_lock_retries = nil
 	self.last_access = nil
 	self.last_signal = nil
 	self.current_state = nil
@@ -586,6 +622,40 @@ function GsmModem:_emit_event(key, value)
 	self.svc:obs_event(key, { modem = self.name, value = value })
 end
 
+---@param timescale number?
+---@return nil
+function GsmModem:_refresh_sim_lock_fields(timescale)
+	local modem_state, state_err = modem_get_field(self.cap, 'modem_state', REQUEST_TIMEOUT, timescale)
+	if state_err == "" then
+		self.modem_state = normalize_optional_string(modem_state)
+	end
+
+	local sim_lock, lock_err = modem_get_field(self.cap, 'sim_lock', REQUEST_TIMEOUT)
+	if lock_err == "" then
+		self.sim_lock = normalize_optional_string(sim_lock)
+	elseif self.modem_state ~= 'locked' then
+		self.sim_lock = nil
+	end
+
+	local retries, retries_err = modem_get_field(self.cap, 'sim_lock_retries', REQUEST_TIMEOUT)
+	if retries_err == "" then
+		self.sim_lock_retries = retries
+	elseif self.modem_state ~= 'locked' then
+		self.sim_lock_retries = nil
+	end
+end
+
+---@return nil
+function GsmModem:_publish_modem_fields()
+	local state = uplink_state_for_modem(self.connected == true, self.modem_state, self.sim_lock)
+	self.conn:retain(t_state_gsm_modem(self.name, 'state'), state)
+	self.conn:retain(t_state_gsm_modem(self.name, 'sim-state'), build_sim_payload(
+		self.sim_state,
+		self.sim_lock,
+		self.sim_lock_retries
+	))
+end
+
 ---@return nil
 
 ---@param connected boolean?
@@ -601,11 +671,12 @@ function GsmModem:_publish_uplink_state(connected, iface)
 	local operator = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT)
 	local signal = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT)
 	local ifname = self.wwan_iface
+	local state = uplink_state_for_modem(self.connected == true, self.modem_state, self.sim_lock)
 	local payload = {
 		schema = 'devicecode.gsm.uplink/1',
 		id = self.name,
 		role = self.name,
-		state = self.connected and 'connected' or 'disconnected',
+		state = state,
 		connected = self.connected == true,
 		available = self.connected == true and type(ifname) == 'string' and ifname ~= '',
 		generation = self.uplink_generation,
@@ -615,6 +686,7 @@ function GsmModem:_publish_uplink_state(connected, iface)
 			role = self.name,
 			device = self.device,
 		},
+		sim = build_sim_payload(self.sim_state, self.sim_lock, self.sim_lock_retries),
 		access = {
 			tech = access_tech ~= '' and access_tech or nil,
 			family = access_tech ~= '' and get_access_family(access_tech) or nil,
@@ -623,6 +695,7 @@ function GsmModem:_publish_uplink_state(connected, iface)
 		signal = type(signal) == 'table' and signal or nil,
 		at = self.svc and self.svc.wall and self.svc:wall() or nil,
 	}
+	self:_publish_modem_fields()
 	self.conn:retain(t_state_gsm_uplink(self.name), payload)
 end
 
@@ -662,8 +735,14 @@ function GsmModem:_emit_metrics_once()
 	local sim, sim_err = modem_get_field(self.cap, 'sim', REQUEST_TIMEOUT)
 	if sim_err == "" then
 		inventory.sim = normalised_sim_string(sim)
-		self:_emit_metric('sim', normalize_sim_presence(sim))
+		self.sim_state = normalize_sim_presence(sim)
+		self:_emit_metric('sim', self.sim_state)
 	end
+
+	self:_refresh_sim_lock_fields(0)
+	self:_emit_metric('modem_state', self.modem_state)
+	self:_emit_metric('sim_lock', self.sim_lock or '--')
+	self:_emit_metric('sim_lock_retries', self.sim_lock_retries or {})
 
 	local iccid, iccid_err = modem_get_field(self.cap, 'iccid', REQUEST_TIMEOUT)
 	if iccid_err == "" then
@@ -686,6 +765,7 @@ function GsmModem:_emit_metrics_once()
 	local state = state_msg.payload and state_msg.payload
 	---@cast state ModemStateEvent
 	if state then
+		self.modem_state = normalize_optional_string(state.to)
 		self:_emit_metric('state', state.to)
 	end
 
@@ -906,6 +986,17 @@ function GsmModem:_autoconnect_loop()
 			if msg then
 				current_state = msg.payload.to
 				self.current_state = current_state
+				self.modem_state = normalize_optional_string(current_state)
+				if current_state == 'locked' then
+					self:_refresh_sim_lock_fields(0)
+				else
+					self.sim_lock = nil
+					self.sim_lock_retries = nil
+				end
+				self:_emit_metric('modem_state', self.modem_state)
+				self:_emit_metric('sim_lock', self.sim_lock or '--')
+				self:_emit_metric('sim_lock_retries', self.sim_lock_retries or {})
+				self:_publish_uplink_state(nil, self.wwan_iface)
 				if current_state ~= self._last_operator_state then
 					self._last_operator_state = current_state
 					local level = current_state == 'failed' and 'warn' or 'info'
@@ -1128,15 +1219,15 @@ function GsmService.start(conn, opts)
 	end
 
 	local function open_apn_store_for_config(cfg)
-		local opts, err = apn_store_opts_from_config(cfg)
-		if not opts then
+		local store_opts, err = apn_store_opts_from_config(cfg)
+		if not store_opts then
 			apn_store = nil
 			custom_apns = {}
 			svc.custom_apns = custom_apns
 			publish_apn_state({ state = 'unavailable', ready = false, reason = err })
 			return nil, err
 		end
-		apn_store = apn_store_control.new(conn, opts)
+		apn_store = apn_store_control.new(conn, store_opts)
 		local records, lerr = perform(apn_store:load_op())
 		if not records then
 			custom_apns = {}
@@ -1392,5 +1483,10 @@ function GsmService.start(conn, opts)
 		end
 	end
 end
+
+GsmService._test = {
+	build_sim_payload = build_sim_payload,
+	uplink_state_for_modem = uplink_state_for_modem,
+}
 
 return GsmService

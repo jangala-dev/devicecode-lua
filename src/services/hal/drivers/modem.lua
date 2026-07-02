@@ -73,6 +73,9 @@ local GROUP_FIELDS = {
         "iccid",
         "imsi",
         "gid1",
+        "sim_lock",
+        "sim_lock_retries",
+        "modem_state",
     },
     network = {
         "access_techs",
