@@ -9,6 +9,7 @@
 
 local fibers   = require 'fibers'
 local resource = require 'devicecode.support.resource'
+local local_model = require 'services.ui.local_model'
 
 local M = {}
 
@@ -76,14 +77,26 @@ local function frame_event(ev, encode)
 	return table.concat(out)
 end
 
+local function event_allowed(ev)
+	if type(ev) ~= 'table' or ev.topic == nil then return true end
+	return local_model.allowed(ev.topic)
+end
+
+local function project_event(ev)
+	if type(ev) ~= 'table' or ev.topic == nil then return ev end
+	return local_model.project_event(ev)
+end
+
 function M.run(scope, owner, route, opts)
 	opts = opts or {}
 	local watch_owner = assert(opts.watch_owner, 'SSE requires watch_owner')
 	local encode = opts.encode_json or opts.encode or default_encode
 	local pattern = route.pattern or (opts.sse and opts.sse.pattern) or { '#' }
+	local replay = (opts.sse and opts.sse.replay == true) or false
 	local watch, err = watch_owner:watch_open(pattern, {
-		replay = not (opts.sse and opts.sse.replay == false),
+		replay = replay,
 		queue_len = (opts.sse and opts.sse.queue_len) or 32,
+		full = 'drop_oldest',
 		max_replay = opts.sse and opts.sse.max_replay,
 	})
 	if not watch then
@@ -107,9 +120,14 @@ function M.run(scope, owner, route, opts)
 		if ev == nil then
 			return { status = 'closed', err = rerr }
 		end
-		perform_required(owner:write_chunk_op(frame_event(ev, encode)), 'SSE event write failed')
+		local projected = project_event(ev)
+		if projected then
+			perform_required(owner:write_chunk_op(frame_event(projected, encode)), 'SSE event write failed')
+		end
 	end
 end
 
 M.frame_event = frame_event
+M.event_allowed = event_allowed
+M.project_event = project_event
 return M

@@ -13,6 +13,11 @@ local M = {}
 local copy = tablex.deep_copy
 local starts_with = topicx.starts_with
 
+local DROP_KEYS = {
+	raw = true,
+	raw_facts = true,
+}
+
 local ALLOW_PREFIXES = {
 	{ 'svc' },
 	{ 'state', 'device' },
@@ -49,7 +54,7 @@ local function sorted_items(snapshot)
 		if type(msg) == 'table' and type(msg.topic) == 'table' and allowed(msg.topic) then
 			out[#out + 1] = {
 				topic = copy(msg.topic),
-				payload = copy(msg.payload),
+				payload = M.project_payload(msg.topic, msg.payload),
 				origin = copy(msg.origin),
 			}
 		end
@@ -57,6 +62,44 @@ local function sorted_items(snapshot)
 	table.sort(out, function(a, b)
 		return topics.topic_key(a.topic) < topics.topic_key(b.topic)
 	end)
+	return out
+end
+
+local function strip_payload(value)
+	if type(value) ~= 'table' then return value end
+	local out = {}
+	for k, v in pairs(value) do
+		if not DROP_KEYS[k] then
+			out[k] = strip_payload(v)
+		end
+	end
+	return out
+end
+
+function M.project_payload(topic, payload)
+	local out = strip_payload(payload)
+	if type(out) ~= 'table' or type(topic) ~= 'table' then return out end
+
+	if starts_with(topic, { 'state', 'device' }) then
+		local kind = topic[3]
+		if kind == 'identity' or kind == 'components' then
+			out.components = nil
+		elseif kind == 'component' then
+			out.observed = nil
+		end
+	end
+
+	return out
+end
+
+function M.project_event(ev)
+	if type(ev) ~= 'table' or ev.topic == nil then return copy(ev) end
+	if not allowed(ev.topic) then return nil end
+
+	local out = copy(ev)
+	out.topic = copy(ev.topic)
+	out.payload = M.project_payload(ev.topic, ev.payload)
+	out.origin = copy(ev.origin)
 	return out
 end
 

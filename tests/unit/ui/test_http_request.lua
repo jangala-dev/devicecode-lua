@@ -13,8 +13,13 @@ if not ok_cjson then cjson = require 'cjson' end
 local tests = {}
 
 local function fail(msg) error(msg or 'assertion failed', 2) end
-local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end end
+local function assert_eq(a, b, msg)
+	if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end
+end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end end
+local function assert_true(v, msg)
+	if v ~= true then fail(msg or ('expected true, got '..tostring(v))) end
+end
 
 local function fake_ctx(method, path)
 	return {
@@ -100,6 +105,70 @@ function tests.test_http_response_writer_may_yield_inside_request_scope_without_
 		assert_eq(events[1], 'reply-start')
 		assert_eq(events[2], 'peer-fiber-ran')
 		assert_eq(events[3], 'reply-finish:resumed')
+	end)
+end
+
+function tests.test_sse_route_opens_without_replaying_large_bootstrap_state()
+	run_fibers.run(function (scope)
+		local model = read_model.new()
+		for i = 1, 40 do
+			model:set({ 'state', 'bulk', tostring(i) }, { n = i })
+		end
+		local watch_owner = read_model.new_watches(model)
+		local headers_ch = channel.new(1)
+		local chunk_ch = channel.new(1)
+		local ctx = fake_ctx('GET', '/events')
+
+		ctx.write_headers_op = function(self, status, headers, opts)
+			return fibers.always(function ()
+				self._current = { status = status, body = '', headers = headers, end_stream = opts and opts.end_stream }
+				headers_ch:put({ status = status, headers = headers })
+				return true, nil
+			end):wrap(function (th)
+				return th()
+			end)
+		end
+		ctx.write_chunk_op = function(self, chunk, opts)
+			return fibers.always(function ()
+				assert(self._current, 'no response headers')
+				self._current.body = self._current.body .. tostring(chunk or '')
+				chunk_ch:put(tostring(chunk or ''))
+				if opts and opts.end_stream then
+					self.replies[#self.replies + 1] = self._current
+					self._current = nil
+				end
+				return true, nil
+			end):wrap(function (th)
+				return th()
+			end)
+		end
+
+		local ok_spawn, spawn_err = scope:spawn(function ()
+			request.run(scope, ctx, {
+				watch_owner = watch_owner,
+				encode_json = function (v) return assert(cjson.encode(v)) end,
+			})
+		end)
+		assert_true(ok_spawn, spawn_err)
+
+		local headers = headers_ch:get()
+		assert_not_nil(headers)
+		assert_eq(headers.status, 200)
+		assert_eq(headers.headers['content-type'], 'text/event-stream')
+
+		watch_owner:set({ 'raw', 'secret' }, { leaked = true })
+		watch_owner:set({ 'state', 'device', 'component', 'switch-main' }, {
+			available = true,
+			observed = { wired = { raw = { leaked = true } } },
+			raw = { leaked = true },
+		})
+		local chunk = chunk_ch:get()
+		assert_not_nil(chunk)
+		assert_true(chunk:find('event: set', 1, true) ~= nil, chunk)
+		assert_true(chunk:find('state/device/component/switch%-main') ~= nil, chunk)
+		assert_true(chunk:find('raw/secret', 1, true) == nil, chunk)
+		assert_true(chunk:find('leaked', 1, true) == nil, chunk)
+		assert_true(chunk:find('"observed"', 1, true) == nil, chunk)
 	end)
 end
 
@@ -214,7 +283,11 @@ function tests.test_http_command_route_rejects_non_json_body()
 		ctx.headers = { ['content-type'] = 'text/plain', ['x-session-id'] = 'sid-1' }
 		ctx.read_body_as_string_op = function () return fibers.always('not json', nil) end
 		local sessions = { get = function () return { id = 'sid-1', principal = 'tester' } end }
-		local result = request.run(scope, ctx, { bus = bus, sessions = sessions, encode_json = function (v) return assert(cjson.encode(v)) end })
+		local result = request.run(scope, ctx, {
+			bus = bus,
+			sessions = sessions,
+			encode_json = function (v) return assert(cjson.encode(v)) end,
+		})
 		assert_eq(result.status, 'bad_request')
 		assert_eq(#ctx.replies, 1)
 		assert_eq(ctx.replies[1].status, 415)

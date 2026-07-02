@@ -12,7 +12,9 @@ local harness = require 'tests.support.local_ui_devhost'
 local T = {}
 
 local function fail(msg) error(msg or 'assertion failed', 2) end
-local function assert_eq(a, b, msg) if a ~= b then fail((msg or 'values differ') .. ': expected ' .. tostring(b) .. ', got ' .. tostring(a)) end end
+local function assert_eq(a, b, msg)
+	if a ~= b then fail((msg or 'values differ') .. ': expected ' .. tostring(b) .. ', got ' .. tostring(a)) end
+end
 local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true, got ' .. tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end return v end
 local function assert_nil(v, msg) if v ~= nil then fail((msg or 'expected nil') .. ': got ' .. tostring(v)) end end
@@ -39,7 +41,8 @@ function T.devhost_local_ui_serves_static_and_curated_bootstrap_over_real_http()
 			inst.base_url .. '/',
 		})
 		assert_eq(status, '200')
-		assert_true(body:find('Big Box', 1, true) ~= nil, 'static UI should serve the local page')
+		assert_true(body:find('Jangala Status Page', 1, true) ~= nil, 'static UI should serve the app shell')
+		assert_true(body:find('/assets/index-', 1, true) ~= nil, 'static UI should reference the generated app bundle')
 
 		status, body = harness.curl({
 			'--silent', '--show-error', '--max-time', '5',
@@ -47,7 +50,8 @@ function T.devhost_local_ui_serves_static_and_curated_bootstrap_over_real_http()
 			inst.base_url .. '/overview',
 		})
 		assert_eq(status, '200')
-		assert_true(body:find('Big Box', 1, true) ~= nil, 'SPA fallback should serve index.html for browser routes')
+		assert_true(body:find('Jangala Status Page', 1, true) ~= nil,
+			'SPA fallback should serve index.html for browser routes')
 
 		status, body = harness.curl({
 			'--silent', '--show-error', '--max-time', '5',
@@ -91,12 +95,14 @@ function T.devhost_local_ui_apns_round_trip_through_gsm_and_fake_control_store()
 		assert_eq(body[1].carrier, 'Demo Carrier')
 		assert_eq(body[1].password, 'prototype-secret')
 
-		local stored = assert_not_nil(inst.control_store:get('custom-apns-v1'), 'APN list should be persisted in fake control-store')
+		local stored = assert_not_nil(inst.control_store:get('custom-apns-v1'),
+			'APN list should be persisted in fake control-store')
 		assert_true(stored:find('demo.internet', 1, true) ~= nil, 'persisted APN JSON should contain the APN')
 
 		status, body = harness.curl_json('GET', inst.base_url .. '/api/local-ui/bootstrap')
 		assert_eq(status, '200')
-		local apn_state = assert_not_nil(body.items['state/gsm/apns/custom'], 'bootstrap should include GSM APN retained state after PUT')
+		local apn_state = assert_not_nil(body.items['state/gsm/apns/custom'],
+			'bootstrap should include GSM APN retained state after PUT')
 		assert_eq(apn_state.payload.count, 1)
 		assert_eq(apn_state.payload.records[1].apn, 'demo.internet')
 		assert_eq(apn_state.payload.records[1].password, nil)
