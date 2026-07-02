@@ -28,6 +28,7 @@ local ALLOW_PREFIXES = {
 	{ 'state', 'workflow', 'update-job' },
 	{ 'obs', 'v1', 'gsm', 'metric' },
 	{ 'obs', 'v1', 'gsm', 'event' },
+	{ 'obs', 'v1', 'system', 'metric' },
 }
 
 local DENY_PREFIXES = {

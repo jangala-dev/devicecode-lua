@@ -24,6 +24,8 @@ function M.default_retained_patterns(opts)
 		t('svc', '#'),
 		t('state', '#'),
 		t('cap', '#'),
+		t('obs', 'v1', 'gsm', '#'),
+		t('obs', 'v1', 'system', 'metric', '#'),
 	}
 	if opts.include_raw == true then patterns[#patterns + 1] = t('raw', '#') end
 	return patterns

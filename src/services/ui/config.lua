@@ -15,7 +15,7 @@ local DEFAULTS = {
 		port = 80,
 	},
 	static = {
-		root = 'src/services/ui/www',
+		root = 'services/ui/www',
 		index = 'index.html',
 		chunk_size = 16384,
 	},

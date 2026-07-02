@@ -21,13 +21,17 @@ function tests.test_routes_decode_local_ui_and_apn_routes()
 	eq(routes.decode(ctx('GET', '/api/diagnostics')).kind, 'diagnostics_stub')
 	local sse = routes.decode(ctx('GET', '/events'))
 	eq(sse.kind, 'sse')
-	eq(table.concat(sse.pattern, '/'), 'state/#')
+	eq(table.concat(sse.pattern, '/'), '#')
 end
 
 function tests.test_local_model_allow_list_excludes_cfg_and_raw()
 	local model = read_model.new()
 	model:set({ 'state', 'net', 'summary' }, { ok = true })
 	model:set({ 'state', 'gsm', 'apns', 'custom' }, { records = {} })
+	model:set({ 'obs', 'v1', 'system', 'metric', 'cpu_util' }, {
+		namespace = { 'system', 'cpu_util' },
+		value = 12.5,
+	})
 	model:set({ 'state', 'device', 'component', 'switch-main' }, {
 		available = true,
 		observed = { wired = { raw = { secret = true } } },
@@ -42,6 +46,7 @@ function tests.test_local_model_allow_list_excludes_cfg_and_raw()
 	local boot = local_model.bootstrap(model:snapshot())
 	ok(boot.items['state/net/summary'])
 	ok(boot.items['state/gsm/apns/custom'])
+	ok(boot.items['obs/v1/system/metric/cpu_util'])
 	ok(boot.items['state/device/component/switch-main'])
 	eq(boot.items['state/device/component/switch-main'].payload.raw, nil)
 	eq(boot.items['state/device/component/switch-main'].payload.observed, nil)

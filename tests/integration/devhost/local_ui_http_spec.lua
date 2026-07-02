@@ -62,6 +62,8 @@ function T.devhost_local_ui_serves_static_and_curated_bootstrap_over_real_http()
 		assert_eq(payload.schema, 'devicecode.ui.local-bootstrap/1')
 		assert_not_nil(payload.items['state/net/summary'], 'bootstrap should include curated network state')
 		assert_not_nil(payload.items['state/device/components'], 'bootstrap should include curated device state')
+		assert_not_nil(payload.items['obs/v1/system/metric/cpu_util'],
+			'bootstrap should include curated system metrics')
 		assert_nil(payload.items['raw/host/secret'], 'bootstrap must not include raw HAL topics')
 		assert_nil(payload.items['cfg/secret'], 'bootstrap must not include cfg topics')
 	end, { timeout = 12 })

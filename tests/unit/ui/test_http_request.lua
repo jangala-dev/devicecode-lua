@@ -156,6 +156,16 @@ function tests.test_sse_route_opens_without_replaying_large_bootstrap_state()
 		assert_eq(headers.status, 200)
 		assert_eq(headers.headers['content-type'], 'text/event-stream')
 
+		watch_owner:set({ 'obs', 'v1', 'system', 'metric', 'cpu_util' }, {
+			namespace = { 'system', 'cpu_util' },
+			value = 12.5,
+		})
+		local metric_chunk = chunk_ch:get()
+		assert_not_nil(metric_chunk)
+		assert_true(metric_chunk:find('event: set', 1, true) ~= nil, metric_chunk)
+		assert_true(metric_chunk:find('obs/v1/system/metric/cpu_util', 1, true) ~= nil, metric_chunk)
+		assert_true(metric_chunk:find('12.5', 1, true) ~= nil, metric_chunk)
+
 		watch_owner:set({ 'raw', 'secret' }, { leaked = true })
 		watch_owner:set({ 'state', 'device', 'component', 'switch-main' }, {
 			available = true,

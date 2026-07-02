@@ -41,7 +41,7 @@ function M.decode(ctx)
 	end
 
 	if parts[1] == 'events' and method == 'GET' then
-		return { kind = 'sse', pattern = { 'state', '#' } }
+		return { kind = 'sse', pattern = { '#' } }
 	end
 
 	if parts[1] ~= 'api' then
