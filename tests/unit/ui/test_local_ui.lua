@@ -1,6 +1,7 @@
 -- tests/unit/ui/test_local_ui.lua
 
 local routes = require 'services.ui.http.routes'
+local sse = require 'services.ui.http.sse'
 local read_model = require 'services.ui.read_model'
 local local_model = require 'services.ui.local_model'
 
@@ -19,9 +20,25 @@ function tests.test_routes_decode_local_ui_and_apn_routes()
 	eq(routes.decode(ctx('GET', '/api/gsm/apns/custom')).kind, 'gsm_apns_get')
 	eq(routes.decode(ctx('PUT', '/api/gsm/apns/custom')).kind, 'gsm_apns_put')
 	eq(routes.decode(ctx('GET', '/api/diagnostics')).kind, 'diagnostics_stub')
-	local sse = routes.decode(ctx('GET', '/events'))
-	eq(sse.kind, 'sse')
-	eq(table.concat(sse.pattern, '/'), '#')
+	local route = routes.decode(ctx('GET', '/events'))
+	eq(route.kind, 'sse')
+	eq(route.pattern, nil)
+	eq(route.patterns, nil)
+end
+
+function tests.test_sse_defaults_use_local_ui_prefixes_without_root_hash()
+	local defaults = sse.default_patterns()
+	local seen = {}
+	ok(#defaults > 0)
+	for _, pattern in ipairs(defaults) do
+		local key = table.concat(pattern, '/')
+		if key == '#' then fail('local-ui SSE must not subscribe to root #') end
+		eq(pattern[#pattern], '#', 'SSE default pattern should end with #')
+		seen[key] = true
+	end
+	ok(seen['state/device/#'], 'state/device stream missing')
+	ok(seen['state/net/#'], 'state/net stream missing')
+	ok(seen['obs/v1/system/metric/#'], 'system metrics stream missing')
 end
 
 function tests.test_local_model_allow_list_excludes_cfg_and_raw()
