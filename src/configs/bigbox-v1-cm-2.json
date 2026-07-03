@@ -72,7 +72,7 @@
             "timeout_s": 3.0,
             "poll": {
               "fast": {
-                "interval_s": 1.0,
+                "interval_s": 5.0,
                 "groups": [
                   "panel",
                   "poe",
@@ -80,14 +80,14 @@
                 ]
               },
               "medium": {
-                "interval_s": 5.0,
+                "interval_s": 30.0,
                 "groups": [
                   "vlan",
                   "lldp"
                 ]
               },
               "slow": {
-                "interval_s": 30.0,
+                "interval_s": 180.0,
                 "groups": [
                   "identity",
                   "runtime"
