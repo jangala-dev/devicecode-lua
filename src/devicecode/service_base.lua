@@ -54,6 +54,29 @@ local function merge_payload(base, extra)
 	return out
 end
 
+local function sorted_keys(t)
+	local keys = {}
+	for k in pairs(t or {}) do keys[#keys + 1] = k end
+	table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+	return keys
+end
+
+local function stable_status_value(v, key)
+	if key == 'ts' or key == 'at' then return '' end
+	if type(v) ~= 'table' then return tostring(v) end
+	local out = { '{' }
+	for _, k in ipairs(sorted_keys(v)) do
+		if k ~= 'ts' and k ~= 'at' then
+			out[#out + 1] = tostring(k)
+			out[#out + 1] = '='
+			out[#out + 1] = stable_status_value(v[k], k)
+			out[#out + 1] = ';'
+		end
+	end
+	out[#out + 1] = '}'
+	return table.concat(out)
+end
+
 local function default_ready_predicate(payload, opts)
 	if type(payload) ~= 'table' then return false end
 	if payload.ready == true then return true end
@@ -83,6 +106,7 @@ function M.new(conn, opts)
 	svc._meta_published = false
 	svc._lifecycle_state = nil
 	svc._lifecycle_extra = nil
+	svc._status_semantic_key = nil
 
 	function svc:now() return runtime.now() end
 	function svc:wall() return wall() end
@@ -215,6 +239,16 @@ function M.new(conn, opts)
 		self.conn:publish(self:obs_counter_topic(name), payload)
 	end
 
+
+	local function retain_status_if_semantically_changed(self, payload)
+		local key = stable_status_value(payload, nil)
+		if self._status_semantic_key == key then return false end
+		self._status_semantic_key = key
+		self:_retain(self:status_topic(), payload)
+		self:obs_state('status', payload)
+		return true
+	end
+
 	----------------------------------------------------------------------
 	-- Service identity / lifecycle
 	----------------------------------------------------------------------
@@ -235,8 +269,7 @@ function M.new(conn, opts)
 
 	function svc:status(state, extra)
 		local payload = self:base_payload(merge_payload({ state = state }, extra))
-		self:_retain(self:status_topic(), payload)
-		self:obs_state('status', payload)
+		retain_status_if_semantically_changed(self, payload)
 		return payload
 	end
 
@@ -244,8 +277,7 @@ function M.new(conn, opts)
 		local payload = self:base_payload(merge_payload({ state = state }, extra))
 		self._lifecycle_state = state
 		self._lifecycle_extra = shallow_copy(extra)
-		self:_retain(self:status_topic(), payload)
-		self:obs_state('status', payload)
+		retain_status_if_semantically_changed(self, payload)
 		return payload
 	end
 

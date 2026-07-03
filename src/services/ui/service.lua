@@ -375,6 +375,28 @@ local function update_lifecycle(state)
 	return lifecycle:running(payload)
 end
 
+
+local function schedule_lifecycle_publish(state, reason)
+	state.lifecycle_publish_pending = true
+	state.lifecycle_publish_reason = reason or state.lifecycle_publish_reason
+	local delay = ui_observability(state).coalesce_status_s
+	if delay == false then delay = 0.05 end
+	delay = tonumber(delay) or 0.05
+	if delay < 0 then delay = 0 end
+	local due = runtime.now() + delay
+	if state.lifecycle_publish_due_at == nil or due < state.lifecycle_publish_due_at then
+		state.lifecycle_publish_due_at = due
+	end
+	return true
+end
+
+local function clear_lifecycle_publish_due(state)
+	state.lifecycle_publish_pending = false
+	state.lifecycle_publish_due_at = nil
+	state.lifecycle_publish_reason = nil
+	return true
+end
+
 local function build_listener_opts(state, cfg, listener_generation, listener_id)
 	local params = state.params or {}
 	local h = cfg.http or {}
@@ -625,10 +647,10 @@ local function reduce_event(state, ev)
 				end
 			end
 		end
-		return { publish = true }
+		return { coalesce_publish = true, reason = ev.kind }
 	elseif ev.kind == 'read_model_changed' then
 		state.model_seen = ev.version or state.model_seen
-		return {}
+		return { coalesce_publish = true, reason = 'read_model_changed' }
 	elseif ev.kind == 'session_changed' then
 		state.sessions_seen = ev.version or state.sessions_seen
 		state.last_session_event = ev.last_event or ev
@@ -659,6 +681,9 @@ local function reduce_event(state, ev)
 		return { publish = true }
 	elseif ev.kind == 'read_model_closed' then
 		state.read_model_status = 'closed'
+		return { publish = true }
+	elseif ev.kind == 'lifecycle_publish_due' then
+		clear_lifecycle_publish_due(state)
 		return { publish = true }
 	end
 	return {}
@@ -692,6 +717,11 @@ local function next_event_op(state)
 
 	local src = dep_slot.event_source(state, 'http_deps', { name = 'http' })
 	if src then arms.http_dependency = src.recv_op() end
+	if state.lifecycle_publish_pending == true then
+		arms.lifecycle_publish_due = sleep.sleep_until_op(state.lifecycle_publish_due_at or runtime.now()):wrap(function ()
+			return { kind = 'lifecycle_publish_due' }
+		end)
+	end
 
 	return fibers.named_choice(arms):wrap(function (_, ev)
 		return ev
@@ -784,7 +814,11 @@ function M.run(scope, params)
 		local ev = fibers.perform(next_event_op(state))
 		if ev == nil then error('ui service event source closed', 0) end
 		local decision = reduce_event(state, ev)
+		if decision.coalesce_publish then
+			schedule_lifecycle_publish(state, decision.reason)
+		end
 		if decision.publish then
+			clear_lifecycle_publish_due(state)
 			publish_summary(state)
 			update_lifecycle(state)
 		end
@@ -825,6 +859,7 @@ M._test = {
 	update_lifecycle = update_lifecycle,
 	lifecycle_status_key = lifecycle_status_key,
 	should_publish_lifecycle = should_publish_lifecycle,
+	schedule_lifecycle_publish = schedule_lifecycle_publish,
 }
 
 

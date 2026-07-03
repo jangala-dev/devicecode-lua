@@ -27,6 +27,19 @@ function tests.test_read_model_default_exclusions_prevent_self_ingesting_ui_stat
 	assert_eq(should({ op = 'replay_done' }, {}), true)
 end
 
+
+function tests.test_default_retained_patterns_exclude_raw_unless_opted_in()
+	local topics = require 'services.ui.topics'
+	local function has_raw(patterns)
+		for _, p in ipairs(patterns or {}) do
+			if p[1] == 'raw' and p[2] == '#' then return true end
+		end
+		return false
+	end
+	assert_eq(has_raw(topics.default_retained_patterns()), false)
+	assert_eq(has_raw(topics.default_retained_patterns({ include_raw = true })), true)
+end
+
 function tests.test_store_snapshot_changed_op_and_material_change()
 	run_fibers.run(function ()
 		local model = read_model.new()

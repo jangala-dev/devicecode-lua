@@ -13,6 +13,7 @@ function M.summary_topic() return topics.summary() end
 function M.surface_topic(id) return topics.surface(id) end
 function M.topology_topic() return topics.topology() end
 function M.violations_topic() return topics.violations() end
+function M.surface_counters_topic(id) return topics.surface_counters(id) end
 
 function M.summary(snapshot)
 	snapshot = snapshot or {}
@@ -33,6 +34,7 @@ function M.summary(snapshot)
 end
 
 function M.surface(rec) return copy(rec or {}) end
+function M.surface_counters(rec) return copy(rec or {}) end
 function M.topology(snapshot) return copy((snapshot or {}).topology or {}) end
 function M.violations(snapshot) return copy((snapshot or {}).violations or {}) end
 

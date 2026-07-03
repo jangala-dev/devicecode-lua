@@ -29,6 +29,7 @@ local DEFAULTS = {
 	},
 	observability = {
 		status_interval_s = 30,
+		coalesce_status_s = 0.05,
 	},
 }
 
@@ -60,7 +61,7 @@ local UPDATE_KEYS = { upload = true, commit = true }
 local UPDATE_UPLOAD_KEYS = { enabled = true, max_bytes = true, require_auth = true, component = true, create_job = true, start_job = true }
 local UPDATE_COMMIT_KEYS = { require_auth = true }
 local SESSION_KEYS = { prune_interval = true }
-local OBSERVABILITY_KEYS = { status_interval_s = true }
+local OBSERVABILITY_KEYS = { status_interval_s = true, coalesce_status_s = true }
 
 local function fail(msg) return nil, msg end
 
@@ -306,6 +307,9 @@ local function normalise_observability(raw)
 	v, err = positive_number_or_false_or_nil(raw.status_interval_s, 'observability.status_interval_s')
 	if err then return nil, err end
 	if v ~= nil then out.status_interval_s = v end
+	v, err = positive_number_or_false_or_nil(raw.coalesce_status_s, 'observability.coalesce_status_s')
+	if err then return nil, err end
+	if v ~= nil then out.coalesce_status_s = v end
 	return out, nil
 end
 

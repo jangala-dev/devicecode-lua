@@ -103,8 +103,12 @@ local function retain_raw_wired_observations(conn)
 				link = { state = 'up', speed_mbps = 1000 },
 				attachment = { mode = 'access', vlan = 32 },
 				poe = { state = 'off' },
-				counters = { rx = { bytes = 1234, packets = 12, drops = 0, errors = 0 } },
 			},
+		},
+	})
+	conn:retain({ 'raw', 'host', 'wired', 'provider', 'switch-main', 'state', 'counters' }, {
+		counters = {
+			GE1 = { rx = { bytes = 1234, packets = 12, drops = 0, errors = 0 } },
 		},
 	})
 end
@@ -157,7 +161,9 @@ function T.state_device_assembly_and_raw_switch_observations_project_to_state_wi
 		assert_eq(lan1.source.component, 'switch-main')
 		assert_eq(lan1.source.observed_surface, 'GE1')
 		assert_eq(lan1.observed.source.exposure, 'external')
-		assert_eq(lan1.counters.rx.bytes, 1234)
+		assert_eq(lan1.counters, nil, 'stable public surface should not carry volatile counters')
+		local counters = probe.wait_retained_payload(reader, wired_topics.surface_counters('lan-1'), { timeout = 1.0 })
+		assert_eq(counters.counters.rx.bytes, 1234)
 
 		local uplink = probe.wait_retained_payload(reader, wired_topics.surface('switch-uplink-cm5'), { timeout = 1.5 })
 		assert_eq(uplink.availability.state, 'available')

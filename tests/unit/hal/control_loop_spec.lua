@@ -135,4 +135,56 @@ function T.run_request_loop_cancels_handler_op_when_request_cancel_op_fires()
     end)
 end
 
+
+function T.run_request_loop_detaches_caller_after_admission_when_policy_requests_it()
+    runfibers.run(function(scope)
+        local ch = channel.new()
+        local reply_ch = channel.new()
+        local cancel_ch = channel.new(1)
+        local entered = channel.new(1)
+        local release = channel.new(1)
+        local aborted = false
+        local completed = false
+        local logs = {}
+        local logger = {
+            warn = function(_, payload) logs[#logs + 1] = payload end,
+            info = function(_, payload) logs[#logs + 1] = payload end,
+            debug = function(_, payload) logs[#logs + 1] = payload end,
+        }
+
+        local ok_spawn, err = scope:spawn(function()
+            control_loop.run_request_loop(ch, {
+                __cancel_policy = { apply = 'detach_after_admission' },
+                apply = function()
+                    fibers.perform(entered:put_op(true))
+                    return release:get_op():wrap(function () completed = true; return true, { applied = true } end)
+                        :on_abort(function () aborted = true end)
+                end,
+            }, logger, 'network_config')
+        end)
+        assert(ok_spawn, tostring(err))
+
+        local cancel_op = cancel_ch:get_op():wrap(function (reason) return reason or 'caller_abandoned' end)
+        local req = assert(types.new.ControlRequest('apply', {}, reply_ch, cancel_op))
+        assert(fibers.perform(ch:put_op(req)) ~= false)
+        assert(fibers.perform(entered:get_op()) == true)
+        assert(fibers.perform(cancel_ch:put_op('caller_abandoned')) ~= false)
+        for _ = 1, 4 do runtime.yield() end
+        assert(aborted == false, 'admitted apply must not be aborted by caller abandonment')
+        assert(fibers.perform(release:put_op(true)) ~= false)
+        for _ = 1, 4 do runtime.yield() end
+        assert(completed == true, 'admitted apply should complete after caller detaches')
+        local got = fibers.perform(reply_ch:get_op():or_else(function () return nil, 'not_ready' end))
+        assert(got == nil, 'detached caller should not receive a late reply')
+
+        local saw_detached = false
+        for _, rec in ipairs(logs) do
+            if rec.what == 'network_config_request_detached' and rec.admitted == true then
+                saw_detached = true
+            end
+        end
+        assert(saw_detached == true, 'expected admitted caller detachment log')
+    end)
+end
+
 return T

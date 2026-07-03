@@ -570,7 +570,6 @@ local function build_surfaces(data)
 	local vlan_port = (data.vlan_port or {}).ports or {}
 	local vlan_membership = (data.vlan_membership or {}).ports or {}
 	local poe_ports = (data.poe_poe or {}).ports or {}
-	local rmon_ports = (data.rmon_statistics or {}).ports or {}
 	local surfaces = {}
 
 	for i, port in ipairs(ports) do
@@ -581,7 +580,6 @@ local function build_surfaces(data)
 		local vp = vlan_port[i]
 		local vm = vlan_membership[i]
 		local poe = poe_ports[i]
-		local rmon = rmon_ports[i]
 		local media = parse_media(prow and prow.type, panel)
 		local membership = parse_vlan_membership_string((vm and (vm.operVlans or vm.adminVlans)) or '')
 		local vlans, tagged, untagged = vlans_from_membership(membership)
@@ -633,12 +631,9 @@ local function build_surfaces(data)
 				vlan_port = vp,
 				vlan_membership = vm,
 				poe_poe = poe,
-				rmon_statistics = rmon,
 			},
 		}
 
-		local counters = parse_surface_counters(rmon)
-		if counters then surfaces[name].counters = counters end
 
 		if poe then
 			surfaces[name].poe = {
@@ -654,6 +649,19 @@ local function build_surfaces(data)
 	end
 
 	return surfaces
+end
+
+local function build_surface_counters(data)
+	local home = data.home_main or {}
+	local ports = home.ports or {}
+	local rmon_ports = (data.rmon_statistics or {}).ports or {}
+	local out = {}
+	for i, port in ipairs(ports) do
+		local name = tostring(port.port or port.name or ('port-' .. i))
+		local counters = parse_surface_counters(rmon_ports[i])
+		if counters then out[name] = counters end
+	end
+	return out
 end
 
 local function build_identity(data)
@@ -695,6 +703,7 @@ local function build_snapshot(self, data)
 		status = base_status(self),
 		identity = build_identity(data),
 		surfaces = build_surfaces(data),
+		counters = build_surface_counters(data),
 		topology = {
 			lldp_local = data.lldp_local,
 			lldp_neighbor = data.lldp_neighbor,
@@ -718,6 +727,8 @@ local function build_group_observation(self, group, data)
 		out.identity = build_identity(data)
 	elseif group == 'runtime' then
 		out.runtime = parse_runtime(data.sys_cpumem)
+	elseif group == 'counters' then
+		out.counters = build_surface_counters(data)
 	elseif group == 'poe' then
 		out.power = parse_power(data.poe_poe)
 		out.surfaces = build_surfaces(data)
@@ -726,7 +737,7 @@ local function build_group_observation(self, group, data)
 			lldp_local = data.lldp_local,
 			lldp_neighbor = data.lldp_neighbor,
 		}
-	elseif group == 'panel' or group == 'vlan' or group == 'counters' then
+	elseif group == 'panel' or group == 'vlan' then
 		out.surfaces = build_surfaces(data)
 	else
 		return { ok = false, provider_id = self.id, group = group, status = { state = 'unavailable', available = false, driver = DRIVER, err = 'unknown command group: ' .. group } }
@@ -746,7 +757,7 @@ local function build_groups_observation(self, groups, data)
 	for _, group in ipairs(groups or {}) do
 		local partial = build_group_observation(self, group, data)
 		if not partial or partial.ok ~= true then return partial end
-		for _, key in ipairs({ 'identity', 'runtime', 'power', 'topology' }) do
+		for _, key in ipairs({ 'identity', 'runtime', 'power', 'topology', 'counters' }) do
 			if type(partial[key]) == 'table' then out[key] = merge_table(out[key] or {}, partial[key]) end
 		end
 		if type(partial.surfaces) == 'table' then

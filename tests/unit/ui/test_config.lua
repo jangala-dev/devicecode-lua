@@ -39,6 +39,7 @@ function M.test_normalise_supplies_http_static_sse_defaults_and_accepts_explicit
 	eq(cfg.updates.commit.require_auth, false)
 	eq(config.DEFAULTS.updates, nil)
 	eq(cfg.observability.status_interval_s, 30)
+	eq(cfg.observability.coalesce_status_s, 0.05)
 end
 
 
@@ -46,9 +47,10 @@ function M.test_observability_status_interval_is_configurable()
 	local cfg = ok(config.normalise({
 		schema = config.SCHEMA,
 		updates = update_policy(),
-		observability = { status_interval_s = 15 },
+		observability = { status_interval_s = 15, coalesce_status_s = 0.1 },
 	}))
 	eq(cfg.observability.status_interval_s, 15)
+	eq(cfg.observability.coalesce_status_s, 0.1)
 
 	cfg = ok(config.normalise({
 		schema = config.SCHEMA,

@@ -81,6 +81,25 @@ function tests.test_dirty_surface_publish_only_retains_changed_surface()
 	eq(conn.retains[#conn.retains].topic, 'state/wired/surface/a')
 end
 
+
+function tests.test_counter_updates_publish_metric_without_republishing_surface()
+	local conn = fake_conn()
+	local published = publisher.new_state()
+	local snap = snapshot('up')
+	snap.counters = { a = { surface_id = 'a', counters = { rx = { bytes = 1 } } } }
+	local dirty = publisher.mark_all(publisher.new_dirty_state())
+	ok(publisher.publish_dirty_now(conn, snap, published, dirty))
+	local before = #conn.retains
+	local snap2 = snapshot('up')
+	snap2.counters = { a = { surface_id = 'a', counters = { rx = { bytes = 2 } } } }
+	publisher.mark_counter(dirty, 'a')
+	local ok2, err2, changed = publisher.publish_dirty_now(conn, snap2, published, dirty)
+	ok(ok2, err2)
+	eq(changed, 1)
+	eq(#conn.retains, before + 1)
+	eq(conn.retains[#conn.retains].topic, 'obs/v1/wired/metric/surface_counters/a')
+end
+
 function tests.test_removed_dirty_surface_is_unretained_once()
 	local conn = fake_conn()
 	local published = publisher.new_state()

@@ -241,7 +241,7 @@ function M.test_completed_exchange_prunes_one_shot_request_and_operation_records
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main', max_event_history = 64 }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main', max_event_history = 16 }))
 		yield_many(4)
 
 		svc._state.requests.req1 = { request_id = 'req1', state = 'running', target = { method = 'GET' } }
@@ -634,7 +634,6 @@ function M.test_handle_returning_rpcs_return_public_wrappers()
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
-			max_event_history = 64,
 			http_server = http_server_success(counters),
 			request_module = request_module('body', counters),
 			websocket_module = websocket_module(counters),
@@ -667,7 +666,6 @@ function M.test_each_local_handle_rpc_rejects_non_local_before_backend_admission
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
-			max_event_history = 64,
 			http_server = http_server_success(counters),
 			request_module = request_module('body', counters),
 			websocket_module = websocket_module(counters),
@@ -716,8 +714,8 @@ function M.test_listener_owner_reports_identity_completion_when_listener_runtime
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
-			max_event_history = 64,
 			http_server = http_server_success(counters),
+			max_event_history = 32,
 		}))
 		local user = b:connect({ origin_base = { kind = 'local' } })
 		local ref = sdk_mod.new_ref(user, 'main')
@@ -750,8 +748,8 @@ function M.test_onstream_context_admission_emits_service_event_without_reducing_
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
-			max_event_history = 64,
 			http_server = http_server_success(counters),
+			max_event_history = 32,
 		}))
 		local user = b:connect({ origin_base = { kind = 'local' } })
 		local ref = sdk_mod.new_ref(user, 'main')
@@ -820,9 +818,9 @@ function M.test_listener_termination_terminates_unaccepted_context_and_emits_con
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
-			max_event_history = 64,
 			http_server = http_server_success({}),
 			context_terminator = function (_, reason) terminated_reason = reason end,
+			max_event_history = 32,
 		}))
 		local user = b:connect({ origin_base = { kind = 'local' } })
 		local rep = ok(fibers.perform(sdk_mod.new_ref(user, 'main'):listen_op({ host = '127.0.0.1', port = 0 })))
@@ -1181,6 +1179,94 @@ function M.test_invalid_retained_http_config_marks_service_degraded_without_repl
 		eq(svc:stats().policy_generation, 1, 'invalid config must not advance policy generation')
 		svc:terminate('done')
 	end)
+end
+
+function M.test_refresh_model_does_not_publish_when_snapshot_is_unchanged()
+	local model_mod = require 'services.http.model'
+	local conn = { retains = {}, retain = function(self, topic, payload) self.retains[#self.retains + 1] = { topic = topic, payload = payload }; return true end }
+	local svc = setmetatable({
+		_conn = conn,
+		_id = 'main',
+		_closed = false,
+		_model = model_mod.new(),
+		_opts = {},
+		_obs = { last_status_key = nil, last_status_emit_at = nil, failure_windows = {}, had_failure = false },
+		_state = {
+			service_state = 'starting', backend = 'starting', ready = false, last_error = nil,
+			policy_generation = 1, completed_exchanges = 0, failed_exchanges = 0, rejected_requests = 0,
+			listeners = {}, contexts = {}, exchanges = {}, websockets = {}, config = { observability = { status_interval_s = 30, stats_interval_s = 30 } },
+		},
+	}, http_service.HttpService)
+	ok(svc:_refresh_model({ kind = 'noop' }))
+	eq(#conn.retains, 0)
+end
+
+function M.test_http_retained_stats_publish_for_handle_activity_without_status_retain()
+	local model_mod = require 'services.http.model'
+	local topics = require 'services.http.topics'
+	local conn = { retains = {}, retain = function(self, topic, payload) self.retains[#self.retains + 1] = { topic = table.concat(topic, '/'), payload = payload }; return true end }
+	local svc = setmetatable({
+		_conn = conn,
+		_id = 'main',
+		_closed = false,
+		_model = model_mod.new(),
+		_opts = {},
+		_obs = { last_status_key = nil, last_status_emit_at = nil, failure_windows = {}, had_failure = false },
+		_retained_status_cache = {},
+		_retained_stats_cache = {},
+		_state = {
+			service_state = 'ready', backend = 'ready', ready = true, last_error = nil,
+			policy_generation = 1, completed_exchanges = 0, failed_exchanges = 0, rejected_requests = 0,
+			listeners = {}, contexts = {}, exchanges = {}, websockets = {}, config = { observability = { status_interval_s = 30, stats_interval_s = 30 } },
+		},
+	}, http_service.HttpService)
+	ok(svc:_refresh_model({ kind = 'backend_ready' }))
+	local status_topic = table.concat(topics.status('main'), '/')
+	local stats_topic = table.concat(topics.state('main', 'stats'), '/')
+	local status_count = 0
+	for _, rec in ipairs(conn.retains) do if rec.topic == status_topic then status_count = status_count + 1 end end
+	local before_retains = #conn.retains
+	svc._state.listeners.l1 = { state = 'registered' }
+	ok(svc:_refresh_model({ kind = 'listener_started' }))
+	local saw_stats = false
+	for i = before_retains + 1, #conn.retains do
+		if conn.retains[i].topic == stats_topic then saw_stats = true end
+	end
+	ok(saw_stats, 'active listener change should refresh retained stats promptly')
+	local after_status_count = 0
+	for _, rec in ipairs(conn.retains) do if rec.topic == status_topic then after_status_count = after_status_count + 1 end end
+	eq(after_status_count, status_count, 'active listener change must not republish cap status')
+end
+
+function M.test_http_retained_status_is_not_republished_for_stats_only_changes()
+	local model_mod = require 'services.http.model'
+	local topics = require 'services.http.topics'
+	local conn = { retains = {}, retain = function(self, topic, payload) self.retains[#self.retains + 1] = { topic = table.concat(topic, '/'), payload = payload }; return true end }
+	local svc = setmetatable({
+		_conn = conn,
+		_id = 'main',
+		_closed = false,
+		_model = model_mod.new(),
+		_opts = {},
+		_obs = { last_status_key = nil, last_status_emit_at = nil, failure_windows = {}, had_failure = false },
+		_retained_status_cache = {},
+		_retained_stats_cache = {},
+		_state = {
+			service_state = 'ready', backend = 'ready', ready = true, last_error = nil,
+			policy_generation = 1, completed_exchanges = 0, failed_exchanges = 0, rejected_requests = 0,
+			listeners = {}, contexts = {}, exchanges = {}, websockets = {}, config = { observability = { status_interval_s = 30, stats_interval_s = 30 } },
+		},
+	}, http_service.HttpService)
+	ok(svc:_refresh_model({ kind = 'backend_ready' }))
+	local first_count = #conn.retains
+	ok(first_count >= 2, 'initial semantic change should publish status and stats')
+	svc._state.completed_exchanges = 1
+	ok(svc:_refresh_model({ kind = 'http_operation_done', status = 'ok' }))
+	eq(#conn.retains, first_count, 'stats-only changes should not republish retained cap state immediately')
+	svc._retained_stats_emit_at = -1000000
+	svc._state.completed_exchanges = 2
+	ok(svc:_refresh_model({ kind = 'http_operation_done', status = 'ok' }))
+	eq(conn.retains[#conn.retains].topic, table.concat(topics.state('main', 'stats'), '/'))
 end
 
 return M
