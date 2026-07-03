@@ -69,7 +69,7 @@
             "base_url": "http://172.28.100.9/",
             "username": "$SWITCH_USERNAME",
             "password": "$SWITCH_PASSWORD",
-            "timeout_s": 0.8,
+            "timeout_s": 3.0,
             "poll": {
               "fast": {
                 "interval_s": 1.0,

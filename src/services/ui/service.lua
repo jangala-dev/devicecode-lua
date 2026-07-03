@@ -125,8 +125,8 @@ local function record_cleanup_error(state, kind, err)
 		kind = kind or 'cleanup_error',
 		err = tostring(err or 'cleanup failed'),
 	}
-	state.cleanup_errors = state.cleanup_errors or {}
-	state.cleanup_errors[#state.cleanup_errors + 1] = rec
+	-- Cleanup errors are diagnostic state, not history. Keep the last error only
+	-- to avoid accumulating records in long-running services.
 	state.last_cleanup_error = rec
 
 	return rec

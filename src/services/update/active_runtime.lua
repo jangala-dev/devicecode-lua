@@ -70,8 +70,6 @@ function M.new_state(_opts)
 		active     = nil,
 		next_token = 1,
 		stats      = new_stats(),
-		completions = {},
-		completion_order = {},
 	}, State)
 end
 
@@ -345,8 +343,6 @@ function M.apply_completion(state, ev)
 
 	local stored = copy(ev)
 	state.last_completion = stored
-	state.completions[ev.token] = stored
-	state.completion_order[#state.completion_order + 1] = ev.token
 
 	active.status = 'completed_pending_persist'
 	active.handle = nil
@@ -379,8 +375,14 @@ function M.last_completion(state)
 end
 
 function M.completion(state, token)
-	local ev = state and token and state.completions and state.completions[token] or nil
-	return ev and copy(ev) or nil
+	if not state or token == nil then return nil end
+	local active = state.active
+	if active and active.token == token and active.completion then
+		return copy(active.completion)
+	end
+	local last = state.last_completion
+	if last and last.token == token then return copy(last) end
+	return nil
 end
 
 

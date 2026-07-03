@@ -237,6 +237,43 @@ function M.test_stale_generation_events_are_ignored()
 	end)
 end
 
+function M.test_completed_exchange_prunes_one_shot_request_and_operation_records()
+	fibers.run(function ()
+		local b = bus.new()
+		local root = b:connect({ origin_base = { kind = 'local' } })
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
+		yield_many(4)
+
+		svc._state.requests.req1 = { request_id = 'req1', state = 'running', target = { method = 'GET' } }
+		svc._state.operations.op1 = { operation_id = 'op1', generation = 1, operation = 'exchange', request_id = 'req1', state = 'running' }
+		ok(svc:_submit_event({ kind = 'http_operation_done', operation_id = 'op1', operation = 'exchange', request_id = 'req1', generation = 1, status = 'ok', result = { status = '200', headers = { large = 'header' } } }))
+		yield_many(8)
+
+		eq(svc._state.requests.req1, nil)
+		eq(svc._state.operations.op1, nil)
+		eq(svc:stats().completed_exchanges, 1)
+		local last = svc:events()[#svc:events()]
+		eq(last.kind, 'http_operation_done')
+		eq(last.result, nil, 'event history should not retain operation result payloads')
+		svc:terminate('done')
+	end)
+end
+
+function M.test_http_event_history_is_bounded()
+	fibers.run(function ()
+		local b = bus.new()
+		local root = b:connect({ origin_base = { kind = 'local' } })
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main', max_event_history = 3 }))
+		for i = 1, 6 do svc:_log_event({ kind = 'synthetic', n = i, raw = { should = 'drop' } }) end
+		local events = svc:events()
+		eq(#events, 3)
+		eq(events[1].n, 4)
+		eq(events[3].n, 6)
+		eq(events[3].raw, nil)
+		svc:terminate('done')
+	end)
+end
+
 function M.test_cap_request_received_then_service_shutdown_finalises_request_owner()
 	fibers.run(function ()
 		local b = bus.new()
@@ -319,17 +356,12 @@ function M.test_bus_request_abandonment_cancels_admitted_http_operation()
 
 		ok(done_tx:send({ status = 'abandoned', err = 'caller_timeout' }))
 		yield_until(function ()
-			local rec = svc._state.operations[operation_id]
-			return rec and rec.state == 'completed'
-		end, 'operation should complete after caller abandonment')
+			return svc._state.operations[operation_id] == nil
+		end, 'operation should complete and be pruned after caller abandonment')
 
-		local rec = svc._state.operations[operation_id]
-		eq(rec.status, 'cancelled')
-		eq(rec.primary, 'caller_timeout')
-		local reqrec = svc._state.requests[request_id]
-		eq(reqrec.state, 'cancelled')
-		eq(reqrec.reason, 'caller_timeout')
+		eq(svc._state.requests[request_id], nil)
 		eq(svc._owned_requests[request_id], nil)
+		eq(svc:stats().failed_exchanges, 1)
 		ok(owner:done(), 'owner should be locally abandoned')
 
 		svc:terminate('done')
