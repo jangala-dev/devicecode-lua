@@ -298,3 +298,22 @@ Debian's QEMU packages, not because the lab image is a desktop image.
 The lab scripts also normalise `PATH` to include `/usr/sbin` and `/sbin`.  On
 minimal cloud images, tools such as iproute2's `bridge` can be installed but not
 visible to the non-login SSH user unless those directories are added explicitly.
+
+### Full service graph with mocked HAL capabilities
+
+`make test-devicecode-full-stack-mock-hal` copies the current source tree into
+the OpenWrt VM and runs the real Devicecode services in-process against a bus
+with mocked HAL capability providers.  It deliberately excludes the production
+`hal` service and replaces the HAL boundary with public capability topics for
+filesystem, network, control-store, artifact-store, time and platform.  The test
+boots config, device, fabric, gsm, http, metrics, monitor, net, system, time,
+ui, update, wifi and wired from their normal source modules.
+
+The fixture asserts that configuration is loaded through the filesystem
+capability, the broad service graph reaches retained running/ready state, wired
+public state is projected, HTTP capability state is retained, UI runs with raw
+HAL topics excluded by default, and network apply requests are serialised by the
+mock HAL boundary while config churn is in flight.  This lane is intended to
+catch shared-infrastructure regressions in service lifecycle, retained publish,
+capability dependency handling, config watch and cancellation semantics under a
+real OpenWrt Lua runtime.

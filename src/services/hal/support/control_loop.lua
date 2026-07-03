@@ -27,6 +27,16 @@ local function err_text(v)
 	return nil
 end
 
+local function method_cancel_policy(methods, verb)
+	local policies = type(methods) == 'table' and rawget(methods, '__cancel_policy') or nil
+	if type(policies) == 'table' then return policies[verb] end
+	return nil
+end
+
+local function caller_abandoned(reason)
+	return reason ~= nil and reason ~= false
+end
+
 ---@param ev any
 ---@param verb string
 ---@return Op
@@ -139,12 +149,13 @@ function M.run_request_loop(ch, methods, logger, what)
 
 		local ok, value_or_err
 		local caller_cancelled = false
-		if request.cancel_op ~= nil then
+		local cancel_policy = method_cancel_policy(methods, request.verb)
+		if request.cancel_op ~= nil and cancel_policy ~= 'detach_after_admission' then
 			local which, a, b = perform(op.named_choice({
 				work = M.evaluate_request_op(methods, request),
 				cancel = request.cancel_op,
 			}))
-			if which == 'cancel' and a ~= nil and a ~= false then
+			if which == 'cancel' and caller_abandoned(a) then
 				caller_cancelled = true
 				dlog(logger, trace_control and 'warn' or 'debug', {
 					what = loop_name .. '_request_cancelled',
@@ -181,22 +192,47 @@ function M.run_request_loop(ch, methods, logger, what)
 			local reply_t0 = fibers.now()
 			local replied, reply_err
 			if request.cancel_op ~= nil then
-				local which, a, b = perform(op.named_choice({
-					reply = M.reply_op(request.reply_ch, ok, value_or_err),
-					cancel = request.cancel_op,
-				}))
-				if which == 'cancel' and a ~= nil and a ~= false then
-					caller_cancelled = true
-					if trace_control then
-						dlog(logger, 'warn', {
-							what = loop_name .. '_reply_cancelled',
-							verb = tostring(request.verb),
-							reason = tostring(a),
-							elapsed_ms = elapsed_ms(req_t0),
-						})
+				-- Detach-protected operations are deliberately allowed to drain after
+				-- admission. If the caller abandoned while the operation was running,
+				-- prefer recording detachment over delivering a late reply.  Do not race
+				-- reply and cancellation here: both may be immediately ready and
+				-- named_choice has no semantic priority.
+				if cancel_policy == 'detach_after_admission' then
+					local pre_reply_cancel = perform(request.cancel_op:or_else(function () return nil end))
+					if caller_abandoned(pre_reply_cancel) then
+						caller_cancelled = true
+						if trace_control then
+							dlog(logger, 'warn', {
+								what = loop_name .. '_request_detached',
+								verb = tostring(request.verb),
+								reason = tostring(pre_reply_cancel),
+								admitted = true,
+								elapsed_ms = elapsed_ms(req_t0),
+							})
+						end
+					else
+						replied, reply_err = perform(M.reply_op(request.reply_ch, ok, value_or_err):or_else(function ()
+							return false, 'reply_not_ready'
+						end))
 					end
 				else
-					replied, reply_err = a, b
+					local which, a, b = perform(op.named_choice({
+						reply = M.reply_op(request.reply_ch, ok, value_or_err),
+						cancel = request.cancel_op,
+					}))
+					if which == 'cancel' and caller_abandoned(a) then
+						caller_cancelled = true
+						if trace_control then
+							dlog(logger, 'warn', {
+								what = loop_name .. '_reply_cancelled',
+								verb = tostring(request.verb),
+								reason = tostring(a),
+								elapsed_ms = elapsed_ms(req_t0),
+							})
+						end
+					else
+						replied, reply_err = a, b
+					end
 				end
 			else
 				replied, reply_err = perform(M.reply_op(request.reply_ch, ok, value_or_err))

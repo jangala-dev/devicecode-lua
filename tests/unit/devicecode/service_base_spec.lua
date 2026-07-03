@@ -62,6 +62,39 @@ function T.new_service_publishes_meta_announce_and_status()
 	end)
 end
 
+
+function T.lifecycle_status_retains_only_on_semantic_change()
+	runfibers.run(function()
+		local bus    = busmod.new()
+		local conn   = bus:connect()
+		local reader = bus:connect()
+		local svc = service_base.new(conn, { name = 'idem', env = 'test' })
+		local sub = reader:subscribe({ 'svc', 'idem', 'status' })
+
+		svc:running({ ready = false, phase = 'steady' })
+		local first_which, first_msg = fibers.perform(op.named_choice{
+			msg = sub:recv_op():wrap(function(msg) return msg end),
+			timeout = sleep.sleep_op(0.5):wrap(function() return nil end),
+		})
+		assert(first_which == 'msg' and first_msg and first_msg.payload and first_msg.payload.phase == 'steady')
+
+		svc:running({ ready = false, phase = 'steady' })
+		local which = fibers.perform(op.named_choice{
+			msg = sub:recv_op():wrap(function() return 'msg' end),
+			timeout = sleep.sleep_op(0.05):wrap(function() return 'timeout' end),
+		})
+		assert(which == 'timeout', 'unchanged lifecycle status should not be retained again')
+
+		svc:running({ ready = true, phase = 'steady' })
+		local changed_which, changed_msg = fibers.perform(op.named_choice{
+			msg = sub:recv_op():wrap(function(msg) return msg end),
+			timeout = sleep.sleep_op(0.5):wrap(function() return nil end),
+		})
+		sub:unsubscribe()
+		assert(changed_which == 'msg' and changed_msg and changed_msg.payload and changed_msg.payload.ready == true)
+	end)
+end
+
 function T.obs_helpers_publish_legacy_and_v1_topics()
 	runfibers.run(function()
 		local bus    = busmod.new()

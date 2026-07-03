@@ -60,6 +60,7 @@ local function driver_method_op(method, req)
 end
 
 local CONFIG_METHODS = {
+	__cancel_policy = { apply = 'detach_after_admission' },
 	validate = function (_opts, req) return driver_method_op('validate', req) end,
 	plan = function (_opts, req) return driver_method_op('plan', req) end,
 	apply = function (_opts, req) return driver_method_op('apply', req) end,

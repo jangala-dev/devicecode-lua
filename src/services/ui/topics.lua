@@ -17,14 +17,16 @@ function M.svc_meta()
 end
 
 
-function M.default_retained_patterns()
-	return {
+function M.default_retained_patterns(opts)
+	opts = opts or {}
+	local patterns = {
 		t('cfg', '#'),
 		t('svc', '#'),
 		t('state', '#'),
 		t('cap', '#'),
-		t('raw', '#'),
 	}
+	if opts.include_raw == true then patterns[#patterns + 1] = t('raw', '#') end
+	return patterns
 end
 
 

@@ -11,6 +11,14 @@ local M = {}
 
 local DEFAULT_URL = 'https://proof.ovh.net/files/100Mb.dat'
 
+local function owned_process_flags()
+	local flags = { process_group = true }
+	if type(exec.supports) == 'function' and exec.supports('parent_death_signal') then
+		flags.parent_death_signal = 'TERM'
+	end
+	return flags
+end
+
 local function read_counter(path)
 	local f, err = file.open(path, 'r')
 	if not f then return nil, err end

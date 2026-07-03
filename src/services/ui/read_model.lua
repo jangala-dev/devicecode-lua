@@ -111,7 +111,7 @@ function M.start(scope, conn, opts)
 	end)
 
 	if conn ~= nil then
-		local patterns = opts.patterns or topics.default_retained_patterns()
+		local patterns = opts.patterns or topics.default_retained_patterns(opts)
 		for _, pattern in ipairs(patterns) do
 			local ok, err = start_feed_owner(scope, watch_owner, conn, pattern, opts)
 			if not ok then error(err or 'read_model feed start failed', 2) end

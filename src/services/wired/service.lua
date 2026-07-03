@@ -41,13 +41,15 @@ local function update_observation_from_event(snap, ev)
 	end
 	local id = topic[5]
 	if type(id) ~= 'string' or id == '' then return false end
-	local rec = snap.observations[id] or { id = id, status = {}, identity = {}, runtime = {}, power = {}, surfaces = {}, topology = {}, meta = {} }
+	local current = snap.observations[id]
+	local rec = copy(current or { id = id, status = {}, identity = {}, runtime = {}, power = {}, surfaces = {}, counters = {}, topology = {}, meta = {} })
 	if ev.op == 'unretain' then
 		if topic[6] == 'status' then rec.status = { state = 'unavailable', available = false, reason = 'unretained' }
 		elseif topic[6] == 'state' and topic[7] == 'identity' then rec.identity = {}
 		elseif topic[6] == 'state' and topic[7] == 'runtime' then rec.runtime = {}
 		elseif topic[6] == 'state' and topic[7] == 'power' then rec.power = {}
 		elseif topic[6] == 'state' and topic[7] == 'surfaces' then rec.surfaces = {}
+		elseif topic[6] == 'state' and topic[7] == 'counters' then rec.counters = {}
 		elseif topic[6] == 'state' and topic[7] == 'topology' then rec.topology = {}
 		elseif topic[6] == 'meta' then rec.meta = {} end
 	else
@@ -57,12 +59,13 @@ local function update_observation_from_event(snap, ev)
 		elseif topic[6] == 'state' and topic[7] == 'runtime' then rec.runtime = payload
 		elseif topic[6] == 'state' and topic[7] == 'power' then rec.power = payload
 		elseif topic[6] == 'state' and topic[7] == 'surfaces' then rec.surfaces = payload.surfaces or payload
+		elseif topic[6] == 'state' and topic[7] == 'counters' then rec.counters = payload.counters or payload
 		elseif topic[6] == 'state' and topic[7] == 'topology' then rec.topology = payload
 		elseif topic[6] == 'meta' then rec.meta = payload end
 	end
-	rec.updated_at = now()
+	if tablex.deep_equal(current, rec) then return false, id end
 	snap.observations[id] = rec
-	return true
+	return true, id
 end
 
 local function net_segments_from_payload(payload)
@@ -290,6 +293,7 @@ end
 
 local function rebuild_derived(snap)
 	local surfaces = {}
+	local counters = {}
 	local violations = {}
 	local topology = { protected_trunks = {}, access = {}, trunks = {} }
 	local segments = snap.net and snap.net.segments or {}
@@ -303,7 +307,7 @@ local function rebuild_derived(snap)
 		local p_surface = binding and observed_surface_record(observation, binding.observed_surface) or nil
 		local link = copy((p_surface and p_surface.link) or {})
 		local observed_attachment = copy((p_surface and p_surface.attachment) or {})
-		local observed_counters = copy((p_surface and p_surface.counters) or {})
+		local observed_counters = copy((observation and observation.counters and binding and observation.counters[binding.observed_surface]) or {})
 		local observed_poe = copy((p_surface and p_surface.poe) or {})
 		local availability = { state = 'available', reason = nil }
 		if desired.enabled == false then
@@ -321,6 +325,14 @@ local function rebuild_derived(snap)
 		end
 
 		validate_observed_capabilities(violations, id, desired, binding, p_surface)
+
+		if next(observed_counters) ~= nil then
+			counters[id] = {
+				surface_id = id,
+				source = source_from_binding(binding),
+				counters = observed_counters,
+			}
+		end
 
 		if desired.protected then
 			if desired.enabled == false then append_violation(violations, 'protected_surface_disabled', { surface_id = id, severity = 'critical' }) end
@@ -362,16 +374,15 @@ local function rebuild_derived(snap)
 			source = source_from_binding(binding),
 			capabilities = copy(desired.capabilities),
 			attachment = copy(desired.attachment),
-			observed = { attachment = observed_attachment, poe = observed_poe, counters = observed_counters, source = source_from_binding(binding) },
+			observed = { attachment = observed_attachment, poe = observed_poe, source = source_from_binding(binding) },
 			link = link,
 			poe = observed_poe,
-			counters = observed_counters,
 			availability = availability,
-			updated_at = now(),
 		}
 	end
 
 	snap.surfaces = surfaces
+	snap.counters = counters
 	snap.topology = topology
 	snap.violations = violations
 	snap.ready = true
@@ -380,14 +391,43 @@ local function rebuild_derived(snap)
 	return snap
 end
 
+local function mark_surfaces_for_provider(dirty, snap, provider_id)
+	local marked = false
+	if provider_id == nil then return marked end
+	for surface_id, desired in pairs((snap.config_intent and snap.config_intent.surfaces) or {}) do
+		local binding = resolve_observation_binding(snap, desired)
+		if binding and binding.component == provider_id then
+			publisher.mark_surface(dirty, surface_id)
+			marked = true
+		end
+	end
+	return marked
+end
+
+
+local function mark_counters_for_provider(dirty, snap, provider_id)
+	local marked = false
+	if provider_id == nil then return marked end
+	for surface_id, desired in pairs((snap.config_intent and snap.config_intent.surfaces) or {}) do
+		local binding = resolve_observation_binding(snap, desired)
+		if binding and binding.component == provider_id then
+			publisher.mark_counter(dirty, surface_id)
+			marked = true
+		end
+	end
+	return marked
+end
+
 local function publish(state)
 	local snap = state.model:snapshot()
-	local ok, err = publisher.publish_all_now(state.conn, snap, state.published)
+	local ok, err, changed = publisher.publish_dirty_now(state.conn, snap, state.published, state.dirty)
 	if ok ~= true then return nil, err end
-	state.model:update(function (s)
-		s.stats.publications = (s.stats.publications or 0) + 1
-		return s
-	end)
+	if (changed or 0) > 0 then
+		state.model:update(function (s)
+			s.stats.publications = (s.stats.publications or 0) + 1
+			return s
+		end)
+	end
 	return true, nil
 end
 
@@ -403,6 +443,7 @@ local function apply_config(state, ev)
 		return rebuild_derived(snap)
 	end)
 	if uerr ~= nil then return nil, uerr end
+	publisher.mark_all(state.dirty)
 	return publish(state)
 end
 
@@ -417,6 +458,7 @@ local function apply_net_segments(state, ev)
 		return rebuild_derived(snap)
 	end)
 	if uerr ~= nil then return nil, uerr end
+	publisher.mark_all(state.dirty)
 	return publish(state)
 end
 
@@ -429,16 +471,38 @@ local function apply_assembly_event(state, ev)
 		return rebuild_derived(snap)
 	end)
 	if uerr ~= nil then return nil, uerr end
+	publisher.mark_all(state.dirty)
 	return publish(state)
 end
 
 local function apply_observation_event(state, ev)
 	if ev and ev.op == 'replay_done' then return true, nil end
+	local changed_provider_id
+	local observation_changed = false
 	local _changed, _version, uerr = state.model:update(function (snap)
-		if update_observation_from_event(snap, ev) then snap.stats.observation_updates = (snap.stats.observation_updates or 0) + 1 end
+		local changed, provider_id = update_observation_from_event(snap, ev)
+		changed_provider_id = provider_id
+		observation_changed = changed == true
+		if changed then snap.stats.observation_updates = (snap.stats.observation_updates or 0) + 1 end
 		return rebuild_derived(snap)
 	end)
 	if uerr ~= nil then return nil, uerr end
+	if not observation_changed then return true, nil end
+	local snap = state.model:snapshot()
+	local topic = ev and ev.topic or {}
+	if topic[6] == 'state' and topic[7] == 'counters' then
+		if not mark_counters_for_provider(state.dirty, snap, changed_provider_id) then
+			publisher.mark_summary(state.dirty)
+		end
+		return publish(state)
+	end
+	local surface_marked = mark_surfaces_for_provider(state.dirty, snap, changed_provider_id)
+	local counter_marked = mark_counters_for_provider(state.dirty, snap, changed_provider_id)
+	if not surface_marked and not counter_marked then
+		publisher.mark_summary(state.dirty)
+	end
+	publisher.mark_topology(state.dirty)
+	publisher.mark_violations(state.dirty)
 	return publish(state)
 end
 
@@ -463,6 +527,7 @@ function M.build_state(scope, opts)
 		assembly_watch = assembly_watch,
 		observation_watch = observation_watch,
 		published = publisher.new_state(),
+		dirty = publisher.mark_all(publisher.new_dirty_state()),
 	}
 	scope:finally(function ()
 		cfg:close()
@@ -501,6 +566,7 @@ end
 M._test = {
 	rebuild_derived = rebuild_derived,
 	observed_vlan_set = observed_vlan_set,
+	update_observation_from_event = update_observation_from_event,
 }
 
 function M.run(scope, opts)

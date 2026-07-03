@@ -18,6 +18,7 @@ local config_watch = require 'devicecode.support.config_watch'
 local config_mod = require 'services.http.config'
 local service_events = require 'devicecode.support.service_events'
 local service_base = require 'devicecode.service_base'
+local retained_publish = require 'devicecode.support.retained_publish'
 
 local M = {}
 local perform = fibers.perform
@@ -108,6 +109,38 @@ local function obs_status_key(snap)
 		tostring(snap.last_error),
 		tostring(snap.policy_generation),
 	}, '|')
+end
+
+local function retained_stats_semantic_key(snap)
+	-- Retained stats need to remain responsive for public handle/dependency
+	-- state, but completed/failed/rejected counters are diagnostic and can
+	-- be emitted on the lower-frequency stats interval.
+	return table.concat({
+		tostring(snap.state),
+		tostring(snap.backend),
+		tostring(snap.ready),
+		tostring(snap.active_listeners),
+		tostring(snap.active_contexts),
+		tostring(snap.active_exchanges),
+		tostring(snap.active_websockets),
+		tostring(snap.last_error),
+		tostring(snap.policy_generation),
+	}, '|')
+end
+
+local function cap_status_payload(snap)
+	return {
+		state = snap.state,
+		available = snap.ready,
+		backend = snap.backend,
+		reason = snap.ready and nil or (snap.last_error or snap.backend),
+		last_error = snap.last_error,
+	}
+end
+
+local function stats_publish_interval(self)
+	local cfg = obs_config(self)
+	return tonumber(cfg.stats_interval_s or cfg.status_interval_s) or 30
 end
 
 local function uri_summary(uri)
@@ -244,23 +277,49 @@ function HttpService:_record_http_recovery(rec)
 	})
 end
 
+function HttpService:_should_publish_retained_stats(snap, ev, status_changed)
+	local key = retained_stats_semantic_key(snap)
+	if self._retained_stats_cache == nil or self._retained_stats_cache.stats == nil then return true, key end
+	if status_changed == true then return true, key end
+	if key ~= self._retained_stats_semantic_key then return true, key end
+	local interval = stats_publish_interval(self)
+	if interval <= 0 then return false, key end
+	return (now() - (self._retained_stats_emit_at or 0)) >= interval, key
+end
+
 function HttpService:_publish_model(ev)
 	if self._closed and not self._publishing_after_close then return end
 	local snap = self._model:snapshot()
-	self._conn:retain(topics.status(self._id), {
-		state = snap.state,
-		available = snap.ready,
-		backend = snap.backend,
-		reason = snap.ready and nil or (snap.last_error or snap.backend),
-		last_error = snap.last_error,
-	})
-	self._conn:retain(topics.state(self._id, 'stats'), snap)
+	self._retained_status_cache = self._retained_status_cache or {}
+	self._retained_stats_cache = self._retained_stats_cache or {}
+	local ok, err, status_changed = retained_publish.retain_if_changed(
+		self._conn,
+		self._retained_status_cache,
+		'status',
+		topics.status(self._id),
+		cap_status_payload(snap)
+	)
+	if ok ~= true then return nil, err end
+	local publish_stats, stats_key = self:_should_publish_retained_stats(snap, ev, status_changed)
+	if publish_stats then
+		ok, err = retained_publish.retain_if_changed(
+			self._conn,
+			self._retained_stats_cache,
+			'stats',
+			topics.state(self._id, 'stats'),
+			snap
+		)
+		if ok ~= true then return nil, err end
+		self._retained_stats_emit_at = now()
+		self._retained_stats_semantic_key = stats_key
+	end
 	self:_publish_obs_status(snap, ev)
+	return true
 end
 
 function HttpService:_refresh_model(ev)
 	local changed = self._model:set_snapshot(self:_derive_snapshot())
-	if changed ~= nil then self:_publish_model(ev) end
+	if changed == true then return self:_publish_model(ev) end
 	return true
 end
 
