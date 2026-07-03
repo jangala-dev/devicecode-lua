@@ -22,6 +22,8 @@ local service_base = require 'devicecode.service_base'
 local M = {}
 local perform = fibers.perform
 
+local DEFAULT_MAX_EVENT_HISTORY = 0
+
 local function normalise_initial_config(opts)
 	local raw = opts.config
 	if raw == nil then raw = { id = opts.id, policy = opts.policy } end
@@ -42,7 +44,15 @@ end
 local function copy_event(ev)
 	local out = {}
 	for k, v in pairs(ev or {}) do
-		if k ~= 'req' and k ~= 'owner' and k ~= 'ctx' and k ~= 'websocket' then out[k] = v end
+		if k ~= 'req'
+			and k ~= 'owner'
+			and k ~= 'ctx'
+			and k ~= 'websocket'
+			and k ~= 'result'
+			and k ~= 'report'
+			and k ~= 'raw' then
+			out[k] = v
+		end
 	end
 	return out
 end
@@ -133,13 +143,9 @@ function HttpService:_derive_snapshot()
 		active_contexts = count_where(st.contexts, function (rec) return rec.state ~= 'terminated' end),
 		active_exchanges = count_where(st.exchanges, is_live_handle),
 		active_websockets = count_where(st.websockets, is_live_handle),
-		completed_exchanges = count_where(st.operations, function (rec)
-			return rec.operation == 'exchange' and rec.state == 'completed' and rec.status == 'ok'
-		end),
-		failed_exchanges = count_where(st.operations, function (rec)
-			return rec.operation == 'exchange' and rec.state == 'completed' and rec.status ~= 'ok'
-		end),
-		rejected_requests = count_where(st.requests, function (rec) return rec.state == 'rejected' end),
+		completed_exchanges = st.completed_exchanges or 0,
+		failed_exchanges = st.failed_exchanges or 0,
+		rejected_requests = st.rejected_requests or 0,
 		last_error = st.last_error,
 		policy_generation = st.policy_generation,
 	}
@@ -273,10 +279,13 @@ end
 
 function HttpService:_log_event(ev)
 	if not ev or not ev.kind then return true end
+	local max_events = tonumber(self._opts and self._opts.max_event_history) or DEFAULT_MAX_EVENT_HISTORY
+	if max_events <= 0 then return true end
 	self._event_seq = self._event_seq + 1
 	local saved = copy_event(ev)
 	saved.seq = self._event_seq
 	self._events[#self._events + 1] = saved
+	while #self._events > max_events do table.remove(self._events, 1) end
 	return true
 end
 
@@ -364,26 +373,34 @@ function HttpService:_next_request_identity(verb, req)
 	return operation_owner.next_request(self, verb, req)
 end
 
-function HttpService:_finish_request(request_id, state, reason)
-	local rec = self._state.requests[request_id]
-	if rec then
-		rec.state = state or rec.state or 'resolved'
-		rec.reason = reason
+function HttpService:_account_completed_operation(rec, status)
+	if not rec or rec.operation ~= 'exchange' then return true end
+	if status == 'ok' then
+		self._state.completed_exchanges = (self._state.completed_exchanges or 0) + 1
+	else
+		self._state.failed_exchanges = (self._state.failed_exchanges or 0) + 1
 	end
+	return true
+end
+
+function HttpService:_prune_request(request_id)
+	local rec = self._state.requests[request_id]
+	if rec then rec.owner = nil end
+	self._state.requests[request_id] = nil
 	self._owned_requests[request_id] = nil
 	return true
 end
 
+function HttpService:_finish_request(request_id, _state, _reason)
+	return self:_prune_request(request_id)
+end
+
 function HttpService:_reject_request(request_id, owner, reason)
 	if owner then owner:fail_once(reason or 'invalid_args') end
-	local rec = self._state.requests[request_id]
-	if rec then
-		rec.state = 'rejected'
-		rec.reason = reason or 'invalid_args'
-	end
+	self._state.rejected_requests = (self._state.rejected_requests or 0) + 1
 	self._state.last_error = reason or 'invalid_args'
 	self:_log_event { kind = 'cap_request_rejected', request_id = request_id, reason = reason or 'invalid_args' }
-	self._owned_requests[request_id] = nil
+	self:_prune_request(request_id)
 	return true
 end
 
@@ -663,7 +680,9 @@ function HttpService:_handle_operation_done(ev)
 		})
 	end
 	if operation_success == true then self:_record_http_recovery(rec) end
-	self._owned_requests[rec.request_id] = nil
+	self:_account_completed_operation(rec, ev.status)
+	self:_prune_request(rec.request_id)
+	self._state.operations[ev.operation_id] = nil
 	self:_log_event(ev)
 	return true
 end
@@ -894,6 +913,9 @@ function M.open_handle(conn, opts)
 			policy_generation = 1,
 			config_generation = 1,
 			config = initial_config,
+			completed_exchanges = 0,
+			failed_exchanges = 0,
+			rejected_requests = 0,
 			requests = {},
 			operations = {},
 			listeners = {},

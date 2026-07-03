@@ -89,6 +89,8 @@ local files = {
 	'unit.update.test_service',
 	'unit.update.test_service_phase2',
 	'unit.devicecode.blob_source_spec',
+	'unit.devicecode.signal_bridge_spec',
+	'unit.devicecode.exec_direct_usage_spec',
 	'unit.devicecode.support_contracts_spec',
 	'unit.shared.table_spec',
 	'unit.shared.topic_spec',
@@ -163,6 +165,7 @@ local files = {
 	"integration.devhost.wired_assembly_projection_spec",
 	"integration.devhost.rtl8380m_switch_spec",
 	"unit.device.test_wired_provider_curation",
+	"unit.hal.modem_process_flags_spec",
 	"unit.hal.wired_provider_spec",
 }
 

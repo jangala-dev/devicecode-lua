@@ -66,7 +66,7 @@ end
 ---@param varname string
 ---@return string value
 local function read_fw_printenv(varname)
-    local cmd = exec.command('fw_printenv', varname)
+    local cmd = exec.command { 'fw_printenv', varname, stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
     local out, _, code = perform(cmd:output_op())
     if code ~= 0 or not out then
         return ""

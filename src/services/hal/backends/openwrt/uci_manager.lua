@@ -39,11 +39,19 @@ ActivationRunner.__index = ActivationRunner
 local Session = {}
 Session.__index = Session
 
-local unpack = rawget(table, 'unpack') or _G.unpack
-
 local function elapsed_ms(t0)
 	if not t0 then return nil end
 	return math.floor(((fibers.now() - t0) * 1000) + 0.5)
+end
+
+local function exec_spec(argv, opts)
+	opts = opts or {}
+	local spec = {}
+	for i = 1, #argv do spec[i] = argv[i] end
+	spec.stdin  = opts.stdin  ~= nil and opts.stdin  or 'null'
+	spec.stdout = opts.stdout ~= nil and opts.stdout or 'null'
+	spec.stderr = opts.stderr ~= nil and opts.stderr or 'null'
+	return spec
 end
 
 local function log_manager(self, level, payload)
@@ -585,7 +593,7 @@ end
 
 local function default_run_cmd(argv)
 	local exec = require 'fibers.io.exec'
-	local cmd = exec.command(unpack(argv))
+	local cmd = exec.command(exec_spec(argv))
 	local status, code = fibers.perform(cmd:run_op())
 	if status ~= 'exited' or code ~= 0 then
 		return false, table.concat(argv, ' ') .. ' exited with status=' .. tostring(status) .. ' code=' .. tostring(code)

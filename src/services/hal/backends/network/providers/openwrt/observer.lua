@@ -286,6 +286,22 @@ local function terminate_stream(st, reason)
 	return true, nil
 end
 
+local function owned_process_flags()
+	local flags = { process_group = true }
+	if type(exec.supports) == 'function' and exec.supports('parent_death_signal') then
+		flags.parent_death_signal = 'TERM'
+	end
+	return flags
+end
+
+local function terminate_command(cmd, sig)
+	if not cmd or type(cmd.kill) ~= 'function' then return true, nil end
+	local ok, a, b = pcall(function () return cmd:kill(sig or 15) end)
+	if not ok then return nil, tostring(a) end
+	if a == false or a == nil then return nil, tostring(b or 'command kill failed') end
+	return true, nil
+end
+
 function Observer:_track_stream(st)
 	if st then self.active_streams[st] = true end
 	return st
@@ -302,15 +318,19 @@ function Observer:_stop_ubus_listener()
 
 	local cmd = self.ubus_cmd
 	self.ubus_cmd = nil
-	if cmd and cmd.kill then pcall(function () cmd:kill() end) end
+	terminate_command(cmd, 15)
 end
 
 function Observer:ubus_listener()
 	while not self.closed do
-		local cmd = exec.command('ubus', 'listen', 'network.interface')
-		cmd:set_stdout('pipe')
-		cmd:set_stderr('stdout')
-		cmd:set_shutdown_grace(0.2)
+		local cmd = exec.command {
+			'ubus', 'listen', 'network.interface',
+			stdin = 'null',
+			stdout = 'pipe',
+			stderr = 'stdout',
+			shutdown_grace = 0.2,
+			flags = owned_process_flags(),
+		}
 		self.ubus_cmd = cmd
 		local stream, err = cmd:stdout_stream()
 		if not stream then
@@ -330,8 +350,8 @@ function Observer:ubus_listener()
 			end
 			if self.ubus_stream == stream then self.ubus_stream = nil end
 			if self.ubus_cmd == cmd then self.ubus_cmd = nil end
-			close_stream(stream)
-			pcall(function () cmd:kill() end)
+			terminate_stream(stream, 'ubus listener stream closed')
+			perform(cmd:shutdown_op(0.2))
 			if not self.closed then perform(sleep.sleep_op(1.0)) end
 		end
 	end

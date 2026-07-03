@@ -71,7 +71,13 @@ local function make_fake_exec(result, capture)
 
 	return {
 		command = function(...)
-			capture.argv = { ... }
+			local args = { ... }
+			if type(args[1]) == 'table' and args[2] == nil then
+				capture.spec = args[1]
+				capture.argv = args[1]
+			else
+				capture.argv = args
+			end
 
 			return {
 				combined_output_op = function()
@@ -169,6 +175,9 @@ function T.verify_ed25519_success_writes_all_inputs_and_invokes_openssl()
 		assert(capture.argv[9] == '-in')
 		assert(capture.argv[10] == '/tmp/sv-2')
 		assert(capture.argv[11] == '-rawin')
+		assert(capture.spec.stdin == 'null')
+		assert(capture.spec.stdout == 'pipe')
+		assert(capture.spec.stderr == 'stdout')
 	end)
 end
 

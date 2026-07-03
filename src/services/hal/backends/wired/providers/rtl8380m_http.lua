@@ -9,6 +9,7 @@
 
 local fibers = require 'fibers'
 local op = require 'fibers.op'
+local exec = require 'fibers.io.exec'
 local contract = require 'services.hal.backends.wired.contract'
 local tablex = require 'shared.table'
 local blob_source = require 'devicecode.blob_source'
@@ -350,21 +351,39 @@ local function rsa_public_key_pem(modulus_hex)
 	return pem_wrap('PUBLIC KEY', der(0x30, alg_id .. der(0x03, string.char(0) .. rsa_pub)))
 end
 
+local function run_openssl(argv)
+	local spec = { stdin = 'null', stdout = 'null', stderr = 'null' }
+	for i = 1, #argv do spec[i] = argv[i] end
+	local cmd = exec.command(spec)
+	local status, code = fibers.perform(cmd:run_op())
+	return status == 'exited' and code == 0
+end
+
 local function openssl_encrypt_b64(self, modulus_hex, plaintext)
 	local prefix = os.tmpname()
 	local pub_path, in_path, out_path = prefix .. '.pub.pem', prefix .. '.plain', prefix .. '.cipher'
 	write_file_raw(pub_path, rsa_public_key_pem(modulus_hex))
 	write_file_raw(in_path, plaintext or '')
-	local openssl = shell_quote(self.openssl_bin)
-	local cmd = table.concat({ openssl, 'pkeyutl', '-encrypt', '-pubin', '-inkey', shell_quote(pub_path), '-pkeyopt', 'rsa_padding_mode:pkcs1', '-in', shell_quote(in_path), '-out', shell_quote(out_path), '2>/dev/null' }, ' ')
-	local ok = os.execute(cmd)
-	if not (ok == true or ok == 0) then
-		cmd = table.concat({ openssl, 'rsautl', '-encrypt', '-pubin', '-pkcs', '-inkey', shell_quote(pub_path), '-in', shell_quote(in_path), '-out', shell_quote(out_path), '2>/dev/null' }, ' ')
-		ok = os.execute(cmd)
+	local ok = run_openssl({
+		self.openssl_bin,
+		'pkeyutl', '-encrypt', '-pubin',
+		'-inkey', pub_path,
+		'-pkeyopt', 'rsa_padding_mode:pkcs1',
+		'-in', in_path,
+		'-out', out_path,
+	})
+	if not ok then
+		ok = run_openssl({
+			self.openssl_bin,
+			'rsautl', '-encrypt', '-pubin', '-pkcs',
+			'-inkey', pub_path,
+			'-in', in_path,
+			'-out', out_path,
+		})
 	end
 	local cipher = read_file(out_path)
 	os.remove(pub_path); os.remove(in_path); os.remove(out_path)
-	if not (ok == true or ok == 0) or not cipher or cipher == '' then return nil, 'openssl_rsa_encrypt_failed' end
+	if not ok or not cipher or cipher == '' then return nil, 'openssl_rsa_encrypt_failed' end
 	return base64(cipher)
 end
 

@@ -159,7 +159,7 @@ end
 -- Keep recursive removal boxed here until the file layer grows an rmdir/remove-tree
 -- primitive. This is now used only where directory removal is genuinely required.
 local function rm_rf_op(path)
-	return exec.command('rm', '-rf', path):run_op():wrap(function (st, code, _sig, err)
+	return (exec.command { 'rm', '-rf', path, stdin = 'null', stdout = 'null', stderr = 'null' }):run_op():wrap(function (st, code, _sig, err)
 		if st == 'exited' and code == 0 then
 			return true, nil
 		end

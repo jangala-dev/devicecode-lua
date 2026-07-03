@@ -5,9 +5,19 @@ local modem_types = require "services.hal.types.modem"
 local fibers = require "fibers"
 local exec = require "fibers.io.exec"
 local op = require "fibers.op"
+local scope = require "fibers.scope"
 
 -- Other modules
 local json = require "cjson.safe"
+local process_flags = require "services.hal.backends.modem.process_flags"
+
+local function terminate_command(cmd, sig)
+    if not cmd or type(cmd.kill) ~= 'function' then return true, nil end
+    local ok, a, b = pcall(function() return cmd:kill(sig or 15) end)
+    if not ok then return nil, tostring(a) end
+    if a == false or a == nil then return nil, tostring(b or 'command kill failed') end
+    return true, nil
+end
 
 local function list_to_map(list)
     local map = {}
@@ -545,7 +555,8 @@ function ModemBackend:inhibit()
         "mmcli", "-m", self.identity.address, "--inhibit",
         stdin = "null",
         stdout = "pipe",
-        stderr = "stdout"
+        stderr = "stdout",
+        flags = process_flags.owned_monitor_flags(),
     }
 
     local stream, err = cmd:stdout_stream()
@@ -557,16 +568,30 @@ function ModemBackend:inhibit()
     return true, "Modem inhibit started"
 end
 
+---@param timeout number?
+---@return Op
+function ModemBackend:uninhibit_op(timeout)
+    return op.guard(function()
+        local cmd = self.inhibit_cmd
+        if not cmd then
+            return op.always(false, "Modem is not inhibited")
+        end
+
+        self.inhibit_cmd = nil
+        return cmd:shutdown_op(timeout or 1.0):wrap(function(status, _code, _sig, err)
+            if status == "exited" or status == "signalled" then
+                return true, "Modem uninhibited"
+            end
+            return false, err or ("failed to stop inhibit command: " .. tostring(status))
+        end)
+    end)
+end
+
+---@param timeout number?
 ---@return boolean ok
 ---@return string error
-function ModemBackend:uninhibit()
-    if not self.inhibit_cmd then
-        return false, "Modem is not inhibited"
-    end
-
-    self.inhibit_cmd:kill()
-    self.inhibit_cmd = nil
-    return true, "Modem uninhibited"
+function ModemBackend:uninhibit(timeout)
+    return fibers.perform(self:uninhibit_op(timeout))
 end
 
 ---@return boolean ok
@@ -579,7 +604,8 @@ function ModemBackend:start_state_monitor()
         "mmcli", "-m", self.identity.address, "-w",
         stdin = "null",
         stdout = "pipe",
-        stderr = "stdout"
+        stderr = "stdout",
+        flags = process_flags.owned_monitor_flags(),
     }
     local stream, err = cmd:stdout_stream()
     if not stream then
@@ -587,6 +613,118 @@ function ModemBackend:start_state_monitor()
     end
     self.state_monitor = { cmd = cmd, stream = stream }
     return true, ""
+end
+
+---@param timeout number?
+---@return Op
+function ModemBackend:stop_state_monitor_op(timeout)
+    return op.guard(function()
+        local rec = self.state_monitor
+        self.state_monitor = nil
+
+        if not rec then
+            return op.always(true, "")
+        end
+
+        if rec.stream then
+            pcall(function() rec.stream:terminate("modem_state_monitor_stop") end)
+        end
+
+        if not rec.cmd then
+            return op.always(true, "")
+        end
+
+        return rec.cmd:shutdown_op(timeout or 1.0):wrap(function(status, _code, _sig, err)
+            if status == "exited" or status == "signalled" then
+                return true, ""
+            end
+            return false, err or ("state monitor shutdown failed: " .. tostring(status))
+        end)
+    end)
+end
+
+---@param timeout number?
+---@return boolean ok
+---@return string error
+function ModemBackend:stop_state_monitor(timeout)
+    return fibers.perform(self:stop_state_monitor_op(timeout))
+end
+
+local function terminate_monitor_record(rec, stream_key, reason)
+    if not rec then
+        return
+    end
+
+    local stream = rec[stream_key]
+    if stream then
+        pcall(function() stream:terminate(reason) end)
+    end
+
+    if rec.cmd then
+        terminate_command(rec.cmd, 15)
+    end
+end
+
+---Best-effort non-blocking teardown for scope finalisers.
+---@param reason string?
+function ModemBackend:terminate(reason)
+    reason = reason or "modem_backend_terminated"
+
+    terminate_monitor_record(self.sim_present, "stdout", reason)
+    self.sim_present = nil
+
+    terminate_monitor_record(self.state_monitor, "stream", reason)
+    self.state_monitor = nil
+
+    if self.inhibit_cmd then
+        terminate_command(self.inhibit_cmd, 15)
+        self.inhibit_cmd = nil
+    end
+end
+
+---@param timeout number?
+---@return Op
+function ModemBackend:shutdown_op(timeout)
+    timeout = timeout or 1.0
+
+    return scope.run_op(function(s)
+        local errors = {}
+
+        if self.stop_sim_presence_monitor_op then
+            local ok, err = s:perform(self:stop_sim_presence_monitor_op(timeout))
+            if not ok then errors[#errors + 1] = tostring(err) end
+        end
+
+        if self.stop_state_monitor_op then
+            local ok, err = s:perform(self:stop_state_monitor_op(timeout))
+            if not ok then errors[#errors + 1] = tostring(err) end
+        end
+
+        if self.inhibit_cmd and self.uninhibit_op then
+            local ok, err = s:perform(self:uninhibit_op(timeout))
+            if not ok then errors[#errors + 1] = tostring(err) end
+        end
+
+        if #errors > 0 then
+            return false, table.concat(errors, "; ")
+        end
+
+        return true, ""
+    end):wrap(function(st, _, ...)
+        if st == "ok" then
+            return ...
+        elseif st == "cancelled" then
+            return false, "cancelled"
+        end
+        return false, (... or "modem backend shutdown failed")
+    end)
+end
+
+---@param timeout number?
+---@return boolean ok
+---@return string error
+function ModemBackend:shutdown(timeout)
+    return fibers.perform(self:shutdown_op(timeout))
 end
 
 ---@return Op

@@ -1,6 +1,15 @@
 local exec = require "fibers.io.exec"
 local op = require "fibers.op"
 local modem_types = require "services.hal.types.modem"
+local process_flags = require "services.hal.backends.modem.process_flags"
+
+local function terminate_command(cmd, sig)
+    if not cmd or type(cmd.kill) ~= 'function' then return true, nil end
+    local ok, a, b = pcall(function() return cmd:kill(sig or 15) end)
+    if not ok then return nil, tostring(a) end
+    if a == false or a == nil then return nil, tostring(b or 'command kill failed') end
+    return true, nil
+end
 
 ---@class ModemMonitor
 ---@field cmd Command
@@ -43,6 +52,48 @@ function ModemMonitor:next_event_op()
     end)
 end
 
+---Best-effort non-blocking teardown for scope finalisers.
+---@param reason string?
+function ModemMonitor:terminate(reason)
+    reason = reason or "modem_monitor_terminated"
+
+    if self.stream then
+        pcall(function() self.stream:terminate(reason) end)
+    end
+
+    if self.cmd then
+        terminate_command(self.cmd, 15)
+    end
+
+    self.stream = nil
+    self.cmd = nil
+end
+
+---@param timeout number?
+---@return Op
+function ModemMonitor:shutdown_op(timeout)
+    return op.guard(function()
+        if self.stream then
+            pcall(function() self.stream:terminate("modem_monitor_stop") end)
+        end
+
+        local cmd = self.cmd
+        self.cmd = nil
+        self.stream = nil
+
+        if not cmd then
+            return op.always(true, "")
+        end
+
+        return cmd:shutdown_op(timeout or 1.0):wrap(function(status, _code, _sig, err)
+            if status == "exited" or status == "signalled" then
+                return true, ""
+            end
+            return false, err or ("modem monitor shutdown failed: " .. tostring(status))
+        end)
+    end)
+end
+
 --- Create and start a new ModemMonitor backed by `mmcli -M`.
 ---@return ModemMonitor? monitor
 ---@return string error
@@ -51,7 +102,8 @@ local function new()
         "mmcli", "-M",
         stdin = "null",
         stdout = "pipe",
-        stderr = "stdout"
+        stderr = "stdout",
+        flags = process_flags.owned_monitor_flags(),
     }
     local stream, err = cmd:stdout_stream()
     if not stream then
