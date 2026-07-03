@@ -91,7 +91,10 @@ end
 ---@return boolean ok
 ---@return string? error
 local function run_checked(...)
-    local status, code, _, err = fibers.perform(exec.command(...):run_op())
+    local argv = { ... }
+    local spec = { stdin = 'null', stdout = 'null', stderr = 'null' }
+    for i = 1, #argv do spec[i] = argv[i] end
+    local status, code, _, err = fibers.perform(exec.command(spec):run_op())
     if status ~= 'exited' or code ~= 0 then
         return false, tostring(err or ("exit code " .. tostring(code)))
     end

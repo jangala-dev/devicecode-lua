@@ -463,6 +463,8 @@ end
 
 ---@class ModemMonitor
 ---@field next_event_op fun(self: ModemMonitor): Op
+---@field shutdown_op fun(self: ModemMonitor, timeout: number?): Op
+---@field terminate fun(self: ModemMonitor, reason: string?)
 
 ---@class ModemBackend
 ---@field identity ModemIdentity
@@ -478,8 +480,12 @@ end
 ---@field read_signal fun(self: ModemBackend): ModemSignalInfo?, string
 ---@field read_traffic fun(self: ModemBackend): ModemTrafficInfo?, string
 ---@field start_state_monitor fun(self: ModemBackend): boolean, string
+---@field stop_state_monitor_op fun(self: ModemBackend, timeout: number?): Op
+---@field stop_state_monitor fun(self: ModemBackend, timeout: number?): boolean, string
 ---@field monitor_state_op fun(self: ModemBackend): Op
 ---@field start_sim_presence_monitor fun(self: ModemBackend): boolean, string
+---@field stop_sim_presence_monitor_op fun(self: ModemBackend, timeout: number?): Op
+---@field stop_sim_presence_monitor fun(self: ModemBackend, timeout: number?): boolean, string
 ---@field wait_for_sim_present_op fun(self: ModemBackend): Op
 ---@field wait_for_sim_present fun(self: ModemBackend): boolean, string
 ---@field is_sim_present fun(self: ModemBackend): boolean, string
@@ -490,7 +496,11 @@ end
 ---@field connect fun(self: ModemBackend, conn_string: string): boolean, string
 ---@field disconnect fun(self: ModemBackend): boolean, string
 ---@field inhibit fun(self: ModemBackend): boolean, string
----@field uninhibit fun(self: ModemBackend): boolean, string
+---@field uninhibit_op fun(self: ModemBackend, timeout: number?): Op
+---@field uninhibit fun(self: ModemBackend, timeout: number?): boolean, string
+---@field shutdown_op fun(self: ModemBackend, timeout: number?): Op
+---@field shutdown fun(self: ModemBackend, timeout: number?): boolean, string
+---@field terminate fun(self: ModemBackend, reason: string?)
 ---@field set_signal_update_interval fun(self: ModemBackend, interval: number): boolean, string
 
 return {

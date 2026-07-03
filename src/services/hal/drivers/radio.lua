@@ -465,6 +465,9 @@ function RadioDriver:stats_loop()
     backend:start_client_monitor()
 
     fibers.current_scope():finally(function()
+        if backend and backend.terminate then
+            backend:terminate('radio stats loop stopped')
+        end
         self.log:debug({ what = 'radio_stats_loop_stopped', id = id })
     end)
 
@@ -505,6 +508,10 @@ function RadioDriver:stats_loop()
         elseif name == 'tick' then
             on_tick(emit_ch, id, backend, interfaces_set, connected)
         end
+    end
+
+    if backend and backend.stop_client_monitor_op then
+        fibers.perform(backend:stop_client_monitor_op(0.2))
     end
 end
 

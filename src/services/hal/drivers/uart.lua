@@ -346,7 +346,9 @@ local function configure_termios_op(self, why)
             return false, self.termios_error
         end
 
-        local cmd = exec.command(args)
+        local spec = { stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
+        for i = 1, #args do spec[i] = args[i] end
+        local cmd = exec.command(spec)
         local output, status, code, sig, err = fibers.perform(cmd:combined_output_op())
         if status == 'exited' and code == 0 then
             self.termios_ok = true

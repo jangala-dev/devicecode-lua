@@ -1,9 +1,18 @@
 -- services/hal/backends/network/providers/openwrt/mwan3.lua
 -- MWAN3 UCI and live-weight helpers for the OpenWrt network provider.
 
-local unpack = _G.unpack or rawget(table, 'unpack')
-
 local M = {}
+
+local function exec_spec(argv, opts)
+	opts = opts or {}
+	local spec = {}
+	for i = 1, #argv do spec[i] = argv[i] end
+	spec.stdin  = opts.stdin  ~= nil and opts.stdin  or 'null'
+	spec.stdout = opts.stdout ~= nil and opts.stdout or 'null'
+	spec.stderr = opts.stderr ~= nil and opts.stderr or 'null'
+	if opts.shutdown_grace ~= nil then spec.shutdown_grace = opts.shutdown_grace end
+	return spec
+end
 
 local function is_plain_table(v) return type(v) == 'table' and getmetatable(v) == nil end
 local function sorted_keys(t)
@@ -174,7 +183,7 @@ end
 local function default_capture(argv)
 	local fibers = require 'fibers'
 	local exec = require 'fibers.io.exec'
-	local cmd = exec.command(unpack(argv))
+	local cmd = exec.command(exec_spec(argv, { stdout = 'pipe', stderr = 'stdout' }))
 	local out, st, code, sig, err = fibers.perform(cmd:combined_output_op())
 	local ok = (st == 'exited' and code == 0)
 	if ok then return true, out or '', nil end
@@ -191,17 +200,18 @@ end
 local function default_restore(content)
 	local fibers = require 'fibers'
 	local exec = require 'fibers.io.exec'
-	local cmd = exec.command('iptables-restore', '--noflush')
-	cmd:set_stdin('pipe')
-	cmd:set_stdout('pipe')
-	cmd:set_stderr('stdout')
+	local cmd = exec.command(exec_spec({ 'iptables-restore', '--noflush' }, {
+		stdin = 'pipe',
+		stdout = 'pipe',
+		stderr = 'stdout',
+		shutdown_grace = 0.5,
+	}))
 	local stdin, serr = cmd:stdin_stream()
 	if not stdin then return nil, serr or 'failed to open iptables-restore stdin' end
 	local ok, werr = stdin:write(content or '')
 	if not ok then
-		pcall(function() stdin:close() end)
-		cmd:kill()
-		fibers.perform(cmd:run_op())
+		pcall(function() stdin:terminate('iptables-restore write failed') end)
+		fibers.perform(cmd:shutdown_op(0.2))
 		return nil, 'failed to write iptables-restore input: ' .. tostring(werr)
 	end
 	stdin:close()

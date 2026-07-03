@@ -43,7 +43,13 @@ function M.run_op(req, opts)
 			local ok, out, err = run_cmd(argv)
 			return { ok = ok == true, backend = 'openwrt', interface = iface, device = dev, peak_mbps = tonumber(out) or 0, err = ok == true and nil or tostring(err or out) }
 		end
-		local spec = { stdin = 'null', stdout = 'pipe', stderr = 'null' }
+		local spec = {
+			stdin = 'null',
+			stdout = 'pipe',
+			stderr = 'null',
+			shutdown_grace = 0.2,
+			flags = owned_process_flags(),
+		}
 		for i = 1, #argv do spec[i] = argv[i] end
 		local cmd = exec.command(spec)
 		local started, serr = cmd:stdout_stream()

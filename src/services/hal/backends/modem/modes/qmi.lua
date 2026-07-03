@@ -5,6 +5,7 @@ local scope = require "fibers.scope"
 local op = require "fibers.op"
 
 local modem_types = require "services.hal.types.modem"
+local process_flags = require "services.hal.backends.modem.process_flags"
 
 -- ---@param status string?
 -- ---@return string card_status
@@ -151,7 +152,8 @@ local function add_mode_funcs(ModemBackend)
             "qmicli", "-p", "-d", self.identity.mode_port, "--uim-monitor-slot-status",
             stdin = "null",
             stdout = "pipe",
-            stderr = "stdout"
+            stderr = "stdout",
+            flags = process_flags.owned_monitor_flags(),
         }
 
         local stdout, err = cmd:stdout_stream()
@@ -163,6 +165,42 @@ local function add_mode_funcs(ModemBackend)
             stdout = stdout
         }
         return true, ""
+    end
+
+    ---Stop the long-running QMI SIM presence monitor.
+    ---@param timeout number?
+    ---@return Op
+    function ModemBackend:stop_sim_presence_monitor_op(timeout)
+        return op.guard(function()
+            local rec = self.sim_present
+            self.sim_present = nil
+
+            if not rec then
+                return op.always(true, "")
+            end
+
+            if rec.stdout then
+                pcall(function() rec.stdout:terminate("modem_sim_monitor_stop") end)
+            end
+
+            if not rec.cmd then
+                return op.always(true, "")
+            end
+
+            return rec.cmd:shutdown_op(timeout or 1.0):wrap(function(status, _code, _sig, err)
+                if status == "exited" or status == "signalled" then
+                    return true, ""
+                end
+                return false, err or ("SIM monitor shutdown failed: " .. tostring(status))
+            end)
+        end)
+    end
+
+    ---@param timeout number?
+    ---@return boolean ok
+    ---@return string error
+    function ModemBackend:stop_sim_presence_monitor(timeout)
+        return fibers.perform(self:stop_sim_presence_monitor_op(timeout))
     end
 
     ---@return Op
@@ -245,7 +283,8 @@ local function add_mode_funcs(ModemBackend)
                 "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-off=1",
                 stdin = "null",
                 stdout = "pipe",
-                stderr = "stdout"
+                stderr = "stdout",
+                flags = process_flags.owned_monitor_flags(),
             }
             local _, status, code, _, power_err = fibers.perform(cmd:combined_output_op())
             if status ~= "exited" or code ~= 0 then
@@ -258,7 +297,8 @@ local function add_mode_funcs(ModemBackend)
                 "qmicli", "-p", "-d", self.identity.mode_port, "--uim-sim-power-on=1",
                 stdin = "null",
                 stdout = "pipe",
-                stderr = "stdout"
+                stderr = "stdout",
+                flags = process_flags.owned_monitor_flags(),
             }
             local _, status_on, code_on, _, err_on = fibers.perform(cmd_on:combined_output_op())
             if status_on ~= "exited" or code_on ~= 0 then

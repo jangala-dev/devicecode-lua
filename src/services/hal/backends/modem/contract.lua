@@ -20,10 +20,14 @@ local BACKEND_FUNCTIONS = list_to_map {
 
     -- State monitoring
     "start_state_monitor",
+    "stop_state_monitor_op",
+    "stop_state_monitor",
     "monitor_state_op",
 
     -- SIM monitoring
     "start_sim_presence_monitor",
+    "stop_sim_presence_monitor_op",
+    "stop_sim_presence_monitor",
     "wait_for_sim_present_op",
     "wait_for_sim_present",
     "is_sim_present",
@@ -37,11 +41,17 @@ local BACKEND_FUNCTIONS = list_to_map {
     "disconnect",
     "inhibit",
     "uninhibit",
+    "uninhibit_op",
+    "shutdown_op",
+    "shutdown",
+    "terminate",
     "set_signal_update_interval"
 }
 
 local MONITOR_FUNCTIONS = list_to_map {
     "next_event_op",
+    "shutdown_op",
+    "terminate",
 }
 
 --- Check that a modem monitor provides all required functions and no extras.

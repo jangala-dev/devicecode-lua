@@ -27,12 +27,14 @@ local STOP_TIMEOUT = 5.0 -- seconds
 ---@field modem_detect_ch Channel
 ---@field driver_ch Channel
 ---@field modems table<ModemAddress, Modem>
+---@field monitor ModemMonitor?
 local ModemcardManager = {
     started = false,
     modem_remove_ch = channel.new(),
     modem_detect_ch = channel.new(),
     driver_ch = channel.new(),
     modems = {},
+    monitor = nil,
 }
 
 ---Continuously monitors modem add/remove events and publishes them onto
@@ -41,14 +43,24 @@ local ModemcardManager = {
 local function detector(scope)
     log:debug("Modem Detector: started")
 
+    local monitor
+
     scope:finally(function ()
+        if monitor and monitor.terminate then
+            monitor:terminate("modem_detector_scope_exit")
+        end
+        if ModemcardManager.monitor == monitor then
+            ModemcardManager.monitor = nil
+        end
         log:debug("Modem Detector: closed")
     end)
 
-    local monitor, err = modem_provider.new_monitor()
+    local err
+    monitor, err = modem_provider.new_monitor()
     if not monitor then
         error("Modem Detector: failed to create monitor: " .. tostring(err))
     end
+    ModemcardManager.monitor = monitor
 
     while true do
         local event, mon_err = fibers.perform(monitor:next_event_op())
@@ -289,7 +301,25 @@ function ModemcardManager.stop(timeout)
         return false, "Not started"
     end
     timeout = timeout or STOP_TIMEOUT
-    ModemcardManager.scope:cancel()
+
+    for address, driver in pairs(ModemcardManager.modems) do
+        local ok, stop_err = driver:stop(STOP_TIMEOUT)
+        if not ok then
+            log:error({ what = "stop_driver_failed", address = address, err = tostring(stop_err) })
+        end
+    end
+    ModemcardManager.modems = {}
+
+    local monitor = ModemcardManager.monitor
+    if monitor and monitor.shutdown_op then
+        local ok, mon_err = fibers.perform(monitor:shutdown_op(1.0))
+        if not ok then
+            log:error({ what = "stop_modem_monitor_failed", err = tostring(mon_err) })
+        end
+    end
+    ModemcardManager.monitor = nil
+
+    ModemcardManager.scope:cancel("modemcard manager stopping")
 
     local source = fibers.perform(op.named_choice {
         join = ModemcardManager.scope:join_op(),
