@@ -508,8 +508,11 @@ function T.rtl8380m_real_switch_raw_observations_project_to_state_wired()
 			assert_eq(projected.link.speed_mbps, raw_surface.link.speed_mbps)
 		end
 		assert_eq(projected.observed.attachment.mode, raw_surface.attachment and raw_surface.attachment.mode)
-		if raw_surface.counters and raw_surface.counters.rx and raw_surface.counters.rx.bytes ~= nil then
-			assert_eq(projected.counters.rx.bytes, raw_surface.counters.rx.bytes)
+		assert_eq(projected.counters, nil, 'stable public surface should not carry volatile counters')
+		local raw_counters = snap.counters and snap.counters[probe_id]
+		if raw_counters and raw_counters.rx and raw_counters.rx.bytes ~= nil then
+			local projected_counters = probe.wait_retained_payload(reader, wired_topics.surface_counters('lan-probe'), { timeout = 1.0 })
+			assert_eq(projected_counters.counters.rx.bytes, raw_counters.rx.bytes)
 		end
 		if raw_surface.capabilities and raw_surface.capabilities.poe == true then
 			assert_true(projected.source.observed_surface == probe_id, 'PoE-capable source should still project via assembly')

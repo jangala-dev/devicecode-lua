@@ -63,11 +63,12 @@ local function merge_observation(cache, snapshot)
 		runtime = {},
 		power = {},
 		surfaces = {},
+		counters = {},
 		topology = {},
 	}
 	snapshot = snapshot or {}
 	if type(snapshot.status) == 'table' then merge_table(cache.status, snapshot.status) end
-	for _, key in ipairs({ 'identity', 'runtime', 'power', 'topology' }) do
+	for _, key in ipairs({ 'identity', 'runtime', 'power', 'topology', 'counters' }) do
 		if type(snapshot[key]) == 'table' then merge_table(cache[key], snapshot[key]) end
 	end
 	if type(snapshot.surfaces) == 'table' then
@@ -115,6 +116,10 @@ local function emit_snapshot(self, snapshot, present)
 	end
 	if present.surfaces ~= nil then
 		ok, err = emit_state_changed(self, 'surfaces', { surfaces = snapshot.surfaces or {} })
+		if ok == false or ok == nil then return nil, err end
+	end
+	if present.counters ~= nil then
+		ok, err = emit_state_changed(self, 'counters', { counters = snapshot.counters or {} })
 		if ok == false or ok == nil then return nil, err end
 	end
 	if present.topology ~= nil then

@@ -22,6 +22,7 @@ function M.initial(service_id)
 		assembly = {},
 		dependencies = {},
 		surfaces = {},
+		counters = {},
 		topology = { protected_trunks = {}, access = {}, trunks = {} },
 		violations = {},
 		stats = { config_updates = 0, segment_updates = 0, observation_updates = 0, assembly_updates = 0, publications = 0 },

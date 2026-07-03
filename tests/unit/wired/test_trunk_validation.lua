@@ -197,4 +197,45 @@ function tests.test_observed_surface_capability_checks_report_unsupported_access
 	assert_true(seen.observed_surface_does_not_support_poe, 'poe capability violation expected')
 end
 
+
+function tests.test_counter_observations_project_to_metric_not_stable_surface()
+	local snap = {
+		net = { segments = { jan = { vlan = 100 } } },
+		config_intent = { surfaces = { lan = { surface_id = 'lan', id = 'lan', kind = 'ethernet-port', attachment = { mode = 'access', segment = 'jan' } } } },
+		assembly = { surfaces = { lan = { component = 'switch-main', observed_surface = 'GE1' } } },
+		observations = {
+			['switch-main'] = {
+				status = { state = 'available', available = true },
+				surfaces = { GE1 = { link = { state = 'up' }, attachment = { mode = 'access', vlan = 100 } } },
+				counters = { GE1 = { rx = { bytes = 1234 } } },
+			},
+		},
+	}
+	snap = service._test.rebuild_derived(snap)
+	assert_eq(snap.surfaces.lan.counters, nil)
+	assert_eq(snap.counters.lan.counters.rx.bytes, 1234)
+end
+
+function tests.test_rebuild_derived_does_not_stamp_surfaces_with_volatile_updated_at()
+	local snap = {
+		net = { segments = { lan = { vlan = { id = 100 } } } },
+		config_intent = select(1, config.normalise({ schema = config.SCHEMA, surfaces = { lan = { attachment = { mode = 'access', segment = 'lan' } } } })),
+		assembly = { surfaces = { lan = { component = 'switch-main', observed_surface = 'GE1' } } },
+		observations = { ['switch-main'] = { status = { state = 'available', available = true }, surfaces = { GE1 = { link = { state = 'up' }, attachment = { mode = 'access', vlan = 100 } } } } },
+		stats = {},
+	}
+	service._test.rebuild_derived(snap)
+	assert_eq(snap.surfaces.lan.updated_at, nil)
+end
+
+function tests.test_identical_wired_observation_does_not_invalidate_model()
+	local snap = { observations = {} }
+	local ev = { topic = { 'raw', 'host', 'wired', 'provider', 'switch-main', 'state', 'surfaces' }, payload = { surfaces = { GE1 = { link = { state = 'up' } } } } }
+	local changed, id = service._test.update_observation_from_event(snap, ev)
+	assert_eq(changed, true)
+	assert_eq(id, 'switch-main')
+	changed = service._test.update_observation_from_event(snap, ev)
+	assert_eq(changed, false)
+end
+
 return tests

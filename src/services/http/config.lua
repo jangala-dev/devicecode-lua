@@ -20,6 +20,7 @@ local DEFAULTS = {
 	},
 	observability = {
 		status_interval_s = 30,
+		stats_interval_s = 30,
 		request_trace = false,
 		success_events = false,
 		failure_rate_limit_s = 60,
@@ -36,6 +37,7 @@ local ROOT_KEYS = {
 
 local OBSERVABILITY_KEYS = {
 	status_interval_s = true,
+	stats_interval_s = true,
 	request_trace = true,
 	success_events = true,
 	failure_rate_limit_s = true,
@@ -155,6 +157,10 @@ local function normalise_observability(raw)
 	v, err = positive_number_or_nil(raw.status_interval_s, 'observability.status_interval_s')
 	if err then return nil, err end
 	if v ~= nil then out.status_interval_s = v end
+
+	v, err = positive_number_or_nil(raw.stats_interval_s, 'observability.stats_interval_s')
+	if err then return nil, err end
+	if v ~= nil then out.stats_interval_s = v end
 
 	v, err = bool_or_nil(raw.request_trace, 'observability.request_trace')
 	if err then return nil, err end

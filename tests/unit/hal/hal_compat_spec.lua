@@ -585,6 +585,68 @@ function T.op_manager_apply_timeout_does_not_block_later_config()
 	end, { timeout = 2.0 })
 end
 
+
+function T.op_manager_apply_timeout_reports_pending_not_failed()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local hanging_apply = new_hanging_apply_manager()
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = fs_manager,
+			['services.hal.managers.hanging_apply'] = hanging_apply,
+		}, function(bus)
+			local admin = bus:connect()
+			local reader = bus:connect()
+			local end_sub = reader:subscribe({ 'obs', 'v1', 'hal', 'event', 'config_end' }, { queue_len = 8, full = 'drop_oldest' })
+			local log_sub = reader:subscribe({ 'obs', 'v1', 'hal', 'event', 'log' }, { queue_len = 16, full = 'drop_oldest' })
+
+			admin:retain({ 'cfg', 'hal' }, {
+				data = {
+					schema = 'devicecode.config/hal/1',
+					hanging_apply = {},
+				},
+			})
+
+			local end_msg
+			for _ = 1, 8 do
+				local which, msg = fibers.perform(op.named_choice({
+					msg = end_sub:recv_op(),
+					timeout = require('fibers.sleep').sleep_op(0.2):wrap(function () return nil end),
+				}))
+				if which == 'msg' and msg and msg.payload and msg.payload.pending_managers then
+					end_msg = msg
+					break
+				end
+			end
+			assert(end_msg and end_msg.payload, 'expected config_end with pending manager')
+			assert(end_msg.payload.ok == true, 'pending admitted manager should not make config_end fail')
+			assert(end_msg.payload.degraded == true, 'pending manager should mark config degraded')
+			assert(end_msg.payload.pending_managers[1] == 'hanging_apply')
+
+			local saw_pending = false
+			local saw_failed = false
+			for _ = 1, 8 do
+				local which, msg = fibers.perform(op.named_choice({
+					msg = log_sub:recv_op(),
+					timeout = require('fibers.sleep').sleep_op(0.05):wrap(function () return nil end),
+				}))
+				if which ~= 'msg' then break end
+				local p = msg and msg.payload or {}
+				if p.what == 'manager_apply_pending_timeout' and p.manager == 'hanging_apply' then saw_pending = true end
+				if p.what == 'manager_apply_failed' and p.manager == 'hanging_apply' then saw_failed = true end
+			end
+			assert(saw_pending == true, 'expected manager_apply_pending_timeout log')
+			assert(saw_failed == false, 'pending admitted manager must not be logged as failed')
+
+			end_sub:unsubscribe()
+			log_sub:unsubscribe()
+		end, {
+			manager_start_timeout_s = 0.02,
+			manager_apply_timeout_s = 0.02,
+		})
+	end, { timeout = 2.0 })
+end
+
 function T.unsupported_control_verb_returns_no_route()
 	runfibers.run(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()

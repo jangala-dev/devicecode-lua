@@ -3,7 +3,7 @@
 
 local topics = require 'services.device.topics'
 local model  = require 'services.device.model'
-local bit    = require 'bit'
+local bit = rawget(_G, 'bit') or require 'bit32'
 
 local M = {}
 

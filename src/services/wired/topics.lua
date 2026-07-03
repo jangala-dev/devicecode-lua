@@ -15,6 +15,7 @@ function M.summary() return { 'state', 'wired', 'summary' } end
 function M.surface(id) return { 'state', 'wired', 'surface', token(id) } end
 function M.topology() return { 'state', 'wired', 'topology' } end
 function M.violations() return { 'state', 'wired', 'violations' } end
+function M.surface_counters(id) return { 'obs', 'v1', 'wired', 'metric', 'surface_counters', token(id) } end
 function M.event(name) return { 'event', 'wired', token(name) } end
 
 function M.net_segments() return { 'state', 'net', 'segments' } end

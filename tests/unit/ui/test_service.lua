@@ -158,7 +158,24 @@ function tests.test_read_model_changed_updates_seen_without_lifecycle_publish()
 	})
 
 	assert_eq(state.model_seen, 5)
-	assert_eq(next(decision), nil)
+	assert_true(decision.coalesce_publish)
+	assert_eq(decision.reason, 'read_model_changed')
+end
+
+
+function tests.test_http_dependency_changes_are_coalesced_before_lifecycle_publish()
+	local state = base_state()
+	local decision = service._test.reduce_event(state, {
+		kind = 'http_dependency_changed',
+		key = 'http',
+		available = false,
+		reason = 'http_unavailable',
+	})
+	assert_true(decision.coalesce_publish)
+	assert_eq(decision.publish, nil)
+	service._test.schedule_lifecycle_publish(state, decision.reason)
+	assert_true(state.lifecycle_publish_pending)
+	assert_true(type(state.lifecycle_publish_due_at) == 'number')
 end
 
 function tests.test_session_changed_updates_seen_without_lifecycle_publish()

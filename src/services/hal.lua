@@ -1121,13 +1121,39 @@ function HalService.start(conn, opts)
 	end
 
 	local function apply_manager_config(name, manager, manager_config)
-		return perform(manager_call_with_timeout_op(
-			name,
-			manager,
-			'apply_config',
-			manager_apply_timeout_s,
-			manager_config
-		))
+		local has_op_method = type(manager.apply_config_op) == 'function'
+		if not has_op_method or type(manager_apply_timeout_s) ~= 'number' or manager_apply_timeout_s < 0 then
+			local ok, err = perform(manager_call_op(name, manager, 'apply_config', manager_config))
+			if ok == true then return 'applied', nil end
+			return 'failed', err
+		end
+
+		local result_ch = channel.new(1)
+		local spawned, spawn_err = fibers.spawn(function()
+			local ok, err = perform(manager_call_op(name, manager, 'apply_config', manager_config))
+			perform(result_ch:put_op({ ok = ok == true, err = err }))
+		end)
+		if spawned ~= true then return 'failed', tostring(spawn_err or 'manager apply worker spawn failed') end
+
+		local which, result = perform(op.named_choice({
+			result = result_ch:get_op(),
+			timeout = sleep.sleep_op(manager_apply_timeout_s),
+		}))
+		if which == 'result' then
+			if result and result.ok == true then return 'applied', nil end
+			return 'failed', result and result.err or 'manager apply failed'
+		end
+
+		log('warn', 'manager_apply_pending_timeout', { manager = name, admitted = true, timeout_s = manager_apply_timeout_s })
+		fibers.spawn(function()
+			local late = perform(result_ch:get_op())
+			if late and late.ok == true then
+				log('warn', 'manager_apply_late_success', { manager = name })
+			else
+				log('error', 'manager_apply_late_failure', { manager = name, err = tostring(late and late.err or 'manager apply failed') })
+			end
+		end)
+		return 'pending_after_timeout', 'timeout'
 	end
 
 	local function on_config(config)
@@ -1140,16 +1166,21 @@ function HalService.start(conn, opts)
 			return
 		end
 
+		local pending_managers = {}
+		local failed_managers = {}
+
 		for name, manager_config in pairs(config) do
 			if name ~= 'schema' then
 				if not managers[name] then
 					local ok, manager = pcall(require, "services.hal.managers." .. name)
 					if not ok then
 						log('error', 'manager_require_failed', { manager = name, err = tostring(manager) })
+						failed_managers[#failed_managers + 1] = name
 					else
 						local start_ok, start_err = start_manager(name, manager)
 						if start_ok ~= true then
 							log('error', 'manager_start_failed', { manager = name, err = tostring(start_err) })
+							failed_managers[#failed_managers + 1] = name
 						else
 							managers[name] = manager
 							svc:obs_event('manager_started', { manager = name })
@@ -1159,8 +1190,11 @@ function HalService.start(conn, opts)
 
 				local manager = managers[name]
 				if manager then
-					local ok, apply_err = apply_manager_config(name, manager, manager_config)
-					if ok ~= true then
+					local status, apply_err = apply_manager_config(name, manager, manager_config)
+					if status == 'pending_after_timeout' then
+						pending_managers[#pending_managers + 1] = name
+					elseif status ~= 'applied' then
+						failed_managers[#failed_managers + 1] = name
 						log('error', 'manager_apply_failed', { manager = name, err = tostring(apply_err) })
 					end
 				end
@@ -1175,7 +1209,12 @@ function HalService.start(conn, opts)
 			end
 		end
 
-		svc:obs_event('config_end', { ok = true })
+		svc:obs_event('config_end', {
+			ok = #failed_managers == 0,
+			degraded = (#pending_managers > 0 or #failed_managers > 0) or nil,
+			pending_managers = (#pending_managers > 0) and pending_managers or nil,
+			failed_managers = (#failed_managers > 0) and failed_managers or nil,
+		})
 	end
 
 	local function bootstrap()
@@ -1190,16 +1229,16 @@ function HalService.start(conn, opts)
 			error("HAL bootstrap failed: Failed to start filesystem manager: " .. tostring(start_err))
 		end
 
-		local ok, cfg_err = apply_manager_config('filesystem', fs_manager, {
+		local cfg_status, cfg_err = apply_manager_config('filesystem', fs_manager, {
 			{
 				name = "config",
 				root = os.getenv("DEVICECODE_CONFIG_DIR"),
 			}
 		})
 
-		if ok ~= true then
+		if cfg_status ~= 'applied' then
 			svc:status('failed', { reason = 'filesystem manager config failed', err = tostring(cfg_err) })
-			log('error', 'bootstrap_failed', { err = tostring(cfg_err), phase = 'apply_filesystem_config' })
+			log('error', 'bootstrap_failed', { err = tostring(cfg_err), phase = 'apply_filesystem_config', status = tostring(cfg_status) })
 			error("HAL bootstrap failed: " .. tostring(cfg_err))
 		end
 

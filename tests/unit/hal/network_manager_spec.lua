@@ -106,4 +106,69 @@ function tests.test_network_manager_cancels_driver_op_when_control_request_is_ab
 	end)
 end
 
+
+function tests.test_network_apply_continues_after_caller_abandonment_once_admitted()
+	local fibers = require 'fibers'
+	local runtime = require 'fibers.runtime'
+	local op = require 'fibers.op'
+	local channel = require 'fibers.channel'
+	local runfibers = require 'tests.support.run_fibers'
+	local types = require 'services.hal.types.core'
+	local manager = require 'services.hal.managers.network'
+	local driver_mod = require 'services.hal.drivers.network'
+
+	runfibers.run(function(scope)
+		manager.terminate('test reset')
+		local old_new = driver_mod.new
+		scope:finally(function ()
+			driver_mod.new = old_new
+			manager.terminate('test cleanup')
+		end)
+
+		local entered = channel.new(1)
+		local release = channel.new(1)
+		local cancel_ch = channel.new(1)
+		local aborted = false
+		local completed = false
+		driver_mod.new = function ()
+			return {
+				apply_op = function ()
+					fibers.perform(entered:put_op(true))
+					return release:get_op():wrap(function () completed = true; return { ok = true } end)
+						:on_abort(function () aborted = true end)
+				end,
+				terminate = function () return true, nil end,
+			}, nil
+		end
+
+		local dev_ev_ch = channel.new(4)
+		local cap_emit_ch = channel.new(4)
+		local ok_start, start_err = fibers.perform(manager.start_op(nil, dev_ev_ch, cap_emit_ch))
+		assert(ok_start == true, tostring(start_err))
+		local dev_ev = fibers.perform(dev_ev_ch:get_op())
+		local ok_apply, apply_err = fibers.perform(manager.apply_config_op({ provider = 'test' }))
+		assert(ok_apply == true, tostring(apply_err))
+
+		local cfg_cap
+		for _, cap in ipairs(dev_ev.capabilities or {}) do
+			if cap.class == 'network-config' then cfg_cap = cap end
+		end
+		assert(cfg_cap and cfg_cap.control_ch, 'network config cap expected')
+
+		local reply_ch = channel.new(1)
+		local cancel_op = cancel_ch:get_op():wrap(function (reason) return reason or 'caller_abandoned' end)
+		local req = assert(types.new.ControlRequest('apply', { generation = 1 }, reply_ch, cancel_op))
+		assert(fibers.perform(cfg_cap.control_ch:put_op(req)) ~= false)
+		assert(fibers.perform(entered:get_op()) == true)
+		assert(fibers.perform(cancel_ch:put_op('caller_abandoned')) ~= false)
+		for _ = 1, 4 do runtime.yield() end
+		assert(aborted == false, 'admitted network apply should not be aborted by caller abandonment')
+		assert(fibers.perform(release:put_op(true)) ~= false)
+		for _ = 1, 4 do runtime.yield() end
+		assert(completed == true, 'network apply should drain after caller detaches')
+		local got = fibers.perform(reply_ch:get_op():or_else(function () return nil, 'not_ready' end))
+		assert(got == nil, 'detached caller should not receive a late reply')
+	end)
+end
+
 return tests
