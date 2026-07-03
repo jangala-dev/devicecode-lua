@@ -96,6 +96,7 @@ local function start_cap_service(opts)
 		connection_setup_timeout = opts.connection_setup_timeout or 2,
 		intra_stream_timeout = opts.intra_stream_timeout or 2,
 		max_accept_queue = opts.max_accept_queue or 32,
+		max_event_history = opts.max_event_history or 64,
 	}))
 
 	local user_conn = b:connect({ origin_base = { kind = 'local' } })

@@ -241,7 +241,7 @@ function M.test_completed_exchange_prunes_one_shot_request_and_operation_records
 	fibers.run(function ()
 		local b = bus.new()
 		local root = b:connect({ origin_base = { kind = 'local' } })
-		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main' }))
+		local svc = ok(http_service.open_handle(root, { driver = fake_driver(), id = 'main', max_event_history = 64 }))
 		yield_many(4)
 
 		svc._state.requests.req1 = { request_id = 'req1', state = 'running', target = { method = 'GET' } }
@@ -634,6 +634,7 @@ function M.test_handle_returning_rpcs_return_public_wrappers()
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
+			max_event_history = 64,
 			http_server = http_server_success(counters),
 			request_module = request_module('body', counters),
 			websocket_module = websocket_module(counters),
@@ -666,6 +667,7 @@ function M.test_each_local_handle_rpc_rejects_non_local_before_backend_admission
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
+			max_event_history = 64,
 			http_server = http_server_success(counters),
 			request_module = request_module('body', counters),
 			websocket_module = websocket_module(counters),
@@ -714,6 +716,7 @@ function M.test_listener_owner_reports_identity_completion_when_listener_runtime
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
+			max_event_history = 64,
 			http_server = http_server_success(counters),
 		}))
 		local user = b:connect({ origin_base = { kind = 'local' } })
@@ -747,6 +750,7 @@ function M.test_onstream_context_admission_emits_service_event_without_reducing_
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
+			max_event_history = 64,
 			http_server = http_server_success(counters),
 		}))
 		local user = b:connect({ origin_base = { kind = 'local' } })
@@ -816,6 +820,7 @@ function M.test_listener_termination_terminates_unaccepted_context_and_emits_con
 		local svc = ok(http_service.open_handle(root, {
 			driver = fake_polling_driver(),
 			id = 'main',
+			max_event_history = 64,
 			http_server = http_server_success({}),
 			context_terminator = function (_, reason) terminated_reason = reason end,
 		}))
