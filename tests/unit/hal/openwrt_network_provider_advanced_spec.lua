@@ -180,6 +180,63 @@ function tests.test_apply_uses_shaper_and_schedules_structural_mwan3_activation(
 	end)
 end
 
+function tests.test_segment_profile_shaping_targets_segment_data_device()
+	fibers.run(function()
+		local shaper_cmds = {}
+		local segment_intent = {
+			schema = 'devicecode.net.intent/1',
+			rev = 1,
+			segments = {
+				jan = {
+					kind = 'user',
+					vlan = { id = 32 },
+					addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/30' } },
+					shaping = { profile = 'restricted' },
+				},
+				direct = {
+					kind = 'user',
+					l2 = { mode = 'direct' },
+					vlan = { id = 40 },
+					addressing = { ipv4 = { mode = 'static', cidr = '172.28.40.1/30' } },
+					shaping = { profile = 'restricted' },
+				},
+			},
+			interfaces = {},
+			dns = {}, dhcp = {}, firewall = { zones = {}, policies = {}, rules = {} },
+			routing = {}, wan = {}, vpn = {}, diagnostics = {},
+			shaping = {
+				enabled = true,
+				profiles = {
+					restricted = {
+						egress = {
+							enabled = true,
+							match = 'dst',
+							pool_rate = '10mbit',
+							pool_ceil = '10mbit',
+							host_rate = '1mbit',
+							host_ceil = '2mbit',
+							all_hosts = true,
+						},
+					},
+				},
+			},
+		}
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt',
+			allow_fake_uci = true,
+			platform = { segment_trunk = { ifname = 'eth0' } },
+			shaper_run_cmd = function(argv) shaper_cmds[#shaper_cmds + 1] = table.concat(argv, ' '); return true, nil end,
+		}, {}))
+		local result = fibers.perform(provider:apply_op({ intent = segment_intent }))
+		eq(result.ok, true)
+		ok(result.shaping and result.shaping.ok == true, 'segment-profile shaping should be applied')
+		eq(result.shaping.links.jan.iface, 'br-jan', 'bridged segment shaping should target the bridge data device')
+		eq(result.shaping.links.direct.iface, 'vl-direct', 'direct segment shaping should target the VLAN data device')
+		ok(#shaper_cmds > 0, 'segment-profile shaping should emit tc commands')
+		provider:terminate('test complete')
+	end)
+end
+
 function tests.test_live_weight_update_uses_iptables_restore_and_persists_without_restart()
 	fibers.run(function()
 		local restores, restart_cmds = {}, {}
@@ -368,6 +425,8 @@ function tests.test_bigbox_clean_config_plans_dns_rules_routes_and_segment_shapi
 		local result = fibers.perform(provider:apply_op({ intent = intent }))
 		eq(result.ok, true)
 		ok(result.shaping and result.shaping.ok == true, 'segment-profile shaping should be applied')
+		ok(result.shaping.links and result.shaping.links.jan, 'jan shaping link should be reported')
+		eq(result.shaping.links.jan.iface, 'br-jan', 'jan shaping should target the bridge data device')
 		ok(#shaper_cmds > 0, 'segment shaping should emit tc commands')
 		provider:terminate('test complete')
 	end)
@@ -540,5 +599,142 @@ function tests.test_bigbox_net_intent_still_renders_openwrt_segment_trunk_indepe
 		provider:terminate('test complete')
 	end)
 end
+
+function tests.test_semantic_segment_profile_compiles_budgeted_peak_layout()
+	fibers.run(function()
+		local batch_text = {}
+		local segment_intent = {
+			schema = 'devicecode.net.intent/1', rev = 1,
+			segments = {
+				jan = { kind = 'user', vlan = { id = 32 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/30' } }, shaping = { profile = 'restricted' } },
+			},
+			interfaces = {}, dns = {}, dhcp = {}, firewall = { zones = {}, policies = {}, rules = {} }, routing = {}, wan = {}, vpn = {}, diagnostics = {},
+			shaping = {
+				enabled = true,
+				profiles = {
+					restricted = {
+						segment = { download = { limit = '40mbit' }, upload = { limit = '10mbit' } },
+						host_default = {
+							mode = 'budgeted_peak',
+							download = { sustained_rate = '2mbit', peak_rate = '8mbit', burst_budget = '500k' },
+							upload = { sustained_rate = '1500kbit', peak_rate = '6mbit', burst_budget = '225k' },
+						},
+					},
+				},
+			},
+		}
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt', allow_fake_uci = true, platform = { segment_trunk = { ifname = 'eth0' } },
+			shaper_run_cmd = function(argv)
+				if argv[1] == 'tc' and argv[2] == '-batch' and type(argv[3]) == 'string' then
+					local f = io.open(argv[3], 'rb')
+					if f then batch_text[#batch_text + 1] = f:read('*a') or ''; f:close() end
+				end
+				return true, '', nil
+			end,
+		}, {}))
+		local result = fibers.perform(provider:apply_op({ intent = segment_intent }))
+		eq(result.ok, true)
+		eq(result.shaping.links.jan.iface, 'br-jan')
+		local all = table.concat(batch_text, '\n')
+		contains(all, 'qdisc add dev br-jan root handle 1: htb default 1', 'aggregate budgeted_peak should keep unmatched root traffic on root default class')
+		contains(all, 'class replace dev br-jan parent 20: classid 20:1002 htb rate 2mbit burst 500k ceil 2mbit cburst 500k', 'download host budget should be under aggregate with sustained ceil')
+		contains(all, 'qdisc replace dev br-jan parent 20:1002 handle 1002: htb default 1', 'download host budget should own a peak HTB qdisc')
+		contains(all, 'class replace dev br-jan parent 1002: classid 1002:1 htb rate 8mbit ceil 8mbit', 'download host peak class should cap burst spend rate')
+		contains(all, 'filter add dev br-jan parent 20: protocol ip prio 99 handle 1: u32 divisor 256', 'aggregate budgeted_peak should classify hosts under the segment aggregate qdisc')
+		contains(all, 'qdisc add dev br-jan parent 1:20 handle 20: htb default 100', 'aggregate budgeted_peak should install an inner HTB under the segment aggregate')
+		provider:terminate('test complete')
+	end)
+end
+
+
+function tests.test_inline_segment_shaping_compiles_without_profile()
+	fibers.run(function()
+		local batch_text = {}
+		local segment_intent = {
+			schema = 'devicecode.net.intent/1', rev = 1,
+			segments = {
+				jan = {
+					kind = 'user', vlan = { id = 32 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/30' } },
+					shaping = {
+						download = { limit = '40mbit' },
+						upload = { limit = '10mbit' },
+						host_default = {
+							mode = 'budgeted_peak',
+							download = { sustained_rate = '2mbit', peak_rate = '8mbit', burst_budget = '500k' },
+							upload = { sustained_rate = '1500kbit', peak_rate = '6mbit', burst_budget = '225k' },
+						},
+					},
+				},
+			},
+			interfaces = {}, dns = {}, dhcp = {}, firewall = { zones = {}, policies = {}, rules = {} }, routing = {}, wan = {}, vpn = {}, diagnostics = {},
+			shaping = { enabled = true, profiles = {} },
+		}
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt', allow_fake_uci = true, platform = { segment_trunk = { ifname = 'eth0' } },
+			shaper_run_cmd = function(argv)
+				if argv[1] == 'tc' and argv[2] == '-batch' and type(argv[3]) == 'string' then
+					local f = io.open(argv[3], 'rb')
+					if f then batch_text[#batch_text + 1] = f:read('*a') or ''; f:close() end
+				end
+				return true, '', nil
+			end,
+		}, {}))
+		local result = fibers.perform(provider:apply_op({ intent = segment_intent }))
+		eq(result.ok, true)
+		eq(result.shaping.links.jan.profile, nil)
+		eq(result.shaping.links.jan.iface, 'br-jan')
+		local all = table.concat(batch_text, '\n')
+		contains(all, 'class replace dev br-jan parent 20: classid 20:1002 htb rate 2mbit burst 500k ceil 2mbit cburst 500k', 'inline segment host budget should compile')
+		contains(all, 'class replace dev br-jan parent 1002: classid 1002:1 htb rate 8mbit ceil 8mbit', 'inline segment peak class should compile')
+		provider:terminate('test complete')
+	end)
+end
+
+function tests.test_wan_member_shaping_renders_router_exemption_marks_and_wan_mark_link()
+	fibers.run(function()
+		local restores = {}
+		local cmds = {}
+		local i = intent()
+		i.wan.members.wired = {
+			interface = 'wan_a', mwan_metric = 1, weight = 1,
+			shaping = { download = { limit = '80mbit' }, upload = { limit = '20mbit' } },
+		}
+		local provider = ok(provider_loader.new({
+			provider = 'openwrt', allow_fake_uci = true,
+			shaper_run_cmd = function(argv) cmds[#cmds + 1] = table.concat(argv, ' '); return true, '', nil end,
+			shaper_run_restore = function(payload) restores[#restores + 1] = payload; return true, nil, '' end,
+		}, {}))
+		local result = fibers.perform(provider:apply_op({ intent = i }))
+		eq(result.ok, true)
+		ok(result.shaping.links.backhaul_wired, 'backhaul shaping link should be reported')
+		eq(result.shaping.links.backhaul_wired.kind, 'wan_mark')
+		eq(#restores, 1, 'one shaping mangle restore expected')
+		local r = restores[1]
+		contains(r, ':DEVICECODE_SHAPING_OUTPUT', 'router-output chain expected')
+		contains(r, ':DEVICECODE_SHAPING_FORWARD', 'forwarded-client chain expected')
+		contains(r, '-A DEVICECODE_SHAPING_OUTPUT -o wwan0', 'router traffic should be marked on the WAN device')
+		contains(r, 'devicecode-shaping router exempt', 'router exemption comment expected')
+		contains(r, 'CONNMARK --save-mark --mask 0x00f00000', 'router/client marks should be saved to conntrack')
+		contains(r, '-A DEVICECODE_SHAPING_FORWARD -o wwan0', 'forwarded traffic should be marked client')
+		local all_cmds = table.concat(cmds, '\n')
+		contains(all_cmds, 'tc class replace dev wwan0 parent 1:1 classid 1:20 htb rate 20mbit ceil 20mbit', 'WAN upload client class should use upload limit')
+		contains(all_cmds, 'tc filter add dev wwan0 parent ffff: protocol ip prio 1 u32 match u32 0 0 action ctinfo cpmark 0x00f00000 action mirred egress redirect dev ifb_wwan0', 'WAN download should restore connmark before IFB redirect')
+		contains(all_cmds, 'tc class replace dev ifb_wwan0 parent 1:1 classid 1:20 htb rate 80mbit ceil 80mbit', 'WAN download client class should use download limit')
+		provider:terminate('test complete')
+	end)
+end
+
+
+function tests.test_shaping_mark_namespace_does_not_overlap_mwan_default_mask()
+	local marks = require 'services.hal.backends.network.providers.openwrt.shaping_marks'
+	local spec, err = marks.validate_marks({ marks = marks.default_marks() }, '0x3f00')
+	ok(spec, tostring(err))
+	eq(spec.mask, '0x00f00000')
+	local bad, berr = marks.validate_marks({ marks = { mask = '0x00003f00', control = '0x00000100', client = '0x00000200' } }, '0x3f00')
+	eq(bad, nil)
+	contains(tostring(berr), 'overlaps MWAN mask')
+end
+
 
 return tests

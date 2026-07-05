@@ -1,0 +1,32 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+ROOT_DIR="$(CDPATH= cd -- "$VM_DIR/../../.." && pwd)"
+SSH="$VM_DIR/scripts/ssh"
+SCP_TO="$VM_DIR/scripts/scp-to"
+REMOTE="${DEVICECODE_REMOTE_STAGE:-/tmp/devicecode-current}"
+WORK="$VM_DIR/work"
+STAMP_FILE="$WORK/devicecode-stage.stamp"
+
+mkdir -p "$WORK"
+
+# Use metadata rather than file contents so the check is cheap during local
+# development.  It is deliberately conservative: touching a source file causes
+# a re-stage.
+STAMP="$({ cd "$ROOT_DIR" && find src vendor -type f -printf '%p %s %T@\n' | sort; } | sha256sum | awk '{print $1}')"
+printf '%s\n' "$STAMP" > "$STAMP_FILE"
+
+if [ "${DEVICECODE_STAGE_FORCE:-0}" != 1 ] && \
+   "$SSH" "test -f '$REMOTE/.devicecode-stage-stamp' && grep -qx '$STAMP' '$REMOTE/.devicecode-stage-stamp'" >/dev/null 2>&1; then
+  printf '%s\n' "$REMOTE"
+  exit 0
+fi
+
+printf '[openwrt-vm] staging Devicecode source to %s\n' "$REMOTE" >&2
+"$SSH" "rm -rf '$REMOTE'; mkdir -p '$REMOTE'"
+"$SCP_TO" "$ROOT_DIR/src" "$REMOTE/src"
+"$SCP_TO" "$ROOT_DIR/vendor" "$REMOTE/vendor"
+"$SSH" "printf '%s\\n' '$STAMP' > '$REMOTE/.devicecode-stage-stamp'"
+printf '%s\n' "$REMOTE"

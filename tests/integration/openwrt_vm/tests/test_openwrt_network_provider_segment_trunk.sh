@@ -114,6 +114,13 @@ local intent = {
       dhcp = { enabled = true, start = 50, limit = 100, leasetime = '6h' },
       firewall = { zone = 'guest' },
     },
+    iot = {
+      kind = 'user', l2 = { mode = 'direct' }, vlan = { id = 102 },
+      addressing = { ipv4 = { mode = 'static', cidr = '192.168.102.1/24' } },
+      dhcp = { enabled = false },
+      firewall = { zone = 'lan' },
+      shaping = { profile = 'restricted_iot' },
+    },
   },
   interfaces = {},
   dns = { enabled = true, upstreams = { '1.1.1.1' } },
@@ -126,7 +133,10 @@ local intent = {
       guest = { input = 'REJECT', output = 'ACCEPT', forward = 'REJECT' },
     },
   },
-  routing = {}, wan = {}, shaping = { enabled = true, profiles = { restricted = { egress = { enabled = true, host_rate = '2mbit', hosts = { ['192.168.100.2'] = { rate = '1mbit' } } } } } }, vpn = {}, diagnostics = {},
+  routing = {}, wan = {}, shaping = { enabled = true, profiles = {
+    restricted = { egress = { enabled = true, host_rate = '2mbit', hosts = { ['192.168.100.2'] = { rate = '1mbit' } } } },
+    restricted_iot = { egress = { enabled = true, host_rate = '2mbit', hosts = { ['192.168.102.2'] = { rate = '1mbit' } } } },
+  } }, vpn = {}, diagnostics = {},
 }
 
 local name_ctx = assert(names_mod.allocate(intent))
@@ -144,9 +154,12 @@ end)
 
 if #shaper_cmds == 0 then fail('shaper commands expected for shaped trunk segment') end
 local shaper_text = table.concat(shaper_cmds, '\n') .. '\n' .. table.concat(shaper_batches, '\n')
-if not shaper_text:find('vl%-lan') then fail('trunk segment shaping should target generated VLAN device vl-lan, got: ' .. shaper_text) end
+if not shaper_text:find('br%-lan') then fail('bridged trunk segment shaping should target bridge data device br-lan, got: ' .. shaper_text) end
+if shaper_text:find('dev vl%-lan') then fail('bridged trunk segment shaping must not target VLAN member device vl-lan') end
 if shaper_text:find('eth0%.100') then fail('trunk segment shaping must not target legacy eth0.100') end
-if not shaper_text:find('ifb_vl_lan') then fail('trunk segment ingress IFB should be derived from vl-lan') end
+if not shaper_text:find('ifb_br_lan') then fail('bridged trunk segment ingress IFB should be derived from br-lan') end
+if not shaper_text:find('vl%-iot') then fail('direct trunk segment shaping should target VLAN data device vl-iot, got: ' .. shaper_text) end
+if not shaper_text:find('ifb_vl_iot') then fail('direct trunk segment ingress IFB should be derived from vl-iot') end
 
 local c = assert(uci.cursor(conf, save))
 for _, pkg in ipairs({ 'network', 'dhcp', 'firewall' }) do if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end end
@@ -199,6 +212,16 @@ for seg, e in pairs(expected) do
   eq(iface.netmask, e.netmask, seg .. ' netmask')
   assert(#ifsec <= 8, seg .. ' logical interface length')
 end
+
+local _iot_vlan_sec, iot_vlan = section_by_name('network', name_ctx:section('dev_vlan', 'iot'), 'device')
+eq(iot_vlan.type, '8021q', 'iot direct vlan device type')
+eq(iot_vlan.ifname, 'eth0', 'iot direct vlan ifname')
+eq(iot_vlan.vid, '102', 'iot direct vid')
+local _iot_ifsec, iot_iface = section_by_name('network', name_ctx:iface('iot'), 'interface')
+eq(iot_iface.device, iot_vlan.name, 'direct segment interface should use VLAN device')
+eq(iot_iface.ipaddr, '192.168.102.1', 'iot direct ipaddr')
+eq(iot_iface.netmask, '255.255.255.0', 'iot direct netmask')
+if all('network')[name_ctx:section('dev_bridge', 'iot')] ~= nil then fail('direct segment should not create bridge device') end
 
 local _dhcp_lan_sec, dhcp_lan = section_by_name('dhcp', name_ctx:section('dhcp', 'lan'), 'dhcp')
 local _dhcp_guest_sec, dhcp_guest = section_by_name('dhcp', name_ctx:section('dhcp', 'guest'), 'dhcp')

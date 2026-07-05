@@ -1,6 +1,6 @@
 .PHONY: \
 	preflight fetch verify reset run wait provision provision-force ensure-mwan3 \
-	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-devicecode-exec-containment test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-full-stack-mock-hal test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-openwrt-jan-client-dhcp-dns test-openwrt-int-bridge-client-dhcp-dns test-openwrt-dnsmasq-multi-instance-resilience \
+	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-devicecode-exec-containment test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-openwrt-jan-client-per-host-shaping test-openwrt-shaping-idempotent-apply test-openwrt-segment-shaping-modes test-openwrt-wan-mark-shaping-contract test-openwrt-wan-mark-upload-exemption test-openwrt-wan-mark-download-capability test-openwrt-shaping-fast test-openwrt-shaping-clean test-devicecode-wired-static-provider test-devicecode-full-stack-mock-hal test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-openwrt-jan-client-dhcp-dns test-openwrt-int-bridge-client-dhcp-dns test-openwrt-dnsmasq-multi-instance-resilience \
 	setup-bridge-client-fabric teardown-bridge-client-fabric \
 	network-lab-fetch network-lab-start network-lab-wait network-lab-provision network-lab-sync network-lab-ssh network-lab-stop network-lab-test test-network-lab \
 	test openwrt-vm-test clean
@@ -157,6 +157,60 @@ test-openwrt-jan-client-dhcp-dns:
 	./scripts/ensure-jan-client-dhcp-dns-deps
 	./tests/test_openwrt_jan_client_dhcp_dns.sh
 
+test-openwrt-jan-client-per-host-shaping:
+	./scripts/ensure-jan-client-dhcp-dns-deps
+	./tests/test_openwrt_jan_client_per_host_shaping.sh
+
+
+test-openwrt-shaping-idempotent-apply:
+	./scripts/ensure-jan-client-dhcp-dns-deps
+	./tests/test_openwrt_shaping_idempotent_apply.sh
+
+
+test-openwrt-segment-shaping-modes:
+	./scripts/ensure-jan-client-dhcp-dns-deps
+	./tests/test_openwrt_segment_shaping_modes.sh
+
+
+test-openwrt-wan-mark-shaping-contract:
+	./scripts/wait-ssh
+	./tests/test_openwrt_wan_mark_shaping_contract.sh
+
+
+test-openwrt-wan-mark-upload-exemption:
+	./scripts/ensure-jan-client-dhcp-dns-deps
+	./scripts/ensure-mwan3
+	./tests/test_openwrt_wan_mark_upload_exemption.sh
+
+
+test-openwrt-wan-mark-download-capability:
+	./scripts/ensure-jan-client-dhcp-dns-deps
+	./tests/test_openwrt_wan_mark_download_capability.sh
+
+
+test-openwrt-shaping-clean:
+	./scripts/cleanup-shaping-state
+
+
+test-openwrt-shaping-fast:
+	./scripts/ensure-jan-client-dhcp-dns-deps
+	./scripts/ensure-devicecode-staged >/dev/null
+	./scripts/backup-openwrt-config-state >/dev/null
+	set -e; \
+	cleanup() { \
+		./scripts/cleanup-shaping-state >/dev/null 2>&1 || true; \
+		DEVICECODE_RESTORE_ACTIVATE=0 DEVICECODE_RESTORE_NOWAIT=1 ./scripts/restore-openwrt-config-state >/dev/null 2>&1 || true; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	./scripts/cleanup-shaping-state >/dev/null 2>&1 || true; \
+	DC_SHAPING_CLEANUP_DISABLED=1 ./tests/test_openwrt_shaping_idempotent_apply.sh; \
+	DC_SHAPING_CLEANUP_DISABLED=1 ./tests/test_openwrt_jan_client_per_host_shaping.sh; \
+	DC_SHAPING_CLEANUP_DISABLED=1 ./tests/test_openwrt_segment_shaping_modes.sh; \
+	DC_SHAPING_CLEANUP_DISABLED=1 ./tests/test_openwrt_wan_mark_shaping_contract.sh; \
+	./scripts/ensure-mwan3; \
+	DC_SHAPING_CLEANUP_DISABLED=1 ./tests/test_openwrt_wan_mark_upload_exemption.sh; \
+	DC_SHAPING_CLEANUP_DISABLED=1 ./tests/test_openwrt_wan_mark_download_capability.sh
+
 setup-bridge-client-fabric:
 	./scripts/setup-bridge-client-fabric
 
@@ -215,7 +269,7 @@ test-scp:
 	grep -q devicecode-openwrt-vm "$$tmp.out"; \
 	rm -f "$$tmp" "$$tmp.out"
 
-test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-devicecode-exec-containment test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-devicecode-wired-static-provider test-devicecode-full-stack-mock-hal test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-scp
+test: test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-devicecode-exec-containment test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-openwrt-jan-client-per-host-shaping test-openwrt-shaping-idempotent-apply test-openwrt-segment-shaping-modes test-openwrt-wan-mark-shaping-contract test-openwrt-wan-mark-upload-exemption test-openwrt-wan-mark-download-capability test-devicecode-wired-static-provider test-devicecode-full-stack-mock-hal test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-scp
 
 openwrt-vm-test: preflight fetch verify stop reset run wait provision test
 

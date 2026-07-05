@@ -13,7 +13,7 @@ local cjson = require 'cjson.safe'
 local uci_manager = require 'services.hal.backends.openwrt.uci_manager'
 local observer_mod = require 'services.hal.backends.network.providers.openwrt.observer'
 local mwan3_mod = require 'services.hal.backends.network.providers.openwrt.mwan3'
-local shaper_mod = require 'services.hal.backends.network.providers.openwrt.tc_u32_shaper'
+local shaper_mod = require 'services.hal.backends.network.providers.openwrt.shaper'
 local speedtest_mod = require 'services.hal.backends.network.providers.openwrt.speedtest'
 local names_mod = require 'services.hal.backends.network.providers.openwrt.names'
 local hal_types = require 'services.hal.types.core'
@@ -439,8 +439,41 @@ local function resolve_shaping_profile(shaping, seg)
 	local profile_name = seg_shape.profile or seg_shape.profile_id
 	local base = {}
 	if type(profile_name) == 'string' and is_plain_table(profiles[profile_name]) then base = profiles[profile_name] end
-	local overrides = is_plain_table(seg_shape.overrides) and seg_shape.overrides or {}
+
+	-- Canonical segment shaping lives on the segment.  A segment may either
+	-- reference a reusable shaping profile or provide the policy inline.  Treat
+	-- all fields apart from the profile selectors as overrides on the reusable
+	-- profile; preserve the older explicit `overrides` table as an additional
+	-- compatibility layer.
+	local overrides = {}
+	for k, v in pairs(seg_shape) do
+		if k ~= 'profile' and k ~= 'profile_id' and k ~= 'overrides' then
+			overrides[k] = copy_plain(v)
+		end
+	end
+	if is_plain_table(seg_shape.overrides) then overrides = merge_tables(overrides, seg_shape.overrides) end
 	return merge_tables(base, overrides), profile_name
+end
+
+local function seg_l2_mode(seg)
+	local l2 = is_plain_table(seg and seg.l2) and seg.l2 or {}
+	if type(l2.mode) == 'string' and l2.mode ~= '' then return l2.mode end
+	local kind = seg and seg.kind or 'lan'
+	if kind == 'wan' or kind == 'uplink' then return 'direct' end
+	return 'bridge'
+end
+
+local function segment_data_device(provider_config, seg_id, seg, name_ctx)
+	local trunk, base_ifname = platform_segment_trunk(provider_config)
+	local vid = segment_vlan_id(seg)
+	if not (trunk and base_ifname and vid and name_ctx) then return nil end
+	if seg_l2_mode(seg) == 'bridge' and type(name_ctx.bridge) == 'function' then
+		return name_ctx:bridge(seg_id)
+	end
+	if type(name_ctx.vlan) == 'function' then
+		return name_ctx:vlan(seg_id)
+	end
+	return nil
 end
 
 local function segment_shaping_device(provider_config, seg_id, seg, name_ctx)
@@ -449,17 +482,153 @@ local function segment_shaping_device(provider_config, seg_id, seg, name_ctx)
 	if not (trunk and base_ifname and vid) then return nil end
 
 	-- The OpenWrt provider owns Linux device naming.  For trunk-derived VLAN
-	-- segments, netifd is configured to create a named VLAN device such as
-	-- "vl-jan".  Shape that provider-owned device rather than the older
-	-- trunk-dot-VLAN convention (for example "eth0.32"), unless a legacy
-	-- compatibility switch is set explicitly.
+	-- segments, netifd is configured to create provider-owned devices such as
+	-- "vl-jan" and, for bridged segments, "br-jan".  Shape the segment data
+	-- device selected for the OpenWrt interface so TC sees the same traffic as
+	-- the L3 segment.  Preserve the older trunk-dot-VLAN convention only behind
+	-- an explicit compatibility switch.
 	if trunk.legacy_shaping_device == true or trunk.legacy_dot_vlan_shaping == true then
 		return base_ifname .. '.' .. tostring(vid)
 	end
-	if name_ctx and type(name_ctx.vlan) == 'function' then
-		return name_ctx:vlan(seg_id)
+	return segment_data_device(provider_config, seg_id, seg, name_ctx)
+end
+
+local function normalise_host_policy_direction(dir_cfg, legacy_cfg)
+	dir_cfg = is_plain_table(dir_cfg) and dir_cfg or {}
+	legacy_cfg = is_plain_table(legacy_cfg) and legacy_cfg or {}
+	local sustained = dir_cfg.sustained_rate or dir_cfg.rate or legacy_cfg.host_rate
+	local peak = dir_cfg.peak_rate or dir_cfg.ceil or legacy_cfg.host_ceil or sustained
+	local burst = dir_cfg.burst_budget or dir_cfg.burst or legacy_cfg.host_burst
+	return sustained, peak, burst
+end
+
+local function compile_semantic_segment_profile(spec)
+	if not is_plain_table(spec) then return spec end
+	-- Operator-facing segment shape.  Canonical policies put aggregate
+	-- download/upload and host defaults directly on the segment or reusable
+	-- segment profile.  Older low-level profiles with egress/ingress are left
+	-- untouched except for explicit host_mode/mode annotations.
+	local has_semantic = is_plain_table(spec.segment)
+		or is_plain_table(spec.host_default)
+		or is_plain_table(spec.host_overrides)
+		or is_plain_table(spec.download)
+		or is_plain_table(spec.upload)
+	if not has_semantic then return spec end
+	local out = copy_plain(spec)
+	local seg = is_plain_table(spec.segment) and spec.segment or spec
+	local def = is_plain_table(spec.host_default) and spec.host_default or {}
+	local mode = def.mode or spec.host_mode or spec.mode or 'budgeted_peak'
+	local fq = spec.fq_codel or def.fq_codel or { flows = 1024, limit = 10240, memory_limit = '16Mb', target = '5ms', interval = '100ms' }
+	local function build_dir(name, match, pool_key)
+		local d = is_plain_table(def[name]) and def[name] or {}
+		local s = is_plain_table(seg[name]) and seg[name] or {}
+		local rate, ceil, burst = normalise_host_policy_direction(d, {})
+		local aggregate = s.limit or s.rate or seg[pool_key] or spec[pool_key]
+		local out_dir = {
+			enabled = d.enabled ~= false,
+			match = match,
+			mode = mode,
+			host_rate = rate or '1mbit',
+			host_ceil = ceil or rate or '1mbit',
+			host_burst = burst,
+			host_cburst = d.cburst or burst,
+			all_hosts = def.all_hosts ~= false,
+			fq_codel = copy_plain(fq),
+		}
+		if aggregate then
+			out_dir.segment_aggregate = true
+			out_dir.pool_rate = aggregate
+			out_dir.pool_ceil = s.limit or s.ceil or aggregate
+		end
+		return out_dir
 	end
-	return nil
+	out.egress = out.egress or build_dir('download', 'dst', 'download_limit')
+	out.ingress = out.ingress or build_dir('upload', 'src', 'upload_limit')
+	out.host_default = nil
+	out.host_overrides = copy_plain(spec.host_overrides or {})
+	return out
+end
+
+local function compile_legacy_segment_profile(spec)
+	if not is_plain_table(spec) then return spec end
+	local out = copy_plain(spec)
+	for _, dir in ipairs({ 'egress', 'ingress' }) do
+		if is_plain_table(out[dir]) then
+			out[dir].mode = out[dir].mode or out[dir].host_mode or out.host_mode or out.mode or 'borrow_to_ceil'
+		end
+	end
+	return out
+end
+
+local function compile_segment_shaping_profile(spec)
+	return compile_legacy_segment_profile(compile_semantic_segment_profile(spec))
+end
+
+local function interface_linux_device(intent, ifid, name_ctx)
+	if type(ifid) ~= 'string' or ifid == '' then return nil end
+	local iface = is_plain_table(intent.interfaces) and intent.interfaces[ifid] or nil
+	if is_plain_table(iface) then
+		local ep = is_plain_table(iface.endpoint) and iface.endpoint or {}
+		local dev = ep.ifname or ep.device or ep.name or iface.device or iface.ifname
+		if type(dev) == 'string' and dev ~= '' then return dev end
+		if type(iface.segment) == 'string' and is_plain_table(intent.segments) and intent.segments[iface.segment] then
+			return segment_data_device({}, iface.segment, intent.segments[iface.segment], name_ctx)
+		end
+	end
+	if name_ctx and type(name_ctx.vlan) == 'function' then return name_ctx:vlan(ifid) end
+	return ifid
+end
+
+local function add_backhaul_shaping_link(intent, shaping, links, name_ctx, bid, b, member_id, member)
+	if not (is_plain_table(b) and b.enabled ~= false) then return end
+	member_id = member_id or b.member or b.backhaul or bid
+	member = is_plain_table(member) and member or {}
+	local ifid = b.interface or b.iface or member.interface or member.id or member_id
+	local dev = b.device or b.ifname or interface_linux_device(intent, ifid, name_ctx)
+	if type(dev) ~= 'string' or dev == '' then return end
+	local down = is_plain_table(b.download) and b.download or {}
+	local up = is_plain_table(b.upload) and b.upload or {}
+	local link = {
+		kind = 'wan_mark',
+		iface = dev,
+		member = member_id,
+		marks = copy_plain(shaping.marks or {}),
+		egress = {
+			enabled = up.enabled ~= false and b.upload_enabled ~= false,
+			client = { rate = up.limit or up.rate or b.upload_limit or '1gbit', ceil = up.limit or up.ceil or b.upload_limit or '1gbit' },
+			control = { rate = b.control_rate or '1gbit', ceil = b.control_ceil or b.control_rate or '1gbit' },
+			fq_codel = copy_plain(b.fq_codel or {}),
+		},
+		ingress = {
+			enabled = down.enabled ~= false and b.download_enabled ~= false,
+			client = { rate = down.limit or down.rate or b.download_limit or '1gbit', ceil = down.limit or down.ceil or b.download_limit or '1gbit' },
+			control = { rate = b.control_rate or '1gbit', ceil = b.control_ceil or b.control_rate or '1gbit' },
+			fq_codel = copy_plain(b.fq_codel or {}),
+		},
+	}
+	links['backhaul_' .. tostring(bid)] = link
+end
+
+local function compile_backhaul_shaping_links(intent, shaping, links, name_ctx)
+	local members = is_plain_table(intent.wan) and is_plain_table(intent.wan.members) and intent.wan.members or {}
+	-- WAN/backhaul shaping is canonical only on the WAN member: it describes
+	-- how client traffic may use that upstream path.
+	for _, member_id in ipairs(sorted_keys(members)) do
+		local member = members[member_id]
+		local b = is_plain_table(member) and member.shaping or nil
+		if is_plain_table(b) then
+			add_backhaul_shaping_link(intent, shaping, links, name_ctx, member_id, b, member_id, member)
+		end
+	end
+	return links
+end
+
+local function has_segment_shaping_intent(seg_shape)
+	if not is_plain_table(seg_shape) then return false end
+	return seg_shape.profile ~= nil or seg_shape.profile_id ~= nil
+		or seg_shape.egress ~= nil or seg_shape.ingress ~= nil
+		or seg_shape.segment ~= nil or seg_shape.download ~= nil or seg_shape.upload ~= nil
+		or seg_shape.host_default ~= nil or seg_shape.host_overrides ~= nil
 end
 
 local function build_shaping_request(intent, provider_config, name_ctx)
@@ -467,11 +636,12 @@ local function build_shaping_request(intent, provider_config, name_ctx)
 	if shaping.enabled ~= true then return shaping end
 	local links = {}
 	for k, v in pairs(shaping.links or {}) do links[k] = copy_plain(v) end
+	compile_backhaul_shaping_links(intent, shaping, links, name_ctx)
 	for _, seg_id in ipairs(sorted_keys(intent.segments or {})) do
 		local seg = intent.segments[seg_id]
 		local seg_shape = is_plain_table(seg.shaping) and seg.shaping or {}
-		if seg_shape.enabled ~= false and (seg_shape.profile or seg_shape.profile_id) then
-			local spec = resolve_shaping_profile(shaping, seg)
+		if seg_shape.enabled ~= false and has_segment_shaping_intent(seg_shape) then
+			local spec = compile_segment_shaping_profile(resolve_shaping_profile(shaping, seg))
 			if is_plain_table(spec) and spec.enabled ~= false then
 				local iface = spec.iface or spec.device or segment_shaping_device(provider_config, seg_id, seg, name_ctx)
 				local subnet = spec.subnet or spec.cidr or segment_ipv4_cidr(seg)
@@ -507,13 +677,6 @@ end
 -- Devicecode owns the OpenWrt UCI packages completely; all OpenWrt-visible
 -- names are allocated through names.lua before rendering.
 
-local function seg_l2_mode(seg)
-	local l2 = is_plain_table(seg and seg.l2) and seg.l2 or {}
-	if type(l2.mode) == 'string' and l2.mode ~= '' then return l2.mode end
-	local kind = seg and seg.kind or 'lan'
-	if kind == 'wan' or kind == 'uplink' then return 'direct' end
-	return 'bridge'
-end
 
 local function add_static_or_dhcp_interface(changes, known, ifsec, devname, proto, ipv4, auto)
 	add_section(changes, known, 'network', ifsec, 'interface')
@@ -619,7 +782,7 @@ local function build_network_changes(intent, provider_config, name_ctx)
 					set_option(changes, 'network', vlan_sec, 'vid', vid)
 					set_option(changes, 'network', vlan_sec, 'name', vlan_name)
 
-					local devname = vlan_name
+					local devname = segment_data_device(provider_config, seg_id, seg, name_ctx) or vlan_name
 					if seg_l2_mode(seg) == 'bridge' then
 						local br_name = name_ctx:bridge(seg_id)
 						local br_sec = name_ctx:section('dev_bridge', seg_id)
@@ -628,7 +791,6 @@ local function build_network_changes(intent, provider_config, name_ctx)
 						set_option(changes, 'network', br_sec, 'type', 'bridge')
 						set_option(changes, 'network', br_sec, 'ports', { vlan_name })
 						set_option(changes, 'network', br_sec, 'bridge_empty', '1')
-						devname = br_name
 					end
 
 					local ifsec = name_ctx:iface(seg_id)
@@ -1022,6 +1184,7 @@ function M.new(config, opts)
 		mwan_run_cmd_capture = config.mwan_run_cmd_capture,
 		mwan_run_restore = config.mwan_run_restore,
 		shaper_run_cmd = config.shaper_run_cmd or config.run_cmd,
+		shaper_run_restore = config.shaper_run_restore,
 		speedtest_run_cmd = config.speedtest_run_cmd,
 		counter_reader = config.counter_reader or config.stat_reader,
 	}, Provider)
@@ -1317,7 +1480,7 @@ function Provider:apply_op(req)
 				apply_id = trace.apply_id,
 				apply_elapsed_ms = elapsed_ms(t0),
 			})
-			shaping_result = shaper_mod.apply(shaping_request, { run_cmd = self.shaper_run_cmd })
+			shaping_result = shaper_mod.apply(shaping_request, { run_cmd = self.shaper_run_cmd, run_restore = self.shaper_run_restore })
 			log_provider(self, shaping_result and shaping_result.ok == true and 'info' or 'warn', {
 				what = 'openwrt_apply_shaping_done',
 				generation = trace.generation,
@@ -2062,7 +2225,7 @@ end
 function Provider:apply_shaping_op(req)
 	return fibers.run_scope_op(function()
 		if self.terminated then return { ok = false, err = 'provider terminated', backend = 'openwrt' } end
-		local result = shaper_mod.apply(req or {}, { run_cmd = self.shaper_run_cmd })
+		local result = shaper_mod.apply(req or {}, { run_cmd = self.shaper_run_cmd, run_restore = self.shaper_run_restore })
 		if not result then return { ok = false, err = 'traffic shaping apply failed', backend = 'openwrt' } end
 		return result
 	end):wrap(function(status, _report, result)

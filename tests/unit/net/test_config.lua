@@ -109,6 +109,17 @@ end
 
 
 
+
+function tests.test_rejects_top_level_shaping_backhauls_alias()
+	local cfg = sample_cfg()
+	cfg.shaping.backhauls = {
+		wired = { download = { limit = '80mbit' }, upload = { limit = '20mbit' } },
+	}
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	if intent ~= nil then error('expected top-level shaping.backhauls alias to be rejected', 2) end
+	ok(err and err:find('net.shaping.backhauls', 1, true), 'shaping.backhauls rejection error expected')
+end
+
 function tests.test_rejects_implicit_static_route_without_kind()
 	local cfg = sample_cfg()
 	cfg.routing.routes.legacy = { target = '192.168.100.1', interface = 'wan_modem_a' }
@@ -179,7 +190,7 @@ function tests.test_bigbox_config_uses_clean_segment_authority_shape()
 	eq(intent.segments.jan.dns.host_files[1], 'ads')
 	eq(intent.segments.jan.dns.host_files[2], 'adult')
 	eq(intent.segments.jan.shaping.profile, 'restricted_user_per_host')
-	eq(intent.shaping.profiles.restricted_user_per_host.egress.host_rate, '2mbit')
+	eq(intent.shaping.profiles.restricted_user_per_host.host_default.download.sustained_rate, '2mbit')
 	eq(intent.dns.records['config.bigbox.home'].address, '172.28.8.1')
 	eq(intent.routing.routes.starlink_admin.kind, 'host')
 	eq(intent.routing.routes.starlink_admin.interface, 'wan')
