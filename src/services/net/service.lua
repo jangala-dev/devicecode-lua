@@ -186,7 +186,6 @@ local function copy_intent_to_model(s, intent)
 	s.wan = intent.wan or {}
 	s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
 	s.sources = s.sources or { gsm_uplinks = {} }
-	s.shaping = intent.shaping or {}
 	s.vpn = intent.vpn or {}
 	s.diagnostics = intent.diagnostics or {}
 	return s

@@ -9,61 +9,59 @@ VM_DIR="$(dirname "$SCRIPT_DIR")"
 
 "$SCRIPT_DIR/wait-ssh"
 
-echo "[openwrt-vm] ensuring jan client DHCP/DNS test dependencies"
+echo "[openwrt-vm] checking jan client network-data-plane test dependencies"
 
 "$SCRIPT_DIR/ssh" '
 	set -eu
 
-	updated=0
-	need_update() {
-		if [ "$updated" -eq 0 ]; then
-			opkg update
-			updated=1
-		fi
-	}
-
-	install_best_effort() {
-		need_update
-		opkg install "$@" || true
+	fail_missing() {
+		echo "jan client dependency check failed: $*" >&2
+		echo "Run: make provision-force" >&2
+		exit 1
 	}
 
 	cleanup_probe() {
+		ip netns del dcdepns >/dev/null 2>&1 || true
 		ip link del dcdep0 2>/dev/null || true
 		ip link del dcdep0p 2>/dev/null || true
 		ip link del dcdep0.32 2>/dev/null || true
 		ip link del dcdepvlan 2>/dev/null || true
+		ip link del dcdepifb 2>/dev/null || true
 	}
 	trap cleanup_probe EXIT INT TERM
 
-	command -v ip >/dev/null 2>&1 || install_best_effort ip-full
-	command -v udhcpc >/dev/null 2>&1 || install_best_effort busybox
-	command -v nslookup >/dev/null 2>&1 || install_best_effort bind-dig
-	command -v pgrep >/dev/null 2>&1 || install_best_effort procps-ng-pgrep
+	missing_cmd=""
+	for x in ip udhcpc nslookup pgrep tc; do
+		command -v "$x" >/dev/null 2>&1 || missing_cmd="$missing_cmd $x"
+	done
+	[ -z "$missing_cmd" ] || fail_missing "missing commands:$missing_cmd"
+
+	# Load modules if available.  Provisioning is responsible for installing
+	# packages; this check must not install packages, so missing capability is a
+	# deterministic provision failure rather than a hidden per-test mutation.
+	modprobe ifb 2>/dev/null || true
+	modprobe 8021q 2>/dev/null || true
+	modprobe sch_htb 2>/dev/null || true
+	modprobe sch_ingress 2>/dev/null || true
+	modprobe sch_fq_codel 2>/dev/null || true
+	modprobe cls_u32 2>/dev/null || true
+	modprobe act_mirred 2>/dev/null || true
 
 	cleanup_probe
-	if ! ip link add dcdep0 type veth peer name dcdep0p >/dev/null 2>&1; then
-		install_best_effort kmod-veth ip-full
-		cleanup_probe
-		ip link add dcdep0 type veth peer name dcdep0p >/dev/null 2>&1 || {
-			echo "jan client DHCP/DNS dependency check failed: veth is unavailable" >&2
-			exit 1
-		}
-	fi
+	ip link add dcdep0 type veth peer name dcdep0p >/dev/null 2>&1 || \
+		fail_missing "veth devices are unavailable; expected kmod-veth/ip-full"
 
 	ip link set dcdep0 up >/dev/null 2>&1 || true
-	if ! ip link add link dcdep0 name dcdepvlan type vlan id 32 >/dev/null 2>&1; then
-		install_best_effort kmod-8021q
-		cleanup_probe
-		ip link add dcdep0 type veth peer name dcdep0p >/dev/null 2>&1 || {
-			echo "jan client DHCP/DNS dependency check failed: veth became unavailable" >&2
-			exit 1
-		}
-		ip link set dcdep0 up >/dev/null 2>&1 || true
-		ip link add link dcdep0 name dcdepvlan type vlan id 32 >/dev/null 2>&1 || {
-			echo "jan client DHCP/DNS dependency check failed: 8021q VLAN devices are unavailable" >&2
-			exit 1
-		}
-	fi
+	ip link add link dcdep0 name dcdepvlan type vlan id 32 >/dev/null 2>&1 || \
+		fail_missing "8021q VLAN devices are unavailable; expected built-in VLAN support or kmod-8021q"
+
+	ip link add dcdepifb type ifb >/dev/null 2>&1 || \
+		fail_missing "ifb devices are unavailable; expected kmod-ifb"
+	ip link set dcdepifb up >/dev/null 2>&1 || true
+	tc qdisc add dev dcdepifb root handle 1: htb default 1 >/dev/null 2>&1 || \
+		fail_missing "HTB qdisc is unavailable; expected tc-full/kmod-sched/kmod-sched-core"
+	tc qdisc add dev dcdep0 ingress >/dev/null 2>&1 || \
+		fail_missing "ingress qdisc is unavailable; expected tc-full/kmod-sched-core"
 
 	if ! ip netns add dcdepns >/dev/null 2>&1; then
 		echo "[openwrt-vm] network namespaces unavailable; jan test will use same-namespace veth fallback" >&2
@@ -74,4 +72,4 @@ echo "[openwrt-vm] ensuring jan client DHCP/DNS test dependencies"
 	cleanup_probe
 '
 
-echo "[openwrt-vm] jan client DHCP/DNS dependencies ready"
+echo "[openwrt-vm] jan client network-data-plane dependencies ready"

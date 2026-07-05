@@ -8,7 +8,7 @@ local M = {}
 
 local DOMAIN_TOPICS = {
 	'addressing', 'dns', 'dhcp', 'firewall', 'routing',
-	'wan', 'wan_runtime', 'sources', 'shaping', 'vpn', 'diagnostics', 'observed', 'drift',
+	'wan', 'wan_runtime', 'sources', 'vpn', 'diagnostics', 'observed', 'drift',
 }
 
 

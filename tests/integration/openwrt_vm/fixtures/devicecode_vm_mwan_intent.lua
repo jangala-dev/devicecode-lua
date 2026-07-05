@@ -77,7 +77,7 @@ function M.intent()
         wanc = { interface = 'wanc', mwan_metric = 1, weight = 20, track_ip = '172.31.3.2' },
       },
     },
-    shaping = {}, vpn = {}, diagnostics = {},
+    vpn = {}, diagnostics = {},
   }
 end
 

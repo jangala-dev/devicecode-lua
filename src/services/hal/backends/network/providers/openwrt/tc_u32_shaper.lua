@@ -426,8 +426,70 @@ local function default_ids()
 	}
 end
 
+local function layout_mode(cfg)
+	local m = cfg and (cfg.mode or cfg.host_mode or cfg.burst_model)
+	if m == 'budgeted_peak' or m == 'borrow_to_ceil' then return m end
+	return 'borrow_to_ceil'
+end
+
+local function budgeted_peak(cfg) return layout_mode(cfg) == 'budgeted_peak' end
+
 local function classid(major, minor) return tostring(major) .. ':' .. tostring(minor) end
 local function qdisc_handle(major) return tostring(major) .. ':' end
+
+local function budgeted_peak_has_aggregate(cfg)
+	if not budgeted_peak(cfg) then return false end
+	if cfg and cfg.segment_aggregate == false then return false end
+	if cfg and cfg.segment_aggregate == true then return true end
+	-- Canonical segment shaping sets pool_* only when the operator configured
+	-- an aggregate segment download/upload limit.
+	return cfg and (cfg.pool_class ~= nil or cfg.pool_rate ~= nil or cfg.pool_ceil ~= nil or cfg.rate ~= nil or cfg.ceil ~= nil)
+end
+
+local function budgeted_peak_flat(cfg)
+	return budgeted_peak(cfg) and not budgeted_peak_has_aggregate(cfg)
+end
+
+local function filter_parent(ids, cfg)
+	if budgeted_peak_flat(cfg) then return qdisc_handle(ids.root_major) end
+	return qdisc_handle(ids.inner_major)
+end
+
+local function host_classid(ids, cfg, minor)
+	if budgeted_peak_flat(cfg) then return classid(ids.root_major, minor) end
+	return classid(ids.inner_major, minor)
+end
+
+local function host_parent_classid(ids, cfg)
+	if budgeted_peak_flat(cfg) then return qdisc_handle(ids.root_major) end
+	if budgeted_peak_has_aggregate(cfg) then return qdisc_handle(ids.inner_major) end
+	return classid(ids.inner_major, ids.inner_root_minor)
+end
+
+local function default_classid(ids, cfg)
+	if budgeted_peak_flat(cfg) then return classid(ids.root_major, ids.default_minor) end
+	return classid(ids.inner_major, ids.default_minor)
+end
+
+local function peak_qdisc_handle(rec)
+	return qdisc_handle(rec.minor)
+end
+
+local function peak_classid(rec)
+	return classid(rec.minor, 1)
+end
+
+local function fq_parent_classid(rec)
+	return rec.leaf_classid or rec.classid
+end
+
+local function host_table_handle(ids, cfg)
+	-- In flat budgeted_peak the filters live under the root qdisc (normally
+	-- handle 1:), so avoid using table handle 1: by default.  The old shaper
+	-- used 100:.
+	if budgeted_peak_flat(cfg) and ids.host_table_handle == 1 then return 256 end
+	return ids.host_table_handle
+end
 
 local function bool_flag(v, yes, no)
 	if v == nil then return nil end
@@ -520,17 +582,19 @@ end
 local function scaffold_signature(kind, spec, cfg, ids, dev)
 	local dp = direction_params(kind, cfg)
 	return table.concat({
-		kind, dev, spec.cidr, dp.match_field, tostring(dp.hash_at),
+		kind, dev, spec.cidr, dp.match_field, tostring(dp.hash_at), layout_mode(cfg),
+		budgeted_peak_has_aggregate(cfg) and 'agg' or 'noagg',
 		tostring(ids.root_major), tostring(ids.pool_minor),
 		tostring(ids.inner_major), tostring(ids.inner_root_minor),
 		tostring(ids.default_minor), tostring(ids.base_minor),
-		tostring(ids.host_table_handle),
+		tostring(host_table_handle(ids, cfg)),
 		tostring(ids.outer_prio), tostring(ids.link_prio), tostring(ids.host_prio),
 	}, '|')
 end
 
-local function reconcile_default_fq(dev, ids, fq_cfg, logger)
-	local parent = classid(ids.inner_major, ids.default_minor)
+local function reconcile_default_fq(dev, ids, cfg, logger)
+	local fq_cfg = cfg and cfg.default_fq_codel
+	local parent = default_classid(ids, cfg)
 	if fq_cfg == nil or fq_cfg == false then
 		try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'parent', parent }, logger)
 		return true, nil
@@ -545,6 +609,66 @@ local function rebuild_scaffold(kind, spec, cfg, dev, ids, logger)
 	local net_s = ipv4_to_string(spec.net_u) .. '/' .. tostring(spec.pfx)
 
 	try_cmd({ 'tc', 'qdisc', 'del', 'dev', dev, 'root' }, logger)
+
+	if budgeted_peak(cfg) then
+		if budgeted_peak_has_aggregate(cfg) then
+			local cmds = {
+				{ 'tc', 'qdisc', 'add', 'dev', dev, 'root',
+					'handle', qdisc_handle(ids.root_major),
+					'htb', 'default', tostring(ids.root_class_minor) },
+
+				htb_class_replace_argv(dev, qdisc_handle(ids.root_major),
+					classid(ids.root_major, ids.root_class_minor),
+					cfg.root_class or { rate = (cfg.root_rate or '1gbit'), ceil = (cfg.root_ceil or cfg.root_rate or '1gbit') }),
+				htb_class_replace_argv(dev, qdisc_handle(ids.root_major),
+					classid(ids.root_major, ids.pool_minor),
+					cfg.pool_class or {
+						rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
+						ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
+						burst  = cfg.pool_burst,
+						cburst = cfg.pool_cburst,
+					}),
+				{ 'tc', 'qdisc', 'add', 'dev', dev,
+					'parent', classid(ids.root_major, ids.pool_minor),
+					'handle', qdisc_handle(ids.inner_major),
+					'htb', 'default', tostring(ids.default_minor) },
+				htb_class_replace_argv(dev, qdisc_handle(ids.inner_major),
+					classid(ids.inner_major, ids.default_minor),
+					cfg.default_class or {
+						rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
+						ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
+						burst  = (cfg.default_burst or cfg.host_burst),
+						cburst = (cfg.default_cburst or cfg.host_cburst),
+					}),
+				{ 'tc', 'filter', 'add', 'dev', dev,
+					'parent', qdisc_handle(ids.root_major),
+					'protocol', 'ip',
+					'prio', tostring(ids.outer_prio),
+					'u32', 'match', 'ip', dp.match_field, net_s,
+					'flowid', classid(ids.root_major, ids.pool_minor) },
+			}
+			local ok, err = must_tc_batch_chunked(cmds, logger, 'rebuild budgeted_peak aggregate scaffold', 128)
+			if not ok then return nil, err end
+			return reconcile_default_fq(dev, ids, cfg, logger)
+		end
+
+		local cmds = {
+			{ 'tc', 'qdisc', 'add', 'dev', dev, 'root',
+				'handle', qdisc_handle(ids.root_major),
+				'htb', 'default', tostring(ids.default_minor) },
+			htb_class_replace_argv(dev, qdisc_handle(ids.root_major),
+				classid(ids.root_major, ids.default_minor),
+				cfg.default_class or {
+					rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
+					ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
+					burst  = (cfg.default_burst or cfg.host_burst),
+					cburst = (cfg.default_cburst or cfg.host_cburst),
+				}),
+		}
+		local ok, err = must_tc_batch_chunked(cmds, logger, 'rebuild budgeted_peak flat scaffold', 128)
+		if not ok then return nil, err end
+		return reconcile_default_fq(dev, ids, cfg, logger)
+	end
 
 	local cmds = {
 		{ 'tc', 'qdisc', 'add', 'dev', dev, 'root',
@@ -596,10 +720,47 @@ local function rebuild_scaffold(kind, spec, cfg, dev, ids, logger)
 
 	local ok, err = must_tc_batch_chunked(cmds, logger, 'rebuild scaffold', 128)
 	if not ok then return nil, err end
-	return reconcile_default_fq(dev, ids, cfg.default_fq_codel, logger)
+	return reconcile_default_fq(dev, ids, cfg, logger)
 end
 
 local function apply_top_classes(dev, ids, cfg, logger)
+	if budgeted_peak(cfg) then
+		local cmds = {}
+		if budgeted_peak_has_aggregate(cfg) then
+			cmds[#cmds + 1] = htb_class_replace_argv(dev, qdisc_handle(ids.root_major),
+				classid(ids.root_major, ids.root_class_minor),
+				cfg.root_class or { rate = (cfg.root_rate or '1gbit'), ceil = (cfg.root_ceil or cfg.root_rate or '1gbit') })
+			cmds[#cmds + 1] = htb_class_replace_argv(dev, qdisc_handle(ids.root_major),
+				classid(ids.root_major, ids.pool_minor),
+				cfg.pool_class or {
+					rate   = (cfg.pool_rate or cfg.rate or '1gbit'),
+					ceil   = (cfg.pool_ceil or cfg.ceil or cfg.pool_rate or cfg.rate or '1gbit'),
+					burst  = cfg.pool_burst,
+					cburst = cfg.pool_cburst,
+				})
+			cmds[#cmds + 1] = htb_class_replace_argv(dev, qdisc_handle(ids.inner_major),
+				classid(ids.inner_major, ids.default_minor),
+				cfg.default_class or {
+					rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
+					ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
+					burst  = (cfg.default_burst or cfg.host_burst),
+					cburst = (cfg.default_cburst or cfg.host_cburst),
+				})
+		else
+			cmds[#cmds + 1] = htb_class_replace_argv(dev, qdisc_handle(ids.root_major),
+				classid(ids.root_major, ids.default_minor),
+				cfg.default_class or {
+					rate   = (cfg.default_rate or cfg.host_rate or '1gbit'),
+					ceil   = (cfg.default_ceil or cfg.host_ceil or cfg.default_rate or cfg.host_rate or '1gbit'),
+					burst  = (cfg.default_burst or cfg.host_burst),
+					cburst = (cfg.default_cburst or cfg.host_cburst),
+				})
+		end
+		local ok, err = must_tc_batch_chunked(cmds, logger, 'budgeted_peak top class refresh', 128)
+		if not ok then return nil, err end
+		return reconcile_default_fq(dev, ids, cfg, logger)
+	end
+
 	local cmds = {
 		-- Refresh root class as well; otherwise root_rate/root_ceil changes only
 		-- take effect on a full scaffold rebuild.
@@ -636,7 +797,7 @@ local function apply_top_classes(dev, ids, cfg, logger)
 	}
 	local ok, err = must_tc_batch_chunked(cmds, logger, 'top class refresh', 128)
 	if not ok then return nil, err end
-	return reconcile_default_fq(dev, ids, cfg.default_fq_codel, logger)
+	return reconcile_default_fq(dev, ids, cfg, logger)
 end
 
 --------------------------------------------------------------------------------
@@ -686,14 +847,43 @@ local function build_host_plan(spec, cfg, ids)
 			return nil, 'class minor too large for host ' .. ip_s
 		end
 
-		local htb = {
-			rate    = hcfg.rate or cfg.host_rate or '1mbit',
-			ceil    = hcfg.ceil or cfg.host_ceil or hcfg.rate or cfg.host_rate or '1mbit',
-			burst   = hcfg.burst or cfg.host_burst,
-			cburst  = hcfg.cburst or cfg.host_cburst,
-			prio    = hcfg.prio or cfg.host_prio,
-			quantum = hcfg.quantum or cfg.host_quantum,
-		}
+		local sustained = hcfg.sustained_rate or hcfg.rate or cfg.host_rate or '1mbit'
+		local peak      = hcfg.peak_rate or hcfg.peak or hcfg.ceil or cfg.host_ceil or sustained
+		local burst     = hcfg.burst_budget or hcfg.burst or cfg.host_burst
+		local cburst    = hcfg.cburst or cfg.host_cburst or burst
+
+		local htb
+		local peak_htb = nil
+		if budgeted_peak(cfg) then
+			-- The host budget class enforces long-term behaviour.  Its ceil is
+			-- deliberately the sustained rate; the child peak class caps how
+			-- quickly the burst allowance may be spent.
+			htb = {
+				rate    = sustained,
+				ceil    = hcfg.sustained_ceil or sustained,
+				burst   = burst,
+				cburst  = cburst,
+				prio    = hcfg.prio or cfg.host_prio,
+				quantum = hcfg.quantum or cfg.host_quantum,
+			}
+			peak_htb = {
+				rate    = peak,
+				ceil    = hcfg.peak_ceil or peak,
+				burst   = hcfg.peak_burst or cfg.host_peak_burst,
+				cburst  = hcfg.peak_cburst or cfg.host_peak_cburst,
+				prio    = hcfg.peak_prio or cfg.host_peak_prio,
+				quantum = hcfg.peak_quantum or cfg.host_peak_quantum,
+			}
+		else
+			htb = {
+				rate    = sustained,
+				ceil    = peak,
+				burst   = burst,
+				cburst  = cburst,
+				prio    = hcfg.prio or cfg.host_prio,
+				quantum = hcfg.quantum or cfg.host_quantum,
+			}
+		end
 
 		local fq = nil
 		if hcfg.fq_codel == false then
@@ -705,18 +895,29 @@ local function build_host_plan(spec, cfg, ids)
 			end
 		end
 
-		return {
+		local rec = {
 			ip_s    = ip_s,
 			ip_u    = ip_u,
 			offset  = off,
 			bucket  = bucket,
 			minor   = minor,
-			classid = classid(ids.inner_major, minor),
+			classid = host_classid(ids, cfg, minor),
 			htb     = htb,
+			peak_htb = peak_htb,
 			fq      = fq,
-			htb_sig = htb_signature(htb),
-			fq_sig  = fq_signature(fq),
-		}, nil
+			cfg     = cfg,
+		}
+		if budgeted_peak(cfg) then
+			rec.peak_qdisc = peak_qdisc_handle(rec)
+			rec.peak_classid = peak_classid(rec)
+			rec.leaf_classid = rec.peak_classid
+			rec.htb_sig = htb_signature(htb) .. '|peak:' .. htb_signature(peak_htb)
+		else
+			rec.leaf_classid = rec.classid
+			rec.htb_sig = htb_signature(htb)
+		end
+		rec.fq_sig = fq_signature(fq)
+		return rec, nil
 	end
 
 	local out = {}
@@ -804,11 +1005,11 @@ end
 local function host_rule_argv(dev, ids, match_field, rec)
 	return {
 		'tc', 'filter', 'add', 'dev', dev,
-		'parent', qdisc_handle(ids.inner_major),
+		'parent', filter_parent(ids, rec.cfg or {}),
 		'protocol', 'ip',
 		'prio', tostring(ids.host_prio),
 		'u32',
-		'ht', u32_bucket_ref(ids.host_table_handle, rec.bucket),
+		'ht', u32_bucket_ref(host_table_handle(ids, rec.cfg or {}), rec.bucket),
 		'match', 'ip', match_field, rec.ip_s .. '/32',
 		'flowid', rec.classid,
 	}
@@ -824,30 +1025,30 @@ local function rebuild_host_filters_full(kind, spec, cfg, dev, ids, plan, logger
 
 	-- best-effort clear the filter priorities we own
 	try_cmd(
-		{ 'tc', 'filter', 'del', 'dev', dev, 'parent', qdisc_handle(ids.inner_major), 'protocol', 'ip', 'prio', tostring(
+		{ 'tc', 'filter', 'del', 'dev', dev, 'parent', filter_parent(ids, cfg), 'protocol', 'ip', 'prio', tostring(
 			ids
 			.link_prio) }, logger)
 	try_cmd(
-		{ 'tc', 'filter', 'del', 'dev', dev, 'parent', qdisc_handle(ids.inner_major), 'protocol', 'ip', 'prio', tostring(
+		{ 'tc', 'filter', 'del', 'dev', dev, 'parent', filter_parent(ids, cfg), 'protocol', 'ip', 'prio', tostring(
 			ids
 			.host_prio) }, logger)
 
 	local batch = {
 		{
 			'tc', 'filter', 'add', 'dev', dev,
-			'parent', qdisc_handle(ids.inner_major),
+			'parent', filter_parent(ids, cfg),
 			'protocol', 'ip',
 			'prio', tostring(ids.host_prio),
-			'handle', u32_table_ref(ids.host_table_handle),
+			'handle', u32_table_ref(host_table_handle(ids, cfg)),
 			'u32', 'divisor', '256',
 		},
 		{
 			'tc', 'filter', 'add', 'dev', dev,
-			'parent', qdisc_handle(ids.inner_major),
+			'parent', filter_parent(ids, cfg),
 			'protocol', 'ip',
 			'prio', tostring(ids.link_prio),
 			'u32',
-			'link', u32_table_ref(ids.host_table_handle),
+			'link', u32_table_ref(host_table_handle(ids, cfg)),
 			'hashkey', 'mask', '0x000000ff', 'at', tostring(dp.hash_at),
 			'match', 'ip', dp.match_field, net_s,
 		},
@@ -861,14 +1062,14 @@ local function rebuild_host_filters_full(kind, spec, cfg, dev, ids, plan, logger
 	return must_tc_batch_chunked(batch, logger, 'rebuild host filters')
 end
 
-local function delete_bucket_rules(dev, ids, bucket, logger)
+local function delete_bucket_rules(dev, ids, cfg, bucket, logger)
 	local argv = {
 		'tc', 'filter', 'del', 'dev', dev,
-		'parent', qdisc_handle(ids.inner_major),
+		'parent', filter_parent(ids, cfg),
 		'protocol', 'ip',
 		'prio', tostring(ids.host_prio),
 		'u32',
-		'ht', u32_bucket_ref(ids.host_table_handle, bucket),
+		'ht', u32_bucket_ref(host_table_handle(ids, cfg), bucket),
 	}
 
 	local ok, out, err, code = run_cmd(argv)
@@ -900,7 +1101,7 @@ local function reconcile_host_filters_delta(kind, spec, cfg, dev, ids, prev_plan
 	local buckets = sorted_keys(affected)
 	for i = 1, #buckets do
 		local b = tonumber(buckets[i])
-		local ok, _ = delete_bucket_rules(dev, ids, b, logger)
+		local ok, _ = delete_bucket_rules(dev, ids, cfg, b, logger)
 		if not ok then
 			return rebuild_host_filters_full(kind, spec, cfg, dev, ids, new_plan, logger)
 		end
@@ -923,17 +1124,30 @@ end
 -- Host classes + fq_codel leaves (true deltas; batched)
 --------------------------------------------------------------------------------
 
+local function peak_qdisc_argv(op, dev, rec)
+	return { 'tc', 'qdisc', op, 'dev', dev, 'parent', rec.classid, 'handle', rec.peak_qdisc, 'htb', 'default', '1' }
+end
+
 local function reconcile_host_classes_and_fq(dev, ids, prev_plan, new_plan, logger)
 	prev_plan = prev_plan or {}
 
-	local qdisc_del, class_del, class_upd, qdisc_add = {}, {}, {}, {}
+	local qdisc_del, class_del = {}, {}
+	local budget_class_upd, peak_qdisc_upd, peak_class_upd, qdisc_add = {}, {}, {}, {}
+
+	local function del_host_qdiscs(rec)
+		if not rec then return end
+		if is_plain_table(rec.fq) then
+			qdisc_del[#qdisc_del + 1] = { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', fq_parent_classid(rec) }
+		end
+		if rec.peak_qdisc then
+			qdisc_del[#qdisc_del + 1] = { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', rec.classid }
+		end
+	end
 
 	-- stale removals
 	for ip_s, old in pairs(prev_plan) do
 		if not new_plan[ip_s] then
-			if is_plain_table(old.fq) then
-				qdisc_del[#qdisc_del + 1] = { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', old.classid }
-			end
+			del_host_qdiscs(old)
 			class_del[#class_del + 1] = { 'tc', 'class', 'del', 'dev', dev, 'classid', old.classid }
 		end
 	end
@@ -944,31 +1158,44 @@ local function reconcile_host_classes_and_fq(dev, ids, prev_plan, new_plan, logg
 		local rec = new_plan[ips[i]]
 		local old = prev_plan[rec.ip_s]
 
-		-- If the host remains present but its classid changes, remove the old class.
-		-- (Any old per-host qdisc is handled in host_fq_changed().)
-		if old and old.classid ~= rec.classid then
+		-- If the host remains present but its classid or leaf topology changes,
+		-- remove the old per-host qdiscs before replacing classes.
+		local topology_changed = old and (old.classid ~= rec.classid or old.leaf_classid ~= rec.leaf_classid or old.peak_qdisc ~= rec.peak_qdisc)
+		if topology_changed then
+			del_host_qdiscs(old)
 			class_del[#class_del + 1] = { 'tc', 'class', 'del', 'dev', dev, 'classid', old.classid }
 		end
 
 		if host_htb_changed(old, rec) then
-			class_upd[#class_upd + 1] =
-				htb_class_replace_argv(dev, classid(ids.inner_major, ids.inner_root_minor), rec.classid, rec.htb)
+			budget_class_upd[#budget_class_upd + 1] =
+				htb_class_replace_argv(dev, host_parent_classid(ids, rec.cfg or {}), rec.classid, rec.htb)
+			if rec.peak_htb then
+				-- The peak qdisc is only a container for the peak class.  On OpenWrt,
+				-- `tc qdisc replace ... htb` against an existing classful HTB qdisc
+				-- with children can fail with "Change operation not supported by
+				-- specified qdisc".  For steady-state rate changes, keep the
+				-- existing qdisc and replace only the classes.  Add the qdisc only
+				-- when the host is new or the old topology was explicitly removed.
+				if (not old) or topology_changed then
+					peak_qdisc_upd[#peak_qdisc_upd + 1] = peak_qdisc_argv('add', dev, rec)
+				end
+				peak_class_upd[#peak_class_upd + 1] = htb_class_replace_argv(dev, rec.peak_qdisc, rec.peak_classid, rec.peak_htb)
+			end
 		end
 
 		if host_fq_changed(old, rec) then
-			if old and is_plain_table(old.fq) then
-				-- Delete the qdisc attached to the *old* classid (it may differ from rec.classid).
-				qdisc_del[#qdisc_del + 1] = { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', old.classid }
+			if old and is_plain_table(old.fq) and not (old.classid ~= rec.classid or old.leaf_classid ~= rec.leaf_classid or old.peak_qdisc ~= rec.peak_qdisc) then
+				qdisc_del[#qdisc_del + 1] = { 'tc', 'qdisc', 'del', 'dev', dev, 'parent', fq_parent_classid(old) }
 			end
 			if is_plain_table(rec.fq) then
-				qdisc_add[#qdisc_add + 1] = fq_qdisc_argv('add', dev, rec.classid, rec.fq)
+				qdisc_add[#qdisc_add + 1] = fq_qdisc_argv('add', dev, fq_parent_classid(rec), rec.fq)
 			end
 		end
 	end
 
 	-- Phase 1: qdisc deletes (batch, with best-effort fallback)
 	if #qdisc_del > 0 then
-		local ok, _ = must_tc_batch_chunked(qdisc_del, logger, 'fq qdisc deletes', 256)
+		local ok, _ = must_tc_batch_chunked(qdisc_del, logger, 'host qdisc deletes', 256)
 		if not ok then
 			for i = 1, #qdisc_del do try_cmd(qdisc_del[i], logger) end
 		end
@@ -980,13 +1207,25 @@ local function reconcile_host_classes_and_fq(dev, ids, prev_plan, new_plan, logg
 		if not ok then return nil, err end
 	end
 
-	-- Phase 3: class updates
-	if #class_upd > 0 then
-		local ok, err = must_tc_batch_chunked(class_upd, logger, 'class updates', 512)
+	-- Phase 3: host budget class updates
+	if #budget_class_upd > 0 then
+		local ok, err = must_tc_batch_chunked(budget_class_upd, logger, 'host budget class updates', 512)
 		if not ok then return nil, err end
 	end
 
-	-- Phase 4: qdisc adds
+	-- Phase 4: per-host peak qdisc updates
+	if #peak_qdisc_upd > 0 then
+		local ok, err = must_tc_batch_chunked(peak_qdisc_upd, logger, 'host peak qdisc updates', 256)
+		if not ok then return nil, err end
+	end
+
+	-- Phase 5: per-host peak class updates
+	if #peak_class_upd > 0 then
+		local ok, err = must_tc_batch_chunked(peak_class_upd, logger, 'host peak class updates', 512)
+		if not ok then return nil, err end
+	end
+
+	-- Phase 6: fq_codel leaf adds
 	if #qdisc_add > 0 then
 		local ok, err = must_tc_batch_chunked(qdisc_add, logger, 'fq qdisc adds', 256)
 		if not ok then return nil, err end

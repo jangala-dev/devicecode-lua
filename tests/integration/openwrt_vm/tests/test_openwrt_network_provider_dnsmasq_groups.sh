@@ -29,7 +29,7 @@ for _,pkg in ipairs({'network','dhcp','firewall','mwan3'}) do local f=assert(io.
 local function seg(kind, vid, host_files)
   return { kind=kind or 'lan', vlan={id=vid}, addressing={ipv4={mode='static', cidr='192.168.'..tostring(vid)..'.1/24'}}, dhcp={enabled=true}, dns={local_server=true, host_files=host_files or {}, domain='bigbox.home'}, firewall={zone='lan'} }
 end
-local intent={ schema='devicecode.net.intent/1', rev=1, segments={ adm=seg('system',8,{'ads'}), ops=seg('system',9,{'ads'}), jan=seg('user',32,{'ads','adult'}), int=seg('system',100,{}) }, interfaces={}, dns={enabled=true, domain='bigbox.home', upstreams={'1.1.1.1'}, cache={size=1000}, host_files={base_dir='/data/devicecode/dns/hosts', addnmount=true, sources={ads={file='ads.hosts'}, adult={file='adult.hosts'}}}}, dhcp={}, firewall={zones={lan={}}}, routing={}, wan={}, shaping={}, vpn={}, diagnostics={} }
+local intent={ schema='devicecode.net.intent/1', rev=1, segments={ adm=seg('system',8,{'ads'}), ops=seg('system',9,{'ads'}), jan=seg('user',32,{'ads','adult'}), int=seg('system',100,{}) }, interfaces={}, dns={enabled=true, domain='bigbox.home', upstreams={'1.1.1.1'}, cache={size=1000}, host_files={base_dir='/data/devicecode/dns/hosts', addnmount=true, sources={ads={file='ads.hosts'}, adult={file='adult.hosts'}}}}, dhcp={}, firewall={zones={lan={}}}, routing={}, wan={}, vpn={}, diagnostics={} }
 local name_ctx = assert(names_mod.allocate(intent))
 
 fibers.run(function()

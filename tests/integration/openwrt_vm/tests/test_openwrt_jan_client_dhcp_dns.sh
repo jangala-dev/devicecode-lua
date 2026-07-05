@@ -95,7 +95,7 @@ local intent = {
   },
   routing = { routes = {} },
   wan = {},
-  shaping = {},
+  
   vpn = {},
   diagnostics = {},
 }

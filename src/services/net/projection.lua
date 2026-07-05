@@ -41,7 +41,6 @@ function M.summary(snapshot)
 			wan_members = count_map(snapshot.wan and snapshot.wan.members),
 			gsm_uplinks = count_map(snapshot.sources and snapshot.sources.gsm_uplinks),
 			vpn_tunnels = count_map(snapshot.vpn and snapshot.vpn.tunnels),
-			shaping_profiles = count_map(snapshot.shaping and snapshot.shaping.profiles),
 		},
 		drift = copy(snapshot.drift),
 		observed = {
