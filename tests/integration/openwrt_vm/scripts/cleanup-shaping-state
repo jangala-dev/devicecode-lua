@@ -1,0 +1,65 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+VM_DIR="$(dirname "$SCRIPT_DIR")"
+SSH="$VM_DIR/scripts/ssh"
+
+if [ "${DC_SHAPING_CLEANUP_DISABLED:-0}" = 1 ]; then
+  exit 0
+fi
+
+"$SSH" 'set +e
+# Remove Devicecode-owned shaping mangle chains and jumps.  Loop deletions so
+# interrupted/retried tests cannot leave duplicate jump rules behind.
+for tbl in mangle; do
+  for chain in OUTPUT FORWARD POSTROUTING PREROUTING; do
+    while iptables -t "$tbl" -D "$chain" -j DEVICECODE_SHAPING_OUTPUT 2>/dev/null; do :; done
+    while iptables -t "$tbl" -D "$chain" -j DEVICECODE_SHAPING_FORWARD 2>/dev/null; do :; done
+  done
+  iptables -t "$tbl" -F DEVICECODE_SHAPING_OUTPUT 2>/dev/null
+  iptables -t "$tbl" -F DEVICECODE_SHAPING_FORWARD 2>/dev/null
+  iptables -t "$tbl" -X DEVICECODE_SHAPING_OUTPUT 2>/dev/null
+  iptables -t "$tbl" -X DEVICECODE_SHAPING_FORWARD 2>/dev/null
+done
+
+# Remove shaping qdiscs from deterministic VM test devices.  Avoid broad globs
+# over production-looking interfaces; these names are owned by the VM tests.
+for dev in \
+  br-jan vl-jan ifb_br_jan ifb_vl_jan \
+  dcjantrunk0 dcjantrunk0p dc-jan-host dc-jan-client0 \
+  dcshape-budget dcshape-budgetp \
+  dcs-bflat dcs-bflatp \
+  dcs-bagg dcs-baggp \
+  dcshape-borrow dcshape-borrowp \
+  dcshape-idem dcshape-idemp ifb_dcs_idem \
+  dcshape-old dcshape-oldp ifb_dcshape_old \
+  dcwan0 dcwan-up0 dcwan-cap dcwan-capp \
+  dcclient-host dcclient0 ifb_dcwan0 ifb_dcwan_cap ifb_dcwan_c; do
+  tc qdisc del dev "$dev" root 2>/dev/null
+  tc qdisc del dev "$dev" ingress 2>/dev/null
+done
+
+# Remove test namespaces and test links.  Deleting the root-side veth usually
+# removes the peer as well, but peers are listed here for interrupted runs.
+for ns in dcwan-upstream dcwan-client dcwan-cap-peer dcshape-idem-peer dc-jan-shape-client; do
+  ip netns del "$ns" 2>/dev/null
+done
+for dev in \
+  dcjantrunk0 dcjantrunk0p dc-jan-host dc-jan-client0 \
+  dcshape-budget dcshape-budgetp \
+  dcs-bflat dcs-bflatp \
+  dcs-bagg dcs-baggp \
+  dcshape-borrow dcshape-borrowp \
+  dcshape-idem dcshape-idemp \
+  dcshape-old dcshape-oldp \
+  dcwan0 dcwan-up0 dcclient-host dcclient0 dcwan-cap dcwan-capp \
+  ifb_br_jan ifb_vl_jan ifb_dcs_idem ifb_dcshape_old ifb_dcwan0 ifb_dcwan_cap ifb_dcwan_c; do
+  ip link del "$dev" 2>/dev/null
+done
+
+# Best-effort cleanups for tests that inserted temporary routing/filtering rules.
+while iptables -D FORWARD -i dcclient-host -o dcwan0 -j ACCEPT 2>/dev/null; do :; done
+while iptables -D FORWARD -i dcwan0 -o dcclient-host -j ACCEPT 2>/dev/null; do :; done
+while iptables -t mangle -D OUTPUT -o dcwan0 -m comment --comment devicecode-test-client-mark -j MARK --set-xmark 0x00200000/0x00f00000 2>/dev/null; do :; done
+'

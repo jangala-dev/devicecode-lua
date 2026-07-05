@@ -9,20 +9,16 @@ VM_DIR="$(dirname "$SCRIPT_DIR")"
 
 "$SCRIPT_DIR/wait-ssh"
 
-"$SCRIPT_DIR/ssh" "
+"$SCRIPT_DIR/ssh" '
 	set -eu
-	missing=0
+	missing=""
 	for x in mwan3 iptables-save iptables-restore; do
-		command -v \"\$x\" >/dev/null 2>&1 || missing=1
+		command -v "$x" >/dev/null 2>&1 || missing="$missing $x"
 	done
-	[ -x /etc/init.d/mwan3 ] || missing=1
-	if [ \"\$missing\" -ne 0 ]; then
-		echo '[openwrt-vm] installing mwan3 and iptables compatibility packages'
-		opkg update
-		opkg install mwan3 iptables-nft ip6tables-nft
+	[ -x /etc/init.d/mwan3 ] || missing="$missing /etc/init.d/mwan3"
+	if [ -n "$missing" ]; then
+		echo "[openwrt-vm] missing MWAN dependencies:$missing" >&2
+		echo "[openwrt-vm] run: make provision-force" >&2
+		exit 1
 	fi
-	command -v mwan3 >/dev/null
-	command -v iptables-save >/dev/null
-	command -v iptables-restore >/dev/null
-	test -x /etc/init.d/mwan3
-"
+'

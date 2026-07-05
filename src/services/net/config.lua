@@ -13,7 +13,6 @@ local addressing_dom = require 'services.net.domain.addressing'
 local firewall_dom = require 'services.net.domain.firewall'
 local routing_dom = require 'services.net.domain.routing'
 local multiwan_dom = require 'services.net.domain.multiwan'
-local shaping_dom = require 'services.net.domain.shaping'
 local vpn_dom = require 'services.net.domain.vpn'
 local dns_dom = require 'services.net.domain.dns'
 local dhcp_dom = require 'services.net.domain.dhcp'
@@ -30,7 +29,7 @@ local TOP_LEVEL = {
 	'segments', 'interfaces',
 	'addressing', 'dns', 'dhcp',
 	'vlan_policy',
-	'firewall', 'routing', 'wan', 'shaping', 'vpn', 'diagnostics',
+	'firewall', 'routing', 'wan', 'vpn', 'diagnostics',
 	'runtime', 'policies', 'metadata', 'extensions',
 }
 
@@ -137,7 +136,6 @@ local function ensure_shape(intent)
 		interfaces = schema.count_map(intent.interfaces),
 		wan_members = schema.count_map(intent.wan and intent.wan.members),
 		vpn_tunnels = schema.count_map(intent.vpn and intent.vpn.tunnels),
-		shaping_profiles = schema.count_map(intent.shaping and intent.shaping.profiles),
 	}
 	return intent
 end
@@ -181,8 +179,6 @@ function M.normalise(value, opts)
 	if not routing then return nil, rerr end
 	local wan, werr = multiwan_dom.normalise(t.wan)
 	if not wan then return nil, werr end
-	local shaping, sherr = shaping_dom.normalise(t.shaping)
-	if not shaping then return nil, sherr end
 	local vpn, vperr = vpn_dom.normalise(t.vpn)
 	if not vpn then return nil, vperr end
 	local diagnostics, derr = diagnostics_dom.normalise(t.diagnostics)
@@ -214,7 +210,6 @@ function M.normalise(value, opts)
 		firewall = firewall,
 		routing = routing,
 		wan = wan,
-		shaping = shaping,
 		vpn = vpn,
 		diagnostics = diagnostics,
 		runtime = runtime,

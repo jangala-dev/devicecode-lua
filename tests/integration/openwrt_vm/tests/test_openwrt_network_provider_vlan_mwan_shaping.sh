@@ -96,10 +96,9 @@ local intent = {
   dhcp={ defaults={ lease_time='12h', authoritative=true }, reservations={ unifi={ name='unifi', mac='00:11:22:33:44:55', ip='192.168.10.2' } } },
   vpn={}, diagnostics={},
   wan = { enabled=true, policy='weighted_failover', load_balancing={speedtests=true, policy='balanced'}, members={ gsm_a={interface='wan_a', mwan_metric=1, weight=1}, gsm_b={interface='wan_b', mwan_metric=1, weight=1} } },
-  shaping = { enabled=true, profiles={ restricted={ egress={enabled=true, host_rate='2mbit', hosts={['192.168.10.2']={rate='1mbit'}}} } } },
 }
 intent.segments.lan.dns = { local_server=true, domain='bigbox.home', host_files={'ads'} }
-intent.segments.lan.shaping = { profile='restricted' }
+intent.segments.lan.shaping = { download={limit='10mbit'}, upload={limit='10mbit'}, host_default={ mode='budgeted_peak', all_hosts=true, download={sustained_rate='2mbit', peak_rate='4mbit', burst_budget='100k'}, upload={sustained_rate='2mbit', peak_rate='4mbit', burst_budget='100k'} } }
 
 fibers.run(function()
   local plan = perform(provider:plan_op({ intent = intent }))

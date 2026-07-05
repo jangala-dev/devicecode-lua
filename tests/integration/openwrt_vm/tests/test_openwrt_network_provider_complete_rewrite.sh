@@ -62,7 +62,7 @@ local intent = {
   },
   interfaces = {},
   dns = { enabled = true, domain = 'bigbox.home', upstreams = { '1.1.1.1' } },
-  dhcp = {}, firewall = { zones = { lan = {} } }, routing = {}, wan = {}, shaping = {}, vpn = {}, diagnostics = {},
+  dhcp = {}, firewall = { zones = { lan = {} } }, routing = {}, wan = {}, vpn = {}, diagnostics = {},
 }
 
 fibers.run(function()

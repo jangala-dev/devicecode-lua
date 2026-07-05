@@ -13,8 +13,63 @@ local ALLOWED = {
 local MEMBER_ALLOWED = {
 	'id', 'interface', 'source', 'mwan_metric', 'weight', 'dynamic_weight', 'family',
 	'track_ip', 'health', 'reliability', 'count', 'timeout', 'interval', 'up', 'down',
-	'enabled', 'disabled', 'speedtest_url', 'speedtest_duration_s', 'metadata', 'extensions',
+	'enabled', 'disabled', 'speedtest_url', 'speedtest_duration_s', 'shaping', 'metadata', 'extensions',
 }
+
+
+local MEMBER_SHAPING_ALLOWED = {
+	'enabled', 'download', 'upload', 'router_traffic', 'control', 'fq_codel', 'metadata', 'extensions',
+}
+local MEMBER_SHAPING_DIRECTION_ALLOWED = { 'enabled', 'limit', 'metadata', 'extensions' }
+local MEMBER_SHAPING_CONTROL_ALLOWED = { 'rate', 'ceil', 'metadata', 'extensions' }
+
+local function normalise_shaping_direction(v, path)
+	if v == nil then return nil, nil end
+	local t, err = schema.require_plain_table(v, path)
+	if not t then return nil, err end
+	local ok, ferr = schema.check_allowed_fields(t, MEMBER_SHAPING_DIRECTION_ALLOWED, path)
+	if not ok then return nil, ferr end
+	if type(t.limit) ~= 'string' or t.limit == '' then
+		return nil, schema.err({ schema.path(path), 'limit' }, 'must be a non-empty rate string')
+	end
+	return schema.with_optional_extensions({ enabled = t.enabled ~= false, limit = t.limit }, t, path)
+end
+
+local function normalise_control(v, path)
+	if v == nil then return {}, nil end
+	local t, err = schema.require_plain_table(v, path)
+	if not t then return nil, err end
+	local ok, ferr = schema.check_allowed_fields(t, MEMBER_SHAPING_CONTROL_ALLOWED, path)
+	if not ok then return nil, ferr end
+	local out = { rate = t.rate, ceil = t.ceil }
+	return schema.with_optional_extensions(out, t, path)
+end
+
+local function normalise_member_shaping(v, path)
+	if v == nil then return nil, nil end
+	local t, err = schema.require_plain_table(v, path)
+	if not t then return nil, err end
+	local ok, ferr = schema.check_allowed_fields(t, MEMBER_SHAPING_ALLOWED, path)
+	if not ok then return nil, ferr end
+	if t.router_traffic ~= nil and t.router_traffic ~= 'exempt' then
+		return nil, schema.err({ schema.path(path), 'router_traffic' }, 'must be exempt')
+	end
+	local download, derr = normalise_shaping_direction(t.download, { schema.path(path), 'download' })
+	if derr then return nil, derr end
+	local upload, uerr = normalise_shaping_direction(t.upload, { schema.path(path), 'upload' })
+	if uerr then return nil, uerr end
+	local control, cerr = normalise_control(t.control, { schema.path(path), 'control' })
+	if cerr then return nil, cerr end
+	local out = {
+		enabled = t.enabled ~= false,
+		router_traffic = t.router_traffic or 'exempt',
+		download = download,
+		upload = upload,
+		control = control,
+		fq_codel = schema.copy(t.fq_codel or {}),
+	}
+	return schema.with_optional_extensions(out, t, path)
+end
 
 local RULE_ALLOWED = {
 	'family', 'proto', 'src_ip', 'dest_ip', 'src_port', 'dest_port',
@@ -90,6 +145,10 @@ local function clean_member(id, m, index)
 	m.mwan_metric = math.max(1, math.floor(tonumber(m.mwan_metric) or 1))
 	m.weight = math.max(1, math.floor(tonumber(m.weight) or 1))
 	m.route_metric = 10 + index
+	local shaping, sherr = normalise_member_shaping(m.shaping, { 'net', 'wan', 'members', id, 'shaping' })
+	if sherr then return nil, sherr end
+	m.shaping = shaping
+
 	local src = m.source
 	if src ~= nil then
 		if not schema.is_plain_table(src) then return nil, schema.err({ 'net', 'wan', 'members', id, 'source' }, 'must be a table') end

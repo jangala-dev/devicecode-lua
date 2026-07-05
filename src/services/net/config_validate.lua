@@ -45,17 +45,12 @@ local function validate_interfaces(intent)
 end
 
 local function validate_segments(intent)
-	local profiles = intent.shaping and intent.shaping.profiles or {}
 	local host_sources = intent.dns and intent.dns.host_files and intent.dns.host_files.sources or {}
 	local zones = intent.firewall and intent.firewall.zones or {}
 	for id, seg in pairs(intent.segments or {}) do
 		local zone = seg.firewall and seg.firewall.zone or nil
 		if zone ~= nil and type(zones) == 'table' and next(zones) ~= nil and not zones[zone] then
 			return nil, err({ 'net', 'segments', id, 'firewall', 'zone' }, 'references unknown firewall zone ' .. tostring(zone))
-		end
-		local profile = seg.shaping and seg.shaping.profile or nil
-		if profile ~= nil and type(profiles) == 'table' and next(profiles) ~= nil and not profiles[profile] then
-			return nil, err({ 'net', 'segments', id, 'shaping', 'profile' }, 'references unknown shaping profile ' .. tostring(profile))
 		end
 		for i, source in ipairs((seg.dns and seg.dns.host_files) or {}) do
 			if type(host_sources) == 'table' and next(host_sources) ~= nil and not host_sources[source] then

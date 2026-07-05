@@ -16,7 +16,7 @@ local function base_cfg()
 		},
 		interfaces = {},
 		firewall = { zones = { wan = { masq = true } }, policies = {} },
-		routing = {}, dns = {}, dhcp = {}, shaping = {}, vpn = {}, diagnostics = {},
+		routing = {}, dns = {}, dhcp = {}, vpn = {}, diagnostics = {},
 		wan = {
 			enabled = true,
 			members = {

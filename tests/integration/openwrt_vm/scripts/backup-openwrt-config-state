@@ -1,0 +1,22 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SSH="$SCRIPT_DIR/ssh"
+STATE="${DEVICECODE_CONFIG_STATE:-/tmp/devicecode-openwrt-config-backup}"
+
+"$SSH" "CONFIG_STATE='$STATE' sh -s" <<'REMOTE_BACKUP'
+set -eu
+rm -rf "$CONFIG_STATE"
+mkdir -p "$CONFIG_STATE"
+: > "$CONFIG_STATE/present"
+: > "$CONFIG_STATE/absent"
+for name in network dhcp firewall mwan3; do
+  if [ -e "/etc/config/$name" ]; then
+    cp -a "/etc/config/$name" "$CONFIG_STATE/$name"
+    echo "$name" >> "$CONFIG_STATE/present"
+  else
+    echo "$name" >> "$CONFIG_STATE/absent"
+  fi
+done
+REMOTE_BACKUP

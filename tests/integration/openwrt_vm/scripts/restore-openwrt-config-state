@@ -1,0 +1,37 @@
+#!/usr/bin/env sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SSH="$SCRIPT_DIR/ssh"
+WAIT_SSH="$SCRIPT_DIR/wait-ssh"
+STATE="${DEVICECODE_CONFIG_STATE:-/tmp/devicecode-openwrt-config-backup}"
+ACTIVATE="${DEVICECODE_RESTORE_ACTIVATE:-1}"
+
+"$SSH" "CONFIG_STATE='$STATE' RESTORE_ACTIVATE='$ACTIVATE' sh -s" <<'REMOTE_RESTORE'
+set +e
+if [ -d "$CONFIG_STATE" ]; then
+  while read name; do
+    [ -n "$name" ] && [ -e "$CONFIG_STATE/$name" ] && cp -a "$CONFIG_STATE/$name" "/etc/config/$name"
+  done < "$CONFIG_STATE/present"
+  while read name; do
+    [ -n "$name" ] && rm -f "/etc/config/$name"
+  done < "$CONFIG_STATE/absent"
+  if [ "${RESTORE_ACTIVATE:-1}" = 1 ]; then
+    (
+      sleep 1
+      /etc/init.d/network reload >/tmp/devicecode-config-restore-network.log 2>&1
+      /etc/init.d/firewall restart >/tmp/devicecode-config-restore-firewall.log 2>&1
+    ) </dev/null >/tmp/devicecode-config-restore-wrapper.log 2>&1 &
+    echo "restore-launched"
+  else
+    echo "restore-files-only"
+  fi
+else
+  echo "no saved config state at $CONFIG_STATE" >&2
+fi
+REMOTE_RESTORE
+
+if [ "${DEVICECODE_RESTORE_NOWAIT:-0}" != 1 ] && [ "${ACTIVATE:-1}" = 1 ]; then
+  sleep 2
+  "$WAIT_SSH"
+fi

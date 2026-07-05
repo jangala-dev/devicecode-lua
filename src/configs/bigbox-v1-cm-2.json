@@ -23,6 +23,13 @@
           "segment_trunk": {
             "ifname": "eth0",
             "protected": true
+          },
+          "shaping": {
+            "marks": {
+              "mask": "0x00f00000",
+              "control": "0x00100000",
+              "client": "0x00200000"
+            }
           }
         }
       },
@@ -243,7 +250,33 @@
             "zone": "lan_rst"
           },
           "shaping": {
-            "profile": "restricted_user_per_host"
+            "download": {
+              "limit": "100mbit"
+            },
+            "upload": {
+              "limit": "100mbit"
+            },
+            "host_default": {
+              "mode": "budgeted_peak",
+              "all_hosts": true,
+              "download": {
+                "sustained_rate": "2mbit",
+                "peak_rate": "8mbit",
+                "burst_budget": "500k"
+              },
+              "upload": {
+                "sustained_rate": "1500kbit",
+                "peak_rate": "6mbit",
+                "burst_budget": "225k"
+              },
+              "fq_codel": {
+                "flows": 1024,
+                "limit": 10240,
+                "memory_limit": "16Mb",
+                "target": "5ms",
+                "interval": "100ms"
+              }
+            }
           }
         },
         "int": {
@@ -524,51 +557,6 @@
             "policy": "balanced",
             "sticky": true
           }
-        }
-      },
-      "shaping": {
-        "enabled": true,
-        "profiles": {
-          "restricted_user_per_host": {
-            "description": "Per-client restricted shaping for the Jangala user segment",
-            "egress": {
-              "enabled": true,
-              "match": "dst",
-              "pool_rate": "100mbit",
-              "pool_ceil": "100mbit",
-              "host_rate": "2mbit",
-              "host_ceil": "8mbit",
-              "host_burst": "500k",
-              "all_hosts": true,
-              "fq_codel": {
-                "flows": 1024,
-                "limit": 10240,
-                "memory_limit": "16Mb",
-                "target": "5ms",
-                "interval": "100ms"
-              }
-            },
-            "ingress": {
-              "enabled": true,
-              "match": "src",
-              "pool_rate": "100mbit",
-              "pool_ceil": "100mbit",
-              "host_rate": "1500kbit",
-              "host_ceil": "6mbit",
-              "host_burst": "225k",
-              "all_hosts": true,
-              "fq_codel": {
-                "flows": 1024,
-                "limit": 10240,
-                "memory_limit": "16Mb",
-                "target": "5ms",
-                "interval": "100ms"
-              }
-            }
-          }
-        },
-        "classes": {
-          "default": "best_effort"
         }
       },
       "vpn": {

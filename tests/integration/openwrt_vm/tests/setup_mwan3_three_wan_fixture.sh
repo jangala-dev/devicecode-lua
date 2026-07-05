@@ -29,6 +29,42 @@ if [ "${DEVICECODE_MWAN3_FIXTURE_FORCE:-0}" != 1 ] && [ -f "$MARKER" ]; then
 fi
 
 echo 'installing three-WAN MWAN3 fixture'
+
+cleanup_devicecode_shaping_state() {
+	# Tests may be run individually or after an interrupted prior run.  Keep the
+	# MWAN fixture independent of Devicecode shaping experiments by removing any
+	# Devicecode-owned qdiscs, IFBs and mangle chains before reloading network.
+	for dev in eth1 eth2 eth3; do
+		tc qdisc del dev "$dev" root >/dev/null 2>&1 || true
+		tc qdisc del dev "$dev" ingress >/dev/null 2>&1 || true
+		ifb="ifb_$(echo "$dev" | sed 's/[^A-Za-z0-9_]/_/g')"
+		ip link del "$ifb" >/dev/null 2>&1 || true
+	done
+	if command -v iptables >/dev/null 2>&1; then
+		while iptables -t mangle -D OUTPUT -j DEVICECODE_SHAPING_OUTPUT >/dev/null 2>&1; do :; done
+		while iptables -t mangle -D FORWARD -j DEVICECODE_SHAPING_FORWARD >/dev/null 2>&1; do :; done
+		iptables -t mangle -F DEVICECODE_SHAPING_OUTPUT >/dev/null 2>&1 || true
+		iptables -t mangle -F DEVICECODE_SHAPING_FORWARD >/dev/null 2>&1 || true
+		iptables -t mangle -X DEVICECODE_SHAPING_OUTPUT >/dev/null 2>&1 || true
+		iptables -t mangle -X DEVICECODE_SHAPING_FORWARD >/dev/null 2>&1 || true
+	fi
+}
+
+run_logged_step() {
+	label="$1"; log="$2"; shift 2
+	echo "[mwan-fixture] $label"
+	if "$@" >"$log" 2>&1; then
+		return 0
+	fi
+	rc="$?"
+	echo "[mwan-fixture] failed: $label" >&2
+	cat "$log" >&2 || true
+	logread 2>/dev/null | tail -80 >&2 || true
+	ps w >&2 || true
+	exit "$rc"
+}
+
+cleanup_devicecode_shaping_state
 for dev in eth1 eth2 eth3; do
 	ip link show "$dev" >/dev/null 2>&1 || {
 		echo "missing VM WAN interface: $dev" >&2
@@ -69,10 +105,10 @@ uci commit firewall
 
 cp /tmp/devicecode-mwan3-balanced.fixture /etc/config/mwan3
 
-/etc/init.d/network reload >/tmp/devicecode-mwan-live-network.log 2>&1 || { cat /tmp/devicecode-mwan-live-network.log; exit 1; }
-/etc/init.d/firewall restart >/tmp/devicecode-mwan-live-firewall.log 2>&1 || { cat /tmp/devicecode-mwan-live-firewall.log; exit 1; }
+run_logged_step 'network reload' /tmp/devicecode-mwan-live-network.log /etc/init.d/network reload
+run_logged_step 'firewall restart' /tmp/devicecode-mwan-live-firewall.log /etc/init.d/firewall restart
 /etc/init.d/mwan3 enable >/tmp/devicecode-mwan-live-enable.log 2>&1 || true
-/etc/init.d/mwan3 restart >/tmp/devicecode-mwan-live-restart.log 2>&1 || { cat /tmp/devicecode-mwan-live-restart.log; exit 1; }
+run_logged_step 'mwan3 restart' /tmp/devicecode-mwan-live-restart.log /etc/init.d/mwan3 restart
 sleep 2
 
 mwan3 status >/tmp/devicecode-mwan-live-status.log 2>&1 || { cat /tmp/devicecode-mwan-live-status.log; exit 1; }
