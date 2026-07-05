@@ -62,10 +62,6 @@ local function sample_cfg()
 			defaults = { lease_time = '12h' },
 			reservations = {},
 		},
-		shaping = {
-			enabled = true,
-			profiles = { default = { fairness = 'per_client' } },
-		},
 		vpn = {
 			enabled = true,
 			tunnels = { management = { kind = 'wireguard' } },
@@ -110,14 +106,29 @@ end
 
 
 
-function tests.test_rejects_top_level_shaping_backhauls_alias()
+
+function tests.test_rejects_top_level_shaping()
 	local cfg = sample_cfg()
-	cfg.shaping.backhauls = {
-		wired = { download = { limit = '80mbit' }, upload = { limit = '20mbit' } },
-	}
+	cfg.shaping = { enabled = true }
 	local intent, err = config.normalise(cfg, { rev = 1 })
-	if intent ~= nil then error('expected top-level shaping.backhauls alias to be rejected', 2) end
-	ok(err and err:find('net.shaping.backhauls', 1, true), 'shaping.backhauls rejection error expected')
+	if intent ~= nil then error('expected top-level shaping to be rejected', 2) end
+	ok(err and err:find('cfg.net.shaping', 1, true), 'top-level shaping rejection error expected')
+end
+
+function tests.test_rejects_low_level_segment_shaping_fields()
+	local cfg = sample_cfg()
+	cfg.segments.lan.shaping = { egress = { enabled = true } }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	if intent ~= nil then error('expected segment shaping egress to be rejected', 2) end
+	ok(err and err:find('net.segments.lan.shaping.egress', 1, true), 'segment shaping egress rejection error expected')
+end
+
+function tests.test_rejects_low_level_wan_shaping_fields()
+	local cfg = sample_cfg()
+	cfg.wan.members.gsm_a.shaping = { download_limit = '80mbit' }
+	local intent, err = config.normalise(cfg, { rev = 1 })
+	if intent ~= nil then error('expected wan member shaping download_limit to be rejected', 2) end
+	ok(err and err:find('net.wan.members.gsm_a.shaping.download_limit', 1, true), 'wan shaping download_limit rejection error expected')
 end
 
 function tests.test_rejects_implicit_static_route_without_kind()
@@ -189,8 +200,8 @@ function tests.test_bigbox_config_uses_clean_segment_authority_shape()
 	eq(intent.segments.jan.dhcp.enabled, true)
 	eq(intent.segments.jan.dns.host_files[1], 'ads')
 	eq(intent.segments.jan.dns.host_files[2], 'adult')
-	eq(intent.segments.jan.shaping.profile, 'restricted_user_per_host')
-	eq(intent.shaping.profiles.restricted_user_per_host.host_default.download.sustained_rate, '2mbit')
+	eq(intent.segments.jan.shaping.host_default.download.sustained_rate, '2mbit')
+	eq(intent.segments.jan.shaping.download.limit, '100mbit')
 	eq(intent.dns.records['config.bigbox.home'].address, '172.28.8.1')
 	eq(intent.routing.routes.starlink_admin.kind, 'host')
 	eq(intent.routing.routes.starlink_admin.interface, 'wan')

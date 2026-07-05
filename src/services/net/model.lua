@@ -70,7 +70,6 @@ function M.initial(service_id)
 		wan = {},
 		wan_runtime = { uplinks = {}, speedtests = {}, live_weights = {}, last_weight_apply = nil },
 		sources = { gsm_uplinks = {} },
-		shaping = {},
 		vpn = {},
 		diagnostics = {},
 

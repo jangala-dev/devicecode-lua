@@ -127,7 +127,17 @@ local function jan_intent(shaping_enabled)
         dhcp = { enabled = false },
         dns = { local_server = true, domain = 'bigbox.home' },
         firewall = { zone = 'jan' },
-        shaping = { profile = 'restricted_user_per_host' },
+        shaping = shaping_enabled and {
+          download = { limit = '8mbit' },
+          upload = { limit = '8mbit' },
+          host_default = {
+            mode = 'budgeted_peak',
+            all_hosts = true,
+            download = { sustained_rate = '2mbit', peak_rate = '2mbit', burst_budget = '100k' },
+            upload = { sustained_rate = '2mbit', peak_rate = '2mbit', burst_budget = '100k' },
+            fq_codel = { flows = 1024, limit = 10240 },
+          },
+        } or {},
       },
       wan = { kind = 'wan', firewall = { zone = 'wan' } },
     },
@@ -160,27 +170,6 @@ local function jan_intent(shaping_enabled)
     },
     routing = { routes = {} },
     wan = {},
-    shaping = {
-      enabled = shaping_enabled == true,
-      profiles = {
-        restricted_user_per_host = {
-          egress = {
-            enabled = true, mode = 'budgeted_peak',
-            pool_rate = '8mbit', pool_ceil = '8mbit',
-            host_rate = '2mbit', host_ceil = '2mbit',
-            fq_codel = { flows = 1024, limit = 10240 },
-            hosts = { ['172.28.32.36'] = { rate = '1mbit', ceil = '2mbit' } },
-          },
-          ingress = {
-            enabled = true, mode = 'budgeted_peak',
-            pool_rate = '8mbit', pool_ceil = '8mbit',
-            host_rate = '2mbit', host_ceil = '2mbit',
-            fq_codel = { flows = 1024, limit = 10240 },
-            hosts = { ['172.28.32.36'] = { rate = '1mbit', ceil = '2mbit' } },
-          },
-        },
-      },
-    },
     vpn = {}, diagnostics = {},
   }
 end

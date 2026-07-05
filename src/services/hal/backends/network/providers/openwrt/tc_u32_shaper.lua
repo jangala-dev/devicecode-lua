@@ -441,9 +441,8 @@ local function budgeted_peak_has_aggregate(cfg)
 	if not budgeted_peak(cfg) then return false end
 	if cfg and cfg.segment_aggregate == false then return false end
 	if cfg and cfg.segment_aggregate == true then return true end
-	-- Low-level profiles use pool_* to request an explicit segment aggregate.
-	-- Semantic profiles only set these when the operator configured a segment
-	-- download/upload limit.
+	-- Canonical segment shaping sets pool_* only when the operator configured
+	-- an aggregate segment download/upload limit.
 	return cfg and (cfg.pool_class ~= nil or cfg.pool_rate ~= nil or cfg.pool_ceil ~= nil or cfg.rate ~= nil or cfg.ceil ~= nil)
 end
 

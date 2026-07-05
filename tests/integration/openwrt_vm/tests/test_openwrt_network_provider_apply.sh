@@ -138,7 +138,7 @@ local intent = {
     },
   },
   wan = { enabled = true, members = { wan = { interface = 'wan', mwan_metric = 1, weight = 1 } } },
-  shaping = {},
+  
   vpn = {},
   diagnostics = {},
 }

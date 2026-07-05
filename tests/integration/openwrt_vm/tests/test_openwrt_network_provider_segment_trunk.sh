@@ -106,7 +106,7 @@ local intent = {
       addressing = { ipv4 = { mode = 'static', cidr = '192.168.100.1/24' } },
       dhcp = { enabled = true, start = 20, limit = 50, leasetime = '12h' },
       firewall = { zone = 'lan' },
-      shaping = { profile = 'restricted' },
+      shaping = { download = { limit = '10mbit' }, upload = { limit = '10mbit' }, host_default = { mode = 'budgeted_peak', all_hosts = true, download = { sustained_rate = '2mbit', peak_rate = '4mbit', burst_budget = '100k' }, upload = { sustained_rate = '2mbit', peak_rate = '4mbit', burst_budget = '100k' } } },
     },
     guest = {
       kind = 'guest', vlan = { id = 101 },
@@ -119,7 +119,7 @@ local intent = {
       addressing = { ipv4 = { mode = 'static', cidr = '192.168.102.1/24' } },
       dhcp = { enabled = false },
       firewall = { zone = 'lan' },
-      shaping = { profile = 'restricted_iot' },
+      shaping = { download = { limit = '10mbit' }, upload = { limit = '10mbit' }, host_default = { mode = 'budgeted_peak', all_hosts = true, download = { sustained_rate = '2mbit', peak_rate = '4mbit', burst_budget = '100k' }, upload = { sustained_rate = '2mbit', peak_rate = '4mbit', burst_budget = '100k' } } },
     },
   },
   interfaces = {},
@@ -133,10 +133,7 @@ local intent = {
       guest = { input = 'REJECT', output = 'ACCEPT', forward = 'REJECT' },
     },
   },
-  routing = {}, wan = {}, shaping = { enabled = true, profiles = {
-    restricted = { egress = { enabled = true, host_rate = '2mbit', hosts = { ['192.168.100.2'] = { rate = '1mbit' } } } },
-    restricted_iot = { egress = { enabled = true, host_rate = '2mbit', hosts = { ['192.168.102.2'] = { rate = '1mbit' } } } },
-  } }, vpn = {}, diagnostics = {},
+  routing = {}, wan = {}, vpn = {}, diagnostics = {},
 }
 
 local name_ctx = assert(names_mod.allocate(intent))

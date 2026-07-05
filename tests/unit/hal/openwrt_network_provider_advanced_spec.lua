@@ -53,14 +53,8 @@ local function intent()
 			rules = { https = { family = 'ipv4', proto = 'tcp', dest_port = '443', policy = 'balanced', sticky = true } },
 			health = { track_ip = { '1.1.1.1', '8.8.8.8' }, reliability = 1 },
 			members = {
-				gsm_a = { interface = 'wan_a', mwan_metric = 1, weight = 1 },
+				gsm_a = { interface = 'wan_a', mwan_metric = 1, weight = 1, shaping = { download = { limit = '5mbit' }, upload = { limit = '2mbit' } } },
 				gsm_b = { interface = 'wan_b', mwan_metric = 1, weight = 1 },
-			},
-		},
-		shaping = {
-			enabled = true,
-			links = {
-				wan_a = { iface = 'wwan0', egress = { enabled = true, host_rate = '2mbit', hosts = { ['192.168.10.2'] = { rate = '1mbit' } } } },
 			},
 		},
 		vpn = {}, diagnostics = {},
@@ -170,6 +164,7 @@ function tests.test_apply_uses_shaper_and_schedules_structural_mwan3_activation(
 			debounce_s = 0.01,
 			run_cmd = function(argv) restart_cmds[#restart_cmds + 1] = table.concat(argv, ' '); return true, nil end,
 			shaper_run_cmd = function(argv) shaper_cmds[#shaper_cmds + 1] = table.concat(argv, ' '); return true, nil end,
+			shaper_run_restore = function(_) return true, nil, '' end,
 		}, {}))
 		local result = fibers.perform(provider:apply_op({ intent = intent() }))
 		eq(result.ok, true)
@@ -180,7 +175,7 @@ function tests.test_apply_uses_shaper_and_schedules_structural_mwan3_activation(
 	end)
 end
 
-function tests.test_segment_profile_shaping_targets_segment_data_device()
+function tests.test_segment_shaping_targets_segment_data_device()
 	fibers.run(function()
 		local shaper_cmds = {}
 		local segment_intent = {
@@ -191,48 +186,51 @@ function tests.test_segment_profile_shaping_targets_segment_data_device()
 					kind = 'user',
 					vlan = { id = 32 },
 					addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/30' } },
-					shaping = { profile = 'restricted' },
+					shaping = {
+						download = { limit = '10mbit' },
+						upload = { limit = '10mbit' },
+						host_default = {
+							mode = 'budgeted_peak',
+							all_hosts = true,
+							download = { sustained_rate = '1mbit', peak_rate = '2mbit', burst_budget = '100k' },
+							upload = { sustained_rate = '1mbit', peak_rate = '2mbit', burst_budget = '100k' },
+						},
+					},
 				},
 				direct = {
 					kind = 'user',
 					l2 = { mode = 'direct' },
 					vlan = { id = 40 },
 					addressing = { ipv4 = { mode = 'static', cidr = '172.28.40.1/30' } },
-					shaping = { profile = 'restricted' },
+					shaping = {
+						download = { limit = '10mbit' },
+						upload = { limit = '10mbit' },
+						host_default = {
+							mode = 'budgeted_peak',
+							all_hosts = true,
+							download = { sustained_rate = '1mbit', peak_rate = '2mbit', burst_budget = '100k' },
+							upload = { sustained_rate = '1mbit', peak_rate = '2mbit', burst_budget = '100k' },
+						},
+					},
 				},
 			},
 			interfaces = {},
 			dns = {}, dhcp = {}, firewall = { zones = {}, policies = {}, rules = {} },
 			routing = {}, wan = {}, vpn = {}, diagnostics = {},
-			shaping = {
-				enabled = true,
-				profiles = {
-					restricted = {
-						egress = {
-							enabled = true,
-							match = 'dst',
-							pool_rate = '10mbit',
-							pool_ceil = '10mbit',
-							host_rate = '1mbit',
-							host_ceil = '2mbit',
-							all_hosts = true,
-						},
-					},
-				},
-			},
 		}
 		local provider = ok(provider_loader.new({
 			provider = 'openwrt',
 			allow_fake_uci = true,
 			platform = { segment_trunk = { ifname = 'eth0' } },
 			shaper_run_cmd = function(argv) shaper_cmds[#shaper_cmds + 1] = table.concat(argv, ' '); return true, nil end,
+			shaper_run_restore = function(_) return true, nil, '' end,
 		}, {}))
 		local result = fibers.perform(provider:apply_op({ intent = segment_intent }))
 		eq(result.ok, true)
-		ok(result.shaping and result.shaping.ok == true, 'segment-profile shaping should be applied')
+		ok(result.shaping and result.shaping.ok == true, 'segment shaping should be applied')
 		eq(result.shaping.links.jan.iface, 'br-jan', 'bridged segment shaping should target the bridge data device')
 		eq(result.shaping.links.direct.iface, 'vl-direct', 'direct segment shaping should target the VLAN data device')
-		ok(#shaper_cmds > 0, 'segment-profile shaping should emit tc commands')
+		ok(#shaper_cmds > 0, 'segment shaping should emit tc commands')
 		provider:terminate('test complete')
 	end)
 end
@@ -385,7 +383,7 @@ function tests.test_segment_trunk_realises_segments_without_cfg_net_interfaces()
 			},
 			interfaces = {},
 			firewall = { zones = { mgmt = {}, guest = {} }, policies = {} },
-			routing = {}, dns = {}, dhcp = {}, wan = {}, shaping = {}, vpn = {}, diagnostics = {},
+			routing = {}, dns = {}, dhcp = {}, wan = {}, vpn = {}, diagnostics = {},
 		} }))
 		eq(plan.ok, true)
 		ok(plan.plan.packages.network.sections >= 5, 'segment trunk should create globals plus interface/device sections')
@@ -416,6 +414,7 @@ function tests.test_bigbox_clean_config_plans_dns_rules_routes_and_segment_shapi
 			allow_fake_uci = true,
 			platform = { segment_trunk = { ifname = 'eth0' } },
 			shaper_run_cmd = function(argv) shaper_cmds[#shaper_cmds + 1] = table.concat(argv, ' '); return true, nil end,
+			shaper_run_restore = function(_) return true, nil, '' end,
 		}, {}))
 		local plan = fibers.perform(provider:plan_op({ intent = intent }))
 		eq(plan.ok, true)
@@ -424,7 +423,7 @@ function tests.test_bigbox_clean_config_plans_dns_rules_routes_and_segment_shapi
 		ok(plan.plan.packages.network.changes > 0, 'network changes expected')
 		local result = fibers.perform(provider:apply_op({ intent = intent }))
 		eq(result.ok, true)
-		ok(result.shaping and result.shaping.ok == true, 'segment-profile shaping should be applied')
+		ok(result.shaping and result.shaping.ok == true, 'segment shaping should be applied')
 		ok(result.shaping.links and result.shaping.links.jan, 'jan shaping link should be reported')
 		eq(result.shaping.links.jan.iface, 'br-jan', 'jan shaping should target the bridge data device')
 		ok(#shaper_cmds > 0, 'segment shaping should emit tc commands')
@@ -561,7 +560,7 @@ function tests.test_bigbox_net_intent_still_renders_openwrt_segment_trunk_indepe
 			dns = {}, dhcp = {}, firewall = { zones = { lan = {}, lan_rst = {}, wan = { masq = true } }, policies = {}, rules = {} },
 			routing = { routes = { starlink_admin = { kind = 'host', target = '192.168.100.1', interface = 'wan' } } },
 			wan = { enabled = true, members = { wan = { interface = 'wan', weight = 1, mwan_metric = 1 } } },
-			shaping = {}, vpn = {}, diagnostics = {},
+			vpn = {}, diagnostics = {},
 		}, { rev = 1 })
 		ok(intent, ierr)
 		local provider = ok(provider_loader.new({
@@ -600,28 +599,15 @@ function tests.test_bigbox_net_intent_still_renders_openwrt_segment_trunk_indepe
 	end)
 end
 
-function tests.test_semantic_segment_profile_compiles_budgeted_peak_layout()
+function tests.test_segment_shaping_compiles_budgeted_peak_layout()
 	fibers.run(function()
 		local batch_text = {}
 		local segment_intent = {
 			schema = 'devicecode.net.intent/1', rev = 1,
 			segments = {
-				jan = { kind = 'user', vlan = { id = 32 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/30' } }, shaping = { profile = 'restricted' } },
+				bpagg = { kind = 'user', vlan = { id = 232 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/30' } }, shaping = { download = { limit = '40mbit' }, upload = { limit = '10mbit' }, host_default = { mode = 'budgeted_peak', download = { sustained_rate = '2mbit', peak_rate = '8mbit', burst_budget = '500k' }, upload = { sustained_rate = '1500kbit', peak_rate = '6mbit', burst_budget = '225k' } } } },
 			},
 			interfaces = {}, dns = {}, dhcp = {}, firewall = { zones = {}, policies = {}, rules = {} }, routing = {}, wan = {}, vpn = {}, diagnostics = {},
-			shaping = {
-				enabled = true,
-				profiles = {
-					restricted = {
-						segment = { download = { limit = '40mbit' }, upload = { limit = '10mbit' } },
-						host_default = {
-							mode = 'budgeted_peak',
-							download = { sustained_rate = '2mbit', peak_rate = '8mbit', burst_budget = '500k' },
-							upload = { sustained_rate = '1500kbit', peak_rate = '6mbit', burst_budget = '225k' },
-						},
-					},
-				},
-			},
 		}
 		local provider = ok(provider_loader.new({
 			provider = 'openwrt', allow_fake_uci = true, platform = { segment_trunk = { ifname = 'eth0' } },
@@ -635,27 +621,27 @@ function tests.test_semantic_segment_profile_compiles_budgeted_peak_layout()
 		}, {}))
 		local result = fibers.perform(provider:apply_op({ intent = segment_intent }))
 		eq(result.ok, true)
-		eq(result.shaping.links.jan.iface, 'br-jan')
+		eq(result.shaping.links.bpagg.iface, 'br-bpagg')
 		local all = table.concat(batch_text, '\n')
-		contains(all, 'qdisc add dev br-jan root handle 1: htb default 1', 'aggregate budgeted_peak should keep unmatched root traffic on root default class')
-		contains(all, 'class replace dev br-jan parent 20: classid 20:1002 htb rate 2mbit burst 500k ceil 2mbit cburst 500k', 'download host budget should be under aggregate with sustained ceil')
-		contains(all, 'qdisc add dev br-jan parent 20:1002 handle 1002: htb default 1', 'download host budget should own a peak HTB qdisc')
-		contains(all, 'class replace dev br-jan parent 1002: classid 1002:1 htb rate 8mbit ceil 8mbit', 'download host peak class should cap burst spend rate')
-		contains(all, 'filter add dev br-jan parent 20: protocol ip prio 99 handle 1: u32 divisor 256', 'aggregate budgeted_peak should classify hosts under the segment aggregate qdisc')
-		contains(all, 'qdisc add dev br-jan parent 1:20 handle 20: htb default 100', 'aggregate budgeted_peak should install an inner HTB under the segment aggregate')
+		contains(all, 'qdisc add dev br-bpagg root handle 1: htb default 1', 'aggregate budgeted_peak should keep unmatched root traffic on root default class')
+		contains(all, 'class replace dev br-bpagg parent 20: classid 20:1002 htb rate 2mbit burst 500k ceil 2mbit cburst 500k', 'download host budget should be under aggregate with sustained ceil')
+		contains(all, 'qdisc add dev br-bpagg parent 20:1002 handle 1002: htb default 1', 'download host budget should own a peak HTB qdisc')
+		contains(all, 'class replace dev br-bpagg parent 1002: classid 1002:1 htb rate 8mbit ceil 8mbit', 'download host peak class should cap burst spend rate')
+		contains(all, 'filter add dev br-bpagg parent 20: protocol ip prio 99 handle 1: u32 divisor 256', 'aggregate budgeted_peak should classify hosts under the segment aggregate qdisc')
+		contains(all, 'qdisc add dev br-bpagg parent 1:20 handle 20: htb default 100', 'aggregate budgeted_peak should install an inner HTB under the segment aggregate')
 		provider:terminate('test complete')
 	end)
 end
 
 
-function tests.test_inline_segment_shaping_compiles_without_profile()
+function tests.test_inline_segment_shaping_compiles_budgeted_peak_layout()
 	fibers.run(function()
 		local batch_text = {}
 		local segment_intent = {
 			schema = 'devicecode.net.intent/1', rev = 1,
 			segments = {
-				jan = {
-					kind = 'user', vlan = { id = 32 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/30' } },
+				inlinebp = {
+					kind = 'user', vlan = { id = 233 }, addressing = { ipv4 = { mode = 'static', cidr = '172.28.32.1/30' } },
 					shaping = {
 						download = { limit = '40mbit' },
 						upload = { limit = '10mbit' },
@@ -668,8 +654,7 @@ function tests.test_inline_segment_shaping_compiles_without_profile()
 				},
 			},
 			interfaces = {}, dns = {}, dhcp = {}, firewall = { zones = {}, policies = {}, rules = {} }, routing = {}, wan = {}, vpn = {}, diagnostics = {},
-			shaping = { enabled = true, profiles = {} },
-		}
+			}
 		local provider = ok(provider_loader.new({
 			provider = 'openwrt', allow_fake_uci = true, platform = { segment_trunk = { ifname = 'eth0' } },
 			shaper_run_cmd = function(argv)
@@ -682,11 +667,10 @@ function tests.test_inline_segment_shaping_compiles_without_profile()
 		}, {}))
 		local result = fibers.perform(provider:apply_op({ intent = segment_intent }))
 		eq(result.ok, true)
-		eq(result.shaping.links.jan.profile, nil)
-		eq(result.shaping.links.jan.iface, 'br-jan')
+		eq(result.shaping.links.inlinebp.iface, 'br-inlinebp')
 		local all = table.concat(batch_text, '\n')
-		contains(all, 'class replace dev br-jan parent 20: classid 20:1002 htb rate 2mbit burst 500k ceil 2mbit cburst 500k', 'inline segment host budget should compile')
-		contains(all, 'class replace dev br-jan parent 1002: classid 1002:1 htb rate 8mbit ceil 8mbit', 'inline segment peak class should compile')
+		contains(all, 'class replace dev br-inlinebp parent 20: classid 20:1002 htb rate 2mbit burst 500k ceil 2mbit cburst 500k', 'inline segment host budget should compile')
+		contains(all, 'class replace dev br-inlinebp parent 1002: classid 1002:1 htb rate 8mbit ceil 8mbit', 'inline segment peak class should compile')
 		provider:terminate('test complete')
 	end)
 end
@@ -701,7 +685,7 @@ function tests.test_wan_member_shaping_renders_router_exemption_marks_and_wan_ma
 			shaping = { download = { limit = '80mbit' }, upload = { limit = '20mbit' } },
 		}
 		local provider = ok(provider_loader.new({
-			provider = 'openwrt', allow_fake_uci = true,
+			provider = 'openwrt', allow_fake_uci = true, platform = { shaping = { marks = { mask = '0x00f00000', control = '0x00100000', client = '0x00200000' } } },
 			shaper_run_cmd = function(argv) cmds[#cmds + 1] = table.concat(argv, ' '); return true, '', nil end,
 			shaper_run_restore = function(payload) restores[#restores + 1] = payload; return true, nil, '' end,
 		}, {}))

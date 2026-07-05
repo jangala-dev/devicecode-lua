@@ -62,7 +62,6 @@ local intent = {
       },
     },
   },
-  shaping = { enabled = true },
 }
 
 fibers.run(function()
