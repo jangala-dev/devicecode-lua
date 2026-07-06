@@ -74,7 +74,7 @@ env:
 	@cd $(VENDOR_DIR)/lua-fibers && git fetch && git checkout $(FIBERS_VER)
 	@cd $(VENDOR_DIR)/lua-trie   && git fetch && git checkout $(TRIE_VER)
 	@cd $(VENDOR_DIR)/lua-bus    && git fetch && git checkout $(BUS_VER)
-	@cd $(UI_DIR) && git fetch && git checkout $(UI_VER)
+	@cd $(UI_DIR) && git fetch && git checkout $(UI_VER) && git pull --ff-only
 	@cd $(UI_DIR)/client && npm install
 	@echo "Submodules pinned."
 
