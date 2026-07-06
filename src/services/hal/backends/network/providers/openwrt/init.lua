@@ -1602,7 +1602,7 @@ local function normalise_mwan3_status(st, name_ctx)
 			end
 			local state = rec.status
 			if rec.enabled == false then state = 'disabled' end
-			local online = state == 'online' or rec.up == true or rec.online == true
+			local online = state == 'online' or (state == nil and rec.online == true)
 			local item = {
 				interface = ifid,
 				semantic_interface = (name_ctx and type(name_ctx.semantic_for) == 'function' and name_ctx:semantic_for('mwan_iface', ifid)) or ifid,
@@ -2175,5 +2175,9 @@ function Provider:terminate(reason)
 	end
 	return true, nil
 end
+
+M._test = {
+	normalise_mwan3_status = normalise_mwan3_status,
+}
 
 return M

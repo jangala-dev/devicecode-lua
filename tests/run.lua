@@ -27,6 +27,7 @@ local files = {
 	'unit.config.state_spec',
 	'unit.main.service_spec',
 	'unit.config.service_spec',
+	'unit.system_spec',
 	'unit.devicecode.service_base_spec',
 	'unit.monitor.test_service',
 	'unit.hal.cap_sdk_spec',
