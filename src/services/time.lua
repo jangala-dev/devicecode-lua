@@ -34,10 +34,12 @@ end
 ---@return nil
 local function apply_sync_state(state, conn, svc, is_synced, payload)
 	if state.current_synced ~= is_synced then
-		svc:obs_log('info', {
-			what = 'sync_state_transition',
-			from = tostring(state.current_synced),
-			to   = tostring(is_synced),
+		local what = is_synced and 'time_synced' or 'time_unsynced'
+		svc:obs_log(is_synced and 'info' or 'warn', {
+			what = what,
+			summary = is_synced and 'time synchronised' or 'time synchronisation lost',
+			from = state.current_synced,
+			to   = is_synced,
 		})
 		conn:retain({ 'state', 'time', 'synced' }, is_synced)
 		svc:obs_event(is_synced and 'synced' or 'unsynced', payload or {})
@@ -48,11 +50,11 @@ local function apply_sync_state(state, conn, svc, is_synced, payload)
 	-- install_alarm_handler/clock_synced/clock_desynced.
 	if is_synced then
 		if not state.time_source_installed then
-			svc:obs_log('info', 'installing alarm time source from realtime clock')
+			svc:obs_log('debug', 'installing alarm time source from realtime clock')
 			local ok, err = pcall(alarm.set_time_source, time_utils.realtime)
 			if ok then
 				state.time_source_installed = true
-				svc:obs_log('info', 'alarm time source installed')
+				svc:obs_log('debug', 'alarm time source installed')
 			else
 				svc:obs_log('warn', { what = 'alarm_time_source_failed', err = tostring(err) })
 			end
@@ -67,7 +69,7 @@ end
 ---@param cap_ref CapabilityReference
 ---@return nil
 local function monitor_capability(conn, svc, cap_ref)
-	svc:obs_log('info', { what = 'capability_monitor_start', cap_id = tostring(cap_ref.id) })
+	svc:obs_log('debug', { what = 'capability_monitor_start', cap_id = tostring(cap_ref.id) })
 	local sub_state    = cap_ref:get_state_sub('synced')
 	local sub_synced   = cap_ref:get_event_sub('synced')
 	local sub_unsynced = cap_ref:get_event_sub('unsynced')
@@ -83,7 +85,7 @@ local function monitor_capability(conn, svc, cap_ref)
 	do
 		local msg, err = perform(sub_state:recv_op())
 		if msg then
-			svc:obs_log('info', 'received initial retained sync state')
+			svc:obs_log('debug', 'received initial retained sync state')
 			local is_synced = synced_from_state_payload(msg.payload)
 			if is_synced ~= nil then
 				apply_sync_state(state, conn, svc, is_synced, msg.payload)
@@ -127,7 +129,7 @@ function M.start(conn, opts)
 	local wait_timeout_s = (type(opts.wait_timeout_s) == 'number') and opts.wait_timeout_s or nil
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
-	svc:obs_log('info', 'service start() entered')
+	svc:obs_log('debug', 'service start() entered')
 	svc:announce({})
 	svc:starting()
 	svc:spawn_heartbeat(heartbeat_s, 'tick')
@@ -135,13 +137,13 @@ function M.start(conn, opts)
 	fibers.current_scope():finally(function()
 		local _, primary = fibers.current_scope():status()
 		svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'scope_exit') })
-		svc:obs_log('info', 'service stopped')
+		svc:obs_log('debug', 'service stopped')
 	end)
 
 	svc:running()
 
 	local cap_listener = cap_sdk.new_cap_listener(conn, 'time', '+')
-	svc:obs_log('info', { what = 'waiting_for_time_capability', timeout = wait_timeout_s })
+	svc:obs_log('debug', { what = 'waiting_for_time_capability', timeout = wait_timeout_s })
 
 	local cap_ref, cap_err = cap_listener:wait_for_cap({ timeout = wait_timeout_s })
 	cap_listener:close()
@@ -151,7 +153,7 @@ function M.start(conn, opts)
 		return
 	end
 
-	svc:obs_log('info', { what = 'capability_selected', cap_id = tostring(cap_ref.id) })
+	svc:obs_log('debug', { what = 'capability_selected', cap_id = tostring(cap_ref.id) })
 	monitor_capability(conn, svc, cap_ref)
 end
 

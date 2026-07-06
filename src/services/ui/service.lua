@@ -368,6 +368,17 @@ local function update_lifecycle(state)
 	local key = lifecycle_status_key(service_state, payload)
 	if not should_publish_lifecycle(state, key) then return true, nil end
 	note_lifecycle_published(state, key)
+	if state.svc and ready == true and state._last_operator_ready ~= true then
+		state.svc:info('ui_ready', {
+			summary = string.format('ui ready listener=%s read_model=%s', tostring(state.listener_status), tostring(state.read_model_status)),
+			listener_status = state.listener_status,
+			read_model_status = state.read_model_status,
+			config_generation = state.config_generation,
+		})
+		state._last_operator_ready = true
+	elseif ready ~= true then
+		state._last_operator_ready = false
+	end
 	if service_state == 'disabled' then return lifecycle:status('disabled', payload) end
 	if service_state == 'degraded' then return lifecycle:degraded(payload) end
 	if service_state == 'failed' then return lifecycle:failed(reason or 'ui_failed', payload) end
@@ -751,6 +762,7 @@ function M.run(scope, params)
 		service_id = params.service_id or 'ui',
 		conn = conn,
 		lifecycle = params.lifecycle,
+		svc = params.lifecycle,
 		cfg_watch = cfg_watch,
 		done_tx = done_tx,
 		done_rx = done_rx,

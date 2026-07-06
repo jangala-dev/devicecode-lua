@@ -431,12 +431,18 @@ local function make_service_caps(self)
 		conn       = self._conn,
 		compiled_config = self._compiled_config,
 		routing = self._compiled_config and self._compiled_config.routing or nil,
+		svc       = self._svc,
 
 		snapshot = public_snapshot(self),
 	}
 end
 
-local function default_link_runner(link_scope, spec)
+local function default_link_runner(link_scope, spec, service_caps)
+	if service_caps and service_caps.svc then
+		local out = shallow_copy(spec)
+		out.state_projector_svc = service_caps.svc
+		return link_mod.run(link_scope, out)
+	end
 	return link_mod.run(link_scope, spec)
 end
 
@@ -611,6 +617,7 @@ function M.run(scope, params)
 		_compiled_config = compiled,
 		_links       = {},
 		_complete    = false,
+		_svc         = params.svc,
 	}, Service)
 
 	start_all_links(self, link_specs)
@@ -924,6 +931,44 @@ local function publish_waiting_for_transport(state, reason)
 	return true
 end
 
+
+
+local function log_link_inventory(state, links, generation)
+	if not state.svc then return end
+	state._logged_link_inventory = state._logged_link_inventory or {}
+	for _, link in ipairs(links or {}) do
+		local id = link.link_id or link.id
+		local tr = link.transport or {}
+		local transport = tr.id or tr.source or tr.kind or link.transport_id
+		local peer = link.peer_id or (link.session and link.session.peer_id) or 'peer'
+		local key = tostring(generation) .. '|' .. tostring(id) .. '|' .. tostring(transport) .. '|' .. tostring(peer)
+		if id ~= nil and state._logged_link_inventory[id] ~= key then
+			state._logged_link_inventory[id] = key
+			state.svc:info('fabric_link_configured', {
+				summary = string.format('fabric link %s configured transport=%s peer=%s', tostring(id), tostring(transport or 'unknown'), tostring(peer or 'unknown')),
+				link_id = id,
+				transport = transport,
+				peer = peer,
+				generation = generation,
+			})
+		end
+	end
+end
+
+local function link_summary_parts(links)
+	local ids, transports = {}, {}
+	for _, link in ipairs(links or {}) do
+		local id = link.link_id or link.id
+		if id ~= nil then ids[#ids + 1] = tostring(id) end
+		local tr = link.transport or {}
+		local tid = tr.id or tr.source or tr.kind or link.transport_id
+		if tid ~= nil then transports[#transports + 1] = tostring(tid) end
+	end
+	table.sort(ids)
+	table.sort(transports)
+	return table.concat(ids, ','), table.concat(transports, ',')
+end
+
 local function maybe_start_pending_generation(state, reason)
 	if state.active ~= nil then return true, nil end
 	local compiled = state.pending_compiled
@@ -937,10 +982,23 @@ local function maybe_start_pending_generation(state, reason)
 	local active, err = start_generation(state, compiled)
 	if not active then return nil, err or 'generation_start_failed' end
 	state.last_error = nil
+	local link_count = #(compiled.links or {})
+	if state.svc and state._last_operator_generation ~= active.config_generation then
+		local link_ids, transports = link_summary_parts(compiled.links)
+		state.svc:info('fabric_ready', {
+			summary = string.format('fabric ready generation=%s links=%d%s%s', tostring(active.config_generation), link_count, link_ids ~= '' and (' ids=' .. link_ids) or '', transports ~= '' and (' transport=' .. transports) or ''),
+			config_generation = active.config_generation,
+			links = link_count,
+			link_ids = link_ids ~= '' and link_ids or nil,
+			transport = transports ~= '' and transports or nil,
+		})
+		state._last_operator_generation = active.config_generation
+	end
+	log_link_inventory(state, compiled.links, active.config_generation)
 	publish_service_lifecycle(state, 'running', {
 		ready = true,
 		config_generation = active.config_generation,
-		links = #(compiled.links or {}),
+		links = link_count,
 	})
 	return true, nil
 end
@@ -984,6 +1042,7 @@ function start_generation(state, compiled)
 				link_runner      = state.link_runner,
 				_private_link_runtime = state.private_link_runtime,
 				link_overrides   = overrides,
+				svc              = state.svc,
 				policy           = state.config_generation_policy,
 				done_queue_len   = state.config_generation_done_queue_len,
 			})

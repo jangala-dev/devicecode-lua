@@ -397,6 +397,56 @@ end
 ---@field scope Scope?
 ---@field config_pulse Pulse
 ---@field svc ServiceBase
+
+local function id_suffix(id)
+	id = tostring(id or '')
+	if #id <= 4 then return id end
+	return '…' .. id:sub(-4)
+end
+
+local function modem_label(self)
+	local role = tostring(self.name or self.id or 'modem')
+	local suffix = id_suffix(self.id)
+	if suffix ~= '' and suffix ~= role then return role .. ' ' .. suffix end
+	return role
+end
+
+local function normalised_sim_string(v)
+	if v == nil then return nil end
+	local n = normalize_sim_presence(v)
+	if n == nil then return tostring(v) end
+	return tostring(n)
+end
+
+local function log_modem_detected(modem, fields)
+	if not modem or not modem.svc then return end
+	fields = fields or {}
+	local key = table.concat({
+		tostring(modem.name or ''),
+		tostring(modem.id or ''),
+		tostring(modem.device or ''),
+		tostring(fields.firmware or ''),
+		tostring(fields.sim or ''),
+		tostring(fields.ifname or modem.wwan_iface or ''),
+	}, '|')
+	if modem._last_inventory_key == key then return end
+	modem._last_inventory_key = key
+	local parts = { tostring(modem.name or 'modem'), id_suffix(modem.id), 'detected' }
+	if fields.firmware then parts[#parts + 1] = 'fw=' .. tostring(fields.firmware) end
+	if fields.sim ~= nil then parts[#parts + 1] = 'sim=' .. tostring(fields.sim) end
+	if fields.ifname or modem.wwan_iface then parts[#parts + 1] = 'ifname=' .. tostring(fields.ifname or modem.wwan_iface) end
+	if modem.device and modem.device ~= '' then parts[#parts + 1] = 'device=' .. tostring(modem.device):match('[^/]+$') end
+	modem.svc:info('modem_detected', {
+		summary = table.concat(parts, ' '),
+		modem = modem.name,
+		modem_id = tostring(modem.id),
+		device = modem.device,
+		firmware = fields.firmware,
+		sim = fields.sim,
+		ifname = fields.ifname or modem.wwan_iface,
+	})
+end
+
 local GsmModem = {}
 GsmModem.__index = GsmModem
 
@@ -511,10 +561,12 @@ end
 
 function GsmModem:_emit_metrics_once()
 	-- Derived metrics only; HAL remains the source of truth.
+	local inventory = {}
 	local access_techs, access_err = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT)
 	if access_err == "" then
 		local access_tech = derive_access_tech(access_techs)
 		if access_tech ~= "" then
+			inventory.access_tech = access_tech
 			self:_emit_metric('access_tech', access_tech)
 			local access_family = get_access_family(access_tech)
 			if access_family ~= "" then
@@ -530,16 +582,19 @@ function GsmModem:_emit_metrics_once()
 
 	local imei, imei_err = modem_get_field(self.cap, 'imei', REQUEST_TIMEOUT)
 	if imei_err == "" then
+		inventory.imei = imei
 		self:_emit_metric('imei', imei)
 	end
 
 	local operator, operator_err = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT)
 	if operator_err == "" then
+		inventory.operator = operator
 		self:_emit_metric('operator', operator)
 	end
 
 	local sim, sim_err = modem_get_field(self.cap, 'sim', REQUEST_TIMEOUT)
 	if sim_err == "" then
+		inventory.sim = normalised_sim_string(sim)
 		self:_emit_metric('sim', normalize_sim_presence(sim))
 	end
 
@@ -550,6 +605,7 @@ function GsmModem:_emit_metrics_once()
 
 	local firmware, firmware_err = modem_get_field(self.cap, 'firmware', REQUEST_TIMEOUT)
 	if firmware_err == "" then
+		inventory.firmware = firmware
 		self:_emit_metric('fw_version', firmware)
 	end
 
@@ -567,11 +623,11 @@ function GsmModem:_emit_metrics_once()
 	end
 
 	local net_ports, net_ports_err = modem_get_field(self.cap, 'net_ports', REQUEST_TIMEOUT)
-	print(net_ports, net_ports_err, net_ports and #net_ports or 0, net_ports and net_ports[1])
 	if net_ports_err == "" then
 		local interface = net_ports and net_ports[1]
 		if interface then
 			self.wwan_iface = interface
+			inventory.ifname = interface
 			self:_emit_metric('wann_type', interface)
 			self.conn:retain(t_state_gsm_modem(self.name, 'wwan-iface'), interface)
 			self:_publish_uplink_state(nil, interface)
@@ -624,6 +680,7 @@ function GsmModem:_emit_metrics_once()
 			self:_emit_metric('bars', bars)
 		end
 	end
+	log_modem_detected(self, inventory)
 end
 
 ---@return nil
@@ -708,14 +765,14 @@ function GsmModem:_apn_connect()
 					{ what = 'apn_connect_rpc', modem = self.name, apn = ranking.name, err = conn_err })
 				if conn_err == "" then
 					-- Connect succeeded
-					self.svc:obs_log('debug', { what = 'apn_connected', modem = self.name, apn = ranking.name })
+					self.svc:obs_log('info', { what = 'apn_connected', modem = self.name, apn = ranking.name })
 					state_sub:unsubscribe()
 					return apn_table, "", nil
 				end
 
 				-- Check for throttled error
 				if string.find(conn_err, "pdn-ipv4-call-throttled") then
-					self.svc:obs_log('debug', { what = 'apn_throttled', modem = self.name })
+					self.svc:obs_log('warn', { what = 'apn_throttled', modem = self.name })
 					state_sub:unsubscribe()
 					return nil, conn_err, 360 -- 6-minute backoff
 				end
@@ -730,11 +787,11 @@ function GsmModem:_apn_connect()
 				)
 				state_sub:unsubscribe()
 				if not ok then
-					self.svc:obs_log('debug', { what = 'wait_for_connection_failed', modem = self.name, err = wait_err })
+					self.svc:obs_log('warn', { what = 'wait_for_connection_failed', modem = self.name, err = wait_err })
 					return nil, wait_err, DEFAULT_RETRY_TIMEOUT
 				end
 
-				self.svc:obs_log('debug', { what = 'apn_attempt_failed', modem = self.name, apn = ranking.name })
+				self.svc:obs_log('warn', { what = 'apn_attempt_failed', modem = self.name, apn = ranking.name })
 			else
 				self.svc:obs_log('debug',
 					{ what = 'apn_invalid_opts', modem = self.name, apn = ranking.name, err = opts_err })
@@ -781,10 +838,22 @@ function GsmModem:_autoconnect_loop()
 			local msg = msg_or_ver
 			if msg then
 				current_state = msg.payload.to
-				self.svc:obs_log('debug', { what = 'modem_state_changed', modem = self.name, state = current_state })
+				if current_state ~= self._last_operator_state then
+					self._last_operator_state = current_state
+					local level = current_state == 'failed' and 'warn' or 'info'
+					local what = current_state == 'failed' and 'modem_failed' or 'modem_state_changed'
+					self.svc:obs_log(level, {
+						what = what,
+						summary = string.format('%s modem state -> %s', modem_label(self), tostring(current_state)),
+						modem = self.name,
+						modem_id = self.id,
+						modem_suffix = id_suffix(self.id),
+						state = current_state,
+					})
+				end
 			end
 		elseif which == 'backoff' then
-			self.svc:obs_log('debug', { what = 'autoconnect_retry', modem = self.name, state = current_state })
+			self.svc:obs_log('warn', { what = 'autoconnect_retry', modem = self.name, state = current_state })
 		end
 
 		-- Act on current_state
@@ -917,7 +986,7 @@ function GsmService.start(conn, opts)
 	local svc = base.new(conn, { name = name, env = opts.env })
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
-	svc:obs_log('info', 'service start() entered')
+	svc:obs_log('debug', 'service start() entered')
 	svc:announce({})
 	svc:starting()
 	svc:spawn_heartbeat(heartbeat_s, 'tick')
@@ -936,7 +1005,7 @@ function GsmService.start(conn, opts)
 		end
 		local _, primary = fibers.current_scope():status()
 		svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'scope_exit') })
-		svc:obs_log('info', 'service stopped')
+		svc:obs_log('debug', 'service stopped')
 	end)
 
 	local function ensure_modem(cap)
@@ -958,6 +1027,7 @@ function GsmService.start(conn, opts)
 
 		local cfg, modem_name, _ = get_modem_config(current_cfg, id, modem.device)
 		modem:apply_config(cfg, modem_name)
+		log_modem_detected(modem, {})
 
 		local ok, err = modem:start(parent_scope)
 		if not ok then
@@ -1010,7 +1080,7 @@ function GsmService.start(conn, opts)
 
 	svc:obs_event('config_applied', {})
 	svc:running()
-	svc:obs_log('info', 'service running')
+	svc:obs_log('debug', 'service running')
 
 	while true do
 		local choices = {

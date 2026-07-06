@@ -779,6 +779,7 @@ end
 function HttpService:_reduce_event(ev)
 	local k = ev.kind
 	if k == 'backend_ready' then
+		if self._state.backend ~= 'ready' then self:_publish_obs_log('info', { what = 'http_ready', summary = 'http backend ready' }) end
 		self._state.backend = 'ready'
 		if self._state.config and self._state.config.enabled == false then
 			self._state.service_state = 'disabled'; self._state.ready = false
@@ -786,6 +787,7 @@ function HttpService:_reduce_event(ev)
 			self._state.service_state = 'ready'; self._state.ready = true
 		end
 	elseif k == 'backend_failed' then
+		self:_publish_obs_log('error', { what = 'http_failed', reason = ev.reason })
 		self._state.backend = 'failed'; self._state.service_state = 'failed'; self._state.ready = false; self._state.last_error = ev.reason
 		if self._registry then self._registry:terminate_all(ev.reason or 'backend_failed') end
 	elseif k == 'backend_terminated' then

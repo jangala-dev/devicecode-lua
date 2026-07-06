@@ -104,7 +104,7 @@ function M.build_changes(intent, name_ctx)
 		set_option(changes, 'mwan3', ifsec, 'enabled', '1')
 		set_option(changes, 'mwan3', ifsec, 'family', m.family or health.family or 'ipv4')
 		set_list_option(changes, 'mwan3', ifsec, 'track_ip', m.track_ip or (m.health and m.health.track_ip) or health.track_ip)
-		set_option(changes, 'mwan3', ifsec, 'initial_state', m.initial_state or health.initial_state)
+		set_option(changes, 'mwan3', ifsec, 'initial_state', m.initial_state or health.initial_state or 'offline')
 		set_option(changes, 'mwan3', ifsec, 'reliability', m.reliability or health.reliability)
 		set_option(changes, 'mwan3', ifsec, 'count', m.count or health.count)
 		set_option(changes, 'mwan3', ifsec, 'timeout', m.timeout or health.timeout)
@@ -279,28 +279,44 @@ function M.parse_mangle_ruleset(text)
 end
 
 local function normalise_members(members, parsed)
-	local out, total = {}, 0
+	local out, skipped, total, requested_positive = {}, {}, 0, 0
 	for i = 1, #(members or {}) do
 		local m = members[i]
 		if type(m) == 'table' and m.enabled ~= false and m.disabled ~= true then
 			local weight = math.floor(tonumber(m.weight or m.live_weight or 0) or 0)
 			if weight > 0 then
+				requested_positive = requested_positive + 1
 				local iface, ierr = interface_from_member(m, i)
 				if not iface then return nil, ierr end
 				local mark = explicit_mark(m) or (parsed and parsed.iface_marks and parsed.iface_marks[iface])
-				if not mark then return nil, 'no MWAN3 firewall mark found for interface ' .. tostring(iface) end
-				total = total + weight
-				out[#out + 1] = {
-					interface = iface,
-					weight = weight,
-					metric = math.floor(tonumber(m.metric or 1) or 1),
-					mark = mark,
-				}
+				if not mark then
+					skipped[#skipped + 1] = {
+						interface = iface,
+						semantic_interface = m.semantic_interface,
+						weight = weight,
+						metric = math.floor(tonumber(m.metric or 1) or 1),
+						reason = 'no_mwan3_mark',
+					}
+				else
+					total = total + weight
+					out[#out + 1] = {
+						interface = iface,
+						semantic_interface = m.semantic_interface,
+						weight = weight,
+						metric = math.floor(tonumber(m.metric or 1) or 1),
+						mark = mark,
+					}
+				end
 			end
 		end
 	end
-	if #out == 0 then return nil, 'no enabled positive-weight MWAN3 members supplied' end
-	return out, nil, total
+	if #out == 0 then
+		if requested_positive > 0 and #skipped > 0 then
+			return nil, 'no MWAN3 firewall mark found for any live member; no live MWAN3 members have firewall marks'
+		end
+		return nil, 'no enabled positive-weight MWAN3 members supplied'
+	end
+	return out, nil, total, skipped
 end
 
 local function quote_restore_arg(s)
@@ -357,7 +373,7 @@ function M.build_live_weight_restore(req, ruleset_text)
 	if not parsed.chains[chain] and not parsed.policy_rules[chain] then
 		return nil, 'MWAN3 policy chain not found: ' .. chain
 	end
-	local members, merr, total = normalise_members(req.members, parsed)
+	local members, merr, total, skipped = normalise_members(req.members, parsed)
 	if not members then return nil, merr end
 	local mask = tostring(req.mask or req.mmx_mask or parsed.mask or '0x3f00')
 	local lines = { '*mangle', '-F ' .. chain }
@@ -376,6 +392,8 @@ function M.build_live_weight_restore(req, ruleset_text)
 		members = members,
 		total_weight = total,
 		single_member = (#members == 1),
+		skipped_members = skipped or {},
+		skipped_count = #(skipped or {}),
 	}
 end
 

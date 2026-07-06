@@ -20,6 +20,9 @@ local DEFAULT_Q_LEN = 10
 local DEFAULT_CONTROL_TIMEOUT_S = 30.0
 local DEFAULT_MANAGER_START_TIMEOUT_S = 10.0
 local DEFAULT_MANAGER_APPLY_TIMEOUT_S = 10.0
+local DEFAULT_MANAGER_APPLY_TIMEOUTS = {
+	wired = 20.0,
+}
 local DEFAULT_MANAGER_SHUTDOWN_TIMEOUT_S = 5.0
 
 local unpack = rawget(table, 'unpack') or _G.unpack
@@ -578,9 +581,18 @@ function HalService.start(conn, opts)
 	local manager_start_timeout_s = (type(opts.manager_start_timeout_s) == 'number')
 		and opts.manager_start_timeout_s
 		or DEFAULT_MANAGER_START_TIMEOUT_S
-	local manager_apply_timeout_s = (type(opts.manager_apply_timeout_s) == 'number')
+	local configured_manager_apply_timeout_s = (type(opts.manager_apply_timeout_s) == 'number')
 		and opts.manager_apply_timeout_s
 		or DEFAULT_MANAGER_APPLY_TIMEOUT_S
+	local function manager_apply_timeout_for(name)
+		if type(opts.manager_apply_timeouts) == 'table' and type(opts.manager_apply_timeouts[name]) == 'number' then
+			return opts.manager_apply_timeouts[name]
+		end
+		if type(DEFAULT_MANAGER_APPLY_TIMEOUTS[name]) == 'number' then
+			return DEFAULT_MANAGER_APPLY_TIMEOUTS[name]
+		end
+		return configured_manager_apply_timeout_s
+	end
 	local manager_shutdown_timeout_s = (type(opts.manager_shutdown_timeout_s) == 'number')
 		and opts.manager_shutdown_timeout_s
 		or DEFAULT_MANAGER_SHUTDOWN_TIMEOUT_S
@@ -1121,8 +1133,9 @@ function HalService.start(conn, opts)
 	end
 
 	local function apply_manager_config(name, manager, manager_config)
+		local timeout_s = manager_apply_timeout_for(name)
 		local has_op_method = type(manager.apply_config_op) == 'function'
-		if not has_op_method or type(manager_apply_timeout_s) ~= 'number' or manager_apply_timeout_s < 0 then
+		if not has_op_method or type(timeout_s) ~= 'number' or timeout_s < 0 then
 			local ok, err = perform(manager_call_op(name, manager, 'apply_config', manager_config))
 			if ok == true then return 'applied', nil end
 			return 'failed', err
@@ -1137,20 +1150,20 @@ function HalService.start(conn, opts)
 
 		local which, result = perform(op.named_choice({
 			result = result_ch:get_op(),
-			timeout = sleep.sleep_op(manager_apply_timeout_s),
+			timeout = sleep.sleep_op(timeout_s),
 		}))
 		if which == 'result' then
 			if result and result.ok == true then return 'applied', nil end
 			return 'failed', result and result.err or 'manager apply failed'
 		end
 
-		log('warn', 'manager_apply_pending_timeout', { manager = name, admitted = true, timeout_s = manager_apply_timeout_s })
+		log('debug', 'manager_apply_pending_timeout', { summary = string.format('HAL manager %s still pending after %ss', tostring(name), tostring(timeout_s)), manager = name, admitted = true, timeout_s = timeout_s })
 		fibers.spawn(function()
 			local late = perform(result_ch:get_op())
 			if late and late.ok == true then
-				log('warn', 'manager_apply_late_success', { manager = name })
+				log('info', 'hal_manager_recovered', { summary = string.format('HAL manager %s recovered after timeout', tostring(name)), manager = name })
 			else
-				log('error', 'manager_apply_late_failure', { manager = name, err = tostring(late and late.err or 'manager apply failed') })
+				log('error', 'hal_manager_failed', { summary = string.format('HAL manager %s failed after timeout: %s', tostring(name), tostring(late and late.err or 'manager apply failed')), manager = name, err = tostring(late and late.err or 'manager apply failed') })
 			end
 		end)
 		return 'pending_after_timeout', 'timeout'
@@ -1209,9 +1222,27 @@ function HalService.start(conn, opts)
 			end
 		end
 
+		local config_ok = #failed_managers == 0
+		local config_degraded = (#pending_managers > 0 or #failed_managers > 0) or nil
 		svc:obs_event('config_end', {
-			ok = #failed_managers == 0,
-			degraded = (#pending_managers > 0 or #failed_managers > 0) or nil,
+			ok = config_ok,
+			degraded = config_degraded,
+			pending_managers = (#pending_managers > 0) and pending_managers or nil,
+			failed_managers = (#failed_managers > 0) and failed_managers or nil,
+		})
+		local hal_what = config_ok and (config_degraded and 'hal_config_degraded' or 'hal_ready') or 'hal_config_failed'
+		local hal_summary
+		if not config_ok then
+			hal_summary = string.format('HAL config failed failed=%d', #failed_managers)
+		elseif config_degraded then
+			hal_summary = string.format('HAL config degraded: pending=%s failed=%d', table.concat(pending_managers, ','), #failed_managers)
+		else
+			hal_summary = 'HAL ready'
+		end
+		log(config_ok and (config_degraded and 'warn' or 'info') or 'error', hal_what, {
+			summary = hal_summary,
+			ok = config_ok,
+			degraded = config_degraded,
 			pending_managers = (#pending_managers > 0) and pending_managers or nil,
 			failed_managers = (#failed_managers > 0) and failed_managers or nil,
 		})
@@ -1279,7 +1310,7 @@ function HalService.start(conn, opts)
 	local config_sub
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
-	svc:obs_log('info', 'service start() entered')
+	svc:obs_log('debug', 'service start() entered')
 	svc:status('starting')
 	svc:spawn_heartbeat(heartbeat_s, 'tick')
 
@@ -1309,15 +1340,15 @@ function HalService.start(conn, opts)
 		end
 
 		svc:status('stopped', { reason = tostring(primary or 'scope_exit') })
-		svc:obs_log('info', 'service stopped')
+		svc:obs_log('debug', 'service stopped')
 	end)
 
 	bootstrap()
 	svc:status('running')
-	svc:obs_log('info', 'bootstrap successful')
+	svc:obs_log('debug', 'bootstrap successful')
 
 	config_sub = conn:subscribe({ 'cfg', svc.name })
-	svc:obs_log('info', { what = 'subscribed', topic = 'cfg/' .. svc.name })
+	svc:obs_log('debug', { what = 'subscribed', topic = 'cfg/' .. svc.name })
 
 	while true do
 		local source, a, b = perform(op.named_choice({

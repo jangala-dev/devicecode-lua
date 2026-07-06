@@ -22,6 +22,8 @@ local alarms        = require "services.system.alarms"
 
 local SCHEMA_TARGET = "devicecode.config/system/1"
 
+local cap_unavailable_logged = {}
+
 -- ── topic helpers ────────────────────────────────
 
 ---@param name string
@@ -99,8 +101,12 @@ local function wait_for_cap(conn, svc, class, id)
         timeout = REQUEST_TIMEOUT,
     })
     if not cap_ref then
-        svc:obs_log('warn', {
-            what = 'cap_unavailable',
+        local key = cap_ref_key(class, id)
+        local first = not cap_unavailable_logged[key]
+        cap_unavailable_logged[key] = true
+        svc:obs_log(first and 'warn' or 'debug', {
+            what = tostring(class) .. '_unavailable',
+            summary = string.format('%s capability %s unavailable: %s', tostring(class), tostring(id), tostring(cap_err or 'unknown')),
             class = class,
             id = id,
             err = cap_err,
@@ -388,7 +394,7 @@ local function system_main(svc, report_period_ch)
         ))
         if identity_msg and type(identity_msg.payload) == 'table' and identity_msg.payload.hw_revision then
             hw_revision = identity_msg.payload.hw_revision:match('(%S+)')
-            svc:obs_log('debug', { what = 'hw_revision_detected', value = hw_revision })
+            svc:obs_log('info', { what = 'hw_revision_detected', value = hw_revision })
         else
             svc:obs_log('warn', 'platform identity not available at startup; USB3 control disabled')
         end
@@ -483,7 +489,7 @@ function SystemService.start(conn, opts)
     local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
 
     svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
-    svc:obs_log('info', 'service start() entered')
+    svc:obs_log('debug', 'service start() entered')
     svc:announce({})
     svc:starting()
     svc:spawn_heartbeat(heartbeat_s, 'tick')
@@ -495,14 +501,14 @@ function SystemService.start(conn, opts)
     fibers.current_scope():finally(function()
         local _, primary = fibers.current_scope():status()
         svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'ok') })
-        svc:obs_log('info', 'service stopped')
+        svc:obs_log('debug', 'service stopped')
     end)
 
     -- Spawn Sysinfo first so it is ready to receive from report_period_ch.
     fibers.current_scope():spawn(sysinfo_fiber, svc, report_period_ch)
 
     svc:running()
-    svc:obs_log('info', 'service running')
+    svc:obs_log('debug', 'service running')
 
     -- Run System Main in the calling fiber.
     system_main(svc, report_period_ch)

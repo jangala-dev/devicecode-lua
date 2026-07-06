@@ -74,6 +74,22 @@ end
 
 local function is_table(v) return type(v) == 'table' end
 
+local function count_array(t)
+    return is_table(t) and #t or 0
+end
+
+local function ssids_for_radio(ssid_cfgs, radio_id)
+    local count = 0
+    for _, ssid_cfg in ipairs(ssid_cfgs or {}) do
+        if is_table(ssid_cfg.radios) then
+            for _, r in ipairs(ssid_cfg.radios) do
+                if r == radio_id then count = count + 1; break end
+            end
+        end
+    end
+    return count
+end
+
 ------------------------------------------------------------------------
 -- Band steering application
 ------------------------------------------------------------------------
@@ -284,7 +300,7 @@ local function apply_band_steering(band_cap, band_cfg, svc)
     end
 
     band_rpc(band_cap, svc, 'apply', {}, slow)
-    svc:obs_log('info', { what = 'band_config_applied' })
+    svc:obs_log('debug', { what = 'band_config_applied' })
 end
 
 ------------------------------------------------------------------------
@@ -488,7 +504,16 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
 
     -- 8. Apply
     if not radio_rpc(radio_cap, radio_id, svc, 'apply', {}) then return end
-    svc:obs_log('info', { what = 'radio_config_applied', radio = radio_id })
+    svc:obs_log('info', {
+        what = 'radio_ready',
+        summary = string.format('wifi radio %s ready band=%s channel=%s ssids=%d', tostring(radio_id), tostring(radio_cfg.band or '?'), tostring(radio_cfg.channel or '?'), ssids_for_radio(ssid_cfgs, radio_id)),
+        radio = radio_id,
+        band = radio_cfg.band,
+        channel = radio_cfg.channel,
+        htmode = radio_cfg.htmode,
+        txpower = radio_cfg.txpower,
+        ssids = ssids_for_radio(ssid_cfgs, radio_id),
+    })
 end
 
 ------------------------------------------------------------------------
@@ -724,6 +749,13 @@ local function on_cfg(ctx, msg)
         ctx.last_rev = rev or ctx.last_rev
         ctx.data     = data
         ctx.svc:obs_event('config_applied', { rev = rev })
+        ctx.svc:obs_log('info', {
+            what = 'wifi_config_applied',
+            summary = string.format('wifi config applied radios=%d ssids=%d', count_array(data.radios), count_array(data.ssids)),
+            rev = rev,
+            radios = count_array(data.radios),
+            ssids = count_array(data.ssids),
+        })
         reapply_all_radios(ctx)
         apply_band_config(ctx)
     end
@@ -733,10 +765,10 @@ local function on_radio_cap(ctx, msg)
     local id    = msg.topic and msg.topic[3]
     local state = msg.payload
     if state == 'added' then
-        ctx.svc:obs_log('info', { what = 'radio_cap_added', radio = id })
+        ctx.svc:obs_log('debug', { what = 'radio_cap_added', radio = id })
         spawn_radio_scope(ctx, id)
     elseif state == 'removed' then
-        ctx.svc:obs_log('info', { what = 'radio_cap_removed', radio = id })
+        ctx.svc:obs_log('debug', { what = 'radio_cap_removed', radio = id })
         remove_radio(ctx, id)
     end
 end
@@ -744,11 +776,11 @@ end
 local function on_band_cap(ctx, msg)
     local state = msg.payload
     if state == 'added' then
-        ctx.svc:obs_log('info', { what = 'band_cap_added' })
+        ctx.svc:obs_log('debug', { what = 'band_cap_added' })
         ctx.band_cap = cap_sdk.new_cap_ref(ctx.conn, 'band', '1')
         apply_band_config(ctx)
     elseif state == 'removed' then
-        ctx.svc:obs_log('info', { what = 'band_cap_removed' })
+        ctx.svc:obs_log('debug', { what = 'band_cap_removed' })
         ctx.band_cap = nil
     end
 end
@@ -756,11 +788,11 @@ end
 local function on_fs_cap(ctx, msg)
     local state = msg.payload
     if state == 'added' then
-        ctx.svc:obs_log('info', { what = 'fs_configs_cap_added' })
+        ctx.svc:obs_log('debug', { what = 'fs_configs_cap_added' })
         ctx.fs_configs_cap = cap_sdk.new_cap_ref(ctx.conn, 'fs', 'credentials')
         reapply_all_radios(ctx)
     elseif state == 'removed' then
-        ctx.svc:obs_log('info', { what = 'fs_configs_cap_removed' })
+        ctx.svc:obs_log('debug', { what = 'fs_configs_cap_removed' })
         ctx.fs_configs_cap = nil
     end
 end
@@ -777,7 +809,7 @@ function WifiService.start(conn, opts)
     local svc = base.new(conn, { name = opts and opts.name or 'wifi', env = opts and opts.env })
 
     svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
-    svc:obs_log('info', 'service start() entered')
+    svc:obs_log('debug', 'service start() entered')
     svc:status('starting')
     svc:spawn_heartbeat(10, 'tick')
 
@@ -790,7 +822,7 @@ function WifiService.start(conn, opts)
             svc:obs_log('error', { what = 'scope_failed', err = tostring(primary) })
         end
         svc:status('stopped', primary and { reason = tostring(primary) } or nil)
-        svc:obs_log('info', 'service stopped')
+        svc:obs_log('debug', 'service stopped')
     end)
 
     local ctx                = {
@@ -813,7 +845,7 @@ function WifiService.start(conn, opts)
     local fs_cap_listener    = cap_sdk.new_cap_listener(conn, 'fs', 'credentials')
 
     svc:status('running')
-    svc:obs_log('info', 'service running')
+    svc:obs_log('debug', 'service running')
 
     parent_scope:spawn(function() run_global_num_sta(conn, parent_scope) end)
 

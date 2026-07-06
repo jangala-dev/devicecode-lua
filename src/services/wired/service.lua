@@ -16,9 +16,241 @@ local tablex = require 'shared.table'
 
 local M = {}
 
+local OPERATOR_SETTLE_S = 12
+local COUNTER_FIRST_THRESHOLD = 25
+local COUNTER_REPEAT_S = 60
+
 local function now() return runtime.now() end
 local function copy(v) return tablex.deep_copy(v) end
 local function is_plain_table(v) return type(v) == 'table' and getmetatable(v) == nil end
+
+local function count_map(t)
+	local n = 0
+	for _ in pairs(t or {}) do n = n + 1 end
+	return n
+end
+
+local function count_where(t, pred)
+	local n = 0
+	for k, v in pairs(t or {}) do if pred(k, v) then n = n + 1 end end
+	return n
+end
+
+local function surface_label(id, rec)
+	return tostring((rec and (rec.operator_label or rec.name)) or id)
+end
+
+local function operator_settling(state)
+	local started = state and state.operator_started_at or nil
+	if not started then return false end
+	return (now() - started) < (state.operator_settle_s or OPERATOR_SETTLE_S)
+end
+
+local function link_status(link)
+	link = link or {}
+	local v = link.state or link.status
+	if v == nil and link.carrier ~= nil then v = link.carrier end
+	if v == true or v == 'up' or v == 'online' or v == 'available' then return 'up' end
+	if v == false or v == 'down' or v == 'offline' or v == 'unavailable' then return 'down' end
+	return nil
+end
+
+local function link_is_up(link)
+	return link_status(link) == 'up'
+end
+
+local function link_speed(link)
+	link = link or {}
+	return link.speed or link.speed_mbps
+end
+
+local function link_summary(link)
+	link = link or {}
+	local parts = {}
+	local speed = link_speed(link)
+	if speed then parts[#parts + 1] = 'speed=' .. tostring(speed) end
+	if link.duplex then parts[#parts + 1] = 'duplex=' .. tostring(link.duplex) end
+	return table.concat(parts, ' ')
+end
+
+local function segment_summary(rec)
+	local parts = {}
+	if rec and rec.segment_id then parts[#parts + 1] = 'segment=' .. tostring(rec.segment_id) end
+	if rec and rec.vlan_id then parts[#parts + 1] = 'vlan=' .. tostring(rec.vlan_id) end
+	return table.concat(parts, ' ')
+end
+
+local function has_observed_surfaces(surfaces)
+	for _, rec in pairs(surfaces or {}) do
+		if rec and rec.source and rec.source.exposure then return true end
+	end
+	return false
+end
+
+local function has_observed_link_state(surfaces)
+	for _, rec in pairs(surfaces or {}) do
+		if link_status(rec and rec.link or {}) ~= nil then return true end
+	end
+	return false
+end
+
+local function count_link_states(surfaces)
+	local up, down, unknown = 0, 0, 0
+	for _, rec in pairs(surfaces or {}) do
+		local st = link_status(rec and rec.link or {})
+		if st == 'up' then up = up + 1
+		elseif st == 'down' then down = down + 1
+		else unknown = unknown + 1 end
+	end
+	return up, down, unknown
+end
+
+local function log_wired_inventory(state, snap)
+	if not state.svc then return end
+	local surfaces = snap and snap.surfaces or {}
+	if count_map(surfaces) == 0 then return end
+	-- Configuration alone produces placeholder surfaces.  Wait until we have at
+	-- least one observed provider surface before calling the runtime inventory ready.
+	if not has_observed_surfaces(surfaces) or not has_observed_link_state(surfaces) then return end
+	local protected = count_where(surfaces, function(_, rec) return rec and rec.protected == true end)
+	local external = count_where(surfaces, function(_, rec) return rec and rec.source and rec.source.exposure == 'external' end)
+	local key = tostring(count_map(surfaces)) .. '|' .. tostring(protected) .. '|' .. tostring(external)
+	if state._operator_inventory_key == key then return end
+	state._operator_inventory_key = key
+	local up, down, unknown = count_link_states(surfaces)
+	state.svc:info('wired_ready', {
+		summary = string.format('wired ready surfaces=%d protected=%d external=%d links_up=%d links_down=%d links_unknown=%d', count_map(surfaces), protected, external, up, down, unknown),
+		surfaces = count_map(surfaces),
+		protected = protected,
+		external = external,
+		links_up = up,
+		links_down = down,
+		links_unknown = unknown,
+	})
+end
+
+local function log_protected_backhaul(state, snap)
+	if not state.svc then return end
+	state._operator_backhaul_key = state._operator_backhaul_key or {}
+	state._operator_backhaul_up_seen = state._operator_backhaul_up_seen or {}
+	local surfaces = (snap and snap.surfaces) or {}
+	if not has_observed_surfaces(surfaces) or not has_observed_link_state(surfaces) then return end
+	for id, rec in pairs(surfaces) do
+		if rec and rec.protected == true then
+			local avail = rec.availability or {}
+			local link = rec.link or {}
+			local lst = link_status(link)
+			local available = avail.state == 'available' or avail.state == 'ok'
+			local up = available and lst == 'up'
+			local state_now = up and 'up' or (lst or avail.state or 'unknown')
+			local key = tostring(state_now) .. '|' .. tostring(link.speed or '') .. '|' .. tostring(link.duplex or '') .. '|' .. tostring(avail.reason or '')
+			if state._operator_backhaul_key[id] ~= key then
+				local ls = link_summary(link)
+				if up then
+					state._operator_backhaul_key[id] = key
+					state._operator_backhaul_up_seen[id] = true
+					state.svc:info('backhaul_up', {
+						summary = string.format('wired backhaul %s link up%s', surface_label(id, rec), ls ~= '' and (' ' .. ls) or ''),
+						surface_id = id,
+						state = state_now,
+						speed = link_speed(link),
+						duplex = link.duplex,
+					})
+				else
+					local pending = (operator_settling(state) and not state._operator_backhaul_up_seen[id])
+						or (not state.operator_surface_baselined and not state._operator_backhaul_up_seen[id])
+						or (available and lst == nil)
+					if pending then
+						state.svc:debug('backhaul_pending', {
+							summary = string.format('wired backhaul %s pending state=%s%s', surface_label(id, rec), tostring(state_now), avail.reason and (' reason=' .. tostring(avail.reason)) or ''),
+							surface_id = id,
+							state = state_now,
+							reason = avail.reason,
+						})
+					else
+						state._operator_backhaul_key[id] = key
+						state.svc:warn('backhaul_degraded', {
+							summary = string.format('wired backhaul %s degraded state=%s%s%s', surface_label(id, rec), tostring(state_now), ls ~= '' and (' ' .. ls) or '', avail.reason and (' reason=' .. tostring(avail.reason)) or ''),
+							surface_id = id,
+							state = state_now,
+							reason = avail.reason,
+							speed = link_speed(link),
+							duplex = link.duplex,
+						})
+					end
+				end
+			end
+		end
+	end
+end
+
+local function counter_number(t, a, b)
+	local v = t and t[a]
+	if type(v) == 'table' and b then v = v[b] end
+	return tonumber(v) or 0
+end
+
+local function counter_total(c, key)
+	return counter_number(c, key) + counter_number(c, 'rx', key) + counter_number(c, 'tx', key)
+end
+
+local function log_counter_anomalies(state, snap)
+	if not state.svc then return end
+	state.logged_counter_state = state.logged_counter_state or {}
+	state.counter_windows = state.counter_windows or {}
+	local tnow = now()
+	for id, rec in pairs((snap and snap.counters) or {}) do
+		local counters = rec.counters or {}
+		local errors = counter_total(counters, 'errors')
+		local drops = counter_total(counters, 'drops')
+		local prev = state.logged_counter_state[id]
+		state.logged_counter_state[id] = { errors = errors, drops = drops }
+		if prev then
+			local de = errors - (prev.errors or 0)
+			local dd = drops - (prev.drops or 0)
+			if de > 0 or dd > 0 then
+				local surf = snap.surfaces and snap.surfaces[id]
+				-- Operator warnings are reserved for protected/backhaul surfaces.  Other
+				-- counters remain available as metrics and debug state.
+				if not (surf and surf.protected) then
+					state.svc:debug('counter_changed', { surface_id = id, errors_delta = de, drops_delta = dd })
+				else
+					local win = state.counter_windows[id] or { started_at = tnow, errors = 0, drops = 0, last_emit = nil }
+					win.errors = (win.errors or 0) + de
+					win.drops = (win.drops or 0) + dd
+					local first = win.last_emit == nil
+					local should_emit = (first and ((win.errors or 0) >= COUNTER_FIRST_THRESHOLD or (win.drops or 0) >= COUNTER_FIRST_THRESHOLD))
+						or ((not first) and (tnow - win.last_emit) >= COUNTER_REPEAT_S)
+					if should_emit then
+						local elapsed = math.max(1, math.floor(tnow - (win.started_at or tnow) + 0.5))
+						state.svc:warn(first and 'counter_anomaly' or 'counter_anomaly_continuing', {
+							summary = string.format('wired %s errors=+%d drops=+%d over=%ds', surface_label(id, surf), win.errors or 0, win.drops or 0, elapsed),
+							surface_id = id,
+							errors_delta = win.errors or 0,
+							drops_delta = win.drops or 0,
+							protected = true,
+							elapsed_s = elapsed,
+						})
+						win = { started_at = tnow, errors = 0, drops = 0, last_emit = tnow }
+					end
+					state.counter_windows[id] = win
+				end
+			end
+		else
+			local win = state.counter_windows[id]
+			if win and win.last_emit and (tnow - win.last_emit) >= COUNTER_REPEAT_S and (win.errors or 0) == 0 and (win.drops or 0) == 0 then
+				local surf = snap.surfaces and snap.surfaces[id]
+				if surf and surf.protected then
+					state.svc:info('counter_anomaly_stable', {
+						summary = string.format('wired %s counters stable for %ds', surface_label(id, surf), COUNTER_REPEAT_S),
+						surface_id = id,
+					})
+				end
+				state.counter_windows[id] = nil
+			end
+		end
+	end
+end
 
 local function new_service_id()
 	return ('wired-%d-%d'):format(os.time(), math.random(1, 1000000))
@@ -172,9 +404,12 @@ local function observed_vlan_set(attachment)
 	local set, list = {}, {}
 	attachment = attachment or {}
 	add_vlan_value(set, list, attachment.vlan)
+	add_vlan_value(set, list, attachment.pvid)
 	add_vlan_value(set, list, attachment.vlans)
 	add_vlan_value(set, list, attachment.tagged)
 	add_vlan_value(set, list, attachment.untagged)
+	add_vlan_value(set, list, attachment.tagged_vlans)
+	add_vlan_value(set, list, attachment.untagged_vlans)
 	table.sort(list)
 	return set, list
 end
@@ -241,6 +476,60 @@ local function expand_user_segments(attachment, segments)
 		for i = 1, #us do out[#out + 1] = us[i] end
 	end
 	return out
+end
+
+local function segment_ids_for_vlans(segments, vlan_list)
+	local out, seen = {}, {}
+	for _, vlan in ipairs(vlan_list or {}) do
+		for sid, seg in pairs(segments or {}) do
+			if segment_vlan_id(seg) == vlan and not seen[sid] then
+				seen[sid] = true
+				out[#out + 1] = sid
+			end
+		end
+	end
+	table.sort(out)
+	return out
+end
+
+local function connector_label(binding)
+	local c = binding and binding.connector or nil
+	if type(c) == 'string' and c ~= '' then return c end
+	return nil
+end
+
+local function infer_surface_semantics(_surface_id, desired, binding, observed_attachment, segments)
+	local inferred = {}
+	local observed, observed_list = observed_vlan_set(observed_attachment or {})
+	local carried = segment_ids_for_vlans(segments, observed_list)
+	if #carried > 0 then inferred.carried_segments = carried end
+
+	if desired and desired.protected == true then
+		inferred.role = 'protected-trunk'
+		inferred.label = desired.name
+		return inferred
+	end
+
+	local wan_vlan = segments and segments.wan and segment_vlan_id(segments.wan) or nil
+	local untagged = observed_attachment and observed_attachment.untagged_vlans or nil
+	local pvid = normalise_vlan_id(observed_attachment and observed_attachment.pvid)
+	local untagged_wan = false
+	if wan_vlan then
+		if pvid == wan_vlan then untagged_wan = true end
+		for _, vlan in ipairs(untagged or {}) do
+			if normalise_vlan_id(vlan) == wan_vlan then untagged_wan = true end
+		end
+	end
+
+	if wan_vlan and observed[wan_vlan] and untagged_wan then
+		inferred.role = 'wan-uplink'
+		inferred.segment_id = 'wan'
+		inferred.vlan_id = wan_vlan
+		local c = connector_label(binding)
+		inferred.label = c and ('WAN uplink ' .. c) or 'WAN uplink'
+	end
+
+	return inferred
 end
 
 local function validate_observed_capabilities(violations, surface_id, desired, binding, p_surface)
@@ -363,12 +652,18 @@ local function rebuild_derived(snap)
 		elseif desired.attachment.mode == 'trunk' then topology.trunks[id] = { surface_id = id, segments = copy(desired.attachment.segments), required_segments = copy(desired.attachment.required_segments), user_segments = copy(desired.attachment.user_segments), expanded_user_segments = expand_user_segments(desired.attachment, segments) }
 		end
 
+		local inferred = infer_surface_semantics(id, desired, binding, observed_attachment, segments)
 		surfaces[id] = {
 			surface_id = id,
 			name = desired.name,
+			operator_label = inferred.label,
 			description = desired.description,
 			kind = desired.kind,
-			role = desired.role,
+			role = inferred.role or desired.role,
+			configured_role = desired.role,
+			segment_id = inferred.segment_id,
+			vlan_id = inferred.vlan_id,
+			carried_segments = inferred.carried_segments,
 			enabled = desired.enabled,
 			protected = desired.protected,
 			source = source_from_binding(binding),
@@ -418,6 +713,66 @@ local function mark_counters_for_provider(dirty, snap, provider_id)
 	return marked
 end
 
+
+local function log_surface_transitions(state, before, after)
+	if not state.svc then return end
+	local after_surfaces = after and after.surfaces or {}
+	if not has_observed_surfaces(after_surfaces) or not has_observed_link_state(after_surfaces) then return end
+
+	local function key_for(rec)
+		local link = rec and rec.link or {}
+		return tostring(link_status(link) or 'unknown') .. '|' .. tostring(link_speed(link) or '') .. '|' .. tostring(link.duplex or '')
+	end
+
+	-- First observed provider snapshot establishes the baseline.  Do not narrate
+	-- every initially-down LAN port as a transition.
+	if not state.operator_surface_baselined then
+		state.operator_surface_baselined = true
+		local up, down, unknown = count_link_states(after_surfaces)
+		for id, rec in pairs(after_surfaces) do state.logged_surface_state[id] = key_for(rec) end
+		state.svc:info('wired_ports_ready', {
+			summary = string.format('wired ports observed links_up=%d links_down=%d links_unknown=%d', up, down, unknown),
+			links_up = up,
+			links_down = down,
+			links_unknown = unknown,
+		})
+		return
+	end
+
+	for id, rec in pairs(after_surfaces or {}) do
+		local link = rec and rec.link or {}
+		local lst = link_status(link)
+		local key = key_for(rec)
+		if state.logged_surface_state[id] ~= key then
+			local prev_key = state.logged_surface_state[id]
+			state.logged_surface_state[id] = key
+			if lst == nil then
+				state.svc:debug('surface_link_unknown', { surface_id = id, previous = prev_key, current = key })
+			else
+				local up = lst == 'up'
+					local important = rec and (rec.protected == true or rec.role == 'wan-uplink')
+					local level = (important and not up) and 'warn' or 'info'
+				local what = up and 'link_up' or 'link_down'
+					local ls = link_summary(link)
+					local ss = segment_summary(rec)
+				state.svc:log(level, what, {
+						summary = string.format('wired %s link %s%s%s', surface_label(id, rec), up and 'up' or 'down', ls ~= '' and (' ' .. ls) or '', ss ~= '' and (' ' .. ss) or ''),
+					surface_id = id,
+					name = rec and rec.name,
+					operator_label = rec and rec.operator_label,
+					role = rec and rec.role,
+					segment_id = rec and rec.segment_id,
+					vlan_id = rec and rec.vlan_id,
+					protected = rec and rec.protected,
+					link_state = lst,
+					speed = link_speed(link),
+					duplex = link.duplex,
+				})
+			end
+		end
+	end
+end
+
 local function publish(state)
 	local snap = state.model:snapshot()
 	local ok, err, changed = publisher.publish_dirty_now(state.conn, snap, state.published, state.dirty)
@@ -435,6 +790,7 @@ end
 local function apply_config(state, ev)
 	local intent, err = config_mod.normalise(ev and ev.raw or nil, { rev = ev and ev.rev, generation = ev and ev.generation })
 	if not intent then return nil, err end
+	local before = state.model:snapshot()
 	local _changed, _version, uerr = state.model:update(function (snap)
 		snap.generation = (ev and ev.generation) or (snap.generation + 1)
 		snap.config = { rev = intent.rev, schema = intent.schema, config_schema = intent.config_schema, version = intent.version }
@@ -444,6 +800,9 @@ local function apply_config(state, ev)
 	end)
 	if uerr ~= nil then return nil, uerr end
 	publisher.mark_all(state.dirty)
+	if state.svc then state.svc:info('wired_config_applied', { summary = string.format('wired config applied surfaces=%s', tostring(count_map(intent.surfaces or {}))), generation = intent.generation, surfaces = count_map(intent.surfaces or {}) }) end
+	-- Runtime inventory is narrated after provider observations arrive; config
+	-- alone only tells us intended surfaces.
 	return publish(state)
 end
 
@@ -479,6 +838,7 @@ local function apply_observation_event(state, ev)
 	if ev and ev.op == 'replay_done' then return true, nil end
 	local changed_provider_id
 	local observation_changed = false
+	local before = state.model:snapshot()
 	local _changed, _version, uerr = state.model:update(function (snap)
 		local changed, provider_id = update_observation_from_event(snap, ev)
 		changed_provider_id = provider_id
@@ -489,6 +849,10 @@ local function apply_observation_event(state, ev)
 	if uerr ~= nil then return nil, uerr end
 	if not observation_changed then return true, nil end
 	local snap = state.model:snapshot()
+	log_surface_transitions(state, before, snap)
+	log_wired_inventory(state, snap)
+	log_protected_backhaul(state, snap)
+	log_counter_anomalies(state, snap)
 	local topic = ev and ev.topic or {}
 	if topic[6] == 'state' and topic[7] == 'counters' then
 		if not mark_counters_for_provider(state.dirty, snap, changed_provider_id) then
@@ -522,12 +886,17 @@ function M.build_state(scope, opts)
 		scope = scope,
 		conn = conn,
 		model = opts.model or model_mod.new(opts.service_id or new_service_id()),
+		svc = opts.svc,
 		config_watch = cfg,
 		net_watch = net_watch,
 		assembly_watch = assembly_watch,
 		observation_watch = observation_watch,
 		published = publisher.new_state(),
 		dirty = publisher.mark_all(publisher.new_dirty_state()),
+		logged_surface_state = {},
+		logged_counter_state = {},
+		operator_started_at = now(),
+		operator_settle_s = tonumber(opts.operator_settle_s) or OPERATOR_SETTLE_S,
 	}
 	scope:finally(function ()
 		cfg:close()
@@ -573,6 +942,8 @@ function M.run(scope, opts)
 	opts = opts or {}
 	local state, err = M.build_state(scope, opts)
 	if not state then error(err or 'wired service start failed', 0) end
+	log_wired_inventory(state, state.model:snapshot())
+	log_protected_backhaul(state, state.model:snapshot())
 	publish(state)
 	while true do
 		local ev = fibers.perform(M.next_event_op(state))

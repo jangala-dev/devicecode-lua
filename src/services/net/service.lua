@@ -287,6 +287,13 @@ local function start_apply_for_intent(state, intent, reason)
 	if ok_pub ~= true then return nil, pub_err end
 
 	obs_event(state.svc, 'apply_started', { generation = generation, apply_id = apply_id, rev = apply_intent.rev, reason = reason })
+	obs_log(state.svc, 'info', {
+		what = 'apply_started',
+		summary = string.format('network apply %s started generation=%s reason=%s', tostring(apply_id), tostring(generation), tostring(reason or 'unknown')),
+		generation = generation,
+		apply_id = apply_id,
+		reason = reason,
+	})
 
 	local handle, err = apply_runtime.start_apply {
 		lifetime_scope = state.scope,
@@ -459,7 +466,19 @@ local function handle_apply_done(state, ev)
 	mark_apply_dirty(state)
 	set_status(state.svc, apply_ok and 'running' or 'degraded', reason and { reason = reason } or nil)
 	local started_at = state.model:snapshot().apply and state.model:snapshot().apply.started_at or nil
-	obs_event(state.svc, 'apply_completed', { generation = ev.generation, apply_id = ev.apply_id, ok = apply_ok, reason = reason, elapsed_ms = elapsed_ms(started_at) })
+	local apply_elapsed_ms = elapsed_ms(started_at)
+	obs_event(state.svc, 'apply_completed', { generation = ev.generation, apply_id = ev.apply_id, ok = apply_ok, reason = reason, elapsed_ms = apply_elapsed_ms })
+	obs_log(state.svc, apply_ok and 'info' or 'warn', {
+		what = apply_ok and 'apply_completed' or 'apply_failed',
+		summary = apply_ok
+			and string.format('network apply %s completed in %.1fs', tostring(ev.apply_id), (apply_elapsed_ms or 0) / 1000)
+			or string.format('network apply %s failed: %s', tostring(ev.apply_id), tostring(reason or 'unknown')),
+		generation = ev.generation,
+		apply_id = ev.apply_id,
+		ok = apply_ok,
+		reason = reason,
+		elapsed_ms = apply_elapsed_ms,
+	})
 
 	local ok_pub, pub_err = publish_snapshot(state)
 	if ok_pub ~= true then return nil, pub_err end
@@ -529,12 +548,29 @@ local function handle_gsm_uplink_changed(state, ev)
 	end)
 	mark_domain_dirty(state, 'sources')
 	mark_summary_dirty(state)
+	local ifname = payload.linux and payload.linux.ifname or payload.interface
 	obs_event(state.svc, 'gsm_uplink_changed', {
 		role = role,
 		state = payload.state,
 		connected = payload.connected == true,
-		ifname = payload.linux and payload.linux.ifname or payload.interface,
+		ifname = ifname,
 	})
+	local uplink_key = tostring(role) .. '|' .. tostring(payload.state) .. '|' .. tostring(payload.connected == true) .. '|' .. tostring(ifname or '')
+	state._operator_gsm_uplink = state._operator_gsm_uplink or {}
+	if state._operator_gsm_uplink[role] ~= uplink_key then
+		state._operator_gsm_uplink[role] = uplink_key
+		local expected_online = payload.expected_online == true or payload.expected_connected == true
+		local level = (payload.connected == true or not expected_online) and 'info' or 'warn'
+		obs_log(state.svc, level, {
+			what = 'gsm_uplink_changed',
+			summary = string.format('cellular uplink %s %s%s%s', tostring(role), tostring(payload.state or (payload.connected and 'connected' or 'disconnected')), ifname and (' ifname=' .. tostring(ifname)) or '', expected_online and ' expected=true' or ''),
+			role = role,
+			state = payload.state,
+			connected = payload.connected == true,
+			expected_online = expected_online or nil,
+			ifname = ifname,
+		})
+	end
 	local structural_ok, structural_err = true, nil
 	if state.base_intent then
 		local fp = realised_fingerprint(state, state.base_intent)
@@ -543,6 +579,17 @@ local function handle_gsm_uplink_changed(state, ev)
 			next_intent.generation = state.next_generation
 			state.next_generation = state.next_generation + 1
 			state.base_intent = next_intent
+			local active_apply = state.active_apply
+			if active_apply and state.svc then
+				obs_log(state.svc, 'warn', {
+					what = 'apply_superseded',
+					summary = string.format('network apply %s superseded by generation=%s reason=gsm_uplink_binding_changed', tostring(active_apply.apply_id or '?'), tostring(next_intent.generation)),
+					apply_id = active_apply.apply_id,
+					generation = active_apply.generation,
+				next_generation = next_intent.generation,
+					reason = 'gsm_uplink_binding_changed',
+				})
+			end
 			cancel_active_generation(state, 'gsm_uplink_binding_changed')
 			structural_ok, structural_err = accept_pending_intent(state, next_intent, 'gsm_uplink_binding_changed')
 			if structural_ok == true then structural_ok, structural_err = reconcile_apply_admission(state, 'gsm_uplink_binding_changed') end
@@ -643,14 +690,18 @@ local function handle_speedtest_done(state, ev)
 		local snap = state.model:snapshot()
 		local rec = snap.wan_runtime and snap.wan_runtime.speedtests and snap.wan_runtime.speedtests[ev.uplink_id]
 		if rec then
+			local mbps = rec.ok == true and tonumber(rec.peak_mbps) or nil
 			obs_log(state.svc, rec.ok == true and 'info' or 'warn', {
 				what = 'speedtest_completed',
+				summary = rec.ok == true
+					and string.format('speedtest %s on %s/%s: %.1f Mbps', tostring(ev.uplink_id), tostring(rec.interface or '?'), tostring(rec.device or '?'), mbps or 0)
+					or string.format('speedtest %s failed: %s', tostring(ev.uplink_id), tostring(rec.err or 'unknown')),
 				uplink_id = ev.uplink_id,
 				interface = rec.interface,
 				device = rec.device,
 				ok = rec.ok == true,
 				err = rec.err,
-				peak_mbps = rec.ok == true and rec.peak_mbps or nil,
+				peak_mbps = mbps,
 			})
 		end
 		if rec and rec.ok == true and rec.peak_mbps ~= nil and state.svc and type(state.svc.obs_metric) == 'function' then
@@ -669,6 +720,63 @@ end
 
 local function handle_live_weights_done(state, ev)
 	local ok, err = wan_manager.handle_live_weights_done(state, ev)
+	local result = ev and ev.result and (ev.result.result or ev.result) or {}
+	if ok == true and err ~= 'stale' then
+		if result.ok == true then
+			state._live_weight_failure_log = nil
+			local detail = type(result.detail) == 'table' and result.detail or {}
+			local effective = type(detail.members) == 'table' and detail.members or {}
+			local skipped = type(detail.skipped_members) == 'table' and detail.skipped_members or {}
+			local effective_names, skipped_names = {}, {}
+			for i = 1, #effective do
+				effective_names[#effective_names + 1] = tostring(effective[i].semantic_interface or effective[i].interface or effective[i].id or '?')
+			end
+			for i = 1, #skipped do
+				skipped_names[#skipped_names + 1] = tostring(skipped[i].semantic_interface or skipped[i].interface or skipped[i].id or '?')
+			end
+			local suffix = ''
+			if #skipped_names > 0 then
+				suffix = ' effective=' .. (#effective_names > 0 and table.concat(effective_names, ',') or '?')
+					.. ' skipped=' .. table.concat(skipped_names, ',') .. ' reason=no_mwan3_mark'
+			end
+			obs_log(state.svc, 'info', {
+				what = 'live_weights_applied',
+				summary = string.format('live weights applied generation=%s%s', tostring(ev.generation or '?'), suffix),
+				generation = ev.generation,
+				weight_apply_id = ev.weight_apply_id,
+				skipped_members = skipped,
+				effective_members = effective,
+			})
+		else
+			local signature = tostring(ev.generation or '?') .. ':' .. tostring(result.err or 'unknown')
+			local rec = state._live_weight_failure_log
+			local tnow = now()
+			if not rec or rec.signature ~= signature then
+				rec = { signature = signature, repeats = 0, first_at = tnow, last_logged_at = tnow }
+				state._live_weight_failure_log = rec
+				obs_log(state.svc, 'warn', {
+					what = 'live_weights_failed',
+					summary = string.format('live weights failed generation=%s: %s', tostring(ev.generation or '?'), tostring(result.err or 'unknown')),
+					generation = ev.generation,
+					weight_apply_id = ev.weight_apply_id,
+					err = result.err,
+				})
+			else
+				rec.repeats = (rec.repeats or 0) + 1
+				if tnow - (rec.last_logged_at or rec.first_at or tnow) >= 60 then
+					rec.last_logged_at = tnow
+					obs_log(state.svc, 'warn', {
+						what = 'live_weights_still_failing',
+						summary = string.format('live weights still failing generation=%s (%d repeat%s): %s', tostring(ev.generation or '?'), rec.repeats, rec.repeats == 1 and '' or 's', tostring(result.err or 'unknown')),
+						generation = ev.generation,
+						weight_apply_id = ev.weight_apply_id,
+						repeats = rec.repeats,
+						err = result.err,
+					})
+				end
+			end
+		end
+	end
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end
@@ -829,7 +937,7 @@ function M.run(scope, params)
 	if svc then
 		svc:spawn_heartbeat(params.heartbeat_s or 30.0, 'tick')
 		set_status(svc, 'starting')
-		obs_log(svc, 'info', { what = 'service_start' })
+		obs_log(svc, 'debug', { what = 'service_start' })
 	end
 
 	set_model_state(state, 'waiting_for_config', 'no_config')
