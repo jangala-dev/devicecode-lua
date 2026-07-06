@@ -991,7 +991,7 @@ end
 
 function Manager:_run_restart_entry(entry, trace)
 	local wait = entry.wait ~= false
-	log_manager(self, 'info', (function ()
+	log_manager(self, 'debug', (function ()
 		local p = trace_fields(trace)
 		p.what = wait and 'uci_activation_begin' or 'uci_activation_schedule_begin'
 		p.argv = array_copy(entry.argv or {})
@@ -1001,7 +1001,7 @@ function Manager:_run_restart_entry(entry, trace)
 	if wait then
 		local t0 = fibers.now()
 		local ok, err = self._run_cmd(entry.argv)
-		log_manager(self, ok == true and 'info' or 'warn', (function ()
+		log_manager(self, ok == true and 'debug' or 'warn', (function ()
 			local p = trace_fields(trace)
 			p.what = 'uci_activation_done'
 			p.argv = array_copy(entry.argv or {})
@@ -1085,7 +1085,7 @@ function Manager:_apply_transaction(item)
 	local records = tx.records or {}
 	local packages = tx.packages or record_packages(records)
 	local trace = tx.trace or {}
-	log_manager(self, 'info', (function ()
+	log_manager(self, 'debug', (function ()
 		local p = trace_fields(trace)
 		p.what = 'uci_transaction_begin'
 		p.packages = packages
@@ -1190,7 +1190,7 @@ function Manager:_apply_transaction(item)
 	if not failed then
 		phase = fibers.now()
 		local restart_entries = trim_restarts(record_results)
-		log_manager(self, 'info', (function ()
+		log_manager(self, 'debug', (function ()
 			local p = trace_fields(trace)
 			p.what = 'uci_activation_phase_begin'
 			p.entries = #restart_entries
@@ -1220,7 +1220,7 @@ function Manager:_apply_transaction(item)
 			end
 		end
 		result.timings.activation_ms = elapsed_ms(phase)
-		log_manager(self, failed and 'warn' or 'info', (function ()
+		log_manager(self, failed and 'warn' or 'debug', (function ()
 			local p = trace_fields(trace)
 			p.what = 'uci_activation_phase_done'
 			p.ok = failed == nil
@@ -1270,7 +1270,7 @@ function Manager:_apply_transaction(item)
 	end
 
 	result.timings.total_ms = elapsed_ms(t0)
-	log_manager(self, result.ok == true and 'info' or 'warn', (function ()
+	log_manager(self, result.ok == true and 'debug' or 'warn', (function ()
 		local p = trace_fields(trace)
 		p.what = 'uci_transaction_done'
 		p.ok = result.ok == true

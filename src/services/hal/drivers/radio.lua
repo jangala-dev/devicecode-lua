@@ -440,7 +440,6 @@ local function on_client_event(emit_ch, id, connected, ev)
         connected[iface][mac] = nil
     end
 
-    print("emitted event")
 
     emit_event(emit_ch, id, 'client_event', {
         mac       = mac,

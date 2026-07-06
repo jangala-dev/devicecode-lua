@@ -225,7 +225,6 @@ local function add_model_funcs(backend, identity_info)
     for _, func_def in ipairs(funcs) do
         for _, cond in ipairs(func_def.conditionals) do
             if cond(backend, identity_info) then
-                print("attaching method:", func_def.name, "to modem", identity_info.model)
                 backend[func_def.name] = func_def.func
                 break
             end

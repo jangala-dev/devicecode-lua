@@ -141,7 +141,7 @@ function M.run_request_loop(ch, methods, logger, what)
 		local trace_control = loop_name:match('^network_') ~= nil
 		local req_t0 = fibers.now()
 		if trace_control then
-			dlog(logger, 'info', {
+			dlog(logger, 'debug', {
 				what = loop_name .. '_request_begin',
 				verb = tostring(request.verb),
 			})
@@ -157,7 +157,7 @@ function M.run_request_loop(ch, methods, logger, what)
 			}))
 			if which == 'cancel' and caller_abandoned(a) then
 				caller_cancelled = true
-				dlog(logger, trace_control and 'warn' or 'debug', {
+				dlog(logger, 'debug', {
 					what = loop_name .. '_request_cancelled',
 					verb = tostring(request.verb),
 					reason = tostring(a),
@@ -166,7 +166,9 @@ function M.run_request_loop(ch, methods, logger, what)
 			else
 				ok, value_or_err = a, b
 				if trace_control then
-					dlog(logger, ok == true and 'info' or 'warn', {
+					local method_level = ok == true and 'debug' or 'warn'
+					if loop_name == 'network_config' and (request.verb == 'apply' or request.verb == 'apply_live_weights') then method_level = 'debug' end
+					dlog(logger, method_level, {
 						what = loop_name .. '_method_done',
 						verb = tostring(request.verb),
 						ok = ok == true,
@@ -178,7 +180,9 @@ function M.run_request_loop(ch, methods, logger, what)
 		else
 			ok, value_or_err = perform(M.evaluate_request_op(methods, request))
 			if trace_control then
-				dlog(logger, ok == true and 'info' or 'warn', {
+				local method_level = ok == true and 'debug' or 'warn'
+				if loop_name == 'network_config' and (request.verb == 'apply' or request.verb == 'apply_live_weights') then method_level = 'debug' end
+				dlog(logger, method_level, {
 					what = loop_name .. '_method_done',
 					verb = tostring(request.verb),
 					ok = ok == true,
@@ -202,7 +206,7 @@ function M.run_request_loop(ch, methods, logger, what)
 					if caller_abandoned(pre_reply_cancel) then
 						caller_cancelled = true
 						if trace_control then
-							dlog(logger, 'warn', {
+							dlog(logger, 'debug', {
 								what = loop_name .. '_request_detached',
 								verb = tostring(request.verb),
 								reason = tostring(pre_reply_cancel),
@@ -223,7 +227,7 @@ function M.run_request_loop(ch, methods, logger, what)
 					if which == 'cancel' and caller_abandoned(a) then
 						caller_cancelled = true
 						if trace_control then
-							dlog(logger, 'warn', {
+							dlog(logger, 'debug', {
 								what = loop_name .. '_reply_cancelled',
 								verb = tostring(request.verb),
 								reason = tostring(a),
@@ -246,7 +250,7 @@ function M.run_request_loop(ch, methods, logger, what)
 					reply_elapsed_ms = elapsed_ms(reply_t0),
 				})
 			elseif trace_control and not caller_cancelled then
-				dlog(logger, 'info', {
+				dlog(logger, 'debug', {
 					what = loop_name .. '_reply_done',
 					verb = tostring(request.verb),
 					elapsed_ms = elapsed_ms(req_t0),

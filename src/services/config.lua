@@ -49,7 +49,7 @@ function M.start(conn, opts)
 	local persist_retry_max_s     = numopt('persist_retry_max_s', 30.0)
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
-	svc:obs_log('info', 'service start() entered')
+	svc:obs_log('debug', 'service start() entered')
 	svc:status('starting')
 
 	svc:spawn_heartbeat(heartbeat_s, 'tick')
@@ -75,6 +75,34 @@ function M.start(conn, opts)
 
 	-- current[svc] = { rev=int, data=table }
 	local current   = {}
+
+	local function count_current()
+		local n = 0
+		local keys = {}
+		for k in pairs(current or {}) do n = n + 1; keys[#keys + 1] = tostring(k) end
+		table.sort(keys)
+		return n, table.concat(keys, ',')
+	end
+
+	local function log_config_summary(reason)
+		local n, keys = count_current()
+		if reason == 'loaded' then
+			svc:info('config_loaded', {
+				summary = string.format('config loaded target=%s services=%d', tostring(STATE_KEY), n),
+				reason = reason,
+				target = STATE_KEY,
+				services = n,
+			})
+		else
+			svc:info('config_summary', {
+				summary = string.format('config summary target=%s services=%d', tostring(STATE_KEY), n),
+				reason = reason,
+				target = STATE_KEY,
+				services = n,
+				keys = keys ~= '' and keys or nil,
+			})
+		end
+	end
 
 	local function publish_all_retained()
 		return state.publish_all_retained(conn, svc, current)
@@ -115,6 +143,7 @@ function M.start(conn, opts)
 
 		current = decoded
 		publish_all_retained()
+		log_config_summary('loaded')
 		svc:obs_event('load_end', { ok = true })
 		return true
 	end
@@ -188,6 +217,7 @@ function M.start(conn, opts)
 		end
 
 		svc:obs_event('persist_end', { ok = true })
+		log_config_summary('persisted')
 		return true, nil
 	end
 
@@ -232,10 +262,10 @@ function M.start(conn, opts)
 	end)
 
 	local set_ep = conn:bind({ 'cmd', 'config', 'set' }, { queue_len = 50 })
-	svc:obs_log('info', 'bound cmd/config/set')
+	svc:obs_log('debug', 'bound cmd/config/set')
 
 	svc:status('running')
-	svc:obs_log('info', 'service running')
+	svc:obs_log('debug', 'service running')
 
 	while true do
 		local req, err = perform(set_ep:recv_op())

@@ -271,7 +271,7 @@ function FilesystemManager.apply_config(namespaces)
         FilesystemManager.drivers["main"] = driver
         FilesystemManager.last_names = names
         emit_added_device(names, capabilities)
-        FilesystemManager.logger:info({ what = 'applied_config_created_driver', namespaces = names })
+        FilesystemManager.logger:debug({ what = 'applied_config_created_driver', namespaces = names })
     end)
 
     if not ok then

@@ -64,6 +64,20 @@ local function config_from_value(value, opts)
 	})
 end
 
+
+local function sorted_component_ids(cfg)
+	local ids = {}
+	for id in pairs((cfg and cfg.components) or {}) do ids[#ids + 1] = tostring(id) end
+	table.sort(ids)
+	return ids
+end
+
+local function update_ready_summary(self)
+	local ids = sorted_component_ids(self and self._config or nil)
+	local suffix = (#ids > 0) and (' components=' .. table.concat(ids, ',')) or ''
+	return 'update ready; job runtime available' .. suffix
+end
+
 local function pending_for_state(state, reason)
 	if state == 'waiting_for_job_store' then
 		return {
@@ -110,6 +124,14 @@ local function update_model_state(self, state, reason)
 		if snapshot and snapshot.pending ~= nil then extra.pending = snapshot.pending end
 		extra.dependencies = self._deps:snapshot()
 		self._svc:status(state, extra)
+		if self._last_logged_state ~= state or self._last_logged_reason ~= reason then
+			local level = state == 'failed' and 'error' or state == 'degraded' and 'warn' or ready and 'info' or 'debug'
+			local what = ready and 'update_ready' or 'update_state_changed'
+			local summary = ready and update_ready_summary(self) or string.format('update %s%s', tostring(state), reason and (' (' .. tostring(reason) .. ')') or '')
+			self._svc:log(level, what, { summary = summary, state = state, ready = ready, reason = reason, components = table.concat(sorted_component_ids(self._config), ',') })
+			self._last_logged_state = state
+			self._last_logged_reason = reason
+		end
 	end
 end
 
@@ -221,6 +243,8 @@ local function start_generation(self, cfg, reason)
 	}, {
 		label = 'update_generation_completion_report_failed',
 	})
+
+	if self._svc then self._svc:debug('update_generation_started', { summary = string.format('update runtime generation %s started%s', tostring(generation_id), reason and (' (' .. tostring(reason) .. ')') or ''), generation = generation_id, reason = reason }) end
 
 	local handle, err = scoped_work.start {
 		lifetime_scope = self._scope,
@@ -361,12 +385,14 @@ local function handle_generation_done(self, ev)
 	end
 
 	if ev.status == 'ok' then
+		if self._svc then self._svc:info('update_generation_completed', { generation = ev.generation, status = ev.status }) end
 		update_model_state(self, 'stopped', 'generation_completed')
 		self._complete = true
 		return
 	end
 
 	if ev.status == 'cancelled' then
+		if self._svc then self._svc:warn('update_generation_cancelled', { generation = ev.generation, reason = ev.primary or 'generation_cancelled' }) end
 		update_model_state(self, 'stopped', ev.primary or 'generation_cancelled')
 		self._complete = true
 		return
@@ -377,6 +403,7 @@ local function handle_generation_done(self, ev)
 		handle_artifact_route_missing(self, reason)
 		return
 	end
+	if self._svc then self._svc:error('update_generation_failed', { generation = ev.generation, reason = reason }) end
 	update_model_state(self, 'failed', reason)
 	error('update generation failed: ' .. tostring(reason), 0)
 end

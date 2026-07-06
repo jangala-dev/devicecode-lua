@@ -85,7 +85,7 @@ local function start_radio(name, radio_cfg, dev_ev_ch, cap_emit_ch)
     end
 
     dev_ev_ch:put(device_event)
-    log:info({ what = 'radio_driver_started', name = name })
+    log:debug({ what = 'radio_driver_started', name = name })
 end
 
 ---Stop a single radio driver and emit device-removed event.
@@ -115,7 +115,7 @@ local function stop_radio(name, dev_ev_ch)
         return
     end
     dev_ev_ch:put(device_event)
-    log:info({ what = 'radio_driver_stopped', name = name })
+    log:debug({ what = 'radio_driver_stopped', name = name })
 end
 
 ---Start the band driver and emit device-added event.
@@ -161,7 +161,7 @@ local function start_band(dev_ev_ch, cap_emit_ch)
     end
 
     dev_ev_ch:put(device_event)
-    log:info({ what = 'band_driver_started' })
+    log:debug({ what = 'band_driver_started' })
 end
 
 ---Reconcile running radio drivers against a new config.
@@ -189,7 +189,7 @@ local function reconcile_radios(config, dev_ev_ch, cap_emit_ch)
         end
     end
     for _, s in ipairs(to_stop) do
-        log:info({ what = 'stopping_radio', name = s.name, reason = s.reason })
+        log:debug({ what = 'stopping_radio', name = s.name, reason = s.reason })
         stop_radio(s.name, dev_ev_ch)
     end
 
@@ -240,7 +240,7 @@ local function manager_fiber(scope, dev_ev_ch, cap_emit_ch)
         if source == 'cancel' then
             break
         elseif source == 'config' then
-            log:info({ what = 'apply_config_received' })
+            log:debug({ what = 'apply_config_received' })
             -- reconcile_radios handles both initial setup and subsequent updates
             reconcile_radios(val, dev_ev_ch, cap_emit_ch)
         elseif source == 'driver_fault' then

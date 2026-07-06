@@ -47,6 +47,21 @@ local function recv_payload(sub, label)
 	return msg.payload
 end
 
+local function recv_payload_where(sub, pred, label)
+	local deadline = label or 'timed out waiting for matching message'
+	for _ = 1, 20 do
+		local which, msg, err = fibers.perform(op.named_choice({
+			msg = sub:recv_op(),
+			timeout = sleep.sleep_op(0.1),
+		}))
+		if which ~= 'msg' then error(deadline, 2) end
+		ok(msg, err or deadline)
+		local payload = msg.payload
+		if pred(payload) then return payload end
+	end
+	error(deadline, 2)
+end
+
 local function table_empty(t)
 	for _ in pairs(t or {}) do return false end
 	return true
@@ -127,7 +142,7 @@ function M.test_http_failure_recovery_is_visible_and_resets_suppression()
 		ok(saw_suppressed, 'second equivalent failure should be suppressed within the rate limit window')
 
 		ok(svc:_record_http_recovery({ operation = 'exchange' }))
-		local recovery = recv_payload(info_sub, 'expected recovery log')
+		local recovery = recv_payload_where(info_sub, function (payload) return payload and payload.what == 'request_recovered' end, 'expected recovery log')
 		eq(recovery.what, 'request_recovered')
 		eq(recovery.operation, 'exchange')
 		ok(table_empty(svc._obs.failure_windows), 'recovery must clear failure suppression windows')

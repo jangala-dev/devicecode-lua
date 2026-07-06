@@ -114,6 +114,48 @@ function M.new_queue(len)
 	return mailbox.new(len or DEFAULT_QUEUE_LEN, { full = 'reject_newest' })
 end
 
+
+local function compact_peer(snapshot)
+	if type(snapshot) ~= 'table' then return nil end
+	local peer = snapshot.peer_node or snapshot.peer_id or snapshot.peer_sid
+	if peer ~= nil and peer ~= '' then return tostring(peer) end
+	local claim = snapshot.peer_identity_claim
+	if type(claim) == 'table' then
+		return claim.node or claim.id or claim.name
+	end
+	return nil
+end
+
+local function log_component_lifecycle(svc, obs_state, ev)
+	if type(svc) ~= 'table' or type(svc.info) ~= 'function' then return end
+	if ev.kind ~= 'component_snapshot' or ev.component ~= 'session' then return end
+	local snap = type(ev.snapshot) == 'table' and ev.snapshot or {}
+	obs_state.session_log_keys = obs_state.session_log_keys or {}
+	local established = snap.established == true
+	local phase = snap.phase or snap.state
+	local peer = compact_peer(snap)
+	local key = tostring(established) .. '|' .. tostring(phase or '') .. '|' .. tostring(peer or '')
+	local prev = obs_state.session_log_keys[ev.link_id]
+	if prev == key then return end
+	obs_state.session_log_keys[ev.link_id] = key
+	if established then
+		svc:info('fabric_session_established', {
+			summary = string.format('fabric session established link=%s%s', tostring(ev.link_id or 'link'), peer and (' peer=' .. tostring(peer)) or ''),
+			link_id = ev.link_id,
+			link_generation = ev.link_generation,
+			peer = peer,
+			phase = phase,
+		})
+	elseif prev and prev:match('^true|') then
+		svc:warn('fabric_session_lost', {
+			summary = string.format('fabric session lost link=%s phase=%s', tostring(ev.link_id or 'link'), tostring(phase or 'unknown')),
+			link_id = ev.link_id,
+			link_generation = ev.link_generation,
+			phase = phase,
+		})
+	end
+end
+
 local function retain(conn, topic, payload, opts)
 	if conn == nil then return true, nil end
 	return bus_cleanup.retain(conn, topic, payload, opts)
@@ -305,7 +347,7 @@ local function publish_transfer_obs(conn, obs_state, payload)
 	return true, nil
 end
 
-local function handle_event(conn, ev, obs_state)
+local function handle_event(conn, ev, obs_state, svc)
 	obs_state = obs_state or {}
 	if ev.kind == 'link_snapshot' then
 		return retain(
@@ -318,6 +360,7 @@ local function handle_event(conn, ev, obs_state)
 		)
 
 	elseif ev.kind == 'component_snapshot' then
+		log_component_lifecycle(svc, obs_state, ev)
 		local ok, err = retain(
 			conn,
 			M.component_topic(ev.link_id, ev.component),
@@ -377,7 +420,7 @@ function M.run_projector(scope, params)
 			return { role = 'state_projector', published = count, reason = rx.why and rx:why() or 'closed' }
 		end
 
-		local ok, err = handle_event(conn, ev, obs_state)
+		local ok, err = handle_event(conn, ev, obs_state, params.svc)
 		if ok ~= true then
 			error(err or 'fabric state projection failed', 0)
 		end

@@ -79,7 +79,7 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
         error("Platform Manager: failed to start driver: " .. tostring(start_err))
     end
 
-    dlog(PlatformManager.logger, 'info', { what = 'device_registered' })
+    dlog(PlatformManager.logger, 'debug', { what = 'device_registered' })
 end
 
 ---- public interface ----
