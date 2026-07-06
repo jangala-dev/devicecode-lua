@@ -7,3 +7,7 @@
 [submodule "vendor/lua-bus"]
 	path = vendor/lua-bus
 	url = https://github.com/jangala-dev/lua-bus.git
+[submodule "src/services/ui/local-ui"]
+	path = src/services/ui/local-ui
+	url = https://github.com/jangala-dev/local-ui.git
+	branch = align-devicecode-lua-ui-api
