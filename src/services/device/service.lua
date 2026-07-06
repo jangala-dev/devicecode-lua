@@ -38,6 +38,367 @@ local function new_service_id()
 	return ('device-%d-%d'):format(os.time(), math.random(1, 1000000))
 end
 
+local function count_map(t)
+	local n = 0
+	for _ in pairs(t or {}) do n = n + 1 end
+	return n
+end
+
+local function sorted_keys_map(t)
+	local keys = {}
+	for k in pairs(t or {}) do keys[#keys + 1] = tostring(k) end
+	table.sort(keys)
+	return keys
+end
+
+local function join_sorted_map_keys(t)
+	local keys = sorted_keys_map(t)
+	return table.concat(keys, ',')
+end
+
+local function first_non_empty(...)
+	for i = 1, select('#', ...) do
+		local v = select(i, ...)
+		if v ~= nil and v ~= '' and v ~= false then return v end
+	end
+	return nil
+end
+
+local function scalar(v)
+	local tv = type(v)
+	if tv == 'string' or tv == 'number' or tv == 'boolean' then return v end
+	return nil
+end
+
+local function scalar_string(v)
+	v = scalar(v)
+	if v == nil or v == '' then return nil end
+	return tostring(v)
+end
+
+local function status_field(rec, field)
+	if type(rec) ~= 'table' then return nil end
+	local st = type(rec.status) == 'table' and rec.status or {}
+	return scalar_string(st[field]) or scalar_string(rec[field])
+end
+
+local function is_pending_reason(reason, availability)
+	return availability == 'unknown'
+		or reason == 'missing_required_fact'
+		or reason == 'no_observation'
+		or reason == 'source_not_confirmed'
+		or reason == 'missing_host_software'
+end
+
+local function version_from_software(sw)
+	if type(sw) ~= 'table' then return nil end
+	return scalar_string(first_non_empty(sw.version, sw.fw_version, sw.firmware_version, sw.fw, sw.build, sw.build_id, sw.image_id))
+end
+
+local function updater_state(up)
+	if type(up) ~= 'table' then return nil end
+	return scalar_string(first_non_empty(up.state, up.raw_state, up.status, up.kind))
+end
+
+local function pending_update(up)
+	if type(up) ~= 'table' then return nil end
+	return scalar_string(first_non_empty(up.pending_version, up.staged_image_id, up.job_id))
+end
+
+local function component_operator_key(rec)
+	if type(rec) ~= 'table' then return 'missing' end
+	return table.concat({
+		status_field(rec, 'availability') or '',
+		status_field(rec, 'health') or '',
+		status_field(rec, 'reason') or '',
+	}, '|')
+end
+
+local function component_label(component_id, rec)
+	rec = rec or {}
+	local parts = { 'component ' .. tostring(component_id) }
+	local role = scalar_string(rec.role or rec.member or rec.member_class)
+	local kind = scalar_string(rec.subtype or rec.kind or rec.class)
+	if role and role ~= tostring(component_id) then parts[#parts + 1] = 'role=' .. role end
+	if kind and kind ~= tostring(component_id) then parts[#parts + 1] = 'kind=' .. kind end
+	return table.concat(parts, ' ')
+end
+
+local function component_summary(component_id, rec, opts)
+	rec = rec or {}
+	opts = opts or {}
+	local parts = { component_label(component_id, rec) }
+	local availability = status_field(rec, 'availability')
+	local health = status_field(rec, 'health')
+	local reason = status_field(rec, 'reason')
+	if availability then parts[#parts + 1] = 'state=' .. availability end
+	if health and health ~= 'unknown' then parts[#parts + 1] = 'health=' .. health end
+	if reason then parts[#parts + 1] = 'reason=' .. reason end
+	local facts = rec.raw_facts or {}
+	local swv = version_from_software(facts.software)
+	if swv then parts[#parts + 1] = 'fw=' .. swv end
+	local ups = updater_state(facts.updater)
+	if ups then parts[#parts + 1] = 'updater=' .. ups end
+	local pend = pending_update(facts.updater)
+	if pend then parts[#parts + 1] = 'pending=' .. pend end
+	return table.concat(parts, ' ')
+end
+
+
+local function fmt_voltage_mv(v)
+	v = tonumber(v)
+	if not v then return nil end
+	return string.format('%.2fV', v / 1000)
+end
+
+local function fmt_voltage_mv_coarse(v)
+	v = tonumber(v)
+	if not v then return nil end
+	return string.format('%.0fV', v / 1000)
+end
+
+local function fmt_current_ma(v)
+	v = tonumber(v)
+	if not v then return nil end
+	if math.abs(v) >= 1000 then return string.format('%.2fA', v / 1000) end
+	return string.format('%dmA', math.floor(v + 0.5))
+end
+
+local function fmt_temp_mc(v)
+	v = tonumber(v)
+	if not v then return nil end
+	return string.format('%.1fC', v / 1000)
+end
+
+local function first_number(t, names)
+	if type(t) ~= 'table' then return nil end
+	for i = 1, #names do
+		local v = tonumber(t[names[i]])
+		if v ~= nil then return v end
+	end
+	return nil
+end
+
+local function first_scalar(t, names)
+	if type(t) ~= 'table' then return nil end
+	for i = 1, #names do
+		local v = scalar_string(t[names[i]])
+		if v ~= nil then return v end
+	end
+	return nil
+end
+
+local function bool_flag(t, name)
+	return type(t) == 'table' and t[name] == true
+end
+
+local function summarise_mcu_power_env_memory(rec)
+	local facts = rec and rec.raw_facts or {}
+	local parts = {}
+	local swv = version_from_software(facts.software)
+	local ups = updater_state(facts.updater)
+	if swv then parts[#parts + 1] = 'mcu_fw=' .. swv end
+	if ups then parts[#parts + 1] = 'updater=' .. ups end
+
+	local battery = facts.power_battery or {}
+	local pack = fmt_voltage_mv(first_number(battery, { 'pack_mV', 'pack_mv', 'voltage_mV', 'vbat_mV' }))
+	local ibat = fmt_current_ma(first_number(battery, { 'ibat_mA', 'current_mA', 'battery_current_mA' }))
+	local btemp = fmt_temp_mc(first_number(battery, { 'temp_mC', 'temperature_mC' }))
+	local bparts = {}
+	if pack then bparts[#bparts + 1] = pack end
+	if ibat then bparts[#bparts + 1] = ibat end
+	if btemp then bparts[#bparts + 1] = 'temp=' .. btemp end
+	if #bparts > 0 then parts[#parts + 1] = 'battery=' .. table.concat(bparts, ',') end
+
+	local charger = facts.power_charger or {}
+	local vin = fmt_voltage_mv_coarse(first_number(charger, { 'vin_mV', 'vin_mv' }))
+	local vsys = fmt_voltage_mv_coarse(first_number(charger, { 'vsys_mV', 'vsys_mv' }))
+	local cstate = charger.state or {}
+	local cstatus = charger.status or {}
+	local csystem = charger.system or {}
+	local cparts = {}
+	if vin then cparts[#cparts + 1] = 'vin=' .. vin end
+	if vsys then cparts[#cparts + 1] = 'vsys=' .. vsys end
+	if bool_flag(csystem, 'charger_enabled') then cparts[#cparts + 1] = 'enabled' end
+	if bool_flag(csystem, 'ok_to_charge') then cparts[#cparts + 1] = 'ok_to_charge' end
+	if bool_flag(cstatus, 'const_current') then cparts[#cparts + 1] = 'cc' end
+	if bool_flag(cstatus, 'const_voltage') then cparts[#cparts + 1] = 'cv' end
+	if bool_flag(cstate, 'charger_suspended') then cparts[#cparts + 1] = 'suspended' end
+	if bool_flag(cstate, 'bat_missing_fault') then cparts[#cparts + 1] = 'bat_missing' end
+	if #cparts > 0 then parts[#parts + 1] = 'charger=' .. table.concat(cparts, ',') end
+
+	local temp = facts.environment_temperature or {}
+	local tempv = fmt_temp_mc(first_number(temp, { 'temp_mC', 'temperature_mC', 'ambient_mC', 'mC' }))
+	if not tempv then
+		local c = first_number(temp, { 'temperature_C', 'temperature_c', 'celsius', 'value' })
+		if c then tempv = string.format('%.1fC', c) end
+	end
+	local hum = facts.environment_humidity or {}
+	local hpct = first_number(hum, { 'relative_percent', 'rh_percent', 'percent', 'value' })
+	if not hpct then
+		local pptt = first_number(hum, { 'rh_pptt', 'relative_pptt' })
+		if pptt then hpct = pptt / 100 end
+	end
+	local eparts = {}
+	if tempv then eparts[#eparts + 1] = 'temp=' .. tempv end
+	if hpct then eparts[#eparts + 1] = string.format('humidity=%.1f%%', hpct) end
+	if #eparts > 0 then parts[#parts + 1] = 'env=' .. table.concat(eparts, ',') end
+
+	local mem = facts.runtime_memory or {}
+	local free = first_number(mem, { 'free', 'free_bytes', 'free_B' })
+	local used = first_number(mem, { 'used', 'used_bytes', 'used_B' })
+	local total = first_number(mem, { 'total', 'total_bytes', 'total_B' })
+	local mparts = {}
+	if free and total and total > 0 then
+		mparts[#mparts + 1] = string.format('free=%.0f%%', (free / total) * 100)
+	elseif used and total and total > 0 then
+		mparts[#mparts + 1] = string.format('used=%.0f%%', (used / total) * 100)
+	else
+		local state = first_scalar(mem, { 'state', 'status' })
+		if state then mparts[#mparts + 1] = state end
+	end
+	if #mparts > 0 then parts[#parts + 1] = 'memory=' .. table.concat(mparts, ',') end
+
+	return parts
+end
+
+local function log_device_summary(state, reason)
+	if not state.svc or not state.model then return end
+	local snap = state.model:snapshot()
+	local components = snap.components or {}
+	local mcu = components.mcu
+	local mcu_parts = summarise_mcu_power_env_memory(mcu)
+	-- Component inventory and readiness already have their own operator lines.  The
+	-- device summary should only appear once it adds composed product context,
+	-- particularly MCU firmware/power/environment/runtime facts.
+	if #mcu_parts < 3 then return end
+	local parts = {}
+	parts[#parts + 1] = 'components=' .. tostring(count_map(components))
+	local ids = join_sorted_map_keys(components)
+	if ids ~= '' then parts[#parts + 1] = 'ids=' .. ids end
+	for i = 1, #mcu_parts do parts[#parts + 1] = mcu_parts[i] end
+	local summary = 'device summary ' .. table.concat(parts, ' ')
+	local key = summary
+	local tnow = runtime.now()
+	-- MCU measurements can move every poll.  Do not let small voltage/current
+	-- changes turn the operator log into telemetry; after the first meaningful
+	-- summary, emit at most every five minutes unless the coarse summary is
+	-- unchanged for ten minutes.
+	local last_at = state.operator_device_summary_at or 0
+	if state.operator_device_summary_key == key and (tnow - last_at) < 600 then return end
+	if state.operator_device_summary_key ~= nil and (tnow - last_at) < 300 then return end
+	state.operator_device_summary_key = key
+	state.operator_device_summary_at = tnow
+	state.svc:info('device_summary', {
+		summary = summary,
+		reason = reason,
+		components = count_map(components),
+		component_ids = ids ~= '' and ids or nil,
+	})
+end
+
+local function log_component_identity(state, component_id, rec)
+	if not state.svc or type(rec) ~= 'table' then return end
+	local facts = rec.raw_facts or {}
+	local swv = version_from_software(facts.software)
+	local ups = updater_state(facts.updater)
+	local pend = pending_update(facts.updater)
+	if not swv and not ups and not pend then return end
+	-- The MCU software and updater facts usually arrive as separate retained
+	-- updates during boot.  Avoid half-stories followed immediately by the full
+	-- story; wait for firmware before emitting the MCU identity line.
+	if component_id == 'mcu' and (not swv or not ups) then return end
+	state.operator_component_identity_keys = state.operator_component_identity_keys or {}
+	local key = table.concat({ tostring(swv or ''), tostring(ups or ''), tostring(pend or '') }, '|')
+	if state.operator_component_identity_keys[component_id] == key then return end
+	state.operator_component_identity_keys[component_id] = key
+	local parts = { component_label(component_id, rec) }
+	if swv then parts[#parts + 1] = 'fw=' .. swv end
+	if ups then parts[#parts + 1] = 'updater=' .. ups end
+	if pend then parts[#parts + 1] = 'pending=' .. pend end
+	state.svc:info('device_component_identified', {
+		summary = table.concat(parts, ' '),
+		component = component_id,
+		version = swv,
+		updater_state = ups,
+		pending_version = pend,
+		class = rec.class,
+		subtype = rec.subtype,
+		role = rec.role,
+		member = rec.member,
+	})
+end
+
+local function log_component_snapshot(state, component_id, rec, opts)
+	if not state.svc or type(rec) ~= 'table' then return end
+	state.operator_component_keys = state.operator_component_keys or {}
+	state.operator_component_ready_seen = state.operator_component_ready_seen or {}
+	local availability = status_field(rec, 'availability') or (rec.available and 'available') or 'unknown'
+	local health = status_field(rec, 'health') or 'unknown'
+	local reason = status_field(rec, 'reason')
+	local key = component_operator_key(rec)
+	local status_changed = state.operator_component_keys[component_id] ~= key
+	local ready = availability == 'available' or availability == 'ok'
+
+	if status_changed then
+		state.operator_component_keys[component_id] = key
+
+		-- Partial boot-time observation is expected while a component is still collecting
+		-- its required facts.  It is useful in debug logs, but should not read as an
+		-- operator-facing degradation.
+		if is_pending_reason(reason, availability) and not state.operator_component_ready_seen[component_id] then
+			state.svc:debug('device_component_pending', {
+				summary = component_summary(component_id, rec, opts),
+				component = component_id,
+				availability = availability,
+				health = health,
+				reason = reason,
+			})
+			return
+		end
+
+		local level = ready and 'info' or 'warn'
+		local what = ready and 'device_component_ready' or 'device_component_degraded'
+		if ready then state.operator_component_ready_seen[component_id] = true end
+		-- A readiness line is component-level.  The source fact that made it true is
+		-- useful at debug level, but it is not part of the operator story.
+		local facts = rec.raw_facts or {}
+		local identity_key = table.concat({ tostring(version_from_software(facts.software) or ''), tostring(updater_state(facts.updater) or ''), tostring(pending_update(facts.updater) or '') }, '|')
+		if ready and identity_key ~= '||' then
+			state.operator_component_identity_keys = state.operator_component_identity_keys or {}
+			state.operator_component_identity_keys[component_id] = identity_key
+		end
+		state.svc:log(level, what, {
+			summary = component_summary(component_id, rec, {}),
+			component = component_id,
+			availability = availability,
+			available = rec.available,
+			health = health,
+			reason = reason,
+			class = rec.class,
+			subtype = rec.subtype,
+			role = rec.role,
+			member = rec.member,
+		})
+		return
+	end
+
+	-- Status is stable.  Only log identity/version changes, not another readiness line.
+	log_component_identity(state, component_id, rec)
+end
+
+local function log_configured_inventory(state, generation, catalogue)
+	if not state.svc then return end
+	local components = catalogue and catalogue.components or {}
+	local ids = join_sorted_map_keys(components)
+	state.svc:info('device_inventory_configured', {
+		summary = string.format('device inventory configured generation=%s components=%d%s', tostring(generation), count_map(components), ids ~= '' and (' ids=' .. ids) or ''),
+		generation = generation,
+		components = count_map(components),
+		component_ids = ids ~= '' and ids or nil,
+	})
+end
+
 -- Device action timeout is owned by the action worker scope.  The Fabric
 -- transfer-manager request may legitimately stay open for that whole action, so
 -- do not add lua-bus' default one-second call timeout here.  The transfer budget
@@ -397,6 +758,8 @@ local function start_generation(state, catalogue)
 	state.generation_history = state.generation_history or {}
 	state.generation_history[generation] = active
 	state.active = active
+	if state.svc then state.svc:info('device_generation_started', { summary = string.format('device generation %s started (%s component(s))', tostring(generation), tostring(count_map(catalogue and catalogue.components or {}))), generation = generation, components = count_map(catalogue and catalogue.components or {}) }) end
+	log_configured_inventory(state, generation, catalogue)
 	return active, nil
 end
 
@@ -689,7 +1052,11 @@ local function handle_observation(state, ev)
 		return true, nil
 	end
 	local changed = state.model:apply_observation(ev.generation, ev)
-	if changed then mark_component_dirty(state, ev.component) end
+	if changed then
+		mark_component_dirty(state, ev.component)
+		log_component_snapshot(state, ev.component, state.model:component_snapshot(ev.component), { source = ev.fact or ev.event or ev.tag })
+		if ev.component == 'mcu' then log_device_summary(state, 'mcu_observation') end
+	end
 	return true, nil
 end
 
@@ -878,6 +1245,7 @@ local function build_state(scope, params)
 		stale_action_outcomes = {},
 		generation_history = {},
 		pending_events = {},
+		svc = params.svc,
 		action_timeout = params.action_timeout or 10.0,
 		action_queue_len = params.action_queue_len or backpressure.policy.action_endpoints.default_len,
 		enable_actions = params.enable_actions,
@@ -891,6 +1259,7 @@ local function build_state(scope, params)
 		action_deps = nil,
 		dependency_queue_len = params.dependency_queue_len,
 		update_dependency_model = update_dependency_model,
+		operator_component_keys = {},
 	}
 
 	state.now = params.now or function () return fibers.now() end
@@ -938,6 +1307,7 @@ function M.run(scope, params)
 	if params and params.lifecycle and type(params.lifecycle.ready) == 'function' then
 		params.lifecycle:ready({ ready = true })
 	end
+	if state.svc then state.svc:info('device_ready', { summary = 'device service ready', generation = state.active and state.active.generation or nil }) end
 
 	coordinator_loop(state)
 	return { status = 'stopped' }
@@ -996,6 +1366,7 @@ function M.start(conn, opts)
 		config_watch = cfg_watch,
 		owns_config_feed = owns_cfg_watch,
 		initial_config = opts.initial_config,
+		svc = svc,
 		done_queue_len = opts.done_queue_len,
 		observation_queue_len = opts.observation_queue_len,
 		action_queue_len = opts.action_queue_len,

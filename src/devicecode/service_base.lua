@@ -22,6 +22,16 @@ local ok_uuid, uuid = pcall(require, 'uuid')
 
 local M = {}
 
+local LOG_LEVELS = { trace = true, debug = true, info = true, warn = true, error = true, fatal = true }
+
+local function normalise_log_level(level)
+	level = tostring(level or 'info'):lower()
+	if level == 'warning' then level = 'warn' end
+	if LOG_LEVELS[level] then return level end
+	return 'info'
+end
+
+
 local function t(...) return { ... } end
 
 local function wall()
@@ -200,19 +210,39 @@ function M.new(conn, opts)
 	-- Observability helpers
 	----------------------------------------------------------------------
 
-	function svc:obs_log(level, payload)
-		self.conn:publish(self:obs_log_legacy_topic(level), payload)
+	function svc:log(level, what, payload)
+		level = normalise_log_level(level)
 
-		local v1_payload
-		if type(payload) == 'table' then
-			v1_payload = shallow_copy(payload)
-			v1_payload.level = level
-		else
-			v1_payload = { level = level, message = payload }
+		if payload == nil and type(what) == 'table' then
+			payload = what
+			what = payload.what
+		elseif payload == nil then
+			payload = { message = tostring(what or ''), summary = tostring(what or '') }
+			what = nil
+		elseif type(payload) ~= 'table' then
+			payload = { message = tostring(payload), summary = tostring(payload) }
 		end
 
-		self.conn:publish(self:obs_event_topic('log'), v1_payload)
+		local out = self:base_payload(payload)
+		if what ~= nil and out.what == nil then out.what = tostring(what) end
+		if out.summary == nil and type(out.message) == 'string' then out.summary = out.message end
+		out.level = level
+
+		self.conn:publish(self:obs_log_legacy_topic(level), out)
+		self.conn:publish(self:obs_event_topic('log'), out)
+		return out
 	end
+
+	function svc:obs_log(level, payload)
+		return self:log(level, payload)
+	end
+
+	function svc:trace(what, payload) return self:log('trace', what, payload) end
+	function svc:debug(what, payload) return self:log('debug', what, payload) end
+	function svc:info(what, payload)  return self:log('info', what, payload) end
+	function svc:warn(what, payload)  return self:log('warn', what, payload) end
+	function svc:error(what, payload) return self:log('error', what, payload) end
+	function svc:fatal(what, payload) return self:log('fatal', what, payload) end
 
 	function svc:obs_event(name, payload)
 		self:_publish_dual(
@@ -275,9 +305,23 @@ function M.new(conn, opts)
 
 	function svc:lifecycle(state, extra)
 		local payload = self:base_payload(merge_payload({ state = state }, extra))
+		local prev_state = self._lifecycle_state
+		local prev_ready = self._lifecycle_extra and self._lifecycle_extra.ready
 		self._lifecycle_state = state
 		self._lifecycle_extra = shallow_copy(extra)
-		retain_status_if_semantically_changed(self, payload)
+		local changed = retain_status_if_semantically_changed(self, payload)
+		if changed then
+			local level = 'debug'
+			if state == 'failed' then level = 'error'
+			elseif state == 'degraded' then level = 'warn'
+			elseif payload.ready == true and (prev_state ~= state or prev_ready ~= true) then level = 'info' end
+			self:log(level, 'service_state_changed', {
+				state = state,
+				ready = payload.ready,
+				previous_state = prev_state,
+				reason = payload.reason,
+			})
+		end
 		return payload
 	end
 
@@ -392,5 +436,6 @@ function M.wait_service_ready(conn, service_name, opts)
 end
 
 M.default_ready_predicate = default_ready_predicate
+M.normalise_log_level = normalise_log_level
 
 return M

@@ -79,7 +79,7 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
         error("USB Manager: failed to start driver: " .. tostring(start_err))
     end
 
-    dlog(UsbManager.logger, 'info', { what = 'device_registered' })
+    dlog(UsbManager.logger, 'debug', { what = 'device_registered' })
 end
 
 ---- public interface ----

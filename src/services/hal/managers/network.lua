@@ -81,7 +81,7 @@ local DIAGNOSTICS_METHODS = {
 
 local function control_loop_for(kind, ch, methods)
 	if tostring(kind) == 'config' then
-		log('warn', {
+		log('debug', {
 			what = 'network_config_control_instrumented_build',
 			marker = 'owned_activation_runner_v1',
 		})
@@ -140,7 +140,7 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch)
 				return false, err or 'network device event failed'
 			end
 			state.started = true
-			log('info', { what = 'network_manager_started' })
+			log('debug', { what = 'network_manager_started' })
 			return true, nil
 		end)
 	end)
@@ -159,7 +159,7 @@ function M.apply_config_op(config)
 			state.driver:terminate('replaced')
 		end
 		state.driver = driver
-		log('info', { what = 'network_driver_configured', provider = (config and (config.provider or config.backend)) or 'fake' })
+		log('debug', { what = 'network_driver_configured', provider = (config and (config.provider or config.backend)) or 'fake' })
 		return op.always(true, nil)
 	end)
 end

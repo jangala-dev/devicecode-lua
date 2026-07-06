@@ -408,6 +408,7 @@ local function start_state_projector(self, params)
 			return state_mod.run_projector(projector_scope, {
 				conn = params.state_projector_conn,
 				state_rx = rx,
+				svc = params.state_projector_svc,
 			})
 		end,
 

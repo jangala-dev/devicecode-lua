@@ -22,6 +22,7 @@ if not ok_http_headers then http_headers = nil end
 local M = {}
 
 local UPDATE_COMMIT_TOPIC = { 'cap', 'update-manager', 'main', 'rpc', 'commit-job' }
+local function monitor_rpc_topic(method) return { 'cap', 'monitor', 'main', 'rpc', method } end
 
 local function default_encode_json(value)
 	local encoded, err = cjson.encode(value)
@@ -259,6 +260,78 @@ local function handle_update_commit(scope, owner, ctx, deps)
 	return { status = 'ok', route = 'update_commit' }
 end
 
+
+local function call_monitor_op(deps, method, payload, timeout)
+	local conn = assert(deps.conn, 'monitor UI endpoint requires bus connection')
+	return conn:call_op(monitor_rpc_topic(method), payload or {}, { timeout = timeout or deps.command_timeout or 5.0 })
+end
+
+local function handle_logs_query(owner, deps)
+	local reply, err = fibers.perform(call_monitor_op(deps, 'query-logs', { limit = 200, min_level = 'info' }))
+	if reply == nil then
+		perform_response(owner:reply_error_op(503, err or 'monitor_unavailable'))
+		return { status = 'failed', err = err or 'monitor_unavailable' }
+	end
+	perform_response(owner:reply_json_op(200, reply))
+	return { status = 'ok', route = 'logs_query' }
+end
+
+local function handle_logs_follow(scope, owner, deps)
+	local reply, err = fibers.perform(call_monitor_op(deps, 'follow-logs', { limit = 200, min_level = 'info', replay = true }, false))
+	if reply == nil or reply.ok ~= true or reply.feed == nil then
+		perform_response(owner:reply_error_op(503, err or (reply and reply.err) or 'monitor_follow_unavailable'))
+		return { status = 'failed', err = err or (reply and reply.err) or 'monitor_follow_unavailable' }
+	end
+	local feed = reply.feed
+	scope:finally(function (_, status, primary)
+		if feed and type(feed.close) == 'function' then feed:close(primary or status or 'ui_log_follow_closed') end
+	end)
+	perform_response(owner:write_headers_op(200, {
+		['content-type'] = 'text/event-stream',
+		['cache-control'] = 'no-cache',
+		['connection'] = 'keep-alive',
+	}))
+	local encode = deps.encode_json or default_encode_json
+	while true do
+		local ev, rerr = fibers.perform(feed:recv_op())
+		if ev == nil then return { status = 'closed', err = rerr } end
+		perform_response(owner:write_chunk_op(sse.frame_event(ev, encode)))
+	end
+end
+
+local function handle_monitor_profile(scope, owner, ctx, deps)
+	local principal = principal_from(ctx, deps)
+	if principal == nil then
+		perform_response(owner:reply_error_op(401, 'unauthenticated'))
+		return { status = 'unauthenticated' }
+	end
+	local payload, perr = json_body_table(ctx, deps, { require_json_content_type = true })
+	if not payload then
+		perform_response(owner:reply_error_op(nil, perr))
+		return { status = 'bad_request', err = perr }
+	end
+	local st, _rep, result_or_primary = fibers.perform(user_operation.run_op {
+		principal = principal,
+		connect = deps.connect,
+		bus = deps.bus,
+		conn = deps.conn,
+		timeout = deps.command_timeout or 5.0,
+		run_op = function (_, conn)
+			return conn:call_op(monitor_rpc_topic('set-profile'), payload, { timeout = false })
+				:wrap(function (value, call_err)
+					if value == nil then return nil, call_err or 'upstream_failed' end
+					return { value = value }, nil
+				end)
+		end,
+	})
+	if st ~= 'ok' then
+		perform_response(owner:reply_error_op(nil, result_or_primary))
+		return { status = 'failed', err = result_or_primary }
+	end
+	perform_response(owner:reply_json_op(200, result_or_primary))
+	return { status = 'ok', route = 'monitor_profile' }
+end
+
 local function handle_command(scope, owner, ctx, route, deps)
 	if type(route.topic) ~= 'table' or #route.topic == 0 then
 		perform_response(owner:reply_error_op(400, 'bad_request'))
@@ -278,6 +351,7 @@ local function handle_command(scope, owner, ctx, route, deps)
 		principal = principal,
 		connect = deps.connect,
 		bus = deps.bus,
+		conn = deps.conn,
 		timeout = deps.command_timeout or 5.0,
 		run_op = function (_, conn)
 			return conn:call_op(route.topic, payload, { timeout = false })
@@ -315,6 +389,12 @@ function M.run(scope, ctx, deps)
 		return handle_logout(owner, ctx, deps)
 	elseif route.kind == 'session_get' then
 		return handle_session_get(owner, ctx, deps)
+	elseif route.kind == 'logs_query' then
+		return handle_logs_query(owner, deps)
+	elseif route.kind == 'logs_follow' then
+		return handle_logs_follow(scope, owner, deps)
+	elseif route.kind == 'monitor_profile' then
+		return handle_monitor_profile(scope, owner, ctx, deps)
 	elseif route.kind == 'command' then
 		return handle_command(scope, owner, ctx, route, deps)
 	elseif route.kind == 'update_commit' then

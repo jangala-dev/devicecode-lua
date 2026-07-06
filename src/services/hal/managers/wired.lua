@@ -254,7 +254,7 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch, opts)
 
 		child:finally(function (_, status, primary) M.terminate(primary or status or 'wired manager closed') end)
 		state.started = true
-		log('info', { what = 'wired_manager_started' })
+		log('debug', { what = 'wired_manager_started' })
 		return op.always(true, nil)
 	end)
 end
@@ -362,7 +362,7 @@ function M.apply_config_op(config)
 				state.runners[id] = runners[id]
 			end
 			if ready_now and caps_ready_cond then caps_ready_cond:signal() end
-			log('info', { what = 'wired_manager_configured', providers = provider_ids })
+			log('debug', { what = 'wired_manager_configured', providers = provider_ids })
 			return true, nil
 		end):wrap(function (status, report, ok_or_primary, err)
 			if status == 'ok' then

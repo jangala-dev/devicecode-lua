@@ -6,6 +6,7 @@ local M = {}
 
 local function split_path(path)
 	path = tostring(path or '/')
+	path = path:match('^([^?#]*)') or path
 	local out = {}
 	for part in path:gmatch('[^/]+') do
 		out[#out + 1] = part
@@ -69,6 +70,18 @@ function M.decode(ctx)
 
 	if parts[2] == 'fabric' and method == 'GET' then
 		return { kind = 'read', query = 'fabric' }
+	end
+
+
+	if parts[2] == 'logs' and method == 'GET' then
+		if parts[3] == 'follow' or parts[3] == 'tail' then
+			return { kind = 'logs_follow' }
+		end
+		return { kind = 'logs_query' }
+	end
+
+	if parts[2] == 'monitor' and parts[3] == 'profile' and method == 'POST' then
+		return { kind = 'monitor_profile' }
 	end
 
 	if parts[2] == 'update' and method == 'GET' then

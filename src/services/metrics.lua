@@ -182,7 +182,7 @@ local function rebuild_cloud_config()
 		return
 	end
 	State.cloud_config = cfg
-	State.svc:obs_log('info', 'cloud config ready')
+	State.svc:obs_log('debug', 'cloud config ready')
 end
 
 local function fetch_mainflux_config()
@@ -209,7 +209,7 @@ local function fetch_mainflux_config()
 	end
 
 	State.mainflux_config = conf.standardise_config(raw)
-	State.svc:obs_log('info', 'mainflux config loaded')
+	State.svc:obs_log('debug', 'mainflux config loaded')
 	rebuild_cloud_config()
 end
 
@@ -231,7 +231,7 @@ end
 ---@param data table<string, MetricSample>
 local function log_publish(data)
 	for endpoint_str, metric in pairs(data) do
-		State.svc:obs_log('info', { what = 'metric_value',
+		State.svc:obs_log('trace', { what = 'metric_value',
 			endpoint = endpoint_str, value = metric.value, time = metric.time })
 	end
 end
@@ -276,6 +276,26 @@ local function http_publish(data)
 	if full then
 		State.svc:obs_log('error', { what = 'http_queue_full', err = 'dropping publish payload' })
 	end
+end
+
+
+local function count_pipelines()
+	local n = 0
+	for _ in pairs(State.pipelines_map or {}) do n = n + 1 end
+	return n
+end
+
+local function log_metrics_summary(reason, extra)
+	local parts = {}
+	parts[#parts + 1] = 'publishing=' .. ((State.publish_period and State.base_time and State.base_time.synced) and 'enabled' or 'waiting')
+	if State.publish_period then parts[#parts + 1] = 'interval=' .. tostring(State.publish_period) .. 's' end
+	parts[#parts + 1] = 'pipelines=' .. tostring(count_pipelines())
+	local summary = 'metrics summary ' .. table.concat(parts, ' ')
+	local tnow = now()
+	if State._operator_summary_key == summary and (tnow - (State._operator_summary_at or 0)) < 600 then return end
+	State._operator_summary_key = summary
+	State._operator_summary_at = tnow
+	State.svc:obs_log('info', { what = 'metrics_summary', summary = summary, reason = reason })
 end
 
 local publish_fns = { bus = bus_publish, log = log_publish, http = http_publish }
@@ -450,13 +470,13 @@ local function main()
 				State.svc:obs_log('warn', { what = 'config_sub_closed', err = tostring(err) })
 				break
 			end
-			State.svc:obs_log('info', 'config received, applying')
+			State.svc:obs_log('debug', 'config received, applying')
 			next_publish_time = handle_config(msg.payload)
 			-- Re-read mainflux.cfg in case cloud_url or credentials changed.
 			fetch_mainflux_config()
 			local next_s = next_publish_time == math.huge and nil or (next_publish_time - now())
 			State.svc:obs_event('config_applied', { next_publish_s = next_s })
-			State.svc:obs_log('info', next_s
+			State.svc:obs_log('debug', next_s
 				and string.format('config applied, next publish in %.1fs', next_s)
 				or 'config applied, publishing suspended (waiting for NTP sync)')
 		elseif which == 'metric' then
@@ -471,15 +491,14 @@ local function main()
 				if first_sync and State.publish_period then
 					next_publish_time = now() + State.publish_period
 					State.svc:obs_event('ntp_synced', { first = true, next_publish_s = State.publish_period })
-					State.svc:obs_log('info', string.format(
-						'NTP synced, first publish scheduled in %.1fs', State.publish_period))
+					State.svc:obs_log('info', { what = 'metrics_ready', summary = string.format('metrics ready; next publish in %ss', tostring(State.publish_period)), next_publish_s = State.publish_period })
 				elseif first_sync then
 					State.svc:obs_event('ntp_synced', { first = true })
-					State.svc:obs_log('info', 'NTP synced, waiting for config before scheduling publish')
+					State.svc:obs_log('debug', 'NTP synced, waiting for config before scheduling publish')
 				elseif not State.base_time.synced then
 					next_publish_time = math.huge
 					State.svc:obs_event('ntp_lost', {})
-					State.svc:obs_log('warn', { what = 'ntp_lost' })
+					State.svc:obs_log('debug', { what = 'ntp_lost' })
 				end
 			end
 		elseif which == 'tick' then
@@ -498,7 +517,7 @@ local function main()
 			end
 			State.svc:obs_event('publish', { count = total })
 			if total > 0 then
-				State.svc:obs_log('info', string.format('publishing %d metric(s)', total))
+				State.svc:obs_log('debug', string.format('publishing %d metric(s)', total))
 			end
 			publish_all(values)
 		end
@@ -507,7 +526,7 @@ local function main()
 	obs_sub:unsubscribe()
 	cfg_sub:unsubscribe()
 	time_sub:unsubscribe()
-	State.svc:obs_log('info', 'service stopping')
+	State.svc:obs_log('debug', 'service stopping')
 end
 
 -------------------------------------------------------------------------------
@@ -526,7 +545,7 @@ function M.start(conn, opts)
 	local svc = base.new(conn, { name = name, env = opts.env })
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
-	svc:obs_log('info', 'service start() entered')
+	svc:obs_log('debug', 'service start() entered')
 	svc:announce({})
 	svc:starting()
 	svc:spawn_heartbeat(heartbeat_s, 'tick')
@@ -552,10 +571,10 @@ function M.start(conn, opts)
 	fibers.current_scope():finally(function()
 		local _, primary = fibers.current_scope():status()
 		svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'scope_exit') })
-		svc:obs_log('info', 'service stopped')
+		svc:obs_log('debug', 'service stopped')
 	end)
 
-	svc:obs_log('info', 'waiting for filesystem capability')
+	svc:obs_log('debug', 'waiting for filesystem capability')
 	local fs_listener = cap_sdk.new_cap_listener(conn, 'fs', 'credentials')
 	local fs_cap, cap_err = fs_listener:wait_for_cap()
 	fs_listener:close()
@@ -567,11 +586,11 @@ function M.start(conn, opts)
 	State.fs_cap = fs_cap
 
 	svc:obs_event('fs_ready', {})
-	svc:obs_log('info', 'fetching mainflux config')
+	svc:obs_log('debug', 'fetching mainflux config')
 	fetch_mainflux_config()
 
 	svc:running()
-	svc:obs_log('info', 'service is live')
+	svc:obs_log('debug', 'service is live')
 
 	main()
 end

@@ -80,7 +80,7 @@ local function send_http(http_ref, data, log_fn)
 			headers = table.concat(parts, '\n'),
 		})
 	else
-		log_fn('info', { what = 'http_publish_ok', status = status })
+		log_fn('trace', { what = 'http_publish_ok', status = status })
 	end
 end
 

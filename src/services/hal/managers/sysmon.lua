@@ -175,7 +175,7 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
         end
     end
 
-    dlog(SysmonManager.logger, 'info', { what = 'all_devices_registered' })
+    dlog(SysmonManager.logger, 'debug', { what = 'all_devices_registered' })
 end
 
 ---- public interface ----

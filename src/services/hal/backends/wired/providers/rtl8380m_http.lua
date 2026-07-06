@@ -535,20 +535,37 @@ end
 
 local function parse_surface_counters(row)
 	if type(row) ~= 'table' then return nil end
-	local errors = 0
-	local has_error = false
-	for _, key in ipairs({ 'CRCAlignErr', 'undersizePkts', 'oversizePkts', 'fragments', 'jabbers', 'collisions' }) do
-		local n = tonumber(row[key])
-		if n then errors = errors + n; has_error = true end
+	local function sum_keys(keys)
+		local total, seen = 0, false
+		for _, key in ipairs(keys or {}) do
+			local n = tonumber(row[key])
+			if n then total = total + n; seen = true end
+		end
+		return seen and total or nil
 	end
+	-- RMON ``oversize`` packets are contextual on VLAN trunks: valid
+	-- 802.1Q-tagged 1522-byte frames may be counted here by this switch even
+	-- when Etherlike/FCS/alignment counters remain clean.  Keep them visible as
+	-- RMON detail, but do not fold them into the operator-facing error total.
+	local hard_errors = sum_keys({ 'CRCAlignErr', 'fragments', 'jabbers' })
 	return {
 		rx = {
 			bytes = tonumber(row.bytesRec),
 			packets = tonumber(row.pktsRec),
 			drops = tonumber(row.dropEvents),
-			errors = has_error and errors or nil,
+			errors = hard_errors,
+			errors_hard = hard_errors,
 			broadcast_packets = tonumber(row.bPktsRec),
 			multicast_packets = tonumber(row.mPktsRec),
+		},
+		rmon = {
+			crc_align_errors = tonumber(row.CRCAlignErr),
+			undersize_packets = tonumber(row.undersizePkts),
+			oversize_packets = tonumber(row.oversizePkts),
+			fragments = tonumber(row.fragments),
+			jabbers = tonumber(row.jabbers),
+			collisions = tonumber(row.collisions),
+			drop_events = tonumber(row.dropEvents),
 		},
 		size_buckets = {
 			frames_64 = tonumber(row.frames64B),
@@ -561,7 +578,8 @@ local function parse_surface_counters(row)
 	}
 end
 
-local function build_surfaces(data)
+local function build_surfaces(data, opts)
+	opts = opts or { link = true, attachment = true, poe = true }
 	local home = data.home_main or {}
 	local ports = home.ports or {}
 	local panel_ports = (data.panel_info or {}).ports or {}
@@ -572,6 +590,15 @@ local function build_surfaces(data)
 	local poe_ports = (data.poe_poe or {}).ports or {}
 	local surfaces = {}
 
+	local function set_if_present(t, k, v)
+		if v ~= nil then t[k] = v end
+	end
+
+	local function maybe_nonempty(t)
+		for _ in pairs(t or {}) do return t end
+		return nil
+	end
+
 	for i, port in ipairs(ports) do
 		local name = tostring(port.port or port.name or ('port-' .. i))
 		local panel = panel_ports[i]
@@ -580,63 +607,67 @@ local function build_surfaces(data)
 		local vp = vlan_port[i]
 		local vm = vlan_membership[i]
 		local poe = poe_ports[i]
-		local media = parse_media(prow and prow.type, panel)
-		local membership = parse_vlan_membership_string((vm and (vm.operVlans or vm.adminVlans)) or '')
-		local vlans, tagged, untagged = vlans_from_membership(membership)
-		local mode = VLAN_MODE[(vp and vp.mode) or (vm and vm.mode) or (vconf and vconf.mode)]
-		local pvid = vp and vp.pvid
-		if pvid == nil and vconf and vconf.pvid then pvid = (data.vlan_conf and data.vlan_conf.vlan) or 1 end
-		local link_up = (panel and panel.linkup) or (prow and prow.operStatus)
-		local speed = parse_speed_mbps((panel and panel.speed) or (prow and prow.operSpeed))
-		local duplex
-		if panel and panel.dupFull ~= nil then duplex = panel.dupFull and 'full' or 'half'
-		elseif prow and type(prow.operDuplex) == 'string' and prow.operDuplex:lower():find('full') then duplex = 'full'
-		elseif prow and type(prow.operDuplex) == 'string' and prow.operDuplex:lower():find('half') then duplex = 'half' end
-
-		surfaces[name] = {
+		local surface = {
 			provider_surface_id = name,
 			kind = is_lag_name(name) and 'lag' or 'switch-port',
-			capabilities = {
-				trunk = mode == 'trunk' or mode == 'hybrid',
-				access = mode == 'access' or mode == 'hybrid',
-				poe = poe ~= nil,
-			},
-			link = {
-				state = link_up and 'up' or 'down',
-				speed_mbps = speed,
-				duplex = duplex,
-				auto_negotiation = panel and panel.autoNego or nil,
-				media = media,
-			},
-			attachment = {
-				mode = mode,
-				pvid = pvid,
-				vlans = vlans,
-				tagged_vlans = tagged,
-				untagged_vlans = untagged,
-				accept_frame_type = vp and VLAN_ACCEPT_FRAME[vp.accFrameType] or nil,
-				ingress_filter = vp and vp.ingressFilter or nil,
-				uplink = vp and vp.uplink or nil,
-				tpid = vp and vp.tpid or nil,
-				admin_vlans_raw = vm and vm.adminVlans or nil,
-				oper_vlans_raw = vm and vm.operVlans or nil,
-				oper_vlans = membership,
-				vlan_membership = vconf and VLAN_MEMBERSHIP[vconf.membership] or nil,
-				forbidden = vconf and vconf.forbidden or nil,
-			},
-			raw = {
-				panel_info = panel,
-				port_port = prow,
-				vlan_conf = vconf,
-				vlan_port = vp,
-				vlan_membership = vm,
-				poe_poe = poe,
-			},
 		}
+		local capabilities, raw = {}, {}
 
+		if opts.link then
+			local media = parse_media(prow and prow.type, panel)
+			local speed = parse_speed_mbps((panel and panel.speed) or (prow and prow.operSpeed))
+			local duplex
+			if panel and panel.dupFull ~= nil then duplex = panel.dupFull and 'full' or 'half'
+			elseif prow and type(prow.operDuplex) == 'string' and prow.operDuplex:lower():find('full') then duplex = 'full'
+			elseif prow and type(prow.operDuplex) == 'string' and prow.operDuplex:lower():find('half') then duplex = 'half' end
 
-		if poe then
-			surfaces[name].poe = {
+			local link = {}
+			-- Absence of panel/port operational state means "not observed in this
+			-- command group", not "down".  The merge layer preserves the prior link
+			-- state when this group has no link facts.
+			if panel and panel.linkup ~= nil then link.state = panel.linkup and 'up' or 'down'
+			elseif prow and prow.operStatus ~= nil then link.state = prow.operStatus and 'up' or 'down' end
+			set_if_present(link, 'speed_mbps', speed)
+			set_if_present(link, 'duplex', duplex)
+			if panel then set_if_present(link, 'auto_negotiation', panel.autoNego) end
+			set_if_present(link, 'media', media)
+			surface.link = maybe_nonempty(link)
+			set_if_present(raw, 'panel_info', panel)
+			set_if_present(raw, 'port_port', prow)
+		end
+
+		if opts.attachment then
+			local membership = parse_vlan_membership_string((vm and (vm.operVlans or vm.adminVlans)) or '')
+			local vlans, tagged, untagged = vlans_from_membership(membership)
+			local mode = VLAN_MODE[(vp and vp.mode) or (vm and vm.mode) or (vconf and vconf.mode)]
+			local pvid = vp and vp.pvid
+			if pvid == nil and vconf and vconf.pvid then pvid = (data.vlan_conf and data.vlan_conf.vlan) or 1 end
+			if mode == 'trunk' or mode == 'hybrid' then capabilities.trunk = true end
+			if mode == 'access' or mode == 'hybrid' then capabilities.access = true end
+			local attachment = {}
+			set_if_present(attachment, 'mode', mode)
+			set_if_present(attachment, 'pvid', pvid)
+			if #vlans > 0 or vm ~= nil then attachment.vlans = vlans end
+			if #tagged > 0 or vm ~= nil then attachment.tagged_vlans = tagged end
+			if #untagged > 0 or vm ~= nil then attachment.untagged_vlans = untagged end
+			set_if_present(attachment, 'accept_frame_type', vp and VLAN_ACCEPT_FRAME[vp.accFrameType] or nil)
+			set_if_present(attachment, 'ingress_filter', vp and vp.ingressFilter or nil)
+			set_if_present(attachment, 'uplink', vp and vp.uplink or nil)
+			set_if_present(attachment, 'tpid', vp and vp.tpid or nil)
+			set_if_present(attachment, 'admin_vlans_raw', vm and vm.adminVlans or nil)
+			set_if_present(attachment, 'oper_vlans_raw', vm and vm.operVlans or nil)
+			if vm ~= nil then attachment.oper_vlans = membership end
+			set_if_present(attachment, 'vlan_membership', vconf and VLAN_MEMBERSHIP[vconf.membership] or nil)
+			set_if_present(attachment, 'forbidden', vconf and vconf.forbidden or nil)
+			surface.attachment = maybe_nonempty(attachment)
+			set_if_present(raw, 'vlan_conf', vconf)
+			set_if_present(raw, 'vlan_port', vp)
+			set_if_present(raw, 'vlan_membership', vm)
+		end
+
+		if opts.poe and poe then
+			capabilities.poe = true
+			surface.poe = {
 				enabled = poe.portEnable == true,
 				state = poe.portStatus and 'delivering' or 'off',
 				delivering = poe.portStatus == true,
@@ -645,7 +676,12 @@ local function build_surfaces(data)
 				power_limit_mw = poe.portPowerLimit,
 				watchdog = poe.watchDog == true,
 			}
+			set_if_present(raw, 'poe_poe', poe)
 		end
+
+		surface.capabilities = maybe_nonempty(capabilities)
+		surface.raw = maybe_nonempty(raw)
+		surfaces[name] = surface
 	end
 
 	return surfaces
@@ -702,7 +738,7 @@ local function build_snapshot(self, data)
 		writable = false,
 		status = base_status(self),
 		identity = build_identity(data),
-		surfaces = build_surfaces(data),
+		surfaces = build_surfaces(data, { link = true, attachment = true, poe = true }),
 		counters = build_surface_counters(data),
 		topology = {
 			lldp_local = data.lldp_local,
@@ -731,14 +767,16 @@ local function build_group_observation(self, group, data)
 		out.counters = build_surface_counters(data)
 	elseif group == 'poe' then
 		out.power = parse_power(data.poe_poe)
-		out.surfaces = build_surfaces(data)
+		out.surfaces = build_surfaces(data, { poe = true })
 	elseif group == 'lldp' then
 		out.topology = {
 			lldp_local = data.lldp_local,
 			lldp_neighbor = data.lldp_neighbor,
 		}
-	elseif group == 'panel' or group == 'vlan' then
-		out.surfaces = build_surfaces(data)
+	elseif group == 'panel' then
+		out.surfaces = build_surfaces(data, { link = true })
+	elseif group == 'vlan' then
+		out.surfaces = build_surfaces(data, { attachment = true })
 	else
 		return { ok = false, provider_id = self.id, group = group, status = { state = 'unavailable', available = false, driver = DRIVER, err = 'unknown command group: ' .. group } }
 	end

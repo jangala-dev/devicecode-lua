@@ -185,6 +185,22 @@ function HttpService:_derive_snapshot()
 end
 
 
+
+function HttpService:_log_http_summary(reason)
+	local snap = self:_derive_snapshot()
+	local completed = tonumber(snap.completed_exchanges) or 0
+	local failed = tonumber(snap.failed_exchanges) or 0
+	local rejected = tonumber(snap.rejected_requests) or 0
+	local active = tonumber(snap.active_exchanges) or 0
+	local summary = string.format('http summary backend=%s active=%d completed=%d failed=%d rejected=%d', tostring(snap.backend), active, completed, failed, rejected)
+	local key = summary
+	local tnow = now()
+	if self._last_operator_summary_key == key and (tnow - (self._last_operator_summary_at or 0)) < 600 then return end
+	self._last_operator_summary_key = key
+	self._last_operator_summary_at = tnow
+	self:_publish_obs_log('info', { what = 'http_summary', summary = summary, reason = reason })
+end
+
 function HttpService:_publish_obs_log(level, payload)
 	payload = payload or {}
 	payload.service = 'http'
@@ -779,6 +795,7 @@ end
 function HttpService:_reduce_event(ev)
 	local k = ev.kind
 	if k == 'backend_ready' then
+		if self._state.backend ~= 'ready' then self:_publish_obs_log('info', { what = 'http_ready', summary = 'http backend ready' }) end
 		self._state.backend = 'ready'
 		if self._state.config and self._state.config.enabled == false then
 			self._state.service_state = 'disabled'; self._state.ready = false
@@ -786,6 +803,7 @@ function HttpService:_reduce_event(ev)
 			self._state.service_state = 'ready'; self._state.ready = true
 		end
 	elseif k == 'backend_failed' then
+		self:_publish_obs_log('error', { what = 'http_failed', reason = ev.reason })
 		self._state.backend = 'failed'; self._state.service_state = 'failed'; self._state.ready = false; self._state.last_error = ev.reason
 		if self._registry then self._registry:terminate_all(ev.reason or 'backend_failed') end
 	elseif k == 'backend_terminated' then
