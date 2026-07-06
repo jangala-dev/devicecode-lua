@@ -262,6 +262,15 @@ local function uplink_state_for_modem(connected, modem_state, _sim_lock, sim_sta
 	return 'disconnected'
 end
 
+local function modem_state_implies_sim_present(modem_state)
+	return modem_state == 'enabled'
+		or modem_state == 'searching'
+		or modem_state == 'registered'
+		or modem_state == 'connecting'
+		or modem_state == 'connected'
+		or modem_state == 'disconnecting'
+end
+
 ---@param sim_state string?
 ---@param sim_lock string?
 ---@param sim_lock_retries table?
@@ -271,7 +280,11 @@ local function build_sim_payload(sim_state, sim_lock, sim_lock_retries, modem_st
 	local sim_absent = sim_state == '--'
 	local locked = not sim_absent and modem_state == 'locked'
 	local lock = locked and normalize_optional_string(sim_lock) or nil
-	local state = sim_absent and '--' or (locked and 'locked' or normalize_optional_string(sim_state))
+	local state = sim_absent
+		and '--'
+		or (locked and 'locked'
+			or normalize_optional_string(sim_state)
+			or (modem_state_implies_sim_present(modem_state) and 'present' or nil))
 	return {
 		state = state or '--',
 		lock = lock,

@@ -44,6 +44,14 @@ function tests.test_sim_payload_ignores_non_blocking_pin2_on_connected_modem()
 	eq(payload.lock_retries, nil)
 end
 
+function tests.test_sim_payload_treats_connected_modem_as_present_when_sim_is_unknown()
+	local payload = gsm._test.build_sim_payload(nil, nil, nil, 'connected')
+
+	eq(payload.state, 'present')
+	eq(payload.lock, nil)
+	eq(payload.lock_retries, nil)
+end
+
 function tests.test_sim_payload_reports_locked_without_lock_detail_when_modem_locked()
 	local payload = gsm._test.build_sim_payload('present', nil, nil, 'locked')
 
