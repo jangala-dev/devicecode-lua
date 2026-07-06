@@ -1615,6 +1615,8 @@ local function normalise_mwan3_status(st, name_ctx)
 				usable = online,
 				age = tonumber(rec.age),
 				uptime = tonumber(rec.uptime),
+				online_for = tonumber(rec.online),
+				offline_for = tonumber(rec.offline),
 				online = online,
 				online_count = tonumber(rec.online),
 				offline = tonumber(rec.offline),

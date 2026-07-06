@@ -97,6 +97,8 @@ function tests.test_mwan_status_keeps_link_up_separate_from_online_health()
 	eq(wan.up, true)
 	eq(wan.online, false)
 	eq(wan.usable, false)
+	eq(wan.online_for, 4)
+	eq(wan.offline_for, 1)
 	eq(wan.online_count, 4)
 end
 
