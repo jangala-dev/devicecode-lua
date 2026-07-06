@@ -76,6 +76,7 @@ function tests.test_plan_reports_vlan_mwan3_and_shaping_domains()
 end
 
 function tests.test_mwan_status_keeps_link_up_separate_from_online_health()
+	local t0 = os.time()
 	local observed = openwrt_provider._test.normalise_mwan3_status({
 		interfaces = {
 			wan = {
@@ -88,10 +89,22 @@ function tests.test_mwan_status_keeps_link_up_separate_from_online_health()
 				online = 4,
 				offline = 1,
 			},
+			wanb = {
+				status = 'online',
+				enabled = true,
+				running = true,
+				tracking = 'active',
+				up = true,
+				uptime = 999,
+				online = 15,
+				offline = 0,
+			},
 		},
 	})
 	local wan = observed.interfaces_by_semantic.wan
+	local wanb = observed.interfaces_by_semantic.wanb
 	ok(wan, 'wan status expected')
+	ok(wanb, 'wanb status expected')
 	eq(wan.state, 'offline')
 	eq(wan.mwan3_status, 'offline')
 	eq(wan.up, true)
@@ -100,6 +113,13 @@ function tests.test_mwan_status_keeps_link_up_separate_from_online_health()
 	eq(wan.online_for, 4)
 	eq(wan.offline_for, 1)
 	eq(wan.online_count, 4)
+	ok(type(wan.offline_since) == 'number', 'offline_since expected')
+	ok(math.abs(wan.offline_since - (t0 - 1)) <= 2, 'offline_since should be derived from offline duration')
+	eq(wanb.online, true)
+	eq(wanb.online_for, 15)
+	eq(wanb.uptime, 999)
+	ok(type(wanb.online_since) == 'number', 'online_since expected')
+	ok(math.abs(wanb.online_since - (t0 - 15)) <= 2, 'online_since should be derived from online duration')
 end
 
 
