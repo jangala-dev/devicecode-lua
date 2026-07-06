@@ -79,7 +79,7 @@ local function manager(scope, dev_ev_ch, cap_emit_ch)
         error("Power Manager: failed to start driver: " .. tostring(start_err))
     end
 
-    dlog(PowerManager.logger, 'info', { what = 'device_registered' })
+    dlog(PowerManager.logger, 'debug', { what = 'device_registered' })
 end
 
 ---- public interface ----

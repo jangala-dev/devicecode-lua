@@ -379,7 +379,7 @@ function Observer:socket_server()
 		return
 	end
 	self.listener = s
-	log(self, 'info', { what = 'hotplug_socket_listening', path = self.socket_path })
+	log(self, 'debug', { what = 'hotplug_socket_listening', path = self.socket_path })
 	while not self.closed do
 		local st, aerr = perform(s:accept_op())
 		if st then

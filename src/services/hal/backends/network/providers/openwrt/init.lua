@@ -1114,7 +1114,7 @@ function M.new(config, opts)
 		speedtest_run_cmd = config.speedtest_run_cmd,
 		counter_reader = config.counter_reader or config.stat_reader,
 	}, Provider)
-	log_provider(self, 'warn', {
+	log_provider(self, 'debug', {
 		what = 'openwrt_network_provider_instrumented_build',
 		marker = 'owned_activation_runner_v1',
 		activation_runner = 'owned',
@@ -1257,7 +1257,7 @@ function Provider:apply_op(req)
 			generation = opts.generation,
 			apply_id = opts.apply_id,
 		}
-		log_provider(self, 'info', {
+		log_provider(self, 'debug', {
 			what = 'openwrt_apply_begin',
 			generation = trace.generation,
 			apply_id = trace.apply_id,
@@ -1322,7 +1322,7 @@ function Provider:apply_op(req)
 		local records = transaction_records(built.changes)
 		local packages = OWNED_PACKAGES
 		phase = fibers.now()
-		log_provider(self, 'info', {
+		log_provider(self, 'debug', {
 			what = 'openwrt_apply_uci_transaction_begin',
 			generation = trace.generation,
 			apply_id = trace.apply_id,
@@ -1341,7 +1341,7 @@ function Provider:apply_op(req)
 			},
 		}))
 		local tx_elapsed = elapsed_ms(phase)
-		log_provider(self, tx_result and tx_result.ok == true and 'info' or 'warn', {
+		log_provider(self, tx_result and tx_result.ok == true and 'debug' or 'warn', {
 			what = 'openwrt_apply_uci_transaction_done',
 			generation = trace.generation,
 			apply_id = trace.apply_id,
@@ -1376,7 +1376,7 @@ function Provider:apply_op(req)
 		local shaping_request = build_shaping_request(intent, self.config, built.name_ctx)
 		if shaping_request and shaping_request.enabled == true then
 			phase = fibers.now()
-			log_provider(self, 'info', {
+			log_provider(self, 'debug', {
 				what = 'openwrt_apply_shaping_wait_targets_begin',
 				generation = trace.generation,
 				apply_id = trace.apply_id,
@@ -1386,7 +1386,7 @@ function Provider:apply_op(req)
 				timeout_s = tonumber(self.config.shaping_target_timeout_s) or 10,
 				interval_s = tonumber(self.config.shaping_target_poll_s) or 0.1,
 			})
-			log_provider(self, targets_ok == true and 'info' or 'warn', {
+			log_provider(self, targets_ok == true and 'debug' or 'warn', {
 				what = 'openwrt_apply_shaping_wait_targets_done',
 				generation = trace.generation,
 				apply_id = trace.apply_id,
@@ -1400,14 +1400,14 @@ function Provider:apply_op(req)
 			end
 
 			phase = fibers.now()
-			log_provider(self, 'info', {
+			log_provider(self, 'debug', {
 				what = 'openwrt_apply_shaping_begin',
 				generation = trace.generation,
 				apply_id = trace.apply_id,
 				apply_elapsed_ms = elapsed_ms(t0),
 			})
 			shaping_result = shaper_mod.apply(shaping_request, { run_cmd = self.shaper_run_cmd, run_restore = self.shaper_run_restore })
-			log_provider(self, shaping_result and shaping_result.ok == true and 'info' or 'warn', {
+			log_provider(self, shaping_result and shaping_result.ok == true and 'debug' or 'warn', {
 				what = 'openwrt_apply_shaping_done',
 				generation = trace.generation,
 				apply_id = trace.apply_id,
@@ -1434,7 +1434,7 @@ function Provider:apply_op(req)
 			openwrt_names = self._last_openwrt_names,
 			shaping = shaping_result,
 		}
-		log_provider(self, 'info', {
+		log_provider(self, 'debug', {
 			what = 'openwrt_apply_done',
 			ok = true,
 			generation = trace.generation,

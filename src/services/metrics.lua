@@ -498,7 +498,7 @@ local function main()
 				elseif not State.base_time.synced then
 					next_publish_time = math.huge
 					State.svc:obs_event('ntp_lost', {})
-					State.svc:obs_log('warn', { what = 'ntp_lost' })
+					State.svc:obs_log('debug', { what = 'ntp_lost' })
 				end
 			end
 		elseif which == 'tick' then

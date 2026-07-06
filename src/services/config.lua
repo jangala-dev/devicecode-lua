@@ -49,7 +49,7 @@ function M.start(conn, opts)
 	local persist_retry_max_s     = numopt('persist_retry_max_s', 30.0)
 
 	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
-	svc:obs_log('info', 'service start() entered')
+	svc:obs_log('debug', 'service start() entered')
 	svc:status('starting')
 
 	svc:spawn_heartbeat(heartbeat_s, 'tick')
@@ -262,10 +262,10 @@ function M.start(conn, opts)
 	end)
 
 	local set_ep = conn:bind({ 'cmd', 'config', 'set' }, { queue_len = 50 })
-	svc:obs_log('info', 'bound cmd/config/set')
+	svc:obs_log('debug', 'bound cmd/config/set')
 
 	svc:status('running')
-	svc:obs_log('info', 'service running')
+	svc:obs_log('debug', 'service running')
 
 	while true do
 		local req, err = perform(set_ep:recv_op())

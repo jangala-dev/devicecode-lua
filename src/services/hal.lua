@@ -1025,7 +1025,7 @@ function HalService.start(conn, opts)
 
 		local entry = registry:get_cap(emit.class, emit.id)
 		if not entry then
-			log('warn', 'cap_emit_missing_capability', {
+			log('debug', 'cap_emit_missing_capability', {
 				class = tostring(emit.class),
 				id    = tostring(emit.id),
 				mode  = tostring(emit.mode),

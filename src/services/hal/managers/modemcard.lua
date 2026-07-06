@@ -71,10 +71,10 @@ local function detector(scope)
         elseif event then
             ---@cast event ModemMonitorEvent
             if event.is_added then
-                log:info({ what = 'modem_detected', summary = string.format('modem detected %s', tostring(event.address)), address = event.address })
+                log:debug({ what = 'modem_detected', summary = string.format('modem detected %s', tostring(event.address)), address = event.address })
                 ModemcardManager.modem_detect_ch:put(event.address)
             else
-                log:info({ what = 'modem_removed', summary = string.format('modem removed %s', tostring(event.address)), address = event.address })
+                log:debug({ what = 'modem_removed', summary = string.format('modem removed %s', tostring(event.address)), address = event.address })
                 ModemcardManager.modem_remove_ch:put(event.address)
             end
         end
@@ -90,7 +90,7 @@ local function on_remove(dev_ev_ch, address)
         return
     end
 
-    log:info({ what = 'removing_modem', address = address })
+    log:debug({ what = 'removing_modem', address = address })
 
     local driver = ModemcardManager.modems[address]
     if driver == nil then
