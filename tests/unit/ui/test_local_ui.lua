@@ -5,6 +5,9 @@ local sse = require 'services.ui.http.sse'
 local read_model = require 'services.ui.read_model'
 local local_model = require 'services.ui.local_model'
 
+local ok_cjson, cjson = pcall(require, 'cjson.safe')
+if not ok_cjson then cjson = require 'cjson' end
+
 local tests = {}
 
 local function fail(msg) error(msg or 'assertion failed', 2) end
@@ -13,6 +16,15 @@ local function ok(v,msg) if not v then fail(msg or 'expected truthy') end end
 
 local function ctx(method, path)
 	return { method = method, path = path }
+end
+
+local function sse_data(frame)
+	local lines = {}
+	for line in tostring(frame):gmatch('([^\n]*)\n') do
+		local data = line:match('^data:%s?(.*)$')
+		if data ~= nil then lines[#lines + 1] = data end
+	end
+	return table.concat(lines, '\n')
 end
 
 function tests.test_routes_decode_local_ui_and_apn_routes()
@@ -40,6 +52,31 @@ function tests.test_sse_defaults_use_local_ui_prefixes_without_root_hash()
 	ok(seen['obs/v1/system/metric/#'], 'system metrics stream missing')
 	eq(seen['obs/v1/gsm/event/#'], nil, 'generic GSM events should not be watched by /events')
 	eq(seen['obs/v1/+/event/log'], nil, 'logs should use the monitor log follow endpoint')
+end
+
+function tests.test_sse_default_encoder_emits_parseable_json_for_multiline_strings()
+	local restore = '*mangle\n'
+		.. '-F mwan3_policy_balanced\n'
+		.. '-A mwan3_policy_balanced -m comment --comment "wan 88 88" -j MARK\n'
+		.. 'COMMIT\n'
+	local frame = sse.frame_event({
+		kind = 'read_model_event',
+		op = 'set',
+		topic = { 'state', 'net', 'wan_runtime' },
+		payload = {
+			live_weights = {
+				result = {
+					restore = restore,
+				},
+			},
+		},
+	})
+	local decoded, err = cjson.decode(sse_data(frame))
+	ok(decoded, err or frame)
+	eq(decoded.topic[1], 'state')
+	eq(decoded.topic[2], 'net')
+	eq(decoded.topic[3], 'wan_runtime')
+	eq(decoded.payload.live_weights.result.restore, restore)
 end
 
 function tests.test_local_model_allow_list_excludes_cfg_and_raw()

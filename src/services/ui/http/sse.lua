@@ -10,29 +10,15 @@
 local fibers   = require 'fibers'
 local local_model = require 'services.ui.local_model'
 
+local ok_cjson, cjson = pcall(require, 'cjson.safe')
+if not ok_cjson then cjson = require 'cjson' end
+
 local M = {}
 
-local function default_encode(v)
-	local tv = type(v)
-	if tv == 'nil' then return 'null' end
-	if tv == 'boolean' or tv == 'number' then return tostring(v) end
-	if tv == 'string' then return string.format('%q', v) end
-	if tv == 'table' then
-		local parts = {}
-		local is_array = true
-		local n = 0
-		for k in pairs(v) do
-			if type(k) ~= 'number' or k < 1 or k % 1 ~= 0 then is_array = false end
-			if type(k) == 'number' and k > n then n = k end
-		end
-		if is_array then
-			for i = 1, n do parts[#parts + 1] = default_encode(v[i]) end
-			return '[' .. table.concat(parts, ',') .. ']'
-		end
-		for k, vv in pairs(v) do parts[#parts + 1] = default_encode(tostring(k)) .. ':' .. default_encode(vv) end
-		return '{' .. table.concat(parts, ',') .. '}'
-	end
-	return default_encode(tostring(v))
+local function default_encode_json(v)
+	local encoded, err = cjson.encode(v)
+	if encoded == nil then error(err or 'json_encode_failed', 0) end
+	return encoded
 end
 
 local function perform_required(ev, label)
@@ -88,6 +74,7 @@ local function patterns_for(route, opts)
 end
 
 local function frame_event(ev, encode)
+	encode = encode or default_encode_json
 	local name = (ev and ev.op) or (ev and ev.kind) or 'message'
 	local data = encode(ev or {})
 	local id = ev and ev.topic and topic_to_string(ev.topic) or nil
@@ -159,7 +146,7 @@ end
 function M.run(scope, owner, route, opts)
 	opts = opts or {}
 	local watch_owner = assert(opts.watch_owner, 'SSE requires watch_owner')
-	local encode = opts.encode_json or opts.encode or default_encode
+	local encode = opts.encode_json or opts.encode or default_encode_json
 	local patterns = patterns_for(route, opts)
 	local replay = (opts.sse and opts.sse.replay == true) or false
 	if #patterns == 0 then
@@ -207,4 +194,5 @@ M.event_allowed = event_allowed
 M.project_event = project_event
 M.default_patterns = default_patterns
 M.patterns_for = patterns_for
+M.default_encode_json = default_encode_json
 return M
