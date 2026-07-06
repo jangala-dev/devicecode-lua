@@ -27,14 +27,10 @@ local ALLOW_PREFIXES = {
 	{ 'state', 'update' },
 	{ 'state', 'workflow', 'update-job' },
 	{ 'obs', 'v1', 'gsm', 'metric' },
-	{ 'obs', 'v1', 'gsm', 'event' },
 	{ 'obs', 'v1', 'system', 'metric' },
 }
 
-local LOG_EVENT_PATTERN = { 'obs', 'v1', '+', 'event', 'log' }
-local LIVE_EVENT_PATTERNS = {
-	LOG_EVENT_PATTERN,
-}
+local LIVE_EVENT_PATTERNS = {}
 
 local DENY_PREFIXES = {
 	{ 'cfg' },
@@ -44,7 +40,17 @@ local DENY_PREFIXES = {
 	{ 'obs', 'v1', 'ui' },
 }
 
+local function is_log_topic(topic)
+	return type(topic) == 'table'
+		and #topic == 5
+		and topic[1] == 'obs'
+		and topic[2] == 'v1'
+		and topic[4] == 'event'
+		and topic[5] == 'log'
+end
+
 local function allowed(topic)
+	if is_log_topic(topic) then return false end
 	for _, prefix in ipairs(DENY_PREFIXES) do
 		if starts_with(topic, prefix) then return false end
 	end
@@ -54,21 +60,11 @@ local function allowed(topic)
 	return false
 end
 
-local function matches_log_event(topic)
-	return type(topic) == 'table'
-		and #topic == 5
-		and topic[1] == 'obs'
-		and topic[2] == 'v1'
-		and topic[3] ~= nil
-		and topic[4] == 'event'
-		and topic[5] == 'log'
-end
-
 local function allowed_event(topic)
 	for _, prefix in ipairs(DENY_PREFIXES) do
 		if starts_with(topic, prefix) then return false end
 	end
-	return allowed(topic) or matches_log_event(topic)
+	return allowed(topic) or is_log_topic(topic)
 end
 
 local function sorted_items(snapshot)
@@ -142,7 +138,6 @@ M.allowed = allowed
 M.allowed_event = allowed_event
 M.ALLOW_PREFIXES = ALLOW_PREFIXES
 M.DENY_PREFIXES = DENY_PREFIXES
-M.LOG_EVENT_PATTERN = LOG_EVENT_PATTERN
 M.LIVE_EVENT_PATTERNS = LIVE_EVENT_PATTERNS
 
 return M

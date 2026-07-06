@@ -38,7 +38,8 @@ function tests.test_sse_defaults_use_local_ui_prefixes_without_root_hash()
 	ok(seen['state/device/#'], 'state/device stream missing')
 	ok(seen['state/net/#'], 'state/net stream missing')
 	ok(seen['obs/v1/system/metric/#'], 'system metrics stream missing')
-	ok(seen['obs/v1/+/event/log'], 'live log stream missing')
+	eq(seen['obs/v1/gsm/event/#'], nil, 'generic GSM events should not be watched by /events')
+	eq(seen['obs/v1/+/event/log'], nil, 'logs should use the monitor log follow endpoint')
 end
 
 function tests.test_local_model_allow_list_excludes_cfg_and_raw()
@@ -73,7 +74,7 @@ function tests.test_local_model_allow_list_excludes_cfg_and_raw()
 	if boot.items['raw/member/mcu'] then fail('raw member leaked into local-ui bootstrap') end
 end
 
-function tests.test_local_model_admits_live_logs_without_bootstrapping_them()
+function tests.test_local_model_keeps_logs_out_of_default_stream_and_bootstrap()
 	local model = read_model.new()
 	model:set({ 'obs', 'v1', 'net', 'event', 'log' }, {
 		level = 'warn',
@@ -88,7 +89,7 @@ function tests.test_local_model_admits_live_logs_without_bootstrapping_them()
 			message = 'not retained',
 		},
 	})
-	ok(log_event, 'canonical service log event should be projected')
+	ok(log_event, 'explicit canonical service log projection should remain supported')
 	eq(log_event.payload.message, 'not retained')
 
 	local ui_log = local_model.project_event({
@@ -97,6 +98,13 @@ function tests.test_local_model_admits_live_logs_without_bootstrapping_them()
 		payload = { level = 'info', message = 'hidden' },
 	})
 	eq(ui_log, nil, 'ui service logs should remain denied')
+
+	local gsm_log = local_model.project_event({
+		op = 'set',
+		topic = { 'obs', 'v1', 'gsm', 'event', 'log' },
+		payload = { level = 'info', message = 'hidden' },
+	})
+	ok(gsm_log, 'explicit GSM service log projection should remain supported')
 
 	local boot = local_model.bootstrap(model:snapshot())
 	if boot.items['obs/v1/net/event/log'] then fail('log event leaked into local-ui bootstrap') end

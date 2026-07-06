@@ -156,6 +156,9 @@ function tests.test_read_model_forwards_non_retained_logs_without_storing_them()
 
 		local store, watch_owner = read_model.start(scope, feed_conn, {
 			patterns = {},
+			event_patterns = {
+				{ 'obs', 'v1', '+', 'event', 'log' },
+			},
 			event_queue_len = 8,
 		})
 		local watch = assert(watch_owner:watch_open({ 'obs', 'v1', '+', 'event', 'log' }, {
