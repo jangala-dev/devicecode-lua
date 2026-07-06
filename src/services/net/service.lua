@@ -105,6 +105,65 @@ local function reconcile_speedtests_if_ready(state, reason)
 	return wan_manager.reconcile_speedtests(state, reason)
 end
 
+
+local function sorted_keys(t)
+	local keys = {}
+	for k in pairs(t or {}) do keys[#keys + 1] = tostring(k) end
+	table.sort(keys)
+	return keys
+end
+
+local function latest_successful_speedtest(snapshot)
+	local tests = snapshot and snapshot.wan_runtime and snapshot.wan_runtime.speedtests or {}
+	local best = nil
+	for id, rec in pairs(tests or {}) do
+		if type(rec) == 'table' and rec.ok == true and rec.peak_mbps ~= nil then
+			if not best or (tonumber(rec.completed_at) or 0) > (tonumber(best.completed_at) or 0) then
+				best = { id = id, rec = rec, completed_at = tonumber(rec.completed_at) or 0 }
+			end
+		end
+	end
+	return best
+end
+
+local function log_net_summary(state, reason)
+	if not state.svc or not state.model then return end
+	local snap = state.model:snapshot()
+	local parts = {}
+	local wan_iface = snap.interfaces and snap.interfaces.wan or nil
+	local endpoint = type(wan_iface) == 'table' and type(wan_iface.endpoint) == 'table' and wan_iface.endpoint or {}
+	local latest = latest_successful_speedtest(snap)
+	local wan_state = (wan_iface and wan_iface.state) or nil
+	if not wan_state and latest and tostring(latest.id) == 'wan' and latest.rec and latest.rec.ok == true then wan_state = 'online' end
+	if not wan_state and endpoint.device then wan_state = 'configured' end
+	if wan_state then parts[#parts + 1] = 'wan=' .. tostring(wan_state) end
+	if endpoint.device or (latest and latest.rec and latest.rec.device) then parts[#parts + 1] = 'device=' .. tostring(endpoint.device or latest.rec.device) end
+	if endpoint.address or endpoint.ipaddr then parts[#parts + 1] = 'addr=' .. tostring(endpoint.address or endpoint.ipaddr) end
+	if latest then parts[#parts + 1] = string.format('speedtest=%s:%.1fMbps', tostring(latest.id), tonumber(latest.rec.peak_mbps) or 0) end
+	local last_apply = snap.wan_runtime and snap.wan_runtime.last_weight_apply or nil
+	if last_apply and type(last_apply.detail) == 'table' then
+		local detail = last_apply.detail
+		local eff, skipped = {}, {}
+		for _, m in ipairs(detail.members or {}) do eff[#eff + 1] = tostring(m.semantic_interface or m.interface or m.id or '?') end
+		for _, m in ipairs(detail.skipped_members or {}) do skipped[#skipped + 1] = tostring(m.semantic_interface or m.interface or m.id or '?') end
+		if #eff > 0 then parts[#parts + 1] = 'effective=' .. table.concat(eff, ',') end
+		if #skipped > 0 then parts[#parts + 1] = 'skipped=' .. table.concat(skipped, ',') end
+	end
+	local gsm = snap.sources and snap.sources.gsm_uplinks or {}
+	local gsm_parts = {}
+	for _, role in ipairs(sorted_keys(gsm)) do
+		local rec = gsm[role]
+		gsm_parts[#gsm_parts + 1] = tostring(role) .. '=' .. tostring((rec and (rec.state or (rec.connected and 'connected' or 'disconnected'))) or 'unknown')
+	end
+	if #gsm_parts > 0 then parts[#parts + 1] = 'modems=' .. table.concat(gsm_parts, ',') end
+	local summary = 'net summary ' .. table.concat(parts, ' ')
+	local tnow = now()
+	if state.operator_net_summary_key == summary and (tnow - (state.operator_net_summary_at or 0)) < 600 then return end
+	state.operator_net_summary_key = summary
+	state.operator_net_summary_at = tnow
+	obs_log(state.svc, 'info', { what = 'net_summary', summary = summary, reason = reason })
+end
+
 local function set_model_state(state, service_state, reason)
 	state.model:update(function (s)
 		s.state = service_state
@@ -780,6 +839,7 @@ local function handle_live_weights_done(state, ev)
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end
+	if ok == true and err ~= 'stale' then log_net_summary(state, 'live_weights_done') end
 	if ok == true and err == 'stale' then return true, nil end
 	return ok, err
 end

@@ -105,6 +105,68 @@ local function count_link_states(surfaces)
 	return up, down, unknown
 end
 
+
+local function link_brief(rec)
+	if not rec then return 'unknown' end
+	local st = link_status(rec.link or {}) or 'unknown'
+	local speed = link_speed(rec.link or {})
+	local duplex = rec.link and rec.link.duplex or nil
+	local parts = { st }
+	if speed then parts[#parts + 1] = tostring(speed) end
+	if duplex then parts[#parts + 1] = tostring(duplex) end
+	return table.concat(parts, '/')
+end
+
+local function choose_wan_surface(surfaces)
+	for id, rec in pairs(surfaces or {}) do
+		if rec and rec.role == 'wan-uplink' then return id, rec end
+	end
+	return nil, nil
+end
+
+local function choose_trunk_surface(surfaces)
+	for id, rec in pairs(surfaces or {}) do
+		if rec and rec.protected == true and link_status(rec.link or {}) ~= nil then return id, rec end
+	end
+	for id, rec in pairs(surfaces or {}) do
+		if rec and rec.protected == true and rec.source and rec.source.exposure == 'internal' then return id, rec end
+	end
+	for id, rec in pairs(surfaces or {}) do
+		if rec and rec.protected == true then return id, rec end
+	end
+	return nil, nil
+end
+
+local function log_wired_summary(state, snap, reason)
+	if not state.svc then return end
+	local surfaces = snap and snap.surfaces or {}
+	if not has_observed_surfaces(surfaces) or not has_observed_link_state(surfaces) then return end
+	local up, down, unknown = count_link_states(surfaces)
+	local wan_id, wan = choose_wan_surface(surfaces)
+	if not wan then return end
+	local trunk_id, trunk = choose_trunk_surface(surfaces)
+	local parts = {}
+	if wan then parts[#parts + 1] = 'wan=' .. surface_label(wan_id, wan) .. ':' .. link_brief(wan) end
+	if trunk then parts[#parts + 1] = 'trunk=' .. surface_label(trunk_id, trunk) .. ':' .. link_brief(trunk) end
+	parts[#parts + 1] = 'links_up=' .. tostring(up)
+	parts[#parts + 1] = 'links_down=' .. tostring(down)
+	if unknown and unknown > 0 then parts[#parts + 1] = 'links_unknown=' .. tostring(unknown) end
+	local summary = 'wired summary ' .. table.concat(parts, ' ')
+	local tnow = now()
+	if state.operator_wired_summary_key == summary and (tnow - (state.operator_wired_summary_at or 0)) < 600 then return end
+	state.operator_wired_summary_key = summary
+	state.operator_wired_summary_at = tnow
+	state.svc:info('wired_summary', {
+		summary = summary,
+		reason = reason,
+		wan_surface = wan_id,
+		trunk_surface = trunk_id,
+		links_up = up,
+		links_down = down,
+		links_unknown = unknown,
+	})
+end
+
 local function log_wired_inventory(state, snap)
 	if not state.svc then return end
 	local surfaces = snap and snap.surfaces or {}
@@ -127,6 +189,7 @@ local function log_wired_inventory(state, snap)
 		links_down = down,
 		links_unknown = unknown,
 	})
+	log_wired_summary(state, snap, 'inventory_ready')
 end
 
 local function log_protected_backhaul(state, snap)
@@ -852,6 +915,7 @@ local function apply_observation_event(state, ev)
 	log_surface_transitions(state, before, snap)
 	log_wired_inventory(state, snap)
 	log_protected_backhaul(state, snap)
+	log_wired_summary(state, snap, 'observation')
 	log_counter_anomalies(state, snap)
 	local topic = ev and ev.topic or {}
 	if topic[6] == 'state' and topic[7] == 'counters' then

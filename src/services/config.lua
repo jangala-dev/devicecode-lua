@@ -76,6 +76,34 @@ function M.start(conn, opts)
 	-- current[svc] = { rev=int, data=table }
 	local current   = {}
 
+	local function count_current()
+		local n = 0
+		local keys = {}
+		for k in pairs(current or {}) do n = n + 1; keys[#keys + 1] = tostring(k) end
+		table.sort(keys)
+		return n, table.concat(keys, ',')
+	end
+
+	local function log_config_summary(reason)
+		local n, keys = count_current()
+		if reason == 'loaded' then
+			svc:info('config_loaded', {
+				summary = string.format('config loaded target=%s services=%d', tostring(STATE_KEY), n),
+				reason = reason,
+				target = STATE_KEY,
+				services = n,
+			})
+		else
+			svc:info('config_summary', {
+				summary = string.format('config summary target=%s services=%d', tostring(STATE_KEY), n),
+				reason = reason,
+				target = STATE_KEY,
+				services = n,
+				keys = keys ~= '' and keys or nil,
+			})
+		end
+	end
+
 	local function publish_all_retained()
 		return state.publish_all_retained(conn, svc, current)
 	end
@@ -115,6 +143,7 @@ function M.start(conn, opts)
 
 		current = decoded
 		publish_all_retained()
+		log_config_summary('loaded')
 		svc:obs_event('load_end', { ok = true })
 		return true
 	end
@@ -188,6 +217,7 @@ function M.start(conn, opts)
 		end
 
 		svc:obs_event('persist_end', { ok = true })
+		log_config_summary('persisted')
 		return true, nil
 	end
 

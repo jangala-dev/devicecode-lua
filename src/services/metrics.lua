@@ -278,6 +278,26 @@ local function http_publish(data)
 	end
 end
 
+
+local function count_pipelines()
+	local n = 0
+	for _ in pairs(State.pipelines_map or {}) do n = n + 1 end
+	return n
+end
+
+local function log_metrics_summary(reason, extra)
+	local parts = {}
+	parts[#parts + 1] = 'publishing=' .. ((State.publish_period and State.base_time and State.base_time.synced) and 'enabled' or 'waiting')
+	if State.publish_period then parts[#parts + 1] = 'interval=' .. tostring(State.publish_period) .. 's' end
+	parts[#parts + 1] = 'pipelines=' .. tostring(count_pipelines())
+	local summary = 'metrics summary ' .. table.concat(parts, ' ')
+	local tnow = now()
+	if State._operator_summary_key == summary and (tnow - (State._operator_summary_at or 0)) < 600 then return end
+	State._operator_summary_key = summary
+	State._operator_summary_at = tnow
+	State.svc:obs_log('info', { what = 'metrics_summary', summary = summary, reason = reason })
+end
+
 local publish_fns = { bus = bus_publish, log = log_publish, http = http_publish }
 
 ---@param values table<string, table<string, MetricSample>>

@@ -144,6 +144,159 @@ local function component_summary(component_id, rec, opts)
 	return table.concat(parts, ' ')
 end
 
+
+local function fmt_voltage_mv(v)
+	v = tonumber(v)
+	if not v then return nil end
+	return string.format('%.2fV', v / 1000)
+end
+
+local function fmt_voltage_mv_coarse(v)
+	v = tonumber(v)
+	if not v then return nil end
+	return string.format('%.0fV', v / 1000)
+end
+
+local function fmt_current_ma(v)
+	v = tonumber(v)
+	if not v then return nil end
+	if math.abs(v) >= 1000 then return string.format('%.2fA', v / 1000) end
+	return string.format('%dmA', math.floor(v + 0.5))
+end
+
+local function fmt_temp_mc(v)
+	v = tonumber(v)
+	if not v then return nil end
+	return string.format('%.1fC', v / 1000)
+end
+
+local function first_number(t, names)
+	if type(t) ~= 'table' then return nil end
+	for i = 1, #names do
+		local v = tonumber(t[names[i]])
+		if v ~= nil then return v end
+	end
+	return nil
+end
+
+local function first_scalar(t, names)
+	if type(t) ~= 'table' then return nil end
+	for i = 1, #names do
+		local v = scalar_string(t[names[i]])
+		if v ~= nil then return v end
+	end
+	return nil
+end
+
+local function bool_flag(t, name)
+	return type(t) == 'table' and t[name] == true
+end
+
+local function summarise_mcu_power_env_memory(rec)
+	local facts = rec and rec.raw_facts or {}
+	local parts = {}
+	local swv = version_from_software(facts.software)
+	local ups = updater_state(facts.updater)
+	if swv then parts[#parts + 1] = 'mcu_fw=' .. swv end
+	if ups then parts[#parts + 1] = 'updater=' .. ups end
+
+	local battery = facts.power_battery or {}
+	local pack = fmt_voltage_mv(first_number(battery, { 'pack_mV', 'pack_mv', 'voltage_mV', 'vbat_mV' }))
+	local ibat = fmt_current_ma(first_number(battery, { 'ibat_mA', 'current_mA', 'battery_current_mA' }))
+	local btemp = fmt_temp_mc(first_number(battery, { 'temp_mC', 'temperature_mC' }))
+	local bparts = {}
+	if pack then bparts[#bparts + 1] = pack end
+	if ibat then bparts[#bparts + 1] = ibat end
+	if btemp then bparts[#bparts + 1] = 'temp=' .. btemp end
+	if #bparts > 0 then parts[#parts + 1] = 'battery=' .. table.concat(bparts, ',') end
+
+	local charger = facts.power_charger or {}
+	local vin = fmt_voltage_mv_coarse(first_number(charger, { 'vin_mV', 'vin_mv' }))
+	local vsys = fmt_voltage_mv_coarse(first_number(charger, { 'vsys_mV', 'vsys_mv' }))
+	local cstate = charger.state or {}
+	local cstatus = charger.status or {}
+	local csystem = charger.system or {}
+	local cparts = {}
+	if vin then cparts[#cparts + 1] = 'vin=' .. vin end
+	if vsys then cparts[#cparts + 1] = 'vsys=' .. vsys end
+	if bool_flag(csystem, 'charger_enabled') then cparts[#cparts + 1] = 'enabled' end
+	if bool_flag(csystem, 'ok_to_charge') then cparts[#cparts + 1] = 'ok_to_charge' end
+	if bool_flag(cstatus, 'const_current') then cparts[#cparts + 1] = 'cc' end
+	if bool_flag(cstatus, 'const_voltage') then cparts[#cparts + 1] = 'cv' end
+	if bool_flag(cstate, 'charger_suspended') then cparts[#cparts + 1] = 'suspended' end
+	if bool_flag(cstate, 'bat_missing_fault') then cparts[#cparts + 1] = 'bat_missing' end
+	if #cparts > 0 then parts[#parts + 1] = 'charger=' .. table.concat(cparts, ',') end
+
+	local temp = facts.environment_temperature or {}
+	local tempv = fmt_temp_mc(first_number(temp, { 'temp_mC', 'temperature_mC', 'ambient_mC', 'mC' }))
+	if not tempv then
+		local c = first_number(temp, { 'temperature_C', 'temperature_c', 'celsius', 'value' })
+		if c then tempv = string.format('%.1fC', c) end
+	end
+	local hum = facts.environment_humidity or {}
+	local hpct = first_number(hum, { 'relative_percent', 'rh_percent', 'percent', 'value' })
+	if not hpct then
+		local pptt = first_number(hum, { 'rh_pptt', 'relative_pptt' })
+		if pptt then hpct = pptt / 100 end
+	end
+	local eparts = {}
+	if tempv then eparts[#eparts + 1] = 'temp=' .. tempv end
+	if hpct then eparts[#eparts + 1] = string.format('humidity=%.1f%%', hpct) end
+	if #eparts > 0 then parts[#parts + 1] = 'env=' .. table.concat(eparts, ',') end
+
+	local mem = facts.runtime_memory or {}
+	local free = first_number(mem, { 'free', 'free_bytes', 'free_B' })
+	local used = first_number(mem, { 'used', 'used_bytes', 'used_B' })
+	local total = first_number(mem, { 'total', 'total_bytes', 'total_B' })
+	local mparts = {}
+	if free and total and total > 0 then
+		mparts[#mparts + 1] = string.format('free=%.0f%%', (free / total) * 100)
+	elseif used and total and total > 0 then
+		mparts[#mparts + 1] = string.format('used=%.0f%%', (used / total) * 100)
+	else
+		local state = first_scalar(mem, { 'state', 'status' })
+		if state then mparts[#mparts + 1] = state end
+	end
+	if #mparts > 0 then parts[#parts + 1] = 'memory=' .. table.concat(mparts, ',') end
+
+	return parts
+end
+
+local function log_device_summary(state, reason)
+	if not state.svc or not state.model then return end
+	local snap = state.model:snapshot()
+	local components = snap.components or {}
+	local mcu = components.mcu
+	local mcu_parts = summarise_mcu_power_env_memory(mcu)
+	-- Component inventory and readiness already have their own operator lines.  The
+	-- device summary should only appear once it adds composed product context,
+	-- particularly MCU firmware/power/environment/runtime facts.
+	if #mcu_parts < 3 then return end
+	local parts = {}
+	parts[#parts + 1] = 'components=' .. tostring(count_map(components))
+	local ids = join_sorted_map_keys(components)
+	if ids ~= '' then parts[#parts + 1] = 'ids=' .. ids end
+	for i = 1, #mcu_parts do parts[#parts + 1] = mcu_parts[i] end
+	local summary = 'device summary ' .. table.concat(parts, ' ')
+	local key = summary
+	local tnow = runtime.now()
+	-- MCU measurements can move every poll.  Do not let small voltage/current
+	-- changes turn the operator log into telemetry; after the first meaningful
+	-- summary, emit at most every five minutes unless the coarse summary is
+	-- unchanged for ten minutes.
+	local last_at = state.operator_device_summary_at or 0
+	if state.operator_device_summary_key == key and (tnow - last_at) < 600 then return end
+	if state.operator_device_summary_key ~= nil and (tnow - last_at) < 300 then return end
+	state.operator_device_summary_key = key
+	state.operator_device_summary_at = tnow
+	state.svc:info('device_summary', {
+		summary = summary,
+		reason = reason,
+		components = count_map(components),
+		component_ids = ids ~= '' and ids or nil,
+	})
+end
+
 local function log_component_identity(state, component_id, rec)
 	if not state.svc or type(rec) ~= 'table' then return end
 	local facts = rec.raw_facts or {}
@@ -154,7 +307,7 @@ local function log_component_identity(state, component_id, rec)
 	-- The MCU software and updater facts usually arrive as separate retained
 	-- updates during boot.  Avoid half-stories followed immediately by the full
 	-- story; wait for firmware before emitting the MCU identity line.
-	if component_id == 'mcu' and not swv then return end
+	if component_id == 'mcu' and (not swv or not ups) then return end
 	state.operator_component_identity_keys = state.operator_component_identity_keys or {}
 	local key = table.concat({ tostring(swv or ''), tostring(ups or ''), tostring(pend or '') }, '|')
 	if state.operator_component_identity_keys[component_id] == key then return end
@@ -902,6 +1055,7 @@ local function handle_observation(state, ev)
 	if changed then
 		mark_component_dirty(state, ev.component)
 		log_component_snapshot(state, ev.component, state.model:component_snapshot(ev.component), { source = ev.fact or ev.event or ev.tag })
+		if ev.component == 'mcu' then log_device_summary(state, 'mcu_observation') end
 	end
 	return true, nil
 end

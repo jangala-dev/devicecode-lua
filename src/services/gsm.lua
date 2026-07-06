@@ -447,6 +447,61 @@ local function log_modem_detected(modem, fields)
 	})
 end
 
+
+local function modem_summary_state(modem)
+	if not modem then return 'missing' end
+	if modem.current_state then return tostring(modem.current_state) end
+	if modem.connected then return 'connected' end
+	return 'detected'
+end
+
+local function expected_role_count(svc)
+	local roles = svc and svc._gsm_expected_roles or nil
+	if type(roles) ~= 'table' then return 0 end
+	local n = 0
+	for _ in pairs(roles) do n = n + 1 end
+	return n
+end
+
+local function derive_expected_roles(cfg)
+	local roles = {}
+	local known = cfg and cfg.modems and cfg.modems.known
+	if type(known) == 'table' then
+		for i, entry in ipairs(known) do
+			if is_plain_table(entry) then
+				roles[tostring(entry.name or ('modem' .. tostring(i)))] = true
+			end
+		end
+	end
+	return roles
+end
+
+local function log_gsm_summary(svc, modems, reason)
+	if not svc then return end
+	local parts = {}
+	local roles = {}
+	for _, modem in pairs(modems or {}) do roles[#roles + 1] = tostring(modem.name or modem.id or 'modem') end
+	table.sort(roles)
+	local expected_n = expected_role_count(svc)
+	if expected_n > 0 and #roles < expected_n then return end
+	for _, role in ipairs(roles) do
+		for _, modem in pairs(modems or {}) do
+			if tostring(modem.name or modem.id or 'modem') == role then
+				local piece = role .. '=' .. modem_summary_state(modem)
+				if modem.wwan_iface then piece = piece .. '(' .. tostring(modem.wwan_iface) .. ')' end
+				parts[#parts + 1] = piece
+			end
+		end
+	end
+	if #parts == 0 then parts[#parts + 1] = 'modems=none' end
+	local summary = 'gsm summary ' .. table.concat(parts, ' ')
+	local tnow = fibers.now()
+	if svc._gsm_summary_key == summary and (tnow - (svc._gsm_summary_at or 0)) < 600 then return end
+	svc._gsm_summary_key = summary
+	svc._gsm_summary_at = tnow
+	svc:info('gsm_summary', { summary = summary, reason = reason })
+end
+
 local GsmModem = {}
 GsmModem.__index = GsmModem
 
@@ -465,6 +520,7 @@ function GsmModem.new(cap, svc)
 	self.wwan_iface = nil
 	self.last_access = nil
 	self.last_signal = nil
+	self.current_state = nil
 	self.uplink_generation = 0
 	self.scope = nil
 	self.config_pulse = pulse.new()
@@ -838,6 +894,7 @@ function GsmModem:_autoconnect_loop()
 			local msg = msg_or_ver
 			if msg then
 				current_state = msg.payload.to
+				self.current_state = current_state
 				if current_state ~= self._last_operator_state then
 					self._last_operator_state = current_state
 					local level = current_state == 'failed' and 'warn' or 'info'
@@ -850,6 +907,7 @@ function GsmModem:_autoconnect_loop()
 						modem_suffix = id_suffix(self.id),
 						state = current_state,
 					})
+					if self.summary_fn then self.summary_fn('modem_state_changed') end
 				end
 			end
 		elseif which == 'backoff' then
@@ -1016,6 +1074,7 @@ function GsmService.start(conn, opts)
 		end
 
 		modem = GsmModem.new(cap, svc)
+		modem.summary_fn = function(reason) log_gsm_summary(svc, modems, reason) end
 		modems[id] = modem
 
 		local device, device_err = modem_get_field(cap, 'device', REQUEST_TIMEOUT)
@@ -1044,6 +1103,7 @@ function GsmService.start(conn, opts)
 		end
 		modem:stop('modem removed', true)
 		modems[id] = nil
+		log_gsm_summary(svc, modems, 'modem_removed')
 	end
 
 	local cfg_sub = conn:subscribe(t_cfg(name))
@@ -1070,6 +1130,7 @@ function GsmService.start(conn, opts)
 					svc:obs_log('warn', { what = 'invalid_config', err = cfg_err })
 				else
 					current_cfg = cfg
+					svc._gsm_expected_roles = derive_expected_roles(cfg)
 					config_ready = true
 				end
 			end
@@ -1133,6 +1194,7 @@ function GsmService.start(conn, opts)
 					svc:obs_log('debug', { what = 'invalid_config', err = cfg_err })
 				else
 					current_cfg = updated_cfg
+					svc._gsm_expected_roles = derive_expected_roles(updated_cfg)
 					for id, modem in pairs(modems) do
 						local modem_cfg, modem_name, _ = get_modem_config(current_cfg, id, modem.device)
 						modem:apply_config(modem_cfg, modem_name)

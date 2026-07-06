@@ -395,6 +395,7 @@ local function system_main(svc, report_period_ch)
         if identity_msg and type(identity_msg.payload) == 'table' and identity_msg.payload.hw_revision then
             hw_revision = identity_msg.payload.hw_revision:match('(%S+)')
             svc:obs_log('info', { what = 'hw_revision_detected', value = hw_revision })
+            svc:obs_log('info', { what = 'system_summary', summary = string.format('system summary hw=%s', tostring(hw_revision)), hw_revision = hw_revision })
         else
             svc:obs_log('warn', 'platform identity not available at startup; USB3 control disabled')
         end

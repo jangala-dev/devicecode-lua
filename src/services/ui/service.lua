@@ -352,6 +352,19 @@ local function lifecycle_readiness(state)
 	return service_state, true, nil
 end
 
+
+local function log_ui_summary(state, reason)
+	if not state.svc then return end
+	local sessions = state.sessions and state.sessions:count() or 0
+	local summary = string.format('ui summary ready=%s listener=%s read_model=%s sessions=%d active_requests=%d',
+		tostring(state._last_operator_ready == true), tostring(state.listener_status), tostring(state.read_model_status), sessions, tonumber(state.active_requests) or 0)
+	local tnow = fibers.now()
+	if state._operator_summary_key == summary and (tnow - (state._operator_summary_at or 0)) < 600 then return end
+	state._operator_summary_key = summary
+	state._operator_summary_at = tnow
+	state.svc:info('ui_summary', { summary = summary, reason = reason, sessions = sessions, listener_status = state.listener_status, read_model_status = state.read_model_status })
+end
+
 local function update_lifecycle(state)
 	local lifecycle = state.lifecycle
 	if not lifecycle then return true, nil end
