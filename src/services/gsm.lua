@@ -255,24 +255,27 @@ end
 ---@param sim_lock string?
 ---@param sim_state string?
 ---@return string
-local function uplink_state_for_modem(connected, modem_state, sim_lock, sim_state)
+local function uplink_state_for_modem(connected, modem_state, _sim_lock, sim_state)
 	if connected == true then return 'connected' end
 	if sim_state == '--' then return 'disconnected' end
-	if normalize_optional_string(sim_lock) ~= nil or modem_state == 'locked' then return 'locked' end
+	if modem_state == 'locked' then return 'locked' end
 	return 'disconnected'
 end
 
 ---@param sim_state string?
 ---@param sim_lock string?
 ---@param sim_lock_retries table?
+---@param modem_state string?
 ---@return table
-local function build_sim_payload(sim_state, sim_lock, sim_lock_retries)
-	local lock = normalize_optional_string(sim_lock)
-	local state = lock and 'locked' or normalize_optional_string(sim_state)
+local function build_sim_payload(sim_state, sim_lock, sim_lock_retries, modem_state)
+	local sim_absent = sim_state == '--'
+	local locked = not sim_absent and modem_state == 'locked'
+	local lock = locked and normalize_optional_string(sim_lock) or nil
+	local state = sim_absent and '--' or (locked and 'locked' or normalize_optional_string(sim_state))
 	return {
 		state = state or '--',
 		lock = lock,
-		lock_retries = copy(sim_lock_retries),
+		lock_retries = lock and copy(sim_lock_retries) or nil,
 	}
 end
 
@@ -632,18 +635,20 @@ function GsmModem:_refresh_sim_lock_fields(timescale)
 		self.modem_state = normalize_optional_string(modem_state)
 	end
 
+	if self.modem_state ~= 'locked' then
+		self.sim_lock = nil
+		self.sim_lock_retries = nil
+		return
+	end
+
 	local sim_lock, lock_err = modem_get_field(self.cap, 'sim_lock', REQUEST_TIMEOUT)
 	if lock_err == "" then
 		self.sim_lock = normalize_optional_string(sim_lock)
-	elseif self.modem_state ~= 'locked' then
-		self.sim_lock = nil
 	end
 
 	local retries, retries_err = modem_get_field(self.cap, 'sim_lock_retries', REQUEST_TIMEOUT)
 	if retries_err == "" then
 		self.sim_lock_retries = retries
-	elseif self.modem_state ~= 'locked' then
-		self.sim_lock_retries = nil
 	end
 end
 
@@ -654,7 +659,8 @@ function GsmModem:_publish_modem_fields()
 	self.conn:retain(t_state_gsm_modem(self.name, 'sim-state'), build_sim_payload(
 		self.sim_state,
 		self.sim_lock,
-		self.sim_lock_retries
+		self.sim_lock_retries,
+		self.modem_state
 	))
 end
 
@@ -688,7 +694,7 @@ function GsmModem:_publish_uplink_state(connected, iface)
 			role = self.name,
 			device = self.device,
 		},
-		sim = build_sim_payload(self.sim_state, self.sim_lock, self.sim_lock_retries),
+		sim = build_sim_payload(self.sim_state, self.sim_lock, self.sim_lock_retries, self.modem_state),
 		access = {
 			tech = access_tech ~= '' and access_tech or nil,
 			family = access_tech ~= '' and get_access_family(access_tech) or nil,
