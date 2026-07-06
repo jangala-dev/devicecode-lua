@@ -253,9 +253,11 @@ end
 ---@param connected boolean
 ---@param modem_state string?
 ---@param sim_lock string?
+---@param sim_state string?
 ---@return string
-local function uplink_state_for_modem(connected, modem_state, sim_lock)
+local function uplink_state_for_modem(connected, modem_state, sim_lock, sim_state)
 	if connected == true then return 'connected' end
+	if sim_state == '--' then return 'disconnected' end
 	if normalize_optional_string(sim_lock) ~= nil or modem_state == 'locked' then return 'locked' end
 	return 'disconnected'
 end
@@ -647,7 +649,7 @@ end
 
 ---@return nil
 function GsmModem:_publish_modem_fields()
-	local state = uplink_state_for_modem(self.connected == true, self.modem_state, self.sim_lock)
+	local state = uplink_state_for_modem(self.connected == true, self.modem_state, self.sim_lock, self.sim_state)
 	self.conn:retain(t_state_gsm_modem(self.name, 'state'), state)
 	self.conn:retain(t_state_gsm_modem(self.name, 'sim-state'), build_sim_payload(
 		self.sim_state,
@@ -671,7 +673,7 @@ function GsmModem:_publish_uplink_state(connected, iface)
 	local operator = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT)
 	local signal = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT)
 	local ifname = self.wwan_iface
-	local state = uplink_state_for_modem(self.connected == true, self.modem_state, self.sim_lock)
+	local state = uplink_state_for_modem(self.connected == true, self.modem_state, self.sim_lock, self.sim_state)
 	local payload = {
 		schema = 'devicecode.gsm.uplink/1',
 		id = self.name,

@@ -15,6 +15,12 @@ function tests.test_uplink_state_reports_locked_when_modem_or_sim_lock_is_locked
 	eq(gsm._test.uplink_state_for_modem(true, 'locked', 'sim-pin'), 'connected')
 end
 
+function tests.test_uplink_state_reports_disconnected_when_sim_is_absent()
+	eq(gsm._test.uplink_state_for_modem(false, 'locked', nil, '--'), 'disconnected')
+	eq(gsm._test.uplink_state_for_modem(false, 'registered', 'sim-puk', '--'), 'disconnected')
+	eq(gsm._test.uplink_state_for_modem(true, 'locked', 'sim-pin', '--'), 'connected')
+end
+
 function tests.test_sim_payload_carries_lock_and_retry_details()
 	local payload = gsm._test.build_sim_payload('present', 'sim-puk', {
 		['sim-pin'] = 0,
