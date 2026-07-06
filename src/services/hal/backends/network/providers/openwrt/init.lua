@@ -1577,9 +1577,12 @@ local function normalise_device_status(name, st)
 end
 
 local function normalise_mwan3_status(st, name_ctx)
-	local wall_now = os.time()
 	local out = {
+		schema = 'devicecode.hal.network.multiwan/1',
 		available = type(st) == 'table',
+		backend = 'openwrt',
+		source = 'mwan3',
+		observed_at = fibers.now(),
 		interfaces = {},
 		interfaces_by_semantic = {},
 		policies = {},
@@ -1600,32 +1603,31 @@ local function normalise_mwan3_status(st, name_ctx)
 						packetloss_pct = tonumber(p.packetloss),
 					}
 				end
-				end
-				local state = rec.status
-				if rec.enabled == false then state = 'disabled' end
-				local online = state == 'online' or (state == nil and rec.online == true)
-				local online_for = tonumber(rec.online)
-				local offline_for = tonumber(rec.offline)
-				local item = {
-					interface = ifid,
-					semantic_interface = (name_ctx and type(name_ctx.semantic_for) == 'function' and name_ctx:semantic_for('mwan_iface', ifid)) or ifid,
-					state = state,
-				mwan3_status = rec.status,
+			end
+			local state = rec.status
+			if rec.enabled == false then state = 'disabled' end
+			local online = state == 'online' or (state == nil and rec.online == true)
+			local item = {
+				interface = ifid,
+				semantic_interface = (name_ctx and type(name_ctx.semantic_for) == 'function' and name_ctx:semantic_for('mwan_iface', ifid)) or ifid,
+				state = state,
+				status = state,
+				backend = 'openwrt',
+				tool = 'mwan3',
+				mwan3_status = rec.status, -- compatibility/diagnostics only
 				enabled = rec.enabled,
-					running = rec.running,
-					tracking = rec.tracking,
-					up = rec.up,
-					usable = online,
-					age = tonumber(rec.age),
-					uptime = tonumber(rec.uptime),
-					online_for = online_for,
-					offline_for = offline_for,
-					online_since = online and online_for and (wall_now - online_for) or nil,
-					offline_since = (not online) and offline_for and (wall_now - offline_for) or nil,
-					online = online,
-					online_count = online_for,
-					offline = offline_for,
-					score = tonumber(rec.score),
+				running = rec.running,
+				tracking = rec.tracking,
+				up = rec.up,
+				usable = online,
+				age_s = tonumber(rec.age),
+				uptime_s = tonumber(rec.uptime),
+				age = tonumber(rec.age), -- compatibility
+				uptime = tonumber(rec.uptime), -- compatibility
+				online = online,
+				online_count = tonumber(rec.online),
+				offline = tonumber(rec.offline),
+				score = tonumber(rec.score),
 				lost = tonumber(rec.lost),
 				turn = tonumber(rec.turn),
 				probes = probes,

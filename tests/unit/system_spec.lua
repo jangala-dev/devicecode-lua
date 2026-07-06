@@ -17,10 +17,15 @@ local function assert_eq(a, b, msg)
 	end
 end
 
-function T.publish_platform_identity_metrics_reads_identity_rpc()
+function T.publish_platform_identity_publishes_state_and_legacy_metrics()
 	fibers.run(function()
 		local metrics = {}
+		local retained = {}
 		local svc = {
+			wall = function() return '2026-07-06 12:00:00' end,
+			_retain = function(_, topic, payload)
+				retained[table.concat(topic, '/')] = payload
+			end,
 			obs_metric = function(_, key, payload)
 				metrics[key] = payload
 			end,
@@ -49,6 +54,8 @@ function T.publish_platform_identity_metrics_reads_identity_rpc()
 		assert_eq(metrics.board_revision.value, '0xC04180')
 		assert_eq(metrics.hw_id.namespace[1], 'system')
 		assert_eq(metrics.hw_id.namespace[2], 'hw_id')
+		assert_eq(retained['state/system/identity'].schema, 'devicecode.system.identity/1')
+		assert_eq(retained['state/system/identity'].hw_revision, 'bigbox-v1-cm-2')
 	end)
 end
 

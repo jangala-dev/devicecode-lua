@@ -26,39 +26,29 @@ local function obs_event(state, kind, payload)
 	end
 end
 
-local function observed_multiwan(snapshot)
-	local observed = snapshot and snapshot.observed or nil
-	local mw = observed and observed.snapshot and observed.snapshot.multiwan or nil
-	if type(mw) ~= 'table' then mw = observed and observed.multiwan or nil end
-	return type(mw) == 'table' and mw or nil
-end
-
 local function table_has_entries(t)
 	if type(t) ~= 'table' then return false end
 	return next(t) ~= nil
 end
 
-local function observed_multiwan_ready(snapshot)
-	local mw = observed_multiwan(snapshot)
-	if not mw then return false end
-	return table_has_entries(mw.interfaces) or table_has_entries(mw.interfaces_by_semantic)
+local function backhaul_ready(snapshot)
+	local bh = snapshot and snapshot.backhaul or nil
+	return type(bh) == 'table' and table_has_entries(bh.uplinks)
 end
 
-local function enrich_observed_status(payload, state, uplink)
+local function enrich_backhaul_status(payload, state, uplink)
 	local snap = state and state.model and state.model:snapshot() or nil
-	local mw = observed_multiwan(snap)
 	local status = wan_policy.uplink_observed_status(snap, uplink)
 	if type(status) == 'table' then
-		payload.observed_state = status.state or status.mwan3_status
-		payload.observed_online = status.online
-		payload.observed_usable = status.usable
-		payload.observed_up = status.up
-		payload.observed_interface = status.interface
-		payload.observed_ifname = status.ifname
+		payload.backhaul_state = status.state
+		payload.backhaul_usable = status.usable
+		payload.backhaul_interface = status.interface
+		payload.backhaul_ifname = status.ifname
+		payload.backhaul_source = status.source
 	else
-		payload.observed_status = 'missing'
+		payload.backhaul_status = 'missing'
 	end
-	if not mw then payload.observed_multiwan = 'missing' end
+	if not backhaul_ready(snap) then payload.backhaul = 'missing' end
 	return payload
 end
 
@@ -74,11 +64,11 @@ local function speedtest_skip_payload(reason, trigger, uplink, generation)
 end
 
 local function report_speedtest_skip(state, reason, trigger, uplink, generation)
-	local payload = enrich_observed_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink)
+	local payload = enrich_backhaul_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink)
 	payload.what = 'speedtest_skipped'
 	obs_log(state, 'debug', payload)
 	obs_event(state, 'speedtest_skipped',
-		enrich_observed_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink))
+		enrich_backhaul_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink))
 end
 
 local function mark_speedtest_skipped(state, uplink, generation, reason)
@@ -86,8 +76,9 @@ local function mark_speedtest_skipped(state, uplink, generation, reason)
 		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
 		s.wan_runtime.speedtests = s.wan_runtime.speedtests or {}
 		local id = uplink.uplink_id
-		local rec = s.wan_runtime.speedtests[id] or { uplink_id = id, state = 'skipped' }
-		if rec.state == nil then rec.state = 'skipped' end
+		local rec = s.wan_runtime.speedtests[id] or { uplink_id = id }
+		rec.state = 'skipped'
+		rec.ok = false
 		rec.last_skip_generation = generation
 		rec.last_skip_reason = reason
 		rec.interface = uplink.request and uplink.request.interface or rec.interface
@@ -164,7 +155,7 @@ local function start_speedtest_for_uplink(state, uplink)
 		state.model:update(function(s)
 			local rec = s.wan_runtime and s.wan_runtime.speedtests and s.wan_runtime.speedtests[uplink_id]
 			if rec then
-				rec.state = 'failed_to_start'; rec.err = tostring(err)
+				rec.state = 'failed'; rec.ok = false; rec.err = tostring(err); rec.last_attempt = { state = 'failed', reason = 'failed_to_start', completed_at = now(state) }
 			end
 			return s
 		end)
@@ -235,7 +226,7 @@ function M.reconcile_speedtests(state, reason)
 		local online = wan_policy.uplink_online(snap, uplink)
 		if not online then
 			local skip_reason = 'not_online'
-			if observed_status == nil and not observed_multiwan_ready(snap) then
+			if observed_status == nil then
 				skip_reason = 'waiting_for_observation'
 			else
 				local active = state.active_speedtests[uplink.uplink_id]
@@ -327,7 +318,7 @@ function M.handle_speedtest_done(state, ev)
 	state.model:update(function(s)
 		s.wan_runtime = s.wan_runtime or { uplinks = {}, speedtests = {}, live_weights = {} }
 		local rec = s.wan_runtime.speedtests[ev.uplink_id] or { uplink_id = ev.uplink_id, id = ev.speedtest_id }
-		rec.state = 'done'
+		local completed_at = now(state)
 		rec.generation = ev.generation
 		rec.id = ev.speedtest_id
 		rec.ok = result.ok == true
@@ -335,17 +326,33 @@ function M.handle_speedtest_done(state, ev)
 		rec.interface = result.interface or (work_result.request and work_result.request.interface) or rec.interface
 		rec.device = result.device or (work_result.request and work_result.request.device) or rec.device
 		rec.metric = rec.metric or (work_result.request and work_result.request.metric) or 1
-		if result.ok == true and result.peak_mbps ~= nil then
-			rec.peak_mbps = result.peak_mbps
-			rec.last_success_mbps = result.peak_mbps
-			rec.last_success_at = now(state)
-		elseif rec.last_success_mbps ~= nil then
-			rec.peak_mbps = rec.last_success_mbps
+		rec.completed_at = completed_at
+		local mbps = tonumber(result.mbps or result.peak_mbps)
+		if result.ok == true and mbps ~= nil then
+			rec.state = 'ok'
+			rec.peak_mbps = mbps -- compatibility
+			rec.last_success_mbps = mbps -- compatibility
+			rec.last_success_at = completed_at
+			rec.last_success = {
+				mbps = mbps,
+				bytes = result.bytes,
+				data_mib = result.data_mib,
+				duration_s = result.duration_s,
+				completed_at = completed_at,
+			}
+		else
+			rec.state = 'failed'
+			rec.ok = false
+			rec.retry_after = completed_at + 60
+			rec.last_attempt = {
+				state = 'failed',
+				reason = result.code or result.err or 'speedtest_failed',
+				completed_at = completed_at,
+			}
+			if rec.last_success_mbps ~= nil then rec.peak_mbps = rec.last_success_mbps end
 		end
 		rec.data_mib = result.data_mib
 		rec.duration_s = result.duration_s
-		rec.completed_at = now(state)
-		if rec.ok ~= true then rec.retry_after = now(state) + 60 end
 		s.wan_runtime.speedtests[ev.uplink_id] = rec
 		s.stats.speedtests_completed = (s.stats.speedtests_completed or 0) + 1
 		return s

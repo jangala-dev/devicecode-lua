@@ -5,13 +5,21 @@
 -- rather than exposing the full /api/state model to ordinary local pages.
 
 local tablex = require 'shared.table'
-local topicx = require 'shared.topic'
 local topics = require 'services.ui.topics'
 
 local M = {}
 
 local copy = tablex.deep_copy
-local starts_with = topicx.starts_with
+local function prefix_matches(topic, prefix)
+	if type(topic) ~= 'table' or type(prefix) ~= 'table' then return false end
+	if #prefix > #topic then return false end
+	for i = 1, #prefix do
+		local p = prefix[i]
+		if p == '#' then return true end
+		if p ~= '+' and topic[i] ~= p then return false end
+	end
+	return true
+end
 
 local DROP_KEYS = {
 	raw = true,
@@ -19,15 +27,14 @@ local DROP_KEYS = {
 }
 
 local ALLOW_PREFIXES = {
-	{ 'svc' },
+	{ 'svc', '+', 'status' },
 	{ 'state', 'device' },
 	{ 'state', 'net' },
 	{ 'state', 'gsm' },
+	{ 'state', 'system' },
 	{ 'state', 'fabric' },
 	{ 'state', 'update' },
 	{ 'state', 'workflow', 'update-job' },
-	{ 'obs', 'v1', 'gsm', 'metric' },
-	{ 'obs', 'v1', 'system', 'metric' },
 }
 
 local LIVE_EVENT_PATTERNS = {}
@@ -52,17 +59,17 @@ end
 local function allowed(topic)
 	if is_log_topic(topic) then return false end
 	for _, prefix in ipairs(DENY_PREFIXES) do
-		if starts_with(topic, prefix) then return false end
+		if prefix_matches(topic, prefix) then return false end
 	end
 	for _, prefix in ipairs(ALLOW_PREFIXES) do
-		if starts_with(topic, prefix) then return true end
+		if prefix_matches(topic, prefix) then return true end
 	end
 	return false
 end
 
 local function allowed_event(topic)
 	for _, prefix in ipairs(DENY_PREFIXES) do
-		if starts_with(topic, prefix) then return false end
+		if prefix_matches(topic, prefix) then return false end
 	end
 	return allowed(topic) or is_log_topic(topic)
 end
@@ -99,7 +106,7 @@ function M.project_payload(topic, payload)
 	local out = strip_payload(payload)
 	if type(out) ~= 'table' or type(topic) ~= 'table' then return out end
 
-	if starts_with(topic, { 'state', 'device' }) then
+	if prefix_matches(topic, { 'state', 'device' }) then
 		local kind = topic[3]
 		if kind == 'identity' or kind == 'components' then
 			out.components = nil

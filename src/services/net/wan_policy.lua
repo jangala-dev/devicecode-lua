@@ -73,7 +73,7 @@ function M.build_speedtest_request(snapshot, uplink_id, member)
 	local endpoint = type(iface) == 'table' and type(iface.endpoint) == 'table' and iface.endpoint or {}
 	local gsm = M.gsm_uplink_state(snapshot, member)
 	local gsm_linux = type(gsm) == 'table' and type(gsm.linux) == 'table' and gsm.linux or {}
-	local metric = tonumber(member.mwan_metric) or 1
+	local metric = tonumber(member.metric) or 1
 	return {
 		interface = iface_id,
 		device = member.device or member.linux_interface or member.ifname or endpoint.ifname or endpoint.device or endpoint.name or (iface and iface.device) or gsm_linux.ifname,
@@ -102,21 +102,22 @@ function M.collect_uplinks(snapshot)
 end
 
 local function status_by_interface(snapshot, iface)
-	local mw = snapshot and snapshot.observed and snapshot.observed.snapshot and snapshot.observed.snapshot.multiwan or nil
-	if type(mw) ~= 'table' then mw = snapshot and snapshot.observed and snapshot.observed.multiwan or nil end
-	if type(mw) ~= 'table' then return nil end
-	local by_sem = mw.interfaces_by_semantic
-	if type(by_sem) == 'table' and by_sem[iface] then return by_sem[iface] end
-	local ifaces = mw.interfaces
-	if type(ifaces) == 'table' then return ifaces[iface] end
+	local bh = snapshot and snapshot.backhaul or nil
+	local uplinks = type(bh) == 'table' and bh.uplinks or nil
+	if type(uplinks) ~= 'table' then return nil end
+	for id, rec in pairs(uplinks) do
+		if type(rec) == 'table' and (rec.interface == iface or rec.id == iface or id == iface) then
+			if rec.observed == false then return nil end
+			return rec
+		end
+	end
 	return nil
 end
 
 local function status_online(st)
-	if type(st) ~= 'table' then return false end
-	if st.usable == true or st.online == true or st.up == true then return true end
-	local state = tostring(st.state or st.mwan3_status or ''):lower()
-	return state == 'online' or state == 'up' or state == 'connected'
+	return type(st) == 'table'
+		and st.usable == true
+		and st.state == 'online'
 end
 
 function M.uplink_observed_status(snapshot, uplink)
@@ -136,12 +137,23 @@ local function speedtest_ttl(snapshot)
 	return tonumber(cfg.interval_s or cfg.refresh_s or cfg.ttl_s or cfg.max_age_s)
 end
 
+local function speedtest_last_success(rec)
+	if type(rec) ~= 'table' then return nil, nil end
+	local last = type(rec.last_success) == 'table' and rec.last_success or nil
+	local mbps = last and tonumber(last.mbps) or tonumber(rec.last_success_mbps) or tonumber(rec.peak_mbps)
+	local completed = last and tonumber(last.completed_at)
+		or tonumber(rec.last_success_at)
+		or tonumber(rec.completed_at)
+	if mbps == nil or mbps <= 0 then return nil, completed end
+	return mbps, completed
+end
+
 local function speedtest_success_fresh(snapshot, rec, now)
-	if type(rec) ~= 'table' or rec.state ~= 'done' or rec.ok ~= true then return false end
+	local mbps, completed = speedtest_last_success(rec)
+	if mbps == nil then return false end
 	local ttl = speedtest_ttl(snapshot)
 	if not ttl or ttl <= 0 then return true end
-	local completed = tonumber(rec.completed_at) or 0
-	return now ~= nil and completed > 0 and now - completed < ttl
+	return now ~= nil and completed ~= nil and completed > 0 and now - completed < ttl
 end
 
 function M.speedtest_due(snapshot, uplink, opts)
@@ -161,7 +173,7 @@ end
 
 local function member_fingerprint(m)
 	if type(m) ~= 'table' then return '' end
-	return table.concat({ tostring(m.id), tostring(m.interface), tostring(m.mwan_metric), tostring(m.weight) }, ':')
+	return table.concat({ tostring(m.id), tostring(m.interface), tostring(m.metric), tostring(m.weight) }, ':')
 end
 
 function M.weights_equal(a, b)
@@ -189,11 +201,10 @@ function M.compute_weights(snapshot, generation, opts)
 		local id = uplink.uplink_id
 		local rec = tests[id]
 		local mbps = nil
-		if rec and rec.state == 'done' then
-			if rec.ok == true and (rec.generation == generation or speedtest_success_fresh(snapshot, rec, now_from_opts(opts))) then
-				mbps = tonumber(rec.peak_mbps) or tonumber(rec.last_success_mbps)
-			elseif rec.generation == generation then
-				mbps = tonumber(rec.last_success_mbps)
+		if rec then
+			local success_mbps = speedtest_last_success(rec)
+			if success_mbps and (rec.generation == generation or speedtest_success_fresh(snapshot, rec, now_from_opts(opts))) then
+				mbps = success_mbps
 			end
 		end
 		if mbps and mbps > 0 then total = total + mbps end

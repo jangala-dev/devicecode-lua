@@ -20,12 +20,8 @@ end
 function M.default_retained_patterns(opts)
 	opts = opts or {}
 	local patterns = {
-		t('cfg', '#'),
-		t('svc', '#'),
 		t('state', '#'),
-		t('cap', '#'),
-		t('obs', 'v1', 'gsm', '#'),
-		t('obs', 'v1', 'system', 'metric', '#'),
+		t('svc', '+', 'status'),
 	}
 	if opts.include_raw == true then patterns[#patterns + 1] = t('raw', '#') end
 	return patterns

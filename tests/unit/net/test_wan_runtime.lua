@@ -62,8 +62,8 @@ function tests.test_reconcile_applies_live_weights_when_speedtests_are_fresh()
 			s.wan = {
 				load_balancing = { speedtests = true, policy = 'balanced' },
 				members = {
-					wan = { interface = 'wan', mwan_metric = 1 },
-					modem = { interface = 'modem', mwan_metric = 1 },
+					wan = { interface = 'wan', metric = 1 },
+					modem = { interface = 'modem', metric = 1 },
 				},
 			}
 			s.observed.snapshot = {

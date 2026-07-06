@@ -172,9 +172,10 @@ function M.publish_demo_state(conn)
 		selected = 'gsm-main',
 		internet = true,
 	})
-	conn:retain({ 'obs', 'v1', 'system', 'metric', 'cpu_util' }, {
-		namespace = { 'system', 'cpu_util' },
-		value = 12.5,
+	conn:retain({ 'state', 'system', 'stats' }, {
+		schema = 'devicecode.system.stats/1',
+		state = 'ok',
+		cpu = { utilisation = 12.5 },
 	})
 	conn:retain({ 'state', 'fabric', 'summary' }, {
 		schema = 'devicecode.fabric.summary/1',

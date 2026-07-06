@@ -11,12 +11,17 @@ local function snapshot()
 		generation = 1,
 		wan = {
 			members = {
-				wan = { interface = 'wan', mwan_metric = 1 },
-				modem_primary = { interface = 'modem_primary', mwan_metric = 1, source = { kind = 'gsm-uplink', id = 'primary' } },
+				wan = { interface = 'wan', metric = 1 },
+				modem_primary = { interface = 'modem_primary', metric = 1, source = { kind = 'gsm-uplink', id = 'primary' } },
 			},
 			load_balancing = { speedtests = { enabled = true, probe_weight = 1, weight_scale = 100 } },
 		},
-		observed = { snapshot = { multiwan = { interfaces_by_semantic = { wan = { online = true }, modem_primary = { online = false } } } } },
+		backhaul = {
+			uplinks = {
+				wan = { id = 'wan', interface = 'wan', state = 'online', usable = true },
+				modem_primary = { id = 'modem_primary', interface = 'modem_primary', state = 'offline', usable = false },
+			},
+		},
 		wan_runtime = { speedtests = {} },
 		sources = { gsm_uplinks = { primary = { linux = { ifname = 'wwan1' } } } },
 	}
@@ -49,7 +54,8 @@ function tests.test_fresh_previous_generation_success_is_used_for_weights()
 	local s = snapshot()
 	s.generation = 2
 	s.wan.load_balancing.speedtests.interval_s = 100
-	s.observed.snapshot.multiwan.interfaces_by_semantic.modem_primary.online = true
+	s.backhaul.uplinks.modem_primary.state = 'online'
+	s.backhaul.uplinks.modem_primary.usable = true
 	s.wan_runtime.speedtests.wan = {
 		state = 'done',
 		generation = 1,
@@ -88,6 +94,39 @@ function tests.test_fresh_previous_generation_success_is_used_for_weights()
 	eq(expired_by_id.wan.weight, 1)
 	eq(expired_by_id.wan.probe, true)
 	eq(expired_by_id.modem_primary.weight, 100)
+end
+
+
+function tests.test_failed_latest_speedtest_keeps_fresh_last_success_for_weights()
+	local s = snapshot()
+	s.generation = 2
+	s.wan.load_balancing.speedtests.interval_s = 100
+	s.backhaul.uplinks.modem_primary.state = 'online'
+	s.backhaul.uplinks.modem_primary.usable = true
+	s.wan_runtime.speedtests.wan = {
+		state = 'failed',
+		generation = 2,
+		ok = false,
+		last_attempt = { state = 'failed', reason = 'counter_unavailable', completed_at = 30 },
+		last_success = { mbps = 80, completed_at = 10 },
+		last_success_mbps = 80,
+		last_success_at = 10,
+		interface = 'wan',
+	}
+	s.wan_runtime.speedtests.modem_primary = {
+		state = 'ok',
+		generation = 2,
+		ok = true,
+		last_success = { mbps = 20, completed_at = 20 },
+		interface = 'modem_primary',
+	}
+
+	local weights = assert(policy.compute_weights(s, 2, { now = 30 }))
+	local by_id = {}
+	for _, m in ipairs(weights) do by_id[m.id] = m end
+	eq(by_id.wan.weight, 80)
+	eq(by_id.wan.probe, false)
+	eq(by_id.modem_primary.weight, 20)
 end
 
 return tests

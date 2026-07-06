@@ -67,7 +67,9 @@ function M.realise(base_intent, sources, opts)
 			member.interface = iface_id
 			local route_metric = tonumber(member.route_metric) or (10 + index)
 			member.route_metric = route_metric
-			member.mwan_metric = tonumber(member.mwan_metric) or 1
+			member.metric = tonumber(member.metric) or 1
+			-- HAL/OpenWrt still consumes this backend-shaped alias when realising mwan3.
+			member.mwan_metric = member.metric
 			local src = member.source
 			if type(src) == 'table' and src.kind == 'gsm-uplink' then
 				local ifname = gsm_ifname(sources or {}, src.id)
@@ -106,7 +108,7 @@ function M.realised_fingerprint(intent, sources)
 		local iface = m and m.interface or id
 		local i = realised.interfaces and realised.interfaces[iface] or nil
 		local ep = type(i) == 'table' and type(i.endpoint) == 'table' and i.endpoint or {}
-		parts[#parts + 1] = table.concat({ tostring(id), tostring(iface), tostring(ep.ifname), tostring(m and m.route_metric), tostring(m and m.mwan_metric) }, ':')
+		parts[#parts + 1] = table.concat({ tostring(id), tostring(iface), tostring(ep.ifname), tostring(m and m.route_metric), tostring(m and m.metric) }, ':')
 	end
 	return table.concat(parts, '|')
 end

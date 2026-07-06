@@ -158,14 +158,13 @@ function tests.test_sse_route_opens_without_replaying_large_bootstrap_state()
 		assert_eq(headers.headers['content-type'], 'text/event-stream')
 		assert_eq(watch_owner:watch_count(), #sse.default_patterns())
 
-		watch_owner:set({ 'obs', 'v1', 'system', 'metric', 'cpu_util' }, {
-			namespace = { 'system', 'cpu_util' },
-			value = 12.5,
+		watch_owner:set({ 'state', 'system', 'stats' }, {
+			cpu = { utilisation = 12.5 },
 		})
 		local metric_chunk = chunk_ch:get()
 		assert_not_nil(metric_chunk)
 		assert_true(metric_chunk:find('event: set', 1, true) ~= nil, metric_chunk)
-		assert_true(metric_chunk:find('obs/v1/system/metric/cpu_util', 1, true) ~= nil, metric_chunk)
+		assert_true(metric_chunk:find('state/system/stats', 1, true) ~= nil, metric_chunk)
 		assert_true(metric_chunk:find('12.5', 1, true) ~= nil, metric_chunk)
 
 		watch_owner:set({ 'raw', 'secret' }, { leaked = true })
@@ -248,7 +247,8 @@ function tests.test_sse_route_opens_only_local_ui_prefix_watches()
 		end
 		assert_true(seen['state/device/#'] == true, 'state/device watch missing')
 		assert_true(seen['state/net/#'] == true, 'state/net watch missing')
-		assert_true(seen['obs/v1/system/metric/#'] == true, 'system metric watch missing')
+		assert_true(seen['obs/v1/system/metric/#'] == nil, 'system metric watch should not be opened')
+			assert_true(seen['state/system/#'] == true, 'state/system watch missing')
 	end)
 end
 

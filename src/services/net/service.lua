@@ -27,6 +27,7 @@ local drift = require 'services.net.drift'
 local backpressure = require 'services.net.backpressure'
 local gsm_uplink_watch = require 'services.net.gsm_uplink_watch'
 local intent_realiser = require 'services.net.intent_realiser'
+local backhaul_model = require 'services.net.backhaul_model'
 
 local perform = fibers.perform
 
@@ -243,8 +244,9 @@ local function copy_intent_to_model(s, intent)
 	s.firewall = intent.firewall or {}
 	s.routing = intent.routing or {}
 	s.wan = intent.wan or {}
-	s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
 	s.sources = s.sources or { gsm_uplinks = {} }
+	s.backhaul = backhaul_model.reduce(s, { now = now() })
+	s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
 	s.vpn = intent.vpn or {}
 	s.diagnostics = intent.diagnostics or {}
 	return s
@@ -568,6 +570,7 @@ local function merge_observation(state, s, observed_event)
 
 	s.stats.observations = (s.stats.observations or 0) + 1
 	s.drift = drift.calculate(s, { now = now })
+	s.backhaul = backhaul_model.reduce(s, { now = now() })
 	return project_dependencies(state, s)
 end
 
@@ -576,6 +579,7 @@ local function handle_observed_state(state, ev)
 	if type(observed_event) ~= 'table' then return true, nil end
 	state.model:update(function (s) return merge_observation(state, s, observed_event) end)
 	mark_domain_dirty(state, 'observed')
+	mark_domain_dirty(state, 'backhaul')
 	mark_domain_dirty(state, 'drift')
 	obs_event(state.svc, 'network_observed', { subject = observed_event.subject, source = observed_event.source, kind = observed_event.kind })
 	local ok, err = reconcile_speedtests_if_ready(state, 'observed_state')
@@ -602,10 +606,12 @@ local function handle_gsm_uplink_changed(state, ev)
 		s.sources = s.sources or { gsm_uplinks = {} }
 		s.sources.gsm_uplinks = s.sources.gsm_uplinks or {}
 		s.sources.gsm_uplinks[role] = payload
+		s.backhaul = backhaul_model.reduce(s, { now = now() })
 		s.stats.gsm_uplink_updates = (s.stats.gsm_uplink_updates or 0) + 1
 		return project_dependencies(state, s)
 	end)
 	mark_domain_dirty(state, 'sources')
+	mark_domain_dirty(state, 'backhaul')
 	mark_summary_dirty(state)
 	local ifname = payload.linux and payload.linux.ifname or payload.interface
 	obs_event(state.svc, 'gsm_uplink_changed', {

@@ -49,7 +49,11 @@ function M.run_op(req, opts)
 		local run_cmd = opts.run_cmd or req.run_cmd
 		if type(run_cmd) == 'function' then
 			local ok, out, err = run_cmd(argv)
-			return { ok = ok == true, backend = 'openwrt', interface = iface, device = dev, peak_mbps = tonumber(out) or 0, err = ok == true and nil or tostring(err or out) }
+			local mbps = tonumber(out)
+			if ok == true and mbps ~= nil then
+				return { ok = true, backend = 'openwrt', interface = iface, device = dev, mbps = mbps, peak_mbps = mbps }
+			end
+			return { ok = false, code = 'speedtest_failed', backend = 'openwrt', interface = iface, device = dev, err = tostring(err or out or 'speedtest failed') }
 		end
 		local spec = {
 			stdin = 'null',
@@ -61,13 +65,14 @@ function M.run_op(req, opts)
 		for i = 1, #argv do spec[i] = argv[i] end
 		local cmd = exec.command(spec)
 		local started, serr = cmd:stdout_stream()
-		if not started then return { ok = false, err = serr or 'speedtest start failed', backend = 'openwrt' } end
+		if not started then return { ok = false, code = 'start_failed', err = serr or 'speedtest start failed', backend = 'openwrt' } end
 		local counter = '/sys/class/net/' .. tostring(dev) .. '/statistics/rx_bytes'
 		local start_b, berr = read_counter(counter)
 		if not start_b then
 			perform(cmd:shutdown_op(0.2))
 			return {
 				ok = false,
+				code = 'counter_unavailable',
 				err = 'counter read failed: ' .. tostring(berr or 'unknown'),
 				backend = 'openwrt',
 				interface = iface,
@@ -92,9 +97,12 @@ function M.run_op(req, opts)
 			prev_t, prev_b = t, b
 		end
 		perform(cmd:shutdown_op(0.2))
-		return { ok = true, backend = 'openwrt', interface = iface, device = dev, peak_mbps = peak, data_mib = (prev_b - start_b) / (1024 * 1024), duration_s = prev_t - t0 }
+		if peak <= 0 and (prev_b - start_b) <= 0 then
+			return { ok = false, code = 'insufficient_data', backend = 'openwrt', interface = iface, device = dev, data_mib = 0, duration_s = prev_t - t0 }
+		end
+		return { ok = true, backend = 'openwrt', interface = iface, device = dev, mbps = peak, peak_mbps = peak, data_mib = (prev_b - start_b) / (1024 * 1024), bytes = (prev_b - start_b), duration_s = prev_t - t0 }
 	end):wrap(function(status, _report, result)
-		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
+		if status ~= 'ok' then return { ok = false, code = 'worker_failed', err = tostring(result or status), backend = 'openwrt' } end
 		return result
 	end)
 end

@@ -28,6 +28,7 @@ local perform = fibers.perform
 local base = require 'devicecode.service_base'
 local cap_sdk = require 'services.hal.sdk.cap'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
+local retained_domain = require 'devicecode.support.retained_domain'
 local apns = require "services.gsm.apn"
 local gsm_topics = require 'services.gsm.topics'
 local apn_model = require 'services.gsm.apn_model'
@@ -227,39 +228,12 @@ local function get_signal_bars(access_tech, signal_type, signal)
 	return 0, ""
 end
 
----@param sim_value any
----@return string
-local function normalize_sim_presence(sim_value)
-	if sim_value == nil or sim_value == '--' then
-		return "--"
-	end
-	if type(sim_value) == 'table' then
-		return "present"
-	end
-	if tostring(sim_value) ~= '' then
-		return "present"
-	end
-	return "--"
-end
-
 ---@param value any
 ---@return string?
 local function normalize_optional_string(value)
 	if type(value) ~= 'string' then return nil end
 	if value == '' or value == '--' then return nil end
 	return value
-end
-
----@param connected boolean
----@param modem_state string?
----@param sim_lock string?
----@param sim_state string?
----@return string
-local function uplink_state_for_modem(connected, modem_state, _sim_lock, sim_state)
-	if connected == true then return 'connected' end
-	if sim_state == '--' then return 'disconnected' end
-	if modem_state == 'locked' then return 'locked' end
-	return 'disconnected'
 end
 
 local function modem_state_implies_sim_present(modem_state)
@@ -271,25 +245,101 @@ local function modem_state_implies_sim_present(modem_state)
 		or modem_state == 'disconnecting'
 end
 
+---@param sim_value any
+---@param sim_lock any
+---@param sim_lock_retries table?
+---@param modem_state string?
+---@return table
+local function sim_payload_from_value(sim_value, sim_lock, sim_lock_retries, modem_state)
+	local value_type = type(sim_value)
+	local present
+	local state
+	local lock = nil
+	local retries = nil
+
+	if value_type == 'table' then
+		present = sim_value.present
+		state = normalize_optional_string(sim_value.state)
+			or normalize_optional_string(sim_value.status)
+			or normalize_optional_string(sim_value.sim_state)
+		lock = normalize_optional_string(sim_value.lock or sim_value.sim_lock)
+		retries = sim_value.lock_retries or sim_value.sim_lock_retries
+	elseif sim_value == false or sim_value == '--' or sim_value == 'absent' then
+		present = false
+		state = 'absent'
+	elseif sim_value == nil then
+		present = nil
+		state = 'unknown'
+	elseif sim_value == true or sim_value == 'present' then
+		present = true
+		state = 'present'
+	elseif type(sim_value) == 'string' and sim_value ~= '' then
+		present = true
+		state = sim_value
+	else
+		present = nil
+		state = 'unknown'
+	end
+
+	if state == 'missing' or state == 'none' or state == 'not-present' then
+		state = 'absent'
+		present = false
+	end
+
+	if present ~= false and modem_state == 'locked' then
+		state = 'locked'
+		present = true
+		lock = lock or normalize_optional_string(sim_lock)
+		retries = retries or sim_lock_retries
+	elseif present == nil and modem_state_implies_sim_present(modem_state) then
+		state = 'present'
+		present = true
+	end
+
+	if present == false then
+		state = 'absent'
+		lock = nil
+		retries = nil
+	elseif state == nil or state == '' then
+		state = present == true and 'present' or 'unknown'
+	end
+
+	return {
+		present = present,
+		state = state or 'unknown',
+		legacy_state = present == false and '--' or nil,
+		lock = lock,
+		lock_retries = lock and copy(retries) or nil,
+	}
+end
+
+---@param sim_value any
+---@return string
+local function normalize_sim_presence(sim_value)
+	local sim = sim_payload_from_value(sim_value, nil, nil, nil)
+	return sim.present == false and '--' or (sim.present == true and 'present' or 'unknown')
+end
+
+---@param connected boolean
+---@param modem_state string?
+---@param sim_lock string?
 ---@param sim_state string?
+---@return string
+local function uplink_state_for_modem(connected, modem_state, _sim_lock, sim_state)
+	if sim_state == '--' then return 'sim_absent' end
+	if modem_state == 'locked' then return 'locked' end
+	if connected == true then return 'connected' end
+	if modem_state == 'registered' then return 'registered' end
+	return 'disconnected'
+end
+
+---@param sim_state any
 ---@param sim_lock string?
 ---@param sim_lock_retries table?
 ---@param modem_state string?
 ---@return table
 local function build_sim_payload(sim_state, sim_lock, sim_lock_retries, modem_state)
-	local sim_absent = sim_state == '--'
-	local locked = not sim_absent and modem_state == 'locked'
-	local lock = locked and normalize_optional_string(sim_lock) or nil
-	local state = sim_absent
-		and '--'
-		or (locked and 'locked'
-			or normalize_optional_string(sim_state)
-			or (modem_state_implies_sim_present(modem_state) and 'present' or nil))
-	return {
-		state = state or '--',
-		lock = lock,
-		lock_retries = lock and copy(sim_lock_retries) or nil,
-	}
+	return sim_payload_from_value(sim_state, sim_lock, sim_lock_retries, modem_state)
 end
 
 ---@param access_techs any
@@ -590,6 +640,7 @@ function GsmModem.new(cap, svc)
 	self.scope = nil
 	self.config_pulse = pulse.new()
 	self.svc = svc
+	self.domain = retained_domain.new(self.conn, { prefix = { 'state', 'gsm' } })
 	return self
 end
 
@@ -668,8 +719,8 @@ end
 ---@return nil
 function GsmModem:_publish_modem_fields()
 	local state = uplink_state_for_modem(self.connected == true, self.modem_state, self.sim_lock, self.sim_state)
-	self.conn:retain(t_state_gsm_modem(self.name, 'state'), state)
-	self.conn:retain(t_state_gsm_modem(self.name, 'sim-state'), build_sim_payload(
+	self.domain:retain({ 'modem', self.name, 'state' }, state)
+	self.domain:retain({ 'modem', self.name, 'sim-state' }, build_sim_payload(
 		self.sim_state,
 		self.sim_lock,
 		self.sim_lock_retries,
@@ -683,16 +734,49 @@ end
 ---@param iface string?
 ---@return nil
 function GsmModem:_publish_uplink_state(connected, iface)
+	-- Transitional GSM domain model boundary. HAL owns raw modem facts and
+	-- cache policy. GSM owns cellular semantics: SIM absent/locked/present,
+	-- registration, connection, operator validity and APN readiness. UI and NET
+	-- consume state/gsm/uplink/* rather than HAL fields or obs metrics.
 	if connected ~= nil then self.connected = connected == true end
 	if type(iface) == 'string' and iface ~= '' then self.wwan_iface = iface end
 	self.uplink_generation = (self.uplink_generation or 0) + 1
 
-	local access_techs = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT)
-	local access_tech = derive_access_tech(access_techs)
-	local operator = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT)
-	local signal = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT)
 	local ifname = self.wwan_iface
+	local sim = build_sim_payload(self.sim_state, self.sim_lock, self.sim_lock_retries, self.modem_state)
 	local state = uplink_state_for_modem(self.connected == true, self.modem_state, self.sim_lock, self.sim_state)
+	local access = {}
+	local signal_payload = nil
+
+	if sim.present == true and state ~= 'locked' and state ~= 'sim_absent' then
+		local access_techs, access_err = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT, 0)
+		local access_tech = access_err == '' and derive_access_tech(access_techs) or ''
+		if access_tech ~= '' then
+			access.tech = access_tech
+			access.family = get_access_family(access_tech)
+		end
+
+		local operator, operator_err = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT, 0)
+		operator = operator_err == '' and normalize_optional_string(operator) or nil
+		if operator then
+			access.operator = operator
+			self.domain:retain({ 'modem', self.name, 'operator' }, operator)
+		else
+			self.domain:unretain({ 'modem', self.name, 'operator' })
+		end
+
+		local signal, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT, 0)
+		if signal_err == '' and type(signal) == 'table' then
+			signal_payload = signal
+			self.domain:retain({ 'modem', self.name, 'signal' }, signal)
+		else
+			self.domain:unretain({ 'modem', self.name, 'signal' })
+		end
+	else
+		self.domain:unretain({ 'modem', self.name, 'operator' })
+		self.domain:unretain({ 'modem', self.name, 'signal' })
+	end
+
 	local payload = {
 		schema = 'devicecode.gsm.uplink/1',
 		id = self.name,
@@ -707,17 +791,18 @@ function GsmModem:_publish_uplink_state(connected, iface)
 			role = self.name,
 			device = self.device,
 		},
-		sim = build_sim_payload(self.sim_state, self.sim_lock, self.sim_lock_retries, self.modem_state),
-		access = {
-			tech = access_tech ~= '' and access_tech or nil,
-			family = access_tech ~= '' and get_access_family(access_tech) or nil,
-			operator = operator,
-		},
-		signal = type(signal) == 'table' and signal or nil,
+		sim = sim,
+		access = access,
+		signal = signal_payload,
 		at = self.svc and self.svc.wall and self.svc:wall() or nil,
 	}
 	self:_publish_modem_fields()
-	self.conn:retain(t_state_gsm_uplink(self.name), payload)
+	if type(ifname) == 'string' and ifname ~= '' then
+		self.domain:retain({ 'modem', self.name, 'wwan-iface' }, ifname)
+	else
+		self.domain:unretain({ 'modem', self.name, 'wwan-iface' })
+	end
+	self.domain:retain({ 'uplink', self.name }, payload)
 end
 
 function GsmModem:_emit_metrics_once()
@@ -797,7 +882,7 @@ function GsmModem:_emit_metrics_once()
 			self.wwan_iface = interface
 			inventory.ifname = interface
 			self:_emit_metric('wann_type', interface)
-			self.conn:retain(t_state_gsm_modem(self.name, 'wwan-iface'), interface)
+			self.domain:retain({ 'modem', self.name, 'wwan-iface' }, interface)
 			self:_publish_uplink_state(nil, interface)
 		else
 			self.svc:obs_log('debug', { what = 'no_net_ports', modem = self.name })
@@ -983,6 +1068,10 @@ function GsmModem:_autoconnect_loop()
 		queue_len = 1,
 		full = 'drop_oldest',
 	})
+	local sim_state_sub = self.cap:get_state_sub('sim_state', {
+		queue_len = 1,
+		full = 'drop_oldest',
+	})
 
 	local current_state = nil
 	local connected = false
@@ -991,6 +1080,7 @@ function GsmModem:_autoconnect_loop()
 	while true do
 		local which, msg_or_ver = perform(op.named_choice({
 			state = state_sub:recv_op(),
+			sim = sim_state_sub:recv_op(),
 			backoff = sleep.sleep_op(backoff),
 			config = self.config_pulse:changed_op(seen),
 		}))
@@ -1033,6 +1123,20 @@ function GsmModem:_autoconnect_loop()
 					if self.summary_fn then self.summary_fn('modem_state_changed') end
 				end
 			end
+		elseif which == 'sim' then
+			local msg = msg_or_ver
+			if msg then
+				local sim = sim_payload_from_value(msg.payload, self.sim_lock, self.sim_lock_retries, self.modem_state)
+				self.sim_state = sim.present == false and '--' or (sim.present == true and 'present' or 'unknown')
+				if sim.present == false then
+					self.connected = false
+					connected = false
+					self.sim_lock = nil
+					self.sim_lock_retries = nil
+				end
+				self:_emit_metric('sim', self.sim_state)
+				self:_publish_uplink_state(nil, self.wwan_iface)
+			end
 		elseif which == 'backoff' then
 			self.svc:obs_log('warn', { what = 'autoconnect_retry', modem = self.name, state = current_state })
 		end
@@ -1064,7 +1168,7 @@ function GsmModem:_autoconnect_loop()
 			if connection_changed then
 				connected = current_state == STATE_CONNECTED
 				self.connected = connected
-				self.conn:retain(t_state_gsm_modem(self.name, 'connected'), connected)
+				self.domain:retain({ 'modem', self.name, 'connected' }, connected)
 				self:_publish_uplink_state(connected, self.wwan_iface)
 				self.svc:obs_event('connection_changed', { modem = self.name, connected = connected })
 			end
@@ -1087,6 +1191,7 @@ function GsmModem:_autoconnect_loop()
 	end
 
 	state_sub:unsubscribe()
+	sim_state_sub:unsubscribe()
 end
 
 ---@param parent_scope Scope
@@ -1132,8 +1237,9 @@ end
 ---@param reason string?
 ---@param close_pulse boolean?
 ---@return nil
-function GsmModem:stop(reason, close_pulse)
+function GsmModem:stop(reason, close_pulse, clear_state)
 	if not self.scope then
+		if clear_state == true then self.domain:clear() end
 		return
 	end
 
@@ -1145,9 +1251,14 @@ function GsmModem:stop(reason, close_pulse)
 	perform(self.scope:join_op())
 	self.scope = nil
 
+	if clear_state == true then
+		self.domain:clear()
+		return
+	end
+
 	if self.name and self.name ~= "" then
 		self.connected = false
-		self.conn:retain(t_state_gsm_modem(self.name, 'connected'), false)
+		self.domain:retain({ 'modem', self.name, 'connected' }, false)
 		self:_publish_uplink_state(false, self.wwan_iface)
 	end
 end
@@ -1341,7 +1452,7 @@ function GsmService.start(conn, opts)
 
 	parent_scope:finally(function()
 		for _, modem in pairs(modems) do
-			modem:stop(nil, true)
+			modem:stop(nil, true, true)
 		end
 		local _, primary = fibers.current_scope():status()
 		svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'scope_exit') })
@@ -1383,7 +1494,7 @@ function GsmService.start(conn, opts)
 		if not modem then
 			return
 		end
-		modem:stop('modem removed', true)
+		modem:stop('modem removed', true, true)
 		modems[id] = nil
 		log_gsm_summary(svc, modems, 'modem_removed')
 	end

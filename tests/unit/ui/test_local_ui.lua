@@ -49,7 +49,8 @@ function tests.test_sse_defaults_use_local_ui_prefixes_without_root_hash()
 	end
 	ok(seen['state/device/#'], 'state/device stream missing')
 	ok(seen['state/net/#'], 'state/net stream missing')
-	ok(seen['obs/v1/system/metric/#'], 'system metrics stream missing')
+	ok(seen['state/system/#'], 'state/system stream missing')
+	eq(seen['obs/v1/system/metric/#'], nil, 'system metrics should not be a default UI stream')
 	eq(seen['obs/v1/gsm/event/#'], nil, 'generic GSM events should not be watched by /events')
 	eq(seen['obs/v1/+/event/log'], nil, 'logs should use the monitor log follow endpoint')
 end
@@ -83,9 +84,8 @@ function tests.test_local_model_allow_list_excludes_cfg_and_raw()
 	local model = read_model.new()
 	model:set({ 'state', 'net', 'summary' }, { ok = true })
 	model:set({ 'state', 'gsm', 'apns', 'custom' }, { records = {} })
-	model:set({ 'obs', 'v1', 'system', 'metric', 'cpu_util' }, {
-		namespace = { 'system', 'cpu_util' },
-		value = 12.5,
+	model:set({ 'state', 'system', 'stats' }, {
+		cpu = { utilisation = 12.5 },
 	})
 	model:set({ 'state', 'device', 'component', 'switch-main' }, {
 		available = true,
@@ -101,7 +101,8 @@ function tests.test_local_model_allow_list_excludes_cfg_and_raw()
 	local boot = local_model.bootstrap(model:snapshot())
 	ok(boot.items['state/net/summary'])
 	ok(boot.items['state/gsm/apns/custom'])
-	ok(boot.items['obs/v1/system/metric/cpu_util'])
+	ok(boot.items['state/system/stats'])
+	eq(boot.items['obs/v1/system/metric/cpu_util'], nil, 'system metrics should not be in local-ui bootstrap')
 	ok(boot.items['state/device/component/switch-main'])
 	eq(boot.items['state/device/component/switch-main'].payload.raw, nil)
 	eq(boot.items['state/device/component/switch-main'].payload.observed, nil)
