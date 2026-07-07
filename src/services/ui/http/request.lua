@@ -226,7 +226,12 @@ local function handle_gsm_apns_put(scope, owner, ctx, deps)
 		deps.apn_timeout or 5.0
 	))
 	if st ~= 'ok' then
-		perform_response(owner:reply_error_op(400, result_or_primary or 'gsm_apns_update_failed'))
+		local detail = tostring(result_or_primary or 'gsm_apns_update_failed')
+		perform_response(owner:reply_json_op(400, {
+			error = detail,
+			code = 'gsm_apns_update_failed',
+			detail = detail,
+		}))
 		return { status = 'failed', err = result_or_primary }
 	end
 	perform_response(owner:reply_json_op(200, { ok = true, apns = result_or_primary.value or {} }))
