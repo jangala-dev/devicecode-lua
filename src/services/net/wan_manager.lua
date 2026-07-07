@@ -63,12 +63,23 @@ local function speedtest_skip_payload(reason, trigger, uplink, generation)
 	}
 end
 
+local function enrich_measurement(payload, state, uplink)
+	local snap = state and state.model and state.model:snapshot() or nil
+	local measurement = snap and wan_policy.measurement(snap, uplink) or nil
+	if type(measurement) == 'table' then
+		payload.measurement_key = measurement.key
+		payload.address = measurement.address
+		payload.address_family = measurement.address_family
+	end
+	return payload
+end
+
 local function report_speedtest_skip(state, reason, trigger, uplink, generation)
-	local payload = enrich_backhaul_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink)
+	local payload = enrich_measurement(enrich_backhaul_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink), state, uplink)
 	payload.what = 'speedtest_skipped'
 	obs_log(state, 'debug', payload)
 	obs_event(state, 'speedtest_skipped',
-		enrich_backhaul_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink))
+		enrich_measurement(enrich_backhaul_status(speedtest_skip_payload(reason, trigger, uplink, generation), state, uplink), state, uplink))
 end
 
 local function mark_speedtest_skipped(state, uplink, generation, reason)
@@ -77,12 +88,27 @@ local function mark_speedtest_skipped(state, uplink, generation, reason)
 		s.wan_runtime.speedtests = s.wan_runtime.speedtests or {}
 		local id = uplink.uplink_id
 		local rec = s.wan_runtime.speedtests[id] or { uplink_id = id }
-		rec.state = 'skipped'
-		rec.ok = false
+		local measurement = wan_policy.measurement(s, uplink)
+		if (reason == 'fresh_same_path' or reason == 'fresh_weak_path') and rec.last_success then
+			rec.state = 'ok'
+			rec.ok = true
+			if reason == 'fresh_weak_path' and type(measurement) == 'table' then
+				rec.last_success.measurement_key = measurement.key
+				rec.last_success.measurement = model_mod.deep_copy(measurement)
+				rec.last_success_key = measurement.key
+			end
+		else
+			rec.state = 'skipped'
+			rec.ok = false
+		end
 		rec.last_skip_generation = generation
 		rec.last_skip_reason = reason
 		rec.interface = uplink.request and uplink.request.interface or rec.interface
 		rec.device = uplink.request and uplink.request.device or rec.device
+		if type(measurement) == 'table' then
+			rec.current_measurement_key = measurement.key
+			rec.current_measurement = model_mod.deep_copy(measurement)
+		end
 		rec.updated_at = now(state)
 		s.wan_runtime.speedtests[id] = rec
 		return s
@@ -111,6 +137,8 @@ local function start_speedtest_for_uplink(state, uplink)
 	local uplink_id = uplink.uplink_id
 	local prev = snap.wan_runtime and snap.wan_runtime.speedtests and snap.wan_runtime.speedtests[uplink_id]
 	if prev and prev.state == 'running' and prev.generation == generation then return true, nil end
+	local measurement, merr = wan_policy.measurement(snap, uplink)
+	if not measurement then return nil, merr or 'speedtest_measurement_key_unavailable' end
 
 	local id = state.next_speedtest_id
 	state.next_speedtest_id = id + 1
@@ -124,6 +152,9 @@ local function start_speedtest_for_uplink(state, uplink)
 			metric = uplink.request.metric,
 			updated_at = now(state),
 		}
+		local previous = s.wan_runtime.speedtests[uplink_id]
+		local same_path_failure = type(previous) == 'table'
+			and (previous.measurement_key == measurement.key or previous.current_measurement_key == measurement.key)
 		s.wan_runtime.speedtests[uplink_id] = {
 			state = 'running',
 			generation = generation,
@@ -132,6 +163,13 @@ local function start_speedtest_for_uplink(state, uplink)
 			interface = uplink.request.interface,
 			device = uplink.request.device,
 			metric = uplink.request.metric,
+			measurement_key = measurement.key,
+			measurement = model_mod.deep_copy(measurement),
+			failure_count = same_path_failure and (tonumber(previous.failure_count) or 0) or 0,
+			last_failure = same_path_failure and model_mod.deep_copy(previous.last_failure) or nil,
+			last_success = previous and model_mod.deep_copy(previous.last_success) or nil,
+			last_success_mbps = previous and previous.last_success_mbps or nil,
+			last_success_at = previous and previous.last_success_at or nil,
 			started_at = now(state),
 		}
 		s.stats.speedtests_started = (s.stats.speedtests_started or 0) + 1
@@ -330,25 +368,41 @@ function M.handle_speedtest_done(state, ev)
 		local mbps = tonumber(result.mbps or result.peak_mbps)
 		if result.ok == true and mbps ~= nil then
 			rec.state = 'ok'
+			rec.failure_count = 0
+			rec.retry_after = nil
+			rec.retry_delay_s = nil
+			rec.last_failure = nil
 			rec.peak_mbps = mbps -- compatibility
 			rec.last_success_mbps = mbps -- compatibility
 			rec.last_success_at = completed_at
+			rec.last_success_key = rec.measurement_key
 			rec.last_success = {
 				mbps = mbps,
 				bytes = result.bytes,
 				data_mib = result.data_mib,
 				duration_s = result.duration_s,
 				completed_at = completed_at,
+				measurement_key = rec.measurement_key,
+				measurement = model_mod.deep_copy(rec.measurement),
 			}
+
 		else
+			local reason = result.code or result.err or 'speedtest_failed'
 			rec.state = 'failed'
 			rec.ok = false
-			rec.retry_after = completed_at + 60
-			rec.last_attempt = {
+			rec.err = reason
+			rec.failure_count = (tonumber(rec.failure_count) or 0) + 1
+			rec.retry_delay_s = wan_policy.speedtest_retry_delay_s(s, rec)
+			rec.retry_after = completed_at + rec.retry_delay_s
+			rec.last_failure = {
 				state = 'failed',
-				reason = result.code or result.err or 'speedtest_failed',
+				reason = reason,
 				completed_at = completed_at,
+				failure_count = rec.failure_count,
+				retry_delay_s = rec.retry_delay_s,
+				retry_after = rec.retry_after,
 			}
+			rec.last_attempt = rec.last_failure -- compatibility
 			if rec.last_success_mbps ~= nil then rec.peak_mbps = rec.last_success_mbps end
 		end
 		rec.data_mib = result.data_mib

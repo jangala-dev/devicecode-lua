@@ -6,10 +6,12 @@
 -- admitted through scoped components.
 
 local fibers = require 'fibers'
+local sleep = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 
 local service_base = require 'devicecode.service_base'
 local config_watch = require 'devicecode.support.config_watch'
+local queue = require 'devicecode.support.queue'
 
 local model_mod = require 'services.net.model'
 local config_mod = require 'services.net.config'
@@ -66,6 +68,10 @@ end
 
 local function mark_domain_dirty(state, name)
 	publisher.mark_domain(state.dirty, name)
+end
+
+local function mark_interface_dirty(state, id)
+	if id ~= nil then publisher.mark_interface(state.dirty, tostring(id)) end
 end
 
 local function mark_apply_dirty(state)
@@ -228,6 +234,83 @@ local function cancel_active_generation(state, reason)
 	return true, nil
 end
 
+
+local function backhaul_for_interface(backhaul, uplink_id, iface_id)
+	local uplinks = backhaul and backhaul.uplinks or nil
+	if type(uplinks) ~= 'table' then return nil end
+	local direct = uplinks[tostring(uplink_id)]
+	if type(direct) == 'table' then return direct end
+	for id, rec in pairs(uplinks) do
+		if type(rec) == 'table' and (rec.interface == iface_id or rec.id == iface_id or id == iface_id) then
+			return rec
+		end
+	end
+	return nil
+end
+
+local function apply_backhaul_to_interfaces(s)
+	local members = s and s.wan and s.wan.members or {}
+	local interfaces = s and s.interfaces or nil
+	if type(interfaces) ~= 'table' then return s end
+	for uplink_id, member in pairs(members or {}) do
+		if type(member) == 'table' and member.enabled ~= false and member.disabled ~= true then
+			local iface_id = member.interface or uplink_id
+			local iface = interfaces[iface_id]
+			local bh = backhaul_for_interface(s.backhaul, uplink_id, iface_id)
+			if type(iface) == 'table' and type(bh) == 'table' then
+				-- mwan3/backhaul is the semantic authority for WAN reachability.
+				-- Interface config and speedtests enrich this record; they must not
+				-- make an mwan3-online uplink appear offline to consumers.
+				iface.state = bh.state
+				iface.status = bh.state
+				iface.online = bh.state == 'online' and bh.usable == true
+				iface.usable = bh.usable == true
+				iface.backhaul = {
+					state = bh.state,
+					usable = bh.usable == true,
+					ifname = bh.ifname,
+					path_address = model_mod.deep_copy(bh.path_address),
+					source = model_mod.deep_copy(bh.source),
+					observed_at = bh.observed_at,
+				}
+			end
+		end
+	end
+	return s
+end
+
+local function mark_wan_member_interfaces_dirty(state)
+	local snap = state and state.model and state.model:snapshot() or nil
+	local members = snap and snap.wan and snap.wan.members or {}
+	for uplink_id, member in pairs(members or {}) do
+		if type(member) == 'table' and member.enabled ~= false and member.disabled ~= true then
+			mark_interface_dirty(state, member.interface or uplink_id)
+		end
+	end
+end
+
+local function carry_forward_wan_runtime(previous, intent, generation)
+	local out = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
+	if type(previous) ~= 'table' then return out end
+	local members = intent and intent.wan and intent.wan.members or {}
+	for uplink_id, member in pairs(members or {}) do
+		if type(member) == 'table' and member.enabled ~= false and member.disabled ~= true then
+			local rec = previous.speedtests and previous.speedtests[tostring(uplink_id)] or nil
+			if type(rec) == 'table' then
+				local kept = model_mod.deep_copy(rec)
+				if kept.state == 'running' then
+					kept.state = kept.last_success and 'ok' or 'skipped'
+					kept.ok = kept.last_success ~= nil
+					kept.last_skip_reason = kept.last_skip_reason or 'generation_replaced'
+				end
+				out.speedtests[tostring(uplink_id)] = kept
+			end
+		end
+	end
+	out.last_weight_apply = model_mod.deep_copy(previous.last_weight_apply)
+	return out
+end
+
 local function copy_intent_to_model(s, intent)
 	local generation = intent.generation
 	s.generation = generation
@@ -246,7 +329,8 @@ local function copy_intent_to_model(s, intent)
 	s.wan = intent.wan or {}
 	s.sources = s.sources or { gsm_uplinks = {} }
 	s.backhaul = backhaul_model.reduce(s, { now = now() })
-	s.wan_runtime = { generation = generation, uplinks = {}, speedtests = {}, live_weights = { state = 'idle', generation = generation } }
+	apply_backhaul_to_interfaces(s)
+	s.wan_runtime = carry_forward_wan_runtime(s.wan_runtime, intent, generation)
 	s.vpn = intent.vpn or {}
 	s.diagnostics = intent.diagnostics or {}
 	return s
@@ -571,6 +655,7 @@ local function merge_observation(state, s, observed_event)
 	s.stats.observations = (s.stats.observations or 0) + 1
 	s.drift = drift.calculate(s, { now = now })
 	s.backhaul = backhaul_model.reduce(s, { now = now() })
+	apply_backhaul_to_interfaces(s)
 	return project_dependencies(state, s)
 end
 
@@ -580,6 +665,7 @@ local function handle_observed_state(state, ev)
 	state.model:update(function (s) return merge_observation(state, s, observed_event) end)
 	mark_domain_dirty(state, 'observed')
 	mark_domain_dirty(state, 'backhaul')
+	mark_wan_member_interfaces_dirty(state)
 	mark_domain_dirty(state, 'drift')
 	obs_event(state.svc, 'network_observed', { subject = observed_event.subject, source = observed_event.source, kind = observed_event.kind })
 	local ok, err = reconcile_speedtests_if_ready(state, 'observed_state')
@@ -607,11 +693,13 @@ local function handle_gsm_uplink_changed(state, ev)
 		s.sources.gsm_uplinks = s.sources.gsm_uplinks or {}
 		s.sources.gsm_uplinks[role] = payload
 		s.backhaul = backhaul_model.reduce(s, { now = now() })
+		apply_backhaul_to_interfaces(s)
 		s.stats.gsm_uplink_updates = (s.stats.gsm_uplink_updates or 0) + 1
 		return project_dependencies(state, s)
 	end)
 	mark_domain_dirty(state, 'sources')
 	mark_domain_dirty(state, 'backhaul')
+	mark_wan_member_interfaces_dirty(state)
 	mark_summary_dirty(state)
 	local ifname = payload.linux and payload.linux.ifname or payload.interface
 	obs_event(state.svc, 'gsm_uplink_changed', {
@@ -749,6 +837,64 @@ local function handle_dependency_status(state, ev)
 	return publish_snapshot(state)
 end
 
+
+local function schedule_speedtest_retry(state, uplink_id, generation, delay_s, reason)
+	if not state or not state.scope or not state.done_tx then return true, nil end
+	if type(uplink_id) ~= 'string' or uplink_id == '' then return true, nil end
+	delay_s = tonumber(delay_s) or 10
+	if delay_s < 1 then delay_s = 1 end
+	state.speedtest_retries = state.speedtest_retries or {}
+	local existing = state.speedtest_retries[uplink_id]
+	local tnow = now()
+	if type(existing) == 'table' and (existing.due_at or 0) > tnow then return true, nil end
+	local retry_id = state.next_speedtest_retry_id or 1
+	state.next_speedtest_retry_id = retry_id + 1
+	state.speedtest_retries[uplink_id] = {
+		retry_id = retry_id,
+		uplink_id = uplink_id,
+		generation = generation,
+		due_at = tnow + delay_s,
+		reason = reason or 'speedtest_retry',
+	}
+	local ok, err = state.scope:spawn(function ()
+		sleep.sleep(delay_s)
+		queue.assert_admit_required(state.done_tx, {
+			kind = 'speedtest_retry_due',
+			uplink_id = uplink_id,
+			generation = generation,
+			retry_id = retry_id,
+			reason = reason or 'speedtest_retry',
+		}, 'net_speedtest_retry_report_failed')
+	end)
+	if ok ~= true then
+		state.speedtest_retries[uplink_id] = nil
+		return nil, err or 'speedtest_retry_spawn_failed'
+	end
+	obs_log(state.svc, 'debug', {
+		what = 'speedtest_retry_scheduled',
+		uplink_id = uplink_id,
+		generation = generation,
+		retry_id = retry_id,
+		delay_s = delay_s,
+		reason = reason,
+	})
+	return true, nil
+end
+
+local function handle_speedtest_retry_due(state, ev)
+	local pending = state.speedtest_retries and state.speedtest_retries[ev.uplink_id] or nil
+	if type(pending) ~= 'table' or pending.retry_id ~= ev.retry_id then return true, nil end
+	state.speedtest_retries[ev.uplink_id] = nil
+	obs_log(state.svc, 'debug', {
+		what = 'speedtest_retry_due',
+		uplink_id = ev.uplink_id,
+		generation = ev.generation,
+		retry_id = ev.retry_id,
+		reason = ev.reason,
+	})
+	return reconcile_speedtests_if_ready(state, 'speedtest_retry_due')
+end
+
 local function handle_speedtest_done(state, ev)
 	local ok, err = wan_manager.handle_speedtest_done(state, ev)
 	if ok == true and err ~= 'stale' then
@@ -767,6 +913,9 @@ local function handle_speedtest_done(state, ev)
 				ok = rec.ok == true,
 				err = rec.err,
 				peak_mbps = mbps,
+				retry_delay_s = rec.retry_delay_s,
+				retry_after = rec.retry_after,
+				failure_count = rec.failure_count,
 			})
 		end
 		if rec and rec.ok == true and rec.peak_mbps ~= nil and state.svc and type(state.svc.obs_metric) == 'function' then
@@ -774,6 +923,11 @@ local function handle_speedtest_done(state, ev)
 				value = rec.peak_mbps,
 				namespace = { 'net', rec.interface or ev.uplink_id, 'speedtest' },
 			})
+		end
+		if rec and rec.ok ~= true and rec.retry_after then
+			local delay_s = math.max(1, (tonumber(rec.retry_after) or (now() + (tonumber(rec.retry_delay_s) or 10))) - now())
+			local rok, rerr = schedule_speedtest_retry(state, tostring(ev.uplink_id or ''), ev.generation, delay_s, rec.err or 'speedtest_failed')
+			if rok ~= true then return nil, rerr end
 		end
 	end
 	mark_domain_dirty(state, 'wan_runtime')
@@ -864,6 +1018,8 @@ local function handle_event(state, ev)
 		return true, nil
 	elseif ev.kind == 'net_speedtest_done' then
 		return handle_speedtest_done(state, ev)
+	elseif ev.kind == 'speedtest_retry_due' then
+		return handle_speedtest_retry_due(state, ev)
 	elseif ev.kind == 'net_live_weights_done' then
 		return handle_live_weights_done(state, ev)
 	elseif ev.kind == 'net_observation_started' then
@@ -965,8 +1121,10 @@ function M.run(scope, params)
 		next_generation = 1,
 		next_apply_id = 1,
 		next_speedtest_id = 1,
+		next_speedtest_retry_id = 1,
 		next_weight_apply_id = 1,
 		active_speedtests = {},
+		speedtest_retries = {},
 		active_weight_apply = nil,
 		counter_poll_enabled = params.counter_metrics ~= false and params.counter_poll ~= false,
 		counter_poll_interval_s = params.counter_poll_interval_s or params.counter_metrics_interval_s or 60,

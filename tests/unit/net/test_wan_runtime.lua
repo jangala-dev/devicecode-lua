@@ -74,11 +74,21 @@ function tests.test_reconcile_applies_live_weights_when_speedtests_are_fresh()
 					},
 				},
 			}
+			s.backhaul = {
+				uplinks = {
+					wan = { id = 'wan', interface = 'wan', state = 'online', usable = true, path_address = { family = 'ipv4', address = '203.0.113.10' } },
+					modem = { id = 'modem', interface = 'modem', state = 'online', usable = true, path_address = { family = 'ipv4', address = '10.1.2.3' } },
+				},
+			}
 			s.wan_runtime = {
 				uplinks = {},
 				speedtests = {
-					wan = { state = 'done', generation = 1, ok = true, peak_mbps = 80, last_success_mbps = 80, completed_at = 10 },
-					modem = { state = 'done', generation = 2, ok = true, peak_mbps = 20, last_success_mbps = 20, completed_at = 20 },
+					wan = { state = 'done', generation = 1, ok = true, peak_mbps = 80, last_success_mbps = 80, completed_at = 10,
+						measurement_key = 'v1|wan|wan||host-multiwan||ipv4|203.0.113.10|',
+						last_success = { mbps = 80, completed_at = 10, measurement_key = 'v1|wan|wan||host-multiwan||ipv4|203.0.113.10|' } },
+					modem = { state = 'done', generation = 2, ok = true, peak_mbps = 20, last_success_mbps = 20, completed_at = 20,
+						measurement_key = 'v1|modem|modem||host-multiwan||ipv4|10.1.2.3|',
+						last_success = { mbps = 20, completed_at = 20, measurement_key = 'v1|modem|modem||host-multiwan||ipv4|10.1.2.3|' } },
 				},
 				live_weights = {},
 				last_weight_apply = { generation = 2, members = {
