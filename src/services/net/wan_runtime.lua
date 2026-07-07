@@ -9,6 +9,8 @@ local queue = require 'devicecode.support.queue'
 
 local M = {}
 
+local HARD_MAX_SPEEDTEST_DURATION_S = 1
+
 local function with_timeout(work_op, timeout_s, label)
 	timeout_s = tonumber(timeout_s)
 	if not timeout_s or timeout_s < 0 then return work_op end
@@ -56,7 +58,8 @@ function M.start_speedtest(spec)
 			uplink_id = spec.uplink_id,
 		},
 		run = function ()
-			local timeout_s = request.max_duration_s or spec.timeout_s or 30
+			local timeout_s = tonumber(request.max_duration_s or spec.timeout_s) or HARD_MAX_SPEEDTEST_DURATION_S
+			if timeout_s <= 0 or timeout_s > HARD_MAX_SPEEDTEST_DURATION_S then timeout_s = HARD_MAX_SPEEDTEST_DURATION_S end
 			local result = fibers.perform(with_timeout(
 				hal:speedtest_op(request, { timeout = false }),
 				timeout_s,

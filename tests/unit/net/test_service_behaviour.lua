@@ -740,6 +740,9 @@ function tests.test_wan_speedtests_wait_for_multiwan_observation()
 						wan_a = { interface = 'wan_a', state = 'online', online = true, usable = true },
 					},
 				},
+				live = { interfaces = {
+					wan_a = { ipv4 = { { address = '203.0.113.10' } } },
+				} },
 			},
 		} })
 
@@ -807,6 +810,10 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 						wan_b = { interface = 'wan_b', state = 'online', online = true, usable = true },
 					},
 				},
+				live = { interfaces = {
+					wan_a = { ipv4 = { { address = '203.0.113.10' } } },
+					wan_b = { ipv4 = { { address = '10.1.2.3' } } },
+				} },
 			},
 		} })
 

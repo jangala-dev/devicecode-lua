@@ -30,6 +30,54 @@ local function status_by_interface(snapshot, iface)
 	return nil
 end
 
+local function observed_live(snapshot)
+	local observed = snapshot and snapshot.observed or nil
+	local live = observed and observed.snapshot and observed.snapshot.live or nil
+	if not is_table(live) then live = observed and observed.live or nil end
+	return is_table(live) and live or nil
+end
+
+local function live_interface(snapshot, iface, ifname)
+	local live = observed_live(snapshot)
+	local interfaces = live and live.interfaces or nil
+	if not is_table(interfaces) then return nil end
+	if type(iface) == 'string' and iface ~= '' and is_table(interfaces[iface]) then return interfaces[iface] end
+	if type(ifname) == 'string' and ifname ~= '' and is_table(interfaces[ifname]) then return interfaces[ifname] end
+	return nil
+end
+
+local function valid_address(addr)
+	if type(addr) ~= 'string' or addr == '' then return nil end
+	if addr == '0.0.0.0' or addr == '::' then return nil end
+	return addr
+end
+
+local function first_address(list)
+	if not is_table(list) then return nil end
+	for i = 1, #list do
+		local rec = list[i]
+		local addr = is_table(rec) and valid_address(rec.address or rec.ip or rec.addr) or valid_address(rec)
+		if addr then return addr end
+	end
+	return nil
+end
+
+local function select_path_address(st, source)
+	if not is_table(st) then return nil end
+	local ipv4 = first_address(st.ipv4 or st.addresses_ipv4 or st.address)
+		or valid_address(st.ipv4_address or st.ipaddr or st.ip or st.address)
+	if ipv4 then return { family = 'ipv4', address = ipv4, source = source } end
+	local ipv6 = first_address(st.ipv6 or st.addresses_ipv6 or st['ipv6-address'] or st.ipv6_address)
+		or valid_address(st.ipv6addr or st.ip6addr)
+	if ipv6 then return { family = 'ipv6', address = ipv6, source = source } end
+	return nil
+end
+
+local function path_address(snapshot, iface, ifname, st)
+	return select_path_address(live_interface(snapshot, iface, ifname), 'hal-network-live')
+		or select_path_address(st, 'multiwan-status')
+end
+
 local function semantic_state_from_host(st)
 	if not is_table(st) then return 'unknown', false end
 	local state = tostring(st.state or st.status or ''):lower()
@@ -42,6 +90,11 @@ local function semantic_state_from_host(st)
 	if state == 'up' or state == 'connected' then state = 'online'; usable = true end
 	if state ~= 'online' then usable = false end
 	return state, usable
+end
+
+local function interface_endpoint(snapshot, iface)
+	local rec = snapshot and snapshot.interfaces and snapshot.interfaces[iface] or nil
+	return is_table(rec) and is_table(rec.endpoint) and rec.endpoint or {}
 end
 
 local function member_interface(member, uplink_id)
@@ -75,14 +128,18 @@ local function reduce_gsm(snapshot, uplink_id, member, opts)
 		usable = gsm.connected == true and state == 'online'
 	end
 	local linux = is_table(gsm and gsm.linux) and gsm.linux or {}
+	local iface = member_interface(member, uplink_id)
+	local endpoint = interface_endpoint(snapshot, iface)
+	local ifname = linux.ifname or member.device or member.ifname or endpoint.ifname or endpoint.device or endpoint.name
 	return {
 		id = tostring(uplink_id),
 		role = member.role or uplink_id,
-		interface = member_interface(member, uplink_id),
-		ifname = linux.ifname or member.device or member.ifname,
+		interface = iface,
+		ifname = ifname,
 		state = state,
 		usable = usable,
 		metric = member_metric(member),
+		path_address = path_address(snapshot, iface, ifname, nil),
 		source = { kind = 'gsm-uplink', id = gsm_source(member) },
 		observed_at = is_table(gsm) and (gsm.updated_at or gsm.observed_at) or (opts and opts.now),
 	}
@@ -93,15 +150,18 @@ local function reduce_host(snapshot, uplink_id, member, opts)
 	local st = status_by_interface(snapshot, iface)
 	local mw = observed_multiwan(snapshot) or {}
 	local state, usable = semantic_state_from_host(st)
+	local endpoint = interface_endpoint(snapshot, iface)
+	local ifname = st and st.ifname or member.device or member.ifname or endpoint.ifname or endpoint.device or endpoint.name
 	return {
 		id = tostring(uplink_id),
 		role = member.role or uplink_id,
 		interface = iface,
-		ifname = st and st.ifname or member.device or member.ifname,
+		ifname = ifname,
 		state = state,
 		usable = usable,
 		observed = st ~= nil,
 		metric = member_metric(member),
+		path_address = path_address(snapshot, iface, ifname, st),
 		uptime_s = st and (tonumber(st.uptime_s) or tonumber(st.uptime)) or nil,
 		age_s = st and (tonumber(st.age_s) or tonumber(st.age)) or nil,
 		source = {
@@ -148,6 +208,7 @@ end
 M._test = {
 	observed_multiwan = observed_multiwan,
 	status_by_interface = status_by_interface,
+	select_path_address = select_path_address,
 }
 
 return M
