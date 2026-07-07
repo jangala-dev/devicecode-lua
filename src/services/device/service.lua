@@ -12,6 +12,7 @@ local model_mod   = require 'services.device.model'
 local topics      = require 'services.device.topics'
 local publisher   = require 'services.device.publisher'
 local projection  = require 'services.device.projection'
+local mcu_metrics = require 'services.device.mcu_metrics'
 local observer_manager = require 'services.device.observer_manager'
 local action_manager   = require 'services.device.action_manager'
 local priority_event   = require 'devicecode.support.priority_event'
@@ -496,6 +497,14 @@ local function flush_publication(state)
 		emit_event = state.emit_events ~= false,
 	})
 	if ok ~= true then return nil, err end
+
+	if state.dirty.components.mcu then
+		local metrics_ok, metrics_err = mcu_metrics.publish_component(
+			state.svc,
+			snapshot.components and snapshot.components.mcu
+		)
+		if metrics_ok ~= true then return nil, metrics_err end
+	end
 
 	for component_id in pairs(state.dirty.components) do
 		state.published_components[component_id] = true
