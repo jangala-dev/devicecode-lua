@@ -171,6 +171,42 @@ local function log_net_summary(state, reason)
 	obs_log(state.svc, 'info', { what = 'net_summary', summary = summary, reason = reason })
 end
 
+
+local function backhaul_uplinks(backhaul)
+	local uplinks = type(backhaul) == 'table' and backhaul.uplinks or nil
+	return type(uplinks) == 'table' and uplinks or {}
+end
+
+local function log_mwan_backhaul_transitions(state, before, after, trigger)
+	if not state.svc then return end
+	local prev = backhaul_uplinks(before)
+	local next_uplinks = backhaul_uplinks(after)
+	for _, uplink_id in ipairs(sorted_keys(next_uplinks)) do
+		local rec = next_uplinks[uplink_id]
+		if type(rec) == 'table' then
+			local source = type(rec.status_source) == 'table' and rec.status_source or rec.source
+			local tool = type(source) == 'table' and source.tool or nil
+			local prev_rec = prev[uplink_id]
+			local prev_state = type(prev_rec) == 'table' and prev_rec.state or nil
+			local state_now = rec.state
+			if (state_now == 'online' or state_now == 'offline') and state_now ~= prev_state and (tool == nil or tool == 'mwan3') then
+				obs_log(state.svc, 'info', {
+					what = state_now == 'online' and 'mwan_member_online' or 'mwan_member_offline',
+					summary = string.format('mwan member %s %s interface=%s ifname=%s', tostring(uplink_id), tostring(state_now), tostring(rec.interface or '?'), tostring(rec.ifname or '?')),
+					uplink_id = tostring(uplink_id),
+					interface = rec.interface,
+					ifname = rec.ifname,
+					state = state_now,
+					usable = rec.usable == true,
+					previous_state = prev_state,
+					subject = trigger and trigger.subject or nil,
+					source = trigger and trigger.source or nil,
+				})
+			end
+		end
+	end
+end
+
 local function set_model_state(state, service_state, reason)
 	state.model:update(function (s)
 		s.state = service_state
@@ -311,28 +347,47 @@ local function carry_forward_wan_runtime(previous, intent, generation)
 	return out
 end
 
-local function copy_intent_to_model(s, intent)
-	local generation = intent.generation
+local function copy_wan_with_realised_members(configured_wan, realised_wan)
+	local wan = model_mod.deep_copy(configured_wan or {})
+	wan.members = model_mod.deep_copy((configured_wan and configured_wan.members) or {})
+	wan.realised_members = model_mod.deep_copy((realised_wan and realised_wan.members) or {})
+	return wan
+end
+
+local function copy_intent_to_model(s, apply_intent, configured_intent)
+	configured_intent = configured_intent or apply_intent
+	local generation = configured_intent.generation or apply_intent.generation
 	s.generation = generation
-	s.config = { rev = intent.rev, schema = intent.schema, config_schema = intent.config_schema, version = intent.version }
+	s.config = {
+		rev = configured_intent.rev,
+		schema = configured_intent.schema,
+		config_schema = configured_intent.config_schema,
+		version = configured_intent.version,
+	}
 	s.intent = s.intent or {}
 	s.intent.generation = generation
-	s.segments = intent.segments or {}
-	s.vlan_policy = intent.vlan_policy or {}
-	s.policies = intent.policies or {}
-	s.interfaces = intent.interfaces or {}
-	s.addressing = intent.addressing or {}
-	s.dns = intent.dns or {}
-	s.dhcp = intent.dhcp or {}
-	s.firewall = intent.firewall or {}
-	s.routing = intent.routing or {}
-	s.wan = intent.wan or {}
+	s.intent.realised_generation = apply_intent.generation
+	s.segments = apply_intent.segments or {}
+	s.vlan_policy = apply_intent.vlan_policy or {}
+	s.policies = apply_intent.policies or {}
+	s.interfaces = apply_intent.interfaces or {}
+	s.addressing = apply_intent.addressing or {}
+	s.dns = apply_intent.dns or {}
+	s.dhcp = apply_intent.dhcp or {}
+	s.firewall = apply_intent.firewall or {}
+	s.routing = apply_intent.routing or {}
+	-- Keep the product-level WAN member catalogue stable in the public NET
+	-- model.  The OpenWrt/HAL apply intent may legitimately omit GSM-backed
+	-- members until a Linux ifname exists; that volatility must not remove
+	-- state/net/backhaul.uplinks or local-UI cards.  The realised set is kept
+	-- separately for diagnostics and apply/runtime policy that needs it.
+	s.wan = copy_wan_with_realised_members(configured_intent.wan, apply_intent.wan)
 	s.sources = s.sources or { gsm_uplinks = {} }
 	s.backhaul = backhaul_model.reduce(s, { now = now() })
 	apply_backhaul_to_interfaces(s)
-	s.wan_runtime = carry_forward_wan_runtime(s.wan_runtime, intent, generation)
-	s.vpn = intent.vpn or {}
-	s.diagnostics = intent.diagnostics or {}
+	s.wan_runtime = carry_forward_wan_runtime(s.wan_runtime, configured_intent, generation)
+	s.vpn = apply_intent.vpn or {}
+	s.diagnostics = apply_intent.diagnostics or {}
 	return s
 end
 
@@ -366,7 +421,7 @@ local function accept_pending_intent(state, intent, reason)
 	state.last_realised_source_fingerprint = realised_fingerprint(state, intent)
 
 	state.model:update(function (s)
-		copy_intent_to_model(s, apply_intent)
+		copy_intent_to_model(s, apply_intent, intent)
 		s.state = 'waiting_for_hal'
 		s.ready = false
 		s.reason = reason
@@ -408,7 +463,7 @@ local function start_apply_for_intent(state, intent, reason)
 	state.pending_apply_reason = nil
 
 	state.model:update(function (s)
-		copy_intent_to_model(s, apply_intent)
+		copy_intent_to_model(s, apply_intent, intent)
 		s.state = 'applying'
 		s.ready = false
 		s.reason = nil
@@ -532,7 +587,8 @@ end
 local function return_apply_to_pending(state, result, reason)
 	reason = reason or 'network_config_unavailable'
 	local gen = state.current_generation
-	local intent = gen and gen.intent or nil
+	local apply_intent = gen and gen.intent or nil
+	local intent = state.base_intent or apply_intent
 	state.active_apply = nil
 	if not intent then return set_model_state(state, 'waiting_for_hal', reason) end
 
@@ -662,7 +718,10 @@ end
 local function handle_observed_state(state, ev)
 	local observed_event = ev and ev.event or nil
 	if type(observed_event) ~= 'table' then return true, nil end
+	local before = state.model and state.model:snapshot().backhaul or nil
 	state.model:update(function (s) return merge_observation(state, s, observed_event) end)
+	local after = state.model and state.model:snapshot().backhaul or nil
+	log_mwan_backhaul_transitions(state, before, after, observed_event)
 	mark_domain_dirty(state, 'observed')
 	mark_domain_dirty(state, 'backhaul')
 	mark_wan_member_interfaces_dirty(state)
@@ -739,7 +798,7 @@ local function handle_gsm_uplink_changed(state, ev)
 					summary = string.format('network apply %s superseded by generation=%s reason=gsm_uplink_binding_changed', tostring(active_apply.apply_id or '?'), tostring(next_intent.generation)),
 					apply_id = active_apply.apply_id,
 					generation = active_apply.generation,
-				next_generation = next_intent.generation,
+					next_generation = next_intent.generation,
 					reason = 'gsm_uplink_binding_changed',
 				})
 			end

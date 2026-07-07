@@ -24,6 +24,11 @@ local Provider = {}
 Provider.__index = Provider
 
 local HOST_NETMASK = '255.255.255.255'
+local DEFAULT_OBSERVER_SOCKET = '/var/run/devicecode-net-observe.sock'
+local DEFAULT_HOTPLUG_SENDER = '/usr/lib/lua/services/hal/backends/network/providers/openwrt/hotplug_send.lua'
+local OBSERVER_HOTPLUG_NAME = '95-devicecode-net-observe'
+local OBSERVER_BLOCK_BEGIN = '# BEGIN devicecode-net-observer'
+local OBSERVER_BLOCK_END = '# END devicecode-net-observer'
 local OWNED_PACKAGES = { 'network', 'dhcp', 'firewall', 'mwan3' }
 local COUNTER_STATS = {
 	'rx_bytes',
@@ -86,6 +91,219 @@ local function run_provider_command(self, argv)
 	local status, code = perform(cmd:run_op())
 	if status == 'exited' and code == 0 then return true, nil end
 	return nil, table.concat(argv, ' ') .. ' exited with status=' .. tostring(status) .. ' code=' .. tostring(code)
+end
+
+local function run_hook_command(self, argv)
+	local cfg = self and self.config or {}
+	local runner = cfg.hook_run_cmd or cfg.run_cmd
+	if type(runner) == 'function' then return runner(argv) end
+	local cmd = exec.command(exec_spec(argv))
+	local status, code = perform(cmd:run_op())
+	if status == 'exited' and code == 0 then return true, nil end
+	return nil, table.concat(argv or {}, ' ') .. ' exited with status=' .. tostring(status) .. ' code=' .. tostring(code)
+end
+
+local function shell_quote(v)
+	v = tostring(v or '')
+	return "'" .. v:gsub("'", "'\\''") .. "'"
+end
+
+local function observer_socket_path(config)
+	config = config or {}
+	return config.observer_socket_path or config.hotplug_socket_path or DEFAULT_OBSERVER_SOCKET
+end
+
+local function path_dirname(path)
+	return tostring(path or ''):match('^(.*)/[^/]+$') or '.'
+end
+
+local function absolute_path(path)
+	if type(path) ~= 'string' or path == '' then return nil end
+	if path:sub(1, 1) == '/' then return path end
+	path = path:gsub('^%./', '')
+	local cwd = os.getenv('PWD')
+	if type(cwd) == 'string' and cwd ~= '' then return cwd:gsub('/+$', '') .. '/' .. path end
+	return path
+end
+
+local function source_tree_hotplug_sender_path()
+	local info = debug and debug.getinfo and debug.getinfo(1, 'S') or nil
+	local source = info and info.source or nil
+	if type(source) ~= 'string' then return nil end
+	if source:sub(1, 1) == '@' then source = source:sub(2) end
+	local dir = path_dirname(absolute_path(source) or source)
+	if dir and dir ~= '' then return dir .. '/hotplug_send.lua' end
+	return nil
+end
+
+local function hotplug_sender_path(config)
+	config = config or {}
+	return config.hotplug_sender_path or source_tree_hotplug_sender_path() or DEFAULT_HOTPLUG_SENDER
+end
+
+local function observer_hook_root(config)
+	config = config or {}
+	local root = config.observer_hook_root or config.observer_hooks_root
+	if type(root) == 'string' and root ~= '' then
+		return root:gsub('/+$', '')
+	end
+	return ''
+end
+
+local function rooted_hook_path(config, path)
+	local root = observer_hook_root(config)
+	if root == '' then return path end
+	return root .. path
+end
+
+local function write_text_file(path, content)
+	local f, err = file.open(path, 'w')
+	if not f then return nil, err end
+	local ok, werr = f:write(content or '')
+	if ok == false or ok == nil then
+		f:close()
+		return nil, werr
+	end
+	if f.flush then
+		local fok, ferr = f:flush()
+		if fok == false or fok == nil then
+			f:close()
+			return nil, ferr
+		end
+	end
+	local cok, cerr = f:close()
+	if cok == false or cok == nil then return nil, cerr end
+	return true, nil
+end
+
+local function read_text_file(path)
+	local f = file.open(path, 'r')
+	if not f then return nil end
+	local data = f:read_all()
+	f:close()
+	return data or ''
+end
+
+local function observer_forward_script(config, source, kind, directory, prelude)
+	local socket_path = observer_socket_path(config)
+	local sender = hotplug_sender_path(config)
+	local lines = {
+		'#!/bin/sh',
+		'# Installed by devicecode.  Keep policy in Lua; this only wakes the observer.',
+		'DEVICECODE_NET_HOTPLUG_SOCKET=${DEVICECODE_NET_HOTPLUG_SOCKET:-' .. shell_quote(socket_path) .. '}',
+		'LUA_BIN=${DEVICECODE_LUA:-}',
+		'if [ -z "$LUA_BIN" ]; then',
+		'  if command -v lua >/dev/null 2>&1; then LUA_BIN=lua; elif command -v luajit >/dev/null 2>&1; then LUA_BIN=luajit; fi',
+		'fi',
+	}
+	if type(prelude) == 'string' and prelude ~= '' then
+		for line in tostring(prelude):gmatch('[^\n]+') do lines[#lines + 1] = line end
+	end
+	lines[#lines + 1] = 'DEVICECODE_NET_HOTPLUG_SENDER=' .. shell_quote(sender)
+	lines[#lines + 1] = 'if [ ! -S "$DEVICECODE_NET_HOTPLUG_SOCKET" ]; then'
+	lines[#lines + 1] = '  logger -t devicecode-net-observe "socket missing: $DEVICECODE_NET_HOTPLUG_SOCKET source=' .. tostring(source) .. ' action=${ACTION:-} interface=${INTERFACE:-}" 2>/dev/null || true'
+	lines[#lines + 1] = 'elif [ ! -r "$DEVICECODE_NET_HOTPLUG_SENDER" ]; then'
+	lines[#lines + 1] = '  logger -t devicecode-net-observe "sender missing: $DEVICECODE_NET_HOTPLUG_SENDER" 2>/dev/null || true'
+	lines[#lines + 1] = 'elif [ -n "$LUA_BIN" ]; then'
+	lines[#lines + 1] = '  "$LUA_BIN" "$DEVICECODE_NET_HOTPLUG_SENDER"'
+		.. ' --source=' .. shell_quote(source)
+		.. ' --kind=' .. shell_quote(kind)
+		.. ' --directory=' .. shell_quote(directory)
+		.. ' --socket="$DEVICECODE_NET_HOTPLUG_SOCKET"'
+		.. ' --ACTION="${ACTION:-}"'
+		.. ' --INTERFACE="${INTERFACE:-}"'
+		.. ' --DEVICE="${DEVICE:-}"'
+		.. ' --DEVICENAME="${DEVICENAME:-}"'
+		.. ' --DEVNAME="${DEVNAME:-}"'
+		.. ' --SUBSYSTEM="${SUBSYSTEM:-}" >/dev/null 2>&1 || {'
+		.. ' logger -t devicecode-net-observe "send failed source=' .. tostring(source) .. ' kind=' .. tostring(kind) .. ' directory=' .. tostring(directory) .. ' action=${ACTION:-} interface=${INTERFACE:-}" 2>/dev/null || true; }'
+	lines[#lines + 1] = 'else'
+	lines[#lines + 1] = '  logger -t devicecode-net-observe "lua interpreter missing" 2>/dev/null || true'
+	lines[#lines + 1] = 'fi'
+	lines[#lines + 1] = 'exit 0'
+	return table.concat(lines, '\n') .. '\n'
+end
+
+local function mwan3_user_block(config)
+	local prelude = table.concat({
+		'case "$1" in',
+		'  ifup|ifdown|online|offline|connected|disconnected|disabled|enabled)',
+		'    [ -n "$ACTION" ] || export ACTION="$1"',
+		'    [ -n "$INTERFACE" ] || export INTERFACE="$2"',
+		'    ;;',
+		'  *)',
+		'    [ -n "$INTERFACE" ] || export INTERFACE="$1"',
+		'    [ -n "$ACTION" ] || export ACTION="$2"',
+		'    ;;',
+		'esac',
+	}, '\n')
+	local body = observer_forward_script(config, 'mwan3', 'mwan3', 'mwan3.user', prelude)
+	body = body:gsub('^#!/bin/sh\n', '')
+	body = body:gsub('exit 0\n$', '')
+	return OBSERVER_BLOCK_BEGIN .. '\n' .. body .. OBSERVER_BLOCK_END .. '\n'
+end
+
+local function strip_observer_block(content)
+	content = tostring(content or '')
+	local pattern = '\n?%# BEGIN devicecode%-net%-observer.-%# END devicecode%-net%-observer\n?'
+	local stripped = content:gsub(pattern, '\n')
+	stripped = stripped:gsub('\n+$', '\n')
+	return stripped
+end
+
+local function install_observer_file(self, path, content)
+	local cfg = self and self.config or {}
+	local dir = path_dirname(path)
+	local ok, err = file.mkdir_p(dir)
+	if ok ~= true then return nil, 'failed to create ' .. dir .. ': ' .. tostring(err) end
+	ok, err = write_text_file(path, content)
+	if ok ~= true then return nil, 'failed to write ' .. path .. ': ' .. tostring(err) end
+	if cfg.observer_hook_chmod ~= false then
+		ok, err = run_hook_command(self, { 'chmod', '+x', path })
+		if ok ~= true then return nil, 'failed to chmod ' .. path .. ': ' .. tostring(err) end
+	end
+	return true, nil
+end
+
+local function install_mwan3_user_hook(self)
+	local cfg = self and self.config or {}
+	local path = rooted_hook_path(cfg, cfg.mwan3_user_path or '/etc/mwan3.user')
+	local old = read_text_file(path)
+	local base = strip_observer_block(old or '')
+	if base == '' then base = '#!/bin/sh\n' end
+	if not base:match('^#!') then base = '#!/bin/sh\n' .. base end
+	if not base:match('\n$') then base = base .. '\n' end
+	local shebang, rest = base:match('^(#![^\n]*\n?)(.*)$')
+	shebang = shebang or '#!/bin/sh\n'
+	rest = rest or base
+	local content = shebang .. '\n' .. mwan3_user_block(cfg) .. '\n' .. rest
+	return install_observer_file(self, path, content)
+end
+
+local function install_hotplug_hook(self, directory)
+	local cfg = self and self.config or {}
+	local path = rooted_hook_path(cfg, '/etc/hotplug.d/' .. tostring(directory) .. '/' .. OBSERVER_HOTPLUG_NAME)
+	local content = observer_forward_script(cfg, 'hotplug', 'hotplug', directory)
+	return install_observer_file(self, path, content)
+end
+
+local function install_observer_hooks(self)
+	local cfg = self and self.config or {}
+	if cfg.install_observer_hooks == false then return true, nil end
+	if cfg.allow_fake_uci == true and cfg.install_observer_hooks ~= true and observer_hook_root(cfg) == '' then
+		return true, nil, { 'skipped:fake_uci' }
+	end
+	local installed = {}
+	local ok, err = install_hotplug_hook(self, 'iface')
+	if ok ~= true then return nil, err end
+	installed[#installed + 1] = 'hotplug:iface'
+	ok, err = install_hotplug_hook(self, 'net')
+	if ok ~= true then return nil, err end
+	installed[#installed + 1] = 'hotplug:net'
+	ok, err = install_mwan3_user_hook(self)
+	if ok ~= true then return nil, err end
+	installed[#installed + 1] = 'mwan3.user'
+	return true, nil, installed
 end
 
 local function wait_for_linux_device(self, dev, opts)
@@ -1200,9 +1418,22 @@ function Provider:_ensure_observer()
 	if self._observer then return self._observer, nil end
 	local scope = self:_owner()
 	if not scope then return nil, 'provider owner scope required' end
+	local hooks_ok, hooks_err, hooks = install_observer_hooks(self)
+	log_provider(self, hooks_ok == true and 'info' or 'warn', {
+		what = 'openwrt_network_observer_hooks_installed',
+		summary = hooks_ok == true
+			and ('network observer hooks installed sender=' .. tostring(hotplug_sender_path(self.config)) .. ' socket=' .. tostring(observer_socket_path(self.config)))
+			or ('network observer hook installation failed: ' .. tostring(hooks_err)),
+		ok = hooks_ok == true,
+		err = hooks_err,
+		hooks = hooks,
+		sender = hotplug_sender_path(self.config),
+		socket = observer_socket_path(self.config),
+	})
+	if hooks_ok ~= true then return nil, hooks_err end
 	local obs, err = observer_mod.new({
 		logger = self.logger,
-		socket_path = self.config.observer_socket_path or self.config.hotplug_socket_path or '/var/run/devicecode-net-observe.sock',
+		socket_path = observer_socket_path(self.config),
 		debounce_s = self.config.observer_debounce_s or self.config.debounce_observation_s or 0.15,
 		enable_socket = self.config.enable_hotplug_socket ~= false,
 		enable_ubus = self.config.enable_ubus_listener == true,
@@ -2214,6 +2445,10 @@ end
 
 M._test = {
 	normalise_mwan3_status = normalise_mwan3_status,
+	observer_forward_script = observer_forward_script,
+	mwan3_user_block = mwan3_user_block,
+	strip_observer_block = strip_observer_block,
+	install_observer_hooks = install_observer_hooks,
 }
 
 return M

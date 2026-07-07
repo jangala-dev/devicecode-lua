@@ -80,7 +80,7 @@ local function check_firewall(items, snapshot, observed)
 end
 
 local function check_wan(items, snapshot, observed)
-	local desired = snapshot.wan and snapshot.wan.members or {}
+	local desired = snapshot.wan and (snapshot.wan.realised_members or snapshot.wan.members) or {}
 	local obs = observed and observed.wan and observed.wan.members or nil
 	if type(obs) ~= 'table' then return end
 	for id, member in pairs(desired or {}) do

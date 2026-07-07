@@ -106,6 +106,39 @@ local function member_metric(member)
 	return tonumber(member and member.metric) or 1
 end
 
+local function vlan_id(vlan)
+	if type(vlan) == 'number' then return vlan end
+	if is_table(vlan) then return tonumber(vlan.id) end
+	return nil
+end
+
+local function first_kind(segment, endpoint)
+	local kind = (is_table(segment) and segment.kind) or (is_table(endpoint) and endpoint.kind)
+	if kind == 'wan' or kind == 'wired' then return 'wired' end
+	return kind or 'wired'
+end
+
+local function link_view(snapshot, iface, member, source_kind)
+	local segment = snapshot and snapshot.segments and snapshot.segments[iface] or nil
+	local endpoint = interface_endpoint(snapshot, iface)
+	local vid = vlan_id(member and member.vlan) or vlan_id(segment and segment.vlan) or vlan_id(endpoint and endpoint.vlan)
+	local kind = source_kind == 'gsm-uplink' and 'cellular' or first_kind(segment, endpoint)
+	return {
+		kind = kind,
+		segment = iface,
+		vlan = vid,
+	}
+end
+
+local function status_source(snapshot, st)
+	local mw = observed_multiwan(snapshot) or {}
+	return {
+		kind = 'host-multiwan',
+		backend = st and (st.backend or mw.backend) or mw.backend,
+		tool = st and (st.tool or mw.source) or mw.source,
+	}
+end
+
 local function gsm_source(member)
 	local src = member and member.source or nil
 	if is_table(src) and src.kind == 'gsm-uplink' then return src.id end
@@ -120,17 +153,12 @@ end
 
 local function reduce_gsm(snapshot, uplink_id, member, opts)
 	local gsm = gsm_uplink(snapshot, member)
-	local state = 'unknown'
-	local usable = false
-	if is_table(gsm) then
-		state = tostring(gsm.state or (gsm.connected and 'connected' or 'disconnected'))
-		if state == 'connected' then state = 'online' end
-		usable = gsm.connected == true and state == 'online'
-	end
 	local linux = is_table(gsm and gsm.linux) and gsm.linux or {}
 	local iface = member_interface(member, uplink_id)
+	local st = status_by_interface(snapshot, iface)
+	local state, usable = semantic_state_from_host(st)
 	local endpoint = interface_endpoint(snapshot, iface)
-	local ifname = linux.ifname or member.device or member.ifname or endpoint.ifname or endpoint.device or endpoint.name
+	local ifname = st and st.ifname or linux.ifname or member.device or member.ifname or endpoint.ifname or endpoint.device or endpoint.name
 	return {
 		id = tostring(uplink_id),
 		role = member.role or uplink_id,
@@ -138,17 +166,20 @@ local function reduce_gsm(snapshot, uplink_id, member, opts)
 		ifname = ifname,
 		state = state,
 		usable = usable,
+		observed = st ~= nil,
 		metric = member_metric(member),
-		path_address = path_address(snapshot, iface, ifname, nil),
+		path_address = path_address(snapshot, iface, ifname, st),
 		source = { kind = 'gsm-uplink', id = gsm_source(member) },
-		observed_at = is_table(gsm) and (gsm.updated_at or gsm.observed_at) or (opts and opts.now),
+		status_source = status_source(snapshot, st),
+		link = link_view(snapshot, iface, member, 'gsm-uplink'),
+		observed_at = st and (st.observed_at or ((observed_multiwan(snapshot) or {}).observed_at))
+			or (is_table(gsm) and (gsm.updated_at or gsm.observed_at) or (opts and opts.now)),
 	}
 end
 
 local function reduce_host(snapshot, uplink_id, member, opts)
 	local iface = member_interface(member, uplink_id)
 	local st = status_by_interface(snapshot, iface)
-	local mw = observed_multiwan(snapshot) or {}
 	local state, usable = semantic_state_from_host(st)
 	local endpoint = interface_endpoint(snapshot, iface)
 	local ifname = st and st.ifname or member.device or member.ifname or endpoint.ifname or endpoint.device or endpoint.name
@@ -164,13 +195,11 @@ local function reduce_host(snapshot, uplink_id, member, opts)
 		path_address = path_address(snapshot, iface, ifname, st),
 		uptime_s = st and (tonumber(st.uptime_s) or tonumber(st.uptime)) or nil,
 		age_s = st and (tonumber(st.age_s) or tonumber(st.age)) or nil,
-		source = {
-			kind = 'host-multiwan',
-			backend = st and (st.backend or mw.backend) or nil,
-			tool = st and (st.tool or mw.source) or nil,
-		},
+		source = status_source(snapshot, st),
+		status_source = status_source(snapshot, st),
+		link = link_view(snapshot, iface, member, 'host-multiwan'),
 		probes = st and copy(st.probes) or nil,
-		observed_at = st and (st.observed_at or mw.observed_at) or nil,
+		observed_at = st and (st.observed_at or ((observed_multiwan(snapshot) or {}).observed_at)) or (opts and opts.now),
 	}
 end
 

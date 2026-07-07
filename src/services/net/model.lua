@@ -67,7 +67,7 @@ function M.initial(service_id)
 		dhcp = {},
 		firewall = {},
 		routing = {},
-		wan = {},
+		wan = { members = {}, realised_members = {} },
 		backhaul = { schema = 'devicecode.net.backhaul/1', state = 'unknown', uplinks = {} },
 		wan_runtime = { uplinks = {}, speedtests = {}, live_weights = {}, last_weight_apply = nil },
 		sources = { gsm_uplinks = {} },

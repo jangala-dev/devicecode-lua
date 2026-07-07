@@ -358,6 +358,17 @@ function Observer:ubus_listener()
 	self:_stop_ubus_listener()
 end
 
+local function trigger_summary(trigger)
+	trigger = trigger or {}
+	local env = trigger.env or trigger.payload or trigger
+	return string.format('%s event action=%s interface=%s device=%s directory=%s',
+		tostring(trigger.source or trigger.kind or 'hotplug'),
+		tostring(env.ACTION or env.action or '?'),
+		tostring(env.INTERFACE or env.interface or '?'),
+		tostring(env.DEVICE or env.DEVICENAME or env.DEVNAME or env.device or '?'),
+		tostring(trigger.directory or env.SUBSYSTEM or '?'))
+end
+
 function Observer:handle_socket_stream(st)
 	self:_track_stream(st)
 	while not self.closed do
@@ -365,7 +376,14 @@ function Observer:handle_socket_stream(st)
 		if line == nil then break end
 		local rec = cjson.decode(line)
 		local trig = normalise_hotplug_record(rec)
-		if trig then self:ingest(trig) end
+		if trig then
+			if trig.source == 'mwan3' or trig.kind == 'mwan3' then
+				log(self, 'info', { what = 'network_observer_mwan3_trigger', summary = trigger_summary(trig), trigger = trig })
+			elseif trig.directory == 'iface' or trig.directory == 'net' then
+				log(self, 'info', { what = 'network_observer_hotplug_trigger', summary = trigger_summary(trig), trigger = trig })
+			end
+			self:ingest(trig)
+		end
 	end
 	self:_untrack_stream(st)
 	close_stream(st)
