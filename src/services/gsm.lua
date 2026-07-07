@@ -613,19 +613,6 @@ local function log_gsm_summary(svc, modems, reason)
 	svc:info('gsm_summary', { summary = summary, reason = reason })
 end
 
-local function debug_ranked_apn_list(ranked_apns, rankings, rank_cutoff)
-	local out = {}
-	for _, ranking in ipairs(rankings or {}) do
-		local rec = apn_model.redact_record((ranked_apns or {})[ranking.name] or {})
-		local rank = tonumber(ranking.rank) or math.huge
-		rec._name = ranking.name
-		rec._rank = ranking.rank
-		rec._eligible = rank <= tonumber(rank_cutoff or 0)
-		out[#out + 1] = rec
-	end
-	return out
-end
-
 local GsmModem = {}
 GsmModem.__index = GsmModem
 
@@ -1000,16 +987,6 @@ function GsmModem:_apn_connect()
 	-- Get ranked APNs
 	local rank_cutoff = tonumber(self.cfg.apn_rank_cutoff) or 4
 	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, nil, gid1, self.svc and self.svc.custom_apns)
-	self.svc:obs_log('info', {
-		what = 'apns_loaded_for_sim',
-		temporary_debug = true,
-		modem = self.name,
-		mcc = tostring(mcc or ''),
-		mnc = tostring(mnc or ''),
-		rank_cutoff = rank_cutoff,
-		count = #rankings,
-		apns = debug_ranked_apn_list(ranked_apns, rankings, rank_cutoff),
-	})
 
 	-- Iterate through ranked APNs
 	for _, ranking in ipairs(rankings) do
