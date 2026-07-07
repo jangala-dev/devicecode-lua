@@ -1576,6 +1576,22 @@ local function normalise_device_status(name, st)
 	}
 end
 
+local function duration_seconds(v)
+	if type(v) == 'number' then return v end
+	if type(v) ~= 'string' then return nil end
+	local n = tonumber(v)
+	if n then return n end
+	local h, m, s = v:match('^(%d+)h:?%s*(%d+)m:?%s*(%d+)s$')
+	if h then return (tonumber(h) * 3600) + (tonumber(m) * 60) + tonumber(s) end
+	h, m, s = v:match('^(%d+):(%d+):(%d+)$')
+	if h then return (tonumber(h) * 3600) + (tonumber(m) * 60) + tonumber(s) end
+	m, s = v:match('^(%d+)m:?%s*(%d+)s$')
+	if m then return (tonumber(m) * 60) + tonumber(s) end
+	s = v:match('^(%d+)s$')
+	if s then return tonumber(s) end
+	return nil
+end
+
 local function normalise_mwan3_status(st, name_ctx)
 	local out = {
 		schema = 'devicecode.hal.network.multiwan/1',
@@ -1590,6 +1606,7 @@ local function normalise_mwan3_status(st, name_ctx)
 		raw = copy_plain(st or {}),
 	}
 	if not is_plain_table(st) then return out end
+	local wall_now = os.time()
 	for ifid, rec in pairs(st.interfaces or {}) do
 		if is_plain_table(rec) then
 			local probes = {}
@@ -1607,9 +1624,15 @@ local function normalise_mwan3_status(st, name_ctx)
 			local state = rec.status
 			if rec.enabled == false then state = 'disabled' end
 			local online = state == 'online' or (state == nil and rec.online == true)
+			local semantic_interface = ifid
+			if name_ctx and type(name_ctx.semantic_for) == 'function' then
+				semantic_interface = name_ctx:semantic_for('mwan_iface', ifid) or ifid
+			end
+			local online_for = duration_seconds(rec.online)
+			local offline_for = duration_seconds(rec.offline)
 			local item = {
 				interface = ifid,
-				semantic_interface = (name_ctx and type(name_ctx.semantic_for) == 'function' and name_ctx:semantic_for('mwan_iface', ifid)) or ifid,
+				semantic_interface = semantic_interface,
 				state = state,
 				status = state,
 				backend = 'openwrt',
@@ -1625,8 +1648,12 @@ local function normalise_mwan3_status(st, name_ctx)
 				age = tonumber(rec.age), -- compatibility
 				uptime = tonumber(rec.uptime), -- compatibility
 				online = online,
-				online_count = tonumber(rec.online),
-				offline = tonumber(rec.offline),
+				online_for = online_for,
+				online_since = online and online_for and (wall_now - online_for) or nil,
+				online_count = online_for,
+				offline_for = offline_for,
+				offline_since = (not online) and offline_for and (wall_now - offline_for) or nil,
+				offline = offline_for,
 				score = tonumber(rec.score),
 				lost = tonumber(rec.lost),
 				turn = tonumber(rec.turn),

@@ -32,6 +32,16 @@ function tests.test_routes_decode_local_ui_and_apn_routes()
 	eq(routes.decode(ctx('GET', '/api/gsm/apns/custom')).kind, 'gsm_apns_get')
 	eq(routes.decode(ctx('PUT', '/api/gsm/apns/custom')).kind, 'gsm_apns_put')
 	eq(routes.decode(ctx('GET', '/api/diagnostics')).kind, 'diagnostics_stub')
+	local logs_route = routes.decode(ctx('GET', '/api/logs?boot=true'))
+	eq(logs_route.kind, 'logs_query')
+	eq(logs_route.boot, true)
+	local header_logs_route = routes.decode({
+		method = 'GET',
+		path = function () return '/api/logs' end,
+		headers = { [':path'] = '/api/logs?boot=true' },
+	})
+	eq(header_logs_route.kind, 'logs_query')
+	eq(header_logs_route.boot, true)
 	local route = routes.decode(ctx('GET', '/events'))
 	eq(route.kind, 'sse')
 	eq(route.pattern, nil)

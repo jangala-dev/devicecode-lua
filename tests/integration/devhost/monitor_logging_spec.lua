@@ -79,7 +79,10 @@ function T.monitor_public_capability_feeds_ui_initial_logs()
 		end, { timeout = 0.8, interval = 0.01 })
 
 		local ctx = fake_ctx('GET', '/api/logs')
-		local result = request.run(scope, ctx, { conn = ui_conn, encode_json = function (v) return assert(cjson.encode(v)) end })
+		local result = request.run(scope, ctx, {
+			conn = ui_conn,
+			encode_json = function (v) return assert(cjson.encode(v)) end,
+		})
 		assert_eq(result.status, 'ok')
 		assert_eq(#ctx.replies, 1)
 		assert_eq(ctx.replies[1].status, 200)
@@ -90,6 +93,57 @@ function T.monitor_public_capability_feeds_ui_initial_logs()
 			if rec.service == 'net' and rec.what == 'speedtest_completed' then found = true end
 		end
 		assert_true(found, 'UI logs response should include monitor query result')
+	end)
+end
+
+function T.ui_logs_endpoint_can_request_boot_buffer()
+	run_fibers.run(function (scope)
+		local b = busmod.new()
+		local admin = b:connect({ origin_base = { service = 'monitor-test-admin' } })
+		admin:retain({ 'cfg', 'monitor' }, {
+			data = { storage = { boot_records = 10, ring_records = 2, boot_seconds = 0 } },
+			rev = 1,
+		})
+		local monitor_conn = b:connect({ origin_base = { service = 'monitor' } })
+		local app_conn = b:connect({ origin_base = { service = 'app' } })
+		local ui_conn = b:connect({ origin_base = { service = 'ui' } })
+		local ok, err = scope:spawn(function () monitor.start(monitor_conn, { env = 'test' }) end)
+		assert_true(ok, tostring(err))
+		probe.wait_retained_payload(ui_conn, { 'cap', 'monitor', 'main' }, { timeout = 0.5 })
+
+		for i = 1, 5 do publish_log(app_conn, 'alpha', 'info', 'record_' .. i, 'record ' .. i) end
+		probe.wait_until(function ()
+			local rep = ui_conn:call(monitor_rpc('query-logs'), { service = 'alpha', limit = 10 }, { timeout = 0.05 })
+			return rep and rep.count == 2 and rep.records[1].what == 'record_4'
+		end, { timeout = 0.8, interval = 0.01 })
+
+		local ring_ctx = fake_ctx('GET', '/api/logs')
+		local ring_result = request.run(scope, ring_ctx, {
+			conn = ui_conn,
+			encode_json = function (v) return assert(cjson.encode(v)) end,
+		})
+		assert_eq(ring_result.status, 'ok')
+		local ring = assert_true(cjson.decode(ring_ctx.replies[1].body), ring_ctx.replies[1].body)
+
+		local boot_ctx = fake_ctx('GET', '/api/logs?boot=true')
+		local boot_result = request.run(scope, boot_ctx, {
+			conn = ui_conn,
+			encode_json = function (v) return assert(cjson.encode(v)) end,
+		})
+		assert_eq(boot_result.status, 'ok')
+		local boot = assert_true(cjson.decode(boot_ctx.replies[1].body), boot_ctx.replies[1].body)
+
+		local ring_found_first = false
+		for _, rec in ipairs(ring.records or {}) do
+			if rec.service == 'alpha' and rec.what == 'record_1' then ring_found_first = true end
+		end
+		assert_true(not ring_found_first, 'plain UI logs response should use the ring buffer')
+
+		local boot_found_first = false
+		for _, rec in ipairs(boot.records or {}) do
+			if rec.service == 'alpha' and rec.what == 'record_1' then boot_found_first = true end
+		end
+		assert_true(boot_found_first, 'boot UI logs response should include startup records')
 	end)
 end
 
@@ -105,7 +159,13 @@ function T.monitor_profile_endpoint_changes_profile_through_ui_route()
 		local ctx = fake_ctx('POST', '/api/monitor/profile')
 		ctx.headers = { ['content-type'] = 'application/json', ['x-session-id'] = 'sid-1' }
 		ctx.read_body_as_string_op = function () return fibers.always('{"profile":"debug"}', nil) end
-		local sessions = { get = function (_, sid) if sid == 'sid-1' then return { id = sid, principal = { kind = 'user', id = 'tester' } } end end }
+		local sessions = {
+			get = function (_, sid)
+				if sid == 'sid-1' then
+					return { id = sid, principal = { kind = 'user', id = 'tester' } }
+				end
+			end,
+		}
 		local result = request.run(scope, ctx, {
 			conn = ui_conn,
 			bus = b,

@@ -50,15 +50,14 @@ end
 
 local function ensure_request_metadata(ctx)
 	if type(ctx) ~= 'table' then return ctx end
-	if ctx.method ~= nil and (ctx.path ~= nil or ctx.uri ~= nil) then return ctx end
-	if type(ctx.method) == 'function' and type(ctx.path) == 'function' then return ctx end
 	if type(ctx.get_headers_op) ~= 'function' then return ctx end
 
-	local h, err = fibers.perform(ctx:get_headers_op())
+	local h, err = ctx.headers, nil
+	if h == nil then h, err = fibers.perform(ctx:get_headers_op()) end
 	if not h then error(err or 'request headers unavailable', 0) end
 	ctx.headers = ctx.headers or h
 	ctx.method = ctx.method or header_one(h, ':method') or header_one(h, 'method') or 'GET'
-	ctx.path = ctx.path or ctx.uri or header_one(h, ':path') or '/'
+	ctx.path = header_one(h, ':path') or ctx.path or ctx.uri or '/'
 	return ctx
 end
 
@@ -351,8 +350,10 @@ local function call_monitor_op(deps, method, payload, timeout)
 	return conn:call_op(monitor_rpc_topic(method), payload or {}, { timeout = timeout or deps.command_timeout or 5.0 })
 end
 
-local function handle_logs_query(owner, deps)
-	local reply, err = fibers.perform(call_monitor_op(deps, 'query-logs', { limit = 200, min_level = 'info' }))
+local function handle_logs_query(route, owner, deps)
+	local payload = { limit = 200, min_level = 'info' }
+	if route and route.boot == true then payload.boot = true end
+	local reply, err = fibers.perform(call_monitor_op(deps, 'query-logs', payload))
 	if reply == nil then
 		perform_response(owner:reply_error_op(503, err or 'monitor_unavailable'))
 		return { status = 'failed', err = err or 'monitor_unavailable' }
@@ -362,7 +363,12 @@ local function handle_logs_query(owner, deps)
 end
 
 local function handle_logs_follow(scope, owner, deps)
-	local reply, err = fibers.perform(call_monitor_op(deps, 'follow-logs', { limit = 200, min_level = 'info', replay = true }, false))
+	local reply, err = fibers.perform(call_monitor_op(
+		deps,
+		'follow-logs',
+		{ limit = 200, min_level = 'info', replay = true },
+		false
+	))
 	if reply == nil or reply.ok ~= true or reply.feed == nil then
 		perform_response(owner:reply_error_op(503, err or (reply and reply.err) or 'monitor_follow_unavailable'))
 		return { status = 'failed', err = err or (reply and reply.err) or 'monitor_follow_unavailable' }
@@ -483,7 +489,7 @@ function M.run(scope, ctx, deps)
 	elseif route.kind == 'session_get' then
 		return handle_session_get(owner, ctx, deps)
 	elseif route.kind == 'logs_query' then
-		return handle_logs_query(owner, deps)
+		return handle_logs_query(route, owner, deps)
 	elseif route.kind == 'logs_follow' then
 		return handle_logs_follow(scope, owner, deps)
 	elseif route.kind == 'monitor_profile' then
