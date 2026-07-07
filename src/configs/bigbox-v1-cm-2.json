@@ -149,6 +149,10 @@
         {
           "name": "update",
           "root": "/data/devicecode/control/update"
+        },
+        {
+          "name": "gsm",
+          "root": "/data/devicecode/control/gsm"
         }
       ],
       "time": {},
@@ -546,7 +550,9 @@
           "policy": "balanced",
           "speedtests": {
             "enabled": true,
-            "interval_s": 300
+            "interval_s": 21600,
+            "retry_after_s": 10,
+            "retry_max_s": 3600
           }
         },
         "rules": {
@@ -1286,6 +1292,11 @@
             "metrics_interval": 60
           }
         ]
+      },
+      "apn_store": {
+        "kind": "control-store",
+        "id": "gsm",
+        "key": "custom-apns-v1"
       }
     }
   },
@@ -1440,7 +1451,7 @@
         "enabled": true,
         "cap_id": "main",
         "host": "0.0.0.0",
-        "port": 8080
+        "port": 80
       },
       "updates": {
         "upload": {

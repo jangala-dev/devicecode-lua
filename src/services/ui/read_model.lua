@@ -11,6 +11,7 @@
 
 local fibers      = require 'fibers'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
+local local_model = require 'services.ui.local_model'
 local store_mod   = require 'services.ui.read_model_store'
 local watches_mod = require 'services.ui.read_model_watches'
 local topics      = require 'services.ui.topics'
@@ -64,7 +65,7 @@ local function start_feed_owner(scope, target, conn, pattern, opts)
 				error(recv_err or 'read model retained feed closed', 0)
 			end
 			if should_ingest_event(ev, opts) then
-				local changed, _msg, _op_name, ingest_err = target:ingest(ev)
+				local changed, _, _, ingest_err = target:ingest(ev)
 				if changed == nil then
 					error(ingest_err or 'read model ingest failed', 0)
 				end
@@ -73,6 +74,41 @@ local function start_feed_owner(scope, target, conn, pattern, opts)
 	end)
 	if not ok then
 		bus_cleanup.unwatch_retained(conn, watch)
+		return nil, spawn_err
+	end
+
+	return true, nil
+end
+
+local function start_live_event_owner(scope, target, conn, pattern, opts)
+	local sub, err = bus_cleanup.subscribe(conn, pattern, {
+		queue_len = opts.event_queue_len or 256,
+		full = opts.event_full or 'drop_oldest',
+	})
+	if not sub then
+		return nil, err or 'subscribe failed'
+	end
+
+	scope:finally(function ()
+		bus_cleanup.unsubscribe(conn, sub)
+	end)
+
+	local ok, spawn_err = fibers.spawn(function ()
+		while true do
+			local msg, recv_err = fibers.perform(sub:recv_op())
+			if msg == nil then
+				error(recv_err or 'read model live event feed closed', 0)
+			end
+			if local_model.allowed_event(msg.topic) then
+				local notified, notify_err = target:notify('set', msg)
+				if notified == nil then
+					error(notify_err or 'read model live event notify failed', 0)
+				end
+			end
+		end
+	end)
+	if not ok then
+		bus_cleanup.unsubscribe(conn, sub)
 		return nil, spawn_err
 	end
 
@@ -116,6 +152,15 @@ function M.start(scope, conn, opts)
 			local ok, err = start_feed_owner(scope, watch_owner, conn, pattern, opts)
 			if not ok then error(err or 'read_model feed start failed', 2) end
 		end
+
+		local event_patterns = opts.event_patterns
+		if event_patterns == nil then event_patterns = local_model.LIVE_EVENT_PATTERNS end
+		if event_patterns ~= false then
+			for _, pattern in ipairs(event_patterns) do
+				local ok, err = start_live_event_owner(scope, watch_owner, conn, pattern, opts)
+				if not ok then error(err or 'read_model live event feed start failed', 2) end
+			end
+		end
 	end
 
 	return store, watch_owner
@@ -129,6 +174,7 @@ M.Watch = watches_mod.Watch
 M.match_topic = store_mod.match_topic
 M._test = {
 	should_ingest_event = should_ingest_event,
+	start_live_event_owner = start_live_event_owner,
 	topic_is_excluded = topic_is_excluded,
 }
 

@@ -96,7 +96,7 @@ function M.build_changes(intent, name_ctx)
 	for _, mid in ipairs(sorted_keys(members)) do
 		local m = is_plain_table(members[mid]) and members[mid] or {}
 		local iface_sem = member_iface(mid, m)
-		local metric = math.floor(tonumber(m.mwan_metric or 1) or 1)
+		local metric = math.floor(tonumber(m.metric or m.mwan_metric or 1) or 1)
 		local weight = math.max(1, math.floor(tonumber(m.weight or 1) or 1))
 		local ifsec = mw_iface(iface_sem)
 		known[ifsec] = true

@@ -450,7 +450,7 @@ end
 
 local function reply_shell_manager_request(self, req, method)
 	if method == 'status' then
-		reply_manager_request(req, { ok = true, snapshot = self._model:snapshot() }, 'status_reply_failed')
+		reply_manager_request(req, projection.manager_status(self._model:snapshot()), 'status_reply_failed')
 		return true
 	end
 

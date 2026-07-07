@@ -12,17 +12,17 @@ local DEFAULTS = {
 		enabled = true,
 		cap_id = 'main',
 		host = '0.0.0.0',
-		port = 8080,
+		port = 80,
 	},
 	static = {
-		root = 'www',
+		root = 'services/ui/www',
 		index = 'index.html',
 		chunk_size = 16384,
 	},
 	sse = {
 		enabled = true,
-		queue_len = 32,
-		replay = true,
+		queue_len = 256,
+		replay = false,
 	},
 	sessions = {
 		prune_interval = 60,
@@ -58,7 +58,14 @@ local HTTP_KEYS = {
 local STATIC_KEYS = { root = true, index = true, chunk_size = true }
 local SSE_KEYS = { enabled = true, queue_len = true, max_replay = true, replay = true, pattern = true }
 local UPDATE_KEYS = { upload = true, commit = true }
-local UPDATE_UPLOAD_KEYS = { enabled = true, max_bytes = true, require_auth = true, component = true, create_job = true, start_job = true }
+local UPDATE_UPLOAD_KEYS = {
+	enabled = true,
+	max_bytes = true,
+	require_auth = true,
+	component = true,
+	create_job = true,
+	start_job = true,
+}
 local UPDATE_COMMIT_KEYS = { require_auth = true }
 local SESSION_KEYS = { prune_interval = true }
 local OBSERVABILITY_KEYS = { status_interval_s = true, coalesce_status_s = true }
@@ -331,7 +338,8 @@ function M.normalise(raw)
 	local sse; sse, err = normalise_sse(raw.sse); if not sse then return nil, err end
 	local updates; updates, err = normalise_updates(raw.updates); if not updates then return nil, err end
 	local sessions; sessions, err = normalise_sessions(raw.sessions); if not sessions then return nil, err end
-	local observability; observability, err = normalise_observability(raw.observability); if not observability then return nil, err end
+	local observability; observability, err = normalise_observability(raw.observability)
+	if not observability then return nil, err end
 
 	return {
 		schema = M.SCHEMA,

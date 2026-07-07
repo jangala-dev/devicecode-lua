@@ -206,7 +206,19 @@ local function log_protected_backhaul(state, snap)
 			local available = avail.state == 'available' or avail.state == 'ok'
 			local up = available and lst == 'up'
 			local state_now = up and 'up' or (lst or avail.state or 'unknown')
-			local key = tostring(state_now) .. '|' .. tostring(link.speed or '') .. '|' .. tostring(link.duplex or '') .. '|' .. tostring(avail.reason or '')
+			local state_key = table.concat({
+				tostring(state_now),
+				tostring(link.speed or ''),
+				tostring(link.duplex or ''),
+				tostring(avail.reason or ''),
+			}, '|')
+			local pending = false
+			if not up then
+				pending = (operator_settling(state) and not state._operator_backhaul_up_seen[id])
+					or (not state.operator_surface_baselined and not state._operator_backhaul_up_seen[id])
+					or (available and lst == nil)
+			end
+			local key = (up and 'up' or (pending and 'pending' or 'degraded')) .. '|' .. state_key
 			if state._operator_backhaul_key[id] ~= key then
 				local ls = link_summary(link)
 				if up then
@@ -220,10 +232,8 @@ local function log_protected_backhaul(state, snap)
 						duplex = link.duplex,
 					})
 				else
-					local pending = (operator_settling(state) and not state._operator_backhaul_up_seen[id])
-						or (not state.operator_surface_baselined and not state._operator_backhaul_up_seen[id])
-						or (available and lst == nil)
 					if pending then
+						state._operator_backhaul_key[id] = key
 						state.svc:debug('backhaul_pending', {
 							summary = string.format('wired backhaul %s pending state=%s%s', surface_label(id, rec), tostring(state_now), avail.reason and (' reason=' .. tostring(avail.reason)) or ''),
 							surface_id = id,

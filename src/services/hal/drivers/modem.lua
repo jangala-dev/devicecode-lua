@@ -73,6 +73,9 @@ local GROUP_FIELDS = {
         "iccid",
         "imsi",
         "gid1",
+        "sim_lock",
+        "sim_lock_retries",
+        "modem_state",
     },
     network = {
         "access_techs",
@@ -230,6 +233,27 @@ function Modem:_cache_group(group, value)
 end
 
 ---@param group string
+function Modem:_invalidate_group(group)
+    if not group_valid(group) then return end
+    if self.cache and type(self.cache.delete) == 'function' then
+        self.cache:delete(group)
+    elseif self.cache and self.cache.store then
+        self.cache.store[group] = nil
+    end
+end
+
+---@param groups string[]
+function Modem:invalidate_groups(groups)
+    for _, group in ipairs(groups or {}) do
+        self:_invalidate_group(group)
+    end
+end
+
+function Modem:_invalidate_dynamic()
+    self:invalidate_groups { 'sim', 'network', 'signal', 'traffic' }
+end
+
+---@param group string
 ---@param timescale number?
 ---@return any snapshot
 ---@return string error
@@ -307,6 +331,7 @@ function Modem:enable()
     if not ok then
         return return_error(err, 1)
     end
+    self:_invalidate_dynamic()
     return true
 end
 
@@ -319,6 +344,7 @@ function Modem:disable()
     if not ok then
         return return_error(err, 1)
     end
+    self:_invalidate_dynamic()
     return true
 end
 
@@ -331,6 +357,7 @@ function Modem:reset()
     if not ok then
         return return_error(err, 1)
     end
+    self:_invalidate_dynamic()
     return true
 end
 
@@ -347,6 +374,7 @@ function Modem:connect(opts)
     if not ok then
         return return_error(err, 1)
     end
+    self:invalidate_groups { 'network', 'signal', 'traffic' }
     return true
 end
 
@@ -359,6 +387,7 @@ function Modem:disconnect()
     if not ok then
         return return_error(err, 1)
     end
+    self:invalidate_groups { 'network', 'signal', 'traffic' }
     return true
 end
 
@@ -526,6 +555,14 @@ function Modem:modem_lifecycle_monitor()
     local function on_card_change(state_update)
         ---@cast state_update ModemStateEvent
         self.log:debug({ what = 'state_change', imei = self.imei, from = state_update.from, to = state_update.to })
+        local to_state = state_update and state_update.to or nil
+        if to_state == 'failed' or to_state == 'disabled' then
+            self:_invalidate_dynamic()
+        elseif to_state == 'locked' then
+            self:invalidate_groups { 'network', 'signal', 'traffic' }
+        else
+            self:invalidate_groups { 'network', 'signal', 'traffic' }
+        end
         self:_emit_state('card', state_update)
 
         self.state_pulse:signal()
@@ -538,13 +575,17 @@ function Modem:modem_lifecycle_monitor()
         self:_emit_state("sim_state", sim_state)
 
         if present == true then
+            self:_invalidate_dynamic()
             self.sim_inserted_pulse:signal()
             self.state_pulse:signal()
-        elseif present == false and current_card_state ~= "failed" then
-            -- Only reset if the card is not already in a failed state.
-            -- If failed, a SIM-absent report is expected and resetting would cause a boot loop.
-            self:reset()
-            self.scope:cancel("modem restarting")
+        elseif present == false then
+            self:_invalidate_dynamic()
+            if current_card_state ~= "failed" then
+                -- Only reset if the card is not already in a failed state.
+                -- If failed, a SIM-absent report is expected and resetting would cause a boot loop.
+                self:reset()
+                self.scope:cancel("modem restarting")
+            end
         end
     end
 

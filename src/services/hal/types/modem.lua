@@ -111,6 +111,9 @@ ModemPortsInfo.__index = ModemPortsInfo
 ---@field iccid string?
 ---@field imsi string?
 ---@field gid1 string?
+---@field sim_lock string?
+---@field sim_lock_retries table<string, integer>?
+---@field modem_state string?
 local ModemSimInfo = {}
 ModemSimInfo.__index = ModemSimInfo
 
@@ -284,9 +287,12 @@ end
 ---@param iccid string?
 ---@param imsi string?
 ---@param gid1 string?
+---@param sim_lock string?
+---@param sim_lock_retries table<string, integer>?
+---@param modem_state string?
 ---@return ModemSimInfo?
 ---@return string error
-function new.ModemSimInfo(sim, iccid, imsi, gid1)
+function new.ModemSimInfo(sim, iccid, imsi, gid1, sim_lock, sim_lock_retries, modem_state)
 	local ok, err = validate_optional_string(sim, 'sim')
 	if not ok then
 		return nil, err
@@ -303,12 +309,33 @@ function new.ModemSimInfo(sim, iccid, imsi, gid1)
 	if not ok then
 		return nil, err
 	end
+	ok, err = validate_optional_string(sim_lock, 'sim_lock')
+	if not ok then
+		return nil, err
+	end
+	ok, err = validate_optional_string(modem_state, 'modem_state')
+	if not ok then
+		return nil, err
+	end
+	if sim_lock_retries ~= nil then
+		if type(sim_lock_retries) ~= 'table' then
+			return nil, 'invalid sim_lock_retries'
+		end
+		for k, v in pairs(sim_lock_retries) do
+			if type(k) ~= 'string' or k == '' or type(v) ~= 'number' or v < 0 or v % 1 ~= 0 then
+				return nil, 'invalid sim_lock_retries'
+			end
+		end
+	end
 
 	return setmetatable({
 		sim = sim,
 		iccid = iccid,
 		imsi = imsi,
 		gid1 = gid1,
+		sim_lock = sim_lock,
+		sim_lock_retries = sim_lock_retries,
+		modem_state = modem_state,
 	}, ModemSimInfo), ""
 end
 

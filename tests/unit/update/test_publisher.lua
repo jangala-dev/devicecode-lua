@@ -53,7 +53,7 @@ function tests.test_publisher_retains_initial_and_changed_state()
 end
 
 
-function tests.test_publisher_retains_update_job_timeline_with_correlation()
+function tests.test_publisher_publishes_compact_component_and_no_workflow_timeline()
 	fibers.run(function (scope)
 		local bus = busmod.new()
 		local conn = bus:connect()
@@ -65,20 +65,18 @@ function tests.test_publisher_retains_update_job_timeline_with_correlation()
 		m:update(function (snap)
 			snap.ready = true
 			snap.state = 'running'
+			snap.config = { components = { mcu = { component = 'mcu' } } }
 			snap.jobs = {
 				count = 1,
+				order = { 'job-1' },
 				by_id = {
 					['job-1'] = {
 						job_id = 'job-1',
 						component = 'mcu', expected_image_id = 'mcu-image-test',
 						state = 'awaiting_commit',
 						artifact_ref = 'artifact-1',
-						metadata = { expected_image_id = 'image-1', ingest_id = 'ing-1' },
 						updated_seq = 2,
-						history = {
-							{ seq = 1, state = 'created', reason = 'create_job' },
-							{ seq = 2, state = 'awaiting_commit', reason = 'stage_complete' },
-						},
+						last_event = { seq = 2, state = 'awaiting_commit', reason = 'stage_complete' },
 						stage_result = {
 							transfer = { digest_alg = 'xxhash32', digest = '12345678', size = 5 },
 							reply = { transfer = { xfer_id = 'xfer-1', request_id = 'req-1', link_id = 'link-a', sent_bytes = 5 } },
@@ -89,15 +87,24 @@ function tests.test_publisher_retains_update_job_timeline_with_correlation()
 			return snap
 		end)
 
-		local timeline = probe.wait_retained_payload(conn, topics.workflow_update_job_timeline('job-1'), { timeout = 0.3 })
-		assert_eq(timeline.kind, 'update.job.timeline')
-		assert_eq(timeline.correlation.job_id, 'job-1')
-		assert_eq(timeline.correlation.artifact_ref, 'artifact-1')
-		assert_eq(timeline.correlation.ingest_id, 'ing-1')
-		assert_eq(timeline.correlation.xfer_id, 'xfer-1')
-		assert_eq(timeline.transfer.digest, '12345678')
-		assert_eq(#timeline.events, 2)
-		assert_eq(timeline.events[2].xfer_id, 'xfer-1')
+		local component = probe.wait_retained_payload(conn, topics.update_component('mcu'), { timeout = 0.3 })
+		assert_eq(component.kind, 'update.component')
+		assert_eq(component.current_job.job_id, 'job-1')
+		assert_eq(component.current_job.state, 'awaiting_commit')
+		assert_eq(component.jobs, nil)
+
+		local summary = probe.wait_retained_payload(conn, topics.update_summary(), { timeout = 0.3 })
+		assert_eq(summary.jobs.count, 1)
+		assert_eq(summary.jobs.by_id, nil)
+		assert_eq(summary.jobs.order, nil)
+		assert_eq(summary.jobs.last.history, nil)
+		assert_eq(summary.job.job_id, 'job-1')
+
+		fibers.perform(sleep.sleep_op(0.05))
+		local view = conn:retained_view({ 'state', 'workflow', '#' })
+		assert_eq(view:get(topics.workflow_update_job_timeline('job-1')), nil)
+		assert_eq(view:get(topics.workflow_update_job('job-1')), nil)
+		view:close()
 
 		pub:stop('test complete')
 		fibers.perform(sleep.sleep_op(0.001))

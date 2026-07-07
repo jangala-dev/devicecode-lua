@@ -27,9 +27,11 @@ function M.test_normalise_supplies_http_static_sse_defaults_and_accepts_explicit
 	eq(cfg.enabled, true)
 	eq(cfg.http.enabled, true)
 	eq(cfg.http.cap_id, 'main')
-	eq(cfg.http.port, 8080)
-	eq(cfg.static.root, 'www')
+	eq(cfg.http.port, 80)
+	eq(cfg.static.root, 'services/ui/www')
 	eq(cfg.sse.enabled, true)
+	eq(cfg.sse.queue_len, 256)
+	eq(cfg.sse.replay, false)
 	eq(cfg.updates.upload.enabled, true)
 	eq(cfg.updates.upload.max_bytes, 1024 * 1024)
 	eq(cfg.updates.upload.require_auth, false)
@@ -40,6 +42,15 @@ function M.test_normalise_supplies_http_static_sse_defaults_and_accepts_explicit
 	eq(config.DEFAULTS.updates, nil)
 	eq(cfg.observability.status_interval_s, 30)
 	eq(cfg.observability.coalesce_status_s, 0.05)
+end
+
+function M.test_sse_replay_can_be_enabled_explicitly()
+	local cfg = ok(config.normalise({
+		schema = config.SCHEMA,
+		updates = update_policy(),
+		sse = { replay = true },
+	}))
+	eq(cfg.sse.replay, true)
 end
 
 
@@ -121,7 +132,11 @@ function M.test_rejects_unknown_fields()
 end
 
 function M.test_rejects_legacy_uploads_field()
-	local cfg, err = config.normalise({ schema = config.SCHEMA, uploads = { require_auth = false }, updates = update_policy() })
+	local cfg, err = config.normalise({
+		schema = config.SCHEMA,
+		uploads = { require_auth = false },
+		updates = update_policy(),
+	})
 	eq(cfg, nil)
 	ok(tostring(err):find('unknown field', 1, true))
 end

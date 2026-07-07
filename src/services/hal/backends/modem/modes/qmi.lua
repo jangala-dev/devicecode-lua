@@ -136,6 +136,27 @@ local function read_rf_band_info(identity)
     return nil, band_or_err or "Unknown error"
 end
 
+---@param info ModemSimInfo
+---@param gid1 string?
+---@param gid_err string
+---@return ModemSimInfo?
+---@return string error
+local function sim_info_with_gid1(info, gid1, gid_err)
+    if gid_err ~= "" then
+        gid1 = nil
+    end
+
+    return modem_types.new.ModemSimInfo(
+        info.sim,
+        info.iccid,
+        info.imsi,
+        gid1,
+        info.sim_lock,
+        info.sim_lock_retries,
+        info.modem_state
+    )
+end
+
 local function add_mode_funcs(ModemBackend)
     ---@cast ModemBackend ModemBackend
     local base_read_network_info = ModemBackend.read_network_info
@@ -349,19 +370,13 @@ local function add_mode_funcs(ModemBackend)
         end
 
         local gid1, gid_err = read_gid1(self.identity)
-        if gid_err ~= "" then
-            return nil, gid_err
-        end
-
-        return modem_types.new.ModemSimInfo(
-            info.sim,
-            info.iccid,
-            info.imsi,
-            gid1
-        )
+        return sim_info_with_gid1(info, gid1, gid_err)
     end
 end
 
 return {
-    add_mode_funcs = add_mode_funcs
+    add_mode_funcs = add_mode_funcs,
+    _test = {
+        sim_info_with_gid1 = sim_info_with_gid1,
+    },
 }

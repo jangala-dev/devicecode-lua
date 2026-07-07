@@ -629,8 +629,9 @@ local function start_cm5_uart_manager(scope, bus, port)
 end
 
 local function wait_job(conn, job_id, state, timeout)
-    return wait_retained_payload_where(conn, update_topics.workflow_update_job(job_id), 'update job ' .. tostring(job_id) .. ' ' .. tostring(state), function (p)
-        if p and p.state == state then return p end
+    return wait_retained_payload_where(conn, update_topics.update_component('mcu'), 'update job ' .. tostring(job_id) .. ' ' .. tostring(state), function (p)
+        local job = p and (p.current_job or p.last_job) or nil
+        if job and job.job_id == job_id and job.state == state then return job end
         return nil
     end, { timeout = timeout or 4.0 })
 end
@@ -666,7 +667,7 @@ end
 
 local function wait_job_chatty(conn, job_id, state, timeout, progress_fn)
     timeout = timeout or 4.0
-    local topic = update_topics.workflow_update_job(job_id)
+    local topic = update_topics.update_component('mcu')
     local view = conn:retained_view(topic)
     local deadline = fibers.now() + timeout
     local last_log = -math.huge
@@ -683,9 +684,10 @@ local function wait_job_chatty(conn, job_id, state, timeout, progress_fn)
     end
 
     local payload = (view:get(topic) or {}).payload
-    if payload and payload.state == state then
+    local job = payload and (payload.current_job or payload.last_job) or nil
+    if job and job.job_id == job_id and job.state == state then
         view:close()
-        return payload
+        return job
     end
     maybe_log(true)
 
@@ -710,10 +712,11 @@ local function wait_job_chatty(conn, job_id, state, timeout, progress_fn)
             end
             seen = version
             payload = (view:get(topic) or {}).payload
-            if payload and payload.state == state then
+            local job = payload and (payload.current_job or payload.last_job) or nil
+            if job and job.job_id == job_id and job.state == state then
                 maybe_log(true)
                 view:close()
-                return payload
+                return job
             end
         end
 

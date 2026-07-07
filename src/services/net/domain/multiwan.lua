@@ -11,7 +11,7 @@ local ALLOWED = {
 }
 
 local MEMBER_ALLOWED = {
-	'id', 'interface', 'source', 'mwan_metric', 'weight', 'dynamic_weight', 'family',
+	'id', 'interface', 'source', 'metric', 'mwan_metric', 'weight', 'dynamic_weight', 'family',
 	'track_ip', 'health', 'reliability', 'count', 'timeout', 'interval', 'up', 'down',
 	'enabled', 'disabled', 'speedtest_url', 'speedtest_duration_s', 'shaping', 'metadata', 'extensions',
 }
@@ -142,7 +142,10 @@ local function clean_member(id, m, index)
 	if not ok then return nil, ferr end
 	m.id = m.id or id
 	m.interface = m.interface or id
-	m.mwan_metric = math.max(1, math.floor(tonumber(m.mwan_metric) or 1))
+	-- Product-level NET policy uses metric. mwan_metric is accepted only as
+	-- a legacy config alias and is not carried in NET's normalised model.
+	m.metric = math.max(1, math.floor(tonumber(m.metric or m.mwan_metric) or 1))
+	m.mwan_metric = nil
 	m.weight = math.max(1, math.floor(tonumber(m.weight) or 1))
 	m.route_metric = 10 + index
 	local shaping, sherr = normalise_member_shaping(m.shaping, { 'net', 'wan', 'members', id, 'shaping' })

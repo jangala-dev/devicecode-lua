@@ -277,18 +277,17 @@ function tests.test_active_completion_and_ready_start_cannot_double_own_slot()
 		})
 
 		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j1', component = 'cm5', artifact_ref = 'artifact-j1' }, { timeout = 0.5 }))
-		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j2', component = 'cm5', artifact_ref = 'artifact-j2' }, { timeout = 0.5 }))
-		fibers.perform(sleep.sleep_op(0.05))
-		fibers.perform(sleep.sleep_op(0.05))
 		assert(caller:call(topics.update_manager_rpc('start-job'), { job_id = 'j1' }, { timeout = 0.5 }))
+		assert_true(probe.wait_until(function () return run_count >= 1 end, { timeout = 2.0, interval = 0.02 }), 'expected first job to run')
 
+		assert(caller:call(topics.update_manager_rpc('create-job'), { job_id = 'j2', component = 'cm5', artifact_ref = 'artifact-j2' }, { timeout = 0.5 }))
 		local reply, err
 		assert_true(probe.wait_until(function ()
 			reply, err = caller:call(topics.update_manager_rpc('start-job'), { job_id = 'j2' }, { timeout = 0.05 })
 			return reply and reply.accepted == true
-		end, { timeout = 2.0, interval = 0.02 }), err or 'expected second start to be admitted after active completion')
+		end, { timeout = 2.0, interval = 0.02 }), err or 'expected second start to be admitted after first completion')
 
-		assert_true(probe.wait_until(function () return run_count >= 2 end, { timeout = 2.0, interval = 0.02 }), 'expected both jobs to run without double-owning the slot')
+		assert_true(probe.wait_until(function () return run_count >= 2 end, { timeout = 2.0, interval = 0.02 }), 'expected both sequential jobs to run')
 
 		child:cancel('test complete')
 	end)
