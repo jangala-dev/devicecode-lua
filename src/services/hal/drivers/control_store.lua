@@ -147,24 +147,36 @@ function Driver:start_op(owner_scope)
 			return op.always(false, 'missing emit channel')
 		end
 
-		local shell_scope, serr = owner_scope:child()
-		if not shell_scope then
-			return op.always(false, tostring(serr))
-		end
+		return fibers.run_scope_op(function ()
+			local pok, perr = fibers.perform(self.provider:prepare_op())
+			if not pok then
+				return false, tostring(perr or 'control_store provider prepare failed')
+			end
 
-		self.scope = shell_scope
+			local shell_scope, serr = owner_scope:child()
+			if not shell_scope then
+				return false, tostring(serr)
+			end
 
-		local ok, err = shell_scope:spawn(function ()
-			return shell_main(self)
+			self.scope = shell_scope
+
+			local ok, err = shell_scope:spawn(function ()
+				return shell_main(self)
+			end)
+			if not ok then
+				self.scope = nil
+				shell_scope:cancel(tostring(err or 'shell spawn failed'))
+				return false, tostring(err)
+			end
+
+			self.started = true
+			return true, nil
+		end):wrap(function (status, reason, ok, err)
+			if status ~= 'ok' then
+				return false, tostring(reason or err or 'control_store driver start failed')
+			end
+			return ok, err
 		end)
-		if not ok then
-			self.scope = nil
-			shell_scope:cancel(tostring(err or 'shell spawn failed'))
-			return op.always(false, tostring(err))
-		end
-
-		self.started = true
-		return op.always(true, nil)
 	end)
 end
 

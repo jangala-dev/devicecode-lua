@@ -137,9 +137,9 @@ local function write_index_op(root, keys)
 	return write_file_op(index_path(root), join_lines(sort_unique(keys)))
 end
 
-local function ensure_root_op(root)
+function Provider:prepare_op()
 	return op.guard(function ()
-		local ok, err = file.mkdir_p(root)
+		local ok, err = file.mkdir_p(self.root)
 		if ok then return op.always(true, nil) end
 		return op.always(false, tostring(err or 'control_store_root_create_failed'))
 	end)
@@ -195,11 +195,6 @@ function Provider:put_op(opts)
 		end
 
 		return fibers.run_scope_op(function ()
-			local ok_root, root_err = fibers.perform(ensure_root_op(self.root))
-			if not ok_root then
-				return false, root_err
-			end
-
 			local okw, werr = fibers.perform(write_file_op(path_for(self.root, opts.key), opts.data))
 			if not okw then
 				return false, werr

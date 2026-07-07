@@ -57,6 +57,40 @@ function T.start_apply_config_and_stop_round_trip()
   rm_rf(root)
 end
 
+function T.apply_config_creates_missing_control_store_root()
+  local base = mk_tmpdir('csm-create-root')
+  local root = base .. '/nested/control-store'
+  local M = fresh_manager()
+
+  runfibers.run(function()
+    local dev_ev_ch = channel.new(8)
+    local cap_emit_ch = channel.new(8)
+
+    local ok_start, err_start = fibers.perform(M.start_op(nil, dev_ev_ch, cap_emit_ch))
+    assert(ok_start == true, tostring(err_start))
+
+    local ok_cfg, err_cfg = fibers.perform(M.apply_config_op({
+      { name = 'main', root = root },
+    }))
+    assert(ok_cfg == true, tostring(err_cfg))
+
+    local ev = recv_or_fail(dev_ev_ch)
+    assert(ev.event_type == 'added')
+    assert(ev.class == 'control-store')
+    assert(ev.id == 'main')
+
+    local probe, perr = io.open(root .. '/.probe', 'wb')
+    assert(probe ~= nil, tostring(perr))
+    probe:write('ok')
+    probe:close()
+
+    local ok_stop, err_stop = fibers.perform(M.shutdown_op())
+    assert(ok_stop == true, tostring(err_stop))
+  end)
+
+  rm_rf(base)
+end
+
 function T.apply_config_fails_when_not_started()
   local root = mk_tmpdir('csm-not-started')
   local M = fresh_manager()
