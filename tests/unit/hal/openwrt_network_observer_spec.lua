@@ -50,6 +50,56 @@ function tests.test_observer_coalesces_wakeups_then_snapshots()
 	end)
 end
 
+
+function tests.test_observer_ignores_transient_mwan3_phases()
+	fibers.run(function (scope)
+		local emitted = {}
+		local snapshots = {}
+		local logs = {}
+		local obs = ok(observer_mod.new({
+			debounce_s = 0.01,
+			enable_socket = false,
+			enable_ubus = false,
+			initial_snapshot = false,
+			logger = function (level, payload)
+				logs[#logs + 1] = { level = level, payload = payload }
+			end,
+			snapshot = function (subject, trigger)
+				snapshots[#snapshots + 1] = { subject = subject, trigger = trigger }
+				return {
+					ok = true,
+					backend = 'test',
+					observed = {
+						schema = 'devicecode.net.observed/1',
+						interfaces = {},
+						segments = {},
+					},
+				}
+			end,
+			emit = function (ev)
+				emitted[#emitted + 1] = ev
+				return true
+			end,
+		}))
+		ok(obs:start(scope))
+
+		ok(obs:ingest({ source = 'mwan3', kind = 'mwan3', env = { ACTION = 'disconnecting', INTERFACE = 'wan' } }))
+		ok(obs:ingest({ source = 'hotplug', kind = 'hotplug', directory = 'iface', env = { ACTION = 'connecting', INTERFACE = 'wan' } }))
+		fibers.perform(sleep.sleep_op(0.05))
+		eq(#snapshots, 0, 'transient mwan phases should not trigger snapshots')
+		eq(#emitted, 0, 'transient mwan phases should not emit observed-state events')
+
+		ok(obs:ingest({ source = 'mwan3', kind = 'mwan3', env = { ACTION = 'connected', INTERFACE = 'wan' } }))
+		fibers.perform(sleep.sleep_op(0.05))
+		eq(#snapshots, 1, 'terminal mwan events should still trigger snapshots')
+		eq(#emitted, 1, 'terminal mwan events should emit observed-state events')
+		eq(emitted[1].kind, 'mwan_member_changed')
+		eq(emitted[1].subject, 'mwan:wan')
+
+		obs:terminate('test complete')
+	end)
+end
+
 local function read_source(relpath)
 	local candidates = {
 		relpath,

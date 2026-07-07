@@ -144,6 +144,30 @@ local function decode_ubus_line(line)
 	}
 end
 
+local TRANSIENT_MWAN_ACTIONS = {
+	connecting = true,
+	disconnecting = true,
+}
+
+local function trigger_env(trigger)
+	if type(trigger) ~= 'table' then return {} end
+	local env = trigger.env or trigger.payload or trigger
+	if type(env) ~= 'table' then return {} end
+	return env
+end
+
+local function trigger_action(trigger)
+	local env = trigger_env(trigger)
+	local action = env.ACTION or env.action
+	if action == nil and type(trigger) == 'table' then action = trigger.action end
+	if action == nil then return nil end
+	return tostring(action):lower()
+end
+
+local function is_transient_mwan_action(trigger)
+	return TRANSIENT_MWAN_ACTIONS[trigger_action(trigger) or ''] == true
+end
+
 local function normalise_hotplug_record(rec)
 	if type(rec) ~= 'table' then return nil end
 	local env = rec.env or rec
@@ -181,6 +205,14 @@ end
 
 function Observer:ingest(trigger)
 	if self.closed then return false, 'observer closed' end
+	-- mwan3.user emits transitional phases such as connecting/disconnecting.
+	-- Treat these as diagnostics only: they are not stable data-path states and
+	-- must not become retained NET backhaul status.  Terminal events such as
+	-- connected/disconnected still wake the observer and take a fresh snapshot.
+	if is_transient_mwan_action(trigger) then
+		log(self, 'debug', { what = 'network_observer_transient_trigger_ignored', summary = 'transient mwan event ignored action=' .. tostring(trigger_action(trigger) or '?'), trigger = trigger })
+		return true, 'ignored_transient_mwan_action'
+	end
 	return self.tx:send(trigger)
 end
 
