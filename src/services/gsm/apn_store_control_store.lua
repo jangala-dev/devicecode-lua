@@ -26,7 +26,11 @@ local function unwrap(method)
 	return function(reply, err)
 		if reply == nil then return nil, err end
 		if type(reply) ~= 'table' or type(reply.ok) ~= 'boolean' then return nil, 'invalid_control_store_reply' end
-		if reply.ok then return reply.reason, nil end
+		if reply.ok then
+			if reply.reason ~= nil then return reply.reason, nil end
+			if method == 'put' or method == 'delete' then return true, nil end
+			return nil, nil
+		end
 		return nil, tostring(reply.reason or err or ('control_store_' .. method .. '_failed'))
 	end
 end

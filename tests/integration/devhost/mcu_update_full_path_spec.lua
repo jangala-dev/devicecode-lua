@@ -178,8 +178,9 @@ local function wait_retained_payload_where(conn, topic, label, pred, opts)
 end
 
 local function wait_job(conn, job_id, state, timeout)
-    return wait_retained_payload_where(conn, update_topics.workflow_update_job(job_id), 'update job ' .. tostring(job_id) .. ' ' .. tostring(state), function (p)
-        if p and p.state == state then return p end
+    return wait_retained_payload_where(conn, update_topics.update_component('mcu'), 'update job ' .. tostring(job_id) .. ' ' .. tostring(state), function (p)
+        local job = p and (p.current_job or p.last_job) or nil
+        if job and job.job_id == job_id and job.state == state then return job end
         return nil
     end, { timeout = timeout or 4.0 })
 end

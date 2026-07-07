@@ -550,7 +550,9 @@
           "policy": "balanced",
           "speedtests": {
             "enabled": true,
-            "interval_s": 300
+            "interval_s": 21600,
+            "retry_after_s": 10,
+            "retry_max_s": 3600
           }
         },
         "rules": {

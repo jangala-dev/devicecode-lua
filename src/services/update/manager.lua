@@ -11,6 +11,7 @@ local queue           = require 'devicecode.support.queue'
 local request_owner   = require 'devicecode.support.request_owner'
 local model_mod       = require 'services.update.model'
 local manager_requests = require 'services.update.manager_requests'
+local projection       = require 'services.update.projection'
 
 local M = {}
 
@@ -114,10 +115,7 @@ local function start_scoped_request(ctx, req, method, runner)
 end
 
 local function handle_status(ctx, req)
-	reply_request(req, {
-		ok = true,
-		snapshot = copy(ctx.snapshot or {}),
-	}, 'status_reply_failed')
+	reply_request(req, projection.manager_status(ctx.snapshot or {}), 'status_reply_failed')
 end
 
 local function handle_list(ctx, req)

@@ -1,5 +1,10 @@
 -- services/metrics.lua
 --
+-- Transitional metrics pipeline: long-term, metrics should observe retained
+-- domain /state and derive export series from those models. Services may
+-- still publish legacy obs metrics during migration, but UI-critical state
+-- should live under /state.
+--
 -- Metrics service:
 --  - subscribes to {'obs', 'v1', '+', 'metric', '+'} for all observable metrics
 --  - applies per-pipeline processing (DiffTrigger, DeltaValue, etc.)

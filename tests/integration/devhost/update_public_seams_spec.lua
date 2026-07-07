@@ -119,7 +119,7 @@ local function body_from_chunks(chunks)
 	}
 end
 
-function T.update_public_manager_retains_capabilities_and_workflow_records()
+function T.update_public_manager_retains_capabilities_and_compact_component_state()
 	runfibers.run(function(scope)
 		local h = start_update(scope)
 		local conn = h.caller
@@ -129,9 +129,7 @@ function T.update_public_manager_retains_capabilities_and_workflow_records()
 		assert_eq(meta.class, 'update-manager')
 		assert_true(has_value(meta.methods, 'create-job'), 'manager meta should list create-job')
 		assert_true(has_value(meta.methods, 'start-job'), 'manager meta should list start-job')
-		assert_eq(meta.workflow_family[1], 'state')
-		assert_eq(meta.workflow_family[2], 'workflow')
-		assert_eq(meta.workflow_family[3], 'update-job')
+		assert_eq(meta.workflow_family, nil)
 
 		local status = wait_retained_payload_where(conn, topics.update_manager_status(), 'update manager status', function (p)
 			return p and p.available == true
@@ -153,20 +151,17 @@ function T.update_public_manager_retains_capabilities_and_workflow_records()
 		assert_eq(reply.ok, true)
 		assert_eq(reply.job.job_id, 'j-cap-1')
 
-		local job = probe.wait_retained_payload(conn, topics.workflow_update_job('j-cap-1'), { timeout = 1.0 })
-		assert_eq(job.job_id, 'j-cap-1')
-		assert_eq(job.component, 'cm5')
-		assert_eq(job.artifact_ref, 'artifact-cap-1')
-
 		local component = probe.wait_retained_payload(conn, topics.update_component('cm5'), { timeout = 1.0 })
 		assert_eq(component.kind, 'update.component')
-		assert_not_nil(component.jobs.by_id['j-cap-1'])
+		assert_not_nil(component.current_job)
+		assert_eq(component.current_job.job_id, 'j-cap-1')
+		assert_eq(component.jobs, nil)
 
 		h.child:cancel('test complete')
 	end, { timeout = 5.0 })
 end
 
-function T.update_artifact_ingest_uses_public_cap_and_workflow_record()
+function T.update_artifact_ingest_uses_public_cap_and_compact_job_state()
 	runfibers.run(function(scope)
 		local h = start_update(scope)
 		local conn = h.caller
@@ -201,13 +196,6 @@ function T.update_artifact_ingest_uses_public_cap_and_workflow_record()
 		assert_eq(committed.ok, true)
 		assert_eq(committed.commit.artifact.artifact_id, 'artifact-ingest-1')
 
-		local rec = wait_retained_payload_where(conn, topics.workflow_artifact_ingest('ing-public-1'), 'ingest committed', function (p)
-			return p and p.state == 'committed'
-		end, { timeout = 1.0 })
-		assert_eq(rec.ingest_id, 'ing-public-1')
-		assert_eq(rec.state, 'committed')
-		assert_eq(rec.bytes, 3)
-		assert_eq(rec.artifact.artifact_id, 'artifact-ingest-1')
 
 		h.child:cancel('test complete')
 	end, { timeout = 5.0 })
@@ -238,16 +226,10 @@ function T.ui_upload_drives_update_public_ingest_and_manager_caps()
 		assert_eq(sink.chunks[1], 'hello')
 		assert_eq(sink.chunks[2], 'world')
 
-		local job = probe.wait_retained_payload(conn, topics.workflow_update_job('j-upload-1'), { timeout = 1.0 })
-		assert_eq(job.job_id, 'j-upload-1')
-		assert_eq(job.component, 'cm5')
 
-		local rec = wait_retained_payload_where(conn, topics.workflow_artifact_ingest('ing-upload-1'), 'upload ingest committed', function (p)
-			return p and p.state == 'committed'
-		end, { timeout = 1.0 })
-		assert_eq(rec.state, 'committed')
-		assert_eq(rec.bytes, 10)
-		assert_eq(rec.artifact.artifact_id, 'artifact-upload-1')
+		local component = probe.wait_retained_payload(conn, topics.update_component('cm5'), { timeout = 1.0 })
+		assert_not_nil(component.current_job)
+		assert_eq(component.current_job.job_id, 'j-upload-1')
 
 		h.child:cancel('test complete')
 	end, { timeout = 5.0 })

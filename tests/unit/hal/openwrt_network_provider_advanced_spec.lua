@@ -2,6 +2,7 @@
 
 local fibers = require 'fibers'
 local provider_loader = require 'services.hal.backends.network.provider'
+local openwrt_provider = require 'services.hal.backends.network.providers.openwrt.init'
 local names = require 'services.hal.backends.network.providers.openwrt.names'
 local net_config = require 'services.net.config'
 
@@ -72,6 +73,36 @@ function tests.test_plan_reports_vlan_mwan3_and_shaping_domains()
 		ok(plan.plan.packages.mwan3.changes > 0, 'mwan3 should have UCI changes')
 		provider:terminate('test complete')
 	end)
+end
+
+function tests.test_mwan_status_keeps_link_up_separate_from_online_health()
+	local before = os.time()
+	local observed = openwrt_provider._test.normalise_mwan3_status({
+		interfaces = {
+			wan = {
+				status = 'offline',
+				enabled = true,
+				running = true,
+				tracking = 'active',
+				up = true,
+				uptime = 123,
+				online = 4,
+				offline = 1,
+			},
+		},
+	})
+	local wan = observed.interfaces_by_semantic.wan
+	ok(wan, 'wan status expected')
+	eq(wan.state, 'offline')
+	eq(wan.mwan3_status, 'offline')
+	eq(wan.up, true)
+	eq(wan.online, false)
+	eq(wan.usable, false)
+	eq(wan.online_for, 4)
+	eq(wan.online_since, nil)
+	eq(wan.online_count, 4)
+	eq(wan.offline_for, 1)
+	ok(wan.offline_since >= before - 1 and wan.offline_since <= os.time(), 'offline_since should be epoch seconds')
 end
 
 

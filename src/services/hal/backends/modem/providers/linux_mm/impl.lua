@@ -39,6 +39,9 @@ local MODEM_INFO_PATHS = {
     model = { "generic", "model" },
     revision = { "generic", "revision" },
     operator = { "3gpp", "operator-name" },
+    modem_state = { "generic", "state" },
+    sim_lock = { "generic", "unlock-required" },
+    sim_lock_retries = { "generic", "unlock-retries" },
 }
 
 local SIM_INFO_PATHS = {
@@ -134,6 +137,34 @@ local function normalize_string_list(value)
     return {}
 end
 
+---@param value any
+---@return string?
+local function normalize_optional_string(value)
+    if type(value) ~= 'string' then return nil end
+    if value == '' or value == '--' then return nil end
+    return value
+end
+
+---@param value any
+---@return table<string, integer>?
+local function normalize_unlock_retries(value)
+    if type(value) ~= 'table' then return nil end
+    local out = {}
+    for _, entry in ipairs(value) do
+        if type(entry) == 'string' then
+            local key, retries = entry:match("^%s*([^%(]-)%s*%((%d+)%)%s*$")
+            if key and retries then
+                key = key:match("^%s*(.-)%s*$")
+                if key ~= '' then
+                    out[key] = tonumber(retries)
+                end
+            end
+        end
+    end
+    if next(out) == nil then return nil end
+    return out
+end
+
 ---@param output string
 ---@return string
 local function parse_firmware_version(output)
@@ -192,12 +223,7 @@ end
 ---@param address string
 ---@return table<string, any>?
 ---@return string error
-local function read_modem_info(address)
-    local output, err = run_command(address, { "mmcli", "-J", "-m", address })
-    if not output then
-        return nil, err
-    end
-
+local function parse_modem_info_json(output)
     local data, json_err = json.decode(output)
     if not data then
         return nil, "Failed to decode mmcli info output as JSON: "
@@ -215,7 +241,22 @@ local function read_modem_info(address)
     end
     flat.drivers = normalize_string_list(flat.drivers)
     flat.access_techs = normalize_string_list(flat.access_techs)
+    flat.modem_state = normalize_optional_string(flat.modem_state)
+    flat.sim_lock = normalize_optional_string(flat.sim_lock)
+    flat.sim_lock_retries = normalize_unlock_retries(flat.sim_lock_retries)
     return flat, ""
+end
+
+---@param address string
+---@return table<string, any>?
+---@return string error
+local function read_modem_info(address)
+    local output, err = run_command(address, { "mmcli", "-J", "-m", address })
+    if not output then
+        return nil, err
+    end
+
+    return parse_modem_info_json(output)
 end
 
 ---@param identity ModemIdentity
@@ -463,7 +504,10 @@ function ModemBackend:read_sim_info()
         modem_info.sim,
         sim_info and sim_info.iccid or nil,
         sim_info and sim_info.imsi or nil,
-        nil
+        nil,
+        modem_info.sim_lock,
+        modem_info.sim_lock_retries,
+        modem_info.modem_state
     )
 end
 
@@ -764,5 +808,9 @@ local function new(address)
 end
 
 return {
-    new = new
+    new = new,
+    _test = {
+        normalize_unlock_retries = normalize_unlock_retries,
+        parse_modem_info_json = parse_modem_info_json,
+    },
 }

@@ -4,3 +4,5 @@ src/services/modem-*
 docs/
 build/
 .env.secret
+local-ui/
+src/services/ui/www/

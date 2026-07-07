@@ -726,7 +726,7 @@ function tests.test_wan_speedtests_wait_for_multiwan_observation()
 		}))
 		ok(which == 'event' and msg and msg.payload, 'expected speedtest skip event')
 		eq(msg.payload.reason, 'waiting_for_observation')
-		eq(msg.payload.observed_status, 'missing')
+		eq(msg.payload.backhaul_status, 'missing')
 		eq(#speedtests, 0, 'speedtest should wait for observed multiwan status')
 
 		obs_tx:send({ payload = {
@@ -740,6 +740,9 @@ function tests.test_wan_speedtests_wait_for_multiwan_observation()
 						wan_a = { interface = 'wan_a', state = 'online', online = true, usable = true },
 					},
 				},
+				live = { interfaces = {
+					wan_a = { ipv4 = { { address = '203.0.113.10' } } },
+				} },
 			},
 		} })
 
@@ -807,6 +810,10 @@ function tests.test_wan_members_trigger_speedtests_and_live_weights()
 						wan_b = { interface = 'wan_b', state = 'online', online = true, usable = true },
 					},
 				},
+				live = { interfaces = {
+					wan_a = { ipv4 = { { address = '203.0.113.10' } } },
+					wan_b = { ipv4 = { { address = '10.1.2.3' } } },
+				} },
 			},
 		} })
 

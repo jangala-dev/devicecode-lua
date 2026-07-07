@@ -30,30 +30,12 @@ local function json_body(status, body)
 	return assert_not_nil(decoded, 'expected JSON body, got: ' .. tostring(body) .. ' decode_err=' .. tostring(err))
 end
 
-function T.devhost_local_ui_serves_static_and_curated_bootstrap_over_real_http()
+function T.devhost_local_ui_serves_curated_bootstrap_over_real_http()
 	runfibers.run(function (scope)
 		local inst = harness.start(scope, { port = devhost_port(1), static_root = 'src/services/ui/www' })
 		harness.wait_http_ready(inst.base_url, { timeout = 5 })
 
 		local status, body = harness.curl({
-			'--silent', '--show-error', '--max-time', '5',
-			'--write-out', '\n__HTTP_STATUS__:%{http_code}',
-			inst.base_url .. '/',
-		})
-		assert_eq(status, '200')
-		assert_true(body:find('Jangala Status Page', 1, true) ~= nil, 'static UI should serve the app shell')
-		assert_true(body:find('/assets/index-', 1, true) ~= nil, 'static UI should reference the generated app bundle')
-
-		status, body = harness.curl({
-			'--silent', '--show-error', '--max-time', '5',
-			'--write-out', '\n__HTTP_STATUS__:%{http_code}',
-			inst.base_url .. '/overview',
-		})
-		assert_eq(status, '200')
-		assert_true(body:find('Jangala Status Page', 1, true) ~= nil,
-			'SPA fallback should serve index.html for browser routes')
-
-		status, body = harness.curl({
 			'--silent', '--show-error', '--max-time', '5',
 			'--write-out', '\n__HTTP_STATUS__:%{http_code}',
 			inst.base_url .. '/api/local-ui/bootstrap',
@@ -62,6 +44,8 @@ function T.devhost_local_ui_serves_static_and_curated_bootstrap_over_real_http()
 		assert_eq(payload.schema, 'devicecode.ui.local-bootstrap/1')
 		assert_not_nil(payload.items['state/net/summary'], 'bootstrap should include curated network state')
 		assert_not_nil(payload.items['state/device/components'], 'bootstrap should include curated device state')
+		assert_not_nil(payload.items['state/system/stats'],
+			'bootstrap should include curated system stats')
 		assert_nil(payload.items['raw/host/secret'], 'bootstrap must not include raw HAL topics')
 		assert_nil(payload.items['cfg/secret'], 'bootstrap must not include cfg topics')
 	end, { timeout = 12 })

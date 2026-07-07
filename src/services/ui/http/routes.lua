@@ -16,6 +16,19 @@ local function split_path(path)
 	return out
 end
 
+local function query_flag(path, name)
+	local query = tostring(path or ''):match('%?([^#]*)')
+	if not query then return false end
+	for pair in query:gmatch('[^&]+') do
+		local key, value = pair:match('^([^=]*)=?(.*)$')
+		if key == name then
+			value = tostring(value or ''):lower()
+			return value == '' or value == '1' or value == 'true' or value == 'yes'
+		end
+	end
+	return false
+end
+
 local function method_of(ctx)
 	if ctx and type(ctx.method) == 'function' then
 		local ok, v = safe.pcall(function () return ctx:method() end)
@@ -24,7 +37,21 @@ local function method_of(ctx)
 	return string.upper(tostring((ctx and (ctx.method or ctx.verb)) or 'GET'))
 end
 
+local function header_one(headers, name)
+	if not headers then return nil end
+	if type(headers.get) == 'function' then
+		local ok, v = safe.pcall(function () return headers:get(string.lower(name)) end)
+		if ok and v ~= nil then return v end
+	end
+	if type(headers) == 'table' then
+		return headers[name] or headers[string.lower(name)] or headers[string.upper(name)]
+	end
+	return nil
+end
+
 local function path_of(ctx)
+	local header_path = ctx and header_one(ctx.headers, ':path')
+	if header_path ~= nil then return header_path end
 	if ctx and type(ctx.path) == 'function' then
 		local ok, v = safe.pcall(function () return ctx:path() end)
 		if ok and v ~= nil then return v end
@@ -34,14 +61,15 @@ end
 
 function M.decode(ctx)
 	local method = method_of(ctx)
-	local parts = split_path(path_of(ctx))
+	local path = path_of(ctx)
+	local parts = split_path(path)
 
 	if #parts == 0 then
 		return { kind = 'static', path = '/index.html' }
 	end
 
 	if parts[1] == 'events' and method == 'GET' then
-		return { kind = 'sse', pattern = { 'state', '#' } }
+		return { kind = 'sse' }
 	end
 
 	if parts[1] ~= 'api' then
@@ -92,7 +120,7 @@ function M.decode(ctx)
 		if parts[3] == 'follow' or parts[3] == 'tail' then
 			return { kind = 'logs_follow' }
 		end
-		return { kind = 'logs_query' }
+		return { kind = 'logs_query', boot = query_flag(path, 'boot') }
 	end
 
 	if parts[2] == 'monitor' and parts[3] == 'profile' and method == 'POST' then
