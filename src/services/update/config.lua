@@ -62,11 +62,23 @@ end
 local function normalise_retention(raw)
 	local retention, rerr = table_or_empty(raw)
 	if not retention then return nil, rerr end
-	if retention.prune_on_startup == nil then retention.prune_on_startup = false end
-	if retention.prune_on_startup ~= true and retention.prune_on_startup ~= false then
-		return nil, 'retention.prune_on_startup must be boolean'
+	-- Update is not an audit archive on-device.  This release always uses
+	-- the single compact current-or-last job policy, regardless of stale
+	-- legacy config carried by development images.
+	retention.mode = 'single_job'
+	retention.scrub_legacy_on_startup = true
+	retention.prune_on_startup = true
+	if retention.max_jobs == nil then retention.max_jobs = 1 end
+	local ok, err = normalise_optional_positive_integer(retention, 'max_jobs', 'retention')
+	if not ok then return nil, err end
+	if retention.max_jobs ~= 1 then retention.max_jobs = 1 end
+	if retention.keep_last_terminal == nil then retention.keep_last_terminal = true end
+	if retention.keep_last_terminal ~= true and retention.keep_last_terminal ~= false then
+		return nil, 'retention.keep_last_terminal must be boolean'
 	end
-	local ok, err = normalise_non_negative_integer(retention, 'terminal_max_count', 'retention')
+	-- Retained workflow archives are disabled on device targets.
+	retention.retain_workflows = false
+	ok, err = normalise_non_negative_integer(retention, 'terminal_max_count', 'retention')
 	if not ok then return nil, err end
 	ok, err = normalise_optional_positive_integer(retention, 'terminal_max_age_s', 'retention')
 	if not ok then return nil, err end

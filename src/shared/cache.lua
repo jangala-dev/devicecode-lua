@@ -43,6 +43,36 @@ function Cache:set(key, value, timeout)
     self.store[key] = {value = value, timestamp=self.time_func(), timeout = timeout}
 end
 
+
+--- Delete a value from the cache.
+---@param key CacheKey
+function Cache:delete(key)
+    if type(key) ~= 'string' then
+        key = table.concat(key, self.separator)
+    end
+    self.store[key] = nil
+end
+
+--- Delete all cache entries whose string key starts with prefix.
+---@param prefix string
+function Cache:clear_prefix(prefix)
+    prefix = tostring(prefix or '')
+    local remove = {}
+    for key in pairs(self.store) do
+        if key == prefix or key:sub(1, #prefix) == prefix then
+            remove[#remove + 1] = key
+        end
+    end
+    for _, key in ipairs(remove) do
+        self.store[key] = nil
+    end
+end
+
+--- Delete all cache entries.
+function Cache:clear()
+    self.store = {}
+end
+
 --- Getting a value from the cache
 ---@param key CacheKey
 ---@param timeout number?

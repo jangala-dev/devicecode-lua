@@ -1,6 +1,7 @@
 -- tests/unit/ui/test_read_model.lua
 
 local fibers = require 'fibers'
+local busmod = require 'bus'
 local read_model = require 'services.ui.read_model'
 local store_mod = require 'services.ui.read_model_store'
 local watches_mod = require 'services.ui.read_model_watches'
@@ -9,7 +10,9 @@ local run_fibers = require 'tests.support.run_fibers'
 local tests = {}
 
 local function fail(msg) error(msg or 'assertion failed', 2) end
-local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end end
+local function assert_eq(a, b, msg)
+	if a ~= b then fail(msg or ('expected '..tostring(b)..', got '..tostring(a))) end
+end
 local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, got '..tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end end
 
@@ -138,6 +141,52 @@ function tests.test_read_model_start_uses_supplied_store_and_watch_owner()
 		local ev = fibers.perform(watch:recv_op())
 		assert_eq(ev.op, 'set')
 		assert_eq(store:get({ 'svc', 'ui' }).payload.status, 'running')
+	end)
+end
+
+function tests.test_read_model_forwards_non_retained_logs_without_storing_them()
+	run_fibers.run(function (scope)
+		local bus = busmod.new()
+		local feed_conn = bus:connect({ origin_base = { service = 'ui-read-model-test' } })
+		local publisher = bus:connect({ origin_base = { service = 'net' } })
+		scope:finally(function ()
+			feed_conn:disconnect()
+			publisher:disconnect()
+		end)
+
+		local store, watch_owner = read_model.start(scope, feed_conn, {
+			patterns = {},
+			event_patterns = {
+				{ 'obs', 'v1', '+', 'event', 'log' },
+			},
+			event_queue_len = 8,
+		})
+		local watch = assert(watch_owner:watch_open({ 'obs', 'v1', '+', 'event', 'log' }, {
+			queue_len = 8,
+			replay = false,
+		}))
+
+		publisher:publish({ 'obs', 'v1', 'net', 'event', 'log' }, {
+			level = 'warn',
+			message = 'wan offline',
+		})
+
+		local ev = fibers.perform(watch:recv_op())
+		assert_eq(ev.op, 'set')
+		assert_eq(ev.topic[1], 'obs')
+		assert_eq(ev.topic[3], 'net')
+		assert_eq(ev.payload.level, 'warn')
+		assert_eq(ev.payload.message, 'wan offline')
+		assert_nil(store:get({ 'obs', 'v1', 'net', 'event', 'log' }))
+
+		publisher:publish({ 'obs', 'v1', 'ui', 'event', 'log' }, {
+			level = 'info',
+			message = 'hidden',
+		})
+		local unexpected = fibers.perform(watch:recv_op():or_else(function ()
+			return nil, 'not_ready'
+		end))
+		assert_nil(unexpected)
 	end)
 end
 

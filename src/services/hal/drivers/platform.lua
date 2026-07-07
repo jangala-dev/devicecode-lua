@@ -62,6 +62,12 @@ local function trim(s)
     return (s or ""):match("^%s*(.-)%s*$") or ""
 end
 
+local function copy_plain(t)
+    local out = {}
+    for k, v in pairs(t or {}) do out[k] = v end
+    return out
+end
+
 --- Run fw_printenv and extract a named variable.
 ---@param varname string
 ---@return string value
@@ -104,6 +110,14 @@ function PlatformDriver:get(opts)
     end
     local field   = opts.field
     local max_age = opts.max_age
+
+    if field == 'identity' then
+        return true, copy_plain(self.identity)
+    end
+
+    if self.identity and self.identity[field] ~= nil then
+        return true, self.identity[field]
+    end
 
     if field ~= 'uptime' then
         return false, "unsupported field: " .. tostring(field)

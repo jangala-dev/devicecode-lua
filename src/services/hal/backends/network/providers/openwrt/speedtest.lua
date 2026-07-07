@@ -10,6 +10,10 @@ local perform = fibers.perform
 local M = {}
 
 local DEFAULT_URL = 'https://proof.ovh.net/files/100Mb.dat'
+local HARD_MAX_DURATION_S = 1
+local DEFAULT_SAMPLE_INTERVAL_S = 0.06
+local DEFAULT_NO_IMPROVEMENT_SAMPLES = 2
+
 
 local function owned_process_flags()
 	local flags = { process_group = true }
@@ -34,6 +38,26 @@ local function monotonic()
 	return fibers.now and fibers.now() or os.clock()
 end
 
+local function record_sample(state, mbps)
+	if mbps <= 0 then return false end
+	state.samples = state.samples + 1
+	if mbps > state.highest then
+		state.second_highest = state.highest
+		state.highest = mbps
+		state.consecutive_no_improvement = 0
+		return true
+	end
+	if mbps > state.second_highest then state.second_highest = mbps end
+	state.consecutive_no_improvement = state.consecutive_no_improvement + 1
+	return false
+end
+
+local function averaged_top_two(state)
+	if state.samples <= 0 then return 0 end
+	if state.samples == 1 or state.second_highest <= 0 then return state.highest end
+	return (state.highest + state.second_highest) / 2
+end
+
 function M.run_op(req, opts)
 	return fibers.run_scope_op(function(scope)
 		req = req or {}
@@ -43,13 +67,21 @@ function M.run_op(req, opts)
 		if type(iface) ~= 'string' or iface == '' then return { ok = false, err = 'speedtest interface required', backend = 'openwrt' } end
 		if type(dev) ~= 'string' or dev == '' then dev = iface end
 		local url = req.url or opts.url or DEFAULT_URL
-		local duration = tonumber(req.max_duration_s or opts.max_duration_s) or 8
-		local sample_s = tonumber(req.sample_interval_s or opts.sample_interval_s) or 0.1
+		local duration = tonumber(req.max_duration_s or opts.max_duration_s) or HARD_MAX_DURATION_S
+		if duration <= 0 or duration > HARD_MAX_DURATION_S then duration = HARD_MAX_DURATION_S end
+		local sample_s = tonumber(req.sample_interval_s or opts.sample_interval_s) or DEFAULT_SAMPLE_INTERVAL_S
+		if sample_s <= 0 then sample_s = DEFAULT_SAMPLE_INTERVAL_S end
+		local no_improvement_limit = tonumber(req.no_improvement_samples or opts.no_improvement_samples) or DEFAULT_NO_IMPROVEMENT_SAMPLES
+		no_improvement_limit = math.max(1, math.floor(no_improvement_limit))
 		local argv = { 'mwan3', 'use', iface, 'wget', '-O', '/dev/null', tostring(url) }
 		local run_cmd = opts.run_cmd or req.run_cmd
 		if type(run_cmd) == 'function' then
 			local ok, out, err = run_cmd(argv)
-			return { ok = ok == true, backend = 'openwrt', interface = iface, device = dev, peak_mbps = tonumber(out) or 0, err = ok == true and nil or tostring(err or out) }
+			local mbps = tonumber(out)
+			if ok == true and mbps ~= nil then
+				return { ok = true, backend = 'openwrt', interface = iface, device = dev, mbps = mbps, peak_mbps = mbps }
+			end
+			return { ok = false, code = 'speedtest_failed', backend = 'openwrt', interface = iface, device = dev, err = tostring(err or out or 'speedtest failed') }
 		end
 		local spec = {
 			stdin = 'null',
@@ -61,13 +93,14 @@ function M.run_op(req, opts)
 		for i = 1, #argv do spec[i] = argv[i] end
 		local cmd = exec.command(spec)
 		local started, serr = cmd:stdout_stream()
-		if not started then return { ok = false, err = serr or 'speedtest start failed', backend = 'openwrt' } end
+		if not started then return { ok = false, code = 'start_failed', err = serr or 'speedtest start failed', backend = 'openwrt' } end
 		local counter = '/sys/class/net/' .. tostring(dev) .. '/statistics/rx_bytes'
 		local start_b, berr = read_counter(counter)
 		if not start_b then
 			perform(cmd:shutdown_op(0.2))
 			return {
 				ok = false,
+				code = 'counter_unavailable',
 				err = 'counter read failed: ' .. tostring(berr or 'unknown'),
 				backend = 'openwrt',
 				interface = iface,
@@ -77,9 +110,16 @@ function M.run_op(req, opts)
 		end
 		local t0 = monotonic()
 		local prev_t, prev_b = t0, start_b
-		local peak = 0
+		local samples = {
+			highest = 0,
+			second_highest = 0,
+			samples = 0,
+			consecutive_no_improvement = 0,
+		}
 		while (monotonic() - t0) < duration do
-			perform(sleep.sleep_op(sample_s))
+			local remaining = duration - (monotonic() - t0)
+			if remaining <= 0 then break end
+			perform(sleep.sleep_op(math.min(sample_s, remaining)))
 			local t = monotonic()
 			local b = read_counter(counter)
 			if not b then break end
@@ -87,14 +127,32 @@ function M.run_op(req, opts)
 			local db = b - prev_b
 			if dt > 0 and db >= 0 then
 				local mbps = (db * 8) / (dt * 1000 * 1000)
-				if mbps > peak then peak = mbps end
+				record_sample(samples, mbps)
 			end
 			prev_t, prev_b = t, b
+			if samples.highest > 0 and samples.consecutive_no_improvement >= no_improvement_limit then break end
 		end
 		perform(cmd:shutdown_op(0.2))
-		return { ok = true, backend = 'openwrt', interface = iface, device = dev, peak_mbps = peak, data_mib = (prev_b - start_b) / (1024 * 1024), duration_s = prev_t - t0 }
+		local mbps = averaged_top_two(samples)
+		if mbps <= 0 and (prev_b - start_b) <= 0 then
+			return { ok = false, code = 'insufficient_data', backend = 'openwrt', interface = iface, device = dev, data_mib = 0, duration_s = prev_t - t0 }
+		end
+		return {
+			ok = true,
+			backend = 'openwrt',
+			interface = iface,
+			device = dev,
+			mbps = mbps,
+			peak_mbps = mbps,
+			raw_peak_mbps = samples.highest,
+			second_peak_mbps = samples.second_highest > 0 and samples.second_highest or nil,
+			sample_count = samples.samples,
+			data_mib = (prev_b - start_b) / (1024 * 1024),
+			bytes = (prev_b - start_b),
+			duration_s = prev_t - t0,
+		}
 	end):wrap(function(status, _report, result)
-		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
+		if status ~= 'ok' then return { ok = false, code = 'worker_failed', err = tostring(result or status), backend = 'openwrt' } end
 		return result
 	end)
 end
