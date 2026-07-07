@@ -38,7 +38,7 @@ function M.summary(snapshot)
 		counts = {
 			segments = count_map(snapshot.segments),
 			interfaces = count_map(snapshot.interfaces),
-			wan_members = count_map(snapshot.wan and snapshot.wan.members),
+			wan_members = count_map(snapshot.wan and snapshot.wan.configured_members),
 			gsm_uplinks = count_map(snapshot.sources and snapshot.sources.gsm_uplinks),
 			vpn_tunnels = count_map(snapshot.vpn and snapshot.vpn.tunnels),
 		},

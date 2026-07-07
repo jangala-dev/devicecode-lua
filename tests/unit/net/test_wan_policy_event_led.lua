@@ -10,7 +10,7 @@ local function snapshot()
 	return {
 		generation = 1,
 		wan = {
-			members = {
+			configured_members = {
 				wan = { interface = 'wan', metric = 1 },
 				modem_primary = { interface = 'modem_primary', metric = 1, source = { kind = 'gsm-uplink', id = 'primary' } },
 			},
@@ -159,13 +159,13 @@ end
 
 function tests.test_speedtest_request_duration_is_capped_at_one_second()
 	local s = snapshot()
-	s.wan.members.wan.speedtest_duration_s = 8
+	s.wan.configured_members.wan.speedtest_duration_s = 8
 	local uplinks = policy.collect_uplinks(s)
 	local by_uplink = {}
 	for _, u in ipairs(uplinks) do by_uplink[u.uplink_id] = u end
 	eq(by_uplink.wan.request.max_duration_s, 1)
 
-	s.wan.members.wan.speedtest_duration_s = 0.5
+	s.wan.configured_members.wan.speedtest_duration_s = 0.5
 	uplinks = policy.collect_uplinks(s)
 	by_uplink = {}
 	for _, u in ipairs(uplinks) do by_uplink[u.uplink_id] = u end

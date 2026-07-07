@@ -219,6 +219,13 @@ function tests.test_backhaul_publishes_configured_gsm_members_even_when_unrealis
 			end,
 			{ timeout = 0.5 })
 
+		local wan_domain = probe.wait_retained_payload(reader, topics.domain('wan'), { timeout = 0.2 })
+		ok(wan_domain.configured_members and wan_domain.configured_members.wan, 'configured WAN catalogue expected')
+		ok(wan_domain.configured_members.modem_primary, 'configured primary modem member expected in NET model')
+		ok(wan_domain.realised_members and wan_domain.realised_members.wan, 'realised wired WAN member expected')
+		eq(wan_domain.realised_members.modem_primary, nil)
+		eq(wan_domain.members, nil)
+
 		local backhaul = probe.wait_retained_payload(reader, topics.domain('backhaul'), { timeout = 0.2 })
 		ok(backhaul.uplinks.wan, 'wired WAN member expected')
 		ok(backhaul.uplinks.modem_primary, 'configured primary modem WAN member expected')
@@ -238,7 +245,7 @@ function tests.test_backhaul_publishes_configured_gsm_members_even_when_unrealis
 	end)
 end
 
-function tests.test_counter_metrics_publish_generic_topics_with_legacy_namespaces()
+function tests.test_counter_metrics_publish_generic_topics_with_member_namespaces()
 	fibers.run(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
@@ -299,8 +306,8 @@ function tests.test_counter_metrics_publish_generic_topics_with_legacy_namespace
 			['net.adm.rx_bytes'] = 1001,
 			['net.jan.tx_errors'] = 2008,
 			['net.wan.rx_packets'] = 3002,
-			['net.mdm0.rx_dropped'] = 4003,
-			['net.mdm1.tx_packets'] = 5006,
+			['net.modem_primary.rx_dropped'] = 4003,
+			['net.modem_secondary.tx_packets'] = 5006,
 		}
 		local seen = {}
 		local deadline = fibers.now() + 2.0

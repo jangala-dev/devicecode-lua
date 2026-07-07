@@ -12,7 +12,7 @@ function tests.test_reduces_hal_multiwan_facts_to_semantic_backhaul()
         segments = {
             wan = { kind = 'wan', vlan = { id = 4 } },
         },
-        wan = { members = { wan = { interface = 'wan', metric = 10 } } },
+        wan = { configured_members = { wan = { interface = 'wan', metric = 10 } } },
         observed = {
             snapshot = {
                 multiwan = {
@@ -58,7 +58,7 @@ function tests.test_backhaul_uses_mwan3_for_status_and_endpoint_for_device_name(
         interfaces = {
             wan = { endpoint = { ifname = 'vl-wan' } },
         },
-        wan = { members = { wan = { interface = 'wan', metric = 10 } } },
+        wan = { configured_members = { wan = { interface = 'wan', metric = 10 } } },
         observed = {
             snapshot = {
                 multiwan = {
@@ -83,7 +83,7 @@ end
 function tests.test_gsm_uplink_uses_mwan3_status_not_gsm_connection_state()
     local model = backhaul.reduce({
         wan = {
-            members = {
+            configured_members = {
                 gsm_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
             },
         },
@@ -132,7 +132,7 @@ end
 function tests.test_gsm_uplink_remains_offline_when_mwan3_is_offline_even_if_gsm_connected()
     local model = backhaul.reduce({
         wan = {
-            members = {
+            configured_members = {
                 gsm_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
             },
         },
@@ -172,7 +172,7 @@ end
 function tests.test_gsm_member_stays_present_without_gsm_details()
     local model = backhaul.reduce({
         wan = {
-            members = {
+            configured_members = {
                 gsm_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
             },
         },

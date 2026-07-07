@@ -156,13 +156,15 @@ local function log_net_summary(state, reason)
 		if #eff > 0 then parts[#parts + 1] = 'effective=' .. table.concat(eff, ',') end
 		if #skipped > 0 then parts[#parts + 1] = 'skipped=' .. table.concat(skipped, ',') end
 	end
-	local gsm = snap.sources and snap.sources.gsm_uplinks or {}
-	local gsm_parts = {}
-	for _, role in ipairs(sorted_keys(gsm)) do
-		local rec = gsm[role]
-		gsm_parts[#gsm_parts + 1] = tostring(role) .. '=' .. tostring((rec and (rec.state or (rec.connected and 'connected' or 'disconnected'))) or 'unknown')
+	local backhaul = snap.backhaul and snap.backhaul.uplinks or {}
+	local backhaul_parts = {}
+	for _, uplink_id in ipairs(sorted_keys(backhaul)) do
+		local rec = backhaul[uplink_id]
+		if type(rec) == 'table' then
+			backhaul_parts[#backhaul_parts + 1] = tostring(uplink_id) .. '=' .. tostring(rec.state or 'unknown')
+		end
 	end
-	if #gsm_parts > 0 then parts[#parts + 1] = 'modems=' .. table.concat(gsm_parts, ',') end
+	if #backhaul_parts > 0 then parts[#parts + 1] = 'backhaul=' .. table.concat(backhaul_parts, ',') end
 	local summary = 'net summary ' .. table.concat(parts, ' ')
 	local tnow = now()
 	if state.operator_net_summary_key == summary and (tnow - (state.operator_net_summary_at or 0)) < 600 then return end
@@ -285,7 +287,7 @@ local function backhaul_for_interface(backhaul, uplink_id, iface_id)
 end
 
 local function apply_backhaul_to_interfaces(s)
-	local members = s and s.wan and s.wan.members or {}
+	local members = s and s.wan and s.wan.configured_members or {}
 	local interfaces = s and s.interfaces or nil
 	if type(interfaces) ~= 'table' then return s end
 	for uplink_id, member in pairs(members or {}) do
@@ -317,7 +319,7 @@ end
 
 local function mark_wan_member_interfaces_dirty(state)
 	local snap = state and state.model and state.model:snapshot() or nil
-	local members = snap and snap.wan and snap.wan.members or {}
+	local members = snap and snap.wan and snap.wan.configured_members or {}
 	for uplink_id, member in pairs(members or {}) do
 		if type(member) == 'table' and member.enabled ~= false and member.disabled ~= true then
 			mark_interface_dirty(state, member.interface or uplink_id)
@@ -347,10 +349,11 @@ local function carry_forward_wan_runtime(previous, intent, generation)
 	return out
 end
 
-local function copy_wan_with_realised_members(configured_wan, realised_wan)
+local function copy_wan_catalogue_and_realisation(configured_wan, realised_wan)
 	local wan = model_mod.deep_copy(configured_wan or {})
-	wan.members = model_mod.deep_copy((configured_wan and configured_wan.members) or {})
+	wan.configured_members = model_mod.deep_copy((configured_wan and configured_wan.members) or {})
 	wan.realised_members = model_mod.deep_copy((realised_wan and realised_wan.members) or {})
+	wan.members = nil
 	return wan
 end
 
@@ -381,7 +384,7 @@ local function copy_intent_to_model(s, apply_intent, configured_intent)
 	-- members until a Linux ifname exists; that volatility must not remove
 	-- state/net/backhaul.uplinks or local-UI cards.  The realised set is kept
 	-- separately for diagnostics and apply/runtime policy that needs it.
-	s.wan = copy_wan_with_realised_members(configured_intent.wan, apply_intent.wan)
+	s.wan = copy_wan_catalogue_and_realisation(configured_intent.wan, apply_intent.wan)
 	s.sources = s.sources or { gsm_uplinks = {} }
 	s.backhaul = backhaul_model.reduce(s, { now = now() })
 	apply_backhaul_to_interfaces(s)

@@ -27,6 +27,8 @@ local HOST_NETMASK = '255.255.255.255'
 local DEFAULT_OBSERVER_SOCKET = '/var/run/devicecode-net-observe.sock'
 local DEFAULT_HOTPLUG_SENDER = '/usr/lib/lua/services/hal/backends/network/providers/openwrt/hotplug_send.lua'
 local OBSERVER_HOTPLUG_NAME = '95-devicecode-net-observe'
+local DEFAULT_IFACE_HOTPLUG_HOOK = '/etc/hotplug.d/iface/' .. OBSERVER_HOTPLUG_NAME
+local DEFAULT_NET_HOTPLUG_HOOK = '/etc/hotplug.d/net/' .. OBSERVER_HOTPLUG_NAME
 local OBSERVER_BLOCK_BEGIN = '# BEGIN devicecode-net-observer'
 local OBSERVER_BLOCK_END = '# END devicecode-net-observer'
 local OWNED_PACKAGES = { 'network', 'dhcp', 'firewall', 'mwan3' }
@@ -280,9 +282,16 @@ local function install_mwan3_user_hook(self)
 	return install_observer_file(self, path, content)
 end
 
+local function default_hotplug_hook_path(directory)
+	directory = tostring(directory or '')
+	if directory == 'iface' then return DEFAULT_IFACE_HOTPLUG_HOOK end
+	if directory == 'net' then return DEFAULT_NET_HOTPLUG_HOOK end
+	return '/etc/hotplug.d/' .. directory .. '/' .. OBSERVER_HOTPLUG_NAME
+end
+
 local function install_hotplug_hook(self, directory)
 	local cfg = self and self.config or {}
-	local path = rooted_hook_path(cfg, '/etc/hotplug.d/' .. tostring(directory) .. '/' .. OBSERVER_HOTPLUG_NAME)
+	local path = rooted_hook_path(cfg, default_hotplug_hook_path(directory))
 	local content = observer_forward_script(cfg, 'hotplug', 'hotplug', directory)
 	return install_observer_file(self, path, content)
 end

@@ -211,7 +211,7 @@ function M.reduce(snapshot, opts)
 		observed_at = opts.now,
 		uplinks = {},
 	}
-	local members = snapshot and snapshot.wan and snapshot.wan.members or {}
+	local members = snapshot and snapshot.wan and snapshot.wan.configured_members or {}
 	local total, online, known = 0, 0, 0
 	for uplink_id, member in pairs(members or {}) do
 		if is_table(member) and member.enabled ~= false and member.disabled ~= true then
