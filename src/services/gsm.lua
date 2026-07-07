@@ -613,6 +613,19 @@ local function log_gsm_summary(svc, modems, reason)
 	svc:info('gsm_summary', { summary = summary, reason = reason })
 end
 
+local function debug_ranked_apn_list(ranked_apns, rankings, rank_cutoff)
+	local out = {}
+	for _, ranking in ipairs(rankings or {}) do
+		local rec = apn_model.redact_record((ranked_apns or {})[ranking.name] or {})
+		local rank = tonumber(ranking.rank) or math.huge
+		rec._name = ranking.name
+		rec._rank = ranking.rank
+		rec._eligible = rank <= tonumber(rank_cutoff or 0)
+		out[#out + 1] = rec
+	end
+	return out
+end
+
 local GsmModem = {}
 GsmModem.__index = GsmModem
 
@@ -987,6 +1000,16 @@ function GsmModem:_apn_connect()
 	-- Get ranked APNs
 	local rank_cutoff = tonumber(self.cfg.apn_rank_cutoff) or 4
 	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, nil, gid1, self.svc and self.svc.custom_apns)
+	self.svc:obs_log('info', {
+		what = 'apns_loaded_for_sim',
+		temporary_debug = true,
+		modem = self.name,
+		mcc = tostring(mcc or ''),
+		mnc = tostring(mnc or ''),
+		rank_cutoff = rank_cutoff,
+		count = #rankings,
+		apns = debug_ranked_apn_list(ranked_apns, rankings, rank_cutoff),
+	})
 
 	-- Iterate through ranked APNs
 	for _, ranking in ipairs(rankings) do
@@ -1287,6 +1310,8 @@ function GsmService.start(conn, opts)
 	local config_ready = false
 	local custom_apns = {}
 	local apn_store = nil
+	local apn_store_loaded = false
+	local apn_store_retry_delay_s = 1.0
 
 	-- Transitional APN bridge. GSM is still on its pre-modern service
 	-- architecture; keep this surface deliberately small until GSM is migrated.
@@ -1351,9 +1376,11 @@ function GsmService.start(conn, opts)
 	end
 
 	local function open_apn_store_for_config(cfg)
+		apn_store_retry_delay_s = 1.0
 		local store_opts, err = apn_store_opts_from_config(cfg)
 		if not store_opts then
 			apn_store = nil
+			apn_store_loaded = false
 			custom_apns = {}
 			svc.custom_apns = custom_apns
 			publish_apn_state({ state = 'unavailable', ready = false, reason = err })
@@ -1362,11 +1389,12 @@ function GsmService.start(conn, opts)
 		apn_store = apn_store_control.new(conn, store_opts)
 		local records, lerr = perform(apn_store:load_op())
 		if not records then
-			custom_apns = {}
-			svc.custom_apns = custom_apns
+			apn_store_loaded = false
+			apn_store_retry_delay_s = 0
 			publish_apn_state({ state = 'degraded', ready = false, reason = lerr or 'apn_store_load_failed' })
 			return nil, lerr or 'apn_store_load_failed'
 		end
+		apn_store_loaded = true
 		custom_apns = records
 		svc.custom_apns = custom_apns
 		publish_apn_state({ state = 'ready', ready = true })
@@ -1379,8 +1407,42 @@ function GsmService.start(conn, opts)
 		end
 	end
 
+	local function apn_store_retry_op()
+		return fibers.run_scope_op(function ()
+			if apn_store_retry_delay_s > 0 then
+				perform(sleep.sleep_op(apn_store_retry_delay_s))
+			end
+			if not apn_store then return nil, 'apn_store_unavailable' end
+			return perform(apn_store:load_op())
+		end):wrap(function (st, rep, records, lerr)
+			if st ~= 'ok' then return nil, tostring(records or lerr or rep or 'apn_store_load_failed') end
+			return records, lerr
+		end)
+	end
+
+	local function handle_apn_store_load_result(records, lerr)
+		if records then
+			apn_store_loaded = true
+			custom_apns = records
+			svc.custom_apns = custom_apns
+			publish_apn_state({ state = 'ready', ready = true })
+			svc:obs_log('info', { what = 'apn_store_loaded', count = #custom_apns })
+			apn_store_retry_delay_s = 1.0
+			signal_all_modems()
+			return true, nil
+		end
+		publish_apn_state({ state = 'degraded', ready = false, reason = lerr or 'apn_store_load_failed' })
+		if apn_store_retry_delay_s <= 0 then
+			apn_store_retry_delay_s = 1.0
+		else
+			apn_store_retry_delay_s = math.min(apn_store_retry_delay_s * 2, 10.0)
+		end
+		return nil, lerr or 'apn_store_load_failed'
+	end
+
 	local function replace_custom_apns(records)
 		if not apn_store then return nil, 'apn_store_unavailable' end
+		if not apn_store_loaded then return nil, 'apn_store_not_ready' end
 		local list, lerr = apn_model.normalise_list(records)
 		if not list then return nil, lerr end
 		local saved, serr = perform(apn_store:save_op(list))
@@ -1397,6 +1459,7 @@ function GsmService.start(conn, opts)
 
 	local function handle_apn_request(method, payload)
 		if method == 'list-custom-apns' then
+			if not apn_store_loaded then return false, 'apn_store_not_ready' end
 			return true, copy(custom_apns)
 		elseif method == 'replace-custom-apns' then
 			local records, perr = apn_model.list_from_payload(payload or {})
@@ -1553,6 +1616,9 @@ function GsmService.start(conn, opts)
 			cap = modem_cap_sub:recv_op(),
 			cfg = cfg_sub:recv_op(),
 		}
+		if apn_store and not apn_store_loaded then
+			choices.apn_store_retry = apn_store_retry_op()
+		end
 
 		local modem_fault_ops = {}
 		for id, modem in pairs(modems) do
@@ -1567,7 +1633,7 @@ function GsmService.start(conn, opts)
 
 		local which, msg, err = perform(op.named_choice(choices))
 
-		if not msg then
+		if not msg and which ~= 'apn_store_retry' then
 			svc:obs_log('debug', { what = 'subscription_closed', err = tostring(err) })
 			return
 		end
@@ -1588,6 +1654,11 @@ function GsmService.start(conn, opts)
 				svc:obs_log('debug',
 					{ what = 'modem_scope_faulted', modem = tostring(msg.id), err = tostring(msg.primary) })
 				modem:stop()
+			end
+		elseif which == 'apn_store_retry' then
+			local _, retry_err = handle_apn_store_load_result(msg, err)
+			if retry_err then
+				svc:obs_log('debug', { what = 'apn_store_retry_failed', err = tostring(retry_err) })
 			end
 		elseif which == 'cfg' then
 			local cfg_data = msg.payload and msg.payload.data
