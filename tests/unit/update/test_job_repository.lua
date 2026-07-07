@@ -39,6 +39,30 @@ function tests.test_lifecycle_helpers_do_not_perform_work()
   repo.upsert(state, job); local stored = state.jobs.j1
   repo.mark_staging(stored, { seq=repo.next_sequence(state), reason='start' }); assert_eq(stored.state, 'staging'); assert_eq(stored.phase, nil); assert_eq(stored.stage, nil)
   repo.mark_awaiting_commit(stored, { image='ok' }, { seq=repo.next_sequence(state) }); assert_eq(stored.state, 'awaiting_commit'); assert_eq(stored.next_step, 'commit'); assert_eq(stored.phase, nil); assert_eq(stored.stage, nil)
-  repo.mark_terminal(stored, 'failed', 'boom', nil, { seq=repo.next_sequence(state) }); assert_true(repo.is_terminal(stored.state)); assert_not_nil(stored.history[1])
+  repo.mark_terminal(stored, 'failed', 'boom', nil, { seq=repo.next_sequence(state) }); assert_true(repo.is_terminal(stored.state)); assert_not_nil(stored.last_event)
 end
+function tests.test_terminal_compaction_drops_operational_internals()
+  local job = repo.compact_job({
+    job_id='j1', component='cm5', state='succeeded', expected_image_id='img',
+    created_seq=1, updated_seq=2, next_step='commit', generation=9,
+    active_token='tok', active_intent={ token='tok', phase='stage' }, active={ token='tok', phase='stage' },
+    adoption={ action='kept_committable' }, commit_attempt={ token='ct' },
+    stage_result={ reply={ transfer={ xfer_id='x1', sent_bytes=12 } }, preflight={ metadata={ large=true } } },
+    result={ ok=true, tag='ok' }, history={ { seq=2, state='succeeded', reason='done' } },
+  })
+  assert_eq(job.next_step, nil)
+  assert_eq(job.generation, nil)
+  assert_eq(job.active_token, nil)
+  assert_eq(job.active_intent, nil)
+  assert_eq(job.active, nil)
+  assert_eq(job.adoption, nil)
+  assert_not_nil(job.commit_attempt)
+  assert_eq(job.commit_attempt.token, 'ct')
+  assert_eq(job.stage_result, nil)
+  assert_not_nil(job.transfer)
+  assert_eq(job.transfer.xfer_id, 'x1')
+  assert_eq(job.result.ok, true)
+  assert_eq(job.last_event.reason, 'done')
+end
+
 return tests

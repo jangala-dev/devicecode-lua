@@ -22,6 +22,7 @@ local active_policy = require 'services.update.active_policy'
 local M = {}
 
 local DEFAULT_QUEUE = 32
+local MAX_TRANSITION_RECORDS = 8
 
 local Runtime = {}
 Runtime.__index = Runtime
@@ -421,23 +422,16 @@ local function adopt_restart_jobs(self, jobs)
 		local current = jobs.jobs[id]
 		local state = current and current.state
 		if state == 'awaiting_commit' then
-			local job = copy(current)
-			local seq = next_adoption_seq(jobs)
-			repo_mod.patch(job, {
-				adoption = {
-					action = 'kept_committable',
-					reason = 'restart_awaiting_commit',
-					seq = seq,
-				},
-			}, { seq = seq, reason = 'restart_adoption_awaiting_commit' })
-			local ok, err = save_adopted_job(self, jobs, job)
-			if ok ~= true then return nil, err end
-			local pub = public_job(job)
+			-- A staged-but-uncommitted job surviving restart is still visible and
+			-- committable, but adoption is a run-local observation.  Do not patch,
+			-- bump or resave the durable job merely because the service restarted.
+			local pub = public_job(current)
 			adoption.awaiting_commit[#adoption.awaiting_commit + 1] = pub
 			adoption.decisions[#adoption.decisions + 1] = {
 				job_id = id,
 				from_state = state,
 				action = 'kept_committable',
+				reason = 'restart_awaiting_commit_run_local',
 				job = pub,
 			}
 		elseif state == 'awaiting_return' then
@@ -526,7 +520,7 @@ local function adopt_restart_jobs(self, jobs)
 						attempt = next_restart_count,
 						restart_max = active_restart_max,
 					}
-				else
+			else
 					job.active_intent = intent
 					job.active_intent.state = 'adopted'
 					job.active_intent.reason = 'restart_active_intent'
@@ -615,16 +609,17 @@ end
 
 
 local function normalise_retention(params)
+	params = params or {}
 	local retention = type(params.retention) == 'table' and copy(params.retention) or {}
-	if params.prune_terminal_jobs_on_startup ~= nil then
-		retention.prune_on_startup = params.prune_terminal_jobs_on_startup == true
-	end
-	if params.terminal_job_max_count ~= nil then
-		retention.terminal_max_count = tonumber(params.terminal_job_max_count)
-	end
-	if params.terminal_job_max_age_s ~= nil then
-		retention.terminal_max_age_s = tonumber(params.terminal_job_max_age_s)
-	end
+	-- The startup scrub is a migration, not ordinary policy.  It is intentionally
+	-- unconditional for this version so stale development records cannot preserve
+	-- the legacy archive by carrying old config.
+	retention.mode = 'single_job'
+	retention.max_jobs = 1
+	retention.scrub_legacy_on_startup = true
+	retention.prune_on_startup = true
+	retention.keep_last_terminal = retention.keep_last_terminal ~= false
+	retention.retain_workflows = false
 	if params.active_intent_restart_max ~= nil then
 		retention.active_intent_restart_max = tonumber(params.active_intent_restart_max)
 	end
@@ -634,43 +629,47 @@ local function normalise_retention(params)
 	return retention
 end
 
-local function terminal_job_sort_newest_first(jobs, a, b)
-	local ja, jb = jobs.jobs[a] or {}, jobs.jobs[b] or {}
-	local ua = ja.updated_seq or ja.created_seq or 0
-	local ub = jb.updated_seq or jb.created_seq or 0
-	if ua == ub then
-		local ca = ja.created_seq or 0
-		local cb = jb.created_seq or 0
-		if ca == cb then return tostring(a) > tostring(b) end
-		return ca > cb
-	end
-	return ua > ub
+local function job_time(job)
+	return tonumber(job and (job.updated_seq or job.created_seq or job.created_mono)) or 0
 end
 
-local function terminal_time_s(job)
-	if type(job) ~= 'table' then return nil end
-	for _, key in ipairs({ 'terminal_at_s', 'completed_at_s', 'updated_at_s', 'updated_wall_s', 'updated_time_s' }) do
-		local n = tonumber(job[key])
-		if n ~= nil then return n end
+local function newest_first(jobs, a, b)
+	local ja, jb = jobs.jobs[a] or {}, jobs.jobs[b] or {}
+	local ta, tb = job_time(ja), job_time(jb)
+	if ta == tb then return tostring(a) > tostring(b) end
+	return ta > tb
+end
+
+local function recoverable_job(job)
+	if type(job) ~= 'table' then return false end
+	local state = job.state
+	if state == 'awaiting_return' then return true end
+	if state == 'committing' and type(job.commit_attempt) == 'table' then return true end
+	if (state == 'staging' or state == 'committing') and (job.active_token ~= nil or type(job.active_intent) == 'table') then
+		return true
 	end
-	local result = type(job.result) == 'table' and job.result or nil
-	if result then
-		for _, key in ipairs({ 'terminal_at_s', 'completed_at_s', 'timestamp_s', 'time_s' }) do
-			local n = tonumber(result[key])
-			if n ~= nil then return n end
+	return false
+end
+
+local function select_single_job_to_keep(jobs)
+	local recoverable = {}
+	local terminal = {}
+	local any = {}
+	for id, job in pairs((jobs and jobs.jobs) or {}) do
+		if job and job.state ~= 'invalid_legacy' then any[#any + 1] = id end
+		if recoverable_job(job) then
+			recoverable[#recoverable + 1] = id
+		elseif repo_mod.is_terminal(job and job.state) then
+			terminal[#terminal + 1] = id
 		end
 	end
-	return nil
-end
-
-local function should_prune_terminal_by_age(job, retention, now_s)
-	local max_age = tonumber(retention.terminal_max_age_s)
-	if type(max_age) ~= 'number' or max_age <= 0 then return false end
-	now_s = tonumber(now_s)
-	if type(now_s) ~= 'number' then return false end
-	local t = terminal_time_s(job)
-	if type(t) ~= 'number' then return false end
-	return t <= (now_s - max_age)
+	table.sort(recoverable, function(a, b) return newest_first(jobs, a, b) end)
+	if recoverable[1] ~= nil then return recoverable[1], 'recoverable' end
+	table.sort(terminal, function(a, b) return newest_first(jobs, a, b) end)
+	if terminal[1] ~= nil then return terminal[1], 'last_terminal' end
+	table.sort(any, function(a, b) return newest_first(jobs, a, b) end)
+	if any[1] ~= nil then return any[1], 'last_job' end
+	return nil, 'none'
 end
 
 local function mark_pruned(adoption, job_id, job, reason)
@@ -678,67 +677,128 @@ local function mark_pruned(adoption, job_id, job, reason)
 	adoption.pruned[#adoption.pruned + 1] = {
 		job_id = job_id,
 		state = job and job.state,
-		action = 'pruned_terminal',
-		reason = reason or 'startup_retention',
+		action = 'deleted_legacy_job',
+		reason = reason or 'single_job_startup_scrub',
 	}
 	adoption.decisions[#adoption.decisions + 1] = {
 		job_id = job_id,
 		from_state = job and job.state,
-		action = 'pruned_terminal',
-		reason = reason or 'startup_retention',
+		action = 'deleted_legacy_job',
+		reason = reason or 'single_job_startup_scrub',
 	}
 end
 
-local function prune_terminal_id(self, jobs, adoption, id, reason)
+local function job_has_legacy_cruft(job)
+	if type(job) ~= 'table' then return false end
+	if job.schema ~= nil and job.schema ~= 'devicecode.update.job/2' then return true end
+	local terminal = repo_mod.is_terminal(job.state)
+	for _, key in ipairs({
+		'history', 'stage_result', 'commit_result', 'active',
+		'active_token', 'active_intent', 'runtime', 'generation',
+	}) do
+		if job[key] ~= nil then return true end
+	end
+	if not terminal and job.commit_attempt ~= nil then return true end
+	if not terminal and job.adoption ~= nil then return true end
+	return false
+end
+
+local function save_compact_job(self, jobs, id, reason, opts)
 	local job = jobs.jobs[id]
-	local ok, derr = fibers.perform(store_delete_op(self._store, id))
-	if ok == true then
-		repo_mod.remove(jobs, id)
-		mark_pruned(adoption, id, job, reason)
+	if not job then return true, nil end
+	local compact = repo_mod.public_job(job)
+	local ok_replace, rerr = repo_mod.replace(jobs, id, compact)
+	if not ok_replace then return nil, rerr end
+	local force = type(opts) == 'table' and opts.force == true
+	if not force and not job_has_legacy_cruft(job) then
 		return true, nil
 	end
-	adoption.diagnostics[#adoption.diagnostics + 1] = {
-		job_id = id,
-		message = 'terminal job prune failed: ' .. tostring(derr or 'delete_failed'),
-	}
-	return false, derr
+	local ok, serr = fibers.perform(store_save_op(self._store, compact))
+	if ok ~= true then return nil, serr or (reason or 'single_job_save_failed') end
+	return true, nil
 end
 
-local function prune_terminal_jobs(self, jobs, adoption)
-	local retention = normalise_retention(self._params or {})
-	if retention.prune_on_startup ~= true then return true, nil end
-	local max_count = retention.terminal_max_count
-	local now_s = self._params and self._params.now_s or os.time()
-
-	local terminal_ids = {}
+local function newest_created_waiter(jobs, keep_id)
+	local ids = {}
 	for id, job in pairs((jobs and jobs.jobs) or {}) do
-		if repo_mod.is_terminal(job and job.state) then
-			terminal_ids[#terminal_ids + 1] = id
+		if id ~= keep_id and type(job) == 'table' and job.state == 'created' then ids[#ids + 1] = id end
+	end
+	table.sort(ids, function(a, b) return newest_first(jobs, a, b) end)
+	return ids[1]
+end
+
+local function scrub_legacy_jobs(self, jobs, adoption)
+	local keep_id, keep_reason = select_single_job_to_keep(jobs)
+	local keep = {}
+	if keep_id ~= nil then keep[keep_id] = true end
+	-- Compatibility exception: if a genuinely active staging/committing job owns
+	-- the slot, a single created job may be waiting behind it.  Awaiting-return is
+	-- recovery state rather than an active stage owner; legacy created waiters are
+	-- blitzed in that case.
+	local keep_job = keep_id and jobs.jobs[keep_id] or nil
+	local keep_owns_active_slot = type(keep_job) == 'table'
+		and (keep_job.state == 'staging' or keep_job.state == 'committing')
+		and (keep_job.active_token ~= nil or type(keep_job.active_intent) == 'table')
+	if keep_reason == 'recoverable' and keep_owns_active_slot then
+		local waiter_id = newest_created_waiter(jobs, keep_id)
+		if waiter_id ~= nil then keep[waiter_id] = true end
+	end
+
+	local ids = sorted_job_ids(jobs)
+	local deleted = 0
+	for _, id in ipairs(ids) do
+		if not keep[id] then
+			local job = jobs.jobs[id]
+			local ok, derr = fibers.perform(store_delete_op(self._store, id))
+			if ok ~= true then
+				adoption.diagnostics[#adoption.diagnostics + 1] = {
+					job_id = id,
+					message = 'legacy job delete failed: ' .. tostring(derr or 'delete_failed'),
+				}
+				return nil, derr or 'legacy_job_delete_failed'
+			end
+			repo_mod.remove(jobs, id)
+			mark_pruned(adoption, id, job, 'single_job_startup_scrub')
+			deleted = deleted + 1
 		end
 	end
-	table.sort(terminal_ids, function (a, b) return terminal_job_sort_newest_first(jobs, a, b) end)
-
-	local retained = {}
-	local pruned_seen = {}
-	for _, id in ipairs(terminal_ids) do
+	for id in pairs(keep) do
 		local job = jobs.jobs[id]
-		if should_prune_terminal_by_age(job, retention, now_s) then
-			local ok = prune_terminal_id(self, jobs, adoption, id, 'startup_retention_age')
-			if ok == true then pruned_seen[id] = true end
-		else
-			retained[#retained + 1] = id
-		end
+		local force_compact = deleted > 0
+			or (id == keep_id and keep_reason == 'last_job' and job and job.state == 'awaiting_commit')
+		local ok, err = save_compact_job(self, jobs, id, 'single_job_compact_save_failed', { force = force_compact })
+		if ok ~= true then return nil, err end
 	end
-
-	if type(max_count) ~= 'number' or max_count < 0 then return true, nil end
-	if #retained <= max_count then return true, nil end
-	for i = max_count + 1, #retained do
-		local id = retained[i]
-		if not pruned_seen[id] and jobs.jobs[id] ~= nil then
-			prune_terminal_id(self, jobs, adoption, id, 'startup_retention_count')
-		end
-	end
+	local kept_aux = {}
+	for id in pairs(keep) do if id ~= keep_id then kept_aux[#kept_aux + 1] = id end end
+	table.sort(kept_aux)
+	adoption.single_job = {
+		mode = 'single_job',
+		kept_job_id = keep_id,
+		kept_aux_ids = kept_aux,
+		kept_reason = keep_reason,
+		deleted_count = deleted,
+		legacy_job_ids = copy(ids),
+	}
 	return true, nil
+end
+
+local function plan_delete_others(self, plan)
+	if not (plan and plan.kind == 'save_job' and plan.job_id ~= nil) then return plan end
+	local ids = {}
+	for id, job in pairs((self._jobs and self._jobs.jobs) or {}) do
+		-- Do not delete another non-terminal job merely because this transition is
+		-- being persisted.  Original update semantics allow a created job to wait while
+		-- an active job owns the slot.  Terminal records are replaceable compact
+		-- telemetry and may be removed when a new operational record is saved.
+		if id ~= plan.job_id and (repo_mod.is_terminal(job and job.state)
+			or (plan.transition == 'create_job' and job and job.state == 'created')) then
+			ids[#ids + 1] = id
+		end
+	end
+	table.sort(ids)
+	plan.delete_others = ids
+	return plan
 end
 
 local function next_sequence_value(jobs)
@@ -806,6 +866,11 @@ local function durable_active_owner(jobs)
 end
 
 local function compute_create(self, cmd)
+	-- Compatibility boundary: create-job does not own the operational update slot.
+	-- The slot is owned by start/commit work.  A second job may therefore be
+	-- created while a first job is still active; start-job will continue to reject
+	-- with slot_busy until the active owner has completed.  The storage policy is
+	-- enforced by pruning terminal records, not by rejecting create.
 	local payload = copy(cmd.payload or cmd.job or {})
 	payload.job_id = payload.job_id or cmd.job_id or new_id('job')
 
@@ -1301,6 +1366,11 @@ local function apply_plan(self, plan)
 	if plan.kind == 'save_job' then
 		local saved, err = repo_mod.upsert(self._jobs, plan.job)
 		if not saved then return nil, err end
+		for _, id in ipairs(plan.delete_others or {}) do
+			if self._jobs.jobs and self._jobs.jobs[id] ~= nil then
+				repo_mod.remove(self._jobs, id)
+			end
+		end
 		if plan.next_seq and plan.next_seq > (self._jobs.next_seq or 1) then
 			self._jobs.next_seq = plan.next_seq
 		end
@@ -1337,6 +1407,10 @@ local function start_transition_worker(self, req, plan)
 			if plan.kind == 'save_job' then
 				local ok, serr = fibers.perform(store_save_op(self._store, public_job(plan.job)))
 				if ok ~= true then error(serr or 'job_save_failed', 0) end
+				for _, id in ipairs(plan.delete_others or {}) do
+					local dok, derr = fibers.perform(store_delete_op(self._store, id))
+					if dok ~= true then error(derr or 'job_delete_failed', 0) end
+				end
 			elseif plan.kind == 'delete_job' then
 				local ok, derr = fibers.perform(store_delete_op(self._store, plan.job_id))
 				if ok ~= true then error(derr or 'job_delete_failed', 0) end
@@ -1391,6 +1465,7 @@ local function start_next(self)
 			refresh_model(self)
 			resolve_cell(req.cell, outcome, nil)
 		else
+			plan = plan_delete_others(self, plan)
 			local rec = transition_set(self, req, 'admitted', {
 				sequence = req.sequence,
 				plan_kind = plan.kind,
@@ -1464,11 +1539,21 @@ local function transition_outcome(req, plan, status, reason)
 	return out
 end
 
+local function trim_ordered_map(map, order, max_count)
+	max_count = max_count or MAX_TRANSITION_RECORDS
+	while #order > max_count do
+		local id = table.remove(order, 1)
+		if map then map[id] = nil end
+	end
+end
+
 function record_transition_outcome(self, outcome)
 	self._transition_outcomes = self._transition_outcomes or {}
 	self._transition_outcome_order = self._transition_outcome_order or {}
 	self._transition_outcomes[outcome.transition_id] = copy(outcome)
 	self._transition_outcome_order[#self._transition_outcome_order + 1] = outcome.transition_id
+	trim_ordered_map(self._transition_outcomes, self._transition_outcome_order, MAX_TRANSITION_RECORDS)
+	trim_ordered_map(self._transitions, self._transition_order or {}, MAX_TRANSITION_RECORDS)
 end
 
 local function handle_transition_done(self, ev)
@@ -1547,17 +1632,25 @@ function Runtime:_run(scope)
 		error(self._ready_err, 0)
 	end
 	self._jobs = jobs
-	local adoption, adopt_err = adopt_restart_jobs(self, jobs)
-	if not adoption then
+	local adoption = adoption_empty()
+	local scrubbed, scrub_err = scrub_legacy_jobs(self, jobs, adoption)
+	if scrubbed ~= true then
+		self._ready_err = scrub_err or 'legacy_job_scrub_failed'
+		self._ready_cond:signal()
+		error(self._ready_err, 0)
+	end
+	local adopted, adopt_err = adopt_restart_jobs(self, jobs)
+	if not adopted then
 		self._ready_err = adopt_err or 'restart_adoption_failed'
 		self._ready_cond:signal()
 		error(self._ready_err, 0)
 	end
-	local pruned, prune_err = prune_terminal_jobs(self, jobs, adoption)
-	if pruned ~= true then
-		self._ready_err = prune_err or 'job_retention_prune_failed'
-		self._ready_cond:signal()
-		error(self._ready_err, 0)
+	for k, v in pairs(adopted or {}) do
+		if type(v) == 'table' and type(adoption[k]) == 'table' then
+			for _, item in ipairs(v) do adoption[k][#adoption[k] + 1] = item end
+		else
+			adoption[k] = v
+		end
 	end
 	self._adoption = adoption
 	self._ready = true

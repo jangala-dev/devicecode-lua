@@ -81,27 +81,18 @@ end
 
 local function component_summaries(snapshot)
 	local out = {}
+	local seen = {}
+	local cfg = snapshot and snapshot.config or nil
+	if type(cfg) == 'table' and type(cfg.components) == 'table' then
+		for id in pairs(cfg.components) do seen[id] = true end
+	end
 	for _, job in pairs(jobs_by_id(snapshot)) do
-		local component = type(job) == 'table' and job.component or nil
-		if type(component) == 'string' and component ~= '' then
-			local rec = out[component]
-			if not rec then
-				rec = {
-					kind = 'update.component',
-					component = component,
-					jobs = { count = 0, by_id = {} },
-					active = nil,
-					last = nil,
-				}
-				out[component] = rec
-			end
-			rec.jobs.count = rec.jobs.count + 1
-			rec.jobs.by_id[job.job_id] = copy(job)
-			if job.active ~= nil or job.active_intent ~= nil or job.active_token ~= nil then
-				rec.active = copy(job)
-			end
-			rec.last = copy(job)
+		if type(job) == 'table' and type(job.component) == 'string' and job.component ~= '' then
+			seen[job.component] = true
 		end
+	end
+	for id in pairs(seen) do
+		out[id] = projection.component_summary(id, snapshot)
 	end
 	return out
 end
@@ -113,39 +104,46 @@ local function retained_set_clear(conn, retained, make_topic)
 	end
 end
 
-local function sync_workflows(conn, retained, snapshot)
-	local current_jobs = {}
-	for id, job in pairs(jobs_by_id(snapshot)) do
-		current_jobs[id] = true
-		local ok, err = retain_payload(conn, topics.workflow_update_job(id), projection.job(job))
-		if ok ~= true then return nil, err or 'update workflow job retain failed' end
-		ok, err = retain_payload(conn, topics.workflow_update_job_timeline(id), projection.job_timeline(job))
-		if ok ~= true then return nil, err or 'update workflow job timeline retain failed' end
-		retained.jobs[id] = true
-	end
-	for id in pairs(retained.jobs) do
-		if not current_jobs[id] then
-			local ok, err = unretain(conn, topics.workflow_update_job(id))
-			if ok ~= true then return nil, err or 'update workflow job unretain failed' end
-			ok, err = unretain(conn, topics.workflow_update_job_timeline(id))
-			if ok ~= true then return nil, err or 'update workflow job timeline unretain failed' end
-			retained.jobs[id] = nil
-		end
-	end
+local function unretain_workflow_job(conn, id)
+	local ok, err = unretain(conn, topics.workflow_update_job(id))
+	if ok ~= true then return nil, err or 'update workflow job unretain failed' end
+	ok, err = unretain(conn, topics.workflow_update_job_timeline(id))
+	if ok ~= true then return nil, err or 'update workflow job timeline unretain failed' end
+	return true, nil
+end
 
-	local current_ingest = {}
-	for id, rec in pairs(ingest_by_id(snapshot)) do
-		current_ingest[id] = true
-		local ok, err = retain_payload(conn, topics.workflow_artifact_ingest(id), projection.ingest(rec))
-		if ok ~= true then return nil, err or 'artifact ingest workflow retain failed' end
-		retained.ingest[id] = true
+local function sync_workflows(conn, retained, snapshot)
+	-- Workflow job/timeline retained topics were useful during early development but
+	-- are not device state. Normal publication no longer creates them. This cleanup
+	-- removes anything retained by this publisher and any legacy job IDs reported by
+	-- the destructive startup scrub.
+	for id in pairs(retained.jobs or {}) do
+		local ok, err = unretain_workflow_job(conn, id)
+		if ok ~= true then return nil, err end
+		retained.jobs[id] = nil
 	end
-	for id in pairs(retained.ingest) do
-		if not current_ingest[id] then
-			local ok, err = unretain(conn, topics.workflow_artifact_ingest(id))
-			if ok ~= true then return nil, err or 'artifact ingest workflow unretain failed' end
-			retained.ingest[id] = nil
+	local adoption = type(snapshot) == 'table' and type(snapshot.adoption) == 'table' and snapshot.adoption or {}
+	local seen_legacy = {}
+	local single = type(adoption.single_job) == 'table' and adoption.single_job or {}
+	for _, id in ipairs(single.legacy_job_ids or {}) do
+		if id ~= nil and not seen_legacy[id] then
+			seen_legacy[id] = true
+			local ok, err = unretain_workflow_job(conn, id)
+			if ok ~= true then return nil, err end
 		end
+	end
+	for _, row in ipairs(adoption.pruned or {}) do
+		local id = type(row) == 'table' and row.job_id or nil
+		if id ~= nil and not seen_legacy[id] then
+			seen_legacy[id] = true
+			local ok, err = unretain_workflow_job(conn, id)
+			if ok ~= true then return nil, err end
+		end
+	end
+	for id in pairs(retained.ingest or {}) do
+		local ok, err = unretain(conn, topics.workflow_artifact_ingest(id))
+		if ok ~= true then return nil, err or 'artifact ingest workflow unretain failed' end
+		retained.ingest[id] = nil
 	end
 	return true, nil
 end
@@ -177,7 +175,6 @@ local function publish_capabilities(conn, snapshot)
 		owner = 'update',
 		methods = mgr_methods,
 		canonical_state = topics.update_summary(),
-		workflow_family = { 'state', 'workflow', 'update-job' },
 	})
 	if ok ~= true then return nil, err end
 	ok, err = retain_payload(conn, topics.update_manager_status(), {
@@ -194,7 +191,6 @@ local function publish_capabilities(conn, snapshot)
 		id = 'main',
 		owner = 'update',
 		methods = ingest_methods,
-		workflow_family = { 'state', 'workflow', 'artifact-ingest' },
 	})
 	if ok ~= true then return nil, err end
 	return retain_payload(conn, topics.artifact_ingest_status(), {
@@ -206,7 +202,7 @@ local function publish_capabilities(conn, snapshot)
 end
 
 local function publish_all(conn, retained, snapshot)
-	local ok, err = publish_snapshot(conn, topics.update_summary(), projection.service_state, snapshot)
+	local ok, err = publish_snapshot(conn, topics.update_summary(), projection.service_summary, snapshot)
 	if ok ~= true then return nil, err end
 	ok, err = publish_capabilities(conn, snapshot)
 	if ok ~= true then return nil, err end

@@ -30,34 +30,23 @@ function tests.test_manager_create_job_is_scoped_and_updates_status_model()
     child:cancel('test complete')
   end)
 end
-function tests.test_active_completion_releases_slot_before_later_start_admission()
+function tests.test_single_job_policy_replaces_previous_created_job()
   fibers.run(function (root_scope)
-    local release_first = cond.new(); local started_first = cond.new(); local run_count = 0
-    local active_backend = {}
-    function active_backend:stage_op(job)
-      run_count = run_count + 1
-      if job.job_id == 'j1' then
-        started_first:signal()
-        return release_first:wait_op():wrap(function () return { job='j1' } end)
-      end
-      return op.always({ job=job.job_id }, nil)
-    end
-    local child, caller = start_service(root_scope, { config={ schema='devicecode.update/1', components={ { component='cm5' } } }, backend=active_backend })
+    local child, caller = start_service(root_scope, { config={ schema='devicecode.update/1', components={ { component='cm5' } } } })
     assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j1', component='cm5', artifact_ref='artifact-j1' }, { timeout=0.5 }))
     assert(caller:call(topics.update_manager_rpc('create-job'), { job_id='j2', component='cm5', artifact_ref='artifact-j2' }, { timeout=0.5 }))
-    assert_true(probe.wait_until(function() local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 }); return status and status.snapshot.jobs.by_id.j1 and status.snapshot.jobs.by_id.j2 end, { timeout=0.5, interval=0.01 }), 'expected both jobs to be visible')
-    local accepted = assert(caller:call(topics.update_manager_rpc('start-job'), { job_id='j1' }, { timeout=0.5 })); assert_eq(accepted.accepted, true); fibers.perform(started_first:wait_op())
-    local busy, busy_err = caller:call(topics.update_manager_rpc('start-job'), { job_id='j2' }, { timeout=0.2 }); assert_eq(busy, nil); assert_eq(busy_err, 'slot_busy')
-    release_first:signal()
-    local accepted2
-    local ok_wait = probe.wait_until(function() accepted2 = caller:call(topics.update_manager_rpc('start-job'), { job_id='j2' }, { timeout=0.05 }); return accepted2 and accepted2.accepted == true end, { timeout=0.6, interval=0.01 })
-    assert_true(ok_wait, 'expected second start to be admitted after active completion'); assert_eq(run_count >= 2, true)
     local status
-    probe.wait_until(function() status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 }); return status and status.snapshot.jobs.by_id.j1 and status.snapshot.jobs.by_id.j1.state == 'awaiting_commit' end, { timeout=0.5, interval=0.01 })
-    assert_eq(status.snapshot.jobs.by_id.j1.state, 'awaiting_commit')
+    assert_true(probe.wait_until(function()
+      status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
+      return status and status.snapshot and status.snapshot.jobs.by_id.j2 ~= nil
+    end, { timeout=0.5, interval=0.01 }), 'expected newest job to be visible')
+    assert_eq(status.snapshot.jobs.count, 1)
+    assert_eq(status.snapshot.jobs.by_id.j1, nil)
+    assert_eq(status.snapshot.jobs.by_id.j2.state, 'created')
     child:cancel('test complete')
   end)
 end
+
 
 function tests.test_commit_job_persists_awaiting_return_before_reconcile()
   fibers.run(function (root_scope)
@@ -460,7 +449,6 @@ function tests.test_job_store_dependency_loss_cancels_and_reloads_runtime()
       local status = caller:call(topics.update_manager_rpc('status'), {}, { timeout=0.05 })
       return status and status.snapshot
         and status.snapshot.state == 'running'
-        and status.snapshot.jobs.by_id['j-before-loss'] ~= nil
         and list_calls.count > first_load_count
     end, { timeout=0.8, interval=0.01 }), 'expected service to reload job runtime from store after job-store returns')
 
