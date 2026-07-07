@@ -57,38 +57,38 @@ function T.devhost_local_ui_apns_round_trip_through_gsm_and_fake_control_store()
 		harness.wait_http_ready(inst.base_url, { timeout = 5 })
 
 		local apns = {
-			records = {
-				{
-					carrier = 'Demo Carrier',
-					mcc = '234',
-					mnc = '10',
-					apn = 'demo.internet',
-					user = 'clinic',
-					password = 'prototype-secret',
-				},
+			{
+				carrier = 'Demo Carrier',
+				mcc = '234',
+				mnc = '10',
+				apn = 'custom-apn',
+				authtype = 'none',
+				user = 'demo-user',
+				password = 'demo-password',
 			},
 		}
 
 		local status, body = harness.curl_json('PUT', inst.base_url .. '/api/gsm/apns/custom', apns)
 		assert_eq(status, '200')
 		assert_true(body.ok, 'APN PUT should succeed')
-		assert_eq(body.apns[1].apn, 'demo.internet')
+		assert_eq(body.apns[1].apn, 'custom-apn')
+		assert_eq(body.apns[1].authtype, 'none')
 
 		status, body = harness.curl_json('GET', inst.base_url .. '/api/gsm/apns/custom')
 		assert_eq(status, '200')
 		assert_eq(body[1].carrier, 'Demo Carrier')
-		assert_eq(body[1].password, 'prototype-secret')
+		assert_eq(body[1].password, 'demo-password')
 
 		local stored = assert_not_nil(inst.control_store:get('custom-apns-v1'),
 			'APN list should be persisted in fake control-store')
-		assert_true(stored:find('demo.internet', 1, true) ~= nil, 'persisted APN JSON should contain the APN')
+		assert_true(stored:find('custom-apn', 1, true) ~= nil, 'persisted APN JSON should contain the APN')
 
 		status, body = harness.curl_json('GET', inst.base_url .. '/api/local-ui/bootstrap')
 		assert_eq(status, '200')
 		local apn_state = assert_not_nil(body.items['state/gsm/apns/custom'],
 			'bootstrap should include GSM APN retained state after PUT')
 		assert_eq(apn_state.payload.count, 1)
-		assert_eq(apn_state.payload.records[1].apn, 'demo.internet')
+		assert_eq(apn_state.payload.records[1].apn, 'custom-apn')
 		assert_eq(apn_state.payload.records[1].password, nil)
 		assert_eq(apn_state.payload.records[1].user, nil)
 		assert_eq(apn_state.payload.records[1].has_password, true)
