@@ -5,7 +5,8 @@ VENDOR_DIR := vendor
 BUILD_DIR  := build
 TEST_DIR   := tests
 LINTER     := luacheck
-UI_DIR     := $(SRC_DIR)/services/ui/local-ui
+UI_REPO   ?= https://github.com/jangala-dev/local-ui.git
+UI_DIR    ?= local-ui
 UI_WWW_DIR := $(SRC_DIR)/services/ui/www
 
 # Default target
@@ -37,7 +38,7 @@ build-vendor:
 build-ui:
 	@echo "Building local UI..."
 	@if [ ! -d "$(UI_DIR)/client" ]; then \
-		echo "local-ui submodule missing; run 'make env' first." >&2; \
+		echo "local-ui checkout missing; run 'make env' first." >&2; \
 		exit 1; \
 	fi
 	@$(MAKE) -C $(UI_DIR) build
@@ -74,6 +75,13 @@ env:
 	@cd $(VENDOR_DIR)/lua-fibers && git fetch && git checkout $(FIBERS_VER)
 	@cd $(VENDOR_DIR)/lua-trie   && git fetch && git checkout $(TRIE_VER)
 	@cd $(VENDOR_DIR)/lua-bus    && git fetch && git checkout $(BUS_VER)
+	@if [ ! -d "$(UI_DIR)/.git" ]; then \
+		if [ -e "$(UI_DIR)" ]; then \
+			echo "$(UI_DIR) exists but is not a git checkout." >&2; \
+			exit 1; \
+		fi; \
+		git clone $(UI_REPO) $(UI_DIR); \
+	fi
 	@cd $(UI_DIR) && git fetch && git checkout $(UI_VER) && git pull --ff-only
 	@cd $(UI_DIR)/client && npm install
 	@echo "Submodules pinned."
