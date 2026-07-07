@@ -12,15 +12,6 @@ local copy = tablex.deep_copy
 
 local function is_table(v) return type(v) == 'table' end
 
-local function first_number(...)
-	for i = 1, select('#', ...) do
-		local v = select(i, ...)
-		local n = type(v) == 'number' and v or (type(v) == 'string' and tonumber(v) or nil)
-		if n then return n end
-	end
-	return nil
-end
-
 local function observed_multiwan(snapshot)
 	local observed = snapshot and snapshot.observed or nil
 	local mw = observed and observed.snapshot and observed.snapshot.multiwan or nil
@@ -74,20 +65,8 @@ local function gsm_uplink(snapshot, member)
 	return snapshot and snapshot.sources and snapshot.sources.gsm_uplinks and snapshot.sources.gsm_uplinks[id] or nil
 end
 
-local function online_duration(st)
-	if not is_table(st) then return nil end
-	return first_number(st.online_for, st.online_seconds, st.online_count, st.online)
-end
-
-local function offline_duration(st)
-	if not is_table(st) then return nil end
-	return first_number(st.offline_for, st.offline_seconds, st.offline_count, st.offline)
-end
-
 local function reduce_gsm(snapshot, uplink_id, member, opts)
 	local gsm = gsm_uplink(snapshot, member)
-	local iface = member_interface(member, uplink_id)
-	local st = status_by_interface(snapshot, iface)
 	local state = 'unknown'
 	local usable = false
 	if is_table(gsm) then
@@ -99,21 +78,17 @@ local function reduce_gsm(snapshot, uplink_id, member, opts)
 	return {
 		id = tostring(uplink_id),
 		role = member.role or uplink_id,
-		interface = iface,
+		interface = member_interface(member, uplink_id),
 		ifname = linux.ifname or member.device or member.ifname,
 		state = state,
 		usable = usable,
 		metric = member_metric(member),
-		online_for = online_duration(st),
-		online_since = st and first_number(st.online_since) or nil,
-		offline_for = offline_duration(st),
-		offline_since = st and first_number(st.offline_since) or nil,
 		source = { kind = 'gsm-uplink', id = gsm_source(member) },
 		observed_at = is_table(gsm) and (gsm.updated_at or gsm.observed_at) or (opts and opts.now),
 	}
 end
 
-local function reduce_host(snapshot, uplink_id, member)
+local function reduce_host(snapshot, uplink_id, member, opts)
 	local iface = member_interface(member, uplink_id)
 	local st = status_by_interface(snapshot, iface)
 	local mw = observed_multiwan(snapshot) or {}
@@ -127,10 +102,6 @@ local function reduce_host(snapshot, uplink_id, member)
 		usable = usable,
 		observed = st ~= nil,
 		metric = member_metric(member),
-		online_for = online_duration(st),
-		online_since = st and first_number(st.online_since) or nil,
-		offline_for = offline_duration(st),
-		offline_since = st and first_number(st.offline_since) or nil,
 		uptime_s = st and (tonumber(st.uptime_s) or tonumber(st.uptime)) or nil,
 		age_s = st and (tonumber(st.age_s) or tonumber(st.age)) or nil,
 		source = {
