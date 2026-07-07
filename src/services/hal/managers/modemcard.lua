@@ -9,6 +9,7 @@ local fibers = require "fibers"
 local op = require "fibers.op"
 local channel = require "fibers.channel"
 local sleep = require "fibers.sleep"
+local cond = require "fibers.cond"
 
 -- Other modules
 local log -- set in start()
@@ -181,12 +182,14 @@ local function on_driver(dev_ev_ch, cap_emit_ch, driver)
         return
     end
 
-    -- Start the driver
-    local ok, start_err = driver:start()
-    if not ok then
-        log:error({ what = 'start_driver_failed', address = address, err = tostring(start_err) })
-        return
-    end
+    -- Register the capability before starting the driver. The modem driver
+    -- starts lifecycle workers that immediately emit retained state such as
+    -- card/sim changes. If those emissions occur before HAL has registered the
+    -- capability they are dropped by hal.lua:on_cap_emit(), leaving GSM waiting
+    -- for a retained state that may never exist. This mirrors the platform,
+    -- power and sysmon managers: publish the DeviceEvent, wait until HAL has
+    -- registered it, then start the emitting workers.
+    local ready_cond = cond.new()
 
     local device_event, ev_err = hal_types.new.DeviceEvent(
         "added",
@@ -196,15 +199,31 @@ local function on_driver(dev_ev_ch, cap_emit_ch, driver)
             address = address,
             port = device -- the device field holds the usb or pcie port info
         },
-        capabilities
+        capabilities,
+        ready_cond
     )
     if not device_event then
         log:error({ what = 'create_device_event_failed', address = address, err = tostring(ev_err) })
         return
     end
 
-    -- Notify HAL of new modem device
+    -- Notify HAL of the new modem device and wait until the device and its
+    -- capabilities are registered before starting the driver.
     dev_ev_ch:put(device_event)
+    ready_cond:wait()
+
+    -- Start the driver only after capability registration, so initial retained
+    -- state emissions cannot race ahead of the registry.
+    local ok, start_err = driver:start()
+    if not ok then
+        log:error({ what = 'start_driver_failed', address = address, err = tostring(start_err) })
+        ModemcardManager.modems[driver.address] = nil
+        local remove_event = hal_types.new.DeviceEvent("removed", "modemcard", device)
+        if remove_event then
+            dev_ev_ch:put(remove_event)
+        end
+        return
+    end
 end
 
 ---Modemcard Manager notifies HAL of modem additions/removals.
