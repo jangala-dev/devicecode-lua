@@ -65,4 +65,28 @@ function tests.test_terminal_compaction_drops_operational_internals()
   assert_eq(job.last_event.reason, 'done')
 end
 
+function tests.test_active_compaction_preserves_policy_for_auto_commit()
+  local job = repo.compact_job({
+    job_id='j1', component='mcu', state='awaiting_commit', expected_image_id='img',
+    created_seq=1, updated_seq=2, next_step='commit', generation=9,
+    policy={
+      job_id='j1', create_if='image_differs', start='auto', commit='auto',
+      reconcile='required', supersede='same_job_if_image_changed',
+    },
+  })
+  assert_not_nil(job.policy)
+  assert_eq(job.policy.commit, 'auto')
+  assert_eq(job.policy.start, 'auto')
+  assert_eq(job.policy.reconcile, 'required')
+end
+
+function tests.test_new_job_preserves_policy_for_active_lifecycle()
+  local job = assert(repo.new_job({
+    job_id='j1', component='mcu', expected_image_id='img', artifact_ref='a1',
+    policy={ start='auto', commit='auto', reconcile='required' },
+  }, { seq=1 }))
+  assert_not_nil(job.policy)
+  assert_eq(job.policy.commit, 'auto')
+end
+
 return tests

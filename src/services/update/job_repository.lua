@@ -167,6 +167,19 @@ local function compact_adoption(adoption)
 	return next(out) ~= nil and out or nil
 end
 
+local function compact_policy(policy)
+	if type(policy) ~= 'table' then return nil end
+	local out = {}
+	local keys = {
+		'job_id', 'create_if', 'start', 'commit', 'reconcile', 'supersede',
+		'attempt', 'max_attempts',
+	}
+	for _, key in ipairs(keys) do
+		out[key] = policy[key]
+	end
+	return next(out) ~= nil and out or nil
+end
+
 local function last_event_from(job)
 	if type(job) ~= 'table' then return nil end
 	if type(job.last_event) == 'table' then return copy(job.last_event) end
@@ -229,6 +242,7 @@ function M.compact_job(job)
 		out.stage_result = compact_stage_result(job.stage_result, job)
 		out.commit_attempt = compact_commit_attempt(job.commit_attempt)
 		out.commit_result = compact_result(job.commit_result)
+		out.policy = compact_policy(job.policy)
 		if out.active == nil and out.active_intent ~= nil then out.active = copy(out.active_intent) end
 		-- Preserve the one runtime field that can affect admission while a save is pending.
 		if type(job.runtime) == 'table' and job.runtime.persistence_pending then
@@ -371,6 +385,7 @@ function M.new_job(spec, opts)
 		artifact_ref = spec.artifact_ref,
 		attempt = spec.attempt,
 		metadata = copy(spec.metadata or {}),
+		policy = copy(spec.policy),
 		created_seq = seq,
 		updated_seq = seq,
 		last_event = { seq = seq, state = 'created', reason = opts.reason or 'create_job' },
