@@ -14,6 +14,26 @@ function tests.test_normalise_record_requires_core_fields()
 	if bad then fail('invalid MCC accepted') end
 end
 
+function tests.test_normalise_record_accepts_apn_editor_payload()
+	local rec, err = model.normalise_record({
+		carrier = 'Demo Carrier',
+		mcc = '234',
+		mnc = '10',
+		apn = 'custom-apn',
+		authtype = 'none',
+		user = 'demo-user',
+		password = 'demo-password',
+	})
+	ok(rec, err)
+	eq(rec.carrier, 'Demo Carrier')
+	eq(rec.mcc, '234')
+	eq(rec.mnc, '10')
+	eq(rec.apn, 'custom-apn')
+	eq(rec.authtype, 'none')
+	eq(rec.user, 'demo-user')
+	eq(rec.password, 'demo-password')
+end
+
 function tests.test_normalise_list_rejects_duplicates()
 	local list, err = model.normalise_list({
 		{ carrier='A', mcc='234', mnc='10', apn='internet' },
