@@ -137,6 +137,14 @@ local function write_index_op(root, keys)
 	return write_file_op(index_path(root), join_lines(sort_unique(keys)))
 end
 
+function Provider:prepare_op()
+	return op.guard(function ()
+		local ok, err = file.mkdir_p(self.root)
+		if ok then return op.always(true, nil) end
+		return op.always(false, tostring(err or 'control_store_root_create_failed'))
+	end)
+end
+
 function Provider:status_op()
 	return op.always(true, {
 		root = self.root,
