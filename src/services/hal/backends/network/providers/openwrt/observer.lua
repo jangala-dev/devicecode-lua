@@ -144,6 +144,30 @@ local function decode_ubus_line(line)
 	}
 end
 
+local TRANSIENT_MWAN_ACTIONS = {
+	connecting = true,
+	disconnecting = true,
+}
+
+local function trigger_env(trigger)
+	if type(trigger) ~= 'table' then return {} end
+	local env = trigger.env or trigger.payload or trigger
+	if type(env) ~= 'table' then return {} end
+	return env
+end
+
+local function trigger_action(trigger)
+	local env = trigger_env(trigger)
+	local action = env.ACTION or env.action
+	if action == nil and type(trigger) == 'table' then action = trigger.action end
+	if action == nil then return nil end
+	return tostring(action):lower()
+end
+
+local function is_transient_mwan_action(trigger)
+	return TRANSIENT_MWAN_ACTIONS[trigger_action(trigger) or ''] == true
+end
+
 local function normalise_hotplug_record(rec)
 	if type(rec) ~= 'table' then return nil end
 	local env = rec.env or rec
@@ -181,6 +205,14 @@ end
 
 function Observer:ingest(trigger)
 	if self.closed then return false, 'observer closed' end
+	-- mwan3.user emits transitional phases such as connecting/disconnecting.
+	-- Treat these as diagnostics only: they are not stable data-path states and
+	-- must not become retained NET backhaul status.  Terminal events such as
+	-- connected/disconnected still wake the observer and take a fresh snapshot.
+	if is_transient_mwan_action(trigger) then
+		log(self, 'debug', { what = 'network_observer_transient_trigger_ignored', summary = 'transient mwan event ignored action=' .. tostring(trigger_action(trigger) or '?'), trigger = trigger })
+		return true, 'ignored_transient_mwan_action'
+	end
 	return self.tx:send(trigger)
 end
 
@@ -358,6 +390,17 @@ function Observer:ubus_listener()
 	self:_stop_ubus_listener()
 end
 
+local function trigger_summary(trigger)
+	trigger = trigger or {}
+	local env = trigger.env or trigger.payload or trigger
+	return string.format('%s event action=%s interface=%s device=%s directory=%s',
+		tostring(trigger.source or trigger.kind or 'hotplug'),
+		tostring(env.ACTION or env.action or '?'),
+		tostring(env.INTERFACE or env.interface or '?'),
+		tostring(env.DEVICE or env.DEVICENAME or env.DEVNAME or env.device or '?'),
+		tostring(trigger.directory or env.SUBSYSTEM or '?'))
+end
+
 function Observer:handle_socket_stream(st)
 	self:_track_stream(st)
 	while not self.closed do
@@ -365,7 +408,14 @@ function Observer:handle_socket_stream(st)
 		if line == nil then break end
 		local rec = cjson.decode(line)
 		local trig = normalise_hotplug_record(rec)
-		if trig then self:ingest(trig) end
+		if trig then
+			if trig.source == 'mwan3' or trig.kind == 'mwan3' then
+				log(self, 'info', { what = 'network_observer_mwan3_trigger', summary = trigger_summary(trig), trigger = trig })
+			elseif trig.directory == 'iface' or trig.directory == 'net' then
+				log(self, 'info', { what = 'network_observer_hotplug_trigger', summary = trigger_summary(trig), trigger = trig })
+			end
+			self:ingest(trig)
+		end
 	end
 	self:_untrack_stream(st)
 	close_stream(st)

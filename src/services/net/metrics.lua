@@ -58,17 +58,11 @@ local function counter_aliases(snapshot)
 		if has_counter_interface(snapshot, rec.interface) then add_counter_alias(out, seen_alias, seen_iface, rec.alias, rec.interface) end
 	end
 
-	if has_counter_interface(snapshot, 'modem_primary') then add_counter_alias(out, seen_alias, seen_iface, 'mdm0', 'modem_primary') end
-	if has_counter_interface(snapshot, 'modem_secondary') then add_counter_alias(out, seen_alias, seen_iface, 'mdm1', 'modem_secondary') end
-
-	local members = snapshot.wan and snapshot.wan.members or {}
+	local members = snapshot.wan and snapshot.wan.configured_members or {}
 	for _, member_id in ipairs(sorted_keys(members)) do
 		local member = members[member_id]
-		local source = type(member) == 'table' and member.source or nil
-		local source_id = type(source) == 'table' and source.id or nil
 		local iface = type(member) == 'table' and (member.interface or member_id) or member_id
-		if source_id == 'primary' then add_counter_alias(out, seen_alias, seen_iface, 'mdm0', iface) end
-		if source_id == 'secondary' then add_counter_alias(out, seen_alias, seen_iface, 'mdm1', iface) end
+		add_counter_alias(out, seen_alias, seen_iface, tostring(member_id), iface)
 	end
 	return out
 end

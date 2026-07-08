@@ -9,7 +9,10 @@ local function ok(v, msg) if not v then fail(msg or 'expected truthy') end retur
 
 function tests.test_reduces_hal_multiwan_facts_to_semantic_backhaul()
     local model = backhaul.reduce({
-        wan = { members = { wan = { interface = 'wan', metric = 10 } } },
+        segments = {
+            wan = { kind = 'wan', vlan = { id = 4 } },
+        },
+        wan = { configured_members = { wan = { interface = 'wan', metric = 10 } } },
         observed = {
             snapshot = {
                 multiwan = {
@@ -43,6 +46,9 @@ function tests.test_reduces_hal_multiwan_facts_to_semantic_backhaul()
     eq(wan.uptime_s, 123)
     eq(wan.source.kind, 'host-multiwan')
     eq(wan.source.tool, 'mwan3')
+    eq(wan.status_source.tool, 'mwan3')
+    eq(wan.link.kind, 'wired')
+    eq(wan.link.vlan, 4)
     eq(wan.path_address.address, '203.0.113.10')
 end
 
@@ -52,7 +58,7 @@ function tests.test_backhaul_uses_mwan3_for_status_and_endpoint_for_device_name(
         interfaces = {
             wan = { endpoint = { ifname = 'vl-wan' } },
         },
-        wan = { members = { wan = { interface = 'wan', metric = 10 } } },
+        wan = { configured_members = { wan = { interface = 'wan', metric = 10 } } },
         observed = {
             snapshot = {
                 multiwan = {
@@ -71,12 +77,13 @@ function tests.test_backhaul_uses_mwan3_for_status_and_endpoint_for_device_name(
     eq(wan.usable, true)
     eq(wan.ifname, 'vl-wan')
     eq(wan.source.tool, 'mwan3')
+    eq(wan.status_source.tool, 'mwan3')
 end
 
-function tests.test_gsm_uplink_is_mapped_without_hal_backend_terms()
+function tests.test_gsm_uplink_uses_mwan3_status_not_gsm_connection_state()
     local model = backhaul.reduce({
         wan = {
-            members = {
+            configured_members = {
                 gsm_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
             },
         },
@@ -91,18 +98,107 @@ function tests.test_gsm_uplink_is_mapped_without_hal_backend_terms()
         },
         observed = {
             snapshot = {
+                multiwan = {
+                    backend = 'openwrt',
+                    source = 'mwan3',
+                    interfaces_by_semantic = {
+                        modem_primary = {
+                            interface = 'modem_primary',
+                            ifname = 'wwan0',
+                            state = 'online',
+                            usable = true,
+                        },
+                    },
+                },
                 live = { interfaces = { wwan0 = { ipv4 = { { address = '10.1.2.3' } } } } },
             },
         },
     }, { now = 42 })
 
     local uplink = ok(model.uplinks.gsm_primary, 'gsm uplink expected')
-    eq(uplink.state, 'sim_absent')
-    eq(uplink.usable, false)
+    eq(uplink.state, 'online')
+    eq(uplink.usable, true)
+    eq(uplink.observed, true)
     eq(uplink.source.kind, 'gsm-uplink')
+    eq(uplink.source.id, 'primary')
+    eq(uplink.status_source.kind, 'host-multiwan')
+    eq(uplink.status_source.tool, 'mwan3')
+    eq(uplink.link.kind, 'cellular')
     eq(uplink.ifname, 'wwan0')
     eq(uplink.path_address.address, '10.1.2.3')
     eq(uplink.gsm, nil)
+end
+
+function tests.test_gsm_uplink_remains_offline_when_mwan3_is_offline_even_if_gsm_connected()
+    local model = backhaul.reduce({
+        wan = {
+            configured_members = {
+                gsm_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
+            },
+        },
+        sources = {
+            gsm_uplinks = {
+                primary = {
+                    state = 'connected',
+                    connected = true,
+                    linux = { ifname = 'wwan0' },
+                },
+            },
+        },
+        observed = {
+            snapshot = {
+                multiwan = {
+                    backend = 'openwrt',
+                    source = 'mwan3',
+                    interfaces_by_semantic = {
+                        modem_primary = {
+                            interface = 'modem_primary',
+                            ifname = 'wwan0',
+                            state = 'offline',
+                            usable = false,
+                        },
+                    },
+                },
+            },
+        },
+    }, { now = 42 })
+
+    local uplink = ok(model.uplinks.gsm_primary, 'gsm uplink expected')
+    eq(uplink.state, 'offline')
+    eq(uplink.usable, false)
+    eq(uplink.ifname, 'wwan0')
+end
+
+function tests.test_gsm_member_stays_present_without_gsm_details()
+    local model = backhaul.reduce({
+        wan = {
+            configured_members = {
+                gsm_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
+            },
+        },
+        observed = {
+            snapshot = {
+                multiwan = {
+                    backend = 'openwrt',
+                    source = 'mwan3',
+                    interfaces_by_semantic = {
+                        modem_primary = {
+                            interface = 'modem_primary',
+                            ifname = 'wwan0',
+                            state = 'offline',
+                            usable = false,
+                        },
+                    },
+                },
+            },
+        },
+    }, { now = 42 })
+
+    local uplink = ok(model.uplinks.gsm_primary, 'gsm uplink expected')
+    eq(uplink.state, 'offline')
+    eq(uplink.usable, false)
+    eq(uplink.source.id, 'primary')
+    eq(uplink.ifname, 'wwan0')
 end
 
 return tests
