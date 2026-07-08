@@ -409,10 +409,11 @@ function Observer:handle_socket_stream(st)
 		local rec = cjson.decode(line)
 		local trig = normalise_hotplug_record(rec)
 		if trig then
+			local trigger_log_level = is_transient_mwan_action(trig) and 'debug' or 'info'
 			if trig.source == 'mwan3' or trig.kind == 'mwan3' then
-				log(self, 'info', { what = 'network_observer_mwan3_trigger', summary = trigger_summary(trig), trigger = trig })
+				log(self, trigger_log_level, { what = 'network_observer_mwan3_trigger', summary = trigger_summary(trig), trigger = trig })
 			elseif trig.directory == 'iface' or trig.directory == 'net' then
-				log(self, 'info', { what = 'network_observer_hotplug_trigger', summary = trigger_summary(trig), trigger = trig })
+				log(self, trigger_log_level, { what = 'network_observer_hotplug_trigger', summary = trigger_summary(trig), trigger = trig })
 			end
 			self:ingest(trig)
 		end

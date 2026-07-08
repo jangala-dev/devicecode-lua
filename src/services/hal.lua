@@ -597,8 +597,13 @@ function HalService.start(conn, opts)
 		and opts.manager_shutdown_timeout_s
 		or DEFAULT_MANAGER_SHUTDOWN_TIMEOUT_S
 
-	local cap_emit_ch = channel.new(DEFAULT_Q_LEN)
-	local dev_ev_ch   = channel.new(DEFAULT_Q_LEN)
+	local cap_emit_ch      = channel.new(DEFAULT_Q_LEN)
+	local dev_ev_ch        = channel.new(DEFAULT_Q_LEN)
+	local config_result_ch = channel.new(DEFAULT_Q_LEN)
+
+	local config_generation = 0
+	local active_config_generation = nil
+	local pending_config = nil
 
 	local managers = {}
 	local registry = {
@@ -1103,6 +1108,48 @@ function HalService.start(conn, opts)
 		})
 	end
 
+	local function drain_lifecycle_internal_event(label, source, payload)
+		if source == 'cap_emit' then
+			on_cap_emit(payload)
+			return true
+		end
+
+		if source == 'device_event' then
+			on_device_event(payload)
+			return true
+		end
+
+		log('warn', 'hal_lifecycle_pump_unknown_source', {
+			label = tostring(label),
+			source = tostring(source),
+		})
+		return false
+	end
+
+	local function perform_manager_lifecycle_op_with_hal_pump(label, result_op)
+		local result_ch = channel.new(1)
+		local spawned, spawn_err = fibers.spawn(function()
+			local results = pack(perform(result_op))
+			perform(result_ch:put_op(results))
+		end)
+		if spawned ~= true then return nil, tostring(spawn_err or 'lifecycle worker spawn failed') end
+
+		while true do
+			local source, a = perform(op.named_choice({
+				result       = result_ch:get_op(),
+				cap_emit     = cap_emit_ch:get_op(),
+				device_event = dev_ev_ch:get_op(),
+			}))
+
+			if source == 'result' then
+				return unpack(a, 1, a.n)
+			end
+
+			drain_lifecycle_internal_event(label, source, a)
+		end
+	end
+
+
 	local dependency_resolver, dependency_resolver_err = dependencies.resolver(conn)
 	if not dependency_resolver then
 		error('HAL dependency resolver failed: ' .. tostring(dependency_resolver_err), 0)
@@ -1120,23 +1167,36 @@ function HalService.start(conn, opts)
 			manager   = name,
 		})
 
-		return perform(manager_call_with_timeout_op(
-			name,
-			manager,
-			'start',
-			manager_start_timeout_s,
-			manager_logger,
-			dev_ev_ch,
-			cap_emit_ch,
-			dependencies.manager_options(name, dependency_resolver, { service_name = svc.name })
-		))
+		return perform_manager_lifecycle_op_with_hal_pump(
+			'manager_start:' .. tostring(name),
+			manager_call_with_timeout_op(
+				name,
+				manager,
+				'start',
+				manager_start_timeout_s,
+				manager_logger,
+				dev_ev_ch,
+				cap_emit_ch,
+				dependencies.manager_options(name, dependency_resolver, { service_name = svc.name })
+			)
+		)
 	end
 
-	local function apply_manager_config(name, manager, manager_config)
+	local function apply_manager_config_with_wait(name, manager, manager_config, opts)
+		opts = opts or {}
+		local wait = opts.wait
+		local function wait_for(label, wait_op)
+			if type(wait) == 'function' then return wait(label, wait_op) end
+			return perform(wait_op)
+		end
+
 		local timeout_s = manager_apply_timeout_for(name)
 		local has_op_method = type(manager.apply_config_op) == 'function'
 		if not has_op_method or type(timeout_s) ~= 'number' or timeout_s < 0 then
-			local ok, err = perform(manager_call_op(name, manager, 'apply_config', manager_config))
+			local ok, err = wait_for(
+				'manager_apply:' .. tostring(name),
+				manager_call_op(name, manager, 'apply_config', manager_config)
+			)
 			if ok == true then return 'applied', nil end
 			return 'failed', err
 		end
@@ -1148,10 +1208,13 @@ function HalService.start(conn, opts)
 		end)
 		if spawned ~= true then return 'failed', tostring(spawn_err or 'manager apply worker spawn failed') end
 
-		local which, result = perform(op.named_choice({
-			result = result_ch:get_op(),
-			timeout = sleep.sleep_op(timeout_s),
-		}))
+		local which, result = wait_for(
+			'manager_apply_wait:' .. tostring(name),
+			op.named_choice({
+				result = result_ch:get_op(),
+				timeout = sleep.sleep_op(timeout_s),
+			})
+		)
 		if which == 'result' then
 			if result and result.ok == true then return 'applied', nil end
 			return 'failed', result and result.err or 'manager apply failed'
@@ -1169,62 +1232,131 @@ function HalService.start(conn, opts)
 		return 'pending_after_timeout', 'timeout'
 	end
 
-	local function on_config(config)
-		svc:obs_event('config_begin', {})
+	local function apply_manager_config(name, manager, manager_config)
+		return apply_manager_config_with_wait(name, manager, manager_config, {
+			wait = perform_manager_lifecycle_op_with_hal_pump,
+		})
+	end
 
-		local valid, valid_err = validate_config(config)
-		if not valid then
-			log('warn', 'config_invalid', { err = valid_err })
-			svc:obs_event('config_end', { ok = false, err = valid_err })
-			return
-		end
+	local function copy_list(list)
+		local out = {}
+		for i, v in ipairs(list or {}) do out[i] = v end
+		return out
+	end
 
-		local pending_managers = {}
-		local failed_managers = {}
+	local function copy_map(map)
+		local out = {}
+		for k, v in pairs(map or {}) do out[k] = v end
+		return out
+	end
+
+	local function build_config_generation_plan(config)
+		local plan = { entries = {}, removals = {}, failed_managers = {}, start_errors = {} }
 
 		for name, manager_config in pairs(config) do
 			if name ~= 'schema' then
-				if not managers[name] then
+				local entry = {
+					name = name,
+					manager_config = manager_config,
+					manager = managers[name],
+				}
+				if not entry.manager then
 					local ok, manager = pcall(require, "services.hal.managers." .. name)
 					if not ok then
-						log('error', 'manager_require_failed', { manager = name, err = tostring(manager) })
-						failed_managers[#failed_managers + 1] = name
+						local err = tostring(manager)
+						plan.failed_managers[#plan.failed_managers + 1] = name
+						plan.start_errors[name] = err
 					else
+						local valid, valid_err = validate_strict_manager(name, manager)
+						if not valid then error(valid_err, 0) end
 						local start_ok, start_err = start_manager(name, manager)
 						if start_ok ~= true then
-							log('error', 'manager_start_failed', { manager = name, err = tostring(start_err) })
-							failed_managers[#failed_managers + 1] = name
+							plan.failed_managers[#plan.failed_managers + 1] = name
+							plan.start_errors[name] = tostring(start_err)
 						else
+							entry.manager = manager
 							managers[name] = manager
 							svc:obs_event('manager_started', { manager = name })
 						end
 					end
+				else
+					local valid, valid_err = validate_strict_manager(name, entry.manager)
+					if not valid then error(valid_err, 0) end
 				end
-
-				local manager = managers[name]
-				if manager then
-					local status, apply_err = apply_manager_config(name, manager, manager_config)
-					if status == 'pending_after_timeout' then
-						pending_managers[#pending_managers + 1] = name
-					elseif status ~= 'applied' then
-						failed_managers[#failed_managers + 1] = name
-						log('error', 'manager_apply_failed', { manager = name, err = tostring(apply_err) })
-					end
-				end
+				if entry.manager then plan.entries[#plan.entries + 1] = entry end
 			end
 		end
 
 		for name, manager in pairs(managers) do
 			if not config[name] then
-				managers[name] = nil
-				svc:obs_event('manager_stopping', { manager = name, reason = 'removed_from_config' })
-				shutdown_manager_async(name, manager, 'removed_from_config')
+				plan.removals[#plan.removals + 1] = { name = name, manager = manager }
 			end
 		end
 
+		return plan
+	end
+
+	local function run_config_generation(generation, plan)
+		local result = {
+			generation = generation,
+			pending_managers = {},
+			failed_managers = copy_list(plan.failed_managers),
+			start_errors = copy_map(plan.start_errors),
+			apply_errors = {},
+			removals = plan.removals or {},
+		}
+
+		for _, entry in ipairs(plan.entries or {}) do
+			local name = entry.name
+			local manager = entry.manager
+			if manager then
+				local ok, status, apply_err = pcall(apply_manager_config_with_wait, name, manager, entry.manager_config)
+				if not ok then
+					result.failed_managers[#result.failed_managers + 1] = name
+					result.apply_errors[name] = tostring(status)
+				elseif status == 'pending_after_timeout' then
+					result.pending_managers[#result.pending_managers + 1] = name
+				elseif status ~= 'applied' then
+					result.failed_managers[#result.failed_managers + 1] = name
+					result.apply_errors[name] = tostring(apply_err)
+				end
+			end
+		end
+
+		return result
+	end
+
+	local start_config_generation
+
+	local function finish_config_result(result)
+		if type(result) ~= 'table' then return end
+		local generation = result.generation
+		if generation ~= active_config_generation then
+			log('debug', 'hal_config_generation_stale', { generation = generation, active_generation = active_config_generation })
+			return
+		end
+
+		for name, err in pairs(result.start_errors or {}) do
+			log('error', 'manager_start_failed', { manager = name, err = tostring(err), generation = generation })
+		end
+		for name, err in pairs(result.apply_errors or {}) do
+			log('error', 'manager_apply_failed', { manager = name, err = tostring(err), generation = generation })
+		end
+
+		for _, rec in ipairs(result.removals or {}) do
+			if managers[rec.name] == rec.manager then
+				managers[rec.name] = nil
+				svc:obs_event('manager_stopping', { manager = rec.name, reason = 'removed_from_config', generation = generation })
+				shutdown_manager_async(rec.name, rec.manager, 'removed_from_config')
+			end
+		end
+
+		local pending_managers = result.pending_managers or {}
+		local failed_managers = result.failed_managers or {}
 		local config_ok = #failed_managers == 0
 		local config_degraded = (#pending_managers > 0 or #failed_managers > 0) or nil
 		svc:obs_event('config_end', {
+			generation = generation,
 			ok = config_ok,
 			degraded = config_degraded,
 			pending_managers = (#pending_managers > 0) and pending_managers or nil,
@@ -1241,12 +1373,56 @@ function HalService.start(conn, opts)
 		end
 		log(config_ok and (config_degraded and 'warn' or 'info') or 'error', hal_what, {
 			summary = hal_summary,
+			generation = generation,
 			ok = config_ok,
 			degraded = config_degraded,
 			pending_managers = (#pending_managers > 0) and pending_managers or nil,
 			failed_managers = (#failed_managers > 0) and failed_managers or nil,
 		})
+
+		active_config_generation = nil
+		if pending_config then
+			local next_config = pending_config
+			pending_config = nil
+			start_config_generation(next_config)
+		end
 	end
+
+	function start_config_generation(config)
+		svc:obs_event('config_begin', {})
+		local valid, valid_err = validate_config(config)
+		if not valid then
+			log('warn', 'config_invalid', { err = valid_err })
+			svc:obs_event('config_end', { ok = false, err = valid_err })
+			return
+		end
+
+		config_generation = config_generation + 1
+		local generation = config_generation
+		active_config_generation = generation
+		svc:obs_event('config_generation_started', { generation = generation })
+		local plan = build_config_generation_plan(config)
+		local spawned, spawn_err = fibers.spawn(function()
+			local ok, result = pcall(run_config_generation, generation, plan)
+			if ok ~= true then
+				result = {
+					generation = generation,
+					pending_managers = {},
+					failed_managers = { '_config_generation' },
+					start_errors = {},
+					apply_errors = { _config_generation = tostring(result) },
+					removals = {},
+				}
+			end
+			perform(config_result_ch:put_op(result))
+		end)
+		if spawned ~= true then
+			active_config_generation = nil
+			log('error', 'hal_config_worker_spawn_failed', { generation = generation, err = tostring(spawn_err) })
+			svc:obs_event('config_end', { generation = generation, ok = false, err = tostring(spawn_err) })
+		end
+	end
+
 
 	local function bootstrap()
 		svc:obs_event('bootstrap_begin', {})
@@ -1300,11 +1476,16 @@ function HalService.start(conn, opts)
 
 	local function on_config_message(msg)
 		local cfg_data = msg and msg.payload and msg.payload.data
-		if type(cfg_data) == 'table' then
-			on_config(cfg_data)
-		else
+		if type(cfg_data) ~= 'table' then
 			log('warn', 'config_bad_shape', { payload = msg and msg.payload })
+			return
 		end
+		if active_config_generation then
+			pending_config = cfg_data
+			log('debug', 'hal_config_deferred', { active_generation = active_config_generation })
+			return
+		end
+		start_config_generation(cfg_data)
 	end
 
 	local config_sub
@@ -1351,12 +1532,14 @@ function HalService.start(conn, opts)
 	svc:obs_log('debug', { what = 'subscribed', topic = 'cfg/' .. svc.name })
 
 	while true do
+		local fault_op = active_config_generation and op.never() or op.choice(manager_fault_ops())
 		local source, a, b = perform(op.named_choice({
 			rpc           = op.choice(registry:rpc_ops()),
-			manager_fault = op.choice(manager_fault_ops()),
+			manager_fault = fault_op,
 			cap_emit      = cap_emit_ch:get_op(),
 			device_event  = dev_ev_ch:get_op(),
 			config        = config_sub:recv_op(),
+			config_result = config_result_ch:get_op(),
 		}))
 
 		if source == 'rpc' then
@@ -1367,6 +1550,8 @@ function HalService.start(conn, opts)
 			on_device_event(a)
 		elseif source == 'config' then
 			on_config_message(a)
+		elseif source == 'config_result' then
+			finish_config_result(a)
 		elseif source == 'manager_fault' then
 			on_manager_fault(a)
 		else
