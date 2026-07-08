@@ -254,24 +254,18 @@
             "zone": "lan_rst"
           },
           "shaping": {
-            "download": {
-              "limit": "100mbit"
-            },
-            "upload": {
-              "limit": "100mbit"
-            },
             "host_default": {
               "mode": "budgeted_peak",
               "all_hosts": true,
               "download": {
-                "sustained_rate": "2mbit",
-                "peak_rate": "8mbit",
+                "sustained_rate": "500kbit",
+                "peak_rate": "2mbit",
                 "burst_budget": "500k"
               },
               "upload": {
-                "sustained_rate": "1500kbit",
-                "peak_rate": "6mbit",
-                "burst_budget": "225k"
+                "sustained_rate": "250kbit",
+                "peak_rate": "1mbit",
+                "burst_budget": "250k"
               },
               "fq_codel": {
                 "flows": 1024,
