@@ -647,6 +647,85 @@ function T.op_manager_apply_timeout_reports_pending_not_failed()
 	end, { timeout = 2.0 })
 end
 
+
+function T.manager_lifecycle_pump_drains_device_events_during_config_apply()
+	runfibers.run(function(scope)
+		local fs_manager = new_bootstrap_filesystem_manager()
+		local patches = {
+			['services.hal.managers.filesystem'] = fs_manager,
+		}
+		local config = {
+			schema = 'devicecode.config/hal/1',
+		}
+
+		for i = 1, 14 do
+			local name = string.format('burst_mgr_%02d', i)
+			patches['services.hal.managers.' .. name] = new_capability_manager{
+				name = name,
+				cap_class = 'burst_cap',
+				cap_id = string.format('cap_%02d', i),
+				apply_mode = 'op',
+				offerings = { 'echo' },
+			}
+			config[name] = {}
+		end
+
+		with_real_hal(scope, patches, function(bus)
+			local admin = bus:connect()
+			admin:retain({ 'cfg', 'hal' }, { data = config })
+
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'burst_cap', 'cap_14')
+			local ref, err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(err))
+			listener:close()
+		end, {
+			manager_start_timeout_s = 0.1,
+			manager_apply_timeout_s = 0.1,
+		})
+	end, { timeout = 2.0 })
+end
+
+
+function T.hal_config_application_uses_generation_worker_completion_events()
+	local f = assert(io.open('../src/services/hal.lua', 'r'))
+	local src = f:read('*a')
+	f:close()
+
+	assert(src:find('config_result_ch', 1, true), 'expected config result channel')
+	assert(src:find('active_config_generation', 1, true), 'expected active config generation guard')
+	assert(src:find('pending_config', 1, true), 'expected latest pending config coalescing')
+	assert(src:find('run_config_generation', 1, true), 'expected generation worker body')
+	assert(src:find('finish_config_result', 1, true), 'expected coordinator-side completion handler')
+	assert(src:find('hal_config_deferred', 1, true), 'expected config deferral while a generation is active')
+	assert(src:find('config_result = config_result_ch:get_op()', 1, true), 'main coordinator should receive config completion records')
+
+	assert(not src:find('local rpc_op = active_config_generation and op.never()', 1, true), 'main loop should continue serving capability RPC during active config')
+
+	local worker_start = assert(src:find('local function run_config_generation', 1, true), 'expected run_config_generation block')
+	local worker_end = assert(src:find('local start_config_generation', worker_start, true), 'expected run_config_generation terminator')
+	local worker = src:sub(worker_start, worker_end)
+	assert(not worker:find('on_device_event', 1, true), 'worker must not mutate device registry')
+	assert(not worker:find('on_cap_emit', 1, true), 'worker must not mutate capability registry')
+	assert(not worker:find('start_manager', 1, true), 'worker must not start managers from a short-lived config scope')
+
+	local plan_start = assert(src:find('local function build_config_generation_plan', 1, true), 'expected config planning block')
+	local plan_end = assert(src:find('local function run_config_generation', plan_start, true), 'expected config planning terminator')
+	local plan_block = src:sub(plan_start, plan_end)
+	assert(plan_block:find('start_manager%(name, manager%)'), 'coordinator should start missing managers while planning')
+	assert(plan_block:find('managers%[name%] = manager'), 'coordinator should admit started managers before spawning apply worker')
+
+	local start_start = assert(src:find('function start_config_generation', 1, true), 'expected start_config_generation block')
+	local start_end = assert(src:find('local function bootstrap', start_start, true), 'expected start_config_generation terminator')
+	local start_block = src:sub(start_start, start_end)
+	assert(start_block:find('fibers%.spawn%(function%('), 'apply generation should run in a worker')
+
+	local finish_start = assert(src:find('local function finish_config_result', 1, true), 'expected finish_config_result block')
+	local finish_end = assert(src:find('function start_config_generation', finish_start, true), 'expected finish_config_result terminator')
+	local finish = src:sub(finish_start, finish_end)
+	assert(not finish:find('managers%[rec%.name%] = rec%.manager'), 'finish handler should not admit worker-started managers')
+	assert(finish:find('shutdown_manager_async'), 'coordinator should own manager removal')
+end
+
 function T.unsupported_control_verb_returns_no_route()
 	runfibers.run(function(scope)
 		local fs_manager = new_bootstrap_filesystem_manager()
@@ -785,6 +864,23 @@ function T.strict_hal_managers_do_not_use_perform_raw()
 		f:close()
 		assert(not s:find('perform_raw', 1, true), path .. ' uses perform_raw')
 	end
+end
+
+
+function T.network_manager_control_loops_start_after_driver_configured()
+	local f = assert(io.open('../src/services/hal/managers/network.lua', 'r'))
+	local src = f:read('*a')
+	f:close()
+	local start_s = src:find('function M.start_op', 1, true)
+	local apply_s = src:find('function M.apply_config_op', 1, true)
+	local shutdown_s = src:find('function M.shutdown_op', 1, true)
+	assert(start_s and apply_s and shutdown_s, 'expected network manager lifecycle functions')
+	local start_block = src:sub(start_s, apply_s - 1)
+	local apply_block = src:sub(apply_s, shutdown_s - 1)
+	assert(start_block:find('emit_added', 1, true), 'network start should publish passive capability handles for legacy consumers')
+	assert(not start_block:find('start_control_loops', 1, true), 'network start must not serve requests before config')
+	assert(apply_block:find('state.driver = driver', 1, true), 'network apply should configure driver')
+	assert(apply_block:find('start_control_loops', 1, true), 'network apply should start control loops after driver configuration')
 end
 
 return T

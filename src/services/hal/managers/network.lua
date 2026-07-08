@@ -20,6 +20,9 @@ local state = {
 	cap_emit_ch = nil,
 	driver = nil,
 	controls = {},
+	caps = nil,
+	device_added = false,
+	controls_started = false,
 }
 
 local function log(level, payload)
@@ -89,6 +92,16 @@ local function control_loop_for(kind, ch, methods)
 	control_loop.run_request_loop(ch, methods, state.logger, 'network_' .. tostring(kind))
 end
 
+local function start_control_loops()
+	if state.controls_started == true then return true, nil end
+	if not state.scope then return nil, 'network manager scope not started' end
+	state.scope:spawn(function () control_loop_for('config', state.controls.config, CONFIG_METHODS) end)
+	state.scope:spawn(function () control_loop_for('state', state.controls.state, STATE_METHODS) end)
+	state.scope:spawn(function () control_loop_for('diagnostics', state.controls.diagnostics, DIAGNOSTICS_METHODS) end)
+	state.controls_started = true
+	return true, nil
+end
+
 local function make_capabilities()
 	local cfg_ch = channel.new(16)
 	local state_ch = channel.new(16)
@@ -112,6 +125,10 @@ local function emit_added(dev_ev_ch, caps)
 	return dev_ev_ch:put_op(ev)
 end
 
+-- Network capabilities are published during start so consumers can discover
+-- passive handles early.  The request loops are deliberately not started here:
+-- apply_config_op() must first create the provider driver, otherwise callers
+-- can observe "network driver not configured" during HAL config generation.
 function M.start_op(logger, dev_ev_ch, cap_emit_ch)
 	return op.guard(function ()
 		if state.started then return op.always(true, nil) end
@@ -124,28 +141,28 @@ function M.start_op(logger, dev_ev_ch, cap_emit_ch)
 		state.dev_ev_ch = dev_ev_ch
 		state.cap_emit_ch = cap_emit_ch
 		state.controls = {}
-		local caps = make_capabilities()
+		state.caps = make_capabilities()
+		state.device_added = false
+		state.controls_started = false
 
 		child:finally(function (_, status, primary)
 			M.terminate(primary or status or 'network manager closed')
 		end)
 
-		child:spawn(function () control_loop_for('config', state.controls.config, CONFIG_METHODS) end)
-		child:spawn(function () control_loop_for('state', state.controls.state, STATE_METHODS) end)
-		child:spawn(function () control_loop_for('diagnostics', state.controls.diagnostics, DIAGNOSTICS_METHODS) end)
-
-		return emit_added(dev_ev_ch, caps):wrap(function (ok, err)
-			if ok == false then
-				child:cancel('device_event_failed')
-				return false, err or 'network device event failed'
-			end
-			state.started = true
-			log('debug', { what = 'network_manager_started' })
+		state.started = true
+		log('debug', { what = 'network_manager_started' })
+		return emit_added(dev_ev_ch, state.caps):wrap(function (ok, emit_err)
+			if ok == false then return false, emit_err or 'network device event failed' end
+			state.device_added = true
 			return true, nil
 		end)
 	end)
 end
 
+-- Configuring the driver is the point at which the passive handles become
+-- serviceable.  Start the control loops only after state.driver is ready so
+-- queued requests wait rather than receiving a premature driver-not-configured
+-- failure.
 function M.apply_config_op(config)
 	return op.guard(function ()
 		if not state.started then return op.always(false, 'network manager not started') end
@@ -160,6 +177,8 @@ function M.apply_config_op(config)
 		end
 		state.driver = driver
 		log('debug', { what = 'network_driver_configured', provider = (config and (config.provider or config.backend)) or 'fake' })
+		local loops_ok, loops_err = start_control_loops()
+		if loops_ok ~= true then return op.always(false, loops_err or 'network control loops failed to start') end
 		return op.always(true, nil)
 	end)
 end
@@ -176,6 +195,9 @@ function M.terminate(reason)
 		state.driver:terminate(reason or 'terminated')
 	end
 	state.driver = nil
+	state.caps = nil
+	state.device_added = false
+	state.controls_started = false
 	for _, ch in pairs(state.controls or {}) do
 		if ch and type(ch.close) == 'function' then ch:close(reason or 'terminated') end
 	end
