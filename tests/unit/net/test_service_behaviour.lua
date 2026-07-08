@@ -182,7 +182,70 @@ function tests.test_initial_config_starts_apply_and_publishes_running_state()
 end
 
 
-function tests.test_counter_metrics_publish_generic_topics_with_legacy_namespaces()
+
+function tests.test_backhaul_publishes_configured_gsm_members_even_when_unrealised()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+
+		local c = cfg()
+		c.segments.wan = { kind = 'wan', vlan = { id = 4 }, firewall = { zone = 'wan' }, addressing = { ipv4 = { mode = 'dhcp' } } }
+		c.wan = {
+			members = {
+				wan = { interface = 'wan', weight = 1 },
+				modem_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' }, weight = 1 },
+				modem_secondary = { interface = 'modem_secondary', source = { kind = 'gsm-uplink', id = 'secondary' }, weight = 1 },
+			},
+		}
+
+		retain_network_config_status(conn, 'available')
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = c,
+			rev = 32,
+			hal = success_hal(calls),
+			observe = false,
+		})
+
+		local summary_view = reader:retained_view(topics.summary())
+		probe.wait_versioned_until('net running summary with configured gsm wan members',
+			function () return summary_view:version() end,
+			function (seen) return summary_view:changed_op(seen) end,
+			function ()
+				local msg = summary_view:get(topics.summary())
+				return msg and msg.payload and msg.payload.state == 'running' and msg.payload or nil
+			end,
+			{ timeout = 0.5 })
+
+		local wan_domain = probe.wait_retained_payload(reader, topics.domain('wan'), { timeout = 0.2 })
+		ok(wan_domain.configured_members and wan_domain.configured_members.wan, 'configured WAN catalogue expected')
+		ok(wan_domain.configured_members.modem_primary, 'configured primary modem member expected in NET model')
+		ok(wan_domain.realised_members and wan_domain.realised_members.wan, 'realised wired WAN member expected')
+		eq(wan_domain.realised_members.modem_primary, nil)
+		eq(wan_domain.members, nil)
+
+		local backhaul = probe.wait_retained_payload(reader, topics.domain('backhaul'), { timeout = 0.2 })
+		ok(backhaul.uplinks.wan, 'wired WAN member expected')
+		ok(backhaul.uplinks.modem_primary, 'configured primary modem WAN member expected')
+		ok(backhaul.uplinks.modem_secondary, 'configured secondary modem WAN member expected')
+		eq(backhaul.uplinks.modem_primary.state, 'unknown')
+		eq(backhaul.uplinks.modem_primary.observed, false)
+		eq(backhaul.uplinks.modem_primary.source.kind, 'gsm-uplink')
+		eq(backhaul.uplinks.modem_primary.source.id, 'primary')
+		-- HAL apply still receives only the realised member set: without GSM ifnames,
+		-- modem interfaces are not written to OpenWrt.
+		eq(calls[1].intent.wan.members.modem_primary, nil)
+		eq(calls[1].intent.wan.members.modem_secondary, nil)
+
+		summary_view:close()
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+function tests.test_counter_metrics_publish_generic_topics_with_member_namespaces()
 	fibers.run(function (scope)
 		local b = busmod.new()
 		local conn = b:connect()
@@ -243,8 +306,8 @@ function tests.test_counter_metrics_publish_generic_topics_with_legacy_namespace
 			['net.adm.rx_bytes'] = 1001,
 			['net.jan.tx_errors'] = 2008,
 			['net.wan.rx_packets'] = 3002,
-			['net.mdm0.rx_dropped'] = 4003,
-			['net.mdm1.tx_packets'] = 5006,
+			['net.modem_primary.rx_dropped'] = 4003,
+			['net.modem_secondary.tx_packets'] = 5006,
 		}
 		local seen = {}
 		local deadline = fibers.now() + 2.0

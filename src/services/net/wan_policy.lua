@@ -135,7 +135,7 @@ end
 
 function M.collect_uplinks(snapshot)
 	local out = {}
-	local members = snapshot and snapshot.wan and snapshot.wan.members or {}
+	local members = snapshot and snapshot.wan and snapshot.wan.configured_members or {}
 	local keys = sorted_keys(members)
 	for i = 1, #keys do
 		local uplink_id = keys[i]
