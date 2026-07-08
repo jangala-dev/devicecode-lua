@@ -15,6 +15,7 @@ local files = {
 	'../src/services/device/model.lua',
 	'../src/services/device/publisher.lua',
 	'../src/services/device/projection.lua',
+	'../src/services/device/mcu_metrics.lua',
 	'../src/services/device/catalogue.lua',
 	'../src/services/device/component_mcu.lua',
 	'../src/services/device/component_host.lua',
