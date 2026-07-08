@@ -14,6 +14,9 @@ local function assert_eq(a, b, msg) if a ~= b then fail(msg or ('expected ' .. t
 local function assert_true(v, msg) if v ~= true then fail(msg or ('expected true, got ' .. tostring(v))) end end
 local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, got ' .. tostring(v))) end end
 local function assert_not_nil(v, msg) if v == nil then fail(msg or 'expected non-nil') end end
+local function assert_close(a, b, msg)
+	if math.abs(a - b) > 0.000001 then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end
+end
 
 local function key(topic) return table.concat(topic, '/') end
 local function fake_conn()
@@ -54,6 +57,34 @@ local function fake_conn()
 	return c
 end
 
+local function fake_svc()
+	local svc = { metrics = {} }
+	function svc:obs_metric(name, payload)
+		self.metrics[#self.metrics + 1] = { name = name, payload = payload }
+	end
+	return svc
+end
+
+local function metrics_by_namespace(svc)
+	local out = {}
+	for i = 1, #(svc.metrics or {}) do
+		local rec = svc.metrics[i]
+		out[table.concat(rec.payload.namespace or {}, '.')] = rec
+	end
+	return out
+end
+
+local function assert_metric(map, namespace, name, value)
+	local rec = map[namespace]
+	assert_not_nil(rec, 'missing metric ' .. namespace)
+	assert_eq(rec.name, name, 'metric topic key mismatch for ' .. namespace)
+	if type(value) == 'number' then
+		assert_close(rec.payload.value, value, 'metric value mismatch for ' .. namespace)
+	else
+		assert_eq(rec.payload.value, value, 'metric value mismatch for ' .. namespace)
+	end
+end
+
 local function cfg_one(extra)
 	local c = {
 		schema = config.SCHEMA,
@@ -63,6 +94,24 @@ local function cfg_one(extra)
 	}
 	if extra then for k, v in pairs(extra) do c[k] = v end end
 	return c
+end
+
+local function cfg_mcu_metrics()
+	return {
+		schema = config.SCHEMA,
+		components = {
+			mcu = {
+				subtype = 'mcu',
+				facts = {
+					runtime_memory = topics.raw_member_state('mcu', 'runtime', 'memory'),
+					environment_temperature = topics.raw_member_state('mcu', 'environment', 'temperature'),
+					environment_humidity = topics.raw_member_state('mcu', 'environment', 'humidity'),
+					power_battery = topics.raw_member_state('mcu', 'power', 'battery'),
+					power_charger = topics.raw_member_state('mcu', 'power', 'charger'),
+				},
+			},
+		},
+	}
 end
 
 
@@ -230,6 +279,127 @@ function tests.test_publication_coalesces_repeated_materially_identical_observat
 		assert_true(service.flush_publication(state))
 		assert_eq(conn.retain_calls, retain_after_first)
 		assert_eq(conn.publish_calls, publish_after_first)
+	end)
+end
+
+function tests.test_mcu_dirty_publication_emits_mcu_metrics()
+	fibers.run(function (scope)
+		local conn = fake_conn()
+		local state = service.build_state(scope, {
+			conn = conn,
+			enable_actions = false,
+			enable_observers = false,
+			now = function () return 100 end,
+		})
+
+		assert_true(service.apply_config_payload(state, cfg_mcu_metrics()))
+		local generation = state.active.generation
+		local observations = {
+			{ fact = 'runtime_memory', payload = { alloc_bytes = 32768 } },
+			{ fact = 'environment_temperature', payload = { deci_c = 234 } },
+			{ fact = 'environment_humidity', payload = { rh_x100 = 4512 } },
+			{ fact = 'power_battery', payload = {
+				pack_mV = 12800,
+				ibat_mA = -120,
+				temp_mC = 24500,
+			} },
+			{ fact = 'power_charger', payload = {
+				vin_mV = 24000,
+				vsys_mV = 12800,
+				iin_mA = 500,
+				state_bits = 0x0142,
+				status_bits = 0x000d,
+				system_bits = 0x2045,
+			} },
+		}
+		for i = 1, #observations do
+			local obs = observations[i]
+			assert_true(service.reduce_event(state, {
+				kind = 'component_observation',
+				generation = generation,
+				component = 'mcu',
+				tag = 'fact_retained',
+				fact = obs.fact,
+				payload = obs.payload,
+			}))
+		end
+
+		local svc = fake_svc()
+		state.svc = svc
+		local ok, err = service.flush_publication(state)
+		assert_true(ok, err)
+
+		local metrics = metrics_by_namespace(svc)
+		assert_metric(metrics, 'mcu.sys.mem.alloc', 'alloc', 32768)
+		assert_metric(metrics, 'mcu.env.temperature.core', 'core', 23.4)
+		assert_metric(metrics, 'mcu.env.humidity.core', 'core', 45.12)
+		assert_metric(metrics, 'mcu.power.temperature.internal', 'internal', 24.5)
+		assert_metric(metrics, 'mcu.power.battery.internal.vbat', 'vbat', 12800)
+		assert_metric(metrics, 'mcu.power.battery.internal.ibat', 'ibat', -120)
+		assert_metric(metrics, 'mcu.power.charger.internal.vin', 'vin', 24000)
+		assert_metric(metrics, 'mcu.power.charger.internal.vsys', 'vsys', 12800)
+		assert_metric(metrics, 'mcu.power.charger.internal.iin', 'iin', 500)
+		assert_metric(metrics,
+			'mcu.power.charger.internal.system.charger_enabled', 'charger_enabled', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.system.ok_to_charge', 'ok_to_charge', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.system.vin_gt_vbat', 'vin_gt_vbat', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.status.iin_limited', 'iin_limited', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.status.uvcl_active', 'uvcl_active', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.status.cc_phase', 'cc_phase', false)
+		assert_metric(metrics, 'mcu.power.charger.internal.status.cv_phase', 'cv_phase', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.state.bat_missing', 'bat_missing', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.state.cccv', 'cccv', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.state.suspended', 'suspended', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.state.bat_short', 'bat_short', false)
+	end)
+end
+
+function tests.test_mcu_metrics_skip_empty_component_values()
+	fibers.run(function (scope)
+		local conn = fake_conn()
+		local state = service.build_state(scope, {
+			conn = conn,
+			enable_actions = false,
+			enable_observers = false,
+			now = function () return 100 end,
+		})
+
+		assert_true(service.apply_config_payload(state, cfg_mcu_metrics()))
+		local svc = fake_svc()
+		state.svc = svc
+		local ok, err = service.flush_publication(state)
+		assert_true(ok, err)
+		assert_eq(#svc.metrics, 0)
+	end)
+end
+
+function tests.test_non_mcu_dirty_publication_does_not_emit_mcu_metrics()
+	fibers.run(function (scope)
+		local conn = fake_conn()
+		local state = service.build_state(scope, {
+			conn = conn,
+			enable_actions = false,
+			enable_observers = false,
+			now = function () return 100 end,
+		})
+
+		assert_true(service.apply_config_payload(state, {
+			schema = config.SCHEMA,
+			components = {
+				host = {
+					class = 'host',
+					subtype = 'cm5',
+					facts = {
+						software = topics.raw_host_cap_state('updater', 'updater', 'cm5', 'software'),
+					},
+				},
+			},
+		}))
+		local svc = fake_svc()
+		state.svc = svc
+		local ok, err = service.flush_publication(state)
+		assert_true(ok, err)
+		assert_eq(#svc.metrics, 0)
 	end)
 end
 
