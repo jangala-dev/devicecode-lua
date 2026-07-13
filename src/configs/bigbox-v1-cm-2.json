@@ -1583,7 +1583,8 @@
       },
       "pipelines": {
         "component_update_lifecycle": {
-          "protocol": "http"
+          "protocol": "http",
+          "process": []
         },
         "wann_type": {
           "template": "any_change"

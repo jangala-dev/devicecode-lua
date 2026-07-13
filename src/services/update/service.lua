@@ -148,6 +148,24 @@ local function software_from_fact(fact)
 	return type(fact) == 'table' and type(fact.software) == 'table' and fact.software or nil
 end
 
+local function meaningful_fact_value(v)
+	if v == nil then return nil end
+	if type(v) == 'userdata' then return nil end
+	if type(v) == 'string' and v == '' then return nil end
+	return v
+end
+
+local function updater_job_id(upd)
+	local job_id = type(upd) == 'table' and upd.job_id or nil
+	if type(job_id) ~= 'string' or job_id == '' then return nil end
+	return job_id
+end
+
+local function updater_error(upd)
+	if type(upd) ~= 'table' then return nil end
+	return meaningful_fact_value(upd.last_error) or meaningful_fact_value(upd.error)
+end
+
 local function expected_image_id(job)
 	if type(job) ~= 'table' then return nil end
 	local meta = type(job.metadata) == 'table' and job.metadata or {}
@@ -171,10 +189,20 @@ end
 local function lifecycle_record(component, fact)
 	local upd = updater_from_fact(fact) or {}
 	return {
-		job_id = upd.job_id,
+		job_id = updater_job_id(upd),
 		component = component or (type(fact) == 'table' and fact.component),
 		state = upd.state,
-		error = upd.last_error or upd.error,
+		error = updater_error(upd),
+	}
+end
+
+local function lifecycle_record_from_job(job)
+	if type(job) ~= 'table' then return nil end
+	return {
+		job_id = job.job_id,
+		component = job.component,
+		state = job.state,
+		error = job.error,
 	}
 end
 
@@ -196,48 +224,159 @@ local function mark_lifecycle_metric_sent(self, record, phase, sent)
 	self._component_lifecycle_sent[lifecycle_metric_key(record, phase)] = sent == true or nil
 end
 
+local function trace_component_lifecycle(self, what, payload)
+	if not (self and self._svc and type(self._svc.obs_log) == 'function') then return end
+	local out = { what = what }
+	for k, v in pairs(payload or {}) do out[k] = v end
+	self._svc:obs_log('trace', out)
+end
+
 local function emit_component_lifecycle_metric(self, record, phase, extra)
+	local key = lifecycle_metric_key(record, phase)
 	if lifecycle_metric_sent(self, record, phase) then
+		trace_component_lifecycle(self, 'component_lifecycle_metric_skipped_duplicate', {
+			key = key,
+			component = record and record.component or nil,
+			job_id = record and record.job_id or nil,
+			phase = phase,
+		})
 		return true, nil
 	end
 	mark_lifecycle_metric_sent(self, record, phase, true)
 
+	trace_component_lifecycle(self, 'component_lifecycle_metric_emit_begin', {
+		key = key,
+		component = record and record.component or nil,
+		job_id = record and record.job_id or nil,
+		phase = phase,
+		state = record and record.state or nil,
+		error = record and record.error or nil,
+	})
 	local ok, err = lifecycle_metrics.emit(self._conn, self._svc, record, phase, extra)
 	if ok ~= true then
 		mark_lifecycle_metric_sent(self, record, phase, false)
 		if self._svc and type(self._svc.obs_log) == 'function' then
-			self._svc:obs_log('warn', { what = 'component_lifecycle_metric_emit_failed', err = tostring(err) })
+			self._svc:obs_log('warn', {
+				what = 'component_lifecycle_metric_emit_failed',
+				key = key,
+				component = record and record.component or nil,
+				job_id = record and record.job_id or nil,
+				phase = phase,
+				err = tostring(err),
+			})
 		end
 		return true, nil
+	end
+	trace_component_lifecycle(self, 'component_lifecycle_metric_emit_ok', {
+		key = key,
+		component = record and record.component or nil,
+		job_id = record and record.job_id or nil,
+		phase = phase,
+	})
+	return true, nil
+end
+
+local function job_lifecycle_phase(job)
+	if type(job) ~= 'table' then return nil, 'job_missing' end
+	if type(job.job_id) ~= 'string' or job.job_id == '' then return nil, 'job_id_missing' end
+	if type(job.component) ~= 'string' or job.component == '' then return nil, 'component_missing' end
+
+	local state = job.state
+	if state == 'created' then return nil, 'job_not_started' end
+	if state == 'succeeded' then return 'completed', 'job_succeeded' end
+	if state == 'failed' or state == 'timed_out' then return 'failed', 'job_failed' end
+	if state == 'cancelled' or state == 'discarded' or state == 'superseded' then
+		return 'cancelled', 'job_cancelled'
+	end
+	if state == 'awaiting_commit' then return 'staged', 'job_staged' end
+	if state == 'staging' or state == 'committing' or state == 'awaiting_return' then
+		return 'started', 'job_active'
+	end
+	return nil, 'job_state_unmapped'
+end
+
+local TERMINAL_LIFECYCLE_PHASE = {
+	completed = true,
+	failed = true,
+	cancelled = true,
+}
+
+local function emit_job_lifecycle_metric(self, job, reason)
+	local phase, phase_reason = job_lifecycle_phase(job)
+	local record = lifecycle_record_from_job(job)
+	trace_component_lifecycle(self, 'job_lifecycle_evaluated', {
+		component = record and record.component or nil,
+		job_id = record and record.job_id or nil,
+		state = record and record.state or nil,
+		error = record and record.error or nil,
+		phase = phase,
+		reason = phase_reason,
+		source_reason = reason,
+	})
+	if not phase then return true, nil end
+
+	if TERMINAL_LIFECYCLE_PHASE[phase] and not lifecycle_metric_sent(self, record, 'started') then
+		local ok_started, serr = emit_component_lifecycle_metric(self, record, 'started', {
+			source = 'update_job_state',
+			reason = 'terminal_without_started',
+			source_reason = reason,
+		})
+		if ok_started ~= true then return ok_started, serr end
+	end
+
+	return emit_component_lifecycle_metric(self, record, phase, {
+		source = 'update_job_state',
+		reason = phase_reason,
+		source_reason = reason,
+	})
+end
+
+local function emit_job_lifecycle_metrics_from_snapshot(self, snapshot, reason)
+	local jobs = snapshot and snapshot.jobs and snapshot.jobs.by_id or nil
+	if type(jobs) ~= 'table' then return true, nil end
+	for _, job in pairs(jobs) do
+		local ok, err = emit_job_lifecycle_metric(self, job, reason)
+		if ok ~= true then return ok, err end
 	end
 	return true, nil
 end
 
 local function component_fact_phase(component, fact, self)
 	local upd = updater_from_fact(fact) or {}
-	if type(upd.job_id) ~= 'string' or upd.job_id == '' then return nil end
-	if upd.state == 'cancelled' or upd.state == 'aborted' then return 'cancelled' end
-	if upd.state == 'failed' or upd.state == 'rollback_detected' or upd.last_error ~= nil or upd.error ~= nil then
-		return 'failed'
+	local job_id = updater_job_id(upd)
+	if not job_id then return nil, 'job_id_missing' end
+	if upd.state == 'cancelled' or upd.state == 'aborted' then return 'cancelled', 'updater_cancelled' end
+	if upd.state == 'failed' or upd.state == 'rollback_detected' or updater_error(upd) ~= nil then
+		return 'failed', 'updater_failed'
 	end
 
 	local record = lifecycle_record(component, fact)
 	if lifecycle_metric_sent(self, record, 'started') then
-		local job = self._jobs and self._jobs:get(upd.job_id) or nil
+		local job = self._jobs and self._jobs:get(job_id) or nil
 		local expected = expected_image_id(job)
 		local sw = software_from_fact(fact)
 		if type(sw) == 'table' and expected and sw.image_id == expected then
-			return 'completed'
+			return 'completed', 'expected_image_seen'
 		end
 	end
 
-	return 'started'
+	return 'started', 'job_observed'
 end
 
 local function emit_component_fact_lifecycle_metric(self, ev)
 	local component = ev and ev.component or nil
 	local fact = ev and ev.payload or nil
-	local phase = component_fact_phase(component, fact, self)
+	local upd = updater_from_fact(fact) or {}
+	local sw = software_from_fact(fact) or {}
+	local phase, phase_reason = component_fact_phase(component, fact, self)
+	trace_component_lifecycle(self, 'component_fact_lifecycle_evaluated', {
+		component = component,
+		job_id = updater_job_id(upd),
+		updater_state = upd.state,
+		software_image_id = sw.image_id,
+		phase = phase,
+		reason = phase_reason,
+	})
 	if not phase then return true, nil end
 	local record = lifecycle_record(component, fact)
 	return emit_component_lifecycle_metric(self, record, phase, {
@@ -667,6 +806,7 @@ local function handle_job_runtime_changed(self, ev)
 	if self._jobs and self._jobs:ready() and not self._job_runtime_ready then
 		self._job_runtime_ready = true
 		update_service_jobs_projection(self)
+		emit_job_lifecycle_metrics_from_snapshot(self, ev.snapshot, 'job_runtime_ready')
 		local ok, err = reconcile_runtime_components(self, 'job_runtime_ready')
 		if ok ~= true then
 			update_model_state(self, 'failed', err or 'runtime_dependents_start_failed')
@@ -674,6 +814,7 @@ local function handle_job_runtime_changed(self, ev)
 		end
 	else
 		update_service_jobs_projection(self)
+		emit_job_lifecycle_metrics_from_snapshot(self, ev.snapshot, 'job_runtime_changed')
 	end
 	if self._current_generation then
 		apply_generation_snapshot(self, self._current_generation.last_snapshot or {
@@ -1285,6 +1426,9 @@ local function ensure_component_watch(self, reason)
 		queue_len = params.component_watch_queue_len,
 		report = service_events.reporter(cw_port, 'update_component_watch_completion_report_failed'),
 		events_tx = self._done_tx,
+		trace = function (_, payload)
+			trace_component_lifecycle(self, payload and payload.what or 'component_watch_trace', payload)
+		end,
 	})
 	if not cwh then return nil, cwerr or 'update_component_watch_start_failed' end
 	self._component_watch = cwh

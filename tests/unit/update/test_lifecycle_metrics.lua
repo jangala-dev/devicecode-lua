@@ -15,7 +15,7 @@ local function assert_nil(v, msg) if v ~= nil then fail(msg or ('expected nil, g
 
 function tests.test_safe_token_replaces_namespace_unsafe_characters()
 	assert_eq(metrics.safe_token('job/mcu.1 ready'), 'job_mcu_1_ready')
-	assert_eq(metrics.safe_token('job-1_ok'), 'job-1_ok')
+	assert_eq(metrics.safe_token('job-1_ok'), 'job_1_ok')
 	assert_eq(metrics.safe_token('///'), 'unknown')
 end
 
@@ -43,6 +43,26 @@ function tests.test_emit_publishes_component_lifecycle_payload()
 	assert_eq(seen.payload.component, 'mcu')
 	assert_eq(seen.payload.state, 'ready')
 	assert_eq(seen.payload.source, 'device_component_fact')
+end
+
+function tests.test_emit_sanitizes_full_uuid_job_id_in_namespace()
+	local seen
+	local svc = {
+		obs_metric = function (_, name, payload)
+			seen = { name = name, payload = payload }
+		end,
+	}
+
+	local job_id = '08be26e5-e0b6-4f11-9c64-d1053e983820'
+	local ok, err = metrics.emit(nil, svc, {
+		job_id = job_id,
+		component = 'mcu',
+		state = 'ready',
+	}, 'started')
+
+	assert_eq(ok, true, err)
+	assert_eq(seen.payload.job_id, job_id)
+	assert_eq(table.concat(seen.payload.namespace, '.'), 'mcu.lifecycle.08be26e5_e0b6_4f11_9c64_d1053e983820.started')
 end
 
 function tests.test_emit_rejects_missing_component_or_phase()

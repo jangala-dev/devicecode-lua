@@ -8,24 +8,26 @@ local M = {}
 
 M.METRIC_NAME = 'component_update_lifecycle'
 
+local METRIC_TOPIC = { 'obs', 'v1', 'update', 'metric', M.METRIC_NAME }
+
 -- Metric payload shape consumed by services.metrics:
 -- {
---   value = 'started' | 'completed' | 'failed' | 'cancelled',
+--   value = 'started' | 'staged' | 'completed' | 'failed' | 'cancelled',
 --   namespace = { '<component>', 'lifecycle', '<job_id>', '<phase>' },
 --   job_id = '<original job id>', component = '<component id>', ...
 -- }
 -- The namespace is later used as a metrics topic suffix, so each segment must
--- avoid separators and whitespace.
+-- avoid separators, whitespace, and dashes.
 
 ---Return a string safe to use as one metric namespace segment.
 ---This is a topic/namespace normaliser, not a security boundary: it preserves
----letters, digits, '_' and '-', replaces every other run with '_', trims edge
+---letters, digits, and '_', replaces every other run with '_', trims edge
 ---underscores, and falls back to 'unknown' if nothing usable remains.
 ---@param value any Original component or job identifier.
 ---@return string token Namespace-safe token.
 local function safe_token(value)
 	local s = tostring(value or '')
-	s = s:gsub('[^%w%-_]', '_')
+	s = s:gsub('[^%w_]', '_')
 	s = s:gsub('_+', '_')
 	s = s:gsub('^_+', ''):gsub('_+$', '')
 	if s == '' then return 'unknown' end
@@ -38,6 +40,28 @@ local function component_of(record)
 	local component = type(record) == 'table' and record.component or nil
 	if type(component) ~= 'string' or component == '' then return nil end
 	return component
+end
+
+local function topic_string(topic)
+	if type(topic) ~= 'table' then return nil end
+	local parts = {}
+	for i = 1, #topic do parts[i] = tostring(topic[i]) end
+	return table.concat(parts, '/')
+end
+
+local function log_bus_publish(svc, what, p, extra)
+	if not (svc and type(svc.obs_log) == 'function') then return end
+	local out = {
+		what = what,
+		metric = M.METRIC_NAME,
+		topic = topic_string(METRIC_TOPIC),
+		namespace = topic_string(type(p) == 'table' and p.namespace or nil),
+		value = type(p) == 'table' and p.value or nil,
+		component = type(p) == 'table' and p.component or nil,
+		job_id = type(p) == 'table' and p.job_id or nil,
+	}
+	for k, v in pairs(extra or {}) do out[k] = v end
+	svc:obs_log('trace', out)
 end
 
 ---Build the metric payload expected by services.metrics.
@@ -53,7 +77,7 @@ local function payload(record, phase, extra)
 
 	local out = {
 		value = phase,
-		namespace = { safe_token(component), 'lifecycle', safe_token(record.job_id), phase },
+		namespace = { safe_token(component), 'lifecycle', safe_token(record.job_id), safe_token(phase) },
 		job_id = record.job_id,
 		component = component,
 		state = record.state,
@@ -72,12 +96,14 @@ end
 ---@return string|nil err Error code when no sink is available.
 local function publish(conn, svc, p)
 	if svc and type(svc.obs_metric) == 'function' then
+		log_bus_publish(svc, 'component_lifecycle_metric_bus_publish', p, { sink = 'service_base' })
 		svc:obs_metric(M.METRIC_NAME, p)
 		return true, nil
 	end
 
 	if conn and type(conn.retain) == 'function' then
-		conn:retain({ 'obs', 'v1', 'update', 'metric', M.METRIC_NAME }, p)
+		log_bus_publish(svc, 'component_lifecycle_metric_bus_publish', p, { sink = 'conn_retain' })
+		conn:retain(METRIC_TOPIC, p)
 		return true, nil
 	end
 

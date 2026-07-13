@@ -547,11 +547,11 @@ function T.component_update_lifecycle_metric_uses_event_namespace()
 
 		test_conn:publish(
 			{ "obs", "v1", "update", "metric", "component_update_lifecycle" },
-			{ value = "started", namespace = { "mcu", "lifecycle", "job-1", "started" } })
+			{ value = "started", namespace = { "mcu", "lifecycle", "job_1", "started" } })
 
 		local msg = recv_metric(clock, result_sub, 0.5)
 		assert(msg ~= nil, "expected lifecycle metric publish")
-		assert(table.concat(msg.topic, ".") == "obs.v1.metrics.output.mcu.lifecycle.job-1.started",
+		assert(table.concat(msg.topic, ".") == "obs.v1.metrics.output.mcu.lifecycle.job_1.started",
 			"unexpected topic " .. table.concat(msg.topic, "."))
 		assert(msg.payload.value == "started",
 			"expected value=started, got " .. tostring(msg.payload.value))

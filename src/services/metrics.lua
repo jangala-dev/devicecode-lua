@@ -44,6 +44,7 @@ local types          = require 'services.metrics.types'
 local unpack = unpack or rawget(table, 'unpack')
 
 local NAME = 'metrics'
+local HTTP_MAX_RECORDS = 25
 
 -------------------------------------------------------------------------------
 -- Topic helpers
@@ -70,6 +71,13 @@ local function now() return runtime.now() end
 
 ---@return number
 local function now_real() return time.realtime() end
+
+local function topic_string(topic)
+	if type(topic) ~= 'table' then return nil end
+	local parts = {}
+	for i = 1, #topic do parts[i] = tostring(topic[i]) end
+	return table.concat(parts, '/')
+end
 
 -------------------------------------------------------------------------------
 -- Metric helpers
@@ -126,6 +134,22 @@ local State = {
 	base_time        = nil,
 	fs_cap           = nil,
 }
+
+local function trace_component_lifecycle_metric_received(metric_name, msg, payload, extra)
+	if metric_name ~= 'component_update_lifecycle' then return end
+	if not (State.svc and type(State.svc.obs_log) == 'function') then return end
+	local out = {
+		what = 'component_lifecycle_metric_received',
+		metric = metric_name,
+		topic = topic_string(msg and msg.topic or nil),
+		namespace = topic_string(type(payload) == 'table' and payload.namespace or nil),
+		value = type(payload) == 'table' and payload.value or nil,
+		component = type(payload) == 'table' and payload.component or nil,
+		job_id = type(payload) == 'table' and payload.job_id or nil,
+	}
+	for k, v in pairs(extra or {}) do out[k] = v end
+	State.svc:obs_log('trace', out)
+end
 
 -------------------------------------------------------------------------------
 -- Config warnings (pure: no service state)
@@ -241,17 +265,113 @@ local function log_publish(data)
 	end
 end
 
+local function log_component_lifecycle_http_payload(data, senml_list, body)
+	if not (State.svc and type(State.svc.obs_log) == 'function') then return end
+	local endpoints = {}
+	for endpoint_str, metric in pairs(data or {}) do
+		if type(endpoint_str) == 'string' and endpoint_str:find('%.lifecycle%.', 1, false) then
+			endpoints[#endpoints + 1] = string.format('%s=%s', endpoint_str, tostring(metric and metric.value))
+		end
+	end
+	if #endpoints == 0 then return end
+
+	local encoded = {}
+	for _, rec in ipairs(senml_list or {}) do
+		if type(rec) == 'table' and type(rec.n) == 'string' and rec.n:find('%.lifecycle%.', 1, false) then
+			local field = rec.v ~= nil and 'v' or rec.vs ~= nil and 'vs' or rec.vb ~= nil and 'vb' or 'unknown'
+			encoded[#encoded + 1] = string.format('%s:%s=%s@%s', rec.n, field, tostring(rec[field]), tostring(rec.t))
+		end
+	end
+
+	State.svc:obs_log('trace', {
+		what = 'component_lifecycle_metric_http_payload',
+		endpoints = table.concat(endpoints, ','),
+		encoded = table.concat(encoded, ','),
+		body_bytes = type(body) == 'string' and #body or nil,
+	})
+end
+
+local function component_lifecycle_http_debug(data, senml_list, channel_id, body)
+	local endpoints = {}
+	for endpoint_str, metric in pairs(data or {}) do
+		if type(endpoint_str) == 'string' and endpoint_str:find('%.lifecycle%.', 1, false) then
+			endpoints[#endpoints + 1] = string.format('%s=%s', endpoint_str, tostring(metric and metric.value))
+		end
+	end
+	if #endpoints == 0 then return nil end
+
+	local encoded = {}
+	for _, rec in ipairs(senml_list or {}) do
+		if type(rec) == 'table' and type(rec.n) == 'string' and rec.n:find('%.lifecycle%.', 1, false) then
+			local field = rec.v ~= nil and 'v' or rec.vs ~= nil and 'vs' or rec.vb ~= nil and 'vb' or 'unknown'
+			encoded[#encoded + 1] = string.format('%s:%s=%s@%s', rec.n, field, tostring(rec[field]), tostring(rec.t))
+		end
+	end
+
+	return {
+		lifecycle_endpoints = table.concat(endpoints, ','),
+		lifecycle_encoded = table.concat(encoded, ','),
+		channel_id = channel_id,
+		body_bytes = type(body) == 'string' and #body or nil,
+	}
+end
+
+local function sorted_metric_keys(data)
+	local keys = {}
+	for endpoint_str in pairs(data or {}) do keys[#keys + 1] = endpoint_str end
+	table.sort(keys)
+	return keys
+end
+
+local function metric_chunks(data, max_records)
+	local keys = sorted_metric_keys(data)
+	local chunks = {}
+	if #keys == 0 then return chunks end
+
+	local limit = tonumber(max_records) or #keys
+	if limit < 1 then limit = #keys end
+
+	for i = 1, #keys, limit do
+		local chunk = {}
+		for j = i, math.min(i + limit - 1, #keys) do
+			local key = keys[j]
+			chunk[key] = data[key]
+		end
+		chunks[#chunks + 1] = chunk
+	end
+	return chunks
+end
+
+local function metric_time_window(data)
+	local min_t, max_t
+	for _, metric in pairs(data or {}) do
+		local t = type(metric) == 'table' and metric.time or nil
+		if type(t) == 'number' then
+			if min_t == nil or t < min_t then min_t = t end
+			if max_t == nil or t > max_t then max_t = t end
+		end
+	end
+	return min_t, max_t
+end
+
+local function log_http_chunk(chunk_index, chunk_count, record_count, body, debug, data)
+	if not (State.svc and type(State.svc.obs_log) == 'function') then return end
+	local min_t, max_t = metric_time_window(data)
+	local out = {
+		what = 'http_publish_chunk',
+		chunk_index = chunk_index,
+		chunk_count = chunk_count,
+		records = record_count,
+		body_bytes = type(body) == 'string' and #body or nil,
+		time_min_ms = min_t,
+		time_max_ms = max_t,
+	}
+	for k, v in pairs(debug or {}) do out[k] = v end
+	State.svc:obs_log('trace', out)
+end
+
 ---@param data table<string, MetricSample>
 local function http_publish(data)
-	local senml_list, encode_err = senml.encode_r('', data)
-	if encode_err then
-		State.svc:obs_log('error', { what = 'senml_encode_failed', err = tostring(encode_err) })
-		return
-	end
-	if #senml_list == 0 then return end
-
-	local body = json.encode(senml_list)
-
 	local valid, config_err = conf.validate_http_config(State.cloud_config)
 	if not valid then
 		State.svc:obs_log('error', { what = 'http_publish_skipped', err = tostring(config_err) })
@@ -274,12 +394,40 @@ local function http_publish(data)
 		State.cloud_config.url, channel_id)
 	local auth  = 'Thing ' .. State.cloud_config.thing_key
 
-	-- Non-blocking enqueue: drop and log if the channel is at capacity.
-	local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body })
-		:or_else(function() return true end))
+	local chunks = metric_chunks(data, HTTP_MAX_RECORDS)
+	for chunk_index, chunk in ipairs(chunks) do
+		local senml_list, encode_err = senml.encode_r('', chunk)
+		if encode_err then
+			State.svc:obs_log('error', {
+				what = 'senml_encode_failed',
+				err = tostring(encode_err),
+				chunk_index = chunk_index,
+				chunk_count = #chunks,
+			})
+		elseif #senml_list > 0 then
+			local body = json.encode(senml_list)
+			log_component_lifecycle_http_payload(chunk, senml_list, body)
+			local debug = component_lifecycle_http_debug(chunk, senml_list, channel_id, body) or {}
+			debug.channel_id = channel_id
+			debug.body_bytes = type(body) == 'string' and #body or nil
+			debug.chunk_index = chunk_index
+			debug.chunk_count = #chunks
+			debug.records = #senml_list
+			log_http_chunk(chunk_index, #chunks, #senml_list, body, debug, chunk)
 
-	if full then
-		State.svc:obs_log('error', { what = 'http_queue_full', err = 'dropping publish payload' })
+			-- Non-blocking enqueue: drop and log if the channel is at capacity.
+			local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body, debug = debug })
+				:or_else(function() return true end))
+
+			if full then
+				State.svc:obs_log('error', {
+					what = 'http_queue_full',
+					err = 'dropping publish payload',
+					chunk_index = chunk_index,
+					chunk_count = #chunks,
+				})
+			end
+		end
 	end
 end
 
@@ -305,6 +453,29 @@ end
 
 local publish_fns = { bus = bus_publish, log = log_publish, http = http_publish }
 
+local function metric_sample_summary(metric)
+	if type(metric) ~= 'table' then return tostring(metric) end
+	return tostring(metric.value)
+end
+
+local function log_publish_batch(protocol, data)
+	if not (State.svc and type(State.svc.obs_log) == 'function') then return end
+	local items = {}
+	for endpoint_str, metric in pairs(data or {}) do
+		items[#items + 1] = tostring(endpoint_str) .. '=' .. metric_sample_summary(metric)
+	end
+	table.sort(items)
+	local min_t, max_t = metric_time_window(data)
+	State.svc:obs_log('trace', {
+		what = 'metrics_publish_batch',
+		protocol = protocol,
+		count = #items,
+		time_min_ms = min_t,
+		time_max_ms = max_t,
+		endpoints = table.concat(items, ','),
+	})
+end
+
 ---@param values table<string, table<string, MetricSample>>
 local function publish_all(values)
 	for protocol, pv in pairs(values) do
@@ -320,6 +491,7 @@ local function publish_all(values)
 		end
 
 		pv = set_timestamps_realtime_millis(State.base_time, pv)
+		log_publish_batch(protocol, pv)
 
 		local fn = publish_fns[protocol]
 		if fn == nil then
@@ -343,9 +515,10 @@ local function handle_metric(msg)
 	if not metric_name then return end
 
 	local pipe_cfg = State.pipelines_map[metric_name]
+	local payload = msg.payload
+	trace_component_lifecycle_metric_received(metric_name, msg, payload, { has_pipeline = pipe_cfg ~= nil })
 	if not pipe_cfg then return end -- no matching pipeline, drop silently
 
-	local payload = msg.payload
 	if type(payload) ~= 'table' then return end
 
 	local value = payload.value
@@ -354,11 +527,22 @@ local function handle_metric(msg)
 	-- Optional namespace overrides the topic used as the SenML name and state key.
 	local topic = payload.namespace or msg.topic
 	if not validate_topic(topic) then
+		trace_component_lifecycle_metric_received(metric_name, msg, payload, {
+			what = 'component_lifecycle_metric_rejected',
+			has_pipeline = true,
+			valid_namespace = false,
+		})
 		State.svc:obs_log('warn', { what = 'metric_invalid_topic', metric = metric_name })
 		return
 	end
 
 	local endpoint_str = table.concat(topic, '.')
+	trace_component_lifecycle_metric_received(metric_name, msg, payload, {
+		what = 'component_lifecycle_metric_accepted',
+		has_pipeline = true,
+		valid_namespace = true,
+		endpoint = endpoint_str,
+	})
 
 	-- Get-or-create per-endpoint processing state.
 	if not State.metric_states[endpoint_str] then
