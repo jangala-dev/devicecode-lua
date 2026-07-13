@@ -42,28 +42,6 @@ local function component_of(record)
 	return component
 end
 
-local function topic_string(topic)
-	if type(topic) ~= 'table' then return nil end
-	local parts = {}
-	for i = 1, #topic do parts[i] = tostring(topic[i]) end
-	return table.concat(parts, '/')
-end
-
-local function log_bus_publish(svc, what, p, extra)
-	if not (svc and type(svc.obs_log) == 'function') then return end
-	local out = {
-		what = what,
-		metric = M.METRIC_NAME,
-		topic = topic_string(METRIC_TOPIC),
-		namespace = topic_string(type(p) == 'table' and p.namespace or nil),
-		value = type(p) == 'table' and p.value or nil,
-		component = type(p) == 'table' and p.component or nil,
-		job_id = type(p) == 'table' and p.job_id or nil,
-	}
-	for k, v in pairs(extra or {}) do out[k] = v end
-	svc:obs_log('trace', out)
-end
-
 ---Build the metric payload expected by services.metrics.
 ---@param record table Lifecycle record with job_id/component/state/error fields.
 ---@param phase string Lifecycle phase to publish.
@@ -96,13 +74,11 @@ end
 ---@return string|nil err Error code when no sink is available.
 local function publish(conn, svc, p)
 	if svc and type(svc.obs_metric) == 'function' then
-		log_bus_publish(svc, 'component_lifecycle_metric_bus_publish', p, { sink = 'service_base' })
 		svc:obs_metric(M.METRIC_NAME, p)
 		return true, nil
 	end
 
 	if conn and type(conn.retain) == 'function' then
-		log_bus_publish(svc, 'component_lifecycle_metric_bus_publish', p, { sink = 'conn_retain' })
 		conn:retain(METRIC_TOPIC, p)
 		return true, nil
 	end

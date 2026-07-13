@@ -27,15 +27,6 @@ local blob_source  = require 'devicecode.blob_source'
 local QUEUE_SIZE   = 10
 local HTTP_TIMEOUT = 60
 
-local function with_debug(payload, debug)
-	local out = {}
-	for k, v in pairs(payload or {}) do out[k] = v end
-	if type(debug) == 'table' then
-		for k, v in pairs(debug) do out[k] = v end
-	end
-	return out
-end
-
 --- Send a single HTTP payload to the cloud via the HTTP capability service,
 --- retrying with exponential backoff on failure.  Returns only when the send
 --- succeeds or the enclosing scope is cancelled.
@@ -47,13 +38,12 @@ local function send_http(http_ref, data, log_fn)
 	local uri            = data.uri
 	local body           = data.body
 	local auth           = data.auth
-	local debug          = data.debug
 
 	local sleep_duration = 1
 	local reply
 
 	while not reply do
-		log_fn('trace', with_debug({ what = 'http_publish_attempt', status = 'started' }, debug))
+		log_fn('trace', { what = 'http_publish_attempt', status = 'started' })
 		local which, result, err = fibers.perform(op.named_choice({
 			response = http_ref:exchange_op({
 				method      = 'POST',
@@ -66,11 +56,11 @@ local function send_http(http_ref, data, log_fn)
 			}),
 			timeout  = sleep.sleep_op(HTTP_TIMEOUT),
 		}))
-		log_fn('trace', with_debug({ what = 'http_publish_attempt', status = which }, debug))
+		log_fn('trace', { what = 'http_publish_attempt', status = which })
 
 		if which == 'timeout' or not result then
 			local err_msg = which == 'timeout' and 'timeout' or tostring(err)
-			log_fn('debug', with_debug({ what = 'http_retry', retry_in_s = sleep_duration, err = err_msg }, debug))
+			log_fn('debug', { what = 'http_retry', retry_in_s = sleep_duration, err = err_msg })
 			sleep.sleep(sleep_duration)
 			sleep_duration = math.min(sleep_duration * 2, 60)
 		else
@@ -84,13 +74,13 @@ local function send_http(http_ref, data, log_fn)
 		for k, v in pairs(reply.result and reply.result.headers or {}) do
 			table.insert(parts, string.format('\t%s: %s', k, v))
 		end
-		log_fn('warn', with_debug({
+		log_fn('warn', {
 			what    = 'http_publish_failed',
 			status  = tostring(status),
 			headers = table.concat(parts, '\n'),
-		}, debug))
+		})
 	else
-		log_fn('trace', with_debug({ what = 'http_publish_ok', status = status }, debug))
+		log_fn('trace', { what = 'http_publish_ok', status = status })
 	end
 end
 
