@@ -562,12 +562,6 @@ function tests.test_component_device_fact_job_id_emits_lifecycle_started_metric(
 			config = component_config("mcu"),
 		})
 
-		assert(caller:call(topics.update_manager_rpc("create-job"), {
-			job_id = "job/mcu.1",
-			component = "mcu",
-			artifact_ref = "artifact-mcu",
-		}, { timeout = 0.5 }))
-
 		retain_component_fact(caller, "mcu", {
 			job_id = "job/mcu.1",
 			image_id = "image-old",
@@ -590,12 +584,6 @@ function tests.test_component_device_fact_json_null_error_still_emits_lifecycle_
 			config = component_config("mcu"),
 		})
 
-		assert(caller:call(topics.update_manager_rpc("create-job"), {
-			job_id = "job/mcu.null-error",
-			component = "mcu",
-			artifact_ref = "artifact-mcu",
-		}, { timeout = 0.5 }))
-
 		retain_component_fact(caller, "mcu", {
 			job_id = "job/mcu.null-error",
 			updater_state = "ready",
@@ -617,14 +605,20 @@ function tests.test_component_device_fact_expected_image_emits_lifecycle_complet
 	fibers.run(function (root_scope)
 		local child, caller = start_service(root_scope, {
 			config = component_config("mcu"),
+			initial_jobs = {
+				jobs = {
+					["j-success"] = {
+						job_id = "j-success",
+						component = "mcu",
+						artifact_ref = "artifact-mcu",
+						expected_image_id = "image-new",
+						state = "staging",
+						created_seq = 1,
+						updated_seq = 1,
+					},
+				},
+			},
 		})
-
-		assert(caller:call(topics.update_manager_rpc("create-job"), {
-			job_id = "j-success",
-			component = "mcu",
-			artifact_ref = "artifact-mcu",
-			metadata = { expected_image_id = "image-new" },
-		}, { timeout = 0.5 }))
 
 		retain_component_fact(caller, "mcu", {
 			job_id = "j-success",
@@ -653,12 +647,6 @@ function tests.test_component_device_fact_error_emits_lifecycle_failed_metric()
 			config = component_config("mcu"),
 		})
 
-		assert(caller:call(topics.update_manager_rpc("create-job"), {
-			job_id = "j-fail",
-			component = "mcu",
-			artifact_ref = "artifact-mcu",
-		}, { timeout = 0.5 }))
-
 		retain_component_fact(caller, "mcu", {
 			job_id = "j-fail",
 			updater_state = "failed",
@@ -681,12 +669,6 @@ function tests.test_component_device_fact_cancelled_emits_lifecycle_cancelled_me
 		local child, caller = start_service(root_scope, {
 			config = component_config("mcu"),
 		})
-
-		assert(caller:call(topics.update_manager_rpc("create-job"), {
-			job_id = "j-cancel",
-			component = "mcu",
-			artifact_ref = "artifact-mcu",
-		}, { timeout = 0.5 }))
 
 		retain_component_fact(caller, "mcu", {
 			job_id = "j-cancel",
@@ -737,14 +719,14 @@ function tests.test_job_state_awaiting_commit_emits_lifecycle_staged_metric_with
 		end
 
 		local child, caller = start_service(root_scope, {
-			config = component_config("mcu"),
+			config = component_config("cm5"),
 			backend = backend,
 		})
 
 		assert(caller:call(topics.update_manager_rpc("create-job"), {
 			job_id = "j-state-staged",
-			component = "mcu",
-			artifact_ref = "artifact-mcu",
+			component = "cm5",
+			artifact_ref = "artifact-cm5",
 			expected_image_id = "image-new",
 		}, { timeout = 0.5 }))
 		assert(caller:call(topics.update_manager_rpc("start-job"), {
@@ -752,7 +734,7 @@ function tests.test_job_state_awaiting_commit_emits_lifecycle_staged_metric_with
 		}, { timeout = 0.5 }))
 
 		local metric = wait_lifecycle_metric(caller, "staged")
-		assert_eq(table.concat(metric.namespace, "."), "mcu.lifecycle.j_state_staged.staged")
+		assert_eq(table.concat(metric.namespace, "."), "cm5.lifecycle.j_state_staged.staged")
 		assert_eq(metric.job_id, "j-state-staged")
 		assert_eq(metric.source, "update_job_state")
 
@@ -768,14 +750,14 @@ function tests.test_job_state_failure_emits_lifecycle_failed_metric_without_comp
 		end
 
 		local child, caller = start_service(root_scope, {
-			config = component_config("mcu"),
+			config = component_config("cm5"),
 			backend = backend,
 		})
 
 		assert(caller:call(topics.update_manager_rpc("create-job"), {
 			job_id = "j-state-fail",
-			component = "mcu",
-			artifact_ref = "artifact-mcu",
+			component = "cm5",
+			artifact_ref = "artifact-cm5",
 			expected_image_id = "image-new",
 		}, { timeout = 0.5 }))
 		assert(caller:call(topics.update_manager_rpc("start-job"), {
@@ -783,9 +765,9 @@ function tests.test_job_state_failure_emits_lifecycle_failed_metric_without_comp
 		}, { timeout = 0.5 }))
 
 		local metric = wait_lifecycle_metric(caller, "failed")
-		assert_eq(table.concat(metric.namespace, "."), "mcu.lifecycle.j_state_fail.failed")
+		assert_eq(table.concat(metric.namespace, "."), "cm5.lifecycle.j_state_fail.failed")
 		assert_eq(metric.job_id, "j-state-fail")
-		assert_eq(metric.component, "mcu")
+		assert_eq(metric.component, "cm5")
 		assert_eq(metric.source, "update_job_state")
 		assert_eq(metric.error, "no_session")
 
@@ -810,14 +792,14 @@ function tests.test_job_state_reconcile_success_emits_lifecycle_completed_metric
 		end
 
 		local child, caller = start_service(root_scope, {
-			config = component_config("mcu"),
+			config = component_config("cm5"),
 			backend = backend,
 		})
 
 		assert(caller:call(topics.update_manager_rpc("create-job"), {
 			job_id = "j-state-complete",
-			component = "mcu",
-			artifact_ref = "artifact-mcu",
+			component = "cm5",
+			artifact_ref = "artifact-cm5",
 			expected_image_id = "image-new",
 		}, { timeout = 0.5 }))
 		assert(caller:call(topics.update_manager_rpc("start-job"), {
@@ -834,9 +816,9 @@ function tests.test_job_state_reconcile_success_emits_lifecycle_completed_metric
 		}, { timeout = 0.5 }))
 
 		local metric = wait_lifecycle_metric(caller, "completed")
-		assert_eq(table.concat(metric.namespace, "."), "mcu.lifecycle.j_state_complete.completed")
+		assert_eq(table.concat(metric.namespace, "."), "cm5.lifecycle.j_state_complete.completed")
 		assert_eq(metric.job_id, "j-state-complete")
-		assert_eq(metric.component, "mcu")
+		assert_eq(metric.component, "cm5")
 		assert_eq(metric.source, "update_job_state")
 
 		child:cancel("test complete")
