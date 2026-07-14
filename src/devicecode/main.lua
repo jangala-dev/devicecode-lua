@@ -79,9 +79,7 @@ local function spawn_service(child, bus, name, mod, env, extra_opts)
             connect      = connect_as,
             services     = extra_opts and extra_opts.services or nil,
             run_http     = extra_opts and extra_opts.run_http or nil,
-            verify_login = extra_opts and extra_opts.verify_login or nil,
-            profile = 'trace',
-            min_level = 'trace'
+            verify_login = extra_opts and extra_opts.verify_login or nil
         })
 
         error(('service returned unexpectedly: %s'):format(tostring(name)), 0)
