@@ -243,6 +243,15 @@ end
 
 ---@param data table<string, MetricSample>
 local function http_publish(data)
+	local senml_list, encode_err = senml.encode_r('', data)
+	if encode_err then
+		State.svc:obs_log('error', { what = 'senml_encode_failed', err = tostring(encode_err) })
+		return
+	end
+	if #senml_list == 0 then return end
+
+	local body = json.encode(senml_list)
+
 	local valid, config_err = conf.validate_http_config(State.cloud_config)
 	if not valid then
 		State.svc:obs_log('error', { what = 'http_publish_skipped', err = tostring(config_err) })
@@ -265,19 +274,12 @@ local function http_publish(data)
 		State.cloud_config.url, channel_id)
 	local auth  = 'Thing ' .. State.cloud_config.thing_key
 
-	local senml_list, encode_err = senml.encode_r('', data)
-	if encode_err then
-		State.svc:obs_log('error', { what = 'senml_encode_failed', err = tostring(encode_err) })
-	elseif #senml_list > 0 then
-		local body = json.encode(senml_list)
+	-- Non-blocking enqueue: drop and log if the channel is at capacity.
+	local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body })
+		:or_else(function() return true end))
 
-		-- Non-blocking enqueue: drop and log if the channel is at capacity.
-		local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body })
-			:or_else(function() return true end))
-
-		if full then
-			State.svc:obs_log('error', { what = 'http_queue_full', err = 'dropping publish payload' })
-		end
+	if full then
+		State.svc:obs_log('error', { what = 'http_queue_full', err = 'dropping publish payload' })
 	end
 end
 
