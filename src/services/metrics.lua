@@ -44,7 +44,6 @@ local types          = require 'services.metrics.types'
 local unpack = unpack or rawget(table, 'unpack')
 
 local NAME = 'metrics'
-local HTTP_MAX_RECORDS = 25
 
 -------------------------------------------------------------------------------
 -- Topic helpers
@@ -242,32 +241,6 @@ local function log_publish(data)
 	end
 end
 
-local function sorted_metric_keys(data)
-	local keys = {}
-	for endpoint_str in pairs(data or {}) do keys[#keys + 1] = endpoint_str end
-	table.sort(keys)
-	return keys
-end
-
-local function metric_chunks(data, max_records)
-	local keys = sorted_metric_keys(data)
-	local chunks = {}
-	if #keys == 0 then return chunks end
-
-	local limit = tonumber(max_records) or #keys
-	if limit < 1 then limit = #keys end
-
-	for i = 1, #keys, limit do
-		local chunk = {}
-		for j = i, math.min(i + limit - 1, #keys) do
-			local key = keys[j]
-			chunk[key] = data[key]
-		end
-		chunks[#chunks + 1] = chunk
-	end
-	return chunks
-end
-
 ---@param data table<string, MetricSample>
 local function http_publish(data)
 	local valid, config_err = conf.validate_http_config(State.cloud_config)
@@ -292,31 +265,18 @@ local function http_publish(data)
 		State.cloud_config.url, channel_id)
 	local auth  = 'Thing ' .. State.cloud_config.thing_key
 
-	local chunks = metric_chunks(data, HTTP_MAX_RECORDS)
-	for chunk_index, chunk in ipairs(chunks) do
-		local senml_list, encode_err = senml.encode_r('', chunk)
-		if encode_err then
-			State.svc:obs_log('error', {
-				what = 'senml_encode_failed',
-				err = tostring(encode_err),
-				chunk_index = chunk_index,
-				chunk_count = #chunks,
-			})
-		elseif #senml_list > 0 then
-			local body = json.encode(senml_list)
+	local senml_list, encode_err = senml.encode_r('', data)
+	if encode_err then
+		State.svc:obs_log('error', { what = 'senml_encode_failed', err = tostring(encode_err) })
+	elseif #senml_list > 0 then
+		local body = json.encode(senml_list)
 
-			-- Non-blocking enqueue: drop and log if the channel is at capacity.
-			local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body })
-				:or_else(function() return true end))
+		-- Non-blocking enqueue: drop and log if the channel is at capacity.
+		local full = perform(State.http_send_ch:put_op({ uri = uri, auth = auth, body = body })
+			:or_else(function() return true end))
 
-			if full then
-				State.svc:obs_log('error', {
-					what = 'http_queue_full',
-					err = 'dropping publish payload',
-					chunk_index = chunk_index,
-					chunk_count = #chunks,
-				})
-			end
+		if full then
+			State.svc:obs_log('error', { what = 'http_queue_full', err = 'dropping publish payload' })
 		end
 	end
 end
