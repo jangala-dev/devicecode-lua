@@ -82,7 +82,7 @@ env:
 		fi; \
 		git clone $(UI_REPO) $(UI_DIR); \
 	fi
-	@cd $(UI_DIR) && git fetch && git checkout $(UI_VER) && git pull --ff-only
+	@cd $(UI_DIR) && git fetch && git checkout --detach $(UI_VER)
 	@cd $(UI_DIR)/client && npm install
 	@echo "Submodules pinned."
 
