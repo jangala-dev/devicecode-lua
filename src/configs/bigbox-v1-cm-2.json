@@ -258,14 +258,14 @@
               "mode": "budgeted_peak",
               "all_hosts": true,
               "download": {
+                "sustained_rate": "1mbit",
+                "peak_rate": "4mbit",
+                "burst_budget": "1000k"
+              },
+              "upload": {
                 "sustained_rate": "500kbit",
                 "peak_rate": "2mbit",
                 "burst_budget": "500k"
-              },
-              "upload": {
-                "sustained_rate": "250kbit",
-                "peak_rate": "1mbit",
-                "burst_budget": "250k"
               },
               "fq_codel": {
                 "flows": 1024,
