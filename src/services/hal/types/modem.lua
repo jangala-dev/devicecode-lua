@@ -126,8 +126,10 @@ ModemSimInfo.__index = ModemSimInfo
 local ModemNetworkInfo = {}
 ModemNetworkInfo.__index = ModemNetworkInfo
 
+---@alias ModemSignalValues table<string, table<string, number>>
+
 ---@class ModemSignalInfo
----@field values table<string, string|number>
+---@field values ModemSignalValues
 local ModemSignalInfo = {}
 ModemSignalInfo.__index = ModemSignalInfo
 
@@ -171,16 +173,26 @@ local function is_signal_value_table(value)
 	if type(value) ~= 'table' then
 		return false
 	end
-	for key, entry in pairs(value) do
-		if type(key) ~= 'string' then
+
+	local has_tech = false
+	for tech, signals in pairs(value) do
+		if type(tech) ~= 'string' or type(signals) ~= 'table' then
 			return false
 		end
-		local entry_type = type(entry)
-		if entry_type ~= 'string' and entry_type ~= 'number' then
+
+		local has_signal = false
+		for signal_name, signal_value in pairs(signals) do
+			if type(signal_name) ~= 'string' or type(signal_value) ~= 'number' then
+				return false
+			end
+			has_signal = true
+		end
+		if not has_signal then
 			return false
 		end
+		has_tech = true
 	end
-	return true
+	return has_tech
 end
 
 ---Create a new ModemIdentityInfo.
@@ -379,7 +391,7 @@ function new.ModemNetworkInfo(operator, access_techs, mcc, mnc, active_band_clas
 end
 
 ---Create a new ModemSignalInfo.
----@param values table<string, string|number>
+---@param values ModemSignalValues
 ---@return ModemSignalInfo?
 ---@return string error
 function new.ModemSignalInfo(values)

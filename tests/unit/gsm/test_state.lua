@@ -82,4 +82,55 @@ function tests.test_sim_payload_reports_absent_explicitly()
 	eq(payload.lock, nil)
 end
 
+function tests.test_canonical_signal_matches_current_access_tech()
+	local signals = {
+		lte = { rsrp = -96 },
+		['5g'] = { rsrp = -103 },
+		umts = { rscp = -88 },
+		gsm = { rssi = -78 },
+	}
+
+	local signal, tech = gsm._test.select_canonical_signal({ 'lte' }, signals)
+	eq(tech, 'lte')
+	eq(signal.rsrp, -96)
+
+	signal, tech = gsm._test.select_canonical_signal({ 'umts' }, signals)
+	eq(tech, 'umts')
+	eq(signal.rscp, -88)
+
+	signal, tech = gsm._test.select_canonical_signal({ 'gsm' }, signals)
+	eq(tech, 'gsm')
+	eq(signal.rssi, -78)
+end
+
+function tests.test_5g_nsa_prefers_5g_when_both_signal_sets_are_valid()
+	local signals = {
+		lte = { rsrp = -96 },
+		['5g'] = { rsrp = -103 },
+	}
+	local signal, tech = gsm._test.select_canonical_signal({ 'lte', '5gnr' }, signals)
+	eq(tech, '5g')
+	eq(signal.rsrp, -103)
+end
+
+function tests.test_5g_nsa_falls_back_to_lte_when_5g_signal_is_unavailable()
+	local signals = { lte = { rsrp = -96 } }
+	local signal, tech = gsm._test.select_canonical_signal({ '5gnr', 'lte' }, signals)
+	eq(tech, 'lte')
+	eq(signal.rsrp, -96)
+end
+
+function tests.test_5g_sa_does_not_fall_back_to_an_unrelated_lte_signal()
+	local signal, tech = gsm._test.select_canonical_signal({ '5gnr' }, { lte = { rsrp = -96 } })
+	eq(signal, nil)
+	eq(tech, '')
+end
+
+function tests.test_signal_bars_use_the_selected_signal_tech()
+	local tech, value, field = gsm._test.select_signal_for_bars('lte', nil, -96, nil)
+	eq(tech, 'lte')
+	eq(value, -96)
+	eq(field, 'rsrp')
+end
+
 return tests

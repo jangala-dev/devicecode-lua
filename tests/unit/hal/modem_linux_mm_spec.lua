@@ -7,6 +7,11 @@ local function eq(a, b, msg)
 	if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end
 end
 local function ok(v, msg) if not v then fail(msg or 'expected truthy') end end
+local function contains(value, expected, msg)
+	if not tostring(value):find(expected, 1, true) then
+		fail(msg or ('expected ' .. tostring(value) .. ' to contain ' .. expected))
+	end
+end
 
 function tests.test_linux_mm_parses_sim_lock_fields_from_modem_json()
 	local info, err = linux_mm._test.parse_modem_info_json([[
@@ -70,6 +75,104 @@ function tests.test_linux_mm_normalises_absent_unlock_required()
 	eq(info.sim_lock_retries, nil)
 	eq(info.access_techs[1], 'lte')
 	eq(info.drivers[1], 'qmi_wwan')
+end
+
+function tests.test_linux_mm_signal_parser_returns_all_valid_techs_as_numbers()
+	local info, err = linux_mm._test.parse_signal_info_json([[
+{
+  "modem": {
+    "signal": {
+      "5g": {
+        "rsrp": "-103.5",
+        "snr": 12.25,
+        "error-rate": "99"
+      },
+      "lte": {
+        "rsrp": "-96",
+        "rsrq": "-11.5"
+      },
+      "umts": {
+        "rscp": "--"
+      }
+    }
+  }
+}
+]])
+	ok(info, err)
+	eq(info.values['5g'].rsrp, -103.5)
+	eq(info.values['5g'].snr, 12.25)
+	eq(info.values['5g']['error-rate'], nil)
+	eq(info.values.lte.rsrp, -96)
+	eq(info.values.lte.rsrq, -11.5)
+	eq(info.values.umts, nil)
+end
+
+function tests.test_linux_mm_signal_parser_filters_sentinels_and_invalid_fields()
+	local info, err = linux_mm._test.parse_signal_info_json([[
+{
+  "modem": {
+    "signal": {
+      "5g": {
+        "rsrp": "-32768",
+        "snr": -3276.8,
+        "error-rate": "0"
+      },
+      "lte": {
+        "rsrp": "-97",
+        "rsrq": "not-a-number",
+        "rssi": "--"
+      },
+      "unknown": {
+        "rssi": "-50"
+      }
+    }
+  }
+}
+]])
+	ok(info, err)
+	eq(info.values['5g'], nil)
+	eq(info.values.unknown, nil)
+	eq(info.values.lte.rsrp, -97)
+	eq(info.values.lte.rsrq, nil)
+	eq(info.values.lte.rssi, nil)
+end
+
+function tests.test_linux_mm_signal_parser_preserves_zero()
+	local info, err = linux_mm._test.parse_signal_info_json([[
+{
+  "modem": {
+    "signal": {
+      "lte": {
+        "rsrp": "0",
+        "snr": 0
+      }
+    }
+  }
+}
+]])
+	ok(info, err)
+	eq(info.values.lte.rsrp, 0)
+	eq(info.values.lte.snr, 0)
+end
+
+function tests.test_linux_mm_signal_parser_rejects_payload_without_valid_signals()
+	local info, err = linux_mm._test.parse_signal_info_json([[
+{
+  "modem": {
+    "signal": {
+      "5g": {
+        "rsrp": "-32768",
+        "error-rate": "0"
+      },
+      "lte": {
+        "rsrp": "--"
+      }
+    }
+  }
+}
+]])
+	eq(info, nil)
+	contains(err, 'No active signal found')
 end
 
 return tests

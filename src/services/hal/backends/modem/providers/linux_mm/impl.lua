@@ -62,6 +62,21 @@ local SIGNAL_IGNORE_FIELDS = list_to_map {
     "error-rate"
 }
 
+local SIGNAL_INVALID_VALUES = list_to_map {
+    -32768,
+    -3276.8,
+}
+
+---@param signal number?
+---@return boolean
+local function is_signal_valid(signal)
+    return signal ~= nil
+        and signal == signal
+        and signal ~= math.huge
+        and signal ~= -math.huge
+        and not SIGNAL_INVALID_VALUES[signal]
+end
+
 ---@param nested table
 ---@param key_paths table<string, string[]>
 ---@return table<string, any>
@@ -85,16 +100,6 @@ local function nested_to_flat(nested, key_paths)
         end
     end
     return flat
-end
-
----@param tbl table<string, any>
----@return table<string, any>
-local function shallow_copy(tbl)
-    local copy = {}
-    for key, value in pairs(tbl) do
-        copy[key] = value
-    end
-    return copy
 end
 
 ---@param ports string[]
@@ -275,15 +280,10 @@ local function read_firmware_version(identity)
     return version, ""
 end
 
----@param identity ModemIdentity
+---@param output string
 ---@return ModemSignalInfo?
 ---@return string error
-local function read_signal_info(identity)
-    local output, err = run_command(identity.address, { "mmcli", "-J", "-m", identity.address, "--signal-get" })
-    if not output then
-        return nil, err
-    end
-
+local function parse_signal_info_json(output)
     local data, json_err = json.decode(output)
     if not data then
         return nil, "Failed to decode mmcli output as JSON: " .. tostring(json_err) .. ", output: " .. tostring(output)
@@ -294,27 +294,41 @@ local function read_signal_info(identity)
         return nil, "No signal info found in mmcli output"
     end
 
-    local active_signal = nil
+    local active_signals = {}
     for tech, signals in pairs(signal_techs) do
         if SIGNAL_TECHNOLOGIES[tech] and type(signals) == 'table' then
             local filtered_fields = {}
             for signal_name, signal_value in pairs(signals) do
                 if not SIGNAL_IGNORE_FIELDS[signal_name] and signal_value ~= "--" then
-                    filtered_fields[signal_name] = signal_value
+                    local numeric_value = tonumber(signal_value)
+                    if is_signal_valid(numeric_value) then
+                        filtered_fields[signal_name] = numeric_value
+                    end
                 end
             end
             if next(filtered_fields) ~= nil then
-                active_signal = filtered_fields
-                break
+                active_signals[tech] = filtered_fields
             end
         end
     end
 
-    if not active_signal then
+    if next(active_signals) == nil then
         return nil, "No active signal found"
     end
 
-    return modem_types.new.ModemSignalInfo(shallow_copy(active_signal))
+    return modem_types.new.ModemSignalInfo(active_signals)
+end
+
+---@param identity ModemIdentity
+---@return ModemSignalInfo?
+---@return string error
+local function read_signal_info(identity)
+    local output, err = run_command(identity.address, { "mmcli", "-J", "-m", identity.address, "--signal-get" })
+    if not output then
+        return nil, err
+    end
+
+    return parse_signal_info_json(output)
 end
 
 ---@param sim_path string
@@ -812,5 +826,6 @@ return {
     _test = {
         normalize_unlock_retries = normalize_unlock_retries,
         parse_modem_info_json = parse_modem_info_json,
+        parse_signal_info_json = parse_signal_info_json,
     },
 }

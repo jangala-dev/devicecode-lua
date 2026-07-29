@@ -47,6 +47,7 @@ local files = {
 	"unit.hal.uart_manager_spec",
 	"unit.hal.network_manager_spec",
 	"unit.hal.modem_linux_mm_spec",
+	"unit.hal.modem_types_spec",
 	"unit.hal.modem_qmi_spec",
 	"unit.hal.openwrt_network_observer_spec",
 	"unit.hal.openwrt_network_provider_advanced_spec",
