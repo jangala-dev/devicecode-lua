@@ -514,6 +514,11 @@ end
 local SHUTDOWN_GRACE = 10          -- seconds services have to shut down
 local USB3_MODEL     = "bigbox-ss" -- only model with controllable USB3 hardware
 
+local function usb_verb_for_config(hw_revision, cfg)
+    if hw_revision ~= USB3_MODEL then return nil end
+    return cfg.usb3_enabled and 'enable' or 'disable'
+end
+
 ---@param svc ServiceBase
 ---@param power_cap CapabilityReference?
 ---@param alarm SystemAlarm
@@ -632,7 +637,7 @@ local function system_main(svc, report_period_ch)
 
                 -- Handle USB3 control (bigbox-ss hardware only).
                 if usb_cap then
-                    local usb_verb = cfg.usb3_enabled and 'enable' or 'disable'
+                    local usb_verb = usb_verb_for_config(hw_revision, cfg)
                     local _, usb_err = cap_rpc(usb_cap, usb_verb, {})
                     if usb_err ~= "" then
                         svc:obs_log('warn', { what = 'usb3_control_failed', verb = usb_verb, err = usb_err })
@@ -710,6 +715,7 @@ SystemService._test = {
     publish_sysinfo_metrics = publish_sysinfo_metrics,
     collect_sysinfo_state = collect_sysinfo_state,
     publish_sysinfo_state = publish_sysinfo_state,
+    usb_verb_for_config = usb_verb_for_config,
 }
 
 return SystemService

@@ -25,6 +25,7 @@ assert(stdlib.setenv('CONFIG_TARGET', 'services'))
 local files = {
 	'unit.config.codec_spec',
 	'unit.config.state_spec',
+	'unit.config.bigbox_ss_spec',
 	'unit.main.service_spec',
 	'unit.config.service_spec',
 	'unit.system_spec',

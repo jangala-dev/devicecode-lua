@@ -1,0 +1,876 @@
+{
+  "hal": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/hal/1",
+      "filesystem": [
+        {
+          "name": "config",
+          "root": "/data/devicecode/configs"
+        },
+        {
+          "name": "credentials",
+          "root": "/data/configs"
+        },
+        {
+          "name": "state",
+          "root": "/tmp/devicecode-state"
+        }
+      ],
+      "network": {
+        "provider": "openwrt",
+        "platform": {
+          "segment_trunk": {
+            "ifname": "eth0",
+            "protected": true
+          },
+          "shaping": {
+            "marks": {
+              "mask": "0x00f00000",
+              "control": "0x00100000",
+              "client": "0x00200000"
+            }
+          }
+        }
+      },
+      "wired": {
+        "providers": {
+          "ss-local-wired": {
+            "provider": "static",
+            "mode": "read_only",
+            "poll": {
+              "static": {
+                "interval_s": 30,
+                "groups": [
+                  "snapshot"
+                ]
+              }
+            },
+            "surfaces": {
+              "eth0": {
+                "provider_surface_id": "eth0",
+                "kind": "direct-nic",
+                "capabilities": {
+                  "trunk": true,
+                  "access": false,
+                  "poe": false
+                },
+                "link": {
+                  "state": "unknown"
+                },
+                "attachment": {
+                  "mode": "trunk",
+                  "vlans": [
+                    8,
+                    100,
+                    32,
+                    4
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "artifact_store": {
+        "stores": [
+          {
+            "id": "main",
+            "transient_root": "/tmp/devicecode-artifacts",
+            "durable_root": "/data/devicecode/artifacts",
+            "import_root": "/data/devicecode/artifacts/import",
+            "durable_enabled": true
+          }
+        ]
+      },
+      "control_store": [
+        {
+          "name": "gsm",
+          "root": "/data/devicecode/control/gsm"
+        }
+      ],
+      "time": {},
+      "platform": {},
+      "power": {},
+      "usb": {},
+      "modemcard": {},
+      "sysmon": {}
+    }
+  },
+  "net": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/net/1",
+      "version": 1,
+      "product": "bigbox-ss",
+      "description": "Big Box stepping-stone config using the segment-first NET model, GSM-sourced modem uplinks, generated WAN route metrics, and Devicecode-owned OpenWrt UCI output.",
+      "vlan_policy": {
+        "reserved": {
+          "internal": 100
+        },
+        "ranges": {
+          "user": {
+            "from": 1,
+            "to": 99
+          },
+          "system": {
+            "from": 100,
+            "to": 399
+          }
+        },
+        "metadata": {
+          "note": "Converted from legacy VLANs eth0.8, eth0.32, eth0.100 and eth0.4."
+        }
+      },
+      "segments": {
+        "adm": {
+          "name": "Admin Network",
+          "kind": "system",
+          "protected": true,
+          "user_editable": false,
+          "purpose": "admin_network",
+          "vlan": {
+            "id": 8
+          },
+          "addressing": {
+            "ipv4": {
+              "mode": "static",
+              "cidr": "172.28.8.1/24"
+            }
+          },
+          "dhcp": {
+            "enabled": true,
+            "start": 10,
+            "limit": 240,
+            "lease_time": "12h"
+          },
+          "dns": {
+            "local_server": true,
+            "host_files": [
+              "ads"
+            ],
+            "domain": "bigbox.home"
+          },
+          "firewall": {
+            "zone": "lan"
+          }
+        },
+        "jan": {
+          "name": "Jangala Network",
+          "kind": "user",
+          "protected": false,
+          "user_editable": true,
+          "purpose": "restricted_user_access",
+          "vlan": {
+            "id": 32
+          },
+          "addressing": {
+            "ipv4": {
+              "mode": "static",
+              "cidr": "172.28.32.1/24"
+            }
+          },
+          "dhcp": {
+            "enabled": true,
+            "start": 10,
+            "limit": 240,
+            "lease_time": "12h"
+          },
+          "dns": {
+            "local_server": true,
+            "host_files": [
+              "ads",
+              "adult"
+            ],
+            "domain": "bigbox.home"
+          },
+          "firewall": {
+            "zone": "lan_rst"
+          },
+          "shaping": {
+            "host_default": {
+              "mode": "budgeted_peak",
+              "all_hosts": true,
+              "download": {
+                "sustained_rate": "6mbit",
+                "peak_rate": "24mbit",
+                "burst_budget": "1500k"
+              },
+              "upload": {
+                "sustained_rate": "3mbit",
+                "peak_rate": "12mbit",
+                "burst_budget": "750k"
+              },
+              "fq_codel": {
+                "flows": 1024,
+                "limit": 10240,
+                "memory_limit": "16Mb",
+                "target": "5ms",
+                "interval": "100ms"
+              }
+            }
+          }
+        },
+        "int": {
+          "name": "Internal Network",
+          "kind": "system",
+          "protected": true,
+          "user_editable": false,
+          "purpose": "internal_services",
+          "vlan": {
+            "reserved": "internal"
+          },
+          "addressing": {
+            "ipv4": {
+              "mode": "static",
+              "cidr": "172.28.100.1/24"
+            }
+          },
+          "dhcp": {
+            "enabled": true,
+            "start": 10,
+            "limit": 240,
+            "lease_time": "12h"
+          },
+          "dns": {},
+          "firewall": {
+            "zone": "lan"
+          }
+        },
+        "wan": {
+          "name": "Wired Internet",
+          "kind": "wan",
+          "protected": false,
+          "user_editable": false,
+          "purpose": "wired_backhaul",
+          "vlan": {
+            "id": 4
+          },
+          "addressing": {
+            "ipv4": {
+              "mode": "dhcp",
+              "peerdns": false
+            }
+          },
+          "dhcp": {
+            "enabled": false
+          },
+          "firewall": {
+            "zone": "wan"
+          },
+          "dns": {}
+        }
+      },
+      "interfaces": {},
+      "addressing": {},
+      "dns": {
+        "enabled": true,
+        "domain": "bigbox.home",
+        "upstreams": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ],
+        "cache": {
+          "size": 10000
+        },
+        "host_files": {
+          "base_dir": "/etc/jng/hosts",
+          "addnmount": true,
+          "sources": {
+            "ads": {
+              "file": "ads",
+              "description": "advertising and tracking block list"
+            },
+            "adult": {
+              "file": "adult",
+              "description": "adult-content block list"
+            }
+          }
+        },
+        "records": {
+          "unifi": {
+            "name": "unifi",
+            "address": "$UNIFI_ADDRESS",
+            "segments": [
+              "int"
+            ]
+          },
+          "config.bigbox.home": {
+            "name": "config.bigbox.home",
+            "address": "172.28.8.1"
+          }
+        }
+      },
+      "dhcp": {
+        "enabled": true,
+        "defaults": {
+          "lease_time": "12h",
+          "authoritative": true
+        },
+        "reservations": {},
+        "options": {},
+        "relays": {}
+      },
+      "firewall": {
+        "defaults": {
+          "syn_flood": "1",
+          "input": "ACCEPT",
+          "forward": "REJECT",
+          "output": "ACCEPT"
+        },
+        "zones": {
+          "lan": {
+            "input": "ACCEPT",
+            "output": "ACCEPT",
+            "forward": "ACCEPT"
+          },
+          "lan_rst": {
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT"
+          },
+          "wan": {
+            "input": "REJECT",
+            "output": "ACCEPT",
+            "forward": "REJECT",
+            "masq": 1,
+            "mtu_fix": 1
+          }
+        },
+        "policies": {
+          "lan_to_wan_1": {
+            "from": "lan",
+            "to": "wan",
+            "action": "allow"
+          },
+          "lan_rst_to_wan_1": {
+            "from": "lan_rst",
+            "to": "wan",
+            "action": "allow"
+          }
+        },
+        "rules": {
+          "Allow-DHCP-Renew": {
+            "name": "Allow-DHCP-Renew",
+            "src": "wan",
+            "proto": "udp",
+            "dest_port": "68",
+            "target": "ACCEPT"
+          },
+          "Allow-Ping": {
+            "name": "Allow-Ping",
+            "src": "wan",
+            "proto": "icmp",
+            "icmp_type": "echo-request",
+            "target": "ACCEPT"
+          },
+          "Allow-IGMP": {
+            "name": "Allow-IGMP",
+            "src": "wan",
+            "proto": "igmp",
+            "target": "ACCEPT"
+          },
+          "Allow-IPSec-ESP": {
+            "name": "Allow-IPSec-ESP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "esp",
+            "target": "ACCEPT"
+          },
+          "Allow-ISAKMP": {
+            "name": "Allow-ISAKMP",
+            "src": "wan",
+            "dest": "lan",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          },
+          "Allow-IPSec-ESP_RST": {
+            "name": "Allow-IPSec-ESP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "esp",
+            "target": "ACCEPT"
+          },
+          "Allow-ISAKMP_RST": {
+            "name": "Allow-ISAKMP (RST)",
+            "src": "wan",
+            "dest": "lan_rst",
+            "proto": "udp",
+            "dest_port": "500",
+            "target": "ACCEPT"
+          },
+          "Allow_DHCP_request_RST": {
+            "name": "Allow DHCP request (RST)",
+            "src": "lan_rst",
+            "proto": "udp",
+            "src_port": "67-68",
+            "dest_port": "67-68",
+            "target": "ACCEPT"
+          },
+          "Allow_DNS_queries_RST": {
+            "name": "Allow DNS queries (RST)",
+            "src": "lan_rst",
+            "proto": "tcp udp",
+            "dest_port": "53",
+            "target": "ACCEPT"
+          }
+        }
+      },
+      "routing": {
+        "routes": {
+          "starlink_admin": {
+            "kind": "host",
+            "target": "192.168.100.1",
+            "interface": "wan",
+            "description": "Starlink dish/admin UI reachable via the wired WAN uplink"
+          }
+        }
+      },
+      "wan": {
+        "enabled": true,
+        "members": {
+          "wan": {
+            "interface": "wan",
+            "weight": 1,
+            "dynamic_weight": true,
+            "family": "ipv4",
+            "mwan_metric": 1
+          },
+          "modem_primary": {
+            "interface": "modem_primary",
+            "weight": 1,
+            "dynamic_weight": true,
+            "family": "ipv4",
+            "source": {
+              "kind": "gsm-uplink",
+              "id": "primary"
+            },
+            "mwan_metric": 1
+          },
+          "modem_secondary": {
+            "interface": "modem_secondary",
+            "weight": 1,
+            "dynamic_weight": true,
+            "family": "ipv4",
+            "source": {
+              "kind": "gsm-uplink",
+              "id": "secondary"
+            },
+            "mwan_metric": 1
+          }
+        },
+        "health": {
+          "track_ip": [
+            "1.1.1.1",
+            "8.8.8.8"
+          ],
+          "track_method": "ping",
+          "timeout": 2,
+          "interval": 1,
+          "down": 2,
+          "up": 1
+        },
+        "runtime": {
+          "mmx_mask": "0x3F00"
+        },
+        "load_balancing": {
+          "policy": "balanced",
+          "speedtests": {
+            "enabled": true,
+            "interval_s": 21600,
+            "retry_after_s": 10,
+            "retry_max_s": 3600
+          }
+        },
+        "rules": {
+          "https": {
+            "family": "ipv4",
+            "proto": "tcp",
+            "dest_port": "443",
+            "policy": "balanced",
+            "sticky": true
+          }
+        }
+      },
+      "vpn": {
+        "enabled": false
+      },
+      "diagnostics": {
+        "reflectors": {
+          "cloudflare": {
+            "address": "1.1.1.1"
+          },
+          "google": {
+            "address": "8.8.8.8"
+          }
+        }
+      },
+      "runtime": {
+        "apply": {
+          "debounce_s": 0.25
+        },
+        "observe": {
+          "interval_s": 5
+        }
+      },
+      "metadata": {}
+    }
+  },
+  "wired": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/wired/1",
+      "version": 1,
+      "product": "bigbox-ss",
+      "description": "Single protected Ethernet trunk on the stepping-stone host.",
+      "surfaces": {
+        "ss-eth0": {
+          "name": "Stepping Stone Ethernet",
+          "kind": "direct-nic",
+          "role": "internal-trunk",
+          "protected": true,
+          "attachment": {
+            "mode": "trunk",
+            "required_segments": [
+              "adm",
+              "int"
+            ],
+            "user_segments": "all-realised-user-segments"
+          }
+        }
+      },
+      "metadata": {
+        "note": "The stepping-stone has no managed RTL8380M switch; eth0 carries the product VLAN trunk directly."
+      }
+    }
+  },
+  "device": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/device/1",
+      "components": {
+        "ss-host": {
+          "class": "host",
+          "subtype": "rpi4",
+          "role": "primary",
+          "member": "local",
+          "facts": {
+            "identity": [
+              "state",
+              "system",
+              "identity"
+            ]
+          }
+        }
+      },
+      "assembly": {
+        "schema": "devicecode.device.assembly/1",
+        "product": "big-box-ss",
+        "components": {
+          "ss-host": {
+            "kind": "compute",
+            "role": "controller"
+          },
+          "ss-local-wired": {
+            "kind": "direct-nic",
+            "role": "controller-wired-port",
+            "observation": {
+              "kind": "local-provider",
+              "source": [
+                "raw",
+                "host",
+                "wired",
+                "provider",
+                "ss-local-wired"
+              ]
+            }
+          }
+        },
+        "links": {},
+        "surfaces": {
+          "ss-eth0": {
+            "kind": "ethernet",
+            "exposure": "external",
+            "component": "ss-local-wired",
+            "observed_surface": "eth0",
+            "connector": "RJ45"
+          }
+        }
+      }
+    }
+  },
+  "gsm": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/gsm/1",
+      "modems": {
+        "default": {
+          "enabled": true,
+          "signal_freq": 10
+        },
+        "known": [
+          {
+            "name": "primary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.2",
+            "autoconnect": true,
+            "metrics_interval": 60
+          },
+          {
+            "name": "secondary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/scb/fd500000.pcie/pci0000:00/0000:00:00.0/0000:01:00.0/usb1/1-1/1-1.4",
+            "autoconnect": true,
+            "metrics_interval": 60
+          }
+        ]
+      },
+      "apn_store": {
+        "kind": "control-store",
+        "id": "gsm",
+        "key": "custom-apns-v1"
+      }
+    }
+  },
+  "http": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/http/1",
+      "enabled": true,
+      "id": "main",
+      "policy": {
+        "allowed_schemes": {
+          "http": true,
+          "https": true,
+          "ws": true,
+          "wss": true
+        },
+        "allow_loopback": true,
+        "allowed_response_parsers": {
+          "strict": true,
+          "legacy-http1-close": true
+        },
+        "legacy_http1_close_max_response_bytes": 1048576
+      }
+    }
+  },
+  "ui": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/ui/1",
+      "enabled": true,
+      "http": {
+        "enabled": true,
+        "cap_id": "main",
+        "host": "0.0.0.0",
+        "port": 80
+      },
+      "updates": {
+        "upload": {
+          "enabled": false,
+          "max_bytes": 67108864,
+          "require_auth": false,
+          "component": "ss-host",
+          "create_job": false,
+          "start_job": false
+        },
+        "commit": {
+          "require_auth": false
+        }
+      }
+    }
+  },
+  "system": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/system/1",
+      "report_period": 60,
+      "usb3_enabled": false,
+      "alarms": [
+        {
+          "time": "5:00",
+          "repeats": "daily",
+          "payload": {
+            "name": "daily reboot",
+            "type": "reboot"
+          }
+        }
+      ]
+    }
+  },
+  "metrics": {
+    "rev": 1,
+    "data": {
+      "schema": "devicecode.config/metrics/1",
+      "cloud_url": "$CLOUD_URL",
+      "publish_period": 60,
+      "templates": {
+        "network_stat": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5,
+              "initial_val": 0
+            },
+            {
+              "type": "DeltaValue"
+            }
+          ]
+        },
+        "any_change": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "any-change"
+            }
+          ]
+        },
+        "percent_5": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "percent",
+              "threshold": 5
+            }
+          ]
+        }
+      },
+      "pipelines": {
+        "wann_type": {
+          "template": "any_change"
+        },
+        "access_tech": {
+          "template": "any_change"
+        },
+        "access_fam": {
+          "template": "any_change"
+        },
+        "rx_bytes": {
+          "template": "network_stat"
+        },
+        "rx_packets": {
+          "template": "network_stat"
+        },
+        "rx_dropped": {
+          "template": "network_stat"
+        },
+        "rx_errors": {
+          "template": "network_stat"
+        },
+        "tx_bytes": {
+          "template": "network_stat"
+        },
+        "tx_packets": {
+          "template": "network_stat"
+        },
+        "tx_dropped": {
+          "template": "network_stat"
+        },
+        "tx_errors": {
+          "template": "network_stat"
+        },
+        "speedtest": {
+          "protocol": "http",
+          "process": []
+        },
+        "firmware": {
+          "template": "any_change"
+        },
+        "band": {
+          "template": "any_change"
+        },
+        "access-tech": {
+          "template": "any_change"
+        },
+        "access-family": {
+          "template": "any_change"
+        },
+        "imei": {
+          "template": "any_change"
+        },
+        "sim": {
+          "template": "any_change"
+        },
+        "rssi": {
+          "template": "percent_5"
+        },
+        "rsrp": {
+          "template": "percent_5"
+        },
+        "rsrq": {
+          "template": "percent_5"
+        },
+        "bars": {
+          "template": "any_change"
+        },
+        "operator": {
+          "template": "any_change"
+        },
+        "iccid": {
+          "template": "any_change"
+        },
+        "state": {
+          "template": "any_change"
+        },
+        "interface": {
+          "template": "any_change"
+        },
+        "boot_time": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 1000
+            }
+          ]
+        },
+        "version": {
+          "template": "any_change"
+        },
+        "fw_version": {
+          "template": "any_change"
+        },
+        "revision": {
+          "template": "any_change"
+        },
+        "serial": {
+          "template": "any_change"
+        },
+        "overall_utilisation": {
+          "template": "percent_5"
+        },
+        "util": {
+          "template": "percent_5"
+        },
+        "temperature": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "DiffTrigger",
+              "diff_method": "absolute",
+              "threshold": 2
+            }
+          ]
+        },
+        "mem_util": {
+          "template": "any_change"
+        },
+        "cpu_util": {
+          "template": "any_change"
+        },
+        "fw_id": {
+          "template": "any_change"
+        },
+        "hw_id": {
+          "template": "any_change"
+        }
+      }
+    }
+  }
+}
