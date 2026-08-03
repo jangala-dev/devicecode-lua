@@ -1,4 +1,6 @@
 local modem_types = require 'services.hal.types.modem'
+local cap_types = require 'services.hal.types.capabilities'
+local channel = require 'fibers.channel'
 
 local tests = {}
 
@@ -40,6 +42,13 @@ function tests.test_modem_signal_info_rejects_empty_signal_sets()
 	local empty_tech_info, empty_tech_err = modem_types.new.ModemSignalInfo({ lte = {} })
 	eq(empty_tech_info, nil)
 	eq(empty_tech_err, 'invalid signal values')
+end
+
+function tests.test_modem_capability_offers_full_info_refresh()
+	local cap, err = cap_types.new.ModemCapability('test-modem', channel.new())
+	ok(cap, err)
+	eq(cap.offerings.refresh_info, true)
+	eq(cap.offerings.set_signal_update_freq, true)
 end
 
 return tests

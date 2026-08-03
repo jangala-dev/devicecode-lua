@@ -133,6 +133,20 @@ ModemNetworkInfo.__index = ModemNetworkInfo
 local ModemSignalInfo = {}
 ModemSignalInfo.__index = ModemSignalInfo
 
+---@alias ModemInfoValues table<string, any>
+
+---@class ModemInfoSnapshot
+---@field schema string
+---@field generation integer
+---@field values ModemInfoValues
+---@field observed_at table<string, number>
+
+---@class ModemSignalEvent
+---@field schema string
+---@field observed_at number
+---@field access_techs string[]
+---@field signal ModemSignalValues
+
 ---@class ModemTrafficInfo
 ---@field rx_bytes integer
 ---@field tx_bytes integer
@@ -516,6 +530,7 @@ end
 ---@field read_ports fun(self: ModemBackend): ModemPortsInfo?, string
 ---@field read_sim_info fun(self: ModemBackend): ModemSimInfo?, string
 ---@field read_network_info fun(self: ModemBackend): ModemNetworkInfo?, string
+---@field read_access_techs fun(self: ModemBackend): string[]?, string
 ---@field read_signal fun(self: ModemBackend): ModemSignalInfo?, string
 ---@field read_traffic fun(self: ModemBackend): ModemTrafficInfo?, string
 ---@field start_state_monitor fun(self: ModemBackend): boolean, string
