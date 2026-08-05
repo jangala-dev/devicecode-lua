@@ -1126,6 +1126,7 @@
     "rev": 1,
     "data": {
       "schema": "devicecode.config/wifi/1",
+      "user_salt": "$USER_SALT",
       "report_period": 10,
       "radios": [
         {

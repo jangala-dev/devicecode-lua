@@ -53,6 +53,7 @@ local utils    = require 'services.wifi.utils'
 
 ---@class WifiServiceData
 ---@field schema string
+---@field user_salt string
 ---@field report_period? number
 ---@field radios WifiRadioConfig[]
 ---@field ssids WifiSsidConfig[]
@@ -73,6 +74,7 @@ local function map_mode(mode)
 end
 
 local function is_table(v) return type(v) == 'table' end
+local function valid_user_salt(v) return type(v) == 'string' and v ~= '' end
 
 local function count_array(t)
     return is_table(t) and #t or 0
@@ -523,8 +525,9 @@ end
 ---@param conn Connection
 ---@param id string
 ---@param radio_cfg WifiRadioConfig?
+---@param user_salt string
 ---@param svc ServiceBase
-local function radio_stats_loop(conn, id, radio_cfg, svc)
+local function radio_stats_loop(conn, id, radio_cfg, user_salt, svc)
     local band        = ((radio_cfg and radio_cfg.band) or ''):sub(1, 1)
     local hw_platform = '1'
     local sessions    = {}
@@ -548,7 +551,7 @@ local function radio_stats_loop(conn, id, radio_cfg, svc)
 
         prefix, stat = key:match('^(client)_(.+)$')
         if prefix then
-            local uid = gen.userid(p.mac)
+            local uid = gen.userid(p.mac, user_salt)
             local sid = sessions[p.mac]
             if sid then
                 conn:retain(t_obs_metric(stat), {
@@ -570,7 +573,7 @@ local function radio_stats_loop(conn, id, radio_cfg, svc)
         local iface      = p.interface
         local connected  = p.connected
         local timestamp  = p.timestamp or os.time()
-        local uid        = gen.userid(mac)
+        local uid        = gen.userid(mac, user_salt)
         local change     = connected and 1 or -1
 
         iface_sta[iface] = math.max(0, (iface_sta[iface] or 0) + change)
@@ -692,8 +695,11 @@ local function configure_radio(ctx, id)
 end
 
 local function radio_fiber_body(ctx, id)
+    local user_salt = is_table(ctx.data) and ctx.data.user_salt or nil
+    if not valid_user_salt(user_salt) then return end
+
     configure_radio(ctx, id)
-    radio_stats_loop(ctx.conn, id, get_radio_cfg(ctx, id), ctx.svc)
+    radio_stats_loop(ctx.conn, id, get_radio_cfg(ctx, id), user_salt, ctx.svc)
 end
 
 local function spawn_radio_scope(ctx, id)
@@ -745,6 +751,8 @@ local function on_cfg(ctx, msg)
         ctx.svc:obs_log('debug', { what = 'stale_config', rev = rev, last_rev = ctx.last_rev })
     elseif not is_table(data) then
         ctx.svc:obs_log('warn', { what = 'config_data_not_table' })
+    elseif not valid_user_salt(data.user_salt) then
+        ctx.svc:obs_log('warn', { what = 'invalid_config_user_salt' })
     else
         ctx.last_rev = rev or ctx.last_rev
         ctx.data     = data

@@ -46,6 +46,7 @@ SWITCH_USERNAME=
 SWITCH_PASSWORD=
 UNIFI_ADDRESS=
 CLOUD_URL=
+USER_SALT=
 ```
 
 `.env.secret` is listed in `.gitignore` and must never be committed. If the file is absent, `make build-all` will print a warning and leave placeholders unreplaced.
