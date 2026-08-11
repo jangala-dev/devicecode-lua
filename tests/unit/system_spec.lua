@@ -59,4 +59,10 @@ function T.publish_platform_identity_publishes_state_and_legacy_metrics()
 	end)
 end
 
+function T.usb3_control_is_gated_to_bigbox_ss_and_follows_config()
+	assert_eq(system._test.usb_verb_for_config('bigbox-ss', { usb3_enabled = false }), 'disable')
+	assert_eq(system._test.usb_verb_for_config('bigbox-ss', { usb3_enabled = true }), 'enable')
+	assert_eq(system._test.usb_verb_for_config('bigbox-v1-cm-2', { usb3_enabled = false }), nil)
+end
+
 return T

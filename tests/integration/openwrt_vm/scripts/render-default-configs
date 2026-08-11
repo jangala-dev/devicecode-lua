@@ -13,6 +13,7 @@ WORK="$VM_DIR/work/render-default-configs"
 OUT_DIR="${DEVICECODE_RENDER_OUT_DIR:-$VM_DIR/work/generated-default-etc-config}"
 TRUNK_IFNAME="${DEVICECODE_RENDER_TRUNK_IFNAME:-eth0}"
 PRINT="${DEVICECODE_RENDER_PRINT:-1}"
+CONFIG_REL="${DEVICECODE_RENDER_CONFIG:-src/configs/bigbox-v1-cm-2.json}"
 
 mkdir -p "$WORK" "$OUT_DIR"
 
@@ -92,6 +93,7 @@ local function maybe_gsm_sources()
 end
 
 local root = os.getenv('DEVICECODE_RENDER_ROOT') or '.'
+local config_rel = os.getenv('DEVICECODE_RENDER_CONFIG') or 'src/configs/bigbox-v1-cm-2.json'
 local confdir = os.getenv('DEVICECODE_RENDER_CONFDIR') or '/tmp/devicecode-render-default-configs/conf'
 local savedir = os.getenv('DEVICECODE_RENDER_SAVEDIR') or '/tmp/devicecode-render-default-configs/save'
 local outdir = os.getenv('DEVICECODE_RENDER_OUTDIR') or '/tmp/devicecode-render-default-configs/out'
@@ -106,7 +108,7 @@ mkdir_p(savedir)
 mkdir_p(outdir)
 
 fibers.run(function()
-  local doc = cjson.decode(read_file(root .. '/src/configs/bigbox-v1-cm-2.json'))
+  local doc = cjson.decode(read_file(root .. '/' .. config_rel))
   if type(doc) ~= 'table' then fail('default config JSON did not decode') end
   local payload = net_config.extract_payload(doc.net)
   local base_intent, err = net_config.normalise(payload, { generation = doc.net and doc.net.rev or 1 })
@@ -154,7 +156,7 @@ fibers.run(function()
 
   local manifest = {
     schema = 'devicecode.openwrt.generated-configs/1',
-    source_config = 'src/configs/bigbox-v1-cm-2.json',
+    source_config = config_rel,
     config_rev = doc.net and doc.net.rev or nil,
     trunk_ifname = trunk_ifname,
     realised_wan_members = {},
@@ -185,7 +187,7 @@ LUA
 "$SCP_TO" "$WORK/run_devicecode_render_default_configs.lua" "$REMOTE/run_devicecode_render_default_configs.lua"
 
 echo "[openwrt-vm] rendering default Devicecode /etc/config files into $OUT_DIR"
-"$SSH" "cd '$REMOTE' && DEVICECODE_RENDER_ROOT='$REMOTE' DEVICECODE_RENDER_CONFDIR='$REMOTE/conf' DEVICECODE_RENDER_SAVEDIR='$REMOTE/save' DEVICECODE_RENDER_OUTDIR='$REMOTE_OUT' DEVICECODE_RENDER_TRUNK_IFNAME='$TRUNK_IFNAME' DEVICECODE_RENDER_PRINT='$PRINT' DEVICECODE_RENDER_GSM_PRIMARY_IFNAME='${DEVICECODE_RENDER_GSM_PRIMARY_IFNAME:-}' DEVICECODE_RENDER_GSM_SECONDARY_IFNAME='${DEVICECODE_RENDER_GSM_SECONDARY_IFNAME:-}' lua ./run_devicecode_render_default_configs.lua"
+"$SSH" "cd '$REMOTE' && DEVICECODE_RENDER_ROOT='$REMOTE' DEVICECODE_RENDER_CONFIG='$CONFIG_REL' DEVICECODE_RENDER_CONFDIR='$REMOTE/conf' DEVICECODE_RENDER_SAVEDIR='$REMOTE/save' DEVICECODE_RENDER_OUTDIR='$REMOTE_OUT' DEVICECODE_RENDER_TRUNK_IFNAME='$TRUNK_IFNAME' DEVICECODE_RENDER_PRINT='$PRINT' DEVICECODE_RENDER_GSM_PRIMARY_IFNAME='${DEVICECODE_RENDER_GSM_PRIMARY_IFNAME:-}' DEVICECODE_RENDER_GSM_SECONDARY_IFNAME='${DEVICECODE_RENDER_GSM_SECONDARY_IFNAME:-}' lua ./run_devicecode_render_default_configs.lua"
 rm -rf "$OUT_DIR"
 mkdir -p "$(dirname "$OUT_DIR")"
 "$SCP_FROM" "$REMOTE_OUT" "$OUT_DIR"

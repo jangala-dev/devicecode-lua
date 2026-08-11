@@ -78,8 +78,15 @@ local function is_device_on_hub_port(hub, port)
     if not subpaths[port] then return false, "invalid port" end
     local path = USB_HUB_PREFIX .. hub .. '/' .. subpaths[port]
     local cmd = exec.command { 'test', '-e', path, stdin = 'null', stdout = 'null', stderr = 'null' }
-    local _, _, code = perform(cmd:run_op())
-    return code == 0, nil
+    local status, code, signal, run_err = perform(cmd:run_op())
+    if status == 'exited' and code == 0 then
+        return true, nil
+    end
+    if status == 'exited' and code == 1 then
+        return false, nil
+    end
+    return false, ("test -e %s failed (status=%s exit=%s signal=%s err=%s)"):format(
+        path, tostring(status), tostring(code), tostring(signal), tostring(run_err))
 end
 
 --- Write an integer to a sysfs path.
@@ -160,10 +167,11 @@ end
 ---@return string? error
 local function set_usb_hub_power(enabled, hub)
     local cmd = exec.command { 'uhubctl', '-e', '-l', tostring(hub), '-a', tostring(enabled and 1 or 0), stdin = 'null', stdout = 'null', stderr = 'null' }
-    local _, _, code = perform(cmd:run_op())
-    if code ~= 0 then
-        return ("uhubctl hub %d power %s failed (exit %d)"):format(
-            hub, enabled and 'on' or 'off', code or -1)
+    local status, code, signal, run_err = perform(cmd:run_op())
+    if status ~= 'exited' or code ~= 0 then
+        return ("uhubctl hub %d power %s failed (status=%s exit=%s signal=%s err=%s)"):format(
+            hub, enabled and 'on' or 'off', tostring(status), tostring(code),
+            tostring(signal), tostring(run_err))
     end
     return nil
 end
@@ -225,9 +233,9 @@ end
 ---@return boolean ok
 ---@return any value_or_err
 function UsbDriver:disable(_opts)
-    if not self.enabled then
-        return true, nil
-    end
+    -- Do not trust the cached state here. It is initially inferred from
+    -- authorized_default, which does not prove that the hub is powered down or
+    -- that an already-enumerated USB3 device is disconnected.
 
     -- Verify VL805 firmware supports hub power control.
     local vl805_ts, ts_err = get_vl805_timestamp()
