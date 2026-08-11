@@ -805,6 +805,9 @@
         "rsrq": {
           "template": "percent_5"
         },
+        "snr": {
+          "template": "percent_5"
+        },
         "bars": {
           "template": "any_change"
         },
