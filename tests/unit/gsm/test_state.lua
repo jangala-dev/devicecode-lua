@@ -1,4 +1,6 @@
 local gsm = require 'services.gsm'
+local op = require 'fibers.op'
+local runfibers = require 'tests.support.run_fibers'
 
 local tests = {}
 
@@ -7,7 +9,8 @@ local function eq(a, b, msg)
 	if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end
 end
 
-local function new_test_modem()
+local function new_test_modem(fields)
+	fields = fields or {}
 	local retained = {}
 	local unretained = {}
 	local domain = {
@@ -22,31 +25,31 @@ local function new_test_modem()
 			return true
 		end,
 	}
+	local cap = {
+		call_control_op = function(_, method, opts)
+			eq(method, 'get')
+			local value = fields[opts.field]
+			if value == nil then
+				return op.always({ ok = false, reason = 'field unavailable' })
+			end
+			return op.always({ ok = true, reason = value })
+		end,
+	}
 	local modem = setmetatable({
 		id = 'test-modem',
 		name = 'primary',
 		device = '/dev/test-modem',
+		cap = cap,
 		connected = true,
 		wwan_iface = 'wwan0',
 		modem_state = 'connected',
 		sim_state = 'present',
-		info_values = {},
-		info_observed_at = {},
 		uplink_generation = 0,
 		domain = domain,
 		svc = { wall = function() return 100 end },
 	}, gsm._test.GsmModem)
 
 	return modem, retained, unretained
-end
-
-local function signal_event(access_techs, signal, observed_at)
-	return {
-		schema = 'devicecode.hal.modem.signal/1',
-		access_techs = access_techs,
-		signal = signal,
-		observed_at = observed_at,
-	}
 end
 
 function tests.test_uplink_state_uses_semantic_registered_state()
@@ -204,37 +207,44 @@ function tests.test_5g_sa_does_not_fall_back_to_an_unrelated_lte_signal()
 	eq(tech, '')
 end
 
-function tests.test_empty_signal_event_unretains_signal_and_omits_it_from_uplink()
-	local modem, retained, unretained = new_test_modem()
-	local accepted, err = modem:_accept_signal_event(signal_event({ 'lte' }, {
-		lte = { rssi = -70, rsrp = -96, rsrq = -11, snr = 10 },
-	}, 1))
-	eq(accepted, true, err)
-	eq(retained['modem/primary/signal'].rsrp, -96)
+function tests.test_empty_signal_read_unretains_signal_and_omits_it_from_uplink()
+	runfibers.run(function()
+		local fields = {
+			access_techs = { 'lte' },
+			signal = { lte = { rssi = -70, rsrp = -96, rsrq = -11, snr = 10 } },
+		}
+		local modem, retained, unretained = new_test_modem(fields)
+		modem:_publish_uplink_state()
+		eq(retained['modem/primary/signal'].rsrp, -96)
 
-	accepted, err = modem:_accept_signal_event(signal_event({ 'lte' }, {}, 2))
-	eq(accepted, true, err)
-	eq(retained['modem/primary/signal'], nil)
-	eq(unretained['modem/primary/signal'], true)
-	eq(retained['uplink/primary'].signal, nil)
-	eq(retained['uplink/primary'].access.signal_tech, nil)
+		fields.signal = {}
+		modem:_publish_uplink_state()
+		eq(retained['modem/primary/signal'], nil)
+		eq(unretained['modem/primary/signal'], true)
+		eq(retained['uplink/primary'].signal, nil)
+		eq(retained['uplink/primary'].access.signal_tech, nil)
+	end)
 end
 
-function tests.test_incomplete_5g_event_retains_complete_lte_signal()
-	local modem, retained = new_test_modem()
-	local accepted, err = modem:_accept_signal_event(signal_event({ 'lte', '5gnr' }, {
-		['5g'] = { rsrp = -103, snr = 12 },
-		lte = { rssi = -70, rsrp = -96, rsrq = -11, snr = 10 },
-	}, 1))
-	eq(accepted, true, err)
+function tests.test_incomplete_5g_read_retains_complete_lte_signal()
+	runfibers.run(function()
+		local modem, retained = new_test_modem({
+			access_techs = { 'lte', '5gnr' },
+			signal = {
+				['5g'] = { rsrp = -103, snr = 12 },
+				lte = { rssi = -70, rsrp = -96, rsrq = -11, snr = 10 },
+			},
+		})
+		modem:_publish_uplink_state()
 
-	local signal = retained['modem/primary/signal']
-	eq(signal.rssi, -70)
-	eq(signal.rsrp, -96)
-	eq(signal.rsrq, -11)
-	eq(signal.snr, 10)
-	eq(retained['uplink/primary'].signal.rsrp, -96)
-	eq(retained['uplink/primary'].access.signal_tech, 'lte')
+		local signal = retained['modem/primary/signal']
+		eq(signal.rssi, -70)
+		eq(signal.rsrp, -96)
+		eq(signal.rsrq, -11)
+		eq(signal.snr, 10)
+		eq(retained['uplink/primary'].signal.rsrp, -96)
+		eq(retained['uplink/primary'].access.signal_tech, 'lte')
+	end)
 end
 
 function tests.test_signal_bars_use_the_selected_signal_tech()
