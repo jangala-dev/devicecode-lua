@@ -188,7 +188,6 @@ local function is_signal_value_table(value)
 		return false
 	end
 
-	local has_tech = false
 	for tech, signals in pairs(value) do
 		if type(tech) ~= 'string' or type(signals) ~= 'table' then
 			return false
@@ -204,9 +203,8 @@ local function is_signal_value_table(value)
 		if not has_signal then
 			return false
 		end
-		has_tech = true
 	end
-	return has_tech
+	return true
 end
 
 ---Create a new ModemIdentityInfo.
