@@ -19,14 +19,6 @@ local function terminate_command(cmd, sig)
     return true, nil
 end
 
-local function list_to_map(list)
-    local map = {}
-    for _, item in ipairs(list) do
-        map[item] = true
-    end
-    return map
-end
-
 local MODEM_INFO_PATHS = {
     imei = { "generic", "equipment-identifier" },
     device = { "generic", "device" },
@@ -49,32 +41,57 @@ local SIM_INFO_PATHS = {
     imsi = { "properties", "imsi" },
 }
 
-local SIGNAL_TECHNOLOGIES = list_to_map {
-    "5g",
-    "cdma1x",
-    "evdo",
-    "gsm",
-    "lte",
-    "umts"
+local VALID_SIGNAL_RANGES = {
+    ["5g"] = {
+        rssi = { low = -125, high = -30 }, -- dBm
+        rsrp = { low = -156, high = -31 }, -- dBm
+        rsrq = { low = -43, high = 20 },   -- dB
+        snr  = { low = -23, high = 40 },   -- dB
+    },
+
+    cdma1x = {
+        rssi = { low = -125, high = -30 }, -- dBm
+        ecio = { low = -31.5, high = 0 },  -- dB
+    },
+
+    evdo = {
+        rssi = { low = -125, high = -30 }, -- dBm
+        ecio = { low = -31.5, high = 0 },  -- dB
+        sinr = { low = -9, high = 9 },     -- dB
+        io   = { low = -125, high = -30 }, -- dBm
+    },
+
+    gsm = {
+        rssi = { low = -125, high = -30 }, -- dBm
+    },
+
+    lte = {
+        rssi = { low = -125, high = -30 }, -- dBm
+        rsrp = { low = -140, high = -44 }, -- dBm
+        rsrq = { low = -20, high = -3 },   -- dB
+        snr  = { low = -20, high = 30 },   -- dB
+    },
+
+    umts = {
+        rssi = { low = -125, high = -30 }, -- dBm
+        rscp = { low = -120, high = -25 }, -- dBm
+        ecio = { low = -24, high = 0 },    -- dB
+    },
 }
 
-local SIGNAL_IGNORE_FIELDS = list_to_map {
-    "error-rate"
-}
-
-local SIGNAL_INVALID_VALUES = list_to_map {
-    -32768,
-    -3276.8,
-}
-
----@param signal number?
+---@param signal number
+---@param range { low: number, high: number }
 ---@return boolean
-local function is_signal_valid(signal)
-    return signal ~= nil
+local function is_signal_valid(signal, range)
+    return type(signal) == 'number'
         and signal == signal
         and signal ~= math.huge
         and signal ~= -math.huge
-        and not SIGNAL_INVALID_VALUES[signal]
+        and type(range) == 'table'
+        and type(range.low) == 'number'
+        and type(range.high) == 'number'
+        and signal >= range.low
+        and signal <= range.high
 end
 
 ---@param nested table
@@ -294,29 +311,27 @@ local function parse_signal_info_json(output)
         return nil, "No signal info found in mmcli output"
     end
 
-    local active_signals = {}
+    local valid_signals = {}
     for tech, signals in pairs(signal_techs) do
-        if SIGNAL_TECHNOLOGIES[tech] and type(signals) == 'table' then
+        local expected_signals = VALID_SIGNAL_RANGES[tech]
+        if expected_signals and type(signals) == 'table' then
             local filtered_fields = {}
-            for signal_name, signal_value in pairs(signals) do
-                if not SIGNAL_IGNORE_FIELDS[signal_name] and signal_value ~= "--" then
-                    local numeric_value = tonumber(signal_value)
-                    if is_signal_valid(numeric_value) then
-                        filtered_fields[signal_name] = numeric_value
-                    end
+            for signal_name, range in pairs(expected_signals) do
+                local numeric_value = tonumber(signals[signal_name])
+                if is_signal_valid(numeric_value, range) then
+                    filtered_fields[signal_name] = numeric_value
                 end
             end
             if next(filtered_fields) ~= nil then
-                active_signals[tech] = filtered_fields
+                valid_signals[tech] = filtered_fields
             end
         end
     end
 
-    if next(active_signals) == nil then
-        return nil, "No active signal found"
-    end
-
-    return modem_types.new.ModemSignalInfo(active_signals)
+    -- An empty table is a successful observation that no valid signal is
+    -- currently available. The driver emits it so consumers can clear stale
+    -- retained signal state instead of treating it as a failed modem read.
+    return modem_types.new.ModemSignalInfo(valid_signals)
 end
 
 ---@param identity ModemIdentity
@@ -834,8 +849,10 @@ end
 return {
     new = new,
     _test = {
+        is_signal_valid = is_signal_valid,
         normalize_unlock_retries = normalize_unlock_retries,
         parse_modem_info_json = parse_modem_info_json,
         parse_signal_info_json = parse_signal_info_json,
+        valid_signal_ranges = VALID_SIGNAL_RANGES,
     },
 }
