@@ -65,6 +65,35 @@ function tests.test_signal_poll_emits_access_tech_and_measurements_together()
 	end)
 end
 
+function tests.test_signal_poll_emits_empty_success_to_clear_stale_signal()
+	runfibers.run(function()
+		local emitted
+		local driver = setmetatable({
+			backend = {
+				read_access_techs = function()
+					return { 'lte' }, ''
+				end,
+				read_signal = function()
+					return { values = {} }, ''
+				end,
+			},
+			cache = cache.new(math.huge),
+			field_observed_at = {},
+			cap_emit_ch = {
+				put = function(_, payload)
+					emitted = payload
+				end,
+			},
+			imei = 'test-imei',
+		}, modem_driver._test.Modem)
+
+		local poll_ok, err = driver:_poll_signal_once()
+		ok(poll_ok, err)
+		eq(emitted.data.access_techs[1], 'lte')
+		eq(next(emitted.data.signal), nil)
+	end)
+end
+
 function tests.test_full_info_snapshot_marks_present_and_absent_fields_as_observed()
 	runfibers.run(function(scope)
 		local emitted

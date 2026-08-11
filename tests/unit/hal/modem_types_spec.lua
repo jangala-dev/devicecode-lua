@@ -34,10 +34,10 @@ function tests.test_modem_signal_info_rejects_non_numeric_measurements()
 	eq(err, 'invalid signal values')
 end
 
-function tests.test_modem_signal_info_rejects_empty_signal_sets()
+function tests.test_modem_signal_info_accepts_empty_signal_set_as_observed_absence()
 	local empty_info, empty_err = modem_types.new.ModemSignalInfo({})
-	eq(empty_info, nil)
-	eq(empty_err, 'invalid signal values')
+	ok(empty_info, empty_err)
+	eq(next(empty_info.values), nil)
 
 	local empty_tech_info, empty_tech_err = modem_types.new.ModemSignalInfo({ lte = {} })
 	eq(empty_tech_info, nil)
