@@ -1,6 +1,6 @@
 .PHONY: \
 	preflight fetch verify reset run wait provision provision-force ensure-mwan3 \
-	stop ssh smoke logs render-default-configs print-default-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-devicecode-exec-containment test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-openwrt-jan-client-per-host-shaping test-openwrt-shaping-idempotent-apply test-openwrt-segment-shaping-modes test-openwrt-wan-mark-shaping-contract test-openwrt-wan-mark-upload-exemption test-openwrt-wan-mark-download-capability test-openwrt-shaping-fast test-openwrt-shaping-clean test-devicecode-wired-static-provider test-devicecode-full-stack-mock-hal test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-openwrt-jan-client-dhcp-dns test-openwrt-int-bridge-client-dhcp-dns test-openwrt-dnsmasq-multi-instance-resilience \
+	stop ssh smoke logs render-default-configs print-default-configs render-bigbox-ss-configs print-bigbox-ss-configs baseline test-baseline test-tc-veth test-lua-uci test-devicecode-uci-manager test-devicecode-uci-manager-async-activation test-devicecode-openwrt-no-blocking-os-io test-devicecode-exec-containment test-openwrt-uart-stty-coreutils test-openwrt-network-provider-apply test-openwrt-network-provider-async-activation test-openwrt-network-provider-fw4-schema test-openwrt-network-provider-snapshot test-openwrt-network-provider-live-snapshot test-openwrt-network-observer-event-ingress test-openwrt-network-provider-vlan-mwan-shaping test-openwrt-network-provider-mwan-live-weights test-openwrt-network-provider-mwan-live-weights-fast test-openwrt-vm-generated-configs-expected test-openwrt-vm-mwan-connected test-openwrt-network-provider-segment-trunk test-openwrt-jan-client-per-host-shaping test-openwrt-shaping-idempotent-apply test-openwrt-segment-shaping-modes test-openwrt-wan-mark-shaping-contract test-openwrt-wan-mark-upload-exemption test-openwrt-wan-mark-download-capability test-openwrt-shaping-fast test-openwrt-shaping-clean test-devicecode-wired-static-provider test-devicecode-full-stack-mock-hal test-devicecode-bigbox-phase1-composition test-devicecode-bigbox-phase1-broken-trunk test-openwrt-jan-client-dhcp-dns test-openwrt-int-bridge-client-dhcp-dns test-openwrt-dnsmasq-multi-instance-resilience \
 	setup-bridge-client-fabric teardown-bridge-client-fabric \
 	network-lab-fetch network-lab-start network-lab-wait network-lab-provision network-lab-sync network-lab-ssh network-lab-stop network-lab-test test-network-lab \
 	test openwrt-vm-test clean
@@ -52,6 +52,14 @@ render-default-configs:
 print-default-configs:
 	./scripts/wait-ssh
 	DEVICECODE_RENDER_PRINT=1 ./scripts/render-default-configs
+
+render-bigbox-ss-configs:
+	./scripts/wait-ssh
+	DEVICECODE_RENDER_CONFIG=src/configs/bigbox-ss.json DEVICECODE_RENDER_OUT_DIR=work/generated-bigbox-ss-etc-config DEVICECODE_RENDER_PRINT=0 ./scripts/render-default-configs
+
+print-bigbox-ss-configs:
+	./scripts/wait-ssh
+	DEVICECODE_RENDER_CONFIG=src/configs/bigbox-ss.json DEVICECODE_RENDER_OUT_DIR=work/generated-bigbox-ss-etc-config DEVICECODE_RENDER_PRINT=1 ./scripts/render-default-configs
 
 baseline: test-baseline
 
