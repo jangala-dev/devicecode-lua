@@ -56,6 +56,14 @@ local SCOREMAP = {
 	["5g"] = { rsrp = { -115, -105, -95, -85, 1000000 } },
 }
 
+local SIGNAL_COMPLETENESS_FIELDS = {
+	rssi = true,
+	rsrp = true,
+	rscp = true,
+	rsrq = true,
+	snr = true,
+}
+
 local ACCESS_TECH_MAP = {
 	{ tokens = { 'lte', '5gnr' }, tech = '5g' },
 	{ tokens = { '5gnr' },        tech = '5g' },
@@ -65,15 +73,6 @@ local ACCESS_TECH_MAP = {
 	{ tokens = { 'gsm' },         tech = 'gsm' },
 	{ tokens = { 'evdo' },        tech = 'evdo' },
 	{ tokens = { 'cdma1x' },      tech = 'cdma1x' },
-}
-
-local SIGNAL_TECH_BY_ACCESS = {
-	cdma1x = 'cdma1x',
-	evdo = 'evdo',
-	gsm = 'gsm',
-	umts = 'umts',
-	lte = 'lte',
-	['5g'] = '5g',
 }
 
 local STATE_CONNECTED = 'connected'
@@ -257,38 +256,45 @@ local function derive_access_tech(access_techs)
 	return ""
 end
 
----@param signals any
----@param tech string
----@return table?
-local function signal_values_for_tech(signals, tech)
-	if not is_plain_table(signals) then return nil end
-	local values = signals[tech]
-	if not is_plain_table(values) or next(values) == nil then return nil end
-	return values
-end
-
 ---@param access_techs any
 ---@param signals any
 ---@return table?
 ---@return string
 local function select_canonical_signal(access_techs, signals)
-	local access_tech = derive_access_tech(access_techs)
-	local signal_tech = SIGNAL_TECH_BY_ACCESS[access_tech]
-	if not signal_tech then return nil, "" end
+	if not is_plain_table(signals) then return nil, "" end
 
-	local signal = signal_values_for_tech(signals, signal_tech)
-	if signal then return signal, signal_tech end
+	local active_access_techs = access_tech_set(access_techs)
+	local best_signal, best_tech, best_count = nil, "", 0
 
-	-- 5G NSA can expose either signal set. Prefer 5G when both are valid, but
-	-- only fall back to LTE when LTE is part of the current access technology.
-	local techs = access_tech_set(access_techs)
-	local is_5g_nsa = techs.lte and (techs['5gnr'] or techs['5g'])
-	if is_5g_nsa then
-		signal = signal_values_for_tech(signals, 'lte')
-		if signal then return signal, 'lte' end
+	for signal_tech, values in pairs(signals) do
+		local is_active = active_access_techs[signal_tech] == true
+		if signal_tech == '5g' then
+			is_active = active_access_techs['5g'] == true or active_access_techs['5gnr'] == true
+		end
+
+		if is_active and is_plain_table(values) then
+			local count = 0
+			for signal_name in pairs(SIGNAL_COMPLETENESS_FIELDS) do
+				if values[signal_name] ~= nil then
+					count = count + 1
+				end
+			end
+
+			if count > 0 then
+				-- pairs() order is undefined, so use the technology name only to
+				-- make equal-completeness results stable without a preference list.
+				local should_select = count > best_count
+					or (count == best_count and (best_tech == "" or signal_tech < best_tech))
+				if should_select then
+					best_signal = values
+					best_tech = signal_tech
+					best_count = count
+				end
+			end
+		end
 	end
 
-	return nil, ""
+	return best_signal, best_tech
 end
 
 ---@param access_tech string
@@ -1832,6 +1838,7 @@ function GsmService.start(conn, opts)
 end
 
 GsmService._test = {
+	GsmModem = GsmModem,
 	build_sim_payload = build_sim_payload,
 	derive_access_tech = derive_access_tech,
 	merge_info_snapshot = merge_info_snapshot,
