@@ -54,6 +54,14 @@ local SCOREMAP = {
 	["5g"] = { rsrp = { -115, -105, -95, -85, 1000000 } },
 }
 
+local SIGNAL_COMPLETENESS_FIELDS = {
+	rssi = true,
+	rsrp = true,
+	rscp = true,
+	rsrq = true,
+	snr = true,
+}
+
 local ACCESS_TECH_MAP = {
 	{ tokens = { 'lte', '5gnr' }, tech = '5g' },
 	{ tokens = { '5gnr' },        tech = '5g' },
@@ -160,19 +168,29 @@ local function is_plain_table(value)
 end
 
 ---@param access_techs any
----@return string
-local function derive_access_tech(access_techs)
+---@return table<string, boolean>
+local function access_tech_set(access_techs)
 	local techs = {}
 	if type(access_techs) == 'string' then
 		for token in string.gmatch(access_techs, "([^,]+)") do
+			token = token:match('^%s*(.-)%s*$')
 			techs[token] = true
 		end
 	elseif is_plain_table(access_techs) then
 		for _, token in ipairs(access_techs) do
-			techs[token] = true
+			if type(token) == 'string' then
+				techs[token] = true
+			end
 		end
 	end
 
+	return techs
+end
+
+---@param access_techs any
+---@return string
+local function derive_access_tech(access_techs)
+	local techs = access_tech_set(access_techs)
 	for _, rule in ipairs(ACCESS_TECH_MAP) do
 		local all_match = true
 		for _, required_token in ipairs(rule.tokens) do
@@ -187,6 +205,47 @@ local function derive_access_tech(access_techs)
 	end
 
 	return ""
+end
+
+---@param access_techs any
+---@param signals any
+---@return table?
+---@return string
+local function select_canonical_signal(access_techs, signals)
+	if not is_plain_table(signals) then return nil, "" end
+
+	local active_access_techs = access_tech_set(access_techs)
+	local best_signal, best_tech, best_count = nil, "", 0
+
+	for signal_tech, values in pairs(signals) do
+		local is_active = active_access_techs[signal_tech] == true
+		if signal_tech == '5g' then
+			is_active = active_access_techs['5g'] == true or active_access_techs['5gnr'] == true
+		end
+
+		if is_active and is_plain_table(values) then
+			local count = 0
+			for signal_name in pairs(SIGNAL_COMPLETENESS_FIELDS) do
+				if values[signal_name] ~= nil then
+					count = count + 1
+				end
+			end
+
+			if count > 0 then
+				-- pairs() order is undefined, so use the technology name only to
+				-- make equal-completeness results stable without a preference list.
+				local should_select = count > best_count
+					or (count == best_count and (best_tech == "" or signal_tech < best_tech))
+				if should_select then
+					best_signal = values
+					best_tech = signal_tech
+					best_count = count
+				end
+			end
+		end
+	end
+
+	return best_signal, best_tech
 end
 
 ---@param access_tech string
@@ -342,45 +401,40 @@ local function build_sim_payload(sim_state, sim_lock, sim_lock_retries, modem_st
 	return sim_payload_from_value(sim_state, sim_lock, sim_lock_retries, modem_state)
 end
 
----@param access_techs any
+---@param signal_tech string?
 ---@param rssi any
 ---@param rsrp any
 ---@param rscp any
 ---@return string
 ---@return number
 ---@return string
-local function select_signal_for_bars(access_techs, rssi, rsrp, rscp)
-	if not access_techs then
-		return "", 0, "access tech unavailable"
+local function select_signal_for_bars(signal_tech, rssi, rsrp, rscp)
+	if not signal_tech or signal_tech == "" then
+		return "", 0, "signal tech unavailable"
 	end
 
-	local access_tech = derive_access_tech(access_techs)
-	if access_tech == "" then
-		return "", 0, "access tech unknown"
-	end
-
-	if access_tech == 'umts' and rscp ~= nil then
+	if signal_tech == 'umts' and rscp ~= nil then
 		local rscp_value = tonumber(rscp)
 		if rscp_value then
-			return access_tech, rscp_value, "rscp"
+			return signal_tech, rscp_value, "rscp"
 		end
 	end
 
-	if (access_tech == 'lte' or access_tech == '5g') and rsrp ~= nil then
+	if (signal_tech == 'lte' or signal_tech == '5g') and rsrp ~= nil then
 		local rsrp_value = tonumber(rsrp)
 		if rsrp_value then
-			return access_tech, rsrp_value, "rsrp"
+			return signal_tech, rsrp_value, "rsrp"
 		end
 	end
 
 	if rssi ~= nil then
 		local rssi_value = tonumber(rssi)
 		if rssi_value then
-			return access_tech, rssi_value, "rssi"
+			return signal_tech, rssi_value, "rssi"
 		end
 	end
 
-	return access_tech, 0, ""
+	return signal_tech, 0, ""
 end
 
 ---@param cfg table?
@@ -765,10 +819,15 @@ function GsmModem:_publish_uplink_state(connected, iface)
 			self.domain:unretain({ 'modem', self.name, 'operator' })
 		end
 
-		local signal, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT, 0)
-		if signal_err == '' and type(signal) == 'table' then
-			signal_payload = signal
-			self.domain:retain({ 'modem', self.name, 'signal' }, signal)
+		local signals, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT, 0)
+		local canonical_signal, signal_tech = nil, ""
+		if signal_err == '' then
+			canonical_signal, signal_tech = select_canonical_signal(access_techs, signals)
+		end
+		if canonical_signal then
+			signal_payload = shallow_copy(canonical_signal)
+			access.signal_tech = signal_tech
+			self.domain:retain({ 'modem', self.name, 'signal' }, signal_payload)
 		else
 			self.domain:unretain({ 'modem', self.name, 'signal' })
 		end
@@ -808,7 +867,7 @@ end
 function GsmModem:_emit_metrics_once()
 	-- Derived metrics only; HAL remains the source of truth.
 	local inventory = {}
-	local access_techs, access_err = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT)
+	local access_techs, access_err = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT, 0)
 	if access_err == "" then
 		local access_tech = derive_access_tech(access_techs)
 		if access_tech ~= "" then
@@ -899,9 +958,13 @@ function GsmModem:_emit_metrics_once()
 		self:_emit_metric('tx_bytes', tx_bytes)
 	end
 
-	local signal, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT)
+	local signals, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT, 0)
+	local signal, signal_tech = nil, ""
 	local rssi, rsrp, rsrq, rscp = nil, nil, nil, nil
 	if signal_err == "" then
+		signal, signal_tech = select_canonical_signal(access_techs, signals)
+	end
+	if signal then
 		rssi = signal.rssi
 		rsrp = signal.rsrp
 		rsrq = signal.rsrq
@@ -921,7 +984,7 @@ function GsmModem:_emit_metrics_once()
 	end
 
 	local bars_access_tech, signal_value, signal_type = select_signal_for_bars(
-		access_techs,
+		signal_tech,
 		rssi,
 		rsrp,
 		rscp
@@ -1665,7 +1728,11 @@ function GsmService.start(conn, opts)
 end
 
 GsmService._test = {
+	GsmModem = GsmModem,
 	build_sim_payload = build_sim_payload,
+	derive_access_tech = derive_access_tech,
+	select_canonical_signal = select_canonical_signal,
+	select_signal_for_bars = select_signal_for_bars,
 	uplink_state_for_modem = uplink_state_for_modem,
 }
 
