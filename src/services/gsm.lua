@@ -960,7 +960,7 @@ function GsmModem:_emit_metrics_once()
 
 	local signals, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT, 0)
 	local signal, signal_tech = nil, ""
-	local rssi, rsrp, rsrq, rscp = nil, nil, nil, nil
+	local rssi, rsrp, rsrq, rscp, snr = nil, nil, nil, nil, nil
 	if signal_err == "" then
 		signal, signal_tech = select_canonical_signal(access_techs, signals)
 	end
@@ -969,6 +969,7 @@ function GsmModem:_emit_metrics_once()
 		rsrp = signal.rsrp
 		rsrq = signal.rsrq
 		rscp = signal.rscp
+		snr = signal.snr
 	end
 
 	if rsrp then
@@ -981,6 +982,10 @@ function GsmModem:_emit_metrics_once()
 
 	if rssi then
 		self:_emit_metric('rssi', rssi)
+	end
+
+	if snr then
+		self:_emit_metric('snr', snr)
 	end
 
 	local bars_access_tech, signal_value, signal_type = select_signal_for_bars(
