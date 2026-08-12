@@ -13,11 +13,10 @@ if digest.digest == nil then
     end
 end
 
-local USER_SALT = "$USER_SALT"
 local USER_ID_LEN = 6
 
-local function userid(mac)
-    local hash = digest.digest("sha256", USER_SALT..mac)
+local function userid(mac, user_salt)
+    local hash = digest.digest("sha256", user_salt..mac)
     return string.sub(hash, 1, USER_ID_LEN)
 end
 

@@ -45,6 +45,7 @@ Received via retained bus message on `{'cfg', 'wifi'}`. The message uses the sta
   rev  = <number>,   -- config revision; service skips messages with rev <= last applied rev
   data = {
     schema        = "devicecode.config/wifi/1",
+    user_salt     = <string>,       -- required: target-specific salt used to generate client IDs
     report_period = <number>,       -- required: stats publish interval in seconds
     radios = {                      -- required: array of per-radio configs
       {
@@ -116,6 +117,9 @@ Received via retained bus message on `{'cfg', 'wifi'}`. The message uses the sta
   },
 }
 ```
+
+`user_salt` is required and must not be empty. Changing it changes every generated
+client ID, so it should be treated as immutable configuration and must not be logged.
 
 > **Underflow note:** JSON decoding may silently convert negative numbers to large positive integers due to integer underflow. The service must check decoded numeric fields that are expected to be non-negative and, if the value exceeds a sanity threshold (e.g. > 2^31), treat it as if the original value were negative by subtracting 2^32.
 

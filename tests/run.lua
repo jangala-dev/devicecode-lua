@@ -172,6 +172,7 @@ local files = {
 	"unit.net.test_hal_client",
 	"unit.net.test_service_behaviour",
 	"unit.net.test_wan_runtime",
+	"unit.wifi.gen_spec",
 	"unit.wired.test_config",
 	"unit.wired.test_dependencies",
 	"unit.wired.test_publisher",
