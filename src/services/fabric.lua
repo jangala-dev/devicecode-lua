@@ -3,8 +3,8 @@
 -- Public Fabric assembly entry point.
 --
 -- This module deliberately stays thin. The semantic owners live under
--- services.fabric.*; this file wires the default service runner to the standard
--- composed link runner.
+-- services.fabric.*; this file wires the default service runner to the selected
+-- protocol profile.
 
 local fibers   = require 'fibers'
 local service  = require 'services.fabric.service'
@@ -23,6 +23,7 @@ local protocol = require 'services.fabric.protocol'
 local topics   = require 'services.fabric.topics'
 local config   = require 'services.fabric.config'
 local state    = require 'services.fabric.state'
+local profile_loader = require 'services.fabric.profiles.loader'
 local dep_failure = require 'devicecode.support.dependency_failure'
 local tablex   = require 'shared.table'
 
@@ -42,6 +43,7 @@ local M = {
 	topics   = topics,
 	config   = config,
 	state    = state,
+	profile_loader = profile_loader,
 }
 
 local shallow_copy = tablex.shallow_copy
@@ -50,11 +52,8 @@ local function has_terminate_contract(x)
 	return type(x) == 'table' and type(x.terminate) == 'function'
 end
 
-local function is_frame_transport(x)
-	return type(x) == 'table'
-		and type(x.read_frame_op) == 'function'
-		and type(x.write_frame_op) == 'function'
-		and has_terminate_contract(x)
+local function is_managed_transport(x)
+	return has_terminate_contract(x)
 end
 
 local function link_conn(link_spec, service_caps)
@@ -107,7 +106,7 @@ local function transport_open_error(link_spec, err, fallback)
 end
 
 local function open_transport_for_link(scope, link_spec, service_caps)
-	if is_frame_transport(link_spec.transport) then
+	if is_managed_transport(link_spec.transport) then
 		return link_spec.transport, nil
 	end
 
@@ -116,8 +115,8 @@ local function open_transport_for_link(scope, link_spec, service_caps)
 		if transport == nil then
 			return nil, transport_open_error(link_spec, err, 'transport_open_failed')
 		end
-		if not is_frame_transport(transport) then
-			return nil, transport_open_error(link_spec, 'transport_open_returned_non_frame_transport')
+		if not is_managed_transport(transport) then
+			return nil, transport_open_error(link_spec, 'transport_open_returned_unmanaged_transport')
 		end
 		return transport, nil
 	end
@@ -153,14 +152,16 @@ function M.run_link(scope, link_spec, service_caps)
 
 	p.transport = transport
 	p.open_transport_op = nil
-
-	return link.run_composed(scope, p, service_caps)
+	local profile_kind = p.protocol and p.protocol.kind or profile_loader.DEFAULT_KIND
+	local profile, profile_err = profile_loader.load(profile_kind)
+	if not profile then error(profile_err, 0) end
+	return profile.run(scope, p, service_caps)
 end
 
 --- Start the long-lived public Fabric service shell.
 ---
 --- opts is the same shape accepted by services.fabric.service.start, except that
---- link_runner defaults to services.fabric.link.run_composed.
+--- link_runner defaults to profile-based Fabric dispatch.
 function M.start(conn, opts)
 	opts = opts or {}
 	local p = shallow_copy(opts)
@@ -171,10 +172,10 @@ function M.start(conn, opts)
 	return service.start(conn, p)
 end
 
---- Run one Fabric generation using the standard composed-link implementation.
+--- Run one Fabric generation using profile-based link dispatch.
 ---
 --- params is the same shape accepted by services.fabric.service.run, except that
---- link_runner defaults to services.fabric.link.run_composed.
+--- link_runner defaults to profile-based Fabric dispatch.
 function M.run(scope, params)
 	if type(scope) ~= 'table' then
 		error('fabric.run: scope required', 2)
