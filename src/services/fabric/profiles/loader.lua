@@ -36,7 +36,7 @@ function M.load(kind)
 	if type(kind) ~= 'string' or kind:match(KIND_PATTERN) == nil then
 		return nil, 'protocol.kind must match ' .. KIND_PATTERN
 	end
-	local ok, profile = pcall(require, MODULE_PREFIX .. kind)
+	local ok, profile = pcall(require, MODULE_PREFIX .. kind .. '.init')
 	if not ok then
 		return nil, 'fabric protocol profile unavailable: ' .. kind .. ': ' .. tostring(profile)
 	end
