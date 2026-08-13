@@ -218,6 +218,20 @@ function tests.test_bigbox_config_uses_clean_segment_authority_shape()
 end
 
 
+
+function tests.test_bigbox_v1_cm_preserves_original_symmetric_host_shaping()
+	local cjson = require 'cjson.safe'
+	local text = ok(read_project_file('src/configs/bigbox-v1-cm.json'))
+	local doc = ok(cjson.decode(text), 'bigbox-v1-cm config must decode')
+	local intent = ok(config.normalise(doc.net, { generation = 1 }))
+	local shaping = intent.segments.jan.shaping.host_default
+	for _, direction in ipairs({ 'download', 'upload' }) do
+		eq(shaping[direction].sustained_rate, '400kbit')
+		eq(shaping[direction].peak_rate, '2mbit')
+		eq(shaping[direction].burst_budget, '200k')
+	end
+end
+
 function tests.test_rejects_cross_domain_unknown_segment_reference()
 	local cfg = sample_cfg()
 	cfg.interfaces.bad = { kind = 'bridge', segment = 'missing' }

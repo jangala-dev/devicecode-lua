@@ -259,4 +259,228 @@ function T.compile_rejects_profile_field()
 	assert(tostring(err):match('unknown field: profile'))
 end
 
+
+function T.compile_defaults_to_standard_fabric_profile()
+	local compiled, err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		links = { { id = 'uart0', peer_id = 'peer-a' } },
+	})
+	assert(compiled ~= nil, tostring(err))
+	assert(compiled.links[1].protocol.kind == 'fabric_jsonl_v1')
+	assert(next(compiled.links[1].protocol.args) == nil)
+	assert(compiled.links[1].protocol.capabilities.transfer == true)
+end
+
+function T.compile_accepts_legacy_mcu_metrics_profile_args()
+	local compiled, err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		local_node = 'bigbox-v1-cm',
+		links = {
+			{
+				id = 'legacy-mcu-uart0',
+				peer_id = 'mcu',
+				protocol = {
+					kind = 'legacy_mcu_metrics_v1',
+					args = {
+						namespace_prefix = { 'mcu' },
+						publish_service = 'mcu',
+						change_only = true,
+						unsigned_underflow_compat = true,
+						error_log_initial_s = 1,
+						error_log_max_s = 60,
+					},
+				},
+				transport = {
+					kind = 'uart',
+					source = 'uart_manager',
+					class = 'uart',
+					id = 'uart0',
+					terminator = '\n',
+				},
+			},
+		},
+	})
+	assert(compiled ~= nil, tostring(err))
+	local link = compiled.links[1]
+	assert(link.protocol.kind == 'legacy_mcu_metrics_v1')
+	assert(link.protocol.args.namespace_prefix[1] == 'mcu')
+	assert(link.protocol.args.publish_service == 'mcu')
+	assert(link.protocol.capabilities.transfer == false)
+	assert(link.session == nil)
+	assert(link.bridge == nil)
+	assert(link.transfer == nil)
+end
+
+function T.compile_profile_owns_legacy_defaults()
+	local compiled, err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		links = {
+			{
+				id = 'legacy',
+				peer_id = 'mcu',
+				protocol = { kind = 'legacy_mcu_metrics_v1' },
+			},
+		},
+	})
+	assert(compiled ~= nil, tostring(err))
+	local args = compiled.links[1].protocol.args
+	assert(args.change_only == true)
+	assert(args.unsigned_underflow_compat == true)
+	assert(args.error_log_initial_s == 1)
+	assert(args.error_log_max_s == 60)
+end
+
+function T.compile_rejects_link_sections_not_supported_by_profile()
+	local compiled, err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		links = {
+			{
+				id = 'legacy',
+				peer_id = 'mcu',
+				protocol = { kind = 'legacy_mcu_metrics_v1' },
+				session = {},
+			},
+		},
+	})
+	assert(compiled == nil)
+	assert(tostring(err):match('link.session is not valid for protocol profile'))
+end
+
+function T.compile_rejects_profile_args_at_protocol_root()
+	local compiled, err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		links = {
+			{
+				id = 'legacy',
+				peer_id = 'mcu',
+				protocol = { kind = 'legacy_mcu_metrics_v1', change_only = true },
+			},
+		},
+	})
+	assert(compiled == nil)
+	assert(tostring(err):match('protocol has unknown field'))
+end
+
+function T.compile_rejects_args_unknown_to_selected_profile()
+	local compiled, err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		links = {
+			{
+				id = 'standard',
+				peer_id = 'mcu',
+				protocol = {
+					kind = 'fabric_jsonl_v1',
+					args = { change_only = true },
+				},
+			},
+		},
+	})
+	assert(compiled == nil)
+	assert(tostring(err):match('unknown field for fabric_jsonl_v1'))
+end
+
+function T.compile_loads_new_profile_packages_without_central_registration()
+	local module_name = 'services.fabric.profiles.test_extensible_v1.init'
+	package.loaded[module_name] = nil
+	package.preload[module_name] = function ()
+		return {
+			kind = 'test_extensible_v1',
+			capabilities = { publish = true },
+			link_sections = {},
+			compile = function (args)
+				if type(args) ~= 'table' or args.token ~= 'accepted' then
+					return nil, 'test profile args rejected'
+				end
+				return { token = args.token }, nil
+			end,
+			run = function () return { ok = true } end,
+		}
+	end
+	local compiled, err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		links = {
+			{
+				id = 'dynamic',
+				peer_id = 'peer',
+				protocol = {
+					kind = 'test_extensible_v1',
+					args = { token = 'accepted' },
+				},
+			},
+		},
+	})
+	package.loaded[module_name] = nil
+	package.preload[module_name] = nil
+	assert(compiled ~= nil, tostring(err))
+	assert(compiled.links[1].protocol.args.token == 'accepted')
+end
+
+function T.compile_rejects_unsafe_or_unavailable_profile_kinds()
+	local unsafe, unsafe_err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		links = {
+			{ id = 'unsafe', peer_id = 'mcu', protocol = { kind = '../escape' } },
+		},
+	})
+	assert(unsafe == nil)
+	assert(tostring(unsafe_err):match('must match'))
+
+	local missing, missing_err = cfg.compile({
+		schema = 'devicecode.config/fabric/1',
+		links = {
+			{ id = 'missing', peer_id = 'mcu', protocol = { kind = 'not_installed_v1' } },
+		},
+	})
+	assert(missing == nil)
+	assert(tostring(missing_err):match('profile unavailable'))
+end
+
+
+local function read_project_file(rel)
+	local candidates = { rel, '../' .. rel }
+	for i = 1, #candidates do
+		local f = io.open(candidates[i], 'rb')
+		if f then
+			local data = f:read('*a')
+			f:close()
+			return data
+		end
+	end
+	return nil, 'unable to read ' .. rel
+end
+
+function T.bigbox_v1_cm_selects_the_legacy_mcu_metrics_profile()
+	local cjson = require 'cjson.safe'
+	local text, read_err = read_project_file('src/configs/bigbox-v1-cm.json')
+	assert(text ~= nil, tostring(read_err))
+	local doc, decode_err = cjson.decode(text)
+	assert(doc ~= nil, tostring(decode_err))
+	local compiled, err = cfg.compile(doc.fabric.data)
+	assert(compiled ~= nil, tostring(err))
+	local link = compiled.links[1]
+	assert(link.protocol.kind == 'legacy_mcu_metrics_v1')
+	assert(link.protocol.args.error_log_initial_s == 1)
+	assert(link.protocol.args.error_log_max_s == 60)
+	assert(link.protocol.capabilities.transfer == false)
+	assert(link.reader == nil)
+	assert(link.session == nil)
+	assert(link.bridge == nil)
+end
+
+function T.bigbox_v1_cm_2_explicitly_selects_standard_profile()
+	local cjson = require 'cjson.safe'
+	local text, read_err = read_project_file('src/configs/bigbox-v1-cm-2.json')
+	assert(text ~= nil, tostring(read_err))
+	local doc, decode_err = cjson.decode(text)
+	assert(doc ~= nil, tostring(decode_err))
+	local compiled, err = cfg.compile(doc.fabric.data)
+	assert(compiled ~= nil, tostring(err))
+	local link = compiled.links[1]
+	assert(link.protocol.kind == 'fabric_jsonl_v1')
+	assert(link.protocol.capabilities.session == true)
+	assert(link.protocol.capabilities.transfer == true)
+	assert(link.session ~= nil)
+	assert(link.bridge ~= nil)
+end
+
 return T
