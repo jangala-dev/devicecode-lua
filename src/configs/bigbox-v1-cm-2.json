@@ -1304,6 +1304,9 @@
         {
           "id": "mcu-uart0",
           "peer_id": "mcu",
+          "protocol": {
+            "kind": "fabric_jsonl_v1"
+          },
           "transport": {
             "kind": "uart",
             "source": "uart_manager",

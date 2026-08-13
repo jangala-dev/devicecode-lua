@@ -1161,15 +1161,17 @@
           "id": "mcu-uart0",
           "peer_id": "mcu",
           "protocol": {
-            "kind": "legacy-mcu-metrics-jsonl/1",
-            "namespace_prefix": [
-              "mcu"
-            ],
-            "publish_service": "mcu",
-            "change_only": true,
-            "unsigned_underflow_compat": true,
-            "error_log_initial_s": 1,
-            "error_log_max_s": 60
+            "kind": "legacy_mcu_metrics_v1",
+            "args": {
+              "namespace_prefix": [
+                "mcu"
+              ],
+              "publish_service": "mcu",
+              "change_only": true,
+              "unsigned_underflow_compat": true,
+              "error_log_initial_s": 1,
+              "error_log_max_s": 60
+            }
           },
           "transport": {
             "kind": "uart",
