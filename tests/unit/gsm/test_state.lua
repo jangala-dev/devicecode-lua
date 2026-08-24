@@ -247,6 +247,39 @@ function tests.test_incomplete_5g_read_retains_complete_lte_signal()
 	end)
 end
 
+function tests.test_uplink_state_includes_active_band_and_modem_firmware()
+	runfibers.run(function()
+		local modem, retained = new_test_modem({
+			access_techs = { 'lte' },
+			active_band_class = 'EUTRAN-20',
+			firmware = 'EG25GGBR07A08M2G',
+		})
+		modem:_publish_uplink_state()
+
+		local uplink = retained['uplink/primary']
+		eq(uplink.schema, 'devicecode.gsm.uplink/1')
+		eq(uplink.access.band, 'EUTRAN-20')
+		eq(uplink.modem.firmware, 'EG25GGBR07A08M2G')
+	end)
+end
+
+function tests.test_uplink_state_omits_band_without_active_sim_but_keeps_firmware()
+	runfibers.run(function()
+		local modem, retained = new_test_modem({
+			active_band_class = 'EUTRAN-20',
+			firmware = 'EG25GGBR07A08M2G',
+		})
+		modem.connected = false
+		modem.modem_state = 'disabled'
+		modem.sim_state = '--'
+		modem:_publish_uplink_state()
+
+		local uplink = retained['uplink/primary']
+		eq(uplink.access.band, nil)
+		eq(uplink.modem.firmware, 'EG25GGBR07A08M2G')
+	end)
+end
+
 function tests.test_signal_bars_use_the_selected_signal_tech()
 	local tech, value, field = gsm._test.select_signal_for_bars('lte', nil, -96, nil)
 	eq(tech, 'lte')
