@@ -801,6 +801,14 @@ function GsmModem:_publish_uplink_state(connected, iface)
 	local state = uplink_state_for_modem(self.connected == true, self.modem_state, self.sim_lock, self.sim_state)
 	local access = {}
 	local signal_payload = nil
+	local modem_payload = {
+		id = tostring(self.id),
+		role = self.name,
+		device = self.device,
+	}
+	local firmware, firmware_err = modem_get_field(self.cap, 'firmware', REQUEST_TIMEOUT)
+	firmware = firmware_err == '' and normalize_optional_string(firmware) or nil
+	if firmware then modem_payload.firmware = firmware end
 
 	if sim.present == true and state ~= 'locked' and state ~= 'sim_absent' then
 		local access_techs, access_err = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT, 0)
@@ -818,6 +826,10 @@ function GsmModem:_publish_uplink_state(connected, iface)
 		else
 			self.domain:unretain({ 'modem', self.name, 'operator' })
 		end
+
+		local band, band_err = modem_get_field(self.cap, 'active_band_class', REQUEST_TIMEOUT, 0)
+		band = band_err == '' and normalize_optional_string(band) or nil
+		if band then access.band = band end
 
 		local signals, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT, 0)
 		local canonical_signal, signal_tech = nil, ""
@@ -845,11 +857,7 @@ function GsmModem:_publish_uplink_state(connected, iface)
 		available = self.connected == true and type(ifname) == 'string' and ifname ~= '',
 		generation = self.uplink_generation,
 		linux = { ifname = ifname },
-		modem = {
-			id = tostring(self.id),
-			role = self.name,
-			device = self.device,
-		},
+		modem = modem_payload,
 		sim = sim,
 		access = access,
 		signal = signal_payload,
