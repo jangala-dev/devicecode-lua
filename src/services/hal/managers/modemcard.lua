@@ -3,6 +3,7 @@ local modem_provider = require "services.hal.backends.modem.provider"
 local hal_types = require "services.hal.types.core"
 local capability_args = require "services.hal.types.capability_args"
 local modem_driver = require "services.hal.drivers.modem"
+local attempts_counter = require "services.hal.managers.modemcard.attempts_counter"
 
 -- Fiber modules
 local fibers = require "fibers"
@@ -37,7 +38,7 @@ local ModemcardManager = {
     driver_ch = channel.new(),
     modems = {},
     monitor = nil,
-    modem_init_attempts = {}
+    init_attempts = attempts_counter.new(MODEM_INIT_MAX_ATTEMPTS)
 }
 
 ---Continuously monitors modem add/remove events and publishes them onto
@@ -74,12 +75,18 @@ local function detector(scope)
         elseif event then
             ---@cast event ModemMonitorEvent
             if event.is_added then
-                log:debug({ what = 'modem_detected', summary = string.format('modem detected %s', tostring(event.address)), address =
-                event.address })
+                log:debug({
+                    what = 'modem_detected',
+                    summary = string.format('modem detected %s', tostring(event.address)),
+                    address = event.address,
+                })
                 ModemcardManager.modem_detect_ch:put(event.address)
             else
-                log:debug({ what = 'modem_removed', summary = string.format('modem removed %s', tostring(event.address)), address =
-                event.address })
+                log:debug({
+                    what = 'modem_removed',
+                    summary = string.format('modem removed %s', tostring(event.address)),
+                    address = event.address,
+                })
                 ModemcardManager.modem_remove_ch:put(event.address)
             end
         end
@@ -134,23 +141,44 @@ local function on_remove(dev_ev_ch, address)
     dev_ev_ch:put(device_event)
 end
 
----@param device string
----@return boolean
-local function can_attempt_init(device)
-    local attempts = ModemcardManager.modem_init_attempts[device] or MODEM_INIT_MAX_ATTEMPTS
-    return attempts ~= 0
-end
+---@param address ModemAddress
+---@param driver Modem
+---@param new_recovery fun(address: ModemAddress): RecoveryModem
+---@param attempts InitAttempts
+---@param logger Logger
+---@return Modem? initialized_driver
+local function initialise_driver(address, driver, new_recovery, attempts, logger)
+    local init_err = driver:init()
+    if init_err == "" then
+        return driver
+    end
 
----@paramn device string
-local function increment_attempts(device)
-    local attempts = ModemcardManager.modem_init_attempts[device] or MODEM_INIT_MAX_ATTEMPTS
-    if attempts == 0 then attempts = 3 end
-    attempts = attempts - 1
-    ModemcardManager.modem_init_attempts[device] = attempts
-end
+    local recovery_driver = new_recovery(address)
+    local device, dev_err = recovery_driver:get_device()
+    if dev_err ~= "" then
+        logger:error({ what = 'init_driver_failed', address = address, err = init_err, retry = false })
+        return nil
+    end
 
-local function reset_attempts(device)
-    ModemcardManager.modem_init_attempts[device] = 3
+    local should_reset = attempts:record_failure(device)
+    if not should_reset then
+        return nil
+    end
+
+    local ok, reset_err = recovery_driver:reset()
+    if not ok then
+        logger:error({
+            what = 'reset_driver_failed',
+            address = address,
+            err = reset_err,
+            init_err = init_err,
+            retry = false,
+        })
+        return nil
+    end
+
+    logger:warn({ what = 'init_driver_failed', address = address, err = init_err, retry = true })
+    return nil
 end
 
 ---Handle modem detection by creating and initializing a driver.
@@ -172,27 +200,16 @@ local function on_detection(address)
     end
 
     fibers.current_scope():spawn(function()
-        local init_err = driver:init()
-        if init_err ~= "" then
-            driver = modem_driver.new_recovery(address)
-            local device, dev_err = driver:get_device()
-            if dev_err ~= "" then
-                log:error({ what = 'init_driver_failed', address = address, err = init_err, retry=false })
-                return
-            end
-            increment_attempts(device)
-            if can_attempt_init(device) then
-                local ok, err = driver:reset()
-                if not ok then
-                    log:error({ what = 'reset_driver_failed', address = address, err = err, init_err = init_err, retry=false })
-                    return
-                end
-                log:warn({ what = 'init_driver_failed', address = address, err = init_err, retry=true })
-                return
-            end
-            return
+        local initialized_driver = initialise_driver(
+            address,
+            driver,
+            modem_driver.new_recovery,
+            ModemcardManager.init_attempts,
+            log
+        )
+        if initialized_driver then
+            ModemcardManager.driver_ch:put(initialized_driver)
         end
-        ModemcardManager.driver_ch:put(driver)
     end)
 end
 
@@ -212,7 +229,7 @@ local function on_driver(dev_ev_ch, cap_emit_ch, driver)
     end
     local device = primary
 
-    reset_attempts(device)
+    ModemcardManager.init_attempts:record_success(device)
 
     ModemcardManager.modems[driver.address] = driver
 
@@ -401,5 +418,9 @@ function ModemcardManager.apply_config(namespaces) -- luacheck: ignore
     -- No-op: modemcard manager does not support dynamic configuration
     return true, ""
 end
+
+ModemcardManager._test = {
+    initialise_driver = initialise_driver,
+}
 
 return ModemcardManager
