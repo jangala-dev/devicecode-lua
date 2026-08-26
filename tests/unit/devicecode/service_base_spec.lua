@@ -104,13 +104,13 @@ function T.obs_helpers_publish_legacy_and_v1_topics()
 		local svc = service_base.new(conn, { name = 'beta', env = 'test' })
 
 		-- Subscribe BEFORE publishing non-retained events/logs.
-        local evt_legacy_sub = reader:subscribe({ 'obs', 'event', 'beta', 'tick' })
-        local evt_v1_sub     = reader:subscribe({ 'obs', 'v1', 'beta', 'event', 'tick' })
+		local evt_legacy_sub = reader:subscribe({ 'obs', 'event', 'beta', 'tick' })
+		local evt_v1_sub     = reader:subscribe({ 'obs', 'v1', 'beta', 'event', 'tick' })
 
-        local log_legacy_sub = reader:subscribe({ 'obs', 'log', 'beta', 'info' })
-        local log_v1_sub     = reader:subscribe({ 'obs', 'v1', 'beta', 'event', 'log' })
+		local log_legacy_sub = reader:subscribe({ 'obs', 'log', 'beta', 'info' })
+		local log_v1_sub     = reader:subscribe({ 'obs', 'v1', 'beta', 'event', 'log' })
 
-        local counter_v1_sub = reader:subscribe({ 'obs', 'v1', 'beta', 'counter', 'restarts' })
+		local counter_v1_sub = reader:subscribe({ 'obs', 'v1', 'beta', 'counter', 'restarts' })
 
 		svc:obs_event('tick', { n = 1 })
 		svc:obs_state('phase', { value = 'booting' })
@@ -151,15 +151,15 @@ function T.obs_helpers_publish_legacy_and_v1_topics()
 		assert(type(metric_v1) == 'table')
 		assert(metric_v1.c == 42)
 
-        local counter_v1, err5 = counter_v1_sub:recv()
-        assert(counter_v1, tostring(err5))
-        assert(counter_v1.payload.n == 3)
+		local counter_v1, err5 = counter_v1_sub:recv()
+		assert(counter_v1, tostring(err5))
+		assert(counter_v1.payload.n == 3)
 
 		evt_legacy_sub:unsubscribe()
 		evt_v1_sub:unsubscribe()
 		log_legacy_sub:unsubscribe()
 		log_v1_sub:unsubscribe()
-        counter_v1_sub:unsubscribe()
+		counter_v1_sub:unsubscribe()
 	end)
 end
 

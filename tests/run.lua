@@ -101,6 +101,7 @@ local files = {
 	'unit.shared.topic_spec',
 	'unit.shared.validate_spec',
 	'unit.shared.hash_xxhash32_spec',
+	'unit.tools.lua_indentation_spec',
 	'integration.devhost.main_failure_spec',
 	'integration.devhost.config_recovery_spec',
 	'integration.devhost.monitor_logging_spec',

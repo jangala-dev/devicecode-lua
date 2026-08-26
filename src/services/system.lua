@@ -33,22 +33,22 @@ local function t_cfg(name) return { 'cfg', name } end
 
 ---@return Topic
 local function t_state_time_synced()
-    return { 'state', 'time', 'synced' }
+	return { 'state', 'time', 'synced' }
 end
 
 ---@return Topic
 local function t_state_system_shutdown()
-    return { 'state', 'system', 'shutdown' }
+	return { 'state', 'system', 'shutdown' }
 end
 
 ---@return Topic
 local function t_state_system_identity()
-    return { 'state', 'system', 'identity' }
+	return { 'state', 'system', 'identity' }
 end
 
 ---@return Topic
 local function t_state_system_stats()
-    return { 'state', 'system', 'stats' }
+	return { 'state', 'system', 'stats' }
 end
 
 -- ── config validation ──────────────────────────────
@@ -57,23 +57,23 @@ end
 ---@return { report_period: number, usb3_enabled: boolean, alarms?: table }?
 ---@return string error
 local function validate_config(cfg)
-    if type(cfg) ~= 'table' then
-        return nil, "config must be a table"
-    end
-    if cfg.schema ~= SCHEMA_TARGET then
-        return nil, "config.schema is not currently supported"
-    end
-    if type(cfg.report_period) ~= 'number' or cfg.report_period <= 0 then
-        return nil, "config.report_period must be a positive number"
-    end
-    if type(cfg.usb3_enabled) ~= 'boolean' then
-        return nil, "config.usb3_enabled must be a boolean"
-    end
-    -- alarms is optional
-    if cfg.alarms ~= nil and type(cfg.alarms) ~= 'table' then
-        return nil, "config.alarms must be nil or a table"
-    end
-    return cfg, ""
+	if type(cfg) ~= 'table' then
+		return nil, "config must be a table"
+	end
+	if cfg.schema ~= SCHEMA_TARGET then
+		return nil, "config.schema is not currently supported"
+	end
+	if type(cfg.report_period) ~= 'number' or cfg.report_period <= 0 then
+		return nil, "config.report_period must be a positive number"
+	end
+	if type(cfg.usb3_enabled) ~= 'boolean' then
+		return nil, "config.usb3_enabled must be a boolean"
+	end
+	-- alarms is optional
+	if cfg.alarms ~= nil and type(cfg.alarms) ~= 'table' then
+		return nil, "config.alarms must be nil or a table"
+	end
+	return cfg, ""
 end
 
 -- ── RPC helper ─────────────────────────────────
@@ -88,18 +88,18 @@ local CAP_RETRY_TIMEOUT = 0.1
 ---@return any value
 ---@return string error
 local function cap_rpc(cap_ref, method, opts, timeout)
-    timeout = timeout or REQUEST_TIMEOUT
-    local reply, err = perform(cap_ref:call_control_op(method, opts, { timeout = timeout }))
-    if not reply then return nil, err or "rpc failed" end
-    if reply.ok ~= true then return nil, reply.reason or "rpc returned not ok" end
-    return reply.reason, ""
+	timeout = timeout or REQUEST_TIMEOUT
+	local reply, err = perform(cap_ref:call_control_op(method, opts, { timeout = timeout }))
+	if not reply then return nil, err or "rpc failed" end
+	if reply.ok ~= true then return nil, reply.reason or "rpc returned not ok" end
+	return reply.reason, ""
 end
 
 ---@param class CapabilityClass
 ---@param id CapabilityId
 ---@return string
 local function cap_ref_key(class, id)
-    return tostring(class) .. ':' .. tostring(id)
+	return tostring(class) .. ':' .. tostring(id)
 end
 
 ---@param conn Connection
@@ -109,28 +109,28 @@ end
 ---@return CapabilityReference?
 ---@return string error
 local function wait_for_cap(conn, svc, class, id, timeout)
-    local cap_ref, cap_err = cap_sdk.new_cap_listener(conn, class, id):wait_for_cap({
-        timeout = timeout or REQUEST_TIMEOUT,
-    })
-    if not cap_ref then
-        local key = cap_ref_key(class, id)
-        local first = not cap_unavailable_logged[key]
-        cap_unavailable_logged[key] = true
-        svc:obs_log(first and 'warn' or 'debug', {
-            what = tostring(class) .. '_unavailable',
-            summary = string.format(
-                '%s capability %s unavailable: %s',
-                tostring(class),
-                tostring(id),
-                tostring(cap_err or 'unknown')
-            ),
-            class = class,
-            id = id,
-            err = cap_err,
-        })
-        return nil, cap_err
-    end
-    return cap_ref, ""
+	local cap_ref, cap_err = cap_sdk.new_cap_listener(conn, class, id):wait_for_cap({
+		timeout = timeout or REQUEST_TIMEOUT,
+	})
+	if not cap_ref then
+		local key = cap_ref_key(class, id)
+		local first = not cap_unavailable_logged[key]
+		cap_unavailable_logged[key] = true
+		svc:obs_log(first and 'warn' or 'debug', {
+			what = tostring(class) .. '_unavailable',
+			summary = string.format(
+				'%s capability %s unavailable: %s',
+				tostring(class),
+				tostring(id),
+				tostring(cap_err or 'unknown')
+			),
+			class = class,
+			id = id,
+			err = cap_err,
+		})
+		return nil, cap_err
+	end
+	return cap_ref, ""
 end
 
 ---@param conn Connection
@@ -138,33 +138,33 @@ end
 ---@param specs { class: CapabilityClass, id: CapabilityId }[]
 ---@return table<string, CapabilityReference>
 local function discover_caps(conn, svc, specs)
-    local refs = {}
-    local seen = {}
+	local refs = {}
+	local seen = {}
 
-    for _, spec in ipairs(specs) do
-        local key = cap_ref_key(spec.class, spec.id)
-        if not seen[key] then
-            local cap_ref = wait_for_cap(conn, svc, spec.class, spec.id)
-            if cap_ref then
-                refs[key] = cap_ref
-            end
-            seen[key] = true
-        end
-    end
+	for _, spec in ipairs(specs) do
+		local key = cap_ref_key(spec.class, spec.id)
+		if not seen[key] then
+			local cap_ref = wait_for_cap(conn, svc, spec.class, spec.id)
+			if cap_ref then
+				refs[key] = cap_ref
+			end
+			seen[key] = true
+		end
+	end
 
-    return refs
+	return refs
 end
 
 local function discover_missing_caps(conn, svc, refs, specs, timeout)
-    refs = refs or {}
-    for _, spec in ipairs(specs or {}) do
-        local key = cap_ref_key(spec.class, spec.id)
-        if refs[key] == nil then
-            local cap_ref = wait_for_cap(conn, svc, spec.class, spec.id, timeout or CAP_RETRY_TIMEOUT)
-            if cap_ref then refs[key] = cap_ref end
-        end
-    end
-    return refs
+	refs = refs or {}
+	for _, spec in ipairs(specs or {}) do
+		local key = cap_ref_key(spec.class, spec.id)
+		if refs[key] == nil then
+			local cap_ref = wait_for_cap(conn, svc, spec.class, spec.id, timeout or CAP_RETRY_TIMEOUT)
+			if cap_ref then refs[key] = cap_ref end
+		end
+	end
+	return refs
 end
 
 ---@param refs table<string, CapabilityReference>
@@ -172,7 +172,7 @@ end
 ---@param id CapabilityId
 ---@return CapabilityReference?
 local function get_cap_ref(refs, class, id)
-    return refs[cap_ref_key(class, id)]
+	return refs[cap_ref_key(class, id)]
 end
 
 -- ── sysinfo fiber ────────────────────────────────
@@ -181,332 +181,332 @@ end
 local THERMAL_ZONE0_ID = 'zone0'
 
 local PLATFORM_IDENTITY_METRICS = {
-    { field = 'hw_revision',    metric_key = 'hw_id' },
-    { field = 'fw_version',     metric_key = 'fw_id' },
-    { field = 'serial',         metric_key = 'serial' },
-    { field = 'board_revision', metric_key = 'board_revision' },
+	{ field = 'hw_revision',    metric_key = 'hw_id' },
+	{ field = 'fw_version',     metric_key = 'fw_id' },
+	{ field = 'serial',         metric_key = 'serial' },
+	{ field = 'board_revision', metric_key = 'board_revision' },
 }
 
 local SYSINFO_METRICS = {
-    {
-        class = 'cpu',
-        id = '1',
-        method = 'get',
-        field = 'utilisation',
-        metric_key = 'cpu_util',
-        mk_opts = cap_sdk.args.new.CpuGetOpts
-    },
-    {
-        class = 'memory',
-        id = '1',
-        method = 'get',
-        field = 'util',
-        metric_key = 'mem_util',
-        mk_opts = cap_sdk.args.new.MemoryGetOpts
-    },
-    {
-        class = 'thermal',
-        id = THERMAL_ZONE0_ID,
-        method = 'get',
-        field = '',
-        metric_key = 'temp',
-        mk_opts = function(_, max_age) return cap_sdk.args.new.ThermalGetOpts(max_age) end
-    }
+	{
+		class = 'cpu',
+		id = '1',
+		method = 'get',
+		field = 'utilisation',
+		metric_key = 'cpu_util',
+		mk_opts = cap_sdk.args.new.CpuGetOpts
+	},
+	{
+		class = 'memory',
+		id = '1',
+		method = 'get',
+		field = 'util',
+		metric_key = 'mem_util',
+		mk_opts = cap_sdk.args.new.MemoryGetOpts
+	},
+	{
+		class = 'thermal',
+		id = THERMAL_ZONE0_ID,
+		method = 'get',
+		field = '',
+		metric_key = 'temp',
+		mk_opts = function(_, max_age) return cap_sdk.args.new.ThermalGetOpts(max_age) end
+	}
 }
 
 local function publish_system_metric(svc, metric_key, value)
-    if value == nil then return false end
-    svc:obs_metric(metric_key, {
-        namespace = { 'system', metric_key },
-        value = value
-    })
-    return true
+	if value == nil then return false end
+	svc:obs_metric(metric_key, {
+		namespace = { 'system', metric_key },
+		value = value
+	})
+	return true
 end
 
 
 local function publish_platform_identity_state(svc, identity)
-    if type(identity) ~= 'table' then return false end
-    svc:_retain(t_state_system_identity(), {
-        schema = 'devicecode.system.identity/1',
-        state = 'ok',
-        observed_at = fibers.now(),
-        at = svc:wall(),
-        hw_revision = identity.hw_revision,
-        fw_version = identity.fw_version,
-        serial = identity.serial,
-        board_revision = identity.board_revision,
-    })
-    return true
+	if type(identity) ~= 'table' then return false end
+	svc:_retain(t_state_system_identity(), {
+		schema = 'devicecode.system.identity/1',
+		state = 'ok',
+		observed_at = fibers.now(),
+		at = svc:wall(),
+		hw_revision = identity.hw_revision,
+		fw_version = identity.fw_version,
+		serial = identity.serial,
+		board_revision = identity.board_revision,
+	})
+	return true
 end
 
 local function collect_sysinfo_state(svc, cap_refs, max_age)
-    local out = {
-        schema = 'devicecode.system.stats/1',
-        state = 'ok',
-        observed_at = fibers.now(),
-        at = svc:wall(),
-        missing = {},
-    }
+	local out = {
+		schema = 'devicecode.system.stats/1',
+		state = 'ok',
+		observed_at = fibers.now(),
+		at = svc:wall(),
+		missing = {},
+	}
 
-    local function missing(key, err)
-        out.missing[#out.missing + 1] = { key = key, err = tostring(err or 'unavailable') }
-        out.state = 'partial'
-    end
+	local function missing(key, err)
+		out.missing[#out.missing + 1] = { key = key, err = tostring(err or 'unavailable') }
+		out.state = 'partial'
+	end
 
-    for _, m in ipairs(SYSINFO_METRICS) do
-        local cap_ref = get_cap_ref(cap_refs, m.class, m.id)
-        if not cap_ref then
-            missing(m.class .. ':' .. m.id, 'capability_unavailable')
-        else
-            local opts, opts_err = m.mk_opts(m.field, max_age)
-            if opts_err ~= "" then
-                missing(m.class .. ':' .. m.id, opts_err)
-            else
-                local value, err = cap_rpc(cap_ref, m.method, opts)
-                if err ~= "" then
-                    missing(m.class .. ':' .. m.id, err)
-                elseif m.metric_key == 'cpu_util' then
-                    out.cpu = { utilisation = tonumber(value) or value }
-                elseif m.metric_key == 'mem_util' then
-                    out.memory = { utilisation = tonumber(value) or value }
-                elseif m.metric_key == 'temp' then
-                    out.thermal = out.thermal or {}
-                    out.thermal[THERMAL_ZONE0_ID] = { temp_c = tonumber(value) or value }
-                end
-            end
-        end
-    end
+	for _, m in ipairs(SYSINFO_METRICS) do
+		local cap_ref = get_cap_ref(cap_refs, m.class, m.id)
+		if not cap_ref then
+			missing(m.class .. ':' .. m.id, 'capability_unavailable')
+		else
+			local opts, opts_err = m.mk_opts(m.field, max_age)
+			if opts_err ~= "" then
+				missing(m.class .. ':' .. m.id, opts_err)
+			else
+				local value, err = cap_rpc(cap_ref, m.method, opts)
+				if err ~= "" then
+					missing(m.class .. ':' .. m.id, err)
+				elseif m.metric_key == 'cpu_util' then
+					out.cpu = { utilisation = tonumber(value) or value }
+				elseif m.metric_key == 'mem_util' then
+					out.memory = { utilisation = tonumber(value) or value }
+				elseif m.metric_key == 'temp' then
+					out.thermal = out.thermal or {}
+					out.thermal[THERMAL_ZONE0_ID] = { temp_c = tonumber(value) or value }
+				end
+			end
+		end
+	end
 
-    if #out.missing == 0 then out.missing = nil end
-    if out.cpu == nil and out.memory == nil and out.thermal == nil then out.state = 'unavailable' end
-    return out
+	if #out.missing == 0 then out.missing = nil end
+	if out.cpu == nil and out.memory == nil and out.thermal == nil then out.state = 'unavailable' end
+	return out
 end
 
 local function publish_sysinfo_state(svc, cap_refs, stats_period)
-    local state = collect_sysinfo_state(svc, cap_refs, stats_period)
-    svc:_retain(t_state_system_stats(), state)
-    return state
+	local state = collect_sysinfo_state(svc, cap_refs, stats_period)
+	svc:_retain(t_state_system_stats(), state)
+	return state
 end
 
 local function unsubscribe(sub)
-    if sub and type(sub.unsubscribe) == 'function' then sub:unsubscribe() end
+	if sub and type(sub.unsubscribe) == 'function' then sub:unsubscribe() end
 end
 
 local function read_platform_identity(platform_cap, timeout)
-    if not platform_cap then return nil, 'platform_unavailable' end
-    timeout = timeout or REQUEST_TIMEOUT
+	if not platform_cap then return nil, 'platform_unavailable' end
+	timeout = timeout or REQUEST_TIMEOUT
 
-    local identity_opts, identity_opts_err = cap_sdk.args.new.PlatformGetOpts('identity', 0)
-    if identity_opts then
-        local identity, err = cap_rpc(platform_cap, 'get', identity_opts, timeout)
-        if err == "" and type(identity) == 'table' then
-            return identity, ""
-        end
-    elseif identity_opts_err ~= "" then
-        return nil, identity_opts_err
-    end
+	local identity_opts, identity_opts_err = cap_sdk.args.new.PlatformGetOpts('identity', 0)
+	if identity_opts then
+		local identity, err = cap_rpc(platform_cap, 'get', identity_opts, timeout)
+		if err == "" and type(identity) == 'table' then
+			return identity, ""
+		end
+	elseif identity_opts_err ~= "" then
+		return nil, identity_opts_err
+	end
 
-    local identity_sub = platform_cap:get_state_sub('identity', {
-        queue_len = 1,
-        full = 'drop_oldest',
-    })
-    local identity_msg = perform(op.choice(
-        identity_sub:recv_op(),
-        sleep.sleep_op(timeout)
-    ))
-    unsubscribe(identity_sub)
-    if identity_msg and type(identity_msg.payload) == 'table' then
-        return identity_msg.payload, ""
-    end
+	local identity_sub = platform_cap:get_state_sub('identity', {
+		queue_len = 1,
+		full = 'drop_oldest',
+	})
+	local identity_msg = perform(op.choice(
+		identity_sub:recv_op(),
+		sleep.sleep_op(timeout)
+	))
+	unsubscribe(identity_sub)
+	if identity_msg and type(identity_msg.payload) == 'table' then
+		return identity_msg.payload, ""
+	end
 
-    local out = {}
-    local got = false
-    local last_err = nil
-    for _, metric in ipairs(PLATFORM_IDENTITY_METRICS) do
-        local opts, opts_err = cap_sdk.args.new.PlatformGetOpts(metric.field, 0)
-        if opts then
-            local value, err = cap_rpc(platform_cap, 'get', opts, timeout)
-            if err == "" then
-                out[metric.field] = value
-                got = true
-            else
-                last_err = err
-            end
-        else
-            last_err = opts_err
-        end
-    end
-    if got then return out, "" end
-    return nil, last_err or 'platform_identity_unavailable'
+	local out = {}
+	local got = false
+	local last_err = nil
+	for _, metric in ipairs(PLATFORM_IDENTITY_METRICS) do
+		local opts, opts_err = cap_sdk.args.new.PlatformGetOpts(metric.field, 0)
+		if opts then
+			local value, err = cap_rpc(platform_cap, 'get', opts, timeout)
+			if err == "" then
+				out[metric.field] = value
+				got = true
+			else
+				last_err = err
+			end
+		else
+			last_err = opts_err
+		end
+	end
+	if got then return out, "" end
+	return nil, last_err or 'platform_identity_unavailable'
 end
 
 local function publish_platform_identity_metrics(svc, platform_cap, timeout)
-    local identity, err = read_platform_identity(platform_cap, timeout)
-    if type(identity) ~= 'table' then
-        svc:obs_log('warn', { what = 'platform_identity_unavailable', err = tostring(err or 'unknown') })
-        return false
-    end
+	local identity, err = read_platform_identity(platform_cap, timeout)
+	if type(identity) ~= 'table' then
+		svc:obs_log('warn', { what = 'platform_identity_unavailable', err = tostring(err or 'unknown') })
+		return false
+	end
 
-    publish_platform_identity_state(svc, identity)
+	publish_platform_identity_state(svc, identity)
 
-    local published = false
-    for _, metric in ipairs(PLATFORM_IDENTITY_METRICS) do
-        if identity[metric.field] ~= nil then
-            published = publish_system_metric(svc, metric.metric_key, identity[metric.field]) or published
-        end
-    end
+	local published = false
+	for _, metric in ipairs(PLATFORM_IDENTITY_METRICS) do
+		if identity[metric.field] ~= nil then
+			published = publish_system_metric(svc, metric.metric_key, identity[metric.field]) or published
+		end
+	end
 
-    if published then
-        svc:obs_log('debug', 'sysinfo: published platform identity metrics')
-    else
-        svc:obs_log('warn', 'sysinfo: platform identity had no publishable fields')
-    end
-    return published
+	if published then
+		svc:obs_log('debug', 'sysinfo: published platform identity metrics')
+	else
+		svc:obs_log('warn', 'sysinfo: platform identity had no publishable fields')
+	end
+	return published
 end
 
 local function publish_sysinfo_metrics(svc, cap_refs, report_period)
-    for _, m in ipairs(SYSINFO_METRICS) do
-        local cap_ref = get_cap_ref(cap_refs, m.class, m.id)
-        if cap_ref then
-            local opts, opts_err = m.mk_opts(m.field, report_period)
-            if opts_err ~= "" then
-                svc:obs_log('warn', {
-                    what = 'metric_opts_invalid',
-                    class = m.class,
-                    id = m.id,
-                    field = m.field,
-                    err = opts_err
-                })
-            else
-                local value, err = cap_rpc(cap_ref, m.method, opts)
-                if err ~= "" then
-                    svc:obs_log('warn', {
-                        what = 'metric_get_failed',
-                        class = m.class,
-                        id = m.id,
-                        field = m.field,
-                        err = err
-                    })
-                else
-                    publish_system_metric(svc, m.metric_key, value)
-                end
-            end
-        end
-    end
+	for _, m in ipairs(SYSINFO_METRICS) do
+		local cap_ref = get_cap_ref(cap_refs, m.class, m.id)
+		if cap_ref then
+			local opts, opts_err = m.mk_opts(m.field, report_period)
+			if opts_err ~= "" then
+				svc:obs_log('warn', {
+					what = 'metric_opts_invalid',
+					class = m.class,
+					id = m.id,
+					field = m.field,
+					err = opts_err
+				})
+			else
+				local value, err = cap_rpc(cap_ref, m.method, opts)
+				if err ~= "" then
+					svc:obs_log('warn', {
+						what = 'metric_get_failed',
+						class = m.class,
+						id = m.id,
+						field = m.field,
+						err = err
+					})
+				else
+					publish_system_metric(svc, m.metric_key, value)
+				end
+			end
+		end
+	end
 end
 
 local function publish_boot_time_metric(svc, platform_cap, report_period)
-    if not platform_cap then return end
-    local uptime_opts, uptime_opts_err = cap_sdk.args.new.PlatformGetOpts('uptime', report_period)
-    if uptime_opts_err ~= "" then
-        svc:obs_log('warn', { what = 'uptime_opts_invalid', err = uptime_opts_err })
-    else
-        local uptime, uptime_err = cap_rpc(platform_cap, 'get', uptime_opts)
-        if uptime == nil or uptime_err ~= "" then
-            svc:obs_log('warn', { what = 'uptime_get_failed', err = uptime_err })
-        else
-            publish_system_metric(svc, 'boot_time', os.time() - math.floor(uptime))
-        end
-    end
+	if not platform_cap then return end
+	local uptime_opts, uptime_opts_err = cap_sdk.args.new.PlatformGetOpts('uptime', report_period)
+	if uptime_opts_err ~= "" then
+		svc:obs_log('warn', { what = 'uptime_opts_invalid', err = uptime_opts_err })
+	else
+		local uptime, uptime_err = cap_rpc(platform_cap, 'get', uptime_opts)
+		if uptime == nil or uptime_err ~= "" then
+			svc:obs_log('warn', { what = 'uptime_get_failed', err = uptime_err })
+		else
+			publish_system_metric(svc, 'boot_time', os.time() - math.floor(uptime))
+		end
+	end
 end
 
 ---@param _ Scope
 ---@param svc ServiceBase
 ---@param report_period_ch Channel
 local function sysinfo_fiber(_, svc, report_period_ch)
-    local conn = svc.conn
-    svc:obs_log('debug', 'sysinfo started')
+	local conn = svc.conn
+	svc:obs_log('debug', 'sysinfo started')
 
-    fibers.current_scope():finally(function()
-        local _, primary = fibers.current_scope():status()
-        bus_cleanup.unretain(svc.conn, t_state_system_stats())
-        bus_cleanup.unretain(svc.conn, t_state_system_identity())
-        svc:obs_log('debug', { what = 'sysinfo_stopped', reason = tostring(primary or 'ok') })
-    end)
+	fibers.current_scope():finally(function()
+		local _, primary = fibers.current_scope():status()
+		bus_cleanup.unretain(svc.conn, t_state_system_stats())
+		bus_cleanup.unretain(svc.conn, t_state_system_identity())
+		svc:obs_log('debug', { what = 'sysinfo_stopped', reason = tostring(primary or 'ok') })
+	end)
 
-    local cap_specs = {
-        { class = 'platform', id = '1' },
-    }
-    for _, metric in ipairs(SYSINFO_METRICS) do
-        cap_specs[#cap_specs + 1] = { class = metric.class, id = metric.id }
-    end
+	local cap_specs = {
+		{ class = 'platform', id = '1' },
+	}
+	for _, metric in ipairs(SYSINFO_METRICS) do
+		cap_specs[#cap_specs + 1] = { class = metric.class, id = metric.id }
+	end
 
-    local cap_refs = discover_caps(conn, svc, cap_specs)
-    local platform_cap = get_cap_ref(cap_refs, 'platform', '1')
-    local identity_published = false
+	local cap_refs = discover_caps(conn, svc, cap_specs)
+	local platform_cap = get_cap_ref(cap_refs, 'platform', '1')
+	local identity_published = false
 
-    -- Block until System Main sends us the initial report_period.
-    local report_period = report_period_ch:get()
-    if not report_period then
-        svc:obs_log('warn', 'sysinfo: report_period channel closed before config received')
-        return
-    end
-    svc:obs_log('debug', { what = 'report_period_set', value = report_period })
+	-- Block until System Main sends us the initial report_period.
+	local report_period = report_period_ch:get()
+	if not report_period then
+		svc:obs_log('warn', 'sysinfo: report_period channel closed before config received')
+		return
+	end
+	svc:obs_log('debug', { what = 'report_period_set', value = report_period })
 
-    local function refresh_caps(timeout)
-        discover_missing_caps(conn, svc, cap_refs, cap_specs, timeout)
-        platform_cap = get_cap_ref(cap_refs, 'platform', '1')
-        if not identity_published and platform_cap then
-            identity_published = publish_platform_identity_metrics(svc, platform_cap, timeout or REQUEST_TIMEOUT)
-        end
-    end
+	local function refresh_caps(timeout)
+		discover_missing_caps(conn, svc, cap_refs, cap_specs, timeout)
+		platform_cap = get_cap_ref(cap_refs, 'platform', '1')
+		if not identity_published and platform_cap then
+			identity_published = publish_platform_identity_metrics(svc, platform_cap, timeout or REQUEST_TIMEOUT)
+		end
+	end
 
-    -- Subscribe to time sync.
-    local time_sub = conn:subscribe(t_state_time_synced())
+	-- Subscribe to time sync.
+	local time_sub = conn:subscribe(t_state_time_synced())
 
-    local time_synced = false
-    local stats_period = math.max(1, math.min(tonumber(report_period) or 5, 5))
-    local next_metrics_at = fibers.now()
+	local time_synced = false
+	local stats_period = math.max(1, math.min(tonumber(report_period) or 5, 5))
+	local next_metrics_at = fibers.now()
 
-    refresh_caps(CAP_RETRY_TIMEOUT)
-    publish_sysinfo_state(svc, cap_refs, stats_period)
-    publish_sysinfo_metrics(svc, cap_refs, report_period)
-    next_metrics_at = fibers.now() + report_period
+	refresh_caps(CAP_RETRY_TIMEOUT)
+	publish_sysinfo_state(svc, cap_refs, stats_period)
+	publish_sysinfo_metrics(svc, cap_refs, report_period)
+	next_metrics_at = fibers.now() + report_period
 
-    while true do
-        local choices = {
-            stats  = sleep.sleep_op(stats_period),
-            period = report_period_ch:get_op(),
-            time   = time_sub:recv_op(),
-            -- time = time_synced and op.never() or op.always( { payload = true } )
-        }
+	while true do
+		local choices = {
+			stats  = sleep.sleep_op(stats_period),
+			period = report_period_ch:get_op(),
+			time   = time_sub:recv_op(),
+			-- time = time_synced and op.never() or op.always( { payload = true } )
+		}
 
-        local which, msg = perform(op.named_choice(choices))
+		local which, msg = perform(op.named_choice(choices))
 
-        if which == 'period' then
-            if msg then
-                report_period = msg
-                stats_period = math.max(1, math.min(tonumber(report_period) or 5, 5))
-                next_metrics_at = fibers.now()
-                svc:obs_log('debug', { what = 'report_period_updated', value = report_period, stats_period = stats_period })
-                refresh_caps(CAP_RETRY_TIMEOUT)
-                publish_sysinfo_state(svc, cap_refs, stats_period)
-                publish_sysinfo_metrics(svc, cap_refs, report_period)
-                next_metrics_at = fibers.now() + report_period
-            else
-                svc:obs_log('debug', 'sysinfo: report_period channel closed')
-                return
-            end
-        elseif which == 'time' then
-            if not msg then
-                svc:obs_log('debug', 'sysinfo: time subscription closed')
-                return
-            end
-            time_synced = (msg.payload == true)
-            svc:obs_log('debug', { what = 'time_synced_updated', value = time_synced })
-        elseif which == 'stats' then
-            refresh_caps(CAP_RETRY_TIMEOUT)
-            publish_sysinfo_state(svc, cap_refs, stats_period)
+		if which == 'period' then
+			if msg then
+				report_period = msg
+				stats_period = math.max(1, math.min(tonumber(report_period) or 5, 5))
+				next_metrics_at = fibers.now()
+				svc:obs_log('debug', { what = 'report_period_updated', value = report_period, stats_period = stats_period })
+				refresh_caps(CAP_RETRY_TIMEOUT)
+				publish_sysinfo_state(svc, cap_refs, stats_period)
+				publish_sysinfo_metrics(svc, cap_refs, report_period)
+				next_metrics_at = fibers.now() + report_period
+			else
+				svc:obs_log('debug', 'sysinfo: report_period channel closed')
+				return
+			end
+		elseif which == 'time' then
+			if not msg then
+				svc:obs_log('debug', 'sysinfo: time subscription closed')
+				return
+			end
+			time_synced = (msg.payload == true)
+			svc:obs_log('debug', { what = 'time_synced_updated', value = time_synced })
+		elseif which == 'stats' then
+			refresh_caps(CAP_RETRY_TIMEOUT)
+			publish_sysinfo_state(svc, cap_refs, stats_period)
 
-            if fibers.now() >= next_metrics_at then
-                publish_sysinfo_metrics(svc, cap_refs, report_period)
-                if time_synced and platform_cap then
-                    publish_boot_time_metric(svc, platform_cap, report_period)
-                end
-                next_metrics_at = fibers.now() + report_period
-            end
-        end
-    end
+			if fibers.now() >= next_metrics_at then
+				publish_sysinfo_metrics(svc, cap_refs, report_period)
+				if time_synced and platform_cap then
+					publish_boot_time_metric(svc, platform_cap, report_period)
+				end
+				next_metrics_at = fibers.now() + report_period
+			end
+		end
+	end
 end
 
 -- ── shutdown orchestration ─────────────────────────────
@@ -515,46 +515,46 @@ local SHUTDOWN_GRACE = 10          -- seconds services have to shut down
 local USB3_MODEL     = "bigbox-ss" -- only model with controllable USB3 hardware
 
 local function usb_verb_for_config(hw_revision, cfg)
-    if hw_revision ~= USB3_MODEL then return nil end
-    return cfg.usb3_enabled and 'enable' or 'disable'
+	if hw_revision ~= USB3_MODEL then return nil end
+	return cfg.usb3_enabled and 'enable' or 'disable'
 end
 
 ---@param svc ServiceBase
 ---@param power_cap CapabilityReference?
 ---@param alarm SystemAlarm
 local function handle_alarm(svc, power_cap, alarm)
-    local conn       = svc.conn
-    local payload    = alarm.payload or {}
-    local alarm_name = payload.name or "scheduled alarm"
-    local alarm_type = payload.type or "reboot"
+	local conn       = svc.conn
+	local payload    = alarm.payload or {}
+	local alarm_name = payload.name or "scheduled alarm"
+	local alarm_type = payload.type or "reboot"
 
-    svc:obs_log('info', { what = 'alarm_fired', name = alarm_name, type = alarm_type })
-    svc:obs_event('alarm_fired', { name = alarm_name, type = alarm_type, ts = svc:now() })
+	svc:obs_log('info', { what = 'alarm_fired', name = alarm_name, type = alarm_type })
+	svc:obs_event('alarm_fired', { name = alarm_name, type = alarm_type, ts = svc:now() })
 
-    if not power_cap then
-        svc:obs_log('error', { what = 'alarm_aborted', reason = 'power cap unavailable', alarm = alarm_name })
-        return
-    end
+	if not power_cap then
+		svc:obs_log('error', { what = 'alarm_aborted', reason = 'power cap unavailable', alarm = alarm_name })
+		return
+	end
 
-    -- Broadcast shutdown signal so all services can clean up within the deadline.
-    conn:retain(t_state_system_shutdown(), {
-        reason   = alarm_name,
-        deadline = fibers.now() + SHUTDOWN_GRACE,
-    })
+	-- Broadcast shutdown signal so all services can clean up within the deadline.
+	conn:retain(t_state_system_shutdown(), {
+		reason   = alarm_name,
+		deadline = fibers.now() + SHUTDOWN_GRACE,
+	})
 
-    -- After the grace period, issue the power command via the capability.
-    local ok, spawn_err = fibers.current_scope():spawn(function()
-        perform(sleep.sleep_op(SHUTDOWN_GRACE))
-        svc:obs_log('info', { what = 'power_command', type = alarm_type })
-        local power_opts = cap_sdk.args.new.PowerActionOpts()
-        local _, err = cap_rpc(power_cap, alarm_type, power_opts)
-        if err ~= "" then
-            svc:obs_log('error', { what = 'power_command_failed', type = alarm_type, err = err })
-        end
-    end)
-    if not ok then
-        svc:obs_log('error', { what = 'power_fiber_spawn_failed', err = tostring(spawn_err) })
-    end
+	-- After the grace period, issue the power command via the capability.
+	local ok, spawn_err = fibers.current_scope():spawn(function()
+		perform(sleep.sleep_op(SHUTDOWN_GRACE))
+		svc:obs_log('info', { what = 'power_command', type = alarm_type })
+		local power_opts = cap_sdk.args.new.PowerActionOpts()
+		local _, err = cap_rpc(power_cap, alarm_type, power_opts)
+		if err ~= "" then
+			svc:obs_log('error', { what = 'power_command_failed', type = alarm_type, err = err })
+		end
+	end)
+	if not ok then
+		svc:obs_log('error', { what = 'power_fiber_spawn_failed', err = tostring(spawn_err) })
+	end
 end
 
 -- ── system main fiber ──────────────────────────────
@@ -562,112 +562,112 @@ end
 ---@param svc ServiceBase
 ---@param report_period_ch Channel
 local function system_main(svc, report_period_ch)
-    local conn = svc.conn
-    svc:obs_log('debug', 'main started')
+	local conn = svc.conn
+	svc:obs_log('debug', 'main started')
 
-    local parent_scope = fibers.current_scope()
-    parent_scope:finally(function()
-        local _, primary = parent_scope:status()
-        svc:obs_log('debug', { what = 'main_stopped', reason = tostring(primary or 'ok') })
-    end)
+	local parent_scope = fibers.current_scope()
+	parent_scope:finally(function()
+		local _, primary = parent_scope:status()
+		svc:obs_log('debug', { what = 'main_stopped', reason = tostring(primary or 'ok') })
+	end)
 
-    -- Acquire platform cap to read hw_revision from identity state.
-    local platform_cap = wait_for_cap(conn, svc, 'platform', '1')
+	-- Acquire platform cap to read hw_revision from identity state.
+	local platform_cap = wait_for_cap(conn, svc, 'platform', '1')
 
-    -- Read hw_revision to gate USB3 control to bigbox-ss hardware only.
-    local hw_revision = nil
-    if platform_cap then
-        local identity, identity_err = read_platform_identity(platform_cap, REQUEST_TIMEOUT)
-        if type(identity) == 'table' and identity.hw_revision then
-            hw_revision = identity.hw_revision:match('(%S+)')
-            svc:obs_log('info', { what = 'hw_revision_detected', value = hw_revision })
-            svc:obs_log('info', {
-                what = 'system_summary',
-                summary = string.format('system summary hw=%s', tostring(hw_revision)),
-                hw_revision = hw_revision,
-            })
-        else
-            svc:obs_log('warn', {
-                what = 'platform_identity_unavailable',
-                summary = 'platform identity not available at startup; USB3 control disabled',
-                err = tostring(identity_err or 'unknown'),
-            })
-        end
-    end
+	-- Read hw_revision to gate USB3 control to bigbox-ss hardware only.
+	local hw_revision = nil
+	if platform_cap then
+		local identity, identity_err = read_platform_identity(platform_cap, REQUEST_TIMEOUT)
+		if type(identity) == 'table' and identity.hw_revision then
+			hw_revision = identity.hw_revision:match('(%S+)')
+			svc:obs_log('info', { what = 'hw_revision_detected', value = hw_revision })
+			svc:obs_log('info', {
+				what = 'system_summary',
+				summary = string.format('system summary hw=%s', tostring(hw_revision)),
+				hw_revision = hw_revision,
+			})
+		else
+			svc:obs_log('warn', {
+				what = 'platform_identity_unavailable',
+				summary = 'platform identity not available at startup; USB3 control disabled',
+				err = tostring(identity_err or 'unknown'),
+			})
+		end
+	end
 
-    -- Acquire USB cap only if this is bigbox-ss hardware.
-    local usb_cap = nil
-    if hw_revision == USB3_MODEL then
-        usb_cap = wait_for_cap(conn, svc, 'usb', 'usb3')
-    end
+	-- Acquire USB cap only if this is bigbox-ss hardware.
+	local usb_cap = nil
+	if hw_revision == USB3_MODEL then
+		usb_cap = wait_for_cap(conn, svc, 'usb', 'usb3')
+	end
 
-    -- Acquire power cap upfront — needed when alarms fire.
-    local power_cap = wait_for_cap(conn, svc, 'power', '1')
+	-- Acquire power cap upfront — needed when alarms fire.
+	local power_cap = wait_for_cap(conn, svc, 'power', '1')
 
-    local alarm_mgr = alarms.AlarmManager.new()
-    local cfg_sub   = conn:subscribe(t_cfg(svc.name))
-    local time_sub  = conn:subscribe(t_state_time_synced())
+	local alarm_mgr = alarms.AlarmManager.new()
+	local cfg_sub   = conn:subscribe(t_cfg(svc.name))
+	local time_sub  = conn:subscribe(t_state_time_synced())
 
-    while true do
-        local choices = {
-            cfg   = cfg_sub:recv_op(),
-            time  = time_sub:recv_op(),
-            alarm = alarm_mgr:next_alarm_op(),
-        }
+	while true do
+		local choices = {
+			cfg   = cfg_sub:recv_op(),
+			time  = time_sub:recv_op(),
+			alarm = alarm_mgr:next_alarm_op(),
+		}
 
-        local which, msg = perform(op.named_choice(choices))
+		local which, msg = perform(op.named_choice(choices))
 
-        if not msg and (which == 'cfg' or which == 'time') then
-            svc:obs_log('debug', { what = 'subscription_closed', source = which })
-            return
-        end
+		if not msg and (which == 'cfg' or which == 'time') then
+			svc:obs_log('debug', { what = 'subscription_closed', source = which })
+			return
+		end
 
-        if which == 'cfg' then
-            local cfg, err = validate_config(msg.payload and msg.payload.data)
-            if cfg == nil or err ~= "" then
-                svc:obs_log('warn', { what = 'config_invalid', err = err })
-            else
-                svc:obs_event('config_applied', { ts = svc:now() })
+		if which == 'cfg' then
+			local cfg, err = validate_config(msg.payload and msg.payload.data)
+			if cfg == nil or err ~= "" then
+				svc:obs_log('warn', { what = 'config_invalid', err = err })
+			else
+				svc:obs_event('config_applied', { ts = svc:now() })
 
-                -- Forward report_period to sysinfo fiber.
-                -- Drain any stale unconsumed value first (non-blocking via or_else so
-                -- the channel is tried first), then put the latest value.
-                perform(report_period_ch:get_op():or_else(function() return nil end))
-                report_period_ch:put(cfg.report_period)
+				-- Forward report_period to sysinfo fiber.
+				-- Drain any stale unconsumed value first (non-blocking via or_else so
+				-- the channel is tried first), then put the latest value.
+				perform(report_period_ch:get_op():or_else(function() return nil end))
+				report_period_ch:put(cfg.report_period)
 
-                -- Handle USB3 control (bigbox-ss hardware only).
-                if usb_cap then
-                    local usb_verb = usb_verb_for_config(hw_revision, cfg)
-                    local _, usb_err = cap_rpc(usb_cap, usb_verb, {})
-                    if usb_err ~= "" then
-                        svc:obs_log('warn', { what = 'usb3_control_failed', verb = usb_verb, err = usb_err })
-                    end
-                end
+				-- Handle USB3 control (bigbox-ss hardware only).
+				if usb_cap then
+					local usb_verb = usb_verb_for_config(hw_revision, cfg)
+					local _, usb_err = cap_rpc(usb_cap, usb_verb, {})
+					if usb_err ~= "" then
+						svc:obs_log('warn', { what = 'usb3_control_failed', verb = usb_verb, err = usb_err })
+					end
+				end
 
-                -- Reload alarms.
-                alarm_mgr:delete_all()
-                if type(cfg.alarms) == 'table' then
-                    for _, alarm_cfg in ipairs(cfg.alarms) do
-                        local add_err = alarm_mgr:add(alarm_cfg)
-                        if add_err ~= "" then
-                            svc:obs_log('warn', { what = 'alarm_add_failed', err = add_err })
-                        end
-                    end
-                end
-            end
-        elseif which == 'time' then
-            local is_synced = (msg.payload == true)
-            if is_synced then
-                alarm_mgr:sync()
-                svc:obs_log('debug', 'alarm manager synced')
-            else
-                alarm_mgr:desync()
-                svc:obs_log('debug', 'alarm manager desynced')
-            end
-        elseif which == 'alarm' then
-            handle_alarm(svc, power_cap, msg)
-        end
-    end
+				-- Reload alarms.
+				alarm_mgr:delete_all()
+				if type(cfg.alarms) == 'table' then
+					for _, alarm_cfg in ipairs(cfg.alarms) do
+						local add_err = alarm_mgr:add(alarm_cfg)
+						if add_err ~= "" then
+							svc:obs_log('warn', { what = 'alarm_add_failed', err = add_err })
+						end
+					end
+				end
+			end
+		elseif which == 'time' then
+			local is_synced = (msg.payload == true)
+			if is_synced then
+				alarm_mgr:sync()
+				svc:obs_log('debug', 'alarm manager synced')
+			else
+				alarm_mgr:desync()
+				svc:obs_log('debug', 'alarm manager desynced')
+			end
+		elseif which == 'alarm' then
+			handle_alarm(svc, power_cap, msg)
+		end
+	end
 end
 
 -- ── service entry point ──────────────────────────────
@@ -678,44 +678,44 @@ local SystemService = {}
 ---@param conn Connection
 ---@param opts? { name?: string, env?: string, heartbeat_s?: number }
 function SystemService.start(conn, opts)
-    opts = opts or {}
+	opts = opts or {}
 
-    local svc = base.new(conn, { name = opts.name or 'system', env = opts.env })
-    local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
+	local svc = base.new(conn, { name = opts.name or 'system', env = opts.env })
+	local heartbeat_s = (type(opts.heartbeat_s) == 'number') and opts.heartbeat_s or 30.0
 
-    svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
-    svc:obs_log('debug', 'service start() entered')
-    svc:announce({})
-    svc:starting()
-    svc:spawn_heartbeat(heartbeat_s, 'tick')
+	svc:obs_state('boot', { at = svc:wall(), ts = svc:now(), state = 'entered' })
+	svc:obs_log('debug', 'service start() entered')
+	svc:announce({})
+	svc:starting()
+	svc:spawn_heartbeat(heartbeat_s, 'tick')
 
-    -- Channel carries report_period from System Main → System Sysinfo.
-    -- Buffer of 1 so a rapid double-update does not block Main.
-    local report_period_ch = channel.new(1)
+	-- Channel carries report_period from System Main → System Sysinfo.
+	-- Buffer of 1 so a rapid double-update does not block Main.
+	local report_period_ch = channel.new(1)
 
-    fibers.current_scope():finally(function()
-        local _, primary = fibers.current_scope():status()
-        svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'ok') })
-        svc:obs_log('debug', 'service stopped')
-    end)
+	fibers.current_scope():finally(function()
+		local _, primary = fibers.current_scope():status()
+		svc:lifecycle('stopped', { ready = false, reason = tostring(primary or 'ok') })
+		svc:obs_log('debug', 'service stopped')
+	end)
 
-    -- Spawn Sysinfo first so it is ready to receive from report_period_ch.
-    fibers.current_scope():spawn(sysinfo_fiber, svc, report_period_ch)
+	-- Spawn Sysinfo first so it is ready to receive from report_period_ch.
+	fibers.current_scope():spawn(sysinfo_fiber, svc, report_period_ch)
 
-    svc:running()
-    svc:obs_log('debug', 'service running')
+	svc:running()
+	svc:obs_log('debug', 'service running')
 
-    -- Run System Main in the calling fiber.
-    system_main(svc, report_period_ch)
+	-- Run System Main in the calling fiber.
+	system_main(svc, report_period_ch)
 end
 
 SystemService._test = {
-    publish_platform_identity_metrics = publish_platform_identity_metrics,
-    read_platform_identity = read_platform_identity,
-    publish_sysinfo_metrics = publish_sysinfo_metrics,
-    collect_sysinfo_state = collect_sysinfo_state,
-    publish_sysinfo_state = publish_sysinfo_state,
-    usb_verb_for_config = usb_verb_for_config,
+	publish_platform_identity_metrics = publish_platform_identity_metrics,
+	read_platform_identity = read_platform_identity,
+	publish_sysinfo_metrics = publish_sysinfo_metrics,
+	collect_sysinfo_state = collect_sysinfo_state,
+	publish_sysinfo_state = publish_sysinfo_state,
+	usb_verb_for_config = usb_verb_for_config,
 }
 
 return SystemService
