@@ -44,6 +44,8 @@ local DEFAULT_SIGNAL_FREQ = 5
 local APN_SETTLE_TIMEOUT = 3 -- seconds to wait for modem to enter 'connecting' after a failed attempt
 
 local SCHEMA_STANDARD = "devicecode.config/gsm/1"
+local MODEM_INFO_SCHEMA = 'devicecode.hal.modem.info/1'
+local MODEM_SIGNAL_SCHEMA = 'devicecode.hal.modem.signal/1'
 
 local SCOREMAP = {
 	cdma1x = { rssi = { -110, -100, -86, -70, 1000000 } },
@@ -139,6 +141,13 @@ local function modem_set_signal_freq(cap, freq)
 	return call_modem_rpc(cap, 'set_signal_update_freq', opts, REQUEST_TIMEOUT)
 end
 
+---@param cap CapabilityReference
+---@return any
+---@return string
+local function modem_refresh_info(cap)
+	return call_modem_rpc(cap, 'refresh_info', {}, REQUEST_TIMEOUT)
+end
+
 ---@param tbl table?
 ---@return table
 local function shallow_copy(tbl)
@@ -165,6 +174,46 @@ end
 ---@return boolean
 local function is_plain_table(value)
 	return type(value) == 'table' and getmetatable(value) == nil
+end
+
+---@param current_values table
+---@param current_observed_at table
+---@param current_generation number
+---@param snapshot any
+---@return table? values
+---@return table? observed_at
+---@return number? generation
+---@return string error
+local function merge_info_snapshot(current_values, current_observed_at, current_generation, snapshot)
+	if not is_plain_table(snapshot) or snapshot.schema ~= MODEM_INFO_SCHEMA then
+		return nil, nil, nil, 'invalid modem info snapshot'
+	end
+	if not is_plain_table(snapshot.values) or not is_plain_table(snapshot.observed_at) then
+		return nil, nil, nil, 'invalid modem info snapshot values'
+	end
+	local generation = tonumber(snapshot.generation)
+	if not generation or generation < current_generation then
+		return nil, nil, nil, 'stale modem info snapshot'
+	end
+
+	local values = copy(current_values)
+	local observed_at = copy(current_observed_at)
+	for field in pairs(snapshot.values) do
+		if type(field) ~= 'string' or tonumber(snapshot.observed_at[field]) == nil then
+			return nil, nil, nil, 'modem info value is missing an observation time'
+		end
+	end
+	for field, observed in pairs(snapshot.observed_at) do
+		observed = tonumber(observed)
+		if type(field) ~= 'string' or not observed then
+			return nil, nil, nil, 'invalid modem info observation time'
+		end
+		if observed >= (tonumber(observed_at[field]) or -math.huge) then
+			values[field] = copy(snapshot.values[field])
+			observed_at[field] = observed
+		end
+	end
+	return values, observed_at, generation, ''
 end
 
 ---@param access_techs any
@@ -689,6 +738,10 @@ function GsmModem.new(cap, svc)
 	self.sim_lock_retries = nil
 	self.last_access = nil
 	self.last_signal = nil
+	self.info_values = {}
+	self.info_observed_at = {}
+	self.info_generation = 0
+	self.info_received_at = nil
 	self.current_state = nil
 	self.uplink_generation = 0
 	self.scope = nil
@@ -802,16 +855,16 @@ function GsmModem:_publish_uplink_state(connected, iface)
 	local access = {}
 	local signal_payload = nil
 
+	local info = self.info_values or {}
 	if sim.present == true and state ~= 'locked' and state ~= 'sim_absent' then
-		local access_techs, access_err = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT, 0)
-		local access_tech = access_err == '' and derive_access_tech(access_techs) or ''
+		local access_techs = info.access_techs
+		local access_tech = derive_access_tech(access_techs)
 		if access_tech ~= '' then
 			access.tech = access_tech
 			access.family = get_access_family(access_tech)
 		end
 
-		local operator, operator_err = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT, 0)
-		operator = operator_err == '' and normalize_optional_string(operator) or nil
+		local operator = normalize_optional_string(info.operator)
 		if operator then
 			access.operator = operator
 			self.domain:retain({ 'modem', self.name, 'operator' }, operator)
@@ -819,11 +872,7 @@ function GsmModem:_publish_uplink_state(connected, iface)
 			self.domain:unretain({ 'modem', self.name, 'operator' })
 		end
 
-		local signals, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT, 0)
-		local canonical_signal, signal_tech = nil, ""
-		if signal_err == '' then
-			canonical_signal, signal_tech = select_canonical_signal(access_techs, signals)
-		end
+		local canonical_signal, signal_tech = select_canonical_signal(access_techs, info.signal)
 		if canonical_signal then
 			signal_payload = shallow_copy(canonical_signal)
 			access.signal_tech = signal_tech
@@ -864,106 +913,127 @@ function GsmModem:_publish_uplink_state(connected, iface)
 	self.domain:retain({ 'uplink', self.name }, payload)
 end
 
+---@param snapshot any
+---@return boolean
+---@return string
+function GsmModem:_accept_info_snapshot(snapshot)
+	local values, observed_at, generation, err = merge_info_snapshot(
+		self.info_values,
+		self.info_observed_at,
+		self.info_generation,
+		snapshot
+	)
+	if not values then return false, err end
+
+	self.info_values = values
+	self.info_observed_at = observed_at
+	self.info_generation = generation
+	self.info_received_at = fibers.now()
+
+	local info = self.info_values
+	self.device = normalize_optional_string(info.device) or ''
+	self.sim_state = normalize_sim_presence(info.sim)
+	self.sim_lock = normalize_optional_string(info.sim_lock)
+	self.sim_lock_retries = info.sim_lock_retries and copy(info.sim_lock_retries) or nil
+	self.modem_state = normalize_optional_string(info.modem_state)
+
+	local interface = info.net_ports and info.net_ports[1]
+	self.wwan_iface = interface
+	if interface then
+		self.domain:retain({ 'modem', self.name, 'wwan-iface' }, interface)
+	else
+		self.domain:unretain({ 'modem', self.name, 'wwan-iface' })
+	end
+	self:_publish_uplink_state(nil, interface)
+	return true, ''
+end
+
+---@param event any
+---@return boolean
+---@return string
+function GsmModem:_accept_signal_event(event)
+	if not is_plain_table(event) or event.schema ~= MODEM_SIGNAL_SCHEMA then
+		return false, 'invalid modem signal event'
+	end
+	if not is_plain_table(event.access_techs) or not is_plain_table(event.signal) then
+		return false, 'invalid modem signal event values'
+	end
+
+	self.info_values = self.info_values or {}
+	self.info_observed_at = self.info_observed_at or {}
+	local observed_at = tonumber(event.observed_at) or fibers.now()
+	local latest_observed_at = math.max(
+		tonumber(self.info_observed_at.access_techs) or -math.huge,
+		tonumber(self.info_observed_at.signal) or -math.huge
+	)
+	if observed_at < latest_observed_at then
+		return false, 'stale modem signal event'
+	end
+	self.info_values.access_techs = copy(event.access_techs)
+	self.info_values.signal = copy(event.signal)
+	self.info_observed_at.access_techs = observed_at
+	self.info_observed_at.signal = observed_at
+	self:_publish_uplink_state(nil, self.wwan_iface)
+	return true, ''
+end
+
 function GsmModem:_emit_metrics_once()
 	-- Derived metrics only; HAL remains the source of truth.
+	local info = self.info_values or {}
 	local inventory = {}
-	local access_techs, access_err = modem_get_field(self.cap, 'access_techs', REQUEST_TIMEOUT, 0)
-	if access_err == "" then
-		local access_tech = derive_access_tech(access_techs)
-		if access_tech ~= "" then
-			inventory.access_tech = access_tech
-			self:_emit_metric('access_tech', access_tech)
-			local access_family = get_access_family(access_tech)
-			if access_family ~= "" then
-				self:_emit_metric('access_fam', access_family)
-			end
-		end
+	local access_techs = info.access_techs
+	local access_tech = derive_access_tech(access_techs)
+	if access_tech ~= '' then
+		inventory.access_tech = access_tech
+		self:_emit_metric('access_tech', access_tech)
+		local access_family = get_access_family(access_tech)
+		if access_family ~= '' then self:_emit_metric('access_fam', access_family) end
 	end
 
-	local band, band_err = modem_get_field(self.cap, 'active_band_class', REQUEST_TIMEOUT)
-	if band_err == "" then
-		self:_emit_metric('band', band)
+	self:_emit_metric('band', info.active_band_class)
+
+	if info.imei ~= nil then
+		inventory.imei = info.imei
+		self:_emit_metric('imei', info.imei)
 	end
 
-	local imei, imei_err = modem_get_field(self.cap, 'imei', REQUEST_TIMEOUT)
-	if imei_err == "" then
-		inventory.imei = imei
-		self:_emit_metric('imei', imei)
+	if info.operator ~= nil then
+		inventory.operator = info.operator
+		self:_emit_metric('operator', info.operator)
 	end
 
-	local operator, operator_err = modem_get_field(self.cap, 'operator', REQUEST_TIMEOUT)
-	if operator_err == "" then
-		inventory.operator = operator
-		self:_emit_metric('operator', operator)
-	end
-
-	local sim, sim_err = modem_get_field(self.cap, 'sim', REQUEST_TIMEOUT)
-	if sim_err == "" then
-		inventory.sim = normalised_sim_string(sim)
-		self.sim_state = normalize_sim_presence(sim)
+	if info.sim ~= nil then
+		inventory.sim = normalised_sim_string(info.sim)
+		self.sim_state = normalize_sim_presence(info.sim)
 		self:_emit_metric('sim', self.sim_state)
 	end
 
-	self:_refresh_sim_lock_fields(0)
 	self:_emit_metric('modem_state', self.modem_state)
+	self:_emit_metric('state', self.modem_state)
 	self:_emit_metric('sim_lock', self.sim_lock or '--')
 	self:_emit_metric('sim_lock_retries', self.sim_lock_retries or {})
+	self:_emit_metric('iccid', info.iccid)
 
-	local iccid, iccid_err = modem_get_field(self.cap, 'iccid', REQUEST_TIMEOUT)
-	if iccid_err == "" then
-		self:_emit_metric('iccid', iccid)
+	if info.firmware ~= nil then
+		inventory.firmware = info.firmware
+		self:_emit_metric('fw_version', info.firmware)
 	end
 
-	local firmware, firmware_err = modem_get_field(self.cap, 'firmware', REQUEST_TIMEOUT)
-	if firmware_err == "" then
-		inventory.firmware = firmware
-		self:_emit_metric('fw_version', firmware)
+	local interface = info.net_ports and info.net_ports[1]
+	if interface then
+		self.wwan_iface = interface
+		inventory.ifname = interface
+		self:_emit_metric('wann_type', interface)
+		self.domain:retain({ 'modem', self.name, 'wwan-iface' }, interface)
+	else
+		self.svc:obs_log('debug', { what = 'no_net_ports', modem = self.name })
 	end
 
-	local state_sub = self.cap:get_state_sub('card')
-	local state_msg, msg_err = state_sub:recv()
-	state_sub:unsubscribe()
-	if msg_err then
-		self.svc:obs_log('debug', { what = 'state_recv_error', modem = self.name, err = tostring(msg_err) })
-	end
+	self:_emit_metric('rx_bytes', info.rx_bytes)
+	self:_emit_metric('tx_bytes', info.tx_bytes)
 
-	local state = state_msg.payload and state_msg.payload
-	---@cast state ModemStateEvent
-	if state then
-		self.modem_state = normalize_optional_string(state.to)
-		self:_emit_metric('state', state.to)
-	end
-
-	local net_ports, net_ports_err = modem_get_field(self.cap, 'net_ports', REQUEST_TIMEOUT)
-	if net_ports_err == "" then
-		local interface = net_ports and net_ports[1]
-		if interface then
-			self.wwan_iface = interface
-			inventory.ifname = interface
-			self:_emit_metric('wann_type', interface)
-			self.domain:retain({ 'modem', self.name, 'wwan-iface' }, interface)
-			self:_publish_uplink_state(nil, interface)
-		else
-			self.svc:obs_log('debug', { what = 'no_net_ports', modem = self.name })
-		end
-	end
-
-	local rx_bytes, rx_err = modem_get_field(self.cap, 'rx_bytes', REQUEST_TIMEOUT)
-	if rx_err == "" then
-		self:_emit_metric('rx_bytes', rx_bytes)
-	end
-
-	local tx_bytes, tx_err = modem_get_field(self.cap, 'tx_bytes', REQUEST_TIMEOUT)
-	if tx_err == "" then
-		self:_emit_metric('tx_bytes', tx_bytes)
-	end
-
-	local signals, signal_err = modem_get_field(self.cap, 'signal', REQUEST_TIMEOUT, 0)
-	local signal, signal_tech = nil, ""
+	local signal, signal_tech = select_canonical_signal(access_techs, info.signal)
 	local rssi, rsrp, rsrq, rscp, snr = nil, nil, nil, nil, nil
-	if signal_err == "" then
-		signal, signal_tech = select_canonical_signal(access_techs, signals)
-	end
 	if signal then
 		rssi = signal.rssi
 		rsrp = signal.rsrp
@@ -972,21 +1042,10 @@ function GsmModem:_emit_metrics_once()
 		snr = signal.snr
 	end
 
-	if rsrp then
-		self:_emit_metric('rsrp', rsrp)
-	end
-
-	if rsrq then
-		self:_emit_metric('rsrq', rsrq)
-	end
-
-	if rssi then
-		self:_emit_metric('rssi', rssi)
-	end
-
-	if snr then
-		self:_emit_metric('snr', snr)
-	end
+	self:_emit_metric('rsrp', rsrp)
+	self:_emit_metric('rsrq', rsrq)
+	self:_emit_metric('rssi', rssi)
+	self:_emit_metric('snr', snr)
 
 	local bars_access_tech, signal_value, signal_type = select_signal_for_bars(
 		signal_tech,
@@ -994,12 +1053,9 @@ function GsmModem:_emit_metrics_once()
 		rsrp,
 		rscp
 	)
-
-	if bars_access_tech ~= "" and signal_type ~= "" then
+	if bars_access_tech ~= '' and signal_type ~= '' then
 		local bars, bars_err = get_signal_bars(bars_access_tech, signal_type, signal_value)
-		if bars_err == "" then
-			self:_emit_metric('bars', bars)
-		end
+		if bars_err == '' then self:_emit_metric('bars', bars) end
 	end
 	log_modem_detected(self, inventory)
 end
@@ -1008,28 +1064,84 @@ end
 function GsmModem:_metrics_loop()
 	local seen = self.config_pulse:version()
 	local interval = tonumber(self.cfg.metrics_interval) or DEFAULT_METRICS_INTERVAL
+	local next_metrics_at = fibers.now() + interval
+	local info_sub = self.cap:get_state_sub('info', { queue_len = 2, full = 'drop_oldest' })
+	local signal_sub = self.cap:get_event_sub('signal', { queue_len = 2, full = 'drop_oldest' })
+	local emit_after_refresh = false
+	local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
+	local _, signal_freq_err = modem_set_signal_freq(self.cap, signal_freq)
+	if signal_freq_err ~= '' then
+		self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = signal_freq_err })
+	end
+
+	local _, refresh_err = modem_refresh_info(self.cap)
+	if refresh_err ~= '' then
+		self.svc:obs_log('debug', { what = 'initial_info_refresh_failed', modem = self.name, err = refresh_err })
+	end
 
 	while true do
-		local which, ver = perform(op.named_choice({
-			tick = sleep.sleep_op(interval),
+		local which, value, event_err = perform(op.named_choice({
+			info = info_sub:recv_op(),
+			signal = signal_sub:recv_op(),
+			tick = sleep.sleep_until_op(next_metrics_at),
 			config = self.config_pulse:changed_op(seen),
 		}))
 
 		if which == 'config' then
-			if not ver then
-				return
-			end
-			seen = ver
+			if not value then break end
+			seen = value
 			interval = tonumber(self.cfg.metrics_interval) or DEFAULT_METRICS_INTERVAL
+			next_metrics_at = fibers.now() + interval
+			local configured_signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
+			if configured_signal_freq ~= signal_freq then
+				signal_freq = configured_signal_freq
+				local _, err = modem_set_signal_freq(self.cap, signal_freq)
+				if err ~= '' then
+					self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = err })
+				end
+			end
+		elseif which == 'info' then
+			if not value then
+				self.svc:obs_log('debug', { what = 'info_subscription_closed', modem = self.name, err = tostring(event_err) })
+				break
+			end
+			local accepted, accept_err = self:_accept_info_snapshot(value.payload)
+			if not accepted then
+				self.svc:obs_log('debug', { what = 'invalid_info_snapshot', modem = self.name, err = accept_err })
+			elseif emit_after_refresh then
+				emit_after_refresh = false
+				self:_emit_metrics_once()
+			end
+		elseif which == 'signal' then
+			if not value then
+				self.svc:obs_log('debug', { what = 'signal_subscription_closed', modem = self.name, err = tostring(event_err) })
+				break
+			end
+			local accepted, accept_err = self:_accept_signal_event(value.payload)
+			if not accepted then
+				self.svc:obs_log('debug', { what = 'invalid_signal_event', modem = self.name, err = accept_err })
+			end
 		else
-			self:_emit_metrics_once()
+			next_metrics_at = fibers.now() + interval
+			local stale = not self.info_received_at
+				or fibers.now() - self.info_received_at >= interval
+			if stale then
+				emit_after_refresh = true
+				local _, err = modem_refresh_info(self.cap)
+				if err ~= '' then
+					emit_after_refresh = false
+					self.svc:obs_log('debug', { what = 'info_refresh_failed', modem = self.name, err = err })
+					self:_emit_metrics_once()
+				end
+			else
+				self:_emit_metrics_once()
+			end
 		end
 	end
-end
 
----@return table|nil apn
----@return string error
----@return number? retry_timeout
+	info_sub:unsubscribe()
+	signal_sub:unsubscribe()
+end
 function GsmModem:_apn_connect()
 	-- Fetch network/SIM identifiers from HAL
 	local mcc, mcc_err = modem_get_field(self.cap, 'mcc', REQUEST_TIMEOUT)
@@ -1223,11 +1335,6 @@ function GsmModem:_autoconnect_loop()
 				local _, err_inner, retry_inner = self:_apn_connect()
 				err = err_inner
 				retry_timeout = retry_inner
-				local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
-				local _, sig_err = modem_set_signal_freq(self.cap, signal_freq)
-				if sig_err ~= "" then
-					self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = sig_err })
-				end
 			end
 
 			local connection_changed = (connected and current_state ~= STATE_CONNECTED)
@@ -1736,6 +1843,7 @@ GsmService._test = {
 	GsmModem = GsmModem,
 	build_sim_payload = build_sim_payload,
 	derive_access_tech = derive_access_tech,
+	merge_info_snapshot = merge_info_snapshot,
 	select_canonical_signal = select_canonical_signal,
 	select_signal_for_bars = select_signal_for_bars,
 	uplink_state_for_modem = uplink_state_for_modem,

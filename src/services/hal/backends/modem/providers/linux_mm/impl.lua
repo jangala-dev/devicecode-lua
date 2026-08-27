@@ -557,6 +557,16 @@ function ModemBackend:read_network_info()
     )
 end
 
+---@return string[]?
+---@return string error
+function ModemBackend:read_access_techs()
+    local modem_info, err = read_modem_info(self.identity.address)
+    if not modem_info then
+        return nil, err
+    end
+    return modem_info.access_techs, ""
+end
+
 ---@return ModemSignalInfo?
 ---@return string error
 function ModemBackend:read_signal()

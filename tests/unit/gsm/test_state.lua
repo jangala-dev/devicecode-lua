@@ -254,4 +254,54 @@ function tests.test_signal_bars_use_the_selected_signal_tech()
 	eq(field, 'rsrp')
 end
 
+function tests.test_info_snapshot_merges_only_fields_observed_by_the_driver()
+	local values, observed_at, generation, err = gsm._test.merge_info_snapshot(
+		{
+			operator = 'Old operator',
+			signal = { lte = { rsrp = -90 } },
+			legacy_field = 'stale',
+		},
+		{
+			operator = 5,
+			signal = 20,
+			legacy_field = 5,
+		},
+		1,
+		{
+			schema = 'devicecode.hal.modem.info/1',
+			generation = 2,
+			values = {
+				operator = 'New operator',
+				signal = { lte = { rsrp = -110 } },
+			},
+			observed_at = {
+				operator = 30,
+				signal = 10,
+				legacy_field = 30,
+			},
+		}
+	)
+
+	eq(err, '')
+	eq(generation, 2)
+	eq(values.operator, 'New operator')
+	eq(values.signal.lte.rsrp, -90)
+	eq(values.legacy_field, nil)
+	eq(observed_at.operator, 30)
+	eq(observed_at.signal, 20)
+	eq(observed_at.legacy_field, 30)
+end
+
+function tests.test_info_snapshot_rejects_values_without_observation_times()
+	local values, _, _, err = gsm._test.merge_info_snapshot({}, {}, 0, {
+		schema = 'devicecode.hal.modem.info/1',
+		generation = 1,
+		values = { operator = 'Demo' },
+		observed_at = {},
+	})
+
+	eq(values, nil)
+	eq(err, 'modem info value is missing an observation time')
+end
+
 return tests

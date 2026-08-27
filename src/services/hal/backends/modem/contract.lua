@@ -12,6 +12,7 @@ local BACKEND_FUNCTIONS = list_to_map {
     "read_ports",
     "read_sim_info",
     "read_network_info",
+    "read_access_techs",
     "read_signal",
     "read_traffic",
 
