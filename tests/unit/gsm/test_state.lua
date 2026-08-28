@@ -44,6 +44,7 @@ local function new_test_modem(fields)
 		wwan_iface = 'wwan0',
 		modem_state = 'connected',
 		sim_state = 'present',
+		info_values = fields,
 		uplink_generation = 0,
 		domain = domain,
 		svc = { wall = function() return 100 end },
