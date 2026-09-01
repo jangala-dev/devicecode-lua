@@ -55,6 +55,7 @@ local files = {
 	"unit.hal.openwrt_names_spec",
 	'unit.fabric.test_model',
 	'unit.fabric.test_config',
+	'unit.fabric.test_legacy_mcu_metrics',
 	'unit.fabric.test_dependencies',
 	'unit.fabric.test_session',
 	'unit.fabric.test_link',

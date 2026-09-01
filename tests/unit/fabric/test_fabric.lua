@@ -34,6 +34,7 @@ function tests.test_public_entrypoint_exports_semantic_modules()
 	assert_eq(fabric.transfer_sender, require 'services.fabric.transfer_sender')
 	assert_eq(fabric.transfer_receive, require 'services.fabric.transfer_receive')
 	assert_eq(fabric.state, require 'services.fabric.state')
+	assert_eq(fabric.profile_loader, require 'services.fabric.profiles.loader')
 	assert_eq(type(fabric.start), 'function')
 	assert_eq(type(fabric.run), 'function')
 	assert_eq(type(fabric.run_link), 'function')
@@ -154,6 +155,70 @@ function tests.test_composed_link_transport_open_failure_fails_link_scope_before
 		else
 			assert_match(primary, 'open failed')
 		end
+	end)
+end
+
+
+function tests.test_legacy_mcu_protocol_runs_as_a_fabric_link_and_publishes_metrics()
+	fibers.run(function ()
+		local lines = {
+			'{"power/battery/internal/ibat":4294967176}',
+			'{"power/battery/internal/ibat":4294967176}',
+		}
+		local next_line = 0
+		local terminated = false
+		local retained = {}
+		local conn = {
+			retain = function (_, topic, payload)
+				if topic[1] == 'obs' and topic[2] == 'v1' and topic[4] == 'metric' then
+					retained[#retained + 1] = { topic = topic, payload = payload }
+				end
+				return true, nil
+			end,
+		}
+		local raw_transport = {
+			read_line_op = function ()
+				next_line = next_line + 1
+				return fibers.always(lines[next_line], lines[next_line] and nil or 'eof')
+			end,
+			write_line_op = function () return fibers.always(true, nil) end,
+			terminate = function () terminated = true; return true, nil end,
+		}
+
+		local st, rep, result = fibers.run_scope(function (scope)
+			return fabric.run_link(scope, {
+				link_id = 'legacy-mcu-uart0',
+				link_generation = 1,
+				peer_id = 'mcu',
+				conn = conn,
+				protocol = {
+					kind = 'legacy_mcu_metrics_v1',
+					args = {
+					namespace_prefix = { 'mcu' },
+					publish_service = 'mcu',
+					change_only = true,
+					unsigned_underflow_compat = true,
+					error_log_initial_s = 1,
+						error_log_max_s = 60,
+					},
+				},
+				open_transport_op = function ()
+					local wrapped, err = hal_transport.wrap_transport(raw_transport)
+					return fibers.always(wrapped, err)
+				end,
+			})
+		end)
+
+		assert_eq(st, 'ok')
+		assert_eq(#rep.extra_errors, 0)
+		assert_not_nil(result)
+		assert_eq(result.snapshot.components.legacy_metrics_reader.status, 'ok')
+		assert_eq(#retained, 1)
+		assert_eq(retained[1].topic[3], 'mcu')
+		assert_eq(retained[1].topic[5], 'ibat')
+		assert_eq(retained[1].payload.value, -120)
+		assert_eq(table.concat(retained[1].payload.namespace, '/'), 'mcu/power/battery/internal/ibat')
+		assert_true(terminated)
 	end)
 end
 

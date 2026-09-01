@@ -296,6 +296,26 @@ function tests.test_http_command_route_parses_real_json_body_and_calls_bus()
 end
 
 
+
+function tests.test_disabled_updates_hide_status_upload_and_commit_routes()
+	run_fibers.run(function (scope)
+		for _, spec in ipairs({
+			{ method = 'GET', path = '/api/update/status' },
+			{ method = 'POST', path = '/api/update/upload' },
+			{ method = 'POST', path = '/api/update/commit' },
+		}) do
+			local ctx = fake_ctx(spec.method, spec.path)
+			local result = request.run(scope, ctx, {
+				model = read_model.new(),
+				update = { enabled = false },
+			})
+			assert_eq(result.status, 'not_found')
+			assert_eq(#ctx.replies, 1)
+			assert_eq(ctx.replies[1].status, 404)
+		end
+	end)
+end
+
 function tests.test_update_commit_route_calls_update_manager_without_session()
 	run_fibers.run(function (scope)
 		local bus = busmod.new()

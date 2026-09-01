@@ -168,8 +168,8 @@
     "data": {
       "schema": "devicecode.config/net/1",
       "version": 1,
-      "product": "bigbox-legacy-converted-phase1",
-      "description": "Big Box default config using segment-first NET model, GSM-sourced modem uplinks, generated WAN route metrics, and Devicecode-owned OpenWrt UCI output.",
+      "product": "bigbox-v1-cm",
+      "description": "Big Box v1 CM config using the segment-first NET model, GSM-sourced modem uplinks, and Devicecode-owned OpenWrt UCI output.",
       "vlan_policy": {
         "reserved": {
           "internal": 100
@@ -258,14 +258,14 @@
               "mode": "budgeted_peak",
               "all_hosts": true,
               "download": {
-                "sustained_rate": "500kbit",
+                "sustained_rate": "400kbit",
                 "peak_rate": "2mbit",
-                "burst_budget": "500k"
+                "burst_budget": "200k"
               },
               "upload": {
-                "sustained_rate": "250kbit",
-                "peak_rate": "1mbit",
-                "burst_budget": "250k"
+                "sustained_rate": "400kbit",
+                "peak_rate": "2mbit",
+                "burst_budget": "200k"
               },
               "fq_codel": {
                 "flows": 1024,
@@ -588,7 +588,7 @@
     "data": {
       "schema": "devicecode.config/wired/1",
       "version": 1,
-      "product": "bigbox-legacy-converted-phase1",
+      "product": "bigbox-v1-cm",
       "surfaces": {
         "cm5-eth0": {
           "name": "CM5 Ethernet",
@@ -801,150 +801,6 @@
                 "cm5",
                 "rpc",
                 "commit"
-              ]
-            }
-          }
-        },
-        "mcu": {
-          "class": "member",
-          "subtype": "mcu",
-          "role": "controller",
-          "member": "mcu",
-          "required_facts": [
-            "software",
-            "updater"
-          ],
-          "facts": {
-            "software": [
-              "raw",
-              "member",
-              "mcu",
-              "state",
-              "software"
-            ],
-            "updater": [
-              "raw",
-              "member",
-              "mcu",
-              "state",
-              "updater"
-            ],
-            "health": [
-              "raw",
-              "member",
-              "mcu",
-              "state",
-              "health"
-            ],
-            "power_battery": [
-              "raw",
-              "member",
-              "mcu",
-              "state",
-              "power",
-              "battery"
-            ],
-            "power_charger": [
-              "raw",
-              "member",
-              "mcu",
-              "state",
-              "power",
-              "charger"
-            ],
-            "power_charger_config": [
-              "raw",
-              "member",
-              "mcu",
-              "state",
-              "power",
-              "charger",
-              "config"
-            ],
-            "environment_temperature": [
-              "raw",
-              "member",
-              "mcu",
-              "state",
-              "environment",
-              "temperature"
-            ],
-            "environment_humidity": [
-              "raw",
-              "member",
-              "mcu",
-              "state",
-              "environment",
-              "humidity"
-            ],
-            "runtime_memory": [
-              "raw",
-              "member",
-              "mcu",
-              "state",
-              "runtime",
-              "memory"
-            ]
-          },
-          "events": {
-            "charger_alert": [
-              "raw",
-              "member",
-              "mcu",
-              "cap",
-              "telemetry",
-              "main",
-              "event",
-              "power",
-              "charger",
-              "alert"
-            ]
-          },
-          "actions": {
-            "restart": {
-              "kind": "rpc",
-              "call_topic": [
-                "raw",
-                "member",
-                "mcu",
-                "cap",
-                "control",
-                "main",
-                "rpc",
-                "restart"
-              ]
-            },
-            "prepare-update": {
-              "kind": "rpc",
-              "call_topic": [
-                "raw",
-                "member",
-                "mcu",
-                "cap",
-                "updater",
-                "main",
-                "rpc",
-                "prepare-update"
-              ]
-            },
-            "stage-update": {
-              "kind": "fabric_stage",
-              "target": "updater/main",
-              "chunk_size": 2048,
-              "artifact_store": "main",
-              "timeout_s": 300
-            },
-            "commit-update": {
-              "kind": "rpc",
-              "call_topic": [
-                "raw",
-                "member",
-                "mcu",
-                "cap",
-                "updater",
-                "main",
-                "rpc",
-                "commit-update"
               ]
             }
           }
@@ -1285,6 +1141,20 @@
             "device": "/sys/devices/platform/axi/1000480000.usb/usb1/1-1",
             "autoconnect": true,
             "metrics_interval": 60
+          },
+          {
+            "name": "primary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb5/5-1/5-1.1",
+            "autoconnect": true,
+            "metrics_interval": 60
+          },
+          {
+            "name": "secondary",
+            "id_field": "device",
+            "device": "/sys/devices/platform/axi/1000120000.pcie/1f00300000.usb/xhci-hcd.1/usb4/4-1/4-1.2",
+            "autoconnect": true,
+            "metrics_interval": 60
           }
         ]
       },
@@ -1299,13 +1169,23 @@
     "rev": 1,
     "data": {
       "schema": "devicecode.config/fabric/1",
-      "local_node": "bigbox-cm5",
+      "local_node": "bigbox-v1-cm",
       "links": [
         {
           "id": "mcu-uart0",
           "peer_id": "mcu",
           "protocol": {
-            "kind": "fabric_jsonl_v1"
+            "kind": "legacy_mcu_metrics_v1",
+            "args": {
+              "namespace_prefix": [
+                "mcu"
+              ],
+              "publish_service": "mcu",
+              "change_only": true,
+              "unsigned_underflow_compat": true,
+              "error_log_initial_s": 1,
+              "error_log_max_s": 60
+            }
           },
           "transport": {
             "kind": "uart",
@@ -1313,106 +1193,6 @@
             "class": "uart",
             "id": "uart0",
             "terminator": "\n"
-          },
-          "session": {
-            "identity_claim": {
-              "id": "bigbox-cm5",
-              "role": "controller"
-            }
-          },
-          "bridge": {
-            "imports": [
-              {
-                "id": "mcu-state",
-                "remote": [
-                  "state",
-                  "self"
-                ],
-                "local": [
-                  "raw",
-                  "member",
-                  "mcu",
-                  "state"
-                ]
-              },
-              {
-                "id": "mcu-event",
-                "remote": [
-                  "event",
-                  "self"
-                ],
-                "local": [
-                  "raw",
-                  "member",
-                  "mcu",
-                  "cap",
-                  "telemetry",
-                  "main",
-                  "event"
-                ]
-              },
-              {
-                "id": "mcu-cap",
-                "remote": [
-                  "cap",
-                  "self"
-                ],
-                "local": [
-                  "raw",
-                  "member",
-                  "mcu",
-                  "cap"
-                ]
-              }
-            ],
-            "exports": [],
-            "rpc": {
-              "outbound": [
-                {
-                  "id": "mcu-updater-prepare",
-                  "local": [
-                    "raw",
-                    "member",
-                    "mcu",
-                    "cap",
-                    "updater",
-                    "main",
-                    "rpc",
-                    "prepare-update"
-                  ],
-                  "remote": [
-                    "cap",
-                    "self",
-                    "updater",
-                    "main",
-                    "rpc",
-                    "prepare-update"
-                  ]
-                },
-                {
-                  "id": "mcu-updater-commit",
-                  "local": [
-                    "raw",
-                    "member",
-                    "mcu",
-                    "cap",
-                    "updater",
-                    "main",
-                    "rpc",
-                    "commit-update"
-                  ],
-                  "remote": [
-                    "cap",
-                    "self",
-                    "updater",
-                    "main",
-                    "rpc",
-                    "commit-update"
-                  ]
-                }
-              ],
-              "inbound": []
-            }
           }
         }
       ]
@@ -1450,69 +1230,6 @@
         "cap_id": "main",
         "host": "0.0.0.0",
         "port": 80
-      },
-      "updates": {
-        "upload": {
-          "enabled": true,
-          "max_bytes": 67108864,
-          "require_auth": false,
-          "component": "mcu",
-          "create_job": true,
-          "start_job": true
-        },
-        "commit": {
-          "require_auth": false
-        }
-      }
-    }
-  },
-  "update": {
-    "rev": 1,
-    "data": {
-      "schema": "devicecode.update/1",
-      "components": {
-        "cm5": {
-          "component": "cm5"
-        },
-        "mcu": {
-          "component": "mcu",
-          "backend": "component",
-          "stage_timeout_s": 300
-        },
-        "switch-main": {
-          "component": "switch-main"
-        }
-      },
-      "bundled": {
-        "enabled": true,
-        "max_attempts": 30,
-        "components": {
-          "mcu": {
-            "component": "mcu",
-            "source": {
-              "kind": "file",
-              "path": "/artifacts/mcu.dcmcu",
-              "policy": "transient_only"
-            },
-            "job": {
-              "job_id": "bundled-mcu",
-              "create_if": "image_differs",
-              "start": "auto",
-              "commit": "auto",
-              "reconcile": "required",
-              "supersede": "same_job_if_image_changed"
-            }
-          }
-        }
-      },
-      "publish": {
-        "enabled": true
-      },
-      "retention": {
-        "terminal_max_count": 50,
-        "terminal_max_age_s": 604800,
-        "active_intent_restart_max": 1,
-        "prune_on_startup": true
       }
     }
   },
