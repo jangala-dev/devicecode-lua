@@ -12,7 +12,7 @@ local resource   = require 'devicecode.support.resource'
 local driver_mod = require 'services.hal.drivers.control_store'
 
 local M = {
-    api_mode = 'op_only',
+	api_mode = 'op_only',
 }
 
 
@@ -28,14 +28,14 @@ local STOP_TIMEOUT = 5.0
 ---@field generation integer
 ---@field drivers table<string, ControlStoreDriver>
 local S = {
-    started     = false,
-    scope       = nil,
-    logger      = nil,
-    dev_ev_ch   = nil,
-    cap_emit_ch = nil,
-    cfg_ch      = nil,
+	started     = false,
+	scope       = nil,
+	logger      = nil,
+	dev_ev_ch   = nil,
+	cap_emit_ch = nil,
+	cfg_ch      = nil,
 	generation  = 0,
-    drivers     = {},
+	drivers     = {},
 }
 
 local function finalise_manager_scope(scope, generation)
@@ -57,21 +57,21 @@ local function finalise_manager_scope(scope, generation)
 end
 
 local function validate_config(namespaces)
-    if type(namespaces) ~= 'table' then
-        return false, 'config must be a list'
-    end
-    for _, ns in ipairs(namespaces) do
-        if type(ns) ~= 'table' then
-            return false, 'each namespace must be a table'
-        end
-        if type(ns.name) ~= 'string' or ns.name == '' then
-            return false, 'namespace.name must be a non-empty string'
-        end
-        if type(ns.root) ~= 'string' or ns.root == '' then
-            return false, 'namespace.root must be a non-empty string'
-        end
-    end
-    return true, nil
+	if type(namespaces) ~= 'table' then
+		return false, 'config must be a list'
+	end
+	for _, ns in ipairs(namespaces) do
+		if type(ns) ~= 'table' then
+			return false, 'each namespace must be a table'
+		end
+		if type(ns.name) ~= 'string' or ns.name == '' then
+			return false, 'namespace.name must be a non-empty string'
+		end
+		if type(ns.root) ~= 'string' or ns.root == '' then
+			return false, 'namespace.root must be a non-empty string'
+		end
+	end
+	return true, nil
 end
 
 local function emit_device_added_op(driver, caps)
@@ -83,73 +83,73 @@ local function emit_device_removed_op(driver)
 end
 
 local function start_driver_op(name, root)
-    return fibers.run_scope_op(function ()
-        local driver = driver_mod.new(name, root, S.logger)
+	return fibers.run_scope_op(function ()
+		local driver = driver_mod.new(name, root, S.logger)
 
-        local ok_caps, caps_or_err = fibers.perform(driver:capabilities_op(S.cap_emit_ch))
-        if not ok_caps then
-        return false, tostring(caps_or_err)
-        end
-        local caps = caps_or_err
+		local ok_caps, caps_or_err = fibers.perform(driver:capabilities_op(S.cap_emit_ch))
+		if not ok_caps then
+		return false, tostring(caps_or_err)
+		end
+		local caps = caps_or_err
 
-        local started = false
-        local handed_off = false
+		local started = false
+		local handed_off = false
 
-        local function cleanup_started_driver()
-        if started and not handed_off then
-            -- Best-effort rollback; this resource belongs to this start attempt
-            resource.terminate_checked(driver, 'manager cleanup', 'HAL manager driver rollback failed')
-        end
-        end
+		local function cleanup_started_driver()
+		if started and not handed_off then
+			-- Best-effort rollback; this resource belongs to this start attempt
+			resource.terminate_checked(driver, 'manager cleanup', 'HAL manager driver rollback failed')
+		end
+		end
 
-        -- If anything below errors, rollback the started driver.
-        fibers.current_scope():finally(function ()
-        cleanup_started_driver()
-        end)
+		-- If anything below errors, rollback the started driver.
+		fibers.current_scope():finally(function ()
+		cleanup_started_driver()
+		end)
 
-        local ok_start, start_err =
-        fibers.perform(driver:start_op(assert(S.scope, 'control_store manager scope missing')))
-        if not ok_start then
-        return false, tostring(start_err)
-        end
-        started = true
+		local ok_start, start_err =
+		fibers.perform(driver:start_op(assert(S.scope, 'control_store manager scope missing')))
+		if not ok_start then
+		return false, tostring(start_err)
+		end
+		started = true
 
-        local ok_emit, emit_err = fibers.perform(emit_device_added_op(driver, caps))
-        if not ok_emit then
-        return false, tostring(emit_err)
-        end
+		local ok_emit, emit_err = fibers.perform(emit_device_added_op(driver, caps))
+		if not ok_emit then
+		return false, tostring(emit_err)
+		end
 
-        S.drivers[name] = driver
-        handed_off = true
-        return true, nil
-    end):wrap(function (st, rep, ok, err)
-        if st ~= 'ok' then
-        return false, tostring(err or rep)
-        end
-        return ok, err
-    end)
+		S.drivers[name] = driver
+		handed_off = true
+		return true, nil
+	end):wrap(function (st, rep, ok, err)
+		if st ~= 'ok' then
+		return false, tostring(err or rep)
+		end
+		return ok, err
+	end)
 end
 
 local function stop_driver_op(name, driver)
-    return fibers.run_scope_op(function ()
-        local ok_emit, emit_err = fibers.perform(emit_device_removed_op(driver))
-        if not ok_emit then
-            return false, tostring(emit_err)
-        end
+	return fibers.run_scope_op(function ()
+		local ok_emit, emit_err = fibers.perform(emit_device_removed_op(driver))
+		if not ok_emit then
+			return false, tostring(emit_err)
+		end
 
-        local ok_stop, stop_err = fibers.perform(driver:shutdown_op())
-        if not ok_stop then
-            return false, tostring(stop_err)
-        end
+		local ok_stop, stop_err = fibers.perform(driver:shutdown_op())
+		if not ok_stop then
+			return false, tostring(stop_err)
+		end
 
-        S.drivers[name] = nil
-        return true, nil
-    end):wrap(function (st, rep, ok, err)
-        if st ~= 'ok' then
-            return false, tostring(err or rep)
-        end
-        return ok, err
-    end)
+		S.drivers[name] = nil
+		return true, nil
+	end):wrap(function (st, rep, ok, err)
+		if st ~= 'ok' then
+			return false, tostring(err or rep)
+		end
+		return ok, err
+	end)
 end
 
 local function reconcile_op(namespaces)
@@ -211,47 +211,47 @@ local function shell_loop(generation, cfg_ch)
 end
 
 function M.start_op(logger, dev_ev_ch, cap_emit_ch)
-    -- Capture the owning long-lived HAL scope now, not at perform time.
-    -- This op may be passed around before being performed; the driver shell must
-    -- still be parented to the manager/service scope that initiated startup.
-    local owner_scope = fibers.current_scope()
-    assert(owner_scope ~= nil, 'control_store.start_op must be called from inside a fiber')
+	-- Capture the owning long-lived HAL scope now, not at perform time.
+	-- This op may be passed around before being performed; the driver shell must
+	-- still be parented to the manager/service scope that initiated startup.
+	local owner_scope = fibers.current_scope()
+	assert(owner_scope ~= nil, 'control_store.start_op must be called from inside a fiber')
 
-    return op.guard(function ()
-        if S.started then
-            return op.always(false, 'already started')
-        end
+	return op.guard(function ()
+		if S.started then
+			return op.always(false, 'already started')
+		end
 
-        local scope, err = owner_scope:child()
-        if not scope then
-            return op.always(false, tostring(err))
-        end
+		local scope, err = owner_scope:child()
+		if not scope then
+			return op.always(false, tostring(err))
+		end
 
-        S.scope       = scope
-        S.logger      = logger
-        S.dev_ev_ch   = dev_ev_ch
-        S.cap_emit_ch = cap_emit_ch
+		S.scope       = scope
+		S.logger      = logger
+		S.dev_ev_ch   = dev_ev_ch
+		S.cap_emit_ch = cap_emit_ch
 
 		S.cfg_ch      = channel.new(8)
 		S.generation  = S.generation + 1
 		local generation = S.generation
 		local cfg_ch = S.cfg_ch
 
-        local detach_finaliser = scope:finally(function ()
-            finalise_manager_scope(scope, generation)
-        end)
+		local detach_finaliser = scope:finally(function ()
+			finalise_manager_scope(scope, generation)
+		end)
 
-        local ok, serr = scope:spawn(function () shell_loop(generation, cfg_ch) end)
-        if not ok then
-            detach_finaliser()
-            finalise_manager_scope(scope, generation)
-            scope:cancel(tostring(serr or 'manager shell spawn failed'))
-            return op.always(false, tostring(serr))
-        end
+		local ok, serr = scope:spawn(function () shell_loop(generation, cfg_ch) end)
+		if not ok then
+			detach_finaliser()
+			finalise_manager_scope(scope, generation)
+			scope:cancel(tostring(serr or 'manager shell spawn failed'))
+			return op.always(false, tostring(serr))
+		end
 
-        S.started = true
-        return op.always(true, nil)
-    end)
+		S.started = true
+		return op.always(true, nil)
+	end)
 end
 
 function M.apply_config_op(namespaces)
@@ -300,32 +300,32 @@ function M.apply_config_op(namespaces)
 end
 
 function M.shutdown_op(timeout)
-    timeout = timeout or STOP_TIMEOUT
+	timeout = timeout or STOP_TIMEOUT
 
-    return op.guard(function ()
-        if not S.started or not S.scope then
-            return op.always(true, nil)
-        end
+	return op.guard(function ()
+		if not S.started or not S.scope then
+			return op.always(true, nil)
+		end
 
-        local scope = S.scope
+		local scope = S.scope
 		local generation = S.generation
-        scope:cancel()
+		scope:cancel()
 
-        return fibers.boolean_choice(
-            scope:join_op():wrap(function ()
-                finalise_manager_scope(scope, generation)
-                return true, nil
-            end),
-            sleep.sleep_op(timeout):wrap(function ()
-                return false, 'control_store manager stop timeout'
-            end)
-        ):wrap(function (completed, a, b)
-            if completed then
-                return true, nil
-            end
-            return false, b
-        end)
-    end)
+		return fibers.boolean_choice(
+			scope:join_op():wrap(function ()
+				finalise_manager_scope(scope, generation)
+				return true, nil
+			end),
+			sleep.sleep_op(timeout):wrap(function ()
+				return false, 'control_store manager stop timeout'
+			end)
+		):wrap(function (completed, a, b)
+			if completed then
+				return true, nil
+			end
+			return false, b
+		end)
+	end)
 end
 
 function M.terminate(reason)

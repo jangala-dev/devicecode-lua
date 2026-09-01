@@ -12,7 +12,9 @@
     "json.schemas": [],
     "terminal.integrated.defaultProfile.linux": "bash",
     "[lua]": {
-      "editor.tabSize": 4
+      "editor.tabSize": 4,
+      "editor.insertSpaces": false,
+      "editor.detectIndentation": false
     },
     "Lua.diagnostics.workspaceDelay": -1,
     "Lua.diagnostics.enable": true,

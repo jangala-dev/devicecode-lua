@@ -29,24 +29,24 @@ ControlRequest.__index = ControlRequest
 ---@return ControlRequest?
 ---@return string error
 function new.ControlRequest(verb, opts, reply_ch, cancel_op)
-    if type(verb) ~= 'string' or verb == '' then
-        return nil, "invalid verb"
-    end
+	if type(verb) ~= 'string' or verb == '' then
+		return nil, "invalid verb"
+	end
 
-    if type(opts) ~= 'table' then
-        return nil, "opts must be a table"
-    end
+	if type(opts) ~= 'table' then
+		return nil, "opts must be a table"
+	end
 
-    if getmetatable(reply_ch) ~= ChannelMT then
-        return nil, "invalid reply_ch"
-    end
+	if getmetatable(reply_ch) ~= ChannelMT then
+		return nil, "invalid reply_ch"
+	end
 
-    return setmetatable({
-        verb = verb,
-        opts = opts,
-        reply_ch = reply_ch,
-        cancel_op = cancel_op,
-    }, ControlRequest), ""
+	return setmetatable({
+		verb = verb,
+		opts = opts,
+		reply_ch = reply_ch,
+		cancel_op = cancel_op,
+	}, ControlRequest), ""
 end
 
 ---@class Reply
@@ -63,15 +63,15 @@ Reply.__index = Reply
 ---@return Reply?
 ---@return string error
 function new.Reply(ok, reason, code)
-    if type(ok) ~= 'boolean' then
-        return nil, "invalid ok"
-    end
+	if type(ok) ~= 'boolean' then
+		return nil, "invalid ok"
+	end
 
-    return setmetatable({
-        ok = ok,
-        reason = reason,
-        code = code,
-    }, Reply), ""
+	return setmetatable({
+		ok = ok,
+		reason = reason,
+		code = code,
+	}, Reply), ""
 end
 
 ---@alias EmitMode 'event'|'state'|'meta'|'log'
@@ -94,33 +94,33 @@ Emit.__index = Emit
 ---@return Emit?
 ---@return string error
 function new.Emit(class, id, mode, key, data)
-    if type(class) ~= 'string' or class == '' then
-        return nil, "invalid class"
-    end
+	if type(class) ~= 'string' or class == '' then
+		return nil, "invalid class"
+	end
 
-    if type(id) ~= 'string' and type(id) ~= 'number' then
-        return nil, "invalid id"
-    end
+	if type(id) ~= 'string' and type(id) ~= 'number' then
+		return nil, "invalid id"
+	end
 
-    if mode ~= 'event' and mode ~= 'state' and mode ~= 'meta' and mode ~= 'log' then
-        return nil, "invalid mode"
-    end
+	if mode ~= 'event' and mode ~= 'state' and mode ~= 'meta' and mode ~= 'log' then
+		return nil, "invalid mode"
+	end
 
-    if type(key) ~= 'string' or key == '' then
-        return nil, "invalid key"
-    end
+	if type(key) ~= 'string' or key == '' then
+		return nil, "invalid key"
+	end
 
-    if type(data) == 'nil' then
-        return nil, "data cannot be nil"
-    end
+	if type(data) == 'nil' then
+		return nil, "data cannot be nil"
+	end
 
-    return setmetatable({
-        class = class,
-        id = id,
-        mode = mode,
-        key = key,
-        data = data,
-    }, Emit), ""
+	return setmetatable({
+		class = class,
+		id = id,
+		mode = mode,
+		key = key,
+		data = data,
+	}, Emit), ""
 end
 
 ---@alias EventType 'added'|'removed'
@@ -145,48 +145,48 @@ DeviceEvent.__index = DeviceEvent
 ---@return DeviceEvent?
 ---@return string error
 function new.DeviceEvent(event_type, class, id, meta, capabilities, ready_cond)
-    meta = meta or {}
-    capabilities = capabilities or {}
+	meta = meta or {}
+	capabilities = capabilities or {}
 
-    if event_type ~= 'added' and event_type ~= 'removed' then
-        return nil, "invalid event_type"
-    end
+	if event_type ~= 'added' and event_type ~= 'removed' then
+		return nil, "invalid event_type"
+	end
 
-    if type(class) ~= 'string' or class == '' then
-        return nil, "invalid class"
-    end
+	if type(class) ~= 'string' or class == '' then
+		return nil, "invalid class"
+	end
 
-    if type(id) ~= 'string' and type(id) ~= 'number' then
-        return nil, "invalid id"
-    end
+	if type(id) ~= 'string' and type(id) ~= 'number' then
+		return nil, "invalid id"
+	end
 
-    if type(meta) ~= 'table' then
-        return nil, "invalid meta"
-    end
+	if type(meta) ~= 'table' then
+		return nil, "invalid meta"
+	end
 
-    if type(capabilities) ~= 'table' then
-        return nil, "invalid capabilities"
-    end
-    for _, cap in ipairs(capabilities) do
-        if getmetatable(cap) ~= cap_types.Capability then
-            return nil, "invalid capability in capabilities"
-        end
-    end
+	if type(capabilities) ~= 'table' then
+		return nil, "invalid capabilities"
+	end
+	for _, cap in ipairs(capabilities) do
+		if getmetatable(cap) ~= cap_types.Capability then
+			return nil, "invalid capability in capabilities"
+		end
+	end
 
-    if ready_cond ~= nil and type(ready_cond.signal) ~= 'function' then
-        return nil, "invalid ready_cond"
-    end
+	if ready_cond ~= nil and type(ready_cond.signal) ~= 'function' then
+		return nil, "invalid ready_cond"
+	end
 
-    local ev = setmetatable({
-        event_type  = event_type,
-        class       = class,
-        id          = id,
-        meta        = meta,
-        capabilities = capabilities,
-        ready_cond  = ready_cond,
-    }, DeviceEvent)
+	local ev = setmetatable({
+		event_type  = event_type,
+		class       = class,
+		id          = id,
+		meta        = meta,
+		capabilities = capabilities,
+		ready_cond  = ready_cond,
+	}, DeviceEvent)
 
-    return ev, ""
+	return ev, ""
 end
 
 ---@class Device
@@ -205,37 +205,37 @@ Device.__index = Device
 ---@return Device?
 ---@return string error
 function new.Device(class, id, meta, capabilities)
-    meta = meta or {}
-    capabilities = capabilities or {}
+	meta = meta or {}
+	capabilities = capabilities or {}
 
-    if type(class) ~= 'string' or class == '' then
-        return nil, "invalid class"
-    end
+	if type(class) ~= 'string' or class == '' then
+		return nil, "invalid class"
+	end
 
-    if type(id) ~= 'string' and type(id) ~= 'number' then
-        return nil, "invalid id"
-    end
+	if type(id) ~= 'string' and type(id) ~= 'number' then
+		return nil, "invalid id"
+	end
 
-    if type(meta) ~= 'table' then
-        return nil, "invalid meta"
-    end
+	if type(meta) ~= 'table' then
+		return nil, "invalid meta"
+	end
 
-    if type(capabilities) ~= 'table' then
-        return nil, "invalid capabilities"
-    end
-    for _, cap in ipairs(capabilities) do
-        if getmetatable(cap) ~= cap_types.Capability then
-            return nil, "invalid capability in capabilities"
-        end
-    end
+	if type(capabilities) ~= 'table' then
+		return nil, "invalid capabilities"
+	end
+	for _, cap in ipairs(capabilities) do
+		if getmetatable(cap) ~= cap_types.Capability then
+			return nil, "invalid capability in capabilities"
+		end
+	end
 
-    local dev = setmetatable({
-        class = class,
-        id = id,
-        meta = meta,
-        capabilities = capabilities,
-    }, Device)
-    return dev, ""
+	local dev = setmetatable({
+		class = class,
+		id = id,
+		meta = meta,
+		capabilities = capabilities,
+	}, Device)
+	return dev, ""
 end
 
 -- Todo types:
@@ -266,37 +266,37 @@ UARTOpenReply.__index = UARTOpenReply
 ---@return UARTOpenReply?|nil
 ---@return string
 function new.UARTOpenReply(lease_id, session, path, baud, mode)
-    if type(lease_id) ~= 'string' or lease_id == '' then
-        return nil, 'invalid lease_id'
-    end
-    if session == nil then
-        return nil, 'missing session'
-    end
-    if type(path) ~= 'string' or path == '' then
-        return nil, 'invalid path'
-    end
-    if baud ~= nil and (type(baud) ~= 'number' or baud <= 0 or baud % 1 ~= 0) then
-        return nil, 'invalid baud'
-    end
-    if mode ~= nil and type(mode) ~= 'string' then
-        return nil, 'invalid mode'
-    end
+	if type(lease_id) ~= 'string' or lease_id == '' then
+		return nil, 'invalid lease_id'
+	end
+	if session == nil then
+		return nil, 'missing session'
+	end
+	if type(path) ~= 'string' or path == '' then
+		return nil, 'invalid path'
+	end
+	if baud ~= nil and (type(baud) ~= 'number' or baud <= 0 or baud % 1 ~= 0) then
+		return nil, 'invalid baud'
+	end
+	if mode ~= nil and type(mode) ~= 'string' then
+		return nil, 'invalid mode'
+	end
 
-    return setmetatable({
-        lease_id = lease_id,
-        session  = session,
-        path     = path,
-        baud     = baud,
-        mode     = mode,
-    }, UARTOpenReply), ''
+	return setmetatable({
+		lease_id = lease_id,
+		session  = session,
+		path     = path,
+		baud     = baud,
+		mode     = mode,
+	}, UARTOpenReply), ''
 end
 
 return {
-    ControlRequest = ControlRequest,
-    Reply = Reply,
-    Emit = Emit,
-    DeviceEvent = DeviceEvent,
-    Device = Device,
-    UARTOpenReply = UARTOpenReply,
-    new = new,
+	ControlRequest = ControlRequest,
+	Reply = Reply,
+	Emit = Emit,
+	DeviceEvent = DeviceEvent,
+	Device = Device,
+	UARTOpenReply = UARTOpenReply,
+	new = new,
 }

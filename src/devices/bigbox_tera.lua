@@ -1,18 +1,18 @@
 -- Big Box v0.9 device configuration
 
 return {
-    services = {
-        "log",
-        "config",
-        "hal",
-        "gsm",
-        "time",
-        "net",
-        "metrics",
-        "system",
-        "ui",
-        "wifi",
-        "mcu_bridge"
-        -- ... other services specific to this device version
-    }
+	services = {
+		"log",
+		"config",
+		"hal",
+		"gsm",
+		"time",
+		"net",
+		"metrics",
+		"system",
+		"ui",
+		"wifi",
+		"mcu_bridge"
+		-- ... other services specific to this device version
+	}
 }

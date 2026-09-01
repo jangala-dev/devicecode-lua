@@ -1,9 +1,9 @@
 return {
-  name = 'obs',
-  topic_groups = {
+	name = 'obs',
+	topic_groups = {
 
-    { label = 'obs', topic = { 'obs', '#' } },
-    { label = 'svc', topic = { 'svc', '#' } },
+		{ label = 'obs', topic = { 'obs', '#' } },
+		{ label = 'svc', topic = { 'svc', '#' } },
 
-  },
+	},
 }
