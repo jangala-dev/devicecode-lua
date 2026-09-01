@@ -1049,7 +1049,12 @@ function GsmModem:_apn_connect()
 
 	local gid1, gid1_err = modem_get_field(self.cap, 'gid1', REQUEST_TIMEOUT)
 	if gid1_err ~= "" then
-		return nil, "gid1: " .. gid1_err, DEFAULT_RETRY_TIMEOUT
+		self.svc:obs_log('warn', {
+			what = 'gid1_unavailable',
+			modem = self.name,
+			err = gid1_err,
+		})
+		gid1 = nil
 	end
 
 	-- Get ranked APNs
