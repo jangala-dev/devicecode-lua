@@ -30,8 +30,13 @@ local pulse = require "fibers.pulse"
 ---@field initialised boolean
 ---@field caps_applied boolean
 ---@field state_pulse Pulse
+---@field signal_config_pulse Pulse
 ---@field sim_inserted_pulse Pulse
 ---@field sim_state_ch Channel
+---@field field_observed_at table<string, number>
+---@field info_generation integer
+---@field card_state string?
+---@field signal_poll_interval number?
 ---@field log Logger
 local Modem = {}
 Modem.__index = Modem
@@ -51,6 +56,23 @@ local DEFAULT_STOP_TIMEOUT = 5
 local LISTEN_TRIGGER_INTERVAL = 1
 
 local CONTROL_Q_LEN = 8
+local MODEM_INFO_SCHEMA = 'devicecode.hal.modem.info/1'
+local MODEM_SIGNAL_SCHEMA = 'devicecode.hal.modem.signal/1'
+
+local STATIC_GROUPS = {
+    identity = true,
+    ports = true,
+}
+
+local SIGNAL_ACTIVE_STATES = {
+    registered = true,
+    connecting = true,
+    connected = true,
+}
+
+local function signal_polling_active(state)
+    return SIGNAL_ACTIVE_STATES[state] == true
+end
 
 local GROUP_FIELDS = {
     identity = {
@@ -230,6 +252,14 @@ end
 ---@param value any
 function Modem:_cache_group(group, value)
     self.cache:set(group, value)
+    local observed_at = fibers.now()
+    self.field_observed_at = self.field_observed_at or {}
+    for _, field in ipairs(GROUP_FIELDS[group] or {}) do
+        -- A timestamp means the field was observed, including when the backend
+        -- successfully observed that the field is absent. Failed groups do not
+        -- advance these timestamps, so consumers can preserve their last value.
+        self.field_observed_at[field] = observed_at
+    end
 end
 
 ---@param group string
@@ -494,7 +524,85 @@ function Modem:set_signal_update_freq(opts)
     if not ok then
         return return_error(err, 1)
     end
+    self.signal_poll_interval = opts.frequency
+    self.signal_config_pulse:signal()
     return true
+end
+
+--- Request a complete modem information refresh.
+---@return boolean ok
+---@return string reason
+function Modem:refresh_info()
+    self.state_pulse:signal()
+    return true, "refresh requested"
+end
+
+---@return boolean ok
+---@return string error
+function Modem:_poll_signal_once()
+    local access_techs, access_err = self.backend:read_access_techs()
+    if not access_techs then
+        return false, access_err
+    end
+
+    local signal, signal_err = self.backend:read_signal()
+    if not signal then
+        return false, signal_err
+    end
+
+    self:_cache_group('signal', signal)
+    self.field_observed_at.access_techs = fibers.now()
+
+    local cached_network = self.cache:get('network', math.huge)
+    if cached_network then
+        cached_network.access_techs = access_techs
+        self.cache:set('network', cached_network)
+    end
+
+    local emit_ok, emit_err = self:_emit_event('signal', {
+        schema = MODEM_SIGNAL_SCHEMA,
+        observed_at = fibers.now(),
+        access_techs = access_techs,
+        signal = signal.values,
+    })
+    if not emit_ok then
+        return false, emit_err
+    end
+    return true, ""
+end
+
+function Modem:signal_poller()
+    local seen = self.signal_config_pulse:version()
+    self.log:debug({ what = 'signal_poller_started', imei = self.imei })
+
+    fibers.current_scope():finally(function()
+        self.log:debug({ what = 'signal_poller_exiting', imei = self.imei })
+    end)
+
+    while true do
+        local interval = self.signal_poll_interval
+        local which, version
+        if interval then
+            which, version = fibers.perform(op.named_choice {
+                tick = sleep.sleep_op(interval),
+                config = self.signal_config_pulse:changed_op(seen),
+            })
+        else
+            which, version = 'config', self.signal_config_pulse:changed(seen)
+        end
+
+        if which == 'config' then
+            if not version then return end
+            seen = version
+        end
+
+        if signal_polling_active(self.card_state) then
+            local ok, err = self:_poll_signal_once()
+            if not ok then
+                self.log:debug({ what = 'signal_poll_failed', imei = self.imei, err = tostring(err) })
+            end
+        end
+    end
 end
 
 function Modem:emitter()
@@ -517,8 +625,11 @@ function Modem:emitter()
         sleep.sleep(timeout_buffer) -- we want to put some buffer time in to invalidate any cache
         self.log:debug({ what = 'emitter_dispatching', imei = self.imei })
 
+        local values = {}
+        local observed_at = {}
         for group_name, fields in pairs(GROUP_FIELDS) do
-            local snapshot, group_err = self:_get_group(group_name, timeout_buffer)
+            local timescale = STATIC_GROUPS[group_name] and math.huge or 0
+            local snapshot, group_err = self:_get_group(group_name, timescale)
             if group_err ~= "" then
                 if D_LOG_EMITTER then
                     self.log:warn({
@@ -531,7 +642,9 @@ function Modem:emitter()
             else
                 for _, field in ipairs(fields) do
                     local value = extract_group_field(snapshot, field)
+                    observed_at[field] = self.field_observed_at[field]
                     if value ~= nil then
+                        values[field] = value
                         local emit_ok, emit_err = self:_emit_meta(field, value)
                         if not emit_ok and D_LOG_EMITTER then
                             self.log:warn({
@@ -545,6 +658,17 @@ function Modem:emitter()
                 end
             end
         end
+
+        self.info_generation = self.info_generation + 1
+        local emit_ok, emit_err = self:_emit_state('info', {
+            schema = MODEM_INFO_SCHEMA,
+            generation = self.info_generation,
+            values = values,
+            observed_at = observed_at,
+        })
+        if not emit_ok then
+            self.log:warn({ what = 'info_snapshot_emit_failed', imei = self.imei, err = tostring(emit_err) })
+        end
     end
 end
 
@@ -556,6 +680,8 @@ function Modem:modem_lifecycle_monitor()
         ---@cast state_update ModemStateEvent
         self.log:debug({ what = 'state_change', imei = self.imei, from = state_update.from, to = state_update.to })
         local to_state = state_update and state_update.to or nil
+        self.card_state = to_state
+        self.signal_config_pulse:signal()
         if to_state == 'failed' or to_state == 'disabled' then
             self:_invalidate_dynamic()
         elseif to_state == 'locked' then
@@ -712,6 +838,7 @@ function Modem:start()
     self.scope:spawn(function() self:modem_lifecycle_monitor() end)
     self.scope:spawn(function() self:control_manager() end)
     self.scope:spawn(function() self:emitter() end)
+    self.scope:spawn(function() self:signal_poller() end)
 
     -- Signal initial pulse so emitter emits the initial state
     self.state_pulse:signal()
@@ -871,9 +998,14 @@ local function new(address, logger)
         log = logger,
         address = address,
         cache = cache_mod.new(math.huge, fibers.now, '.'),
+        field_observed_at = {},
+        info_generation = 0,
         initialised = false,  -- modem cannot apply capabilities until initialised
         caps_applied = false, -- modem cannot start until capabilities applied
         listening_for_sim = false,
+        card_state = nil,
+        signal_poll_interval = nil,
+        signal_config_pulse = pulse.new(),
         state_pulse = pulse.new(),
         sim_inserted_pulse = pulse.new(),
         sim_state_ch = channel.new(),
@@ -882,5 +1014,9 @@ local function new(address, logger)
 end
 
 return {
-    new = new
+    new = new,
+    _test = {
+        Modem = Modem,
+        signal_polling_active = signal_polling_active,
+    },
 }

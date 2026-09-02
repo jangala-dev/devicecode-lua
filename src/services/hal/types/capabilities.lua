@@ -96,6 +96,7 @@ function new.ModemCapability(id, control_ch)
         'connect',
         'disconnect',
         'listen_for_sim',
+        'refresh_info',
         'set_signal_update_freq',
     }
     return new.Capability('modem', id, control_ch, offerings)
