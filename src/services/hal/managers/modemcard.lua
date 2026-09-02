@@ -154,10 +154,16 @@ local function initialise_driver(address, driver, new_recovery, attempts, logger
         return driver
     end
 
-    fibers.spawn(function ()
-        local ok, err = driver:stop(STOP_TIMEOUT)
-        if not ok then logger:error({ what = "driver_stop_failed", address = address, err = err }) end
-    end)
+    local ok, err = driver:stop(STOP_TIMEOUT)
+    if not ok then
+        logger:error({
+            what = "driver_stop_failed",
+            address = address,
+            err = err,
+            retry = false
+        })
+        return nil
+    end
 
     local recovery_status, _, recovery_driver = scope.run(function()
         return new_recovery(address)
@@ -215,8 +221,12 @@ local function on_detection(address)
         return
     end
 
-    log:debug({ what = 'creating_modem', summary = string.format('creating modem %s', tostring(address)), address =
-    address })
+    log:debug({
+        what = 'creating_modem',
+        summary = string.format('creating modem %s', tostring(address)),
+        address =
+            address
+    })
 
     local driver, drv_err = modem_driver.new(address, log:child({ modem = address }))
     if not driver then
