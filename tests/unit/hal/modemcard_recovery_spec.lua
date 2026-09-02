@@ -1,3 +1,4 @@
+local fibers = require 'fibers'
 local attempts_counter = require 'services.hal.managers.modemcard.attempts_counter'
 local modemcard = require 'services.hal.managers.modemcard'
 
@@ -31,6 +32,10 @@ local function failed_driver(init_err)
         return init_err or 'missing required modem ports'
     end
 
+    function driver:stop()
+        return true, ''
+    end
+
     return driver
 end
 
@@ -53,17 +58,20 @@ local function run_failure(attempts, options)
         return true
     end
 
-    local result = modemcard._test.initialise_driver(
-        options.address,
-        failed_driver(options.init_err),
-        function(address)
-            recovery_calls = recovery_calls + 1
-            recovery_address = address
-            return recovery
-        end,
-        attempts,
-        logger
-    )
+    local result
+    fibers.run(function()
+        result = modemcard._test.initialise_driver(
+            options.address,
+            failed_driver(options.init_err),
+            function(address)
+                recovery_calls = recovery_calls + 1
+                recovery_address = address
+                return recovery
+            end,
+            attempts,
+            logger
+        )
+    end)
 
     return {
         result = result,
@@ -171,6 +179,29 @@ function tests.test_device_lookup_failure_does_not_consume_attempt()
     eq(#logger.errors, 1)
     eq(logger.errors[1].what, 'init_driver_failed')
     eq(logger.errors[1].retry, false)
+end
+
+function tests.test_recovery_driver_creation_failure_is_contained()
+    local attempts = attempts_counter.new(3)
+    local logger = new_logger()
+    local result
+    fibers.run(function()
+        result = modemcard._test.initialise_driver(
+            '1',
+            failed_driver(),
+            function()
+                error('recovery constructor failed')
+            end,
+            attempts,
+            logger
+        )
+    end)
+
+    eq(result, nil)
+    eq(#logger.errors, 1)
+    eq(logger.errors[1].what, 'create_recovery_driver_failed')
+    eq(logger.errors[1].retry, false)
+    assert(logger.errors[1].err:find('recovery constructor failed', 1, true))
 end
 
 function tests.test_reset_failure_is_terminal_and_not_logged_as_retrying()

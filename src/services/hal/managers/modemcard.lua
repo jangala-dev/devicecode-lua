@@ -8,6 +8,7 @@ local attempts_counter = require "services.hal.managers.modemcard.attempts_count
 -- Fiber modules
 local fibers = require "fibers"
 local op = require "fibers.op"
+local scope = require "fibers.scope"
 local channel = require "fibers.channel"
 local sleep = require "fibers.sleep"
 local cond = require "fibers.cond"
@@ -153,7 +154,25 @@ local function initialise_driver(address, driver, new_recovery, attempts, logger
         return driver
     end
 
-    local recovery_driver = new_recovery(address)
+    fibers.spawn(function ()
+        local ok, err = driver:stop(STOP_TIMEOUT)
+        if not ok then logger:error({ what = "driver_stop_failed", address = address, err = err }) end
+    end)
+
+    local recovery_status, _, recovery_driver = scope.run(function()
+        return new_recovery(address)
+    end)
+    if recovery_status ~= 'ok' then
+        logger:error({
+            what = 'create_recovery_driver_failed',
+            address = address,
+            err = tostring(recovery_driver),
+            init_err = init_err,
+            retry = false,
+        })
+        return nil
+    end
+
     local device, dev_err = recovery_driver:get_device()
     if dev_err ~= "" then
         logger:error({ what = 'init_driver_failed', address = address, err = init_err, retry = false })
@@ -162,6 +181,12 @@ local function initialise_driver(address, driver, new_recovery, attempts, logger
 
     local should_reset = attempts:record_failure(device)
     if not should_reset then
+        logger:error({
+            what = 'driver_init_attempts_exhaused',
+            address = address,
+            err = "The modem card has hit the maximum initialisation attempts",
+            retry = false
+        })
         return nil
     end
 
