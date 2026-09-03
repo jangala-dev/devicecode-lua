@@ -50,6 +50,8 @@ local files = {
 	"unit.hal.modem_linux_mm_spec",
 	"unit.hal.modem_types_spec",
 	"unit.hal.modem_qmi_spec",
+	"unit.hal.modem_recovery_backend_spec",
+	"unit.hal.modemcard_recovery_spec",
 	"unit.hal.openwrt_network_observer_spec",
 	"unit.hal.openwrt_network_provider_advanced_spec",
 	"unit.hal.common_uci_compat_spec",
