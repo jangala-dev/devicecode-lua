@@ -883,4 +883,68 @@ function T.network_manager_control_loops_start_after_driver_configured()
 	assert(apply_block:find('start_control_loops', 1, true), 'network apply should start control loops after driver configuration')
 end
 
+local function check_late_reply(mode)
+	runfibers.run(function(scope)
+		local entered, release = channel.new(1), channel.new()
+		local mgr = new_capability_manager{
+			name = 'late_reply_mgr',
+			cap_class = 'late_reply_cap',
+			cap_id = 'main',
+			apply_mode = 'op',
+			reply_fn = function(req)
+				if req.opts.value == 'slow' then
+					entered:put(true)
+					release:get()
+				end
+				return true, req.opts.value
+			end,
+		}
+
+		with_real_hal(scope, {
+			['services.hal.managers.filesystem'] = new_bootstrap_filesystem_manager(),
+			['services.hal.managers.late_reply_mgr'] = mgr,
+		}, function(bus)
+			bus:connect():retain({ 'cfg', 'hal' }, {
+				data = { schema = 'devicecode.config/hal/1', late_reply_mgr = {} },
+			})
+			local listener = cap_sdk.new_curated_cap_listener(bus:connect(), 'late_reply_cap', 'main')
+			local ref, wait_err = fibers.perform(listener:wait_for_cap_op())
+			assert(ref, tostring(wait_err))
+
+			local result = channel.new(1)
+			assert(scope:spawn(function()
+				local reply, err = fibers.perform(ref:call_control_op('echo', { value = 'slow' }, {
+					timeout = mode == 'caller' and 0.03 or 0.5,
+				}))
+				result:put({ reply = reply, err = err })
+			end))
+			assert(entered:get(), 'slow request must reach the driver before timing out')
+			local first = result:get()
+			if mode == 'caller' then
+				assert(first.reply == nil and tostring(first.err):match('timeout'))
+			else
+				assert(first.reply and first.reply.ok == false)
+				assert(tostring(first.reply.reason):match('timeout'))
+			end
+
+			-- Finish the driver operation only after HAL has stopped awaiting its
+			-- reply. A rendezvous reply channel would wedge the serial worker here.
+			release:put(true)
+			local reply, err = fibers.perform(ref:call_control_op('echo', { value = 'next' }, { timeout = 0.5 }))
+			assert(reply and reply.ok == true, 'late reply blocked next request: ' .. tostring(err or (reply and reply.reason)))
+			assert(reply.reason == 'next', 'late reply must not reach the next caller')
+			assert(#mgr.calls == 2)
+			listener:close()
+		end, { control_timeout_s = mode == 'hal' and 0.03 or 0.5 })
+	end)
+end
+
+function T.late_reply_after_caller_timeout_does_not_block_next_request()
+	check_late_reply('caller')
+end
+
+function T.late_reply_after_hal_timeout_does_not_block_next_request()
+	check_late_reply('hal')
+end
+
 return T
