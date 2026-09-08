@@ -805,6 +805,19 @@
             }
           }
         },
+        "mcu": {
+          "class": "member",
+          "subtype": "mcu",
+          "role": "power-sensor-controller",
+          "member": "mcu",
+          "facts": {
+            "power_battery": ["raw", "member", "mcu", "state", "power", "battery"],
+            "power_charger": ["raw", "member", "mcu", "state", "power", "charger"],
+            "environment_temperature": ["raw", "member", "mcu", "state", "environment", "temperature"],
+            "environment_humidity": ["raw", "member", "mcu", "state", "environment", "humidity"],
+            "runtime_memory": ["raw", "member", "mcu", "state", "runtime", "memory"]
+          }
+        },
         "switch-main": {
           "kind": "switch",
           "module": "switch",
@@ -1177,10 +1190,7 @@
           "protocol": {
             "kind": "legacy_mcu_metrics_v1",
             "args": {
-              "namespace_prefix": [
-                "mcu"
-              ],
-              "publish_service": "mcu",
+              "member": "mcu",
               "change_only": true,
               "unsigned_underflow_compat": true,
               "error_log_initial_s": 1,

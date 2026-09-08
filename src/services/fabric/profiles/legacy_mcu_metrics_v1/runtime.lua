@@ -12,6 +12,7 @@ local resource    = require 'devicecode.support.resource'
 local bus_cleanup = require 'devicecode.support.bus_cleanup'
 local tablex      = require 'shared.table'
 local processor_mod = require 'services.fabric.profiles.legacy_mcu_metrics_v1.processor'
+local model_mod = require 'services.fabric.profiles.legacy_mcu_metrics_v1.state_model'
 
 local M = {}
 
@@ -47,20 +48,23 @@ local function publish_snapshot(state_tx, params, processor, state, last_error)
 	if ok ~= true then error(err or 'legacy MCU metrics state publish failed', 0) end
 end
 
-local function publish_metric(conn, args, metric_name, value, namespace)
-	return bus_cleanup.retain(conn, {
-		'obs', 'v1', args.publish_service, 'metric', metric_name,
-	}, {
-		value = value,
-		namespace = namespace,
-	})
-end
-
-local function run_reader(_, params, conn, state_tx)
+local function run_reader(scope, params, conn, state_tx)
 	local protocol = params.protocol or {}
 	local args = protocol.args or {}
+	-- Direct callers (including low-level link tests) may bypass config
+	-- compilation, so preserve the profile default here as well.
+	local member = args.member or 'mcu'
 	local processor = M.new_processor(args)
 	processor.profile_kind = protocol.kind
+	local retained = {}
+	scope:finally(function ()
+		local errors = {}
+		for fact in pairs(retained) do
+			local ok, err = bus_cleanup.unretain(conn, model_mod.topic(member, fact))
+			if ok ~= true then errors[#errors + 1] = tostring(err) end
+		end
+		if #errors > 0 then error(table.concat(errors, '; '), 0) end
+	end)
 	local cooldown = args.error_log_initial_s or 1
 	local cooldown_max = args.error_log_max_s or 60
 	local next_error_log_at = -math.huge
@@ -79,8 +83,11 @@ local function run_reader(_, params, conn, state_tx)
 		end
 
 		processor.last_rx_at = fibers.now()
-		local ok, err = M.process_line(processor, line, function(metric_name, value, namespace)
-			return publish_metric(conn, args, metric_name, value, namespace)
+		local ok, err = M.process_line(processor, line, function(fact, payload)
+			local published, publish_err = bus_cleanup.retain(conn, model_mod.topic(member, fact), payload)
+			if published ~= true then error(publish_err or 'legacy MCU fact publish failed', 0) end
+			retained[fact] = true
+			return true
 		end)
 		if ok ~= true then
 			local now = fibers.now()

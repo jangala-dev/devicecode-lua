@@ -159,26 +159,40 @@ function tests.test_composed_link_transport_open_failure_fails_link_scope_before
 end
 
 
-function tests.test_legacy_mcu_protocol_runs_as_a_fabric_link_and_publishes_metrics()
+local function check_legacy_link(mode)
 	fibers.run(function ()
 		local lines = {
-			'{"power/battery/internal/ibat":4294967176}',
-			'{"power/battery/internal/ibat":4294967176}',
+			'{"power/battery/internal/ibat":4294967176,"power/battery/internal/vbat":12400,'
+				.. '"power/charger/internal/state/bat_missing":0,"power/charger/internal/state/bat_short":0}',
 		}
+		lines[2] = lines[1]
 		local next_line = 0
 		local terminated = false
+		local link_scope
 		local retained = {}
+		local state_retained = {}
+		local unretained = {}
 		local conn = {
 			retain = function (_, topic, payload)
 				if topic[1] == 'obs' and topic[2] == 'v1' and topic[4] == 'metric' then
 					retained[#retained + 1] = { topic = topic, payload = payload }
+				elseif topic[1] == 'raw' and topic[2] == 'member' then
+					state_retained[#state_retained + 1] = { topic = topic, payload = payload }
 				end
 				return true, nil
+			end,
+			unretain = function (_, topic)
+				unretained[table.concat(topic, '/')] = true
+				return true
 			end,
 		}
 		local raw_transport = {
 			read_line_op = function ()
 				next_line = next_line + 1
+				if next_line == 3 then
+					if mode == 'read_error' then error('read failed') end
+					if mode == 'cancel' then link_scope:cancel('test cancelled') end
+				end
 				return fibers.always(lines[next_line], lines[next_line] and nil or 'eof')
 			end,
 			write_line_op = function () return fibers.always(true, nil) end,
@@ -186,6 +200,7 @@ function tests.test_legacy_mcu_protocol_runs_as_a_fabric_link_and_publishes_metr
 		}
 
 		local st, rep, result = fibers.run_scope(function (scope)
+			link_scope = scope
 			return fabric.run_link(scope, {
 				link_id = 'legacy-mcu-uart0',
 				link_generation = 1,
@@ -194,11 +209,10 @@ function tests.test_legacy_mcu_protocol_runs_as_a_fabric_link_and_publishes_metr
 				protocol = {
 					kind = 'legacy_mcu_metrics_v1',
 					args = {
-					namespace_prefix = { 'mcu' },
-					publish_service = 'mcu',
-					change_only = true,
-					unsigned_underflow_compat = true,
-					error_log_initial_s = 1,
+						member = 'mcu',
+						change_only = true,
+						unsigned_underflow_compat = true,
+						error_log_initial_s = 1,
 						error_log_max_s = 60,
 					},
 				},
@@ -209,17 +223,39 @@ function tests.test_legacy_mcu_protocol_runs_as_a_fabric_link_and_publishes_metr
 			})
 		end)
 
-		assert_eq(st, 'ok')
-		assert_eq(#rep.extra_errors, 0)
-		assert_not_nil(result)
-		assert_eq(result.snapshot.components.legacy_metrics_reader.status, 'ok')
-		assert_eq(#retained, 1)
-		assert_eq(retained[1].topic[3], 'mcu')
-		assert_eq(retained[1].topic[5], 'ibat')
-		assert_eq(retained[1].payload.value, -120)
-		assert_eq(table.concat(retained[1].payload.namespace, '/'), 'mcu/power/battery/internal/ibat')
+		if mode == 'eof' then
+			assert_eq(st, 'ok')
+			assert_eq(#rep.extra_errors, 0)
+			assert_not_nil(result)
+			assert_eq(result.snapshot.components.legacy_metrics_reader.status, 'ok')
+		elseif mode == 'cancel' then
+			assert_eq(st, 'cancelled')
+		else
+			assert_eq(st, 'failed')
+		end
+		assert_eq(#retained, 0)
+		assert_eq(#state_retained, 2)
+		assert_eq(table.concat(state_retained[1].topic, '/'), 'raw/member/mcu/state/power/battery')
+		assert_eq(state_retained[1].payload.ibat_mA, -120)
+		assert_eq(state_retained[1].payload.pack_mV, 12400)
+		assert_true(state_retained[1].payload.measurements_valid)
+		assert_eq(state_retained[2].payload.state_bits, 0)
+		assert_true(unretained['raw/member/mcu/state/power/battery'])
+		assert_true(unretained['raw/member/mcu/state/power/charger'])
 		assert_true(terminated)
 	end)
+end
+
+function tests.test_legacy_link_publishes_only_canonical_state_and_cleans_up_on_eof()
+	check_legacy_link('eof')
+end
+
+function tests.test_legacy_link_cleans_up_retained_facts_on_read_failure()
+	check_legacy_link('read_error')
+end
+
+function tests.test_legacy_link_cleans_up_retained_facts_on_cancellation()
+	check_legacy_link('cancel')
 end
 
 return tests
