@@ -59,6 +59,7 @@ local files = {
 	'unit.fabric.test_model',
 	'unit.fabric.test_config',
 	'unit.fabric.test_legacy_mcu_metrics',
+	'unit.fabric.test_legacy_mcu_state',
 	'unit.fabric.test_dependencies',
 	'unit.fabric.test_session',
 	'unit.fabric.test_link',

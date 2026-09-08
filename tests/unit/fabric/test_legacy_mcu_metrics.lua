@@ -1,90 +1,83 @@
 local legacy = require 'services.fabric.profiles.legacy_mcu_metrics_v1.processor'
-
+local cjson = require 'cjson.safe'
+local tablex = require 'shared.table'
 local T = {}
 
-local function eq(a, b, msg)
-	if a ~= b then error(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a)), 2) end
+local function processor(args)
+	return legacy.new_processor(args or { change_only = true, unsigned_underflow_compat = true })
 end
 
-local function protocol(overrides)
-	local out = {
-		kind = 'legacy_mcu_metrics_v1',
-		namespace_prefix = { 'mcu' },
-		publish_service = 'mcu',
-		change_only = true,
-		unsigned_underflow_compat = true,
-		error_log_initial_s = 1,
-		error_log_max_s = 60,
+local function feed(p, values, out)
+	return legacy.process_line(p, assert(cjson.encode(values)), function(fact, payload)
+		out[#out + 1] = { fact = fact, payload = payload }
+		return true
+	end)
+end
+
+function T.publishes_one_complete_fact_per_line_and_filters_unchanged_facts()
+	local p, out = processor(), {}
+	local values = {
+		['power/charger/internal/vin'] = 24000,
+		['power/charger/internal/vsys'] = 23900,
+		['power/charger/internal/iin'] = 750,
+		['power/charger/internal/system/vin_gt_vbat'] = 1,
 	}
-	for k, v in pairs(overrides or {}) do out[k] = v end
-	return out
+	assert(feed(p, values, out))
+	assert(#out == 1 and out[1].fact == 'power/charger')
+	assert(out[1].payload.vin_mV == 24000 and out[1].payload.iin_mA == 750)
+	assert(out[1].payload.system_bits == 4)
+	assert(feed(p, values, out))
+	assert(#out == 1 and p.unchanged == 1)
+	values['power/charger/internal/iin'] = 500
+	assert(feed(p, values, out))
+	assert(#out == 2 and out[2].payload.iin_mA == 500)
+	assert(out[1].payload.iin_mA == 750, 'previous retained payload was mutated')
 end
 
-function T.processes_slash_keys_as_current_metrics_with_namespace()
-	local p = legacy.new_processor(protocol())
-	local emitted = {}
-	local ok, err = legacy.process_line(p,
-		'  {"power/battery/internal/vbat":12740,"env/temperature/core":24.3}  ',
-		function(name, value, namespace)
-			emitted[name] = { value = value, namespace = table.concat(namespace, '.') }
-			return true
-		end)
-	assert(ok, tostring(err))
-	eq(emitted.vbat.value, 12740)
-	eq(emitted.vbat.namespace, 'mcu.power.battery.internal.vbat')
-	eq(emitted.core.value, 24.3)
-	eq(emitted.core.namespace, 'mcu.env.temperature.core')
-	eq(p.lines, 1)
-	eq(p.decoded, 1)
-	eq(p.published, 2)
+function T.preserves_large_unsigned_measurements_and_only_unwraps_signed_fields()
+	local p, out = processor(), {}
+	assert(feed(p, { ['sys/mem/alloc'] = 2000000 }, out))
+	assert(out[1].payload.alloc_bytes == 2000000)
+	assert(feed(p, { ['power/charger/internal/iin'] = 4294967176 }, out))
+	assert(out[2].payload.iin_mA == -120)
+	assert(feed(p, { ['power/charger/internal/iin'] = -120 }, out))
+	assert(#out == 2, 'signed and wrapped representations must compare equal')
+	p = processor({ unsigned_underflow_compat = false })
+	assert(feed(p, { ['power/charger/internal/iin'] = 4294967176 }, out))
+	assert(out[3].payload.iin_mA == 4294967176)
 end
 
-function T.suppresses_unchanged_values_and_publishes_changes()
-	local p = legacy.new_processor(protocol())
-	local emitted = {}
-	local function emit(name, value)
-		emitted[#emitted + 1] = { name = name, value = value }
-		return true
+function T.retries_failed_publication_without_committing_the_line()
+	local p, out = processor(), {}
+	local line = '{"sys/mem/alloc":100}'
+	assert(not legacy.process_line(p, line, function() return nil, 'rejected' end))
+	assert(next(p.model.facts) == nil and next(p.cache) == nil)
+	assert(feed(p, { ['sys/mem/alloc'] = 100 }, out))
+	assert(#out == 1 and out[1].payload.alloc_bytes == 100)
+end
+
+function T.rejects_bad_lines_atomically_and_ignores_unknown_keys()
+	local p, out = processor(), {}
+	assert(feed(p, { ['sys/mem/alloc'] = 100 }, out))
+	local before = tablex.deep_copy(p.model)
+	for _, line in ipairs({ '{bad', '42', '[]', 'null',
+		'{"sys/mem/alloc":200,"power/charger/internal/iin":"bad"}',
+		'{"power/charger/internal/state/bat_missing":2}',
+	}) do
+		assert(not legacy.process_line(p, line, function() error('invalid input published') end))
+		assert(tablex.deep_equal(p.model, before))
 	end
-	assert(legacy.process_line(p, '{"sys/mem/alloc":100}', emit))
-	assert(legacy.process_line(p, '{"sys/mem/alloc":100}', emit))
-	assert(legacy.process_line(p, '{"sys/mem/alloc":101}', emit))
-	eq(#emitted, 2)
-	eq(emitted[1].value, 100)
-	eq(emitted[2].value, 101)
-	eq(p.unchanged, 1)
+	assert(p.decode_errors == 6)
+	assert(feed(p, { unknown = 42 }, out))
+	assert(#out == 1)
 end
 
-function T.reproduces_legacy_unsigned_underflow_conversion()
-	local p = legacy.new_processor(protocol())
-	local value
-	assert(legacy.process_line(p, '{"power/battery/internal/ibat":4294967176}', function(_, v)
-		value = v
-		return true
-	end))
-	eq(value, -120)
-end
-
-function T.can_disable_underflow_compatibility()
-	local p = legacy.new_processor(protocol({ unsigned_underflow_compat = false }))
-	local value
-	assert(legacy.process_line(p, '{"counter":4294967176}', function(_, v)
-		value = v
-		return true
-	end))
-	eq(value, 4294967176)
-end
-
-function T.rejects_malformed_and_non_object_json_without_emitting()
-	local p = legacy.new_processor(protocol())
-	local calls = 0
-	local function emit() calls = calls + 1; return true end
-	local ok1 = legacy.process_line(p, '{bad', emit)
-	local ok2 = legacy.process_line(p, '42', emit)
-	eq(ok1, nil)
-	eq(ok2, nil)
-	eq(calls, 0)
-	eq(p.decode_errors, 2)
+function T.can_republish_unchanged_facts_without_republishing_unrelated_facts()
+	local p, out = processor({ change_only = false }), {}
+	assert(feed(p, { ['sys/mem/alloc'] = 100 }, out))
+	assert(feed(p, { ['env/temperature/core'] = 243 }, out))
+	assert(feed(p, { ['env/temperature/core'] = 243 }, out))
+	assert(#out == 3 and out[3].fact == 'environment/temperature')
 end
 
 return T
