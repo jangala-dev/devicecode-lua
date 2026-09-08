@@ -1,4 +1,5 @@
--- Original Big Box MCU newline-JSON metric profile.
+-- Original Big Box MCU newline-JSON to canonical retained-state profile.
+-- The historical profile name is kept for link configuration compatibility.
 --
 -- This module is deliberately pure. Its Fiber-backed runtime is loaded only
 -- when a link runs, keeping configuration compilation dependency-free.
@@ -16,19 +17,17 @@ local M = {
 }
 
 local DEFAULTS = {
-	namespace_prefix = { 'mcu' },
-	publish_service = 'mcu',
 	change_only = true,
 	unsigned_underflow_compat = true,
+	member = 'mcu',
 	error_log_initial_s = 1.0,
 	error_log_max_s = 60.0,
 }
 
 local ALLOWED_ARGS = {
-	namespace_prefix = true,
-	publish_service = true,
 	change_only = true,
 	unsigned_underflow_compat = true,
+	member = true,
 	error_log_initial_s = true,
 	error_log_max_s = true,
 }
@@ -57,27 +56,6 @@ local function non_empty_string(value, path, default)
 	return value, nil
 end
 
-local function namespace(value)
-	value = value or DEFAULTS.namespace_prefix
-	if type(value) ~= 'table' then
-		return nil, 'protocol.args.namespace_prefix must be a dense topic array'
-	end
-	local out, count = {}, #value
-	for i = 1, count do
-		local token = value[i]
-		if (type(token) ~= 'string' or token == '') and type(token) ~= 'number' then
-			return nil, 'protocol.args.namespace_prefix[' .. tostring(i) .. '] must be string or number'
-		end
-		out[i] = token
-	end
-	for key in pairs(value) do
-		if type(key) ~= 'number' or key < 1 or key % 1 ~= 0 or key > count then
-			return nil, 'protocol.args.namespace_prefix must be a dense topic array'
-		end
-	end
-	return out, nil
-end
-
 function M.compile(args)
 	if args == nil then args = {} end
 	if type(args) ~= 'table' then return nil, 'protocol.args must be a table' end
@@ -87,11 +65,6 @@ function M.compile(args)
 		end
 	end
 
-	local prefix, e1 = namespace(args.namespace_prefix)
-	if e1 then return nil, e1 end
-	local service, e2 = non_empty_string(args.publish_service,
-		'protocol.args.publish_service', DEFAULTS.publish_service)
-	if e2 then return nil, e2 end
 	local change_only, e3 = boolean(args.change_only,
 		'protocol.args.change_only', DEFAULTS.change_only)
 	if e3 then return nil, e3 end
@@ -107,12 +80,13 @@ function M.compile(args)
 	if max_s < initial_s then
 		return nil, 'protocol.args.error_log_max_s must be >= error_log_initial_s'
 	end
+	local member, e7 = non_empty_string(args.member, 'protocol.args.member', DEFAULTS.member)
+	if e7 then return nil, e7 end
 
 	return {
-		namespace_prefix = prefix,
-		publish_service = service,
 		change_only = change_only,
 		unsigned_underflow_compat = underflow,
+		member = member,
 		error_log_initial_s = initial_s,
 		error_log_max_s = max_s,
 	}, nil

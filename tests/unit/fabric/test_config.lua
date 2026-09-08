@@ -282,8 +282,7 @@ function T.compile_accepts_legacy_mcu_metrics_profile_args()
 				protocol = {
 					kind = 'legacy_mcu_metrics_v1',
 					args = {
-						namespace_prefix = { 'mcu' },
-						publish_service = 'mcu',
+						member = 'mcu',
 						change_only = true,
 						unsigned_underflow_compat = true,
 						error_log_initial_s = 1,
@@ -303,12 +302,20 @@ function T.compile_accepts_legacy_mcu_metrics_profile_args()
 	assert(compiled ~= nil, tostring(err))
 	local link = compiled.links[1]
 	assert(link.protocol.kind == 'legacy_mcu_metrics_v1')
-	assert(link.protocol.args.namespace_prefix[1] == 'mcu')
-	assert(link.protocol.args.publish_service == 'mcu')
+	assert(link.protocol.args.member == 'mcu')
 	assert(link.protocol.capabilities.transfer == false)
 	assert(link.session == nil)
 	assert(link.bridge == nil)
 	assert(link.transfer == nil)
+end
+
+function T.compile_rejects_obsolete_legacy_metric_routing_args()
+	local profile = require 'services.fabric.profiles.legacy_mcu_metrics_v1.init'
+	for _, name in ipairs({ 'namespace_prefix', 'publish_service' }) do
+		local compiled, err = profile.compile({ [name] = 'mcu' })
+		assert(compiled == nil)
+		assert(err:find(name, 1, true))
+	end
 end
 
 function T.compile_profile_owns_legacy_defaults()
@@ -326,6 +333,7 @@ function T.compile_profile_owns_legacy_defaults()
 	local args = compiled.links[1].protocol.args
 	assert(args.change_only == true)
 	assert(args.unsigned_underflow_compat == true)
+	assert(args.member == 'mcu')
 	assert(args.error_log_initial_s == 1)
 	assert(args.error_log_max_s == 60)
 end
@@ -465,6 +473,8 @@ function T.bigbox_v1_cm_selects_the_legacy_mcu_metrics_profile()
 	assert(link.reader == nil)
 	assert(link.session == nil)
 	assert(link.bridge == nil)
+	assert(doc.device.data.components.mcu.facts.power_battery[1] == 'raw')
+	assert(doc.device.data.components.mcu.facts.power_charger[6] == 'charger')
 end
 
 function T.bigbox_v1_cm_2_explicitly_selects_standard_profile()

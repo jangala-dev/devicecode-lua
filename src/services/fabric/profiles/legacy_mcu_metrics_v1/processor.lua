@@ -1,87 +1,45 @@
--- Pure decoder and change filter for the original Big Box MCU JSONL output.
-
+-- Decode each legacy JSON line into complete canonical retained facts.
 local cjson = require 'cjson.safe'
+local tablex = require 'shared.table'
+local model = require 'services.fabric.profiles.legacy_mcu_metrics_v1.state_model'
 
 local M = {}
 
-local UINT32 = 4294967296
-local UNDERFLOW_THRESHOLD = 1000000
-
-local function trim(s)
-	return tostring(s):gsub('^%s*(.-)%s*$', '%1')
-end
-
-local function metric_route(protocol, key)
-	local namespace = {}
-	for i = 1, #(protocol.namespace_prefix or {}) do
-		namespace[#namespace + 1] = protocol.namespace_prefix[i]
-	end
-	local metric_name
-	for segment in tostring(key):gmatch('[^/]+') do
-		namespace[#namespace + 1] = segment
-		metric_name = segment
-	end
-	if metric_name == nil then return nil, nil end
-	return metric_name, namespace
-end
-
-local function compatible_value(protocol, value)
-	if protocol.unsigned_underflow_compat == true
-		and type(value) == 'number'
-		and value > UNDERFLOW_THRESHOLD
-	then
-		return value - UINT32
-	end
-	return value
-end
-
 function M.new_processor(protocol)
 	return {
-		protocol = protocol or {},
-		cache = {},
-		lines = 0,
-		decoded = 0,
-		decode_errors = 0,
-		published = 0,
-		unchanged = 0,
+		protocol = protocol or {}, model = model.new(), cache = {},
+		lines = 0, decoded = 0, decode_errors = 0, published = 0, unchanged = 0,
 	}
 end
 
 function M.process_line(processor, line, emit)
 	if type(processor) ~= 'table' then return nil, 'processor must be a table' end
 	if type(emit) ~= 'function' then return nil, 'emit must be a function' end
-	processor.lines = (processor.lines or 0) + 1
-
-	local json_string = trim(line)
-	local decoded, err = cjson.decode(json_string)
-	if decoded == nil then
-		processor.decode_errors = (processor.decode_errors or 0) + 1
-		return nil, tostring(err or 'invalid JSON')
+	processor.lines = processor.lines + 1
+	local decoded, err = cjson.decode(line)
+	if type(decoded) ~= 'table' or not line:match('^%s*{') then
+		processor.decode_errors = processor.decode_errors + 1
+		return nil, err or 'legacy MCU JSON line must decode to an object'
 	end
-	if type(decoded) ~= 'table' then
-		processor.decode_errors = (processor.decode_errors or 0) + 1
-		return nil, 'legacy MCU JSON line must decode to an object'
+	local next_model, touched = model.update(processor.model, decoded, processor.protocol.unsigned_underflow_compat)
+	if not next_model then
+		processor.decode_errors = processor.decode_errors + 1
+		return nil, touched
 	end
-	processor.decoded = (processor.decoded or 0) + 1
-
-	for key, raw_value in pairs(decoded) do
-		if type(key) == 'string' then
-			local value = compatible_value(processor.protocol, raw_value)
-			local changed = processor.protocol.change_only ~= true or processor.cache[key] ~= value
-			if changed then
-				local metric_name, namespace = metric_route(processor.protocol, key)
-				if metric_name ~= nil then
-					local ok, emit_err = emit(metric_name, value, namespace)
-					if ok ~= true then return nil, emit_err or 'legacy MCU metric publish failed' end
-					processor.cache[key] = value
-					processor.published = (processor.published or 0) + 1
-				end
-			else
-				processor.unchanged = (processor.unchanged or 0) + 1
-			end
+	processor.decoded = processor.decoded + 1
+	local facts = model.project(next_model)
+	for _, fact in ipairs(tablex.sorted_keys(touched)) do
+		local payload = facts[fact]
+		if processor.protocol.change_only ~= true or not tablex.deep_equal(payload, processor.cache[fact]) then
+			local ok, emit_err = emit(fact, tablex.deep_copy(payload))
+			if ok ~= true then return nil, emit_err or 'legacy MCU fact publish failed' end
+			processor.published = processor.published + 1
+		else
+			processor.unchanged = processor.unchanged + 1
 		end
 	end
-	return true, nil
+	processor.model, processor.cache = next_model, facts
+	return true
 end
 
 return M
