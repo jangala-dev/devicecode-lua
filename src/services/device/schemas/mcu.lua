@@ -110,6 +110,37 @@ local function decode_bits(value, spec)
 	return out
 end
 
+local function charger_flags(raw, group, spec)
+	if raw[group .. '_bits'] ~= nil then
+		return decode_bits(raw[group .. '_bits'], spec)
+	end
+	-- The original MCU publishes named 0/1 flags instead of bitfields.
+	local out = {}
+	for name, value in pairs(table_or_empty(raw[group])) do
+		out[name] = value == true or value == 1
+	end
+	return out
+end
+
+local function signed_current(value)
+	-- Accept uint32 representations of the MCU's signed int32 mA fields.
+	-- Restrict compatibility to currents and the actual uint32 wrap range.
+	if type(value) == 'number' and value >= 2147483648
+		and value < 4294967296 and value % 1 == 0 then
+		return value - 4294967296
+	end
+	return value
+end
+
+function M.normalise_battery(raw)
+	local out = copy_named(raw, {
+		'presence', 'measurements_valid', 'reason', 'pack_mV', 'per_cell_mV',
+		'ibat_mA', 'temp_mC', 'bsr_uohm_per_cell', 'seq', 'uptime_ms',
+	})
+	out.ibat_mA = signed_current(out.ibat_mA)
+	return out
+end
+
 function M.normalise_software(raw)
 	raw = table_or_empty(raw)
 	return {
@@ -149,9 +180,10 @@ function M.normalise_charger(raw)
 		'state_bits', 'status_bits', 'system_bits',
 		'seq', 'uptime_ms',
 	})
-	out.state = decode_bits(raw.state_bits, charger_state_bits)
-	out.status = decode_bits(raw.status_bits, charger_status_bits)
-	out.system = decode_bits(raw.system_bits, charger_system_bits)
+	out.iin_mA = signed_current(out.iin_mA)
+	out.state = charger_flags(raw, 'state', charger_state_bits)
+	out.status = charger_flags(raw, 'status', charger_status_bits)
+	out.system = charger_flags(raw, 'system', charger_system_bits)
 	return out
 end
 
@@ -176,7 +208,7 @@ function M.compose(raw_facts, raw_events)
 		updater = M.normalise_updater(raw_facts.updater),
 		health = M.normalise_health(raw_facts.health),
 		power = {
-			battery = copy_named(raw_facts.power_battery, { 'pack_mV', 'per_cell_mV', 'ibat_mA', 'temp_mC', 'seq', 'uptime_ms' }),
+			battery = M.normalise_battery(raw_facts.power_battery),
 			charger = M.normalise_charger(raw_facts.power_charger),
 			charger_config = copy(raw_facts.power_charger_config or {}),
 		},
