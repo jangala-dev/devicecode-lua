@@ -1316,4 +1316,44 @@ function tests.test_mcu_charger_bitfields_are_expanded_in_device_projection()
 	assert_true(fact.system.intvcc_gt_2p8v)
 end
 
+function tests.test_mcu_power_preserves_legacy_flags_and_signed_currents()
+	local raw = {
+		vin_mV = 50, vsys_mV = 12400, iin_mA = 4294967295,
+		system = { vin_gt_vbat = 0, charger_enabled = 1 },
+		state = { bat_missing = 0, suspended = true },
+		status = { cc_phase = 0 },
+	}
+	local fact = component_mcu.normalise_fact('power_charger', raw)
+	assert_eq(fact.iin_mA, -1)
+	assert_false(fact.system.vin_gt_vbat)
+	assert_true(fact.system.charger_enabled)
+	assert_false(fact.state.bat_missing)
+	assert_true(fact.state.suspended)
+	assert_false(fact.status.cc_phase)
+	local composed = component_mcu.compose({ power_charger = fact })
+	assert_true(composed.power.charger.system.charger_enabled)
+	assert_true(composed.power.charger.state.suspended)
+	assert_eq(raw.iin_mA, 4294967295)
+	-- Explicit bitfields, including zero, take precedence over named flags.
+	raw.system_bits = 0
+	assert_false(component_mcu.normalise_fact('power_charger', raw).system.charger_enabled)
+end
+
+function tests.test_mcu_power_normalises_wrapped_battery_current_without_rescaling()
+	for _, current in ipairs({ -500, 4294966796, 0, 500 }) do
+		local raw = { pack_mV = 12400, ibat_mA = current, seq = 3000000000 }
+		local expected = current == 4294966796 and -500 or current
+		local fact = component_mcu.normalise_fact('power_battery', raw)
+		local composed = component_mcu.compose({ power_battery = raw })
+		assert_eq(fact.ibat_mA, expected)
+		assert_eq(composed.power.battery.ibat_mA, expected)
+		assert_eq(fact.pack_mV, 12400)
+		assert_eq(fact.seq, 3000000000)
+		assert_eq(raw.ibat_mA, current)
+		if expected == -500 then
+			assert_eq(fact.pack_mV * math.abs(fact.ibat_mA) / 1000000, 6.2)
+		end
+	end
+end
+
 return tests
