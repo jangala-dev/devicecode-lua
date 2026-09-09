@@ -395,7 +395,9 @@ local function dispatch_cap_ctrl(cap_entry, verb, payload, timeout_s, bus_req)
 		return nil, 'capability unavailable'
 	end
 
-	local reply_ch = channel.new()
+	-- Each request has one reply. Let the driver finish delivering it even if
+	-- this dispatcher exits first because the caller or HAL timed out.
+	local reply_ch = channel.new(1)
 	local caller_cancel_op = nil
 	if type(bus_req) == 'table' and type(bus_req.done_op) == 'function' then
 		caller_cancel_op = bus_req:done_op():wrap(function (status, _value, err)
