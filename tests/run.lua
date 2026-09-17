@@ -172,6 +172,7 @@ local files = {
 	"unit.gsm.test_state",
 	"unit.net.test_architecture",
 	"unit.net.test_config",
+	"unit.net.test_ipv4",
 	"unit.net.test_backhaul_model",
 	"unit.net.test_intent_realiser",
 	"unit.net.test_hal_client",

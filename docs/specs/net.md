@@ -168,6 +168,65 @@ Example shape:
 
 The OpenWrt provider translates these to dnsmasq `addnhosts` and, where requested, `addnmount` entries. The location is configurable through `dns.host_files.base_dir`.
 
+### Shared-device ranges and discovery intent
+
+NET supports named, manual-only IPv4 ranges under
+`segments.<id>.addressing.ipv4.reserved_ranges`. Each entry contains `from` and
+`to` addresses. A range requires a static segment CIDR and must exclude the
+network, router, broadcast, other reserved ranges and the effective dynamic
+DHCP pool (`network + start` through `network + start + limit - 1`). DHCP
+reservations cannot allocate these addresses. Interface-level addressing
+overrides on these segments are rejected because their effective subnet would
+be ambiguous. DHCP rendering and pool sizes are unchanged.
+
+Generic discovery intent is passed to HAL in this form:
+
+```json
+{
+  "dns": {
+    "service_discovery": {
+      "shared_devices": {
+        "enabled": true,
+        "source_segment": "adm",
+        "advertise_to": ["jan"],
+        "address_range": "shared_devices",
+        "family": "ipv4",
+        "services": {
+          "ipp": { "type": "_ipp._tcp", "protocol": "tcp", "ports": [631] }
+        }
+      }
+    }
+  }
+}
+```
+
+The policy identifies eligible service endpoints within the named source range
+and the segments where those services should be discoverable. NET validates
+references, distinct destinations, IPv4 family, DNS-SD service types, matching
+TCP/UDP protocols and integer ports from 1 through 65535. Disabled policies
+remain structurally validated. No daemon, Linux device name, individual device
+address, MAC or printer identity belongs in this discovery policy.
+
+Connectivity remains explicit in `firewall.rules`. Rules accepting a declared
+service from a discovery consumer zone to its source zone must have positive
+IPv4 destinations contained within the referenced reserved ranges. This check
+associates rules by zones, protocol and port, independent of rule names; it does
+not generate access rules or change existing rule syntax. Firewall fields also
+receive zone, family, protocol, address/CIDR, port and target validation.
+
+Only `bigbox-v1-cm-2.json` currently opts into this intent. It reserves
+`172.28.8.250` through `172.28.8.254` and allows `lan_rst` to reach those five
+`/32` destinations in `lan` on TCP/631. Its UDP/5353 rule allows Guest input to
+router-local `224.0.0.251` without a destination zone. No broad inter-zone
+forwarding, NAT or bridging is added.
+
+This implements Section 1 only: normalization, validation, explicit firewall
+permissions and the HAL handoff. The current provider does not implement the
+discovery policy, so this intent does not yet enable cross-segment automatic
+discovery or alter any discovery daemon. Rendering, device-name resolution,
+capability reporting, activation and rollback for the chosen discovery backend
+are deferred to Section 2.
+
 ## Current source layout
 
 ```text
