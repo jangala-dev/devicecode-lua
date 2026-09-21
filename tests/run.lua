@@ -54,6 +54,7 @@ local files = {
 	"unit.hal.modemcard_recovery_spec",
 	"unit.hal.openwrt_network_observer_spec",
 	"unit.hal.openwrt_network_provider_advanced_spec",
+	"unit.hal.openwrt_mdns_repeater_spec",
 	"unit.hal.common_uci_compat_spec",
 	"unit.hal.openwrt_names_spec",
 	'unit.fabric.test_model',

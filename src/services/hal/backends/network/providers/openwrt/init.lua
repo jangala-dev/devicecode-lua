@@ -16,6 +16,7 @@ local mwan3_mod = require 'services.hal.backends.network.providers.openwrt.mwan3
 local shaper_mod = require 'services.hal.backends.network.providers.openwrt.shaper'
 local speedtest_mod = require 'services.hal.backends.network.providers.openwrt.speedtest'
 local names_mod = require 'services.hal.backends.network.providers.openwrt.names'
+local mdns_mod = require 'services.hal.backends.network.providers.openwrt.mdns_repeater'
 local hal_types = require 'services.hal.types.core'
 
 local perform = fibers.perform
@@ -31,7 +32,7 @@ local DEFAULT_IFACE_HOTPLUG_HOOK = '/etc/hotplug.d/iface/' .. OBSERVER_HOTPLUG_N
 local DEFAULT_NET_HOTPLUG_HOOK = '/etc/hotplug.d/net/' .. OBSERVER_HOTPLUG_NAME
 local OBSERVER_BLOCK_BEGIN = '# BEGIN devicecode-net-observer'
 local OBSERVER_BLOCK_END = '# END devicecode-net-observer'
-local OWNED_PACKAGES = { 'network', 'dhcp', 'firewall', 'mwan3' }
+local OWNED_PACKAGES = { 'network', 'dhcp', 'firewall', 'mwan3', 'mdns_repeater' }
 local COUNTER_STATS = {
 	'rx_bytes',
 	'rx_packets',
@@ -50,6 +51,7 @@ local ACTIVATION_COMMANDS = {
 	-- WAN/multi-WAN is disabled or a member disappears.  Structural apply
 	-- restarts mwan3; live weight changes do not.
 	mwan3 = { { kind = 'restart', target = 'mwan3', wait = true } },
+	mdns_repeater = { mdns_mod.activation_command() },
 }
 
 local function elapsed_ms(t0)
@@ -899,6 +901,11 @@ local function build_network_changes(intent, provider_config, name_ctx)
 	local changes = {}
 	local known = {}
 	local segment_to_ifaces = {}
+	local segment_devices = {}
+	local function remember_device(id, device, cidr)
+		segment_devices[id] = segment_devices[id] or {}
+		segment_devices[id][#segment_devices[id] + 1] = { device = device, cidr = cidr }
+	end
 	local mwan_by_iface = mwan_members_by_interface(intent)
 
 	add_section(changes, known, 'network', 'loopback', 'interface')
@@ -950,6 +957,7 @@ local function build_network_changes(intent, provider_config, name_ctx)
 					local proto, ipv4 = build_segment_interface_proto(seg)
 					ipv4 = apply_mwan_network_defaults(ipv4, mwan_by_iface[seg_id])
 					add_static_or_dhcp_interface(changes, known, ifsec, devname, proto, ipv4, true)
+					remember_device(seg_id, devname, segment_ipv4_cidr(seg))
 					segment_to_ifaces[seg_id] = segment_to_ifaces[seg_id] or {}
 					segment_to_ifaces[seg_id][#segment_to_ifaces[seg_id] + 1] = ifsec
 				end
@@ -986,6 +994,9 @@ local function build_network_changes(intent, provider_config, name_ctx)
 		if type(iface.segment) == 'string' then segs[#segs + 1] = iface.segment end
 		if type(iface.segments) == 'table' then for i = 1, #iface.segments do segs[#segs + 1] = iface.segments[i] end end
 		for i = 1, #segs do
+			if iface.enabled ~= false and iface.role ~= 'wan' and iface.realises_segment ~= false then
+				remember_device(segs[i], devname, segment_ipv4_cidr({ addressing = { ipv4 = ipv4 } }))
+			end
 			segment_to_ifaces[segs[i]] = segment_to_ifaces[segs[i]] or {}
 			segment_to_ifaces[segs[i]][#segment_to_ifaces[segs[i]] + 1] = ifsec
 		end
@@ -1005,7 +1016,7 @@ local function build_network_changes(intent, provider_config, name_ctx)
 		set_option(changes, 'network', rsec, 'table', r.table)
 	end
 
-	return changes, known, segment_to_ifaces
+	return changes, known, segment_to_ifaces, segment_devices
 end
 
 local function canonical_list(list)
@@ -1278,20 +1289,30 @@ end
 
 local function build_uci_plan(intent, provider_config)
 	local name_ctx = names_mod.allocate(intent, provider_config)
-	local n_changes, n_known, segment_to_ifaces = build_network_changes(intent, provider_config, name_ctx)
+	local n_changes, n_known, segment_to_ifaces, segment_devices = build_network_changes(intent, provider_config, name_ctx)
 	local d_changes, d_known = build_dhcp_changes(intent, name_ctx, segment_to_ifaces)
 	local f_changes, f_known = build_firewall_changes(intent, segment_to_ifaces, name_ctx)
 	local m_changes, m_known, m_plan = mwan3_mod.build_changes(filter_unrealised_mwan_members(intent), name_ctx)
+	local discovery, derr = mdns_mod.build_changes(intent, segment_devices)
+	if not discovery then return nil, derr end
 	return {
 		name_ctx = name_ctx,
+		discovery_plan = discovery.plan,
 		mwan_plan = m_plan,
-		changes = { network = n_changes, dhcp = d_changes, firewall = f_changes, mwan3 = m_changes },
-		sections = { network = n_known, dhcp = d_known, firewall = f_known, mwan3 = m_known },
+		changes = {
+			network = n_changes, dhcp = d_changes, firewall = f_changes, mwan3 = m_changes,
+			mdns_repeater = discovery.changes,
+		},
+		sections = {
+			network = n_known, dhcp = d_known, firewall = f_known, mwan3 = m_known,
+			mdns_repeater = discovery.sections,
+		},
 		counts = {
 			network = { changes = #n_changes, sections = count_keys(n_known) },
 			dhcp = { changes = #d_changes, sections = count_keys(d_known) },
 			firewall = { changes = #f_changes, sections = count_keys(f_known) },
 			mwan3 = { changes = #m_changes, sections = count_keys(m_known) },
+			mdns_repeater = { changes = #discovery.changes, sections = count_keys(discovery.sections) },
 		},
 	}
 end
@@ -1467,10 +1488,12 @@ function Provider:plan_op(req)
 	local valid = validate_intent(intent)
 	if not valid or valid.ok ~= true then return op.always(valid) end
 
-	local built = build_uci_plan(intent, self.config)
+	local built, build_err = build_uci_plan(intent, self.config)
+	if not built then return op.always({ ok = false, backend = 'openwrt', err = build_err }) end
 	local names = built.name_ctx:snapshot()
 	local shaping = build_shaping_request(intent, self.config, built.name_ctx)
 	local domains = {
+		discovery = built.discovery_plan,
 		vlan = { status = 'implemented' },
 		shaping = { status = shaping.enabled and 'implemented' or 'not_configured' },
 		multiwan = { status = (built.mwan_plan and built.mwan_plan.enabled) and 'implemented' or 'not_configured' },
@@ -1542,7 +1565,8 @@ function Provider:apply_op(req)
 		if not mgr then return { ok = false, err = merr or 'uci manager unavailable', backend = 'openwrt' } end
 
 		phase = fibers.now()
-		local built = build_uci_plan(intent, self.config)
+		local built, build_err = build_uci_plan(intent, self.config)
+		if not built then return { ok = false, backend = 'openwrt', err = build_err } end
 		log_provider(self, 'debug', {
 			what = 'openwrt_apply_built_uci',
 			elapsed_ms = elapsed_ms(phase),
@@ -1573,6 +1597,7 @@ function Provider:apply_op(req)
 			records = records,
 			packages = packages,
 			rollback = true,
+			reactivate_on_rollback = true,
 		}, {
 			trace = {
 				what = 'net_apply',
@@ -1994,6 +2019,7 @@ function snapshot_from_packages(packages)
 		routing = { routes = {} },
 		multiwan = { config = { interfaces = {}, members = {}, policies = {}, rules = {} } },
 		shaping = { applied = nil },
+		service_discovery = mdns_mod.snapshot(packages.mdns_repeater),
 	}
 
 	local bridge_by_name = {}
