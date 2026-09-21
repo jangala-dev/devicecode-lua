@@ -220,12 +220,37 @@ Only `bigbox-v1-cm-2.json` currently opts into this intent. It reserves
 router-local `224.0.0.251` without a destination zone. No broad inter-zone
 forwarding, NAT or bridging is added.
 
-This implements Section 1 only: normalization, validation, explicit firewall
-permissions and the HAL handoff. The current provider does not implement the
-discovery policy, so this intent does not yet enable cross-segment automatic
-discovery or alter any discovery daemon. Rendering, device-name resolution,
-capability reporting, activation and rollback for the chosen discovery backend
-are deferred to Section 2.
+The OpenWrt provider uses `mdns-repeater` for cross-network mDNS discovery.
+NET expresses the discovery policy, while HAL resolves segment devices through
+the same naming and device information used to render network interfaces. It owns the
+`mdns_repeater` UCI package and renders exact `/32` entries for the reserved range
+plus the destination subnet needed for client queries. No discovery policy emits
+or replaces service-access firewall rules.
+
+The mdns-repeater backend supports one active policy and one destination. Each
+segment resolves to one enabled Linux device with a known IPv4 subnet. It rejects
+ambiguous mappings, overlapping source/client subnets and ranges larger than
+15 addresses. Disabled or absent policies produce a disabled configuration and
+remove stale lists.
+
+`plan_op().plan.domains.discovery` reports `backend = mdns_repeater` and these
+capabilities: `directional = false`, `range_filter = source_ip`,
+`service_filter = false`, `port_filter = false`. The whitelist checks the packet
+sender, not endpoint addresses inside DNS-SD records. Other services from a
+shared device can be discovered, and Guest advertisements also reach Admin.
+Actual cross-network connectivity remains governed by the firewall.
+
+Activation runs after network/firewall activation. The firmware supplies
+`/etc/init.d/mdns-repeater`, whose `capabilities` command returns
+`source-whitelist-v1`. Its `apply` command validates the UCI policy, waits for
+IPv4 data devices, restarts the supervised process and checks that it starts.
+An enabled apply fails if the script is missing or does not support this contract.
+On activation failure, the UCI manager restores all packages and
+synchronously reactivates the previous services in dependency order. Recovery
+failure is reported separately. Disabled discovery tolerates a missing daemon.
+Snapshots expose configured interfaces, whitelist and backend capabilities;
+`configured` does not imply the daemon is running. Continuous discovery health
+and service counters are not implemented.
 
 ## Current source layout
 
@@ -411,7 +436,7 @@ tests/integration/openwrt_vm/work/generated-default-etc-config/
 ```
 
 `print-default-configs` does the same and also prints the rendered `network`,
-`dhcp`, `firewall` and `mwan3` files to stdout. The output directory also
+`dhcp`, `firewall`, `mwan3` and `mdns_repeater` files to stdout. The output directory also
 contains `manifest.json`, which records the source config, generated OpenWrt
 name map, realised WAN members, activation commands that would have been run,
 and shaping commands that would have been run.
