@@ -135,7 +135,13 @@
           "addressing": {
             "ipv4": {
               "mode": "static",
-              "cidr": "172.28.8.1/24"
+              "cidr": "172.28.8.1/24",
+              "reserved_ranges": {
+                "shared_devices": {
+                  "from": "172.28.8.250",
+                  "to": "172.28.8.254"
+                }
+              }
             }
           },
           "dhcp": {
@@ -299,6 +305,26 @@
             "name": "config.bigbox.home",
             "address": "172.28.8.1"
           }
+        },
+        "service_discovery": {
+          "shared_devices": {
+            "enabled": true,
+            "source_segment": "adm",
+            "advertise_to": [
+              "jan"
+            ],
+            "address_range": "shared_devices",
+            "family": "ipv4",
+            "services": {
+              "ipp": {
+                "type": "_ipp._tcp",
+                "protocol": "tcp",
+                "ports": [
+                  631
+                ]
+              }
+            }
+          }
         }
       },
       "dhcp": {
@@ -413,6 +439,31 @@
             "src": "lan_rst",
             "proto": "tcp udp",
             "dest_port": "53",
+            "target": "ACCEPT"
+          },
+          "Allow_Guest_Shared_Devices_IPP": {
+            "name": "Allow Guest Shared Devices IPP",
+            "family": "ipv4",
+            "src": "lan_rst",
+            "dest": "lan",
+            "dest_ip": [
+              "172.28.8.250/32",
+              "172.28.8.251/32",
+              "172.28.8.252/32",
+              "172.28.8.253/32",
+              "172.28.8.254/32"
+            ],
+            "proto": "tcp",
+            "dest_port": "631",
+            "target": "ACCEPT"
+          },
+          "Allow_Guest_mDNS": {
+            "name": "Allow Guest mDNS",
+            "family": "ipv4",
+            "src": "lan_rst",
+            "dest_ip": "224.0.0.251",
+            "proto": "udp",
+            "dest_port": "5353",
             "target": "ACCEPT"
           }
         }

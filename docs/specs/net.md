@@ -214,9 +214,10 @@ associates rules by zones, protocol and port, independent of rule names; it does
 not generate access rules or change existing rule syntax. Firewall fields also
 receive zone, family, protocol, address/CIDR, port and target validation.
 
-Only `bigbox-v1-cm-2.json` currently opts into this intent. It reserves
-`172.28.8.250` through `172.28.8.254` and allows `lan_rst` to reach those five
-`/32` destinations in `lan` on TCP/631. Its UDP/5353 rule allows Guest input to
+`bigbox-v1-cm.json`, `bigbox-v1-cm-2.json` and `bigbox-ss.json` enable this
+intent. Each reserves `172.28.8.250` through `172.28.8.254` and allows
+`lan_rst` to reach those five
+`/32` destinations in `lan` on TCP/631. Each UDP/5353 rule allows Guest input to
 router-local `224.0.0.251` without a destination zone. No broad inter-zone
 forwarding, NAT or bridging is added.
 

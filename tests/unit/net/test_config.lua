@@ -470,23 +470,19 @@ function tests.test_shared_firewall_cannot_widen_reserved_destinations()
 	rejects(cfg, 'declared reserved range')
 end
 
-function tests.test_section_one_product_config_and_legacy_products()
+function tests.test_shared_devices_enabled_in_all_bigbox_product_configs()
 	local json = require 'cjson.safe'
 	for _, filename in ipairs({ 'bigbox-ss.json', 'bigbox-v1-cm.json', 'bigbox-v1-cm-2.json' }) do
 		local doc = ok(json.decode(ok(read_project_file('src/configs/' .. filename))))
 		local intent = ok(config.normalise(doc.net))
 		eq(intent.segments.adm.dhcp.start, 10); eq(intent.segments.adm.dhcp.limit, 240)
-		if filename == 'bigbox-v1-cm-2.json' then
-			local range = intent.segments.adm.addressing.ipv4.reserved_ranges.shared_devices
-			eq(range.from, '172.28.8.250'); eq(range.to, '172.28.8.254')
-			eq(intent.dns.service_discovery.shared_devices.services.ipp.ports[1], 631)
-			local rule = intent.firewall.rules.Allow_Guest_Shared_Devices_IPP
-			eq(#rule.dest_ip, 5); eq(rule.dest_ip[5], '172.28.8.254/32'); eq(rule.dest_port, '631')
-			eq(intent.firewall.rules.Allow_Guest_mDNS.dest, nil)
-			eq(intent.firewall.rules.Allow_Guest_mDNS.dest_ip, '224.0.0.251')
-		else
-			eq(next(intent.dns.service_discovery), nil)
-		end
+		local range = intent.segments.adm.addressing.ipv4.reserved_ranges.shared_devices
+		eq(range.from, '172.28.8.250'); eq(range.to, '172.28.8.254')
+		eq(intent.dns.service_discovery.shared_devices.services.ipp.ports[1], 631)
+		local rule = intent.firewall.rules.Allow_Guest_Shared_Devices_IPP
+		eq(#rule.dest_ip, 5); eq(rule.dest_ip[5], '172.28.8.254/32'); eq(rule.dest_port, '631')
+		eq(intent.firewall.rules.Allow_Guest_mDNS.dest, nil)
+		eq(intent.firewall.rules.Allow_Guest_mDNS.dest_ip, '224.0.0.251')
 	end
 end
 
