@@ -15,6 +15,9 @@ function M.normalise(v)
 	if not t then return nil, err end
 	local ok, ferr = schema.check_allowed_fields(t, ALLOWED, { 'net', 'firewall' })
 	if not ok then return nil, ferr end
+	if t.rules ~= nil and not schema.is_plain_table(t.rules) then
+		return nil, schema.err({ 'net', 'firewall', 'rules' }, 'must be a table of rules')
+	end
 	local out = {
 		defaults = schema.copy(t.defaults or {}),
 		zones = schema.copy(t.zones or {}),

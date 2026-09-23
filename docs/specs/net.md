@@ -212,7 +212,10 @@ service from a discovery consumer zone to its source zone must have positive
 IPv4 destinations contained within the referenced reserved ranges. This check
 associates rules by zones, protocol and port, independent of rule names; it does
 not generate access rules or change existing rule syntax. Firewall fields also
-receive zone, family, protocol, address/CIDR, port and target validation.
+receive zone, family, protocol, address/CIDR, port and target validation. Rules
+and policies may reference zones created from segment zone names, segment IDs
+when no zone name is set, and the default `wan` zone for WAN interfaces, as well
+as explicitly configured zones.
 
 `bigbox-v1-cm.json`, `bigbox-v1-cm-2.json` and `bigbox-ss.json` enable this
 intent. Each reserves `172.28.8.250` through `172.28.8.254` and allows

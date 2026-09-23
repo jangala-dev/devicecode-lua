@@ -47,15 +47,15 @@ local function validate_interfaces(intent)
 	return true, nil
 end
 
+local function segment_zone_name(id, seg)
+	local fw = schema.is_plain_table(seg and seg.firewall) and seg.firewall or {}
+	if type(fw.zone) == 'string' and fw.zone ~= '' then return fw.zone end
+	return id
+end
+
 local function validate_segments(intent)
 	local host_sources = intent.dns and intent.dns.host_files and intent.dns.host_files.sources or {}
-	local zones = intent.firewall and intent.firewall.zones or {}
 	for id, seg in pairs(intent.segments or {}) do
-		local zone = seg.firewall and seg.firewall.zone or nil
-		if zone ~= nil and type(zones) == 'table' and next(zones) ~= nil and not zones[zone] then
-			return nil, err({ 'net', 'segments', id, 'firewall', 'zone' },
-				'references unknown firewall zone ' .. tostring(zone))
-		end
 		for i, source in ipairs((seg.dns and seg.dns.host_files) or {}) do
 			if type(host_sources) == 'table' and next(host_sources) ~= nil and not host_sources[source] then
 				return nil, err({ 'net', 'segments', id, 'dns', 'host_files', i },
@@ -90,9 +90,31 @@ local function validate_wan(intent)
 	return true, nil
 end
 
+local function effective_firewall_zones(intent)
+	local configured = intent.firewall.zones or {}
+	if not schema.is_plain_table(configured) then
+		return nil, err({ 'net', 'firewall', 'zones' }, 'must be a table of zones')
+	end
+	local zones = {}
+	for id in pairs(configured) do zones[id] = true end
+	for id, seg in pairs(intent.segments or {}) do zones[segment_zone_name(id, seg)] = true end
+	for _, iface in pairs(intent.interfaces or {}) do
+		local fw = schema.is_plain_table(iface.firewall) and iface.firewall or {}
+		local zone = fw.zone or (iface.role == 'wan' and 'wan' or nil)
+		if type(zone) == 'string' and zone ~= '' then zones[zone] = true end
+	end
+	return zones
+end
+
 local function validate_firewall(intent)
-	local zones = intent.firewall and intent.firewall.zones or {}
-	for id, rule in pairs(intent.firewall.rules or {}) do
+	local zones, zone_err = effective_firewall_zones(intent)
+	if not zones then return nil, zone_err end
+	local rules = intent.firewall.rules
+	if rules == nil then rules = {} end
+	if not schema.is_plain_table(rules) then
+		return nil, err({ 'net', 'firewall', 'rules' }, 'must be a table of rules')
+	end
+	for id, rule in pairs(rules) do
 		local ok, e = firewall_values.rule(rule, zones, { 'net', 'firewall', 'rules', id })
 		if not ok then return nil, e end
 	end
@@ -255,12 +277,12 @@ local function validate_shared_access(intent)
 			local allowed = {}
 			for _, policy in pairs(intent.dns.service_discovery or {}) do
 				local source = intent.segments[policy.source_segment]
-				local source_zone = source.firewall.zone
+				local source_zone = segment_zone_name(policy.source_segment, source)
 				local matches_zones = false
 				for _, destination in ipairs(policy.advertise_to) do
-					local dest_zone = intent.segments[destination].firewall.zone
-					matches_zones = matches_zones or (dest_zone ~= nil and source_zone ~= nil
-						and (rule.src == dest_zone or rule.src == '*') and (rule.dest == source_zone or rule.dest == '*'))
+					local dest_zone = segment_zone_name(destination, intent.segments[destination])
+					matches_zones = matches_zones or ((rule.src == dest_zone or rule.src == '*')
+						and (rule.dest == source_zone or rule.dest == '*'))
 				end
 				if matches_zones then
 					for _, service in pairs(policy.services) do

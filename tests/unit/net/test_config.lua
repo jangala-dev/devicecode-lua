@@ -441,6 +441,45 @@ function tests.test_firewall_rejects_invalid_zones_addresses_and_ports()
 	end
 end
 
+function tests.test_firewall_accepts_generated_segment_and_wan_zones()
+	local cfg = sample_cfg()
+	cfg.firewall.zones = {}
+	cfg.firewall.rules = {
+		guest_dns = { src = 'guest', proto = 'udp', dest_port = '53', target = 'ACCEPT' },
+		lan_status = { src = 'lan', proto = 'tcp', dest_port = '443', target = 'ACCEPT' },
+		wan_ping = { src = 'wan', proto = 'icmp', target = 'ACCEPT' },
+	}
+	cfg.firewall.policies = { guest_to_lan = { from = 'guest', to = 'lan', action = 'allow' } }
+	ok(config.normalise(cfg), 'segment and WAN zones can be generated without explicit definitions')
+	cfg.firewall.zones = { guest = {} }
+	cfg.segments.lan.firewall = {}
+	ok(config.normalise(cfg), 'segment-id zone can be generated alongside explicit zones')
+	cfg.firewall.rules.lan_status.src = 'missing'
+	rejects(cfg, 'references unknown firewall zone missing')
+end
+
+function tests.test_shared_access_checks_generated_segment_zones()
+	local cfg = shared_cfg()
+	cfg.firewall.zones = {}
+	cfg.firewall.policies = {}
+	cfg.segments.adm.firewall = {}
+	cfg.segments.jan.firewall = {}
+	cfg.firewall.rules.shared.src = 'jan'
+	cfg.firewall.rules.shared.dest = 'adm'
+	cfg.firewall.rules.mdns.src = 'jan'
+	ok(config.normalise(cfg), 'shared-device rule can reference generated zones')
+	cfg.firewall.rules.shared.dest_ip = '172.28.8.73'
+	rejects(cfg, 'declared reserved range')
+end
+
+function tests.test_firewall_rejects_non_table_rules_without_throwing()
+	for _, value in ipairs({ 'bad', 42, false }) do
+		local cfg = sample_cfg()
+		cfg.firewall.rules = value
+		rejects(cfg, 'net.firewall.rules: must be a table of rules')
+	end
+end
+
 function tests.test_firewall_preserves_existing_list_range_and_ipv6_syntax()
 	local cfg = sample_cfg()
 	cfg.firewall.rules = {
