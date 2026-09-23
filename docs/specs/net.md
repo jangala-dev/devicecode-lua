@@ -221,6 +221,10 @@ intent. Each reserves `172.28.8.250` through `172.28.8.254` and allows
 router-local `224.0.0.251` without a destination zone. No broad inter-zone
 forwarding, NAT or bridging is added.
 
+Each product also permits Guest TCP/443 to `172.28.8.250` for HTTPS printer
+status. This permits access to that device's HTTPS management page from Guest;
+other Admin addresses remain blocked on TCP/443.
+
 The OpenWrt provider uses `mdns-repeater` for cross-network mDNS discovery.
 NET expresses the discovery policy, while HAL resolves segment devices through
 the same naming and device information used to render network interfaces. It owns the

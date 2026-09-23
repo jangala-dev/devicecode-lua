@@ -523,6 +523,16 @@
             "dest_port": "631",
             "target": "ACCEPT"
           },
+          "Allow_Guest_Shared_Device_HTTPS": {
+            "name": "Allow Guest Shared Device HTTPS",
+            "family": "ipv4",
+            "src": "lan_rst",
+            "dest": "lan",
+            "dest_ip": "172.28.8.250/32",
+            "proto": "tcp",
+            "dest_port": "443",
+            "target": "ACCEPT"
+          },
           "Allow_Guest_mDNS": {
             "name": "Allow Guest mDNS",
             "family": "ipv4",

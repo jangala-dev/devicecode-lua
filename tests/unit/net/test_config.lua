@@ -481,6 +481,10 @@ function tests.test_shared_devices_enabled_in_all_bigbox_product_configs()
 		eq(intent.dns.service_discovery.shared_devices.services.ipp.ports[1], 631)
 		local rule = intent.firewall.rules.Allow_Guest_Shared_Devices_IPP
 		eq(#rule.dest_ip, 5); eq(rule.dest_ip[5], '172.28.8.254/32'); eq(rule.dest_port, '631')
+		local https = intent.firewall.rules.Allow_Guest_Shared_Device_HTTPS
+		eq(https.src, 'lan_rst'); eq(https.dest, 'lan'); eq(https.family, 'ipv4')
+		eq(https.dest_ip, '172.28.8.250/32'); eq(https.proto, 'tcp'); eq(https.dest_port, '443')
+		eq(https.target, 'ACCEPT')
 		eq(intent.firewall.rules.Allow_Guest_mDNS.dest, nil)
 		eq(intent.firewall.rules.Allow_Guest_mDNS.dest_ip, '224.0.0.251')
 	end
