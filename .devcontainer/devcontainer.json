@@ -2,6 +2,11 @@
 	"name": "devicecode-lua",
 	"image": "ghcr.io/jangala-dev/mini-lua-image:latest",
 	"remoteUser": "vscode",
+	"features": {
+		"ghcr.io/devcontainers/features/node:1": {
+			"version": "22"
+		}
+	},
 	"postCreateCommand": "bash .devcontainer/postCreateCommand.sh",
 	"forwardPorts": [
 		8081,
