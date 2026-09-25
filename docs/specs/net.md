@@ -224,9 +224,17 @@ intent. Each reserves `172.28.8.250` through `172.28.8.254` and allows
 router-local `224.0.0.251` without a destination zone. No broad inter-zone
 forwarding, NAT or bridging is added.
 
-Each product also permits Guest TCP/443 to `172.28.8.250` for HTTPS printer
-status. This permits access to that device's HTTPS management page from Guest;
-other Admin addresses remain blocked on TCP/443.
+All three target configs (`bigbox-v1-cm.json`, `bigbox-v1-cm-2.json` and
+`bigbox-ss.json`) also permit Guest TCP/443 to `172.28.8.250` for printer
+status on iPhone and printing capability on Android. Testing with this exception
+enabled did not allow Guest access to the printer dashboard. This is an observed result for the tested printer and
+firmware, not a guarantee that HTTPS administrative functions are inaccessible.
+The firewall permits TCP/443 to this device and cannot distinguish status
+requests from management requests on that port. Administrative access has not
+been exhaustively verified; any management functions exposed by the printer on
+TCP/443 may also be reachable from Guest. The intended exception supports
+iPhone printer status and Android printing with this unresolved management-access
+risk. Other Admin addresses remain blocked on TCP/443.
 
 The OpenWrt provider uses `mdns-repeater` for cross-network mDNS discovery.
 NET expresses the discovery policy, while HAL resolves segment devices through
