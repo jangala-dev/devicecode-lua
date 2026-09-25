@@ -200,11 +200,11 @@ fibers.run(function(_scope)
   eq(observed.routing.routes[1].target, '10.0.0.0/8', 'route target')
   eq(observed.routing.routes[1].gateway, '192.168.10.254', 'route gateway')
 
-  wait_until(function() return #restarts == 4 end, 1, 'activation commands should run')
+  wait_until(function() return #restarts == 5 end, 1, 'activation commands should run')
   provider:terminate('test complete')
 end)
 
-eq(#restarts, 4, 'restart command count')
+eq(#restarts, 5, 'restart command count')
 
 print('openwrt network provider snapshot: ok')
 LUA

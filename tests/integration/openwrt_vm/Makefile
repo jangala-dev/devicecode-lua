@@ -292,3 +292,15 @@ clean:
 test-devicecode-exec-containment:
 	@echo "==> devicecode exec containment"
 	@$(RUN) tests/test_devicecode_exec_containment.sh
+
+.PHONY: ensure-mdns-repeater test-openwrt-mdns-repeater
+ensure-mdns-repeater:
+	./scripts/wait-ssh
+	./scripts/ensure-mdns-repeater
+
+test-openwrt-mdns-repeater:
+	./tests/test_openwrt_mdns_repeater.sh
+
+.PHONY: test-mdns-repeater-init-contract
+test-mdns-repeater-init-contract:
+	./tests/test_mdns_repeater_init_contract.sh

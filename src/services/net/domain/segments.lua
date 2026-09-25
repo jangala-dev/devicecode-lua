@@ -2,6 +2,7 @@
 -- Product-level network segment normalisation.  No HAL or backend knowledge.
 
 local schema = require 'services.net.schema'
+local ipv4 = require 'services.net.ipv4'
 
 local M = {}
 
@@ -131,6 +132,34 @@ local function normalise_vlan(v, path)
 	return out, nil
 end
 
+local function normalise_reserved_range(_, rec, path)
+	local t, err = schema.require_plain_table(rec, path)
+	if not t then return nil, err end
+	local ok, ferr = schema.check_allowed_fields(t, { 'from', 'to' }, path)
+	if not ok then return nil, ferr end
+	for _, field in ipairs({ 'from', 'to' }) do
+		local address, aerr = ipv4.parse_address(t[field])
+		if not address then return nil, schema.err({ schema.path(path), field }, aerr) end
+	end
+	return { from = t.from, to = t.to }
+end
+
+local function normalise_addressing(value, path)
+	local addressing, err = schema.copy_table_or_empty(value, path)
+	if not addressing then return nil, err end
+	if addressing.ipv4 ~= nil then
+		local spec, ierr = schema.require_plain_table(addressing.ipv4, { schema.path(path), 'ipv4' })
+		if not spec then return nil, ierr end
+		if spec.reserved_ranges ~= nil then
+			local ranges, rerr = schema.map(spec.reserved_ranges,
+				{ schema.path(path), 'ipv4', 'reserved_ranges' }, normalise_reserved_range)
+			if not ranges then return nil, rerr end
+			spec.reserved_ranges = ranges
+		end
+	end
+	return addressing
+end
+
 function M.normalise_record(id, rec, path)
 	local t, err = schema.require_plain_table(rec, path)
 	if not t then return nil, err end
@@ -146,6 +175,8 @@ function M.normalise_record(id, rec, path)
 	local shaping, sherr = normalise_shaping(t.shaping, { schema.path(path), 'shaping' })
 	if not shaping then return nil, sherr end
 
+	local addressing, aerr = normalise_addressing(t.addressing, { schema.path(path), 'addressing' })
+	if not addressing then return nil, aerr end
 	local out = {
 		id = id,
 		name = t.name or id,
@@ -156,7 +187,7 @@ function M.normalise_record(id, rec, path)
 		user_editable = t.user_editable ~= false,
 		purpose = t.purpose,
 		vlan = vlan,
-		addressing = schema.copy(t.addressing or {}),
+		addressing = addressing,
 		l2 = schema.copy(t.l2 or {}),
 		dhcp = schema.copy(t.dhcp or {}),
 		dns = schema.copy(t.dns or {}),
