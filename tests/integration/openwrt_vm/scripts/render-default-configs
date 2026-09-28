@@ -143,7 +143,7 @@ fibers.run(function()
     return st and (st.state == 'done' or st.state == 'idle')
   end, 5, 'activation runner should settle')
 
-  local pkgs = { 'network', 'dhcp', 'firewall', 'mwan3' }
+  local pkgs = { 'network', 'dhcp', 'firewall', 'mwan3', 'mdns_repeater' }
   for _, pkg in ipairs(pkgs) do
     local data = read_file(confdir .. '/' .. pkg)
     write_file(outdir .. '/' .. pkg, data)

@@ -21,6 +21,13 @@ if [ -d "$CONFIG_STATE" ]; then
       sleep 1
       /etc/init.d/network reload >/tmp/devicecode-config-restore-network.log 2>&1
       /etc/init.d/firewall restart >/tmp/devicecode-config-restore-firewall.log 2>&1
+      if [ -x /etc/init.d/mdns-repeater ]; then
+        if [ "$(uci -q get mdns_repeater.main.enabled)" = 1 ]; then
+          /etc/init.d/mdns-repeater apply >/tmp/devicecode-config-restore-mdns.log 2>&1
+        else
+          /etc/init.d/mdns-repeater stop >/tmp/devicecode-config-restore-mdns.log 2>&1 || true
+        fi
+      fi
     ) </dev/null >/tmp/devicecode-config-restore-wrapper.log 2>&1 &
     echo "restore-launched"
   else

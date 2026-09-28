@@ -1152,6 +1152,7 @@ function Manager:_apply_transaction(item)
 
 	local record_results = {}
 	local failed = nil
+	local activation_started = false
 	for _, record in ipairs(records) do
 		local rt0 = fibers.now()
 		log_manager(self, 'debug', (function ()
@@ -1202,6 +1203,7 @@ function Manager:_apply_transaction(item)
 			-- non-OpenWrt hosts should still exercise validation, reconciliation and
 			-- transaction/rollback semantics without attempting /etc/init.d commands.
 		else
+			activation_started = true
 			local sync_entries, async_entries = split_activation_entries(restart_entries)
 			for _, entry in ipairs(sync_entries) do
 				local rok, rerr = self:_run_restart_entry(entry, trace)
@@ -1247,6 +1249,21 @@ function Manager:_apply_transaction(item)
 				return p
 			end)())
 			local rok, rerr, restored = restore_packages(self._cursor, snapshots, packages)
+			-- Opt-in recovery keeps runtime services consistent with restored UCI.
+			-- Use all records in their original order, including the failed activation.
+			if rok and activation_started and tx.reactivate_on_rollback then
+				local previous = {}
+				for _, record in ipairs(records) do previous[#previous + 1] = { ok = true, record = record } end
+				result.rollback.reactivated = true
+				for _, entry in ipairs(trim_restarts(previous)) do
+					entry.wait = true
+					local active, active_err = self:_run_restart_entry(entry, trace)
+					if not active then
+						rok, rerr = false, active_err or 'rollback activation failed'
+						result.rollback.reactivated = false
+					end
+				end
+			end
 			result.timings.rollback_ms = elapsed_ms(phase)
 			result.rollback.ok = rok == true
 			result.rollback.packages = restored or {}
@@ -1338,6 +1355,7 @@ function Manager:transaction_op(spec, opts)
 				records = records,
 				packages = spec.packages or record_packages(records),
 				rollback = spec.rollback ~= false,
+				reactivate_on_rollback = spec.reactivate_on_rollback == true,
 				trace = opts.trace,
 			},
 			reply_tx = reply_tx,

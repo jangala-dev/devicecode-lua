@@ -219,11 +219,12 @@ fibers.run(function(_scope)
   local result = perform(provider:apply_op({ intent = intent }))
   assert(result and result.ok == true, 'apply failed: ' .. tostring(result and result.err))
   assert(result.activation == nil, 'provider activation should be synchronous for structural network apply')
-  eq(#restarts, 4, 'activation command count')
+  eq(#restarts, 5, 'activation command count')
   provider:terminate('test complete')
 end)
 
-eq(restarts[#restarts], '/etc/init.d/mwan3 restart', 'last restart command')
+eq(restarts[4], '/etc/init.d/mwan3 restart', 'fourth restart command')
+eq(restarts[5], table.concat(require('services.hal.backends.network.providers.openwrt.mdns_repeater').activation_command(), ' '), 'discovery activates last')
 
 local c = assert(uci.cursor(conf, save))
 if type(c.load) == 'function' then pcall(function() c:load('firewall') end) end
