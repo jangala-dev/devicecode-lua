@@ -65,17 +65,56 @@ function tests.test_signal_poll_emits_access_tech_and_measurements_together()
 	end)
 end
 
+function tests.test_incomplete_startup_identity_retries_until_firmware_is_available()
+	runfibers.run(function()
+		local reads = 0
+		local driver = setmetatable({
+			backend = {
+				read_identity = function()
+					reads = reads + 1
+					return {
+						imei = 'test-imei',
+						firmware = reads >= 3 and 'test-firmware' or nil,
+					}, ''
+				end,
+			},
+			cache = cache.new(math.huge),
+		}, modem_driver._test.Modem)
+		driver:_cache_group('identity', { imei = 'test-imei' })
+
+		for expected_reads = 1, 3 do
+			local identity, err = driver:_get_group('identity', math.huge)
+			eq(err, '')
+			eq(identity.imei, 'test-imei')
+			eq(identity.firmware, expected_reads == 3 and 'test-firmware' or nil)
+			eq(reads, expected_reads)
+		end
+
+		local identity, err = driver:_get_group('identity', math.huge)
+		eq(err, '')
+		eq(identity.firmware, 'test-firmware')
+		eq(reads, 3)
+	end)
+end
+
 function tests.test_full_info_snapshot_marks_present_and_absent_fields_as_observed()
 	runfibers.run(function(scope)
 		local emitted
+		local identity_reads = 0
+		local port_reads = 0
 		local done = pulse.new()
 		local done_version = done:version()
 		local driver = setmetatable({
 			backend = {
 				read_identity = function()
-					return { imei = 'test-imei', drivers = {}, model = 'Test modem' }, ''
+					identity_reads = identity_reads + 1
+					return {
+						imei = 'test-imei', drivers = {}, model = 'Test modem',
+						firmware = identity_reads > 1 and 'test-firmware' or nil,
+					}, ''
 				end,
 				read_ports = function()
+					port_reads = port_reads + 1
 					return { device = '/sys/test', at_ports = {}, qmi_ports = {}, net_ports = { 'wwan0' } }, ''
 				end,
 				read_sim_info = function()
@@ -123,6 +162,24 @@ function tests.test_full_info_snapshot_marks_present_and_absent_fields_as_observ
 		eq(emitted.values.sim_lock, nil)
 		ok(type(emitted.observed_at.operator) == 'number')
 		ok(type(emitted.observed_at.sim_lock) == 'number')
+		eq(emitted.values.firmware, nil)
+		eq(identity_reads, 1)
+
+		done_version = done:version()
+		local refresh_ok, refresh_err = driver:refresh_info()
+		ok(refresh_ok, refresh_err)
+		done:changed(done_version)
+		eq(emitted.values.firmware, 'test-firmware')
+		eq(emitted.generation, 2)
+		eq(identity_reads, 2)
+
+		done_version = done:version()
+		driver.state_pulse:signal()
+		done:changed(done_version)
+		eq(emitted.values.firmware, 'test-firmware')
+		eq(emitted.generation, 3)
+		eq(identity_reads, 2)
+		eq(port_reads, 1)
 	end)
 end
 
