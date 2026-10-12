@@ -298,7 +298,9 @@ function Modem:_get_group(group, timescale)
     end
 
     local cached = self.cache:get(group, timescale)
-    if cached ~= nil then
+    -- Firmware lookup failures are non-fatal during startup. Retry incomplete
+    -- identity reads even when callers request an indefinitely cached snapshot.
+    if cached ~= nil and not (group == 'identity' and cached.firmware == nil) then
         return cached, "", self.group_observed_at and self.group_observed_at[group] or {}
     end
 
