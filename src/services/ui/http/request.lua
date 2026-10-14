@@ -9,6 +9,7 @@ local static        = require 'services.ui.http.static'
 local sse           = require 'services.ui.http.sse'
 local queries       = require 'services.ui.queries'
 local local_model   = require 'services.ui.local_model'
+local usage         = require 'services.ui.usage'
 local auth          = require 'services.ui.auth'
 local user_operation = require 'services.ui.user_operation'
 local upload        = require 'services.ui.update.upload'
@@ -128,6 +129,23 @@ local function json_body_table(ctx, deps, opts)
 	if obj == cjson.null or type(obj) ~= 'table' then return nil, 'invalid_body' end
 	ctx._ui_json_body = obj
 	return obj, nil
+end
+
+local function handle_local_ui_visit(owner, ctx, deps)
+	local payload, err = json_body_table(ctx, deps, { max_bytes = 256 })
+	if not payload or not usage.valid(payload) then
+		perform_response(owner:reply_error_op(400, err or 'bad_request'))
+		return { status = 'bad_request' }
+	end
+	-- Publish without retaining: a metrics restart must not replay an old visit.
+	-- No cloud work or RPC is performed on the HTTP request path.
+	if deps.conn then
+		deps.conn:publish(usage.topic, { value = {
+			visitor_id = payload.visitor_id, visit_id = payload.visit_id,
+		} })
+	end
+	perform_response(owner:reply_json_op(202, { accepted = true }))
+	return { status = 'ok' }
 end
 
 local function session_id_from(ctx)
@@ -487,6 +505,8 @@ function M.run(scope, ctx, deps)
 
 	if route.kind == 'read' then
 		return handle_read(owner, route, deps)
+	elseif route.kind == 'local_ui_visit' then
+		return handle_local_ui_visit(owner, ctx, deps)
 	elseif route.kind == 'local_ui_bootstrap' then
 		return handle_local_ui_bootstrap(owner, deps)
 	elseif route.kind == 'gsm_apns_get' then
