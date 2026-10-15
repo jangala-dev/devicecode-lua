@@ -36,6 +36,7 @@ local pulse = require "fibers.pulse"
 ---@field card_state string?
 ---@field signal_poll_interval number?
 ---@field log Logger
+---@field card_state ModemState?
 local Modem = {}
 Modem.__index = Modem
 
@@ -126,6 +127,7 @@ local GROUP_FIELDS = {
             "tx_bytes",
         },
     },
+    pdp = { fields = { "pdp_contexts" }, does_emit = false },
 }
 
 ---@param groups table<string, ModemInfoGroup>
@@ -151,6 +153,7 @@ local GROUP_FETCHERS = {
     network = "read_network_info",
     signal = "read_signal",
     traffic = "read_traffic",
+    pdp = "read_pdp_info",
 }
 
 ---- Modem Utility Functions ----
@@ -300,14 +303,19 @@ end
 
 ---@param group string
 ---@param timescale number?
----@return any snapshot
+---@return ModemInfoSnapshot? snapshot
 ---@return string error
 function Modem:_get_group(group, timescale)
     if not group_valid(group) then
         return nil, "unsupported group: " .. tostring(group)
     end
 
-    local cached = self.cache:get(group, timescale)
+    if group == 'pdp' then
+        local ok, err = self:_require_registered()
+        if not ok then return nil, err end
+    end
+
+    local cached = group ~= 'pdp' and self.cache:get(group, timescale) or nil
     -- Firmware lookup failures are non-fatal during startup. Retry incomplete
     -- identity reads even when callers request an indefinitely cached snapshot.
     if cached ~= nil and not (group == 'identity' and cached.firmware == nil) then
@@ -328,8 +336,19 @@ function Modem:_get_group(group, timescale)
         return nil, err
     end
 
+    if group == 'pdp' then return snapshot, "", {} end
     local timestamps = self:_cache_group(group, snapshot, observed_at)
     return snapshot, "", timestamps
+end
+
+-- State is updated by the lifecycle monitor before its event is published.
+---@return boolean registered
+---@return string error
+function Modem:_require_registered()
+    if self.card_state ~= 'registered' then
+        return false, 'modem_not_registered:' .. tostring(self.card_state or 'unknown')
+    end
+    return true, ""
 end
 
 --- Checks if an error string indicates a closed command
@@ -409,6 +428,28 @@ function Modem:reset()
     end
     self:_invalidate_dynamic()
     return true
+end
+
+---@return boolean ok
+---@return string? reason
+---@return integer? code
+function Modem:restart()
+    return self:reset()
+end
+
+---@param opts ModemSetPdnTypeOpts
+---@return boolean ok
+---@return string reason
+---@return integer? code
+function Modem:set_pdn_type(opts)
+    if opts == nil or getmetatable(opts) ~= capability_args.ModemSetPdnTypeOpts then
+        return return_error("invalid options", 1)
+    end
+    local registered, state_err = self:_require_registered()
+    if not registered then return return_error(state_err, 1) end
+    local ok, err = self.backend:set_pdn_type(opts.cid, opts.pdp_type)
+    if not ok then return return_error(err, 1) end
+    return true, ""
 end
 
 --- Connect the modem
@@ -699,7 +740,10 @@ end
 --- Handles both modem card state changes and SIM presence lifecycle in a single fiber.
 --- card_state is always current when SIM removal decisions are made, eliminating the
 --- need for backend-level guards about whether to reset on SIM absent.
+---@return nil
 function Modem:modem_lifecycle_monitor()
+    ---@param state_update ModemStateEvent
+    ---@return nil
     local function on_card_change(state_update)
         ---@cast state_update ModemStateEvent
         self.log:debug({ what = 'state_change', imei = self.imei, from = state_update.from, to = state_update.to })
@@ -742,6 +786,7 @@ function Modem:modem_lifecycle_monitor()
     self.log:debug({ what = 'lifecycle_monitor_started', imei = self.imei })
 
     fibers.current_scope():finally(function()
+        self.card_state = nil
         self.log:debug({ what = 'lifecycle_monitor_exiting', imei = self.imei })
     end)
 
