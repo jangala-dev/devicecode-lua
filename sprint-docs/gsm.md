@@ -33,6 +33,28 @@ The GSM service is responsible for managing GSM modems, handling their configura
 - **Default Configuration**: Holds default settings for modems.
 - **Known Modems**: Specific configurations for known modems identified by IMEI or device path.
 
+Set `pdp_type` in `modems.default` or override it in a `modems.known` entry.
+Accepted values are `IP`, `IPV4V6`, and `IPV6`. Modems inherit the default;
+if neither specifies a type, GSM uses `IP`.
+
+```json
+{
+  "schema": "devicecode.config/gsm/1",
+  "modems": {
+    "default": { "enabled": true, "pdp_type": "IP" },
+    "known": [
+      { "name": "primary", "imei": "123456789012345", "pdp_type": "IPV4V6" }
+    ]
+  }
+}
+```
+
+After all eligible APNs fail, GSM changes active PDP contexts whose type differs
+from the configured value, verifies the changes, and reboots the modem. Changing
+this setting does not immediately reconfigure an already connected modem.
+PDP commands require the modem to be registered. Once a change is verified,
+the modem can reboot from any state to apply it.
+
 ## GSM Internal Overview
 
 ### Data Structures

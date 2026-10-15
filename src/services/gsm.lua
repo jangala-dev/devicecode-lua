@@ -41,6 +41,11 @@ local REQUEST_TIMEOUT = 10
 local DEFAULT_RETRY_TIMEOUT = 20
 local DEFAULT_METRICS_INTERVAL = 120
 local DEFAULT_SIGNAL_FREQ = 5
+---@alias GsmPdpType 'IP'|'IPV4V6'|'IPV6'
+---@type GsmPdpType
+local DEFAULT_PDP_TYPE = 'IP'
+---@type table<GsmPdpType, boolean>
+local VALID_PDP_TYPES = { IP = true, IPV4V6 = true, IPV6 = true }
 local APN_SETTLE_TIMEOUT = 3 -- seconds to wait for modem to enter 'connecting' after a failed attempt
 
 local SCHEMA_STANDARD = "devicecode.config/gsm/1"
@@ -438,6 +443,7 @@ local function select_signal_for_bars(signal_tech, rssi, rsrp, rscp)
 end
 
 ---@class GsmModemConfig
+---@field pdp_type GsmPdpType?
 ---@field enabled boolean?
 ---@field autoconnect boolean?
 ---@field signal_freq number?
@@ -477,6 +483,24 @@ local function normalize_config(cfg)
 	if modems_known ~= nil and type(modems_known) ~= 'table' then
 		return {}, "config.modems.known must be a list"
 	end
+	---@param modem_cfg table<string, any>
+	---@param path string
+	---@return string error
+	local function validate_pdp_type(modem_cfg, path)
+		local pdp_type = rawget(modem_cfg, 'pdp_type')
+		if pdp_type ~= nil and (type(pdp_type) ~= 'string' or not VALID_PDP_TYPES[pdp_type]) then
+			return path .. ".pdp_type must be IP, IPV4V6 or IPV6"
+		end
+		return ""
+	end
+	local pdp_err = validate_pdp_type(modems_default, 'config.modems.default')
+	if pdp_err ~= "" then return {}, pdp_err end
+	for index, entry in ipairs(modems_known or {}) do
+		if is_plain_table(entry) then
+			pdp_err = validate_pdp_type(entry, 'config.modems.known[' .. index .. ']')
+			if pdp_err ~= "" then return {}, pdp_err end
+		end
+	end
 	local apn_store = rawget(cfg, 'apn_store')
 	if apn_store ~= nil and not is_plain_table(apn_store) then
 		return {}, "config.apn_store must be a table"
@@ -494,6 +518,7 @@ end
 ---@return string error
 local function get_modem_config(cfg, imei, device)
 	local modem_base = shallow_copy(cfg.modems and cfg.modems.default or {})
+	if modem_base.pdp_type == nil then modem_base.pdp_type = DEFAULT_PDP_TYPE end
 	local known = cfg.modems and cfg.modems.known
 	if type(known) == 'table' then
 		for _, entry in ipairs(known) do
@@ -1103,7 +1128,7 @@ end
 ---@return string error
 ---@return ModemState? state
 function GsmModem:_recover_pdp()
-	local pdp_type = 'IP'
+	local pdp_type = self.cfg.pdp_type or DEFAULT_PDP_TYPE
 	self.svc:obs_log('debug', { what = 'pdp_inspect', modem = self.name, pdp_type = pdp_type })
 	local contexts, err = modem_get_field(self.cap, 'pdp_contexts', REQUEST_TIMEOUT, 0)
 	if err ~= "" then
@@ -1877,6 +1902,8 @@ function GsmService.start(conn, opts)
 end
 
 GsmService._test = {
+	normalize_config = normalize_config,
+	get_modem_config = get_modem_config,
 	GsmModem = GsmModem,
 	build_sim_payload = build_sim_payload,
 	derive_access_tech = derive_access_tech,
