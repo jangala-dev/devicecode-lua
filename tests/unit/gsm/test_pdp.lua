@@ -58,6 +58,87 @@ local function count(calls, method)
     return n
 end
 
+local function config(default, known)
+    return { schema = 'devicecode.config/gsm/1', modems = { default = default or {}, known = known } }
+end
+
+function tests.test_pdp_config_accepts_supported_types_and_rejects_other_values()
+    for _, pdp_type in ipairs({ 'IP', 'IPV4V6', 'IPV6' }) do
+        local _, err = gsm._test.normalize_config(config({ pdp_type = pdp_type }, { { pdp_type = pdp_type } }))
+        eq(err, '')
+    end
+    for _, pdp_type in ipairs({ '', 'ip', 'PPP', false, 1, {} }) do
+        local _, err = gsm._test.normalize_config(config({ pdp_type = pdp_type }))
+        eq(err, 'config.modems.default.pdp_type must be IP, IPV4V6 or IPV6')
+        _, err = gsm._test.normalize_config(config({}, { { pdp_type = pdp_type } }))
+        eq(err, 'config.modems.known[1].pdp_type must be IP, IPV4V6 or IPV6')
+    end
+end
+
+function tests.test_pdp_config_inherits_default_and_supports_imei_and_device_overrides()
+    local input = config({ pdp_type = 'IPV4V6', signal_freq = 10 }, {
+        { imei = 'inherited', name = 'primary' },
+        { imei = 'override', pdp_type = 'IPV6' },
+        { id_field = 'device', device = '/dev/modem', pdp_type = 'IP' },
+    })
+    local cfg, err = gsm._test.normalize_config(input)
+    eq(err, '')
+    local inherited, name = gsm._test.get_modem_config(cfg, 'inherited', '')
+    eq(inherited.pdp_type, 'IPV4V6')
+    eq(inherited.signal_freq, 10)
+    eq(name, 'primary')
+    eq(gsm._test.get_modem_config(cfg, 'override', '').pdp_type, 'IPV6')
+    eq(gsm._test.get_modem_config(cfg, 'other', '/dev/modem').pdp_type, 'IP')
+    eq(gsm._test.get_modem_config(cfg, 'unknown', '').pdp_type, 'IPV4V6')
+    eq(input.modems.known[1].pdp_type, nil)
+end
+
+function tests.test_pdp_config_without_type_defaults_to_ip_without_mutating_input()
+    local input = config({}, { { imei = 'known' } })
+    local cfg, err = gsm._test.normalize_config(input)
+    eq(err, '')
+    eq(gsm._test.get_modem_config(cfg, 'unknown', '').pdp_type, 'IP')
+    eq(gsm._test.get_modem_config(cfg, 'known', '').pdp_type, 'IP')
+    eq(input.modems.default.pdp_type, nil)
+    eq(input.modems.known[1].pdp_type, nil)
+end
+
+function tests.test_pdp_recovery_uses_configured_type_and_skips_matching_contexts()
+    runfibers.run(function()
+        for _, pdp_type in ipairs({ 'IP', 'IPV4V6', 'IPV6' }) do
+            local m, calls = fixture({
+                context(1, 'IP', true), context(2, 'IPV4V6', true), context(3, 'IPV6', true),
+                context(4, 'OTHER', false),
+            })
+            local cfg = gsm._test.normalize_config(config({ pdp_type = pdp_type }))
+            m:apply_config(gsm._test.get_modem_config(cfg, 'unknown', ''))
+            eq(m:_recover_pdp(), true)
+            eq(count(calls, 'set_pdn_type'), 2)
+            eq(count(calls, 'restart'), 1)
+            for _, call in ipairs(calls) do
+                if call.method == 'set_pdn_type' then
+                    eq(call.opts.pdp_type, pdp_type)
+                    assert(({ 'IP', 'IPV4V6', 'IPV6' })[call.opts.cid] ~= pdp_type)
+                end
+            end
+        end
+    end)
+end
+
+function tests.test_pdp_recovery_does_not_restart_when_configured_type_already_matches()
+    runfibers.run(function()
+        for _, pdp_type in ipairs({ 'IP', 'IPV4V6', 'IPV6' }) do
+            local m, calls = fixture({ context(1, pdp_type, true) })
+            m.cfg.pdp_type = pdp_type
+            local restarted, err = m:_recover_pdp()
+            eq(restarted, false)
+            eq(err, '')
+            eq(count(calls, 'set_pdn_type'), 0)
+            eq(count(calls, 'restart'), 0)
+        end
+    end)
+end
+
 function tests.test_pdp_recovery_changes_all_active_non_ip_contexts_and_restarts_once()
     runfibers.run(function()
         local m, calls, _, _, subs = fixture({
