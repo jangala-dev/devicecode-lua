@@ -437,9 +437,26 @@ local function select_signal_for_bars(signal_tech, rssi, rsrp, rscp)
 	return signal_tech, 0, ""
 end
 
----@param cfg table?
----@return table
----@return string
+---@class GsmModemConfig
+---@field enabled boolean?
+---@field autoconnect boolean?
+---@field signal_freq number?
+---@field metrics_interval number?
+---@field apn_rank_cutoff number?
+---@field roaming_allow boolean?
+---@field name string?
+---@field id_field 'imei'|'device'|nil
+---@field imei string|number|nil
+---@field device string?
+
+---@class GsmConfig
+---@field schema string?
+---@field modems { default: GsmModemConfig, known: GsmModemConfig[]? }?
+---@field apn_store { kind: string?, id: string?, store_id: string?, key: string? }?
+
+---@param cfg table<string, any>?
+---@return GsmConfig config Empty on validation failure; schema is removed on success.
+---@return string error
 local function normalize_config(cfg)
 	if not is_plain_table(cfg) then
 		return {}, "config must be a table"
@@ -469,12 +486,12 @@ local function normalize_config(cfg)
 	return out, ""
 end
 
----@param cfg table
+---@param cfg GsmConfig
 ---@param imei string|number
 ---@param device string
----@return table
----@return string
----@return string
+---@return GsmModemConfig config
+---@return string name
+---@return string error
 local function get_modem_config(cfg, imei, device)
 	local modem_base = shallow_copy(cfg.modems and cfg.modems.default or {})
 	local known = cfg.modems and cfg.modems.known
@@ -505,9 +522,10 @@ end
 --- the subscription so only live transitions are seen here.
 ---@param name string
 ---@param state_sub Subscription
----@param log_fn function?
+---@param log_fn fun(level: string, payload: table<string, string>)?
 ---@return boolean ok
 ---@return string error
+---@return ModemState? settled_state
 local function wait_for_connection(name, state_sub, log_fn)
 	log_fn = log_fn or function(_, _) end
 
@@ -532,6 +550,7 @@ local function wait_for_connection(name, state_sub, log_fn)
 		local state = msg.payload and msg.payload.to
 		log_fn('debug', { what = 'connection_progress', modem = name, modem_state = tostring(state) })
 
+		if state == STATE_CONNECTED then return true, "", state end
 		if state == 'connecting' then
 			break
 		end
@@ -547,7 +566,7 @@ local function wait_for_connection(name, state_sub, log_fn)
 		local state = msg.payload and msg.payload.to
 		log_fn('debug', { what = 'connection_progress', modem = name, modem_state = tostring(state) })
 		if state and state ~= 'connecting' then
-			return true, ""
+			return true, "", state
 		end
 	end
 end
@@ -557,11 +576,14 @@ end
 ---@field cap CapabilityReference
 ---@field id string|number
 ---@field name string
----@field cfg table
+---@field cfg GsmModemConfig
 ---@field device string
 ---@field scope Scope?
 ---@field config_pulse Pulse
 ---@field svc ServiceBase
+---@field current_state ModemState?
+---@field pdp_restart_needed boolean?
+---@field pdp_restart_waiting boolean?
 
 local function id_suffix(id)
 	id = tostring(id or '')
@@ -703,7 +725,7 @@ function GsmModem:_signal_config_change()
 	self.config_pulse:signal()
 end
 
----@param cfg table
+---@param cfg GsmModemConfig
 ---@param name string?
 ---@return nil
 function GsmModem:apply_config(cfg, name)
@@ -1035,9 +1057,95 @@ function GsmModem:_metrics_loop()
 	end
 end
 
----@return table|nil apn
+---@param err string?
+---@return ModemState? state
+local function pdp_error_state(err)
+	return err and err:match('modem_not_registered:([%w_-]+)') or nil
+end
+
+-- Subscribe before reset so a fast reboot cannot be mistaken for stale registration.
+---@return 'ok'|'failed'|'cancelled' status
+---@return ScopeReport report
+---@return any restarted_or_error Boolean on success; otherwise the scope's unconstrained failure value.
+---@return string? error Present when status is ok.
+---@return ModemState? next_state
+function GsmModem:_restart_after_pdp()
+	return fibers.run_scope(function(scope)
+		local state_sub = self.cap:get_state_sub('card', { queue_len = 16, full = 'drop_oldest' })
+		scope:finally(function() state_sub:unsubscribe() end)
+		state_sub:recv() -- drain retained state
+		local _, err = call_modem_rpc(self.cap, 'restart', {}, REQUEST_TIMEOUT)
+		self.svc:obs_log(err == "" and 'info' or 'warn', {
+			what = 'pdp_restart', modem = self.name, err = err,
+		})
+		if err ~= "" then return false, err end
+		self.pdp_restart_needed = false
+		self.pdp_restart_waiting = true
+		local deadline = fibers.now() + DEFAULT_RETRY_TIMEOUT
+		while true do
+			local which, msg = perform(op.named_choice({
+				state = state_sub:recv_op(),
+				timeout = sleep.sleep_op(math.max(0, deadline - fibers.now())),
+			}))
+			if which == 'timeout' then return false, 'pdp_restart_state_timeout' end
+			if not msg then return false, 'state subscription interrupted' end
+			local state = msg.payload and msg.payload.to
+			local from = msg.payload and msg.payload.from
+			if state and (state ~= 'registered' or (from and from ~= 'registered')) then
+				self.pdp_restart_waiting = false
+				return true, "", state
+			end
+		end
+	end)
+end
+
+---@return boolean restarted
+---@return string error
+---@return ModemState? state
+function GsmModem:_recover_pdp()
+	local pdp_type = 'IP'
+	self.svc:obs_log('debug', { what = 'pdp_inspect', modem = self.name, pdp_type = pdp_type })
+	local contexts, err = modem_get_field(self.cap, 'pdp_contexts', REQUEST_TIMEOUT, 0)
+	if err ~= "" then
+		self.svc:obs_log('warn', { what = 'pdp_inspect_failed', modem = self.name, err = err })
+		if not self.pdp_restart_needed then return false, err, pdp_error_state(err) end
+		contexts = {}
+	end
+	table.sort(contexts, function(a, b) return a.cid < b.cid end)
+	for _, context in ipairs(contexts) do
+		if context.active and context.pdp_type ~= pdp_type then
+			local opts, opts_err = cap_sdk.args.new.ModemSetPdnTypeOpts(context.cid, pdp_type)
+			local set_err = opts_err
+			if opts then
+				local _, rpc_err = call_modem_rpc(self.cap, 'set_pdn_type', opts, REQUEST_TIMEOUT)
+				set_err = rpc_err
+			end
+			self.svc:obs_log(set_err == "" and 'info' or 'warn', {
+				what = set_err == "" and 'pdp_type_changed' or 'pdp_type_change_failed',
+				modem = self.name, cid = context.cid, pdp_type = pdp_type, err = set_err,
+			})
+			if set_err == "" then self.pdp_restart_needed = true end
+			local state = pdp_error_state(set_err)
+			if state then
+				if not self.pdp_restart_needed then return false, set_err, state end
+				break -- Stop PDP commands; verified changes still need a reboot.
+			end
+		end
+	end
+	if not self.pdp_restart_needed then return false, "" end
+
+	-- Registration is required for PDP commands, not for applying verified changes by rebooting.
+	local status, _, restarted, restart_err, next_state = self:_restart_after_pdp()
+	if status ~= 'ok' then return false, tostring(restarted or 'pdp_restart_failed') end
+	---@cast restarted boolean
+	---@cast restart_err string
+	return restarted, restart_err, next_state
+end
+
+---@return table<string, string|number|boolean>? apn
 ---@return string error
 ---@return number? retry_timeout
+---@return ModemState? next_state
 function GsmModem:_apn_connect()
 	-- Fetch network/SIM identifiers from HAL
 	local mcc, mcc_err = modem_get_field(self.cap, 'mcc', REQUEST_TIMEOUT)
@@ -1069,6 +1177,7 @@ function GsmModem:_apn_connect()
 	local rank_cutoff = tonumber(self.cfg.apn_rank_cutoff) or 4
 	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, nil, gid1, self.svc and self.svc.custom_apns)
 
+	local attempts = 0
 	-- Iterate through ranked APNs
 	for _, ranking in ipairs(rankings) do
 		if ranking.rank > rank_cutoff then break end
@@ -1093,6 +1202,7 @@ function GsmModem:_apn_connect()
 				self.svc:obs_log('debug',
 					{ what = 'apn_connect_attempt', modem = self.name, apn = ranking.name, conn_str = conn_str })
 
+				attempts = attempts + 1
 				local _, conn_err = call_modem_rpc(self.cap, 'connect', opts, REQUEST_TIMEOUT)
 
 				self.svc:obs_log('debug',
@@ -1105,7 +1215,7 @@ function GsmModem:_apn_connect()
 				end
 
 				-- Check for throttled error
-				if string.find(conn_err, "pdn-ipv4-call-throttled") then
+				if string.find(conn_err, "pdn-ipv4-call-throttled", 1, true) then
 					self.svc:obs_log('warn', { what = 'apn_throttled', modem = self.name })
 					state_sub:unsubscribe()
 					return nil, conn_err, 360 -- 6-minute backoff
@@ -1115,7 +1225,7 @@ function GsmModem:_apn_connect()
 				self.svc:obs_log('debug',
 					{ what = 'apn_connect_failed', modem = self.name, apn = ranking.name, err = conn_err })
 
-				local ok, wait_err = wait_for_connection(
+				local ok, wait_err, settled_state = wait_for_connection(
 					self.name, state_sub,
 					function(level, payload) self.svc:obs_log(level, payload) end
 				)
@@ -1123,6 +1233,11 @@ function GsmModem:_apn_connect()
 				if not ok then
 					self.svc:obs_log('warn', { what = 'wait_for_connection_failed', modem = self.name, err = wait_err })
 					return nil, wait_err, DEFAULT_RETRY_TIMEOUT
+				end
+
+				if settled_state == STATE_CONNECTED then return apn_table, "", nil, settled_state end
+				if settled_state and settled_state ~= 'registered' then
+					return nil, 'modem_not_registered:' .. settled_state, DEFAULT_RETRY_TIMEOUT, settled_state
 				end
 
 				self.svc:obs_log('warn', { what = 'apn_attempt_failed', modem = self.name, apn = ranking.name })
@@ -1136,6 +1251,14 @@ function GsmModem:_apn_connect()
 		end
 	end
 
+	if attempts > 0 then
+		local restarted, recovery_err, state = self:_recover_pdp()
+		if state == STATE_CONNECTED then return nil, "", nil, state end
+		if restarted then return nil, "", 0, state end
+		if recovery_err ~= "" then
+			return nil, recovery_err, state == 'disabled' and 0 or DEFAULT_RETRY_TIMEOUT, state
+		end
+	end
 	return nil, "no apn connected", DEFAULT_RETRY_TIMEOUT
 end
 
@@ -1177,6 +1300,9 @@ function GsmModem:_autoconnect_loop()
 			local msg = msg_or_ver
 			if msg then
 				current_state = msg.payload.to
+				if current_state ~= 'registered' or (msg.payload.from and msg.payload.from ~= 'registered') then
+					self.pdp_restart_waiting = false
+				end
 				self.current_state = current_state
 				self.modem_state = normalize_optional_string(current_state)
 				if current_state == 'locked' then
@@ -1232,8 +1358,13 @@ function GsmModem:_autoconnect_loop()
 			elseif current_state == 'failed' then
 				local _, err_inner = call_modem_rpc(self.cap, 'listen_for_sim', {}, REQUEST_TIMEOUT)
 				err = err_inner
-			elseif current_state == 'registered' then
-				local _, err_inner, retry_inner = self:_apn_connect()
+			elseif current_state == 'registered' and not self.pdp_restart_waiting then
+				local _, err_inner, retry_inner, next_state = self:_apn_connect()
+				if next_state then
+					current_state = next_state
+					self.current_state = next_state
+					self.modem_state = normalize_optional_string(next_state)
+				end
 				err = err_inner
 				retry_timeout = retry_inner
 				local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
@@ -1266,7 +1397,7 @@ function GsmModem:_autoconnect_loop()
 							backoff
 					})
 			else
-				backoff = math.huge
+				backoff = retry_timeout or math.huge
 			end
 		end
 	end

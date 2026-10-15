@@ -173,6 +173,7 @@ local files = {
 	"unit.gsm.test_apn_store_control_store",
 	"unit.gsm.test_apn",
 	"unit.gsm.test_state",
+	"unit.gsm.test_pdp",
 	"unit.net.test_architecture",
 	"unit.net.test_config",
 	"unit.net.test_ipv4",
