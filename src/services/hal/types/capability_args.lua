@@ -1,5 +1,26 @@
 local new = {}
 
+---@class ModemSetPdnTypeOpts
+---@field cid integer
+---@field pdp_type string
+local ModemSetPdnTypeOpts = {}
+ModemSetPdnTypeOpts.__index = ModemSetPdnTypeOpts
+
+---Create options for setting a PDP context's type.
+---@param cid integer
+---@param pdp_type string
+---@return ModemSetPdnTypeOpts? opts
+---@return string error
+function new.ModemSetPdnTypeOpts(cid, pdp_type)
+    if type(cid) ~= 'number' or cid <= 0 or cid == math.huge or cid % 1 ~= 0 then
+        return nil, "invalid cid"
+    end
+    if type(pdp_type) ~= 'string' or not pdp_type:match('^[%w%-]+$') then
+        return nil, "invalid pdp_type"
+    end
+    return setmetatable({ cid = cid, pdp_type = pdp_type:upper() }, ModemSetPdnTypeOpts), ""
+end
+
 ---@class ModemGetOpts
 ---@field field string
 ---@field timescale? number
@@ -1078,6 +1099,7 @@ end
 ---@field reason? string  -- error message on failure
 
 return {
+    ModemSetPdnTypeOpts = ModemSetPdnTypeOpts,
     ModemGetOpts = ModemGetOpts,
     ModemConnectOpts = ModemConnectOpts,
     ModemSignalUpdateOpts = ModemSignalUpdateOpts,

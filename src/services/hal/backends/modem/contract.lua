@@ -14,6 +14,10 @@ local BACKEND_FUNCTIONS = list_to_map {
     "read_network_info",
     "read_signal",
     "read_traffic",
+    "read_pdp_contexts",
+    "read_active_pdp_contexts",
+    "read_pdp_info",
+    "set_pdn_type",
 
     -- Private reads
     "_read_firmware",
