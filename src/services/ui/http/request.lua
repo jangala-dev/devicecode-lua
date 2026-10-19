@@ -109,7 +109,11 @@ local function json_body_table(ctx, deps, opts)
 	if type(ctx.body_string) == 'string' then
 		raw = ctx.body_string
 	elseif opts.max_bytes and type(ctx.read_chars_op) == 'function' then
-		-- Read one byte past the limit so an oversized body is never buffered whole.
+		-- lua-http buffers each transfer chunk whole, so a bounded body must declare its
+		-- length up front; refuse chunked or oversized bodies before reading anything.
+		local te = ctx_header(ctx, 'transfer-encoding') or ctx_header(ctx, 'Transfer-Encoding')
+		local length = tonumber(ctx_header(ctx, 'content-length') or ctx_header(ctx, 'Content-Length'))
+		if te or not length or length > opts.max_bytes then return nil, 'request_body_too_large' end
 		raw = fibers.perform(ctx:read_chars_op(opts.max_bytes + 1))
 	elseif type(ctx.read_body_as_string_op) == 'function' then
 		raw = fibers.perform(ctx:read_body_as_string_op())

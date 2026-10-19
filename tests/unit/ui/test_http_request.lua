@@ -431,17 +431,28 @@ end
 
 function tests.test_local_ui_visit_never_buffers_an_oversized_body()
 	run_fibers.run(function (scope)
-		local requested
-		local ctx = fake_ctx('POST', '/api/local-ui/visit')
-		ctx.headers = { ['content-type'] = 'application/json' }
-		ctx.read_body_as_string_op = function () error('unbounded body read') end
-		ctx.read_chars_op = function (_, n)
-			requested = n
-			return require('fibers.op').always(string.rep('x', math.min(n, 65536)))
+		local valid = '{"visitor_id":"' .. string.rep('a', 32) .. '","visit_id":"' .. string.rep('b', 32) .. '"}'
+		local sent = 0
+		local deps = { conn = { publish = function () sent = sent + 1 end } }
+		local function visit(headers, body)
+			local requested
+			local ctx = fake_ctx('POST', '/api/local-ui/visit')
+			ctx.headers = headers
+			ctx.read_body_as_string_op = function () error('unbounded body read') end
+			ctx.read_chars_op = function (_, n)
+				requested = n
+				return require('fibers.op').always(body:sub(1, n))
+			end
+			return request.run(scope, ctx, deps).status, ctx.replies[1].status, requested
 		end
-		assert_eq(request.run(scope, ctx, { conn = { publish = function () end } }).status, 'bad_request')
-		assert_eq(ctx.replies[1].status, 400)
-		assert_eq(requested, 257)
+		-- lua-http buffers each transfer chunk whole, so chunked bodies are refused unread.
+		local status, code, requested = visit({ ['content-type'] = 'application/json', ['transfer-encoding'] = 'chunked' }, valid)
+		assert_eq(status, 'bad_request'); assert_eq(code, 400); assert_eq(requested, nil)
+		status, code, requested = visit({ ['content-type'] = 'application/json', ['content-length'] = '65536' }, string.rep('x', 65536))
+		assert_eq(status, 'bad_request'); assert_eq(code, 400); assert_eq(requested, nil)
+		status, code, requested = visit({ ['content-type'] = 'application/json', ['content-length'] = tostring(#valid) }, valid)
+		assert_eq(status, 'ok'); assert_eq(code, 202); assert_eq(requested, 257)
+		assert_eq(sent, 1)
 	end)
 end
 
