@@ -12,7 +12,7 @@ local resource   = require 'devicecode.support.resource'
 local driver_mod = require 'services.hal.drivers.uart'
 
 local M = {
-    api_mode = 'op_only',
+	api_mode = 'op_only',
 }
 
 
@@ -28,14 +28,14 @@ local STOP_TIMEOUT = 5.0
 ---@field generation integer
 ---@field drivers table<string, UARTDriver>
 local S = {
-    started     = false,
-    scope       = nil,
-    logger      = nil,
-    dev_ev_ch   = nil,
-    cap_emit_ch = nil,
-    cfg_ch      = nil,
+	started     = false,
+	scope       = nil,
+	logger      = nil,
+	dev_ev_ch   = nil,
+	cap_emit_ch = nil,
+	cfg_ch      = nil,
 	generation  = 0,
-    drivers     = {},
+	drivers     = {},
 }
 
 local function finalise_manager_scope(scope, generation)
@@ -57,66 +57,66 @@ local function finalise_manager_scope(scope, generation)
 end
 
 local function valid_mode(mode)
-    return mode == nil
-        or mode == '8N1'
-        or mode == '7E1'
-        or mode == '8O1'
+	return mode == nil
+		or mode == '8N1'
+		or mode == '7E1'
+		or mode == '8O1'
 end
 
 local function is_sequence(t)
-    if type(t) ~= 'table' then
-        return false
-    end
+	if type(t) ~= 'table' then
+		return false
+	end
 
-    local n = 0
-    for k in pairs(t) do
-        if type(k) ~= 'number' or k < 1 or k % 1 ~= 0 then
-            return false
-        end
-        n = n + 1
-    end
+	local n = 0
+	for k in pairs(t) do
+		if type(k) ~= 'number' or k < 1 or k % 1 ~= 0 then
+			return false
+		end
+		n = n + 1
+	end
 
-    return n == #t
+	return n == #t
 end
 
 local function normalise_config(raw)
-    if type(raw) ~= 'table' then
-        return nil, 'uart config must be a table with serial_ports list'
-    end
+	if type(raw) ~= 'table' then
+		return nil, 'uart config must be a table with serial_ports list'
+	end
 
-    for k in pairs(raw) do
-        if k ~= 'serial_ports' then
-            return nil, 'uart config only supports serial_ports'
-        end
-    end
+	for k in pairs(raw) do
+		if k ~= 'serial_ports' then
+			return nil, 'uart config only supports serial_ports'
+		end
+	end
 
-    if not is_sequence(raw.serial_ports) then
-        return nil, 'uart serial_ports must be a list'
-    end
+	if not is_sequence(raw.serial_ports) then
+		return nil, 'uart serial_ports must be a list'
+	end
 
-    return raw.serial_ports, nil
+	return raw.serial_ports, nil
 end
 
 local function validate_config(entries)
-    for _, entry in ipairs(entries) do
-        if type(entry) ~= 'table' then
-            return false, 'each uart entry must be a table'
-        end
-        if type(entry.id) ~= 'string' or entry.id == '' then
-            return false, 'uart entry id must be a non-empty string'
-        end
-        if type(entry.path) ~= 'string' or entry.path == '' then
-            return false, 'uart entry path must be a non-empty string'
-        end
-        if entry.baud ~= nil and (type(entry.baud) ~= 'number' or entry.baud <= 0 or entry.baud % 1 ~= 0) then
-            return false, 'uart entry baud must be a positive integer'
-        end
-        if not valid_mode(entry.mode) then
-            return false, 'uart entry mode is invalid'
-        end
-    end
+	for _, entry in ipairs(entries) do
+		if type(entry) ~= 'table' then
+			return false, 'each uart entry must be a table'
+		end
+		if type(entry.id) ~= 'string' or entry.id == '' then
+			return false, 'uart entry id must be a non-empty string'
+		end
+		if type(entry.path) ~= 'string' or entry.path == '' then
+			return false, 'uart entry path must be a non-empty string'
+		end
+		if entry.baud ~= nil and (type(entry.baud) ~= 'number' or entry.baud <= 0 or entry.baud % 1 ~= 0) then
+			return false, 'uart entry baud must be a positive integer'
+		end
+		if not valid_mode(entry.mode) then
+			return false, 'uart entry mode is invalid'
+		end
+	end
 
-    return true, nil
+	return true, nil
 end
 
 local UART_MANAGER_SOURCE_ID = 'uart_manager'
@@ -140,83 +140,83 @@ local function emit_device_removed_op(driver)
 end
 
 local function same_driver_config(driver, entry)
-    return driver.path == entry.path
-        and driver.default_baud == entry.baud
-        and driver.default_mode == entry.mode
+	return driver.path == entry.path
+		and driver.default_baud == entry.baud
+		and driver.default_mode == entry.mode
 end
 
 local function start_driver_op(entry)
-    return fibers.run_scope_op(function ()
-        local driver = driver_mod.new(
-            entry.id,
-            entry.path,
-            entry.baud,
-            entry.mode,
-            S.logger
-        )
+	return fibers.run_scope_op(function ()
+		local driver = driver_mod.new(
+			entry.id,
+			entry.path,
+			entry.baud,
+			entry.mode,
+			S.logger
+		)
 
-        local ok_caps, caps_or_err = fibers.perform(driver:capabilities_op(S.cap_emit_ch))
-        if not ok_caps then
-            return false, tostring(caps_or_err)
-        end
-        local caps = caps_or_err
+		local ok_caps, caps_or_err = fibers.perform(driver:capabilities_op(S.cap_emit_ch))
+		if not ok_caps then
+			return false, tostring(caps_or_err)
+		end
+		local caps = caps_or_err
 
-        local started = false
-        local handed_off = false
+		local started = false
+		local handed_off = false
 
-        local function cleanup_started_driver()
-            if started and not handed_off then
-                resource.terminate_checked(driver, 'manager cleanup', 'HAL manager driver rollback failed')
-            end
-        end
+		local function cleanup_started_driver()
+			if started and not handed_off then
+				resource.terminate_checked(driver, 'manager cleanup', 'HAL manager driver rollback failed')
+			end
+		end
 
-        fibers.current_scope():finally(function ()
-            cleanup_started_driver()
-        end)
+		fibers.current_scope():finally(function ()
+			cleanup_started_driver()
+		end)
 
-        local ok_start, start_err =
-            fibers.perform(driver:start_op(assert(S.scope, 'uart manager scope missing')))
-        if not ok_start then
-            return false, tostring(start_err)
-        end
-        started = true
+		local ok_start, start_err =
+			fibers.perform(driver:start_op(assert(S.scope, 'uart manager scope missing')))
+		if not ok_start then
+			return false, tostring(start_err)
+		end
+		started = true
 
-        local ok_emit, emit_err = fibers.perform(emit_device_added_op(driver, caps))
-        if not ok_emit then
-            return false, tostring(emit_err)
-        end
+		local ok_emit, emit_err = fibers.perform(emit_device_added_op(driver, caps))
+		if not ok_emit then
+			return false, tostring(emit_err)
+		end
 
-        S.drivers[entry.id] = driver
-        handed_off = true
-        return true, nil
-    end):wrap(function (st, rep, ok, err)
-        if st ~= 'ok' then
-            return false, tostring(err or rep)
-        end
-        return ok, err
-    end)
+		S.drivers[entry.id] = driver
+		handed_off = true
+		return true, nil
+	end):wrap(function (st, rep, ok, err)
+		if st ~= 'ok' then
+			return false, tostring(err or rep)
+		end
+		return ok, err
+	end)
 end
 
 local function stop_driver_op(id, driver)
-    return fibers.run_scope_op(function ()
-        local ok_emit, emit_err = fibers.perform(emit_device_removed_op(driver))
-        if not ok_emit then
-            return false, tostring(emit_err)
-        end
+	return fibers.run_scope_op(function ()
+		local ok_emit, emit_err = fibers.perform(emit_device_removed_op(driver))
+		if not ok_emit then
+			return false, tostring(emit_err)
+		end
 
-        local ok_stop, stop_err = fibers.perform(driver:shutdown_op())
-        if not ok_stop then
-            return false, tostring(stop_err)
-        end
+		local ok_stop, stop_err = fibers.perform(driver:shutdown_op())
+		if not ok_stop then
+			return false, tostring(stop_err)
+		end
 
-        S.drivers[id] = nil
-        return true, nil
-    end):wrap(function (st, rep, ok, err)
-        if st ~= 'ok' then
-            return false, tostring(err or rep)
-        end
-        return ok, err
-    end)
+		S.drivers[id] = nil
+		return true, nil
+	end):wrap(function (st, rep, ok, err)
+		if st ~= 'ok' then
+			return false, tostring(err or rep)
+		end
+		return ok, err
+	end)
 end
 
 local function reconcile_op(entries)
@@ -277,44 +277,44 @@ local function shell_loop(generation, cfg_ch)
 end
 
 function M.start_op(logger, dev_ev_ch, cap_emit_ch)
-    local owner_scope = fibers.current_scope()
-    assert(owner_scope ~= nil, 'uart.start_op must be called from inside a fiber')
+	local owner_scope = fibers.current_scope()
+	assert(owner_scope ~= nil, 'uart.start_op must be called from inside a fiber')
 
-    return op.guard(function ()
-        if S.started then
-            return op.always(false, 'already started')
-        end
+	return op.guard(function ()
+		if S.started then
+			return op.always(false, 'already started')
+		end
 
-        local scope, err = owner_scope:child()
-        if not scope then
-            return op.always(false, tostring(err))
-        end
+		local scope, err = owner_scope:child()
+		if not scope then
+			return op.always(false, tostring(err))
+		end
 
-        S.scope       = scope
-        S.logger      = logger
-        S.dev_ev_ch   = dev_ev_ch
-        S.cap_emit_ch = cap_emit_ch
+		S.scope       = scope
+		S.logger      = logger
+		S.dev_ev_ch   = dev_ev_ch
+		S.cap_emit_ch = cap_emit_ch
 
 		S.cfg_ch      = channel.new(8)
 		S.generation  = S.generation + 1
 		local generation = S.generation
 		local cfg_ch = S.cfg_ch
 
-        local detach_finaliser = scope:finally(function ()
-            finalise_manager_scope(scope, generation)
-        end)
+		local detach_finaliser = scope:finally(function ()
+			finalise_manager_scope(scope, generation)
+		end)
 
-        local ok, serr = scope:spawn(function () shell_loop(generation, cfg_ch) end)
-        if not ok then
-            detach_finaliser()
-            finalise_manager_scope(scope, generation)
-            scope:cancel(tostring(serr or 'manager shell spawn failed'))
-            return op.always(false, tostring(serr))
-        end
+		local ok, serr = scope:spawn(function () shell_loop(generation, cfg_ch) end)
+		if not ok then
+			detach_finaliser()
+			finalise_manager_scope(scope, generation)
+			scope:cancel(tostring(serr or 'manager shell spawn failed'))
+			return op.always(false, tostring(serr))
+		end
 
-        S.started = true
-        return op.always(true, nil)
-    end)
+		S.started = true
+		return op.always(true, nil)
+	end)
 end
 
 function M.apply_config_op(entries)
@@ -368,32 +368,32 @@ function M.apply_config_op(entries)
 end
 
 function M.shutdown_op(timeout)
-    timeout = timeout or STOP_TIMEOUT
+	timeout = timeout or STOP_TIMEOUT
 
-    return op.guard(function ()
-        if not S.started or not S.scope then
-            return op.always(true, nil)
-        end
+	return op.guard(function ()
+		if not S.started or not S.scope then
+			return op.always(true, nil)
+		end
 
-        local scope = S.scope
+		local scope = S.scope
 		local generation = S.generation
-        scope:cancel()
+		scope:cancel()
 
-        return fibers.boolean_choice(
-            scope:join_op():wrap(function ()
-                finalise_manager_scope(scope, generation)
-                return true, nil
-            end),
-            sleep.sleep_op(timeout):wrap(function ()
-                return false, 'uart manager stop timeout'
-            end)
-        ):wrap(function (completed, _a, b)
-            if completed then
-                return true, nil
-            end
-            return false, b
-        end)
-    end)
+		return fibers.boolean_choice(
+			scope:join_op():wrap(function ()
+				finalise_manager_scope(scope, generation)
+				return true, nil
+			end),
+			sleep.sleep_op(timeout):wrap(function ()
+				return false, 'uart manager stop timeout'
+			end)
+		):wrap(function (completed, _a, b)
+			if completed then
+				return true, nil
+			end
+			return false, b
+		end)
+	end)
 end
 
 function M.terminate(reason)

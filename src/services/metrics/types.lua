@@ -23,17 +23,17 @@ BaseTime.__index = BaseTime
 ---@return BaseTime?
 ---@return string error
 function new.BaseTime(real, mono)
-    if type(real) ~= 'number' then
-        return nil, "real must be a number"
-    end
-    if type(mono) ~= 'number' then
-        return nil, "mono must be a number"
-    end
-    return setmetatable({
-        synced = false,
-        real   = real,
-        mono   = mono,
-    }, BaseTime), ""
+	if type(real) ~= 'number' then
+		return nil, "real must be a number"
+	end
+	if type(mono) ~= 'number' then
+		return nil, "mono must be a number"
+	end
+	return setmetatable({
+		synced = false,
+		real   = real,
+		mono   = mono,
+	}, BaseTime), ""
 end
 
 -------------------------------------------------------------------------------
@@ -59,20 +59,20 @@ CloudConfig.__index = CloudConfig
 ---@return CloudConfig?
 ---@return string error
 function new.CloudConfig(url, thing_key, channels)
-    if type(url) ~= 'string' or url == '' then
-        return nil, "url must be a non-empty string"
-    end
-    if type(thing_key) ~= 'string' or thing_key == '' then
-        return nil, "thing_key must be a non-empty string"
-    end
-    if type(channels) ~= 'table' then
-        return nil, "channels must be a table"
-    end
-    return setmetatable({
-        url       = url,
-        thing_key = thing_key,
-        channels  = channels,
-    }, CloudConfig), ""
+	if type(url) ~= 'string' or url == '' then
+		return nil, "url must be a non-empty string"
+	end
+	if type(thing_key) ~= 'string' or thing_key == '' then
+		return nil, "thing_key must be a non-empty string"
+	end
+	if type(channels) ~= 'table' then
+		return nil, "channels must be a table"
+	end
+	return setmetatable({
+		url       = url,
+		thing_key = thing_key,
+		channels  = channels,
+	}, CloudConfig), ""
 end
 
 -------------------------------------------------------------------------------
@@ -91,17 +91,17 @@ MetricSample.__index = MetricSample
 ---@return MetricSample?
 ---@return string error
 function new.MetricSample(value, time)
-    local vt = type(value)
-    if vt ~= 'number' and vt ~= 'string' and vt ~= 'boolean' then
-        return nil, "value must be number, string or boolean"
-    end
-    if type(time) ~= 'number' then
-        return nil, "time must be a number"
-    end
-    return setmetatable({
-        value = value,
-        time  = time,
-    }, MetricSample), ""
+	local vt = type(value)
+	if vt ~= 'number' and vt ~= 'string' and vt ~= 'boolean' then
+		return nil, "value must be number, string or boolean"
+	end
+	if type(time) ~= 'number' then
+		return nil, "time must be a number"
+	end
+	return setmetatable({
+		value = value,
+		time  = time,
+	}, MetricSample), ""
 end
 
 -------------------------------------------------------------------------------
@@ -124,23 +124,23 @@ SenMLRecord.__index = SenMLRecord
 ---@return SenMLRecord?
 ---@return string? error
 function new.SenMLRecord(name, value, time)
-    if type(name) ~= 'string' or name == '' then
-        return nil, "name must be a non-empty string"
-    end
-    local vt = type(value)
-    if vt ~= 'number' and vt ~= 'string' and vt ~= 'boolean' then
-        return nil, "value must be number, string or boolean, found " .. vt
-    end
-    if time ~= nil and type(time) ~= 'number' then
-        return nil, "time must be a number"
-    end
+	if type(name) ~= 'string' or name == '' then
+		return nil, "name must be a non-empty string"
+	end
+	local vt = type(value)
+	if vt ~= 'number' and vt ~= 'string' and vt ~= 'boolean' then
+		return nil, "value must be number, string or boolean, found " .. vt
+	end
+	if time ~= nil and type(time) ~= 'number' then
+		return nil, "time must be a number"
+	end
 
-    local obj = setmetatable({ n = name }, SenMLRecord)
-    if vt == 'number' then obj.v = value end
-    if vt == 'string' then obj.vs = value end
-    if vt == 'boolean' then obj.vb = value end
-    if time then obj.t = time end
-    return obj, nil
+	local obj = setmetatable({ n = name }, SenMLRecord)
+	if vt == 'number' then obj.v = value end
+	if vt == 'string' then obj.vs = value end
+	if vt == 'boolean' then obj.vb = value end
+	if time then obj.t = time end
+	return obj, nil
 end
 
 -------------------------------------------------------------------------------
@@ -170,9 +170,9 @@ end
 ---@field fs_cap           CapabilityReference?  nil before filesystem cap is resolved
 
 return {
-    new          = new,
-    BaseTime     = BaseTime,
-    CloudConfig  = CloudConfig,
-    MetricSample = MetricSample,
-    SenMLRecord  = SenMLRecord,
+	new          = new,
+	BaseTime     = BaseTime,
+	CloudConfig  = CloudConfig,
+	MetricSample = MetricSample,
+	SenMLRecord  = SenMLRecord,
 }
