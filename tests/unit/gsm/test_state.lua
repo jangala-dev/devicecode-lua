@@ -69,7 +69,7 @@ end
 function tests.test_searching_is_preserved_and_sim_absence_still_wins()
 	eq(gsm._test.uplink_state_for_modem(false, 'searching', nil, 'present'), 'searching')
 	eq(gsm._test.uplink_state_for_modem(false, 'searching', nil, '--'), 'sim_absent')
-	eq(gsm._test.uplink_state_for_modem(true, 'connected', nil, 'present'), 'connected')
+	eq(gsm._test.uplink_state_for_modem(true, 'searching', nil, 'present'), 'connected')
 end
 
 function tests.test_sim_payload_carries_lock_and_retry_details()
