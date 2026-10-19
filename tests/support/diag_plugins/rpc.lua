@@ -1,8 +1,8 @@
 return {
-  name = 'rpc',
-  topic_groups = {
+	name = 'rpc',
+	topic_groups = {
 
 
-    { label = 'rpc', topic = { 'rpc', '#' } },
-  },
+		{ label = 'rpc', topic = { 'rpc', '#' } },
+	},
 }

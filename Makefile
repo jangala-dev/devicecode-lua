@@ -5,6 +5,7 @@ VENDOR_DIR := vendor
 BUILD_DIR  := build
 TEST_DIR   := tests
 LINTER     := luacheck
+LUA_INDENT_DIRS := $(SRC_DIR) $(TEST_DIR) examples tools
 UI_REPO   ?= https://github.com/jangala-dev/local-ui.git
 UI_DIR    ?= local-ui
 UI_WWW_DIR := $(SRC_DIR)/services/ui/www
@@ -115,11 +116,18 @@ test-all:
 	@rm -f  $(VENDOR_DIR)/lua-bus/src/trie.lua
 	@echo "All tests complete."
 
-# Lint: Static analysis on source and test directories
+# Check-Indent: Enforce tab-based indentation in first-party Lua files
+.PHONY: check-indent
+check-indent:
+	@echo "Checking Lua indentation..."
+	@luajit tools/check_lua_indentation.lua $(LUA_INDENT_DIRS)
+	@echo "Lua indentation check complete."
+
+# Lint: Indentation and static analysis on source and test directories
 .PHONY: lint
-lint:
+lint: check-indent
 	@echo "Running linter..."
-	@$(LINTER) $(SRC_DIR) $(TEST_DIR)
+	@$(LINTER) $(SRC_DIR) $(TEST_DIR) tools
 	@echo "Linting complete."
 
 # Clean: Remove the build directory
@@ -143,6 +151,7 @@ help:
 	@echo "  env           Pin vendor submodules to revisions in .env"
 	@echo "  test          Run the devicecode test suite"
 	@echo "  test-all      Run devicecode and all vendor test suites"
-	@echo "  lint          Run luacheck on $(SRC_DIR)/ and $(TEST_DIR)/"
+	@echo "  check-indent  Enforce tab-based indentation in first-party Lua files"
+	@echo "  lint          Run indentation checks and luacheck"
 	@echo "  clean         Remove $(BUILD_DIR)/"
 	@echo "  help          Show this message"
