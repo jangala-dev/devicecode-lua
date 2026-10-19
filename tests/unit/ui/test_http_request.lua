@@ -429,4 +429,20 @@ function tests.test_local_ui_visit_is_anonymous_and_publishes_only_valid_ids()
 	end)
 end
 
+function tests.test_local_ui_visit_never_buffers_an_oversized_body()
+	run_fibers.run(function (scope)
+		local requested
+		local ctx = fake_ctx('POST', '/api/local-ui/visit')
+		ctx.headers = { ['content-type'] = 'application/json' }
+		ctx.read_body_as_string_op = function () error('unbounded body read') end
+		ctx.read_chars_op = function (_, n)
+			requested = n
+			return require('fibers.op').always(string.rep('x', math.min(n, 65536)))
+		end
+		assert_eq(request.run(scope, ctx, { conn = { publish = function () end } }).status, 'bad_request')
+		assert_eq(ctx.replies[1].status, 400)
+		assert_eq(requested, 257)
+	end)
+end
+
 return tests

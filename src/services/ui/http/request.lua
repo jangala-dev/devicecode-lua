@@ -108,6 +108,9 @@ local function json_body_table(ctx, deps, opts)
 	local raw
 	if type(ctx.body_string) == 'string' then
 		raw = ctx.body_string
+	elseif opts.max_bytes and type(ctx.read_chars_op) == 'function' then
+		-- Read one byte past the limit so an oversized body is never buffered whole.
+		raw = fibers.perform(ctx:read_chars_op(opts.max_bytes + 1))
 	elseif type(ctx.read_body_as_string_op) == 'function' then
 		raw = fibers.perform(ctx:read_body_as_string_op())
 	elseif type(ctx.read_chars_op) == 'function' then
