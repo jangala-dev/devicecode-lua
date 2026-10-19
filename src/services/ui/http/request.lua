@@ -113,7 +113,7 @@ local function json_body_table(ctx, deps, opts)
 		-- length up front; refuse chunked or oversized bodies before reading anything.
 		local te = ctx_header(ctx, 'transfer-encoding') or ctx_header(ctx, 'Transfer-Encoding')
 		local length = tonumber(ctx_header(ctx, 'content-length') or ctx_header(ctx, 'Content-Length'))
-		if te or not length or length > opts.max_bytes then return nil, 'request_body_too_large' end
+		if te or not length or length < 0 or length > opts.max_bytes then return nil, 'request_body_too_large' end
 		raw = fibers.perform(ctx:read_chars_op(opts.max_bytes + 1))
 	elseif type(ctx.read_body_as_string_op) == 'function' then
 		raw = fibers.perform(ctx:read_body_as_string_op())

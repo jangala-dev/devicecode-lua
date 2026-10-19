@@ -446,11 +446,12 @@ function tests.test_local_ui_visit_never_buffers_an_oversized_body()
 			return request.run(scope, ctx, deps).status, ctx.replies[1].status, requested
 		end
 		-- lua-http buffers each transfer chunk whole, so chunked bodies are refused unread.
-		local status, code, requested = visit({ ['content-type'] = 'application/json', ['transfer-encoding'] = 'chunked' }, valid)
+		local json = 'application/json'
+		local status, code, requested = visit({ ['content-type'] = json, ['transfer-encoding'] = 'chunked' }, valid)
 		assert_eq(status, 'bad_request'); assert_eq(code, 400); assert_eq(requested, nil)
-		status, code, requested = visit({ ['content-type'] = 'application/json', ['content-length'] = '65536' }, string.rep('x', 65536))
+		status, code, requested = visit({ ['content-type'] = json, ['content-length'] = '65536' }, string.rep('x', 65536))
 		assert_eq(status, 'bad_request'); assert_eq(code, 400); assert_eq(requested, nil)
-		status, code, requested = visit({ ['content-type'] = 'application/json', ['content-length'] = tostring(#valid) }, valid)
+		status, code, requested = visit({ ['content-type'] = json, ['content-length'] = tostring(#valid) }, valid)
 		assert_eq(status, 'ok'); assert_eq(code, 202); assert_eq(requested, 257)
 		assert_eq(sent, 1)
 	end)
