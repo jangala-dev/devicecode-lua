@@ -10,6 +10,7 @@ if command -v apt-get >/dev/null 2>&1; then
 		ca-certificates \
 		gzip \
 		openssh-client \
+		sshpass \
 		rsync \
 		socat \
 		qemu-system-x86 \
@@ -41,6 +42,7 @@ elif command -v apk >/dev/null 2>&1; then
 		ca-certificates \
 		gzip \
 		openssh-client \
+		sshpass \
 		rsync \
 		socat \
 		qemu-system-x86_64 \
