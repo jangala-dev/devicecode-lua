@@ -250,16 +250,21 @@ end
 
 ---@param group string
 ---@param value any
-function Modem:_cache_group(group, value)
+function Modem:_cache_group(group, value, observed_at)
     self.cache:set(group, value)
-    local observed_at = fibers.now()
+    observed_at = observed_at or fibers.now()
+    self.group_observed_at = self.group_observed_at or {}
+    local timestamps = {}
     self.field_observed_at = self.field_observed_at or {}
     for _, field in ipairs(GROUP_FIELDS[group] or {}) do
         -- A timestamp means the field was observed, including when the backend
         -- successfully observed that the field is absent. Failed groups do not
         -- advance these timestamps, so consumers can preserve their last value.
-        self.field_observed_at[field] = observed_at
+        timestamps[field] = observed_at
+        self.field_observed_at[field] = math.max(self.field_observed_at[field] or -math.huge, observed_at)
     end
+    self.group_observed_at[group] = timestamps
+    return timestamps
 end
 
 ---@param group string
@@ -294,7 +299,7 @@ function Modem:_get_group(group, timescale)
 
     local cached = self.cache:get(group, timescale)
     if cached ~= nil then
-        return cached, ""
+        return cached, "", self.group_observed_at and self.group_observed_at[group] or {}
     end
 
     local fetcher_name = GROUP_FETCHERS[group]
@@ -303,13 +308,16 @@ function Modem:_get_group(group, timescale)
         return nil, "group " .. tostring(group) .. " is not implemented by backend"
     end
 
+    -- Multi-command readers can yield after observing a field. Use the start
+    -- time conservatively so completing later cannot supersede a newer event.
+    local observed_at = fibers.now()
     local snapshot, err = fetcher(self.backend)
     if err ~= "" then
         return nil, err
     end
 
-    self:_cache_group(group, snapshot)
-    return snapshot, ""
+    local timestamps = self:_cache_group(group, snapshot, observed_at)
+    return snapshot, "", timestamps
 end
 
 --- Checks if an error string indicates a closed command
@@ -540,6 +548,7 @@ end
 ---@return boolean ok
 ---@return string error
 function Modem:_poll_signal_once()
+    local observed_at = fibers.now()
     local access_techs, access_err = self.backend:read_access_techs()
     if not access_techs then
         return false, access_err
@@ -550,18 +559,21 @@ function Modem:_poll_signal_once()
         return false, signal_err
     end
 
-    self:_cache_group('signal', signal)
-    self.field_observed_at.access_techs = fibers.now()
+    self:_cache_group('signal', signal, observed_at)
+    self.field_observed_at.access_techs = math.max(self.field_observed_at.access_techs or -math.huge, observed_at)
 
     local cached_network = self.cache:get('network', math.huge)
     if cached_network then
         cached_network.access_techs = access_techs
         self.cache:set('network', cached_network)
+        local timestamps = self.group_observed_at.network or {}
+        timestamps.access_techs = observed_at
+        self.group_observed_at.network = timestamps
     end
 
     local emit_ok, emit_err = self:_emit_event('signal', {
         schema = MODEM_SIGNAL_SCHEMA,
-        observed_at = fibers.now(),
+        observed_at = observed_at,
         access_techs = access_techs,
         signal = signal.values,
     })
@@ -629,7 +641,7 @@ function Modem:emitter()
         local observed_at = {}
         for group_name, fields in pairs(GROUP_FIELDS) do
             local timescale = STATIC_GROUPS[group_name] and math.huge or 0
-            local snapshot, group_err = self:_get_group(group_name, timescale)
+            local snapshot, group_err, timestamps = self:_get_group(group_name, timescale)
             if group_err ~= "" then
                 if D_LOG_EMITTER then
                     self.log:warn({
@@ -642,7 +654,7 @@ function Modem:emitter()
             else
                 for _, field in ipairs(fields) do
                     local value = extract_group_field(snapshot, field)
-                    observed_at[field] = self.field_observed_at[field]
+                    observed_at[field] = timestamps[field]
                     if value ~= nil then
                         values[field] = value
                         local emit_ok, emit_err = self:_emit_meta(field, value)
