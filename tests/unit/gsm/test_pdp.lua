@@ -1,6 +1,7 @@
 local op = require 'fibers.op'
 local channel = require 'fibers.channel'
 local pulse = require 'fibers.pulse'
+local sleep = require 'fibers.sleep'
 local safe = require 'coxpcall'
 local runfibers = require 'tests.support.run_fibers'
 local gsm = require 'services.gsm'
@@ -14,7 +15,7 @@ local function fixture(contexts, overrides)
     overrides = overrides or {}
     local calls, logs, subs = {}, {}, {}
     local values = { mcc = '234', mnc = '30', imsi = '234300000000000', gid1 = '',
-        pdp_contexts = contexts or {}, modem_state = 'registered' }
+        pdp_contexts = contexts or {}, modem_state = 'disabled' }
     local cap = {
         call_control_op = function(_, method, opts)
             calls[#calls + 1] = { method = method, opts = opts }
@@ -26,16 +27,29 @@ local function fixture(contexts, overrides)
             if method == 'set_pdn_type' then return reply(true) end
             if method == 'restart' then
                 for _, sub in ipairs(subs) do
-                    sub.queue:put({ payload = { from = 'registered', to = 'disabled' } })
+                    if sub.field == 'card' and not sub.closed then
+                        sub.queue:put({ payload = { from = 'initializing', to = 'disabled' } })
+                    end
                 end
                 return reply(true)
             end
             if method == 'connect' then return reply(false, 'connection failed') end
             return reply(true)
         end,
-        get_state_sub = function(_, field)
-            local queue = channel.new(16)
-            queue:put({ payload = { from = 'registered', to = 'registered' } })
+        get_state_sub = function(_, field, opts)
+            local queue = channel.new(opts and opts.queue_len or 16)
+            if opts and opts.full == 'drop_oldest' then
+                local put = queue.put
+                queue.put = function(q, message)
+                    if not q:put_op(message).try_fn() then
+                        q:get_op().try_fn()
+                        put(q, message)
+                    end
+                end
+            end
+            if field == 'card' then
+                queue:put({ payload = { from = 'disabled', to = 'disabled' } })
+            end
             local sub = {
                 queue = queue, field = field,
                 recv = function() return queue:get() end,
@@ -112,7 +126,7 @@ function tests.test_pdp_recovery_uses_configured_type_and_skips_matching_context
             })
             local cfg = gsm._test.normalize_config(config({ pdp_type = pdp_type }))
             m:apply_config(gsm._test.get_modem_config(cfg, 'unknown', ''))
-            eq(m:_recover_pdp(), true)
+            eq(m:_configure_pdp(), true)
             eq(count(calls, 'set_pdn_type'), 2)
             eq(count(calls, 'restart'), 1)
             for _, call in ipairs(calls) do
@@ -130,7 +144,7 @@ function tests.test_pdp_recovery_does_not_restart_when_configured_type_already_m
         for _, pdp_type in ipairs({ 'IP', 'IPV4V6', 'IPV6' }) do
             local m, calls = fixture({ context(1, pdp_type, true) })
             m.cfg.pdp_type = pdp_type
-            local restarted, err = m:_recover_pdp()
+            local restarted, err = m:_configure_pdp()
             eq(restarted, false)
             eq(err, '')
             eq(count(calls, 'set_pdn_type'), 0)
@@ -139,13 +153,13 @@ function tests.test_pdp_recovery_does_not_restart_when_configured_type_already_m
     end)
 end
 
-function tests.test_pdp_recovery_changes_all_active_non_ip_contexts_and_restarts_once()
+function tests.test_pdp_configuration_changes_active_mismatched_contexts_and_restarts_once()
     runfibers.run(function()
         local m, calls, _, _, subs = fixture({
             context(3, 'IPV6', true), context(2, 'IP', true),
             context(1, 'IPV4V6', true), context(4, 'IPV6', false),
         })
-        local restarted, err, state = m:_recover_pdp()
+        local restarted, err, state = m:_configure_pdp()
         eq(restarted, true)
         eq(err, '')
         eq(state, 'disabled')
@@ -160,11 +174,11 @@ function tests.test_pdp_recovery_changes_all_active_non_ip_contexts_and_restarts
     end)
 end
 
-function tests.test_pdp_recovery_skips_empty_inactive_and_ipv4_contexts()
+function tests.test_pdp_configuration_skips_empty_inactive_and_matching_contexts()
     runfibers.run(function()
         for _, contexts in ipairs({ {}, { context(1, 'IP', true), context(2, 'IPV6', false) } }) do
             local m, calls = fixture(contexts)
-            local restarted, err = m:_recover_pdp()
+            local restarted, err = m:_configure_pdp()
             eq(restarted, false)
             eq(err, '')
             eq(count(calls, 'set_pdn_type'), 0)
@@ -181,7 +195,7 @@ function tests.test_pdp_recovery_read_and_verification_failures_do_not_restart()
                     if method == failure_method then return reply(false, 'AT failed') end
                 end,
             })
-            eq(m:_recover_pdp(), false)
+            eq(m:_configure_pdp(), false)
             eq(count(calls, 'restart'), 0)
         end
     end)
@@ -194,7 +208,7 @@ function tests.test_pdp_recovery_restarts_once_after_partial_verified_changes()
                 if method == 'set_pdn_type' and opts.cid == 1 then return reply(false, 'verification failed') end
             end,
         })
-        eq(m:_recover_pdp(), true)
+        eq(m:_configure_pdp(), true)
         eq(count(calls, 'set_pdn_type'), 2)
         eq(count(calls, 'restart'), 1)
     end)
@@ -208,11 +222,11 @@ function tests.test_pdp_recovery_stops_commands_on_state_error_and_restarts_veri
         }, {
             call = function(method, opts)
                 if method == 'set_pdn_type' and opts.cid == 2 then
-                    return reply(false, 'modem_not_registered:disabled')
+                    return reply(false, 'modem_invalid_pdp_state:connecting')
                 end
             end,
         })
-        local restarted, err, state = m:_recover_pdp()
+        local restarted, err, state = m:_configure_pdp()
         eq(restarted, true)
         eq(err, '')
         eq(state, 'disabled')
@@ -234,7 +248,7 @@ function tests.test_pdp_recovery_restarts_after_verified_change_without_querying
                     end
                 end,
             })
-            eq(m:_recover_pdp(), true)
+            eq(m:_configure_pdp(), true)
             eq(count(calls, 'set_pdn_type'), 1)
             eq(count(calls, 'restart'), 1)
         end
@@ -247,12 +261,12 @@ function tests.test_pdp_recovery_retries_required_restart_even_when_inspection_i
         local m, calls = fixture({}, {
             call = function(method, opts)
                 if method == 'get' and opts.field == 'pdp_contexts' then
-                    return reply(false, 'modem_not_registered:disabled')
+                    return reply(false, 'modem_invalid_pdp_state:connecting')
                 end
             end,
         })
         m.pdp_restart_needed = true -- A prior cycle verified a change but its restart failed.
-        eq(m:_recover_pdp(), true)
+        eq(m:_configure_pdp(), true)
         eq(count(calls, 'set_pdn_type'), 0)
         eq(count(calls, 'restart'), 1)
         eq(m.pdp_restart_needed, false)
@@ -264,13 +278,13 @@ function tests.test_pdp_recovery_does_not_restart_after_state_rejection_without_
     runfibers.run(function()
         local m, calls = fixture({ context(1, 'IPV6', true), context(2, 'IPV6', true) }, {
             call = function(method)
-                if method == 'set_pdn_type' then return reply(false, 'modem_not_registered:disabled') end
+                if method == 'set_pdn_type' then return reply(false, 'modem_invalid_pdp_state:connecting') end
             end,
         })
-        local restarted, err, state = m:_recover_pdp()
+        local restarted, err, state = m:_configure_pdp()
         eq(restarted, false)
-        eq(err, 'modem_not_registered:disabled')
-        eq(state, 'disabled')
+        eq(err, 'modem_invalid_pdp_state:connecting')
+        eq(state, 'connecting')
         eq(count(calls, 'set_pdn_type'), 1)
         eq(count(calls, 'restart'), 0)
     end)
@@ -278,15 +292,15 @@ end
 
 function tests.test_pdp_recovery_late_connection_and_state_errors_do_not_restart()
     runfibers.run(function()
-        for _, state in ipairs({ 'connected', 'disabled', 'connecting' }) do
+        for _, state in ipairs({ 'connected', 'enabling', 'connecting' }) do
             local m, calls = fixture({}, {
                 call = function(method, opts)
                     if method == 'get' and opts.field == 'pdp_contexts' then
-                        return reply(false, 'error getting field pdp_contexts: modem_not_registered:' .. state)
+                        return reply(false, 'error getting field pdp_contexts: modem_invalid_pdp_state:' .. state)
                     end
                 end,
             })
-            local restarted, _, observed_state = m:_recover_pdp()
+            local restarted, _, observed_state = m:_configure_pdp()
             eq(restarted, false)
             eq(observed_state, state)
             eq(count(calls, 'restart'), 0)
@@ -299,7 +313,7 @@ function tests.test_pdp_restart_failure_preserves_verified_change_and_closes_sub
         local m, _, _, _, subs = fixture({ context(1, 'IPV6', true) }, {
             call = function(method) if method == 'restart' then return reply(false, 'reset failed') end end,
         })
-        local restarted, err = m:_recover_pdp()
+        local restarted, err = m:_configure_pdp()
         eq(restarted, false)
         eq(err, 'reset failed')
         eq(m.pdp_restart_needed, true)
@@ -307,21 +321,21 @@ function tests.test_pdp_restart_failure_preserves_verified_change_and_closes_sub
     end)
 end
 
-function tests.test_pdp_restart_discards_stale_registered_events()
+function tests.test_pdp_restart_discards_stale_disabled_events()
     runfibers.run(function()
         local m = fixture({ context(1, 'IPV6', true) }, {
             call = function(method, _, subs)
                 if method == 'restart' then
-                    subs[1].queue:put({ payload = { from = 'registered', to = 'registered' } })
-                    subs[1].queue:put({ payload = { from = 'enabling', to = 'registered' } })
+                    subs[1].queue:put({ payload = { from = 'disabled', to = 'disabled' } })
+                    subs[1].queue:put({ payload = { from = 'initializing', to = 'disabled' } })
                     return reply(true)
                 end
             end,
         })
-        local restarted, err, state = m:_recover_pdp()
+        local restarted, err, state = m:_configure_pdp()
         eq(restarted, true)
         eq(err, '')
-        eq(state, 'registered')
+        eq(state, 'disabled')
         eq(m.pdp_restart_waiting, false)
     end)
 end
@@ -337,7 +351,7 @@ local function with_rankings(body)
     assert(ok, err)
 end
 
-function tests.test_pdp_recovery_runs_only_after_all_eligible_apns_fail()
+function tests.test_pdp_configuration_does_not_run_after_apn_exhaustion()
     with_rankings(function()
         local m, calls = fixture({}, {
             call = function(method, _, subs)
@@ -351,7 +365,9 @@ function tests.test_pdp_recovery_runs_only_after_all_eligible_apns_fail()
         local _, err = m:_apn_connect()
         eq(err, 'no apn connected')
         eq(count(calls, 'connect'), 2)
-        eq(calls[#calls].opts.field, 'pdp_contexts')
+        for _, call in ipairs(calls) do
+            assert(not (call.method == 'get' and call.opts.field == 'pdp_contexts'))
+        end
     end)
 end
 
@@ -409,38 +425,197 @@ function tests.test_pdp_recovery_skips_zero_attempts_and_missing_identifiers()
     end)
 end
 
-function tests.test_pdp_autoconnect_enables_after_driver_state_error_then_retries()
-    runfibers.run(function()
-        local m, calls = fixture({})
-        m.cfg.autoconnect = true
-        m.domain = { retain = function() end }
-        m._publish_uplink_state = function() end
-        m._emit_metric = function() end
-        local attempts, card_sub = 0, nil
-        m._apn_connect = function()
-            attempts = attempts + 1
-            if attempts == 1 then return nil, 'modem_not_registered:disabled', 0, 'disabled' end
-            m.config_pulse:close()
-            return {}, ''
+---@param modem GsmModem
+---@return nil
+local function prepare_autoconnect(modem)
+    modem.cfg.autoconnect = true
+    modem.domain = { retain = function() end }
+    modem._publish_uplink_state = function() end
+    modem._emit_metric = function() end
+    modem.svc.obs_event = function(_, event, payload)
+        if event == 'connection_changed' and payload.connected then modem.config_pulse:close() end
+    end
+end
+
+---@return nil
+function tests.test_pdp_disabled_check_corrects_restarts_rereads_then_connects_successfully()
+    with_rankings(function()
+        for _, target in ipairs({ 'IP', 'IPV4V6', 'IPV6' }) do
+            local wrong_type = target == 'IP' and 'IPV6' or 'IP'
+            local contexts = { context(1, wrong_type, true) }
+            local reads = 0
+            local m, calls = fixture(contexts, {
+                call = function(method, opts, subs)
+                    if method == 'get' and opts.field == 'pdp_contexts' then reads = reads + 1 end
+                    if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
+                    if method == 'enable' then
+                        assert(reads >= 2, 'enable ran before post-restart PDP check')
+                        eq(contexts[1].pdp_type, target)
+                        subs[1].queue:put({ payload = { from = 'enabling', to = 'registered' } })
+                    end
+                    if method == 'connect' then
+                        subs[1].queue:put({ payload = { from = 'connecting', to = 'connected' } })
+                        return reply(true)
+                    end
+                end,
+            })
+            prepare_autoconnect(m)
+            m.cfg.pdp_type = target
+            m:_autoconnect_loop()
+            assert(count(calls, 'set_pdn_type') == 1, 'expected one PDP write for ' .. target)
+            assert(count(calls, 'restart') == 1, 'expected one restart for ' .. target)
+            assert(count(calls, 'enable') == 1, 'expected one enable for ' .. target)
+            assert(count(calls, 'connect') == 1, 'expected one connection for ' .. target)
+            assert(reads >= 2, 'expected PDP read before and after restart')
         end
-        local saved_sub = m.cap.get_state_sub
-        m.cap.get_state_sub = function(cap, field)
-            if field == 'sim_state' then
-                local queue = channel.new(1)
-                return { recv_op = function() return queue:get_op() end, unsubscribe = function() end }
-            end
-            local sub = saved_sub(cap, field)
-            if field == 'card' then card_sub = sub end
-            return sub
-        end
-        local saved_call = m.cap.call_control_op
-        m.cap.call_control_op = function(cap, method, opts)
-            if method == 'enable' then card_sub.queue:put({ payload = { from = 'enabling', to = 'registered' } }) end
-            return saved_call(cap, method, opts)
-        end
+    end)
+end
+
+---@return nil
+function tests.test_pdp_disabled_check_enables_without_restarting_when_already_correct()
+    with_rankings(function()
+        local m, calls = fixture({ context(1, 'IPV6', true) }, {
+            call = function(method, _, subs)
+                if method == 'enable' then
+                    subs[1].queue:put({ payload = { from = 'enabling', to = 'registered' } })
+                elseif method == 'connect' then
+                    subs[1].queue:put({ payload = { from = 'connecting', to = 'connected' } })
+                    return reply(true)
+                end
+            end,
+        })
+        prepare_autoconnect(m)
+        m.cfg.pdp_type = 'IPV6'
         m:_autoconnect_loop()
-        eq(attempts, 2)
+        eq(calls[1].method, 'get')
+        eq(calls[1].opts.field, 'pdp_contexts')
+        eq(calls[2].method, 'enable')
+        eq(count(calls, 'set_pdn_type'), 0)
+        eq(count(calls, 'restart'), 0)
+        eq(count(calls, 'connect'), 1)
+    end)
+end
+
+---@return nil
+function tests.test_pdp_disabled_check_prevents_enable_on_read_or_write_failure()
+    runfibers.run(function()
+        for _, fail_method in ipairs({ 'get', 'set_pdn_type' }) do
+            local m, calls
+            m, calls = fixture({ context(1, 'IPV6', true) }, {
+                call = function(method)
+                    if method == fail_method then
+                        m.config_pulse:close()
+                        return reply(false, 'AT failed')
+                    end
+                end,
+            })
+            prepare_autoconnect(m)
+            m:_autoconnect_loop()
+            eq(count(calls, 'enable'), 0)
+            eq(count(calls, 'connect'), 0)
+            eq(count(calls, 'restart'), 0)
+        end
+    end)
+end
+
+---@return nil
+function tests.test_pdp_disabled_check_retries_read_write_and_restart_failures_before_enabling()
+    local saved_sleep_op = sleep.sleep_op
+    local ok, err = safe.pcall(function()
+        with_rankings(function()
+            for _, fail_method in ipairs({ 'get', 'set_pdn_type', 'restart' }) do
+                local contexts = { context(1, 'IPV6', true) }
+                local failed, retry_pending, retries = false, false, 0
+                local m, calls = fixture(contexts, {
+                    call = function(method, opts, subs)
+                        if method == fail_method and not failed
+                            and (method ~= 'get' or opts.field == 'pdp_contexts') then
+                            failed, retry_pending = true, true
+                            return reply(false, 'temporary failure')
+                        end
+                        if method == 'set_pdn_type' then contexts[1].pdp_type = opts.pdp_type end
+                        if method == 'enable' then
+                            eq(retries, 1)
+                            eq(contexts[1].pdp_type, 'IP')
+                            subs[1].queue:put({ payload = { from = 'enabling', to = 'registered' } })
+                        elseif method == 'connect' then
+                            subs[1].queue:put({ payload = { from = 'connecting', to = 'connected' } })
+                            return reply(true)
+                        end
+                    end,
+                })
+                sleep.sleep_op = function(seconds)
+                    if retry_pending and seconds == 20 then
+                        retry_pending = false
+                        retries = retries + 1
+                        eq(count(calls, 'enable'), 0)
+                        eq(count(calls, 'connect'), 0)
+                        return op.always()
+                    end
+                    return saved_sleep_op(seconds)
+                end
+                prepare_autoconnect(m)
+                m:_autoconnect_loop()
+                eq(failed, true)
+                eq(retries, 1)
+                eq(count(calls, 'enable'), 1)
+                eq(count(calls, 'connect'), 1)
+                eq(count(calls, 'set_pdn_type'), fail_method == 'set_pdn_type' and 2 or 1)
+                eq(count(calls, 'restart'), fail_method == 'restart' and 2 or 1)
+            end
+        end)
+    end)
+    sleep.sleep_op = saved_sleep_op
+    assert(ok, err)
+end
+
+---@return nil
+function tests.test_pdp_disabled_check_still_runs_when_autoconnect_is_off()
+    runfibers.run(function()
+        local contexts = { context(1, 'IPV6', true) }
+        local reads = 0
+        local m, calls
+        m, calls = fixture(contexts, {
+            call = function(method, opts)
+                if method == 'get' and opts.field == 'pdp_contexts' then
+                    reads = reads + 1
+                    if reads == 2 then m.config_pulse:close() end
+                elseif method == 'set_pdn_type' then
+                    contexts[1].pdp_type = opts.pdp_type
+                end
+            end,
+        })
+        prepare_autoconnect(m)
+        m.cfg.autoconnect = false
+        m:_autoconnect_loop()
+        assert(reads >= 2, 'expected PDP read before and after restart')
+        eq(count(calls, 'set_pdn_type'), 1)
+        eq(count(calls, 'restart'), 1)
+        eq(count(calls, 'enable'), 0)
+        eq(count(calls, 'connect'), 0)
+    end)
+end
+
+---@return nil
+function tests.test_pdp_disabled_check_allows_unsupported_modems_to_enable()
+    with_rankings(function()
+        local m, calls = fixture({}, {
+            call = function(method, opts, subs)
+                if method == 'get' and opts.field == 'pdp_contexts' then
+                    return reply(false, 'error getting field pdp_contexts: pdp_not_supported')
+                elseif method == 'enable' then
+                    subs[1].queue:put({ payload = { from = 'enabling', to = 'registered' } })
+                elseif method == 'connect' then
+                    subs[1].queue:put({ payload = { from = 'connecting', to = 'connected' } })
+                    return reply(true)
+                end
+            end,
+        })
+        prepare_autoconnect(m)
+        m:_autoconnect_loop()
         eq(count(calls, 'enable'), 1)
+        eq(count(calls, 'connect'), 1)
+        eq(count(calls, 'restart'), 0)
     end)
 end
 
