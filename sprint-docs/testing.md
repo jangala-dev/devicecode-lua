@@ -1,5 +1,53 @@
 # Testing
 
+## Shared support for physical box tests
+
+Reusable Lua helpers live in `tests/integration/onbox/support/`. Run inside the
+devcontainer and add `tests/integration/?.lua` and `src/?.lua` to `package.path`.
+Imports use the `onbox.support.*` namespace.
+
+| Module | Responsibility |
+| --- | --- |
+| `auth` | Hidden password entry and inherited password pipes. |
+| `process` | Local commands, timeouts, captured output and background process groups. |
+| `ssh` | Remote commands, authentication and uploads over SSH stdin. |
+| `logs` | Continuous syslog capture, configurable filters and failure diagnostics. |
+| `devicecode` | Dependencies, build/package/deploy, service control and config/runtime snapshots. |
+| `runner` | Common arguments, private artifacts, signals, phases and cleanup. |
+| `modem` | Discovery by IMEI, state waits, reset/rediscovery and guarded AT probing. |
+
+`runner.parse_args()` accepts extra defaults, value options and boolean flags
+for each test. `runner.open()` checks local tools, prompts when `--ask-pass` is
+selected, and creates a session exposing `process`, `ssh` and `logs`.
+The file-password and SSH-key modes use `--password-file` and `--ssh-key-auth`.
+
+Use `box:phase(label, body)` for automatic log capture around a phase and
+`box:run(body, hooks)` for the full test lifecycle. Register resource cleanup
+with `box:defer(callback)`; callbacks run in reverse order, even after failure.
+Failure hooks can collect extra diagnostics and perform test-specific rollback.
+The shared runner does not choose when to deploy, reset devices or restore config.
+Keep assertions and config transformations in the individual test.
+
+Create `devicecode.new(box)` to manage a runtime. `prepare()` snapshots the
+bootstrap and persistent config; `backup()` saves the runtime before mutation.
+`build(label, config)` optionally replaces only the staged config. `deploy()`
+stops the service and unpacks the archive, while `write_config()` updates both
+config locations. `restore_runtime()` restores the snapshot and leaves the
+service stopped so the caller can recover devices before restarting it.
+`restore_persistent()` also restores the absence of an originally missing file.
+
+`modem.new(box)` is optional for modem tests. It keeps selection policy in the
+caller, waits by stable IMEI across changing mmcli IDs, and accepts a list of AT
+commands for probing. Its helper briefly pauses ModemManager with a trap and
+watchdog to resume it. AT assertions belong in the calling test.
+
+Run the support checks without a box or password file:
+
+```bash
+devcontainer exec --workspace-folder . bash -lc \
+  'luajit tests/integration/onbox/support/test.lua'
+```
+
 ## Unit Testing
 
 If we want to 100% unit test our code we will need to think about refactoring around local functions within modules that our
