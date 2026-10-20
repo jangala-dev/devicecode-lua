@@ -280,7 +280,7 @@ function Modem:_get_group(group, timescale)
     end
 
     if group == 'pdp' then
-        local ok, err = self:_require_registered()
+        local ok, err = self:_require_pdp_state()
         if not ok then return nil, err end
     end
 
@@ -305,11 +305,11 @@ function Modem:_get_group(group, timescale)
 end
 
 -- State is updated by the lifecycle monitor before its event is published.
----@return boolean registered
+---@return boolean allowed
 ---@return string error
-function Modem:_require_registered()
-    if self.card_state ~= 'registered' then
-        return false, 'modem_not_registered:' .. tostring(self.card_state or 'unknown')
+function Modem:_require_pdp_state()
+    if self.card_state ~= 'disabled' and self.card_state ~= 'registered' then
+        return false, 'modem_invalid_pdp_state:' .. tostring(self.card_state or 'unknown')
     end
     return true, ""
 end
@@ -408,8 +408,8 @@ function Modem:set_pdn_type(opts)
     if opts == nil or getmetatable(opts) ~= capability_args.ModemSetPdnTypeOpts then
         return return_error("invalid options", 1)
     end
-    local registered, state_err = self:_require_registered()
-    if not registered then return return_error(state_err, 1) end
+    local allowed, state_err = self:_require_pdp_state()
+    if not allowed then return return_error(state_err, 1) end
     local ok, err = self.backend:set_pdn_type(opts.cid, opts.pdp_type)
     if not ok then return return_error(err, 1) end
     return true, ""
