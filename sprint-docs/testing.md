@@ -48,6 +48,69 @@ devcontainer exec --workspace-folder . bash -lc \
   'luajit tests/integration/onbox/support/test.lua'
 ```
 
+## PDP tests on a physical box
+
+Run from the repository root:
+
+```bash
+devcontainer exec --workspace-folder . bash -lc \
+  'luajit tests/integration/onbox/modem_pdp/test_box.lua'
+```
+
+The runner uses `root@172.28.100.1` and passes the root-level `boxkey` password
+file directly to `sshpass`, without displaying or reading its contents itself.
+Use `--host` and `--password-file` for another box, or `--ssh-key-auth` to use
+your SSH agent/key. The box must already have its devicecode init service and
+SIMs installed, with autoconnect enabled for the target Quectel modems.
+
+To enter the password manually, run from an interactive terminal:
+
+```bash
+devcontainer exec --workspace-folder . bash -lc \
+  'luajit tests/integration/onbox/modem_pdp/test_box.lua --ask-pass'
+```
+
+The password is requested once with echo disabled, held in memory for the run,
+and passed to `sshpass` through a fresh anonymous pipe for each connection.
+It is never placed in command arguments, environment variables, files or logs.
+Terminal settings are restored on completion or interruption. `--ask-pass`,
+`--password-file` and `--ssh-key-auth` are mutually exclusive.
+
+The Lua runner executes inside the devcontainer, builds with `make build-all`, transfers the
+build using tar over SSH, stops devicecode, resets and rediscovers the modems,
+and restarts the service. It waits for every target modem to connect, then reads
+`CGDCONT` and `CGACT` and checks every active CID against that modem's effective
+config. It repeats the build/deploy/check cycle with `IP`, then `IPV4V6`.
+The source configs are untouched; the build output preserves the box's existing
+config and changes only the GSM PDP fields for the two test phases.
+
+By default a final cycle restores the original per-modem config and checks it
+again, keeping the new code deployed. `--keep-final-config` instead leaves the
+second test config active. `--first`, `--second`, `--timeout`, `--runtime`,
+`--service`, `--target`, and `--build-command` customize the run.
+
+SFTP and picocom are unnecessary: the probe uses the built Lua AT transport.
+ModemManager is briefly paused during read-only connected-state AT checks to
+avoid competing serial readers, then resumed by a trap and watchdog. If required
+box dependencies are missing, package installation is attempted even when
+`opkg update` returns nonzero; the installed commands/modules are checked afterwards.
+
+Private build, service, AT, and failure logs plus `results.json` are saved under
+`tests/integration/onbox/modem_pdp/artifacts/pdp-box-<timestamp>` in the mounted
+workspace (override with `--artifacts`). This directory is ignored by Git. Config/build
+artifacts may contain credentials: the directory and files have private permissions.
+A runtime backup is retained in `/tmp/devicecode-pdp-box-<timestamp>` on the
+box. Failures print relevant logs and attempt to restore the original runtime
+and config. The saved service stream is included even if the box's syslog ring
+has rolled over. A rollback failure is reported explicitly with the backup path.
+
+Offline checks for the runner:
+
+```bash
+devcontainer exec --workspace-folder . bash -lc \
+  'luajit tests/integration/onbox/modem_pdp/test_runner.lua'
+```
+
 ## Unit Testing
 
 If we want to 100% unit test our code we will need to think about refactoring around local functions within modules that our
