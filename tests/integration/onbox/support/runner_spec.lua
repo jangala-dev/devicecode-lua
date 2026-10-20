@@ -98,6 +98,48 @@ function tests.local_commands_preserve_stdin_stderr_exit_status_and_timeout()
 end
 
 ---@return nil
+function tests.upload_creates_parent_directories_without_a_devicecode_runtime()
+    with_session(function(box, temp)
+        box.ssh.command = 'sh -c'
+        local source, destination = temp .. '/source', temp .. '/nested/path/destination'
+        util.write(source, 'uploaded over stdin')
+        box.ssh:upload(source, destination)
+        equal(util.read(destination), 'uploaded over stdin')
+        equal(posix.stat(destination).mode:sub(-9), 'rw-------')
+    end)
+end
+
+---@return nil
+function tests.phase_captures_and_stops_logs_without_preparing_a_devicecode_runtime()
+    with_session(function(box, temp)
+        local bin = temp .. '/bin'
+        assert(process.execute('mkdir -p ' .. quote(bin)) == 0)
+        util.write(bin .. '/logread', "#!/bin/sh\nprintf 'capture ready\\n'\nsleep 30\n")
+        util.write(bin .. '/logger', '#!/bin/sh\nexit 0\n')
+        assert(posix.chmod(bin .. '/logread', 'rwx------'))
+        assert(posix.chmod(bin .. '/logger', 'rwx------'))
+        box.ssh.command = 'env PATH=' .. quote(bin) .. ':"$PATH" sh -c'
+        local body_ok, body_err = pcall(function()
+            box:phase('example', function()
+                local deadline = process.now() + 2
+                while process.now() < deadline do
+                    if util.read(box.logs.path):find('capture ready', 1, true) then return end
+                    process.pause(0.02)
+                end
+                error('Background log capture did not start')
+            end)
+        end)
+        -- Always stop the owned group, including after a fixture assertion fails.
+        local stopped, stop_err = pcall(function() box.logs:stop() end)
+        assert(body_ok, body_err)
+        assert(stopped, stop_err)
+        equal(box.logs.pid, nil)
+        equal(box.logs.pid_path, nil)
+        assert(util.read(box.logs.path):find('capture ready', 1, true))
+    end)
+end
+
+---@return nil
 function tests.failure_logs_survive_syslog_rollover_and_support_custom_filters()
     local lines = { 'radio: changing mode', 'radio: restarting' }
     for _ = 1, 1000 do lines[#lines + 1] = 'dropbear: Password auth succeeded' end
