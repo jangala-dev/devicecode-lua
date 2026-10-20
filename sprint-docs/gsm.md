@@ -49,11 +49,19 @@ if neither specifies a type, GSM uses `IP`.
 }
 ```
 
-After all eligible APNs fail, GSM changes active PDP contexts whose type differs
-from the configured value, verifies the changes, and reboots the modem. Changing
-this setting does not immediately reconfigure an already connected modem.
-PDP commands require the modem to be registered. Once a change is verified,
-the modem can reboot from any state to apply it.
+Whenever the modem is disabled, GSM checks active PDP contexts against its
+configured `pdp_type` before enabling it. Mismatched contexts are corrected and
+verified, then the modem is restarted once. On the next disabled-state pass,
+matching contexts need no writes or restart and autoconnect can enable the modem.
+Read, write, or restart failures are retried before enabling.
+If no contexts are reported active, no contexts are rewritten.
+
+PDP commands are allowed in disabled or registered state; restart is allowed from
+any state. Unsupported manufacturers retain their existing enable/connect behavior.
+The backend prefers the secondary AT port and falls back to the primary AT port
+when no secondary port is available.
+Changing this setting does not immediately disconnect an already connected modem;
+it is enforced the next time the modem is disabled.
 
 ## GSM Internal Overview
 

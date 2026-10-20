@@ -609,6 +609,7 @@ end
 ---@field current_state ModemState?
 ---@field pdp_restart_needed boolean?
 ---@field pdp_restart_waiting boolean?
+---@field pdp_restart_from ModemState?
 
 local function id_suffix(id)
 	id = tostring(id or '')
@@ -1085,10 +1086,18 @@ end
 ---@param err string?
 ---@return ModemState? state
 local function pdp_error_state(err)
-	return err and err:match('modem_not_registered:([%w_-]+)') or nil
+	return err and err:match('modem_invalid_pdp_state:([%w_-]+)') or nil
 end
 
--- Subscribe before reset so a fast reboot cannot be mistaken for stale registration.
+---@param event ModemStateEvent
+---@param previous_state ModemState?
+---@return boolean transitioned
+local function pdp_restart_transition(event, previous_state)
+	return event.to ~= nil and (event.to ~= previous_state
+		or (event.from ~= nil and event.from ~= event.to))
+end
+
+-- Subscribe before reset so a fast reboot cannot be mistaken for a stale state.
 ---@return 'ok'|'failed'|'cancelled' status
 ---@return ScopeReport report
 ---@return any restarted_or_error Boolean on success; otherwise the scope's unconstrained failure value.
@@ -1098,7 +1107,8 @@ function GsmModem:_restart_after_pdp()
 	return fibers.run_scope(function(scope)
 		local state_sub = self.cap:get_state_sub('card', { queue_len = 16, full = 'drop_oldest' })
 		scope:finally(function() state_sub:unsubscribe() end)
-		state_sub:recv() -- drain retained state
+		local retained = state_sub:recv()
+		self.pdp_restart_from = retained and retained.payload and retained.payload.to or self.current_state
 		local _, err = call_modem_rpc(self.cap, 'restart', {}, REQUEST_TIMEOUT)
 		self.svc:obs_log(err == "" and 'info' or 'warn', {
 			what = 'pdp_restart', modem = self.name, err = err,
@@ -1115,8 +1125,7 @@ function GsmModem:_restart_after_pdp()
 			if which == 'timeout' then return false, 'pdp_restart_state_timeout' end
 			if not msg then return false, 'state subscription interrupted' end
 			local state = msg.payload and msg.payload.to
-			local from = msg.payload and msg.payload.from
-			if state and (state ~= 'registered' or (from and from ~= 'registered')) then
+			if msg.payload and pdp_restart_transition(msg.payload, self.pdp_restart_from) then
 				self.pdp_restart_waiting = false
 				return true, "", state
 			end
@@ -1127,7 +1136,7 @@ end
 ---@return boolean restarted
 ---@return string error
 ---@return ModemState? state
-function GsmModem:_recover_pdp()
+function GsmModem:_configure_pdp()
 	local pdp_type = self.cfg.pdp_type or DEFAULT_PDP_TYPE
 	self.svc:obs_log('debug', { what = 'pdp_inspect', modem = self.name, pdp_type = pdp_type })
 	local contexts, err = modem_get_field(self.cap, 'pdp_contexts', REQUEST_TIMEOUT, 0)
@@ -1136,6 +1145,7 @@ function GsmModem:_recover_pdp()
 		if not self.pdp_restart_needed then return false, err, pdp_error_state(err) end
 		contexts = {}
 	end
+	local change_err = ""
 	table.sort(contexts, function(a, b) return a.cid < b.cid end)
 	for _, context in ipairs(contexts) do
 		if context.active and context.pdp_type ~= pdp_type then
@@ -1149,7 +1159,7 @@ function GsmModem:_recover_pdp()
 				what = set_err == "" and 'pdp_type_changed' or 'pdp_type_change_failed',
 				modem = self.name, cid = context.cid, pdp_type = pdp_type, err = set_err,
 			})
-			if set_err == "" then self.pdp_restart_needed = true end
+			if set_err == "" then self.pdp_restart_needed = true else change_err = set_err end
 			local state = pdp_error_state(set_err)
 			if state then
 				if not self.pdp_restart_needed then return false, set_err, state end
@@ -1157,9 +1167,9 @@ function GsmModem:_recover_pdp()
 			end
 		end
 	end
-	if not self.pdp_restart_needed then return false, "" end
+	if not self.pdp_restart_needed then return false, change_err end
 
-	-- Registration is required for PDP commands, not for applying verified changes by rebooting.
+	-- Apply verified changes before enabling; restart is allowed from any state.
 	local status, _, restarted, restart_err, next_state = self:_restart_after_pdp()
 	if status ~= 'ok' then return false, tostring(restarted or 'pdp_restart_failed') end
 	---@cast restarted boolean
@@ -1202,7 +1212,6 @@ function GsmModem:_apn_connect()
 	local rank_cutoff = tonumber(self.cfg.apn_rank_cutoff) or 4
 	local ranked_apns, rankings = apns.get_ranked_apns(mcc, mnc, imsi, nil, gid1, self.svc and self.svc.custom_apns)
 
-	local attempts = 0
 	-- Iterate through ranked APNs
 	for _, ranking in ipairs(rankings) do
 		if ranking.rank > rank_cutoff then break end
@@ -1227,7 +1236,6 @@ function GsmModem:_apn_connect()
 				self.svc:obs_log('debug',
 					{ what = 'apn_connect_attempt', modem = self.name, apn = ranking.name, conn_str = conn_str })
 
-				attempts = attempts + 1
 				local _, conn_err = call_modem_rpc(self.cap, 'connect', opts, REQUEST_TIMEOUT)
 
 				self.svc:obs_log('debug',
@@ -1275,15 +1283,6 @@ function GsmModem:_apn_connect()
 				{ what = 'apn_build_failed', modem = self.name, apn = ranking.name, err = build_err or 'nil' })
 		end
 	end
-
-	if attempts > 0 then
-		local restarted, recovery_err, state = self:_recover_pdp()
-		if state == STATE_CONNECTED then return nil, "", nil, state end
-		if restarted then return nil, "", 0, state end
-		if recovery_err ~= "" then
-			return nil, recovery_err, state == 'disabled' and 0 or DEFAULT_RETRY_TIMEOUT, state
-		end
-	end
 	return nil, "no apn connected", DEFAULT_RETRY_TIMEOUT
 end
 
@@ -1325,7 +1324,7 @@ function GsmModem:_autoconnect_loop()
 			local msg = msg_or_ver
 			if msg then
 				current_state = msg.payload.to
-				if current_state ~= 'registered' or (msg.payload.from and msg.payload.from ~= 'registered') then
+				if self.pdp_restart_waiting and pdp_restart_transition(msg.payload, self.pdp_restart_from) then
 					self.pdp_restart_waiting = false
 				end
 				self.current_state = current_state
@@ -1374,12 +1373,27 @@ function GsmModem:_autoconnect_loop()
 		end
 
 		-- Act on current_state
-		if current_state and self.cfg.autoconnect then
+		if current_state and (self.cfg.autoconnect or current_state == 'disabled') then
 			local err, retry_timeout
 
-			if current_state == 'disabled' then
-				local _, err_inner = call_modem_rpc(self.cap, 'enable', {}, REQUEST_TIMEOUT)
-				err = err_inner
+			if current_state == 'disabled' and not self.pdp_restart_waiting then
+				local restarted, pdp_err, next_state = self:_configure_pdp()
+				if next_state then
+					current_state = next_state
+					self.current_state = next_state
+					self.modem_state = normalize_optional_string(next_state)
+				end
+				if pdp_err:find('pdp_not_supported', 1, true) then
+					-- Unsupported manufacturers retain their existing enable/connect behavior.
+					pdp_err = ""
+				end
+				err = pdp_err
+				if restarted then
+					retry_timeout = 0 -- Re-read configuration on the next disabled pass.
+				elseif pdp_err == "" and current_state == 'disabled' and self.cfg.autoconnect then
+					local _, enable_err = call_modem_rpc(self.cap, 'enable', {}, REQUEST_TIMEOUT)
+					err = enable_err
+				end
 			elseif current_state == 'failed' then
 				local _, err_inner = call_modem_rpc(self.cap, 'listen_for_sim', {}, REQUEST_TIMEOUT)
 				err = err_inner
