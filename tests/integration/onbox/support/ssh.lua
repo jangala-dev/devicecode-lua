@@ -86,7 +86,10 @@ end
 ---@param remote_path string
 ---@return nil
 function Ssh:upload(path, remote_path)
-    self:run('umask 077; cat > ' .. quote(remote_path), { input_path = path, timeout = 120 })
+    local parent = remote_path:match('^(.*)/[^/]+$') or '.'
+    if parent == '' then parent = '/' end
+    self:run('umask 077; mkdir -p ' .. quote(parent) .. ' && cat > ' .. quote(remote_path),
+        { input_path = path, timeout = 120 })
 end
 
 ---@param command string
