@@ -139,4 +139,45 @@ function tests.test_refresh_info_wakes_the_full_snapshot_emitter()
 	end)
 end
 
+function tests.test_slow_network_read_keeps_its_original_observation_time()
+	runfibers.run(function()
+		local sleep = require 'fibers.sleep'
+		local emitted
+		local driver
+		driver = setmetatable({
+			backend = {
+				read_network_info = function()
+					local old_network = { access_techs = { 'lte' }, operator = 'Demo' }
+					sleep.sleep(0.01)
+					local poll_ok, err = driver:_poll_signal_once()
+					ok(poll_ok, err)
+					sleep.sleep(0.01)
+					return old_network, ''
+				end,
+				read_access_techs = function() return { '5gnr' }, '' end,
+				read_signal = function() return { values = { ['5g'] = { rsrp = -90 } } }, '' end,
+			},
+			cache = cache.new(math.huge),
+			field_observed_at = {},
+			cap_emit_ch = { put = function(_, payload) emitted = payload.data end },
+			imei = 'test-imei',
+		}, modem_driver._test.Modem)
+		local network, err, timestamps = driver:_get_group('network', 0)
+		eq(err, '')
+		eq(network.access_techs[1], 'lte')
+		eq(emitted.access_techs[1], '5gnr')
+		ok(timestamps.access_techs < emitted.observed_at)
+		local _, _, cached_times = driver:_get_group('network', math.huge)
+		eq(cached_times.access_techs, timestamps.access_techs)
+		-- Verify the consumer keeps the newer access technology and signal.
+		local values = require('services.gsm')._test.merge_info_snapshot(
+			{ access_techs = emitted.access_techs, signal = emitted.signal },
+			{ access_techs = emitted.observed_at, signal = emitted.observed_at }, 0,
+			{ schema = 'devicecode.hal.modem.info/1', generation = 1,
+				values = network, observed_at = timestamps })
+		eq(values.access_techs[1], '5gnr')
+		eq(values.signal['5g'].rsrp, -90)
+	end)
+end
+
 return tests

@@ -798,29 +798,70 @@ function GsmModem:_emit_event(key, value)
 	self.svc:obs_event(key, { modem = self.name, value = value })
 end
 
+---@param field string
+---@param value any
+---@param observed_at number?
+function GsmModem:_observe_info_field(field, value, observed_at)
+	self.info_values = self.info_values or {}
+	self.info_observed_at = self.info_observed_at or {}
+	observed_at = observed_at or fibers.now()
+	if observed_at < (self.info_observed_at[field] or -math.huge) then return end
+	self.info_values[field] = copy(value)
+	self.info_observed_at[field] = observed_at
+end
+
+function GsmModem:_sync_sim_fields()
+	local info = self.info_values or {}
+	self.sim_state = normalize_sim_presence(info.sim)
+	self.sim_lock = normalize_optional_string(info.sim_lock)
+	self.sim_lock_retries = info.sim_lock_retries and copy(info.sim_lock_retries) or nil
+	self.modem_state = normalize_optional_string(info.modem_state)
+end
+
+function GsmModem:_accept_card_state(state, observed_at)
+	observed_at = observed_at or fibers.now()
+	self:_observe_info_field('modem_state', normalize_optional_string(state), observed_at)
+	-- Lock details from an earlier state must not survive a lifecycle change.
+	self:_observe_info_field('sim_lock', nil, observed_at)
+	self:_observe_info_field('sim_lock_retries', nil, observed_at)
+	self:_sync_sim_fields()
+end
+
+function GsmModem:_accept_sim_state(value, observed_at)
+	observed_at = observed_at or fibers.now()
+	local sim = sim_payload_from_value(value, self.sim_lock, self.sim_lock_retries, self.modem_state)
+	local presence = sim.present == false and 'absent' or (sim.present == true and 'present' or nil)
+	self:_observe_info_field('sim', presence, observed_at)
+	if sim.present == false then
+		self:_observe_info_field('sim_lock', nil, observed_at)
+		self:_observe_info_field('sim_lock_retries', nil, observed_at)
+	end
+	self:_sync_sim_fields()
+end
+
 ---@param timescale number?
----@return nil
 function GsmModem:_refresh_sim_lock_fields(timescale)
+	local observed_at = fibers.now()
 	local modem_state, state_err = modem_get_field(self.cap, 'modem_state', REQUEST_TIMEOUT, timescale)
 	if state_err == "" then
-		self.modem_state = normalize_optional_string(modem_state)
+		self:_observe_info_field('modem_state', normalize_optional_string(modem_state), observed_at)
 	end
+	self:_sync_sim_fields()
 
 	if self.modem_state ~= 'locked' then
-		self.sim_lock = nil
-		self.sim_lock_retries = nil
 		return
 	end
 
 	local sim_lock, lock_err = modem_get_field(self.cap, 'sim_lock', REQUEST_TIMEOUT)
 	if lock_err == "" then
-		self.sim_lock = normalize_optional_string(sim_lock)
+		self:_observe_info_field('sim_lock', normalize_optional_string(sim_lock), observed_at)
 	end
 
 	local retries, retries_err = modem_get_field(self.cap, 'sim_lock_retries', REQUEST_TIMEOUT)
 	if retries_err == "" then
-		self.sim_lock_retries = retries
+		self:_observe_info_field('sim_lock_retries', retries, observed_at)
 	end
+	self:_sync_sim_fields()
 end
 
 ---@return nil
@@ -938,10 +979,7 @@ function GsmModem:_accept_info_snapshot(snapshot)
 
 	local info = self.info_values
 	self.device = normalize_optional_string(info.device) or ''
-	self.sim_state = normalize_sim_presence(info.sim)
-	self.sim_lock = normalize_optional_string(info.sim_lock)
-	self.sim_lock_retries = info.sim_lock_retries and copy(info.sim_lock_retries) or nil
-	self.modem_state = normalize_optional_string(info.modem_state)
+	self:_sync_sim_fields()
 
 	local interface = info.net_ports and info.net_ports[1]
 	self.wwan_iface = interface
@@ -1066,6 +1104,19 @@ function GsmModem:_emit_metrics_once()
 	log_modem_detected(self, inventory)
 end
 
+---@return boolean
+function GsmModem:_ensure_signal_frequency()
+	local frequency = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
+	if frequency == self.configured_signal_freq then return true end
+	local _, err = modem_set_signal_freq(self.cap, frequency)
+	if err ~= '' then
+		self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = err })
+		return false
+	end
+	self.configured_signal_freq = frequency
+	return true
+end
+
 ---@return nil
 function GsmModem:_metrics_loop()
 	local seen = self.config_pulse:version()
@@ -1074,11 +1125,7 @@ function GsmModem:_metrics_loop()
 	local info_sub = self.cap:get_state_sub('info', { queue_len = 2, full = 'drop_oldest' })
 	local signal_sub = self.cap:get_event_sub('signal', { queue_len = 2, full = 'drop_oldest' })
 	local emit_after_refresh = false
-	local signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
-	local _, signal_freq_err = modem_set_signal_freq(self.cap, signal_freq)
-	if signal_freq_err ~= '' then
-		self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = signal_freq_err })
-	end
+	self:_ensure_signal_frequency()
 
 	local _, refresh_err = modem_refresh_info(self.cap)
 	if refresh_err ~= '' then
@@ -1098,14 +1145,7 @@ function GsmModem:_metrics_loop()
 			seen = value
 			interval = tonumber(self.cfg.metrics_interval) or DEFAULT_METRICS_INTERVAL
 			next_metrics_at = fibers.now() + interval
-			local configured_signal_freq = tonumber(self.cfg.signal_freq) or DEFAULT_SIGNAL_FREQ
-			if configured_signal_freq ~= signal_freq then
-				signal_freq = configured_signal_freq
-				local _, err = modem_set_signal_freq(self.cap, signal_freq)
-				if err ~= '' then
-					self.svc:obs_log('debug', { what = 'set_signal_freq_failed', modem = self.name, err = err })
-				end
-			end
+			self:_ensure_signal_frequency()
 		elseif which == 'info' then
 			if not value then
 				self.svc:obs_log('debug', { what = 'info_subscription_closed', modem = self.name, err = tostring(event_err) })
@@ -1129,6 +1169,7 @@ function GsmModem:_metrics_loop()
 			end
 		else
 			next_metrics_at = fibers.now() + interval
+			self:_ensure_signal_frequency()
 			local stale = not self.info_received_at
 				or fibers.now() - self.info_received_at >= interval
 			if stale then
@@ -1288,12 +1329,11 @@ function GsmModem:_autoconnect_loop()
 			if msg then
 				current_state = msg.payload.to
 				self.current_state = current_state
-				self.modem_state = normalize_optional_string(current_state)
+				self:_accept_card_state(current_state)
 				if current_state == 'locked' then
 					self:_refresh_sim_lock_fields(0)
-				else
-					self.sim_lock = nil
-					self.sim_lock_retries = nil
+				elseif current_state == 'registered' or current_state == 'connecting' or current_state == STATE_CONNECTED then
+					self:_ensure_signal_frequency()
 				end
 				self:_emit_metric('modem_state', self.modem_state)
 				self:_emit_metric('sim_lock', self.sim_lock or '--')
@@ -1318,12 +1358,10 @@ function GsmModem:_autoconnect_loop()
 			local msg = msg_or_ver
 			if msg then
 				local sim = sim_payload_from_value(msg.payload, self.sim_lock, self.sim_lock_retries, self.modem_state)
-				self.sim_state = sim.present == false and '--' or (sim.present == true and 'present' or 'unknown')
+				self:_accept_sim_state(msg.payload)
 				if sim.present == false then
 					self.connected = false
 					connected = false
-					self.sim_lock = nil
-					self.sim_lock_retries = nil
 				end
 				self:_emit_metric('sim', self.sim_state)
 				self:_publish_uplink_state(nil, self.wwan_iface)

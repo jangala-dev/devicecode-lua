@@ -45,6 +45,8 @@ local function new_test_modem(fields)
 		modem_state = 'connected',
 		sim_state = 'present',
 		info_values = fields,
+		info_observed_at = {},
+		info_generation = 0,
 		uplink_generation = 0,
 		domain = domain,
 		svc = { wall = function() return 100 end },
@@ -336,6 +338,66 @@ function tests.test_info_snapshot_rejects_values_without_observation_times()
 
 	eq(values, nil)
 	eq(err, 'modem info value is missing an observation time')
+end
+
+function tests.test_signal_frequency_failure_remains_pending_until_success()
+	runfibers.run(function()
+		local modem = new_test_modem()
+		local attempts = 0
+		modem.cfg = { signal_freq = 5 }
+		modem.svc.obs_log = function() end
+		modem.cap.call_control_op = function(_, method, opts)
+			eq(method, 'set_signal_update_freq')
+			eq(opts.frequency, modem.cfg.signal_freq)
+			attempts = attempts + 1
+			return op.always({ ok = attempts ~= 1 and attempts ~= 3, reason = 'setup result' })
+		end
+		eq(modem:_ensure_signal_frequency(), false)
+		eq(modem.configured_signal_freq, nil)
+		eq(modem:_ensure_signal_frequency(), true)
+		eq(modem.configured_signal_freq, 5)
+		eq(modem:_ensure_signal_frequency(), true)
+		eq(attempts, 2)
+		modem.cfg.signal_freq = 10
+		eq(modem:_ensure_signal_frequency(), false)
+		eq(modem.configured_signal_freq, 5)
+		eq(modem:_ensure_signal_frequency(), true)
+		eq(modem.configured_signal_freq, 10)
+	end)
+end
+
+function tests.test_lifecycle_state_survives_failed_and_older_sim_snapshots()
+	runfibers.run(function()
+		local modem = new_test_modem()
+		local function snapshot(generation, values, observed_at)
+			local accepted, err = modem:_accept_info_snapshot({
+				schema = 'devicecode.hal.modem.info/1', generation = generation,
+				values = values, observed_at = observed_at,
+			})
+			eq(accepted, true, err)
+		end
+		snapshot(1, { sim = 'present', modem_state = 'locked', sim_lock = 'sim-pin' },
+			{ sim = 10, modem_state = 10, sim_lock = 10 })
+		modem:_accept_card_state('connected', 20)
+		modem:_accept_sim_state('absent', 20)
+		-- A failed SIM group contributes no observations.
+		snapshot(2, { operator = 'Demo' }, { operator = 30 })
+		eq(modem.sim_state, '--')
+		eq(modem.modem_state, 'connected')
+		eq(modem.sim_lock, nil)
+		-- An in-flight SIM read completed after the lifecycle change.
+		snapshot(3, { sim = 'present', modem_state = 'locked', sim_lock = 'sim-pin' },
+			{ sim = 15, modem_state = 15, sim_lock = 15 })
+		eq(modem.sim_state, '--')
+		eq(modem.modem_state, 'connected')
+		eq(modem.sim_lock, nil)
+		-- A genuinely newer read can change those fields again.
+		snapshot(4, { sim = 'present', modem_state = 'locked', sim_lock = 'sim-puk' },
+			{ sim = 40, modem_state = 40, sim_lock = 40 })
+		eq(modem.sim_state, 'present')
+		eq(modem.modem_state, 'locked')
+		eq(modem.sim_lock, 'sim-puk')
+	end)
 end
 
 return tests
