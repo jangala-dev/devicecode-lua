@@ -49,6 +49,7 @@ local files = {
 	"unit.hal.radio_driver_spec",
 	"unit.hal.modem_linux_mm_spec",
 	"unit.hal.modem_emit_spec",
+	"unit.hal.modem_at_spec",
 	"unit.hal.modem_pdp_spec",
 	"unit.hal.modem_types_spec",
 	"unit.hal.modem_qmi_spec",
