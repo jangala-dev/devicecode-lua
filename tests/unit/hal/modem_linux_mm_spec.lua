@@ -1,3 +1,8 @@
+local fibers = require 'fibers'
+local op = require 'fibers.op'
+local runfibers = require 'tests.support.run_fibers'
+local driver = require 'services.hal.drivers.modem'
+local sleep = require 'fibers.sleep'
 local linux_mm = require 'services.hal.backends.modem.providers.linux_mm.impl'
 
 local tests = {}
@@ -7,6 +12,45 @@ local function eq(a, b, msg)
 	if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end
 end
 local function ok(v, msg) if not v then fail(msg or 'expected truthy') end end
+
+---@return nil
+function tests.test_linux_mm_stopped_state_monitor_reports_command_closed()
+	runfibers.run(function()
+		local backend = setmetatable({}, linux_mm._test.ModemBackend)
+		local event, err = fibers.perform(backend:monitor_state_op())
+		eq(event, nil)
+		eq(err, 'Command closed')
+	end)
+end
+
+---@return nil
+function tests.test_linux_mm_lifecycle_exits_when_state_monitor_is_cleared_during_shutdown()
+	runfibers.run(function()
+		local backend = setmetatable({
+			state_monitor = { stream = { read_line_op = function()
+				return op.always("modem: Initial state, 'disabled'")
+			end } },
+			wait_for_sim_present_op = function() return sleep.sleep_op(math.huge) end,
+		}, linux_mm._test.ModemBackend)
+		local errors = {}
+		local modem = assert(driver.new('test-modem', {
+			debug = function() end,
+			trace = function() end,
+			error = function(_, entry)
+				errors[#errors + 1] = entry
+				assert(#errors == 1, 'Lifecycle spins on a cleared state monitor without yielding')
+			end,
+		}))
+		modem.backend = backend
+		modem._emit_state = function()
+			-- Shutdown clears the monitor before yielding to wait for its process.
+			backend.state_monitor = nil
+		end
+		modem:modem_lifecycle_monitor()
+		eq(#errors, 1)
+		eq(errors[1].what, 'state monitor_closed')
+	end)
+end
 
 function tests.test_linux_mm_parses_sim_lock_fields_from_modem_json()
 	local info, err = linux_mm._test.parse_modem_info_json([[

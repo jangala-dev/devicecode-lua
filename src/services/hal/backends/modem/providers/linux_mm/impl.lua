@@ -919,7 +919,9 @@ end
 function ModemBackend:monitor_state_op()
     return op.guard(function()
         if not self.state_monitor then
-            return op.always(nil)
+            -- Shutdown clears the record before waiting for the monitor process.
+            -- Report closure so the lifecycle fiber exits instead of spinning.
+            return op.always(nil, "Command closed")
         end
         return self.state_monitor.stream:read_line_op():wrap(function(line)
             local state_ev, err = parse_modem_state_line(line)
