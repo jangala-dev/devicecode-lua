@@ -41,6 +41,8 @@ local function get_provider()
     error("No supported modem provider found")
 end
 
+---@param address ModemAddress
+---@return ModemBackend
 local function new(address)
     local provider = get_provider()
     local impl = provider.backend
@@ -74,13 +76,13 @@ local function new(address)
                     local model_variant = details.model_variant
                     identity_info.model = model
                     identity_info.model_variant = model_variant
-                    local ok, model_mod = pcall(require, "services.hal.backends.modem.models." .. manufacturer)
-                    if ok and type(model_mod) == "table" and model_mod.add_model_funcs then
-                        model_mod.add_model_funcs(backend, identity_info)
-                        model_funcs_loaded = true
-                    end
                     break
                 end
+            end
+            local ok, model_mod = pcall(require, "services.hal.backends.modem.models." .. manufacturer)
+            if ok and type(model_mod) == "table" and model_mod.add_model_funcs then
+                model_mod.add_model_funcs(backend, identity_info)
+                model_funcs_loaded = true
             end
         end
         if model_funcs_loaded then break end
