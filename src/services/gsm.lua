@@ -178,42 +178,36 @@ end
 
 ---@param current_values table
 ---@param current_observed_at table
----@param current_generation number
 ---@param snapshot any
 ---@return table? values
 ---@return table? observed_at
----@return number? generation
 ---@return string error
-local function merge_info_snapshot(current_values, current_observed_at, current_generation, snapshot)
+local function merge_info_snapshot(current_values, current_observed_at, snapshot)
 	if not is_plain_table(snapshot) or snapshot.schema ~= MODEM_INFO_SCHEMA then
-		return nil, nil, nil, 'invalid modem info snapshot'
+		return nil, nil, 'invalid modem info snapshot'
 	end
 	if not is_plain_table(snapshot.values) or not is_plain_table(snapshot.observed_at) then
-		return nil, nil, nil, 'invalid modem info snapshot values'
-	end
-	local generation = tonumber(snapshot.generation)
-	if not generation or generation < current_generation then
-		return nil, nil, nil, 'stale modem info snapshot'
+		return nil, nil, 'invalid modem info snapshot values'
 	end
 
 	local values = copy(current_values)
 	local observed_at = copy(current_observed_at)
 	for field in pairs(snapshot.values) do
 		if type(field) ~= 'string' or tonumber(snapshot.observed_at[field]) == nil then
-			return nil, nil, nil, 'modem info value is missing an observation time'
+			return nil, nil, 'modem info value is missing an observation time'
 		end
 	end
 	for field, observed in pairs(snapshot.observed_at) do
 		observed = tonumber(observed)
 		if type(field) ~= 'string' or not observed then
-			return nil, nil, nil, 'invalid modem info observation time'
+			return nil, nil, 'invalid modem info observation time'
 		end
 		if observed >= (tonumber(observed_at[field]) or -math.huge) then
 			values[field] = copy(snapshot.values[field])
 			observed_at[field] = observed
 		end
 	end
-	return values, observed_at, generation, ''
+	return values, observed_at, ''
 end
 
 ---@param access_techs any
@@ -740,8 +734,6 @@ function GsmModem.new(cap, svc)
 	self.last_signal = nil
 	self.info_values = {}
 	self.info_observed_at = {}
-	self.info_generation = 0
-	self.info_received_at = nil
 	self.current_state = nil
 	self.uplink_generation = 0
 	self.scope = nil
@@ -964,18 +956,15 @@ end
 ---@return boolean
 ---@return string
 function GsmModem:_accept_info_snapshot(snapshot)
-	local values, observed_at, generation, err = merge_info_snapshot(
+	local values, observed_at, err = merge_info_snapshot(
 		self.info_values,
 		self.info_observed_at,
-		self.info_generation,
 		snapshot
 	)
 	if not values then return false, err end
 
 	self.info_values = values
 	self.info_observed_at = observed_at
-	self.info_generation = generation
-	self.info_received_at = fibers.now()
 
 	local info = self.info_values
 	self.device = normalize_optional_string(info.device) or ''
@@ -1168,19 +1157,16 @@ function GsmModem:_metrics_loop()
 				self.svc:obs_log('debug', { what = 'invalid_signal_event', modem = self.name, err = accept_err })
 			end
 		else
-			next_metrics_at = fibers.now() + interval
+			-- Keep deadlines on the original cadence, skipping missed intervals
+			-- after a delay instead of issuing a burst of catch-up refreshes.
+			local elapsed_intervals = math.floor((fibers.now() - next_metrics_at) / interval) + 1
+			next_metrics_at = next_metrics_at + elapsed_intervals * interval
 			self:_ensure_signal_frequency()
-			local stale = not self.info_received_at
-				or fibers.now() - self.info_received_at >= interval
-			if stale then
-				emit_after_refresh = true
-				local _, err = modem_refresh_info(self.cap)
-				if err ~= '' then
-					emit_after_refresh = false
-					self.svc:obs_log('debug', { what = 'info_refresh_failed', modem = self.name, err = err })
-					self:_emit_metrics_once()
-				end
-			else
+			emit_after_refresh = true
+			local _, err = modem_refresh_info(self.cap)
+			if err ~= '' then
+				emit_after_refresh = false
+				self.svc:obs_log('debug', { what = 'info_refresh_failed', modem = self.name, err = err })
 				self:_emit_metrics_once()
 			end
 		end

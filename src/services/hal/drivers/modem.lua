@@ -33,8 +33,6 @@ local pulse = require "fibers.pulse"
 ---@field signal_config_pulse Pulse
 ---@field sim_inserted_pulse Pulse
 ---@field sim_state_ch Channel
----@field field_observed_at table<string, number>
----@field info_generation integer
 ---@field card_state string?
 ---@field signal_poll_interval number?
 ---@field log Logger
@@ -255,13 +253,11 @@ function Modem:_cache_group(group, value, observed_at)
     observed_at = observed_at or fibers.now()
     self.group_observed_at = self.group_observed_at or {}
     local timestamps = {}
-    self.field_observed_at = self.field_observed_at or {}
     for _, field in ipairs(GROUP_FIELDS[group] or {}) do
         -- A timestamp means the field was observed, including when the backend
         -- successfully observed that the field is absent. Failed groups do not
         -- advance these timestamps, so consumers can preserve their last value.
         timestamps[field] = observed_at
-        self.field_observed_at[field] = math.max(self.field_observed_at[field] or -math.huge, observed_at)
     end
     self.group_observed_at[group] = timestamps
     return timestamps
@@ -562,7 +558,6 @@ function Modem:_poll_signal_once()
     end
 
     self:_cache_group('signal', signal, observed_at)
-    self.field_observed_at.access_techs = math.max(self.field_observed_at.access_techs or -math.huge, observed_at)
 
     local cached_network = self.cache:get('network', math.huge)
     if cached_network then
@@ -673,10 +668,8 @@ function Modem:emitter()
             end
         end
 
-        self.info_generation = self.info_generation + 1
         local emit_ok, emit_err = self:_emit_state('info', {
             schema = MODEM_INFO_SCHEMA,
-            generation = self.info_generation,
             values = values,
             observed_at = observed_at,
         })
@@ -1012,8 +1005,6 @@ local function new(address, logger)
         log = logger,
         address = address,
         cache = cache_mod.new(math.huge, fibers.now, '.'),
-        field_observed_at = {},
-        info_generation = 0,
         initialised = false,  -- modem cannot apply capabilities until initialised
         caps_applied = false, -- modem cannot start until capabilities applied
         listening_for_sim = false,

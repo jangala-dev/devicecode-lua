@@ -38,7 +38,6 @@ function tests.test_signal_poll_emits_access_tech_and_measurements_together()
 				end,
 			},
 			cache = cache.new(math.huge),
-			field_observed_at = {},
 			cap_emit_ch = {
 				put = function(_, payload)
 					emitted = payload
@@ -131,8 +130,6 @@ function tests.test_full_info_snapshot_marks_present_and_absent_fields_as_observ
 				end,
 			},
 			cache = cache.new(math.huge),
-			field_observed_at = {},
-			info_generation = 0,
 			state_pulse = pulse.new(),
 			cap_emit_ch = {
 				put = function(_, payload)
@@ -157,7 +154,6 @@ function tests.test_full_info_snapshot_marks_present_and_absent_fields_as_observ
 		done:changed(done_version)
 
 		eq(emitted.schema, 'devicecode.hal.modem.info/1')
-		eq(emitted.generation, 1)
 		eq(emitted.values.operator, 'Demo')
 		eq(emitted.values.sim_lock, nil)
 		ok(type(emitted.observed_at.operator) == 'number')
@@ -170,14 +166,12 @@ function tests.test_full_info_snapshot_marks_present_and_absent_fields_as_observ
 		ok(refresh_ok, refresh_err)
 		done:changed(done_version)
 		eq(emitted.values.firmware, 'test-firmware')
-		eq(emitted.generation, 2)
 		eq(identity_reads, 2)
 
 		done_version = done:version()
 		driver.state_pulse:signal()
 		done:changed(done_version)
 		eq(emitted.values.firmware, 'test-firmware')
-		eq(emitted.generation, 3)
 		eq(identity_reads, 2)
 		eq(port_reads, 1)
 	end)
@@ -215,7 +209,6 @@ function tests.test_slow_network_read_keeps_its_original_observation_time()
 				read_signal = function() return { values = { ['5g'] = { rsrp = -90 } } }, '' end,
 			},
 			cache = cache.new(math.huge),
-			field_observed_at = {},
 			cap_emit_ch = { put = function(_, payload) emitted = payload.data end },
 			imei = 'test-imei',
 		}, modem_driver._test.Modem)
@@ -229,8 +222,8 @@ function tests.test_slow_network_read_keeps_its_original_observation_time()
 		-- Verify the consumer keeps the newer access technology and signal.
 		local values = require('services.gsm')._test.merge_info_snapshot(
 			{ access_techs = emitted.access_techs, signal = emitted.signal },
-			{ access_techs = emitted.observed_at, signal = emitted.observed_at }, 0,
-			{ schema = 'devicecode.hal.modem.info/1', generation = 1,
+			{ access_techs = emitted.observed_at, signal = emitted.observed_at },
+			{ schema = 'devicecode.hal.modem.info/1',
 				values = network, observed_at = timestamps })
 		eq(values.access_techs[1], '5gnr')
 		eq(values.signal['5g'].rsrp, -90)

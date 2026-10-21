@@ -137,7 +137,6 @@ ModemSignalInfo.__index = ModemSignalInfo
 
 ---@class ModemInfoSnapshot
 ---@field schema string
----@field generation integer
 ---@field values ModemInfoValues
 ---@field observed_at table<string, number>
 
