@@ -44,6 +44,8 @@ local function new_test_modem(fields)
 		wwan_iface = 'wwan0',
 		modem_state = 'connected',
 		sim_state = 'present',
+		info_values = fields,
+		info_observed_at = {},
 		uplink_generation = 0,
 		domain = domain,
 		svc = { wall = function() return 100 end },
@@ -285,6 +287,223 @@ function tests.test_signal_bars_use_the_selected_signal_tech()
 	eq(tech, 'lte')
 	eq(value, -96)
 	eq(field, 'rsrp')
+end
+
+function tests.test_info_snapshot_merges_only_fields_observed_by_the_driver()
+	local values, observed_at, err = gsm._test.merge_info_snapshot(
+		{
+			operator = 'Old operator',
+			signal = { lte = { rsrp = -90 } },
+			legacy_field = 'stale',
+		},
+		{
+			operator = 5,
+			signal = 20,
+			legacy_field = 5,
+		},
+		{
+			schema = 'devicecode.hal.modem.info/1',
+			values = {
+				operator = 'New operator',
+				signal = { lte = { rsrp = -110 } },
+			},
+			observed_at = {
+				operator = 30,
+				signal = 10,
+				legacy_field = 30,
+			},
+		}
+	)
+
+	eq(err, '')
+	eq(values.operator, 'New operator')
+	eq(values.signal.lte.rsrp, -90)
+	eq(values.legacy_field, nil)
+	eq(observed_at.operator, 30)
+	eq(observed_at.signal, 20)
+	eq(observed_at.legacy_field, 30)
+end
+
+function tests.test_info_snapshot_rejects_values_without_observation_times()
+	local values, _, err = gsm._test.merge_info_snapshot({}, {}, {
+		schema = 'devicecode.hal.modem.info/1',
+		values = { operator = 'Demo' },
+		observed_at = {},
+	})
+
+	eq(values, nil)
+	eq(err, 'modem info value is missing an observation time')
+end
+
+function tests.test_info_snapshot_uses_field_timestamps_when_generation_restarts()
+	runfibers.run(function()
+		local modem = new_test_modem()
+		local accepted, err = modem:_accept_info_snapshot({
+			schema = 'devicecode.hal.modem.info/1', generation = 100,
+			values = { operator = 'Old operator', signal = { lte = { rsrp = -90 } } },
+			observed_at = { operator = 10, signal = 30 },
+		})
+		eq(accepted, true, err)
+
+		accepted, err = modem:_accept_info_snapshot({
+			schema = 'devicecode.hal.modem.info/1', generation = 1,
+			values = { operator = 'New operator', signal = { lte = { rsrp = -110 } } },
+			observed_at = { operator = 20, signal = 20 },
+		})
+		eq(accepted, true, err)
+		eq(modem.info_values.operator, 'New operator')
+		eq(modem.info_values.signal.lte.rsrp, -90)
+		eq(modem.info_observed_at.operator, 20)
+		eq(modem.info_observed_at.signal, 30)
+	end)
+end
+
+function tests.test_signal_frequency_failure_remains_pending_until_success()
+	runfibers.run(function()
+		local modem = new_test_modem()
+		local attempts = 0
+		modem.cfg = { signal_freq = 5 }
+		modem.svc.obs_log = function() end
+		modem.cap.call_control_op = function(_, method, opts)
+			eq(method, 'set_signal_update_freq')
+			eq(opts.frequency, modem.cfg.signal_freq)
+			attempts = attempts + 1
+			return op.always({ ok = attempts ~= 1 and attempts ~= 3, reason = 'setup result' })
+		end
+		eq(modem:_ensure_signal_frequency(), false)
+		eq(modem.configured_signal_freq, nil)
+		eq(modem:_ensure_signal_frequency(), true)
+		eq(modem.configured_signal_freq, 5)
+		eq(modem:_ensure_signal_frequency(), true)
+		eq(attempts, 2)
+		modem.cfg.signal_freq = 10
+		eq(modem:_ensure_signal_frequency(), false)
+		eq(modem.configured_signal_freq, 5)
+		eq(modem:_ensure_signal_frequency(), true)
+		eq(modem.configured_signal_freq, 10)
+	end)
+end
+
+function tests.test_metrics_loop_refreshes_on_absolute_deadlines_despite_delayed_snapshots()
+	runfibers.run(function(scope)
+		local fibers = require 'fibers'
+		local channel = require 'fibers.channel'
+		local time_harness = require 'tests.support.time_harness'
+		local clock = require('tests.support.virtual_time').install({ monotonic = 0 })
+		scope:finally(function() clock:restore() end)
+
+		local modem = new_test_modem()
+		modem.cfg = { metrics_interval = 1 }
+		modem.config_pulse = require('fibers.pulse').new()
+		modem.svc.obs_log = function() end
+		local info, signal = channel.new(2), channel.new(2)
+		local unsubscribed = 0
+		local function subscription(ch)
+			return {
+				recv_op = function() return ch:get_op() end,
+				unsubscribe = function() unsubscribed = unsubscribed + 1 end,
+			}
+		end
+		modem.cap.get_state_sub = function(_, key)
+			eq(key, 'info')
+			return subscription(info)
+		end
+		modem.cap.get_event_sub = function(_, key)
+			eq(key, 'signal')
+			return subscription(signal)
+		end
+		local refreshes, emitted = {}, {}
+		modem.cap.call_control_op = function(_, method)
+			if method == 'refresh_info' then
+				refreshes[#refreshes + 1] = fibers.now()
+			else
+				eq(method, 'set_signal_update_freq')
+			end
+			return op.always({ ok = true })
+		end
+		modem._emit_metrics_once = function()
+			emitted[#emitted + 1] = modem.info_values.operator
+		end
+		local stopped = false
+		assert(scope:spawn(function()
+			modem:_metrics_loop()
+			stopped = true
+		end))
+		local function advance_to(now)
+			clock:set_monotonic(now)
+			time_harness.flush_ticks(20)
+		end
+		local function deliver_snapshot(now)
+			advance_to(now)
+			info:put({ payload = {
+				schema = 'devicecode.hal.modem.info/1',
+				values = { operator = 'Demo ' .. #refreshes },
+				observed_at = { operator = refreshes[#refreshes] },
+			} })
+			time_harness.flush_ticks(20)
+			eq(modem.info_values.operator, 'Demo ' .. #refreshes)
+		end
+
+		advance_to(0)
+		eq(#refreshes, 1)
+		deliver_snapshot(0.25)
+		-- The first tick is serviced late, but its recently received snapshot
+		-- must not suppress the refresh or move the following deadline.
+		advance_to(1.125)
+		eq(#refreshes, 2)
+		deliver_snapshot(1.25)
+		eq(emitted[1], 'Demo 2')
+		advance_to(2)
+		eq(#refreshes, 3)
+		deliver_snapshot(2.25)
+		eq(emitted[2], 'Demo 3')
+
+		-- Skip missed deadlines after a long pause, then resume the cadence.
+		advance_to(5.25)
+		eq(#refreshes, 4)
+		deliver_snapshot(5.5)
+		advance_to(6)
+		eq(#refreshes, 5)
+
+		modem.config_pulse:close()
+		time_harness.flush_ticks(20)
+		eq(stopped, true)
+		eq(unsubscribed, 2)
+	end, { timeout = 20 })
+end
+
+function tests.test_lifecycle_state_survives_failed_and_older_sim_snapshots()
+	runfibers.run(function()
+		local modem = new_test_modem()
+		local function snapshot(values, observed_at)
+			local accepted, err = modem:_accept_info_snapshot({
+				schema = 'devicecode.hal.modem.info/1',
+				values = values, observed_at = observed_at,
+			})
+			eq(accepted, true, err)
+		end
+		snapshot({ sim = 'present', modem_state = 'locked', sim_lock = 'sim-pin' },
+			{ sim = 10, modem_state = 10, sim_lock = 10 })
+		modem:_accept_card_state('connected', 20)
+		modem:_accept_sim_state('absent', 20)
+		-- A failed SIM group contributes no observations.
+		snapshot({ operator = 'Demo' }, { operator = 30 })
+		eq(modem.sim_state, '--')
+		eq(modem.modem_state, 'connected')
+		eq(modem.sim_lock, nil)
+		-- An in-flight SIM read completed after the lifecycle change.
+		snapshot({ sim = 'present', modem_state = 'locked', sim_lock = 'sim-pin' },
+			{ sim = 15, modem_state = 15, sim_lock = 15 })
+		eq(modem.sim_state, '--')
+		eq(modem.modem_state, 'connected')
+		eq(modem.sim_lock, nil)
+		-- A genuinely newer read can change those fields again.
+		snapshot({ sim = 'present', modem_state = 'locked', sim_lock = 'sim-puk' },
+			{ sim = 40, modem_state = 40, sim_lock = 40 })
+		eq(modem.sim_state, 'present')
+		eq(modem.modem_state, 'locked')
+		eq(modem.sim_lock, 'sim-puk')
+	end)
 end
 
 return tests

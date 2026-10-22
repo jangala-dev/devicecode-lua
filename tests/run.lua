@@ -50,6 +50,7 @@ local files = {
 	"unit.hal.modem_linux_mm_spec",
 	"unit.hal.modem_lifecycle_spec",
 	"unit.hal.modem_types_spec",
+	"unit.hal.modem_driver_spec",
 	"unit.hal.modem_qmi_spec",
 	"unit.hal.modem_recovery_backend_spec",
 	"unit.hal.modemcard_recovery_spec",
