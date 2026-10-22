@@ -1122,8 +1122,12 @@ function GsmModem:_restart_after_pdp()
 				state = state_sub:recv_op(),
 				timeout = sleep.sleep_op(math.max(0, deadline - fibers.now())),
 			}))
-			if which == 'timeout' then return false, 'pdp_restart_state_timeout' end
-			if not msg then return false, 'state subscription interrupted' end
+			if which == 'timeout' or not msg then
+				self.pdp_restart_waiting = false
+				self.pdp_restart_needed = true
+				if which == 'timeout' then return false, 'pdp_restart_state_timeout' end
+				return false, 'state subscription interrupted'
+			end
 			local state = msg.payload and msg.payload.to
 			if msg.payload and pdp_restart_transition(msg.payload, self.pdp_restart_from) then
 				self.pdp_restart_waiting = false
