@@ -804,7 +804,7 @@ end
 function ModemBackend:monitor_state_op()
     return op.guard(function()
         if not self.state_monitor then
-            return op.always(nil)
+            return op.always(nil, "Command closed")
         end
         return self.state_monitor.stream:read_line_op():wrap(function(line)
             local state_ev, err = parse_modem_state_line(line)
@@ -875,6 +875,7 @@ return {
     new = new,
     new_recovery = new_recovery,
     _test = {
+        ModemBackend = ModemBackend,
         is_signal_valid = is_signal_valid,
         normalize_unlock_retries = normalize_unlock_retries,
         get_device_from_modem_info = get_device_from_modem_info,
