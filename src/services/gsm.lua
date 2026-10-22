@@ -389,6 +389,7 @@ local function uplink_state_for_modem(connected, modem_state, _sim_lock, sim_sta
 	if modem_state == 'locked' then return 'locked' end
 	if connected == true then return 'connected' end
 	if modem_state == 'registered' then return 'registered' end
+	if modem_state == 'searching' then return 'searching' end
 	return 'disconnected'
 end
 
@@ -802,6 +803,7 @@ function GsmModem:_publish_uplink_state(connected, iface)
 	local access = {}
 	local signal_payload = nil
 	local modem_payload = {
+		state = self.modem_state,
 		id = tostring(self.id),
 		role = self.name,
 		device = self.device,
