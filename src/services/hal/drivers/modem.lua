@@ -881,6 +881,37 @@ local function new(address, logger)
     }, Modem), ""
 end
 
+---@class RecoveryModem
+local RecoveryModem = {}
+RecoveryModem.__index = RecoveryModem
+
+function RecoveryModem:get_device()
+    return self.backend:get_device()
+end
+
+function RecoveryModem:reset()
+    local ok, err = self.backend:reset()
+    if not ok then
+        return return_error(err, 1)
+    end
+    return true
+end
+
+
+--- Create a new Modem driver.
+---@param address ModemAddress
+---@return RecoveryModem modem
+local function new_recovery(address)
+    local recovery_backend = modem_backend_provider.new_recovery(address)
+    local self = setmetatable({
+        address = address,
+        backend = recovery_backend
+    }, RecoveryModem)
+
+    return self
+end
+
 return {
-    new = new
+    new = new,
+    new_recovery = new_recovery
 }

@@ -1,0 +1,105 @@
+#!/bin/sh /etc/rc.common
+# Test implementation of the proposed firmware contract (GPL-2.0-or-later).
+# Production package changes belong in the separate firmware repository.
+# See mdns-repeater-firmware-plan.md; devicecode only manages the UCI policy.
+START=50
+STOP=50
+USE_PROCD=1
+PROG=/usr/sbin/mdns-repeater
+EXTRA_COMMANDS="capabilities apply"
+EXTRA_HELP="        capabilities    Report supported policy contract
+        apply           Validate, restart and verify the supervised process"
+
+capabilities() {
+	echo source-whitelist-v1
+}
+
+validate_config() {
+	config_load mdns_repeater
+	config_get_bool mdns_enabled main enabled 0
+	[ "$mdns_enabled" = 1 ] || return 0
+	config_get mdns_interfaces main interface
+	config_get mdns_whitelist main whitelist
+	[ -x "$PROG" ] || { echo 'mdns-repeater binary missing' >&2; return 1; }
+	case "$("$PROG" -h 2>&1)" in
+		*-w*) ;;
+		*) echo 'mdns-repeater binary lacks whitelist support' >&2; return 1 ;;
+	esac
+	# Disable globbing: UCI list entries must remain literal arguments.
+	set -f
+	local count=0 value
+	for value in $mdns_interfaces; do
+		case "$value" in
+			*[!a-zA-Z0-9_.:-]*|'') echo 'invalid mdns-repeater interface' >&2; return 1 ;;
+		esac
+		[ "${#value}" -le 15 ] || return 1
+		count=$((count + 1))
+	done
+	[ "$count" -ge 2 ] && [ "$count" -le 16 ] || { echo 'mdns-repeater needs 2..16 interfaces' >&2; return 1; }
+	count=0
+	for value in $mdns_whitelist; do
+		# Require an explicit IPv4 CIDR; /0 is deliberately rejected.
+		printf '%s\n' "$value" | awk -F '[./]' '
+			NF != 5 { exit 1 }
+			{ for (i=1; i<=5; i++) if ($i !~ /^[0-9]+$/) exit 1
+			  for (i=1; i<=4; i++) if ($i > 255) exit 1
+			  if ($5 < 1 || $5 > 32) exit 1 }' || {
+			echo 'invalid mdns-repeater whitelist CIDR' >&2; return 1;
+		}
+		count=$((count + 1))
+	done
+	[ "$count" -ge 1 ] && [ "$count" -le 16 ] || {
+		echo 'enabled mdns-repeater requires 1..16 whitelist entries' >&2; return 1;
+	}
+}
+
+start_service() {
+	validate_config || return 1
+	[ "$mdns_enabled" = 1 ] || return 0
+	local value
+	procd_open_instance main
+	procd_set_param command "$PROG" -f
+	for value in $mdns_whitelist; do procd_append_param command -w "$value"; done
+	for value in $mdns_interfaces; do procd_append_param command "$value"; done
+	procd_set_param respawn
+	procd_set_param file /etc/config/mdns_repeater
+	procd_close_instance
+}
+
+reload_service() {
+	validate_config || return 1
+	restart
+}
+
+apply() {
+	validate_config || return 1
+	[ "$mdns_enabled" = 1 ] || { stop || ! running; return $?; }
+	# netifd reload may return before its data devices have IPv4 addresses.
+	local attempt=0 ready value
+	while [ "$attempt" -lt 10 ]; do
+		ready=1
+		for value in $mdns_interfaces; do
+			ip -4 addr show dev "$value" 2>/dev/null | grep -q 'inet ' || ready=0
+		done
+		[ "$ready" = 1 ] && break
+		attempt=$((attempt + 1))
+		sleep 1
+	done
+	[ "$ready" = 1 ] || { echo 'mdns-repeater interfaces not ready' >&2; return 1; }
+	restart || return 1
+	attempt=0
+	while [ "$attempt" -lt 5 ]; do
+		sleep 1
+		if running; then return 0; fi
+		attempt=$((attempt + 1))
+	done
+	echo 'mdns-repeater failed to start' >&2
+	return 1
+}
+
+service_triggers() {
+	procd_add_reload_trigger mdns_repeater
+	# These are Linux data devices, not netifd logical interface names.
+	# Rebind when network interfaces change, including after boot/network reload.
+	procd_add_raw_trigger 'interface.*' 2000 /etc/init.d/mdns-repeater reload
+}

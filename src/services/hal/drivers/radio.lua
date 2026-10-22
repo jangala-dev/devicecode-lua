@@ -461,7 +461,12 @@ function RadioDriver:stats_loop()
     local connected      = {}
     local interfaces_set = {}
 
-    backend:start_client_monitor()
+    local ok, err = backend:start_client_monitor()
+
+    if not ok then
+        self.log:error({ what = 'radio_stats_loop_failed', id = id, err = err })
+        return
+    end
 
     fibers.current_scope():finally(function()
         if backend and backend.terminate then
@@ -486,7 +491,7 @@ function RadioDriver:stats_loop()
     end
 
     while true do
-        local name, val = fibers.perform(fibers.named_choice({
+        local name, val, choice_err = fibers.perform(fibers.named_choice({
             client_event = backend:watch_clients_op(),
             iface_update = self.iface_update_ch:get_op(),
             tick         = sleep.sleep_op(report_period),
@@ -501,7 +506,14 @@ function RadioDriver:stats_loop()
         elseif name == 'iface_update' then
             update_interfaces(val.op, val.name)
         elseif name == 'client_event' then
-            if val and interfaces_set[val.interface] then
+            if not val then
+                self.log:error({
+                    what = 'radio_stats_loop_failed',
+                    id = id,
+                    err = choice_err or 'client monitor stopped',
+                })
+                break
+            elseif interfaces_set[val.interface] then
                 on_client_event(emit_ch, id, connected, val)
             end
         elseif name == 'tick' then

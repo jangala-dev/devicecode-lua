@@ -440,7 +440,7 @@ local function build_listener_opts(state, cfg, listener_generation, listener_id)
 
 	local update_opts = shallow_copy(params.update or {})
 	update_opts.max_bytes = upload.max_bytes
-	update_opts.enabled = upload.enabled
+	update_opts.enabled = updates.enabled == true and upload.enabled == true
 	update_opts.require_auth = upload.require_auth
 	update_opts.component = upload.component
 	update_opts.create_job = upload.create_job

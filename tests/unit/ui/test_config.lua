@@ -32,6 +32,7 @@ function M.test_normalise_supplies_http_static_sse_defaults_and_accepts_explicit
 	eq(cfg.sse.enabled, true)
 	eq(cfg.sse.queue_len, 256)
 	eq(cfg.sse.replay, false)
+	eq(cfg.updates.enabled, true)
 	eq(cfg.updates.upload.enabled, true)
 	eq(cfg.updates.upload.max_bytes, 1024 * 1024)
 	eq(cfg.updates.upload.require_auth, false)
@@ -42,6 +43,23 @@ function M.test_normalise_supplies_http_static_sse_defaults_and_accepts_explicit
 	eq(config.DEFAULTS.updates, nil)
 	eq(cfg.observability.status_interval_s, 30)
 	eq(cfg.observability.coalesce_status_s, 0.05)
+end
+
+
+function M.test_updates_are_disabled_when_the_section_is_omitted()
+	local cfg = ok(config.normalise({ schema = config.SCHEMA }))
+	eq(cfg.updates.enabled, false)
+	eq(cfg.updates.upload, nil)
+	eq(cfg.updates.commit, nil)
+end
+
+function M.test_disabled_updates_reject_unused_upload_and_commit_policy()
+	local cfg, err = config.normalise({
+		schema = config.SCHEMA,
+		updates = { enabled = false, upload = update_policy().upload },
+	})
+	eq(cfg, nil)
+	ok(tostring(err):find('not valid when updates.enabled is false', 1, true))
 end
 
 function M.test_sse_replay_can_be_enabled_explicitly()

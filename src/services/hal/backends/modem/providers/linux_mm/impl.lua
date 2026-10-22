@@ -836,11 +836,48 @@ local function new(address)
     return setmetatable(self, ModemBackend)
 end
 
+---@class ModemRecoveryBackend
+local ModemRecoveryBackend = {}
+ModemRecoveryBackend.__index = ModemRecoveryBackend
+
+---@param modem_info table<string, any>
+---@return string? device
+---@return string error
+local function get_device_from_modem_info(modem_info)
+    local device = modem_info.device
+    if type(device) ~= "string" or device == "" then
+        return nil, "Failed to determine modem device path"
+    end
+    return device, ""
+end
+
+---@return string? device
+---@return string error
+function ModemRecoveryBackend:get_device()
+    local modem_info, err = read_modem_info(self.identity.address)
+    if not modem_info then
+        return nil, err
+    end
+
+    return get_device_from_modem_info(modem_info)
+end
+
+---@return ModemRecoveryBackend
+local function new_recovery(address)
+    local self = {
+        identity = { address = address },
+        reset = ModemBackend.reset
+    }
+    return setmetatable(self, ModemRecoveryBackend)
+end
+
 return {
     new = new,
+    new_recovery = new_recovery,
     _test = {
         is_signal_valid = is_signal_valid,
         normalize_unlock_retries = normalize_unlock_retries,
+        get_device_from_modem_info = get_device_from_modem_info,
         parse_modem_info_json = parse_modem_info_json,
         parse_signal_info_json = parse_signal_info_json,
         valid_signal_ranges = VALID_SIGNAL_RANGES,

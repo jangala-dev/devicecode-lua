@@ -11,7 +11,7 @@ rm -rf "$CONFIG_STATE"
 mkdir -p "$CONFIG_STATE"
 : > "$CONFIG_STATE/present"
 : > "$CONFIG_STATE/absent"
-for name in network dhcp firewall mwan3; do
+for name in network dhcp firewall mwan3 mdns_repeater; do
   if [ -e "/etc/config/$name" ]; then
     cp -a "/etc/config/$name" "$CONFIG_STATE/$name"
     echo "$name" >> "$CONFIG_STATE/present"

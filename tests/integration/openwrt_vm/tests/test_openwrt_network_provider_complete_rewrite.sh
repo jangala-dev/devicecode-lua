@@ -72,14 +72,14 @@ fibers.run(function()
   provider:terminate('test complete')
 end)
 
-for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
+for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3', 'mdns_repeater' }) do
   local fh = io.open(conf .. '/' .. pkg, 'rb')
   if not fh then fail('missing generated package file ' .. pkg) end
   fh:close()
 end
 
 local c = assert(uci.cursor(conf, save))
-for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end end
+for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3', 'mdns_repeater' }) do if type(c.load) == 'function' then pcall(function() c:load(pkg) end) end end
 
 eq(c:get('network', 'oldwan'), nil, 'stale network section removed')
 eq(c:get('network', 'lan', 'stale_option'), nil, 'stale network option removed from recreated section')
@@ -93,7 +93,7 @@ if dhcp_sec.instance == 'old_dnsmasq' then fail('dhcp instance should not point 
 eq(c:get('network', 'loopback'), 'interface', 'loopback generated')
 eq(c:get('network', 'loopback', 'device'), 'lo', 'loopback device')
 
-for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3' }) do
+for _, pkg in ipairs({ 'network', 'dhcp', 'firewall', 'mwan3', 'mdns_repeater' }) do
   for name, sec in pairs(c:get_all(pkg) or {}) do
     if type(sec) == 'table' then
       for _, opt in ipairs({ 'devicecode_managed', 'devicecode_owner', 'devicecode_semantic_id', 'devicecode_role' }) do

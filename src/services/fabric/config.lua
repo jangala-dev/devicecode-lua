@@ -17,11 +17,14 @@
 --   * compiled tables are sealed against new fields, but not proxy-immutable
 --     (Lua 5.1 cannot trap writes to existing keys without much heavier wrappers).
 
+local profile_loader = require 'services.fabric.profiles.loader'
+
 local M = {}
 
 local SCHEMA = 'devicecode.config/fabric/1'
 
 local DEFAULTS = {
+	protocol = { kind = profile_loader.DEFAULT_KIND },
 	reader = {
 		bad_frame_limit    = 5,
 		bad_frame_window_s = 10.0,
@@ -59,9 +62,12 @@ local ROOT_KEYS = {
 
 local LINK_KEYS = {
 	id = true, peer_id = true,
+	protocol = true,
 	transport = true, session = true, reader = true, writer = true,
 	bridge = true, transfer = true, queues = true,
 }
+
+local PROTOCOL_KEYS = { kind = true, args = true }
 
 local TRANSPORT_KEYS = {
 	kind = true, source = true, class = true, id = true,
@@ -549,6 +555,47 @@ local function compile_queues(raw)
 	return out, nil
 end
 
+
+local function compile_protocol(raw)
+	raw = raw or {}
+	if type(raw) ~= 'table' then return nil, nil, 'protocol must be a table' end
+	local ok, err = allowed(raw, PROTOCOL_KEYS, 'protocol')
+	if not ok then return nil, nil, err end
+
+	local kind, kind_err = opt_str(raw.kind, 'protocol.kind', DEFAULTS.protocol.kind)
+	if kind_err then return nil, nil, kind_err end
+	local profile, load_err = profile_loader.load(kind)
+	if not profile then return nil, nil, load_err end
+	local called, args, compile_err = pcall(profile.compile, raw.args)
+	if not called then
+		return nil, nil, 'protocol profile compile failed for ' .. kind .. ': ' .. tostring(args)
+	end
+	if args == nil then return nil, nil, compile_err end
+	if type(args) ~= 'table' then
+		return nil, nil, 'protocol profile compile must return an args table: ' .. kind
+	end
+
+	return {
+		kind = kind,
+		args = copy_plain(args),
+		capabilities = copy_plain(profile.capabilities),
+	}, profile, nil
+end
+
+local LINK_SECTION_NAMES = {
+	'session', 'reader', 'writer', 'bridge', 'transfer', 'queues',
+}
+
+local function compile_link_section(name, raw, service_local_node)
+	if name == 'session' then return compile_session(raw, service_local_node) end
+	if name == 'reader' then return compile_reader(raw) end
+	if name == 'writer' then return compile_writer(raw) end
+	if name == 'bridge' then return compile_bridge(raw) end
+	if name == 'transfer' then return compile_transfer(raw) end
+	if name == 'queues' then return compile_queues(raw) end
+	return nil, 'unsupported generic link section: ' .. tostring(name)
+end
+
 local function compile_link(raw, service_local_node)
 	if type(raw) ~= 'table' then return nil, 'link must be a table' end
 	local ok, err = allowed(raw, LINK_KEYS, 'link')
@@ -558,33 +605,27 @@ local function compile_link(raw, service_local_node)
 	if e1 then return nil, e1 end
 	local peer_id, e2 = str(raw.peer_id, 'link.peer_id')
 	if e2 then return nil, e2 end
-
+	local protocol, profile, e3 = compile_protocol(raw.protocol)
+	if e3 then return nil, e3 end
 	local transport, e4 = compile_transport(raw.transport, link_id)
 	if e4 then return nil, e4 end
-	local session, e5 = compile_session(raw.session, service_local_node)
-	if e5 then return nil, e5 end
-	local reader, e6 = compile_reader(raw.reader)
-	if e6 then return nil, e6 end
-	local writer, e7 = compile_writer(raw.writer)
-	if e7 then return nil, e7 end
-	local bridge, e8 = compile_bridge(raw.bridge)
-	if e8 then return nil, e8 end
-	local transfer, e9 = compile_transfer(raw.transfer)
-	if e9 then return nil, e9 end
-	local queues, e10 = compile_queues(raw.queues)
-	if e10 then return nil, e10 end
 
-	return {
-		link_id       = link_id,
-		peer_id       = peer_id,
-		transport     = transport,
-		session       = session,
-		reader        = reader,
-		writer        = writer,
-		bridge        = bridge,
-		transfer      = transfer,
-		queues        = queues,
-	}, nil
+	local compiled = {
+		link_id = link_id,
+		peer_id = peer_id,
+		protocol = protocol,
+		transport = transport,
+	}
+	for _, name in ipairs(LINK_SECTION_NAMES) do
+		if profile.link_sections[name] == true then
+			local section, section_err = compile_link_section(name, raw[name], service_local_node)
+			if not section then return nil, section_err end
+			compiled[name] = section
+		elseif raw[name] ~= nil then
+			return nil, 'link.' .. name .. ' is not valid for protocol profile ' .. protocol.kind
+		end
+	end
+	return compiled, nil
 end
 
 -------------------------------------------------------------------------------

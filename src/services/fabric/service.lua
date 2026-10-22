@@ -880,7 +880,8 @@ local function build_generation_overrides(state, compiled)
 	for _, link in ipairs(compiled.links or {}) do
 		local override = merged_link_override(state, link.link_id)
 		override.conn = override.conn or state.conn
-		if override.transfer_admission_rx == nil then
+		local capabilities = link.protocol and link.protocol.capabilities or {}
+		if capabilities.transfer == true and override.transfer_admission_rx == nil then
 			local tx, rx = mailbox.new(state.transfer_admission_queue_len or 16, { full = 'reject_newest' })
 			state.transfer_admissions[link.link_id] = tx
 			override.transfer_admission_rx = rx

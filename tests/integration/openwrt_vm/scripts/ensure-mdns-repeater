@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# Install the test-only firmware contract into the disposable VM.
+set -eu
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)"
+"$SCRIPT_DIR/ssh" 'opkg install mdns-repeater'
+"$SCRIPT_DIR/scp-to" "$ROOT_DIR/tests/integration/openwrt_vm/fixtures/mdns/mdns-repeater.init" /etc/init.d/mdns-repeater
+"$SCRIPT_DIR/ssh" 'chmod +x /etc/init.d/mdns-repeater; /etc/init.d/mdns-repeater capabilities'

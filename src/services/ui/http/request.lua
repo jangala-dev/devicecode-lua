@@ -476,6 +476,14 @@ function M.run(scope, ctx, deps)
 
 	ensure_request_metadata(ctx)
 	local route = routes.decode(ctx)
+	local update_disabled = deps.update ~= nil and deps.update.enabled == false
+	local update_route = route.kind == 'upload'
+		or route.kind == 'update_commit'
+		or (route.kind == 'read' and route.query == 'update_status')
+	if update_disabled and update_route then
+		perform_response(owner:reply_error_op(404, 'not_found'))
+		return { status = 'not_found' }
+	end
 
 	if route.kind == 'read' then
 		return handle_read(owner, route, deps)

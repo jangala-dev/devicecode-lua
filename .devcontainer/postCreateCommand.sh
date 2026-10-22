@@ -26,8 +26,17 @@ if command -v apt-get >/dev/null 2>&1; then
 		tcpdump \
 		cloud-image-utils \
 		genisoimage
+
+	# NodeSource's Node.js 22 package includes npm.
+	node_setup=$(mktemp)
+	trap 'rm -f "$node_setup"' EXIT
+	curl -fsSL https://deb.nodesource.com/setup_22.x -o "$node_setup"
+	sudo -E bash "$node_setup"
+	sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs
 elif command -v apk >/dev/null 2>&1; then
 	sudo apk add --no-cache \
+		'nodejs~22' \
+		npm \
 		curl \
 		ca-certificates \
 		gzip \
@@ -51,6 +60,9 @@ else
 	echo "[devcontainer] unsupported base image: no apt-get or apk found" >&2
 	exit 1
 fi
+
+node --version
+npm --version
 
 # Privileged OpenWrt dataplane tests are run inside the optional network-lab VM.
 # The top-level devcontainer is intentionally unprivileged so normal development

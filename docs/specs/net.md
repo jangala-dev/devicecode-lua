@@ -168,6 +168,106 @@ Example shape:
 
 The OpenWrt provider translates these to dnsmasq `addnhosts` and, where requested, `addnmount` entries. The location is configurable through `dns.host_files.base_dir`.
 
+### Shared-device ranges and discovery intent
+
+NET supports named, manual-only IPv4 ranges under
+`segments.<id>.addressing.ipv4.reserved_ranges`. Each entry contains `from` and
+`to` addresses. A range requires a static segment CIDR and must exclude the
+network, router, broadcast, other reserved ranges and the effective dynamic
+DHCP pool (`network + start` through `network + start + limit - 1`). DHCP
+reservations cannot allocate these addresses. Interface-level addressing
+overrides on these segments are rejected because their effective subnet would
+be ambiguous. DHCP rendering and pool sizes are unchanged.
+
+Generic discovery intent is passed to HAL in this form:
+
+```json
+{
+  "dns": {
+    "service_discovery": {
+      "shared_devices": {
+        "enabled": true,
+        "source_segment": "adm",
+        "advertise_to": ["jan"],
+        "address_range": "shared_devices",
+        "family": "ipv4",
+        "services": {
+          "ipp": { "type": "_ipp._tcp", "protocol": "tcp", "ports": [631] }
+        }
+      }
+    }
+  }
+}
+```
+
+The policy identifies eligible service endpoints within the named source range
+and the segments where those services should be discoverable. NET validates
+references, distinct destinations, IPv4 family, DNS-SD service types, matching
+TCP/UDP protocols and integer ports from 1 through 65535. Disabled policies
+remain structurally validated. No daemon, Linux device name, individual device
+address, MAC or printer identity belongs in this discovery policy.
+
+Connectivity remains explicit in `firewall.rules`. Rules accepting a declared
+service from a discovery consumer zone to its source zone must have positive
+IPv4 destinations contained within the referenced reserved ranges. This check
+associates rules by zones, protocol and port, independent of rule names; it does
+not generate access rules or change existing rule syntax. Firewall fields also
+receive zone, family, protocol, address/CIDR, port and target validation. Rules
+and policies may reference zones created from segment zone names, segment IDs
+when no zone name is set, and the default `wan` zone for WAN interfaces, as well
+as explicitly configured zones.
+
+`bigbox-v1-cm.json`, `bigbox-v1-cm-2.json` and `bigbox-ss.json` enable this
+intent. Each reserves `172.28.8.250` through `172.28.8.254` and allows
+`lan_rst` to reach those five
+`/32` destinations in `lan` on TCP/631. Each UDP/5353 rule allows Guest input to
+router-local `224.0.0.251` without a destination zone. No broad inter-zone
+forwarding, NAT or bridging is added.
+
+All three target configs (`bigbox-v1-cm.json`, `bigbox-v1-cm-2.json` and
+`bigbox-ss.json`) also permit Guest TCP/443 to `172.28.8.250` for printer
+status on iPhone and printing capability on Android. Testing with this exception
+enabled did not allow Guest access to the printer dashboard. This is an observed result for the tested printer and
+firmware, not a guarantee that HTTPS administrative functions are inaccessible.
+The firewall permits TCP/443 to this device and cannot distinguish status
+requests from management requests on that port. Administrative access has not
+been exhaustively verified; any management functions exposed by the printer on
+TCP/443 may also be reachable from Guest. The intended exception supports
+iPhone printer status and Android printing with this unresolved management-access
+risk. Other Admin addresses remain blocked on TCP/443.
+
+The OpenWrt provider uses `mdns-repeater` for cross-network mDNS discovery.
+NET expresses the discovery policy, while HAL resolves segment devices through
+the same naming and device information used to render network interfaces. It owns the
+`mdns_repeater` UCI package and renders exact `/32` entries for the reserved range
+plus the destination subnet needed for client queries. No discovery policy emits
+or replaces service-access firewall rules.
+
+The mdns-repeater backend supports one active policy and one destination. Each
+segment resolves to one enabled Linux device with a known IPv4 subnet. It rejects
+ambiguous mappings, overlapping source/client subnets and ranges larger than
+15 addresses. Disabled or absent policies produce a disabled configuration and
+remove stale lists.
+
+`plan_op().plan.domains.discovery` reports `backend = mdns_repeater` and these
+capabilities: `directional = false`, `range_filter = source_ip`,
+`service_filter = false`, `port_filter = false`. The whitelist checks the packet
+sender, not endpoint addresses inside DNS-SD records. Other services from a
+shared device can be discovered, and Guest advertisements also reach Admin.
+Actual cross-network connectivity remains governed by the firewall.
+
+Activation runs after network/firewall activation. The firmware supplies
+`/etc/init.d/mdns-repeater`, whose `capabilities` command returns
+`source-whitelist-v1`. Its `apply` command validates the UCI policy, waits for
+IPv4 data devices, restarts the supervised process and checks that it starts.
+An enabled apply fails if the script is missing or does not support this contract.
+On activation failure, the UCI manager restores all packages and
+synchronously reactivates the previous services in dependency order. Recovery
+failure is reported separately. Disabled discovery tolerates a missing daemon.
+Snapshots expose configured interfaces, whitelist and backend capabilities;
+`configured` does not imply the daemon is running. Continuous discovery health
+and service counters are not implemented.
+
 ## Current source layout
 
 ```text
@@ -352,7 +452,7 @@ tests/integration/openwrt_vm/work/generated-default-etc-config/
 ```
 
 `print-default-configs` does the same and also prints the rendered `network`,
-`dhcp`, `firewall` and `mwan3` files to stdout. The output directory also
+`dhcp`, `firewall`, `mwan3` and `mdns_repeater` files to stdout. The output directory also
 contains `manifest.json`, which records the source config, generated OpenWrt
 name map, realised WAN members, activation commands that would have been run,
 and shaping commands that would have been run.

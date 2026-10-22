@@ -48,49 +48,51 @@ local BACKEND_FUNCTIONS = list_to_map {
     "set_signal_update_interval"
 }
 
+local RECOVERY_BACKEND_FUNCTIONS = list_to_map {
+    "get_device",
+    "reset"
+}
+
 local MONITOR_FUNCTIONS = list_to_map {
     "next_event_op",
     "shutdown_op",
     "terminate",
 }
 
+local function validate_object_has_functions(object, functions)
+    for func in pairs(functions) do
+        if type(object[func]) ~= "function" then
+            return "Missing required function: " .. func
+        end
+    end
+    for key, value in pairs(object) do
+        if type(value) == "function" and not functions[key] then
+            return "Object provides unsupported function: " .. key
+        end
+    end
+    return ""
+end
+
 --- Check that a modem monitor provides all required functions and no extras.
 ---@param monitor ModemMonitor
 ---@return string error
 local function validate_monitor(monitor)
-    for func in pairs(MONITOR_FUNCTIONS) do
-        if type(monitor[func]) ~= "function" then
-            return "Missing required function: " .. func
-        end
-    end
-    for key, value in pairs(monitor) do
-        if type(value) == "function" and not MONITOR_FUNCTIONS[key] then
-            return "Monitor provides unsupported function: " .. key
-        end
-    end
-    return ""
+    return validate_object_has_functions(monitor, MONITOR_FUNCTIONS)
 end
 
 --- Check that a modem backend provides all required functions and no more
 ---@param backend ModemBackend
 ---@return string error
 local function validate(backend)
-    for func, _ in pairs(BACKEND_FUNCTIONS) do
-        if type(backend[func]) ~= "function" then
-            return "Missing required function: " .. func
-        end
-    end
+    return validate_object_has_functions(backend, BACKEND_FUNCTIONS)
+end
 
-    for key, value in pairs(backend) do
-        if type(value) == "function" and not BACKEND_FUNCTIONS[key] then
-            return "Backend provides unsupported function: " .. key
-        end
-    end
-
-    return ""
+local function validate_recovery(backend)
+    return validate_object_has_functions(backend, RECOVERY_BACKEND_FUNCTIONS)
 end
 
 return {
     validate = validate,
     validate_monitor = validate_monitor,
+    validate_recovery = validate_recovery
 }

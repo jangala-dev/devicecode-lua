@@ -57,7 +57,7 @@ local HTTP_KEYS = {
 
 local STATIC_KEYS = { root = true, index = true, chunk_size = true }
 local SSE_KEYS = { enabled = true, queue_len = true, max_replay = true, replay = true, pattern = true }
-local UPDATE_KEYS = { upload = true, commit = true }
+local UPDATE_KEYS = { enabled = true, upload = true, commit = true }
 local UPDATE_UPLOAD_KEYS = {
 	enabled = true,
 	max_bytes = true,
@@ -275,15 +275,26 @@ local function normalise_update_commit(raw)
 end
 
 local function normalise_updates(raw)
+	if raw == nil then return { enabled = false }, nil end
 	local err
 	raw, err = table_required(raw, 'updates')
 	if not raw then return nil, err end
 	local ok
 	ok, err = allowed(raw, UPDATE_KEYS, 'updates')
 	if not ok then return nil, err end
+	local enabled
+	enabled, err = bool_or_nil(raw.enabled, 'updates.enabled')
+	if err then return nil, err end
+	if enabled == nil then enabled = raw.upload ~= nil or raw.commit ~= nil end
+	if enabled == false then
+		if raw.upload ~= nil or raw.commit ~= nil then
+			return nil, 'updates.upload and updates.commit are not valid when updates.enabled is false'
+		end
+		return { enabled = false }, nil
+	end
 	local upload; upload, err = normalise_update_upload(raw.upload); if not upload then return nil, err end
 	local commit; commit, err = normalise_update_commit(raw.commit); if not commit then return nil, err end
-	return { upload = upload, commit = commit }, nil
+	return { enabled = true, upload = upload, commit = commit }, nil
 end
 
 local function normalise_sessions(raw)

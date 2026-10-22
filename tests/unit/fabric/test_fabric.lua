@@ -34,6 +34,7 @@ function tests.test_public_entrypoint_exports_semantic_modules()
 	assert_eq(fabric.transfer_sender, require 'services.fabric.transfer_sender')
 	assert_eq(fabric.transfer_receive, require 'services.fabric.transfer_receive')
 	assert_eq(fabric.state, require 'services.fabric.state')
+	assert_eq(fabric.profile_loader, require 'services.fabric.profiles.loader')
 	assert_eq(type(fabric.start), 'function')
 	assert_eq(type(fabric.run), 'function')
 	assert_eq(type(fabric.run_link), 'function')
@@ -155,6 +156,106 @@ function tests.test_composed_link_transport_open_failure_fails_link_scope_before
 			assert_match(primary, 'open failed')
 		end
 	end)
+end
+
+
+local function check_legacy_link(mode)
+	fibers.run(function ()
+		local lines = {
+			'{"power/battery/internal/ibat":4294967176,"power/battery/internal/vbat":12400,'
+				.. '"power/charger/internal/state/bat_missing":0,"power/charger/internal/state/bat_short":0}',
+		}
+		lines[2] = lines[1]
+		local next_line = 0
+		local terminated = false
+		local link_scope
+		local retained = {}
+		local state_retained = {}
+		local unretained = {}
+		local conn = {
+			retain = function (_, topic, payload)
+				if topic[1] == 'obs' and topic[2] == 'v1' and topic[4] == 'metric' then
+					retained[#retained + 1] = { topic = topic, payload = payload }
+				elseif topic[1] == 'raw' and topic[2] == 'member' then
+					state_retained[#state_retained + 1] = { topic = topic, payload = payload }
+				end
+				return true, nil
+			end,
+			unretain = function (_, topic)
+				unretained[table.concat(topic, '/')] = true
+				return true
+			end,
+		}
+		local raw_transport = {
+			read_line_op = function ()
+				next_line = next_line + 1
+				if next_line == 3 then
+					if mode == 'read_error' then error('read failed') end
+					if mode == 'cancel' then link_scope:cancel('test cancelled') end
+				end
+				return fibers.always(lines[next_line], lines[next_line] and nil or 'eof')
+			end,
+			write_line_op = function () return fibers.always(true, nil) end,
+			terminate = function () terminated = true; return true, nil end,
+		}
+
+		local st, rep, result = fibers.run_scope(function (scope)
+			link_scope = scope
+			return fabric.run_link(scope, {
+				link_id = 'legacy-mcu-uart0',
+				link_generation = 1,
+				peer_id = 'mcu',
+				conn = conn,
+				protocol = {
+					kind = 'legacy_mcu_metrics_v1',
+					args = {
+						member = 'mcu',
+						change_only = true,
+						unsigned_underflow_compat = true,
+						error_log_initial_s = 1,
+						error_log_max_s = 60,
+					},
+				},
+				open_transport_op = function ()
+					local wrapped, err = hal_transport.wrap_transport(raw_transport)
+					return fibers.always(wrapped, err)
+				end,
+			})
+		end)
+
+		if mode == 'eof' then
+			assert_eq(st, 'ok')
+			assert_eq(#rep.extra_errors, 0)
+			assert_not_nil(result)
+			assert_eq(result.snapshot.components.legacy_metrics_reader.status, 'ok')
+		elseif mode == 'cancel' then
+			assert_eq(st, 'cancelled')
+		else
+			assert_eq(st, 'failed')
+		end
+		assert_eq(#retained, 0)
+		assert_eq(#state_retained, 2)
+		assert_eq(table.concat(state_retained[1].topic, '/'), 'raw/member/mcu/state/power/battery')
+		assert_eq(state_retained[1].payload.ibat_mA, -120)
+		assert_eq(state_retained[1].payload.pack_mV, 12400)
+		assert_true(state_retained[1].payload.measurements_valid)
+		assert_eq(state_retained[2].payload.state_bits, 0)
+		assert_true(unretained['raw/member/mcu/state/power/battery'])
+		assert_true(unretained['raw/member/mcu/state/power/charger'])
+		assert_true(terminated)
+	end)
+end
+
+function tests.test_legacy_link_publishes_only_canonical_state_and_cleans_up_on_eof()
+	check_legacy_link('eof')
+end
+
+function tests.test_legacy_link_cleans_up_retained_facts_on_read_failure()
+	check_legacy_link('read_error')
+end
+
+function tests.test_legacy_link_cleans_up_retained_facts_on_cancellation()
+	check_legacy_link('cancel')
 end
 
 return tests

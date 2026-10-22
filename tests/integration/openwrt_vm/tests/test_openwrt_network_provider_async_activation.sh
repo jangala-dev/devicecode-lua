@@ -150,7 +150,7 @@ fibers.run(function(scope)
   assert_true(result.transaction and result.transaction.ok == true, 'transaction should succeed')
   assert_true(result.activation == nil, 'synchronous provider activation should not return a scheduled activation token')
 
-  eq(#restarts, 4, 'provider should run network, dnsmasq, firewall and mwan3 activation before reply')
+  eq(#restarts, 5, 'provider should run network, dnsmasq, firewall, mwan3 and discovery activation before reply')
   eq(restarts[2], '/etc/init.d/dnsmasq restart', 'second activation command')
   eq(restarts[3], '/etc/init.d/firewall restart', 'third activation command')
   eq(restarts[4], '/etc/init.d/mwan3 restart', 'fourth activation command')

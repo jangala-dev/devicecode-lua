@@ -501,4 +501,69 @@ function tests.test_cleanup_publication_ignores_summary_identity_when_never_publ
 	end)
 end
 
+function tests.test_legacy_fabric_facts_reach_public_device_state_and_device_owned_metrics()
+	local legacy = require 'services.fabric.profiles.legacy_mcu_metrics_v1.processor'
+	local cjson = require 'cjson.safe'
+	fibers.run(function (scope)
+		local conn = fake_conn()
+		local state = service.build_state(scope, {
+			conn = conn, enable_actions = false, enable_observers = false,
+			now = function () return 100 end,
+		})
+		assert_true(service.apply_config_payload(state, cfg_mcu_metrics()))
+		local p = legacy.new_processor({ change_only = true, unsigned_underflow_compat = true })
+		local facts = {
+			['power/battery'] = 'power_battery', ['power/charger'] = 'power_charger',
+			['environment/temperature'] = 'environment_temperature',
+			['environment/humidity'] = 'environment_humidity', ['runtime/memory'] = 'runtime_memory',
+		}
+		local function emit(fact, payload)
+			return service.reduce_event(state, {
+				kind = 'component_observation', generation = state.active.generation,
+				component = 'mcu', tag = 'fact_retained', fact = facts[fact], payload = payload,
+			})
+		end
+		assert_true(legacy.process_line(p, assert(cjson.encode({
+			['power/battery/internal/vbat'] = 12400,
+			['power/battery/internal/ibat'] = 4294966796,
+			['power/battery/internal/bsr'] = 2000000,
+			['power/charger/internal/vin'] = 50,
+			['power/charger/internal/vsys'] = 12300,
+			['power/charger/internal/iin'] = 0,
+			['power/charger/internal/state/bat_missing'] = 0,
+			['power/charger/internal/state/bat_short'] = 0,
+			['power/charger/internal/state/suspended'] = 1,
+			['power/charger/internal/system/vin_gt_vbat'] = 0,
+			['power/charger/internal/status/cc_phase'] = 0,
+			['env/temperature/core'] = 243,
+			['env/humidity/core'] = 4567,
+			['sys/mem/alloc'] = 2000000,
+		})), emit))
+		state.svc = fake_svc()
+		state.svc.log = function () end
+		assert_true(service.flush_publication(state))
+		local view = conn.retained['state/device/component/mcu']
+		assert_true(view.power.battery.measurements_valid)
+		assert_eq(view.power.battery.presence, 'present')
+		assert_eq(view.power.battery.bsr_uohm_per_cell, 2000000)
+		assert_eq(view.power.battery.ibat_mA, -500)
+		local metrics = metrics_by_namespace(state.svc)
+		assert_metric(metrics, 'mcu.power.battery.internal.vbat', 'vbat', 12400)
+		assert_metric(metrics, 'mcu.power.battery.internal.ibat', 'ibat', -500)
+		assert_metric(metrics, 'mcu.power.charger.internal.state.suspended', 'suspended', true)
+		assert_metric(metrics, 'mcu.power.charger.internal.system.vin_gt_vbat', 'vin_gt_vbat', false)
+		assert_metric(metrics, 'mcu.env.temperature.core', 'core', 24.3)
+		assert_metric(metrics, 'mcu.env.humidity.core', 'core', 45.67)
+		assert_metric(metrics, 'mcu.sys.mem.alloc', 'alloc', 2000000)
+		assert_true(legacy.process_line(p, '{"power/charger/internal/state/bat_missing":1}', emit))
+		assert_true(service.flush_publication(state))
+		view = conn.retained['state/device/component/mcu']
+		assert_eq(view.power.battery.presence, 'absent')
+		assert_eq(view.power.battery.measurements_valid, false)
+		assert_nil(view.power.battery.pack_mV)
+		assert_nil(view.power.battery.ibat_mA)
+		assert_true(view.power.charger.state.bat_missing_fault)
+	end)
+end
+
 return tests

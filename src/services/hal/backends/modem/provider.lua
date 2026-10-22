@@ -94,6 +94,18 @@ local function new(address)
     return backend
 end
 
+local function new_recovery(address)
+    local provider = get_provider()
+    local impl = provider.backend
+    local backend = impl.new_recovery(address)
+
+    local iface_err = contract.validate_recovery(backend)
+    if iface_err ~= "" then
+        error("Recovery backend does not implement required interface: " .. tostring(iface_err))
+    end
+    return backend
+end
+
 --- Create a new ModemMonitor using the selected provider.
 ---@return ModemMonitor monitor
 local function new_monitor()
@@ -114,5 +126,6 @@ end
 
 return {
     new = new,
+    new_recovery = new_recovery,
     new_monitor = new_monitor,
 }
