@@ -321,6 +321,25 @@ function tests.test_pdp_restart_failure_preserves_verified_change_and_closes_sub
     end)
 end
 
+function tests.test_pdp_restart_unobserved_transition_restores_retry_state()
+    runfibers.run(function()
+        local m, _, _, _, subs = fixture({ context(1, 'IPV6', true) }, {
+            call = function(method, _, active_subs)
+                if method == 'restart' then
+                    active_subs[1].recv_op = function() return op.always(nil) end
+                    return reply(true)
+                end
+            end,
+        })
+        local restarted, err = m:_configure_pdp()
+        eq(restarted, false)
+        eq(err, 'state subscription interrupted')
+        eq(m.pdp_restart_needed, true)
+        eq(m.pdp_restart_waiting, false)
+        eq(subs[1].closed, true)
+    end)
+end
+
 function tests.test_pdp_restart_discards_stale_disabled_events()
     runfibers.run(function()
         local m = fixture({ context(1, 'IPV6', true) }, {
