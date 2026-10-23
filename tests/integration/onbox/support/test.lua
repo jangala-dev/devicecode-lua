@@ -5,6 +5,7 @@ local path = assert(posix.realpath(arg[0]))
 local here = assert(path:match('^(.*)/[^/]+$'))
 local repo = assert(here:match('^(.*)/tests/integration/onbox/support$'))
 package.path = repo .. '/tests/integration/?.lua;' .. repo .. '/src/?.lua;' .. package.path
+require('onbox.support.fiber_runtime').configure(repo)
 
 local total = 0
 for _, module in ipairs({ 'auth_spec', 'runner_spec' }) do

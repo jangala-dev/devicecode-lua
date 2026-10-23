@@ -4,6 +4,7 @@ local poll = require 'posix.poll'
 local termio = require 'posix.termio'
 local time = require 'posix.time'
 local auth = require 'onbox.support.auth'
+local process = require 'onbox.support.process'
 local runner = require 'onbox.support.runner'
 
 local tests = {}
@@ -88,13 +89,21 @@ end
 function tests.password_pipe_closes_on_success_and_failure()
     for _, fail in ipairs({ false, true }) do
         local descriptor
-        local ok, result = pcall(auth.with_password_fd, dummy_password, function(fd)
+        local lease
+        local ok, result = pcall(auth.with_password_fd, dummy_password, function(fd, supplied_lease)
+            lease = supplied_lease
             descriptor = fd
+            assert(not auth.lease_is_inheritable(lease), 'Password descriptor must default to CLOEXEC')
+            local executed, execute_err = pcall(process.execute, 'true')
+            assert(not executed and tostring(execute_err):find('forbidden', 1, true),
+                'Blocking execute was allowed while a credential lease was active')
             assert(posix.read(fd, 4096) == dummy_password .. '\n', 'Password pipe contained incorrect data')
             if fail then error('callback failed') end
             return 'complete'
         end)
         assert(fcntl.fcntl(descriptor, fcntl.F_GETFD) == nil, 'Password descriptor leaked')
+        local live = pcall(auth.lease_fd, lease)
+        assert(not live, 'Credential lease remained live after callback')
         assert(ok == not fail)
         if not fail then assert(result == 'complete') end
     end
@@ -103,6 +112,19 @@ end
 ---@return nil
 function tests.manual_password_auth_preserves_upload_stdin_and_background_auth()
     local temp = assert(posix.mkdtemp('/tmp/onbox-auth-XXXXXX'))
+    local original_path = assert(os.getenv('PATH'))
+    local bin = temp .. '/bin'
+    assert(posix.mkdir(bin, 'rwx------'))
+    local shim = assert(io.open(bin .. '/sshpass', 'w'))
+    shim:write([[#!/bin/sh
+test "$1" = "-d" || exit 2
+export ONBOX_TEST_PASSWORD_FD="$2"
+shift 2
+exec "$@"
+]])
+    shim:close()
+    assert(posix.chmod(bin .. '/sshpass', 'rwx------'))
+    assert(posix.setenv('PATH', bin .. ':' .. original_path, true))
     local here = assert(posix.realpath(arg[0])):match('^(.*)/[^/]+$')
     local repo = assert(here:match('^(.*)/tests/integration/onbox/support$'))
     local box = runner.new(runner.parse_args({ '--ask-pass', '--artifacts', temp .. '/logs' }, repo, here),
@@ -116,13 +138,8 @@ local bit = require 'bit'
 local termio = require 'posix.termio'
 -- Delay authentication so the background launcher has already closed its pipe copy.
 os.execute('sleep 0.1')
-local fd = assert(posix.open('/dev/tty', posix.O_RDWR))
-local attrs = assert(termio.tcgetattr(fd))
-attrs.lflag = bit.band(attrs.lflag, bit.bnot(termio.ECHO))
-assert(termio.tcsetattr(fd, termio.TCSAFLUSH, attrs))
-assert(posix.write(fd, 'Password: '))
+local fd = assert(tonumber(os.getenv('ONBOX_TEST_PASSWORD_FD')))
 local line = assert(posix.read(fd, 4096))
-posix.close(fd)
 assert(line:sub(1, -2) == ]] .. string.format('%q', dummy_password) .. [[, 'Incorrect test password')
 io.stdout:write('authenticated\n', io.stdin:read('*a'))
 ]])
@@ -144,6 +161,8 @@ io.stdout:write('authenticated\n', io.stdin:read('*a'))
             time.nanosleep({ tv_sec = 0, tv_nsec = 20000000 })
         end
         assert(output == 'authenticated\n', 'Background authentication failed')
+        box.process:stop(background_pid)
+        background_pid = nil
         for name in posix.files(box.artifacts) do
             if name ~= '.' and name ~= '..' then
                 local file = assert(io.open(box.artifacts .. '/' .. name, 'r'))
@@ -153,12 +172,15 @@ io.stdout:write('authenticated\n', io.stdin:read('*a'))
             end
         end
     end)
+    posix.setenv('PATH', original_path, true)
     if not ok and background_pid then posix.kill(-background_pid, posix.SIGTERM) end
     for name in posix.files(box.artifacts) do
         if name ~= '.' and name ~= '..' then os.remove(box.artifacts .. '/' .. name) end
     end
     posix.rmdir(box.artifacts)
     os.remove(temp .. '/fake_ssh.lua')
+    os.remove(bin .. '/sshpass')
+    posix.rmdir(bin)
     posix.rmdir(temp)
     assert(ok, err)
 end
