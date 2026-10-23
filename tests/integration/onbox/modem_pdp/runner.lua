@@ -128,6 +128,8 @@ function Runner:prepare()
             assert(info.plugin:lower():find('quectel', 1, true), 'Unsupported modem: ' .. info.model)
             assert(info.state ~= 'locked' and info.state ~= 'failed',
                 ('Modem …%s is %s: %s'):format(imei:sub(-4), info.state, info.failed_reason or ''))
+            assert(info.at_port,
+                'No AT port reported by ModemManager for modem …' .. imei:sub(-4))
             info.name = cfg.name or imei:sub(-4)
             self.targets[imei] = info
         end
@@ -172,7 +174,7 @@ function Runner:phase(label, config, archive)
     self.box:phase(label, function()
         self.runtime:deploy(archive)
         self.runtime:write_config(config)
-        self.modems:clean_boot(self.targets)
+        self.modems:clean_boot(self.targets, true)
         self.runtime:service('restart')
         self:inspect(label, config)
     end)
