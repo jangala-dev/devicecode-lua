@@ -13,7 +13,7 @@ local M = {}
 ---@field failed_reason string?
 ---@field plugin string
 ---@field model string
----@field at_port string
+---@field at_port string?
 ---@field name string?
 
 ---@class OnboxModems
@@ -41,10 +41,11 @@ function Modems:inventory()
                 local name = port:match('^(.*) %(at%)$')
                 if name then ports[#ports + 1] = name end
             end
-            if imei ~= '' and #ports > 0 then
+            if imei ~= '' then
+                local at_port = ports[2] or ports[1]
                 result[imei] = { id = id, imei = imei, device = generic.device or '', state = generic.state,
                     failed_reason = generic['state-failed-reason'], plugin = generic.plugin or '',
-                    model = generic.model or '', at_port = '/dev/' .. (ports[2] or ports[1]) }
+                    model = generic.model or '', at_port = at_port and '/dev/' .. at_port or nil }
             end
         end -- Objects can disappear between list and query during reset.
     end
@@ -54,8 +55,9 @@ end
 ---@param targets table<string, OnboxModemInfo> Stable IMEI keys, not mmcli IDs.
 ---@param state string
 ---@param old_ids table<string, string>?
+---@param require_at boolean? Also wait for ModemManager to report an AT port.
 ---@return table<string, OnboxModemInfo>
-function Modems:wait(targets, state, old_ids)
+function Modems:wait(targets, state, old_ids, require_at)
     local deadline, last_status = process.now() + self.box.args.timeout, ''
     while process.now() < deadline do
         local ok, current = pcall(function() return self:inventory() end)
@@ -65,12 +67,14 @@ function Modems:wait(targets, state, old_ids)
                 local modem = current[imei]
                 statuses[#statuses + 1] = (targets[imei].name or imei:sub(-4))
                     .. '=' .. (modem and modem.state or 'absent')
+                    .. (modem and not modem.at_port and ' (no AT port)' or '')
                 if modem then
                     assert(modem.state == state or (modem.state ~= 'failed' and modem.state ~= 'locked'),
                         ('Modem …%s became %s: %s'):format(imei:sub(-4), modem.state, modem.failed_reason or ''))
                     result[imei] = modem
                 end
                 if not modem or modem.state ~= state or (old_ids and modem.id == old_ids[imei]) then matched = false end
+                if require_at and modem and not modem.at_port then matched = false end
             end
             local status = table.concat(statuses, ', ')
             if status ~= last_status then print('  Waiting for ' .. state .. ': ' .. status); last_status = status end
@@ -82,8 +86,9 @@ function Modems:wait(targets, state, old_ids)
 end
 
 ---@param targets table<string, OnboxModemInfo>
+---@param require_at boolean? Reset/recovery itself does not require an AT port.
 ---@return nil
-function Modems:clean_boot(targets)
+function Modems:clean_boot(targets, require_at)
     local current, old_ids = self:inventory(), {}
     for _, imei in ipairs(util.keys(targets)) do
         old_ids[imei] = assert(current[imei], 'Target modem missing before reset: ' .. imei).id
@@ -91,7 +96,7 @@ function Modems:clean_boot(targets)
     for _, imei in ipairs(util.keys(old_ids)) do
         self.box.ssh:run('mmcli -m ' .. old_ids[imei] .. ' --reset', { timeout = 45 })
     end
-    self:wait(targets, 'disabled', old_ids)
+    self:wait(targets, 'disabled', old_ids, require_at)
 end
 
 ---Run AT commands with ModemManager paused; a remote watchdog always resumes it.
@@ -100,6 +105,8 @@ end
 ---@return OnboxCommandResult
 function Modems:probe(modem, commands)
     assert(#commands > 0, 'AT probe requires at least one command')
+    assert(modem.at_port and modem.at_port ~= '',
+        'No AT port reported by ModemManager for modem …' .. (modem.imei or ''):sub(-4))
     if not self.probe_uploaded then
         local module_path = assert(package.searchpath('onbox.support.modem', package.path))
         local directory = assert(posix.realpath(module_path)):match('^(.*)/[^/]+$')
