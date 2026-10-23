@@ -125,6 +125,64 @@ function tests.arguments()
     end
 end
 
+---@return nil
+function tests.prepare_rejects_missing_at_ports_before_backup_or_deployment()
+    local instance = runner.from_session({ args = {} })
+    instance.runtime = {
+        original = config,
+        prepare = function() end,
+        ensure_dependencies = function() end,
+        backup = function() error('Must not back up or deploy when AT ports are missing') end,
+    }
+    instance.modems = { inventory = function()
+        return { ['123'] = { imei = '123', state = 'disabled', plugin = 'quectel', model = 'EM06-E' } }
+    end }
+    rejects(function() instance:prepare() end, 'No AT port reported by ModemManager for modem …123')
+end
+
+---@return nil
+function tests.phase_waits_for_at_readiness_before_starting_service()
+    local calls = {}
+    local instance = runner.from_session({ args = {}, phase = function(_, _, body) body() end })
+    instance.runtime = {
+        deploy = function() calls[#calls + 1] = 'deploy' end,
+        write_config = function() calls[#calls + 1] = 'config' end,
+        service = function() error('Must not start the service without AT readiness') end,
+    }
+    instance.modems = { clean_boot = function(_, targets, require_at)
+        equal(targets, instance.targets)
+        equal(require_at, true)
+        error('primary=disabled (no AT port)')
+    end }
+    rejects(function() instance:phase('test', {}) end, 'primary=disabled (no AT port)')
+    equal(calls, { 'deploy', 'config' })
+end
+
+---@return nil
+function tests.rollback_does_not_require_at_ports_and_restarts_after_reset_error()
+    for _, fail_reset in ipairs({ false, true }) do
+        local calls = {}
+        local instance = runner.from_session({ args = {} })
+        instance.runtime = {
+            restore_runtime = function() calls[#calls + 1] = 'restore' end,
+            service = function(_, action) calls[#calls + 1] = action end,
+        }
+        instance.modems = {
+            resume_manager = function() calls[#calls + 1] = 'resume' end,
+            clean_boot = function(_, targets, require_at)
+                equal(targets, instance.targets)
+                equal(require_at, nil)
+                calls[#calls + 1] = 'reset'
+                if fail_reset then error('reset failed') end
+            end,
+        }
+        local ok, err = pcall(function() instance:rollback() end)
+        equal(ok, not fail_reset)
+        if fail_reset then assert(tostring(err):find('reset failed', 1, true)) end
+        equal(calls, { 'resume', 'restore', 'reset', 'restart' })
+    end
+end
+
 local names = {}
 for name in pairs(tests) do names[#names + 1] = name end
 table.sort(names)
