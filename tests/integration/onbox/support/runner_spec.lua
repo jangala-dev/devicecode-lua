@@ -613,6 +613,70 @@ function tests.modems_rediscover_by_imei_and_use_secondary_at_port()
 end
 
 ---@return nil
+function tests.modem_inventory_keeps_disabled_modems_without_at_ports()
+    local box = { ssh = { run = function(_, command)
+        if command == 'mmcli -L' then
+            return { stdout = '/org/freedesktop/ModemManager1/Modem/3' }
+        end
+        equal(command, 'mmcli -m 3 -J')
+        return { code = 0, stdout = util.encode({ modem = { generic = {
+            ['equipment-identifier'] = '866680041259328', state = 'disabled', model = 'EM06-E',
+            ports = { 'cdc-wdm0 (qmi)', 'ttyUSB0 (qcdm)', 'ttyUSB1 (gps)', 'wwan0 (net)' },
+        } } }) }
+    end } }
+    local modems = modem.new(box)
+    local inventory = modems:inventory()
+    local primary = assert(inventory['866680041259328'], 'Modem without AT ports must remain visible')
+    equal(primary.id, '3')
+    equal(primary.state, 'disabled')
+    equal(primary.at_port, nil)
+    box.args = { timeout = 10 }
+    equal(modems:wait(inventory, 'disabled')[primary.imei].id, '3')
+end
+
+---@return nil
+function tests.modem_wait_can_require_at_readiness_after_reset()
+    local box = { args = { timeout = 10 }, ssh = {} }
+    local modems, reads, commands = modem.new(box), 0, {}
+    modems.inventory = function()
+        reads = reads + 1
+        return { ['123'] = { id = reads == 1 and '7' or '9', state = 'disabled',
+            at_port = reads >= 3 and '/dev/ttyUSB3' or nil } }
+    end
+    box.ssh.run = function(_, command) commands[#commands + 1] = command end
+    local saved = process.pause
+    process.pause = function() end
+    local ok, err = pcall(function() modems:clean_boot({ ['123'] = { name = 'primary' } }, true) end)
+    process.pause = saved
+    assert(ok, err)
+    equal(reads, 3)
+    equal(commands[1], 'mmcli -m 7 --reset')
+end
+
+---@return nil
+function tests.modem_wait_reports_missing_at_port_instead_of_absent()
+    local modems = modem.new({ args = { timeout = 10 } })
+    modems.inventory = function() return { ['123'] = { id = '3', state = 'disabled' } } end
+    local saved_now, saved_pause = process.now, process.pause
+    local ticks = 0
+    process.now = function() ticks = ticks + 1; return ticks < 3 and 0 or 11 end
+    process.pause = function() end
+    local ok, err = pcall(function() modems:wait({ ['123'] = { name = 'primary' } }, 'disabled', nil, true) end)
+    process.now, process.pause = saved_now, saved_pause
+    assert(not ok and tostring(err):find('primary=disabled (no AT port)', 1, true), tostring(err))
+end
+
+---@return nil
+function tests.modem_probe_rejects_missing_at_port_before_remote_actions()
+    local modems = modem.new({ ssh = {
+        upload = function() error('Must not upload for a missing AT port') end,
+        run = function() error('Must not pause ModemManager for a missing AT port') end,
+    } })
+    rejects(function() modems:probe({ imei = '866680041259328' }, { 'AT' }) end,
+        'No AT port reported by ModemManager for modem …9328')
+end
+
+---@return nil
 function tests.modem_reset_waits_for_new_ids_instead_of_accepting_stale_disabled_state()
     local box = { args = { timeout = 10 }, ssh = {} }
     local modems = modem.new(box)
