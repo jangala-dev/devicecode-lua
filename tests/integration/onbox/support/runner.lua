@@ -2,6 +2,7 @@ local posix = require 'posix'
 local signals = require 'posix.signal'
 local stat = require 'posix.sys.stat'
 local auth = require 'onbox.support.auth'
+local fiber_runtime = require 'onbox.support.fiber_runtime'
 local process = require 'onbox.support.process'
 local ssh = require 'onbox.support.ssh'
 local logs = require 'onbox.support.logs'
@@ -92,7 +93,7 @@ end
 ---@param args OnboxArgs
 ---@return nil
 function M.check_tools(args)
-    for _, name in ipairs({ 'ssh', 'timeout', 'tar', 'setsid',
+    for _, name in ipairs({ 'ssh', 'tar', 'setsid',
         (args.ask_pass or args.password_file) and 'sshpass' or nil }) do
         assert(process.execute('command -v ' .. name .. ' >/dev/null') == 0, 'Missing local command: ' .. name)
     end
@@ -114,6 +115,8 @@ Session.__index = Session
 ---@param filters string[]?
 ---@return OnboxSession
 function M.new(args, password, filters)
+    fiber_runtime.configure(args.repo)
+    fiber_runtime.check_backend()
     stat.umask(63)
     local parent = assert(args.artifacts:match('^(.*)/[^/]+$'))
     assert(process.execute('mkdir -p ' .. process.quote(parent)) == 0, 'Cannot create artifact parent')
@@ -146,10 +149,14 @@ end
 ---@param body fun(): nil
 ---@return nil
 function Session:phase(label, body)
+    if not fiber_runtime.in_fiber() then
+        return fiber_runtime.get().fibers.run(function() return self:phase(label, body) end)
+    end
     local ok, err = pcall(function()
         self.logs:start(label)
         body()
     end)
+    if not ok and fiber_runtime.get().scope.is_cancelled(err) then error(err, 0) end
     local stopped, stop_err = pcall(function() self.logs:stop() end)
     if not stopped then
         if ok then error(stop_err, 0) end
@@ -172,32 +179,65 @@ function Session:run(body, hooks)
     for _, sig in ipairs({ signals.SIGINT, signals.SIGTERM }) do
         previous[sig] = signals.signal(sig, function() self.interrupted = true end)
     end
-    local ok, err = pcall(body)
-    self.recovering = true
-    local stopped, stop_err = pcall(function() self.logs:stop() end)
-    if not stopped then
-        if ok then ok, err = false, stop_err
-        else io.stderr:write('Could not stop log capture: ', tostring(stop_err), '\n') end
-    end
-    if not ok then
-        io.stderr:write('FAIL: ', tostring(err), '\n')
-        local diagnosed, diag_err = pcall(hooks.diagnostics or function() self.logs:diagnostics('failure') end)
-        if not diagnosed then io.stderr:write('Diagnostics failed: ', tostring(diag_err), '\n') end
-        if hooks.rollback then
-            local restored, restore_err = pcall(hooks.rollback)
-            if not restored then
-                io.stderr:write('ROLLBACK FAILED: ', tostring(restore_err), '. Backup: ', self.remote, '\n')
+    local ran, code_or_err = pcall(function()
+        return fiber_runtime.get().fibers.run(function(scope)
+            local f = fiber_runtime.get()
+            local notification = f.oneshot.new()
+            self.interrupt_notification = notification
+            process.set_run_state(self)
+            local watcher_done = false
+            assert(scope:spawn(function()
+                while not watcher_done and not self.interrupted do f.sleep.sleep(0.05) end
+                if self.interrupted then notification:signal() end
+            end))
+            local body_op = f.fibers.run_scope_op(function() body() end):wrap(function(status, _, primary)
+                return 'body', status, primary
+            end)
+            local interrupted_op = fiber_runtime.oneshot_op(notification):wrap(function()
+                return 'interrupt', 'cancelled', 'Interrupted'
+            end)
+            local which, status, primary = f.fibers.perform(f.op.choice(body_op, interrupted_op))
+            watcher_done = true
+            local ok = which == 'body' and status == 'ok'
+            local err = ok and nil or (primary or 'Interrupted')
+            self.recovering = true
+            local stopped, stop_err = pcall(function() self.logs:stop() end)
+            if not stopped then
+                if ok then ok, err = false, stop_err
+                else io.stderr:write('Could not stop log capture: ', tostring(stop_err), '\n') end
             end
-        end
-    end
-    for i = #self.cleanups, 1, -1 do
-        local cleaned, cleanup_err = pcall(self.cleanups[i])
-        if not cleaned then ok = false; io.stderr:write('Cleanup failed: ', tostring(cleanup_err), '\n') end
-    end
-    self.cleanups = {}
+            local processes_stopped, process_err = pcall(function() self.process:stop_all() end)
+            if not processes_stopped then
+                if ok then ok, err = false, process_err
+                else io.stderr:write('Could not stop local processes: ', tostring(process_err), '\n') end
+            end
+            if not ok then
+                io.stderr:write('FAIL: ', tostring(err), '\n')
+                local diagnosed, diag_err = pcall(hooks.diagnostics or function() self.logs:diagnostics('failure') end)
+                if not diagnosed then io.stderr:write('Diagnostics failed: ', tostring(diag_err), '\n') end
+                if hooks.rollback then
+                    local restored, restore_err = pcall(hooks.rollback)
+                    if not restored then
+                        io.stderr:write('ROLLBACK FAILED: ', tostring(restore_err), '. Backup: ', self.remote, '\n')
+                    end
+                end
+            end
+            for i = #self.cleanups, 1, -1 do
+                local cleaned, cleanup_err = pcall(self.cleanups[i])
+                if not cleaned then ok = false; io.stderr:write('Cleanup failed: ', tostring(cleanup_err), '\n') end
+            end
+            self.cleanups = {}
+            process.set_run_state(nil)
+            self.interrupt_notification = nil
+            if ok then print((hooks.success_message or 'PASS') .. '. Logs and results: ' .. self.artifacts) end
+            return ok and 0 or 1
+        end)
+    end)
+    process.set_run_state(nil)
+    self.interrupt_notification = nil
     for sig, handler in pairs(previous) do signals.signal(sig, handler) end
-    if ok then print((hooks.success_message or 'PASS') .. '. Logs and results: ' .. self.artifacts) end
-    return ok and 0 or 1
+    if not ran then error(code_or_err, 0) end
+    return code_or_err
 end
 
 return M

@@ -5,6 +5,53 @@ local termio = require 'posix.termio'
 local unistd = require 'posix.unistd'
 
 local M = {}
+local leases = setmetatable({}, { __mode = 'k' })
+local active_leases = 0
+
+local function set_cloexec(fd, enabled)
+    local flags = assert(fcntl.fcntl(fd, fcntl.F_GETFD), 'Cannot inspect password descriptor flags')
+    local cloexec = fcntl.FD_CLOEXEC or 1
+    local updated = enabled and bit.bor(flags, cloexec) or bit.band(flags, bit.bnot(cloexec))
+    assert(fcntl.fcntl(fd, fcntl.F_SETFD, updated), 'Cannot update password descriptor flags')
+end
+
+local function record(lease)
+    return assert(leases[lease], 'Invalid or expired credential lease')
+end
+
+---Internal support API: validate a live lease and return its descriptor.
+function M.lease_fd(lease)
+    local value = record(lease)
+    assert(value.active, 'Credential lease is closed')
+    assert(fcntl.fcntl(value.fd, fcntl.F_GETFD) ~= nil, 'Credential descriptor is closed')
+    return value.fd
+end
+
+function M.lease_is_inheritable(lease)
+    local fd = M.lease_fd(lease)
+    local flags = assert(fcntl.fcntl(fd, fcntl.F_GETFD))
+    return bit.band(flags, fcntl.FD_CLOEXEC or 1) == 0
+end
+
+---Internal support API: change inheritance only while the launch gate is held.
+function M.set_lease_inheritable(lease, inheritable)
+    local fd = M.lease_fd(lease)
+    set_cloexec(fd, not inheritable)
+    return fd
+end
+
+---Internal support API: close a lease without exposing raw close ownership.
+function M.close_lease(lease)
+    local value = record(lease)
+    if not value.active then return end
+    pcall(set_cloexec, value.fd, true)
+    local closed, close_err = unistd.close(value.fd)
+    value.active = false
+    active_leases = active_leases - 1
+    assert(closed, close_err or 'Cannot close credential descriptor')
+end
+
+function M.has_active_leases() return active_leases > 0 end
 
 ---@param password string
 ---@return nil
@@ -67,15 +114,24 @@ function M.with_password_fd(password, callback)
     validate(password)
     local reader, writer = unistd.pipe()
     assert(reader, 'Cannot create password pipe')
+    local configured, configure_err = pcall(set_cloexec, reader, true)
+    if not configured then
+        unistd.close(reader)
+        unistd.close(writer)
+        error(configure_err, 0)
+    end
+    local lease = {}
+    leases[lease] = { fd = reader, active = true }
+    active_leases = active_leases + 1
     local ok, result = pcall(function()
         local line = password .. '\n'
         assert(unistd.write(writer, line) == #line, 'Cannot fill password pipe')
-        unistd.close(writer)
+        assert(unistd.close(writer), 'Cannot close password writer')
         writer = nil
-        return callback(reader)
+        return callback(reader, lease)
     end)
     if writer then unistd.close(writer) end
-    unistd.close(reader)
+    M.close_lease(lease)
     if not ok then error(result, 0) end
     return result
 end

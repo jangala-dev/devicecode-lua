@@ -50,7 +50,7 @@ end
 ---@param label string
 ---@return nil
 function Logs:start(label)
-    assert(not self.pid and not self.pid_path, 'Log capture is already running')
+    assert(not self.pid and not self.pid_path and not self.stopping, 'Log capture is already running')
     self.ssh:run('umask 077; mkdir -p ' .. quote(self.remote))
     self.pid_path = self.remote .. '/' .. label .. '-logread.pid'
     self.path = self.artifacts .. '/' .. label .. '-service.log'
@@ -62,10 +62,14 @@ end
 
 ---@return nil
 function Logs:stop()
+    if self.stopping then return end
+    if not self.pid and not self.pid_path then return end
+    self.stopping = true
     -- Cleanup must still be allowed to SSH after the test has been interrupted.
     local state = self.process.state
     local recovering = state.recovering
     state.recovering = true
+    local errors = {}
     local ok, err = pcall(function()
         if self.pid_path then
             self.ssh:run('onbox_log_pid=$(cat ' .. quote(self.pid_path) .. [=[ 2>/dev/null)
@@ -77,9 +81,14 @@ function Logs:stop()
             self.pid_path = nil
         end
     end)
-    if self.pid then self.process:stop(self.pid); self.pid = nil end
+    if not ok then errors[#errors + 1] = tostring(err) end
+    if self.pid then
+        local stopped, stop_err = pcall(function() self.process:stop(self.pid) end)
+        if stopped then self.pid = nil else errors[#errors + 1] = tostring(stop_err) end
+    end
     state.recovering = recovering
-    if not ok then error(err, 0) end
+    self.stopping = false
+    assert(#errors == 0, table.concat(errors, '\n'))
 end
 
 ---@param label string
