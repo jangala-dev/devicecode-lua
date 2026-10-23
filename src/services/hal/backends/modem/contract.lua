@@ -14,6 +14,7 @@ local BACKEND_FUNCTIONS = list_to_map {
     "read_network_info",
     "read_signal",
     "read_traffic",
+    "read_modes",
 
     -- Private reads
     "_read_firmware",
@@ -45,7 +46,8 @@ local BACKEND_FUNCTIONS = list_to_map {
     "shutdown_op",
     "shutdown",
     "terminate",
-    "set_signal_update_interval"
+    "set_signal_update_interval",
+    "set_modes",
 }
 
 local RECOVERY_BACKEND_FUNCTIONS = list_to_map {

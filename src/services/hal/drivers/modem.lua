@@ -53,6 +53,7 @@ local LISTEN_TRIGGER_INTERVAL = 1
 local CONTROL_Q_LEN = 8
 
 local GROUP_FIELDS = {
+    modes = { "supported_modes", "current_modes" },
     identity = {
         "imei",
         "drivers",
@@ -101,6 +102,7 @@ for group_name, fields in pairs(GROUP_FIELDS) do
 end
 
 local GROUP_FETCHERS = {
+    modes = "read_modes",
     identity = "read_identity",
     ports = "read_ports",
     sim = "read_sim_info",
@@ -110,6 +112,7 @@ local GROUP_FETCHERS = {
 }
 
 local VALID_GROUPS = list_to_map {
+    "modes",
     "identity",
     "ports",
     "sim",
@@ -250,7 +253,19 @@ function Modem:invalidate_groups(groups)
 end
 
 function Modem:_invalidate_dynamic()
-    self:invalidate_groups { 'sim', 'network', 'signal', 'traffic' }
+    self:invalidate_groups { 'sim', 'network', 'signal', 'traffic', 'modes' }
+end
+
+---@param opts ModemSetModesOpts
+function Modem:set_modes(opts)
+    if opts == nil or getmetatable(opts) ~= capability_args.ModemSetModesOpts then
+        return return_error('invalid options', 1)
+    end
+    local ok, err = self.backend:set_modes(opts.preferred, opts.allowed)
+    if not ok then return return_error(err, 1) end
+    self:invalidate_groups { 'modes', 'network', 'signal', 'traffic' }
+    self.state_pulse:signal()
+    return true
 end
 
 ---@param group string

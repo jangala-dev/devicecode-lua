@@ -32,6 +32,8 @@ local retained_domain = require 'devicecode.support.retained_domain'
 local apns = require "services.gsm.apn"
 local gsm_topics = require 'services.gsm.topics'
 local apn_model = require 'services.gsm.apn_model'
+local cellular_modes = require 'services.gsm.modes'
+local mode_values = require 'services.hal.types.modem_modes'
 local apn_store_control = require 'services.gsm.apn_store_control_store'
 local tablex = require 'shared.table'
 
@@ -154,7 +156,12 @@ end
 local function apply_defaults(cfg, defaults)
 	for key, value in pairs(defaults) do
 		if cfg[key] == nil then
-			cfg[key] = value
+			cfg[key] = copy(value)
+		elseif key == 'cellular_modes' and type(value) == 'table' and type(cfg[key]) == 'table' then
+			-- Mode fields inherit individually, but allowed generations are a set.
+			for field, default in pairs(value) do
+				if cfg[key][field] == nil then cfg[key][field] = copy(default) end
+			end
 		elseif type(value) == 'table' and type(cfg[key]) == 'table' then
 			apply_defaults(cfg[key], value)
 		end
@@ -476,7 +483,7 @@ end
 ---@return string
 ---@return string
 local function get_modem_config(cfg, imei, device)
-	local modem_base = shallow_copy(cfg.modems and cfg.modems.default or {})
+	local modem_base = copy(cfg.modems and cfg.modems.default or {})
 	local known = cfg.modems and cfg.modems.known
 	if type(known) == 'table' then
 		for _, entry in ipairs(known) do
@@ -485,7 +492,7 @@ local function get_modem_config(cfg, imei, device)
 				if (id_field == 'device' and device ~= "" and entry.device == device)
 					or (id_field ~= 'device' and (entry.imei == imei))
 				then
-					local merged = shallow_copy(entry)
+					local merged = copy(entry)
 					apply_defaults(merged, modem_base)
 					return merged, (merged.name or ""), ""
 				end
@@ -1139,6 +1146,67 @@ function GsmModem:_apn_connect()
 	return nil, "no apn connected", DEFAULT_RETRY_TIMEOUT
 end
 
+-- Returns whether this configuration is settled and whether a write was attempted.
+-- Only transient I/O/apply failures are retried; policy failures wait for new config.
+function GsmModem:_reconcile_modes()
+	local request = self.cfg.cellular_modes
+	if request == nil then return true, false end
+	local function log(level, what, selected, reason)
+		self.svc:obs_log(level, {
+			what = what, modem = self.name, requested = request,
+			selected = selected, reason = reason,
+		})
+	end
+	local wanted, validation_err
+	if type(request) == 'table' then
+		wanted, validation_err = mode_values.normalize(request.preferred, request.allowed)
+	else
+		validation_err = 'cellular_modes must be a table'
+	end
+	if not wanted then
+		log('warn', 'cellular_modes_invalid', nil, validation_err)
+		return true, false
+	end
+	local supported, read_err = modem_get_field(self.cap, 'supported_modes', REQUEST_TIMEOUT, 0)
+	if read_err ~= '' then
+		log('warn', 'cellular_modes_read_failed', nil, read_err)
+		return false, false
+	end
+	local selected, reason = cellular_modes.select(wanted, supported)
+	if not selected then
+		log('warn', 'cellular_modes_unsupported', nil, reason)
+		return true, false
+	end
+	local current, current_err = modem_get_field(self.cap, 'current_modes', REQUEST_TIMEOUT, 0)
+	if current_err ~= '' then
+		log('warn', 'cellular_modes_read_failed', selected, current_err)
+		return false, false
+	end
+	if mode_values.equal(current, selected) then return true, false end
+	local opts, opts_err = cap_sdk.args.new.ModemSetModesOpts(selected.preferred, selected.allowed)
+	if not opts then
+		log('warn', 'cellular_modes_invalid', selected, opts_err)
+		return true, false
+	end
+	local _, set_err = call_modem_rpc(self.cap, 'set_modes', opts, REQUEST_TIMEOUT)
+	if set_err ~= '' then
+		log('warn', 'cellular_modes_apply_failed', selected, set_err)
+		return false, true
+	end
+	current, current_err = modem_get_field(self.cap, 'current_modes', REQUEST_TIMEOUT, 0)
+	if current_err ~= '' or not mode_values.equal(current, selected) then
+		log('warn', 'cellular_modes_verify_failed', selected,
+			current_err ~= '' and current_err or 'current modes differ from selected modes')
+		return false, true
+	end
+	log('info', 'cellular_modes_applied', selected, reason)
+	return true, true
+end
+
+local MODE_CONFIG_STATES = {
+	disabled = true, enabled = true, searching = true, registered = true, connected = true,
+}
+
 -- Autoconnect loop: listens to modem state changes and reacts with enable/fix/connect.
 -- Retry logic with exponential backoff and state change preemption.
 ---@return nil
@@ -1157,13 +1225,18 @@ function GsmModem:_autoconnect_loop()
 	local current_state = nil
 	local connected = false
 	local backoff = math.huge
+	local modes_pending = true
+	local modes_retry_at = 0
+	local modes_refresh = false
 
 	while true do
 		local which, msg_or_ver = perform(op.named_choice({
 			state = state_sub:recv_op(),
 			sim = sim_state_sub:recv_op(),
-			backoff = sleep.sleep_op(backoff),
+			backoff = sleep.sleep_op(not modes_refresh and math.max(0, backoff - fibers.now()) or math.huge),
 			config = self.config_pulse:changed_op(seen),
+			modes_retry = sleep.sleep_op(modes_pending and (MODE_CONFIG_STATES[current_state] or modes_refresh)
+				and math.max(0, modes_retry_at - fibers.now()) or math.huge),
 		}))
 
 		if which == 'config' then
@@ -1173,9 +1246,14 @@ function GsmModem:_autoconnect_loop()
 			end
 			seen = msg_or_ver
 			backoff = math.huge
+			modes_pending, modes_retry_at = true, 0
 		elseif which == 'state' then
 			local msg = msg_or_ver
 			if msg then
+				if current_state ~= msg.payload.to and
+					(msg.payload.to == 'disabled' or msg.payload.to == 'failed' or msg.payload.to == 'locked') then
+					modes_pending, modes_retry_at = true, 0
+				end
 				current_state = msg.payload.to
 				self.current_state = current_state
 				self.modem_state = normalize_optional_string(current_state)
@@ -1222,8 +1300,38 @@ function GsmModem:_autoconnect_loop()
 			self.svc:obs_log('warn', { what = 'autoconnect_retry', modem = self.name, state = current_state })
 		end
 
+		if modes_refresh and fibers.now() >= modes_retry_at then
+			local fresh, fresh_err = modem_get_field(self.cap, 'modem_state', REQUEST_TIMEOUT, 0)
+			if fresh_err == '' then
+				current_state, self.current_state = fresh, fresh
+				self.modem_state = normalize_optional_string(fresh)
+				modes_refresh = false
+			else
+				modes_retry_at = fibers.now() + DEFAULT_RETRY_TIMEOUT
+			end
+		end
+		if modes_pending and not modes_refresh and MODE_CONFIG_STATES[current_state]
+			and fibers.now() >= modes_retry_at then
+			local settled, wrote = self:_reconcile_modes()
+			modes_pending = not settled
+			modes_retry_at = fibers.now() + DEFAULT_RETRY_TIMEOUT
+			if wrote then
+				-- A mode change may have deregistered the modem during the RPC.
+				local fresh, fresh_err = modem_get_field(self.cap, 'modem_state', REQUEST_TIMEOUT, 0)
+				current_state = fresh_err == '' and fresh or nil
+				self.current_state = current_state
+				self.modem_state = normalize_optional_string(current_state)
+				if not current_state then
+					modes_pending = true
+					modes_refresh = true
+					self.svc:obs_log('warn', { what = 'cellular_modes_state_refresh_failed',
+						modem = self.name, err = fresh_err })
+				end
+			end
+		end
+
 		-- Act on current_state
-		if current_state and self.cfg.autoconnect then
+		if current_state and self.cfg.autoconnect and not modes_refresh and which ~= 'modes_retry' then
 			local err, retry_timeout
 
 			if current_state == 'disabled' then
@@ -1255,15 +1363,15 @@ function GsmModem:_autoconnect_loop()
 			end
 
 			if err and err ~= "" then
-				backoff = retry_timeout or DEFAULT_RETRY_TIMEOUT
+				local delay = retry_timeout or DEFAULT_RETRY_TIMEOUT
+				backoff = fibers.now() + delay
 				self.svc:obs_log('error',
 					{
 						what = 'autoconnect_failed',
 						modem = self.name,
 						state = current_state,
 						err = err,
-						retry_after =
-							backoff
+							retry_after = delay
 					})
 			else
 				backoff = math.huge
@@ -1746,6 +1854,7 @@ function GsmService.start(conn, opts)
 end
 
 GsmService._test = {
+	get_modem_config = get_modem_config,
 	GsmModem = GsmModem,
 	build_sim_payload = build_sim_payload,
 	derive_access_tech = derive_access_tech,

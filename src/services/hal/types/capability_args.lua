@@ -1,4 +1,18 @@
 local new = {}
+local modem_modes = require 'services.hal.types.modem_modes'
+
+---@class ModemSetModesOpts: ModemModeCombination
+local ModemSetModesOpts = {}
+ModemSetModesOpts.__index = ModemSetModesOpts
+
+function new.ModemSetModesOpts(preferred, allowed)
+    local combination, err = modem_modes.normalize(preferred, allowed)
+    if not combination then return nil, err end
+    if preferred ~= 'none' and not modem_modes.includes(combination, preferred) then
+        return nil, 'preferred mode must be allowed'
+    end
+    return setmetatable(combination, ModemSetModesOpts), ''
+end
 
 ---@class ModemGetOpts
 ---@field field string
@@ -1078,6 +1092,7 @@ end
 ---@field reason? string  -- error message on failure
 
 return {
+    ModemSetModesOpts = ModemSetModesOpts,
     ModemGetOpts = ModemGetOpts,
     ModemConnectOpts = ModemConnectOpts,
     ModemSignalUpdateOpts = ModemSignalUpdateOpts,
