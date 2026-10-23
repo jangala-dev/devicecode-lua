@@ -26,6 +26,14 @@ The current available commands are:
 - connect
 - disconnect
 - inhibit
+- set_modes (typed preferred generation and allowed generation list)
+
+The mode fields `supported_modes` and `current_modes` are available through the
+driver's `get` operation. Supported modes are complete `{preferred, allowed}`
+combinations rather than an independent list of generations. `set_modes` accepts
+`capability_args.new.ModemSetModesOpts(preferred, allowed)`; a concrete preferred
+generation must also appear in the nonempty allowed list. `none` means no explicit
+preference. Successful writes invalidate mode, network, signal, and traffic caches.
 
 Commands are sent over a command queue held by the driver. A command is a table of:
 ```
