@@ -516,6 +516,10 @@ end
 ---@field read_network_info fun(self: ModemBackend): ModemNetworkInfo?, string
 ---@field read_signal fun(self: ModemBackend): ModemSignalInfo?, string
 ---@field read_traffic fun(self: ModemBackend): ModemTrafficInfo?, string
+---@field read_pdp_contexts fun(self: ModemBackend): ModemPdpContext[]?, string
+---@field read_active_pdp_contexts fun(self: ModemBackend): ModemPdpActivation[]?, string
+---@field read_pdp_info fun(self: ModemBackend): ModemPdpInfo?, string
+---@field set_pdn_type fun(self: ModemBackend, cid: integer, pdp_type: string): boolean, string
 ---@field start_state_monitor fun(self: ModemBackend): boolean, string
 ---@field stop_state_monitor_op fun(self: ModemBackend, timeout: number?): Op
 ---@field stop_state_monitor fun(self: ModemBackend, timeout: number?): boolean, string
@@ -539,6 +543,29 @@ end
 ---@field shutdown fun(self: ModemBackend, timeout: number?): boolean, string
 ---@field terminate fun(self: ModemBackend, reason: string?)
 ---@field set_signal_update_interval fun(self: ModemBackend, interval: number): boolean, string
+
+---@class ModemPdpContext
+---@field cid integer
+---@field pdp_type string
+---@field apn string
+---@field pdp_addr string
+---@field active boolean?
+
+---@class ModemPdpActivation
+---@field cid integer
+---@field active boolean
+
+---@class ModemPdpInfo
+---@field pdp_contexts ModemPdpContext[]
+
+---@alias ModemInfoSnapshot
+---| ModemIdentityInfo
+---| ModemPortsInfo
+---| ModemSimInfo
+---| ModemNetworkInfo
+---| ModemSignalInfo
+---| ModemTrafficInfo
+---| ModemPdpInfo
 
 return {
 	ModemDevice = ModemDevice,
