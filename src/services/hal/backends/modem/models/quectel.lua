@@ -14,6 +14,9 @@ local PDP_AT_TIMEOUT = 3
 local function parse_pdp_contexts(lines)
     local contexts, seen = {}, {}
     for _, line in ipairs(lines) do
+        if line:match('^%+CGACT:') or (line:match('^AT') and line ~= 'AT+CGDCONT?') then
+            return nil, 'unexpected_pdp_response:expected_CGDCONT'
+        end
         if line:match('^%+CGDCONT:') then
             local cid, pdp_type, apn, pdp_addr, trailing = line:match(
                 '^%+CGDCONT:%s*(%d+)%s*,%s*"([^"]+)"%s*,%s*"([^"]*)"%s*,%s*"([^"]*)"(.*)$')
@@ -35,6 +38,9 @@ end
 local function parse_pdp_activations(lines)
     local contexts, seen = {}, {}
     for _, line in ipairs(lines) do
+        if line:match('^%+CGDCONT:') or (line:match('^AT') and line ~= 'AT+CGACT?') then
+            return nil, 'unexpected_pdp_response:expected_CGACT'
+        end
         if line:match('^%+CGACT:') then
             local cid, active = line:match('^%+CGACT:%s*(%d+)%s*,%s*([01])%s*$')
             cid = tonumber(cid)
@@ -91,7 +97,12 @@ local function read_pdp_info(backend)
     local activations, active_err = backend:read_active_pdp_contexts()
     if not activations then return nil, active_err end
     local active_by_cid = {}
+    local defined = {}
+    for _, context in ipairs(contexts) do defined[context.cid] = true end
     for _, context in ipairs(activations) do
+        if context.active and not defined[context.cid] then
+            return nil, 'pdp_active_context_missing:' .. tostring(context.cid)
+        end
         active_by_cid[context.cid] = context.active
     end
     for _, context in ipairs(contexts) do

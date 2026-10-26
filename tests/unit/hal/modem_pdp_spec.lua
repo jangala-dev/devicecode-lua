@@ -140,6 +140,66 @@ function tests.test_pdp_parsers_reject_malformed_or_duplicate_records()
     eq(quectel._test.parse_pdp_activations({ '+CGACT: 1,0', '+CGACT: 1,1' }), nil)
 end
 
+---@return nil
+function tests.test_pdp_parsers_reject_foreign_responses_and_command_echoes()
+    for _, line in ipairs({ '+CGACT: 1,1', 'AT+CGACT?', 'AT+QGMR', 'AT+CGDCONT=1,"IP",""' }) do
+        local result, err = quectel._test.parse_pdp_contexts({ context_line(1, 'IP'), line })
+        eq(result, nil)
+        eq(err, 'unexpected_pdp_response:expected_CGDCONT')
+    end
+    for _, line in ipairs({ context_line(1, 'IP'), 'AT+CGDCONT?', 'AT+QGMR' }) do
+        local result, err = quectel._test.parse_pdp_activations({ '+CGACT: 1,1', line })
+        eq(result, nil)
+        eq(err, 'unexpected_pdp_response:expected_CGACT')
+    end
+end
+
+---@return nil
+function tests.test_pdp_parsers_allow_expected_echoes_and_unsolicited_notifications()
+    local contexts = assert(quectel._test.parse_pdp_contexts({
+        'AT+CGDCONT?', '+CEREG: 1', context_line(1, 'IP'), '+CGEV: ME PDN ACT 1',
+    }))
+    eq(#contexts, 1)
+    local activations = assert(quectel._test.parse_pdp_activations({
+        'AT+CGACT?', '+CEREG: 1', '+CGACT: 1,1', '+CGEV: ME PDN ACT 1',
+    }))
+    eq(#activations, 1)
+    eq(activations[1].active, true)
+end
+
+---@return nil
+function tests.test_pdp_composite_rejects_observed_shifted_responses()
+    with_at(function(command)
+        if command == 'AT+CGDCONT?' then return op.always({}) end
+        return op.always({ context_line(1, 'IP'), context_line(2, 'IPV4V6'), context_line(3, 'IPV4V6') })
+    end, function(b)
+        local info, err = b:read_pdp_info()
+        eq(info, nil)
+        eq(err, 'unexpected_pdp_response:expected_CGACT')
+    end)
+end
+
+---@return nil
+function tests.test_pdp_composite_rejects_active_cids_missing_from_contexts()
+    with_at(function(command)
+        if command == 'AT+CGDCONT?' then return op.always({}) end
+        return op.always({ '+CGACT: 1,1' })
+    end, function(b)
+        local info, err = b:read_pdp_info()
+        eq(info, nil)
+        eq(err, 'pdp_active_context_missing:1')
+    end)
+end
+
+---@return nil
+function tests.test_pdp_composite_preserves_genuinely_empty_responses()
+    with_at(function() return op.always({}) end, function(b)
+        local info, err = b:read_pdp_info()
+        eq(err, '')
+        eq(#info.pdp_contexts, 0)
+    end)
+end
+
 function tests.test_pdp_composite_joins_by_cid_and_defaults_missing_activation_to_false()
     with_at(function(command)
         if command == 'AT+CGDCONT?' then

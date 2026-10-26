@@ -1151,6 +1151,15 @@ function GsmModem:_configure_pdp()
 	end
 	local change_err = ""
 	table.sort(contexts, function(a, b) return a.cid < b.cid end)
+	if err == "" then
+		local inspected = {}
+		for _, context in ipairs(contexts) do
+			inspected[#inspected + 1] = ('%d:%s:%s'):format(
+				context.cid, context.pdp_type, context.active and 'active' or 'inactive')
+		end
+		self.svc:obs_log('info', { what = 'pdp_contexts_checked', modem = self.name,
+			pdp_type = pdp_type, contexts = #inspected > 0 and table.concat(inspected, ',') or 'none' })
+	end
 	for _, context in ipairs(contexts) do
 		if context.active and context.pdp_type ~= pdp_type then
 			local opts, opts_err = cap_sdk.args.new.ModemSetPdnTypeOpts(context.cid, pdp_type)

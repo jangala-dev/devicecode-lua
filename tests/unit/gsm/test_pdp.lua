@@ -6,6 +6,8 @@ local safe = require 'coxpcall'
 local runfibers = require 'tests.support.run_fibers'
 local gsm = require 'services.gsm'
 local apns = require 'services.gsm.apn'
+local at = require 'services.hal.backends.modem.at'
+local quectel = require 'services.hal.backends.modem.models.quectel'
 
 local tests = {}
 local function eq(a, b) assert(a == b, 'expected ' .. tostring(b) .. ', got ' .. tostring(a)) end
@@ -534,6 +536,65 @@ function tests.test_pdp_disabled_check_prevents_enable_on_read_or_write_failure(
             eq(count(calls, 'connect'), 0)
             eq(count(calls, 'restart'), 0)
         end
+    end)
+end
+
+---@return nil
+function tests.test_pdp_disabled_gate_rejects_shifted_backend_replies_before_enabling()
+    local saved_send = at.send_op
+    local ok, err = safe.pcall(function()
+        runfibers.run(function()
+            for _, activation_reply in ipairs({
+                { '+CGDCONT: 1,"IP","","0.0.0.0",0,0,0,0' },
+                { '+CGACT: 1,1' },
+            }) do
+                at.send_op = function(_, command)
+                    if command == 'AT+CGDCONT?' then return op.always({}) end
+                    eq(command, 'AT+CGACT?')
+                    return op.always(activation_reply)
+                end
+                local backend = { identity = { at_port = '/test' } }
+                quectel.add_model_funcs(backend, { model = 'unknown-quectel' })
+                local m, calls, logs
+                m, calls, logs = fixture({}, { call = function(method, opts)
+                    if method == 'get' and opts.field == 'pdp_contexts' then
+                        local info, read_err = backend:read_pdp_info()
+                        m.config_pulse:close()
+                        return reply(info ~= nil, info and info.pdp_contexts or read_err)
+                    end
+                end })
+                prepare_autoconnect(m)
+                m:_autoconnect_loop()
+                eq(count(calls, 'enable'), 0)
+                eq(count(calls, 'connect'), 0)
+                eq(count(calls, 'restart'), 0)
+                local failed = false
+                for _, record in ipairs(logs) do
+                    if record.what == 'pdp_inspect_failed' then failed = true end
+                    assert(record.what ~= 'pdp_contexts_checked', 'Invalid data logged as checked')
+                end
+                assert(failed, 'Expected a failed PDP inspection')
+            end
+        end)
+    end)
+    at.send_op = saved_send
+    assert(ok, err)
+end
+
+---@return nil
+function tests.test_pdp_inspection_logs_requested_type_and_context_activity()
+    runfibers.run(function()
+        local m, _, logs = fixture({ context(2, 'IPV6', false), context(1, 'IP', true) })
+        m.cfg.pdp_type = 'IP'
+        local _, err = m:_configure_pdp()
+        eq(err, '')
+        local checked
+        for _, record in ipairs(logs) do
+            if record.what == 'pdp_contexts_checked' then checked = record end
+        end
+        assert(checked, 'Expected a PDP inspection record')
+        eq(checked.pdp_type, 'IP')
+        eq(checked.contexts, '1:IP:active,2:IPV6:inactive')
     end)
 end
 

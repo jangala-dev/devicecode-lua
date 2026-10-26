@@ -68,6 +68,25 @@ function tests.test_pdp_at_transport_reads_composite_using_real_streams()
 end
 
 ---@return nil
+function tests.test_pdp_at_transport_rejects_shifted_responses_after_a_stale_ok()
+    with_port(function(scope, port, streams)
+        assert(scope:spawn(function()
+            assert(port:expect_exact(12) == 'AT+CGDCONT?\r')
+            -- A previous command's terminal arrives before this query's data.
+            assert(port:write('\r\nOK\r\n'))
+            assert(port:expect_exact(10) == 'AT+CGACT?\r')
+            assert(port:write('\r\n+CGDCONT: 1,"IP","","",0,0\r\nOK\r\n'))
+        end))
+        local backend = { identity = { at_port = port.slave_name } }
+        quectel.add_model_funcs(backend, { model = 'em12' })
+        local info, err = backend:read_pdp_info()
+        assert(info == nil, 'Shifted replies must not become valid empty contexts')
+        assert(err == 'unexpected_pdp_response:expected_CGACT', tostring(err))
+        assert_closed(streams, 4)
+    end)
+end
+
+---@return nil
 function tests.test_modem_at_transport_preserves_errors_and_closes_streams()
     for _, response in ipairs({ { 'ERROR', 'error' }, { '+CME ERROR: 13', '13' } }) do
         with_port(function(scope, port, streams)

@@ -55,6 +55,10 @@ verified, then the modem is restarted once. On the next disabled-state pass,
 matching contexts need no writes or restart and autoconnect can enable the modem.
 Read, write, or restart failures are retried before enabling.
 If no contexts are reported active, no contexts are rewritten.
+Replies containing another PDP command's records or a different command echo,
+and active CIDs missing from the context list, fail inspection and prevent enabling.
+Successful inspections log `pdp_contexts_checked` with the requested type and each
+CID's observed type/activity; APNs and credentials are omitted.
 
 PDP commands are allowed in disabled or registered state; restart is allowed from
 any state. Unsupported manufacturers retain their existing enable/connect behavior.
