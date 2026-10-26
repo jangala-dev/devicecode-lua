@@ -32,6 +32,8 @@ local scope = require 'fibers.scope'
 --       -- timeout arm: loop retries with a fresh op; port re-opened cleanly
 --   end
 
+---@param input string
+---@return string
 local function trim(input)
     -- Pattern matches non-printable characters and spaces at the start and end of the string
     -- %c matches control characters, %s matches all whitespace characters
@@ -70,17 +72,23 @@ function at.send_op(port, command, opts)
             return nil, "error opening AT read port: " .. rd_err
         end
 
-        -- Centralised cleanup: reader is closed however this scope exits
-        -- (success, AT error, unhandled error, or cancelled by losing a race).
-        s:finally(function() reader:close() end)
+        -- Finalisers cannot wait for a graceful stream close.
+        s:finally(function() reader:terminate('AT command finished') end)
 
         local writer, wr_err = file.open(port, "w")
         if not writer then
             return nil, "error opening AT write port: " .. wr_err
         end
+        s:finally(function() writer:terminate('AT command finished') end)
 
-        writer:write(command .. '\r')
-        writer:close()
+        local written, write_err = writer:write(command .. '\r')
+        if not written then
+            return nil, "error writing AT command: " .. tostring(write_err)
+        end
+        local closed, close_err = writer:close()
+        if not closed then
+            return nil, "error flushing AT command: " .. tostring(close_err)
+        end
 
         local res = {}
         while true do

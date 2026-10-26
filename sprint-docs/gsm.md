@@ -33,6 +33,40 @@ The GSM service is responsible for managing GSM modems, handling their configura
 - **Default Configuration**: Holds default settings for modems.
 - **Known Modems**: Specific configurations for known modems identified by IMEI or device path.
 
+Set `pdp_type` in `modems.default` or override it in a `modems.known` entry.
+Accepted values are `IP`, `IPV4V6`, and `IPV6`. Modems inherit the default;
+if neither specifies a type, GSM uses `IP`.
+
+```json
+{
+  "schema": "devicecode.config/gsm/1",
+  "modems": {
+    "default": { "enabled": true, "pdp_type": "IP" },
+    "known": [
+      { "name": "primary", "imei": "123456789012345", "pdp_type": "IPV4V6" }
+    ]
+  }
+}
+```
+
+Whenever the modem is disabled, GSM checks active PDP contexts against its
+configured `pdp_type` before enabling it. Mismatched contexts are corrected and
+verified, then the modem is restarted once. On the next disabled-state pass,
+matching contexts need no writes or restart and autoconnect can enable the modem.
+Read, write, or restart failures are retried before enabling.
+If no contexts are reported active, no contexts are rewritten.
+Replies containing another PDP command's records or a different command echo,
+and active CIDs missing from the context list, fail inspection and prevent enabling.
+Successful inspections log `pdp_contexts_checked` with the requested type and each
+CID's observed type/activity; APNs and credentials are omitted.
+
+PDP commands are allowed in disabled or registered state; restart is allowed from
+any state. Unsupported manufacturers retain their existing enable/connect behavior.
+The backend prefers the secondary AT port and falls back to the primary AT port
+when no secondary port is available.
+Changing this setting does not immediately disconnect an already connected modem;
+it is enforced the next time the modem is disabled.
+
 ## GSM Internal Overview
 
 ### Data Structures

@@ -396,7 +396,7 @@ local function read_net_stat(net_port, stat)
     return -1, value_or_err or "Unknown error"
 end
 
----@param address string
+---@param address ModemAddress
 ---@return ModemIdentity
 local function get_identity(address)
     local modem_info, err = read_modem_info(address)
@@ -411,7 +411,8 @@ local function get_identity(address)
         error("Failed to determine modem control port")
     end
 
-    local at_port = modem_info.at_ports and modem_info.at_ports[1] or nil
+    -- ModemManager may hold the primary AT port open.
+    local at_port = modem_info.at_ports and (modem_info.at_ports[2] or modem_info.at_ports[1]) or nil
     if not at_port then
         error("Failed to determine modem AT port")
     end
@@ -577,6 +578,33 @@ function ModemBackend:read_traffic()
     end
 
     return modem_types.new.ModemTrafficInfo(rx_bytes, tx_bytes)
+end
+
+-- Manufacturer hooks replace these when PDP configuration is supported.
+---@return ModemPdpContext[]? contexts
+---@return string error
+function ModemBackend:read_pdp_contexts()
+    return nil, 'pdp_not_supported'
+end
+
+---@return ModemPdpActivation[]? activations
+---@return string error
+function ModemBackend:read_active_pdp_contexts()
+    return nil, 'pdp_not_supported'
+end
+
+---@return ModemPdpInfo? info
+---@return string error
+function ModemBackend:read_pdp_info()
+    return nil, 'pdp_not_supported'
+end
+
+---@param _cid integer
+---@param _pdp_type string
+---@return boolean ok
+---@return string error
+function ModemBackend:set_pdn_type(_cid, _pdp_type)
+    return false, 'pdp_not_supported'
 end
 
 ---@return boolean ok
@@ -804,7 +832,9 @@ end
 function ModemBackend:monitor_state_op()
     return op.guard(function()
         if not self.state_monitor then
-            return op.always(nil)
+            -- Shutdown clears the record before waiting for the monitor process.
+            -- Report closure so the lifecycle fiber exits instead of spinning.
+            return op.always(nil, "Command closed")
         end
         return self.state_monitor.stream:read_line_op():wrap(function(line)
             local state_ev, err = parse_modem_state_line(line)
@@ -826,6 +856,7 @@ function ModemBackend:set_signal_update_interval(period)
     return err == "", err
 end
 
+---@param address ModemAddress
 ---@return ModemBackend
 local function new(address)
     local self = {
@@ -875,6 +906,7 @@ return {
     new = new,
     new_recovery = new_recovery,
     _test = {
+        ModemBackend = ModemBackend,
         is_signal_valid = is_signal_valid,
         normalize_unlock_retries = normalize_unlock_retries,
         get_device_from_modem_info = get_device_from_modem_info,

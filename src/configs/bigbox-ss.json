@@ -668,7 +668,8 @@
       "modems": {
         "default": {
           "enabled": true,
-          "signal_freq": 10
+          "signal_freq": 10,
+          "pdp_type": "IP"
         },
         "known": [
           {

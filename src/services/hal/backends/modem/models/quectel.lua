@@ -4,6 +4,134 @@ local sleep = require "fibers.sleep"
 local scope = require "fibers.scope"
 local op = require "fibers.op"
 local at = require "services.hal.backends.modem.at"
+local capability_args = require "services.hal.types.capability_args"
+
+local PDP_AT_TIMEOUT = 3
+
+---@param lines ATResponseLine[]
+---@return ModemPdpContext[]? contexts
+---@return string error
+local function parse_pdp_contexts(lines)
+    local contexts, seen = {}, {}
+    for _, line in ipairs(lines) do
+        if line:match('^%+CGACT:') or (line:match('^AT') and line ~= 'AT+CGDCONT?') then
+            return nil, 'unexpected_pdp_response:expected_CGDCONT'
+        end
+        if line:match('^%+CGDCONT:') then
+            local cid, pdp_type, apn, pdp_addr, trailing = line:match(
+                '^%+CGDCONT:%s*(%d+)%s*,%s*"([^"]+)"%s*,%s*"([^"]*)"%s*,%s*"([^"]*)"(.*)$')
+            cid = tonumber(cid)
+            if not cid or cid <= 0 or seen[cid]
+                or not (trailing:match('^%s*$') or trailing:match('^%s*,')) then
+                return nil, 'malformed_pdp_context:' .. line
+            end
+            seen[cid] = true
+            contexts[#contexts + 1] = { cid = cid, pdp_type = pdp_type, apn = apn, pdp_addr = pdp_addr }
+        end
+    end
+    return contexts, ""
+end
+
+---@param lines ATResponseLine[]
+---@return ModemPdpActivation[]? activations
+---@return string error
+local function parse_pdp_activations(lines)
+    local contexts, seen = {}, {}
+    for _, line in ipairs(lines) do
+        if line:match('^%+CGDCONT:') or (line:match('^AT') and line ~= 'AT+CGACT?') then
+            return nil, 'unexpected_pdp_response:expected_CGACT'
+        end
+        if line:match('^%+CGACT:') then
+            local cid, active = line:match('^%+CGACT:%s*(%d+)%s*,%s*([01])%s*$')
+            cid = tonumber(cid)
+            if not cid or cid <= 0 or seen[cid] then
+                return nil, 'malformed_pdp_activation:' .. line
+            end
+            seen[cid] = true
+            contexts[#contexts + 1] = { cid = cid, active = active == '1' }
+        end
+    end
+    return contexts, ""
+end
+
+---@param port SerialPortPath
+---@param command ATCommand
+---@return ATResponseLine[]? lines
+---@return string error
+---@return boolean? timed_out
+local function run_pdp_command(port, command)
+    local which, lines, err = fibers.perform(op.named_choice({
+        response = at.send_op(port, command),
+        timeout = sleep.sleep_op(PDP_AT_TIMEOUT),
+    }))
+    if which == 'timeout' then return nil, 'pdp_command_timeout', true end
+    if err then return nil, err end
+    if not lines then return nil, 'missing_pdp_response' end
+    return lines, ""
+end
+
+---@param backend ModemBackend
+---@return ModemPdpContext[]? contexts
+---@return string error
+local function read_pdp_contexts(backend)
+    local lines, err = run_pdp_command(backend.identity.at_port, 'AT+CGDCONT?')
+    if not lines then return nil, err end
+    return parse_pdp_contexts(lines)
+end
+
+---@param backend ModemBackend
+---@return ModemPdpActivation[]? activations
+---@return string error
+local function read_active_pdp_contexts(backend)
+    local lines, err = run_pdp_command(backend.identity.at_port, 'AT+CGACT?')
+    if not lines then return nil, err end
+    return parse_pdp_activations(lines)
+end
+
+---@param backend ModemBackend
+---@return ModemPdpInfo? info
+---@return string error
+local function read_pdp_info(backend)
+    local contexts, err = backend:read_pdp_contexts()
+    if not contexts then return nil, err end
+    local activations, active_err = backend:read_active_pdp_contexts()
+    if not activations then return nil, active_err end
+    local active_by_cid = {}
+    local defined = {}
+    for _, context in ipairs(contexts) do defined[context.cid] = true end
+    for _, context in ipairs(activations) do
+        if context.active and not defined[context.cid] then
+            return nil, 'pdp_active_context_missing:' .. tostring(context.cid)
+        end
+        active_by_cid[context.cid] = context.active
+    end
+    for _, context in ipairs(contexts) do
+        context.active = active_by_cid[context.cid] == true
+    end
+    return { pdp_contexts = contexts }, ""
+end
+
+---@param backend ModemBackend
+---@param cid integer
+---@param pdp_type string
+---@return boolean ok
+---@return string error
+local function set_pdn_type(backend, cid, pdp_type)
+    local opts, validation_err = capability_args.new.ModemSetPdnTypeOpts(cid, pdp_type)
+    if not opts then return false, validation_err end
+    local command = string.format('AT+CGDCONT=%d,"%s",""', opts.cid, opts.pdp_type)
+    local _, err, timed_out = run_pdp_command(backend.identity.at_port, command)
+    if err ~= "" and not timed_out then return false, err end
+    local contexts, read_err = backend:read_pdp_contexts()
+    if not contexts then return false, read_err end
+    for _, context in ipairs(contexts) do
+        if context.cid == opts.cid then
+            if context.pdp_type == opts.pdp_type then return true, "" end
+            return false, 'pdp_type_verification_failed:' .. tostring(opts.cid)
+        end
+    end
+    return false, 'pdp_context_missing:' .. tostring(opts.cid)
+end
 
 local SIM_POLL_INTERVAL = 5
 
@@ -221,7 +349,13 @@ local funcs = {
 
 ---@param backend ModemBackend
 ---@param identity_info ModemIdentityInfo
+---@return nil
 local function add_model_funcs(backend, identity_info)
+    backend.read_pdp_contexts = read_pdp_contexts
+    backend.read_active_pdp_contexts = read_active_pdp_contexts
+    backend.read_pdp_info = read_pdp_info
+    backend.set_pdn_type = set_pdn_type
+
     for _, func_def in ipairs(funcs) do
         for _, cond in ipairs(func_def.conditionals) do
             if cond(backend, identity_info) then
@@ -233,5 +367,9 @@ local function add_model_funcs(backend, identity_info)
 end
 
 return {
-    add_model_funcs = add_model_funcs
+    add_model_funcs = add_model_funcs,
+    _test = {
+        parse_pdp_contexts = parse_pdp_contexts,
+        parse_pdp_activations = parse_pdp_activations,
+    },
 }
