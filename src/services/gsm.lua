@@ -1300,12 +1300,14 @@ function GsmModem:_autoconnect_loop()
 			self.svc:obs_log('warn', { what = 'autoconnect_retry', modem = self.name, state = current_state })
 		end
 
+		local recovered_modes_state = false
 		if modes_refresh and fibers.now() >= modes_retry_at then
 			local fresh, fresh_err = modem_get_field(self.cap, 'modem_state', REQUEST_TIMEOUT, 0)
 			if fresh_err == '' then
 				current_state, self.current_state = fresh, fresh
 				self.modem_state = normalize_optional_string(fresh)
 				modes_refresh = false
+				recovered_modes_state = true
 			else
 				modes_retry_at = fibers.now() + DEFAULT_RETRY_TIMEOUT
 			end
@@ -1330,8 +1332,11 @@ function GsmModem:_autoconnect_loop()
 			end
 		end
 
-		-- Act on current_state
-		if current_state and self.cfg.autoconnect and not modes_refresh and which ~= 'modes_retry' then
+		-- State-read recovery must resume autoconnect without requiring another event,
+		-- while preserving any APN backoff that has not expired.
+		local can_act = which ~= 'modes_retry'
+		if recovered_modes_state then can_act = backoff == math.huge or fibers.now() >= backoff end
+		if current_state and self.cfg.autoconnect and not modes_refresh and can_act then
 			local err, retry_timeout
 
 			if current_state == 'disabled' then
