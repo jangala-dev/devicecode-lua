@@ -1599,6 +1599,7 @@ function Provider:apply_op(req)
 			rollback = true,
 			reactivate_on_rollback = true,
 		}, {
+			cancel_op = req and req.cancel_op,
 			trace = {
 				what = 'net_apply',
 				generation = trace.generation,

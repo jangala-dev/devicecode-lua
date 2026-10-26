@@ -67,6 +67,18 @@ function tests.test_generated_devices_exact_whitelist_and_capabilities()
 	end
 end
 
+function tests.test_network_provider_forwards_transaction_cancellation()
+	local intent = fixture()
+	with_plan(intent, function(_, provider)
+		local result = fibers.perform(provider:apply_op({
+			intent = intent, cancel_op = require('fibers.op').always('superseded'),
+		}))
+		eq(result.ok, false)
+		eq(result.status, 'cancelled_no_change')
+		eq(result.rollback.attempted, false)
+	end)
+end
+
 function tests.test_explicit_bridge_uses_interface_allocation_and_effective_client_subnet()
 	local intent = fixture()
 	intent.interfaces.client_bridge = {

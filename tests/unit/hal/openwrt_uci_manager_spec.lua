@@ -378,4 +378,145 @@ function tests.test_activation_command_replies_without_waiting_for_command_compl
 	end)
 end
 
+local function cancellable_record(value)
+	return { config = 'network', changes = {
+		{ op = 'set', config = 'network', section = 'lan', option = 'proto', value = value },
+	}, restart_cmds = { { kind = 'reload', target = 'network', wait = true } } }
+end
+
+function tests.test_queued_transaction_cancellation_discards_without_changes()
+	require('tests.support.run_fibers').run(function(scope)
+		local channel = require 'fibers.channel'
+		local entered, release, admitted, done = channel.new(1), channel.new(1), channel.new(1), channel.new(1)
+		local cancel = channel.new(1)
+		local calls = {}
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function() return {} end
+		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function()
+			entered:put(true)
+			release:get()
+			return true
+		end }))
+		ok(mgr:start(scope))
+		ok(scope:spawn(function()
+			fibers.perform(mgr:transaction_op({ records = { cancellable_record('first') } }))
+		end))
+		entered:get()
+		ok(scope:spawn(function()
+			done:put(fibers.perform(mgr:transaction_op({ records = { cancellable_record('obsolete') } }, {
+				cancel_op = cancel:get_op(), on_admitted = function() admitted:put(true) end,
+			})))
+		end))
+		admitted:get()
+		cancel:put('superseded')
+		release:put(true)
+		local result = done:get()
+		eq(result.status, 'cancelled_no_change')
+		eq(result.rollback.attempted, false)
+		for _, call in ipairs(calls) do
+			if call.op == 'set' then eq(call[4], 'first') end
+		end
+	end)
+end
+
+function tests.test_cancellation_during_changes_restores_config_without_activation()
+	require('tests.support.run_fibers').run(function(scope)
+		local cancel = require('fibers.channel').new(1)
+		local calls, activations = {}, 0
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function() return { lan = { ['.type'] = 'interface', proto = 'original' } } end
+		local set = cursor.set
+		cursor.set = function(self, config, section, option, value)
+			if value == 'obsolete' then cancel:put('superseded') end
+			return set(self, config, section, option, value)
+		end
+		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function()
+			activations = activations + 1
+			return true
+		end }))
+		ok(mgr:start(scope))
+		local result = fibers.perform(mgr:transaction_op({
+			records = { cancellable_record('obsolete') }, rollback = false, reactivate_on_rollback = true,
+		}, { cancel_op = cancel:get_op() }))
+		eq(result.status, 'cancelled_rolled_back')
+		eq(result.rollback.ok, true)
+		eq(activations, 0)
+		local restored = false
+		for _, call in ipairs(calls) do
+			if call.op == 'set' and call[4] == 'original' then restored = true end
+		end
+		ok(restored, 'original configuration should be restored')
+	end)
+end
+
+function tests.test_cancellation_after_activation_starts_is_ignored()
+	require('tests.support.run_fibers').run(function(scope)
+		local cancel = require('fibers.channel').new(1)
+		local calls, activations = {}, 0
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function() return {} end
+		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function()
+			activations = activations + 1
+			if activations == 1 then cancel:put('superseded') end
+			return true
+		end }))
+		ok(mgr:start(scope))
+		local record = cancellable_record('new')
+		record.restart_cmds[2] = { kind = 'restart', target = 'firewall', wait = true }
+		local result = fibers.perform(mgr:transaction_op({ records = { record } }, { cancel_op = cancel:get_op() }))
+		eq(result.ok, true)
+		eq(result.status, 'ok')
+		eq(result.rollback.attempted, false)
+		eq(activations, 2)
+	end)
+end
+
+function tests.test_cancellation_after_commit_restores_committed_packages()
+	require('tests.support.run_fibers').run(function(scope)
+		local cancel = require('fibers.channel').new(1)
+		local calls, commits, activations = {}, 0, 0
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function() return { lan = { ['.type'] = 'interface', proto = 'original' } } end
+		cursor.commit = function()
+			commits = commits + 1
+			if commits == 1 then cancel:put('superseded') end
+			return true
+		end
+		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function()
+			activations = activations + 1
+			return true
+		end }))
+		ok(mgr:start(scope))
+		local result = fibers.perform(mgr:transaction_op({ records = { cancellable_record('obsolete') } }, {
+			cancel_op = cancel:get_op(),
+		}))
+		eq(result.status, 'cancelled_rolled_back')
+		eq(result.rollback.ok, true)
+		eq(commits, 2, 'rollback should commit the restored package')
+		eq(activations, 0)
+	end)
+end
+
+function tests.test_cancellation_reports_rollback_failure()
+	require('tests.support.run_fibers').run(function(scope)
+		local cancel = require('fibers.channel').new(1)
+		local cursor = fake_cursor({})
+		cursor.get_all = function() return { lan = { ['.type'] = 'interface', proto = 'original' } } end
+		cursor.set = function(_, _, _, _, value)
+			if value == 'obsolete' then cancel:put('superseded') end
+			if value == 'original' then return nil, 'restore failed' end
+			return true
+		end
+		local mgr = ok(uci_manager.new({ cursor = cursor }))
+		ok(mgr:start(scope))
+		local result = fibers.perform(mgr:transaction_op({ records = { cancellable_record('obsolete') } }, {
+			cancel_op = cancel:get_op(),
+		}))
+		eq(result.ok, false)
+		eq(result.cancelled, true)
+		eq(result.status, 'failed_rollback_failed')
+		contains(result.rollback.err, 'restore failed')
+	end)
+end
+
 return tests

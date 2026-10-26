@@ -424,6 +424,17 @@ is expressed as a rule with `proto = tcp`, `dest_port = 443`, `sticky = true`
 and `policy = balanced`; the OpenWrt provider translates that into an mwan3
 `config rule` using `option sticky '1'` and `option use_policy '<policy>'`.
 
+### Transaction cancellation
+
+Network applies forward caller abandonment to the UCI transaction as a local
+cancellation Op. A cancelled queued transaction is discarded without changes.
+Before activation, cancellation restores the saved UCI packages without
+restarting services. Once activation begins, cancellation is ignored and the
+transaction completes normally, including recovery if activation fails.
+
+Other UCI callers can opt into the same behavior with `transaction_op`'s
+`opts.cancel_op`; cancelling their wait alone does not cancel admitted work.
+
 ## OpenWrt VM generated-config renderer
 
 The OpenWrt VM lane includes a renderer for inspecting the exact generated

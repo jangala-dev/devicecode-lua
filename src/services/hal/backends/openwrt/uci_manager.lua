@@ -11,6 +11,8 @@
 --     commit record;
 --   * caller cancellation after admission abandons only that caller's wait, not
 --     the already-admitted commit.
+--   * transactions may opt into cancellation before activation: queued work is
+--     discarded and partially applied work is restored. Activation ignores it.
 --
 -- UCI model covered here:
 --   * named section creation through set(config, section, stype)
@@ -522,7 +524,8 @@ local function cursor_rename(cursor, config, section, option, new_name)
 	return cursor_rename_section_fallback(cursor, config, section, new_name)
 end
 
-local function apply_with_cursor(cursor, record)
+local function apply_with_cursor(cursor, record, cancelled)
+	if cancelled and cancelled() then return nil, 'uci transaction cancelled' end
 	if not cursor then
 		return true, nil -- explicit fake/no-uci mode for tests and non-OpenWrt hosts.
 	end
@@ -533,6 +536,7 @@ local function apply_with_cursor(cursor, record)
 	end
 	local aliases = {}
 	for _, change in ipairs(record.changes) do
+		if cancelled and cancelled() then return nil, 'uci transaction cancelled' end
 		local op = change.op
 		local section = resolve_section(record, aliases, change.section)
 		if op == 'add' then
@@ -586,6 +590,7 @@ local function apply_with_cursor(cursor, record)
 			if not ok then return nil, tostring(err or 'uci reorder failed') end
 		end
 	end
+	if cancelled and cancelled() then return nil, 'uci transaction cancelled' end
 	local ok, err = cursor:commit(record.config)
 	if not ok then return nil, tostring(err or 'uci commit failed') end
 	return true, nil
@@ -1085,6 +1090,22 @@ function Manager:_apply_transaction(item)
 	local records = tx.records or {}
 	local packages = tx.packages or record_packages(records)
 	local trace = tx.trace or {}
+	local cancel_requested = false
+	local function cancelled()
+		if not cancel_requested and tx.cancel_op then
+			local reason = queue.try_now(tx.cancel_op, nil)
+			cancel_requested = reason ~= nil and reason ~= false
+		end
+		return cancel_requested
+	end
+	if cancelled() then
+		local result = { ok = false, status = 'cancelled_no_change', err = 'uci transaction cancelled',
+			cancelled = true, packages = packages, rollback = { attempted = false } }
+		log_manager(self, 'debug', { what = 'uci_transaction_cancelled', status = result.status,
+			generation = trace.generation, apply_id = trace.apply_id })
+		if item.reply_tx then queue.try_admit_now(item.reply_tx, result) end
+		return
+	end
 	log_manager(self, 'debug', (function ()
 		local p = trace_fields(trace)
 		p.what = 'uci_transaction_begin'
@@ -1167,7 +1188,7 @@ function Manager:_apply_transaction(item)
 		if self._closed then
 			ok, err = nil, 'uci manager closed'
 		else
-			ok, err = apply_with_cursor(self._cursor, record)
+			ok, err = apply_with_cursor(self._cursor, record, cancelled)
 		end
 		local record_ms = elapsed_ms(rt0)
 		log_manager(self, ok == true and 'debug' or 'warn', (function ()
@@ -1183,11 +1204,16 @@ function Manager:_apply_transaction(item)
 		record_results[#record_results + 1] = res
 		result.timings['commit_' .. tostring(record.config) .. '_ms'] = record_ms
 		if ok ~= true then
-			failed = { step = 'uci_commit', config = record.config, err = err }
+			failed = { step = cancel_requested and 'cancelled' or 'uci_commit', config = record.config, err = err }
 			break
 		end
 	end
 
+	-- The final check closes the cancellation window. No cancellation checks are
+	-- made once activation starts, including during rollback after an error.
+	if not failed and cancelled() then
+		failed = { step = 'cancelled', err = 'uci transaction cancelled' }
+	end
 	if not failed then
 		phase = fibers.now()
 		local restart_entries = trim_restarts(record_results)
@@ -1238,7 +1264,8 @@ function Manager:_apply_transaction(item)
 		result.failed_step = failed.step
 		result.failed_config = failed.config
 		result.err = tostring(failed.err or failed.step or 'uci transaction failed')
-		if tx.rollback ~= false then
+		result.cancelled = failed.step == 'cancelled' or nil
+		if tx.rollback ~= false or result.cancelled then
 			result.rollback.attempted = true
 			phase = fibers.now()
 			log_manager(self, 'warn', (function ()
@@ -1276,7 +1303,7 @@ function Manager:_apply_transaction(item)
 				return p
 			end)())
 			if rok == true then
-				result.status = 'failed_rolled_back'
+				result.status = result.cancelled and 'cancelled_rolled_back' or 'failed_rolled_back'
 			else
 				result.status = 'failed_rollback_failed'
 				result.rollback.err = tostring(rerr)
@@ -1357,6 +1384,7 @@ function Manager:transaction_op(spec, opts)
 				rollback = spec.rollback ~= false,
 				reactivate_on_rollback = spec.reactivate_on_rollback == true,
 				trace = opts.trace,
+				cancel_op = opts.cancel_op,
 			},
 			reply_tx = reply_tx,
 		})
