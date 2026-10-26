@@ -34,6 +34,7 @@ function tests.test_speedtest_service_timeout_aborts_hal_bus_op_without_hidden_b
 			speedtest_id = 7,
 			uplink_id = 'wan_a',
 			request = { interface = 'wan_a', max_duration_s = 0.01 },
+			timeout_s = 0.01,
 		})
 		ok(handle, err)
 		local ev = fibers.perform(done_rx:recv_op())
@@ -42,6 +43,27 @@ function tests.test_speedtest_service_timeout_aborts_hal_bus_op_without_hidden_b
 		ok(seen_opts and seen_opts.timeout == false, 'HAL bus call should not receive hidden positive timeout')
 		ok(ev.result and ev.result.result and ev.result.result.timeout == true, 'timeout result expected')
 		eq(ev.result.result.err, 'net_speedtest_timeout')
+	end)
+end
+
+
+function tests.test_speedtest_allows_setup_time_beyond_payload_window()
+	runfibers.run(function(scope)
+		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })
+		local hal = {
+			speedtest_op = function()
+				return require('fibers.sleep').sleep_op(1.05):wrap(function()
+					return {ok=true, mbps=12}
+				end)
+			end,
+		}
+		assert(wan_runtime.start_speedtest({
+			lifetime_scope=scope, hal=hal, done_tx=done_tx,
+			generation=1, speedtest_id=1, uplink_id='wan',
+			request={interface='wan', max_duration_s=1},
+		}))
+		local ev = fibers.perform(done_rx:recv_op())
+		assert(ev.result.result.ok and ev.result.result.mbps == 12)
 	end)
 end
 
@@ -152,6 +174,62 @@ function tests.test_live_weights_service_timeout_aborts_hal_bus_op_without_hidde
 		ok(ev.result and ev.result.result and ev.result.result.timeout == true, 'timeout result expected')
 		eq(ev.result.result.err, 'net_live_weights_timeout')
 	end)
+end
+
+local function check_running_speedtest_observations(missing_observation)
+	runfibers.run(function(scope)
+		local done_tx = mailbox.new(8, { full = 'reject_newest' })
+		local model = model_mod.new('net-test')
+		model:update(function(s)
+			s.generation = 2
+			s.wan = {
+				load_balancing = { speedtests = true, policy = 'balanced' },
+				configured_members = { wan = { interface = 'wan', metric = 1 } },
+			}
+			s.backhaul = { uplinks = { wan = {
+				id = 'wan', interface = 'wan', state = 'online', usable = true,
+				path_address = { family = 'ipv4', address = '203.0.113.10' },
+			} } }
+			s.wan_runtime = { uplinks = {}, live_weights = {}, speedtests = {
+				wan = { state = 'running', generation = 2, id = 7 },
+			} }
+			return s
+		end)
+		local original = { generation = 2, speedtest_id = 7 }
+		local state = {
+			scope = scope, service_id = 'net-test', model = model,
+			hal = { speedtest_op = function() return op.never() end },
+			done_tx = done_tx, active_speedtests = { wan = original },
+			current_generation = { generation = 2 }, next_speedtest_id = 8,
+			now = function() return 100 end,
+		}
+		if missing_observation then
+			model:update(function(s) s.backhaul.uplinks.wan.observed = false; return s end)
+			assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+			model:update(function(s) s.backhaul.uplinks.wan.observed = true; return s end)
+		end
+		for _ = 1, 3 do
+			assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		end
+		eq(state.next_speedtest_id, 8, 'observations must not launch duplicate downloads')
+		eq(state.active_speedtests.wan, original, 'original completion must remain current')
+		eq(model:snapshot().wan_runtime.speedtests.wan.state, 'running')
+		local accepted, reason = wan_manager.handle_speedtest_done(state, {
+			uplink_id = 'wan', generation = 2, speedtest_id = 7,
+			result = { ok = true, mbps = 12 },
+		})
+		ok(accepted and reason ~= 'stale', 'original completion must be accepted')
+		eq(model:snapshot().wan_runtime.speedtests.wan.state, 'ok')
+		eq(state.active_speedtests.wan, nil)
+	end)
+end
+
+function tests.test_repeated_observations_preserve_running_speedtest()
+	check_running_speedtest_observations(false)
+end
+
+function tests.test_missing_observation_preserves_running_speedtest()
+	check_running_speedtest_observations(true)
 end
 
 return tests

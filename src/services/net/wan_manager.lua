@@ -89,7 +89,15 @@ local function mark_speedtest_skipped(state, uplink, generation, reason)
 		local id = uplink.uplink_id
 		local rec = s.wan_runtime.speedtests[id] or { uplink_id = id }
 		local measurement = wan_policy.measurement(s, uplink)
-		if (reason == 'fresh_same_path' or reason == 'fresh_weak_path') and rec.last_success then
+		local active = state.active_speedtests and state.active_speedtests[id]
+		local awaiting_observation = reason == 'waiting_for_observation'
+			and rec.state == 'running' and active
+			and active.generation == generation and rec.generation == generation
+			and active.speedtest_id == rec.id
+		if reason == 'running' or awaiting_observation then
+			-- Observation updates must not make an active download eligible again.
+			-- Preserve its state until the original completion arrives.
+		elseif (reason == 'fresh_same_path' or reason == 'fresh_weak_path') and rec.last_success then
 			rec.state = 'ok'
 			rec.ok = true
 			if reason == 'fresh_weak_path' and type(measurement) == 'table' then
@@ -378,6 +386,8 @@ function M.handle_speedtest_done(state, ev)
 			rec.last_success_key = rec.measurement_key
 			rec.last_success = {
 				mbps = mbps,
+				lower_bound = result.lower_bound,
+				estimator = result.estimator,
 				bytes = result.bytes,
 				data_mib = result.data_mib,
 				duration_s = result.duration_s,
@@ -407,6 +417,13 @@ function M.handle_speedtest_done(state, ev)
 		end
 		rec.data_mib = result.data_mib
 		rec.duration_s = result.duration_s
+		rec.bytes = result.bytes
+		rec.setup_s = result.setup_s
+		rec.total_duration_s = result.total_duration_s
+		rec.stop_reason = result.stop_reason
+		rec.estimator = result.estimator
+		rec.lower_bound = result.lower_bound
+		rec.error_detail = result.err
 		s.wan_runtime.speedtests[ev.uplink_id] = rec
 		s.stats.speedtests_completed = (s.stats.speedtests_completed or 0) + 1
 		return s
