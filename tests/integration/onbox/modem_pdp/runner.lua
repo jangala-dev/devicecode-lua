@@ -128,13 +128,12 @@ function Runner:prepare()
             assert(info.plugin:lower():find('quectel', 1, true), 'Unsupported modem: ' .. info.model)
             assert(info.state ~= 'locked' and info.state ~= 'failed',
                 ('Modem …%s is %s: %s'):format(imei:sub(-4), info.state, info.failed_reason or ''))
-            assert(info.at_port,
-                'No AT port reported by ModemManager for modem …' .. imei:sub(-4))
             info.name = cfg.name or imei:sub(-4)
             self.targets[imei] = info
         end
     end
     assert(next(self.targets), 'No configured Quectel modems with autoconnect enabled')
+    self.modems:ensure_at_ports(self.targets)
     self.runtime:backup()
     for _, imei in ipairs(util.keys(self.targets)) do
         local info = self.targets[imei]
@@ -146,7 +145,7 @@ end
 ---@param config table
 ---@return nil
 function Runner:inspect(label, config)
-    local current, results = self.modems:wait(self.targets, 'connected'), {}
+    local current, results = self.modems:wait(self.targets, 'connected', nil, true), {}
     for _, imei in ipairs(util.keys(current)) do
         local info = current[imei]
         local expected = M.effective_config(config, info).pdp_type

@@ -126,18 +126,47 @@ function tests.arguments()
 end
 
 ---@return nil
-function tests.prepare_rejects_missing_at_ports_before_backup_or_deployment()
+function tests.prepare_recovers_missing_at_ports_before_backup_or_deployment()
+    for _, fail_recovery in ipairs({ false, true }) do
+        local calls = {}
+        local instance = runner.from_session({ args = {} })
+        instance.runtime = {
+            original = config,
+            prepare = function() calls[#calls + 1] = 'prepare' end,
+            ensure_dependencies = function() calls[#calls + 1] = 'dependencies' end,
+            backup = function() calls[#calls + 1] = 'backup' end,
+        }
+        instance.modems = {
+            inventory = function()
+                return { ['123'] = { imei = '123', state = 'disabled', plugin = 'quectel', model = 'EM06-E' } }
+            end,
+            ensure_at_ports = function(_, targets)
+                equal(targets['123'].at_port, nil)
+                equal(targets['123'].name, 'primary')
+                calls[#calls + 1] = 'recover'
+                if fail_recovery then error('AT recovery failed') end
+            end,
+        }
+        local ok, err = pcall(function() instance:prepare() end)
+        equal(ok, not fail_recovery)
+        if fail_recovery then
+            assert(tostring(err):find('AT recovery failed', 1, true))
+            equal(calls, { 'prepare', 'dependencies', 'recover' })
+        else equal(calls, { 'prepare', 'dependencies', 'recover', 'backup' }) end
+    end
+end
+
+---@return nil
+function tests.inspect_requires_at_recovery_while_waiting_for_connection()
     local instance = runner.from_session({ args = {} })
-    instance.runtime = {
-        original = config,
-        prepare = function() end,
-        ensure_dependencies = function() end,
-        backup = function() error('Must not back up or deploy when AT ports are missing') end,
-    }
-    instance.modems = { inventory = function()
-        return { ['123'] = { imei = '123', state = 'disabled', plugin = 'quectel', model = 'EM06-E' } }
+    instance.modems = { wait = function(_, targets, state, old_ids, require_at)
+        equal(targets, instance.targets)
+        equal(state, 'connected')
+        equal(old_ids, nil)
+        equal(require_at, true)
+        error('recovery exhausted')
     end }
-    rejects(function() instance:prepare() end, 'No AT port reported by ModemManager for modem …123')
+    rejects(function() instance:inspect('test', config) end, 'recovery exhausted')
 end
 
 ---@return nil
