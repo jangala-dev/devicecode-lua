@@ -48,6 +48,11 @@ devcontainer exec --workspace-folder . bash -lc \
   'luajit tests/integration/onbox/support/test.lua'
 ```
 
+The [cellular generation on-box test](../tests/integration/onbox/cellular_modes/README.md)
+builds and deploys supported, unsupported, and captured-original mode configurations.
+It verifies modes through `mmcli` and warnings through the local UI log API. Its
+offline scenario checks run with `luajit tests/integration/onbox/cellular_modes/test_runner.lua`.
+
 ## Unit Testing
 
 If we want to 100% unit test our code we will need to think about refactoring around local functions within modules that our

@@ -1,5 +1,6 @@
 -- service modules
 local modem_types = require "services.hal.types.modem"
+local mode_values = require 'services.hal.types.modem_modes'
 
 -- Fiber modules
 local fibers = require "fibers"
@@ -20,6 +21,8 @@ local function terminate_command(cmd, sig)
 end
 
 local MODEM_INFO_PATHS = {
+    supported_modes = { 'generic', 'supported-modes' },
+    current_modes = { 'generic', 'current-modes' },
     imei = { "generic", "equipment-identifier" },
     device = { "generic", "device" },
     primary_port = { "generic", "primary-port" },
@@ -165,6 +168,43 @@ local function normalize_optional_string(value)
     if type(value) ~= 'string' then return nil end
     if value == '' or value == '--' then return nil end
     return value
+end
+
+local function parse_mode_combination(value)
+    if type(value) ~= 'string' then return nil, 'missing mode combination' end
+    local allowed, preferred = value:match('^%s*allowed:%s*(.-);%s*preferred:%s*(.-)%s*$')
+    if not allowed then return nil, 'malformed mode combination' end
+    if allowed:match('^%s*,') or allowed:match(',%s*$') or allowed:match(',%s*,') then
+        return nil, 'malformed allowed modes'
+    end
+    local generations = {}
+    for generation in allowed:gmatch('[^,]+') do
+        generations[#generations + 1] = generation:match('^%s*(.-)%s*$')
+    end
+    local combination, err = mode_values.normalize(preferred, generations)
+    if not combination then return nil, err end
+    if preferred ~= 'none' and not mode_values.includes(combination, preferred) then
+        return nil, 'preferred mode is not allowed'
+    end
+    return combination, ''
+end
+
+local function parse_modes_info(info)
+    local entries = normalize_string_list(info.supported_modes)
+    local supported, seen = {}, {}
+    for _, entry in ipairs(entries) do
+        -- Non-cellular/future combinations cannot be selected by this API.
+        local combination = parse_mode_combination(entry)
+        if combination and not seen[mode_values.key(combination)] then
+            supported[#supported + 1] = combination
+            seen[mode_values.key(combination)] = true
+        end
+    end
+    if #supported == 0 then return nil, 'no usable supported cellular modes' end
+    local current, err = parse_mode_combination(info.current_modes)
+    if not current then return nil, 'current modes: ' .. err end
+    table.sort(supported, function(a, b) return mode_values.key(a) < mode_values.key(b) end)
+    return { supported_modes = supported, current_modes = current }, ''
 end
 
 ---@param value any
@@ -579,6 +619,28 @@ function ModemBackend:read_traffic()
     return modem_types.new.ModemTrafficInfo(rx_bytes, tx_bytes)
 end
 
+---@return ModemModesInfo?
+---@return string error
+function ModemBackend:read_modes()
+    local info, err = read_modem_info(self.identity.address)
+    if not info then return nil, err end
+    return parse_modes_info(info)
+end
+
+function ModemBackend:set_modes(preferred, allowed)
+    local combination, err = mode_values.normalize(preferred, allowed)
+    if not combination then return false, err end
+    if preferred ~= 'none' and not mode_values.includes(combination, preferred) then
+        return false, 'preferred mode must be allowed'
+    end
+    local _, command_err = run_command(self.identity.address, {
+        'mmcli', '-m', self.identity.address,
+        '--set-allowed-modes=' .. table.concat(combination.allowed, '|'),
+        '--set-preferred-mode=' .. combination.preferred,
+    })
+    return command_err == '', command_err
+end
+
 ---@return boolean ok
 ---@return string error
 function ModemBackend:enable()
@@ -875,6 +937,8 @@ return {
     new = new,
     new_recovery = new_recovery,
     _test = {
+        ModemBackend = ModemBackend,
+        parse_modes_info = parse_modes_info,
         is_signal_valid = is_signal_valid,
         normalize_unlock_retries = normalize_unlock_retries,
         get_device_from_modem_info = get_device_from_modem_info,

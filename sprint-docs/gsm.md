@@ -33,6 +33,47 @@ The GSM service is responsible for managing GSM modems, handling their configura
 - **Default Configuration**: Holds default settings for modems.
 - **Known Modems**: Specific configurations for known modems identified by IMEI or device path.
 
+### Cellular generations
+
+Within the existing `devicecode.config/gsm/1` schema, modem defaults and individual
+`modems.known` entries may specify:
+
+```json
+"cellular_modes": {
+  "preferred": "4g",
+  "allowed": ["3g", "4g"]
+}
+```
+
+Generations are `2g`, `3g`, `4g`, and `5g`. Preferred may also be `none` to request
+no explicit preference. Both fields must be present after inheritance from modem
+defaults. Missing fields inherit individually; an explicit allowed list replaces
+the default list completely. Allowed lists must be nonempty; duplicates and order
+have no significance.
+
+GSM applies settings only when the modem advertises an exact preferred/allowed
+pair. If no pair matches, GSM logs a warning and leaves the modem's current modes
+unchanged. It does not add or remove allowed generations or substitute a different
+preference, including `none` for a single-generation request.
+
+Settings apply on modem discovery, configuration changes, and recovery, including
+when `autoconnect` is false. Initialization, locked SIMs, and failed modem states
+defer application until the modem becomes usable. Changes apply to connected
+modems and may briefly interrupt connectivity. GSM skips an already-matching
+setting, verifies writes by reading the modes back, and retries I/O/apply failures
+after 20 seconds independently of APN retries. Invalid or unsupported requests
+produce per-modem warnings without blocking normal connection management.
+
+Omitting `cellular_modes` preserves existing behavior. Removing the effective
+settings stops managing modes; it does not reset the modem to automatic selection.
+Unsupported requests and application failures log the requested pair and reason.
+
+HAL exposes `get` fields `supported_modes` (a list of combinations) and
+`current_modes` (one combination), each shaped as `{preferred, allowed}`. The
+`set_modes` control operation takes typed `ModemSetModesOpts(preferred, allowed)`.
+The modem backend provides `read_modes()` and `set_modes(preferred, allowed)`;
+generation configuration validation belongs to GSM.
+
 ## GSM Internal Overview
 
 ### Data Structures
