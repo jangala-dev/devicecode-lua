@@ -4,6 +4,7 @@ local util = require 'onbox.support.util'
 local quote = process.quote
 
 local M = {}
+local MAX_AT_RECOVERY_RESETS = 2
 
 ---@class OnboxModemInfo
 ---@field id string
@@ -53,12 +54,15 @@ function Modems:inventory()
 end
 
 ---@param targets table<string, OnboxModemInfo> Stable IMEI keys, not mmcli IDs.
----@param state string
+---@param state string? Omit to accept any unlocked, non-failed state.
 ---@param old_ids table<string, string>?
----@param require_at boolean? Also wait for ModemManager to report an AT port.
+---@param require_at boolean? Immediately reset a modem without an AT port, up to twice per modem.
 ---@return table<string, OnboxModemInfo>
 function Modems:wait(targets, state, old_ids, require_at)
     local deadline, last_status = process.now() + self.box.args.timeout, ''
+    local excluded_ids, resets = {}, {}
+    for imei, id in pairs(old_ids or {}) do excluded_ids[imei] = { [id] = true } end
+    local description = state or 'AT ports'
     while process.now() < deadline do
         local ok, current = pcall(function() return self:inventory() end)
         if ok then
@@ -73,16 +77,39 @@ function Modems:wait(targets, state, old_ids, require_at)
                         ('Modem …%s became %s: %s'):format(imei:sub(-4), modem.state, modem.failed_reason or ''))
                     result[imei] = modem
                 end
-                if not modem or modem.state ~= state or (old_ids and modem.id == old_ids[imei]) then matched = false end
-                if require_at and modem and not modem.at_port then matched = false end
+                local fresh = modem and not (excluded_ids[imei] and excluded_ids[imei][modem.id])
+                if not modem or (state and modem.state ~= state) or not fresh then matched = false end
+                if require_at and modem and not modem.at_port then
+                    matched = false
+                    if fresh then
+                        local count = resets[imei] or 0
+                        assert(count < MAX_AT_RECOVERY_RESETS,
+                            ('Modem %s (…%s) still has no AT port after %d recovery resets'):format(
+                                targets[imei].name or imei:sub(-4), imei:sub(-4), count))
+                        print(('  Resetting %s (…%s): no AT port, recovery %d/%d'):format(
+                            targets[imei].name or imei:sub(-4), imei:sub(-4), count + 1, MAX_AT_RECOVERY_RESETS))
+                        self.box.ssh:run('mmcli -m ' .. modem.id .. ' --reset', { timeout = 45 })
+                        excluded_ids[imei] = excluded_ids[imei] or {}
+                        excluded_ids[imei][modem.id], resets[imei] = true, count + 1
+                    end
+                end
             end
             local status = table.concat(statuses, ', ')
-            if status ~= last_status then print('  Waiting for ' .. state .. ': ' .. status); last_status = status end
+            if status ~= last_status then
+                print('  Waiting for ' .. description .. ': ' .. status)
+                last_status = status
+            end
             if matched then return result end
         elseif self.box.interrupted then error('Interrupted', 0) end
         process.pause(2)
     end
-    error(('Timed out after %ss waiting for %s: %s'):format(self.box.args.timeout, state, last_status), 0)
+    error(('Timed out after %ss waiting for %s: %s'):format(self.box.args.timeout, description, last_status), 0)
+end
+
+---@param targets table<string, OnboxModemInfo>
+---@return table<string, OnboxModemInfo>
+function Modems:ensure_at_ports(targets)
+    return self:wait(targets, nil, nil, true)
 end
 
 ---@param targets table<string, OnboxModemInfo>
