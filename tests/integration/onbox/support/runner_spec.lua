@@ -30,6 +30,26 @@ local function rejects(callback, message)
     assert(not ok and tostring(err):find(message, 1, true), 'Expected failure containing: ' .. message)
 end
 
+---@param snapshots table<string, OnboxModemInfo>[]
+---@param body fun(modems: OnboxModems, commands: string[]): nil
+---@return nil
+local function with_modem_inventory(snapshots, body)
+    local commands, ticks, reads = {}, 0, 0
+    local modems = modem.new({ args = { timeout = 10 }, ssh = { run = function(_, command)
+        commands[#commands + 1] = command
+    end } })
+    modems.inventory = function()
+        reads = reads + 1
+        return snapshots[math.min(reads, #snapshots)]
+    end
+    local saved_now, saved_pause = process.now, process.pause
+    process.now = function() return ticks end
+    process.pause = function() ticks = ticks + 1 end
+    local ok, err = pcall(body, modems, commands)
+    process.now, process.pause = saved_now, saved_pause
+    assert(ok, err)
+end
+
 ---@param path string
 ---@return nil
 local function remove_tree(path)
@@ -635,35 +655,119 @@ function tests.modem_inventory_keeps_disabled_modems_without_at_ports()
 end
 
 ---@return nil
-function tests.modem_wait_can_require_at_readiness_after_reset()
-    local box = { args = { timeout = 10 }, ssh = {} }
-    local modems, reads, commands = modem.new(box), 0, {}
-    modems.inventory = function()
-        reads = reads + 1
-        return { ['123'] = { id = reads == 1 and '7' or '9', state = 'disabled',
-            at_port = reads >= 3 and '/dev/ttyUSB3' or nil } }
-    end
-    box.ssh.run = function(_, command) commands[#commands + 1] = command end
-    local saved = process.pause
-    process.pause = function() end
-    local ok, err = pcall(function() modems:clean_boot({ ['123'] = { name = 'primary' } }, true) end)
-    process.pause = saved
-    assert(ok, err)
-    equal(reads, 3)
-    equal(commands[1], 'mmcli -m 7 --reset')
+function tests.modem_wait_resets_missing_at_port_and_ignores_stale_ids()
+    local healthy = { id = '2', state = 'connected', at_port = '/dev/ttyUSB7' }
+    with_modem_inventory({
+        { primary = { id = '7', state = 'disabled' }, secondary = healthy },
+        { primary = { id = '7', state = 'disabled' }, secondary = healthy },
+        { secondary = healthy },
+        { primary = { id = '9', state = 'disabled', at_port = '/dev/ttyUSB3' }, secondary = healthy },
+    }, function(modems, commands)
+        local targets = { primary = { name = 'primary' }, secondary = { name = 'secondary' } }
+        local current = modems:ensure_at_ports(targets)
+        equal(current.primary.id, '9')
+        equal(current.secondary.id, '2')
+        equal(#commands, 1)
+        equal(commands[1], 'mmcli -m 7 --reset')
+    end)
 end
 
 ---@return nil
-function tests.modem_wait_reports_missing_at_port_instead_of_absent()
-    local modems = modem.new({ args = { timeout = 10 } })
-    modems.inventory = function() return { ['123'] = { id = '3', state = 'disabled' } } end
-    local saved_now, saved_pause = process.now, process.pause
-    local ticks = 0
-    process.now = function() ticks = ticks + 1; return ticks < 3 and 0 or 11 end
-    process.pause = function() end
-    local ok, err = pcall(function() modems:wait({ ['123'] = { name = 'primary' } }, 'disabled', nil, true) end)
-    process.now, process.pause = saved_now, saved_pause
-    assert(not ok and tostring(err):find('primary=disabled (no AT port)', 1, true), tostring(err))
+function tests.modem_wait_bounds_missing_at_recovery_resets()
+    with_modem_inventory({
+        { ['123'] = { id = '3', state = 'disabled' } },
+        { ['123'] = { id = '4', state = 'disabled' } },
+        { ['123'] = { id = '5', state = 'disabled' } },
+    }, function(modems, commands)
+        rejects(function() modems:ensure_at_ports({ ['123'] = { name = 'primary' } }) end,
+            'Modem primary (…123) still has no AT port after 2 recovery resets')
+        equal(#commands, 2)
+        equal(commands[1], 'mmcli -m 3 --reset')
+        equal(commands[2], 'mmcli -m 4 --reset')
+    end)
+end
+
+---@return nil
+function tests.modem_clean_boot_recovers_a_fresh_missing_at_modem_only()
+    with_modem_inventory({
+        { ['123'] = { id = '3', state = 'disabled' } },
+        { ['123'] = { id = '3', state = 'disabled' } },
+        { ['123'] = { id = '4', state = 'disabled' } },
+        { ['123'] = { id = '4', state = 'disabled' } },
+        { ['123'] = { id = '5', state = 'disabled', at_port = '/dev/ttyUSB3' } },
+    }, function(modems, commands)
+        modems:clean_boot({ ['123'] = { name = 'primary' } }, true)
+        equal(#commands, 2)
+        equal(commands[1], 'mmcli -m 3 --reset')
+        equal(commands[2], 'mmcli -m 4 --reset')
+    end)
+end
+
+---@return nil
+function tests.modem_wait_never_accepts_stale_id_after_recovery_reset()
+    with_modem_inventory({
+        { ['123'] = { id = '3', state = 'disabled' } },
+        { ['123'] = { id = '3', state = 'disabled', at_port = '/dev/ttyUSB3' } },
+    }, function(modems, commands)
+        rejects(function() modems:ensure_at_ports({ ['123'] = { name = 'primary' } }) end,
+            'Timed out after 10s waiting for AT ports')
+        equal(#commands, 1)
+    end)
+end
+
+---@return nil
+function tests.modem_wait_remembers_all_previously_reset_ids()
+    for _, stale_has_at in ipairs({ false, true }) do
+        with_modem_inventory({
+            { ['123'] = { id = '3', state = 'disabled' } },
+            { ['123'] = { id = '4', state = 'disabled' } },
+            { ['123'] = { id = '3', state = 'disabled', at_port = stale_has_at and '/dev/ttyUSB3' or nil } },
+            { ['123'] = { id = '5', state = 'disabled', at_port = '/dev/ttyUSB3' } },
+        }, function(modems, commands)
+            local current = modems:ensure_at_ports({ ['123'] = { name = 'primary' } })
+            equal(current['123'].id, '5')
+            equal(#commands, 2)
+            equal(commands[1], 'mmcli -m 3 --reset')
+            equal(commands[2], 'mmcli -m 4 --reset')
+        end)
+    end
+end
+
+---@return nil
+function tests.modem_wait_preserves_initial_id_exclusion_during_recovery()
+    with_modem_inventory({
+        { ['123'] = { id = '4', state = 'disabled' } },
+        { ['123'] = { id = '3', state = 'disabled', at_port = '/dev/ttyUSB3' } },
+        { ['123'] = { id = '5', state = 'disabled', at_port = '/dev/ttyUSB3' } },
+    }, function(modems, commands)
+        local old_ids = { ['123'] = '3' }
+        local current = modems:wait({ ['123'] = { name = 'primary' } }, 'disabled', old_ids, true)
+        equal(current['123'].id, '5')
+        equal(#commands, 1)
+        equal(commands[1], 'mmcli -m 4 --reset')
+        equal(old_ids['123'], '3')
+    end)
+end
+
+---@return nil
+function tests.modem_wait_does_not_reset_absent_failed_or_locked_modems()
+    for _, state in ipairs({ 'absent', 'failed', 'locked' }) do
+        local snapshot = state == 'absent' and {} or { ['123'] = { id = '3', state = state } }
+        with_modem_inventory({ snapshot }, function(modems, commands)
+            local expected = state == 'absent' and 'primary=absent' or 'became ' .. state
+            rejects(function() modems:ensure_at_ports({ ['123'] = { name = 'primary' } }) end, expected)
+            equal(#commands, 0)
+        end)
+    end
+end
+
+---@return nil
+function tests.modem_wait_propagates_reset_failure_without_looping()
+    with_modem_inventory({ { ['123'] = { id = '3', state = 'disabled' } } }, function(modems, commands)
+        modems.box.ssh.run = function() error('reset rejected') end
+        rejects(function() modems:ensure_at_ports({ ['123'] = { name = 'primary' } }) end, 'reset rejected')
+        equal(#commands, 0)
+    end)
 end
 
 ---@return nil
