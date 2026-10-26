@@ -47,6 +47,11 @@ end
 
 function M.speedtest_retry_delay_s(snapshot, rec)
 	local cfg = runtime_opts(snapshot)
+	-- Repeating a successful but too-short capped download cannot improve it.
+	if rec and rec.err == 'insufficient_data_budget' then
+		local ttl = tonumber(cfg.interval_s or cfg.refresh_s or cfg.ttl_s or cfg.max_age_s)
+		return ttl and ttl > 0 and ttl or DEFAULT_SPEEDTEST_INTERVAL_S
+	end
 	local base = bounded_number(cfg.retry_after_s or cfg.retry_base_s or cfg.retry_s,
 		DEFAULT_SPEEDTEST_RETRY_AFTER_S, 1)
 	local cap = bounded_number(cfg.retry_max_s or cfg.max_retry_after_s or cfg.retry_cap_s,
