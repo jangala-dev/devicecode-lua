@@ -71,7 +71,7 @@ function T.test_byte_budget_setup_and_download_deadlines_are_separate()
 		assert(argv:find('%{exitcode}', 1, true), 'read curl status, not the mwan wrapper status')
 		assert(argv:find('--fail-early', 1, true), 'do not GET after failed setup')
 		assert(argv:find('--head --max-time 5 --output /dev/null', 1, true))
-		assert(argv:find('--range 0-1048575 --max-filesize 1048576 --max-time 1', 1, true))
+		assert(argv:find('--range 0-1048575 --max-filesize 1048576 --max-time 4', 1, true))
 	end)
 end
 
@@ -179,7 +179,7 @@ function T.test_oversized_or_malformed_output_is_rejected()
 end
 
 function T.test_worker_deadline_shuts_down_stalled_process()
-	fixture({delay=8}, function(s)
+	fixture({delay=12}, function(s)
 		local r=run()
 		assert(not r.ok and r.err=='speedtest_timeout' and s.shutdowns==2)
 	end)
@@ -219,11 +219,12 @@ function T.test_cancellation_reaps_real_downloader()
 end
 
 function T.test_duration_and_outer_budget_validation()
-	assert(limits.duration(0/0) == 1)
-	assert(limits.duration(math.huge) == 1)
-	assert(limits.duration(-1) == 1)
+	assert(limits.duration(0/0) == 4)
+	assert(limits.duration(math.huge) == 4)
+	assert(limits.duration(-1) == 4)
 	assert(limits.duration(0.5) == 0.5)
 	assert(limits.timeout(1) == 7)
+	assert(limits.timeout() == 10)
 end
 
 return T

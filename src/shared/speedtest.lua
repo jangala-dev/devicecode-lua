@@ -2,7 +2,8 @@
 local M = {
 	SETUP_S = 5,
 	CLEANUP_S = 1,
-	MAX_DURATION_S = 1,
+	-- MAX_BYTES bounds data use; a 1 s window measured TCP ramp-up on high-RTT SIMs.
+	MAX_DURATION_S = 4,
 	MAX_BYTES = 1024 * 1024,
 	MIN_BYTES = 16 * 1024,
 	MIN_MEASUREMENT_S = 0.05,

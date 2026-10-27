@@ -1001,6 +1001,10 @@ local function handle_speedtest_done(state, ev)
 			if rok ~= true then return nil, rerr end
 		end
 	end
+	if ok == true and err ~= 'stale' then
+		-- Speed tests run one at a time; start the next due uplink.
+		ok, err = reconcile_speedtests_if_ready(state, 'speedtest_done')
+	end
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
 	if pub_ok ~= true then return nil, pub_err end

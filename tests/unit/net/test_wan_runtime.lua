@@ -232,4 +232,85 @@ function tests.test_missing_observation_preserves_running_speedtest()
 	check_running_speedtest_observations(true)
 end
 
+function tests.test_due_speedtests_launch_one_at_a_time()
+	runfibers.run(function(scope)
+		local done_tx = mailbox.new(8, { full = 'reject_newest' })
+		local model = model_mod.new('net-test')
+		local ids = { 'wan', 'sim_a', 'sim_b' }
+		model:update(function(s)
+			s.generation = 2
+			s.wan = { load_balancing = { speedtests = true, policy = 'balanced' }, configured_members = {} }
+			s.backhaul = { uplinks = {} }
+			for i, id in ipairs(ids) do
+				s.wan.configured_members[id] = { interface = id, metric = 1 }
+				s.backhaul.uplinks[id] = {
+					id = id, interface = id, state = 'online', usable = true,
+					path_address = { family = 'ipv4', address = '203.0.113.' .. i },
+				}
+			end
+			s.wan_runtime = { uplinks = {}, live_weights = {}, speedtests = {} }
+			return s
+		end)
+		local state = {
+			scope = scope, service_id = 'net-test', model = model,
+			hal = { speedtest_op = function() return op.never() end },
+			done_tx = done_tx, active_speedtests = {},
+			current_generation = { generation = 2 }, next_speedtest_id = 1,
+			now = function() return 100 end,
+		}
+		for n = 1, #ids do
+			assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+			assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+			eq(state.next_speedtest_id, n + 1, 'one launch per free slot')
+			local uplink_id, active = next(state.active_speedtests)
+			ok(active and next(state.active_speedtests, uplink_id) == nil, 'exactly one active speed test')
+			assert(wan_manager.handle_speedtest_done(state, {
+				uplink_id = uplink_id, generation = 2, speedtest_id = active.speedtest_id,
+				result = { ok = true, mbps = 10 },
+			}))
+		end
+		assert(wan_manager.reconcile_speedtests(state, 'speedtest_done'))
+		eq(state.next_speedtest_id, #ids + 1, 'fresh results must not relaunch')
+		for _, id in ipairs(ids) do eq(model:snapshot().wan_runtime.speedtests[id].state, 'ok') end
+	end)
+end
+
+function tests.test_offline_uplink_releases_slot_for_due_uplink_in_same_reconcile()
+	runfibers.run(function(scope)
+		local done_tx = mailbox.new(8, { full = 'reject_newest' })
+		local model = model_mod.new('net-test')
+		model:update(function(s)
+			s.generation = 2
+			s.wan = {
+				load_balancing = { speedtests = true, policy = 'balanced' },
+				configured_members = { a = { interface = 'a', metric = 1 }, b = { interface = 'b', metric = 1 } },
+			}
+			s.backhaul = { uplinks = {
+				a = { id = 'a', interface = 'a', state = 'online', usable = true,
+					path_address = { family = 'ipv4', address = '203.0.113.1' } },
+				b = { id = 'b', interface = 'b', state = 'offline', usable = false },
+			} }
+			s.wan_runtime = { uplinks = {}, live_weights = {}, speedtests = {
+				b = { state = 'running', generation = 2, id = 7 },
+			} }
+			return s
+		end)
+		local cancelled
+		local state = {
+			scope = scope, service_id = 'net-test', model = model,
+			hal = { speedtest_op = function() return op.never() end },
+			done_tx = done_tx,
+			active_speedtests = { b = { generation = 2, speedtest_id = 7,
+				handle = { cancel = function(_, why) cancelled = why end } } },
+			current_generation = { generation = 2 }, next_speedtest_id = 8,
+			now = function() return 100 end,
+		}
+		assert(wan_manager.reconcile_speedtests(state, 'observed_state'))
+		eq(cancelled, 'uplink_offline')
+		eq(state.active_speedtests.b, nil)
+		ok(state.active_speedtests.a, 'due uplink must launch once the offline test releases the slot')
+		eq(state.next_speedtest_id, 9)
+	end)
+end
+
 return tests

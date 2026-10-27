@@ -265,22 +265,25 @@ function M.reconcile_speedtests(state, reason)
 		return s
 	end)
 
+	-- Release tests on uplinks observed offline before choosing the next one to launch.
+	for i = 1, #uplinks do
+		local uplink = uplinks[i]
+		if not wan_policy.uplink_online(snap, uplink) and wan_policy.uplink_observed_status(snap, uplink) ~= nil then
+			local active = state.active_speedtests[uplink.uplink_id]
+			if active and active.handle and type(active.handle.cancel) == 'function' then
+				active.handle:cancel('uplink_offline')
+			end
+			state.active_speedtests[uplink.uplink_id] = nil
+		end
+	end
+
 	local speedtest_pending = false
 	for i = 1, #uplinks do
 		local uplink = uplinks[i]
 		local observed_status = wan_policy.uplink_observed_status(snap, uplink)
 		local online = wan_policy.uplink_online(snap, uplink)
 		if not online then
-			local skip_reason = 'not_online'
-			if observed_status == nil then
-				skip_reason = 'waiting_for_observation'
-			else
-				local active = state.active_speedtests[uplink.uplink_id]
-				if active and active.handle and type(active.handle.cancel) == 'function' then
-					active.handle:cancel('uplink_offline')
-				end
-				state.active_speedtests[uplink.uplink_id] = nil
-			end
+			local skip_reason = observed_status == nil and 'waiting_for_observation' or 'not_online'
 			mark_speedtest_skipped(state, uplink, generation, skip_reason)
 			report_speedtest_skip(state, skip_reason, reason, uplink, generation)
 		else
@@ -288,8 +291,12 @@ function M.reconcile_speedtests(state, reason)
 				{ generation = generation, now = now(state) })
 			if due then
 				speedtest_pending = true
-				local ok, err = start_speedtest_for_uplink(state, uplink)
-				if ok ~= true then return nil, err end
+				-- The HAL runs speed tests serially, but each caller deadline starts
+				-- at launch. Launch one at a time; completion reconciles the next.
+				if next(state.active_speedtests) == nil then
+					local ok, err = start_speedtest_for_uplink(state, uplink)
+					if ok ~= true then return nil, err end
+				end
 			else
 				if due_reason == 'running' then speedtest_pending = true end
 				mark_speedtest_skipped(state, uplink, generation, due_reason or 'not_due')
