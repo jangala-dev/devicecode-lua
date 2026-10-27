@@ -98,13 +98,18 @@ function M.run_op(req, opts)
 		-- A HEAD request establishes DNS/TCP/TLS without downloading a file.
 		-- The following GET reuses that connection but has its own short timeout.
 		local out, wrapper_code, err = collect(argv, deadline)
-		if not out or wrapper_code ~= 0 then return failure('speedtest_failed', err) end
+		if not out then return failure('speedtest_failed', err) end
 		local setup_code, setup_s, setup_exit = out:match('\nSETUP,(%d+),([%d%.]+),(%d+)\n')
 		local http_code, bytes, first_s, total_s, exit_code =
 			out:match('\nRESULT,(%d+),([%d%.]+),([%d%.]+),([%d%.]+),(%d+)\n')
 		setup_code, setup_s, setup_exit = tonumber(setup_code), tonumber(setup_s), tonumber(setup_exit)
 		exit_code = tonumber(exit_code)
 		http_code, bytes, first_s, total_s = tonumber(http_code), tonumber(bytes), tonumber(first_s), tonumber(total_s)
+		-- mwan3 < 2.11.16 always exits 0; 2.11.16 (OpenWrt 24.10) execs curl and
+		-- returns its status. Any other wrapper status is mwan3's own failure.
+		if wrapper_code ~= 0 and wrapper_code ~= (exit_code or setup_exit) then
+			return failure('speedtest_failed', 'mwan3 exit: ' .. tostring(wrapper_code))
+		end
 		if setup_exit ~= 0 or (setup_code ~= 200 and setup_code ~= 206) then
 			return failure(setup_exit == 28 and 'setup_timeout' or 'http_failed',
 				'setup HTTP: ' .. tostring(setup_code) .. '; curl exit: ' .. tostring(setup_exit))
@@ -124,7 +129,7 @@ function M.run_op(req, opts)
 			stop_reason = exit_code == 28 and 'duration' or bytes == limits.MAX_BYTES and 'byte_budget' or 'eof',
 			estimator = 'payload_average',
 		}
-		-- mwan3 exits zero even when curl fails; use the write-out exitcode.
+		-- Judge the download by curl's write-out exitcode, not the wrapper's.
 		-- curl 28 is the intentional GET deadline. Other partial-download errors
 		-- must not become successful measurements, even if some bytes arrived.
 		if exit_code ~= 0 and exit_code ~= 28 then
