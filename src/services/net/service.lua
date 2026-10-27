@@ -975,6 +975,15 @@ local function handle_speedtest_done(state, ev)
 				ok = rec.ok == true,
 				err = rec.err,
 				peak_mbps = mbps,
+				bytes = rec.bytes,
+				data_mib = rec.data_mib,
+				duration_s = rec.duration_s,
+				setup_s = rec.setup_s,
+				total_duration_s = rec.total_duration_s,
+				stop_reason = rec.stop_reason,
+				estimator = rec.estimator,
+				lower_bound = rec.lower_bound,
+				error_detail = rec.error_detail,
 				retry_delay_s = rec.retry_delay_s,
 				retry_after = rec.retry_after,
 				failure_count = rec.failure_count,
@@ -991,6 +1000,10 @@ local function handle_speedtest_done(state, ev)
 			local rok, rerr = schedule_speedtest_retry(state, tostring(ev.uplink_id or ''), ev.generation, delay_s, rec.err or 'speedtest_failed')
 			if rok ~= true then return nil, rerr end
 		end
+	end
+	if ok == true and err ~= 'stale' then
+		-- Speed tests run one at a time; start the next due uplink.
+		ok, err = reconcile_speedtests_if_ready(state, 'speedtest_done')
 	end
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)

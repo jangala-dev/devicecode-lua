@@ -1,19 +1,14 @@
--- services/hal/backends/network/providers/openwrt/speedtest.lua
--- HAL-side WAN speed test using `mwan3 use <iface> <cmd>`.
-
+-- Bounded WAN payload throughput, timed by curl rather than the Lua scheduler.
 local fibers = require 'fibers'
 local sleep = require 'fibers.sleep'
+local op = require 'fibers.op'
 local exec = require 'fibers.io.exec'
-local file = require 'fibers.io.file'
+local time = require 'fibers.utils.time'
+local limits = require 'shared.speedtest'
 
 local perform = fibers.perform
 local M = {}
-
 local DEFAULT_URL = 'https://proof.ovh.net/files/100Mb.dat'
-local HARD_MAX_DURATION_S = 1
-local DEFAULT_SAMPLE_INTERVAL_S = 0.06
-local DEFAULT_NO_IMPROVEMENT_SAMPLES = 2
-
 
 local function owned_process_flags()
 	local flags = { process_group = true }
@@ -23,136 +18,143 @@ local function owned_process_flags()
 	return flags
 end
 
-local function read_counter(path)
-	local f, err = file.open(path, 'r')
-	if not f then return nil, err end
-	local data, rerr = f:read_all()
-	f:close()
-	if rerr ~= nil then return nil, rerr end
-	local n = tonumber((tostring(data or ''):gsub('%s+', '')))
-	if not n then return nil, 'counter parse failed' end
-	return n, nil
+local function before_deadline(work, deadline)
+	return perform(op.named_choice({
+		work = work,
+		timeout = sleep.sleep_op(math.max(0, deadline - time.monotonic())),
+	}))
 end
 
-local function monotonic()
-	return fibers.now and fibers.now() or os.clock()
-end
-
-local function record_sample(state, mbps)
-	if mbps <= 0 then return false end
-	state.samples = state.samples + 1
-	if mbps > state.highest then
-		state.second_highest = state.highest
-		state.highest = mbps
-		state.consecutive_no_improvement = 0
-		return true
+local function collect(argv, deadline)
+	local spec = {
+		stdin = 'null', stdout = 'pipe', stderr = 'null', shutdown_grace = 0.2,
+		flags = owned_process_flags(),
+		env = { http_proxy = '', https_proxy = '', all_proxy = '', HTTP_PROXY = '', HTTPS_PROXY = '', ALL_PROXY = '' },
+	}
+	for i = 1, #argv do spec[i] = argv[i] end
+	local cmd = exec.command(spec)
+	local stream, err = cmd:stdout_stream()
+	if not stream then return nil, nil, err end
+	-- Only the mwan3 banner and curl's statistics are on stdout, never payload.
+	local which, out, count, read_err = before_deadline(stream:core_read_op({
+		min = 8192, max = 8192, eof_ok = true,
+	}), deadline)
+	local status, code
+	if which == 'work' and not read_err and (count or 0) < 8192 then
+		which, status, code = before_deadline(cmd:run_op(), deadline)
 	end
-	if mbps > state.second_highest then state.second_highest = mbps end
-	state.consecutive_no_improvement = state.consecutive_no_improvement + 1
-	return false
-end
-
-local function averaged_top_two(state)
-	if state.samples <= 0 then return 0 end
-	if state.samples == 1 or state.second_highest <= 0 then return state.highest end
-	return (state.highest + state.second_highest) / 2
+	perform(cmd:shutdown_op(0.2))
+	if which ~= 'work' then return nil, nil, 'speedtest_timeout' end
+	if read_err or (count or 0) >= 8192 then return nil, nil, read_err or 'invalid_output' end
+	if status ~= 'exited' then return nil, nil, 'download_process_failed' end
+	return out or '', code
 end
 
 function M.run_op(req, opts)
-	return fibers.run_scope_op(function(scope)
-		req = req or {}
-		opts = opts or {}
+	return fibers.run_scope_op(function()
+		req, opts = req or {}, opts or {}
 		local iface = req.interface
-		local dev = req.device or req.linux_interface or req.ifname
-		if type(iface) ~= 'string' or iface == '' then return { ok = false, err = 'speedtest interface required', backend = 'openwrt' } end
-		if type(dev) ~= 'string' or dev == '' then dev = iface end
-		local url = req.url or opts.url or DEFAULT_URL
-		local duration = tonumber(req.max_duration_s or opts.max_duration_s) or HARD_MAX_DURATION_S
-		if duration <= 0 or duration > HARD_MAX_DURATION_S then duration = HARD_MAX_DURATION_S end
-		local sample_s = tonumber(req.sample_interval_s or opts.sample_interval_s) or DEFAULT_SAMPLE_INTERVAL_S
-		if sample_s <= 0 then sample_s = DEFAULT_SAMPLE_INTERVAL_S end
-		local no_improvement_limit = tonumber(req.no_improvement_samples or opts.no_improvement_samples) or DEFAULT_NO_IMPROVEMENT_SAMPLES
-		no_improvement_limit = math.max(1, math.floor(no_improvement_limit))
-		local argv = { 'mwan3', 'use', iface, 'wget', '-O', '/dev/null', tostring(url) }
+		local dev = req.device or req.linux_interface or req.ifname or iface
+		local function failure(code, err)
+			return { ok = false, code = code, err = err or code, backend = 'openwrt', interface = iface, device = dev }
+		end
+		if type(iface) ~= 'string' or iface == '' then return failure('invalid_request', 'speedtest interface required') end
+		local duration = limits.duration(req.max_duration_s or opts.max_duration_s)
+		local url = tostring(req.url or opts.url or DEFAULT_URL)
+		-- mwan3 expands $* unquoted. Curl globbing is also disabled below.
+		if #url > 2048 or not url:match('^https?://') or url:find('[%s%z%[%]%*%?]') then
+			return failure('invalid_request', 'speedtest URL must be HTTP(S) without whitespace or glob characters')
+		end
+		local argv = {
+			'mwan3', 'use', iface, 'curl', '--disable', '--fail-early', '--globoff',
+			'--silent', '--show-error', '--fail', '--ipv4', '--http1.1',
+			'--head', '--max-time', tostring(limits.SETUP_S), '--output', '/dev/null',
+			'--write-out', 'SETUP,%{http_code},%{time_total},%{exitcode}\\n', '--url', url,
+			'--next', '--globoff', '--silent', '--show-error', '--fail', '--ipv4', '--http1.1',
+			'--range', '0-' .. tostring(limits.MAX_BYTES - 1), '--max-filesize', tostring(limits.MAX_BYTES),
+			'--max-time', tostring(duration), '--output', '/dev/null',
+			'--write-out', 'RESULT,%{http_code},%{size_download},%{time_starttransfer},%{time_total},%{exitcode}\\n',
+			'--url', url,
+		}
 		local run_cmd = opts.run_cmd or req.run_cmd
 		if type(run_cmd) == 'function' then
 			local ok, out, err = run_cmd(argv)
 			local mbps = tonumber(out)
-			if ok == true and mbps ~= nil then
+			if ok == true and mbps and mbps > 0 and mbps < math.huge then
 				return { ok = true, backend = 'openwrt', interface = iface, device = dev, mbps = mbps, peak_mbps = mbps }
 			end
-			return { ok = false, code = 'speedtest_failed', backend = 'openwrt', interface = iface, device = dev, err = tostring(err or out or 'speedtest failed') }
+			return failure('speedtest_failed', tostring(err or out or 'speedtest failed'))
 		end
-		local spec = {
-			stdin = 'null',
-			stdout = 'pipe',
-			stderr = 'null',
-			shutdown_grace = 0.2,
-			flags = owned_process_flags(),
+		local started_at = time.monotonic()
+		local deadline = started_at + limits.timeout(duration) - 0.2
+		-- Before 8.4, --max-filesize only checks advertised Content-Length and
+		-- cannot cap an unknown-length response whose server ignores Range.
+		local version, version_code = collect({'curl', '--disable', '--version'}, deadline)
+		local major, minor = tostring(version):match('^curl (%d+)%.(%d+)')
+		if version_code ~= 0 or not major or tonumber(major) < 8
+			or (tonumber(major) == 8 and tonumber(minor) < 4) then
+			return failure('curl_unsupported', 'speedtest requires curl >= 8.4 for a bounded download')
+		end
+		-- A HEAD request establishes DNS/TCP/TLS without downloading a file.
+		-- The following GET reuses that connection but has its own short timeout.
+		local out, wrapper_code, err = collect(argv, deadline)
+		if not out then return failure('speedtest_failed', err) end
+		local setup_code, setup_s, setup_exit = out:match('\nSETUP,(%d+),([%d%.]+),(%d+)\n')
+		local http_code, bytes, first_s, total_s, exit_code =
+			out:match('\nRESULT,(%d+),([%d%.]+),([%d%.]+),([%d%.]+),(%d+)\n')
+		setup_code, setup_s, setup_exit = tonumber(setup_code), tonumber(setup_s), tonumber(setup_exit)
+		exit_code = tonumber(exit_code)
+		http_code, bytes, first_s, total_s = tonumber(http_code), tonumber(bytes), tonumber(first_s), tonumber(total_s)
+		-- mwan3 < 2.11.16 always exits 0; 2.11.16 (OpenWrt 24.10) execs curl and
+		-- returns its status. Any other wrapper status is mwan3's own failure.
+		if wrapper_code ~= 0 and wrapper_code ~= (exit_code or setup_exit) then
+			return failure('speedtest_failed', 'mwan3 exit: ' .. tostring(wrapper_code))
+		end
+		if setup_exit ~= 0 or (setup_code ~= 200 and setup_code ~= 206) then
+			return failure(setup_exit == 28 and 'setup_timeout' or 'http_failed',
+				'setup HTTP: ' .. tostring(setup_code) .. '; curl exit: ' .. tostring(setup_exit))
+		end
+		if http_code ~= 200 and http_code ~= 206 then
+			return failure('http_failed', 'download HTTP: ' .. tostring(http_code))
+		end
+		if not exit_code or not bytes or not first_s or not total_s
+			or bytes > limits.MAX_BYTES or total_s < first_s then
+			return failure('invalid_output')
+		end
+		local elapsed = total_s - first_s
+		local result = {
+			backend = 'openwrt', interface = iface, device = dev, bytes = bytes,
+			data_mib = bytes / (1024 * 1024), duration_s = elapsed, setup_s = setup_s,
+			total_duration_s = time.monotonic() - started_at,
+			stop_reason = exit_code == 28 and 'duration' or bytes == limits.MAX_BYTES and 'byte_budget' or 'eof',
+			estimator = 'payload_average',
 		}
-		for i = 1, #argv do spec[i] = argv[i] end
-		local cmd = exec.command(spec)
-		local started, serr = cmd:stdout_stream()
-		if not started then return { ok = false, code = 'start_failed', err = serr or 'speedtest start failed', backend = 'openwrt' } end
-		local counter = '/sys/class/net/' .. tostring(dev) .. '/statistics/rx_bytes'
-		local start_b, berr = read_counter(counter)
-		if not start_b then
-			perform(cmd:shutdown_op(0.2))
-			return {
-				ok = false,
-				code = 'counter_unavailable',
-				err = 'counter read failed: ' .. tostring(berr or 'unknown'),
-				backend = 'openwrt',
-				interface = iface,
-				device = dev,
-				counter = counter,
-			}
+		-- Judge the download by curl's write-out exitcode, not the wrapper's.
+		-- curl 28 is the intentional GET deadline. Other partial-download errors
+		-- must not become successful measurements, even if some bytes arrived.
+		if exit_code ~= 0 and exit_code ~= 28 then
+			result.ok, result.code, result.err = false, 'speedtest_failed', 'curl exit: ' .. tostring(exit_code)
+		elseif bytes == limits.MAX_BYTES and elapsed < limits.MIN_MEASUREMENT_S then
+			-- A fast capped transfer is evidence of capacity, not a failed link.
+			-- Clamp the interval and label the estimate instead of starving its weight.
+			result.ok, result.lower_bound = true, true
+			result.estimator = 'payload_lower_bound'
+			result.mbps = bytes * 8 / (limits.MIN_MEASUREMENT_S * 1000000)
+			result.peak_mbps = result.mbps
+		elseif elapsed < limits.MIN_MEASUREMENT_S or bytes < limits.MIN_BYTES then
+			result.ok = false
+			result.code = bytes == limits.MAX_BYTES and 'insufficient_data_budget' or 'insufficient_data'
+			result.err = result.code
+		else
+			result.ok = true
+			result.mbps = bytes * 8 / (elapsed * 1000000)
+			result.peak_mbps = result.mbps -- compatibility; this is no longer a peak
 		end
-		local t0 = monotonic()
-		local prev_t, prev_b = t0, start_b
-		local samples = {
-			highest = 0,
-			second_highest = 0,
-			samples = 0,
-			consecutive_no_improvement = 0,
-		}
-		while (monotonic() - t0) < duration do
-			local remaining = duration - (monotonic() - t0)
-			if remaining <= 0 then break end
-			perform(sleep.sleep_op(math.min(sample_s, remaining)))
-			local t = monotonic()
-			local b = read_counter(counter)
-			if not b then break end
-			local dt = t - prev_t
-			local db = b - prev_b
-			if dt > 0 and db >= 0 then
-				local mbps = (db * 8) / (dt * 1000 * 1000)
-				record_sample(samples, mbps)
-			end
-			prev_t, prev_b = t, b
-			if samples.highest > 0 and samples.consecutive_no_improvement >= no_improvement_limit then break end
-		end
-		perform(cmd:shutdown_op(0.2))
-		local mbps = averaged_top_two(samples)
-		if mbps <= 0 and (prev_b - start_b) <= 0 then
-			return { ok = false, code = 'insufficient_data', backend = 'openwrt', interface = iface, device = dev, data_mib = 0, duration_s = prev_t - t0 }
-		end
-		return {
-			ok = true,
-			backend = 'openwrt',
-			interface = iface,
-			device = dev,
-			mbps = mbps,
-			peak_mbps = mbps,
-			raw_peak_mbps = samples.highest,
-			second_peak_mbps = samples.second_highest > 0 and samples.second_highest or nil,
-			sample_count = samples.samples,
-			data_mib = (prev_b - start_b) / (1024 * 1024),
-			bytes = (prev_b - start_b),
-			duration_s = prev_t - t0,
-		}
+		return result
 	end):wrap(function(status, _report, result)
-		if status ~= 'ok' then return { ok = false, code = 'worker_failed', err = tostring(result or status), backend = 'openwrt' } end
+		if status ~= 'ok' then
+			return { ok = false, code = 'worker_failed', err = tostring(result or status), backend = 'openwrt' }
+		end
 		return result
 	end)
 end

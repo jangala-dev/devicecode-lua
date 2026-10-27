@@ -2,13 +2,13 @@
 -- Pure WAN runtime policy for event-led speedtests and live weights.
 
 local tablex = require 'shared.table'
+local speedtest_limits = require 'shared.speedtest'
 
 local M = {}
 
 local DEFAULT_SPEEDTEST_INTERVAL_S = 6 * 60 * 60
 local DEFAULT_SPEEDTEST_RETRY_AFTER_S = 10
 local DEFAULT_SPEEDTEST_RETRY_MAX_S = 60 * 60
-local HARD_MAX_SPEEDTEST_DURATION_S = 1
 
 local function copy(v) return tablex.deep_copy(v) end
 
@@ -47,6 +47,11 @@ end
 
 function M.speedtest_retry_delay_s(snapshot, rec)
 	local cfg = runtime_opts(snapshot)
+	-- Repeating a successful but too-short capped download cannot improve it.
+	if rec and rec.err == 'insufficient_data_budget' then
+		local ttl = tonumber(cfg.interval_s or cfg.refresh_s or cfg.ttl_s or cfg.max_age_s)
+		return ttl and ttl > 0 and ttl or DEFAULT_SPEEDTEST_INTERVAL_S
+	end
 	local base = bounded_number(cfg.retry_after_s or cfg.retry_base_s or cfg.retry_s,
 		DEFAULT_SPEEDTEST_RETRY_AFTER_S, 1)
 	local cap = bounded_number(cfg.retry_max_s or cfg.max_retry_after_s or cfg.retry_cap_s,
@@ -121,8 +126,7 @@ function M.build_speedtest_request(snapshot, uplink_id, member)
 	local gsm = M.gsm_uplink_state(snapshot, member)
 	local gsm_linux = type(gsm) == 'table' and type(gsm.linux) == 'table' and gsm.linux or {}
 	local metric = tonumber(member.metric) or 1
-	local duration = tonumber(member.speedtest_duration_s) or HARD_MAX_SPEEDTEST_DURATION_S
-	if duration <= 0 or duration > HARD_MAX_SPEEDTEST_DURATION_S then duration = HARD_MAX_SPEEDTEST_DURATION_S end
+	local duration = speedtest_limits.duration(member.speedtest_duration_s)
 	return {
 		interface = iface_id,
 		device = member.device or member.linux_interface or member.ifname or endpoint.ifname or endpoint.device or endpoint.name or (iface and iface.device) or gsm_linux.ifname,
