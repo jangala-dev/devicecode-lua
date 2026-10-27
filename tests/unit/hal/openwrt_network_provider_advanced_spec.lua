@@ -397,6 +397,36 @@ function tests.test_speedtest_translates_semantic_device_to_linux_counter_device
 	end)
 end
 
+function tests.test_restart_interface_runs_ifup_on_generated_interface_name()
+	fibers.run(function()
+		local argv_seen
+		local provider = ok(provider_loader.new({ provider = 'openwrt', allow_fake_uci = true }, {}))
+		provider.shaper_run_cmd = function(argv)
+			argv_seen = argv
+			return true, nil
+		end
+
+		local result = fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' }))
+		eq(result.ok, false)
+		eq(argv_seen, nil, 'no command without a name context')
+
+		provider._last_name_ctx = ok(names.allocate({
+			interfaces = { modem_primary = { kind = 'direct', role = 'wan', endpoint = { ifname = 'wwan0' } } },
+			wan = { members = { modem_primary = { interface = 'modem_primary' } } },
+		}))
+		result = fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' }))
+		eq(result.ok, true)
+		eq(result.interface, 'mopri79e')
+		eq(argv_s(argv_seen), 'ifup mopri79e')
+
+		argv_seen = nil
+		result = fibers.perform(provider:restart_interface_op({ interface = 'modem_secondary' }))
+		eq(result.ok, false)
+		eq(argv_seen, nil, 'unknown interface must not run a command')
+		provider:terminate('test complete')
+	end)
+end
+
 
 function tests.test_segment_trunk_realises_segments_without_cfg_net_interfaces()
 	fibers.run(function()

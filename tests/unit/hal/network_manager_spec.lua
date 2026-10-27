@@ -35,6 +35,7 @@ function tests.test_network_backend_contract_requires_op_methods()
 		read_counters_op = function () return op.always({ ok = true }) end,
 		apply_live_weights_op = function () return op.always({ ok = true }) end,
 		apply_shaping_op = function () return op.always({ ok = true }) end,
+		restart_interface_op = function () return op.always({ ok = true }) end,
 		speedtest_op = function () return op.always({ ok = true }) end,
 		terminate = function () return true end,
 	}

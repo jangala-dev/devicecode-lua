@@ -154,4 +154,36 @@ function tests.test_live_weights_service_timeout_aborts_hal_bus_op_without_hidde
 	end)
 end
 
+function tests.test_interface_restart_reports_identity_and_passes_no_bus_timeout()
+	runfibers.run(function(scope)
+		local sleep = require 'fibers.sleep'
+		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })
+		local seen_req, seen_opts
+		local hal = {
+			restart_interface_op = function (_, request, opts)
+				seen_req, seen_opts = request, opts
+				return sleep.sleep_op(0.05):wrap(function ()
+					return { ok = true, backend = 'test', interface = request.interface }
+				end)
+			end,
+		}
+
+		local handle, err = wan_runtime.start_interface_restart({
+			lifetime_scope = scope,
+			done_tx = done_tx,
+			hal = hal,
+			interface = 'modem_primary',
+			role = 'primary',
+		})
+		ok(handle, err)
+		local ev = fibers.perform(done_rx:recv_op())
+		eq(ev.kind, 'net_interface_restart_done')
+		eq(ev.interface, 'modem_primary')
+		eq(ev.role, 'primary')
+		eq(seen_req.interface, 'modem_primary')
+		ok(seen_opts and seen_opts.timeout == false, 'HAL bus call should not receive hidden positive timeout')
+		eq(ev.result.ok, true)
+	end)
+end
+
 return tests

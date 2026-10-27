@@ -245,6 +245,228 @@ function tests.test_backhaul_publishes_configured_gsm_members_even_when_unrealis
 	end)
 end
 
+function tests.test_gsm_reconnect_restarts_member_interface()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+		local restarts = {}
+
+		local hal = success_hal(calls)
+		hal.restart_interface_op = function (_, req)
+			restarts[#restarts + 1] = req
+			return op.always({ ok = true, backend = 'test', interface = req.interface })
+		end
+
+		local c = cfg()
+		c.wan = {
+			members = {
+				modem_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
+			},
+		}
+
+		local function uplink(role, connected, ifname)
+			conn:retain(topics.gsm_uplink(role), { connected = connected, available = connected, linux = { ifname = ifname } })
+		end
+		local function wait_restarts(n, timeout)
+			local deadline = fibers.now() + timeout
+			while #restarts < n and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.01)) end
+		end
+
+		uplink('primary', true, 'wwan0')
+		retain_network_config_status(conn, 'available')
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = c,
+			rev = 33,
+			hal = hal,
+			observe = false,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		probe.wait_versioned_until('net running summary with primary modem member',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				return msg and msg.payload and msg.payload.state == 'running' and msg.payload or nil
+			end,
+			{ timeout = 0.5 })
+		view:close()
+
+		-- Already connected at startup, or staying connected: no restart.
+		uplink('primary', true, 'wwan0')
+		wait_restarts(1, 0.1)
+		eq(#restarts, 0, 'no restart without a reconnect')
+
+		-- Reconnect on the same wwan device: restart the member interface once.
+		uplink('primary', false, 'wwan0')
+		uplink('primary', true, 'wwan0')
+		wait_restarts(1, 0.5)
+		eq(#restarts, 1, 'one restart expected after reconnect')
+		eq(restarts[1].interface, 'modem_primary')
+
+		-- A role with no WAN member: nothing to restart.
+		uplink('secondary', false, 'wwan1')
+		uplink('secondary', true, 'wwan1')
+		wait_restarts(2, 0.1)
+		eq(#restarts, 1, 'no restart for a role without a WAN member')
+
+		-- Modem drops its wwan device and returns on the same one: the structural
+		-- applies may leave the config unchanged, so the restart is still needed.
+		uplink('primary', false, nil)
+		uplink('primary', true, 'wwan0')
+		wait_restarts(2, 0.5)
+		eq(#restarts, 2, 'restart expected when the reconnect also rebinds the device')
+		eq(restarts[2].interface, 'modem_primary')
+
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+function tests.test_gsm_reconnect_restart_retries_until_success_while_connected()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local reader = b:connect()
+		local calls = {}
+		local restarts = {}
+		local fail_next = 0
+
+		local hal = success_hal(calls)
+		hal.restart_interface_op = function (_, req)
+			restarts[#restarts + 1] = req
+			if fail_next > 0 then
+				fail_next = fail_next - 1
+				return op.always({ ok = false, err = 'timeout' })
+			end
+			return op.always({ ok = true, backend = 'test', interface = req.interface })
+		end
+
+		local c = cfg()
+		c.wan = {
+			members = {
+				modem_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
+			},
+		}
+
+		local function uplink(connected)
+			conn:retain(topics.gsm_uplink('primary'), { connected = connected, available = connected, linux = { ifname = 'wwan0' } })
+		end
+		local function wait_restarts(n, timeout)
+			local deadline = fibers.now() + timeout
+			while #restarts < n and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.01)) end
+		end
+
+		uplink(true)
+		retain_network_config_status(conn, 'available')
+		local child = start_service(scope, conn, {
+			conn = conn,
+			config = c,
+			rev = 34,
+			hal = hal,
+			observe = false,
+			interface_restart_retry_s = 0.02,
+		})
+
+		local view = reader:retained_view(topics.summary())
+		probe.wait_versioned_until('net running summary for restart retry',
+			function () return view:version() end,
+			function (seen) return view:changed_op(seen) end,
+			function ()
+				local msg = view:get(topics.summary())
+				return msg and msg.payload and msg.payload.state == 'running' and msg.payload or nil
+			end,
+			{ timeout = 0.5 })
+		view:close()
+
+		-- First attempt fails (e.g. HAL dispatch timeout behind an apply); the retry succeeds.
+		fail_next = 1
+		uplink(false)
+		uplink(true)
+		wait_restarts(2, 0.5)
+		eq(#restarts, 2, 'failed restart should be retried')
+		wait_restarts(3, 0.1)
+		eq(#restarts, 2, 'no further restarts after success')
+
+		-- Modem disconnects before the retry is due: the repair is dropped.
+		fail_next = 1
+		uplink(false)
+		uplink(true)
+		wait_restarts(3, 0.5)
+		uplink(false)
+		wait_restarts(4, 0.1)
+		eq(#restarts, 3, 'no retry once the modem is disconnected')
+
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
+function tests.test_gsm_restart_retry_dropped_when_config_removes_member()
+	fibers.run(function (scope)
+		local b = busmod.new()
+		local conn = b:connect()
+		local writer = b:connect()
+		local reader = b:connect()
+		local calls = {}
+		local restarts = {}
+
+		local hal = success_hal(calls)
+		hal.restart_interface_op = function (_, req)
+			restarts[#restarts + 1] = req
+			return op.always({ ok = false, err = 'timeout' })
+		end
+
+		local c = cfg()
+		c.wan = {
+			members = {
+				modem_primary = { interface = 'modem_primary', source = { kind = 'gsm-uplink', id = 'primary' } },
+			},
+		}
+		local function uplink(connected)
+			conn:retain(topics.gsm_uplink('primary'), { connected = connected, available = connected, linux = { ifname = 'wwan0' } })
+		end
+		local function wait_running(rev)
+			local view = reader:retained_view(topics.summary())
+			probe.wait_versioned_until('net running config rev ' .. rev,
+				function () return view:version() end,
+				function (seen) return view:changed_op(seen) end,
+				function ()
+					local msg = view:get(topics.summary())
+					local payload = msg and msg.payload
+					return payload and payload.state == 'running' and payload.config and payload.config.rev == rev
+						and payload or nil
+				end,
+				{ timeout = 0.5 })
+			view:close()
+		end
+
+		uplink(true)
+		retain_network_config_status(conn, 'available')
+		local child = start_service(scope, conn, { conn = conn, hal = hal, observe = false, interface_restart_retry_s = 0.2 })
+		writer:retain(topics.config(), { rev = 1, data = c })
+		wait_running(1)
+
+		uplink(false)
+		uplink(true)
+		local deadline = fibers.now() + 0.5
+		while #restarts < 1 and fibers.now() < deadline do fibers.perform(sleep.sleep_op(0.01)) end
+		eq(#restarts, 1, 'reconnect should attempt a restart')
+
+		-- Before the retry is due, config drops the cellular WAN member.
+		writer:retain(topics.config(), { rev = 2, data = cfg() })
+		wait_running(2)
+		fibers.perform(sleep.sleep_op(0.3))
+		eq(#restarts, 1, 'retry must not run once the interface is no longer the role member')
+
+		child:cancel('test complete')
+		fibers.perform(child:join_op())
+	end)
+end
+
 function tests.test_counter_metrics_publish_generic_topics_with_member_namespaces()
 	fibers.run(function (scope)
 		local b = busmod.new()
