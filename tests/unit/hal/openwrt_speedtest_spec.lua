@@ -159,6 +159,28 @@ function T.test_get_deadline_uses_partial_payload_and_includes_idle_time()
 	end)
 end
 
+-- mwan3 2.11.16 (OpenWrt 24.10) execs curl, so the wrapper returns curl's status.
+function T.test_get_deadline_is_measured_when_mwan_returns_curl_status()
+	fixture({output="banner\nSETUP,200,0.1\nRESULT,206,65536,0.1,1\n",exit_code=28,wrapper_exit_code=28}, function()
+		local r=run()
+		assert(r.ok and r.stop_reason=='duration' and r.bytes==65536)
+	end)
+end
+
+function T.test_setup_timeout_is_reported_when_mwan_returns_curl_status()
+	fixture({output="banner\nSETUP,000,5.0\n",setup_exit_code=28,wrapper_exit_code=28}, function()
+		local r=run()
+		assert(not r.ok and r.code=='setup_timeout')
+	end)
+end
+
+function T.test_mwan_failure_is_not_a_speed_measurement()
+	fixture({wrapper_exit_code=1}, function()
+		local r=run()
+		assert(not r.ok and r.code=='speedtest_failed' and r.err=='mwan3 exit: 1')
+	end)
+end
+
 function T.test_old_curl_cannot_start_unbounded_unknown_length_download()
 	fixture({version='curl 8.3.0 test\n'}, function(s)
 		local r=run()
