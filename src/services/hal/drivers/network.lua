@@ -22,6 +22,7 @@ function Driver:probe_link_op(req) return self.provider:probe_link_op(req) end
 function Driver:read_counters_op(req) return self.provider:read_counters_op(req) end
 function Driver:apply_live_weights_op(req) return self.provider:apply_live_weights_op(req) end
 function Driver:apply_shaping_op(req) return self.provider:apply_shaping_op(req) end
+function Driver:restart_interface_op(req) return self.provider:restart_interface_op(req) end
 function Driver:speedtest_op(req) return self.provider:speedtest_op(req) end
 
 function Driver:terminate(reason)

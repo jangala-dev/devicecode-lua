@@ -100,6 +100,20 @@ function M.realise(base_intent, sources, opts)
 	return intent
 end
 
+-- Interfaces realised for WAN members fed by the given GSM uplink role.
+function M.gsm_member_interfaces(intent, sources, role)
+	local realised = M.realise(intent, sources or {})
+	local out = {}
+	for _, id in ipairs(sorted_keys(realised.wan and realised.wan.members)) do
+		local m = realised.wan.members[id]
+		local src = m.source
+		if type(src) == 'table' and src.kind == 'gsm-uplink' and src.id == role then
+			out[#out + 1] = m.interface
+		end
+	end
+	return out
+end
+
 function M.realised_fingerprint(intent, sources)
 	local realised = M.realise(intent, sources or {})
 	local parts = {}

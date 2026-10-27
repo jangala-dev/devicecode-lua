@@ -16,6 +16,7 @@ local REQUIRED_OPS = {
 	'read_counters_op',
 	'apply_live_weights_op',
 	'apply_shaping_op',
+	'restart_interface_op',
 	'speedtest_op',
 }
 

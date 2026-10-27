@@ -69,6 +69,7 @@ local CONFIG_METHODS = {
 	apply = function (_opts, req) return driver_method_op('apply', req) end,
 	apply_live_weights = function (_opts, req) return driver_method_op('apply_live_weights', req) end,
 	apply_shaping = function (_opts, req) return driver_method_op('apply_shaping', req) end,
+	restart_interface = function (_opts, req) return driver_method_op('restart_interface', req) end,
 }
 
 local STATE_METHODS = {

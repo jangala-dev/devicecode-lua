@@ -120,4 +120,45 @@ function M.start_live_weights(spec)
 	}
 end
 
+function M.start_interface_restart(spec)
+	if type(spec) ~= 'table' then return nil, 'interface restart spec required' end
+	local lifetime_scope = spec.lifetime_scope
+	local hal = spec.hal
+	local done_tx = spec.done_tx
+	if not lifetime_scope then return nil, 'lifetime_scope required' end
+	if not hal then return nil, 'hal client required' end
+	if not done_tx then return nil, 'done_tx required' end
+	if type(spec.interface) ~= 'string' or spec.interface == '' then return nil, 'interface required' end
+
+	local request = { interface = spec.interface }
+
+	return scoped_work.start {
+		lifetime_scope = lifetime_scope,
+		reaper_scope = spec.reaper_scope or lifetime_scope,
+		report_scope = spec.report_scope or lifetime_scope,
+		identity = {
+			kind = 'net_interface_restart_done',
+			service_id = spec.service_id or 'net',
+			interface = spec.interface,
+			role = spec.role,
+			restart_id = spec.restart_id,
+		},
+		run = function ()
+			-- No default timeout: network-config requests run one at a time, so this
+			-- may wait behind an apply of any length before it starts.
+			local result = fibers.perform(with_timeout(
+				hal:restart_interface_op(request, { timeout = false }),
+				spec.timeout_s,
+				'net_interface_restart'
+			))
+			return {
+				request = request,
+				result = result,
+				ok = result and result.ok == true,
+			}
+		end,
+		report = report_to(done_tx, 'net_interface_restart_completion_report_failed'),
+	}
+end
+
 return M

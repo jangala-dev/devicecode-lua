@@ -2462,6 +2462,24 @@ function Provider:apply_shaping_op(req)
 	end)
 end
 
+function Provider:restart_interface_op(req)
+	return fibers.run_scope_op(function()
+		if self.terminated then return { ok = false, err = 'provider terminated', backend = 'openwrt' } end
+		local id = req and req.interface
+		-- Look up the name generated at the last apply; never allocate a new one here.
+		local names = self._last_name_ctx and self._last_name_ctx:snapshot().names.logical_interface or {}
+		local name = id ~= nil and names[tostring(id)] or nil
+		if not name then return { ok = false, err = 'unknown interface ' .. tostring(id), backend = 'openwrt' } end
+		-- ifup takes the netifd interface down and up, so its DHCP client starts a new lease.
+		local ok, err = run_provider_command(self, { 'ifup', name })
+		if not ok then return { ok = false, err = err, backend = 'openwrt', interface = name } end
+		return { ok = true, backend = 'openwrt', interface = name }
+	end):wrap(function(status, _report, result)
+		if status ~= 'ok' then return { ok = false, err = tostring(result or status), backend = 'openwrt' } end
+		return result
+	end)
+end
+
 function Provider:speedtest_op(req)
 	return speedtest_mod.run_op(translate_speedtest_req(req or {}, self._last_name_ctx), { run_cmd = self.speedtest_run_cmd })
 end
