@@ -123,6 +123,86 @@ function tests.test_reconcile_applies_live_weights_when_speedtests_are_fresh()
 	end)
 end
 
+-- Strict failover relies on this: with speed tests off, live weights never
+-- replace mwan3's metric-ordered policy chain, even with usable results.
+function tests.test_reconcile_applies_no_live_weights_when_speedtests_are_disabled()
+	runfibers.run(function(scope)
+		local sleep = require 'fibers.sleep'
+		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })
+		local wan_key = 'v1|wan|wan||host-multiwan||ipv4|203.0.113.10|'
+		local modem_key = 'v1|modem|modem||host-multiwan||ipv4|10.1.2.3|'
+		local applied = false
+		local hal = {
+			apply_live_weights_op = function()
+				applied = true
+				return op.always({ ok = true, changed = true, applied = true })
+			end,
+		}
+		local model = model_mod.new('net-test')
+		model:update(function(s)
+			s.generation = 2
+			s.wan = {
+				load_balancing = { speedtests = { enabled = false }, policy = 'balanced' },
+				configured_members = {
+					wan = { interface = 'wan', metric = 1 },
+					modem = { interface = 'modem', metric = 2 },
+				},
+			}
+			s.observed.snapshot = {
+				multiwan = {
+					interfaces_by_semantic = {
+						wan = { interface = 'wan', state = 'online', online = true, usable = true },
+						modem = { interface = 'modem', state = 'online', online = true, usable = true },
+					},
+				},
+			}
+			s.backhaul = {
+				uplinks = {
+					wan = { id = 'wan', interface = 'wan', state = 'online', usable = true,
+						path_address = { family = 'ipv4', address = '203.0.113.10' } },
+					modem = { id = 'modem', interface = 'modem', state = 'online', usable = true,
+						path_address = { family = 'ipv4', address = '10.1.2.3' } },
+				},
+			}
+			s.wan_runtime = {
+				uplinks = {},
+				speedtests = {
+					wan = { state = 'done', generation = 2, ok = true, peak_mbps = 80, last_success_mbps = 80,
+						completed_at = 10, measurement_key = wan_key,
+						last_success = { mbps = 80, completed_at = 10, measurement_key = wan_key } },
+					modem = { state = 'done', generation = 2, ok = true, peak_mbps = 20, last_success_mbps = 20,
+						completed_at = 20, measurement_key = modem_key,
+						last_success = { mbps = 20, completed_at = 20, measurement_key = modem_key } },
+				},
+				live_weights = {},
+			}
+			return s
+		end)
+		local state = {
+			scope = scope,
+			service_id = 'net-test',
+			model = model,
+			hal = hal,
+			done_tx = done_tx,
+			active_speedtests = {},
+			active_weight_apply = nil,
+			next_speedtest_id = 1,
+			next_weight_apply_id = 1,
+			current_generation = { generation = 2 },
+			now = function() return 30 end,
+		}
+		local ok_apply, err = wan_manager.reconcile_speedtests(state, 'observed_state')
+		ok(ok_apply, err)
+		local which = fibers.perform(op.named_choice({
+			done = done_rx:recv_op(),
+			idle = sleep.sleep_op(0.05),
+		}))
+		eq(which, 'idle', 'no live weight work should start')
+		eq(applied, false, 'live weights must not be applied')
+		eq(state.next_speedtest_id, 1, 'no speed test should start')
+	end)
+end
+
 function tests.test_live_weights_service_timeout_aborts_hal_bus_op_without_hidden_bus_timeout()
 	runfibers.run(function(scope)
 		local done_tx, done_rx = mailbox.new(8, { full = 'reject_newest' })

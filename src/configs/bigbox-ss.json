@@ -494,14 +494,14 @@
           "wan": {
             "interface": "wan",
             "weight": 1,
-            "dynamic_weight": true,
+            "dynamic_weight": false,
             "family": "ipv4",
             "mwan_metric": 1
           },
           "modem_primary": {
             "interface": "modem_primary",
             "weight": 1,
-            "dynamic_weight": true,
+            "dynamic_weight": false,
             "family": "ipv4",
             "source": {
               "kind": "gsm-uplink",
@@ -512,7 +512,7 @@
           "modem_secondary": {
             "interface": "modem_secondary",
             "weight": 1,
-            "dynamic_weight": true,
+            "dynamic_weight": false,
             "family": "ipv4",
             "source": {
               "kind": "gsm-uplink",
@@ -550,7 +550,7 @@
             "proto": "tcp",
             "dest_port": "443",
             "policy": "balanced",
-            "sticky": true
+            "sticky": false
           }
         }
       },
