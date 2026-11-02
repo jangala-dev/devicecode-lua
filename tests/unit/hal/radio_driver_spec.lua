@@ -8,6 +8,38 @@ local function eq(a, b, msg)
 	end
 end
 
+function tests.test_set_channels_htmodes_match_openwrt()
+	local cap_args = require 'services.hal.types.capability_args'
+	local radio = require 'services.hal.drivers.radio'
+
+	-- Accepted as given: the forms OpenWrt's mac80211.sh understands.
+	for _, mode in ipairs({ 'HE20', 'HE40', 'HE80', 'HE160', 'HT20', 'HT40+', 'HT40-',
+		'VHT20', 'VHT40', 'VHT80', 'VHT160' }) do
+		local opts, err = cap_args.new.RadioSetChannelsOpts('5g', 36, mode)
+		eq(err, '', mode .. ' should be accepted')
+		eq(opts.htmode, mode)
+	end
+
+	-- HE40±/VHT40± would silently run at 20 MHz; they map to HE40/VHT40.
+	local mapped = { ['HE40+'] = 'HE40', ['HE40-'] = 'HE40', ['VHT40+'] = 'VHT40', ['VHT40-'] = 'VHT40' }
+	for given, want in pairs(mapped) do
+		local opts, err = cap_args.new.RadioSetChannelsOpts('5g', 36, given)
+		eq(err, '', given .. ' should be accepted')
+		eq(opts.htmode, want, given .. ' should map')
+	end
+
+	for _, mode in ipairs({ 'HT40', 'HE40x', 'EHT40', '' }) do
+		local opts = cap_args.new.RadioSetChannelsOpts('5g', 36, mode)
+		eq(opts, nil, mode .. ' should be rejected')
+	end
+
+	-- The driver stages the mapped value, also for a plain request table.
+	local driver = setmetatable({ id = 'radio1', staged = {} }, radio.Driver)
+	local ok, reason = driver:set_channels({ band = '5g', channel = 100, htmode = 'HE40+' })
+	eq(ok, true, tostring(reason))
+	eq(driver.staged.htmode, 'HE40')
+end
+
 function tests.test_stats_loop_stops_when_client_monitor_cannot_start()
 	local channel = require 'fibers.channel'
 	local runfibers = require 'tests.support.run_fibers'
