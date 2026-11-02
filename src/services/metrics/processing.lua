@@ -203,6 +203,9 @@ function DeltaValue:run(value, state)
         return nil, false, 'Value must be a number'
     end
     local difference = value - state.last_val
+    -- A counter lower than before was reset (interface restart, wifi reload):
+    -- it counted up from zero, so the new value is the change.
+    if difference < 0 then difference = value end
     state.curr_val = value
     return difference, false, nil
 end

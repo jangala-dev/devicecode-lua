@@ -40,6 +40,8 @@ local function is_list(t)
     return true
 end
 
+-- Only for fields the kernel reports as signed 32-bit (txpower, channel, noise,
+-- signal). Byte and packet counters are 64-bit and must be passed through as is.
 local function fix_underflow(n)
     if type(n) == 'number' and n > INT32_MAX then
         return n - 4294967296
@@ -384,7 +386,7 @@ local function tick_iface(emit_ch, id, backend, iface_name, connected)
         if sval ~= nil then
             emit_state(emit_ch, id, 'iface_' .. stat, {
                 interface = iface_name,
-                value     = fix_underflow(sval),
+                value     = sval,
             })
         end
     end
@@ -404,14 +406,14 @@ local function tick_iface(emit_ch, id, backend, iface_name, connected)
                     emit_state(emit_ch, id, 'client_tx_bytes', {
                         mac       = mac,
                         interface = iface_name,
-                        value     = fix_underflow(sta.tx_bytes),
+                        value     = sta.tx_bytes,
                     })
                 end
                 if sta.rx_bytes ~= nil then
                     emit_state(emit_ch, id, 'client_rx_bytes', {
                         mac       = mac,
                         interface = iface_name,
-                        value     = fix_underflow(sta.rx_bytes),
+                        value     = sta.rx_bytes,
                     })
                 end
             end
@@ -419,34 +421,110 @@ local function tick_iface(emit_ch, id, backend, iface_name, connected)
     end
 end
 
----Emit stats for every currently-tracked interface.
-local function on_tick(emit_ch, id, backend, interfaces_set, connected)
-    for iface_name in pairs(interfaces_set) do
-        tick_iface(emit_ch, id, backend, iface_name, connected)
+---Retain the full connected set (and any DHCP hostnames found) as state
+---'clients', so a consumer that (re)subscribes gets the current clients.
+local function emit_clients(emit_ch, id, connected, hostnames)
+    local interfaces, names = {}, {}
+    for iface, macs in pairs(connected) do
+        local list = {}
+        for mac in pairs(macs) do
+            list[#list + 1] = mac
+            names[mac] = hostnames[mac]
+        end
+        table.sort(list)
+        interfaces[iface] = list
     end
+    emit_state(emit_ch, id, 'clients', { interfaces = interfaces, hostnames = names })
 end
 
----Update connected-station bookkeeping and emit a client_event.
-local function on_client_event(emit_ch, id, connected, ev)
-    if not ev then return end
-    local mac   = ev.mac
-    local iface = ev.interface
-
+---Mark a client connected or disconnected; emit a client_event only when
+---that changes the connected set.
+---@return boolean changed
+local function set_client(emit_ch, id, connected, iface, mac, added)
+    added = added == true
     if not connected[iface] then connected[iface] = {} end
-
-    if ev.added then
-        connected[iface][mac] = true
-    else
-        connected[iface][mac] = nil
-    end
-
+    if (connected[iface][mac] == true) == added then return false end
+    connected[iface][mac] = added or nil
 
     emit_event(emit_ch, id, 'client_event', {
         mac       = mac,
-        connected = ev.added,
+        connected = added,
         interface = iface,
         timestamp = os.time(),
     })
+    return true
+end
+
+---Bring one interface's connected set in line with its station list, which
+---catches missed events and clients that left during a reconfigure.
+---@return boolean changed
+local function sync_iface_clients(emit_ch, id, backend, connected, iface)
+    local macs, err = backend:get_connected_macs(iface)
+    if err and err ~= '' then return false end -- keep the set rather than drop every client
+    local present, changed = {}, false
+    for _, mac in ipairs(macs) do
+        present[mac] = true
+        changed = set_client(emit_ch, id, connected, iface, mac, true) or changed
+    end
+    for mac in pairs(connected[iface] or {}) do
+        if not present[mac] then
+            changed = set_client(emit_ch, id, connected, iface, mac, false) or changed
+        end
+    end
+    return changed
+end
+
+---Look up DHCP hostnames for connected clients that have none yet.
+---@return boolean changed
+local function update_hostnames(backend, connected, hostnames)
+    local present, missing = {}, false
+    for _, macs in pairs(connected) do
+        for mac in pairs(macs) do
+            present[mac] = true
+            if not hostnames[mac] then missing = true end
+        end
+    end
+    local changed = false
+    for mac in pairs(hostnames) do
+        if not present[mac] then hostnames[mac] = nil end
+    end
+    if not missing or type(backend.get_dhcp_hostnames) ~= 'function' then return changed end
+    local leases = backend:get_dhcp_hostnames()
+    if type(leases) ~= 'table' then return changed end
+    for mac in pairs(present) do
+        if not hostnames[mac] and type(leases[mac]) == 'string' then
+            hostnames[mac] = leases[mac]
+            changed = true
+        end
+    end
+    return changed
+end
+
+---Reconcile clients and emit stats for every currently-tracked interface.
+local function on_tick(emit_ch, id, backend, interfaces_set, connected, hostnames)
+    local changed = false
+    for iface, macs in pairs(connected) do
+        if not interfaces_set[iface] then
+            for mac in pairs(macs) do
+                changed = set_client(emit_ch, id, connected, iface, mac, false) or changed
+            end
+            connected[iface] = nil
+        end
+    end
+    for iface_name in pairs(interfaces_set) do
+        changed = sync_iface_clients(emit_ch, id, backend, connected, iface_name) or changed
+        tick_iface(emit_ch, id, backend, iface_name, connected)
+    end
+    changed = update_hostnames(backend, connected, hostnames) or changed
+    if changed then emit_clients(emit_ch, id, connected, hostnames) end
+end
+
+---Apply a client monitor event.
+local function on_client_event(emit_ch, id, connected, hostnames, ev)
+    if not ev then return end
+    if set_client(emit_ch, id, connected, ev.interface, ev.mac, ev.added) then
+        emit_clients(emit_ch, id, connected, hostnames)
+    end
 end
 
 ------------------------------------------------------------------------
@@ -457,8 +535,11 @@ function RadioDriver:stats_loop()
     local emit_ch        = self.cap_emit_ch
     local id             = self.id
     local report_period  = DEFAULT_REPORT_PERIOD
+    -- Absolute deadline: client events must not push the next report back.
+    local next_report_at = fibers.now() + report_period
     local backend        = self.backend
     local connected      = {}
+    local hostnames      = {}
     local interfaces_set = {}
 
     local ok, err = backend:start_client_monitor()
@@ -479,9 +560,8 @@ function RadioDriver:stats_loop()
         if op == 'add' then
             interfaces_set[name] = true
             -- Seed connected set with any clients already associated before startup
-            local macs, _ = backend:get_connected_macs(name)
-            for _, mac in ipairs(macs) do
-                on_client_event(emit_ch, id, connected, { mac = mac, interface = name, added = true })
+            if sync_iface_clients(emit_ch, id, backend, connected, name) then
+                emit_clients(emit_ch, id, connected, hostnames)
             end
         elseif op == 'remove' then
             interfaces_set[name] = nil
@@ -494,7 +574,7 @@ function RadioDriver:stats_loop()
         local name, val, choice_err = fibers.perform(fibers.named_choice({
             client_event = backend:watch_clients_op(),
             iface_update = self.iface_update_ch:get_op(),
-            tick         = sleep.sleep_op(report_period),
+            tick         = sleep.sleep_until_op(next_report_at),
             new_period   = self.report_period_ch:get_op(),
             cancel       = fibers.current_scope():cancel_op(),
         }))
@@ -502,7 +582,8 @@ function RadioDriver:stats_loop()
         if name == 'cancel' then
             break
         elseif name == 'new_period' then
-            report_period = val
+            report_period  = val
+            next_report_at = math.min(next_report_at, fibers.now() + report_period)
         elseif name == 'iface_update' then
             update_interfaces(val.op, val.name)
         elseif name == 'client_event' then
@@ -514,10 +595,15 @@ function RadioDriver:stats_loop()
                 })
                 break
             elseif interfaces_set[val.interface] then
-                on_client_event(emit_ch, id, connected, val)
+                on_client_event(emit_ch, id, connected, hostnames, val)
             end
         elseif name == 'tick' then
-            on_tick(emit_ch, id, backend, interfaces_set, connected)
+            on_tick(emit_ch, id, backend, interfaces_set, connected, hostnames)
+            -- Keep the cadence; skip intervals missed while the tick ran late.
+            local tnow = fibers.now()
+            repeat
+                next_report_at = next_report_at + report_period
+            until next_report_at > tnow
         end
     end
 

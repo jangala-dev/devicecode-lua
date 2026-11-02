@@ -166,11 +166,13 @@ Rollback is not called by the service on error; the radio driver's staged state 
 
 ## Session Management
 
-Client association and disassociation events arrive on `{'cap', 'radio', id, 'event'}`. The wifi service is responsible for:
+Each radio's connected clients arrive as the retained state `{'cap', 'radio', id, 'state', 'clients'}`: MACs per interface, plus any DHCP hostnames. The wifi service reconciles its sessions with that set:
 
-1. **MAC hashing** — raw MAC addresses are never forwarded to the observability bus. Each MAC is hashed using `gen.userid(mac)` to produce a stable, anonymous user identifier.
-2. **Session tracking** — on association, a new session ID is generated via `gen.gen_session_id()` and a `session_start` record is emitted. On disassociation, a `session_end` record is emitted with the same session ID.
-3. **Published session events** — emitted to the specific metric topic for the event type: `{'obs', 'v1', 'wifi', 'metric', 'session_start'}` and `{'obs', 'v1', 'wifi', 'metric', 'session_end'}`. Each record includes fields `user_id`, `session_id`, `radio`, and `timestamp`.
+1. **MAC hashing** — raw MAC addresses are never forwarded to the observability bus. Each MAC is hashed using `gen.userid(mac, user_salt)` to produce a stable, anonymous user identifier.
+2. **Session tracking** — a MAC in the set without a session gets a new session ID (`gen.gen_session_id()`) and a `session_start` record. A session whose MAC has left the set gets a `session_end` record. A hostname is sent once per session, when it is first known.
+3. **Published session records** — published (not retained) on the metric topics `{'obs', 'v1', 'wifi', 'metric', 'session_start' | 'session_end' | 'hostname'}`. The namespace is `wifi.clients.<user_id>.sessions.<session_id>.<stat>`, and the value is the timestamp (or the hostname).
+4. **Continuity** — the session table for each radio is held by the service, not by the per-radio loop. A reconfigure restarts the loop, and the retained state lets it carry on with the same sessions. Removing a radio ends its sessions.
+5. **Client counts** — `num_sta` per interface is the number of MACs on that interface; per radio, each MAC is counted once. The service keeps each radio's count and publishes their sum as `wifi.num_sta`; removing a radio drops it from the sum.
 
 The radio driver itself has no knowledge of sessions or MAC hashing — it emits raw events and the wifi service applies the anonymisation and session logic.
 
@@ -184,6 +186,7 @@ All stats and events are forwarded to `obs/v1/wifi/metric/<name>` topics, matchi
 | `{'obs', 'v1', 'wifi', 'metric', <name>}`           | Named stat or event from a radio (e.g. `num_sta`, `iface_rx_bytes`, `client_signal`) |
 | `{'obs', 'v1', 'wifi', 'metric', 'session_start'}`  | Anonymised session start record (MAC hashed to `user_id`)       |
 | `{'obs', 'v1', 'wifi', 'metric', 'session_end'}`    | Anonymised session end record (MAC hashed to `user_id`)         |
+| `{'obs', 'v1', 'wifi', 'metric', 'hostname'}`       | Client hostname from DHCP leases, per session                   |
 
 ## Service Flow
 
@@ -212,20 +215,14 @@ flowchart TD
 
 ### Stats forwarding loop (per radio)
 
-Runs in child scope, subscribes to `{'cap', 'radio', id, 'state', '+'}` and `{'cap', 'radio', id, 'event', '+'}`:
+Runs in child scope, subscribes to `{'cap', 'radio', id, 'state', '+'}`:
 
-1. On `state/<name>` message: forward payload to `{'obs', 'v1', 'wifi', 'metric', name}`.
-2. On `event/client_event` message (association):
-   - Hash MAC via `gen.userid(mac)` → `user_id`.
-   - Generate session ID via `gen.gen_session_id()` → `session_id`.
-   - Store `(mac → session_id)` in per-radio session table.
-   - Publish `session_start` record to `{'obs', 'v1', 'wifi', 'metric', 'session_start'}`.
-3. On `event/client_event` message (disassociation):
-   - Look up `session_id` from per-radio session table.
-   - Publish `session_end` record to `{'obs', 'v1', 'wifi', 'metric', 'session_end'}`.
-   - Remove entry from session table.
-4. On other `event/<name>` messages: forward payload to `{'obs', 'v1', 'wifi', 'metric', name}`.
-5. On scope cancellation: exit loop.
+1. On `state/clients`: reconcile sessions and publish `num_sta` (see Session Management).
+2. On `state/iface_<name>`: forward to `{'obs', 'v1', 'wifi', 'metric', name}` under the radio/interface namespace.
+3. On `state/client_<name>`: forward under the client's session namespace, if the client has a session.
+4. On scope cancellation: exit loop. Open sessions are kept for the next loop.
+
+A radio's `report_period` falls back to the service-level `report_period`, then to 60 seconds.
 
 ## Architecture
 
