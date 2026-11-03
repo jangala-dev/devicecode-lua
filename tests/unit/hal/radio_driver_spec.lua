@@ -166,6 +166,9 @@ function tests.test_stats_loop_tracks_clients_once_and_retains_the_set()
 		local h = start_stats_loop(scope)
 		h.stations.radio0_i0 = { 'aa' }
 		h.driver.iface_update_ch:put({ op = 'add', name = 'radio0_i0' })
+		-- Let the interface register first: the loop picks among ready inputs at
+		-- random and ignores events for interfaces it does not track yet.
+		sleep.sleep(0.005)
 		h.events:put({ mac = 'aa', interface = 'radio0_i0', added = true }) -- duplicate of the seed
 		h.events:put({ mac = 'bb', interface = 'radio0_i0', added = true })
 		sleep.sleep(0.01)
