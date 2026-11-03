@@ -781,6 +781,38 @@ function tests.test_shaping_mark_namespace_does_not_overlap_mwan_default_mask()
 	contains(tostring(berr), 'overlaps MWAN mask')
 end
 
+-- BigBox WAN is strict failover: wan, then modem_primary, then modem_secondary.
+-- Speed tests stay off: live weights (applied only after them) would replace
+-- mwan3's metric order with a weighted split across every member. HTTPS is not
+-- sticky: a sticky entry made while on a modem is checked before the policy and
+-- would keep that client on cellular after the WAN recovers.
+function tests.test_bigbox_configs_render_strict_wan_modem_failover()
+	local cjson = require 'cjson.safe'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local wan_policy = require 'services.net.wan_policy'
+	local order = { wan = 1, modem_primary = 2, modem_secondary = 3 }
+
+	for _, target in ipairs({ 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'bigbox-ss' }) do
+		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))), target .. ' must decode')
+		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+
+		eq(wan_policy.speedtest_enabled({ wan = net_intent.wan }), false, target .. ' speed tests')
+		local ctx = ok(names.allocate(net_intent))
+		local changes = ok(mwan3.build_changes(net_intent, ctx))
+		for mid, metric in pairs(order) do
+			eq(net_intent.wan.members[mid].metric, metric, target .. ' ' .. mid .. ' metric')
+			ok(find_change(changes, { config = 'mwan3', section = ctx:mwan_member(mid), option = 'metric', value = metric }),
+				target .. ' ' .. mid .. ' mwan3 member should render metric ' .. metric)
+		end
+		for rule_id in pairs(net_intent.wan.rules or {}) do
+			ok(not find_change(changes, { config = 'mwan3', section = ctx:mwan_rule(rule_id), option = 'sticky', value = '1' }),
+				target .. ' mwan3 rule ' .. rule_id .. ' must not be sticky')
+		end
+		ok(find_change(changes, { config = 'mwan3', section = ctx:mwan_rule('https'), option = 'sticky', value = '0' }),
+			target .. ' https rule should render sticky 0')
+	end
+end
+
 
 -- mwan3 interfaces start online (mwan3's default) unless the HAL intent says
 -- otherwise. Starting them offline dropped all traffic on every structural apply.

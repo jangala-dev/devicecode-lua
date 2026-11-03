@@ -560,31 +560,31 @@
           "wan": {
             "interface": "wan",
             "weight": 1,
-            "dynamic_weight": true,
+            "dynamic_weight": false,
             "family": "ipv4",
             "mwan_metric": 1
           },
           "modem_primary": {
             "interface": "modem_primary",
             "weight": 1,
-            "dynamic_weight": true,
+            "dynamic_weight": false,
             "family": "ipv4",
             "source": {
               "kind": "gsm-uplink",
               "id": "primary"
             },
-            "mwan_metric": 1
+            "mwan_metric": 2
           },
           "modem_secondary": {
             "interface": "modem_secondary",
             "weight": 1,
-            "dynamic_weight": true,
+            "dynamic_weight": false,
             "family": "ipv4",
             "source": {
               "kind": "gsm-uplink",
               "id": "secondary"
             },
-            "mwan_metric": 1
+            "mwan_metric": 3
           }
         },
         "health": {
@@ -604,7 +604,7 @@
         "load_balancing": {
           "policy": "balanced",
           "speedtests": {
-            "enabled": true,
+            "enabled": false,
             "interval_s": 21600,
             "retry_after_s": 10,
             "retry_max_s": 3600
@@ -616,7 +616,7 @@
             "proto": "tcp",
             "dest_port": "443",
             "policy": "balanced",
-            "sticky": true
+            "sticky": false
           }
         }
       },
