@@ -117,6 +117,10 @@ function tests.test_live_weight_shaping_and_speedtest_capabilities_are_exposed()
 		eq(r4.ok, true)
 		eq(diag_calls[2].method, 'read_counters')
 		eq(diag_calls[2].args.interfaces[1], 'wan_a')
+		local r5 = fibers.perform(client:restart_interface_op({ interface = 'modem_primary' }, { timeout = 1 }))
+		eq(r5.ok, true)
+		eq(config_calls[3].method, 'restart_interface')
+		eq(config_calls[3].args.interface, 'modem_primary')
 	end)
 end
 

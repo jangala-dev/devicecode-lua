@@ -146,6 +146,7 @@ function new.NetworkConfigCapability(id, control_ch)
         'apply',
         'apply_live_weights',
         'apply_shaping',
+        'restart_interface',
     })
 end
 
