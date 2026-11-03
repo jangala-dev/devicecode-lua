@@ -906,6 +906,12 @@
         "serial": {
           "template": "any_change"
         },
+        "board_revision": {
+          "template": "any_change"
+        },
+        "temp": {
+          "template": "any_change"
+        },
         "overall_utilisation": {
           "template": "percent_5"
         },
