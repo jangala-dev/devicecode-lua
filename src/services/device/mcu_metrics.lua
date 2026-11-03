@@ -103,6 +103,19 @@ function M.collect_component(rec)
 	local memory = table_or_empty(runtime.memory)
 	emit(out, 'alloc', first_number(memory.alloc_bytes, memory.alloc), { 'mcu', 'sys', 'mem', 'alloc' })
 
+	-- The power board keeps counting when only the computer restarts, and starts
+	-- again (new boot_id) when it loses power, so these tell the two apart.
+	local power = table_or_empty(view.power)
+	local battery_uptime = tonumber(table_or_empty(power.battery).uptime_ms)
+	local charger_uptime = tonumber(table_or_empty(power.charger).uptime_ms)
+	local uptime_ms = battery_uptime
+	if charger_uptime and (not uptime_ms or charger_uptime > uptime_ms) then uptime_ms = charger_uptime end
+	if uptime_ms then emit(out, 'mcu_uptime', math.floor(uptime_ms / 1000), { 'mcu', 'sys', 'uptime' }) end
+	local boot_id = table_or_empty(view.software).boot_id
+	if type(boot_id) == 'string' and boot_id ~= '' then
+		emit(out, 'mcu_boot_id', boot_id, { 'mcu', 'sys', 'boot_id' })
+	end
+
 	local environment = table_or_empty(view.environment)
 	local temperature = table_or_empty(environment.temperature)
 	local humidity = table_or_empty(environment.humidity)
@@ -115,7 +128,6 @@ function M.collect_component(rec)
 		emit(out, 'core', rh_x100 / 100, { 'mcu', 'env', 'humidity', 'core' })
 	end
 
-	local power = table_or_empty(view.power)
 	local battery = table_or_empty(power.battery)
 	local temp_mc = first_number(battery.temp_mC)
 	if temp_mc ~= nil then

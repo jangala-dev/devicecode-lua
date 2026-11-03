@@ -137,4 +137,33 @@ function T.validate_config_propagates_invalid_template_to_pipeline()
 	assert(saw_metric_invalid_protocol,      "expected warning: sim inherited invalid protocol 'invalid'")
 end
 
+-- bigbox-v1-cm-2 sends the power board's uptime (every 5 minutes) and boot id (on
+-- change), so a computer-only restart can be told from a power loss. bigbox-v1-cm's
+-- legacy power-board protocol carries neither, so it has no such pipelines.
+function T.bigbox_v1_cm2_config_sends_power_board_uptime_and_boot_id()
+	local cjson = require 'cjson.safe'
+	for _, target in ipairs({ 'bigbox-v1-cm-2' }) do
+		local path = 'src/configs/' .. target .. '.json'
+		local f = io.open(path, 'rb') or io.open('../' .. path, 'rb')
+		assert(f, 'unable to read ' .. path)
+		local doc = assert(cjson.decode(f:read('*a')), target .. ' must decode')
+		f:close()
+
+		local ok, _, err = conf.validate_config(doc.metrics)
+		assert(ok == true, target .. ' metrics config invalid: ' .. tostring(err))
+		local pipelines = conf.apply_config(doc.metrics)
+		assert(pipelines.mcu_uptime, target .. ' should have an mcu_uptime pipeline')
+		assert(pipelines.mcu_boot_id, target .. ' should have an mcu_boot_id pipeline')
+
+		local up = doc.metrics.data.pipelines.mcu_uptime.process[1]
+		assert(up.type == 'TimeTrigger' and up.duration == 300, target .. ' uptime should report every 5 minutes')
+
+		local id_state = pipelines.mcu_boot_id.pipeline:new_state()
+		assert(pipelines.mcu_boot_id.pipeline:run('a', id_state) == 'a', target .. ' first boot id passes')
+		local _, same = pipelines.mcu_boot_id.pipeline:run('a', id_state)
+		assert(same == true, target .. ' unchanged boot id is held back')
+		assert(pipelines.mcu_boot_id.pipeline:run('b', id_state) == 'b', target .. ' new boot id passes')
+	end
+end
+
 return T

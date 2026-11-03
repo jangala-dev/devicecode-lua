@@ -1767,6 +1767,18 @@
             }
           ]
         },
+        "mcu_uptime": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "TimeTrigger",
+              "duration": 300
+            }
+          ]
+        },
+        "mcu_boot_id": {
+          "template": "any_change"
+        },
         "alloc": {
           "protocol": "http",
           "process": [

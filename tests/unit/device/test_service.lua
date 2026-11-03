@@ -108,6 +108,7 @@ local function cfg_mcu_metrics()
 					environment_humidity = topics.raw_member_state('mcu', 'environment', 'humidity'),
 					power_battery = topics.raw_member_state('mcu', 'power', 'battery'),
 					power_charger = topics.raw_member_state('mcu', 'power', 'charger'),
+					software = topics.raw_member_state('mcu', 'software'),
 				},
 			},
 		},
@@ -302,6 +303,7 @@ function tests.test_mcu_dirty_publication_emits_mcu_metrics()
 				pack_mV = 12800,
 				ibat_mA = -120,
 				temp_mC = 24500,
+				uptime_ms = 125000,
 			} },
 			{ fact = 'power_charger', payload = {
 				vin_mV = 24000,
@@ -310,7 +312,9 @@ function tests.test_mcu_dirty_publication_emits_mcu_metrics()
 				state_bits = 0x0142,
 				status_bits = 0x000d,
 				system_bits = 0x2045,
+				uptime_ms = 126500,
 			} },
+			{ fact = 'software', payload = { boot_id = 'boot-42' } },
 		}
 		for i = 1, #observations do
 			local obs = observations[i]
@@ -331,6 +335,9 @@ function tests.test_mcu_dirty_publication_emits_mcu_metrics()
 
 		local metrics = metrics_by_namespace(svc)
 		assert_metric(metrics, 'mcu.sys.mem.alloc', 'alloc', 32768)
+		-- Power-board uptime is the newest reading's, in whole seconds.
+		assert_metric(metrics, 'mcu.sys.uptime', 'mcu_uptime', 126)
+		assert_metric(metrics, 'mcu.sys.boot_id', 'mcu_boot_id', 'boot-42')
 		assert_metric(metrics, 'mcu.env.temperature.core', 'core', 23.4)
 		assert_metric(metrics, 'mcu.env.humidity.core', 'core', 45.12)
 		assert_metric(metrics, 'mcu.power.temperature.internal', 'internal', 24.5)
