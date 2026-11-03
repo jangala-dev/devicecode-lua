@@ -211,8 +211,25 @@ local SYSINFO_METRICS = {
         field = '',
         metric_key = 'temp',
         mk_opts = function(_, max_age) return cap_sdk.args.new.ThermalGetOpts(max_age) end
-    }
+    },
 }
+
+-- Raspberry Pi firmware power flags, under their v0.10.6 metric names.
+for _, flag in ipairs({
+    { field = 'under_voltage_detected', metric_key = 'power_undervoltage' },
+    { field = 'arm_frequency_capped',   metric_key = 'power_arm_frequency_capped' },
+    { field = 'currently_throttled',    metric_key = 'power_currently_throttled' },
+    { field = 'under_voltage_occurred', metric_key = 'power_under_voltage_occurred' },
+}) do
+    SYSINFO_METRICS[#SYSINFO_METRICS + 1] = {
+        class = 'platform',
+        id = '1',
+        method = 'get',
+        field = flag.field,
+        metric_key = flag.metric_key,
+        mk_opts = cap_sdk.args.new.PlatformGetOpts,
+    }
+end
 
 local function publish_system_metric(svc, metric_key, value)
     if value == nil then return false end

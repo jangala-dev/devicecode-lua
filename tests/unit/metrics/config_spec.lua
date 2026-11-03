@@ -186,4 +186,24 @@ function T.bigbox_configs_send_temp_and_board_revision()
 	end
 end
 
+-- Every BigBox target sends the Raspberry Pi power flags (v0.10.6 names).
+function T.bigbox_configs_send_pi_power_flags()
+	local cjson = require 'cjson.safe'
+	for _, target in ipairs({ 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'bigbox-ss' }) do
+		local path = 'src/configs/' .. target .. '.json'
+		local f = io.open(path, 'rb') or io.open('../' .. path, 'rb')
+		assert(f, 'unable to read ' .. path)
+		local doc = assert(cjson.decode(f:read('*a')), target .. ' must decode')
+		f:close()
+
+		local ok, _, err = conf.validate_config(doc.metrics)
+		assert(ok == true, target .. ' metrics config invalid: ' .. tostring(err))
+		local pipelines = conf.apply_config(doc.metrics)
+		for _, key in ipairs({ 'power_undervoltage', 'power_arm_frequency_capped',
+			'power_currently_throttled', 'power_under_voltage_occurred' }) do
+			assert(pipelines[key], target .. ' should have a ' .. key .. ' pipeline')
+		end
+	end
+end
+
 return T
