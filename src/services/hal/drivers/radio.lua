@@ -13,9 +13,9 @@ local INT32_MAX             = 2147483647
 
 local VALID_BANDS           = { '2g', '5g' }
 local VALID_HTMODES         = {
-    'HE20', 'HE40+', 'HE40-', 'HE80', 'HE160',
+    'HE20', 'HE40', 'HE80', 'HE160',
     'HT20', 'HT40+', 'HT40-',
-    'VHT20', 'VHT40+', 'VHT40-', 'VHT80', 'VHT160',
+    'VHT20', 'VHT40', 'VHT80', 'VHT160',
 }
 local VALID_ENCRYPTIONS     = {
     'none', 'wep', 'psk', 'psk2', 'psk-mixed',

@@ -62,14 +62,16 @@ Input:
 {
   band     = <string>,         -- required: "2g" or "5g"
   channel  = <number|string>,  -- required: channel number or "auto"
-  htmode   = <string>,         -- required: one of "HE20","HE40+","HE40-","HE80","HE160","HT20","HT40+","HT40-","VHT20","VHT40+","VHT40-","VHT80","VHT160"
+  htmode   = <string>,         -- required: one of "HE20","HE40","HE80","HE160","HT20","HT40+","HT40-","VHT20","VHT40","VHT80","VHT160"
   channels = <table|nil>,      -- required when channel == "auto": list of numbers or strings
 }
 ```
 
 Validation:
 - `band` must be `"2g"` or `"5g"`.
-- `htmode` must be one of the listed valid values.
+- `htmode` must be one of the listed valid values. `HE40+`/`HE40-` and `VHT40+`/`VHT40-` are
+  accepted and mapped to `HE40`/`VHT40`: OpenWrt's mac80211.sh only takes a secondary-channel
+  suffix for `HT40`, and would otherwise run those modes at 20 MHz.
 - When `channel == "auto"`, `channels` must be a non-empty list of numbers or strings.
 - When `channel ~= "auto"`, `channel` must be a number or string.
 
