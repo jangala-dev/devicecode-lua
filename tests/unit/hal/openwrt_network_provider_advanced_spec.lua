@@ -752,4 +752,42 @@ function tests.test_shaping_mark_namespace_does_not_overlap_mwan_default_mask()
 end
 
 
+-- mwan3 interfaces start online (mwan3's default) unless the HAL intent says
+-- otherwise. Starting them offline dropped all traffic on every structural apply.
+-- (NET config accepts initial_state only under wan.health; the member-level case
+-- covers the renderer.)
+function tests.test_mwan3_interfaces_start_online_unless_configured()
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local function initial_states(wan)
+		local intent_doc = { wan = wan }
+		local ctx = ok(names.allocate(intent_doc))
+		local changes = ok(mwan3.build_changes(intent_doc, ctx))
+		local out = {}
+		for mid in pairs(wan.members) do
+			local ch = find_change(changes, { config = 'mwan3', section = ctx:mwan_iface(mid), option = 'initial_state' })
+			out[mid] = ch and ch.value
+		end
+		return out
+	end
+
+	local states = initial_states({
+		enabled = true,
+		health = { track_ip = { '1.1.1.1' } },
+		members = {
+			wan = { interface = 'wan', mwan_metric = 1 },
+			modem_primary = { interface = 'modem_primary', mwan_metric = 2, initial_state = 'offline' },
+		},
+	})
+	eq(states.wan, 'online', 'default initial_state')
+	eq(states.modem_primary, 'offline', 'HAL member override kept')
+
+	states = initial_states({
+		enabled = true,
+		health = { track_ip = { '1.1.1.1' }, initial_state = 'offline' },
+		members = { wan = { interface = 'wan', mwan_metric = 1 } },
+	})
+	eq(states.wan, 'offline', 'health-level override kept')
+end
+
+
 return tests
