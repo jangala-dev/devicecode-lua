@@ -99,6 +99,8 @@ function M.run_op(req, opts)
 		-- The following GET reuses that connection but has its own short timeout.
 		local out, wrapper_code, err = collect(argv, deadline)
 		if not out then return failure('speedtest_failed', err) end
+		-- mwan3 2.12+ prints its banner to stderr, so SETUP can start stdout.
+		out = '\n' .. out
 		local setup_code, setup_s, setup_exit = out:match('\nSETUP,(%d+),([%d%.]+),(%d+)\n')
 		local http_code, bytes, first_s, total_s, exit_code =
 			out:match('\nRESULT,(%d+),([%d%.]+),([%d%.]+),([%d%.]+),(%d+)\n')

@@ -61,6 +61,21 @@ function T.test_payload_average_excludes_setup_and_lua_scheduling_delay()
 	end)
 end
 
+-- mwan3 2.12+ (OpenWrt 25.12) writes its "Running ..." banner to stderr, so
+-- stdout starts with curl's SETUP record; older versions print it to stdout.
+function T.test_parses_output_with_and_without_mwan3_banner()
+	for _, output in ipairs({
+		"Running 'curl test'\nSETUP,200,1.2\nRESULT,206,1048576,0.02,0.12\n",
+		"SETUP,200,1.2\nRESULT,206,1048576,0.02,0.12\n",
+	}) do
+		fixture({output=output}, function()
+			local r = run()
+			assert(r.ok, r.err)
+			assert(r.bytes == 1048576 and r.setup_s == 1.2)
+		end)
+	end
+end
+
 function T.test_byte_budget_setup_and_download_deadlines_are_separate()
 	fixture({}, function(s)
 		assert(run().ok)
