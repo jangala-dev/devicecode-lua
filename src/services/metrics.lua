@@ -118,6 +118,7 @@ local State = {
 	pipelines_map    = {},
 	metric_states    = {},
 	endpoint_to_pipe = {},
+	endpoint_seen    = {},
 	metric_values    = {},
 	publish_period   = nil,
 	cloud_url        = nil,
@@ -305,6 +306,21 @@ end
 
 local publish_fns = { bus = bus_publish, log = log_publish, http = http_publish }
 
+-- Endpoints include per-session ids (wifi.clients.<uid>.sessions.<sid>...), so
+-- drop processing state for endpoints that have not reported for a day.
+local ENDPOINT_IDLE_S = 24 * 60 * 60
+
+---@param tnow number
+local function prune_idle_endpoints(tnow)
+	for endpoint_str, seen_at in pairs(State.endpoint_seen) do
+		if tnow - seen_at > ENDPOINT_IDLE_S then
+			State.endpoint_seen[endpoint_str]    = nil
+			State.metric_states[endpoint_str]    = nil
+			State.endpoint_to_pipe[endpoint_str] = nil
+		end
+	end
+end
+
 ---@param values table<string, table<string, MetricSample>>
 local function publish_all(values)
 	for protocol, pv in pairs(values) do
@@ -365,6 +381,7 @@ local function handle_metric(msg)
 		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state()
 		State.endpoint_to_pipe[endpoint_str] = metric_name
 	end
+	State.endpoint_seen[endpoint_str] = now()
 
 	local ret, short, err = pipe_cfg.pipeline:run(value, State.metric_states[endpoint_str])
 	if err then
@@ -525,6 +542,7 @@ local function main()
 				State.svc:obs_log('debug', string.format('publishing %d metric(s)', total))
 			end
 			publish_all(values)
+			prune_idle_endpoints(now())
 		end
 	end
 
@@ -599,5 +617,11 @@ function M.start(conn, opts)
 
 	main()
 end
+
+M._test = {
+	State                = State,
+	handle_metric        = handle_metric,
+	prune_idle_endpoints = prune_idle_endpoints,
+}
 
 return M

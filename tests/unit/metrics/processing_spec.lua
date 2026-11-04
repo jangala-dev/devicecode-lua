@@ -76,6 +76,19 @@ function T.delta_value()
 	assert(val == 5, 'expected delta=5 (20-15), got ' .. tostring(val))
 end
 
+function T.delta_value_counter_reset_reports_new_value()
+	local block = processing.DeltaValue.new({})
+	local state = block:new_state()
+
+	block:run(5000, state)
+	block:reset(state)  -- published: last_val = 5000
+
+	-- The counter restarted (wifi reload) and has counted 300 since.
+	local val, _, err = block:run(300, state)
+	assert(err == nil, tostring(err))
+	assert(val == 300, 'expected the post-reset value 300, got ' .. tostring(val))
+end
+
 function T.pipeline_run_and_reset()
 	local pipeline, err = processing.new_process_pipeline()
 	assert(err == nil, tostring(err))
