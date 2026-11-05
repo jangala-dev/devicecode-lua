@@ -128,7 +128,9 @@ function M.build_changes(intent, name_ctx)
 	known[policy_name] = true
 	set_section(changes, 'mwan3', policy_name, 'policy')
 	set_list_option(changes, 'mwan3', policy_name, 'use_member', member_sections)
-	set_option(changes, 'mwan3', policy_name, 'last_resort', wan.last_resort or 'unreachable')
+	-- Tracking only pings, so an uplink can look dead on a network that just blocks them.
+	-- When every uplink looks dead, clients use the normal route rather than being refused.
+	set_option(changes, 'mwan3', policy_name, 'last_resort', wan.last_resort or 'default')
 
 	local rule_sections = {}
 	for _, rid in ipairs(sorted_keys(wan.rules or {})) do
