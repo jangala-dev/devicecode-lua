@@ -14,6 +14,17 @@ local function ok(v, msg) if not v then fail(msg) end return v end
 local function eq(a, b, msg) if a ~= b then fail((msg or 'assertion failed') .. ': expected ' .. tostring(b) .. ', got ' .. tostring(a)) end end
 local function contains(s, needle, msg) if type(s) ~= 'string' or not s:find(needle, 1, true) then fail(msg or ('expected ' .. tostring(s) .. ' to contain ' .. tostring(needle))) end end
 
+local function section_record(name, stype, index, anonymous, options)
+	local record = {
+		['.name'] = name,
+		['.type'] = stype,
+		['.index'] = index,
+		['.anonymous'] = anonymous == true,
+	}
+	for key, value in pairs(options or {}) do record[key] = value end
+	return record
+end
+
 local function fake_cursor(calls)
 	return {
 		set = function (_, ...)
@@ -247,10 +258,10 @@ function tests.test_transaction_rolls_back_touched_packages_on_partial_failure()
 		local calls = {}
 		local snapshots = {
 			network = {
-				lan = { ['.type'] = 'interface', proto = 'static' },
+				lan = section_record('lan', 'interface', 0, false, { proto = 'static' }),
 			},
 			dhcp = {
-				dnsmasq = { ['.type'] = 'dnsmasq', domainneeded = '1' },
+				dnsmasq = section_record('dnsmasq', 'dnsmasq', 0, false, { domainneeded = '1' }),
 			},
 		}
 		local cursor = fake_cursor(calls)
@@ -419,12 +430,24 @@ function tests.test_queued_transaction_cancellation_discards_without_changes()
 	end)
 end
 
-function tests.test_cancellation_during_changes_restores_config_without_activation()
+function tests.test_cancellation_during_uncommitted_changes_reverts_without_rewriting_or_activation()
 	require('tests.support.run_fibers').run(function(scope)
 		local cancel = require('fibers.channel').new(1)
 		local calls, activations = {}, 0
 		local cursor = fake_cursor(calls)
-		cursor.get_all = function() return { lan = { ['.type'] = 'interface', proto = 'original' } } end
+		local did_revert = false
+		cursor.get_all = function()
+			local anonymous_name = did_revert and 'cfgnew' or 'cfgold'
+			return {
+				lan = section_record('lan', 'interface', 0, false, { proto = 'original' }),
+				[anonymous_name] = section_record(anonymous_name, 'rule', 1, true, { target = 'ACCEPT' }),
+			}
+		end
+		local revert = cursor.revert
+		cursor.revert = function(self, config)
+			did_revert = true
+			return revert(self, config)
+		end
 		local set = cursor.set
 		cursor.set = function(self, config, section, option, value)
 			if value == 'obsolete' then cancel:put('superseded') end
@@ -441,11 +464,13 @@ function tests.test_cancellation_during_changes_restores_config_without_activati
 		eq(result.status, 'cancelled_rolled_back')
 		eq(result.rollback.ok, true)
 		eq(activations, 0)
-		local restored = false
+		local reverted, rewrote = false, false
 		for _, call in ipairs(calls) do
-			if call.op == 'set' and call[4] == 'original' then restored = true end
+			if call.op == 'revert' then reverted = true end
+			if call.op == 'delete' or call.op == 'commit' then rewrote = true end
 		end
-		ok(restored, 'original configuration should be restored')
+		ok(reverted, 'staged configuration should be reverted')
+		eq(rewrote, false, 'equivalent configuration should not be rewritten')
 	end)
 end
 
@@ -476,7 +501,14 @@ function tests.test_cancellation_after_commit_restores_committed_packages()
 		local cancel = require('fibers.channel').new(1)
 		local calls, commits, activations = {}, 0, 0
 		local cursor = fake_cursor(calls)
-		cursor.get_all = function() return { lan = { ['.type'] = 'interface', proto = 'original' } } end
+		cursor.get_all = function()
+			local proto = commits == 1 and 'obsolete' or 'original'
+			return { lan = section_record('lan', 'interface', 0, false, { proto = proto }) }
+		end
+		cursor.reorder = function(_, ...)
+			calls[#calls + 1] = { op = 'reorder', ... }
+			return true
+		end
 		cursor.commit = function()
 			commits = commits + 1
 			if commits == 1 then cancel:put('superseded') end
@@ -497,14 +529,87 @@ function tests.test_cancellation_after_commit_restores_committed_packages()
 	end)
 end
 
+function tests.test_restore_preserves_section_order_and_anonymity_and_ignores_generated_anonymous_ids()
+	require('tests.support.run_fibers').run(function(scope)
+		local cancel = require('fibers.channel').new(1)
+		local calls, commits, anonymous = {}, 0, 0
+		local snapshot = {
+			cfgold1 = section_record('cfgold1', 'rule', 0, true, { target = 'ACCEPT' }),
+			policy = section_record('policy', 'defaults', 1, false, { enabled = '1' }),
+			cfgold2 = section_record('cfgold2', 'rule', 2, true, { target = 'REJECT' }),
+		}
+		local changed = {
+			policy = section_record('policy', 'defaults', 0, false, { enabled = '0' }),
+		}
+		local restored = {
+			cfgnew1 = section_record('cfgnew1', 'rule', 0, true, { target = 'ACCEPT' }),
+			policy = section_record('policy', 'defaults', 1, false, { enabled = '1' }),
+			cfgnew2 = section_record('cfgnew2', 'rule', 2, true, { target = 'REJECT' }),
+		}
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function()
+			if commits == 0 then return snapshot end
+			if commits == 1 then return changed end
+			return restored
+		end
+		cursor.add = function(_, config, stype)
+			anonymous = anonymous + 1
+			local name = 'cfgnew' .. tostring(anonymous)
+			calls[#calls + 1] = { op = 'add', config, stype, name }
+			return name
+		end
+		cursor.reorder = function(_, ...)
+			calls[#calls + 1] = { op = 'reorder', ... }
+			return true
+		end
+		cursor.commit = function(_, config)
+			commits = commits + 1
+			calls[#calls + 1] = { op = 'commit', config }
+			if commits == 1 then cancel:put('superseded') end
+			return true
+		end
+		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function() return true end }))
+		ok(mgr:start(scope))
+		local result = fibers.perform(mgr:transaction_op({ records = {
+			{ config = 'firewall', changes = {
+				{ op = 'set', config = 'firewall', section = 'policy', option = 'enabled', value = '0' },
+			} },
+		} }, { cancel_op = cancel:get_op() }))
+		eq(result.status, 'cancelled_rolled_back')
+		eq(result.rollback.ok, true)
+		eq(commits, 2)
+
+		local created, reordered = {}, {}
+		for _, call in ipairs(calls) do
+			if call.op == 'add' then created[#created + 1] = 'anonymous:' .. tostring(call[2]) end
+			if call.op == 'set' and call[4] == nil then created[#created + 1] = 'named:' .. tostring(call[2]) end
+			if call.op == 'reorder' then reordered[#reordered + 1] = call[3] end
+		end
+		eq(created[1], 'anonymous:rule')
+		eq(created[2], 'named:policy')
+		eq(created[3], 'anonymous:rule')
+		eq(reordered[1], 0)
+		eq(reordered[2], 1)
+		eq(reordered[3], 2)
+	end)
+end
+
 function tests.test_cancellation_reports_rollback_failure()
 	require('tests.support.run_fibers').run(function(scope)
 		local cancel = require('fibers.channel').new(1)
 		local cursor = fake_cursor({})
-		cursor.get_all = function() return { lan = { ['.type'] = 'interface', proto = 'original' } } end
+		local commits = 0
+		cursor.get_all = function()
+			local proto = commits == 0 and 'original' or 'obsolete'
+			return { lan = section_record('lan', 'interface', 0, false, { proto = proto }) }
+		end
 		cursor.set = function(_, _, _, _, value)
-			if value == 'obsolete' then cancel:put('superseded') end
 			if value == 'original' then return nil, 'restore failed' end
+			return true
+		end
+		cursor.commit = function()
+			commits = commits + 1
+			if commits == 1 then cancel:put('superseded') end
 			return true
 		end
 		local mgr = ok(uci_manager.new({ cursor = cursor }))

@@ -173,17 +173,54 @@ function tests.test_activation_failure_restores_policy_and_reactivates_previous_
 			end
 			return true
 		end
-		local data = {}
+		local data, committed, next_anon = {}, {}, 0
+		local function clone(value) return cjson.decode(cjson.encode(value or {})) end
+		local function section_count(pkg)
+			local count = 0
+			for _, section in pairs(data[pkg] or {}) do
+				if type(section) == 'table' and section['.index'] ~= nil then count = count + 1 end
+			end
+			return count
+		end
 		local cursor = {
-			get_all = function(_, pkg) return cjson.decode(cjson.encode(data[pkg] or {})) end,
+			get_all = function(_, pkg) return clone(data[pkg]) end,
 			set = function(_, pkg, section, option, value)
 				data[pkg] = data[pkg] or {}
-				if value == nil then data[pkg][section] = { ['.type'] = option }
+				if value == nil then data[pkg][section] = {
+					['.type'] = option, ['.name'] = section,
+					['.index'] = section_count(pkg), ['.anonymous'] = false,
+				}
 				else data[pkg][section][option] = value end
 				return true
 			end,
-			delete = function(_, pkg, section) data[pkg][section] = nil; return true end,
-			commit = function() return true end,
+			add = function(_, pkg, stype)
+				data[pkg] = data[pkg] or {}
+				next_anon = next_anon + 1
+				local name = 'cfgtest' .. tostring(next_anon)
+				data[pkg][name] = {
+					['.type'] = stype, ['.name'] = name,
+					['.index'] = section_count(pkg), ['.anonymous'] = true,
+				}
+				return name
+			end,
+			delete = function(_, pkg, section, option)
+				if option ~= nil then data[pkg][section][option] = nil
+				else data[pkg][section] = nil end
+				return true
+			end,
+			reorder = function(_, pkg, section, position)
+				local moved = data[pkg][section]
+				local old = moved['.index']
+				for _, candidate in pairs(data[pkg]) do
+					local index = candidate['.index']
+					if old < position and index > old and index <= position then candidate['.index'] = index - 1 end
+					if old > position and index >= position and index < old then candidate['.index'] = index + 1 end
+				end
+				moved['.index'] = position
+				return true
+			end,
+			revert = function(_, pkg) data[pkg] = clone(committed[pkg]); return true end,
+			commit = function(_, pkg) committed[pkg] = clone(data[pkg]); return true end,
 		}
 		cfg.uci_manager = assert(require('services.hal.backends.openwrt.uci_manager').new({
 			cursor = cursor, run_cmd = cfg.run_cmd,
