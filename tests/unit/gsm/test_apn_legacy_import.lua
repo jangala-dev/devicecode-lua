@@ -43,11 +43,8 @@ local function reading(reply, err)
 	return function() return op.always(reply, err) end
 end
 
-local function wanted() return true end
-
-local function run(conn, read_op, begin_save, end_save)
-	local store = store_mod.new(conn)
-	return fibers.perform(import.run_op(store, read_op, begin_save or wanted, end_save or function() end))
+local function run(conn, read_op)
+	return fibers.perform(import.run_op(store_mod.new(conn), read_op))
 end
 
 function tests.test_parse_reads_the_list_the_v09_ui_saves()
@@ -167,42 +164,6 @@ function tests.test_read_and_store_failures_are_retryable()
 		local c, cerr = run(conn, function() error('must not read when the store is failing') end)
 		assert(c == nil and cerr == 'store busy', tostring(cerr))
 		assert(conn.puts == 0)
-	end)
-end
-
-function tests.test_a_save_in_the_new_ui_supersedes_the_import()
-	runfibers.run(function()
-		local conn = fake_conn()
-		local read_op = reading({ ok = true, reason = user_cfg({ rec('old') }) })
-		local result = assert(run(conn, read_op, function() return false end))
-		assert(result.status == 'superseded')
-		assert(conn.puts == 0)
-	end)
-end
-
-function tests.test_save_is_bracketed_and_the_end_always_runs()
-	runfibers.run(function()
-		local events = {}
-		local conn = fake_conn()
-		local put = conn.call_op
-		function conn:call_op(topic, payload)
-			if topic[5] == 'put' then events[#events + 1] = 'put' end
-			return put(self, topic, payload)
-		end
-		local function begin_save() events[#events + 1] = 'begin'; return true end
-		local function end_save() events[#events + 1] = 'end' end
-		assert(run(conn, reading({ ok = true, reason = user_cfg({ rec('one') }) }), begin_save, end_save))
-		assert(table.concat(events, ',') == 'begin,put,end', table.concat(events, ','))
-
-		-- A failed put still ends the save.
-		events = {}
-		function conn:call_op(topic)
-			if topic[5] == 'put' then return op.always({ ok = false, reason = 'disk full' }, nil) end
-			return op.always({ ok = false, reason = 'not found' }, nil)
-		end
-		local result, err = run(conn, reading({ ok = true, reason = user_cfg({ rec('one') }) }), begin_save, end_save)
-		assert(result == nil and err == 'disk full', tostring(err))
-		assert(table.concat(events, ',') == 'begin,end', table.concat(events, ','))
 	end)
 end
 

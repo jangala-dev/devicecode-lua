@@ -6,7 +6,8 @@
 -- finds it.
 --
 -- The store's key decides whether the import has happened: once it exists, whether from
--- this import or from a save in the current UI, the import never writes again.
+-- this import or from a save in the current UI, the import never writes again. The caller
+-- refuses APN saves until this has finished, so nothing else writes the key meanwhile.
 --
 -- APN records can hold passwords, so nothing here returns or logs file contents in an
 -- error.
@@ -77,17 +78,10 @@ end
 --   imported    records were saved; imported and skipped hold the counts
 --   no_source   no file, or no usable records in it; nothing written
 --   malformed   the file can't be parsed; nothing written
---   superseded  begin_save() said no; nothing written
---
--- begin_save and end_save let the caller keep this save and UI saves from overlapping.
--- begin_save runs with no yield before the save starts, and end_save always runs after
--- it, including on failure or cancellation.
 ---@param store table
 ---@param read_op fun(): Op resolves to a filesystem reply and an error
----@param begin_save fun(): boolean
----@param end_save fun()
 ---@return Op
-function M.run_op(store, read_op, begin_save, end_save)
+function M.run_op(store, read_op)
 	return fibers.run_scope_op(function()
 		local exists, xerr = perform(store:exists_op())
 		if exists == nil then return nil, xerr or 'control_store_get_failed' end
@@ -107,8 +101,6 @@ function M.run_op(store, read_op, begin_save, end_save)
 		local records, skipped = M.parse(reply.reason)
 		if not records then return { status = 'malformed' }, nil end
 		if #records == 0 then return { status = 'no_source', skipped = skipped }, nil end
-		if not begin_save() then return { status = 'superseded' }, nil end
-		fibers.current_scope():finally(function () end_save() end)
 
 		local saved, serr = perform(store:save_op(records))
 		if not saved then return nil, serr or 'control_store_put_failed' end
