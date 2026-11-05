@@ -311,6 +311,14 @@ Store.next_pending = guarded(function(self, now)
 	return state.pending[1]
 end)
 
+--- When the next record may be sent: 0 means now, and nil means nothing is waiting.
+---@return number? monotonic seconds
+Store.next_send_at = guarded(function(self)
+	local state = self:load()
+	if not state.pending[1] then return nil end
+	return state.next_send or 0
+end)
+
 --- The cloud accepted this record.
 Store.mark_sent = guarded(function(self, seq, now)
 	local state = self:load()

@@ -346,7 +346,8 @@ function T.delta_value_pipeline()
 end
 
 -- Runs metrics with a stubbed HTTP publisher and a crash record already on file.
-local function with_pending_crash(synced, body)
+local function with_pending_crash(synced, body, opts)
+	opts = opts or {}
 	local original_http_mod = package.loaded['services.metrics.http']
 	local sent = {}
 	package.loaded['services.metrics.http'] = {
@@ -372,6 +373,11 @@ local function with_pending_crash(synced, body)
 	local earlier = new_store(500)
 	earlier:begin_run()
 	earlier:record_failure({ service = 'gsm', status = 'failed', primary = 'gsm.lua:1: boom' })
+	for i = 2, opts.records or 1 do
+		local later = new_store(500 + i)
+		later:begin_run()
+		later:record_failure({ service = 'gsm', status = 'failed', primary = 'gsm.lua:1: boom' })
+	end
 
 	local ok_run, run_err = pcall(function()
 		runfibers.run(function(scope)
@@ -385,7 +391,7 @@ local function with_pending_crash(synced, body)
 			test_conn:retain({ 'state', 'time', 'synced' }, synced)
 			test_conn:retain({ 'cfg', 'metrics' }, {
 				data = {
-					schema = METRICS_SCHEMA, publish_period = 0.1,
+					schema = METRICS_SCHEMA, publish_period = opts.publish_period or 0.1,
 					cloud_url = 'http://localhost:18080',
 					pipelines = { sim = { protocol = 'http', process = {} } },
 				},
@@ -402,7 +408,7 @@ local function with_pending_crash(synced, body)
 
 			stop_scope(svc_scope)
 			clock:restore()
-		end, { timeout = 3.0 })
+		end, { timeout = opts.timeout or 3.0 })
 	end)
 
 	package.loaded['services.metrics.http'] = original_http_mod
@@ -455,6 +461,69 @@ function T.crash_record_is_kept_when_the_cloud_refuses_it()
 		time_harness.flush_ticks(20)
 		assert(#sent == 1, 'should wait before retrying, got ' .. #sent)
 	end)
+end
+
+local function advance_crash_clock(clock, seconds)
+	clock:advance(seconds)
+	time_harness.flush_ticks(20)
+end
+
+-- /tmp is cleared by a reboot, so a retry can't wait for a long publish period.
+function T.crash_retry_does_not_wait_for_the_publish_tick()
+	with_pending_crash(true, function(sent, _, clock)
+		assert(#sent == 1, 'expected the first send, got ' .. #sent)
+		sent[1].on_result(false)
+
+		advance_crash_clock(clock, 29)
+		assert(#sent == 1, 'should wait out the retry delay, got ' .. #sent)
+
+		advance_crash_clock(clock, 2)
+		assert(#sent == 2, 'expected a retry at the crash deadline, got ' .. #sent)
+	end, { timeout = 3000, publish_period = 3600 })
+end
+
+function T.next_crash_record_does_not_wait_for_the_publish_tick()
+	with_pending_crash(true, function(sent, _, clock)
+		assert(#sent == 1, 'expected the first send, got ' .. #sent)
+		sent[1].on_result(true)
+
+		advance_crash_clock(clock, 6)
+		assert(#sent == 2, 'expected the second record, got ' .. #sent)
+	end, { timeout = 3000, publish_period = 3600, records = 2 })
+end
+
+-- Past the first crashes, records are paced to keep the data use down.
+function T.crash_send_interval_does_not_wait_for_the_publish_tick()
+	with_pending_crash(true, function(sent, _, clock)
+		for i = 1, 4 do
+			assert(#sent == i, 'expected send ' .. i .. ', got ' .. #sent)
+			sent[i].on_result(true)
+			if i < 4 then advance_crash_clock(clock, 6) end
+		end
+
+		advance_crash_clock(clock, 599)
+		assert(#sent == 4, 'should wait out the send interval, got ' .. #sent)
+
+		advance_crash_clock(clock, 2)
+		assert(#sent == 5, 'expected the paced send, got ' .. #sent)
+	end, { timeout = 3000, publish_period = 3600, records = 5 })
+end
+
+-- A full /tmp means the wait can't be saved, which mustn't turn into a tight loop.
+function T.crash_sends_stay_spaced_when_the_store_cannot_save()
+	with_pending_crash(true, function(sent, store, clock)
+		store.mark_failed = function() end
+		local answered = 0
+		for _ = 1, 21 do
+			if #sent > answered then
+				answered = #sent
+				sent[answered].on_result(false)
+			end
+			advance_crash_clock(clock, 1)
+		end
+		assert(#sent >= 2, 'expected it to keep trying, got ' .. #sent)
+		assert(#sent <= 5, 'expected sends at least 5s apart, got ' .. #sent)
+	end, { timeout = 3000, publish_period = 3600 })
 end
 
 function T.crash_record_waits_for_time_sync()

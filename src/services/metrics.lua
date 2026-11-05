@@ -25,6 +25,7 @@
 
 local fibers         = require 'fibers'
 local op             = require 'fibers.op'
+local pulse          = require 'fibers.pulse'
 local sleep          = require 'fibers.sleep'
 local runtime        = require 'fibers.runtime'
 local time           = require 'fibers.utils.time'
@@ -46,6 +47,10 @@ local crash_record   = require 'devicecode.crash_record'
 local unpack = unpack or rawget(table, 'unpack')
 
 local NAME = 'metrics'
+
+-- The least time between crash sends, whatever the store says. If /tmp is full the
+-- store can't save its own wait, and that mustn't become a tight loop.
+local CRASH_MIN_GAP_S = 5
 
 -------------------------------------------------------------------------------
 -- Topic helpers
@@ -130,6 +135,9 @@ local State = {
 	fs_cap           = nil,
 	crash_store      = nil,
 	crash_inflight   = false,
+	crash_last_try   = -math.huge,
+	crash_due        = math.huge,
+	crash_wake       = nil,
 }
 
 -------------------------------------------------------------------------------
@@ -295,16 +303,29 @@ local function http_publish(data, on_result)
 	return true
 end
 
+--- Work out when the main loop should next try a crash send. /tmp is cleared by a
+--- reboot, so this can't wait for the publish tick. The result is kept here because
+--- the loop goes round for every metric and the store is a file.
+local function schedule_crash_send()
+	State.crash_due = math.huge
+	if not State.crash_store or State.crash_inflight then return end
+	if not (State.base_time.synced and State.cloud_config) then return end
+	local due = State.crash_store:next_send_at()
+	if due then State.crash_due = math.max(due, State.crash_last_try + CRASH_MIN_GAP_S) end
+end
+
 --- Send the next crash record from an earlier process, in its own request. It goes
 --- straight to the cloud rather than through a pipeline, so it can't be lost to the
 --- start-up race between metrics and config. It stays on file until accepted.
-local function send_pending_crash()
+local function attempt_crash_send()
 	if not State.crash_store or State.crash_inflight then return end
 	if not (State.base_time.synced and State.cloud_config) then return end
 
 	local tnow = now()
+	if tnow < State.crash_last_try + CRASH_MIN_GAP_S then return end
 	local rec = State.crash_store:next_pending(tnow)
 	if not rec then return end
+	State.crash_last_try = tnow
 
 	-- rec.mono is from the same boot, so it converts to the time of the crash.
 	local at = math.floor((State.base_time.real + (rec.mono - State.base_time.mono)) * 1000)
@@ -324,11 +345,19 @@ local function send_pending_crash()
 		else
 			State.crash_store:mark_failed(now())
 		end
+		-- The answer arrives while the main loop is asleep on the old deadline.
+		schedule_crash_send()
+		State.crash_wake:signal()
 	end)
 	if not queued then
 		State.crash_inflight = false
 		State.crash_store:mark_failed(tnow)
 	end
+end
+
+local function send_pending_crash()
+	attempt_crash_send()
+	schedule_crash_send()
 end
 
 
@@ -534,6 +563,9 @@ local function main()
 			timesync = time_sub:recv_op(),
 			-- timesync = State.base_time.synced and op.never() or op.always({ payload = true }),
 			tick     = sleep.sleep_until_op(next_publish_time),
+			crash    = sleep.sleep_until_op(State.crash_due),
+			-- Only has to wake the loop, so that it goes round with the new crash_due.
+			crash_wake = State.crash_wake:next_op(),
 		}))
 
 
@@ -599,6 +631,8 @@ local function main()
 			publish_all(values)
 			prune_idle_endpoints(now())
 			send_pending_crash()
+		elseif which == 'crash' then
+			send_pending_crash()
 		end
 	end
 
@@ -649,6 +683,9 @@ function M.start(conn, opts)
 	State.fs_cap           = nil
 	State.crash_store      = opts.crash_store or crash_record.new()
 	State.crash_inflight   = false
+	State.crash_last_try   = -math.huge
+	State.crash_due        = math.huge
+	State.crash_wake       = pulse.new()
 
 	fibers.current_scope():finally(function()
 		local _, primary = fibers.current_scope():status()

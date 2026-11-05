@@ -59,6 +59,24 @@ function T.nothing_is_pending_after_a_clean_start()
 	os.remove(path)
 end
 
+function T.next_send_at_says_when_a_record_is_due()
+	local path = temp_path()
+	assert(restarted(path):next_send_at() == nil, 'expected nothing due with nothing pending')
+	os.remove(path)
+
+	failed_run(path, 'gsm.lua:1: boom')
+	local store = restarted(path)
+	assert(store:next_send_at() == 0, 'expected a new record to be due at once')
+
+	store:mark_failed(2000)
+	assert(store:next_send_at() == 2000 + crash_record.RETRY_MIN_S,
+		'expected the retry deadline, got ' .. tostring(store:next_send_at()))
+
+	store:mark_sent(store:next_pending(math.huge).seq, 2100)
+	assert(store:next_send_at() == nil, 'expected nothing due once sent')
+	os.remove(path)
+end
+
 function T.a_killed_process_is_reported_as_unknown_exit_with_system_log()
 	local path = temp_path()
 	new_store(path):begin_run() -- never records anything: killed
