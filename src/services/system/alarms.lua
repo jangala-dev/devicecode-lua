@@ -181,8 +181,9 @@ end
 
 --- Mark the manager as synced, recalculating all trigger times from now.
 function AlarmManager:sync()
-    if self.is_synced then return end
+    if self.is_synced and not self.sync_lost then return end
     self.is_synced = true
+    self.sync_lost = false
     local old = self.alarms
     self:delete_all()
     for _, alarm in ipairs(old) do
@@ -190,13 +191,14 @@ function AlarmManager:sync()
     end
 end
 
---- Mark the manager as desynced (alarms will not fire until re-synced).
+--- Note that sync has been lost. Alarms stay armed: a clock that has synced keeps
+--- running, and the daily reboot is how a box recovers from being offline.
 function AlarmManager:desync()
-    self.is_synced = false
+    self.sync_lost = self.is_synced
 end
 
 --- Return an op that resolves when the next alarm fires, yielding the alarm.
---- If no alarms are pending or the manager is not synced, returns an op that
+--- If no alarms are pending or the clock has never synced, returns an op that
 --- never resolves.
 ---@return Op operation
 function AlarmManager:next_alarm_op()

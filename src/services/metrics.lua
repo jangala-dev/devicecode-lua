@@ -39,6 +39,7 @@ local senml          = require 'services.metrics.senml'
 local http_m         = require 'services.metrics.http'
 local conf           = require 'services.metrics.config'
 local types          = require 'services.metrics.types'
+local ui_usage       = require 'services.ui.usage'
 
 
 local unpack = unpack or rawget(table, 'unpack')
@@ -375,6 +376,10 @@ local function handle_metric(msg)
 
 	local value = payload.value
 	if value == nil then return end
+	if metric_name == ui_usage.metric and type(value) == 'table' then
+		if msg.topic[3] == 'ui' then State.ui_visits:add(value, now()) end
+		return
+	end
 
 	-- Optional namespace overrides the topic used as the SenML name and state key.
 	local topic = payload.namespace or msg.topic
@@ -490,9 +495,11 @@ local function handle_time_sync(synced)
 			State.base_time.real = real - (mono - State.base_time.mono)
 			return true -- first sync
 		end
-	else
-		State.base_time.synced = false
+		-- Sync regained: take up any correction to the clock.
+		State.base_time.real = now_real() - (now() - State.base_time.mono)
 	end
+	-- Losing sync changes nothing. Timestamps come from the monotonic clock and the
+	-- offset from the first sync, and telemetry is how we'd see a box in this state.
 	return false
 end
 
@@ -559,13 +566,14 @@ local function main()
 				elseif first_sync then
 					State.svc:obs_event('ntp_synced', { first = true })
 					State.svc:obs_log('debug', 'NTP synced, waiting for config before scheduling publish')
-				elseif not State.base_time.synced then
-					next_publish_time = math.huge
+				elseif msg.payload ~= true then
 					State.svc:obs_event('ntp_lost', {})
 					State.svc:obs_log('debug', { what = 'ntp_lost' })
 				end
 			end
 		elseif which == 'tick' then
+			local visits = State.ui_visits:drain(State.base_time)
+			if visits then handle_metric({ topic = ui_usage.topic, payload = { value = visits } }) end
 			local values        = State.metric_values
 			State.metric_values = {}
 
@@ -626,6 +634,7 @@ function M.start(conn, opts)
 	State.metric_states    = {}
 	State.endpoint_to_pipe = {}
 	State.metric_values    = {}
+	State.ui_visits        = ui_usage.new()
 	State.publish_period   = nil
 	State.cloud_url        = nil
 	State.mainflux_config  = nil
