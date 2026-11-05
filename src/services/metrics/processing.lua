@@ -13,7 +13,9 @@
 --   block:reset(state)              -> nil
 --
 -- ProcessPipeline wraps a list of blocks and exposes the same interface:
---   pipeline:new_state()            -> state_table  {full_run, blocks={...}}
+--   pipeline:new_state(opts?)       -> state_table  {full_run, blocks={...}}
+--     opts.baseline_first_sample: DeltaValue blocks take the first sample as their
+--     baseline and publish nothing for it (see DeltaValue:new_state).
 --   pipeline:run(value, state)      -> value, short_circuit, error
 --   pipeline:reset(state)           -> nil   (only resets when full_run == true)
 --   pipeline:force_reset(state)     -> nil   (reset unconditionally)
@@ -185,11 +187,16 @@ function DeltaValue.new(config)
     return self, nil
 end
 
+--- opts.baseline_first_sample: take the first sample as the baseline and publish
+--- nothing for it. After a devicecode restart the kernel counter keeps its value,
+--- so measuring from initial_val would report the whole counter as new traffic.
+---@param opts? { baseline_first_sample: boolean? }
 ---@return table
-function DeltaValue:new_state()
+function DeltaValue:new_state(opts)
     return {
         last_val = self.config.initial_val or 0,
         curr_val = nil,
+        baseline_pending = (opts and opts.baseline_first_sample) or nil,
     }
 end
 
@@ -201,6 +208,12 @@ end
 function DeltaValue:run(value, state)
     if type(value) ~= 'number' then
         return nil, false, 'Value must be a number'
+    end
+    if state.baseline_pending then
+        state.baseline_pending = nil
+        state.last_val = value
+        state.curr_val = value
+        return nil, true, nil
     end
     local difference = value - state.last_val
     -- A counter lower than before was reset (interface restart, wifi reload):
@@ -240,11 +253,12 @@ function ProcessPipeline:add(block)
 end
 
 --- Create a fresh state table for this pipeline (and all its blocks).
+---@param opts? { baseline_first_sample: boolean? }
 ---@return table
-function ProcessPipeline:new_state()
+function ProcessPipeline:new_state(opts)
     local state = { full_run = false, blocks = {} }
     for i, block in ipairs(self.process_blocks) do
-        state.blocks[i] = block:new_state()
+        state.blocks[i] = block:new_state(opts)
     end
     return state
 end

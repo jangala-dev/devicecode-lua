@@ -344,6 +344,64 @@ function T.delta_value_pipeline()
 	end, { timeout = 3.0 })
 end
 
+-- Shared set-up for the restart baseline specs: metrics starts with the box
+-- already `uptime_s` seconds into its boot.
+local function with_delta_metrics(uptime_s, body)
+	runfibers.run(function(scope)
+		local clock = virtual_time.install({ monotonic = uptime_s, realtime = 1700000000 })
+		scope:finally(function() clock:restore() end)
+		local bus       = make_bus()
+		local test_conn = bus:connect()
+
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+		start_mock_hal(test_conn, scope)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
+
+		local result_sub = test_conn:subscribe(
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
+			{ queue_len = 10, full = 'drop_oldest' })
+
+		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1, {
+			{ type = 'DeltaValue', initial_val = 0 },
+		}))
+		local svc_scope = start_metrics(bus, scope)
+		flush_ticks()
+
+		local function send(value)
+			test_conn:publish({ 'obs', 'v1', 'network', 'metric', 'rx_bytes' }, { value = value })
+		end
+		body(clock, send, result_sub)
+
+		stop_scope(svc_scope)
+		clock:restore()
+	end, { timeout = 3.0 })
+end
+
+-- A restart late in a boot must not report the whole kernel counter again.
+function T.restart_late_in_boot_takes_first_sample_as_baseline()
+	with_delta_metrics(3600, function(clock, send, result_sub)
+		send(20000000000)
+		local spike = recv_metric(clock, result_sub, 0.4)
+		assert(spike == nil, 'first sample after a restart must not publish, got '
+			.. tostring(spike and spike.payload.value))
+
+		send(20000000500)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg ~= nil, 'expected a publish after the baseline')
+		assert(msg.payload.value == 500, 'expected delta=500, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- A fresh boot starts the counter near zero, so its first sample is real traffic.
+function T.fresh_boot_still_counts_first_sample()
+	with_delta_metrics(60, function(clock, send, result_sub)
+		send(1000)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg ~= nil, 'expected the first sample to publish on a fresh boot')
+		assert(msg.payload.value == 1000, 'expected delta=1000, got ' .. tostring(msg.payload.value))
+	end)
+end
+
 -- HTTP pipelines should enqueue a well-formed Mainflux request payload.
 function T.http_pipeline_enqueues_request_payload()
 	-- Save originals so we can restore after the test.

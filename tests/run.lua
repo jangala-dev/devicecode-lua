@@ -166,6 +166,7 @@ local files = {
 	"integration.devhost.local_ui_http_spec",
 	'unit.metrics.processing_spec',
 	'unit.metrics.endpoint_prune_spec',
+	'unit.metrics.restart_baseline_spec',
 	'unit.metrics.config_spec',
 	'unit.metrics.senml_spec',
 	'unit.metrics.http_spec',

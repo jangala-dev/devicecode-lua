@@ -130,4 +130,86 @@ function T.pipeline_short_circuit()
 	assert(short == true, 'expected short-circuit (diff=2 < threshold 5)')
 end
 
+-- After a devicecode restart the kernel counter keeps its value, so the first
+-- sample is taken as the baseline instead of being reported as new traffic.
+function T.delta_value_baseline_swallows_first_sample()
+	local delta = processing.DeltaValue.new({ initial_val = 0 })
+	local state = delta:new_state({ baseline_first_sample = true })
+
+	local val, short, err = delta:run(20000000000, state)
+	assert(err == nil, tostring(err))
+	assert(short == true, 'baseline sample should not be published')
+	assert(val == nil, 'baseline sample should carry no value')
+
+	val, short, err = delta:run(20000000500, state)
+	assert(err == nil, tostring(err))
+	assert(short == false, 'expected the next sample to publish')
+	assert(val == 500, 'expected delta=500, got ' .. tostring(val))
+end
+
+function T.delta_value_without_baseline_keeps_counting_from_zero()
+	local delta = processing.DeltaValue.new({ initial_val = 0 })
+	local state = delta:new_state()
+
+	local val, short, err = delta:run(1000, state)
+	assert(err == nil, tostring(err))
+	assert(short == false, 'expected publish')
+	assert(val == 1000, 'expected delta=1000, got ' .. tostring(val))
+end
+
+function T.pipeline_baseline_applies_to_the_shipped_counter_shape()
+	-- Same shape as the network_stat template in src/configs.
+	local pipeline = assert(processing.new_process_pipeline())
+	pipeline:add(processing.DiffTrigger.new({
+		diff_method = 'percent', threshold = 5, initial_val = 0,
+	}))
+	pipeline:add(processing.DeltaValue.new({}))
+	local state = pipeline:new_state({ baseline_first_sample = true })
+
+	local kernel = 20000000000
+	local val, short, err = pipeline:run(kernel, state)
+	assert(err == nil, tostring(err))
+	assert(short == true, 'baseline sample should not be published')
+	assert(state.full_run == false, 'a swallowed sample is not a full run')
+
+	-- 4% growth: under the trigger from the baseline, so nothing is sent.
+	val, short, err = pipeline:run(kernel + 800000000, state)
+	assert(err == nil, tostring(err))
+	assert(short == true, '4% should not pass the 5% trigger')
+
+	-- 6% growth: reported as exactly what was added since the baseline.
+	val, short, err = pipeline:run(kernel + 1200000000, state)
+	assert(err == nil, tostring(err))
+	assert(short == false, '6% should pass the 5% trigger')
+	assert(val == 1200000000, 'expected only the growth, got ' .. tostring(val))
+
+	pipeline:reset(state)
+	val, short, err = pipeline:run(kernel + 2400000000, state)
+	assert(err == nil, tostring(err))
+	assert(short == false, 'next 5% step should pass')
+	assert(val == 1200000000, 'expected delta from the published value, got ' .. tostring(val))
+end
+
+function T.pipeline_baseline_handles_a_counter_reset_afterwards()
+	local delta = processing.DeltaValue.new({})
+	local state = delta:new_state({ baseline_first_sample = true })
+	delta:run(5000, state)
+
+	local val, short, err = delta:run(300, state)
+	assert(err == nil, tostring(err))
+	assert(short == false, 'expected publish')
+	assert(val == 300, 'a lower counter was reset, so the value is the change; got ' .. tostring(val))
+end
+
+function T.pipeline_baseline_is_ignored_without_a_delta_block()
+	local pipeline = assert(processing.new_process_pipeline())
+	pipeline:add(processing.DiffTrigger.new({ diff_method = 'any-change' }))
+	local state = pipeline:new_state({ baseline_first_sample = true })
+
+	local val, short, err = pipeline:run('bigbox-v1', state)
+	assert(err == nil, tostring(err))
+	assert(short == false, 'identity-style metrics must still publish')
+	assert(val == 'bigbox-v1', 'expected the value through, got ' .. tostring(val))
+end
+
 return T

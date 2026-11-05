@@ -108,6 +108,13 @@ end
 -- Service state
 -------------------------------------------------------------------------------
 
+-- devicecode starts well inside this on a fresh boot, so a later start is a
+-- restart of the process, and the kernel counters have kept their values.
+local RESTART_MIN_UPTIME_S = 300
+-- Endpoints first seen this soon after a restart were already counting before it.
+-- Later ones are new, such as a Wi-Fi session, so their first sample is real traffic.
+local RESTART_BASELINE_WINDOW_S = 600
+
 ---@type ServiceState
 local State = {
 	conn             = nil,
@@ -126,6 +133,7 @@ local State = {
 	cloud_config     = nil,
 	base_time        = nil,
 	fs_cap           = nil,
+	baseline_until   = nil,
 }
 
 -------------------------------------------------------------------------------
@@ -378,7 +386,9 @@ local function handle_metric(msg)
 
 	-- Get-or-create per-endpoint processing state.
 	if not State.metric_states[endpoint_str] then
-		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state()
+		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state({
+			baseline_first_sample = State.baseline_until ~= nil and now() <= State.baseline_until,
+		})
 		State.endpoint_to_pipe[endpoint_str] = metric_name
 	end
 	State.endpoint_seen[endpoint_str] = now()
@@ -590,6 +600,8 @@ function M.start(conn, opts)
 	State.cloud_config     = nil
 	State.base_time        = types.new.BaseTime(now_real(), now())
 	State.fs_cap           = nil
+	-- Monotonic time is time since boot, so this tells a restart from a fresh boot.
+	State.baseline_until   = (now() >= RESTART_MIN_UPTIME_S) and (now() + RESTART_BASELINE_WINDOW_S) or nil
 
 	fibers.current_scope():finally(function()
 		local _, primary = fibers.current_scope():status()
