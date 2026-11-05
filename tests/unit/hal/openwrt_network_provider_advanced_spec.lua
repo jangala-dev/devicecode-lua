@@ -832,6 +832,23 @@ function tests.test_bigbox_ss_renders_v09_uplink_health_timing()
 	end
 end
 
+-- A member can override the fast-probe options, as it can the other health options.
+function tests.test_member_can_override_fast_probe_intervals()
+	local cjson = require 'cjson.safe'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local doc = ok(cjson.decode(ok(read_project_file('src/configs/bigbox-ss.json'))))
+	doc.net.data.wan.members.wan.failure_interval = 2
+	doc.net.data.wan.members.wan.recovery_interval = 4
+	local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+	local ctx = ok(names.allocate(net_intent))
+	local changes = ok(mwan3.build_changes(net_intent, ctx))
+	local wan = ctx:mwan_iface(net_intent.wan.members.wan.interface)
+	ok(find_change(changes, { config = 'mwan3', section = wan, option = 'failure_interval', value = 2 }))
+	ok(find_change(changes, { config = 'mwan3', section = wan, option = 'recovery_interval', value = 4 }))
+	local modem = ctx:mwan_iface(net_intent.wan.members.modem_primary.interface)
+	ok(find_change(changes, { config = 'mwan3', section = modem, option = 'failure_interval', value = 1 }))
+end
+
 -- The v1 targets keep their timing, and get no fast-probe options they didn't ask for.
 function tests.test_bigbox_v1_targets_keep_uplink_health_timing()
 	local cjson = require 'cjson.safe'
