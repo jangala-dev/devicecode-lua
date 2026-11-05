@@ -86,4 +86,59 @@ function tests.test_apn_connect_continues_when_gid1_is_unavailable()
 	end)
 end
 
+function tests.test_redact_connection_string_hides_only_the_password()
+	local apns = require 'services.gsm.apn'
+	local out = apns.redact_connection_string('apn=example,user=me,password=s3cret,allow-roaming=true')
+	assert(out == 'apn=example,user=me,password=***,allow-roaming=true', out)
+	assert(apns.redact_connection_string('apn=example') == 'apn=example')
+	local err = apns.redact_connection_string('mmcli --simple-connect=apn=a,password=s3cret failed for modem 0')
+	assert(err == 'mmcli --simple-connect=apn=a,password=*** failed for modem 0', err)
+end
+
+-- A failed connect's error repeats the whole mmcli command, password included.
+function tests.test_apn_connect_never_logs_the_password()
+	fibers.run(function()
+		local values = { mcc = '001', mnc = '01', imsi = '001010000000000', gid1 = 'ff' }
+		local logged = {}
+		local cap = {
+			call_control_op = function(_, method, args)
+				if method == 'get' then return op.always({ ok = true, reason = values[args.field] }) end
+				if method == 'connect' then
+					return op.always({ ok = false, reason = 'mmcli -m 0 --simple-connect='
+						.. args.connection_string .. ' failed for modem 0: error, output: nope' })
+				end
+				return op.always({ ok = false, reason = 'unexpected method: ' .. tostring(method) })
+			end,
+			get_state_sub = function()
+				return {
+					recv = function() return { payload = 'registered' } end,
+					recv_op = function() return op.always(nil) end, -- ends the attempt after one failure
+					unsubscribe = function() end,
+				}
+			end,
+		}
+		local svc = {
+			custom_apns = {
+				{ carrier = 'Test', mcc = '001', mnc = '01', apn = 'private', user = 'me', password = 's3cret' },
+			},
+			obs_log = function(_, _, payload)
+				if type(payload) == 'table' then
+					for _, v in pairs(payload) do logged[#logged + 1] = tostring(v) end
+				else
+					logged[#logged + 1] = tostring(payload)
+				end
+			end,
+		}
+		local modem = setmetatable({ cap = cap, svc = svc, cfg = {}, name = 'primary' }, gsm._test.GsmModem)
+
+		local _, connect_err = modem:_apn_connect()
+
+		local all = table.concat(logged, '\n')
+		ok(all:find('apn=private', 1, true), 'expected the attempt to be logged')
+		ok(all:find('failed for modem', 1, true), 'expected the error to be logged')
+		ok(not all:find('s3cret', 1, true), 'password in logs: ' .. all)
+		ok(not tostring(connect_err):find('s3cret', 1, true), 'password in the returned error')
+	end)
+end
+
 return tests

@@ -100,6 +100,12 @@ local function merge_into(dst_apns, dst_rankings, src_apns, src_rankings)
     for _, r in ipairs(src_rankings or {}) do dst_rankings[#dst_rankings + 1] = r end
 end
 
+-- For logs: a connection string can hold an APN password, and a failed connect's error
+-- repeats the whole command.
+local function redact_connection_string(conn_string)
+    return (tostring(conn_string):gsub('password=[^,%s]*', 'password=***'))
+end
+
 local function get_ranked_apns(mcc, mnc, imsi, spn, gid1, custom_records)
     if mnc == nil then return {}, {} end
     mnc = normalise_mnc(mnc)
@@ -132,6 +138,7 @@ end
 
 return {
     get_ranked_apns = get_ranked_apns,
+    redact_connection_string = redact_connection_string,
     build_connection_string = build_connection_string,
     get_apns = get_apns,
 }

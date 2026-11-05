@@ -7,7 +7,7 @@
 --
 -- The store's key decides whether the import has happened: once it exists, whether from
 -- this import or from a save in the current UI, the import never writes again. The caller
--- refuses APN saves until this has finished, so nothing else writes the key meanwhile.
+-- holds APN requests until this has finished, so nothing else writes the key meanwhile.
 --
 -- APN records can hold passwords, so nothing here returns or logs file contents in an
 -- error.
