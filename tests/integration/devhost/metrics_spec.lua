@@ -370,8 +370,8 @@ local function with_delta_metrics(uptime_s, body)
 		local function send(value)
 			test_conn:publish({ 'obs', 'v1', 'network', 'metric', 'rx_bytes' }, { value = value })
 		end
-		local function reapply_config()
-			test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1, {
+		local function reapply_config(publish_period, process)
+			test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', publish_period or 0.1, process or {
 				{ type = 'DeltaValue', initial_val = 0 },
 			}))
 			flush_ticks()
@@ -442,6 +442,38 @@ function T.config_reapplied_before_publishing_keeps_the_queued_traffic()
 		local msg = recv_metric(clock, result_sub, 0.4)
 		assert(msg, 'expected a publish')
 		assert(msg.payload.value == 20000, 'expected all the growth, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- Changing something else in the config doesn't touch a counter.
+function T.config_change_elsewhere_keeps_counting()
+	with_delta_metrics(3600, function(clock, send, result_sub, reapply_config)
+		send(100000) -- baseline
+		assert(recv_metric(clock, result_sub, 0.4) == nil, 'baseline should not publish')
+		send(110000)
+		assert(recv_metric(clock, result_sub, 0.4), 'expected a publish before the config change')
+
+		reapply_config(0.2)
+
+		send(120000)
+		local msg = recv_metric(clock, result_sub, 0.6)
+		assert(msg, 'the sample after a config change must not be swallowed')
+		assert(msg.payload.value == 10000, 'expected delta=10000, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- A pipeline whose logic changed starts again, as it always has.
+function T.config_change_to_the_pipeline_starts_it_again()
+	with_delta_metrics(60, function(clock, send, result_sub, reapply_config)
+		send(100000)
+		assert(recv_metric(clock, result_sub, 0.4), 'expected the first sample to publish')
+
+		reapply_config(0.1, { { type = 'DeltaValue', initial_val = 50000 } })
+
+		send(110000)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg and msg.payload.value == 60000,
+			'expected a delta from the new initial value, got ' .. tostring(msg and msg.payload.value))
 	end)
 end
 

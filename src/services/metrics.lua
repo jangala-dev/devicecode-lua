@@ -422,6 +422,19 @@ local function deep_equal(a, b)
 	return true
 end
 
+--- A pipeline's definition, and the template it uses if any.
+local function pipeline_definition(data, metric_name)
+	local pipeline = data and data.pipelines and data.pipelines[metric_name]
+	local template = pipeline and pipeline.template
+	return pipeline, template and data.templates and data.templates[template]
+end
+
+local function same_pipeline(old_data, new_data, metric_name)
+	local old_pipeline, old_template = pipeline_definition(old_data, metric_name)
+	local new_pipeline, new_template = pipeline_definition(new_data, metric_name)
+	return old_pipeline ~= nil and deep_equal(old_pipeline, new_pipeline) and deep_equal(old_template, new_template)
+end
+
 ---@param payload table?
 ---@return number next_publish_time
 local function handle_config(payload)
@@ -447,11 +460,13 @@ local function handle_config(payload)
 	State.cloud_url = payload.data and payload.data.cloud_url
 	rebuild_cloud_config()
 
-	-- Replace all pipeline state if the logic has changed. The same config applied
-	-- again keeps it, because counters being tracked have lost nothing.
-	if not deep_equal(State.config_data, payload.data) then
-		State.metric_states    = {}
-		State.endpoint_to_pipe = {}
+	-- Replace state only for pipelines whose logic has changed. Counters on the rest
+	-- have lost nothing, whatever else in the config changed.
+	for endpoint_str, metric_name in pairs(State.endpoint_to_pipe) do
+		if not same_pipeline(State.config_data, payload.data, metric_name) then
+			State.metric_states[endpoint_str]    = nil
+			State.endpoint_to_pipe[endpoint_str] = nil
+		end
 	end
 	State.config_data      = payload.data
 	State.pipelines_map    = new_pipelines_map
