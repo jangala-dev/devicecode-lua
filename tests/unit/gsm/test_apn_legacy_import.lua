@@ -120,7 +120,7 @@ function tests.test_an_emptied_list_is_not_imported_again()
 	runfibers.run(function()
 		local conn = fake_conn({ [KEY] = cjson.encode({ records = {} }) })
 		local result = assert(run(conn, function() error('must not read user.cfg') end))
-		assert(result.status == 'exists' and #result.records == 0)
+		assert(result.status == 'exists')
 		assert(conn.puts == 0)
 	end)
 end

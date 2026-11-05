@@ -100,10 +100,25 @@ local function merge_into(dst_apns, dst_rankings, src_apns, src_rankings)
     for _, r in ipairs(src_rankings or {}) do dst_rankings[#dst_rankings + 1] = r end
 end
 
--- For logs: a connection string can hold an APN password, and a failed connect's error
--- repeats the whole command.
-local function redact_connection_string(conn_string)
-    return (tostring(conn_string):gsub('password=[^,%s]*', 'password=***'))
+local function replace_plain(text, needle, with)
+    if type(needle) ~= 'string' or needle == '' then return text end
+    local out, from = {}, 1
+    while true do
+        local i, j = text:find(needle, from, true)
+        if not i then break end
+        out[#out + 1] = text:sub(from, i - 1)
+        out[#out + 1] = with
+        from = j + 1
+    end
+    out[#out + 1] = text:sub(from)
+    return table.concat(out)
+end
+
+-- For errors that may repeat a connection string. It matches exact values rather than a
+-- pattern, because an APN password can hold any characters.
+local function scrub_secrets(text, conn_string, password)
+    text = replace_plain(tostring(text), conn_string, '<connection string>')
+    return replace_plain(text, password, '<password>')
 end
 
 local function get_ranked_apns(mcc, mnc, imsi, spn, gid1, custom_records)
@@ -138,7 +153,7 @@ end
 
 return {
     get_ranked_apns = get_ranked_apns,
-    redact_connection_string = redact_connection_string,
+    scrub_secrets = scrub_secrets,
     build_connection_string = build_connection_string,
     get_apns = get_apns,
 }

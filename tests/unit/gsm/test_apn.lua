@@ -86,13 +86,16 @@ function tests.test_apn_connect_continues_when_gid1_is_unavailable()
 	end)
 end
 
-function tests.test_redact_connection_string_hides_only_the_password()
+function tests.test_scrub_removes_the_exact_connection_string_and_password()
 	local apns = require 'services.gsm.apn'
-	local out = apns.redact_connection_string('apn=example,user=me,password=s3cret,allow-roaming=true')
-	assert(out == 'apn=example,user=me,password=***,allow-roaming=true', out)
-	assert(apns.redact_connection_string('apn=example') == 'apn=example')
-	local err = apns.redact_connection_string('mmcli --simple-connect=apn=a,password=s3cret failed for modem 0')
-	assert(err == 'mmcli --simple-connect=apn=a,password=*** failed for modem 0', err)
+	local conn = 'apn=a,user=me,password=p.%s (x, y)'
+	local err = 'mmcli --simple-connect=' .. conn .. ' failed for modem 0: bad p.%s (x, y) here'
+	local out = apns.scrub_secrets(err, conn, 'p.%s (x, y)')
+	assert(not out:find('p.%s', 1, true), out)
+	assert(not out:find('(x, y)', 1, true), out)
+	assert(out:find('failed for modem 0', 1, true), out)
+	assert(apns.scrub_secrets('plain', conn, nil) == 'plain')
+	assert(apns.scrub_secrets('', conn, 'p') == '')
 end
 
 -- A failed connect's error repeats the whole mmcli command, password included.
@@ -119,7 +122,10 @@ function tests.test_apn_connect_never_logs_the_password()
 		}
 		local svc = {
 			custom_apns = {
-				{ carrier = 'Test', mcc = '001', mnc = '01', apn = 'private', user = 'me', password = 's3cret' },
+				{
+					carrier = 'Test', mcc = '001', mnc = '01', apn = 'private', user = 'me',
+					password = 's3cret with space, and comma',
+				},
 			},
 			obs_log = function(_, _, payload)
 				if type(payload) == 'table' then
@@ -134,10 +140,12 @@ function tests.test_apn_connect_never_logs_the_password()
 		local _, connect_err = modem:_apn_connect()
 
 		local all = table.concat(logged, '\n')
-		ok(all:find('apn=private', 1, true), 'expected the attempt to be logged')
 		ok(all:find('failed for modem', 1, true), 'expected the error to be logged')
-		ok(not all:find('s3cret', 1, true), 'password in logs: ' .. all)
-		ok(not tostring(connect_err):find('s3cret', 1, true), 'password in the returned error')
+		ok(all:find('failed for modem', 1, true), 'expected the error to be logged')
+		for _, part in ipairs({ 's3cret', 'with space', 'and comma' }) do
+			ok(not all:find(part, 1, true), 'password in logs: ' .. all)
+			ok(not tostring(connect_err):find(part, 1, true), 'password in the returned error')
+		end
 	end)
 end
 

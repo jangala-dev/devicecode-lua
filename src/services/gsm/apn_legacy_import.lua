@@ -7,7 +7,7 @@
 --
 -- The store's key decides whether the import has happened: once it exists, whether from
 -- this import or from a save in the current UI, the import never writes again. The caller
--- holds APN requests until this has finished, so nothing else writes the key meanwhile.
+-- runs this before it serves APN requests, so nothing else writes the key meanwhile.
 --
 -- APN records can hold passwords, so nothing here returns or logs file contents in an
 -- error.
@@ -74,7 +74,7 @@ end
 
 -- Resolves to a result whose status is final for this boot, or to nil and an error that
 -- is worth retrying:
---   exists      the store already has the key; records holds its contents
+--   exists      the store already has the key
 --   imported    records were saved; imported and skipped hold the counts
 --   no_source   no file, or no usable records in it; nothing written
 --   malformed   the file can't be parsed; nothing written
@@ -85,11 +85,7 @@ function M.run_op(store, read_op)
 	return fibers.run_scope_op(function()
 		local exists, xerr = perform(store:exists_op())
 		if exists == nil then return nil, xerr or 'control_store_get_failed' end
-		if exists then
-			local records, lerr = perform(store:load_op())
-			if not records then return nil, lerr or 'control_store_get_failed' end
-			return { status = 'exists', records = records }, nil
-		end
+		if exists then return { status = 'exists' }, nil end
 
 		local reply, rerr = perform(read_op())
 		if reply == nil then return nil, tostring(rerr or 'user_cfg_read_failed') end

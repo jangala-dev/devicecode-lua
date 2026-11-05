@@ -105,14 +105,6 @@ local function add_apn(h, apn)
 	return fibers.perform(h.conn:call_op(topic, { record = rec(apn) }, { timeout = 2 }))
 end
 
-local function wait_for_status(h, want)
-	local sub = h.conn:subscribe(gsm_topics.apns_status_state())
-	while true do
-		local msg = assert(fibers.perform(sub:recv_op()), 'status subscription closed')
-		if msg.payload and msg.payload.state == want then return end
-	end
-end
-
 local function stored(h)
 	local body = h.store.values[KEY]
 	return body and cjson.decode(body).records or nil
@@ -168,8 +160,7 @@ end
 function tests.test_import_off_reads_nothing_and_leaves_saves_free()
 	runfibers.run(function(scope)
 		local h = start(scope, { import = false, replies = { { ok = true, reason = user_cfg({ rec('old') }) } } })
-		wait_until(function() return count_calls(h.store, 'get') > 0 end, 'store read')
-		wait_for_status(h, 'ready')
+		wait_for_list(h, 0)
 		local reply, err = add_apn(h, 'typed')
 		assert(reply and reply.ok == true, tostring(err or (reply and reply.reason)))
 		assert(h.reads == 0, 'user.cfg must not be read')
@@ -177,19 +168,19 @@ function tests.test_import_off_reads_nothing_and_leaves_saves_free()
 	end, { timeout = TIMEOUT })
 end
 
--- With no filesystem answer, APN requests wait only until the import gives up.
-function tests.test_import_gives_up_so_requests_cannot_stay_waiting()
+-- With no filesystem answer, GSM starts normally once the import gives up.
+function tests.test_import_gives_up_so_gsm_still_starts()
 	runfibers.run(function(scope)
 		local h = start(scope, { give_up_s = 0.3 })
-		wait_for_status(h, 'ready')
+		wait_for_list(h, 0)
 		local reply, err = add_apn(h, 'typed')
 		assert(reply and reply.ok == true, tostring(err or (reply and reply.reason)))
 		assert(stored(h)[1].apn == 'typed')
 	end, { timeout = TIMEOUT })
 end
 
--- Other main-loop events must not cost the import its retries.
-function tests.test_busy_main_loop_cannot_starve_the_import()
+-- Config updates arriving during startup don't cost the import its retries.
+function tests.test_config_updates_cannot_starve_the_import()
 	runfibers.run(function(scope)
 		local h = start(scope, { give_up_s = 3, replies = {
 			{ ok = false, reason = 'read busy' },
@@ -291,26 +282,29 @@ local function final_list(h)
 	return reply.reason, body and cjson.decode(body).records or nil
 end
 
--- This is how the local UI works: it reads the whole list, then saves the whole list back.
--- A read and a save that arrive while the import is reading wait, and see what it imported.
-function tests.test_ui_read_then_save_during_the_read_keeps_the_import()
+-- APN requests can't reach GSM until the import has finished, so they can't overlap it.
+function tests.test_apn_requests_are_not_served_during_the_import()
 	runfibers.run(function(scope)
 		local h = start_gated(scope)
 		wait_until(function() return h.reading end, 'the read')
-		local listed, list_err
-		assert(scope:spawn(function() listed, list_err = list_apns(h) end))
-		local added
-		assert(scope:spawn(function() added = add_apn(h, 'added') end))
-		fibers.perform(sleep.sleep_op(0.1))
-		assert(listed == nil and added == nil, 'requests must wait for the import')
+		local during = list_apns(h)
+		assert(not (during and during.ok == true), 'GSM must not answer during the import')
+		local refused = add_apn(h, 'early')
+		assert(not (refused and refused.ok == true), 'GSM must not save during the import')
 		assert(#h.puts == 0)
 		h.read_gate:signal()
-		wait_until(function() return listed ~= nil or list_err ~= nil end, 'the list')
-		assert(listed and listed.ok == true, tostring(list_err))
-		assert(#listed.reason >= 1 and listed.reason[1].apn == 'old', 'the read must see the import')
-		wait_until(function() return added ~= nil end, 'the add')
-		assert(added.ok == true, tostring(added.reason))
+		wait_for_list(h, 1)
+		assert(#h.puts == 1)
+	end, { timeout = TIMEOUT })
+end
 
+-- This is how the local UI works: it reads the whole list, then saves the whole list back.
+function tests.test_ui_read_then_save_after_the_import_keeps_it()
+	runfibers.run(function(scope)
+		local h = start_gated(scope)
+		wait_until(function() return h.reading end, 'the read')
+		h.read_gate:signal()
+		wait_for_list(h, 1)
 		local current = assert(list_apns(h))
 		local next_list = current.reason
 		next_list[#next_list + 1] = rec('typed')
@@ -318,47 +312,27 @@ function tests.test_ui_read_then_save_during_the_read_keeps_the_import()
 		local reply = fibers.perform(h.conn:call_op(topic, { records = next_list }, { timeout = 2 }))
 		assert(reply and reply.ok == true, tostring(reply and reply.reason))
 		local memory, disk = final_list(h)
-		assert(#memory == 3 and memory[1].apn == 'old' and memory[3].apn == 'typed', 'memory')
-		assert(#disk == 3 and disk[1].apn == 'old', 'disk')
-	end, { timeout = TIMEOUT })
-end
-
--- The import's save is in flight: a UI save waits for it, then adds to it.
-function tests.test_ui_save_waits_for_the_import_save_and_adds_to_it()
-	runfibers.run(function(scope)
-		local h = start_gated(scope)
-		h.put_gates[1] = cond.new()
-		wait_until(function() return h.reading end, 'the read')
-		h.read_gate:signal()
-		wait_until(function() return #h.puts == 1 end, 'the import save')
-		local reply
-		assert(scope:spawn(function() reply = add_apn(h, 'typed') end))
-		fibers.perform(sleep.sleep_op(0.1))
-		assert(#h.puts == 1 and reply == nil, 'the UI save must wait')
-		h.put_gates[1]:signal()
-		wait_until(function() return reply ~= nil end, 'the UI reply')
-		assert(reply.ok == true, tostring(reply.reason))
-		local memory, disk = final_list(h)
 		assert(#memory == 2 and memory[1].apn == 'old' and memory[2].apn == 'typed', 'memory')
 		assert(#disk == 2 and disk[1].apn == 'old', 'disk')
 	end, { timeout = TIMEOUT })
 end
 
--- Giving up can't lose a save that has landed: only a finished attempt can give up.
-function tests.test_deadline_does_not_abandon_a_save_in_flight()
+-- The import's save lands but its reply never comes, and the import gives up. GSM then
+-- loads what the store holds, so it can't later save a list without the imported record.
+function tests.test_save_whose_reply_is_lost_is_still_used()
 	runfibers.run(function(scope)
 		local h = start_gated(scope, { give_up_s = 0.2 })
 		h.put_gates[1] = cond.new()
 		wait_until(function() return h.reading end, 'the read')
 		h.read_gate:signal()
-		wait_until(function() return #h.puts == 1 end, 'the import save')
-		fibers.perform(sleep.sleep_op(0.4))
-		h.put_gates[1]:signal()
 		wait_for_list(h, 1)
+		local memory = final_list(h)
+		assert(memory[1].apn == 'old')
+		h.put_gates[1]:signal()
 		local reply, err = add_apn(h, 'typed')
 		assert(reply and reply.ok == true, tostring(err or (reply and reply.reason)))
-		local memory, disk = final_list(h)
-		assert(#memory == 2 and memory[1].apn == 'old', 'memory')
+		local after, disk = final_list(h)
+		assert(#after == 2 and after[1].apn == 'old', 'memory')
 		assert(#disk == 2 and disk[1].apn == 'old', 'disk')
 	end, { timeout = TIMEOUT })
 end
@@ -373,26 +347,6 @@ function tests.test_failed_import_save_is_retried()
 		assert(#h.puts == 2, 'puts ' .. tostring(#h.puts))
 		local memory, disk = final_list(h)
 		assert(memory[1].apn == 'old' and disk[1].apn == 'old')
-	end, { timeout = TIMEOUT })
-end
-
--- A config reload in the middle of the import's save doesn't disturb it.
-function tests.test_config_reload_during_the_import_save()
-	runfibers.run(function(scope)
-		local h = start_gated(scope)
-		h.put_gates[1] = cond.new()
-		wait_until(function() return h.reading end, 'the read')
-		h.read_gate:signal()
-		wait_until(function() return #h.puts == 1 end, 'the import save')
-		h.retain_cfg(2)
-		fibers.perform(sleep.sleep_op(0.1))
-		h.put_gates[1]:signal()
-		wait_for_list(h, 1)
-		assert(#h.puts == 1, 'the import must not save twice')
-		local reply, err = add_apn(h, 'typed')
-		assert(reply and reply.ok == true, tostring(err or (reply and reply.reason)))
-		local memory = final_list(h)
-		assert(#memory == 2 and memory[1].apn == 'old')
 	end, { timeout = TIMEOUT })
 end
 
