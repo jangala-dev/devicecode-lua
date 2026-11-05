@@ -813,21 +813,23 @@ function tests.test_bigbox_configs_render_strict_wan_modem_failover()
 	end
 end
 
--- bigbox-ss uses v0.9's health check: a ping every 5 s, and a 1 s probe once an uplink
+-- Every BigBox uses v0.9's health check: a ping every 5 s, and a 1 s probe once an uplink
 -- starts failing. It saves SIM data, and rides out short drops on single-uplink boxes.
-function tests.test_bigbox_ss_renders_v09_uplink_health_timing()
+function tests.test_bigbox_targets_render_v09_uplink_health_timing()
 	local cjson = require 'cjson.safe'
 	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
-	local doc = ok(cjson.decode(ok(read_project_file('src/configs/bigbox-ss.json'))))
-	local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
-	local ctx = ok(names.allocate(net_intent))
-	local changes = ok(mwan3.build_changes(net_intent, ctx))
 	local want = { interval = 5, down = 3, up = 3, timeout = 2, failure_interval = 1, recovery_interval = 1 }
-	for mid, member in pairs(net_intent.wan.members) do
-		local sem = member.interface or mid
-		for option, value in pairs(want) do
-			ok(find_change(changes, { config = 'mwan3', section = ctx:mwan_iface(sem), option = option, value = value }),
-				mid .. ' should render ' .. option .. ' ' .. value)
+	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))))
+		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+		local ctx = ok(names.allocate(net_intent))
+		local changes = ok(mwan3.build_changes(net_intent, ctx))
+		for mid, member in pairs(net_intent.wan.members) do
+			local sem = member.interface or mid
+			for option, value in pairs(want) do
+				ok(find_change(changes, { config = 'mwan3', section = ctx:mwan_iface(sem), option = option, value = value }),
+					target .. ' ' .. mid .. ' should render ' .. option .. ' ' .. value)
+			end
 		end
 	end
 end
@@ -849,34 +851,6 @@ function tests.test_member_can_override_fast_probe_intervals()
 	ok(find_change(changes, { config = 'mwan3', section = modem, option = 'failure_interval', value = 1 }))
 end
 
--- The v1 targets keep their timing, and get no fast-probe options they didn't ask for.
-function tests.test_bigbox_v1_targets_keep_uplink_health_timing()
-	local cjson = require 'cjson.safe'
-	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
-	for _, target in ipairs({ 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
-		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))))
-		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
-		local ctx = ok(names.allocate(net_intent))
-		local changes = ok(mwan3.build_changes(net_intent, ctx))
-		for mid, member in pairs(net_intent.wan.members) do
-			local sec = ctx:mwan_iface(member.interface or mid)
-			ok(find_change(changes, { config = 'mwan3', section = sec, option = 'interval', value = 1 }), target .. ' interval')
-			ok(find_change(changes, { config = 'mwan3', section = sec, option = 'down', value = 2 }), target .. ' down')
-			ok(find_change(changes, { config = 'mwan3', section = sec, option = 'up', value = 1 }), target .. ' up')
-			for _, ch in ipairs(changes) do
-				if ch.section == sec and (ch.option == 'failure_interval' or ch.option == 'recovery_interval') then
-					fail(target .. ' should not render ' .. ch.option)
-				end
-			end
-		end
-	end
-end
-
-
--- mwan3 interfaces start online (mwan3's default) unless the HAL intent says
--- otherwise. Starting them offline dropped all traffic on every structural apply.
--- (NET config accepts initial_state only under wan.health; the member-level case
--- covers the renderer.)
 function tests.test_mwan3_interfaces_start_online_unless_configured()
 	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
 	local function initial_states(wan)
