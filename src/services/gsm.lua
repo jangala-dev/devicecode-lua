@@ -1583,7 +1583,7 @@ function GsmModem:_autoconnect_loop()
 		end
 
 		-- Act on current_state
-		if current_state and (self.cfg.autoconnect or current_state == 'disabled') then
+		if current_state and self.cfg.autoconnect then
 			local err, retry_timeout
 
 			if current_state == 'disabled' and not self.pdp_restart_waiting then

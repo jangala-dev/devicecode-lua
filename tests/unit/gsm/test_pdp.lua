@@ -696,27 +696,19 @@ function tests.test_pdp_disabled_check_retries_read_write_and_restart_failures_b
 end
 
 ---@return nil
-function tests.test_pdp_disabled_check_still_runs_when_autoconnect_is_off()
+function tests.test_pdp_disabled_check_does_not_run_when_autoconnect_is_off()
     runfibers.run(function()
         local contexts = { context(1, 'IPV6', true) }
-        local reads = 0
-        local m, calls
-        m, calls = fixture(contexts, {
-            call = function(method, opts)
-                if method == 'get' and opts.field == 'pdp_contexts' then
-                    reads = reads + 1
-                    if reads == 2 then m.config_pulse:close() end
-                elseif method == 'set_pdn_type' then
-                    contexts[1].pdp_type = opts.pdp_type
-                end
-            end,
-        })
+        local m, calls = fixture(contexts)
         prepare_autoconnect(m)
         m.cfg.autoconnect = false
+        m.config_pulse:close()
         m:_autoconnect_loop()
-        assert(reads >= 2, 'expected PDP read before and after restart')
-        eq(count(calls, 'set_pdn_type'), 1)
-        eq(count(calls, 'restart'), 1)
+        for _, call in ipairs(calls) do
+            assert(not (call.method == 'get' and call.opts.field == 'pdp_contexts'))
+        end
+        eq(count(calls, 'set_pdn_type'), 0)
+        eq(count(calls, 'restart'), 0)
         eq(count(calls, 'enable'), 0)
         eq(count(calls, 'connect'), 0)
     end)
