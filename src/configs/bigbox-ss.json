@@ -528,9 +528,11 @@
           ],
           "track_method": "ping",
           "timeout": 2,
-          "interval": 1,
-          "down": 2,
-          "up": 1
+          "interval": 5,
+          "failure_interval": 1,
+          "recovery_interval": 1,
+          "down": 3,
+          "up": 3
         },
         "runtime": {
           "mmx_mask": "0x3F00"
