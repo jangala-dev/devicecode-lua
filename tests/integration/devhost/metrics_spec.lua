@@ -370,7 +370,13 @@ local function with_delta_metrics(uptime_s, body)
 		local function send(value)
 			test_conn:publish({ 'obs', 'v1', 'network', 'metric', 'rx_bytes' }, { value = value })
 		end
-		body(clock, send, result_sub)
+		local function reapply_config()
+			test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1, {
+				{ type = 'DeltaValue', initial_val = 0 },
+			}))
+			flush_ticks()
+		end
+		body(clock, send, result_sub, reapply_config)
 
 		stop_scope(svc_scope)
 		clock:restore()
@@ -399,6 +405,41 @@ function T.fresh_boot_still_counts_first_sample()
 		local msg = recv_metric(clock, result_sub, 0.4)
 		assert(msg ~= nil, 'expected the first sample to publish on a fresh boot')
 		assert(msg.payload.value == 1000, 'expected delta=1000, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- Reapplying config isn't a restart: nothing is swallowed and nothing is repeated.
+function T.config_reapplied_after_a_restart_keeps_counting()
+	with_delta_metrics(3600, function(clock, send, result_sub, reapply_config)
+		send(100000) -- baseline
+		assert(recv_metric(clock, result_sub, 0.4) == nil, 'baseline should not publish')
+
+		send(110000)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg and msg.payload.value == 10000, 'expected delta=10000 before the config change')
+
+		reapply_config()
+
+		send(120000)
+		msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg, 'the sample after a config change must not be swallowed')
+		assert(msg.payload.value == 10000, 'expected delta=10000, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- Likewise on a fresh boot, where the whole counter used to be reported again.
+function T.config_reapplied_on_a_fresh_boot_does_not_repeat_the_counter()
+	with_delta_metrics(60, function(clock, send, result_sub, reapply_config)
+		send(100000)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg and msg.payload.value == 100000, 'expected the first sample to count')
+
+		reapply_config()
+
+		send(110000)
+		msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg and msg.payload.value == 10000,
+			'expected only the growth, got ' .. tostring(msg and msg.payload.value))
 	end)
 end
 

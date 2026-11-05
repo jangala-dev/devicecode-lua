@@ -134,6 +134,7 @@ local State = {
 	base_time        = nil,
 	fs_cap           = nil,
 	baseline_until   = nil,
+	carried_counters = {},
 }
 
 -------------------------------------------------------------------------------
@@ -386,7 +387,10 @@ local function handle_metric(msg)
 
 	-- Get-or-create per-endpoint processing state.
 	if not State.metric_states[endpoint_str] then
+		local resume_counter = State.carried_counters[endpoint_str]
+		State.carried_counters[endpoint_str] = nil
 		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state({
+			resume_counter        = resume_counter,
 			baseline_first_sample = State.baseline_until ~= nil and now() <= State.baseline_until,
 		})
 		State.endpoint_to_pipe[endpoint_str] = metric_name
@@ -408,6 +412,18 @@ end
 -------------------------------------------------------------------------------
 -- Config handling
 -------------------------------------------------------------------------------
+
+--- A config change replaces all pipeline state, but the process hasn't restarted,
+--- so counters being tracked carry on from where they were.
+local function carry_counters_across_config()
+	State.carried_counters = {}
+	for endpoint_str, state in pairs(State.metric_states) do
+		local metric_name = State.endpoint_to_pipe[endpoint_str]
+		local pipe_cfg = metric_name and State.pipelines_map[metric_name]
+		local counter = pipe_cfg and pipe_cfg.pipeline:counter_value(state)
+		if counter then State.carried_counters[endpoint_str] = counter end
+	end
+end
 
 ---@param payload table?
 ---@return number next_publish_time
@@ -435,6 +451,7 @@ local function handle_config(payload)
 	rebuild_cloud_config()
 
 	-- Replace all pipeline state (logic may have changed).
+	carry_counters_across_config()
 	State.pipelines_map    = new_pipelines_map
 	State.metric_states    = {}
 	State.endpoint_to_pipe = {}
@@ -600,6 +617,7 @@ function M.start(conn, opts)
 	State.cloud_config     = nil
 	State.base_time        = types.new.BaseTime(now_real(), now())
 	State.fs_cap           = nil
+	State.carried_counters = {}
 	-- Monotonic time is time since boot, so this tells a restart from a fresh boot.
 	State.baseline_until   = (now() >= RESTART_MIN_UPTIME_S) and (now() + RESTART_BASELINE_WINDOW_S) or nil
 
@@ -634,6 +652,7 @@ M._test = {
 	State                = State,
 	handle_metric        = handle_metric,
 	prune_idle_endpoints = prune_idle_endpoints,
+	carry_counters_across_config = carry_counters_across_config,
 }
 
 return M

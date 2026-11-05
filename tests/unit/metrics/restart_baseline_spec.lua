@@ -60,6 +60,24 @@ function T.first_sample_on_a_fresh_boot_is_real_traffic()
 	assert(queued_value(State) == 1000, 'expected the first sample to count, got ' .. tostring(queued_value(State)))
 end
 
+-- A config change replaces all pipeline state. It isn't a restart, so a counter
+-- already being tracked must neither be swallowed again nor reported in full.
+function T.config_replacement_does_not_lose_or_repeat_a_counter()
+	local t = metrics._test
+	local pipeline = delta_pipeline()
+	local State = reset_state(pipeline, runtime.now() + 10)
+
+	t.handle_metric(counter_msg(100000)) -- baseline
+	t.handle_metric(counter_msg(110000))
+	assert(queued_value(State) == 10000, 'expected the growth, got ' .. tostring(queued_value(State)))
+
+	t.carry_counters_across_config()
+	State.metric_states, State.endpoint_to_pipe, State.metric_values = {}, {}, {}
+
+	t.handle_metric(counter_msg(120000))
+	assert(queued_value(State) == 10000, 'expected only the growth, got ' .. tostring(queued_value(State)))
+end
+
 -- The failure seen in the field, through the rx_bytes pipeline each target ships.
 function T.shipped_pipelines_report_only_real_traffic_across_restarts()
 	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do

@@ -14,8 +14,11 @@
 --
 -- ProcessPipeline wraps a list of blocks and exposes the same interface:
 --   pipeline:new_state(opts?)       -> state_table  {full_run, blocks={...}}
---     opts.baseline_first_sample: DeltaValue blocks take the first sample as their
---     baseline and publish nothing for it (see DeltaValue:new_state).
+--     opts.baseline_first_sample: a pipeline with a DeltaValue block takes the first
+--     sample as its baseline and publishes nothing for it.
+--     opts.resume_counter: a pipeline with a DeltaValue block carries on from this
+--     counter value.
+--   pipeline:counter_value(state)   -> number?  counter taken up so far, if any
 --   pipeline:run(value, state)      -> value, short_circuit, error
 --   pipeline:reset(state)           -> nil   (only resets when full_run == true)
 --   pipeline:force_reset(state)     -> nil   (reset unconditionally)
@@ -187,16 +190,11 @@ function DeltaValue.new(config)
     return self, nil
 end
 
---- opts.baseline_first_sample: take the first sample as the baseline and publish
---- nothing for it. After a devicecode restart the kernel counter keeps its value,
---- so measuring from initial_val would report the whole counter as new traffic.
----@param opts? { baseline_first_sample: boolean? }
 ---@return table
-function DeltaValue:new_state(opts)
+function DeltaValue:new_state()
     return {
         last_val = self.config.initial_val or 0,
         curr_val = nil,
-        baseline_pending = (opts and opts.baseline_first_sample) or nil,
     }
 end
 
@@ -208,12 +206,6 @@ end
 function DeltaValue:run(value, state)
     if type(value) ~= 'number' then
         return nil, false, 'Value must be a number'
-    end
-    if state.baseline_pending then
-        state.baseline_pending = nil
-        state.last_val = value
-        state.curr_val = value
-        return nil, true, nil
     end
     local difference = value - state.last_val
     -- A counter lower than before was reset (interface restart, wifi reload):
@@ -252,13 +244,45 @@ function ProcessPipeline:add(block)
     table.insert(self.process_blocks, block)
 end
 
+local function has_counter(pipeline)
+    for _, block in ipairs(pipeline.process_blocks) do
+        if getmetatable(block) == DeltaValue then return true end
+    end
+    return false
+end
+
+--- Measure this pipeline's counter from `value`, in every block that compares
+--- against an earlier value.
+local function seed_counter(pipeline, state, value)
+    for i, block in ipairs(pipeline.process_blocks) do
+        local mt = getmetatable(block)
+        if mt == DeltaValue or mt == DiffTrigger then
+            local block_state = state.blocks[i]
+            block_state.last_val = value
+            block_state.curr_val = value
+            block_state.empty = false
+        end
+    end
+end
+
 --- Create a fresh state table for this pipeline (and all its blocks).
----@param opts? { baseline_first_sample: boolean? }
+---
+--- baseline_first_sample is for a devicecode restart: the kernel counter has kept
+--- its value, so measuring from initial_val would report the whole counter as new
+--- traffic. resume_counter is for replacing state while the process keeps running.
+---@param opts? { baseline_first_sample: boolean?, resume_counter: number? }
 ---@return table
 function ProcessPipeline:new_state(opts)
     local state = { full_run = false, blocks = {} }
     for i, block in ipairs(self.process_blocks) do
-        state.blocks[i] = block:new_state(opts)
+        state.blocks[i] = block:new_state()
+    end
+    if opts and has_counter(self) then
+        if type(opts.resume_counter) == 'number' then
+            seed_counter(self, state, opts.resume_counter)
+        elseif opts.baseline_first_sample then
+            state.baseline_pending = true
+        end
     end
     return state
 end
@@ -271,6 +295,14 @@ end
 ---@return boolean short_circuit
 ---@return string? error
 function ProcessPipeline:run(value, state)
+    -- Taken here, ahead of the blocks: a trigger could reject the first sample
+    -- (a percent change from a counter at zero), and the next would then be lost.
+    if state.baseline_pending and type(value) == 'number' then
+        state.baseline_pending = nil
+        seed_counter(self, state, value)
+        return nil, true, nil
+    end
+
     local val   = value
     local short = false
     local err   = nil
@@ -297,6 +329,20 @@ function ProcessPipeline:reset(state)
         end
         state.full_run = false
     end
+end
+
+--- The counter value taken up by this pipeline so far, including anything queued
+--- but not yet published, or nil if it has none.
+---@param state table
+---@return number?
+function ProcessPipeline:counter_value(state)
+    for i, block in ipairs(self.process_blocks) do
+        if getmetatable(block) == DeltaValue then
+            local block_state = state.blocks[i]
+            return block_state.curr_val or block_state.last_val
+        end
+    end
+    return nil
 end
 
 --- Reset regardless of whether the pipeline produced a published value.
