@@ -9,7 +9,6 @@ local tests = {}
 
 function tests.test_absent_state_monitor_reports_command_closed()
 	local fibers = require 'fibers'
-	local runfibers = require 'tests.support.run_fibers'
 	local Backend = linux_mm._test.ModemBackend
 
 	runfibers.run(function()
@@ -22,7 +21,6 @@ end
 
 function tests.test_stopped_state_monitor_reports_command_closed()
 	local fibers = require 'fibers'
-	local runfibers = require 'tests.support.run_fibers'
 	local Backend = linux_mm._test.ModemBackend
 
 	runfibers.run(function()
