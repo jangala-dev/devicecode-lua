@@ -1,5 +1,7 @@
 local busmod    = require 'bus'
 local fibers    = require 'fibers'
+local sleep     = require 'fibers.sleep'
+local op        = require 'fibers.op'
 
 local probe     = require 'tests.support.bus_probe'
 local runfibers = require 'tests.support.run_fibers'
@@ -17,6 +19,16 @@ local function wait_until(fn, timeout, interval)
 		timeout = timeout or 1.0,
 		interval = interval or 0.01,
 	})
+end
+
+-- Curated and raw listeners are op-only, so this gives them the legacy listener's wait.
+local function wait_for_cap(listener, timeout)
+	local which, cap, err = fibers.perform(op.named_choice({
+		cap = listener:wait_for_cap_op(),
+		timeout = sleep.sleep_op(timeout),
+	}))
+	if which == 'timeout' then return nil, 'timeout' end
+	return cap, err or ''
 end
 
 function T.cap_sdk_legacy_listener_accepts_added_on_public_state_topic()
@@ -57,7 +69,7 @@ function T.cap_sdk_curated_listener_accepts_available_status_payload()
 
 		local got_cap, got_err
 		local ok, err = scope:spawn(function()
-			got_cap, got_err = listener:wait_for_cap({ timeout = 0.5 })
+			got_cap, got_err = wait_for_cap(listener, 0.5)
 		end)
 		assert(ok, tostring(err))
 
@@ -85,7 +97,7 @@ function T.cap_sdk_curated_listener_accepts_available_true_payload()
 
 		local got_cap, got_err
 		local ok, err = scope:spawn(function()
-			got_cap, got_err = listener:wait_for_cap({ timeout = 0.5 })
+			got_cap, got_err = wait_for_cap(listener, 0.5)
 		end)
 		assert(ok, tostring(err))
 
@@ -113,7 +125,7 @@ function T.cap_sdk_curated_listener_ignores_removed_status_payload()
 
 		local got_cap, got_err
 		local ok, err = scope:spawn(function()
-			got_cap, got_err = listener:wait_for_cap({ timeout = 0.1 })
+			got_cap, got_err = wait_for_cap(listener, 0.1)
 		end)
 		assert(ok, tostring(err))
 
@@ -143,7 +155,7 @@ function T.cap_sdk_raw_host_listener_and_ref_follow_raw_host_topics()
 
 		local got_cap, got_err
 		local ok, err = scope:spawn(function()
-			got_cap, got_err = listener:wait_for_cap({ timeout = 0.5 })
+			got_cap, got_err = wait_for_cap(listener, 0.5)
 		end)
 		assert(ok, tostring(err))
 
@@ -217,7 +229,7 @@ function T.cap_sdk_raw_member_listener_and_ref_follow_raw_member_topics()
 
 		local got_cap, got_err
 		local ok, err = scope:spawn(function()
-			got_cap, got_err = listener:wait_for_cap({ timeout = 0.5 })
+			got_cap, got_err = wait_for_cap(listener, 0.5)
 		end)
 		assert(ok, tostring(err))
 
