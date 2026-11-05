@@ -2,6 +2,8 @@
 
 local fibers        = require 'fibers'
 local sleep         = require 'fibers.sleep'
+local op            = require 'fibers.op'
+local channel       = require 'fibers.channel'
 local busmod        = require 'bus'
 
 local safe = require 'coxpcall'
@@ -251,7 +253,7 @@ local function stuck_loader(fake_hal, release)
 			return {
 				start = function()
 					fibers.current_scope():finally(function()
-						while not release.now do fibers.perform(sleep.sleep_op(0.005):wrap(function() end)) end
+						op.perform_raw(release.ch:get_op())
 					end)
 					while true do sleep.sleep(3600.0) end
 				end,
@@ -266,7 +268,7 @@ local function run_main_with_stuck_service(path, services_csv, service_loader_fo
 		local bus, fake_hal = new_stack(scope)
 		local store = temp_crash_store(path)
 		store:begin_run()
-		local release = { now = false }
+		local release = { ch = channel.new(1) }
 
 		local child = assert(scope:child())
 		assert(scope:spawn(function()
@@ -279,7 +281,14 @@ local function run_main_with_stuck_service(path, services_csv, service_loader_fo
 		end))
 
 		body(child, store)
-		release.now = true
+
+		-- The record must have appeared while the service was really still stuck.
+		local first = fibers.perform(op.choice(
+			child:join_op():wrap(function() return 'joined' end),
+			sleep.sleep_op(0.02):wrap(function() return 'pending' end)))
+		assert(first == 'pending', 'expected the join to still be blocked')
+
+		fibers.perform(release.ch:put_op(true))
 		child:cancel('test done')
 		fibers.perform(child:join_op())
 	end, { timeout = 2.0 })

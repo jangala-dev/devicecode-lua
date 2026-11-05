@@ -300,7 +300,7 @@ Each record is sent in its own request once config is loaded and the time is syn
 
 **Limits, for metered SIMs:** the reason is at most 200 characters and the log at most 2 KB. Only the first 3 crashes in a boot keep a log, at most 5 records wait at once, and once past the first crashes records are sent at most every 10 minutes. `seq` still shows how many there have been.
 
-**Redaction:** passwords, keys, tokens, salts, usernames, hostnames, MAC addresses, UUIDs and long digit runs such as IMEI and ICCID are removed before anything is written.
+**Redaction:** before anything is written, a line is masked from its first sensitive key onwards (passwords, keys, tokens, salts, usernames, hostnames and similar), and MAC addresses, UUIDs and long digit runs such as IMEI and ICCID are removed. Text is cut to size first, so this can't hold up the scheduler.
 
 ## Timestamping
 

@@ -200,27 +200,61 @@ function T.secrets_and_identifiers_are_removed()
 	os.remove(path)
 end
 
-function T.secrets_in_json_and_quoted_text_are_removed()
+function T.secrets_in_json_quoted_and_nested_text_are_removed()
 	local path = temp_path()
 	local store = new_store(path)
 	store:begin_run()
-	store:note_log('http', 'error', { what = 'a', message = '{"password":"hunter2","user_salt":"salty","ok":"kept"}' })
-	store:note_log('http', 'error', { what = 'b', message = 'password="two secret words" next=fine' })
-	store:note_log('http', 'error', { what = 'c', message = "token='single quoted value' next=fine" })
-	store:note_log('http', 'error', { what = 'd', message = [[{"secret":"esc\"aped value","next":"fine"}]] })
-	store:note_log('http', 'error', { what = 'e', err = 'Authorization: Bearer abc.def.ghi' })
-	store:record_failure({ service = 'x', status = 'failed', primary = '{"psk":"wifi pass phrase"} failed' })
+	for _, message in ipairs({
+		'{"password":"hunter2","user_salt":"salty"}',
+		'password="two secret words" next=x',
+		"token='single quoted value' next=x",
+		[[{"secret":"esc\"aped value","next":"x"}]],
+		'{"credentials":{"value":"nested1"}}',
+		[[{"err":"password=\"esc secret\""}]],
+		[[{\"psk\":\"encoded json\"}]],
+		'Authorization: Bearer abc.def.ghi',
+		'run --password flagvalue now',
+	}) do
+		store:note_log('http', 'error', { what = 'x', message = message })
+	end
+	store:note_log('http', 'error', { what = 'ok_line', detail = 'stays' })
+	store:record_failure({ service = 'x', status = 'failed', primary = 'connect failed {"psk":"wifi pass phrase"}' })
 
 	local rec = restarted(path):next_pending(2000)
 	local text = rec.reason .. '\n' .. rec.log
 	for _, secret in ipairs({
-		'hunter2', 'salty', 'two secret', 'secret words', 'single quoted', 'esc', 'aped value',
-		'abc%.def', 'wifi pass', 'pass phrase',
+		'hunter2', 'salty', 'two secret', 'secret words', 'single quoted', 'esc', 'aped value', 'nested1',
+		'encoded json', 'abc%.def', 'flagvalue', 'wifi pass', 'pass phrase',
 	}) do
 		assert(not text:match(secret), 'leaked ' .. secret .. ' in: ' .. text)
 	end
-	for _, kept in ipairs({ 'kept', 'next=fine', '"next":"fine"', 'failed' }) do
-		assert(text:find(kept, 1, true), 'lost ' .. kept .. ' from: ' .. text)
+	assert(text:find('ok_line detail=stays', 1, true), 'lost a harmless line from: ' .. text)
+	assert(text:find('connect failed', 1, true), 'lost the text before the secret from: ' .. text)
+	os.remove(path)
+end
+
+function T.ordinary_errors_are_left_readable()
+	for _, line in ipairs({
+		"gsm.lua:1685: attempt to index field 'scope' (a nil value)",
+		'service_not_ok:net',
+		"metrics.lua:149: attempt to index field 'pipelines' (a nil value)",
+		'http_listener_context_event_report_failed: full',
+	}) do
+		assert(crash_record.redact(line) == line, 'changed: ' .. crash_record.redact(line))
+	end
+end
+
+-- Redaction runs on the scheduler, so long input mustn't hold up other fibers.
+function T.long_input_is_quick()
+	local path = temp_path()
+	local store = new_store(path)
+	store:begin_run()
+	for _, filler in ipairs({ 'x', 'a=', '"', '1', ':' }) do
+		local t0 = os.clock()
+		store:note_log('svc', 'error', { what = 'x', message = string.rep(filler, 1024 * 1024) })
+		local _ = crash_record.redact(string.rep(filler, 1024 * 1024))
+		local elapsed = os.clock() - t0
+		assert(elapsed < 0.2, ('took %.3f s on a long run of %q'):format(elapsed, filler))
 	end
 	os.remove(path)
 end

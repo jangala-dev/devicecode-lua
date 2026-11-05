@@ -35,6 +35,7 @@ M.FULL_LOG_CRASHES = 3   -- crashes per boot that keep a log, for metered SIMs
 M.MAX_PENDING      = 5
 M.SEND_INTERVAL_S  = 600 -- between sends once past the first crashes, and between retries
 M.LOGREAD_TIMEOUT_S = 5
+M.MAX_SCAN         = 8192 -- the most text redact will look at
 
 local SENSITIVE_KEY_PARTS = {
 	apikey = true, auth = true, authorization = true, credential = true, credentials = true,
@@ -58,54 +59,40 @@ local function is_sensitive_key(key)
 	return false
 end
 
---- Where a value starting at `first` ends: at its closing quote if it has one,
---- honouring backslash escapes, otherwise at the next separator.
-local function value_end(text, first, quote)
-	if quote == '' then
-		local _, last = text:find('^[^%s,"\'}%]]*', first)
-		return last
-	end
-	local i = first
-	while i <= #text do
-		local c = text:sub(i, i)
-		if c == '\\' then
-			i = i + 2
-		elseif c == quote then
-			break
-		else
-			i = i + 1
-		end
-	end
-	return i - 1
-end
-
---- Mask the value of any key=value or "key":"value" with a sensitive key. Other
---- values are scanned too, since one can hold another pair.
-local function redact_pairs(text)
-	local out, pos = {}, 1
+--- Mask a line from its first sensitive key onwards. Trying to find where a value
+--- ends misses nested JSON and escaped quotes, and a lost bit of context is a small
+--- price. Linear in the length of the line.
+local function redact_line(line)
+	local pos = 1
 	while true do
-		local s, e, key, quote = text:find('([%w_%-%.]+)["\']?%s*[=:]%s*(["\']?)', pos)
-		if not s then break end
-		out[#out + 1] = text:sub(pos, e)
-		pos = e + 1
+		local s, e = line:find('[%w_%-%.]+', pos)
+		if not s then return line end
+		local key = line:sub(s, e)
 		if is_sensitive_key(key) then
-			out[#out + 1] = '[redacted]'
-			pos = value_end(text, pos, quote) + 1
+			local _, sep_end = line:find('^[\\"\']*%s*[=:]', e + 1)
+			if not sep_end and key:sub(1, 1) == '-' and line:find('^%s+%S', e + 1) then
+				sep_end = e -- a command line flag such as --password value
+			end
+			if sep_end then return line:sub(1, sep_end) .. ' [redacted]' end
 		end
+		pos = e + 1
 	end
-	out[#out + 1] = text:sub(pos)
-	return table.concat(out)
 end
 
---- Remove secrets and identifiers from free text.
+--- Remove secrets and identifiers from free text. Callers cut text to size first,
+--- because this runs on the scheduler and nothing else runs meanwhile.
 ---@param text string
 ---@return string
 function M.redact(text)
-	text = tostring(text)
+	text = tostring(text):sub(1, M.MAX_SCAN)
 	text = text:gsub('://[^/%s@]+@', '://[redacted]@')
 	text = text:gsub('([Tt]hing%s+)%S+', '%1[redacted]')
 	text = text:gsub('([Bb]earer%s+)%S+', '%1[redacted]')
-	text = redact_pairs(text)
+	local lines = {}
+	for line in (text .. '\n'):gmatch('([^\n]*)\n') do
+		lines[#lines + 1] = redact_line(line)
+	end
+	text = table.concat(lines, '\n')
 	text = text:gsub('%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x[:%-]%x%x', '[mac]')
 	text = text:gsub('%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x', '[uuid]')
 	text = text:gsub('%d+', function(digits)
@@ -138,7 +125,7 @@ local function format_log_line(mono, service, level, payload)
 			parts[#parts + 1] = k .. '=' .. value
 		end
 	end
-	return M.redact(table.concat(parts, ' ')):sub(1, M.MAX_LINE)
+	return M.redact(table.concat(parts, ' '):sub(1, M.MAX_LINE))
 end
 
 --- The newest text that fits, cut at a line boundary where possible.
@@ -214,12 +201,12 @@ function Store:add(state, fields, log_text)
 		service = fields.service,
 		status  = fields.status,
 		mono    = self.monotonic(),
-		reason  = M.redact(fields.reason or ''):sub(1, M.MAX_REASON),
+		reason  = M.redact(tostring(fields.reason or ''):sub(1, M.MAX_REASON)),
 	}
 	if log_text then
 		state.crashes = state.crashes + 1
 		if state.crashes <= M.FULL_LOG_CRASHES and log_text ~= '' then
-			rec.log = keep_tail(M.redact(log_text), M.MAX_LOG)
+			rec.log = keep_tail(M.redact(keep_tail(log_text, M.MAX_SCAN)), M.MAX_LOG)
 		end
 	end
 	state.pending[#state.pending + 1] = rec
