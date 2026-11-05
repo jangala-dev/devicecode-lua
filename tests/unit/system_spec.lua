@@ -203,11 +203,15 @@ function T.uptime_backstop_fires_at_48_hours_only_when_it_should()
 
 		clock:set_monotonic(48 * 3600 + 1)
 		runtime.yield()
-		local which = fibers.perform(op.named_choice({
-			backstop = backstop(true, {}),
-			timeout = sleep.sleep_op(0.05),
-		}))
-		assert_eq(which, 'backstop', 'should fire past 48 hours')
+		-- A timeout can't be used here, because this clock doesn't move by itself.
+		local ready = backstop(true, {})
+		local fired = false
+		for _ = 1, 50 do
+			local which = fibers.perform(op.named_choice({ backstop = ready, now = op.always(true) }))
+			if which == 'backstop' then fired = true; break end
+			runtime.yield()
+		end
+		assert_true(fired, 'should fire past 48 hours')
 	end)
 end
 
