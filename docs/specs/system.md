@@ -93,7 +93,8 @@ The sysinfo fiber subscribes to `{'cap', 'thermal', '+', 'meta'}` to discover av
 Alarms are managed internally by an `AlarmManager` instance (same logic as the old service). Alarms are wall-clock scheduled and require NTP sync to fire correctly, so the alarm manager is only activated once the time service reports `synced = true`.
 
 - On sync: `alarm_manager:sync()` — recalculates all next-trigger times from the current wall clock
-- On unsync: `alarm_manager:desync()` — prevents alarms from firing until re-synced
+- On unsync: `alarm_manager:desync()` — alarms stay armed, because a clock that has synced keeps running and the daily reboot is how a box recovers from being offline
+- Before the first sync, alarms don't fire. If a box with a reboot alarm reaches 48 hours of uptime, it reboots anyway, which covers a box that booted with no internet and never synced
 - On alarm fire: call `_handle_alarm` (see Shutdown Orchestration)
 
 Alarms are replaced wholesale on each config update: `delete_all()` followed by `add()` for each entry.
@@ -108,7 +109,7 @@ When an alarm with `type = 'shutdown'` or `type = 'reboot'` fires:
 4. Subscribe to `{'+', 'health'}` and track all services that are not yet `'disabled'`.
 5. Wait for all tracked services to reach `'disabled'` state, or until the deadline scope expires.
 6. For any service that did not shut down in time, subscribe to `{service, 'health', 'fibers', '+'}` and log which fibers are stuck.
-7. Call the `power` capability RPC (`shutdown` or `reboot`) with `{ reason = alarm.payload.name }`.
+7. Call the `power` capability RPC (`shutdown` or `reboot`) with `{ reason = alarm.payload.name }`, looking the capability up at this point. If it's unavailable or the call fails, log it and try again every 5 minutes.
 
 The shutdown scope is independent of the service scope, since the service scope will itself be cancelled by the broadcast shutdown signal.
 

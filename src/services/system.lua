@@ -529,6 +529,10 @@ end
 -- ── shutdown orchestration ─────────────────────────────
 
 local SHUTDOWN_GRACE = 10          -- seconds services have to shut down
+local POWER_RETRY_S  = 300         -- between attempts at a failed power command
+-- A box reboots daily, so reaching this means the daily alarm isn't working: most likely
+-- the clock has never synced, because the box booted with no internet.
+local MAX_UPTIME_S   = 48 * 60 * 60
 local USB3_MODEL     = "bigbox-ss" -- only model with controllable USB3 hardware
 
 local function usb_verb_for_config(hw_revision, cfg)
@@ -536,10 +540,20 @@ local function usb_verb_for_config(hw_revision, cfg)
     return cfg.usb3_enabled and 'enable' or 'disable'
 end
 
+local function has_reboot_alarm(cfg)
+    for _, alarm_cfg in ipairs(cfg.alarms or {}) do
+        if alarm_cfg.payload and alarm_cfg.payload.type == 'reboot' then return true end
+    end
+    return false
+end
+
 ---@param svc ServiceBase
----@param power_cap CapabilityReference?
+---@param get_power_cap fun(): CapabilityReference?
 ---@param alarm SystemAlarm
-local function handle_alarm(svc, power_cap, alarm)
+---@param opts? { grace_s: number?, retry_s: number?, state: table? }
+local function handle_alarm(svc, get_power_cap, alarm, opts)
+    opts = opts or {}
+    local state      = opts.state or {}
     local conn       = svc.conn
     local payload    = alarm.payload or {}
     local alarm_name = payload.name or "scheduled alarm"
@@ -548,25 +562,30 @@ local function handle_alarm(svc, power_cap, alarm)
     svc:obs_log('info', { what = 'alarm_fired', name = alarm_name, type = alarm_type })
     svc:obs_event('alarm_fired', { name = alarm_name, type = alarm_type, ts = svc:now() })
 
-    if not power_cap then
-        svc:obs_log('error', { what = 'alarm_aborted', reason = 'power cap unavailable', alarm = alarm_name })
-        return
-    end
+    if state.power_pending then return end
+    state.power_pending = true
 
     -- Broadcast shutdown signal so all services can clean up within the deadline.
     conn:retain(t_state_system_shutdown(), {
         reason   = alarm_name,
-        deadline = fibers.now() + SHUTDOWN_GRACE,
+        deadline = fibers.now() + (opts.grace_s or SHUTDOWN_GRACE),
     })
 
-    -- After the grace period, issue the power command via the capability.
+    -- After the grace period, issue the power command via the capability. Keep trying
+    -- until it works: the capability may not be up yet, and tomorrow is a long time to wait.
     local ok, spawn_err = fibers.current_scope():spawn(function()
-        perform(sleep.sleep_op(SHUTDOWN_GRACE))
-        svc:obs_log('info', { what = 'power_command', type = alarm_type })
-        local power_opts = cap_sdk.args.new.PowerActionOpts()
-        local _, err = cap_rpc(power_cap, alarm_type, power_opts)
-        if err ~= "" then
+        perform(sleep.sleep_op(opts.grace_s or SHUTDOWN_GRACE))
+        while true do
+            local power_cap = get_power_cap()
+            local err = 'power capability unavailable'
+            if power_cap then
+                svc:obs_log('info', { what = 'power_command', type = alarm_type })
+                local _
+                _, err = cap_rpc(power_cap, alarm_type, cap_sdk.args.new.PowerActionOpts())
+            end
+            if err == "" then return end
             svc:obs_log('error', { what = 'power_command_failed', type = alarm_type, err = err })
+            perform(sleep.sleep_op(opts.retry_s or POWER_RETRY_S))
         end
     end)
     if not ok then
@@ -618,8 +637,15 @@ local function system_main(svc, report_period_ch)
         usb_cap = wait_for_cap(conn, svc, 'usb', 'usb3')
     end
 
-    -- Acquire power cap upfront — needed when alarms fire.
-    local power_cap = wait_for_cap(conn, svc, 'power', '1')
+    -- The power capability is looked up when an alarm fires, so one that was slow to
+    -- appear at start-up doesn't stop reboots for the life of the process.
+    local power_cap = nil
+    local function get_power_cap()
+        power_cap = power_cap or wait_for_cap(conn, svc, 'power', '1')
+        return power_cap
+    end
+    local power_state = {}
+    local reboot_configured = false
 
     local alarm_mgr = alarms.AlarmManager.new()
     local cfg_sub   = conn:subscribe(t_cfg(svc.name))
@@ -631,6 +657,9 @@ local function system_main(svc, report_period_ch)
             time  = time_sub:recv_op(),
             alarm = alarm_mgr:next_alarm_op(),
         }
+        if reboot_configured and not power_state.power_pending then
+            choices.backstop = sleep.sleep_until_op(MAX_UPTIME_S) -- monotonic time is time since boot
+        end
 
         local which, msg = perform(op.named_choice(choices))
 
@@ -662,6 +691,7 @@ local function system_main(svc, report_period_ch)
                 end
 
                 -- Reload alarms.
+                reboot_configured = has_reboot_alarm(cfg)
                 alarm_mgr:delete_all()
                 if type(cfg.alarms) == 'table' then
                     for _, alarm_cfg in ipairs(cfg.alarms) do
@@ -679,10 +709,15 @@ local function system_main(svc, report_period_ch)
                 svc:obs_log('debug', 'alarm manager synced')
             else
                 alarm_mgr:desync()
-                svc:obs_log('debug', 'alarm manager desynced')
+                svc:obs_log('debug', 'alarm manager noted sync lost')
             end
         elseif which == 'alarm' then
-            handle_alarm(svc, power_cap, msg)
+            handle_alarm(svc, get_power_cap, msg, { state = power_state })
+        elseif which == 'backstop' then
+            svc:obs_log('warn', { what = 'uptime_backstop', uptime_s = MAX_UPTIME_S })
+            handle_alarm(svc, get_power_cap, { payload = { name = 'uptime backstop', type = 'reboot' } }, {
+                state = power_state,
+            })
         end
     end
 end
@@ -733,6 +768,8 @@ SystemService._test = {
     collect_sysinfo_state = collect_sysinfo_state,
     publish_sysinfo_state = publish_sysinfo_state,
     usb_verb_for_config = usb_verb_for_config,
+    has_reboot_alarm = has_reboot_alarm,
+    handle_alarm = handle_alarm,
 }
 
 return SystemService

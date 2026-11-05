@@ -3,6 +3,8 @@
 local fibers = require 'fibers'
 local op = require 'fibers.op'
 
+local sleep = require 'fibers.sleep'
+
 local system = require 'services.system'
 
 local T = {}
@@ -100,6 +102,135 @@ function T.publish_sysinfo_metrics_sends_pi_power_flags_under_v0_10_names()
 		metrics = run({})
 		assert_eq(metrics.power_undervoltage, nil, 'no value, no metric')
 	end)
+end
+
+-- fibers.alarm takes one time source per load, so each test gets a fresh copy.
+local function with_wall_clock(body)
+	local saved_falarm, saved_alarms = package.loaded['fibers.alarm'], package.loaded['services.system.alarms']
+	package.loaded['fibers.alarm'], package.loaded['services.system.alarms'] = nil, nil
+	local falarm = require 'fibers.alarm'
+	local alarms = require 'services.system.alarms'
+
+	local start = os.time()
+	start = start - start % 3600 + 3599 -- one second before the next hour
+	local real_time = os.time
+	fibers.run(function()
+		local mono0 = fibers.now()
+		local function wall() return start + (fibers.now() - mono0) end
+		os.time = function(tbl)
+			if tbl then return real_time(tbl) end
+			return math.floor(wall())
+		end
+		falarm.set_time_source(wall)
+		local ok, err = pcall(body, alarms, os.date('*t', start + 1))
+		os.time = real_time
+		package.loaded['fibers.alarm'], package.loaded['services.system.alarms'] = saved_falarm, saved_alarms
+		if not ok then error(err, 0) end
+	end)
+end
+
+local function alarm_at(trigger)
+	return { time = string.format('%d:%02d', trigger.hour, trigger.min), repeats = 'daily', payload = { name = 'test' } }
+end
+
+local function fired_within(mgr, seconds)
+	local which = fibers.perform(op.named_choice({ alarm = mgr:next_alarm_op(), timeout = sleep.sleep_op(seconds) }))
+	return which == 'alarm'
+end
+
+-- A clock that has synced once keeps running when NTP is lost. The daily reboot is how
+-- a box recovers from being offline, so it must not depend on still being in touch.
+function T.alarm_still_fires_after_losing_sync()
+	with_wall_clock(function(alarms, trigger)
+		local mgr = alarms.AlarmManager.new()
+		assert_eq(mgr:add(alarm_at(trigger)), '')
+		mgr:sync()
+		mgr:desync()
+		assert_true(fired_within(mgr, 1.5), 'expected the alarm to fire despite losing sync')
+	end)
+end
+
+function T.alarm_waits_for_the_first_sync()
+	with_wall_clock(function(alarms, trigger)
+		local mgr = alarms.AlarmManager.new()
+		assert_eq(mgr:add(alarm_at(trigger)), '')
+		assert_true(not fired_within(mgr, 1.5), 'a clock that never synced could be anything')
+	end)
+end
+
+function T.regaining_sync_recalculates_from_the_new_clock()
+	with_wall_clock(function(alarms, trigger)
+		local mgr = alarms.AlarmManager.new()
+		assert_eq(mgr:add(alarm_at(trigger)), '')
+		mgr:sync()
+		local head = mgr.alarms[1].wait_alarm
+		mgr:desync()
+		assert_true(mgr.alarms[1].wait_alarm == head, 'losing sync should leave the alarm armed')
+		mgr:sync()
+		assert_true(mgr.alarms[1].wait_alarm ~= head, 'regaining sync should rebuild the alarm')
+	end)
+end
+
+function T.uptime_backstop_needs_a_configured_reboot()
+	local has = system._test.has_reboot_alarm
+	assert_eq(has({ alarms = { { payload = { type = 'reboot' } } } }), true)
+	assert_eq(has({ alarms = { { payload = { type = 'shutdown' } } } }), false)
+	assert_eq(has({ alarms = {} }), false)
+	assert_eq(has({}), false)
+end
+
+-- Runs handle_alarm with a stand-in capability, and records what happened.
+local function run_handle_alarm(get_power_cap, attempts_wanted)
+	local logs, retained = {}, {}
+	local svc = {
+		conn = { retain = function(_, topic, payload) retained[#retained + 1] = { topic = topic, payload = payload } end },
+		now = function() return 0 end,
+		obs_log = function(_, _, payload) logs[#logs + 1] = payload end,
+		obs_event = function() end,
+	}
+	local result = { logs = logs, retained = retained }
+	fibers.run(function()
+		system._test.handle_alarm(svc, get_power_cap, { payload = { name = 'daily reboot', type = 'reboot' } }, {
+			grace_s = 0.01, retry_s = 0.01,
+		})
+		sleep.sleep(attempts_wanted * 0.05)
+	end)
+	return result
+end
+
+function T.reboot_looks_up_the_power_capability_when_it_fires()
+	local lookups, calls = 0, 0
+	local cap = {
+		call_control_op = function()
+			calls = calls + 1
+			return op.always({ ok = true })
+		end,
+	}
+	run_handle_alarm(function()
+		lookups = lookups + 1
+		if lookups < 3 then return nil end
+		return cap
+	end, 4)
+	assert_eq(calls, 1, 'expected one reboot command once the capability appeared')
+	assert_eq(lookups, 3, 'expected the capability to be looked up until it appeared')
+end
+
+function T.a_failed_reboot_is_tried_again()
+	local calls = 0
+	local cap = {
+		call_control_op = function()
+			calls = calls + 1
+			if calls < 3 then return op.always({ ok = false, reason = 'busy' }) end
+			return op.always({ ok = true })
+		end,
+	}
+	local result = run_handle_alarm(function() return cap end, 4)
+	assert_eq(calls, 3, 'expected the command to be retried until it worked')
+	local failures = 0
+	for _, log in ipairs(result.logs) do
+		if log.what == 'power_command_failed' then failures = failures + 1 end
+	end
+	assert_eq(failures, 2, 'expected each failure to be logged')
 end
 
 return T
