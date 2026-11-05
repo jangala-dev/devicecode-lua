@@ -80,6 +80,51 @@ function tests.test_backhaul_uses_mwan3_for_status_and_endpoint_for_device_name(
     eq(wan.status_source.tool, 'mwan3')
 end
 
+function tests.test_wired_member_reports_link_and_address_readings()
+    local model = backhaul.reduce({
+        interfaces = { wan = { endpoint = { ifname = 'eth0.2' } } },
+        wan = { configured_members = { wan = { interface = 'wan', metric = 10 } } },
+        observed = {
+            snapshot = {
+                multiwan = {
+                    backend = 'openwrt', source = 'mwan3',
+                    interfaces_by_semantic = {
+                        wan = { interface = 'wan', ifname = 'eth0.2', state = 'online', usable = true },
+                    },
+                },
+                live = {
+                    interfaces = { wan = { device = 'eth0.2', ipv4 = { { address = '192.0.2.5' } } } },
+                    -- carrier = physical cable; up (admin) is deliberately false to prove we read carrier.
+                    devices = { ['eth0.2'] = { name = 'eth0.2', carrier = true, up = false } },
+                },
+            },
+        },
+    }, { now = 42 })
+
+    local wan = ok(model.uplinks.wan, 'wan uplink expected')
+    eq(wan.link_up, true)
+    eq(wan.has_address, true)
+end
+
+function tests.test_wired_member_link_and_address_unknown_without_live_readings()
+    local model = backhaul.reduce({
+        wan = { configured_members = { wan = { interface = 'wan' } } },
+        observed = {
+            snapshot = {
+                multiwan = {
+                    interfaces_by_semantic = {
+                        wan = { interface = 'wan', state = 'offline', usable = false },
+                    },
+                },
+            },
+        },
+    }, { now = 42 })
+
+    local wan = ok(model.uplinks.wan, 'wan uplink expected')
+    eq(wan.link_up, nil)
+    eq(wan.has_address, nil)
+end
+
 function tests.test_gsm_uplink_uses_mwan3_status_not_gsm_connection_state()
     local model = backhaul.reduce({
         wan = {
