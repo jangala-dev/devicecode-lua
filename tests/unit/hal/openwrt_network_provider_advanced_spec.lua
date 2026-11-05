@@ -786,6 +786,42 @@ end
 -- mwan3's metric order with a weighted split across every member. HTTPS is not
 -- sticky: a sticky entry made while on a modem is checked before the policy and
 -- would keep that client on cellular after the WAN recovers.
+-- When every uplink looks dead, traffic uses the normal route rather than being refused.
+-- Tracking only pings, so a network that blocks pings can look dead when it isn't.
+function tests.test_bigbox_configs_fall_back_to_the_normal_route()
+	local cjson = require 'cjson.safe'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))))
+		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+		local ctx = ok(names.allocate(net_intent))
+		local changes = ok(mwan3.build_changes(net_intent, ctx))
+		ok(find_change(changes, { config = 'mwan3', option = 'last_resort', value = 'default' }),
+			target .. ' should render last_resort default')
+	end
+end
+
+function tests.test_last_resort_can_be_set_in_config()
+	local cjson = require 'cjson.safe'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local doc = ok(cjson.decode(ok(read_project_file('src/configs/bigbox-ss.json'))))
+	doc.net.data.wan.last_resort = 'unreachable'
+	local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+	local ctx = ok(names.allocate(net_intent))
+	local changes = ok(mwan3.build_changes(net_intent, ctx))
+	ok(find_change(changes, { config = 'mwan3', option = 'last_resort', value = 'unreachable' }),
+		'a configured last_resort should be rendered')
+end
+
+function tests.test_last_resort_rejects_an_unknown_value()
+	local cjson = require 'cjson.safe'
+	local doc = ok(cjson.decode(ok(read_project_file('src/configs/bigbox-ss.json'))))
+	doc.net.data.wan.last_resort = 'somewhere'
+	local net_intent, err = net_config.normalise(doc.net, { rev = 1 })
+	if net_intent ~= nil then fail('expected an unknown last_resort to be rejected') end
+	if not tostring(err):match('last_resort') then fail('expected the error to name last_resort: ' .. tostring(err)) end
+end
+
 function tests.test_bigbox_configs_render_strict_wan_modem_failover()
 	local cjson = require 'cjson.safe'
 	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
@@ -813,11 +849,44 @@ function tests.test_bigbox_configs_render_strict_wan_modem_failover()
 	end
 end
 
+-- Every BigBox uses v0.9's health check: a ping every 5 s, and a 1 s probe once an uplink
+-- starts failing. It saves SIM data, and rides out short drops on single-uplink boxes.
+function tests.test_bigbox_targets_render_v09_uplink_health_timing()
+	local cjson = require 'cjson.safe'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local want = { interval = 5, down = 3, up = 3, timeout = 2, failure_interval = 1, recovery_interval = 1 }
+	for _, target in ipairs({ 'bigbox-ss', 'bigbox-v1-cm', 'bigbox-v1-cm-2' }) do
+		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))))
+		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+		local ctx = ok(names.allocate(net_intent))
+		local changes = ok(mwan3.build_changes(net_intent, ctx))
+		for mid, member in pairs(net_intent.wan.members) do
+			local sem = member.interface or mid
+			for option, value in pairs(want) do
+				ok(find_change(changes, { config = 'mwan3', section = ctx:mwan_iface(sem), option = option, value = value }),
+					target .. ' ' .. mid .. ' should render ' .. option .. ' ' .. value)
+			end
+		end
+	end
+end
 
--- mwan3 interfaces start online (mwan3's default) unless the HAL intent says
--- otherwise. Starting them offline dropped all traffic on every structural apply.
--- (NET config accepts initial_state only under wan.health; the member-level case
--- covers the renderer.)
+-- A member can override the fast-probe options, as it can the other health options.
+function tests.test_member_can_override_fast_probe_intervals()
+	local cjson = require 'cjson.safe'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local doc = ok(cjson.decode(ok(read_project_file('src/configs/bigbox-ss.json'))))
+	doc.net.data.wan.members.wan.failure_interval = 2
+	doc.net.data.wan.members.wan.recovery_interval = 4
+	local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+	local ctx = ok(names.allocate(net_intent))
+	local changes = ok(mwan3.build_changes(net_intent, ctx))
+	local wan = ctx:mwan_iface(net_intent.wan.members.wan.interface)
+	ok(find_change(changes, { config = 'mwan3', section = wan, option = 'failure_interval', value = 2 }))
+	ok(find_change(changes, { config = 'mwan3', section = wan, option = 'recovery_interval', value = 4 }))
+	local modem = ctx:mwan_iface(net_intent.wan.members.modem_primary.interface)
+	ok(find_change(changes, { config = 'mwan3', section = modem, option = 'failure_interval', value = 1 }))
+end
+
 function tests.test_mwan3_interfaces_start_online_unless_configured()
 	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
 	local function initial_states(wan)

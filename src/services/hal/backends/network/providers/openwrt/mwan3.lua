@@ -111,6 +111,8 @@ function M.build_changes(intent, name_ctx)
 		set_option(changes, 'mwan3', ifsec, 'count', m.count or health.count)
 		set_option(changes, 'mwan3', ifsec, 'timeout', m.timeout or health.timeout)
 		set_option(changes, 'mwan3', ifsec, 'interval', m.interval or health.interval)
+		set_option(changes, 'mwan3', ifsec, 'failure_interval', m.failure_interval or health.failure_interval)
+		set_option(changes, 'mwan3', ifsec, 'recovery_interval', m.recovery_interval or health.recovery_interval)
 		set_option(changes, 'mwan3', ifsec, 'up', m.up or health.up)
 		set_option(changes, 'mwan3', ifsec, 'down', m.down or health.down)
 		local member_sec = mw_member(mid)
@@ -126,7 +128,9 @@ function M.build_changes(intent, name_ctx)
 	known[policy_name] = true
 	set_section(changes, 'mwan3', policy_name, 'policy')
 	set_list_option(changes, 'mwan3', policy_name, 'use_member', member_sections)
-	set_option(changes, 'mwan3', policy_name, 'last_resort', wan.last_resort or 'unreachable')
+	-- Tracking only pings, so an uplink can look dead on a network that just blocks them.
+	-- When every uplink looks dead, clients use the normal route rather than being refused.
+	set_option(changes, 'mwan3', policy_name, 'last_resort', wan.last_resort or 'default')
 
 	local rule_sections = {}
 	for _, rid in ipairs(sorted_keys(wan.rules or {})) do

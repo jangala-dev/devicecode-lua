@@ -344,6 +344,219 @@ function T.delta_value_pipeline()
 	end, { timeout = 3.0 })
 end
 
+-- Shared set-up for the restart baseline specs: metrics starts with the box
+-- already `uptime_s` seconds into its boot.
+local function with_delta_metrics(uptime_s, body)
+	runfibers.run(function(scope)
+		local clock = virtual_time.install({ monotonic = uptime_s, realtime = 1700000000 })
+		scope:finally(function() clock:restore() end)
+		local bus       = make_bus()
+		local test_conn = bus:connect()
+
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+		start_mock_hal(test_conn, scope)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
+
+		local result_sub = test_conn:subscribe(
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
+			{ queue_len = 10, full = 'drop_oldest' })
+
+		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', 0.1, {
+			{ type = 'DeltaValue', initial_val = 0 },
+		}))
+		local svc_scope = start_metrics(bus, scope)
+		flush_ticks()
+
+		local function send(value)
+			test_conn:publish({ 'obs', 'v1', 'network', 'metric', 'rx_bytes' }, { value = value })
+		end
+		local function reapply_config(publish_period, process)
+			test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('rx_bytes', publish_period or 0.1, process or {
+				{ type = 'DeltaValue', initial_val = 0 },
+			}))
+			flush_ticks()
+		end
+		body(clock, send, result_sub, reapply_config)
+
+		stop_scope(svc_scope)
+		clock:restore()
+	end, { timeout = 3.0 })
+end
+
+-- A restart late in a boot must not report the whole kernel counter again.
+function T.restart_late_in_boot_takes_first_sample_as_baseline()
+	with_delta_metrics(3600, function(clock, send, result_sub)
+		send(20000000000)
+		local spike = recv_metric(clock, result_sub, 0.4)
+		assert(spike == nil, 'first sample after a restart must not publish, got '
+			.. tostring(spike and spike.payload.value))
+
+		send(20000000500)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg ~= nil, 'expected a publish after the baseline')
+		assert(msg.payload.value == 500, 'expected delta=500, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- A fresh boot starts the counter near zero, so its first sample is real traffic.
+function T.fresh_boot_still_counts_first_sample()
+	with_delta_metrics(60, function(clock, send, result_sub)
+		send(1000)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg ~= nil, 'expected the first sample to publish on a fresh boot')
+		assert(msg.payload.value == 1000, 'expected delta=1000, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- Reapplying config isn't a restart: nothing is swallowed and nothing is repeated.
+function T.config_reapplied_after_a_restart_keeps_counting()
+	with_delta_metrics(3600, function(clock, send, result_sub, reapply_config)
+		send(100000) -- baseline
+		assert(recv_metric(clock, result_sub, 0.4) == nil, 'baseline should not publish')
+
+		send(110000)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg and msg.payload.value == 10000, 'expected delta=10000 before the config change')
+
+		reapply_config()
+
+		send(120000)
+		msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg, 'the sample after a config change must not be swallowed')
+		assert(msg.payload.value == 10000, 'expected delta=10000, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- A sample queued but not yet published must survive the same config being applied.
+function T.config_reapplied_before_publishing_keeps_the_queued_traffic()
+	with_delta_metrics(3600, function(clock, send, result_sub, reapply_config)
+		send(100000) -- baseline
+		flush_ticks()
+		send(110000)
+		flush_ticks()
+		reapply_config()
+		reapply_config()
+		send(120000)
+		flush_ticks()
+
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg, 'expected a publish')
+		assert(msg.payload.value == 20000, 'expected all the growth, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- Changing something else in the config doesn't touch a counter.
+function T.config_change_elsewhere_keeps_counting()
+	with_delta_metrics(3600, function(clock, send, result_sub, reapply_config)
+		send(100000) -- baseline
+		assert(recv_metric(clock, result_sub, 0.4) == nil, 'baseline should not publish')
+		send(110000)
+		assert(recv_metric(clock, result_sub, 0.4), 'expected a publish before the config change')
+
+		reapply_config(0.2)
+
+		send(120000)
+		local msg = recv_metric(clock, result_sub, 0.6)
+		assert(msg, 'the sample after a config change must not be swallowed')
+		assert(msg.payload.value == 10000, 'expected delta=10000, got ' .. tostring(msg.payload.value))
+	end)
+end
+
+-- A pipeline whose logic changed starts again, as it always has.
+function T.config_change_to_the_pipeline_starts_it_again()
+	with_delta_metrics(60, function(clock, send, result_sub, reapply_config)
+		send(100000)
+		assert(recv_metric(clock, result_sub, 0.4), 'expected the first sample to publish')
+
+		reapply_config(0.1, { { type = 'DeltaValue', initial_val = 50000 } })
+
+		send(110000)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg and msg.payload.value == 60000,
+			'expected a delta from the new initial value, got ' .. tostring(msg and msg.payload.value))
+	end)
+end
+
+-- Likewise on a fresh boot, where the whole counter used to be reported again.
+function T.config_reapplied_on_a_fresh_boot_does_not_repeat_the_counter()
+	with_delta_metrics(60, function(clock, send, result_sub, reapply_config)
+		send(100000)
+		local msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg and msg.payload.value == 100000, 'expected the first sample to count')
+
+		reapply_config()
+
+		send(110000)
+		msg = recv_metric(clock, result_sub, 0.4)
+		assert(msg and msg.payload.value == 10000,
+			'expected only the growth, got ' .. tostring(msg and msg.payload.value))
+	end)
+end
+
+-- Telemetry is how we'd see a box that has lost NTP, so losing sync must not stop it.
+function T.publishing_continues_after_sync_is_lost()
+	runfibers.run(function(scope)
+		local clock = new_test_clock()
+		scope:finally(function() clock:restore() end)
+		local bus       = make_bus()
+		local test_conn = bus:connect()
+
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+		start_mock_hal(test_conn, scope)
+		test_conn:retain({ 'state', 'time', 'synced' }, true)
+
+		local result_sub = test_conn:subscribe(
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
+			{ queue_len = 10, full = 'drop_oldest' })
+
+		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1, {}))
+		local svc_scope = start_metrics(bus, scope)
+		flush_ticks()
+
+		test_conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, { value = 'before' })
+		local first = recv_metric(clock, result_sub, 0.4)
+		assert(first and first.payload.value == 'before', 'expected a publish while synced')
+
+		test_conn:retain({ 'state', 'time', 'synced' }, false)
+		flush_ticks()
+
+		test_conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, { value = 'after' })
+		local second = recv_metric(clock, result_sub, 0.4)
+		assert(second and second.payload.value == 'after', 'expected publishing to carry on after losing sync')
+		assert(second.payload.time > first.payload.time, 'expected timestamps to keep moving forward')
+
+		stop_scope(svc_scope)
+		clock:restore()
+	end, { timeout = 3.0 })
+end
+
+function T.nothing_publishes_before_the_first_sync()
+	runfibers.run(function(scope)
+		local clock = new_test_clock()
+		scope:finally(function() clock:restore() end)
+		local bus       = make_bus()
+		local test_conn = bus:connect()
+
+		test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+		start_mock_hal(test_conn, scope)
+		test_conn:retain({ 'state', 'time', 'synced' }, false)
+
+		local result_sub = test_conn:subscribe(
+			{ 'obs', 'v1', 'metrics', 'output', '#' },
+			{ queue_len = 10, full = 'drop_oldest' })
+
+		test_conn:retain({ 'cfg', 'metrics' }, bus_pipeline_config('sim', 0.1, {}))
+		local svc_scope = start_metrics(bus, scope)
+		flush_ticks()
+
+		test_conn:publish({ 'obs', 'v1', 'modem', 'metric', 'sim' }, { value = 'x' })
+		assert(recv_metric(clock, result_sub, 0.4) == nil, 'timestamps would be wrong before the first sync')
+
+		stop_scope(svc_scope)
+		clock:restore()
+	end, { timeout = 3.0 })
+end
+
 -- HTTP pipelines should enqueue a well-formed Mainflux request payload.
 function T.http_pipeline_enqueues_request_payload()
 	-- Save originals so we can restore after the test.

@@ -251,6 +251,29 @@ function tests.test_wired_driver_requires_observe_groups_backend_contract()
 	package.loaded['services.hal.backends.wired.providers.invalid_missing_observe_groups'] = nil
 end
 
+function tests.test_rtl8380m_vlan_membership_accepts_comma_and_space_separators()
+	local parse = provider._test.parse_vlan_membership_string
+	local function vlans(s)
+		local out = {}
+		for _, rec in ipairs(parse(s)) do out[#out + 1] = tostring(rec.vlan) end
+		return table.concat(out, ',')
+	end
+
+	-- Strings seen on a CM5 BigBox switch: the uplink port, then an external port.
+	assert_eq(vlans('1UP, 4T, 8T, 32T, 100T'), '1,4,8,32,100')
+	assert_eq(vlans('8T, 32T, 100UP'), '8,32,100')
+	assert_eq(vlans('1UP 4T 8T 32T 100T'), '1,4,8,32,100')
+	assert_eq(vlans('1UP,4T,8T'), '1,4,8', 'commas without spaces')
+	assert_eq(vlans('4T, 8T,'), '4,8', 'trailing comma')
+	assert_eq(vlans(''), '', 'empty membership')
+
+	local recs = parse('1UP, 4T, 7F')
+	assert_true(recs[1].untagged == true and recs[1].pvid == true, '1UP is untagged PVID')
+	assert_eq(recs[1].raw, '1UP')
+	assert_true(recs[2].tagged == true and recs[2].untagged == nil, '4T is tagged only')
+	assert_true(recs[3].forbidden == true, '7F is forbidden')
+end
+
 function tests.test_rtl8380m_observe_groups_deduplicates_shared_commands()
 	local commands, err = provider._test.commands_for_groups({ 'panel', 'poe', 'counters' })
 	assert_not_nil(commands, err)
