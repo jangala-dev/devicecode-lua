@@ -1545,7 +1545,6 @@ function GsmService.start(conn, opts)
 			return
 		end
 		local status = result.status
-		if status == 'superseded' then return end
 		apn_import_pending = false
 		if status == 'imported' then
 			svc:obs_log('info', { what = 'apn_v09_import_done', imported = result.imported, skipped = result.skipped })
@@ -1568,15 +1567,15 @@ function GsmService.start(conn, opts)
 		local list, lerr = apn_model.normalise_list(records)
 		if not list then return nil, lerr end
 		-- Stop the import before the first yield, and let any save it has in flight finish,
-		-- so this save can't land first and then be overwritten.
-		local import_was_pending = apn_import_pending
+		-- so this save can't land first and then be overwritten. The import stays stopped
+		-- until the next start even if this save fails: no key exists then, so that start
+		-- imports.
 		apn_import_pending = false
 		while apn_import_save_done do
 			perform(apn_import_save_done:wait_op())
 		end
 		local saved, serr = perform(apn_store:save_op(list))
 		if not saved then
-			apn_import_pending = import_was_pending
 			publish_apn_state({ state = 'degraded', ready = false, reason = serr or 'apn_store_save_failed' })
 			return nil, serr or 'apn_store_save_failed'
 		end

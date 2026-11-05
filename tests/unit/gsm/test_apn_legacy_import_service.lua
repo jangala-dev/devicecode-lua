@@ -206,10 +206,13 @@ local function start_gated(scope)
 		return { ok = true, reason = body }
 	end)
 	serve({ 'cap', 'control-store', 'gsm', 'rpc', 'put' }, function(payload)
-		h.values[payload.key] = payload.data
 		h.puts[#h.puts + 1] = payload.data
-		local gate = h.put_gates[#h.puts]
+		local n = #h.puts
+		local fail = h.fail_put == n
+		if not fail then h.values[payload.key] = payload.data end
+		local gate = h.put_gates[n]
 		if gate then fibers.perform(gate:wait_op()) end
+		if fail then return { ok = false, reason = 'disk full' } end
 		return { ok = true, reason = true }
 	end)
 	serve({ 'cap', 'fs', 'credentials', 'rpc', 'read' }, function()
@@ -217,16 +220,20 @@ local function start_gated(scope)
 		fibers.perform(h.read_gate:wait_op())
 		return { ok = true, reason = user_cfg({ rec('old') }) }
 	end)
-	bus:connect({ origin_base = { kind = 'test', service = 'config' } }):retain({ 'cfg', 'gsm' }, {
-		schema = 'devicecode.config.snapshot/1',
-		service = 'gsm',
-		rev = 1,
-		data = {
-			schema = 'devicecode.config/gsm/1',
-			apn_store = { kind = 'control-store', id = 'gsm', key = KEY },
-			modems = { default = { enabled = false, signal_freq = 60 }, known = {} },
-		},
-	})
+	local cfg_conn = bus:connect({ origin_base = { kind = 'test', service = 'config' } })
+	h.retain_cfg = function(rev)
+		cfg_conn:retain({ 'cfg', 'gsm' }, {
+			schema = 'devicecode.config.snapshot/1',
+			service = 'gsm',
+			rev = rev,
+			data = {
+				schema = 'devicecode.config/gsm/1',
+				apn_store = { kind = 'control-store', id = 'gsm', key = KEY },
+				modems = { default = { enabled = false, signal_freq = 60 }, known = {} },
+			},
+		})
+	end
+	h.retain_cfg(1)
 	assert(scope:spawn(function()
 		gsm_service.start(bus:connect({ origin_base = { service = 'gsm' } }), { name = 'gsm', env = 'dev', heartbeat_s = 60 })
 	end))
@@ -283,6 +290,37 @@ function tests.test_ui_save_waits_for_an_import_save_then_wins()
 		local memory, disk = final_list(h)
 		assert(memory[#memory].apn == 'typed', 'memory')
 		assert(disk[#disk].apn == 'typed', 'disk')
+	end, { timeout = TIMEOUT })
+end
+
+-- Once a UI save has been tried, the import stands down until the next start, so a failed
+-- save leaves nothing waiting. The key still doesn't exist, so the next start imports.
+function tests.test_failed_ui_save_stands_the_import_down_until_the_next_start()
+	runfibers.run(function(scope)
+		local h = start_gated(scope)
+		h.fail_put = 1
+		h.put_gates[1] = cond.new()
+		wait_until(function() return h.reading end, 'the read')
+		local reply, err
+		assert(scope:spawn(function() reply, err = add_apn(h, 'typed') end))
+		wait_until(function() return #h.puts == 1 end, 'the UI save')
+		h.read_gate:signal()
+		fibers.perform(sleep.sleep_op(0.1))
+		h.put_gates[1]:signal()
+		wait_until(function() return reply ~= nil or err ~= nil end, 'the UI reply')
+		assert(reply and reply.ok == false, 'the UI must see the failure')
+
+		-- Waking the main loop must not start the import again.
+		h.retain_cfg(2)
+		fibers.perform(sleep.sleep_op(0.3))
+		assert(#h.puts == 1, 'the import must not write this boot')
+		assert(h.values[KEY] == nil)
+
+		-- GSM stays usable, and a retried save works.
+		local again, again_err = add_apn(h, 'typed')
+		assert(again and again.ok == true, tostring(again_err or (again and again.reason)))
+		local memory, disk = final_list(h)
+		assert(memory[1].apn == 'typed' and disk[1].apn == 'typed')
 	end, { timeout = TIMEOUT })
 end
 
