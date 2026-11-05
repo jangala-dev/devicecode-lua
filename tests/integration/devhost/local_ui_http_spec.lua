@@ -51,6 +51,22 @@ function T.devhost_local_ui_serves_curated_bootstrap_over_real_http()
 	end, { timeout = 12 })
 end
 
+function T.devhost_local_ui_visit_publishes_over_real_http_without_login()
+	runfibers.run(function (scope)
+		local inst = harness.start(scope, { port = devhost_port(3), static_root = 'src/services/ui/www' })
+		harness.wait_http_ready(inst.base_url, { timeout = 5 })
+		local sub = inst.config_conn:subscribe({ 'obs', 'v1', 'ui', 'metric', 'local_ui_visits' })
+		local status, body = harness.curl_json('POST', inst.base_url .. '/api/local-ui/visit', {
+			visitor_id = string.rep('a', 32), visit_id = string.rep('b', 32),
+		})
+		assert_eq(status, '202')
+		assert_true(body.accepted)
+		local msg = require('fibers').perform(sub:recv_op())
+		assert_eq(msg.payload.value.visitor_id, string.rep('a', 32))
+		sub:unsubscribe()
+	end, { timeout = 12 })
+end
+
 function T.devhost_local_ui_apns_round_trip_through_gsm_and_fake_control_store()
 	runfibers.run(function (scope)
 		local inst = harness.start(scope, { port = devhost_port(2), static_root = 'src/services/ui/www' })

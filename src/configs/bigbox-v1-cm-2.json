@@ -1647,6 +1647,10 @@
         }
       },
       "pipelines": {
+        "local_ui_visits": {
+          "protocol": "http",
+          "process": []
+        },
         "wann_type": {
           "template": "any_change"
         },

@@ -85,6 +85,10 @@ function M.decode(ctx)
 		if method == 'DELETE' or method == 'POST' then return { kind = 'logout' } end
 	end
 
+	if parts[2] == 'local-ui' and parts[3] == 'visit' and parts[4] == nil and method == 'POST' then
+		return { kind = 'local_ui_visit' }
+	end
+
 	if parts[2] == 'local-ui' and parts[3] == 'bootstrap' and method == 'GET' then
 		return { kind = 'local_ui_bootstrap' }
 	end

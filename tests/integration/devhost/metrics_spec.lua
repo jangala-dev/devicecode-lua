@@ -425,6 +425,92 @@ function T.http_pipeline_enqueues_request_payload()
 	assert(ok_run, tostring(run_err))
 end
 
+function T.ui_visits_are_batched_in_http_payload()
+	-- Save originals so we can restore after the test.
+	local original_http_mod = package.loaded['services.metrics.http']
+
+	local captured = nil
+
+	-- Stub the HTTP publisher so we can inspect what gets enqueued.
+	package.loaded['services.metrics.http'] = {
+		start_http_publisher = function()
+			return {
+				put_op = function(_, data)
+					captured = data
+					return op.always(true)
+				end,
+			}
+		end,
+	}
+
+	local ok_run, run_err = pcall(function()
+		runfibers.run(function(scope)
+			local clock     = new_test_clock()
+			scope:finally(function() clock:restore() end)
+			local bus       = make_bus()
+			local test_conn = bus:connect()
+
+			test_conn:retain({ 'cap', 'fs', 'credentials', 'state' }, 'added')
+			start_mock_hal(test_conn, scope)
+			test_conn:retain({ 'state', 'time', 'synced' }, true)
+
+			test_conn:retain({ 'cfg', 'metrics' }, {
+				data = {
+					schema         = METRICS_SCHEMA,
+					publish_period = 0.1,
+					cloud_url      = 'http://localhost:18080',
+					pipelines = {
+						local_ui_visits = {
+							protocol = 'http',
+							process  = {},
+						},
+					},
+				},
+			})
+
+			local svc_scope = start_metrics(bus, scope)
+			flush_ticks()
+
+			for _, id in ipairs({ 'a', 'b', 'a' }) do
+				test_conn:publish({ 'obs', 'v1', 'ui', 'metric', 'local_ui_visits' }, {
+					value = { visitor_id = string.rep(id, 32), visit_id = string.rep(id, 32) },
+				})
+			end
+			flush_ticks()
+
+			clock:advance(0.3)
+			time_harness.flush_ticks(20)
+
+			assert(captured ~= nil, 'expected HTTP payload to be enqueued')
+			assert(captured.uri == 'http://localhost:18080/http/channels/ch-data/messages',
+				'unexpected uri: ' .. tostring(captured.uri))
+			assert(captured.auth == 'Thing test-thing-key',
+				'unexpected auth: ' .. tostring(captured.auth))
+			assert(captured.body ~= nil, 'expected non-nil body')
+
+			local recs, decode_err = json.decode(captured.body)
+			assert(decode_err == nil, 'JSON decode error: ' .. tostring(decode_err))
+			assert(type(recs) == 'table', 'expected table of records')
+			assert(#recs == 1, 'expected 1 record, got ' .. tostring(#recs))
+			assert(recs[1].n == 'obs.v1.ui.metric.local_ui_visits')
+			local batch = assert(json.decode(recs[1].vs))
+			assert(#batch.visits == 2, 'all distinct visits must survive one publish interval')
+			assert(batch.visits[1].visitor_id == string.rep('a', 32))
+			assert(batch.visits[2].visitor_id == string.rep('b', 32))
+			assert(batch.visits[1].visited_at_ms == 1700000000000)
+
+
+			stop_scope(svc_scope)
+			clock:restore()
+		end, { timeout = 3.0 })
+	end)
+
+	-- Always restore the stub.
+	package.loaded['services.metrics.http'] = original_http_mod
+
+	assert(ok_run, tostring(run_err))
+end
+
 -- Receiving a new config replaces existing pipelines; old metric names are dropped.
 function T.config_update_replaces_pipelines()
 	runfibers.run(function(scope)
