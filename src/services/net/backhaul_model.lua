@@ -89,12 +89,14 @@ local function live_device(snapshot, iface, ifname)
 	return nil
 end
 
--- Physical link/carrier for a wired member: true/false when known, nil when we have no device reading.
+-- Physical link/carrier for a wired member: true/false when the carrier is known, nil otherwise. We use the
+-- physical `carrier` (legacy alias `link`), never the administrative `up`, so "cable in" isn't confused with
+-- "interface enabled".
 local function link_up_for(snapshot, iface, ifname)
 	local dev = live_device(snapshot, iface, ifname)
 	if not is_table(dev) then return nil end
+	if type(dev.carrier) == 'boolean' then return dev.carrier end
 	if type(dev.link) == 'boolean' then return dev.link end
-	if type(dev.up) == 'boolean' then return dev.up end
 	return nil
 end
 

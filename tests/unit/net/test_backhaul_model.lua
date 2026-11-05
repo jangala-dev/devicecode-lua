@@ -94,7 +94,8 @@ function tests.test_wired_member_reports_link_and_address_readings()
                 },
                 live = {
                     interfaces = { wan = { device = 'eth0.2', ipv4 = { { address = '192.0.2.5' } } } },
-                    devices = { ['eth0.2'] = { name = 'eth0.2', link = true, up = true } },
+                    -- carrier = physical cable; up (admin) is deliberately false to prove we read carrier.
+                    devices = { ['eth0.2'] = { name = 'eth0.2', carrier = true, up = false } },
                 },
             },
         },

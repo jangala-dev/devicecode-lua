@@ -851,5 +851,22 @@ function tests.test_mwan3_interfaces_start_online_unless_configured()
 	eq(states.wan, 'offline', 'health-level override kept')
 end
 
+function tests.test_device_status_normalises_carrier_from_raw_ubus()
+	local dev = openwrt_provider._test.normalise_device_status('eth0.2', {
+		type = 'vlan', up = true, carrier = false, mtu = 1500,
+	})
+	eq(dev.carrier, false, 'carrier carried through from raw ubus')
+	eq(dev.up, true, 'admin up kept separate from carrier')
+end
+
+function tests.test_interface_status_normalises_ipv4_address_from_raw_ubus()
+	local iface = openwrt_provider._test.normalise_interface_status('wan', {
+		up = true, device = 'eth0.2',
+		['ipv4-address'] = { { address = '192.0.2.5', mask = 24 } },
+	})
+	eq(#iface.ipv4, 1, 'one ipv4 address expected from ipv4-address key')
+	eq(iface.ipv4[1].address, '192.0.2.5')
+end
+
 
 return tests
