@@ -142,6 +142,8 @@ function tests.test_existing_key_is_left_alone()
 		assert(h.reads == 0, 'user.cfg must not be read')
 		assert(h.store.values[KEY] == body)
 		assert(count_calls(h.store, 'put') == 0)
+		-- With APNs saved, startup does exactly what it does without the import.
+		assert(count_calls(h.store, 'get') == 1, 'store reads ' .. tostring(count_calls(h.store, 'get')))
 	end, { timeout = TIMEOUT })
 end
 
@@ -233,6 +235,8 @@ local function start_gated(scope, opts)
 		end))
 	end
 	serve({ 'cap', 'control-store', 'gsm', 'rpc', 'get' }, function(payload)
+		h.gets = (h.gets or 0) + 1
+		if h.fail_get_until and h.gets <= h.fail_get_until then return { ok = false, reason = 'store busy' } end
 		local body = h.values[payload.key]
 		if body == nil then return { ok = false, reason = 'not found' } end
 		return { ok = true, reason = body }
@@ -347,6 +351,32 @@ function tests.test_failed_import_save_is_retried()
 		assert(#h.puts == 2, 'puts ' .. tostring(#h.puts))
 		local memory, disk = final_list(h)
 		assert(memory[1].apn == 'old' and disk[1].apn == 'old')
+	end, { timeout = TIMEOUT })
+end
+
+-- The store isn't answering yet when GSM starts, as can happen early in boot.
+function tests.test_import_waits_for_the_store_to_answer()
+	runfibers.run(function(scope)
+		local h = start_gated(scope, { give_up_s = 5 })
+		h.fail_get_until = 2
+		wait_until(function() return h.reading end, 'the read')
+		h.read_gate:signal()
+		wait_for_list(h, 1)
+		local memory, disk = final_list(h)
+		assert(memory[1].apn == 'old' and disk[1].apn == 'old')
+	end, { timeout = TIMEOUT })
+end
+
+-- A list emptied in the current UI still has its key, so it stays empty.
+function tests.test_emptied_list_is_left_empty()
+	runfibers.run(function(scope)
+		local h = start(scope, { values = { [KEY] = cjson.encode({ records = {} }) }, replies = {
+			{ ok = true, reason = user_cfg({ rec('old') }) },
+		} })
+		wait_for_list(h, 0)
+		fibers.perform(sleep.sleep_op(0.1))
+		assert(h.reads == 0, 'user.cfg must not be read')
+		assert(count_calls(h.store, 'put') == 0)
 	end, { timeout = TIMEOUT })
 end
 
