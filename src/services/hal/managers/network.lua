@@ -50,7 +50,15 @@ local function driver_method_op(method, req)
 			return op.always(false, { ok = false, err = 'network driver missing ' .. opname })
 		end
 
-		local ok, driver_op = pcall(function () return fn(state.driver, req and req.opts or {}) end)
+		local args = req and req.opts or {}
+		if method == 'apply' and req and req.cancel_op then
+			-- Keep request cancellation local; do not put an Op in the bus payload.
+			local copy = {}
+			for key, value in pairs(args) do copy[key] = value end
+			copy.cancel_op = req.cancel_op
+			args = copy
+		end
+		local ok, driver_op = pcall(function () return fn(state.driver, args) end)
 		if not ok then
 			return op.always(false, { ok = false, err = tostring(driver_op) })
 		end
@@ -69,6 +77,7 @@ local CONFIG_METHODS = {
 	apply = function (_opts, req) return driver_method_op('apply', req) end,
 	apply_live_weights = function (_opts, req) return driver_method_op('apply_live_weights', req) end,
 	apply_shaping = function (_opts, req) return driver_method_op('apply_shaping', req) end,
+	restart_interface = function (_opts, req) return driver_method_op('restart_interface', req) end,
 }
 
 local STATE_METHODS = {

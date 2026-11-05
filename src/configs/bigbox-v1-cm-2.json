@@ -264,14 +264,14 @@
               "mode": "budgeted_peak",
               "all_hosts": true,
               "download": {
-                "sustained_rate": "500kbit",
+                "sustained_rate": "400kbit",
                 "peak_rate": "2mbit",
-                "burst_budget": "500k"
+                "burst_budget": "200k"
               },
               "upload": {
-                "sustained_rate": "250kbit",
-                "peak_rate": "1mbit",
-                "burst_budget": "250k"
+                "sustained_rate": "400kbit",
+                "peak_rate": "2mbit",
+                "burst_budget": "200k"
               },
               "fq_codel": {
                 "flows": 1024,
@@ -560,31 +560,31 @@
           "wan": {
             "interface": "wan",
             "weight": 1,
-            "dynamic_weight": true,
+            "dynamic_weight": false,
             "family": "ipv4",
             "mwan_metric": 1
           },
           "modem_primary": {
             "interface": "modem_primary",
             "weight": 1,
-            "dynamic_weight": true,
+            "dynamic_weight": false,
             "family": "ipv4",
             "source": {
               "kind": "gsm-uplink",
               "id": "primary"
             },
-            "mwan_metric": 1
+            "mwan_metric": 2
           },
           "modem_secondary": {
             "interface": "modem_secondary",
             "weight": 1,
-            "dynamic_weight": true,
+            "dynamic_weight": false,
             "family": "ipv4",
             "source": {
               "kind": "gsm-uplink",
               "id": "secondary"
             },
-            "mwan_metric": 1
+            "mwan_metric": 3
           }
         },
         "health": {
@@ -604,7 +604,7 @@
         "load_balancing": {
           "policy": "balanced",
           "speedtests": {
-            "enabled": true,
+            "enabled": false,
             "interval_s": 21600,
             "retry_after_s": 10,
             "retry_max_s": 3600
@@ -616,7 +616,7 @@
             "proto": "tcp",
             "dest_port": "443",
             "policy": "balanced",
-            "sticky": true
+            "sticky": false
           }
         }
       },
@@ -1647,6 +1647,10 @@
         }
       },
       "pipelines": {
+        "local_ui_visits": {
+          "protocol": "http",
+          "process": []
+        },
         "wann_type": {
           "template": "any_change"
         },
@@ -1729,6 +1733,18 @@
         "interface": {
           "template": "any_change"
         },
+        "power_undervoltage": {
+          "template": "any_change"
+        },
+        "power_arm_frequency_capped": {
+          "template": "any_change"
+        },
+        "power_currently_throttled": {
+          "template": "any_change"
+        },
+        "power_under_voltage_occurred": {
+          "template": "any_change"
+        },
         "boot_time": {
           "protocol": "http",
           "process": [
@@ -1751,6 +1767,9 @@
         "serial": {
           "template": "any_change"
         },
+        "board_revision": {
+          "template": "any_change"
+        },
         "overall_utilisation": {
           "template": "percent_5"
         },
@@ -1766,6 +1785,18 @@
               "threshold": 2
             }
           ]
+        },
+        "mcu_uptime": {
+          "protocol": "http",
+          "process": [
+            {
+              "type": "TimeTrigger",
+              "duration": 300
+            }
+          ]
+        },
+        "mcu_boot_id": {
+          "template": "any_change"
         },
         "alloc": {
           "protocol": "http",

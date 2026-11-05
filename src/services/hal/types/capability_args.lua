@@ -524,9 +524,16 @@ end
 
 local RADIO_VALID_BANDS = { '2g', '5g' }
 local RADIO_VALID_HTMODES = {
-    'HE20', 'HE40+', 'HE40-', 'HE80', 'HE160',
+    'HE20', 'HE40', 'HE80', 'HE160',
     'HT20', 'HT40+', 'HT40-',
-    'VHT20', 'VHT40+', 'VHT40-', 'VHT80', 'VHT160',
+    'VHT20', 'VHT40', 'VHT80', 'VHT160',
+}
+-- OpenWrt's mac80211.sh takes the secondary channel only for HT40+/HT40-; for
+-- HE40/VHT40 it picks it itself and does not recognise HE40+/VHT40-, which then
+-- run silently at 20 MHz. Map those to the forms it understands.
+local RADIO_HTMODE_ALIASES = {
+    ['HE40+'] = 'HE40', ['HE40-'] = 'HE40',
+    ['VHT40+'] = 'VHT40', ['VHT40-'] = 'VHT40',
 }
 local RADIO_VALID_ENCRYPTIONS = {
     'none', 'wep', 'psk', 'psk2', 'psk-mixed',
@@ -542,7 +549,7 @@ local function is_in(value, list)
 end
 
 ---@alias RadioBand '2g'|'5g'
----@alias RadioHtmode 'HE20'|'HE40+'|'HE40-'|'HE80'|'HE160'|'HT20'|'HT40+'|'HT40-'|'VHT20'|'VHT40+'|'VHT40-'|'VHT80'|'VHT160'
+---@alias RadioHtmode 'HE20'|'HE40'|'HE80'|'HE160'|'HT20'|'HT40+'|'HT40-'|'VHT20'|'VHT40'|'VHT80'|'VHT160'
 ---@alias RadioEncryption 'none'|'wep'|'psk'|'psk2'|'psk-mixed'|'sae'|'sae-mixed'|'owe'|'wpa'|'wpa2'|'wpa3'
 ---@alias RadioIfaceMode 'ap'|'sta'|'adhoc'|'mesh'|'monitor'
 
@@ -564,6 +571,7 @@ function new.RadioSetChannelsOpts(band, channel, htmode, channels)
     if not is_in(band, RADIO_VALID_BANDS) then
         return nil, 'band must be one of: ' .. table.concat(RADIO_VALID_BANDS, ', ')
     end
+    htmode = RADIO_HTMODE_ALIASES[htmode] or htmode
     if not is_in(htmode, RADIO_VALID_HTMODES) then
         return nil, 'htmode must be one of: ' .. table.concat(RADIO_VALID_HTMODES, ', ')
     end

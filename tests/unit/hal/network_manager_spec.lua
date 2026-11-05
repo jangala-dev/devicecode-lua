@@ -35,6 +35,7 @@ function tests.test_network_backend_contract_requires_op_methods()
 		read_counters_op = function () return op.always({ ok = true }) end,
 		apply_live_weights_op = function () return op.always({ ok = true }) end,
 		apply_shaping_op = function () return op.always({ ok = true }) end,
+		restart_interface_op = function () return op.always({ ok = true }) end,
 		speedtest_op = function () return op.always({ ok = true }) end,
 		terminate = function () return true end,
 	}
@@ -130,9 +131,11 @@ function tests.test_network_apply_continues_after_caller_abandonment_once_admitt
 		local cancel_ch = channel.new(1)
 		local aborted = false
 		local completed = false
+		local forwarded_cancel
 		driver_mod.new = function ()
 			return {
-				apply_op = function ()
+				apply_op = function (_, args)
+					forwarded_cancel = args.cancel_op
 					fibers.perform(entered:put_op(true))
 					return release:get_op():wrap(function () completed = true; return { ok = true } end)
 						:on_abort(function () aborted = true end)
@@ -160,6 +163,8 @@ function tests.test_network_apply_continues_after_caller_abandonment_once_admitt
 		local req = assert(types.new.ControlRequest('apply', { generation = 1 }, reply_ch, cancel_op))
 		assert(fibers.perform(cfg_cap.control_ch:put_op(req)) ~= false)
 		assert(fibers.perform(entered:get_op()) == true)
+		assert(forwarded_cancel == cancel_op, 'apply should pass cancellation through to the provider')
+		assert(req.opts.cancel_op == nil, 'local cancellation must not mutate the request payload')
 		assert(fibers.perform(cancel_ch:put_op('caller_abandoned')) ~= false)
 		for _ = 1, 4 do runtime.yield() end
 		assert(aborted == false, 'admitted network apply should not be aborted by caller abandonment')

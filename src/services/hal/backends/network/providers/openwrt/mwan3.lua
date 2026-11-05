@@ -104,7 +104,9 @@ function M.build_changes(intent, name_ctx)
 		set_option(changes, 'mwan3', ifsec, 'enabled', '1')
 		set_option(changes, 'mwan3', ifsec, 'family', m.family or health.family or 'ipv4')
 		set_list_option(changes, 'mwan3', ifsec, 'track_ip', m.track_ip or (m.health and m.health.track_ip) or health.track_ip)
-		set_option(changes, 'mwan3', ifsec, 'initial_state', m.initial_state or health.initial_state or 'offline')
+		-- 'online' is mwan3's own default. 'offline' would drop all traffic on every
+		-- mwan3 restart (each structural apply) until ping tracking succeeds.
+		set_option(changes, 'mwan3', ifsec, 'initial_state', m.initial_state or health.initial_state or 'online')
 		set_option(changes, 'mwan3', ifsec, 'reliability', m.reliability or health.reliability)
 		set_option(changes, 'mwan3', ifsec, 'count', m.count or health.count)
 		set_option(changes, 'mwan3', ifsec, 'timeout', m.timeout or health.timeout)

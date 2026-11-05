@@ -11,6 +11,8 @@
 --     commit record;
 --   * caller cancellation after admission abandons only that caller's wait, not
 --     the already-admitted commit.
+--   * transactions may opt into cancellation before activation: queued work is
+--     discarded and partially applied work is restored. Activation ignores it.
 --
 -- UCI model covered here:
 --   * named section creation through set(config, section, stype)
@@ -24,6 +26,7 @@
 --   * commit, revert-on-failure and deduplicated reload/restart commands.
 
 local fibers = require 'fibers'
+local fibers_op = require 'fibers.op'
 local sleep = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 local queue = require 'devicecode.support.queue'
@@ -334,10 +337,18 @@ local function resolve_section(record, aliases, section)
 	return section
 end
 
-local function revert_record(cursor, record)
-	if cursor and type(cursor.revert) == 'function' then
-		pcall(function () cursor:revert(record.config) end)
+local function revert_package(cursor, config)
+	if not cursor then return true, nil end
+	if type(cursor.revert) ~= 'function' then return nil, 'uci revert unavailable' end
+	local called, ok, err = pcall(function () return cursor:revert(config) end)
+	if not called or ok ~= true then
+		return nil, tostring(err or ok or ('uci revert failed for ' .. tostring(config)))
 	end
+	return true, nil
+end
+
+local function revert_record(cursor, record)
+	revert_package(cursor, record.config)
 end
 
 local function record_packages(records)
@@ -360,6 +371,87 @@ local function copy_package_table(pkg)
 		end
 	end
 	return out
+end
+
+local function canonical_value_equal(a, b)
+	if type(a) ~= type(b) then return false end
+	if type(a) ~= 'table' then return a == b end
+	for k, v in pairs(a) do
+		if not canonical_value_equal(v, b[k]) then return false end
+	end
+	for k in pairs(b) do
+		if a[k] == nil then return false end
+	end
+	return true
+end
+
+local function canonical_package(pkg, package_name)
+	local sections = {}
+	local indexes = {}
+	for key, rec in pairs(pkg or {}) do
+		if type(key) == 'string' and key:sub(1, 1) ~= '.' and type(rec) == 'table' then
+			local stype = rec['.type']
+			if type(stype) ~= 'string' or stype == '' then
+				return nil, 'snapshot missing section type for ' .. tostring(package_name) .. '.' .. tostring(key)
+			end
+			local index = tonumber(rec['.index'])
+			if index == nil or index < 0 or index % 1 ~= 0 then
+				return nil, 'snapshot missing valid section index for ' .. tostring(package_name) .. '.' .. tostring(key)
+			end
+			if indexes[index] then
+				return nil, 'snapshot has duplicate section index ' .. tostring(index) .. ' for ' .. tostring(package_name)
+			end
+			indexes[index] = true
+			if type(rec['.anonymous']) ~= 'boolean' then
+				return nil, 'snapshot missing anonymous metadata for ' .. tostring(package_name) .. '.' .. tostring(key)
+			end
+			local name = rec['.name'] or key
+			if type(name) ~= 'string' or name == '' then
+				return nil, 'snapshot missing section name for ' .. tostring(package_name) .. '.' .. tostring(key)
+			end
+			local option_names = {}
+			for option in pairs(rec) do
+				if type(option) == 'string' and option:sub(1, 1) ~= '.' then
+					option_names[#option_names + 1] = option
+				end
+			end
+			table.sort(option_names)
+			local options = {}
+			for _, option in ipairs(option_names) do
+				options[#options + 1] = { name = option, value = deep_copy(rec[option]) }
+			end
+			sections[#sections + 1] = {
+				index = index,
+				name = name,
+				anonymous = rec['.anonymous'],
+				stype = stype,
+				options = options,
+			}
+		end
+	end
+	table.sort(sections, function (a, b) return a.index < b.index end)
+	for i, section in ipairs(sections) do
+		if section.index ~= i - 1 then
+			return nil, 'snapshot has non-contiguous section indexes for ' .. tostring(package_name)
+		end
+	end
+	return sections, nil
+end
+
+local function canonical_packages_equal(a, b)
+	if #a ~= #b then return false end
+	for i = 1, #a do
+		local aa, bb = a[i], b[i]
+		if aa.index ~= bb.index or aa.anonymous ~= bb.anonymous or aa.stype ~= bb.stype then return false end
+		-- Anonymous names are generated references, not persistent UCI identity.
+		if not aa.anonymous and aa.name ~= bb.name then return false end
+		if #aa.options ~= #bb.options then return false end
+		for j = 1, #aa.options do
+			local ao, bo = aa.options[j], bb.options[j]
+			if ao.name ~= bo.name or not canonical_value_equal(ao.value, bo.value) then return false end
+		end
+	end
+	return true
 end
 
 local function snapshot_packages(cursor, packages)
@@ -388,29 +480,54 @@ end
 
 local function restore_package(cursor, pkg, snapshot)
 	if not cursor then return true, nil end
-	if type(cursor.revert) == 'function' then pcall(function () cursor:revert(pkg) end) end
+	if type(cursor.revert) ~= 'function' then return nil, 'uci revert unavailable for rollback' end
+	local called, reverted, revert_err = pcall(function () return cursor:revert(pkg) end)
+	if not called or reverted ~= true then
+		return nil, tostring(revert_err or reverted or ('uci revert failed for ' .. pkg))
+	end
+	local expected, expected_err = canonical_package(snapshot or {}, pkg)
+	if not expected then return nil, expected_err end
+	local current, current_err = canonical_package(cursor:get_all(pkg) or {}, pkg)
+	if not current then return nil, current_err end
+	if canonical_packages_equal(current, expected) then return true, nil end
+
 	local ok, err = delete_all_sections(cursor, pkg)
 	if ok ~= true then return nil, err end
-	for secname, rec in pairs(snapshot or {}) do
-		if type(secname) == 'string' and secname:sub(1, 1) ~= '.' and type(rec) == 'table' then
-			local stype = rec['.type']
-			if type(stype) ~= 'string' or stype == '' then
-				return nil, 'rollback snapshot missing section type for ' .. pkg .. '.' .. secname
-			end
-			ok, err = cursor:set(pkg, secname, stype)
-			if ok ~= true then return nil, tostring(err or ('restore create failed for ' .. pkg .. '.' .. secname)) end
-			for opt, value in pairs(rec) do
-				if type(opt) == 'string' and opt:sub(1, 1) ~= '.' then
-					local uval, verr = to_uci_value(value)
-					if verr then return nil, verr end
-					ok, err = cursor:set(pkg, secname, opt, uval)
-					if ok ~= true then return nil, tostring(err or ('restore set failed for ' .. pkg .. '.' .. secname .. '.' .. opt)) end
-				end
+	for _, section in ipairs(expected) do
+		local restored_name
+		if section.anonymous then
+			if type(cursor.add) ~= 'function' then return nil, 'uci add unavailable for anonymous section rollback' end
+			restored_name, err = cursor:add(pkg, section.stype)
+			if not restored_name then return nil, tostring(err or ('restore add failed for ' .. pkg)) end
+		else
+			ok, err = cursor:set(pkg, section.name, section.stype)
+			if ok ~= true then return nil, tostring(err or ('restore create failed for ' .. pkg .. '.' .. section.name)) end
+			restored_name = section.name
+		end
+		for _, option in ipairs(section.options) do
+			local uval, verr = to_uci_value(option.value)
+			if verr then return nil, verr end
+			ok, err = cursor:set(pkg, restored_name, option.name, uval)
+			if ok ~= true then
+				return nil, tostring(err or ('restore set failed for '
+					.. pkg .. '.' .. restored_name .. '.' .. option.name))
 			end
 		end
+		if type(cursor.reorder) ~= 'function' then return nil, 'uci reorder unavailable for rollback' end
+		ok, err = cursor:reorder(pkg, restored_name, section.index)
+		if ok ~= true then return nil, tostring(err or ('restore reorder failed for ' .. pkg .. '.' .. restored_name)) end
 	end
 	ok, err = cursor:commit(pkg)
 	if ok ~= true then return nil, tostring(err or ('rollback commit failed for ' .. pkg)) end
+	if type(cursor.load) == 'function' then
+		called, ok, err = pcall(function () return cursor:load(pkg) end)
+		if not called or ok ~= true then return nil, tostring(err or ok or ('uci reload failed for ' .. pkg)) end
+	end
+	current, current_err = canonical_package(cursor:get_all(pkg) or {}, pkg)
+	if not current then return nil, current_err end
+	if not canonical_packages_equal(current, expected) then
+		return nil, 'rollback verification failed for ' .. pkg
+	end
 	return true, nil
 end
 
@@ -522,7 +639,8 @@ local function cursor_rename(cursor, config, section, option, new_name)
 	return cursor_rename_section_fallback(cursor, config, section, new_name)
 end
 
-local function apply_with_cursor(cursor, record)
+local function apply_with_cursor(cursor, record, cancelled)
+	if cancelled and cancelled() then return nil, 'uci transaction cancelled' end
 	if not cursor then
 		return true, nil -- explicit fake/no-uci mode for tests and non-OpenWrt hosts.
 	end
@@ -533,6 +651,7 @@ local function apply_with_cursor(cursor, record)
 	end
 	local aliases = {}
 	for _, change in ipairs(record.changes) do
+		if cancelled and cancelled() then return nil, 'uci transaction cancelled' end
 		local op = change.op
 		local section = resolve_section(record, aliases, change.section)
 		if op == 'add' then
@@ -586,6 +705,7 @@ local function apply_with_cursor(cursor, record)
 			if not ok then return nil, tostring(err or 'uci reorder failed') end
 		end
 	end
+	if cancelled and cancelled() then return nil, 'uci transaction cancelled' end
 	local ok, err = cursor:commit(record.config)
 	if not ok then return nil, tostring(err or 'uci commit failed') end
 	return true, nil
@@ -1085,6 +1205,22 @@ function Manager:_apply_transaction(item)
 	local records = tx.records or {}
 	local packages = tx.packages or record_packages(records)
 	local trace = tx.trace or {}
+	local cancel_requested = false
+	local function cancelled()
+		if not cancel_requested and tx.cancel_op then
+			local reason = queue.try_now(tx.cancel_op, nil)
+			cancel_requested = reason ~= nil and reason ~= false
+		end
+		return cancel_requested
+	end
+	if cancelled() then
+		local result = { ok = false, status = 'cancelled_no_change', err = 'uci transaction cancelled',
+			cancelled = true, packages = packages, rollback = { attempted = false } }
+		log_manager(self, 'debug', { what = 'uci_transaction_cancelled', status = result.status,
+			generation = trace.generation, apply_id = trace.apply_id })
+		if item.reply_tx then queue.try_admit_now(item.reply_tx, result) end
+		return
+	end
 	log_manager(self, 'debug', (function ()
 		local p = trace_fields(trace)
 		p.what = 'uci_transaction_begin'
@@ -1152,7 +1288,8 @@ function Manager:_apply_transaction(item)
 
 	local record_results = {}
 	local failed = nil
-	local activation_started = false
+	local activation_attempted = false
+	local committed_packages, committed_package_set = {}, {}
 	for _, record in ipairs(records) do
 		local rt0 = fibers.now()
 		log_manager(self, 'debug', (function ()
@@ -1167,7 +1304,7 @@ function Manager:_apply_transaction(item)
 		if self._closed then
 			ok, err = nil, 'uci manager closed'
 		else
-			ok, err = apply_with_cursor(self._cursor, record)
+			ok, err = apply_with_cursor(self._cursor, record, cancelled)
 		end
 		local record_ms = elapsed_ms(rt0)
 		log_manager(self, ok == true and 'debug' or 'warn', (function ()
@@ -1183,11 +1320,20 @@ function Manager:_apply_transaction(item)
 		record_results[#record_results + 1] = res
 		result.timings['commit_' .. tostring(record.config) .. '_ms'] = record_ms
 		if ok ~= true then
-			failed = { step = 'uci_commit', config = record.config, err = err }
+			failed = { step = cancel_requested and 'cancelled' or 'uci_commit', config = record.config, err = err }
 			break
+		end
+		if self._cursor and not committed_package_set[record.config] then
+			committed_package_set[record.config] = true
+			committed_packages[#committed_packages + 1] = record.config
 		end
 	end
 
+	-- The final check closes the cancellation window. No cancellation checks are
+	-- made once activation starts, including during rollback after an error.
+	if not failed and cancelled() then
+		failed = { step = 'cancelled', err = 'uci transaction cancelled' }
+	end
 	if not failed then
 		phase = fibers.now()
 		local restart_entries = trim_restarts(record_results)
@@ -1203,9 +1349,9 @@ function Manager:_apply_transaction(item)
 			-- non-OpenWrt hosts should still exercise validation, reconciliation and
 			-- transaction/rollback semantics without attempting /etc/init.d commands.
 		else
-			activation_started = true
 			local sync_entries, async_entries = split_activation_entries(restart_entries)
 			for _, entry in ipairs(sync_entries) do
+				activation_attempted = true
 				local rok, rerr = self:_run_restart_entry(entry, trace)
 				if rok ~= true then
 					failed = { step = 'restart', argv = entry.argv, err = rerr }
@@ -1238,7 +1384,18 @@ function Manager:_apply_transaction(item)
 		result.failed_step = failed.step
 		result.failed_config = failed.config
 		result.err = tostring(failed.err or failed.step or 'uci transaction failed')
-		if tx.rollback ~= false then
+		result.cancelled = failed.step == 'cancelled' or nil
+		local rollback_packages = packages
+		local staged_revert_ok, staged_revert_err = true, nil
+		if result.cancelled then
+			rollback_packages = committed_packages
+			if failed.config and not committed_package_set[failed.config] then
+				staged_revert_ok, staged_revert_err = revert_package(self._cursor, failed.config)
+			end
+		end
+		if result.cancelled and #rollback_packages == 0 and staged_revert_ok == true then
+			result.status = 'cancelled_no_change'
+		elseif tx.rollback ~= false or result.cancelled then
 			result.rollback.attempted = true
 			phase = fibers.now()
 			log_manager(self, 'warn', (function ()
@@ -1248,10 +1405,14 @@ function Manager:_apply_transaction(item)
 				p.failed_config = failed.config
 				return p
 			end)())
-			local rok, rerr, restored = restore_packages(self._cursor, snapshots, packages)
+			local rok, rerr, restored = restore_packages(self._cursor, snapshots, rollback_packages)
+			if staged_revert_ok ~= true then
+				rok = false
+				rerr = staged_revert_err .. (rerr and ('; ' .. tostring(rerr)) or '')
+			end
 			-- Opt-in recovery keeps runtime services consistent with restored UCI.
 			-- Use all records in their original order, including the failed activation.
-			if rok and activation_started and tx.reactivate_on_rollback then
+			if rok and activation_attempted and tx.reactivate_on_rollback then
 				local previous = {}
 				for _, record in ipairs(records) do previous[#previous + 1] = { ok = true, record = record } end
 				result.rollback.reactivated = true
@@ -1276,7 +1437,7 @@ function Manager:_apply_transaction(item)
 				return p
 			end)())
 			if rok == true then
-				result.status = 'failed_rolled_back'
+				result.status = result.cancelled and 'cancelled_rolled_back' or 'failed_rolled_back'
 			else
 				result.status = 'failed_rollback_failed'
 				result.rollback.err = tostring(rerr)
@@ -1340,6 +1501,10 @@ function Manager:transaction_op(spec, opts)
 	local admitted_flag = false
 	return fibers.run_scope_op(function ()
 		if self._closed then return { ok = false, status = 'closed', err = 'closed' }, false end
+		if opts.cancel_op ~= nil
+			and (type(opts.cancel_op) ~= 'table' or getmetatable(opts.cancel_op) ~= fibers_op.Op) then
+			return { ok = false, status = 'invalid', err = 'cancel_op must be an Op' }, false
+		end
 		local records = {}
 		for i, record in ipairs(spec.records or {}) do
 			local normalised, err = normalise_record(record)
@@ -1357,6 +1522,7 @@ function Manager:transaction_op(spec, opts)
 				rollback = spec.rollback ~= false,
 				reactivate_on_rollback = spec.reactivate_on_rollback == true,
 				trace = opts.trace,
+				cancel_op = opts.cancel_op,
 			},
 			reply_tx = reply_tx,
 		})

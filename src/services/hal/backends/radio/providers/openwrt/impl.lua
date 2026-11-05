@@ -414,9 +414,38 @@ end
 ---@return string    err
 function RadioBackend:get_connected_macs(iface)
     local proc = exec.command { 'iw', 'dev', iface, 'station', 'dump', stdin = 'null', stdout = 'pipe', stderr = 'stdout' }
-    local out, status, _, _, err = fibers.perform(proc:output_op())
-    if status ~= 'exited' or err then return {}, tostring(err or 'iw station dump failed') end
+    local out, status, code, _, err = fibers.perform(proc:output_op())
+    -- A failed dump (e.g. "No such device") must not read as "no clients".
+    if status ~= 'exited' or code ~= 0 or err then
+        return {}, tostring(err or ('iw station dump failed: ' .. tostring(out)))
+    end
     return parse_station_dump_macs(out), ''
+end
+
+---Parse dnsmasq lease lines (`<expiry> <mac> <ip> <hostname> <client-id>`)
+---into mac -> hostname, skipping leases without a hostname ('*').
+---@param raw string
+---@return table<string, string>
+local function parse_dhcp_leases(raw)
+    local out = {}
+    for line in (raw or ''):gmatch('[^\n]+') do
+        local _, mac, _, hostname = line:match('^(%S+)%s+(%S+)%s+(%S+)%s+(%S+)')
+        if mac and hostname and hostname ~= '*' then
+            out[mac:lower()] = hostname
+        end
+    end
+    return out
+end
+
+---Hostnames from the DHCP leases of every dnsmasq instance.
+---@return table<string, string>|nil  mac -> hostname
+---@return string err
+function RadioBackend:get_dhcp_hostnames()
+    local proc = exec.command { 'sh', '-c', 'cat /tmp/dhcp.leases /tmp/dhcp.leases.* 2>/dev/null; true',
+        stdin = 'null', stdout = 'pipe', stderr = 'null' }
+    local out, status, _, _, err = fibers.perform(proc:output_op())
+    if status ~= 'exited' or err then return nil, tostring(err or 'reading dhcp leases failed') end
+    return parse_dhcp_leases(out), ''
 end
 
 ---Read a sysfs statistics value for an interface.

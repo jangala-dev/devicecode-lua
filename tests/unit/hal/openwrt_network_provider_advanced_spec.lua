@@ -397,6 +397,36 @@ function tests.test_speedtest_translates_semantic_device_to_linux_counter_device
 	end)
 end
 
+function tests.test_restart_interface_runs_ifup_on_generated_interface_name()
+	fibers.run(function()
+		local argv_seen
+		local provider = ok(provider_loader.new({ provider = 'openwrt', allow_fake_uci = true }, {}))
+		provider.shaper_run_cmd = function(argv)
+			argv_seen = argv
+			return true, nil
+		end
+
+		local result = fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' }))
+		eq(result.ok, false)
+		eq(argv_seen, nil, 'no command without a name context')
+
+		provider._last_name_ctx = ok(names.allocate({
+			interfaces = { modem_primary = { kind = 'direct', role = 'wan', endpoint = { ifname = 'wwan0' } } },
+			wan = { members = { modem_primary = { interface = 'modem_primary' } } },
+		}))
+		result = fibers.perform(provider:restart_interface_op({ interface = 'modem_primary' }))
+		eq(result.ok, true)
+		eq(result.interface, 'mopri79e')
+		eq(argv_s(argv_seen), 'ifup mopri79e')
+
+		argv_seen = nil
+		result = fibers.perform(provider:restart_interface_op({ interface = 'modem_secondary' }))
+		eq(result.ok, false)
+		eq(argv_seen, nil, 'unknown interface must not run a command')
+		provider:terminate('test complete')
+	end)
+end
+
 
 function tests.test_segment_trunk_realises_segments_without_cfg_net_interfaces()
 	fibers.run(function()
@@ -749,6 +779,76 @@ function tests.test_shaping_mark_namespace_does_not_overlap_mwan_default_mask()
 	local bad, berr = marks.validate_marks({ marks = { mask = '0x00003f00', control = '0x00000100', client = '0x00000200' } }, '0x3f00')
 	eq(bad, nil)
 	contains(tostring(berr), 'overlaps MWAN mask')
+end
+
+-- BigBox WAN is strict failover: wan, then modem_primary, then modem_secondary.
+-- Speed tests stay off: live weights (applied only after them) would replace
+-- mwan3's metric order with a weighted split across every member. HTTPS is not
+-- sticky: a sticky entry made while on a modem is checked before the policy and
+-- would keep that client on cellular after the WAN recovers.
+function tests.test_bigbox_configs_render_strict_wan_modem_failover()
+	local cjson = require 'cjson.safe'
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local wan_policy = require 'services.net.wan_policy'
+	local order = { wan = 1, modem_primary = 2, modem_secondary = 3 }
+
+	for _, target in ipairs({ 'bigbox-v1-cm', 'bigbox-v1-cm-2', 'bigbox-ss' }) do
+		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))), target .. ' must decode')
+		local net_intent = ok(net_config.normalise(doc.net, { rev = 1 }))
+
+		eq(wan_policy.speedtest_enabled({ wan = net_intent.wan }), false, target .. ' speed tests')
+		local ctx = ok(names.allocate(net_intent))
+		local changes = ok(mwan3.build_changes(net_intent, ctx))
+		for mid, metric in pairs(order) do
+			eq(net_intent.wan.members[mid].metric, metric, target .. ' ' .. mid .. ' metric')
+			ok(find_change(changes, { config = 'mwan3', section = ctx:mwan_member(mid), option = 'metric', value = metric }),
+				target .. ' ' .. mid .. ' mwan3 member should render metric ' .. metric)
+		end
+		for rule_id in pairs(net_intent.wan.rules or {}) do
+			ok(not find_change(changes, { config = 'mwan3', section = ctx:mwan_rule(rule_id), option = 'sticky', value = '1' }),
+				target .. ' mwan3 rule ' .. rule_id .. ' must not be sticky')
+		end
+		ok(find_change(changes, { config = 'mwan3', section = ctx:mwan_rule('https'), option = 'sticky', value = '0' }),
+			target .. ' https rule should render sticky 0')
+	end
+end
+
+
+-- mwan3 interfaces start online (mwan3's default) unless the HAL intent says
+-- otherwise. Starting them offline dropped all traffic on every structural apply.
+-- (NET config accepts initial_state only under wan.health; the member-level case
+-- covers the renderer.)
+function tests.test_mwan3_interfaces_start_online_unless_configured()
+	local mwan3 = require 'services.hal.backends.network.providers.openwrt.mwan3'
+	local function initial_states(wan)
+		local intent_doc = { wan = wan }
+		local ctx = ok(names.allocate(intent_doc))
+		local changes = ok(mwan3.build_changes(intent_doc, ctx))
+		local out = {}
+		for mid in pairs(wan.members) do
+			local ch = find_change(changes, { config = 'mwan3', section = ctx:mwan_iface(mid), option = 'initial_state' })
+			out[mid] = ch and ch.value
+		end
+		return out
+	end
+
+	local states = initial_states({
+		enabled = true,
+		health = { track_ip = { '1.1.1.1' } },
+		members = {
+			wan = { interface = 'wan', mwan_metric = 1 },
+			modem_primary = { interface = 'modem_primary', mwan_metric = 2, initial_state = 'offline' },
+		},
+	})
+	eq(states.wan, 'online', 'default initial_state')
+	eq(states.modem_primary, 'offline', 'HAL member override kept')
+
+	states = initial_states({
+		enabled = true,
+		health = { track_ip = { '1.1.1.1' }, initial_state = 'offline' },
+		members = { wan = { interface = 'wan', mwan_metric = 1 } },
+	})
+	eq(states.wan, 'offline', 'health-level override kept')
 end
 
 
