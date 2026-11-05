@@ -26,6 +26,7 @@
 --   * commit, revert-on-failure and deduplicated reload/restart commands.
 
 local fibers = require 'fibers'
+local fibers_op = require 'fibers.op'
 local sleep = require 'fibers.sleep'
 local mailbox = require 'fibers.mailbox'
 local queue = require 'devicecode.support.queue'
@@ -336,10 +337,18 @@ local function resolve_section(record, aliases, section)
 	return section
 end
 
-local function revert_record(cursor, record)
-	if cursor and type(cursor.revert) == 'function' then
-		pcall(function () cursor:revert(record.config) end)
+local function revert_package(cursor, config)
+	if not cursor then return true, nil end
+	if type(cursor.revert) ~= 'function' then return nil, 'uci revert unavailable' end
+	local called, ok, err = pcall(function () return cursor:revert(config) end)
+	if not called or ok ~= true then
+		return nil, tostring(err or ok or ('uci revert failed for ' .. tostring(config)))
 	end
+	return true, nil
+end
+
+local function revert_record(cursor, record)
+	revert_package(cursor, record.config)
 end
 
 local function record_packages(records)
@@ -1280,6 +1289,7 @@ function Manager:_apply_transaction(item)
 	local record_results = {}
 	local failed = nil
 	local activation_attempted = false
+	local committed_packages, committed_package_set = {}, {}
 	for _, record in ipairs(records) do
 		local rt0 = fibers.now()
 		log_manager(self, 'debug', (function ()
@@ -1312,6 +1322,10 @@ function Manager:_apply_transaction(item)
 		if ok ~= true then
 			failed = { step = cancel_requested and 'cancelled' or 'uci_commit', config = record.config, err = err }
 			break
+		end
+		if self._cursor and not committed_package_set[record.config] then
+			committed_package_set[record.config] = true
+			committed_packages[#committed_packages + 1] = record.config
 		end
 	end
 
@@ -1371,7 +1385,17 @@ function Manager:_apply_transaction(item)
 		result.failed_config = failed.config
 		result.err = tostring(failed.err or failed.step or 'uci transaction failed')
 		result.cancelled = failed.step == 'cancelled' or nil
-		if tx.rollback ~= false or result.cancelled then
+		local rollback_packages = packages
+		local staged_revert_ok, staged_revert_err = true, nil
+		if result.cancelled then
+			rollback_packages = committed_packages
+			if failed.config and not committed_package_set[failed.config] then
+				staged_revert_ok, staged_revert_err = revert_package(self._cursor, failed.config)
+			end
+		end
+		if result.cancelled and #rollback_packages == 0 and staged_revert_ok == true then
+			result.status = 'cancelled_no_change'
+		elseif tx.rollback ~= false or result.cancelled then
 			result.rollback.attempted = true
 			phase = fibers.now()
 			log_manager(self, 'warn', (function ()
@@ -1381,7 +1405,11 @@ function Manager:_apply_transaction(item)
 				p.failed_config = failed.config
 				return p
 			end)())
-			local rok, rerr, restored = restore_packages(self._cursor, snapshots, packages)
+			local rok, rerr, restored = restore_packages(self._cursor, snapshots, rollback_packages)
+			if staged_revert_ok ~= true then
+				rok = false
+				rerr = staged_revert_err .. (rerr and ('; ' .. tostring(rerr)) or '')
+			end
 			-- Opt-in recovery keeps runtime services consistent with restored UCI.
 			-- Use all records in their original order, including the failed activation.
 			if rok and activation_attempted and tx.reactivate_on_rollback then
@@ -1473,6 +1501,10 @@ function Manager:transaction_op(spec, opts)
 	local admitted_flag = false
 	return fibers.run_scope_op(function ()
 		if self._closed then return { ok = false, status = 'closed', err = 'closed' }, false end
+		if opts.cancel_op ~= nil
+			and (type(opts.cancel_op) ~= 'table' or getmetatable(opts.cancel_op) ~= fibers_op.Op) then
+			return { ok = false, status = 'invalid', err = 'cancel_op must be an Op' }, false
+		end
 		local records = {}
 		for i, record in ipairs(spec.records or {}) do
 			local normalised, err = normalise_record(record)

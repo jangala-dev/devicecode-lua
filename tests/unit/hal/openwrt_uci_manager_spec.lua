@@ -433,7 +433,7 @@ end
 function tests.test_cancellation_during_uncommitted_changes_reverts_without_rewriting_or_activation()
 	require('tests.support.run_fibers').run(function(scope)
 		local cancel = require('fibers.channel').new(1)
-		local calls, activations = {}, 0
+		local calls, activations, applied_after_cancel = {}, 0, false
 		local cursor = fake_cursor(calls)
 		local did_revert = false
 		cursor.get_all = function()
@@ -451,6 +451,7 @@ function tests.test_cancellation_during_uncommitted_changes_reverts_without_rewr
 		local set = cursor.set
 		cursor.set = function(self, config, section, option, value)
 			if value == 'obsolete' then cancel:put('superseded') end
+			if value == 'must_not_apply' then applied_after_cancel = true end
 			return set(self, config, section, option, value)
 		end
 		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function()
@@ -459,11 +460,16 @@ function tests.test_cancellation_during_uncommitted_changes_reverts_without_rewr
 		end }))
 		ok(mgr:start(scope))
 		local result = fibers.perform(mgr:transaction_op({
-			records = { cancellable_record('obsolete') }, rollback = false, reactivate_on_rollback = true,
+			records = { { config = 'network', changes = {
+				{ op = 'set', config = 'network', section = 'lan', option = 'proto', value = 'obsolete' },
+				{ op = 'set', config = 'network', section = 'lan', option = 'after_cancel', value = 'must_not_apply' },
+			}, restart_cmds = { { kind = 'reload', target = 'network', wait = true } } } },
+			rollback = false, reactivate_on_rollback = true,
 		}, { cancel_op = cancel:get_op() }))
-		eq(result.status, 'cancelled_rolled_back')
-		eq(result.rollback.ok, true)
+		eq(result.status, 'cancelled_no_change')
+		eq(result.rollback.attempted, false)
 		eq(activations, 0)
+		eq(applied_after_cancel, false, 'changes after cancellation must not be applied')
 		local reverted, rewrote = false, false
 		for _, call in ipairs(calls) do
 			if call.op == 'revert' then reverted = true end
@@ -471,6 +477,30 @@ function tests.test_cancellation_during_uncommitted_changes_reverts_without_rewr
 		end
 		ok(reverted, 'staged configuration should be reverted')
 		eq(rewrote, false, 'equivalent configuration should not be rewritten')
+	end)
+end
+
+function tests.test_invalid_cancel_op_is_rejected_without_admission_or_manager_failure()
+	require('tests.support.run_fibers').run(function(scope)
+		local calls = {}
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function() return {} end
+		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function() return true end }))
+		ok(mgr:start(scope))
+
+		local invalid, admitted = fibers.perform(mgr:transaction_op({
+			records = { cancellable_record('invalid') },
+		}, { cancel_op = {} }))
+		eq(invalid.status, 'invalid')
+		contains(invalid.err, 'cancel_op must be an Op')
+		eq(admitted, false)
+		eq(#calls, 0, 'invalid request must not reach the manager')
+
+		local valid, valid_admitted = fibers.perform(mgr:transaction_op({
+			records = { cancellable_record('valid') },
+		}))
+		eq(valid.status, 'ok')
+		eq(valid_admitted, true)
 	end)
 end
 
@@ -526,6 +556,54 @@ function tests.test_cancellation_after_commit_restores_committed_packages()
 		eq(result.rollback.ok, true)
 		eq(commits, 2, 'rollback should commit the restored package')
 		eq(activations, 0)
+	end)
+end
+
+function tests.test_cancellation_restores_only_committed_packages_and_reverts_current_staging()
+	require('tests.support.run_fibers').run(function(scope)
+		local cancel = require('fibers.channel').new(1)
+		local calls, commits = {}, {}
+		local cursor = fake_cursor(calls)
+		cursor.get_all = function(_, config)
+			return { main = section_record('main', 'settings', 0, false, { value = config .. '-original' }) }
+		end
+		local set = cursor.set
+		cursor.set = function(self, config, section, option, value)
+			if config == 'firewall' and value == 'cancel-now' then cancel:put('superseded') end
+			return set(self, config, section, option, value)
+		end
+		cursor.commit = function(_, config)
+			commits[#commits + 1] = config
+			calls[#calls + 1] = { op = 'commit', config }
+			return true
+		end
+		local mgr = ok(uci_manager.new({ cursor = cursor, run_cmd = function() return true end }))
+		ok(mgr:start(scope))
+		local result = fibers.perform(mgr:transaction_op({
+			packages = { 'network', 'firewall', 'dhcp' },
+			records = {
+				{ config = 'network', changes = {
+					{ op = 'set', section = 'main', option = 'value', value = 'network-changed' },
+				} },
+				{ config = 'firewall', changes = {
+					{ op = 'set', section = 'main', option = 'value', value = 'cancel-now' },
+				} },
+			},
+		}, { cancel_op = cancel:get_op() }))
+		eq(result.status, 'cancelled_rolled_back')
+		eq(result.rollback.ok, true)
+		eq(result.rollback.packages[1], 'network')
+		eq(#result.rollback.packages, 1)
+		eq(commits[1], 'network')
+		eq(#commits, 1, 'cancelled firewall package must not be committed')
+
+		local reverted = {}
+		for _, call in ipairs(calls) do
+			if call.op == 'revert' then reverted[call[1]] = true end
+		end
+		eq(reverted.network, true, 'committed package should be restored')
+		eq(reverted.firewall, true, 'current staged package should be reverted')
+		eq(reverted.dhcp, nil, 'uncommitted untouched package should not be restored')
 	end)
 end
 
