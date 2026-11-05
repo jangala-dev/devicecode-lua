@@ -6,6 +6,7 @@ local pulse = require 'fibers.pulse'
 local channel = require 'fibers.channel'
 local sleep = require 'fibers.sleep'
 local runfibers = require 'tests.support.run_fibers'
+local safe = require 'coxpcall'
 local T = {}
 
 local function pair(preferred, allowed)
@@ -276,6 +277,56 @@ function T.state_refresh_recovery_preserves_a_future_apn_retry_deadline()
         assert(connects == 1, 'state-read recovery must not shorten the APN backoff')
         assert(state.writes == 2, 'recovery should not rewrite already-applied modes')
     end, { timeout = 44 })
+end
+
+function T.state_event_recovery_preserves_and_resumes_the_apn_retry_deadline()
+    local named_choice = op.named_choice
+    local ok, err = safe.pcall(function()
+        -- Force recovery to come from a state event, leaving the APN timer active.
+        op.named_choice = function(choices)
+            if choices.modes_retry then choices.modes_retry = sleep.sleep_op(math.huge) end
+            return named_choice(choices)
+        end
+        runfibers.run(function(scope)
+            local modem, state, events = loop_fixture(scope, true)
+            local connects, refresh_reads = 0, 0
+            modem._apn_connect = function()
+                connects = connects + 1
+                if connects == 1 then return nil, 'retry later', 50 end
+                return nil, '', nil
+            end
+            local control = modem.cap.call_control_op
+            modem.cap.call_control_op = function(self, method, opts)
+                if method == 'get' and opts.field == 'modem_state' then refresh_reads = refresh_reads + 1 end
+                return control(self, method, opts)
+            end
+            state.write_failure = true
+            events:put({ payload = { to = 'registered' } })
+            sleep.sleep(0.01)
+            assert(connects == 1 and state.writes == 1)
+            local initial_refresh_reads = refresh_reads
+
+            state.write_failure, state.refresh_failure = false, true
+            sleep.sleep(20.05)
+            events:put({ payload = { to = 'registered' } })
+            sleep.sleep(0.01)
+            assert(state.writes == 2 and state.logs.cellular_modes_state_refresh_failed)
+            assert(refresh_reads == initial_refresh_reads + 1)
+
+            state.refresh_failure = false
+            sleep.sleep(20.05)
+            events:put({ payload = { to = 'registered' } })
+            sleep.sleep(0.01)
+            assert(refresh_reads == initial_refresh_reads + 2, 'the state event must recover the failed state read')
+            assert(connects == 1, 'state-event recovery must not preempt the APN cooldown')
+            assert(state.writes == 2, 'state recovery must not rewrite already-applied modes')
+
+            sleep.sleep(10.05)
+            assert(connects == 2, 'the original APN deadline must resume connecting without another event')
+        end, { timeout = 54 })
+    end)
+    op.named_choice = named_choice
+    assert(ok, err)
 end
 
 function T.mode_retry_does_not_preempt_apn_backoff()
