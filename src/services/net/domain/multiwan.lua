@@ -12,7 +12,8 @@ local ALLOWED = {
 
 local MEMBER_ALLOWED = {
 	'id', 'interface', 'source', 'metric', 'mwan_metric', 'weight', 'dynamic_weight', 'family',
-	'track_ip', 'health', 'reliability', 'count', 'timeout', 'interval', 'up', 'down',
+	'track_ip', 'health', 'reliability', 'count', 'timeout', 'interval', 'failure_interval', 'recovery_interval',
+	'up', 'down',
 	'enabled', 'disabled', 'speedtest_url', 'speedtest_duration_s', 'shaping', 'metadata', 'extensions',
 }
 
