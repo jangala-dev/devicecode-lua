@@ -23,6 +23,7 @@ function tests.test_artifact_missing_stage_resume_moves_mcu_job_to_reconcile()
 	}
 
 	policy.apply_completion(job, {
+		kind = 'active_job_done',
 		status = 'failed',
 		phase = 'stage',
 		primary = 'not_found',
@@ -48,6 +49,7 @@ function tests.test_artifact_missing_stage_resume_without_identity_still_fails()
 	}
 
 	policy.apply_completion(job, {
+		kind = 'active_job_done',
 		status = 'failed',
 		phase = 'stage',
 		primary = 'not_found',

@@ -4,7 +4,9 @@
 -- Reads hw_revision, fw_version, serial number and board_revision at
 -- driver creation and publishes them as a retained state/identity message.
 -- Exposes a 'platform' capability with a 'get' RPC offering.
--- Only the 'uptime' field is readable at runtime (from /proc/uptime).
+-- Runtime fields: 'uptime' (from /proc/uptime) and the Raspberry Pi firmware's
+-- power flags (under_voltage_detected, arm_frequency_capped, currently_throttled,
+-- under_voltage_occurred) from get_throttled.
 
 local fibers  = require "fibers"
 local op      = require "fibers.op"
@@ -50,7 +52,8 @@ local function read_file(path)
     end
     local content, read_err = f:read_all()
     f:close()
-    if not content then
+    -- read_all can return partial content together with an error.
+    if not content or read_err ~= nil then
         return nil, tostring(read_err)
     end
     return content, ""
@@ -99,6 +102,56 @@ local function read_identity()
     }
 end
 
+--- Raspberry Pi firmware throttle state: the first readable path wins
+--- (the second form is BCM2712 / CM5).
+local THROTTLED_PATHS = {
+    '/sys/devices/platform/soc/soc:firmware/get_throttled',
+    '/sys/devices/platform/soc@107c000000/soc@107c000000:firmware/get_throttled',
+}
+
+--- get_throttled bits, as v0.10.6 reported them. On OpenWrt the file is a
+--- compatibility view of the hwmon driver's cached value, which clears the
+--- sticky "occurred" bits periodically, so under_voltage_occurred can miss
+--- short events between reads.
+local THROTTLED_BITS = {
+    under_voltage_detected = 0x1,
+    arm_frequency_capped   = 0x2,
+    currently_throttled    = 0x4,
+    under_voltage_occurred = 0x10000,
+}
+
+--- Accepts "0x50005", "50005" or "throttled=0x50005" (whole value only).
+---@param raw string
+---@return integer?
+local function parse_throttled(raw)
+    local s = trim(raw):gsub('^throttled=', '')
+    local hex = s:match('^0[xX](%x+)$') or s:match('^(%x+)$')
+    return hex and tonumber(hex, 16) or nil
+end
+
+--- Read get_throttled within max_age. Returns nil without an error only when no
+--- candidate path exists (not a Pi); a path that exists but can't be read or
+--- parsed is an error.
+---@return integer|nil value
+---@return string error
+function PlatformDriver:_throttled(max_age)
+    local cached = self.cache:get('throttled', max_age)
+    if cached ~= nil then return cached, "" end
+    local first_err = nil
+    for _, path in ipairs(self.throttled_paths or THROTTLED_PATHS) do
+        local raw, err = read_file(path)
+        if raw then
+            local value = parse_throttled(raw)
+            if not value then return nil, "failed to parse " .. path end
+            self.cache:set('throttled', value)
+            return value, ""
+        elseif not err:find('No such file', 1, true) then
+            first_err = first_err or ("failed to read " .. path .. ": " .. err)
+        end
+    end
+    return nil, first_err or ""
+end
+
 ---- capability verbs ----
 
 ---@param opts PlatformGetOpts
@@ -117,6 +170,14 @@ function PlatformDriver:get(opts)
 
     if self.identity and self.identity[field] ~= nil then
         return true, self.identity[field]
+    end
+
+    local mask = THROTTLED_BITS[field]
+    if mask then
+        local value, err = self:_throttled(max_age)
+        if err ~= "" then return false, err end
+        if value == nil then return true, nil end
+        return true, math.floor(value / mask) % 2 == 1
     end
 
     if field ~= 'uptime' then
@@ -287,4 +348,4 @@ local function new(logger)
     }, PlatformDriver), ""
 end
 
-return { new = new }
+return { new = new, Driver = PlatformDriver, THROTTLED_PATHS = THROTTLED_PATHS }
