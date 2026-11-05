@@ -48,6 +48,7 @@ local files = {
 	"unit.hal.network_manager_spec",
 	"unit.hal.radio_driver_spec",
 	"unit.hal.radio_openwrt_backend_spec",
+	"unit.hal.platform_driver_spec",
 	"unit.hal.modem_linux_mm_spec",
 	"unit.hal.modem_lifecycle_spec",
 	"unit.hal.modem_types_spec",

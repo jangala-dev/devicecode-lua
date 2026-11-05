@@ -884,6 +884,18 @@
         "interface": {
           "template": "any_change"
         },
+        "power_undervoltage": {
+          "template": "any_change"
+        },
+        "power_arm_frequency_capped": {
+          "template": "any_change"
+        },
+        "power_currently_throttled": {
+          "template": "any_change"
+        },
+        "power_under_voltage_occurred": {
+          "template": "any_change"
+        },
         "boot_time": {
           "protocol": "http",
           "process": [

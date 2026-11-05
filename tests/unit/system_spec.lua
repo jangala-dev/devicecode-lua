@@ -65,4 +65,41 @@ function T.usb3_control_is_gated_to_bigbox_ss_and_follows_config()
 	assert_eq(system._test.usb_verb_for_config('bigbox-v1-cm-2', { usb3_enabled = false }), nil)
 end
 
+-- The Pi firmware power flags go out under their v0.10.6 names (system.power_*).
+-- A platform without them (value nil) sends nothing.
+function T.publish_sysinfo_metrics_sends_pi_power_flags_under_v0_10_names()
+	fibers.run(function()
+		local function run(flags)
+			local metrics = {}
+			local svc = {
+				obs_metric = function(_, key, payload) metrics[key] = payload end,
+				obs_log = function() end,
+			}
+			local platform = {
+				call_control_op = function(_, method, opts)
+					assert_eq(method, 'get')
+					return op.always({ ok = true, reason = flags[opts.field] })
+				end,
+			}
+			system._test.publish_sysinfo_metrics(svc, { ['platform:1'] = platform }, 60)
+			return metrics
+		end
+
+		local metrics = run({
+			under_voltage_detected = true,
+			arm_frequency_capped = false,
+			currently_throttled = true,
+			under_voltage_occurred = true,
+		})
+		assert_eq(metrics.power_undervoltage.value, true)
+		assert_eq(metrics.power_arm_frequency_capped.value, false)
+		assert_eq(metrics.power_currently_throttled.value, true)
+		assert_eq(metrics.power_under_voltage_occurred.value, true)
+		assert_eq(table.concat(metrics.power_undervoltage.namespace, '.'), 'system.power_undervoltage')
+
+		metrics = run({})
+		assert_eq(metrics.power_undervoltage, nil, 'no value, no metric')
+	end)
+end
+
 return T
