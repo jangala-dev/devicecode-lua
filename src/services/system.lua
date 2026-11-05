@@ -289,25 +289,10 @@ local function collect_sysinfo_state(svc, cap_refs, max_age)
                 elseif m.metric_key == 'temp' then
                     out.thermal = out.thermal or {}
                     out.thermal[THERMAL_ZONE0_ID] = { temp_c = tonumber(value) or value }
+                elseif m.class == 'platform' and value ~= nil then
+                    out.power = out.power or {}
+                    out.power[m.field] = value
                 end
-            end
-        end
-    end
-
-    -- Pi throttle/under-voltage flags (best-effort: absent on hardware without vcgencmd; never marks partial).
-    local platform_cap = get_cap_ref(cap_refs, 'platform', '1')
-    if platform_cap then
-        local throttle_opts, throttle_opts_err = cap_sdk.args.new.PlatformGetOpts('throttled', max_age)
-        if throttle_opts_err == "" then
-            local throttled, err = cap_rpc(platform_cap, 'get', throttle_opts)
-            if err == "" and type(throttled) == 'table' then
-                out.power = {
-                    currently_throttled    = throttled.currently_throttled == true,
-                    under_voltage_detected = throttled.under_voltage_detected == true,
-                    arm_frequency_capped   = throttled.arm_frequency_capped == true,
-                    under_voltage_occurred = throttled.under_voltage_occurred == true,
-                    raw                    = tonumber(throttled.raw),
-                }
             end
         end
     end

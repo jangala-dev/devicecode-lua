@@ -99,27 +99,38 @@ function T.publish_sysinfo_metrics_sends_pi_power_flags_under_v0_10_names()
 
 		metrics = run({})
 		assert_eq(metrics.power_undervoltage, nil, 'no value, no metric')
-function T.collect_sysinfo_state_includes_pi_throttle_power()
+	end)
+end
+
+-- The stats payload carries the power flags the sysinfo pass already reads, so the UI
+-- doesn't need a second reading of the same firmware state.
+function T.collect_sysinfo_state_includes_pi_power_flags()
 	fibers.run(function()
 		local svc = { wall = function() return '2026-07-06 12:00:00' end }
-		local cap = {
-			call_control_op = function(_, method, opts)
-				assert_eq(method, 'get')
-				assert_eq(opts.field, 'throttled')
-				return op.always({ ok = true, reason = {
-					currently_throttled = true, under_voltage_detected = true,
-					arm_frequency_capped = false, under_voltage_occurred = true, raw = 327685,
-				} })
-			end,
-		}
+		local function run(flags)
+			local fields = {}
+			local cap = {
+				call_control_op = function(_, method, opts)
+					assert_eq(method, 'get')
+					fields[#fields + 1] = opts.field
+					return op.always({ ok = true, reason = flags[opts.field] })
+				end,
+			}
+			return system._test.collect_sysinfo_state(svc, { ['platform:1'] = cap }, 0.1), fields
+		end
 
-		local out = system._test.collect_sysinfo_state(svc, { ['platform:1'] = cap }, 0.1)
-		assert_true(out.power, 'power expected in stats payload')
+		local out, fields = run({
+			currently_throttled = true, under_voltage_detected = true,
+			arm_frequency_capped = false, under_voltage_occurred = true,
+		})
 		assert_eq(out.power.currently_throttled, true)
 		assert_eq(out.power.under_voltage_detected, true)
 		assert_eq(out.power.arm_frequency_capped, false)
 		assert_eq(out.power.under_voltage_occurred, true)
-		assert_eq(out.power.raw, 327685)
+		assert_eq(#fields, 4, 'one read per flag, and no other')
+
+		out = run({})
+		assert_eq(out.power, nil, 'no flags on this platform, no power block')
 	end)
 end
 
