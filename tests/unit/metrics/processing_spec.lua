@@ -228,7 +228,8 @@ function T.pipeline_baseline_is_ignored_without_a_delta_block()
 end
 
 function T.pipeline_baseline_still_reports_a_non_number()
-	local pipeline = shipped_counter_pipeline()
+	local pipeline = assert(processing.new_process_pipeline())
+	pipeline:add(processing.DeltaValue.new({}))
 	local state = pipeline:new_state({ baseline_first_sample = true })
 	local _, _, err = pipeline:run('not-a-number', state)
 	assert(err ~= nil, 'expected the existing error for a non-number')
