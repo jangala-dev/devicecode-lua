@@ -324,4 +324,26 @@ function tests.test_failed_ui_save_stands_the_import_down_until_the_next_start()
 	end, { timeout = TIMEOUT })
 end
 
+-- The import lands while a UI save waits, then that save fails: GSM must use what's stored.
+function tests.test_failed_ui_save_leaves_gsm_using_what_the_store_holds()
+	runfibers.run(function(scope)
+		local h = start_gated(scope)
+		h.fail_put = 2
+		h.put_gates[1] = cond.new()
+		wait_until(function() return h.reading end, 'the read')
+		h.read_gate:signal()
+		wait_until(function() return #h.puts == 1 end, 'the import save')
+		local reply, err
+		assert(scope:spawn(function() reply, err = add_apn(h, 'typed') end))
+		fibers.perform(sleep.sleep_op(0.1))
+		h.put_gates[1]:signal()
+		wait_until(function() return reply ~= nil or err ~= nil end, 'the UI reply')
+		assert(reply and reply.ok == false, 'the UI must see the failure')
+		fibers.perform(sleep.sleep_op(0.1))
+		local memory, disk = final_list(h)
+		assert(#disk == 1 and disk[1].apn == 'old', 'disk')
+		assert(#memory == 1 and memory[1].apn == 'old', 'memory holds ' .. tostring(#memory))
+	end, { timeout = TIMEOUT })
+end
+
 return tests

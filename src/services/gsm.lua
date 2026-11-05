@@ -1576,6 +1576,13 @@ function GsmService.start(conn, opts)
 		end
 		local saved, serr = perform(apn_store:save_op(list))
 		if not saved then
+			-- The store may have changed while this save waited, so use what it holds.
+			local stored = perform(apn_store:load_op())
+			if stored then
+				custom_apns = stored
+				svc.custom_apns = custom_apns
+				signal_all_modems()
+			end
 			publish_apn_state({ state = 'degraded', ready = false, reason = serr or 'apn_store_save_failed' })
 			return nil, serr or 'apn_store_save_failed'
 		end
