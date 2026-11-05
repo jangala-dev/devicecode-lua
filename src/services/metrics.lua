@@ -39,6 +39,7 @@ local senml          = require 'services.metrics.senml'
 local http_m         = require 'services.metrics.http'
 local conf           = require 'services.metrics.config'
 local types          = require 'services.metrics.types'
+local ui_usage       = require 'services.ui.usage'
 
 
 local unpack = unpack or rawget(table, 'unpack')
@@ -118,6 +119,7 @@ local State = {
 	pipelines_map    = {},
 	metric_states    = {},
 	endpoint_to_pipe = {},
+	endpoint_seen    = {},
 	metric_values    = {},
 	publish_period   = nil,
 	cloud_url        = nil,
@@ -305,6 +307,21 @@ end
 
 local publish_fns = { bus = bus_publish, log = log_publish, http = http_publish }
 
+-- Endpoints include per-session ids (wifi.clients.<uid>.sessions.<sid>...), so
+-- drop processing state for endpoints that have not reported for a day.
+local ENDPOINT_IDLE_S = 24 * 60 * 60
+
+---@param tnow number
+local function prune_idle_endpoints(tnow)
+	for endpoint_str, seen_at in pairs(State.endpoint_seen) do
+		if tnow - seen_at > ENDPOINT_IDLE_S then
+			State.endpoint_seen[endpoint_str]    = nil
+			State.metric_states[endpoint_str]    = nil
+			State.endpoint_to_pipe[endpoint_str] = nil
+		end
+	end
+end
+
 ---@param values table<string, table<string, MetricSample>>
 local function publish_all(values)
 	for protocol, pv in pairs(values) do
@@ -350,6 +367,10 @@ local function handle_metric(msg)
 
 	local value = payload.value
 	if value == nil then return end
+	if metric_name == ui_usage.metric and type(value) == 'table' then
+		if msg.topic[3] == 'ui' then State.ui_visits:add(value, now()) end
+		return
+	end
 
 	-- Optional namespace overrides the topic used as the SenML name and state key.
 	local topic = payload.namespace or msg.topic
@@ -365,6 +386,7 @@ local function handle_metric(msg)
 		State.metric_states[endpoint_str]    = pipe_cfg.pipeline:new_state()
 		State.endpoint_to_pipe[endpoint_str] = metric_name
 	end
+	State.endpoint_seen[endpoint_str] = now()
 
 	local ret, short, err = pipe_cfg.pipeline:run(value, State.metric_states[endpoint_str])
 	if err then
@@ -507,6 +529,8 @@ local function main()
 				end
 			end
 		elseif which == 'tick' then
+			local visits = State.ui_visits:drain(State.base_time)
+			if visits then handle_metric({ topic = ui_usage.topic, payload = { value = visits } }) end
 			local values        = State.metric_values
 			State.metric_values = {}
 
@@ -525,6 +549,7 @@ local function main()
 				State.svc:obs_log('debug', string.format('publishing %d metric(s)', total))
 			end
 			publish_all(values)
+			prune_idle_endpoints(now())
 		end
 	end
 
@@ -566,6 +591,7 @@ function M.start(conn, opts)
 	State.metric_states    = {}
 	State.endpoint_to_pipe = {}
 	State.metric_values    = {}
+	State.ui_visits        = ui_usage.new()
 	State.publish_period   = nil
 	State.cloud_url        = nil
 	State.mainflux_config  = nil
@@ -599,5 +625,11 @@ function M.start(conn, opts)
 
 	main()
 end
+
+M._test = {
+	State                = State,
+	handle_metric        = handle_metric,
+	prune_idle_endpoints = prune_idle_endpoints,
+}
 
 return M

@@ -224,7 +224,13 @@ The stats loop runs in a separate fiber within the driver's scope. It calls back
 
 ### Client events
 
-The backend monitors the wireless interface for `AP-STA-CONNECTED` and `AP-STA-DISCONNECTED` events (using `iw event` on OpenWrt). For each event the driver emits a raw `client_event` with the MAC address and connection state. The wifi service handles session ID generation, MAC address hashing, and deduplication.
+The backend monitors the wireless interface for `AP-STA-CONNECTED` and `AP-STA-DISCONNECTED` events (using `iw event` on OpenWrt). The driver keeps the set of connected MACs per interface and emits a raw `client_event` only when an event changes that set, so duplicate events are dropped.
+
+The set is also checked against the station list (`get_connected_macs`) when an interface is added and on every report tick. This catches missed events and clients that left during a reconfigure; a failed station query leaves the set unchanged. Clients on interfaces that are no longer tracked are dropped on the next tick.
+
+Whenever the set changes, the driver emits the retained state `clients`. It also adds DHCP hostnames from `get_dhcp_hostnames` for connected clients that have none yet. Because the state is retained, a consumer that (re)subscribes gets the current clients at once. The wifi service handles session ID generation and MAC hashing.
+
+The report tick runs on an absolute deadline, so a stream of client events does not delay it. Byte and packet counters are 64-bit and passed through unchanged; only the signed 32-bit fields (txpower, channel, noise, signal) are converted from their unsigned form.
 
 ### Emitted stats
 
@@ -232,9 +238,8 @@ Stats are refreshed on each `report_period` tick. All values are emitted via `em
 
 | Emit key             | Content                                            | Source                                      |
 |----------------------|----------------------------------------------------|---------------------------------------------|
-| `client_event`       | `{ mac, connected, interface, timestamp }`         | backend event monitor (e.g. `iw event`)     |
-| `num_sta`            | Total connected station count (number)             | Derived from connect/disconnect tracking    |
-| `iface_num_sta`      | `{ interface, band, index, count }`                | Per-interface station count                 |
+| `client_event`       | `{ mac, connected, interface, timestamp }` (event, on change only) | backend event monitor (e.g. `iw event`) |
+| `clients`            | `{ interfaces = { <iface> = { mac, ... } }, hostnames = { <mac> = name } }` (retained) | connected-set tracking; hostnames from DHCP leases |
 | `iface_txpower`      | `{ interface, value }`                             | backend query (e.g. `iw dev <iface> info`)  |
 | `iface_channel`      | `{ interface, channel, freq, width }`              | backend query (e.g. `iw dev <iface> info`)  |
 | `iface_noise`        | `{ interface, value }`                             | backend query (e.g. `iw <iface> survey dump`) |
