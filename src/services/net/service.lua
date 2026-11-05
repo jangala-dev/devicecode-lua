@@ -24,6 +24,7 @@ local hal_client_mod = require 'services.net.hal_client'
 local cap_deps_mod = require 'devicecode.support.capability_dependencies'
 local observer_manager = require 'services.net.observer_manager'
 local wan_manager = require 'services.net.wan_manager'
+local wan_runtime = require 'services.net.wan_runtime'
 local metrics = require 'services.net.metrics'
 local drift = require 'services.net.drift'
 local backpressure = require 'services.net.backpressure'
@@ -737,6 +738,73 @@ local function handle_observed_state(state, ev)
 	return ok, err
 end
 
+local INTERFACE_RESTART_RETRY_S = 10
+
+-- A pending restart still applies only while the role is connected and the
+-- current config still realises the interface as that role's WAN member.
+local function interface_restart_applicable(state, iface, role)
+	local rec = (realised_sources(state).gsm_uplinks or {})[role]
+	if type(rec) ~= 'table' or rec.connected ~= true or not state.base_intent then return false end
+	for _, member_iface in ipairs(intent_realiser.gsm_member_interfaces(state.base_intent, realised_sources(state), role)) do
+		if member_iface == iface then return true end
+	end
+	return false
+end
+
+local function schedule_interface_restart_retry(state, iface, role, restart_id)
+	local ok, err = state.scope:spawn(function ()
+		sleep.sleep(state.interface_restart_retry_s or INTERFACE_RESTART_RETRY_S)
+		queue.assert_admit_required(state.done_tx, {
+			kind = 'interface_restart_retry_due',
+			interface = iface,
+			role = role,
+			restart_id = restart_id,
+		}, 'net_interface_restart_retry_report_failed')
+	end)
+	if ok ~= true then
+		state.interface_restarts[iface] = nil
+		obs_log(state.svc, 'warn', { what = 'interface_restart_retry_not_scheduled', role = role, interface = iface, err = tostring(err) })
+	end
+end
+
+-- One pending restart per interface; a newer attempt supersedes older results.
+local function start_interface_restart(state, iface, role)
+	local restart_id = (state.next_interface_restart_id or 0) + 1
+	state.next_interface_restart_id = restart_id
+	state.interface_restarts = state.interface_restarts or {}
+	state.interface_restarts[iface] = { role = role, restart_id = restart_id }
+	local handle, err = wan_runtime.start_interface_restart {
+		lifetime_scope = state.scope,
+		reaper_scope = state.scope,
+		report_scope = state.scope,
+		service_id = state.service_id,
+		hal = state.hal,
+		done_tx = state.done_tx,
+		interface = iface,
+		role = role,
+		restart_id = restart_id,
+	}
+	if not handle then
+		obs_log(state.svc, 'warn', { what = 'interface_restart_not_started', role = role, interface = iface, err = tostring(err) })
+		schedule_interface_restart_retry(state, iface, role, restart_id)
+	end
+end
+
+-- A modem reconnect can bring a new IP while the DHCP interface on the wwan
+-- device stays up with the old lease; restart the interface so it picks up the new one.
+local function restart_gsm_member_interfaces(state, role)
+	if not state.base_intent or not state.hal or not state.scope or not state.done_tx then return end
+	for _, iface in ipairs(intent_realiser.gsm_member_interfaces(state.base_intent, realised_sources(state), role)) do
+		start_interface_restart(state, iface, role)
+	end
+end
+
+local function pending_interface_restart(state, ev)
+	local pending = state.interface_restarts and state.interface_restarts[ev.interface] or nil
+	if type(pending) == 'table' and pending.restart_id == ev.restart_id then return pending end
+	return nil
+end
+
 local function handle_gsm_uplink_changed(state, ev)
 	if ev.kind == 'gsm_uplink_replay_done' then return true, nil end
 	if ev.kind == 'gsm_uplink_unknown' then
@@ -750,6 +818,8 @@ local function handle_gsm_uplink_changed(state, ev)
 	payload.id = payload.id or role
 	payload.role = payload.role or role
 	payload.updated_at = now()
+	local prev = (realised_sources(state).gsm_uplinks or {})[role]
+	local reconnected = prev ~= nil and prev.connected ~= true and payload.connected == true
 	state.model:update(function (s)
 		s.sources = s.sources or { gsm_uplinks = {} }
 		s.sources.gsm_uplinks = s.sources.gsm_uplinks or {}
@@ -810,6 +880,9 @@ local function handle_gsm_uplink_changed(state, ev)
 			if structural_ok == true then structural_ok, structural_err = reconcile_apply_admission(state, 'gsm_uplink_binding_changed') end
 		end
 	end
+	-- Restart even when a structural apply was started: it may be superseded, or
+	-- leave the interface config unchanged so that `network reload` keeps the old lease.
+	if reconnected then restart_gsm_member_interfaces(state, role) end
 	local ok, err = reconcile_speedtests_if_ready(state, 'gsm_uplink_changed')
 	mark_domain_dirty(state, 'wan_runtime')
 	local pub_ok, pub_err = publish_snapshot(state)
@@ -1066,6 +1139,41 @@ local function handle_live_weights_done(state, ev)
 	return ok, err
 end
 
+local function handle_interface_restart_done(state, ev)
+	if not pending_interface_restart(state, ev) then return true, nil end
+	local result = ev and ev.result and (ev.result.result or ev.result) or {}
+	local ok = result.ok == true
+	local err = not ok and tostring(result.err or ev.primary or ev.status or 'unknown') or nil
+	-- Keep retrying (e.g. after a HAL dispatch timeout behind a long apply) while the restart still applies.
+	local retry = not ok and interface_restart_applicable(state, ev.interface, ev.role)
+	obs_log(state.svc, ok and 'info' or 'warn', {
+		what = 'interface_restart_done',
+		summary = string.format('cellular uplink %s interface %s restart %s%s',
+			tostring(ev.role), tostring(ev.interface), ok and 'ok' or ('failed: ' .. err),
+			retry and string.format(' (retry in %ss)', tostring(state.interface_restart_retry_s or INTERFACE_RESTART_RETRY_S)) or ''),
+		role = ev.role,
+		interface = ev.interface,
+		ok = ok,
+		err = err,
+	})
+	if retry then
+		schedule_interface_restart_retry(state, ev.interface, ev.role, ev.restart_id)
+	else
+		state.interface_restarts[ev.interface] = nil
+	end
+	return true, nil
+end
+
+local function handle_interface_restart_retry_due(state, ev)
+	if not pending_interface_restart(state, ev) then return true, nil end
+	if not interface_restart_applicable(state, ev.interface, ev.role) then
+		state.interface_restarts[ev.interface] = nil
+		return true, nil
+	end
+	start_interface_restart(state, ev.interface, ev.role)
+	return true, nil
+end
+
 local function handle_event(state, ev)
 	if ev.kind == 'config_changed' then
 		return handle_config_changed(state, ev)
@@ -1084,6 +1192,10 @@ local function handle_event(state, ev)
 		return handle_speedtest_retry_due(state, ev)
 	elseif ev.kind == 'net_live_weights_done' then
 		return handle_live_weights_done(state, ev)
+	elseif ev.kind == 'net_interface_restart_done' then
+		return handle_interface_restart_done(state, ev)
+	elseif ev.kind == 'interface_restart_retry_due' then
+		return handle_interface_restart_retry_due(state, ev)
 	elseif ev.kind == 'net_observation_started' then
 		return handle_observation_started(state, ev)
 	elseif ev.kind == 'capability_status' or ev.kind == 'capability_dependency_changed' then
@@ -1191,6 +1303,7 @@ function M.run(scope, params)
 		counter_poll_enabled = params.counter_metrics ~= false and params.counter_poll ~= false,
 		counter_poll_interval_s = params.counter_poll_interval_s or params.counter_metrics_interval_s or 60,
 		counter_poll_timeout_s = params.counter_poll_timeout_s or 5,
+		interface_restart_retry_s = params.interface_restart_retry_s or INTERFACE_RESTART_RETRY_S,
 		current_generation = nil,
 		active_apply = nil,
 		pending_intent = nil,

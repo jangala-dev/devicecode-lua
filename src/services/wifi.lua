@@ -7,8 +7,8 @@
 --   Constants / helpers
 --   band_rpc / apply_band_steering
 --   radio_rpc / apply_radio_config
---   on_radio_state / on_radio_event / radio_stats_loop
---   run_global_num_sta
+--   publish_session_metric / radio_stats_loop
+--   publish_global_num_sta
 --   Service context helpers  (get_radio_cfg … reapply_all_radios)
 --   Main-loop handlers       (on_cfg … on_fs_cap)
 --   WifiService.start
@@ -128,10 +128,6 @@ end
 ---@param key string
 ---@return Topic
 local function t_obs_metric(key) return { 'obs', 'v1', 'wifi', 'metric', key } end
-
----@param key string
----@return Topic
-local function t_obs_event(key) return { 'obs', 'v1', 'wifi', 'event', key } end
 
 ------------------------------------------------------------------------
 -- Band steering RPC helper
@@ -342,7 +338,9 @@ end
 ---@param fs_configs_cap CapabilityReference?
 ---@param band_steering_cfg WifiBandSteeringConfig?
 ---@param svc ServiceBase
-local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_cap, band_steering_cfg, svc)
+---@param default_report_period number?  service-level report_period
+local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_cap, band_steering_cfg, svc,
+                                  default_report_period)
     local radio_id = radio_cap.id
 
     svc:obs_log('debug', { what = 'radio_config_start', radio = radio_id })
@@ -352,7 +350,8 @@ local function apply_radio_config(radio_cap, radio_cfg, ssid_cfgs, fs_configs_ca
 
     -- 2. Set report period
     do
-        local args, err = cap_sdk.args.new.RadioSetReportPeriodOpts(radio_cfg.report_period or 60)
+        local args, err = cap_sdk.args.new.RadioSetReportPeriodOpts(
+            radio_cfg.report_period or default_report_period or 60)
         if not args then
             svc:obs_log('warn', { what = 'radio_args_invalid', method = 'set_report_period', err = err })
             return
@@ -522,22 +521,128 @@ end
 -- Per-radio stats and session forwarding loop
 ------------------------------------------------------------------------
 
+---@class WifiSession
+---@field uid string
+---@field sid string
+---@field hostname string?
+
+---Send a per-session metric (session_start, session_end, hostname) to the cloud
+---under the namespace the v0.10 dashboards read. Published, not retained, so a
+---restarted metrics service does not resend old session records.
+---@param conn Connection
+---@param s WifiSession
+---@param stat string
+---@param value any
+local function publish_session_metric(conn, s, stat, value)
+    conn:publish(t_obs_metric(stat), {
+        value     = value,
+        namespace = { 'wifi', 'clients', s.uid, 'sessions', s.sid, stat },
+    })
+end
+
+---End every open session in `sessions` (radio removed).
+---@param conn Connection
+---@param sessions table<string, WifiSession>
+local function end_sessions(conn, sessions)
+    local ts = os.time()
+    for mac, s in pairs(sessions) do
+        publish_session_metric(conn, s, 'session_end', ts)
+        sessions[mac] = nil
+    end
+end
+
+---Count clients in a radio's retained 'clients' state: per interface, and
+---across the radio with each MAC counted once.
+---@param interfaces table<string, string[]>
+---@return table<string, number> per_iface
+---@return number total
+---@return table<string, boolean> seen
+local function count_clients(interfaces)
+    local per_iface, total, seen = {}, 0, {}
+    for iface, macs in pairs(interfaces) do
+        local in_iface = {}
+        per_iface[iface] = 0
+        for _, mac in ipairs(is_table(macs) and macs or {}) do
+            if not in_iface[mac] then
+                in_iface[mac] = true
+                per_iface[iface] = per_iface[iface] + 1
+            end
+            if not seen[mac] then
+                seen[mac] = true
+                total = total + 1
+            end
+        end
+    end
+    return per_iface, total, seen
+end
+
 ---@param conn Connection
 ---@param id string
 ---@param radio_cfg WifiRadioConfig?
 ---@param user_salt string
 ---@param svc ServiceBase
-local function radio_stats_loop(conn, id, radio_cfg, user_salt, svc)
+---@param sessions table<string, WifiSession>  mac -> open session; owned by the
+---  service so sessions survive this loop being restarted on reconfigure
+---@param on_total fun(total: number)?  called with the radio's client count
+local function radio_stats_loop(conn, id, radio_cfg, user_salt, svc, sessions, on_total)
     local band        = ((radio_cfg and radio_cfg.band) or ''):sub(1, 1)
     local hw_platform = '1'
-    local sessions    = {}
     local iface_sta   = {}
-    local radio_sta   = 0
+
+    ---Reconcile sessions and client counts with the radio's connected set.
+    ---The state is retained, so a (re)started loop sees current clients at once.
+    local function on_clients(p)
+        local interfaces = is_table(p.interfaces) and p.interfaces or {}
+        local hostnames  = is_table(p.hostnames) and p.hostnames or {}
+        local per_iface, total, seen = count_clients(interfaces)
+        local ts = os.time()
+
+        for mac, s in pairs(sessions) do
+            if not seen[mac] then
+                publish_session_metric(conn, s, 'session_end', ts)
+                sessions[mac] = nil
+            end
+        end
+        for mac in pairs(seen) do
+            local s = sessions[mac]
+            if not s then
+                s = { uid = gen.userid(mac, user_salt), sid = gen.gen_session_id() }
+                sessions[mac] = s
+                publish_session_metric(conn, s, 'session_start', ts)
+            end
+            local hostname = hostnames[mac]
+            if type(hostname) == 'string' and hostname ~= s.hostname then
+                s.hostname = hostname
+                publish_session_metric(conn, s, 'hostname', hostname)
+            end
+        end
+
+        for iface in pairs(iface_sta) do
+            if per_iface[iface] == nil then per_iface[iface] = 0 end
+        end
+        for iface, n in pairs(per_iface) do
+            conn:retain(t_obs_metric('num_sta'), {
+                value     = n,
+                namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, iface_idx(iface), 'num_sta' },
+            })
+            iface_sta[iface] = interfaces[iface] and n or nil
+        end
+        conn:retain(t_obs_metric('num_sta'), {
+            value     = total,
+            namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, 'num_sta' },
+        })
+        if on_total then on_total(total) end
+    end
 
     local function on_radio_state(msg)
         local key = msg.topic and msg.topic[5]
         local p   = msg.payload
         if not (key and is_table(p)) then return end
+
+        if key == 'clients' then
+            on_clients(p)
+            return
+        end
 
         local prefix, stat = key:match('^(iface)_(.+)$')
         if prefix then
@@ -551,75 +656,25 @@ local function radio_stats_loop(conn, id, radio_cfg, user_salt, svc)
 
         prefix, stat = key:match('^(client)_(.+)$')
         if prefix then
-            local uid = gen.userid(p.mac, user_salt)
-            local sid = sessions[p.mac]
-            if sid then
+            local s = sessions[p.mac]
+            if s then
                 conn:retain(t_obs_metric(stat), {
                     value     = p.value,
-                    namespace = { 'wifi', 'clients', uid, 'sessions', sid, stat },
+                    namespace = { 'wifi', 'clients', s.uid, 'sessions', s.sid, stat },
                 })
-            end
-        end
-    end
-
-    local function on_radio_event(msg)
-        local event_name = msg.topic and msg.topic[5]
-        if event_name ~= 'client_event' then return end
-
-        local p = msg.payload
-        if not (is_table(p) and p.mac) then return end
-
-        local mac        = p.mac
-        local iface      = p.interface
-        local connected  = p.connected
-        local timestamp  = p.timestamp or os.time()
-        local uid        = gen.userid(mac, user_salt)
-        local change     = connected and 1 or -1
-
-        iface_sta[iface] = math.max(0, (iface_sta[iface] or 0) + change)
-        radio_sta        = math.max(0, radio_sta + change)
-
-        local idx        = iface_idx(iface)
-        conn:retain(t_obs_metric('num_sta'), {
-            value     = iface_sta[iface],
-            namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, idx, 'num_sta' },
-        })
-        conn:retain(t_obs_metric('num_sta'), {
-            value     = radio_sta,
-            namespace = { 'wifi', 'hp', hw_platform, 'rd' .. band, 'num_sta' },
-        })
-
-        if connected then
-            local sid = gen.gen_session_id()
-            sessions[mac] = sid
-            conn:publish(t_obs_event('session_start'), {
-                value     = timestamp,
-                namespace = { 'wifi', 'clients', uid, 'sessions', sid, 'session_start' },
-            })
-        else
-            local sid = sessions[mac]
-            if sid then
-                conn:publish(t_obs_event('session_end'), {
-                    value     = timestamp,
-                    namespace = { 'wifi', 'clients', uid, 'sessions', sid, 'session_end' },
-                })
-                sessions[mac] = nil
             end
         end
     end
 
     local state_sub = conn:subscribe({ 'cap', 'radio', id, 'state', '+' })
-    local event_sub = conn:subscribe({ 'cap', 'radio', id, 'event', '+' })
 
     fibers.current_scope():finally(function()
         state_sub:unsubscribe()
-        event_sub:unsubscribe()
     end)
 
     while true do
         local which, msg = perform(fibers.named_choice({
             state  = state_sub:recv_op(),
-            event  = event_sub:recv_op(),
             cancel = fibers.current_scope():cancel_op(),
         }))
 
@@ -630,44 +685,22 @@ local function radio_stats_loop(conn, id, radio_cfg, user_salt, svc)
             break
         end
 
-        if which == 'state' then
-            on_radio_state(msg)
-        elseif which == 'event' then
-            on_radio_event(msg)
-        end
+        on_radio_state(msg)
     end
 end
 
 ------------------------------------------------------------------------
--- Global num_sta aggregator fiber
+-- Global num_sta
 ------------------------------------------------------------------------
 
----Subscribes to all radio client_event emissions and maintains a single
----wifi/num_sta count across all radios.
+---Publish the sum of every radio's client count as wifi/num_sta. The service
+---keeps the per-radio counts so a removed radio drops out of the sum.
 ---@param conn Connection
----@param parent_scope Scope
-local function run_global_num_sta(conn, parent_scope)
-    local global_sta       = 0
-    local global_event_sub = conn:subscribe({ 'cap', 'radio', '+', 'event', 'client_event' })
-
-    fibers.current_scope():finally(function()
-        global_event_sub:unsubscribe()
-    end)
-
-    while true do
-        local which, msg = perform(fibers.named_choice({
-            event  = global_event_sub:recv_op(),
-            cancel = parent_scope:cancel_op(),
-        }))
-
-        if which == 'cancel' then break end
-
-        if msg and is_table(msg.payload) and msg.payload.mac then
-            local change = msg.payload.connected and 1 or -1
-            global_sta = math.max(0, global_sta + change)
-            conn:retain(t_obs_metric('num_sta'), { value = global_sta, namespace = { 'wifi', 'num_sta' } })
-        end
-    end
+---@param radio_sta table<string, number>  radio id -> client count
+local function publish_global_num_sta(conn, radio_sta)
+    local total = 0
+    for _, n in pairs(radio_sta) do total = total + n end
+    conn:retain(t_obs_metric('num_sta'), { value = total, namespace = { 'wifi', 'num_sta' } })
 end
 
 ------------------------------------------------------------------------
@@ -691,7 +724,7 @@ local function configure_radio(ctx, id)
     local cap   = cap_sdk.new_cap_ref(ctx.conn, 'radio', id)
     local ssids = is_table(ctx.data.ssids) and ctx.data.ssids or {}
     apply_radio_config(cap, radio_cfg, ssids, ctx.fs_configs_cap,
-        is_table(ctx.data) and ctx.data.band_steering or nil, ctx.svc)
+        is_table(ctx.data) and ctx.data.band_steering or nil, ctx.svc, ctx.data.report_period)
 end
 
 local function radio_fiber_body(ctx, id)
@@ -699,7 +732,12 @@ local function radio_fiber_body(ctx, id)
     if not valid_user_salt(user_salt) then return end
 
     configure_radio(ctx, id)
-    radio_stats_loop(ctx.conn, id, get_radio_cfg(ctx, id), user_salt, ctx.svc)
+    ctx.radio_sessions[id] = ctx.radio_sessions[id] or {}
+    radio_stats_loop(ctx.conn, id, get_radio_cfg(ctx, id), user_salt, ctx.svc, ctx.radio_sessions[id],
+        function(total)
+            ctx.radio_sta[id] = total
+            publish_global_num_sta(ctx.conn, ctx.radio_sta)
+        end)
 end
 
 local function spawn_radio_scope(ctx, id)
@@ -720,6 +758,14 @@ local function remove_radio(ctx, id)
     if ctx.radio_scopes[id] then
         ctx.radio_scopes[id]:cancel('radio removed')
         ctx.radio_scopes[id] = nil
+    end
+    if ctx.radio_sessions[id] then
+        end_sessions(ctx.conn, ctx.radio_sessions[id])
+        ctx.radio_sessions[id] = nil
+    end
+    if ctx.radio_sta[id] then
+        ctx.radio_sta[id] = nil
+        publish_global_num_sta(ctx.conn, ctx.radio_sta)
     end
 end
 
@@ -842,6 +888,8 @@ function WifiService.start(conn, opts)
         fs_configs_cap = nil, -- configs filesystem cap reference
         band_cap       = nil, -- band capability reference
         radio_scopes   = {},  -- radio_id → child scope
+        radio_sessions = {},  -- radio_id → mac → open session (outlives radio scopes)
+        radio_sta      = {},  -- radio_id → connected client count, for wifi/num_sta
     }
 
     -- Subscribe to config topic
@@ -854,8 +902,6 @@ function WifiService.start(conn, opts)
 
     svc:status('running')
     svc:obs_log('debug', 'service running')
-
-    parent_scope:spawn(function() run_global_num_sta(conn, parent_scope) end)
 
     while true do
         local which, msg = perform(fibers.named_choice({
@@ -892,5 +938,11 @@ function WifiService.start(conn, opts)
     band_cap_listener:close()
     fs_cap_listener:close()
 end
+
+WifiService._test = {
+    radio_stats_loop  = radio_stats_loop,
+    remove_radio       = remove_radio,
+    apply_radio_config = apply_radio_config,
+}
 
 return WifiService

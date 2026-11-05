@@ -208,10 +208,10 @@ function tests.test_bigbox_config_uses_clean_segment_authority_shape()
 	eq(intent.segments.jan.dhcp.enabled, true)
 	eq(intent.segments.jan.dns.host_files[1], 'ads')
 	eq(intent.segments.jan.dns.host_files[2], 'adult')
-	eq(intent.segments.jan.shaping.host_default.download.sustained_rate, '500kbit')
+	eq(intent.segments.jan.shaping.host_default.download.sustained_rate, '400kbit')
 	eq(intent.segments.jan.shaping.host_default.download.peak_rate, '2mbit')
-	eq(intent.segments.jan.shaping.host_default.upload.sustained_rate, '250kbit')
-	eq(intent.segments.jan.shaping.host_default.upload.peak_rate, '1mbit')
+	eq(intent.segments.jan.shaping.host_default.upload.sustained_rate, '400kbit')
+	eq(intent.segments.jan.shaping.host_default.upload.peak_rate, '2mbit')
 	eq(intent.segments.jan.shaping.download, nil)
 	eq(intent.segments.jan.shaping.upload, nil)
 	eq(intent.dns.records['config.bigbox.home'].address, '172.28.8.1')
@@ -238,6 +238,23 @@ function tests.test_bigbox_v1_cm_preserves_original_symmetric_host_shaping()
 		eq(shaping[direction].peak_rate, '2mbit')
 		eq(shaping[direction].burst_budget, '200k')
 	end
+end
+
+-- Both BigBox v1 targets shape users the same way (the bigbox-ss v0.9 rates).
+function tests.test_bigbox_v1_targets_share_per_client_shaping()
+	local cjson = require 'cjson.safe'
+	local function host_default(target)
+		local doc = ok(cjson.decode(ok(read_project_file('src/configs/' .. target .. '.json'))), target .. ' must decode')
+		local intent = ok(config.normalise(doc.net, { generation = 1 }))
+		return intent.segments.jan.shaping.host_default
+	end
+	local cm, cm2 = host_default('bigbox-v1-cm'), host_default('bigbox-v1-cm-2')
+	for _, direction in ipairs({ 'download', 'upload' }) do
+		for _, field in ipairs({ 'sustained_rate', 'peak_rate', 'burst_budget' }) do
+			eq(cm2[direction][field], cm[direction][field])
+		end
+	end
+	eq(cjson.encode(cm2.fq_codel), cjson.encode(cm.fq_codel))
 end
 
 function tests.test_rejects_cross_domain_unknown_segment_reference()

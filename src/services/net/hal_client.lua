@@ -136,6 +136,14 @@ function Client:apply_shaping_op(req, opts)
 	return op.always({ ok = false, err = 'network-config HAL capability not configured', reason = { code = 'missing_network_config_hal' } })
 end
 
+function Client:restart_interface_op(req, opts)
+	opts = opts or {}
+	if self.network_config and type(self.network_config.call_control_op) == 'function' then
+		return self.network_config:call_control_op('restart_interface', req or {}, opts):wrap(function (reply, err) return reply_to_result(reply, err, 'network_config') end)
+	end
+	return op.always({ ok = false, err = 'network-config HAL capability not configured', reason = { code = 'missing_network_config_hal' } })
+end
+
 function Client:speedtest_op(req, opts)
 	opts = opts or {}
 	if self.network_diagnostics and type(self.network_diagnostics.call_control_op) == 'function' then

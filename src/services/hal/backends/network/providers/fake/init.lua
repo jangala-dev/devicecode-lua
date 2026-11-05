@@ -91,6 +91,11 @@ function Provider:apply_shaping_op(req)
 	return op.always({ ok = true, backend = 'fake', changed = true, applied = true, request = copy(req or {}) })
 end
 
+function Provider:restart_interface_op(req)
+	self.last_restart_interface = copy(req or {})
+	return op.always({ ok = true, backend = 'fake', interface = req and req.interface or nil })
+end
+
 function Provider:speedtest_op(req)
 	return op.always({
 		ok = true,

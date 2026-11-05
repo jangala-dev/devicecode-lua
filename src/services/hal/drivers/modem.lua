@@ -726,6 +726,9 @@ end
 function Modem:stop(timeout)
     timeout = timeout or DEFAULT_STOP_TIMEOUT
 
+    -- Stop workers from polling monitors while backend shutdown removes them.
+    self.scope:cancel("modem stopping")
+
     if self.backend and self.backend.shutdown_op then
         local ok, err = fibers.perform(self.backend:shutdown_op(1.0))
         if not ok then
@@ -737,8 +740,6 @@ function Modem:stop(timeout)
             })
         end
     end
-
-    self.scope:cancel("modem stopping")
 
     local source = fibers.perform(op.named_choice {
         join = self.scope:join_op(),

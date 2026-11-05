@@ -66,6 +66,12 @@ function tests.test_uplink_state_reports_sim_absent_when_sim_is_absent()
 	eq(gsm._test.uplink_state_for_modem(true, 'locked', 'sim-pin', '--'), 'sim_absent')
 end
 
+function tests.test_searching_is_preserved_and_sim_absence_still_wins()
+	eq(gsm._test.uplink_state_for_modem(false, 'searching', nil, 'present'), 'searching')
+	eq(gsm._test.uplink_state_for_modem(false, 'searching', nil, '--'), 'sim_absent')
+	eq(gsm._test.uplink_state_for_modem(true, 'searching', nil, 'present'), 'connected')
+end
+
 function tests.test_sim_payload_carries_lock_and_retry_details()
 	local payload = gsm._test.build_sim_payload('present', 'sim-puk', {
 		['sim-pin'] = 0,
@@ -285,6 +291,23 @@ function tests.test_signal_bars_use_the_selected_signal_tech()
 	eq(tech, 'lte')
 	eq(value, -96)
 	eq(field, 'rsrp')
+end
+
+function tests.test_uplink_publishes_raw_modem_states_without_claiming_connectivity()
+	runfibers.run(function()
+		local modem, retained = new_test_modem()
+		modem.connected = false
+		modem.sim_state = '--'
+		for _, state in ipairs({ 'enabled', 'searching', 'registered', 'connecting', 'connected', 'searching' }) do
+			modem.modem_state = state
+			modem:_publish_uplink_state(false, nil)
+			local uplink = retained['uplink/primary']
+			eq(uplink.modem.state, state)
+			eq(uplink.connected, false)
+			eq(uplink.available, false)
+			eq(uplink.state, 'sim_absent')
+		end
+	end)
 end
 
 return tests

@@ -2,6 +2,40 @@ local linux_mm = require 'services.hal.backends.modem.providers.linux_mm.impl'
 
 local tests = {}
 
+function tests.test_absent_state_monitor_reports_command_closed()
+	local fibers = require 'fibers'
+	local runfibers = require 'tests.support.run_fibers'
+	local Backend = linux_mm._test.ModemBackend
+
+	runfibers.run(function()
+		local backend = setmetatable({}, Backend)
+		local event, err = fibers.perform(backend:monitor_state_op())
+		assert(event == nil)
+		assert(err == 'Command closed', tostring(err))
+	end)
+end
+
+function tests.test_stopped_state_monitor_reports_command_closed()
+	local fibers = require 'fibers'
+	local runfibers = require 'tests.support.run_fibers'
+	local Backend = linux_mm._test.ModemBackend
+
+	runfibers.run(function()
+		local terminated = false
+		local backend = setmetatable({
+			state_monitor = {
+				stream = { terminate = function() terminated = true end },
+			},
+		}, Backend)
+		local stopped, stop_err = fibers.perform(backend:stop_state_monitor_op())
+		assert(stopped, stop_err)
+		assert(terminated)
+		local event, err = fibers.perform(backend:monitor_state_op())
+		assert(event == nil)
+		assert(err == 'Command closed', tostring(err))
+	end)
+end
+
 local function fail(msg) error(msg or 'assertion failed', 2) end
 local function eq(a, b, msg)
 	if a ~= b then fail(msg or ('expected ' .. tostring(b) .. ', got ' .. tostring(a))) end
